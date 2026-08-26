@@ -15,6 +15,13 @@ gap-free history (the offchain feed has outage holes; see
 Coverage is validated up front: GARCH calibration needs ``min_days`` of
 contiguous daily history per symbol, and a series with holes would silently
 distort the return series, so shortfalls and gaps fail the run instead.
+
+One oracle feeds the whole series. Competing oracles hold separate rows for
+the same token, and "newest block of the day" would hop between them from
+one day to the next; the return series must not carry that noise. The
+default is the SparkLend oracle because it is the only feed with a full
+year of gap-free daily history for every modeled collateral on staging
+(Chainlink is indexed since Feb 2026 only).
 """
 
 import logging
@@ -36,7 +43,7 @@ _DAILY_CLOSES = text("""
            p.price_usd                            AS close
     FROM onchain_token_price p
     JOIN token t ON t.id = p.token_id
-    WHERE t.chain_id = :chain_id AND upper(t.symbol) = ANY(:symbols)
+    WHERE t.chain_id = :chain_id AND p.oracle_id = :oracle_id AND upper(t.symbol) = ANY(:symbols)
     ORDER BY upper(t.symbol), date_trunc('day', p."timestamp"),
              p.block_number DESC, p.block_version DESC, p.processing_version DESC
 """)
@@ -47,22 +54,32 @@ _AMBIGUOUS_SYMBOLS = text("""
     SELECT upper(t.symbol) AS symbol, count(*) AS token_count
     FROM token t
     WHERE t.chain_id = :chain_id AND upper(t.symbol) = ANY(:symbols)
-      AND EXISTS (SELECT 1 FROM onchain_token_price p WHERE p.token_id = t.id)
+      AND EXISTS (SELECT 1 FROM onchain_token_price p WHERE p.token_id = t.id AND p.oracle_id = :oracle_id)
     GROUP BY upper(t.symbol)
     HAVING count(*) > 1
 """)
 
+_ORACLE_BY_NAME = text("SELECT id FROM oracle WHERE name = :oracle_name AND chain_id = :chain_id")
+
 
 class PostgresPriceReader:
-    def __init__(self, engine: AsyncEngine, min_days: int = 180, chain_id: int = 1) -> None:
+    def __init__(
+        self, engine: AsyncEngine, min_days: int = 180, chain_id: int = 1, oracle_name: str = "sparklend"
+    ) -> None:
         self._engine = engine
         self._min_days = min_days
         self._chain_id = chain_id
+        self._oracle_name = oracle_name
 
     async def get_prices(self, collateral_list: list[str]) -> pd.DataFrame:
         symbols = sorted({token.upper() for token in collateral_list})
         async with self._engine.connect() as conn:
-            params = {"symbols": symbols, "chain_id": self._chain_id}
+            oracle_id = (
+                await conn.execute(_ORACLE_BY_NAME, {"oracle_name": self._oracle_name, "chain_id": self._chain_id})
+            ).scalar_one_or_none()
+            if oracle_id is None:
+                raise ValueError(f"oracle {self._oracle_name!r} is not registered on chain {self._chain_id}")
+            params = {"symbols": symbols, "chain_id": self._chain_id, "oracle_id": oracle_id}
             ambiguous = (await conn.execute(_AMBIGUOUS_SYMBOLS, params)).fetchall()
             if ambiguous:
                 raise ValueError(
@@ -82,13 +99,17 @@ class PostgresPriceReader:
         prices.index.name = None
         prices.columns.name = None
         logger.info(
-            "prices loaded from onchain_token_price: %d days x %d symbols (%s .. %s)",
+            "prices loaded from onchain_token_price (%s): %d days x %d symbols (%s .. %s)",
+            self._oracle_name,
             len(prices),
             len(prices.columns),
             prices.index.min().date(),
             prices.index.max().date(),
         )
-        return prices[[token.upper() for token in collateral_list]]
+        # The port promises columns named exactly as the caller's labels.
+        out = prices[[token.upper() for token in collateral_list]].copy()
+        out.columns = list(collateral_list)
+        return out
 
     def _validate(self, prices: pd.DataFrame, symbols: list[str]) -> None:
         problems: list[str] = []

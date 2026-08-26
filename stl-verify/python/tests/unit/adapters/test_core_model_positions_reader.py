@@ -13,9 +13,9 @@ from app.adapters.postgres.core_model_positions_reader import (
     supply_prices,
 )
 
-_PRICES = {"WETH": 2000.0, "WSTETH": 2400.0, "USDT": 1.0, "USDS": 1.0, "DAI": 1.0}
-_TOKEN_IDS = {"WETH": 1, "WSTETH": 2, "USDT": 3, "USDS": 4, "DAI": 5, "EXOTIC": 6}
-_RESERVES = {"WETH": (0.86, 1.05), "WSTETH": (0.84, 1.07), "USDS": (0.0, 0.0)}
+_PRICES = {"WETH": 2000.0, "WSTETH": 2400.0, "USDT": 1.0, "USDS": 1.0, "DAI": 1.0, "USDC": 1.0, "WBTC": 1.0}
+_TOKEN_IDS = {"WETH": 1, "WSTETH": 2, "USDT": 3, "USDS": 4, "DAI": 5, "EXOTIC": 6, "USDC": 7, "WBTC": 8}
+_RESERVES = {"WETH": (0.86, 1.05), "WSTETH": (0.84, 1.07), "USDS": (0.0, 0.0), "USDC": (0.0, 0.0), "WBTC": (0.75, 1.07)}
 
 
 def _row(side, address, sym, qty, enabled, token_id=None):
@@ -42,35 +42,54 @@ def test_wide_columns_match_the_parquet_shape():
 
 
 def test_aggregates_reproduce_ba_semantics():
-    # Mixed collateral incl. an LT=0 asset: it counts toward total collateral
-    # but adds nothing to the LT / bonus numerators -- exactly how BA's rows
-    # treat USDS-style collateral.
+    # Mixed collateral incl. an LT=0 asset: it is not collateral (total, lltv,
+    # ltv exclude it) but it still dilutes the liquidation incentive, exactly
+    # how BA's rows treat USDS-style supply.
     rows = _user(
         supplies=[("WETH", 10.0, True), ("WSTETH", 5.0, True), ("USDS", 1000.0, True)],
         borrows=[("USDT", 10000.0)],
     )
     df = build_users_frame(rows, _RESERVES, "USDT")
     row = df.iloc[0]
-    total = 20000.0 + 12000.0 + 1000.0
+    collateral = 20000.0 + 12000.0
+    supply = collateral + 1000.0
     lt = 20000.0 * 0.86 + 12000.0 * 0.84
     bonus = 20000.0 * 1.05 + 12000.0 * 1.07
-    assert row["total_collateral_usd"] == total
-    assert row["lltv"] == pytest.approx(lt / total)
+    assert row["usds_supply_usd"] == 1000.0
+    assert row["total_collateral_usd"] == collateral
+    assert row["lltv"] == pytest.approx(lt / collateral)
+    assert row["ltv"] == pytest.approx(10000.0 / collateral)
     assert row["health_factor"] == pytest.approx(lt / 10000.0)
-    assert row["liquidation_incentive"] == pytest.approx(bonus / total)
-    assert row["ltv"] == pytest.approx(10000.0 / total)
+    assert row["liquidation_incentive"] == pytest.approx(bonus / supply)
 
 
-def test_disabled_collateral_keeps_its_supply_but_protects_nothing():
-    enabled = build_users_frame(
-        _user(supplies=[("WETH", 10.0, True)], borrows=[("USDT", 1000.0)]), _RESERVES, "USDT"
+def test_totals_match_a_real_ba_row():
+    # users_sparklend_dai.parquet: WETH 18,231 + WBTC 10,715 + USDC 40,079 supplied,
+    # total_collateral_usd 28,946 and liquidation_incentive 0.4434.
+    rows = _user(
+        supplies=[("WETH", 18231.0 / 2000.0, True), ("WBTC", 10715.0, True), ("USDC", 40079.0, True)],
+        borrows=[("DAI", 10000.0)],
+    )
+    row = build_users_frame(rows, _RESERVES, "DAI").iloc[0]
+    assert row["total_collateral_usd"] == pytest.approx(28946.0)
+    assert row["liquidation_incentive"] == pytest.approx(0.4434, abs=1e-4)
+
+
+def test_disabled_collateral_keeps_its_supply_but_is_not_collateral():
+    row = build_users_frame(
+        _user(supplies=[("WETH", 10.0, False), ("WSTETH", 5.0, True)], borrows=[("USDT", 1000.0)]), _RESERVES, "USDT"
     ).iloc[0]
-    disabled = build_users_frame(
-        _user(supplies=[("WETH", 10.0, False)], borrows=[("USDT", 1000.0)]), _RESERVES, "USDT"
-    ).iloc[0]
-    assert disabled["weth_supply_usd"] == enabled["weth_supply_usd"] == 20000.0
-    assert enabled["health_factor"] > 0
-    assert disabled["health_factor"] == 0.0
+    assert row["weth_supply_usd"] == 20000.0
+    assert row["total_collateral_usd"] == 12000.0
+    assert row["lltv"] == pytest.approx(0.84)
+    assert row["liquidation_incentive"] == pytest.approx(12000.0 * 1.07 / 32000.0)
+
+
+def test_a_borrower_whose_only_collateral_is_disabled_is_excluded():
+    rows = _user("0xaaa", supplies=[("WETH", 1.0, True)], borrows=[("USDT", 100.0)])
+    rows += _user("0xbbb", supplies=[("WETH", 10.0, False)], borrows=[("USDT", 1000.0)])
+    df = build_users_frame(rows, _RESERVES, "USDT")
+    assert list(df["wallet_address"]) == ["0xaaa"]
 
 
 def test_users_not_borrowing_the_loan_token_are_excluded():
@@ -131,8 +150,8 @@ def test_market_frame_contains_only_modeled_collaterals():
 
 
 def test_market_frame_fails_on_a_modeled_collateral_without_a_price():
-    with pytest.raises(ValueError, match="WBTC"):
-        build_market_frame({"WETH", "WBTC"}, _PRICES)
+    with pytest.raises(ValueError, match="LBTC"):
+        build_market_frame({"WETH", "LBTC"}, _PRICES)
 
 
 # Morpho Blue

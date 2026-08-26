@@ -31,8 +31,11 @@ async def _token_id(engine, token_symbol: str) -> int:
         ).scalar_one()
 
 
-async def _seed_days(engine, token_id: int, closes: dict[dt.date, float]) -> None:
+async def _seed_days(engine, token_id: int, closes: dict[dt.date, float], oracle: str = "sparklend") -> None:
     async with engine.begin() as conn:
+        oracle_id = (
+            await conn.execute(text("SELECT id FROM oracle WHERE name = :n AND chain_id = 1"), {"n": oracle})
+        ).scalar_one()
         for i, (day, close) in enumerate(closes.items()):
             # Two updates per day: the later block must win as the close.
             for block_offset, hour, price in ((0, 9, close + 5.0), (1, 23, close)):
@@ -40,9 +43,15 @@ async def _seed_days(engine, token_id: int, closes: dict[dt.date, float]) -> Non
                 await conn.execute(
                     text("""
                         INSERT INTO onchain_token_price (token_id, oracle_id, block_number, "timestamp", price_usd)
-                        VALUES (:token_id, 1, :block, :ts, :price)
+                        VALUES (:token_id, :oracle_id, :block, :ts, :price)
                     """),
-                    {"token_id": token_id, "block": 1000 + i * 10 + block_offset, "ts": ts, "price": price},
+                    {
+                        "token_id": token_id,
+                        "oracle_id": oracle_id,
+                        "block": 1000 + i * 10 + block_offset,
+                        "ts": ts,
+                        "price": price,
+                    },
                 )
 
 
@@ -58,6 +67,45 @@ async def test_daily_close_is_the_newest_block_of_each_day(engine):
 
     prices = await PostgresPriceReader(engine, min_days=_MIN_DAYS).get_prices(["WETH"])
     assert list(prices["WETH"]) == [2000.0 + i for i in range(_MIN_DAYS)]  # closes, not the 09:00 updates
+
+
+async def test_rows_from_other_oracles_never_enter_the_series(engine):
+    # Chainlink writes the same days at higher blocks; the pinned oracle's
+    # closes must win, never the newest block across feeds.
+    token_id = await _token_id(engine, "WETH")
+    days = _last_days(_MIN_DAYS)
+    await _seed_days(engine, token_id, {d: 2000.0 for d in days})
+    async with engine.begin() as conn:
+        chainlink = (await conn.execute(text("SELECT id FROM oracle WHERE name = 'chainlink'"))).scalar_one()
+        for i, day in enumerate(days):
+            await conn.execute(
+                text("""
+                    INSERT INTO onchain_token_price (token_id, oracle_id, block_number, "timestamp", price_usd)
+                    VALUES (:t, :o, :block, :ts, 9999.0)
+                """),
+                {
+                    "t": token_id,
+                    "o": chainlink,
+                    "block": 1000 + i * 10 + 5,
+                    "ts": dt.datetime.combine(day, dt.time(23, 30), tzinfo=dt.UTC),
+                },
+            )
+
+    prices = await PostgresPriceReader(engine, min_days=_MIN_DAYS).get_prices(["WETH"])
+    assert list(prices["WETH"]) == [2000.0] * _MIN_DAYS
+
+
+async def test_an_unregistered_oracle_fails_loudly(engine):
+    with pytest.raises(ValueError, match="not registered"):
+        await PostgresPriceReader(engine, min_days=_MIN_DAYS, oracle_name="nope").get_prices(["WETH"])
+
+
+async def test_columns_keep_the_callers_labels(engine):
+    token_id = await _token_id(engine, "cbBTC")
+    await _seed_days(engine, token_id, {d: 60000.0 for d in _last_days(_MIN_DAYS)})
+
+    prices = await PostgresPriceReader(engine, min_days=_MIN_DAYS).get_prices(["cbBTC"])
+    assert list(prices.columns) == ["cbBTC"]
 
 
 async def test_symbols_resolve_case_insensitively(engine):

@@ -88,8 +88,8 @@ async def _seed_price(conn, token_id: int, oracle_id: int, price: float, age: dt
     )
 
 
-async def _seed_market(conn, ids: dict, price_age: dt.timedelta = dt.timedelta(0), oracle: str = "sparklend") -> None:
-    """WETH reserve params plus WETH/USDT prices from the given oracle feed."""
+async def _seed_reserve(conn, ids: dict) -> None:
+    """WETH as collateral: LT 86%, bonus 5%. Without it WETH supply is not collateral."""
     await conn.execute(
         text("""
             INSERT INTO sparklend_reserve_data
@@ -98,6 +98,11 @@ async def _seed_market(conn, ids: dict, price_age: dt.timedelta = dt.timedelta(0
         """),
         {"p": ids["protocol_id"], "t": ids["weth"]},
     )
+
+
+async def _seed_market(conn, ids: dict, price_age: dt.timedelta = dt.timedelta(0), oracle: str = "sparklend") -> None:
+    """WETH reserve params plus WETH/USDT prices from the given oracle feed."""
+    await _seed_reserve(conn, ids)
     for token_id, price in ((ids["weth"], 2000), (ids["usdt"], 1)):
         await _seed_price(conn, token_id, ids[oracle], price, price_age)
 
@@ -162,6 +167,7 @@ async def test_an_unchanged_fixed_price_stays_valid_while_the_feed_is_alive(engi
     async with engine.begin() as conn:
         ids = await _ids(conn)
         user_id = await _seed_user(conn, "ab" * 20)
+        await _seed_reserve(conn, ids)
         await _seed_price(conn, ids["usdt"], ids["sparklend"], 1.0, dt.timedelta(days=40), block=50)
         await _seed_price(conn, ids["weth"], ids["sparklend"], 2000.0, dt.timedelta(minutes=1))
         await _seed_supply(conn, ids, user_id, ids["weth"], 10**18)

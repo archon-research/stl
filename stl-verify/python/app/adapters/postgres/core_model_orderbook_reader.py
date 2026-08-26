@@ -2,10 +2,9 @@
 
 Replaces the static ``*_sell_orderbook.parquet`` snapshots. Aggregation mirrors
 what BA's parquet set did: one merged multi-venue book per canonical asset,
-with derivative tokens riding their underlying's book. Inspection of the
-parquet inputs confirmed the LST books are the raw ETH book duplicated with
-**no price rescaling**, so routing a token to its group book reproduces the
-original semantics exactly.
+with derivative tokens riding their underlying's book at the underlying's
+prices (BA's LST parquet books are the ETH book duplicated, unscaled). The
+routing table is pinned by ``test_routing_matches_the_model_readme_table``.
 
 Only the books our venues actually track can be served (see
 ``app/risk_engine/core_model/DATA_GAPS.md``). A market whose collateral has no
@@ -24,8 +23,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 logger = logging.getLogger(__name__)
 
 # Canonical book -> the symbol each venue stores in cex_orderbook_snapshots
-# (verified against staging: Coinbase BTC-USD, OKX BTC-USDT, Kraken XBT/USD).
-# USDT quotes are treated as USD. New venues/symbols extend these lists.
+# (k8s/overlays/*/configmaps.yaml SYMBOLS: Coinbase BTC-USD, OKX BTC-USDT,
+# Kraken XBT/USD). USDT quotes are treated as USD. A venue symbol missing here
+# only thins the book; the freshness check catches a venue with no match at all.
 _BOOK_SYMBOLS: dict[str, list[str]] = {
     "BTC": ["BTC-USD", "BTC-USDT", "XBT/USD"],
     "ETH": ["ETH-USD", "ETH-USDT", "ETH/USD"],

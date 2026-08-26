@@ -18,8 +18,13 @@ Collateral set required by the 9 enabled markets:
 
 **The CORE price reader now reads on-chain oracle prices, not the offchain
 feed.** Checked against staging: all 10 SparkLend collaterals have 355 days of
-gap-free daily closes in `onchain_token_price` (block-driven worker + the
-Erigon `oracle-pricing-backfill`; that pipeline never had the outages below).
+gap-free daily closes in `onchain_token_price` **under the `sparklend` oracle**
+(block-driven worker + the Erigon `oracle-pricing-backfill`; that pipeline
+never had the outages below). The series is pinned to that one oracle
+(`PostgresPriceReader(oracle_name=...)`): competing oracles hold separate rows
+per token, and "newest block of the day" would hop between feeds from day to
+day. Chainlink is indexed since 3 Feb 2026 only (186 days on 26 Aug 2026, just
+above `TRAIN_SIZE`), so it is not a usable default yet.
 BA's original used Yahoo Finance purely for convenience — the model's own
 liquidation mechanics run on oracle prices, so calibrating on the oracle
 series is more self-consistent, and it is the repo's preferred lineage.
@@ -118,7 +123,7 @@ Note: prod has all six venue books flowing (verified on the replica,
 
 **SparkLend (4 markets): done** behind `CORE_MODEL_POSITION_SOURCE=postgres`.
 The reader builds the wide users frame from `borrower` /
-`borrower_collateral` / `sparklend_reserve_data` / `onchain_token_price`,
+`borrower_collateral` / `sparklend_reserve_data` / `token_price_current`,
 validated against staging: the per-user borrow sum matches the reserve-level
 total debt within 0.6% (interest accrual since each user's last event), and a
 full CRR computed end to end on the live frame.

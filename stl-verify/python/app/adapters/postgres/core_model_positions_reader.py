@@ -16,12 +16,17 @@ for weeks while the feed as a whole ticks every block.
 Aggregate semantics were reverse-engineered from BA's parquet rows and
 reproduce them exactly:
 
-- ``total_collateral_usd``  = Σ supply_usd over every supplied asset
+- ``total_collateral_usd``  = Σ supply_usd over *eligible* assets (LT > 0 and
+  enabled as collateral); USDC/USDS-style supply still shows in its own
+  ``<sym>_supply_usd`` column but is not collateral
 - ``lltv``                  = Σ supply_usd × LT / total_collateral_usd
+- ``ltv``                   = total_borrow_usd / total_collateral_usd
 - ``health_factor``         = Σ supply_usd × LT / total_borrow_usd
-- ``liquidation_incentive`` = Σ supply_usd × bonus / total_collateral_usd
-  (assets with LT = 0 contribute supply to the denominator but nothing to the
-  LT / bonus numerators — matching how BA's rows treat USDS-style collateral)
+- ``liquidation_incentive`` = Σ supply_usd × bonus / Σ supply_usd over *every*
+  supplied asset — BA's rows dilute the bonus by non-eligible supply (a real
+  row: WETH 18,231 + WBTC 10,715 + USDC 40,079 → total 28,946, incentive
+  0.4434), so this is reproduced, not corrected
+- a borrower with no eligible collateral has no row (BA's files contain none)
 
 Deliberate deviations, documented in DATA_GAPS.md:
 
@@ -65,7 +70,8 @@ _ORACLE_ID = text("""
     FROM protocol_oracle po
     JOIN protocol p ON p.id = po.protocol_id
     JOIN oracle o ON o.id = po.oracle_id
-    WHERE p.chain_id = :chain_id AND p.name = :protocol_name AND o.name = :oracle_name
+    WHERE p.chain_id = :chain_id AND p.name = :protocol_name
+      AND o.name = :oracle_name AND o.chain_id = :chain_id
     ORDER BY po.from_block DESC
     LIMIT 1
 """)
@@ -193,7 +199,7 @@ def build_users_frame(
     records: list[dict] = []
     for address, cols in users.items():
         record: dict = {"wallet_address": address, "emode_category": 0}
-        total_collateral = total_lt = total_bonus = total_borrow = 0.0
+        total_supply = total_collateral = total_lt = total_bonus = total_borrow = 0.0
         borrows_loan_token = False
         for col, qty in cols.items():
             sym, side = col.rsplit("_", 1)
@@ -206,11 +212,12 @@ def build_users_frame(
             record[col] = qty
             record[f"{col}_usd"] = usd
             if side == "supply":
-                total_collateral += usd
+                total_supply += usd
                 lt, bonus = reserve_params.get(upper, (0.0, 0.0))
-                # Collateral the user disabled protects nothing and pays no
-                # bonus, same as an LT=0 reserve; the supply itself still shows.
+                # Disabled collateral is not collateral, same as an LT=0 reserve;
+                # the supply itself still shows and still dilutes the incentive.
                 if enabled.get((address, upper), True) and lt > 0:
+                    total_collateral += usd
                     total_lt += usd * lt
                     total_bonus += usd * bonus
             else:
@@ -220,7 +227,7 @@ def build_users_frame(
         if not borrows_loan_token or total_borrow <= 0:
             continue
         if total_collateral <= 0:
-            # A borrower with no live collateral is already bad debt, not a
+            # A borrower with no eligible collateral is already bad debt, not a
             # future liquidation the simulation can process — every downstream
             # ratio divides by collateral and would poison the CRR with NaN.
             # Excluded loudly below, never silently.
@@ -231,7 +238,7 @@ def build_users_frame(
         record["lltv"] = total_lt / total_collateral
         record["ltv"] = total_borrow / total_collateral
         record["health_factor"] = total_lt / total_borrow
-        record["liquidation_incentive"] = total_bonus / total_collateral
+        record["liquidation_incentive"] = total_bonus / total_supply
         records.append(record)
 
     if unpriced:
