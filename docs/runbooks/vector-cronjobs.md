@@ -706,6 +706,11 @@ records nothing is a permanent hole — it cannot be backfilled afterwards.
 observed value as if it were current, rather than going null. The stall is
 invisible from both the error path and the API.
 
+This alert also fires if `reference_capital_sync_snapshots_written_total`
+stops being emitted at all (a collector drop or a metric rename), not only
+when it is present and reads zero — check that the series still exists at all
+before chasing an upstream cause.
+
 **Triage.**
 
 1. Confirm the worker is cycling rather than wedged:

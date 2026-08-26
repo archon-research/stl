@@ -456,25 +456,23 @@ groups:
       # Sky's Star monitor publishes no history, so a cycle that records nothing
       # leaves a hole that can never be backfilled — and the read path gap-fills
       # with locf, so a stalled series keeps serving its last value as current.
-      # Neither rule below is covered by the generic cronjob rules above: both
-      # failures happen on runs that report success.
+      # None of the rules below is covered by the generic cronjob rules above:
+      # every failure they catch happens on a run that reports success.
       - alert: VectorReferenceCapitalIndexerWritesZero
         # Cycling but persisting nothing. The monitor covers every tracked prime
         # today, so a healthy cycle always writes; zero means it returned an
         # empty-but-successful payload. Gated on "cycling AND zero" so it does
         # not duplicate the worker-down rules when the worker is simply down.
+        # `unless` (not `== 0`) also fires when the counter series is entirely
+        # absent — a collector drop or metric rename — which `== 0` cannot.
         expr: |
-          (
-            sum by (cluster) (
-              rate(cronjob_runs_total{service_name="reference-capital-indexer", status="success", k8s_namespace_name="vector"}[1h])
-            ) > 0
-          )
-          and
-          (
-            sum by (cluster) (
-              increase(reference_capital_sync_snapshots_written_total{k8s_namespace_name="vector"}[1h])
-            ) == 0
-          )
+          sum by (cluster) (
+            rate(cronjob_runs_total{service_name="reference-capital-indexer", status="success", k8s_namespace_name="vector"}[1h])
+          ) > 0
+          unless
+          sum by (cluster) (
+            increase(reference_capital_sync_snapshots_written_total{k8s_namespace_name="vector"}[1h])
+          ) > 0
         for: 30m
         labels:
           team: vector
