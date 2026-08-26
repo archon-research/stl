@@ -547,12 +547,15 @@ groups:
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorreferencecapitalindexerallocationszero
 
       - alert: VectorReferenceCapitalIndexerPositionsZero
-        # The balance-sheet positions stalled while cycles succeed. A successful
-        # cycle always writes: the positions client fails on an empty result for
-        # a covered prime, so zero here means the covered set itself was empty —
-        # which WritesZero also catches — or the counter stopped moving.
+        # The positions counter stalled while cycles succeed. A successful cycle
+        # always writes at least one row per covered star: Run fails before
+        # persisting if snapshots are empty, and the positions client fails the
+        # whole cycle on an empty result for a covered prime — so a covered set
+        # is never empty when a cycle succeeds. Zero here therefore means the
+        # counter itself broke (collector drop, metric rename, missed recording
+        # call), not a stalled series.
         # `unless` (not `== 0`) also fires when the counter series is entirely
-        # absent — a collector drop or metric rename — which `== 0` cannot.
+        # absent, which `== 0` cannot.
         expr: |
           sum by (cluster) (
             rate(cronjob_runs_total{service_name="reference-capital-indexer", status="success", k8s_namespace_name="vector"}[1h])
@@ -568,10 +571,11 @@ groups:
           component: reference-capital-indexer
           namespace: vector
         annotations:
-          summary: "Vector reference-capital-indexer wrote 0 balance-sheet position rows"
+          summary: "Vector reference-capital-indexer: positions counter stopped moving"
           description: |
-            `prime_reference_position` received 0 rows over 1h while cycles
-            succeeded. The position-level reference series has stopped advancing;
-            this history cannot be backfilled afterwards — the feed publishes
-            only a current snapshot.
+            `reference_capital_sync_positions_written_total` recorded 0 over 1h
+            while cycles succeeded. A successful cycle always writes at least one
+            position row, so this is the counter itself breaking (collector drop,
+            metric rename, missed recording call) — confirm against
+            `prime_reference_position` before assuming the series stalled.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorreferencecapitalindexerpositionszero

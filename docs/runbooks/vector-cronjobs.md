@@ -798,16 +798,19 @@ Confirm what the monitor reports and reconcile; the gap in the series stays.
 
 ## VectorReferenceCapitalIndexerPositionsZero
 
-**What it means.** Cycles are succeeding but `prime_reference_position`
-received no rows for an hour. The position-level balance sheet has stopped
-advancing; the feed publishes only a current snapshot, so the gap is permanent.
+**What it means.** Cycles are succeeding but
+`reference_capital_sync_positions_written_total` recorded no increase for an
+hour. This points at the counter, not the pipeline: see below for why.
 
-**Why it is not caught by the generic rules.** The positions client fails the
-cycle on an empty result for a covered prime — the feed answers unknown primes
-with `200` and an empty list, so emptiness is deliberately never persisted. A
-successful cycle writing zero rows therefore means the covered set itself was
-empty (which `WritesZero` also catches) or the counter stopped moving while
-writes continue, which points at telemetry wiring rather than data.
+**Why it is not caught by the generic rules, and why it is not a data gap.**
+The positions client fails the whole cycle on an empty result for a covered
+prime — the feed answers unknown primes with `200` and an empty list, so
+emptiness is deliberately never persisted — and `Run` fails before persisting
+anything if the cycle's snapshot set is empty. So a cycle that reports success
+always covers at least one star and always wrote at least one position row.
+Zero on this counter while cycles succeed can therefore only mean the counter
+itself broke (collector drop, metric rename, a missed recording call), never
+that positions stopped landing.
 
 **A third failure mode this alert cannot catch.** A prime the Star monitor
 covers but this positions feed does not carry makes every cycle fail loudly
@@ -819,17 +822,17 @@ coverage — a code change, never a silent skip.
 
 1. Confirm the worker is cycling:
    `kubectl -n vector logs deploy/reference-capital-indexer --tail=100`.
-2. Ask the feed directly:
-   `curl -s "$SKY_DATA_URL/allocations/?prime=spark&limit=1000" | jq '.data.results | length'`.
-   Rows here with zero rows landing means the payload changed shape — the
-   client should have errored, so check its logs for parse failures.
-3. Compare against the table:
-   `SELECT max(synced_at) FROM prime_reference_position;` — if rows are landing
-   but the counter is flat, fix the telemetry, not the pipeline.
+2. Compare against the table:
+   `SELECT max(synced_at) FROM prime_reference_position;` — if rows are
+   landing at the expected cadence, this is telemetry-only: fix the counter
+   (check the metric name/labels and that `RecordPositionsWritten` is on the
+   success path), not the pipeline.
+3. If rows are genuinely not landing despite cycles succeeding, that
+   contradicts the invariant above — treat it as a code regression in the
+   positions client's empty-result guard, not a routine data gap.
 
-**Resolution.** Same posture as `WritesZero`: confirm upstream, reconcile the
-covered set, accept the gap. Do not backfill from the daily aggregates — they
-are a different granularity of a different question.
+**Resolution.** A telemetry fix ships as a normal PR; no upstream reconciliation
+or accepted gap applies here, unlike `WritesZero`/`AllocationsZero`.
 
 ---
 
