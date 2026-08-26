@@ -1,15 +1,10 @@
-# Codex PR review, triggered by adding the "Ready for Codex review" label.
+# Codex PR review, triggered by the "Ready for Codex review" label.
 #
-# Why a label and not `pull_request: [opened, synchronize]`: a review costs real
-# usage against the service seat's ChatGPT quota, and most pushes don't want one.
-# The label makes asking explicit and re-askable — the last step removes it, so
-# adding it again re-runs the review on the new head.
-#
-# Why raw `codex exec` and not openai/codex-action: the official action takes only
-# `openai-api-key` and proxies the Responses API, which is metered billing. We pay
-# for ChatGPT Business seats, so this seeds the seat's own auth.json instead. See
-# https://learn.chatgpt.com/docs/auth/ci-cd-auth
-#
+# Label, not `[opened, synchronize]`: a review spends the service seat's ChatGPT
+# quota, so asking is explicit — and re-askable, since the last step removes it.
+# Raw `codex exec`, not openai/codex-action: the action only takes an API key
+# (metered billing); we pay for seats, so this seeds the seat's own auth.json.
+# See https://learn.chatgpt.com/docs/auth/ci-cd-auth
 # Actions are pinned to commit SHAs for supply-chain security.
 name: Codex Review
 
@@ -22,29 +17,19 @@ permissions: {}
 jobs:
   review:
     name: Codex Review
-    # Two conditions, both load-bearing on a PUBLIC repo:
-    #   - the label gate: adding a label needs triage or write access, so only a
-    #     trusted actor can spend the seat or point the agent at a diff.
-    #   - the same-repo gate: a fork PR must never reach the seeding step. GitHub
-    #     already withholds secrets from fork-PR runs, so this is belt-and-braces —
-    #     but relying on that alone leaves the safety property invisible in the
-    #     file, and one switch to `pull_request_target` would silently remove it.
+    # Both conditions load-bearing on a PUBLIC repo: the label needs triage/write
+    # access, so only a trusted actor can spend the seat or aim the agent; the
+    # same-repo gate keeps fork PRs away from the seeding step even if the trigger
+    # ever moves to pull_request_target.
     if: >-
       github.event.label.name == 'Ready for Codex review' &&
       github.event.pull_request.head.repo.full_name == github.repository
-    # Job-level and per-PR, not workflow-level and repo-wide. A workflow-level group
-    # admits every `labeled` event before the `if` above filters it, and GitHub keeps
-    # at most one pending run per group — so adding an unrelated label anywhere could
-    # evict a genuinely queued review, whose always() cleanup steps then never run and
-    # whose trigger label stays stranded. Job-level means only real reviews enter the
-    # group; per-PR means reviews of different PRs never evict each other.
-    #
-    # The cost is that reviews of different PRs may run concurrently while sharing one
-    # seeded auth.json secret. That race is confined to the rare run where Codex
-    # refreshes the bundle (it does so only when the copy is older than ~8 days), and
-    # the persist step below writes the secret back only when the bundle actually
-    # changed, so same-day concurrent runs never touch it. If two refreshes ever do
-    # collide, the seed step's failure message says how to recover.
+    # Job-level and per-PR: a workflow-level repo-wide group admits every labeled
+    # event before the `if` filters, and GitHub keeps one pending run per group —
+    # an unrelated label could evict a queued review, stranding its trigger label
+    # (the evicted run's always() cleanup never runs). Sharing one seeded secret
+    # across concurrent PRs is safe because the persist step below only writes
+    # back a changed bundle, and Codex refreshes only past ~8 days.
     concurrency:
       group: codex-review-${{ github.event.pull_request.number }}
       cancel-in-progress: false
@@ -56,23 +41,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          # The head SHA the event pinned, not the default refs/pull/N/merge: the
-          # merge ref drifts as the base advances (the tree would then disagree with
-          # the `git diff BASE..HEAD` the reviewer is told to read) and does not
-          # exist at all for a conflicted PR. The stamp in the report names this SHA,
-          # so the tree must be exactly it.
+          # Event-time head SHA, not the default refs/pull/N/merge: the merge ref
+          # drifts as the base advances and doesn't exist for a conflicted PR; the
+          # report stamps this SHA, so the tree must be exactly it.
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
           fetch-depth: 0  # merge-base against the base branch needs full history
 
-      # Fresh CODEX_HOME per run: holds only the seeded auth.json, so no stray
-      # config.toml or session history from the runner image can affect the review.
-      # Exported through GITHUB_ENV because `runner.*` is out of scope in job-level env.
-      #
-      # Every credential string in the bundle is registered as a log mask here, at
-      # the earliest possible moment: GitHub only knows the secret as one whole JSON
-      # blob, so an individual token printed alone would otherwise pass through
-      # masking untouched.
+      # Fresh CODEX_HOME per run: nothing but the seeded auth.json can affect the
+      # review. Exported via GITHUB_ENV (`runner.*` is out of scope in job env).
+      # Each credential string is registered as a log mask here: GitHub only knows
+      # the secret as one JSON blob, so a token printed alone would pass unmasked.
       - name: Seed Codex auth from the service seat
         env:
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
@@ -96,32 +75,21 @@ jobs:
       - name: Install Codex CLI
         run: |
           set -euo pipefail
-          # Pinned: both vendors change agent behaviour silently, and an unpinned
-          # reviewer makes "did quality drop?" unanswerable across runs.
+          # Pinned: vendors change agent behaviour silently; unpinned makes
+          # "did quality drop?" unanswerable across runs.
           npm install --global --no-fund --no-audit @openai/codex@0.149.1
           codex --version
 
-      # ubuntu-latest is Ubuntu 24.04, which restricts unprivileged user namespaces by
-      # default. Codex sandboxes every command the reviewer runs with bubblewrap, which
-      # needs such a namespace to bring up loopback, so with the restriction in place
-      # every one of those commands dies with "bwrap: loopback: Failed RTM_NEWADDR" —
-      # openai/codex#15057.
-      #
-      # Grant the permission to Codex's bundled bwrap alone, via the AppArmor profile
-      # shape Ubuntu itself ships for flatpak and chrome. The blunt alternative — the
-      # kernel.apparmor_restrict_unprivileged_userns=0 sysctl — hands the userns
-      # primitive (a recurring local-privesc surface) to every process on the runner,
-      # including whatever author-controlled code the reviewer executes inside the
-      # sandbox. Codex's bwrap moves between releases, but the CLI version is pinned
-      # above, so the path is resolvable right here at install time; and if a release
-      # ever ships it somewhere `find` misses, the `codex sandbox` preflight turns
-      # that from a silently useless profile into a loud job failure.
-      #
-      # The preflight exercises the real sandbox stack, whatever binary that turns out
-      # to be, and costs no model tokens. Without it a broken sandbox is not a failure
-      # but a silent downgrade — the agent cannot read the checkout, so it reviews
-      # whatever it can still reach, and a confident review of the wrong bytes is
-      # worse than no review.
+      # Ubuntu 24.04 restricts unprivileged user namespaces; Codex sandboxes every
+      # reviewer command with bubblewrap, which needs one ("bwrap: loopback: Failed
+      # RTM_NEWADDR", openai/codex#15057). Grant userns to Codex's bundled bwrap
+      # alone via an AppArmor profile (the shape Ubuntu ships for flatpak/chrome) —
+      # the sysctl alternative hands a recurring local-privesc primitive to every
+      # process on the runner, including author-controlled code the reviewer runs
+      # inside the sandbox. The bwrap path moves between releases but is resolvable
+      # from the pinned install, and the preflight turns a wrong path into a loud
+      # failure instead of a silent no-op — without it a broken sandbox degrades
+      # into a confident review of whatever the agent can still reach.
       - name: Enable and verify the sandbox the reviewer runs in
         run: |
           set -euo pipefail
@@ -160,15 +128,11 @@ jobs:
           set -euo pipefail
           BASE_SHA="$(git merge-base "origin/${BASE_REF}" "${HEAD_SHA}")"
 
-          # The prompt file carries the standing review instructions; only the
-          # per-run scope is appended here. The title and body are quoted as data:
-          # the reviewer needs them to judge intent, but their author is the person
-          # under review, so they must not read as instructions. This step holds no
-          # GitHub token for the same reason.
-          #
-          # Defusing the closing tag matters as much as the tags themselves: a body
-          # containing a literal `</pr-body>` would end the untrusted block early and
-          # let the rest of the body speak with the prompt's own voice.
+          # Standing instructions live in the prompt file; only per-run scope is
+          # appended. Title and body are quoted as data — their author is the
+          # person under review — and closing tags are defused so a literal
+          # </pr-body> can't end the untrusted block and speak with the prompt's
+          # own voice. This step holds no GitHub token for the same reason.
           defuse() { printf '%s' "$1" | sed 's|</pr-|<\\/pr-|gI'; }
           PR_TITLE_SAFE="$(defuse "${PR_TITLE}")"
           PR_BODY_SAFE="$(defuse "${PR_BODY}")"
@@ -185,17 +149,13 @@ jobs:
             printf '<pr-body>\n%s\n</pr-body>\n' "${PR_BODY_SAFE}"
           } > "${RUNNER_TEMP}/prompt.md"
 
-          # read-only sandbox: the reviewer needs to read the tree and run git, and
-          # must not be able to write to it. --ephemeral keeps session files out of
-          # CODEX_HOME so nothing but auth.json is written back in the next step.
-          # Web search is pinned off rather than left to the vendor default: it is a
-          # server-side egress channel that neither the sandbox nor the leak check
-          # below can see, and a default flip must not silently open it.
-          #
-          # Captured to a file rather than streamed: the transcript is a public
-          # Actions log on this repo, and it carries every tool result the agent saw.
-          # It gets published a step later, once the leak check has masked it. Codex
-          # failures are held over the same way, so a crash still shows its output.
+          # read-only sandbox: read the tree and run git, never write. --ephemeral
+          # keeps session files out of CODEX_HOME. Web search pinned off: a
+          # server-side egress channel neither the sandbox nor the leak check
+          # sees, and a vendor default flip must not silently open it.
+          # Output captured, not streamed: the transcript carries every tool
+          # result the agent saw and lands in a public log, so it publishes only
+          # after the leak check has masked it; a crash is held over the same way.
           set +e
           codex exec \
             --sandbox read-only \
@@ -207,20 +167,14 @@ jobs:
           echo "CODEX_RC=$?" >> "${GITHUB_ENV}"
           set -e
 
-      # The reviewer reads the diff and PR body — text the PR author controls — while
-      # auth.json sits on disk, and `--sandbox read-only` stops writes, not reads. Two
-      # ways out of the runner have to be checked, because GitHub's masking covers
-      # neither on its own: the report is posted through the API, which masking does
-      # not touch at all, and masking in the log only knows the strings registered as
-      # masks. So: take the credential fields of both the seeded bundle and the
-      # possibly-refreshed one now on disk (the agent may have read either), register
-      # each as a log mask, and refuse to post any file that contains one — verbatim
-      # or base64-encoded at any of the three alignments, which is the cheap
-      # "encode it first" dodge.
-      #
-      # This still won't catch a determined obfuscation (a wrapped encoding, a cipher
-      # the agent was talked into), which is why the label gate above (write access
-      # required) is the real boundary and this step is defence in depth.
+      # The agent reads author-controlled text while auth.json sits on disk
+      # (read-only stops writes, not reads), and GitHub masking covers neither
+      # escape route: the comment API not at all, the log only for registered
+      # strings. So: credential fields from both the seeded and possibly-refreshed
+      # bundle become needles — verbatim and base64 at all three alignments, the
+      # cheap "encode it first" dodge — each registered as a mask, and nothing
+      # containing one gets posted. A determined obfuscation still gets through;
+      # the label gate above is the real boundary, this is defence in depth.
       - name: Refuse to publish anything containing token material
         id: leakcheck
         env:
@@ -245,9 +199,8 @@ jobs:
             exit 1
           fi
 
-          # Each token, plus its base64 at all three byte alignments. The first 4 and
-          # last 4 characters of each encoding are dropped because they mix token
-          # bytes with whatever surrounds them in a larger encoded blob.
+          # 4 head/tail chars of each encoding dropped: they mix token bytes with
+          # whatever surrounds them in a larger encoded blob.
           : > "${RUNNER_TEMP}/needles"
           while IFS= read -r t; do
             printf '%s\n' "${t}" >> "${RUNNER_TEMP}/needles"
@@ -263,8 +216,7 @@ jobs:
           rm -f "${RUNNER_TEMP}/tokens"
           sort -u -o "${RUNNER_TEMP}/needles" "${RUNNER_TEMP}/needles"
 
-          # Every needle becomes a log mask, so the transcript step after this one
-          # prints *** where a token (or its base64) would have been.
+          # Mask every needle so the transcript step prints *** instead.
           while IFS= read -r needle; do
             echo "::add-mask::${needle}"
           done < "${RUNNER_TEMP}/needles"
@@ -278,9 +230,8 @@ jobs:
           done
           rm -f "${RUNNER_TEMP}/needles"
 
-      # Runs even when the leak check failed — every credential string is a registered
-      # mask by then, so the log shows *** where token material would be, and a failed
-      # run keeps its only debugging evidence. Also where a Codex failure surfaces.
+      # Runs even if the leak check failed — needles are masked by then, so a
+      # failed run keeps its only debugging evidence. Also surfaces Codex failures.
       - name: Publish the transcript and surface any Codex failure
         if: ${{ !cancelled() }}
         run: |
@@ -305,17 +256,13 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: gh pr comment "${PR_NUMBER}" --body-file "${RUNNER_TEMP}/review.md"
 
-      # Codex refreshes the token bundle when it is older than ~8 days, and the
-      # refresh may invalidate the copy we seeded from. Persisting the refreshed
-      # file back is what OpenAI's CI guide requires. Runs after the comment on
-      # purpose: a rotation failure must not cost us the review we already paid for.
-      # Skipped (with a warning) until the rotation token exists, so the first runs
-      # can prove whether rotation is actually needed.
-      #
-      # Gated on the leak check passing — the one run that just declared the token
-      # compromised must not re-arm every later run with it — and on the bundle
-      # actually having changed, so a run that refreshed nothing cannot clobber an
-      # operator's concurrent re-seed with a stale copy.
+      # Codex refreshes the bundle past ~8 days and the refresh may invalidate the
+      # seeded copy; persisting it back is what OpenAI's CI guide requires. After
+      # the comment on purpose: a rotation failure must not cost the review.
+      # Gated on the leak check (a compromised token must not re-arm later runs)
+      # and on the bundle actually changing (a no-op run must not clobber an
+      # operator's concurrent re-seed). Skipped with a warning until the rotation
+      # token exists.
       - name: Persist refreshed auth
         if: always() && steps.leakcheck.outcome == 'success'
         env:
@@ -337,8 +284,8 @@ jobs:
           # Piped, not --body: a secret on the command line is visible in argv.
           gh secret set CODEX_AUTH_JSON < "${CODEX_HOME}/auth.json"
 
-      # Makes the label re-usable: adding it again is how you ask for a re-review
-      # of a new head, and `labeled` only fires on a label that isn't already there.
+      # Re-usable label: `labeled` only fires on a label that isn't already there,
+      # so removing it here is what makes a re-review askable.
       - name: Release the label
         if: always()
         env:
