@@ -5,6 +5,7 @@ database keeps the scenarios independent of each other and of ordering.
 """
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import asyncpg
@@ -287,6 +288,95 @@ async def test_correction_lands_over_a_backfilled_null_version_row(conn: asyncpg
     assert row is not None
     assert row["usage_as_collateral_enabled"] is False
     assert row["processing_version"] == 0
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_reserve_trigger_propagates_the_whole_row(conn: asyncpg.Connection) -> None:
+    """The cache carries the source row's full payload, not just the collateral flag.
+
+    VEC-661 widened this table to every sparklend_reserve_data column so a new reader
+    needs no migration. Two of the columns are carried under their canonical
+    name/type rather than verbatim, and both conversions are guarded — so the
+    corrupt-epoch and out-of-range-decimals cases are asserted here too, since an
+    unguarded cast would raise inside the trigger and abort the history insert.
+    """
+    protocol_id = await insert_protocol(conn, "curWide", b"\xb1" * 20)
+    token_id = await insert_token(conn, "CURWIDE", 18, b"\xb2" * 20)
+
+    await conn.execute(
+        """
+        INSERT INTO sparklend_reserve_data
+            (protocol_id, token_id, block_number, block_version, usage_as_collateral_enabled,
+             unbacked, accrued_to_treasury_scaled, total_a_token, total_stable_debt,
+             total_variable_debt, liquidity_rate, variable_borrow_rate, stable_borrow_rate,
+             average_stable_borrow_rate, liquidity_index, variable_borrow_index,
+             last_update_timestamp, decimals, ltv, liquidation_threshold, liquidation_bonus,
+             reserve_factor, borrowing_enabled, stable_borrow_rate_enabled, is_active, is_frozen)
+        VALUES ($1, $2, $3, 0, true,
+                1, 2, 3, 4,
+                5, 6, 7, 8,
+                9, 10, 11,
+                1800000000, 18, 7500, 8250, 10500,
+                1000, true, false, true, false)
+        """,
+        protocol_id,
+        token_id,
+        _BLOCK,
+    )
+
+    row = await conn.fetchrow(
+        "SELECT * FROM sparklend_reserve_data_current WHERE protocol_id = $1 AND token_id = $2",
+        protocol_id,
+        token_id,
+    )
+    assert row is not None
+    assert row["unbacked"] == 1
+    assert row["accrued_to_treasury_scaled"] == 2
+    assert row["total_a_token"] == 3
+    assert row["total_stable_debt"] == 4
+    assert row["total_variable_debt"] == 5
+    assert row["liquidity_rate"] == 6
+    assert row["variable_borrow_rate"] == 7
+    assert row["stable_borrow_rate"] == 8
+    assert row["average_stable_borrow_rate"] == 9
+    assert row["liquidity_index"] == 10
+    assert row["variable_borrow_index"] == 11
+    assert row["last_update_at"] == datetime(2027, 1, 15, 8, 0, tzinfo=UTC)
+    assert row["decimals"] == 18
+    assert row["ltv"] == 7500
+    assert row["liquidation_threshold"] == 8250
+    assert row["liquidation_bonus"] == 10500
+    assert row["reserve_factor"] == 1000
+    assert row["borrowing_enabled"] is True
+    assert row["stable_borrow_rate_enabled"] is False
+    assert row["is_active"] is True
+    assert row["is_frozen"] is False
+
+    # A corrupt epoch (the history column's COMMENT records ~5.9% of them, some
+    # negative) and a decimals value outside the ERC-20 uint8 range must cache as
+    # NULL, and above all must not abort this insert.
+    await conn.execute(
+        """
+        INSERT INTO sparklend_reserve_data
+            (protocol_id, token_id, block_number, block_version, usage_as_collateral_enabled,
+             last_update_timestamp, decimals)
+        VALUES ($1, $2, $3, 0, true, -62135596800, 100000)
+        """,
+        protocol_id,
+        token_id,
+        _BLOCK + 1,
+    )
+
+    row = await conn.fetchrow(
+        "SELECT last_update_at, decimals, block_number FROM sparklend_reserve_data_current "
+        "WHERE protocol_id = $1 AND token_id = $2",
+        protocol_id,
+        token_id,
+    )
+    assert row is not None
+    assert row["block_number"] == _BLOCK + 1
+    assert row["last_update_at"] is None
+    assert row["decimals"] is None
 
 
 @pytest.mark.asyncio(loop_scope="module")
