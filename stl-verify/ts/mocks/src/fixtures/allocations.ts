@@ -400,6 +400,8 @@ function skyOnlyAllocations(nowMs: number, primeName: PrimeName): Allocation[] {
       underlying_token_id: null,
       underlying_token_address: null,
       symbol: 'sparkPrimeUSDC1',
+      // Unresolved against STL's receipt-token registry, like the id/address
+      // above: this feed names no underlying of its own.
       underlying_symbol: '',
       protocol_name: 'Arkis',
       position_keys: [`position:1:${ARKIS_VAULT}`],

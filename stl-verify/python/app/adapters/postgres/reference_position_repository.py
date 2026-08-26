@@ -9,6 +9,9 @@ The indexer fetches positions only for the stars a cycle's risk-capital
 snapshots cover, so "this prime has position rows" implies "this prime has a
 coverage row". That invariant lives in the Go service and is what lets the
 coverage gate below be a cheap AND rather than a decision about precedence.
+
+The underlying-token columns' meaning is documented on
+:class:`~app.domain.entities.reference_position.ReferencePosition`.
 """
 
 from sqlalchemy import text
@@ -19,6 +22,7 @@ from app.adapters.postgres._reference_rows import (
     PRIME_BY_STAR_CTE,
     optional_decimal,
     receipt_token_join,
+    receipt_token_underlying_join,
     required_decimal,
     text_or_empty,
     token_address_bytes,
@@ -79,10 +83,14 @@ _POSITIONS_SQL = text(
         r.assets_usd,
         r.allocated_assets_usd,
         r.idle_assets_usd,
-        rt.id AS receipt_token_id
+        rt.id AS receipt_token_id,
+        ut.id AS underlying_token_id,
+        encode(ut.address, 'hex') AS underlying_token_address,
+        ut.symbol AS underlying_symbol
     FROM latest r
     """
     + receipt_token_join("r")
+    + receipt_token_underlying_join()
     + """
     WHERE EXISTS (
         SELECT 1 FROM prime_capital_stack pcs WHERE pcs.prime_id = (SELECT id FROM target)
@@ -128,6 +136,9 @@ def _position(row) -> ReferencePosition:
         allocated_assets_usd=optional_decimal(row.allocated_assets_usd, "allocated_assets_usd"),
         idle_assets_usd=optional_decimal(row.idle_assets_usd, "idle_assets_usd"),
         receipt_token_id=row.receipt_token_id,
+        underlying_token_id=row.underlying_token_id,
+        underlying_token_address=("0x" + row.underlying_token_address) if row.underlying_token_id is not None else None,
+        underlying_symbol=text_or_empty(row.underlying_symbol),
         chain_id=row.chain_id,
         chain=chain_name_for(row.chain_id),
     )

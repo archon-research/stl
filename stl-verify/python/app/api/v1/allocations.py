@@ -196,8 +196,8 @@ class AllocationResponse(BaseModel):
         description=(
             "Surrogate id of the underlying token. For direct holdings, this is the held asset itself, "
             "unless the holding is valued on the underlying-value basis (allowlisted). `null` for off-chain "
-            "custody holdings (e.g. Anchorage BTC), which have no token-registry row. On a reference row, "
-            "populated when the position resolves to STL's registry, null otherwise."
+            "custody holdings (e.g. Anchorage BTC), which have no token-registry row, and for a reference "
+            "row (`source=reference`) whose position does not resolve to STL's receipt-token registry."
         ),
         examples=[1],
     )
@@ -206,8 +206,8 @@ class AllocationResponse(BaseModel):
         description=(
             "0x-prefixed underlying-token contract address. For direct holdings, this is the held asset itself, "
             "unless the holding is valued on the underlying-value basis (allowlisted). `null` for off-chain "
-            "custody holdings (e.g. Anchorage BTC), which have no on-chain address. On a reference row, "
-            "populated when the position resolves to STL's registry, null otherwise."
+            "custody holdings (e.g. Anchorage BTC), which have no on-chain address, and for a reference row "
+            "(`source=reference`) whose position does not resolve to STL's receipt-token registry."
         ),
         examples=["0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"],
     )
@@ -218,8 +218,11 @@ class AllocationResponse(BaseModel):
     underlying_symbol: str = Field(
         description=(
             "Underlying-token symbol. For direct holdings, same as ``symbol``, "
-            "unless the holding is valued on the underlying-value basis (allowlisted). On a reference row, "
-            "populated when the position resolves to STL's registry, empty otherwise."
+            "unless the holding is valued on the underlying-value basis (allowlisted). Empty on a reference "
+            "row (`source=reference`) whose position does not resolve to STL's receipt-token registry — "
+            "that feed never names an underlying of its own — and also empty on a resolved reference row "
+            "whose registry token has no symbol recorded yet; `underlying_token_id`/`underlying_token_address` "
+            "are the reliable resolution signal, not this field."
         ),
         examples=["USDC"],
     )
@@ -461,9 +464,9 @@ async def list_protocols(service: AllocationService = Depends(_get_service)):
         "monitor's risk-capital breakdown, whose `exposure` covers only the priced subset and runs "
         "about a third smaller. These rows carry no `balance` and no activity fields, which "
         "upstream does not publish, and a `reference_synced_at` naming the sync cycle they were "
-        "observed at rather than implying they are current. `underlying_token_id`, "
-        "`underlying_token_address` and `underlying_symbol` are populated when the position "
-        "resolves to STL's registry, null otherwise — upstream names no loan token of its own."
+        "observed at rather than implying they are current. `underlying_*` are populated when the "
+        "position resolves to STL's receipt-token registry (the feed itself names no underlying) "
+        "and `null`/empty otherwise."
     ),
 )
 async def list_allocations(
@@ -714,10 +717,8 @@ def _reference_allocation_row(
         network=row.network,
         receipt_token_id=row.receipt_token_id,
         receipt_token_address=row.token_address if as_address(row.token_address) else None,
-        # Both or neither, per the model's invariant — true here because the
-        # service sets them from the same registry lookup as `receipt_token_id`.
-        # This feed names no loan token of its own; populated when the position
-        # resolves to STL's registry, null otherwise.
+        # Unlike the Star monitor's breakdown, this feed names no loan token
+        # itself; see ReferencePosition for where these come from instead.
         underlying_token_id=row.underlying_token_id,
         underlying_token_address=row.underlying_token_address,
         symbol=row.symbol,

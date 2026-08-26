@@ -58,6 +58,15 @@ class ReferencePosition:
     # ``None`` whenever the join cannot be made — a pool id in place of an
     # address, an unmapped network, or a token STL does not index.
     receipt_token_id: int | None = None
+    # This feed never reports an underlying itself. When `receipt_token_id`
+    # resolves, id/address carry the registry's own underlying for that
+    # receipt token (the same fact `receipt_token` FKs express for the
+    # indexed path) and are both `None` when it does not. `underlying_symbol`
+    # is looser: `token.symbol` is independently nullable, so a resolved
+    # token can still read `""` while awaiting its on-chain symbol.
+    underlying_token_id: int | None = None
+    underlying_token_address: str | None = None
+    underlying_symbol: str = ""
     # Both ``None`` for a network upstream has added that STL has no chain id
     # for. Callers must not substitute a placeholder id: 0 already means
     # off-chain custody, so an unmapped EVM position would read as one.

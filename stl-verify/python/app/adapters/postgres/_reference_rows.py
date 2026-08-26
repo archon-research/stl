@@ -54,6 +54,20 @@ def receipt_token_join(alias: str) -> str:
 """
 
 
+def receipt_token_underlying_join() -> str:
+    """LEFT JOIN resolving the receipt token's underlying, following ``receipt_token_join``.
+
+    Must appear after ``receipt_token_join`` in the same statement, whose ``rt``
+    alias this reads. ``receipt_token.underlying_token_id`` is ``NOT NULL``, so
+    a matched ``rt`` always resolves a ``ut`` row; the LEFT JOIN exists only so
+    an unmatched ``rt`` (``rt.underlying_token_id`` NULL) carries an all-NULL
+    ``ut`` instead of dropping the row.
+    """
+    return """
+    LEFT JOIN token ut ON ut.id = rt.underlying_token_id
+"""
+
+
 def required_decimal(value: Any, field_name: str) -> Decimal:
     """Read a NOT NULL numeric column, rejecting one the driver could not decode."""
     figure = optional_decimal(value, field_name)

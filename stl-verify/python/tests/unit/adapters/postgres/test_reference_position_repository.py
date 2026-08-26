@@ -32,6 +32,9 @@ def _row(**overrides) -> SimpleNamespace:
             "allocated_assets_usd": Decimal("787000000.00"),
             "idle_assets_usd": Decimal("379142.91"),
             "receipt_token_id": 41,
+            "underlying_token_id": 7,
+            "underlying_token_address": "cd" * 20,
+            "underlying_symbol": "USDS",
             **overrides,
         }
     )
@@ -63,20 +66,49 @@ async def test_maps_a_position_with_its_resolved_registry_id(stub_engine) -> Non
 
 
 @pytest.mark.asyncio
+async def test_a_resolved_position_carries_the_registrys_underlying(stub_engine) -> None:
+    # Sky's feed names no underlying itself; a resolved receipt token
+    # contributes one from STL's registry, the same join that resolves
+    # `receipt_token_id`.
+    snapshot = await _reader(stub_engine, _row()).get_positions("spark")
+
+    assert snapshot is not None
+    (position,) = snapshot.positions
+    assert position.underlying_token_id == 7
+    assert position.underlying_token_address == "0x" + "cd" * 20
+    assert position.underlying_symbol == "USDS"
+
+
+@pytest.mark.asyncio
 async def test_keeps_a_position_the_registry_join_missed(stub_engine) -> None:
     # Most of this feed is positions STL has no registry entry for; an
     # unresolved id must not drop the row.
-    snapshot = await _reader(stub_engine, _row(receipt_token_id=None)).get_positions("spark")
+    snapshot = await _reader(
+        stub_engine,
+        _row(receipt_token_id=None, underlying_token_id=None, underlying_token_address=None, underlying_symbol=None),
+    ).get_positions("spark")
 
     assert snapshot is not None
-    assert snapshot.positions[0].receipt_token_id is None
+    (position,) = snapshot.positions
+    assert position.receipt_token_id is None
+    assert position.underlying_token_id is None
+    assert position.underlying_token_address is None
+    assert position.underlying_symbol == ""
 
 
 @pytest.mark.asyncio
 async def test_leaves_an_unmapped_network_without_a_chain(stub_engine) -> None:
-    snapshot = await _reader(stub_engine, _row(network="plume", chain_id=None, receipt_token_id=None)).get_positions(
-        "spark"
-    )
+    snapshot = await _reader(
+        stub_engine,
+        _row(
+            network="plume",
+            chain_id=None,
+            receipt_token_id=None,
+            underlying_token_id=None,
+            underlying_token_address=None,
+            underlying_symbol=None,
+        ),
+    ).get_positions("spark")
 
     assert snapshot is not None
     assert snapshot.positions[0].chain is None

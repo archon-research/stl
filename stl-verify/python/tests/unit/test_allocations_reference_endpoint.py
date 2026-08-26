@@ -39,11 +39,11 @@ def _reference_position(
     network: str = "ethereum",
     token_address: str = _TOKEN,
     receipt_token_id: int | None = 41,
-    chain_id: int | None = 1,
-    chain: str | None = "mainnet",
     underlying_token_id: int | None = None,
     underlying_token_address: str | None = None,
     underlying_symbol: str = "",
+    chain_id: int | None = 1,
+    chain: str | None = "mainnet",
 ) -> ReferencePosition:
     return ReferencePosition(
         protocol_name="sparklend",
@@ -55,11 +55,11 @@ def _reference_position(
         allocated_assets_usd=Decimal("344000000.00"),
         idle_assets_usd=Decimal("187505.66"),
         receipt_token_id=receipt_token_id,
-        chain_id=chain_id,
-        chain=chain,
         underlying_token_id=underlying_token_id,
         underlying_token_address=underlying_token_address,
         underlying_symbol=underlying_symbol,
+        chain_id=chain_id,
+        chain=chain,
     )
 
 
@@ -114,27 +114,29 @@ def test_reference_mode_serves_upstream_positions_in_the_allocation_shape(refere
     ],
     indirect=True,
 )
-def test_reference_mode_serves_underlying_identity_when_the_position_resolves(reference_client):
-    # Sky names no loan token of its own; this comes from the service resolving
-    # the position against STL's receipt-token registry.
+def test_reference_mode_carries_the_registrys_underlying_when_resolved(reference_client):
+    # Sky's feed names no underlying itself; a position that resolves against
+    # STL's receipt-token registry carries the registry's own underlying.
     client, _ = reference_client
 
     body = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?reference=true").json()
 
-    assert body[0]["underlying_token_id"] == 7
-    assert body[0]["underlying_token_address"] == "0x" + "77" * 20
-    assert body[0]["underlying_symbol"] == "USDT"
+    (row,) = body
+    assert row["underlying_token_id"] == 7
+    assert row["underlying_token_address"] == "0x" + "77" * 20
+    assert row["underlying_symbol"] == "USDT"
 
 
-@pytest.mark.parametrize("reference_client", [_positions()], indirect=True)
-def test_reference_mode_leaves_underlying_null_when_the_position_is_unresolved(reference_client):
+@pytest.mark.parametrize("reference_client", [_positions(_reference_position(receipt_token_id=None))], indirect=True)
+def test_reference_mode_leaves_the_underlying_null_when_unresolved(reference_client):
     client, _ = reference_client
 
     body = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?reference=true").json()
 
-    assert body[0]["underlying_token_id"] is None
-    assert body[0]["underlying_token_address"] is None
-    assert body[0]["underlying_symbol"] == ""
+    (row,) = body
+    assert row["underlying_token_id"] is None
+    assert row["underlying_token_address"] is None
+    assert row["underlying_symbol"] == ""
 
 
 @pytest.mark.parametrize("reference_client", [_positions()], indirect=True)
@@ -332,7 +334,56 @@ def test_both_marks_a_position_only_sky_reports(reference_client):
 
 @pytest.mark.parametrize(
     "reference_client",
-    [_positions(_reference_position(network="ethereum", chain_id=1, chain="mainnet"))],
+    [
+        _positions(
+            _reference_position(
+                network="ethereum",
+                chain_id=1,
+                chain="mainnet",
+                underlying_token_id=7,
+                underlying_token_address="0x" + "77" * 20,
+                underlying_symbol="USDT",
+            )
+        )
+    ],
+    indirect=True,
+)
+def test_both_carries_the_reference_only_rows_own_underlying(reference_client):
+    # A reference-only row is projected the same way under `both` as under
+    # `source=reference` -- the enrichment is not special-cased away when the
+    # indexed half has nothing to match it against.
+    client, service = reference_client
+    service.prime_proxy_addresses.return_value = [EthAddress(_VALID_ADDR)]
+    service.list_receipt_token_positions.return_value = []
+    service.list_direct_asset_holdings.return_value = []
+    service.primary_proxy_address.return_value = None
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?source=both")
+
+    assert response.status_code == 200
+    (row,) = response.json()
+    assert row["source"] == "reference"
+    assert row["underlying_token_id"] == 7
+    assert row["underlying_symbol"] == "USDT"
+
+
+@pytest.mark.parametrize(
+    "reference_client",
+    [
+        _positions(
+            _reference_position(
+                network="ethereum",
+                chain_id=1,
+                chain="mainnet",
+                # Deliberately different from the indexed row's registry
+                # resolution below, so a leaked reference value would be
+                # caught rather than agreeing with the indexed one by luck.
+                underlying_token_id=99,
+                underlying_token_address="0x" + "99" * 20,
+                underlying_symbol="DIFFERENT",
+            )
+        )
+    ],
     indirect=True,
 )
 def test_both_keeps_skys_value_beside_stls_on_a_matched_row(reference_client):
@@ -375,6 +426,10 @@ def test_both_keeps_skys_value_beside_stls_on_a_matched_row(reference_client):
     # STL priced none of it; Sky's figure is the only one there is.
     assert row["amount_usd"] is None
     assert row["reference_amount_usd"] == "344187505.66"
+    # The indexed half's own registry resolution leads on a match; it is
+    # computed from the chain rather than reported.
+    assert row["underlying_token_id"] == 7
+    assert row["underlying_symbol"] == "USDT"
     assert row["reference_synced_at"] == _SYNCED_AT_ISO
 
 

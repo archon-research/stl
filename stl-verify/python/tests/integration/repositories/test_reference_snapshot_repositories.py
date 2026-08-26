@@ -466,6 +466,48 @@ async def test_positions_resolve_a_token_stl_indexes(seeded, async_db_url: str):
 
 
 @pytest.mark.asyncio(loop_scope="module")
+async def test_positions_resolve_the_registrys_underlying_when_the_receipt_token_matches(
+    seeded, async_db_url: str
+) -> None:
+    # This feed never names an underlying itself; a resolved receipt token
+    # contributes one from STL's registry, via the same join that resolves
+    # `receipt_token_id`.
+    conn, prime_id, receipt_token_id = seeded
+    underlying = await conn.fetchrow(
+        "SELECT rt.underlying_token_id, t.symbol, encode(t.address, 'hex') AS address "
+        "FROM receipt_token rt JOIN token t ON t.id = rt.underlying_token_id WHERE rt.id = $1",
+        receipt_token_id,
+    )
+    await _insert_stack(conn, prime_id, _CYCLE)
+    await _insert_position(conn, prime_id, _CYCLE, token_address=_INDEXED_TOKEN)
+
+    snapshot = await _positions(async_db_url)
+
+    assert snapshot is not None
+    (position,) = snapshot.positions
+    assert position.underlying_token_id == underlying["underlying_token_id"]
+    assert position.underlying_token_address == "0x" + underlying["address"]
+    assert position.underlying_symbol == underlying["symbol"]
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_positions_leave_the_underlying_unresolved_when_the_registry_join_misses(
+    seeded, async_db_url: str
+) -> None:
+    conn, prime_id, _ = seeded
+    await _insert_stack(conn, prime_id, _CYCLE)
+    await _insert_position(conn, prime_id, _CYCLE, token_address=_UNINDEXED_TOKEN)
+
+    snapshot = await _positions(async_db_url)
+
+    assert snapshot is not None
+    (position,) = snapshot.positions
+    assert position.underlying_token_id is None
+    assert position.underlying_token_address is None
+    assert position.underlying_symbol == ""
+
+
+@pytest.mark.asyncio(loop_scope="module")
 async def test_the_join_misses_without_dropping_the_row(seeded, async_db_url: str):
     # Most of the balance sheet is positions STL has no registry entry for.
     conn, prime_id, _ = seeded
