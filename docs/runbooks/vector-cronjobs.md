@@ -765,6 +765,68 @@ The alert exists precisely because a partially-covered cycle looks healthy.
 
 ---
 
+## VectorReferenceCapitalIndexerAllocationsZero
+
+**What it means.** Cycles are succeeding but `prime_capital_stack_allocation`
+received no rows for an hour. The per-allocation breakdown behind the
+prime-level totals has stopped advancing, and like the prime-level series it
+cannot be backfilled afterwards — the monitor publishes no history.
+
+**Why it is not caught by the generic rules.** The run returns no error, so
+`VectorCronjobRunFailing` stays quiet — and the service deliberately fails a
+cycle whose covered primes report exposure with an empty breakdown, so a
+successful cycle writing zero rows means every covered prime reported zero
+exposure. That is either a market state worth confirming or an upstream fault
+wearing its shape.
+
+**Triage.**
+
+1. Confirm the worker is cycling:
+   `kubectl -n vector logs deploy/reference-capital-indexer --tail=100`.
+2. Ask the breakdown route directly for a covered prime:
+   `curl -s "$SKY_RISK_CAPITAL_URL/primes/spark/allocations/?limit=500" | jq '.data.results | length'`.
+   Rows here with zero rows landing means the payload changed shape — the
+   client should have errored, so check its logs for parse failures.
+3. Cross-check the prime-level series: if
+   `VectorReferenceCapitalIndexerWritesZero` is also firing, treat that as the
+   primary signal — the whole feed stalled, not just the breakdown.
+
+**Resolution.** Same posture as `WritesZero`: upstream coverage is upstream's.
+Confirm what the monitor reports and reconcile; the gap in the series stays.
+
+---
+
+## VectorReferenceCapitalIndexerPositionsZero
+
+**What it means.** Cycles are succeeding but `prime_reference_position`
+received no rows for an hour. The position-level balance sheet has stopped
+advancing; the feed publishes only a current snapshot, so the gap is permanent.
+
+**Why it is not caught by the generic rules.** The positions client fails the
+cycle on an empty result for a covered prime — the feed answers unknown primes
+with `200` and an empty list, so emptiness is deliberately never persisted. A
+successful cycle writing zero rows therefore means the covered set itself was
+empty (which `WritesZero` also catches) or the counter stopped moving while
+writes continue, which points at telemetry wiring rather than data.
+
+**Triage.**
+
+1. Confirm the worker is cycling:
+   `kubectl -n vector logs deploy/reference-capital-indexer --tail=100`.
+2. Ask the feed directly:
+   `curl -s "$SKY_DATA_URL/allocations/?prime=spark&limit=1000" | jq '.data.results | length'`.
+   Rows here with zero rows landing means the payload changed shape — the
+   client should have errored, so check its logs for parse failures.
+3. Compare against the table:
+   `SELECT max(synced_at) FROM prime_reference_position;` — if rows are landing
+   but the counter is flat, fix the telemetry, not the pipeline.
+
+**Resolution.** Same posture as `WritesZero`: confirm upstream, reconcile the
+covered set, accept the gap. Do not backfill from the daily aggregates — they
+are a different granularity of a different question.
+
+---
+
 ## morpho-v2-bootstrap run outcomes
 
 **Nothing here needs rows reconciling by hand.** Adapter membership is an
