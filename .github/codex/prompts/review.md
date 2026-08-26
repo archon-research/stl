@@ -29,9 +29,10 @@ carry the specifics you are reviewing against:
 A rule you read in an `AGENTS.md` is the citable authority for a finding. A preference
 you hold that no `AGENTS.md` states is not.
 
-Read the PR body too, and the linked Linear ticket if it names one: a change that works
-but does not do what the ticket asked is a blocking finding, and it is one neither
-linter nor type checker can produce.
+Judge the diff against the PR title and body quoted at the end of this prompt: a change
+that works but does not do what it claims is a blocking finding, and it is one neither
+linter nor type checker can produce. You have no network access, so a Linear ticket the
+body links to is out of reach — review against the body's own description of intent.
 
 ## Lenses
 
