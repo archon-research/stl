@@ -15,12 +15,9 @@ import (
 const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 
 // sqlStateUnknown labels an error the server never assigned a SQLSTATE to: a
-// cancelled context, a connection reset mid-statement. Pool acquisition fails
-// before the tracer runs, so dial failures are not counted here at all.
+// cancelled context, a connection reset mid-statement.
 const sqlStateUnknown = "unknown"
 
-// Error classes partition every SQLSTATE into a domain small enough to seed, so
-// alert rules key on a series that exists before the first error does.
 const (
 	errorClassResources = "resources"
 	errorClassRetryable = "retryable"
@@ -43,36 +40,30 @@ var (
 	_ pgx.QueryTracer    = (*queryErrorTracer)(nil)
 	_ pgx.BatchTracer    = (*queryErrorTracer)(nil)
 	_ pgx.CopyFromTracer = (*queryErrorTracer)(nil)
+	_ pgx.ConnectTracer  = (*queryErrorTracer)(nil)
 )
 
 func newQueryErrorTracer(mp metric.MeterProvider) (*queryErrorTracer, error) {
 	meter := mp.Meter(instrumentationName)
 
-	queriesTotal, err := meter.Int64Counter(
-		"db.query.total",
-		metric.WithDescription("Database operations traced by the pgx tracer; the denominator of the error ratio"),
-	)
+	queriesTotal, err := counter(meter, "db.query.total",
+		"Database operations traced by the pgx tracer — every query, batch statement, copy and connection attempt, including the implicit BEGIN/COMMIT/ROLLBACK a transaction issues; the denominator of the error ratio")
 	if err != nil {
-		return nil, fmt.Errorf("creating db.query.total counter: %w", err)
+		return nil, err
 	}
 
-	errorsTotal, err := meter.Int64Counter(
-		"db.query.errors.total",
-		metric.WithDescription("Failed database operations, labelled by error class (resources|retryable|other|unknown)"),
-	)
+	errorsTotal, err := counter(meter, "db.query.errors.total",
+		"Failed database operations, labelled by error class (resources|retryable|other|unknown)")
 	if err != nil {
-		return nil, fmt.Errorf("creating db.query.errors.total counter: %w", err)
+		return nil, err
 	}
 
-	// SQLSTATE is open-ended, so it cannot be seeded and cannot carry an alert
-	// that must fire on a first occurrence; it rides a sibling counter for
-	// breakdowns instead of widening the alertable series.
-	errorsBySQLState, err := meter.Int64Counter(
-		"db.query.errors.by_sqlstate.total",
-		metric.WithDescription("Failed database operations, broken down by Postgres SQLSTATE"),
-	)
+	// SQLSTATE is open-ended, so this counter's series cannot be seeded and it
+	// carries no alert condition; see seedErrorClasses.
+	errorsBySQLState, err := counter(meter, "db.query.errors.by_sqlstate.total",
+		"Failed database operations, broken down by Postgres SQLSTATE")
 	if err != nil {
-		return nil, fmt.Errorf("creating db.query.errors.by_sqlstate.total counter: %w", err)
+		return nil, err
 	}
 
 	t := &queryErrorTracer{
@@ -84,10 +75,24 @@ func newQueryErrorTracer(mp metric.MeterProvider) (*queryErrorTracer, error) {
 	return t, nil
 }
 
-// seedErrorClasses exports every error-class series at 0 on startup. Without it
-// a class's first error is also its series' first sample, so increase() reports
-// 0 for an increment it never observed beginning — and every deploy mints fresh
-// series, resetting the blind spot.
+func counter(meter metric.Meter, name, description string) (metric.Int64Counter, error) {
+	c, err := meter.Int64Counter(name, metric.WithDescription(description))
+	if err != nil {
+		return nil, fmt.Errorf("creating %s counter: %w", name, err)
+	}
+	return c, nil
+}
+
+// seedErrorClasses exports every error-class series at 0. Without it a class's
+// first error is also its series' first sample, so increase() reports 0 for an
+// increment it never observed beginning, the ratio rule's numerator has no
+// series to divide, and every deploy mints fresh series that reset the blind
+// spot. It is why the alert rules key on the four fixed classes rather than on
+// the open-ended sqlstate label, which cannot be enumerated in advance.
+//
+// A pool is usually built before telemetry installs the exporting meter
+// provider, which drops this seed; attachQueryTracer re-runs it once the
+// provider arrives.
 func (t *queryErrorTracer) seedErrorClasses() {
 	ctx := context.Background()
 	for _, class := range errorClasses {
@@ -103,9 +108,9 @@ func (t *queryErrorTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data 
 	t.record(ctx, data.Err)
 }
 
-// TraceBatchStart seeds the per-batch dedupe flag TraceBatchEnd reads. pgx
-// type-asserts BatchTracer separately and routes SendBatch — every bulk write in
-// this package — through it alone, never through TraceQueryEnd.
+// TraceBatchStart seeds the per-batch dedupe flag the other batch callbacks
+// read. pgx type-asserts BatchTracer separately and routes SendBatch — every
+// bulk write in this package — through it alone, never through TraceQueryEnd.
 func (t *queryErrorTracer) TraceBatchStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceBatchStartData) context.Context {
 	return context.WithValue(ctx, batchStateKey{}, &batchState{})
 }
@@ -116,14 +121,18 @@ func (t *queryErrorTracer) TraceBatchQuery(ctx context.Context, _ *pgx.Conn, dat
 	}
 }
 
-// TraceBatchEnd catches a batch that failed before any statement was read, which
-// reaches no TraceBatchQuery; pgx repeats an already-traced statement error here,
-// so a counted one is skipped.
+// TraceBatchEnd carries the batch's single accumulated error (pgx v5.10.0
+// batch.go, br.err), which every earlier callback has already seen, and pgx can
+// deliver it twice: SendBatch traces a prepare-time failure without setting
+// endTraced, so Close traces it again. One flag per batch keeps the failure
+// counted once.
 func (t *queryErrorTracer) TraceBatchEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceBatchEndData) {
 	if data.Err == nil || batchErrorCounted(ctx) {
 		return
 	}
-	t.record(ctx, data.Err)
+	if t.record(ctx, data.Err) {
+		markBatchErrorCounted(ctx)
+	}
 }
 
 func (t *queryErrorTracer) TraceCopyFromStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceCopyFromStartData) context.Context {
@@ -134,12 +143,25 @@ func (t *queryErrorTracer) TraceCopyFromEnd(ctx context.Context, _ *pgx.Conn, da
 	t.record(ctx, data.Err)
 }
 
+func (t *queryErrorTracer) TraceConnectStart(ctx context.Context, _ pgx.TraceConnectStartData) context.Context {
+	return ctx
+}
+
+// TraceConnectEnd is where 53300 too_many_connections lands: pgx fails the
+// connect inside pgxpool's acquire, so no query callback ever runs for it and
+// the class-53 signal would otherwise miss the one code that is about the pool.
+func (t *queryErrorTracer) TraceConnectEnd(ctx context.Context, data pgx.TraceConnectEndData) {
+	t.record(ctx, data.Err)
+}
+
 type batchStateKey struct{}
 
 type batchState struct {
 	errorCounted bool
 }
 
+// markBatchErrorCounted is a no-op when the context did not come from
+// TraceBatchStart, which pgx always calls first on a traced batch.
 func markBatchErrorCounted(ctx context.Context) {
 	if s, ok := ctx.Value(batchStateKey{}).(*batchState); ok {
 		s.errorCounted = true
@@ -170,8 +192,8 @@ func (t *queryErrorTracer) record(ctx context.Context, err error) bool {
 	return true
 }
 
-// sqlState extracts the five-character SQLSTATE from a Postgres error. SQLSTATE
-// is a closed set of codes, so it is safe to use as a metric attribute.
+// sqlState extracts the five-character SQLSTATE from a Postgres error, looking
+// through the *pgconn.ConnectError that wraps a connect-time failure.
 func sqlState(err error) string {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
