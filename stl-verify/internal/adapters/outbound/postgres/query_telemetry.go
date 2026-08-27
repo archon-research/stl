@@ -47,7 +47,7 @@ func newQueryErrorTracer(mp metric.MeterProvider) (*queryErrorTracer, error) {
 	meter := mp.Meter(instrumentationName)
 
 	queriesTotal, err := counter(meter, "db.query.total",
-		"Database operations traced by the pgx tracer — every query, batch statement, copy and connection attempt, including the implicit BEGIN/COMMIT/ROLLBACK a transaction issues; the denominator of the error ratio")
+		"Database operations traced by the pgx tracer: queries, batch statements, copies, connection attempts, and a transaction's implicit BEGIN/COMMIT/ROLLBACK. The denominator of the error ratio")
 	if err != nil {
 		return nil, err
 	}

@@ -11,8 +11,8 @@
 #   db_query_errors_by_sqlstate_total{sqlstate, error_class}  breakdown only
 #
 # `python-api` reaches the same database through SQLAlchemy/asyncpg and emits
-# none of these; it took 174 of the 202 `out of memory` lines in the worst hour
-# of 2026-08-25, so these rules are a Go-fleet view, not a whole-namespace one.
+# none of these; it took 174 of the 202 `out of memory` lines in the 08:00 hour
+# on 2026-08-25, so these rules are a Go-fleet view, not a whole-namespace one.
 #
 # Rules key on `error_class`, never on `sqlstate`. The four classes are seeded
 # at 0 when a pool is built, so a class's first error is a 0->1 transition
