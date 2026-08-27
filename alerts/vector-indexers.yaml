@@ -355,11 +355,41 @@ groups:
       # ARCHIVE_SC_CALLS=true, so a disabled source has no series and never fires.
 
       - alert: VectorArchivingStalled
-        # No successful S3 archive writes for 10m while the indexer is still
+        # No successful S3 archive writes for 30m while the indexer is still
         # executing multicalls. multicall_batch_size_count increments on the same
         # Execute path that archives, so success==0 with multicalls>0 is a genuine
         # archiving failure, not an idle/disabled source (those have no multicalls,
         # so the guard excludes them).
+        #
+        # The window is 30m, NOT 10m, because of a cold-start artifact that the
+        # multicall guard cannot catch (VEC-364 triage, 2026-08-27). Archiving is
+        # fire-and-forget: archiving.Multicaller.Execute records
+        # multicall.batch.size synchronously inside inner.Execute, then hands the
+        # S3 PUT to a detached goroutine, so on a fresh pod archive_writes_total is
+        # first exported one scrape after multicall_batch_size_count and its first
+        # sample already reads >0. increase() cannot see increments that precede a
+        # series' first sample, so those writes stay invisible. On a source
+        # archiving ~1 batch/10m (prime-allocation-indexer on unichain/optimism/
+        # arbitrum, prime-debt-indexer on mainnet) the next increment falls
+        # outside a 10m window: the archive leg read 0 while the multicall leg,
+        # scraped one interval earlier, captured its own first increment and read
+        # >0. Both legs are true, so the alert fires and then resolves as soon as
+        # the next write lands. It false-fired on every deploy rollout for those
+        # four sources and never once for the high-volume sources sharing the same
+        # S3 adapter (morpho ~502/10m, sparklend ~256, oracle-price-worker ~600).
+        # A 30m window always contains 2-3 increments at that cadence, so the
+        # invisible prefix can no longer zero the leg out. Trade-off: worst-case
+        # detection latency for a genuine stall goes from ~15m to ~35m (30m window
+        # + for: 5m) for every source, including the high-volume ones that never
+        # false-fired. A stall whose writes are attempted and failing drives the
+        # error ratio to 100%, so it still trips VectorArchivingErrorRatioHigh in
+        # ~15m on its unchanged 10m window. Only a stall that emits no error
+        # samples at all — writes never attempted, e.g. a decorator that silently
+        # stopped being invoked — waits the full ~35m. Accepted because this is a
+        # warning, not a page: archiving is fire-and-forget so a stall never
+        # affects product data, and Alchemy remains the replay fallback. If a
+        # faster signal is ever needed for the high-volume sources, split them
+        # onto their own shorter-window rule rather than narrowing this one back.
         #
         # The `or (… * 0)` synthesises a zero-valued success series for a source
         # that has attempted writes but never emitted a success sample; without it
@@ -370,21 +400,23 @@ groups:
         # has no archive_writes_total series, so filling from the multicall counter
         # would falsely fire on every non-archiving multicall worker. Filling from
         # archive_writes_total only synthesises a 0 once a write has been attempted.
+        # It does NOT help with the cold-start artifact above: there the success
+        # series exists, at a non-zero birth value, so the `or` never engages.
         # VectorArchivingErrorRatioHigh covers the partial-failure case (some writes
         # succeed) that `== 0` misses.
         expr: |
           (
             sum by (service_name, chain, cluster) (
-              increase(archive_writes_total{status="success", k8s_namespace_name="vector"}[10m])
+              increase(archive_writes_total{status="success", k8s_namespace_name="vector"}[30m])
             )
             or
             sum by (service_name, chain, cluster) (
-              increase(archive_writes_total{k8s_namespace_name="vector"}[10m])
+              increase(archive_writes_total{k8s_namespace_name="vector"}[30m])
             ) * 0
           ) == 0
           and on (service_name, chain, cluster)
           sum by (service_name, chain, cluster) (
-            increase(multicall_batch_size_count{k8s_namespace_name="vector"}[10m])
+            increase(multicall_batch_size_count{k8s_namespace_name="vector"}[30m])
           ) > 0
         for: 5m
         labels:
@@ -397,7 +429,8 @@ groups:
           description: |
             `{{ $labels.service_name }}` on chain `{{ $labels.chain }}` is still
             executing multicalls but has written no raw SC call archives to S3 for
-            >10m. Replay data is being lost (Alchemy remains the fallback).
+            >30m. Replay data is being lost (Alchemy remains the fallback).
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorarchivingstalled
 
       - alert: VectorArchivingEmptyObjects
         # Any archived object lands in the smallest size bucket (<=64B). A real
@@ -420,6 +453,7 @@ groups:
             `{{ $labels.service_name }}` on chain `{{ $labels.chain }}` wrote one or
             more archived objects <=64 bytes in the last 10m. Inspect the object
             and the encode path; the file is likely missing call/response data.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorarchivingemptyobjects
 
       - alert: VectorArchivingErrorRatioHigh
         # Catches PARTIAL failure: a meaningful fraction of writes erroring while
@@ -456,6 +490,7 @@ groups:
             over 10m while some still succeed. Replay data is being partially lost
             (Alchemy remains the fallback). A total stall is covered separately by
             VectorArchivingStalled.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorarchivingerrorratiohigh
 
   # morpho VaultV2 structured tracking (VEC-218) — the adapter registry, adapter
   # realAssets snapshots, allocation caps and fee-config snapshots the morpho
