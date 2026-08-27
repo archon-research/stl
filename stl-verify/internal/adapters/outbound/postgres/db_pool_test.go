@@ -80,13 +80,12 @@ func TestBuildPoolConfig_UsesTheInjectedMeterProvider(t *testing.T) {
 }
 
 // Most binaries open their pool before telemetry installs the exporting meter
-// provider. otel re-delegates the instruments created beforehand but never
-// replays the measurements recorded through them, so a seed written at build
-// time reaches no exporter and the error_class series first appear with the
-// error they exist to make visible.
+// provider, and a seed written at build time then reaches no exporter. See
+// telemetry.OnMeterProviderReady.
 //
-// This is the only test that installs a global meter provider; it must stay the
-// only one, since otel.SetMeterProvider takes effect once per process.
+// This must stay the only test in the binary that reaches
+// telemetry.SetMeterProvider: otel.SetMeterProvider takes effect once per
+// process, and the first call also drains every pending seed.
 func TestBuildPoolConfig_SeedsErrorClassesWhenTelemetryStartsLast(t *testing.T) {
 	if _, err := buildPoolConfig(DefaultDBConfig(unreachableDSN)); err != nil {
 		t.Fatalf("buildPoolConfig: %v", err)

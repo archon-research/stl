@@ -70,8 +70,8 @@ groups:
         # It is a warning, not a page: TigerDataMemoryPressureCritical in the
         # infrastructure repo already pages on the instance-level cause, and a
         # second critical paged twice for one incident. It does cover that
-        # rule's gap — on 2026-08-27 staging peaked at 80.3%, so only the >75%
-        # warning fired, while Go services were still taking 53200s.
+        # rule's gap — the 2026-08-27 errors arrived at a memory peak of 76.7%,
+        # so only the >75% warning fired and no critical ever did.
         expr: |
           sum by (cluster) (
             increase(db_query_errors_total{
@@ -113,10 +113,11 @@ groups:
         # meaningful for both.
         #
         # The guard is on the DENOMINATOR, matching
-        # VectorAllocationTrackerErrorRatioHigh (vector-indexers.yaml). Guarding
-        # the numerator instead makes the rule unreachable at both ends of that
-        # range: it re-imposes the very queries/sec floor the ratio form exists
-        # to avoid.
+        # VectorAllocationTrackerErrorRatioHigh (vector-indexers.yaml). The old
+        # numerator guard (`errors > 0.01/s`) re-imposed a queries/sec floor on
+        # exactly the low-volume services the ratio form exists to include: a
+        # cronjob issuing a handful of queries an hour cannot reach 0.01
+        # errors/s even while failing every one of them.
         #
         # Covers everything except `retryable`, so it never double-fires with
         # VectorDatabaseSerializationErrorsUnretried.
@@ -173,9 +174,9 @@ groups:
         # Elsewhere an abort rolls back the whole unit of work and the SQS
         # redrive re-runs it, so a one-off is handled and not actionable; only a
         # sustained rate means contention that will eventually DLQ. `>= 6`, not
-        # `> 5`: increase() extrapolates, so a genuine 5-in-an-hour lands at
-        # ~5.02 and would trip a `> 5` threshold the runbook calls "more than
-        # five". No `for`, because a 1h window is already the dwell.
+        # `> 5`: increase() extrapolates, so a genuine five-in-an-hour lands at
+        # ~5.02 and would trip `> 5` while the intent is "a sixth". No `for`,
+        # because a 1h window is already the dwell.
         expr: |
           sum by (service_name, cluster) (
             increase(db_query_errors_total{

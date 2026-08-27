@@ -9,8 +9,6 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Without a series at 0 from startup, a class's first error is also its series'
-// first sample, and increase() reports 0 for an increment it never saw begin.
 func TestQueryErrorTracerSeedsEveryErrorClass(t *testing.T) {
 	_, reader := newTestTracer(t)
 
@@ -99,9 +97,8 @@ func TestQueryErrorTracerIgnoresSuccesses(t *testing.T) {
 	}
 }
 
-// pgx delivers ErrNoRows to a tracer only as a QueuedQuery.Fn callback's return
-// value, which reaches TraceBatchEnd as the batch error. It means "no row", not
-// a fault, and counting it would put every optional lookup in the error ratio.
+// A QueuedQuery.Fn callback returning ErrNoRows is the only way it reaches a
+// tracer; it means "no row", not a fault.
 func TestQueryErrorTracerIgnoresBatchNoRows(t *testing.T) {
 	tracer, reader := newTestTracer(t)
 
@@ -113,9 +110,6 @@ func TestQueryErrorTracerIgnoresBatchNoRows(t *testing.T) {
 	}
 }
 
-// pgx dispatches SendBatch through BatchTracer alone and never calls
-// TraceQueryEnd, so the bulk-write paths a resource storm kills are invisible
-// without this.
 func TestQueryErrorTracerCountsBatchQueryErrors(t *testing.T) {
 	tracer, reader := newTestTracer(t)
 
@@ -128,7 +122,6 @@ func TestQueryErrorTracerCountsBatchQueryErrors(t *testing.T) {
 	}
 }
 
-// A batch that fails before any statement is read reaches TraceBatchEnd only.
 func TestQueryErrorTracerCountsBatchEarlyErrors(t *testing.T) {
 	tracer, reader := newTestTracer(t)
 
@@ -141,8 +134,6 @@ func TestQueryErrorTracerCountsBatchEarlyErrors(t *testing.T) {
 	}
 }
 
-// pgx reports the statement error read at TraceBatchQuery again at
-// TraceBatchEnd; counting both would inflate the error ratio.
 func TestQueryErrorTracerCountsOneBatchFailureOnce(t *testing.T) {
 	tracer, reader := newTestTracer(t)
 
@@ -155,9 +146,6 @@ func TestQueryErrorTracerCountsOneBatchFailureOnce(t *testing.T) {
 	}
 }
 
-// SendBatch traces a prepare-time failure through TraceBatchEnd without marking
-// the batch traced, and Close then traces the same error again (pgx v5.10.0
-// conn.go:947-955, batch.go:395-403).
 func TestQueryErrorTracerCountsOneEarlyBatchFailureOnce(t *testing.T) {
 	tracer, reader := newTestTracer(t)
 
@@ -185,8 +173,6 @@ func TestQueryErrorTracerCountsCopyFromErrors(t *testing.T) {
 	}
 }
 
-// 53300 too_many_connections fails the connect itself, so no query, batch or
-// copy callback ever runs for the one class-53 code that is about the pool.
 func TestQueryErrorTracerCountsConnectErrors(t *testing.T) {
 	tracer, reader := newTestTracer(t)
 

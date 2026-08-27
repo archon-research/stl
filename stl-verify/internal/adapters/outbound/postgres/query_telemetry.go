@@ -90,9 +90,8 @@ func counter(meter metric.Meter, name, description string) (metric.Int64Counter,
 // spot. It is why the alert rules key on the four fixed classes rather than on
 // the open-ended sqlstate label, which cannot be enumerated in advance.
 //
-// A pool is usually built before telemetry installs the exporting meter
-// provider, which drops this seed; attachQueryTracer re-runs it once the
-// provider arrives.
+// Whether this reaches an exporter depends on the meter provider being the real
+// one; attachQueryTracer owns that.
 func (t *queryErrorTracer) seedErrorClasses() {
 	ctx := context.Background()
 	for _, class := range errorClasses {
@@ -121,11 +120,12 @@ func (t *queryErrorTracer) TraceBatchQuery(ctx context.Context, _ *pgx.Conn, dat
 	}
 }
 
-// TraceBatchEnd carries the batch's single accumulated error (pgx v5.10.0
-// batch.go, br.err), which every earlier callback has already seen, and pgx can
-// deliver it twice: SendBatch traces a prepare-time failure without setting
-// endTraced, so Close traces it again. One flag per batch keeps the failure
-// counted once.
+// TraceBatchEnd catches a batch that failed before any statement was read, and
+// pgx delivers a prepare-time failure here twice: SendBatch traces it without
+// setting endTraced, so Close traces the same error again. One flag per batch
+// keeps that pair counted once, at the cost of dropping a genuinely different
+// second error in simple protocol (pgx v5.10.0 batch.go:139-151), which the
+// repo does not use.
 func (t *queryErrorTracer) TraceBatchEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceBatchEndData) {
 	if data.Err == nil || batchErrorCounted(ctx) {
 		return
@@ -160,8 +160,8 @@ type batchState struct {
 	errorCounted bool
 }
 
-// markBatchErrorCounted is a no-op when the context did not come from
-// TraceBatchStart, which pgx always calls first on a traced batch.
+// markBatchErrorCounted no-ops off a context pgx did not build in
+// TraceBatchStart, which it always calls first on a traced batch.
 func markBatchErrorCounted(ctx context.Context) {
 	if s, ok := ctx.Value(batchStateKey{}).(*batchState); ok {
 		s.errorCounted = true

@@ -32,14 +32,15 @@ Those watch the *instance*; these rules watch *which services are being refused
 and on what*. On a resource fault expect both to fire — start there for the
 cause, come here for the blast radius.
 
-The instance rules do not always fire, which is why the class-53 rule here is
-not redundant with them. On 2026-08-25 memory reached **87.6% at 14:27 UTC** and
-87.1% just before 10:00, and `…Critical` fired in four episodes (08:08, 08:30,
-09:52, 14:29 UTC) inside nine warning episodes spanning 07:12–14:37. On
-2026-08-27 the same failure recurred at a peak of only **80.3%**: the >75%
-warning fired twice, `…Critical` never did, and Go services were still taking
-53200s. Query these at 1m resolution rather than reading the TigerData console,
-whose default range averages the spikes away.
+The `…Critical` rule does not always fire, which is the second reason the
+class-53 rule here is not redundant (the first being per-service attribution).
+On 2026-08-25 memory reached **87.6% at 14:27 UTC** and 87.1% just before 10:00,
+and `…Critical` fired in four episodes (08:08, 08:30, 09:52, 14:29 UTC) inside
+nine warning episodes spanning 07:12–14:37. On 2026-08-27 the same failure
+recurred with memory at only **76.7%**: the >75% warning fired, `…Critical`
+never did that day at all, and Go services were still taking 53200s. Query these
+at 1m resolution rather than reading the TigerData console, whose default range
+averages the spikes away.
 
 **Read this first:** workers retry and recover from database errors, so the
 pipeline looks healthy while writes fail and are re-driven. Absence of a visible
@@ -145,9 +146,10 @@ nor the failure. Don't spend time there before the two causes above.
 
 The durable fixes are per-query — chunk intervals and the spilling queries
 themselves — not server knobs. Postgres memory settings are role/database-level
-(`ALTER DATABASE … SET`), which migrations may not do: they require superuser and
-belong in the infra repo's `bootstrap-db.sh`. See `db/migrations/AGENTS.md`
-("Role admin vs object grants"). Note `timescaledb.max_background_workers` is
+(`ALTER ROLE … SET`, `ALTER DATABASE … SET`), which migrations may not do: they
+need privileges the migration role does not hold and belong in the infra repo's
+`bootstrap-db.sh`. See `db/migrations/AGENTS.md` ("Role admin vs object
+grants"). Note `timescaledb.max_background_workers` is
 postmaster-context and `autovacuum_max_workers` is sighup-context, so neither can
 be set that way at all. Resizing the instance is the fallback, not the
 first move.
@@ -174,8 +176,10 @@ VectorDatabaseSerializationErrorsUnretried.
 
 This is the "one service is broken" shape: schema drift after a deploy, a
 revoked grant, an adapter issuing invalid SQL. A resource storm is the opposite
-shape — a small share of failures across a healthy fleet, which even at the
-worst minute of 2026-08-25 was well under 1% — and is covered by
+shape — a small share of failures across a healthy fleet. On 2026-08-25 the
+fleet's worst hour was 0.059 errors/sec against an instance committing 50–98
+transactions/sec, so the ratio was well under 1% throughout (an estimate:
+`db_query_total` did not exist yet). That storm is covered by
 VectorDatabaseResourceErrors above. If the failures here *are* class-53, read
 that section and expect `TigerDataMemoryPressureCritical` to be the page that
 matters.
@@ -198,7 +202,7 @@ the ratio form exists to avoid.
    | `42501` | `insufficient_privilege` | an ingest path attempted UPDATE/DELETE on an append-only table |
    | `42P01` / `42703` | undefined table / column | schema drift: a deploy landed ahead of its migration |
    | `55P03` | `lock_not_available` | `WorkerDBConfig`'s 10s `lock_timeout` fired — a lock convoy |
-   | `57014` | `query_canceled` | a client-side cancel (shutdown, request timeout), or a server-side `statement_timeout` set outside this repo |
+   | `57014` | `query_canceled` | a server-side cancel: a `statement_timeout` set outside this repo, or `pg_cancel_backend`. A client-side cancel lands in `unknown`, not here |
    | `23505` | unique violation | a replay writing duplicate rows — check `processing_version` |
    | `unknown` | never reached the server | connection reset, context cancellation |
 
@@ -250,8 +254,8 @@ which wraps `SaveBlock` and `HandleReorgAtomic` — so only the watchers retry.
 (Note `isRetryableError` in the same file is a *different* predicate: it retries
 any error that is not a context cancellation, and does not key on SQLSTATE.)
 Nothing in the other ~30 repositories retries these codes, which is why the rule
-scopes its exclusion to `service_name=~".*watcher"` instead of dropping the
-codes fleet-wide.
+excludes only the services that do retry (`service_name!~".*watcher"`) instead
+of dropping the codes fleet-wide.
 
 Everywhere else the abort rolls back the whole unit of work. The worker returns
 an error, does not ack, and SQS redrives the message — so a one-off is already

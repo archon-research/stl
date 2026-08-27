@@ -172,10 +172,6 @@ func resetStartupSeeds(t *testing.T) {
 	})
 }
 
-// A component built during startup registers its seed before InitMetrics
-// installs the exporting provider. otel re-delegates the instruments it created
-// but never replays what it recorded through them, so the seed only reaches an
-// exporter if something re-runs it here.
 func TestOnMeterProviderReady_DefersSeedsUntilTheProviderIsInstalled(t *testing.T) {
 	resetStartupSeeds(t)
 

@@ -171,8 +171,9 @@ func buildPoolConfig(cfg DBConfig) (*pgxpool.Config, error) {
 }
 
 // attachQueryTracer gives the pool the pgx tracer behind the fleet-wide database
-// error metrics, wired to mp or to the global meter provider when mp is nil.
-func attachQueryTracer(poolConfig *pgxpool.Config, mp metric.MeterProvider) error {
+// error metrics.
+func attachQueryTracer(poolConfig *pgxpool.Config, injected metric.MeterProvider) error {
+	mp := injected
 	if mp == nil {
 		mp = otel.GetMeterProvider()
 	}
@@ -183,10 +184,12 @@ func attachQueryTracer(poolConfig *pgxpool.Config, mp metric.MeterProvider) erro
 	}
 	poolConfig.ConnConfig.Tracer = tracer
 
-	// Most binaries build their pool before telemetry.InitOTEL, which drops the
-	// seed newQueryErrorTracer just wrote; re-run it when the exporting provider
-	// arrives. See telemetry.OnMeterProviderReady.
-	telemetry.OnMeterProviderReady(tracer.seedErrorClasses)
+	if injected == nil {
+		// An injected provider is already exporting, so the seed
+		// newQueryErrorTracer wrote has landed; the global one usually is not
+		// yet. See telemetry.OnMeterProviderReady.
+		telemetry.OnMeterProviderReady(tracer.seedErrorClasses)
+	}
 
 	return nil
 }

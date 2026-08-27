@@ -8,41 +8,48 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
 
-// The unit tests drive the tracer's methods directly, so they cannot show that
-// pgx reaches them: SendBatch dispatches through BatchTracer alone, and a
-// failure raised while preparing the batch is traced twice.
-func TestOpenPool_TracesQueryAndBatchErrors(t *testing.T) {
-	ctx := context.Background()
-	reader := sdkmetric.NewManualReader()
+// tracedPool opens a pool whose metrics land on a reader the caller can collect.
+func tracedPool(t *testing.T, dsn string) (*pgxpool.Pool, sdkmetric.Reader) {
+	t.Helper()
 
-	cfg := DefaultDBConfig(sharedDSN)
+	reader := sdkmetric.NewManualReader()
+	cfg := DefaultDBConfig(dsn)
 	cfg.MeterProvider = sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
-	pool, err := OpenPool(ctx, cfg)
+	pool, err := OpenPool(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("OpenPool: %v", err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
+	return pool, reader
+}
 
-	if _, err := pool.Exec(ctx, "SELECT 1 FROM stl_no_such_table"); err == nil {
+func TestOpenPool_TracesQueryErrors(t *testing.T) {
+	pool, reader := tracedPool(t, sharedDSN)
+
+	if _, err := pool.Exec(context.Background(), "SELECT 1 FROM stl_no_such_table"); err == nil {
 		t.Fatal("Exec on a missing table returned no error")
 	}
 
-	// Fails while preparing, before any result is read: SendBatch traces it and
-	// Close traces the same error again.
-	prepareFailure := &pgx.Batch{}
-	prepareFailure.Queue("SELECT 1 FROM stl_no_such_table")
-	if err := pool.SendBatch(ctx, prepareFailure).Close(); err == nil {
-		t.Fatal("batch against a missing table returned no error")
+	counts := countsByAttr(t, reader, "db.query.errors.by_sqlstate.total", "sqlstate")
+	if got := counts["42P01"]; got != 1 {
+		t.Errorf("sqlstate 42P01 count = %d, want 1", got)
 	}
+}
 
-	// Fails at execution, after the statement was read.
-	runtimeFailure := &pgx.Batch{}
-	runtimeFailure.Queue("SELECT 1 / 0")
-	results := pool.SendBatch(ctx, runtimeFailure)
+// The unit tests drive the tracer's methods directly, so they cannot show that
+// pgx reaches them: SendBatch dispatches through BatchTracer alone, and a
+// QueryTracer-only implementation counts nothing here while passing them all.
+func TestOpenPool_TracesBatchErrors(t *testing.T) {
+	pool, reader := tracedPool(t, sharedDSN)
+
+	batch := &pgx.Batch{}
+	batch.Queue("SELECT 1 / 0")
+	results := pool.SendBatch(context.Background(), batch)
 	if _, err := results.Exec(); err == nil {
 		t.Fatal("batched divide by zero returned no error")
 	}
@@ -51,25 +58,36 @@ func TestOpenPool_TracesQueryAndBatchErrors(t *testing.T) {
 	}
 
 	counts := countsByAttr(t, reader, "db.query.errors.by_sqlstate.total", "sqlstate")
-	if got := counts["42P01"]; got != 2 {
-		t.Errorf("sqlstate 42P01 count = %d, want 2 (one Exec, one batch counted once)", got)
-	}
 	if got := counts["22012"]; got != 1 {
-		t.Errorf("sqlstate 22012 count = %d, want 1 (SendBatch path not traced)", got)
+		t.Errorf("sqlstate 22012 count = %d, want 1", got)
 	}
 }
 
-// A connect failure is returned by pgxpool before any query runs, so it reaches
-// the tracer only through ConnectTracer — the path 53300 too_many_connections
-// takes.
-func TestOpenPool_TracesConnectErrors(t *testing.T) {
-	ctx := context.Background()
-	reader := sdkmetric.NewManualReader()
+// A batch that fails while preparing reaches TraceBatchEnd twice, once from
+// SendBatch and once from Close.
+func TestOpenPool_CountsAPrepareFailingBatchOnce(t *testing.T) {
+	pool, reader := tracedPool(t, sharedDSN)
 
+	batch := &pgx.Batch{}
+	batch.Queue("SELECT 1 FROM stl_no_such_table")
+	if err := pool.SendBatch(context.Background(), batch).Close(); err == nil {
+		t.Fatal("batch against a missing table returned no error")
+	}
+
+	counts := countsByAttr(t, reader, "db.query.errors.by_sqlstate.total", "sqlstate")
+	if got := counts["42P01"]; got != 1 {
+		t.Errorf("sqlstate 42P01 count = %d, want 1", got)
+	}
+}
+
+// 53300 too_many_connections fails the connect itself, which pgxpool returns
+// before any query runs.
+func TestOpenPool_TracesConnectErrors(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
 	cfg := DefaultDBConfig(dsnForDatabase(t, sharedDSN, "stl_no_such_database"))
 	cfg.MeterProvider = sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
-	pool, err := OpenPool(ctx, cfg)
+	pool, err := OpenPool(context.Background(), cfg)
 	if err == nil {
 		pool.Close()
 		t.Fatal("OpenPool against a missing database returned no error")

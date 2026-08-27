@@ -32,9 +32,9 @@ type MetricConfig struct {
 // InitMetrics initializes the OpenTelemetry meter provider.
 func InitMetrics(ctx context.Context, config MetricConfig) (shutdown func(context.Context) error, err error) {
 	if config.OTLPEndpoint == "" {
-		// If no endpoint, use a no-op provider or stdout?
-		// For now, we'll just return with no error and default no-op provider.
-		runStartupSeeds()
+		// No endpoint: leave the global no-op provider in place and leave the
+		// startup seeds pending, so "installed" never claims a provider that
+		// does not exist.
 		return func(_ context.Context) error { return nil }, nil
 	}
 
@@ -72,8 +72,9 @@ func InitMetrics(ctx context.Context, config MetricConfig) (shutdown func(contex
 	return meterProvider.Shutdown, nil
 }
 
-// startupSeeds holds the seeds registered before the exporting meter provider
-// was installed, and the flag that makes later registrations run immediately.
+// startupSeeds is process-global because the constraint it works around is:
+// otel's own meter provider is a global installed once, at a moment no
+// component that registers instruments controls. See OnMeterProviderReady.
 var startupSeeds struct {
 	mu        sync.Mutex
 	installed bool
@@ -81,10 +82,8 @@ var startupSeeds struct {
 }
 
 // SetMeterProvider installs mp globally and runs every seed registered with
-// OnMeterProviderReady. Always install through this rather than
-// otel.SetMeterProvider: otel re-delegates instruments created earlier but does
-// not replay the measurements recorded through them, so the seeds have to run
-// here or not at all.
+// OnMeterProviderReady. Always install through this rather than calling
+// otel.SetMeterProvider directly, or those seeds never run.
 func SetMeterProvider(mp otelmetric.MeterProvider) {
 	otel.SetMeterProvider(mp)
 	runStartupSeeds()
