@@ -42,9 +42,10 @@
 #
 # Severity → routing (per the alerting routing spec): every rule here is a
 # `warning` — no page, prod #at_stl_alerts / staging #at_stl_staging_alerts,
-# [WARNING], 4h repeat. Paging on the instance-level cause of a class-53 storm
-# belongs to TigerDataMemoryPressureCritical in the infrastructure repo, and
-# these rules deliberately do not duplicate it.
+# [WARNING], 4h repeat. The infrastructure repo's TigerData rules watch the
+# instance and page on memory (>85%); nothing there watches connection count or
+# disk, so for every class-53 code except 53200 these counters are the only
+# signal. See docs/runbooks/vector-database.md.
 # =============================================================================
 groups:
   - name: vector-database
@@ -67,11 +68,13 @@ groups:
         # is *which services were refused*, and the description carries the
         # breakdown query rather than fanning out one alert per service.
         #
-        # It is a warning, not a page: TigerDataMemoryPressureCritical in the
-        # infrastructure repo already pages on the instance-level cause, and a
-        # second critical paged twice for one incident. It does cover that
-        # rule's gap — the 2026-08-27 errors arrived at a memory peak of 76.7%,
-        # so only the >75% warning fired and no critical ever did.
+        # It is a warning, not a page: for 53200 TigerDataMemoryPressureCritical
+        # in the infrastructure repo pages on the instance-level cause, and a
+        # second critical paged twice for one incident. That companion covers
+        # 53200 only, and covers it unreliably — the 2026-08-27 errors arrived
+        # at a memory peak of 76.7%, where only the >75% warning fired. For
+        # 53300 and 53100 there is no instance rule at all, which is why the
+        # annotation branches on the SQLSTATE instead of naming one cause.
         expr: |
           sum by (cluster) (
             increase(db_query_errors_total{
@@ -89,16 +92,25 @@ groups:
           description: |
             Postgres returned `{{ $value | printf "%.0f" }}` SQLSTATE class-53
             (`insufficient_resources`) errors to the Vector Go fleet in the last
-            15m — the instance is out of memory, connections or disk, and writes
+            15m — the instance refused work for want of a resource, and writes
             are failing and being re-driven.
 
-            Which services and which code:
+            Get the code first; it decides where to look, and the three codes
+            have nothing in common but their class:
             `sum by (service_name, sqlstate) (db_query_errors_by_sqlstate_total{k8s_namespace_name="vector", error_class="resources"})`
 
-            The cause is the instance, not the query in the error message. Expect
-            TigerDataMemoryPressure / …Critical to be firing and start there;
-            this is the blast radius. Note python-api does not emit these
-            counters, so its share of the incident is invisible here.
+            `53200` out_of_memory → instance memory. TigerDataMemoryPressure
+            (>75%) is the companion; …Critical (>85%) frequently does not fire
+            for these, so do not wait for it or treat its silence as health.
+            `53300` too_many_connections → pool sizing, not memory: MinConns per
+            service times replicas against the instance limit.
+            `53100` disk_full → disk headroom, retention and tiering policies.
+            No instance alert covers connections or disk, so for those two this
+            is the only signal.
+
+            The cause is the instance, not the query in the error message.
+            python-api does not emit these counters, so its share of the
+            incident is invisible here.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-database.md#vectordatabaseresourceerrors
 
       - alert: VectorDatabaseErrorRatioHigh
@@ -159,9 +171,8 @@ groups:
             context cancellation).
 
             If `sqlstate` is a class-53 code the instance itself is out of a
-            resource: see VectorDatabaseResourceErrors, and treat
-            TigerDataMemoryPressureCritical as the cause and this as the blast
-            radius.
+            resource, and which resource depends on the code: see
+            VectorDatabaseResourceErrors, whose description branches on it.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-database.md#vectordatabaseerrorratiohigh
 
       - alert: VectorDatabaseSerializationErrorsUnretried

@@ -23,24 +23,29 @@ fired (see below); nothing said which services were being refused, or on what.
 Workers retried and recovered, so nothing looked broken while writes failed and
 were re-driven all day. The failure recurred on 2026-08-27.
 
-**This is not the only database alerting, and is not the first thing to check.**
-`TigerDataMemoryPressure` / `TigerDataMemoryPressureCritical` (>75% / >85%),
-`TigerDataMemoryMetricsMissing`, and the WAL-archive rules live in the
+**This is not the only database alerting — but for every class-53 cause except
+`53200` it is the only alerting there is.** `TigerDataMemoryPressure` /
+`TigerDataMemoryPressureCritical` (>75% / >85%), `TigerDataMemoryMetricsMissing`,
+the long-running-transaction rules and the WAL-archive rules live in the
 infrastructure repo (`alerts/orbit/orbit-tigerdata.yaml`) with their own runbook,
 [tigerdata-memory-exhaustion.md](https://github.com/archon-research/infrastructure/blob/main/docs/runbook/tigerdata-memory-exhaustion.md).
-Those watch the *instance*; these rules watch *which services are being refused
-and on what*. On a resource fault expect both to fire — start there for the
-cause, come here for the blast radius.
+Every one of those watches memory, WAL or transaction age. **Nothing watches
+connection count or disk** — Grafana carries no connection-count metric for the
+instance at all, and `timescale_cloud_system_disk_usage_bytes` has no matching
+`_total_bytes` to form a ratio against. So a `53300` or `53100` storm fires
+nothing upstream and leaves a memory dashboard that looks fine. Only `53200` has
+a companion alert, and only that code should send you to memory first.
 
-The `…Critical` rule does not always fire, which is the second reason the
-class-53 rule here is not redundant (the first being per-service attribution).
-On 2026-08-25 memory reached **87.6% at 14:27 UTC** and 87.1% just before 10:00,
-and `…Critical` fired in four episodes (08:08, 08:30, 09:52, 14:29 UTC) inside
-nine warning episodes spanning 07:12–14:37. On 2026-08-27 the same failure
-recurred with memory at only **76.7%**: the >75% warning fired, `…Critical`
-never did that day at all, and Go services were still taking 53200s. Query these
-at 1m resolution rather than reading the TigerData console, whose default range
-averages the spikes away.
+**Even for `53200`, `…Critical` is not a reliable companion.** On 2026-08-27 the
+failure recurred with memory at **76.7%** in the hour the errors landed (03:00–
+04:00 UTC; the whole day peaked at 80.3%). The >75% warning fired for 18 minutes
+of that day — and `…Critical` recorded **0 firing and 0 pending minutes**, it did
+not fire at all. On 2026-08-25 it did: memory reached **87.6% at 14:27 UTC** and
+87.1% just before 10:00, and `…Critical` fired in four episodes (08:08, 08:30,
+09:52, 14:29 UTC) inside nine warning episodes spanning 07:12–14:37. Read a
+silent `…Critical` as "the instance stayed under 85%", never as "the fleet was
+served". Query these at 1m resolution rather than reading the TigerData console,
+whose default range averages the spikes away.
 
 **Read this first:** workers retry and recover from database errors, so the
 pipeline looks healthy while writes fail and are re-driven. Absence of a visible
@@ -83,44 +88,91 @@ here. Connect failures — including `53300 too_many_connections` — are counte
 ### What it means
 
 Postgres returned a SQLSTATE class-53 error (`insufficient_resources`) to one or
-more Vector Go services. The members that matter here:
+more Vector Go services. The four members share a class and nothing else — a
+different resource, a different first check, and a different amount of upstream
+alerting:
 
-| SQLSTATE | Meaning |
-|---|---|
-| `53200` | `out_of_memory` — a backend could not allocate |
-| `53300` | `too_many_connections` |
-| `53100` | `disk_full` |
-| `53400` | configuration limit exceeded |
+| SQLSTATE | Meaning | Resource | Instance alert |
+|---|---|---|---|
+| `53200` | `out_of_memory` — a backend could not allocate | instance memory | `TigerDataMemoryPressure(Critical)`, unreliably (see above) |
+| `53300` | `too_many_connections` | connection slots, i.e. pool sizing | none |
+| `53100` | `disk_full` | disk headroom, retention, tiering | none |
+| `53400` | configuration limit exceeded | a server limit (`max_locks_per_transaction`, prepared statements) | none |
 
 The rule is fleet-level on purpose: this is a fault in the one dependency every
 service shares, so it sends one notification per cluster rather than one per
-affected service. It is a warning, not a page — paging on the instance-level
-cause belongs to `TigerDataMemoryPressureCritical`, and a second critical here
-paged twice for one incident. What this adds is the per-service breakdown that
-the instance alert cannot give you, plus coverage of the band below its 85%
-threshold where services are refused but the instance rule stays quiet.
+affected service. It is a warning, not a page — for `53200` the page belongs to
+`TigerDataMemoryPressureCritical`, and a second critical here paged twice for
+one incident. That is the only code with an upstream page: for the other three
+this rule is the whole signal, which is why the first check below is *get the
+code*, not *open the memory dashboard*.
 
 ### First checks (≤5 min)
 
-1. **Which code, and who is affected** — the raw counter, graphed over the
+1. **Get the code, and who is affected** — the raw counter, graphed over the
    incident window (not `increase()`, which is blind to a `sqlstate` series'
    first sample):
    `sum by (service_name, sqlstate) (db_query_errors_by_sqlstate_total{k8s_namespace_name="vector", error_class="resources"})`
-2. **Check python-api separately** — it emits none of these counters. Loki:
+   Everything after this branches on the code. Do not open the memory dashboard
+   before you have it — three of the four codes have nothing to do with memory.
+2. **Check python-api separately** — it emits none of these counters, whichever
+   the code is. Loki, with the message text that matches (`out of memory`,
+   `too many connections`, `No space left on device`):
    `{k8s_namespace_name="vector", service_name="python-api"} |= "out of memory"`.
    In the 08:00 hour on 2026-08-25 it was 86% of the fleet's failures.
-3. **Confirm at the source** — the failing statements are usually trivial
-   indexed lookups (`get last block`, `get block by hash`). That is the
-   signature of a *server-side* memory ceiling, not an expensive query: the
-   small queries are victims failing to allocate, not the cause. Do not go
-   hunting the query in the error message.
-4. **Instance headroom** — `100 * timescale_cloud_system_memory_usage_bytes /
-   timescale_cloud_system_memory_total_bytes{service_id="…"}`. The TigerData
-   metric exporter feeds these into Grafana, so query them at 1m resolution
-   rather than reading the console, whose default range averages spikes away.
-   Staging is `xd7na17213`, prod `ucpymqz73b`.
 
-### Common causes
+#### `53200` — instance memory
+
+3. **Instance headroom** — `100 * timescale_cloud_system_memory_usage_bytes /
+   timescale_cloud_system_memory_total_bytes{service_id="…"}`, at 1m resolution
+   rather than in the console, whose default range averages spikes away.
+   Staging is `xd7na17213`, prod `ucpymqz73b`. A reading under 85% clears
+   nothing: the 08-27 recurrence refused work at 76.7%.
+4. **Do not hunt the query in the error message** — the failing statements are
+   usually trivial indexed lookups (`get last block`, `get block by hash`).
+   That is the signature of a server-side memory ceiling: the small queries are
+   victims failing to allocate, not the cause. Go to Common causes below.
+
+#### `53300` — connection slots
+
+Pool sizing, not memory, and Grafana carries no connection-count metric for the
+instance, so count them at the source over a read-only session (`stl_read_only`).
+
+3. **What is actually connected** —
+   `SELECT state, count(*) FROM pg_stat_activity GROUP BY 1` against
+   `SHOW max_connections`. Idle-in-transaction sessions hold a slot as firmly
+   as active ones and are the usual surprise.
+4. **What the fleet asks for** — `MinConns` × replicas, summed over the
+   services. `WorkerDBConfig`'s `MinConns` was cut to 1 fleet-wide in PR #585
+   for exactly this failure; a service that overrides it, or a replica-count
+   bump, undoes that. `MaxConns` bounds the burst, `MinConns` the floor every
+   replica holds permanently.
+5. **Correlate with a rollout** — a new worker or a scale-up lands its floor
+   immediately, so `53300` starting at a deploy boundary points at the change,
+   not at the database.
+
+#### `53100` — disk
+
+3. **Disk headroom** — `timescale_cloud_system_disk_usage_bytes{service_id="…"}`.
+   There is no exported total, so compare it against the plan's allocated
+   storage in the TigerData console; this is why no instance alert covers it.
+4. **Are the policies running** — a stalled retention, compression or tiering
+   job is the usual cause, and it fails silently:
+   `SELECT job_id, last_run_status, last_successful_finish FROM timescaledb_information.job_stats WHERE last_run_status <> 'Success'`.
+5. **What is growing** — order hypertables by size and check the largest have
+   a retention or tiering policy at all, rather than assuming they do.
+
+#### `53400` — a configured server limit
+
+3. Read the error text: it names the limit. `max_locks_per_transaction` is the
+   one this schema can reach (a statement touching many chunks takes a lock per
+   chunk), which makes it the same over-chunking problem as `53200` — see
+   VEC-663 below — rather than an independent fault.
+
+### Common causes of `53200`
+
+The other codes are diagnosed by their first checks above; only memory needs a
+cause list, because the error never names it.
 
 - **Per-query planner and executor memory on over-chunked hypertables.** This is
   the measured driver, not maintenance work. A single call of a routine API
@@ -133,9 +185,6 @@ threshold where services are refused but the instance rule stays quiet.
   cuts, not one big query: order `pg_stat_statements` by `temp_blks_written` and
   check `calls` — the top consumer has been one application query at ~10 MB per
   call across ~5,900 calls.
-- **`53300` too_many_connections** — check pool sizing. `MinConns` was cut to 1
-  in PR #585 for exactly this; a service that overrides it can undo that.
-- **`53100` disk_full** — check retention and tiering policies are running.
 
 Concurrent TimescaleDB maintenance jobs are a plausible-looking cause that has
 **not** held up: staging runs ~103 policy jobs that fire in tight clusters, but
@@ -144,8 +193,13 @@ nor the failure. Don't spend time there before the two causes above.
 
 ### Fixing it
 
-The durable fixes are per-query — chunk intervals and the spilling queries
-themselves — not server knobs. Postgres memory settings are role/database-level
+For `53300`, cut the floor the fleet holds (`MinConns`) or the replica count —
+raising `max_connections` moves the same memory problem to `53200`, since each
+backend costs memory. For `53100`, restart the stalled policy and give the
+growing hypertable a retention or tiering policy; adding disk buys weeks.
+
+For `53200` the durable fixes are per-query — chunk intervals and the spilling
+queries themselves — not server knobs. Postgres memory settings are role/database-level
 (`ALTER ROLE … SET`, `ALTER DATABASE … SET`), which migrations may not do: they
 need privileges the migration role does not hold and belong in the infra repo's
 `bootstrap-db.sh`. See `db/migrations/AGENTS.md` ("Role admin vs object
@@ -181,8 +235,8 @@ fleet's worst hour was 0.059 errors/sec against an instance committing 50–98
 transactions/sec, so the ratio was well under 1% throughout (an estimate:
 `db_query_total` did not exist yet). That storm is covered by
 VectorDatabaseResourceErrors above. If the failures here *are* class-53, read
-that section and expect `TigerDataMemoryPressureCritical` to be the page that
-matters.
+that section: which resource ran out depends on the SQLSTATE, and only `53200`
+has an instance alert to corroborate it.
 
 It is a ratio rather than an absolute rate because query volume across the fleet
 spans orders of magnitude, from a watcher querying continuously to a cronjob
