@@ -142,6 +142,17 @@ func run(ctx context.Context, args []string) error {
 
 	logger.Info("starting oracle price worker", "queue", cfg.queueURL, "chainID", cfg.chainID)
 
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    "oracle-price-worker",
+		ServiceVersion: buildinfo.GitHash(),
+		BuildTime:      BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("initializing telemetry: %w", err)
+	}
+	defer shutdownOTEL(context.Background())
+
 	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{
 		StaticCredentialsFromEnv: true,
 	})
@@ -198,18 +209,6 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("registering build: %w", err)
 	}
-
-	// Initialize OpenTelemetry tracing and metrics
-	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    "oracle-price-worker",
-		ServiceVersion: buildReg.GitHash(),
-		BuildTime:      BuildTime,
-		Logger:         logger,
-	})
-	if err != nil {
-		return fmt.Errorf("initializing telemetry: %w", err)
-	}
-	defer shutdownOTEL(context.Background())
 
 	// Service telemetry
 	chainName, err := entity.ChainName(cfg.chainID)

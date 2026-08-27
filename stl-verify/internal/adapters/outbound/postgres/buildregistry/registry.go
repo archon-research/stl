@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -27,24 +26,11 @@ type Registry struct {
 }
 
 // New registers the current build's git hash in build_registry and returns the
-// resolved build_id. The git hash is read from buildinfo package-level vars
-// (set via ldflags), with VCS info and BUILD_GIT_HASH env var as fallbacks.
-// If the hash is already registered (pod restart, multiple replicas), it looks
-// up the existing ID.
+// resolved build_id. The hash comes from buildinfo.Resolve, the same source the
+// services report to telemetry as service.version. If it is already registered
+// (pod restart, multiple replicas), it looks up the existing ID.
 func New(ctx context.Context, db *pgxpool.Pool) (*Registry, error) {
-	gitHash := buildinfo.GitCommit
-	buildTime := buildinfo.BuildTime
-
-	// Fallback: Go's embedded VCS info (works when .git is present)
-	if gitHash == "" || buildTime == "" {
-		buildinfo.PopulateFromVCS(&gitHash, &buildTime)
-	}
-
-	// Fallback: BUILD_GIT_HASH env var
-	if gitHash == "" {
-		gitHash = os.Getenv("BUILD_GIT_HASH")
-	}
-
+	gitHash, buildTime := buildinfo.Resolve()
 	if gitHash == "" {
 		return nil, fmt.Errorf("git hash not available: build with VCS info or set BUILD_GIT_HASH env var")
 	}

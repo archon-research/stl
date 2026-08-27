@@ -169,6 +169,17 @@ func run(ctx context.Context, args []string) error {
 	}))
 	slog.SetDefault(logger)
 
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    "sparklend-indexer",
+		ServiceVersion: buildinfo.GitHash(),
+		BuildTime:      BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("initializing telemetry: %w", err)
+	}
+	defer shutdownOTEL(context.Background())
+
 	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{
 		StaticCredentialsFromEnv: true,
 	})
@@ -274,19 +285,6 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("creating debt token repository: %w", err)
 	}
-
-	// Initialize OpenTelemetry before constructing any telemetry instruments, so
-	// they bind to the configured meter provider rather than the global no-op one.
-	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    "sparklend-indexer",
-		ServiceVersion: buildReg.GitHash(),
-		BuildTime:      BuildTime,
-		Logger:         logger,
-	})
-	if err != nil {
-		return fmt.Errorf("initializing telemetry: %w", err)
-	}
-	defer shutdownOTEL(context.Background())
 
 	// Multicall client with batch-size telemetry, optionally wrapped for raw SC
 	// call archiving (VEC-81). Archiving is off unless ARCHIVE_SC_CALLS=true.
