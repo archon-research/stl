@@ -46,8 +46,8 @@ resources:
   - ../../base/offchain-price-backfill
   - ../../base/reference-capital-indexer
   - ../../base/reference-capital-backfill
-  # CORE model runner (VEC-272). Now also deployed to prod (k8s/overlays/prod) —
-  # the live readers this waited on landed in VEC-272 PR 3.
+  # CORE model runner (VEC-272). Also deployed to prod (k8s/overlays/prod) since
+  # the live readers landed (#706); both overlays pin N_MC=100.
   - ../../base/core-model-runner
   - ../../base/maple-graphql-indexer
   # On-demand one-shot VaultV2 repair worker (VEC-218). No Temporal schedule:
