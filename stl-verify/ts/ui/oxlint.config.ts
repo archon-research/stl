@@ -1,5 +1,18 @@
 import boundariesConfig from '@archon-research/oxlint-config/design-system-boundaries';
 
+const presetRules = boundariesConfig.rules ?? {};
+
+/**
+ * Raise a preset rule's severity without restating its options. A bare severity
+ * string replaces the whole entry, which would silently drop the restricted
+ * paths the boundaries preset exists to carry.
+ */
+const denied = (name: keyof typeof presetRules) => {
+  const entry = presetRules[name];
+
+  return Array.isArray(entry) ? ['error', ...entry.slice(1)] : 'error';
+};
+
 const config = {
   ...boundariesConfig,
   categories: {
@@ -7,9 +20,36 @@ const config = {
     suspicious: 'error',
   },
   rules: {
-    ...(boundariesConfig.rules ?? {}),
-    'import/no-unassigned-import': 'off',
+    ...presetRules,
+    // The preset ships the design-system boundary at 'warn'. oxlint exits 0 on
+    // warnings, so left alone it can never fail a build or block a commit.
+    'no-restricted-imports': denied('no-restricted-imports'),
     'no-console': 'error',
+
+    // Type-aware rules (`--type-aware` in the lint script). The promise-safety
+    // family is the reason the flag is on at all: without it these sit in the
+    // effective config reading as coverage while never executing.
+    'typescript/no-floating-promises': 'error',
+    'typescript/no-misused-promises': 'error',
+    'typescript/await-thenable': 'error',
+    'typescript/no-base-to-string': 'error',
+
+    // The style rules `--type-aware` also switches on. Off for now, with the
+    // count each currently reports across src/ -- turning one on is a cleanup
+    // PR of that size, not a side effect of enabling promise safety.
+    //
+    // Narrowing an API envelope union by assertion is the app's normal shape
+    // (the response schema cannot express which arm a query selects), so this
+    // one is closer to a design change than a cleanup. 25 findings.
+    'typescript/no-unsafe-type-assertion': 'off',
+    // Fires on the standard effect shape: one branch returns a cleanup, the
+    // early-out returns nothing. 14 findings.
+    'typescript/consistent-return': 'off',
+    // Genuinely dead assertions, safe to remove but all in App.tsx and the
+    // chart hooks. 9 findings.
+    'typescript/no-unnecessary-type-assertion': 'off',
+    // 2 findings, both on router helpers where the parameter documents intent.
+    'typescript/no-unnecessary-type-parameters': 'off',
   },
   overrides: [
     {

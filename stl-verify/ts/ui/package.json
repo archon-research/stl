@@ -8,7 +8,6 @@
     "./package.json": "./package.json"
   },
   "imports": {
-    "#env": "./env.ts",
     "#src/*": "./src/*",
     "#styled-system/*": "./styled-system/*"
   },
@@ -17,8 +16,8 @@
     "dev": "node scripts/copy-theme-bootstrap.ts && vite",
     "build": "node scripts/copy-theme-bootstrap.ts && vite build",
     "type:check": "tsc -b",
-    "format": "uikit-cli format --write \"src/**/*.ts\" \"src/**/*.tsx\" \"scripts/**/*.ts\" panda.config.ts vite.config.ts env.ts",
-    "format:check": "uikit-cli format --check \"src/**/*.ts\" \"src/**/*.tsx\" \"scripts/**/*.ts\" panda.config.ts vite.config.ts env.ts",
+    "format": "uikit-cli format --write \"src/**/*.ts\" \"src/**/*.tsx\" \"src/**/*.css\" \"scripts/**/*.ts\" panda.config.ts vite.config.ts env.ts oxlint.config.ts .oxfmtrc.ts index.html",
+    "format:check": "uikit-cli format --check \"src/**/*.ts\" \"src/**/*.tsx\" \"src/**/*.css\" \"scripts/**/*.ts\" panda.config.ts vite.config.ts env.ts oxlint.config.ts .oxfmtrc.ts index.html",
     "preview": "vite preview",
     "test:explorers": "node scripts/check-explorer-urls.ts",
     "test:prime-grouping": "node scripts/check-prime-grouping.ts",
@@ -27,7 +26,7 @@
     "test:routes": "node scripts/check-router-urls.ts",
     "test:unindexed-chains": "node scripts/check-unindexed-chains.ts",
     "generate:openapi-types": "uikit-openapi-generate --schema ./src/generated/openapi-schema.json --output ./src/generated/openapi-types.ts && uikit-cli format --write ./src/generated/openapi-types.ts",
-    "lint": "uikit-cli lint src scripts panda.config.ts vite.config.ts env.ts",
+    "lint": "uikit-cli lint -c oxlint.config.ts --type-aware --max-warnings=0 --report-unused-disable-directives src scripts panda.config.ts vite.config.ts env.ts oxlint.config.ts .oxfmtrc.ts",
     "doctor": "uikit-cli doctor --codegen"
   },
   "dependencies": {
@@ -50,7 +49,7 @@
     "@archon-research/tsconfig": "0.10.0",
     "@pandacss/dev": "1.12.0",
     "@stl-verify/mocks": "*",
-    "@types/node": "26.2.0",
+    "@types/node": "24.13.3",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
     "@vitejs/plugin-react": "6.0.5",

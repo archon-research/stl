@@ -4,6 +4,18 @@
 # oxlint and oxfmt each take one config, and the two workspaces have their own
 # (ui carries the design-system boundaries preset, mocks does not).
 #
+# Both run through `uikit-cli`, not the oxlint/oxfmt binaries directly: those are
+# transitive dependencies of uikit-cli rather than declared ones, so naming them
+# here would depend on npm hoisting them into
+# stl-verify/ts/node_modules/.bin. `uikit-cli` is the declared entry point, and
+# it is what the npm scripts CI runs use, so hook and CI resolve the same tool at
+# the same pinned version.
+#
+# `-c` is passed explicitly even though CI relies on discovery from the workspace
+# directory: the hook's cwd is stl-verify/ts, where neither config lives.
+# `--max-warnings=0` matches the npm scripts -- oxlint exits 0 on warnings, and
+# the design-system boundary rule is a warning.
+#
 # `root`, `glob` and `exclude` are all repo-root-relative, and `glob`/`exclude`
 # are applied to the staged path BEFORE `root` rewrites it -- so they have to
 # carry the stl-verify/ts/ prefix too. `run` and the substituted {staged_files}
@@ -32,25 +44,31 @@ pre-commit:
       root: *ts_root
       glob: 'stl-verify/ts/ui/**.{ts,tsx}'
       exclude: *generated_exclude
-      run: npx --no-install oxlint -c ui/oxlint.config.ts --fix {staged_files}
+      run: >-
+        npx --no-install uikit-cli lint -c ui/oxlint.config.ts
+        --max-warnings=0 --report-unused-disable-directives
+        --fix {staged_files}
       stage_fixed: true
 
     ui-oxfmt:
       root: *ts_root
       glob: 'stl-verify/ts/ui/**.{ts,tsx,css,html,json}'
       exclude: ['stl-verify/ts/*/package.json', 'stl-verify/ts/*/src/generated/**']
-      run: npx --no-install oxfmt -c ui/.oxfmtrc.ts --write {staged_files}
+      run: npx --no-install uikit-cli format -c ui/.oxfmtrc.ts --write {staged_files}
       stage_fixed: true
 
     mocks-oxlint:
       root: *ts_root
       glob: 'stl-verify/ts/mocks/**.ts'
-      run: npx --no-install oxlint -c mocks/oxlint.config.ts --fix {staged_files}
+      run: >-
+        npx --no-install uikit-cli lint -c mocks/oxlint.config.ts
+        --max-warnings=0 --report-unused-disable-directives
+        --fix {staged_files}
       stage_fixed: true
 
     mocks-oxfmt:
       root: *ts_root
       glob: 'stl-verify/ts/mocks/**.{ts,json}'
       exclude: *oxfmt_exclude
-      run: npx --no-install oxfmt -c mocks/.oxfmtrc.ts --write {staged_files}
+      run: npx --no-install uikit-cli format -c mocks/.oxfmtrc.ts --write {staged_files}
       stage_fixed: true

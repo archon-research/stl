@@ -110,7 +110,8 @@ export function MethodologyPanel({
       }
     }
 
-    fetchSources();
+    // `fetchSources` handles its own failures, so there is nothing to await.
+    void fetchSources();
 
     return () => abortController.abort();
   }, [isOpen]);
