@@ -37,31 +37,44 @@ _MAPLE = frozenset({"maple"})
 _SUPPORTED_PROTOCOLS = _AAVE_LIKE | _MORPHO
 _NORMALIZE_RE = re.compile(r"[\s\-_]+")
 
+# Reads allocation_position_current, which already holds one row per (proxy,
+# chain, token); the DISTINCT ON stays because a proxy can hold several tokens
+# matching either branch. Chain predicates and newer-wins order: rationale on
+# allocation_position_repository._RECEIPT_TOKEN_POSITIONS_SQL.
 _WALLET_LOOKUP_SQL = """
 WITH latest_receipt AS (
     -- Most-recent balance snapshot per wallet for the receipt token itself.
-    -- DISTINCT ON ensures we read the current state, not a historical peak.
     SELECT DISTINCT ON (ap.proxy_address)
         ap.proxy_address,
         ap.balance
-    FROM allocation_position ap
-    JOIN token t ON t.id = ap.token_id AND t.address = :receipt_token_address
+    FROM allocation_position_current ap
+    JOIN token t ON t.id = ap.token_id AND t.chain_id = ap.chain_id
+                AND t.address = :receipt_token_address
     WHERE ap.chain_id = :chain_id
-    ORDER BY ap.proxy_address, ap.block_number DESC, ap.block_version DESC,
-             ap.processing_version DESC, ap.log_index DESC
+    ORDER BY ap.proxy_address,
+             ap.block_number DESC, ap.block_version DESC, ap.block_timestamp DESC,
+             ap.log_index DESC, ap.direction DESC, ap.tx_hash DESC,
+             ap.processing_version DESC
 ),
 latest_underlying AS (
     -- Most-recent balance snapshot per wallet for the underlying token.
+    -- rt.chain_id = ap.chain_id scopes the registry to the chain asked about:
+    -- receipt_token.underlying_token_id carries no chain constraint, so another
+    -- chain's registration of the same address otherwise answers with ITS
+    -- underlying's holders.
     SELECT DISTINCT ON (ap.proxy_address)
         ap.proxy_address,
         ap.balance
-    FROM allocation_position ap
-    JOIN token t ON t.id = ap.token_id
+    FROM allocation_position_current ap
+    JOIN token t ON t.id = ap.token_id AND t.chain_id = ap.chain_id
     JOIN receipt_token rt ON rt.underlying_token_id = t.id
                          AND rt.receipt_token_address = :receipt_token_address
+                         AND rt.chain_id = ap.chain_id
     WHERE ap.chain_id = :chain_id
-    ORDER BY ap.proxy_address, ap.block_number DESC, ap.block_version DESC,
-             ap.processing_version DESC, ap.log_index DESC
+    ORDER BY ap.proxy_address,
+             ap.block_number DESC, ap.block_version DESC, ap.block_timestamp DESC,
+             ap.log_index DESC, ap.direction DESC, ap.tx_hash DESC,
+             ap.processing_version DESC
 ),
 candidates AS (
     -- Prefer wallets that explicitly hold the receipt token. Fall back to a
