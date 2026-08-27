@@ -31,11 +31,14 @@
 -- an event row at log_index 0 beside the same block's sweep row, a sweep carrying
 -- log_index 0 and the zero tx hash (the sweep path in
 -- internal/services/allocation_tracker/service.go reads a balance, not a log).
--- The sweep wins that collision — it is a reconciled read of the whole position
--- rather than a per-event derivation of it — and it wins in either arrival order,
--- which is what makes the cache a function of history instead of of ingest
--- timing. It does NOT outrank an event at a higher log_index: log_index ranks
--- above both.
+-- Both paths read balanceOf at the same block hash (service.go passes
+-- event.ParsedBlockHash() to FetchAll for the event path and for the sweep), so
+-- the two tied rows carry the SAME balance by construction: the tiebreak settles
+-- only which activity metadata surfaces (latest_activity_action/_amount/tx_hash).
+-- Its job is to make the comparison total and deterministic in either arrival
+-- order — that is what makes the cache a function of history instead of of ingest
+-- timing — and it happens to surface the sweep row. It does NOT outrank an event
+-- at a higher log_index: log_index ranks above both.
 --
 -- block_timestamp is in the comparison only because the PK admits it — the tracker
 -- never varies it within one (block_number, block_version). With all seven terms
@@ -95,11 +98,11 @@ COMMENT ON TABLE allocation_position_current IS '[Operational] Newest allocation
 COMMENT ON COLUMN allocation_position_current.proxy_address IS 'PK. The ALM proxy holding the position, raw 20-byte address.';
 COMMENT ON COLUMN allocation_position_current.chain_id IS 'PK. FK→chain.chain_id.';
 COMMENT ON COLUMN allocation_position_current.token_id IS 'PK. FK→token.id. The held token (a receipt token for a wrapped position, the asset itself for a direct holding).';
-COMMENT ON COLUMN allocation_position_current.balance IS 'Derived (copy of allocation_position.balance). Post-transaction balance as a raw on-chain integer in the token''s native decimals; divide by 10^token.decimals.';
-COMMENT ON COLUMN allocation_position_current.underlying_value IS 'Derived (copy of allocation_position.underlying_value). Redeemable value of the balance in the UNDERLYING token''s native decimals (convertToAssets), raw integer. NULL on rows written before the column existed.';
+COMMENT ON COLUMN allocation_position_current.balance IS 'Derived (copy of allocation_position.balance). Post-transaction balanceOf reading, ALREADY decimals-normalized to a human-readable value at write time — never divide by 10^token.decimals. uni_v3_pool/uni_v3_lp rows carry no balanceOf: the tracker-computed full position value in the hint asset''s units. Semantics identical to allocation_position.balance; that comment is the full per-type statement.';
+COMMENT ON COLUMN allocation_position_current.underlying_value IS 'Derived (copy of allocation_position.underlying_value). Redeemable value of the balance denominated in the UNDERLYING asset (underlying_token_id), decimals-normalised by that asset — never divide by 10^decimals. NULL where not computable: no valuation implemented for the type, a reverting or undecodable convertToAssets, a missing asset_address, and every row written before the column or its type''s valuation existed. NULL is never zero exposure. Semantics identical to allocation_position.underlying_value; that comment is the full per-type statement.';
 COMMENT ON COLUMN allocation_position_current.underlying_token_id IS 'Derived (copy of allocation_position.underlying_token_id). FK→token.id. The underlying the row''s own underlying_value is denominated in; NULL when the row carries no redeemable value.';
-COMMENT ON COLUMN allocation_position_current.tx_amount IS 'Derived (copy of allocation_position.tx_amount). Magnitude of the transfer that produced this row, raw on-chain integer in the token''s native decimals; 0 on a sweep, which reads a balance rather than a transfer.';
-COMMENT ON COLUMN allocation_position_current.direction IS 'Derived (copy of allocation_position.direction). in | out | sweep. Part of the newer-wins comparison, ranked below log_index and above tx_hash: it is what makes a sweep beat an event at the same log_index.';
+COMMENT ON COLUMN allocation_position_current.tx_amount IS 'Derived (copy of allocation_position.tx_amount). Magnitude of the transfer that produced this row, ALREADY decimals-normalized to a human-readable value at write time — never divide by 10^token.decimals. 0 on a sweep, which reads a balance rather than a transfer. Semantics identical to allocation_position.tx_amount.';
+COMMENT ON COLUMN allocation_position_current.direction IS 'Derived (copy of allocation_position.direction). in | out | sweep. Part of the newer-wins comparison, ranked below log_index and above tx_hash. A tied sweep/event pair carries the same balance (both paths read balanceOf at one block hash), so this term settles only which activity metadata surfaces; it is there to make the comparison total and deterministic, and it surfaces the sweep row.';
 COMMENT ON COLUMN allocation_position_current.tx_hash IS 'Derived (copy of allocation_position.tx_hash). Transaction that produced the winning row, raw 32 bytes, or the 32 zero bytes on a sweep, which has no transaction (VEC-340). Part of the newer-wins comparison, its lowest-ranked identity term.';
 COMMENT ON COLUMN allocation_position_current.block_timestamp IS 'Derived (copy of allocation_position.created_at). On-chain block time of the winning row; surfaced by the reads as latest_activity_at; part of the newer-wins comparison.';
 COMMENT ON COLUMN allocation_position_current.block_number IS 'Derived. Block the winning history row was observed at; the highest-ranked term of the newer-wins comparison.';

@@ -2541,9 +2541,11 @@ RTL_LATEST_BALANCES = {
 }
 
 # Rows tied on (block_number, block_version, block_timestamp, log_index) are
-# legal, so the ordering ends on direction then tx_hash: a sweep is a reconciled
-# balance read and wins its collision with an event row at the same log_index,
-# and an out-row wins over the in-row its self-transfer emitted alongside it.
+# legal, so the ordering ends on direction then tx_hash to stay total. A tied pair
+# carries the same balance (each path reads balanceOf at one block hash), so the
+# tiebreak settles only the surfaced activity metadata: the sweep wins its
+# collision with an event row at the same log_index, and an out-row wins over the
+# in-row its self-transfer emitted alongside it.
 # Which of a tied pair an untiebroken sort returns is plan-dependent, so these
 # cases pin the resolution rather than relying on seed order to expose its
 # absence.

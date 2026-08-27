@@ -1125,7 +1125,10 @@ class AllocationRepository:
 # Reads the trigger-maintained caches, not the histories behind them:
 # allocation_position_current holds one row per (proxy, chain, token) and
 # token_price_current one per (oracle, token), so no latest-row DISTINCT ON is left
-# here. Two invariants, CANONICAL for every allocation latest-row read:
+# here. Two invariants, CANONICAL for every allocation latest-row read —
+# ``allocation_share_repository``'s as-of LATERAL over the history follows the same
+# newer-wins order, and needs no chain-qualified token join because it matches
+# ``token_id`` directly:
 #   * t.chain_id = ap.chain_id on the token join. Nothing constrains a position's
 #     chain to its token row's, so two cache rows otherwise reach one receipt_token
 #     and the read emits the position twice.
@@ -1134,9 +1137,10 @@ class AllocationRepository:
 #     processing_version, all DESC, with created_at standing in for block_timestamp
 #     over the history. processing_version versions ONE row, so it ranks last;
 #     above log_index it would let a reprocessed earlier event beat a later
-#     original one. direction and tx_hash hand a sweep its log_index-0 collision
-#     with an event row, a sweep being a reconciled balance read rather than a
-#     per-event derivation.
+#     original one. direction and tx_hash make the comparison total over the
+#     log_index-0 sweep/event tie: both rows carry the same balance (each path
+#     reads balanceOf at one block hash), so the tiebreak settles only which
+#     activity metadata surfaces, and it surfaces the sweep row.
 #
 # Match positions to receipt tokens only by receipt_token_address: a prime's
 # direct holding of an underlying asset (e.g. raw USDT in the proxy wallet)

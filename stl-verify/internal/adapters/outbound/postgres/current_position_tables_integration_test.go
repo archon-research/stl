@@ -731,8 +731,10 @@ func (f *currentTablesFixture) insertPausedPair(ctx context.Context, block int64
 // log_index are all equal across that pair, so unless direction and tx_hash are
 // part of the comparison the winner is whichever row arrived first, and a cache
 // whose content depends on arrival order is not the newest-row query it claims to
-// be. The sweep is the winner in both orders because it is a reconciled balance
-// read of the whole position, not a per-event derivation.
+// be. Both rows carry the same balance (each path reads balanceOf at the same
+// block hash), so the tiebreak settles only which activity metadata surfaces; the
+// sweep is the winner in both orders because direction and tx_hash make the
+// comparison total, not because a sweep is a better reading.
 func TestCurrentTables_AllocationSweepWinsSameBlockTie(t *testing.T) {
 	withCurrentTablesPool(t)
 	ctx := context.Background()
