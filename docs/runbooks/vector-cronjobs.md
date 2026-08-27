@@ -599,7 +599,7 @@ success signal); until then, treat a `VectorCronjobRunFailing` for
 `core-model-runner` is excluded from `VectorCronjobAllRunsFailing` (24h
 interval, `RetryPolicy.maximum_attempts=1`: one failed tick can never recover
 inside that rule's 1h window). That leaves `VectorCronjobRunFailing`, which is
-a warning and fires only when the activity **raises**. Three ways a tick is
+a warning and fires only when the activity **raises**. Four ways a tick is
 lost record no error at all:
 
 1. **A deploy landed mid-tick.** The worker cancels the running activity on
@@ -612,9 +612,25 @@ lost record no error at all:
 3. **The pod was SIGKILLed** after `terminationGracePeriodSeconds` while deep
    in a numpy call (the injected cancel exception cannot land inside C code):
    nothing recorded, nothing flushed.
+4. **Karpenter evicted the pod mid-tick** (VEC-681, first seen in prod on
+   27 Aug 2026). Mechanically case 3, but the trigger is neither a deploy nor a
+   fault: consolidation reclaims an underutilised node at any hour, so a healthy
+   tick on a healthy pod is lost with the pod's own logs gone with it. The pod
+   template now carries `karpenter.sh/do-not-disrupt: "true"` as a stopgap;
+   until the tick is resumable that annotation is the only thing preventing a
+   repeat, and it does **not** cover staging, where nodes are spot and reclaim
+   is forceful.
 
-`VectorCronjobWorkerDown` does not help either: in all three cases the
-Deployment stays `1/1` available.
+`VectorCronjobWorkerDown` does not help either: cases 1-3 leave the Deployment
+`1/1` available throughout, and case 4's replacement pod schedules well inside
+that rule's 10m `for`.
+
+**A single lost tick is not necessarily caught.** This rule's 30h window is
+measured from the last completion, not from the schedule, so a lost **scheduled**
+tick fires it ~6.5h late (once the previous day's completion ages out) and a lost
+**hand-triggered** run never fires it at all — the next 00:00 tick completes
+inside 30h. That is why the 27 Aug eviction was found by hand rather than by an
+alert.
 
 **What this rule cannot see.** A live pod whose OTLP export dies (collector
 unreachable, exporter thread wedged) stops refreshing the series; once it
@@ -650,6 +666,11 @@ a cold start is therefore covered only by `VectorCronjobRunFailing`.
    `kubectl -n vector rollout history deploy/core-model-runner`; compare with
    the tick's start (00:00 UTC by default). If so, nothing is broken — the day
    was lost to the rollout.
+   **Or was the pod evicted?** — same symptom, different cause, and the
+   rollout history is empty because the ReplicaSet never changed. Check
+   `kubectl -n vector get events --field-selector involvedObject.name=<pod>`
+   for `Evicted pod: Underutilized` (Karpenter consolidation) and confirm the
+   pod name changed without a new ReplicaSet.
 4. **Memory** — `kubectl -n vector describe pod -l app=core-model-runner` for
    `OOMKilled`. A raised `CORE_MODEL_N_MC` without a matching memory limit is
    the expected way to hit this (see the ConfigMap and Deployment comments).
