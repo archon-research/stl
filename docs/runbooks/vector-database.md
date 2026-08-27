@@ -2,18 +2,26 @@
 
 Owner: vector team · Source rules: [alerts/vector-database.yaml](../../alerts/vector-database.yaml)
 
-Every Vector service reaches Postgres (TimescaleDB on TigerData) through one
-pool builder, `stl-verify/internal/adapters/outbound/postgres/db.go`. That
-builder attaches a pgx tracer which counts every query, batch and copy in the
-fleet. Every other Vector counter is per-service and domain-shaped (blocks,
-reorgs, backfill gaps), so this is the only per-service view of the shared
-database dependency.
+Every Vector **Go** service reaches Postgres (TimescaleDB on TigerData) through
+one pool builder, `stl-verify/internal/adapters/outbound/postgres/db.go`. That
+builder attaches a pgx tracer which counts every query, batch, copy and
+connection it makes. Every other Vector counter is per-service and domain-shaped
+(blocks, reorgs, backfill gaps), so this is the only per-service view of the
+shared database dependency.
+
+`python-api` runs in the same namespace but reaches the same database through
+SQLAlchemy/asyncpg, so it emits none of these counters — and it is not a minor
+omission: it produced 174 of the 202 `out of memory` log lines in the worst
+morning hour of 2026-08-25. Absence of a Vector database alert does **not** mean
+the database is healthy for the API.
 
 **Why it exists:** on 2026-08-25 the staging database returned SQLSTATE 53200
-(`out_of_memory`) to the watcher fleet for six hours — arbitrum-watcher absorbed
-13 in a single hour — with no per-service signal. Workers retried and recovered,
-so nothing looked broken while writes failed and were re-driven all day. The
-failure recurred on 2026-08-27.
+(`out_of_memory`) across the fleet from 07:00 to 15:00 UTC — 444 log lines over
+15 services, peaking at 211 lines across 14 services in the 14:00 hour, of which
+arbitrum-watcher absorbed 90 — with no *per-service* signal. The instance alerts
+fired (see below); nothing said which services were being refused, or on what.
+Workers retried and recovered, so nothing looked broken while writes failed and
+were re-driven all day. The failure recurred on 2026-08-27.
 
 **This is not the only database alerting, and is not the first thing to check.**
 `TigerDataMemoryPressure` / `TigerDataMemoryPressureCritical` (>75% / >85%),
@@ -23,6 +31,15 @@ infrastructure repo (`alerts/orbit/orbit-tigerdata.yaml`) with their own runbook
 Those watch the *instance*; these rules watch *which services are being refused
 and on what*. On a resource fault expect both to fire — start there for the
 cause, come here for the blast radius.
+
+The instance rules do not always fire, which is why the class-53 rule here is
+not redundant with them. On 2026-08-25 memory reached **87.6% at 14:27 UTC** and
+87.1% just before 10:00, and `…Critical` fired in four episodes (08:08, 08:30,
+09:52, 14:29 UTC) inside nine warning episodes spanning 07:12–14:37. On
+2026-08-27 the same failure recurred at a peak of only **80.3%**: the >75%
+warning fired twice, `…Critical` never did, and Go services were still taking
+53200s. Query these at 1m resolution rather than reading the TigerData console,
+whose default range averages the spikes away.
 
 **Read this first:** workers retry and recover from database errors, so the
 pipeline looks healthy while writes fail and are re-driven. Absence of a visible
@@ -39,27 +56,33 @@ outage is not evidence that these alerts are benign.
 `error_class` is a closed domain — `resources` (SQLSTATE class 53),
 `retryable` (40001 / 40P01), `unknown` (no SQLSTATE: the error never reached the
 server), `other` (everything else). All four series are seeded at 0 when a pool
-is built, which is what lets `increase()` catch the *first* error of an
-incident. SQLSTATE cannot be seeded, so alert on `error_class` and use
-`db_query_errors_by_sqlstate_total` only to break an alert down.
+is built, which is what lets `increase()` see a class's *first* error as a 0→1
+transition and gives the ratio rule's numerator a series to divide. SQLSTATE
+cannot be seeded, so alert on `error_class` and use
+`db_query_errors_by_sqlstate_total` only to break an alert down — and break it
+down with the raw counter, not `increase()`, which returns 0 for a `sqlstate`
+series whose first sample is the error you are looking for.
 
-Pool acquisition failures (dial errors, pool exhaustion) never reach the tracer
-— pgx returns them before it runs — so they are not counted anywhere here.
+`db_query_total` counts what pgx traces, so it includes the implicit
+`BEGIN`/`COMMIT`/`ROLLBACK` of every transaction and the `SET` that
+`WorkerDBConfig`'s AfterConnect hook issues on each new connection. On a
+transaction-heavy repository that is roughly 3x the statements the calling code
+wrote. Read the ratio as "share of traced operations", not "share of my queries".
+
+Pool-exhaustion timeouts (`Acquire` giving up before a connection frees) are
+returned by `pgxpool` before any tracer runs, so they are not counted anywhere
+here. Connect failures — including `53300 too_many_connections` — are counted.
 
 ---
 
-## Resource errors (SQLSTATE class 53)
+## VectorDatabaseResourceErrors
 
-**No alert of its own.** Paging for this is owned by
-`TigerDataMemoryPressureCritical` in the infrastructure repo, which watches the
-instance directly — a second critical here paged twice for one incident. These
-errors still surface per-service through VectorDatabaseErrorRatioHigh, and this
-section is the diagnostic reference for them.
+**Severity:** warning · **Window:** 15m · **Grouping:** per cluster, not per service
 
 ### What it means
 
 Postgres returned a SQLSTATE class-53 error (`insufficient_resources`) to one or
-more Vector services. The members that matter here:
+more Vector Go services. The members that matter here:
 
 | SQLSTATE | Meaning |
 |---|---|
@@ -68,21 +91,29 @@ more Vector services. The members that matter here:
 | `53100` | `disk_full` |
 | `53400` | configuration limit exceeded |
 
-This is a fault in a shared dependency: on 2026-08-25 it hit six services at
-once, so expect sibling alerts. The rule keeps `service_name` so a single
-service can be silenced or routed on its own; collapsing the incident into one
-page is Alertmanager's `group_by`, not the rule's job.
+The rule is fleet-level on purpose: this is a fault in the one dependency every
+service shares, so it sends one notification per cluster rather than one per
+affected service. It is a warning, not a page — paging on the instance-level
+cause belongs to `TigerDataMemoryPressureCritical`, and a second critical here
+paged twice for one incident. What this adds is the per-service breakdown that
+the instance alert cannot give you, plus coverage of the band below its 85%
+threshold where services are refused but the instance rule stays quiet.
 
 ### First checks (≤5 min)
 
-1. **Which code, and who is affected** — break the metric down:
-   `sum by (sqlstate, service_name) (increase(db_query_errors_by_sqlstate_total{k8s_namespace_name="vector", error_class="resources"}[15m]))`
-2. **Confirm at the source** — the failing statements are usually trivial
+1. **Which code, and who is affected** — the raw counter, graphed over the
+   incident window (not `increase()`, which is blind to a `sqlstate` series'
+   first sample):
+   `sum by (service_name, sqlstate) (db_query_errors_by_sqlstate_total{k8s_namespace_name="vector", error_class="resources"})`
+2. **Check python-api separately** — it emits none of these counters. Loki:
+   `{k8s_namespace_name="vector", service_name="python-api"} |= "out of memory"`.
+   In the 08:00 hour on 2026-08-25 it was 86% of the fleet's failures.
+3. **Confirm at the source** — the failing statements are usually trivial
    indexed lookups (`get last block`, `get block by hash`). That is the
    signature of a *server-side* memory ceiling, not an expensive query: the
    small queries are victims failing to allocate, not the cause. Do not go
    hunting the query in the error message.
-3. **Instance headroom** — `100 * timescale_cloud_system_memory_usage_bytes /
+4. **Instance headroom** — `100 * timescale_cloud_system_memory_usage_bytes /
    timescale_cloud_system_memory_total_bytes{service_id="…"}`. The TigerData
    metric exporter feeds these into Grafana, so query them at 1m resolution
    rather than reading the console, whose default range averages spikes away.
@@ -123,10 +154,10 @@ first move.
 
 ### Verify recovery
 
-`increase(db_query_errors_total{error_class="resources"}[10m])` should return to
-0. Because workers retry, also confirm the pipeline caught up rather than
-assuming it: the watchers' `backfill_watermark_lag` should be draining toward
-zero.
+The alert auto-resolves when
+`increase(db_query_errors_total{error_class="resources"}[15m])` returns to 0.
+Because workers retry, also confirm the pipeline caught up rather than assuming
+it: the watchers' `backfill_watermark_lag` should be draining toward zero.
 
 ---
 
@@ -136,20 +167,26 @@ zero.
 
 ### What it means
 
-A service is failing more than 5% of its database operations, sustained over
-15m, counting `error_class` `resources`, `other` and `unknown` — the
+A service is failing more than 5% of its traced database operations, sustained
+over 15m, counting `error_class` `resources`, `other` and `unknown` — the
 serialization/deadlock codes are covered by
 VectorDatabaseSerializationErrorsUnretried.
 
-If the failures are class-53 (`resources`), the instance is out of memory,
-connections or disk: see [Resource errors](#resource-errors-sqlstate-class-53)
-above, and expect `TigerDataMemoryPressureCritical` to be the page that matters.
+This is the "one service is broken" shape: schema drift after a deploy, a
+revoked grant, an adapter issuing invalid SQL. A resource storm is the opposite
+shape — a small share of failures across a healthy fleet, which even at the
+worst minute of 2026-08-25 was well under 1% — and is covered by
+VectorDatabaseResourceErrors above. If the failures here *are* class-53, read
+that section and expect `TigerDataMemoryPressureCritical` to be the page that
+matters.
 
 It is a ratio rather than an absolute rate because query volume across the fleet
-spans several orders of magnitude, from a watcher issuing hundreds of queries a
-second to a cronjob issuing a handful an hour. A second conjunct requires at
-least ~0.01 errors/sec so a near-idle service cannot fire on a 100% ratio built
-from a single failed query.
+spans orders of magnitude, from a watcher querying continuously to a cronjob
+issuing a handful an hour. The second conjunct is a minimum-volume guard on the
+*denominator* (>0.02 traced operations/sec), matching
+`VectorAllocationTrackerErrorRatioHigh`: it stops a near-idle service firing on
+a 100% ratio built from one failed query, without imposing the queries/sec floor
+the ratio form exists to avoid.
 
 ### First checks (≤5 min)
 
@@ -158,9 +195,10 @@ from a single failed query.
 
    | SQLSTATE | Meaning | Usual cause |
    |---|---|---|
-   | `57014` | `query_canceled` | `statement_timeout` hit — a query regressed, or a plan flipped |
    | `42501` | `insufficient_privilege` | an ingest path attempted UPDATE/DELETE on an append-only table |
    | `42P01` / `42703` | undefined table / column | schema drift: a deploy landed ahead of its migration |
+   | `55P03` | `lock_not_available` | `WorkerDBConfig`'s 10s `lock_timeout` fired — a lock convoy |
+   | `57014` | `query_canceled` | a client-side cancel (shutdown, request timeout), or a server-side `statement_timeout` set outside this repo |
    | `23505` | unique violation | a replay writing duplicate rows — check `processing_version` |
    | `unknown` | never reached the server | connection reset, context cancellation |
 
@@ -173,9 +211,10 @@ from a single failed query.
   and `DELETE` revoked; an adapter still issuing `ON CONFLICT … DO UPDATE` fails
   at executor start whether or not a conflict occurs. See
   `db/migrations/AGENTS.md`.
-- **`57014` on a latency-bounded worker.** `WorkerDBConfig` sets a 10s
-  `lock_timeout`; services that also set `StatementTimeout` will surface a
-  regressed query here first.
+- **`55P03` on a latency-bounded worker.** `WorkerDBConfig` sets a 10s
+  `lock_timeout` so a lock convoy surfaces as a fast error rather than a hang;
+  a burst of these means something is holding the lock — usually an
+  idle-in-transaction session or a TimescaleDB policy job on the same chunks.
 - **A burst of `unknown` at a rollout.** In-flight queries cancelled by a
   graceful shutdown land in `unknown`. A deploy is seconds long and cannot
   sustain the 15m dwell; if `unknown` *is* sustained, look for connection resets
@@ -183,26 +222,27 @@ from a single failed query.
 
 ### Fixing it
 
-Fix the query or the adapter — do not raise `work_mem` or `statement_timeout` to
-silence it. Note that raising `work_mem` is particularly counterproductive on
-these instances: it is per-sort-node, so it multiplies across concurrent
-backends and moves the box closer to the class-53 failures above.
+Fix the query or the adapter — do not raise `work_mem` or add a
+`statement_timeout` to silence it. Note that raising `work_mem` is particularly
+counterproductive on these instances: it is per-sort-node, so it multiplies
+across concurrent backends and moves the box closer to the class-53 failures
+above.
 
 ### Verify recovery
 
 The alert auto-resolves when the error ratio for the labelled service falls
-below 5% (or its absolute error rate below 0.01/s).
+below 5% (or its traced-operation rate below 0.02/s).
 
 ---
 
 ## VectorDatabaseSerializationErrorsUnretried
 
-**Severity:** warning · **For:** 15m
+**Severity:** warning · **Window:** 1h
 
 ### What it means
 
 A service that does **not** retry serialization failures (`40001`) or deadlocks
-(`40P01`) hit more than five of them in an hour.
+(`40P01`) hit six or more of them in an hour.
 
 The only retry for these codes in the repo is `isRetryableTxError`
 (`stl-verify/internal/adapters/outbound/postgres/blockstate_repository.go`),
@@ -220,13 +260,15 @@ genuinely contending, and messages are heading for the DLQ.
 
 ### First checks (≤5 min)
 
-1. **Serialization or deadlock** —
-   `sum by (sqlstate, service_name) (increase(db_query_errors_by_sqlstate_total{k8s_namespace_name="vector", error_class="retryable"}[1h]))`
+1. **Serialization or deadlock** — the raw counter, graphed over the last hour
+   (`increase()` is blind to a `sqlstate` series' first sample):
+   `sum by (service_name, sqlstate) (db_query_errors_by_sqlstate_total{k8s_namespace_name="vector", error_class="retryable"})`
 2. **Who else is writing the same table** — a deadlock needs two writers. Check
    whether a backfiller or a bootstrap job is running against the same tables as
    the alerting worker; that is the usual pairing.
-3. **Check the DLQ depth** for the alerting worker's queue. If it is growing,
-   the contention is already costing messages.
+3. **Check the DLQ depth** for the alerting worker's queue in the SQS console.
+   No alert covers this; it is a manual check, and a growing DLQ means the
+   contention is already costing messages.
 
 ### Common causes
 
@@ -249,4 +291,5 @@ transaction.
 
 The alert auto-resolves when
 `increase(db_query_errors_total{error_class="retryable"}[1h])` for the labelled
-service drops back to 5 or fewer. Confirm the worker's DLQ stopped growing.
+service drops below 6. Confirm in the SQS console that the worker's DLQ stopped
+growing.
