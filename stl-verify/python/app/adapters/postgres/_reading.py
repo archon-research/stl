@@ -7,7 +7,6 @@ the older adapters still hand-roll it, and should adopt this rather than grow a
 copy.
 """
 
-import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -34,8 +33,6 @@ async def reading(engine: AsyncEngine, *, what: str) -> AsyncIterator[AsyncConne
     try:
         async with engine.connect() as conn:
             yield conn
-    except asyncio.CancelledError:
-        raise
     except Exception as exc:
         logger.error(
             "Failed to read from database",

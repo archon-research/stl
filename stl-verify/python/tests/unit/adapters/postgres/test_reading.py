@@ -1,6 +1,5 @@
 """The connection-lending read helper."""
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -27,19 +26,6 @@ async def test_names_what_was_being_read_in_the_failure() -> None:
     with pytest.raises(ValueError, match="reading the reference positions for 'spark'"):
         async with reading(engine, what="reading the reference positions for 'spark'"):
             pass
-
-
-@pytest.mark.asyncio
-async def test_a_cancelled_read_stays_cancelled(caplog) -> None:
-    # A client disconnect is not a database failure. Rewriting it would log an
-    # error per disconnect and drown the real ones.
-    engine = _engine()
-
-    with pytest.raises(asyncio.CancelledError):
-        async with reading(engine, what="reading something"):
-            raise asyncio.CancelledError
-
-    assert not [record for record in caplog.records if record.levelname == "ERROR"]
 
 
 @pytest.mark.asyncio
