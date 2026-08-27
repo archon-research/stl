@@ -249,7 +249,20 @@ jobs:
           cat "${RUNNER_TEMP}/transcript.log"
           cat "${RUNNER_TEMP}/events.jsonl"
           if [ "${CODEX_RC}" -ne 0 ]; then
-            echo "::error::codex exec exited ${CODEX_RC}."
+            # turn.failed carries the upstream error verbatim as a string, so the
+            # seat's limits are matched by the kinds the CLI names for them. A
+            # spent window means no review happened, which is a note to the person
+            # who asked and a green job — the diff is no worse for it.
+            FAILURE="$(jq -r 'select(.type == "turn.failed") | .error.message' \
+                         "${RUNNER_TEMP}/events.jsonl" 2>/dev/null | tail -n 1 || true)"
+            if printf '%s' "${FAILURE}" \
+               | grep -qE 'usage_limit_reached|rate_limit_reached|credits_depleted|"status": ?429'; then
+              printf '%s' "${FAILURE}" > "${RUNNER_TEMP}/quota.txt"
+              echo "QUOTA=1" >> "${GITHUB_ENV}"
+              echo "::notice::The service seat has reached its usage limit; posting a note instead of a review."
+              exit 0
+            fi
+            echo "::error::codex exec exited ${CODEX_RC}. ${FAILURE}"
             exit 1
           fi
           if [ ! -s "${RUNNER_TEMP}/review.md" ]; then
@@ -257,19 +270,45 @@ jobs:
             exit 1
           fi
 
-      # One live report per pass: the new one is posted, then earlier ones are
-      # collapsed as outdated, so the expanded comment always describes the SHA in
-      # its own stamp while findings already triaged stay one click away. Prior
-      # reports are matched on the marker *and* the bot login: this token may edit
-      # any comment on the PR, so a marker alone would let an author's comment
-      # claim the identity and take the collapse in a real report's place.
-      - name: Post findings
+      # One live comment per marker: the new one is posted, then earlier ones
+      # carrying that marker are collapsed as outdated, so the expanded report
+      # always describes the SHA in its own stamp while findings already triaged
+      # stay one click away. Matched on the marker *and* the bot login: this token
+      # may edit any comment on the PR, so a marker alone would let an author's
+      # comment claim the identity and take the collapse in a real report's place.
+      - name: Post the review, or a note that none ran
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          MARKER: '<!-- stl-review:L3 -->'
         run: |
           set -euo pipefail
+          # The quota note keeps a marker of its own: it says no review ran, so
+          # the last review that did stays expanded above it.
+          if [ "${QUOTA:-0}" = "1" ]; then
+            MARKER='<!-- stl-review:L3-quota -->'
+            {
+              printf '%s\n' "${MARKER}"
+              printf '## L3 review — Codex CI\n\n'
+              printf 'No review this time: the service seat has reached its usage\n'
+              printf 'limit. Re-add the **Ready for Codex review** label once the\n'
+              printf 'window resets.\n\n'
+              printf '```\n%s\n```\n' "$(cat "${RUNNER_TEMP}/quota.txt")"
+            } > "${RUNNER_TEMP}/comment.md"
+          else
+            MARKER='<!-- stl-review:L3 -->'
+            # Usage is measured by the workflow, not quoted from the report: it
+            # sizes a review against the seat's rolling quota, and pairs with the
+            # pinned version so a bump that thins the reasoning shows up as a number.
+            USAGE="$(jq -r 'select(.type == "turn.completed") | .usage
+                            | "\(.input_tokens) in (\(.cached_input_tokens) cached) · \(.output_tokens) out (\(.reasoning_output_tokens) reasoning)"' \
+                       "${RUNNER_TEMP}/events.jsonl" 2>/dev/null | tail -n 1 || true)"
+            {
+              printf '%s\n' "${MARKER}"
+              cat "${RUNNER_TEMP}/review.md"
+              printf '\n---\n_%s · %ss_\n' "${USAGE:-usage unreported}" "${CODEX_SECONDS:-?}"
+            } > "${RUNNER_TEMP}/comment.md"
+          fi
+
           # Read before posting, so the run's own comment stays out of the set.
           gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
             > "${RUNNER_TEMP}/comments.json"
@@ -278,18 +317,6 @@ jobs:
                  | select(.body | startswith($marker)) | .node_id' \
             "${RUNNER_TEMP}/comments.json")
 
-          # Usage is measured by the workflow, not quoted from the report: it
-          # sizes a review against the seat's rolling quota, and pairs with the
-          # pinned version so a bump that thins the reasoning shows up as a number.
-          USAGE="$(jq -r 'select(.type == "turn.completed") | .usage
-                          | "\(.input_tokens) in (\(.cached_input_tokens) cached) · \(.output_tokens) out (\(.reasoning_output_tokens) reasoning)"' \
-                     "${RUNNER_TEMP}/events.jsonl" 2>/dev/null | tail -n 1 || true)"
-
-          {
-            printf '%s\n' "${MARKER}"
-            cat "${RUNNER_TEMP}/review.md"
-            printf '\n---\n_%s · %ss_\n' "${USAGE:-usage unreported}" "${CODEX_SECONDS:-?}"
-          } > "${RUNNER_TEMP}/comment.md"
           gh pr comment "${PR_NUMBER}" --body-file "${RUNNER_TEMP}/comment.md"
 
           # After the post: a collapse failure costs tidiness, and the review is
