@@ -35,16 +35,6 @@ _BLOCK = 30_000_000
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
-async def conn(db_url: str) -> AsyncIterator[asyncpg.Connection]:
-    """One connection for the module's isolated database."""
-    connection = await asyncpg.connect(db_url)
-    try:
-        yield connection
-    finally:
-        await connection.close()
-
-
-@pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def repository(async_db_url: str) -> AsyncIterator[AaveLikeBackedBreakdownRepository]:
     """The Aave-like backed breakdown repository under test."""
     engine = create_async_engine(async_db_url)

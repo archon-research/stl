@@ -2,8 +2,8 @@
 -- (chain_id, token_id). One of the set created by
 -- 20260820_120000_create_current_position_tables.sql, same recipe and same
 -- rationale — read that file's header for the design, the relationship to the
--- append-only rule, the rebuild procedure, and why the SET LOCAL below needs the
--- migrator's per-file transaction; all of it applies verbatim here.
+-- append-only rule, and why the SET LOCAL below needs the migrator's per-file
+-- transaction; all of it applies here.
 --
 -- Why this key needs one: the share lookup (allocation_share_repository.py)
 -- behind the risk-capital and RRC endpoints resolves balance / totalSupply per
@@ -17,24 +17,33 @@
 --
 -- Size: one row per (chain, token) ever observed — 39 on staging today.
 --
--- Two timestamps, deliberately: block_timestamp is copied from the winning row
--- because the read's staleness check is on chain time; updated_at is the cache
--- row's own write time, set on every winning upsert (backfill included) — a
--- pipeline-liveness signal, which lags block_timestamp by the ingest delay.
+-- The newer-wins comparison is (block_number, block_version, processing_version,
+-- block_timestamp). The last term only separates rows that tie on the first
+-- three — the PK permits them, and the assign trigger versions per timestamp, so
+-- both carry version 0 — and without it "newest" would be arrival order for such
+-- rows and a rebuild could disagree with the trigger. A correction that ties on
+-- ALL four never reaches the cache through this trigger (strict >): re-running
+-- the backfill, whose guard is >= exactly for this, is the repair — procedure in
+-- 20260827_120100_backfill_token_total_supply_current.sql.
+--
+-- Two timestamps, deliberately: block_timestamp is chain time, what the read's
+-- staleness check measures; created_at is copied from the winning history row —
+-- when ingest wrote it — and stays correct across rebuilds, unlike a
+-- cache-write-time column would.
 --
 -- Split from its backfill (20260827_120100_backfill_token_total_supply_current.sql):
 -- CREATE TRIGGER takes SHARE ROW EXCLUSIVE on token_total_supply, held to commit,
 -- and the migrator runs a file as one transaction — a backfill in this file would
 -- hold that lock, and every allocation-tracker insert behind it, for the whole
 -- history scan. Newer-wins on both sides makes the split safe: rows the trigger
--- caches between the two files are guarded no-ops for the backfill, and vice versa.
+-- caches between the two files are covered by the backfill's guard, and vice versa.
 --
 -- Deadlock-freedom, as for the sibling caches, rests on the writer sorting its
 -- batch: TokenTotalSupplyRepository.SaveSupplies orders rows by (chain_id,
 -- token_address, …) before any version column. That is not the cache key's order,
 -- and it does not need to be — every writer applies the same sort, so every writer
--- takes the token-row and cache-row locks in the same order, which is all lock
--- ordering needs.
+-- takes the token registry locks and the cache row locks in the same order, which
+-- is all lock ordering needs.
 --
 -- Fail fast rather than convoy ingestion behind CREATE TRIGGER's lock.
 SET LOCAL lock_timeout = '10s';
@@ -48,7 +57,7 @@ CREATE TABLE IF NOT EXISTS token_total_supply_current (
     block_number        BIGINT      NOT NULL,
     block_version       INT         NOT NULL,
     processing_version  INT         NOT NULL,
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at          TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (chain_id, token_id)
 );
 
@@ -57,11 +66,11 @@ COMMENT ON COLUMN token_total_supply_current.chain_id IS 'PK. FK→chain.chain_i
 COMMENT ON COLUMN token_total_supply_current.token_id IS 'PK. FK→token.id. The token whose totalSupply() this is.';
 COMMENT ON COLUMN token_total_supply_current.total_supply IS 'Derived (copy of token_total_supply.total_supply). Total circulating supply, decimals-normalized to a human-readable value (not a raw integer).';
 COMMENT ON COLUMN token_total_supply_current.scaled_total_supply IS 'Derived (copy of token_total_supply.scaled_total_supply). Nullable, decimals-normalized. On-chain scaledTotalSupply reading (interest-free). Populated only for aTokens.';
-COMMENT ON COLUMN token_total_supply_current.block_timestamp IS 'Derived (copy of token_total_supply.block_timestamp). On-chain time of the winning row''s block; what the share lookup''s staleness check measures.';
+COMMENT ON COLUMN token_total_supply_current.block_timestamp IS 'Derived (copy of token_total_supply.block_timestamp). On-chain time of the winning row''s block; what the share lookup''s staleness check measures, and the final tie-break of the newer-wins comparison.';
 COMMENT ON COLUMN token_total_supply_current.block_number IS 'Derived. Block the winning history row was observed at; part of the newer-wins comparison.';
 COMMENT ON COLUMN token_total_supply_current.block_version IS 'Derived. Reorg version of that block (0 = original); part of the newer-wins comparison.';
 COMMENT ON COLUMN token_total_supply_current.processing_version IS 'Derived. Correction version of that row (0 = original, N = Nth reprocess); part of the newer-wins comparison.';
-COMMENT ON COLUMN token_total_supply_current.updated_at IS 'Audit. When this cache row was last written (insert or winning upsert, backfill included) — wall-clock, not block time. An old value means no newer observation has landed since: the token left the tracked set, or ingest has stalled.';
+COMMENT ON COLUMN token_total_supply_current.created_at IS 'Derived (copy of token_total_supply.created_at). When the winning history row was written — ingest wall-clock, not block time. An old value means no newer observation has landed: the token left the tracked set, or ingest has stalled.';
 
 GRANT SELECT ON token_total_supply_current TO stl_readonly;
 GRANT SELECT, INSERT, UPDATE ON token_total_supply_current TO stl_readwrite;
@@ -71,10 +80,10 @@ RETURNS TRIGGER AS $$
 BEGIN
     INSERT INTO token_total_supply_current AS cur
         (chain_id, token_id, total_supply, scaled_total_supply, block_timestamp,
-         block_number, block_version, processing_version)
+         block_number, block_version, processing_version, created_at)
     VALUES
         (NEW.chain_id, NEW.token_id, NEW.total_supply, NEW.scaled_total_supply, NEW.block_timestamp,
-         NEW.block_number, NEW.block_version, NEW.processing_version)
+         NEW.block_number, NEW.block_version, NEW.processing_version, NEW.created_at)
     ON CONFLICT (chain_id, token_id) DO UPDATE SET
         total_supply = EXCLUDED.total_supply,
         scaled_total_supply = EXCLUDED.scaled_total_supply,
@@ -82,9 +91,9 @@ BEGIN
         block_number = EXCLUDED.block_number,
         block_version = EXCLUDED.block_version,
         processing_version = EXCLUDED.processing_version,
-        updated_at = now()
-    WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_version)
-        > (cur.block_number, cur.block_version, cur.processing_version);
+        created_at = EXCLUDED.created_at
+    WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_version, EXCLUDED.block_timestamp)
+        > (cur.block_number, cur.block_version, cur.processing_version, cur.block_timestamp);
     RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;

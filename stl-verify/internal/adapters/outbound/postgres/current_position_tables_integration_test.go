@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
@@ -69,6 +70,7 @@ type currentTablesFixture struct {
 	positionRepo *PositionRepository
 	priceRepo    *OnchainPriceRepository
 	supplyRepo   *TokenTotalSupplyRepository
+	txm          *TxManager
 	protocolID   int64
 	userID       int64
 	tokenIDs     [2]int64
@@ -97,7 +99,7 @@ func setupCurrentTables(t *testing.T) *currentTablesFixture {
 	}
 	supplyRepo := NewTokenTotalSupplyRepository(currentTablesPool, txm, tokenRepo, nil, buildregistry.BuildID(1))
 
-	f := &currentTablesFixture{positionRepo: positionRepo, priceRepo: priceRepo, supplyRepo: supplyRepo}
+	f := &currentTablesFixture{positionRepo: positionRepo, priceRepo: priceRepo, supplyRepo: supplyRepo, txm: txm}
 	f.seedRegistries(t, ctx)
 	return f
 }
@@ -222,16 +224,6 @@ func (f *currentTablesFixture) cachedDebt(t *testing.T, ctx context.Context, tok
 	return amount, block
 }
 
-// cacheProjections narrows a cache to the columns it copies from history, for
-// the caches that carry more: token_total_supply_current's updated_at is its own
-// write time, which no history row has. Absent means the whole table.
-var cacheProjections = map[string]string{
-	"token_total_supply_current": `
-		SELECT chain_id, token_id, total_supply, scaled_total_supply, block_timestamp,
-		       block_number, block_version, processing_version
-		FROM token_total_supply_current`,
-}
-
 // assertCachesMatchHistory is the invariant the whole design rests on: each cache
 // holds exactly "newest row per key" over its history, nothing more and nothing
 // stale. Symmetric EXCEPT so a missing row and a stale row are distinguishable.
@@ -262,22 +254,19 @@ func assertCachesMatchHistory(t *testing.T, ctx context.Context) {
 		{"token_total_supply_current", `
 			SELECT DISTINCT ON (chain_id, token_id)
 			       chain_id, token_id, total_supply, scaled_total_supply, block_timestamp,
-			       block_number, block_version, processing_version
+			       block_number, block_version, processing_version, created_at
 			FROM token_total_supply
 			ORDER BY chain_id, token_id,
-			         block_number DESC, block_version DESC, processing_version DESC`},
+			         block_number DESC, block_version DESC, processing_version DESC,
+			         block_timestamp DESC`},
 	}
 
 	for _, c := range checks {
-		cache, ok := cacheProjections[c.table]
-		if !ok {
-			cache = "TABLE " + c.table
-		}
 		query := fmt.Sprintf(`
 			WITH newest AS (%s)
-			SELECT (SELECT count(*) FROM (TABLE newest EXCEPT %s) a),
-			       (SELECT count(*) FROM (%s EXCEPT TABLE newest) b)`,
-			c.newest, cache, cache)
+			SELECT (SELECT count(*) FROM (TABLE newest EXCEPT TABLE %s) a),
+			       (SELECT count(*) FROM (TABLE %s EXCEPT TABLE newest) b)`,
+			c.newest, c.table, c.table)
 
 		var historyNotInCache, cacheNotInHistory int
 		if err := currentTablesPool.QueryRow(ctx, query).Scan(&historyNotInCache, &cacheNotInHistory); err != nil {
@@ -336,27 +325,62 @@ func TestCurrentTables_ProductionWritePath_CachesNewestPerKey(t *testing.T) {
 }
 
 // TestCurrentTables_ProductionWritePath_BackfilledOldRowDoesNotRegress covers the
-// backfill case through the batched writer: a run that fills a gap below the
+// backfill case through each batched writer: a run that fills a gap below the
 // current block must leave the cache on the newer row.
 func TestCurrentTables_ProductionWritePath_BackfilledOldRowDoesNotRegress(t *testing.T) {
 	withCurrentTablesPool(t)
 	ctx := context.Background()
-	f := setupCurrentTables(t)
 
-	f.saveBorrowers(t, ctx, f.borrowerAt(0, 500, 0, 5000))
-
-	// A backfiller filling blocks 100-300 after the live worker already wrote 500.
-	f.saveBorrowers(t, ctx,
-		f.borrowerAt(0, 100, 0, 1000),
-		f.borrowerAt(0, 200, 0, 2000),
-		f.borrowerAt(0, 300, 0, 3000),
-	)
-
-	amount, block := f.cachedDebt(t, ctx, 0)
-	if amount != "5000" || block != 500 {
-		t.Errorf("backfill regressed the cache: got amount %s at block %d, want 5000 at 500", amount, block)
+	cases := []struct {
+		name string
+		// write persists one batch of {block, value} rows; read returns the cached row.
+		write func(t *testing.T, f *currentTablesFixture, rows ...[2]int64)
+		read  func(t *testing.T, f *currentTablesFixture) (value string, block int64)
+	}{
+		{
+			name: "borrower",
+			write: func(t *testing.T, f *currentTablesFixture, rows ...[2]int64) {
+				batch := make([]*entity.Borrower, len(rows))
+				for i, r := range rows {
+					batch[i] = f.borrowerAt(0, r[0], 0, r[1])
+				}
+				f.saveBorrowers(t, ctx, batch...)
+			},
+			read: func(t *testing.T, f *currentTablesFixture) (string, int64) {
+				return f.cachedDebt(t, ctx, 0)
+			},
+		},
+		{
+			name: "token_total_supply",
+			write: func(t *testing.T, f *currentTablesFixture, rows ...[2]int64) {
+				batch := make([]*entity.TokenTotalSupply, len(rows))
+				for i, r := range rows {
+					batch[i] = f.supplyAt(0, r[0], r[1])
+				}
+				f.saveSupplies(t, ctx, batch...)
+			},
+			read: func(t *testing.T, f *currentTablesFixture) (string, int64) {
+				return f.cachedSupply(t, ctx, 0)
+			},
+		},
 	}
-	assertCachesMatchHistory(t, ctx)
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := setupCurrentTables(t)
+
+			c.write(t, f, [2]int64{500, 5000})
+
+			// A backfiller filling blocks 100-300 after the live worker already wrote 500.
+			c.write(t, f, [2]int64{100, 1000}, [2]int64{200, 2000}, [2]int64{300, 3000})
+
+			value, block := c.read(t, f)
+			if value != "5000" || block != 500 {
+				t.Errorf("backfill regressed the cache: got %s at block %d, want 5000 at 500", value, block)
+			}
+			assertCachesMatchHistory(t, ctx)
+		})
+	}
 }
 
 // TestCurrentTables_TriggerFiresOnInsertIntoCompressedChunk pins the behaviour the
@@ -394,6 +418,28 @@ func TestCurrentTables_TriggerFiresOnInsertIntoCompressedChunk(t *testing.T) {
 	}
 	if block != 2000 {
 		t.Errorf("cache did not follow an insert into a compressed chunk: got block %d, want 2000", block)
+	}
+	assertCachesMatchHistory(t, ctx)
+}
+
+// TestCurrentTables_SupplyTriggerFiresOnInsertIntoCompressedChunk mirrors the
+// price test for token_total_supply (2-day columnstore policy, segmentby
+// chain_id): a sweep backfilling into an already-compressed chunk must still
+// reach the cache.
+func TestCurrentTables_SupplyTriggerFiresOnInsertIntoCompressedChunk(t *testing.T) {
+	withCurrentTablesPool(t)
+	ctx := context.Background()
+	f := setupCurrentTables(t)
+
+	f.saveSupplies(t, ctx, f.supplyAt(0, 1000, 1000))
+	compressAllChunks(t, ctx, "token_total_supply")
+
+	// Same chunk (1,000 seconds later), strictly newer block.
+	f.saveSupplies(t, ctx, f.supplyAt(0, 2000, 2000))
+
+	supply, block := f.cachedSupply(t, ctx, 0)
+	if supply != "2000" || block != 2000 {
+		t.Errorf("cache did not follow an insert into a compressed chunk: got supply %s at block %d, want 2000 at 2000", supply, block)
 	}
 	assertCachesMatchHistory(t, ctx)
 }
@@ -516,17 +562,12 @@ func (f *currentTablesFixture) saveSupplies(t *testing.T, ctx context.Context, r
 	}
 }
 
+// trySaveSupplies runs one batch the way production does: through the TxManager
+// the repository is constructed around.
 func (f *currentTablesFixture) trySaveSupplies(ctx context.Context, rows ...*entity.TokenTotalSupply) error {
-	tx, err := currentTablesPool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	if err := f.supplyRepo.SaveSupplies(ctx, tx, rows); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return f.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
+		return f.supplyRepo.SaveSupplies(ctx, tx, rows)
+	})
 }
 
 func (f *currentTablesFixture) cachedSupply(t *testing.T, ctx context.Context, tokenIdx int) (supply string, block int64) {
@@ -543,36 +584,14 @@ func (f *currentTablesFixture) cachedSupply(t *testing.T, ctx context.Context, t
 	return supply, block
 }
 
-// TestCurrentTables_ProductionWritePath_SupplyBackfillDoesNotRegress is the
-// out-of-order case for token_total_supply_current through the batched writer: a
-// redelivered batch below the live block must leave the cache on the newer row.
-func TestCurrentTables_ProductionWritePath_SupplyBackfillDoesNotRegress(t *testing.T) {
-	withCurrentTablesPool(t)
-	ctx := context.Background()
-	f := setupCurrentTables(t)
-
-	f.saveSupplies(t, ctx, f.supplyAt(0, 500, 5000))
-
-	f.saveSupplies(t, ctx,
-		f.supplyAt(0, 100, 1000),
-		f.supplyAt(0, 200, 2000),
-		f.supplyAt(0, 300, 3000),
-	)
-
-	supply, block := f.cachedSupply(t, ctx, 0)
-	if supply != "5000" || block != 500 {
-		t.Errorf("backfill regressed the cache: got supply %s at block %d, want 5000 at 500", supply, block)
-	}
-	assertCachesMatchHistory(t, ctx)
-}
-
-// TestCurrentTables_ConcurrentOverlappingSupplyWritersDoNotDeadlock is the
-// borrower test's counterpart for token_total_supply_current: the cache row lock
-// is keyed on (chain, token) alone, so two tracker processes writing the same
-// tokens at different blocks (a rolling-deploy overlap) contend on it, and
-// SaveSupplies' natural-key sort is what keeps their token-row and cache-row lock
-// order the same. Shuffled input per writer, so the test fails if that sort is
-// ever dropped.
+// TestCurrentTables_ConcurrentOverlappingSupplyWritersDoNotDeadlock: two
+// SaveSupplies batches over the same tokens at different blocks, shuffled input
+// per writer, so the test fails if the natural-key sort is ever dropped. Today
+// the sort's first job is ordering the token registry rows — GetOrCreateToken's
+// upsert locks those before any cache row, serializing overlapping batches — and
+// the test keeps holding if that upsert ever becomes DO NOTHING + SELECT and the
+// batches truly overlap on the cache rows. The negative control below is what
+// pins the cache-row half of the claim.
 func TestCurrentTables_ConcurrentOverlappingSupplyWritersDoNotDeadlock(t *testing.T) {
 	withCurrentTablesPool(t)
 	ctx := context.Background()
@@ -609,7 +628,7 @@ func TestCurrentTables_ConcurrentOverlappingSupplyWritersDoNotDeadlock(t *testin
 
 		for i, err := range errs {
 			if testutil.IsDeadlock(err) {
-				t.Fatalf("round %d, writer %d deadlocked: %v — SaveSupplies' natural-key sort is what keeps the cache row locks in a caller-stable order", round, i, err)
+				t.Fatalf("round %d, writer %d deadlocked: %v — SaveSupplies' natural-key sort is what keeps the registry and cache row locks in a caller-stable order", round, i, err)
 			}
 			if err != nil {
 				t.Fatalf("round %d, writer %d: %v", round, i, err)
@@ -664,6 +683,66 @@ func (f *currentTablesFixture) insertPausedPair(ctx context.Context, block int64
 	time.Sleep(500 * time.Millisecond)
 	if err := f.positionRepo.SaveBorrower(ctx, tx, f.borrowerAt(secondToken, block, 0, 10)); err != nil {
 		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// TestCurrentTables_NegativeControl_ReverseSupplyKeyOrderDeadlocks is the supply
+// cache's proof that its row locks are real: hand-written inserts that bypass
+// SaveSupplies' sort and take the two cache rows in opposite orders deadlock. The
+// production writers cannot reach this state today (the registry upsert
+// serializes them first), which is exactly why the claim needs its own control.
+func TestCurrentTables_NegativeControl_ReverseSupplyKeyOrderDeadlocks(t *testing.T) {
+	withCurrentTablesPool(t)
+	ctx := context.Background()
+	f := setupCurrentTables(t)
+
+	// Register the tokens (and their cache rows) before contending on them.
+	f.saveSupplies(t, ctx, f.supplyAt(0, 5999, 1), f.supplyAt(1, 5999, 1))
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		errs[0] = f.insertPausedSupplyPair(ctx, 6000, 0, 1)
+	}()
+	go func() {
+		defer wg.Done()
+		errs[1] = f.insertPausedSupplyPair(ctx, 6001, 1, 0)
+	}()
+	wg.Wait()
+
+	if !testutil.IsDeadlock(errs[0]) && !testutil.IsDeadlock(errs[1]) {
+		t.Fatalf("expected one writer to deadlock on the cache rows, got %v and %v — if this stops deadlocking, the trigger no longer locks the cache rows the way the migration header claims", errs[0], errs[1])
+	}
+}
+
+// insertPausedSupplyPair inserts supply rows for two minted tokens in the given
+// order inside one transaction, pausing between them so the two callers overlap.
+// Raw SQL, deliberately: the point is to reach the cache rows without
+// SaveSupplies' sort or its registry upsert.
+func (f *currentTablesFixture) insertPausedSupplyPair(ctx context.Context, block int64, firstToken, secondToken int) error {
+	tx, err := currentTablesPool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	for i, tokenIdx := range []int{firstToken, secondToken} {
+		if i == 1 {
+			time.Sleep(500 * time.Millisecond)
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO token_total_supply
+				(chain_id, token_id, total_supply, block_number, block_version, block_timestamp, source)
+			SELECT 1, tk.id, 1, $2, 0, $3, 'sweep'
+			FROM token tk WHERE tk.chain_id = 1 AND tk.address = $1`,
+			supplyTokenAddress(tokenIdx).Bytes(), block, time.Unix(1700000000+block, 0).UTC(),
+		); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }

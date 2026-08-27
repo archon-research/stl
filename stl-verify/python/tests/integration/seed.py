@@ -41,6 +41,23 @@ async def insert_user(conn: asyncpg.Connection, address: bytes) -> int:
     )
 
 
+async def insert_prime(conn: asyncpg.Connection, name: str, vault_address: bytes) -> int:
+    """Insert a prime (upserting on name) and return its ID."""
+    return cast(
+        int,
+        await conn.fetchval(
+            """
+        INSERT INTO prime (name, vault_address)
+        VALUES ($1, $2)
+        ON CONFLICT (name) DO UPDATE SET vault_address = EXCLUDED.vault_address
+        RETURNING id
+        """,
+            name,
+            vault_address,
+        ),
+    )
+
+
 async def insert_protocol(
     conn: asyncpg.Connection, name: str, address: bytes, *, protocol_type: str = "lending"
 ) -> int:

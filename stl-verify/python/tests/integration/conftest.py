@@ -12,6 +12,7 @@ holds only auto-discovered pytest fixtures.
 
 import asyncio
 import pathlib
+from collections.abc import AsyncIterator
 
 import asyncpg
 import pytest
@@ -137,6 +138,16 @@ def db_url(module_db) -> str:
 def async_db_url(module_db) -> str:
     """SQLAlchemy async URL for the module's isolated database."""
     return module_db["async_url"]
+
+
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
+async def conn(db_url: str) -> AsyncIterator[asyncpg.Connection]:
+    """One connection to the module's isolated database, shared by its tests."""
+    connection = await asyncpg.connect(db_url)
+    try:
+        yield connection
+    finally:
+        await connection.close()
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")

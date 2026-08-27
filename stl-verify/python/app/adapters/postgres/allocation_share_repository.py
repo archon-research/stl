@@ -22,7 +22,8 @@ logger = get_logger(__name__)
 # on them:
 #   * Latest supply: the pair's ``token_total_supply_current`` row — the
 #     trigger-maintained newest ``token_total_supply`` row per pair by
-#     ``(block_number, block_version, processing_version)``. A PK hit.
+#     ``(block_number, block_version, processing_version, block_timestamp)``.
+#     A PK hit.
 #   * Pinned balance: most-recent ``allocation_position`` row at or strictly
 #     before the supply row's ``(block_number, block_version)`` — never *after*
 #     — so a balance from a later block is never paired with an earlier supply
