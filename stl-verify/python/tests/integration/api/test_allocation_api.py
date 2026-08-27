@@ -708,7 +708,8 @@ def test_total_capital_returns_all_null_when_prime_has_no_treasury(client: TestC
 def test_risk_capital_self_computed_total_is_latest_treasury(client: TestClient) -> None:
     """The self-computed risk-capital endpoint reports Total Risk Capital from the
     latest on-chain SubProxy USDS balance (the 2.1M observation wins over 2.0M),
-    independent of the Star feed. The default model (gap_sweep) is reported and a
+    independent of the Star feed. ``model`` reports the top of the indexed view's
+    preference order (core_model) regardless of what actually priced, and a
     per-allocation breakdown is present; required RRC depends on model coverage
     which the fixture does not seed, so it is not asserted here.
     """
@@ -716,7 +717,7 @@ def test_risk_capital_self_computed_total_is_latest_treasury(client: TestClient)
 
     assert response.status_code == 200
     body = response.json()
-    assert body["model"] == "gap_sweep"
+    assert body["model"] == "core_model"
     assert Decimal(body["total_risk_capital_usd"]) == Decimal("2100000")
     assert isinstance(body["per_allocation"], list)
 

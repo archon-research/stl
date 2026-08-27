@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.domain.entities.allocation import EthAddress
-from app.domain.exceptions import MissingShareError, StaleShareError
+from app.domain.exceptions import MissingShareError, ModelDataUnavailableError, StaleShareError
+from app.domain.provenance import Provenance
 from app.ports.allocation_repository import AllocationRepositoryPort
 from app.services.model_registry import ModelRegistry
 from app.services.prime_risk_capital_service import PrimeRiskCapitalService
@@ -40,6 +41,26 @@ class _FakeModel:
     async def compute(self, asset_id, prime_id, overrides):
         self.computed_ids.append(asset_id)
         return SimpleNamespace(rrc_usd=self._rrc, comparable_crr_pct=self._crr, risk_model=self.risk_model)
+
+
+class _UnavailableModel:
+    """A model that structurally applies but has no data to compute from.
+
+    Mirrors ``CoreModelRiskService`` before the runner cronjob has populated a
+    market: ``applies_to`` (via ``asset_to_market_key``) says yes, but
+    ``compute`` raises ``ModelDataUnavailableError`` — the signal
+    ``PrimeRiskCapitalService`` falls through to the next preferred model on.
+    """
+
+    def __init__(self, name: str, applies_ids: set[int]) -> None:
+        self.risk_model = name
+        self._ids = applies_ids
+
+    def applies_to(self, asset_id: int, prime_id: EthAddress) -> bool:
+        return asset_id in self._ids
+
+    async def compute(self, asset_id, prime_id, overrides):
+        raise ModelDataUnavailableError(f"no data for asset_id={asset_id}")
 
 
 class _FakeRegistry:
@@ -465,7 +486,10 @@ async def test_compute_mixes_modeled_and_unmodeled_allocations():
 
     result = await service.compute(_PRIME)
 
-    assert result.model == "gap_sweep"
+    # The top-level ``model`` names indexed's preference (core_model), not what
+    # actually priced this prime's positions — see the model-preference tests
+    # below for the per-allocation / fallback behavior.
+    assert result.model == "core_model"
     assert result.exposure_usd == Decimal("1000")
     assert result.total_risk_capital_usd == Decimal("100")
     assert result.required_risk_capital_usd == Decimal("30")
@@ -829,3 +853,130 @@ async def test_prime_compute_unaffected_for_non_crypto_lending_models():
 
     assert fake.computed_ids == [1]
     assert result.required_risk_capital_usd == Decimal("7")
+
+
+# ----------------------------------------------------------------------
+# Provenance-conditional model preference
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_compute_indexed_prefers_core_model_over_gap_sweep():
+    positions = [make_receipt_token_position(receipt_token_id=1, symbol="spUSDT", amount_usd=Decimal("100"))]
+    registry = _FakeRegistry(
+        [
+            _FakeModel("core_model", {1}, rrc=Decimal("50"), crr=Decimal("8")),
+            _FakeModel("gap_sweep", {1}, rrc=Decimal("30"), crr=Decimal("5")),
+        ]
+    )
+    service = _service(_repo(positions, Decimal("1000")), registry)
+
+    result = await service.compute(_PRIME, Provenance.INDEXED)
+
+    assert result.per_allocation[0].model == "core_model"
+    assert result.required_risk_capital_usd == Decimal("50")
+
+
+@pytest.mark.asyncio
+async def test_compute_indexed_falls_back_to_gap_sweep_when_core_does_not_apply():
+    """core_model is absent from the registry entirely (structural non-applicability)."""
+    positions = [make_receipt_token_position(receipt_token_id=1, symbol="spUSDT", amount_usd=Decimal("100"))]
+    registry = _FakeRegistry([_FakeModel("gap_sweep", {1}, rrc=Decimal("30"), crr=Decimal("5"))])
+    service = _service(_repo(positions, Decimal("1000")), registry)
+
+    result = await service.compute(_PRIME, Provenance.INDEXED)
+
+    assert result.per_allocation[0].model == "gap_sweep"
+    assert result.required_risk_capital_usd == Decimal("30")
+
+
+@pytest.mark.asyncio
+async def test_compute_indexed_falls_back_to_gap_sweep_when_core_has_no_data():
+    """core_model applies but its precomputed table is empty (ModelDataUnavailableError)."""
+    positions = [make_receipt_token_position(receipt_token_id=1, symbol="spUSDT", amount_usd=Decimal("100"))]
+    registry = _FakeRegistry(
+        [
+            _UnavailableModel("core_model", {1}),
+            _FakeModel("gap_sweep", {1}, rrc=Decimal("30"), crr=Decimal("5")),
+        ]
+    )
+    service = _service(_repo(positions, Decimal("1000")), registry)
+
+    result = await service.compute(_PRIME, Provenance.INDEXED)
+
+    alloc = result.per_allocation[0]
+    assert alloc.applied is True
+    assert alloc.model == "gap_sweep"
+    assert alloc.required_risk_capital_usd == Decimal("30")
+    assert result.required_risk_capital_usd == Decimal("30")
+
+
+@pytest.mark.asyncio
+async def test_compute_indexed_reports_no_model_when_every_preferred_model_is_unavailable():
+    """core_model has no data and gap_sweep does not apply: the allocation stays unpriced."""
+    positions = [make_receipt_token_position(receipt_token_id=1, symbol="spUSDT", amount_usd=Decimal("100"))]
+    registry = _FakeRegistry([_UnavailableModel("core_model", {1})])
+    service = _service(_repo(positions, Decimal("1000")), registry)
+
+    result = await service.compute(_PRIME, Provenance.INDEXED)
+
+    alloc = result.per_allocation[0]
+    assert alloc.applied is False
+    assert alloc.required_risk_capital_usd is None
+    assert alloc.model is None
+    assert alloc.unpriced_reason == "no_model"
+
+
+@pytest.mark.asyncio
+async def test_compute_both_uses_core_model_and_never_gap_sweep():
+    """The composite view prefers core_model exclusively, even though gap_sweep applies too."""
+    positions = [make_receipt_token_position(receipt_token_id=1, symbol="spUSDT", amount_usd=Decimal("100"))]
+    registry = _FakeRegistry(
+        [
+            _FakeModel("core_model", {1}, rrc=Decimal("50"), crr=Decimal("8")),
+            _FakeModel("gap_sweep", {1}, rrc=Decimal("30"), crr=Decimal("5")),
+        ]
+    )
+    service = _service(_repo(positions, Decimal("1000")), registry)
+
+    result = await service.compute(_PRIME, Provenance.BOTH)
+
+    assert result.per_allocation[0].model == "core_model"
+    assert result.required_risk_capital_usd == Decimal("50")
+
+
+@pytest.mark.asyncio
+async def test_compute_both_leaves_the_allocation_null_when_core_model_has_no_data():
+    """gap_sweep must never leak into the composite view, even as a fallback: a
+    null model figure there is the intended signal for the UI's reference
+    fallback (``preferReference``), not a gap that gap_sweep should fill."""
+    positions = [make_receipt_token_position(receipt_token_id=1, symbol="spUSDT", amount_usd=Decimal("100"))]
+    registry = _FakeRegistry(
+        [
+            _UnavailableModel("core_model", {1}),
+            _FakeModel("gap_sweep", {1}, rrc=Decimal("30"), crr=Decimal("5")),
+        ]
+    )
+    service = _service(_repo(positions, Decimal("1000")), registry)
+
+    result = await service.compute(_PRIME, Provenance.BOTH)
+
+    alloc = result.per_allocation[0]
+    assert alloc.applied is False
+    assert alloc.required_risk_capital_usd is None
+    assert alloc.model is None
+    assert alloc.unpriced_reason == "no_model"
+    assert result.required_risk_capital_usd == Decimal("0")
+
+
+@pytest.mark.parametrize("source", [Provenance.INDEXED, Provenance.BOTH])
+@pytest.mark.asyncio
+async def test_compute_names_indexed_preference_as_the_top_level_model(source):
+    """The top-level ``model`` is the view's preference, not a per-run tally."""
+    positions = [make_receipt_token_position(receipt_token_id=1, symbol="spUSDT", amount_usd=Decimal("100"))]
+    registry = _FakeRegistry([_FakeModel("gap_sweep", {1}, rrc=Decimal("30"), crr=Decimal("5"))])
+    service = _service(_repo(positions, Decimal("1000")), registry)
+
+    result = await service.compute(_PRIME, source)
+
+    assert result.model == "core_model"

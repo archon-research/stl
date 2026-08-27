@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.domain.entities.allocation import EthAddress
+from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.reference_position import ReferencePosition
 from app.services.reference_positions_service import (
     _RESOLVE_CONCURRENCY,
@@ -39,6 +40,20 @@ def _position(
     )
 
 
+def _receipt_token_info(receipt_token_id: int) -> ReceiptTokenInfo:
+    return ReceiptTokenInfo(
+        receipt_token_id=receipt_token_id,
+        protocol_id=1,
+        underlying_token_id=7,
+        receipt_token_address=bytes.fromhex("cd" * 20),
+        chain_id=1,
+        protocol_name="sparklend",
+        receipt_token_token_id=None,
+        underlying_token_address=bytes.fromhex("77" * 20),
+        underlying_symbol="USDT",
+    )
+
+
 def _service(
     *,
     positions: tuple[ReferencePosition, ...] = (),
@@ -54,7 +69,7 @@ def _service(
 
     receipt_tokens = AsyncMock()
     receipt_tokens.get_by_chain_and_address.return_value = (
-        None if receipt_token_id is None else AsyncMock(receipt_token_id=receipt_token_id)
+        None if receipt_token_id is None else _receipt_token_info(receipt_token_id)
     )
 
     directory = AsyncMock()
@@ -108,6 +123,20 @@ async def test_attaches_stls_receipt_token_id(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_attaches_the_lookups_underlying_identity(monkeypatch):
+    # The adapter's query already joins the underlying `token` row alongside the
+    # receipt token, so one lookup resolves both rather than a second per-row call.
+    monkeypatch.setattr("app.services.star_resolution.prime_name_for", lambda _: "spark")
+    service, _, _ = _service(positions=(_position(),), receipt_token_id=41)
+
+    (row,) = await service.get(_PROXY)
+
+    assert row.underlying_token_id == 7
+    assert row.underlying_token_address == "0x" + "77" * 20
+    assert row.underlying_symbol == "USDT"
+
+
+@pytest.mark.asyncio
 async def test_keeps_a_row_stl_does_not_index(monkeypatch):
     # Most of this feed is positions STL has no registry entry for — that is why
     # it carries 59 rows against the monitor's 11. An unresolved id must not drop
@@ -119,6 +148,9 @@ async def test_keeps_a_row_stl_does_not_index(monkeypatch):
 
     assert row.receipt_token_id is None
     assert row.symbol == "spUSDS"
+    assert row.underlying_token_id is None
+    assert row.underlying_token_address is None
+    assert row.underlying_symbol == ""
 
 
 @pytest.mark.asyncio

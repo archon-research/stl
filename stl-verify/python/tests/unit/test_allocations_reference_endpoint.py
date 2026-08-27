@@ -39,6 +39,9 @@ def _reference_position(
     receipt_token_id: int | None = 41,
     chain_id: int | None = 1,
     chain: str | None = "mainnet",
+    underlying_token_id: int | None = None,
+    underlying_token_address: str | None = None,
+    underlying_symbol: str = "",
 ) -> ReferencePosition:
     return ReferencePosition(
         protocol_name="sparklend",
@@ -52,6 +55,9 @@ def _reference_position(
         receipt_token_id=receipt_token_id,
         chain_id=chain_id,
         chain=chain,
+        underlying_token_id=underlying_token_id,
+        underlying_token_address=underlying_token_address,
+        underlying_symbol=underlying_symbol,
     )
 
 
@@ -97,6 +103,42 @@ def test_reference_mode_serves_upstream_positions_in_the_allocation_shape(refere
     assert row["chain_id"] == 1
 
 
+@pytest.mark.parametrize(
+    "reference_client",
+    [
+        _positions(
+            _reference_position(
+                underlying_token_id=7,
+                underlying_token_address="0x" + "77" * 20,
+                underlying_symbol="USDT",
+            )
+        )
+    ],
+    indirect=True,
+)
+def test_reference_mode_serves_underlying_identity_when_the_position_resolves(reference_client):
+    # Sky names no loan token of its own; this comes from the service resolving
+    # the position against STL's receipt-token registry.
+    client, _ = reference_client
+
+    body = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?reference=true").json()
+
+    assert body[0]["underlying_token_id"] == 7
+    assert body[0]["underlying_token_address"] == "0x" + "77" * 20
+    assert body[0]["underlying_symbol"] == "USDT"
+
+
+@pytest.mark.parametrize("reference_client", [_positions()], indirect=True)
+def test_reference_mode_leaves_underlying_null_when_the_position_is_unresolved(reference_client):
+    client, _ = reference_client
+
+    body = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?reference=true").json()
+
+    assert body[0]["underlying_token_id"] is None
+    assert body[0]["underlying_token_address"] is None
+    assert body[0]["underlying_symbol"] == ""
+
+
 @pytest.mark.parametrize("reference_client", [_positions()], indirect=True)
 def test_reference_mode_reports_no_balance_because_upstream_has_no_token_quantity(reference_client):
     client, _ = reference_client
@@ -104,6 +146,15 @@ def test_reference_mode_reports_no_balance_because_upstream_has_no_token_quantit
     body = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?reference=true").json()
 
     assert body[0]["balance"] is None
+
+
+@pytest.mark.parametrize("reference_client", [_positions()], indirect=True)
+def test_reference_mode_stamps_reference_provenance_on_each_row(reference_client):
+    client, _ = reference_client
+
+    body = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?reference=true").json()
+
+    assert body[0]["source"] == "reference"
 
 
 @pytest.mark.parametrize("reference_client", [_positions()], indirect=True)
