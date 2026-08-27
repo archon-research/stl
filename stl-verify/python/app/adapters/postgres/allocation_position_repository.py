@@ -971,7 +971,8 @@ class AllocationRepository:
               AND ap.proxy_address IN :subproxy_addrs
               AND t.address = decode(:usds_hex, 'hex')
             ORDER BY ap.block_number DESC, ap.block_version DESC,
-                     ap.processing_version DESC, ap.log_index DESC
+                     ap.processing_version DESC, ap.log_index DESC,
+                     ap.direction DESC, ap.tx_hash DESC
             LIMIT 1
             """
         ).bindparams(bindparam("subproxy_addrs", expanding=True))
@@ -1192,9 +1193,14 @@ class AllocationRepository:
 #     Inlined, the planner re-scans allocation_position per surviving row and pays
 #     the whole chunk fan-out every time.
 #
-# Rows tied on the full ordering key (legal: a self-transfer emits an out-row and
-# an in-row at one log_index, and sweep rows land at log_index 0) are still broken
-# arbitrarily, as they were before the staging.
+# ``direction`` and ``tx_hash`` end the ordering because log_index does not: at a
+# single log_index a self-transfer emits both an out-row and an in-row, and a
+# sweep — which carries log_index 0 and a zero tx_hash — collides with an event
+# row there. A sweep wins that collision, being a reconciled balance read rather
+# than a per-event derivation; it does not outrank an event row at a HIGHER
+# log_index, which log_index has already decided. Together these settle every tie
+# one (chain_id, token_id, proxy_address) can produce; rows differing only in
+# prime_id or created_at stay tied, and no proxy produces those.
 _RECEIPT_TOKEN_POSITIONS_SQL = text("""
     WITH latest_position_block AS MATERIALIZED (
         SELECT ap.chain_id, ap.token_id, MAX(ap.block_number) AS block_number
@@ -1205,7 +1211,8 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
     latest_positions AS MATERIALIZED (
         SELECT ap.chain_id, ap.token_id, ap.balance, ap.underlying_value,
                ap.underlying_token_id, ap.created_at, ap.direction, ap.tx_amount,
-               ap.block_number, ap.block_version, ap.processing_version, ap.log_index
+               ap.block_number, ap.block_version, ap.processing_version, ap.log_index,
+               ap.tx_hash
         FROM allocation_position ap
         WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
           AND (ap.chain_id, ap.token_id, ap.block_number) IN (
@@ -1236,7 +1243,8 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
         JOIN protocol pr      ON pr.id = rt.protocol_id AND pr.chain_id = ap.chain_id
         ORDER BY rt.id,
                  ap.block_number DESC, ap.block_version DESC,
-                 ap.processing_version DESC, ap.log_index DESC
+                 ap.processing_version DESC, ap.log_index DESC,
+                 ap.direction DESC, ap.tx_hash DESC
     )
     SELECT
         p.chain_id,
@@ -1307,8 +1315,19 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
 # join): either all three columns emit or none do, because ``token.symbol`` is
 # nullable and a partial identity would let the endpoint compose a hybrid of
 # underlying id/address with the held token's symbol.
+#
+# Latest-row staging and ordering: same reasons as _RECEIPT_TOKEN_POSITIONS_SQL,
+# with the grouping key matching this query's own dedup key (token_id). Only the
+# aggregate needs MATERIALIZED here — the stage that reads the history carries the
+# DISTINCT ON, which the planner cannot pull up, so it is already scanned once.
 _DIRECT_ASSET_HOLDINGS_SQL = text("""
-    WITH latest_positions AS (
+    WITH latest_position_block AS MATERIALIZED (
+        SELECT ap.token_id, MAX(ap.block_number) AS block_number
+        FROM allocation_position ap
+        WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
+        GROUP BY ap.token_id
+    ),
+    latest_positions AS (
         SELECT DISTINCT ON (ap.token_id)
             ap.chain_id,
             ap.token_id,
@@ -1320,9 +1339,13 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
             ap.tx_amount AS latest_activity_amount
         FROM allocation_position ap
         WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
+          AND (ap.token_id, ap.block_number) IN (
+              SELECT b.token_id, b.block_number FROM latest_position_block b
+          )
         ORDER BY ap.token_id,
                  ap.block_number DESC, ap.block_version DESC,
-                 ap.processing_version DESC, ap.log_index DESC
+                 ap.processing_version DESC, ap.log_index DESC,
+                 ap.direction DESC, ap.tx_hash DESC
     )
     SELECT
         lp.chain_id,
@@ -1523,7 +1546,8 @@ WITH latest_position AS (
     JOIN protocol p ON p.id = rt.protocol_id AND p.chain_id = ap.chain_id
     WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
     ORDER BY ap.block_number DESC, ap.block_version DESC,
-             ap.processing_version DESC, ap.log_index DESC
+             ap.processing_version DESC, ap.log_index DESC,
+             ap.direction DESC, ap.tx_hash DESC
     LIMIT 1
 ),
 latest_price AS (
@@ -1559,9 +1583,26 @@ WHERE lb.balance > 0
 # Redeemable-value basis; rationale (incl. the divergence refusal) on
 # _RECEIPT_TOKEN_POSITIONS_SQL. A refused or unpriced position contributes
 # nothing to the SUM (NULL terms are skipped), matching the positions list
-# where it shows as NULL amount_usd.
+# where it shows as NULL amount_usd. Latest-row staging and ordering: same
+# construction, and same reasons, as _RECEIPT_TOKEN_POSITIONS_SQL.
 _TOTAL_USD_EXPOSURE_SQL = text("""
-WITH latest_receipt_positions AS (
+WITH latest_position_block AS MATERIALIZED (
+    SELECT ap.chain_id, ap.token_id, MAX(ap.block_number) AS block_number
+    FROM allocation_position ap
+    WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
+    GROUP BY ap.chain_id, ap.token_id
+),
+latest_positions AS MATERIALIZED (
+    SELECT ap.chain_id, ap.token_id, ap.balance, ap.underlying_value,
+           ap.underlying_token_id, ap.block_number, ap.block_version,
+           ap.processing_version, ap.log_index, ap.direction, ap.tx_hash
+    FROM allocation_position ap
+    WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
+      AND (ap.chain_id, ap.token_id, ap.block_number) IN (
+          SELECT b.chain_id, b.token_id, b.block_number FROM latest_position_block b
+      )
+),
+latest_receipt_positions AS (
     SELECT DISTINCT ON (rt.id)
         rt.id                  AS receipt_token_id,
         rt.underlying_token_id AS underlying_token_id,
@@ -1569,14 +1610,14 @@ WITH latest_receipt_positions AS (
         ap.balance,
         ap.underlying_value,
         ap.underlying_token_id AS position_underlying_token_id
-    FROM allocation_position ap
+    FROM latest_positions ap
     JOIN token t          ON t.id = ap.token_id
     JOIN receipt_token rt ON rt.receipt_token_address = t.address AND rt.chain_id = ap.chain_id
     JOIN protocol pr      ON pr.id = rt.protocol_id AND pr.chain_id = ap.chain_id
-    WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
     ORDER BY rt.id,
              ap.block_number DESC, ap.block_version DESC,
-             ap.processing_version DESC, ap.log_index DESC
+             ap.processing_version DESC, ap.log_index DESC,
+             ap.direction DESC, ap.tx_hash DESC
 )
 SELECT COALESCE(SUM(
     CASE
