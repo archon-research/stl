@@ -10,16 +10,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// Covers the *_current caches from 20260820_120000_create_current_position_tables.sql
-// through the production write path — the batched, natural-key-sorted repository
-// inserts — rather than hand-written SQL. The trigger semantics themselves are
-// covered per-row in python/tests/integration/repositories/test_current_position_tables.py;
+// Covers the *_current caches (20260820_120000_create_current_position_tables.sql
+// and its per-cache siblings) through the production write path — the batched,
+// natural-key-sorted repository inserts — rather than hand-written SQL. The trigger
+// semantics themselves are covered per-row in python/tests/integration/repositories/
+// (test_current_position_tables.py and the per-cache test_*_current.py modules);
 // what only shows up here is batching, chunk compression, and cross-writer locking.
 
 const currentTablesDBName = "test_current_tables"
@@ -60,11 +63,12 @@ func withCurrentTablesPool(t *testing.T) {
 	})
 }
 
-// currentTablesFixture holds the FK rows the histories need plus the two
+// currentTablesFixture holds the FK rows the histories need plus the
 // production writers under test.
 type currentTablesFixture struct {
 	positionRepo *PositionRepository
 	priceRepo    *OnchainPriceRepository
+	supplyRepo   *TokenTotalSupplyRepository
 	protocolID   int64
 	userID       int64
 	tokenIDs     [2]int64
@@ -83,8 +87,17 @@ func setupCurrentTables(t *testing.T) *currentTablesFixture {
 	if err != nil {
 		t.Fatalf("new onchain price repository: %v", err)
 	}
+	tokenRepo, err := NewTokenRepository(currentTablesPool, nil, 0)
+	if err != nil {
+		t.Fatalf("new token repository: %v", err)
+	}
+	txm, err := NewTxManager(currentTablesPool, nil)
+	if err != nil {
+		t.Fatalf("new tx manager: %v", err)
+	}
+	supplyRepo := NewTokenTotalSupplyRepository(currentTablesPool, txm, tokenRepo, nil, buildregistry.BuildID(1))
 
-	f := &currentTablesFixture{positionRepo: positionRepo, priceRepo: priceRepo}
+	f := &currentTablesFixture{positionRepo: positionRepo, priceRepo: priceRepo, supplyRepo: supplyRepo}
 	f.seedRegistries(t, ctx)
 	return f
 }
@@ -98,6 +111,7 @@ func resetCurrentTables(t *testing.T, ctx context.Context) {
 		"borrower", "borrower_current",
 		"borrower_collateral", "borrower_collateral_current",
 		"onchain_token_price", "token_price_current",
+		"token_total_supply", "token_total_supply_current",
 	} {
 		if _, err := currentTablesPool.Exec(ctx, `DELETE FROM `+table); err != nil {
 			t.Fatalf("clear %s: %v", table, err)
@@ -208,6 +222,16 @@ func (f *currentTablesFixture) cachedDebt(t *testing.T, ctx context.Context, tok
 	return amount, block
 }
 
+// cacheProjections narrows a cache to the columns it copies from history, for
+// the caches that carry more: token_total_supply_current's updated_at is its own
+// write time, which no history row has. Absent means the whole table.
+var cacheProjections = map[string]string{
+	"token_total_supply_current": `
+		SELECT chain_id, token_id, total_supply, scaled_total_supply, block_timestamp,
+		       block_number, block_version, processing_version
+		FROM token_total_supply_current`,
+}
+
 // assertCachesMatchHistory is the invariant the whole design rests on: each cache
 // holds exactly "newest row per key" over its history, nothing more and nothing
 // stale. Symmetric EXCEPT so a missing row and a stale row are distinguishable.
@@ -235,14 +259,25 @@ func assertCachesMatchHistory(t *testing.T, ctx context.Context) {
 			FROM onchain_token_price
 			ORDER BY oracle_id, token_id,
 			         block_number DESC, block_version DESC, processing_version DESC`},
+		{"token_total_supply_current", `
+			SELECT DISTINCT ON (chain_id, token_id)
+			       chain_id, token_id, total_supply, scaled_total_supply, block_timestamp,
+			       block_number, block_version, processing_version
+			FROM token_total_supply
+			ORDER BY chain_id, token_id,
+			         block_number DESC, block_version DESC, processing_version DESC`},
 	}
 
 	for _, c := range checks {
+		cache, ok := cacheProjections[c.table]
+		if !ok {
+			cache = "TABLE " + c.table
+		}
 		query := fmt.Sprintf(`
 			WITH newest AS (%s)
-			SELECT (SELECT count(*) FROM (TABLE newest EXCEPT TABLE %s) a),
-			       (SELECT count(*) FROM (TABLE %s EXCEPT TABLE newest) b)`,
-			c.newest, c.table, c.table)
+			SELECT (SELECT count(*) FROM (TABLE newest EXCEPT %s) a),
+			       (SELECT count(*) FROM (%s EXCEPT TABLE newest) b)`,
+			c.newest, cache, cache)
 
 		var historyNotInCache, cacheNotInHistory int
 		if err := currentTablesPool.QueryRow(ctx, query).Scan(&historyNotInCache, &cacheNotInHistory); err != nil {
@@ -284,8 +319,18 @@ func TestCurrentTables_ProductionWritePath_CachesNewestPerKey(t *testing.T) {
 		t.Fatalf("UpsertPrices: %v", err)
 	}
 
+	for _, block := range []int64{100, 200, 300} {
+		f.saveSupplies(t, ctx,
+			f.supplyAt(0, block, block*50),
+			f.supplyAt(1, block, block*60),
+		)
+	}
+
 	if amount, block := f.cachedDebt(t, ctx, 0); amount != "3000" || block != 300 {
 		t.Errorf("borrower_current for token 0: got amount %s at block %d, want 3000 at 300", amount, block)
+	}
+	if supply, block := f.cachedSupply(t, ctx, 0); supply != "15000" || block != 300 {
+		t.Errorf("token_total_supply_current for token 0: got supply %s at block %d, want 15000 at 300", supply, block)
 	}
 	assertCachesMatchHistory(t, ctx)
 }
@@ -438,6 +483,141 @@ func (f *currentTablesFixture) trySaveBorrowers(ctx context.Context, rows ...*en
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// supplyAt builds a supply observation for one of two tokens minted here rather
+// than taken from seedRegistries: SaveSupplies resolves addresses through
+// GetOrCreateToken. Zero decimals, so the cached numeric reads back as written;
+// a scaled supply too, so the cache's copy of it is compared rather than NULL.
+func (f *currentTablesFixture) supplyAt(tokenIdx int, block int64, supply int64) *entity.TokenTotalSupply {
+	return &entity.TokenTotalSupply{
+		ChainID:           1,
+		TokenAddress:      supplyTokenAddress(tokenIdx),
+		TokenSymbol:       fmt.Sprintf("TS%d", tokenIdx),
+		TokenDecimals:     0,
+		TotalSupply:       big.NewInt(supply),
+		ScaledTotalSupply: big.NewInt(supply / 2),
+		BlockNumber:       block,
+		BlockVersion:      0,
+		BlockTimestamp:    time.Unix(1700000000+block, 0).UTC(),
+		Source:            "sweep",
+		CreatedAtBlock:    block,
+	}
+}
+
+func supplyTokenAddress(tokenIdx int) common.Address {
+	return common.BytesToAddress([]byte{0x88, byte(tokenIdx)})
+}
+
+func (f *currentTablesFixture) saveSupplies(t *testing.T, ctx context.Context, rows ...*entity.TokenTotalSupply) {
+	t.Helper()
+	if err := f.trySaveSupplies(ctx, rows...); err != nil {
+		t.Fatalf("SaveSupplies: %v", err)
+	}
+}
+
+func (f *currentTablesFixture) trySaveSupplies(ctx context.Context, rows ...*entity.TokenTotalSupply) error {
+	tx, err := currentTablesPool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := f.supplyRepo.SaveSupplies(ctx, tx, rows); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (f *currentTablesFixture) cachedSupply(t *testing.T, ctx context.Context, tokenIdx int) (supply string, block int64) {
+	t.Helper()
+	if err := currentTablesPool.QueryRow(ctx,
+		`SELECT c.total_supply::text, c.block_number
+		 FROM token_total_supply_current c
+		 JOIN token tk ON tk.id = c.token_id AND tk.chain_id = c.chain_id
+		 WHERE tk.address = $1`,
+		supplyTokenAddress(tokenIdx).Bytes(),
+	).Scan(&supply, &block); err != nil {
+		t.Fatalf("read token_total_supply_current: %v", err)
+	}
+	return supply, block
+}
+
+// TestCurrentTables_ProductionWritePath_SupplyBackfillDoesNotRegress is the
+// out-of-order case for token_total_supply_current through the batched writer: a
+// redelivered batch below the live block must leave the cache on the newer row.
+func TestCurrentTables_ProductionWritePath_SupplyBackfillDoesNotRegress(t *testing.T) {
+	withCurrentTablesPool(t)
+	ctx := context.Background()
+	f := setupCurrentTables(t)
+
+	f.saveSupplies(t, ctx, f.supplyAt(0, 500, 5000))
+
+	f.saveSupplies(t, ctx,
+		f.supplyAt(0, 100, 1000),
+		f.supplyAt(0, 200, 2000),
+		f.supplyAt(0, 300, 3000),
+	)
+
+	supply, block := f.cachedSupply(t, ctx, 0)
+	if supply != "5000" || block != 500 {
+		t.Errorf("backfill regressed the cache: got supply %s at block %d, want 5000 at 500", supply, block)
+	}
+	assertCachesMatchHistory(t, ctx)
+}
+
+// TestCurrentTables_ConcurrentOverlappingSupplyWritersDoNotDeadlock is the
+// borrower test's counterpart for token_total_supply_current: the cache row lock
+// is keyed on (chain, token) alone, so two tracker processes writing the same
+// tokens at different blocks (a rolling-deploy overlap) contend on it, and
+// SaveSupplies' natural-key sort is what keeps their token-row and cache-row lock
+// order the same. Shuffled input per writer, so the test fails if that sort is
+// ever dropped.
+func TestCurrentTables_ConcurrentOverlappingSupplyWritersDoNotDeadlock(t *testing.T) {
+	withCurrentTablesPool(t)
+	ctx := context.Background()
+	f := setupCurrentTables(t)
+
+	// Register the tokens first: concurrent GetOrCreateToken of an absent token is
+	// its own race, and this test is about the cache rows.
+	f.saveSupplies(t, ctx, f.supplyAt(0, 3999, 1), f.supplyAt(1, 3999, 1))
+
+	const rounds = 20
+	for round := 0; round < rounds; round++ {
+		liveBlock := int64(4000 + round*2)
+		sweepBlock := int64(4001 + round*2)
+
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			errs[0] = f.trySaveSupplies(ctx,
+				f.supplyAt(0, liveBlock, 10),
+				f.supplyAt(1, liveBlock, 10),
+			)
+		}()
+		go func() {
+			defer wg.Done()
+			errs[1] = f.trySaveSupplies(ctx,
+				f.supplyAt(1, sweepBlock, 20),
+				f.supplyAt(0, sweepBlock, 20),
+			)
+		}()
+		wg.Wait()
+
+		for i, err := range errs {
+			if testutil.IsDeadlock(err) {
+				t.Fatalf("round %d, writer %d deadlocked: %v — SaveSupplies' natural-key sort is what keeps the cache row locks in a caller-stable order", round, i, err)
+			}
+			if err != nil {
+				t.Fatalf("round %d, writer %d: %v", round, i, err)
+			}
+		}
+	}
+
+	assertCachesMatchHistory(t, ctx)
 }
 
 // TestCurrentTables_NegativeControl_ReverseKeyOrderDeadlocks proves the test above
