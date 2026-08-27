@@ -5,7 +5,13 @@ import (
 	"time"
 
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 )
+
+// unreachableDSN parses as a valid pool config but is never dialled: these tests
+// only inspect what buildPoolConfig produced.
+const unreachableDSN = "postgres://user:pass@localhost:5432/db"
 
 // TestBuildPoolConfig_TimeoutsNotStartupParams pins the invariant behind the
 // 2026-06-19 staging crashloop: lock_timeout/statement_timeout must NOT ride the
@@ -14,7 +20,7 @@ import (
 // lock_timeout"), so the timeouts must be applied with a post-connect SET via
 // AfterConnect instead.
 func TestBuildPoolConfig_TimeoutsNotStartupParams(t *testing.T) {
-	cfg := WorkerDBConfig("postgres://u:p@localhost:5432/db")
+	cfg := WorkerDBConfig(unreachableDSN)
 	cfg.StatementTimeout = 45 * time.Second
 
 	pc, err := buildPoolConfig(cfg)
@@ -34,7 +40,7 @@ func TestBuildPoolConfig_TimeoutsNotStartupParams(t *testing.T) {
 }
 
 func TestBuildPoolConfig_NoTimeoutsNoAfterConnect(t *testing.T) {
-	pc, err := buildPoolConfig(DefaultDBConfig("postgres://u:p@localhost:5432/db"))
+	pc, err := buildPoolConfig(DefaultDBConfig(unreachableDSN))
 	if err != nil {
 		t.Fatalf("buildPoolConfig: %v", err)
 	}
@@ -44,8 +50,8 @@ func TestBuildPoolConfig_NoTimeoutsNoAfterConnect(t *testing.T) {
 	}
 }
 
-func TestBuildPoolConfigAttachesQueryTracer(t *testing.T) {
-	poolConfig, err := buildPoolConfig(DefaultDBConfig("postgres://user:pass@localhost:5432/db"))
+func TestBuildPoolConfig_AttachesQueryTracer(t *testing.T) {
+	poolConfig, err := buildPoolConfig(DefaultDBConfig(unreachableDSN))
 	if err != nil {
 		t.Fatalf("buildPoolConfig: %v", err)
 	}
@@ -58,9 +64,9 @@ func TestBuildPoolConfigAttachesQueryTracer(t *testing.T) {
 	}
 }
 
-func TestBuildPoolConfigUsesTheInjectedMeterProvider(t *testing.T) {
+func TestBuildPoolConfig_UsesTheInjectedMeterProvider(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
-	cfg := DefaultDBConfig("postgres://user:pass@localhost:5432/db")
+	cfg := DefaultDBConfig(unreachableDSN)
 	cfg.MeterProvider = sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
 	if _, err := buildPoolConfig(cfg); err != nil {
@@ -70,5 +76,29 @@ func TestBuildPoolConfigUsesTheInjectedMeterProvider(t *testing.T) {
 	counts := countsByAttr(t, reader, "db.query.errors.total", "error_class")
 	if len(counts) != len(errorClasses) {
 		t.Errorf("seeded classes on the injected provider = %v, want %v", counts, errorClasses)
+	}
+}
+
+// Most binaries open their pool before telemetry installs the exporting meter
+// provider. otel re-delegates the instruments created beforehand but never
+// replays the measurements recorded through them, so a seed written at build
+// time reaches no exporter and the error_class series first appear with the
+// error they exist to make visible.
+//
+// This is the only test that installs a global meter provider; it must stay the
+// only one, since otel.SetMeterProvider takes effect once per process.
+func TestBuildPoolConfig_SeedsErrorClassesWhenTelemetryStartsLast(t *testing.T) {
+	if _, err := buildPoolConfig(DefaultDBConfig(unreachableDSN)); err != nil {
+		t.Fatalf("buildPoolConfig: %v", err)
+	}
+
+	reader := sdkmetric.NewManualReader()
+	telemetry.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+
+	counts := countsByAttr(t, reader, "db.query.errors.total", "error_class")
+	for _, class := range errorClasses {
+		if got, ok := counts[class]; !ok || got != 0 {
+			t.Errorf("error_class %q seeded = (%d, %v), want (0, true)", class, got, ok)
+		}
 	}
 }

@@ -155,3 +155,51 @@ func TestSecondsDurationBuckets(t *testing.T) {
 		t.Errorf("boundaries %v need a value > 30s so the >30s backup-worker alert can fire", b)
 	}
 }
+
+// resetStartupSeeds isolates a test from the process-wide seed registry.
+func resetStartupSeeds(t *testing.T) {
+	t.Helper()
+
+	startupSeeds.mu.Lock()
+	installed, pending := startupSeeds.installed, startupSeeds.pending
+	startupSeeds.installed, startupSeeds.pending = false, nil
+	startupSeeds.mu.Unlock()
+
+	t.Cleanup(func() {
+		startupSeeds.mu.Lock()
+		startupSeeds.installed, startupSeeds.pending = installed, pending
+		startupSeeds.mu.Unlock()
+	})
+}
+
+// A component built during startup registers its seed before InitMetrics
+// installs the exporting provider. otel re-delegates the instruments it created
+// but never replays what it recorded through them, so the seed only reaches an
+// exporter if something re-runs it here.
+func TestOnMeterProviderReady_DefersSeedsUntilTheProviderIsInstalled(t *testing.T) {
+	resetStartupSeeds(t)
+
+	var seeded int
+	OnMeterProviderReady(func() { seeded++ })
+	if seeded != 0 {
+		t.Fatalf("seed ran %d times before the provider was installed, want 0", seeded)
+	}
+
+	runStartupSeeds()
+
+	if seeded != 1 {
+		t.Errorf("seed ran %d times after the provider was installed, want 1", seeded)
+	}
+}
+
+func TestOnMeterProviderReady_RunsSeedsRegisteredAfterTheProviderIsInstalled(t *testing.T) {
+	resetStartupSeeds(t)
+	runStartupSeeds()
+
+	var seeded int
+	OnMeterProviderReady(func() { seeded++ })
+
+	if seeded != 1 {
+		t.Errorf("seed ran %d times, want 1", seeded)
+	}
+}

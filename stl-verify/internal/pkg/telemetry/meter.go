@@ -3,10 +3,12 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
+	otelmetric "go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
@@ -32,6 +34,7 @@ func InitMetrics(ctx context.Context, config MetricConfig) (shutdown func(contex
 	if config.OTLPEndpoint == "" {
 		// If no endpoint, use a no-op provider or stdout?
 		// For now, we'll just return with no error and default no-op provider.
+		runStartupSeeds()
 		return func(_ context.Context) error { return nil }, nil
 	}
 
@@ -64,9 +67,59 @@ func InitMetrics(ctx context.Context, config MetricConfig) (shutdown func(contex
 		metric.WithView(secondsHistogramView()),
 	)
 
-	otel.SetMeterProvider(meterProvider)
+	SetMeterProvider(meterProvider)
 
 	return meterProvider.Shutdown, nil
+}
+
+// startupSeeds holds the seeds registered before the exporting meter provider
+// was installed, and the flag that makes later registrations run immediately.
+var startupSeeds struct {
+	mu        sync.Mutex
+	installed bool
+	pending   []func()
+}
+
+// SetMeterProvider installs mp globally and runs every seed registered with
+// OnMeterProviderReady. Always install through this rather than
+// otel.SetMeterProvider: otel re-delegates instruments created earlier but does
+// not replay the measurements recorded through them, so the seeds have to run
+// here or not at all.
+func SetMeterProvider(mp otelmetric.MeterProvider) {
+	otel.SetMeterProvider(mp)
+	runStartupSeeds()
+}
+
+// OnMeterProviderReady runs seed once the exporting meter provider is installed,
+// or immediately if it already is.
+//
+// A "seed" is an Add(ctx, 0) whose only job is to create a series so increase()
+// can observe its first real increment. Until SetMeterProvider runs,
+// otel.GetMeterProvider hands out delegating placeholders whose Add is a no-op
+// (otel v1.44.0 internal/global/instruments.go, siCounter.Add) — so a seed
+// written by a component built during startup, before telemetry is wired, is
+// dropped. Registering it here removes that ordering constraint.
+func OnMeterProviderReady(seed func()) {
+	startupSeeds.mu.Lock()
+	if startupSeeds.installed {
+		startupSeeds.mu.Unlock()
+		seed()
+		return
+	}
+	startupSeeds.pending = append(startupSeeds.pending, seed)
+	startupSeeds.mu.Unlock()
+}
+
+func runStartupSeeds() {
+	startupSeeds.mu.Lock()
+	startupSeeds.installed = true
+	pending := startupSeeds.pending
+	startupSeeds.pending = nil
+	startupSeeds.mu.Unlock()
+
+	for _, seed := range pending {
+		seed()
+	}
 }
 
 // SecondsDurationBuckets are explicit histogram bucket boundaries (in seconds)
