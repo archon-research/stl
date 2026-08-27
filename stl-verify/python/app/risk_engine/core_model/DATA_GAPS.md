@@ -8,9 +8,11 @@ they are a snapshot from **14 Aug 2026**.
 The model needs three inputs per market: borrower positions, daily price
 history, and sell-side order book depth. Galaxy is excluded throughout — it is
 explicitly disabled in `inputs/market_configs.json` (see `_galaxy_disabled`).
+`morpho_cbbtc-usdc` is likewise excluded (see §5) — it is a memory pathology,
+not a data gap, but the market key drops out of the enabled set the same way.
 
-Collateral set required by the 9 enabled markets:
-`BTC, CBBTC, EZETH, HYPE, LBTC, RETH, RSETH, TBTC, WBTC, WEETH, WETH, WSTETH, XRP`
+Collateral set required by the 8 enabled markets:
+`BTC, EZETH, HYPE, LBTC, RETH, RSETH, TBTC, WBTC, WEETH, WETH, WSTETH, XRP`
 
 ---
 
@@ -103,7 +105,7 @@ JITOSOL snapshots flowing from all three venues, latest under a minute old.
 **Prod configmaps still index only BTC/ETH** — mirror the staging expansion
 before flipping any of these markets live in prod.
 
-So order books now cover **all 9 enabled markets in staging**. The 2 Syrup
+So order books now cover **all 8 enabled markets in staging**. The 2 Syrup
 markets remain on parquet only because of positions + prices (see §1 and §3),
 no longer because of books.
 
@@ -212,6 +214,22 @@ To re-enable, Galaxy needs all of:
   shipped the ETH/SOL/JITOSOL parquet books, so before this there was no
   parquet fallback either.
 - **Prices**: SOL/JITOSOL/XRP rows in `offchain_price_asset` plus backfill.
+
+---
+
+## 5. morpho_cbbtc-usdc (excluded, VEC-662)
+
+Not a data gap — all three inputs are live (§1-§3) — but excluded from
+`market_configs.json` (`_morpho_cbbtc-usdc_disabled`, the `_galaxy_disabled`
+convention) as of the N_MC=10,000 staging confirmation (VEC-272). During the
+N_MC sizing measurement for that rollout ([PR #800](https://github.com/archon-research/stl/pull/800),
+"N_MC sizing measurement" section), this market exceeded a 21 GiB watchdog cap
+**without finishing**, both at N_MC=10,000 and at its own reduced `N_MC: 5000`
+override — every other market finishes well inside the envelope (worst is
+`morpho_weth-usdc` at 8.45 GiB). Suspected culprit is the liquidator/orderbook
+simulation path; see [VEC-662](https://linear.app/archontech/issue/VEC-662)
+for the investigation. Re-enable by renaming the key back once VEC-662
+resolves the pathology.
 
 ---
 

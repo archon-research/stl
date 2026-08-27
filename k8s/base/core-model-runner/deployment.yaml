@@ -42,18 +42,15 @@ spec:
           # in-process and single-threaded (forecaster.py pins the MC to
           # n_jobs=1 -- loky workers would multiply the per-scenario tensors;
           # the calibrator backtest still runs 4 joblib workers, hence the cpu
-          # limit). Memory scales with N_MC and accumulates across the 9
-          # markets of one "all" tick -- measured at N_MC=100: ~0.97 GiB for
-          # the full pass (~0.4 GiB heaviest single market); the 10000 default
-          # peaks at ~8.0 GiB on one market alone. Sized for the capped runs
-          # (dev and staging both pin N_MC=100 in their overlays); raising the
-          # cap must raise this limit with it, from a fresh full-pass
-          # measurement.
+          # limit). run_markets is sequential, so pod peak = worst single
+          # market: 8.45 GiB measured at N_MC=10000 (morpho_weth-usdc,
+          # morpho_cbbtc-usdc excluded pending VEC-662). See PR #800's "N_MC
+          # sizing measurement" section.
           resources:
             requests:
               cpu: "1"
-              memory: "1Gi"
+              memory: "9Gi"
             limits:
               cpu: "4"
-              memory: "2Gi"
+              memory: "12Gi"
       terminationGracePeriodSeconds: 60

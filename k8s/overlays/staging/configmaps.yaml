@@ -707,8 +707,11 @@ data:
   # The schedule lives in Temporal state; the worker reconciles a changed
   # interval into it on startup, so a redeploy is enough (stl-verify/AGENTS.md).
   CORE_MODEL_RUN_INTERVAL_HOURS: "24"
-  # Deliberately tiny while staging only validates the pipeline end to end:
-  # the pod's memory limit is sized for this cap (~1.0 GiB measured for a
-  # full 9-market tick; the N_MC=10000 default peaks at ~8.0 GiB on one
-  # market alone). Raise only together with the deployment's memory limit.
-  CORE_MODEL_N_MC: "100"
+  # Design point is 10000 (~10x less noise on published CRR/PL/PD than the
+  # old smoke-test cap of 100). Measured envelope: worst finishing market is
+  # morpho_weth-usdc at 8.45 GiB @10k (run_markets is sequential, so pod peak
+  # = worst single market, not a sum); morpho_cbbtc-usdc is excluded pending
+  # VEC-662 (memory pathology, does not finish). See PR #800's "N_MC sizing
+  # measurement" section. This staging tick confirms the container envelope
+  # before prod values lock.
+  CORE_MODEL_N_MC: "10000"
