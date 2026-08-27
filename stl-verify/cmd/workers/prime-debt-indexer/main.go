@@ -164,6 +164,17 @@ func run(ctx context.Context, args []string) error {
 	}))
 	slog.SetDefault(logger)
 
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    "prime-debt-indexer",
+		ServiceVersion: buildinfo.GitHash(),
+		BuildTime:      BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("init telemetry: %w", err)
+	}
+	defer shutdownOTEL(context.Background())
+
 	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{
 		StaticCredentialsFromEnv: true,
 	})
@@ -202,18 +213,6 @@ func run(ctx context.Context, args []string) error {
 		"buildTime", BuildTime,
 		"chainID", cfg.chainID,
 	)
-
-	// OpenTelemetry
-	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    "prime-debt-indexer",
-		ServiceVersion: buildReg.GitHash(),
-		BuildTime:      BuildTime,
-		Logger:         logger,
-	})
-	if err != nil {
-		return fmt.Errorf("init telemetry: %w", err)
-	}
-	defer shutdownOTEL(context.Background())
 
 	// Ethereum JSON-RPC client
 	ethClient, err := rpchttp.DialEthereum(ctx, cfg.rpcURL)
