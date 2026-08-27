@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.openapi.docs import get_swagger_ui_html, get_swagger_ui_oauth2_redirect_html
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import text
@@ -139,7 +139,23 @@ def _is_asset_path(requested_path: str) -> bool:
     return requested_path.split("/", 1)[0] == "assets"
 
 
-def configure_docs(application: FastAPI) -> None:
+def configure_docs(application: FastAPI, settings: Settings) -> None:
+    # With auth on, Swagger gets an Authorize button (authorization-code +
+    # PKCE against Keycloak) and the redirect page it needs. The redirect
+    # route is NOT auto-registered because docs_url=None — without it the
+    # OAuth flow dead-ends silently after login (ADR-015, app-code notes).
+    init_oauth = None
+    if settings.auth_enabled and settings.oidc_issuer:
+        init_oauth = {
+            "clientId": "swagger-ui",
+            "usePkceWithAuthorizationCodeGrant": True,
+            "scopes": "openid profile",
+        }
+
+        @application.get("/docs/oauth2-redirect", include_in_schema=False)
+        async def swagger_ui_redirect():
+            return get_swagger_ui_oauth2_redirect_html()
+
     @application.get("/docs", include_in_schema=False)
     async def swagger_ui_html():
         openapi_url = application.openapi_url or "/openapi.json"
@@ -147,6 +163,8 @@ def configure_docs(application: FastAPI) -> None:
             openapi_url=openapi_url,
             title=f"{application.title} - Swagger UI",
             swagger_favicon_url=DOCS_FAVICON_URL,
+            oauth2_redirect_url="/docs/oauth2-redirect" if init_oauth else None,
+            init_oauth=init_oauth,
         )
 
 
@@ -314,13 +332,30 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             routes=application.routes,
             tags=application.openapi_tags,
         )
-        application.openapi_schema = strip_internal_operations(full)
+        full = strip_internal_operations(full)
+        # Swagger's Authorize button exists only if the schema declares a
+        # security scheme. Emitted only when auth is on, so the published
+        # /openapi.json is unchanged while the app ships dark.
+        if settings.auth_enabled and settings.oidc_issuer:
+            full.setdefault("components", {})["securitySchemes"] = {
+                "oidc": {
+                    "type": "oauth2",
+                    "flows": {
+                        "authorizationCode": {
+                            "authorizationUrl": f"{settings.oidc_issuer}/protocol/openid-connect/auth",
+                            "tokenUrl": f"{settings.oidc_issuer}/protocol/openid-connect/token",
+                            "scopes": {"openid": "", "profile": ""},
+                        }
+                    },
+                }
+            }
+        application.openapi_schema = full
         return application.openapi_schema
 
     # FastAPI's documented openapi override pattern
     application.openapi = public_openapi  # ty: ignore[invalid-assignment]
 
-    configure_docs(application)
+    configure_docs(application, settings)
     configure_static_hosting(application, static_dir or DEFAULT_STATIC_DIR)
     return application
 

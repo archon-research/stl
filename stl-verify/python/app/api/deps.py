@@ -18,6 +18,41 @@ from app.services.reference_positions_service import ReferencePositionsService
 from app.services.reference_risk_capital_service import ReferenceRiskCapitalService
 
 
+class Principal:
+    """The authenticated caller, derived from a verified JWT.
+
+    Deliberately edge-agnostic: the principal comes from the token the app
+    verifies itself, never from proxy-written claim headers, so the same code
+    works behind Tailscale today and behind the Envoy edge later without
+    resting on a NetworkPolicy staying correct.
+    """
+
+    __slots__ = ("subject", "roles", "org")
+
+    def __init__(self, subject: str, roles: frozenset[str], org: str | None):
+        self.subject = subject
+        self.roles = roles
+        self.org = org
+
+
+def get_principal(request: Request) -> Principal | None:
+    """Resolve the caller for the current request.
+
+    Ships dark: with auth_enabled=False (the default) every caller is
+    anonymous (None) and no request-time work happens. With the flag on, this
+    fails CLOSED until the verifier lands — enabling auth before deploying
+    enforcement must reject traffic, not silently wave it through.
+    """
+    settings = get_settings()
+    if not settings.auth_enabled:
+        return None
+    # Replaced by the JWT verification middleware (pyjwt against Keycloak
+    # JWKS) in the enforcement change. Until then the flag must not be on.
+    from fastapi import HTTPException
+
+    raise HTTPException(status_code=503, detail="auth_enabled is set but the token verifier is not deployed")
+
+
 def get_engine(request: Request) -> AsyncEngine:
     """Extract the shared SQLAlchemy engine from application state."""
     return request.app.state.engine
