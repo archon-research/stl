@@ -5,16 +5,24 @@ Owner: vector team · Source rules: [alerts/vector-database.yaml](../../alerts/v
 Every Vector service reaches Postgres (TimescaleDB on TigerData) through one
 pool builder, `stl-verify/internal/adapters/outbound/postgres/db.go`. That
 builder attaches a pgx tracer which counts every query, batch and copy in the
-fleet. These alerts are the only signal we have for a fault in the shared
-database dependency — every other Vector counter is per-service and
-domain-shaped (blocks, reorgs, backfill gaps).
+fleet. Every other Vector counter is per-service and domain-shaped (blocks,
+reorgs, backfill gaps), so this is the only per-service view of the shared
+database dependency.
 
 **Why it exists:** on 2026-08-25 the staging database returned SQLSTATE 53200
 (`out_of_memory`) to the watcher fleet for six hours — arbitrum-watcher absorbed
-13 in a single hour — and nothing alerted. The day's errors surfaced only
-because morpho-vault-backfill happened to take one and `VectorCronjobRunFailing`
-has `for: 0m`. Workers retried and recovered, so nothing looked broken while
-writes failed and were re-driven all day. The failure recurred on 2026-08-27.
+13 in a single hour — with no per-service signal. Workers retried and recovered,
+so nothing looked broken while writes failed and were re-driven all day. The
+failure recurred on 2026-08-27.
+
+**This is not the only database alerting, and is not the first thing to check.**
+`TigerDataMemoryPressure` / `TigerDataMemoryPressureCritical` (>75% / >85%),
+`TigerDataMemoryMetricsMissing`, and the WAL-archive rules live in the
+infrastructure repo (`alerts/orbit/orbit-tigerdata.yaml`) with their own runbook,
+[tigerdata-memory-exhaustion.md](https://github.com/archon-research/infrastructure/blob/main/docs/runbook/tigerdata-memory-exhaustion.md).
+Those watch the *instance*; these rules watch *which services are being refused
+and on what*. On a resource fault expect both to fire — start there for the
+cause, come here for the blast radius.
 
 **Read this first:** workers retry and recover from database errors, so the
 pipeline looks healthy while writes fail and are re-driven. Absence of a visible
@@ -70,38 +78,43 @@ page is Alertmanager's `group_by`, not the rule's job.
    signature of a *server-side* memory ceiling, not an expensive query: the
    small queries are victims failing to allocate, not the cause. Do not go
    hunting the query in the error message.
-3. **Instance headroom** — TigerData console for the service
-   (`stl-sentinelstaging-db` = `xd7na17213`, `stl-sentinelprod-db` =
-   `ucpymqz73b`). Note that these instances are **not** scraped into Grafana,
-   so the console is the only memory view.
+3. **Instance headroom** — `100 * timescale_cloud_system_memory_usage_bytes /
+   timescale_cloud_system_memory_total_bytes{service_id="…"}`. The TigerData
+   metric exporter feeds these into Grafana, so query them at 1m resolution
+   rather than reading the console, whose default range averages spikes away.
+   Staging is `xd7na17213`, prod `ucpymqz73b`.
 
 ### Common causes
 
-- **Concurrent maintenance jobs (the usual cause for `53200`).** TigerData ships
-  `maintenance_work_mem = 1 GB` with `timescaledb.max_background_workers = 16`.
-  Each background worker running a compression or tiering policy can claim up to
-  `maintenance_work_mem`, on top of a 2 GB `shared_buffers`, on an 8 GB
-  instance. Staging carries ~103 policy jobs and they do not stagger — 13
-  compression jobs have been observed starting in the same second. Four
-  concurrent jobs is enough to exhaust the box.
-  Check: `SELECT j.proc_name, s.last_run_started_at FROM
-  timescaledb_information.jobs j JOIN timescaledb_information.job_stats s USING
-  (job_id) ORDER BY s.last_run_started_at DESC LIMIT 20;` and look for clusters
-  of identical timestamps.
+- **Per-query planner and executor memory on over-chunked hypertables.** This is
+  the measured driver, not maintenance work. A single call of a routine API
+  query against `allocation_position` (130 MB over 176 chunks) allocated 724 MB,
+  holding one sort open per chunk under a Merge Append, and re-planned on every
+  call. A handful of concurrent requests is enough to exhaust an 8 GB instance.
+  Check chunk counts (`timescaledb_information.chunks`) for the tables in the
+  plan, and `pg_stat_statements.plans` vs `calls` for re-planning. See VEC-663.
+- **A single high-frequency query spilling repeatedly.** Death by a thousand
+  cuts, not one big query: order `pg_stat_statements` by `temp_blks_written` and
+  check `calls` — the top consumer has been one application query at ~10 MB per
+  call across ~5,900 calls.
 - **`53300` too_many_connections** — check pool sizing. `MinConns` was cut to 1
   in PR #585 for exactly this; a service that overrides it can undo that.
 - **`53100` disk_full** — check retention and tiering policies are running.
 
+Concurrent TimescaleDB maintenance jobs are a plausible-looking cause that has
+**not** held up: staging runs ~103 policy jobs that fire in tight clusters, but
+capping `maintenance_work_mem` was measured to change neither compression time
+nor the failure. Don't spend time there before the two causes above.
+
 ### Fixing it
 
-Postgres memory settings are role/database-level (`ALTER DATABASE … SET`), which
-migrations may not do — they require superuser and belong in the infra repo's
-`bootstrap-db.sh` or the TigerData console. See `db/migrations/AGENTS.md`
-("Role admin vs object grants").
-
-Reducing `maintenance_work_mem` for the database caps what concurrent background
-workers can collectively claim; lowering `autovacuum_max_workers` (staging ships
-10) does the same for vacuum. Resizing the instance is the fallback, not the
+The durable fixes are per-query — chunk intervals and the spilling queries
+themselves — not server knobs. Postgres memory settings are role/database-level
+(`ALTER DATABASE … SET`), which migrations may not do: they require superuser and
+belong in the infra repo's `bootstrap-db.sh`. See `db/migrations/AGENTS.md`
+("Role admin vs object grants"). Note `timescaledb.max_background_workers` is
+postmaster-context and `autovacuum_max_workers` is sighup-context, so neither can
+be set that way at all. Resizing the instance is the fallback, not the
 first move.
 
 ### Verify recovery
