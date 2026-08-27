@@ -90,7 +90,6 @@ CREATE TABLE IF NOT EXISTS allocation_position_current (
     log_index           INT         NOT NULL,
     processing_version  INT         NOT NULL,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (proxy_address, chain_id, token_id)
 );
 
@@ -109,8 +108,7 @@ COMMENT ON COLUMN allocation_position_current.block_number IS 'Derived. Block th
 COMMENT ON COLUMN allocation_position_current.block_version IS 'Derived. Reorg version of that block (0 = original); part of the newer-wins comparison, ranked directly below block_number so a replacement wins wherever in the block its log lands.';
 COMMENT ON COLUMN allocation_position_current.log_index IS 'Derived. Position of the winning row''s event within its block; part of the newer-wins comparison, and the term that orders the several rows one block can hold for one key.';
 COMMENT ON COLUMN allocation_position_current.processing_version IS 'Derived. Correction version of that row (0 = original, N = Nth reprocess); the LOWEST-ranked term of the newer-wins comparison, because it versions one identity and must not rank rows of differing identity against each other.';
-COMMENT ON COLUMN allocation_position_current.created_at IS 'Audit. When this cache row was first written (row-write time, not block time).';
-COMMENT ON COLUMN allocation_position_current.updated_at IS 'Audit. When this cache row was last overwritten by a newer history row; max(updated_at) per proxy is the cache''s staleness signal.';
+COMMENT ON COLUMN allocation_position_current.created_at IS 'Audit. When the content of this row was written — the first insert or the latest overwrite by a newer history row (there is only ever one row per key, so an overwrite is the creation of the current row). Not block time (see block_timestamp). max(created_at) per proxy is the cache''s staleness signal.';
 
 GRANT SELECT ON allocation_position_current TO stl_readonly;
 GRANT SELECT, INSERT, UPDATE ON allocation_position_current TO stl_readwrite;
@@ -140,7 +138,7 @@ BEGIN
         block_version = EXCLUDED.block_version,
         log_index = EXCLUDED.log_index,
         processing_version = EXCLUDED.processing_version,
-        updated_at = now()
+        created_at = now()
     WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.block_timestamp,
            EXCLUDED.log_index, EXCLUDED.direction, EXCLUDED.tx_hash, EXCLUDED.processing_version)
         > (cur.block_number, cur.block_version, cur.block_timestamp,

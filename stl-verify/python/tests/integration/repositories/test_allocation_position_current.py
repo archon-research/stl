@@ -4,8 +4,8 @@ The cache is what the allocation latest-row reads select from instead of walking
 the allocation_position history, so "newest" here must mean exactly what those
 reads mean: (block_number, block_version, block_timestamp, log_index, direction,
 tx_hash, processing_version), with several rows per key inside one block being
-the normal case. created_at and updated_at are the cache row's own write times
-and rank nowhere in that comparison.
+the normal case. created_at is the cache row's own write time — set on the first
+insert and moved by every overwrite — and ranks nowhere in that comparison.
 
 Every scenario seeds its own token and proxy, so the module's shared database
 keeps the scenarios independent of each other and of ordering.
@@ -51,7 +51,7 @@ async def prime_id(conn: asyncpg.Connection) -> int:
 async def _cached(conn: asyncpg.Connection, proxy_hex: str, token_id: int) -> asyncpg.Record:
     return await conn.fetchrow(
         "SELECT balance, block_number, block_version, block_timestamp, log_index, direction, "
-        "tx_hash, processing_version, created_at, updated_at "
+        "tx_hash, processing_version, created_at "
         "FROM allocation_position_current "
         "WHERE chain_id = 1 AND proxy_address = $1 AND token_id = $2",
         bytes.fromhex(proxy_hex),
@@ -285,7 +285,7 @@ async def test_sweep_wins_its_collision_with_an_event_row(
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_cached_block_timestamp_is_the_winning_rows_block_time(conn: asyncpg.Connection, prime_id: int) -> None:
-    """block_timestamp carries the history row's created_at; the cache's own times are separate."""
+    """block_timestamp carries the history row's created_at; the cache's own write time is separate."""
     proxy_hex = "ad" * 20
     token_id = await insert_token(conn, "APCBLOCKTIME", 18, b"\xad" * 20)
 
@@ -306,11 +306,21 @@ async def test_cached_block_timestamp_is_the_winning_rows_block_time(conn: async
     assert row["created_at"] > _BLOCK_AT
 
 
+@pytest.mark.parametrize(
+    ("label", "proxy_byte", "second_block", "wins"),
+    [("accepted", 0xAE, _BLOCK + 1, True), ("rejected", 0xAF, _BLOCK - 1, False)],
+)
 @pytest.mark.asyncio(loop_scope="module")
-async def test_overwrite_moves_updated_at_and_leaves_created_at(conn: asyncpg.Connection, prime_id: int) -> None:
-    """updated_at is the staleness signal, so it moves on every overwrite; created_at never does."""
-    proxy_hex = "ae" * 20
-    token_id = await insert_token(conn, "APCTIMES", 18, b"\xae" * 20)
+async def test_created_at_moves_exactly_when_the_cached_row_is_rewritten(
+    conn: asyncpg.Connection, prime_id: int, label: str, proxy_byte: int, second_block: int, wins: bool
+) -> None:
+    """created_at is the staleness signal, so it moves on an overwrite and stays on a rejected write.
+
+    One row per key, so an overwrite IS the creation of the current row and one
+    audit column carries both its write time and the cache's staleness.
+    """
+    proxy_hex = f"{proxy_byte:02x}" * 20
+    token_id = await insert_token(conn, f"APCTIMES{label}", 18, bytes([proxy_byte]) * 20)
 
     async def write(block: int, balance: int) -> None:
         await insert_allocation_position(
@@ -320,6 +330,7 @@ async def test_overwrite_moves_updated_at_and_leaves_created_at(conn: asyncpg.Co
             proxy_hex=proxy_hex,
             balance=balance,
             block=block,
+            created_at=_BLOCK_AT,
             tx=_TX,
             direction="in",
         )
@@ -327,9 +338,8 @@ async def test_overwrite_moves_updated_at_and_leaves_created_at(conn: asyncpg.Co
     await write(_BLOCK, 100)
     before = await _cached(conn, proxy_hex, token_id)
     await conn.execute("SELECT pg_sleep(0.01)")
-    await write(_BLOCK + 1, 200)
+    await write(second_block, 200)
     after = await _cached(conn, proxy_hex, token_id)
 
-    assert after["balance"] == 200
-    assert after["created_at"] == before["created_at"]
-    assert after["updated_at"] > before["updated_at"]
+    assert after["balance"] == (200 if wins else 100)
+    assert (after["created_at"] > before["created_at"]) is wins

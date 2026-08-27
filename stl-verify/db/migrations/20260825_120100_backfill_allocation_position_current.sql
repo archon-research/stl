@@ -59,7 +59,7 @@ ON CONFLICT (proxy_address, chain_id, token_id) DO UPDATE SET
     block_version = EXCLUDED.block_version,
     log_index = EXCLUDED.log_index,
     processing_version = EXCLUDED.processing_version,
-    updated_at = now()
+    created_at = now()
 WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.block_timestamp,
        EXCLUDED.log_index, EXCLUDED.direction, EXCLUDED.tx_hash, EXCLUDED.processing_version)
     > (allocation_position_current.block_number, allocation_position_current.block_version,

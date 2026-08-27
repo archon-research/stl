@@ -245,8 +245,8 @@ func assertCachesMatchHistory(t *testing.T, ctx context.Context) {
 	t.Helper()
 
 	// cached is spelled out per table rather than `TABLE <cache>` because
-	// allocation_position_current carries created_at/updated_at, which are
-	// row-write times of the cache row itself and have no counterpart in history.
+	// allocation_position_current carries created_at, which is the write time of
+	// the cache row itself and has no counterpart in history.
 	checks := []struct{ table, cached, newest string }{
 		{"borrower_current", `TABLE borrower_current`, `
 			SELECT DISTINCT ON (protocol_id, user_id, token_id)
