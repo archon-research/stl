@@ -250,11 +250,42 @@ jobs:
             exit 1
           fi
 
+      # One live report per pass: the new one is posted, then earlier ones are
+      # collapsed as outdated, so the expanded comment always describes the SHA in
+      # its own stamp while findings already triaged stay one click away. Prior
+      # reports are matched on the marker *and* the bot login: this token may edit
+      # any comment on the PR, so a marker alone would let an author's comment
+      # claim the identity and take the collapse in a real report's place.
       - name: Post findings
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: gh pr comment "${PR_NUMBER}" --body-file "${RUNNER_TEMP}/review.md"
+          MARKER: '<!-- stl-review:L3 -->'
+        run: |
+          set -euo pipefail
+          # Read before posting, so the run's own comment stays out of the set.
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            > "${RUNNER_TEMP}/comments.json"
+          mapfile -t STALE < <(jq -r --arg marker "${MARKER}" \
+            '.[] | select(.user.login == "github-actions[bot]")
+                 | select(.body | startswith($marker)) | .node_id' \
+            "${RUNNER_TEMP}/comments.json")
+
+          { printf '%s\n' "${MARKER}"; cat "${RUNNER_TEMP}/review.md"; } \
+            > "${RUNNER_TEMP}/comment.md"
+          gh pr comment "${PR_NUMBER}" --body-file "${RUNNER_TEMP}/comment.md"
+
+          # After the post: a collapse failure costs tidiness, and the review is
+          # already readable. Warn rather than fail for the same reason.
+          for id in ${STALE[@]+"${STALE[@]}"}; do
+            gh api graphql -f query='
+              mutation($id: ID!) {
+                minimizeComment(input: {subjectId: $id, classifier: OUTDATED}) {
+                  minimizedComment { isMinimized }
+                }
+              }' -F id="${id}" > /dev/null \
+              || echo "::warning::Could not collapse the earlier report ${id}; this PR now shows more than one expanded review."
+          done
 
       # Codex refreshes the bundle past ~8 days and the refresh may invalidate the
       # seeded copy; persisting it back is what OpenAI's CI guide requires. After
