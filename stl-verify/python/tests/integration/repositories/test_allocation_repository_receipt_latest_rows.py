@@ -44,8 +44,10 @@ _PROXY = EthAddress(f"0x{RTL_PROXY_HEX}")
 _SPILL_WORK_MEM = "64kB"
 
 # The query exactly as it stood before the latest-row rewrite: one DISTINCT ON
-# over the full four-way join. Kept verbatim as the differential reference; do
-# not "fix" it to match the live query, that is what it is here to detect.
+# over the full four-way join. It is the reference for the LATEST-ROW SELECTION
+# only — do not restage its CTE to match the live query, that divergence is what
+# this reference exists to detect. A deliberate change to the outer SELECT or the
+# valuation CASE does belong here, mirrored from the live query.
 _PRE_REWRITE_RECEIPT_TOKEN_POSITIONS_SQL = text("""
     WITH latest_receipt_positions AS (
         SELECT DISTINCT ON (rt.id)

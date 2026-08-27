@@ -1179,25 +1179,22 @@ class AllocationRepository:
 # nulls the divergent observation before ``last()``, so ``locf`` carries the
 # last pre-divergence value (stale but unit-correct) without telemetry.
 #
-# Latest-row selection is staged so the DISTINCT ON sorts a per-token candidate
-# set rather than the join output — sorting the join output is what made this the
-# database's largest temp-spill source, ~10 MB of temp per call.
-# ``latest_position_block`` reduces the proxy's history to one block per
-# (chain_id, token_id), which the columnstore answers from batch metadata because
-# block_number is an orderby column; ``latest_positions`` then keeps only the rows
-# at those blocks.
+# The latest-row selection is staged so the DISTINCT ON sorts a per-token
+# candidate set, never the join output. Three constraints hold it in that shape:
 #
-# Both stages are MATERIALIZED to pin exactly one pass over the history each.
-# Inlined, the planner re-scans allocation_position per surviving row and pays the
-# whole chunk fan-out each time: 104k buffer reads against 28k on TimescaleDB
-# 2.29, and the equality-join spelling of the same idea degraded to 3.7s on 2.25.
+#   * The pre-filter is safe because block_number leads the ordering: the winning
+#     row always sits at its own (chain_id, token_id) max block, so restricting to
+#     those blocks cannot drop it, and a semi-join cannot duplicate what it keeps.
+#   * The dedup stays on rt.id because two (chain_id, token_id) pairs can reach one
+#     receipt_token — two chains' token rows may share an address, and the
+#     receipt_token join matches on it without constraining token.chain_id.
+#   * Both stages are MATERIALIZED so the history is scanned exactly once each.
+#     Inlined, the planner re-scans allocation_position per surviving row and pays
+#     the whole chunk fan-out every time.
 #
-# Equivalence with the unstaged form: block_number leads the ordering, so the
-# winning row always sits at its own (chain_id, token_id) max block and survives
-# the pre-filter; the pre-filter is a semi-join, so it cannot duplicate rows; and
-# the dedup stays on ``rt.id`` because two (chain_id, token_id) pairs can reach one
-# receipt_token — two chains' token rows may share an address, which the
-# receipt_token join matches on without constraining token.chain_id.
+# Rows tied on the full ordering key (legal: a self-transfer emits an out-row and
+# an in-row at one log_index, and sweep rows land at log_index 0) are still broken
+# arbitrarily, as they were before the staging.
 _RECEIPT_TOKEN_POSITIONS_SQL = text("""
     WITH latest_position_block AS MATERIALIZED (
         SELECT ap.chain_id, ap.token_id, MAX(ap.block_number) AS block_number
