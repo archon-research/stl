@@ -2223,3 +2223,257 @@ events is orders of magnitude outside anything observed. It is not a lull.
 for the affected chain.
 
 ---
+
+## raw SC call archiving (VEC-364)
+
+Cross-cutting, not a service of its own. Every worker built with
+`ARCHIVE_SC_CALLS=true` wraps its multicaller in
+`internal/pkg/blockchain/archiving.Multicaller`, which writes the whole
+`(call, result)` batch to S3 as one compressed object. With that archive we can
+re-derive state from our own data; without it we re-fetch from Alchemy. The
+`VectorArchiving*` rules are keyed
+by `service_name` + `chain` and so cover every archiving source at once.
+
+Signals:
+
+- `archive_writes_total{status,source,chain,service_name}` — one sample per
+  attempted S3 object write, from the archiving decorator.
+- `archive_object_size_bytes` — compressed-object-size histogram, from the S3
+  adapter.
+
+Both series exist only for binaries with `ARCHIVE_SC_CALLS=true`, so a source
+with archiving disabled has no series and can never fire any of these rules.
+
+Archiving is *fire-and-forget*: `Multicaller.Execute` records
+`multicall.batch.size` synchronously inside `inner.Execute`, then hands the S3
+PUT to a detached goroutine (30s timeout). It never blocks or fails the caller,
+so an archiving fault never corrupts product data, which is why every rule here
+is a `warning` rather than a page. It also means `archive_writes_total` *lags*
+`multicall_batch_size_count` by one S3 round-trip, and on a freshly started pod
+that lag is enough to shift which counter gets exported first (see
+`VectorArchivingStalled` below). On graceful shutdown `archivingwire`'s `drain()`
+blocks until in-flight writes finish, so a cleanly terminated pod ends at exact
+`multicall == archive_success` parity.
+
+---
+
+## VectorArchivingStalled
+
+**Severity:** warning · **For:** 5m · **Window:** 30m
+
+### What it means
+
+The labelled source is still executing multicalls but has landed no successful
+S3 archive object for >30m. New batches are not replayable; Alchemy remains the
+fallback, so nothing customer-facing is broken yet.
+
+The `multicall_batch_size_count > 0` guard is what separates a genuine fault
+from an idle or archiving-disabled source: both counters advance on the same
+`Execute` path, so multicalls-without-archives is the signature of a broken
+write path.
+
+### First checks (≤5 min)
+
+1. **Rule out the cold-start artifact first** — this is the most common cause of
+   this alert firing on a low-rate source. Check whether the pod restarted or
+   rolled just before the alert:
+
+   ```promql
+   count by (k8s_pod_name) (archive_writes_total{service_name="<svc>", chain="<chain>"})
+   ```
+
+   Two `k8s_pod_name` values (or two `k8s_replicaset_name` hashes) around the
+   alert start means a rollout. Compare `service_version` against the newest
+   `deploy(staging|prod)` commit to confirm. Restart count `0` on both pods plus
+   a new ReplicaSet hash means a deploy, not a crash. See *Known false positive*
+   below — no action needed.
+2. **Check for write errors** — a real stall almost always has them:
+
+   ```promql
+   sum by (service_name, chain) (increase(archive_writes_total{status="error"}[1h]))
+   ```
+
+   No error series at all means no write has failed; combined with a rollout,
+   that confirms the artifact.
+3. **Check counter parity** — archive:multicall is 1:1 by construction, so a
+   healthy source sits at equal values within a single pod:
+
+   ```promql
+   sum(archive_writes_total{status="success", service_name="<svc>", chain="<chain>"})
+   sum(multicall_batch_size_count{service_name="<svc>", chain="<chain>"})
+   ```
+
+   Equal values = nothing was lost. A growing gap = a genuine stall.
+4. **Pod logs** — `kubectl -n vector logs <pod> --tail=200 | grep -i archiv`.
+   Look for `archiving raw SC calls` failures, S3 `AccessDenied`,
+   `NoSuchBucket`, or `context deadline exceeded` (the 30s `archiveTimeout`).
+5. **Confirm the feature is meant to be on** — `ARCHIVE_SC_CALLS` and the bucket
+   env var on the deployment. A source that just had archiving *enabled* will
+   look stalled until its first write lands.
+
+### Known false positive: cold-start counter birth (triaged 2026-08-27)
+
+`increase()` cannot see counter increments that precede a series' *first
+sample*. On a fresh pod, `archive_writes_total` is exported one scrape *after*
+`multicall_batch_size_count` (the S3 PUT happens in a detached goroutine), and
+its first exported sample already reads >0 — so those first writes are invisible
+to `increase()` forever.
+
+On a source archiving only ~1 batch per 10 minutes, the *next* increment then
+fell outside the old `[10m]` window: the archive leg read 0 while the multicall
+leg — scraped one interval earlier, capturing its own first increment — read >0.
+Both legs true, so the alert fired, and it resolved the moment the next write
+landed. It reproduced on **every deploy rollout** for the four low-rate sources
+(`prime-allocation-indexer` on unichain/optimism/arbitrum, `prime-debt-indexer`
+on mainnet) and **never once** for the high-volume sources sharing the same S3
+adapter and bucket (morpho ~502 writes/10m, sparklend ~256,
+oracle-price-worker ~600).
+
+The window is now `[30m]`, which always contains 2-3 increments at that cadence,
+so the invisible prefix can no longer zero the leg out. The cost is detection
+latency: a genuine stall now takes ~35m rather than ~15m to fire. A stall whose
+writes are *attempted and failing* still trips `VectorArchivingErrorRatioHigh`
+in ~15m on its unchanged 10m window, so only a stall that emits no error samples
+at all waits the full ~35m.
+
+If you still see this shape — short firing (~1-5 min) that self-resolves,
+straddling a rollout, with zero `status="error"` samples and intact counter
+parity — it is this artifact, not lost data. Neither the `multicall > 0` guard
+nor the `or (… * 0)` zero-fill catches it: the guard is defeated because the
+counters differ in *when their first scrape landed* rather than in rate, and the
+zero-fill only engages when the success series is *absent*, not when it exists
+at a non-zero birth value.
+
+### Common causes
+
+- Deploy rollout / pod restart on a low-rate source → the cold-start artifact
+  above. Not a fault.
+- S3 credentials or bucket policy changed → `AccessDenied` on every write; the
+  error counter climbs and `VectorArchivingErrorRatioHigh` should fire too.
+- Bucket renamed / deleted, or wrong bucket for the environment →
+  `NoSuchBucket`.
+- S3 or network degraded such that every PUT exceeds the 30s `archiveTimeout`.
+- The archiving decorator was not wired for this source (a regression in the
+  worker's `main.go` wrap) → multicalls advance and no archive series is ever
+  created; the zero-fill keeps the rule silent in that case, so check that the
+  series exists at all.
+
+### Verify recovery
+
+```promql
+sum by (service_name, chain) (increase(archive_writes_total{status="success"}[30m])) > 0
+```
+
+for the affected source, plus counter parity from check 3. Spot-check that
+objects are actually landing in the bucket for the current block range.
+
+---
+
+## VectorArchivingEmptyObjects
+
+**Severity:** warning · **For:** 5m · **Window:** 10m
+
+### What it means
+
+At least one archived object landed in the smallest histogram bucket (≤64
+bytes). A real single-call zstd object is comfortably larger, so this signals a
+degenerate write — the object is probably missing its call and/or response data.
+Unlike a stall, these objects exist and look valid to a replay consumer, so they
+are worse than a gap: replay would silently produce wrong results.
+
+This rule depends on `archive_object_size_bytes` and stays dormant until that
+metric is deployed for the source.
+
+### First checks (≤5 min)
+
+1. **Pull an offending object** from the bucket for the affected
+   `service_name`/`chain` at the alert's timestamp and inspect it — decompress
+   it and check whether calls and results are both populated.
+2. **Correlate with truncation warnings** —
+   `kubectl -n vector logs <pod> --tail=500 | grep "result count does not match"`.
+   `archiveBatch` archives only the `(call, result)` prefix when the inner
+   multicaller returns a mismatched count, which can yield a very small object.
+3. **Check batch sizes** — `histogram_quantile(0.5, multicall_batch_size_bucket{...})`.
+   A source genuinely issuing 1-call batches produces small (but not ≤64B)
+   objects; a collapse toward 1 call/batch points at the caller, not the encoder.
+4. **Check the encode path** if the object is structurally empty — the S3
+   adapter records size regardless of content, so an encoder returning an empty
+   payload still counts as a successful write.
+
+### Common causes
+
+- Inner multicaller returning fewer results than calls (truncation) → only a
+  tiny prefix is archived.
+- Encoder regression producing an empty or header-only payload.
+- A source whose batches genuinely collapsed to near-zero calls upstream.
+
+### Verify recovery
+
+```promql
+increase(archive_object_size_bytes_bucket{le="64", service_name="<svc>", chain="<chain>"}[10m]) == 0
+```
+
+and confirm a freshly written object decompresses to complete call/response data.
+
+---
+
+## VectorArchivingErrorRatioHigh
+
+**Severity:** warning · **For:** 5m · **Window:** 10m
+
+### What it means
+
+More than 50% of archive write attempts for the labelled source are erroring
+while some still succeed — partial loss of replay data. `VectorArchivingStalled`
+keys on `success == 0` and so cannot see this case by construction; this rule is
+its partial-failure counterpart.
+
+It is an **error ratio**, not an absolute rate, on purpose: archive write
+cadence varies across sources by orders of magnitude (~1/10m on unichain
+prime-allocation vs
+~600/10m on oracle-price-worker), so a fixed per-second threshold would either
+miss a low-rate source's total failure or false-fire on a high-rate one. The
+`clamp_min` denominator avoids a divide-by-zero when a source has no writes
+(ratio → 0, never fires), which is why this rule needs no multicall guard.
+
+### First checks (≤5 min)
+
+1. **Get the error shape** —
+   `kubectl -n vector logs <pod> --tail=200 | grep -i archiv`. Classify:
+   - `AccessDenied` / `InvalidAccessKeyId` → IAM role or credential problem.
+   - `SlowDown` / `503` → S3 throttling; likely correlated with a high-volume
+     source or a backfill running concurrently.
+   - `context deadline exceeded` → PUTs exceeding the 30s `archiveTimeout`;
+     check object sizes and network.
+2. **Scope it** — is it one source or many?
+
+   ```promql
+   sum by (service_name, chain) (rate(archive_writes_total{status="error"}[10m])) > 0
+   ```
+
+   Many sources at once points at S3, IAM, or the network rather than at any one
+   worker. A single source points at that deployment's config.
+3. **Check whether it is degrading toward a stall** — if the success rate is
+   also trending to zero, expect `VectorArchivingStalled` to follow; treat the
+   underlying cause as the same incident.
+4. **Quantify the loss** — the gap between `multicall_batch_size_count` and
+   `archive_writes_total{status="success"}` within the current pod is the number
+   of batches that will need re-fetching from Alchemy on replay.
+
+### Common causes
+
+- S3 throttling (`SlowDown`) under concurrent backfill load.
+- IAM credential rotation that partially landed, or a policy change.
+- Object sizes grown past what the 30s timeout allows on a slow path.
+- Transient S3 regional degradation — usually resolves on its own; confirm
+  against the provider status page before chasing it in our code.
+
+### Verify recovery
+
+```promql
+sum by (service_name, chain) (rate(archive_writes_total{status="error"}[10m])) == 0
+```
+
+and counter parity restored (`multicall == archive_success` within the pod).
+
+---
