@@ -153,19 +153,25 @@ jobs:
           # keeps session files out of CODEX_HOME. Web search pinned off: a
           # server-side egress channel neither the sandbox nor the leak check
           # sees, and a vendor default flip must not silently open it.
-          # Output captured, not streamed: the transcript carries every tool
-          # result the agent saw and lands in a public log, so it publishes only
-          # after the leak check has masked it; a crash is held over the same way.
+          # Output captured, not streamed: both streams carry every tool result
+          # the agent saw and land in a public log, so they publish only after the
+          # leak check has masked them; a crash is held over the same way. --json
+          # makes stdout an event stream, carrying the usage the footer reports in
+          # its turn.completed event, so stderr gets a file of its own.
           set +e
+          START="${SECONDS}"
           codex exec \
+            --json \
             --sandbox read-only \
             --ephemeral \
             -c model_reasoning_effort="high" \
             -c tools.web_search=false \
             --output-last-message "${RUNNER_TEMP}/review.md" \
-            - < "${RUNNER_TEMP}/prompt.md" > "${RUNNER_TEMP}/transcript.log" 2>&1
+            - < "${RUNNER_TEMP}/prompt.md" \
+            > "${RUNNER_TEMP}/events.jsonl" 2> "${RUNNER_TEMP}/transcript.log"
           echo "CODEX_RC=$?" >> "${GITHUB_ENV}"
           set -e
+          echo "CODEX_SECONDS=$((SECONDS - START))" >> "${GITHUB_ENV}"
 
       # The agent reads author-controlled text while auth.json sits on disk
       # (read-only stops writes, not reads), and GitHub masking covers neither
@@ -222,7 +228,7 @@ jobs:
           done < "${RUNNER_TEMP}/needles"
 
           # -F: fixed strings, never treat token bytes as a regex.
-          for f in review.md transcript.log; do
+          for f in review.md events.jsonl transcript.log; do
             if [ -f "${RUNNER_TEMP}/${f}" ] && grep -qFf "${RUNNER_TEMP}/needles" "${RUNNER_TEMP}/${f}"; then
               echo "::error::${f} contains credential material. Not posting the review. Treat the seat's token as compromised and re-run 'codex login' to invalidate it."
               exit 1
@@ -241,6 +247,7 @@ jobs:
             exit 0
           fi
           cat "${RUNNER_TEMP}/transcript.log"
+          cat "${RUNNER_TEMP}/events.jsonl"
           if [ "${CODEX_RC}" -ne 0 ]; then
             echo "::error::codex exec exited ${CODEX_RC}."
             exit 1
@@ -271,8 +278,18 @@ jobs:
                  | select(.body | startswith($marker)) | .node_id' \
             "${RUNNER_TEMP}/comments.json")
 
-          { printf '%s\n' "${MARKER}"; cat "${RUNNER_TEMP}/review.md"; } \
-            > "${RUNNER_TEMP}/comment.md"
+          # Usage is measured by the workflow, not quoted from the report: it
+          # sizes a review against the seat's rolling quota, and pairs with the
+          # pinned version so a bump that thins the reasoning shows up as a number.
+          USAGE="$(jq -r 'select(.type == "turn.completed") | .usage
+                          | "\(.input_tokens) in (\(.cached_input_tokens) cached) · \(.output_tokens) out (\(.reasoning_output_tokens) reasoning)"' \
+                     "${RUNNER_TEMP}/events.jsonl" 2>/dev/null | tail -n 1 || true)"
+
+          {
+            printf '%s\n' "${MARKER}"
+            cat "${RUNNER_TEMP}/review.md"
+            printf '\n---\n_%s · %ss_\n' "${USAGE:-usage unreported}" "${CODEX_SECONDS:-?}"
+          } > "${RUNNER_TEMP}/comment.md"
           gh pr comment "${PR_NUMBER}" --body-file "${RUNNER_TEMP}/comment.md"
 
           # After the post: a collapse failure costs tidiness, and the review is
