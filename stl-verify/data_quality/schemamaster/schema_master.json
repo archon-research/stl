@@ -1477,6 +1477,10 @@
       "type": "raw_pipeline",
       "owner": "infra"
     },
+    "token_total_supply_current": {
+      "type": "derived",
+      "owner": "infra"
+    },
     "user": {
       "type": "dimension",
       "owner": "lending"
