@@ -18,7 +18,7 @@ into TimescaleDB (or validates stored data). Current cronjobs:
 | `reference-capital-backfill` | `reference-capital-backfill` | **on demand** | Seeds the reference balance-sheet history predating the syncer's first run |
 | `morpho-vault-backfill` | `morpho-vault-backfill` | **on demand** | Discovers Morpho vaults from the archived S3 receipts and replays their VaultV2 structured events, for a block range supplied at start time (VEC-218) |
 | `morpho-v2-bootstrap` | `morpho-v2-bootstrap` | **on demand** | One-shot repair of Morpho VaultV2 vaults discovered before atomic discovery (VEC-218) |
-| `core-model-runner` | `core-model-runner` | 24h | CORE model CRR per market → `core_model_results` (Python harness; staging today, prod rollout in #800; N_MC capped at 100 until the sizing in #804 settles) |
+| `core-model-runner` | `core-model-runner` | 24h | CORE model CRR per market → `core_model_results` (Python harness; staging + prod; N_MC capped at 100 until the sizing in #804 settles) |
 
 > `maple-graphql-indexer` is also a cronjob but has its own richer rules — see
 > [vector-indexers.md](vector-indexers.md), not this runbook.
@@ -50,8 +50,8 @@ scheduled cronjob, `VectorOnDemandWorkerDown` for an on-demand worker.
 > when no tick has *completed* (success or error) in 30h — the stall coverage
 > the exclusion above would otherwise remove, and the only rule that catches a
 > tick lost to a deploy-time cancel or a hang (neither records an error).
-> The runner ships in staging today; the prod rollout is #800. N_MC stays
-> capped at 100 until the sizing run in #804 settles — unrelated to this gap.
+> The runner runs in staging and prod (#800), both at N_MC=100 until the
+> sizing run in #804 settles — unrelated to this gap.
 
 > `transform-worker` ships at `replicas: 0` and is enabled (scaled to 1) only after
 > the one-off bootstrap has run. `VectorCronjobWorkerDown` is guarded on
