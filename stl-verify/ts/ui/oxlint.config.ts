@@ -11,6 +11,15 @@ const config = {
     'import/no-unassigned-import': 'off',
     'no-console': 'error',
   },
+  overrides: [
+    {
+      // The regression checks are CLIs: their reports go to stdout.
+      files: ['scripts/**'],
+      rules: {
+        'no-console': 'off',
+      },
+    },
+  ],
   ignorePatterns: ['dist', 'src/generated'],
 };
 

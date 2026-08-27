@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
 
+import type {
+  FetchResponse,
+  MaybeOptionalInit,
+  PathsWithMethod,
+} from '@archon-research/http-client-core';
 import { createApiClient } from '@archon-research/http-client-core';
 
 import {
@@ -12,6 +17,7 @@ import {
   SPUSDS,
 } from '../src/index.ts';
 import { mockServer } from '../src/node.ts';
+import type { paths } from '../src/schema.ts';
 
 /**
  * Drives the mock handlers through the same `createApiClient` the app builds its
@@ -28,21 +34,50 @@ import { mockServer } from '../src/node.ts';
 // construction and msw replaces it here. See README, "Gotchas worth knowing".
 mockServer.listen();
 
-const api = createApiClient(MOCK_ORIGIN);
+// Typed against the same generated `paths` the app and the handlers use, so a
+// path, a query param or a response field that drifts from the schema is a type
+// error here rather than a runtime assertion nobody wrote yet.
+const api = createApiClient<paths>(MOCK_ORIGIN);
 const UNKNOWN_ADDRESS = `0x${'1'.repeat(40)}`;
 
-async function request(path, init, label) {
-  const { data, error, response } = await api.GET(path, init);
+/** The media type `createApiClient` pins its client to. */
+type ApiMedia = `${string}/${string}`;
+
+type GetPath = PathsWithMethod<paths, 'get'>;
+type GetInit<P extends GetPath> = MaybeOptionalInit<paths[P], 'get'>;
+type GetBody<P extends GetPath> = NonNullable<
+  FetchResponse<paths[P]['get'], GetInit<P>, ApiMedia>['data']
+>;
+
+/**
+ * openapi-fetch spreads its init as a tuple whose optionality it derives from
+ * the resolved path, so it cannot be checked against a still-generic `P`. The
+ * cast is confined to these two wrappers; every call site is checked against
+ * the signatures above them.
+ */
+type LooseInit = Parameters<typeof api.GET>[1];
+
+async function request<P extends GetPath>(
+  path: P,
+  init: GetInit<P>,
+  label: string,
+): Promise<GetBody<P>> {
+  const { data, error, response } = await api.GET(path, init as LooseInit);
   assert.ok(
     response.ok && data !== undefined,
     `${label}: expected 200 with a body, got ${response.status} ${JSON.stringify(error)}`,
   );
-  return data;
+  return data as GetBody<P>;
 }
 
 /** The mirror of `request`: asserts the mock says no, and how. */
-async function expectStatus(path, init, status, label) {
-  const { response, error } = await api.GET(path, init);
+async function expectStatus<P extends GetPath>(
+  path: P,
+  init: GetInit<P>,
+  status: number,
+  label: string,
+): Promise<unknown> {
+  const { response, error } = await api.GET(path, init as LooseInit);
   assert.equal(
     response.status,
     status,
@@ -51,8 +86,91 @@ async function expectStatus(path, init, status, label) {
   return error;
 }
 
-const primeAt = (primeId) => ({ params: { path: { prime_id: primeId } } });
-const activity = (query) => ({ params: { query } });
+/**
+ * `request` for the cases that deliberately send a spelling the schema types
+ * differently — the API accepts more than the schema can express (pydantic reads
+ * `aggregate=YES` as true). The path is still checked.
+ */
+async function requestLoosely<P extends GetPath>(
+  path: P,
+  init: Record<string, unknown>,
+  label: string,
+): Promise<GetBody<P>> {
+  return request(path, init as GetInit<P>, label);
+}
+
+/**
+ * The mirror, for the malformed-input cases: they send values the schema forbids
+ * on purpose, so the init cannot be checked against it — the path still is, and
+ * the status assertion is the point.
+ */
+async function expectRejection<P extends GetPath>(
+  path: P,
+  init: Record<string, unknown>,
+  status: number,
+  label: string,
+): Promise<unknown> {
+  return expectStatus(path, init as GetInit<P>, status, label);
+}
+
+/** `noUncheckedIndexedAccess` is on: assert the element exists and narrow it. */
+function at<Rows extends readonly unknown[]>(
+  rows: Rows,
+  index: number,
+  label: string,
+): Rows[number] {
+  const row = rows[index];
+
+  assert.ok(row !== undefined, `${label}: expected an element at ${index}`);
+
+  return row;
+}
+
+/** The same, for a lookup the fixtures are supposed to guarantee. */
+function got<K, V>(map: ReadonlyMap<K, V>, key: K, label: string): V {
+  const value = map.get(key);
+
+  assert.ok(value !== undefined, `${label}: ${String(key)} is missing`);
+
+  return value;
+}
+
+/**
+ * Narrow an envelope's `data` to the arm the query selected. Bucketed and
+ * unbucketed rows are separate response schemas and the query param that picks
+ * between them is not expressible in the response, so the generated type is a
+ * union. Asserting the discriminating field is what makes the checks below read
+ * one arm rather than the union.
+ */
+function armWith<Rows extends readonly object[], K extends PropertyKey>(
+  rows: Rows,
+  key: K,
+  label: string,
+): Extract<Rows[number], Record<K, unknown>>[] {
+  for (const row of rows) {
+    assert.ok(
+      key in row,
+      `${label}: expected rows carrying \`${String(key)}\``,
+    );
+  }
+
+  // `rows` is a union of arrays, so the element type is `Rows[number]` and the
+  // loop above is what proves which arm this is.
+  return rows as unknown as Extract<Rows[number], Record<K, unknown>>[];
+}
+
+/** Rows and queries these checks pass around, named off the generated paths. */
+type AllocationRow = GetBody<'/v1/primes/{prime_id}/allocations'>[number];
+type RiskAllocation =
+  GetBody<'/v1/primes/{prime_id}/risk-capital'>['per_allocation'][number];
+type ExposureQuery = NonNullable<
+  paths['/v1/primes/{prime_id}/exposure']['get']['parameters']['query']
+>;
+
+const primeAt = (primeId: string) => ({
+  params: { path: { prime_id: primeId } },
+});
+const activity = <Q>(query: Q) => ({ params: { query } });
 
 async function checkPrimesList() {
   const primes = await request('/v1/primes', {}, 'GET /v1/primes');
@@ -137,15 +255,18 @@ async function checkEveryReferencedTokenResolves() {
       `allocations for ${prime.address}`,
     );
     for (const row of allocations) {
-      for (const field of ['receipt_token_id', 'underlying_token_id']) {
+      for (const field of [
+        'receipt_token_id',
+        'underlying_token_id',
+      ] as const) {
         const id = row[field];
-        if (id === null) continue;
+        if (id === null || id === undefined) continue;
         assert.ok(
           known.has(id),
           `allocation ${row.symbol} on ${prime.chain} names ${field} ${id}, which /v1/tokens does not hold`,
         );
         assert.equal(
-          known.get(id).chain_id,
+          got(known, id, `token ${id}`).chain_id,
           row.chain_id,
           `allocation ${row.symbol} names ${field} ${id} from another chain`,
         );
@@ -158,7 +279,7 @@ async function checkEveryReferencedTokenResolves() {
     activity({ limit: 1000 }),
     'GET /v1/allocations/activity',
   );
-  for (const row of feed.data) {
+  for (const row of armWith(feed.data, 'action_type', 'activity feed')) {
     assert.ok(
       known.has(row.token_id),
       `activity row for ${row.token_symbol} names token ${row.token_id}, which /v1/tokens does not hold`,
@@ -181,9 +302,13 @@ async function checkRiskCapitalMatchesAllocations() {
   const receiptTokenIds = new Set(
     allocations
       .map((allocation) => allocation.receipt_token_id)
-      .filter((id) => id !== null),
+      .filter((id): id is number => id !== null && id !== undefined),
   );
   for (const entry of riskCapital.per_allocation) {
+    assert.ok(
+      entry.receipt_token_id !== null,
+      `risk-capital reports ${entry.symbol} with no receipt token`,
+    );
     assert.ok(
       receiptTokenIds.has(entry.receipt_token_id),
       `risk-capital reports ${entry.symbol} (${entry.receipt_token_id}) but no allocation row holds it`,
@@ -200,7 +325,7 @@ async function checkUnpricedAllocationHasAFixture() {
 
   const unpriced = riskCapital.per_allocation.filter((row) => !row.applied);
   assert.equal(unpriced.length, 1, 'the applied=false state needs a fixture');
-  assert.equal(unpriced[0].unpriced_reason, 'no_model');
+  assert.equal(at(unpriced, 0, 'unpriced rows').unpriced_reason, 'no_model');
 }
 
 async function checkCustodyLegIsPrimeScoped() {
@@ -226,7 +351,7 @@ async function checkPrimeFilterDoesNotLeak() {
   assert.equal(feed.mode, 'raw');
   assert.ok(feed.data.length > 0, 'prime-filtered activity is empty');
   assert.ok(
-    feed.data.every(
+    armWith(feed.data, 'action_type', 'prime-filtered activity').every(
       (row) =>
         row.prime_address.toLowerCase() === SPARK_MAINNET_PROXY.toLowerCase(),
     ),
@@ -247,7 +372,11 @@ async function checkActivitySymbolsExistInAllocations() {
   );
 
   const held = new Set(allocations.map((allocation) => allocation.symbol));
-  for (const row of feed.data) {
+  for (const row of armWith(feed.data, 'action_type', 'activity?prime_id')) {
+    assert.ok(
+      row.token_symbol !== null && row.token_symbol !== undefined,
+      `activity row ${row.action_type} names no token`,
+    );
     assert.ok(
       held.has(row.token_symbol),
       `activity mentions ${row.token_symbol}, which the allocation table does not hold`,
@@ -282,10 +411,11 @@ async function checkRawAndAggregatedActivityAgree() {
 
   assert.equal(raw.mode, 'raw');
   assert.equal(aggregated.mode, 'aggregated');
-  const bucketed = aggregated.data.reduce(
-    (total, bucket) => total + bucket.event_count,
-    0,
-  );
+  const bucketed = armWith(
+    aggregated.data,
+    'event_count',
+    'aggregated activity',
+  ).reduce((total, bucket) => total + bucket.event_count, 0);
   assert.equal(
     bucketed,
     raw.data.length,
@@ -303,7 +433,10 @@ async function checkAggregatedRowShapeAndGrid() {
   assert.equal(hourly.window.resolution, 'PT1H');
   assert.equal(hourly.window.interval_ms, 3_600_000);
   assert.equal(hourly.data.length, 25, '24h of hourly buckets, both ends');
-  assert.ok('event_count' in hourly.data[0], 'aggregated rows carry a count');
+  assert.ok(
+    'event_count' in at(hourly.data, 0, 'hourly buckets'),
+    'aggregated rows carry a count',
+  );
 
   // The resolution has to reach the bucket grid, not just the echoed window: a
   // fixture that ignores it answers every resolution with the same buckets.
@@ -321,7 +454,7 @@ async function checkAggregatedRowShapeAndGrid() {
  * denominations is what catches it.
  */
 async function checkAggregatedFlowsAreValued() {
-  const usdPerUnit = async (symbol) => {
+  const usdPerUnit = async (symbol: string) => {
     const feed = await request(
       '/v1/allocations/activity',
       activity({
@@ -332,9 +465,11 @@ async function checkAggregatedFlowsAreValued() {
       }),
       `activity?aggregate&token_symbol=${symbol}`,
     );
-    const moved = feed.data.filter(
-      (bucket) => Number(bucket.total_tx_amount) > 0,
-    );
+    const moved = armWith(
+      feed.data,
+      'event_count',
+      `activity?aggregate&token_symbol=${symbol}`,
+    ).filter((bucket) => Number(bucket.total_tx_amount) > 0);
     assert.ok(moved.length > 0, `${symbol} moved nothing in the window`);
     return moved.map(
       (bucket) =>
@@ -370,7 +505,10 @@ async function checkRawActivityHonoursLimit() {
   );
 
   assert.equal(feed.data.length, 5, 'limit was not honoured on the raw feed');
-  assert.ok('tx_amount' in feed.data[0], 'raw rows carry tx_amount');
+  assert.ok(
+    'tx_amount' in at(feed.data, 0, 'raw activity rows'),
+    'raw rows carry tx_amount',
+  );
 }
 
 async function checkDebtRawSnapshots() {
@@ -383,9 +521,14 @@ async function checkDebtRawSnapshots() {
   assert.equal(raw.mode, 'raw');
   assert.equal(raw.source, 'indexed');
   assert.equal(raw.data.length, 1, 'limit=1 should return one snapshot');
-  assert.equal(raw.data[0].ilk_name, 'ALLOCATOR-SPARK-A');
-  assert.equal(raw.data[0].prime_address, SPARK_VAULT);
-  assert.match(raw.data[0].debt_wad, /^\d+$/u, 'debt_wad is an integer string');
+  const snapshot = at(
+    armWith(raw.data, 'ilk_name', 'raw debt snapshots'),
+    0,
+    'raw debt snapshots',
+  );
+  assert.equal(snapshot.ilk_name, 'ALLOCATOR-SPARK-A');
+  assert.equal(snapshot.prime_address, SPARK_VAULT);
+  assert.match(snapshot.debt_wad, /^\d+$/u, 'debt_wad is an integer string');
 }
 
 async function checkCompositeAllocationsAreAUnion() {
@@ -569,7 +712,7 @@ async function checkPositionKeysJoinTheTwoEndpoints() {
     'risk-capital (both)',
   );
 
-  const byKey = new Map();
+  const byKey = new Map<string, RiskAllocation>();
   for (const row of risk.per_allocation) {
     for (const key of row.position_keys ?? []) {
       if (!byKey.has(key)) byKey.set(key, row);
@@ -577,7 +720,7 @@ async function checkPositionKeysJoinTheTwoEndpoints() {
   }
   assert.ok(byKey.size > 0, 'the risk breakdown publishes no position keys');
 
-  const attach = (allocation) =>
+  const attach = (allocation: AllocationRow) =>
     (allocation.position_keys ?? [])
       .map((key) => byKey.get(key))
       .find((row) => row !== undefined);
@@ -618,7 +761,7 @@ async function checkPositionKeysJoinTheTwoEndpoints() {
 async function checkProvenanceSelection() {
   const window = { aggregate: true, limit: 3 };
 
-  for (const source of ['indexed', 'reference', 'both']) {
+  for (const source of ['indexed', 'reference', 'both'] as const) {
     const envelope = await request(
       '/v1/primes/{prime_id}/exposure',
       {
@@ -693,8 +836,9 @@ async function checkDebtAggregatedBuckets() {
 
   assert.equal(aggregated.mode, 'aggregated');
   assert.equal(aggregated.data.length, 5);
+  const bucket = at(aggregated.data, 0, 'aggregated debt buckets');
   assert.ok(
-    'debt_wad' in aggregated.data[0] && !('ilk_name' in aggregated.data[0]),
+    'debt_wad' in bucket && !('ilk_name' in bucket),
     'aggregated debt buckets carry no ilk identity',
   );
 }
@@ -705,7 +849,7 @@ async function checkDebtAggregatedBuckets() {
  * overlap, or paging or rescaling a chart redraws it.
  */
 async function checkSeriesValuesFollowTheirInstant() {
-  const read = async (query, label) =>
+  const read = async (query: ExposureQuery, label: string) =>
     request(
       '/v1/primes/{prime_id}/exposure',
       { params: { path: { prime_id: SPARK_MAINNET_PROXY }, query } },
@@ -717,9 +861,9 @@ async function checkSeriesValuesFollowTheirInstant() {
     daily.data.map((bucket) => [bucket.bucket_start, bucket.exposure_usd]),
   );
 
-  const hoursAgo = (hours) =>
+  const hoursAgo = (hours: number) =>
     new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
-  const variants = [
+  const variants: [Awaited<ReturnType<typeof read>>, string][] = [
     [await read({ resolution: 'PT1H', limit: 10 }, 'limit=10'), 'page size'],
     [
       await read(
@@ -828,7 +972,9 @@ async function checkProtocolEventsFilter() {
   assert.equal(sparkLend.mode, 'raw');
   assert.ok(sparkLend.data.length > 0);
   assert.ok(
-    sparkLend.data.every((event) => event.protocol_name === 'SparkLend'),
+    armWith(sparkLend.data, 'protocol_name', 'sparklend events').every(
+      (event) => event.protocol_name === 'SparkLend',
+    ),
     'the protocol filter leaked another protocol',
   );
 
@@ -873,7 +1019,7 @@ async function checkTokenSymbolFilter() {
 
   assert.equal(matched.length, 3, 'limit was not honoured');
   assert.ok(
-    matched.every((row) => row.symbol.toLowerCase().includes('usds')),
+    matched.every((row) => row.symbol?.toLowerCase().includes('usds') === true),
     'the symbol filter is a case-insensitive substring match',
   );
 }
@@ -938,7 +1084,8 @@ async function checkRiskBreakdownScalesToPrime() {
   // scaling as broken rather than the fixture as missing.
   assert.ok(grove.items.length > 0, "grove's scaled breakdown is empty");
   assert.ok(
-    Number(grove.items[0].amount_usd) < Number(pool.items[0].amount_usd),
+    Number(at(grove.items, 0, "grove's breakdown").amount_usd) <
+      Number(at(pool.items, 0, "the pool's breakdown").amount_usd),
     "prime_id should scale the breakdown to that prime's pool share",
   );
 }
@@ -947,7 +1094,10 @@ async function checkRiskBreakdownScalesToPrime() {
  * `max_*` summarizes `results`, so it has to be the largest of them on the asset
  * it was asked about — the check that catches a summary copied from another one.
  */
-function assertMaxCollapsesResults(envelope, label) {
+function assertMaxCollapsesResults(
+  envelope: GetBody<'/v1/risk/rrc'>,
+  label: string,
+) {
   assert.equal(
     Number(envelope.max_rrc_usd),
     Math.max(...envelope.results.map((result) => Number(result.rrc_usd))),
@@ -962,15 +1112,21 @@ function assertMaxCollapsesResults(envelope, label) {
   );
 
   const suraf = envelope.results.find((r) => r.risk_model === 'suraf');
+  assert.ok(suraf !== undefined, `${label}: the suraf result is missing`);
+  const surafDetails = suraf.details;
+  assert.ok(
+    'crr_pct' in surafDetails,
+    `${label}: the suraf result carries no crr_pct detail`,
+  );
   assert.equal(
-    Number(suraf.details.crr_pct),
+    Number(surafDetails.crr_pct),
     Number(suraf.comparable_crr_pct),
     `${label}: suraf reports one CRR on the result and another in its details`,
   );
   const parts =
-    Number(suraf.details.unadjusted_crr_pct) + Number(suraf.details.penalty_pp);
+    Number(surafDetails.unadjusted_crr_pct) + Number(surafDetails.penalty_pp);
   assert.ok(
-    Math.abs(Number(suraf.details.crr_pct) - parts) < 1e-9,
+    Math.abs(Number(surafDetails.crr_pct) - parts) < 1e-9,
     `${label}: crr_pct is not unadjusted_crr_pct + penalty_pp`,
   );
 }
@@ -993,8 +1149,14 @@ async function checkRrcReportsBothModels() {
   assert.equal(envelope.asset_id, 736);
   // gap_sweep is the model risk-capital reports, so the two must agree.
   const gapSweep = envelope.results.find((r) => r.risk_model === 'gap_sweep');
+  assert.ok(gapSweep !== undefined, 'the gap_sweep result is missing');
   assert.equal(envelope.max_rrc_usd, gapSweep.rrc_usd);
-  assert.equal(gapSweep.details.loss_usd, gapSweep.rrc_usd);
+  const details = gapSweep.details;
+  assert.ok(
+    'loss_usd' in details,
+    'the gap_sweep result carries no loss_usd detail',
+  );
+  assert.equal(details.loss_usd, gapSweep.rrc_usd);
   assertMaxCollapsesResults(envelope, 'rrc (spUSDS)');
 }
 
@@ -1051,7 +1213,7 @@ async function checkUnknownPrimeIsNotFound() {
     '/v1/primes/{prime_id}/exposure',
     '/v1/primes/{prime_id}/total-capital',
     '/v1/primes/{prime_id}/debt',
-  ]) {
+  ] as const) {
     await expectStatus(path, primeAt(UNKNOWN_ADDRESS), 404, path);
   }
 }
@@ -1131,7 +1293,7 @@ async function checkReferenceDebtRequiresAggregate() {
 }
 
 async function checkMalformedParamsAreRejected() {
-  await expectStatus(
+  await expectRejection(
     '/v1/allocations/activity',
     activity({ limit: 'abc' }),
     422,
@@ -1149,7 +1311,7 @@ async function checkMalformedParamsAreRejected() {
     422,
     'limit above the documented maximum',
   );
-  await expectStatus(
+  await expectRejection(
     '/v1/allocations/activity',
     activity({ chain_id: 'abc' }),
     422,
@@ -1169,14 +1331,14 @@ async function checkMalformedParamsAreRejected() {
  * `false` would serve a raw envelope to a screen that asked for buckets.
  */
 async function checkBooleanFlagsFollowPydantic() {
-  const feed = await request(
+  const feed = await requestLoosely(
     '/v1/allocations/activity',
     activity({ aggregate: 'YES' }),
     'activity?aggregate=YES',
   );
   assert.equal(feed.mode, 'aggregated', 'YES is a true this API accepts');
 
-  await expectStatus(
+  await expectRejection(
     '/v1/allocations/activity',
     activity({ aggregate: 'maybe' }),
     422,
@@ -1216,7 +1378,7 @@ async function checkIllegalWindowsAreRejected() {
 }
 
 async function checkRrcRejectsAmbiguousIdentity() {
-  await expectStatus(
+  await expectRejection(
     '/v1/risk/rrc',
     activity({ chain_id: 1, token_address: SPUSDS }),
     422,
@@ -1241,7 +1403,7 @@ async function checkRrcRejectsAmbiguousIdentity() {
   );
 }
 
-const checks = [
+const checks: [string, () => Promise<void>][] = [
   ['primes list shape', checkPrimesList],
   ['registry lists', checkRegistryLists],
   ['every referenced token resolves', checkEveryReferencedTokenResolves],

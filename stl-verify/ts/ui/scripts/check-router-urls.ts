@@ -1,10 +1,46 @@
 import assert from 'node:assert/strict';
 
+import type { EntryLeaf } from '@archon-research/router-kit/testing';
 import {
   resolveEntryUrl,
   settleEntryUrl,
 } from '@archon-research/router-kit/testing';
 import { createServer } from 'vite';
+
+/**
+ * The validated search, as the router hands it back. `settleEntryUrl` reports it
+ * as `unknown` because the shape belongs to the app, so it is restated here to
+ * keep these assertions checked — a mistyped key is then a type error rather
+ * than a silent `undefined === undefined` pass.
+ *
+ * Mirrors `AppSearchPatch` (shared + allocation + activities schemas) in
+ * `src/router/search-params.ts`; importing that type would pull an app-project
+ * file into this node project's program. Every value is post-validation, so
+ * every one of them is a string or absent.
+ */
+type SettledSearch = Partial<
+  Record<
+    | 'prime'
+    | 'network'
+    | 'protocol'
+    | 'range'
+    | 'from'
+    | 'to'
+    | 'source'
+    | 'reference'
+    | 'category'
+    | 'tab'
+    | 'daa'
+    | 'sort'
+    | 'q'
+    | 'drawer'
+    | 'row'
+    | 'token'
+    | 'aa'
+    | 'allp',
+    string
+  >
+>;
 
 // Every URL an entry-time assertion below covers, plus the shapes that only
 // need to be shown to converge.
@@ -39,7 +75,7 @@ async function main() {
   const vite = await createServer({
     appType: 'custom',
     logLevel: 'error',
-    // See check-prime-grouping.mjs: dependency discovery runs a native rolldown
+    // See check-prime-grouping.ts: dependency discovery runs a native rolldown
     // pass that segfaults intermittently and has nothing to contribute here.
     optimizeDeps: { noDiscovery: true },
     server: { middlewareMode: true },
@@ -49,12 +85,21 @@ async function main() {
     const { router } = await vite.ssrLoadModule('/src/router/routes.ts');
     // The harness takes the shipped router's own options, so the parse/stringify
     // and trailing-slash behaviour under test is the one the app runs with.
-    const resolve = (url) => resolveEntryUrl(router.options, url);
-    const settle = (url) => settleEntryUrl(router.options, url);
+    const resolve = (url: string) => resolveEntryUrl(router.options, url);
+    const settle = (url: string) => settleEntryUrl(router.options, url);
     // What the address bar and the page settle on, once every entry-time
     // redirect has run.
-    const settledUrl = async (url) => (await settle(url)).url;
-    const applied = async (url) => (await settle(url)).result.search;
+    const settledUrl = async (url: string) => (await settle(url)).url;
+    const applied = async (url: string) =>
+      (await settle(url)).result.search as SettledSearch;
+    // A resolution is a redirect or a leaf, and only a leaf carries params.
+    const leaf = async (url: string): Promise<EntryLeaf> => {
+      const resolution = await resolve(url);
+
+      assert.equal(resolution.redirectTo, null, `${url} redirected`);
+
+      return resolution as EntryLeaf;
+    };
 
     for (const url of ENTRY_URLS) {
       await settle(url);
@@ -63,11 +108,17 @@ async function main() {
     // Links shared before the prime moved into the path must keep working, with
     // every other param intact and unchanged in spelling.
     assert.equal(
-      (await resolve('/allocation?prime=0xAAA&network=1&sort=symbol%3Adesc&q=usd'))
-        .redirectTo,
+      (
+        await resolve(
+          '/allocation?prime=0xAAA&network=1&sort=symbol%3Adesc&q=usd',
+        )
+      ).redirectTo,
       '/allocation/0xAAA?network=1&sort=symbol%3Adesc&q=usd',
     );
-    assert.equal((await resolve('/?prime=0xAAA')).redirectTo, '/allocation/0xAAA');
+    assert.equal(
+      (await resolve('/?prime=0xAAA')).redirectTo,
+      '/allocation/0xAAA',
+    );
     assert.equal(
       (await resolve('/unknown/path?prime=0xAAA')).redirectTo,
       '/allocation/0xAAA',
@@ -80,7 +131,10 @@ async function main() {
     // Entry points with no prime land on the allocation view, which resolves the
     // default prime once the prime list arrives, and keep their filters.
     assert.equal((await resolve('/')).redirectTo, '/allocation');
-    assert.equal((await resolve('/unknown/deep/path')).redirectTo, '/allocation');
+    assert.equal(
+      (await resolve('/unknown/deep/path')).redirectTo,
+      '/allocation',
+    );
     assert.equal(
       (await resolve('/unknown?network=1')).redirectTo,
       '/allocation?network=1',
@@ -91,7 +145,7 @@ async function main() {
     // A trailing slash resolves to the same route.
     assert.equal((await resolve('/activities/')).routeId, '/activities');
 
-    assert.equal((await resolve('/allocation/0xAAA')).params.primeId, '0xAAA');
+    assert.equal((await leaf('/allocation/0xAAA')).params.primeId, '0xAAA');
 
     // The prime lives in the path on this view, so a leftover `?prime=` naming a
     // different one is dropped and everything else is carried over.
@@ -104,7 +158,9 @@ async function main() {
     // A hand-edited URL degrades to "absent" rather than failing the route, and
     // the address bar is rewritten to the state that was actually applied.
     assert.equal(
-      await settledUrl('/allocation/0xAAA?range=bogus&tab=bogus&category=bogus&network=1'),
+      await settledUrl(
+        '/allocation/0xAAA?range=bogus&tab=bogus&category=bogus&network=1',
+      ),
       '/allocation/0xAAA?network=1',
     );
     assert.equal((await applied('/allocation/0xAAA?range=7d')).range, '7d');
@@ -112,7 +168,10 @@ async function main() {
 
     // `custom` is not a preset in the URL: usable bounds are what mark a custom
     // range, so the naked selection is dropped and a usable pair survives it.
-    assert.equal((await applied('/allocation/0xAAA?range=custom')).range, undefined);
+    assert.equal(
+      (await applied('/allocation/0xAAA?range=custom')).range,
+      undefined,
+    );
     const customRange = await applied(
       '/allocation/0xAAA?range=custom&from=2026-01-01T00:00:00Z&to=2026-02-01T00:00:00Z',
     );
@@ -126,7 +185,9 @@ async function main() {
       '/allocation/0xAAA',
     );
     assert.equal(
-      await settledUrl('/allocation/0xAAA?from=2026-02-01T00:00:00Z&to=2026-01-01T00:00:00Z'),
+      await settledUrl(
+        '/allocation/0xAAA?from=2026-02-01T00:00:00Z&to=2026-01-01T00:00:00Z',
+      ),
       '/allocation/0xAAA',
     );
 
@@ -141,7 +202,10 @@ async function main() {
       (await applied('/allocation/0xAAA?source=indexed')).source,
       'indexed',
     );
-    assert.equal((await applied('/allocation/0xAAA?source=both')).source, 'both');
+    assert.equal(
+      (await applied('/allocation/0xAAA?source=both')).source,
+      'both',
+    );
     // Already canonical, so it is left exactly as it arrived -- no redirect to
     // loop on.
     assert.equal(
@@ -151,7 +215,10 @@ async function main() {
 
     // A provenance the vocabulary does not know is dropped rather than carried,
     // so the address bar cannot claim a mode the page is not in.
-    assert.equal((await applied('/allocation/0xAAA?source=sky')).source, undefined);
+    assert.equal(
+      (await applied('/allocation/0xAAA?source=sky')).source,
+      undefined,
+    );
     assert.equal(
       await settledUrl('/allocation/0xAAA?source=sky'),
       '/allocation/0xAAA',
@@ -164,7 +231,10 @@ async function main() {
       (await applied('/allocation/0xAAA?reference=true')).source,
       'reference',
     );
-    assert.equal((await applied('/allocation/0xAAA?reference')).source, 'reference');
+    assert.equal(
+      (await applied('/allocation/0xAAA?reference')).source,
+      'reference',
+    );
     assert.equal(
       (await applied('/allocation/0xAAA?reference=true')).reference,
       undefined,
@@ -204,7 +274,10 @@ async function main() {
       (await applied('/allocation/0xAAA?sort=symbol:desc')).sort,
       'symbol:desc',
     );
-    assert.equal(await settledUrl('/activities?q=usd&sort=symbol:desc'), '/activities');
+    assert.equal(
+      await settledUrl('/activities?q=usd&sort=symbol:desc'),
+      '/activities',
+    );
 
     // Search text is never JSON-decoded, so a term that happens to be valid JSON
     // stays the text the user typed.
@@ -213,8 +286,13 @@ async function main() {
 
     // Each view's action filter has its own key, so neither leaks into the other.
     assert.equal((await applied('/allocation/0xAAA?daa=in')).daa, 'in');
-    assert.equal(await settledUrl('/allocation/0xAAA?aa=in'), '/allocation/0xAAA');
-    const activitiesSearch = await applied('/activities?token=USDC&allp=0&aa=in');
+    assert.equal(
+      await settledUrl('/allocation/0xAAA?aa=in'),
+      '/allocation/0xAAA',
+    );
+    const activitiesSearch = await applied(
+      '/activities?token=USDC&allp=0&aa=in',
+    );
     assert.equal(activitiesSearch.aa, 'in');
     assert.equal(activitiesSearch.token, 'USDC');
     assert.equal(activitiesSearch.allp, '0');
@@ -223,7 +301,7 @@ async function main() {
   }
 }
 
-// See check-prime-grouping.mjs: vite's dev server swallows unhandled rejections,
+// See check-prime-grouping.ts: vite's dev server swallows unhandled rejections,
 // so a failing assertion only fails this script if it is caught here.
 main().catch((error) => {
   console.error(error);

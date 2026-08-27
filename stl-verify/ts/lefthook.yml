@@ -44,13 +44,13 @@ pre-commit:
 
     mocks-oxlint:
       root: *ts_root
-      glob: 'stl-verify/ts/mocks/**.{ts,mjs}'
+      glob: 'stl-verify/ts/mocks/**.ts'
       run: npx --no-install oxlint -c mocks/oxlint.config.ts --fix {staged_files}
       stage_fixed: true
 
     mocks-oxfmt:
       root: *ts_root
-      glob: 'stl-verify/ts/mocks/**.{ts,mjs,json}'
+      glob: 'stl-verify/ts/mocks/**.{ts,json}'
       exclude: *oxfmt_exclude
       run: npx --no-install oxfmt -c mocks/.oxfmtrc.ts --write {staged_files}
       stage_fixed: true

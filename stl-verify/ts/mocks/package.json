@@ -10,10 +10,10 @@
   },
   "scripts": {
     "type:check": "tsc -p tsconfig.json --noEmit",
-    "format": "uikit-cli format --write \"src/**/*.ts\" \"scripts/**/*.mjs\" oxlint.config.ts .oxfmtrc.ts",
-    "format:check": "uikit-cli format --check \"src/**/*.ts\" \"scripts/**/*.mjs\" oxlint.config.ts .oxfmtrc.ts",
+    "format": "uikit-cli format --write \"src/**/*.ts\" \"scripts/**/*.ts\" oxlint.config.ts .oxfmtrc.ts",
+    "format:check": "uikit-cli format --check \"src/**/*.ts\" \"scripts/**/*.ts\" oxlint.config.ts .oxfmtrc.ts",
     "lint": "uikit-cli lint src scripts oxlint.config.ts",
-    "test:mocks": "NODE_ENV=test node scripts/check-mock-api.mjs"
+    "test:mocks": "NODE_ENV=test node scripts/check-mock-api.ts"
   },
   "dependencies": {
     "@archon-research/http-client-msw": "0.10.0"

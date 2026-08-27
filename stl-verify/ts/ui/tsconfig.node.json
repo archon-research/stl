@@ -6,5 +6,12 @@
     "types": ["node"],
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo"
   },
-  "include": ["vite.config.ts", "panda.config.ts", "env.ts"]
+  "include": [
+    "vite.config.ts",
+    "panda.config.ts",
+    "env.ts",
+    "oxlint.config.ts",
+    ".oxfmtrc.ts",
+    "scripts"
+  ]
 }
