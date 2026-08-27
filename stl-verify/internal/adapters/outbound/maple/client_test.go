@@ -573,6 +573,47 @@ func TestGetActiveLoans_NullCollateralAmountsPersistedAsNull(t *testing.T) {
 	}
 }
 
+func TestGetActiveLoans_NullCollateralAssetSymbolKeepsLoan(t *testing.T) {
+	// Maple returned a priced, Deposited collateral with a null asset symbol on
+	// 2026-08-27 (loan 0x74f49ed5…), which failed the whole loans phase for ~1h
+	// in both environments. The symbol decodes to "" and the loan is kept.
+	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+		writeJSON(w, fmt.Sprintf(`{"data": {"openTermLoans": [{
+			"id": %q, "borrower": {"id": %q}, "state": "Active",
+			"principalOwed": "5000000", "acmRatio": "1677823",
+			"collateral": {
+				"asset": null, "assetAmount": "3000000000000000", "assetValueUsd": "279637223441",
+				"decimals": 18, "state": "Deposited", "custodian": null,
+				"liquidationLevel": 1250000
+			},
+			"loanMeta": null,
+			"fundingPool": {"id": %q}
+		}]}}`, loanAddr, borrowerAddr, poolAddr))
+	}})
+
+	loans, err := client.GetActiveLoans(context.Background())
+	if err != nil {
+		t.Fatalf("GetActiveLoans must tolerate a null collateral asset symbol: %v", err)
+	}
+	if len(loans) != 1 {
+		t.Fatalf("len(loans) = %d, want 1 (loan must be kept)", len(loans))
+	}
+	col := loans[0].Collateral
+	if col == nil {
+		t.Fatalf("Collateral = nil, want a collateral with an empty symbol")
+	}
+	if col.Asset != "" {
+		t.Errorf("Asset = %q, want \"\"", col.Asset)
+	}
+	// The risk-bearing values must survive the missing label.
+	if col.AssetAmount.Cmp(big.NewInt(3000000000000000)) != 0 {
+		t.Errorf("AssetAmount = %s, want 3000000000000000", col.AssetAmount)
+	}
+	if col.AssetValueUSD.Cmp(big.NewInt(279637223441)) != 0 {
+		t.Errorf("AssetValueUSD = %s, want 279637223441", col.AssetValueUSD)
+	}
+}
+
 func TestGetActiveLoans_MalformedCollateralValuesNameLoanID(t *testing.T) {
 	// Non-null but malformed collateral values are still hard errors (only
 	// API-sanctioned nulls downgrade to an absent collateral).

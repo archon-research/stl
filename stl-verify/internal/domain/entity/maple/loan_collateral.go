@@ -17,7 +17,7 @@ import (
 type LoanCollateral struct {
 	LoanID           int64
 	SyncedAt         time.Time
-	AssetSymbol      string
+	AssetSymbol      string   // empty when the API reports a null asset symbol
 	AssetAmount      *big.Int // nil when the API reports null
 	AssetDecimals    int16
 	AssetValueUSD    *big.Int // nil when the API reports null
@@ -65,9 +65,12 @@ func (c *LoanCollateral) Validate() error {
 	if c.SyncedAt.IsZero() {
 		return fmt.Errorf("syncedAt must not be zero")
 	}
-	if c.AssetSymbol == "" {
-		return fmt.Errorf("assetSymbol must not be empty")
-	}
+	// AssetSymbol is deliberately not required. It is Maple-side metadata, and
+	// the loans phase writes one all-or-nothing snapshot: making a missing
+	// symbol fatal discards every loan's snapshot over one absent label. The
+	// amount, price, and liquidation level still carry the risk signal, so an
+	// empty symbol is persisted as-is and counted as a null downgrade by the
+	// caller instead.
 	if err := requireNonNegBigIntIfSet("assetAmount", c.AssetAmount); err != nil {
 		return err
 	}

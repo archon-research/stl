@@ -375,6 +375,11 @@ rather than pages.
   (duplicate IDs across pages) → usually transient; confirm it clears next cycle.
 - A string-encoded integer field the client can't parse → the phase fails hard
   by design (never silently skips rows); needs a client fix.
+- A null `collateral.asset` symbol is a downgrade, not a failure: the row is
+  stored with an empty `asset_symbol` and counted under
+  `maple_sync_null_downgrades_total{field="collateral_asset_symbol"}`. A sustained
+  nonzero count is an upstream metadata gap to raise with Maple, not an
+  indexer bug.
 - DB write failure (FK, constraint) → inspect the named entity.
 
 ---

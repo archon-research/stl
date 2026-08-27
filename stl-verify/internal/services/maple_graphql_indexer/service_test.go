@@ -1409,7 +1409,10 @@ func TestSync_InvalidCollateralFailsPhase(t *testing.T) {
 	client := happyClient()
 	client.GetActiveLoansFn = func(context.Context) ([]outbound.MapleActiveLoan, error) {
 		loans := fixtureLoans()
-		loans[0].Collateral.Asset = "" // entity validation rejects this
+		// A negative amount, not an empty symbol: a missing symbol is a
+		// tolerated downgrade (see TestSyncIntegration_NullCollateralAssetSymbolPersists),
+		// whereas a nonsensical amount must still fail the phase.
+		loans[0].Collateral.AssetAmount = big.NewInt(-1)
 		return loans, nil
 	}
 	repo := newMockRepo()
@@ -1419,7 +1422,7 @@ func TestSync_InvalidCollateralFailsPhase(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "assetSymbol must not be empty") {
+	if !strings.Contains(err.Error(), "assetAmount must be non-negative") {
 		t.Errorf("error = %q", err.Error())
 	}
 }

@@ -47,9 +47,11 @@ func TestLoanCollateral_Validate(t *testing.T) {
 			wantErr: "syncedAt must not be zero",
 		},
 		{
-			name:    "empty asset symbol",
-			mutate:  func(c *LoanCollateral) { c.AssetSymbol = "" },
-			wantErr: "assetSymbol must not be empty",
+			// Maple returns a null asset symbol occasionally (precedent:
+			// loan 0x74f49ed5… on 2026-08-27). It must not fail the phase,
+			// which would discard every loan's snapshot for that cycle.
+			name:   "empty asset symbol is valid",
+			mutate: func(c *LoanCollateral) { c.AssetSymbol = "" },
 		},
 		{
 			// Nullable in the API schema (e.g. DepositPending): nil is valid.
