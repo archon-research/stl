@@ -18,6 +18,12 @@ spec:
     metadata:
       labels:
         app: core-model-runner
+      annotations:
+        # A tick is unretryable Monte Carlo (maximum_attempts=1), so a voluntary
+        # eviction loses the day's run rather than costing a restart (VEC-681).
+        # Stopgap: it pins the node through the ~23.5h the pod idles, and does
+        # nothing on staging's spot nodes. Remove once the tick resumes per market.
+        karpenter.sh/do-not-disrupt: "true"
     spec:
       serviceAccountName: core-model-runner
       containers:
