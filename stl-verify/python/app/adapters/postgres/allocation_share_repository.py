@@ -20,8 +20,9 @@ logger = get_logger(__name__)
 #
 # Semantics — kept stable because both the batch and single-pair callers rely
 # on them:
-#   * Latest supply: most-recent ``token_total_supply`` row per pair, broken
-#     by ``(block_number, block_version, processing_version) DESC``.
+#   * Latest supply: the pair's ``token_total_supply_current`` row — the
+#     trigger-maintained newest ``token_total_supply`` row per pair by
+#     ``(block_number, block_version, processing_version)``. A PK hit.
 #   * Pinned balance: most-recent ``allocation_position`` row at or strictly
 #     before the supply row's ``(block_number, block_version)`` — never *after*
 #     — so a balance from a later block is never paired with an earlier supply
@@ -31,11 +32,11 @@ logger = get_logger(__name__)
 #     ``LIMIT 1`` over the segmentby-indexed ``(chain_id, token_id,
 #     proxy_address)`` triple still needs a chunk-prune to avoid scanning
 #     every chunk for the wallet. TimescaleDB only prunes for stable
-#     expressions of ``NOW()`` (CTE column refs like ``ls.block_timestamp``
-#     are runtime-only and force a full scan). Safe because the caller rejects
-#     with :class:`StaleShareError` when the supply row is older than
-#     ``max_stale_seconds`` (~minutes), so any row newer than the supply is
-#     within ``NOW() - 14d`` by a wide margin.
+#     expressions of ``NOW()`` (a column of the joined supply row, like
+#     ``ls.block_timestamp``, is runtime-only and forces a full scan). Safe
+#     because the caller rejects with :class:`StaleShareError` when the supply
+#     row is older than ``max_stale_seconds`` (~minutes), so any row newer than
+#     the supply is within ``NOW() - 14d`` by a wide margin.
 _BATCH_SHARE_LOOKUP_SQL = """
 WITH inputs AS (
     SELECT unnest(CAST(:chain_ids AS int[]))   AS chain_id,
@@ -50,17 +51,9 @@ SELECT
     ls.scaled_total_supply,
     ls.block_timestamp AS supply_ts
 FROM inputs i
-LEFT JOIN LATERAL (
-    SELECT total_supply, scaled_total_supply,
-           block_number, block_version,
-           block_timestamp
-    FROM token_total_supply
-    WHERE chain_id = i.chain_id
-      AND token_id = i.token_id
-    ORDER BY block_number DESC, block_version DESC,
-             processing_version DESC
-    LIMIT 1
-) ls ON true
+LEFT JOIN token_total_supply_current ls
+    ON ls.chain_id = i.chain_id
+   AND ls.token_id = i.token_id
 LEFT JOIN LATERAL (
     SELECT ap.balance, ap.scaled_balance
     FROM allocation_position ap

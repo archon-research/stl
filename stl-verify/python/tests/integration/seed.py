@@ -112,6 +112,43 @@ async def insert_onchain_price(
     )
 
 
+async def insert_token_total_supply(
+    conn: asyncpg.Connection,
+    *,
+    token_id: int,
+    total_supply: int | str | Decimal,
+    block: int,
+    scaled_total_supply: int | str | Decimal | None = None,
+    block_version: int = 0,
+    block_timestamp: dt.datetime | None = None,
+    build_id: int = 0,
+    chain_id: int = 1,
+) -> None:
+    """Insert a token_total_supply observation (decimals-normalized, as the tracker writes it).
+
+    ``block_timestamp`` defaults to NOW() so the share lookup's staleness check
+    passes. The processing_version trigger keys on (block, block_version,
+    block_timestamp), so passing the same timestamp under a new ``build_id`` is
+    how a reprocess (the next version) is seeded.
+    """
+    await conn.execute(
+        """
+        INSERT INTO token_total_supply
+            (chain_id, token_id, total_supply, scaled_total_supply,
+             block_number, block_version, block_timestamp, source, build_id)
+        VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, NOW()), 'sweep', $8)
+        """,
+        chain_id,
+        token_id,
+        Decimal(total_supply),
+        None if scaled_total_supply is None else Decimal(scaled_total_supply),
+        block,
+        block_version,
+        block_timestamp,
+        build_id,
+    )
+
+
 async def insert_borrower_debt(
     conn: asyncpg.Connection, *, protocol_id: int, user_id: int, token_id: int, amount: int | str, block: int
 ) -> None:

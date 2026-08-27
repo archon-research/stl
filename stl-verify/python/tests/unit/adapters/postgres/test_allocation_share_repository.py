@@ -1,3 +1,4 @@
+import re
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
@@ -77,6 +78,13 @@ def test_batch_sql_pins_balance_to_supply_block() -> None:
     assert "ap.created_at >= NOW() - INTERVAL '14 days'" in sql
     # Wallet bind must stay scalar (one prime per request).
     assert ":wallet" in sql
+
+
+def test_batch_sql_reads_the_supply_from_the_current_cache() -> None:
+    """The newest supply per pair is a PK hit on ``token_total_supply_current``, never a walk over the history."""
+    sql = _BATCH_SHARE_LOOKUP_SQL
+    assert "JOIN token_total_supply_current" in sql
+    assert re.search(r"\btoken_total_supply\b", sql) is None
 
 
 @pytest.mark.asyncio
