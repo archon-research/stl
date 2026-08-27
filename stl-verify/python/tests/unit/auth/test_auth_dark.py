@@ -32,7 +32,7 @@ def test_auth_is_off_by_default() -> None:
 
 
 def test_anonymous_principal_when_dark(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(deps, "get_settings", lambda: _settings())
+    monkeypatch.setattr(deps, "get_settings", _settings)
     assert deps.get_principal(request=None) is None  # ty: ignore[invalid-argument-type]
 
 
