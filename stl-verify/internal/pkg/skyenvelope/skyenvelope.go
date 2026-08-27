@@ -1,9 +1,7 @@
 // Package skyenvelope holds the response-envelope mechanics shared by Sky's
 // hosts: pagination guarding and optional-field folding. Split so the envelope
 // stays one contract across hosts while page limits and each vendor's network
-// vocabulary stay per-client. Now the only reader of these feeds — the Python
-// API serves them from the tables this service writes rather than fetching them
-// per request, so its own copy of this envelope is gone.
+// vocabulary stay per-client.
 package skyenvelope
 
 import (
