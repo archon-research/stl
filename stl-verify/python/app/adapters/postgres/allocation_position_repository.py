@@ -1178,8 +1178,44 @@ class AllocationRepository:
 # refusal via ``_record_receipt_valuation_gaps``; the exposure-buckets read
 # nulls the divergent observation before ``last()``, so ``locf`` carries the
 # last pre-divergence value (stale but unit-correct) without telemetry.
+#
+# Latest-row selection is staged so the DISTINCT ON sorts a per-token candidate
+# set rather than the join output — sorting the join output is what made this the
+# database's largest temp-spill source, ~10 MB of temp per call.
+# ``latest_position_block`` reduces the proxy's history to one block per
+# (chain_id, token_id), which the columnstore answers from batch metadata because
+# block_number is an orderby column; ``latest_positions`` then keeps only the rows
+# at those blocks.
+#
+# Both stages are MATERIALIZED to pin exactly one pass over the history each.
+# Inlined, the planner re-scans allocation_position per surviving row and pays the
+# whole chunk fan-out each time: 104k buffer reads against 28k on TimescaleDB
+# 2.29, and the equality-join spelling of the same idea degraded to 3.7s on 2.25.
+#
+# Equivalence with the unstaged form: block_number leads the ordering, so the
+# winning row always sits at its own (chain_id, token_id) max block and survives
+# the pre-filter; the pre-filter is a semi-join, so it cannot duplicate rows; and
+# the dedup stays on ``rt.id`` because two (chain_id, token_id) pairs can reach one
+# receipt_token — two chains' token rows may share an address, which the
+# receipt_token join matches on without constraining token.chain_id.
 _RECEIPT_TOKEN_POSITIONS_SQL = text("""
-    WITH latest_receipt_positions AS (
+    WITH latest_position_block AS MATERIALIZED (
+        SELECT ap.chain_id, ap.token_id, MAX(ap.block_number) AS block_number
+        FROM allocation_position ap
+        WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
+        GROUP BY ap.chain_id, ap.token_id
+    ),
+    latest_positions AS MATERIALIZED (
+        SELECT ap.chain_id, ap.token_id, ap.balance, ap.underlying_value,
+               ap.underlying_token_id, ap.created_at, ap.direction, ap.tx_amount,
+               ap.block_number, ap.block_version, ap.processing_version, ap.log_index
+        FROM allocation_position ap
+        WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
+          AND (ap.chain_id, ap.token_id, ap.block_number) IN (
+              SELECT b.chain_id, b.token_id, b.block_number FROM latest_position_block b
+          )
+    ),
+    latest_receipt_positions AS (
         SELECT DISTINCT ON (rt.id)
             rt.id                                    AS receipt_token_id,
             rt.symbol                                AS symbol,
@@ -1196,12 +1232,11 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
             ap.created_at                            AS latest_activity_at,
             ap.direction                             AS latest_activity_action,
             ap.tx_amount                             AS latest_activity_amount
-        FROM allocation_position ap
+        FROM latest_positions ap
         JOIN token t          ON t.id = ap.token_id
         JOIN receipt_token rt ON rt.receipt_token_address = t.address AND rt.chain_id = ap.chain_id
         JOIN token ut         ON ut.id = rt.underlying_token_id
         JOIN protocol pr      ON pr.id = rt.protocol_id AND pr.chain_id = ap.chain_id
-        WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
         ORDER BY rt.id,
                  ap.block_number DESC, ap.block_version DESC,
                  ap.processing_version DESC, ap.log_index DESC
