@@ -39,55 +39,6 @@ groups:
     interval: 1m
     rules:
       # ---------------------------------------------------------------------
-      # CRITICAL — page-worthy
-      # ---------------------------------------------------------------------
-
-      - alert: VectorDatabaseOutOfResources
-        # error_class="resources" is SQLSTATE class 53, `insufficient_resources`:
-        # 53200 out_of_memory, 53300 too_many_connections, 53100 disk_full,
-        # 53400 configuration limit exceeded. Every member means the server ran
-        # out of something and is refusing work it would otherwise do — there is
-        # no benign amount, so the threshold is >0 rather than a rate.
-        #
-        # Kept per-service: `service_name` is what per-service silencing and
-        # routing key on. Collapsing one shared-dependency fault into a single
-        # page is Alertmanager's job — the route wants
-        # `group_by: [alertname, cluster]`.
-        #
-        # increase()>0 over 10m with a 1m dwell latches an isolated occurrence,
-        # which rate()>0 with a longer `for` can miss when the lone positive
-        # window straddles the dwell boundary — same construction as
-        # VectorWatcherSilentBackfillNoCanonical.
-        expr: |
-          sum by (service_name, cluster) (
-            increase(db_query_errors_total{
-              k8s_namespace_name="vector",
-              error_class="resources"
-            }[10m])
-          ) > 0
-        for: 1m
-        labels:
-          team: vector
-          severity: critical
-          component: database
-          namespace: vector
-        annotations:
-          summary: "Vector database out of resources (SQLSTATE 53x) for {{ $labels.service_name }} on {{ $labels.cluster }}"
-          description: |
-            Postgres returned a SQLSTATE class-53 error (insufficient
-            resources — out of memory, too many connections, or disk full) to
-            `{{ $labels.service_name }}` on `{{ $labels.cluster }}` in the last
-            10m: `{{ $value | printf "%.0f" }}` occurrences.
-
-            Workers retry and recover, so the pipeline will look healthy while
-            writes fail and are re-driven. Do not wait for a visible outage.
-
-            Break `db_query_errors_by_sqlstate_total` down by `sqlstate` to see
-            which resource ran out, and check whether sibling services are
-            firing too — this is a fault in a shared dependency.
-          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-database.md#vectordatabaseoutofresources
-
-      # ---------------------------------------------------------------------
       # WARNING
       # ---------------------------------------------------------------------
 
@@ -96,9 +47,14 @@ groups:
         # issuing hundreds of queries a second to a cronjob issuing a handful an
         # hour, and one threshold in queries/sec cannot be meaningful for both.
         #
-        # Covers `other` and `unknown` only, so this never double-fires with
-        # VectorDatabaseOutOfResources (`resources`) or
-        # VectorDatabaseSerializationErrorsUnretried (`retryable`).
+        # Covers everything except `retryable`, so this never double-fires with
+        # VectorDatabaseSerializationErrorsUnretried.
+        #
+        # `resources` (SQLSTATE class 53) is included but deliberately has no
+        # rule of its own: TigerDataMemoryPressureCritical in the infrastructure
+        # repo already pages on the instance-level cause, and a second critical
+        # here paged twice for one incident. This keeps the per-service view —
+        # which services are being refused — without the duplicate page.
         #
         # The absolute-rate conjunct keeps a near-idle service from paging on a
         # 100% ratio built out of one failed query.
@@ -107,7 +63,7 @@ groups:
             sum by (service_name, cluster) (
               rate(db_query_errors_total{
                 k8s_namespace_name="vector",
-                error_class=~"other|unknown"
+                error_class=~"resources|other|unknown"
               }[10m])
             )
             /
@@ -119,7 +75,7 @@ groups:
           sum by (service_name, cluster) (
             rate(db_query_errors_total{
               k8s_namespace_name="vector",
-              error_class=~"other|unknown"
+              error_class=~"resources|other|unknown"
             }[10m])
           ) > 0.01
         for: 15m
@@ -133,9 +89,13 @@ groups:
           description: |
             `{{ $labels.service_name }}` is failing
             `{{ $value | humanizePercentage }}` of its database operations,
-            sustained over 15m, excluding the resource errors covered by
-            VectorDatabaseOutOfResources and the serialization/deadlock codes
+            sustained over 15m, excluding the serialization/deadlock codes
             covered by VectorDatabaseSerializationErrorsUnretried.
+
+            If `sqlstate` is a class-53 code (53200 out_of_memory, 53300
+            too_many_connections, 53100 disk_full) the instance itself is out of
+            a resource — expect TigerDataMemoryPressureCritical to be firing,
+            and treat that as the cause and this as the blast radius.
 
             Break `db_query_errors_by_sqlstate_total` down by `sqlstate` to
             classify: 57014 is a statement timeout, 42501 an append-only grant

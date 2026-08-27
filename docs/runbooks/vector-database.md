@@ -48,9 +48,13 @@ Pool acquisition failures (dial errors, pool exhaustion) never reach the tracer
 
 ---
 
-## VectorDatabaseOutOfResources
+## Resource errors (SQLSTATE class 53)
 
-**Severity:** critical · **For:** 1m
+**No alert of its own.** Paging for this is owned by
+`TigerDataMemoryPressureCritical` in the infrastructure repo, which watches the
+instance directly — a second critical here paged twice for one incident. These
+errors still surface per-service through VectorDatabaseErrorRatioHigh, and this
+section is the diagnostic reference for them.
 
 ### What it means
 
@@ -119,10 +123,10 @@ first move.
 
 ### Verify recovery
 
-The alert auto-resolves when
-`increase(db_query_errors_total{error_class="resources"}[10m])` returns to 0.
-Because workers retry, also confirm the pipeline caught up rather than assuming
-it: the watchers' `backfill_watermark_lag` should be draining toward zero.
+`increase(db_query_errors_total{error_class="resources"}[10m])` should return to
+0. Because workers retry, also confirm the pipeline caught up rather than
+assuming it: the watchers' `backfill_watermark_lag` should be draining toward
+zero.
 
 ---
 
@@ -133,9 +137,13 @@ it: the watchers' `backfill_watermark_lag` should be draining toward zero.
 ### What it means
 
 A service is failing more than 5% of its database operations, sustained over
-15m, counting only `error_class` `other` and `unknown` — resource exhaustion is
-covered by VectorDatabaseOutOfResources and the serialization/deadlock codes by
+15m, counting `error_class` `resources`, `other` and `unknown` — the
+serialization/deadlock codes are covered by
 VectorDatabaseSerializationErrorsUnretried.
+
+If the failures are class-53 (`resources`), the instance is out of memory,
+connections or disk: see [Resource errors](#resource-errors-sqlstate-class-53)
+above, and expect `TigerDataMemoryPressureCritical` to be the page that matters.
 
 It is a ratio rather than an absolute rate because query volume across the fleet
 spans several orders of magnitude, from a watcher issuing hundreds of queries a
