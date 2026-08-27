@@ -820,7 +820,12 @@ const manyChunkSeedStatement = `
 	FROM generate_series(1, $1) AS g`
 
 func processingVersionSeedStatements() []string {
-	const tsExpr = `timestamptz '2035-01-01 00:00:00+00' + ((g % 5) * interval '1 day') + (g * interval '1 second')`
+	// One stride has to outrun the widest chunk interval any fixture table has (30 days, VEC-663)
+	// or the five rows share a chunk and minFixtureChunkCount fires. The base is the probe
+	// timestamp itself, so the first row's chunk contains the probe whatever the table's interval
+	// is -- the premise every prune assertion here rests on.
+	const tsExpr = processingVersionProbeTimestamp +
+		` + ((g % 5) * interval '30 days') + (g * interval '1 second')`
 	const hashExpr = `decode(lpad(to_hex(g), 64, '0'), 'hex')`
 
 	return []string{
@@ -832,13 +837,13 @@ func processingVersionSeedStatements() []string {
 			INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled, created_at, processing_version, build_id)
 			SELECT 1, 1, 1, 1000000, 0, 1, 1, 'collateral', %s, true, %s, 0, 0
 			FROM generate_series(1, $1) AS g`, hashExpr, tsExpr),
-		// This table partitions on block_number (100,000 blocks to a chunk) and its natural key has no
+		// This table partitions on block_number (1,000,000 blocks to a chunk) and its natural key has no
 		// time column, so the column that varies per row is also the column that picks the chunk — where
 		// the other tables vary a timestamp. Striding one chunk interval every fifth row spreads the
 		// fixture over five chunks, and g = 1 puts a row on the probe key itself inside the first of them.
 		`
 			INSERT INTO sparklend_reserve_data (protocol_id, token_id, block_number, block_version, total_a_token, processing_version, build_id)
-			SELECT 1, 1, 1000000 + ((g - 1) % 5) * 100000 + ((g - 1) / 5), 0, 1, 0, 0
+			SELECT 1, 1, 1000000 + ((g - 1) % 5) * 1000000 + ((g - 1) / 5), 0, 1, 0, 0
 			FROM generate_series(1, $1) AS g`,
 		fmt.Sprintf(`
 			INSERT INTO onchain_token_price (token_id, oracle_id, block_number, block_version, timestamp, price_usd, processing_version, build_id)
