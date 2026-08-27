@@ -167,10 +167,10 @@ async def test_keeps_an_unobserved_encumbrance_ratio_distinct_from_zero(stub_eng
 
 @pytest.mark.asyncio
 async def test_refuses_a_cycle_reporting_exposure_with_no_breakdown_rows(stub_engine) -> None:
-    # The indexer writes the totals before the breakdown, in separate
-    # transactions, and the totals table predates the breakdown table -- so a
-    # readable cycle can have no rows. Serving it publishes "this prime holds
-    # nothing" against real exposure, which reads like a real answer.
+    # `_TOTALS_SQL` should never actually return this combination -- its WHERE
+    # already excludes it -- so this exercises `_require_breakdown` as the
+    # backstop it is: a mocked totals row lets the test reach it directly
+    # without depending on the real query.
     repository, _ = _reader(
         stub_engine,
         {"fetchone.return_value": _totals_row(exposure_usd=Decimal("2098090654.81"))},

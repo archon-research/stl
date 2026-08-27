@@ -67,6 +67,19 @@ _TOTALS_SQL = text(
         pcs.spj_utilization
     FROM prime_capital_stack pcs
     WHERE pcs.prime_id = (SELECT id FROM target)
+      -- A cycle written before prime_capital_stack_allocation existed (every
+      -- cycle from 2026-08-19 to 2026-08-26) has totals with no breakdown, and
+      -- a prime the monitor has since stopped covering keeps that as its
+      -- newest row forever. Skipping past it to an earlier complete cycle, or
+      -- to none, is what turns that into a 404 -- the endpoint's documented
+      -- indexed fallback -- instead of a permanent 500.
+      AND (
+        pcs.exposure_usd = 0
+        OR EXISTS (
+            SELECT 1 FROM prime_capital_stack_allocation a
+            WHERE a.prime_id = pcs.prime_id AND a.synced_at = pcs.synced_at
+        )
+      )
     ORDER BY pcs.synced_at DESC, pcs.processing_version DESC
     LIMIT 1
     """
@@ -187,15 +200,14 @@ def _snapshot(star: str, totals, rows) -> ReferencePrimeRiskCapital:
 
 
 def _require_breakdown(star: str, synced_at, exposure: Decimal, rows) -> None:
-    """Refuse a cycle whose totals report exposure that no row accounts for.
+    """Defend the invariant ``_TOTALS_SQL``'s WHERE already enforces.
 
-    The indexer writes the totals before the breakdown and not in one
-    transaction, so a cycle can be readable with its rows missing — and the
-    totals table predates the breakdown table, so every cycle written before it
-    existed is in exactly that state. Serving it would publish "this prime holds
-    nothing" against real exposure, which reads like a real answer. The writer
-    refuses the same combination when upstream reports it; this refuses it when
-    only half a cycle landed.
+    A cycle lands its totals and its breakdown together in one transaction, and
+    the totals query above only selects a ``synced_at`` that already has a
+    matching allocation row or reports zero exposure — so this should be
+    unreachable. It stays a hard failure rather than a silent pass in case that
+    guard is ever weakened: serving zero rows against real exposure publishes
+    "this prime holds nothing", which reads like a real answer rather than a bug.
     """
     if rows or exposure == 0:
         return

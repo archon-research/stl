@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.reference_position_repository import ReferencePositionRepository
 from app.adapters.postgres.reference_risk_capital_repository import ReferenceRiskCapitalRepository
-from tests.integration.seed import insert_receipt_token_row
+from tests.integration.seed import insert_receipt_token_row, insert_token
 
 _STAR = "spark"
 _CYCLE = datetime(2026, 8, 26, 9, 15, tzinfo=UTC)
@@ -35,6 +35,11 @@ _UNINDEXED_TOKEN = "0x" + "ab" * 20
 # hex at all, which `decode` raises on.
 _V4_POOL_ID = "0x" + "ef" * 32
 _NOT_AN_ADDRESS = "uniswap-v4-position"
+# The receipt token's underlying, inserted with a known symbol rather than
+# picked with `LIMIT 1`: `token.symbol` is nullable, and an arbitrary
+# chain_id=1 row could carry one.
+_UNDERLYING_TOKEN = "0x" + "11" * 20
+_UNDERLYING_SYMBOL = "USDT"
 
 
 async def _insert_stack(conn: asyncpg.Connection, prime_id: int, synced_at: datetime, **overrides) -> None:
@@ -136,7 +141,7 @@ async def seeded(db_url: str):
     try:
         prime_id = cast(int, await conn.fetchval("SELECT id FROM prime WHERE name = $1", _STAR))
         protocol_id = cast(int, await conn.fetchval("SELECT id FROM protocol WHERE chain_id = 1 LIMIT 1"))
-        underlying_id = cast(int, await conn.fetchval("SELECT id FROM token WHERE chain_id = 1 LIMIT 1"))
+        underlying_id = await insert_token(conn, _UNDERLYING_SYMBOL, 6, bytes.fromhex(_UNDERLYING_TOKEN[2:]))
         receipt_token_id = await conn.fetchval(
             "SELECT id FROM receipt_token WHERE chain_id = 1 AND receipt_token_address = $1",
             bytes.fromhex(_INDEXED_TOKEN[2:]),
@@ -242,15 +247,28 @@ async def test_positions_without_a_coverage_row_are_not_served(seeded, async_db_
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_a_cycle_reporting_exposure_with_no_breakdown_is_refused(seeded, async_db_url: str):
-    # Same window on the risk-capital side, where the totals are readable and
-    # real. A 500 is correct; serving real exposure against an empty breakdown
-    # is not.
+async def test_a_cycle_reporting_exposure_with_no_breakdown_is_skipped(seeded, async_db_url: str):
+    # Same window on the risk-capital side: the totals are readable and real,
+    # but with no other cycle to fall back to this reads as "never reported on"
+    # rather than a permanent 500 for a prime the monitor has stopped covering.
     conn, prime_id, _ = seeded
     await _insert_stack(conn, prime_id, _CYCLE, exposure_usd=Decimal("2098090654.81"))
 
-    with pytest.raises(ValueError, match="landed no per-allocation rows"):
-        await _risk_capital(async_db_url)
+    assert await _risk_capital(async_db_url) is None
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_an_incomplete_newest_cycle_falls_back_to_the_last_complete_one(seeded, async_db_url: str):
+    conn, prime_id, _ = seeded
+    await _insert_stack(conn, prime_id, _EARLIER_CYCLE, exposure_usd=Decimal("1"))
+    await _insert_allocation(conn, prime_id, _EARLIER_CYCLE, token_address=_UNINDEXED_TOKEN, exposure="1")
+    await _insert_stack(conn, prime_id, _CYCLE, exposure_usd=Decimal("2098090654.81"))
+
+    snapshot = await _risk_capital(async_db_url)
+
+    assert snapshot is not None
+    assert snapshot.synced_at == _EARLIER_CYCLE
+    assert snapshot.exposure_usd == Decimal("1")
 
 
 @pytest.mark.asyncio(loop_scope="module")

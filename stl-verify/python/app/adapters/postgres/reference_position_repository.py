@@ -42,9 +42,10 @@ from app.domain.entities.reference_position import ReferencePosition, ReferenceP
 _POSITIONS_SQL = text(
     PRIME_BY_STAR_CTE
     + """,
-    -- Its own newest cycle, not the coverage row's: the indexer saves the
-    -- capital stack before the positions and not in one transaction, so pinning
-    -- to coverage blanks the sheet for the window between the two saves.
+    -- Its own newest cycle, not the coverage row's: prime_capital_stack
+    -- predates prime_reference_position, so every cycle written before
+    -- 2026-08-26 has a coverage row and no positions. Pinning to coverage
+    -- would blank the sheet for that whole window.
     cycle AS (
         SELECT p.synced_at
         FROM prime_reference_position p

@@ -805,11 +805,12 @@ wearing its shape.
 
 **Serving impact.** `/v1/primes/{id}/risk-capital?source=reference` reads its
 `per_allocation` breakdown from this table, pinned to the same cycle its totals
-came from so the two cannot be mixed. If cycles keep landing prime-level rows
-while the breakdown does not — a save that failed between the two tables, which
-also fails the run — the endpoint returns **500** rather than publishing real
-exposure against an empty breakdown. One successful cycle repairs it; until then
-treat `VectorCronjobRunFailing` as the primary signal.
+came from so the two cannot be mixed. A totals row with no matching breakdown
+and non-zero exposure — every cycle recorded before 2026-08-26, before this
+table existed — is skipped rather than served: the reader falls back to that
+prime's last complete cycle, or to a **404** (`both` degrading to `indexed`) if
+it has none. It cannot 500 for this reason — the three reference tables land in
+one transaction, so a cycle that wrote totals always wrote its breakdown too.
 
 **Resolution.** Same posture as `WritesZero`: upstream coverage is upstream's.
 Confirm what the monitor reports and reconcile; the gap in the series stays.
