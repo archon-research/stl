@@ -72,14 +72,6 @@ class ReferencePosition:
     # off-chain custody, so an unmapped EVM position would read as one.
     chain_id: int | None = None
     chain: str | None = None
-    # The underlying STL's registry names for this position's receipt token —
-    # set together with ``receipt_token_id`` and ``None``/``""`` whenever it
-    # is, since they come from the same registry lookup. Upstream names no
-    # loan token of its own; this is populated only when the position resolves
-    # to STL's registry, null otherwise.
-    underlying_token_id: int | None = None
-    underlying_token_address: str | None = None
-    underlying_symbol: str = ""
 
 
 @dataclass(frozen=True)
