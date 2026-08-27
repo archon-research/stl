@@ -466,16 +466,12 @@ export function seedCompositeAllocations(
 
   return [
     ...indexed.map((allocation): Allocation => {
-      const alsoReported =
-        allocation.receipt_token_id != null &&
-        referenceRows.some(
-          (row) => row.receipt_token_id === allocation.receipt_token_id,
-        );
-      const reported = alsoReported
-        ? referenceRows.find(
-            (row) => row.receipt_token_id === allocation.receipt_token_id,
-          )
-        : undefined;
+      const reported =
+        allocation.receipt_token_id != null
+          ? referenceRows.find(
+              (row) => row.receipt_token_id === allocation.receipt_token_id,
+            )
+          : undefined;
       return {
         ...allocation,
         source: reported ? 'both' : 'indexed',
