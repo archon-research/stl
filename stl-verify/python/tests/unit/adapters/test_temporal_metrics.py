@@ -5,6 +5,7 @@ in alerts/vector-cronjobs.yaml key on these exact instrument names and label
 values, so this pins them.
 """
 
+from collections.abc import Iterator
 from typing import cast
 
 import pytest
@@ -12,7 +13,7 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import DataPointT, HistogramDataPoint, InMemoryMetricReader, NumberDataPoint
 from opentelemetry.sdk.resources import Resource
 
-from app.adapters.temporal.metrics import CronjobMetrics
+from app.adapters.temporal.metrics import _SECONDS_DURATION_BUCKETS, CronjobMetrics
 
 
 def _points(reader: InMemoryMetricReader, name: str) -> list[DataPointT]:
@@ -38,18 +39,20 @@ def _counts_by_status(reader: InMemoryMetricReader) -> dict[str, float]:
     return out
 
 
-def _new_metrics(reader: InMemoryMetricReader) -> CronjobMetrics:
+@pytest.fixture
+def probe() -> Iterator[tuple[InMemoryMetricReader, CronjobMetrics]]:
+    reader = InMemoryMetricReader()
     provider = MeterProvider(metric_readers=[reader])
-    return CronjobMetrics(meter_provider=provider)
+    yield reader, CronjobMetrics(meter_provider=provider)
+    provider.shutdown()
 
 
-def test_construction_seeds_every_status_series_at_zero():
+def test_construction_seeds_every_status_series_at_zero(probe):
     # Without this, a series does not exist until its first occurrence, so
     # increase()/rate() cannot see its 0->1 appearance -- see
     # CronjobMetrics._seed_status_series's docstring for the alert this
     # protects (VectorCronjobAllRunsFailing).
-    reader = InMemoryMetricReader()
-    _new_metrics(reader)
+    reader, _ = probe
 
     assert _counts_by_status(reader) == {"success": 0, "error": 0, "canceled": 0}
 
@@ -62,9 +65,8 @@ def test_construction_seeds_every_status_series_at_zero():
         ("canceled", ("success", "error")),
     ],
 )
-def test_record_run_increments_only_its_own_status_series(status, other_statuses):
-    reader = InMemoryMetricReader()
-    metrics = _new_metrics(reader)
+def test_record_run_increments_only_its_own_status_series(probe, status, other_statuses):
+    reader, metrics = probe
 
     metrics.record_run(1.0, status)
 
@@ -74,9 +76,8 @@ def test_record_run_increments_only_its_own_status_series(status, other_statuses
         assert got[other] == 0
 
 
-def test_record_run_records_the_duration_histogram():
-    reader = InMemoryMetricReader()
-    metrics = _new_metrics(reader)
+def test_record_run_records_the_duration_histogram(probe):
+    reader, metrics = probe
 
     metrics.record_run(2.5, "success")
 
@@ -87,6 +88,19 @@ def test_record_run_records_the_duration_histogram():
     assert point.sum == 2.5
     assert point.attributes is not None
     assert point.attributes["status"] == "success"
+
+
+def test_duration_histogram_uses_the_go_harness_bucket_boundaries(probe):
+    # The boundaries are hand-copied from telemetry.SecondsDurationBuckets;
+    # without the advisory the SDK falls back to millisecond-sized defaults
+    # and every cronjob duration collapses into the (0, 5] bucket.
+    reader, metrics = probe
+
+    metrics.record_run(2.5, "success")
+
+    (point,) = _points(reader, "cronjob.run.duration_seconds")
+    assert isinstance(point, HistogramDataPoint)
+    assert tuple(point.explicit_bounds) == _SECONDS_DURATION_BUCKETS
 
 
 def test_init_metrics_provider_is_a_noop_without_an_otlp_endpoint(monkeypatch):

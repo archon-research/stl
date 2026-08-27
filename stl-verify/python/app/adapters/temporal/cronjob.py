@@ -152,9 +152,8 @@ async def run_cronjob(spec: CronjobSpec) -> None:
     # whichever MeterProvider is global at that moment (see
     # init_metrics_provider's docstring). Wrapped in try/finally from here on
     # -- a connect()/ensure_schedule() failure must still shut the provider
-    # down, or an in-process retry finds the global MeterProvider already
-    # taken and set_meter_provider silently no-ops, leaving the failed
-    # attempt's periodic reader running forever.
+    # down, or its periodic-reader thread outlives the failed attempt and
+    # keeps exporting while the process unwinds.
     shutdown_metrics = init_metrics_provider(spec.name)
     try:
         run_metrics = CronjobMetrics()

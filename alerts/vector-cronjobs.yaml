@@ -37,10 +37,8 @@
 # for why "no successes in an hour" is their healthy state. Every other
 # cronjob, including any added later, is covered automatically; the excluded
 # ones are covered by VectorCronjobRunFailing (and VectorOnDemandWorkerDown /
-# VectorCronjobWorkerDown for availability) instead. core-model-runner, being
-# scheduled, additionally gets its own stall rule, VectorCoreModelRunnerStale:
-# the exclusion above removes the only critical run-based rule from it, and a
-# 24h/no-retry job has failure modes that record nothing at all (see the rule).
+# VectorCronjobWorkerDown for availability) instead; core-model-runner also
+# gets its own stall rule, VectorCoreModelRunnerStale.
 #
 # Severity → routing (per the alerting routing spec):
 #   critical       → pages, prod #at_stl_prod_alerts / staging
@@ -108,19 +106,12 @@ groups:
         # cronjob_runs_total and are covered by the VectorCronjobRunFailing
         # warning above (the right severity) plus VectorOnDemandWorkerDown.
         #
-        # core-model-runner is excluded for the same reason despite being
-        # scheduled: it ticks every 24h with no retry
-        # (RetryPolicy.maximum_attempts=1, app/services/core_model_runner/
-        # workflow.py), so a single failed tick is errors=1/successes=0 with no
-        # recovery possible inside this rule's 1h window — the same shape as an
-        # on-demand job's one-off failure, just on a schedule. Without this
-        # exclusion this rule would page critical on any single bad tick and
-        # stay paged for up to 24h, the same false-positive
-        # VectorCronjobAllRunsFailing already avoids for morpho-v2-bootstrap
-        # (see docs/runbooks/vector-cronjobs.md). VectorCronjobRunFailing
-        # (warning) still covers a failed core-model-runner tick.
+        # core-model-runner (scheduled, but 24h interval with no retry) is
+        # excluded for the same reason: one failed tick is errors=1/successes=0
+        # for a full day. VectorCronjobRunFailing still warns on it, and
+        # VectorCoreModelRunnerStale below is its critical rule.
         #
-        # The 1h window spans >=1 cycle for every OTHER covered cronjob — even
+        # The 1h window spans >=1 cycle for every other covered cronjob — even
         # the slowest of them, watcher-data-validator (1h), and many cycles for
         # the faster ones. Distinct from VectorCronjobWorkerDown: here the
         # worker IS running and emitting metrics, every run just errors.
@@ -275,46 +266,54 @@ groups:
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorondemandworkerdown
 
       # -----------------------------------------------------------------------
-      # CRITICAL — core-model-runner has produced no successful tick in 30h
+      # CRITICAL — core-model-runner has not completed a tick in 30h
       # -----------------------------------------------------------------------
       - alert: VectorCoreModelRunnerStale
-        # The stall rule for the one scheduled cronjob VectorCronjobAllRunsFailing
-        # excludes (24h interval, RetryPolicy.maximum_attempts=1). Without it the
-        # runner's only critical coverage is VectorCronjobWorkerDown, and a
-        # 24h/no-retry job can stop producing results while its pod stays 1/1
-        # available and cronjob_runs_total records nothing the other rules key
-        # on:
-        #   - a deploy lands mid-tick: the run is classified status="canceled"
-        #     (deliberately not "error"), and with no retry that day's tick is
-        #     simply gone;
-        #   - the tick hangs: the server times the activity out at 4h, but the
-        #     sync activity thread never learns (no heartbeat), so the
-        #     interceptor never returns and NO run is recorded at all;
-        #   - the pod is SIGKILLed after the termination grace period mid
-        #     Monte Carlo: nothing is recorded or flushed.
-        # Only a plain activity exception reaches VectorCronjobRunFailing, and
-        # that is a warning. Meanwhile the API serves the newest
-        # core_model_results row as the current CRR with no age check, so a
-        # silent stop means a stale published number.
+        # Stall rule for the one scheduled cronjob excluded from
+        # VectorCronjobAllRunsFailing. "Completed" = status success OR error: a
+        # tick that fails is VectorCronjobRunFailing's business (warning, daily,
+        # and one gap-y market fails the whole tick — see run_markets), so
+        # counting errors as completions keeps that from escalating into a
+        # permanent page. What this rule catches is a tick that leaves no
+        # completion at all while the pod stays 1/1 available: a deploy mid-tick
+        # (status="canceled", no retry, day lost), a hang (the sync activity
+        # never learns of the 4h server-side timeout, so nothing is recorded),
+        # or a SIGKILL mid Monte Carlo. The API serves the newest
+        # core_model_results row with no age check, so a silent stop means a
+        # stale published number.
         #
-        # Window: 24h interval + 4h TICK_TIMEOUT (the longest a legitimate tick
-        # may run, app/services/core_model_runner/workflow.py) + 2h slack. Two
-        # consecutive successes are therefore at most ~28h apart when healthy;
-        # 30h with no success is a stall, not jitter.
+        # Window: 24h interval + 4h TICK_TIMEOUT + 2h slack, so two healthy
+        # completions are at most ~28h apart.
         #
-        # The success series is zero-seeded at worker startup (metrics.py), so
-        # it exists from the pod's first export and `increase()` sees the 0->1
-        # step. No series at all (the runner is not deployed in this tenant)
-        # yields no vector and no alert, so this rule is inert until the
-        # Deployment is registered in an overlay.
+        # The `offset` gate requires the (zero-seeded) success series to have
+        # existed a window ago. Without it every cold start pages: the seed is
+        # 0 from the first export and the first tick is at the next 00:00 UTC.
+        # It gates on the series existing, not on total>0 — a hung tick records
+        # nothing, which is exactly what must still fire.
+        #
+        # Residual: a live pod whose OTLP export dies lets the series
+        # staleness-expire; `increase()` then has <2 samples, returns no data,
+        # and this rule goes silent. VectorCronjobWorkerDown does not cover it
+        # (the pod is 1/1) — see the runbook.
         expr: |
-          sum by (cluster) (
-            increase(cronjob_runs_total{
-              service_name="core-model-runner",
-              status="success",
-              k8s_namespace_name="vector"
-            }[30h])
-          ) == 0
+          (
+            sum by (cluster) (
+              increase(cronjob_runs_total{
+                service_name="core-model-runner",
+                status=~"success|error",
+                k8s_namespace_name="vector"
+              }[30h])
+            ) == 0
+          )
+          and on (cluster) (
+            sum by (cluster) (
+              count_over_time(cronjob_runs_total{
+                service_name="core-model-runner",
+                status="success",
+                k8s_namespace_name="vector"
+              }[1h] offset 29h)
+            ) > 0
+          )
         for: 30m
         labels:
           team: vector
@@ -324,14 +323,15 @@ groups:
         annotations:
           summary: "Vector cronjob `core-model-runner` has not completed a tick in 30h"
           description: |
-            `core-model-runner` recorded no `status="success"` run in the last
-            30h (schedule is 24h, a tick may take up to 4h). `core_model_results`
-            has stopped advancing while the API keeps serving its newest row as
-            the current CRR. The run may have failed (see VectorCronjobRunFailing),
-            been canceled by a deploy mid-tick (no retry, so the day is lost),
-            or hung past its 4h timeout without recording anything. Check the
-            Temporal UI (vector namespace -> Schedules -> core-model-runner) and
-            the pod logs; trigger the schedule by hand once the cause is fixed.
+            `core-model-runner` recorded no completed run (success or error) in
+            the last 30h (schedule is 24h, a tick may take up to 4h).
+            `core_model_results` has stopped advancing while the API keeps
+            serving its newest row as the current CRR. The tick was canceled by
+            a deploy mid-run (no retry, so the day is lost), hung past its 4h
+            timeout without recording anything, or the schedule stopped firing.
+            Check the Temporal UI (vector namespace -> Schedules ->
+            core-model-runner) and the pod logs; trigger the schedule by hand
+            once the cause is fixed.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorcoremodelrunnerstale
 
       # =======================================================================

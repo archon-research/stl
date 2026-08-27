@@ -47,9 +47,9 @@ scheduled cronjob, `VectorOnDemandWorkerDown` for an on-demand worker.
 > on-demand jobs, just reached by a long interval instead of no schedule.
 > `VectorCronjobRunFailing` (warning) still covers a failed tick, and
 > [`VectorCoreModelRunnerStale`](#vectorcoremodelrunnerstale) (critical) pages
-> when no tick has succeeded in 30h — the stall coverage the exclusion above
-> would otherwise remove, and the only rule that catches a tick lost to a
-> deploy-time cancel or a hang (neither records an error).
+> when no tick has *completed* (success or error) in 30h — the stall coverage
+> the exclusion above would otherwise remove, and the only rule that catches a
+> tick lost to a deploy-time cancel or a hang (neither records an error).
 > The runner ships in staging today; the prod rollout is #800. N_MC stays
 > capped at 100 until the sizing run in #804 settles — unrelated to this gap.
 
@@ -577,13 +577,22 @@ than in workflow history; see the resume note at the top of this runbook.
 
 ### What it means
 
-`core-model-runner` has not recorded a `status="success"` run in 30h. The
-schedule is 24h and a tick may legitimately run up to 4h (`TICK_TIMEOUT`, in
-`app/services/core_model_runner/workflow.py`), so two healthy successes are at
-most ~28h apart; 30h without one is a stall. `core_model_results` has stopped
-advancing, and the API keeps serving its newest row as the current CRR — there
-is no age check on the read side — so the published number is going stale
-without anything else saying so.
+`core-model-runner` has not recorded a **completed** run — `status="success"`
+or `status="error"` — in 30h. The schedule is 24h and a tick may legitimately
+run up to 4h (`TICK_TIMEOUT`, in `app/services/core_model_runner/workflow.py`),
+so two healthy completions are at most ~28h apart; 30h without one is a stall.
+`core_model_results` has stopped advancing, and the API keeps serving its
+newest row as the current CRR — there is no age check on the read side — so
+the published number is going stale without anything else saying so.
+
+A tick that **fails** is deliberately not a stall here: `run_markets` fails the
+whole tick when any one market fails, so a single market with a known input
+gap would otherwise keep this rule paging every day while the other markets
+advance normally. A failed tick is `VectorCronjobRunFailing`'s (warning). The
+gap that leaves — a tick failing every day, for every market, only ever warns —
+is tracked in [VEC-665](https://linear.app/archontech/issue/VEC-665) (per-market
+success signal); until then, treat a `VectorCronjobRunFailing` for
+`core-model-runner` on two consecutive days as if it were this alert.
 
 ### Why the generic rules do not catch it
 
@@ -606,6 +615,20 @@ lost record no error at all:
 
 `VectorCronjobWorkerDown` does not help either: in all three cases the
 Deployment stays `1/1` available.
+
+**What this rule cannot see.** A live pod whose OTLP export dies (collector
+unreachable, exporter thread wedged) stops refreshing the series; once it
+staleness-expires, `increase(...[30h])` has fewer than two samples, returns no
+data, and this rule goes **silent** rather than firing. `VectorCronjobWorkerDown`
+does not cover that either — the pod is `1/1`. The same residual is documented
+on the sibling stall rules in `alerts/vector-indexers.yaml`. If the runner's
+series vanish from Grafana while the pod is up, check the pod's
+`cronjob run metrics initialized` / exporter warnings in its logs.
+
+The rule is also gated on the success series having existed 29h ago, so a
+freshly registered Deployment does not page on its first day (the seeded series
+starts at 0 and the first tick is at the next 00:00 UTC). The first tick after
+a cold start is therefore covered only by `VectorCronjobRunFailing`.
 
 ### First checks
 
@@ -641,9 +664,11 @@ row, not a conflict.
 
 ### Verify recovery
 
-A new `status="success"` sample for `core-model-runner` in `cronjob_runs_total`
-(the rule clears on the next evaluation) and a fresh `computed_at` per market in
-`core_model_results`.
+A new completed run for `core-model-runner` in `cronjob_runs_total` clears the
+rule on the next evaluation. Recovery of the *data* is a `status="success"`
+sample and a fresh `computed_at` for every market in `core_model_results` — an
+`error` completion clears this alert but leaves `VectorCronjobRunFailing` to
+tell you which market is still broken.
 
 ---
 

@@ -177,10 +177,8 @@ def test_build_worker_installs_the_run_metrics_interceptor(monkeypatch):
 
 async def test_run_cronjob_shuts_down_metrics_when_connect_fails(monkeypatch):
     # A connect()/ensure_schedule() failure happens before the worker's own
-    # try/finally. Without shutting the provider down here too, an
-    # in-process retry finds the global MeterProvider already taken (see
-    # metrics.py's set_meter_provider note) and the failed attempt's
-    # periodic reader keeps running.
+    # try/finally; the provider's periodic-reader thread must still be shut
+    # down on that path.
     shutdown = MagicMock()
     monkeypatch.setattr(cronjob_module, "init_metrics_provider", lambda _name: shutdown)
 
