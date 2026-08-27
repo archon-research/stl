@@ -27,14 +27,18 @@
 # template's `Cluster:` header is populated. `namespace` is a static rule label
 # (mimir-rules-sync lint forbids `cluster`/`env` as static labels but allows it).
 #
-# Five services are EXCLUDED by service_name: maple-graphql-indexer, which has
-# richer dedicated rules in vector-indexers.yaml (VEC-320), and the four
-# on-demand jobs — offchain-price-backfill, reference-capital-backfill,
-# morpho-vault-backfill and morpho-v2-bootstrap, none of which carries a schedule — see
-# VectorCronjobAllRunsFailing for why "no successes in an hour" is their healthy
-# state. Every other cronjob, including any added later, is covered
-# automatically; on-demand workers are covered by VectorCronjobRunFailing and
-# VectorOnDemandWorkerDown instead.
+# Six services are EXCLUDED from VectorCronjobAllRunsFailing by service_name:
+# maple-graphql-indexer, which has richer dedicated rules in
+# vector-indexers.yaml (VEC-320); the four on-demand jobs —
+# offchain-price-backfill, reference-capital-backfill, morpho-vault-backfill
+# and morpho-v2-bootstrap, none of which carries a schedule; and
+# core-model-runner, which does carry a schedule but ticks only every 24h with
+# no retry (RetryPolicy.maximum_attempts=1) — see VectorCronjobAllRunsFailing
+# for why "no successes in an hour" is their healthy state. Every other
+# cronjob, including any added later, is covered automatically; the excluded
+# ones are covered by VectorCronjobRunFailing (and VectorOnDemandWorkerDown /
+# VectorCronjobWorkerDown for availability) instead; core-model-runner also
+# gets its own stall rule, VectorCoreModelRunnerStale.
 #
 # Severity → routing (per the alerting routing spec):
 #   critical       → pages, prod #at_stl_prod_alerts / staging
@@ -102,10 +106,15 @@ groups:
         # cronjob_runs_total and are covered by the VectorCronjobRunFailing
         # warning above (the right severity) plus VectorOnDemandWorkerDown.
         #
-        # The 1h window spans >=1 cycle for even the
-        # slowest cronjob (watcher-data-validator, 1h) and many cycles for the
-        # faster ones. Distinct from VectorCronjobWorkerDown: here the worker
-        # IS running and emitting metrics, every run just errors.
+        # core-model-runner (scheduled, but 24h interval with no retry) is
+        # excluded for the same reason: one failed tick is errors=1/successes=0
+        # for a full day. VectorCronjobRunFailing still warns on it, and
+        # VectorCoreModelRunnerStale below is its critical rule.
+        #
+        # The 1h window spans >=1 cycle for every other covered cronjob — even
+        # the slowest of them, watcher-data-validator (1h), and many cycles for
+        # the faster ones. Distinct from VectorCronjobWorkerDown: here the
+        # worker IS running and emitting metrics, every run just errors.
         expr: |
           (
             sum by (service_name, cluster) (
@@ -116,6 +125,7 @@ groups:
                 service_name!="reference-capital-backfill",
                 service_name!="morpho-v2-bootstrap",
                 service_name!="morpho-vault-backfill",
+                service_name!="core-model-runner",
                 k8s_namespace_name="vector"
               }[1h])
             ) > 0
@@ -130,6 +140,7 @@ groups:
                 service_name!="reference-capital-backfill",
                 service_name!="morpho-v2-bootstrap",
                 service_name!="morpho-vault-backfill",
+                service_name!="core-model-runner",
                 k8s_namespace_name="vector"
               }[1h])
             ) == 0
@@ -253,6 +264,75 @@ groups:
             back. Check the pod (CrashLoopBackOff, OOM, image pull); an
             ImagePullBackOff here usually means the release wiring is missing.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorondemandworkerdown
+
+      # -----------------------------------------------------------------------
+      # CRITICAL — core-model-runner has not completed a tick in 30h
+      # -----------------------------------------------------------------------
+      - alert: VectorCoreModelRunnerStale
+        # Stall rule for the one scheduled cronjob excluded from
+        # VectorCronjobAllRunsFailing. "Completed" = status success OR error: a
+        # tick that fails is VectorCronjobRunFailing's business (warning, daily,
+        # and one gap-y market fails the whole tick — see run_markets), so
+        # counting errors as completions keeps that from escalating into a
+        # permanent page. What this rule catches is a tick that leaves no
+        # completion at all while the pod stays 1/1 available: a deploy mid-tick
+        # (status="canceled", no retry, day lost), a hang (the sync activity
+        # never learns of the 4h server-side timeout, so nothing is recorded),
+        # or a SIGKILL mid Monte Carlo. The API serves the newest
+        # core_model_results row with no age check, so a silent stop means a
+        # stale published number.
+        #
+        # Window: 24h interval + 4h TICK_TIMEOUT + 2h slack, so two healthy
+        # completions are at most ~28h apart.
+        #
+        # The `offset` gate requires the (zero-seeded) success series to have
+        # existed a window ago. Without it every cold start pages: the seed is
+        # 0 from the first export and the first tick is at the next 00:00 UTC.
+        # It gates on the series existing, not on total>0 — a hung tick records
+        # nothing, which is exactly what must still fire.
+        #
+        # Residual: a live pod whose OTLP export dies lets the series
+        # staleness-expire; `increase()` then has <2 samples, returns no data,
+        # and this rule goes silent. VectorCronjobWorkerDown does not cover it
+        # (the pod is 1/1) — see the runbook.
+        expr: |
+          (
+            sum by (cluster) (
+              increase(cronjob_runs_total{
+                service_name="core-model-runner",
+                status=~"success|error",
+                k8s_namespace_name="vector"
+              }[30h])
+            ) == 0
+          )
+          and on (cluster) (
+            sum by (cluster) (
+              count_over_time(cronjob_runs_total{
+                service_name="core-model-runner",
+                status="success",
+                k8s_namespace_name="vector"
+              }[1h] offset 29h)
+            ) > 0
+          )
+        for: 30m
+        labels:
+          team: vector
+          severity: critical
+          component: temporal-cronjobs
+          namespace: vector
+        annotations:
+          summary: "Vector cronjob `core-model-runner` has not completed a tick in 30h"
+          description: |
+            `core-model-runner` recorded no completed run (success or error) in
+            the last 30h (schedule is 24h, a tick may take up to 4h).
+            `core_model_results` has stopped advancing while the API keeps
+            serving its newest row as the current CRR. The tick was canceled by
+            a deploy mid-run (no retry, so the day is lost), hung past its 4h
+            timeout without recording anything, or the schedule stopped firing.
+            Check the Temporal UI (vector namespace -> Schedules ->
+            core-model-runner) and the pod logs; trigger the schedule by hand
+            once the cause is fixed.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorcoremodelrunnerstale
 
       # =======================================================================
       # transform-worker (VEC-484): queue-drain and parity rules

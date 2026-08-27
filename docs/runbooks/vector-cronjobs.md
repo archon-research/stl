@@ -18,25 +18,40 @@ into TimescaleDB (or validates stored data). Current cronjobs:
 | `reference-capital-backfill` | `reference-capital-backfill` | **on demand** | Seeds the reference balance-sheet history predating the syncer's first run |
 | `morpho-vault-backfill` | `morpho-vault-backfill` | **on demand** | Discovers Morpho vaults from the archived S3 receipts and replays their VaultV2 structured events, for a block range supplied at start time (VEC-218) |
 | `morpho-v2-bootstrap` | `morpho-v2-bootstrap` | **on demand** | One-shot repair of Morpho VaultV2 vaults discovered before atomic discovery (VEC-218) |
-| `core-model-runner` | `core-model-runner` | 24h | CORE model CRR per market → `core_model_results` (staging only; N_MC capped at 100 until live readers land) |
+| `core-model-runner` | `core-model-runner` | 24h | CORE model CRR per market → `core_model_results` (Python harness; staging today, prod rollout in #800; N_MC capped at 100 until the sizing in #804 settles) |
 
 > `maple-graphql-indexer` is also a cronjob but has its own richer rules — see
 > [vector-indexers.md](vector-indexers.md), not this runbook.
 
-The shared activity records `cronjob_runs_total{status="success"|"error"}` and
-`cronjob_run_duration_seconds` per run, labelled `service_name=<cronjob>`. New
-cronjobs are covered automatically; only the availability rule needs the new
-Deployment name added to its regex — `VectorCronjobWorkerDown` for a scheduled
-cronjob, `VectorOnDemandWorkerDown` for an on-demand worker.
+The shared activity records `cronjob_runs_total{status="success"|"error"|"canceled"}`
+and `cronjob_run_duration_seconds` per run, labelled `service_name=<cronjob>`.
+New cronjobs are covered automatically; only the availability rule needs the
+new Deployment name added to its regex — `VectorCronjobWorkerDown` for a
+scheduled cronjob, `VectorOnDemandWorkerDown` for an on-demand worker.
 
-> `core-model-runner` is the first **Python** Temporal cronjob and its harness
-> does not emit `cronjob_runs_total` yet, so the metric-based rules above do not
-> cover it — `VectorCronjobWorkerDown` is its only alert. A failed tick shows up
-> in the Temporal UI (vector namespace → Schedules → `core-model-runner`) and in
-> the pod logs, not in Grafana. Closing that gap is
-> [VEC-638](https://linear.app/archontech/issue/VEC-638), and it is a **prod
-> blocker**: the runner stays out of the prod overlay until the Python harness
-> emits run metrics and the stall/silent-empty rules cover it.
+> `core-model-runner` is the first **Python** Temporal cronjob. Its harness
+> (`stl-verify/python/app/adapters/temporal/`) now emits the same
+> `cronjob_runs_total{status}` / `cronjob_run_duration_seconds` series from a
+> single site every Python cronjob shares — a `RunMetricsInterceptor` wrapping
+> every activity execution, mirroring the Go shared activity's `RecordRun`,
+> including the `status="canceled"` split for a run interrupted by activity
+> cancellation (worker shutdown during a deploy, or a schedule cancel) — so the
+> metric-based rules above cover it like any other cronjob, with no per-job
+> wiring ([VEC-638](https://linear.app/archontech/issue/VEC-638), closing the
+> prod-blocker gap raised in the review of #705).
+>
+> `core-model-runner` is still excluded from `VectorCronjobAllRunsFailing` (see
+> that rule and "Adding a new cronjob" below): it ticks every 24h with no retry,
+> so a single failed tick would otherwise page critical and stay paged for up
+> to 24h — the same shape `VectorCronjobAllRunsFailing` already avoids for the
+> on-demand jobs, just reached by a long interval instead of no schedule.
+> `VectorCronjobRunFailing` (warning) still covers a failed tick, and
+> [`VectorCoreModelRunnerStale`](#vectorcoremodelrunnerstale) (critical) pages
+> when no tick has *completed* (success or error) in 30h — the stall coverage
+> the exclusion above would otherwise remove, and the only rule that catches a
+> tick lost to a deploy-time cancel or a hang (neither records an error).
+> The runner ships in staging today; the prod rollout is #800. N_MC stays
+> capped at 100 until the sizing run in #804 settles — unrelated to this gap.
 
 > `transform-worker` ships at `replicas: 0` and is enabled (scaled to 1) only after
 > the one-off bootstrap has run. `VectorCronjobWorkerDown` is guarded on
@@ -556,6 +571,107 @@ than in workflow history; see the resume note at the top of this runbook.
 
 ---
 
+## VectorCoreModelRunnerStale
+
+**Severity:** critical (pages) · **For:** 30m · **Window:** 30h
+
+### What it means
+
+`core-model-runner` has not recorded a **completed** run — `status="success"`
+or `status="error"` — in 30h. The schedule is 24h and a tick may legitimately
+run up to 4h (`TICK_TIMEOUT`, in `app/services/core_model_runner/workflow.py`),
+so two healthy completions are at most ~28h apart; 30h without one is a stall.
+`core_model_results` has stopped advancing, and the API keeps serving its
+newest row as the current CRR — there is no age check on the read side — so
+the published number is going stale without anything else saying so.
+
+A tick that **fails** is deliberately not a stall here: `run_markets` fails the
+whole tick when any one market fails, so a single market with a known input
+gap would otherwise keep this rule paging every day while the other markets
+advance normally. A failed tick is `VectorCronjobRunFailing`'s (warning). The
+gap that leaves — a tick failing every day, for every market, only ever warns —
+is tracked in [VEC-665](https://linear.app/archontech/issue/VEC-665) (per-market
+success signal); until then, treat a `VectorCronjobRunFailing` for
+`core-model-runner` on two consecutive days as if it were this alert.
+
+### Why the generic rules do not catch it
+
+`core-model-runner` is excluded from `VectorCronjobAllRunsFailing` (24h
+interval, `RetryPolicy.maximum_attempts=1`: one failed tick can never recover
+inside that rule's 1h window). That leaves `VectorCronjobRunFailing`, which is
+a warning and fires only when the activity **raises**. Three ways a tick is
+lost record no error at all:
+
+1. **A deploy landed mid-tick.** The worker cancels the running activity on
+   shutdown; the harness classifies that `status="canceled"`, deliberately not
+   `"error"`. With no retry, that day's tick is simply gone.
+2. **The tick hung.** Temporal times the activity out at 4h, but the sync
+   activity thread never learns of it (the runner does not heartbeat), so the
+   metrics interceptor never returns and **no run is recorded at all**. The
+   failed workflow is visible only in the Temporal UI.
+3. **The pod was SIGKILLed** after `terminationGracePeriodSeconds` while deep
+   in a numpy call (the injected cancel exception cannot land inside C code):
+   nothing recorded, nothing flushed.
+
+`VectorCronjobWorkerDown` does not help either: in all three cases the
+Deployment stays `1/1` available.
+
+**What this rule cannot see.** A live pod whose OTLP export dies (collector
+unreachable, exporter thread wedged) stops refreshing the series; once it
+staleness-expires, `increase(...[30h])` has fewer than two samples, returns no
+data, and this rule goes **silent** rather than firing. `VectorCronjobWorkerDown`
+does not cover that either — the pod is `1/1`. The same residual is documented
+on the sibling stall rules in `alerts/vector-indexers.yaml`. If the runner's
+series vanish from Grafana while the pod is up, check the pod's
+`cronjob run metrics initialized` / exporter warnings in its logs.
+
+The rule is also gated on the success series having existed 29h ago, so a
+freshly registered Deployment does not page on its first day (the seeded series
+starts at 0 and the first tick is at the next 00:00 UTC). The first tick after
+a cold start is therefore covered only by `VectorCronjobRunFailing`.
+
+### First checks
+
+1. **Temporal UI** — `vector` namespace → Schedules → `core-model-runner`.
+   Look at the recent actions: a **Failed** workflow with a
+   `StartToClose`/`ScheduleToClose` timeout is the hang case; a **Canceled** or
+   failed one at a deploy time is case 1; **no** recent action means the
+   schedule itself is paused or the worker is not polling.
+2. **Pod logs** — `kubectl -n vector logs deploy/core-model-runner --tail=200`.
+   A healthy tick logs `running market_key=…` for every market and ends with
+   `result written to core_model_results market_key=…` for each. A market that
+   raised logs `failed market_key=… -- continuing` and the tick ends in
+   `one or more markets failed`. Common causes: a live reader refusing its
+   input (missing price-history days, a dead oracle feed, no borrower rows —
+   the message names the exact gap; see
+   `stl-verify/python/app/risk_engine/core_model/DATA_GAPS.md`), or the
+   database being unreachable.
+3. **Did a deploy land during the tick?** —
+   `kubectl -n vector rollout history deploy/core-model-runner`; compare with
+   the tick's start (00:00 UTC by default). If so, nothing is broken — the day
+   was lost to the rollout.
+4. **Memory** — `kubectl -n vector describe pod -l app=core-model-runner` for
+   `OOMKilled`. A raised `CORE_MODEL_N_MC` without a matching memory limit is
+   the expected way to hit this (see the ConfigMap and Deployment comments).
+
+### Resolution
+
+Fix the cause, then start the schedule by hand from the Temporal UI (Schedules
+→ `core-model-runner` → Trigger) rather than waiting for the next 00:00 tick.
+A hand-triggered run is identical to a scheduled one (`market_key=all`), and
+`core_model_results` is append-only, so a second run on the same day is a new
+row, not a conflict.
+
+### Verify recovery
+
+A new completed run for `core-model-runner` in `cronjob_runs_total` clears the
+rule on the next evaluation. Recovery of the *data* is a `status="success"`
+sample and a fresh `computed_at` for every market in `core_model_results` — an
+`error` completion clears this alert but leaves `VectorCronjobRunFailing` to
+tell you which market is still broken.
+
+---
+
 ## VectorReferenceCapitalIndexerWritesZero
 
 **What it means.** Cycles are succeeding but `prime_capital_stack` received no
@@ -689,8 +805,9 @@ exposure.
 ## Adding a new cronjob
 
 Failure + all-failing alerts are automatic (they group by `service_name`).
-`VectorCronjobAllRunsFailing` excludes `maple-graphql-indexer`,
-`offchain-price-backfill`, `morpho-vault-backfill` and `morpho-v2-bootstrap`;
+`VectorCronjobAllRunsFailing` excludes `maple-graphql-indexer`, the four
+on-demand jobs (`offchain-price-backfill`, `reference-capital-backfill`,
+`morpho-vault-backfill`, `morpho-v2-bootstrap`), and `core-model-runner`;
 `VectorCronjobRunFailing` excludes only maple. Two manual steps:
 
 1. Add the new **Deployment name** to the `deployment=~"..."` regex in the
@@ -703,3 +820,13 @@ Failure + all-failing alerts are automatic (they group by `service_name`).
    ALSO be added to the `service_name!=` exclusions in
    `VectorCronjobAllRunsFailing`, or its idle state pages.
 2. Add a row to the table at the top of this runbook.
+
+A **scheduled** cronjob that ticks too infrequently or retries too little for
+`VectorCronjobAllRunsFailing`'s 1h window to span a likely recovery needs the
+same `service_name!=` exclusion as an on-demand job — `core-model-runner`
+(24h interval, `RetryPolicy.maximum_attempts=1`) is the first example; see the
+alert's own comment in `alerts/vector-cronjobs.yaml` for the reasoning. Unlike
+an on-demand job, though, its output *does* go stale, so the exclusion must be
+paired with a per-job stall rule — `VectorCoreModelRunnerStale` is the
+template: "no `status="success"` in (interval + max tick duration + slack)",
+critical, with its own runbook section.
