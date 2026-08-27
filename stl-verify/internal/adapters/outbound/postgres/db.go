@@ -10,6 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
 )
 
 // DBConfig holds configuration for the PostgreSQL connection pool.
@@ -51,6 +53,10 @@ type DBConfig struct {
 	// this pool builder run legitimately long statements. Set it only on
 	// latency-bounded services that should never run a long single statement.
 	StatementTimeout time.Duration
+
+	// MeterProvider supplies the pool's query metrics. Defaults to the global
+	// provider (a no-op until telemetry.InitMetrics runs).
+	MeterProvider metric.MeterProvider
 }
 
 // LogValue implements slog.LogValuer to redact the URL (which contains credentials).
@@ -153,6 +159,16 @@ func buildPoolConfig(cfg DBConfig) (*pgxpool.Config, error) {
 	if ac := cfg.afterConnect(); ac != nil {
 		poolConfig.AfterConnect = ac
 	}
+
+	mp := cfg.MeterProvider
+	if mp == nil {
+		mp = otel.GetMeterProvider()
+	}
+	tracer, err := newQueryErrorTracer(mp)
+	if err != nil {
+		return nil, fmt.Errorf("building query error tracer: %w", err)
+	}
+	poolConfig.ConnConfig.Tracer = tracer
 
 	return poolConfig, nil
 }

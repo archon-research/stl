@@ -3,6 +3,8 @@ package postgres
 import (
 	"testing"
 	"time"
+
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
 
 // TestBuildPoolConfig_TimeoutsNotStartupParams pins the invariant behind the
@@ -39,5 +41,34 @@ func TestBuildPoolConfig_NoTimeoutsNoAfterConnect(t *testing.T) {
 
 	if pc.AfterConnect != nil {
 		t.Error("AfterConnect set for DefaultDBConfig (no timeouts); want nil to avoid a wasted round-trip on every new connection")
+	}
+}
+
+func TestBuildPoolConfigAttachesQueryTracer(t *testing.T) {
+	poolConfig, err := buildPoolConfig(DefaultDBConfig("postgres://user:pass@localhost:5432/db"))
+	if err != nil {
+		t.Fatalf("buildPoolConfig: %v", err)
+	}
+
+	if poolConfig.ConnConfig.Tracer == nil {
+		t.Fatal("ConnConfig.Tracer is nil, want the query error tracer attached")
+	}
+	if _, ok := poolConfig.ConnConfig.Tracer.(*queryErrorTracer); !ok {
+		t.Errorf("ConnConfig.Tracer = %T, want *queryErrorTracer", poolConfig.ConnConfig.Tracer)
+	}
+}
+
+func TestBuildPoolConfigUsesTheInjectedMeterProvider(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	cfg := DefaultDBConfig("postgres://user:pass@localhost:5432/db")
+	cfg.MeterProvider = sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	if _, err := buildPoolConfig(cfg); err != nil {
+		t.Fatalf("buildPoolConfig: %v", err)
+	}
+
+	counts := countsByAttr(t, reader, "db.query.errors.total", "error_class")
+	if len(counts) != len(errorClasses) {
+		t.Errorf("seeded classes on the injected provider = %v, want %v", counts, errorClasses)
 	}
 }
