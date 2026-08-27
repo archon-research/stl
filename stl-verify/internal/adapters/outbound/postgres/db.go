@@ -186,9 +186,10 @@ func attachQueryTracer(poolConfig *pgxpool.Config, injected metric.MeterProvider
 
 	if injected == nil {
 		// An injected provider is already exporting, so the seed
-		// newQueryErrorTracer wrote has landed; the global one usually is not
-		// yet. See telemetry.OnMeterProviderReady.
-		telemetry.OnMeterProviderReady(tracer.seedErrorClasses)
+		// newQueryErrorTracer wrote has landed. The global one has too in every
+		// metric-exporting binary, which telemetry.InitOTEL asserts; this covers
+		// the pools built without telemetry at all — one-shot backfillers, tests.
+		telemetry.OnMeterProviderReady("postgres.OpenPool", tracer.seedErrorClasses)
 	}
 
 	return nil

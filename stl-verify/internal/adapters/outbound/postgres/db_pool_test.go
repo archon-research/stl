@@ -79,9 +79,9 @@ func TestBuildPoolConfig_UsesTheInjectedMeterProvider(t *testing.T) {
 	}
 }
 
-// Most binaries open their pool before telemetry installs the exporting meter
-// provider, and a seed written at build time then reaches no exporter. See
-// telemetry.OnMeterProviderReady.
+// A pool built before an exporting meter provider is installed — a one-shot
+// backfiller, a test — writes its seed into a placeholder that exports nothing.
+// See telemetry.OnMeterProviderReady.
 //
 // This must stay the only test in the binary that reaches
 // telemetry.SetMeterProvider: otel.SetMeterProvider takes effect once per

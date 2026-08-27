@@ -161,13 +161,13 @@ func resetStartupSeeds(t *testing.T) {
 	t.Helper()
 
 	startupSeeds.mu.Lock()
-	installed, pending := startupSeeds.installed, startupSeeds.pending
-	startupSeeds.installed, startupSeeds.pending = false, nil
+	installed, started, pending := startupSeeds.installed, startupSeeds.started, startupSeeds.pending
+	startupSeeds.installed, startupSeeds.started, startupSeeds.pending = false, false, nil
 	startupSeeds.mu.Unlock()
 
 	t.Cleanup(func() {
 		startupSeeds.mu.Lock()
-		startupSeeds.installed, startupSeeds.pending = installed, pending
+		startupSeeds.installed, startupSeeds.started, startupSeeds.pending = installed, started, pending
 		startupSeeds.mu.Unlock()
 	})
 }
@@ -176,7 +176,7 @@ func TestOnMeterProviderReady_DefersSeedsUntilTheProviderIsInstalled(t *testing.
 	resetStartupSeeds(t)
 
 	var seeded int
-	OnMeterProviderReady(func() { seeded++ })
+	OnMeterProviderReady("test", func() { seeded++ })
 	if seeded != 0 {
 		t.Fatalf("seed ran %d times before the provider was installed, want 0", seeded)
 	}
@@ -193,7 +193,7 @@ func TestOnMeterProviderReady_RunsSeedsRegisteredAfterTheProviderIsInstalled(t *
 	runStartupSeeds()
 
 	var seeded int
-	OnMeterProviderReady(func() { seeded++ })
+	OnMeterProviderReady("test", func() { seeded++ })
 
 	if seeded != 1 {
 		t.Errorf("seed ran %d times, want 1", seeded)

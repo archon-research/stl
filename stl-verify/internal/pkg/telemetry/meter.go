@@ -78,7 +78,21 @@ func InitMetrics(ctx context.Context, config MetricConfig) (shutdown func(contex
 var startupSeeds struct {
 	mu        sync.Mutex
 	installed bool
-	pending   []func()
+	// started is set by the first InitOTEL, so a seed registered afterwards is
+	// distinguishable from one that beat telemetry to startup. Without OTLP
+	// configured no provider is ever installed and seeds stay pending forever,
+	// which is not an ordering fault and must not read as one.
+	started bool
+	pending []startupSeed
+}
+
+// startupSeed is a pending seed and the component that registered it. The owner
+// is carried so InitOTEL can name what beat it to startup rather than reporting
+// an ordering fault with no address; see assertNoInstrumentsPredateTelemetry.
+type startupSeed struct {
+	owner        string
+	run          func()
+	predatesInit bool
 }
 
 // SetMeterProvider installs mp globally and runs every seed registered with
@@ -90,34 +104,61 @@ func SetMeterProvider(mp otelmetric.MeterProvider) {
 }
 
 // OnMeterProviderReady runs seed once the exporting meter provider is installed,
-// or immediately if it already is.
+// or immediately if it already is. owner names the component registering it,
+// for the ordering assertion in InitOTEL.
 //
 // A "seed" is an Add(ctx, 0) whose only job is to create a series so increase()
 // can observe its first real increment. Until SetMeterProvider runs,
 // otel.GetMeterProvider hands out delegating placeholders whose Add is a no-op
 // (otel v1.44.0 internal/global/instruments.go, siCounter.Add) — so a seed
 // written by a component built during startup, before telemetry is wired, is
-// dropped. Registering it here removes that ordering constraint.
-func OnMeterProviderReady(seed func()) {
+// dropped. Registering it here removes that ordering constraint *for the seed*.
+//
+// It does not remove it for real measurements: those are recorded through the
+// same placeholder and are never replayed. A binary must still initialize
+// telemetry before anything that can fail on a measurable dependency, and
+// InitOTEL enforces that rather than trusting it.
+func OnMeterProviderReady(owner string, seed func()) {
 	startupSeeds.mu.Lock()
 	if startupSeeds.installed {
 		startupSeeds.mu.Unlock()
 		seed()
 		return
 	}
-	startupSeeds.pending = append(startupSeeds.pending, seed)
+	startupSeeds.pending = append(startupSeeds.pending, startupSeed{
+		owner:        owner,
+		run:          seed,
+		predatesInit: !startupSeeds.started,
+	})
 	startupSeeds.mu.Unlock()
+}
+
+// markTelemetryStarted records that InitOTEL has run, and reports the components
+// that registered a seed before it did — i.e. the ones built before telemetry.
+func markTelemetryStarted() []string {
+	startupSeeds.mu.Lock()
+	defer startupSeeds.mu.Unlock()
+
+	var owners []string
+	for _, seed := range startupSeeds.pending {
+		if seed.predatesInit {
+			owners = append(owners, seed.owner)
+		}
+	}
+	startupSeeds.started = true
+	return owners
 }
 
 func runStartupSeeds() {
 	startupSeeds.mu.Lock()
 	startupSeeds.installed = true
+	startupSeeds.started = true
 	pending := startupSeeds.pending
 	startupSeeds.pending = nil
 	startupSeeds.mu.Unlock()
 
 	for _, seed := range pending {
-		seed()
+		seed.run()
 	}
 }
 
