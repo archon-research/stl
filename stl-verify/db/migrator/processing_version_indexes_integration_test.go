@@ -34,7 +34,7 @@ const minFixtureChunkCount = 5
 // A row-store chunk and a columnstore one are separate populations and get separate ceilings, so cost
 // drift on one cannot be read as fan-out on the other: measured 25-59 buffers across all 14 tables
 // with the many-chunk table at 401 chunks, and 37-95 once the probe key's chunk is compressed, where
-// planning also has to reach the compress_hyper_* twin.
+// planning also has to reach the columnstore twin.
 const (
 	maxTriggerLookupBuffers           = 120
 	maxCompressedTriggerLookupBuffers = 160
@@ -395,7 +395,7 @@ func TestProcessingVersionTriggerLookupsPruneToOneChunk(t *testing.T) {
 			t.Run(tc.tableName+"/"+lookup.label, func(t *testing.T) {
 				plan := explainWarmedLookup(t, ctx, conn, lookup)
 				assertLookupPrunedToOneChunk(t, plan, tc.tableName+" "+lookup.label, maxTriggerLookupBuffers)
-				if twins := plan.compressedChunkNames(); len(twins) != 0 {
+				if twins := plan.compressedChunkNames(columnstoreTwinNames(t, ctx, pool)); len(twins) != 0 {
 					t.Fatalf("%s %s lookup reached the columnstore twins %v on a fixture that compresses "+
 						"nothing, so the policy jobs setupMigratedPostgres switches off ran anyway and the "+
 						"row-store chunk count above is no longer measuring what it names\nplan:\n%s",
@@ -617,29 +617,29 @@ func (p explainPlan) totalBuffers() int {
 // A compressed chunk is two relations, and the two answer different questions: the row-store chunk
 // is what pruning either kept or discarded, and its columnstore twin is where a columnar scan reads
 // the compressed batches from. Counting them together would let a twin stand in for a second chunk
-// the plan failed to prune, so each pattern gets its own accessor and every caller says which it
-// means. TimescaleDB names both, and only these two shapes are chunks.
-var (
-	chunkRelationPattern           = regexp.MustCompile(`^_hyper_\d+_\d+_chunk$`)
-	compressedChunkRelationPattern = regexp.MustCompile(`^compress_hyper_\d+_\d+_chunk$`)
-)
+// the plan failed to prune, so each gets its own accessor and every caller says which it means.
+var chunkRelationPattern = regexp.MustCompile(`^_hyper_\d+_\d+_chunk$`)
 
 // The row-store chunks the plan names — one per chunk that survived pruning, whether its rows are
 // compressed or not.
 func (p explainPlan) chunkNames() []string {
-	return p.relationNamesMatching(chunkRelationPattern)
+	return p.relationNames(chunkRelationPattern.MatchString)
 }
 
-// The columnstore twins the plan names, one per compressed chunk it reads batches from.
-func (p explainPlan) compressedChunkNames() []string {
-	return p.relationNamesMatching(compressedChunkRelationPattern)
+// The columnstore twins the plan names, one per compressed chunk it reads batches from. Which
+// relations are twins has to come from the catalogue (columnstoreTwinNames): the name is not a
+// stable tell. TimescaleDB 2.29 names a twin <chunk>_compressed where earlier releases named it
+// compress_hyper_N_M_chunk, and a chunk compressed under an earlier release keeps the name it was
+// given, so one database holds both.
+func (p explainPlan) compressedChunkNames(twins map[string]bool) []string {
+	return p.relationNames(func(name string) bool { return twins[name] })
 }
 
-func (p explainPlan) relationNamesMatching(pattern *regexp.Regexp) []string {
+func (p explainPlan) relationNames(include func(string) bool) []string {
 	seen := map[string]bool{}
 	var names []string
 	p.walk(func(n explainNode) {
-		if pattern.MatchString(n.RelationName) && !seen[n.RelationName] {
+		if include(n.RelationName) && !seen[n.RelationName] {
 			seen[n.RelationName] = true
 			names = append(names, n.RelationName)
 		}
@@ -725,6 +725,35 @@ func chunkCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, table str
 	}
 	return n
 }
+
+// Every columnstore twin the database holds, under the bare relation name an EXPLAIN plan reports.
+// compression_settings is the one relation TimescaleDB keeps the pairing in across the releases this
+// suite runs on: 2.29 dropped the chunk catalogue's compressed_chunk_id, and the twin's name is not
+// a stable tell either (see compressedChunkNames).
+func columnstoreTwinNames(t *testing.T, ctx context.Context, pool *pgxpool.Pool) map[string]bool {
+	t.Helper()
+
+	rows, err := pool.Query(ctx, columnstoreTwinQuery)
+	if err != nil {
+		t.Fatalf("read the columnstore twins: %v", err)
+	}
+	names, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatalf("read the columnstore twins: %v", err)
+	}
+	twins := make(map[string]bool, len(names))
+	for _, name := range names {
+		twins[name] = true
+	}
+	return twins
+}
+
+// Every compressed relation the catalogue records a twin for. The join to pg_class drops the
+// hypertable-level settings rows, which carry no twin, and yields the unqualified name a plan uses.
+const columnstoreTwinQuery = `
+	SELECT twin.relname
+	FROM _timescaledb_catalog.compression_settings AS settings
+	JOIN pg_class AS twin ON twin.oid = settings.compress_relid`
 
 // prime_debt's only FK parent. A prime of its own keeps the measured insert on keys nothing else
 // touches, clear of the migration-seeded prime_id = 1 the fan-out fixture writes under.
