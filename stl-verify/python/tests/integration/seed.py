@@ -3000,6 +3000,9 @@ async def seed_receipt_position_latest_rows(db_url: str) -> None:
             prime_id = await conn.fetchval("SELECT id FROM prime ORDER BY id LIMIT 1")
             if prime_id is None:
                 raise RuntimeError("no prime seeded by migrations")
+            # prime_proxy is reference data (VEC-651): the treasury read resolves the
+            # prime through it, so positions alone do not make _PROXY resolvable.
+            await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=RTL_PROXY_HEX)
             tokens = await _rtl_seed_registry(conn)
             await _rtl_seed_positions(conn, prime_id=prime_id, tokens=tokens)
     finally:
