@@ -7,6 +7,7 @@ from typing import Any
 from app.domain.entities.allocation import (
     AnchorageCustodyHolding,
     DirectAssetHolding,
+    Psm3Position,
     ReceiptTokenPosition,
 )
 
@@ -57,3 +58,18 @@ def make_anchorage_custody_holding(**overrides: Any) -> AnchorageCustodyHolding:
     )
     defaults.update(overrides)
     return AnchorageCustodyHolding(**defaults)
+
+
+def make_psm3_position(**overrides: Any) -> Psm3Position:
+    """Defaults mirror a PSM3 LP stake: optimism PSM3, ~$1M par, 1M shares."""
+    defaults: dict[str, Any] = dict(
+        chain_id=10,
+        psm3_address="0x" + "e0" * 20,
+        alm_address="0x" + "87" * 20,
+        shares=Decimal("1000000"),
+        asset_value=Decimal("1000000"),
+        block_number=12345678,
+        block_timestamp=datetime(2026, 8, 1, 12, 0, tzinfo=UTC),
+    )
+    defaults.update(overrides)
+    return Psm3Position(**defaults)

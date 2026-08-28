@@ -178,3 +178,18 @@ async def test_list_total_capital_buckets_delegates_to_repository():
         bucket_seconds=3600.0,
         limit=50,
     )
+
+
+@pytest.mark.asyncio
+async def test_list_psm3_positions_delegates_to_repository():
+    from tests.factories import make_psm3_position
+
+    repo = AsyncMock()
+    holding = make_psm3_position()
+    repo.list_psm3_positions.return_value = [holding]
+    service = AllocationService(repo)
+
+    result = await service.list_psm3_positions(_VALID_ADDR)
+
+    assert result == [holding]
+    repo.list_psm3_positions.assert_awaited_once_with(_VALID_ADDR)

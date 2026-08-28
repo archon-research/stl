@@ -16,6 +16,21 @@ def test_anchorage_protocol_classified_as_custody():
     assert AllocationCategoryService().classify("anchorage", "BTC") is AllocationCategory.CUSTODY
 
 
+def test_psm3_protocol_classified_as_psm3():
+    """Go-emitted protocol_name='psm3' must classify as PSM3, not ALLOCATION.
+
+    The legacy SparkPSM3/Spark PSM3 rules cover the historic label; the added
+    substring rule for 'psm3' covers the Go tracker's protocol field.
+    """
+    service = AllocationCategoryService()
+    assert service.classify("psm3", "PSM3") is AllocationCategory.PSM3
+    assert service.classify("SparkPSM3", "PSM3") is AllocationCategory.PSM3
+    assert service.classify("Spark PSM3", "PSM3") is AllocationCategory.PSM3
+    # Substring containment: any protocol containing psm3 should map to PSM3,
+    # while an unrelated protocol falls back to ALLOCATION.
+    assert service.classify("aave", "PSM3") is not AllocationCategory.PSM3
+
+
 def test_custody_category_has_label_and_description():
     service = AllocationCategoryService()
     assert service.get_category_label(AllocationCategory.CUSTODY) == "Custody"

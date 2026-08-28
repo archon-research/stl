@@ -22,6 +22,7 @@ from app.domain.entities.allocation import (
     EthAddress,
     Prime,
     ProtocolMetadata,
+    Psm3Position,
     ReceiptTokenPosition,
 )
 from app.domain.entities.allocation_activity import AllocationActivityEvent
@@ -406,6 +407,50 @@ class AllocationRepository:
                 exc_info=True,
             )
             raise ValueError(f"Database query failed while fetching anchorage custody holdings: {exc}") from exc
+
+    async def list_psm3_positions(self, prime_id: EthAddress) -> list[Psm3Position]:
+        """Return current PSM3 LP stakes for the prime.
+
+        One row per (chain_id, alm_address) at the latest sweep for that
+        holder — see ``_PSM3_POSITIONS_SQL`` for ordering and zero-share
+        exclusion. ``shares`` and ``asset_value`` are stored raw at 1e18 and
+        normalized here to token-unit / USD scale (par valuation, not
+        market-priced).
+        """
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(_PSM3_POSITIONS_SQL, {"proxy_hex": prime_id.hex})
+                rows = result.fetchall()
+            # 1e18 scale for shares and asset_value (see docs/psm3_spec.md).
+            scale = Decimal(10) ** 18
+            positions = [
+                Psm3Position(
+                    chain_id=row.chain_id,
+                    psm3_address="0x" + row.psm3_address,
+                    alm_address="0x" + row.alm_address,
+                    shares=_safe_decimal(row.shares, "shares", row.psm3_address) / scale,
+                    asset_value=_safe_decimal(row.asset_value, "asset_value", row.psm3_address) / scale,
+                    block_number=row.block_number,
+                    block_timestamp=row.block_timestamp,
+                )
+                for row in rows
+            ]
+            return positions
+        except asyncio.CancelledError:
+            raise
+        except ValueError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch PSM3 positions from database",
+                extra={
+                    "prime_id": str(prime_id),
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                exc_info=True,
+            )
+            raise ValueError(f"Database query failed while fetching PSM3 positions: {exc}") from exc
 
     @staticmethod
     def _record_stale_custody(prime_id: EthAddress, holdings: list[AnchorageCustodyHolding]) -> None:
@@ -1465,6 +1510,33 @@ _ANCHORAGE_CUSTODY_HOLDINGS_SQL = text("""
     ORDER BY amount_usd DESC, symbol ASC
 """)
 
+
+# PSM3 LP stakes: one row per (chain_id, alm_address) at the latest sweep.
+# Shares and asset_value are raw 1e18 (see docs/psm3_spec.md); the sweep is
+# sparse (every N blocks), so gaps are expected. Latest per holder is
+# ``DISTINCT ON (chain_id, alm_address) ORDER BY chain_id, alm_address,
+# block_number DESC, block_version DESC, processing_version DESC`` — the
+# canonical newer-wins order for versioned PSM3 tables (see
+# ``psm3_alm_shares`` primary key and its ``idx_psm3_alm_shares_current``
+# index). Zero-share rows are excluded (closed/withdrawn). ``psm3_reserves``
+# is not joined: the asset_value already carries the par valuation
+# (``convertToAssetValue``) and the reserve composition is not needed for an
+# allocation listing; a cross-check against ``psm3_reserves.total_shares``/
+# ``total_assets`` can be added later if a consistency guard is warranted.
+_PSM3_POSITIONS_SQL = text("""
+    SELECT DISTINCT ON (chain_id, alm_address)
+        chain_id,
+        encode(address, 'hex') AS psm3_address,
+        encode(alm_address, 'hex') AS alm_address,
+        shares,
+        asset_value,
+        block_number,
+        block_timestamp
+    FROM psm3_alm_shares
+    WHERE alm_address = decode(:proxy_hex, 'hex')
+      AND shares > 0
+    ORDER BY chain_id, alm_address, block_number DESC, block_version DESC, processing_version DESC
+""")
 
 # Redeemable-value basis; rationale (incl. the divergence refusal) on
 # _RECEIPT_TOKEN_POSITIONS_SQL. The open-position filter stays on the raw share

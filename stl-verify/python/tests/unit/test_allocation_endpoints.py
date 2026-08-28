@@ -17,6 +17,7 @@ from tests.factories import (
     ANCHORAGE_FROZEN_AS_OF,
     make_anchorage_custody_holding,
     make_direct_asset_holding,
+    make_psm3_position,
     make_receipt_token_position,
 )
 
@@ -73,6 +74,7 @@ def _make_service(
     positions=None,
     direct_holdings=None,
     anchorage_holdings=None,
+    psm3_holdings=None,
     *,
     exists: bool = True,
     primary_proxy: str | None = _SPARK_MAINNET_ALM,
@@ -82,6 +84,7 @@ def _make_service(
     service.list_receipt_token_positions.return_value = positions or []
     service.list_direct_asset_holdings.return_value = direct_holdings or []
     service.list_anchorage_custody_holdings.return_value = anchorage_holdings or []
+    service.list_psm3_positions.return_value = psm3_holdings or []
     service.prime_exists.return_value = exists
     service.list_activity_buckets.return_value = []
     # Which proxy carries the prime's prime-scoped rows is a fact about the
@@ -707,6 +710,84 @@ def test_list_allocations_tags_on_chain_rows_as_proxy_scoped():
     response = TestClient(app).get(f"/v1/primes/{_SPARK_MAINNET_ALM}/allocations")
 
     assert response.json()[0]["scope"] == "proxy"
+
+
+def test_list_allocations_surfaces_psm3_row():
+    """PSM3 LP stakes surface as a fourth row shape: psm3 protocol, PSM3
+    category, chain-qualified psm3 contract as receipt, Decimal strings.
+    """
+    from app.api.v1 import allocations
+
+    holding = make_psm3_position(
+        chain_id=10,
+        psm3_address="0x" + "e0" * 20,
+        alm_address=_SPARK_MAINNET_ALM,
+        shares=Decimal("1000000"),
+        asset_value=Decimal("999000"),
+        block_timestamp=datetime(2026, 8, 1, 12, 0, tzinfo=UTC),
+    )
+    service = _make_service(psm3_holdings=[holding])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    row = response.json()[0]
+    assert row["chain_id"] == 10
+    assert row["receipt_token_address"] == "0x" + "e0" * 20
+    assert row["receipt_token_id"] is None
+    assert row["underlying_token_id"] is None
+    assert row["underlying_token_address"] is None
+    assert row["symbol"] == "PSM3"
+    assert row["underlying_symbol"] == "PSM3"
+    assert row["protocol_name"] == "psm3"
+    assert row["balance"] == "1000000"
+    assert row["amount_usd"] == "999000"
+    assert row["category"] == "psm3"
+    assert row["scope"] == "proxy"
+    assert row["latest_activity_at"] == "2026-08-01T12:00:00+00:00"
+    service.list_psm3_positions.assert_awaited_once_with(EthAddress(_VALID_ADDR))
+
+
+def test_list_allocations_combines_all_four_sources():
+    """Receipt, direct, custody and PSM3 union into one response."""
+    from app.api.v1 import allocations
+
+    service = _make_service(
+        positions=[make_receipt_token_position()],
+        direct_holdings=[make_direct_asset_holding()],
+        anchorage_holdings=[make_anchorage_custody_holding()],
+        psm3_holdings=[make_psm3_position()],
+    )
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(f"/v1/primes/{_SPARK_MAINNET_ALM}/allocations")
+
+    assert response.status_code == 200
+    rows = response.json()
+    assert len(rows) == 4
+    by_symbol = {row["symbol"]: row for row in rows}
+    assert by_symbol["aUSDC"]["receipt_token_id"] == 1
+    assert by_symbol["PYUSD"]["receipt_token_id"] is None
+    assert by_symbol["BTC"]["category"] == "custody"
+    assert by_symbol["PSM3"]["category"] == "psm3"
+
+
+def test_list_allocations_psm3_amount_uses_decimal_strings():
+    """Shares and asset_value remain Decimal precision through JSON (strings, not floats)."""
+    from app.api.v1 import allocations
+
+    holding = make_psm3_position(shares=Decimal("1234567.890123456789"), asset_value=Decimal("987654.321"))
+    service = _make_service(psm3_holdings=[holding])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    response = TestClient(app).get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    row = response.json()[0]
+    assert row["balance"] == "1234567.890123456789"
+    assert row["amount_usd"] == "987654.321"
 
 
 @pytest.mark.parametrize(

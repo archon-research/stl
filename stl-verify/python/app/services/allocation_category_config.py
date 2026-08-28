@@ -13,6 +13,7 @@ def default_allocation_category_rules() -> list[AllocationCategoryMapping]:
         # PSM3: Spark PSM3 positions.
         AllocationCategoryMapping("SparkPSM3", None, AllocationCategory.PSM3, priority=200),
         AllocationCategoryMapping("Spark PSM3", None, AllocationCategory.PSM3, priority=200),
+        AllocationCategoryMapping("psm3", None, AllocationCategory.PSM3, priority=200),
         # POL: Protocol-owned liquidity and governance positions.
         AllocationCategoryMapping("Aave", "AAVE", AllocationCategory.POL, priority=150),
         AllocationCategoryMapping("Aave", None, AllocationCategory.ALLOCATION, priority=100),

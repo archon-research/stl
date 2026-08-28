@@ -8,6 +8,7 @@ from app.domain.entities.allocation import (
     EthAddress,
     Prime,
     ProtocolMetadata,
+    Psm3Position,
     ReceiptTokenPosition,
 )
 from app.domain.entities.allocation_activity import AllocationActivityEvent
@@ -43,6 +44,9 @@ class AllocationService:
 
     async def list_anchorage_custody_holdings(self, prime_id: EthAddress) -> list[AnchorageCustodyHolding]:
         return await self._repository.list_anchorage_custody_holdings(prime_id)
+
+    async def list_psm3_positions(self, prime_id: EthAddress) -> list[Psm3Position]:
+        return await self._repository.list_psm3_positions(prime_id)
 
     async def primary_proxy_address(self, prime_id: EthAddress) -> str | None:
         return await self._repository.primary_proxy_address(prime_id)

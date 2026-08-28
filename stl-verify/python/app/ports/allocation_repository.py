@@ -10,6 +10,7 @@ from app.domain.entities.allocation import (
     EthAddress,
     Prime,
     ProtocolMetadata,
+    Psm3Position,
     ReceiptTokenPosition,
 )
 from app.domain.entities.allocation_activity import AllocationActivityEvent
@@ -72,6 +73,18 @@ class AllocationRepositoryPort(Protocol):
         froze at an earlier poll (``exposure_value = 0`` but still
         ``active = true``) are outside the cohort and never inflate the totals.
         Returns an empty list when the prime has no custody snapshots.
+        """
+        ...
+
+    async def list_psm3_positions(self, prime_id: EthAddress) -> list[Psm3Position]:
+        """Return current PSM3 LP stakes for the given prime.
+
+        One row per (chain_id, alm_address) at the latest sweep for that
+        holder (``ORDER BY block_number DESC, block_version DESC,
+        processing_version DESC``). A position whose latest shares are zero
+        (closed/withdrawn) is excluded. Exposes raw par valuation via
+        ``asset_value`` (``PSM3.convertToAssetValue(shares)`` at 1e18) — not
+        market-priced — so consumers should document the basis.
         """
         ...
 

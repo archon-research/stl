@@ -24,6 +24,7 @@ from app.domain.entities.allocation import (
     AnchorageCustodyHolding,
     DirectAssetHolding,
     EthAddress,
+    Psm3Position,
     ReceiptTokenPosition,
     as_address,
 )
@@ -110,7 +111,7 @@ class ProtocolResponse(BaseModel):
 class AllocationResponse(BaseModel):
     """Enriched allocation response with category and metadata.
 
-    Three row shapes share this model:
+    Four row shapes share this model:
     - Receipt-token positions (e.g. spUSDT wrapping USDT): all fields populated.
     - Direct asset holdings (e.g. PYUSD held in the proxy with no wrapper):
       ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` are
@@ -128,6 +129,12 @@ class AllocationResponse(BaseModel):
       registry row). ``amount_usd`` is the loan drawn against the collateral and
       ``latest_activity_at`` is the snapshot time — surfaced verbatim even when
       the upstream feed is frozen, so staleness is visible rather than hidden.
+    - PSM3 LP stakes: ``chain_id`` is the L2 deployment chain, ``protocol_name``
+      is ``psm3``, ``symbol``/``underlying_symbol`` are ``PSM3``, the PSM3
+      contract is the position (``receipt_token_address``), and
+      ``underlying_*`` are null. ``balance`` is shares (1e18 normalized) and
+      ``amount_usd`` is par valuation (``asset_value / 1e18``,
+      ``PSM3.convertToAssetValue``), not market-priced.
 
     ``chain_id`` therefore has three states, and 0 is not one of the other two:
     an EVM chain id, 0 for off-chain custody, and null for a chain STL has no id
@@ -450,9 +457,11 @@ async def list_protocols(service: AllocationService = Depends(_get_service)):
         "holdings (tokens held in the proxy with no registered receipt-token wrapper, "
         "surfaced with `receipt_token_id`, `receipt_token_address` and `protocol_name` "
         "set to `null`, and `amount_usd` valued from the token's oracle price when one "
-        "exists), and off-chain Anchorage BTC custody (chain_id 0, `protocol_name` "
-        "`anchorage`, `amount_usd` the loan drawn against the collateral). Each row "
-        "includes the latest activity timestamp and a derived `category` "
+        "exists), off-chain Anchorage BTC custody (chain_id 0, `protocol_name` "
+        "`anchorage`, `amount_usd` the loan drawn against the collateral), and PSM3 "
+        "LP stakes (Sweep-indexed `psm3_alm_shares`, `protocol_name` `psm3`, par "
+        "valuation `asset_value / 1e18`). Each row includes the latest activity "
+        "timestamp and a derived `category` "
         "(`allocation` / `pol` / `psm3` / `asset` / `custody`). Rows are proxy-scoped "
         "except the Anchorage custody leg, which is prime-scoped and returned only "
         "under the one proxy of the prime that carries its prime-scoped rows (its mainnet proxy when "
@@ -477,7 +486,7 @@ async def list_allocations(
 ):
     """Return current allocations for ``prime_id``.
 
-    Combines three sources:
+    Combines four sources:
     - Receipt-token positions (e.g. spUSDT wrapping USDT).
     - Direct asset holdings — tokens held in the proxy that are not
       registered as receipt-token wrappers (e.g. PYUSD, syrupUSDT). These
@@ -488,6 +497,9 @@ async def list_allocations(
       loan drawn against the collateral as ``amount_usd``. Gated to the
       one proxy of the prime that carries its prime-scoped rows (see
       ``_custody_applies``).
+    - PSM3 LP stakes — ``psm3_alm_shares`` latest per (chain_id, alm_address),
+      ``protocol_name`` ``psm3``, ``balance`` = shares, ``amount_usd`` = par
+      ``asset_value`` (``convertToAssetValue`` at 1e18, not market-priced).
 
     Errors:
     - 422 if ``prime_id`` is malformed.
@@ -506,10 +518,11 @@ async def list_allocations(
         return _with_position_keys(await _merged_allocations(prime_address, service, reference_services()))
 
     custody_applies = await _custody_applies(prime_address, service)
-    positions, direct, custody = await asyncio.gather(
+    positions, direct, custody, psm3 = await asyncio.gather(
         service.list_receipt_token_positions(prime_address),
         service.list_direct_asset_holdings(prime_address),
         service.list_anchorage_custody_holdings(prime_address) if custody_applies else _no_custody(),
+        service.list_psm3_positions(prime_address),
     )
 
     category_service = AllocationCategoryService()
@@ -518,6 +531,7 @@ async def list_allocations(
             *(_receipt_token_row(position, category_service) for position in positions),
             *(_direct_asset_row(holding, category_service) for holding in direct),
             *(_anchorage_custody_row(holding, category_service) for holding in custody),
+            *(_psm3_position_row(holding, category_service) for holding in psm3),
         ]
     )
 
@@ -656,12 +670,14 @@ async def _prime_wide_indexed_allocations(
 
     rows: list[AllocationResponse] = []
     for proxy in proxies:
-        positions, direct = await asyncio.gather(
+        positions, direct, psm3 = await asyncio.gather(
             service.list_receipt_token_positions(proxy),
             service.list_direct_asset_holdings(proxy),
+            service.list_psm3_positions(proxy),
         )
         rows.extend(_receipt_token_row(position, category_service) for position in positions)
         rows.extend(_direct_asset_row(holding, category_service) for holding in direct)
+        rows.extend(_psm3_position_row(holding, category_service) for holding in psm3)
 
     # Prime-scoped, so it belongs to the union once however many proxies there
     # are — and ungated, unlike the proxy-scoped default. `_custody_applies`
@@ -820,6 +836,40 @@ def _anchorage_custody_row(
         latest_activity_amount=None,
         category=category_service.classify(_ANCHORAGE_PROTOCOL_NAME, holding.symbol),
         scope="prime",
+    )
+
+
+_PSM3_PROTOCOL_NAME = "psm3"
+_PSM3_SYMBOL = "PSM3"
+
+
+def _psm3_position_row(holding: Psm3Position, category_service: AllocationCategoryService) -> AllocationResponse:
+    """Project a PSM3 LP stake onto the allocation model.
+
+    The PSM3 pool is indexed by the ``psm3-indexer`` into ``psm3_alm_shares``;
+    one row per (chain_id, alm_address) at the latest sweep. ``balance`` is
+    shares normalized from 1e18, ``amount_usd`` is the par valuation
+    (``asset_value / 1e18`` from ``PSM3.convertToAssetValue``), not
+    market-priced — consumers should surface the basis alongside the figure.
+    ``latest_activity_at`` is the sweep block timestamp, verbatim, not a
+    deposit/withdraw event time; there is no per-Activity row for PSM3.
+    """
+    return AllocationResponse(
+        chain_id=holding.chain_id,
+        receipt_token_id=None,
+        receipt_token_address=holding.psm3_address,
+        underlying_token_id=None,
+        underlying_token_address=None,
+        symbol=_PSM3_SYMBOL,
+        underlying_symbol=_PSM3_SYMBOL,
+        protocol_name=_PSM3_PROTOCOL_NAME,
+        balance=holding.shares,
+        amount_usd=holding.asset_value,
+        latest_activity_at=holding.block_timestamp.isoformat() if holding.block_timestamp else None,
+        latest_activity_action=None,
+        latest_activity_amount=None,
+        category=category_service.classify(_PSM3_PROTOCOL_NAME, _PSM3_SYMBOL),
+        scope="proxy",
     )
 
 

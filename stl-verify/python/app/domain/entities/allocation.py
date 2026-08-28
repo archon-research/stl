@@ -139,6 +139,28 @@ class AnchorageCustodyHolding:
 
 
 @dataclass(frozen=True)
+class Psm3Position:
+    """One tracked ALM proxy's LP stake in a Spark PSM3 pool at the latest sweep.
+
+    Mirrors ``psm3_alm_shares`` — one row per (chain_id, alm_address) at the
+    latest block for that holder. ``shares`` and ``asset_value`` are stored
+    raw at 1e18 in the DB and normalized here to token-unit/USD scale
+    (``/ 1e18``), matching the par valuation semantics of ``PSM3.totalAssets()``
+    (see ``docs/psm3_spec.md``). ``asset_value`` is par, not market-priced —
+    it equals ``shares * total_assets / total_shares`` on the matching
+    ``psm3_reserves`` row.
+    """
+
+    chain_id: int
+    psm3_address: str
+    alm_address: str
+    shares: Decimal
+    asset_value: Decimal
+    block_number: int
+    block_timestamp: datetime | None
+
+
+@dataclass(frozen=True)
 class Prime:
     """One of a prime's proxy wallets, as surfaced by ``/v1/primes``.
 
