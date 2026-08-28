@@ -55,9 +55,11 @@ type UniswapV4Repository interface {
 	// 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE native-ETH placeholder.
 	LoadPools(ctx context.Context, chainID int64) ([]UniswapV4PoolRow, error)
 	// SaveBlock persists all of a block's uniswap_v4 rows within tx and returns
-	// the number of state rows actually inserted (ON CONFLICT DO NOTHING means a
-	// redelivery returns 0), for the uniswap_v4_state_rows_written_total metric.
-	SaveBlock(ctx context.Context, tx pgx.Tx, w UniswapV4BlockWrites) (stateRows int64, err error)
+	// both the number of state rows the block queued and the number that
+	// actually appended (ON CONFLICT DO NOTHING means a redelivery persists 0),
+	// for the uniswap_v4_state_rows_attempted_total and
+	// uniswap_v4_state_rows_written_total metrics.
+	SaveBlock(ctx context.Context, tx pgx.Tx, w UniswapV4BlockWrites) (stateRows UniswapStateRowCounts, err error)
 	// PoolIDsWithStateAtBlock returns the CURRENT uniswap_v4_pool ids, ascending,
 	// of the pools on chainID that already have a uniswap_v4_pool_state row at
 	// blockNumber. A reorg redelivery unions them into its due set so a pool

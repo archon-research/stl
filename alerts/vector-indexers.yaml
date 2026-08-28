@@ -1819,11 +1819,11 @@ groups:
 
       - alert: VectorUniswapV3IndexerNotWritingState
         # Silent-empty guard, HALF ONE of two: pools WERE touched by decoded
-        # events, but no state/tick snapshot rows came out the other side. The
-        # error path will NOT catch a due-set that goes quietly empty (DueSet
-        # returning nothing for a touched pool, every snapshotDueSet call
-        # no-opping, or every state INSERT hitting ON CONFLICT DO NOTHING) —
-        # there is no error, just no rows. This alert catches that.
+        # events, but the block queued no state snapshot rows at all. The error
+        # path will NOT catch a due-set that goes quietly empty (DueSet
+        # returning nothing for a touched pool, or every snapshotDueSet call
+        # no-opping) — there is no error, just nothing to insert. This alert
+        # catches that.
         #
         # It deliberately does NOT catch a touched-pool set that is always
         # empty (dead registry, address-match regression): that zeroes this
@@ -1846,20 +1846,40 @@ groups:
         # successful commit. Sourcing the gate from DueSet instead would zero
         # both sides under the exact bug this targets and go blind.
         #
-        # `unless`, not `and … == 0`: RecordStateRows is a no-op for n<=0, so
-        # under that bug (or on a fresh deploy) the state-rows counter series is
-        # never created, and `and … == 0` yields no match on the empty right
-        # side — the alert could never fire. `A > 0 unless B > 0` keeps each
-        # (chain,cluster) that is touching pools unless it is also writing state
-        # rows, so an absent OR zero state-rows series correctly fires. Do not
-        # revert to `and`.
+        # The right side is state.rows.ATTEMPTED, not state.rows.written, and
+        # that distinction is the whole point. Replaying an already-committed
+        # range under one build_id makes the assign_processing_version trigger
+        # reuse the existing processing_version, so every state INSERT lands on
+        # the identical primary key, hits ON CONFLICT DO NOTHING and appends
+        # nothing: `written` stays absent while the worker is perfectly healthy,
+        # and keying on it fired this rule with nothing to fix. `attempted`
+        # counts the rows the block QUEUED, conflicts included, so the replay
+        # keeps it advancing.
+        #
+        # The case this deliberately excludes is exactly that conflict, and it
+        # is provably not a data hole: under this primary key
+        # (pool_id, block_timestamp, block_number, block_version,
+        # processing_version) a conflict means the identical row is already in
+        # the table. Nothing the rule was built for is lost — DueSet going
+        # empty, snapshotDueSet no-opping and buildBlockWrites dropping the
+        # states all queue nothing, so all three still leave attempted at zero.
+        # uniswap_v3_state_rows_written_total stays exported as volume
+        # observability; it is simply not the health signal.
+        #
+        # `unless`, not `and … == 0`: RecordStateRowsAttempted is a no-op for
+        # n<=0 (matching RecordStateRows), so under that bug (or on a fresh
+        # deploy) the attempted counter series is never created, and
+        # `and … == 0` yields no match on the empty right side — the alert
+        # could never fire. `A > 0 unless B > 0` keeps each (chain,cluster) that
+        # is touching pools unless it is also queueing state rows, so an absent
+        # OR zero attempted series correctly fires. Do not revert to `and`.
         expr: |
           sum by (chain, cluster) (
             rate(uniswap_v3_pools_touched_total{k8s_namespace_name="vector"}[30m])
           ) > 0
           unless
           sum by (chain, cluster) (
-            rate(uniswap_v3_state_rows_written_total{k8s_namespace_name="vector"}[30m])
+            rate(uniswap_v3_state_rows_attempted_total{k8s_namespace_name="vector"}[30m])
           ) > 0
         for: 10m
         labels:
@@ -1871,11 +1891,13 @@ groups:
           summary: "Vector uniswap-v3-indexer writing no state rows on {{ $labels.chain }}"
           description: |
             `uniswap-v3-indexer` on chain `{{ $labels.chain }}` has decoded
-            events touching registered pools for 30m but written zero
-            state/tick snapshot rows. Pools are being touched, so this is not a
-            quiet market: the due-set (DueSet) is likely silently empty, every
-            snapshotDueSet call is no-opping, or every state INSERT is hitting
-            ON CONFLICT DO NOTHING.
+            events touching registered pools for 30m but queued zero pool-state
+            snapshot rows (the counter tracks uniswap_v3_pool_state inserts
+            only, never ticks). Pools are being touched, so this is not a quiet
+            market — and an idempotent replay cannot cause it either, since the
+            counter includes rows that conflict away. The rows are not being
+            produced at all: the due set (DueSet) is likely silently empty, or
+            every snapshotDueSet call is no-opping.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3indexernotwritingstate
 
       - alert: VectorUniswapV3IndexerNoPoolsTouched
@@ -1953,9 +1975,9 @@ groups:
   # updateDynamicLPFee rewrites with no event; the registry excludes such a pool
   # from snapshots (uniswap_v4_pool.snapshot_supported = false) while still
   # indexing its events, so it contributes to pools_touched but never to
-  # state_rows_written or pools_never_indexed. State itself is read from the
-  # StateView lens (0x7fFE42C4a5DEeA5b0feC41C94C136Cf115597227) pinned to the
-  # block hash.
+  # state_rows_attempted/written or pools_never_indexed. State itself is read
+  # from the StateView lens (0x7fFE42C4a5DEeA5b0feC41C94C136Cf115597227) pinned
+  # to the block hash.
   - name: vector-uniswap-v4-indexer
     interval: 1m
     rules:
@@ -2120,10 +2142,10 @@ groups:
 
       - alert: VectorUniswapV4IndexerNotWritingState
         # Silent-empty guard, HALF ONE of two: pools WERE touched by decoded
-        # PoolManager events, but no pool-state snapshot rows came out the other
-        # side. The error path will NOT catch that: a snapshotDueSet call that
-        # no-ops, or state INSERTs that all hit ON CONFLICT DO NOTHING, raise no
-        # error — there are simply no rows. (DueSet itself is not one of the
+        # PoolManager events, but the block queued no pool-state snapshot rows
+        # at all. The error path will NOT catch that: a snapshotDueSet call that
+        # no-ops, or buildBlockWrites dropping the states, raises no error —
+        # there is simply nothing to insert. (DueSet itself is not one of the
         # silent paths: a touched pool it cannot resolve, or one below its
         # deploy_block, is a hard error and surfaces as ErrorsHigh/Stalled.)
         #
@@ -2159,22 +2181,43 @@ groups:
         # counter instead would break NoPoolsTouched below, which reads the same
         # metric and legitimately wants every touch.
         #
-        # `unless`, not `and … == 0`: RecordStateRows is a no-op for n<=0, so
-        # under that bug (or on a fresh deploy) the state-rows counter series is
-        # never created, and `and … == 0` yields no match on the empty right
-        # side — the alert could never fire. `A > 0 unless B > 0` keeps each
-        # (chain,cluster) that is touching pools unless it is also writing state
-        # rows, so an absent OR zero state-rows series correctly fires. Do not
-        # revert to `and`. The same absent-series semantics carry the exclusion:
-        # RecordPoolsTouched no-ops for n<=0, so an excluded-only block leaves
-        # the snapshot_supported="true" series absent and the rule un-fireable.
+        # The right side is state.rows.ATTEMPTED, not state.rows.written, and
+        # that distinction is the whole point. Replaying an already-committed
+        # range under one build_id makes the assign_processing_version trigger
+        # reuse the existing processing_version, so every state INSERT lands on
+        # the identical primary key, hits ON CONFLICT DO NOTHING and appends
+        # nothing: `written` stays absent while the worker is perfectly healthy,
+        # and keying on it fired this rule with nothing to fix. `attempted`
+        # counts the rows the block QUEUED, conflicts included, so the replay
+        # keeps it advancing.
+        #
+        # The case this deliberately excludes is exactly that conflict, and it
+        # is provably not a data hole: under this primary key
+        # (pool_id, block_timestamp, block_number, block_version,
+        # processing_version) a conflict means the identical row is already in
+        # the table. Nothing the rule was built for is lost — snapshotDueSet
+        # no-opping, buildBlockWrites dropping the states, and dueSetForBlock
+        # going empty all queue nothing, so all three still leave attempted at
+        # zero. uniswap_v4_state_rows_written_total stays exported as volume
+        # observability; it is simply not the health signal.
+        #
+        # `unless`, not `and … == 0`: RecordStateRowsAttempted is a no-op for
+        # n<=0 (matching RecordStateRows), so under that bug (or on a fresh
+        # deploy) the attempted counter series is never created, and
+        # `and … == 0` yields no match on the empty right side — the alert
+        # could never fire. `A > 0 unless B > 0` keeps each (chain,cluster) that
+        # is touching pools unless it is also queueing state rows, so an absent
+        # OR zero attempted series correctly fires. Do not revert to `and`. The
+        # same absent-series semantics carry the exclusion: RecordPoolsTouched
+        # no-ops for n<=0, so an excluded-only block leaves the
+        # snapshot_supported="true" series absent and the rule un-fireable.
         expr: |
           sum by (chain, cluster) (
             rate(uniswap_v4_pools_touched_total{snapshot_supported="true", k8s_namespace_name="vector"}[30m])
           ) > 0
           unless
           sum by (chain, cluster) (
-            rate(uniswap_v4_state_rows_written_total{k8s_namespace_name="vector"}[30m])
+            rate(uniswap_v4_state_rows_attempted_total{k8s_namespace_name="vector"}[30m])
           ) > 0
         for: 10m
         labels:
@@ -2187,12 +2230,13 @@ groups:
           description: |
             `uniswap-v4-indexer` on chain `{{ $labels.chain }}` has decoded
             PoolManager events touching registered, snapshot-supported PoolIds
-            for 30m but written zero pool-state snapshot rows (the counter
-            tracks uniswap_v4_pool_state inserts only, never ticks). Pools that
-            should be snapshotted are being touched, so this is not a quiet
-            market: suspect snapshotDueSet no-opping, or every state INSERT
-            hitting ON CONFLICT DO NOTHING (a replay of an already-indexed
-            range under one build_id).
+            for 30m but queued zero pool-state snapshot rows (the counter tracks
+            uniswap_v4_pool_state inserts only, never ticks). Pools that should
+            be snapshotted are being touched, so this is not a quiet market —
+            and an idempotent replay cannot cause it either, since the counter
+            includes rows that conflict away. The rows are not being produced at
+            all: suspect snapshotDueSet no-opping or buildBlockWrites dropping
+            the states.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexernotwritingstate
 
       - alert: VectorUniswapV4IndexerNoPoolsTouched

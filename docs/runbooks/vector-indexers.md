@@ -1244,7 +1244,7 @@ Gated on `uniswap_v3_pools_touched_total`, not on blocks processed. uniswap-v3
 runs `SnapshotTracker(0)` — no sweep — so it writes state rows only for pools an
 event touched in that block, and a quiet market legitimately writes nothing. The
 gate means a quiet window can no longer fire this alert: it fires only when pools
-WERE touched and rows still did not come out.
+WERE touched and the worker still queued no state rows at all.
 
 This is **one half** of the silent-empty guard. It cannot fire when the touched
 set is always empty (that zeroes its own left side) —
@@ -1253,56 +1253,73 @@ is the other half and covers that class. Neither alone is the whole guard.
 
 ### What it means
 
-Decoded events touched registered pools
-(`uniswap_v3_pools_touched_total` is non-zero) but no state/tick snapshot rows
-were written (`uniswap_v3_state_rows_written_total` is zero) for 30 minutes.
-The error path will NOT catch this: a due-set that goes quietly empty (`DueSet`
+Decoded events touched registered pools (`uniswap_v3_pools_touched_total` is
+non-zero) but the worker queued no pool-state snapshot rows
+(`uniswap_v3_state_rows_attempted_total` is zero or absent) for 30 minutes. The
+counter tracks `uniswap_v3_pool_state` INSERTs only — never `uniswap_v3_tick`
+rows — so this alert is about the state snapshot, not the tick writer.
+
+The rule keys on *attempted*, not on `uniswap_v3_state_rows_written_total`, and
+the two differ on an idempotent replay: re-processing an already-committed range
+under one `build_id` makes the `assign_processing_version` trigger reuse the
+existing `processing_version`, so every INSERT lands on the identical primary key
+`(pool_id, block_timestamp, block_number, block_version, processing_version)`,
+hits `ON CONFLICT DO NOTHING` and appends nothing. That is a healthy worker with
+nothing to fix, and it can no longer fire this alert. A conflict under that key
+means the identical row is already in the table, so zero *written* is provably
+not a data hole; zero *attempted* is a different claim entirely — the rows were
+never produced at all.
+
+The error path will NOT catch that: a due set that goes quietly empty (`DueSet`
 returning nothing for a pool that WAS touched, or every `snapshotDueSet` call
-silently no-opping) produces no errors, just no state rows.
+silently no-opping) produces no errors, just nothing to insert.
 
 Because pools are being touched, **a quiet market is already ruled out** — this
-is not the "no Uniswap V3 activity" case. Something between decode and persist
-is dropping the rows.
+is not the "no Uniswap V3 activity" case. Something between decode and the
+INSERT is dropping the rows.
+
+`uniswap_v3_state_rows_written_total` is still exported, as volume
+observability ("how many rows did this worker actually add"). It is simply not
+the health signal.
 
 This is the data-quality / silent-empty check that `VectorUniswapV3IndexerStalled`
 cannot see.
 
 ### First checks
 
-1. **SQS replay / redrive** — the most common benign cause (see below). Check
-   the queue for a redrive before assuming a logic stall.
-2. **Due set** — `pools.touched` is recorded from `handleBlock`'s decode-stage
-   `touchedIDs`, upstream of `DueSet`, so a non-zero gate with zero state rows
-   points straight at `DueSet` returning empty for pools that were touched, or
-   at `snapshotDueSet` no-opping.
-3. **Pool registry** — a registry that is empty for this chain cannot produce
+1. **Due set** — `pools.touched` is recorded from `handleBlock`'s decode-stage
+   `touchedIDs`, upstream of `DueSet`, so a non-zero gate with zero attempted
+   state rows points straight at `DueSet` returning empty for pools that were
+   touched, or at `snapshotDueSet` no-opping.
+2. **Pool registry** — a registry that is empty for this chain cannot produce
    touches either, so it would NOT fire this alert. If you suspect an empty
    registry, check `uniswap_v3_pools_touched_total` is flat at zero and confirm
    the Uniswap V3 pool registry row count for this chain directly.
 
 ### Common causes
 
-- Sustained SQS replay / redrive over an already-indexed range under one
-  `build_id`: every message is a block already persisted at this build (same
-  `build_id`, same `block_version`), so each state INSERT hits `ON CONFLICT DO
-  NOTHING` (0 rows) and `uniswap_v3_state_rows_written_total` does not advance
-  even though processing succeeds — while `pools_touched` keeps advancing,
-  since the blocks really do touch pools. A redeploy (new `build_id`) or reorg
-  (new `block_version`) inserts fresh rows and clears the alert.
 - `DueSet` silently empty despite touched pools -> a tracker/`SnapshotTracker`
   regression; this is the bug the alert exists to catch.
 - Contract address mismatch (new pool deployed at a different address) ->
   update the pool registry. Note this suppresses touches too, so it shows up as
   a flat-zero `pools_touched`, not as this alert.
+- **Not** an idempotent replay of an already-indexed range under one `build_id`.
+  The rows still get queued, so `state_rows_attempted` keeps advancing and the
+  rule stays silent; only `state_rows_written` goes flat. If you are here
+  because *written* is flat, that is expected during a replay and needs no
+  action.
 
 ### Verify recovery
 
-`rate(uniswap_v3_state_rows_written_total[30m]) > 0` for the affected chain.
+`rate(uniswap_v3_state_rows_attempted_total[30m]) > 0` for the affected chain —
+the same series the rule keys on. `rate(uniswap_v3_state_rows_written_total[30m])`
+is the volume check alongside it, and legitimately stays at zero while the
+worker is replaying an already-indexed range.
 
 A quiet market no longer needs ruling out — if no pools are being touched the
 alert cannot fire. To sanity-check overall liveness during a lull, confirm
-`rate(uniswap_v3_blocks_processed_total{status="success"}[5m]) > 0`
-(`VectorUniswapV3IndexerStalled` covers this).
+`rate(uniswap_v3_blocks_processed_total{status="success"}[5m]) > 0` for that
+chain (`VectorUniswapV3IndexerStalled` covers this).
 
 ### History
 
@@ -1420,8 +1437,8 @@ it and the worker would crash-loop forever on a legal pool. See VEC-573 for the
 
 Consequences worth remembering while triaging: an excluded pool contributes to
 `uniswap_v4_pools_touched_total{snapshot_supported="false"}` but never to
-`uniswap_v4_state_rows_written_total`, and it is deliberately not counted by
-`uniswap_v4_pools_never_indexed`. That label is what keeps
+`uniswap_v4_state_rows_attempted_total` or `uniswap_v4_state_rows_written_total`,
+and it is deliberately not counted by `uniswap_v4_pools_never_indexed`. That label is what keeps
 [`VectorUniswapV4IndexerNotWritingState`](#vectoruniswapv4indexernotwritingstate)
 — which selects `snapshot_supported="true"` — from paging on a window whose only
 touches were excluded pools, while
@@ -1618,8 +1635,8 @@ and the pod logs show the `uniswap-v4-indexer started` line with a non-zero
 ### What it means
 
 The worker is **up** (>=1 replica) but has consumed **no block for 15 minutes**:
-`rate(uniswap_v4_blocks_processed_total{status="success"}[5m])` is zero — or the
-series has **vanished entirely**. The expression zero-fills from
+`rate(uniswap_v4_blocks_processed_total{status="success", chain="mainnet"}[5m])`
+is zero — or the series has **vanished entirely**. The expression zero-fills from
 kube-state-metrics, so a dead OTLP export with a live pod still fires; without
 that zero-fill the counter would simply staleness-expire and the rule would
 return no data and stay silent. It is replica-gated, so a dead process is
@@ -1632,8 +1649,18 @@ block (~12s on mainnet) and counts every one, touched pools or not, so this is
 never a quiet market.
 
 Because the zero-fill comes from kube-state-metrics, which knows nothing about
-chains, this rule aggregates by `cluster` only — unlike the rest of the group it
-carries no `chain` label.
+chains, this rule *aggregates* by `cluster` only — but it still *carries* a
+`chain` label: `chain: mainnet` is re-added as a static rule label, and the rate
+is pinned to `chain="mainnet"` so a second chain's Deployment cannot mask this
+one's stall. Aggregating without `chain` and carrying no `chain` are different
+things. This is not the odd one out either: it is one of the group's two
+kube-state-keyed rules, and
+[`VectorUniswapV4IndexerDown`](#vectoruniswapv4indexerdown) is built the same way
+(`max by (cluster)` plus a static `chain: mainnet`). The five metric-keyed rules
+in the group — ErrorsHigh, BlockLatencyHigh, NotWritingState, NoPoolsTouched,
+PoolNeverIndexed — derive `chain` from the series instead. A second chain gets
+its own copy of this pair, with its own deployment name and its own static
+chain.
 
 ### First checks (<=5 min)
 
@@ -1675,8 +1702,10 @@ A startup registry refusal is **not** in this list: it kills the pod, so it fire
 
 ### Verify recovery
 
-`sum by (cluster) (rate(uniswap_v4_blocks_processed_total{status="success"}[5m])) > 0`
-in the affected cluster.
+`sum by (cluster) (rate(uniswap_v4_blocks_processed_total{status="success", chain="mainnet"}[5m])) > 0`
+in the affected cluster. Keep the `chain` pin: without it the sum adds up every
+chain's rate, and once a second Deployment exists one chain's stall would never
+reach zero.
 
 ---
 
@@ -1870,8 +1899,8 @@ Gated on `uniswap_v4_pools_touched_total{snapshot_supported="true"}`, not on
 blocks processed. uniswap-v4 runs `SnapshotTracker(0)` — no sweep — so it writes
 state rows only for pools a PoolManager log touched in that block, and a quiet
 market legitimately writes nothing. The gate means a quiet window can no longer
-fire this alert: it fires only when pools WERE touched and rows still did not
-come out.
+fire this alert: it fires only when pools WERE touched and the worker still
+queued no state rows at all.
 
 The `snapshot_supported="true"` selector matters. `handleBlock` splits the
 touched set by the registry's `snapshot_supported` flag and records both halves
@@ -1889,46 +1918,59 @@ is the other half and covers that class. Neither alone is the whole guard.
 ### What it means
 
 Decoded PoolManager events touched registered, snapshot-supported PoolIds
-(`uniswap_v4_pools_touched_total{snapshot_supported="true"}` is non-zero) but no
-pool-state snapshot rows were written for 30 minutes.
-`uniswap_v4_state_rows_written_total` counts `uniswap_v4_pool_state` inserts
-only — never `uniswap_v4_tick` rows — so this alert is about the state snapshot,
-not the tick writer.
+(`uniswap_v4_pools_touched_total{snapshot_supported="true"}` is non-zero) but the
+worker queued no pool-state snapshot rows for 30 minutes.
+`uniswap_v4_state_rows_attempted_total` counts the `uniswap_v4_pool_state`
+INSERTs a block queued — never `uniswap_v4_tick` rows — so this alert is about
+the state snapshot, not the tick writer.
 
-The error path will NOT catch this: `snapshotDueSet` silently no-opping, or
-every state `INSERT` hitting `ON CONFLICT DO NOTHING`, produces no error — just
-no rows. `DueSet` is *not* one of those silent paths: a touched pool it cannot
+The rule keys on *attempted*, not on `uniswap_v4_state_rows_written_total`, and
+the two differ on an idempotent replay: re-processing an already-committed range
+under one `build_id` makes the `assign_processing_version` trigger reuse the
+existing `processing_version`, so every INSERT lands on the identical primary key
+`(pool_id, block_timestamp, block_number, block_version, processing_version)`,
+hits `ON CONFLICT DO NOTHING` and appends nothing. That is a healthy worker with
+nothing to fix, and it can no longer fire this alert. A conflict under that key
+means the identical row is already in the table, so zero *written* is provably
+not a data hole; zero *attempted* is a different claim entirely — the rows were
+never produced at all.
+
+The error path will NOT catch that: `snapshotDueSet` silently no-opping, or
+`buildBlockWrites` dropping the states, produces no error — just nothing to
+insert. `DueSet` is *not* one of those silent paths: a touched pool it cannot
 resolve in the registry, or one whose `deploy_block` is above the block being
 processed, is a hard error that fails the block.
 
 Because pools are being touched, **a quiet market is already ruled out** — this
-is not the "no Uniswap V4 activity" case. Something between decode and persist
-is dropping the rows.
+is not the "no Uniswap V4 activity" case. Something between decode and the
+INSERT is dropping the rows.
+
+`uniswap_v4_state_rows_written_total` is still exported, as volume
+observability ("how many rows did this worker actually add"). It is simply not
+the health signal.
 
 This is the data-quality / silent-empty check that `VectorUniswapV4IndexerStalled`
 cannot see.
 
 ### First checks
 
-1. **SQS replay / redrive** — the most common benign cause (see below). Check
-   the queue for a redrive before assuming a logic stall.
-2. **Snapshot path** — `pools.touched` is recorded from `handleBlock`'s
+1. **Snapshot path** — `pools.touched` is recorded from `handleBlock`'s
    decode-stage `touchedIDs`, upstream of `DueSet`, split by `snapshot_supported`
    and labelled with it, so a non-zero `snapshot_supported="true"` gate with zero
-   state rows points at everything after it: `snapshotDueSet` no-opping,
-   `buildBlockWrites` dropping the states, or the insert conflicting away. To see
-   the split for yourself:
+   attempted state rows points at everything after it: `snapshotDueSet`
+   no-opping, or `buildBlockWrites` dropping the states. To see the split for
+   yourself:
    `sum by (chain, snapshot_supported) (rate(uniswap_v4_pools_touched_total[30m]))`.
-3. **Not the deploy gate** — a `deploy_block` seeded above the blocks being
+2. **Not the deploy gate** — a `deploy_block` seeded above the blocks being
    processed cannot cause this alert. `DueSet` hard-errors on that pool
    (`... touched at block B but registry deploy block is D: registry bug`), the
    block fails, and the symptom is
    [`VectorUniswapV4IndexerErrorsHigh`](#vectoruniswapv4indexererrorshigh) or
    [`VectorUniswapV4IndexerStalled`](#vectoruniswapv4indexerstalled). Rule it
    out there, not here.
-4. **Latest state rows** — confirm directly whether anything is landing:
+3. **Latest state rows** — confirm directly whether anything is landing:
    `SELECT pool_id, max(block_number) FROM uniswap_v4_pool_state GROUP BY 1;`
-5. **Not an empty registry** — a chain with no `uniswap_v4_pool` rows never
+4. **Not an empty registry** — a chain with no `uniswap_v4_pool` rows never
    boots (`uniswapV4Factory` errors with `no uniswap v4 pools registered for
    chain N`), and a registry that loads but matches nothing produces no touches,
    which zeroes this alert's own gate. Either way the symptom is `Stalled` or
@@ -1937,13 +1979,6 @@ cannot see.
 
 ### Common causes
 
-- Sustained SQS replay / redrive over an already-indexed range under one
-  `build_id`: every message is a block already persisted at this build (same
-  `build_id`, same `block_version`), so each state INSERT hits `ON CONFLICT DO
-  NOTHING` (0 rows) and `uniswap_v4_state_rows_written_total` does not advance
-  even though processing succeeds — while `pools_touched` keeps advancing,
-  since the blocks really do touch pools. A redeploy (new `build_id`) or reorg
-  (new `block_version`) inserts fresh rows and clears the alert.
 - A regression between the due set and the insert -> `snapshotDueSet` returning
   no states for a non-empty due set, or `buildBlockWrites` dropping them. This
   is the bug class the alert exists to catch. `DueSet` itself is not a
@@ -1951,6 +1986,11 @@ cannot see.
 - Mis-seeded pool key in the registry -> note this suppresses touches too, so it
   shows up as a flat-zero `pools_touched` and fires the *other* alert, not this
   one.
+- **Not** an idempotent replay of an already-indexed range under one `build_id`.
+  The rows still get queued, so `state_rows_attempted` keeps advancing and the
+  rule stays silent; only `state_rows_written` goes flat. If you are here
+  because *written* is flat, that is expected during a replay and needs no
+  action.
 - **Not** a pool the registry excludes from snapshots
   (`uniswap_v4_pool.snapshot_supported = false`). Its touches are recorded under
   `snapshot_supported="false"`, which this alert's gate does not select, so a
@@ -1961,12 +2001,15 @@ cannot see.
 
 ### Verify recovery
 
-`rate(uniswap_v4_state_rows_written_total[30m]) > 0` for the affected chain.
+`rate(uniswap_v4_state_rows_attempted_total[30m]) > 0` for the affected chain —
+the same series the rule keys on. `rate(uniswap_v4_state_rows_written_total[30m])`
+is the volume check alongside it, and legitimately stays at zero while the
+worker is replaying an already-indexed range.
 
 A quiet market no longer needs ruling out — if no pools are being touched the
 alert cannot fire. To sanity-check overall liveness during a lull, confirm
-`rate(uniswap_v4_blocks_processed_total{status="success"}[5m]) > 0`
-(`VectorUniswapV4IndexerStalled` covers this).
+`rate(uniswap_v4_blocks_processed_total{status="success"}[5m]) > 0` for that
+chain (`VectorUniswapV4IndexerStalled` covers this).
 
 ---
 

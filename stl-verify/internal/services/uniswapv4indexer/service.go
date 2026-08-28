@@ -284,9 +284,12 @@ func (s *UniswapV4Service) handleBlock(ctx context.Context, event outbound.Block
 	s.markSnapshotted(dueSet, baselined, coords.number, coords.version)
 	s.markIndexed(ctx, dueSet)
 	// Recorded only after a successful commit, so the alerts compare pools this
-	// block touched against the rows that same block persisted.
+	// block touched against the state rows that same block queued. Attempted is
+	// what VectorUniswapV4IndexerNotWritingState keys on — persisted goes to
+	// zero on a healthy replay; written stays as volume observability.
 	s.recordPoolsTouched(ctx, acc.touchedIDs)
-	s.telemetry.RecordStateRows(ctx, int(stateRows))
+	s.telemetry.RecordStateRowsAttempted(ctx, int(stateRows.Attempted))
+	s.telemetry.RecordStateRows(ctx, int(stateRows.Persisted))
 	return nil
 }
 
@@ -572,16 +575,24 @@ func (s *UniswapV4Service) buildBlockWrites(acc blockAccumulators, states []*ent
 	return writes, dexconsumer.ToProtocolEventInputs(acc.captured, s.chainID, bn, ver, ts)
 }
 
-// persistBlock returns the number of state rows actually inserted, which is
-// zero on an idempotent ON CONFLICT DO NOTHING replay.
-func (s *UniswapV4Service) persistBlock(ctx context.Context, writes outbound.UniswapV4BlockWrites, capturedIns []dexconsumer.ProtocolEventInput, bn int64) (int64, error) {
-	return dexconsumer.PersistBlock(ctx, s.txMgr, s.eventWriter, func(ctx context.Context, tx pgx.Tx) (int64, error) {
+// persistBlock returns how the block's state rows fared: how many were queued,
+// and how many actually appended (zero on an idempotent ON CONFLICT DO NOTHING
+// replay). dexconsumer.PersistBlock only carries the persisted count back, so
+// the attempted count rides out on the closure.
+func (s *UniswapV4Service) persistBlock(ctx context.Context, writes outbound.UniswapV4BlockWrites, capturedIns []dexconsumer.ProtocolEventInput, bn int64) (outbound.UniswapStateRowCounts, error) {
+	var attempted int64
+	persisted, err := dexconsumer.PersistBlock(ctx, s.txMgr, s.eventWriter, func(ctx context.Context, tx pgx.Tx) (int64, error) {
 		rows, err := s.repo.SaveBlock(ctx, tx, writes)
 		if err != nil {
 			return 0, fmt.Errorf("persisting uniswap v4 block %d: %w", bn, err)
 		}
-		return rows, nil
+		attempted = rows.Attempted
+		return rows.Persisted, nil
 	}, capturedIns, bn)
+	if err != nil {
+		return outbound.UniswapStateRowCounts{}, err
+	}
+	return outbound.UniswapStateRowCounts{Attempted: attempted, Persisted: persisted}, nil
 }
 
 // markSnapshotted records the tracker and baselineSeen bookkeeping AFTER a
