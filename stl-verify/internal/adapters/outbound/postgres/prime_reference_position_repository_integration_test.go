@@ -27,6 +27,7 @@ func referencePosition(primeID int64, syncedAt time.Time, buildID int) entity.Pr
 		TokenSymbol:        "spUSDS",
 		TokenName:          &name,
 		TokenAddress:       "0xc02ab1a5eaa8d1b114ef786d9bde108cd4364359",
+		WalletAddress:      "0x1111111111111111111111111111111111111111",
 		AssetsUSD:          "782710914.129541047405509005",
 		AllocatedAssetsUSD: &allocated,
 		IdleAssetsUSD:      &idle,
@@ -170,5 +171,36 @@ func TestPrimeReferencePositionRepositoryAppendsACorrectionForANewBuild(t *testi
 	}
 	if len(versions) != 2 || versions[0] != 0 || versions[1] != 1 {
 		t.Errorf("processing_versions = %v, want [0 1]", versions)
+	}
+}
+
+// wallet_address is a PK component alongside network and token_address:
+// grove legitimately reports the same token on the same network under two
+// proxy wallets with different balances, and a key regression collapsing to
+// (network, token_address) would still pass every single-row test above.
+func TestPrimeReferencePositionRepositoryKeepsSameTokenUnderTwoWalletsDistinct(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+
+	primeID := seedReferencePrime(t, ctx, pool, "grove-prp-two-wallets")
+	txm := newReferenceRepoTxm(t, pool)
+	repo := NewPrimeReferencePositionRepository(pool, nil)
+	syncedAt := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+
+	proxyOne := referencePosition(primeID, syncedAt, 1)
+	proxyTwo := referencePosition(primeID, syncedAt, 1)
+	proxyTwo.WalletAddress = "0x000000005ce4e5e4e5e4e5e4e5e4e5e4e5e4e5e4"
+
+	if err := savePositions(t, ctx, txm, repo, []entity.PrimeReferencePosition{proxyOne, proxyTwo}); err != nil {
+		t.Fatalf("SaveReferencePositions() = %v", err)
+	}
+
+	var rows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM prime_reference_position WHERE prime_id = $1`, primeID).Scan(&rows); err != nil {
+		t.Fatalf("counting: %v", err)
+	}
+	if rows != 2 {
+		t.Errorf("wrote %d rows for the same token under two proxy wallets, want 2", rows)
 	}
 }
