@@ -7,6 +7,7 @@ import type { paths } from '../generated/openapi-types';
 import type {
   AllocationActivityBucket,
   AllocationActivityEnvelope,
+  DataSourcesResponse,
   ExposureBucket,
   ExposureEnvelope,
   PrimeDebtBucket,
@@ -60,6 +61,12 @@ const CACHE = {
   series: { staleTime: MINUTE, gcTime: 30 * MINUTE },
   /** A daily upstream feed seeded by a one-shot backfill; see the lookback below. */
   referenceSeries: { staleTime: 6 * HOUR, gcTime: 24 * HOUR },
+  /** The drawer's own reads. The long `gcTime` is the point: re-opening a row is free. */
+  drawer: { staleTime: MINUTE, gcTime: 30 * MINUTE },
+  /** Token metadata is immutable once published. */
+  tokenMeta: { staleTime: HOUR, gcTime: 24 * HOUR },
+  /** A price is the one genuinely live figure here. */
+  tokenPrice: { staleTime: 30_000, gcTime: 5 * MINUTE },
 } as const;
 
 /** The window every bucketed series is fetched over. */
@@ -138,6 +145,9 @@ const selectTotalCapitalBuckets = (
 const selectExposureBuckets = (envelope: ExposureEnvelope): ExposureBucket[] =>
   sortByBucketStart(envelope.data as ExposureBucket[]);
 
+const selectDataSources = (response: DataSourcesResponse) =>
+  response.sources ?? [];
+
 const selectTokenSymbols = (tokens: TokensResponse): string[] =>
   Array.from(
     new Set(
@@ -163,6 +173,13 @@ export const primesQuery = () =>
   api.queryOptions('get', '/v1/primes', undefined, {
     ...CACHE.primes,
     meta: { logMessage: 'Failed to load primes' },
+  });
+
+export const dataSourcesQuery = () =>
+  api.queryOptions('get', '/v1/data-sources', undefined, {
+    ...CACHE.provenance,
+    select: selectDataSources,
+    meta: { logMessage: 'Failed to fetch data sources' },
   });
 
 export const provenanceAvailabilityQuery = () =>
@@ -368,6 +385,94 @@ export const exposureSeriesQuery = (primeId: string, window: SeriesWindow) =>
         logLevel: 'warn',
         logMessage: 'Exposure history unavailable; using current value',
       },
+    },
+  );
+
+export const riskBreakdownQuery = (
+  chainId: number,
+  tokenAddress: string,
+  primeId: string | null,
+) =>
+  api.queryOptions(
+    'get',
+    '/v1/risk/{chain_id}/{token_address}/breakdown',
+    {
+      params: {
+        path: { chain_id: chainId, token_address: tokenAddress },
+        query: primeId ? { prime_id: primeId } : undefined,
+      },
+    },
+    {
+      ...CACHE.drawer,
+      meta: { logMessage: 'Failed to load risk breakdown' },
+    },
+  );
+
+export const rrcQuery = (
+  chainId: number,
+  tokenAddress: string,
+  primeAddress: string,
+) =>
+  api.queryOptions(
+    'get',
+    '/v1/risk/rrc',
+    {
+      params: {
+        query: {
+          chain_id: chainId,
+          prime_id: primeAddress,
+          token_address: tokenAddress,
+        },
+      },
+    },
+    {
+      ...CACHE.drawer,
+      meta: { logMessage: 'Failed to load required risk capital (RRC)' },
+    },
+  );
+
+export const tokenQuery = (chainId: number, tokenAddress: string) =>
+  api.queryOptions(
+    'get',
+    '/v1/tokens/{chain_id}/{token_address}',
+    { params: { path: { chain_id: chainId, token_address: tokenAddress } } },
+    {
+      ...CACHE.tokenMeta,
+      meta: {
+        logLevel: 'warn',
+        logMessage: 'Token catalog metadata unavailable',
+      },
+    },
+  );
+
+export const tokenPriceQuery = (chainId: number, tokenAddress: string) =>
+  api.queryOptions(
+    'get',
+    '/v1/tokens/{chain_id}/{token_address}/price',
+    { params: { path: { chain_id: chainId, token_address: tokenAddress } } },
+    {
+      ...CACHE.tokenPrice,
+      meta: {
+        logLevel: 'warn',
+        logMessage: 'Token price metadata unavailable',
+      },
+    },
+  );
+
+export type TokenFilters = {
+  chain_id?: number;
+  symbol?: string;
+  limit?: number;
+};
+
+export const tokensQuery = (filters: TokenFilters) =>
+  api.queryOptions(
+    'get',
+    '/v1/tokens',
+    { params: { query: filters } },
+    {
+      ...CACHE.tokenList,
+      meta: { logLevel: 'warn', logMessage: 'Token catalogue unavailable' },
     },
   );
 

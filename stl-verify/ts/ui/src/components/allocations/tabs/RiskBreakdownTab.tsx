@@ -8,11 +8,11 @@ import {
   SkeletonStack,
   useDataTable,
 } from '@archon-research/design-system';
-import { useEffect, useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
 
-import { getRiskBreakdown, getToken, getTokenPrice } from '../../../lib/api';
 import {
   formatDateTime,
   formatDurationFromSeconds,
@@ -24,14 +24,16 @@ import {
   formatUsdValue,
   parseNumericValue,
 } from '../../../lib/dashboard';
-import { isAbortError, toErrorMessage } from '../../../lib/errors';
-import { logging } from '../../../lib/logging';
+import { toQueryErrorMessage } from '../../../lib/errors';
+import {
+  riskBreakdownQuery,
+  tokenPriceQuery,
+  tokenQuery,
+} from '../../../lib/queries';
 import type {
   Allocation,
   Prime,
   RiskBreakdown,
-  Token,
-  TokenPrice,
 } from '../../../types/allocation';
 import {
   ChainLogo,
@@ -51,6 +53,11 @@ type RiskBreakdownTabProps = {
 };
 
 type RiskItem = RiskBreakdown['items'][number];
+
+// Stand-ins for the path params of a query `enabled` has switched off. Neither
+// is a real chain or address: nothing ever requests them.
+const NO_CHAIN_ID = -1;
+const NO_ADDRESS = '';
 
 function RiskSymbolCell({
   chainId,
@@ -230,16 +237,17 @@ export function RiskBreakdownTab({
   selectedReceiptToken,
   selectedPrime,
 }: RiskBreakdownTabProps) {
-  const [breakdown, setBreakdown] = useState<RiskBreakdown | null>(null);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
   const [isMethodologyOpen, setIsMethodologyOpen] = useState(false);
-  const [tokenCatalog, setTokenCatalog] = useState<Token | null>(null);
-  const [tokenPrice, setTokenPrice] = useState<TokenPrice | null>(null);
-  const [isTokenMetaLoading, setIsTokenMetaLoading] = useState(false);
 
   const receiptTokenId = selectedReceiptToken?.receipt_token_id ?? null;
   const primeId = selectedPrime?.id ?? null;
+  // A null chain is a position STL does not index, so there is no
+  // (chain, receipt token) pair to ask about.
+  const chainId = selectedReceiptToken?.chain_id ?? null;
+  const receiptTokenAddress =
+    selectedReceiptToken?.receipt_token_address ?? null;
+  const underlyingAddress =
+    selectedReceiptToken?.underlying_token_address ?? null;
   // The breakdown scales to the given prime_id's pro-rata pool share on the
   // allocation's own chain_id, so it only resolves for the chain
   // selectedPrime actually holds a position on — the prime's primary proxy's
@@ -251,130 +259,47 @@ export function RiskBreakdownTab({
     selectedPrime !== null &&
     selectedReceiptToken.chain_id !== selectedPrime.chain_id;
 
-  useEffect(() => {
-    const receiptTokenAddress = selectedReceiptToken?.receipt_token_address;
-    // A null chain is a position STL does not index, so there is no
-    // (chain, receipt token) pair to ask about.
-    const chainId = selectedReceiptToken?.chain_id ?? null;
-    if (
-      !isEnabled ||
-      !selectedReceiptToken ||
-      chainId === null ||
-      receiptTokenId === null ||
-      !receiptTokenAddress ||
-      isChainMismatch
-    ) {
-      setBreakdown(null);
-      setErrorMessage(null);
-      setIsLoading(false);
-      return;
-    }
+  const canLoadBreakdown =
+    isEnabled &&
+    chainId !== null &&
+    receiptTokenId !== null &&
+    receiptTokenAddress !== null &&
+    !isChainMismatch;
 
-    const controller = new AbortController();
-
-    setIsLoading(true);
-    setErrorMessage(null);
-    setBreakdown(null);
-
-    void getRiskBreakdown(
-      chainId,
-      receiptTokenAddress,
+  const breakdownResult = useQuery({
+    ...riskBreakdownQuery(
+      chainId ?? NO_CHAIN_ID,
+      receiptTokenAddress ?? NO_ADDRESS,
       primeId,
-      controller.signal,
-    )
-      .then((response) => {
-        if (controller.signal.aborted) {
-          return;
-        }
-        setBreakdown(response);
-      })
-      .catch((error: unknown) => {
-        if (isAbortError(error)) {
-          return;
-        }
+    ),
+    enabled: canLoadBreakdown,
+  });
 
-        logging.error('Failed to load risk breakdown', {
-          error,
-          chainId: selectedReceiptToken.chain_id,
-          receiptTokenAddress,
-        });
-        setBreakdown(null);
-        setErrorMessage(toErrorMessage(error));
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) {
-          setIsLoading(false);
-        }
-      });
+  const breakdown = breakdownResult.data ?? null;
+  const isLoading = canLoadBreakdown && breakdownResult.isPending;
+  const errorMessage = toQueryErrorMessage(breakdownResult.error);
 
-    return () => controller.abort();
-  }, [
-    isChainMismatch,
-    isEnabled,
-    receiptTokenId,
-    primeId,
-    selectedReceiptToken,
-  ]);
+  // Catalogue metadata for the *underlying*, which the breakdown does not carry.
+  const canLoadTokenMeta =
+    isEnabled && chainId !== null && underlyingAddress !== null;
 
-  useEffect(() => {
-    if (!isEnabled || !selectedReceiptToken) {
-      setTokenCatalog(null);
-      setTokenPrice(null);
-      setIsTokenMetaLoading(false);
-      return;
-    }
+  const tokenCatalogResult = useQuery({
+    ...tokenQuery(chainId ?? NO_CHAIN_ID, underlyingAddress ?? NO_ADDRESS),
+    enabled: canLoadTokenMeta,
+  });
+  const tokenPriceResult = useQuery({
+    ...tokenPriceQuery(chainId ?? NO_CHAIN_ID, underlyingAddress ?? NO_ADDRESS),
+    enabled: canLoadTokenMeta,
+  });
 
-    const chainId = selectedReceiptToken.chain_id;
-    const underlyingAddress = selectedReceiptToken.underlying_token_address;
-    if (chainId === null || !underlyingAddress) {
-      setTokenCatalog(null);
-      setTokenPrice(null);
-      setIsTokenMetaLoading(false);
-      return;
-    }
-
-    const controller = new AbortController();
-    setIsTokenMetaLoading(true);
-
-    void Promise.allSettled([
-      getToken(chainId, underlyingAddress, controller.signal),
-      getTokenPrice(chainId, underlyingAddress, controller.signal),
-    ])
-      .then(([tokenResult, priceResult]) => {
-        if (controller.signal.aborted) {
-          return;
-        }
-
-        if (tokenResult.status === 'fulfilled') {
-          setTokenCatalog(tokenResult.value);
-        } else {
-          setTokenCatalog(null);
-          logging.warn('Token catalog metadata unavailable for risk summary', {
-            error: tokenResult.reason,
-            chainId,
-            underlyingAddress,
-          });
-        }
-
-        if (priceResult.status === 'fulfilled') {
-          setTokenPrice(priceResult.value);
-        } else {
-          setTokenPrice(null);
-          logging.warn('Token price metadata unavailable for risk summary', {
-            error: priceResult.reason,
-            chainId,
-            underlyingAddress,
-          });
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) {
-          setIsTokenMetaLoading(false);
-        }
-      });
-
-    return () => controller.abort();
-  }, [isEnabled, selectedReceiptToken]);
+  const tokenCatalog = tokenCatalogResult.data ?? null;
+  const tokenPrice = tokenPriceResult.data ?? null;
+  // One flag for both, because the summary reads them as a single block: a
+  // price beside a still-loading symbol reads as a price for another token.
+  // Either failing leaves its own value null, which the block already renders.
+  const isTokenMetaLoading =
+    canLoadTokenMeta &&
+    (tokenCatalogResult.isPending || tokenPriceResult.isPending);
 
   const totalUsd = useMemo(() => {
     if (!breakdown) {

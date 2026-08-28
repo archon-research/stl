@@ -13,13 +13,10 @@ export type DataSource = components['schemas']['DataSourceResponse'];
 /** Which provenance a response was answered from -- not a `/v1/data-sources` row. */
 export type Provenance = components['schemas']['Provenance'];
 export type AllocationCategory = components['schemas']['AllocationCategory'];
-export type Token = components['schemas']['TokenResponse'];
-export type TokenPrice = components['schemas']['TokenPriceResponse'];
 export type PrimeDebtSnapshot =
   components['schemas']['PrimeDebtSnapshotResponse'];
 
 export type RiskBreakdown = components['schemas']['RiskBreakdownResponse'];
-export type Rrc = components['schemas']['RrcEnvelope'];
 export type RrcResult = components['schemas']['RrcResult'];
 
 // Full envelope returned by the endpoint: { mode, window, data }.

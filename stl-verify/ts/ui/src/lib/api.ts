@@ -4,13 +4,7 @@ import type { components, paths } from '../generated/openapi-types';
 import type {
   AllocationActivityEnvelope,
   AllocationActivityResponse,
-  DataSourcesResponse,
   ProtocolEventsResponse,
-  RiskBreakdown,
-  Rrc,
-  Token,
-  TokenPrice,
-  TokensResponse,
   TxProtocolEventsResponse,
 } from '../types/allocation';
 import { logging } from './logging';
@@ -97,45 +91,6 @@ async function requestData<TData, TError>(
   return data;
 }
 
-export function getRiskBreakdown(
-  chainId: number,
-  tokenAddress: string,
-  primeId?: string | null,
-  signal?: AbortSignal,
-): Promise<RiskBreakdown> {
-  return requestData(
-    apiClient.GET('/v1/risk/{chain_id}/{token_address}/breakdown', {
-      params: {
-        path: { chain_id: chainId, token_address: tokenAddress },
-        query: primeId ? { prime_id: primeId } : undefined,
-      },
-      signal,
-    }),
-    'GET /v1/risk/{chain_id}/{token_address}/breakdown',
-  );
-}
-
-export function getRrc(
-  chainId: number,
-  tokenAddress: string,
-  primeAddress: string,
-  signal?: AbortSignal,
-): Promise<Rrc> {
-  return requestData(
-    apiClient.GET('/v1/risk/rrc', {
-      params: {
-        query: {
-          chain_id: chainId,
-          prime_id: primeAddress,
-          token_address: tokenAddress,
-        },
-      },
-      signal,
-    }),
-    'GET /v1/risk/rrc',
-  );
-}
-
 type AllocationActivityFilters = TimeSeriesFilters & {
   prime_id?: string;
   chain_id?: number;
@@ -175,15 +130,6 @@ async function getAllocationActivityEnvelope(
   return envelope as AllocationActivityEnvelope;
 }
 
-export function getDataSources(
-  signal?: AbortSignal,
-): Promise<DataSourcesResponse> {
-  return requestData(
-    apiClient.GET('/v1/data-sources', { signal }),
-    'GET /v1/data-sources',
-  );
-}
-
 export async function getProtocolEvents(
   filters?: {
     tx_hash?: string;
@@ -216,60 +162,5 @@ export function getTxProtocolEvents(
       signal,
     }),
     'GET /v1/tx/{tx_hash}/events',
-  );
-}
-
-export function getTokens(
-  filters?: {
-    chain_id?: number;
-    symbol?: string;
-    limit?: number;
-  },
-  signal?: AbortSignal,
-): Promise<TokensResponse> {
-  return requestData(
-    apiClient.GET('/v1/tokens', {
-      params: { query: filters },
-      signal,
-    }),
-    'GET /v1/tokens',
-  );
-}
-
-export function getToken(
-  chainId: number,
-  tokenAddress: string,
-  signal?: AbortSignal,
-): Promise<Token> {
-  return requestData(
-    apiClient.GET('/v1/tokens/{chain_id}/{token_address}', {
-      params: {
-        path: {
-          chain_id: chainId,
-          token_address: tokenAddress,
-        },
-      },
-      signal,
-    }),
-    'GET /v1/tokens/{chain_id}/{token_address}',
-  );
-}
-
-export function getTokenPrice(
-  chainId: number,
-  tokenAddress: string,
-  signal?: AbortSignal,
-): Promise<TokenPrice> {
-  return requestData(
-    apiClient.GET('/v1/tokens/{chain_id}/{token_address}/price', {
-      params: {
-        path: {
-          chain_id: chainId,
-          token_address: tokenAddress,
-        },
-      },
-      signal,
-    }),
-    'GET /v1/tokens/{chain_id}/{token_address}/price',
   );
 }
