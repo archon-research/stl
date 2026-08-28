@@ -1,5 +1,8 @@
 -- Initial backfill of allocation_position_current, and the statement an operator
--- re-runs to converge it.
+-- re-runs to converge it. It runs as the migrator, which owns the cache, and that
+-- is the whole of its authority to write one: the cache's only two writers are its
+-- SECURITY DEFINER trigger and this statement, both the owner's, and stl_readwrite
+-- holds SELECT only (20260825_120000). An application role cannot run this.
 --
 -- Separate from 20260825_120000, which creates the table and the trigger, for the
 -- reason that file's header states and 20260819_150100 (VEC-409) established: the
@@ -16,7 +19,11 @@
 -- guard raises a cached row to a newer history row and never lowers or removes
 -- one, so it cannot repair a row that is AHEAD of history, nor one whose key has
 -- no history at all. A true rebuild is TRUNCATE then this statement, and TRUNCATE
--- is owner-only — stl_readwrite holds no TRUNCATE grant.
+-- is owner-only — no login role holds any write grant here, TRUNCATE included.
+--
+-- Forward-only is enough for the recovery cases 20260825_120000's header names — a
+-- restore, a `session_replication_role = replica` load, any window with the trigger
+-- disabled — because all of them leave the cache BEHIND history, never ahead.
 --
 -- The ORDER BY is the trigger's newer-wins comparison spelled as a sort, term for
 -- term, so the row this picks is the row the trigger would have left: identity

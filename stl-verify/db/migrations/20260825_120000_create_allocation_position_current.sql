@@ -1,8 +1,41 @@
 -- allocation_position_current: the newest allocation_position row per
 -- (proxy_address, chain_id, token_id). Fifth table of the set created by
--- 20260820_120000_create_current_position_tables.sql, same recipe and same
--- rationale — read that file's header for the design, the relationship to the
--- append-only rule, and the rebuild procedure; all of it applies verbatim here.
+-- 20260820_120000_create_current_position_tables.sql — read that file's header for
+-- the design and the sizing rationale. It differs from those four in one respect,
+-- and that respect is the two sections below: its write path is closed.
+--
+-- RELATIONSHIP TO THE APPEND-ONLY RULE (db/migrations/AGENTS.md). This table is a
+-- derived cache of the newest-row query over append-only history: the history stays
+-- untouched, nothing here is a source of truth, every row is reproducible from it,
+-- and it is never read as a history — there is no "as of block N" answer in it. So
+-- it does take `ON CONFLICT … DO UPDATE`. What it does not take is an update
+-- CHANNEL for callers. Exactly two paths write it:
+--   1. upsert_allocation_position_current(), the AFTER INSERT trigger below, which
+--      is SECURITY DEFINER and so writes under the table owner's privileges; and
+--   2. the migrator's backfill, 20260825_120100, which runs as that same owner.
+-- No login role holds a write grant. stl_readwrite gets SELECT and nothing else,
+-- and the REVOKE below is what makes that true: 20260122_140100's ALTER DEFAULT
+-- PRIVILEGES hands stl_readwrite SELECT, INSERT, UPDATE and DELETE on every
+-- migrator-owned table at creation, so a grant this file omits arrives anyway.
+--
+-- The sanctioned update channel is therefore a FUNCTION, not a role privilege. That
+-- is what makes "the cache is a function of history" structural rather than a
+-- convention: a stray UPDATE in an adapter fails at runtime with SQLSTATE 42501
+-- instead of forking the cache from history, and no scheduled reconciliation job is
+-- needed to catch a write nobody can make.
+-- TestTriggerOnlyCachesGrantTheAppRoleNoWrite and
+-- TestAllocationPositionCurrentIsWrittenOnlyByItsTrigger (db/migrator) hold the two
+-- halves — the grants, and the trigger path still working without them.
+--
+-- RECOVERY. The trigger is the only live writer, so any period in which it did not
+-- fire leaves the cache behind history: a restore from a dump, a load under
+-- `session_replication_role = replica` (which suppresses ordinary triggers), or a
+-- window with the trigger explicitly disabled. After any of those, re-run
+-- 20260825_120100 as the owner. It is an idempotent FORWARD-ONLY merge — it raises
+-- a cached row to a newer history row and never lowers or removes one — so it
+-- repairs a cache that is BEHIND, with ingest running, at any time. A cache holding
+-- rows AHEAD of history, or keys history no longer has, needs TRUNCATE first, which
+-- is owner-only (ALTER DEFAULT PRIVILEGES never grants TRUNCATE).
 --
 -- Why this key needs one: the receipt-position reads select the newest row per
 -- receipt token for one ALM proxy. proxy_address is not the partition column, so
@@ -111,12 +144,32 @@ COMMENT ON COLUMN allocation_position_current.processing_version IS 'Derived. Co
 COMMENT ON COLUMN allocation_position_current.created_at IS 'Audit. When the content of this row was written — the first insert or the latest overwrite by a newer history row (there is only ever one row per key, so an overwrite is the creation of the current row). Not block time (see block_timestamp). max(created_at) per proxy is the cache''s staleness signal.';
 
 GRANT SELECT ON allocation_position_current TO stl_readonly;
-GRANT SELECT, INSERT, UPDATE ON allocation_position_current TO stl_readwrite;
+
+-- SELECT only for the application role: the trigger below and 20260825_120100 both
+-- write as the owner, so no caller needs a write grant, and holding none is what
+-- closes the write path (see this file's header). The REVOKE is the operative
+-- statement, not a formality — 20260122_140100 sets `ALTER DEFAULT PRIVILEGES IN
+-- SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO stl_readwrite`,
+-- so this table arrives with full DML whatever this file grants, and only an
+-- explicit REVOKE takes it back. Unguarded, like the GRANTs above and for the same
+-- reason: 20260122_140100 creates stl_readwrite unconditionally. TRUNCATE needs no
+-- revoke — ALTER DEFAULT PRIVILEGES never grants it. Nothing is revoked from the
+-- OWNER: the owner is the writer.
+GRANT SELECT ON allocation_position_current TO stl_readwrite;
+REVOKE INSERT, UPDATE, DELETE ON allocation_position_current FROM stl_readwrite;
 
 -- AFTER INSERT, not BEFORE: trigger_assign_processing_version assigns
 -- processing_version in a BEFORE trigger, and this upsert must see the final value.
+--
+-- SECURITY DEFINER, so the upsert runs under the owner's privileges: the role that
+-- appends to allocation_position holds no write grant on the cache, and without
+-- this every ingest INSERT would fail at the AFTER trigger. search_path is pinned
+-- to the same fixed value as the transformed-layer enqueue triggers
+-- (20260706_140000) — mandatory on a SECURITY DEFINER function, so a caller's
+-- search_path cannot bind these unqualified names to objects of its own.
 CREATE OR REPLACE FUNCTION upsert_allocation_position_current()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
 BEGIN
     INSERT INTO allocation_position_current AS cur
         (proxy_address, chain_id, token_id, balance, underlying_value, underlying_token_id,
@@ -145,7 +198,7 @@ BEGIN
            cur.log_index, cur.direction, cur.tx_hash, cur.processing_version);
     RETURN NULL;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
 CREATE TRIGGER trigger_upsert_allocation_position_current
     AFTER INSERT ON allocation_position
