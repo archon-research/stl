@@ -1477,7 +1477,7 @@
     "prime_reference_position": {
       "type": "raw_pipeline",
       "owner": "prime",
-      "transform_defer": "native PK (prime_id, synced_at, network, token_address); transform deferred pending the reference-data rollout"
+      "transform_defer": "native PK (prime_id, synced_at, network, token_address, wallet_address); transform deferred pending the reference-data rollout"
     },
     "protocol": {
       "type": "dimension",

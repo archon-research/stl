@@ -9,6 +9,17 @@
 -- creating migration 20260826_121000 has never had a successful cycle land),
 -- so this ALTER carries no backfill.
 
+-- Prove the emptiness this migration assumes rather than trusting it: the feed
+-- publishes no history, so a populated table would have no wallet_address to
+-- backfill existing rows with, and minting '' identities for them would be
+-- silently wrong rather than loudly refused.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM prime_reference_position) THEN
+        RAISE EXCEPTION 'prime_reference_position has rows; wallet_address backfill is impossible because the feed publishes no history. Aborting rather than minting empty-string identities for existing rows.';
+    END IF;
+END $$;
+
 -- A columnstore-enabled hypertable refuses ADD COLUMN ... NOT NULL with no
 -- DEFAULT outright (SQLSTATE 0A000), even on an empty table. The table has no
 -- rows to backfill, so the default is dropped immediately after: every future
@@ -69,9 +80,9 @@ $$ LANGUAGE plpgsql SET plan_cache_mode = 'force_custom_plan';
 -- Catalogue metadata (COMMENT ON), consistent with 20260609 add_schema_comments.
 -- ============================================================================
 COMMENT ON TABLE prime_reference_position IS
-  '[Hypertable] Per-cycle snapshot of a prime''s balance-sheet positions as reported by Sky''s internal feed, partitioned on synced_at. Reference data, not STL''s own indexing. Position-level counterpart of prime_reference_balance_sheet''s daily aggregates, and a different question from prime_capital_stack_allocation (balance sheet vs risk-capital breakdown). The feed publishes no history, so rows can only be accumulated forward, never backfilled. Identity fields are upstream''s claims verbatim, not registry FKs -- registry resolution happens at read time. Row identity is (prime, cycle, network, token_address, wallet_address): the same token address legitimately recurs under a prime''s different proxy wallets (verified live on grove, whose Uni V3 LP position is split across two proxies at materially different balances), so wallet_address is part of the PK, not incidental data.';
+  '[Hypertable] Per-cycle snapshot of a prime''s balance-sheet positions as reported by Sky''s internal feed, partitioned on synced_at. Reference data, not STL''s own indexing. Position-level counterpart of prime_reference_balance_sheet''s daily aggregates, and a different question from prime_capital_stack_allocation (balance sheet vs risk-capital breakdown). The feed publishes no history, so rows can only be accumulated forward, never backfilled. Identity fields are upstream''s claims verbatim, not registry FKs -- registry resolution happens at read time. Row identity is (prime, cycle, network, token_address, wallet_address): a token address legitimately recurs under a prime''s different proxy wallets, so wallet_address is part of the PK, not incidental data.';
 
-COMMENT ON COLUMN prime_reference_position.wallet_address IS 'Upstream wallet_address: which of the prime''s proxy wallets holds the position, as upstream reports it. Part of PK -- the same token address can appear under multiple proxies for one prime (verified live on grove). allocation_type remains unrecorded, mirroring the serving layer''s decision.';
+COMMENT ON COLUMN prime_reference_position.wallet_address IS 'Upstream wallet_address: which of the prime''s proxy wallets holds the position, as upstream reports it. Part of PK -- the same token address can appear under multiple proxies for one prime. allocation_type remains unrecorded, mirroring the serving layer''s decision.';
 
 INSERT INTO migrations (filename)
 VALUES ('20260828_120000_add_wallet_address_to_prime_reference_position.sql')
