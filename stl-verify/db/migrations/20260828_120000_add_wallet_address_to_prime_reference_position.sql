@@ -20,15 +20,28 @@ BEGIN
     END IF;
 END $$;
 
--- A columnstore-enabled hypertable refuses ADD COLUMN ... NOT NULL with no
--- DEFAULT outright (SQLSTATE 0A000), even on an empty table. The table has no
--- rows to backfill, so the default is dropped immediately after: every future
--- insert supplies wallet_address explicitly, and none ever relies on it.
+-- Added nullable, with no NOT NULL and no DEFAULT.
+--
+-- Two separate TimescaleDB restrictions apply to this table, and satisfying the
+-- first is what tripped the second. A columnstore-enabled hypertable refuses
+-- ADD COLUMN ... NOT NULL with no DEFAULT (SQLSTATE 0A000), so the first cut of
+-- this migration supplied `NOT NULL DEFAULT ''`. But the table also carries a
+-- tiering policy (added by its creating migration 20260826_121000), and a
+-- tiered table refuses ADD COLUMN with a NOT NULL constraint at all -- default
+-- or not, empty or not:
+--
+--   ERROR: Adding column with NOT NULL constraint is blocked for tiered tables
+--          (SQLSTATE XX000)
+--
+-- which failed the staging migrate Job and every deploy behind it.
+--
+-- No column-level NOT NULL is needed: wallet_address joins the PRIMARY KEY
+-- below, and PK membership makes it NOT NULL. That is also the shape every
+-- other ADD COLUMN on these hypertables uses (20260819_100000, 20260702_120000
+-- -- all nullable). Dropping the placeholder default along with it removes the
+-- window in which a row could acquire an empty-string identity.
 ALTER TABLE prime_reference_position
-    ADD COLUMN wallet_address TEXT NOT NULL DEFAULT '';
-
-ALTER TABLE prime_reference_position
-    ALTER COLUMN wallet_address DROP DEFAULT;
+    ADD COLUMN wallet_address TEXT;
 
 ALTER TABLE prime_reference_position
     DROP CONSTRAINT prime_reference_position_pkey;
