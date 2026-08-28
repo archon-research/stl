@@ -8,7 +8,6 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, JSONResponse
-from prometheus_fastapi_instrumentator import Instrumentator
 from sqlalchemy import text
 
 from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
@@ -237,7 +236,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             try:
                 await engine.dispose()
             finally:
-                shutdown_telemetry(app.state.tracer_provider)
+                shutdown_telemetry(app.state.telemetry_providers)
 
     application = FastAPI(
         title="stl-verify",
@@ -252,7 +251,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
         openapi_tags=OPENAPI_TAGS,
     )
     application.add_middleware(RequestIdMiddleware)
-    application.state.tracer_provider = setup_telemetry(application, settings)
+    application.state.telemetry_providers = setup_telemetry(application, settings)
 
     @application.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -320,8 +319,6 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
 
     # FastAPI's documented openapi override pattern
     application.openapi = public_openapi  # ty: ignore[invalid-assignment]
-
-    Instrumentator().instrument(application).expose(application)
 
     configure_docs(application)
     configure_static_hosting(application, static_dir or DEFAULT_STATIC_DIR)
