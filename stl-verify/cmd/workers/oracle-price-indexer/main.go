@@ -242,6 +242,12 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating repository: %w", err)
 	}
 
+	referenceEffectiveAt, err := oracle_pricing.ResolveReferenceEffectiveAt(
+		os.Getenv(oracle_pricing.ReferenceEffectiveAtEnv), time.Now())
+	if err != nil {
+		return err
+	}
+
 	service, err := oracle_price_worker.NewService(
 		shared.SQSConsumerConfig{
 			Logger:  logger,
@@ -262,18 +268,12 @@ func run(ctx context.Context, args []string) error {
 			// mc is the telemetry-instrumented client built once at startup.
 			return archiveWrap(mc), nil
 		},
+		referenceEffectiveAt,
 	)
 	if err != nil {
 		return fmt.Errorf("creating service: %w", err)
 	}
 	service.WithTelemetry(oracleTelemetry)
-
-	referenceEffectiveAt, err := oracle_pricing.ResolveReferenceEffectiveAt(
-		os.Getenv(oracle_pricing.ReferenceEffectiveAtEnv), time.Now())
-	if err != nil {
-		return err
-	}
-	service.WithReferenceEffectiveAt(referenceEffectiveAt)
 
 	return lifecycle.Run(ctx, logger, service)
 }

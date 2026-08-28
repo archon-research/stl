@@ -13,7 +13,9 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
+from app.adapters.postgres.reference_as_of import utc_now
 from tests.integration.seed import (
+    ORACLE_ASSET_RETIRED_FROM,
     bind_protocol_oracle,
     insert_borrower_collateral,
     insert_borrower_debt,
@@ -49,7 +51,7 @@ async def repository(async_db_url: str) -> AsyncIterator[AaveLikeBackedBreakdown
     """The Aave-like backed breakdown repository under test."""
     engine = create_async_engine(async_db_url)
     try:
-        yield AaveLikeBackedBreakdownRepository(engine)
+        yield AaveLikeBackedBreakdownRepository(engine, utc_now)
     finally:
         await engine.dispose()
 
@@ -518,9 +520,13 @@ async def test_disabling_a_mapping_drops_the_price_at_read_time(
     }
 
     # Retiring a source is a configuration change on the mapping, not a rewrite
-    # of any price history.
+    # of any price history: oracle_asset is append-on-change, so the retirement is
+    # a new version (VEC-597) and UPDATE is revoked in production.
     await conn.execute(
-        "UPDATE oracle_asset SET enabled = false WHERE oracle_id = $1 AND token_id = $2", oracle_id, drop_id
+        "SELECT oracle_asset_set_enabled($1, $2, NULL, false, $3, 'test: source retired')",
+        oracle_id,
+        drop_id,
+        ORACLE_ASSET_RETIRED_FROM,
     )
     assert (
         await conn.fetchval(
@@ -574,8 +580,12 @@ async def test_disabling_a_mapping_falls_back_to_the_next_enabled_oracle(
     before = await repository.get_backed_breakdown(protocol_id, debt_id)
     assert {item.symbol: item.price_usd for item in before.items} == {"FALLBACKCOLL": Decimal("10")}
 
+    # Append-on-change: the retirement is a new oracle_asset version, not an UPDATE.
     await conn.execute(
-        "UPDATE oracle_asset SET enabled = false WHERE oracle_id = $1 AND token_id = $2", primary_oracle_id, coll_id
+        "SELECT oracle_asset_set_enabled($1, $2, NULL, false, $3, 'test: primary source retired')",
+        primary_oracle_id,
+        coll_id,
+        ORACLE_ASSET_RETIRED_FROM,
     )
 
     # Both rows are still cached; the read now picks the backup oracle's price.

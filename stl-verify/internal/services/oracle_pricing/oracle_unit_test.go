@@ -19,7 +19,7 @@ import (
 // Mock repo
 // ---------------------------------------------------------------------------
 
-// testReferenceEffectiveAt is the recorded reference effective date the unit tests pin
+// testReferenceEffectiveAt is the recorded reference effective instant the unit tests pin
 // their oracle_asset reads to; a fixed date, so no test depends on the wall clock.
 var testReferenceEffectiveAt = time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 
@@ -37,7 +37,7 @@ type mockRepo struct {
 	copyOracleAssetsFn             func(ctx context.Context, fromOracleID, toOracleID int64) error
 	getAllProtocolOracleBindingsFn func(ctx context.Context) ([]*entity.ProtocolOracle, error)
 
-	// referenceEffectiveAt records the date the last oracle_asset read was pinned to.
+	// referenceEffectiveAt records the instant the last oracle_asset read was pinned to.
 	referenceEffectiveAt time.Time
 }
 
@@ -120,10 +120,10 @@ func (m *mockRepo) GetAllProtocolOracleBindings(ctx context.Context) ([]*entity.
 // TestLoadOracleUnits
 // ---------------------------------------------------------------------------
 
-// TestLoadOracleUnitsPinsAssetReadsToTheRecordedDate is the reproducibility contract at
-// this seam (ADR-0006 §4): the run's recorded reference date reaches the oracle_asset
+// TestLoadOracleUnitsPinsAssetReadsToTheRecordedInstant is the reproducibility contract at
+// this seam (ADR-0006 §4): the run's recorded reference instant reaches the oracle_asset
 // read, so the units a replay builds do not depend on when it runs.
-func TestLoadOracleUnitsPinsAssetReadsToTheRecordedDate(t *testing.T) {
+func TestLoadOracleUnitsPinsAssetReadsToTheRecordedInstant(t *testing.T) {
 	repo := &mockRepo{
 		getEnabledOraclesByChainFn: func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
 			return []*entity.Oracle{{

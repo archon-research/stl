@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.adapters.postgres.prime_capital_stack_repository import PrimeCapitalStackRepository
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository
+from app.adapters.postgres.reference_as_of import ReferenceEffectiveAtProvider
 from app.adapters.sky.internal_positions_client import SkyInternalPositionsClient
 from app.adapters.sky.reference_risk_capital_client import SkyReferenceRiskCapitalClient
 from app.config import get_settings
@@ -21,6 +22,16 @@ from app.services.reference_risk_capital_service import ReferenceRiskCapitalServ
 def get_engine(request: Request) -> AsyncEngine:
     """Extract the shared SQLAlchemy engine from application state."""
     return request.app.state.engine
+
+
+def get_reference_as_of(request: Request) -> ReferenceEffectiveAtProvider:
+    """Extract the process-wide reference effective-instant provider (ADR-0006 §4).
+
+    Every repository that reads a converted reference table takes this, so one
+    setting pins the whole API rather than the subset of routes that remembered
+    to wire it. Resolved once at startup from `reference_effective_at`.
+    """
+    return request.app.state.reference_effective_at
 
 
 def get_suraf_ratings(request: Request) -> dict[str, SurafResult]:
@@ -62,7 +73,7 @@ def get_reference_risk_capital_service_factory(
         return ReferenceRiskCapitalService(
             SkyReferenceRiskCapitalClient(get_settings().star_risk_capital_base_url),
             ReceiptTokenRepository(request.app.state.engine),
-            AllocationRepository(request.app.state.engine),
+            AllocationRepository(request.app.state.engine, request.app.state.reference_effective_at),
         )
 
     return build
@@ -84,7 +95,7 @@ def get_reference_positions_service_factory(
             SkyInternalPositionsClient(settings.sky_internal_base_url),
             SkyReferenceRiskCapitalClient(settings.star_risk_capital_base_url),
             ReceiptTokenRepository(request.app.state.engine),
-            AllocationRepository(request.app.state.engine),
+            AllocationRepository(request.app.state.engine, request.app.state.reference_effective_at),
         )
 
     return build

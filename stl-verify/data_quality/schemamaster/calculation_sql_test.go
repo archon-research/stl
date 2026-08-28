@@ -85,13 +85,74 @@ func TestCheckCalculationSQL(t *testing.T) {
 			wantKind: "unpinned_reference_read",
 		},
 		{
-			name:     "the wall clock as the effective date",
+			name:     "the wall clock as the effective instant",
 			body:     `SELECT 1 FROM oracle_asset_as_of(now()::date) oa`,
 			wantKind: "wall_clock_effective_at",
 		},
 		{
-			name:     "CURRENT_DATE as the effective date",
+			name:     "CURRENT_DATE as the effective instant",
 			body:     `SELECT 1 FROM oracle_asset_as_of(CURRENT_DATE) oa`,
+			wantKind: "wall_clock_effective_at",
+		},
+		// The spellings a reintroduced unpinned read would plausibly take. Each of these
+		// is how the rule gets walked around if the matcher only knows the bare name.
+		{
+			name:     "a schema-qualified unpinned read",
+			body:     `SELECT 1 FROM public.oracle_asset oa WHERE oa.enabled`,
+			wantKind: "unpinned_reference_read",
+		},
+		{
+			name:     "a quoted unpinned read",
+			body:     `SELECT 1 FROM "oracle_asset" oa WHERE oa.enabled`,
+			wantKind: "unpinned_reference_read",
+		},
+		// Records a KNOWN GAP, not desired behaviour: a comma carries no clause context, so
+		// matching it also fires on `TRUNCATE a, b, c`. See unpinnedReads for why that
+		// trade was made; this case exists so the gap is visible rather than forgotten.
+		{
+			name: "a comma-joined FROM list is a known miss",
+			body: `SELECT 1 FROM token t, oracle_asset oa WHERE oa.token_id = t.id`,
+		},
+		{
+			name: "a table list in TRUNCATE is not a read",
+			body: `TRUNCATE oracle, token, oracle_asset CASCADE`,
+		},
+		{
+			name:     "an unpinned ONLY read",
+			body:     `SELECT 1 FROM ONLY oracle_asset oa WHERE oa.enabled`,
+			wantKind: "unpinned_reference_read",
+		},
+		// A comment marker inside a string literal must not truncate the line, or the
+		// read after it escapes every rule.
+		{
+			name:     "an unpinned read sharing a line with a URL literal",
+			body:     `SELECT 'https://sky.money' AS src FROM oracle_asset oa WHERE oa.enabled`,
+			wantKind: "unpinned_reference_read",
+		},
+		{
+			name:     "an unpinned read after a jsonb operator",
+			body:     `SELECT meta #>> '{k}' FROM oracle_asset oa WHERE oa.enabled`,
+			wantKind: "unpinned_reference_read",
+		},
+		// now()'s synonyms, which a substitution would reach for first.
+		{
+			name:     "transaction_timestamp as the effective instant",
+			body:     `SELECT 1 FROM oracle_asset_as_of(transaction_timestamp()) oa`,
+			wantKind: "wall_clock_effective_at",
+		},
+		{
+			name:     "clock_timestamp as the effective instant",
+			body:     `SELECT 1 FROM oracle_asset_as_of(clock_timestamp()) oa`,
+			wantKind: "wall_clock_effective_at",
+		},
+		{
+			name:     "statement_timestamp as the effective instant",
+			body:     `SELECT 1 FROM oracle_asset_as_of(statement_timestamp()) oa`,
+			wantKind: "wall_clock_effective_at",
+		},
+		{
+			name:     "CURRENT_TIME as the effective instant",
+			body:     `SELECT 1 FROM oracle_asset_as_of(CURRENT_TIME) oa`,
 			wantKind: "wall_clock_effective_at",
 		},
 	} {
@@ -179,7 +240,17 @@ func TestApplicationSQLPinsReferenceReads(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 
-	_, thisFile, _, _ := runtime.Caller(0)
+	// An empty ReferenceReads makes CheckCalculationSQL a no-op for every input, and the
+	// per-reference guard below iterates it too — so a mistyped JSON key would take the
+	// whole gate green rather than failing. Assert the register is populated first.
+	if len(reg.ReferenceReads) == 0 {
+		t.Fatal("register has no reference_reads — the lint would pass while checking nothing")
+	}
+
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller: cannot locate this file, so the scan roots cannot be resolved")
+	}
 	serviceRoot := filepath.Join(filepath.Dir(thisFile), "..", "..")
 	sources, err := LoadSQLSources(
 		filepath.Join(serviceRoot, "internal", "adapters", "outbound", "postgres"),

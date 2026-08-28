@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -67,3 +68,48 @@ class TestAllocationShareStaleness:
     def test_overridable(self):
         settings = Settings.model_validate({"allocation_share_max_stale_seconds": 600})
         assert settings.allocation_share_max_stale_seconds == 600
+
+
+class TestReferenceEffectiveAt:
+    """The reference instant must reject anything Go's resolver would reject.
+
+    A value that parses to an unintended instant is worse than one that fails:
+    an instant before every oracle_asset.valid_from makes oracle_asset_as_of
+    return no rows, and the priced reads then report zeros and 404s rather
+    than erroring (ADR-0006 §4).
+    """
+
+    def test_unset_means_now(self):
+        assert Settings.model_validate({}).resolved_reference_effective_at() is None
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("2026-06-01", datetime(2026, 6, 1, tzinfo=UTC)),
+            ("2026-06-01T02:30:00Z", datetime(2026, 6, 1, 2, 30, tzinfo=UTC)),
+            # A non-UTC offset is normalised, not truncated.
+            ("2026-06-01T02:30:00+02:00", datetime(2026, 6, 1, 0, 30, tzinfo=UTC)),
+        ],
+    )
+    def test_accepts_rfc3339_and_bare_dates(self, raw, expected):
+        settings = Settings.model_validate({"reference_effective_at": raw})
+        assert settings.resolved_reference_effective_at() == expected
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            # Bare numerics: pydantic would read these as Unix timestamps, putting
+            # `2026` at 1970-01-01T00:33:46Z and `20260601` at 1970-08-23.
+            "2026",
+            "20260601",
+            "1700000000",
+            "0",
+            # No offset: silently reading an operator's local wall clock as UTC
+            # resolves the wrong reference version.
+            "2026-06-01T02:30:00",
+            "not-a-date",
+        ],
+    )
+    def test_rejects_values_that_would_resolve_to_an_unintended_instant(self, raw):
+        with pytest.raises(ValidationError):
+            Settings.model_validate({"reference_effective_at": raw})

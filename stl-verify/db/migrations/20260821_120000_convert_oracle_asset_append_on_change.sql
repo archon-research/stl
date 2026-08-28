@@ -38,6 +38,14 @@ ALTER TABLE oracle_asset DROP CONSTRAINT IF EXISTS oracle_asset_change_reason_ch
 ALTER TABLE oracle_asset ADD CONSTRAINT oracle_asset_change_reason_chk CHECK (btrim(change_reason) <> '');
 
 -- feed_key is the NULL-free form of feed_address, so one key covers both oracle shapes.
+-- The fold is only injective while an empty feed_address is unrepresentable: '\x' would
+-- otherwise share a feed_key with the NULL-feed row for the same (oracle_id, token_id), so
+-- oracle_asset_set_enabled would resolve and toggle a different logical asset than the
+-- caller named. An address is 20 bytes; anything else was never a real feed.
+ALTER TABLE oracle_asset DROP CONSTRAINT IF EXISTS oracle_asset_feed_address_len_chk;
+ALTER TABLE oracle_asset ADD CONSTRAINT oracle_asset_feed_address_len_chk
+  CHECK (feed_address IS NULL OR octet_length(feed_address) = 20);
+
 ALTER TABLE oracle_asset ADD COLUMN IF NOT EXISTS feed_key bytea
   GENERATED ALWAYS AS (COALESCE(feed_address, '\x'::bytea)) STORED;
 
@@ -56,15 +64,15 @@ CREATE INDEX IF NOT EXISTS oracle_asset_version_lookup_idx
   ON oracle_asset (oracle_id, token_id, feed_key, valid_from DESC, processing_version DESC);
 
 COMMENT ON TABLE oracle_asset IS
-'[Configuration] Append-on-change map of which tokens an oracle prices (ADR-0006 §4). PK (oracle_id, token_id, feed_key, processing_version); `id` is a per-VERSION surrogate, never an asset identity. Every change — enabled included — is a new row via oracle_asset_set_enabled(); UPDATE/DELETE are revoked. Calculation and writer SQL read oracle_asset_as_of(effective_at) with a recorded effective_at; oracle_asset_current is for operational reads only. A plain table, not a hypertable: governance rows, on the order of a few per month.';
+'[Configuration] Append-on-change map of which tokens an oracle prices (ADR-0006 §4). PK (oracle_id, token_id, feed_key, processing_version); `id` is a per-VERSION surrogate, never an asset identity. UPDATE/DELETE are revoked, so every change is a new row: use oracle_asset_set_enabled() to toggle `enabled`, and an explicit INSERT carrying the next processing_version for a feed_decimals/quote_currency correction (there is no writer function for those). Calculation and writer SQL read oracle_asset_as_of(effective_at) with a recorded effective_at; oracle_asset_current is for operational reads only. A plain table, not a hypertable: governance rows, on the order of a few per month.';
 COMMENT ON COLUMN oracle_asset.processing_version IS
 'PK. Version of this (oracle_id, token_id, feed_key); monotonic from 0, assigned by oracle_asset_set_enabled under an advisory lock.';
 COMMENT ON COLUMN oracle_asset.feed_key IS
 'PK. Derived: feed_address with NULL folded to an empty bytea, so the natural key is NULL-free and one key covers feed and non-feed oracles. Never written directly.';
 COMMENT ON COLUMN oracle_asset.valid_from IS
-'Instant this version became effective; the only temporal field stored (timestamptz, so it cannot shift with a session TimeZone). valid_to is derived in oracle_asset_versions. Reads resolve a version with valid_from <= effective_at.';
+'Audit. Instant this version became effective; the only temporal field stored (timestamptz, so it cannot shift with a session TimeZone). valid_to is derived in oracle_asset_versions. Reads resolve a version with valid_from <= effective_at.';
 COMMENT ON COLUMN oracle_asset.change_reason IS
-'Mandatory: why this version exists. Rows predating VEC-597 say so explicitly.';
+'Audit. Mandatory: why this version exists. Rows predating VEC-597 say so explicitly.';
 COMMENT ON COLUMN oracle_asset.id IS
 'Audit. BIGSERIAL surrogate, one per VERSION row; unique but not the key. NOT an asset identity and not stable across versions — resolve by (oracle_id, token_id, feed_key).';
 
@@ -203,7 +211,9 @@ COMMENT ON FUNCTION oracle_asset_set_enabled(bigint, bigint, bytea, boolean, tim
 'Appends a new oracle_asset version toggling `enabled` (ADR-0006 §4). Compares against the version effective at p_effective_at. Returns the new processing_version, or NULL if unchanged. Advisory-locked on the natural key; raises on an unregistered key or an effective time before the first version.';
 
 -- Reads for both roles; append-only writes for the application role, and mutation revoked from
--- the owner too so a future migration cannot quietly rewrite history either. Safe to revoke the
+-- the owner too, which makes a history rewrite explicit and reviewable rather than impossible:
+-- the owner can re-grant itself, so a future migration needing to reshape this table must say
+-- so in one visible GRANT (and record the exception per db/migrations/AGENTS.md). Safe to revoke the
 -- owner's UPDATE here only because nothing FKs oracle_asset: no RI probe needs FOR KEY SHARE on
 -- it (the trap 20260714_160000 fixed for the reference layer). Guarded on role existence — unit
 -- test databases have no roles.

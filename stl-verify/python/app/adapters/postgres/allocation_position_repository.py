@@ -14,7 +14,7 @@ from app.adapters.postgres._time_window import (
     required_time_window_clause,
     time_bucket_expr,
 )
-from app.adapters.postgres.reference_as_of import ReferenceAsOf, ReferenceEffectiveAtProvider, utc_now
+from app.adapters.postgres.reference_as_of import ReferenceAsOf, ReferenceEffectiveAtProvider
 from app.domain.chain_names import MAINNET_CHAIN_ID, chain_name_for
 from app.domain.entities.allocation import (
     AnchorageCustodyHolding,
@@ -117,7 +117,7 @@ def _safe_decimal(value: Any, field_name: str, row_identifier: Any = None) -> De
 
 
 class AllocationRepository:
-    def __init__(self, engine: AsyncEngine, reference_effective_at: ReferenceEffectiveAtProvider = utc_now) -> None:
+    def __init__(self, engine: AsyncEngine, reference_effective_at: ReferenceEffectiveAtProvider) -> None:
         self._engine = engine
         self._reference = ReferenceAsOf(reference_effective_at)
 
@@ -1056,7 +1056,8 @@ class AllocationRepository:
                     WHERE otp.token_id = pk.underlying_token_id
                     -- enabled-mapping filter (rationale on _DIRECT_ASSET_HOLDINGS_SQL):
                     -- a retired source's tail must not serve any bucket after
-                    -- retirement (nor, given the no-history simplification, before).
+                    -- retirement (nor, given the one-instant-per-query tradeoff
+                    -- recorded there, before).
                       AND EXISTS (
                           SELECT 1 FROM oracle_asset_as_of(:reference_effective_at) oa
                           WHERE oa.oracle_id = otp.oracle_id
@@ -1305,6 +1306,12 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
         -- Read through oracle_asset_as_of, never the raw table (every version)
         -- or oracle_asset_current (wall-clock bounded) — ADR-0006 §4, enforced
         -- by the schemamaster lint.
+        -- Tradeoff, still live: ONE instant is bound per query, not one per
+        -- time_bucket, and unset reference_effective_at resolves it to now. So a
+        -- retired source still vanishes from historical/LOCF buckets that predate
+        -- its retirement. What the conversion bought is that a run CAN be pinned to
+        -- an earlier instant and see the mapping that applied then; per-bucket
+        -- temporal enablement remains out of scope.
           AND EXISTS (
               SELECT 1 FROM oracle_asset_as_of(:reference_effective_at) oa
               WHERE oa.oracle_id = otp.oracle_id

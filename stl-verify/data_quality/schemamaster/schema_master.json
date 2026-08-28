@@ -1182,7 +1182,7 @@
       "class": "S"
     },
     "valid_from": {
-      "type": "date",
+      "type": "timestamptz",
       "class": "A",
       "semantics": "effective_time"
     },

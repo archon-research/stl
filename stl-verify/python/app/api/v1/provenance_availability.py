@@ -14,7 +14,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
-from app.api.deps import get_engine, get_reference_risk_capital_service_factory
+from app.adapters.postgres.reference_as_of import ReferenceEffectiveAtProvider
+from app.api.deps import get_engine, get_reference_as_of, get_reference_risk_capital_service_factory
 from app.domain.exceptions import ReferenceDataUnavailableError
 from app.domain.provenance import Provenance
 from app.services.allocation_service import AllocationService
@@ -52,8 +53,11 @@ class ProvenanceAvailabilityResponse(BaseModel):
     )
 
 
-async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationService:
-    return AllocationService(AllocationRepository(engine))
+async def _get_service(
+    engine: AsyncEngine = Depends(get_engine),
+    reference_as_of: ReferenceEffectiveAtProvider = Depends(get_reference_as_of),
+) -> AllocationService:
+    return AllocationService(AllocationRepository(engine, reference_as_of))
 
 
 @router.get(

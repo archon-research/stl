@@ -59,10 +59,10 @@ func mustDate(t *testing.T, value string) time.Time {
 	return d
 }
 
-// TestGetEnabledAssetsResolvesTheVersionEffectiveAtTheRecordedDate is the reader half of
+// TestGetEnabledAssetsResolvesTheVersionEffectiveAtTheRecordedInstant is the reader half of
 // VEC-597: which assets an oracle prices depends on the run's recorded effective_at, not
 // on when the query happens to run.
-func TestGetEnabledAssetsResolvesTheVersionEffectiveAtTheRecordedDate(t *testing.T) {
+func TestGetEnabledAssetsResolvesTheVersionEffectiveAtTheRecordedInstant(t *testing.T) {
 	ctx := context.Background()
 	f := newRetiredSourceFixture(t, ctx, "vec597-assets", "0x1111111111111111111111111111111111111111", "2026-01-01", "2026-08-20")
 
@@ -91,10 +91,10 @@ func TestGetEnabledAssetsResolvesTheVersionEffectiveAtTheRecordedDate(t *testing
 	}
 }
 
-// TestGetTokenInfosResolvesTheVersionEffectiveAtTheRecordedDate keeps the second read of
+// TestGetTokenInfosResolvesTheVersionEffectiveAtTheRecordedInstant keeps the second read of
 // the same mapping consistent with the first: a unit built from assets and token infos
 // that disagreed would price a token it never resolved an address for.
-func TestGetTokenInfosResolvesTheVersionEffectiveAtTheRecordedDate(t *testing.T) {
+func TestGetTokenInfosResolvesTheVersionEffectiveAtTheRecordedInstant(t *testing.T) {
 	ctx := context.Background()
 	f := newRetiredSourceFixture(t, ctx, "vec597-infos", "0x2222222222222222222222222222222222222222", "2026-01-01", "2026-08-20")
 
@@ -115,10 +115,10 @@ func TestGetTokenInfosResolvesTheVersionEffectiveAtTheRecordedDate(t *testing.T)
 	}
 }
 
-// TestCopyOracleAssetsCopiesTheVersionEffectiveAtTheRecordedDate covers the writer path:
+// TestCopyOracleAssetsCopiesTheVersionEffectiveAtTheRecordedInstant covers the writer path:
 // seeding a newly discovered oracle must copy the mappings that were effective at the
 // run's effective_at, and must not resurrect a retired one.
-func TestCopyOracleAssetsCopiesTheVersionEffectiveAtTheRecordedDate(t *testing.T) {
+func TestCopyOracleAssetsCopiesTheVersionEffectiveAtTheRecordedInstant(t *testing.T) {
 	ctx := context.Background()
 	f := newRetiredSourceFixture(t, ctx, "vec597-copy", "0x3333333333333333333333333333333333333333", "2026-01-01", "2026-08-20")
 	targetID := testutil.SeedOracle(t, ctx, onchainPricePool, "vec597-copy-target", "target", 1, "0x9999999999999999999999999999999999999999")

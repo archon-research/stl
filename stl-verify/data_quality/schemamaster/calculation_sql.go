@@ -33,8 +33,13 @@ type SQLSource struct {
 }
 
 // wallClock matches every spelling of "when it runs", so the rule does not depend on a
-// reviewer knowing which ones the lint knows.
-var wallClock = regexp.MustCompile(`(?i)\b(now\s*\(\s*\)|current_date|current_timestamp|localtimestamp)`)
+// reviewer knowing which ones the lint knows. transaction_timestamp() is now()'s exact
+// synonym and clock_timestamp()/statement_timestamp()/timeofday() are the plausible
+// substitutions for it, so omitting any of them would leave the rule looking enforced
+// while the closest available alternative walked through. current_time and localtime
+// are listed ahead of their longer siblings only for readability; the alternation is
+// unanchored at the right, so either order matches.
+var wallClock = regexp.MustCompile(`(?i)\b(now|transaction_timestamp|clock_timestamp|statement_timestamp|timeofday)\s*\(\s*\)|\b(current_date|current_timestamp|current_time|localtimestamp|localtime)\b`)
 
 // CheckCalculationSQL lints calculation and writer SQL against ADR-0006 §4: a read of a
 // converted reference table must go through <table>_as_of(<recorded effective_at>), and a
@@ -71,7 +76,7 @@ func (r *Register) wallClockExempt(path string) bool {
 	return false
 }
 
-// check reports every way src reads ref without a pinned effective date. Violation.Table
+// check reports every way src reads ref without a pinned effective instant. Violation.Table
 // carries the source path and Column the reference table, matching "<table>.<column>: <kind>".
 func (ref ReferenceRead) check(src SQLSource, wallClockAllowed bool) []Violation {
 	var vs []Violation
@@ -105,7 +110,7 @@ func (ref ReferenceRead) check(src SQLSource, wallClockAllowed bool) []Violation
 			continue // reported as wall_clock_effective_at above
 		}
 		finding("wall_clock_in_reference_read_sql", fmt.Sprintf(
-			"%q sits in SQL that reads %s; calculation SQL must take every date as a recorded parameter (ADR-0006 §4). Sanction a legitimate staleness computation in schema_master.json wall_clock_exempt",
+			"%q sits in SQL that reads %s; calculation SQL must take the effective instant as a recorded parameter (ADR-0006 §4). Sanction a legitimate staleness computation in schema_master.json wall_clock_exempt",
 			strings.TrimSpace(src.Body[m[0]:m[1]]), ref.Table))
 	}
 	return vs
@@ -141,24 +146,61 @@ func stripLineComments(body string) string {
 }
 
 // commentStart returns the index where line's comment begins, or -1 if it has none.
+//
+// A marker inside a string literal starts no comment: truncating there would silently hide
+// the rest of the line from every rule below, so a `https://` URL or a quoted `--` in the
+// same line as an unpinned read would mask it. Quote tracking is per line, which is why a
+// literal spanning a newline (Go raw strings, Python triple quotes) can still leave the
+// scanner mid-literal — that direction only over-reports, so it stays a lint finding to
+// investigate rather than a miss.
 func commentStart(line string) int {
-	first := -1
-	for _, marker := range []string{"--", "#", "//"} {
-		if i := strings.Index(line, marker); i >= 0 && (first < 0 || i < first) {
-			first = i
+	var quote byte
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if quote != 0 {
+			switch {
+			case c == '\\':
+				i++ // an escape cannot close the literal
+			case c == quote:
+				quote = 0
+			}
+			continue
+		}
+		switch {
+		case c == '\'' || c == '"' || c == '`':
+			quote = c
+		case strings.HasPrefix(line[i:], "--"), strings.HasPrefix(line[i:], "//"):
+			return i
+		case c == '#' && strings.TrimSpace(line[:i]) == "":
+			// Only a line-leading `#` is a Python comment. A trailing one is
+			// indistinguishable from Postgres' `#>`/`#>>`/`#-` operators without a real
+			// parser, and guessing wrong there truncates live SQL out of the scan — so
+			// a trailing `#` is left in, which can only over-report.
+			return i
 		}
 	}
-	return first
+	return -1
 }
 
 // unpinnedReads returns the FROM/JOIN clauses that read table directly; an INSERT is how a
 // version is appended, so it is not one. RE2 has no lookahead, so the trailing characters are
 // captured and checked instead — that is what separates the table from its _as_of object.
+//
+// The spellings matched beyond the bare name are the ones a reintroduced read would plausibly
+// take, each of which the bare-name pattern alone let through: a `public.` schema qualifier, a
+// `"quoted"` identifier, and `ONLY`.
+//
+// A comma-joined FROM list (`FROM token t, oracle_asset oa`) is deliberately NOT matched: the
+// comma carries no clause context, so the rule cannot tell that read from the table lists in
+// `TRUNCATE a, b, c` or `GRANT … ON a, b`, both of which this repo's migrations and test
+// helpers use. Matching it produced exactly that false positive. The archaic comma join is
+// therefore a known gap, recorded in README.md rather than papered over.
 func unpinnedReads(table, body string) []string {
-	pattern := regexp.MustCompile(`(?i)\b(from|join)\s+` + regexp.QuoteMeta(table) + `([0-9a-z_]*)`)
+	pattern := regexp.MustCompile(`(?i)(\bfrom|\bjoin)\s+(?:only\s+)?"?(?:[a-z_][a-z0-9_]*"?\.\s*"?)?` +
+		regexp.QuoteMeta(table) + `("?)([0-9a-z_]*)`)
 	var positions []string
 	for _, m := range pattern.FindAllStringSubmatch(body, -1) {
-		if m[2] != "" {
+		if m[3] != "" {
 			continue // a longer identifier: the _as_of / _current / _versions object
 		}
 		positions = append(positions, strings.ToUpper(m[1]))

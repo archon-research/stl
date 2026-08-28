@@ -128,13 +128,22 @@ func SeedOracleAssetEffectiveFrom(t *testing.T, ctx context.Context, pool *pgxpo
 
 // SetOracleAssetEnabled appends an oracle_asset version toggling enabled, effective from
 // effectiveAt (YYYY-MM-DD, midnight UTC) — the append-on-change writer, since UPDATE is revoked.
+//
+// A NULL return means the value was already that at effectiveAt, so nothing was appended.
+// That is a fixture that did not establish the state it claims, and a test asserting on the
+// retirement would then pass or fail for the wrong reason — so it fails the seed instead.
 func SetOracleAssetEnabled(t *testing.T, ctx context.Context, pool *pgxpool.Pool, oracleID, tokenID int64, enabled bool, effectiveAt, reason string) {
 	t.Helper()
-	_, err := pool.Exec(ctx,
+	var processingVersion *int
+	err := pool.QueryRow(ctx,
 		`SELECT oracle_asset_set_enabled($1, $2, NULL, $3, $4, $5)`,
-		oracleID, tokenID, enabled, MustUTCInstant(t, effectiveAt), reason)
+		oracleID, tokenID, enabled, MustUTCInstant(t, effectiveAt), reason).Scan(&processingVersion)
 	if err != nil {
 		t.Fatalf("failed to set oracle asset enabled=%v (oracle=%d, token=%d): %v", enabled, oracleID, tokenID, err)
+	}
+	if processingVersion == nil {
+		t.Fatalf("oracle asset (oracle=%d, token=%d) was already enabled=%v at %s, so no version was appended",
+			oracleID, tokenID, enabled, effectiveAt)
 	}
 }
 

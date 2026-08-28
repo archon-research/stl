@@ -844,12 +844,20 @@ async def insert_oracle_asset(
         registered_from,
     )
     if not enabled:
-        await conn.execute(
+        # A NULL return means the value was already false at retired_from, so nothing was
+        # appended — a fixture that did not establish the state it claims. Fail here rather
+        # than let a retirement assertion pass for the wrong reason.
+        appended = await conn.fetchval(
             "SELECT oracle_asset_set_enabled($1, $2, NULL, false, $3, 'test seed: source retired')",
             oracle_id,
             token_id,
             retired_from,
         )
+        if appended is None:
+            raise AssertionError(
+                f"oracle_asset (oracle_id={oracle_id}, token_id={token_id}) was already "
+                f"retired as of {retired_from.isoformat()}; no version was appended"
+            )
 
 
 async def _insert_price(conn: asyncpg.Connection, token_id: int, oracle_id: int, price: Decimal) -> None:

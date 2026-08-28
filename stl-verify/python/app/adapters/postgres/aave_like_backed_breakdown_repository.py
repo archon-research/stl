@@ -5,7 +5,7 @@ from decimal import Decimal
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.adapters.postgres.reference_as_of import ReferenceAsOf, ReferenceEffectiveAtProvider, utc_now
+from app.adapters.postgres.reference_as_of import ReferenceAsOf, ReferenceEffectiveAtProvider
 from app.domain.entities.backed_breakdown import (
     BackedBreakdown,
     CollateralContribution,
@@ -45,7 +45,7 @@ user_collateral AS (
 -- Step 3: Current USD price per token from the protocol's oracles.
 -- Which protocols an oracle serves, and whether its mapping was enabled, are resolved
 -- HERE and pinned to :reference_effective_at rather than at write time, so a replay of an
--- earlier date sees the mapping that applied then (canonical rationale, incl. the
+-- earlier instant sees the mapping that applied then (canonical rationale, incl. the
 -- append-on-change read path, on _DIRECT_ASSET_HOLDINGS_SQL in
 -- allocation_position_repository.py). FROM is token_price_current, not the
 -- onchain_token_price hypertable, so the ranking runs over one row per (oracle, token)
@@ -140,7 +140,7 @@ ORDER BY a.backed_asset_id, backing_usd DESC;
 class AaveLikeBackedBreakdownRepository:
     """Postgres implementation of the backed breakdown repository for Aave-like protocols."""
 
-    def __init__(self, engine: AsyncEngine, reference_effective_at: ReferenceEffectiveAtProvider = utc_now) -> None:
+    def __init__(self, engine: AsyncEngine, reference_effective_at: ReferenceEffectiveAtProvider) -> None:
         self._engine = engine
         self._reference = ReferenceAsOf(reference_effective_at)
 

@@ -517,7 +517,7 @@ func TestE2E_VEC242_NullBlockBodyRejected_RetryThenWorkerProcesses(t *testing.T)
 		Logger:       logger,
 		ChainID:      1,
 	}
-	workerSvc, err := NewService(workerCfg, consumer, cache, priceRepo, multicallFactoryFor(mc))
+	workerSvc, err := NewService(workerCfg, consumer, cache, priceRepo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService (worker): %v", err)
 	}

@@ -7,8 +7,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
+from app.adapters.postgres.reference_as_of import ReferenceEffectiveAtProvider
 from app.api._validators import ProxyAddressPathParam
-from app.api.deps import get_engine, get_model_registry, get_reference_risk_capital_service_factory
+from app.api.deps import get_engine, get_model_registry, get_reference_as_of, get_reference_risk_capital_service_factory
 from app.api.provenance import (
     get_requested_provenance,
     resolve_or_422,
@@ -395,8 +396,9 @@ class PrimeRiskCapitalResponse(BaseModel):
 async def _get_service(
     engine: AsyncEngine = Depends(get_engine),
     registry: ModelRegistry = Depends(get_model_registry),
+    reference_as_of: ReferenceEffectiveAtProvider = Depends(get_reference_as_of),
 ) -> PrimeRiskCapitalService:
-    return PrimeRiskCapitalService(AllocationRepository(engine), registry)
+    return PrimeRiskCapitalService(AllocationRepository(engine, reference_as_of), registry)
 
 
 @router.get(

@@ -5,7 +5,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.adapters.postgres.reference_as_of import ReferenceAsOf, ReferenceEffectiveAtProvider, utc_now
+from app.adapters.postgres.reference_as_of import ReferenceAsOf, ReferenceEffectiveAtProvider
 from app.domain.entities.backed_breakdown import (
     BackedBreakdown,
     CollateralContribution,
@@ -160,7 +160,7 @@ WITH morpho_vaults AS (
 class MorphoBackedBreakdownRepository:
     """Postgres implementation of the backed breakdown repository for Morpho vaults."""
 
-    def __init__(self, engine: AsyncEngine, reference_effective_at: ReferenceEffectiveAtProvider = utc_now) -> None:
+    def __init__(self, engine: AsyncEngine, reference_effective_at: ReferenceEffectiveAtProvider) -> None:
         self._engine = engine
         self._reference = ReferenceAsOf(reference_effective_at)
 

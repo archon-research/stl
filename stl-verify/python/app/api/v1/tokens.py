@@ -5,12 +5,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.adapters.postgres.reference_as_of import pinned_to
+from app.adapters.postgres.reference_as_of import ReferenceEffectiveAtProvider
 from app.adapters.postgres.token_catalog_repository import TokenCatalogRepository
 from app.api._validators import ChainIdPath, TokenAddressPath
-from app.api.deps import get_engine
+from app.api.deps import get_engine, get_reference_as_of
 from app.api.v1._resolvers import resolve_token
-from app.config import get_settings
 from app.domain.entities.token_catalog import TokenMetadata, TokenPriceQuote
 from app.domain.serialization import PlainDecimal
 from app.services.token_catalog_service import TokenCatalogService
@@ -126,8 +125,11 @@ def _to_token_response(row) -> TokenResponse:
     )
 
 
-async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> TokenCatalogService:
-    return TokenCatalogService(TokenCatalogRepository(engine, pinned_to(get_settings().reference_effective_at)))
+async def _get_service(
+    engine: AsyncEngine = Depends(get_engine),
+    reference_as_of: ReferenceEffectiveAtProvider = Depends(get_reference_as_of),
+) -> TokenCatalogService:
+    return TokenCatalogService(TokenCatalogRepository(engine, reference_as_of))
 
 
 @router.get(

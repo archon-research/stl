@@ -16,6 +16,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
+from app.adapters.postgres.reference_as_of import utc_now
 from app.domain.entities.allocation import EthAddress
 
 # Declared in the migration. The ALM/SubProxy split matters: the reads classify by
@@ -42,7 +43,7 @@ async def repository(async_db_url: str) -> AsyncIterator[AllocationRepository]:
     """The repository whose reads resolve a proxy to its prime."""
     engine = create_async_engine(async_db_url)
     try:
-        yield AllocationRepository(engine)
+        yield AllocationRepository(engine, utc_now)
     finally:
         await engine.dispose()
 

@@ -85,8 +85,8 @@ type Service struct {
 
 	telemetry *Telemetry
 
-	// referenceEffectiveAt pins the oracle_asset versions the units are built from; zero
-	// means "resolve at load time" (ADR-0006 §4).
+	// referenceEffectiveAt pins which oracle_asset versions the units are built from, so a
+	// replay can rebuild the reference view a past run used (ADR-0006 §4).
 	referenceEffectiveAt time.Time
 
 	ctx    context.Context
@@ -100,13 +100,6 @@ func (s *Service) WithTelemetry(t *Telemetry) {
 	s.telemetry = t
 }
 
-// WithReferenceEffectiveAt pins which oracle_asset versions this run reads, so a replay can
-// rebuild the reference view a past run used (ADR-0006 §4). Call before Start; unset means
-// the run's start time.
-func (s *Service) WithReferenceEffectiveAt(effectiveAt time.Time) {
-	s.referenceEffectiveAt = effectiveAt
-}
-
 // NewService creates a new oracle price worker service.
 // cacheReader supplies raw block JSON; the worker derives each block's
 // timestamp from it (cache miss falls back to S3 inside the reader).
@@ -116,6 +109,7 @@ func NewService(
 	cacheReader outbound.BlockCacheReader,
 	repo outbound.OnchainPriceRepository,
 	newMulticaller MulticallerFactory,
+	referenceEffectiveAt time.Time,
 ) (*Service, error) {
 	if consumer == nil {
 		return nil, fmt.Errorf("consumer cannot be nil")
@@ -128,6 +122,9 @@ func NewService(
 	}
 	if newMulticaller == nil {
 		return nil, fmt.Errorf("newMulticaller cannot be nil")
+	}
+	if referenceEffectiveAt.IsZero() {
+		return nil, fmt.Errorf("referenceEffectiveAt cannot be zero")
 	}
 
 	config.ApplyDefaults()
@@ -156,16 +153,17 @@ func NewService(
 	}
 
 	return &Service{
-		config:         config,
-		consumer:       consumer,
-		cacheReader:    cacheReader,
-		repo:           repo,
-		newMulticaller: newMulticaller,
-		oracleABI:      oracleABI,
-		feedABI:        feedABI,
-		shareABI:       shareABI,
-		curvePoolABI:   curvePoolABI,
-		logger:         config.Logger.With("component", "oracle-price-worker"),
+		config:               config,
+		consumer:             consumer,
+		cacheReader:          cacheReader,
+		repo:                 repo,
+		newMulticaller:       newMulticaller,
+		oracleABI:            oracleABI,
+		feedABI:              feedABI,
+		shareABI:             shareABI,
+		curvePoolABI:         curvePoolABI,
+		referenceEffectiveAt: referenceEffectiveAt,
+		logger:               config.Logger.With("component", "oracle-price-worker"),
 	}, nil
 }
 
@@ -205,13 +203,10 @@ func (s *Service) Stop() error {
 }
 
 func (s *Service) initialize(ctx context.Context) error {
-	// One reference view per run (ADR-0006 §4): resolved once, so every unit sees the same
-	// oracle_asset versions and a replay can supply the instant the original run used.
-	referenceEffectiveAt := s.referenceEffectiveAt
-	if referenceEffectiveAt.IsZero() {
-		referenceEffectiveAt = time.Now().UTC()
-	}
-	shared, err := oracle_pricing.LoadOracleUnits(ctx, s.repo, s.config.ChainID, referenceEffectiveAt, s.logger)
+	// One reference view per run (ADR-0006 §4): NewService resolved it once and rejects a
+	// zero value, so every unit here sees the same oracle_asset versions and a replay can
+	// supply the instant the original run used.
+	shared, err := oracle_pricing.LoadOracleUnits(ctx, s.repo, s.config.ChainID, s.referenceEffectiveAt, s.logger)
 	if err != nil {
 		return err
 	}

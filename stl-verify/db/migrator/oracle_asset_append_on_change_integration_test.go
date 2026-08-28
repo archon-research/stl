@@ -3,6 +3,7 @@
 package migrator_test
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -31,6 +32,32 @@ func seedOracleAsset(ctx context.Context, t *testing.T, pool *pgxpool.Pool, orac
 		INSERT INTO oracle_asset (oracle_id, token_id, enabled, valid_from, change_reason)
 		VALUES ($1, $2, $3, $4, 'test fixture')`, oracleID, tokenID, enabled, utcMidnight(t, validFrom)); err != nil {
 		t.Fatalf("seed oracle_asset for %s: %v", oracleName, err)
+	}
+	return oracleID, tokenID
+}
+
+// seedFeedOracleAsset registers one feed-style (feed_address NOT NULL) oracle_asset version,
+// the shape seedOracleAsset cannot produce. Its own oracle name keeps the natural key distinct.
+func seedFeedOracleAsset(ctx context.Context, t *testing.T, pool *pgxpool.Pool, oracleName string, feedAddress []byte, validFrom string) (oracleID, tokenID int64) {
+	t.Helper()
+
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO oracle (name, display_name, chain_id, address, oracle_type, deployment_block, price_decimals, enabled)
+		VALUES ($1::text, $1::text, 1, sha256($1::text::bytea), 'chainlink_feed', 1, 8, true)
+		RETURNING id`, oracleName).Scan(&oracleID); err != nil {
+		t.Fatalf("seed oracle %s: %v", oracleName, err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO token (chain_id, address, symbol, decimals)
+		VALUES (1, substring(sha256($1::text::bytea) for 20), $1::text, 18)
+		RETURNING id`, oracleName+"-token").Scan(&tokenID); err != nil {
+		t.Fatalf("seed token for %s: %v", oracleName, err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, valid_from, change_reason)
+		VALUES ($1, $2, true, $3, 8, 'USD', $4, 'test fixture')`,
+		oracleID, tokenID, feedAddress, utcMidnight(t, validFrom)); err != nil {
+		t.Fatalf("seed feed-style oracle_asset for %s: %v", oracleName, err)
 	}
 	return oracleID, tokenID
 }
@@ -222,7 +249,7 @@ func TestOracleAssetVersionsDerivesTheValidityWindow(t *testing.T) {
 }
 
 // TestOracleAssetCurrentIgnoresAFutureDatedVersion: a version inserted ahead of its
-// effective date must not become current early. Also why _current is banned from
+// effective instant must not become current early. Also why _current is banned from
 // calculation SQL — the same row flips the answer once its valid_from arrives.
 func TestOracleAssetCurrentIgnoresAFutureDatedVersion(t *testing.T) {
 	ctx := context.Background()
@@ -278,9 +305,9 @@ func TestOracleAssetSetEnabledIsANoOpWhenUnchanged(t *testing.T) {
 	}
 }
 
-// TestOracleAssetSetEnabledRejectsADateBeforeTheFirstVersion: appending a row with nothing to
+// TestOracleAssetSetEnabledRejectsAnInstantBeforeTheFirstVersion: appending a row with nothing to
 // supersede would claim the asset was disabled before it was ever registered.
-func TestOracleAssetSetEnabledRejectsADateBeforeTheFirstVersion(t *testing.T) {
+func TestOracleAssetSetEnabledRejectsAnInstantBeforeTheFirstVersion(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
@@ -370,5 +397,91 @@ func TestOracleAssetSetEnabledRejectsAnUnknownAsset(t *testing.T) {
 		oracleID, tokenID).Scan(&pv)
 	if err == nil {
 		t.Fatal("setting enabled on an unregistered (oracle, token, feed) key succeeded; want an error")
+	}
+}
+
+// TestOracleAssetSetEnabledCarriesFeedColumnsForward pins the writer's carry-forward for the
+// feed-style shape. Every other fixture here is aave-style with feed_address, feed_decimals and
+// quote_currency all NULL, which makes dropping any of them from the writer's VALUES list
+// invisible — and feed_decimals is the exponent that scales a raw feed answer into a price, so
+// losing it is a price wrong by a power of ten.
+func TestOracleAssetSetEnabledCarriesFeedColumnsForward(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	feedAddress := bytes.Repeat([]byte{0xab}, 20)
+	oracleID, tokenID := seedFeedOracleAsset(ctx, t, pool, "feed-carry-forward", feedAddress, "2026-01-01")
+
+	var processingVersion *int
+	if err := pool.QueryRow(ctx,
+		`SELECT oracle_asset_set_enabled($1, $2, $3, false, $4, 'retired')`,
+		oracleID, tokenID, feedAddress, utcMidnight(t, "2026-08-20")).Scan(&processingVersion); err != nil {
+		t.Fatalf("oracle_asset_set_enabled on a feed-style row: %v", err)
+	}
+	if processingVersion == nil {
+		t.Fatal("no version appended: the writer did not match the feed-style row by feed_key")
+	}
+
+	var (
+		gotFeed     []byte
+		gotDecimals *int
+		gotQuote    *string
+		gotEnabled  bool
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT feed_address, feed_decimals, quote_currency, enabled
+		FROM oracle_asset
+		WHERE oracle_id = $1 AND token_id = $2 AND processing_version = $3`,
+		oracleID, tokenID, *processingVersion).Scan(&gotFeed, &gotDecimals, &gotQuote, &gotEnabled); err != nil {
+		t.Fatalf("read appended version: %v", err)
+	}
+	if !bytes.Equal(gotFeed, feedAddress) {
+		t.Errorf("feed_address = %x, want %x", gotFeed, feedAddress)
+	}
+	if gotDecimals == nil || *gotDecimals != 8 {
+		t.Errorf("feed_decimals = %v, want 8", gotDecimals)
+	}
+	if gotQuote == nil || *gotQuote != "USD" {
+		t.Errorf("quote_currency = %v, want USD", gotQuote)
+	}
+	if gotEnabled {
+		t.Error("enabled = true on the appended version, want false")
+	}
+}
+
+// TestOracleAssetRejectsAnEmptyFeedAddress: feed_key folds NULL to '\x', so an empty
+// feed_address would share a natural key with the feedless row and oracle_asset_set_enabled
+// would silently resolve a different logical asset than the caller named.
+func TestOracleAssetRejectsAnEmptyFeedAddress(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	oracleID, tokenID := seedOracleAsset(ctx, t, pool, "empty-feed-address", true, "2026-01-01")
+
+	_, err := pool.Exec(ctx, `
+		INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, processing_version, valid_from, change_reason)
+		VALUES ($1, $2, true, '\x'::bytea, 1, $3, 'empty feed address')`,
+		oracleID, tokenID, utcMidnight(t, "2026-02-01"))
+	if err == nil {
+		t.Fatal("an empty feed_address was accepted; it collides with the NULL-feed row's feed_key")
+	}
+}
+
+// TestOracleAssetRejectsABlankChangeReason: change_reason is mandatory in substance, not just
+// NOT NULL — whitespace is not a reason for a version to exist.
+func TestOracleAssetRejectsABlankChangeReason(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	oracleID, tokenID := seedOracleAsset(ctx, t, pool, "blank-change-reason", true, "2026-01-01")
+
+	_, err := pool.Exec(ctx,
+		`SELECT oracle_asset_set_enabled($1, $2, NULL, false, $3, '   ')`,
+		oracleID, tokenID, utcMidnight(t, "2026-08-20"))
+	if err == nil {
+		t.Fatal("a whitespace-only change_reason was accepted")
 	}
 }

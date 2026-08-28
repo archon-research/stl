@@ -81,7 +81,7 @@ func (r *OnchainPriceRepository) GetEnabledAssets(ctx context.Context, oracleID 
 		SELECT id, oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, created_at
 		FROM oracle_asset_as_of($2::timestamptz)
 		WHERE oracle_id = $1 AND enabled = true
-		ORDER BY oracle_id, token_id, feed_address
+		ORDER BY oracle_id, token_id, feed_key
 	`, oracleID, referenceEffectiveAt)
 	if err != nil {
 		return nil, fmt.Errorf("querying enabled oracle assets: %w", err)
@@ -167,7 +167,7 @@ func (r *OnchainPriceRepository) GetTokenInfos(ctx context.Context, oracleID int
 		FROM oracle_asset_as_of($2::timestamptz) oa
 		JOIN token t ON t.id = oa.token_id
 		WHERE oa.oracle_id = $1 AND oa.enabled = true
-		ORDER BY oa.oracle_id, oa.token_id, oa.feed_address
+		ORDER BY oa.oracle_id, oa.token_id, oa.feed_key
 	`, oracleID, referenceEffectiveAt)
 	if err != nil {
 		return nil, fmt.Errorf("querying token infos: %w", err)
@@ -379,8 +379,11 @@ func (r *OnchainPriceRepository) GetAllProtocolOracleBindings(ctx context.Contex
 // recorded instant, not the wall clock: a replay of the same run must produce identically
 // dated rows. The change_reason renders it in UTC so the text never depends on the
 // writer's session TimeZone.
+// A copy of zero rows is not an error — the source legitimately had no enabled mapping at
+// that instant — but it is logged, because the target is then registered with no assets and
+// the symptom surfaces much later as "oracle has no enabled assets" in a different process.
 func (r *OnchainPriceRepository) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64, referenceEffectiveAt time.Time) error {
-	_, err := r.pool.Exec(ctx, `
+	tag, err := r.pool.Exec(ctx, `
 		INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, valid_from, change_reason)
 		SELECT $2, token_id, enabled, feed_address, feed_decimals, quote_currency,
 		       $3::timestamptz,
@@ -393,5 +396,10 @@ func (r *OnchainPriceRepository) CopyOracleAssets(ctx context.Context, fromOracl
 	if err != nil {
 		return fmt.Errorf("copying oracle assets from %d to %d: %w", fromOracleID, toOracleID, err)
 	}
+	r.logger.Info("copied oracle assets",
+		"from_oracle_id", fromOracleID,
+		"to_oracle_id", toOracleID,
+		"rows", tag.RowsAffected(),
+		"reference_effective_at", referenceEffectiveAt.UTC().Format(time.RFC3339))
 	return nil
 }
