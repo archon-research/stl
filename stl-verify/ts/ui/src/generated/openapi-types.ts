@@ -95,7 +95,7 @@ export interface paths {
      * List a prime's current allocations
      * @description Return every current allocation held by the given prime — receipt-token positions (enriched with USD value when a price is available), direct asset holdings (tokens held in the proxy with no registered receipt-token wrapper, surfaced with `receipt_token_id`, `receipt_token_address` and `protocol_name` set to `null`, and `amount_usd` valued from the token's oracle price when one exists), and off-chain Anchorage BTC custody (chain_id 0, `protocol_name` `anchorage`, `amount_usd` the loan drawn against the collateral). Each row includes the latest activity timestamp and a derived `category` (`allocation` / `pol` / `psm3` / `asset` / `custody`). Rows are proxy-scoped except the Anchorage custody leg, which is prime-scoped and returned only under the one proxy of the prime that carries its prime-scoped rows (its mainnet proxy when indexed, else its lowest-addressed one) — see the `scope` field.
      *
-     *     Under `source=reference` (and the reference half of `source=both`) the rows are Sky's published balance sheet instead: every position the prime holds, prime-scoped, with `amount_usd` carrying upstream's `assets`. That is the same measurement as the indexed rows' `amount_usd`, so the two halves of `both` are comparable — deliberately not the Star monitor's risk-capital breakdown, whose `exposure` covers only the priced subset and runs about a third smaller. These rows carry no `balance` and no activity fields, which upstream does not publish. `underlying_token_id`, `underlying_token_address` and `underlying_symbol` are populated when the position resolves to STL's registry, null otherwise — upstream names no loan token of its own.
+     *     Under `source=reference` (and the reference half of `source=both`) the rows are Sky's published balance sheet instead: every position the prime holds, prime-scoped, with `amount_usd` carrying upstream's `assets`. That is the same measurement as the indexed rows' `amount_usd`, so the two halves of `both` are comparable — deliberately not the Star monitor's risk-capital breakdown, whose `exposure` covers only the priced subset and runs about a third smaller. These rows carry no `balance` and no activity fields, which upstream does not publish, and a `reference_synced_at` naming the sync cycle they were observed at rather than implying they are current. `underlying_*` are populated when the position resolves to STL's receipt-token registry (the feed itself names no underlying) and `null`/empty otherwise.
      */
     get: operations['list_allocations_v1_primes__prime_id__allocations_get'];
     put?: never;
@@ -872,6 +872,12 @@ export interface components {
        */
       reference_amount_usd?: string | null;
       /**
+       * Reference Synced At
+       * @description When Sky's figures for this row were observed. Populated on any row carrying them — a `reference` row, or a `both` row's `reference_amount_usd` — and `null` on an indexed-only row. STL reads them from its own record of the feed rather than the feed itself, so they are as of the last sync cycle, up to 15 minutes old. Consumers should show this rather than implying the figures are current.
+       * @example 2026-08-26T09:15:00+00:00
+       */
+      reference_synced_at?: string | null;
+      /**
        * Scope
        * @description Whether the row belongs to the queried proxy (`proxy`) or to the prime as a whole (`prime`). A `prime`-scoped row is served under the prime's primary proxy only, so unioning a prime's proxies never double-counts it.
        * @default proxy
@@ -892,19 +898,19 @@ export interface components {
       symbol: string;
       /**
        * Underlying Symbol
-       * @description Underlying-token symbol. For direct holdings, same as ``symbol``, unless the holding is valued on the underlying-value basis (allowlisted). On a reference row, populated when the position resolves to STL's registry, empty otherwise.
+       * @description Underlying-token symbol. For direct holdings, same as ``symbol``, unless the holding is valued on the underlying-value basis (allowlisted). Empty on a reference row (`source=reference`) whose position does not resolve to STL's receipt-token registry — that feed never names an underlying of its own — and also empty on a resolved reference row whose registry token has no symbol recorded yet; `underlying_token_id`/`underlying_token_address` are the reliable resolution signal, not this field.
        * @example USDC
        */
       underlying_symbol: string;
       /**
        * Underlying Token Address
-       * @description 0x-prefixed underlying-token contract address. For direct holdings, this is the held asset itself, unless the holding is valued on the underlying-value basis (allowlisted). `null` for off-chain custody holdings (e.g. Anchorage BTC), which have no on-chain address. On a reference row, populated when the position resolves to STL's registry, null otherwise.
+       * @description 0x-prefixed underlying-token contract address. For direct holdings, this is the held asset itself, unless the holding is valued on the underlying-value basis (allowlisted). `null` for off-chain custody holdings (e.g. Anchorage BTC), which have no on-chain address, and for a reference row (`source=reference`) whose position does not resolve to STL's receipt-token registry.
        * @example 0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
        */
       underlying_token_address?: string | null;
       /**
        * Underlying Token Id
-       * @description Surrogate id of the underlying token. For direct holdings, this is the held asset itself, unless the holding is valued on the underlying-value basis (allowlisted). `null` for off-chain custody holdings (e.g. Anchorage BTC), which have no token-registry row. On a reference row, populated when the position resolves to STL's registry, null otherwise.
+       * @description Surrogate id of the underlying token. For direct holdings, this is the held asset itself, unless the holding is valued on the underlying-value basis (allowlisted). `null` for off-chain custody holdings (e.g. Anchorage BTC), which have no token-registry row, and for a reference row (`source=reference`) whose position does not resolve to STL's receipt-token registry.
        * @example 1
        */
       underlying_token_id?: number | null;
@@ -1373,7 +1379,7 @@ export interface components {
     PrimeProvenanceResponse: {
       /**
        * Available
-       * @description Provenances this prime can be served from. `indexed` is always present — a prime is only listed because STL indexes it. `reference` and `both` appear together, and only when Sky's monitor covers the prime.
+       * @description Provenances this prime can be served from. `indexed` is always present — a prime is only listed because STL indexes it. `reference` and `both` appear together, and only when STL has observed at least one reference cycle for the prime.
        * @example [
        *       "indexed",
        *       "reference",
@@ -1609,6 +1615,12 @@ export interface components {
        */
       reference_prime_required_risk_capital_usd?: string | null;
       /**
+       * Reference Synced At
+       * @description When the Sky figures in this response were observed. Populated wherever the response carries them (`source=reference` or `source=both`), and `null` under `source=indexed`. STL reads them from its own record of the monitor rather than the monitor itself, so they are as of the last sync cycle — up to 15 minutes old. Consumers should show this rather than implying the figures are current.
+       * @example 2026-08-26T09:15:00+00:00
+       */
+      reference_synced_at?: string | null;
+      /**
        * Reference Total Risk Capital Usd
        * @description Sky's reported total risk capital. Populated only under `source=both`.
        */
@@ -1624,7 +1636,7 @@ export interface components {
        */
       senior_risk_capital_usd?: string | null;
       /**
-       * @description Provenance of the figures in this response. `indexed` is STL's own on-chain model; `reference` is Sky's Star Agents Risk Capital & Requirements Monitor; `both` carries the two side by side, STL's in the unprefixed fields and Sky's in the `reference_`-prefixed ones. Never reconciled: no field holds a blend of the two, and `both` degrades to `indexed` — reporting itself as such — when the monitor cannot be read.
+       * @description Provenance of the figures in this response. `indexed` is STL's own on-chain model; `reference` is Sky's Star Agents Risk Capital & Requirements Monitor as STL observed it; `both` carries the two side by side, STL's in the unprefixed fields and Sky's in the `reference_`-prefixed ones. Never reconciled: no field holds a blend of the two, and `both` degrades to `indexed` — reporting itself as such — for a prime no reference cycle has ever reported on.
        * @default indexed
        */
       source: components['schemas']['Provenance'];
@@ -1817,7 +1829,8 @@ export interface components {
       primes: components['schemas']['PrimeProvenanceResponse'][];
       /**
        * Reference Upstream Reachable
-       * @description Whether Sky's monitor answered. When `false` every prime reports `indexed` alone — unknown coverage is reported as no coverage, so a client is never told a provenance is available and then handed an error for it.
+       * @deprecated
+       * @description DEPRECATED — always `true`. Coverage is now read from STL's own record of the reference feeds rather than by calling them, so there is no upstream to be unreachable: a read that fails is a `500` and cannot answer at all. Retained so clients that branch on it keep working. Read `available` per prime instead.
        */
       reference_upstream_reachable: boolean;
     };
