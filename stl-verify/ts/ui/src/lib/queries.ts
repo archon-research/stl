@@ -1,9 +1,3 @@
-import {
-  createApiClient,
-  createQueryApi,
-} from '@archon-research/http-client-react';
-
-import type { paths } from '../generated/openapi-types';
 import type {
   AllocationActivityBucket,
   AllocationActivityEnvelope,
@@ -14,31 +8,25 @@ import type {
   PrimeDebtBucket,
   PrimeDebtEnvelope,
   PrimeDebtSnapshot,
+  ProtocolEventsEnvelope,
   ProtocolEventsResponse,
   TimeSeriesResolution,
   TokensResponse,
   TotalCapitalBucket,
   TotalCapitalEnvelope,
 } from '../types/allocation';
+import { api } from './api-client';
 import { sortByBucketStart } from './dashboard';
+import { logging } from './logging';
 import { sourceQuery } from './provenance';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
-
-// `openapi-typescript` emits `paths` as an interface, and an interface carries
-// no implicit index signature — so it does not satisfy `createQueryApi`'s
-// `Record<string, …>` bound, and inference silently falls back to it.
-type ApiPaths = { [Path in keyof paths]: paths[Path] };
-
-const apiClient = createApiClient<ApiPaths>(API_BASE_URL);
-
 /**
- * The typed query surface, derived from the generated `paths`.
- *
- * No tag vocabulary: tags exist to be invalidated by mutations, and this app
- * issues none. Add one here when the first write lands, not before.
+ * Stand-ins for the params of a query `enabled` has switched off, which still
+ * has to build a key. Neither is a real chain or address, and no enabled query
+ * ever names them — widening an `enabled` predicate is what would make one real.
  */
-const api = createQueryApi(apiClient);
+export const DISABLED_CHAIN_ID = -1;
+export const DISABLED_ADDRESS = '';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -49,29 +37,42 @@ const HOUR = 60 * MINUTE;
  * they are stated once here rather than at each call site.
  */
 const CACHE = {
-  /** `/v1/chains`, `/v1/protocols`: a static registry, per `lib/chain-metadata`. */
+  /** `/v1/chains`, `/v1/protocols`: rows that change on a backend deploy, and a
+   * deploy reloads the tab — so within one session they cannot go stale. */
   registry: { staleTime: Infinity, gcTime: 24 * HOUR },
   /** Provenance coverage changes on deploy, not on block. */
   provenance: { staleTime: 30 * MINUTE, gcTime: HOUR },
   /** The prime list is near-static. */
   primes: { staleTime: 5 * MINUTE, gcTime: 30 * MINUTE },
-  /** The token catalogue, read only to populate a filter's options. */
+  /** The token catalogue, read for a filter's options and the methodology
+   * panel's row count — never for a figure anything is decided on. */
   tokenList: { staleTime: 10 * MINUTE, gcTime: 30 * MINUTE },
   /** The screen's primary per-block data: allocations, risk capital, debt. */
   position: { staleTime: 30_000, gcTime: 10 * MINUTE },
-  /** Bucketed to PT15M and coarser, so sub-minute refetching cannot change the answer. */
+  /** One minute is the finest bucket the range picker can ask for (`PT1M`, at
+   * the 1h preset — see `getResolutionForRange`), so a shorter `staleTime`
+   * could not change the line that gets drawn. Revisit if a finer preset lands. */
   series: { staleTime: MINUTE, gcTime: 30 * MINUTE },
   /** A daily upstream feed seeded by a one-shot backfill; see the lookback below. */
   referenceSeries: { staleTime: 6 * HOUR, gcTime: 24 * HOUR },
-  /** The drawer's own reads. The long `gcTime` is the point: re-opening a row is free. */
+  /** The drawer's own reads. The long `gcTime` is the point: re-opening a row
+   * renders from cache immediately, though a refetch may still run behind it. */
   drawer: { staleTime: MINUTE, gcTime: 30 * MINUTE },
-  /** Token metadata is immutable once published. */
+  /** Decimals and symbol never change; the row can still be re-published with
+   * corrected metadata, which an hour is long enough to be worth catching. */
   tokenMeta: { staleTime: HOUR, gcTime: 24 * HOUR },
   /** A price is the one genuinely live figure here. */
   tokenPrice: { staleTime: 30_000, gcTime: 5 * MINUTE },
-  /** A settled transaction's decoded events do not change absent a reorg. */
+  /** A settled transaction's events change only if it is reorged out, so the
+   * hour is a reorg-depth bound rather than a freshness one. `gcTime` matches
+   * `staleTime` deliberately: the panel unmounts when a row collapses, so
+   * `gcTime` is what has to survive the gap between expansions. */
   settledTx: { staleTime: HOUR, gcTime: HOUR },
 } as const;
+
+// `sources` is the one genuinely optional envelope field in this file, so it
+// gets a stable fallback rather than a fresh array per select run.
+const NO_DATA_SOURCES: DataSourcesResponse['sources'] = [];
 
 /** The window every bucketed series is fetched over. */
 export type SeriesWindow = {
@@ -82,11 +83,11 @@ export type SeriesWindow = {
 
 // limit 500 (the per-prime max) so the longest ranges (e.g. 365d at P1D) return
 // every bucket rather than being truncated to the default page.
-function bucketQuery(window: SeriesWindow) {
+function bucketQuery(range: SeriesWindow) {
   return {
-    from_timestamp: window.fromTimestamp,
-    to_timestamp: window.toTimestamp,
-    resolution: window.resolution,
+    from_timestamp: range.fromTimestamp,
+    to_timestamp: range.toTimestamp,
+    resolution: range.resolution,
     aggregate: true,
     limit: 500,
   };
@@ -100,16 +101,26 @@ function bucketQuery(window: SeriesWindow) {
  * handing back mis-typed rows. Thrown from a `select`, which react-query
  * reports as the query's own error.
  */
-function requireEnvelopeMode(
-  envelope: { mode: string },
-  expected: string,
+function requireEnvelopeMode<TEnvelope extends { mode: string }>(
+  envelope: TEnvelope,
+  expected: TEnvelope['mode'],
   label: string,
 ): void {
-  if (envelope.mode !== expected) {
-    throw new Error(
-      `${label} returned "${envelope.mode}" for an ${expected} request`,
-    );
+  if (envelope.mode === expected) {
+    return;
   }
+
+  // The cache's `onError` only ever sees a rejected `queryFn`; a throwing
+  // `select` is caught by the observer, so this would otherwise log nowhere.
+  logging.error('API envelope contract violation', {
+    label,
+    expected,
+    actual: envelope.mode,
+  });
+
+  throw new Error(
+    `${label} returned "${envelope.mode}" for an ${expected} request`,
+  );
 }
 
 // Selects are module-level so their identity is stable: react-query re-runs a
@@ -119,27 +130,35 @@ const selectLatestDebtSnapshot = (
   envelope: PrimeDebtEnvelope,
 ): PrimeDebtSnapshot | null => {
   requireEnvelopeMode(envelope, 'raw', 'GET /v1/primes/{prime_id}/debt');
-  return ((envelope.data ?? []) as PrimeDebtSnapshot[])[0] ?? null;
+  return (envelope.data as PrimeDebtSnapshot[])[0] ?? null;
 };
 
 const selectLatestDebtBucket = (
   envelope: PrimeDebtEnvelope,
-): PrimeDebtBucket | null =>
-  ((envelope.data ?? []) as PrimeDebtBucket[])[0] ?? null;
+): PrimeDebtBucket | null => {
+  requireEnvelopeMode(envelope, 'aggregated', 'GET /v1/primes/{prime_id}/debt');
+  return (envelope.data as PrimeDebtBucket[])[0] ?? null;
+};
 
 const selectDebtBuckets = (envelope: PrimeDebtEnvelope): PrimeDebtBucket[] => {
   requireEnvelopeMode(envelope, 'aggregated', 'GET /v1/primes/{prime_id}/debt');
   return sortByBucketStart(envelope.data as PrimeDebtBucket[]);
 };
 
-// A non-aggregated activity envelope means "no data" here, unlike the debt
-// series above, where `aggregate=true` is the whole request.
 const selectActivityBuckets = (
   envelope: AllocationActivityEnvelope,
-): AllocationActivityBucket[] =>
-  envelope.mode === 'aggregated'
-    ? sortByBucketStart(envelope.data as AllocationActivityBucket[])
-    : [];
+): AllocationActivityBucket[] => {
+  if (envelope.mode === 'aggregated') {
+    return sortByBucketStart(envelope.data as AllocationActivityBucket[]);
+  }
+
+  // Both series ask for `aggregate=true`, so this is the same violation the
+  // debt series throws on — coerced because its card degrades, not ignored.
+  logging.warn('Allocation activity envelope was not aggregated', {
+    mode: envelope.mode,
+  });
+  return [];
+};
 
 const selectTotalCapitalBuckets = (
   envelope: TotalCapitalEnvelope,
@@ -150,18 +169,18 @@ const selectExposureBuckets = (envelope: ExposureEnvelope): ExposureBucket[] =>
   sortByBucketStart(envelope.data as ExposureBucket[]);
 
 const selectDataSources = (response: DataSourcesResponse) =>
-  response.sources ?? [];
+  response.sources ?? NO_DATA_SOURCES;
 
 const selectRawActivity = (
   envelope: AllocationActivityEnvelope,
 ): AllocationActivityResponse => {
   requireEnvelopeMode(envelope, 'raw', 'GET /v1/allocations/activity');
-  return (envelope.data ?? []) as AllocationActivityResponse;
+  return envelope.data as AllocationActivityResponse;
 };
 
-const selectProtocolEvents = (envelope: {
-  data?: unknown;
-}): ProtocolEventsResponse => (envelope.data ?? []) as ProtocolEventsResponse;
+const selectProtocolEvents = (
+  envelope: ProtocolEventsEnvelope,
+): ProtocolEventsResponse => envelope.data as ProtocolEventsResponse;
 
 const selectTokenSymbols = (tokens: TokensResponse): string[] =>
   Array.from(
@@ -268,15 +287,21 @@ export const latestDebtSnapshotQuery = (primeId: string) =>
     },
   );
 
-// How far back to look for the newest reference debt bucket. The endpoint
-// defaults to the last 24h, but this series is a daily upstream feed seeded by
-// a one-shot backfill, so the most recent bucket is routinely older than that
-// and the default window returns nothing at all.
+/**
+ * How far back to look for the newest reference debt bucket. The endpoint
+ * defaults to the last 24h, but this series is a daily upstream feed seeded by
+ * a one-shot backfill, so the most recent bucket is routinely older than that
+ * and the default window returns nothing at all.
+ */
 const REFERENCE_DEBT_LOOKBACK_DAYS = 90;
 
-// Quantised to the UTC day. `Date.now()` here would be a fresh bound on every
-// render, and the bound is part of the cache key — so the query would refetch
-// forever. The feed is daily, so a finer boundary buys nothing anyway.
+/**
+ * The lower bound, quantised to the UTC day.
+ *
+ * `Date.now()` here would be a fresh bound on every render, and the bound is
+ * part of the cache key — so the query would refetch forever. The feed is
+ * daily, so a finer boundary buys nothing anyway.
+ */
 function referenceDebtLookbackStart(): string {
   const start = new Date();
   start.setUTCHours(0, 0, 0, 0);
@@ -311,7 +336,7 @@ export const latestReferenceDebtQuery = (primeId: string) =>
       select: selectLatestDebtBucket,
       meta: {
         logLevel: 'warn',
-        logMessage: 'Prime debt snapshot unavailable for selected prime',
+        logMessage: 'Reference debt bucket unavailable for selected prime',
       },
     },
   );
@@ -453,6 +478,9 @@ export const tokenQuery = (chainId: number, tokenAddress: string) =>
     { params: { path: { chain_id: chainId, token_address: tokenAddress } } },
     {
       ...CACHE.tokenMeta,
+      // `warn`, not `error`, at both call sites: the drawer degrades silently
+      // and the methodology panel says so on screen, and one shared cache entry
+      // cannot carry two levels.
       meta: {
         logLevel: 'warn',
         logMessage: 'Token catalog metadata unavailable',
@@ -510,7 +538,14 @@ export const txProtocolEventsQuery = (txHash: string) =>
     { params: { path: { tx_hash: txHash } } },
     {
       ...CACHE.settledTx,
-      meta: { logMessage: 'Failed to fetch tx protocol events' },
+      // A 404 here is the fallback's trigger rather than an outage, and it is
+      // the common case on a deployment without the endpoint — so `warn`, and
+      // a message that says what happens next rather than "failed".
+      meta: {
+        logLevel: 'warn',
+        logMessage:
+          'Dedicated tx-events endpoint unavailable; trying the generic filter',
+      },
     },
   );
 
@@ -527,7 +562,9 @@ export const txProtocolEventsFallbackQuery = (txHash: string) =>
     {
       ...CACHE.settledTx,
       select: selectProtocolEvents,
-      meta: { logMessage: 'Failed to fetch tx protocol events' },
+      meta: {
+        logMessage: 'Failed to fetch tx protocol events from the filter',
+      },
     },
   );
 

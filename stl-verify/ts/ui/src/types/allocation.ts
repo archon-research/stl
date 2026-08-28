@@ -34,7 +34,10 @@ export type DataSourcesResponse = NonNullable<
   paths['/v1/data-sources']['get']['responses']['200']['content']['application/json']
 >;
 
-// Consumers use the raw rows; the API client unwraps `data`.
+export type ProtocolEventsEnvelope =
+  components['schemas']['ProtocolEventsEnvelope'];
+
+// Consumers use the raw rows; the query layer unwraps `data`.
 export type ProtocolEventsResponse = ProtocolEvent[];
 
 export type PrimeDebtEnvelope = components['schemas']['PrimeDebtEnvelope'];

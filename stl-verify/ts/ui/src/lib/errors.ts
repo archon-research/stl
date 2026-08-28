@@ -1,7 +1,5 @@
 import { isHttpRequestError } from '@archon-research/http-client-react';
 
-import { logging } from './logging';
-
 function toErrorBody(body: unknown): string {
   if (typeof body === 'string') {
     return body;
@@ -17,8 +15,9 @@ function toErrorBody(body: unknown): string {
 
   try {
     return JSON.stringify(body);
-  } catch (stringifyError) {
-    logging.error('Failed to stringify error body', { body, stringifyError });
+  } catch {
+    // Not logged, unlike everything else here: a cyclic body would log on every
+    // render. The query cache's `onError` already carries the error itself.
     return 'Unserializable error body.';
   }
 }

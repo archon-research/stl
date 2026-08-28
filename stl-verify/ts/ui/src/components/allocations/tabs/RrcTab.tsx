@@ -16,7 +16,11 @@ import {
 } from '../../../lib/dashboard';
 import { toQueryErrorMessage } from '../../../lib/errors';
 import { showsReference } from '../../../lib/provenance';
-import { rrcQuery } from '../../../lib/queries';
+import {
+  DISABLED_ADDRESS,
+  DISABLED_CHAIN_ID,
+  rrcQuery,
+} from '../../../lib/queries';
 import type {
   Allocation,
   AllocationRiskCapital,
@@ -42,11 +46,6 @@ const MODEL_LABELS: Record<string, string> = {
   gap_sweep: 'Gap sweep',
   core_model: 'CORE (alpha)',
 };
-
-// Stand-ins for the query params of a query `enabled` has switched off. Neither
-// is a real chain or address: nothing ever requests them.
-const NO_CHAIN_ID = -1;
-const NO_ADDRESS = '';
 
 // The table's own preference chain (PrimeRiskCapitalService._model_preference):
 // under `source=both` it tries core_model alone — a position core_model can't
@@ -242,9 +241,11 @@ export function RrcTab({
 }: RrcTabProps) {
   const receiptTokenId = selectedReceiptToken?.receipt_token_id ?? null;
   const chainId = selectedReceiptToken?.chain_id ?? null;
+  // Falsy rather than nullish, matching the other two drawer reads: an empty
+  // address would still build a request path that looks well-formed.
   const receiptTokenAddress =
-    selectedReceiptToken?.receipt_token_address ?? null;
-  const primeAddress = selectedPrime?.address ?? null;
+    selectedReceiptToken?.receipt_token_address || null;
+  const primeAddress = selectedPrime?.address || null;
   // The RRC endpoint scales a pool share to the exact (chain_id, prime
   // address) pair, so it only resolves for the chain selectedPrime.address
   // actually holds a position on — the prime's primary proxy's chain, today
@@ -269,9 +270,9 @@ export function RrcTab({
 
   const rrcResult = useQuery({
     ...rrcQuery(
-      chainId ?? NO_CHAIN_ID,
-      receiptTokenAddress ?? NO_ADDRESS,
-      primeAddress ?? NO_ADDRESS,
+      chainId ?? DISABLED_CHAIN_ID,
+      receiptTokenAddress ?? DISABLED_ADDRESS,
+      primeAddress ?? DISABLED_ADDRESS,
     ),
     enabled: canLoadRrc,
   });

@@ -8,7 +8,7 @@ import {
 } from '@archon-research/design-system';
 import { useQuery } from '@tanstack/react-query';
 import { ChevronDown, ChevronUp } from 'lucide-react';
-import { lazy, Suspense, useState } from 'react';
+import { lazy, Suspense } from 'react';
 
 import { css } from '#styled-system/css';
 
@@ -21,16 +21,14 @@ import { toQueryErrorMessage } from '../../lib/errors';
 import { logging } from '../../lib/logging';
 import {
   dataSourcesQuery,
+  DISABLED_ADDRESS,
+  DISABLED_CHAIN_ID,
   tokenPriceQuery,
   tokenQuery,
   tokensQuery,
 } from '../../lib/queries';
 import type { DataSource } from '../../types/allocation';
 
-// Stand-ins for the path params of a query `enabled` has switched off. Neither
-// is a real chain or address: nothing ever requests them.
-const NO_CHAIN_ID = -1;
-const NO_ADDRESS = '';
 const NO_SOURCES: DataSource[] = [];
 
 // The panel is collapsed on first paint and its markdown is a module constant,
@@ -97,8 +95,6 @@ export function MethodologyPanel({
   selectedTokenSymbol,
   selectedChainId,
 }: MethodologyPanelProps) {
-  const [methodologyText] = useState<string>(METHODOLOGY_MARKDOWN);
-
   // Every read below is gated on the panel being open: it is collapsed on first
   // paint, and none of this belongs in the app's first wave of requests.
   const dataSourcesResult = useQuery({
@@ -110,24 +106,29 @@ export function MethodologyPanel({
   const error = toQueryErrorMessage(dataSourcesResult.error);
 
   const chainId = selectedChainId ?? null;
-  const canLoadToken =
-    isOpen && chainId !== null && selectedTokenAddress !== undefined;
+  // Falsy rather than nullish: an empty address is as unaskable as an absent
+  // one, and it would still build a request path that looks well-formed.
+  const tokenAddress = selectedTokenAddress || null;
+  const canLoadToken = isOpen && chainId !== null && tokenAddress !== null;
 
   const tokenResult = useQuery({
-    ...tokenQuery(chainId ?? NO_CHAIN_ID, selectedTokenAddress ?? NO_ADDRESS),
+    ...tokenQuery(
+      chainId ?? DISABLED_CHAIN_ID,
+      tokenAddress ?? DISABLED_ADDRESS,
+    ),
     enabled: canLoadToken,
   });
   const tokenPriceResult = useQuery({
     ...tokenPriceQuery(
-      chainId ?? NO_CHAIN_ID,
-      selectedTokenAddress ?? NO_ADDRESS,
+      chainId ?? DISABLED_CHAIN_ID,
+      tokenAddress ?? DISABLED_ADDRESS,
     ),
     enabled: canLoadToken,
   });
   // The catalogue slice this token's symbol belongs to, read only for its size.
   const catalogResult = useQuery({
     ...tokensQuery({
-      chain_id: chainId ?? NO_CHAIN_ID,
+      chain_id: chainId ?? DISABLED_CHAIN_ID,
       symbol: selectedTokenSymbol ?? undefined,
       limit: 200,
     }),
@@ -246,7 +247,7 @@ export function MethodologyPanel({
                   onError={reportMarkdownLoadError}
                 >
                   <Suspense fallback={<SkeletonStack count={3} />}>
-                    <MethodologyMarkdown markdown={methodologyText} />
+                    <MethodologyMarkdown markdown={METHODOLOGY_MARKDOWN} />
                   </Suspense>
                 </ErrorBoundary>
               </div>

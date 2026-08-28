@@ -5,13 +5,13 @@ import {
   activitySeriesQuery,
   debtSeriesQuery,
   exposureSeriesQuery,
+  type SeriesWindow,
   totalCapitalSeriesQuery,
 } from '../lib/queries';
 import type {
   AllocationActivityBucket,
   ExposureBucket,
   PrimeDebtBucket,
-  TimeSeriesResolution,
   TotalCapitalBucket,
 } from '../types/allocation';
 
@@ -40,27 +40,24 @@ const NO_EXPOSURE: ExposureBucket[] = [];
  */
 export function usePrimeChartData(
   primeId: string | null,
-  fromTimestamp: string | undefined,
-  toTimestamp: string | undefined,
-  resolution: TimeSeriesResolution,
+  range: SeriesWindow,
 ): PrimeChartData {
   // `enabled` is the whole gate; the empty id only ever reaches the key of a
   // query that will not run.
-  const enabled = primeId !== null;
+  const enabled = Boolean(primeId);
   const forPrime = primeId ?? '';
-  const window = { fromTimestamp, toTimestamp, resolution };
 
-  const debt = useQuery({ ...debtSeriesQuery(forPrime, window), enabled });
+  const debt = useQuery({ ...debtSeriesQuery(forPrime, range), enabled });
   const activity = useQuery({
-    ...activitySeriesQuery(forPrime, window),
+    ...activitySeriesQuery(forPrime, range),
     enabled,
   });
   const totalCapital = useQuery({
-    ...totalCapitalSeriesQuery(forPrime, window),
+    ...totalCapitalSeriesQuery(forPrime, range),
     enabled,
   });
   const exposure = useQuery({
-    ...exposureSeriesQuery(forPrime, window),
+    ...exposureSeriesQuery(forPrime, range),
     enabled,
   });
 
@@ -69,9 +66,9 @@ export function usePrimeChartData(
     activityBuckets: activity.data ?? NO_ACTIVITY,
     totalCapitalBuckets: totalCapital.data ?? NO_CAPITAL,
     exposureBuckets: exposure.data ?? NO_EXPOSURE,
-    // Exposure is deliberately not one of these: it feeds a single card that
-    // already falls back on its own, and waiting on it would hold the other
-    // three in a skeleton behind the slowest request on the screen.
+    // The other three settle together so no card flashes its fallback while a
+    // sibling is still in flight. Exposure is deliberately outside that: it
+    // feeds one card that already degrades on its own.
     isLoading:
       enabled &&
       (debt.isPending || activity.isPending || totalCapital.isPending),

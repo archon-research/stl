@@ -26,6 +26,8 @@ import {
 } from '../../../lib/dashboard';
 import { toQueryErrorMessage } from '../../../lib/errors';
 import {
+  DISABLED_ADDRESS,
+  DISABLED_CHAIN_ID,
   riskBreakdownQuery,
   tokenPriceQuery,
   tokenQuery,
@@ -54,10 +56,8 @@ type RiskBreakdownTabProps = {
 
 type RiskItem = RiskBreakdown['items'][number];
 
-// Stand-ins for the path params of a query `enabled` has switched off. Neither
-// is a real chain or address: nothing ever requests them.
-const NO_CHAIN_ID = -1;
-const NO_ADDRESS = '';
+// Stable while the breakdown is absent: `RiskTable` memoises on this identity.
+const NO_RISK_ITEMS: RiskItem[] = [];
 
 function RiskSymbolCell({
   chainId,
@@ -244,10 +244,12 @@ export function RiskBreakdownTab({
   // A null chain is a position STL does not index, so there is no
   // (chain, receipt token) pair to ask about.
   const chainId = selectedReceiptToken?.chain_id ?? null;
+  // Falsy rather than nullish, as the effect these replaced was: an empty
+  // address would still build a request path that looks well-formed.
   const receiptTokenAddress =
-    selectedReceiptToken?.receipt_token_address ?? null;
+    selectedReceiptToken?.receipt_token_address || null;
   const underlyingAddress =
-    selectedReceiptToken?.underlying_token_address ?? null;
+    selectedReceiptToken?.underlying_token_address || null;
   // The breakdown scales to the given prime_id's pro-rata pool share on the
   // allocation's own chain_id, so it only resolves for the chain
   // selectedPrime actually holds a position on — the prime's primary proxy's
@@ -268,8 +270,8 @@ export function RiskBreakdownTab({
 
   const breakdownResult = useQuery({
     ...riskBreakdownQuery(
-      chainId ?? NO_CHAIN_ID,
-      receiptTokenAddress ?? NO_ADDRESS,
+      chainId ?? DISABLED_CHAIN_ID,
+      receiptTokenAddress ?? DISABLED_ADDRESS,
       primeId,
     ),
     enabled: canLoadBreakdown,
@@ -284,11 +286,17 @@ export function RiskBreakdownTab({
     isEnabled && chainId !== null && underlyingAddress !== null;
 
   const tokenCatalogResult = useQuery({
-    ...tokenQuery(chainId ?? NO_CHAIN_ID, underlyingAddress ?? NO_ADDRESS),
+    ...tokenQuery(
+      chainId ?? DISABLED_CHAIN_ID,
+      underlyingAddress ?? DISABLED_ADDRESS,
+    ),
     enabled: canLoadTokenMeta,
   });
   const tokenPriceResult = useQuery({
-    ...tokenPriceQuery(chainId ?? NO_CHAIN_ID, underlyingAddress ?? NO_ADDRESS),
+    ...tokenPriceQuery(
+      chainId ?? DISABLED_CHAIN_ID,
+      underlyingAddress ?? DISABLED_ADDRESS,
+    ),
     enabled: canLoadTokenMeta,
   });
 
@@ -534,7 +542,7 @@ export function RiskBreakdownTab({
       {!errorMessage && (isLoading || breakdown) ? (
         <RiskTable
           chainId={selectedReceiptToken.chain_id}
-          items={breakdown?.items ?? []}
+          items={breakdown?.items ?? NO_RISK_ITEMS}
           isLoading={isLoading}
           searchQuery={searchQuery}
         />

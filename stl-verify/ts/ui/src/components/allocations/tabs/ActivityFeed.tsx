@@ -279,8 +279,8 @@ function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
  *
  * A settled transaction's decoded events do not change, so the query holds them
  * for an hour: re-expanding a row it already showed issues no request at all.
- * That is the point of the endpoint's long `staleTime` — expansion mounts and
- * unmounts this component, and before the cache every re-open paid full price.
+ * Expansion mounts and unmounts this component, so `gcTime` is what carries the
+ * entry across a collapse.
  *
  * `txProtocolEventsQuery` is the dedicated endpoint; the generic
  * `/v1/protocol-events` filter is the fallback for deployments that lack it,
@@ -759,9 +759,17 @@ function useAllocationActivity({
     enabled: canLoadActivity,
   });
 
-  const events = activityResult.data ?? NO_EVENTS;
+  // Read through the gate, not just fetched behind it. The scope fields this
+  // query drops when it cannot be asked are `undefined`, which the key
+  // sanitizer strips — so a disabled query lands on the *unscoped* request's
+  // cache entry and would otherwise render another scope's rows.
+  const events = canLoadActivity
+    ? (activityResult.data ?? NO_EVENTS)
+    : NO_EVENTS;
   const isLoading = canLoadActivity && activityResult.isPending;
-  const error = toQueryErrorMessage(activityResult.error);
+  const error = canLoadActivity
+    ? toQueryErrorMessage(activityResult.error)
+    : null;
 
   const filteredEvents = useMemo(() => {
     if (!searchQuery) {

@@ -184,9 +184,9 @@ const PRIME_SCOPED_RESET: AppSearchPatch = {
   row: undefined,
 };
 
-// Shared fallbacks for a query that has not answered yet. A literal `?? []`
-// would hand every `useMemo` below a fresh array on each render, which is the
-// identity those memos compare on.
+// Shared fallbacks for a query that has not answered yet. For the four that
+// feed a `useMemo` below, a literal `?? []` would hand it a fresh array on
+// every render, which is the identity it compares on.
 const NO_PRIMES: Prime[] = [];
 const NO_CHAINS: LocalChainRow[] = [];
 const NO_PROTOCOLS: LocalProtocolRow[] = [];
@@ -198,9 +198,9 @@ const NO_ALLOCATIONS: Allocation[] = [];
  * Folds the per-proxy allocation queries into the one list the screen reads.
  *
  * A failure on any single proxy blanks the whole set rather than quietly
- * showing a prime that is missing a chain — the call the old `Promise.all`
- * made, kept. Declared at module scope because react-query only memoises a
- * combined result while the `combine` reference holds still.
+ * showing a prime that is missing a chain. Declared at module scope because
+ * react-query only memoises a combined result while the `combine` reference
+ * holds still.
  */
 function combineAllocations(results: readonly UseQueryResult<Allocation[]>[]) {
   const failed = results.find((result) => result.error !== null);
@@ -332,6 +332,10 @@ function App() {
     ? 'custom'
     : searchRangePreset;
 
+  // Deliberately not re-derived per render: `presetToRange` reads the clock, and
+  // a moving bound is a moving cache key. The window a preset resolves to is
+  // therefore fixed until the preset changes, which is what makes the series
+  // queries cacheable at all.
   const timeRange = useMemo<TimeRange>(
     () => customTimeRange ?? presetToRange(searchRangePreset),
     [customTimeRange, searchRangePreset],
@@ -431,14 +435,13 @@ function App() {
     selectedView,
   ]);
 
-  // The prime's rows, gathered from its per-chain ALM proxies. One query each,
-  // so a chain's rows cache on their own and returning to a prime is free.
   const allocationProxies = selectedPrimeGroup?.proxyAddresses ?? NO_PROXIES;
 
   // One call for anything the server answers prime-wide: reference rows are
   // prime-scoped, and the merged view resolves the prime's proxies itself.
   // Fanning either out would show each position once per chain — exactly the
-  // double-count the `scope` field warns about.
+  // double-count the `scope` field warns about. Otherwise it is one query per
+  // proxy, so a chain's rows cache on their own and returning to a prime is free.
   const queriedProxies = showsReference
     ? allocationProxies.slice(0, 1)
     : allocationProxies;
@@ -464,10 +467,8 @@ function App() {
     [shownProvenance, fetchedAllocations],
   );
 
-  // The prime_* fields on this response are aggregated prime-wide server-side,
-  // so one call against the primary proxy carries the same figures every
-  // other proxy of the prime would return; fanning it out would only waste
-  // requests.
+  // The proxy every prime-wide read is addressed to; why one is enough is on
+  // `riskCapitalQuery`, which is what depends on it.
   const primaryProxyAddress = selectedPrimeGroup?.primaryProxyAddress ?? null;
 
   const router = useRouter();
@@ -500,9 +501,10 @@ function App() {
   }, [provenanceFallback, router]);
 
   // Both reads below are prime-scoped snapshots with no range of their own, so
-  // `enabled` is the whole gate. The empty address only ever reaches the key of
-  // a query that will not run.
-  const isPrimeSelected = primaryProxyAddress !== null;
+  // `enabled` is the whole gate, and the empty address only ever reaches the
+  // key of a query that will not run. Falsy rather than nullish, as the effects
+  // these replaced were: an empty address still builds a plausible request path.
+  const isPrimeSelected = Boolean(primaryProxyAddress);
   const forPrime = primaryProxyAddress ?? '';
 
   const riskCapitalResult = useQuery({
@@ -559,9 +561,11 @@ function App() {
     // resolve it prime-wide server-side. Total-capital and debt read
     // prime-scoped rows, so one address answers for the whole prime there too.
     primaryProxyAddress,
-    timeRange.from_timestamp,
-    timeRange.to_timestamp,
-    chartResolution,
+    {
+      fromTimestamp: timeRange.from_timestamp,
+      toTimestamp: timeRange.to_timestamp,
+      resolution: chartResolution,
+    },
   );
 
   const chainLabels = useMemo(
