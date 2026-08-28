@@ -339,14 +339,6 @@ func TestFetchPositionsRejectsAnEmptyResult(t *testing.T) {
 	}
 }
 
-func TestFetchPositionsRejectsADuplicateRowIdentity(t *testing.T) {
-	client, _ := newPositionsTestClient(t, []map[string]any{positionRow(nil), positionRow(nil)}, 2)
-
-	if _, err := client.FetchPositions(context.Background(), []string{"spark"}); err == nil {
-		t.Fatal("FetchPositions() = nil, want an error — a duplicate identity would silently conflict away at insert")
-	}
-}
-
 // Reproduces grove's live shape: the same (network, token_address) reported
 // under two proxy wallets, with materially different balances on each — the
 // staging failure this fix addresses ("sky positions for prime grove repeat
