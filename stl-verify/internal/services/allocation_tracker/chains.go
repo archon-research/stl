@@ -60,9 +60,10 @@ var servedTrackerChains = map[string]bool{
 // are knowingly dropped by entriesForChainID. A chain moves from here into servedTrackerChains
 // in the same PR that deploys its tracker; the staleness rule in validateContractChainsServed
 // fails CI if a chain ends up both served and acknowledged. Vocabulary-UNKNOWN unserved chains
-// live in acknowledgedUnservedChains, not here (see the partition note above). Empty since
-// ARCT-216 deployed the last three: every vocabulary-known contract chain now has a tracker.
-var acknowledgedUnservedByTrackerChains = map[string]bool{}
+// live in acknowledgedUnservedChains, not here (see the partition note above).
+var acknowledgedUnservedByTrackerChains = map[string]bool{
+	"robinhood": true, // until robinhood-allocation-tracker deploys (grove scope)
+}
 
 // allAcknowledgedUnservedChains is the set of chains it is acceptable for no tracker to serve:
 // the union of the vocabulary-unknown acknowledgements (acknowledgedUnservedChains, unserved a
