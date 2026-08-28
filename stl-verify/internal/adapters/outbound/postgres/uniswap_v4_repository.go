@@ -211,10 +211,10 @@ type v4LiquidityEventConverted struct {
 // tx, except ticks (append-on-change, see uniswapTickWriter), and returns both
 // the count of state rows the block queued and the count that actually
 // appended.
-func (r *UniswapV4Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.UniswapV4BlockWrites) (stateRows outbound.UniswapStateRowCounts, err error) {
+func (r *UniswapV4Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.UniswapV4BlockWrites) (stateRows outbound.StateRowCounts, err error) {
 	rows, err := convertV4BlockWrites(w)
 	if err != nil {
-		return outbound.UniswapStateRowCounts{}, err
+		return outbound.StateRowCounts{}, err
 	}
 
 	batch := &pgx.Batch{}
@@ -563,7 +563,7 @@ func queueV4PoolEvents(batch *pgx.Batch, poolEvents []*entity.UniswapV4PoolEvent
 // service means a repo-layer drop is counted as zero attempts too. The batch
 // reader is always closed before returning so the caller may issue further
 // queries on tx (writeTicks runs after this).
-func sendUniswapV4Batch(ctx context.Context, tx pgx.Tx, batch *pgx.Batch, rows v4BatchRows) (stateRows outbound.UniswapStateRowCounts, err error) {
+func sendUniswapV4Batch(ctx context.Context, tx pgx.Tx, batch *pgx.Batch, rows v4BatchRows) (stateRows outbound.StateRowCounts, err error) {
 	br := tx.SendBatch(ctx, batch)
 	defer func() {
 		if closeErr := br.Close(); closeErr != nil {

@@ -349,7 +349,7 @@ func summarisePool(p RegisteredPool, s *entity.UniswapV4PoolState) poolSnapshotS
 func persistStates(t *testing.T, ctx context.Context, txMgr outbound.TxManager, repo *postgres.UniswapV4Repository, states []*entity.UniswapV4PoolState) int64 {
 	t.Helper()
 
-	var stateRows outbound.UniswapStateRowCounts
+	var stateRows outbound.StateRowCounts
 	err := txMgr.WithTransaction(ctx, func(tx pgx.Tx) error {
 		var txErr error
 		stateRows, txErr = repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{States: states})

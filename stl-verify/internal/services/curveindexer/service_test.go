@@ -47,7 +47,7 @@ func (r *fakeCurveRepo) LoadPools(_ context.Context, _ int64) ([]outbound.CurveP
 	return nil, nil
 }
 
-func (r *fakeCurveRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.BlockWrites) (outbound.CurveStateRowCounts, error) {
+func (r *fakeCurveRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.BlockWrites) (outbound.StateRowCounts, error) {
 	r.lastWrites = w
 	r.swapSaves += len(w.Swaps)
 	r.liquiditySaves += len(w.Liquidity)
@@ -59,7 +59,7 @@ func (r *fakeCurveRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.BlockW
 	for _, s := range w.CryptoStates {
 		r.snapshotPoolIDs = append(r.snapshotPoolIDs, s.CurvePoolID)
 	}
-	counts := outbound.CurveStateRowCounts{Attempted: int64(len(w.StableStates) + len(w.CryptoStates))}
+	counts := outbound.StateRowCounts{Attempted: int64(len(w.StableStates) + len(w.CryptoStates))}
 	if r.stateRowsReturn != 0 {
 		counts.Persisted = counts.Attempted
 	}

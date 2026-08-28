@@ -182,7 +182,7 @@ func TestCurveRepository_SaveStableswapState_Idempotent(t *testing.T) {
 		t.Fatalf("NewCurveStableswapState: %v", err)
 	}
 
-	save := func() outbound.CurveStateRowCounts {
+	save := func() outbound.StateRowCounts {
 		return saveBlockCommitted(t, ctx, repo, outbound.BlockWrites{StableStates: []*entity.CurveStableswapState{st}})
 	}
 
@@ -584,7 +584,7 @@ func seedCurvePoolWithLpToken(t *testing.T, ctx context.Context, lpAddr common.A
 
 // saveBlockCommitted runs SaveBlock inside a committed transaction and returns
 // the state-row count.
-func saveBlockCommitted(t *testing.T, ctx context.Context, repo *CurveRepository, w outbound.BlockWrites) outbound.CurveStateRowCounts {
+func saveBlockCommitted(t *testing.T, ctx context.Context, repo *CurveRepository, w outbound.BlockWrites) outbound.StateRowCounts {
 	t.Helper()
 	tx, err := curveTestPool.Begin(ctx)
 	if err != nil {
