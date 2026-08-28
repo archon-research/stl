@@ -23,6 +23,7 @@
     "format:check": "uikit-cli format --check \"src/**/*.ts\" \"src/**/*.tsx\" \"src/**/*.css\" \"scripts/**/*.ts\" panda.config.ts vite.config.ts env.ts oxlint.config.ts .oxfmtrc.ts index.html",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:bundle-budget": "node scripts/check-bundle-budget.ts",
     "test:explorers": "node scripts/check-explorer-urls.ts",
     "test:prime-grouping": "node scripts/check-prime-grouping.ts",
     "test:metrics-grid": "node scripts/check-metrics-grid.ts",
