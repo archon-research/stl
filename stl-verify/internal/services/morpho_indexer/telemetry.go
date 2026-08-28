@@ -24,13 +24,8 @@ const (
 	v2SnapshotVaultFee     v2SnapshotType = "vault_fee"
 )
 
-// UnprobeableReason names why a discovery candidate could not be probed at all,
-// and so was discarded as definitively not a Morpho-family vault.
 type UnprobeableReason string
 
-// UnprobeableGasExhausted is a candidate whose every probe selector, isolated,
-// burns the eth_call gas budget instead of answering — the structural
-// determination "not a vault".
 const UnprobeableGasExhausted UnprobeableReason = "gas_exhausted"
 
 // adapterTypeLabel renders an adapter classification as a metric label. Two
@@ -299,13 +294,8 @@ func (t *Telemetry) RecordV2Snapshot(ctx context.Context, snapshotType v2Snapsho
 	))
 }
 
-// RecordUnprobeableCandidate counts one candidate discovery discarded because it
-// cannot answer a probe. Every discard increments, including a re-encounter
-// served from the prober's memo, so the count is what the candidate set holds
-// rather than how often the bisection ran.
-//
-// Non-zero means the candidate filter is admitting contracts the probe cannot
-// classify; sustained growth means a new class of them is being minted.
+// Every discard increments, a memo hit included, so this counts what the candidate
+// set holds rather than how often the bisection ran.
 func (t *Telemetry) RecordUnprobeableCandidate(ctx context.Context, reason UnprobeableReason) {
 	if t == nil {
 		return

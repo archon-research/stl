@@ -9,9 +9,6 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
-// counterValue sums the named int64 counter's data points whose attributes
-// include every entry of want. Attributes outside want are ignored, so a test
-// asserts only the labels it cares about.
 func counterValue(t *testing.T, reader sdkmetric.Reader, name string, want map[string]string) int64 {
 	t.Helper()
 	var rm metricdata.ResourceMetrics

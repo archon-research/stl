@@ -151,9 +151,6 @@ func TestRecordV2Snapshot_LabelsSnapshotType(t *testing.T) {
 	}
 }
 
-// TestRecordUnprobeableCandidate_LabelsReason pins the label vocabulary a
-// discard alert selects on, and that the address itself stays out of it — the
-// WARN carries the identifier, the counter stays low-cardinality.
 func TestRecordUnprobeableCandidate_LabelsReason(t *testing.T) {
 	tel, reader := newRecordingTelemetry(t)
 	tel.RecordUnprobeableCandidate(context.Background(), UnprobeableGasExhausted)
