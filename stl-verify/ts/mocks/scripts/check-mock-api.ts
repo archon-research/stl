@@ -7,6 +7,7 @@ import type {
 } from '@archon-research/http-client-core';
 import { createApiClient } from '@archon-research/http-client-core';
 
+import { failingHandler } from '../src/failure.ts';
 import {
   GROVE_MAINNET_PROXY,
   MOCK_ORIGIN,
@@ -1403,6 +1404,39 @@ async function checkRrcRejectsAmbiguousIdentity() {
   );
 }
 
+/**
+ * The failure control is the only route to an error state offline — every
+ * fixture succeeds — so the recovery behaviour built on it (the range
+ * selector's retry, the cards' error copy) stops being exercised the moment
+ * this stops working, and nothing else would say so.
+ */
+async function checkAReadCanBeMadeToFail() {
+  const healthy = await request(
+    '/v1/primes/{prime_id}/risk-capital',
+    primeAt(SPARK_MAINNET_PROXY),
+    'risk-capital before the failure is installed',
+  );
+  assert.ok(
+    healthy.prime_exposure_usd !== undefined,
+    'the read has to succeed first, or the 503 below proves nothing',
+  );
+
+  // Dropped by the runner's `mockServer.reset()` after this check.
+  mockServer.server.use(failingHandler('risk-capital'));
+
+  const error = await expectStatus(
+    '/v1/primes/{prime_id}/risk-capital',
+    primeAt(SPARK_MAINNET_PROXY),
+    503,
+    'risk-capital, failing',
+  );
+  const detail = (error as { detail?: unknown } | undefined)?.detail;
+  assert.ok(
+    typeof detail === 'string' && /unavailable/u.test(detail),
+    'a failed read reports why as a string, in the shape FastAPI raises',
+  );
+}
+
 const checks: [string, () => Promise<void>][] = [
   ['primes list shape', checkPrimesList],
   ['registry lists', checkRegistryLists],
@@ -1472,6 +1506,7 @@ const checks: [string, () => Promise<void>][] = [
   ['boolean flags follow pydantic', checkBooleanFlagsFollowPydantic],
   ['illegal windows are rejected', checkIllegalWindowsAreRejected],
   ['rrc rejects an ambiguous identity', checkRrcRejectsAmbiguousIdentity],
+  ['a read can be made to fail', checkAReadCanBeMadeToFail],
 ];
 
 let failed = 0;
