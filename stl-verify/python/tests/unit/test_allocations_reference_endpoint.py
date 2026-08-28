@@ -467,6 +467,75 @@ def test_both_keeps_skys_value_beside_stls_on_a_matched_row(reference_client):
 
 @pytest.mark.parametrize(
     "reference_client",
+    [
+        _positions(
+            _reference_position(
+                network="ethereum",
+                chain_id=1,
+                chain="mainnet",
+                wallet_address=_VALID_ADDR,
+            ),
+            _reference_position(
+                network="ethereum",
+                chain_id=1,
+                chain="mainnet",
+                wallet_address=_OTHER_PROXY,
+            ),
+        )
+    ],
+    indirect=True,
+)
+def test_both_binds_an_indexed_counterpart_to_only_one_wallet_row(reference_client):
+    """Grove reports one token under two proxy wallets (VEC-NA); PositionFacts
+    carries no wallet, so both reference rows answer to the same indexed
+    counterpart. Binding both would copy the indexed row's `amount_usd` into
+    the merged list twice -- it must bind to one wallet row only, leaving the
+    other to serve as a plain reference row.
+    """
+    from app.domain.entities.allocation import ReceiptTokenPosition
+
+    client, service = reference_client
+    service.prime_proxy_addresses.return_value = [EthAddress(_VALID_ADDR)]
+    service.list_direct_asset_holdings.return_value = []
+    service.primary_proxy_address.return_value = None
+    service.list_receipt_token_positions.return_value = [
+        ReceiptTokenPosition(
+            chain_id=1,
+            receipt_token_id=41,
+            receipt_token_address=_TOKEN,
+            underlying_token_id=7,
+            underlying_token_address="0x" + "77" * 20,
+            symbol="spUSDT",
+            underlying_symbol="USDT",
+            protocol_name="sparklend",
+            balance=Decimal("1"),
+            amount_usd=Decimal("500000000"),
+            latest_activity_at=None,
+            latest_activity_action=None,
+            latest_activity_amount=None,
+        )
+    ]
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?source=both")
+
+    assert response.status_code == 200
+    rows = response.json()
+    assert len(rows) == 2
+
+    both_rows = [row for row in rows if row["source"] == "both"]
+    reference_rows = [row for row in rows if row["source"] == "reference"]
+    assert len(both_rows) == 1
+    assert len(reference_rows) == 1
+    # The indexed figure appears exactly once, not once per wallet row: the
+    # unmatched wallet row keeps its own reference `amount_usd`, never the
+    # indexed counterpart's.
+    assert both_rows[0]["amount_usd"] == "500000000"
+    assert reference_rows[0]["amount_usd"] == "344187505.66"
+    assert reference_rows[0]["wallet_address"] in {_VALID_ADDR, _OTHER_PROXY}
+
+
+@pytest.mark.parametrize(
+    "reference_client",
     [_positions(_reference_position(network="ethereum", chain_id=1, chain="mainnet"))],
     indirect=True,
 )
