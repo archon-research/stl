@@ -5,6 +5,13 @@
 # Raw `codex exec`, not openai/codex-action: the action only takes an API key
 # (metered billing); we pay for seats, so this seeds the seat's own auth.json.
 # See https://learn.chatgpt.com/docs/auth/ci-cd-auth
+#
+# The seat bundle lives in Secrets Manager, fetched over OIDC. This repo is
+# public: as an Actions secret the bundle is readable by anyone who can push a
+# workflow, and refreshing it needs a second secret that can rewrite repo
+# secrets. In AWS, reads land in CloudTrail and revocation is IAM. The role is
+# trusted for `environment:codex-review` alone, which is why the job declares it.
+# Terraform: infrastructure/infra/31_codex_review_oidc.tf
 # Actions are pinned to commit SHAs for supply-chain security.
 name: Codex Review
 
@@ -13,6 +20,10 @@ on:
     types: [labeled]
 
 permissions: {}
+
+env:
+  CODEX_SEAT_ROLE_ARN: arn:aws:iam::579039992622:role/archonstaging-github-actions-codex-review
+  CODEX_SEAT_SECRET_ID: archon-staging-codex-review-auth
 
 jobs:
   review:
@@ -35,9 +46,13 @@ jobs:
       cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Qualifies the OIDC subject: the seat role trusts this environment and
+    # nothing else, so no other workflow in this repo can mint the credential.
+    environment: codex-review
     permissions:
       contents: read
       pull-requests: write
+      id-token: write  # AWS OIDC assume
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -48,29 +63,51 @@ jobs:
           persist-credentials: false
           fetch-depth: 0  # merge-base against the base branch needs full history
 
+      - name: Assume the Codex seat role
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c  # v6.2.3
+        with:
+          role-to-assume: ${{ env.CODEX_SEAT_ROLE_ARN }}
+          aws-region: eu-west-1
+
       # Fresh CODEX_HOME per run: nothing but the seeded auth.json can affect the
       # review. Exported via GITHUB_ENV (`runner.*` is out of scope in job env).
-      # Each credential string is registered as a log mask here: GitHub only knows
-      # the secret as one JSON blob, so a token printed alone would pass unmasked.
+      # Each credential string is registered as a log mask here: Secrets Manager
+      # holds the bundle as one JSON blob, so a token printed alone would
+      # otherwise pass unmasked. The seeded copy is kept for the leak check to
+      # build its needles from, alongside whatever the run refreshed it to.
       - name: Seed Codex auth from the service seat
-        env:
-          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
         run: |
           set -euo pipefail
           CODEX_HOME="${RUNNER_TEMP}/codex"
           echo "CODEX_HOME=${CODEX_HOME}" >> "${GITHUB_ENV}"
-          if [ -z "${CODEX_AUTH_JSON}" ]; then
-            echo "::error::CODEX_AUTH_JSON is unset. Run 'codex login' on the service seat and store ~/.codex/auth.json as that secret."
-            exit 1
-          fi
           mkdir -p "${CODEX_HOME}"
           chmod 700 "${CODEX_HOME}"
-          printf '%s' "${CODEX_AUTH_JSON}" > "${CODEX_HOME}/auth.json"
-          chmod 600 "${CODEX_HOME}/auth.json"
+          umask 077
+          aws secretsmanager get-secret-value \
+            --secret-id "${CODEX_SEAT_SECRET_ID}" \
+            --query SecretString --output text > "${CODEX_HOME}/auth.json"
           jq -r '[.OPENAI_API_KEY, .tokens.id_token, .tokens.access_token, .tokens.refresh_token]
                  | map(select(type == "string" and length >= 20)) | .[]' "${CODEX_HOME}/auth.json" \
-            | while IFS= read -r t; do echo "::add-mask::${t}"; done
+            > "${RUNNER_TEMP}/seeded-tokens"
+          if [ ! -s "${RUNNER_TEMP}/seeded-tokens" ]; then
+            echo "::error::${CODEX_SEAT_SECRET_ID} holds no credential fields. Run 'codex login' on the service seat and put ~/.codex/auth.json into that secret."
+            exit 1
+          fi
+          while IFS= read -r t; do echo "::add-mask::${t}"; done < "${RUNNER_TEMP}/seeded-tokens"
+          cp "${CODEX_HOME}/auth.json" "${RUNNER_TEMP}/seeded.json"
           echo "SEEDED_SHA=$(sha256sum "${CODEX_HOME}/auth.json" | cut -d ' ' -f 1)" >> "${GITHUB_ENV}"
+
+      # The reviewer needs the seat bundle on disk; it has no business in AWS.
+      # Clearing the session leaves it unable to rewrite the stored credential
+      # with what it reads, for the same reason it holds no GitHub token.
+      - name: Drop the AWS session before the reviewer runs
+        run: |
+          set -euo pipefail
+          {
+            echo "AWS_ACCESS_KEY_ID="
+            echo "AWS_SECRET_ACCESS_KEY="
+            echo "AWS_SESSION_TOKEN="
+          } >> "${GITHUB_ENV}"
 
       - name: Install Codex CLI
         run: |
@@ -183,15 +220,12 @@ jobs:
       # the label gate above is the real boundary, this is defence in depth.
       - name: Refuse to publish anything containing token material
         id: leakcheck
-        env:
-          SEEDED_AUTH: ${{ secrets.CODEX_AUTH_JSON }}
         run: |
           set -euo pipefail
           extract() {
             jq -r '[.OPENAI_API_KEY, .tokens.id_token, .tokens.access_token, .tokens.refresh_token]
                    | map(select(type == "string" and length >= 20)) | .[]' "$1"
           }
-          printf '%s' "${SEEDED_AUTH}" > "${RUNNER_TEMP}/seeded.json"
           if ! extract "${RUNNER_TEMP}/seeded.json" > "${RUNNER_TEMP}/tokens" \
              || ! extract "${CODEX_HOME}/auth.json" >> "${RUNNER_TEMP}/tokens"; then
             echo "::error::Could not parse auth.json to build the leak check. Refusing to post."
@@ -338,17 +372,23 @@ jobs:
               || echo "::warning::Could not collapse the earlier report ${id}; this PR now shows more than one expanded review."
           done
 
+      # The session was dropped before the reviewer ran, so the write-back takes
+      # its own. Same role, same one secret.
+      - name: Re-assume the Codex seat role
+        if: always() && steps.leakcheck.outcome == 'success'
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c  # v6.2.3
+        with:
+          role-to-assume: ${{ env.CODEX_SEAT_ROLE_ARN }}
+          aws-region: eu-west-1
+
       # Codex refreshes the bundle past ~8 days and the refresh may invalidate the
       # seeded copy; persisting it back is what OpenAI's CI guide requires. After
       # the comment on purpose: a rotation failure must not cost the review.
       # Gated on the leak check (a compromised token must not re-arm later runs)
       # and on the bundle actually changing (a no-op run must not clobber an
-      # operator's concurrent re-seed). Skipped with a warning until the rotation
-      # token exists.
+      # operator's concurrent re-seed).
       - name: Persist refreshed auth
         if: always() && steps.leakcheck.outcome == 'success'
-        env:
-          GH_TOKEN: ${{ secrets.CODEX_AUTH_ROTATE_TOKEN }}
         run: |
           set -euo pipefail
           if [ ! -f "${CODEX_HOME}/auth.json" ]; then
@@ -359,12 +399,11 @@ jobs:
             echo "Bundle unchanged since seeding — nothing to persist."
             exit 0
           fi
-          if [ -z "${GH_TOKEN}" ]; then
-            echo "::warning::CODEX_AUTH_ROTATE_TOKEN unset — refreshed auth.json not persisted. Re-seed CODEX_AUTH_JSON by hand when reviews start failing to authenticate."
-            exit 0
-          fi
-          # Piped, not --body: a secret on the command line is visible in argv.
-          gh secret set CODEX_AUTH_JSON < "${CODEX_HOME}/auth.json"
+          # file://, not the string itself: a secret on the command line is
+          # visible in argv.
+          aws secretsmanager put-secret-value \
+            --secret-id "${CODEX_SEAT_SECRET_ID}" \
+            --secret-string "file://${CODEX_HOME}/auth.json" > /dev/null
 
       # Re-usable label: `labeled` only fires on a label that isn't already there,
       # so removing it here is what makes a re-review askable.
