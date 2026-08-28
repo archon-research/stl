@@ -169,6 +169,17 @@ class AllocationResponse(BaseModel):
         ),
         examples=["ethereum"],
     )
+    wallet_address: str | None = Field(
+        default=None,
+        description=(
+            "The ALM proxy holding this position, as upstream reports it. Populated on reference "
+            "rows only — the same (`network`, `receipt_token_address`/`held_token_address`) can "
+            "legitimately recur under a prime's different proxy wallets, and this is what "
+            "distinguishes those rows. `null` on an indexed row, which is already scoped to a "
+            "single queried proxy."
+        ),
+        examples=["0x1234567890abcdef1234567890abcdef12345678"],
+    )
     receipt_token_id: int | None = Field(
         default=None,
         description="Surrogate id of the receipt token. `null` for direct asset holdings.",
@@ -715,6 +726,7 @@ def _reference_allocation_row(
     return AllocationResponse(
         chain_id=row.chain_id,
         network=row.network,
+        wallet_address=row.wallet_address,
         receipt_token_id=row.receipt_token_id,
         receipt_token_address=row.token_address if as_address(row.token_address) else None,
         # Unlike the Star monitor's breakdown, this feed names no loan token

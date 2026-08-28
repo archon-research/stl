@@ -28,6 +28,7 @@ def _row(**overrides) -> SimpleNamespace:
             "token_symbol": "spUSDS",
             "token_name": "Spark USDS",
             "token_address": "0x" + "cd" * 20,
+            "wallet_address": "0x" + "ef" * 20,
             "assets_usd": Decimal("787379142.91"),
             "allocated_assets_usd": Decimal("787000000.00"),
             "idle_assets_usd": Decimal("379142.91"),
@@ -62,6 +63,7 @@ async def test_maps_a_position_with_its_resolved_registry_id(stub_engine) -> Non
     assert position.assets_usd == Decimal("787379142.91")
     assert position.receipt_token_id == 41
     assert position.chain == "mainnet"
+    assert position.wallet_address == "0x" + "ef" * 20
     assert snapshot.synced_at == _SYNCED_AT
 
 

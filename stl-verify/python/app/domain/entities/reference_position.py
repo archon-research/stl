@@ -27,18 +27,8 @@ class ReferencePosition:
     resolve to a receipt token. Callers join on it defensively and tolerate a
     miss rather than treating it as an address.
 
-    Two fields upstream serves are deliberately absent here, dropped because
-    nothing read them rather than because they are uninteresting:
-
-    ``wallet_address`` is the ALM proxy holding the position. It is now part of
-    ``prime_reference_position``'s row identity in storage (VEC-NA: the same
-    (network, token_address) legitimately recurs under a prime's different
-    proxies, verified live on grove) and is parsed by the Go client and used in
-    this read path's ``DISTINCT ON`` so both proxies' rows still serve — but it
-    is not itself in the response, so two positions that differ only by
-    wallet still read as indistinguishable duplicates here. Serving it is one
-    field here and one in the response contract, once a consumer needs to
-    tell the proxies apart.
+    One field upstream serves is deliberately absent here, dropped because
+    nothing read it rather than because it is uninteresting:
 
     ``allocation_type`` is upstream's own category vocabulary (``allocation`` /
     ``asset`` / ``pol`` / ``psm3``), which maps closely onto the ``category``
@@ -52,6 +42,11 @@ class ReferencePosition:
     symbol: str
     name: str
     token_address: str
+    # The ALM proxy holding the position. Part of `prime_reference_position`'s
+    # row identity in storage (VEC-NA: the same (network, token_address)
+    # legitimately recurs under a prime's different proxies) and what lets a
+    # consumer tell those rows apart.
+    wallet_address: str
     # The full holding. `allocated` and `idle` decompose it — a position can be
     # deployed into a protocol or sitting in the proxy, and upstream reports
     # both legs rather than only the sum.

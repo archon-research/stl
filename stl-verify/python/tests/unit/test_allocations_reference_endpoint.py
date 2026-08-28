@@ -38,6 +38,7 @@ def _reference_position(
     *,
     network: str = "ethereum",
     token_address: str = _TOKEN,
+    wallet_address: str = _VALID_ADDR,
     receipt_token_id: int | None = 41,
     underlying_token_id: int | None = None,
     underlying_token_address: str | None = None,
@@ -51,6 +52,7 @@ def _reference_position(
         symbol="spUSDT",
         name="Spark USDT",
         token_address=token_address,
+        wallet_address=wallet_address,
         assets_usd=Decimal("344187505.66"),
         allocated_assets_usd=Decimal("344000000.00"),
         idle_assets_usd=Decimal("187505.66"),
@@ -99,6 +101,36 @@ def test_reference_mode_serves_upstream_positions_in_the_allocation_shape(refere
     assert row["underlying_symbol"] == ""
     assert row["amount_usd"] == "344187505.66"
     assert row["chain_id"] == 1
+
+
+@pytest.mark.parametrize("reference_client", [_positions()], indirect=True)
+def test_reference_mode_carries_the_holding_wallet(reference_client):
+    client, _ = reference_client
+
+    body = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?reference=true").json()
+
+    assert body[0]["wallet_address"] == _VALID_ADDR
+
+
+@pytest.mark.parametrize(
+    "reference_client",
+    [
+        _positions(
+            _reference_position(wallet_address=_VALID_ADDR),
+            _reference_position(wallet_address=_OTHER_PROXY),
+        )
+    ],
+    indirect=True,
+)
+def test_reference_mode_serves_both_proxies_holding_the_same_token(reference_client):
+    # The same (network, token_address) legitimately recurs under a prime's
+    # different proxy wallets (VEC-NA) -- both rows must survive, distinguished
+    # by wallet_address, not collapse into one.
+    client, _ = reference_client
+
+    body = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?reference=true").json()
+
+    assert sorted(row["wallet_address"] for row in body) == sorted([_VALID_ADDR, _OTHER_PROXY])
 
 
 @pytest.mark.parametrize(

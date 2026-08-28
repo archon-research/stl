@@ -299,6 +299,18 @@ export function allocationNetworkKey(allocation: Allocation): string {
 }
 
 export function getAllocationKey(allocation: Allocation): string {
+  const identityKey = getAllocationIdentityKey(allocation);
+  // The same (network, token) legitimately recurs under a prime's different
+  // proxy wallets on a reference row (VEC-NA) — fold the holding wallet in so
+  // those rows key apart instead of colliding. Indexed rows carry no
+  // `wallet_address`, so the suffix drops out entirely and their key (and any
+  // URL/selection built from it) is unchanged.
+  return allocation.wallet_address
+    ? `${identityKey}#${allocation.wallet_address}`
+    : identityKey;
+}
+
+function getAllocationIdentityKey(allocation: Allocation): string {
   if (allocation.receipt_token_id != null) {
     return String(allocation.receipt_token_id);
   }
