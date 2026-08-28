@@ -9,6 +9,9 @@ export default defineConfig({
     designSystemPreset,
   ],
   preflight: true,
+  // Defaults to 'warn', which lets a config that fails validation (an unknown
+  // token, a malformed recipe) pass codegen and reach the build.
+  validation: 'error',
   include: ['./src/**/*.{ts,tsx,js,jsx}'],
   exclude: [],
   gitignore: true,

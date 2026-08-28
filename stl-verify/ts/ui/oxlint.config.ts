@@ -26,6 +26,14 @@ const config = {
     'no-restricted-imports': denied('no-restricted-imports'),
     'no-console': 'error',
 
+    // Not reachable from `correctness` + `suspicious`: oxlint files these under
+    // `pedantic` and `restriction`, which also carry `max-lines` and friends.
+    // Named individually so the categories stay narrow. All three measured at
+    // 0 violations when enabled, so they are ratchets, not a backlog.
+    'react/rules-of-hooks': 'error',
+    'import/no-cycle': 'error',
+    'typescript/no-explicit-any': 'error',
+
     // Type-aware rules (`--type-aware` in the lint script). The promise-safety
     // family is the reason the flag is on at all: without it these sit in the
     // effective config reading as coverage while never executing.
