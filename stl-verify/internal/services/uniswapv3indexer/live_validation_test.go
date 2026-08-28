@@ -131,7 +131,7 @@ func TestLiveValidation(t *testing.T) {
 	}
 	eventWriter := newLiveEventWriter(t, ctx, pool, buildID)
 
-	var stateRows outbound.UniswapStateRowCounts
+	var stateRows outbound.StateRowCounts
 	err = txMgr.WithTransaction(ctx, func(tx pgx.Tx) error {
 		var txErr error
 		stateRows, txErr = repo.SaveBlock(ctx, tx, outbound.UniswapV3BlockWrites{States: states})

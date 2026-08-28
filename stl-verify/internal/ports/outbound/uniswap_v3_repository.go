@@ -41,7 +41,7 @@ type UniswapV3Repository interface {
 	// number that actually appended (ON CONFLICT DO NOTHING means a redelivery
 	// persists 0), for the uniswap_v3_state_rows_attempted_total and
 	// uniswap_v3_state_rows_written_total metrics.
-	SaveBlock(ctx context.Context, tx pgx.Tx, w UniswapV3BlockWrites) (stateRows UniswapStateRowCounts, err error)
+	SaveBlock(ctx context.Context, tx pgx.Tx, w UniswapV3BlockWrites) (stateRows StateRowCounts, err error)
 	// TicksForPoolAtBlock returns the distinct tick positions that already have a
 	// row for pool at blockNumber, so a reorg redelivery can re-read exactly the
 	// ticks a prior version wrote at this height (VEC-487). Reads committed rows

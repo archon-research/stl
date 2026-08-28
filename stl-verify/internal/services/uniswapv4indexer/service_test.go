@@ -99,13 +99,13 @@ func (r *fakeUniswapRepo) PoolIDsEverSnapshotted(_ context.Context, chainID int6
 	return r.everSnapshotted, nil
 }
 
-func (r *fakeUniswapRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.UniswapV4BlockWrites) (outbound.UniswapStateRowCounts, error) {
+func (r *fakeUniswapRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.UniswapV4BlockWrites) (outbound.StateRowCounts, error) {
 	r.saveBlockCalls++
 	if r.err != nil {
-		return outbound.UniswapStateRowCounts{}, r.err
+		return outbound.StateRowCounts{}, r.err
 	}
 	r.lastWrites = w
-	counts := outbound.UniswapStateRowCounts{
+	counts := outbound.StateRowCounts{
 		Attempted: int64(len(w.States)),
 		Persisted: int64(len(w.States)),
 	}

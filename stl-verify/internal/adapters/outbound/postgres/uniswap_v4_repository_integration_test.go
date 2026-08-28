@@ -580,7 +580,7 @@ func TestUniswapV4Repository_SaveBlock_RoundTripsEveryTable(t *testing.T) {
 	}
 
 	repo := newUniswapV4Repo(t)
-	var stateRows outbound.UniswapStateRowCounts
+	var stateRows outbound.StateRowCounts
 	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
 		var saveErr error
 		stateRows, saveErr = repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{
@@ -803,8 +803,8 @@ func TestUniswapV4Repository_SaveBlock_IdenticalReplayInsertsNothing(t *testing.
 	writes := newUniswapV4TestBlockWrites(t, poolID, blockNumber, 0)
 
 	repo := newUniswapV4Repo(t)
-	save := func() outbound.UniswapStateRowCounts {
-		var counts outbound.UniswapStateRowCounts
+	save := func() outbound.StateRowCounts {
+		var counts outbound.StateRowCounts
 		withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
 			var err error
 			if counts, err = repo.SaveBlock(ctx, tx, writes); err != nil {
@@ -963,7 +963,7 @@ func TestUniswapV4Repository_SaveBlock_CountsOnlyTheStateSectionsRows(t *testing
 
 	// Re-saving the state conflicts away (0 rows) while the swap is new (1 row),
 	// so the two statements' tags are no longer interchangeable.
-	var counts outbound.UniswapStateRowCounts
+	var counts outbound.StateRowCounts
 	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
 		var err error
 		if counts, err = repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{
@@ -974,7 +974,7 @@ func TestUniswapV4Repository_SaveBlock_CountsOnlyTheStateSectionsRows(t *testing
 		}
 	})
 
-	if want := (outbound.UniswapStateRowCounts{Attempted: 1, Persisted: 0}); counts != want {
+	if want := (outbound.StateRowCounts{Attempted: 1, Persisted: 0}); counts != want {
 		t.Errorf("state row counts = %+v, want %+v (the swap's tag must not be read into the state slot)", counts, want)
 	}
 }

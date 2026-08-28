@@ -68,13 +68,13 @@ func (r *fakeUniswapRepo) TicksForPoolAtBlock(_ context.Context, poolID int64, b
 	return r.priorTicks[key], nil
 }
 
-func (r *fakeUniswapRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.UniswapV3BlockWrites) (outbound.UniswapStateRowCounts, error) {
+func (r *fakeUniswapRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.UniswapV3BlockWrites) (outbound.StateRowCounts, error) {
 	r.saveBlockCalls++
 	if r.err != nil {
-		return outbound.UniswapStateRowCounts{}, r.err
+		return outbound.StateRowCounts{}, r.err
 	}
 	r.lastWrites = w
-	counts := outbound.UniswapStateRowCounts{
+	counts := outbound.StateRowCounts{
 		Attempted: int64(len(w.States)),
 		Persisted: int64(len(w.States)),
 	}

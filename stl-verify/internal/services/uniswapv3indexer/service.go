@@ -401,7 +401,7 @@ func (s *UniswapV3Service) buildBlockWrites(acc blockAccumulators, states []*ent
 // an idempotent ON CONFLICT DO NOTHING replay). dexconsumer.PersistBlock only
 // carries the persisted count back, so the attempted count rides out on the
 // closure.
-func (s *UniswapV3Service) persistBlock(ctx context.Context, writes outbound.UniswapV3BlockWrites, capturedIns []dexconsumer.ProtocolEventInput, bn int64) (outbound.UniswapStateRowCounts, error) {
+func (s *UniswapV3Service) persistBlock(ctx context.Context, writes outbound.UniswapV3BlockWrites, capturedIns []dexconsumer.ProtocolEventInput, bn int64) (outbound.StateRowCounts, error) {
 	var attempted int64
 	persisted, err := dexconsumer.PersistBlock(ctx, s.txMgr, s.eventWriter, func(ctx context.Context, tx pgx.Tx) (int64, error) {
 		rows, err := s.repo.SaveBlock(ctx, tx, writes)
@@ -412,9 +412,9 @@ func (s *UniswapV3Service) persistBlock(ctx context.Context, writes outbound.Uni
 		return rows.Persisted, nil
 	}, capturedIns, bn)
 	if err != nil {
-		return outbound.UniswapStateRowCounts{}, err
+		return outbound.StateRowCounts{}, err
 	}
-	return outbound.UniswapStateRowCounts{Attempted: attempted, Persisted: persisted}, nil
+	return outbound.StateRowCounts{Attempted: attempted, Persisted: persisted}, nil
 }
 
 // markSnapshotted records the tracker and baselineSeen bookkeeping AFTER a

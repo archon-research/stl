@@ -120,18 +120,18 @@ type liquidityEventConverted struct {
 // tx, except ticks (append-on-change, see uniswapTickWriter), and returns both
 // the count of state rows the block queued and the count that actually
 // appended.
-func (r *UniswapV3Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.UniswapV3BlockWrites) (stateRows outbound.UniswapStateRowCounts, err error) {
+func (r *UniswapV3Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.UniswapV3BlockWrites) (stateRows outbound.StateRowCounts, err error) {
 	states, err := convertStates(w.States)
 	if err != nil {
-		return outbound.UniswapStateRowCounts{}, err
+		return outbound.StateRowCounts{}, err
 	}
 	swaps, err := convertSwapsV3(w.Swaps)
 	if err != nil {
-		return outbound.UniswapStateRowCounts{}, err
+		return outbound.StateRowCounts{}, err
 	}
 	liqs, err := convertLiquidityEvents(w.LiquidityEvents)
 	if err != nil {
-		return outbound.UniswapStateRowCounts{}, err
+		return outbound.StateRowCounts{}, err
 	}
 
 	batch := &pgx.Batch{}
@@ -375,7 +375,7 @@ func sendUniswapV3Batch(
 	swaps []swapConvertedV3,
 	liqs []liquidityEventConverted,
 	poolEvents []*entity.UniswapV3PoolEvent,
-) (stateRows outbound.UniswapStateRowCounts, err error) {
+) (stateRows outbound.StateRowCounts, err error) {
 	br := tx.SendBatch(ctx, batch)
 	defer func() {
 		if closeErr := br.Close(); closeErr != nil && err == nil {

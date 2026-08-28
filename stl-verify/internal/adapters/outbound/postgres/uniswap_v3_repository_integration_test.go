@@ -287,7 +287,7 @@ func TestUniswapV3Repository_SaveBlock_State_RoundTrip(t *testing.T) {
 	}
 
 	repo := newUniswapV3Repo(t)
-	var stateRows outbound.UniswapStateRowCounts
+	var stateRows outbound.StateRowCounts
 	withUniswapV3Tx(t, ctx, func(tx pgx.Tx) {
 		var err error
 		stateRows, err = repo.SaveBlock(ctx, tx, outbound.UniswapV3BlockWrites{States: []*entity.UniswapV3PoolState{st}})
@@ -394,8 +394,8 @@ func TestUniswapV3Repository_SaveBlock_State_Idempotent(t *testing.T) {
 	}
 
 	repo := newUniswapV3Repo(t)
-	save := func() outbound.UniswapStateRowCounts {
-		var counts outbound.UniswapStateRowCounts
+	save := func() outbound.StateRowCounts {
+		var counts outbound.StateRowCounts
 		withUniswapV3Tx(t, ctx, func(tx pgx.Tx) {
 			var err error
 			counts, err = repo.SaveBlock(ctx, tx, outbound.UniswapV3BlockWrites{States: []*entity.UniswapV3PoolState{st}})
