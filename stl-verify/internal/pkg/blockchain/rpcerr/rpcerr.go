@@ -58,6 +58,29 @@ func IsEVMRevert(err error) bool {
 	return strings.Contains(strings.ToLower(rpcErr.Error()), "execution reverted")
 }
 
+// IsGasExhausted reports whether err is a node's "the call ran out of gas"
+// answer.
+//
+// Unlike a revert this is not a per-sub-call signal: gas comes from one
+// eth_call budget, so a single trapping contract inside an aggregate3 takes
+// every sibling call down with it and no per-result Success:false is produced.
+// Callers use it to tell that determinate verdict apart from a transport
+// failure — the contract DID run, and a retry reaches the same answer.
+//
+// Same conservatism as IsEVMRevert: only JSON-RPC errors qualify, matched on
+// the phrasings geth, Erigon and the hosted providers use.
+func IsGasExhausted(err error) bool {
+	if err == nil {
+		return false
+	}
+	var rpcErr rpc.Error
+	if !errors.As(err, &rpcErr) {
+		return false
+	}
+	msg := strings.ToLower(rpcErr.Error())
+	return strings.Contains(msg, "out of gas") || strings.Contains(msg, "gas required exceeds")
+}
+
 // RequireAllSucceeded returns a non-nil error if any result in results has
 // Success: false, or if results is empty.
 //
