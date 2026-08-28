@@ -71,9 +71,7 @@ export function BottomPanel({
   selectedPrime,
   riskCapital,
 }: BottomPanelProps) {
-  // Not strict: the drawer stays mounted on the activities route, where the
-  // allocation search does not exist.
-  const search = useSearch({ from: '/allocation', shouldThrow: false });
+  const search = useSearch({ from: '/allocation' });
   const navigate = useNavigate();
   const [localRiskSearchValue, setLocalRiskSearchValue] = useState('');
   const [riskSearchValue, setRiskSearchValue] = useState('');

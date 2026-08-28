@@ -78,8 +78,8 @@ export function useProvenanceView(): {
   showsReference: boolean;
   showsIndexed: boolean;
 } {
-  // Not strict: the drawer and the band render on the activities route too,
-  // where the allocation search schema does not apply.
+  // Not strict: the settings menu calls this from the top bar, which is chrome
+  // on the root route, so this runs under whichever leaf is mounted.
   const search = useSearch({ strict: false }) as { source?: unknown };
   const shown = canRestateProvenance
     ? (toProvenance(

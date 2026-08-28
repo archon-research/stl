@@ -52,8 +52,9 @@ function combineAllocations(results: readonly UseQueryResult<Allocation[]>[]) {
 /**
  * The selected prime's allocation rows, narrowed to the provenance on screen.
  *
- * Called from both the allocation view and the shell's filter options, which is
- * a cache read rather than a second fan-out.
+ * Called from both the allocation view and the shell's filter options. The
+ * second call issues no request — react-query serves it from the cache — but it
+ * is a second observer, so the fold and the narrowing below do run twice.
  */
 export function useAllocationRows(
   primeGroup: PrimeGroup | null,

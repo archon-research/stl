@@ -62,6 +62,11 @@ const subtitleSeparatorClassName = css({
  *
  * The drawer stays mounted while closed — its tabs gate their own fetches on
  * `isOpen` — so this renders whether or not a row is selected.
+ *
+ * It renders inside the layout's scrolling content pane rather than beside it,
+ * which is only safe while no ancestor sets `transform`/`filter`/`contain`: any
+ * of those would make itself the containing block for the `position: fixed`
+ * panel and clip the overlay into the pane.
  */
 export function AllocationDrawer({
   allocations,

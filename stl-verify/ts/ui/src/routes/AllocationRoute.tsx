@@ -10,13 +10,13 @@ import { useAllocationSelection } from '../features/allocations/useAllocationSel
 import { useFilteredAllocations } from '../features/allocations/useFilteredAllocations';
 import { usePrimeChartSeries } from '../features/allocations/usePrimeChartSeries';
 import { usePrimeMetrics } from '../features/allocations/usePrimeMetrics';
+import { usePrimeTotalAllocationUsd } from '../features/allocations/usePrimeTotalAllocationUsd';
 import {
   useChainLabels,
   useLocalProtocols,
 } from '../shared/hooks/useRegistries';
 import { useUpdateSearch } from '../shared/hooks/useUpdateSearch';
 import { useUrlSyncedTableState } from '../shared/hooks/useUrlSyncedTableState';
-import { parseNumericValue } from '../shared/lib/dashboard';
 import { useProvenanceView } from '../shared/lib/provenance';
 import { usePrimeSelection } from './prime-selection';
 import { useTimeRange } from './time-range';
@@ -48,23 +48,7 @@ export function AllocationRoute() {
   const primaryProxyAddress = selectedPrimeGroup?.primaryProxyAddress ?? null;
   const metrics = usePrimeMetrics(primaryProxyAddress);
 
-  // Anchor for the reconstructed balance series. Two bases must line up with
-  // the flows driving the reconstruction:
-  //   - Scope: activity buckets are fetched per-prime (no network/protocol/
-  //     search filter), so the anchor is the whole-prime total; anchoring on a
-  //     filtered subset while subtracting whole-prime flows would be wrong. The
-  //     chart is therefore intentionally unaffected by the table filters.
-  //   - Valuation: net_flow_usd values both receipt-token and direct-asset
-  //     flows, so the anchor sums amount_usd across all allocations (receipt
-  //     positions and direct holdings alike) rather than receipt positions only.
-  const primeTotalAllocationUsd = useMemo(
-    () =>
-      rows.allocations.reduce((sum, allocation) => {
-        const numericAmount = parseNumericValue(allocation.amount_usd);
-        return numericAmount === null ? sum : sum + numericAmount;
-      }, 0),
-    [rows.allocations],
-  );
+  const primeTotalAllocationUsd = usePrimeTotalAllocationUsd(rows.allocations);
 
   const series = usePrimeChartSeries(
     primaryProxyAddress,

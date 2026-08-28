@@ -1003,12 +1003,8 @@ export function AllocationGrid({
 
   // The category filter lives in the URL rather than in local state so it is
   // shareable alongside the other grid filters, and so the shell's per-prime
-  // reset clears it with `network`/`protocol`. Not strict, matching the drawer:
-  // the shell renders this from the root route, so the match is not guaranteed.
-  const allocationSearch = useSearch({
-    from: '/allocation',
-    shouldThrow: false,
-  });
+  // reset clears it with `network`/`protocol`.
+  const allocationSearch = useSearch({ from: '/allocation' });
   const navigate = useNavigate();
   const categoryFilter: AllocationCategory | '' =
     allocationSearch?.category ?? '';

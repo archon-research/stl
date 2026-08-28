@@ -11,9 +11,9 @@ From `stl-verify/ts/ui`:
 If styles look stale, re-run `npm run prepare`.
 
 ## Screens and high-signal states
-There is one primary screen (the allocation dashboard, `src/App.tsx`), composed of:
+There is one primary screen (the allocation dashboard, `src/routes/AllocationRoute.tsx`), composed of:
 - Prime sidebar (`PrimeSidebar`): prime selection, including the selected and active state.
-- Top bar (`TopBar`): network and protocol filters plus allocation search; state is URL-synced (see `src/lib/url-params.ts`).
+- Top bar (`TopBar`): network and protocol filters plus allocation search; state is URL-synced (see `src/shared/lib/search-params.ts`).
 - Summary metric row (`SummaryMetric`): the 4-up metric tiles above the grid.
 - Allocation grid (`AllocationGrid`): the dense data table, including the selected-row state and the `Badge` category chips (`categorical.1..5` fills).
 - Bottom panel (`BottomPanel`): segmented tabs for Risk breakdown, Required risk capital, and Activity.
@@ -37,7 +37,7 @@ For any UI change, confirm:
 
 ## Known visual-risk areas
 - Segmented control active highlight (`BottomPanel`): repeatedly adjusted; verify the active tab fill and border after any change.
-- Data table header typography and selected-row inset (`AllocationGrid`). The header voice is one shared override (`shared/tableStyles.ts`) across all three tables — check them together.
+- Data table header typography and selected-row inset (`AllocationGrid`). The header voice is one shared override (`shared/ui/tableStyles.ts`) across all three tables — check them together.
 - Activity feed as a table: column widths in the narrow drawer container, expander discoverability, the detail panel's fit inside a row, and the compact two-line time cell.
 - Category chips: `Badge` padding around short labels, and the neutral fallback an unknown category renders as.
 - Metric-card trend chart (`MetricCardChart` in `AllocationGrid`) first paint: width comes from `useContainerWidth`, so verify the pre-measure frame does not flash a wrong-width chart or jump the layout.

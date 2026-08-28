@@ -40,10 +40,15 @@ export function useDashboardFilters(
   const chainLabels = useChainLabels();
   const localChains = useLocalChains();
   const localProtocols = useLocalProtocols();
-  const { allocations, isLoaded: areAllocationsLoaded } =
-    useAllocationRows(primeGroup);
 
   const isActivitiesView = view === 'activities';
+
+  // Passed no prime on the activities view, which fans out to no queries: that
+  // view's chips come from the registries below, so fetching the prime's rows
+  // for it would be a request whose answer is discarded.
+  const { allocations, isLoaded: areAllocationsLoaded } = useAllocationRows(
+    isActivitiesView ? null : primeGroup,
+  );
   const selectedNetwork = search.network ?? null;
   const selectedProtocol = search.protocol ?? null;
 

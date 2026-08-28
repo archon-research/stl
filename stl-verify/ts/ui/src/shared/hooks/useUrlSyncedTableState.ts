@@ -17,10 +17,7 @@ import { useMemo } from 'react';
  * unsorted while the URL keeps advertising it.
  */
 export function useUrlSyncedTableState(): UseUrlSyncedTableReturn {
-  // Not strict: the allocation route is what calls this, but the same
-  // non-throwing read is what every other consumer of this search makes, and a
-  // throw here would take the whole view down rather than one table's state.
-  const search = useSearch({ from: '/allocation', shouldThrow: false });
+  const search = useSearch({ from: '/allocation' });
   const navigate = useNavigate();
 
   // Keyed on the two params, not on the whole search object the factory's own
@@ -29,12 +26,12 @@ export function useUrlSyncedTableState(): UseUrlSyncedTableReturn {
   const adapter = useMemo(
     () =>
       createUrlSyncedTableAdapter({
-        search: { sort: search?.sort, q: search?.q },
+        search: { sort: search.sort, q: search.q },
         sortKey: 'sort',
         searchKey: 'q',
         navigate,
       }),
-    [search?.q, search?.sort, navigate],
+    [search.q, search.sort, navigate],
   );
 
   return useUrlSyncedTableStateAdapter(adapter);

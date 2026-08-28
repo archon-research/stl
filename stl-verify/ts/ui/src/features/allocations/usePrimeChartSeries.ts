@@ -237,20 +237,41 @@ export function usePrimeChartSeries(
     ? (collateralSeries.at(-1)?.value ?? null)
     : primeTotalAllocationUsd;
 
-  return {
-    allocationBalanceSeries,
-    primeDebtSeries,
-    totalCapitalSeries,
-    collateralSeries,
-    encumbranceSeries,
-    exposureSeries,
-    debtBuckets,
-    totalCapitalBuckets,
-    exposureBuckets,
-    primeCollateralObservedAt,
-    capitalObservedAt,
-    primeCollateralValue,
-    isLoading,
-    errorMessage,
-  };
+  // Memoised as a whole, not just field by field: `buildMetricCharts` is keyed
+  // on this object, so a fresh identity here rebuilds every chart spec on every
+  // render and hands the cards a new array to reconcile against.
+  return useMemo(
+    () => ({
+      allocationBalanceSeries,
+      primeDebtSeries,
+      totalCapitalSeries,
+      collateralSeries,
+      encumbranceSeries,
+      exposureSeries,
+      debtBuckets,
+      totalCapitalBuckets,
+      exposureBuckets,
+      primeCollateralObservedAt,
+      capitalObservedAt,
+      primeCollateralValue,
+      isLoading,
+      errorMessage,
+    }),
+    [
+      allocationBalanceSeries,
+      primeDebtSeries,
+      totalCapitalSeries,
+      collateralSeries,
+      encumbranceSeries,
+      exposureSeries,
+      debtBuckets,
+      totalCapitalBuckets,
+      exposureBuckets,
+      primeCollateralObservedAt,
+      capitalObservedAt,
+      primeCollateralValue,
+      isLoading,
+      errorMessage,
+    ],
+  );
 }
