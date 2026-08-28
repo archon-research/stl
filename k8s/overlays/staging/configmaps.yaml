@@ -624,6 +624,15 @@ data:
   OTEL_ENABLED: "true"
   OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
   OTEL_SERVICE_NAME: "stl-verify-python-api"
+  # Auth plane (ADR-015) — SHIPS DARK. Flipping AUTH_ENABLED to "true" turns on
+  # token verification, per-router role gates and OpenFGA checks in one move;
+  # everything below it is inert until then. Endpoints are in-cluster names in
+  # the auth namespace (NetworkPolicy there admits vector).
+  AUTH_ENABLED: "false"
+  OIDC_ISSUER: "http://keycloak.auth.svc/realms/archon"
+  OIDC_AUDIENCE: "python-api"
+  OPENFGA_URL: "http://openfga.auth.svc:8080"
+  OPENFGA_STORE_NAME: "auth"
   # DB pool for the API, declared here rather than left baked into the image so it
   # can be tuned by editing config and restarting — this ConfigMap is consumed via
   # envFrom with no hash suffix. A prime-scoped risk-capital request opens

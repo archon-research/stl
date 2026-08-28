@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.prime_debt_repository import PrimeDebtRepository
 from app.api._validators import PrimeOrProxyAddressPathParam
-from app.api.deps import get_engine
+from app.api.deps import get_engine, require_prime_view
 from app.api.provenance import (
     get_requested_provenance,
     resolve_or_422,
@@ -133,6 +133,7 @@ async def list_prime_debt_snapshots(
     limit: int = Query(100, ge=1, le=500, description="Max snapshots returned (default 100, max 500)."),
     requested_provenance: Provenance | None = Depends(get_requested_provenance),
     service: PrimeDebtService = Depends(_get_prime_debt_service),
+    _authz: None = Depends(require_prime_view),
 ) -> PrimeDebtEnvelope:
     resolved_prime_id = await service.resolve_prime_id(EthAddress(prime_id))
     if resolved_prime_id is None:

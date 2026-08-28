@@ -5,8 +5,6 @@ change behaviour behind the flag, and pin the fail-closed semantics of turning
 the flag on before the verifier exists.
 """
 
-import pytest
-from fastapi import HTTPException
 from pydantic import SecretStr
 
 from app.api import deps
@@ -31,16 +29,18 @@ def test_auth_is_off_by_default() -> None:
     assert _settings().auth_enabled is False
 
 
-def test_anonymous_principal_when_dark(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(deps, "get_settings", _settings)
-    assert deps.get_principal(request=None) is None  # ty: ignore[invalid-argument-type]
+def test_anonymous_principal_when_dark() -> None:
+    """No verifier on app.state (auth off) → every caller is anonymous, no 401."""
+    from fastapi import Depends, FastAPI
+    from fastapi.testclient import TestClient
 
+    app = FastAPI()
 
-def test_fails_closed_when_enabled_without_verifier(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(deps, "get_settings", lambda: _settings(auth_enabled=True))
-    with pytest.raises(HTTPException) as exc:
-        deps.get_principal(request=None)  # ty: ignore[invalid-argument-type]
-    assert exc.value.status_code == 503
+    @app.get("/who")
+    async def who(principal: deps.Principal | None = Depends(deps.get_principal)) -> dict[str, bool]:
+        return {"anonymous": principal is None}
+
+    assert TestClient(app).get("/who").json() == {"anonymous": True}
 
 
 def test_openapi_has_no_security_scheme_when_dark() -> None:

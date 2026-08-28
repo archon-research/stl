@@ -3,7 +3,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+import httpx
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.docs import get_swagger_ui_html, get_swagger_ui_oauth2_redirect_html
 from fastapi.openapi.utils import get_openapi
@@ -20,6 +21,7 @@ from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingRea
 from app.adapters.postgres.engine import create_db_engine
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository, resolve_receipt_token_mapping
+from app.api.deps import require_analyst, require_viewer
 from app.api.v1 import (
     allocations,
     data_sources,
@@ -33,6 +35,8 @@ from app.api.v1 import (
     tokens,
     total_capital,
 )
+from app.auth.fga import FgaClient
+from app.auth.jwt import TokenVerifier
 from app.config import Settings, get_settings
 from app.logging import get_logger, setup_logging
 from app.middleware.request_id import RequestIdMiddleware
@@ -248,10 +252,29 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             app.state.model_registry = model_registry
             app.state.receipt_token_lookup = receipt_token_repo
 
+            # Auth plane (ADR-015). Built here, beside the engine, so it is
+            # disposed in the same finally. Absent from app.state when auth is
+            # off — the dependencies treat that as "anonymous, no checks".
+            auth_http: httpx.AsyncClient | None = None
+            if settings.auth_enabled:
+                auth_http = httpx.AsyncClient()
+                app.state.verifier = TokenVerifier(
+                    issuer=settings.oidc_issuer, audience=settings.oidc_audience, http=auth_http
+                )
+                app.state.fga = FgaClient(
+                    base_url=settings.openfga_url,
+                    api_key=settings.openfga_api_key.get_secret_value(),
+                    store_name=settings.openfga_store_name,
+                    http=auth_http,
+                    list_ceiling=settings.openfga_list_ceiling,
+                )
+
             instrument_sqlalchemy_engine(engine)
             yield
         finally:
             try:
+                if auth_http is not None:
+                    await auth_http.aclose()
                 await engine.dispose()
             finally:
                 shutdown_telemetry(app.state.tracer_provider)
@@ -310,17 +333,22 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
 
         return JSONResponse(status_code=422, content={"detail": serializable_errors})
 
+    # Coarse RBAC per ROUTER, never as global middleware: the probes on
+    # status.router are reached by kubelet directly and would 401 → CrashLoop.
+    # Gates are no-ops while auth_enabled is false.
+    viewer = [Depends(require_viewer)]
+    analyst = [Depends(require_analyst)]  # /v1/risk/* incl. bad-debt: org:analyst+
     application.include_router(status.router, prefix="/v1")
-    application.include_router(allocations.router, prefix="/v1")
-    application.include_router(tokens.router, prefix="/v1")
-    application.include_router(protocol_events.router, prefix="/v1")
-    application.include_router(prime_debts.router, prefix="/v1")
-    application.include_router(total_capital.router, prefix="/v1")
-    application.include_router(prime_risk_capital.router, prefix="/v1")
-    application.include_router(exposure.router, prefix="/v1")
-    application.include_router(data_sources.router, prefix="/v1")
-    application.include_router(provenance_availability.router, prefix="/v1")
-    application.include_router(risk.router, prefix="/v1")
+    application.include_router(allocations.router, prefix="/v1", dependencies=viewer)
+    application.include_router(tokens.router, prefix="/v1", dependencies=viewer)
+    application.include_router(protocol_events.router, prefix="/v1", dependencies=viewer)
+    application.include_router(prime_debts.router, prefix="/v1", dependencies=viewer)
+    application.include_router(total_capital.router, prefix="/v1", dependencies=viewer)
+    application.include_router(prime_risk_capital.router, prefix="/v1", dependencies=viewer)
+    application.include_router(exposure.router, prefix="/v1", dependencies=viewer)
+    application.include_router(data_sources.router, prefix="/v1", dependencies=viewer)
+    application.include_router(provenance_availability.router, prefix="/v1", dependencies=viewer)
+    application.include_router(risk.router, prefix="/v1", dependencies=analyst)
 
     def public_openapi() -> dict[str, Any]:
         if application.openapi_schema is not None:

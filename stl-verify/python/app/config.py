@@ -52,6 +52,13 @@ class Settings(BaseSettings):
     # the store-bootstrap Job; they cannot be known at deploy-authoring time).
     openfga_store_id: str = ""
     openfga_model_id: str = ""
+    # Resolved by name at first use (store/model ids are server-assigned and
+    # published in another namespace); model = latest, kept safe by the CI gate.
+    openfga_store_name: str = "auth"
+    openfga_api_key: SecretStr = SecretStr("")
+    # ListObjects feeds a SQL WHERE; reaching the ceiling fails closed (500)
+    # rather than returning a silently partial result.
+    openfga_list_ceiling: int = 1000
 
     risk_default_gap_pct: Decimal = Field(default=Decimal("0.15"), ge=0, le=1)
     suraf_inputs_dir: Path = ENV_DIR / "suraf" / "inputs"

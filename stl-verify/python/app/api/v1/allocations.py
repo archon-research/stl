@@ -14,7 +14,12 @@ from app.api._validators import (
     OptionalTxHashParam,
     ProxyAddressPathParam,
 )
-from app.api.deps import get_engine, get_reference_positions_service_factory
+from app.api.deps import (
+    allowed_prime_addresses,
+    get_engine,
+    get_reference_positions_service_factory,
+    require_prime_view,
+)
 from app.api.provenance import (
     get_requested_provenance,
     resolve_or_422,
@@ -375,8 +380,15 @@ async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationS
         "`prime_vault_address` instead. Use `/v1/primes/{address}/risk-capital` for prime-level figures."
     ),
 )
-async def list_primes(service: AllocationService = Depends(_get_service)):
+async def list_primes(
+    service: AllocationService = Depends(_get_service),
+    allowed: frozenset[str] | None = Depends(allowed_prime_addresses),
+):
     primes = await service.list_primes()
+    # ListObjects pushed into the filter (ADR-015): the check and the query
+    # cannot drift apart. None means auth is off — no filtering.
+    if allowed is not None:
+        primes = [p for p in primes if p.address.lower() in allowed]
     return [
         PrimeResponse(
             id=p.id,
@@ -455,6 +467,7 @@ async def list_allocations(
     requested_provenance: Provenance | None = Depends(get_requested_provenance),
     service: AllocationService = Depends(_get_service),
     reference_services: Callable[[], ReferencePositionsService] = Depends(get_reference_positions_service_factory),
+    _authz: None = Depends(require_prime_view),
 ):
     """Return current allocations for ``prime_id``.
 
@@ -901,6 +914,7 @@ async def list_allocation_activity(
     time_series: TimeSeriesQuery = Depends(get_time_series_query_params),
     limit: int = Query(100, ge=1, le=1000, description="Max results (default 100, max 1000)."),
     service: AllocationService = Depends(_get_service),
+    allowed: frozenset[str] | None = Depends(allowed_prime_addresses),
 ) -> AllocationActivityEnvelope:
     """Errors:
 
@@ -910,6 +924,14 @@ async def list_allocation_activity(
       a filter here, not a path resource.
     """
     parsed_prime_id = EthAddress(prime_id) if prime_id is not None else None
+    # Per-resource authz (ADR-015). `allowed` is None when auth is off.
+    if allowed is not None:
+        if parsed_prime_id is not None and str(parsed_prime_id).lower() not in allowed:
+            raise HTTPException(status_code=403, detail="not permitted for this prime")
+        if time_series.aggregate and parsed_prime_id is None:
+            # Buckets aggregate across primes and cannot be filtered per row
+            # after the fact; scope the aggregation to a prime you may view.
+            raise HTTPException(status_code=422, detail="prime_id is required for aggregated activity")
     # Selective = an index-seekable exact filter. Substring filters
     # (protocol_name/token_symbol) and low-cardinality filters (chain_id,
     # action_type) do not qualify because they cannot prune chunks.
@@ -987,5 +1009,6 @@ async def list_allocation_activity(
                 created_at=e.created_at.isoformat(),
             )
             for e in events
+            if allowed is None or e.prime_address.lower() in allowed
         ],
     )
