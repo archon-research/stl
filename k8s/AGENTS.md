@@ -34,6 +34,8 @@ Root repo map and cross-cutting rules: [../AGENTS.md](../AGENTS.md).
 ## Deploy
 
 - **Never hand-edit image tags** in `k8s/overlays/{staging,prod}/kustomization.yaml` — CI owns them (staging bumps on merge; prod via the gated `production` GitHub Environment approval).
+  The prod overlay's tag is also CI's record of the last promoted SHA: main change detection
+  diffs each push against it (ORB-361), so even a uniform hand edit skews what the next merge deploys.
   Guard: the `Manifests` CI job runs `scripts/deploy/check-overlay-tag-consistency.sh`,
   which fails a PR whose tags do not all name one commit — the bot stamps a whole file to a
   single deploy SHA, so a hand-written tag is the odd one out. This has to block the merge:
