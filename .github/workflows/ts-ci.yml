@@ -133,3 +133,10 @@ jobs:
 
       - name: Build workspace
         run: npm run build
+
+      # Last, and only here: it reads dist/, so it is the one step that needs
+      # the build to have run. Rolldown folds a chunk group back into the entry
+      # without an error when nothing dynamically imports it, and no other step
+      # in this job would notice.
+      - name: Lazy chunks stay off the critical path
+        run: npm run test:bundle-budget -w ui
