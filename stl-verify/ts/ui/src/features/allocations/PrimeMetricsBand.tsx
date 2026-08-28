@@ -114,7 +114,8 @@ function MetricCardCell({
 
 // chartsErrorMessage tracks the primary (prime-debt) series only; every
 // supplementary card degrades to its own fallback instead of reporting an error
-// that did not happen to it.
+// that did not happen to it. The activity card has no fallback to degrade to,
+// so its failure rides its own chart spec and is read off it below.
 function TotalAllocationCard({
   summary,
   overallSummary,
@@ -129,6 +130,7 @@ function TotalAllocationCard({
   isChartsLoading: boolean;
 }) {
   const isFiltered = hasSearchQuery && overallSummary !== null;
+  const chartErrorMessage = chart?.errorMessage ?? null;
 
   return (
     <MetricCard
@@ -139,6 +141,7 @@ function TotalAllocationCard({
           chart={chart}
           seriesLabel="allocation"
           isLoading={isChartsLoading}
+          errorMessage={chartErrorMessage}
         />
       }
       value={
@@ -156,7 +159,7 @@ function TotalAllocationCard({
           <MetricCardTrend
             chart={chart}
             isLoading={isChartsLoading}
-            errorMessage={null}
+            errorMessage={chartErrorMessage}
           />
         </div>
       }
