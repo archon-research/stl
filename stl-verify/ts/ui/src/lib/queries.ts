@@ -5,11 +5,19 @@ import {
 
 import type { paths } from '../generated/openapi-types';
 import type {
+  AllocationActivityBucket,
+  AllocationActivityEnvelope,
+  ExposureBucket,
+  ExposureEnvelope,
   PrimeDebtBucket,
   PrimeDebtEnvelope,
   PrimeDebtSnapshot,
+  TimeSeriesResolution,
   TokensResponse,
+  TotalCapitalBucket,
+  TotalCapitalEnvelope,
 } from '../types/allocation';
+import { sortByBucketStart } from './dashboard';
 import { sourceQuery } from './provenance';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
@@ -48,9 +56,30 @@ const CACHE = {
   tokenList: { staleTime: 10 * MINUTE, gcTime: 30 * MINUTE },
   /** The screen's primary per-block data: allocations, risk capital, debt. */
   position: { staleTime: 30_000, gcTime: 10 * MINUTE },
+  /** Bucketed to PT15M and coarser, so sub-minute refetching cannot change the answer. */
+  series: { staleTime: MINUTE, gcTime: 30 * MINUTE },
   /** A daily upstream feed seeded by a one-shot backfill; see the lookback below. */
   referenceSeries: { staleTime: 6 * HOUR, gcTime: 24 * HOUR },
 } as const;
+
+/** The window every bucketed series is fetched over. */
+export type SeriesWindow = {
+  fromTimestamp: string | undefined;
+  toTimestamp: string | undefined;
+  resolution: TimeSeriesResolution;
+};
+
+// limit 500 (the per-prime max) so the longest ranges (e.g. 365d at P1D) return
+// every bucket rather than being truncated to the default page.
+function bucketQuery(window: SeriesWindow) {
+  return {
+    from_timestamp: window.fromTimestamp,
+    to_timestamp: window.toTimestamp,
+    resolution: window.resolution,
+    aggregate: true,
+    limit: 500,
+  };
+}
 
 /**
  * Rejects an envelope whose `mode` is not the one the request asked for.
@@ -86,6 +115,28 @@ const selectLatestDebtBucket = (
   envelope: PrimeDebtEnvelope,
 ): PrimeDebtBucket | null =>
   ((envelope.data ?? []) as PrimeDebtBucket[])[0] ?? null;
+
+const selectDebtBuckets = (envelope: PrimeDebtEnvelope): PrimeDebtBucket[] => {
+  requireEnvelopeMode(envelope, 'aggregated', 'GET /v1/primes/{prime_id}/debt');
+  return sortByBucketStart(envelope.data as PrimeDebtBucket[]);
+};
+
+// A non-aggregated activity envelope means "no data" here, unlike the debt
+// series above, where `aggregate=true` is the whole request.
+const selectActivityBuckets = (
+  envelope: AllocationActivityEnvelope,
+): AllocationActivityBucket[] =>
+  envelope.mode === 'aggregated'
+    ? sortByBucketStart(envelope.data as AllocationActivityBucket[])
+    : [];
+
+const selectTotalCapitalBuckets = (
+  envelope: TotalCapitalEnvelope,
+): TotalCapitalBucket[] =>
+  sortByBucketStart(envelope.data as TotalCapitalBucket[]);
+
+const selectExposureBuckets = (envelope: ExposureEnvelope): ExposureBucket[] =>
+  sortByBucketStart(envelope.data as ExposureBucket[]);
 
 const selectTokenSymbols = (tokens: TokensResponse): string[] =>
   Array.from(
@@ -229,6 +280,93 @@ export const latestReferenceDebtQuery = (primeId: string) =>
       meta: {
         logLevel: 'warn',
         logMessage: 'Prime debt snapshot unavailable for selected prime',
+      },
+    },
+  );
+
+/**
+ * The prime-debt series, which is the metric band's primary one: its card
+ * surfaces an error rather than degrading, so this asks for `aggregated` and
+ * refuses anything else.
+ */
+export const debtSeriesQuery = (primeId: string, window: SeriesWindow) =>
+  api.queryOptions(
+    'get',
+    '/v1/primes/{prime_id}/debt',
+    {
+      params: {
+        path: { prime_id: primeId },
+        // The metric beside this chart reads the same provenance; leaving the
+        // chart on self data would put both in one card.
+        query: { ...bucketQuery(window), ...sourceQuery },
+      },
+    },
+    {
+      ...CACHE.series,
+      select: selectDebtBuckets,
+      meta: { logMessage: 'Failed to load chart buckets' },
+    },
+  );
+
+// The three supplementary series. Each degrades to its card's current-value
+// fallback on failure rather than blanking the view, which is why they log at
+// `warn` and why nothing reads their errors.
+
+export const activitySeriesQuery = (primeId: string, window: SeriesWindow) =>
+  api.queryOptions(
+    'get',
+    '/v1/allocations/activity',
+    { params: { query: { prime_id: primeId, ...bucketQuery(window) } } },
+    {
+      ...CACHE.series,
+      select: selectActivityBuckets,
+      meta: {
+        logLevel: 'warn',
+        logMessage:
+          'Allocation activity history unavailable; using current value',
+      },
+    },
+  );
+
+export const totalCapitalSeriesQuery = (
+  primeId: string,
+  window: SeriesWindow,
+) =>
+  api.queryOptions(
+    'get',
+    '/v1/primes/{prime_id}/total-capital',
+    {
+      params: {
+        path: { prime_id: primeId },
+        query: { ...bucketQuery(window), ...sourceQuery },
+      },
+    },
+    {
+      ...CACHE.series,
+      select: selectTotalCapitalBuckets,
+      meta: {
+        logLevel: 'warn',
+        logMessage: 'Total capital history unavailable; using current value',
+      },
+    },
+  );
+
+export const exposureSeriesQuery = (primeId: string, window: SeriesWindow) =>
+  api.queryOptions(
+    'get',
+    '/v1/primes/{prime_id}/exposure',
+    {
+      params: {
+        path: { prime_id: primeId },
+        query: { ...bucketQuery(window), ...sourceQuery },
+      },
+    },
+    {
+      ...CACHE.series,
+      select: selectExposureBuckets,
+      meta: {
+        logLevel: 'warn',
+        logMessage: 'Exposure history unavailable; using current value',
       },
     },
   );

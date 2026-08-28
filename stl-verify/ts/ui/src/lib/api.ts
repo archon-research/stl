@@ -5,20 +5,15 @@ import type {
   AllocationActivityEnvelope,
   AllocationActivityResponse,
   DataSourcesResponse,
-  ExposureEnvelope,
-  PrimeDebtEnvelope,
   ProtocolEventsResponse,
-  Provenance,
   RiskBreakdown,
   Rrc,
   Token,
   TokenPrice,
   TokensResponse,
-  TotalCapitalEnvelope,
   TxProtocolEventsResponse,
 } from '../types/allocation';
 import { logging } from './logging';
-import { sourceQuery } from './provenance';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
 const apiClient = createApiClient<paths>(API_BASE_URL);
@@ -102,37 +97,6 @@ async function requestData<TData, TError>(
   return data;
 }
 
-export async function getExposureEnvelope(
-  primeId: string,
-  filters?: {
-    from_timestamp?: string;
-    to_timestamp?: string;
-    resolution?: TimeSeriesResolution;
-    aggregate?: boolean;
-    limit?: number;
-  },
-  signal?: AbortSignal,
-): Promise<ExposureEnvelope> {
-  const query = {
-    ...(filters ?? {}),
-    ...sourceQuery,
-  } as paths['/v1/primes/{prime_id}/exposure']['get']['parameters']['query'];
-
-  const envelope = await requestData(
-    apiClient.GET('/v1/primes/{prime_id}/exposure', {
-      params: {
-        path: {
-          prime_id: primeId,
-        },
-        query,
-      },
-      signal,
-    }),
-    'GET /v1/primes/{prime_id}/exposure',
-  );
-  return envelope as ExposureEnvelope;
-}
-
 export function getRiskBreakdown(
   chainId: number,
   tokenAddress: string,
@@ -197,7 +161,7 @@ export async function getAllocationActivity(
   return (envelope.data ?? []) as AllocationActivityResponse;
 }
 
-export async function getAllocationActivityEnvelope(
+async function getAllocationActivityEnvelope(
   filters?: AllocationActivityFilters,
   signal?: AbortSignal,
 ): Promise<AllocationActivityEnvelope> {
@@ -308,53 +272,4 @@ export function getTokenPrice(
     }),
     'GET /v1/tokens/{chain_id}/{token_address}/price',
   );
-}
-
-export async function getPrimeDebtEnvelope(
-  primeId: string,
-  filters?: TimeSeriesFilters & { source?: Provenance },
-  signal?: AbortSignal,
-): Promise<PrimeDebtEnvelope> {
-  const query = filters as
-    | paths['/v1/primes/{prime_id}/debt']['get']['parameters']['query']
-    | undefined;
-
-  const envelope = await requestData(
-    apiClient.GET('/v1/primes/{prime_id}/debt', {
-      params: {
-        path: {
-          prime_id: primeId,
-        },
-        query,
-      },
-      signal,
-    }),
-    'GET /v1/primes/{prime_id}/debt',
-  );
-  return envelope as PrimeDebtEnvelope;
-}
-
-export async function getTotalCapitalEnvelope(
-  primeId: string,
-  filters?: TimeSeriesFilters,
-  signal?: AbortSignal,
-): Promise<TotalCapitalEnvelope> {
-  const query = {
-    ...(filters ?? {}),
-    ...sourceQuery,
-  } as paths['/v1/primes/{prime_id}/total-capital']['get']['parameters']['query'];
-
-  const envelope = await requestData(
-    apiClient.GET('/v1/primes/{prime_id}/total-capital', {
-      params: {
-        path: {
-          prime_id: primeId,
-        },
-        query,
-      },
-      signal,
-    }),
-    'GET /v1/primes/{prime_id}/total-capital',
-  );
-  return envelope as TotalCapitalEnvelope;
 }
