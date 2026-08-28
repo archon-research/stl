@@ -1,6 +1,5 @@
 import { useMemo } from 'react';
 
-import { usePrimeChartData } from '../../hooks/usePrimeChartData';
 import {
   formatChartTimestampLabel,
   parseNumericValue,
@@ -16,6 +15,7 @@ import type {
 } from '../../shared/types/allocation';
 import type { RangePreset, TimeRange } from '../../shared/ui';
 import type { ChartDatum } from './metricCards';
+import { usePrimeChartData } from './usePrimeChartData';
 
 export type PrimeChartSeries = {
   allocationBalanceSeries: ChartDatum[];

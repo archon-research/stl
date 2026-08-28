@@ -13,14 +13,14 @@ import {
   formatPercentValue,
   formatTokenAmount,
   formatUsdValue,
-} from '../../../shared/lib/dashboard';
-import { toQueryErrorMessage } from '../../../shared/lib/errors';
-import { showsReference } from '../../../shared/lib/provenance';
+} from '../../shared/lib/dashboard';
+import { toQueryErrorMessage } from '../../shared/lib/errors';
+import { showsReference } from '../../shared/lib/provenance';
 import {
   DISABLED_ADDRESS,
   DISABLED_CHAIN_ID,
   rrcQuery,
-} from '../../../shared/lib/queries';
+} from '../../shared/lib/queries';
 import type {
   Allocation,
   AllocationRiskCapital,
@@ -28,12 +28,12 @@ import type {
   Prime,
   Provenance,
   RrcResult,
-} from '../../../shared/types/allocation';
-import { ProtocolLogo, SummaryMetric, TokenLogo } from '../../../shared/ui';
+} from '../../shared/types/allocation';
+import { ProtocolLogo, SummaryMetric, TokenLogo } from '../../shared/ui';
 import {
   TabNotePanel,
   unindexedChainMessage,
-} from '../../../shared/ui/TabStatePanels';
+} from '../../shared/ui/TabStatePanels';
 
 type RrcTabProps = {
   isEnabled: boolean;

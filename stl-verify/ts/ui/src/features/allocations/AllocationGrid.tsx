@@ -18,7 +18,6 @@ import { useEffect, useMemo, useState, type ChangeEvent } from 'react';
 import { css, cx } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import { getActionColorClass, getActionIcon } from '../../lib/activity';
 import {
   encumbranceSeverity,
   formatDateTime,
@@ -60,6 +59,7 @@ import {
   TokenLogo,
 } from '../../shared/ui';
 import { TabNotePanel } from '../../shared/ui/TabStatePanels';
+import { getActionColorClass, getActionIcon } from '../activity/action-styles';
 import { findMetricChart, type MetricChartSpec } from './metricCards';
 import { PrimeMetricsBand } from './PrimeMetricsBand';
 
@@ -108,7 +108,7 @@ type AllocationGridProps = {
 // the recipe's.
 //
 // One literal `css()` call per category, evaluated at module scope, so the cell
-// picks a finished class name: see `lib/activity.tsx` for why Panda cannot
+// picks a finished class name: see `features/activity/action-styles.tsx` for why Panda cannot
 // extract a token path handed in as a variable.
 const CATEGORY_CHIP_CLASS: Record<AllocationCategory | 'unknown', string> = {
   allocation: css({ bg: 'categorical.1.bg', color: 'categorical.1.fg' }),

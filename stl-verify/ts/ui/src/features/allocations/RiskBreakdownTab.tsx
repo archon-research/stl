@@ -23,32 +23,32 @@ import {
   formatUsdPrice,
   formatUsdValue,
   parseNumericValue,
-} from '../../../shared/lib/dashboard';
-import { toQueryErrorMessage } from '../../../shared/lib/errors';
+} from '../../shared/lib/dashboard';
+import { toQueryErrorMessage } from '../../shared/lib/errors';
 import {
   DISABLED_ADDRESS,
   DISABLED_CHAIN_ID,
   riskBreakdownQuery,
   tokenPriceQuery,
   tokenQuery,
-} from '../../../shared/lib/queries';
+} from '../../shared/lib/queries';
 import type {
   Allocation,
   Prime,
   RiskBreakdown,
-} from '../../../shared/types/allocation';
+} from '../../shared/types/allocation';
 import {
   ChainLogo,
   SummaryMetric,
   tableHeaderTypographyClassName,
   TokenAddress,
   TruncatedLabel,
-} from '../../../shared/ui';
+} from '../../shared/ui';
 import {
   TabNotePanel,
   unindexedChainMessage,
-} from '../../../shared/ui/TabStatePanels';
-import { MethodologyPanel } from '../../shared/MethodologyPanel';
+} from '../../shared/ui/TabStatePanels';
+import { MethodologyPanel } from './MethodologyPanel';
 
 type RiskBreakdownTabProps = {
   isEnabled: boolean;

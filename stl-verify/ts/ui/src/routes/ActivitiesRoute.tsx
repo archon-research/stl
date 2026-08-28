@@ -1,7 +1,7 @@
 import { toSearchOption } from '@archon-research/router-kit';
 import { useSearch } from '@tanstack/react-router';
 
-import { ActivityFeed } from '../components/allocations/tabs/ActivityFeed';
+import { ActivityFeed } from '../features/activity/ActivityFeed';
 import { useChainLabels, useTokenSymbols } from '../shared/hooks/useRegistries';
 import { useUpdateSearch } from '../shared/hooks/useUpdateSearch';
 import { ACTIVITY_ACTIONS } from '../shared/lib/search-params';

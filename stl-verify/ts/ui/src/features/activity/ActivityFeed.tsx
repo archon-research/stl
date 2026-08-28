@@ -17,7 +17,6 @@ import { type ChangeEvent, useCallback, useMemo, useState } from 'react';
 import { css, cx } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import { getActionColorClass, getActionIcon } from '../../../lib/activity';
 import {
   type ChainLabelLookup,
   DIRECT_PROTOCOL_FILTER_VALUE,
@@ -26,21 +25,21 @@ import {
   formatFreshnessLabel,
   getChainLabel,
   parseNumericValue,
-} from '../../../shared/lib/dashboard';
-import { toQueryErrorMessage } from '../../../shared/lib/errors';
+} from '../../shared/lib/dashboard';
+import { toQueryErrorMessage } from '../../shared/lib/errors';
 import {
   activityQuery,
   FALLBACK_TX_EVENT_LIMIT,
   txProtocolEventsFallbackQuery,
   txProtocolEventsQuery,
-} from '../../../shared/lib/queries';
+} from '../../shared/lib/queries';
 import type {
   Allocation,
   AllocationActivity,
   AllocationActivityResponse,
   Prime,
   ProtocolEvent,
-} from '../../../shared/types/allocation';
+} from '../../shared/types/allocation';
 import {
   ChainLogo,
   DEFAULT_RANGE_PRESET,
@@ -52,8 +51,9 @@ import {
   tableHeaderTypographyClassName,
   type TimeRange,
   TokenAddress,
-} from '../../../shared/ui';
-import { unindexedChainMessage } from '../../../shared/ui/TabStatePanels';
+} from '../../shared/ui';
+import { unindexedChainMessage } from '../../shared/ui/TabStatePanels';
+import { getActionColorClass, getActionIcon } from './action-styles';
 
 type ActivityFeedProps = {
   isEnabled: boolean;

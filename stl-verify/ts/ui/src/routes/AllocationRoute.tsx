@@ -2,14 +2,14 @@ import type { SortingState } from '@archon-research/design-system';
 import { useSearch } from '@tanstack/react-router';
 import { useMemo } from 'react';
 
-import { AllocationDrawer } from '../components/allocations/AllocationDrawer';
-import { AllocationGrid } from '../components/allocations/AllocationGrid';
-import { buildMetricCharts } from '../components/allocations/metric-charts';
-import { useAllocationRows } from '../components/allocations/useAllocationRows';
-import { useAllocationSelection } from '../components/allocations/useAllocationSelection';
-import { useFilteredAllocations } from '../components/allocations/useFilteredAllocations';
-import { usePrimeChartSeries } from '../components/allocations/usePrimeChartSeries';
-import { usePrimeMetrics } from '../components/allocations/usePrimeMetrics';
+import { AllocationDrawer } from '../features/allocations/AllocationDrawer';
+import { AllocationGrid } from '../features/allocations/AllocationGrid';
+import { buildMetricCharts } from '../features/allocations/metric-charts';
+import { useAllocationRows } from '../features/allocations/useAllocationRows';
+import { useAllocationSelection } from '../features/allocations/useAllocationSelection';
+import { useFilteredAllocations } from '../features/allocations/useFilteredAllocations';
+import { usePrimeChartSeries } from '../features/allocations/usePrimeChartSeries';
+import { usePrimeMetrics } from '../features/allocations/usePrimeMetrics';
 import {
   useChainLabels,
   useLocalProtocols,

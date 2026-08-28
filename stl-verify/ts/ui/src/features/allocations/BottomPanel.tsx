@@ -33,9 +33,9 @@ import type {
   PrimeRiskCapital,
   Prime,
 } from '../../shared/types/allocation';
-import { ActivityFeed } from './tabs/ActivityFeed';
-import { RiskBreakdownTab } from './tabs/RiskBreakdownTab';
-import { RrcTab } from './tabs/RrcTab';
+import { ActivityFeed } from '../activity/ActivityFeed';
+import { RiskBreakdownTab } from './RiskBreakdownTab';
+import { RrcTab } from './RrcTab';
 
 type BottomPanelProps = {
   allocations: Allocation[];

@@ -223,7 +223,7 @@ function TotalRiskCapitalCard({
 
 // One chip per band, styled like the table's category chips. Badge has no
 // orange palette, so the low breach overrides its fill with the chart set's
-// orange (`identity.8`) — literal css(): see lib/activity.tsx for the trap.
+// orange (`identity.8`) — literal css(): see features/activity/action-styles.tsx for the trap.
 const ENCUMBRANCE_BAND_CHIP: Record<
   EncumbranceSeverity,
   { label: string; colorPalette: BadgeColorPalette; className?: string }
