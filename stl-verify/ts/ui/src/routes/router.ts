@@ -12,14 +12,14 @@ import {
 } from '@tanstack/react-router';
 import type { z } from 'zod';
 
-import { ActivitiesRoute } from '../routes/ActivitiesRoute';
-import { AllocationRoute } from '../routes/AllocationRoute';
-import { RootLayout } from '../routes/RootLayout';
 import {
   activitiesSearchSchema,
   allocationSearchSchema,
   sharedSearchSchema,
 } from '../shared/lib/search-params';
+import { ActivitiesRoute } from './ActivitiesRoute';
+import { AllocationRoute } from './AllocationRoute';
+import { RootLayout } from './RootLayout';
 
 // Every param here is a plain string, and the default JSON round-trip would
 // write `?network=1` as `?network=%221%22` — a shape no existing link uses.

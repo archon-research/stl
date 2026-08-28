@@ -82,7 +82,7 @@ async function main() {
   });
 
   try {
-    const { router } = await vite.ssrLoadModule('/src/router/routes.ts');
+    const { router } = await vite.ssrLoadModule('/src/routes/router.ts');
     // The harness takes the shipped router's own options, so the parse/stringify
     // and trailing-slash behaviour under test is the one the app runs with.
     const resolve = (url: string) => resolveEntryUrl(router.options, url);

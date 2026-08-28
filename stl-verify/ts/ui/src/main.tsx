@@ -3,7 +3,7 @@ import { HttpProvider } from '@archon-research/http-client-react';
 import { RouterProvider } from '@tanstack/react-router';
 import { createRoot } from 'react-dom/client';
 
-import { router } from './router/routes';
+import { router } from './routes/router';
 import { logging } from './shared/lib/logging';
 import { createAppQueryClient } from './shared/lib/query-client';
 
