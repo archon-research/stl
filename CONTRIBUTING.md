@@ -985,6 +985,10 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
    review on that run; on approval the run syncs `stl-prod` in ArgoCD to
    the approved commit. Rejecting leaves the bump on `main` (it batches
    into the next approved deploy).
+   The deploy runs whenever `main` holds code that has not been promoted
+   yet — CI diffs each main push against the prod overlay's image tag,
+   not just against the push itself — so a docs-only merge can carry an
+   earlier merge's deploy, or retry a promotion that failed (ORB-361).
 6. **Adding a brand-new service image? Split it across two PRs.** If one PR
    both introduces a new image (a new `make docker-*` target, or a base that
    references an image name never built before) *and* the Deployment/CronJob
