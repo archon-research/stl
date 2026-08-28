@@ -1587,6 +1587,12 @@ export function AllocationGrid({
               // A prime's positions are returned in full — no server-side limit
               // — so this is the one grid whose row count nothing bounds.
               virtualized
+              // Proportional, not `calc(100dvh - chrome)`: the metric band
+              // above wraps with width, so the chrome measures 656px at 1920
+              // and 1081px at 1280 and no fixed subtraction is right at both.
+              // The design system's 640px default strands ~300px of an
+              // ultra-tall display; 40rem is that default as a floor.
+              maxHeight="max(40rem, 70dvh)"
               // Six nowrap columns push min-content well past this, so it binds
               // only on the loading skeleton, which has no intrinsic width.
               minWidth="48rem"

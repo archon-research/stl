@@ -1031,6 +1031,9 @@ function ActivityTable({
             // Safe alongside the detail panel: each row is its own <tbody>, so
             // the virtualizer measures a row and its open panel as one unit.
             virtualized
+            // Matches the allocation grid: see the note there for why this is
+            // proportional rather than a subtraction from the viewport.
+            maxHeight="max(40rem, 70dvh)"
             renderDetailPanel={(event) => {
               const txHash = getRealTxHash(event);
               return txHash === null ? null : (
