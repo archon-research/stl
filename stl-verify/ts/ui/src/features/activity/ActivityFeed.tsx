@@ -73,6 +73,9 @@ type ActivityFeedProps = {
   searchQuery?: string;
   showAllPrimes?: boolean;
   tokenOptions?: string[];
+  // Whether an empty `tokenOptions` is empty because its registry failed. The
+  // two look identical in the filter bar, and only one is a fact about tokens.
+  tokenOptionsFailed?: boolean;
   chainLabels?: ChainLabelLookup;
   // External range control: provided by parent-owned top bar picker.
   externalRangePreset?: RangePreset;
@@ -905,6 +908,7 @@ type ActivityFilterBarProps = {
   tokenFilter: string | null;
   onTokenFilterChange?: (value: string | null) => void;
   tokenOptions: string[];
+  tokenOptionsFailed: boolean;
   hasActiveFilters: boolean;
   onClearFilters: () => void;
 };
@@ -915,6 +919,7 @@ function ActivityFilterBar({
   tokenFilter,
   onTokenFilterChange,
   tokenOptions,
+  tokenOptionsFailed,
   hasActiveFilters,
   onClearFilters,
 }: ActivityFilterBarProps) {
@@ -948,11 +953,12 @@ function ActivityFilterBar({
             ))}
           </StyledSelect>
         </label>
-        {tokenOptions.length > 0 ? (
+        {tokenOptions.length > 0 || tokenOptionsFailed ? (
           <label className={filterFieldClassName}>
             <span className={filterLabelClassName}>Token</span>
             <StyledSelect
               aria-label="Filter activity by token symbol"
+              disabled={tokenOptions.length === 0}
               value={tokenFilter ?? ''}
               onChange={(event: ChangeEvent<HTMLSelectElement>) =>
                 onTokenFilterChange?.(
@@ -960,7 +966,11 @@ function ActivityFilterBar({
                 )
               }
             >
-              <option value="">All tokens</option>
+              {/* The same slot the network and protocol chips say it in: an
+                  empty, disabled field cannot say which of the two it is. */}
+              <option value="">
+                {tokenOptionsFailed ? 'Token list failed' : 'All tokens'}
+              </option>
               {tokenOptions.map((symbol) => (
                 <option key={symbol} value={symbol}>
                   {symbol}
@@ -1136,6 +1146,7 @@ export function ActivityFeed(props: ActivityFeedProps) {
     showAllPrimes = false,
     chainLabels,
     selectedReceiptToken = null,
+    tokenOptionsFailed = false,
   } = props;
   const {
     isPageMode,
@@ -1230,6 +1241,7 @@ export function ActivityFeed(props: ActivityFeedProps) {
           tokenFilter={tokenFilter}
           onTokenFilterChange={onTokenFilterChange}
           tokenOptions={uniqueTokenOptions}
+          tokenOptionsFailed={tokenOptionsFailed}
           hasActiveFilters={hasActiveFilters}
           onClearFilters={clearFilters}
         />

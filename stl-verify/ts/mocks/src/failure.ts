@@ -16,15 +16,17 @@ import { mock } from './mock-api.ts';
 import { problemResponse, unavailable } from './problem.ts';
 
 /**
- * The reads worth being able to fail: each backs a card or a series that has
- * its own error state, so failing one exercises a distinct recovery path.
- * Names rather than paths, since this is the surface a Playwright case or a
- * developer types.
+ * The reads worth being able to fail: each backs a card, a series or a filter
+ * that has its own error state, so failing one exercises a distinct recovery
+ * path. Names rather than paths, since this is the surface a Playwright case or
+ * a developer types.
  */
 export const FAILABLE_READS = [
   'risk-capital',
   'prime-debt',
   'exposure',
+  'allocation-activity',
+  'chains',
 ] as const;
 
 export type FailableRead = (typeof FAILABLE_READS)[number];
@@ -54,5 +56,11 @@ export function failingHandler(
       return mock.get('/v1/primes/{prime_id}/debt', fail);
     case 'exposure':
       return mock.get('/v1/primes/{prime_id}/exposure', fail);
+    // One path behind two reads: the metric card's bucketed series and the
+    // activity feed's rows. Failing it fails both, which is what the API does.
+    case 'allocation-activity':
+      return mock.get('/v1/allocations/activity', fail);
+    case 'chains':
+      return mock.get('/v1/chains', fail);
   }
 }

@@ -37,7 +37,7 @@ export function AllocationRoute() {
   const search = useSearch({ from: '/allocation' });
   const updateSearch = useUpdateSearch();
   const chainLabels = useChainLabels();
-  const localProtocols = useLocalProtocols();
+  const { rows: localProtocols } = useLocalProtocols();
   const { showsReference: showsReferenceNow } = useProvenanceView();
   const { globalFilter, setGlobalFilter, setSorting, sorting } =
     useUrlSyncedTableState();

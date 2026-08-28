@@ -20,7 +20,7 @@ export function ActivitiesRoute() {
   const search = useSearch({ from: '/activities' });
   const updateSearch = useUpdateSearch();
   const chainLabels = useChainLabels();
-  const tokenSymbolOptions = useTokenSymbols();
+  const tokens = useTokenSymbols();
 
   return (
     <ActivityFeed
@@ -31,7 +31,10 @@ export function ActivitiesRoute() {
       selectedProtocol={search.protocol ?? null}
       showAllPrimes={search.allp !== '0'}
       selectedPrime={selectedPrime}
-      tokenOptions={tokenSymbolOptions}
+      tokenOptions={tokens.rows}
+      // Same reason the network and protocol chips carry one: an empty token
+      // list looks identical whether the registry failed or simply said so.
+      tokenOptionsFailed={tokens.isError}
       tokenFilter={search.token ?? null}
       onTokenFilterChange={(value) =>
         updateSearch({ token: value ?? undefined })

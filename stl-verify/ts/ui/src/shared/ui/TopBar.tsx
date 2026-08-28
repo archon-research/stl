@@ -27,9 +27,12 @@ type TopBarProps = {
   // chunk. Optional: a caller with nothing to warm simply omits it.
   onViewIntent?: (view: 'allocation' | 'activities') => void;
   networkOptions: FilterOption[];
+  /** Whether the empty option list is a failed read rather than a short one. */
+  networkOptionsFailed: boolean;
   onNetworkChange: (value: string | null) => void;
   onProtocolChange: (value: string | null) => void;
   protocolOptions: FilterOption[];
+  protocolOptionsFailed: boolean;
   selectedNetwork: string | null;
   selectedProtocol: string | null;
   selectedView: 'allocation' | 'activities';
@@ -160,9 +163,11 @@ export function TopBar({
   onViewChange,
   onViewIntent,
   networkOptions,
+  networkOptionsFailed,
   onNetworkChange,
   onProtocolChange,
   protocolOptions,
+  protocolOptionsFailed,
   selectedNetwork,
   selectedProtocol,
   selectedView,
@@ -276,7 +281,14 @@ export function TopBar({
             disabled={networkOptions.length === 0}
             onChange={onNetworkChange}
             options={networkOptions}
-            placeholder="All networks"
+            // A registry that failed leaves the same empty, disabled field an
+            // unanswered one does; the placeholder is the only slot that can
+            // say which of the two the reader is looking at. Kept short — the
+            // field is 122px of text and a native select clips without an
+            // ellipsis.
+            placeholder={
+              networkOptionsFailed ? 'Network list failed' : 'All networks'
+            }
             value={selectedNetwork}
           />
           <FilterField
@@ -287,7 +299,9 @@ export function TopBar({
             }
             onChange={onProtocolChange}
             options={protocolOptions}
-            placeholder="All protocols"
+            placeholder={
+              protocolOptionsFailed ? 'Protocol list failed' : 'All protocols'
+            }
             value={selectedProtocol}
           />
           {showRangePicker ? (
