@@ -14,21 +14,20 @@
 -- identity, so resolve an asset by its natural key, never by id.
 --
 -- Cutover (ADR-0006): rows that predate this migration keep a single version whose valid_from is
--- their created_at date and whose payload is whatever the last in-place UPDATE left. Their real
+-- their created_at and whose payload is whatever the last in-place UPDATE left. Their real
 -- change history was overwritten before this conversion and is not recoverable; change_reason
 -- records that explicitly rather than implying the row was never touched.
 
 ALTER TABLE oracle_asset ADD COLUMN IF NOT EXISTS processing_version integer NOT NULL DEFAULT 0;
-ALTER TABLE oracle_asset ADD COLUMN IF NOT EXISTS valid_from date;
+ALTER TABLE oracle_asset ADD COLUMN IF NOT EXISTS valid_from timestamptz;
 ALTER TABLE oracle_asset ADD COLUMN IF NOT EXISTS change_reason text;
 
 UPDATE oracle_asset
-SET valid_from = COALESCE(valid_from, (created_at AT TIME ZONE 'utc')::date),
+SET valid_from = COALESCE(valid_from, created_at),
     change_reason = COALESCE(change_reason, 'pre-VEC-597 row; earlier changes were applied in place and are not recoverable')
 WHERE valid_from IS NULL OR change_reason IS NULL;
 
--- UTC so which version is current does not shift with the writer's session TimeZone.
-ALTER TABLE oracle_asset ALTER COLUMN valid_from SET DEFAULT ((now() AT TIME ZONE 'utc')::date);
+ALTER TABLE oracle_asset ALTER COLUMN valid_from SET DEFAULT now();
 ALTER TABLE oracle_asset ALTER COLUMN valid_from SET NOT NULL;
 ALTER TABLE oracle_asset ALTER COLUMN change_reason SET NOT NULL;
 
@@ -63,17 +62,17 @@ COMMENT ON COLUMN oracle_asset.processing_version IS
 COMMENT ON COLUMN oracle_asset.feed_key IS
 'PK. Derived: feed_address with NULL folded to an empty bytea, so the natural key is NULL-free and one key covers feed and non-feed oracles. Never written directly.';
 COMMENT ON COLUMN oracle_asset.valid_from IS
-'Date this version became effective (UTC); the only temporal field stored. valid_to is derived in oracle_asset_versions. Reads resolve a version with valid_from <= effective_at.';
+'Instant this version became effective; the only temporal field stored (timestamptz, so it cannot shift with a session TimeZone). valid_to is derived in oracle_asset_versions. Reads resolve a version with valid_from <= effective_at.';
 COMMENT ON COLUMN oracle_asset.change_reason IS
 'Mandatory: why this version exists. Rows predating VEC-597 say so explicitly.';
 COMMENT ON COLUMN oracle_asset.id IS
 'Audit. BIGSERIAL surrogate, one per VERSION row; unique but not the key. NOT an asset identity and not stable across versions — resolve by (oracle_id, token_id, feed_key).';
 
--- Effective version per natural key as of an explicit, recorded date. THE read path for
+-- Effective version per natural key as of an explicit, recorded instant. THE read path for
 -- calculation and writer SQL (ADR-0006 §4): a replay passes the recorded effective_at and gets
 -- the same rows, which now()/CURRENT_DATE can never guarantee. Returns disabled versions too —
 -- callers filter on `enabled`, so "retired then" and "not registered then" stay distinguishable.
-CREATE OR REPLACE FUNCTION oracle_asset_as_of(p_effective_at date)
+CREATE OR REPLACE FUNCTION oracle_asset_as_of(p_effective_at timestamptz)
 RETURNS SETOF oracle_asset
 LANGUAGE sql
 STABLE
@@ -83,19 +82,19 @@ AS $$
     WHERE valid_from <= p_effective_at
     ORDER BY oracle_id, token_id, feed_key, valid_from DESC, processing_version DESC
 $$;
-COMMENT ON FUNCTION oracle_asset_as_of(date) IS
+COMMENT ON FUNCTION oracle_asset_as_of(timestamptz) IS
 'Effective oracle_asset version per natural key as of p_effective_at (ADR-0006 §4). The calculation/writer read path; pass a recorded effective_at, never now(). Includes disabled versions.';
 
--- Operational reads only (ADR-0006 §4): bounded on UTC today, so a future-dated version is not
--- current until its valid_from arrives — which is exactly why it is banned from calculation SQL,
--- where the same query must not change answer with the wall clock.
+-- Operational reads only (ADR-0006 §4): bounded on the wall clock, so a future-dated version is
+-- not current until its valid_from arrives — which is exactly why it is banned from calculation
+-- SQL, where the same query must not change answer with the wall clock.
 CREATE OR REPLACE VIEW oracle_asset_current AS
 SELECT DISTINCT ON (oracle_id, token_id, feed_key) *
 FROM oracle_asset
-WHERE valid_from <= (now() AT TIME ZONE 'utc')::date
+WHERE valid_from <= now()
 ORDER BY oracle_id, token_id, feed_key, valid_from DESC, processing_version DESC;
 COMMENT ON VIEW oracle_asset_current IS
-'[Configuration] Latest effective oracle_asset version per natural key as of UTC today. OPERATIONAL reads only — calculation and writer SQL must use oracle_asset_as_of(effective_at) (ADR-0006 §4).';
+'[Configuration] Latest effective oracle_asset version per natural key as of now. OPERATIONAL reads only — calculation and writer SQL must use oracle_asset_as_of(effective_at) (ADR-0006 §4).';
 
 -- Full history with a derived half-open validity window [valid_from, valid_to_exclusive).
 -- Columns are listed explicitly so a later ADD COLUMN cannot shift the trailing computed columns
@@ -115,8 +114,8 @@ SELECT
     v.valid_from,
     v.change_reason,
     v.valid_to_exclusive,
-    (v.valid_from <= (now() AT TIME ZONE 'utc')::date
-        AND (v.valid_to_exclusive IS NULL OR (now() AT TIME ZONE 'utc')::date < v.valid_to_exclusive)) AS is_current
+    (v.valid_from <= now()
+        AND (v.valid_to_exclusive IS NULL OR now() < v.valid_to_exclusive)) AS is_current
 FROM (
     SELECT oracle_asset.*,
         lead(valid_from) OVER (
@@ -126,7 +125,7 @@ FROM (
     FROM oracle_asset
 ) v;
 COMMENT ON VIEW oracle_asset_versions IS
-'[Configuration] Full oracle_asset history per natural key with derived valid_to_exclusive (half-open [valid_from, valid_to_exclusive)) and is_current as of UTC today. Audit/history reads.';
+'[Configuration] Full oracle_asset history per natural key with derived valid_to_exclusive (half-open [valid_from, valid_to_exclusive)) and is_current as of now. Audit/history reads.';
 
 -- The append-on-change writer: the only sanctioned way to change `enabled`, now that UPDATE is
 -- revoked. Appends the next version, carrying the current version's feed columns forward.
@@ -138,7 +137,7 @@ CREATE OR REPLACE FUNCTION oracle_asset_set_enabled(
     p_token_id      bigint,
     p_feed_address  bytea,
     p_enabled       boolean,
-    p_effective_at  date,
+    p_effective_at  timestamptz,
     p_change_reason text
 ) RETURNS integer
 LANGUAGE plpgsql
@@ -152,9 +151,9 @@ BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(
         format('oracle_asset:%s:%s:%s', p_oracle_id, p_token_id, COALESCE(encode(p_feed_address, 'hex'), '')), 0));
 
-    -- The version this supersedes is the one effective ON p_effective_at, not the newest row:
+    -- The version this supersedes is the one effective AT p_effective_at, not the newest row:
     -- with a future-dated version already recorded, comparing against that would report "no
-    -- change" for a toggle taking effect today and silently write nothing.
+    -- change" for a toggle taking effect now and silently write nothing.
     SELECT * INTO current_version
     FROM oracle_asset
     WHERE oracle_id = p_oracle_id
@@ -171,7 +170,7 @@ BEGIN
               AND token_id = p_token_id
               AND feed_key = COALESCE(p_feed_address, '\x'::bytea)
         ) THEN
-            RAISE EXCEPTION 'effective date % predates the first oracle_asset version for (oracle_id=%, token_id=%, feed_address=%); there is nothing to supersede',
+            RAISE EXCEPTION 'effective time % predates the first oracle_asset version for (oracle_id=%, token_id=%, feed_address=%); there is nothing to supersede',
                 p_effective_at, p_oracle_id, p_token_id, COALESCE(encode(p_feed_address, 'hex'), 'NULL');
         END IF;
         RAISE EXCEPTION 'oracle_asset (oracle_id=%, token_id=%, feed_address=%) is not registered; register it with an INSERT before toggling it',
@@ -200,8 +199,8 @@ BEGIN
 
     RETURN next_version;
 END $$;
-COMMENT ON FUNCTION oracle_asset_set_enabled(bigint, bigint, bytea, boolean, date, text) IS
-'Appends a new oracle_asset version toggling `enabled` (ADR-0006 §4). Compares against the version effective on p_effective_at. Returns the new processing_version, or NULL if unchanged. Advisory-locked on the natural key; raises on an unregistered key or a date before the first version.';
+COMMENT ON FUNCTION oracle_asset_set_enabled(bigint, bigint, bytea, boolean, timestamptz, text) IS
+'Appends a new oracle_asset version toggling `enabled` (ADR-0006 §4). Compares against the version effective at p_effective_at. Returns the new processing_version, or NULL if unchanged. Advisory-locked on the natural key; raises on an unregistered key or an effective time before the first version.';
 
 -- Reads for both roles; append-only writes for the application role, and mutation revoked from
 -- the owner too so a future migration cannot quietly rewrite history either. Safe to revoke the

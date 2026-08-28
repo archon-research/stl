@@ -14,7 +14,7 @@ from app.adapters.postgres._time_window import (
     required_time_window_clause,
     time_bucket_expr,
 )
-from app.adapters.postgres.reference_as_of import ReferenceAsOf, ReferenceEffectiveAtProvider, utc_today
+from app.adapters.postgres.reference_as_of import ReferenceAsOf, ReferenceEffectiveAtProvider, utc_now
 from app.domain.chain_names import MAINNET_CHAIN_ID, chain_name_for
 from app.domain.entities.allocation import (
     AnchorageCustodyHolding,
@@ -117,7 +117,7 @@ def _safe_decimal(value: Any, field_name: str, row_identifier: Any = None) -> De
 
 
 class AllocationRepository:
-    def __init__(self, engine: AsyncEngine, reference_effective_at: ReferenceEffectiveAtProvider = utc_today) -> None:
+    def __init__(self, engine: AsyncEngine, reference_effective_at: ReferenceEffectiveAtProvider = utc_now) -> None:
         self._engine = engine
         self._reference = ReferenceAsOf(reference_effective_at)
 
@@ -1301,7 +1301,7 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
         -- a change-suppressed live feed writes no newer row, so the retired
         -- source would otherwise beat the live one indefinitely.
         -- The mapping is append-on-change, so the version read is the one
-        -- effective at the recorded date rather than "whatever it says now".
+        -- effective at the recorded instant rather than "whatever it says now".
         -- Read through oracle_asset_as_of, never the raw table (every version)
         -- or oracle_asset_current (wall-clock bounded) — ADR-0006 §4, enforced
         -- by the schemamaster lint.

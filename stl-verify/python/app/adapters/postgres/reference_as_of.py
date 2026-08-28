@@ -1,54 +1,57 @@
-"""The effective date a read resolves reference-table versions at (ADR-0006 §4).
+"""The effective instant a read resolves reference-table versions at (ADR-0006 §4).
 
 Reference tables like ``oracle_asset`` are append-on-change: which version applies is
 decided by ``valid_from <= effective_at``. That ``effective_at`` must be an explicit
-parameter the reader supplies, never ``now()``/``CURRENT_DATE`` inside the SQL — a replay
-has to be able to pass the date the original read used and get the same rows back. The
-``_current`` views evaluate the wall clock instead, which is why they are for operational
-reads only.
+parameter the reader supplies, never ``now()`` inside the SQL — a replay has to be able
+to pass the instant the original read used and get the same rows back. The ``_current``
+views evaluate the wall clock instead, which is why they are for operational reads only.
 
-The provider is injected so a calculation can pin its whole run to one recorded date;
-until then the default is today (UTC), which reproduces the pre-conversion behaviour while
-keeping the date visible in the SQL parameters rather than buried in the query.
+The provider is injected so a calculation can pin its whole run to one recorded instant;
+until then the default is now (UTC), which reproduces the pre-conversion behaviour while
+keeping the value visible in the SQL parameters rather than buried in the query.
 """
 
 from collections.abc import Callable
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from typing import Any
 
-# Returns the date whose reference-data versions a read should resolve.
-ReferenceEffectiveAtProvider = Callable[[], date]
+# Returns the instant whose reference-data versions a read should resolve.
+ReferenceEffectiveAtProvider = Callable[[], datetime]
 
 
-def utc_today() -> date:
-    """Today in UTC, so the answer does not shift with the server's local timezone."""
-    return datetime.now(UTC).date()
+def utc_now() -> datetime:
+    """Now in UTC, timezone-aware, so the bound value is an absolute instant."""
+    return datetime.now(UTC)
 
 
-def pinned_to(effective_at: date | None) -> ReferenceEffectiveAtProvider:
+def pinned_to(effective_at: datetime | None) -> ReferenceEffectiveAtProvider:
     """A provider fixed to effective_at, or the default when it is None.
 
-    How a replay reproduces a past reference view: the settings-supplied date is resolved
-    once here instead of per query.
+    How a replay reproduces a past reference view: the settings-supplied instant is
+    resolved once here instead of per query. A naive value is taken as UTC — the
+    settings accept a bare ``YYYY-MM-DD``, which parses to a naive midnight.
     """
     if effective_at is None:
-        return utc_today
+        return utc_now
+    if effective_at.tzinfo is None:
+        effective_at = effective_at.replace(tzinfo=UTC)
     return lambda: effective_at
 
 
 class ReferenceAsOf:
-    """Binds the reference effective date into a query's parameters."""
+    """Binds the reference effective instant into a query's parameters."""
 
-    def __init__(self, provider: ReferenceEffectiveAtProvider = utc_today) -> None:
+    def __init__(self, provider: ReferenceEffectiveAtProvider = utc_now) -> None:
         self._provider = provider
 
     @property
-    def effective_at(self) -> date:
+    def effective_at(self) -> datetime:
         return self._provider()
 
     def params(self, **query_params: Any) -> dict[str, Any]:
-        """The query's own parameters plus the reference effective date.
+        """The query's own parameters plus the reference effective instant.
 
-        One resolution per call, so every reference read in a single query sees one date.
+        One resolution per call, so every reference read in a single query sees one
+        instant.
         """
         return {**query_params, "reference_effective_at": self._provider()}

@@ -43,7 +43,7 @@ type Config struct {
 	Logger      *slog.Logger
 
 	// ReferenceEffectiveAt pins which oracle_asset versions this run reads (ADR-0006 §4).
-	// Zero means the run's start date.
+	// Zero means the run's start time.
 	ReferenceEffectiveAt time.Time
 }
 
@@ -203,7 +203,7 @@ func (s *Service) validateFeedDecimals(ctx context.Context, workUnits []*oracleW
 // and builds the per-oracle data structures needed for price fetching.
 func (s *Service) buildOracleWorkUnits(ctx context.Context) ([]*oracleWorkUnit, error) {
 	// One reference view per run (ADR-0006 §4): resolved once, so every unit sees the same
-	// oracle_asset versions and a replay can supply the date the original run used.
+	// oracle_asset versions and a replay can supply the instant the original run used.
 	referenceEffectiveAt := s.config.ReferenceEffectiveAt
 	if referenceEffectiveAt.IsZero() {
 		referenceEffectiveAt = time.Now().UTC()

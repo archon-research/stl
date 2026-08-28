@@ -5,7 +5,7 @@ from typing import Any
 from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.adapters.postgres.reference_as_of import ReferenceAsOf, ReferenceEffectiveAtProvider, utc_today
+from app.adapters.postgres.reference_as_of import ReferenceAsOf, ReferenceEffectiveAtProvider, utc_now
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.token_catalog import TokenMetadata, TokenPriceQuote
 
@@ -63,7 +63,7 @@ def _normalize_symbol(value: str | None) -> str | None:
 
 
 class TokenCatalogRepository:
-    def __init__(self, engine: AsyncEngine, reference_effective_at: ReferenceEffectiveAtProvider = utc_today) -> None:
+    def __init__(self, engine: AsyncEngine, reference_effective_at: ReferenceEffectiveAtProvider = utc_now) -> None:
         self._engine = engine
         self._reference = ReferenceAsOf(reference_effective_at)
 

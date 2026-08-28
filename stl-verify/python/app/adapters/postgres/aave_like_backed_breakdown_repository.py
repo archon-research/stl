@@ -5,7 +5,7 @@ from decimal import Decimal
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.adapters.postgres.reference_as_of import ReferenceAsOf, ReferenceEffectiveAtProvider, utc_today
+from app.adapters.postgres.reference_as_of import ReferenceAsOf, ReferenceEffectiveAtProvider, utc_now
 from app.domain.entities.backed_breakdown import (
     BackedBreakdown,
     CollateralContribution,
@@ -140,7 +140,7 @@ ORDER BY a.backed_asset_id, backing_usd DESC;
 class AaveLikeBackedBreakdownRepository:
     """Postgres implementation of the backed breakdown repository for Aave-like protocols."""
 
-    def __init__(self, engine: AsyncEngine, reference_effective_at: ReferenceEffectiveAtProvider = utc_today) -> None:
+    def __init__(self, engine: AsyncEngine, reference_effective_at: ReferenceEffectiveAtProvider = utc_now) -> None:
         self._engine = engine
         self._reference = ReferenceAsOf(reference_effective_at)
 

@@ -50,7 +50,7 @@ type OracleUnit struct {
 // referenceEffectiveAt pins which oracle_asset versions the units are built from: it is
 // the run's recorded reference effective time (ADR-0006 §4), captured once by the caller
 // so every unit in a run resolves against one consistent reference view and a replay can
-// pass the same date back.
+// pass the same instant back.
 func LoadOracleUnits(ctx context.Context, repo outbound.OnchainPriceRepository, chainID int64, referenceEffectiveAt time.Time, logger *slog.Logger) ([]*OracleUnit, error) {
 	allOracles, err := repo.GetEnabledOraclesByChain(ctx, chainID)
 	if err != nil {
@@ -79,7 +79,7 @@ func LoadOracleUnits(ctx context.Context, repo outbound.OnchainPriceRepository, 
 	logger.Info("loaded oracle units",
 		"loaded", len(units),
 		"total", len(seen),
-		"reference_effective_at", referenceEffectiveAt.UTC().Format(time.DateOnly))
+		"reference_effective_at", referenceEffectiveAt.UTC().Format(time.RFC3339))
 
 	return units, nil
 }

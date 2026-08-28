@@ -192,7 +192,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
 
             asset_to_rating = await resolve_receipt_token_mapping(raw_mapping, engine)
             # One reference view for the whole process when pinned (ADR-0006 §4); unset
-            # leaves each read resolving today's, as before.
+            # leaves each read resolving now (UTC), as before.
             reference_effective_at = pinned_to(settings.reference_effective_at)
             allocation_repo = AllocationRepository(engine, reference_effective_at)
             suraf_rrc_service = SurafRrcService(asset_to_rating, suraf_ratings, allocation_repo)

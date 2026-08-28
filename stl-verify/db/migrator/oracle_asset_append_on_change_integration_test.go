@@ -29,10 +29,21 @@ func seedOracleAsset(ctx context.Context, t *testing.T, pool *pgxpool.Pool, orac
 	}
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO oracle_asset (oracle_id, token_id, enabled, valid_from, change_reason)
-		VALUES ($1, $2, $3, $4::date, 'test fixture')`, oracleID, tokenID, enabled, validFrom); err != nil {
+		VALUES ($1, $2, $3, $4, 'test fixture')`, oracleID, tokenID, enabled, utcMidnight(t, validFrom)); err != nil {
 		t.Fatalf("seed oracle_asset for %s: %v", oracleName, err)
 	}
 	return oracleID, tokenID
+}
+
+// utcMidnight parses a YYYY-MM-DD fixture date as that day's midnight UTC, so the bound
+// value is an absolute instant and never a cast that depends on the session TimeZone.
+func utcMidnight(t *testing.T, value string) time.Time {
+	t.Helper()
+	parsed, err := time.Parse(time.DateOnly, value)
+	if err != nil {
+		t.Fatalf("parse date %q: %v", value, err)
+	}
+	return parsed.UTC()
 }
 
 // setEnabled calls the append-on-change writer and returns the appended row's
@@ -41,8 +52,8 @@ func setEnabled(ctx context.Context, t *testing.T, pool *pgxpool.Pool, oracleID,
 	t.Helper()
 	var pv *int
 	if err := pool.QueryRow(ctx,
-		`SELECT oracle_asset_set_enabled($1, $2, NULL, $3, $4::date, $5)`,
-		oracleID, tokenID, enabled, effectiveAt, reason).Scan(&pv); err != nil {
+		`SELECT oracle_asset_set_enabled($1, $2, NULL, $3, $4, $5)`,
+		oracleID, tokenID, enabled, utcMidnight(t, effectiveAt), reason).Scan(&pv); err != nil {
 		t.Fatalf("oracle_asset_set_enabled(enabled=%v, %s): %v", enabled, effectiveAt, err)
 	}
 	if pv == nil {
@@ -65,7 +76,7 @@ func TestOracleAssetToggleAppendsNewVersion(t *testing.T) {
 	}
 
 	rows, err := pool.Query(ctx, `
-		SELECT processing_version, enabled, valid_from::text, change_reason
+		SELECT processing_version, enabled, to_char(valid_from AT TIME ZONE 'utc', 'YYYY-MM-DD'), change_reason
 		FROM oracle_asset
 		WHERE oracle_id = $1 AND token_id = $2
 		ORDER BY processing_version`, oracleID, tokenID)
@@ -129,8 +140,8 @@ func TestOracleAssetAsOfReadsTheVersionEffectiveThen(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rows, err := pool.Query(ctx, `
-				SELECT enabled FROM oracle_asset_as_of($1::date)
-				WHERE oracle_id = $2 AND token_id = $3`, tc.effectiveAt, oracleID, tokenID)
+				SELECT enabled FROM oracle_asset_as_of($1)
+				WHERE oracle_id = $2 AND token_id = $3`, utcMidnight(t, tc.effectiveAt), oracleID, tokenID)
 			if err != nil {
 				t.Fatalf("oracle_asset_as_of(%s): %v", tc.effectiveAt, err)
 			}
@@ -168,7 +179,8 @@ func TestOracleAssetVersionsDerivesTheValidityWindow(t *testing.T) {
 	setEnabled(ctx, t, pool, oracleID, tokenID, false, "2026-08-20", "VEC-549: retired")
 
 	rows, err := pool.Query(ctx, `
-		SELECT enabled, valid_from::text, coalesce(valid_to_exclusive::text, ''), is_current
+		SELECT enabled, to_char(valid_from AT TIME ZONE 'utc', 'YYYY-MM-DD'),
+		       coalesce(to_char(valid_to_exclusive AT TIME ZONE 'utc', 'YYYY-MM-DD'), ''), is_current
 		FROM oracle_asset_versions
 		WHERE oracle_id = $1 AND token_id = $2
 		ORDER BY valid_from`, oracleID, tokenID)
@@ -233,8 +245,8 @@ func TestOracleAssetCurrentIgnoresAFutureDatedVersion(t *testing.T) {
 
 	var futureEnabled bool
 	if err := pool.QueryRow(ctx, `
-		SELECT enabled FROM oracle_asset_as_of($1::date)
-		WHERE oracle_id = $2 AND token_id = $3`, future, oracleID, tokenID).Scan(&futureEnabled); err != nil {
+		SELECT enabled FROM oracle_asset_as_of($1)
+		WHERE oracle_id = $2 AND token_id = $3`, utcMidnight(t, future), oracleID, tokenID).Scan(&futureEnabled); err != nil {
 		t.Fatalf("read oracle_asset_as_of(%s): %v", future, err)
 	}
 	if futureEnabled {
@@ -277,10 +289,10 @@ func TestOracleAssetSetEnabledRejectsADateBeforeTheFirstVersion(t *testing.T) {
 
 	var pv *int
 	err := pool.QueryRow(ctx,
-		`SELECT oracle_asset_set_enabled($1, $2, NULL, false, '2026-01-01'::date, 'backdated')`,
+		`SELECT oracle_asset_set_enabled($1, $2, NULL, false, '2026-01-01T00:00:00Z'::timestamptz, 'backdated')`,
 		oracleID, tokenID).Scan(&pv)
 	if err == nil {
-		t.Fatal("an effective date before the first version was accepted; want an error")
+		t.Fatal("an effective time before the first version was accepted; want an error")
 	}
 }
 
@@ -323,7 +335,7 @@ func TestOracleAssetNaturalKeyIsThePrimaryKey(t *testing.T) {
 
 	_, err := pool.Exec(ctx, `
 		INSERT INTO oracle_asset (oracle_id, token_id, enabled, valid_from, change_reason)
-		VALUES ($1, $2, false, '2026-02-01'::date, 'duplicate version 0')`, oracleID, tokenID)
+		VALUES ($1, $2, false, '2026-02-01T00:00:00Z'::timestamptz, 'duplicate version 0')`, oracleID, tokenID)
 	if err == nil {
 		t.Fatal("a duplicate (oracle_id, token_id, feed_key, processing_version) was accepted")
 	}
@@ -354,7 +366,7 @@ func TestOracleAssetSetEnabledRejectsAnUnknownAsset(t *testing.T) {
 
 	var pv *int
 	err := pool.QueryRow(ctx,
-		`SELECT oracle_asset_set_enabled($1, $2, '\xdeadbeef'::bytea, false, '2026-08-20'::date, 'unknown feed')`,
+		`SELECT oracle_asset_set_enabled($1, $2, '\xdeadbeef'::bytea, false, '2026-08-20T00:00:00Z'::timestamptz, 'unknown feed')`,
 		oracleID, tokenID).Scan(&pv)
 	if err == nil {
 		t.Fatal("setting enabled on an unregistered (oracle, token, feed) key succeeded; want an error")

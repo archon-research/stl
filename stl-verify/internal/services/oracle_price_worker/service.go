@@ -102,7 +102,7 @@ func (s *Service) WithTelemetry(t *Telemetry) {
 
 // WithReferenceEffectiveAt pins which oracle_asset versions this run reads, so a replay can
 // rebuild the reference view a past run used (ADR-0006 §4). Call before Start; unset means
-// the run's start date.
+// the run's start time.
 func (s *Service) WithReferenceEffectiveAt(effectiveAt time.Time) {
 	s.referenceEffectiveAt = effectiveAt
 }
@@ -206,7 +206,7 @@ func (s *Service) Stop() error {
 
 func (s *Service) initialize(ctx context.Context) error {
 	// One reference view per run (ADR-0006 §4): resolved once, so every unit sees the same
-	// oracle_asset versions and a replay can supply the date the original run used.
+	// oracle_asset versions and a replay can supply the instant the original run used.
 	referenceEffectiveAt := s.referenceEffectiveAt
 	if referenceEffectiveAt.IsZero() {
 		referenceEffectiveAt = time.Now().UTC()

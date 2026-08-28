@@ -5,9 +5,9 @@ import (
 	"time"
 )
 
-// TestResolveReferenceEffectiveAt covers the replay seam: an operator-supplied date wins
+// TestResolveReferenceEffectiveAt covers the replay seam: an operator-supplied instant wins
 // over the clock, an unset one falls back to the run's start, and an unparseable one fails
-// the run rather than silently reading today's reference view.
+// the run rather than silently reading the current reference view.
 func TestResolveReferenceEffectiveAt(t *testing.T) {
 	now := time.Date(2026, 8, 21, 14, 30, 0, 0, time.FixedZone("CEST", 2*60*60))
 
@@ -19,8 +19,9 @@ func TestResolveReferenceEffectiveAt(t *testing.T) {
 	}{
 		{name: "unset falls back to the run's start in UTC", raw: "", want: "2026-08-21T12:30:00Z"},
 		{name: "a supplied date wins over the clock", raw: "2026-06-01", want: "2026-06-01T00:00:00Z"},
-		{name: "an unparseable date fails the run", raw: "01/06/2026", wantErr: true},
-		{name: "a timestamp is not a date", raw: "2026-06-01T00:00:00Z", wantErr: true},
+		{name: "a supplied timestamp wins over the clock", raw: "2026-06-01T14:30:00Z", want: "2026-06-01T14:30:00Z"},
+		{name: "a zoned timestamp is normalized to UTC", raw: "2026-06-01T14:30:00+02:00", want: "2026-06-01T12:30:00Z"},
+		{name: "an unparseable value fails the run", raw: "01/06/2026", wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := ResolveReferenceEffectiveAt(tc.raw, now)

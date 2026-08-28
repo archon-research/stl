@@ -73,13 +73,13 @@ func (r *OnchainPriceRepository) GetOracle(ctx context.Context, name string) (*e
 	return &o, nil
 }
 
-// GetEnabledAssets retrieves the assets a given oracle prices, as the mapping stood at
-// referenceEffectiveAt (ADR-0006 §4). Ordered by the natural key, not by id: a re-versioned
-// row gets a fresh id, so id order would reshuffle the list on every mapping change.
+// GetEnabledAssets retrieves the assets a given oracle prices, as the mapping stood at the
+// referenceEffectiveAt instant (ADR-0006 §4). Ordered by the natural key, not by id: a
+// re-versioned row gets a fresh id, so id order would reshuffle the list on every mapping change.
 func (r *OnchainPriceRepository) GetEnabledAssets(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) ([]*entity.OracleAsset, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, created_at
-		FROM oracle_asset_as_of(($2::timestamptz AT TIME ZONE 'utc')::date)
+		FROM oracle_asset_as_of($2::timestamptz)
 		WHERE oracle_id = $1 AND enabled = true
 		ORDER BY oracle_id, token_id, feed_address
 	`, oracleID, referenceEffectiveAt)
@@ -164,7 +164,7 @@ func (r *OnchainPriceRepository) GetLatestBlock(ctx context.Context, oracleID in
 func (r *OnchainPriceRepository) GetTokenInfos(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) (map[int64]outbound.TokenInfo, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT oa.token_id, t.address, t.decimals
-		FROM oracle_asset_as_of(($2::timestamptz AT TIME ZONE 'utc')::date) oa
+		FROM oracle_asset_as_of($2::timestamptz) oa
 		JOIN token t ON t.id = oa.token_id
 		WHERE oa.oracle_id = $1 AND oa.enabled = true
 		ORDER BY oa.oracle_id, oa.token_id, oa.feed_address
@@ -376,14 +376,17 @@ func (r *OnchainPriceRepository) GetAllProtocolOracleBindings(ctx context.Contex
 
 // CopyOracleAssets seeds a newly discovered oracle with the mappings the source had at
 // referenceEffectiveAt, as version 0 of the target's own history. valid_from is the run's
-// date, not the wall clock: a replay of the same run must produce identically dated rows.
+// recorded instant, not the wall clock: a replay of the same run must produce identically
+// dated rows. The change_reason renders it in UTC so the text never depends on the
+// writer's session TimeZone.
 func (r *OnchainPriceRepository) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64, referenceEffectiveAt time.Time) error {
 	_, err := r.pool.Exec(ctx, `
 		INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, valid_from, change_reason)
 		SELECT $2, token_id, enabled, feed_address, feed_decimals, quote_currency,
-		       ($3::timestamptz AT TIME ZONE 'utc')::date,
-		       format('copied from oracle %s as of %s', $1::bigint, ($3::timestamptz AT TIME ZONE 'utc')::date)
-		FROM oracle_asset_as_of(($3::timestamptz AT TIME ZONE 'utc')::date)
+		       $3::timestamptz,
+		       format('copied from oracle %s as of %s', $1::bigint,
+		              to_char($3::timestamptz AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+		FROM oracle_asset_as_of($3::timestamptz)
 		WHERE oracle_id = $1 AND enabled = true
 		ON CONFLICT DO NOTHING
 	`, fromOracleID, toOracleID, referenceEffectiveAt)

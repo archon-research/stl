@@ -803,11 +803,12 @@ UV_UNIV3_UNDERLYING_VALUE = Decimal("26927207.299715")
 
 # oracle_asset versions the seeds register (VEC-597): every mapping is live from
 # ORACLE_ASSET_REGISTERED_FROM, and a retired one is disabled from ORACLE_ASSET_RETIRED_FROM.
-# Both are well in the past, so a read pinned to "today" sees the retirement and a read
-# pinned between the two dates sees the source as it was while live.
-ORACLE_ASSET_REGISTERED_FROM = dt.date(2026, 1, 1)
-ORACLE_ASSET_RETIRED_FROM = dt.date(2026, 4, 1)
-ORACLE_ASSET_WHILE_LIVE = dt.date(2026, 3, 1)
+# Both are well in the past, so a read pinned to "now" sees the retirement and a read
+# pinned between the two instants sees the source as it was while live. Timezone-aware
+# UTC, so the bound value is an absolute instant regardless of session TimeZone.
+ORACLE_ASSET_REGISTERED_FROM = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+ORACLE_ASSET_RETIRED_FROM = dt.datetime(2026, 4, 1, tzinfo=dt.UTC)
+ORACLE_ASSET_WHILE_LIVE = dt.datetime(2026, 3, 1, tzinfo=dt.UTC)
 
 
 async def insert_oracle_asset(
@@ -816,8 +817,8 @@ async def insert_oracle_asset(
     token_id: int,
     *,
     enabled: bool = True,
-    registered_from: dt.date = ORACLE_ASSET_REGISTERED_FROM,
-    retired_from: dt.date = ORACLE_ASSET_RETIRED_FROM,
+    registered_from: dt.datetime = ORACLE_ASSET_REGISTERED_FROM,
+    retired_from: dt.datetime = ORACLE_ASSET_RETIRED_FROM,
 ) -> None:
     """Register a non-feed oracle_asset mapping (idempotent).
 

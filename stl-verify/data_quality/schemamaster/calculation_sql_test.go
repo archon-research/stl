@@ -30,7 +30,7 @@ func TestCheckCalculationSQL(t *testing.T) {
 		},
 		{
 			name: "as_of read with a positional parameter and an explicit UTC cast",
-			body: `SELECT 1 FROM oracle_asset_as_of(($2::timestamptz AT TIME ZONE 'utc')::date) oa`,
+			body: `SELECT 1 FROM oracle_asset_as_of($2::timestamptz) oa`,
 		},
 		{
 			name: "appending a version is not a read",
