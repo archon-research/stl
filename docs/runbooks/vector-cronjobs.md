@@ -765,6 +765,77 @@ The alert exists precisely because a partially-covered cycle looks healthy.
 
 ---
 
+## VectorReferenceCapitalIndexerAllocationsZero
+
+**What it means.** Cycles are succeeding but `prime_capital_stack_allocation`
+received no rows for an hour. The per-allocation breakdown behind the
+prime-level totals has stopped advancing, and like the prime-level series it
+cannot be backfilled afterwards — the monitor publishes no history.
+
+**Why it is not caught by the generic rules.** The run returns no error, so
+`VectorCronjobRunFailing` stays quiet — and the service deliberately fails a
+cycle whose covered primes report exposure with an empty breakdown, so a
+successful cycle writing zero rows means every covered prime reported zero
+exposure. That is either a market state worth confirming or an upstream fault
+wearing its shape.
+
+**Triage.**
+
+1. Confirm the worker is cycling:
+   `kubectl -n vector logs deploy/reference-capital-indexer --tail=100`.
+2. Ask the breakdown route directly for a covered prime:
+   `curl -s "$SKY_RISK_CAPITAL_URL/primes/spark/allocations/?limit=500" | jq '.data.results | length'`.
+   Rows here with zero rows landing means the payload changed shape — the
+   client should have errored, so check its logs for parse failures.
+3. Cross-check the prime-level series: if
+   `VectorReferenceCapitalIndexerWritesZero` is also firing, treat that as the
+   primary signal — the whole feed stalled, not just the breakdown.
+
+**Resolution.** Same posture as `WritesZero`: upstream coverage is upstream's.
+Confirm what the monitor reports and reconcile; the gap in the series stays.
+
+---
+
+## VectorReferenceCapitalIndexerPositionsZero
+
+**What it means.** Cycles are succeeding but
+`reference_capital_sync_positions_written_total` recorded no increase for an
+hour. This points at the counter, not the pipeline: see below for why.
+
+**Why it is not caught by the generic rules, and why it is not a data gap.**
+The positions client fails the whole cycle on an empty result for a covered
+prime — the feed answers unknown primes with `200` and an empty list, so
+emptiness is deliberately never persisted — and `Run` fails before persisting
+anything if the cycle's snapshot set is empty. So a cycle that reports success
+always covers at least one star and always wrote at least one position row.
+Zero on this counter while cycles succeed can therefore only mean the counter
+itself broke (collector drop, metric rename, a missed recording call), never
+that positions stopped landing.
+
+**A third failure mode this alert cannot catch.** A prime the Star monitor
+covers but this positions feed does not carry makes every cycle fail loudly
+instead — `VectorCronjobRunFailing` fires, not this alert. The escape hatch is
+a deliberate team decision to gate positions on the positions feed's own
+coverage — a code change, never a silent skip.
+
+**Triage.**
+
+1. Confirm the worker is cycling:
+   `kubectl -n vector logs deploy/reference-capital-indexer --tail=100`.
+2. Compare against the table:
+   `SELECT max(synced_at) FROM prime_reference_position;` — if rows are
+   landing at the expected cadence, this is telemetry-only: fix the counter
+   (check the metric name/labels and that `RecordPositionsWritten` is on the
+   success path), not the pipeline.
+3. If rows are genuinely not landing despite cycles succeeding, that
+   contradicts the invariant above — treat it as a code regression in the
+   positions client's empty-result guard, not a routine data gap.
+
+**Resolution.** A telemetry fix ships as a normal PR; no upstream reconciliation
+or accepted gap applies here, unlike `WritesZero`/`AllocationsZero`.
+
+---
+
 ## morpho-v2-bootstrap run outcomes
 
 **Nothing here needs rows reconciling by hand.** Adapter membership is an

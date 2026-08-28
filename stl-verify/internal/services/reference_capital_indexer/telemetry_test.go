@@ -9,7 +9,8 @@ import (
 )
 
 // The alert rules key on these exact names; renaming one silently stops
-// VectorReferenceCapitalIndexerWritesZero / PrimeUncovered from ever firing.
+// VectorReferenceCapitalIndexerWritesZero / PrimeUncovered / AllocationsZero /
+// PositionsZero from ever firing.
 func TestTelemetryEmitsTheMetricNamesTheAlertsQuery(t *testing.T) {
 	reader := metric.NewManualReader()
 	provider := metric.NewMeterProvider(metric.WithReader(reader))
@@ -21,6 +22,8 @@ func TestTelemetryEmitsTheMetricNamesTheAlertsQuery(t *testing.T) {
 
 	ctx := context.Background()
 	tel.RecordSnapshotsWritten(ctx, 2)
+	tel.RecordAllocationsWritten(ctx, 11)
+	tel.RecordPositionsWritten(ctx, 59)
 	tel.RecordPrimeUncovered(ctx, "grove")
 
 	var rm metricdata.ResourceMetrics
@@ -37,6 +40,8 @@ func TestTelemetryEmitsTheMetricNamesTheAlertsQuery(t *testing.T) {
 
 	for _, want := range []string{
 		"reference_capital.sync.snapshots.written.total",
+		"reference_capital.sync.allocations.written.total",
+		"reference_capital.sync.positions.written.total",
 		"reference_capital.sync.primes.uncovered.total",
 	} {
 		if !names[want] {
@@ -50,5 +55,7 @@ func TestTelemetryEmitsTheMetricNamesTheAlertsQuery(t *testing.T) {
 func TestTelemetryRecordersAreNilSafe(t *testing.T) {
 	var tel *Telemetry
 	tel.RecordSnapshotsWritten(context.Background(), 1)
+	tel.RecordAllocationsWritten(context.Background(), 1)
+	tel.RecordPositionsWritten(context.Background(), 1)
 	tel.RecordPrimeUncovered(context.Background(), "spark")
 }

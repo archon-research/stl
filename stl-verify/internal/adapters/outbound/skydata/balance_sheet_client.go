@@ -20,13 +20,36 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/httpclient"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/skyenvelope"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
 const defaultBaseURL = "https://sky.data.blockanalitica.com/internal"
 
-// Compile-time check that Client implements outbound.BalanceSheetProvider.
-var _ outbound.BalanceSheetProvider = (*Client)(nil)
+// Upstream paginates at 20 by default — spark alone holds 59 positions, so an
+// unset limit silently serves a third of them. Asked for explicitly, and the
+// reported total is checked against what arrives.
+const positionsPageLimit = 1000
+
+// This host spells networks its own way — "ethereum" where the axis-synome
+// contract and the allocation trackers say "mainnet". The same mapping the
+// Star-monitor client applies, repeated rather than shared: they are two
+// vendors' vocabularies that happen to agree today, and a change to one must
+// not silently move the other.
+var networkToChainID = map[string]int64{
+	"ethereum":  1,
+	"optimism":  10,
+	"unichain":  130,
+	"base":      8453,
+	"arbitrum":  42161,
+	"avalanche": 43114,
+}
+
+// Compile-time checks that Client implements both feed ports.
+var (
+	_ outbound.BalanceSheetProvider      = (*Client)(nil)
+	_ outbound.ReferencePositionProvider = (*Client)(nil)
+)
 
 // ClientConfig holds configuration for the Sky balance-sheet client.
 type ClientConfig struct {
@@ -178,6 +201,108 @@ func toDay(row historicRow, index int) (outbound.BalanceSheetDay, error) {
 	return day, nil
 }
 
+// FetchPositions returns every balance-sheet position the feed holds for each
+// star. Callers pass only stars whose coverage is already established: the
+// route answers an unknown star with 200 and an empty list, so an empty result
+// cannot be told apart from a prime that genuinely holds nothing — a passed
+// star returning zero rows therefore fails the fetch.
+func (c *Client) FetchPositions(ctx context.Context, stars []string) ([]outbound.ReferencePositionRow, error) {
+	rows := make([]outbound.ReferencePositionRow, 0, len(stars)*64)
+	for _, star := range stars {
+		starRows, err := c.fetchStarPositions(ctx, star)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, starRows...)
+	}
+	return rows, nil
+}
+
+func (c *Client) fetchStarPositions(ctx context.Context, star string) ([]outbound.ReferencePositionRow, error) {
+	var payload positionsResponse
+	requestURL := fmt.Sprintf("%s/allocations/?prime=%s&limit=%d", c.baseURL, url.QueryEscape(star), positionsPageLimit)
+	if err := c.httpClient.DoRequest(ctx, httpclient.RequestConfig{URL: requestURL}, &payload); err != nil {
+		return nil, fmt.Errorf("fetching sky positions for prime %q: %w", star, err)
+	}
+
+	results := payload.Data.Results
+	if len(results) == 0 {
+		return nil, fmt.Errorf(
+			"sky positions feed returned no rows for prime %q; an untracked star and an empty holder are indistinguishable, so this fails rather than recording an empty balance sheet", star)
+	}
+	if err := skyenvelope.RequireFullPage(payload.Data.Pagination, len(results), positionsPageLimit, requestURL); err != nil {
+		return nil, err
+	}
+
+	// Row identity is (network, token_address) — the table's key. Case-folded
+	// here because the two are otherwise stored verbatim: a casing change on
+	// either would silently mint a second identity for the same position. A
+	// duplicate in one fetch would silently conflict away at insert, so it
+	// fails here instead.
+	seen := make(map[string]bool, len(results))
+	rows := make([]outbound.ReferencePositionRow, 0, len(results))
+	for i, row := range results {
+		parsed, err := toPositionRow(star, row, i)
+		if err != nil {
+			return nil, err
+		}
+		key := strings.ToLower(parsed.Network) + "|" + strings.ToLower(parsed.TokenAddress)
+		if seen[key] {
+			return nil, fmt.Errorf(
+				"sky positions for prime %q repeat identity %s on %s; the row identity assumption no longer holds",
+				star, parsed.TokenAddress, parsed.Network)
+		}
+		seen[key] = true
+		rows = append(rows, parsed)
+	}
+	return rows, nil
+}
+
+// toPositionRow rejects a row missing any identifying field or its balance;
+// persisting a blank in their place would read as a real answer. token_name,
+// allocated_assets and idle_assets are the fields the feed may omit.
+func toPositionRow(star string, row positionPayloadRow, index int) (outbound.ReferencePositionRow, error) {
+	// Ordered, not a map: which field a broken payload is blamed on must be
+	// reproducible across runs, or the same fault reads as a different bug.
+	required := []struct{ field, value string }{
+		{"protocol", row.Protocol},
+		{"network", row.Network},
+		{"token_symbol", row.TokenSymbol},
+		{"address", row.Address},
+		{"assets", row.Assets.String()},
+	}
+	for _, r := range required {
+		if strings.TrimSpace(r.value) == "" {
+			return outbound.ReferencePositionRow{}, fmt.Errorf(
+				"sky position row %d for prime %q is missing field %q", index, star, r.field)
+		}
+	}
+
+	network := strings.TrimSpace(row.Network)
+	return outbound.ReferencePositionRow{
+		Star:            star,
+		Protocol:        strings.TrimSpace(row.Protocol),
+		Network:         network,
+		ChainID:         chainIDFor(network),
+		TokenSymbol:     strings.TrimSpace(row.TokenSymbol),
+		TokenName:       skyenvelope.OptionalText(row.TokenName),
+		TokenAddress:    strings.TrimSpace(row.Address),
+		Assets:          row.Assets.String(),
+		AllocatedAssets: skyenvelope.OptionalNumber(row.AllocatedAssets),
+		IdleAssets:      skyenvelope.OptionalNumber(row.IdleAssets),
+	}, nil
+}
+
+// chainIDFor looks up by a case-folded network, since the vendor vocabulary
+// this map encodes is lowercase and upstream's own casing is not trustworthy.
+func chainIDFor(network string) *int64 {
+	id, ok := networkToChainID[strings.ToLower(network)]
+	if !ok {
+		return nil
+	}
+	return &id
+}
+
 type historicResponse struct {
 	Data []historicRow `json:"data"`
 }
@@ -191,4 +316,22 @@ type historicRow struct {
 	IdleAssets      json.Number `json:"idle_assets"`
 	Debt            json.Number `json:"debt"`
 	BackstopCapital json.Number `json:"backstop_capital"`
+}
+
+type positionsResponse struct {
+	Data struct {
+		Results    []positionPayloadRow    `json:"results"`
+		Pagination *skyenvelope.Pagination `json:"pagination"`
+	} `json:"data"`
+}
+
+type positionPayloadRow struct {
+	Protocol        string      `json:"protocol"`
+	Network         string      `json:"network"`
+	TokenSymbol     string      `json:"token_symbol"`
+	TokenName       string      `json:"token_name"`
+	Address         string      `json:"address"`
+	Assets          json.Number `json:"assets"`
+	AllocatedAssets json.Number `json:"allocated_assets"`
+	IdleAssets      json.Number `json:"idle_assets"`
 }

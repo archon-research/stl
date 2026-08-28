@@ -514,3 +514,68 @@ groups:
             drifted from the axis-synome contract STL tracks. Confirm against the
             monitor's `/primes/` route before assuming an outage.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorreferencecapitalindexerprimeuncovered
+
+      - alert: VectorReferenceCapitalIndexerAllocationsZero
+        # The per-allocation breakdown stalled while cycles succeed. Every row is
+        # keyed by the cycle's fresh synced_at, so written == inserted, and a
+        # healthy cycle always writes: the service fails a cycle whose covered
+        # primes report exposure with no breakdown. Zero therefore means every
+        # covered prime reported zero exposure — worth eyes either way.
+        # `unless` (not `== 0`) also fires when the counter series is entirely
+        # absent — a collector drop or metric rename — which `== 0` cannot.
+        expr: |
+          sum by (cluster) (
+            rate(cronjob_runs_total{service_name="reference-capital-indexer", status="success", k8s_namespace_name="vector"}[1h])
+          ) > 0
+          unless
+          sum by (cluster) (
+            increase(reference_capital_sync_allocations_written_total{k8s_namespace_name="vector"}[1h])
+          ) > 0
+        for: 30m
+        labels:
+          team: vector
+          severity: warning
+          component: reference-capital-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector reference-capital-indexer wrote 0 allocation breakdown rows"
+          description: |
+            `prime_capital_stack_allocation` received 0 rows over 1h while cycles
+            succeeded. The per-allocation reference breakdown has stopped
+            advancing; like the prime-level series, this history cannot be
+            backfilled afterwards — the monitor publishes none.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorreferencecapitalindexerallocationszero
+
+      - alert: VectorReferenceCapitalIndexerPositionsZero
+        # The positions counter stalled while cycles succeed. A successful cycle
+        # always writes at least one row per covered star: Run fails before
+        # persisting if snapshots are empty, and the positions client fails the
+        # whole cycle on an empty result for a covered prime — so a covered set
+        # is never empty when a cycle succeeds. Zero here therefore means the
+        # counter itself broke (collector drop, metric rename, missed recording
+        # call), not a stalled series.
+        # `unless` (not `== 0`) also fires when the counter series is entirely
+        # absent, which `== 0` cannot.
+        expr: |
+          sum by (cluster) (
+            rate(cronjob_runs_total{service_name="reference-capital-indexer", status="success", k8s_namespace_name="vector"}[1h])
+          ) > 0
+          unless
+          sum by (cluster) (
+            increase(reference_capital_sync_positions_written_total{k8s_namespace_name="vector"}[1h])
+          ) > 0
+        for: 30m
+        labels:
+          team: vector
+          severity: warning
+          component: reference-capital-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector reference-capital-indexer: positions counter stopped moving"
+          description: |
+            `reference_capital_sync_positions_written_total` recorded 0 over 1h
+            while cycles succeeded. A successful cycle always writes at least one
+            position row, so this is the counter itself breaking (collector drop,
+            metric rename, missed recording call) — confirm against
+            `prime_reference_position` before assuming the series stalled.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorreferencecapitalindexerpositionszero
