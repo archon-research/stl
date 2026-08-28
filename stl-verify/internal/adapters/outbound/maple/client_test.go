@@ -574,9 +574,6 @@ func TestGetActiveLoans_NullCollateralAmountsPersistedAsNull(t *testing.T) {
 }
 
 func TestGetActiveLoans_NullCollateralAssetSymbolKeepsLoan(t *testing.T) {
-	// Maple returned a priced, Deposited collateral with a null asset symbol on
-	// 2026-08-27 (loan 0x74f49ed5…), which failed the whole loans phase for ~1h
-	// in both environments. The symbol decodes to "" and the loan is kept.
 	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
 		writeJSON(w, fmt.Sprintf(`{"data": {"openTermLoans": [{
 			"id": %q, "borrower": {"id": %q}, "state": "Active",

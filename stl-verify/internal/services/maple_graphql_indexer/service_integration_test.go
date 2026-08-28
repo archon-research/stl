@@ -499,11 +499,6 @@ func TestSyncIntegration_UnpriceableCollateralPersistsNullPrice(t *testing.T) {
 }
 
 func TestSyncIntegration_NullCollateralAssetSymbolPersists(t *testing.T) {
-	// Maple returned a priced, Deposited collateral with a null asset symbol on
-	// 2026-08-27 (loan 0x74f49ed5…), and the loans phase — one all-or-nothing
-	// transaction — dropped every loan's snapshot for ~1h in both environments.
-	// The phase must commit, storing the empty symbol alongside the amount and
-	// price that still carry the risk signal.
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()

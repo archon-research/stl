@@ -1409,9 +1409,7 @@ func TestSync_InvalidCollateralFailsPhase(t *testing.T) {
 	client := happyClient()
 	client.GetActiveLoansFn = func(context.Context) ([]outbound.MapleActiveLoan, error) {
 		loans := fixtureLoans()
-		// A negative amount, not an empty symbol: a missing symbol is a
-		// tolerated downgrade (see TestSyncIntegration_NullCollateralAssetSymbolPersists),
-		// whereas a nonsensical amount must still fail the phase.
+		// A nonsensical value, not a missing label: the latter is a downgrade.
 		loans[0].Collateral.AssetAmount = big.NewInt(-1)
 		return loans, nil
 	}

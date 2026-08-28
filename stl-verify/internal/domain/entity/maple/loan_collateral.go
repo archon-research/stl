@@ -65,12 +65,8 @@ func (c *LoanCollateral) Validate() error {
 	if c.SyncedAt.IsZero() {
 		return fmt.Errorf("syncedAt must not be zero")
 	}
-	// AssetSymbol is deliberately not required. It is Maple-side metadata, and
-	// the loans phase writes one all-or-nothing snapshot: making a missing
-	// symbol fatal discards every loan's snapshot over one absent label. The
-	// amount, price, and liquidation level still carry the risk signal, so an
-	// empty symbol is persisted as-is and counted as a null downgrade by the
-	// caller instead.
+	// AssetSymbol is not required: it is a label, and the loans phase snapshot is
+	// all-or-nothing, so a missing one is a downgrade, not every loan's loss.
 	if err := requireNonNegBigIntIfSet("assetAmount", c.AssetAmount); err != nil {
 		return err
 	}
