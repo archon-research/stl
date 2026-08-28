@@ -232,6 +232,15 @@ jobs:
       cancel-in-progress: false
     permissions:
       id-token: write
+    # The verdict of whichever attempt last ran: later attempts only run when
+    # the earlier one failed, so the highest-numbered non-empty summary is the
+    # final one. Consumed by notify-staging-failure so the Slack alert names the
+    # cause instead of just the job.
+    outputs:
+      failure-summary: >-
+        ${{ steps.wait-attempt-3.outputs.failure-summary
+            || steps.wait-attempt-2.outputs.failure-summary
+            || steps.wait-attempt-1.outputs.failure-summary }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -568,6 +577,10 @@ jobs:
         Build & Push Images (Staging)=${{ needs.build-push-staging.result }}
         Update Staging Image Tags=${{ needs.update-staging.result }}
         Wait for Staging Healthy=${{ needs.wait-staging-healthy.result }}
+      # Empty for the two build/tag jobs, which report their own failures well
+      # enough; set when the ArgoCD gate is what failed, where the job name
+      # alone said nothing and the reason had to be dug out of the ArgoCD UI.
+      body: ${{ needs.wait-staging-healthy.outputs.failure-summary && format('```{0}```', needs.wait-staging-healthy.outputs.failure-summary) || '' }}
     secrets:
       slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_STAGING }}
       gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
