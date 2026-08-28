@@ -405,9 +405,10 @@ export const debtSeriesQuery = (primeId: string, window: SeriesWindow) =>
     },
   );
 
-// The three supplementary series. Each degrades to its card's current-value
-// fallback on failure rather than blanking the view, which is why they log at
-// `warn` and why nothing reads their errors.
+// The three supplementary series, which log at `warn` because a failure
+// degrades a card rather than blanking the view. Activity is the exception:
+// its card has no current-value fallback, so an empty series would read as "no
+// activity" and its error *is* read, to say so.
 
 export const activitySeriesQuery = (primeId: string, window: SeriesWindow) =>
   api.queryOptions(
