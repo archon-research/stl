@@ -34,6 +34,8 @@ resources:
   - ../../base/arbitrum-watcher
   - ../../base/arbitrum-backup-worker
   - ../../base/arbitrum-allocation-tracker
+  - ../../base/robinhood-watcher
+  - ../../base/robinhood-allocation-tracker
   - ../../base/prime-debt-indexer
   - ../../base/base-psm3-indexer
   - ../../base/optimism-psm3-indexer
@@ -140,11 +142,19 @@ images:
     # Shares the watcher image — same binary, different chain config via env vars
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-watcher
     newTag: "ce5a87621effe25d178225a7898cc4f3cb9794e3"
+  - name: robinhood-watcher
+    # Shares the watcher image — same binary, different chain config via env vars
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-watcher
+    newTag: "ce5a87621effe25d178225a7898cc4f3cb9794e3"
   - name: base-backup-worker
     # Shares the backup-worker image — same binary, different chain config via env vars
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
     newTag: "ce5a87621effe25d178225a7898cc4f3cb9794e3"
   - name: base-allocation-tracker
+    # Shares the allocation-tracker image — same binary, different chain config via env vars
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-allocation-tracker
+    newTag: "ce5a87621effe25d178225a7898cc4f3cb9794e3"
+  - name: robinhood-allocation-tracker
     # Shares the allocation-tracker image — same binary, different chain config via env vars
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-allocation-tracker
     newTag: "ce5a87621effe25d178225a7898cc4f3cb9794e3"
