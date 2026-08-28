@@ -229,6 +229,19 @@ func TestIntegration_Register_RefusesAChainIDMismatch(t *testing.T) {
 	}
 }
 
+// deleteSeededV2Vaults restores the "no VaultV2 vault known" premise: registry
+// seed migrations now ship VaultV2 rows (20260825 sparkUSDTbc is mainnet's
+// first), so a freshly migrated database no longer holds zero of them. A
+// test-fixture DELETE on this test's throwaway clone — the append-only rule
+// governs production ingest, not test setup.
+func deleteSeededV2Vaults(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	// vault_version 3 = Morpho VaultV2 (entity.MorphoVaultV2).
+	if _, err := pool.Exec(ctx, `DELETE FROM morpho_vault WHERE vault_version = 3`); err != nil {
+		t.Fatalf("deleting the seed-registered VaultV2 vaults: %v", err)
+	}
+}
+
 // The discovery activity must read the archive through the production reader.
 // A range whose receipts carry nothing Morpho-related yields no candidates and
 // no error — the "quiet range" outcome the workflow treats as ordinary.
@@ -237,6 +250,7 @@ func TestIntegration_DiscoverVaults_FindsNoCandidatesInAnUnrelatedRange(t *testi
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
+	deleteSeededV2Vaults(t, ctx, pool)
 	bucket := seedBucket(t, ctx)
 	// Contiguous, and the range below covers exactly these blocks: the scan
 	// refuses a partition slice the archive has a hole in, so a sampled seed
@@ -347,6 +361,7 @@ func TestIntegration_Backfill_SucceedsWithNothingToReplayOverACompleteArchive(t 
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
+	deleteSeededV2Vaults(t, ctx, pool)
 	bucket := seedQuietBlocks(t, ctx, 1, 6, -1)
 	setWorkerEnv(t, bucket, chainFixtureServer(t, "0x1").URL)
 
@@ -581,6 +596,7 @@ func TestIntegration_ReplayPartition_ReplaysNothingWhenNoV2VaultIsKnown(t *testi
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
+	deleteSeededV2Vaults(t, ctx, pool)
 	// Deliberately an empty bucket: reaching S3 at all here would be the bug.
 	setWorkerEnv(t, seedBucket(t, ctx), chainFixtureServer(t, "0x1").URL)
 	env := newActivityEnv(t, ctx, pool)
