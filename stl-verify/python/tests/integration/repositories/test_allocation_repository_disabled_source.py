@@ -40,8 +40,8 @@ _DIRECT_PRIME = EthAddress(f"0x{DIS_DIRECT_PROXY_HEX}")
 _EXPECTED_RECEIPT_USD = DIS_RECEIPT_UNDERLYING_VALUE * DIS_ENABLED_PRICE
 _EXPECTED_DIRECT_USD = DIS_DIRECT_BALANCE * DIS_ENABLED_PRICE
 
-# While the retired source was still live it held the higher block, so a read pinned
-# before its retirement values the position at ITS price, not the survivor's.
+# While live, the retired source held the higher block, so a read pinned before its
+# retirement values the position at its price, not the survivor's.
 _EXPECTED_RECEIPT_USD_WHILE_LIVE = DIS_RECEIPT_UNDERLYING_VALUE * DIS_DISABLED_PRICE
 _EXPECTED_DIRECT_USD_WHILE_LIVE = DIS_DIRECT_BALANCE * DIS_DISABLED_PRICE
 

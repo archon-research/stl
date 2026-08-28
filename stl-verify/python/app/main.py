@@ -191,10 +191,8 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
                 await conn.execute(text("SELECT 1"))
 
             asset_to_rating = await resolve_receipt_token_mapping(raw_mapping, engine)
-            # One reference view for the whole process when pinned (ADR-0006 §4); unset
-            # leaves each read resolving now (UTC), as before. Published on app.state so
-            # every route resolves the same provider via deps.get_reference_as_of —
-            # a per-route default would silently leave most endpoints unpinned.
+            # Published on app.state so every route resolves the same provider via
+            # deps.get_reference_as_of; a per-route default would leave most unpinned.
             reference_effective_at = pinned_to(settings.resolved_reference_effective_at())
             app.state.reference_effective_at = reference_effective_at
             allocation_repo = AllocationRepository(engine, reference_effective_at)

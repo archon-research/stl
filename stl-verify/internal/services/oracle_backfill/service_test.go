@@ -23,12 +23,8 @@ import (
 // ---------------------------------------------------------------------------
 
 // mockRepo implements outbound.OnchainPriceRepository for testing.
-// testReferenceEffectiveAt is the recorded reference instant every test pins its
-// oracle_asset reads to (ADR-0006 §4). Deliberately AFTER the fixtures: the seed helpers
-// stamp valid_from with time.Now(), and oracle_asset_as_of resolves only versions with
-// valid_from <= effective_at, so an earlier instant would see no mapping at all and every
-// test would fail with "no enabled assets". These tests assert on the current mapping; the
-// bitemporal reads themselves are covered in db/migrator and the postgres adapter.
+// Deliberately after the fixtures: the seed helpers stamp valid_from with time.Now(), and
+// oracle_asset_as_of resolves only versions with valid_from <= effective_at.
 var testReferenceEffectiveAt = time.Now().UTC().Add(24 * time.Hour)
 
 type mockRepo struct {
@@ -49,7 +45,6 @@ type mockRepo struct {
 	mu       sync.Mutex
 	upserted []*entity.OnchainTokenPrice
 
-	// referenceEffectiveAt records the instant the last oracle_asset read was pinned to.
 	referenceEffectiveAt time.Time
 }
 
@@ -450,8 +445,7 @@ func TestNewService(t *testing.T) {
 		},
 		{
 			name: "success with default config values",
-			// Every defaultable field left zero. ChainID and ReferenceEffectiveAt are
-			// required, not defaultable, so they are set.
+			// ChainID and ReferenceEffectiveAt are required, not defaultable.
 			config:         Config{ChainID: 1, ReferenceEffectiveAt: testReferenceEffectiveAt},
 			headerFetcher:  validFetcher,
 			newMulticaller: validFactory,

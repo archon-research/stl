@@ -11,8 +11,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// seedOracleAsset registers one aave-style (feedless) oracle_asset version. Each caller passes
-// its own oracle name, so two fixtures in one database never share a natural key.
+// seedOracleAsset registers one aave-style (feedless) version. Each caller passes its own
+// oracle name, so two fixtures in one database never share a natural key.
 func seedOracleAsset(ctx context.Context, t *testing.T, pool *pgxpool.Pool, oracleName string, enabled bool, validFrom string) (oracleID, tokenID int64) {
 	t.Helper()
 
@@ -36,8 +36,8 @@ func seedOracleAsset(ctx context.Context, t *testing.T, pool *pgxpool.Pool, orac
 	return oracleID, tokenID
 }
 
-// seedFeedOracleAsset registers one feed-style (feed_address NOT NULL) oracle_asset version,
-// the shape seedOracleAsset cannot produce. Its own oracle name keeps the natural key distinct.
+// seedFeedOracleAsset registers one feed-style (feed_address NOT NULL) version, the shape
+// seedOracleAsset cannot produce.
 func seedFeedOracleAsset(ctx context.Context, t *testing.T, pool *pgxpool.Pool, oracleName string, feedAddress []byte, validFrom string) (oracleID, tokenID int64) {
 	t.Helper()
 
@@ -62,8 +62,7 @@ func seedFeedOracleAsset(ctx context.Context, t *testing.T, pool *pgxpool.Pool, 
 	return oracleID, tokenID
 }
 
-// utcMidnight parses a YYYY-MM-DD fixture date as that day's midnight UTC, so the bound
-// value is an absolute instant and never a cast that depends on the session TimeZone.
+// utcMidnight binds an absolute instant, never a cast that depends on the session TimeZone.
 func utcMidnight(t *testing.T, value string) time.Time {
 	t.Helper()
 	parsed, err := time.Parse(time.DateOnly, value)
@@ -73,8 +72,8 @@ func utcMidnight(t *testing.T, value string) time.Time {
 	return parsed.UTC()
 }
 
-// setEnabled calls the append-on-change writer and returns the appended row's
-// processing_version, or -1 when the call was a no-op (NULL: value unchanged).
+// setEnabled returns the appended processing_version, or -1 when the writer returned NULL
+// because the value was unchanged.
 func setEnabled(ctx context.Context, t *testing.T, pool *pgxpool.Pool, oracleID, tokenID int64, enabled bool, effectiveAt, reason string) int {
 	t.Helper()
 	var pv *int
@@ -89,8 +88,6 @@ func setEnabled(ctx context.Context, t *testing.T, pool *pgxpool.Pool, oracleID,
 	return *pv
 }
 
-// TestOracleAssetToggleAppendsNewVersion is the contract: retiring a source appends a version
-// instead of overwriting the row, so the pre-toggle reference view survives.
 func TestOracleAssetToggleAppendsNewVersion(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -144,8 +141,6 @@ func TestOracleAssetToggleAppendsNewVersion(t *testing.T) {
 	}
 }
 
-// TestOracleAssetAsOfReadsTheVersionEffectiveThen is the read half: a calculation
-// pinned to an effective_at before the retirement still sees the source it used.
 func TestOracleAssetAsOfReadsTheVersionEffectiveThen(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -195,8 +190,6 @@ func TestOracleAssetAsOfReadsTheVersionEffectiveThen(t *testing.T) {
 	}
 }
 
-// TestOracleAssetVersionsDerivesTheValidityWindow is the history read: half-open windows
-// [valid_from, valid_to_exclusive), so "which mapping applied on D" needs no call-site logic.
 func TestOracleAssetVersionsDerivesTheValidityWindow(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -248,9 +241,6 @@ func TestOracleAssetVersionsDerivesTheValidityWindow(t *testing.T) {
 	}
 }
 
-// TestOracleAssetCurrentIgnoresAFutureDatedVersion: a version inserted ahead of its
-// effective instant must not become current early. Also why _current is banned from
-// calculation SQL — the same row flips the answer once its valid_from arrives.
 func TestOracleAssetCurrentIgnoresAFutureDatedVersion(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -281,8 +271,6 @@ func TestOracleAssetCurrentIgnoresAFutureDatedVersion(t *testing.T) {
 	}
 }
 
-// TestOracleAssetSetEnabledIsANoOpWhenUnchanged keeps append-ON-CHANGE honest: re-asserting
-// the current value must not manufacture a payload-identical version.
 func TestOracleAssetSetEnabledIsANoOpWhenUnchanged(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -305,8 +293,6 @@ func TestOracleAssetSetEnabledIsANoOpWhenUnchanged(t *testing.T) {
 	}
 }
 
-// TestOracleAssetSetEnabledRejectsAnInstantBeforeTheFirstVersion: appending a row with nothing to
-// supersede would claim the asset was disabled before it was ever registered.
 func TestOracleAssetSetEnabledRejectsAnInstantBeforeTheFirstVersion(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -323,9 +309,8 @@ func TestOracleAssetSetEnabledRejectsAnInstantBeforeTheFirstVersion(t *testing.T
 	}
 }
 
-// TestOracleAssetSetEnabledComparesAgainstTheVersionEffectiveThen: with a retirement already
-// recorded for next week, retiring TODAY must still append. Comparing against the newest row
-// would see "already disabled" and leave the source live until next week.
+// Comparing against the newest row instead would see "already disabled" and leave the source
+// live until next week.
 func TestOracleAssetSetEnabledComparesAgainstTheVersionEffectiveThen(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -351,8 +336,6 @@ func TestOracleAssetSetEnabledComparesAgainstTheVersionEffectiveThen(t *testing.
 	}
 }
 
-// TestOracleAssetNaturalKeyIsThePrimaryKey pins the key shape the pattern is built on;
-// feed_key is what makes it hold for aave-style rows, whose feed_address is NULL.
 func TestOracleAssetNaturalKeyIsThePrimaryKey(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -381,9 +364,6 @@ func TestOracleAssetNaturalKeyIsThePrimaryKey(t *testing.T) {
 	}
 }
 
-// TestOracleAssetSetEnabledRejectsAnUnknownAsset fails loudly rather than appending a
-// version for a natural key that was never registered (a typo'd feed address would
-// otherwise create a phantom, permanently-disabled mapping).
 func TestOracleAssetSetEnabledRejectsAnUnknownAsset(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -400,11 +380,8 @@ func TestOracleAssetSetEnabledRejectsAnUnknownAsset(t *testing.T) {
 	}
 }
 
-// TestOracleAssetSetEnabledCarriesFeedColumnsForward pins the writer's carry-forward for the
-// feed-style shape. Every other fixture here is aave-style with feed_address, feed_decimals and
-// quote_currency all NULL, which makes dropping any of them from the writer's VALUES list
-// invisible — and feed_decimals is the exponent that scales a raw feed answer into a price, so
-// losing it is a price wrong by a power of ten.
+// The feed-style shape, because every other fixture here is aave-style with feed_address,
+// feed_decimals and quote_currency all NULL, which hides a column dropped from the writer.
 func TestOracleAssetSetEnabledCarriesFeedColumnsForward(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -450,9 +427,6 @@ func TestOracleAssetSetEnabledCarriesFeedColumnsForward(t *testing.T) {
 	}
 }
 
-// TestOracleAssetRejectsAnEmptyFeedAddress: feed_key folds NULL to '\x', so an empty
-// feed_address would share a natural key with the feedless row and oracle_asset_set_enabled
-// would silently resolve a different logical asset than the caller named.
 func TestOracleAssetRejectsAnEmptyFeedAddress(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -469,8 +443,6 @@ func TestOracleAssetRejectsAnEmptyFeedAddress(t *testing.T) {
 	}
 }
 
-// TestOracleAssetRejectsABlankChangeReason: change_reason is mandatory in substance, not just
-// NOT NULL — whitespace is not a reason for a version to exist.
 func TestOracleAssetRejectsABlankChangeReason(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)

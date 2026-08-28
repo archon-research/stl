@@ -1295,23 +1295,20 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
         -- Enabled-mapping filter (CANONICAL rationale; every current/latest
         -- onchain_token_price read across the API repositories carries this
         -- EXISTS and points here). A price row is eligible only while its
-        -- (oracle_id, token_id) had an ENABLED oracle_asset mapping as of
+        -- (oracle_id, token_id) had an ENABLED mapping as of
         -- :reference_effective_at. The snapshot-key ordering and the oracle_id
         -- tiebreak below cannot rescue correctness on their own: a reorg can
         -- republish a frozen/retired source's row at a FRESH (max) block while
         -- a change-suppressed live feed writes no newer row, so the retired
         -- source would otherwise beat the live one indefinitely.
         -- The mapping is append-on-change, so the version read is the one
-        -- effective at the recorded instant rather than "whatever it says now".
-        -- Read through oracle_asset_as_of, never the raw table (every version)
-        -- or oracle_asset_current (wall-clock bounded) — ADR-0006 §4, enforced
-        -- by the schemamaster lint.
-        -- Tradeoff, still live: ONE instant is bound per query, not one per
-        -- time_bucket, and unset reference_effective_at resolves it to now. So a
-        -- retired source still vanishes from historical/LOCF buckets that predate
-        -- its retirement. What the conversion bought is that a run CAN be pinned to
-        -- an earlier instant and see the mapping that applied then; per-bucket
-        -- temporal enablement remains out of scope.
+        -- effective at the recorded instant. Read through the _as_of function,
+        -- never the raw table (every version) or the _current view (wall-clock
+        -- bounded). ADR-0006 §4, enforced by the schemamaster lint.
+        -- Tradeoff: ONE instant is bound per query, not one per time_bucket, and
+        -- an unset reference_effective_at resolves to now, so a retired source
+        -- still vanishes from historical/LOCF buckets that predate its
+        -- retirement. Per-bucket temporal enablement is out of scope.
           AND EXISTS (
               SELECT 1 FROM oracle_asset_as_of(:reference_effective_at) oa
               WHERE oa.oracle_id = otp.oracle_id

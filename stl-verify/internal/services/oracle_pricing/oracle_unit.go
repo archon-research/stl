@@ -46,11 +46,8 @@ type OracleUnit struct {
 
 // LoadOracleUnits loads all enabled oracles from DB, deduplicates by oracle ID,
 // and builds OracleUnit structs for each.
-//
-// referenceEffectiveAt pins which oracle_asset versions the units are built from: it is
-// the run's recorded reference effective time (ADR-0006 §4), captured once by the caller
-// so every unit in a run resolves against one consistent reference view and a replay can
-// pass the same instant back.
+// referenceEffectiveAt is captured once by the caller, so every unit in a run resolves
+// against one consistent oracle_asset view (ADR-0006 §4).
 func LoadOracleUnits(ctx context.Context, repo outbound.OnchainPriceRepository, chainID int64, referenceEffectiveAt time.Time, logger *slog.Logger) ([]*OracleUnit, error) {
 	allOracles, err := repo.GetEnabledOraclesByChain(ctx, chainID)
 	if err != nil {

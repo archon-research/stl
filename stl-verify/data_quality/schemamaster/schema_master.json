@@ -2195,7 +2195,7 @@
   "wall_clock_exempt": [
     {
       "path": "python/app/adapters/postgres/token_catalog_repository.py",
-      "reason": "VEC-597: the two NOW() uses compute staleness_seconds — the age of an observation, reported to the caller, not a decision about which reference version applies. The oracle_asset read in the same file is pinned to :reference_effective_at."
+      "reason": "VEC-597: the two NOW() uses compute staleness_seconds, the age of an observation reported to the caller, not a decision about which reference version applies. The oracle_asset read in the same file is pinned to :reference_effective_at."
     }
   ]
 }

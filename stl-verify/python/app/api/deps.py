@@ -27,9 +27,8 @@ def get_engine(request: Request) -> AsyncEngine:
 def get_reference_as_of(request: Request) -> ReferenceEffectiveAtProvider:
     """Extract the process-wide reference effective-instant provider (ADR-0006 §4).
 
-    Every repository that reads a converted reference table takes this, so one
-    setting pins the whole API rather than the subset of routes that remembered
-    to wire it. Resolved once at startup from `reference_effective_at`.
+    Every repository reading a converted reference table takes this, so one setting
+    pins the whole API. Resolved once at startup from `reference_effective_at`.
     """
     return request.app.state.reference_effective_at
 

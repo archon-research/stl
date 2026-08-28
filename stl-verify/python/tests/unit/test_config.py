@@ -98,14 +98,13 @@ class TestReferenceEffectiveAt:
     @pytest.mark.parametrize(
         "raw",
         [
-            # Bare numerics: pydantic would read these as Unix timestamps, putting
-            # `2026` at 1970-01-01T00:33:46Z and `20260601` at 1970-08-23.
+            # Pydantic would read these as Unix timestamps: `2026` at
+            # 1970-01-01T00:33:46Z, `20260601` at 1970-08-23.
             "2026",
             "20260601",
             "1700000000",
             "0",
-            # No offset: silently reading an operator's local wall clock as UTC
-            # resolves the wrong reference version.
+            # Reading an operator's local wall clock as UTC resolves the wrong version.
             "2026-06-01T02:30:00",
             "not-a-date",
         ],

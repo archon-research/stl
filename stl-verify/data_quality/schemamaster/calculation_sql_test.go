@@ -15,9 +15,6 @@ func testReferenceRegister() *Register {
 	}}}
 }
 
-// TestCheckCalculationSQL covers the ADR-0006 §4 lint: calculation and writer SQL must
-// read an append-on-change reference table through its _as_of function with an explicit
-// parameter — never the _current view, never the raw table, never the wall clock.
 func TestCheckCalculationSQL(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -94,8 +91,7 @@ func TestCheckCalculationSQL(t *testing.T) {
 			body:     `SELECT 1 FROM oracle_asset_as_of(CURRENT_DATE) oa`,
 			wantKind: "wall_clock_effective_at",
 		},
-		// The spellings a reintroduced unpinned read would plausibly take. Each of these
-		// is how the rule gets walked around if the matcher only knows the bare name.
+		// Spellings that walk around a matcher knowing only the bare name.
 		{
 			name:     "a schema-qualified unpinned read",
 			body:     `SELECT 1 FROM public.oracle_asset oa WHERE oa.enabled`,
@@ -106,9 +102,8 @@ func TestCheckCalculationSQL(t *testing.T) {
 			body:     `SELECT 1 FROM "oracle_asset" oa WHERE oa.enabled`,
 			wantKind: "unpinned_reference_read",
 		},
-		// Records a KNOWN GAP, not desired behaviour: a comma carries no clause context, so
-		// matching it also fires on `TRUNCATE a, b, c`. See unpinnedReads for why that
-		// trade was made; this case exists so the gap is visible rather than forgotten.
+		// A known gap, not desired behaviour: matching a comma would also fire on
+		// `TRUNCATE a, b, c`. See unpinnedReads.
 		{
 			name: "a comma-joined FROM list is a known miss",
 			body: `SELECT 1 FROM token t, oracle_asset oa WHERE oa.token_id = t.id`,
@@ -122,8 +117,6 @@ func TestCheckCalculationSQL(t *testing.T) {
 			body:     `SELECT 1 FROM ONLY oracle_asset oa WHERE oa.enabled`,
 			wantKind: "unpinned_reference_read",
 		},
-		// A comment marker inside a string literal must not truncate the line, or the
-		// read after it escapes every rule.
 		{
 			name:     "an unpinned read sharing a line with a URL literal",
 			body:     `SELECT 'https://sky.money' AS src FROM oracle_asset oa WHERE oa.enabled`,
@@ -134,7 +127,6 @@ func TestCheckCalculationSQL(t *testing.T) {
 			body:     `SELECT meta #>> '{k}' FROM oracle_asset oa WHERE oa.enabled`,
 			wantKind: "unpinned_reference_read",
 		},
-		// now()'s synonyms, which a substitution would reach for first.
 		{
 			name:     "transaction_timestamp as the effective instant",
 			body:     `SELECT 1 FROM oracle_asset_as_of(transaction_timestamp()) oa`,
@@ -177,9 +169,6 @@ func TestCheckCalculationSQL(t *testing.T) {
 	}
 }
 
-// TestCheckCalculationSQLHonoursTheWallClockExemption covers the sanctioned case: a file
-// that reads a reference table AND computes an observation's age is clean only while the
-// register names it, so removing the entry brings the finding back.
 func TestCheckCalculationSQLHonoursTheWallClockExemption(t *testing.T) {
 	src := SQLSource{
 		Path: "/repo/python/app/adapters/postgres/token_catalog_repository.py",
@@ -200,9 +189,6 @@ func TestCheckCalculationSQLHonoursTheWallClockExemption(t *testing.T) {
 	}
 }
 
-// TestCheckCalculationSQLIgnoresUnconvertedTables keeps the lint scoped to the converted
-// set: a _current view on a table that is still update-in-place is not a finding, so the
-// rule lands with each conversion instead of failing on the whole schema at once.
 func TestCheckCalculationSQLIgnoresUnconvertedTables(t *testing.T) {
 	body := `SELECT 1 FROM morpho_adapter_current ma JOIN security_master sm ON sm.security_id = ma.security_id`
 	if vs := testReferenceRegister().CheckCalculationSQL([]SQLSource{{Path: "q.go", Body: body}}); len(vs) != 0 {
@@ -210,9 +196,6 @@ func TestCheckCalculationSQLIgnoresUnconvertedTables(t *testing.T) {
 	}
 }
 
-// TestReferenceReadsAreRegistered guards the register itself: the lint is only as good as
-// the list of converted tables it walks, and an entry whose view/function names drift from
-// the table name would silently stop matching.
 func TestReferenceReadsAreRegistered(t *testing.T) {
 	reg, err := Load()
 	if err != nil {
@@ -231,18 +214,14 @@ func TestReferenceReadsAreRegistered(t *testing.T) {
 	}
 }
 
-// TestApplicationSQLPinsReferenceReads is the gate: it lints the real calculation and
-// writer SQL in the repository adapters, so reintroducing an unpinned oracle_asset read
-// fails CI without needing a database.
 func TestApplicationSQLPinsReferenceReads(t *testing.T) {
 	reg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 
-	// An empty ReferenceReads makes CheckCalculationSQL a no-op for every input, and the
-	// per-reference guard below iterates it too — so a mistyped JSON key would take the
-	// whole gate green rather than failing. Assert the register is populated first.
+	// An empty ReferenceReads makes the whole gate a no-op, so a mistyped JSON key would
+	// pass rather than fail.
 	if len(reg.ReferenceReads) == 0 {
 		t.Fatal("register has no reference_reads — the lint would pass while checking nothing")
 	}
@@ -262,8 +241,8 @@ func TestApplicationSQLPinsReferenceReads(t *testing.T) {
 	if len(sources) == 0 {
 		t.Fatal("no sources scanned — did the adapter paths move?")
 	}
-	// Guard against a vacuous pass: if the scan no longer covers the repositories that
-	// read the converted tables, the lint would report a clean bill for nothing.
+	// A scan that no longer covers the repositories reading converted tables would report
+	// a clean bill for nothing.
 	for _, ref := range reg.ReferenceReads {
 		scanned := false
 		for _, src := range sources {

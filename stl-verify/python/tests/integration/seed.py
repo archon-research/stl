@@ -801,11 +801,8 @@ UV_USDC_BALANCE = Decimal("1000")
 UV_UNIV3_UNDERLYING_VALUE = Decimal("26927207.299715")
 
 
-# oracle_asset versions the seeds register (VEC-597): every mapping is live from
-# ORACLE_ASSET_REGISTERED_FROM, and a retired one is disabled from ORACLE_ASSET_RETIRED_FROM.
 # Both are well in the past, so a read pinned to "now" sees the retirement and a read
-# pinned between the two instants sees the source as it was while live. Timezone-aware
-# UTC, so the bound value is an absolute instant regardless of session TimeZone.
+# pinned between the two instants sees the source as it was while live.
 ORACLE_ASSET_REGISTERED_FROM = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
 ORACLE_ASSET_RETIRED_FROM = dt.datetime(2026, 4, 1, tzinfo=dt.UTC)
 ORACLE_ASSET_WHILE_LIVE = dt.datetime(2026, 3, 1, tzinfo=dt.UTC)
@@ -844,9 +841,8 @@ async def insert_oracle_asset(
         registered_from,
     )
     if not enabled:
-        # A NULL return means the value was already false at retired_from, so nothing was
-        # appended — a fixture that did not establish the state it claims. Fail here rather
-        # than let a retirement assertion pass for the wrong reason.
+        # A NULL return means nothing was appended, so the fixture did not establish the
+        # state it claims.
         appended = await conn.fetchval(
             "SELECT oracle_asset_set_enabled($1, $2, NULL, false, $3, 'test seed: source retired')",
             oracle_id,

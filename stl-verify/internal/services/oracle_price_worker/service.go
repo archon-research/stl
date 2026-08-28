@@ -85,8 +85,7 @@ type Service struct {
 
 	telemetry *Telemetry
 
-	// referenceEffectiveAt pins which oracle_asset versions the units are built from, so a
-	// replay can rebuild the reference view a past run used (ADR-0006 §4).
+	// Pins which oracle_asset versions the units are built from (ADR-0006 §4).
 	referenceEffectiveAt time.Time
 
 	ctx    context.Context
@@ -203,9 +202,6 @@ func (s *Service) Stop() error {
 }
 
 func (s *Service) initialize(ctx context.Context) error {
-	// One reference view per run (ADR-0006 §4): NewService resolved it once and rejects a
-	// zero value, so every unit here sees the same oracle_asset versions and a replay can
-	// supply the instant the original run used.
 	shared, err := oracle_pricing.LoadOracleUnits(ctx, s.repo, s.config.ChainID, s.referenceEffectiveAt, s.logger)
 	if err != nil {
 		return err

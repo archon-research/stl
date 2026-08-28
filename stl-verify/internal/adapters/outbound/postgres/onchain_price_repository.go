@@ -73,9 +73,8 @@ func (r *OnchainPriceRepository) GetOracle(ctx context.Context, name string) (*e
 	return &o, nil
 }
 
-// GetEnabledAssets retrieves the assets a given oracle prices, as the mapping stood at the
-// referenceEffectiveAt instant (ADR-0006 §4). Ordered by the natural key, not by id: a
-// re-versioned row gets a fresh id, so id order would reshuffle the list on every mapping change.
+// Ordered by the natural key, not by id: a re-versioned row gets a fresh id, so id order would
+// reshuffle the list on every mapping change.
 func (r *OnchainPriceRepository) GetEnabledAssets(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) ([]*entity.OracleAsset, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, created_at
@@ -158,9 +157,8 @@ func (r *OnchainPriceRepository) GetLatestBlock(ctx context.Context, oracleID in
 	return *blockNumber, nil
 }
 
-// GetTokenInfos returns a map of token_id → TokenInfo (address + decimals) for the assets
-// the oracle priced at referenceEffectiveAt. Same effective_at as GetEnabledAssets, or a
-// unit would carry an asset it never resolved an address for.
+// Same effective_at as GetEnabledAssets, or a unit would carry an asset it never resolved an
+// address for.
 func (r *OnchainPriceRepository) GetTokenInfos(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) (map[int64]outbound.TokenInfo, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT oa.token_id, t.address, t.decimals
@@ -374,14 +372,10 @@ func (r *OnchainPriceRepository) GetAllProtocolOracleBindings(ctx context.Contex
 	return bindings, nil
 }
 
-// CopyOracleAssets seeds a newly discovered oracle with the mappings the source had at
-// referenceEffectiveAt, as version 0 of the target's own history. valid_from is the run's
-// recorded instant, not the wall clock: a replay of the same run must produce identically
-// dated rows. The change_reason renders it in UTC so the text never depends on the
-// writer's session TimeZone.
-// A copy of zero rows is not an error — the source legitimately had no enabled mapping at
-// that instant — but it is logged, because the target is then registered with no assets and
-// the symptom surfaces much later as "oracle has no enabled assets" in a different process.
+// valid_from is the run's recorded instant, not the wall clock, so a replay produces identically
+// dated rows; change_reason renders it in UTC so the text never depends on the session TimeZone.
+// Zero rows copied is legitimate but logged, because the target is then registered with no assets
+// and the symptom surfaces much later in a different process.
 func (r *OnchainPriceRepository) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64, referenceEffectiveAt time.Time) error {
 	tag, err := r.pool.Exec(ctx, `
 		INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, valid_from, change_reason)

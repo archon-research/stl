@@ -24,8 +24,8 @@ type OnchainPriceRepository interface {
 
 	// GetEnabledAssets retrieves the assets a given oracle prices, as the oracle_asset
 	// mapping stood at referenceEffectiveAt. That instant is the run's recorded reference
-	// effective time (ADR-0006 §4), never the wall clock at query time: a replay of the
-	// same run must resolve the same mappings even after a source is retired.
+	// effective time (ADR-0006 §4), never the wall clock, so a replay resolves the same
+	// mappings even after a source is retired.
 	GetEnabledAssets(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) ([]*entity.OracleAsset, error)
 
 	// GetLatestPrices returns the most recent price per token for a given oracle.

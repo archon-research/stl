@@ -520,8 +520,7 @@ async def test_disabling_a_mapping_drops_the_price_at_read_time(
     }
 
     # Retiring a source is a configuration change on the mapping, not a rewrite
-    # of any price history: oracle_asset is append-on-change, so the retirement is
-    # a new version (VEC-597) and UPDATE is revoked in production.
+    # of any price history. Append-on-change, so the retirement is a new version.
     await conn.execute(
         "SELECT oracle_asset_set_enabled($1, $2, NULL, false, $3, 'test: source retired')",
         oracle_id,
@@ -580,7 +579,6 @@ async def test_disabling_a_mapping_falls_back_to_the_next_enabled_oracle(
     before = await repository.get_backed_breakdown(protocol_id, debt_id)
     assert {item.symbol: item.price_usd for item in before.items} == {"FALLBACKCOLL": Decimal("10")}
 
-    # Append-on-change: the retirement is a new oracle_asset version, not an UPDATE.
     await conn.execute(
         "SELECT oracle_asset_set_enabled($1, $2, NULL, false, $3, 'test: primary source retired')",
         primary_oracle_id,

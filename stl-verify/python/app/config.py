@@ -28,11 +28,9 @@ def async_database_url(database_url: str) -> str:
 def parse_reference_effective_at(raw: str) -> datetime:
     """Parse a reference effective instant, mirroring Go's ResolveReferenceEffectiveAt.
 
-    Accepts RFC 3339, or a bare ``YYYY-MM-DD`` meaning that day's midnight UTC. A
-    value carrying no offset is rejected rather than assumed: an operator writing a
-    local wall-clock time would otherwise silently read it as UTC and resolve the
-    wrong reference version. Anything else raises, so a typo fails startup instead
-    of pinning the run to an unintended instant.
+    Accepts RFC 3339, or a bare ``YYYY-MM-DD`` meaning that day's midnight UTC. A value
+    carrying no offset is rejected rather than assumed to be UTC, and anything else
+    raises, so a typo fails startup instead of pinning the run to an unintended instant.
     """
     try:
         return datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=UTC)
@@ -79,16 +77,12 @@ class Settings(BaseSettings):
     # treats it as stale and returns HTTP 503.
     allocation_share_max_stale_seconds: int = 1800
     # Pins which append-on-change reference versions the read path resolves (ADR-0006 §4).
-    # Unset means now (UTC); set it (RFC 3339, or YYYY-MM-DD for that day's midnight UTC)
-    # to reproduce the reference view of a past instant.
+    # Unset means now (UTC).
     #
-    # Typed as a string and parsed by the validator below rather than as a `datetime`,
-    # because pydantic reads a bare numeric string as a Unix timestamp: `2026` would
-    # become 1970-01-01T00:33:46Z and `20260601` (the repo's own migration-filename date
-    # format) 1970-08-23. Either silently precedes every oracle_asset.valid_from, so
-    # oracle_asset_as_of returns no rows and the priced reads collapse to zeros and 404s
-    # instead of failing. The grammar here matches Go's ResolveReferenceEffectiveAt, so
-    # one operator-facing value means the same thing in both runtimes.
+    # A string parsed by the validator below, not a `datetime`, because pydantic reads a
+    # bare numeric string as a Unix timestamp: `2026` becomes 1970-01-01T00:33:46Z and
+    # `20260601` becomes 1970-08-23. Both precede every valid_from, so the priced reads
+    # would collapse to zeros and 404s instead of failing.
     reference_effective_at: str | None = None
 
     @field_validator("reference_effective_at")
@@ -102,8 +96,7 @@ class Settings(BaseSettings):
     def resolved_reference_effective_at(self) -> datetime | None:
         """The parsed reference instant, or None when unset (meaning now, UTC).
 
-        Cannot raise: the validator above already parsed this value at settings
-        construction, so a bad one fails startup rather than the first request.
+        Cannot raise; the validator above already parsed this at settings construction.
         """
         if self.reference_effective_at is None:
             return None

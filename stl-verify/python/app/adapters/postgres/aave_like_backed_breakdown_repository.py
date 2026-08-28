@@ -43,15 +43,12 @@ user_collateral AS (
 ),
 
 -- Step 3: Current USD price per token from the protocol's oracles.
--- Which protocols an oracle serves, and whether its mapping was enabled, are resolved
--- HERE and pinned to :reference_effective_at rather than at write time, so a replay of an
--- earlier instant sees the mapping that applied then (canonical rationale, incl. the
--- append-on-change read path, on _DIRECT_ASSET_HOLDINGS_SQL in
--- allocation_position_repository.py). FROM is token_price_current, not the
--- onchain_token_price hypertable, so the ranking runs over one row per (oracle, token)
--- rather than all of history. oracle_id breaks any remaining same-snapshot-key tie
--- deterministically
--- (higher id = later-registered oracle).
+-- Which protocols an oracle serves, and whether its mapping was enabled, are resolved here
+-- and pinned to :reference_effective_at rather than at write time (canonical rationale on
+-- _DIRECT_ASSET_HOLDINGS_SQL in allocation_position_repository.py). FROM is
+-- token_price_current, not the onchain_token_price hypertable, so the ranking runs over one
+-- row per (oracle, token) rather than all of history. oracle_id breaks any remaining
+-- same-snapshot-key tie deterministically (higher id = later-registered oracle).
 token_prices AS (
     SELECT DISTINCT ON (tpc.token_id)
         tpc.token_id,

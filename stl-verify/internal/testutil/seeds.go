@@ -111,9 +111,8 @@ func SeedOracleAsset(t *testing.T, ctx context.Context, pool *pgxpool.Pool, orac
 }
 
 // SeedOracleAssetEffectiveFrom inserts an oracle asset link effective from validFrom
-// (YYYY-MM-DD, meaning that day's midnight UTC), so a test can read it back through
-// oracle_asset_as_of at instants either side of a later change. Parsed here rather than
-// cast in SQL so the instant never depends on the session TimeZone.
+// (YYYY-MM-DD, meaning that day's midnight UTC). Parsed here rather than cast in SQL, so
+// the instant never depends on the session TimeZone.
 func SeedOracleAssetEffectiveFrom(t *testing.T, ctx context.Context, pool *pgxpool.Pool, oracleID, tokenID int64, validFrom string) {
 	t.Helper()
 	_, err := pool.Exec(ctx, `
@@ -127,11 +126,8 @@ func SeedOracleAssetEffectiveFrom(t *testing.T, ctx context.Context, pool *pgxpo
 }
 
 // SetOracleAssetEnabled appends an oracle_asset version toggling enabled, effective from
-// effectiveAt (YYYY-MM-DD, midnight UTC) — the append-on-change writer, since UPDATE is revoked.
-//
-// A NULL return means the value was already that at effectiveAt, so nothing was appended.
-// That is a fixture that did not establish the state it claims, and a test asserting on the
-// retirement would then pass or fail for the wrong reason — so it fails the seed instead.
+// effectiveAt (YYYY-MM-DD, midnight UTC). A NULL return means the value was already that,
+// so the fixture did not establish the state it claims and the seed fails.
 func SetOracleAssetEnabled(t *testing.T, ctx context.Context, pool *pgxpool.Pool, oracleID, tokenID int64, enabled bool, effectiveAt, reason string) {
 	t.Helper()
 	var processingVersion *int
@@ -147,9 +143,8 @@ func SetOracleAssetEnabled(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 	}
 }
 
-// MustUTCInstant parses a YYYY-MM-DD date as that day's midnight UTC. The fixture
-// vocabulary for valid_from/effective_at stays date-shaped; the binding is an absolute
-// instant so it cannot shift with the database session TimeZone.
+// MustUTCInstant parses a YYYY-MM-DD date as that day's midnight UTC, so the bound value
+// cannot shift with the database session TimeZone.
 func MustUTCInstant(t *testing.T, value string) time.Time {
 	t.Helper()
 	parsed, err := time.Parse(time.DateOnly, value)

@@ -20,16 +20,12 @@ func init() {
 	useFileDatabase(onchainPriceDBName, &onchainPricePool)
 }
 
-// retiredSourceFixture is one oracle pricing one token, enabled from enabledFrom and
-// retired from retiredFrom, plus the repository under test.
 type retiredSourceFixture struct {
 	repo     *OnchainPriceRepository
 	oracleID int64
 	tokenID  int64
 }
 
-// newRetiredSourceFixture seeds a source that was enabled on enabledFrom and retired on
-// retiredFrom, the VEC-549 shape: the toggle that used to destroy its own history.
 func newRetiredSourceFixture(t *testing.T, ctx context.Context, oracleName, tokenAddr, enabledFrom, retiredFrom string) retiredSourceFixture {
 	t.Helper()
 
@@ -59,9 +55,6 @@ func mustDate(t *testing.T, value string) time.Time {
 	return d
 }
 
-// TestGetEnabledAssetsResolvesTheVersionEffectiveAtTheRecordedInstant is the reader half of
-// VEC-597: which assets an oracle prices depends on the run's recorded effective_at, not
-// on when the query happens to run.
 func TestGetEnabledAssetsResolvesTheVersionEffectiveAtTheRecordedInstant(t *testing.T) {
 	ctx := context.Background()
 	f := newRetiredSourceFixture(t, ctx, "vec597-assets", "0x1111111111111111111111111111111111111111", "2026-01-01", "2026-08-20")
@@ -91,9 +84,6 @@ func TestGetEnabledAssetsResolvesTheVersionEffectiveAtTheRecordedInstant(t *test
 	}
 }
 
-// TestGetTokenInfosResolvesTheVersionEffectiveAtTheRecordedInstant keeps the second read of
-// the same mapping consistent with the first: a unit built from assets and token infos
-// that disagreed would price a token it never resolved an address for.
 func TestGetTokenInfosResolvesTheVersionEffectiveAtTheRecordedInstant(t *testing.T) {
 	ctx := context.Background()
 	f := newRetiredSourceFixture(t, ctx, "vec597-infos", "0x2222222222222222222222222222222222222222", "2026-01-01", "2026-08-20")
@@ -115,9 +105,6 @@ func TestGetTokenInfosResolvesTheVersionEffectiveAtTheRecordedInstant(t *testing
 	}
 }
 
-// TestCopyOracleAssetsCopiesTheVersionEffectiveAtTheRecordedInstant covers the writer path:
-// seeding a newly discovered oracle must copy the mappings that were effective at the
-// run's effective_at, and must not resurrect a retired one.
 func TestCopyOracleAssetsCopiesTheVersionEffectiveAtTheRecordedInstant(t *testing.T) {
 	ctx := context.Background()
 	f := newRetiredSourceFixture(t, ctx, "vec597-copy", "0x3333333333333333333333333333333333333333", "2026-01-01", "2026-08-20")

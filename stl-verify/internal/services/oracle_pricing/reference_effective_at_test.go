@@ -5,9 +5,6 @@ import (
 	"time"
 )
 
-// TestResolveReferenceEffectiveAt covers the replay seam: an operator-supplied instant wins
-// over the clock, an unset one falls back to the run's start, and an unparseable one fails
-// the run rather than silently reading the current reference view.
 func TestResolveReferenceEffectiveAt(t *testing.T) {
 	now := time.Date(2026, 8, 21, 14, 30, 0, 0, time.FixedZone("CEST", 2*60*60))
 
