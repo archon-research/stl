@@ -282,10 +282,16 @@ export function getProtocolLabel(
 ): string {
   if (!protocol || protocol === DIRECT_PROTOCOL_FILTER_VALUE) return 'Direct';
   const normalized = normalizeLabel(protocol);
+  // `hasOwn`, not a bare read: a protocol named `constructor` or `toString`
+  // reads a function off the prototype, which `??` then accepts as a label.
+  const known = Object.hasOwn(PROTOCOL_LABELS, normalized)
+    ? PROTOCOL_LABELS[normalized]
+    : undefined;
+
   return (
     findProtocolMetadata(protocol, localProtocols, chainId ?? undefined)
       ?.name ??
-    PROTOCOL_LABELS[normalized] ??
+    known ??
     titleCase(protocol)
   );
 }
