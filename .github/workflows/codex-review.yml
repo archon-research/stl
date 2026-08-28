@@ -11,7 +11,7 @@
 # workflow, and refreshing it needs a second secret that can rewrite repo
 # secrets. In AWS, reads land in CloudTrail and revocation is IAM. The role is
 # trusted for `environment:codex-review` alone, which is why the job declares it.
-# Terraform: infrastructure/infra/31_codex_review_oidc.tf
+# Terraform: infrastructure/infra/39_codex_review_oidc.tf
 # Actions are pinned to commit SHAs for supply-chain security.
 name: Codex Review
 
