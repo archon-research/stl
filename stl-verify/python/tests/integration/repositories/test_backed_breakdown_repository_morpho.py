@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
 from app.domain.entities.backed_breakdown import BackedBreakdown
-from tests.integration.seed import insert_oracle_asset, insert_token, insert_user, store_test_ids
+from tests.integration.seed import insert_oracle_asset, insert_prime, insert_token, insert_user, store_test_ids
 
 
 class ProtocolScopedBackedBreakdownRepository(Protocol):
@@ -217,23 +217,6 @@ async def _insert_morpho_market_position(
     )
 
 
-async def _insert_prime(conn: asyncpg.Connection, name: str, vault_address: bytes) -> int:
-    """Insert a prime entry and return its ID."""
-    return cast(
-        int,
-        await conn.fetchval(
-            """
-        INSERT INTO prime (name, vault_address)
-        VALUES ($1, $2)
-        ON CONFLICT (name) DO UPDATE SET vault_address = EXCLUDED.vault_address
-        RETURNING id
-        """,
-            name,
-            vault_address,
-        ),
-    )
-
-
 async def _insert_allocation_position(
     conn: asyncpg.Connection,
     token_id: int,
@@ -370,7 +353,7 @@ async def _seed_data(db_url: str) -> None:
         await _insert_token_price(conn, wbtc_id, chainlink_oracle_id, _WBTC_PRICE_USD)
 
         # Prime — needed as FK for allocation_position.prime_id
-        prime_id = await _insert_prime(conn, "test-prime", _VAULT_ADDRESS)
+        prime_id = await insert_prime(conn, "test-prime", _VAULT_ADDRESS)
 
         # User for the vault (vault address == user address)
         vault_user_id = await insert_user(conn, _VAULT_ADDRESS)

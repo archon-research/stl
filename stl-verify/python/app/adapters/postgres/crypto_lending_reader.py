@@ -229,10 +229,10 @@ class PostgresCryptoLendingReader:
 
         See ``CryptoLendingReader.batch_get_shares`` for the contract. Per-asset
         validation errors (unsupported protocol, missing ``receipt_token_token_id``)
-        are returned as values; the DB call itself is a single ``LATERAL JOIN``
-        query that touches each ``(chain_id, token_id)`` pair via its segmentby
-        index (see ``_BATCH_SHARE_LOOKUP_SQL`` in
-        ``allocation_share_repository``).
+        are returned as values; the DB call itself is one query that takes each
+        ``(chain_id, token_id)`` pair's supply from ``token_total_supply_current``
+        and its balance through a ``LATERAL`` on the segmentby index (see
+        ``_BATCH_SHARE_LOOKUP_SQL`` in ``allocation_share_repository``).
         """
         if not infos:
             return {}
