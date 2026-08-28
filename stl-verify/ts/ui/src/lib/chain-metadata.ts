@@ -1,43 +1,69 @@
-import {
-  arbitrum,
-  avalanche,
-  base,
-  mainnet,
-  optimism,
-  polygon,
-  unichain,
-  zksync,
-} from 'viem/chains';
+type ChainMetadata = {
+  name: string;
+  explorerUrl: string;
+  nativeSymbol: string;
+};
 
 /**
- * Centralized chain metadata derived from viem
- * Single source of truth for all chain-related data (names, explorers, native symbols)
+ * Names, explorers and native symbols for the chains we index. Transcribed from
+ * viem's definitions, which cost ~180 KiB of formatters and serializers to read.
  */
-export const VIEM_CHAINS = {
-  1: mainnet,
-  10: optimism,
-  137: polygon,
-  324: zksync,
-  130: unichain,
-  8453: base,
-  42161: arbitrum,
-  43114: avalanche,
-} as const;
+export const CHAIN_METADATA: Record<number, ChainMetadata | undefined> = {
+  1: {
+    name: 'Ethereum',
+    explorerUrl: 'https://etherscan.io',
+    nativeSymbol: 'ETH',
+  },
+  10: {
+    name: 'OP Mainnet',
+    explorerUrl: 'https://optimistic.etherscan.io',
+    nativeSymbol: 'ETH',
+  },
+  130: {
+    name: 'Unichain',
+    explorerUrl: 'https://uniscan.xyz',
+    nativeSymbol: 'ETH',
+  },
+  137: {
+    name: 'Polygon',
+    explorerUrl: 'https://polygonscan.com',
+    nativeSymbol: 'POL',
+  },
+  324: {
+    name: 'ZKsync Era',
+    explorerUrl: 'https://explorer.zksync.io/',
+    nativeSymbol: 'ETH',
+  },
+  8453: {
+    name: 'Base',
+    explorerUrl: 'https://basescan.org',
+    nativeSymbol: 'ETH',
+  },
+  42161: {
+    name: 'Arbitrum One',
+    explorerUrl: 'https://arbiscan.io',
+    nativeSymbol: 'ETH',
+  },
+  43114: {
+    name: 'Avalanche',
+    explorerUrl: 'https://snowtrace.io',
+    nativeSymbol: 'AVAX',
+  },
+};
 
 /**
  * Get human-readable name for a chain ID
  * @param chainId - Chain ID (e.g., 1 for Ethereum)
- * @returns Display name from viem, or fallback format
+ * @returns Display name, or fallback format
  */
 export function getChainName(chainId: number): string {
-  const chain = VIEM_CHAINS[chainId as keyof typeof VIEM_CHAINS];
-  return chain?.name ?? `Chain ${chainId}`;
+  return CHAIN_METADATA[chainId]?.name ?? `Chain ${chainId}`;
 }
 
 /**
  * Get official block explorer URL for a chain
  * @param chainId - Chain ID
- * @returns Official explorer URL from viem, or null if not available
+ * @returns Official explorer URL, or null if not available
  */
 export function getChainExplorerUrl(
   chainId: number | null | undefined,
@@ -45,8 +71,7 @@ export function getChainExplorerUrl(
   if (chainId === null || chainId === undefined) {
     return null;
   }
-  const chain = VIEM_CHAINS[chainId as keyof typeof VIEM_CHAINS];
-  return chain?.blockExplorers?.default?.url ?? null;
+  return CHAIN_METADATA[chainId]?.explorerUrl ?? null;
 }
 
 /**
@@ -58,6 +83,5 @@ export function getNativeSymbol(chainId: number | null): string | null {
   if (chainId === null) {
     return null;
   }
-  const chain = VIEM_CHAINS[chainId as keyof typeof VIEM_CHAINS];
-  return chain?.nativeCurrency?.symbol ?? null;
+  return CHAIN_METADATA[chainId]?.nativeSymbol ?? null;
 }
