@@ -10,7 +10,8 @@ import (
 
 // The alert rules key on these exact names; renaming one silently stops
 // VectorReferenceCapitalIndexerWritesZero / PrimeUncovered / AllocationsZero /
-// PositionsZero from ever firing.
+// PositionsZero / BalanceSheetStalled / BalanceSheetPrimeUncovered from ever
+// firing.
 func TestTelemetryEmitsTheMetricNamesTheAlertsQuery(t *testing.T) {
 	reader := metric.NewManualReader()
 	provider := metric.NewMeterProvider(metric.WithReader(reader))
@@ -25,6 +26,8 @@ func TestTelemetryEmitsTheMetricNamesTheAlertsQuery(t *testing.T) {
 	tel.RecordAllocationsWritten(ctx, 11)
 	tel.RecordPositionsWritten(ctx, 59)
 	tel.RecordPrimeUncovered(ctx, "grove")
+	tel.RecordBalanceSheetDaysInserted(ctx, 3)
+	tel.RecordBalanceSheetPrimeUncovered(ctx, "grove")
 
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(ctx, &rm); err != nil {
@@ -43,6 +46,8 @@ func TestTelemetryEmitsTheMetricNamesTheAlertsQuery(t *testing.T) {
 		"reference_capital.sync.allocations.written.total",
 		"reference_capital.sync.positions.written.total",
 		"reference_capital.sync.primes.uncovered.total",
+		"reference_capital.sync.balance_sheet.days.inserted.total",
+		"reference_capital.sync.balance_sheet.primes.uncovered.total",
 	} {
 		if !names[want] {
 			t.Errorf("metric %q not emitted; got %v", want, names)
@@ -58,4 +63,6 @@ func TestTelemetryRecordersAreNilSafe(t *testing.T) {
 	tel.RecordAllocationsWritten(context.Background(), 1)
 	tel.RecordPositionsWritten(context.Background(), 1)
 	tel.RecordPrimeUncovered(context.Background(), "spark")
+	tel.RecordBalanceSheetDaysInserted(context.Background(), 1)
+	tel.RecordBalanceSheetPrimeUncovered(context.Background(), "spark")
 }

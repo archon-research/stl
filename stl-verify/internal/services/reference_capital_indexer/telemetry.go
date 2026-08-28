@@ -24,10 +24,12 @@ const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/
 type Telemetry struct {
 	meter metric.Meter
 
-	snapshotsWritten   metric.Int64Counter
-	allocationsWritten metric.Int64Counter
-	positionsWritten   metric.Int64Counter
-	primesUncovered    metric.Int64Counter
+	snapshotsWritten            metric.Int64Counter
+	allocationsWritten          metric.Int64Counter
+	positionsWritten            metric.Int64Counter
+	primesUncovered             metric.Int64Counter
+	balanceSheetDaysInserted    metric.Int64Counter
+	balanceSheetPrimesUncovered metric.Int64Counter
 }
 
 // NewTelemetry creates a Telemetry instance using the global meter provider.
@@ -72,6 +74,22 @@ func NewTelemetryWithProvider(mp metric.MeterProvider) (*Telemetry, error) {
 		return nil, fmt.Errorf("creating primesUncovered counter: %w", err)
 	}
 
+	t.balanceSheetDaysInserted, err = t.meter.Int64Counter(
+		"reference_capital.sync.balance_sheet.days.inserted.total",
+		metric.WithDescription("Balance-sheet days that started fresh (not a build correction), per cycle"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating balanceSheetDaysInserted counter: %w", err)
+	}
+
+	t.balanceSheetPrimesUncovered, err = t.meter.Int64Counter(
+		"reference_capital.sync.balance_sheet.primes.uncovered.total",
+		metric.WithDescription("Tracked primes absent from the balance-sheet feed's fetch window, per cycle"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating balanceSheetPrimesUncovered counter: %w", err)
+	}
+
 	return t, nil
 }
 
@@ -105,4 +123,22 @@ func (t *Telemetry) RecordPrimeUncovered(ctx context.Context, star string) {
 		return
 	}
 	t.primesUncovered.Add(ctx, 1, metric.WithAttributes(attribute.String("star", star)))
+}
+
+// RecordBalanceSheetDaysInserted records how many balance-sheet days a cycle
+// started fresh, excluding rows that corrected an already-stored day.
+func (t *Telemetry) RecordBalanceSheetDaysInserted(ctx context.Context, count int) {
+	if t == nil || t.balanceSheetDaysInserted == nil {
+		return
+	}
+	t.balanceSheetDaysInserted.Add(ctx, int64(count))
+}
+
+// RecordBalanceSheetPrimeUncovered records one tracked prime absent from the
+// balance-sheet feed's fetch window this cycle.
+func (t *Telemetry) RecordBalanceSheetPrimeUncovered(ctx context.Context, star string) {
+	if t == nil || t.balanceSheetPrimesUncovered == nil {
+		return
+	}
+	t.balanceSheetPrimesUncovered.Add(ctx, 1, metric.WithAttributes(attribute.String("star", star)))
 }
