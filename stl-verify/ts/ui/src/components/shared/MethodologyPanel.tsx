@@ -16,9 +16,9 @@ import {
   formatDateTime,
   formatFreshnessLabel,
   formatUsdPrice,
-} from '../../lib/dashboard';
-import { toQueryErrorMessage } from '../../lib/errors';
-import { logging } from '../../lib/logging';
+} from '../../shared/lib/dashboard';
+import { toQueryErrorMessage } from '../../shared/lib/errors';
+import { logging } from '../../shared/lib/logging';
 import {
   dataSourcesQuery,
   DISABLED_ADDRESS,
@@ -26,8 +26,8 @@ import {
   tokenPriceQuery,
   tokenQuery,
   tokensQuery,
-} from '../../lib/queries';
-import type { DataSource } from '../../types/allocation';
+} from '../../shared/lib/queries';
+import type { DataSource } from '../../shared/types/allocation';
 
 const NO_SOURCES: DataSource[] = [];
 

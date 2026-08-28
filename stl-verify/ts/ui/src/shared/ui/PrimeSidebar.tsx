@@ -12,8 +12,8 @@ import { flex } from '#styled-system/patterns';
 import { toggleSwitch } from '#styled-system/recipes';
 
 import { ProtocolLogo } from '.';
-import { truncateMiddle } from '../../lib/dashboard';
-import type { PrimeGroup } from '../../lib/dashboard';
+import { truncateMiddle } from '../lib/dashboard';
+import type { PrimeGroup } from '../lib/dashboard';
 
 type PrimeSidebarProps = {
   primeGroups: PrimeGroup[];

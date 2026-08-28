@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 
-import { buildProtocolLogoUrl } from '../../lib/logo-cdn';
+import { buildProtocolLogoUrl } from '../lib/logo-cdn';
 import { LogoAvatar } from './LogoAvatar';
 
 type ProtocolLogoProps = {

@@ -1,4 +1,4 @@
-import type { components, paths } from '../generated/openapi-types';
+import type { components, paths } from '../../generated/openapi-types';
 
 export type Prime = components['schemas']['PrimeResponse'];
 export type Allocation = components['schemas']['AllocationResponse'];

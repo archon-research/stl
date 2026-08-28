@@ -15,12 +15,12 @@ import {
   groupPrimesByVault,
   truncateMiddle,
   type PrimeGroup,
-} from '../lib/dashboard';
-import { toQueryErrorMessage } from '../lib/errors';
-import { logging } from '../lib/logging';
-import { primesQuery } from '../lib/queries';
-import type { AppSearchPatch } from '../router/search-params';
-import type { Prime } from '../types/allocation';
+} from '../shared/lib/dashboard';
+import { toQueryErrorMessage } from '../shared/lib/errors';
+import { logging } from '../shared/lib/logging';
+import { primesQuery } from '../shared/lib/queries';
+import type { AppSearchPatch } from '../shared/lib/search-params';
+import type { Prime } from '../shared/types/allocation';
 import { useSelectedView, useViewNavigation } from './navigation';
 
 export type PrimeSelection = {

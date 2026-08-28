@@ -1,13 +1,13 @@
 import { useRouter } from '@tanstack/react-router';
 import { useEffect, useRef } from 'react';
 
-import type { ProvenanceAvailability } from '../hooks/useProvenanceAvailability';
+import type { ProvenanceAvailability } from '../shared/hooks/useProvenanceAvailability';
 
 /**
  * Rewrites the URL when the selected prime cannot be served from the session's
  * provenance, rather than leaving it to fail request by request.
  *
- * A full document load, because `lib/provenance` reads the value once per
+ * A full document load, because `shared/lib/provenance` reads the value once per
  * session on purpose: a client-side switch would leave already-fetched series
  * on the old provenance.
  */

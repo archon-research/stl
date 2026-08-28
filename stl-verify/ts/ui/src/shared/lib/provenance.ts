@@ -1,6 +1,5 @@
 import { useSearch } from '@tanstack/react-router';
 
-import { toProvenance } from '../router/search-params';
 // Selects the provenance every endpoint that supports it answers from:
 //
 //   /allocation                    → source: "both"      (merged, the default)
@@ -17,7 +16,7 @@ import { toProvenance } from '../router/search-params';
 // selection would appear to work until you clicked something.
 //
 // Read once here, from the entry URL, rather than through `useSearch`. Two
-// reasons: the consumer is `lib/queries`, which is not a component; and the
+// reasons: the consumer is `shared/lib/queries`, which is not a component; and the
 // value must not change mid-session, because the request that populated a
 // cached series and the one refreshing it would then disagree about it —
 // the one thing the `source` field exists to make impossible.
@@ -26,6 +25,7 @@ import type {
   PrimeRiskCapital,
   Provenance,
 } from '../types/allocation';
+import { toProvenance } from './search-params';
 
 const entryParams = new URLSearchParams(globalThis.location?.search ?? '');
 

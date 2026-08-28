@@ -10,9 +10,9 @@ import {
   getChainLabel,
   getProtocolLabel,
   type ChainLabelLookup,
-} from '../../lib/dashboard';
-import type { Allocation } from '../../types/allocation';
-import type { LocalProtocolRow } from '../../types/local-data';
+} from '../../shared/lib/dashboard';
+import type { Allocation } from '../../shared/types/allocation';
+import type { LocalProtocolRow } from '../../shared/types/local-data';
 
 export type AllocationFilters = {
   allocations: Allocation[];

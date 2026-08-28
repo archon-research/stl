@@ -1,7 +1,7 @@
 import { useMatchRoute, useNavigate } from '@tanstack/react-router';
 import { useCallback } from 'react';
 
-import type { AppSearchPatch } from '../router/search-params';
+import type { AppSearchPatch } from '../shared/lib/search-params';
 
 export type DashboardView = 'allocation' | 'activities';
 

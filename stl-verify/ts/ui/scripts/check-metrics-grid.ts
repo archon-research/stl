@@ -15,7 +15,7 @@ async function main() {
 
   try {
     const { balancedColumns } = await vite.ssrLoadModule(
-      '/src/lib/dashboard.ts',
+      '/src/shared/lib/dashboard.ts',
     );
 
     // The case that prompted this: six cards over four columns read as 4 + 2,
@@ -60,7 +60,7 @@ async function main() {
     }
 
     const { encumbranceSeverity } = await vite.ssrLoadModule(
-      '/src/lib/dashboard.ts',
+      '/src/shared/lib/dashboard.ts',
     );
 
     // The Sky Atlas defines the two breaches, so they are pinned rather than

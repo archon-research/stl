@@ -1,5 +1,5 @@
-import { formatUsdValue } from '../../lib/dashboard';
-import type { PrimeRiskCapital } from '../../types/allocation';
+import { formatUsdValue } from '../../shared/lib/dashboard';
+import type { PrimeRiskCapital } from '../../shared/types/allocation';
 import {
   MetricCard,
   MetricCardLegend,

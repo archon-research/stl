@@ -4,7 +4,7 @@ import type React from 'react';
 
 import { css } from '#styled-system/css';
 
-import { getExplorerUrl } from '../../lib/dashboard';
+import { getExplorerUrl } from '../lib/dashboard';
 
 type TokenAddressProps = {
   address: string | null | undefined;

@@ -6,8 +6,8 @@ import { Fragment } from 'react';
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import { canRestateProvenance, useProvenanceView } from '../../lib/provenance';
-import type { Provenance } from '../../types/allocation';
+import { canRestateProvenance, useProvenanceView } from '../lib/provenance';
+import type { Provenance } from '../types/allocation';
 
 type SettingsOption = {
   value: string;
@@ -176,7 +176,7 @@ const DATA_SOURCE_SECTION_ID = 'data-source';
  * The href comes from the router so the param is spelled and ordered the way the
  * route tree would spell it, and the entry-time cleanup has nothing to rewrite.
  * It is then loaded as a document rather than navigated to: the flag is read
- * once per session on purpose (see `lib/provenance`), so a client-side flip
+ * once per session on purpose (see `shared/lib/provenance`), so a client-side flip
  * would leave already-fetched series on the old provenance while new ones
  * arrive on the new one — a page mixing both, which is what `source` exists to
  * make impossible.

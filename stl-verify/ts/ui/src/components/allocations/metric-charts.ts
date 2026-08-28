@@ -12,14 +12,14 @@ import {
   parseNumericValue,
   toChartSeries,
   wadToUnits,
-} from '../../lib/dashboard';
-import { preferReference } from '../../lib/provenance';
+} from '../../shared/lib/dashboard';
+import { preferReference } from '../../shared/lib/provenance';
 import type {
   PrimeDebtBucket,
   PrimeDebtSnapshot,
   PrimeRiskCapital,
-} from '../../types/allocation';
-import type { TimeRange } from '../shared';
+} from '../../shared/types/allocation';
+import type { TimeRange } from '../../shared/ui';
 import type { ChartDatum, MetricChartSpec } from './metricCards';
 import type { PrimeChartSeries } from './usePrimeChartSeries';
 

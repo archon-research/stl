@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 
-import { getAllocationKey } from '../../lib/dashboard';
-import type { Allocation } from '../../types/allocation';
+import { getAllocationKey } from '../../shared/lib/dashboard';
+import type { Allocation } from '../../shared/types/allocation';
 
 export type AllocationSelection = {
   selectedAllocation: Allocation | null;

@@ -2,9 +2,9 @@ import { toSearchOption } from '@archon-research/router-kit';
 import { useSearch } from '@tanstack/react-router';
 
 import { ActivityFeed } from '../components/allocations/tabs/ActivityFeed';
-import { useChainLabels, useTokenSymbols } from '../hooks/useRegistries';
-import { useUpdateSearch } from '../hooks/useUpdateSearch';
-import { ACTIVITY_ACTIONS } from '../router/search-params';
+import { useChainLabels, useTokenSymbols } from '../shared/hooks/useRegistries';
+import { useUpdateSearch } from '../shared/hooks/useUpdateSearch';
+import { ACTIVITY_ACTIONS } from '../shared/lib/search-params';
 import { usePrimeSelection } from './prime-selection';
 import { useTimeRange } from './time-range';
 

@@ -31,8 +31,11 @@ import { useContext, useMemo } from 'react';
 
 import { css } from '#styled-system/css';
 
-import { balancedColumns, formatFreshnessLabel } from '../../lib/dashboard';
-import { preferReference } from '../../lib/provenance';
+import {
+  balancedColumns,
+  formatFreshnessLabel,
+} from '../../shared/lib/dashboard';
+import { preferReference } from '../../shared/lib/provenance';
 
 export type ChartDatum = {
   label: string;

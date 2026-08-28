@@ -12,8 +12,8 @@ import type { ChangeEvent } from 'react';
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import type { FilterOption } from '../../lib/dashboard';
-import type { Provenance } from '../../types/allocation';
+import type { FilterOption } from '../lib/dashboard';
+import type { Provenance } from '../types/allocation';
 import { SIDEBAR_TOGGLE_ID } from './CollapsibleSidebarLayout';
 import { SettingsMenu, useDataSourceSection } from './SettingsMenu';
 

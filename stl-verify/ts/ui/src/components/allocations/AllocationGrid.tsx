@@ -33,14 +33,14 @@ import {
   getProtocolLabel,
   parseNumericValue,
   type ChainLabelLookup,
-} from '../../lib/dashboard';
+} from '../../shared/lib/dashboard';
 import {
   preferIndexed,
   preferModelRiskFigure,
   preferReference,
   useProvenanceView,
-} from '../../lib/provenance';
-import { ALLOCATION_CATEGORIES } from '../../router/search-params';
+} from '../../shared/lib/provenance';
+import { ALLOCATION_CATEGORIES } from '../../shared/lib/search-params';
 import type {
   Allocation,
   AllocationCategory,
@@ -49,8 +49,8 @@ import type {
   PrimeDebtBucket,
   PrimeDebtSnapshot,
   PrimeRiskCapital,
-} from '../../types/allocation';
-import type { LocalProtocolRow } from '../../types/local-data';
+} from '../../shared/types/allocation';
+import type { LocalProtocolRow } from '../../shared/types/local-data';
 import {
   ChainLogo,
   PageShell,
@@ -58,10 +58,10 @@ import {
   tableHeaderTypographyClassName,
   TokenAddress,
   TokenLogo,
-} from '../shared';
+} from '../../shared/ui';
+import { TabNotePanel } from '../../shared/ui/TabStatePanels';
 import { findMetricChart, type MetricChartSpec } from './metricCards';
 import { PrimeMetricsBand } from './PrimeMetricsBand';
-import { TabNotePanel } from './tabs/TabStatePanels';
 
 type AllocationGridProps = {
   allocations: Allocation[];

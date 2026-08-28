@@ -3,7 +3,7 @@ import {
   createQueryApi,
 } from '@archon-research/http-client-react';
 
-import type { paths } from '../generated/openapi-types';
+import type { paths } from '../../generated/openapi-types';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
 

@@ -1,22 +1,22 @@
 import { useQuery } from '@tanstack/react-query';
 import { useMemo } from 'react';
 
-import { toQueryErrorMessage } from '../../lib/errors';
+import { toQueryErrorMessage } from '../../shared/lib/errors';
 import {
   narrowRiskCapital,
   showsReference,
   useProvenanceView,
-} from '../../lib/provenance';
+} from '../../shared/lib/provenance';
 import {
   latestDebtSnapshotQuery,
   latestReferenceDebtQuery,
   riskCapitalQuery,
-} from '../../lib/queries';
+} from '../../shared/lib/queries';
 import type {
   PrimeDebtBucket,
   PrimeDebtSnapshot,
   PrimeRiskCapital,
-} from '../../types/allocation';
+} from '../../shared/types/allocation';
 
 export type PrimeMetrics = {
   riskCapital: PrimeRiskCapital | null;

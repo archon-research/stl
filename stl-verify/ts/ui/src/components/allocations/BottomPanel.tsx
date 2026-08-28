@@ -21,18 +21,18 @@ import {
   getAllocationKey,
   getPrimeGroupKey,
   sortAllocations,
-} from '../../lib/dashboard';
+} from '../../shared/lib/dashboard';
 import {
   ACTIVITY_ACTIONS,
   type ActivityAction,
   DRAWER_TABS,
   type DrawerTab,
-} from '../../router/search-params';
+} from '../../shared/lib/search-params';
 import type {
   Allocation,
   PrimeRiskCapital,
   Prime,
-} from '../../types/allocation';
+} from '../../shared/types/allocation';
 import { ActivityFeed } from './tabs/ActivityFeed';
 import { RiskBreakdownTab } from './tabs/RiskBreakdownTab';
 import { RrcTab } from './tabs/RrcTab';

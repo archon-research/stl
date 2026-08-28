@@ -26,21 +26,21 @@ import {
   formatFreshnessLabel,
   getChainLabel,
   parseNumericValue,
-} from '../../../lib/dashboard';
-import { toQueryErrorMessage } from '../../../lib/errors';
+} from '../../../shared/lib/dashboard';
+import { toQueryErrorMessage } from '../../../shared/lib/errors';
 import {
   activityQuery,
   FALLBACK_TX_EVENT_LIMIT,
   txProtocolEventsFallbackQuery,
   txProtocolEventsQuery,
-} from '../../../lib/queries';
+} from '../../../shared/lib/queries';
 import type {
   Allocation,
   AllocationActivity,
   AllocationActivityResponse,
   Prime,
   ProtocolEvent,
-} from '../../../types/allocation';
+} from '../../../shared/types/allocation';
 import {
   ChainLogo,
   DEFAULT_RANGE_PRESET,
@@ -52,8 +52,8 @@ import {
   tableHeaderTypographyClassName,
   type TimeRange,
   TokenAddress,
-} from '../../shared';
-import { unindexedChainMessage } from './TabStatePanels';
+} from '../../../shared/ui';
+import { unindexedChainMessage } from '../../../shared/ui/TabStatePanels';
 
 type ActivityFeedProps = {
   isEnabled: boolean;

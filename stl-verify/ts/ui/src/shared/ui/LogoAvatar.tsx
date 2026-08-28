@@ -1,8 +1,9 @@
 import { Avatar } from '@archon-research/design-system';
 import { useMemo, useState } from 'react';
 
-import { logging } from '#src/lib/logging';
 import { css, cx } from '#styled-system/css';
+
+import { logging } from '../lib/logging';
 
 type PandaSizeToken = '4' | '5' | '6' | '7' | '8' | '9' | '10' | '11';
 

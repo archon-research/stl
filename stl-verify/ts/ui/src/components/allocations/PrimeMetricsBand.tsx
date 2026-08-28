@@ -10,8 +10,8 @@ import {
   formatRatioPercent,
   formatUsdValue,
   formatWadValue,
-} from '../../lib/dashboard';
-import type { PrimeRiskCapital } from '../../types/allocation';
+} from '../../shared/lib/dashboard';
+import type { PrimeRiskCapital } from '../../shared/types/allocation';
 import { ExposureCard, PrimeCollateralCard } from './HiddenMetricCards';
 import {
   MetricCard,

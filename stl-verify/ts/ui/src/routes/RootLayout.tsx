@@ -3,11 +3,11 @@ import { useState } from 'react';
 
 import { css } from '#styled-system/css';
 
-import { CollapsibleSidebarLayout } from '../components/shared/CollapsibleSidebarLayout';
-import { PrimeSidebar } from '../components/shared/PrimeSidebar';
-import { TopBar } from '../components/shared/TopBar';
-import { useProvenanceAvailability } from '../hooks/useProvenanceAvailability';
-import { useUpdateSearch } from '../hooks/useUpdateSearch';
+import { useProvenanceAvailability } from '../shared/hooks/useProvenanceAvailability';
+import { useUpdateSearch } from '../shared/hooks/useUpdateSearch';
+import { CollapsibleSidebarLayout } from '../shared/ui/CollapsibleSidebarLayout';
+import { PrimeSidebar } from '../shared/ui/PrimeSidebar';
+import { TopBar } from '../shared/ui/TopBar';
 import { useSelectedView, useViewNavigation } from './navigation';
 import { PrimeSelectionProvider, usePrimeSelection } from './prime-selection';
 import { TimeRangeProvider, useTimeRange } from './time-range';

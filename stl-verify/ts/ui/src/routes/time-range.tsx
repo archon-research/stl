@@ -7,15 +7,15 @@ import {
   type ReactNode,
 } from 'react';
 
+import { useUpdateSearch } from '../shared/hooks/useUpdateSearch';
 // DEFAULT_RANGE_PRESET comes from the local shared barrel so the temporary 24h
-// override in components/shared/index.ts applies here too; see that file.
+// override in shared/ui/index.ts applies here too; see that file.
 import {
   DEFAULT_RANGE_PRESET,
   presetToRange,
   type RangePreset,
   type TimeRange,
-} from '../components/shared';
-import { useUpdateSearch } from '../hooks/useUpdateSearch';
+} from '../shared/ui';
 
 export type TimeRangeSelection = {
   rangePreset: RangePreset;

@@ -1,15 +1,15 @@
 import { useQueries, type UseQueryResult } from '@tanstack/react-query';
 import { useMemo } from 'react';
 
-import type { PrimeGroup } from '../../lib/dashboard';
-import { toQueryErrorMessage } from '../../lib/errors';
+import type { PrimeGroup } from '../../shared/lib/dashboard';
+import { toQueryErrorMessage } from '../../shared/lib/errors';
 import {
   narrowAllocations,
   showsReference,
   useProvenanceView,
-} from '../../lib/provenance';
-import { allocationsQuery } from '../../lib/queries';
-import type { Allocation } from '../../types/allocation';
+} from '../../shared/lib/provenance';
+import { allocationsQuery } from '../../shared/lib/queries';
+import type { Allocation } from '../../shared/types/allocation';
 
 export type AllocationRows = {
   allocations: Allocation[];

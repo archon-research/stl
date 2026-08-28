@@ -6,14 +6,14 @@ import {
   getChainLabel,
   getProtocolLabel,
   type ChainLabelLookup,
-} from '../../lib/dashboard';
+} from '../../shared/lib/dashboard';
 import type {
   Allocation,
   Prime,
   PrimeRiskCapital,
-} from '../../types/allocation';
-import type { LocalProtocolRow } from '../../types/local-data';
-import { ChainLogo, ProtocolLogo, TokenLogo } from '../shared';
+} from '../../shared/types/allocation';
+import type { LocalProtocolRow } from '../../shared/types/local-data';
+import { ChainLogo, ProtocolLogo, TokenLogo } from '../../shared/ui';
 import { BottomPanel } from './BottomPanel';
 import { RiskDetailDrawer } from './RiskDetailDrawer';
 

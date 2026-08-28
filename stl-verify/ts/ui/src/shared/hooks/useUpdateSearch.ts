@@ -1,7 +1,7 @@
 import { useNavigate } from '@tanstack/react-router';
 import { useCallback } from 'react';
 
-import type { AppSearchPatch } from '../router/search-params';
+import type { AppSearchPatch } from '../lib/search-params';
 
 /**
  * Edits search params in place, on whichever route is mounted.

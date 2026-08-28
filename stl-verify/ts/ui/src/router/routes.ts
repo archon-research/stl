@@ -19,7 +19,7 @@ import {
   activitiesSearchSchema,
   allocationSearchSchema,
   sharedSearchSchema,
-} from './search-params';
+} from '../shared/lib/search-params';
 
 // Every param here is a plain string, and the default JSON round-trip would
 // write `?network=1` as `?network=%221%22` — a shape no existing link uses.

@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 
-import { buildChainLogoUrl } from '../../lib/logo-cdn';
+import { buildChainLogoUrl } from '../lib/logo-cdn';
 import { LogoAvatar } from './LogoAvatar';
 
 type ChainLogoProps = {

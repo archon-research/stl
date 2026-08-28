@@ -6,8 +6,8 @@ import {
   useChainLabels,
   useLocalChains,
   useLocalProtocols,
-} from '../hooks/useRegistries';
-import { useUpdateSearch } from '../hooks/useUpdateSearch';
+} from '../shared/hooks/useRegistries';
+import { useUpdateSearch } from '../shared/hooks/useUpdateSearch';
 import {
   buildNetworkOptions,
   buildNetworkOptionsFromMetadata,
@@ -15,7 +15,7 @@ import {
   buildProtocolOptionsFromMetadata,
   type FilterOption,
   type PrimeGroup,
-} from '../lib/dashboard';
+} from '../shared/lib/dashboard';
 import type { DashboardView } from './navigation';
 
 export type DashboardFilters = {

@@ -6,15 +6,15 @@ import {
   parseNumericValue,
   toChartSeries,
   wadToUnits,
-} from '../../lib/dashboard';
-import { useProvenanceView } from '../../lib/provenance';
+} from '../../shared/lib/dashboard';
+import { useProvenanceView } from '../../shared/lib/provenance';
 import type {
   ExposureBucket,
   PrimeDebtBucket,
   TimeSeriesResolution,
   TotalCapitalBucket,
-} from '../../types/allocation';
-import type { RangePreset, TimeRange } from '../shared';
+} from '../../shared/types/allocation';
+import type { RangePreset, TimeRange } from '../../shared/ui';
 import type { ChartDatum } from './metricCards';
 
 export type PrimeChartSeries = {

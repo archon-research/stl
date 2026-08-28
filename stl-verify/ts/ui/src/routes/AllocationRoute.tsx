@@ -10,11 +10,14 @@ import { useAllocationSelection } from '../components/allocations/useAllocationS
 import { useFilteredAllocations } from '../components/allocations/useFilteredAllocations';
 import { usePrimeChartSeries } from '../components/allocations/usePrimeChartSeries';
 import { usePrimeMetrics } from '../components/allocations/usePrimeMetrics';
-import { useUrlSyncedTableState } from '../data-table/hooks';
-import { useChainLabels, useLocalProtocols } from '../hooks/useRegistries';
-import { useUpdateSearch } from '../hooks/useUpdateSearch';
-import { parseNumericValue } from '../lib/dashboard';
-import { useProvenanceView } from '../lib/provenance';
+import {
+  useChainLabels,
+  useLocalProtocols,
+} from '../shared/hooks/useRegistries';
+import { useUpdateSearch } from '../shared/hooks/useUpdateSearch';
+import { useUrlSyncedTableState } from '../shared/hooks/useUrlSyncedTableState';
+import { parseNumericValue } from '../shared/lib/dashboard';
+import { useProvenanceView } from '../shared/lib/provenance';
 import { usePrimeSelection } from './prime-selection';
 import { useTimeRange } from './time-range';
 

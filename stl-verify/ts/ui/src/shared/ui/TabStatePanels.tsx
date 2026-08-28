@@ -5,7 +5,7 @@ import {
 
 import { css } from '#styled-system/css';
 
-import { getChainLabel } from '../../../lib/dashboard';
+import { getChainLabel } from '../lib/dashboard';
 
 type TabNotePanelProps = {
   message: string;

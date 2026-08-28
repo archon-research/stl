@@ -1,19 +1,19 @@
 import { useQuery } from '@tanstack/react-query';
 
-import { toQueryErrorMessage } from '../lib/errors';
+import { toQueryErrorMessage } from '../shared/lib/errors';
 import {
   activitySeriesQuery,
   debtSeriesQuery,
   exposureSeriesQuery,
   type SeriesWindow,
   totalCapitalSeriesQuery,
-} from '../lib/queries';
+} from '../shared/lib/queries';
 import type {
   AllocationActivityBucket,
   ExposureBucket,
   PrimeDebtBucket,
   TotalCapitalBucket,
-} from '../types/allocation';
+} from '../shared/types/allocation';
 
 export interface PrimeChartData {
   debtBuckets: PrimeDebtBucket[];

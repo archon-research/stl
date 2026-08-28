@@ -4,8 +4,11 @@ import {
   formatRatioPercent,
   parseNumericValue,
   riskModelCaptionSuffix,
-} from '../../lib/dashboard';
-import type { PrimeRiskCapital, Provenance } from '../../types/allocation';
+} from '../../shared/lib/dashboard';
+import type {
+  PrimeRiskCapital,
+  Provenance,
+} from '../../shared/types/allocation';
 
 /**
  * The provenance line that used to sit under the metrics band.
