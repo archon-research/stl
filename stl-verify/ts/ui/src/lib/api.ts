@@ -126,7 +126,7 @@ export function getProtocols(
   );
 }
 
-export function getAllocations(
+function getAllocations(
   primeId: string,
   signal?: AbortSignal,
 ): Promise<AllocationsResponse> {
@@ -392,7 +392,7 @@ export function getTokenPrice(
   );
 }
 
-export async function getPrimeDebtSnapshots(
+async function getPrimeDebtSnapshots(
   primeId: string,
   filters?: TimeSeriesFilters,
   signal?: AbortSignal,

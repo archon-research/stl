@@ -236,7 +236,7 @@ function getProtocolMatchScore(
   return score;
 }
 
-export function findProtocolMetadata(
+function findProtocolMetadata(
   protocol: string,
   localProtocols?: LocalProtocolRow[],
   chainId?: number,
@@ -258,7 +258,7 @@ export function findProtocolMetadata(
 
 // chain_id 0 is the off-chain sentinel (e.g. Anchorage BTC custody), which has
 // no EVM chain and so no name in the chain registry or logo CDN.
-export const OFFCHAIN_CHAIN_ID = 0;
+const OFFCHAIN_CHAIN_ID = 0;
 
 export function getChainLabel(
   chainId: number | null | undefined,

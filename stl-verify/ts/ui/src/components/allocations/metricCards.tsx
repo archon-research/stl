@@ -74,7 +74,7 @@ export type MetricChartSpec = {
 
 // Every card the metrics band knows how to build. Not what it shows: see
 // `VISIBLE_TOP_METRIC_CARDS`, which is what drives the grid.
-export const TOP_METRIC_CARDS = [
+const TOP_METRIC_CARDS = [
   'total-allocation',
   'exposure',
   'total-risk-capital',
@@ -402,7 +402,7 @@ function buildSingleSeriesTheme(stroke: string) {
   });
 }
 
-export const chartEmptyMessageClassName = css({
+const chartEmptyMessageClassName = css({
   m: 0,
   mt: '2',
   fontSize: 'xs',
@@ -886,7 +886,7 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
 
 // Card and detail framing, shared by every metric card so one cannot drift from
 // its neighbours.
-export const metricsCardClassName = css({
+const metricsCardClassName = css({
   borderRadius: 'sm',
   borderStyle: 'solid',
   borderWidth: '1px',
