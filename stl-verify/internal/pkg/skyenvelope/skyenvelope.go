@@ -1,8 +1,7 @@
 // Package skyenvelope holds the response-envelope mechanics shared by Sky's
-// hosts: pagination guarding and optional-field folding. The Go counterpart of
-// the Python side's app/adapters/sky/envelope.py, and split the same way —
-// the envelope is one contract across hosts, while page limits and each
-// vendor's network vocabulary stay per-client.
+// hosts: pagination guarding and optional-field folding. Split so the envelope
+// stays one contract across hosts while page limits and each vendor's network
+// vocabulary stay per-client.
 package skyenvelope
 
 import (

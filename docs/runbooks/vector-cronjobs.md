@@ -711,6 +711,13 @@ stops being emitted at all (a collector drop or a metric rename), not only
 when it is present and reads zero — check that the series still exists at all
 before chasing an upstream cause.
 
+**Serving impact.** This table is also where the API reads *coverage* from, and
+where `/v1/primes/{id}/risk-capital` reads its reference totals. A stall does
+not lose coverage — the existing rows still answer it — so nothing starts
+404ing; instead the reference figures freeze while `reference_synced_at` falls
+further behind, and `/v1/provenance/available` keeps offering `reference` for
+every prime that has ever been covered.
+
 **Triage.**
 
 1. Confirm the worker is cycling rather than wedged:
@@ -796,6 +803,15 @@ wearing its shape.
    `VectorReferenceCapitalIndexerWritesZero` is also firing, treat that as the
    primary signal — the whole feed stalled, not just the breakdown.
 
+**Serving impact.** `/v1/primes/{id}/risk-capital?source=reference` reads its
+`per_allocation` breakdown from this table, pinned to the same cycle its totals
+came from so the two cannot be mixed. A totals row with no matching breakdown
+and non-zero exposure — every cycle recorded before 2026-08-26, before this
+table existed — is skipped rather than served: the reader falls back to that
+prime's last complete cycle, or to a **404** (`both` degrading to `indexed`) if
+it has none. It cannot 500 for this reason — the three reference tables land in
+one transaction, so a cycle that wrote totals always wrote its breakdown too.
+
 **Resolution.** Same posture as `WritesZero`: upstream coverage is upstream's.
 Confirm what the monitor reports and reconcile; the gap in the series stays.
 
@@ -835,6 +851,14 @@ coverage — a code change, never a silent skip.
 3. If rows are genuinely not landing despite cycles succeeding, that
    contradicts the invariant above — treat it as a code regression in the
    positions client's empty-result guard, not a routine data gap.
+
+**Serving impact.** `/v1/primes/{id}/allocations?source=reference` reads this
+table, taking the newest cycle that has rows, so a stall serves a frozen balance
+sheet rather than an empty list — `reference_synced_at` on each row is what says
+how old it is. A prime that has *never* had rows here answers `404` on that
+endpoint, deliberately: an empty list would claim the prime holds nothing.
+`/v1/provenance/available` may still offer `reference` for it, since coverage
+there comes from `prime_capital_stack`.
 
 **Resolution.** A telemetry fix ships as a normal PR; no upstream reconciliation
 or accepted gap applies here, unlike `WritesZero`/`AllocationsZero`.

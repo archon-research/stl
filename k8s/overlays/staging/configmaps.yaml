@@ -693,7 +693,10 @@ data:
   REFERENCE_CAPITAL_SYNC_INTERVAL: "15m"
   # Risk-capital root, without the /primes route the client appends itself.
   SKY_RISK_CAPITAL_URL: "https://info-sky.blockanalitica.com/star-monitoring/risk-capital"
-  # Balance-sheet feed, read only by the one-off reference-capital-backfill Job.
+  # Balance-sheet feed. Read every cycle by the indexer -- for the per-prime
+  # daily aggregates and the per-position rows the API now serves reference
+  # allocations from -- and by the reference-capital-backfill Deployment, which
+  # seeds the history the indexer cannot reach.
   SKY_DATA_URL: "https://sky.data.blockanalitica.com/internal"
   ENVIRONMENT: "sentinelstaging"
 ---
