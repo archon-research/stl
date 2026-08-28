@@ -1,13 +1,13 @@
 import {
   Badge,
   type BadgeColorPalette,
+  ErrorBoundary,
   ErrorState,
   Panel,
   SkeletonStack,
 } from '@archon-research/design-system';
 import { ChevronDown, ChevronUp } from 'lucide-react';
-import { useEffect, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
+import { lazy, Suspense, useEffect, useState } from 'react';
 
 import { css } from '#styled-system/css';
 
@@ -25,6 +25,26 @@ import {
 import { isAbortError, toErrorMessage } from '../../lib/errors';
 import { logging } from '../../lib/logging';
 import type { DataSource, Token, TokenPrice } from '../../types/allocation';
+
+// The panel is collapsed on first paint and its markdown is a module constant,
+// so the renderer can arrive with the body instead of with the app shell.
+const MethodologyMarkdown = lazy(() => import('./MethodologyMarkdown'));
+
+// Module scope because a fallback returning JSX inside the component body reads
+// to `react/no-unstable-nested-components` as a component redefined per render.
+const renderMarkdownLoadError = (loadError: Error) => (
+  <ErrorState
+    title="Failed to load methodology"
+    description="The methodology renderer could not be loaded."
+    errorMessage={loadError.message}
+    tone="critical"
+    size="inline"
+  />
+);
+
+const reportMarkdownLoadError = (loadError: Error) => {
+  logging.error('Failed to load methodology renderer', { error: loadError });
+};
 
 // Anything not listed reads as neutral: the set of access models is open-ended
 // (it comes from the data-sources API), so an unknown value must not be styled
@@ -307,7 +327,14 @@ export function MethodologyPanel({
                   },
                 })}
               >
-                <ReactMarkdown>{methodologyText}</ReactMarkdown>
+                <ErrorBoundary
+                  fallback={renderMarkdownLoadError}
+                  onError={reportMarkdownLoadError}
+                >
+                  <Suspense fallback={<SkeletonStack count={3} />}>
+                    <MethodologyMarkdown markdown={methodologyText} />
+                  </Suspense>
+                </ErrorBoundary>
               </div>
             </div>
 
