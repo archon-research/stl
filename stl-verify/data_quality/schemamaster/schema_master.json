@@ -1256,6 +1256,10 @@
       "owner": "prime",
       "transform_defer": "VEC-491: bucket 2 (block-time dimension via block_states)"
     },
+    "allocation_position_current": {
+      "type": "derived",
+      "owner": "prime"
+    },
     "anchorage_operation": {
       "type": "raw_pipeline",
       "owner": "prime",
