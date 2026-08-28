@@ -287,7 +287,7 @@ func TestUniswapV3Repository_SaveBlock_State_RoundTrip(t *testing.T) {
 	}
 
 	repo := newUniswapV3Repo(t)
-	var stateRows int64
+	var stateRows outbound.UniswapStateRowCounts
 	withUniswapV3Tx(t, ctx, func(tx pgx.Tx) {
 		var err error
 		stateRows, err = repo.SaveBlock(ctx, tx, outbound.UniswapV3BlockWrites{States: []*entity.UniswapV3PoolState{st}})
@@ -295,8 +295,8 @@ func TestUniswapV3Repository_SaveBlock_State_RoundTrip(t *testing.T) {
 			t.Fatalf("SaveBlock: %v", err)
 		}
 	})
-	if stateRows != 1 {
-		t.Errorf("stateRows = %d, want 1", stateRows)
+	if stateRows.Persisted != 1 {
+		t.Errorf("stateRows.Persisted = %d, want 1", stateRows.Persisted)
 	}
 
 	var (
@@ -394,23 +394,28 @@ func TestUniswapV3Repository_SaveBlock_State_Idempotent(t *testing.T) {
 	}
 
 	repo := newUniswapV3Repo(t)
-	save := func() int64 {
-		var n int64
+	save := func() outbound.UniswapStateRowCounts {
+		var counts outbound.UniswapStateRowCounts
 		withUniswapV3Tx(t, ctx, func(tx pgx.Tx) {
 			var err error
-			n, err = repo.SaveBlock(ctx, tx, outbound.UniswapV3BlockWrites{States: []*entity.UniswapV3PoolState{st}})
+			counts, err = repo.SaveBlock(ctx, tx, outbound.UniswapV3BlockWrites{States: []*entity.UniswapV3PoolState{st}})
 			if err != nil {
 				t.Fatalf("SaveBlock: %v", err)
 			}
 		})
-		return n
+		return counts
 	}
 
-	if n := save(); n != 1 {
-		t.Errorf("first save stateRows = %d, want 1", n)
+	if got := save(); got.Attempted != 1 || got.Persisted != 1 {
+		t.Errorf("first save = %+v, want {Attempted:1 Persisted:1}", got)
 	}
-	if n := save(); n != 0 {
-		t.Errorf("redelivery stateRows = %d, want 0", n)
+	// The redelivery is the case VectorUniswapV3IndexerNotWritingState must NOT
+	// fire on: the trigger reuses the processing_version, so the INSERT lands on
+	// the identical PK and appends nothing. Persisted therefore drops to zero
+	// while Attempted stays at the row the block really tried to persist — which
+	// is why the alert's right side keys on Attempted.
+	if got := save(); got.Attempted != 1 || got.Persisted != 0 {
+		t.Errorf("redelivery = %+v, want {Attempted:1 Persisted:0} (ON CONFLICT DO NOTHING appends nothing, but the block still tried)", got)
 	}
 
 	var count int

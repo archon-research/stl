@@ -127,7 +127,9 @@ func stringifyBigInts(v any) any {
 // hexBytes renders a bare byte array/slice — go-ethereum decodes bytes32 (a V4
 // PoolId or ModifyLiquidity salt) as [32]byte, which carries no JSON encoding of
 // its own — as lowercase 0x hex. Left as a decimal byte array it would be
-// unjoinable against the hex-keyed pool registry.
+// unjoinable against the hex-keyed pool registry. No curve or uniswap-v3 event
+// ABI declares a byte-typed argument, so this reaches only V4's bytes32 fields
+// and leaves the shipped indexers' protocol_event encoding unchanged.
 func hexBytes(rv reflect.Value) (string, bool) {
 	kind := rv.Kind()
 	if kind != reflect.Array && kind != reflect.Slice {

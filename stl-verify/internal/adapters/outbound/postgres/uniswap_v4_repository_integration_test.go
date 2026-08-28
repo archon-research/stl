@@ -579,7 +579,7 @@ func TestUniswapV4Repository_SaveBlock_RoundTripsEveryTable(t *testing.T) {
 	}
 
 	repo := newUniswapV4Repo(t)
-	var stateRows int64
+	var stateRows outbound.UniswapStateRowCounts
 	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
 		var saveErr error
 		stateRows, saveErr = repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{
@@ -593,8 +593,8 @@ func TestUniswapV4Repository_SaveBlock_RoundTripsEveryTable(t *testing.T) {
 			t.Fatalf("SaveBlock: %v", saveErr)
 		}
 	})
-	if stateRows != 1 {
-		t.Errorf("stateRows = %d, want 1", stateRows)
+	if stateRows.Persisted != 1 {
+		t.Errorf("stateRows.Persisted = %d, want 1", stateRows.Persisted)
 	}
 
 	t.Run("pool_state", func(t *testing.T) {
@@ -791,22 +791,27 @@ func TestUniswapV4Repository_SaveBlock_IdenticalReplayInsertsNothing(t *testing.
 	}
 
 	repo := newUniswapV4Repo(t)
-	save := func() int64 {
-		var n int64
+	save := func() outbound.UniswapStateRowCounts {
+		var counts outbound.UniswapStateRowCounts
 		withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
 			var err error
-			if n, err = repo.SaveBlock(ctx, tx, writes); err != nil {
+			if counts, err = repo.SaveBlock(ctx, tx, writes); err != nil {
 				t.Fatalf("SaveBlock: %v", err)
 			}
 		})
-		return n
+		return counts
 	}
 
-	if got := save(); got != 2 {
-		t.Errorf("first save stateRows = %d, want 2", got)
+	if got := save(); got.Attempted != 2 || got.Persisted != 2 {
+		t.Errorf("first save = %+v, want {Attempted:2 Persisted:2}", got)
 	}
-	if got := save(); got != 0 {
-		t.Errorf("replay stateRows = %d, want 0 (ON CONFLICT DO NOTHING)", got)
+	// The replay is the case VectorUniswapV4IndexerNotWritingState must NOT fire
+	// on: the trigger reuses the processing_version, so every INSERT lands on the
+	// identical PK and appends nothing. Persisted therefore drops to zero while
+	// Attempted stays at the two rows the block really tried to persist — which
+	// is why the alert's right side keys on Attempted.
+	if got := save(); got.Attempted != 2 || got.Persisted != 0 {
+		t.Errorf("replay = %+v, want {Attempted:2 Persisted:0} (ON CONFLICT DO NOTHING appends nothing, but the block still tried)", got)
 	}
 
 	var count int

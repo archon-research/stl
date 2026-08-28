@@ -201,12 +201,13 @@ type v4LiquidityEventConverted struct {
 }
 
 // SaveBlock persists all of a block's uniswap_v4 rows in one pgx.Batch within
-// tx, except ticks (append-on-change, see uniswapTickWriter), and returns the
-// count of state rows inserted.
-func (r *UniswapV4Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.UniswapV4BlockWrites) (stateRows int64, err error) {
+// tx, except ticks (append-on-change, see uniswapTickWriter), and returns both
+// the count of state rows the block queued and the count that actually
+// appended.
+func (r *UniswapV4Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.UniswapV4BlockWrites) (stateRows outbound.UniswapStateRowCounts, err error) {
 	rows, err := convertV4BlockWrites(w)
 	if err != nil {
-		return 0, err
+		return outbound.UniswapStateRowCounts{}, err
 	}
 
 	batch := &pgx.Batch{}
@@ -539,10 +540,13 @@ func queueV4PoolEvents(batch *pgx.Batch, poolEvents []*entity.UniswapV4PoolEvent
 }
 
 // sendUniswapV4Batch executes the queued batch and drains every result in queue
-// order, returning the count of state rows inserted. The batch reader is always
-// closed before returning so the caller may issue further queries on tx
-// (writeTicks runs after this).
-func sendUniswapV4Batch(ctx context.Context, tx pgx.Tx, batch *pgx.Batch, rows v4BatchRows) (stateRows int64, err error) {
+// order, returning both the number of state-row statements it drained and the
+// number of rows they appended. The two diverge on an idempotent replay, where
+// every INSERT conflicts away; counting the attempt here rather than in the
+// service means a repo-layer drop is counted as zero attempts too. The batch
+// reader is always closed before returning so the caller may issue further
+// queries on tx (writeTicks runs after this).
+func sendUniswapV4Batch(ctx context.Context, tx pgx.Tx, batch *pgx.Batch, rows v4BatchRows) (stateRows outbound.UniswapStateRowCounts, err error) {
 	br := tx.SendBatch(ctx, batch)
 	defer func() {
 		if closeErr := br.Close(); closeErr != nil {
@@ -557,7 +561,8 @@ func sendUniswapV4Batch(ctx context.Context, tx pgx.Tx, batch *pgx.Batch, rows v
 				return stateRows, fmt.Errorf("batch %s %d: %w", section.name, i, readErr)
 			}
 			if section.countsStateRows {
-				stateRows += tag.RowsAffected()
+				stateRows.Attempted++
+				stateRows.Persisted += tag.RowsAffected()
 			}
 		}
 	}

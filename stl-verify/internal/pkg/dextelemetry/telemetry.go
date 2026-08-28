@@ -27,20 +27,22 @@ import (
 // no-op when called on a nil pointer, so production code can pass nil for
 // "telemetry disabled" without guard checks at each call site.
 type Telemetry struct {
-	prefix            string
-	chainAttr         attribute.KeyValue
-	blocksProcessed   metric.Int64Counter
-	errorsTotal       metric.Int64Counter
-	blockDuration     metric.Float64Histogram
-	stateRowsWritten  metric.Int64Counter
-	poolsTouched      metric.Int64Counter
-	poolsNeverIndexed metric.Int64Gauge
+	prefix             string
+	chainAttr          attribute.KeyValue
+	blocksProcessed    metric.Int64Counter
+	errorsTotal        metric.Int64Counter
+	blockDuration      metric.Float64Histogram
+	stateRowsWritten   metric.Int64Counter
+	stateRowsAttempted metric.Int64Counter
+	poolsTouched       metric.Int64Counter
+	poolsNeverIndexed  metric.Int64Gauge
 }
 
-// NewTelemetry registers four counters (`<prefix>.blocks.processed`,
+// NewTelemetry registers five counters (`<prefix>.blocks.processed`,
 // `<prefix>.errors.total`, `<prefix>.state.rows.written`,
-// `<prefix>.pools.touched`), the `<prefix>.block.duration_seconds` histogram,
-// and the `<prefix>.pools.never_indexed` gauge. Every DEX gets the whole set;
+// `<prefix>.state.rows.attempted`, `<prefix>.pools.touched`), the
+// `<prefix>.block.duration_seconds` histogram, and the
+// `<prefix>.pools.never_indexed` gauge. Every DEX gets the whole set;
 // an instrument a worker never records simply produces no series. The
 // OTel-to-Prometheus exporter normalises the dots to underscores and adds the
 // `_total` suffix to the counters, yielding the metric series names the alert
@@ -97,6 +99,14 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 		return nil, fmt.Errorf("creating %s.state.rows.written counter: %w", prefix, err)
 	}
 
+	stateRowsAttempted, err := meter.Int64Counter(
+		prefix+".state.rows.attempted",
+		metric.WithDescription("Total state snapshot rows a block queued for insert, conflicts included"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating %s.state.rows.attempted counter: %w", prefix, err)
+	}
+
 	touched, err := meter.Int64Counter(
 		prefix+".pools.touched",
 		metric.WithDescription("Total registered pools touched by decoded events"),
@@ -114,14 +124,15 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 	}
 
 	return &Telemetry{
-		prefix:            prefix,
-		chainAttr:         attribute.String("chain", chainName),
-		blocksProcessed:   blocks,
-		errorsTotal:       errs,
-		blockDuration:     dur,
-		stateRowsWritten:  stateRows,
-		poolsTouched:      touched,
-		poolsNeverIndexed: neverIndexed,
+		prefix:             prefix,
+		chainAttr:          attribute.String("chain", chainName),
+		blocksProcessed:    blocks,
+		errorsTotal:        errs,
+		blockDuration:      dur,
+		stateRowsWritten:   stateRows,
+		stateRowsAttempted: stateRowsAttempted,
+		poolsTouched:       touched,
+		poolsNeverIndexed:  neverIndexed,
 	}, nil
 }
 
@@ -156,13 +167,37 @@ func (t *Telemetry) RecordError(ctx context.Context, operation string, err error
 	))
 }
 
-// RecordStateRows increments state_rows_written_total by n. Nil receiver or
-// n <= 0 are no-ops.
+// RecordStateRows increments state_rows_written_total by n, the number of state
+// snapshot rows a block actually appended. Volume observability: it answers
+// "how much did this worker add", and an idempotent replay legitimately adds
+// nothing. Nil receiver or n <= 0 are no-ops.
 func (t *Telemetry) RecordStateRows(ctx context.Context, n int) {
 	if t == nil || n <= 0 {
 		return
 	}
 	t.stateRowsWritten.Add(ctx, int64(n), metric.WithAttributes(t.chainAttr))
+}
+
+// RecordStateRowsAttempted increments state_rows_attempted_total by n, the
+// number of state snapshot rows a block QUEUED for insert — rows that
+// conflicted away included. It is the health signal the sweepless
+// not-writing-state alerts key on, and it is deliberately not the same question
+// as RecordStateRows: replaying an already-committed range under one build_id
+// reuses the processing_version, so every INSERT hits ON CONFLICT DO NOTHING
+// and writes nothing while the worker is perfectly healthy. A conflict under
+// that primary key means the identical row is already in the table, so zero
+// written is provably not a data hole; zero ATTEMPTED, by contrast, is exactly
+// what every bug those alerts exist for produces (an empty due set, a
+// no-opping snapshot step, a dropped write set).
+//
+// n <= 0 is a no-op, matching RecordStateRows: the rules use
+// `A > 0 unless B > 0` so the series must stay absent, not zero, when nothing
+// was attempted. Nil receiver is a no-op too.
+func (t *Telemetry) RecordStateRowsAttempted(ctx context.Context, n int) {
+	if t == nil || n <= 0 {
+		return
+	}
+	t.stateRowsAttempted.Add(ctx, int64(n), metric.WithAttributes(t.chainAttr))
 }
 
 // RecordPoolsTouched increments pools_touched_total by n, the number of

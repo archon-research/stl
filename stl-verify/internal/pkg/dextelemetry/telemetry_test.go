@@ -284,6 +284,8 @@ func TestTelemetry_NilSafe(t *testing.T) {
 	tel.RecordError(ctx, "op", nil)
 	tel.RecordStateRows(ctx, 5)
 	tel.RecordStateRows(ctx, 0)
+	tel.RecordStateRowsAttempted(ctx, 5)
+	tel.RecordStateRowsAttempted(ctx, 0)
 	tel.RecordPoolsTouched(ctx, 5)
 	tel.RecordPoolsTouched(ctx, 0)
 	tel.RecordPoolsNeverIndexed(ctx, 5)
@@ -319,6 +321,42 @@ func TestRecordStateRows_IncrementsCounter(t *testing.T) {
 	got := readSingleSumCount(t, &rm, "curve.state.rows.written")
 	if got != 8 {
 		t.Errorf("curve.state.rows.written = %d, want 8 (3+5; 0 and -1 are no-ops)", got)
+	}
+}
+
+// TestRecordStateRowsAttempted_IncrementsCounter pins the no-op-on-zero
+// semantics the not-writing-state rules depend on: those use
+// `A > 0 unless B > 0`, so "nothing was attempted" has to leave the series
+// absent rather than at zero, or the rule can never fire.
+func TestRecordStateRowsAttempted_IncrementsCounter(t *testing.T) {
+	reader := metricsdk.NewManualReader()
+	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
+
+	tel, err := NewTelemetry("curve", 1)
+	if err != nil {
+		t.Fatalf("NewTelemetry: %v", err)
+	}
+
+	ctx := context.Background()
+	tel.RecordStateRowsAttempted(ctx, 3)
+	tel.RecordStateRowsAttempted(ctx, 5)
+	tel.RecordStateRowsAttempted(ctx, 0)  // no-op
+	tel.RecordStateRowsAttempted(ctx, -1) // no-op
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	got := readSingleSumCount(t, &rm, "curve.state.rows.attempted")
+	if got != 8 {
+		t.Errorf("curve.state.rows.attempted = %d, want 8 (3+5; 0 and -1 are no-ops)", got)
 	}
 }
 

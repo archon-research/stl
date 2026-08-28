@@ -117,20 +117,21 @@ type liquidityEventConverted struct {
 }
 
 // SaveBlock persists all of a block's uniswap_v3 rows in one pgx.Batch within
-// tx, except ticks (append-on-change, see uniswapTickWriter), and returns the
-// count of state rows inserted.
-func (r *UniswapV3Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.UniswapV3BlockWrites) (stateRows int64, err error) {
+// tx, except ticks (append-on-change, see uniswapTickWriter), and returns both
+// the count of state rows the block queued and the count that actually
+// appended.
+func (r *UniswapV3Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.UniswapV3BlockWrites) (stateRows outbound.UniswapStateRowCounts, err error) {
 	states, err := convertStates(w.States)
 	if err != nil {
-		return 0, err
+		return outbound.UniswapStateRowCounts{}, err
 	}
 	swaps, err := convertSwapsV3(w.Swaps)
 	if err != nil {
-		return 0, err
+		return outbound.UniswapStateRowCounts{}, err
 	}
 	liqs, err := convertLiquidityEvents(w.LiquidityEvents)
 	if err != nil {
-		return 0, err
+		return outbound.UniswapStateRowCounts{}, err
 	}
 
 	batch := &pgx.Batch{}
@@ -360,9 +361,12 @@ func addressBytesOrNil(a *common.Address) []byte {
 }
 
 // sendUniswapV3Batch executes the queued batch and drains every result in
-// queue order, returning the count of state rows inserted. The batch reader
-// is always closed before returning so the caller may issue further queries
-// on tx (writeTicks runs after this).
+// queue order, returning both the number of state-row statements it drained
+// and the number of rows they appended. The two diverge on an idempotent
+// replay, where every INSERT conflicts away; counting the attempt here rather
+// than in the service means a repo-layer drop is counted as zero attempts too.
+// The batch reader is always closed before returning so the caller may issue
+// further queries on tx (writeTicks runs after this).
 func sendUniswapV3Batch(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -371,7 +375,7 @@ func sendUniswapV3Batch(
 	swaps []swapConvertedV3,
 	liqs []liquidityEventConverted,
 	poolEvents []*entity.UniswapV3PoolEvent,
-) (stateRows int64, err error) {
+) (stateRows outbound.UniswapStateRowCounts, err error) {
 	br := tx.SendBatch(ctx, batch)
 	defer func() {
 		if closeErr := br.Close(); closeErr != nil && err == nil {
@@ -384,7 +388,8 @@ func sendUniswapV3Batch(
 		if readErr != nil {
 			return stateRows, fmt.Errorf("batch state %d: %w", i, readErr)
 		}
-		stateRows += tag.RowsAffected()
+		stateRows.Attempted++
+		stateRows.Persisted += tag.RowsAffected()
 	}
 
 	for i := range swaps {

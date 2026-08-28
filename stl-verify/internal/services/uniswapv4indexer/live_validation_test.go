@@ -344,7 +344,7 @@ func summarisePool(p RegisteredPool, s *entity.UniswapV4PoolState) poolSnapshotS
 func persistStates(t *testing.T, ctx context.Context, txMgr outbound.TxManager, repo *postgres.UniswapV4Repository, states []*entity.UniswapV4PoolState) int64 {
 	t.Helper()
 
-	var stateRows int64
+	var stateRows outbound.UniswapStateRowCounts
 	err := txMgr.WithTransaction(ctx, func(tx pgx.Tx) error {
 		var txErr error
 		stateRows, txErr = repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{States: states})
@@ -353,10 +353,13 @@ func persistStates(t *testing.T, ctx context.Context, txMgr outbound.TxManager, 
 	if err != nil {
 		t.Fatalf("SaveBlock (state snapshot batch): %v", err)
 	}
-	if stateRows != int64(len(states)) {
-		t.Errorf("FINDING: SaveBlock persisted %d state rows, want %d", stateRows, len(states))
+	if stateRows.Attempted != int64(len(states)) {
+		t.Errorf("FINDING: SaveBlock queued %d state rows, want %d", stateRows.Attempted, len(states))
 	}
-	return stateRows
+	if stateRows.Persisted != int64(len(states)) {
+		t.Errorf("FINDING: SaveBlock persisted %d state rows, want %d", stateRows.Persisted, len(states))
+	}
+	return stateRows.Persisted
 }
 
 // -----------------------------------------------------------------------

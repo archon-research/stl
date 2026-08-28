@@ -37,8 +37,9 @@ import (
 type fakeUniswapRepo struct {
 	lastWrites     outbound.UniswapV3BlockWrites
 	saveBlockCalls int
-	// stateRowsReturn overrides SaveBlock's returned row count when non-nil. A
-	// pointer, not a plain int64, so a test can stage the idempotent
+	// stateRowsReturn overrides SaveBlock's PERSISTED row count when non-nil;
+	// the attempted count always follows the write set, as the real repository's
+	// does. A pointer, not a plain int64, so a test can stage the idempotent
 	// ON CONFLICT DO NOTHING replay — an explicit 0 — which a zero-valued int64
 	// could not express (it is indistinguishable from "unset").
 	stateRowsReturn *int64
@@ -67,16 +68,20 @@ func (r *fakeUniswapRepo) TicksForPoolAtBlock(_ context.Context, poolID int64, b
 	return r.priorTicks[key], nil
 }
 
-func (r *fakeUniswapRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.UniswapV3BlockWrites) (int64, error) {
+func (r *fakeUniswapRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.UniswapV3BlockWrites) (outbound.UniswapStateRowCounts, error) {
 	r.saveBlockCalls++
 	if r.err != nil {
-		return 0, r.err
+		return outbound.UniswapStateRowCounts{}, r.err
 	}
 	r.lastWrites = w
-	if r.stateRowsReturn != nil {
-		return *r.stateRowsReturn, nil
+	counts := outbound.UniswapStateRowCounts{
+		Attempted: int64(len(w.States)),
+		Persisted: int64(len(w.States)),
 	}
-	return int64(len(w.States)), nil
+	if r.stateRowsReturn != nil {
+		counts.Persisted = *r.stateRowsReturn
+	}
+	return counts, nil
 }
 
 // fakeEventRepo counts saved events via SaveBatch/SaveEvent, satisfying
@@ -1326,6 +1331,48 @@ func TestBlockHandler_RecordsPoolsTouchedOnZeroRowReplay(t *testing.T) {
 
 	// The other half of the invariant: state rows really did stay at zero, so
 	// this test is staging the alert's firing condition and not a healthy block.
+	if rows, ok := sumCounter(t, &rm, "uniswap_v3.state.rows.written"); ok {
+		t.Errorf("uniswap_v3.state.rows.written = %d, want the counter to be absent (0 rows inserted is a no-op)", rows)
+	}
+}
+
+// TestBlockHandler_RecordsStateRowsAttemptedOnZeroRowReplay pins the right side
+// of VectorUniswapV3IndexerNotWritingState. On a replay of an already-committed
+// range under one build_id the assign_processing_version trigger reuses the
+// existing processing_version, so every state INSERT lands on the identical PK,
+// hits ON CONFLICT DO NOTHING and appends nothing: state.rows.written stays
+// absent on a block that is perfectly healthy and has nothing to fix.
+// state.rows.attempted counts the state rows the block queued instead, so it
+// advances on that replay and keeps the alert silent — while still collapsing
+// to absent under every bug the alert exists for (DueSet going empty,
+// snapshotDueSet no-opping, buildBlockWrites dropping the states), none of
+// which queue anything.
+func TestBlockHandler_RecordsStateRowsAttemptedOnZeroRowReplay(t *testing.T) {
+	pool := uniswapTestPool()
+	svc, repo, reader := newTelemetryService(t, []RegisteredPool{pool})
+
+	var zero int64 // the replay: every state INSERT hit ON CONFLICT DO NOTHING
+	repo.stateRowsReturn = &zero
+
+	receipt := shared.TransactionReceipt{Logs: []shared.Log{swapLog(t, pool, "0x0")}}
+	if err := svc.BlockHandler()(context.Background(), blockEvent(200), []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	attempted, ok := sumCounter(t, &rm, "uniswap_v3.state.rows.attempted")
+	if !ok {
+		t.Fatal("uniswap_v3.state.rows.attempted absent: the not-writing-state rule's right side is empty on a benign replay, so it fires with nothing to fix")
+	}
+	if attempted != 1 {
+		t.Errorf("uniswap_v3.state.rows.attempted = %d, want 1 (the block queued one state row)", attempted)
+	}
+	// The other half: written really did stay at zero, so this stages the old
+	// rule's firing condition and not a healthy block.
 	if rows, ok := sumCounter(t, &rm, "uniswap_v3.state.rows.written"); ok {
 		t.Errorf("uniswap_v3.state.rows.written = %d, want the counter to be absent (0 rows inserted is a no-op)", rows)
 	}
