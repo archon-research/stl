@@ -1,7 +1,7 @@
+import type { TimeRange } from '@archon-research/design-system';
 import { describe, expect, it } from 'vitest';
 
 import type { PrimeRiskCapital } from '../../shared/types/allocation';
-import type { TimeRange } from '../../shared/ui';
 import { buildMetricCharts } from './metric-charts';
 import type { MetricChartInputs } from './metric-charts';
 import type { ChartDatum } from './metricCards';

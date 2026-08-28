@@ -1,4 +1,5 @@
 import type { ChartColorToken } from '@archon-research/charting';
+import type { TimeRange } from '@archon-research/design-system';
 
 import {
   ENCUMBRANCE_AT_RISK_THRESHOLD,
@@ -19,7 +20,6 @@ import type {
   PrimeDebtSnapshot,
   PrimeRiskCapital,
 } from '../../shared/types/allocation';
-import type { TimeRange } from '../../shared/ui';
 import type { ChartDatum, MetricChartSpec } from './metricCards';
 import type { PrimeChartSeries } from './usePrimeChartSeries';
 
