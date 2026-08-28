@@ -1248,6 +1248,10 @@
     "withdrawn_assets": {
       "type": "numeric",
       "class": "S"
+    },
+    "wallet_address": {
+      "type": "text",
+      "class": "S"
     }
   },
   "tables": {
