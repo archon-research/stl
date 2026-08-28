@@ -9,6 +9,7 @@
  * has whenever a chain is unindexed, which is what `prime_unserved_chains` is
  * for.
  */
+import { REFERENCE_SYNCED_AGO_MS, iso, mockNow } from '../clock.ts';
 import { positionKeys } from '../identity.ts';
 import { ownEntry } from '../lookup.ts';
 import type {
@@ -476,6 +477,7 @@ export function toCompositeRiskCapital(
     junior_risk_capital_usd: reference.junior_risk_capital_usd,
     senior_risk_capital_usd: reference.senior_risk_capital_usd,
     exposure_share: reference.exposure_share,
+    reference_synced_at: reference.reference_synced_at,
   };
 }
 
@@ -525,6 +527,7 @@ export function toReferenceRiskCapital(
     epi_utilization: '0.8712',
     spj_utilization: '0.6431',
     exposure_share: '0.9302',
+    reference_synced_at: iso(mockNow() - REFERENCE_SYNCED_AGO_MS),
   };
 }
 

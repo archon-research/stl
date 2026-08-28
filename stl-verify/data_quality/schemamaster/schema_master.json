@@ -296,6 +296,10 @@
       "type": "numeric",
       "class": "S"
     },
+    "crr": {
+      "type": "numeric",
+      "class": "S"
+    },
     "crr_el_pct": {
       "type": "numeric",
       "class": "D"
@@ -647,9 +651,17 @@
       "type": "text",
       "class": "S"
     },
+    "loan_token_address": {
+      "type": "text",
+      "class": "S"
+    },
     "loan_token_id": {
       "type": "int8",
       "class": "R"
+    },
+    "loan_token_symbol": {
+      "type": "text",
+      "class": "S"
     },
     "loan_type": {
       "type": "text",
@@ -746,6 +758,10 @@
       "class": "S"
     },
     "name": {
+      "type": "text",
+      "class": "S"
+    },
+    "network": {
       "type": "text",
       "class": "S"
     },
@@ -889,6 +905,10 @@
     "protocol_id": {
       "type": "int8",
       "class": "R"
+    },
+    "protocol_name": {
+      "type": "text",
+      "class": "S"
     },
     "protocol_type": {
       "type": "text",
@@ -1052,9 +1072,21 @@
       "type": "bytea",
       "class": "S"
     },
+    "token_address": {
+      "type": "text",
+      "class": "S"
+    },
     "token_id": {
       "type": "int8",
       "class": "R"
+    },
+    "token_name": {
+      "type": "text",
+      "class": "S"
+    },
+    "token_symbol": {
+      "type": "text",
+      "class": "S"
     },
     "tokenized_junior_risk_capital_usd": {
       "type": "numeric",
@@ -1419,6 +1451,11 @@
       "owner": "prime",
       "transform_defer": "native PK (prime_id, synced_at); transform deferred pending the reference-data rollout"
     },
+    "prime_capital_stack_allocation": {
+      "type": "raw_pipeline",
+      "owner": "prime",
+      "transform_defer": "native PK (prime_id, synced_at, network, token_address); transform deferred pending the reference-data rollout"
+    },
     "prime_debt": {
       "type": "raw_pipeline",
       "owner": "prime",
@@ -1432,6 +1469,11 @@
       "type": "raw_pipeline",
       "owner": "prime",
       "transform_defer": "native PK (prime_id, observed_at); transform deferred pending the reference-data rollout"
+    },
+    "prime_reference_position": {
+      "type": "raw_pipeline",
+      "owner": "prime",
+      "transform_defer": "native PK (prime_id, synced_at, network, token_address); transform deferred pending the reference-data rollout"
     },
     "protocol": {
       "type": "dimension",
@@ -1652,6 +1694,18 @@
     },
     {
       "table": "prime_capital_stack",
+      "column": "synced_at",
+      "canonical": "snapshot_time",
+      "action": "rename"
+    },
+    {
+      "table": "prime_capital_stack_allocation",
+      "column": "synced_at",
+      "canonical": "snapshot_time",
+      "action": "rename"
+    },
+    {
+      "table": "prime_reference_position",
       "column": "synced_at",
       "canonical": "snapshot_time",
       "action": "rename"
@@ -2045,8 +2099,10 @@
         "offchain_token_price",
         "onchain_token_price",
         "prime_capital_stack",
+        "prime_capital_stack_allocation",
         "prime_debt",
         "prime_reference_balance_sheet",
+        "prime_reference_position",
         "psm3_alm_shares",
         "psm3_reserves",
         "token_total_supply"
