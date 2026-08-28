@@ -22,10 +22,11 @@ prices is going stale.
 The morpho rule keys on `status="success"`, not on the total (VEC-218). The
 morpho queue is FIFO: a block that fails blocks its message group, and every SQS
 redelivery of that one poison message keeps `morpho_blocks_processed_total`
-advancing with `status="error"` while nothing is persisted. At
-visibility-timeout cadence that redelivery rate also stays under
-`VectorMorphoIndexerErrorsHigh`'s 0.1/s, so a total-based rule could let the
-whole chain's Morpho data freeze silently. Keying on successes closes that.
+advancing with `status="error"` while nothing is persisted. One message
+redelivered per 180s visibility timeout is ~0.006 blocks/s, under
+`VectorMorphoIndexerErrorRatioHigh`'s 0.02 minimum-volume guard, so a
+total-based rule could let the whole chain's Morpho data freeze silently.
+Keying on successes closes that.
 Consequence when it fires: **an all-error loop looks identical to a dead
 consumer here** — check the logs before assuming the pod is wedged.
 
@@ -72,21 +73,82 @@ and `DeploymentReplicasMismatch` rules rather than by anything in this file; see
 
 ---
 
-## VectorMorphoIndexerErrorsHigh / VectorOracleIndexerErrorsHigh
+## VectorMorphoIndexerErrorRatioHigh / VectorOracleIndexerErrorRatioHigh
 
 **Severity:** warning · **For:** 15m
 
 ### What it means
 
-The labelled indexer is logging more than 0.1 errors/sec sustained for
-15 minutes. Investigate before it escalates to a full stall.
+More than 50% of the labelled indexer's block-processing attempts have failed
+over a 10m window, sustained for 15 minutes, while the worker is still
+consuming at least ~1 block/50s. Investigate before it escalates to a full
+stall.
+
+It is a **ratio**, not an absolute error rate, because both counters increment
+at most once per consumed block and are 1:1 with
+`<prefix>_blocks_processed_total{status="error"}` — over 30 days of prod,
+`morpho_errors_total` and `morpho_blocks_processed_total{status="error"}` both
+increased by exactly 17.00, and the oracle pair matched to within `increase()`'s
+extrapolation on all three chains (33.00 avalanche-c, 4.00 mainnet, 0 base). An
+absolute rate is therefore capped by the chain's block cadence, and the old
+`> 0.1 errors/s` threshold meant something different on every chain:
+unreachable on mainnet at any failure fraction (14d p99 of the block rate is
+0.0838/s), ~20% of blocks on base (0.5009/s), ~10% on avalanche-c (0.9607/s).
+Neither rule fired in 30 days. The ratio is cadence-independent; the
+`total-rate > 0.02` guard keeps a near-stalled chain from firing on a thin
+denominator, and prod has never sat between 0 and 0.02 while alive on any of
+these chains (one sample in 14 days for morpho).
+
+Total failure is covered by `VectorMorphoIndexerStalled` instead, which keys on
+the success rate reaching zero. `VectorOracleIndexerStalled` does **not** — it
+keys on the bare total, so an all-error oracle loop keeps it silent and this
+ratio rule is the only signal that sees it. What this rule adds for morpho is
+the partial middle ground; for the oracle it is also the total-failure signal.
+
+`morpho_errors_total` / `oracle_errors_total` stay exported, and they are where
+you look for the breakdown — each error carries an `operation` attribute.
+
+Three residuals slip through this rule. Two are deliberate:
+
+- A *single* poison-pill block wedging a redelivery batch holds the ratio at
+  1/batch-size. The DLQ redrive policy bounds that, not an alert.
+- Morpho's `reconcilePendingSymbols` sweep is best-effort and swallows its
+  errors, so a failing sweep moves `morpho_errors_total` (up to one per token,
+  500 per sweep) without failing a block. It has never emitted a datapoint in
+  prod; if it starts to, the fix is a rule on `morpho_token_symbol_missing`,
+  not a re-widened whole-worker error rate.
+
+The third is an open hole, stated rather than hidden:
+
+- **Oracle only.** Because `VectorOracleIndexerStalled` keys on the bare total,
+  a *slow* all-error redelivery loop — one message per 180s visibility timeout,
+  ~0.006 blocks/s — sits under this rule's `total > 0.02` guard while keeping
+  that total nonzero. Neither rule fires and the chain's prices freeze silently.
+  Morpho is not exposed, because its Stalled rule is both success-keyed *and*
+  zero-filled. Curve and uniswap-v3 turn out to be exposed as well, for a
+  different reason — they key on `status="success"` but carry no zero-fill, so
+  under an all-error loop the success series never exists and `== 0` matches
+  nothing. Both gaps are pre-existing and untouched here; the fix is to give
+  `VectorOracleIndexerStalled` a `status="success"` key and all three the
+  `or (total … * 0)` fill morpho already has, which is a change to critical
+  paging rules and belongs in its own PR.
 
 ### First checks
 
-- Inspect recent logs for the dominant error class.
-- Correlate with recent deploys (`kubectl rollout history`).
-- Check for chain reorgs in the watcher logs — indexers may need to roll
-  back state.
+1. **Dominant error class** —
+   `sum by (operation)(rate(morpho_errors_total[10m]))` (or `oracle_errors_total`)
+   to see which operation is failing most.
+2. Inspect recent logs for that error class.
+3. Correlate with recent deploys (`kubectl rollout history`).
+4. Check for chain reorgs in the watcher logs — indexers may need to roll
+   back state.
+
+### Verify recovery
+
+`sum by (chain)(rate(morpho_blocks_processed_total{status="error"}[10m])) /
+sum by (chain)(rate(morpho_blocks_processed_total[10m])) < 0.5` for the affected
+chain (substitute `oracle_` for the oracle worker), with the success rate above
+zero.
 
 ---
 
@@ -118,7 +180,7 @@ The oracle-price-worker on the labelled `chain` is still consuming blocks,
 but the single oracle unit `oracle_name` has not completed a successful
 processing pass for over 30 minutes. Prices for that unit's tokens in
 TimescaleDB are going stale while every whole-worker signal (Stalled,
-ErrorsHigh) can look healthy.
+ErrorRatioHigh) can look healthy.
 
 The gauge `oracle_unit_last_success_timestamp_seconds` advances after every
 successful per-unit pass **whether or not any row was written** (writes are
@@ -974,15 +1036,43 @@ or liquidity events are being recorded.
 
 ---
 
-## VectorCurveIndexerErrorsHigh
+## VectorCurveIndexerErrorRatioHigh
 
 **Severity:** warning · **For:** 15m
 
 ### What it means
 
-`curve_errors_total` is above 0.1 errors/sec sustained for 15 minutes. Errors
-are counted per operation (attribute `operation`); the indexer continues
-processing but errors at this rate often precede a full stall.
+More than 50% of block-processing attempts have failed over a 10m window,
+sustained for 15 minutes, while the worker is still consuming at least
+~1 block/50s. The indexer continues processing, but a majority-failure ratio
+usually precedes a full stall.
+
+It is a **ratio**, not an absolute error rate, because `curve_errors_total`
+increments at most once per SQS message and is 1:1 with
+`curve_blocks_processed_total{status="error"}` — every `RecordError` site is
+either in the shared `dexconsumer` block processor or at the `BlockHandler`
+boundary it calls, each returning immediately, so one failed attempt produces
+exactly one error and one `status="error"` sample. Curve runs mainnet-only at a
+14d p99 of 0.0838 blocks/s, so the old `> 0.1 errors/s` threshold needed more
+than 98% of blocks to fail even at the 30d peak rate; it never fired, and
+`curve_errors_total` has produced no series at all in 30 days. The ratio is
+cadence-independent, and the `total-rate > 0.02` guard keeps a near-stalled
+chain from firing on a thin denominator.
+
+Total failure is covered by
+[`VectorCurveIndexerStalled`](#vectorcurveindexerstalled) instead, which keys on
+the success rate reaching zero. One caveat: that rule carries no zero-fill, so a pod
+that restarts *straight into* an all-error loop never creates a
+`status="success"` series and `== 0` matches nothing — in that case this
+ratio rule is the only signal. What this rule adds is the partial middle ground.
+
+`curve_errors_total` is still exported, and it is where you look for the
+breakdown: errors carry an `operation` attribute (`fetchReceipts`,
+`unmarshalReceipts`, or `blockHandler`).
+
+One case slips through both, deliberately: a *single* poison-pill block wedging
+a redelivery batch holds the ratio at 1/batch-size. The DLQ redrive policy
+bounds that, not an alert.
 
 ### First checks
 
@@ -1003,7 +1093,9 @@ processing but errors at this rate often precede a full stall.
 
 ### Verify recovery
 
-`rate(curve_errors_total[10m]) == 0` for the affected chain.
+`sum by (chain)(rate(curve_blocks_processed_total{status="error"}[10m])) /
+sum by (chain)(rate(curve_blocks_processed_total[10m])) < 0.5` for the affected
+chain, with `rate(curve_blocks_processed_total{status="success"}[10m]) > 0`.
 
 ---
 
@@ -1050,21 +1142,38 @@ The 30m rate window must remain above the configured sweep interval (default 50 
 ### What it means
 
 Blocks are advancing (`curve_blocks_processed_total{status="success"}` is
-non-zero) but no pool-state snapshot rows have been written
-(`curve_state_rows_written_total` is zero) for 30 minutes. The error path will
-NOT catch this: a quietly-empty snapshot loop (e.g. `buildSnapshotSet` always
-returns empty, sweep disabled and no touched pools, or all pools skipped)
-produces no errors, just no state rows.
+non-zero) but the worker queued no pool-state snapshot rows
+(`curve_state_rows_attempted_total` is zero or absent) for 30 minutes. The error
+path will NOT catch this: a quietly-empty snapshot loop (e.g. `buildSnapshotSet`
+always returns empty, sweep disabled and no touched pools, or all pools skipped)
+produces no errors, just nothing to insert.
+
+The rule keys on *attempted*, not on `curve_state_rows_written_total`, and the
+two differ on an idempotent replay: re-processing an already-committed range
+under one `build_id` makes the `assign_processing_version` trigger reuse the
+existing `processing_version`, so every INSERT lands on the identical primary key
+`(curve_pool_id, block_timestamp, block_number, block_version, processing_version)`,
+hits `ON CONFLICT DO NOTHING` and appends nothing. That is a healthy worker with
+nothing to fix, and it can no longer fire this alert. A conflict under that key
+means the identical row is already in the table, so zero *written* is provably
+not a data hole; zero *attempted* is a different claim entirely — the rows were
+never produced at all. This mattered more here than for the uniswap pair, whose
+gate is touched pools: curve's left side is blocks processed, which advances
+every ~12s, so any replay window over 30m used to fire it.
+
+`curve_state_rows_written_total` is still exported, as volume observability
+("how many rows did this worker actually add"). It is simply not the health
+signal.
 
 This is the data-quality / silent-empty check that `VectorCurveIndexerStalled`
 cannot see.
 
 Gating on blocks processed is sound for curve because the periodic sweep
 (`SWEEP_BLOCKS`) re-snapshots every pool on a fixed block cadence, so a healthy
-worker writes state rows even through a totally quiet market. The rule uses
-`unless`, not `and … == 0`, so it also fires when `curve_state_rows_written_total`
-is **absent** — a deploy that has never once written a state row is exactly the
-case the old `and` form went blind on.
+worker queues state rows even through a totally quiet market. The rule uses
+`unless`, not `and … == 0`, so it also fires when
+`curve_state_rows_attempted_total` is **absent** — a deploy that has never once
+queued a state row is exactly the case the old `and` form went blind on.
 
 ### First checks
 
@@ -1085,7 +1194,7 @@ case the old `and` form went blind on.
    `buildSnapshotSet` can never produce entries. Confirm the DB has rows in
    `curve_pool`.
 4. **snapshotSet size metric** is not separately emitted; use
-   `curve_state_rows_written_total` as the proxy. A sudden drop to zero after
+   `curve_state_rows_attempted_total` as the proxy. A sudden drop to zero after
    previously non-zero is more urgent than a fresh deploy with no history.
 
 ### Common causes
@@ -1096,19 +1205,21 @@ case the old `and` form went blind on.
   `SELECT count(*) FROM curve_pool WHERE chain_id = <id>`.
 - Contract address mismatch (new pool deployed at different address) -> update
   the pool registry.
-- Sustained SQS replay / redrive, or a backfill re-run over an already-indexed
-  range under one `build_id`: every message is a block already persisted at this
-  build (same `build_id`, same `block_version`), so each state INSERT hits
-  ON CONFLICT DO NOTHING (0 rows) and `curve_state_rows_written_total` does not
-  advance even though processing succeeds. A redeploy (new `build_id`) or reorg
-  (new `block_version`) inserts fresh rows and clears the alert. Check the queue
-  for a redrive, and check whether a backfill is re-processing an already-indexed
-  range, before assuming a logic stall.
+- **Not** an idempotent replay of an already-indexed range under one `build_id`,
+  whether from an SQS replay or a backfill re-run. The rows still get queued, so
+  `state_rows_attempted` keeps advancing and the rule stays silent; only
+  `state_rows_written` goes flat. If you are here because *written* is flat, that
+  is expected during a replay and needs no action. Redrive is the one variant
+  that cannot cause even that: a redriven message never committed, so it writes
+  rows.
 
 ### Verify recovery
 
-`rate(curve_state_rows_written_total[30m]) > 0` for the affected chain, or
-confirm on-chain that no Curve activity occurred (legitimate quiet window).
+`rate(curve_state_rows_attempted_total[30m]) > 0` for the affected chain — the
+same series the rule keys on. `rate(curve_state_rows_written_total[30m])` is the
+volume check alongside it, and legitimately stays at zero while the worker is
+replaying an already-indexed range. Failing both, confirm on-chain that no Curve
+activity occurred (legitimate quiet window).
 
 ---
 
@@ -1163,17 +1274,44 @@ affected chain.
 
 ---
 
-## VectorUniswapV3IndexerErrorsHigh
+## VectorUniswapV3IndexerErrorRatioHigh
 
 **Severity:** warning · **For:** 15m
 
 ### What it means
 
-`uniswap_v3_errors_total` is above 0.1 errors/sec sustained for 15 minutes.
-Errors are counted per operation (attribute `operation`, currently
-`blockHandler` — recorded once at the `BlockHandler` boundary on any non-nil
-error); the indexer continues processing but errors at this rate often
-precede a full stall.
+More than 50% of block-processing attempts have failed over a 10m window,
+sustained for 15 minutes, while the worker is still consuming at least
+~1 block/50s. The indexer continues processing, but a majority-failure ratio
+usually precedes a full stall.
+
+It is a **ratio**, not an absolute error rate, because `uniswap_v3_errors_total`
+increments at most once per SQS message and is 1:1 with
+`uniswap_v3_blocks_processed_total{status="error"}` — this worker runs the same
+shared `dexconsumer` block-processing path as curve, so one failed attempt
+produces exactly one error and one `status="error"` sample. It runs mainnet-only
+at a 14d p99 of 0.0838 blocks/s, so the old `> 0.1 errors/s` threshold needed
+more than 98% of blocks to fail even at the 30d peak rate; it never fired, and
+`uniswap_v3_errors_total` has produced no series at all in 30 days. The ratio is
+cadence-independent, and the `total-rate > 0.02` guard keeps a near-stalled
+chain from firing on a thin denominator.
+
+Total failure is covered by
+[`VectorUniswapV3IndexerStalled`](#vectoruniswapv3indexerstalled) instead, which
+keys on the success rate reaching zero. One caveat: that rule carries no zero-fill, so a pod
+that restarts *straight into* an all-error loop never creates a
+`status="success"` series and `== 0` matches nothing — in that case this
+ratio rule is the only signal. What this rule adds is the partial
+middle ground.
+
+`uniswap_v3_errors_total` is still exported, and it is where you look for the
+breakdown: errors carry an `operation` attribute — `fetchReceipts` /
+`unmarshalReceipts` from the shared block processor, or `blockHandler`, recorded
+once at the `BlockHandler` boundary on any non-nil error out of the V3 handler.
+
+One case slips through both, deliberately: a *single* poison-pill block wedging
+a redelivery batch holds the ratio at 1/batch-size. The DLQ redrive policy
+bounds that, not an alert.
 
 ### First checks
 
@@ -1196,7 +1334,10 @@ precede a full stall.
 
 ### Verify recovery
 
-`rate(uniswap_v3_errors_total[10m]) == 0` for the affected chain.
+`sum by (chain)(rate(uniswap_v3_blocks_processed_total{status="error"}[10m])) /
+sum by (chain)(rate(uniswap_v3_blocks_processed_total[10m])) < 0.5` for the
+affected chain, with
+`rate(uniswap_v3_blocks_processed_total{status="success"}[10m]) > 0`.
 
 ---
 
@@ -1341,6 +1482,16 @@ The 6h rate window is the one that absorbs a quiet market. It is deliberately
 much wider than the 30m used elsewhere in this group: 30m stretches with zero
 touched pools are normal for this registry and are precisely what made the old
 `NotWritingState` gate a false positive.
+
+The left side carries a second clause,
+`rate(uniswap_v3_blocks_processed_total{status="success"}[6h] offset 6h) > 0`,
+and that is what makes the 6h window real on a **fresh deploy**. Metrics export
+every 15s, so `rate(...[6h])` is already non-zero ~30s after boot while
+`pools_touched` is still absent; without the offset clause `for: 10m` matured at
+about T0+10m30s, and 14.7% of evaluation points over 14d had no touch in the
+trailing 11 minutes — roughly one deploy in seven paged for nothing. The offset
+window is `[t-12h, t-6h]` and needs only two samples in it, so the clause costs
+~10 minutes of detection latency, not 6 hours.
 
 ### What it means
 
@@ -1657,7 +1808,7 @@ things. This is not the odd one out either: it is one of the group's two
 kube-state-keyed rules, and
 [`VectorUniswapV4IndexerDown`](#vectoruniswapv4indexerdown) is built the same way
 (`max by (cluster)` plus a static `chain: mainnet`). The five metric-keyed rules
-in the group — ErrorsHigh, BlockLatencyHigh, NotWritingState, NoPoolsTouched,
+in the group — ErrorRatioHigh, BlockLatencyHigh, NotWritingState, NoPoolsTouched,
 PoolNeverIndexed — derive `chain` from the series instead. A second chain gets
 its own copy of this pair, with its own deployment name and its own static
 chain.
@@ -1690,7 +1841,7 @@ chain.
   flowing; restart the pod or fix the collector.
 - StateView reads failing hard (`AllowFailure=false` everywhere, by design) ->
   every block errors out and nothing commits; see
-  `VectorUniswapV4IndexerErrorsHigh`.
+  `VectorUniswapV4IndexerErrorRatioHigh`.
 - DB connection pool saturated -> restart the pod; longer-term raise the pool
   limit.
 - SQS consumer lost connection -> pod restart reconnects.
@@ -1709,14 +1860,27 @@ reach zero.
 
 ---
 
-## VectorUniswapV4IndexerErrorsHigh
+## VectorUniswapV4IndexerErrorRatioHigh
 
 **Severity:** warning · **For:** 15m
 
 ### What it means
 
-`uniswap_v4_errors_total` is above 0.1 errors/sec sustained for 15 minutes.
-Errors carry an `operation` attribute with one of three values:
+More than 50% of block-processing attempts have failed over a 10m window,
+sustained for 15 minutes, while the worker is still consuming at least
+~1 block/50s.
+
+It is a **ratio**, not an absolute error rate, because
+`uniswap_v4_errors_total` increments at most once per SQS message and is 1:1
+with `uniswap_v4_blocks_processed_total{status="error"}`. At mainnet cadence a
+worker failing *every* block emits only ~0.083 errors/s, so the old
+`> 0.1 errors/s` threshold was unreachable — it could not fire even on total
+failure, and it never did. The ratio is cadence-independent, and the
+`total-rate > 0.02` guard keeps a near-stalled chain from firing on a thin
+denominator.
+
+`uniswap_v4_errors_total` is still exported, and it is where you look for the
+breakdown: errors carry an `operation` attribute with one of three values:
 
 - `fetchReceipts` — the shared `dexconsumer` block processor could not read the
   block's receipts from the cache/S3 payload (upstream, before any V4 code runs).
@@ -1725,8 +1889,16 @@ Errors carry an `operation` attribute with one of three values:
   error out of the V4 handler itself: event decode, `DueSet`, the StateView
   snapshot reads, or persistence.
 
-The indexer continues processing, but errors at this rate often precede a full
-stall.
+The indexer continues processing, but a majority-failure ratio usually precedes
+a full stall — total failure is covered by
+[`VectorUniswapV4IndexerStalled`](#vectoruniswapv4indexerstalled) instead, since
+that keys on the success rate reaching zero. What this rule adds is the partial
+middle ground: a bad `deploy_block` making `DueSet` hard-error on most (not all)
+blocks leaves the success rate above zero and pages nowhere else.
+
+One case slips through both, deliberately: a *single* poison-pill block wedging a
+10-message batch holds the ratio near 0.1. The DLQ redrive policy bounds that,
+not an alert.
 
 ### First checks
 
@@ -1833,7 +2005,15 @@ whole fix — restart the worker so `LoadPools` re-reads the registry.
 
 ### Verify recovery
 
-`rate(uniswap_v4_errors_total[10m]) == 0` for the affected chain.
+The rule's own expression back below its threshold for the affected chain:
+
+```promql
+sum by (chain, cluster) (rate(uniswap_v4_blocks_processed_total{status="error", k8s_namespace_name="vector"}[10m]))
+/
+sum by (chain, cluster) (rate(uniswap_v4_blocks_processed_total{k8s_namespace_name="vector"}[10m]))
+```
+
+`rate(uniswap_v4_errors_total[10m]) == 0` is the stricter check alongside it.
 
 ---
 
@@ -1965,7 +2145,7 @@ cannot see.
    processed cannot cause this alert. `DueSet` hard-errors on that pool
    (`... touched at block B but registry deploy block is D: registry bug`), the
    block fails, and the symptom is
-   [`VectorUniswapV4IndexerErrorsHigh`](#vectoruniswapv4indexererrorshigh) or
+   [`VectorUniswapV4IndexerErrorRatioHigh`](#vectoruniswapv4indexererrorratiohigh) or
    [`VectorUniswapV4IndexerStalled`](#vectoruniswapv4indexerstalled). Rule it
    out there, not here.
 3. **Latest state rows** — confirm directly whether anything is landing:
@@ -2028,6 +2208,17 @@ chosen for liquidity *depth*, not for swap frequency, and their quiet-period
 length has never been measured — 6h is margin against that unknown, not a
 measurement. If a chain's registry turns out to be quieter still, widen the
 window for that chain rather than silencing the alert.
+
+The left side carries a second clause,
+`rate(uniswap_v4_blocks_processed_total{status="success"}[6h] offset 6h) > 0`,
+and that is what makes the 6h window real on a **fresh deploy**. Metrics export
+every 15s, so `rate(...[6h])` is already non-zero ~30s after boot while
+`pools_touched` is still absent; without the offset clause `for: 10m` matured at
+about T0+10m30s. On V3's larger registry 14.7% of evaluation points over 14d had
+no touch in the trailing 11 minutes — roughly one deploy in seven would page for
+nothing, and V4's curated registry is quieter still. The offset window is
+`[t-12h, t-6h]` and needs only two samples in it, so the clause costs ~10 minutes
+of detection latency, not 6 hours.
 
 ### What it means
 
@@ -3009,7 +3200,8 @@ labelled `chain`, but **zero** structured snapshots were committed
 (`morpho_v2_snapshots_written_total` is zero or absent). The events are landing in
 `protocol_event` as audit rows while `morpho_adapter_state` / `morpho_vault_cap` /
 `morpho_vault_fee` quietly stop filling, and **no error is raised** — this is the
-silent-data-hole guard that neither the Stalled nor the ErrorsHigh rule can see.
+silent-data-hole guard that neither the Stalled nor the ErrorRatioHigh rule can
+see.
 
 The classic mechanism is dispatch drift: `processMetaMorphoLog`'s `switch` ends in
 `default: return nil`, so an event whose typed handler is removed or whose case

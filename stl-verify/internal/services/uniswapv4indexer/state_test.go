@@ -1,17 +1,63 @@
 package uniswapv4indexer
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"fmt"
 	"math/big"
 	"strings"
 	"testing"
 
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
+)
+
+// The recorded StateView reads below all come from this pool at this block, so
+// a reader can re-fetch and re-verify any of them:
+//
+//	cast call 0x7fFE42C4a5DEeA5b0feC41C94C136Cf115597227 "getSlot0(bytes32)" \
+//	  0x1d5b2949ece8754c2d736991c62c5162bd144f497b2212182401b9bae77e2d76 \
+//	  -r https://eth.drpc.org -b 23200000
+const (
+	fixtureBlock     = 23200000
+	fixtureBlockHash = "0xd6b7f6f0a976ff4ad7d28dfb50b5dd3cda99a5c41c73fe55e297edbeeb1953e5"
+)
+
+// Verbatim StateView return payloads: real contract bytes, not a round-trip
+// through a copy of state.go's own ABI, so a wrong belief about the return
+// layout cannot hide in the code and the fixture at once.
+const (
+	mainnetSlot0Return = "0000000000000000000000000000000000000000e8f3c82a9548345da47b990b" +
+		"fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff8a1" +
+		"0000000000000000000000000000000000000000000000000000000000000000" +
+		"0000000000000000000000000000000000000000000000000000000000000064"
+	mainnetLiquidityReturn        = "0000000000000000000000000000000000000000000001c7d9b92e2754e66d8f"
+	mainnetFeeGrowthGlobalsReturn = "00000000000000000000000000000000001473b86de01b2c78943b25510f85a1" +
+		"0000000000000000000000000000000000110126c6876960202ee205d7f0e477"
+)
+
+// Decoded from the words above by hand and corroborated against the
+// PoolManager's raw storage for this pool, where v4-core's Pool.State puts
+// slot0 at +0, feeGrowthGlobal0X128 at +1, feeGrowthGlobal1X128 at +2 and
+// liquidity at +3.
+const (
+	mainnetSqrtPriceX96         = "72095236511535141145217308939"
+	mainnetTick                 = -1887
+	mainnetProtocolFee          = 0
+	mainnetLpFee                = 100
+	mainnetLiquidity            = "8408957175061230808463"
+	mainnetFeeGrowthGlobal0X128 = "106193026261812897668181834909844897"
+	mainnetFeeGrowthGlobal1X128 = "88292401116605815361741247342503031"
+)
+
+// Selectors the recorded calls were actually made with.
+const (
+	getSlot0Selector            = "c815641c"
+	getLiquiditySelector        = "fa6793d5"
+	getFeeGrowthGlobalsSelector = "9ec538c8"
 )
 
 // stateTestPool is the fixture RegisteredPool for state-snapshot tests.
@@ -19,29 +65,36 @@ func stateTestPool() RegisteredPool {
 	return decodeTestPool(7, ethWstethPoolID)
 }
 
-// stateViewTestABI independently parses the StateView methods, so tests can
-// pack returns and unpack calldata without depending on state.go's own
-// (possibly buggy) ABI.
-func stateViewTestABI(t *testing.T) *abi.ABI {
-	t.Helper()
-	const j = `[
-		{"name":"getSlot0","type":"function","stateMutability":"view","inputs":[{"name":"poolId","type":"bytes32"}],"outputs":[
-			{"name":"sqrtPriceX96","type":"uint160"},
-			{"name":"tick","type":"int24"},
-			{"name":"protocolFee","type":"uint24"},
-			{"name":"lpFee","type":"uint24"}
-		]},
-		{"name":"getLiquidity","type":"function","stateMutability":"view","inputs":[{"name":"poolId","type":"bytes32"}],"outputs":[{"name":"liquidity","type":"uint128"}]},
-		{"name":"getFeeGrowthGlobals","type":"function","stateMutability":"view","inputs":[{"name":"poolId","type":"bytes32"}],"outputs":[
-			{"name":"feeGrowthGlobal0","type":"uint256"},
-			{"name":"feeGrowthGlobal1","type":"uint256"}
-		]}
-	]`
-	a, err := abi.JSON(strings.NewReader(j))
-	if err != nil {
-		t.Fatalf("parsing StateView test ABI: %v", err)
+func mustBigInt(s string) *big.Int {
+	v, ok := new(big.Int).SetString(s, 10)
+	if !ok {
+		panic("bad big.Int literal: " + s)
 	}
-	return &a
+	return v
+}
+
+func hexBytes(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		t.Fatalf("decoding fixture hex %q: %v", s, err)
+	}
+	return b
+}
+
+// abiWords renders values as consecutive 32-byte return words, two's
+// complement for negatives. This is the raw wire shape, so the synthetic
+// fixtures below stay independent of any ABI definition.
+func abiWords(values ...*big.Int) []byte {
+	out := make([]byte, 0, 32*len(values))
+	for _, v := range values {
+		w := new(big.Int).Set(v)
+		if w.Sign() < 0 {
+			w.Add(w, new(big.Int).Lsh(big.NewInt(1), 256))
+		}
+		out = append(out, common.LeftPadBytes(w.Bytes(), 32)...)
+	}
+	return out
 }
 
 // stateFixture holds every value SnapshotState reads, with sane defaults for
@@ -61,47 +114,35 @@ type stateFixture struct {
 
 func defaultStateFixture() stateFixture {
 	return stateFixture{
-		sqrtPriceX96:     mustBigInt("9046142643671156900152450452733"),
-		tick:             big.NewInt(94759),
-		protocolFee:      big.NewInt(0),
-		lpFee:            big.NewInt(100),
-		liquidity:        mustBigInt("3647259153468706670918"),
-		feeGrowthGlobal0: big.NewInt(111),
-		feeGrowthGlobal1: big.NewInt(222),
+		sqrtPriceX96:     mustBigInt(mainnetSqrtPriceX96),
+		tick:             big.NewInt(mainnetTick),
+		protocolFee:      big.NewInt(mainnetProtocolFee),
+		lpFee:            big.NewInt(mainnetLpFee),
+		liquidity:        mustBigInt(mainnetLiquidity),
+		feeGrowthGlobal0: mustBigInt(mainnetFeeGrowthGlobal0X128),
+		feeGrowthGlobal1: mustBigInt(mainnetFeeGrowthGlobal1X128),
 	}
-}
-
-func mustBigInt(s string) *big.Int {
-	v, ok := new(big.Int).SetString(s, 10)
-	if !ok {
-		panic("bad big.Int literal: " + s)
-	}
-	return v
 }
 
 // buildStateResults returns the three outbound.Results in SnapshotState's call
 // order (getSlot0, getLiquidity, getFeeGrowthGlobals).
 func buildStateResults(t *testing.T, f stateFixture) []outbound.Result {
 	t.Helper()
-	a := stateViewTestABI(t)
-
-	slot0, err := a.Methods["getSlot0"].Outputs.Pack(f.sqrtPriceX96, f.tick, f.protocolFee, f.lpFee)
-	if err != nil {
-		t.Fatalf("packing getSlot0 return: %v", err)
-	}
-	liquidity, err := a.Methods["getLiquidity"].Outputs.Pack(f.liquidity)
-	if err != nil {
-		t.Fatalf("packing getLiquidity return: %v", err)
-	}
-	feeGrowths, err := a.Methods["getFeeGrowthGlobals"].Outputs.Pack(f.feeGrowthGlobal0, f.feeGrowthGlobal1)
-	if err != nil {
-		t.Fatalf("packing getFeeGrowthGlobals return: %v", err)
-	}
-
 	return []outbound.Result{
-		{Success: !f.slot0Reverts, ReturnData: slot0},
-		{Success: !f.liquidityReverts, ReturnData: liquidity},
-		{Success: !f.feeGrowthsReverts, ReturnData: feeGrowths},
+		{Success: !f.slot0Reverts, ReturnData: abiWords(f.sqrtPriceX96, f.tick, f.protocolFee, f.lpFee)},
+		{Success: !f.liquidityReverts, ReturnData: abiWords(f.liquidity)},
+		{Success: !f.feeGrowthsReverts, ReturnData: abiWords(f.feeGrowthGlobal0, f.feeGrowthGlobal1)},
+	}
+}
+
+// recordedStateResults feeds the mainnet payloads through untouched, so the
+// decode path sees exactly the bytes StateView returned.
+func recordedStateResults(t *testing.T) []outbound.Result {
+	t.Helper()
+	return []outbound.Result{
+		{Success: true, ReturnData: hexBytes(t, mainnetSlot0Return)},
+		{Success: true, ReturnData: hexBytes(t, mainnetLiquidityReturn)},
+		{Success: true, ReturnData: hexBytes(t, mainnetFeeGrowthGlobalsReturn)},
 	}
 }
 
@@ -130,54 +171,72 @@ func snapshotWith(t *testing.T, pool RegisteredPool, f stateFixture) (*testutil.
 	return mc, gotHash, gotCalls, err
 }
 
-func TestSnapshotState_MapsCoreFields(t *testing.T) {
+// TestSnapshotState_DecodesRecordedMainnetReturns is the independent oracle for
+// the whole pool-state decode: verbatim StateView bytes in, hand-decoded
+// expectations out. Every field is a distinct value, so any transposition of
+// the return layout shows up as a named mismatch.
+func TestSnapshotState_DecodesRecordedMainnetReturns(t *testing.T) {
 	pool := stateTestPool()
-	blockHash := common.HexToHash("0xabc1")
-	f := defaultStateFixture()
+	blockHash := common.HexToHash(fixtureBlockHash)
 	var gotHash common.Hash
 	var gotCalls []outbound.Call
-	mc := mockMulticallerReturning(buildStateResults(t, f), &gotHash, &gotCalls)
+	mc := mockMulticallerReturning(recordedStateResults(t), &gotHash, &gotCalls)
 
-	got, err := SnapshotState(context.Background(), mc, pool, blockHash, blockNumber, 2, blockTS)
+	got, err := SnapshotState(context.Background(), mc, pool, blockHash, fixtureBlock, 2, blockTS)
 	if err != nil {
 		t.Fatalf("SnapshotState: %v", err)
+	}
+	if err := got.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
 	}
 
 	if got.PoolID != pool.ID {
 		t.Errorf("PoolID = %d, want %d", got.PoolID, pool.ID)
 	}
-	if got.BlockNumber != blockNumber || got.BlockVersion != 2 || !got.BlockTimestamp.Equal(blockTS) {
-		t.Errorf("block identity = (%d, %d, %v), want (%d, 2, %v)", got.BlockNumber, got.BlockVersion, got.BlockTimestamp, blockNumber, blockTS)
+	if got.BlockNumber != fixtureBlock || got.BlockVersion != 2 || !got.BlockTimestamp.Equal(blockTS) {
+		t.Errorf("block identity = (%d, %d, %v), want (%d, 2, %v)", got.BlockNumber, got.BlockVersion, got.BlockTimestamp, fixtureBlock, blockTS)
 	}
-	if got.SqrtPriceX96.Cmp(f.sqrtPriceX96) != 0 {
-		t.Errorf("SqrtPriceX96 = %s, want %s", got.SqrtPriceX96, f.sqrtPriceX96)
+	if want := mustBigInt(mainnetSqrtPriceX96); got.SqrtPriceX96.Cmp(want) != 0 {
+		t.Errorf("SqrtPriceX96 = %s, want %s", got.SqrtPriceX96, want)
 	}
-	if got.Tick != 94759 {
-		t.Errorf("Tick = %d, want 94759", got.Tick)
+	if got.Tick != mainnetTick {
+		t.Errorf("Tick = %d, want %d", got.Tick, mainnetTick)
 	}
-	if got.ProtocolFee != 0 {
-		t.Errorf("ProtocolFee = %d, want 0", got.ProtocolFee)
+	if got.ProtocolFee != mainnetProtocolFee {
+		t.Errorf("ProtocolFee = %d, want %d", got.ProtocolFee, mainnetProtocolFee)
 	}
-	if got.LpFee != 100 {
-		t.Errorf("LpFee = %d, want 100", got.LpFee)
+	if got.LpFee != mainnetLpFee {
+		t.Errorf("LpFee = %d, want %d", got.LpFee, mainnetLpFee)
 	}
-	if got.Liquidity.Cmp(f.liquidity) != 0 {
-		t.Errorf("Liquidity = %s, want %s", got.Liquidity, f.liquidity)
+	if want := mustBigInt(mainnetLiquidity); got.Liquidity.Cmp(want) != 0 {
+		t.Errorf("Liquidity = %s, want %s", got.Liquidity, want)
 	}
-	if got.FeeGrowthGlobal0X128.Cmp(f.feeGrowthGlobal0) != 0 {
-		t.Errorf("FeeGrowthGlobal0X128 = %s, want %s", got.FeeGrowthGlobal0X128, f.feeGrowthGlobal0)
+	if want := mustBigInt(mainnetFeeGrowthGlobal0X128); got.FeeGrowthGlobal0X128.Cmp(want) != 0 {
+		t.Errorf("FeeGrowthGlobal0X128 = %s, want %s", got.FeeGrowthGlobal0X128, want)
 	}
-	if got.FeeGrowthGlobal1X128.Cmp(f.feeGrowthGlobal1) != 0 {
-		t.Errorf("FeeGrowthGlobal1X128 = %s, want %s", got.FeeGrowthGlobal1X128, f.feeGrowthGlobal1)
-	}
-	if err := got.Validate(); err != nil {
-		t.Errorf("Validate: %v", err)
+	if want := mustBigInt(mainnetFeeGrowthGlobal1X128); got.FeeGrowthGlobal1X128.Cmp(want) != 0 {
+		t.Errorf("FeeGrowthGlobal1X128 = %s, want %s", got.FeeGrowthGlobal1X128, want)
 	}
 	if gotHash != blockHash {
 		t.Errorf("ExecuteAtHash blockHash = %s, want %s", gotHash, blockHash)
 	}
 	if mc.CallCount != 1 {
 		t.Errorf("ExecuteAtHash invocation count = %d, want 1 (single batched multicall)", mc.CallCount)
+	}
+}
+
+// TestStateFixtureReproducesMainnetBytes keeps the synthetic packer the
+// variation tests use honest: for the recorded values it must emit exactly what
+// StateView returned, byte for byte.
+func TestStateFixtureReproducesMainnetBytes(t *testing.T) {
+	got := buildStateResults(t, defaultStateFixture())
+	want := recordedStateResults(t)
+
+	names := []string{"getSlot0", "getLiquidity", "getFeeGrowthGlobals"}
+	for i, name := range names {
+		if !bytes.Equal(got[i].ReturnData, want[i].ReturnData) {
+			t.Errorf("%s packed as %x, want the recorded %x", name, got[i].ReturnData, want[i].ReturnData)
+		}
 	}
 }
 
@@ -191,8 +250,9 @@ func TestSnapshotState_ReadsStateViewWithPoolID(t *testing.T) {
 		t.Fatalf("SnapshotState: %v", err)
 	}
 
-	if len(gotCalls) != 3 {
-		t.Fatalf("packed %d calls, want 3 (getSlot0, getLiquidity, getFeeGrowthGlobals)", len(gotCalls))
+	wantSelectors := []string{getSlot0Selector, getLiquiditySelector, getFeeGrowthGlobalsSelector}
+	if len(gotCalls) != len(wantSelectors) {
+		t.Fatalf("packed %d calls, want %d (getSlot0, getLiquidity, getFeeGrowthGlobals)", len(gotCalls), len(wantSelectors))
 	}
 	for i, call := range gotCalls {
 		if call.Target != pool.StateView {
@@ -203,6 +263,9 @@ func TestSnapshotState_ReadsStateViewWithPoolID(t *testing.T) {
 		}
 		if len(call.CallData) != 4+32 {
 			t.Fatalf("call %d calldata is %d bytes, want selector + one bytes32", i, len(call.CallData))
+		}
+		if got := hex.EncodeToString(call.CallData[:4]); got != wantSelectors[i] {
+			t.Errorf("call %d selector = %s, want %s", i, got, wantSelectors[i])
 		}
 		if got := common.BytesToHash(call.CallData[4:]); got != pool.PoolIDHash {
 			t.Errorf("call %d argument = %s, want the PoolId %s", i, got, pool.PoolIDHash)

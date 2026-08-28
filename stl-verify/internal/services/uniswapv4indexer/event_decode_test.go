@@ -805,12 +805,31 @@ func TestDecodeEvents_EmptyDataIsAnError(t *testing.T) {
 // ABI: a name in one of them that the ABI does not define would silently divert
 // real logs into the unknown-topic0 capture net.
 func TestPoolManagerABI_RoutesOnlyEventsItDefines(t *testing.T) {
-	if err := assertRoutedEventsExist(poolManagerABIForTest(t)); err != nil {
-		t.Fatalf("assertRoutedEventsExist on the real ABI: %v", err)
+	tests := []struct {
+		name      string
+		abi       *abi.ABI
+		keyed     map[string]struct{}
+		wantError bool
+	}{
+		{name: "real ABI and routing tables", abi: poolManagerABIForTest(t), keyed: poolKeyedEvents},
+		{name: "ABI defining no events", abi: &abi.ABI{Events: map[string]abi.Event{}}, keyed: poolKeyedEvents, wantError: true},
+		{
+			name:      "keyed event with no builder",
+			abi:       poolManagerABIForTest(t),
+			keyed:     map[string]struct{}{"Swap": {}, "ModifyLiquidity": {}, "OwnershipTransferred": {}},
+			wantError: true,
+		},
 	}
-
-	if err := assertRoutedEventsExist(&abi.ABI{Events: map[string]abi.Event{}}); err == nil {
-		t.Fatal("assertRoutedEventsExist on an ABI defining no events: want error, got nil")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := assertRoutedEventsExist(tt.abi, tt.keyed)
+			if tt.wantError && err == nil {
+				t.Fatal("assertRoutedEventsExist: want error, got nil")
+			}
+			if !tt.wantError && err != nil {
+				t.Fatalf("assertRoutedEventsExist: %v", err)
+			}
+		})
 	}
 }
 

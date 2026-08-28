@@ -277,10 +277,10 @@ func TestCryptoswapHandler_CorruptKnownEventErrors(t *testing.T) {
 	}
 }
 
-// TestCryptoswapHandler_EmptyDataOnKnownEventErrors pins the rejection of a
-// known event whose data block is empty at decode time, before anything reaches
-// the capture net: today every cryptoswap extractor happens to read its fields
-// explicitly, so a future capture-only event would be the silent hole.
+// TestCryptoswapHandler_EmptyDataOnKnownEventErrors targets AddLiquidity because
+// it (with RemoveLiquidity and RemoveLiquidityOne) has no extractor and reaches
+// only the capture net: this guard is all that stops an empty data block being
+// persisted as a params payload missing every non-indexed value.
 func TestCryptoswapHandler_EmptyDataOnKnownEventErrors(t *testing.T) {
 	a, err := abis.CurveCryptoswapABI()
 	if err != nil {
@@ -294,16 +294,16 @@ func TestCryptoswapHandler_EmptyDataOnKnownEventErrors(t *testing.T) {
 		NCoins:  3,
 	}
 
-	ev, ok := a.Events["TokenExchange"]
+	ev, ok := a.Events["AddLiquidity"]
 	if !ok {
-		t.Fatal("TokenExchange event not in ABI")
+		t.Fatal("AddLiquidity event not in ABI")
 	}
 	txHash := common.HexToHash("0xdeadbeef01020304050607080900010203040506070809000102030405060708")
-	buyer := common.HexToAddress("0xabc")
+	provider := common.HexToAddress("0xabc")
 
 	log := shared.Log{
 		Address:         pool.Address.Hex(),
-		Topics:          []string{ev.ID.Hex(), common.BytesToHash(buyer.Bytes()).Hex()},
+		Topics:          []string{ev.ID.Hex(), common.BytesToHash(provider.Bytes()).Hex()},
 		Data:            "0x",
 		TransactionHash: txHash.Hex(),
 		LogIndex:        "0x0",
@@ -315,10 +315,10 @@ func TestCryptoswapHandler_EmptyDataOnKnownEventErrors(t *testing.T) {
 
 	got, err := h.DecodeEvents(receipt, pool, 1, 100, 0, time.Unix(1, 0).UTC())
 	if err == nil {
-		t.Fatalf("expected error for a TokenExchange log with no data, got success: %+v", got)
+		t.Fatalf("expected error for an AddLiquidity log with no data, got success: %+v", got)
 	}
-	if !strings.Contains(err.Error(), "tokens_sold") {
-		t.Errorf("error %q does not name an undecoded field", err)
+	if !strings.Contains(err.Error(), "carries no data for non-indexed arguments") {
+		t.Errorf("error %q does not report the empty data block", err)
 	}
 }
 

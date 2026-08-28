@@ -48,9 +48,11 @@ func NewUniswapV4Repository(pool *pgxpool.Pool, buildID buildregistry.BuildID) *
 // silently missing or silently wrong pool: a missing manager row, or a manager
 // protocol / currency token whose row belongs to another chain, would otherwise
 // drop the pool or hand back another chain's PoolManager address, and leave the
-// indexer looking healthy.
+// indexer looking healthy. manager_id is selected so the scan can tell an
+// absent manager row from one whose protocol is off-chain; an inner protocol
+// join would instead skip to the previous manager version and look clean.
 const loadUniswapV4PoolsSQL = `
-	SELECT p.id, m.protocol_id, m.pool_manager_address, m.state_view_address,
+	SELECT p.id, m.manager_id, m.protocol_id, m.pool_manager_address, m.state_view_address,
 	       p.pool_id, p.currency0, p.currency1,
 	       t0.address, t0.decimals, t1.address, t1.decimals,
 	       p.fee, p.tick_spacing, p.hooks, p.deploy_block, p.snapshot_supported
@@ -64,9 +66,10 @@ const loadUniswapV4PoolsSQL = `
 	    ORDER BY pool_id, processing_version DESC
 	) p
 	LEFT JOIN LATERAL (
-	    SELECT mgr.protocol_id, pr.address AS pool_manager_address, mgr.state_view_address
+	    SELECT mgr.id AS manager_id, mgr.protocol_id,
+	           pr.address AS pool_manager_address, mgr.state_view_address
 	    FROM uniswap_v4_pool_manager mgr
-	    JOIN protocol pr ON pr.id = mgr.protocol_id AND pr.chain_id = $1
+	    LEFT JOIN protocol pr ON pr.id = mgr.protocol_id AND pr.chain_id = $1
 	    WHERE mgr.chain_id = $1
 	    ORDER BY mgr.processing_version DESC
 	    LIMIT 1
@@ -104,6 +107,7 @@ func (r *UniswapV4Repository) LoadPools(ctx context.Context, chainID int64) ([]o
 func scanUniswapV4PoolRow(rows pgx.Rows, chainID int64) (outbound.UniswapV4PoolRow, error) {
 	var (
 		id                     int64
+		managerID              *int64
 		protocolID             *int64
 		poolManager, stateView []byte
 		onchainPoolID          []byte
@@ -116,14 +120,17 @@ func scanUniswapV4PoolRow(rows pgx.Rows, chainID int64) (outbound.UniswapV4PoolR
 		snapshotSupported      bool
 		row                    outbound.UniswapV4PoolRow
 	)
-	if err := rows.Scan(&id, &protocolID, &poolManager, &stateView,
+	if err := rows.Scan(&id, &managerID, &protocolID, &poolManager, &stateView,
 		&onchainPoolID, &currency0, &currency1,
 		&token0, &decimals0, &token1, &decimals1,
 		&fee, &tickSpacing, &hooks, &deployBlock, &snapshotSupported); err != nil {
 		return row, fmt.Errorf("scanning uniswap_v4 pool row: %w", err)
 	}
-	if protocolID == nil {
+	if managerID == nil {
 		return row, fmt.Errorf("chain %d has uniswap_v4 pools (e.g. %d) but no uniswap_v4_pool_manager row", chainID, id)
+	}
+	if poolManager == nil {
+		return row, fmt.Errorf("uniswap_v4_pool_manager row %d for chain %d references protocol %d, which is not on chain %d", *managerID, chainID, *protocolID, chainID)
 	}
 
 	currency0Decimals, err := currencyTokenDecimals(id, "currency0", common.BytesToAddress(currency0), token0, decimals0)
@@ -323,21 +330,31 @@ func (r *UniswapV4Repository) PoolIDsEverSnapshotted(ctx context.Context, chainI
 	return poolIDs, nil
 }
 
-// ticksForPoolAtBlockSQL is served by idx_uniswap_v4_tick_block_lookup, whose
+// ticksForPoolAtBlockSQL resolves across registry versions the same way
+// poolIDsWithStateAtBlockSQL does, in the opposite direction: the caller holds
+// the current surrogate id, while a registry correction left the tick rows
+// under a superseded one. Matching on the id alone returns nothing for exactly
+// the pools the reorg path exists to supersede.
+//
+// idx_uniswap_v4_tick_block_lookup still serves the fact side, whose
 // (pool_id, block_number, tick) order makes both filters boundary quals and
 // yields tick already sorted; the PK's interleaved tick column cannot.
 const ticksForPoolAtBlockSQL = `
-	SELECT DISTINCT tick FROM uniswap_v4_tick
-	WHERE pool_id = $1 AND block_number = $2
-	ORDER BY tick`
+	SELECT DISTINCT t.tick
+	FROM uniswap_v4_tick t
+	JOIN uniswap_v4_pool p ON p.id = t.pool_id
+	JOIN uniswap_v4_pool_current cur
+	  ON cur.chain_id = p.chain_id AND cur.pool_id = p.pool_id
+	WHERE p.chain_id = $1 AND cur.id = $2 AND t.block_number = $3
+	ORDER BY t.tick`
 
 // TicksForPoolAtBlock returns the distinct tick positions with a row for pool at
 // blockNumber, ascending. A reorg redelivery uses this to re-read exactly the
 // ticks a prior version wrote at this height and supersede them at the new
 // version. Queries the connection pool directly (committed rows), not a write
 // transaction.
-func (r *UniswapV4Repository) TicksForPoolAtBlock(ctx context.Context, poolID int64, blockNumber int64) ([]int32, error) {
-	rows, err := r.pool.Query(ctx, ticksForPoolAtBlockSQL, poolID, blockNumber)
+func (r *UniswapV4Repository) TicksForPoolAtBlock(ctx context.Context, chainID int64, poolID int64, blockNumber int64) ([]int32, error) {
+	rows, err := r.pool.Query(ctx, ticksForPoolAtBlockSQL, chainID, poolID, blockNumber)
 	if err != nil {
 		return nil, fmt.Errorf("querying ticks for pool %d at block %d: %w", poolID, blockNumber, err)
 	}

@@ -180,8 +180,8 @@ func (t *Telemetry) RecordStateRows(ctx context.Context, n int) {
 
 // RecordStateRowsAttempted increments state_rows_attempted_total by n, the
 // number of state snapshot rows a block QUEUED for insert — rows that
-// conflicted away included. It is the health signal the sweepless
-// not-writing-state alerts key on, and it is deliberately not the same question
+// conflicted away included. It is the health signal every DEX worker's
+// not-writing-state alert keys on, and it is deliberately not the same question
 // as RecordStateRows: replaying an already-committed range under one build_id
 // reuses the processing_version, so every INSERT hits ON CONFLICT DO NOTHING
 // and writes nothing while the worker is perfectly healthy. A conflict under

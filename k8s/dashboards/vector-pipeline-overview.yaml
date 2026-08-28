@@ -365,7 +365,7 @@ spec:
         },
         {
           "type": "timeseries",
-          "title": "Indexer errors/s per chain — ErrorsHigh alerts fire > 0.1 for 15m",
+          "title": "Indexer errors/s per chain — diagnostic breakdown; the ErrorRatioHigh alerts fire on error/total > 0.5 with total > 0.02, for 15m",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
           "fieldConfig": {
@@ -373,8 +373,7 @@ spec:
               "unit": "reqps",
               "custom": { "fillOpacity": 10, "lineWidth": 2 },
               "thresholds": { "mode": "absolute", "steps": [
-                { "color": "green", "value": null },
-                { "color": "red", "value": 0.1 }
+                { "color": "green", "value": null }
               ] }
             }
           },
@@ -766,7 +765,7 @@ spec:
         },
         {
           "type": "timeseries",
-          "title": "Indexer errors/s per chain — ErrorsHigh alerts fire > 0.1 for 15m",
+          "title": "Indexer errors/s per chain — diagnostic breakdown; the ErrorRatioHigh alerts fire on error/total > 0.5 with total > 0.02, for 15m",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
           "fieldConfig": {
@@ -774,8 +773,7 @@ spec:
               "unit": "reqps",
               "custom": { "fillOpacity": 10, "lineWidth": 2 },
               "thresholds": { "mode": "absolute", "steps": [
-                { "color": "green", "value": null },
-                { "color": "red", "value": 0.1 }
+                { "color": "green", "value": null }
               ] }
             }
           },

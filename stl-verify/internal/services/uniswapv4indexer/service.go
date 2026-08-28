@@ -140,6 +140,7 @@ func NewUniswapV4Service(ctx context.Context, deps UniswapV4ServiceDeps) (*Unisw
 		neverIndexed: neverIndexedPools(deps.Pools, baselineSeen),
 	}
 	svc.reportNeverIndexed(ctx)
+	svc.reportExcludedFromSnapshots()
 	return svc, nil
 }
 
@@ -178,6 +179,26 @@ func (s *UniswapV4Service) reportNeverIndexed(ctx context.Context) {
 		hashes[i] = s.poolsByRow[id].PoolIDHash.Hex()
 	}
 	s.logger.Warn("uniswap-v4 pools have never produced a state or tick row",
+		"chainId", s.chainID, "count", len(ids), "poolRowIds", ids, "poolIds", hashes)
+}
+
+// reportExcludedFromSnapshots names the pools the registry drops from the
+// snapshot schedule. Nothing downstream can: the never-indexed gauge iterates
+// the snapshottable set, and their touches file under snapshot_supported
+// "false", which NoPoolsTouched aggregates away.
+func (s *UniswapV4Service) reportExcludedFromSnapshots() {
+	var ids []int64
+	var hashes []string
+	for _, pool := range s.pools {
+		if !pool.SnapshotSupported {
+			ids = append(ids, pool.ID)
+			hashes = append(hashes, pool.PoolIDHash.Hex())
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	s.logger.Info("uniswap-v4 pools excluded from snapshots by the registry",
 		"chainId", s.chainID, "count", len(ids), "poolRowIds", ids, "poolIds", hashes)
 }
 
@@ -363,9 +384,10 @@ func (s *UniswapV4Service) dueSetForBlock(ctx context.Context, touched map[int64
 // carry, restoring the ascending-ID order the snapshot loop and the tests rely
 // on. ids are already resolved to current registry versions on the worker's own
 // chain, so one the registry does not name is a genuine registry bug rather
-// than a superseded or foreign row. Pools registered above bn are skipped, not
-// errored, matching DueSet's deploy gate: there is no state to read below their
-// deploy height.
+// than a superseded or foreign row. A deploy block above bn is the same
+// contradiction from the other side — the id reached here because a committed
+// state row provably exists at bn — so it errors rather than leaving the
+// orphaned fork's rows canonical.
 func (s *UniswapV4Service) withRegisteredPools(due []RegisteredPool, ids []int64, bn int64) ([]RegisteredPool, error) {
 	present := make(map[int64]bool, len(due))
 	for _, pool := range due {
@@ -380,7 +402,7 @@ func (s *UniswapV4Service) withRegisteredPools(due []RegisteredPool, ids []int64
 			return nil, fmt.Errorf("pool %d has uniswap_v4_pool_state rows but is absent from the registry: registry bug", id)
 		}
 		if pool.DeployBlock > bn {
-			continue
+			return nil, fmt.Errorf("pool %d has uniswap_v4_pool_state rows at block %d but is registered as deployed at block %d: registry bug", id, bn, pool.DeployBlock)
 		}
 		present[id] = true
 		due = append(due, pool)
@@ -502,7 +524,7 @@ func (s *UniswapV4Service) snapshotPoolTicks(ctx context.Context, pool Registere
 	}
 
 	if coords.version > 0 {
-		prior, err := s.repo.TicksForPoolAtBlock(ctx, pool.ID, coords.number)
+		prior, err := s.repo.TicksForPoolAtBlock(ctx, s.chainID, pool.ID, coords.number)
 		if err != nil {
 			return nil, false, fmt.Errorf("reading prior-version ticks for pool %s block %d: %w", pool.PoolIDHash, coords.number, err)
 		}

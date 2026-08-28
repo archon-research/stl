@@ -138,7 +138,8 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_pool
     processing_version INT         NOT NULL DEFAULT 0,
     build_id           INT         NOT NULL DEFAULT 0,
     UNIQUE (chain_id, pool_id, processing_version),
-    CHECK (currency0 < currency1)
+    CHECK (currency0 < currency1),
+    CHECK (fee <> 8388608 OR NOT snapshot_supported)
 );
 
 -- chain_id lookups (LoadPools) are served by the UNIQUE
@@ -210,7 +211,7 @@ COMMENT ON COLUMN uniswap_v4_pool.tick_spacing IS
 COMMENT ON COLUMN uniswap_v4_pool.hooks IS
   'PoolKey.hooks, 20 bytes: the hook contract attached to this pool, or the zero address when the pool has no hooks. The hook''s PERMISSION FLAGS are encoded in the low 14 bits of the address itself (beforeSwap, afterSwap, delta-returning, ...), so the address doubles as the capability set. A dynamic fee is not among them: it is signalled by PoolKey.fee = 8388608 (0x800000).';
 COMMENT ON COLUMN uniswap_v4_pool.snapshot_supported IS
-  'Configuration (curated, load-bearing). Gates the STATE and TICK snapshot path only: TRUE = the indexer reads uniswap_v4_pool_state and uniswap_v4_tick rows for this pool; FALSE = the pool stays registered and its logs are still decoded into uniswap_v4_swap / uniswap_v4_liquidity_event / uniswap_v4_pool_event and mirrored into protocol_event, but no state or tick row is ever written for it. Curated the way curve_pool.has_a_precise is, rather than derived: set FALSE for a dynamic-LP-fee pool (fee = 8388608), whose lp_fee updateDynamicLPFee rewrites emitting no event, so a snapshot would silently go stale between touches -- until VEC-573 gives lp_fee a refresh path. A change is a new version row, never an UPDATE.';
+  'Configuration (curated, load-bearing). Gates the STATE and TICK snapshot path only: TRUE = the indexer reads uniswap_v4_pool_state and uniswap_v4_tick rows for this pool; FALSE = the pool stays registered and its logs are still decoded into uniswap_v4_swap / uniswap_v4_liquidity_event / uniswap_v4_pool_event and mirrored into protocol_event, but no state or tick row is ever written for it. Curated the way curve_pool.has_a_precise is, rather than derived: set FALSE for a dynamic-LP-fee pool (fee = 8388608), whose lp_fee updateDynamicLPFee rewrites emitting no event, so a snapshot would silently go stale between touches -- until VEC-573 gives lp_fee a refresh path. A change is a new version row, never an UPDATE. A CHECK enforces the one direction that is always wrong (fee = 8388608 with snapshot_supported = TRUE); VEC-573''s lp_fee refresh path will have to DROP that constraint before it can flip such a pool back on.';
 COMMENT ON COLUMN uniswap_v4_pool.deploy_block IS
   'Configuration (load-bearing). Block at which the pool was created (its Initialize event; a V4 pool has no contract deployment of its own), used to gate snapshot reads. NOT NULL: a NULL would defeat the reorg deploy-gate, so the column makes one unrepresentable. Must be a lower bound of the true initialize block (<= actual height): DueSet hard-errors ("registry bug") when a touched pool reports deploy_block greater than the processed block, and skips sweep scheduling before this height.';
 COMMENT ON COLUMN uniswap_v4_pool.created_at IS

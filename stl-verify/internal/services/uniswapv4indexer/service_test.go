@@ -1,12 +1,14 @@
 package uniswapv4indexer
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
 	"math/big"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -54,6 +56,7 @@ type fakeUniswapRepo struct {
 }
 
 type fakePoolBlockKey struct {
+	chainID     int64
 	poolID      int64
 	blockNumber int64
 }
@@ -70,8 +73,8 @@ func (r *fakeUniswapRepo) LoadPools(_ context.Context, _ int64) ([]outbound.Unis
 	return nil, nil
 }
 
-func (r *fakeUniswapRepo) TicksForPoolAtBlock(_ context.Context, poolID int64, blockNumber int64) ([]int32, error) {
-	key := fakePoolBlockKey{poolID: poolID, blockNumber: blockNumber}
+func (r *fakeUniswapRepo) TicksForPoolAtBlock(_ context.Context, chainID int64, poolID int64, blockNumber int64) ([]int32, error) {
+	key := fakePoolBlockKey{chainID: chainID, poolID: poolID, blockNumber: blockNumber}
 	r.ticksForPoolCalls = append(r.ticksForPoolCalls, key)
 	if r.ticksForPoolErr != nil {
 		return nil, r.ticksForPoolErr
@@ -438,6 +441,29 @@ func newTestService(t *testing.T, pools ...RegisteredPool) (*UniswapV4Service, *
 		t.Fatalf("NewUniswapV4Service: %v", err)
 	}
 	return svc, repo, mc, txMgr
+}
+
+// TestNewUniswapV4Service_NamesPoolsExcludedFromSnapshots covers the blind spot
+// left by the never-indexed gauge: an excluded pool cannot reach it, and its
+// touches land under snapshot_supported="false" where no alert looks, so boot
+// is the only place its identity is ever stated.
+func TestNewUniswapV4Service_NamesPoolsExcludedFromSnapshots(t *testing.T) {
+	excluded := dynamicFeeServicePool(t)
+	deps, _, _, _ := validServiceDeps(t, []RegisteredPool{servicePool(), excluded})
+	var buf bytes.Buffer
+	deps.Logger = slog.New(slog.NewJSONHandler(&buf, nil))
+
+	if _, err := NewUniswapV4Service(context.Background(), deps); err != nil {
+		t.Fatalf("NewUniswapV4Service: %v", err)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, excluded.PoolIDHash.Hex()) {
+		t.Errorf("startup log does not name excluded pool %s:\n%s", excluded.PoolIDHash.Hex(), logged)
+	}
+	if !strings.Contains(logged, strconv.FormatInt(excluded.ID, 10)) {
+		t.Errorf("startup log does not name excluded pool row id %d:\n%s", excluded.ID, logged)
+	}
 }
 
 func TestNewUniswapV4Service_RejectsInvalidDeps(t *testing.T) {
@@ -1158,7 +1184,7 @@ func TestBlockHandler_ReorgRedelivery_RereadsPriorVersionTicks(t *testing.T) {
 
 	const priorTick = int32(300)
 	mc.tickResults[priorTick] = goodTickResult(t)
-	repo.priorTicks = map[fakePoolBlockKey][]int32{{poolID: pool.ID, blockNumber: 200}: {priorTick}}
+	repo.priorTicks = map[fakePoolBlockKey][]int32{{chainID: testChainID, poolID: pool.ID, blockNumber: 200}: {priorTick}}
 
 	reorg := blockEvent(200)
 	reorg.Version = 1
@@ -1166,7 +1192,7 @@ func TestBlockHandler_ReorgRedelivery_RereadsPriorVersionTicks(t *testing.T) {
 		t.Fatalf("BlockHandler (v1 reorg redelivery): %v", err)
 	}
 
-	want := fakePoolBlockKey{poolID: pool.ID, blockNumber: 200}
+	want := fakePoolBlockKey{chainID: testChainID, poolID: pool.ID, blockNumber: 200}
 	if !slices.Contains(repo.ticksForPoolCalls, want) {
 		t.Fatalf("TicksForPoolAtBlock calls = %v, want to include %v", repo.ticksForPoolCalls, want)
 	}
@@ -1189,7 +1215,7 @@ func TestBlockHandler_ReorgAfterRestart_ResnapshotsPoolsWithStateAtThatBlock(t *
 	const priorTick = int32(300)
 	mc.tickResults[priorTick] = goodTickResult(t)
 	repo.poolsWithState = map[int64][]int64{200: {pool.ID}}
-	repo.priorTicks = map[fakePoolBlockKey][]int32{{poolID: pool.ID, blockNumber: 200}: {priorTick}}
+	repo.priorTicks = map[fakePoolBlockKey][]int32{{chainID: testChainID, poolID: pool.ID, blockNumber: 200}: {priorTick}}
 
 	reorg := blockEvent(200)
 	reorg.Version = 1
@@ -1204,7 +1230,7 @@ func TestBlockHandler_ReorgAfterRestart_ResnapshotsPoolsWithStateAtThatBlock(t *
 	if len(repo.lastWrites.States) != 1 || repo.lastWrites.States[0].PoolID != pool.ID {
 		t.Fatalf("v1 States = %+v, want one snapshot of pool %d", repo.lastWrites.States, pool.ID)
 	}
-	want := fakePoolBlockKey{poolID: pool.ID, blockNumber: 200}
+	want := fakePoolBlockKey{chainID: testChainID, poolID: pool.ID, blockNumber: 200}
 	if !slices.Contains(repo.ticksForPoolCalls, want) {
 		t.Fatalf("TicksForPoolAtBlock calls = %v, want to include %v", repo.ticksForPoolCalls, want)
 	}
@@ -1216,23 +1242,24 @@ func TestBlockHandler_ReorgAfterRestart_ResnapshotsPoolsWithStateAtThatBlock(t *
 	}
 }
 
-// TestBlockHandler_ReorgPriorStateBelowDeployBlock_IsNotScheduled mirrors
-// DueSet's deploy gate on the restart path: below a pool's registered deploy
-// height there is nothing for StateView to answer, so the pool is skipped
-// rather than snapshotted at a height it did not exist at.
-func TestBlockHandler_ReorgPriorStateBelowDeployBlock_IsNotScheduled(t *testing.T) {
+// TestBlockHandler_ReorgPriorStateBelowDeployBlock_Errors covers the other
+// registry contradiction the restart path can meet: the id came from rows that
+// provably exist at this height, so a deploy block above it is a registry bug,
+// not the ordinary "nothing to read yet" that DueSet's deploy gate covers.
+func TestBlockHandler_ReorgPriorStateBelowDeployBlock_Errors(t *testing.T) {
 	pool := servicePool()
 	pool.DeployBlock = 500
-	svc, repo, mc, txMgr := newTestService(t, pool)
+	svc, repo, _, txMgr := newTestService(t, pool)
 	repo.poolsWithState = map[int64][]int64{200: {pool.ID}}
 
 	reorg := blockEvent(200)
 	reorg.Version = 1
-	if err := svc.BlockHandler()(context.Background(), reorg, nil); err != nil {
-		t.Fatalf("BlockHandler: %v", err)
+	err := svc.BlockHandler()(context.Background(), reorg, nil)
+	if err == nil {
+		t.Fatal("BlockHandler: want error for prior state below the pool's deploy block, got nil")
 	}
-	if mc.executeAtHashCalls != 0 {
-		t.Errorf("chain reads = %d, want 0 below the pool's deploy block", mc.executeAtHashCalls)
+	if !strings.Contains(err.Error(), "registry bug") {
+		t.Errorf("error %q does not identify the registry bug", err)
 	}
 	if txMgr.calls != 0 || repo.saveBlockCalls != 0 {
 		t.Errorf("tx calls = %d, SaveBlock calls = %d, want 0 and 0", txMgr.calls, repo.saveBlockCalls)

@@ -271,8 +271,11 @@ func (t *Telemetry) RecordUnitReads(ctx context.Context, oracleName string, fetc
 		// rather than forward: the OTel sum aggregator adds negative values
 		// unconditionally, which would corrupt the cumulative counter and
 		// make rate() misread the decrease as a counter reset. Loud, not
-		// silent: the bug lands on the errors counter, where a persistent
-		// occurrence trips VectorOracleIndexerErrorsHigh.
+		// silent: the bug lands on the errors counter under
+		// operation="unit_reads_accounting". No alert covers it —
+		// VectorOracleIndexerErrorRatioHigh keys on
+		// blocks_processed{status="error"} and this path fails no block — so it
+		// is a diagnostic breadcrumb for the operation breakdown, not a page.
 		t.errorsTotal.Add(ctx, 1, metric.WithAttributes(
 			t.chainAttr,
 			attribute.String("operation", "unit_reads_accounting"),

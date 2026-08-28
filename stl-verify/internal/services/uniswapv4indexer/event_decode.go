@@ -25,7 +25,7 @@ var eventsByID = sync.OnceValues(func() (map[common.Hash]*abi.Event, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := assertRoutedEventsExist(poolManagerABI); err != nil {
+	if err := assertRoutedEventsExist(poolManagerABI, poolKeyedEvents); err != nil {
 		return nil, err
 	}
 	out := make(map[common.Hash]*abi.Event, len(poolManagerABI.Events))
@@ -69,12 +69,12 @@ var poolEventNames = map[string]entity.UniswapV4PoolEventName{
 // not define: a typo there would silently divert real logs into the
 // unknown-topic0 capture net instead of their typed table, and nothing at
 // runtime would look wrong.
-func assertRoutedEventsExist(poolManagerABI *abi.ABI) error {
+func assertRoutedEventsExist(poolManagerABI *abi.ABI, keyed map[string]struct{}) error {
 	tables := []struct {
 		table string
 		names []string
 	}{
-		{"poolKeyedEvents", slices.Sorted(maps.Keys(poolKeyedEvents))},
+		{"poolKeyedEvents", slices.Sorted(maps.Keys(keyed))},
 		{"erc6909Events", slices.Sorted(maps.Keys(erc6909Events))},
 		{"poolEventNames", slices.Sorted(maps.Keys(poolEventNames))},
 	}
@@ -83,6 +83,21 @@ func assertRoutedEventsExist(poolManagerABI *abi.ABI) error {
 			if _, ok := poolManagerABI.Events[name]; !ok {
 				return fmt.Errorf("%s routes %q, which the PoolManager ABI does not define", t.table, name)
 			}
+		}
+	}
+	return assertKeyedEventsDispatch(keyed)
+}
+
+// assertKeyedEventsDispatch pins appendTypedEvent's dispatch to the routing
+// tables: a keyed event with neither a dedicated builder nor a poolEventNames
+// entry decodes fine and then falls through to an error on a live log.
+func assertKeyedEventsDispatch(keyed map[string]struct{}) error {
+	for _, name := range slices.Sorted(maps.Keys(keyed)) {
+		if name == "Swap" || name == "ModifyLiquidity" {
+			continue
+		}
+		if _, ok := poolEventNames[name]; !ok {
+			return fmt.Errorf("poolKeyedEvents routes %q, which appendTypedEvent has no builder for", name)
 		}
 	}
 	return nil
@@ -296,15 +311,12 @@ func (d *receiptDecoder) appendTypedEvent(abiEventName string, data map[string]a
 		}
 		d.out.LiquidityEvents = append(d.out.LiquidityEvents, liq)
 
-	case "Initialize", "Donate", "ProtocolFeeUpdated":
+	default:
 		ev, err := d.buildPoolEvent(abiEventName, data, pool, site)
 		if err != nil {
 			return err
 		}
 		d.out.PoolEvents = append(d.out.PoolEvents, ev)
-
-	default:
-		return fmt.Errorf("unhandled pool-keyed event %s", abiEventName)
 	}
 	return nil
 }

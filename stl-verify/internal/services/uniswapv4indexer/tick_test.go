@@ -1,7 +1,9 @@
 package uniswapv4indexer
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"fmt"
 	"math/big"
 	"slices"
@@ -9,13 +11,45 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/tickbitmap"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
+)
+
+// Verbatim StateView returns for the same pool and block as the state fixtures
+// (see state_test.go), so a reader can re-fetch and re-verify:
+//
+//	cast call 0x7fFE42C4a5DEeA5b0feC41C94C136Cf115597227 \
+//	  "getTickInfo(bytes32,int24)" \
+//	  0x1d5b2949ece8754c2d736991c62c5162bd144f497b2212182401b9bae77e2d76 \
+//	  -1873 -r https://eth.drpc.org -b 23200000
+const (
+	mainnetTickInfoReturn = "0000000000000000000000000000000000000000000000027769c57fee0baf02" +
+		"fffffffffffffffffffffffffffffffffffffffffffffffd88963a8011f450fe" +
+		"0000000000000000000000000000000000003284b0bf979fb9f9a08768ee417f" +
+		"0000000000000000000000000000000000002b121f4f9d09a00dcb9dbe17097d"
+	mainnetTickBitmapWordMinus8Return = "0000000000000000001080000000008004000000000000000000000000000000"
+)
+
+// Decoded from the words above by hand and corroborated against the
+// PoolManager's raw storage, where v4-core's TickInfo packs liquidityGross into
+// the low 128 bits and liquidityNet into the high 128 bits of slot +0, then
+// feeGrowthOutside0X128 at +1 and feeGrowthOutside1X128 at +2.
+const (
+	mainnetTickInfoTick          = -1873
+	mainnetLiquidityGross        = "45498113863732408066"
+	mainnetLiquidityNet          = "-45498113863732408066"
+	mainnetFeeGrowthOutside0X128 = "1024633298617050289025684201161087"
+	mainnetFeeGrowthOutside1X128 = "873579410164311889164547676113277"
+)
+
+// Selectors the recorded calls were actually made with.
+const (
+	getTickInfoSelector   = "7c40f1fe"
+	getTickBitmapSelector = "1c7ccb4c"
 )
 
 // tickTestPool is the fixture RegisteredPool for tick-read tests (tickSpacing 60).
@@ -36,33 +70,35 @@ func liquidityEvent(tickLower, tickUpper int, liquidityDelta int64) *entity.Unis
 	}
 }
 
-// tickViewTestABI independently parses the StateView tick getters so tests can
-// pack returns and unpack calldata without depending on tick.go's own ABI.
-func tickViewTestABI(t *testing.T) *abi.ABI {
-	t.Helper()
-	const j = `[
-		{"name":"getTickInfo","type":"function","stateMutability":"view","inputs":[{"name":"poolId","type":"bytes32"},{"name":"tick","type":"int24"}],"outputs":[
-			{"name":"liquidityGross","type":"uint128"},
-			{"name":"liquidityNet","type":"int128"},
-			{"name":"feeGrowthOutside0X128","type":"uint256"},
-			{"name":"feeGrowthOutside1X128","type":"uint256"}
-		]},
-		{"name":"getTickBitmap","type":"function","stateMutability":"view","inputs":[{"name":"poolId","type":"bytes32"},{"name":"tick","type":"int16"}],"outputs":[{"name":"","type":"uint256"}]}
-	]`
-	a, err := abi.JSON(strings.NewReader(j))
-	if err != nil {
-		t.Fatalf("parsing tick view test ABI: %v", err)
-	}
-	return &a
-}
-
 func packTickInfoReturn(t *testing.T, liquidityGross, liquidityNet, fg0, fg1 *big.Int) []byte {
 	t.Helper()
-	packed, err := tickViewTestABI(t).Methods["getTickInfo"].Outputs.Pack(liquidityGross, liquidityNet, fg0, fg1)
-	if err != nil {
-		t.Fatalf("packing getTickInfo return: %v", err)
+	return abiWords(liquidityGross, liquidityNet, fg0, fg1)
+}
+
+// signedWord reads a 32-byte ABI word as a two's-complement signed integer.
+func signedWord(b []byte) *big.Int {
+	v := new(big.Int).SetBytes(b)
+	if v.Bit(255) == 1 {
+		v.Sub(v, new(big.Int).Lsh(big.NewInt(1), 256))
 	}
-	return packed
+	return v
+}
+
+// argWords splits a packed call into its selector and its 32-byte argument
+// words, failing the test if the call is not that shape.
+func argWords(t *testing.T, callData []byte, wantSelector string, wantArgs int) [][]byte {
+	t.Helper()
+	if len(callData) != 4+32*wantArgs {
+		t.Fatalf("calldata is %d bytes, want selector + %d words", len(callData), wantArgs)
+	}
+	if got := hex.EncodeToString(callData[:4]); got != wantSelector {
+		t.Fatalf("selector = %s, want %s", got, wantSelector)
+	}
+	args := make([][]byte, wantArgs)
+	for i := range args {
+		args[i] = callData[4+32*i : 4+32*(i+1)]
+	}
+	return args
 }
 
 func TestTouchedTicks(t *testing.T) {
@@ -122,7 +158,6 @@ func TestBuildTickCalls(t *testing.T) {
 		t.Fatalf("got %d calls, want %d", len(calls), len(ticks))
 	}
 
-	a := tickViewTestABI(t)
 	for i, call := range calls {
 		if call.Target != pool.StateView {
 			t.Errorf("call %d target = %s, want the StateView %s", i, call.Target, pool.StateView)
@@ -130,16 +165,31 @@ func TestBuildTickCalls(t *testing.T) {
 		if call.AllowFailure {
 			t.Errorf("call %d is AllowFailure; an authoritative tick read must fail loud", i)
 		}
-		args, err := a.Methods["getTickInfo"].Inputs.Unpack(call.CallData[4:])
-		if err != nil {
-			t.Fatalf("unpacking call %d args: %v", i, err)
-		}
-		if got := common.Hash(args[0].([32]byte)); got != pool.PoolIDHash {
+		args := argWords(t, call.CallData, getTickInfoSelector, 2)
+		if got := common.BytesToHash(args[0]); got != pool.PoolIDHash {
 			t.Errorf("call %d poolId = %s, want %s", i, got, pool.PoolIDHash)
 		}
-		if got := int32(args[1].(*big.Int).Int64()); got != ticks[i] {
+		if got := int32(signedWord(args[1]).Int64()); got != ticks[i] {
 			t.Errorf("call %d tick = %d, want %d (order must match the input)", i, got, ticks[i])
 		}
+	}
+}
+
+// TestBuildTickCalls_MatchesRecordedCall pins BuildTickCalls against the exact
+// calldata the recorded getTickInfo fixture was fetched with, so the packing
+// and the recorded return stay a matched pair.
+func TestBuildTickCalls_MatchesRecordedCall(t *testing.T) {
+	pool := decodeTestPool(7, ethWstethPoolID)
+
+	calls, err := BuildTickCalls(pool, []int32{mainnetTickInfoTick})
+	if err != nil {
+		t.Fatalf("BuildTickCalls: %v", err)
+	}
+
+	want := append(hexBytes(t, getTickInfoSelector),
+		abiWords(new(big.Int).SetBytes(pool.PoolIDHash.Bytes()), big.NewInt(mainnetTickInfoTick))...)
+	if !bytes.Equal(calls[0].CallData, want) {
+		t.Errorf("calldata = %x, want %x", calls[0].CallData, want)
 	}
 }
 
@@ -153,36 +203,55 @@ func TestBuildTickCalls_EmptyInput(t *testing.T) {
 	}
 }
 
-func TestDecodeTick(t *testing.T) {
-	pool := tickTestPool()
-	liquidityNet := big.NewInt(-500)
-	fg0 := mustBigInt("340282366920938463463374607431768211456")
-	res := outbound.Result{Success: true, ReturnData: packTickInfoReturn(t, big.NewInt(1000), liquidityNet, fg0, big.NewInt(2))}
+// TestDecodeTick_DecodesRecordedMainnetReturn is the independent oracle for the
+// tick decode: verbatim StateView bytes in, hand-decoded expectations out. The
+// recorded tick carries a negative liquidityNet, so this also pins int128 sign
+// handling, and the two fee-growth values differ, so a transposed return layout
+// shows up as a named mismatch.
+func TestDecodeTick_DecodesRecordedMainnetReturn(t *testing.T) {
+	pool := decodeTestPool(7, ethWstethPoolID)
+	res := outbound.Result{Success: true, ReturnData: hexBytes(t, mainnetTickInfoReturn)}
 
-	got, err := DecodeTick(pool, -120, blockNumber, 3, blockTS, res)
+	got, err := DecodeTick(pool, mainnetTickInfoTick, fixtureBlock, 3, blockTS, res)
 	if err != nil {
 		t.Fatalf("DecodeTick: %v", err)
 	}
 	if err := got.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if got.PoolID != pool.ID || got.Tick != -120 {
-		t.Errorf("identity = (pool %d, tick %d), want (%d, -120)", got.PoolID, got.Tick, pool.ID)
+
+	if got.PoolID != pool.ID || got.Tick != mainnetTickInfoTick {
+		t.Errorf("identity = (pool %d, tick %d), want (%d, %d)", got.PoolID, got.Tick, pool.ID, mainnetTickInfoTick)
 	}
-	if got.BlockNumber != blockNumber || got.BlockVersion != 3 || !got.BlockTimestamp.Equal(blockTS) {
-		t.Errorf("block identity = (%d, %d, %v), want (%d, 3, %v)", got.BlockNumber, got.BlockVersion, got.BlockTimestamp, blockNumber, blockTS)
+	if got.BlockNumber != fixtureBlock || got.BlockVersion != 3 || !got.BlockTimestamp.Equal(blockTS) {
+		t.Errorf("block identity = (%d, %d, %v), want (%d, 3, %v)", got.BlockNumber, got.BlockVersion, got.BlockTimestamp, fixtureBlock, blockTS)
 	}
-	if got.LiquidityGross.Cmp(big.NewInt(1000)) != 0 {
-		t.Errorf("LiquidityGross = %s, want 1000", got.LiquidityGross)
+	if want := mustBigInt(mainnetLiquidityGross); got.LiquidityGross.Cmp(want) != 0 {
+		t.Errorf("LiquidityGross = %s, want %s", got.LiquidityGross, want)
 	}
-	if got.LiquidityNet.Cmp(liquidityNet) != 0 {
-		t.Errorf("LiquidityNet = %s, want %s (signed int128)", got.LiquidityNet, liquidityNet)
+	if want := mustBigInt(mainnetLiquidityNet); got.LiquidityNet.Cmp(want) != 0 {
+		t.Errorf("LiquidityNet = %s, want %s (signed int128)", got.LiquidityNet, want)
 	}
-	if got.FeeGrowthOutside0X128.Cmp(fg0) != 0 {
-		t.Errorf("FeeGrowthOutside0X128 = %s, want %s", got.FeeGrowthOutside0X128, fg0)
+	if want := mustBigInt(mainnetFeeGrowthOutside0X128); got.FeeGrowthOutside0X128.Cmp(want) != 0 {
+		t.Errorf("FeeGrowthOutside0X128 = %s, want %s", got.FeeGrowthOutside0X128, want)
 	}
-	if got.FeeGrowthOutside1X128.Cmp(big.NewInt(2)) != 0 {
-		t.Errorf("FeeGrowthOutside1X128 = %s, want 2", got.FeeGrowthOutside1X128)
+	if want := mustBigInt(mainnetFeeGrowthOutside1X128); got.FeeGrowthOutside1X128.Cmp(want) != 0 {
+		t.Errorf("FeeGrowthOutside1X128 = %s, want %s", got.FeeGrowthOutside1X128, want)
+	}
+}
+
+// TestTickFixtureReproducesMainnetBytes keeps the synthetic packer the other
+// tick tests use honest: for the recorded values it must emit exactly what
+// StateView returned, byte for byte.
+func TestTickFixtureReproducesMainnetBytes(t *testing.T) {
+	got := packTickInfoReturn(t,
+		mustBigInt(mainnetLiquidityGross),
+		mustBigInt(mainnetLiquidityNet),
+		mustBigInt(mainnetFeeGrowthOutside0X128),
+		mustBigInt(mainnetFeeGrowthOutside1X128),
+	)
+	if want := hexBytes(t, mainnetTickInfoReturn); !bytes.Equal(got, want) {
+		t.Errorf("packed getTickInfo return = %x, want the recorded %x", got, want)
 	}
 }
 
@@ -235,28 +304,53 @@ func bitmapWord(bits ...uint) *big.Int {
 // set, so a test can stage a densely-initialized word.
 func bitmapWordResult(t *testing.T, bits ...uint) outbound.Result {
 	t.Helper()
-	packed, err := tickViewTestABI(t).Methods["getTickBitmap"].Outputs.Pack(bitmapWord(bits...))
-	if err != nil {
-		t.Fatalf("packing getTickBitmap return: %v", err)
-	}
-	return outbound.Result{Success: true, ReturnData: packed}
+	return outbound.Result{Success: true, ReturnData: abiWords(bitmapWord(bits...))}
 }
 
 // wordFromCallData recovers the int16 word position from a packed
 // getTickBitmap(bytes32,int16) call.
 func wordFromCallData(t *testing.T, callData []byte) int16 {
 	t.Helper()
-	args, err := tickViewTestABI(t).Methods["getTickBitmap"].Inputs.Unpack(callData[4:])
-	if err != nil {
-		t.Fatalf("unpacking getTickBitmap args: %v", err)
+	return int16(signedWord(argWords(t, callData, getTickBitmapSelector, 2)[1]).Int64())
+}
+
+// TestBaselineTicks_DecodesRecordedBitmapWord runs the bit-to-tick mapping over
+// a verbatim mainnet bitmap word. Bit 175 of word -8 is tick -1873, the same
+// tick whose recorded getTickInfo return above is non-zero, so the two fixtures
+// corroborate each other.
+func TestBaselineTicks_DecodesRecordedBitmapWord(t *testing.T) {
+	pool := decodeTestPool(7, ethWstethPoolID)
+	recorded := hexBytes(t, mainnetTickBitmapWordMinus8Return)
+
+	mc := testutil.NewMockMulticaller()
+	mc.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		results := make([]outbound.Result, len(calls))
+		for i, call := range calls {
+			data := abiWords(big.NewInt(0))
+			if wordFromCallData(t, call.CallData) == -8 {
+				data = recorded
+			}
+			results[i] = outbound.Result{Success: true, ReturnData: data}
+		}
+		return results, nil
 	}
-	return args[1].(int16)
+
+	got, err := BaselineTicks(context.Background(), mc, pool, common.HexToHash(fixtureBlockHash))
+	if err != nil {
+		t.Fatalf("BaselineTicks: %v", err)
+	}
+	if want := []int32{-1926, -1913, mainnetTickInfoTick, -1868}; !slices.Equal(got, want) {
+		t.Errorf("BaselineTicks() = %v, want %v", got, want)
+	}
 }
 
 func TestBaselineTicks_DecodesSetBitsToTicks(t *testing.T) {
 	pool := tickTestPool()
 	blockHash := common.HexToHash("0xabc1")
-	minWord, maxWord := tickbitmap.WordBounds(pool.TickSpacing)
+	minWord, maxWord, err := tickbitmap.WordBounds(pool.TickSpacing)
+	if err != nil {
+		t.Fatalf("WordBounds: %v", err)
+	}
 	var gotCallCount int
 
 	mc := testutil.NewMockMulticaller()
@@ -277,7 +371,7 @@ func TestBaselineTicks_DecodesSetBitsToTicks(t *testing.T) {
 			case -1:
 				word = bitmapWord(255) // tick -60
 			}
-			results[i] = outbound.Result{Success: true, ReturnData: common.LeftPadBytes(word.Bytes(), 32)}
+			results[i] = outbound.Result{Success: true, ReturnData: abiWords(word)}
 		}
 		return results, nil
 	}
@@ -306,7 +400,10 @@ func TestBaselineTicks_ChunksWideWordRange(t *testing.T) {
 	pool.TickSpacing = 1
 	blockHash := common.HexToHash("0xabc5")
 
-	minWord, maxWord := tickbitmap.WordBounds(pool.TickSpacing)
+	minWord, maxWord, err := tickbitmap.WordBounds(pool.TickSpacing)
+	if err != nil {
+		t.Fatalf("WordBounds: %v", err)
+	}
 	totalWords := int(maxWord) - int(minWord) + 1
 	if totalWords <= tickbitmap.BitmapWordsPerCall {
 		t.Fatalf("fixture invalid: %d words, want more than %d", totalWords, tickbitmap.BitmapWordsPerCall)
@@ -325,7 +422,7 @@ func TestBaselineTicks_ChunksWideWordRange(t *testing.T) {
 		results := make([]outbound.Result, len(calls))
 		for i, call := range calls {
 			seenWords[wordFromCallData(t, call.CallData)] = true
-			results[i] = outbound.Result{Success: true, ReturnData: common.LeftPadBytes(big.NewInt(0).Bytes(), 32)}
+			results[i] = outbound.Result{Success: true, ReturnData: abiWords(big.NewInt(0))}
 		}
 		return results, nil
 	}
@@ -365,7 +462,7 @@ func TestBaselineTicks_FailureModes(t *testing.T) {
 			executeFn: func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 				results := make([]outbound.Result, len(calls))
 				for i := range results {
-					results[i] = outbound.Result{Success: true, ReturnData: common.LeftPadBytes(big.NewInt(0).Bytes(), 32)}
+					results[i] = outbound.Result{Success: true, ReturnData: abiWords(big.NewInt(0))}
 				}
 				results[0] = outbound.Result{Success: false}
 				return results, nil
@@ -407,7 +504,7 @@ func TestBaselineTicks_PinsToBlockHash(t *testing.T) {
 	mc.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		results := make([]outbound.Result, len(calls))
 		for i := range results {
-			results[i] = outbound.Result{Success: true, ReturnData: common.LeftPadBytes(big.NewInt(0).Bytes(), 32)}
+			results[i] = outbound.Result{Success: true, ReturnData: abiWords(big.NewInt(0))}
 		}
 		return results, nil
 	}

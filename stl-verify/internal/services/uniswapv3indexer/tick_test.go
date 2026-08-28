@@ -393,7 +393,10 @@ func TestBaselineTicks_DecodesSetBitsToTicks(t *testing.T) {
 	pool := tickTestPool() // TickSpacing = 60
 	blockHash := common.HexToHash("0xabc0000000000000000000000000000000000000000000000000000000001")
 
-	minWord, maxWord := tickbitmap.WordBounds(pool.TickSpacing)
+	minWord, maxWord, err := tickbitmap.WordBounds(pool.TickSpacing)
+	if err != nil {
+		t.Fatalf("WordBounds: %v", err)
+	}
 	var gotCallCount int
 
 	mc := testutil.NewMockMulticaller()
@@ -456,7 +459,10 @@ func TestBaselineTicks_ChunksMultipleWordBatches(t *testing.T) {
 	pool.TickSpacing = 1
 	blockHash := common.HexToHash("0xabc0000000000000000000000000000000000000000000000000000000005")
 
-	minWord, maxWord := tickbitmap.WordBounds(pool.TickSpacing)
+	minWord, maxWord, err := tickbitmap.WordBounds(pool.TickSpacing)
+	if err != nil {
+		t.Fatalf("WordBounds: %v", err)
+	}
 	totalWords := int(maxWord) - int(minWord) + 1
 	if totalWords <= tickbitmap.BitmapWordsPerCall {
 		t.Fatalf("test fixture invalid: totalWords = %d, want > tickbitmap.BitmapWordsPerCall = %d", totalWords, tickbitmap.BitmapWordsPerCall)
