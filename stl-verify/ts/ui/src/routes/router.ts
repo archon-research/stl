@@ -19,6 +19,12 @@ import {
   allocationSearchSchema,
   sharedSearchSchema,
 } from '../shared/lib/search-params';
+import {
+  loadActivities,
+  loadAllocationIndex,
+  loadPrimeAllocations,
+  loadShell,
+} from './loaders';
 import { RootLayout } from './RootLayout';
 
 // Every param here is a plain string, and the default JSON round-trip would
@@ -36,6 +42,7 @@ const redirectToValidatedSearch = createValidatedSearchRedirect({
 const rootRoute = createRootRoute({
   validateSearch: sharedSearchSchema,
   component: RootLayout,
+  loader: loadShell,
   beforeLoad: (context) => {
     redirectToValidatedSearch(context);
   },
@@ -97,7 +104,8 @@ const allocationRoute = createRoute({
   validateSearch: allocationSearchSchema,
   // The charts are a chunk of their own and the view's queries take two round
   // trips to answer, so starting the fetch here -- which `defaultPreload` also
-  // runs on hover -- lands it well before there is anything to plot.
+  // runs on hover -- lands it well before there is anything to plot. The view's
+  // data hangs off the two children below, which are where the prime is known.
   loader: preloadMetricsBand,
   component: lazyRouteComponent(
     () => import('./AllocationRoute'),
@@ -109,6 +117,7 @@ const allocationIndexRoute = createRoute({
   getParentRoute: () => allocationRoute,
   path: '/',
   beforeLoad: ({ search }) => redirectToPrimePath(search),
+  loader: loadAllocationIndex,
 });
 
 // The prime rides in the path here, so a surviving `?prime=` would name a second
@@ -117,12 +126,19 @@ const allocationPrimeRoute = createRoute({
   getParentRoute: () => allocationRoute,
   path: '$primeId',
   beforeLoad: createSearchParamStripper('prime', { stringifySearch }),
+  // Destructured from the params this route inferred, not from a context the
+  // loader restates: renaming the path segment above is then a type error here
+  // rather than an `undefined` id nobody notices.
+  loader: ({ params }) => {
+    loadPrimeAllocations(params.primeId);
+  },
 });
 
 const activitiesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/activities',
   validateSearch: activitiesSearchSchema,
+  loader: loadActivities,
   component: lazyRouteComponent(
     () => import('./ActivitiesRoute'),
     'ActivitiesRoute',

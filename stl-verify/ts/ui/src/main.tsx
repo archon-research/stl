@@ -5,7 +5,7 @@ import { createRoot } from 'react-dom/client';
 
 import { router } from './routes/router';
 import { logging } from './shared/lib/logging';
-import { createAppQueryClient } from './shared/lib/query-client';
+import { queryClient } from './shared/lib/query-client';
 
 // Required global stylesheet side effects.
 // oxlint-disable-next-line import/no-unassigned-import
@@ -42,7 +42,7 @@ createRoot(document.getElementById('root')!).render(
     }}
   >
     <ThemeProvider>
-      <HttpProvider client={createAppQueryClient()}>
+      <HttpProvider client={queryClient}>
         <RouterProvider router={router} />
       </HttpProvider>
     </ThemeProvider>

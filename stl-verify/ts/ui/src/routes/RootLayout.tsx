@@ -116,7 +116,9 @@ function DashboardChrome() {
               onViewChange={(view) =>
                 navigateToView({ view, primeKey: selectedPrimeId })
               }
-              onViewIntent={preloadView}
+              onViewIntent={(view) =>
+                preloadView({ view, primeKey: selectedPrimeId })
+              }
               rangePreset={rangePreset}
               timeRange={timeRange}
               onRangeChange={onRangeChange}
