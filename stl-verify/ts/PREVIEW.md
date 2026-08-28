@@ -54,6 +54,6 @@ Add a dedicated preview route or fixture state when:
 If automated visual regression becomes worthwhile, adopt the uikit preview and Ladle setup rather than reinventing it.
 
 ## Last refreshed from
-- `ui/src/App.tsx`, `ui/src/components/` (`allocations/`, `allocations/tabs/`, `shared/`), `ui/src/data-table/`
+- `ui/src/routes/`, `ui/src/features/` (`allocations/`, `activity/`), `ui/src/shared/` (`ui/`, `hooks/`, `lib/`)
 - `ui/package.json` scripts, `ui/panda.config.ts`, and `DESIGN.md` — all three revised for design-system `0.9.0` (narrowed `staticCss`, upstream `tooltip` recipe, `DataTable` activity feed), so re-read them rather than trusting this list.
 - `npx panda cssgen` output, for the resolved token values the checkpoints above refer to.
