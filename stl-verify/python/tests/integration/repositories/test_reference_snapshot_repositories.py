@@ -115,20 +115,22 @@ async def _insert_position(
     network: str = "ethereum",
     assets: str = "787379142.91",
     build_id: int = 1,
+    wallet_address: str = "0x1111111111111111111111111111111111111111",
 ) -> None:
     await conn.execute(
         """
         INSERT INTO prime_reference_position (
             prime_id, synced_at, network, chain_id, protocol_name, token_symbol, token_name,
-            token_address, assets_usd, allocated_assets_usd, idle_assets_usd, source, build_id
-        ) VALUES ($1, $2, $3, $4, 'sparklend', 'spUSDS', 'Spark USDS', $5, $6, NULL, NULL,
-                  'skyeco:internal:allocations', $7)
+            token_address, wallet_address, assets_usd, allocated_assets_usd, idle_assets_usd, source, build_id
+        ) VALUES ($1, $2, $3, $4, 'sparklend', 'spUSDS', 'Spark USDS', $5, $6, $7, NULL, NULL,
+                  'skyeco:internal:allocations', $8)
         """,
         prime_id,
         synced_at,
         network,
         chain_id,
         token_address,
+        wallet_address,
         Decimal(assets),
         build_id,
     )
@@ -394,6 +396,38 @@ async def test_positions_serve_the_newest_cycle_only(seeded, async_db_url: str):
     assert snapshot is not None
     assert snapshot.synced_at == _CYCLE
     assert [row.assets_usd for row in snapshot.positions] == [Decimal("2")]
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_positions_serve_both_wallets_for_the_same_token(seeded, async_db_url: str):
+    # Grove's positions feed legitimately reports the same (network,
+    # token_address) under two proxy wallets, with materially different
+    # balances on each (verified live: ~$1.02M vs ~$29.0M on the same Uni V3
+    # LP pair). wallet_address is part of row identity, so both must serve
+    # rather than one silently overwriting the other.
+    conn, prime_id, _ = seeded
+    await _insert_stack(conn, prime_id, _CYCLE)
+    await _insert_position(
+        conn,
+        prime_id,
+        _CYCLE,
+        token_address=_UNINDEXED_TOKEN,
+        assets="1020000",
+        wallet_address="0x00000000efe302beaa2b3e6e1b18d08d69a9012a",
+    )
+    await _insert_position(
+        conn,
+        prime_id,
+        _CYCLE,
+        token_address=_UNINDEXED_TOKEN,
+        assets="29000000",
+        wallet_address="0x000000005ce4e5e4e5e4e5e4e5e4e5e4e5e4e5e4",
+    )
+
+    snapshot = await _positions(async_db_url)
+
+    assert snapshot is not None
+    assert sorted(row.assets_usd for row in snapshot.positions) == [Decimal("1020000"), Decimal("29000000")]
 
 
 @pytest.mark.asyncio(loop_scope="module")

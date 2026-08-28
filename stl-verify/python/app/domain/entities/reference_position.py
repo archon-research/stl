@@ -30,11 +30,15 @@ class ReferencePosition:
     Two fields upstream serves are deliberately absent here, dropped because
     nothing read them rather than because they are uninteresting:
 
-    ``wallet_address`` is the ALM proxy holding the position — the grain Verify
-    stores positions at, and absent from the Star monitor's feed, which reports
-    per prime. It was carried as the enabler for a future merge keyed on
-    ``(chain, token, proxy)``. Reinstating it is one field here, one column in
-    ``prime_reference_position`` and one parse in the Go client.
+    ``wallet_address`` is the ALM proxy holding the position. It is now part of
+    ``prime_reference_position``'s row identity in storage (VEC-NA: the same
+    (network, token_address) legitimately recurs under a prime's different
+    proxies, verified live on grove) and is parsed by the Go client and used in
+    this read path's ``DISTINCT ON`` so both proxies' rows still serve — but it
+    is not itself in the response, so two positions that differ only by
+    wallet still read as indistinguishable duplicates here. Serving it is one
+    field here and one in the response contract, once a consumer needs to
+    tell the proxies apart.
 
     ``allocation_type`` is upstream's own category vocabulary (``allocation`` /
     ``asset`` / ``pol`` / ``psm3``), which maps closely onto the ``category``

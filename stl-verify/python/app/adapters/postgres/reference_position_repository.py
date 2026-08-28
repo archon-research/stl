@@ -54,7 +54,7 @@ _POSITIONS_SQL = text(
         LIMIT 1
     ),
     latest AS (
-        SELECT DISTINCT ON (p.network, p.token_address)
+        SELECT DISTINCT ON (p.network, p.token_address, p.wallet_address)
             p.synced_at,
             p.network,
             p.chain_id,
@@ -71,7 +71,7 @@ _POSITIONS_SQL = text(
         FROM prime_reference_position p
         WHERE p.prime_id = (SELECT id FROM target)
           AND p.synced_at = (SELECT synced_at FROM cycle)
-        ORDER BY p.network, p.token_address, p.processing_version DESC
+        ORDER BY p.network, p.token_address, p.wallet_address, p.processing_version DESC
     )
     SELECT
         r.synced_at,

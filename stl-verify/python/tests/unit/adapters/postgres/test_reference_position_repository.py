@@ -151,3 +151,11 @@ def test_the_snapshot_ordering_never_selects_on_build_id() -> None:
     # ordering by it picks an arbitrary row. A behavioural test cannot catch
     # this: seeded corrections happen to agree with build_id order.
     assert "build_id" not in str(_POSITIONS_SQL)
+
+
+def test_the_latest_cycle_selection_keys_on_wallet_address_too() -> None:
+    # Grove legitimately reports the same (network, token_address) under two
+    # proxy wallets. A DISTINCT ON that dropped wallet_address would collapse
+    # them into one row, silently discarding a real position (integration
+    # coverage: test_positions_serve_both_wallets_for_the_same_token).
+    assert "p.wallet_address" in str(_POSITIONS_SQL)
