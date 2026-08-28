@@ -151,6 +151,26 @@ func TestRecordV2Snapshot_LabelsSnapshotType(t *testing.T) {
 	}
 }
 
+func TestRecordUnprobeableCandidate_LabelsReason(t *testing.T) {
+	tel, reader := newRecordingTelemetry(t)
+	tel.RecordUnprobeableCandidate(context.Background(), UnprobeableGasExhausted)
+
+	points := counterPoints(t, reader, "morpho.vault.candidates.unprobeable")
+	if len(points) != 1 {
+		t.Fatalf("got %d data points, want 1", len(points))
+	}
+	want := attribute.NewSet(
+		attribute.String("chain", "mainnet"),
+		attribute.String("reason", string(UnprobeableGasExhausted)),
+	)
+	if !points[0].Attributes.Equals(&want) {
+		t.Errorf("attributes = %v, want %v", points[0].Attributes.Encoded(attribute.DefaultEncoder()), want.Encoded(attribute.DefaultEncoder()))
+	}
+	if points[0].Value != 1 {
+		t.Errorf("value = %d, want 1", points[0].Value)
+	}
+}
+
 func TestNewTelemetry(t *testing.T) {
 	tel, err := NewTelemetry("mainnet")
 	if err != nil {
@@ -189,6 +209,7 @@ func exerciseAllMethods(t *testing.T, tel *Telemetry) {
 	tel.RecordError(ctx, "op", someErr)
 	tel.RecordAdapterMembershipObservation(ctx, adapterTypeFor(entity.MorphoAdapterTypeMarketV1), entity.MembershipFromAddAdapter)
 	tel.RecordV2Snapshot(ctx, v2SnapshotAdapterState)
+	tel.RecordUnprobeableCandidate(ctx, UnprobeableGasExhausted)
 
 	_, span := tel.StartBlockSpan(ctx, 1)
 	span.End()
@@ -227,6 +248,10 @@ func TestTelemetry_NilSafe(t *testing.T) {
 
 	t.Run("RecordV2Snapshot", func(t *testing.T) {
 		tel.RecordV2Snapshot(ctx, v2SnapshotVaultCap)
+	})
+
+	t.Run("RecordUnprobeableCandidate", func(t *testing.T) {
+		tel.RecordUnprobeableCandidate(ctx, UnprobeableGasExhausted)
 	})
 
 	t.Run("StartBlockSpan", func(t *testing.T) {

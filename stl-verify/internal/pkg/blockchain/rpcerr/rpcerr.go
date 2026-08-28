@@ -58,6 +58,20 @@ func IsEVMRevert(err error) bool {
 	return strings.Contains(strings.ToLower(rpcErr.Error()), "execution reverted")
 }
 
+// This is a verdict on the whole batch: what one sub-call of an aggregate3 would
+// answer is established only by issuing it alone.
+func IsGasExhausted(err error) bool {
+	if err == nil {
+		return false
+	}
+	var rpcErr rpc.Error
+	if !errors.As(err, &rpcErr) {
+		return false
+	}
+	msg := strings.ToLower(rpcErr.Error())
+	return strings.Contains(msg, "out of gas") || strings.Contains(msg, "gas required exceeds")
+}
+
 // RequireAllSucceeded returns a non-nil error if any result in results has
 // Success: false, or if results is empty.
 //

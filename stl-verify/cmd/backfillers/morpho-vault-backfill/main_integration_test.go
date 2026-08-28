@@ -23,9 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/mock"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
@@ -456,7 +454,7 @@ func discoverInto(t *testing.T, ctx context.Context, bucket string, vault common
 	if err != nil {
 		t.Fatalf("NewEventExtractor: %v", err)
 	}
-	prober, err := newVaultProber(logger, blockStampedVaultProbe(t))
+	prober, err := newVaultProber(logger, blockStampedVaultProbe(t), cfg.chainID)
 	if err != nil {
 		t.Fatalf("newVaultProber: %v", err)
 	}
@@ -699,45 +697,6 @@ func installTestMeterProvider(t *testing.T) sdkmetric.Reader {
 		}
 	})
 	return reader
-}
-
-// counterValue sums the named int64 counter's data points whose attributes
-// include every entry of want. Attributes outside want are ignored, so a test
-// asserts only the labels it cares about.
-func counterValue(t *testing.T, reader sdkmetric.Reader, name string, want map[string]string) int64 {
-	t.Helper()
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("collecting metrics: %v", err)
-	}
-	var total int64
-	for _, scope := range rm.ScopeMetrics {
-		for _, m := range scope.Metrics {
-			if m.Name != name {
-				continue
-			}
-			sum, ok := m.Data.(metricdata.Sum[int64])
-			if !ok {
-				t.Fatalf("metric %q is %T, want metricdata.Sum[int64]", name, m.Data)
-			}
-			for _, dp := range sum.DataPoints {
-				if hasAttributes(dp.Attributes, want) {
-					total += dp.Value
-				}
-			}
-		}
-	}
-	return total
-}
-
-func hasAttributes(set attribute.Set, want map[string]string) bool {
-	for key, value := range want {
-		got, ok := set.Value(attribute.Key(key))
-		if !ok || got.AsString() != value {
-			return false
-		}
-	}
-	return true
 }
 
 // seedV2VaultRow inserts the protocol, asset token and VaultV2 row a replay

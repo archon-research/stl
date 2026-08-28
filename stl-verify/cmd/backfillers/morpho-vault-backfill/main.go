@@ -42,6 +42,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
@@ -152,7 +153,7 @@ func newBackfillActivities(ctx context.Context, deps temporal.Dependencies, cfg 
 	}
 	multicaller = archiveWrap(multicaller)
 
-	prober, err := newVaultProber(deps.Logger, multicaller)
+	prober, err := newVaultProber(deps.Logger, multicaller, cfg.chainID)
 	if err != nil {
 		return nil, err
 	}
@@ -229,7 +230,7 @@ func dialChain(ctx context.Context, cfg config) (*ethclient.Client, error) {
 	return ethClient, nil
 }
 
-func newVaultProber(logger *slog.Logger, multicaller outbound.Multicaller) (*vaultProber, error) {
+func newVaultProber(logger *slog.Logger, multicaller outbound.Multicaller, chainID int64) (*vaultProber, error) {
 	sharedProber, err := morpho_indexer.NewVaultProber()
 	if err != nil {
 		return nil, fmt.Errorf("creating vault prober: %w", err)
@@ -238,10 +239,19 @@ func newVaultProber(logger *slog.Logger, multicaller outbound.Multicaller) (*vau
 	if err != nil {
 		return nil, fmt.Errorf("loading ERC20 ABI: %w", err)
 	}
+	chainName, err := entity.ChainName(chainID)
+	if err != nil {
+		return nil, fmt.Errorf("resolving the chain name for telemetry: %w", err)
+	}
+	probeTelemetry, err := morpho_indexer.NewTelemetry(chainName)
+	if err != nil {
+		return nil, fmt.Errorf("creating morpho telemetry: %w", err)
+	}
 	return &vaultProber{
 		multicaller:  multicaller,
 		sharedProber: sharedProber,
 		erc20ABI:     erc20ABI,
 		logger:       logger,
+		telemetry:    probeTelemetry,
 	}, nil
 }
