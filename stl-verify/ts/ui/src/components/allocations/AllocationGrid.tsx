@@ -1159,6 +1159,28 @@ export function AllocationGrid({
     [visibleAllocations, riskByPositionKey, riskFetchState, selectedPrime],
   );
 
+  // The API legitimately serves two rows for the same (token, network) when a
+  // prime holds it through two wallets, but exposes no wallet field to tell
+  // them apart, so `getAllocationKey` alone collides. Disambiguate with the
+  // row's occurrence within its identity group (first occurrence keeps the
+  // bare identity, so selection/URL matching by `getAllocationKey` still
+  // hits) rather than the bare array index, which would remount every row on
+  // re-sort.
+  const gridRowKeys = useMemo(() => {
+    const occurrences = new Map<string, number>();
+    const keys = new Map<AllocationGridRow, string>();
+    for (const row of gridRows) {
+      const identity = getAllocationKey(row);
+      const occurrence = occurrences.get(identity) ?? 0;
+      occurrences.set(identity, occurrence + 1);
+      keys.set(row, occurrence === 0 ? identity : `${identity}#${occurrence}`);
+    }
+    return keys;
+  }, [gridRows]);
+
+  const getGridRowKey = (row: AllocationGridRow): string =>
+    gridRowKeys.get(row) ?? getAllocationKey(row);
+
   const columns = useMemo<ColumnDef<AllocationGridRow>[]>(
     () => createAllocationColumns(chainLabels, localProtocols),
     [chainLabels, localProtocols],
@@ -1575,7 +1597,7 @@ export function AllocationGrid({
               onRowClick={(allocation) =>
                 onSelectAllocation(getAllocationKey(allocation))
               }
-              getRowKey={getAllocationKey}
+              getRowKey={getGridRowKey}
               selectedRowKey={selectedAllocationKey}
               density="compact"
               // Six nowrap columns push min-content well past this, so it binds
