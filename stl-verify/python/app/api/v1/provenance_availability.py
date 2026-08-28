@@ -3,7 +3,7 @@
 The UI reads this before it renders anything: a provenance a prime cannot be
 served from is removed from the selector, and a URL asking for one is rewritten
 to a provenance that works. Kept off ``/v1/primes`` so the prime list carries no
-dependency on a third-party feed.
+per-prime coverage read.
 """
 
 import logging
@@ -16,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.adapters.postgres.reference_as_of import ReferenceEffectiveAtProvider
 from app.api.deps import get_engine, get_reference_as_of, get_reference_risk_capital_service_factory
-from app.domain.exceptions import ReferenceDataUnavailableError
 from app.domain.provenance import Provenance
 from app.services.allocation_service import AllocationService
 from app.services.reference_risk_capital_service import ReferenceRiskCapitalService
@@ -34,7 +33,7 @@ class PrimeProvenanceResponse(BaseModel):
         description=(
             "Provenances this prime can be served from. `indexed` is always present — a prime is "
             "only listed because STL indexes it. `reference` and `both` appear together, and only "
-            "when Sky's monitor covers the prime."
+            "when STL has observed at least one reference cycle for the prime."
         ),
         examples=[["indexed", "reference", "both"]],
     )
@@ -45,11 +44,13 @@ class ProvenanceAvailabilityResponse(BaseModel):
 
     primes: list[PrimeProvenanceResponse] = Field(description="One entry per prime STL indexes.")
     reference_upstream_reachable: bool = Field(
+        deprecated=True,
         description=(
-            "Whether Sky's monitor answered. When `false` every prime reports `indexed` alone — "
-            "unknown coverage is reported as no coverage, so a client is never told a provenance is "
-            "available and then handed an error for it."
-        )
+            "DEPRECATED — always `true`. Coverage is now read from STL's own record of the "
+            "reference feeds rather than by calling them, so there is no upstream to be unreachable: "
+            "a read that fails is a `500` and cannot answer at all. Retained so clients that branch "
+            "on it keep working. Read `available` per prime instead."
+        ),
     )
 
 
@@ -77,29 +78,18 @@ async def get_provenance_availability(
     primes = await service.list_primes()
     names = sorted({prime.name for prime in primes})
 
-    try:
-        # Lowercased here too: the port promises it, but a provider added later
-        # should not be able to break coverage by shipping a capital letter.
-        tracked = {star.lower() for star in await reference_services().tracked_stars()}
-        reachable = True
-    except ReferenceDataUnavailableError as exc:
-        # Not a 502: STL's own figures are unaffected, and reporting `indexed`
-        # alone is a true statement about what can be served right now.
-        logger.warning(
-            "Reference coverage unknown; reporting indexed alone",
-            extra={"error_message": str(exc)},
-        )
-        tracked = set()
-        reachable = False
+    # Lowercased here too: the port promises it, but a provider added later
+    # should not be able to break coverage by shipping a capital letter.
+    covered = {star.lower() for star in await reference_services().covered_stars()}
 
     return ProvenanceAvailabilityResponse(
-        reference_upstream_reachable=reachable,
+        reference_upstream_reachable=True,
         primes=[
             PrimeProvenanceResponse(
                 name=name,
                 available=(
                     [Provenance.INDEXED, Provenance.REFERENCE, Provenance.BOTH]
-                    if name.lower() in tracked
+                    if name.lower() in covered
                     else [Provenance.INDEXED]
                 ),
             )

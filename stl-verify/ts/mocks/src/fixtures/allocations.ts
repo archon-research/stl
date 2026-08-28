@@ -18,7 +18,14 @@
  * are read off `TOKENS` by id, so a row cannot name one token and label itself
  * with another's symbol.
  */
-import { DAY_MS, MINUTE_MS, SECOND_MS, iso, offsetIsoAgo } from '../clock.ts';
+import {
+  DAY_MS,
+  MINUTE_MS,
+  REFERENCE_SYNCED_AGO_MS,
+  SECOND_MS,
+  iso,
+  offsetIsoAgo,
+} from '../clock.ts';
 import { positionKeys } from '../identity.ts';
 import type { Allocation, AllocationActivity } from '../schema.ts';
 import type { PrimeName } from './registry.ts';
@@ -32,6 +39,7 @@ import {
 } from './registry.ts';
 
 const LAST_SWEEP_AGO = 5 * MINUTE_MS + 13 * SECOND_MS;
+
 const LAST_TRANSFER_AGO = 85 * SECOND_MS;
 /** The custody snapshot is two months stale on purpose; see DATA_SOURCES. */
 const CUSTODY_SNAPSHOT_AGO = 63 * DAY_MS;
@@ -359,6 +367,7 @@ export function seedReferenceAllocations(
         balance: null,
         scope: 'prime',
         source: 'reference',
+        reference_synced_at: iso(nowMs - REFERENCE_SYNCED_AGO_MS),
       })),
     ...skyOnlyAllocations(nowMs, primeName),
   ];
@@ -381,6 +390,7 @@ function skyOnlyAllocations(nowMs: number, primeName: PrimeName): Allocation[] {
   if (primeName !== 'spark') return [];
 
   const observedAt = iso(nowMs - 13 * MINUTE_MS);
+  const syncedAt = iso(nowMs - REFERENCE_SYNCED_AGO_MS);
   return [
     {
       chain_id: 1,
@@ -390,6 +400,8 @@ function skyOnlyAllocations(nowMs: number, primeName: PrimeName): Allocation[] {
       underlying_token_id: null,
       underlying_token_address: null,
       symbol: 'sparkPrimeUSDC1',
+      // Unresolved against STL's receipt-token registry, like the id/address
+      // above: this feed names no underlying of its own.
       underlying_symbol: '',
       protocol_name: 'Arkis',
       position_keys: [`position:1:${ARKIS_VAULT}`],
@@ -401,6 +413,7 @@ function skyOnlyAllocations(nowMs: number, primeName: PrimeName): Allocation[] {
       category: 'allocation',
       scope: 'prime',
       source: 'reference',
+      reference_synced_at: syncedAt,
     },
     {
       chain_id: 1,
@@ -422,6 +435,7 @@ function skyOnlyAllocations(nowMs: number, primeName: PrimeName): Allocation[] {
       category: 'allocation',
       scope: 'prime',
       source: 'reference',
+      reference_synced_at: syncedAt,
     },
   ];
 }
@@ -451,16 +465,23 @@ export function seedCompositeAllocations(
   );
 
   return [
-    ...indexed.map((allocation): Allocation => ({
-      ...allocation,
-      source:
-        allocation.receipt_token_id != null &&
-        referenceRows.some(
-          (row) => row.receipt_token_id === allocation.receipt_token_id,
-        )
-          ? 'both'
-          : 'indexed',
-    })),
+    ...indexed.map((allocation): Allocation => {
+      const reported =
+        allocation.receipt_token_id != null
+          ? referenceRows.find(
+              (row) => row.receipt_token_id === allocation.receipt_token_id,
+            )
+          : undefined;
+      return {
+        ...allocation,
+        source: reported ? 'both' : 'indexed',
+        // Sky's figure and the cycle it was observed at travel together: the
+        // API sets both in one copy, so a stamp beside an empty comparison
+        // cell is a state staging cannot produce.
+        reference_amount_usd: reported?.amount_usd ?? null,
+        reference_synced_at: reported?.reference_synced_at ?? null,
+      };
+    }),
     ...referenceRows.filter(
       (row) =>
         row.receipt_token_id == null || !indexedIds.has(row.receipt_token_id),

@@ -6,21 +6,30 @@ from typing import cast
 
 import asyncpg
 
+from app.domain.prime_registry import subproxy_addresses
 
-async def insert_token(conn: asyncpg.Connection, symbol: str, decimals: int, address: bytes) -> int:
-    """Insert a chain_id=1 token or return the existing ID."""
+
+async def insert_token(
+    conn: asyncpg.Connection, symbol: str, decimals: int, address: bytes, *, chain_id: int = 1
+) -> int:
+    """Insert a token (mainnet by default) or return the existing ID.
+
+    ``token`` is unique on (chain_id, address), so the same address can be
+    registered on two chains; pass ``chain_id`` to seed the non-mainnet twin.
+    """
     return cast(
         int,
         await conn.fetchval(
             """
         INSERT INTO token (chain_id, address, symbol, decimals)
-        VALUES (1, $1, $2, $3)
+        VALUES ($4, $1, $2, $3)
         ON CONFLICT (chain_id, address) DO UPDATE SET symbol = EXCLUDED.symbol
         RETURNING id
         """,
             address,
             symbol,
             decimals,
+            chain_id,
         ),
     )
 
@@ -42,16 +51,22 @@ async def insert_user(conn: asyncpg.Connection, address: bytes) -> int:
 
 
 async def insert_protocol(
-    conn: asyncpg.Connection, name: str, address: bytes, *, protocol_type: str = "lending"
+    conn: asyncpg.Connection,
+    name: str,
+    address: bytes,
+    *,
+    protocol_type: str = "lending",
+    chain_id: int = 1,
 ) -> int:
-    """Insert a chain_id=1 protocol."""
+    """Insert a protocol (mainnet by default)."""
     return cast(
         int,
         await conn.fetchval(
-            "INSERT INTO protocol (chain_id, address, name, protocol_type) VALUES (1, $1, $2, $3) RETURNING id",
+            "INSERT INTO protocol (chain_id, address, name, protocol_type) VALUES ($4, $1, $2, $3) RETURNING id",
             address,
             name,
             protocol_type,
+            chain_id,
         ),
     )
 
@@ -244,16 +259,22 @@ async def insert_receipt_token_row(
     underlying_token_id: int,
     address: bytes,
     symbol: str,
+    chain_id: int = 1,
 ) -> None:
-    """Insert a chain_id=1 receipt_token row with an explicit protocol/underlying binding."""
+    """Insert a receipt_token row (mainnet by default) with an explicit protocol/underlying binding.
+
+    ``receipt_token`` is unique on (chain_id, receipt_token_address), so one
+    address can be registered on two chains; pass ``chain_id`` to seed the twin.
+    """
     await conn.execute(
         "INSERT INTO receipt_token "
         "(chain_id, protocol_id, underlying_token_id, receipt_token_address, symbol) "
-        "VALUES (1, $1, $2, $3, $4)",
+        "VALUES ($5, $1, $2, $3, $4)",
         protocol_id,
         underlying_token_id,
         address,
         symbol,
+        chain_id,
     )
 
 
@@ -516,6 +537,7 @@ async def insert_allocation_position(
     created_at: dt.datetime | None = None,
     tx_amount: int | Decimal | None = None,
     chain_id: int = 1,
+    build_id: int = 0,
 ) -> None:
     """Insert one allocation_position row (chain_id defaults to mainnet; tx_amount defaults to balance).
 
@@ -525,13 +547,19 @@ async def insert_allocation_position(
     specific buckets for the time-bucketed reads. Pass ``tx_amount`` when a flow
     scenario needs the tx magnitude decoupled from the post-tx balance. Pass
     ``chain_id`` to seed a position on a non-mainnet ALM proxy (e.g. avalanche).
+
+    A reprocessing (``processing_version`` 1) is seeded by repeating a row with a
+    fresh ``build_id`` and the SAME explicit ``created_at``: the assign trigger
+    keys its "already written" lookup on the full row identity INCLUDING
+    ``build_id`` and ``created_at``, so a differing build_id makes it bump the
+    version, and a defaulted NOW() would make it a distinct row at version 0.
     """
     await conn.execute(
         "INSERT INTO allocation_position "
         "(chain_id, token_id, prime_id, proxy_address, balance, "
         "block_number, block_version, tx_hash, log_index, tx_amount, direction, "
-        "underlying_value, underlying_token_id, created_at) "
-        "VALUES ($14, $1, $2, $3, $4, $5, $6, $7, $8, $13, $9, $10, $11, COALESCE($12, NOW()))",
+        "underlying_value, underlying_token_id, created_at, build_id) "
+        "VALUES ($14, $1, $2, $3, $4, $5, $6, $7, $8, $13, $9, $10, $11, COALESCE($12, NOW()), $15)",
         token_id,
         prime_id,
         bytes.fromhex(proxy_hex),
@@ -546,6 +574,7 @@ async def insert_allocation_position(
         created_at,
         Decimal(tx_amount) if tx_amount is not None else Decimal(balance),
         chain_id,
+        build_id,
     )
 
 
@@ -2477,5 +2506,536 @@ async def seed_prime_fan_out(db_url: str, *, with_off_contract_proxy: bool = Fal
                     direction="in",
                     chain_id=8453,
                 )
+    finally:
+        await conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Allocation latest-row seed
+#
+# Exercises every case that distinguishes a correct latest-row read of
+# ``allocation_position_current`` from a wrong one: several versions of one
+# token, a reorg (higher block_version at a LOWER log_index), a reprocessed row
+# (processing_version > 0) both winning its own identity and losing to a later
+# original log, a same-block log_index tie, a sweep colliding with an event row
+# at log_index 0 in either arrival order, a swept-to-zero token, a token with no
+# receipt_token, two receipt tokens over one underlying, a receipt_token bound to
+# a protocol on another chain, two token rows sharing one address across chains
+# so that two cache rows reach a single receipt_token, one address carrying a
+# registered position on each of two chains, and the wallet-lookup registry
+# scenarios.
+#
+# Each ordering key is seeded so that dropping it changes the answer rather than
+# merely tying: a wrong query must FAIL these tests, not coin-flip them.
+# ---------------------------------------------------------------------------
+
+RTL_PROXY_HEX = "5a" * 20
+
+_RTL_PROTOCOL_HEX = "5b" * 20
+_RTL_FOREIGN_PROTOCOL_HEX = "5c" * 20
+_RTL_ORACLE_HEX = "5d" * 20
+_RTL_UNDERLYING_HEX = "5e" * 20
+_RTL_ALT_UNDERLYING_HEX = "5f" * 20
+
+RTL_UNDERLYING_PRICE = Decimal("1.02")
+_RTL_ALT_UNDERLYING_PRICE = Decimal("4.00")
+
+# History blocks sit below every decisive block, so history never wins. Enough
+# rows that the latest-row selection is a real choice rather than a single row.
+_RTL_HISTORY_FIRST_BLOCK = 1_000
+_RTL_HISTORY_ROWS_PER_TOKEN = 30
+_RTL_DECISIVE_BLOCK = 9_000
+
+# One block time per block_number, which is what the tracker writes: rows sharing
+# a block tie on block_timestamp, so direction and tx_hash decide the collisions
+# below rather than the seeding clock.
+_RTL_BLOCK_EPOCH = dt.datetime(2026, 5, 4, 12, 0, tzinfo=dt.UTC)
+
+# Token rows registered on avalanche; their positions are seeded per scenario
+# rather than given the mainnet pre-history every other token gets.
+_RTL_NON_MAINNET_TOKENS = frozenset({"rtlMultiChainAvax"})
+
+# The balance each surviving receipt position must report, per receipt symbol.
+RTL_LATEST_BALANCES = {
+    "rtlVersions": Decimal("300"),
+    "rtlReorg": Decimal("440"),
+    "rtlReprocessed": Decimal("770"),
+    "rtlReprocessOutranked": Decimal("7"),
+    "rtlLogIndex": Decimal("550"),
+    "rtlSharedA": Decimal("110"),
+    "rtlSharedB": Decimal("120"),
+    "rtlAliased": Decimal("900"),
+    "rtlMultiChain": Decimal("111"),
+    "rtlMultiChainAvax": Decimal("222"),
+    "rtlSelfTransfer": Decimal("10"),
+    "rtlSweepTie": Decimal("66"),
+    "rtlSweepFirst": Decimal("76"),
+}
+
+# Rows tied on (block_number, block_version, block_timestamp, log_index) are
+# legal, so the ordering ends on direction then tx_hash to stay total. A tied pair
+# carries the same balance (each path reads balanceOf at one block hash), so the
+# tiebreak settles only the surfaced activity metadata: the sweep wins its
+# collision with an event row at the same log_index, and an out-row wins over the
+# in-row its self-transfer emitted alongside it.
+# Which of a tied pair an untiebroken sort returns is plan-dependent, so these
+# cases pin the resolution rather than relying on seed order to expose its
+# absence.
+RTL_LATEST_ACTIONS = {
+    "rtlSelfTransfer": "out",
+    "rtlSweepTie": "sweep",
+    "rtlSweepFirst": "sweep",
+}
+
+# The direct-holdings read dedups on token_id alone, so it gets its own bare-held
+# tokens: one versioned across blocks, one whose sweep ties an event row.
+RTL_TREASURY_BALANCE = Decimal("5678")
+
+RTL_DIRECT_BALANCES = {
+    "RTLPLAIN": Decimal("700"),
+    "RTLPLAINVER": Decimal("330"),
+    "RTLPLAINTIE": Decimal("88"),
+    "RTLPLAINXCHAIN": Decimal("44"),
+}
+
+# Seeded with positions, absent from the positions list: swept to zero, held
+# bare (no receipt_token), or registered against another chain's protocol.
+RTL_EXCLUDED_SYMBOLS = (
+    "rtlSwept",
+    "RTLPLAIN",
+    "RTLPLAINVER",
+    "RTLPLAINTIE",
+    "RTLPLAINXCHAIN",
+    "rtlForeign",
+)
+
+# Wallet-lookup registry. One receipt-token address registered on two chains,
+# each binding its own underlying; `receipt_token.underlying_token_id` is a bare
+# FK to token.id carrying no chain constraint, so the avalanche registration can
+# and here does point at a mainnet token row. Without rt.chain_id = ap.chain_id
+# the mainnet lookup reaches it and answers with that token's larger holder.
+RTL_WALLET_FALLBACK_RECEIPT_HEX = "a0" * 20
+RTL_WALLET_HELD_RECEIPT_HEX = "a3" * 20
+RTL_WALLET_UNDERLYING_HOLDER_HEX = "b1" * 20
+RTL_WALLET_CROSS_CHAIN_HOLDER_HEX = "b2" * 20
+RTL_WALLET_RECEIPT_HOLDER_HEX = "b3" * 20
+RTL_WALLET_UNDERLYING_BALANCE = Decimal("10")
+RTL_WALLET_CROSS_CHAIN_BALANCE = Decimal("999")
+RTL_WALLET_RECEIPT_BALANCE = Decimal("50")
+# The receipt-token holder also holds the underlying, and more of it, so the
+# fallback branch would outrank it on balance if source_rank stopped working.
+_RTL_WALLET_RECEIPT_HOLDER_UNDERLYING = Decimal("4321")
+
+
+def _rtl_tx(nonce: int) -> str:
+    return f"{nonce:064x}"
+
+
+def rtl_block_time(block: int) -> dt.datetime:
+    return _RTL_BLOCK_EPOCH + dt.timedelta(seconds=block - _RTL_DECISIVE_BLOCK)
+
+
+async def _rtl_insert_history(conn: asyncpg.Connection, *, token_id: int, prime_id: int) -> None:
+    """Bulk-insert one token's pre-history; per-row round trips are too slow at this volume."""
+    await conn.execute(
+        """
+        INSERT INTO allocation_position
+            (chain_id, token_id, prime_id, proxy_address, balance, block_number,
+             block_version, tx_hash, log_index, tx_amount, direction, created_at)
+        SELECT 1, $1, $2, $3, g, $4 + g, 0,
+               decode(lpad(to_hex($1::BIGINT * 1000000 + g), 64, '0'), 'hex'), 0, 1, 'in',
+               $6::timestamptz + make_interval(secs => (($4 + g) - $7)::double precision)
+        FROM generate_series(1, $5) g
+        """,
+        token_id,
+        prime_id,
+        bytes.fromhex(RTL_PROXY_HEX),
+        _RTL_HISTORY_FIRST_BLOCK,
+        _RTL_HISTORY_ROWS_PER_TOKEN,
+        _RTL_BLOCK_EPOCH,
+        _RTL_DECISIVE_BLOCK,
+    )
+
+
+async def _rtl_register_receipt_token(
+    conn: asyncpg.Connection,
+    *,
+    symbol: str,
+    address_byte: int,
+    protocol_id: int,
+    underlying_token_id: int,
+) -> int:
+    """Register a receipt token plus the ERC20 the proxy holds, and return that token's id."""
+    address = bytes([address_byte]) * 20
+    token_id = await insert_token(conn, symbol, 18, address)
+    await insert_receipt_token_row(
+        conn,
+        protocol_id=protocol_id,
+        underlying_token_id=underlying_token_id,
+        address=address,
+        symbol=symbol,
+    )
+    return token_id
+
+
+async def _rtl_seed_registry(conn: asyncpg.Connection) -> dict[str, int]:
+    """Seed protocols, oracle, underlyings and receipt tokens; return token ids by symbol."""
+    protocol_id = await insert_protocol(conn, "rtl_lending", bytes.fromhex(_RTL_PROTOCOL_HEX))
+    foreign_protocol_id = await insert_protocol(
+        conn, "rtl_foreign", bytes.fromhex(_RTL_FOREIGN_PROTOCOL_HEX), chain_id=43114
+    )
+    oracle_id = await insert_oracle(conn, "rtl_oracle", bytes.fromhex(_RTL_ORACLE_HEX))
+    await bind_protocol_oracle(conn, protocol_id, oracle_id)
+    await bind_protocol_oracle(conn, foreign_protocol_id, oracle_id)
+
+    underlying_id = await insert_token(conn, "RTLUND", 18, bytes.fromhex(_RTL_UNDERLYING_HEX))
+    alt_underlying_id = await insert_token(conn, "RTLUND2", 18, bytes.fromhex(_RTL_ALT_UNDERLYING_HEX))
+    for token_id, price in (
+        (underlying_id, RTL_UNDERLYING_PRICE),
+        (alt_underlying_id, _RTL_ALT_UNDERLYING_PRICE),
+    ):
+        await insert_onchain_price(conn, token_id=token_id, oracle_id=oracle_id, price=price, block=1)
+        await insert_oracle_asset(conn, oracle_id, token_id)
+
+    tokens: dict[str, int] = {}
+    receipts = (
+        ("rtlVersions", underlying_id),
+        ("rtlReorg", alt_underlying_id),
+        ("rtlReprocessed", alt_underlying_id),
+        ("rtlReprocessOutranked", alt_underlying_id),
+        ("rtlLogIndex", alt_underlying_id),
+        ("rtlSharedA", underlying_id),
+        ("rtlSharedB", underlying_id),
+        ("rtlSwept", alt_underlying_id),
+        ("rtlSelfTransfer", underlying_id),
+        ("rtlSweepTie", underlying_id),
+        ("rtlSweepFirst", underlying_id),
+    )
+    for offset, (symbol, underlying) in enumerate(receipts):
+        tokens[symbol] = await _rtl_register_receipt_token(
+            conn,
+            symbol=symbol,
+            address_byte=0x60 + offset,
+            protocol_id=protocol_id,
+            underlying_token_id=underlying,
+        )
+
+    # Registered against a protocol on another chain: the positions query joins
+    # protocol on pr.chain_id = ap.chain_id, so a mainnet position in this
+    # receipt token resolves to no protocol and drops out.
+    tokens["rtlForeign"] = await _rtl_register_receipt_token(
+        conn,
+        symbol="rtlForeign",
+        address_byte=0x70,
+        protocol_id=foreign_protocol_id,
+        underlying_token_id=underlying_id,
+    )
+
+    # One address, two token rows (mainnet + avalanche), one mainnet
+    # receipt_token, and MAINNET positions against both token rows. Nothing ties
+    # allocation_position.chain_id to token.chain_id, so both cache rows reach
+    # the single receipt_token unless the token join is chain-qualified — and
+    # then the read emits the position twice.
+    tokens["rtlAliased"] = await _rtl_register_receipt_token(
+        conn,
+        symbol="rtlAliased",
+        address_byte=0x71,
+        protocol_id=protocol_id,
+        underlying_token_id=underlying_id,
+    )
+    tokens["rtlAliasedTwin"] = await insert_token(conn, "rtlAliased", 18, bytes([0x71]) * 20, chain_id=43114)
+
+    # One address registered and held on two chains, each side keeping its own
+    # token row and receipt_token: the chain-qualified join must keep both, not
+    # collapse them.
+    multi_chain_address = bytes([0x73]) * 20
+    tokens["rtlMultiChain"] = await insert_token(conn, "rtlMultiChain", 18, multi_chain_address)
+    tokens["rtlMultiChainAvax"] = await insert_token(conn, "rtlMultiChainAvax", 18, multi_chain_address, chain_id=43114)
+    await insert_receipt_token_row(
+        conn,
+        protocol_id=protocol_id,
+        underlying_token_id=underlying_id,
+        address=multi_chain_address,
+        symbol="rtlMultiChain",
+    )
+    await insert_receipt_token_row(
+        conn,
+        protocol_id=foreign_protocol_id,
+        underlying_token_id=underlying_id,
+        address=multi_chain_address,
+        symbol="rtlMultiChainAvax",
+        chain_id=43114,
+    )
+
+    # Held bare, so these belong to the direct-holdings query, not the receipt
+    # one: its dedup keys on token_id alone, so it needs its own versioned and
+    # tied tokens rather than borrowing the receipt tokens above.
+    for offset, symbol in enumerate(("RTLPLAIN", "RTLPLAINVER", "RTLPLAINTIE", "RTLPLAINXCHAIN")):
+        tokens[symbol] = await insert_token(conn, symbol, 18, bytes([0x90 + offset]) * 20)
+    return tokens
+
+
+async def _rtl_seed_positions(conn: asyncpg.Connection, *, prime_id: int, tokens: dict[str, int]) -> None:
+    """Seed each token's decisive latest rows on top of its pre-history."""
+    for symbol, token_id in tokens.items():
+        if symbol not in _RTL_NON_MAINNET_TOKENS:
+            await _rtl_insert_history(conn, token_id=token_id, prime_id=prime_id)
+
+    async def position(token_id: int, *, block: int = _RTL_DECISIVE_BLOCK, **kwargs) -> None:
+        kwargs.setdefault("direction", "in")
+        kwargs.setdefault("created_at", rtl_block_time(block))
+        await insert_allocation_position(
+            conn, token_id=token_id, prime_id=prime_id, proxy_hex=RTL_PROXY_HEX, block=block, **kwargs
+        )
+
+    later_balances = (Decimal("100"), Decimal("200"), RTL_LATEST_BALANCES["rtlVersions"])
+    for index, balance in enumerate(later_balances):
+        await position(tokens["rtlVersions"], balance=balance, block=_RTL_DECISIVE_BLOCK + index, tx=_rtl_tx(1 + index))
+
+    # Reorg: the republished block carries block_version 1 and must win. Its
+    # log_index is LOWER than the superseded row's, so an ordering that drops
+    # block_version picks the stale 44 rather than merely tying.
+    await position(tokens["rtlReorg"], balance=Decimal("44"), tx=_rtl_tx(10), log_index=5)
+    await position(
+        tokens["rtlReorg"],
+        balance=RTL_LATEST_BALANCES["rtlReorg"],
+        tx=_rtl_tx(10),
+        block_version=1,
+        log_index=1,
+    )
+
+    # Reprocessing: same row identity, fresh build_id, so the trigger assigns
+    # processing_version 1 and the corrected balance must win over version 0.
+    for build_id, balance in ((0, Decimal("77")), (1, RTL_LATEST_BALANCES["rtlReprocessed"])):
+        await position(tokens["rtlReprocessed"], balance=balance, tx=_rtl_tx(20), build_id=build_id)
+
+    # The same correction beside a LATER original log in the same block:
+    # processing_version ranks below log_index, so the untouched log_index 9 row
+    # wins. Ranked above it, a correction to one log would beat a different log.
+    for build_id, balance in ((0, Decimal("77")), (1, Decimal("770"))):
+        await position(tokens["rtlReprocessOutranked"], balance=balance, tx=_rtl_tx(21), build_id=build_id)
+    await position(
+        tokens["rtlReprocessOutranked"],
+        balance=RTL_LATEST_BALANCES["rtlReprocessOutranked"],
+        tx=_rtl_tx(22),
+        log_index=9,
+    )
+
+    # Two events in one block: the higher log_index is the later one.
+    await position(tokens["rtlLogIndex"], balance=Decimal("55"), tx=_rtl_tx(30), log_index=3)
+    await position(
+        tokens["rtlLogIndex"],
+        balance=RTL_LATEST_BALANCES["rtlLogIndex"],
+        tx=_rtl_tx(31),
+        log_index=9,
+    )
+
+    for symbol, nonce in (("rtlSharedA", 40), ("rtlSharedB", 41)):
+        await position(tokens[symbol], balance=RTL_LATEST_BALANCES[symbol], tx=_rtl_tx(nonce))
+
+    # Swept to zero after a non-zero balance, in the SAME block: an open-position
+    # filter applied before the latest-row pick — at either stage — resurrects
+    # the stale 500 instead of dropping the token.
+    await position(tokens["rtlSwept"], balance=Decimal("500"), tx=_rtl_tx(50))
+    await position(tokens["rtlSwept"], balance=Decimal("0"), tx=_rtl_tx(51), log_index=4, direction="sweep")
+
+    await position(tokens["rtlForeign"], balance=Decimal("600"), tx=_rtl_tx(60))
+
+    await position(tokens["RTLPLAIN"], balance=RTL_DIRECT_BALANCES["RTLPLAIN"], tx=_rtl_tx(70))
+    for index, balance in enumerate((Decimal("11"), Decimal("22"), RTL_DIRECT_BALANCES["RTLPLAINVER"])):
+        await position(
+            tokens["RTLPLAINVER"], balance=balance, block=_RTL_DECISIVE_BLOCK + index, tx=_rtl_tx(71 + index)
+        )
+    await position(tokens["RTLPLAINTIE"], balance=RTL_DIRECT_BALANCES["RTLPLAINTIE"], tx=_rtl_tx(0), direction="sweep")
+    await position(tokens["RTLPLAINTIE"], balance=Decimal("80"), tx=_rtl_tx(75))
+
+    # One token row, a position on each of two chains at the same block number —
+    # chains number their blocks independently, and nothing forces a position's
+    # chain onto its token row's. So the direct-holdings dedup still has two cache
+    # rows to choose between for one token_id, and only direction separates them:
+    # dropping it leaves tx_hash to hand the event row the sweep should win.
+    await position(tokens["RTLPLAINXCHAIN"], balance=Decimal("41"), tx=_rtl_tx(76))
+    await position(
+        tokens["RTLPLAINXCHAIN"],
+        balance=RTL_DIRECT_BALANCES["RTLPLAINXCHAIN"],
+        tx=_rtl_tx(0),
+        direction="sweep",
+        chain_id=43114,
+    )
+
+    # A proxy transferring to itself: one log, one tx_hash, one log_index, an
+    # out-row and an in-row. Same balance either way, so only the reported action
+    # moves — and it must not move between deploys.
+    for direction in ("in", "out"):
+        await position(
+            tokens["rtlSelfTransfer"],
+            balance=RTL_LATEST_BALANCES["rtlSelfTransfer"],
+            tx=_rtl_tx(100),
+            log_index=2,
+            direction=direction,
+        )
+
+    # A sweep reconciles the on-chain balance and carries no tx_hash or log_index,
+    # so it collides with any event row at log_index 0 in the same block. Seeded
+    # in both arrival orders, because the cache resolves the collision as it is
+    # written and only the ordering makes that independent of arrival.
+    await position(tokens["rtlSweepTie"], balance=Decimal("60"), tx=_rtl_tx(101))
+    await position(tokens["rtlSweepTie"], balance=RTL_LATEST_BALANCES["rtlSweepTie"], tx=_rtl_tx(0), direction="sweep")
+    await position(
+        tokens["rtlSweepFirst"], balance=RTL_LATEST_BALANCES["rtlSweepFirst"], tx=_rtl_tx(0), direction="sweep"
+    )
+    await position(tokens["rtlSweepFirst"], balance=Decimal("70"), tx=_rtl_tx(102))
+
+    # Each chain's own token row and receipt_token, held on its own chain.
+    await position(tokens["rtlMultiChain"], balance=RTL_LATEST_BALANCES["rtlMultiChain"], tx=_rtl_tx(90))
+    await position(
+        tokens["rtlMultiChainAvax"],
+        balance=RTL_LATEST_BALANCES["rtlMultiChainAvax"],
+        block=_RTL_DECISIVE_BLOCK + 100,
+        tx=_rtl_tx(91),
+        chain_id=43114,
+    )
+
+    # Both rows are MAINNET positions; only the token row they point at differs,
+    # and the twin's block is the lower one so the alias resolves to rtlAliased
+    # whether or not the token join is chain-qualified — the duplicate, not the
+    # winner, is what the qualification removes.
+    await position(tokens["rtlAliasedTwin"], balance=Decimal("800"), tx=_rtl_tx(80))
+    await position(
+        tokens["rtlAliased"],
+        balance=RTL_LATEST_BALANCES["rtlAliased"],
+        block=_RTL_DECISIVE_BLOCK + 1,
+        tx=_rtl_tx(81),
+    )
+
+    await _rtl_seed_treasury_tie(conn, prime_id=prime_id)
+    await _rtl_seed_wallet_lookup(conn, prime_id=prime_id)
+
+
+async def _rtl_seed_treasury_tie(conn: asyncpg.Connection, *, prime_id: int) -> None:
+    """Tie the prime's SubProxy treasury the same way, for the total-capital read.
+
+    That read scopes to the SubProxy wallets rather than the ALM proxy, so it
+    needs its own rows; USDS is dollar-pegged, so the balance IS the USD figure.
+    """
+    usds_id = await conn.fetchval(
+        "SELECT id FROM token WHERE chain_id = 1 AND address = $1", bytes.fromhex(_FAN_OUT_USDS_HEX)
+    )
+    if usds_id is None:
+        raise RuntimeError("USDS token not seeded by migrations")
+    subproxy_hex = sorted(subproxy_addresses())[0][2:]
+    for balance, tx, direction in (
+        (Decimal("1234"), _rtl_tx(110), "in"),
+        (RTL_TREASURY_BALANCE, _rtl_tx(0), "sweep"),
+    ):
+        await insert_allocation_position(
+            conn,
+            token_id=usds_id,
+            prime_id=prime_id,
+            proxy_hex=subproxy_hex,
+            balance=balance,
+            block=_RTL_DECISIVE_BLOCK,
+            created_at=rtl_block_time(_RTL_DECISIVE_BLOCK),
+            tx=tx,
+            direction=direction,
+        )
+
+
+async def _rtl_seed_wallet_lookup(conn: asyncpg.Connection, *, prime_id: int) -> None:
+    """Seed the crypto-lending wallet lookup's two branches and its cross-chain trap."""
+    protocol_id = await conn.fetchval("SELECT id FROM protocol WHERE chain_id = 1 AND name = 'rtl_lending'")
+    foreign_protocol_id = await conn.fetchval("SELECT id FROM protocol WHERE chain_id = 43114 AND name = 'rtl_foreign'")
+
+    underlying_id = await insert_token(conn, "RTLWUND", 18, bytes([0xA1]) * 20)
+    cross_chain_underlying_id = await insert_token(conn, "RTLWUNDX", 18, bytes([0xA2]) * 20)
+    # Its own underlying, so the receipt-token holder's larger underlying balance
+    # is a candidate in the held scenario only and cannot answer the fallback one.
+    held_underlying_id = await insert_token(conn, "RTLWUNDH", 18, bytes([0xA4]) * 20)
+
+    fallback_address = bytes.fromhex(RTL_WALLET_FALLBACK_RECEIPT_HEX)
+    await insert_token(conn, "rtlWalletFallback", 18, fallback_address)
+    await insert_receipt_token_row(
+        conn,
+        protocol_id=protocol_id,
+        underlying_token_id=underlying_id,
+        address=fallback_address,
+        symbol="rtlWalletFallback",
+    )
+    await insert_receipt_token_row(
+        conn,
+        protocol_id=foreign_protocol_id,
+        underlying_token_id=cross_chain_underlying_id,
+        address=fallback_address,
+        symbol="rtlWalletFallbackAvax",
+        chain_id=43114,
+    )
+
+    held_address = bytes.fromhex(RTL_WALLET_HELD_RECEIPT_HEX)
+    held_token_id = await insert_token(conn, "rtlWalletHeld", 18, held_address)
+    await insert_receipt_token_row(
+        conn,
+        protocol_id=protocol_id,
+        underlying_token_id=held_underlying_id,
+        address=held_address,
+        symbol="rtlWalletHeld",
+    )
+
+    async def wallet_position(*, token_id: int, proxy_hex: str, balance: Decimal, block: int, nonce: int) -> None:
+        await insert_allocation_position(
+            conn,
+            token_id=token_id,
+            prime_id=prime_id,
+            proxy_hex=proxy_hex,
+            balance=balance,
+            block=block,
+            created_at=rtl_block_time(block),
+            tx=_rtl_tx(nonce),
+            direction="in",
+        )
+
+    await wallet_position(
+        token_id=underlying_id,
+        proxy_hex=RTL_WALLET_UNDERLYING_HOLDER_HEX,
+        balance=RTL_WALLET_UNDERLYING_BALANCE,
+        block=_RTL_DECISIVE_BLOCK,
+        nonce=120,
+    )
+    await wallet_position(
+        token_id=cross_chain_underlying_id,
+        proxy_hex=RTL_WALLET_CROSS_CHAIN_HOLDER_HEX,
+        balance=RTL_WALLET_CROSS_CHAIN_BALANCE,
+        block=_RTL_DECISIVE_BLOCK,
+        nonce=121,
+    )
+    for block, balance in ((_RTL_DECISIVE_BLOCK, Decimal("5")), (_RTL_DECISIVE_BLOCK + 1, RTL_WALLET_RECEIPT_BALANCE)):
+        await wallet_position(
+            token_id=held_token_id,
+            proxy_hex=RTL_WALLET_RECEIPT_HOLDER_HEX,
+            balance=balance,
+            block=block,
+            nonce=122 + block - _RTL_DECISIVE_BLOCK,
+        )
+    await wallet_position(
+        token_id=held_underlying_id,
+        proxy_hex=RTL_WALLET_RECEIPT_HOLDER_HEX,
+        balance=_RTL_WALLET_RECEIPT_HOLDER_UNDERLYING,
+        block=_RTL_DECISIVE_BLOCK,
+        nonce=125,
+    )
+
+
+async def seed_receipt_position_latest_rows(db_url: str) -> None:
+    """Seed the allocation latest-row scenarios into the given database."""
+    conn = await asyncpg.connect(db_url)
+    try:
+        async with conn.transaction():
+            prime_id = await conn.fetchval("SELECT id FROM prime ORDER BY id LIMIT 1")
+            if prime_id is None:
+                raise RuntimeError("no prime seeded by migrations")
+            # prime_proxy is reference data (VEC-651): the treasury read resolves the
+            # prime through it, so positions alone do not make _PROXY resolvable.
+            await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=RTL_PROXY_HEX)
+            tokens = await _rtl_seed_registry(conn)
+            await _rtl_seed_positions(conn, prime_id=prime_id, tokens=tokens)
     finally:
         await conn.close()
