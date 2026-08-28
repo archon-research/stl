@@ -18,17 +18,17 @@ import {
 } from '../../shared/lib/dashboard';
 import type { PrimeRiskCapital } from '../../shared/types/allocation';
 import { ExposureCard, PrimeCollateralCard } from './HiddenMetricCards';
+import { MetricCardLegend, MetricCardTrend } from './metricCardChart';
 import {
   MetricCard,
   MetricCardError,
-  MetricCardLegend,
   MetricCardSkeleton,
-  MetricCardTrend,
   type MetricChartSpec,
   metricCaptionClassName,
   metricDetailClassName,
   metricsGridClassName,
   metricsGridStyle,
+  MetricsBandSkeleton,
   preferredFigure,
   TOP_METRIC_CARD_LABELS,
   type TopMetricCard,
@@ -51,7 +51,7 @@ type BandCharts = {
   debt: MetricChartSpec | null;
 };
 
-type PrimeMetricsBandProps = {
+export type PrimeMetricsBandProps = {
   isSkeleton: boolean;
   hasTopMetrics: boolean;
   summary: AllocationTotals | null;
@@ -443,19 +443,7 @@ export function PrimeMetricsBand({
   chartsErrorMessage,
 }: PrimeMetricsBandProps) {
   if (isSkeleton) {
-    return (
-      <div
-        className={metricsGridClassName}
-        style={metricsGridStyle(VISIBLE_TOP_METRIC_CARDS.length)}
-      >
-        {VISIBLE_TOP_METRIC_CARDS.map((card) => (
-          <MetricCardSkeleton
-            key={`metrics-skeleton-${card}`}
-            label={TOP_METRIC_CARD_LABELS[card]}
-          />
-        ))}
-      </div>
-    );
+    return <MetricsBandSkeleton />;
   }
 
   if (!hasTopMetrics) {

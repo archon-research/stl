@@ -81,6 +81,57 @@ export default defineConfig(({ mode }) => {
     build: {
       outDir: 'dist',
       sourcemap: false,
+      rolldownOptions: {
+        output: {
+          // Vite 8 bundles with rolldown: `manualChunks` survives only as a
+          // deprecated Rollup shim and `advancedChunks` is ignored whenever
+          // this is present. Groups only shape chunks that something already
+          // splits -- the dynamic imports in `MetricsBand`, `AllocationDrawer`,
+          // `MethodologyPanel` and the routes are what create the boundaries;
+          // these decide which vendor code lands on which side of them.
+          codeSplitting: {
+            // Below this a group is dropped and its modules fall back to
+            // automatic chunking, so a near-empty group cannot cost a request.
+            minSize: 20_000,
+            groups: [
+              // Reached only from the collapsed methodology panel.
+              {
+                name: 'markdown',
+                priority: 30,
+                entriesAware: true,
+                test: /node_modules\/(react-markdown|micromark|mdast-|hast-|unified|vfile|property-information|character-entities|decode-named|stringify-entities|trough|bail|zwitch|longest-streak|ccount|devlop|trim-lines|is-plain-obj|extend|@ungap\/structured-clone|inline-style-parser|space-separated|comma-separated|html-url-attributes)/,
+              },
+              // Reached only from the metrics band.
+              {
+                name: 'charts',
+                priority: 30,
+                entriesAware: true,
+                test: /node_modules\/(@archon-research\/charting|@visx|d3-|internmap|delaunator|robust-predicates|@react-spring|react-spring|reduce-css-calc|math-expression-evaluator)/,
+              },
+              {
+                name: 'react',
+                priority: 20,
+                test: /node_modules\/(react|react-dom|scheduler)\//,
+              },
+              {
+                name: 'router',
+                priority: 20,
+                test: /node_modules\/@tanstack\/[^/]*(router|history|store)/,
+              },
+              // Everything the design system and its Ark/Zag primitives bring.
+              // `entriesAware` matters here: merged flat, the modules only the
+              // drawer and the band use would ride in the chunk the entry
+              // loads, which is the whole point of splitting them out.
+              {
+                name: 'design',
+                priority: 10,
+                entriesAware: true,
+                test: /node_modules\/(@archon-research\/|@ark-ui|@zag-js|@floating-ui|@internationalized|@tanstack\/[^/]*(table|virtual))/,
+              },
+            ],
+          },
+        },
+      },
     },
     // Vitest reuses this config, so `#src/*`, `#styled-system/*` and
     // preserveSymlinks resolve in tests exactly as they do in the app.

@@ -1,3 +1,6 @@
+import { SkeletonStack } from '@archon-research/design-system';
+import { lazy, Suspense, useState } from 'react';
+
 import { css } from '#styled-system/css';
 
 import {
@@ -14,8 +17,19 @@ import type {
 } from '../../shared/types/allocation';
 import type { LocalProtocolRow } from '../../shared/types/local-data';
 import { ChainLogo, ProtocolLogo, TokenLogo } from '../../shared/ui';
-import { BottomPanel } from './BottomPanel';
 import { RiskDetailDrawer } from './RiskDetailDrawer';
+
+/**
+ * The drawer's body: three tabs, the activity feed and the backing-collateral
+ * table, and the only user of `@tanstack/react-table`'s heavier features.
+ *
+ * The frame around it stays eager because it is always mounted, but nothing in
+ * here is reachable until a row is clicked, so it downloads on the pointer
+ * reaching the grid (see `preloadAllocationDetail`) rather than on first paint.
+ */
+const BottomPanel = lazy(async () => ({
+  default: (await import('./BottomPanel')).BottomPanel,
+}));
 
 type AllocationDrawerProps = {
   allocations: Allocation[];
@@ -80,6 +94,16 @@ export function AllocationDrawer({
   selectedAllocation,
   selectedPrime,
 }: AllocationDrawerProps) {
+  // Mounted from the first open and never unmounted after: the body is a
+  // dynamic import, and dropping it on close would blank the panel for the
+  // whole slide-out. Before that first open there is nothing to show, so its
+  // chunk is never fetched -- `preloadAllocationDetail` warms it on the pointer
+  // reaching the grid, which is well ahead of the click.
+  const [hasOpened, setHasOpened] = useState(isOpen);
+  if (isOpen && !hasOpened) {
+    setHasOpened(true);
+  }
+
   const protocolLabel = selectedAllocation
     ? getProtocolLabel(
         selectedAllocation.protocol_name,
@@ -143,16 +167,26 @@ export function AllocationDrawer({
         )
       }
     >
-      <BottomPanel
-        allocations={allocations}
-        chainLabels={chainLabels}
-        errorMessage={errorMessage}
-        isDrawerOpen={isOpen}
-        isLoading={isLoading}
-        selectedAllocation={selectedAllocation}
-        selectedPrime={selectedPrime}
-        riskCapital={riskCapital}
-      />
+      {!hasOpened ? null : (
+        <Suspense
+          fallback={
+            <div className={css({ px: { base: '5', md: '7' }, py: '6' })}>
+              <SkeletonStack count={3} />
+            </div>
+          }
+        >
+          <BottomPanel
+            allocations={allocations}
+            chainLabels={chainLabels}
+            errorMessage={errorMessage}
+            isDrawerOpen={isOpen}
+            isLoading={isLoading}
+            selectedAllocation={selectedAllocation}
+            selectedPrime={selectedPrime}
+            riskCapital={riskCapital}
+          />
+        </Suspense>
+      )}
     </RiskDetailDrawer>
   );
 }

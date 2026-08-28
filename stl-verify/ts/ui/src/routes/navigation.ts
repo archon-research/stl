@@ -1,4 +1,4 @@
-import { useMatchRoute, useNavigate } from '@tanstack/react-router';
+import { useMatchRoute, useNavigate, useRouter } from '@tanstack/react-router';
 import { useCallback } from 'react';
 
 import type { AppSearchPatch } from '../shared/lib/search-params';
@@ -63,5 +63,26 @@ export function useViewNavigation(): (target: ViewNavigation) => void {
       });
     },
     [navigate],
+  );
+}
+
+/**
+ * Fetches a view's chunk and runs its loader, ahead of the click.
+ *
+ * `defaultPreload: 'intent'` does this for `<Link>`, and the view switcher is a
+ * tablist of buttons rather than links -- the two views are one screen with a
+ * shared shell, which is what the tab metaphor says. So the hover signal is
+ * wired by hand here instead.
+ */
+export function useViewPreload(): (view: DashboardView) => void {
+  const router = useRouter();
+
+  return useCallback(
+    (view: DashboardView) => {
+      void router.preloadRoute({
+        to: view === 'activities' ? '/activities' : '/allocation',
+      });
+    },
+    [router],
   );
 }

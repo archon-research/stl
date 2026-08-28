@@ -8,7 +8,11 @@ import { useUpdateSearch } from '../shared/hooks/useUpdateSearch';
 import { CollapsibleSidebarLayout } from '../shared/ui/CollapsibleSidebarLayout';
 import { PrimeSidebar } from '../shared/ui/PrimeSidebar';
 import { TopBar } from '../shared/ui/TopBar';
-import { useSelectedView, useViewNavigation } from './navigation';
+import {
+  useSelectedView,
+  useViewNavigation,
+  useViewPreload,
+} from './navigation';
 import { PrimeSelectionProvider, usePrimeSelection } from './prime-selection';
 import { TimeRangeProvider, useTimeRange } from './time-range';
 import { useDashboardFilters } from './useDashboardFilters';
@@ -36,6 +40,7 @@ const shellClassName = css({
 function DashboardChrome() {
   const selectedView = useSelectedView();
   const navigateToView = useViewNavigation();
+  const preloadView = useViewPreload();
   const updateSearch = useUpdateSearch();
   const search = useSearch({ from: '__root__' });
   const activitiesSearch = useSearch({
@@ -111,6 +116,7 @@ function DashboardChrome() {
               onViewChange={(view) =>
                 navigateToView({ view, primeKey: selectedPrimeId })
               }
+              onViewIntent={preloadView}
               rangePreset={rangePreset}
               timeRange={timeRange}
               onRangeChange={onRangeChange}

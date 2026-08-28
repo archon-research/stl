@@ -1,9 +1,8 @@
 import { formatUsdValue } from '../../shared/lib/dashboard';
 import type { PrimeRiskCapital } from '../../shared/types/allocation';
+import { MetricCardLegend, MetricCardTrend } from './metricCardChart';
 import {
   MetricCard,
-  MetricCardLegend,
-  MetricCardTrend,
   type MetricChartSpec,
   metricCaptionClassName,
   metricDetailClassName,
