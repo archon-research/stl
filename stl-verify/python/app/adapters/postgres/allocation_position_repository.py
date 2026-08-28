@@ -184,16 +184,6 @@ class AllocationRepository:
                 result = await conn.execute(
                     text(
                         """
-                        -- One row per (proxy, chain), which is prime_proxy's
-                        -- primary key — so this is the table read directly rather
-                        -- than a DISTINCT ON recovering the same set by sorting
-                        -- every allocation_position row.
-                        --
-                        -- prime_proxy is the declared proxy universe, so this
-                        -- lists a proxy from the moment it is onboarded. A proxy
-                        -- no tracker has indexed yet appears here with an empty
-                        -- series behind it, which is the intended behaviour: the
-                        -- listing follows the contract, not ingest.
                         SELECT
                             p.name,
                             encode(pp.proxy_address, 'hex') AS address,
@@ -237,12 +227,6 @@ class AllocationRepository:
             raise ValueError(f"Database query failed while fetching primes: {exc}") from exc
 
     async def prime_exists(self, prime_address: EthAddress) -> bool:
-        # "Is this a proxy STL knows about", answered from the declared list in
-        # prime_proxy — the same table /v1/primes is built from, so the two cannot
-        # disagree. It deliberately does NOT mean "has allocation_position rows":
-        # a declared proxy that no tracker has indexed yet is a real prime address
-        # whose series is simply empty, and 404 would be the wrong answer for it.
-        # An address absent from the declared list is still a 404.
         query = text(
             """
             SELECT 1
@@ -853,17 +837,9 @@ class AllocationRepository:
         return buckets
 
     async def list_prime_proxy_addresses(self, prime_address: EthAddress) -> list[EthAddress]:
-        """Return every allocation proxy of the prime that owns ``prime_address``.
+        """Return every ALM proxy of the prime that owns ``prime_address``.
 
-        Resolved from ``prime_proxy``, the declared proxy universe transcribed
-        from the axis-synome contract. ``/v1/primes`` is built from the same table,
-        so server and client cannot disagree about what a prime is. A proxy that is
-        declared but not yet indexed widens the set and contributes nothing, which
-        is correct: it is part of the prime.
-
-        SubProxy treasury wallets are excluded — they hold total capital, not
-        allocations. Returns ``[prime_address]`` for an address with no rows, so
-        the caller narrows to it rather than widening to everything.
+        Returns ``[prime_address]`` for an unknown address.
         """
         subproxies = [bytes.fromhex(address[2:]) for address in subproxy_addresses()]
         query = text("""
@@ -897,16 +873,7 @@ class AllocationRepository:
     async def primary_proxy_address(self, prime_address: EthAddress) -> str | None:
         """Return the proxy that carries this prime's prime-scoped rows, or ``None``.
 
-        Prime-scoped rows (the Anchorage custody leg) must be attributed to exactly
-        one of a prime's proxies, or a consumer unioning them double-counts. The pick
-        comes from ``prime_proxy``, the declared proxy universe, which is also what
-        ``/v1/primes`` is built from — so it cannot name a proxy a client does not
-        group by. Mainnet wins when present, else the lowest address, so the pick is
-        deterministic and moves only when the prime's declared proxy set does. It
-        needs the proxy set and each proxy's chain, never a block ordering.
-
-        SubProxy treasury wallets are excluded: they hold the denominator, not
-        allocations, and must never carry an allocation row.
+        Mainnet wins when present, else the lowest address.
         """
         subproxies = [bytes.fromhex(address[2:]) for address in subproxy_addresses()]
         query = text(

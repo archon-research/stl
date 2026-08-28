@@ -77,13 +77,7 @@ class PrimeDebtRepository:
         """
 
     async def resolve_prime_id(self, prime_address: EthAddress) -> int | None:
-        """Resolve either prime identity to its ``prime.id``, or ``None`` if unknown.
-
-        ``prime_proxy`` holds one row per (chain, proxy) and asserts one prime per
-        proxy, so the proxy arm matches at most one prime. A vault match still wins
-        over a proxy match, and the ``p.id`` tiebreak keeps resolution deterministic
-        if one address somehow satisfies both.
-        """
+        """Resolve either prime identity (vault or proxy address) to ``prime.id``."""
         query = text(
             """
             SELECT p.id

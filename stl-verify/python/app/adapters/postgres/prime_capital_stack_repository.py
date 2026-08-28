@@ -93,8 +93,6 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
           AND pbs.observed_at < CAST(:from_timestamp AS TIMESTAMPTZ)
           AND pbs.observed_at >= CAST(:from_timestamp AS TIMESTAMPTZ) - INTERVAL '90 days'
     ), ranked AS (
-        -- Rank once, here. The six figures below then read this CTE without
-        -- sorting it again, where each used to sort the whole of `pre` itself.
         SELECT
             observed_at, total_risk_capital_usd, exposure_usd, encumbrance_ratio, assets_usd,
             row_number() OVER (
@@ -138,8 +136,6 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
         --
         -- Bounded, because a figure this stale is not a current reading. Callers
         -- pair it with the observation time so age is visible rather than implied.
-        -- Exactly one row of `ranked` matches each rank, so max() collapses it
-        -- without imposing an order of its own — the rank carries the ordering.
         SELECT
             max(ranked.total_risk_capital_usd) FILTER (WHERE ranked.rank = first_rank.total_capital)
                 AS total_capital_usd,
