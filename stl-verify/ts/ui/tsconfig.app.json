@@ -5,6 +5,7 @@
     "types": ["vite/client"],
     "jsx": "react-jsx",
     "composite": true,
+    "noUncheckedIndexedAccess": true,
     "preserveSymlinks": true,
     "paths": {
       "#src/*": ["./src/*"],

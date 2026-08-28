@@ -904,18 +904,19 @@ function App() {
       return [];
     }
 
-    const series = new Array<ChartDatum>(activityBuckets.length);
+    // Walked newest-first because each point is the one after it less its own
+    // net flow, then flipped back into the ascending order the charts assume.
+    const newestFirst: ChartDatum[] = [];
     let balance = primeTotalAllocationUsd;
-    for (let index = activityBuckets.length - 1; index >= 0; index -= 1) {
-      const bucket = activityBuckets[index];
-      series[index] = {
+    for (const bucket of [...activityBuckets].reverse()) {
+      newestFirst.push({
         label: formatChartTimestampLabel(bucket.bucket_start),
         value: Math.max(balance, 0),
         timestamp: Date.parse(bucket.bucket_start),
-      };
+      });
       balance -= parseNumericValue(bucket.net_flow_usd) ?? 0;
     }
-    return series;
+    return newestFirst.reverse();
   }, [activityBuckets, primeTotalAllocationUsd, rangePreset]);
 
   const primeDebtSeries = useMemo<ChartDatum[]>(
