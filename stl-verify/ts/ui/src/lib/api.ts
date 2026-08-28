@@ -11,10 +11,8 @@ import type {
   PrimeDebtEnvelope,
   PrimeRiskCapital,
   PrimeDebtSnapshot,
-  PrimesResponse,
   ProtocolEventsResponse,
   Provenance,
-  ProvenanceAvailability,
   RiskBreakdown,
   Rrc,
   Token,
@@ -23,7 +21,6 @@ import type {
   TotalCapitalEnvelope,
   TxProtocolEventsResponse,
 } from '../types/allocation';
-import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
 import { logging } from './logging';
 import { showsReference, sourceQuery } from './provenance';
 
@@ -109,23 +106,6 @@ async function requestData<TData, TError>(
   return data;
 }
 
-export function getPrimes(signal?: AbortSignal): Promise<PrimesResponse> {
-  return requestData(apiClient.GET('/v1/primes', { signal }), 'GET /v1/primes');
-}
-
-export function getChains(signal?: AbortSignal): Promise<LocalChainRow[]> {
-  return requestData(apiClient.GET('/v1/chains', { signal }), 'GET /v1/chains');
-}
-
-export function getProtocols(
-  signal?: AbortSignal,
-): Promise<LocalProtocolRow[]> {
-  return requestData(
-    apiClient.GET('/v1/protocols', { signal }),
-    'GET /v1/protocols',
-  );
-}
-
 function getAllocations(
   primeId: string,
   signal?: AbortSignal,
@@ -160,15 +140,6 @@ export async function getAllocationsForProxies(
     proxyAddresses.map((proxyAddress) => getAllocations(proxyAddress, signal)),
   );
   return perProxyAllocations.flat();
-}
-
-export function getProvenanceAvailability(
-  signal?: AbortSignal,
-): Promise<ProvenanceAvailability> {
-  return requestData(
-    apiClient.GET('/v1/provenance/available', { signal }),
-    'GET /v1/provenance/available',
-  );
 }
 
 export function getPrimeRiskCapital(

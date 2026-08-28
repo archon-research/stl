@@ -1,9 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { useMemo } from 'react';
 
-import { getProvenanceAvailability } from '../lib/api';
-import { isAbortError } from '../lib/errors';
-import { logging } from '../lib/logging';
 import { PROVENANCE } from '../lib/provenance';
+import { provenanceAvailabilityQuery } from '../lib/queries';
 import type { Provenance } from '../types/allocation';
 
 export type ProvenanceAvailability = {
@@ -14,6 +13,8 @@ export type ProvenanceAvailability = {
 };
 
 const EVERYTHING: readonly Provenance[] = ['indexed', 'reference', 'both'];
+
+const NOTHING_KNOWN: ReadonlyMap<string, readonly Provenance[]> = new Map();
 
 /**
  * Which provenances each prime can be answered from.
@@ -28,60 +29,42 @@ const EVERYTHING: readonly Provenance[] = ['indexed', 'reference', 'both'];
  * request fail and reporting it on the card that asked.
  */
 export function useProvenanceAvailability(): ProvenanceAvailability {
-  const [byPrime, setByPrime] = useState<Map<string, readonly Provenance[]>>(
-    new Map(),
-  );
+  const { data } = useQuery(provenanceAvailabilityQuery());
 
-  useEffect(() => {
-    const controller = new AbortController();
-
-    void getProvenanceAvailability(controller.signal)
-      .then((response) => {
-        if (controller.signal.aborted) {
-          return;
-        }
-        setByPrime(
-          new Map(
-            response.primes.map((prime) => [
+  const byPrime = useMemo(
+    () =>
+      data === undefined
+        ? NOTHING_KNOWN
+        : new Map(
+            data.primes.map((prime) => [
               prime.name.toLowerCase(),
               prime.available,
             ]),
           ),
-        );
-      })
-      .catch((error: unknown) => {
-        if (isAbortError(error)) {
-          return;
+    [data],
+  );
+
+  return useMemo(() => {
+    const forPrime = (primeName: string | null | undefined) =>
+      primeName
+        ? (byPrime.get(primeName.toLowerCase()) ?? EVERYTHING)
+        : EVERYTHING;
+
+    return {
+      forPrime,
+      fallbackFor: (primeName) => {
+        const available = forPrime(primeName);
+        if (available.includes(PROVENANCE)) {
+          return null;
         }
-        logging.warn('Provenance coverage unavailable; offering every source', {
-          error,
-        });
-      });
-
-    return () => controller.abort();
-  }, []);
-
-  const forPrime = (primeName: string | null | undefined) => {
-    if (!primeName) {
-      return EVERYTHING;
-    }
-    return byPrime.get(primeName.toLowerCase()) ?? EVERYTHING;
-  };
-
-  return {
-    forPrime,
-    fallbackFor: (primeName) => {
-      const available = forPrime(primeName);
-      if (available.includes(PROVENANCE)) {
-        return null;
-      }
-      // `both` first, then STL's own: the most complete answer this prime can
-      // give, rather than the nearest to what was asked for.
-      return (
-        (['both', 'indexed', 'reference'] as const).find((candidate) =>
-          available.includes(candidate),
-        ) ?? null
-      );
-    },
-  };
+        // `both` first, then STL's own: the most complete answer this prime can
+        // give, rather than the nearest to what was asked for.
+        return (
+          (['both', 'indexed', 'reference'] as const).find((candidate) =>
+            available.includes(candidate),
+          ) ?? null
+        );
+      },
+    };
+  }, [byPrime]);
 }

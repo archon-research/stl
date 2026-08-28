@@ -5,6 +5,7 @@ import {
   type SortingState,
 } from '@archon-research/design-system';
 import { toSearchOption } from '@archon-research/router-kit';
+import { useQuery } from '@tanstack/react-query';
 import {
   useMatchRoute,
   useNavigate,
@@ -43,14 +44,9 @@ import { usePrimeChartData } from './hooks/usePrimeChartData';
 import { useProvenanceAvailability } from './hooks/useProvenanceAvailability';
 import {
   getAllocationsForProxies,
-  getChains,
-  getDataSources,
   getLatestPrimeDebtSnapshot,
   getLatestReferenceDebtBucket,
   getPrimeRiskCapital,
-  getPrimes,
-  getProtocols,
-  getTokens,
 } from './lib/api';
 import {
   allocationNetworkKey,
@@ -80,7 +76,11 @@ import {
   truncateMiddle,
   wadToUnits,
 } from './lib/dashboard';
-import { isAbortError, toErrorMessage } from './lib/errors';
+import {
+  isAbortError,
+  toErrorMessage,
+  toQueryErrorMessage,
+} from './lib/errors';
 import { logging } from './lib/logging';
 import {
   narrowAllocations,
@@ -89,16 +89,20 @@ import {
   showsReference,
   useProvenanceView,
 } from './lib/provenance';
+import {
+  chainsQuery,
+  primesQuery,
+  protocolsQuery,
+  tokenSymbolsQuery,
+} from './lib/queries';
 import { ACTIVITY_ACTIONS, type AppSearchPatch } from './router/search-params';
 import type {
   Allocation,
-  DataSource,
   Prime,
   PrimeDebtBucket,
   PrimeDebtSnapshot,
   PrimeRiskCapital,
   TimeSeriesResolution,
-  TokensResponse,
 } from './types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from './types/local-data';
 
@@ -185,16 +189,27 @@ const PRIME_SCOPED_RESET: AppSearchPatch = {
   row: undefined,
 };
 
+// Shared fallbacks for a query that has not answered yet. A literal `?? []`
+// would hand every `useMemo` below a fresh array on each render, which is the
+// identity those memos compare on.
+const NO_PRIMES: Prime[] = [];
+const NO_CHAINS: LocalChainRow[] = [];
+const NO_PROTOCOLS: LocalProtocolRow[] = [];
+const NO_TOKEN_SYMBOLS: string[] = [];
+
 function App() {
   // What is on screen, which is not always what was fetched: narrowing a
   // composite response changes this without a request.
   const { provenance: shownProvenance, showsReference: showsReferenceNow } =
     useProvenanceView();
-  const [primes, setPrimes] = useState<Prime[]>([]);
-  const [primesErrorMessage, setPrimesErrorMessage] = useState<string | null>(
-    null,
-  );
-  const [isPrimesLoading, setIsPrimesLoading] = useState(true);
+  const primesResult = useQuery(primesQuery());
+  const primes = primesResult.data ?? NO_PRIMES;
+  const isPrimesLoading = primesResult.isPending;
+  const primesErrorMessage = toQueryErrorMessage(primesResult.error);
+  const localChains = useQuery(chainsQuery()).data ?? NO_CHAINS;
+  const localProtocols = useQuery(protocolsQuery()).data ?? NO_PROTOCOLS;
+  const tokenSymbolOptions =
+    useQuery(tokenSymbolsQuery()).data ?? NO_TOKEN_SYMBOLS;
   const [fetchedAllocations, setAllocations] = useState<Allocation[]>([]);
   const [allocationsErrorMessage, setAllocationsErrorMessage] = useState<
     string | null
@@ -209,9 +224,6 @@ function App() {
   const [riskCapitalErrorMessage, setRiskCapitalErrorMessage] = useState<
     string | null
   >(null);
-  const [, setDataSources] = useState<DataSource[]>([]);
-  const [localChains, setLocalChains] = useState<LocalChainRow[]>([]);
-  const [localProtocols, setLocalProtocols] = useState<LocalProtocolRow[]>([]);
   const [fetchedRiskCapital, setRiskCapital] =
     useState<PrimeRiskCapital | null>(null);
 
@@ -236,7 +248,6 @@ function App() {
   const [primeDebtErrorMessage, setPrimeDebtErrorMessage] = useState<
     string | null
   >(null);
-  const [tokenSymbolOptions, setTokenSymbolOptions] = useState<string[]>([]);
   // View-local on purpose: collapsing the prime list is a momentary "give me the
   // whole width" gesture, not a preference worth persisting across sessions.
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -357,109 +368,6 @@ function App() {
       to: customRange?.to_timestamp,
     });
   };
-
-  useEffect(() => {
-    const controller = new AbortController();
-
-    void getDataSources(controller.signal)
-      .then((response) => {
-        setDataSources(response.sources ?? []);
-      })
-      .catch((error: unknown) => {
-        if (isAbortError(error)) {
-          return;
-        }
-
-        logging.error('Failed to load provenance data sources', {
-          error,
-        });
-        setDataSources([]);
-      });
-
-    return () => controller.abort();
-  }, []);
-
-  useEffect(() => {
-    const controller = new AbortController();
-
-    void getTokens({ limit: 500 }, controller.signal)
-      .then((response: TokensResponse) => {
-        const symbols = Array.from(
-          new Set(
-            response
-              .map((token) => token.symbol?.trim().toUpperCase() ?? '')
-              .filter((symbol) => symbol.length > 0),
-          ),
-        ).sort((a, b) => a.localeCompare(b));
-
-        setTokenSymbolOptions(symbols);
-      })
-      .catch((error: unknown) => {
-        if (isAbortError(error)) {
-          return;
-        }
-
-        logging.warn('Failed to load token options for activities view', {
-          error,
-        });
-        setTokenSymbolOptions([]);
-      });
-
-    return () => controller.abort();
-  }, []);
-
-  useEffect(() => {
-    const controller = new AbortController();
-
-    void Promise.all([
-      getChains(controller.signal),
-      getProtocols(controller.signal),
-    ])
-      .then(([chains, protocols]) => {
-        setLocalChains(chains);
-        setLocalProtocols(protocols);
-      })
-      .catch((error: unknown) => {
-        if (isAbortError(error)) {
-          return;
-        }
-
-        logging.error('Failed to load local metadata (chains/protocols)', {
-          error,
-        });
-        setLocalChains([]);
-        setLocalProtocols([]);
-      });
-
-    return () => controller.abort();
-  }, []);
-
-  useEffect(() => {
-    const controller = new AbortController();
-
-    setIsPrimesLoading(true);
-    setPrimesErrorMessage(null);
-
-    void getPrimes(controller.signal)
-      .then((response) => {
-        setPrimes(response);
-      })
-      .catch((error: unknown) => {
-        if (isAbortError(error)) {
-          return;
-        }
-
-        logging.error('Failed to load primes', { error });
-        setPrimesErrorMessage(toErrorMessage(error));
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) {
-          setIsPrimesLoading(false);
-        }
-      });
-
-    return () => controller.abort();
-  }, []);
 
   // One entry per prime (grouped by prime_vault_address), not one per ALM
   // proxy — a prime allocates through several proxies (one per chain), and

@@ -12,8 +12,6 @@ export type AllocationRiskCapital =
 export type DataSource = components['schemas']['DataSourceResponse'];
 /** Which provenance a response was answered from -- not a `/v1/data-sources` row. */
 export type Provenance = components['schemas']['Provenance'];
-export type ProvenanceAvailability =
-  components['schemas']['ProvenanceAvailabilityResponse'];
 export type AllocationCategory = components['schemas']['AllocationCategory'];
 export type Token = components['schemas']['TokenResponse'];
 export type TokenPrice = components['schemas']['TokenPriceResponse'];
@@ -23,10 +21,6 @@ export type PrimeDebtSnapshot =
 export type RiskBreakdown = components['schemas']['RiskBreakdownResponse'];
 export type Rrc = components['schemas']['RrcEnvelope'];
 export type RrcResult = components['schemas']['RrcResult'];
-
-export type PrimesResponse = NonNullable<
-  paths['/v1/primes']['get']['responses']['200']['content']['application/json']
->;
 
 export type AllocationsResponse = NonNullable<
   paths['/v1/primes/{prime_id}/allocations']['get']['responses']['200']['content']['application/json']
