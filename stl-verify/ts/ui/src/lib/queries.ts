@@ -7,12 +7,14 @@ import type { paths } from '../generated/openapi-types';
 import type {
   AllocationActivityBucket,
   AllocationActivityEnvelope,
+  AllocationActivityResponse,
   DataSourcesResponse,
   ExposureBucket,
   ExposureEnvelope,
   PrimeDebtBucket,
   PrimeDebtEnvelope,
   PrimeDebtSnapshot,
+  ProtocolEventsResponse,
   TimeSeriesResolution,
   TokensResponse,
   TotalCapitalBucket,
@@ -67,6 +69,8 @@ const CACHE = {
   tokenMeta: { staleTime: HOUR, gcTime: 24 * HOUR },
   /** A price is the one genuinely live figure here. */
   tokenPrice: { staleTime: 30_000, gcTime: 5 * MINUTE },
+  /** A settled transaction's decoded events do not change absent a reorg. */
+  settledTx: { staleTime: HOUR, gcTime: HOUR },
 } as const;
 
 /** The window every bucketed series is fetched over. */
@@ -147,6 +151,17 @@ const selectExposureBuckets = (envelope: ExposureEnvelope): ExposureBucket[] =>
 
 const selectDataSources = (response: DataSourcesResponse) =>
   response.sources ?? [];
+
+const selectRawActivity = (
+  envelope: AllocationActivityEnvelope,
+): AllocationActivityResponse => {
+  requireEnvelopeMode(envelope, 'raw', 'GET /v1/allocations/activity');
+  return (envelope.data ?? []) as AllocationActivityResponse;
+};
+
+const selectProtocolEvents = (envelope: {
+  data?: unknown;
+}): ProtocolEventsResponse => (envelope.data ?? []) as ProtocolEventsResponse;
 
 const selectTokenSymbols = (tokens: TokensResponse): string[] =>
   Array.from(
@@ -456,6 +471,63 @@ export const tokenPriceQuery = (chainId: number, tokenAddress: string) =>
         logLevel: 'warn',
         logMessage: 'Token price metadata unavailable',
       },
+    },
+  );
+
+/**
+ * The activity feed's rows, which are raw events rather than buckets — the same
+ * endpoint the metric band reads with `aggregate=true`, so the two share no
+ * cache entry and neither can serve the other's shape.
+ */
+export const activityQuery = (filters: {
+  prime_id?: string;
+  chain_id?: number;
+  protocol_name?: string;
+  action_type?: string;
+  token_symbol?: string;
+  from_timestamp?: string;
+  to_timestamp?: string;
+  limit?: number;
+}) =>
+  api.queryOptions(
+    'get',
+    '/v1/allocations/activity',
+    { params: { query: filters } },
+    {
+      ...CACHE.position,
+      select: selectRawActivity,
+      meta: { logMessage: 'Failed to fetch allocation activity' },
+    },
+  );
+
+/** The rows the generic protocol-events filter returns before truncating. */
+export const FALLBACK_TX_EVENT_LIMIT = 200;
+
+export const txProtocolEventsQuery = (txHash: string) =>
+  api.queryOptions(
+    'get',
+    '/v1/tx/{tx_hash}/events',
+    { params: { path: { tx_hash: txHash } } },
+    {
+      ...CACHE.settledTx,
+      meta: { logMessage: 'Failed to fetch tx protocol events' },
+    },
+  );
+
+/**
+ * The same events off the generic filter, for a deployment without the
+ * dedicated endpoint. Its caller enables it only once that one has answered
+ * 404, so a real outage of it still surfaces as an error.
+ */
+export const txProtocolEventsFallbackQuery = (txHash: string) =>
+  api.queryOptions(
+    'get',
+    '/v1/protocol-events',
+    { params: { query: { tx_hash: txHash, limit: FALLBACK_TX_EVENT_LIMIT } } },
+    {
+      ...CACHE.settledTx,
+      select: selectProtocolEvents,
+      meta: { logMessage: 'Failed to fetch tx protocol events' },
     },
   );
 

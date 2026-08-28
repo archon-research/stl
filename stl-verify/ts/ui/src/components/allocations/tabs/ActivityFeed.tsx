@@ -10,24 +10,14 @@ import {
   StyledSelect,
   useDataTable,
 } from '@archon-research/design-system';
-import {
-  type ChangeEvent,
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-} from 'react';
+import { isHttpRequestError } from '@archon-research/http-client-react';
+import { useQuery } from '@tanstack/react-query';
+import { type ChangeEvent, useCallback, useMemo, useState } from 'react';
 
 import { css, cx } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
 import { getActionColorClass, getActionIcon } from '../../../lib/activity';
-import {
-  ApiRequestError,
-  getAllocationActivity,
-  getProtocolEvents,
-  getTxProtocolEvents,
-} from '../../../lib/api';
 import {
   type ChainLabelLookup,
   DIRECT_PROTOCOL_FILTER_VALUE,
@@ -37,8 +27,13 @@ import {
   getChainLabel,
   parseNumericValue,
 } from '../../../lib/dashboard';
-import { isAbortError, toErrorMessage } from '../../../lib/errors';
-import { logging } from '../../../lib/logging';
+import { toQueryErrorMessage } from '../../../lib/errors';
+import {
+  activityQuery,
+  FALLBACK_TX_EVENT_LIMIT,
+  txProtocolEventsFallbackQuery,
+  txProtocolEventsQuery,
+} from '../../../lib/queries';
 import type {
   Allocation,
   AllocationActivity,
@@ -89,6 +84,10 @@ type ActivityFilters = {
   limit?: number;
   rangePreset: RangePreset;
 };
+
+// Stable fallback for a query that has not answered: a literal `[]` would give
+// the search memo below a fresh array to compare on every render.
+const NO_EVENTS: AllocationActivityResponse = [];
 
 const ACTION_FILTER_OPTIONS = [
   { label: 'All actions', value: '' },
@@ -276,74 +275,36 @@ function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
 
 /**
  * Protocol events for one transaction, fetched when the row's detail panel
- * mounts. Expansion mounts and unmounts this component, so the effect's cleanup
- * is the whole cancellation story: collapsing a row (or unmounting the feed)
- * aborts an in-flight request, and no request is issued for a row nobody opened.
+ * mounts.
  *
- * `getTxProtocolEvents` is the dedicated endpoint; the generic
- * `getProtocolEvents` filter is the fallback for deployments that lack it,
+ * A settled transaction's decoded events do not change, so the query holds them
+ * for an hour: re-expanding a row it already showed issues no request at all.
+ * That is the point of the endpoint's long `staleTime` — expansion mounts and
+ * unmounts this component, and before the cache every re-open paid full price.
+ *
+ * `txProtocolEventsQuery` is the dedicated endpoint; the generic
+ * `/v1/protocol-events` filter is the fallback for deployments that lack it,
  * gated on 404 so a real outage of the dedicated endpoint still surfaces.
  */
-const FALLBACK_TX_EVENT_LIMIT = 200;
-
 function TxProtocolEventsPanel({ txHash }: { txHash: string }) {
-  const [events, setEvents] = useState<ProtocolEvent[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [truncated, setTruncated] = useState(false);
+  const dedicated = useQuery(txProtocolEventsQuery(txHash));
 
-  useEffect(() => {
-    const abortController = new AbortController();
-    setEvents(null);
-    setError(null);
-    setTruncated(false);
+  const isMissingEndpoint =
+    isHttpRequestError(dedicated.error) && dedicated.error.status === 404;
 
-    async function fetchTxEvents() {
-      try {
-        setEvents(await getTxProtocolEvents(txHash, abortController.signal));
-      } catch (err) {
-        if (isAbortError(err)) {
-          return;
-        }
+  const fallback = useQuery({
+    ...txProtocolEventsFallbackQuery(txHash),
+    enabled: isMissingEndpoint,
+  });
 
-        if (!(err instanceof ApiRequestError) || err.status !== 404) {
-          const errorMessage = toErrorMessage(err);
-          setError(errorMessage);
-          logging.error('Failed to fetch tx protocol events', {
-            error: err,
-            errorMessage,
-            txHash,
-          });
-          return;
-        }
-
-        try {
-          const fallbackEvents = await getProtocolEvents(
-            { tx_hash: txHash, limit: FALLBACK_TX_EVENT_LIMIT },
-            abortController.signal,
-          );
-          setTruncated(fallbackEvents.length >= FALLBACK_TX_EVENT_LIMIT);
-          setEvents(fallbackEvents);
-        } catch (fallbackErr) {
-          if (isAbortError(fallbackErr)) {
-            return;
-          }
-
-          const errorMessage = toErrorMessage(fallbackErr);
-          setError(errorMessage);
-          logging.error('Failed to fetch tx protocol events', {
-            error: err,
-            fallbackError: fallbackErr,
-            errorMessage,
-            txHash,
-          });
-        }
-      }
-    }
-
-    void fetchTxEvents();
-
-    return () => abortController.abort();
-  }, [txHash]);
+  const events = dedicated.data ?? fallback.data ?? null;
+  // Only the fallback takes a row cap, so only its result can be cut short.
+  const truncated =
+    fallback.data !== undefined &&
+    fallback.data.length >= FALLBACK_TX_EVENT_LIMIT;
+  const error = isMissingEndpoint
+    ? toQueryErrorMessage(fallback.error)
+    : toQueryErrorMessage(dedicated.error);
 
   return (
     <div className={css({ display: 'grid', gap: '2' })}>
@@ -666,9 +627,6 @@ function useAllocationActivity({
   const networkChainId = parseNetworkChainId(selectedNetwork);
   const unindexedNetwork =
     networkChainId === null ? (selectedNetwork ?? null) : null;
-  const [events, setEvents] = useState<AllocationActivityResponse>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [filters, setFilters] = useState<ActivityFilters>(() => {
     const initialRange = defaultTimeRange();
     return {
@@ -786,67 +744,24 @@ function useAllocationActivity({
     tokenFilter,
   ]);
 
-  useEffect(() => {
-    // Don't fetch without a scope: drawer always needs a prime; page mode needs
-    // one too unless "show all primes" is on (otherwise prime_id is undefined
-    // and we'd issue an unfiltered request the UI never asked for). A row on a
-    // chain STL has no id for cannot be scoped at all.
-    const missingScope = isPageMode
-      ? (!showAllPrimes && !selectedPrime) || networkChainId === null
-      : !selectedPrime || selectedReceiptToken?.chain_id === null;
+  // Don't fetch without a scope: drawer always needs a prime; page mode needs
+  // one too unless "show all primes" is on (otherwise prime_id is undefined
+  // and we'd issue an unfiltered request the UI never asked for). A row on a
+  // chain STL has no id for cannot be scoped at all.
+  const missingScope = isPageMode
+    ? (!showAllPrimes && !selectedPrime) || networkChainId === null
+    : !selectedPrime || selectedReceiptToken?.chain_id === null;
 
-    if (!isEnabled || missingScope) {
-      // Emptying the rows unmounts every open detail panel, and each one aborts
-      // its own in-flight tx-events request on the way out.
-      setEvents([]);
-      setError(null);
-      setIsLoading(false);
-      return;
-    }
+  const canLoadActivity = isEnabled && !missingScope;
 
-    const abortController = new AbortController();
+  const activityResult = useQuery({
+    ...activityQuery(requestFilters),
+    enabled: canLoadActivity,
+  });
 
-    async function fetchActivity() {
-      setIsLoading(true);
-      setError(null);
-
-      try {
-        const result = await getAllocationActivity(
-          requestFilters,
-          abortController.signal,
-        );
-        setEvents(result);
-      } catch (err) {
-        if (isAbortError(err)) {
-          return;
-        }
-
-        const errorMsg = toErrorMessage(err);
-        setError(errorMsg);
-        logging.error('Failed to fetch allocation activity', {
-          error: err,
-          errorMessage: errorMsg,
-          filters: requestFilters,
-        });
-      } finally {
-        if (!abortController.signal.aborted) {
-          setIsLoading(false);
-        }
-      }
-    }
-
-    void fetchActivity();
-
-    return () => abortController.abort();
-  }, [
-    isEnabled,
-    isPageMode,
-    networkChainId,
-    requestFilters,
-    selectedPrime,
-    selectedReceiptToken?.chain_id,
-    showAllPrimes,
-  ]);
+  const events = activityResult.data ?? NO_EVENTS;
+  const isLoading = canLoadActivity && activityResult.isPending;
+  const error = toQueryErrorMessage(activityResult.error);
 
   const filteredEvents = useMemo(() => {
     if (!searchQuery) {

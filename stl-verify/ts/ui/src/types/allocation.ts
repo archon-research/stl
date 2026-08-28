@@ -37,10 +37,6 @@ export type DataSourcesResponse = NonNullable<
 // Consumers use the raw rows; the API client unwraps `data`.
 export type ProtocolEventsResponse = ProtocolEvent[];
 
-export type TxProtocolEventsResponse = NonNullable<
-  paths['/v1/tx/{tx_hash}/events']['get']['responses']['200']['content']['application/json']
->;
-
 export type PrimeDebtEnvelope = components['schemas']['PrimeDebtEnvelope'];
 
 export type PrimeDebtBucket = components['schemas']['PrimeDebtBucketResponse'];
