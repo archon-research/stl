@@ -1,5 +1,6 @@
+import type { UseQueryResult } from '@tanstack/react-query';
 import { useQuery } from '@tanstack/react-query';
-import { useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 
 import { toQueryErrorMessage } from '../../shared/lib/errors';
 import {
@@ -37,8 +38,43 @@ export type PrimeMetrics = {
  * of a query that will not run. Falsy rather than nullish, as the effects these
  * replaced were: an empty address still builds a plausible request path.
  */
+/**
+ * The range selector, restored as a retry gesture.
+ *
+ * These snapshots are point-in-time and carry no range in their key, so
+ * changing the range cannot refetch them the way the effects they replaced
+ * did — which left a failed card needing a page reload. Retried only while a
+ * read has nothing cached to show.
+ *
+ * The `data === undefined` guard is deliberate and not the bug it looks like:
+ * widening it would let a control none of these reads depend on refire a dozen
+ * queries at once, every time the range moves. A read that failed *over* a
+ * cached figure is reported instead — `MetricCardCell` marks that card stale
+ * rather than letting it pass its old number off as current.
+ */
+function useRetryEmptyOn(
+  signal: string | undefined,
+  reads: readonly UseQueryResult<unknown, unknown>[],
+): void {
+  const lastSignal = useRef(signal);
+
+  useEffect(() => {
+    if (lastSignal.current === signal) {
+      return;
+    }
+    lastSignal.current = signal;
+
+    for (const read of reads) {
+      if (read.isError && read.data === undefined) {
+        void read.refetch();
+      }
+    }
+  }, [signal, reads]);
+}
+
 export function usePrimeMetrics(
   primaryProxyAddress: string | null,
+  rangeSignal?: string,
 ): PrimeMetrics {
   const { provenance: shownProvenance } = useProvenanceView();
   const isPrimeSelected = Boolean(primaryProxyAddress);
@@ -69,6 +105,12 @@ export function usePrimeMetrics(
   const primeDebtResult = showsReference
     ? referenceDebtResult
     : debtSnapshotResult;
+
+  const reads = useMemo(
+    () => [riskCapitalResult, referenceDebtResult, debtSnapshotResult],
+    [riskCapitalResult, referenceDebtResult, debtSnapshotResult],
+  );
+  useRetryEmptyOn(rangeSignal, reads);
 
   return {
     riskCapital,
