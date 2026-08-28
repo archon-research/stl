@@ -8,6 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, JSONResponse
+from prometheus_fastapi_instrumentator import Instrumentator
 from sqlalchemy import text
 
 from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
@@ -319,6 +320,8 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
 
     # FastAPI's documented openapi override pattern
     application.openapi = public_openapi  # ty: ignore[invalid-assignment]
+
+    Instrumentator().instrument(application).expose(application)
 
     configure_docs(application)
     configure_static_hosting(application, static_dir or DEFAULT_STATIC_DIR)
