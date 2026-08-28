@@ -1,18 +1,5 @@
 import boundariesConfig from '@archon-research/oxlint-config/design-system-boundaries';
 
-const presetRules = boundariesConfig.rules ?? {};
-
-/**
- * Raise a preset rule's severity without restating its options. A bare severity
- * string replaces the whole entry, which would silently drop the restricted
- * paths the boundaries preset exists to carry.
- */
-const denied = (name: keyof typeof presetRules) => {
-  const entry = presetRules[name];
-
-  return Array.isArray(entry) ? ['error', ...entry.slice(1)] : 'error';
-};
-
 const config = {
   ...boundariesConfig,
   // The preset has no reason to know about a test runner, so the vitest rules
@@ -23,18 +10,12 @@ const config = {
     suspicious: 'error',
   },
   rules: {
-    ...presetRules,
-    // The preset ships the design-system boundary at 'warn'. oxlint exits 0 on
-    // warnings, so left alone it can never fail a build or block a commit.
-    'no-restricted-imports': denied('no-restricted-imports'),
+    ...boundariesConfig.rules,
     'no-console': 'error',
 
-    // Not reachable from `correctness` + `suspicious`: oxlint files these under
-    // `pedantic` and `restriction`, which also carry `max-lines` and friends.
-    // Named individually so the categories stay narrow. All three measured at
-    // 0 violations when enabled, so they are ratchets, not a backlog.
-    'react/rules-of-hooks': 'error',
-    'import/no-cycle': 'error',
+    // The one rule the preset does not name that this app still wants.
+    // `restriction` would reach it, and would also carry `max-lines` and
+    // friends. 0 violations, so it is a ratchet rather than a backlog.
     'typescript/no-explicit-any': 'error',
 
     // The lint half of the React Compiler's own analysis, and the reason the

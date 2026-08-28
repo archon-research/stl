@@ -11,10 +11,11 @@
 # it is what the npm scripts CI runs use, so hook and CI resolve the same tool at
 # the same pinned version.
 #
-# `-c` is passed explicitly even though CI relies on discovery from the workspace
-# directory: the hook's cwd is stl-verify/ts, where neither config lives.
-# `--max-warnings=0` matches the npm scripts -- oxlint exits 0 on warnings, and
-# the design-system boundary rule is a warning.
+# `-c` is passed explicitly because `uikit-cli` only injects it when the cwd
+# holds an oxlint.config.ts, and the hook's cwd is stl-verify/ts, where neither
+# config lives -- without it the hook lints against oxlint's defaults and passes.
+# `--max-warnings=0` matches the npm scripts: oxlint exits 0 on warnings, and the
+# shared presets set `correctness` and `suspicious` to `warn`.
 #
 # `root`, `glob` and `exclude` are all repo-root-relative, and `glob`/`exclude`
 # are applied to the staged path BEFORE `root` rewrites it -- so they have to
