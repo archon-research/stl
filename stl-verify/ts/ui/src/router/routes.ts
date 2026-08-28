@@ -12,7 +12,9 @@ import {
 } from '@tanstack/react-router';
 import type { z } from 'zod';
 
-import App from '../App';
+import { ActivitiesRoute } from '../routes/ActivitiesRoute';
+import { AllocationRoute } from '../routes/AllocationRoute';
+import { RootLayout } from '../routes/RootLayout';
 import {
   activitiesSearchSchema,
   allocationSearchSchema,
@@ -33,7 +35,7 @@ const redirectToValidatedSearch = createValidatedSearchRedirect({
 
 const rootRoute = createRootRoute({
   validateSearch: sharedSearchSchema,
-  component: App,
+  component: RootLayout,
   beforeLoad: (context) => {
     redirectToValidatedSearch(context);
   },
@@ -86,10 +88,14 @@ const catchAllRoute = createRoute({
   beforeLoad: ({ search }) => redirectToAllocation(search),
 });
 
+// The view sits on the branch rather than on either child: the two children
+// exist only to normalise the URL in `beforeLoad` and neither renders anything
+// of its own, so `/allocation` and `/allocation/$primeId` are one screen.
 const allocationRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/allocation',
   validateSearch: allocationSearchSchema,
+  component: AllocationRoute,
 });
 
 const allocationIndexRoute = createRoute({
@@ -110,6 +116,7 @@ const activitiesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/activities',
   validateSearch: activitiesSearchSchema,
+  component: ActivitiesRoute,
 });
 
 const routeTree = rootRoute.addChildren([

@@ -17,8 +17,9 @@ import { useMemo } from 'react';
  * unsorted while the URL keeps advertising it.
  */
 export function useUrlSyncedTableState(): UseUrlSyncedTableReturn {
-  // Not strict: the drawer hosting this table stays mounted on the activities
-  // route, where the allocation search does not exist.
+  // Not strict: the allocation route is what calls this, but the same
+  // non-throwing read is what every other consumer of this search makes, and a
+  // throw here would take the whole view down rather than one table's state.
   const search = useSearch({ from: '/allocation', shouldThrow: false });
   const navigate = useNavigate();
 
