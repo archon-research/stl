@@ -22,10 +22,6 @@ export type RiskBreakdown = components['schemas']['RiskBreakdownResponse'];
 export type Rrc = components['schemas']['RrcEnvelope'];
 export type RrcResult = components['schemas']['RrcResult'];
 
-export type AllocationsResponse = NonNullable<
-  paths['/v1/primes/{prime_id}/allocations']['get']['responses']['200']['content']['application/json']
->;
-
 // Full envelope returned by the endpoint: { mode, window, data }.
 export type AllocationActivityEnvelope = NonNullable<
   paths['/v1/allocations/activity']['get']['responses']['200']['content']['application/json']

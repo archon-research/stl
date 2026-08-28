@@ -5,7 +5,11 @@ import {
   type SortingState,
 } from '@archon-research/design-system';
 import { toSearchOption } from '@archon-research/router-kit';
-import { useQuery } from '@tanstack/react-query';
+import {
+  useQueries,
+  useQuery,
+  type UseQueryResult,
+} from '@tanstack/react-query';
 import {
   useMatchRoute,
   useNavigate,
@@ -43,12 +47,6 @@ import { useUrlSyncedTableState } from './data-table/hooks';
 import { usePrimeChartData } from './hooks/usePrimeChartData';
 import { useProvenanceAvailability } from './hooks/useProvenanceAvailability';
 import {
-  getAllocationsForProxies,
-  getLatestPrimeDebtSnapshot,
-  getLatestReferenceDebtBucket,
-  getPrimeRiskCapital,
-} from './lib/api';
-import {
   allocationNetworkKey,
   buildChainLabelLookup,
   buildNetworkOptions,
@@ -76,11 +74,7 @@ import {
   truncateMiddle,
   wadToUnits,
 } from './lib/dashboard';
-import {
-  isAbortError,
-  toErrorMessage,
-  toQueryErrorMessage,
-} from './lib/errors';
+import { toQueryErrorMessage } from './lib/errors';
 import { logging } from './lib/logging';
 import {
   narrowAllocations,
@@ -90,18 +84,19 @@ import {
   useProvenanceView,
 } from './lib/provenance';
 import {
+  allocationsQuery,
   chainsQuery,
+  latestDebtSnapshotQuery,
+  latestReferenceDebtQuery,
   primesQuery,
   protocolsQuery,
+  riskCapitalQuery,
   tokenSymbolsQuery,
 } from './lib/queries';
 import { ACTIVITY_ACTIONS, type AppSearchPatch } from './router/search-params';
 import type {
   Allocation,
   Prime,
-  PrimeDebtBucket,
-  PrimeDebtSnapshot,
-  PrimeRiskCapital,
   TimeSeriesResolution,
 } from './types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from './types/local-data';
@@ -196,6 +191,31 @@ const NO_PRIMES: Prime[] = [];
 const NO_CHAINS: LocalChainRow[] = [];
 const NO_PROTOCOLS: LocalProtocolRow[] = [];
 const NO_TOKEN_SYMBOLS: string[] = [];
+const NO_PROXIES: string[] = [];
+const NO_ALLOCATIONS: Allocation[] = [];
+
+/**
+ * Folds the per-proxy allocation queries into the one list the screen reads.
+ *
+ * A failure on any single proxy blanks the whole set rather than quietly
+ * showing a prime that is missing a chain — the call the old `Promise.all`
+ * made, kept. Declared at module scope because react-query only memoises a
+ * combined result while the `combine` reference holds still.
+ */
+function combineAllocations(results: readonly UseQueryResult<Allocation[]>[]) {
+  const failed = results.find((result) => result.error !== null);
+
+  return {
+    allocations: failed
+      ? NO_ALLOCATIONS
+      : results.flatMap((result) => result.data ?? NO_ALLOCATIONS),
+    errorMessage: toQueryErrorMessage(failed?.error),
+    isLoading: results.some((result) => result.isPending),
+    // Whether the rows on screen are this prime's, settled. An empty list from
+    // a query that has not answered would otherwise read as an answer.
+    isLoaded: results.length > 0 && results.every((result) => result.isSuccess),
+  };
+}
 
 function App() {
   // What is on screen, which is not always what was fetched: narrowing a
@@ -210,44 +230,6 @@ function App() {
   const localProtocols = useQuery(protocolsQuery()).data ?? NO_PROTOCOLS;
   const tokenSymbolOptions =
     useQuery(tokenSymbolsQuery()).data ?? NO_TOKEN_SYMBOLS;
-  const [fetchedAllocations, setAllocations] = useState<Allocation[]>([]);
-  const [allocationsErrorMessage, setAllocationsErrorMessage] = useState<
-    string | null
-  >(null);
-  const [isAllocationsLoading, setIsAllocationsLoading] = useState(false);
-  // Which prime `allocations` holds rows for. Loading flags are set in an effect
-  // and so cannot gate that same commit's later effects; this marker can.
-  const [loadedAllocationsPrimeKey, setLoadedAllocationsPrimeKey] = useState<
-    string | null
-  >(null);
-  const [isRiskCapitalLoading, setIsRiskCapitalLoading] = useState(false);
-  const [riskCapitalErrorMessage, setRiskCapitalErrorMessage] = useState<
-    string | null
-  >(null);
-  const [fetchedRiskCapital, setRiskCapital] =
-    useState<PrimeRiskCapital | null>(null);
-
-  // What was fetched, narrowed to what is being shown. A composite response
-  // holds both provenances, so switching between them is this projection rather
-  // than a request — and doing it here, once, is what keeps the table, the
-  // cards, the charts and the drawer from disagreeing about which they show.
-  const allocations = useMemo(
-    () => narrowAllocations(shownProvenance, fetchedAllocations),
-    [shownProvenance, fetchedAllocations],
-  );
-  const riskCapital = useMemo(
-    () => narrowRiskCapital(shownProvenance, fetchedRiskCapital),
-    [shownProvenance, fetchedRiskCapital],
-  );
-  const [referenceDebt, setReferenceDebt] = useState<PrimeDebtBucket | null>(
-    null,
-  );
-  const [primeDebtSnapshot, setPrimeDebtSnapshot] =
-    useState<PrimeDebtSnapshot | null>(null);
-  const [isPrimeDebtLoading, setIsPrimeDebtLoading] = useState(false);
-  const [primeDebtErrorMessage, setPrimeDebtErrorMessage] = useState<
-    string | null
-  >(null);
   // View-local on purpose: collapsing the prime list is a momentary "give me the
   // whole width" gesture, not a preference worth persisting across sessions.
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -449,53 +431,38 @@ function App() {
     selectedView,
   ]);
 
-  useEffect(() => {
-    if (!selectedPrimeGroup) {
-      setAllocations([]);
-      setLoadedAllocationsPrimeKey(null);
-      setAllocationsErrorMessage(null);
-      setIsAllocationsLoading(false);
-      return;
-    }
+  // The prime's rows, gathered from its per-chain ALM proxies. One query each,
+  // so a chain's rows cache on their own and returning to a prime is free.
+  const allocationProxies = selectedPrimeGroup?.proxyAddresses ?? NO_PROXIES;
 
-    const controller = new AbortController();
+  // One call for anything the server answers prime-wide: reference rows are
+  // prime-scoped, and the merged view resolves the prime's proxies itself.
+  // Fanning either out would show each position once per chain — exactly the
+  // double-count the `scope` field warns about.
+  const queriedProxies = showsReference
+    ? allocationProxies.slice(0, 1)
+    : allocationProxies;
 
-    setAllocations([]);
-    setLoadedAllocationsPrimeKey(null);
-    setIsAllocationsLoading(true);
-    setAllocationsErrorMessage(null);
+  const {
+    allocations: fetchedAllocations,
+    errorMessage: allocationsErrorMessage,
+    isLoading: isAllocationsLoading,
+    isLoaded: areAllocationsLoaded,
+  } = useQueries({
+    queries: queriedProxies.map((proxyAddress) =>
+      allocationsQuery(proxyAddress),
+    ),
+    combine: combineAllocations,
+  });
 
-    // Fans out across every ALM proxy of the prime and concatenates; a
-    // failure on any one proxy rejects the whole call (see
-    // getAllocationsForProxies) rather than silently dropping that chain's
-    // positions.
-    void getAllocationsForProxies(
-      selectedPrimeGroup.proxyAddresses,
-      controller.signal,
-    )
-      .then((response) => {
-        setAllocations(response);
-        setLoadedAllocationsPrimeKey(selectedPrimeGroup.key);
-      })
-      .catch((error: unknown) => {
-        if (isAbortError(error)) {
-          return;
-        }
-
-        logging.error('Failed to load allocations', {
-          error,
-          primeKey: selectedPrimeGroup.key,
-        });
-        setAllocationsErrorMessage(toErrorMessage(error));
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) {
-          setIsAllocationsLoading(false);
-        }
-      });
-
-    return () => controller.abort();
-  }, [selectedPrimeGroup]);
+  // What was fetched, narrowed to what is being shown. A composite response
+  // holds both provenances, so switching between them is this projection rather
+  // than a request — and doing it here, once, is what keeps the table, the
+  // cards, the charts and the drawer from disagreeing about which they show.
+  const allocations = useMemo(
+    () => narrowAllocations(shownProvenance, fetchedAllocations),
+    [shownProvenance, fetchedAllocations],
+  );
 
   // The prime_* fields on this response are aggregated prime-wide server-side,
   // so one call against the primary proxy carries the same figures every
@@ -532,115 +499,43 @@ function App() {
     globalThis.location.assign(href);
   }, [provenanceFallback, router]);
 
-  // Any change to the selected range, as a primitive dependency: it is the
-  // retry signal for the snapshot fetches below, which take no range at all.
-  const retryKey = `${timeRange.from_timestamp}..${timeRange.to_timestamp}`;
+  // Both reads below are prime-scoped snapshots with no range of their own, so
+  // `enabled` is the whole gate. The empty address only ever reaches the key of
+  // a query that will not run.
+  const isPrimeSelected = primaryProxyAddress !== null;
+  const forPrime = primaryProxyAddress ?? '';
 
-  // Risk capital is a snapshot with no range of its own, so it was fetched once
-  // per prime and a transient failure stuck for the session. The range selector
-  // is the retry gesture; this ref stops a fetch that already succeeded from
-  // repeating on every change.
-  const loadedRiskCapitalFor = useRef<string | null>(null);
+  const riskCapitalResult = useQuery({
+    ...riskCapitalQuery(forPrime),
+    enabled: isPrimeSelected,
+  });
+  const fetchedRiskCapital = riskCapitalResult.data ?? null;
+  const isRiskCapitalLoading = isPrimeSelected && riskCapitalResult.isPending;
+  const riskCapitalErrorMessage = toQueryErrorMessage(riskCapitalResult.error);
 
-  useEffect(() => {
-    if (!primaryProxyAddress) {
-      loadedRiskCapitalFor.current = null;
-      setRiskCapital(null);
-      setIsRiskCapitalLoading(false);
-      setRiskCapitalErrorMessage(null);
-      return;
-    }
+  const riskCapital = useMemo(
+    () => narrowRiskCapital(shownProvenance, fetchedRiskCapital),
+    [shownProvenance, fetchedRiskCapital],
+  );
 
-    if (loadedRiskCapitalFor.current === primaryProxyAddress) {
-      return;
-    }
+  // `showsReference` is fixed for the session, so exactly one of these ever
+  // runs — but both hooks are called, which is what keeps the order stable.
+  const referenceDebtResult = useQuery({
+    ...latestReferenceDebtQuery(forPrime),
+    enabled: isPrimeSelected && showsReference,
+  });
+  const debtSnapshotResult = useQuery({
+    ...latestDebtSnapshotQuery(forPrime),
+    enabled: isPrimeSelected && !showsReference,
+  });
 
-    const controller = new AbortController();
-
-    setIsRiskCapitalLoading(true);
-    setRiskCapital(null);
-    setRiskCapitalErrorMessage(null);
-
-    void getPrimeRiskCapital(primaryProxyAddress, controller.signal)
-      .then((response) => {
-        if (!controller.signal.aborted) {
-          loadedRiskCapitalFor.current = primaryProxyAddress;
-          setRiskCapital(response);
-        }
-      })
-      .catch((error: unknown) => {
-        if (isAbortError(error)) {
-          return;
-        }
-
-        logging.warn('Risk capital unavailable for selected prime', {
-          error,
-          primaryProxyAddress,
-        });
-        setRiskCapital(null);
-        setRiskCapitalErrorMessage(toErrorMessage(error));
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) {
-          setIsRiskCapitalLoading(false);
-        }
-      });
-
-    return () => controller.abort();
-  }, [primaryProxyAddress, retryKey]);
-
-  useEffect(() => {
-    if (!primaryProxyAddress) {
-      setPrimeDebtSnapshot(null);
-      setReferenceDebt(null);
-      setIsPrimeDebtLoading(false);
-      setPrimeDebtErrorMessage(null);
-      return;
-    }
-
-    const controller = new AbortController();
-
-    setIsPrimeDebtLoading(true);
-    setPrimeDebtSnapshot(null);
-    setReferenceDebt(null);
-    setPrimeDebtErrorMessage(null);
-
-    void (
-      showsReference
-        ? getLatestReferenceDebtBucket(primaryProxyAddress, controller.signal)
-        : getLatestPrimeDebtSnapshot(primaryProxyAddress, controller.signal)
-    )
-      .then((latest) => {
-        if (controller.signal.aborted) {
-          return;
-        }
-        if (showsReference) {
-          setReferenceDebt(latest as PrimeDebtBucket | null);
-        } else {
-          setPrimeDebtSnapshot(latest as PrimeDebtSnapshot | null);
-        }
-      })
-      .catch((error: unknown) => {
-        if (isAbortError(error)) {
-          return;
-        }
-
-        logging.warn('Prime debt snapshot unavailable for selected prime', {
-          error,
-          primaryProxyAddress,
-        });
-        setPrimeDebtSnapshot(null);
-        setReferenceDebt(null);
-        setPrimeDebtErrorMessage(toErrorMessage(error));
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) {
-          setIsPrimeDebtLoading(false);
-        }
-      });
-
-    return () => controller.abort();
-  }, [primaryProxyAddress]);
+  const referenceDebt = referenceDebtResult.data ?? null;
+  const primeDebtSnapshot = debtSnapshotResult.data ?? null;
+  const primeDebtResult = showsReference
+    ? referenceDebtResult
+    : debtSnapshotResult;
+  const isPrimeDebtLoading = isPrimeSelected && primeDebtResult.isPending;
+  const primeDebtErrorMessage = toQueryErrorMessage(primeDebtResult.error);
 
   const selectedPrime = useMemo(
     () => primes.find((prime) => prime.address === primaryProxyAddress) ?? null,
@@ -694,21 +589,13 @@ function App() {
     [allocations, isActivitiesView, localProtocols],
   );
 
-  // Whether the rows on screen are this prime's, settled. `isAllocationsLoading`
-  // alone is false in two gaps — before the prime list resolves the prime the
-  // page auto-selects, and after a prime changes but before its fetch starts —
-  // and in both an empty `allocations` would otherwise be read as an answer.
-  const areAllocationsSettled =
-    !isPrimesLoading &&
-    selectedPrimeGroup !== null &&
-    !isAllocationsLoading &&
-    loadedAllocationsPrimeKey === selectedPrimeGroup.key;
+  const areAllocationsSettled = !isPrimesLoading && areAllocationsLoaded;
 
   // Only rows loaded for this exact prime are an authoritative option list; []
-  // or another prime's rows read as "no such option" and wipe ?network=.
-  const allocationOptionsUnready =
-    selectedPrimeGroup === null ||
-    loadedAllocationsPrimeKey !== selectedPrimeGroup.key;
+  // or another prime's rows read as "no such option" and wipe ?network=. The
+  // rows are keyed by proxy, so a prime's own answer is the only one that can
+  // be in hand for it.
+  const allocationOptionsUnready = !areAllocationsLoaded;
   const networkOptionsLoading = isActivitiesView
     ? localChains.length === 0
     : allocationOptionsUnready;

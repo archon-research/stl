@@ -4,13 +4,9 @@ import type { components, paths } from '../generated/openapi-types';
 import type {
   AllocationActivityEnvelope,
   AllocationActivityResponse,
-  AllocationsResponse,
   DataSourcesResponse,
   ExposureEnvelope,
-  PrimeDebtBucket,
   PrimeDebtEnvelope,
-  PrimeRiskCapital,
-  PrimeDebtSnapshot,
   ProtocolEventsResponse,
   Provenance,
   RiskBreakdown,
@@ -22,7 +18,7 @@ import type {
   TxProtocolEventsResponse,
 } from '../types/allocation';
 import { logging } from './logging';
-import { showsReference, sourceQuery } from './provenance';
+import { sourceQuery } from './provenance';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
 const apiClient = createApiClient<paths>(API_BASE_URL);
@@ -104,55 +100,6 @@ async function requestData<TData, TError>(
   }
 
   return data;
-}
-
-function getAllocations(
-  primeId: string,
-  signal?: AbortSignal,
-): Promise<AllocationsResponse> {
-  return requestData(
-    apiClient.GET('/v1/primes/{prime_id}/allocations', {
-      params: { path: { prime_id: primeId }, query: { ...sourceQuery } },
-      signal,
-    }),
-    'GET /v1/primes/{prime_id}/allocations',
-  );
-}
-
-// A prime allocates through one ALM proxy per chain, so its allocations live
-// scattered across several proxy addresses. Promise.all (not allSettled) so a
-// single proxy's failure rejects the whole call rather than silently
-// returning a partial list.
-export async function getAllocationsForProxies(
-  proxyAddresses: string[],
-  signal?: AbortSignal,
-): Promise<AllocationsResponse> {
-  // One call for anything the server answers prime-wide: reference rows are
-  // prime-scoped, and the merged view resolves the prime's proxies itself.
-  // Fanning out either would show each position once per chain — exactly the
-  // double-count the `scope` field warns about.
-  if (showsReference) {
-    const [first] = proxyAddresses;
-    return first === undefined ? [] : getAllocations(first, signal);
-  }
-
-  const perProxyAllocations = await Promise.all(
-    proxyAddresses.map((proxyAddress) => getAllocations(proxyAddress, signal)),
-  );
-  return perProxyAllocations.flat();
-}
-
-export function getPrimeRiskCapital(
-  primeId: string,
-  signal?: AbortSignal,
-): Promise<PrimeRiskCapital> {
-  return requestData(
-    apiClient.GET('/v1/primes/{prime_id}/risk-capital', {
-      params: { path: { prime_id: primeId }, query: { ...sourceQuery } },
-      signal,
-    }),
-    'GET /v1/primes/{prime_id}/risk-capital',
-  );
 }
 
 export async function getExposureEnvelope(
@@ -363,22 +310,6 @@ export function getTokenPrice(
   );
 }
 
-async function getPrimeDebtSnapshots(
-  primeId: string,
-  filters?: TimeSeriesFilters,
-  signal?: AbortSignal,
-): Promise<PrimeDebtSnapshot[]> {
-  const envelope = await getPrimeDebtEnvelope(primeId, filters, signal);
-  // Raw snapshots only; an aggregated envelope holds bucket rows, so reject it
-  // rather than returning mis-typed data.
-  if (envelope.mode !== 'raw') {
-    throw new Error(
-      `GET /v1/primes/{prime_id}/debt returned "${envelope.mode}" for a snapshot request`,
-    );
-  }
-  return (envelope.data ?? []) as PrimeDebtSnapshot[];
-}
-
 export async function getPrimeDebtEnvelope(
   primeId: string,
   filters?: TimeSeriesFilters & { source?: Provenance },
@@ -426,44 +357,4 @@ export async function getTotalCapitalEnvelope(
     'GET /v1/primes/{prime_id}/total-capital',
   );
   return envelope as TotalCapitalEnvelope;
-}
-
-// How far back to look for the newest reference debt bucket. The endpoint
-// defaults to the last 24h, but this series is a daily upstream feed seeded by
-// a one-shot backfill, so the most recent bucket is routinely older than that
-// and the default window returns nothing at all.
-const REFERENCE_DEBT_LOOKBACK_DAYS = 90;
-
-// Reference debt is aggregate-only: upstream reports one figure per prime per
-// day and carries no ilk or block identity, so the API rejects a raw request
-// rather than inventing them. The latest bucket is the closest thing to a
-// "current" reading, and it carries the only two fields upstream can fill.
-export async function getLatestReferenceDebtBucket(
-  primeId: string,
-  signal?: AbortSignal,
-): Promise<PrimeDebtBucket | null> {
-  const from = new Date(
-    Date.now() - REFERENCE_DEBT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
-  ).toISOString();
-
-  const envelope = await getPrimeDebtEnvelope(
-    primeId,
-    { aggregate: true, limit: 1, source: 'reference', from_timestamp: from },
-    signal,
-  );
-  return ((envelope.data ?? [])[0] as PrimeDebtBucket | undefined) ?? null;
-}
-
-export async function getLatestPrimeDebtSnapshot(
-  primeId: string,
-  signal?: AbortSignal,
-): Promise<PrimeDebtSnapshot | null> {
-  const snapshots = await getPrimeDebtSnapshots(
-    primeId,
-    {
-      limit: 1,
-    },
-    signal,
-  );
-  return snapshots[0] ?? null;
 }
