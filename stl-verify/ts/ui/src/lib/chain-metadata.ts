@@ -73,15 +73,3 @@ export function getChainExplorerUrl(
   }
   return CHAIN_METADATA[chainId]?.explorerUrl ?? null;
 }
-
-/**
- * Get native currency symbol for a chain
- * @param chainId - Chain ID
- * @returns Native currency symbol (e.g., "ETH", "AVAX"), or null if not available
- */
-export function getNativeSymbol(chainId: number | null): string | null {
-  if (chainId === null) {
-    return null;
-  }
-  return CHAIN_METADATA[chainId]?.nativeSymbol ?? null;
-}
