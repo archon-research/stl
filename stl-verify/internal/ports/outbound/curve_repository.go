@@ -78,11 +78,33 @@ type BlockWrites struct {
 	LpTokenEvents     []*entity.CurveLpTokenEvent
 }
 
+// CurveStateRowCounts is what one block's pool-state INSERTs did, split into the
+// two questions VectorCurveIndexerNoStateWritten needs answered separately.
+//
+// Attempted and Persisted differ precisely on an idempotent replay. Replaying an
+// already-committed range under the same build_id makes the
+// assign_processing_version trigger reuse the existing processing_version, so
+// every INSERT lands on the identical primary key, hits ON CONFLICT DO NOTHING
+// and appends nothing — a healthy block with zero Persisted. Only Attempted can
+// tell that apart from a block whose state rows were silently dropped before the
+// INSERT, so it is Attempted that the alert keys on. Persisted stays as volume
+// observability: the count of rows this worker actually added.
+type CurveStateRowCounts struct {
+	// Attempted is the number of pool-state INSERTs the block queued, across both
+	// stableswap and cryptoswap.
+	Attempted int64
+	// Persisted is how many of them appended a row (RowsAffected), which is zero
+	// for every statement that conflicted away.
+	Persisted int64
+}
+
 // CurveRepository defines the interface for Curve DEX data persistence.
 type CurveRepository interface {
 	LoadPools(ctx context.Context, chainID int64) ([]CurvePoolRow, error)
 	// SaveBlock persists all of a block's curve rows in one pgx.Batch within tx and
-	// returns the number of state rows actually inserted (ON CONFLICT DO NOTHING means
-	// a redelivery returns 0), for the curve_state_rows_written_total metric.
-	SaveBlock(ctx context.Context, tx pgx.Tx, w BlockWrites) (stateRows int64, err error)
+	// returns both the number of state rows the block queued and the number that
+	// actually appended (ON CONFLICT DO NOTHING means a redelivery persists 0), for
+	// the curve_state_rows_attempted_total and curve_state_rows_written_total
+	// metrics.
+	SaveBlock(ctx context.Context, tx pgx.Tx, w BlockWrites) (stateRows CurveStateRowCounts, err error)
 }

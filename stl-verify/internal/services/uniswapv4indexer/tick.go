@@ -154,7 +154,10 @@ func BaselineTicks(ctx context.Context, mc outbound.Multicaller, pool Registered
 		return nil, err
 	}
 
-	minWord, maxWord := tickbitmap.WordBounds(pool.TickSpacing)
+	minWord, maxWord, err := tickbitmap.WordBounds(pool.TickSpacing)
+	if err != nil {
+		return nil, fmt.Errorf("bitmap word range for pool %d: %w", pool.ID, err)
+	}
 
 	var ticks []int32
 	for chunkStart := int(minWord); chunkStart <= int(maxWord); chunkStart += tickbitmap.BitmapWordsPerCall {

@@ -77,9 +77,12 @@ type UniswapV4Repository interface {
 	PoolIDsWithStateAtBlock(ctx context.Context, chainID int64, blockNumber int64, blockTimestamp time.Time) ([]int64, error)
 	// TicksForPoolAtBlock returns the distinct tick positions that already have a
 	// row for pool at blockNumber, so a reorg redelivery can re-read exactly the
-	// ticks a prior version wrote at this height. Reads committed rows outside
-	// any transaction; safe to call before the write tx opens.
-	TicksForPoolAtBlock(ctx context.Context, poolID int64, blockNumber int64) ([]int32, error)
+	// ticks a prior version wrote at this height. poolID is a CURRENT registry
+	// id; rows written under a registry version chainID has since superseded
+	// resolve forward to it, as they do for PoolIDsWithStateAtBlock. Reads
+	// committed rows outside any transaction; safe to call before the write tx
+	// opens.
+	TicksForPoolAtBlock(ctx context.Context, chainID int64, poolID int64, blockNumber int64) ([]int32, error)
 	// PoolIDsEverSnapshotted returns the CURRENT uniswap_v4_pool ids, ascending,
 	// of the pools on chainID that have at least one uniswap_v4_pool_state or
 	// uniswap_v4_tick row at any height. Read once at construction, it recovers

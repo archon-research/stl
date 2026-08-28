@@ -10,6 +10,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -70,7 +71,13 @@ func parseNonIndexedArgs(ev abi.Event, log Log, out map[string]any) error {
 	if len(nonIndexed) == 0 {
 		return nil
 	}
-	raw := common.FromHex(log.Data)
+	// common.FromHex left-pads odd-length input and swallows the decode error,
+	// so a dropped digit silently shifts every argument. Substituting a valid
+	// digit still decodes wrong; only the width defects are caught here.
+	raw, err := hexutil.Decode(log.Data)
+	if err != nil {
+		return fmt.Errorf("%s log data %q is not valid hex: %w", ev.Name, log.Data, err)
+	}
 	if len(raw) == 0 {
 		return fmt.Errorf("%s log carries no data for non-indexed arguments %s", ev.Name, argNames(nonIndexed))
 	}

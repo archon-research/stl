@@ -65,9 +65,8 @@ func TestNewDecodedCapturedLog_StringifiesBigInts(t *testing.T) {
 	if s, ok := arr[0].(string); !ok || s != huge.String() {
 		t.Errorf("token_amounts[0] = %v (%T), want string %q", arr[0], arr[0], huge.String())
 	}
-	// common.Address/common.Hash are [N]byte arrays: without their
-	// TextMarshaler taking precedence they would fall into the byte-array
-	// branch and lose their EIP-55 / hash text form.
+	// common.Address/common.Hash are [N]byte values: JSONB needs them as 0x
+	// hex, since a decimal byte list joins against no address or hash column.
 	if got, want := payload["provider"], "0x2222222222222222222222222222222222222222"; got != want {
 		t.Errorf("provider = %v (%T), want %q", got, got, want)
 	}

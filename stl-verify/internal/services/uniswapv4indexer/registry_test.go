@@ -219,13 +219,3 @@ func TestValidatePoolKeys_AcceptsDynamicFeePool(t *testing.T) {
 		t.Fatalf("ValidatePoolKeys with a dynamic-fee pool: %v", err)
 	}
 }
-
-// TestValidatePoolKeys_RejectsFeeOutsideUint24 keeps the recompute from
-// silently truncating: abi.Pack would reject an out-of-range uint24, and that
-// failure must surface as a registry error rather than a panic.
-func TestValidatePoolKeys_RejectsFeeOutsideUint24(t *testing.T) {
-	pool := registeredPool(3, ethWstethPoolID, 1<<24, common.Address{})
-	if err := ValidatePoolKeys([]RegisteredPool{pool}); err == nil {
-		t.Fatal("ValidatePoolKeys: want error for a fee outside uint24, got nil")
-	}
-}

@@ -234,7 +234,10 @@ func (c *CurveService) handleBlock(ctx context.Context, event outbound.BlockEven
 	// cadence rather than on this counter, but emitting it keeps the metric's
 	// meaning identical across every DEX worker sharing dextelemetry.
 	c.telemetry.RecordPoolsTouched(ctx, len(touchedIDs))
-	c.telemetry.RecordStateRows(ctx, int(stateRows))
+	// Attempted is what VectorCurveIndexerNoStateWritten keys on — persisted goes
+	// to zero on a healthy replay; written stays as volume observability.
+	c.telemetry.RecordStateRowsAttempted(ctx, int(stateRows.Attempted))
+	c.telemetry.RecordStateRows(ctx, int(stateRows.Persisted))
 	return nil
 }
 
@@ -362,16 +365,25 @@ func (c *CurveService) buildBlockWrites(acc blockAccumulators, snapshots snapsho
 }
 
 // persistBlock saves the block writes and captured events in a single DB
-// transaction via dexconsumer.PersistBlock. Returns the number of state rows
-// actually inserted (may be zero on an idempotent ON CONFLICT DO NOTHING replay).
-func (c *CurveService) persistBlock(ctx context.Context, writes outbound.BlockWrites, capturedIns []dexconsumer.ProtocolEventInput, bn int64) (int64, error) {
-	return dexconsumer.PersistBlock(ctx, c.txMgr, c.eventWriter, func(ctx context.Context, tx pgx.Tx) (int64, error) {
+// transaction via dexconsumer.PersistBlock, returning how the block's state rows
+// fared: how many were queued, and how many actually appended (zero on an
+// idempotent ON CONFLICT DO NOTHING replay). dexconsumer.PersistBlock only
+// carries the persisted count back, so the attempted count rides out on the
+// closure.
+func (c *CurveService) persistBlock(ctx context.Context, writes outbound.BlockWrites, capturedIns []dexconsumer.ProtocolEventInput, bn int64) (outbound.CurveStateRowCounts, error) {
+	var attempted int64
+	persisted, err := dexconsumer.PersistBlock(ctx, c.txMgr, c.eventWriter, func(ctx context.Context, tx pgx.Tx) (int64, error) {
 		rows, err := c.repo.SaveBlock(ctx, tx, writes)
 		if err != nil {
 			return 0, fmt.Errorf("persisting curve block %d: %w", bn, err)
 		}
-		return rows, nil
+		attempted = rows.Attempted
+		return rows.Persisted, nil
 	}, capturedIns, bn)
+	if err != nil {
+		return outbound.CurveStateRowCounts{}, err
+	}
+	return outbound.CurveStateRowCounts{Attempted: attempted, Persisted: persisted}, nil
 }
 
 // indexPoolsByWatchedAddress builds the address -> pool index. Each pool is

@@ -76,22 +76,38 @@ func TestWordBitToTick_RoundTrips(t *testing.T) {
 
 // TestWordBounds_CoversUsableRange checks the enumerated word range really
 // brackets MIN_TICK/MAX_TICK for each tick spacing in use, and that it stays
-// far below the 65536 words a naive full-int16 scan would issue.
+// far below the 65536 words a naive full-int16 scan would issue. It asserts
+// through WordBitToTick rather than recomputing the packing, so a broken
+// FloorDiv cannot satisfy both sides of the comparison.
 func TestWordBounds_CoversUsableRange(t *testing.T) {
 	for _, tickSpacing := range []int{1, 10, 50, 60, 200} {
 		t.Run(fmt.Sprintf("tickSpacing=%d", tickSpacing), func(t *testing.T) {
-			minWord, maxWord := WordBounds(tickSpacing)
-
-			gotMin, _ := tickToWordBit(int32(MinTick), tickSpacing)
-			gotMax, _ := tickToWordBit(int32(MaxTick), tickSpacing)
-			if minWord != gotMin {
-				t.Errorf("WordBounds(%d) min = %d, want %d (the word holding MIN_TICK)", tickSpacing, minWord, gotMin)
+			minWord, maxWord, err := WordBounds(tickSpacing)
+			if err != nil {
+				t.Fatalf("WordBounds(%d): %v", tickSpacing, err)
 			}
-			if maxWord != gotMax {
-				t.Errorf("WordBounds(%d) max = %d, want %d (the word holding MAX_TICK)", tickSpacing, maxWord, gotMax)
+
+			if lowest := WordBitToTick(minWord, 0, tickSpacing); lowest > MinTick {
+				t.Errorf("WordBounds(%d) min word %d starts at tick %d, above MIN_TICK %d", tickSpacing, minWord, lowest, MinTick)
+			}
+			if highest := WordBitToTick(maxWord, 255, tickSpacing); highest < MaxTick {
+				t.Errorf("WordBounds(%d) max word %d ends at tick %d, below MAX_TICK %d", tickSpacing, maxWord, highest, MaxTick)
 			}
 			if words := int(maxWord) - int(minWord) + 1; words >= 65536 {
 				t.Errorf("WordBounds(%d) spans %d words, want far fewer than a full int16 scan", tickSpacing, words)
+			}
+		})
+	}
+}
+
+// TestWordBounds_RejectsNonPositiveTickSpacing pins the guard the V3 registry's
+// bare INT column cannot supply: 0 divides by zero and a negative spacing
+// inverts the bounds, which empties the caller's scan loop without an error.
+func TestWordBounds_RejectsNonPositiveTickSpacing(t *testing.T) {
+	for _, tickSpacing := range []int{0, -1, -60} {
+		t.Run(fmt.Sprintf("tickSpacing=%d", tickSpacing), func(t *testing.T) {
+			if _, _, err := WordBounds(tickSpacing); err == nil {
+				t.Fatalf("WordBounds(%d): want error, got nil", tickSpacing)
 			}
 		})
 	}

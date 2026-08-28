@@ -4,7 +4,10 @@
 // floored-division math lives here once instead of per indexer.
 package tickbitmap
 
-import "slices"
+import (
+	"fmt"
+	"slices"
+)
 
 // MinTick and MaxTick are TickMath's usable tick bounds, identical in v3-core
 // and v4-core. They are the widest range any pool can report regardless of
@@ -42,12 +45,16 @@ func WordBitToTick(word int16, bit uint8, tickSpacing int) int32 {
 // full bitmap scan at 6,932 words for tickSpacing 1 and 36 for 200, instead of
 // 65,536.
 //
-// tickSpacing must be >= 1, which every pool registry enforces (a v4-core
-// PoolKey with tickSpacing 0 cannot initialize); 0 divides by zero here.
-func WordBounds(tickSpacing int) (int16, int16) {
+// tickSpacing must be >= 1: 0 divides by zero and a negative spacing inverts
+// the bounds, which silently empties a caller's scan loop. Only the V4 registry
+// constrains the column (VEC-586 tracks the V3 side), so the guard is here.
+func WordBounds(tickSpacing int) (int16, int16, error) {
+	if tickSpacing < 1 {
+		return 0, 0, fmt.Errorf("tick spacing %d is below 1", tickSpacing)
+	}
 	minWord := FloorDiv(FloorDiv(MinTick, tickSpacing), 256)
 	maxWord := FloorDiv(FloorDiv(MaxTick, tickSpacing), 256)
-	return int16(minWord), int16(maxWord)
+	return int16(minWord), int16(maxWord), nil
 }
 
 // TicksPerCall and BitmapWordsPerCall bound how many per-tick getter and how

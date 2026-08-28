@@ -5,7 +5,9 @@ package postgres
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"slices"
 	"strings"
@@ -16,6 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -37,12 +40,31 @@ const (
 
 var uniswapV4TestPool *pgxpool.Pool
 
+// uniswapV4MigrationSeededPoolIDs is the chain-1 uniswap_v4_pool seed exactly as
+// the migration left it. Tests write chain-1 pools of their own, so this has to
+// be snapshotted before any of them runs.
+var uniswapV4MigrationSeededPoolIDs []string
+
 func init() {
 	registerTestFileSetup(func() {
 		uniswapV4TestPool = testutil.SetupDBForMain(sharedDSN, uniswapV4SchemaName)
+		uniswapV4MigrationSeededPoolIDs = readUniswapV4MigrationSeededPoolIDs()
 	}, func() {
 		testutil.CleanupDBForMain(sharedDSN, uniswapV4TestPool, uniswapV4SchemaName)
 	})
+}
+
+func readUniswapV4MigrationSeededPoolIDs() []string {
+	rows, err := uniswapV4TestPool.Query(context.Background(),
+		`SELECT '\x' || encode(pool_id, 'hex') FROM uniswap_v4_pool WHERE chain_id = 1`)
+	if err != nil {
+		log.Fatalf("snapshotting the migration's chain-1 uniswap_v4_pool seed: %v", err)
+	}
+	poolIDs, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		log.Fatalf("reading the migration's seeded pool ids: %v", err)
+	}
+	return poolIDs
 }
 
 // uniswapV4Tables are the 7 tables created by
@@ -184,7 +206,7 @@ func TestUniswapV4TickBlockLookupIndexServesReorgTickRead(t *testing.T) {
 	const firstBlock = int64(22500000)
 	seedUniswapV4TickPlanHistory(t, ctx, poolID, firstBlock, 50)
 
-	plan := explainUniswapV4Query(t, ctx, ticksForPoolAtBlockSQL, poolID, firstBlock+7)
+	plan := explainUniswapV4Query(t, ctx, ticksForPoolAtBlockSQL, 1, poolID, firstBlock+7)
 
 	if !strings.Contains(plan, "idx_uniswap_v4_tick_block_lookup") {
 		t.Errorf("planner did not choose idx_uniswap_v4_tick_block_lookup for TicksForPoolAtBlock:\n%s", plan)
@@ -327,9 +349,7 @@ func TestUniswapV4PoolRejectsShortPoolID(t *testing.T) {
 		        '\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'::bytea,
 		        $1, $2, 3000, 60, '\x0000000000000000000000000000000000000000'::bytea, 22000000)`,
 		wstETH, usdc)
-	if err == nil {
-		t.Fatal("31-byte pool_id was accepted, want a CHECK violation")
-	}
+	requireUniswapV4CheckViolation(t, err)
 }
 
 func TestUniswapV4PoolRejectsUnorderedCurrencies(t *testing.T) {
@@ -346,9 +366,7 @@ func TestUniswapV4PoolRejectsUnorderedCurrencies(t *testing.T) {
 		        '\x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0'::bytea,
 		        $1, $2, 3000, 60, '\x0000000000000000000000000000000000000000'::bytea, 22000000)`,
 		usdc, wstETH)
-	if err == nil {
-		t.Fatal("currency0 > currency1 was accepted, want a CHECK violation")
-	}
+	requireUniswapV4CheckViolation(t, err)
 }
 
 func TestUniswapV4TablesAreAppendOnlyForReadWriteRole(t *testing.T) {
@@ -647,11 +665,28 @@ func TestUniswapV4FactTableChecksRejectOutOfRangeValues(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := uniswapV4TestPool.Exec(ctx, tc.insert,
-				uniswapV4FactInsertArgs(poolID, tc.args, 0)...); err == nil {
-				t.Fatal("out-of-range row was accepted, want a CHECK violation")
-			}
+			_, err := uniswapV4TestPool.Exec(ctx, tc.insert,
+				uniswapV4FactInsertArgs(poolID, tc.args, 0)...)
+			requireUniswapV4CheckViolation(t, err)
 		})
+	}
+}
+
+// requireUniswapV4CheckViolation demands SQLSTATE 23514. The cases above share
+// one pool and one key per table, so a dropped CHECK leaves the first case
+// inserting and the rest failing on the PK instead: asserting err != nil would
+// keep passing on that 23505.
+func requireUniswapV4CheckViolation(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("row was accepted, want a CHECK violation")
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		t.Fatalf("error %v is not a *pgconn.PgError", err)
+	}
+	if pgErr.Code != "23514" {
+		t.Fatalf("SQLSTATE %s (%s), want 23514 check_violation", pgErr.Code, pgErr.Message)
 	}
 }
 
@@ -748,29 +783,31 @@ func TestUniswapV4PoolFeeCheckAllowsOnlyRatesAndTheDynamicSentinel(t *testing.T)
 	wstETH := seedUniswapV4Token(t, ctx, "\\x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0", "wstETH", 18)
 	usdc := seedUniswapV4Token(t, ctx, "\\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "USDC", 6)
 
+	notSnapshotted := false
 	cases := []struct {
-		name       string
-		poolIDHex  string
-		fee        int
-		wantAccept bool
+		name      string
+		poolIDHex string
+		fee       int
+		// snapshotSupported nil omits the column, taking the DDL default.
+		snapshotSupported *bool
+		wantAccept        bool
 	}{
-		{"static_max_fee", "\\x1400000000000000000000000000000000000000000000000000000000000001", 1000000, true},
-		{"dynamic_fee_sentinel", "\\x1400000000000000000000000000000000000000000000000000000000000002", 8388608, true},
-		{"above_100_percent", "\\x1400000000000000000000000000000000000000000000000000000000000003", 1000001, false},
-		{"max_uint24", "\\x1400000000000000000000000000000000000000000000000000000000000004", 16777215, false},
+		{name: "static_max_fee", poolIDHex: "\\x1400000000000000000000000000000000000000000000000000000000000001", fee: 1000000, wantAccept: true},
+		{name: "dynamic_fee_sentinel", poolIDHex: "\\x1400000000000000000000000000000000000000000000000000000000000002", fee: 8388608, snapshotSupported: &notSnapshotted, wantAccept: true},
+		{name: "dynamic_fee_defaults_to_snapshotted", poolIDHex: "\\x1400000000000000000000000000000000000000000000000000000000000005", fee: 8388608},
+		{name: "above_100_percent", poolIDHex: "\\x1400000000000000000000000000000000000000000000000000000000000003", fee: 1000001},
+		{name: "max_uint24", poolIDHex: "\\x1400000000000000000000000000000000000000000000000000000000000004", fee: 16777215},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := uniswapV4TestPool.Exec(ctx, `
-				INSERT INTO uniswap_v4_pool
-				    (chain_id, pool_id, currency0, currency1,
-				     currency0_token_id, currency1_token_id, fee, tick_spacing, hooks, deploy_block)
-				VALUES (1, $1::bytea,
-				        '\x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0'::bytea,
-				        '\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'::bytea,
-				        $2, $3, $4, 60, '\x0000000000000000000000000000000000000000'::bytea, 22000000)`,
-				tc.poolIDHex, wstETH, usdc, tc.fee)
+			sql := uniswapV4FeeCheckInsertSQL
+			args := []any{tc.poolIDHex, wstETH, usdc, tc.fee}
+			if tc.snapshotSupported != nil {
+				sql = uniswapV4FeeCheckInsertWithSnapshotSQL
+				args = append(args, *tc.snapshotSupported)
+			}
+			_, err := uniswapV4TestPool.Exec(ctx, sql, args...)
 			if tc.wantAccept && err != nil {
 				t.Fatalf("fee %d was rejected: %v", tc.fee, err)
 			}
@@ -780,6 +817,25 @@ func TestUniswapV4PoolFeeCheckAllowsOnlyRatesAndTheDynamicSentinel(t *testing.T)
 		})
 	}
 }
+
+const uniswapV4FeeCheckInsertSQL = `
+	INSERT INTO uniswap_v4_pool
+	    (chain_id, pool_id, currency0, currency1,
+	     currency0_token_id, currency1_token_id, fee, tick_spacing, hooks, deploy_block)
+	VALUES (1, $1::bytea,
+	        '\x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0'::bytea,
+	        '\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'::bytea,
+	        $2, $3, $4, 60, '\x0000000000000000000000000000000000000000'::bytea, 22000000)`
+
+const uniswapV4FeeCheckInsertWithSnapshotSQL = `
+	INSERT INTO uniswap_v4_pool
+	    (chain_id, pool_id, currency0, currency1,
+	     currency0_token_id, currency1_token_id, fee, tick_spacing, hooks, deploy_block,
+	     snapshot_supported)
+	VALUES (1, $1::bytea,
+	        '\x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0'::bytea,
+	        '\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'::bytea,
+	        $2, $3, $4, 60, '\x0000000000000000000000000000000000000000'::bytea, 22000000, $5)`
 
 func TestUniswapV4ColumnComments(t *testing.T) {
 	ctx := context.Background()
@@ -957,33 +1013,16 @@ var uniswapV4ExpectedPools = []uniswapV4ExpectedPool{
 	{"xaut_susds_10000", "\\x2f5dff74b96e2df0fa8a5695318d59839c3ce5d058b19024fbfe276100b676ff", "\\x68749665FF8D2d112Fa859AA293F07A622782F38", "\\xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD", 10000, 200, uniswapV4NoHooksHex, 24363921},
 }
 
-// seedUniswapV4Registry mirrors (rather than relies on) the migration's seed:
-// sibling test files TRUNCATE protocol/token CASCADE, which cascades away the
-// pool manager and every pool row before this file runs.
+// seedUniswapV4Registry tops up what the migration's seed depends on and returns
+// the current PoolManager row. The pools themselves are deliberately NOT seeded
+// here: a test that wrote its own expectations in would then assert against its
+// own rows and pass over any transcription error in the migration.
 func seedUniswapV4Registry(t *testing.T, ctx context.Context) int64 {
 	t.Helper()
 
 	poolManagerID := seedUniswapV4PoolManager(t, ctx)
-	tokenIDs := make(map[string]int64, len(uniswapV4SeedTokens))
 	for _, tok := range uniswapV4SeedTokens {
-		tokenIDs[tok.addrHex] = seedUniswapV4Token(t, ctx, tok.addrHex, tok.symbol, tok.decimals)
-	}
-
-	for _, pool := range uniswapV4ExpectedPools {
-		currency0TokenID := tokenIDs[uniswapV4TokenAddrFor(pool.currency0Hex)]
-		currency1TokenID := tokenIDs[uniswapV4TokenAddrFor(pool.currency1Hex)]
-		if _, err := uniswapV4TestPool.Exec(ctx, `
-			INSERT INTO uniswap_v4_pool
-			    (chain_id, pool_id, currency0, currency1,
-			     currency0_token_id, currency1_token_id, fee, tick_spacing, hooks, deploy_block, build_id)
-			VALUES (1, $1::bytea, $2::bytea, $3::bytea, $4, $5, $6, $7, $8::bytea, $9, 0)
-			ON CONFLICT (chain_id, pool_id, processing_version) DO NOTHING`,
-			pool.poolIDHex, pool.currency0Hex, pool.currency1Hex,
-			currency0TokenID, currency1TokenID, pool.fee, pool.tickSpacing,
-			pool.hooksHex, pool.deployBlock,
-		); err != nil {
-			t.Fatalf("seeding pool %s: %v", pool.name, err)
-		}
+		seedUniswapV4Token(t, ctx, tok.addrHex, tok.symbol, tok.decimals)
 	}
 	return poolManagerID
 }
@@ -998,19 +1037,25 @@ func uniswapV4TokenAddrFor(currencyHex string) string {
 	return currencyHex
 }
 
-func TestUniswapV4PoolSeedCount(t *testing.T) {
-	ctx := context.Background()
-	seedUniswapV4Registry(t, ctx)
+// Both directions matter: a pool_id the migration writes that no expectation
+// names is as much a transcription error as an expected pool the migration
+// never seeded, and a per-pool lookup filtered by the expected ids sees neither.
+func TestUniswapV4PoolSeedIsExactlyTheExpectedPools(t *testing.T) {
+	expected := uniswapV4SeededPoolIDs()
 
-	var count int
-	if err := uniswapV4TestPool.QueryRow(ctx, `
-		SELECT count(*) FROM uniswap_v4_pool
-		WHERE chain_id = 1 AND pool_id = ANY($1::bytea[])`,
-		uniswapV4SeededPoolIDs()).Scan(&count); err != nil {
-		t.Fatalf("counting seeded pools: %v", err)
+	for _, want := range expected {
+		if !slices.Contains(uniswapV4MigrationSeededPoolIDs, want) {
+			t.Errorf("expected pool %s is missing from the migration's chain-1 seed", want)
+		}
 	}
-	if count != len(uniswapV4ExpectedPools) {
-		t.Errorf("seeded uniswap_v4_pool count = %d, want %d", count, len(uniswapV4ExpectedPools))
+	for _, got := range uniswapV4MigrationSeededPoolIDs {
+		if !slices.Contains(expected, got) {
+			t.Errorf("migration seeded chain-1 pool %s that no expectation covers", got)
+		}
+	}
+	if len(uniswapV4MigrationSeededPoolIDs) != len(expected) {
+		t.Errorf("migration seeded %d chain-1 pools, want %d",
+			len(uniswapV4MigrationSeededPoolIDs), len(expected))
 	}
 }
 
@@ -1707,14 +1752,22 @@ func TestUniswapV4CreatedAtIgnoresSessionTimeZone(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.table, func(t *testing.T) {
 			var createdAt time.Time
-			var driftSeconds float64
 			if err := conn.QueryRow(ctx, tc.insert+`
-				RETURNING created_at, EXTRACT(EPOCH FROM (now() - created_at))::double precision`,
-				tc.args...).Scan(&createdAt, &driftSeconds); err != nil {
+				RETURNING created_at`, tc.args...).Scan(&createdAt); err != nil {
 				t.Fatalf("inserting into %s under a non-UTC session TimeZone: %v", tc.table, err)
 			}
+
+			// Measuring the drift on the writing session re-applies that
+			// session's offset and cancels it out, so a naive column reads as
+			// zero drift there; only a second session can see it.
+			var driftSeconds float64
+			if err := uniswapV4TestPool.QueryRow(ctx,
+				`SELECT EXTRACT(EPOCH FROM (now() - $1::timestamptz))::double precision`,
+				createdAt).Scan(&driftSeconds); err != nil {
+				t.Fatalf("measuring %s.created_at drift from the UTC pool: %v", tc.table, err)
+			}
 			if driftSeconds < -10 || driftSeconds > 10 {
-				t.Errorf("%s.created_at = %s, %.0fs away from now() under a non-UTC session; it is not stored as an instant",
+				t.Errorf("%s.created_at = %s, %.0fs away from now() when read outside the writing session; it is not stored as an instant",
 					tc.table, createdAt, driftSeconds)
 			}
 		})

@@ -182,28 +182,20 @@ func TestCurveRepository_SaveStableswapState_Idempotent(t *testing.T) {
 		t.Fatalf("NewCurveStableswapState: %v", err)
 	}
 
-	save := func() int64 {
-		tx, err := curveTestPool.Begin(ctx)
-		if err != nil {
-			t.Fatalf("begin tx: %v", err)
-		}
-		defer tx.Rollback(ctx)
-		n, err := repo.SaveBlock(ctx, tx, outbound.BlockWrites{StableStates: []*entity.CurveStableswapState{st}})
-		if err != nil {
-			t.Fatalf("SaveBlock: %v", err)
-		}
-		if err := tx.Commit(ctx); err != nil {
-			t.Fatalf("commit: %v", err)
-		}
-		return n
+	save := func() outbound.CurveStateRowCounts {
+		return saveBlockCommitted(t, ctx, repo, outbound.BlockWrites{StableStates: []*entity.CurveStableswapState{st}})
 	}
 
-	if n := save(); n != 1 {
-		t.Errorf("first save rows affected = %d, want 1", n)
+	if got := save(); got.Attempted != 1 || got.Persisted != 1 {
+		t.Errorf("first save = %+v, want {Attempted:1 Persisted:1}", got)
 	}
-	// redelivery; same build -> trigger reuses pv -> ON CONFLICT DO NOTHING
-	if n := save(); n != 0 {
-		t.Errorf("redelivery rows affected = %d, want 0 (ON CONFLICT DO NOTHING)", n)
+	// The redelivery is the case VectorCurveIndexerNoStateWritten must NOT fire
+	// on: same build -> the trigger reuses the processing_version, so the INSERT
+	// lands on the identical PK and appends nothing. Persisted drops to zero
+	// while Attempted stays at the row the block really tried to persist — which
+	// is why the alert's unless side keys on Attempted.
+	if got := save(); got.Attempted != 1 || got.Persisted != 0 {
+		t.Errorf("redelivery = %+v, want {Attempted:1 Persisted:0} (ON CONFLICT DO NOTHING appends nothing, but the block still tried)", got)
 	}
 
 	var count int
@@ -257,8 +249,8 @@ func TestCurveRepository_SaveCryptoswapState_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SaveBlock: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("rows affected = %d, want 1", n)
+	if n.Persisted != 1 {
+		t.Errorf("rows affected = %d, want 1", n.Persisted)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit: %v", err)
@@ -592,7 +584,7 @@ func seedCurvePoolWithLpToken(t *testing.T, ctx context.Context, lpAddr common.A
 
 // saveBlockCommitted runs SaveBlock inside a committed transaction and returns
 // the state-row count.
-func saveBlockCommitted(t *testing.T, ctx context.Context, repo *CurveRepository, w outbound.BlockWrites) int64 {
+func saveBlockCommitted(t *testing.T, ctx context.Context, repo *CurveRepository, w outbound.BlockWrites) outbound.CurveStateRowCounts {
 	t.Helper()
 	tx, err := curveTestPool.Begin(ctx)
 	if err != nil {
@@ -640,8 +632,8 @@ func TestCurveRepository_SaveStableswapState_ExtendedColumns(t *testing.T) {
 
 	if n := saveBlockCommitted(t, ctx, repo, outbound.BlockWrites{
 		StableStates: []*entity.CurveStableswapState{st},
-	}); n != 1 {
-		t.Fatalf("state rows = %d, want 1", n)
+	}); n.Persisted != 1 {
+		t.Fatalf("state rows = %d, want 1", n.Persisted)
 	}
 
 	var (
@@ -713,8 +705,8 @@ func TestCurveRepository_SaveCryptoswapState_ExtendedColumns(t *testing.T) {
 
 	if n := saveBlockCommitted(t, ctx, repo, outbound.BlockWrites{
 		CryptoStates: []*entity.CurveCryptoswapState{st},
-	}); n != 1 {
-		t.Fatalf("state rows = %d, want 1", n)
+	}); n.Persisted != 1 {
+		t.Fatalf("state rows = %d, want 1", n.Persisted)
 	}
 
 	var (
@@ -1107,8 +1099,8 @@ func TestCurveRepository_SaveBlock_MixedBatchDrainOrder(t *testing.T) {
 	mixed.StableStates = []*entity.CurveStableswapState{newStable(1001), newStable(1002)}
 	mixed.CryptoStates = []*entity.CurveCryptoswapState{crypto}
 
-	if stateRows := saveBlockCommitted(t, ctx, repo, mixed); stateRows != 3 {
-		t.Fatalf("stateRows = %d, want 3 (only the 3 new state rows count; the pre-existing swap/liquidity/parameter/lp rows conflict to 0). A wrong count means queueCurveBatch and sendCurveBatch iterate the batch groups in different orders.", stateRows)
+	if stateRows := saveBlockCommitted(t, ctx, repo, mixed); stateRows.Persisted != 3 {
+		t.Fatalf("stateRows.Persisted = %d, want 3 (only the 3 new state rows count; the pre-existing swap/liquidity/parameter/lp rows conflict to 0). A wrong count means queueCurveBatch and sendCurveBatch iterate the batch groups in different orders.", stateRows.Persisted)
 	}
 
 	// Data is bound at Queue time, so every row lands in its own table regardless

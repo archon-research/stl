@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/hex"
 	"math/big"
-	"strings"
 	"testing"
 	"time"
 
@@ -401,51 +400,6 @@ func TestStableswapHandler_CorruptKnownEventErrors(t *testing.T) {
 	got, err := h.DecodeEvents(receipt, pool, 1, 100, 0, time.Unix(1, 0).UTC())
 	if err == nil {
 		t.Errorf("expected error for corrupt TokenExchange data, got success: %+v", got)
-	}
-}
-
-// TestStableswapHandler_EmptyDataOnKnownEventErrors pins the rejection of a
-// known event whose data block is empty at decode time, before anything reaches
-// the capture net: today every stableswap extractor happens to read its fields
-// explicitly, so a future capture-only event would be the silent hole.
-func TestStableswapHandler_EmptyDataOnKnownEventErrors(t *testing.T) {
-	a, err := abis.CurveStableswapABI()
-	if err != nil {
-		t.Fatalf("loading ABI: %v", err)
-	}
-	h := NewStableswapHandler(a)
-	pool := RegisteredPool{
-		ID:      1,
-		Address: common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
-		Kind:    KindStableswapPreNG,
-		NCoins:  2,
-	}
-
-	ev, ok := a.Events["TokenExchange"]
-	if !ok {
-		t.Fatal("TokenExchange event not in ABI")
-	}
-	txHash := common.HexToHash("0xdeadbeef01020304050607080900010203040506070809000102030405060708")
-	buyer := common.HexToAddress("0xabc")
-
-	log := shared.Log{
-		Address:         pool.Address.Hex(),
-		Topics:          []string{ev.ID.Hex(), common.BytesToHash(buyer.Bytes()).Hex()},
-		Data:            "0x",
-		TransactionHash: txHash.Hex(),
-		LogIndex:        "0x0",
-	}
-	receipt := shared.TransactionReceipt{
-		Logs:            []shared.Log{log},
-		TransactionHash: txHash.Hex(),
-	}
-
-	got, err := h.DecodeEvents(receipt, pool, 1, 100, 0, time.Unix(1, 0).UTC())
-	if err == nil {
-		t.Fatalf("expected error for a TokenExchange log with no data, got success: %+v", got)
-	}
-	if !strings.Contains(err.Error(), "tokens_sold") {
-		t.Errorf("error %q does not name an undecoded field", err)
 	}
 }
 

@@ -79,6 +79,11 @@ const wantSeededPools = 21
 // to find a real Swap on the target pool.
 const swapLogsScanDepth = 2000
 
+// liquidityScanDepth is ten times swapLogsScanDepth: ModifyLiquidity on the
+// seeded pools runs at ~2.7 events per 2000 blocks and is clustered, so the
+// swap window is empty on a large fraction of runs with nothing wrong.
+const liquidityScanDepth = 20000
+
 // baselineTickSampleSize bounds how many enumerated ticks the report renders.
 // Every tick is read and asserted on (the completeness invariant needs all of
 // them); this only keeps the markdown table readable for a dense pool.
@@ -510,6 +515,7 @@ func (h *liveHarness) decodeAndPersistRealSwap(t *testing.T, ctx context.Context
 	}
 	if swapLog == nil {
 		rep.swapDecodeNote = fmt.Sprintf("no Swap found on either target pool in the last %d blocks; no decode was exercised", swapLogsScanDepth)
+		addFinding(t, rep, fmt.Sprintf("no Swap on either target pool in the last %d blocks: mainnet runs ~80 Swaps per such window, so an empty result is the symptom of a drifted Swap signature or a wrong seeded PoolId, not a quiet market", swapLogsScanDepth))
 		return
 	}
 	rep.swapPoolID = poolID.Hex()
@@ -562,7 +568,7 @@ func (h *liveHarness) decodeAndPersistRealLiquidityEvent(t *testing.T, ctx conte
 	}
 
 	logs, err := h.eth.FilterLogs(ctx, ethereum.FilterQuery{
-		FromBlock: big.NewInt(max(h.latest-swapLogsScanDepth, 0)),
+		FromBlock: big.NewInt(max(h.latest-liquidityScanDepth, 0)),
 		ToBlock:   big.NewInt(h.latest),
 		Addresses: []common.Address{h.poolManager},
 		Topics:    [][]common.Hash{{poolManagerEventTopic0("ModifyLiquidity")}, poolIDs},
@@ -571,7 +577,8 @@ func (h *liveHarness) decodeAndPersistRealLiquidityEvent(t *testing.T, ctx conte
 		t.Fatalf("CORE FAILURE: eth_getLogs ModifyLiquidity across the registry: %v", err)
 	}
 	if len(logs) == 0 {
-		rep.liquidityDecodeNote = fmt.Sprintf("no ModifyLiquidity on any of the %d registered pools in the last %d blocks; the tick write path was not exercised", len(h.pools), swapLogsScanDepth)
+		rep.liquidityDecodeNote = fmt.Sprintf("no ModifyLiquidity on any of the %d registered pools in the last %d blocks; the tick write path was not exercised", len(h.pools), liquidityScanDepth)
+		addFinding(t, rep, fmt.Sprintf("no ModifyLiquidity on any of the %d registered pools in the last %d blocks (~2.8 days, ~27 expected): the liquidity write path was not exercised, and an empty result over that range points at a drifted signature or a wrong seeded PoolId", len(h.pools), liquidityScanDepth))
 		return
 	}
 	sort.Slice(logs, func(i, j int) bool { return logs[i].BlockNumber > logs[j].BlockNumber })

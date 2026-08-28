@@ -165,28 +165,30 @@ type cryptoConverted struct {
 	calcWithdrawOneCoin pgtype.FlatArray[pgtype.Numeric]
 }
 
-// SaveBlock persists all of a block's curve rows in one pgx.Batch within tx.
-func (r *CurveRepository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.BlockWrites) (stateRows int64, err error) {
+// SaveBlock persists all of a block's curve rows in one pgx.Batch within tx and
+// returns both the count of state rows the block queued and the count that
+// actually appended.
+func (r *CurveRepository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.BlockWrites) (stateRows outbound.CurveStateRowCounts, err error) {
 	swaps, err := convertSwaps(w.Swaps)
 	if err != nil {
-		return 0, err
+		return outbound.CurveStateRowCounts{}, err
 	}
 	liqs, err := convertLiquidity(w.Liquidity)
 	if err != nil {
-		return 0, err
+		return outbound.CurveStateRowCounts{}, err
 	}
 	stables, err := convertStableStates(w.StableStates)
 	if err != nil {
-		return 0, err
+		return outbound.CurveStateRowCounts{}, err
 	}
 	cryptos, err := convertCryptoStates(w.CryptoStates)
 	if err != nil {
-		return 0, err
+		return outbound.CurveStateRowCounts{}, err
 	}
 
 	batch := &pgx.Batch{}
 	if err := queueCurveBatch(batch, swaps, liqs, stables, cryptos, w.ParameterEvents, w.LpTokenEvents, r.buildID); err != nil {
-		return 0, err
+		return outbound.CurveStateRowCounts{}, err
 	}
 
 	stateRows, err = sendCurveBatch(ctx, tx, batch, swaps, liqs, stables, cryptos, w.ParameterEvents, w.LpTokenEvents)
@@ -468,9 +470,12 @@ func queueCurveBatch(
 }
 
 // sendCurveBatch executes the queued batch and drains every result in queue
-// order, returning the count of state rows inserted (only stableswap/cryptoswap
-// states count). The batch reader is always closed before returning so the
-// caller may issue further queries on tx.
+// order, returning both the number of state-row statements it drained and the
+// number of rows they appended (only stableswap/cryptoswap states count). The
+// two diverge on an idempotent replay, where every INSERT conflicts away;
+// counting the attempt here rather than in the service means a repo-layer drop
+// is counted as zero attempts too. The batch reader is always closed before
+// returning so the caller may issue further queries on tx.
 func sendCurveBatch(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -481,7 +486,7 @@ func sendCurveBatch(
 	cryptos []cryptoConverted,
 	parameterEvents []*entity.CurveParameterEvent,
 	lpTokenEvents []*entity.CurveLpTokenEvent,
-) (stateRows int64, err error) {
+) (stateRows outbound.CurveStateRowCounts, err error) {
 	br := tx.SendBatch(ctx, batch)
 	defer func() {
 		if closeErr := br.Close(); closeErr != nil && err == nil {
@@ -506,7 +511,8 @@ func sendCurveBatch(
 		if readErr != nil {
 			return stateRows, fmt.Errorf("batch stableswap %d: %w", i, readErr)
 		}
-		stateRows += tag.RowsAffected()
+		stateRows.Attempted++
+		stateRows.Persisted += tag.RowsAffected()
 	}
 
 	for i := range cryptos {
@@ -514,7 +520,8 @@ func sendCurveBatch(
 		if readErr != nil {
 			return stateRows, fmt.Errorf("batch cryptoswap %d: %w", i, readErr)
 		}
-		stateRows += tag.RowsAffected()
+		stateRows.Attempted++
+		stateRows.Persisted += tag.RowsAffected()
 	}
 
 	for i := range parameterEvents {

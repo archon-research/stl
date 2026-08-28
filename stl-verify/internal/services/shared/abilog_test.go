@@ -179,6 +179,26 @@ func TestDecodeLog(t *testing.T) {
 		}
 	})
 
+	t.Run("odd-length data errors", func(t *testing.T) {
+		nonIndexed := abi.Arguments{ev.Inputs[2]}
+		data, err := nonIndexed.Pack(big.NewInt(0x123456))
+		if err != nil {
+			t.Fatalf("packing data: %v", err)
+		}
+		hex := common.Bytes2Hex(data)
+		log := Log{
+			Topics: []string{
+				ev.ID.Hex(),
+				common.BytesToHash(from.Bytes()).Hex(),
+				common.BytesToHash(to.Bytes()).Hex(),
+			},
+			Data: "0x" + hex[:len(hex)-2] + hex[len(hex)-1:],
+		}
+		if _, err := DecodeLog(ev, log); err == nil {
+			t.Fatal("expected error for an odd-length data block: left-padding it decodes a silently wrong value")
+		}
+	})
+
 	t.Run("event with no indexed args decodes from data alone", func(t *testing.T) {
 		initialize := eventFixture(t, "Initialize", `[
 			{"name":"sqrtPriceX96","type":"uint160","indexed":false},
