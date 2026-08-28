@@ -1420,6 +1420,10 @@
       "owner": "prime",
       "transform_defer": "VEC-494: bucket 3 (no natural PK, keyed via transform_config)"
     },
+    "prime_proxy": {
+      "type": "dimension",
+      "owner": "prime"
+    },
     "prime_reference_balance_sheet": {
       "type": "raw_pipeline",
       "owner": "prime",

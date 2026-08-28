@@ -297,6 +297,57 @@ async def test_stamps_the_monitor_figures_with_their_own_observation(seeded, asy
 
 
 @pytest.mark.asyncio(loop_scope="module")
+async def test_seeds_locf_from_the_newest_of_several_prior_observations(seeded, async_db_url: str):
+    # With one prior candidate the seeding is right whichever row the query picks,
+    # so the ordering that selects it is only pinned once there are several.
+    conn, prime_id = seeded
+    await _insert_snapshot(conn, prime_id, _WINDOW_START - timedelta(days=4), total_rc="1", exposure="10")
+    await _insert_snapshot(conn, prime_id, _WINDOW_START - timedelta(days=2), total_rc="3", exposure="30")
+    await _insert_snapshot(conn, prime_id, _WINDOW_START - timedelta(days=3), total_rc="2", exposure="20")
+
+    buckets = await _buckets(async_db_url)
+
+    assert buckets
+    assert all(b.total_capital_usd == Decimal("3") for b in buckets)
+    assert all(b.exposure_usd == Decimal("30") for b in buckets)
+    assert all(b.capital_observed_at == _WINDOW_START - timedelta(days=2) for b in buckets)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_prefers_the_snapshot_when_both_feeds_share_the_prior_instant(seeded, async_db_url: str):
+    # The two feeds collide at midnight, and the seeding must break that tie the
+    # same way the in-window merge does: the snapshot is the finer cadence.
+    conn, prime_id = seeded
+    observed = _WINDOW_START - timedelta(days=2)
+    await _insert_history(conn, prime_id, observed, treasury="111")
+    await _insert_snapshot(conn, prime_id, observed, total_rc="222", exposure="5")
+
+    buckets = await _buckets(async_db_url)
+
+    assert buckets
+    assert all(b.total_capital_usd == Decimal("222") for b in buckets)
+    # The assets figure has no snapshot to lose to — only the balance sheet reports it.
+    assert all(b.assets_usd == Decimal("1") for b in buckets)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_seeds_each_figure_from_its_own_newest_observation(seeded, async_db_url: str):
+    # The figures do not travel together: a newer snapshot carries no assets, so
+    # taking one row for all six would blank the balance sheet's contribution.
+    conn, prime_id = seeded
+    await _insert_history(conn, prime_id, _WINDOW_START - timedelta(days=3), treasury="111")
+    await _insert_snapshot(conn, prime_id, _WINDOW_START - timedelta(days=1), total_rc="222", exposure="5")
+
+    buckets = await _buckets(async_db_url)
+
+    assert buckets
+    assert all(b.total_capital_usd == Decimal("222") for b in buckets)
+    assert all(b.assets_usd == Decimal("1") for b in buckets)
+    assert all(b.assets_observed_at == _WINDOW_START - timedelta(days=3) for b in buckets)
+    assert all(b.capital_observed_at == _WINDOW_START - timedelta(days=1) for b in buckets)
+
+
+@pytest.mark.asyncio(loop_scope="module")
 async def test_does_not_reach_back_past_the_staleness_bound(seeded, async_db_url: str):
     # A figure this old is not a current reading, and an unbounded backward scan
     # would walk every chunk the table has.
