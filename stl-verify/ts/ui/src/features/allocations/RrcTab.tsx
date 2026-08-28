@@ -377,10 +377,11 @@ export function RrcTab({
         >
           <p
             className={css({
-              m: 0,
+              m: '0',
               fontSize: 'xs',
               textTransform: 'uppercase',
-              letterSpacing: '0.16em',
+              // Wider than the widest token step (0.1em); kept exact.
+              letterSpacing: '[0.16em]',
               color: 'text.muted',
             })}
           >
@@ -389,8 +390,8 @@ export function RrcTab({
           <ul
             className={css({
               listStyle: 'none',
-              m: 0,
-              p: 0,
+              m: '0',
+              p: '0',
               display: 'grid',
               gap: '2',
             })}
@@ -401,7 +402,7 @@ export function RrcTab({
               value={`${formatUsdValue(reference.rrcUsd)} · CRR ${formatPercentValue(reference.crrPct, 2)}`}
             />
           </ul>
-          <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
+          <p className={css({ m: '0', fontSize: 'sm', color: 'text.muted' })}>
             Verify&apos;s models run on receipt-token positions only; this is
             the legacy feed&apos;s published requirement for the position.
           </p>
@@ -455,10 +456,11 @@ export function RrcTab({
         >
           <p
             className={css({
-              m: 0,
+              m: '0',
               fontSize: 'xs',
               textTransform: 'uppercase',
-              letterSpacing: '0.16em',
+              // Wider than the widest token step (0.1em); kept exact.
+              letterSpacing: '[0.16em]',
               color: 'text.muted',
             })}
           >
@@ -467,8 +469,8 @@ export function RrcTab({
           <ul
             className={css({
               listStyle: 'none',
-              m: 0,
-              p: 0,
+              m: '0',
+              p: '0',
               display: 'grid',
               gap: '2',
             })}

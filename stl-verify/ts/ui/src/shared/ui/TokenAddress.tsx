@@ -65,7 +65,9 @@ export function TokenAddress({
   });
 
   const triggerClassName = css({
-    flex: '1 1 0',
+    flexGrow: '1',
+    flexShrink: '1',
+    flexBasis: '0',
     minWidth: '0',
     fontFamily: 'mono',
     fontSize: type === 'tx' ? 'xs' : '2xs',
@@ -85,9 +87,10 @@ export function TokenAddress({
       textDecoration: 'underline',
     },
     _focus: {
-      outline: '2px solid',
+      // No outline-shorthand token; the scale has no matching step.
+      outline: '[2px solid]',
       outlineColor: 'interactive.accent',
-      outlineOffset: '1px',
+      outlineOffset: '[1px]',
     },
   });
 
@@ -161,9 +164,12 @@ export function TokenAddress({
               borderWidth: '1px',
               borderColor: 'border.subtle',
               boxShadow: 'overlay',
-              minWidth: '200px',
+              // Below the smallest size step (`xs`, 20rem), and a menu is sized
+              // to its longest row rather than to the scale.
+              minWidth: '[200px]',
               overflow: 'hidden',
-              zIndex: '50',
+              // The preset ships no zIndex scale.
+              zIndex: '[50]',
             })}
           >
             <Menu.Item
@@ -174,7 +180,7 @@ export function TokenAddress({
                 display: 'flex',
                 alignItems: 'center',
                 gap: '2',
-                width: '100%',
+                width: 'full',
                 px: '3',
                 py: '2.5',
                 fontSize: 'sm',
@@ -199,7 +205,7 @@ export function TokenAddress({
                 display: 'flex',
                 alignItems: 'center',
                 gap: '2',
-                width: '100%',
+                width: 'full',
                 px: '3',
                 py: '2.5',
                 fontSize: 'sm',

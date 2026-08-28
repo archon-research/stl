@@ -114,8 +114,8 @@ const chartTooltipSurfaceClassName = css({
   px: '3',
   py: '2.5',
   fontSize: 'sm',
-  width: 'fit-content',
-  minW: '8rem',
+  width: 'fit',
+  minW: '32',
 });
 
 const chartTooltipTitleClassName = css({
@@ -146,7 +146,7 @@ function buildSingleSeriesTheme(stroke: string) {
 }
 
 const chartEmptyMessageClassName = css({
-  m: 0,
+  m: '0',
   mt: '2',
   fontSize: 'xs',
   color: 'text.muted',
@@ -245,7 +245,7 @@ export function MetricCardTrend({
     return (
       <p
         className={css({
-          m: 0,
+          m: '0',
           mt: '2',
           fontSize: 'xs',
           color: 'text.warning',
@@ -369,7 +369,7 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
       className={css({
         mt: '2',
         width: 'full',
-        minWidth: 0,
+        minWidth: '0',
         overflowX: 'hidden',
       })}
     >

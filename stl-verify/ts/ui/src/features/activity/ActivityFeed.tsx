@@ -98,11 +98,15 @@ const ACTION_FILTER_OPTIONS = [
   { label: 'Sweep', value: 'sweep' },
 ];
 
-const filterFieldClassName = css({ display: 'grid', gap: '1', minWidth: 0 });
+const filterFieldClassName = css({
+  display: 'grid',
+  gap: '1',
+  minWidth: '0',
+});
 const filterLabelClassName = css({
   fontSize: 'xs',
   textTransform: 'uppercase',
-  letterSpacing: '0.1em',
+  letterSpacing: 'widest',
   color: 'text.muted',
 });
 
@@ -258,7 +262,7 @@ function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
 
       <pre
         className={css({
-          margin: 0,
+          margin: '0',
           borderRadius: 'sm',
           bg: 'surface.subtle',
           padding: '2',
@@ -266,7 +270,7 @@ function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
           fontSize: 'xs',
           color: 'text.default',
           overflowX: 'auto',
-          maxHeight: '10rem',
+          maxHeight: '40',
         })}
       >
         {formatEventData(event.event_data)}
@@ -835,13 +839,15 @@ function ActivityPageHeader({
         className={css({
           display: 'grid',
           gap: '1',
-          minWidth: { base: '0', md: '18rem' },
-          flex: '1 1 20rem',
+          minWidth: { base: '0', md: '72' },
+          flexGrow: '1',
+          flexShrink: '1',
+          flexBasis: '80',
         })}
       >
         <h1
           className={css({
-            m: 0,
+            m: '0',
             fontSize: { base: '3xl', md: '4xl' },
             lineHeight: 'tight',
             color: 'text.strong',
@@ -1231,7 +1237,7 @@ export function ActivityFeed(props: ActivityFeedProps) {
           className={css({
             display: 'flex',
             flexDirection: 'column',
-            minHeight: '24rem',
+            minHeight: '96',
           })}
         >
           {activityResults}

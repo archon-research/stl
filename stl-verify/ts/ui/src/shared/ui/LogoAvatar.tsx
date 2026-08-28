@@ -133,7 +133,7 @@ export function LogoAvatar({
           justifyContent: 'center',
           color: isSelected ? 'white' : fallbackColor,
           fontWeight: 'semibold',
-          lineHeight: '1',
+          lineHeight: 'none',
           textAlign: 'center',
           userSelect: 'none',
         })}

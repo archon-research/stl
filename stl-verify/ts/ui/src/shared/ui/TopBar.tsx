@@ -64,7 +64,7 @@ const tabTriggerClassName = css({
   borderBottomWidth: '2px',
   borderBottomStyle: 'solid',
   borderBottomColor: 'transparent',
-  transitionProperty: 'color, border-color',
+  transitionProperty: 'colors',
   transitionDuration: 'fast',
   whiteSpace: 'nowrap',
   _hover: { color: 'text.default' },
@@ -94,19 +94,19 @@ const sidebarToggleClassName = css({
   background: 'surface.default',
   color: 'text.muted',
   cursor: 'pointer',
-  transitionProperty: 'color, border-color',
+  transitionProperty: 'colors',
   transitionDuration: 'fast',
   _hover: { color: 'text.strong', borderColor: 'border.default' },
   _focusVisible: {
     outlineWidth: '2px',
     outlineStyle: 'solid',
     outlineColor: 'interactive.accent',
-    outlineOffset: '2px',
+    outlineOffset: '0.5',
   },
 });
 
 const rangeFieldClassName = css({
-  width: { base: '100%', sm: '14rem' },
+  width: { base: 'full', sm: '56' },
   flexShrink: 0,
 });
 
@@ -128,7 +128,7 @@ function FilterField({
   return (
     <div
       className={css({
-        width: { base: '100%', sm: '11rem' },
+        width: { base: 'full', sm: '44' },
         flexShrink: 0,
       })}
     >
@@ -200,8 +200,9 @@ export function TopBar({
           // because the content column and this slot resolve to different
           // widths; measured against the card at 1680px, both edges land within
           // a pixel.
-          marginLeft: '-16px',
-          marginRight: '-5px',
+          marginLeft: '-4',
+          // A device-pixel correction rather than a spacing choice.
+          marginRight: '[-5px]',
         })}
       >
         <div className={flex({ align: 'center', gap: '4', flexShrink: 0 })}>

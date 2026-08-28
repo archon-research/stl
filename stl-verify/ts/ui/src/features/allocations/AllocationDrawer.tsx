@@ -49,7 +49,7 @@ const headingClassName = css({
   display: 'inline-flex',
   alignItems: 'center',
   gap: '1.5',
-  minWidth: 0,
+  minWidth: '0',
 });
 
 const subtitleClassName = css({

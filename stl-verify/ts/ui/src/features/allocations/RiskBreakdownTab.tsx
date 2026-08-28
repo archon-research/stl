@@ -90,7 +90,7 @@ function RiskSymbolCell({
 // assistive tech and comes back on hover through `TruncatedLabel`.
 const truncatedHeaderClassName = css({
   display: 'block',
-  maxWidth: '7rem',
+  maxWidth: '28',
   overflow: 'hidden',
   textOverflow: 'ellipsis',
   whiteSpace: 'nowrap',

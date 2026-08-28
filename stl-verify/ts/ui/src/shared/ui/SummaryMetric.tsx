@@ -25,7 +25,7 @@ type SummaryMetricProps = {
 // needs `flex` to keep filling the tile.
 const detailClassName = css({
   flex: '1',
-  minWidth: 0,
+  minWidth: '0',
   overflowWrap: 'anywhere',
 });
 
@@ -56,7 +56,7 @@ export function SummaryMetric({
           <span
             className={css({
               display: 'flex',
-              width: '100%',
+              width: 'full',
               alignItems: 'center',
               justifyContent: 'space-between',
               gap: '2',
