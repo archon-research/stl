@@ -27,7 +27,10 @@
 --
 -- Compression strategy:
 -- - Segment by entity FK (prime_id), order by synced_at DESC
--- - Compress chunks older than 2 days (2x chunk_interval)
+-- - 7-day chunks: at the 15-minute cadence the reference row tables collect
+--   only ~1.1k-7.7k rows/day (~0.5-3 MB), far below where daily chunks pay
+--   off, and chunk COUNT (not volume) drives planner/executor memory (VEC-663 / #808).
+-- - Compress chunks older than 14 days (2x chunk_interval)
 -- - Tier to S3 after 1 year (best-effort; skipped where unavailable)
 --
 -- Auditability follows ADR-0002: processing_version + build_id, PK = natural
@@ -54,7 +57,7 @@ CREATE TABLE IF NOT EXISTS prime_reference_position
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'synced_at',
-    tsdb.chunk_interval = '1 day'
+    tsdb.chunk_interval = '7 days'
 );
 
 ALTER TABLE prime_reference_position SET (
@@ -63,7 +66,7 @@ ALTER TABLE prime_reference_position SET (
     timescaledb.compress_orderby = 'synced_at DESC'
 );
 
-SELECT add_compression_policy('prime_reference_position', INTERVAL '2 days', if_not_exists => TRUE);
+SELECT add_compression_policy('prime_reference_position', INTERVAL '14 days', if_not_exists => TRUE);
 
 DO $$ BEGIN
     PERFORM add_tiering_policy('prime_reference_position', INTERVAL '1 year', if_not_exists => TRUE);
