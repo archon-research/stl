@@ -375,6 +375,8 @@ rather than pages.
   (duplicate IDs across pages) → usually transient; confirm it clears next cycle.
 - A string-encoded integer field the client can't parse → the phase fails hard
   by design (never silently skips rows); needs a client fix.
+- A null `collateral.asset` symbol no longer reaches these alerts at all: it is
+  a downgrade watched by `VectorMapleSchemaDrift`.
 - DB write failure (FK, constraint) → inspect the named entity.
 
 ---
@@ -441,11 +443,18 @@ data-quality signal.
 ### What it means
 
 A field Maple normally populates (`pool_monthly_apy`, `pool_spot_apy`,
-`strategy_fee_rate`, `strategy_total_fees_collected`) was null-downgraded to
-SQL NULL repeatedly (>5/1h). Known-nullable fields (`loan_acm_ratio`,
-`pool_tvl`, `pool_collateral_value_usd`, `syrup_drips_yield_boost`) are
-excluded. A sustained count signals a Maple GraphQL API schema change, not a
-code bug.
+`strategy_fee_rate`, `strategy_total_fees_collected`,
+`collateral_asset_symbol`) was null-downgraded to SQL NULL repeatedly (>5/1h).
+Known-nullable fields (`loan_acm_ratio`, `pool_tvl`,
+`pool_collateral_value_usd`, `syrup_drips_yield_boost`) are excluded. A
+sustained count signals a Maple GraphQL API schema change, not a code bug.
+
+`collateral_asset_symbol` is the one allowlisted field whose null the indexer
+tolerates instead of failing the phase, so this rule is the only alert that
+sees it. The row persists with an empty `asset_symbol`, and the Maple backed
+breakdown drops such rows from its per-symbol aggregate (logged as a dropped
+collateral row) rather than exposing a blank symbol — so a sustained count
+also means that pool's `backing_pct` understates real backing.
 
 ### First checks
 

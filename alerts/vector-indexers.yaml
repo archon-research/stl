@@ -1025,9 +1025,12 @@ groups:
         # null-downgrade canary. Rather than firing on ANY null (acmRatio, tvl
         # and collateral_value_usd are legitimately null on many loans/pools —
         # documented schema-nullable), this uses a POSITIVE allowlist of fields
-        # Maple normally populates: pool APYs and Sky-strategy fee fields. A
-        # sustained count here = a contractually-populated field went null =
-        # API schema regression.
+        # Maple normally populates: pool APYs, Sky-strategy fee fields, and the
+        # collateral asset symbol. A sustained count here = a
+        # contractually-populated field went null = API schema regression.
+        #
+        # collateral_asset_symbol is the only allowlisted field whose null is
+        # tolerated rather than fatal, so this rule is its ONLY signal.
         #
         # Excluded pending baseline (ORB-145): loan_acm_ratio, pool_tvl,
         # pool_collateral_value_usd (known-nullable) and syrup_drips_yield_boost
@@ -1036,7 +1039,7 @@ groups:
         expr: |
           sum by (chain, cluster, field) (
             increase(maple_sync_null_downgrades_total{
-              field=~"pool_monthly_apy|pool_spot_apy|strategy_fee_rate|strategy_total_fees_collected",
+              field=~"pool_monthly_apy|pool_spot_apy|strategy_fee_rate|strategy_total_fees_collected|collateral_asset_symbol",
               k8s_namespace_name="vector"
             }[1h])
           ) > 5
