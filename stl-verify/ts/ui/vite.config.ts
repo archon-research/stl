@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import react from '@vitejs/plugin-react';
+import babel from '@rolldown/plugin-babel';
+import react, { reactCompilerPreset } from '@vitejs/plugin-react';
 import type { Plugin } from 'vite';
 import { defineConfig } from 'vitest/config';
 
@@ -33,6 +34,25 @@ function dropMockWorkerScript(): Plugin {
 
 const WORKER_SCRIPT = 'mockServiceWorker.js';
 
+/**
+ * The React Compiler, as a rolldown babel preset.
+ *
+ * React is 19.2, so no `target` is needed: the compiler emits calls into
+ * `react/compiler-runtime`, which that version ships. The preset ships only a
+ * `code` filter, and Babel is the one thing in this pipeline that is not Oxc,
+ * so an id filter is added for the two trees that would cost the most for
+ * nothing -- the generated OpenAPI types and Panda's generated styled-system.
+ */
+function reactCompiler() {
+  const preset = reactCompilerPreset();
+  preset.rolldown.filter = {
+    ...preset.rolldown.filter,
+    id: { exclude: ['**/src/generated/**', '**/styled-system/**'] },
+  };
+
+  return babel({ presets: [preset] });
+}
+
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
   const env = resolveAppEnv(mode, import.meta.dirname);
@@ -44,7 +64,11 @@ export default defineConfig(({ mode }) => {
     env.VITE_STRICT_PORT ?? (env.VITE_PORT === undefined ? undefined : true);
 
   return {
-    plugins: [react(), ...(mocked ? [] : [dropMockWorkerScript()])],
+    plugins: [
+      react(),
+      reactCompiler(),
+      ...(mocked ? [] : [dropMockWorkerScript()]),
+    ],
     // env.ts is the only validator of this flag, and it reads `.env.default`,
     // which Vite does not. Without this, setting VITE_API_MOCKS there drops the
     // /v1 proxy while leaving the browser worker off, so every call 404s.

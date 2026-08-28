@@ -3,7 +3,9 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "sideEffects": ["**/*.css"],
+  "sideEffects": [
+    "**/*.css"
+  ],
   "exports": {
     "./openapi-types": "./src/generated/openapi-types.ts",
     "./package.json": "./package.json"
@@ -49,12 +51,16 @@
     "@archon-research/oxfmt-config": "0.10.0",
     "@archon-research/oxlint-config": "0.10.0",
     "@archon-research/tsconfig": "0.10.0",
+    "@babel/core": "8.0.1",
     "@pandacss/dev": "1.12.0",
+    "@rolldown/plugin-babel": "0.2.3",
     "@stl-verify/mocks": "*",
+    "@types/babel__core": "7.20.5",
     "@types/node": "24.13.3",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
     "@vitejs/plugin-react": "6.0.5",
+    "babel-plugin-react-compiler": "1.0.0",
     "msw": "2.15.0",
     "openapi-typescript": "7.13.0",
     "postcss": "8.5.26",
