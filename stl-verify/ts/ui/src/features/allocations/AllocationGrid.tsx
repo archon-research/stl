@@ -1422,6 +1422,7 @@ export function AllocationGrid({
           <TabNotePanel message={noticeMessage} />
         )}
         <MetricsBand
+          primeKey={selectedPrime?.id ?? null}
           isSkeleton={showTopMetricsSkeleton}
           hasTopMetrics={hasTopMetrics}
           summary={summary}

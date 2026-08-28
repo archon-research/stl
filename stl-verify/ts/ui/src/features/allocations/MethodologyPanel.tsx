@@ -1,14 +1,12 @@
 import {
   Badge,
   type BadgeColorPalette,
-  ErrorBoundary,
   ErrorState,
   Panel,
   SkeletonStack,
 } from '@archon-research/design-system';
 import { useQuery } from '@tanstack/react-query';
 import { ChevronDown, ChevronUp } from 'lucide-react';
-import { lazy, Suspense } from 'react';
 
 import { css } from '#styled-system/css';
 
@@ -18,7 +16,6 @@ import {
   formatUsdPrice,
 } from '../../shared/lib/dashboard';
 import { toQueryErrorMessage } from '../../shared/lib/errors';
-import { logging } from '../../shared/lib/logging';
 import {
   dataSourcesQuery,
   DISABLED_ADDRESS,
@@ -28,28 +25,15 @@ import {
   tokensQuery,
 } from '../../shared/lib/queries';
 import type { DataSource } from '../../shared/types/allocation';
+import { LazyRegion, lazyChunk } from '../../shared/ui/LazyRegion';
 
 const NO_SOURCES: DataSource[] = [];
 
 // The panel is collapsed on first paint and its markdown is a module constant,
 // so the renderer can arrive with the body instead of with the app shell.
-const MethodologyMarkdown = lazy(() => import('./MethodologyMarkdown'));
-
-// Module scope because a fallback returning JSX inside the component body reads
-// to `react/no-unstable-nested-components` as a component redefined per render.
-const renderMarkdownLoadError = (loadError: Error) => (
-  <ErrorState
-    title="Failed to load methodology"
-    description="The methodology renderer could not be loaded."
-    errorMessage={loadError.message}
-    tone="critical"
-    size="inline"
-  />
+const MethodologyMarkdown = lazyChunk(
+  async () => (await import('./MethodologyMarkdown')).default,
 );
-
-const reportMarkdownLoadError = (loadError: Error) => {
-  logging.error('Failed to load methodology renderer', { error: loadError });
-};
 
 // Anything not listed reads as neutral: the set of access models is open-ended
 // (it comes from the data-sources API), so an unknown value must not be styled
@@ -242,14 +226,14 @@ export function MethodologyPanel({
                   },
                 })}
               >
-                <ErrorBoundary
-                  fallback={renderMarkdownLoadError}
-                  onError={reportMarkdownLoadError}
+                <LazyRegion
+                  title="Methodology unavailable"
+                  subject="methodology renderer"
+                  impact="The rest of the panel is unaffected."
+                  pending={<SkeletonStack count={3} />}
                 >
-                  <Suspense fallback={<SkeletonStack count={3} />}>
-                    <MethodologyMarkdown markdown={METHODOLOGY_MARKDOWN} />
-                  </Suspense>
-                </ErrorBoundary>
+                  <MethodologyMarkdown markdown={METHODOLOGY_MARKDOWN} />
+                </LazyRegion>
               </div>
             </div>
 

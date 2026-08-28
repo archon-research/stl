@@ -1,5 +1,5 @@
 import { SkeletonStack } from '@archon-research/design-system';
-import { lazy, Suspense, useState } from 'react';
+import { useState } from 'react';
 
 import { css } from '#styled-system/css';
 
@@ -17,6 +17,7 @@ import type {
 } from '../../shared/types/allocation';
 import type { LocalProtocolRow } from '../../shared/types/local-data';
 import { ChainLogo, ProtocolLogo, TokenLogo } from '../../shared/ui';
+import { LazyRegion, lazyChunk } from '../../shared/ui/LazyRegion';
 import { RiskDetailDrawer } from './RiskDetailDrawer';
 
 /**
@@ -27,9 +28,9 @@ import { RiskDetailDrawer } from './RiskDetailDrawer';
  * here is reachable until a row is clicked, so it downloads on the pointer
  * reaching the grid (see `preloadAllocationDetail`) rather than on first paint.
  */
-const BottomPanel = lazy(async () => ({
-  default: (await import('./BottomPanel')).BottomPanel,
-}));
+const BottomPanel = lazyChunk(
+  async () => (await import('./BottomPanel')).BottomPanel,
+);
 
 type AllocationDrawerProps = {
   allocations: Allocation[];
@@ -168,8 +169,14 @@ export function AllocationDrawer({
       }
     >
       {!hasOpened ? null : (
-        <Suspense
-          fallback={
+        <LazyRegion
+          title="Risk details unavailable"
+          subject="drawer's tabs"
+          impact="Close the drawer to keep using the grid."
+          // `hasOpened` is sticky, so without this the region outlives the
+          // prime it broke on and stays broken for every prime after it.
+          resetKey={selectedPrime?.id ?? null}
+          pending={
             <div className={css({ px: { base: '5', md: '7' }, py: '6' })}>
               <SkeletonStack count={3} />
             </div>
@@ -185,7 +192,7 @@ export function AllocationDrawer({
             selectedPrime={selectedPrime}
             riskCapital={riskCapital}
           />
-        </Suspense>
+        </LazyRegion>
       )}
     </RiskDetailDrawer>
   );
