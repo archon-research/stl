@@ -22,7 +22,7 @@ npm run test:mocks -w mocks          # the self-test
 `src/schema.ts` imports the generated `paths` and `components` from
 `@stl-verify/ui/openapi-types` — an `exports` subpath on the ui workspace
 pointing at `src/generated/openapi-types.ts`, the same module
-`ui/src/lib/api.ts` builds `createApiClient` on.
+`ui/src/lib/api-client.ts` builds `createApiClient` on.
 
 That is the point of the layer: `createMockApi<paths>` reads the endpoint list,
 the params, and the per-status response bodies off the contract, so a schema
@@ -69,9 +69,10 @@ it with `jq`, which rejects JSONC.
   `globalThis.fetch` when `createApiClient` runs, and msw's node interceptors
   replace that global in `listen()`. A client constructed first keeps the
   original fetch and reaches the real network — which surfaces as a DNS failure,
-  not as an unhandled-request error. `ui/src/lib/api.ts` builds its client at
-  module scope, so a vitest setup file must listen at module scope too, before
-  that module is imported.
+  not as an unhandled-request error. `ui/src/lib/api-client.ts` builds its
+  client at module scope, so a vitest setup file must listen at module scope
+  too, before that module is imported — including transitively, via
+  `ui/src/lib/queries.ts` or anything that reaches it.
 - **No operation declares a 404.** Every path in the document answers `200` plus
   `422`, so the handlers that need a miss to fail — both `/v1/tokens/{chain_id}/{token_address}`
   reads, `/v1/risk/{chain_id}/{token_address}/breakdown`, `/v1/risk/rrc`, and all
