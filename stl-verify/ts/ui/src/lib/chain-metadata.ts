@@ -8,7 +8,7 @@ type ChainMetadata = {
  * Names, explorers and native symbols for the chains we index. Transcribed from
  * viem's definitions, which cost ~180 KiB of formatters and serializers to read.
  */
-export const CHAIN_METADATA: Record<number, ChainMetadata | undefined> = {
+const CHAIN_METADATA: Record<number, ChainMetadata | undefined> = {
   1: {
     name: 'Ethereum',
     explorerUrl: 'https://etherscan.io',

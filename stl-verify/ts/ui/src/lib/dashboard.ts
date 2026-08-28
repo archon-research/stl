@@ -236,7 +236,7 @@ function getProtocolMatchScore(
   return score;
 }
 
-function findProtocolMetadata(
+export function findProtocolMetadata(
   protocol: string,
   localProtocols?: LocalProtocolRow[],
   chainId?: number,
