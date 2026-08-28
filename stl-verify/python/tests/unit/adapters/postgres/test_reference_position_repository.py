@@ -28,6 +28,7 @@ def _row(**overrides) -> SimpleNamespace:
             "token_symbol": "spUSDS",
             "token_name": "Spark USDS",
             "token_address": "0x" + "cd" * 20,
+            "wallet_address": "0x" + "ef" * 20,
             "assets_usd": Decimal("787379142.91"),
             "allocated_assets_usd": Decimal("787000000.00"),
             "idle_assets_usd": Decimal("379142.91"),
@@ -62,6 +63,7 @@ async def test_maps_a_position_with_its_resolved_registry_id(stub_engine) -> Non
     assert position.assets_usd == Decimal("787379142.91")
     assert position.receipt_token_id == 41
     assert position.chain == "mainnet"
+    assert position.wallet_address == "0x" + "ef" * 20
     assert snapshot.synced_at == _SYNCED_AT
 
 
@@ -151,3 +153,11 @@ def test_the_snapshot_ordering_never_selects_on_build_id() -> None:
     # ordering by it picks an arbitrary row. A behavioural test cannot catch
     # this: seeded corrections happen to agree with build_id order.
     assert "build_id" not in str(_POSITIONS_SQL)
+
+
+def test_the_latest_cycle_selection_keys_on_wallet_address_too() -> None:
+    # Grove legitimately reports the same (network, token_address) under two
+    # proxy wallets. A DISTINCT ON that dropped wallet_address would collapse
+    # them into one row, silently discarding a real position (integration
+    # coverage: test_positions_serve_both_wallets_for_the_same_token).
+    assert "p.wallet_address" in str(_POSITIONS_SQL)

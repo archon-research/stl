@@ -61,14 +61,15 @@ func (r *PrimeReferencePositionRepository) SaveReferencePositions(
 			token_symbol,
 			token_name,
 			token_address,
+			wallet_address,
 			assets_usd,
 			allocated_assets_usd,
 			idle_assets_usd,
 			source,
 			build_id
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-		ON CONFLICT (prime_id, synced_at, network, token_address, processing_version) DO NOTHING
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		ON CONFLICT (prime_id, synced_at, network, token_address, wallet_address, processing_version) DO NOTHING
 	`
 
 	batch := &pgx.Batch{}
@@ -83,6 +84,7 @@ func (r *PrimeReferencePositionRepository) SaveReferencePositions(
 			p.TokenSymbol,
 			p.TokenName,
 			p.TokenAddress,
+			p.WalletAddress,
 			p.AssetsUSD,
 			p.AllocatedAssetsUSD,
 			p.IdleAssetsUSD,

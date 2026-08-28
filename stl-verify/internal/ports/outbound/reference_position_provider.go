@@ -24,6 +24,10 @@ type ReferencePositionRow struct {
 	// Nil when the feed omits it.
 	TokenName    *string
 	TokenAddress string
+	// Which of the prime's proxy wallets holds the position. Part of row
+	// identity: the same (network, token_address) legitimately recurs under a
+	// prime's different proxies.
+	WalletAddress string
 
 	Assets string
 	// Nil when the feed omits them, which is distinct from zero.

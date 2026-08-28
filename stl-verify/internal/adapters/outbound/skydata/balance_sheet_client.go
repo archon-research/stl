@@ -234,11 +234,14 @@ func (c *Client) fetchStarPositions(ctx context.Context, star string) ([]outboun
 		return nil, err
 	}
 
-	// Row identity is (network, token_address) — the table's key. Case-folded
-	// here because the two are otherwise stored verbatim: a casing change on
-	// either would silently mint a second identity for the same position. A
-	// duplicate in one fetch would silently conflict away at insert, so it
-	// fails here instead.
+	// Row identity is (network, token_address, wallet_address) — the table's
+	// key. Case-folded here because the three are otherwise stored verbatim: a
+	// casing change on any would silently mint a second identity for the same
+	// position. A duplicate in one fetch would silently conflict away at
+	// insert, so it fails here instead. wallet_address is real identity, not
+	// incidental data: grove legitimately carries the same (network,
+	// token_address) under two proxy wallets, with materially different
+	// balances on the same Uni V3 LP position (verified live).
 	seen := make(map[string]bool, len(results))
 	rows := make([]outbound.ReferencePositionRow, 0, len(results))
 	for i, row := range results {
@@ -246,11 +249,11 @@ func (c *Client) fetchStarPositions(ctx context.Context, star string) ([]outboun
 		if err != nil {
 			return nil, err
 		}
-		key := strings.ToLower(parsed.Network) + "|" + strings.ToLower(parsed.TokenAddress)
+		key := strings.ToLower(parsed.Network) + "|" + strings.ToLower(parsed.TokenAddress) + "|" + strings.ToLower(parsed.WalletAddress)
 		if seen[key] {
 			return nil, fmt.Errorf(
-				"sky positions for prime %q repeat identity %s on %s; the row identity assumption no longer holds",
-				star, parsed.TokenAddress, parsed.Network)
+				"sky positions for prime %q repeat identity %s on %s for wallet %s; the row identity assumption no longer holds",
+				star, parsed.TokenAddress, parsed.Network, parsed.WalletAddress)
 		}
 		seen[key] = true
 		rows = append(rows, parsed)
@@ -270,6 +273,7 @@ func toPositionRow(star string, row positionPayloadRow, index int) (outbound.Ref
 		{"token_symbol", row.TokenSymbol},
 		{"address", row.Address},
 		{"assets", row.Assets.String()},
+		{"wallet_address", row.WalletAddress},
 	}
 	for _, r := range required {
 		if strings.TrimSpace(r.value) == "" {
@@ -287,6 +291,7 @@ func toPositionRow(star string, row positionPayloadRow, index int) (outbound.Ref
 		TokenSymbol:     strings.TrimSpace(row.TokenSymbol),
 		TokenName:       skyenvelope.OptionalText(row.TokenName),
 		TokenAddress:    strings.TrimSpace(row.Address),
+		WalletAddress:   strings.TrimSpace(row.WalletAddress),
 		Assets:          row.Assets.String(),
 		AllocatedAssets: skyenvelope.OptionalNumber(row.AllocatedAssets),
 		IdleAssets:      skyenvelope.OptionalNumber(row.IdleAssets),
@@ -331,6 +336,7 @@ type positionPayloadRow struct {
 	TokenSymbol     string      `json:"token_symbol"`
 	TokenName       string      `json:"token_name"`
 	Address         string      `json:"address"`
+	WalletAddress   string      `json:"wallet_address"`
 	Assets          json.Number `json:"assets"`
 	AllocatedAssets json.Number `json:"allocated_assets"`
 	IdleAssets      json.Number `json:"idle_assets"`

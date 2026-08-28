@@ -26,6 +26,7 @@ def _position() -> ReferencePosition:
         symbol="spUSDS",
         name="Spark USDS",
         token_address="0x" + "cd" * 20,
+        wallet_address="0x" + "ef" * 20,
         assets_usd=Decimal("787379142.91"),
         allocated_assets_usd=None,
         idle_assets_usd=None,

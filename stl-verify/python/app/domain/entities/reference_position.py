@@ -27,14 +27,8 @@ class ReferencePosition:
     resolve to a receipt token. Callers join on it defensively and tolerate a
     miss rather than treating it as an address.
 
-    Two fields upstream serves are deliberately absent here, dropped because
-    nothing read them rather than because they are uninteresting:
-
-    ``wallet_address`` is the ALM proxy holding the position — the grain Verify
-    stores positions at, and absent from the Star monitor's feed, which reports
-    per prime. It was carried as the enabler for a future merge keyed on
-    ``(chain, token, proxy)``. Reinstating it is one field here, one column in
-    ``prime_reference_position`` and one parse in the Go client.
+    One field upstream serves is deliberately absent here, dropped because
+    nothing read it rather than because it is uninteresting:
 
     ``allocation_type`` is upstream's own category vocabulary (``allocation`` /
     ``asset`` / ``pol`` / ``psm3``), which maps closely onto the ``category``
@@ -48,6 +42,11 @@ class ReferencePosition:
     symbol: str
     name: str
     token_address: str
+    # The ALM proxy holding the position. Part of `prime_reference_position`'s
+    # row identity in storage (VEC-NA: the same (network, token_address)
+    # legitimately recurs under a prime's different proxies) and what lets a
+    # consumer tell those rows apart.
+    wallet_address: str
     # The full holding. `allocated` and `idle` decompose it — a position can be
     # deployed into a protocol or sitting in the proxy, and upstream reports
     # both legs rather than only the sum.

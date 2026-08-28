@@ -299,6 +299,35 @@ export function allocationNetworkKey(allocation: Allocation): string {
 }
 
 export function getAllocationKey(allocation: Allocation): string {
+  const identityKey = getAllocationIdentityKey(allocation);
+  const referenceSuffix = getReferenceDisambiguator(allocation);
+  return referenceSuffix ? `${identityKey}#${referenceSuffix}` : identityKey;
+}
+
+/**
+ * Extra identity only a reference row can carry, appended to keep same-symbol
+ * or same-wallet reference rows from colliding on `getAllocationIdentityKey`.
+ *
+ * Two collisions show up there, both only on `source: 'reference'` rows: the
+ * same token under two proxy wallets (VEC-NA, grove's split Uni V3 position),
+ * and several distinct vault-share token addresses sharing one display symbol
+ * (grove's `grove-bbqUSDC` family — unresolved against STL's registry, so
+ * `symbol` is all the identity fallback has to key on). Gated on `source`
+ * rather than on the fields' mere presence: an indexed row can legitimately
+ * carry a `receipt_token_address` too (a resolved receipt-token position),
+ * but it already keys uniquely off `receipt_token_id`/`underlying_token_id`
+ * before reaching that fallback, so folding the address in for it as well
+ * would needlessly change every indexed row's key — and any URL/selection
+ * built from it.
+ */
+function getReferenceDisambiguator(allocation: Allocation): string {
+  if (allocation.source !== 'reference') return '';
+  return [allocation.receipt_token_address, allocation.wallet_address]
+    .filter((part): part is string => Boolean(part))
+    .join(':');
+}
+
+function getAllocationIdentityKey(allocation: Allocation): string {
   if (allocation.receipt_token_id != null) {
     return String(allocation.receipt_token_id);
   }

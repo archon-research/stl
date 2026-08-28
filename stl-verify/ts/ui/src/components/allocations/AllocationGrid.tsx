@@ -1055,7 +1055,14 @@ export function AllocationGrid({
 
   const summary = useMemo(() => {
     if (topMetricsAllocations.length === 0) {
-      return null;
+      // An empty list means either the request hasn't settled yet or it
+      // settled with zero rows; `PrimeMetricsBand` reads `summary === null`
+      // as "still loading" (MetricCardCell), so a resolved-empty fetch must
+      // report zeros here instead of `null` or the Total allocation card
+      // would stay on its skeleton forever.
+      return areAllocationsSettled
+        ? { allocationCount: 0, latestActivityAt: null, totalUsd: 0 }
+        : null;
     }
 
     const totalUsd = topMetricsAllocations.reduce(
@@ -1085,7 +1092,7 @@ export function AllocationGrid({
       latestActivityAt,
       totalUsd,
     };
-  }, [topMetricsAllocations]);
+  }, [topMetricsAllocations, areAllocationsSettled]);
 
   const overallSummary = useMemo(() => {
     if (allocations.length === 0) {

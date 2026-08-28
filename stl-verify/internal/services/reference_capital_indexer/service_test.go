@@ -236,6 +236,7 @@ func positionRow(star string) outbound.ReferencePositionRow {
 		ChainID:         &chainID,
 		TokenSymbol:     "spUSDS",
 		TokenAddress:    "0xc02ab1a5eaa8d1b114ef786d9bde108cd4364359",
+		WalletAddress:   "0x1111111111111111111111111111111111111111",
 		Assets:          "0.825893123256664748",
 		AllocatedAssets: &allocated,
 	}
@@ -858,6 +859,9 @@ func TestRunPersistsThePositionsWithTheCyclesSyncedAt(t *testing.T) {
 	}
 	if got.AssetsUSD != "0.825893123256664748" {
 		t.Errorf("AssetsUSD = %q, want the upstream figure", got.AssetsUSD)
+	}
+	if got.WalletAddress != "0x1111111111111111111111111111111111111111" {
+		t.Errorf("WalletAddress = %q, want the upstream proxy address carried through", got.WalletAddress)
 	}
 	if got.Source != entity.ReferenceDataSource {
 		t.Errorf("Source = %q, want %q", got.Source, entity.ReferenceDataSource)
