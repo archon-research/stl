@@ -237,17 +237,24 @@ jobs:
           rm -f "${RUNNER_TEMP}/needles"
 
       # Runs even if the leak check failed — needles are masked by then, so a
-      # failed run keeps its only debugging evidence. Also surfaces Codex failures.
-      - name: Publish the transcript and surface any Codex failure
+      # failed run keeps its only debugging evidence.
+      #
+      # The transcript prints on the paths that need diagnosing. It carries every
+      # tool result the agent saw, this log is world-readable, and OpenAI's CI
+      # guidance is to keep seat-authenticated runs out of public artifacts; a run
+      # that produced its report has the report as its record.
+      - name: Surface any Codex failure, with the transcript
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           if [ -z "${CODEX_RC:-}" ]; then
-            echo "Codex never ran; nothing to publish."
+            echo "Codex never ran; nothing to surface."
             exit 0
           fi
-          cat "${RUNNER_TEMP}/transcript.log"
-          cat "${RUNNER_TEMP}/events.jsonl"
+          if [ "${CODEX_RC}" -ne 0 ] || [ ! -s "${RUNNER_TEMP}/review.md" ]; then
+            cat "${RUNNER_TEMP}/transcript.log"
+            cat "${RUNNER_TEMP}/events.jsonl"
+          fi
           if [ "${CODEX_RC}" -ne 0 ]; then
             # turn.failed carries the upstream error verbatim as a string, so the
             # seat's limits are matched by the kinds the CLI names for them. A
