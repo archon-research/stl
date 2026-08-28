@@ -1105,6 +1105,9 @@ function ActivityTable({
             table={table}
             isLoading={isLoading}
             density="compact"
+            // Safe alongside the detail panel: each row is its own <tbody>, so
+            // the virtualizer measures a row and its open panel as one unit.
+            virtualized
             renderDetailPanel={(event) => {
               const txHash = getRealTxHash(event);
               return txHash === null ? null : (
