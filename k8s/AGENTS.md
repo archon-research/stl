@@ -42,6 +42,8 @@ Root repo map and cross-cutting rules: [../AGENTS.md](../AGENTS.md).
   ArgoCD syncs the merge commit before the bot stamps it, so a tag naming an image that does
   not exist yet reaches the cluster as ImagePullBackOff, fails the staging health gate, and
   skips the prod promotion (ORB-313). A brand-new service lands its image in a separate PR
-  first (CONTRIBUTING.md section 14).
+  first (CONTRIBUTING.md section 14) — also when it reuses an *existing* image whose content
+  the same PR changes: the new Deployment starts on the previously-built image and
+  crash-loops until the merge commit's own build is stamped.
 - Merging to `main` deploys to staging via ArgoCD, then prod after manual approval.
 - AWS resources (SQS queues, SNS subscriptions, IAM, secrets) live in a separate private infrastructure repo and must land **before** the code that needs them.
