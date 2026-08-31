@@ -50,7 +50,7 @@ include lint.mk
 		kind-create kind-delete kind-infra kind-config kind-secrets kind-bootstrap-db kind-migrate \
 		kind-load-migrate kind-load-watcher kind-load-workers kind-load-python-api kind-load-cronjobs \
 		kind-deploy-apps kind-deploy-workers kind-deploy-data-validator check-dev-overlay-sync \
-		check-reloader-opt-in \
+		check-reloader-opt-in check-overlay-images \
 		kind-redeploy-watcher kind-redeploy-worker \
 		docker-build-migrate \
 		kind-infra-ci kind-ci-up kind-ci-down \
@@ -356,7 +356,7 @@ tools:
 # CI target for lint/format/static/security checks. go vet, staticcheck, and
 # go fix -diff are covered by golangci-lint v2 (govet, staticcheck, modernize
 # linters — see .golangci.yml); running them separately tripled analysis time.
-ci-checks: fmt-check goimports-check tidy-check shared-container-check integration-shard-check ci-service-check golangci-lint vulncheck
+ci-checks: fmt-check goimports-check tidy-check shared-container-check integration-shard-check ci-service-check check-overlay-images golangci-lint vulncheck
 
 # CI target: everything with strict checks
 # Order: fast checks first (fail fast), then expensive checks
@@ -2323,6 +2323,15 @@ check-reloader-opt-in:
 	  exit 1; \
 	fi
 	@echo "✓ dev: no Reloader annotations (correct — no controller locally)"
+
+# ORB-362: the staging/prod images blocks are generated from ../k8s/image-roster.txt
+# by ../scripts/deploy/render-overlay-images.sh. Fails on an entry the roster does not
+# render (hand edit, wrong repo, orphan alias); roster lines the bot has not written
+# yet are reported as pending. Same check as the Manifests CI job.
+check-overlay-images:
+	@for env in staging prod; do \
+	  ../scripts/deploy/render-overlay-images.sh --env $$env --check ../k8s/overlays/$$env/kustomization.yaml --allow-missing || exit 1; \
+	done
 
 # Apply the dev core overlay (watcher, python-api, cronjobs) — reuses k8s/base.
 # Images must already be built + loaded into kind.
