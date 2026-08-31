@@ -1678,14 +1678,11 @@ JOIN protocol pr ON pr.id = m.protocol_id
 ORDER BY m.chain_id, m.processing_version DESC;
 ```
 
-The migration ships `uniswap_v4_pool_current` and
-`uniswap_v4_pool_manager_current`, views that apply exactly those `DISTINCT ON`
-picks, so `SELECT * FROM uniswap_v4_pool_current WHERE chain_id = 1` is the
-short form. The manager view is the registry row only — it carries
-`protocol_id`, not the PoolManager address, so keep the `protocol` join whenever
-you need the address. Query the base tables without the wrapper to see a pool's
-full correction history — that is how you check whether a bad row has already
-been superseded.
+No `*_current` view ships for these tables: the two `DISTINCT ON` picks above are
+the whole rule, and `uniswap_v4_repository.go` inlines the same picks
+(`currentUniswapV4PoolCTE`, `loadUniswapV4PoolsSQL`). Drop the `DISTINCT ON` to
+see a pool's full correction history — that is how you check whether a bad row
+has already been superseded.
 
 Recompute a PoolId from its key (this is exactly what `ValidatePoolKeys` does;
 the example is the seeded ETH/wstETH `fee=100, tickSpacing=1, hooks=0` pool):
@@ -2394,12 +2391,17 @@ this fires on a pool younger than the window. Step 1 resolves it in one look.
    -- rows written before a registry correction carry the SUPERSEDED pool id, so
    -- the existence check has to run over every version of the natural key, not
    -- over cur.id alone -- otherwise a corrected pool reads as never indexed.
+   WITH cur AS (
+       SELECT DISTINCT ON (chain_id, pool_id) *
+       FROM uniswap_v4_pool
+       ORDER BY chain_id, pool_id, processing_version DESC
+   )
    SELECT cur.id,
           '0x' || encode(cur.pool_id, 'hex') AS pool_id,
           cur.tick_spacing, cur.fee,
           '0x' || encode(cur.hooks, 'hex')   AS hooks,
           cur.deploy_block, cur.created_at
-   FROM uniswap_v4_pool_current cur
+   FROM cur
    WHERE cur.chain_id = 1
      AND cur.snapshot_supported
      AND NOT EXISTS (

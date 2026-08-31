@@ -782,26 +782,6 @@ COMMENT ON COLUMN uniswap_v4_pool_event.processing_version IS
 COMMENT ON COLUMN uniswap_v4_pool_event.build_id IS
   'Audit. ID of the indexer build (code+config) that wrote this row.';
 
--- Readers that want "the pool/manager as it stands now" must not re-derive the
--- highest-processing_version pick per query; these views own that one rule.
-CREATE OR REPLACE VIEW uniswap_v4_pool_manager_current AS
-SELECT DISTINCT ON (chain_id) *
-FROM uniswap_v4_pool_manager
-ORDER BY chain_id, processing_version DESC;
-
-CREATE OR REPLACE VIEW uniswap_v4_pool_current AS
-SELECT DISTINCT ON (chain_id, pool_id) *
-FROM uniswap_v4_pool
-ORDER BY chain_id, pool_id, processing_version DESC;
-
-COMMENT ON VIEW uniswap_v4_pool_manager_current IS
-  '[Dimension] Current PoolManager registry row per chain: the highest processing_version of uniswap_v4_pool_manager for that chain_id. Superseded versions stay in the base table for audit.';
-COMMENT ON VIEW uniswap_v4_pool_current IS
-  '[Dimension] Current pool registry row per (chain_id, pool_id): the highest processing_version of uniswap_v4_pool for that natural key. Its id is the surrogate the CURRENT version writes fact rows under; fact rows written before a correction point at the superseded id, so historical aggregation still joins the base table and groups by (chain_id, pool_id).';
-
-GRANT SELECT ON uniswap_v4_pool_manager_current, uniswap_v4_pool_current TO stl_readonly;
-GRANT SELECT ON uniswap_v4_pool_manager_current, uniswap_v4_pool_current TO stl_readwrite;
-
 -- Append-only enforcement: the application role may SELECT and INSERT but never
 -- mutate or delete.
 

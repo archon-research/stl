@@ -234,24 +234,30 @@ func (r *UniswapV4Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbou
 	return stateRows, nil
 }
 
+// currentUniswapV4PoolCTE maps a superseded registry surrogate forward to the
+// current one for its (chain_id, pool_id); fact rows keep the retired id.
+const currentUniswapV4PoolCTE = `
+	WITH cur AS (
+	    SELECT DISTINCT ON (chain_id, pool_id) id, chain_id, pool_id
+	    FROM uniswap_v4_pool
+	    ORDER BY chain_id, pool_id, processing_version DESC
+	)`
+
 // poolIDsWithStateAtBlockSQL resolves each state row's pool through the
-// registry twice over. uniswap_v4_pool_state carries no chain_id, so the
-// worker's chain filter has to come from the pool row the fact FKs; and a
-// registry correction mints a new surrogate while the old fact rows keep the
-// old one, so uniswap_v4_pool_current maps that superseded id forward to the
-// current version of its (chain_id, pool_id) natural key — the only id the
-// caller's in-memory registry knows.
+// registry twice over: uniswap_v4_pool_state carries no chain_id, so the
+// worker's chain filter has to come from the pool row the fact FKs, and
+// currentUniswapV4PoolCTE maps that pool forward to the only id the caller's
+// in-memory registry knows.
 //
 // The block_timestamp band is what lets TimescaleDB exclude chunks: filtering
 // on block_number alone scans every chunk of the hypertable on each reorg
 // (VEC-541). One day either side is far wider than any block's own timestamp
 // needs and still prunes to a couple of chunks.
-const poolIDsWithStateAtBlockSQL = `
+const poolIDsWithStateAtBlockSQL = currentUniswapV4PoolCTE + `
 	SELECT DISTINCT cur.id
 	FROM uniswap_v4_pool_state s
 	JOIN uniswap_v4_pool p ON p.id = s.pool_id
-	JOIN uniswap_v4_pool_current cur
-	  ON cur.chain_id = p.chain_id AND cur.pool_id = p.pool_id
+	JOIN cur ON cur.chain_id = p.chain_id AND cur.pool_id = p.pool_id
 	WHERE p.chain_id = $1
 	  AND s.block_number = $2
 	  AND s.block_timestamp BETWEEN $3::timestamptz - INTERVAL '1 day'
@@ -297,11 +303,10 @@ func (r *UniswapV4Repository) PoolIDsWithStateAtBlock(ctx context.Context, chain
 // timescaledb.enable_tiered_reads defaults off. So "ever" is only literally
 // true for a pool that has ever had an initialized tick — which is every pool
 // that has ever held liquidity.
-const poolIDsEverSnapshottedSQL = `
+const poolIDsEverSnapshottedSQL = currentUniswapV4PoolCTE + `
 	SELECT DISTINCT cur.id
 	FROM uniswap_v4_pool p
-	JOIN uniswap_v4_pool_current cur
-	  ON cur.chain_id = p.chain_id AND cur.pool_id = p.pool_id
+	JOIN cur ON cur.chain_id = p.chain_id AND cur.pool_id = p.pool_id
 	WHERE p.chain_id = $1
 	  AND (EXISTS (SELECT 1 FROM uniswap_v4_tick t WHERE t.pool_id = p.id)
 	       OR EXISTS (SELECT 1 FROM uniswap_v4_pool_state s WHERE s.pool_id = p.id))
@@ -339,12 +344,11 @@ func (r *UniswapV4Repository) PoolIDsEverSnapshotted(ctx context.Context, chainI
 // idx_uniswap_v4_tick_block_lookup still serves the fact side, whose
 // (pool_id, block_number, tick) order makes both filters boundary quals and
 // yields tick already sorted; the PK's interleaved tick column cannot.
-const ticksForPoolAtBlockSQL = `
+const ticksForPoolAtBlockSQL = currentUniswapV4PoolCTE + `
 	SELECT DISTINCT t.tick
 	FROM uniswap_v4_tick t
 	JOIN uniswap_v4_pool p ON p.id = t.pool_id
-	JOIN uniswap_v4_pool_current cur
-	  ON cur.chain_id = p.chain_id AND cur.pool_id = p.pool_id
+	JOIN cur ON cur.chain_id = p.chain_id AND cur.pool_id = p.pool_id
 	WHERE p.chain_id = $1 AND cur.id = $2 AND t.block_number = $3
 	ORDER BY t.tick`
 
