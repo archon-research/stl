@@ -15,9 +15,8 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// StateView overloads getPositionInfo: this is the five-argument
-// (poolId, owner, tickLower, tickUpper, salt) form, selector 0xdacf1d2f, not the
-// two-argument poolId/positionId form.
+// StateView overloads getPositionInfo: this is the five-argument form, selector
+// 0xdacf1d2f, not the two-argument poolId/positionId one.
 const positionViewMethodsJSON = `[
 	{"name":"getPositionInfo","type":"function","stateMutability":"view","inputs":[
 		{"name":"poolId","type":"bytes32"},
@@ -32,9 +31,6 @@ const positionViewMethodsJSON = `[
 	]}
 ]`
 
-// positionViewABIOnce parses positionViewMethodsJSON exactly once: this ABI is
-// on the per-position hot path (BuildPositionCalls, DecodePosition), so
-// re-parsing the JSON per call is pure waste.
 var positionViewABIOnce = sync.OnceValues(func() (*abi.ABI, error) {
 	parsed, err := abis.ParseABI(positionViewMethodsJSON)
 	if err != nil {
@@ -43,25 +39,15 @@ var positionViewABIOnce = sync.OnceValues(func() (*abi.ABI, error) {
 	return parsed, nil
 })
 
-// positionViewABI is the position-level StateView getter; the pool-level ones
-// live in state.go and the tick-level ones in tick.go.
 func positionViewABI() (*abi.ABI, error) {
 	return positionViewABIOnce()
 }
 
-// positionsPerCall bounds how many getPositionInfo sub-calls one multicall3
-// aggregate carries. Same cap as the per-tick getters: one sub-call per key
-// against the same RPC provider request/response limits.
 const positionsPerCall = tickbitmap.TicksPerCall
 
-// TouchedPositions returns the deduplicated, Compare-sorted set of positions
-// this block's ModifyLiquidity events touched, identified by
-// (sender, tickLower, tickUpper, salt).
-//
-// Zero-delta pokes are INCLUDED, unlike TouchedTicks which excludes them:
-// v4-core's Position.update writes both feeGrowthInside*LastX128 checkpoints
-// unconditionally, so a fee-collect poke changes position state even though it
-// leaves every tick untouched.
+// TouchedPositions returns the deduplicated, Compare-sorted positions this
+// block's ModifyLiquidity events touched. Zero-delta pokes are INCLUDED, unlike
+// TouchedTicks: v4-core's Position.update rewrites both fee checkpoints anyway.
 func TouchedPositions(events []*entity.UniswapV4LiquidityEvent) []entity.UniswapV4PositionKey {
 	keys := make([]entity.UniswapV4PositionKey, 0, len(events))
 	for _, e := range events {
@@ -75,10 +61,8 @@ func TouchedPositions(events []*entity.UniswapV4LiquidityEvent) []entity.Uniswap
 	return MergePositionKeys(keys, nil)
 }
 
-// MergePositionKeys returns the deduplicated, Compare-sorted union of two
-// position-key sets: a block must read and write each touched position exactly
-// once, even where this block's own events and a prior version's persisted
-// positions overlap.
+// MergePositionKeys returns the deduplicated, Compare-sorted union: a block must
+// read each touched position exactly once, however it was discovered.
 func MergePositionKeys(a, b []entity.UniswapV4PositionKey) []entity.UniswapV4PositionKey {
 	seen := make(map[entity.UniswapV4PositionKey]struct{}, len(a)+len(b))
 	for _, set := range [][]entity.UniswapV4PositionKey{a, b} {
@@ -98,9 +82,8 @@ func MergePositionKeys(a, b []entity.UniswapV4PositionKey) []entity.UniswapV4Pos
 	return out
 }
 
-// BuildPositionCalls packs one getPositionInfo(poolId, owner, tickLower,
-// tickUpper, salt) call per entry in keys, in the same order as the input, so
-// callers can zip results back to their originating position positionally.
+// BuildPositionCalls packs one getPositionInfo call per key, in key order, so
+// results zip back positionally.
 func BuildPositionCalls(pool RegisteredPool, keys []entity.UniswapV4PositionKey) ([]outbound.Call, error) {
 	a, err := positionViewABI()
 	if err != nil {
@@ -120,10 +103,8 @@ func BuildPositionCalls(pool RegisteredPool, keys []entity.UniswapV4PositionKey)
 	return calls, nil
 }
 
-// DecodePosition decodes one getPositionInfo() multicall result into an
-// authoritative entity.UniswapV4Position. A reverted call is an error, never a
-// silently dropped/zero-value position: this is an authoritative read, and
-// StateView answers a burned position with explicit zeros rather than reverting.
+// DecodePosition treats a revert as an error: getPositionInfo answers even a
+// burned position with zeros, so a revert is never an absent position.
 func DecodePosition(pool RegisteredPool, key entity.UniswapV4PositionKey, blockNumber int64, version int, ts time.Time, res outbound.Result) (*entity.UniswapV4Position, error) {
 	if !res.Success {
 		return nil, fmt.Errorf("getPositionInfo(%s, %s, %d, %d, %s) reverted",

@@ -19,7 +19,6 @@ var (
 	tokenIDSalt = common.BigToHash(big.NewInt(51423))
 )
 
-// positionTestPool is the fixture RegisteredPool for position-read tests.
 func positionTestPool() RegisteredPool {
 	return decodeTestPool(7, ethWstethPoolID)
 }
@@ -28,8 +27,6 @@ func positionKey(owner common.Address, tickLower, tickUpper int, salt common.Has
 	return entity.UniswapV4PositionKey{Owner: owner, TickLower: tickLower, TickUpper: tickUpper, Salt: salt}
 }
 
-// positionLiquidityEvent builds a ModifyLiquidity entity carrying only the
-// fields TouchedPositions reads.
 func positionLiquidityEvent(owner common.Address, tickLower, tickUpper int, salt common.Hash, liquidityDelta int64) *entity.UniswapV4LiquidityEvent {
 	return &entity.UniswapV4LiquidityEvent{
 		PoolID:         7,
@@ -41,9 +38,7 @@ func positionLiquidityEvent(owner common.Address, tickLower, tickUpper int, salt
 	}
 }
 
-// positionViewTestABI independently parses the StateView position getter so
-// tests can pack returns and unpack calldata without depending on position.go's
-// own ABI.
+// positionViewTestABI parses the getter independently of position.go's own ABI.
 func positionViewTestABI(t *testing.T) *abi.ABI {
 	t.Helper()
 	const j = `[
@@ -75,10 +70,6 @@ func packPositionInfoReturn(t *testing.T, liquidity, feeGrowthInside0, feeGrowth
 	return packed
 }
 
-// TestPositionViewABI_SelectorIsPinned pins the getter's 4-byte selector, which
-// fixes the whole signature: StateView overloads getPositionInfo (a two-argument
-// poolId/positionId variant exists), so a drifted argument list would silently
-// call the wrong overload or a non-existent function.
 func TestPositionViewABI_SelectorIsPinned(t *testing.T) {
 	a, err := positionViewABI()
 	if err != nil {
@@ -150,10 +141,6 @@ func TestTouchedPositions(t *testing.T) {
 	}
 }
 
-// TestTouchedPositions_IncludesZeroDeltaPokes is the deliberate difference from
-// TouchedTicks, which excludes pokes: v4-core's Position.update writes both
-// feeGrowthInside*LastX128 checkpoints unconditionally, so a zero-delta
-// fee-collect poke DOES change position state and must be re-read.
 func TestTouchedPositions_IncludesZeroDeltaPokes(t *testing.T) {
 	events := []*entity.UniswapV4LiquidityEvent{positionLiquidityEvent(posmOwner, -60, 60, tokenIDSalt, 0)}
 
@@ -284,9 +271,6 @@ func TestDecodePosition(t *testing.T) {
 	}
 }
 
-// TestDecodePosition_BurnedPositionIsAllZeros documents the absent existence
-// flag: getPositionInfo answers a burned or never-opened key with zeros rather
-// than reverting, and that erasure is what the row records.
 func TestDecodePosition_BurnedPositionIsAllZeros(t *testing.T) {
 	res := outbound.Result{Success: true, ReturnData: packPositionInfoReturn(t, big.NewInt(0), big.NewInt(0), big.NewInt(0))}
 

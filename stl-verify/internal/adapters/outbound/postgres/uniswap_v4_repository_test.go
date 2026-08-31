@@ -10,9 +10,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
 
-// TestSharedPositionBlockNumberRejectsMixedBlocks guards the height bound
-// readLatestPositionsV4 applies: a batch spanning blocks would compare a
-// position against a row from a different block and silently skip the insert.
 func TestSharedPositionBlockNumberRejectsMixedBlocks(t *testing.T) {
 	rows := []*entity.UniswapV4Position{
 		{PoolID: 1, TickLower: -60, TickUpper: 60, BlockNumber: 100, Liquidity: big.NewInt(1)},
@@ -33,10 +30,6 @@ func TestSharedPositionBlockNumberRejectsMixedBlocks(t *testing.T) {
 	}
 }
 
-// TestV4PositionUnchanged pins the append-on-change decision, whose two halves
-// are load-bearing for correctness: block_version separates a reorg
-// re-observation from a redelivery, but only within one height — across heights
-// the versions belong to different blocks and only the values may decide.
 func TestV4PositionUnchanged(t *testing.T) {
 	stored := func(blockNumber int64, blockVersion int, liquidity int64) v4PositionValues {
 		return v4PositionValues{
@@ -82,9 +75,6 @@ func TestV4PositionUnchanged(t *testing.T) {
 	}
 }
 
-// TestDistinctSortedV4PositionKeys pins the advisory-lock ordering for
-// positions: every SaveBlock must request overlapping slots in the same
-// sequence, or two concurrent block writers deadlock against each other.
 func TestDistinctSortedV4PositionKeys(t *testing.T) {
 	ownerA := common.HexToAddress("0x00000000000000000000000000000000000000aa")
 	ownerB := common.HexToAddress("0x00000000000000000000000000000000000000bb")

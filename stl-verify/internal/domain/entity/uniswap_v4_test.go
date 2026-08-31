@@ -310,11 +310,7 @@ func TestUniswapV4Position_Validate(t *testing.T) {
 		{"nil liquidity", func(p *UniswapV4Position) { p.Liquidity = nil }, true},
 		{"nil fee growth inside0", func(p *UniswapV4Position) { p.FeeGrowthInside0LastX128 = nil }, true},
 		{"nil fee growth inside1", func(p *UniswapV4Position) { p.FeeGrowthInside1LastX128 = nil }, true},
-		// getPositionInfo answers a burned or never-opened position with explicit
-		// zeros rather than reverting, so the erasure is a real row.
 		{"all zero position info", func(p *UniswapV4Position) { p.Liquidity = big.NewInt(0) }, false},
-		// The three getters are uint128/uint256 on chain, so a negative can only
-		// come from a decode defect.
 		{"negative liquidity", func(p *UniswapV4Position) { p.Liquidity = big.NewInt(-1) }, true},
 		{"negative fee growth inside0", func(p *UniswapV4Position) { p.FeeGrowthInside0LastX128 = big.NewInt(-1) }, true},
 		{"negative fee growth inside1", func(p *UniswapV4Position) { p.FeeGrowthInside1LastX128 = big.NewInt(-1) }, true},
@@ -328,8 +324,6 @@ func TestUniswapV4Position_Validate(t *testing.T) {
 	}
 }
 
-// The key validates on its own because it crosses the repository boundary
-// inbound, ahead of any row that would carry it.
 func TestUniswapV4PositionKey_Validate(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -361,9 +355,6 @@ func TestUniswapV4Position_Key(t *testing.T) {
 	}
 }
 
-// The comparator is the canonical order both the snapshot read and the
-// repository's advisory-lock sequence derive from, so each field's precedence is
-// pinned rather than left to whichever one a caller happens to vary.
 func TestUniswapV4PositionKey_Compare(t *testing.T) {
 	base := UniswapV4PositionKey{
 		Owner:     common.HexToAddress("0x22"),
