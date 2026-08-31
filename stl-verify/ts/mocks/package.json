@@ -10,21 +10,21 @@
   },
   "scripts": {
     "type:check": "tsc -p tsconfig.json --noEmit",
-    "format": "uikit-cli format --write \"src/**/*.ts\" \"scripts/**/*.mjs\" oxlint.config.ts .oxfmtrc.ts",
-    "format:check": "uikit-cli format --check \"src/**/*.ts\" \"scripts/**/*.mjs\" oxlint.config.ts .oxfmtrc.ts",
-    "lint": "uikit-cli lint src scripts oxlint.config.ts",
-    "test:mocks": "NODE_ENV=test node scripts/check-mock-api.mjs"
+    "format": "uikit-cli format --write \"src/**/*.ts\" \"scripts/**/*.ts\" oxlint.config.ts .oxfmtrc.ts",
+    "format:check": "uikit-cli format --check \"src/**/*.ts\" \"scripts/**/*.ts\" oxlint.config.ts .oxfmtrc.ts",
+    "lint": "uikit-cli lint -c oxlint.config.ts --type-aware --max-warnings=0 --report-unused-disable-directives src scripts oxlint.config.ts .oxfmtrc.ts",
+    "test:mocks": "NODE_ENV=test node scripts/check-mock-api.ts"
   },
   "dependencies": {
-    "@archon-research/http-client-msw": "0.10.0"
+    "@archon-research/http-client-msw": "0.10.1"
   },
   "devDependencies": {
-    "@archon-research/http-client-core": "0.10.0",
-    "@archon-research/oxfmt-config": "0.10.0",
-    "@archon-research/oxlint-config": "0.10.0",
-    "@archon-research/tsconfig": "0.10.0",
+    "@archon-research/http-client-core": "0.10.1",
+    "@archon-research/oxfmt-config": "0.10.1",
+    "@archon-research/oxlint-config": "0.10.1",
+    "@archon-research/tsconfig": "0.10.1",
     "@stl-verify/ui": "*",
-    "@types/node": "26.2.0",
+    "@types/node": "24.13.3",
     "msw": "2.15.0"
   },
   "peerDependencies": {

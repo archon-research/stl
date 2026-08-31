@@ -13,6 +13,7 @@ CHAIN_ID_TO_NAME: dict[int, str] = {
     1: "mainnet",
     10: "optimism",
     130: "unichain",
+    4663: "robinhood",
     8453: "base",
     42161: "arbitrum",
     43114: "avalanche-c",
@@ -32,6 +33,8 @@ MAINNET_CHAIN_ID = 1
 SERVED_TRACKER_CHAINS: frozenset[str] = frozenset(
     {"mainnet", "avalanche-c", "base", "optimism", "unichain", "arbitrum"}
 )
+# Robinhood is acknowledged but not yet served; see
+# stl-verify/internal/services/allocation_tracker/chains.go.
 
 
 def chain_name_for(chain_id: int | None) -> str | None:
