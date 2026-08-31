@@ -27,11 +27,8 @@ import (
 // Fakes
 // ---------------------------------------------------------------------------
 
-// fakeCurveRepo counts saves via SaveBlock; it ignores the pgx.Tx (nil is fine).
-// stateRowsReturn controls whether SaveBlock PERSISTS 0 (simulate ON CONFLICT DO
-// NOTHING no-op) or the actual count; a zero value means newTestCurveService must
-// set it to 1. The attempted count always follows the write set, as the real
-// repository's does.
+// fakeCurveRepo ignores the pgx.Tx (nil is fine). Attempted always follows the
+// write set, as the real repository's does; stateRowsReturn decides if it persists.
 type fakeCurveRepo struct {
 	lastWrites      outbound.BlockWrites
 	snapshotPoolIDs []int64
@@ -678,10 +675,6 @@ func TestCurveService_MissingBlockHash_ReturnsError(t *testing.T) {
 	}
 }
 
-// newZeroRowReplayService builds a sweep-forced curve service whose repository
-// persists zero state rows — the idempotent ON CONFLICT DO NOTHING replay — with
-// a ManualReader installed as the global meter provider so the caller can read
-// back what the block recorded.
 func newZeroRowReplayService(t *testing.T) (*CurveService, *metricsdk.ManualReader) {
 	t.Helper()
 
@@ -709,7 +702,6 @@ func newZeroRowReplayService(t *testing.T) (*CurveService, *metricsdk.ManualRead
 		KindStableswapNG:    stable,
 	}
 
-	// stateRowsReturn=0 simulates the idempotent ON CONFLICT DO NOTHING no-op.
 	repo := &fakeCurveRepo{stateRowsReturn: 0}
 	writer := dexconsumer.NewProtocolEventWriter(1, &fakeEventRepo{})
 
@@ -732,9 +724,6 @@ func newZeroRowReplayService(t *testing.T) (*CurveService, *metricsdk.ManualRead
 	return c, reader
 }
 
-// TestCurveService_RecordsActualStateRowsNotSnapshotCount: a redelivery where the
-// state insert is a no-op (ON CONFLICT DO NOTHING -> 0 rows) must record 0 state
-// rows, not the snapshot-set size.
 func TestCurveService_RecordsActualStateRowsNotSnapshotCount(t *testing.T) {
 	c, reader := newZeroRowReplayService(t)
 
@@ -748,16 +737,6 @@ func TestCurveService_RecordsActualStateRowsNotSnapshotCount(t *testing.T) {
 	}
 }
 
-// TestCurveService_RecordsStateRowsAttemptedOnZeroRowReplay pins the right side
-// of VectorCurveIndexerNoStateWritten. Replaying an already-committed range under
-// one build_id makes the assign_processing_version trigger reuse the existing
-// processing_version, so every state INSERT lands on the identical PK, hits
-// ON CONFLICT DO NOTHING and appends nothing: state.rows.written stays absent on
-// a block that is perfectly healthy. state.rows.attempted counts the state rows
-// the block queued instead, so it advances on that replay and keeps the alert
-// silent — while still collapsing to absent under every bug the alert exists for
-// (an always-empty snapshot set, a no-opping SnapshotState), none of which queue
-// anything.
 func TestCurveService_RecordsStateRowsAttemptedOnZeroRowReplay(t *testing.T) {
 	c, reader := newZeroRowReplayService(t)
 
@@ -773,19 +752,13 @@ func TestCurveService_RecordsStateRowsAttemptedOnZeroRowReplay(t *testing.T) {
 	if attempted != 1 {
 		t.Errorf("curve.state.rows.attempted = %d, want 1 (the block queued one state row)", attempted)
 	}
-	// The other half: written really did stay at zero, so this stages the old
-	// rule's firing condition and not a healthy block.
 	if rows, ok := curveCounter(t, rm, "curve.state.rows.written"); ok {
 		t.Errorf("curve.state.rows.written = %d, want the counter to be absent (0 rows inserted is a no-op)", rows)
 	}
 }
 
-// TestCurveService_HandlerError_RecordsErrorMetric: an error on a handler path
-// that is not one of the individually-instrumented stages (here an invalid log
-// address surfaced by poolsTouchedByReceipt) must still increment
-// curve_errors_total, so its `operation` breakdown — the diagnostic
-// VectorCurveIndexerErrorRatioHigh sends responders to — covers every
-// poison-stall path, not only the decode/snapshot/persist ones.
+// Errors outside the individually-instrumented stages must still increment
+// curve_errors_total, or its `operation` breakdown misses poison-stall paths.
 func TestCurveService_HandlerError_RecordsErrorMetric(t *testing.T) {
 	reader := metricsdk.NewManualReader()
 	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
@@ -1098,7 +1071,6 @@ func TestCurveService_RoutesStableswapConfigIntoBlockWrites(t *testing.T) {
 	}
 }
 
-// collectCurveMetrics drains the reader into a fresh ResourceMetrics.
 func collectCurveMetrics(t *testing.T, reader *metricsdk.ManualReader) *metricdata.ResourceMetrics {
 	t.Helper()
 	var rm metricdata.ResourceMetrics
@@ -1108,9 +1080,6 @@ func collectCurveMetrics(t *testing.T, reader *metricsdk.ManualReader) *metricda
 	return &rm
 }
 
-// curveCounter sums the named int64 counter across every attribute set. The
-// second return distinguishes an absent instrument from one recorded as zero —
-// the alerts key on `A > 0 unless B > 0`, so absence is a distinct signal.
 func curveCounter(t *testing.T, rm *metricdata.ResourceMetrics, name string) (int64, bool) {
 	t.Helper()
 	for _, sm := range rm.ScopeMetrics {

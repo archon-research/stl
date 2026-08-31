@@ -23,13 +23,9 @@ func LogBelongsTo(addr common.Address, addrs ...common.Address) bool {
 	return slices.Contains(addrs, addr)
 }
 
-// DecodeLog extracts both indexed (from topics) and non-indexed (from data)
-// fields of an ABI event log into a flat map, following the morpho_indexer
-// parseTopics/parseData pattern.
-//
-// A log that cannot fill every argument its event declares is an error, never a
-// partial map: a params blob missing half its fields is indistinguishable from
-// a healthy row once persisted, and repairing it later costs a backfill.
+// DecodeLog flattens an event log's indexed (topics) and non-indexed (data) fields
+// into one map. A log that cannot fill every argument is an error, never a partial
+// map: a half-filled params blob reads as a healthy row once persisted.
 func DecodeLog(ev abi.Event, log Log) (map[string]any, error) {
 	out := make(map[string]any)
 	if err := parseIndexedArgs(ev, log, out); err != nil {
@@ -44,7 +40,6 @@ func DecodeLog(ev abi.Event, log Log) (map[string]any, error) {
 	return out, nil
 }
 
-// parseIndexedArgs fills out from the topics following topic0.
 func parseIndexedArgs(ev abi.Event, log Log, out map[string]any) error {
 	indexed := indexedArgs(ev)
 	if len(indexed) == 0 {
@@ -63,17 +58,13 @@ func parseIndexedArgs(ev abi.Event, log Log, out map[string]any) error {
 	return nil
 }
 
-// parseNonIndexedArgs fills out from the log's data block. An empty block is an
-// error rather than a skipped step: the arguments it should have carried would
-// otherwise be absent from the decoded map with nothing reporting it.
 func parseNonIndexedArgs(ev abi.Event, log Log, out map[string]any) error {
 	nonIndexed := ev.Inputs.NonIndexed()
 	if len(nonIndexed) == 0 {
 		return nil
 	}
-	// common.FromHex left-pads odd-length input and swallows the decode error,
-	// so a dropped digit silently shifts every argument. Substituting a valid
-	// digit still decodes wrong; only the width defects are caught here.
+	// common.FromHex left-pads odd-length input and swallows the error, so a
+	// dropped digit silently shifts every argument; hexutil.Decode rejects it.
 	raw, err := hexutil.Decode(log.Data)
 	if err != nil {
 		return fmt.Errorf("%s log data %q is not valid hex: %w", ev.Name, log.Data, err)
@@ -87,8 +78,6 @@ func parseNonIndexedArgs(ev abi.Event, log Log, out map[string]any) error {
 	return nil
 }
 
-// assertEveryArgumentDecoded backstops the two halves above, so a go-ethereum
-// decode path that fills only part of the map cannot reach a params column.
 func assertEveryArgumentDecoded(ev abi.Event, out map[string]any) error {
 	for _, arg := range ev.Inputs {
 		if _, ok := out[arg.Name]; !ok {
@@ -142,9 +131,8 @@ func GetBigIntField(data map[string]any, key string) (*big.Int, error) {
 	return b, nil
 }
 
-// GetHashField reads key from a DecodeLog result map as a common.Hash.
-// go-ethereum decodes a bytes32 argument — indexed or not — into a [32]byte
-// array rather than any named type.
+// GetHashField reads key as a common.Hash: go-ethereum decodes a bytes32
+// argument, indexed or not, into [32]byte rather than any named type.
 func GetHashField(data map[string]any, key string) (common.Hash, error) {
 	v, ok := data[key]
 	if !ok {

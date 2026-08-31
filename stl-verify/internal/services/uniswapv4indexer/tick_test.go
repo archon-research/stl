@@ -19,13 +19,8 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// Verbatim StateView returns for the same pool and block as the state fixtures
-// (see state_test.go), so a reader can re-fetch and re-verify:
-//
-//	cast call 0x7fFE42C4a5DEeA5b0feC41C94C136Cf115597227 \
-//	  "getTickInfo(bytes32,int24)" \
-//	  0x1d5b2949ece8754c2d736991c62c5162bd144f497b2212182401b9bae77e2d76 \
-//	  -1873 -r https://eth.drpc.org -b 23200000
+// Recorded from mainnet at the state fixtures' pool and block (state_test.go):
+// cast call <StateView> "getTickInfo(bytes32,int24)" <ethWstethPoolID> -1873.
 const (
 	mainnetTickInfoReturn = "0000000000000000000000000000000000000000000000027769c57fee0baf02" +
 		"fffffffffffffffffffffffffffffffffffffffffffffffd88963a8011f450fe" +
@@ -34,10 +29,8 @@ const (
 	mainnetTickBitmapWordMinus8Return = "0000000000000000001080000000008004000000000000000000000000000000"
 )
 
-// Decoded from the words above by hand and corroborated against the
-// PoolManager's raw storage, where v4-core's TickInfo packs liquidityGross into
-// the low 128 bits and liquidityNet into the high 128 bits of slot +0, then
-// feeGrowthOutside0X128 at +1 and feeGrowthOutside1X128 at +2.
+// Hand-decoded from the words above. v4-core's TickInfo packs liquidityGross
+// low and liquidityNet high in slot +0, then fee growths at +1 and +2.
 const (
 	mainnetTickInfoTick          = -1873
 	mainnetLiquidityGross        = "45498113863732408066"
@@ -46,21 +39,17 @@ const (
 	mainnetFeeGrowthOutside1X128 = "873579410164311889164547676113277"
 )
 
-// Selectors the recorded calls were actually made with.
 const (
 	getTickInfoSelector   = "7c40f1fe"
 	getTickBitmapSelector = "1c7ccb4c"
 )
 
-// tickTestPool is the fixture RegisteredPool for tick-read tests (tickSpacing 60).
 func tickTestPool() RegisteredPool {
 	pool := decodeTestPool(7, ethWstethPoolID)
 	pool.TickSpacing = 60
 	return pool
 }
 
-// liquidityEvent builds a ModifyLiquidity entity with the given bounds and
-// delta; only those three fields matter to TouchedTicks.
 func liquidityEvent(tickLower, tickUpper int, liquidityDelta int64) *entity.UniswapV4LiquidityEvent {
 	return &entity.UniswapV4LiquidityEvent{
 		PoolID:         7,
@@ -75,7 +64,6 @@ func packTickInfoReturn(t *testing.T, liquidityGross, liquidityNet, fg0, fg1 *bi
 	return abiWords(liquidityGross, liquidityNet, fg0, fg1)
 }
 
-// signedWord reads a 32-byte ABI word as a two's-complement signed integer.
 func signedWord(b []byte) *big.Int {
 	v := new(big.Int).SetBytes(b)
 	if v.Bit(255) == 1 {
@@ -84,8 +72,6 @@ func signedWord(b []byte) *big.Int {
 	return v
 }
 
-// argWords splits a packed call into its selector and its 32-byte argument
-// words, failing the test if the call is not that shape.
 func argWords(t *testing.T, callData []byte, wantSelector string, wantArgs int) [][]byte {
 	t.Helper()
 	if len(callData) != 4+32*wantArgs {
@@ -128,11 +114,6 @@ func TestTouchedTicks(t *testing.T) {
 	}
 }
 
-// TestTouchedTicks_ExcludesZeroDeltaPokes pins the read-amplification guard:
-// v4-core's Pool.modifyLiquidity only calls updateTick when liquidityDelta is
-// non-zero, so a fee-collecting poke leaves tick state untouched and re-reading
-// its bounds would be pure waste (and would let a permissionless zero-delta
-// call with arbitrary bounds mint junk uninitialized-tick rows).
 func TestTouchedTicks_ExcludesZeroDeltaPokes(t *testing.T) {
 	events := []*entity.UniswapV4LiquidityEvent{
 		liquidityEvent(-120, 180, 0),
@@ -175,9 +156,6 @@ func TestBuildTickCalls(t *testing.T) {
 	}
 }
 
-// TestBuildTickCalls_MatchesRecordedCall pins BuildTickCalls against the exact
-// calldata the recorded getTickInfo fixture was fetched with, so the packing
-// and the recorded return stay a matched pair.
 func TestBuildTickCalls_MatchesRecordedCall(t *testing.T) {
 	pool := decodeTestPool(7, ethWstethPoolID)
 
@@ -203,11 +181,6 @@ func TestBuildTickCalls_EmptyInput(t *testing.T) {
 	}
 }
 
-// TestDecodeTick_DecodesRecordedMainnetReturn is the independent oracle for the
-// tick decode: verbatim StateView bytes in, hand-decoded expectations out. The
-// recorded tick carries a negative liquidityNet, so this also pins int128 sign
-// handling, and the two fee-growth values differ, so a transposed return layout
-// shows up as a named mismatch.
 func TestDecodeTick_DecodesRecordedMainnetReturn(t *testing.T) {
 	pool := decodeTestPool(7, ethWstethPoolID)
 	res := outbound.Result{Success: true, ReturnData: hexBytes(t, mainnetTickInfoReturn)}
@@ -240,9 +213,6 @@ func TestDecodeTick_DecodesRecordedMainnetReturn(t *testing.T) {
 	}
 }
 
-// TestTickFixtureReproducesMainnetBytes keeps the synthetic packer the other
-// tick tests use honest: for the recorded values it must emit exactly what
-// StateView returned, byte for byte.
 func TestTickFixtureReproducesMainnetBytes(t *testing.T) {
 	got := packTickInfoReturn(t,
 		mustBigInt(mainnetLiquidityGross),
@@ -255,8 +225,7 @@ func TestTickFixtureReproducesMainnetBytes(t *testing.T) {
 	}
 }
 
-// TestDecodeTick_ClearedTickIsAllZeros documents the absent Initialized flag:
-// v4-core's TickInfo has none, so a cleared tick reads back as an all-zero row.
+// v4-core's TickInfo carries no Initialized flag.
 func TestDecodeTick_ClearedTickIsAllZeros(t *testing.T) {
 	res := outbound.Result{Success: true, ReturnData: packTickInfoReturn(t, big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0))}
 
@@ -291,7 +260,6 @@ func TestDecodeTick_FailureModes(t *testing.T) {
 	}
 }
 
-// bitmapWord returns a uint256 (as *big.Int) with the given bit indices set.
 func bitmapWord(bits ...uint) *big.Int {
 	w := new(big.Int)
 	for _, b := range bits {
@@ -300,24 +268,17 @@ func bitmapWord(bits ...uint) *big.Int {
 	return w
 }
 
-// bitmapWordResult packs a getTickBitmap return whose given bit indices are
-// set, so a test can stage a densely-initialized word.
 func bitmapWordResult(t *testing.T, bits ...uint) outbound.Result {
 	t.Helper()
 	return outbound.Result{Success: true, ReturnData: abiWords(bitmapWord(bits...))}
 }
 
-// wordFromCallData recovers the int16 word position from a packed
-// getTickBitmap(bytes32,int16) call.
 func wordFromCallData(t *testing.T, callData []byte) int16 {
 	t.Helper()
 	return int16(signedWord(argWords(t, callData, getTickBitmapSelector, 2)[1]).Int64())
 }
 
-// TestBaselineTicks_DecodesRecordedBitmapWord runs the bit-to-tick mapping over
-// a verbatim mainnet bitmap word. Bit 175 of word -8 is tick -1873, the same
-// tick whose recorded getTickInfo return above is non-zero, so the two fixtures
-// corroborate each other.
+// Bit 175 of word -8 is tick -1873, the recorded getTickInfo tick.
 func TestBaselineTicks_DecodesRecordedBitmapWord(t *testing.T) {
 	pool := decodeTestPool(7, ethWstethPoolID)
 	recorded := hexBytes(t, mainnetTickBitmapWordMinus8Return)
@@ -392,9 +353,6 @@ func TestBaselineTicks_DecodesSetBitsToTicks(t *testing.T) {
 	}
 }
 
-// TestBaselineTicks_ChunksWideWordRange uses tickSpacing=1, whose word range
-// exceeds the per-multicall cap, to prove the scan splits into bounded batches
-// rather than one aggregate call an RPC provider would reject.
 func TestBaselineTicks_ChunksWideWordRange(t *testing.T) {
 	pool := tickTestPool()
 	pool.TickSpacing = 1
@@ -493,8 +451,6 @@ func TestBaselineTicks_FailureModes(t *testing.T) {
 	}
 }
 
-// TestBaselineTicks_PinsToBlockHash guards the reorg-correctness rule: state
-// reads must never resolve by block number.
 func TestBaselineTicks_PinsToBlockHash(t *testing.T) {
 	mc := testutil.NewMockMulticaller()
 	mc.ExecuteFn = func(context.Context, []outbound.Call, *big.Int) ([]outbound.Result, error) {

@@ -72,16 +72,12 @@ func NewDecodedCapturedLog(addr common.Address, logIndex uint, txHash common.Has
 	}, nil
 }
 
-// MarshalDecodedParams JSON-encodes a shared.DecodeLog result map, recursively
-// stringifying every *big.Int and hex-encoding every bare byte array (addresses
-// and other scalars marshal as their natural JSON form) so uint256/int256/int24
-// values keep full precision and bytes32 values stay joinable in JSONB.
-// Exported for typed-entity params (e.g. UniswapV3PoolEvent.Params) that share
-// the capture net's lossless encoding.
+// MarshalDecodedParams JSON-encodes a shared.DecodeLog result map losslessly:
+// *big.Int as decimal strings, bare byte arrays as 0x hex.
 func MarshalDecodedParams(data map[string]any) (json.RawMessage, error) {
 	out := make(map[string]any, len(data))
 	for k, v := range data {
-		out[k] = stringifyBigInts(v)
+		out[k] = encodeForJSONB(v)
 	}
 	payload, err := json.Marshal(out)
 	if err != nil {
@@ -90,17 +86,10 @@ func MarshalDecodedParams(data map[string]any) (json.RawMessage, error) {
 	return payload, nil
 }
 
-// stringifyBigInts returns v with every *big.Int (v itself, or elements of a
-// slice/array however deeply nested) replaced by its decimal string and every
-// raw byte array/slice replaced by its 0x-prefixed hex; all other values are
-// returned unchanged. ABI-decoded event fields are scalars, addresses, byte
-// arrays, or fixed/dynamic uint256 arrays — no maps or structs — so slice/array
-// recursion covers every big.Int the decode path can produce.
-//
-// Values that carry their own JSON encoding (common.Address / common.Hash are
-// [N]byte arrays implementing encoding.TextMarshaler) are left intact so they
-// still marshal as their hex text, not decomposed into a byte slice.
-func stringifyBigInts(v any) any {
+// encodeForJSONB recurses into slices and arrays only: ABI-decoded fields are
+// never maps or structs. common.Address and common.Hash are [N]byte too, so
+// their TextMarshaler must win before the bare-byte-array branch.
+func encodeForJSONB(v any) any {
 	if bi, ok := v.(*big.Int); ok {
 		return bi.String()
 	}
@@ -117,19 +106,16 @@ func stringifyBigInts(v any) any {
 	if rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array {
 		out := make([]any, rv.Len())
 		for i := range out {
-			out[i] = stringifyBigInts(rv.Index(i).Interface())
+			out[i] = encodeForJSONB(rv.Index(i).Interface())
 		}
 		return out
 	}
 	return v
 }
 
-// hexBytes renders a bare byte array/slice — go-ethereum decodes bytes32 (a V4
-// PoolId or ModifyLiquidity salt) as [32]byte, which carries no JSON encoding of
-// its own — as lowercase 0x hex. Left as a decimal byte array it would be
-// unjoinable against the hex-keyed pool registry. No curve or uniswap-v3 event
-// ABI declares a byte-typed argument, so this reaches only V4's bytes32 fields
-// and leaves the shipped indexers' protocol_event encoding unchanged.
+// hexBytes renders a bare byte array as 0x hex: go-ethereum decodes bytes32 (a
+// V4 PoolId or ModifyLiquidity salt) into [32]byte, which carries no JSON
+// encoding of its own and would land in JSONB as an unjoinable decimal list.
 func hexBytes(rv reflect.Value) (string, bool) {
 	kind := rv.Kind()
 	if kind != reflect.Array && kind != reflect.Slice {

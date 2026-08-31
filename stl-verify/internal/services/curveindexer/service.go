@@ -234,8 +234,6 @@ func (c *CurveService) handleBlock(ctx context.Context, event outbound.BlockEven
 	// cadence rather than on this counter, but emitting it keeps the metric's
 	// meaning identical across every DEX worker sharing dextelemetry.
 	c.telemetry.RecordPoolsTouched(ctx, len(touchedIDs))
-	// Attempted is what VectorCurveIndexerNoStateWritten keys on — persisted goes
-	// to zero on a healthy replay; written stays as volume observability.
 	c.telemetry.RecordStateRowsAttempted(ctx, int(stateRows.Attempted))
 	c.telemetry.RecordStateRows(ctx, int(stateRows.Persisted))
 	return nil
@@ -364,12 +362,8 @@ func (c *CurveService) buildBlockWrites(acc blockAccumulators, snapshots snapsho
 	return writes, capturedIns, nil
 }
 
-// persistBlock saves the block writes and captured events in a single DB
-// transaction via dexconsumer.PersistBlock, returning how the block's state rows
-// fared: how many were queued, and how many actually appended (zero on an
-// idempotent ON CONFLICT DO NOTHING replay). dexconsumer.PersistBlock only
-// carries the persisted count back, so the attempted count rides out on the
-// closure.
+// dexconsumer.PersistBlock carries only the persisted count back, so
+// persistBlock rides the attempted count out on the closure.
 func (c *CurveService) persistBlock(ctx context.Context, writes outbound.BlockWrites, capturedIns []dexconsumer.ProtocolEventInput, bn int64) (outbound.StateRowCounts, error) {
 	var attempted int64
 	persisted, err := dexconsumer.PersistBlock(ctx, c.txMgr, c.eventWriter, func(ctx context.Context, tx pgx.Tx) (int64, error) {

@@ -18,10 +18,10 @@ import (
 const (
 	blockNumber = int64(23000000)
 	blockVer    = 0
-	// The singleton v4-core PoolManager and its StateView periphery on mainnet.
-	poolManagerAddr = "0x000000000004444c5dc75cB358380D2e3dE08A90"
-	stateViewAddr   = "0x7fFE42C4a5DEeA5b0feC41C94C136Cf115597227"
-	// PoolIds of the real mainnet logs replayed as decode fixtures.
+	// Mainnet: the singleton PoolManager, its StateView periphery, and the
+	// PoolIds of the real logs replayed as decode fixtures below.
+	poolManagerAddr       = "0x000000000004444c5dc75cB358380D2e3dE08A90"
+	stateViewAddr         = "0x7fFE42C4a5DEeA5b0feC41C94C136Cf115597227"
 	swapFixturePoolID     = "0xb86b55a845bae916f4d6b15087ec7f734276714652182f929817a8a177d3f837"
 	modifyFixturePoolID   = "0x5244a02f00c673477f6bf1aef0f6b7f4af9cf50ebc22339f20a64f8a8cecba25"
 	donateFixturePoolID   = "0xbd5baafef9eb4fcbc7e592b1b8e14d4a03716c705517baab4121a67b47017b97"
@@ -33,9 +33,6 @@ var blockTS = time.Unix(1700000000, 0).UTC()
 
 func poolManagerAddress() common.Address { return common.HexToAddress(poolManagerAddr) }
 
-// decodeTestPool returns a RegisteredPool keyed by poolIDHash. Only the fields
-// the decoder reads (ID, PoolIDHash) carry meaning here; the rest keep the
-// mainnet ETH/wstETH shape so the fixture stays recognisable.
 func decodeTestPool(id int64, poolIDHash string) RegisteredPool {
 	return RegisteredPool{
 		ID:                id,
@@ -61,9 +58,6 @@ func poolsByIDOf(pools ...RegisteredPool) map[common.Hash]RegisteredPool {
 	return byID
 }
 
-// rawLog builds a log verbatim from an on-chain topics/data capture, so the
-// decode path is exercised against real PoolManager bytes rather than
-// round-tripped Go values.
 func rawLog(topics []string, data, logIndexHex string) shared.Log {
 	return shared.Log{
 		Address:         poolManagerAddr,
@@ -74,8 +68,6 @@ func rawLog(topics []string, data, logIndexHex string) shared.Log {
 	}
 }
 
-// buildLog ABI-encodes an event's non-indexed args into Data and places the
-// given indexed topics (already 32-byte hashes) after topic0.
 func buildLog(t *testing.T, eventName string, indexedTopics []common.Hash, nonIndexedValues ...any) shared.Log {
 	t.Helper()
 	a := poolManagerABIForTest(t)
@@ -108,18 +100,12 @@ func receiptOf(logs ...shared.Log) shared.TransactionReceipt {
 	return shared.TransactionReceipt{Logs: logs}
 }
 
-// addrTopic left-pads an address into a 32-byte topic word.
 func addrTopic(a common.Address) common.Hash { return common.BytesToHash(a.Bytes()) }
 
-// corruptHexWord replaces one hex digit in the middle of a 32-byte word with a
-// non-hex character. Corrupting the middle rather than the first digit is what
-// makes the case interesting: go-ethereum truncates at the bad character and
-// left-pads the remainder into a plausible-looking hash, not an obviously-empty
-// one.
+// Corrupts the middle digit, not the first: truncation there still left-pads
+// into a plausible-looking hash rather than an obviously-empty one.
 func corruptHexWord(word string) string { return word[:34] + "z" + word[35:] }
 
-// decodeFixture runs DecodeEvents over one log against the given registry,
-// failing the test on any decode error.
 func decodeFixture(t *testing.T, log shared.Log, pools map[common.Hash]RegisteredPool) (DecodedEvents, map[int64]bool) {
 	t.Helper()
 	got, touched, err := DecodeEvents(receiptOf(log), pools, poolManagerAddress(), blockNumber, blockVer, blockTS)
@@ -138,11 +124,6 @@ func decodePayload(t *testing.T, raw json.RawMessage) map[string]any {
 	return m
 }
 
-// swapFixtureLog is a verbatim mainnet PoolManager Swap log: amount0 positive
-// (the swapper received currency0), amount1 negative (paid in), tick 94759,
-// swap fee 10990 hundredths of a bip.
-// swapDataWithTick repacks the Swap fixture's non-indexed block with a
-// substituted tick, so a test can drive a value the int24 width cannot hold.
 func swapDataWithTick(t *testing.T, tick *big.Int) string {
 	t.Helper()
 	a := poolManagerABIForTest(t)
@@ -231,9 +212,6 @@ func TestDecodeEvents_Swap(t *testing.T) {
 	}
 }
 
-// modifyLiquidityFixtureLog is a verbatim mainnet ModifyLiquidity log: a
-// full-range position (tickLower -887200, tickUpper 887200) with a non-zero
-// caller-chosen salt.
 func modifyLiquidityFixtureLog() shared.Log {
 	return rawLog(
 		[]string{
@@ -287,9 +265,8 @@ func TestDecodeEvents_ModifyLiquidity(t *testing.T) {
 	}
 }
 
-// TestDecodeEvents_CapturesBytes32FieldsAsHex pins the capture net's encoding of
-// the ABI kind go-ethereum decodes as a bare [32]byte: a decimal byte array
-// would leave params->>'id' unjoinable against uniswap_v4_pool.pool_id.
+// go-ethereum decodes bytes32 as a bare [32]byte, whose default JSON form is a
+// decimal array — unjoinable as params->>'id' against uniswap_v4_pool.pool_id.
 func TestDecodeEvents_CapturesBytes32FieldsAsHex(t *testing.T) {
 	pool := decodeTestPool(11, modifyFixturePoolID)
 	got, _ := decodeFixture(t, modifyLiquidityFixtureLog(), poolsByIDOf(pool))
@@ -321,9 +298,6 @@ func TestDecodeEvents_CapturesBytes32FieldsAsHex(t *testing.T) {
 	}
 }
 
-// initializeFixtureLog is a verbatim mainnet Initialize log for the ETH/wstETH
-// 0.01% pool: native ETH as currency0, tickSpacing 1, no hooks, opening tick
-// -1750.
 func initializeFixtureLog() shared.Log {
 	return rawLog(
 		[]string{
@@ -377,8 +351,6 @@ func TestDecodeEvents_Initialize(t *testing.T) {
 	}
 }
 
-// donateFixtureLog is a verbatim mainnet Donate log: 1528 wei of currency0 and
-// nothing of currency1, so the fixture also pins which amount is which.
 func donateFixtureLog() shared.Log {
 	return rawLog(
 		[]string{
@@ -427,8 +399,6 @@ func TestDecodeEvents_Donate(t *testing.T) {
 	}
 }
 
-// protocolFeeUpdatedFixtureLog is a verbatim mainnet ProtocolFeeUpdated log:
-// 0x3e83e8 packs the maximum 1000 pips in both 12-bit halves.
 func protocolFeeUpdatedFixtureLog() shared.Log {
 	return rawLog(
 		[]string{
@@ -468,10 +438,6 @@ func TestDecodeEvents_ProtocolFeeUpdated(t *testing.T) {
 	}
 }
 
-// TestDecodeEvents_UnregisteredPoolIsSkipped pins the load-bearing filter: the
-// PoolManager is a singleton emitting for thousands of pools, so a log for a
-// PoolId we do not track must produce nothing at all — not even a capture-net
-// entry, which would otherwise flood protocol_event.
 func TestDecodeEvents_UnregisteredPoolIsSkipped(t *testing.T) {
 	other := decodeTestPool(7, ethWstethPoolID)
 
@@ -488,9 +454,6 @@ func TestDecodeEvents_UnregisteredPoolIsSkipped(t *testing.T) {
 	}
 }
 
-// TestDecodeEvents_ERC6909EventsAreSkipped covers the claim-token surface: it
-// is keyed by currency id, not PoolId, so it cannot be attributed to a pool and
-// is deliberately not captured.
 func TestDecodeEvents_ERC6909EventsAreSkipped(t *testing.T) {
 	pool := decodeTestPool(7, ethWstethPoolID)
 	from := common.HexToAddress("0x1111111111111111111111111111111111111111")
@@ -525,9 +488,6 @@ func TestDecodeEvents_ERC6909EventsAreSkipped(t *testing.T) {
 	}
 }
 
-// TestDecodeEvents_GovernanceEventsAreCapturedOnly covers the two singleton
-// events that carry no PoolId: they belong in the capture net but have no pool
-// to attribute a typed row to.
 func TestDecodeEvents_GovernanceEventsAreCapturedOnly(t *testing.T) {
 	pool := decodeTestPool(7, ethWstethPoolID)
 	user := common.HexToAddress("0x1a9C8182C09F50C8318d769245beA52c32BE35BC")
@@ -610,9 +570,6 @@ func TestDecodeEvents_LogFromAnotherContractIsIgnored(t *testing.T) {
 	}
 }
 
-// TestDecodeEvents_MultipleReceiptLogsAccumulate proves the singleton decode
-// path handles a routing transaction that hits two tracked pools plus untracked
-// noise in a single receipt.
 func TestDecodeEvents_MultipleReceiptLogsAccumulate(t *testing.T) {
 	swapPool := decodeTestPool(7, swapFixturePoolID)
 	modifyPool := decodeTestPool(11, modifyFixturePoolID)
@@ -780,10 +737,8 @@ func TestDecodeEvents_MalformedLogsReturnError(t *testing.T) {
 	}
 }
 
-// TestDecodeEvents_EmptyDataIsAnError proves a log whose data block is missing
-// stops the block: DecodeLog skips the non-indexed arguments entirely when data
-// is empty, which would otherwise persist a Donate whose amounts are simply
-// absent from params.
+// go-ethereum's DecodeLog skips the non-indexed arguments entirely when data is
+// empty, which would persist a Donate whose amounts are absent from params.
 func TestDecodeEvents_EmptyDataIsAnError(t *testing.T) {
 	pool := decodeTestPool(7, ethWstethPoolID)
 	log := buildLog(t, "Donate",
@@ -801,9 +756,6 @@ func TestDecodeEvents_EmptyDataIsAnError(t *testing.T) {
 	}
 }
 
-// TestPoolManagerABI_RoutesOnlyEventsItDefines pins the routing tables to the
-// ABI: a name in one of them that the ABI does not define would silently divert
-// real logs into the unknown-topic0 capture net.
 func TestPoolManagerABI_RoutesOnlyEventsItDefines(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -833,9 +785,6 @@ func TestPoolManagerABI_RoutesOnlyEventsItDefines(t *testing.T) {
 	}
 }
 
-// TestDecodeEvents_EntityValidationFailureIsAnError proves a decoded log that
-// cannot form a valid entity stops the block instead of being dropped, for
-// every builder: a partially-valid block would look healthy while leaving holes.
 func TestDecodeEvents_EntityValidationFailureIsAnError(t *testing.T) {
 	poolIDTopic := common.HexToHash(ethWstethPoolID)
 	sender := addrTopic(common.HexToAddress("0xaaa"))

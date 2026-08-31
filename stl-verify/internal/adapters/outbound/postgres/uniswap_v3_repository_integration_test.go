@@ -409,11 +409,6 @@ func TestUniswapV3Repository_SaveBlock_State_Idempotent(t *testing.T) {
 	if got := save(); got.Attempted != 1 || got.Persisted != 1 {
 		t.Errorf("first save = %+v, want {Attempted:1 Persisted:1}", got)
 	}
-	// The redelivery is the case VectorUniswapV3IndexerNotWritingState must NOT
-	// fire on: the trigger reuses the processing_version, so the INSERT lands on
-	// the identical PK and appends nothing. Persisted therefore drops to zero
-	// while Attempted stays at the row the block really tried to persist — which
-	// is why the alert's right side keys on Attempted.
 	if got := save(); got.Attempted != 1 || got.Persisted != 0 {
 		t.Errorf("redelivery = %+v, want {Attempted:1 Persisted:0} (ON CONFLICT DO NOTHING appends nothing, but the block still tried)", got)
 	}
@@ -682,8 +677,7 @@ func newUniswapV3TestTick(poolID int64, tick int, blockNumber int64, blockVersio
 	}
 }
 
-// uniswapV3TickFixture owns one test's pool plus the tick save/read helpers, so
-// every append-on-change test starts from rows nothing else can have touched.
+// A pool of its own per test, so no tick test depends on a sibling's TRUNCATE.
 type uniswapV3TickFixture struct {
 	t      *testing.T
 	ctx    context.Context
@@ -726,8 +720,6 @@ func (f uniswapV3TickFixture) rowCount(tick int) int {
 	return count
 }
 
-// latestValue reads one value column off the canonical-latest row at tick, the
-// row a consumer asking "what is this tick now" would get.
 func (f uniswapV3TickFixture) latestValue(tick int, column string) string {
 	f.t.Helper()
 	var value string
@@ -741,9 +733,6 @@ func (f uniswapV3TickFixture) latestValue(tick int, column string) string {
 	return value
 }
 
-// TestUniswapV3Repository_WriteTicks_SameBlockRedeliveryDoesNotAppend pins the
-// case the block_version gate must still skip: an at-least-once redelivery of
-// the same block at the same version.
 func TestUniswapV3Repository_WriteTicks_SameBlockRedeliveryDoesNotAppend(t *testing.T) {
 	ctx := context.Background()
 	f := newUniswapV3TickFixture(t, ctx, 0x41)
@@ -756,10 +745,6 @@ func TestUniswapV3Repository_WriteTicks_SameBlockRedeliveryDoesNotAppend(t *test
 	}
 }
 
-// TestUniswapV3Repository_WriteTicks_LaterIdenticalTouchAfterReorgDoesNotAppend
-// pins that block_version is only comparable within one height: once a reorg
-// has written (N, v1), the next touch at N+k carries v0, and treating that as a
-// re-observation appends a row claiming a change the chain never made.
 func TestUniswapV3Repository_WriteTicks_LaterIdenticalTouchAfterReorgDoesNotAppend(t *testing.T) {
 	ctx := context.Background()
 	f := newUniswapV3TickFixture(t, ctx, 0x42)
@@ -773,11 +758,6 @@ func TestUniswapV3Repository_WriteTicks_LaterIdenticalTouchAfterReorgDoesNotAppe
 	}
 }
 
-// TestUniswapV3Repository_WriteTicks_BackfilledGapBlockAppendsBelowNewerRow
-// pins the height bound: the gap backfiller republishes a missed block at
-// block_version 0, under a row a later touch already wrote, and the
-// append-on-change decision has to be made against the tick's state at that
-// height or the missed block leaves a permanent hole.
 func TestUniswapV3Repository_WriteTicks_BackfilledGapBlockAppendsBelowNewerRow(t *testing.T) {
 	ctx := context.Background()
 	f := newUniswapV3TickFixture(t, ctx, 0x43)
@@ -896,7 +876,6 @@ func TestUniswapV3Repository_SaveBlock_Ticks_BatchAppendOnChange(t *testing.T) {
 		newUniswapV3TestTick(f.poolID, tickChangedPos, 3000, 0, big.NewInt(200)),
 	)
 
-	// All three re-written in ONE batch at a strictly later block, same version.
 	f.save(
 		newUniswapV3TestTick(f.poolID, tickUnchangedPos, 3001, 0, big.NewInt(100)),
 		newUniswapV3TestTick(f.poolID, tickChangedPos, 3001, 0, big.NewInt(999)),
@@ -915,8 +894,6 @@ func TestUniswapV3Repository_SaveBlock_Ticks_BatchAppendOnChange(t *testing.T) {
 	if got := f.latestValue(tickChangedPos, "liquidity_net"); got != "999" {
 		t.Errorf("latest changed liquidity_net = %q, want 999", got)
 	}
-	// The unchanged tick's single row must still carry its original block_number,
-	// proving the batch skipped it rather than re-inserting at 3001.
 	if got := f.latestValue(tickUnchangedPos, "block_number"); got != "3000" {
 		t.Errorf("unchanged tick block_number = %q, want 3000 (row must be the untouched seed, not a 3001 re-insert)", got)
 	}

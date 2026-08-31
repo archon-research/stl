@@ -17,9 +17,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
-// eventsByID indexes the PoolManager ABI's events by topic0 for O(1) log
-// dispatch, built exactly once alongside the once-parsed ABI: like the ABI
-// itself, this map is immutable and on the per-receipt hot path.
 var eventsByID = sync.OnceValues(func() (map[common.Hash]*abi.Event, error) {
 	poolManagerABI, err := PoolManagerABI()
 	if err != nil {
@@ -35,9 +32,8 @@ var eventsByID = sync.OnceValues(func() (map[common.Hash]*abi.Event, error) {
 	return out, nil
 })
 
-// poolKeyedEvents are the PoolManager events whose first indexed argument is
-// the PoolId, so a registry lookup on topics[1] decides which pool they belong
-// to.
+// poolKeyedEvents carry the PoolId as their first indexed argument, so topics[1]
+// resolves which pool they belong to.
 var poolKeyedEvents = map[string]struct{}{
 	"Initialize":         {},
 	"ModifyLiquidity":    {},
@@ -46,29 +42,22 @@ var poolKeyedEvents = map[string]struct{}{
 	"ProtocolFeeUpdated": {},
 }
 
-// erc6909Events are the claim-token events the PoolManager inherits from
-// ERC6909. They are keyed by currency id, not PoolId, and are emitted whenever
-// anyone mints, burns or transfers a claim on ANY currency the singleton holds
-// — high-volume traffic that cannot be attributed to a pool at all. Capturing
-// them would fill protocol_event with rows no V4 query can join, so they are
-// dropped rather than mirrored.
+// erc6909Events are the inherited claim-token events: keyed by currency id, not
+// PoolId, so they cannot be attributed to a pool at all — dropped, not captured.
 var erc6909Events = map[string]struct{}{
 	"Transfer":    {},
 	"Approval":    {},
 	"OperatorSet": {},
 }
 
-// poolEventNames maps an ABI event name to its persisted UniswapV4PoolEventName.
 var poolEventNames = map[string]entity.UniswapV4PoolEventName{
 	"Initialize":         entity.UniswapV4PoolEventInitialize,
 	"Donate":             entity.UniswapV4PoolEventDonate,
 	"ProtocolFeeUpdated": entity.UniswapV4PoolEventProtocolFeeUpdated,
 }
 
-// assertRoutedEventsExist rejects a routing table naming an event the ABI does
-// not define: a typo there would silently divert real logs into the
-// unknown-topic0 capture net instead of their typed table, and nothing at
-// runtime would look wrong.
+// A typo in a routing table would silently divert real logs into the
+// unknown-topic0 capture net instead of their typed table.
 func assertRoutedEventsExist(poolManagerABI *abi.ABI, keyed map[string]struct{}) error {
 	tables := []struct {
 		table string
@@ -88,9 +77,6 @@ func assertRoutedEventsExist(poolManagerABI *abi.ABI, keyed map[string]struct{})
 	return assertKeyedEventsDispatch(keyed)
 }
 
-// assertKeyedEventsDispatch pins appendTypedEvent's dispatch to the routing
-// tables: a keyed event with neither a dedicated builder nor a poolEventNames
-// entry decodes fine and then falls through to an error on a live log.
 func assertKeyedEventsDispatch(keyed map[string]struct{}) error {
 	for _, name := range slices.Sorted(maps.Keys(keyed)) {
 		if name == "Swap" || name == "ModifyLiquidity" {
@@ -103,17 +89,8 @@ func assertKeyedEventsDispatch(keyed map[string]struct{}) error {
 	return nil
 }
 
-// DecodeEvents extracts typed entities from a single transaction receipt,
-// routing each PoolManager log by its PoolId. Unlike the per-pool V3 decoder it
-// runs ONCE per receipt: V4's emitter is a singleton shared by every pool, so
-// scanning the receipt per registered pool would be O(pools × logs) for the
-// same result. It returns the set of registered pool IDs the receipt touched,
-// which the caller feeds to dexconsumer.DueSet.
-//
-// Capture-net design: a log on the PoolManager is mirrored into Captured
-// whether or not topic0 matched a known event, EXCEPT for logs belonging to
-// pools outside the registry (the singleton emits for thousands of untracked
-// pools) and for the ERC6909 claim-token set (see erc6909Events).
+// DecodeEvents runs once per receipt against the whole registry, and returns the
+// set of registered pool IDs that receipt touched.
 func DecodeEvents(
 	receipt shared.TransactionReceipt,
 	poolsByID map[common.Hash]RegisteredPool,
@@ -144,9 +121,6 @@ func DecodeEvents(
 	return d.out, d.touched, nil
 }
 
-// receiptDecoder carries the registry and block identity every log decode
-// needs, so the per-log helpers below take the log alone instead of repeating a
-// six-argument tail.
 type receiptDecoder struct {
 	events      map[common.Hash]*abi.Event
 	poolsByID   map[common.Hash]RegisteredPool
@@ -165,10 +139,6 @@ type logSite struct {
 	txHash   common.Hash
 }
 
-// decodeLog routes one log: anything not emitted by the PoolManager is ignored,
-// pool-keyed events become typed entities, the singleton's governance events
-// are captured only, ERC6909 traffic is skipped, and an unrecognised topic0 is
-// captured raw so protocol_event keeps a complete mirror.
 func (d *receiptDecoder) decodeLog(log shared.Log) error {
 	if !common.IsHexAddress(log.Address) {
 		return fmt.Errorf("invalid log address %q", log.Address)
@@ -208,10 +178,8 @@ func (d *receiptDecoder) knownEvent(log shared.Log) *abi.Event {
 	return d.events[common.HexToHash(log.Topics[0])]
 }
 
-// decodePoolKeyedLog resolves the log's PoolId against the registry and, for a
-// tracked pool, appends both the typed entity and its capture-net mirror. A log
-// for an untracked pool is dropped entirely — the deliberate high-volume filter
-// this indexer depends on, not a swallowed failure.
+// A log for an untracked pool is dropped: the singleton emits for thousands of
+// pools outside the registry, so this filter is deliberate, not a swallowed failure.
 func (d *receiptDecoder) decodePoolKeyedLog(ev abi.Event, log shared.Log, site logSite) error {
 	poolID, err := indexedPoolID(ev, log)
 	if err != nil {
@@ -233,9 +201,7 @@ func (d *receiptDecoder) decodePoolKeyedLog(ev abi.Event, log shared.Log, site l
 	return nil
 }
 
-// indexedPoolID reads topics[1], which every pool-keyed PoolManager event
-// carries as its PoolId. assertHexWords has already rejected a topic that is
-// not a full 32-byte word.
+// assertHexWords has already rejected a topic that is not a full 32-byte word.
 func indexedPoolID(ev abi.Event, log shared.Log) (common.Hash, error) {
 	if len(log.Topics) < 2 {
 		return common.Hash{}, fmt.Errorf("%s log (index %s) carries no indexed pool id", ev.Name, log.LogIndex)
@@ -243,12 +209,9 @@ func indexedPoolID(ev abi.Event, log shared.Log) (common.Hash, error) {
 	return common.HexToHash(log.Topics[1]), nil
 }
 
-// assertHexWords rejects a log whose transaction hash or topics are not full
-// 32-byte hex words. Everything downstream reads them through
-// common.HexToHash, which left-pads a short value and truncates at the first
-// non-hex character: one corrupted character otherwise becomes a registry miss
-// that drops a tracked pool's swap, a wrong indexed sender, or the wrong
-// transaction hash on a persisted row — none of it visible as a failure.
+// common.HexToHash left-pads a short value and truncates at the first non-hex
+// character, so one corrupted character would silently become a registry miss or
+// a wrong sender or transaction hash on a persisted row.
 func assertHexWords(log shared.Log) error {
 	if !isHexWord(log.TransactionHash) {
 		return fmt.Errorf("log (index %s) transaction hash %q is not a 32-byte hex word", log.LogIndex, log.TransactionHash)
@@ -265,8 +228,6 @@ func isHexWord(value string) bool {
 	return len(value) == 66 && strings.HasPrefix(value, "0x") && common.IsHexHash(value)
 }
 
-// decodeAndCapture ABI-decodes a known event and mirrors it into the capture
-// net, returning the decoded fields for any typed entity built from them.
 func (d *receiptDecoder) decodeAndCapture(ev abi.Event, log shared.Log, site logSite) (map[string]any, error) {
 	data, err := shared.DecodeLog(ev, log)
 	if err != nil {
@@ -280,8 +241,7 @@ func (d *receiptDecoder) decodeAndCapture(ev abi.Event, log shared.Log, site log
 	return data, nil
 }
 
-// captureRaw mirrors a log the ABI cannot decode, named by its topic0. The
-// PoolManager is non-upgradeable, so this net is expected to stay empty.
+// The PoolManager is non-upgradeable, so this net is expected to stay empty.
 func (d *receiptDecoder) captureRaw(log shared.Log, site logSite) error {
 	name := dexconsumer.AnonymousLogEventName
 	if len(log.Topics) > 0 {
@@ -401,9 +361,6 @@ func (d *receiptDecoder) buildLiquidityEvent(data map[string]any, pool Registere
 	return e, nil
 }
 
-// buildPoolEvent decodes a low-frequency pool event (Initialize, Donate,
-// ProtocolFeeUpdated) into a UniswapV4PoolEvent, JSON-marshalling its decoded
-// named fields as Params rather than promoting them to columns.
 func (d *receiptDecoder) buildPoolEvent(abiEventName string, data map[string]any, pool RegisteredPool, site logSite) (*entity.UniswapV4PoolEvent, error) {
 	name, ok := poolEventNames[abiEventName]
 	if !ok {
@@ -430,9 +387,6 @@ func (d *receiptDecoder) buildPoolEvent(abiEventName string, data map[string]any
 	return ev, nil
 }
 
-// bigIntFields reads several fields at once so each builder stays a field
-// mapping. Every v4-core numeric event argument decodes to *big.Int (see
-// numeric.go).
 func bigIntFields(data map[string]any, keys ...string) (map[string]*big.Int, error) {
 	out := make(map[string]*big.Int, len(keys))
 	for _, key := range keys {

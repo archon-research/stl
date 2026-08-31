@@ -117,9 +117,7 @@ type liquidityEventConverted struct {
 }
 
 // SaveBlock persists all of a block's uniswap_v3 rows in one pgx.Batch within
-// tx, except ticks (append-on-change, see uniswapTickWriter), and returns both
-// the count of state rows the block queued and the count that actually
-// appended.
+// tx, except ticks (append-on-change, see uniswapTickWriter).
 func (r *UniswapV3Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.UniswapV3BlockWrites) (stateRows outbound.StateRowCounts, err error) {
 	states, err := convertStates(w.States)
 	if err != nil {
@@ -360,13 +358,6 @@ func addressBytesOrNil(a *common.Address) []byte {
 	return a.Bytes()
 }
 
-// sendUniswapV3Batch executes the queued batch and drains every result in
-// queue order, returning both the number of state-row statements it drained
-// and the number of rows they appended. The two diverge on an idempotent
-// replay, where every INSERT conflicts away; counting the attempt here rather
-// than in the service means a repo-layer drop is counted as zero attempts too.
-// The batch reader is always closed before returning so the caller may issue
-// further queries on tx (writeTicks runs after this).
 func sendUniswapV3Batch(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -413,7 +404,6 @@ func sendUniswapV3Batch(
 	return stateRows, nil
 }
 
-// uniswapV3TickRows maps the V3 entities onto the shared writer's row shape.
 func uniswapV3TickRows(ticks []*entity.UniswapV3Tick) []uniswapTickRow {
 	rows := make([]uniswapTickRow, len(ticks))
 	for i, t := range ticks {

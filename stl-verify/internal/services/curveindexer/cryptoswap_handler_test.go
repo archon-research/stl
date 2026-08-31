@@ -277,10 +277,8 @@ func TestCryptoswapHandler_CorruptKnownEventErrors(t *testing.T) {
 	}
 }
 
-// TestCryptoswapHandler_EmptyDataOnKnownEventErrors targets AddLiquidity because
-// it (with RemoveLiquidity and RemoveLiquidityOne) has no extractor and reaches
-// only the capture net: this guard is all that stops an empty data block being
-// persisted as a params payload missing every non-indexed value.
+// AddLiquidity has no extractor and reaches only the capture net, so this guard
+// is all that stops an empty data block persisting as a params payload.
 func TestCryptoswapHandler_EmptyDataOnKnownEventErrors(t *testing.T) {
 	a, err := abis.CurveCryptoswapABI()
 	if err != nil {

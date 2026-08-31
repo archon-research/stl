@@ -21,9 +21,8 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// Synthetic chains the registry fixtures below are seeded on, one per scenario
-// so a deliberately-broken or multi-version registry can never leak into
-// another test's LoadPools call. Only the mainnet fixtures live on chain 1.
+// One synthetic chain per scenario, so a deliberately-broken or multi-version
+// registry can never leak into another test's LoadPools call.
 const (
 	uniswapV4RepoSaveChainID         = 490001
 	uniswapV4RepoNullDecChainID      = 490002
@@ -49,9 +48,6 @@ const (
 	uniswapV4RepoXChainMgrVerChainID = 490022
 )
 
-// testUniswapV4BuildID / testUniswapV4RebuildID are two distinct build ids so a
-// test can prove build_id is threaded through and that a re-index by a newer
-// build lands at processing_version 1 instead of deduplicating.
 const (
 	testUniswapV4BuildID   = buildregistry.BuildID(1)
 	testUniswapV4RebuildID = buildregistry.BuildID(2)
@@ -62,9 +58,7 @@ func newUniswapV4Repo(t *testing.T) *UniswapV4Repository {
 	return NewUniswapV4Repository(uniswapV4TestPool, testUniswapV4BuildID)
 }
 
-// withUniswapV4Tx runs fn inside a transaction against uniswapV4TestPool,
-// committing on success. Rollback is deferred so a t.Fatal mid-fn still
-// releases the connection.
+// Rollback is deferred so a t.Fatal mid-fn still releases the connection.
 func withUniswapV4Tx(t *testing.T, ctx context.Context, fn func(tx pgx.Tx)) {
 	t.Helper()
 	tx, err := uniswapV4TestPool.Begin(ctx)
@@ -78,8 +72,6 @@ func withUniswapV4Tx(t *testing.T, ctx context.Context, fn func(tx pgx.Tx)) {
 	}
 }
 
-// withUniswapV4RollbackTx runs fn in a transaction that is always rolled back,
-// so a failed SaveBlock is observed exactly as the worker would leave it.
 func withUniswapV4RollbackTx(t *testing.T, ctx context.Context, fn func(tx pgx.Tx)) {
 	t.Helper()
 	tx, err := uniswapV4TestPool.Begin(ctx)
@@ -90,8 +82,6 @@ func withUniswapV4RollbackTx(t *testing.T, ctx context.Context, fn func(tx pgx.T
 	fn(tx)
 }
 
-// seedUniswapV4RepoChain registers the synthetic chain a fixture hangs off, so
-// the chain_id FKs on token / protocol / uniswap_v4_pool resolve.
 func seedUniswapV4RepoChain(t *testing.T, ctx context.Context, chainID int) {
 	t.Helper()
 	if _, err := uniswapV4TestPool.Exec(ctx,
@@ -102,8 +92,6 @@ func seedUniswapV4RepoChain(t *testing.T, ctx context.Context, chainID int) {
 	}
 }
 
-// seedUniswapV4RepoToken upserts a token row and returns its id. decimals ==
-// nil inserts SQL NULL, which is what the NULL-decimals rejection test needs.
 func seedUniswapV4RepoToken(t *testing.T, ctx context.Context, chainID int, addr common.Address, symbol string, decimals *int) int64 {
 	t.Helper()
 	seedUniswapV4RepoChain(t, ctx, chainID)
@@ -125,14 +113,11 @@ func seedUniswapV4RepoToken(t *testing.T, ctx context.Context, chainID int, addr
 	return tokenID
 }
 
-// uniswapV4RepoManagerFixture is one version of a chain's PoolManager registry
-// row. buildID drives the append: re-seeding with the same buildID reuses the
-// row's processing_version and is a no-op, a new buildID appends the next
-// version, which is the one LoadPools must pick up.
+// buildID drives the append: re-seeding under the same one is a no-op, a new one
+// appends the next processing_version.
 type uniswapV4RepoManagerFixture struct {
 	chainID int
-	// protocolChainID is the chain the FK'd protocol row is seeded on; 0 means
-	// chainID, the only coherent registry. Setting it elsewhere seeds the
+	// 0 means chainID, the only coherent registry; anything else seeds the
 	// cross-chain PoolManager defect.
 	protocolChainID int
 	manager         common.Address
@@ -150,8 +135,6 @@ func newUniswapV4RepoManagerFixture(chainID int) uniswapV4RepoManagerFixture {
 	}
 }
 
-// seedUniswapV4RepoPoolManager upserts the protocol row plus one version of the
-// chain's uniswap_v4_pool_manager row.
 func seedUniswapV4RepoPoolManager(t *testing.T, ctx context.Context, f uniswapV4RepoManagerFixture) {
 	t.Helper()
 	seedUniswapV4RepoChain(t, ctx, f.chainID)
@@ -187,8 +170,6 @@ func seedUniswapV4RepoPoolManager(t *testing.T, ctx context.Context, f uniswapV4
 	}
 }
 
-// uniswapV4RepoPoolFixture is one version of a registry pool row. buildID has
-// the same append semantics as on uniswapV4RepoManagerFixture.
 type uniswapV4RepoPoolFixture struct {
 	chainID          int
 	poolID           common.Hash
@@ -201,13 +182,10 @@ type uniswapV4RepoPoolFixture struct {
 	hooks            common.Address
 	deployBlock      int64
 	buildID          int
-	// excludeFromSnapshots seeds snapshot_supported = false; the column's own
-	// default is true, which is what every other fixture wants.
+	// Negated: the column defaults to true, which every other fixture wants.
 	excludeFromSnapshots bool
 }
 
-// seedUniswapV4RepoPool appends one pool version and returns the surrogate id
-// of the chain's current version of that PoolKey.
 func seedUniswapV4RepoPool(t *testing.T, ctx context.Context, f uniswapV4RepoPoolFixture) int64 {
 	t.Helper()
 	seedUniswapV4RepoChain(t, ctx, f.chainID)
@@ -238,9 +216,7 @@ func seedUniswapV4RepoPool(t *testing.T, ctx context.Context, f uniswapV4RepoPoo
 	return poolID
 }
 
-// newUniswapV4RepoPoolFixture builds a pool fixture on chainID whose currencies
-// and PoolId are derived from discriminator, so each caller gets a pool of its
-// own without repeating the token seeding.
+// discriminator gives every caller currencies and a PoolId of its own.
 func newUniswapV4RepoPoolFixture(t *testing.T, ctx context.Context, chainID int, discriminator byte) uniswapV4RepoPoolFixture {
 	t.Helper()
 	currency0 := common.Address{0x10, discriminator}
@@ -258,16 +234,12 @@ func newUniswapV4RepoPoolFixture(t *testing.T, ctx context.Context, chainID int,
 	}
 }
 
-// seedUniswapV4RepoTestPool builds a self-contained registry pool on the chain
-// the write-path tests use, keyed by discriminator so each test gets its own.
 func seedUniswapV4RepoTestPool(t *testing.T, ctx context.Context, discriminator byte) int64 {
 	t.Helper()
 	seedUniswapV4RepoPoolManager(t, ctx, newUniswapV4RepoManagerFixture(uniswapV4RepoSaveChainID))
 	return seedUniswapV4RepoPool(t, ctx, newUniswapV4RepoPoolFixture(t, ctx, uniswapV4RepoSaveChainID, discriminator))
 }
 
-// uniswapV4SeedTokenDecimals indexes the seeded token decimals by the bytea
-// literal of the token's address.
 func uniswapV4SeedTokenDecimals() map[string]int {
 	byAddr := make(map[string]int, len(uniswapV4SeedTokens))
 	for _, tok := range uniswapV4SeedTokens {
@@ -449,9 +421,6 @@ func TestUniswapV4Repository_LoadPools_RejectsChainWithPoolsButNoPoolManager(t *
 	}
 }
 
-// TestUniswapV4Repository_LoadPools_ReturnsLatestPoolVersion pins the
-// append-only registry read: a corrected pool is a NEW row with a new surrogate
-// id, and LoadPools must return only that one, never the superseded version.
 func TestUniswapV4Repository_LoadPools_ReturnsLatestPoolVersion(t *testing.T) {
 	ctx := context.Background()
 	seedUniswapV4RepoPoolManager(t, ctx, newUniswapV4RepoManagerFixture(uniswapV4RepoPoolVerChainID))
@@ -490,9 +459,6 @@ func TestUniswapV4Repository_LoadPools_ReturnsLatestPoolVersion(t *testing.T) {
 	}
 }
 
-// TestUniswapV4Repository_LoadPools_UsesLatestPoolManagerVersion covers the
-// other half of the versioned registry: a corrected PoolManager row must
-// re-point every pool on the chain at the new StateView.
 func TestUniswapV4Repository_LoadPools_UsesLatestPoolManagerVersion(t *testing.T) {
 	ctx := context.Background()
 
@@ -817,11 +783,6 @@ func TestUniswapV4Repository_SaveBlock_IdenticalReplayInsertsNothing(t *testing.
 	if got := save(); got.Attempted != 1 || got.Persisted != 1 {
 		t.Errorf("first save = %+v, want {Attempted:1 Persisted:1}", got)
 	}
-	// The replay is the case VectorUniswapV4IndexerNotWritingState must NOT fire
-	// on: the trigger reuses the processing_version, so every INSERT lands on the
-	// identical PK and appends nothing. Persisted therefore drops to zero while
-	// Attempted stays at the row the block really tried to persist — which is why
-	// the alert's right side keys on Attempted.
 	if got := save(); got.Attempted != 1 || got.Persisted != 0 {
 		t.Errorf("replay = %+v, want {Attempted:1 Persisted:0} (ON CONFLICT DO NOTHING appends nothing, but the block still tried)", got)
 	}
@@ -835,8 +796,7 @@ func TestUniswapV4Repository_SaveBlock_IdenticalReplayInsertsNothing(t *testing.
 	}
 }
 
-// uniswapV4BatchedFactTables are the four tables SaveBlock persists through its
-// pgx.Batch; ticks go through the append-on-change writer instead.
+// Ticks are absent: they go through the append-on-change writer, not the batch.
 var uniswapV4BatchedFactTables = []string{
 	"uniswap_v4_pool_state",
 	"uniswap_v4_swap",
@@ -856,10 +816,6 @@ func uniswapV4RowCount(t *testing.T, ctx context.Context, table string, poolID i
 	return count
 }
 
-// TestUniswapV4Repository_SaveBlock_ReorgVersionAppendsAtProcessingVersionZero
-// pins block_version as part of every fact row's identity: the same logical row
-// re-observed on a new fork appends beside the old one at processing_version 0,
-// so a reorg is never mistaken for a correction of the orphaned row.
 func TestUniswapV4Repository_SaveBlock_ReorgVersionAppendsAtProcessingVersionZero(t *testing.T) {
 	ctx := context.Background()
 	poolID := seedUniswapV4RepoTestPool(t, ctx, 0x16)
@@ -886,8 +842,6 @@ func TestUniswapV4Repository_SaveBlock_ReorgVersionAppendsAtProcessingVersionZer
 	}
 }
 
-// uniswapV4RowVersions returns the (block_version, processing_version) pair of
-// every row table holds for the pool at blockNumber, ordered by block_version.
 func uniswapV4RowVersions(t *testing.T, ctx context.Context, table string, poolID int64, blockNumber int64) [][2]int {
 	t.Helper()
 	rows, err := uniswapV4TestPool.Query(ctx, fmt.Sprintf(
@@ -942,10 +896,6 @@ func TestUniswapV4Repository_SaveBlock_NewBuildBumpsProcessingVersion(t *testing
 	}
 }
 
-// pgx hands batch results back positionally, so queueUniswapV4Batch and
-// v4BatchRows.sections() have to queue and drain in the same order. Only the
-// state section is counted, so a transposition shows up as the wrong statement's
-// RowsAffected landing in Persisted.
 func TestUniswapV4Repository_SaveBlock_CountsOnlyTheStateSectionsRows(t *testing.T) {
 	ctx := context.Background()
 	poolID := seedUniswapV4RepoTestPool(t, ctx, 0x1b)
@@ -979,8 +929,6 @@ func TestUniswapV4Repository_SaveBlock_CountsOnlyTheStateSectionsRows(t *testing
 	}
 }
 
-// The other half of the queue-order invariant: a rejected row has to be named by
-// its own section, which a transposed drain gets wrong.
 func TestUniswapV4Repository_SaveBlock_NamesTheRejectedRowsBatchSection(t *testing.T) {
 	ctx := context.Background()
 
@@ -1001,8 +949,7 @@ func TestUniswapV4Repository_SaveBlock_NamesTheRejectedRowsBatchSection(t *testi
 		{
 			name:          "pool_event",
 			discriminator: 0x1d,
-			// SaveBlock never calls Validate, so an unknown name is the
-			// event_name CHECK's to reject.
+			// SaveBlock never calls Validate, so the event_name CHECK rejects this.
 			reject: func(w outbound.UniswapV4BlockWrites) {
 				w.PoolEvents[0].EventName = entity.UniswapV4PoolEventName("bogus")
 			},
@@ -1028,8 +975,6 @@ func TestUniswapV4Repository_SaveBlock_NamesTheRejectedRowsBatchSection(t *testi
 	}
 }
 
-// uniswapV4RowBuilds returns the (processing_version, build_id) pair of every
-// row table holds for the pool at blockNumber, ordered by processing_version.
 func uniswapV4RowBuilds(t *testing.T, ctx context.Context, table string, poolID int64, blockNumber int64) [][2]int {
 	t.Helper()
 	rows, err := uniswapV4TestPool.Query(ctx, fmt.Sprintf(
@@ -1055,8 +1000,6 @@ func uniswapV4RowBuilds(t *testing.T, ctx context.Context, table string, poolID 
 	return builds
 }
 
-// uniswapV4TickFixture owns one test's pool plus the tick save/read helpers, so
-// every append-on-change test starts from rows nothing else can have touched.
 type uniswapV4TickFixture struct {
 	t      *testing.T
 	ctx    context.Context
@@ -1094,8 +1037,6 @@ func (f uniswapV4TickFixture) rowCount(tick int) int {
 	return count
 }
 
-// latestValue reads one value column off the canonical-latest row at tick, the
-// row a consumer asking "what is this tick now" would get.
 func (f uniswapV4TickFixture) latestValue(tick int, column string) string {
 	f.t.Helper()
 	var value string
@@ -1132,9 +1073,6 @@ func TestUniswapV4Repository_WriteTicks_UnchangedValuesDoNotAppend(t *testing.T)
 	}
 }
 
-// TestUniswapV4Repository_WriteTicks_ChangedValueAppends covers every value
-// column: a change in any one of the four must append, or that column's history
-// silently flatlines.
 func TestUniswapV4Repository_WriteTicks_ChangedValueAppends(t *testing.T) {
 	ctx := context.Background()
 
@@ -1181,9 +1119,6 @@ func TestUniswapV4Repository_WriteTicks_ReorgReobservationAppends(t *testing.T) 
 	}
 }
 
-// TestUniswapV4Repository_WriteTicks_SameBlockRedeliveryDoesNotAppend pins the
-// case the block_version gate must still skip: an at-least-once redelivery of
-// the same block at the same version.
 func TestUniswapV4Repository_WriteTicks_SameBlockRedeliveryDoesNotAppend(t *testing.T) {
 	ctx := context.Background()
 	f := newUniswapV4TickFixture(t, ctx, 0x17)
@@ -1196,10 +1131,6 @@ func TestUniswapV4Repository_WriteTicks_SameBlockRedeliveryDoesNotAppend(t *test
 	}
 }
 
-// TestUniswapV4Repository_WriteTicks_LaterIdenticalTouchAfterReorgDoesNotAppend
-// pins that block_version is only comparable within one height: once a reorg
-// has written (N, v1), the next touch at N+k carries v0, and treating that as a
-// re-observation appends a row claiming a change the chain never made.
 func TestUniswapV4Repository_WriteTicks_LaterIdenticalTouchAfterReorgDoesNotAppend(t *testing.T) {
 	ctx := context.Background()
 	f := newUniswapV4TickFixture(t, ctx, 0x18)
@@ -1213,11 +1144,6 @@ func TestUniswapV4Repository_WriteTicks_LaterIdenticalTouchAfterReorgDoesNotAppe
 	}
 }
 
-// TestUniswapV4Repository_WriteTicks_BackfilledGapBlockAppendsBelowNewerRow
-// pins the height bound: the gap backfiller republishes a missed block at
-// block_version 0, under a row a later touch already wrote, and the
-// append-on-change decision has to be made against the tick's state at that
-// height or the missed block leaves a permanent hole.
 func TestUniswapV4Repository_WriteTicks_BackfilledGapBlockAppendsBelowNewerRow(t *testing.T) {
 	ctx := context.Background()
 	f := newUniswapV4TickFixture(t, ctx, 0x19)
@@ -1231,9 +1157,6 @@ func TestUniswapV4Repository_WriteTicks_BackfilledGapBlockAppendsBelowNewerRow(t
 	}
 }
 
-// TestUniswapV4Repository_WriteTicks_MixedBatchSkipsOnlyUnchanged pins that the
-// append-on-change decision is per tick, not per batch: one SaveBlock carrying
-// an unchanged, a changed and a brand-new tick must insert exactly two rows.
 func TestUniswapV4Repository_WriteTicks_MixedBatchSkipsOnlyUnchanged(t *testing.T) {
 	ctx := context.Background()
 	f := newUniswapV4TickFixture(t, ctx, 0x0c)
@@ -1265,9 +1188,6 @@ func TestUniswapV4Repository_WriteTicks_MixedBatchSkipsOnlyUnchanged(t *testing.
 	}
 }
 
-// TestUniswapV4Repository_WriteTicks_RoundTripsExtremeNumerics pins the NUMERIC
-// columns against the widths v4-core really produces: liquidityNet is a signed
-// int128 and feeGrowthOutside is a full uint256.
 func TestUniswapV4Repository_WriteTicks_RoundTripsExtremeNumerics(t *testing.T) {
 	ctx := context.Background()
 	f := newUniswapV4TickFixture(t, ctx, 0x0d)
@@ -1351,9 +1271,7 @@ func TestUniswapV4Repository_TicksForPoolAtBlock_ReturnsDistinctTicksAscending(t
 		newUniswapV4TestTick(poolID, 300, targetBlock, 0, big.NewInt(1)),
 		newUniswapV4TestTick(poolID, -60, targetBlock, 0, big.NewInt(2)),
 	)
-	// A second version of one tick at the same block must be deduplicated.
 	saveTicks(newUniswapV4TestTick(poolID, -60, targetBlock, 1, big.NewInt(3)))
-	// A tick at a different block must not appear.
 	saveTicks(newUniswapV4TestTick(poolID, 900, targetBlock+1, 0, big.NewInt(4)))
 
 	got, err := repo.TicksForPoolAtBlock(ctx, uniswapV4RepoSaveChainID, poolID, targetBlock)
@@ -1365,10 +1283,6 @@ func TestUniswapV4Repository_TicksForPoolAtBlock_ReturnsDistinctTicksAscending(t
 	}
 }
 
-// TestUniswapV4Repository_TicksForPoolAtBlock_ResolvesSupersededPoolForward is
-// the tick-side counterpart of the state read: the reorg path supersedes ticks
-// written under the surrogate a registry correction has since retired, so the
-// read has to resolve through currentUniswapV4PoolCTE like its two siblings.
 func TestUniswapV4Repository_TicksForPoolAtBlock_ResolvesSupersededPoolForward(t *testing.T) {
 	ctx := context.Background()
 	seedUniswapV4RepoPoolManager(t, ctx, newUniswapV4RepoManagerFixture(uniswapV4RepoSupersededChainID))
@@ -1428,10 +1342,6 @@ func TestUniswapV4Repository_TicksForPoolAtBlock_UnknownBlockIsEmpty(t *testing.
 	}
 }
 
-// TestUniswapV4Repository_LoadPools_RejectsNativeCurrencyMappedToZeroSentinel
-// pins the one currency mapping that is silently plausible: address(0) already
-// exists in token as a 0-decimals "no token" row, so accepting it would scale
-// every native-ETH amount by 10^0.
 func TestUniswapV4Repository_LoadPools_RejectsNativeCurrencyMappedToZeroSentinel(t *testing.T) {
 	ctx := context.Background()
 	seedUniswapV4RepoPoolManager(t, ctx, newUniswapV4RepoManagerFixture(uniswapV4RepoNativeChainID))
@@ -1464,9 +1374,8 @@ func TestUniswapV4Repository_LoadPools_RejectsNativeCurrencyMappedToZeroSentinel
 	}
 }
 
-// TestUniswapV4Repository_LoadPools_CarriesTheSnapshotGate keeps an excluded
-// pool in the result: dropping it here would stop its event indexing too, and
-// the service is what decides to skip only its snapshots.
+// An excluded pool stays in the result: dropping it here would stop its event
+// indexing too; the service skips only its snapshots.
 func TestUniswapV4Repository_LoadPools_CarriesTheSnapshotGate(t *testing.T) {
 	ctx := context.Background()
 	seedUniswapV4RepoPoolManager(t, ctx, newUniswapV4RepoManagerFixture(uniswapV4RepoUnsupportedChainID))
@@ -1499,10 +1408,6 @@ func TestUniswapV4Repository_LoadPools_CarriesTheSnapshotGate(t *testing.T) {
 	}
 }
 
-// TestUniswapV4Repository_LoadPools_RejectsCrossChainCurrencyToken pins the
-// port contract against the join that used to enforce it: a currency_token_id
-// pointing at another chain's token row must name the offending pool, never
-// drop it from the result and leave the indexer running one pool short.
 func TestUniswapV4Repository_LoadPools_RejectsCrossChainCurrencyToken(t *testing.T) {
 	ctx := context.Background()
 	seedUniswapV4RepoPoolManager(t, ctx, newUniswapV4RepoManagerFixture(uniswapV4RepoXChainTokenChainID))
@@ -1534,12 +1439,8 @@ func TestUniswapV4Repository_LoadPools_RejectsCrossChainCurrencyToken(t *testing
 	}
 }
 
-// TestUniswapV4Repository_LoadPools_RejectsCrossChainPoolManagerProtocol pins
-// the chain predicate on the PoolManager join. uniswap_v4_pool_manager.protocol_id
-// is a surrogate-id FK with nothing tying it to the row's own chain, so an
-// unscoped join hands back another chain's PoolManager address: state_view stays
-// right, the pod boots clean, and every log is then dropped by the address filter
-// with no error and no metric while all five fact tables stay empty.
+// protocol_id is a surrogate FK with nothing tying it to the row's own chain, so
+// an unscoped join silently hands back another chain's PoolManager address.
 func TestUniswapV4Repository_LoadPools_RejectsCrossChainPoolManagerProtocol(t *testing.T) {
 	ctx := context.Background()
 
@@ -1559,10 +1460,8 @@ func TestUniswapV4Repository_LoadPools_RejectsCrossChainPoolManagerProtocol(t *t
 	}
 }
 
-// TestUniswapV4Repository_LoadPools_RejectsCrossChainProtocolOnNewestManagerVersion
-// closes the fallback the version history opens: an inner join drops the newest
-// manager version whose protocol is off-chain and silently hands back the
-// previous version's StateView, so the defect reads as a clean pool.
+// An inner join would drop the newest manager version and hand back the previous
+// version's StateView, so the defect would read as a clean pool.
 func TestUniswapV4Repository_LoadPools_RejectsCrossChainProtocolOnNewestManagerVersion(t *testing.T) {
 	ctx := context.Background()
 
@@ -1584,9 +1483,6 @@ func TestUniswapV4Repository_LoadPools_RejectsCrossChainProtocolOnNewestManagerV
 	}
 }
 
-// TestUniswapV4Repository_LoadPools_ExcludesOtherChains seeds two chains at
-// once: the chain filter must reach the pools, the PoolManager and the token
-// join alike.
 func TestUniswapV4Repository_LoadPools_ExcludesOtherChains(t *testing.T) {
 	ctx := context.Background()
 
@@ -1620,9 +1516,8 @@ func TestUniswapV4Repository_LoadPools_ExcludesOtherChains(t *testing.T) {
 	}
 }
 
-// TestUniswapV4Repository_SaveBlock_RoundTripsProtocolFeeUpdatedPoolEvent binds
-// the entity's event-name constant to the column CHECK: a rename on either side
-// must fail here rather than at the first real ProtocolFeeUpdated log.
+// Binds the entity's event-name constant to the column CHECK: a rename on either
+// side must fail here, not at the first real ProtocolFeeUpdated log.
 func TestUniswapV4Repository_SaveBlock_RoundTripsProtocolFeeUpdatedPoolEvent(t *testing.T) {
 	ctx := context.Background()
 	poolID := seedUniswapV4RepoTestPool(t, ctx, 0x0f)
@@ -1671,10 +1566,6 @@ func TestUniswapV4Repository_SaveBlock_RoundTripsProtocolFeeUpdatedPoolEvent(t *
 	}
 }
 
-// TestUniswapV4Repository_SaveBlock_NilNumericWritesNothing pins that a
-// conversion failure discovered after the first statements are queued still
-// leaves the block unwritten: the error must reach the caller so its
-// transaction rolls back, never a half-persisted block.
 func TestUniswapV4Repository_SaveBlock_NilNumericWritesNothing(t *testing.T) {
 	ctx := context.Background()
 	poolID := seedUniswapV4RepoTestPool(t, ctx, 0x0e)
@@ -1692,9 +1583,8 @@ func TestUniswapV4Repository_SaveBlock_NilNumericWritesNothing(t *testing.T) {
 			t.Fatal("SaveBlock with a nil liquidity_gross: want error, got nil")
 		}
 
-		// Inside tx, before its rollback: the state row is what makes the
-		// rollback load-bearing. Counting on the pool afterwards reads 0 under
-		// MVCC whatever SaveBlock did, so it pins nothing.
+		// Counting on the pool after the rollback reads 0 under MVCC whatever
+		// SaveBlock did, so the count that pins anything has to run inside tx.
 		if got := uniswapV4TxRowCount(t, ctx, tx, "uniswap_v4_pool_state", poolID, blockNumber); got != 1 {
 			t.Errorf("uniswap_v4_pool_state rows inside the failed transaction = %d, want 1: the batch must already have run when the tick conversion fails", got)
 		}
@@ -1722,9 +1612,6 @@ func uniswapV4TxRowCount(t *testing.T, ctx context.Context, tx pgx.Tx, table str
 	return count
 }
 
-// TestUniswapV4Repository_PoolIDsWithStateAtBlock_ReturnsDistinctPoolsAscending
-// covers the reorg due-set union: only pools with a state row at exactly that
-// height, once each, ascending.
 func TestUniswapV4Repository_PoolIDsWithStateAtBlock_ReturnsDistinctPoolsAscending(t *testing.T) {
 	ctx := context.Background()
 	poolA := seedUniswapV4RepoTestPool(t, ctx, 0x12)
@@ -1764,9 +1651,7 @@ func TestUniswapV4Repository_PoolIDsWithStateAtBlock_ReturnsDistinctPoolsAscendi
 	}
 }
 
-// A worker serves one chain, and the fact table carries no chain_id of its own,
-// so the scope has to come from the registry join; a neighbouring chain's pool
-// at the same height would look like a registry bug to the caller.
+// The fact tables carry no chain_id; the scope comes from the registry join.
 func TestUniswapV4Repository_PoolIDsWithStateAtBlock_ExcludesOtherChains(t *testing.T) {
 	ctx := context.Background()
 	homePool := seedUniswapV4RepoTestPool(t, ctx, 0x13)
@@ -1796,9 +1681,6 @@ func TestUniswapV4Repository_PoolIDsWithStateAtBlock_ExcludesOtherChains(t *test
 	}
 }
 
-// A registry correction mints a new surrogate id while the fact rows keep the
-// old one, so the id handed back must be the CURRENT version for the natural
-// key: the caller's in-memory registry only knows current ids.
 func TestUniswapV4Repository_PoolIDsWithStateAtBlock_ResolvesSupersededPoolForward(t *testing.T) {
 	ctx := context.Background()
 	seedUniswapV4RepoPoolManager(t, ctx, newUniswapV4RepoManagerFixture(uniswapV4RepoSupersededChainID))
@@ -1832,8 +1714,6 @@ func TestUniswapV4Repository_PoolIDsWithStateAtBlock_ResolvesSupersededPoolForwa
 	}
 }
 
-// Without a block_timestamp predicate the reorg read scans every chunk of the
-// hypertable (VEC-541), so the bound has to be live rather than assumed.
 func TestUniswapV4Repository_PoolIDsWithStateAtBlock_BoundsTheScanToTheBlockTimestamp(t *testing.T) {
 	ctx := context.Background()
 	poolID := seedUniswapV4RepoTestPool(t, ctx, 0x16)
@@ -1871,8 +1751,7 @@ func TestUniswapV4Repository_PoolIDsWithStateAtBlock_UnknownBlockIsEmpty(t *test
 	}
 }
 
-// uniswapV4TestBlockTime is the block_timestamp every fixture row at a height
-// carries; PoolIDsWithStateAtBlock bounds its chunk scan around it.
+// PoolIDsWithStateAtBlock bounds its chunk scan around this timestamp.
 func uniswapV4TestBlockTime(blockNumber int64) time.Time {
 	return time.Unix(1740000000+blockNumber, 0).UTC()
 }
@@ -1893,9 +1772,7 @@ func newUniswapV4TestState(poolID int64, blockNumber int64, blockVersion int, ti
 	}
 }
 
-// newUniswapV4TestBlockWrites builds one validated row for each of the four
-// fact hypertables, sharing every key but blockVersion so two calls differ
-// exactly as an original and its reorg re-observation do.
+// Two calls differ only in blockVersion, exactly as a reorg re-observation does.
 func newUniswapV4TestBlockWrites(t *testing.T, poolID int64, blockNumber int64, blockVersion int) outbound.UniswapV4BlockWrites {
 	t.Helper()
 
@@ -1954,8 +1831,6 @@ func newUniswapV4TestPoolEvent(poolID int64, blockNumber int64, blockVersion, lo
 	}
 }
 
-// uniswapV4TickValues holds a tick row's four append-on-change value columns,
-// so a test can vary one of them without restating the other three.
 type uniswapV4TickValues struct {
 	liquidityGross        *big.Int
 	liquidityNet          *big.Int
@@ -1963,8 +1838,7 @@ type uniswapV4TickValues struct {
 	feeGrowthOutside1X128 *big.Int
 }
 
-// defaultUniswapV4TickValues are four distinct values, so a case that mutates
-// one column cannot pass on another column's value.
+// Four distinct values, so a case mutating one column cannot pass on another's.
 func defaultUniswapV4TickValues() uniswapV4TickValues {
 	return uniswapV4TickValues{
 		liquidityGross:        big.NewInt(1000),
@@ -1994,24 +1868,20 @@ func newUniswapV4TestTickWithValues(poolID int64, tick int, blockNumber int64, b
 	}
 }
 
-// containsPoolID reports whether msg names poolID, so an error assertion can
-// require the offending registry row to be identified.
 func containsPoolID(msg string, poolID int64) bool {
 	return strings.Contains(msg, strconv.FormatInt(poolID, 10))
 }
 
-// seedUniswapV4EverIndexedPool builds a registry pool on chainID (with that
-// chain's PoolManager) for the ever-snapshotted reads, which are chain-scoped
-// and unbounded in block range and so need a chain of their own per scenario.
+// The ever-snapshotted reads are unbounded in block range, so each scenario needs
+// a chain of its own.
 func seedUniswapV4EverIndexedPool(t *testing.T, ctx context.Context, chainID int, discriminator byte) int64 {
 	t.Helper()
 	seedUniswapV4RepoPoolManager(t, ctx, newUniswapV4RepoManagerFixture(chainID))
 	return seedUniswapV4RepoPool(t, ctx, newUniswapV4RepoPoolFixture(t, ctx, chainID, discriminator))
 }
 
-// Both tables count, and neither alone is enough: a pool with no initialized
-// ticks writes a state row and no tick rows, while the baseline enumeration of
-// a pool can write tick rows the state snapshot's own row does not distinguish.
+// Neither table alone is enough: a pool with no initialized ticks writes only a
+// state row, and a baseline enumeration can write only tick rows.
 func TestUniswapV4Repository_PoolIDsEverSnapshotted_ReturnsPoolsWithStateOrTickRows(t *testing.T) {
 	ctx := context.Background()
 	const chainID = uniswapV4RepoEverIndexedChainID
@@ -2041,9 +1911,6 @@ func TestUniswapV4Repository_PoolIDsEverSnapshotted_ReturnsPoolsWithStateOrTickR
 	}
 }
 
-// A registry correction mints a new surrogate id while the fact rows keep the
-// old one; the caller only knows current ids, so a pool that WAS indexed under a
-// superseded version must not read back as never indexed.
 func TestUniswapV4Repository_PoolIDsEverSnapshotted_ResolvesSupersededPoolForward(t *testing.T) {
 	ctx := context.Background()
 	const chainID = uniswapV4RepoEverIndexedFwdChID
@@ -2077,9 +1944,6 @@ func TestUniswapV4Repository_PoolIDsEverSnapshotted_ResolvesSupersededPoolForwar
 	}
 }
 
-// The fact tables carry no chain_id, so the scope comes from the registry join;
-// a neighbouring chain's indexed pool would otherwise mask this chain's own
-// never-indexed one.
 func TestUniswapV4Repository_PoolIDsEverSnapshotted_ExcludesOtherChains(t *testing.T) {
 	ctx := context.Background()
 	homePool := seedUniswapV4EverIndexedPool(t, ctx, uniswapV4RepoEverIndexedNbrChID, 0x1b)

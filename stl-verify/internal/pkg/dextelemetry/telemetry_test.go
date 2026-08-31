@@ -324,10 +324,6 @@ func TestRecordStateRows_IncrementsCounter(t *testing.T) {
 	}
 }
 
-// TestRecordStateRowsAttempted_IncrementsCounter pins the no-op-on-zero
-// semantics the not-writing-state rules depend on: those use
-// `A > 0 unless B > 0`, so "nothing was attempted" has to leave the series
-// absent rather than at zero, or the rule can never fire.
 func TestRecordStateRowsAttempted_IncrementsCounter(t *testing.T) {
 	reader := metricsdk.NewManualReader()
 	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
@@ -346,8 +342,8 @@ func TestRecordStateRowsAttempted_IncrementsCounter(t *testing.T) {
 	ctx := context.Background()
 	tel.RecordStateRowsAttempted(ctx, 3)
 	tel.RecordStateRowsAttempted(ctx, 5)
-	tel.RecordStateRowsAttempted(ctx, 0)  // no-op
-	tel.RecordStateRowsAttempted(ctx, -1) // no-op
+	tel.RecordStateRowsAttempted(ctx, 0)
+	tel.RecordStateRowsAttempted(ctx, -1)
 
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(ctx, &rm); err != nil {
@@ -427,10 +423,6 @@ func TestRecordPoolsTouched_AttachesChainLabel(t *testing.T) {
 	}
 }
 
-// A caller-supplied attribute has to reach the datapoint alongside `chain`,
-// never in place of it: uniswap-v4 splits its touches by snapshot_supported so
-// the not-writing-state alert can select one half, while the rules that want
-// both keep aggregating on chain.
 func TestRecordPoolsTouched_KeepsCallerAttributesAlongsideChain(t *testing.T) {
 	reader := metricsdk.NewManualReader()
 	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
@@ -466,8 +458,6 @@ func TestRecordPoolsTouched_KeepsCallerAttributesAlongsideChain(t *testing.T) {
 	}
 }
 
-// readSumFor returns the counter total over the datapoints carrying key=value,
-// and whether any such series exists.
 func readSumFor(t *testing.T, rm *metricdata.ResourceMetrics, name, key, value string) (int64, bool) {
 	t.Helper()
 	for _, sm := range rm.ScopeMetrics {
@@ -544,8 +534,6 @@ func readSingleSumCount(t *testing.T, rm *metricdata.ResourceMetrics, name strin
 	return 0
 }
 
-// newTestTelemetry wires a Telemetry to a ManualReader through the global meter
-// provider, which NewTelemetry resolves at construction.
 func newTestTelemetry(t *testing.T, prefix string, chainID int64) (*Telemetry, *metricsdk.ManualReader) {
 	t.Helper()
 	reader := metricsdk.NewManualReader()
@@ -564,8 +552,6 @@ func newTestTelemetry(t *testing.T, prefix string, chainID int64) (*Telemetry, *
 	return tel, reader
 }
 
-// Unlike the counters, zero is the healthy value here, so the gauge must be
-// recorded even when it is 0 — the alert compares a level, not a rate.
 func TestRecordPoolsNeverIndexed_RecordsZeroAsAValue(t *testing.T) {
 	tel, reader := newTestTelemetry(t, "uniswap_v4", 1)
 	tel.RecordPoolsNeverIndexed(context.Background(), 0)
@@ -595,7 +581,7 @@ func TestRecordPoolsNeverIndexed_ReportsTheLatestValue(t *testing.T) {
 }
 
 func TestRecordPoolsNeverIndexed_AttachesChainLabel(t *testing.T) {
-	tel, reader := newTestTelemetry(t, "uniswap_v4", 8453) // base
+	tel, reader := newTestTelemetry(t, "uniswap_v4", 8453)
 	tel.RecordPoolsNeverIndexed(context.Background(), 2)
 
 	var rm metricdata.ResourceMetrics

@@ -28,17 +28,11 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
-// fakeUniswapRepo records the writes SaveBlock received; ignores the pgx.Tx
-// (nil is fine). err, when set, makes SaveBlock fail so tests can exercise the
-// failed-persist path (baseline/tracker must not be marked).
 type fakeUniswapRepo struct {
 	lastWrites     outbound.UniswapV4BlockWrites
 	saveBlockCalls int
-	// stateRowsReturn overrides SaveBlock's PERSISTED row count when non-nil;
-	// the attempted count always follows the write set, as the real repository's
-	// does. A pointer, not a plain int64, so a test can stage the idempotent
-	// ON CONFLICT DO NOTHING replay — an explicit 0 — which a zero-valued int64
-	// could not express.
+	// Overrides the PERSISTED count only; a pointer so a test can stage an
+	// explicit 0, the ON CONFLICT DO NOTHING replay.
 	stateRowsReturn *int64
 	err             error
 
@@ -61,8 +55,6 @@ type fakePoolBlockKey struct {
 	blockNumber int64
 }
 
-// fakeStateBlockKey records the full scope PoolIDsWithStateAtBlock is called
-// with, so a test can pin the chain and the chunk-bounding timestamp.
 type fakeStateBlockKey struct {
 	chainID     int64
 	blockNumber int64
@@ -115,9 +107,6 @@ func (r *fakeUniswapRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.Unis
 	return counts, nil
 }
 
-// fakeEventRepo counts saved events, satisfying outbound.EventRepository. err,
-// when set, makes SaveBatch fail so tests can exercise the persist path where
-// the typed write succeeds but the captured-events write does not.
 type fakeEventRepo struct {
 	events []*entity.ProtocolEvent
 	err    error
@@ -136,8 +125,6 @@ func (r *fakeEventRepo) SaveBatch(_ context.Context, _ pgx.Tx, evts []*entity.Pr
 	return nil
 }
 
-// countingTxManager delegates to fn but counts invocations, so tests can assert
-// whether a transaction was opened at all.
 type countingTxManager struct {
 	calls int
 }
@@ -147,10 +134,6 @@ func (m *countingTxManager) WithTransaction(_ context.Context, fn func(pgx.Tx) e
 	return fn(nil)
 }
 
-// recordingMulticaller serves canned results for the state batch, the
-// touched-tick batch, and the baseline bitmap scan, disambiguating a batch by
-// its first call's selector. It records how many times each kind of batch ran
-// so tests can assert exactly-once baseline reads and no-RPC-on-quiet-block.
 type recordingMulticaller struct {
 	stateResults    []outbound.Result
 	tickResults     map[int32]outbound.Result
@@ -204,8 +187,6 @@ func (m *recordingMulticaller) ExecuteAtHash(_ context.Context, calls []outbound
 	}
 }
 
-// batchKind names the StateView method a batch is calling, by matching its
-// first call's 4-byte selector.
 func (m *recordingMulticaller) batchKind(calls []outbound.Call) (string, error) {
 	if len(calls) == 0 || len(calls[0].CallData) < 4 {
 		return "", fmt.Errorf("test stub: call data too short to carry a selector")
@@ -281,9 +262,7 @@ func (m *recordingMulticaller) tickBitmapResults(calls []outbound.Call) ([]outbo
 
 func (m *recordingMulticaller) Address() common.Address { return common.Address{} }
 
-// assertPinnedTo requires every read issued since the previous call to have been
-// pinned to want, and drains the record so the next block can be checked on its
-// own. A read answered at any other hash would silently mix forks.
+// Drains the recorded hashes, so each block is checked on its own.
 func assertPinnedTo(t *testing.T, mc *recordingMulticaller, want common.Hash) {
 	t.Helper()
 	got := mc.pinnedHashes
@@ -302,15 +281,12 @@ const testChainID = int64(1)
 
 const (
 	wbtcAddress = "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"
-	// Mainnet WBTC/wstETH pools; their PoolIds really are the keccak of these
-	// keys, so the service constructor's ValidatePoolKeys gate is exercised for
-	// real rather than bypassed by a synthetic hash.
+	// Real mainnet WBTC/wstETH keys whose PoolIds really are their
+	// keccak, so the constructor's ValidatePoolKeys gate runs for real.
 	wbtcWstethPoolID     = "0x58299b9ad89104f189f5efcdf4910615cb9e3296afb0c5a1d1d3befdd1bf7ae4"
 	wbtcWstethLowFeePool = "0xef3a1d51982c20ee2f125e6d6d1f9d3a10c1e94391b828040943005a1ea27e14"
 )
 
-// servicePool is the primary fixture pool: WBTC/wstETH 0.25%, tickSpacing 50,
-// deployed at block 100.
 func servicePool() RegisteredPool {
 	return RegisteredPool{
 		ID:                7,
@@ -328,9 +304,7 @@ func servicePool() RegisteredPool {
 	}
 }
 
-// dynamicFeeServicePool is servicePool's key at the dynamic-LP-fee sentinel and
-// therefore excluded from snapshots. Its PoolId is computed rather than
-// transcribed: no mainnet pool carries this exact key.
+// PoolId computed, not transcribed: no mainnet pool carries this exact key.
 func dynamicFeeServicePool(t *testing.T) RegisteredPool {
 	t.Helper()
 	pool := servicePool()
@@ -345,8 +319,6 @@ func dynamicFeeServicePool(t *testing.T) RegisteredPool {
 	return pool
 }
 
-// secondServicePool is the same pair at 0.3% / tickSpacing 60, so a single
-// receipt can touch two tracked pools of one PoolManager.
 func secondServicePool() RegisteredPool {
 	pool := servicePool()
 	pool.ID = 8
@@ -356,8 +328,6 @@ func secondServicePool() RegisteredPool {
 	return pool
 }
 
-// blockEvent builds a minimal outbound.BlockEvent with a non-zero block hash so
-// the suite exercises the real hash-pinned read path.
 func blockEvent(bn int64) outbound.BlockEvent {
 	return outbound.BlockEvent{
 		ChainID:        testChainID,
@@ -368,8 +338,6 @@ func blockEvent(bn int64) outbound.BlockEvent {
 	}
 }
 
-// swapLog builds a Swap log for pool, using the real PoolManager ABI so
-// DecodeEvents can decode it.
 func swapLog(t *testing.T, pool RegisteredPool, logIndexHex string) shared.Log {
 	t.Helper()
 	log := buildLog(t, "Swap",
@@ -380,7 +348,6 @@ func swapLog(t *testing.T, pool RegisteredPool, logIndexHex string) shared.Log {
 	return log
 }
 
-// modifyLog builds a ModifyLiquidity log for pool over the given tick range.
 func modifyLog(t *testing.T, pool RegisteredPool, logIndexHex string, tickLower, tickUpper, liquidityDelta int64) shared.Log {
 	t.Helper()
 	log := buildLog(t, "ModifyLiquidity",
@@ -391,9 +358,6 @@ func modifyLog(t *testing.T, pool RegisteredPool, logIndexHex string, tickLower,
 	return log
 }
 
-// donateLog builds a Donate log: a third decoded-event kind (a low-frequency
-// pool event) so the mixed-events test exercises all three DecodedEvents
-// buckets routing into BlockWrites and the capture net.
 func donateLog(t *testing.T, pool RegisteredPool, logIndexHex string) shared.Log {
 	t.Helper()
 	log := buildLog(t, "Donate",
@@ -411,8 +375,6 @@ func goodTickResult(t *testing.T) outbound.Result {
 
 func testLogger() *slog.Logger { return slog.New(slog.NewTextHandler(os.Stderr, nil)) }
 
-// validServiceDeps returns a fully-wired dependency set over pools, with the
-// fakes a test needs to assert on.
 func validServiceDeps(t *testing.T, pools []RegisteredPool) (UniswapV4ServiceDeps, *fakeUniswapRepo, *recordingMulticaller, *countingTxManager) {
 	t.Helper()
 	mc := &recordingMulticaller{
@@ -443,10 +405,6 @@ func newTestService(t *testing.T, pools ...RegisteredPool) (*UniswapV4Service, *
 	return svc, repo, mc, txMgr
 }
 
-// TestNewUniswapV4Service_NamesPoolsExcludedFromSnapshots covers the blind spot
-// left by the never-indexed gauge: an excluded pool cannot reach it, and its
-// touches land under snapshot_supported="false" where no alert looks, so boot
-// is the only place its identity is ever stated.
 func TestNewUniswapV4Service_NamesPoolsExcludedFromSnapshots(t *testing.T) {
 	excluded := dynamicFeeServicePool(t)
 	deps, _, _, _ := validServiceDeps(t, []RegisteredPool{servicePool(), excluded})
@@ -540,9 +498,6 @@ func TestNewUniswapV4Service_RejectsInvalidDeps(t *testing.T) {
 	}
 }
 
-// A dynamic-fee pool is schema-legal and its fee is hashed into its PoolId, so
-// refusing to boot on one would be an unrepairable CrashLoop; the registry
-// excludes it from snapshots instead.
 func TestNewUniswapV4Service_AcceptsDynamicFeePool(t *testing.T) {
 	deps, _, _, _ := validServiceDeps(t, []RegisteredPool{dynamicFeeServicePool(t)})
 	if _, err := NewUniswapV4Service(context.Background(), deps); err != nil {
@@ -550,9 +505,6 @@ func TestNewUniswapV4Service_AcceptsDynamicFeePool(t *testing.T) {
 	}
 }
 
-// TestBlockHandler_UnsnapshottablePoolPersistsEventsWithoutState pins the other
-// half of the curated gate: excluding a pool from snapshots must not exclude it
-// from event indexing, and must issue no chain read at all.
 func TestBlockHandler_UnsnapshottablePoolPersistsEventsWithoutState(t *testing.T) {
 	pool := dynamicFeeServicePool(t)
 	svc, repo, mc, txMgr := newTestService(t, pool)
@@ -580,9 +532,6 @@ func TestBlockHandler_UnsnapshottablePoolPersistsEventsWithoutState(t *testing.T
 	}
 }
 
-// An absent BlockTimestamp is not the zero time, so it would pass every
-// downstream IsZero() guard and file the whole block in a 1970 chunk — acked,
-// invisible, and only repairable by a backfill.
 func TestBlockHandler_MissingBlockTimestamp_ErrorsWithoutPersisting(t *testing.T) {
 	pool := servicePool()
 	svc, repo, mc, txMgr := newTestService(t, pool)
@@ -637,15 +586,11 @@ func TestBlockHandler_MixedEventsPersistsBlockWrites(t *testing.T) {
 	if len(w.PoolEvents) != 1 {
 		t.Errorf("PoolEvents = %d, want 1", len(w.PoolEvents))
 	}
-	// The ModifyLiquidity bounds; the first-touch baseline scan reports no
-	// additional initialized ticks in this fixture.
 	if len(w.Ticks) != 2 {
 		t.Errorf("Ticks = %d, want 2 (the modify event's bounds)", len(w.Ticks))
 	}
 }
 
-// TestBlockHandler_CapturesEveryDecodedLog checks the capture net mirrors all
-// three decoded logs into protocol_event.
 func TestBlockHandler_CapturesEveryDecodedLog(t *testing.T) {
 	pool := servicePool()
 	deps, _, mc, _ := validServiceDeps(t, []RegisteredPool{pool})
@@ -672,9 +617,6 @@ func TestBlockHandler_CapturesEveryDecodedLog(t *testing.T) {
 	}
 }
 
-// TestBlockHandler_MultiPoolReceiptDecodesEveryTouchedPool verifies a single
-// receipt carrying logs for TWO tracked PoolIds decodes and snapshots both:
-// with a singleton emitter this is the ordinary case, not an edge case.
 func TestBlockHandler_MultiPoolReceiptDecodesEveryTouchedPool(t *testing.T) {
 	poolA := servicePool()
 	poolB := secondServicePool()
@@ -706,9 +648,6 @@ func TestBlockHandler_MultiPoolReceiptDecodesEveryTouchedPool(t *testing.T) {
 	}
 }
 
-// TestBlockHandler_QuietBlock_NoTransaction covers the two shapes of block the
-// indexer must leave no trace of: a PoolManager log for a PoolId outside the
-// registry, and a V4-looking log from another contract entirely.
 func TestBlockHandler_QuietBlock_NoTransaction(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -882,8 +821,6 @@ func TestBlockHandler_ReadFailures_NoPersist(t *testing.T) {
 	}
 }
 
-// truncatingTickMulticaller drops the last result of any getTickInfo batch,
-// simulating a provider returning fewer results than requested.
 type truncatingTickMulticaller struct {
 	*recordingMulticaller
 }
@@ -971,9 +908,6 @@ func TestBlockHandler_FirstTouchReadsBaselineTicksOnce(t *testing.T) {
 	}
 }
 
-// TestBlockHandler_BaselineTicksArePersisted proves the first-touch enumeration
-// is written, not merely read: a bitmap word with a set bit must become a tick
-// row even though this block's events did not touch that tick.
 func TestBlockHandler_BaselineTicksArePersisted(t *testing.T) {
 	pool := servicePool()
 	svc, repo, mc, _ := newTestService(t, pool)
@@ -1000,10 +934,6 @@ func TestBlockHandler_BaselineTicksArePersisted(t *testing.T) {
 	}
 }
 
-// TestBlockHandler_BaselineOverlappingTouchedTickIsWrittenOnce guards the
-// first-touch union: a tick that is both a modify bound and already set in the
-// bitmap must produce one row, not a duplicate the append-on-change writer
-// would have to reconcile.
 func TestBlockHandler_BaselineOverlappingTouchedTickIsWrittenOnce(t *testing.T) {
 	pool := servicePool()
 	svc, repo, mc, _ := newTestService(t, pool)
@@ -1060,8 +990,6 @@ func TestBlockHandler_SwapOnlyTouchAfterBaselined_NoTickRead(t *testing.T) {
 	}
 }
 
-// TestBlockHandler_ZeroDeltaModifyReadsNoTicks pins the poke rule end-to-end: a
-// zero-delta ModifyLiquidity still writes its event row, but reads no ticks.
 func TestBlockHandler_ZeroDeltaModifyReadsNoTicks(t *testing.T) {
 	pool := servicePool()
 	svc, repo, mc, _ := newTestService(t, pool)
@@ -1204,10 +1132,6 @@ func TestBlockHandler_ReorgRedelivery_RereadsPriorVersionTicks(t *testing.T) {
 	}
 }
 
-// TestBlockHandler_ReorgAfterRestart_ResnapshotsPoolsWithStateAtThatBlock pins
-// the half of reorg reconciliation the in-memory tracker cannot cover: a fresh
-// process redelivered block N at v1 has no record of the orphaned fork, so the
-// due set has to come from the rows already persisted at that height.
 func TestBlockHandler_ReorgAfterRestart_ResnapshotsPoolsWithStateAtThatBlock(t *testing.T) {
 	pool := servicePool()
 	svc, repo, mc, txMgr := newTestService(t, pool)
@@ -1242,10 +1166,6 @@ func TestBlockHandler_ReorgAfterRestart_ResnapshotsPoolsWithStateAtThatBlock(t *
 	}
 }
 
-// TestBlockHandler_ReorgPriorStateBelowDeployBlock_Errors covers the other
-// registry contradiction the restart path can meet: the id came from rows that
-// provably exist at this height, so a deploy block above it is a registry bug,
-// not the ordinary "nothing to read yet" that DueSet's deploy gate covers.
 func TestBlockHandler_ReorgPriorStateBelowDeployBlock_Errors(t *testing.T) {
 	pool := servicePool()
 	pool.DeployBlock = 500
@@ -1266,11 +1186,6 @@ func TestBlockHandler_ReorgPriorStateBelowDeployBlock_Errors(t *testing.T) {
 	}
 }
 
-// TestBlockHandler_ReorgWithUnregisteredPriorState_Errors keeps the registry
-// authoritative: the repository already resolves prior-state ids forward to
-// their current version on this chain, so an id the registry still does not
-// name is a genuine registry bug, and guessing past it would leave the orphaned
-// fork canonical.
 func TestBlockHandler_ReorgWithUnregisteredPriorState_Errors(t *testing.T) {
 	pool := servicePool()
 	svc, repo, _, txMgr := newTestService(t, pool)
@@ -1290,11 +1205,6 @@ func TestBlockHandler_ReorgWithUnregisteredPriorState_Errors(t *testing.T) {
 	}
 }
 
-// TestBlockHandler_ReorgReReadOfOrphanedPool_PersistsZeroStateTombstone pins the
-// counterpart of the tick path's zeroed re-read: a pool whose Initialize the
-// reorg orphaned answers all zeros through StateView, and that row has to
-// persist to supersede the orphaned fork's snapshot. Refusing it would stall
-// the block forever on redelivery.
 func TestBlockHandler_ReorgReReadOfOrphanedPool_PersistsZeroStateTombstone(t *testing.T) {
 	pool := servicePool()
 	svc, repo, mc, txMgr := newTestService(t, pool)
@@ -1343,9 +1253,6 @@ func TestBlockHandler_ReorgPriorStateReadError_NoPersist(t *testing.T) {
 	}
 }
 
-// TestBlockHandler_GovernanceOnlyBlockPersistsCapturedLogsOnly covers a block
-// touching no pool: the singleton's non-pool-keyed logs still have to reach
-// protocol_event, and nothing may be read from the chain.
 func TestBlockHandler_GovernanceOnlyBlockPersistsCapturedLogsOnly(t *testing.T) {
 	pool := servicePool()
 	deps, repo, mc, txMgr := validServiceDeps(t, []RegisteredPool{pool})
@@ -1382,9 +1289,6 @@ func TestBlockHandler_GovernanceOnlyBlockPersistsCapturedLogsOnly(t *testing.T) 
 	}
 }
 
-// TestBlockHandler_BaselineAboveTicksPerCallIsChunked pins the tick-read
-// batching: a dense pool's first touch must be split into bounded multicalls
-// and reassembled without losing or duplicating a tick.
 func TestBlockHandler_BaselineAboveTicksPerCallIsChunked(t *testing.T) {
 	pool := servicePool()
 	svc, repo, mc, _ := newTestService(t, pool)
@@ -1431,11 +1335,8 @@ func TestBlockHandler_BaselineAboveTicksPerCallIsChunked(t *testing.T) {
 	}
 }
 
-// newTelemetryDeps builds a dependency set wired to a REAL
-// dextelemetry.Telemetry (the rest of the suite passes nil, making every
-// Record* call a no-op) plus the ManualReader that collects it. Tests that need
-// the repo staged BEFORE construction — the boot-time reads — use this and
-// construct the service themselves.
+// Wires a REAL dextelemetry.Telemetry plus the ManualReader collecting it;
+// elsewhere the suite passes nil, making every Record* call a no-op.
 func newTelemetryDeps(t *testing.T, pools []RegisteredPool) (UniswapV4ServiceDeps, *fakeUniswapRepo, *metricsdk.ManualReader) {
 	t.Helper()
 
@@ -1470,10 +1371,8 @@ func newTelemetryService(t *testing.T, pools []RegisteredPool) (*UniswapV4Servic
 	return svc, repo, reader
 }
 
-// sumCounter returns the counter value for name, and whether the metric exists
-// at all. Absent and zero are different states: RecordStateRows/RecordPoolsTouched
-// no-op for n<=0, which is what makes the alerts' `A > 0 unless B > 0` shape
-// necessary.
+// The bool reports whether the metric exists at all: Record* no-ops for n<=0,
+// so absent and zero are different states the alerts distinguish.
 func sumCounter(t *testing.T, rm *metricdata.ResourceMetrics, name string) (int64, bool) {
 	t.Helper()
 	for _, sm := range rm.ScopeMetrics {
@@ -1495,10 +1394,6 @@ func sumCounter(t *testing.T, rm *metricdata.ResourceMetrics, name string) (int6
 	return 0, false
 }
 
-// sumCounterFor is sumCounter narrowed to the datapoints carrying key=value,
-// and whether any such series exists at all. The not-writing-state alert
-// selects on snapshot_supported, so "only excluded pools were touched" has to
-// be observable as an absent series rather than a zero.
 func sumCounterFor(t *testing.T, rm *metricdata.ResourceMetrics, name, key, value string) (int64, bool) {
 	t.Helper()
 	for _, sm := range rm.ScopeMetrics {
@@ -1551,10 +1446,6 @@ func TestBlockHandler_RecordsStateRowsAndPoolsTouched(t *testing.T) {
 	}
 }
 
-// TestBlockHandler_RecordsPoolsTouchedOnZeroRowReplay pins the invariant the
-// not-writing-state alert is built on: on an idempotent replay (0 state rows) a
-// block that touched a pool must still advance pools_touched, or the alert's
-// activity gate goes quiet in exactly the case it exists to detect.
 func TestBlockHandler_RecordsPoolsTouchedOnZeroRowReplay(t *testing.T) {
 	pool := servicePool()
 	svc, repo, reader := newTelemetryService(t, []RegisteredPool{pool})
@@ -1580,22 +1471,13 @@ func TestBlockHandler_RecordsPoolsTouchedOnZeroRowReplay(t *testing.T) {
 	}
 }
 
-// TestBlockHandler_RecordsStateRowsAttemptedOnZeroRowReplay pins the right side
-// of VectorUniswapV4IndexerNotWritingState. On a replay of an already-committed
-// range under one build_id the assign_processing_version trigger reuses the
-// existing processing_version, so every state INSERT lands on the identical PK,
-// hits ON CONFLICT DO NOTHING and appends nothing: state.rows.written stays
-// absent on a block that is perfectly healthy and has nothing to fix.
-// state.rows.attempted counts the state rows the block queued instead, so it
-// advances on that replay and keeps the alert silent — while still collapsing
-// to absent under every bug the alert exists for (snapshotDueSet no-opping,
-// buildBlockWrites dropping the states, dueSetForBlock going empty), none of
-// which queue anything.
+// A replay under one build_id reuses its processing_version: every state INSERT
+// hits ON CONFLICT DO NOTHING, so rows.written goes absent on a healthy block.
 func TestBlockHandler_RecordsStateRowsAttemptedOnZeroRowReplay(t *testing.T) {
 	pool := servicePool()
 	svc, repo, reader := newTelemetryService(t, []RegisteredPool{pool})
 
-	var zero int64 // the replay: every state INSERT hit ON CONFLICT DO NOTHING
+	var zero int64
 	repo.stateRowsReturn = &zero
 
 	receipt := shared.TransactionReceipt{Logs: []shared.Log{swapLog(t, pool, "0x0")}}
@@ -1611,18 +1493,11 @@ func TestBlockHandler_RecordsStateRowsAttemptedOnZeroRowReplay(t *testing.T) {
 	if attempted != 1 {
 		t.Errorf("uniswap_v4.state.rows.attempted = %d, want 1 (the block queued one state row)", attempted)
 	}
-	// The other half: written really did stay at zero, so this stages the old
-	// rule's firing condition and not a healthy block.
 	if rows, ok := sumCounter(t, rm, "uniswap_v4.state.rows.written"); ok {
 		t.Errorf("uniswap_v4.state.rows.written = %d, want the counter to be absent (0 rows inserted is a no-op)", rows)
 	}
 }
 
-// TestBlockHandler_PoolsTouchedCountsTouchedNotDue pins pools_touched to the
-// decode-stage touched set rather than the due set: on a reorg redelivery
-// DueSet re-snapshots a pool the new fork never touched, so sourcing the gate
-// from dueSet would over-count here and collapse to zero under the
-// always-empty-DueSet bug the alert targets.
 func TestBlockHandler_PoolsTouchedCountsTouchedNotDue(t *testing.T) {
 	pool := servicePool()
 	svc, _, reader := newTelemetryService(t, []RegisteredPool{pool})
@@ -1644,12 +1519,6 @@ func TestBlockHandler_PoolsTouchedCountsTouchedNotDue(t *testing.T) {
 	}
 }
 
-// A pool the registry excludes from snapshots writes no state row by design, so
-// a block whose only touch is one of them must record under
-// snapshot_supported="false" alone: the absent "true" series is what keeps
-// VectorUniswapV4IndexerNotWritingState un-fireable, and the present "false"
-// one is what still feeds VectorUniswapV4IndexerNoPoolsTouched, which
-// aggregates the label away.
 func TestBlockHandler_ExcludedPoolTouchRecordsOnlyTheUnsupportedSeries(t *testing.T) {
 	pool := dynamicFeeServicePool(t)
 	svc, _, reader := newTelemetryService(t, []RegisteredPool{pool})
@@ -1704,9 +1573,6 @@ func TestBlockHandler_RecordsErrorsAtTheBoundary(t *testing.T) {
 	}
 }
 
-// gaugeValue returns the gauge value for name, and whether the metric exists at
-// all. Absent and zero are different states: the never-indexed alert must be
-// able to distinguish "nothing to report" from "the gauge was never emitted".
 func gaugeValue(t *testing.T, rm *metricdata.ResourceMetrics, name string) (int64, bool) {
 	t.Helper()
 	for _, sm := range rm.ScopeMetrics {
@@ -1727,9 +1593,6 @@ func gaugeValue(t *testing.T, rm *metricdata.ResourceMetrics, name string) (int6
 	return 0, false
 }
 
-// A mis-seeded pool key is self-consistent, so it passes ValidatePoolKeys, boots
-// green, and then never matches a log — invisible unless the worker reports, per
-// pool, whether it has ever produced a row.
 func TestNewUniswapV4Service_CountsPoolsNeverIndexedAtBoot(t *testing.T) {
 	indexed, never := servicePool(), secondServicePool()
 	deps, repo, reader := newTelemetryDeps(t, []RegisteredPool{indexed, never})
@@ -1748,8 +1611,6 @@ func TestNewUniswapV4Service_CountsPoolsNeverIndexedAtBoot(t *testing.T) {
 	}
 }
 
-// A pool the registry excludes from snapshots can never produce a state or tick
-// row by design, so counting it would leave the alert firing forever.
 func TestNewUniswapV4Service_ExcludesUnsnapshottablePoolsFromNeverIndexed(t *testing.T) {
 	deps, repo, reader := newTelemetryDeps(t, []RegisteredPool{servicePool(), dynamicFeeServicePool(t)})
 	repo.everSnapshotted = []int64{servicePool().ID}
@@ -1795,9 +1656,8 @@ func TestBlockHandler_FailedPersistKeepsPoolNeverIndexed(t *testing.T) {
 	}
 }
 
-// Baseline enumeration costs a full tick-bitmap scan per pool. baselineSeen is
-// in-memory, so without a boot seed every rollout re-enumerates every pool and
-// spikes uniswap_v4_block_duration_seconds past the 3s p99 alert.
+// baselineSeen is in-memory: without this boot seed every rollout re-enumerates
+// every pool's bitmap and pushes block duration past the 3s p99 alert.
 func TestNewUniswapV4Service_SeedsBaselineFromPersistedRows(t *testing.T) {
 	pool := servicePool()
 	deps, repo, mc, _ := validServiceDeps(t, []RegisteredPool{pool})
@@ -1817,8 +1677,6 @@ func TestNewUniswapV4Service_SeedsBaselineFromPersistedRows(t *testing.T) {
 	}
 }
 
-// A boot read that fails must stop the worker: a silently empty result would
-// re-baseline every pool and report every pool as never indexed.
 func TestNewUniswapV4Service_RejectsFailedEverSnapshottedRead(t *testing.T) {
 	deps, repo, _, _ := validServiceDeps(t, []RegisteredPool{servicePool()})
 	repo.everSnapshottedErr = fmt.Errorf("connection refused")
@@ -1832,8 +1690,6 @@ func TestNewUniswapV4Service_RejectsFailedEverSnapshottedRead(t *testing.T) {
 	}
 }
 
-// A boot read scoped to the wrong chain would return another chain's pools,
-// silently marking this chain's as already baselined and already indexed.
 func TestNewUniswapV4Service_ReadsEverSnapshottedForItsOwnChain(t *testing.T) {
 	deps, repo, _, _ := validServiceDeps(t, []RegisteredPool{servicePool()})
 

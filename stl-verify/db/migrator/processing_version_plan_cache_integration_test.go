@@ -30,9 +30,8 @@ type processingVersionTriggerFunction struct {
 	volatility string
 }
 
-// Every assign_processing_version_* function must carry the setting, no exemptions: without it the
-// function's per-row lookup goes generic, stops pruning chunks, and insert cost scales with the
-// table's total chunk count.
+// Every assign_processing_version_* function must carry the setting: without it the per-row lookup
+// goes generic, stops pruning chunks, and insert cost scales with the table's total chunk count.
 func TestProcessingVersionTriggersForceCustomPlan(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)

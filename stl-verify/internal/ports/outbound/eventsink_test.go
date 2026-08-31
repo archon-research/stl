@@ -88,8 +88,6 @@ func TestBlockEvent_BlockTime(t *testing.T) {
 			wantUnix: 1740000000,
 		},
 		{
-			// time.Unix(0, 0) is not the zero Time, so an IsZero() guard downstream
-			// waves it through and files the whole block in a 1970 chunk.
 			name:            "absent timestamp fails hard rather than becoming 1970",
 			event:           BlockEvent{BlockNumber: 100, Version: 0, BlockTimestamp: 0},
 			wantErr:         true,

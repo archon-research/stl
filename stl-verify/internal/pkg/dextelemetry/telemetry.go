@@ -1,9 +1,5 @@
-// Package dextelemetry exposes a small per-worker OpenTelemetry helper shared
-// by the DEX SQS workers the dex-indexer binary can run (curve, uniswap-v3,
-// uniswap-v4). The metric prefix is a parameter so one implementation serves
-// every DEX; names follow the `<prefix>_blocks_processed_total` /
-// `<prefix>_errors_total` convention the rules in alerts/vector-indexers.yaml
-// are written against.
+// Package dextelemetry emits per-worker DEX metrics under a caller-supplied
+// prefix, named for the rules in alerts/vector-indexers.yaml.
 package dextelemetry
 
 import (
@@ -38,19 +34,9 @@ type Telemetry struct {
 	poolsNeverIndexed  metric.Int64Gauge
 }
 
-// NewTelemetry registers five counters (`<prefix>.blocks.processed`,
-// `<prefix>.errors.total`, `<prefix>.state.rows.written`,
-// `<prefix>.state.rows.attempted`, `<prefix>.pools.touched`), the
-// `<prefix>.block.duration_seconds` histogram, and the
-// `<prefix>.pools.never_indexed` gauge. Every DEX gets the whole set;
-// an instrument a worker never records simply produces no series. The
-// OTel-to-Prometheus exporter normalises the dots to underscores and adds the
-// `_total` suffix to the counters, yielding the metric series names the alert
-// rules expect. The chain NAME (via entity.ChainName) is baked into
-// every datapoint as the `chain` attribute so multi-chain dashboards line up
-// with the morpho/oracle indexers, which label the same way. An unknown chainID
-// is rejected so a worker fails hard at startup rather than emitting an empty or
-// mismatched `chain` label.
+// NewTelemetry registers the whole instrument set for one DEX; the
+// OTel-to-Prometheus exporter normalises the dots to underscores and adds
+// `_total`, yielding the series names the alert rules select.
 func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 	if prefix == "" {
 		return nil, fmt.Errorf("dextelemetry.NewTelemetry: prefix must be non-empty")
@@ -167,10 +153,8 @@ func (t *Telemetry) RecordError(ctx context.Context, operation string, err error
 	))
 }
 
-// RecordStateRows increments state_rows_written_total by n, the number of state
-// snapshot rows a block actually appended. Volume observability: it answers
-// "how much did this worker add", and an idempotent replay legitimately adds
-// nothing. Nil receiver or n <= 0 are no-ops.
+// RecordStateRows counts rows a block actually appended; an idempotent replay
+// legitimately appends none.
 func (t *Telemetry) RecordStateRows(ctx context.Context, n int) {
 	if t == nil || n <= 0 {
 		return
@@ -178,21 +162,9 @@ func (t *Telemetry) RecordStateRows(ctx context.Context, n int) {
 	t.stateRowsWritten.Add(ctx, int64(n), metric.WithAttributes(t.chainAttr))
 }
 
-// RecordStateRowsAttempted increments state_rows_attempted_total by n, the
-// number of state snapshot rows a block QUEUED for insert — rows that
-// conflicted away included. It is the health signal every DEX worker's
-// not-writing-state alert keys on, and it is deliberately not the same question
-// as RecordStateRows: replaying an already-committed range under one build_id
-// reuses the processing_version, so every INSERT hits ON CONFLICT DO NOTHING
-// and writes nothing while the worker is perfectly healthy. A conflict under
-// that primary key means the identical row is already in the table, so zero
-// written is provably not a data hole; zero ATTEMPTED, by contrast, is exactly
-// what every bug those alerts exist for produces (an empty due set, a
-// no-opping snapshot step, a dropped write set).
-//
-// n <= 0 is a no-op, matching RecordStateRows: the rules use
-// `A > 0 unless B > 0` so the series must stay absent, not zero, when nothing
-// was attempted. Nil receiver is a no-op too.
+// RecordStateRowsAttempted counts rows queued for insert, conflicts included:
+// a replay reusing one processing_version writes nothing while healthy, so the
+// not-writing-state alerts key on attempted, never on written.
 func (t *Telemetry) RecordStateRowsAttempted(ctx context.Context, n int) {
 	if t == nil || n <= 0 {
 		return
@@ -200,26 +172,9 @@ func (t *Telemetry) RecordStateRowsAttempted(ctx context.Context, n int) {
 	t.stateRowsAttempted.Add(ctx, int64(n), metric.WithAttributes(t.chainAttr))
 }
 
-// RecordPoolsTouched increments pools_touched_total by n, the number of
-// registered pools that a block's decoded events touched — the activity signal
-// the sweepless silent-empty alerts gate on (rationale in
-// alerts/vector-indexers.yaml, group vector-uniswap-v3-indexer). Nil receiver or
-// n <= 0 are no-ops, so a worker that never touches a pool never creates the
-// series at all; those rules use `unless` rather than `and … == 0` precisely to
-// fire on the absent series.
-//
-// Callers must record it from the touched-pool set decoded off the receipts
-// (upstream of DueSet), never from the due set itself: an always-empty DueSet is
-// precisely the bug those alerts exist to catch, and sourcing the gate from
-// DueSet would zero both sides of the comparison and go blind. The sweep (curve)
-// also puts untouched pools in the due set, which would make it a false activity
-// signal.
-//
-// attrs partition the count into series a rule can select one of, on top of the
-// chain attribute every datapoint carries; a rule that wants the whole count
-// aggregates them away with `sum by (chain, cluster)`. uniswap-v4 splits on
-// snapshot_supported, because only the supported half can ever produce a state
-// row and only that half may gate its not-writing-state rule.
+// Record n from the receipts' touched-pool set, never from DueSet: an always-empty
+// DueSet is the bug the sweepless silent-empty alerts catch, and they fire on this
+// series being absent, which a nil receiver or n <= 0 leaves it.
 func (t *Telemetry) RecordPoolsTouched(ctx context.Context, n int, attrs ...attribute.KeyValue) {
 	if t == nil || n <= 0 {
 		return
@@ -230,9 +185,8 @@ func (t *Telemetry) RecordPoolsTouched(ctx context.Context, n int, attrs ...attr
 	t.poolsTouched.Add(ctx, int64(n), metric.WithAttributes(all...))
 }
 
-// RecordPoolsNeverIndexed sets pools_never_indexed to n. Unlike the counters
-// here, 0 is a value and not a no-op: the alert on it compares a level, so the
-// series has to exist while the answer is "none". Nil receiver is still a no-op.
+// RecordPoolsNeverIndexed records 0 rather than skipping it: its alert compares
+// a level, so the series must exist while the answer is "none".
 func (t *Telemetry) RecordPoolsNeverIndexed(ctx context.Context, n int) {
 	if t == nil {
 		return

@@ -104,8 +104,6 @@ func TestUniswapV4PoolState_Validate(t *testing.T) {
 		{"negative block version", func(s *UniswapV4PoolState) { s.BlockVersion = -1 }, true},
 		{"missing block timestamp", func(s *UniswapV4PoolState) { s.BlockTimestamp = time.Time{} }, true},
 		{"nil sqrt price", func(s *UniswapV4PoolState) { s.SqrtPriceX96 = nil }, true},
-		// StateView.getSlot0 answers all-zeros for an unregistered PoolId instead of
-		// reverting, so a zero price is a registry bug rather than a real snapshot.
 		{"zero sqrt price", func(s *UniswapV4PoolState) { s.SqrtPriceX96 = big.NewInt(0) }, true},
 		{"negative sqrt price", func(s *UniswapV4PoolState) { s.SqrtPriceX96 = big.NewInt(-1) }, true},
 		{"tick below TickMath min", func(s *UniswapV4PoolState) { s.Tick = -887273 }, true},
@@ -133,9 +131,6 @@ func TestUniswapV4PoolState_Validate(t *testing.T) {
 	}
 }
 
-// zeroV4PoolState sets every StateView-sourced field to the all-zeros
-// getSlot0 / getLiquidity / getFeeGrowthGlobals answer for a PoolId the
-// PoolManager does not know.
 func zeroV4PoolState(s *UniswapV4PoolState) {
 	s.SqrtPriceX96 = big.NewInt(0)
 	s.Tick = 0
@@ -146,10 +141,6 @@ func zeroV4PoolState(s *UniswapV4PoolState) {
 	s.FeeGrowthGlobal1X128 = big.NewInt(0)
 }
 
-// A reorg that orphans a pool's Initialize makes the re-read answer all zeros;
-// that row must persist to supersede the orphaned fork's snapshot, exactly as
-// the tick path already tolerates a zeroed re-read. Anything short of a full
-// zero read, or a zero at block_version 0, is still a registry bug.
 func TestUniswapV4PoolState_ValidateAcceptsAllZeroReorgReRead(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -192,8 +183,6 @@ func TestUniswapV4Swap_Validate(t *testing.T) {
 		{"missing sender", func(s *UniswapV4Swap) { s.Sender = common.Address{} }, true},
 		{"nil amount0", func(s *UniswapV4Swap) { s.Amount0 = nil }, true},
 		{"nil amount1", func(s *UniswapV4Swap) { s.Amount1 = nil }, true},
-		// Validate deliberately does not constrain the amount sign pair: the
-		// swapper's BalanceDelta is the only source of truth for direction.
 		{"both amounts positive", func(s *UniswapV4Swap) { s.Amount0, s.Amount1 = big.NewInt(1), big.NewInt(1) }, false},
 		{"both amounts negative", func(s *UniswapV4Swap) { s.Amount0, s.Amount1 = big.NewInt(-1), big.NewInt(-1) }, false},
 		{"both amounts zero", func(s *UniswapV4Swap) { s.Amount0, s.Amount1 = big.NewInt(0), big.NewInt(0) }, false},
@@ -238,9 +227,7 @@ func TestUniswapV4LiquidityEvent_Validate(t *testing.T) {
 		{"tick_lower equal tick_upper", func(e *UniswapV4LiquidityEvent) { e.TickUpper = e.TickLower }, true},
 		{"tick_lower greater than tick_upper", func(e *UniswapV4LiquidityEvent) { e.TickLower, e.TickUpper = 100, -100 }, true},
 		{"nil liquidity delta", func(e *UniswapV4LiquidityEvent) { e.LiquidityDelta = nil }, true},
-		// modifyLiquidity(0) is the canonical fee-collect poke, so a zero delta is a
-		// real event rather than a decode failure.
-		{"zero liquidity delta", func(e *UniswapV4LiquidityEvent) { e.LiquidityDelta = big.NewInt(0) }, false},
+		{"zero liquidity delta from a fee-collect poke", func(e *UniswapV4LiquidityEvent) { e.LiquidityDelta = big.NewInt(0) }, false},
 		{"negative liquidity delta", func(e *UniswapV4LiquidityEvent) { e.LiquidityDelta = big.NewInt(-1000) }, false},
 		{"zero salt", func(e *UniswapV4LiquidityEvent) { e.Salt = common.Hash{} }, false},
 	}
@@ -272,9 +259,7 @@ func TestUniswapV4Tick_Validate(t *testing.T) {
 		{"nil liquidity net", func(tk *UniswapV4Tick) { tk.LiquidityNet = nil }, true},
 		{"nil fee growth outside0", func(tk *UniswapV4Tick) { tk.FeeGrowthOutside0X128 = nil }, true},
 		{"nil fee growth outside1", func(tk *UniswapV4Tick) { tk.FeeGrowthOutside1X128 = nil }, true},
-		// An all-zero TickInfo is how V4 reports a never-initialized or cleared
-		// tick; the row records that erasure and must validate.
-		{"all zero tick info", func(tk *UniswapV4Tick) {
+		{"all zero tick info records a cleared tick", func(tk *UniswapV4Tick) {
 			tk.LiquidityGross = big.NewInt(0)
 			tk.LiquidityNet = big.NewInt(0)
 		}, false},

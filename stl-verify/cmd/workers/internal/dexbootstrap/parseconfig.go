@@ -1,6 +1,5 @@
 // Package dexbootstrap consolidates the CLI/env parsing and infrastructure
-// wiring shared by the DEX SQS workers (curve, uniswap-v3, uniswap-v4), so a
-// per-DEX factory supplies only the pieces that actually differ.
+// wiring shared by the DEX SQS workers, leaving factories only what differs.
 package dexbootstrap
 
 import (

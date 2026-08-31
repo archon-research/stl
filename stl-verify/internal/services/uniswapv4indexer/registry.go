@@ -12,7 +12,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// RegisteredPoolsFromRows maps UniswapV4PoolRow slices to RegisteredPool slices.
 func RegisteredPoolsFromRows(rows []outbound.UniswapV4PoolRow) []RegisteredPool {
 	pools := make([]RegisteredPool, 0, len(rows))
 	for _, row := range rows {
@@ -35,10 +34,6 @@ func RegisteredPoolsFromRows(rows []outbound.UniswapV4PoolRow) []RegisteredPool 
 	return pools
 }
 
-// poolKeyArgsOnce builds the abi.Arguments for PoolKey exactly once. The tuple
-// is (address currency0, address currency1, uint24 fee, int24 tickSpacing,
-// address hooks), each padded to a 32-byte word — v4-core's PoolId is
-// keccak256 over that standard abi.encode layout, not a packed encoding.
 var poolKeyArgsOnce = sync.OnceValues(func() (abi.Arguments, error) {
 	address, err := abi.NewType("address", "", nil)
 	if err != nil {
@@ -57,19 +52,12 @@ var poolKeyArgsOnce = sync.OnceValues(func() (abi.Arguments, error) {
 	}, nil
 })
 
-// DynamicFeeFlag is the PoolKey.fee sentinel (LPFeeLibrary.DYNAMIC_FEE_FLAG)
-// marking a pool whose LP fee the hook sets at runtime, rather than a rate.
-// Such a pool is indexed for events and excluded from snapshots through the
-// registry's snapshot_supported column, never refused at boot: the fee is
-// hashed into the PoolId, so no superseding registry row could repair it.
+// DynamicFeeFlag is LPFeeLibrary.DYNAMIC_FEE_FLAG: a PoolKey.fee sentinel meaning
+// the hook sets the LP fee at runtime, so the pool has no fee rate to snapshot.
 const DynamicFeeFlag = 0x800000
 
-// ValidatePoolKeys recomputes every pool's on-chain PoolId from its registry
-// key and rejects any mismatch or duplicate. A mismatch is unrecoverable at
-// runtime rather than merely wrong: PoolManager logs are routed by PoolId, so a
-// pool whose stored id disagrees with its key would silently never match a log
-// and its fact tables would stay empty while the worker looks healthy. Refusing
-// to boot is the only failure mode that surfaces it.
+// Logs route by PoolId, so a pool whose stored id disagrees with its key would
+// silently never match a log; refusing to boot is the only way that surfaces.
 func ValidatePoolKeys(pools []RegisteredPool) error {
 	seen := make(map[common.Hash]int64, len(pools))
 	for _, pool := range pools {
@@ -90,10 +78,6 @@ func ValidatePoolKeys(pools []RegisteredPool) error {
 	return nil
 }
 
-// SnapshottablePools returns the pools whose state and ticks the indexer reads.
-// A pool the registry excludes (snapshot_supported = false, e.g. a dynamic-fee
-// pool whose lp_fee updateDynamicLPFee rewrites with no event) stays in the
-// event-decoding registry; only its snapshot schedule is dropped.
 func SnapshottablePools(pools []RegisteredPool) []RegisteredPool {
 	snapshottable := make([]RegisteredPool, 0, len(pools))
 	for _, pool := range pools {
@@ -104,8 +88,8 @@ func SnapshottablePools(pools []RegisteredPool) []RegisteredPool {
 	return snapshottable
 }
 
-// computePoolID returns keccak256(abi.encode(currency0, currency1, fee,
-// tickSpacing, hooks)) — the PoolId v4-core derives in PoolIdLibrary.
+// computePoolID derives the PoolId the way v4-core's PoolIdLibrary does:
+// keccak256 over the standard abi.encode layout of the PoolKey, not a packed one.
 func computePoolID(pool RegisteredPool) (common.Hash, error) {
 	args, err := poolKeyArgsOnce()
 	if err != nil {

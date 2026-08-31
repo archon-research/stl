@@ -1,8 +1,6 @@
-// Package uniswapv4indexer decodes and snapshots Uniswap V4 pools. Unlike V3,
-// every pool lives inside one singleton PoolManager and is addressed by its
-// PoolId (keccak256 of the abi-encoded PoolKey), so logs are routed by
-// topics[1] rather than by emitting address, and all state is read through the
-// separate StateView periphery contract.
+// Package uniswapv4indexer decodes and snapshots Uniswap V4 pools. One singleton
+// PoolManager holds every pool, so logs route by the PoolId in topics[1] rather
+// than by emitting address, and all state is read from the StateView periphery.
 package uniswapv4indexer
 
 import (
@@ -13,19 +11,12 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 )
 
-// poolManagerABIOnce parses poolManagerEventsJSON exactly once: the ABI is on
-// the per-receipt hot path (DecodeEvents), so re-parsing the JSON on every
-// receipt is pure waste.
 var poolManagerABIOnce = sync.OnceValues(func() (*abi.ABI, error) {
 	return abis.ParseABI(poolManagerEventsJSON)
 })
 
-// PoolManagerABI returns the ABI fragment covering all 10 events the v4-core
-// PoolManager can emit, including the ERC6909 claim-token set it inherits.
-// Signatures match PoolManager.sol exactly, including which arguments are
-// indexed. Two tests split that guarantee: abi_test.go pins each topic0, which
-// fixes the signature but says nothing about the indexed flags, and
-// event_decode_test.go decodes verbatim mainnet logs, which pins the layout.
+// PoolManagerABI covers every event the v4-core PoolManager emits, including the
+// ERC6909 set it inherits; signatures and indexed flags match PoolManager.sol.
 func PoolManagerABI() (*abi.ABI, error) {
 	return poolManagerABIOnce()
 }

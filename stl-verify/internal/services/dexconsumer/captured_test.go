@@ -65,8 +65,6 @@ func TestNewDecodedCapturedLog_StringifiesBigInts(t *testing.T) {
 	if s, ok := arr[0].(string); !ok || s != huge.String() {
 		t.Errorf("token_amounts[0] = %v (%T), want string %q", arr[0], arr[0], huge.String())
 	}
-	// common.Address/common.Hash are [N]byte values: JSONB needs them as 0x
-	// hex, since a decimal byte list joins against no address or hash column.
 	if got, want := payload["provider"], "0x2222222222222222222222222222222222222222"; got != want {
 		t.Errorf("provider = %v (%T), want %q", got, got, want)
 	}
@@ -75,10 +73,6 @@ func TestNewDecodedCapturedLog_StringifiesBigInts(t *testing.T) {
 	}
 }
 
-// TestMarshalDecodedParams_HexEncodesFixedSizeByteArrays covers the ABI kind
-// neither *big.Int nor TextMarshaler handles: go-ethereum decodes bytes32
-// (PoolId, salt) as a bare [32]byte, which JSON-encodes as a decimal byte array
-// and leaves params->>'id' unjoinable against uniswap_v4_pool.pool_id.
 func TestMarshalDecodedParams_HexEncodesFixedSizeByteArrays(t *testing.T) {
 	poolID := [32]byte{0x58, 0x29, 0x9b, 0x9a}
 	poolID[31] = 0xe4

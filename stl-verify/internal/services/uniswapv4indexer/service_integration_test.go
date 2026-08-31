@@ -18,15 +18,9 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// integrationBlock sits above every seeded pool's deploy block, so the
-// deploy-gate in DueSet accepts a touch here.
+// Above every seeded pool's deploy block, which DueSet's gate requires.
 const integrationBlock = int64(25_600_000)
 
-// v4IntegrationFixture wires the real Postgres UniswapV4Repository, event
-// repository, and tx manager against a freshly migrated schema, faking only the
-// multicaller — the archive RPC is the one data source we cannot control. The
-// registry comes from LoadPools over the migration's own seed, so a seed that
-// disagreed with its PoolIds would fail the service constructor here.
 type v4IntegrationFixture struct {
 	svc  *UniswapV4Service
 	deps UniswapV4ServiceDeps
@@ -35,10 +29,6 @@ type v4IntegrationFixture struct {
 	pool RegisteredPool
 }
 
-// restarted builds a second service over the same database, standing in for a
-// worker process that was replaced between two deliveries. Its snapshot tracker
-// starts empty; its baseline set does not — the constructor re-seeds that from
-// the persisted rows, which is exactly the difference these tests exercise.
 func (f *v4IntegrationFixture) restarted(t *testing.T) *UniswapV4Service {
 	t.Helper()
 	svc, err := NewUniswapV4Service(context.Background(), f.deps)
@@ -48,12 +38,8 @@ func (f *v4IntegrationFixture) restarted(t *testing.T) *UniswapV4Service {
 	return svc
 }
 
-// seededDeployBlocks is the Initialize height of every pool the V4 migration
-// seeds, transcribed from the verified Initialize-log scan. deploy_block is
-// load-bearing (DueSet's gate hard-errors when a touched pool reports a height
-// above the block), and this is the only place the migration's OWN seed is read
-// back: the postgres package re-seeds the registry itself because sibling tests
-// TRUNCATE it away.
+// Mainnet Initialize heights of the pools the V4 migration seeds, transcribed
+// from a verified Initialize-log scan.
 var seededDeployBlocks = map[common.Hash]int64{
 	common.HexToHash("0x1d5b2949ece8754c2d736991c62c5162bd144f497b2212182401b9bae77e2d76"): 21743144,
 	common.HexToHash("0xbc21dd4a44766fadfd6447f4b222a6185dcc2e6a3b15eb79e0cc637e30e7e97f"): 25199556,
@@ -78,9 +64,6 @@ var seededDeployBlocks = map[common.Hash]int64{
 	common.HexToHash("0x2f5dff74b96e2df0fa8a5695318d59839c3ce5d058b19024fbfe276100b676ff"): 24363921,
 }
 
-// assertSeededDeployBlocks checks the loaded registry against seededDeployBlocks
-// by PoolId, so a mistyped seed is caught regardless of the order LoadPools
-// returns rows in.
 func assertSeededDeployBlocks(t *testing.T, pools []RegisteredPool) {
 	t.Helper()
 	if len(pools) != len(seededDeployBlocks) {
@@ -157,9 +140,6 @@ func countRows(t *testing.T, ctx context.Context, db *pgxpool.Pool, query string
 	return n
 }
 
-// TestIntegration_PersistsEveryTableForATouchedBlock drives one block carrying
-// a swap, a liquidity change, and a donate through the real repository, and
-// checks each of the six tables this block writes to received its row.
 func TestIntegration_PersistsEveryTableForATouchedBlock(t *testing.T) {
 	ctx := context.Background()
 	f := setupV4Integration(t)
@@ -200,14 +180,11 @@ func TestIntegration_PersistsEveryTableForATouchedBlock(t *testing.T) {
 	}
 }
 
-// tickResultWith packs a getTickInfo return with the given liquidity, so the
-// reorg test can distinguish an initialized tick from a cleared (all-zero) one.
 func tickResultWith(t *testing.T, liquidityGross, liquidityNet int64) outbound.Result {
 	t.Helper()
 	return outbound.Result{Success: true, ReturnData: packTickInfoReturn(t, big.NewInt(liquidityGross), big.NewInt(liquidityNet), big.NewInt(0), big.NewInt(0))}
 }
 
-// latestTick reads the canonical-latest uniswap_v4_tick row for (pool, tick).
 func latestTick(t *testing.T, ctx context.Context, db *pgxpool.Pool, poolID int64, tick int) (blockNumber int64, blockVersion int, liquidityGross string) {
 	t.Helper()
 	if err := db.QueryRow(ctx,
@@ -223,18 +200,13 @@ func latestTick(t *testing.T, ctx context.Context, db *pgxpool.Pool, poolID int6
 	return blockNumber, blockVersion, liquidityGross
 }
 
-// TestIntegration_ReorgReconcilesStaleTicks proves the reconciliation against
-// the real writer: a tick initialized on an orphaned fork (N, v0) is superseded
-// when block N is redelivered at v1 whose receipts do NOT touch the pool.
-// Without the prior-version re-read the stale (N, v0) row would stay
-// canonical-latest forever.
 func TestIntegration_ReorgReconcilesStaleTicks(t *testing.T) {
 	ctx := context.Background()
 	f := setupV4Integration(t)
 
 	const (
-		clearedTick = -100 // initialized on v0, cleared on v1
-		changedTick = 200  // initialized on both, value changes on v1
+		clearedTick = -100
+		changedTick = 200
 	)
 
 	f.mc.tickResults[clearedTick] = goodTickResult(t)
@@ -271,10 +243,6 @@ func TestIntegration_ReorgReconcilesStaleTicks(t *testing.T) {
 	}
 }
 
-// TestIntegration_ReorgAfterRestartReconcilesStaleTicks is the same
-// reconciliation across a process boundary: the redelivering service has never
-// seen block N, so the pools to re-snapshot can only come from the rows already
-// persisted at that height.
 func TestIntegration_ReorgAfterRestartReconcilesStaleTicks(t *testing.T) {
 	ctx := context.Background()
 	f := setupV4Integration(t)
@@ -315,11 +283,6 @@ func TestIntegration_ReorgAfterRestartReconcilesStaleTicks(t *testing.T) {
 	}
 }
 
-// TestIntegration_RestartDoesNotRebaselineAnIndexedPool proves the boot seed
-// against the real repository: baselineSeen lives in memory, so before it was
-// seeded from persisted rows every rollout re-enumerated every pool's tick
-// bitmap — seconds of archive reads per pool, inside the block duration the 3s
-// p99 alert watches.
 func TestIntegration_RestartDoesNotRebaselineAnIndexedPool(t *testing.T) {
 	ctx := context.Background()
 	f := setupV4Integration(t)

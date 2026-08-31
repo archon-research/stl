@@ -9,19 +9,15 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// Mainnet ETH/wstETH 0.01% pool: currency0 is native ETH (address(0)),
-// tickSpacing 1, no hooks. Its PoolId is the keccak of that exact key, so the
-// pair doubles as the positive fixture for ValidatePoolKeys.
+// Real mainnet ETH/wstETH pools, currency0 being native ETH (address(0)): each
+// PoolId is the keccak of the exact key registeredPool builds around it.
 const (
 	ethWstethPoolID = "0x1d5b2949ece8754c2d736991c62c5162bd144f497b2212182401b9bae77e2d76"
 	wstethAddress   = "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"
-	// Same pair and tickSpacing at 0.005% behind the Bunni hook.
-	hookedPoolID = "0x904e8ad11c6f8abb44ea77c507355900e7f9d2907ab0a29353cb1ef0f06b0852"
-	hookAddress  = "0x4440854B2d02C57A0Dc5c58b7A884562D875c0c4"
+	hookedPoolID    = "0x904e8ad11c6f8abb44ea77c507355900e7f9d2907ab0a29353cb1ef0f06b0852"
+	hookAddress     = "0x4440854B2d02C57A0Dc5c58b7A884562D875c0c4"
 )
 
-// registeredPool builds a valid RegisteredPool whose PoolIDHash really is the
-// keccak of its key, with the varying fields as arguments.
 func registeredPool(id int64, poolIDHash string, fee int, hooks common.Address) RegisteredPool {
 	return RegisteredPool{
 		ID:                id,
@@ -132,9 +128,6 @@ func TestValidatePoolKeys_EmptyIsValid(t *testing.T) {
 	}
 }
 
-// TestValidatePoolKeys_RejectsKeyMismatch covers each key component: any
-// registry field that disagrees with the stored PoolId makes every log lookup
-// for that pool miss silently, so boot must fail instead.
 func TestValidatePoolKeys_RejectsKeyMismatch(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -188,9 +181,6 @@ func TestValidatePoolKeys_RejectsDuplicatePoolIDHash(t *testing.T) {
 	}
 }
 
-// TestSnapshottablePools_KeepsOnlySupportedPools pins the curated gate that
-// replaced the boot refusal: an excluded pool stays in the registry (its events
-// still index) and only drops out of the snapshot schedule.
 func TestSnapshottablePools_KeepsOnlySupportedPools(t *testing.T) {
 	supported := registeredPool(1, ethWstethPoolID, 100, common.Address{})
 	excluded := registeredPool(2, hookedPoolID, 50, common.HexToAddress(hookAddress))
@@ -203,9 +193,6 @@ func TestSnapshottablePools_KeepsOnlySupportedPools(t *testing.T) {
 	}
 }
 
-// TestValidatePoolKeys_AcceptsDynamicFeePool pins that the fee sentinel is no
-// longer a boot refusal: the fee is hashed into the PoolId, so a registered
-// dynamic-fee pool has no sanctioned repair and must not crash the worker.
 func TestValidatePoolKeys_AcceptsDynamicFeePool(t *testing.T) {
 	pool := registeredPool(4, ethWstethPoolID, DynamicFeeFlag, common.Address{})
 	hash, err := computePoolID(pool)

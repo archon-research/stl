@@ -15,20 +15,14 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// The recorded StateView reads below all come from this pool at this block, so
-// a reader can re-fetch and re-verify any of them:
-//
-//	cast call 0x7fFE42C4a5DEeA5b0feC41C94C136Cf115597227 "getSlot0(bytes32)" \
-//	  0x1d5b2949ece8754c2d736991c62c5162bd144f497b2212182401b9bae77e2d76 \
-//	  -r https://eth.drpc.org -b 23200000
+// Recorded from mainnet: cast call <StateView> "getSlot0(bytes32)"
+// <ethWstethPoolID> -r https://eth.drpc.org -b 23200000.
 const (
 	fixtureBlock     = 23200000
 	fixtureBlockHash = "0xd6b7f6f0a976ff4ad7d28dfb50b5dd3cda99a5c41c73fe55e297edbeeb1953e5"
 )
 
-// Verbatim StateView return payloads: real contract bytes, not a round-trip
-// through a copy of state.go's own ABI, so a wrong belief about the return
-// layout cannot hide in the code and the fixture at once.
+// Verbatim StateView return words, never re-encoded through state.go's own ABI.
 const (
 	mainnetSlot0Return = "0000000000000000000000000000000000000000e8f3c82a9548345da47b990b" +
 		"fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff8a1" +
@@ -39,10 +33,8 @@ const (
 		"0000000000000000000000000000000000110126c6876960202ee205d7f0e477"
 )
 
-// Decoded from the words above by hand and corroborated against the
-// PoolManager's raw storage for this pool, where v4-core's Pool.State puts
-// slot0 at +0, feeGrowthGlobal0X128 at +1, feeGrowthGlobal1X128 at +2 and
-// liquidity at +3.
+// Hand-decoded from the words above and corroborated against the PoolManager's
+// raw Pool.State storage: slot0 +0, feeGrowthGlobal0/1 +1/+2, liquidity +3.
 const (
 	mainnetSqrtPriceX96         = "72095236511535141145217308939"
 	mainnetTick                 = -1887
@@ -53,14 +45,12 @@ const (
 	mainnetFeeGrowthGlobal1X128 = "88292401116605815361741247342503031"
 )
 
-// Selectors the recorded calls were actually made with.
 const (
 	getSlot0Selector            = "c815641c"
 	getLiquiditySelector        = "fa6793d5"
 	getFeeGrowthGlobalsSelector = "9ec538c8"
 )
 
-// stateTestPool is the fixture RegisteredPool for state-snapshot tests.
 func stateTestPool() RegisteredPool {
 	return decodeTestPool(7, ethWstethPoolID)
 }
@@ -82,9 +72,7 @@ func hexBytes(t *testing.T, s string) []byte {
 	return b
 }
 
-// abiWords renders values as consecutive 32-byte return words, two's
-// complement for negatives. This is the raw wire shape, so the synthetic
-// fixtures below stay independent of any ABI definition.
+// Consecutive 32-byte return words, two's complement for negatives.
 func abiWords(values ...*big.Int) []byte {
 	out := make([]byte, 0, 32*len(values))
 	for _, v := range values {
@@ -97,8 +85,6 @@ func abiWords(values ...*big.Int) []byte {
 	return out
 }
 
-// stateFixture holds every value SnapshotState reads, with sane defaults for
-// the fields a given test is not varying.
 type stateFixture struct {
 	sqrtPriceX96      *big.Int
 	tick              *big.Int
@@ -124,8 +110,6 @@ func defaultStateFixture() stateFixture {
 	}
 }
 
-// buildStateResults returns the three outbound.Results in SnapshotState's call
-// order (getSlot0, getLiquidity, getFeeGrowthGlobals).
 func buildStateResults(t *testing.T, f stateFixture) []outbound.Result {
 	t.Helper()
 	return []outbound.Result{
@@ -135,8 +119,6 @@ func buildStateResults(t *testing.T, f stateFixture) []outbound.Result {
 	}
 }
 
-// recordedStateResults feeds the mainnet payloads through untouched, so the
-// decode path sees exactly the bytes StateView returned.
 func recordedStateResults(t *testing.T) []outbound.Result {
 	t.Helper()
 	return []outbound.Result{
@@ -146,8 +128,6 @@ func recordedStateResults(t *testing.T) []outbound.Result {
 	}
 }
 
-// mockMulticallerReturning wires a MockMulticaller whose ExecuteAtHash returns
-// results positionally and records the calls and block hash it saw.
 func mockMulticallerReturning(results []outbound.Result, gotHash *common.Hash, gotCalls *[]outbound.Call) *testutil.MockMulticaller {
 	mc := testutil.NewMockMulticaller()
 	mc.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
@@ -171,10 +151,6 @@ func snapshotWith(t *testing.T, pool RegisteredPool, f stateFixture) (*testutil.
 	return mc, gotHash, gotCalls, err
 }
 
-// TestSnapshotState_DecodesRecordedMainnetReturns is the independent oracle for
-// the whole pool-state decode: verbatim StateView bytes in, hand-decoded
-// expectations out. Every field is a distinct value, so any transposition of
-// the return layout shows up as a named mismatch.
 func TestSnapshotState_DecodesRecordedMainnetReturns(t *testing.T) {
 	pool := stateTestPool()
 	blockHash := common.HexToHash(fixtureBlockHash)
@@ -225,9 +201,6 @@ func TestSnapshotState_DecodesRecordedMainnetReturns(t *testing.T) {
 	}
 }
 
-// TestStateFixtureReproducesMainnetBytes keeps the synthetic packer the
-// variation tests use honest: for the recorded values it must emit exactly what
-// StateView returned, byte for byte.
 func TestStateFixtureReproducesMainnetBytes(t *testing.T) {
 	got := buildStateResults(t, defaultStateFixture())
 	want := recordedStateResults(t)
@@ -240,9 +213,6 @@ func TestStateFixtureReproducesMainnetBytes(t *testing.T) {
 	}
 }
 
-// TestSnapshotState_ReadsStateViewWithPoolID pins the two things V4 changes
-// versus V3: state comes from the periphery StateView contract, not the pool,
-// and every call is keyed by the on-chain PoolId.
 func TestSnapshotState_ReadsStateViewWithPoolID(t *testing.T) {
 	pool := stateTestPool()
 	_, _, gotCalls, err := snapshotWith(t, pool, defaultStateFixture())
@@ -291,8 +261,6 @@ func TestSnapshotState_NegativeTick(t *testing.T) {
 	}
 }
 
-// TestSnapshotState_CoreRevertFailsSnapshot proves no read degrades to a zero
-// value: all three are core, so any revert stops the block.
 func TestSnapshotState_CoreRevertFailsSnapshot(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -316,10 +284,6 @@ func TestSnapshotState_CoreRevertFailsSnapshot(t *testing.T) {
 	}
 }
 
-// TestSnapshotState_UnknownPoolIDFailsValidation pins the fail-loud rule that
-// makes a registry typo detectable: StateView answers all-zeros for a PoolId
-// the PoolManager never initialized instead of reverting, so a zero price must
-// be rejected rather than persisted as a real snapshot.
 func TestSnapshotState_UnknownPoolIDFailsValidation(t *testing.T) {
 	pool := stateTestPool()
 	f := defaultStateFixture()
@@ -340,8 +304,6 @@ func TestSnapshotState_UnknownPoolIDFailsValidation(t *testing.T) {
 	}
 }
 
-// TestSnapshotState_UnusableReadFails covers every way a read can come back
-// unusable: each must fail loud rather than yield a partly zeroed snapshot.
 func TestSnapshotState_UnusableReadFails(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

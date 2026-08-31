@@ -36,13 +36,15 @@ const (
 	uniswapV4NoHooksHex        = "\\x0000000000000000000000000000000000000000"
 
 	uniswapV4ReadWriteRole = "stl_readwrite"
+
+	// The one fee above the 100% cap a PoolKey may legally carry.
+	uniswapV4DynamicFeeSentinel = 0x800000
 )
 
 var uniswapV4TestPool *pgxpool.Pool
 
-// uniswapV4MigrationSeededPoolIDs is the chain-1 uniswap_v4_pool seed exactly as
-// the migration left it. Tests write chain-1 pools of their own, so this has to
-// be snapshotted before any of them runs.
+// Tests append chain-1 pools of their own, so the migration's seed has to be
+// snapshotted before any of them runs.
 var uniswapV4MigrationSeededPoolIDs []string
 
 func init() {
@@ -67,8 +69,6 @@ func readUniswapV4MigrationSeededPoolIDs() []string {
 	return poolIDs
 }
 
-// uniswapV4Tables are the 7 tables created by
-// 20260819_120000_create_uniswap_v4_tables.sql.
 var uniswapV4Tables = []string{
 	"uniswap_v4_pool_manager",
 	"uniswap_v4_pool",
@@ -79,12 +79,9 @@ var uniswapV4Tables = []string{
 	"uniswap_v4_pool_event",
 }
 
-// uniswapV4VersionedTables is every table in the migration: registry rows are
-// versioned and append-only too, so all 7 carry a processing_version trigger.
+// Registry rows are versioned too, so every table carries a pv trigger.
 var uniswapV4VersionedTables = uniswapV4Tables
 
-// uniswapV4Hypertables excludes uniswap_v4_tick, which is append-on-change and
-// deliberately a plain table.
 var uniswapV4Hypertables = []string{
 	"uniswap_v4_pool_state",
 	"uniswap_v4_swap",
@@ -146,9 +143,8 @@ func TestUniswapV4TickIsNotAHypertable(t *testing.T) {
 	}
 }
 
-// seedUniswapV4TickPlanHistory writes one pool's ticks over a run of blocks, so
-// the planner sees a pool whose entries far outnumber the ones any single block
-// wants; on a handful of rows either candidate index costs the same.
+// The planner needs a pool whose entries far outnumber one block's; on a handful
+// of rows either candidate index costs the same.
 func seedUniswapV4TickPlanHistory(t *testing.T, ctx context.Context, poolID, firstBlock int64, blocks int) {
 	t.Helper()
 	for i := range blocks {
@@ -170,7 +166,6 @@ func seedUniswapV4TickPlanHistory(t *testing.T, ctx context.Context, poolID, fir
 	}
 }
 
-// explainUniswapV4Query returns the planner's text output for sql, bound to args.
 func explainUniswapV4Query(t *testing.T, ctx context.Context, sql string, args ...any) string {
 	t.Helper()
 	rows, err := uniswapV4TestPool.Query(ctx, "EXPLAIN "+sql, args...)
@@ -194,11 +189,8 @@ func explainUniswapV4Query(t *testing.T, ctx context.Context, sql string, args .
 	return plan.String()
 }
 
-// TestUniswapV4TickBlockLookupIndexServesReorgTickRead pins the plan of
-// TicksForPoolAtBlock, the reorg-path read. Both the PK and the pv-lookup index
-// put tick between the query's two filters, so only pool_id bounds the scan and
-// block_number is re-checked at every entry the pool has ever written; the read
-// then grows with the pool's whole tick history rather than with one block's.
+// Both the PK and the pv-lookup index put tick between the query's two filters,
+// so without this index the read scans the pool's whole tick history.
 func TestUniswapV4TickBlockLookupIndexServesReorgTickRead(t *testing.T) {
 	ctx := context.Background()
 	poolID := insertTestUniswapV4Pool(t, ctx, "\\x1100000000000000000000000000000000000000000000000000000000000009")
@@ -479,9 +471,8 @@ func TestUniswapV4ProcessingVersionTriggerAppendsPoolCorrection(t *testing.T) {
 	}
 }
 
-// uniswapV4FactInsert is one versioned fact table's INSERT, parameterised on the
-// values its CHECK constraints govern. $1 is always the pool surrogate id and
-// the last placeholder is always build_id.
+// In each of these, $1 is the pool surrogate id and the last placeholder is
+// build_id; between them come the values the table's CHECK constraints govern.
 const (
 	uniswapV4PoolStateInsertSQL = `
 		INSERT INTO uniswap_v4_pool_state
@@ -530,9 +521,6 @@ const (
 		        '{"sqrtPriceX96": "79228162514264337593543950336", "tick": 0}'::jsonb, $2)`
 )
 
-// uniswapV4ValidFactRow is one fact table plus in-range values for every column
-// its CHECK constraints govern, ordered as the INSERT expects them between
-// pool_id and build_id.
 type uniswapV4ValidFactRow struct {
 	table     string
 	insert    string
@@ -540,8 +528,6 @@ type uniswapV4ValidFactRow struct {
 	args      []any
 }
 
-// uniswapV4ValidFactRows covers all five versioned fact tables. Each gets its own
-// registry pool so the shared block/log_index values cannot collide.
 var uniswapV4ValidFactRows = []uniswapV4ValidFactRow{
 	{
 		table:     "uniswap_v4_pool_state",
@@ -575,8 +561,6 @@ var uniswapV4ValidFactRows = []uniswapV4ValidFactRow{
 	},
 }
 
-// uniswapV4FactInsertArgs assembles the placeholder list: pool surrogate id,
-// then the constrained values, then build_id.
 func uniswapV4FactInsertArgs(poolID int64, values []any, buildID int) []any {
 	args := make([]any, 0, len(values)+2)
 	args = append(args, poolID)
@@ -584,8 +568,6 @@ func uniswapV4FactInsertArgs(poolID int64, values []any, buildID int) []any {
 	return append(args, buildID)
 }
 
-// A correction is a re-insert under a new build_id, which the trigger turns into
-// an appended version; a re-insert under the same build_id must write nothing.
 func TestUniswapV4ProcessingVersionTriggerAppendsFactCorrection(t *testing.T) {
 	ctx := context.Background()
 
@@ -672,10 +654,8 @@ func TestUniswapV4FactTableChecksRejectOutOfRangeValues(t *testing.T) {
 	}
 }
 
-// requireUniswapV4CheckViolation demands SQLSTATE 23514. The cases above share
-// one pool and one key per table, so a dropped CHECK leaves the first case
-// inserting and the rest failing on the PK instead: asserting err != nil would
-// keep passing on that 23505.
+// Asserting err != nil would keep passing on a 23505: the cases share one key
+// per table, so a dropped CHECK fails them on the PK instead.
 func requireUniswapV4CheckViolation(t *testing.T, err error) {
 	t.Helper()
 	if err == nil {
@@ -737,9 +717,8 @@ func TestUniswapV4FactTableChecksAcceptBoundaryValues(t *testing.T) {
 	}
 }
 
-// A reorg that orphans a pool's Initialize makes StateView answer all zeros on
-// the re-read; that tombstone has to persist to supersede the orphaned fork's
-// snapshot, while a zero at block_version 0 stays a registry bug.
+// A reorg orphaning a pool's Initialize makes StateView answer all zeros, and
+// that tombstone must persist; a zero at block_version 0 is a registry bug.
 func TestUniswapV4PoolStateZeroSqrtPriceOnlyAtAReorgVersion(t *testing.T) {
 	ctx := context.Background()
 
@@ -775,8 +754,6 @@ func TestUniswapV4PoolStateZeroSqrtPriceOnlyAtAReorgVersion(t *testing.T) {
 	}
 }
 
-// 8388608 (0x800000) is the dynamic-LP-fee sentinel, the one value above the
-// 100% cap a PoolKey may legally carry.
 func TestUniswapV4PoolFeeCheckAllowsOnlyRatesAndTheDynamicSentinel(t *testing.T) {
 	ctx := context.Background()
 	seedUniswapV4PoolManager(t, ctx)
@@ -793,8 +770,8 @@ func TestUniswapV4PoolFeeCheckAllowsOnlyRatesAndTheDynamicSentinel(t *testing.T)
 		wantAccept        bool
 	}{
 		{name: "static_max_fee", poolIDHex: "\\x1400000000000000000000000000000000000000000000000000000000000001", fee: 1000000, wantAccept: true},
-		{name: "dynamic_fee_sentinel", poolIDHex: "\\x1400000000000000000000000000000000000000000000000000000000000002", fee: 8388608, snapshotSupported: &notSnapshotted, wantAccept: true},
-		{name: "dynamic_fee_defaults_to_snapshotted", poolIDHex: "\\x1400000000000000000000000000000000000000000000000000000000000005", fee: 8388608},
+		{name: "dynamic_fee_sentinel", poolIDHex: "\\x1400000000000000000000000000000000000000000000000000000000000002", fee: uniswapV4DynamicFeeSentinel, snapshotSupported: &notSnapshotted, wantAccept: true},
+		{name: "dynamic_fee_defaults_to_snapshotted", poolIDHex: "\\x1400000000000000000000000000000000000000000000000000000000000005", fee: uniswapV4DynamicFeeSentinel},
 		{name: "above_100_percent", poolIDHex: "\\x1400000000000000000000000000000000000000000000000000000000000003", fee: 1000001},
 		{name: "max_uint24", poolIDHex: "\\x1400000000000000000000000000000000000000000000000000000000000004", fee: 16777215},
 	}
@@ -894,8 +871,6 @@ func TestUniswapV4ColumnComments(t *testing.T) {
 	}
 }
 
-// uniswapV4ColumnComment returns one column's COMMENT, failing the test when
-// the column or its comment is absent.
 func uniswapV4ColumnComment(t *testing.T, ctx context.Context, table, column string) string {
 	t.Helper()
 
@@ -946,16 +921,14 @@ func TestUniswapV4SwapAmountCommentsLeadWithTheSwapperPerspective(t *testing.T) 
 	}
 }
 
-// uniswapV4SeedToken is a token row the 21 seeded pools reference.
 type uniswapV4SeedToken struct {
 	addrHex  string
 	symbol   string
 	decimals int
 }
 
-// uniswapV4SeedTokens are the counterparty tokens the seeded pools resolve
-// currency*_token_id against, plus the 0xEeee… native-ETH placeholder that
-// address(0) maps to. Symbols and decimals are cast-verified against mainnet.
+// Symbols and decimals are cast-verified against mainnet; 0xEeee… is the
+// native-ETH placeholder address(0) maps to.
 var uniswapV4SeedTokens = []uniswapV4SeedToken{
 	{uniswapV4EthPlaceholderHex, "ETH", 18},
 	{"\\x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0", "wstETH", 18},
@@ -975,9 +948,8 @@ var uniswapV4SeedTokens = []uniswapV4SeedToken{
 	{"\\x68749665FF8D2d112Fa859AA293F07A622782F38", "XAUt", 6},
 }
 
-// uniswapV4ExpectedPool is one seeded pool's registry key, transcribed from the
-// verified Initialize-log scan that 20260819_120000_create_uniswap_v4_tables.sql
-// seeds from.
+// Transcribed from the same verified Initialize-log scan
+// 20260819_120000_create_uniswap_v4_tables.sql seeds from.
 type uniswapV4ExpectedPool struct {
 	name         string
 	poolIDHex    string
@@ -1013,10 +985,8 @@ var uniswapV4ExpectedPools = []uniswapV4ExpectedPool{
 	{"xaut_susds_10000", "\\x2f5dff74b96e2df0fa8a5695318d59839c3ce5d058b19024fbfe276100b676ff", "\\x68749665FF8D2d112Fa859AA293F07A622782F38", "\\xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD", 10000, 200, uniswapV4NoHooksHex, 24363921},
 }
 
-// seedUniswapV4Registry tops up what the migration's seed depends on and returns
-// the current PoolManager row. The pools themselves are deliberately NOT seeded
-// here: a test that wrote its own expectations in would then assert against its
-// own rows and pass over any transcription error in the migration.
+// Deliberately does not seed the pools: a test that wrote its own expectations
+// in would assert against its own rows and pass over a transcription error.
 func seedUniswapV4Registry(t *testing.T, ctx context.Context) int64 {
 	t.Helper()
 
@@ -1027,9 +997,6 @@ func seedUniswapV4Registry(t *testing.T, ctx context.Context) int64 {
 	return poolManagerID
 }
 
-// uniswapV4TokenAddrFor maps a Currency value to the token row that carries its
-// symbol/decimals: address(0) is native ETH, which has no ERC-20 contract and
-// resolves to the 0xEeee… placeholder (same convention as curve_pool_coin).
 func uniswapV4TokenAddrFor(currencyHex string) string {
 	if currencyHex == uniswapV4NativeCurrencyHex {
 		return uniswapV4EthPlaceholderHex
@@ -1037,9 +1004,6 @@ func uniswapV4TokenAddrFor(currencyHex string) string {
 	return currencyHex
 }
 
-// Both directions matter: a pool_id the migration writes that no expectation
-// names is as much a transcription error as an expected pool the migration
-// never seeded, and a per-pool lookup filtered by the expected ids sees neither.
 func TestUniswapV4PoolSeedIsExactlyTheExpectedPools(t *testing.T) {
 	expected := uniswapV4SeededPoolIDs()
 
@@ -1076,8 +1040,6 @@ func TestUniswapV4PoolManagerHasOneIdentityPerChain(t *testing.T) {
 	}
 }
 
-// The PoolManager address is the FK'd protocol row's address; a second copy on
-// uniswap_v4_pool_manager is a registry duplicate that can disagree with it.
 func TestUniswapV4PoolManagerHasNoDuplicateAddressColumn(t *testing.T) {
 	ctx := context.Background()
 
@@ -1096,9 +1058,6 @@ func TestUniswapV4PoolManagerHasNoDuplicateAddressColumn(t *testing.T) {
 	}
 }
 
-// A pool is snapshotted unless a maintainer deliberately excludes it, so the
-// curated gate defaults to TRUE: forgetting the column must not silently stop
-// state and tick rows for a newly registered pool.
 func TestUniswapV4PoolSnapshotSupportedDefaultsToTrue(t *testing.T) {
 	ctx := context.Background()
 	poolID := insertTestUniswapV4Pool(t, ctx, "\\x1700000000000000000000000000000000000000000000000000000000000001")
@@ -1113,8 +1072,7 @@ func TestUniswapV4PoolSnapshotSupportedDefaultsToTrue(t *testing.T) {
 	}
 }
 
-// deploy_block gates every snapshot read, so the schema makes a NULL
-// unrepresentable rather than leaving it to the seed or a runtime check.
+// deploy_block gates every snapshot read, so a NULL must be unrepresentable.
 func TestUniswapV4DeployBlockIsNotNullable(t *testing.T) {
 	ctx := context.Background()
 
@@ -1304,10 +1262,7 @@ func TestUniswapV4PoolSeedPoolIDMatchesKeccakOfPoolKey(t *testing.T) {
 	}
 }
 
-// uniswapV4PoolID recomputes PoolId =
-// keccak256(abi.encode(currency0, currency1, fee, tickSpacing, hooks)), the
-// identity v4-core derives a pool from, so a transcription error in the seed
-// cannot pass as a valid registry row.
+// PoolId as v4-core derives it: keccak256(abi.encode(PoolKey)).
 func uniswapV4PoolID(t *testing.T, currency0, currency1 []byte, fee, tickSpacing int64, hooks []byte) []byte {
 	t.Helper()
 
@@ -1348,9 +1303,6 @@ func uniswapV4SeededPoolIDs() []string {
 	return ids
 }
 
-// seedUniswapV4PoolManager appends the mainnet PoolManager row if this build
-// has not written it yet and returns the id of the current (highest-version)
-// row. Never an upsert: the table is append-only and versioned.
 func seedUniswapV4PoolManager(t *testing.T, ctx context.Context) int64 {
 	t.Helper()
 
@@ -1414,9 +1366,8 @@ func seedUniswapV4Token(t *testing.T, ctx context.Context, addrHex, symbol strin
 	return tokenID
 }
 
-// insertTestUniswapV4Pool appends a throwaway pool keyed by poolIDHex so the
-// fact-table tests, which all write block/log_index 0, cannot collide under the
-// natural-key advisory lock. Returns the current version's surrogate id.
+// Every fact-table test writes block/log_index 0, so each needs a pool of its
+// own to stay off the others' natural-key advisory lock.
 func insertTestUniswapV4Pool(t *testing.T, ctx context.Context, poolIDHex string) int64 {
 	t.Helper()
 
@@ -1448,9 +1399,8 @@ func insertTestUniswapV4Pool(t *testing.T, ctx context.Context, poolIDHex string
 	return poolID
 }
 
-// A WITH (tsdb.hypertable, ...) declaration creates its own 1-day compression
-// policy, and add_compression_policy then returns -1 instead of widening it, so
-// the declared 2 days has to be asserted rather than assumed.
+// A WITH (tsdb.hypertable, …) declaration creates its own 1-day compression
+// policy, and add_compression_policy then returns -1 instead of widening it.
 func TestUniswapV4HypertablesCompressAfterTwoDays(t *testing.T) {
 	ctx := context.Background()
 
@@ -1481,8 +1431,6 @@ func TestUniswapV4HypertablesCompressAfterTwoDays(t *testing.T) {
 	}
 }
 
-// Every table records its own write time: build_registry.built_at is when the
-// build registered, so build_id alone only bounds when a row was written.
 func TestUniswapV4CreatedAtIsTimestamptz(t *testing.T) {
 	ctx := context.Background()
 
@@ -1509,22 +1457,15 @@ func TestUniswapV4CreatedAtIsTimestamptz(t *testing.T) {
 	}
 }
 
-// uniswapV4CreatedAtChainID keeps the pool-manager row this test appends off
-// chain 1, whose single manager identity a sibling test asserts on.
+// Off chain 1, whose single pool-manager identity a sibling test asserts on.
 const uniswapV4CreatedAtChainID = 475002
 
-// uniswapV4CreatedAtCase is one table's minimal INSERT plus the values it binds,
-// so a single non-UTC session can exercise created_at on every table.
 type uniswapV4CreatedAtCase struct {
 	table  string
 	insert string
 	args   []any
 }
 
-// uniswapV4CreatedAtCases seeds what each INSERT references and returns one case
-// per table in the migration. Each case gets its own chain or pool, so the block
-// and log_index values the fact fixtures share cannot collide with a sibling
-// test's rows.
 func uniswapV4CreatedAtCases(t *testing.T, ctx context.Context) []uniswapV4CreatedAtCase {
 	t.Helper()
 
@@ -1597,9 +1538,8 @@ func seedUniswapV4CreatedAtProtocol(t *testing.T, ctx context.Context) int64 {
 	return protocolID
 }
 
-// created_at holds an instant, so a row written under a non-UTC session still
-// compares equal to now(); a naive UTC wall-clock column would be read back as
-// the session's local time and drift by that session's UTC offset.
+// timestamptz holds an instant; a naive wall-clock column would read back as the
+// writing session's local time and drift by its UTC offset.
 func TestUniswapV4CreatedAtIgnoresSessionTimeZone(t *testing.T) {
 	ctx := context.Background()
 	cases := uniswapV4CreatedAtCases(t, ctx)
@@ -1624,9 +1564,8 @@ func TestUniswapV4CreatedAtIgnoresSessionTimeZone(t *testing.T) {
 				t.Fatalf("inserting into %s under a non-UTC session TimeZone: %v", tc.table, err)
 			}
 
-			// Measuring the drift on the writing session re-applies that
-			// session's offset and cancels it out, so a naive column reads as
-			// zero drift there; only a second session can see it.
+			// The writing session would re-apply its own offset and cancel the
+			// drift out, so only a second session can see it.
 			var driftSeconds float64
 			if err := uniswapV4TestPool.QueryRow(ctx,
 				`SELECT EXTRACT(EPOCH FROM (now() - $1::timestamptz))::double precision`,

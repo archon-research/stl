@@ -165,9 +165,7 @@ type cryptoConverted struct {
 	calcWithdrawOneCoin pgtype.FlatArray[pgtype.Numeric]
 }
 
-// SaveBlock persists all of a block's curve rows in one pgx.Batch within tx and
-// returns both the count of state rows the block queued and the count that
-// actually appended.
+// SaveBlock persists all of a block's curve rows in one pgx.Batch within tx.
 func (r *CurveRepository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.BlockWrites) (stateRows outbound.StateRowCounts, err error) {
 	swaps, err := convertSwaps(w.Swaps)
 	if err != nil {
@@ -469,13 +467,6 @@ func queueCurveBatch(
 	return nil
 }
 
-// sendCurveBatch executes the queued batch and drains every result in queue
-// order, returning both the number of state-row statements it drained and the
-// number of rows they appended (only stableswap/cryptoswap states count). The
-// two diverge on an idempotent replay, where every INSERT conflicts away;
-// counting the attempt here rather than in the service means a repo-layer drop
-// is counted as zero attempts too. The batch reader is always closed before
-// returning so the caller may issue further queries on tx.
 func sendCurveBatch(
 	ctx context.Context,
 	tx pgx.Tx,

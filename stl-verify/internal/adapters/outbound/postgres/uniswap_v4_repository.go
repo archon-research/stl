@@ -16,41 +16,24 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// Compile-time check that UniswapV4Repository implements outbound.UniswapV4Repository.
 var _ outbound.UniswapV4Repository = (*UniswapV4Repository)(nil)
 
-// nativeETHPlaceholder is the token row a currency of address(0) must resolve
-// to. address(0) is NOT usable as native ETH here: it already exists in the
-// token registry as a distinct "no token" sentinel (empty symbol, 0 decimals)
-// written by another worker, so reusing it would silently scale ETH amounts by
-// 10^0. 0xEeee… is the registry's ETH row (curve_pool_coin uses the same one).
+// address(0) is not usable as native ETH: the token registry already holds it
+// as a "no token" sentinel with 0 decimals, so ETH amounts would scale by 10^0.
 var nativeETHPlaceholder = common.HexToAddress("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE")
 
-// UniswapV4Repository is a PostgreSQL implementation of the outbound.UniswapV4Repository port.
 type UniswapV4Repository struct {
 	pool    *pgxpool.Pool
 	buildID buildregistry.BuildID
 }
 
-// NewUniswapV4Repository creates a new PostgreSQL Uniswap V4 repository.
 func NewUniswapV4Repository(pool *pgxpool.Pool, buildID buildregistry.BuildID) *UniswapV4Repository {
 	return &UniswapV4Repository{pool: pool, buildID: buildID}
 }
 
-// loadUniswapV4PoolsSQL reads the current registry for one chain. Both registry
-// tables are append-only version histories, so "current" is the highest
-// processing_version per natural key: DISTINCT ON (pool_id) for the pools, and
-// the single newest uniswap_v4_pool_manager row for the chain. The PoolManager
-// address is the FK'd protocol row's, never a column of its own.
-//
-// Every join to the right of the pool subquery is LEFT and chain-scoped, so a
-// registry defect surfaces as a named error from the scan rather than as a
-// silently missing or silently wrong pool: a missing manager row, or a manager
-// protocol / currency token whose row belongs to another chain, would otherwise
-// drop the pool or hand back another chain's PoolManager address, and leave the
-// indexer looking healthy. manager_id is selected so the scan can tell an
-// absent manager row from one whose protocol is off-chain; an inner protocol
-// join would instead skip to the previous manager version and look clean.
+// Every join right of the pool subquery is LEFT and chain-scoped so a registry
+// defect becomes a named scan error, not a dropped or cross-chain pool;
+// manager_id separates an absent manager row from an off-chain protocol.
 const loadUniswapV4PoolsSQL = `
 	SELECT p.id, m.manager_id, m.protocol_id, m.pool_manager_address, m.state_view_address,
 	       p.pool_id, p.currency0, p.currency1,
@@ -78,11 +61,6 @@ const loadUniswapV4PoolsSQL = `
 	LEFT JOIN token t1 ON t1.id = p.currency1_token_id AND t1.chain_id = $1
 	ORDER BY p.id`
 
-// LoadPools returns the current version of every registered pool on chainID,
-// with the chain's current PoolManager / StateView addresses and the currency
-// decimals. Every registry defect the port documents (a missing PoolManager,
-// NULL decimals, a currency that disagrees with its token row) is an error
-// rather than a skipped pool.
 func (r *UniswapV4Repository) LoadPools(ctx context.Context, chainID int64) ([]outbound.UniswapV4PoolRow, error) {
 	rows, err := r.pool.Query(ctx, loadUniswapV4PoolsSQL, chainID)
 	if err != nil {
@@ -160,11 +138,8 @@ func scanUniswapV4PoolRow(rows pgx.Rows, chainID int64) (outbound.UniswapV4PoolR
 	}, nil
 }
 
-// currencyTokenDecimals returns the decimals of the token row a currency
-// resolves to, rejecting a registry row whose token is absent from this chain,
-// is not that currency (or, for native ETH, not the placeholder), or has NULL
-// decimals. token is the raw column so an absent row is distinguishable from
-// the zero address, which is itself a meaningful currency value.
+// token is the raw column, so an absent row stays distinguishable from the zero
+// address — itself a meaningful currency value.
 func currencyTokenDecimals(poolID int64, field string, currency common.Address, token []byte, decimals *int) (int, error) {
 	want := currency
 	if currency == (common.Address{}) {
@@ -182,7 +157,6 @@ func currencyTokenDecimals(poolID int64, field string, currency common.Address, 
 	return *decimals, nil
 }
 
-// v4StateConverted holds pre-converted numeric values for a uniswap_v4_pool_state insert.
 type v4StateConverted struct {
 	s                *entity.UniswapV4PoolState
 	sqrtPriceX96     pgtype.Numeric
@@ -191,7 +165,6 @@ type v4StateConverted struct {
 	feeGrowthGlobal1 pgtype.Numeric
 }
 
-// v4SwapConverted holds pre-converted numeric values for a uniswap_v4_swap insert.
 type v4SwapConverted struct {
 	s            *entity.UniswapV4Swap
 	amount0      pgtype.Numeric
@@ -200,17 +173,11 @@ type v4SwapConverted struct {
 	liquidity    pgtype.Numeric
 }
 
-// v4LiquidityEventConverted holds pre-converted numeric values for a
-// uniswap_v4_liquidity_event insert.
 type v4LiquidityEventConverted struct {
 	e              *entity.UniswapV4LiquidityEvent
 	liquidityDelta pgtype.Numeric
 }
 
-// SaveBlock persists all of a block's uniswap_v4 rows in one pgx.Batch within
-// tx, except ticks (append-on-change, see uniswapTickWriter), and returns both
-// the count of state rows the block queued and the count that actually
-// appended.
 func (r *UniswapV4Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.UniswapV4BlockWrites) (stateRows outbound.StateRowCounts, err error) {
 	rows, err := convertV4BlockWrites(w)
 	if err != nil {
@@ -243,16 +210,8 @@ const currentUniswapV4PoolCTE = `
 	    ORDER BY chain_id, pool_id, processing_version DESC
 	)`
 
-// poolIDsWithStateAtBlockSQL resolves each state row's pool through the
-// registry twice over: uniswap_v4_pool_state carries no chain_id, so the
-// worker's chain filter has to come from the pool row the fact FKs, and
-// currentUniswapV4PoolCTE maps that pool forward to the only id the caller's
-// in-memory registry knows.
-//
-// The block_timestamp band is what lets TimescaleDB exclude chunks: filtering
-// on block_number alone scans every chunk of the hypertable on each reorg
-// (VEC-541). One day either side is far wider than any block's own timestamp
-// needs and still prunes to a couple of chunks.
+// The ±1 day block_timestamp band is what prunes chunks; filtering on
+// block_number alone scans every chunk of the hypertable on each reorg (VEC-541).
 const poolIDsWithStateAtBlockSQL = currentUniswapV4PoolCTE + `
 	SELECT DISTINCT cur.id
 	FROM uniswap_v4_pool_state s
@@ -264,12 +223,6 @@ const poolIDsWithStateAtBlockSQL = currentUniswapV4PoolCTE + `
 	                            AND $3::timestamptz + INTERVAL '1 day'
 	ORDER BY cur.id`
 
-// PoolIDsWithStateAtBlock returns the current registry ids of the pools on
-// chainID that already have a uniswap_v4_pool_state row at blockNumber,
-// ascending. A reorg redelivery unions them into its due set so the orphaned
-// fork's snapshot is superseded even when the in-memory tracker was lost to a
-// restart. Queries the connection pool directly (committed rows), not a write
-// transaction.
 func (r *UniswapV4Repository) PoolIDsWithStateAtBlock(ctx context.Context, chainID int64, blockNumber int64, blockTimestamp time.Time) ([]int64, error) {
 	rows, err := r.pool.Query(ctx, poolIDsWithStateAtBlockSQL, chainID, blockNumber, blockTimestamp)
 	if err != nil {
@@ -291,18 +244,9 @@ func (r *UniswapV4Repository) PoolIDsWithStateAtBlock(ctx context.Context, chain
 	return poolIDs, nil
 }
 
-// poolIDsEverSnapshottedSQL asks, per registered pool, whether any fact row was
-// ever written for it. "Ever" admits no block_timestamp bound, so unlike
-// poolIDsWithStateAtBlockSQL this cannot prune chunks (VEC-541) and probes every
-// chunk of the uniswap_v4_pool_state hypertable for a pool that has none. That
-// is affordable only because it runs once per process boot over a registry of
-// tens of pools — do not reuse it on a per-block path.
-//
-// The uniswap_v4_tick side is exact (a plain table, never tiered); the
-// pool_state side stops at the 1-year tiering policy, since
-// timescaledb.enable_tiered_reads defaults off. So "ever" is only literally
-// true for a pool that has ever had an initialized tick — which is every pool
-// that has ever held liquidity.
+// Unbounded by block_timestamp, so it prunes no chunks (VEC-541): boot only,
+// never a per-block path. The pool_state side also stops at the 1-year tiering
+// horizon (enable_tiered_reads defaults off); the plain tick table is exact.
 const poolIDsEverSnapshottedSQL = currentUniswapV4PoolCTE + `
 	SELECT DISTINCT cur.id
 	FROM uniswap_v4_pool p
@@ -312,8 +256,6 @@ const poolIDsEverSnapshottedSQL = currentUniswapV4PoolCTE + `
 	       OR EXISTS (SELECT 1 FROM uniswap_v4_pool_state s WHERE s.pool_id = p.id))
 	ORDER BY cur.id`
 
-// PoolIDsEverSnapshotted queries the connection pool directly (committed rows),
-// not a write transaction.
 func (r *UniswapV4Repository) PoolIDsEverSnapshotted(ctx context.Context, chainID int64) ([]int64, error) {
 	rows, err := r.pool.Query(ctx, poolIDsEverSnapshottedSQL, chainID)
 	if err != nil {
@@ -335,15 +277,8 @@ func (r *UniswapV4Repository) PoolIDsEverSnapshotted(ctx context.Context, chainI
 	return poolIDs, nil
 }
 
-// ticksForPoolAtBlockSQL resolves across registry versions the same way
-// poolIDsWithStateAtBlockSQL does, in the opposite direction: the caller holds
-// the current surrogate id, while a registry correction left the tick rows
-// under a superseded one. Matching on the id alone returns nothing for exactly
-// the pools the reorg path exists to supersede.
-//
-// idx_uniswap_v4_tick_block_lookup still serves the fact side, whose
-// (pool_id, block_number, tick) order makes both filters boundary quals and
-// yields tick already sorted; the PK's interleaved tick column cannot.
+// idx_uniswap_v4_tick_block_lookup serves the fact side: both filters become
+// boundary quals and tick comes out sorted, which the PK's order cannot give.
 const ticksForPoolAtBlockSQL = currentUniswapV4PoolCTE + `
 	SELECT DISTINCT t.tick
 	FROM uniswap_v4_tick t
@@ -352,11 +287,6 @@ const ticksForPoolAtBlockSQL = currentUniswapV4PoolCTE + `
 	WHERE p.chain_id = $1 AND cur.id = $2 AND t.block_number = $3
 	ORDER BY t.tick`
 
-// TicksForPoolAtBlock returns the distinct tick positions with a row for pool at
-// blockNumber, ascending. A reorg redelivery uses this to re-read exactly the
-// ticks a prior version wrote at this height and supersede them at the new
-// version. Queries the connection pool directly (committed rows), not a write
-// transaction.
 func (r *UniswapV4Repository) TicksForPoolAtBlock(ctx context.Context, chainID int64, poolID int64, blockNumber int64) ([]int32, error) {
 	rows, err := r.pool.Query(ctx, ticksForPoolAtBlockSQL, chainID, poolID, blockNumber)
 	if err != nil {
@@ -443,8 +373,6 @@ func convertV4LiquidityEvents(events []*entity.UniswapV4LiquidityEvent) ([]v4Liq
 	return out, nil
 }
 
-// v4BatchRows is one block's converted rows in the canonical batch order that
-// sendUniswapV4Batch drains them in.
 type v4BatchRows struct {
 	states     []v4StateConverted
 	swaps      []v4SwapConverted
@@ -468,17 +396,14 @@ func convertV4BlockWrites(w outbound.UniswapV4BlockWrites) (v4BatchRows, error) 
 	return v4BatchRows{states: states, swaps: swaps, liqs: liqs, poolEvents: w.PoolEvents}, nil
 }
 
-// v4BatchSection names one contiguous run of queued statements so the drain can
-// walk the batch without re-listing every slice.
 type v4BatchSection struct {
 	name            string
 	count           int
 	countsStateRows bool
 }
 
-// sections must stay in the order queueUniswapV4Batch queues them: pgx returns
-// batch results positionally, so a reordering here silently mis-attributes both
-// the row counts and the error messages.
+// Order must match queueUniswapV4Batch: pgx returns batch results positionally,
+// so a reordering silently mis-attributes the row counts and the error messages.
 func (rows v4BatchRows) sections() []v4BatchSection {
 	return []v4BatchSection{
 		{name: "state", count: len(rows.states), countsStateRows: true},
@@ -560,13 +485,6 @@ func queueV4PoolEvents(batch *pgx.Batch, poolEvents []*entity.UniswapV4PoolEvent
 	}
 }
 
-// sendUniswapV4Batch executes the queued batch and drains every result in queue
-// order, returning both the number of state-row statements it drained and the
-// number of rows they appended. The two diverge on an idempotent replay, where
-// every INSERT conflicts away; counting the attempt here rather than in the
-// service means a repo-layer drop is counted as zero attempts too. The batch
-// reader is always closed before returning so the caller may issue further
-// queries on tx (writeTicks runs after this).
 func sendUniswapV4Batch(ctx context.Context, tx pgx.Tx, batch *pgx.Batch, rows v4BatchRows) (stateRows outbound.StateRowCounts, err error) {
 	br := tx.SendBatch(ctx, batch)
 	defer func() {
@@ -591,8 +509,6 @@ func sendUniswapV4Batch(ctx context.Context, tx pgx.Tx, batch *pgx.Batch, rows v
 	return stateRows, nil
 }
 
-// uniswapV4TickRows maps the V4 entities onto the shared writer's row shape.
-// The V4 table has no initialized column, so the field stays unset.
 func uniswapV4TickRows(ticks []*entity.UniswapV4Tick) []uniswapTickRow {
 	rows := make([]uniswapTickRow, len(ticks))
 	for i, t := range ticks {
