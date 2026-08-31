@@ -274,8 +274,6 @@ metadata:
   name: robinhood-allocation-tracker-config
 data:
   AWS_REGION: "eu-west-1"
-  # TODO(ARCT-376): "robinhood-mainnet" is a placeholder — confirm the actual
-  # Alchemy (or other) RPC endpoint for Robinhood Chain before enabling.
   ALCHEMY_HTTP_URL: "https://robinhood-mainnet.g.alchemy.com/v2"
   DEPLOY_ENV: "staging"
   CHAIN_ID: "4663"
@@ -559,8 +557,6 @@ metadata:
   name: robinhood-watcher-config
 data:
   CHAIN_ID: "4663"
-  # TODO(ARCT-376): "robinhood-mainnet" is a placeholder — confirm the actual
-  # Alchemy (or other) RPC endpoint for Robinhood Chain before enabling.
   ALCHEMY_HTTP_URL: "https://robinhood-mainnet.g.alchemy.com/v2"
   ALCHEMY_WS_URL: "wss://robinhood-mainnet.g.alchemy.com/v2"
   AWS_REGION: "eu-west-1"
