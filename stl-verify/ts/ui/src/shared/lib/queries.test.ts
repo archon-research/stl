@@ -2,6 +2,7 @@ import { HttpRequestError } from '@archon-research/http-client-react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type {
+  AllocationActivityBucket,
   AllocationActivityEnvelope,
   ExposureEnvelope,
   PrimeDebtEnvelope,
@@ -32,6 +33,19 @@ function selectOf<TData, TSelected>(options: {
   return select;
 }
 
+/**
+ * The same select, seen as the untyped payload the cache actually hands it. The
+ * contract-violation cases below feed it what no envelope type can express.
+ */
+function wireSelectOf<TData, TSelected>(options: {
+  select?: (data: TData) => TSelected;
+}): (data: unknown) => TSelected {
+  const select = selectOf(options);
+  // The guard under test defends against arbitrary input; only the response
+  // type claims otherwise. Removed when VEC-686 lands.
+  return select as (data: unknown) => TSelected;
+}
+
 /** The sanitized init a query key carries, which is what the cache compares. */
 function keyInitOf(options: {
   queryKey: readonly [string, string, { query?: Record<string, unknown> }];
@@ -47,6 +61,35 @@ const WINDOW: SeriesWindow = {
 };
 
 const PRIME = '0x1601843c5e9bc251a3272907010afa41fa18347e';
+
+const ENVELOPE_WINDOW: PrimeDebtEnvelope['window'] = {
+  from_timestamp: '2026-08-27T00:00:00.000Z',
+  to_timestamp: '2026-08-28T00:00:00.000Z',
+  interval_ms: 900_000,
+  resolution: 'PT15M',
+};
+
+const debtEnvelope = (
+  mode: PrimeDebtEnvelope['mode'],
+  data: PrimeDebtEnvelope['data'],
+): PrimeDebtEnvelope => ({
+  mode,
+  data,
+  source: 'indexed',
+  window: ENVELOPE_WINDOW,
+});
+
+const activityEnvelope = (
+  mode: AllocationActivityEnvelope['mode'],
+  data: AllocationActivityEnvelope['data'],
+): AllocationActivityEnvelope => ({ mode, data, window: ENVELOPE_WINDOW });
+
+const activityBucket = (bucketStart: string): AllocationActivityBucket => ({
+  bucket_start: bucketStart,
+  event_count: 0,
+  net_flow_usd: '0',
+  total_tx_amount: '0',
+});
 
 afterEach(() => {
   vi.useRealTimers();
@@ -92,8 +135,13 @@ describe('latestReferenceDebtQuery', () => {
 describe('the token-symbol projection', () => {
   const select = selectOf<TokensResponse, string[]>(tokenSymbolsQuery());
 
-  const token = (symbol: string | null) =>
-    ({ symbol }) as TokensResponse[number];
+  const token = (symbol: string | null): TokensResponse[number] => ({
+    address: '0xdc035d45d973e3ec169d2276ddab16f1e407384f',
+    chain_id: 1,
+    id: 1,
+    symbol,
+    updated_at: '2026-08-27T00:00:00.000Z',
+  });
 
   it('upper-cases, trims and de-duplicates', () => {
     expect(
@@ -123,28 +171,25 @@ describe('envelope payload policy', () => {
     const error = vi
       .spyOn(console, 'error')
       .mockImplementation(() => undefined);
-    const select = selectOf<PrimeDebtEnvelope, unknown>(
+    const select = wireSelectOf<PrimeDebtEnvelope, unknown>(
       debtSeriesQuery(PRIME, WINDOW),
     );
 
-    expect(() =>
-      select({
-        mode: 'aggregated',
-        data: null,
-      } as unknown as PrimeDebtEnvelope),
-    ).toThrow(/returned a non-array `data` for an aggregated request/);
+    expect(() => select({ mode: 'aggregated', data: null })).toThrow(
+      /returned a non-array `data` for an aggregated request/,
+    );
     expect(error).toHaveBeenCalledOnce();
   });
 
   it('rejects it on a single-mode series too', () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    const select = selectOf<ExposureEnvelope, unknown>(
+    const select = wireSelectOf<ExposureEnvelope, unknown>(
       exposureSeriesQuery(PRIME, WINDOW),
     );
 
-    expect(() =>
-      select({ mode: 'aggregated', data: null } as unknown as ExposureEnvelope),
-    ).toThrow(/GET \/v1\/primes\/\{prime_id\}\/exposure returned a non-array/);
+    expect(() => select({ mode: 'aggregated', data: null })).toThrow(
+      /GET \/v1\/primes\/\{prime_id\}\/exposure returned a non-array/,
+    );
   });
 });
 
@@ -156,9 +201,9 @@ describe('envelope mode policy', () => {
       debtSeriesQuery(PRIME, WINDOW),
     );
 
-    expect(() =>
-      select({ mode: 'raw', data: [] } as unknown as PrimeDebtEnvelope),
-    ).toThrow(/returned "raw" for an aggregated request/);
+    expect(() => select(debtEnvelope('raw', []))).toThrow(
+      /returned "raw" for an aggregated request/,
+    );
   });
 
   it('coerces a raw envelope to no data on the supplementary activity series', () => {
@@ -167,12 +212,7 @@ describe('envelope mode policy', () => {
       activitySeriesQuery(PRIME, WINDOW),
     );
 
-    expect(
-      select({
-        mode: 'raw',
-        data: [],
-      } as unknown as AllocationActivityEnvelope),
-    ).toStrictEqual([]);
+    expect(select(activityEnvelope('raw', []))).toStrictEqual([]);
     // Coerced, but never silently: this is still a contract violation.
     expect(warn).toHaveBeenCalledOnce();
   });
@@ -183,13 +223,12 @@ describe('envelope mode policy', () => {
       { bucket_start: string }[]
     >(activitySeriesQuery(PRIME, WINDOW));
 
-    const sorted = select({
-      mode: 'aggregated',
-      data: [
-        { bucket_start: '2026-08-28T00:00:00Z' },
-        { bucket_start: '2026-08-27T00:00:00Z' },
-      ],
-    } as unknown as AllocationActivityEnvelope);
+    const sorted = select(
+      activityEnvelope('aggregated', [
+        activityBucket('2026-08-28T00:00:00Z'),
+        activityBucket('2026-08-27T00:00:00Z'),
+      ]),
+    );
 
     expect(sorted.map((bucket) => bucket.bucket_start)).toStrictEqual([
       '2026-08-27T00:00:00Z',
