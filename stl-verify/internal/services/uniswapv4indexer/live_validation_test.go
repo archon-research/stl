@@ -51,11 +51,9 @@ var busyPoolID = common.HexToHash("0x1d5b2949ece8754c2d736991c62c5162bd144f497b2
 // PYUSD/USDS 0.0005%.
 var fallbackSwapPoolID = common.HexToHash("0xe63e32b2ae40601662f760d6bf5d771057324fbd97784fe1d3717069f7b75d45")
 
-var hookedPoolID = common.HexToHash("0x904e8ad11c6f8abb44ea77c507355900e7f9d2907ab0a29353cb1ef0f06b0852")
-
 var slot0CrossCheckPools = []common.Hash{
 	busyPoolID,
-	hookedPoolID,
+	common.HexToHash(hookedPoolID),
 	fallbackSwapPoolID,
 }
 
