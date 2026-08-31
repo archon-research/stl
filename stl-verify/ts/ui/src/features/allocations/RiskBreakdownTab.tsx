@@ -1,8 +1,7 @@
 import {
   buildRowSearchString,
-  type CellContext,
-  type ColumnDef,
   DataTable,
+  defineIdentifiedColumns,
   ErrorState,
   matchesSearchQuery,
   SkeletonStack,
@@ -104,40 +103,33 @@ function truncatingHeader(label: string) {
   );
 }
 
-function createRiskColumns(chainId: number | null): ColumnDef<RiskItem>[] {
-  return [
+function createRiskColumns(chainId: number | null) {
+  return defineIdentifiedColumns<RiskItem>(
     {
       id: 'symbol',
       header: 'Symbol',
       accessorKey: 'symbol',
-      cell: (info: CellContext<RiskItem>) => (
-        <RiskSymbolCell chainId={chainId} symbol={info.getValue() as string} />
+      cell: ({ row }) => (
+        <RiskSymbolCell chainId={chainId} symbol={row.original.symbol} />
       ),
     },
     {
       id: 'amount',
       header: 'Amount',
       accessorKey: 'amount',
-      cell: (info: CellContext<RiskItem>) => {
-        const value = info.getValue();
-        return typeof value === 'string'
-          ? parseFloat(value).toFixed(2)
-          : (value as number).toFixed(2);
-      },
+      cell: ({ row }) => parseFloat(row.original.amount).toFixed(2),
     },
     {
       id: 'price_usd',
       header: 'Price USD',
       accessorKey: 'price_usd',
-      cell: (info: CellContext<RiskItem>) =>
-        formatUsdPrice(info.getValue() as string | number | null | undefined),
+      cell: ({ row }) => formatUsdPrice(row.original.price_usd),
     },
     {
       id: 'amount_usd',
       header: 'Amount USD',
       accessorKey: 'amount_usd',
-      cell: (info: CellContext<RiskItem>) =>
-        formatUsdValue(info.getValue() as string | number | null | undefined),
+      cell: ({ row }) => formatUsdValue(row.original.amount_usd),
       // The bar expresses each item's backing share of the position, so the USD
       // amount and its backing percentage live in one column instead of two.
       meta: {
@@ -153,19 +145,15 @@ function createRiskColumns(chainId: number | null): ColumnDef<RiskItem>[] {
       id: 'lt',
       header: truncatingHeader('Liquidation Threshold'),
       accessorKey: 'liquidation_threshold',
-      cell: (info: CellContext<RiskItem>) =>
-        formatRatioPercent(
-          info.getValue() as string | number | null | undefined,
-        ),
+      cell: ({ row }) => formatRatioPercent(row.original.liquidation_threshold),
     },
     {
       id: 'bonus',
       header: truncatingHeader('Liquidation Bonus'),
       accessorKey: 'liquidation_bonus',
-      cell: (info: CellContext<RiskItem>) =>
-        formatMultiplier(info.getValue() as string | number | null | undefined),
+      cell: ({ row }) => formatMultiplier(row.original.liquidation_bonus),
     },
-  ];
+  );
 }
 
 function RiskTable({
@@ -198,10 +186,7 @@ function RiskTable({
     [items, searchQuery],
   );
 
-  const columns = useMemo<ColumnDef<RiskItem>[]>(
-    () => createRiskColumns(chainId),
-    [chainId],
-  );
+  const columns = useMemo(() => createRiskColumns(chainId), [chainId]);
 
   const table = useDataTable(filteredItems, columns, {
     enableSorting: true,
