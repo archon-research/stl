@@ -12,14 +12,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
+	ethtypes "github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/blocktime"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 func mustV2Topics(t *testing.T) map[common.Hash]struct{} {
@@ -403,5 +407,44 @@ func TestCollectPartitionV2Logs_BoundsConcurrencyToWorkers(t *testing.T) {
 	}
 	if maxInFlight.Load() < 2 {
 		t.Error("downloads never overlapped; collection is still serial")
+	}
+}
+
+type headerFetcherFunc func(context.Context, common.Hash) (*ethtypes.Header, error)
+
+func (f headerFetcherFunc) HeaderByHash(ctx context.Context, h common.Hash) (*ethtypes.Header, error) {
+	return f(ctx, h)
+}
+
+// TestReplayPartition_UnknownBlockHashIsStructural: a hash the node has never
+// seen means the receipts object is an orphaned fork. No retry clears that, and
+// the error must name the block and the object the operator has to re-archive.
+func TestReplayPartition_UnknownBlockHashIsStructural(t *testing.T) {
+	vault := common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2")
+	const block = int64(25395651)
+	rng := blockRange{From: block, To: block}
+	part := partition.GetPartition(block)
+	reader := v2LogPartitionFixture(t, vault, block, block)
+	cfg := config{bucket: "bucket", goroutines: 1}
+
+	notFound := blocktime.New(headerFetcherFunc(func(context.Context, common.Hash) (*ethtypes.Header, error) {
+		return nil, ethereum.NotFound
+	}))
+	_, err := replayPartition(context.Background(), testutil.DiscardLogger(), reader, nil, notFound, cfg, rng, part, vaultSet(vault), mustV2Topics(t))
+	if !errors.Is(err, errStructuralData) {
+		t.Fatalf("error = %v, want a structural defect (an orphaned receipts object needs an S3 repair, not a retry)", err)
+	}
+	for _, want := range []string{"25395651", s3key.Build(block, 0, s3key.Receipts)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+
+	down := blocktime.New(headerFetcherFunc(func(context.Context, common.Hash) (*ethtypes.Header, error) {
+		return nil, errors.New("rpc down")
+	}))
+	_, err = replayPartition(context.Background(), testutil.DiscardLogger(), reader, nil, down, cfg, rng, part, vaultSet(vault), mustV2Topics(t))
+	if err == nil || errors.Is(err, errStructuralData) {
+		t.Fatalf("error = %v, want a retryable transport error", err)
 	}
 }

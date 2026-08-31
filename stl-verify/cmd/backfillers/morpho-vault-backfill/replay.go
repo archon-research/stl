@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
@@ -110,7 +112,13 @@ func replayPartition(
 	for _, e := range entries {
 		blockTimestamp, err := tsCache.TimestampAt(ctx, e.blockHash)
 		if err != nil {
-			return 0, err
+			key := s3key.BuildWithPartition(part, e.blockNumber, e.blockVersion, s3key.Receipts)
+			// A hash the node has never seen is an orphaned fork archived as the
+			// block's highest version: an S3 repair clears it, a retry never will.
+			if errors.Is(err, ethereum.NotFound) {
+				return 0, fmt.Errorf("block %d (%s): %w: %w", e.blockNumber, key, err, errStructuralData)
+			}
+			return 0, fmt.Errorf("block %d (%s): %w", e.blockNumber, key, err)
 		}
 		if err := svc.ReplayMetaMorphoLog(ctx, e.log, e.blockNumber, e.blockHash, e.blockVersion, blockTimestamp); err != nil {
 			return 0, fmt.Errorf("replaying log tx=%s index=%d block=%d: %w", e.log.TransactionHash, e.logIndex, e.blockNumber, err)

@@ -1980,6 +1980,14 @@ The gate deliberately does **not** trip on a single error: a lone transient
 The price is that a stall's *first* hour can still fire this, because the success
 rate needs the full 1h window to fall to zero — so rule out a stall first.
 
+The rule counts only `service_name="morpho-indexer"`. The on-demand replay
+workers (`morpho-vault-backfill`, `morpho-v2-bootstrap`) drive historical logs
+through the same handlers and increment the same counter under their own
+`service_name`, and they emit no `morpho_blocks_processed_total` for the loop
+gate to read — the 2026-08-28 staging era backfill replayed 2,604
+`ForceDeallocate` at up to 1,025/h and held this firing for seven hours against
+~1/h of real activity. A backfill's own series is progress, not an incident.
+
 ### First checks
 
 1. **Confirm the indexer is not stalled or redelivering.** Expect this alert

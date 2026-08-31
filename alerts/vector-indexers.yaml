@@ -662,25 +662,34 @@ groups:
         # VectorMorphoIndexerStalled (critical, 15m) pages long before either and
         # the runbook's first check is to rule out a loop, which is a better trade
         # than going blind on a real liquidity run every time one block errors.
+        #
+        # SCOPED to the live indexer. morpho-vault-backfill and morpho-v2-bootstrap
+        # replay history through the same handlers and count on this same
+        # instrument under their own service_name, and neither emits
+        # morpho_blocks_processed_total, so the loop gate cannot suppress them.
+        # The 2026-08-28 staging era backfill replayed 2,604 ForceDeallocate at up
+        # to 1,025/h and held this firing for 7h against ~1/h of real activity.
+        # Replayed history is not a liquidity run; the replay workers' series stay
+        # on the dashboard as backfill progress.
         expr: |
           sum by (chain, cluster) (
             increase(morpho_events_processed_total{
-              event_type="ForceDeallocate", k8s_namespace_name="vector"
+              event_type="ForceDeallocate", service_name="morpho-indexer", k8s_namespace_name="vector"
             }[1h])
           ) > 20
           unless on (chain, cluster)
           (
             sum by (chain, cluster) (
-              rate(morpho_blocks_processed_total{status="error", k8s_namespace_name="vector"}[1h])
+              rate(morpho_blocks_processed_total{status="error", service_name="morpho-indexer", k8s_namespace_name="vector"}[1h])
             ) > 0
             and on (chain, cluster)
             (
               sum by (chain, cluster) (
-                rate(morpho_blocks_processed_total{status="success", k8s_namespace_name="vector"}[1h])
+                rate(morpho_blocks_processed_total{status="success", service_name="morpho-indexer", k8s_namespace_name="vector"}[1h])
               )
               or
               sum by (chain, cluster) (
-                rate(morpho_blocks_processed_total{k8s_namespace_name="vector"}[1h])
+                rate(morpho_blocks_processed_total{service_name="morpho-indexer", k8s_namespace_name="vector"}[1h])
               ) * 0
             ) == 0
           )
