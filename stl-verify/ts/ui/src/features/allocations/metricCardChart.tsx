@@ -172,14 +172,20 @@ const THRESHOLD_LABEL_FONT_SIZE = 11;
  * chart passes `nice`, which adjusts the domain, so a locally derived scale
  * would place the text off its own line.
  */
+// visx types the context's scales as the union of every d3 scale, which is not
+// callable with a plain number; this chart's y scale is always numeric.
+function isNumericScale(
+  scale: unknown,
+): scale is (value: number) => number | undefined {
+  return typeof scale === 'function';
+}
+
 function ThresholdLabels({ thresholds }: { thresholds: ThresholdEntry[] }) {
   const context = useContext(DataContext);
-  const yScale = context?.yScale as
-    | ((value: number) => number | undefined)
-    | undefined;
+  const yScale = context?.yScale;
   const marginLeft = context?.margin?.left;
 
-  if (yScale === undefined || marginLeft === undefined) {
+  if (!isNumericScale(yScale) || marginLeft === undefined) {
     return null;
   }
 
@@ -359,7 +365,7 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
   );
 
   const xAccessor = (point: ChartDatum): string | number =>
-    stops === null ? point.label : (point.timestamp as number);
+    stops === null || point.timestamp === null ? point.label : point.timestamp;
 
   const cursorSeries = [{ id: chart.key, color: chart.stroke, valueAt }];
 
@@ -449,11 +455,9 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
             renderTooltip={({
               tooltipData,
             }: {
-              tooltipData?: { nearestDatum?: { datum: unknown } };
+              tooltipData?: { nearestDatum?: { datum: ChartDatum } };
             }) => {
-              const datum = tooltipData?.nearestDatum?.datum as
-                | ChartDatum
-                | undefined;
+              const datum = tooltipData?.nearestDatum?.datum;
               if (!datum) return null;
               return (
                 <div className={chartTooltipSurfaceClassName}>
