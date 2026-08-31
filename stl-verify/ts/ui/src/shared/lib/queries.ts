@@ -93,6 +93,12 @@ function bucketQuery(range: SeriesWindow) {
   };
 }
 
+// `Array.isArray` is the entire check either way; carrying it in a predicate
+// keeps the arm the caller named from needing an assertion to come back.
+function isEnvelopeRows<TRows>(data: unknown): data is TRows {
+  return Array.isArray(data);
+}
+
 /**
  * Unwraps an envelope's rows, rejecting one that did not hold up: a `mode`
  * other than the one the request asked for, or a `data` that is not an array.
@@ -113,8 +119,8 @@ function requireEnvelopeRows<
   TRows extends TEnvelope['data'],
 >(envelope: TEnvelope, expected: TEnvelope['mode'], label: string): TRows {
   const { data, mode } = envelope;
-  if (mode === expected && Array.isArray(data)) {
-    return data as TRows;
+  if (mode === expected && isEnvelopeRows<TRows>(data)) {
+    return data;
   }
 
   const fault = mode === expected ? 'a non-array `data`' : `"${mode}"`;

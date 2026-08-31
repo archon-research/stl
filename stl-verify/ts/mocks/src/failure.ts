@@ -34,7 +34,7 @@ export const FAILABLE_READS = [
 export type FailableRead = (typeof FAILABLE_READS)[number];
 
 export function isFailableRead(value: unknown): value is FailableRead {
-  return FAILABLE_READS.includes(value as FailableRead);
+  return FAILABLE_READS.some((read) => read === value);
 }
 
 /**

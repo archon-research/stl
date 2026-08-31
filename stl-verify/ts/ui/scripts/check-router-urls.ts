@@ -90,8 +90,15 @@ async function main() {
     // What the address bar and the page settle on, once every entry-time
     // redirect has run.
     const settledUrl = async (url: string) => (await settle(url)).url;
-    const applied = async (url: string) =>
-      (await settle(url)).result.search as SettledSearch;
+    const applied = async (url: string): Promise<SettledSearch> => {
+      const { search } = (await settle(url)).result;
+      // router-kit types a leaf's search as `unknown`; the schemas have already
+      // validated it, so the shape check is all that is left to confirm.
+      if (typeof search !== 'object' || search === null) {
+        throw new Error(`${url} settled without a search object`);
+      }
+      return search;
+    };
     // A resolution is a redirect or a leaf, and only a leaf carries params.
     const leaf = async (url: string): Promise<EntryLeaf> => {
       const resolution = await resolve(url);

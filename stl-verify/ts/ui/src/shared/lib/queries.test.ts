@@ -43,6 +43,7 @@ function wireSelectOf<TData, TSelected>(options: {
   const select = selectOf(options);
   // The guard under test defends against arbitrary input; only the response
   // type claims otherwise. Removed when VEC-686 lands.
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion
   return select as (data: unknown) => TSelected;
 }
 

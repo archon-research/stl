@@ -19,7 +19,7 @@ const config = {
     'typescript/no-misused-promises': 'error',
     'typescript/await-thenable': 'error',
     'typescript/no-base-to-string': 'error',
-    'typescript/no-unsafe-type-assertion': 'off',
+    'typescript/no-unsafe-type-assertion': 'error',
     'typescript/consistent-return': 'off',
     'typescript/no-unnecessary-type-assertion': 'off',
     'typescript/no-unnecessary-type-parameters': 'off',
@@ -30,6 +30,11 @@ const config = {
       files: ['scripts/**'],
       rules: {
         'no-console': 'off',
+        // 6 findings, all bridging openapi-fetch's generics (`MaybeOptionalInit`,
+        // `Extract<Rows[number], ...>`) in the harness's own plumbing rather
+        // than describing a response. The fixtures and handlers are what the
+        // rule is guarding, and they are clean.
+        'typescript/no-unsafe-type-assertion': 'off',
       },
     },
   ],

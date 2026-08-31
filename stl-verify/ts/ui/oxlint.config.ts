@@ -37,17 +37,17 @@ const config = {
     'typescript/await-thenable': 'error',
     'typescript/no-base-to-string': 'error',
 
+    // Narrowing a response type by assertion was how this app described every
+    // envelope, which is exactly why it is a rule and not a count: each one
+    // claimed a shape the schema had not promised, and a schema change would
+    // not have contradicted a single one of them. One survives, carrying a
+    // disable comment that names what removes it (VEC-686); a second would need
+    // the same, which is the point -- an exception has to be argued for.
+    'typescript/no-unsafe-type-assertion': 'error',
+
     // The style rules `--type-aware` also switches on. Off for now, with the
     // count each currently reports across src/ -- turning one on is a cleanup
     // PR of that size, not a side effect of enabling promise safety.
-    //
-    // Narrowing an API envelope union by assertion is the app's normal shape
-    // (the response schema cannot express which arm a query selects), so this
-    // one is closer to a design change than a cleanup. 33 findings, of which 14
-    // are the unit tests asserting fixture literals into response types; app
-    // code carries 19, down from 25, because the query migration collected the
-    // envelope narrowing into `queries.ts`'s selects instead of spreading it.
-    'typescript/no-unsafe-type-assertion': 'off',
     // Fires on the standard effect shape: one branch returns a cleanup, the
     // early-out returns nothing. 4 findings.
     'typescript/consistent-return': 'off',
