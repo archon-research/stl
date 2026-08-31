@@ -108,11 +108,14 @@ export const metricsGridClassName = css({
 
 // The counts are per-breakpoint and computed, so they ride custom properties:
 // panda generates its classes at build time and cannot see a runtime value.
-export function metricsGridStyle(count: number): CSSProperties {
+export function metricsGridStyle(
+  count: number,
+): CSSProperties &
+  Record<'--metric-columns-lg' | '--metric-columns-2xl', number> {
   return {
     '--metric-columns-lg': balancedColumns(count, 2),
     '--metric-columns-2xl': balancedColumns(count, 4),
-  } as CSSProperties;
+  };
 }
 
 export function findMetricChart(

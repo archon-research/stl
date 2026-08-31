@@ -78,6 +78,12 @@ function normalizeRangeSelection<T extends RangeSelection>(selection: T): T {
 // one drift away from a page mixing both provenances.
 const PROVENANCES: readonly Provenance[] = ['indexed', 'reference', 'both'];
 
+// `includes` on a `readonly Provenance[]` demands an argument that is already
+// one, which is the only reason this needed an assertion; `some` narrows.
+function isProvenance(value: string): value is Provenance {
+  return PROVENANCES.some((allowed) => allowed === value);
+}
+
 /**
  * A search param arrives as `unknown` and only a primitive can name a value.
  * Anything else stringifies to '[object Object]', which would then be compared
@@ -98,9 +104,7 @@ export function toProvenance(value: unknown): Provenance | undefined {
     return undefined;
   }
 
-  return PROVENANCES.includes(candidate as Provenance)
-    ? (candidate as Provenance)
-    : undefined;
+  return isProvenance(candidate) ? candidate : undefined;
 }
 
 function provenanceParam() {

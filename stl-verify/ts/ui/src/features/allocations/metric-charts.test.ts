@@ -1,11 +1,16 @@
 import type { TimeRange } from '@archon-research/design-system';
 import { describe, expect, it } from 'vitest';
 
-import type { PrimeRiskCapital } from '../../shared/types/allocation';
+import type {
+  PrimeDebtSnapshot,
+  PrimeRiskCapital,
+} from '../../shared/types/allocation';
 import { buildMetricCharts } from './metric-charts';
 import type { MetricChartInputs } from './metric-charts';
 import type { ChartDatum } from './metricCards';
 import type { PrimeChartSeries } from './usePrimeChartSeries';
+
+const PRIME = '0x1601843c5e9bc251a3272907010afa41fa18347e';
 
 const point = (label: string, value: number): ChartDatum => ({
   label,
@@ -34,7 +39,36 @@ const emptySeries = (): PrimeChartSeries => ({
 const TIME_RANGE: TimeRange = {
   from_timestamp: '2026-08-01T00:00:00Z',
   to_timestamp: '2026-08-08T00:00:00Z',
-} as TimeRange;
+};
+
+// `parseNumericValue` reads `''` as "not reported", so every figure starts
+// absent and a case names only the fields whose cards it means to stand up.
+const capital = (
+  overrides: Partial<PrimeRiskCapital> = {},
+): PrimeRiskCapital => ({
+  exposure_usd: '',
+  model: null,
+  modeled_exposure_usd: '',
+  per_allocation: [],
+  prime_exposure_usd: '',
+  prime_id: PRIME,
+  prime_modeled_exposure_usd: '',
+  prime_required_risk_capital_usd: '',
+  proxy_address: PRIME,
+  required_risk_capital_usd: '',
+  source: 'indexed',
+  ...overrides,
+});
+
+const debtSnapshot = (debtWad: string): PrimeDebtSnapshot => ({
+  block_number: 23_000_000,
+  block_version: 0,
+  debt_wad: debtWad,
+  ilk_name: 'ALLOCATOR-SPARK-A',
+  prime_address: PRIME,
+  prime_name: 'spark',
+  synced_at: '2026-08-01T00:00:00Z',
+});
 
 const inputs = (
   overrides: Partial<MetricChartInputs> = {},
@@ -77,7 +111,7 @@ describe('buildMetricCharts drop rule', () => {
     // absent history is an empty state, not a straight line at today's total.
     const specs = buildMetricCharts(
       inputs({
-        riskCapital: { prime_exposure_usd: '100' } as PrimeRiskCapital,
+        riskCapital: capital({ prime_exposure_usd: '100' }),
       }),
     );
 
@@ -105,7 +139,7 @@ describe('buildMetricCharts drop rule', () => {
   it('leaves every other card free of an error it did not have', () => {
     const specs = buildMetricCharts(
       inputs({
-        riskCapital: { prime_exposure_usd: '100' } as PrimeRiskCapital,
+        riskCapital: capital({ prime_exposure_usd: '100' }),
         series: {
           ...emptySeries(),
           activityErrorMessage: 'activity is unavailable',
@@ -121,7 +155,7 @@ describe('buildMetricCharts current-value fallback', () => {
   it('stands a card up from its current value as two flat, undatable points', () => {
     const specs = buildMetricCharts(
       inputs({
-        riskCapital: { prime_exposure_usd: '250.5' } as PrimeRiskCapital,
+        riskCapital: capital({ prime_exposure_usd: '250.5' }),
       }),
     );
 
@@ -134,8 +168,8 @@ describe('buildMetricCharts current-value fallback', () => {
   it('labels the flat points as range edges when the window is open-ended', () => {
     const specs = buildMetricCharts(
       inputs({
-        riskCapital: { prime_exposure_usd: '1' } as PrimeRiskCapital,
-        timeRange: {} as TimeRange,
+        riskCapital: capital({ prime_exposure_usd: '1' }),
+        timeRange: { from_timestamp: '', to_timestamp: '' },
       }),
     );
 
@@ -191,10 +225,8 @@ describe('buildMetricCharts provenance precedence', () => {
         referenceDebt: {
           bucket_start: '2026-08-01T00:00:00Z',
           debt_wad: '2000000000000000000',
-        } as MetricChartInputs['referenceDebt'],
-        primeDebtSnapshot: {
-          debt_wad: '9000000000000000000',
-        } as MetricChartInputs['primeDebtSnapshot'],
+        },
+        primeDebtSnapshot: debtSnapshot('9000000000000000000'),
       }),
     );
 
@@ -208,10 +240,8 @@ describe('buildMetricCharts provenance precedence', () => {
         referenceDebt: {
           bucket_start: '2026-08-01T00:00:00Z',
           debt_wad: '2000000000000000000',
-        } as MetricChartInputs['referenceDebt'],
-        primeDebtSnapshot: {
-          debt_wad: '9000000000000000000',
-        } as MetricChartInputs['primeDebtSnapshot'],
+        },
+        primeDebtSnapshot: debtSnapshot('9000000000000000000'),
       }),
     );
 
@@ -228,9 +258,7 @@ describe('buildMetricCharts encumbrance band', () => {
   ])('strokes the ratio %o with the band it sits in', (ratio, stroke) => {
     const specs = buildMetricCharts(
       inputs({
-        riskCapital: {
-          prime_encumbrance_ratio: String(ratio),
-        } as PrimeRiskCapital,
+        riskCapital: capital({ prime_encumbrance_ratio: String(ratio) }),
       }),
     );
 
@@ -240,7 +268,7 @@ describe('buildMetricCharts encumbrance band', () => {
   it('draws all three bands as ascending threshold lines', () => {
     const specs = buildMetricCharts(
       inputs({
-        riskCapital: { prime_encumbrance_ratio: '0.5' } as PrimeRiskCapital,
+        riskCapital: capital({ prime_encumbrance_ratio: '0.5' }),
       }),
     );
     const values = chartFor(specs, 'encumbrance-ratio')?.thresholds?.map(
@@ -256,7 +284,7 @@ describe('buildMetricCharts required-capital reference line', () => {
   it('omits the line when no requirement is reported', () => {
     const specs = buildMetricCharts(
       inputs({
-        riskCapital: { total_risk_capital_usd: '10' } as PrimeRiskCapital,
+        riskCapital: capital({ total_risk_capital_usd: '10' }),
       }),
     );
 
@@ -266,10 +294,10 @@ describe('buildMetricCharts required-capital reference line', () => {
   it('draws the requirement once, named rather than numbered on the plot', () => {
     const specs = buildMetricCharts(
       inputs({
-        riskCapital: {
+        riskCapital: capital({
           total_risk_capital_usd: '10',
           prime_required_risk_capital_usd: '4',
-        } as PrimeRiskCapital,
+        }),
       }),
     );
 

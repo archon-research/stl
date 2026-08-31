@@ -17,6 +17,12 @@
 # `--max-warnings=0` matches the npm scripts: oxlint exits 0 on warnings, and the
 # shared presets set `correctness` and `suspicious` to `warn`.
 #
+# `--report-unused-disable-directives` is deliberately NOT passed here, unlike in
+# the npm scripts. This pass omits `--type-aware`, so every type-aware rule is
+# inert -- and a disable directive for one (see `no-unsafe-type-assertion` in
+# both configs) therefore reports nothing and looks unused. CI runs both flags
+# together, which is the only combination that can judge such a directive.
+#
 # `root`, `glob` and `exclude` are all repo-root-relative, and `glob`/`exclude`
 # are applied to the staged path BEFORE `root` rewrites it -- so they have to
 # carry the stl-verify/ts/ prefix too. `run` and the substituted {staged_files}
@@ -47,8 +53,7 @@ pre-commit:
       exclude: *generated_exclude
       run: >-
         npx --no-install uikit-cli lint -c ui/oxlint.config.ts
-        --max-warnings=0 --report-unused-disable-directives
-        --fix {staged_files}
+        --max-warnings=0 --fix {staged_files}
       stage_fixed: true
 
     ui-oxfmt:
@@ -63,8 +68,7 @@ pre-commit:
       glob: 'stl-verify/ts/mocks/**.ts'
       run: >-
         npx --no-install uikit-cli lint -c mocks/oxlint.config.ts
-        --max-warnings=0 --report-unused-disable-directives
-        --fix {staged_files}
+        --max-warnings=0 --fix {staged_files}
       stage_fixed: true
 
     mocks-oxfmt:
