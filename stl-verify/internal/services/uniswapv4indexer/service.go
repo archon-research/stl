@@ -101,11 +101,10 @@ func NewUniswapV4Service(ctx context.Context, deps UniswapV4ServiceDeps) (*Unisw
 	if err != nil {
 		return nil, err
 	}
-	// decodeLog routes the PositionManager branch before the PoolManager's.
 	if positionManager.Address == poolManager {
 		return nil, fmt.Errorf("the registry gives the PoolManager and the PositionManager the same address (%s): every PoolManager log would decode as an NFT transfer", poolManager)
 	}
-	indexed, err := deps.Repo.PoolIDsEverSnapshotted(ctx, deps.ChainID)
+	everSnapshotted, err := deps.Repo.PoolIDsEverSnapshotted(ctx, deps.ChainID)
 	if err != nil {
 		return nil, fmt.Errorf("reading which uniswap v4 pools have ever been indexed on chain %d: %w", deps.ChainID, err)
 	}

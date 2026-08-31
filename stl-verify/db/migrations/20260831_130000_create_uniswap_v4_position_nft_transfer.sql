@@ -1,29 +1,4 @@
 -- Uniswap V4 PositionManager NFT transfers (ARCT-385).
--- Creates the uniswap_v4_position_manager registry and
--- uniswap_v4_position_nft_transfer, the ERC-721 Transfer log stream that makes
--- "who held posm tokenId T at block N" a plain SELECT, with full auditability
--- (ADR-0002) and its column-level COMMENT metadata.
---
--- uniswap_v4_position.owner is the PoolManager-level owner, which for every
--- posm-managed position is the PositionManager contract itself; the human
--- holder is the ERC-721 holder, and only this table records it. The two join on
--- uniswap_v4_position.salt = bytes32(token_id), which is what PositionManager
--- passes to PoolManager.modifyLiquidity.
---
--- This is a PURE EVENT table: every field is in the log, so a reorg
--- redelivery appends a new (block_number, block_version) row set and needs no
--- state re-read. Sibling: uniswap_v4_swap in
--- 20260819_120000_create_uniswap_v4_tables.sql; the trigger / hypertable /
--- compression / tiering boilerplate mirrors it, and the registry mirrors
--- uniswap_v4_pool_manager in the same file.
---
--- COMMENT conventions follow that migration:
---   [Type]: Dimension (seeded/read-only registry) | Hypertable (time-series
---           facts)
---   Roles:  PK | FK->table.col | Partition | Audit
---   Scale:  token_id is the raw uint256 ERC-721 token id, NUMERIC because it
---           does not fit BIGINT; it is not a token amount and carries no
---           decimals.
 
 CREATE TABLE IF NOT EXISTS uniswap_v4_position_manager
 (
