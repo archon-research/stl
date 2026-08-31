@@ -137,15 +137,13 @@ const poolManagerEventsJSON = `[
 	}
 ]`
 
-// positionManagerABIOnce parses positionManagerEventsJSON exactly once, for the
-// same reason the PoolManager's is parsed once: it is on the per-receipt path.
 var positionManagerABIOnce = sync.OnceValues(func() (*abi.ABI, error) {
 	return abis.ParseABI(positionManagerEventsJSON)
 })
 
-// PositionManagerABI returns the ERC-721 Transfer fragment. It is deliberately
-// separate from PoolManagerABI: that ABI's inherited ERC-6909 Transfer is a
-// different event, and one shared topic0 map would decode either against it.
+// PositionManagerABI returns the ERC-721 Transfer fragment. Kept apart from
+// PoolManagerABI: its inherited ERC-6909 Transfer is a different event, and one
+// shared topic0 map would decode either against the other.
 func PositionManagerABI() (*abi.ABI, error) {
 	return positionManagerABIOnce()
 }

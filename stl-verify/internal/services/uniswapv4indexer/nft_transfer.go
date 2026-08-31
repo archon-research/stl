@@ -13,9 +13,6 @@ import (
 
 const erc721TransferEventName = "Transfer"
 
-// positionManagerTransferEvent is kept apart from eventsByID on purpose: the
-// two ABIs share no address and must share no topic0 map. An absent event is an
-// error rather than a nil, which would silently drop every transfer.
 var positionManagerTransferEvent = sync.OnceValues(func() (*abi.Event, error) {
 	positionManagerABI, err := PositionManagerABI()
 	if err != nil {
@@ -28,13 +25,12 @@ var positionManagerTransferEvent = sync.OnceValues(func() (*abi.Event, error) {
 	return &ev, nil
 })
 
-// ERC-20's Transfer hashes to the same topic0 with only three topics, so the
-// arity is the sole discriminator once a log has passed the address filter.
+// ERC-20's Transfer has the same topic0 with three topics, so arity is the only
+// discriminator left once a log has passed the address filter.
 const erc721TransferTopics = 4
 
-// decodePositionManagerLog turns one PositionManager log into a transfer row.
-// The contract's other events (Approval, subscriptions) are skipped rather than
-// captured: protocol_event is scoped to the PoolManager's protocol_id.
+// The posm's other events (Approval, subscriptions) are skipped, not an error:
+// only Transfer names a holder.
 func (d *receiptDecoder) decodePositionManagerLog(log shared.Log) error {
 	if err := assertHexWords(log); err != nil {
 		return err
