@@ -1496,9 +1496,7 @@ func TestWatermarkAlreadyPastUnpublished_RetryFixesThem(t *testing.T) {
 
 	// Set watermark to 10 — it already advanced past the unpublished blocks.
 	// This is the state we'd find in production before deploying the fix.
-	if err := stateRepo.SetBackfillWatermark(ctx, 10); err != nil {
-		t.Fatalf("failed to set watermark: %v", err)
-	}
+	stateRepo.SeedBackfillCursor(10, 0)
 
 	config := BackfillConfig{
 		ChainID:            1,
@@ -2257,11 +2255,13 @@ func TestCacheAndPublishBlockData_RejectsLiteralNullBytes(t *testing.T) {
 // tests can assert the invariant fired. Keep it tiny: this is observability
 // glue, not a full mock.
 type fakeBackfillRecorder struct {
-	mu          sync.Mutex
-	calls       int
-	lastChain   int64
-	lastLag     int64
-	lagRecorded bool
+	mu               sync.Mutex
+	calls            int
+	lastChain        int64
+	lastLag          int64
+	lagRecorded      bool
+	skipped          int
+	lastSkippedChain int64
 }
 
 func (f *fakeBackfillRecorder) RecordBackfillGapNoCanonical(_ context.Context, chainID int64) {
@@ -2276,6 +2276,25 @@ func (f *fakeBackfillRecorder) RecordWatermarkLag(_ context.Context, lag int64) 
 	defer f.mu.Unlock()
 	f.lastLag = lag
 	f.lagRecorded = true
+}
+
+func (f *fakeBackfillRecorder) RecordWatermarkAdvanceSkipped(_ context.Context, chainID int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.skipped++
+	f.lastSkippedChain = chainID
+}
+
+func (f *fakeBackfillRecorder) SkippedAdvances() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.skipped
+}
+
+func (f *fakeBackfillRecorder) LastSkippedChain() int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastSkippedChain
 }
 
 func (f *fakeBackfillRecorder) Calls() int {
@@ -2302,7 +2321,7 @@ func (f *fakeBackfillRecorder) LastLag() int64 {
 	return f.lastLag
 }
 
-// stuckOrphanRepo wraps the in-memory state repo and makes ClearBlockOrphaned
+// stuckOrphanRepo wraps the in-memory state repo and makes ClearBlocksOrphaned
 // a silent no-op. This simulates a hypothetical future code path that
 // reports success but leaves the canonical row orphaned — exactly the
 // silent-failure mode the Piece 2 invariant check is meant to catch.
@@ -2310,7 +2329,7 @@ type stuckOrphanRepo struct {
 	outbound.BlockStateRepository
 }
 
-func (s *stuckOrphanRepo) ClearBlockOrphaned(_ context.Context, _ string) error {
+func (s *stuckOrphanRepo) ClearBlocksOrphaned(_ context.Context, _ []string) error {
 	// Pretend to succeed without actually clearing the flag.
 	return nil
 }
@@ -2589,5 +2608,65 @@ func TestBackfillService_RecordsWatermarkLag(t *testing.T) {
 	// Lag is recorded at cycle start: head=10, watermark=0 → 10.
 	if got := rec.LastLag(); got != 10 {
 		t.Errorf("expected recorded lag 10 (head 10 - watermark 0), got %d", got)
+	}
+}
+
+// refusedAdvanceRepo answers every compare-and-set with "the stored cursor
+// moved on", the state a reorg committing between a pass's scan and its write
+// leaves behind.
+type refusedAdvanceRepo struct {
+	outbound.BlockStateRepository
+}
+
+func (r *refusedAdvanceRepo) AdvanceBackfillWatermark(context.Context, outbound.BackfillCursor, int64) (bool, error) {
+	return false, nil
+}
+
+// TestAdvanceWatermark_SkippedAdvanceIsCounted: a refused advance is the only
+// evidence a pass threw its conclusion away, and a chain whose every pass is
+// refused looks exactly like one with nothing to do until it is counted.
+func TestAdvanceWatermark_SkippedAdvanceIsCounted(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := newMockClient()
+	stateRepo := memory.NewBlockStateRepository()
+	for i := int64(1); i <= 3; i++ {
+		client.AddBlock(i, "")
+		header := client.GetHeader(i)
+		if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+			Number:         i,
+			Hash:           header.Hash,
+			ParentHash:     header.ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
+		}); err != nil {
+			t.Fatalf("save block %d: %v", i, err)
+		}
+		if err := stateRepo.MarkPublishComplete(ctx, header.Hash); err != nil {
+			t.Fatalf("mark published %d: %v", i, err)
+		}
+	}
+
+	rec := &fakeBackfillRecorder{}
+	svc, err := NewBackfillService(BackfillConfig{
+		ChainID:            42161,
+		BoundaryCheckDepth: -1,
+		Logger:             slog.Default(),
+		Metrics:            rec,
+	}, client, &refusedAdvanceRepo{BlockStateRepository: stateRepo}, memory.NewBlockCache(), memory.NewEventSink())
+	if err != nil {
+		t.Fatalf("NewBackfillService: %v", err)
+	}
+
+	if err := svc.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	if got := rec.SkippedAdvances(); got != 1 {
+		t.Fatalf("skipped advances = %d, want 1", got)
+	}
+	if got := rec.LastSkippedChain(); got != 42161 {
+		t.Errorf("skipped advance chain = %d, want 42161", got)
 	}
 }

@@ -169,7 +169,7 @@ func TestLargeDataset_QueryPerformance(t *testing.T) {
 
 	t.Run("FindGaps_NoGaps", func(t *testing.T) {
 		// Set watermark high to skip most blocks
-		repo.SetBackfillWatermark(ctx, totalRows-1000)
+		benchSeedWatermark(t, ctx, repo, totalRows-1000)
 		runQueryBenchmark(t, "FindGaps(last 1000 blocks, no gaps)", 50, func() error {
 			_, err := repo.FindGaps(ctx, totalRows-1000, totalRows)
 			return err
@@ -178,7 +178,7 @@ func TestLargeDataset_QueryPerformance(t *testing.T) {
 
 	t.Run("FindGaps_FullScan", func(t *testing.T) {
 		// Reset watermark to force full scan
-		repo.SetBackfillWatermark(ctx, 0)
+		benchSeedWatermark(t, ctx, repo, 0)
 		// Full scan of 10M rows is expected to be slow - use relaxed thresholds
 		runQueryBenchmarkWithThresholds(t, "FindGaps(full range, no gaps)", 10, 5*time.Second, 10*time.Second, func() error {
 			_, err := repo.FindGaps(ctx, 1, totalRows)
@@ -666,5 +666,17 @@ func sortDurations(d []time.Duration) {
 				d[i], d[j] = d[j], d[i]
 			}
 		}
+	}
+}
+
+// benchSeedWatermark parks the cursor where a benchmark needs it. Seeding is
+// SQL: the port only moves the cursor through its compare-and-set.
+func benchSeedWatermark(t *testing.T, ctx context.Context, repo *BlockStateRepository, watermark int64) {
+	t.Helper()
+	if _, err := repo.Pool().Exec(ctx,
+		`INSERT INTO backfill_watermark (chain_id, watermark, generation) VALUES ($1, $2, 0)
+		 ON CONFLICT (chain_id) DO UPDATE SET watermark = EXCLUDED.watermark`,
+		repo.chainID, watermark); err != nil {
+		t.Fatalf("seed watermark: %v", err)
 	}
 }

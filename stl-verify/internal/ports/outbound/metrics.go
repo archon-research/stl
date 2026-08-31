@@ -68,10 +68,10 @@ const (
 )
 
 // BackfillRecorder records observability events from the backfill gap-fill
-// loop. The single hook today is RecordBackfillGapNoCanonical, fired by the
-// post-cycle invariant check that catches "gap-fill returned success but no
-// canonical row exists" (the silent-failure mode behind VEC-277 arbitrum
-// backfill).
+// loop: the post-cycle invariant check that catches "gap-fill returned success
+// but no canonical row exists" (the silent-failure mode behind VEC-277 arbitrum
+// backfill), and the two cursor signals — how far behind head the watermark is,
+// and how often a pass's advance is refused.
 type BackfillRecorder interface {
 	// RecordBackfillGapNoCanonical increments the counter that fires when a
 	// per-block gap-fill cycle completes without producing a non-orphaned
@@ -83,6 +83,13 @@ type BackfillRecorder interface {
 	// direct symptom that surfaced 26 days late in the VEC-277 incident: the
 	// watermark stayed pinned while head advanced.
 	RecordWatermarkLag(ctx context.Context, lag int64)
+
+	// RecordWatermarkAdvanceSkipped increments the counter for a compare-and-set
+	// the stored cursor refused: a reorg committed while the pass was scanning,
+	// so its conclusion was dropped and the next pass re-runs it. A one-off is
+	// routine; a chain refused pass after pass is a wedged cursor, which
+	// otherwise looks exactly like a chain with nothing to do. Labelled by chain.
+	RecordWatermarkAdvanceSkipped(ctx context.Context, chainID int64)
 }
 
 // BackupMetricsRecorder records metrics for backup processing.

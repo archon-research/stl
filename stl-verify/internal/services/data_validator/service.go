@@ -129,6 +129,7 @@ func (s *Service) Validate(ctx context.Context) (*Report, error) {
 	}
 
 	report.Finalize()
+	s.reportCheckOutcomes(report)
 
 	s.logger.Info("validation complete",
 		"passed", report.Passed,
@@ -139,6 +140,27 @@ func (s *Service) Validate(ctx context.Context) (*Report, error) {
 	)
 
 	return report, nil
+}
+
+// reportCheckOutcomes logs every check that did not pass. The report object
+// never leaves the process — the runner keeps counts, the alert fires on the
+// exit code — so the log is the only route by which a check's message and
+// details (the heights the runbook tells the operator to read) reach anyone.
+func (s *Service) reportCheckOutcomes(report *Report) {
+	for _, check := range report.Checks {
+		attrs := []any{"check", check.Name, "message", check.Message}
+		if len(check.Details) > 0 {
+			attrs = append(attrs, "details", check.Details)
+		}
+		switch check.Status {
+		case StatusError:
+			s.logger.Error("validation check errored", attrs...)
+		case StatusFailed:
+			s.logger.Warn("validation check failed", attrs...)
+		case StatusSkipped:
+			s.logger.Info("validation check skipped", attrs...)
+		}
+	}
 }
 
 // resolveBlockRange determines the actual block range to validate.
@@ -181,9 +203,13 @@ func (s *Service) resolveBlockRange(ctx context.Context) (int64, int64, error) {
 	return fromBlock, toBlock, nil
 }
 
-// validateChainIntegrity verifies parent-hash linkage up to the backfill
-// watermark. Above it is the gap filler's live domain, where an out-of-order
-// arrival is a hole for seconds; backfill_watermark_lag alerts on that instead.
+// validateChainIntegrity verifies the stored chain under two bounds. Up to the
+// backfill watermark every height must be present and linked. Above it a
+// missing height is the gap filler's live work — an out-of-order arrival is a
+// hole for seconds, and backfill_watermark_lag covers it — but a broken link or
+// a duplicated height never repairs itself: it pins the watermark, so the
+// bounded check would never reach it and detection would fall back to the lag
+// alert 1000 blocks later (ARCT-379).
 func (s *Service) validateChainIntegrity(ctx context.Context, fromBlock, toBlock int64) CheckResult {
 	const name = "Chain Integrity"
 	start := time.Now()
@@ -205,37 +231,59 @@ func (s *Service) validateChainIntegrity(ctx context.Context, fromBlock, toBlock
 	if verifyTo < fromBlock {
 		return CheckResult{
 			Name:     name,
-			Status:   StatusPassed,
+			Status:   StatusSkipped,
 			Message:  fmt.Sprintf("Skipped: backfill watermark %d is below the range start %d", watermark, fromBlock),
 			Duration: time.Since(start),
 		}
 	}
 
-	s.logger.Info("validating chain integrity", "from", fromBlock, "to", verifyTo, "watermark", watermark)
+	s.logger.Info("validating chain integrity",
+		"from", fromBlock, "to", verifyTo, "parent_links_to", toBlock, "watermark", watermark)
 
-	err = s.blockStateRepo.VerifyChainIntegrity(ctx, fromBlock, verifyTo)
-	duration := time.Since(start)
-
-	if err != nil {
+	if err := s.verifyChainOver(ctx, fromBlock, verifyTo, toBlock); err != nil {
 		return CheckResult{
 			Name:     name,
 			Status:   StatusFailed,
 			Message:  err.Error(),
-			Duration: duration,
+			Duration: time.Since(start),
 		}
-	}
-
-	message := fmt.Sprintf("Parent-hash chain valid through block %d", verifyTo)
-	if verifyTo == watermark {
-		message = fmt.Sprintf("Parent-hash chain valid through backfill watermark %d", watermark)
 	}
 
 	return CheckResult{
 		Name:     name,
 		Status:   StatusPassed,
-		Message:  message,
-		Duration: duration,
+		Message:  chainValidMessage(watermark, verifyTo, toBlock),
+		Duration: time.Since(start),
 	}
+}
+
+// verifyChainOver runs the strict check up to verifyTo and the parent-link
+// check above it. verifyTo is the lower bound of the second range, not the
+// height after it: a late arrival at verifyTo+1 is saved on its successor's
+// word alone, without checking its own predecessor
+// (live_data's classifyOutOfOrderArrival), so that pair is exactly the one a
+// break hides in.
+func (s *Service) verifyChainOver(ctx context.Context, fromBlock, verifyTo, toBlock int64) error {
+	if err := s.blockStateRepo.VerifyChainIntegrity(ctx, fromBlock, verifyTo); err != nil {
+		return err
+	}
+	if toBlock <= verifyTo {
+		return nil
+	}
+	return s.blockStateRepo.VerifyParentLinks(ctx, verifyTo, toBlock)
+}
+
+// chainValidMessage states what was verified under which bound, so a passed
+// check cannot be read as "the whole range is whole".
+func chainValidMessage(watermark, verifyTo, toBlock int64) string {
+	through := fmt.Sprintf("block %d", verifyTo)
+	if verifyTo == watermark {
+		through = fmt.Sprintf("backfill watermark %d", watermark)
+	}
+	if toBlock <= verifyTo {
+		return fmt.Sprintf("Parent-hash chain valid through %s", through)
+	}
+	return fmt.Sprintf("Parent-hash chain valid through %s; parent links valid through block %d", through, toBlock)
 }
 
 // orphanOnlyHeightsListed caps how many heights the message names; the reported

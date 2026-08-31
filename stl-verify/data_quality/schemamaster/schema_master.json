@@ -483,6 +483,11 @@
       "type": "int8",
       "class": "R"
     },
+    "generation": {
+      "type": "int8",
+      "class": "S",
+      "not_null": true
+    },
     "git_hash": {
       "type": "text",
       "class": "S"

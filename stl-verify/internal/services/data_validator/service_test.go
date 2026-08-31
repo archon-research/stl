@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // mockBlockStateRepository implements outbound.BlockStateRepository for testing.
@@ -23,11 +25,14 @@ type mockBlockStateRepository struct {
 	orphanOnlyErr       error
 	backfillWatermark   int64
 
-	// chainIntegrityViolationAt reports a violation only when that height falls
-	// inside the range VerifyChainIntegrity is asked to check; verifiedTo
-	// records the upper bound the service actually asked for.
+	// chainIntegrityViolationAt and parentLinkViolationAt report a violation
+	// only when that height falls inside the range the corresponding check is
+	// asked for; the recorded ranges are what prove the service asked for the
+	// right bounds, and asked at all.
 	chainIntegrityViolationAt int64
-	verifiedTo                int64
+	parentLinkViolationAt     int64
+	verifiedRanges            []outbound.BlockRange
+	parentLinkRanges          []outbound.BlockRange
 }
 
 func (m *mockBlockStateRepository) SaveBlock(ctx context.Context, state outbound.BlockState) (int, error) {
@@ -65,11 +70,15 @@ func (m *mockBlockStateRepository) GetRecentBlocks(ctx context.Context, limit in
 	return nil, nil
 }
 
+func (m *mockBlockStateRepository) GetLowestCanonicalAbove(ctx context.Context, number, maxNumber int64) (*outbound.BlockState, error) {
+	return nil, nil
+}
+
 func (m *mockBlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash string) error {
 	return nil
 }
 
-func (m *mockBlockStateRepository) ClearBlockOrphaned(ctx context.Context, hash string) error {
+func (m *mockBlockStateRepository) ClearBlocksOrphaned(ctx context.Context, hashes []string) error {
 	return nil
 }
 
@@ -89,11 +98,15 @@ func (m *mockBlockStateRepository) GetBackfillWatermark(ctx context.Context) (in
 	return m.backfillWatermark, nil
 }
 
-func (m *mockBlockStateRepository) SetBackfillWatermark(ctx context.Context, watermark int64) error {
-	return nil
+func (m *mockBlockStateRepository) GetBackfillCursor(ctx context.Context) (outbound.BackfillCursor, error) {
+	return outbound.BackfillCursor{Watermark: m.backfillWatermark}, nil
 }
 
-func (m *mockBlockStateRepository) AdvanceBackfillWatermark(ctx context.Context, expected, watermark int64) (bool, error) {
+func (m *mockBlockStateRepository) RewindBackfillWatermark(ctx context.Context, to int64) (int64, bool, error) {
+	return 0, false, nil
+}
+
+func (m *mockBlockStateRepository) AdvanceBackfillWatermark(ctx context.Context, expected outbound.BackfillCursor, watermark int64) (bool, error) {
 	return true, nil
 }
 
@@ -102,7 +115,7 @@ func (m *mockBlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBl
 }
 
 func (m *mockBlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlock, toBlock int64) error {
-	m.verifiedTo = toBlock
+	m.verifiedRanges = append(m.verifiedRanges, outbound.BlockRange{From: fromBlock, To: toBlock})
 	if m.chainIntegrityViolationAt > 0 &&
 		m.chainIntegrityViolationAt >= fromBlock && m.chainIntegrityViolationAt <= toBlock {
 		return fmt.Errorf("chain integrity violation: canonical block(s) %d to %d missing between blocks %d and %d",
@@ -110,6 +123,16 @@ func (m *mockBlockStateRepository) VerifyChainIntegrity(ctx context.Context, fro
 			m.chainIntegrityViolationAt-1, m.chainIntegrityViolationAt+1)
 	}
 	return m.chainIntegrityError
+}
+
+func (m *mockBlockStateRepository) VerifyParentLinks(ctx context.Context, fromBlock, toBlock int64) error {
+	m.parentLinkRanges = append(m.parentLinkRanges, outbound.BlockRange{From: fromBlock, To: toBlock})
+	if m.parentLinkViolationAt > 0 &&
+		m.parentLinkViolationAt >= fromBlock && m.parentLinkViolationAt <= toBlock {
+		return fmt.Errorf("chain integrity violation at block %d: parent_hash 0xa does not match hash 0xb of block %d",
+			m.parentLinkViolationAt, m.parentLinkViolationAt-1)
+	}
+	return nil
 }
 
 func (m *mockBlockStateRepository) FindOrphanOnlyHeights(ctx context.Context, fromBlock, toBlock int64) ([]int64, error) {
@@ -821,18 +844,21 @@ func TestService_OrphanOnlyHeights_ReportsExactCountAndTruncatesMessage(t *testi
 	}
 }
 
-// TestService_ChainIntegrity_BoundedByWatermark: everything above the backfill
-// watermark is the gap filler's live domain, where an out-of-order arrival is a
-// hole for seconds. Verifying it would fail an hourly run on a gap that
-// backfill_watermark_lag already covers.
+// TestService_ChainIntegrity_BoundedByWatermark: a missing height above the
+// backfill watermark is the gap filler's live domain, where an out-of-order
+// arrival is a hole for seconds, and verifying it would fail an hourly run on
+// something backfill_watermark_lag already covers. A broken parent link up
+// there never repairs itself, pins the watermark, and must still be reported.
 func TestService_ChainIntegrity_BoundedByWatermark(t *testing.T) {
 	tests := []struct {
 		name            string
 		fromBlock       int64
 		watermark       int64
 		violationAt     int64
+		parentViolation int64
 		wantStatus      string
-		wantVerifiedTo  int64
+		wantVerified    []outbound.BlockRange
+		wantParentLinks []outbound.BlockRange
 		wantMsgContains string
 	}{
 		{
@@ -840,29 +866,38 @@ func TestService_ChainIntegrity_BoundedByWatermark(t *testing.T) {
 			watermark:       500,
 			violationAt:     800,
 			wantStatus:      StatusPassed,
-			wantVerifiedTo:  500,
+			wantVerified:    []outbound.BlockRange{{From: 1, To: 500}},
+			wantParentLinks: []outbound.BlockRange{{From: 500, To: 1000}},
 			wantMsgContains: "watermark 500",
 		},
 		{
-			name:           "hole below the watermark fails",
-			watermark:      500,
-			violationAt:    300,
-			wantStatus:     StatusFailed,
-			wantVerifiedTo: 500,
+			name:            "parent break above the watermark fails",
+			watermark:       500,
+			parentViolation: 501,
+			wantStatus:      StatusFailed,
+			wantVerified:    []outbound.BlockRange{{From: 1, To: 500}},
+			wantParentLinks: []outbound.BlockRange{{From: 500, To: 1000}},
+			wantMsgContains: "at block 501",
 		},
 		{
-			name:           "unset watermark verifies the whole range",
-			watermark:      0,
-			violationAt:    800,
-			wantStatus:     StatusFailed,
-			wantVerifiedTo: 1000,
+			name:         "hole below the watermark fails",
+			watermark:    500,
+			violationAt:  300,
+			wantStatus:   StatusFailed,
+			wantVerified: []outbound.BlockRange{{From: 1, To: 500}},
+		},
+		{
+			name:         "unset watermark verifies the whole range",
+			watermark:    0,
+			violationAt:  800,
+			wantStatus:   StatusFailed,
+			wantVerified: []outbound.BlockRange{{From: 1, To: 1000}},
 		},
 		{
 			name:            "watermark below the range start skips the check",
 			fromBlock:       900,
 			watermark:       500,
-			wantStatus:      StatusPassed,
-			wantVerifiedTo:  0,
+			wantStatus:      StatusSkipped,
 			wantMsgContains: "watermark 500 is below the range start 900",
 		},
 	}
@@ -874,6 +909,7 @@ func TestService_ChainIntegrity_BoundedByWatermark(t *testing.T) {
 				maxBlockNumber:            1000,
 				backfillWatermark:         tt.watermark,
 				chainIntegrityViolationAt: tt.violationAt,
+				parentLinkViolationAt:     tt.parentViolation,
 			}
 
 			config := DefaultConfig()
@@ -896,12 +932,63 @@ func TestService_ChainIntegrity_BoundedByWatermark(t *testing.T) {
 			if got.Status != tt.wantStatus {
 				t.Errorf("got status %q, want %q (message %q)", got.Status, tt.wantStatus, got.Message)
 			}
-			if repo.verifiedTo != tt.wantVerifiedTo {
-				t.Errorf("verified up to block %d, want %d", repo.verifiedTo, tt.wantVerifiedTo)
-			}
+			assertRanges(t, "VerifyChainIntegrity", repo.verifiedRanges, tt.wantVerified)
+			assertRanges(t, "VerifyParentLinks", repo.parentLinkRanges, tt.wantParentLinks)
 			if tt.wantMsgContains != "" && !strings.Contains(got.Message, tt.wantMsgContains) {
 				t.Errorf("message %q should contain %q", got.Message, tt.wantMsgContains)
 			}
 		})
+	}
+}
+
+// assertRanges compares the ranges a check was called with, count included, so
+// a call the service should not have made at all is visible.
+func assertRanges(t *testing.T, name string, got, want []outbound.BlockRange) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Errorf("%s called %d time(s) with %v, want %d call(s) with %v", name, len(got), got, len(want), want)
+		return
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("%s call %d = [%d, %d], want [%d, %d]", name, i+1, got[i].From, got[i].To, want[i].From, want[i].To)
+		}
+	}
+}
+
+// TestService_Validate_LogsEveryNonPassedCheck: the report object never leaves
+// the process — the runner keeps counts and the alert fires on the exit code —
+// so a check's message and details reach an operator only through the log.
+func TestService_Validate_LogsEveryNonPassedCheck(t *testing.T) {
+	repo := &mockBlockStateRepository{
+		minBlockNumber:    1,
+		maxBlockNumber:    1000,
+		backfillWatermark: 1000,
+		orphanOnlyHeights: []int64{4, 7},
+	}
+	repo.chainIntegrityError = errors.New("chain integrity violation at block 42")
+
+	logs := &testutil.SlogRecorder{}
+	config := DefaultConfig()
+	config.Logger = slog.New(logs)
+	config.ValidateChainIntegrity = true
+	config.ValidateReorgs = false
+	config.SpotCheckCount = 0
+
+	svc, err := NewService(config, repo, &mockBlockVerifier{})
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	if _, err := svc.Validate(context.Background()); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	for _, want := range []string{"chain integrity violation at block 42", "have only an orphaned block: 4, 7"} {
+		if !logs.ContainsAttr(want) {
+			t.Errorf("no log record carries %q", want)
+		}
+	}
+	if got := logs.CountWarn("validation check failed"); got != 2 {
+		t.Errorf("failed-check warnings = %d, want 2", got)
 	}
 }

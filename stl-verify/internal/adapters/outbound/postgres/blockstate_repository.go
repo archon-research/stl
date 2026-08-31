@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -233,6 +234,30 @@ func (r *BlockStateRepository) GetBlockByNumber(ctx context.Context, number int6
 	return &state, nil
 }
 
+// GetLowestCanonicalAbove retrieves the lowest canonical block whose number is
+// in (number, maxNumber], or nil when the range holds none. Served by
+// idx_block_states_chain_canonical.
+func (r *BlockStateRepository) GetLowestCanonicalAbove(ctx context.Context, number, maxNumber int64) (*outbound.BlockState, error) {
+	query := `
+		SELECT number, hash, parent_hash, received_at, is_orphaned, version, block_published
+		FROM block_states
+		WHERE chain_id = $1 AND number > $2 AND number <= $3 AND NOT is_orphaned
+		ORDER BY number
+		LIMIT 1
+	`
+	var state outbound.BlockState
+	err := r.pool.QueryRow(ctx, query, r.chainID, number, maxNumber).Scan(
+		&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version,
+		&state.BlockPublished)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get lowest canonical block above %d: %w", number, err)
+	}
+	return &state, nil
+}
+
 // GetBlockByHash retrieves a block state by its hash (includes orphaned blocks).
 func (r *BlockStateRepository) GetBlockByHash(ctx context.Context, hash string) (*outbound.BlockState, error) {
 	tracer := otel.Tracer(tracerName)
@@ -322,90 +347,46 @@ func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash strin
 	return nil
 }
 
-// ClearBlockOrphaned clears the is_orphaned flag on a block identified by hash.
-// Used by the backfill loop to self-heal rows that were over-orphaned by a
-// previous reorg whose new canonical chain actually contained the same hash.
-// Idempotent: clearing an already-canonical row is a no-op.
-// Returns an error if the block does not exist.
+// ClearBlocksOrphaned clears the is_orphaned flag on every named block in one
+// transaction, or on none of them. Used by the backfill loop to self-heal a run
+// that was over-orphaned by a previous reorg whose new canonical chain in fact
+// contained those hashes. Idempotent: an already-canonical row is left as it is.
 //
-// Runs inside a transaction that takes the same per-(chain_id, number)
-// advisory lock used by saveBlockOnce and handleReorgAtomicOnce. Without the
-// lock a concurrent live reorg can insert a new canonical row at the same
-// number between this method's lookup and update, leaving two non-orphaned
-// rows at one height and breaking the "highest version = canonical"
-// invariant. The lookup is split from the UPDATE (two statements) to avoid
-// the TimescaleDB XX000 quirk on self-referencing UPDATE-with-SELECT-from-
-// same-hypertable that the external review flagged. See VEC-277 / PR #373
-// review Finding 6.
-func (r *BlockStateRepository) ClearBlockOrphaned(ctx context.Context, hash string) error {
+// Every height is taken under the same per-(chain_id, number) advisory lock
+// saveBlockOnce and handleReorgAtomicOnce use, in ascending order so two
+// healers cannot deadlock. Without the lock a concurrent live reorg can insert
+// a new canonical row at one of these numbers between the lookup and the
+// update, leaving two non-orphaned rows at one height and breaking the
+// "highest version = canonical" invariant. The lookup is split from the UPDATE
+// (two statements) to avoid the TimescaleDB XX000 quirk on self-referencing
+// UPDATE-with-SELECT-from-same-hypertable that the external review flagged.
+// See VEC-277 / PR #373 review Finding 6.
+func (r *BlockStateRepository) ClearBlocksOrphaned(ctx context.Context, hashes []string) error {
+	if len(hashes) == 0 {
+		return nil
+	}
+
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() {
 		if rbErr := tx.Rollback(ctx); rbErr != nil && rbErr != pgx.ErrTxClosed {
-			r.logger.Warn("failed to rollback ClearBlockOrphaned transaction", "error", rbErr)
+			r.logger.Warn("failed to rollback ClearBlocksOrphaned transaction", "error", rbErr)
 		}
 	}()
 
-	// Look up the row first to find its number (used for the advisory lock
-	// namespace). If the row does not exist at all, surface the same
-	// not-found error callers have always seen.
-	var number int64
-	var isOrphaned bool
-	err = tx.QueryRow(ctx,
-		`SELECT number, is_orphaned FROM block_states WHERE chain_id = $1 AND hash = $2`,
-		r.chainID, hash).Scan(&number, &isOrphaned)
+	numbers, err := r.lockHeightsOf(ctx, tx, hashes)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("clear orphan flag: block with hash %s not found", hash)
-		}
-		return fmt.Errorf("failed to look up block by hash: %w", err)
+		return err
 	}
-
-	// Acquire the same per-block advisory lock saveBlockOnce uses, so a
-	// concurrent live insert/reorg at this number is serialised against us.
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1::int, $2::int)`, r.chainID, number); err != nil {
-		return fmt.Errorf("failed to acquire advisory lock: %w", err)
+	if err := r.refuseConflictingCanonical(ctx, tx, numbers, hashes); err != nil {
+		return err
 	}
-
-	// Idempotent: if the row is already canonical there is nothing to do.
-	if !isOrphaned {
-		if err := tx.Commit(ctx); err != nil {
-			return fmt.Errorf("failed to commit transaction: %w", err)
-		}
-		return nil
-	}
-
-	// Guard: never clear the orphan flag if a different canonical row already
-	// exists at this number. That would leave two non-orphaned rows at one
-	// height and break "highest version = canonical". The live writer must
-	// win in that case — the orphan stays.
-	var conflicting int
-	if err := tx.QueryRow(ctx,
-		`SELECT COUNT(*) FROM block_states
-		 WHERE chain_id = $1 AND number = $2 AND hash <> $3 AND NOT is_orphaned`,
-		r.chainID, number, hash).Scan(&conflicting); err != nil {
-		return fmt.Errorf("failed to check for conflicting canonical row: %w", err)
-	}
-	if conflicting > 0 {
-		// Surface as an error so the caller (backfill loop) knows the heal
-		// did not happen and a real reorg is in flight. The backfill retry
-		// path treats this as transient — the new canonical row will be
-		// picked up by the regular gap finder on the next cycle.
-		return fmt.Errorf("clear orphan flag: refusing to un-orphan block %d hash %s: another canonical row already exists at this number", number, hash)
-	}
-
-	tag, err := tx.Exec(ctx,
-		`UPDATE block_states SET is_orphaned = FALSE WHERE chain_id = $1 AND hash = $2`,
-		r.chainID, hash)
-	if err != nil {
-		return fmt.Errorf("failed to clear block orphan flag: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		// Should be unreachable — we already saw the row above under the same
-		// transaction — but kept for defence-in-depth.
-		return fmt.Errorf("clear orphan flag: block with hash %s not found", hash)
+	if _, err := tx.Exec(ctx,
+		`UPDATE block_states SET is_orphaned = FALSE WHERE chain_id = $1 AND hash = ANY($2)`,
+		r.chainID, hashes); err != nil {
+		return fmt.Errorf("failed to clear block orphan flags: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
@@ -413,12 +394,79 @@ func (r *BlockStateRepository) ClearBlockOrphaned(ctx context.Context, hash stri
 	return nil
 }
 
+// lockHeightsOf resolves each hash to its height and takes that height's
+// advisory lock, ascending. An unknown hash is an error: the caller is
+// describing a chain this repository does not hold.
+func (r *BlockStateRepository) lockHeightsOf(ctx context.Context, tx pgx.Tx, hashes []string) ([]int64, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT hash, number FROM block_states WHERE chain_id = $1 AND hash = ANY($2)`,
+		r.chainID, hashes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to look up blocks by hash: %w", err)
+	}
+	defer rows.Close()
+
+	stored := make(map[string]int64, len(hashes))
+	for rows.Next() {
+		var hash string
+		var number int64
+		if err := rows.Scan(&hash, &number); err != nil {
+			return nil, fmt.Errorf("failed to scan block height: %w", err)
+		}
+		stored[hash] = number
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating block heights: %w", err)
+	}
+
+	numbers := make([]int64, 0, len(hashes))
+	for _, hash := range hashes {
+		number, ok := stored[hash]
+		if !ok {
+			return nil, fmt.Errorf("clear orphan flag: block with hash %s not found", hash)
+		}
+		numbers = append(numbers, number)
+	}
+	slices.Sort(numbers)
+	numbers = slices.Compact(numbers)
+
+	for _, number := range numbers {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1::int, $2::int)`, r.chainID, number); err != nil {
+			return nil, fmt.Errorf("failed to acquire advisory lock: %w", err)
+		}
+	}
+	return numbers, nil
+}
+
+// refuseConflictingCanonical stops the heal when another row already holds one
+// of these heights canonically: un-orphaning ours would leave two non-orphaned
+// rows at one height. The live writer wins, and the caller retries once its own
+// gap scan has caught up.
+func (r *BlockStateRepository) refuseConflictingCanonical(ctx context.Context, tx pgx.Tx, numbers []int64, hashes []string) error {
+	var number int64
+	var hash string
+	err := tx.QueryRow(ctx,
+		`SELECT number, hash FROM block_states
+		 WHERE chain_id = $1 AND number = ANY($2) AND NOT is_orphaned AND NOT (hash = ANY($3))
+		 ORDER BY number
+		 LIMIT 1`,
+		r.chainID, numbers, hashes).Scan(&number, &hash)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to check for conflicting canonical row: %w", err)
+	}
+	return fmt.Errorf("clear orphan flag: refusing to un-orphan block %d: canonical row %s already holds this height", number, hash)
+}
+
 // HandleReorgAtomic atomically performs all reorg-related database operations in a single transaction.
 // This ensures consistency: either all operations succeed, or none do.
 // The commonAncestor is derived from the ReorgEvent (BlockNumber - Depth).
 //
-// Uses SERIALIZABLE isolation (consistent with SaveBlock) and includes retry logic
-// for transient tx errors (SQLSTATE 40001 serialization failure, 40P01 deadlock).
+// Uses READ COMMITTED plus the per-block advisory lock (consistent with
+// SaveBlock) and retries transient tx errors (SQLSTATE 40001 serialization
+// failure, 40P01 deadlock).
 func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
 	if newBlock.BlockTimestamp == 0 {
 		return 0, fmt.Errorf("BlockTimestamp is required (used as created_at for hypertable partitioning)")
@@ -546,28 +594,39 @@ func (r *BlockStateRepository) orphanBlocksAbove(ctx context.Context, tx pgx.Tx,
 	return nil
 }
 
-// rewindWatermarkTo lowers the backfill watermark to commonAncestor and reports
-// the value it replaced. FindGaps scans only above the watermark, so a height
-// orphanBlocksAbove leaves without a canonical row is never re-fetched unless
-// the watermark drops back below it (ARCT-379).
+// rewindWatermarkTo lowers the backfill watermark to commonAncestor, counts the
+// reorg in the cursor's generation, and reports the value it replaced. FindGaps
+// scans only above the watermark, so a height orphanBlocksAbove leaves without a
+// canonical row is never re-fetched unless the watermark drops back below it —
+// and where the watermark already sits at or below the ancestor the generation
+// bump is the only thing that stops a pass which scanned before this commit
+// from retiring that height anyway (ARCT-379).
 func (r *BlockStateRepository) rewindWatermarkTo(ctx context.Context, tx pgx.Tx, commonAncestor int64) (int64, bool, error) {
-	query := `
-		WITH previous AS (
-			SELECT watermark FROM backfill_watermark WHERE chain_id = $1
-		)
-		UPDATE backfill_watermark SET watermark = $2
-		WHERE chain_id = $1 AND watermark > $2
-		RETURNING (SELECT watermark FROM previous)
-	`
+	// Read the row under its lock rather than through a CTE beside the write: a
+	// CTE reports the statement snapshot, which is not the row the write
+	// replaced once another writer commits in between.
 	var previous int64
-	err := tx.QueryRow(ctx, query, r.chainID, commonAncestor).Scan(&previous)
+	err := tx.QueryRow(ctx,
+		`SELECT watermark FROM backfill_watermark WHERE chain_id = $1 FOR UPDATE`, r.chainID).Scan(&previous)
+	stored := true
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, false, nil
+		stored = false
+	} else if err != nil {
+		return 0, false, fmt.Errorf("failed to read backfill watermark: %w", err)
 	}
-	if err != nil {
+
+	// Watermark 0 on a chain with no row keeps the "unset" reading every
+	// caller already has for a missing row.
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO backfill_watermark (chain_id, watermark, generation) VALUES ($1, 0, 1)
+		 ON CONFLICT (chain_id) DO UPDATE
+		 SET watermark = LEAST(backfill_watermark.watermark, $2),
+		     generation = backfill_watermark.generation + 1`,
+		r.chainID, commonAncestor); err != nil {
 		return 0, false, fmt.Errorf("failed to rewind backfill watermark: %w", err)
 	}
-	return previous, true, nil
+
+	return previous, stored && previous > commonAncestor, nil
 }
 
 // insertCanonicalBlock stores the reorg's winning block. Version 0 is a
@@ -680,42 +739,83 @@ func (r *BlockStateRepository) GetMaxBlockNumber(ctx context.Context) (int64, er
 // Blocks at or below this number are guaranteed to have no gaps.
 // Returns 0 if no watermark exists yet (e.g., first run for a new chain).
 func (r *BlockStateRepository) GetBackfillWatermark(ctx context.Context) (int64, error) {
-	var watermark int64
-	err := r.pool.QueryRow(ctx, `SELECT watermark FROM backfill_watermark WHERE chain_id = $1`, r.chainID).Scan(&watermark)
+	cursor, err := r.GetBackfillCursor(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return cursor.Watermark, nil
+}
+
+// GetBackfillCursor returns the watermark together with its generation, or the
+// zero cursor when this chain has no row yet.
+func (r *BlockStateRepository) GetBackfillCursor(ctx context.Context) (outbound.BackfillCursor, error) {
+	var cursor outbound.BackfillCursor
+	err := r.pool.QueryRow(ctx,
+		`SELECT watermark, generation FROM backfill_watermark WHERE chain_id = $1`,
+		r.chainID).Scan(&cursor.Watermark, &cursor.Generation)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// No watermark exists yet for this chain - return 0 to start from beginning
-		return 0, nil
+		return outbound.BackfillCursor{}, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("failed to get backfill watermark: %w", err)
+		return outbound.BackfillCursor{}, fmt.Errorf("failed to get backfill cursor: %w", err)
 	}
-	return watermark, nil
+	return cursor, nil
 }
 
-// SetBackfillWatermark updates the watermark to the given block number.
-// Should only be called after confirming all blocks up to this number exist.
-// Uses UPSERT so the row is auto-created for new chains that have no watermark yet.
-func (r *BlockStateRepository) SetBackfillWatermark(ctx context.Context, watermark int64) error {
-	_, err := r.pool.Exec(ctx,
-		`INSERT INTO backfill_watermark (chain_id, watermark) VALUES ($1, $2)
-		 ON CONFLICT (chain_id) DO UPDATE SET watermark = EXCLUDED.watermark`,
-		r.chainID, watermark)
+// RewindBackfillWatermark lowers the watermark to the given block if it sits
+// above it and bumps the generation either way, in its own transaction. The
+// reorg commit does the same write inside its own; this is the entry point for
+// every other path that empties a height, such as the backfill's stale-chain
+// recovery.
+func (r *BlockStateRepository) RewindBackfillWatermark(ctx context.Context, to int64) (int64, bool, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
-		return fmt.Errorf("failed to set backfill watermark: %w", err)
+		return 0, false, fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	return nil
+	defer func() {
+		if rbErr := tx.Rollback(ctx); rbErr != nil && rbErr != pgx.ErrTxClosed {
+			r.logger.Warn("failed to rollback RewindBackfillWatermark transaction", "error", rbErr)
+		}
+	}()
+
+	previous, rewound, err := r.rewindWatermarkTo(ctx, tx, to)
+	if err != nil {
+		return 0, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, false, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return previous, rewound, nil
 }
 
-// AdvanceBackfillWatermark moves the watermark from expected to watermark and
+// AdvanceBackfillWatermark moves the watermark to the given block number as
+// long as the stored cursor is still the one the caller scanned from, and
 // reports whether the row changed.
-func (r *BlockStateRepository) AdvanceBackfillWatermark(ctx context.Context, expected, watermark int64) (bool, error) {
+func (r *BlockStateRepository) AdvanceBackfillWatermark(ctx context.Context, expected outbound.BackfillCursor, watermark int64) (bool, error) {
 	tag, err := r.pool.Exec(ctx,
-		`INSERT INTO backfill_watermark (chain_id, watermark) VALUES ($1, $3)
-		 ON CONFLICT (chain_id) DO UPDATE SET watermark = EXCLUDED.watermark
-		 WHERE backfill_watermark.watermark = $2`,
-		r.chainID, expected, watermark)
+		`UPDATE backfill_watermark SET watermark = $4
+		 WHERE chain_id = $1 AND watermark = $2 AND generation = $3`,
+		r.chainID, expected.Watermark, expected.Generation, watermark)
 	if err != nil {
 		return false, fmt.Errorf("failed to advance backfill watermark: %w", err)
+	}
+	if tag.RowsAffected() > 0 {
+		return true, nil
+	}
+	if expected != (outbound.BackfillCursor{}) {
+		return false, nil
+	}
+
+	// The migrations seed a row for Ethereum and Avalanche only, so every other
+	// chain advances from a cursor that reads as unset until this insert.
+	// DO NOTHING leaves a row another writer seeded first alone, and reports it
+	// as the refusal it is.
+	tag, err = r.pool.Exec(ctx,
+		`INSERT INTO backfill_watermark (chain_id, watermark, generation) VALUES ($1, $2, 0)
+		 ON CONFLICT (chain_id) DO NOTHING`,
+		r.chainID, watermark)
+	if err != nil {
+		return false, fmt.Errorf("failed to seed backfill watermark: %w", err)
 	}
 	return tag.RowsAffected() > 0, nil
 }
@@ -845,21 +945,42 @@ func (r *BlockStateRepository) FindOrphanOnlyHeights(ctx context.Context, fromBl
 }
 
 // VerifyChainIntegrity verifies that the canonical chain over the range is
-// unbroken: consecutive blocks are linked by parent_hash, and no height between
-// two canonical blocks is missing. Returns nil if the chain is valid, or an
-// error describing the first violation in ascending block order.
+// unbroken: consecutive blocks are linked by parent_hash, no height between two
+// canonical blocks is missing, no height above the last canonical block is
+// missing, and no height holds two canonical rows. Returns nil if the chain is
+// valid, or an error describing the first violation in ascending block order.
 func (r *BlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlock, toBlock int64) error {
 	if fromBlock >= toBlock {
 		return nil // Nothing to verify
 	}
+	if err := r.verifyOrderedPairs(ctx, fromBlock, toBlock, true); err != nil {
+		return err
+	}
+	return r.verifyRangeReachesEnd(ctx, fromBlock, toBlock)
+}
 
+// VerifyParentLinks reports the violations that never repair themselves: a
+// broken parent link and two canonical rows at one height. Missing heights are
+// excluded, so the caller can run this above the backfill watermark, where a
+// hole is the gap filler's live work rather than a defect.
+func (r *BlockStateRepository) VerifyParentLinks(ctx context.Context, fromBlock, toBlock int64) error {
+	if fromBlock >= toBlock {
+		return nil
+	}
+	return r.verifyOrderedPairs(ctx, fromBlock, toBlock, false)
+}
+
+// verifyOrderedPairs reports the first violation between two adjacent canonical
+// rows. The version tiebreak keeps two rows at one height in a deterministic
+// order, so the pair that reports them is always the same one.
+func (r *BlockStateRepository) verifyOrderedPairs(ctx context.Context, fromBlock, toBlock int64, reportMissing bool) error {
 	// LAG leaves the range's first block unpaired, so it is never flagged: an
 	// unseeded chain's watermark starts at 0, far below its first block.
 	query := `
 		WITH ordered_blocks AS (
 			SELECT number, hash, parent_hash,
-				LAG(hash) OVER (ORDER BY number) as prev_hash,
-				LAG(number) OVER (ORDER BY number) as prev_number
+				LAG(hash) OVER (ORDER BY number, version) as prev_hash,
+				LAG(number) OVER (ORDER BY number, version) as prev_number
 			FROM block_states
 			WHERE chain_id = $1 AND NOT is_orphaned AND number >= $2 AND number <= $3
 		)
@@ -867,7 +988,8 @@ func (r *BlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlo
 		FROM ordered_blocks
 		WHERE prev_number IS NOT NULL
 			AND (
-				prev_number < number - 1
+				prev_number = number
+				OR (prev_number < number - 1 AND $4)
 				OR (prev_number = number - 1 AND parent_hash != prev_hash)
 			)
 		ORDER BY number
@@ -877,7 +999,7 @@ func (r *BlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlo
 	var brokenBlock, prevBlockNum int64
 	var blockHash, parentHash, prevHash string
 
-	err := r.pool.QueryRow(ctx, query, r.chainID, fromBlock, toBlock).Scan(
+	err := r.pool.QueryRow(ctx, query, r.chainID, fromBlock, toBlock, reportMissing).Scan(
 		&brokenBlock, &blockHash, &parentHash, &prevHash, &prevBlockNum,
 	)
 	if err != nil {
@@ -887,6 +1009,10 @@ func (r *BlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlo
 		return fmt.Errorf("failed to verify chain integrity: %w", err)
 	}
 
+	if prevBlockNum == brokenBlock {
+		return fmt.Errorf("chain integrity violation: duplicate canonical rows at height %d: %s and %s",
+			brokenBlock, prevHash, blockHash)
+	}
 	if prevBlockNum < brokenBlock-1 {
 		return fmt.Errorf("chain integrity violation: canonical block(s) %d to %d missing between blocks %d and %d",
 			prevBlockNum+1, brokenBlock-1, prevBlockNum, brokenBlock)
@@ -894,6 +1020,25 @@ func (r *BlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlo
 
 	return fmt.Errorf("chain integrity violation at block %d: parent_hash %s does not match hash %s of block %d",
 		brokenBlock, parentHash, prevHash, prevBlockNum)
+}
+
+// verifyRangeReachesEnd reports heights missing above the last canonical row.
+// The pair scan has no successor to flag them against, so a hole at the top of
+// the range — the shape a watermark parked on an unfilled height leaves — would
+// otherwise read as a valid chain.
+func (r *BlockStateRepository) verifyRangeReachesEnd(ctx context.Context, fromBlock, toBlock int64) error {
+	var last *int64
+	if err := r.pool.QueryRow(ctx,
+		`SELECT MAX(number) FROM block_states
+		 WHERE chain_id = $1 AND NOT is_orphaned AND number >= $2 AND number <= $3`,
+		r.chainID, fromBlock, toBlock).Scan(&last); err != nil {
+		return fmt.Errorf("failed to verify chain integrity: %w", err)
+	}
+	if last == nil || *last >= toBlock {
+		return nil
+	}
+	return fmt.Errorf("chain integrity violation: canonical block(s) %d to %d missing after block %d",
+		*last+1, toBlock, *last)
 }
 
 // MarkPublishComplete marks a block as published.

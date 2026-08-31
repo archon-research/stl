@@ -200,9 +200,13 @@ post-restart catch-up drains within minutes.
    `stale_fork`. The gap filler refuses to un-orphan it (doing so would make the
    losing fork canonical and wedge every height above it), so the watermark
    stays pinned below N and the lag grows.
-3. **Upstream RPC** — check the Alchemy 429 / error rate; degraded RPC beyond
+3. **Is every advance being refused?** A non-zero
+   `backfill_watermark_advance_skipped_total` on the same `service_name` means
+   a reorg keeps landing mid-scan; sustained alongside a flat lag it is a
+   cursor no pass can move, not a busy chain.
+4. **Upstream RPC** — check the Alchemy 429 / error rate; degraded RPC beyond
    the catch-up rate also grows lag.
-4. **Watcher logs** for repeated gap-fill of the same numbers.
+5. **Watcher logs** for repeated gap-fill of the same numbers.
 
 ### Recovery
 

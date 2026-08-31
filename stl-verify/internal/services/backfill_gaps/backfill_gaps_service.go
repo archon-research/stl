@@ -527,9 +527,7 @@ func (s *BackfillService) processBlockDataInner(ctx context.Context, bd outbound
 		// would leave FindGaps reporting the block as missing forever while
 		// this idempotency check kept skipping the insert.
 		if existing.IsOrphaned {
-			// A block from another fork can share a height but never a parent,
-			// so a mismatch means the fetch and the stored row disagree about
-			// which chain they are on.
+			// A fork shares a height, never a parent.
 			if existing.ParentHash != header.ParentHash {
 				return fmt.Errorf("refusing to un-orphan block %d: stored parent_hash %s differs from fetched %s",
 					blockNum, truncateHash(existing.ParentHash), truncateHash(header.ParentHash))
@@ -624,7 +622,8 @@ func (s *BackfillService) processBlockDataInner(ctx context.Context, bd outbound
 
 // unorphanAnchorDepth bounds the search for the canonical row an un-orphan
 // candidate has to chain up to. A reorg commit inserts one directly above the
-// run it orphaned, and no rewind reaches further back than the finality window.
+// run it orphaned, no rewind reaches further back than the finality window, and
+// a longer over-orphaned run still heals — 64 heights per pass.
 const unorphanAnchorDepth = 64
 
 // unorphanIfOnCanonicalChain clears the orphan flag on the stored row for hash,
@@ -647,10 +646,8 @@ func (s *BackfillService) unorphanIfOnCanonicalChain(ctx context.Context, blockN
 		return fmt.Errorf("refusing to un-orphan block %d: %w", blockNum, err)
 	}
 
-	for _, orphanedHash := range segment {
-		if err := s.stateRepo.ClearBlockOrphaned(ctx, orphanedHash); err != nil {
-			return fmt.Errorf("failed to clear orphan flag on existing block %d: %w", blockNum, err)
-		}
+	if err := s.stateRepo.ClearBlocksOrphaned(ctx, segment); err != nil {
+		return fmt.Errorf("failed to clear orphan flag on existing block %d: %w", blockNum, err)
 	}
 	s.logger.Info("cleared stale orphan flag on backfilled block",
 		"block", blockNum,
@@ -662,16 +659,14 @@ func (s *BackfillService) unorphanIfOnCanonicalChain(ctx context.Context, blockN
 
 // findCanonicalAnchorAbove returns the lowest canonical block above blockNum.
 func (s *BackfillService) findCanonicalAnchorAbove(ctx context.Context, blockNum int64) (*outbound.BlockState, error) {
-	for number := blockNum + 1; number <= blockNum+unorphanAnchorDepth; number++ {
-		block, err := s.stateRepo.GetBlockByNumber(ctx, number)
-		if err != nil {
-			return nil, fmt.Errorf("failed to look up block %d: %w", number, err)
-		}
-		if block != nil {
-			return block, nil
-		}
+	anchor, err := s.stateRepo.GetLowestCanonicalAbove(ctx, blockNum, blockNum+unorphanAnchorDepth)
+	if err != nil {
+		return nil, fmt.Errorf("failed to look up the canonical block above %d: %w", blockNum, err)
 	}
-	return nil, fmt.Errorf("no canonical block within %d heights above it", unorphanAnchorDepth)
+	if anchor == nil {
+		return nil, fmt.Errorf("no canonical block within %d heights above it", unorphanAnchorDepth)
+	}
+	return anchor, nil
 }
 
 // walkStoredChainDownTo follows parent_hash from anchor down to blockNum and
@@ -889,6 +884,14 @@ func (s *BackfillService) recoverFromStaleChain(ctx context.Context, staleBlocks
 		"lowestStaleBlock", lowestStale,
 		"staleBlockCount", len(staleBlocks))
 
+	// Phase 0: put the range back inside FindGaps' reach before anything is
+	// orphaned. Phase 2's refetch is allowed to fail, and nothing else lowers
+	// the cursor, so without this a failed refetch leaves an orphan-only height
+	// below the watermark that no later pass ever scans (ARCT-379).
+	if err := s.rewindWatermarkBelow(ctx, lowestStale); err != nil {
+		return err
+	}
+
 	// Phase 1: Orphan ALL stale blocks first.
 	// This is crucial! We must clear the "next" references in the DB before inserting new blocks,
 	// otherwise validateBlockLinkage will fail when checking against the yet-to-be-orphaned 'next' block.
@@ -929,6 +932,22 @@ func (s *BackfillService) recoverFromStaleChain(ctx context.Context, staleBlocks
 	s.logger.Info("stale chain recovery complete",
 		"staleBlockCount", len(staleBlocks))
 
+	return nil
+}
+
+// rewindWatermarkBelow drops the backfill cursor below the given height.
+func (s *BackfillService) rewindWatermarkBelow(ctx context.Context, height int64) error {
+	target := height - 1
+	previous, rewound, err := s.stateRepo.RewindBackfillWatermark(ctx, target)
+	if err != nil {
+		return fmt.Errorf("failed to rewind watermark to %d: %w", target, err)
+	}
+	if rewound {
+		s.logger.Info("rewound backfill watermark",
+			"from", previous,
+			"to", target,
+			"reason", "stale chain recovery")
+	}
 	return nil
 }
 
@@ -1025,110 +1044,120 @@ func (s *BackfillService) cacheAndPublishBlockData(ctx context.Context, bd outbo
 	return nil
 }
 
-// advanceWatermark updates the backfill watermark to the highest contiguous block.
-// This allows future FindGaps calls to skip already-verified ranges.
+// advanceWatermark retires the range below the highest contiguous, published,
+// verified height, so later FindGaps calls can skip it.
 func (s *BackfillService) advanceWatermark(ctx context.Context) error {
-	// Get current watermark
-	currentWatermark, err := s.stateRepo.GetBackfillWatermark(ctx)
+	cursor, err := s.stateRepo.GetBackfillCursor(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get current watermark: %w", err)
 	}
-
-	// Get min and max block numbers
-	minBlock, err := s.stateRepo.GetMinBlockNumber(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get min block: %w", err)
-	}
-	maxBlock, err := s.stateRepo.GetMaxBlockNumber(ctx)
+	head, err := s.stateRepo.GetMaxBlockNumber(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get max block: %w", err)
 	}
-
-	if maxBlock == 0 {
+	if head == 0 {
 		return nil
 	}
+	s.recordWatermarkLag(ctx, head, cursor.Watermark)
 
-	// Emit the current backfill lag (head minus watermark) as a gauge. In
-	// steady state this sits near zero; a sustained or growing value is the
-	// symptom that went unseen for 26 days in the VEC-277 incident. maxBlock is
-	// the canonical (non-orphaned) head, which can briefly dip below an
-	// already-advanced watermark while blocks are being orphaned, so clamp the
-	// lag at zero rather than emitting a negative gauge that under-reports lag
-	// exactly when the alert should fire.
-	if s.metrics != nil {
-		lag := max(maxBlock-currentWatermark, 0)
-		s.metrics.RecordWatermarkLag(ctx, lag)
-	}
-
-	// Start checking from the block after the current watermark
-	startBlock := max(currentWatermark+1, minBlock)
-
-	// Find the first gap after the current watermark
-	// We temporarily bypass the watermark check by querying directly
-	gaps, err := s.findGapsFromBlock(ctx, startBlock, maxBlock)
+	target, err := s.findContiguousTarget(ctx, cursor.Watermark, head)
 	if err != nil {
-		return fmt.Errorf("failed to find gaps for watermark: %w", err)
+		return err
 	}
+	target, err = s.capAtUnpublishedBlock(ctx, target)
+	if err != nil {
+		return err
+	}
+	if target <= cursor.Watermark {
+		return nil
+	}
+	return s.commitAdvance(ctx, cursor, target)
+}
 
-	var newWatermark int64
+// recordWatermarkLag emits head minus watermark, the symptom that went unseen
+// for 26 days in the VEC-277 incident. The canonical head can dip below an
+// already-advanced watermark while blocks are being orphaned, so the lag is
+// clamped at zero: a negative gauge under-reports exactly when the alert should
+// fire.
+func (s *BackfillService) recordWatermarkLag(ctx context.Context, head, watermark int64) {
+	if s.metrics == nil {
+		return
+	}
+	s.metrics.RecordWatermarkLag(ctx, max(head-watermark, 0))
+}
+
+// findContiguousTarget returns the highest block the watermark could move to:
+// the head, or the block just below the first gap above the watermark.
+func (s *BackfillService) findContiguousTarget(ctx context.Context, watermark, head int64) (int64, error) {
+	minBlock, err := s.stateRepo.GetMinBlockNumber(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get min block: %w", err)
+	}
+	gaps, err := s.findGapsFromBlock(ctx, max(watermark+1, minBlock), head)
+	if err != nil {
+		return 0, fmt.Errorf("failed to find gaps for watermark: %w", err)
+	}
 	if len(gaps) == 0 {
-		// No gaps - advance watermark to maxBlock
-		newWatermark = maxBlock
-	} else {
-		// Advance watermark to just before the first gap
-		newWatermark = gaps[0].From - 1
+		return head, nil
 	}
+	return gaps[0].From - 1, nil
+}
 
-	// Cap watermark at min(unpublished block) - 1 so we never advance past
-	// blocks that haven't been fully published yet.
-	minUnpub, found, err := s.stateRepo.GetMinUnpublishedBlock(ctx)
+// capAtUnpublishedBlock holds the watermark below any block whose publish is
+// still outstanding, so no height is retired before it has been broadcast.
+func (s *BackfillService) capAtUnpublishedBlock(ctx context.Context, target int64) (int64, error) {
+	minUnpublished, found, err := s.stateRepo.GetMinUnpublishedBlock(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to check unpublished blocks: %w", err)
+		return 0, fmt.Errorf("failed to check unpublished blocks: %w", err)
 	}
-	if found && minUnpub-1 < newWatermark {
-		newWatermark = minUnpub - 1
+	if found && minUnpublished-1 < target {
+		return minUnpublished - 1, nil
 	}
+	return target, nil
+}
 
-	// Only advance if we have a higher watermark
-	if newWatermark > currentWatermark {
-		// Verify chain integrity before advancing watermark
-		// This ensures eventual consistency of the parent_hash chain
-		if err := s.stateRepo.VerifyChainIntegrity(ctx, currentWatermark, newWatermark); err != nil {
-			s.logger.Error("chain integrity violation detected, not advancing watermark",
-				"error", err,
-				"from", currentWatermark,
-				"to", newWatermark)
-			return fmt.Errorf("chain integrity check failed: %w", err)
-		}
-
-		advanced, err := s.stateRepo.AdvanceBackfillWatermark(ctx, currentWatermark, newWatermark)
-		if err != nil {
-			return fmt.Errorf("failed to set watermark: %w", err)
-		}
-		if !advanced {
-			return s.reportSkippedAdvance(ctx, currentWatermark, newWatermark)
-		}
-		s.logger.Info("advanced backfill watermark",
-			"from", currentWatermark,
-			"to", newWatermark,
-			"blocksVerified", newWatermark-currentWatermark)
+// commitAdvance verifies the parent_hash chain over the range it is about to
+// retire, then compare-and-sets the cursor the scan was computed from.
+func (s *BackfillService) commitAdvance(ctx context.Context, cursor outbound.BackfillCursor, target int64) error {
+	if err := s.stateRepo.VerifyChainIntegrity(ctx, cursor.Watermark, target); err != nil {
+		s.logger.Error("chain integrity violation detected, not advancing watermark",
+			"error", err,
+			"from", cursor.Watermark,
+			"to", target)
+		return fmt.Errorf("chain integrity check failed: %w", err)
 	}
 
+	advanced, err := s.stateRepo.AdvanceBackfillWatermark(ctx, cursor, target)
+	if err != nil {
+		return fmt.Errorf("failed to set watermark: %w", err)
+	}
+	if !advanced {
+		return s.reportSkippedAdvance(ctx, cursor, target)
+	}
+	s.logger.Info("advanced backfill watermark",
+		"from", cursor.Watermark,
+		"to", target,
+		"blocksVerified", target-cursor.Watermark)
 	return nil
 }
 
-// reportSkippedAdvance explains a compare-and-set that found the watermark
-// changed: a reorg commit rewound it while this pass was scanning, so the
-// scan's conclusion is stale and the next pass re-runs it against the new value.
-func (s *BackfillService) reportSkippedAdvance(ctx context.Context, expected, newWatermark int64) error {
-	current, err := s.stateRepo.GetBackfillWatermark(ctx)
+// reportSkippedAdvance explains a compare-and-set that found the cursor changed:
+// a reorg commit moved it while this pass was scanning, so the scan's conclusion
+// is stale and the next pass re-runs it against the new cursor.
+func (s *BackfillService) reportSkippedAdvance(ctx context.Context, expected outbound.BackfillCursor, target int64) error {
+	current, err := s.stateRepo.GetBackfillCursor(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to re-read watermark after skipped advance: %w", err)
 	}
+	if s.metrics != nil {
+		s.metrics.RecordWatermarkAdvanceSkipped(ctx, s.config.ChainID)
+	}
 	s.logger.Info("watermark changed concurrently, skipping advance",
-		"expected", expected,
-		"current", current,
-		"to", newWatermark)
+		"expected", expected.Watermark,
+		"expectedGeneration", expected.Generation,
+		"current", current.Watermark,
+		"currentGeneration", current.Generation,
+		"to", target)
 	return nil
 }
 

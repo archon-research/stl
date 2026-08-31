@@ -24,10 +24,10 @@ var _ outbound.BlockStateRepository = (*BlockStateRepository)(nil)
 
 // BlockStateRepository is an in-memory implementation for testing.
 type BlockStateRepository struct {
-	mu                sync.RWMutex
-	blocks            map[string]outbound.BlockState // keyed by hash
-	reorgEvents       []outbound.ReorgEvent
-	backfillWatermark int64
+	mu             sync.RWMutex
+	blocks         map[string]outbound.BlockState // keyed by hash
+	reorgEvents    []outbound.ReorgEvent
+	backfillCursor outbound.BackfillCursor
 }
 
 // NewBlockStateRepository creates a new in-memory block state repository.
@@ -98,6 +98,25 @@ func (r *BlockStateRepository) GetBlockByNumber(ctx context.Context, number int6
 	return nil, nil
 }
 
+// GetLowestCanonicalAbove retrieves the lowest canonical block whose number is
+// in (number, maxNumber], or nil when the range holds none.
+func (r *BlockStateRepository) GetLowestCanonicalAbove(ctx context.Context, number, maxNumber int64) (*outbound.BlockState, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var lowest *outbound.BlockState
+	for _, b := range r.blocks {
+		if b.IsOrphaned || b.Number <= number || b.Number > maxNumber {
+			continue
+		}
+		if lowest == nil || b.Number < lowest.Number {
+			bc := b
+			lowest = &bc
+		}
+	}
+	return lowest, nil
+}
+
 // GetBlockByHash retrieves a block state by its hash.
 func (r *BlockStateRepository) GetBlockByHash(ctx context.Context, hash string) (*outbound.BlockState, error) {
 	r.mu.RLock()
@@ -166,33 +185,40 @@ func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash strin
 	return nil
 }
 
-// ClearBlockOrphaned clears the is_orphaned flag on a block identified by hash.
-// Returns an error if the block does not exist. Mirrors the postgres adapter
-// contract: idempotent on already-canonical rows, and refuses to un-orphan
-// when a different canonical row already occupies the same number.
-func (r *BlockStateRepository) ClearBlockOrphaned(ctx context.Context, hash string) error {
+// ClearBlocksOrphaned clears the is_orphaned flag on every named block, or on
+// none of them. Mirrors the postgres adapter contract: idempotent on
+// already-canonical rows, and refuses the whole set when a hash is unknown or
+// when a different canonical row already occupies one of the numbers.
+func (r *BlockStateRepository) ClearBlocksOrphaned(ctx context.Context, hashes []string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	b, ok := r.blocks[hash]
-	if !ok {
-		return fmt.Errorf("clear orphan flag: block with hash %s not found", hash)
+	healing := make(map[string]bool, len(hashes))
+	for _, hash := range hashes {
+		healing[hash] = true
 	}
-	// Idempotent: clearing an already-canonical row is a no-op.
-	if !b.IsOrphaned {
-		return nil
-	}
-	// Guard: refuse to un-orphan if a different canonical row already occupies
-	// this number, mirroring the postgres adapter so unit tests exercise the
-	// same contract (PR #373 review). Leaving the orphan in place keeps the
-	// "highest version = canonical" invariant; the live writer wins.
-	for h, other := range r.blocks {
-		if h != hash && other.Number == b.Number && !other.IsOrphaned {
-			return fmt.Errorf("clear orphan flag: refusing to un-orphan block %d hash %s: another canonical row already exists at this number", b.Number, hash)
+	for _, hash := range hashes {
+		block, ok := r.blocks[hash]
+		if !ok {
+			return fmt.Errorf("clear orphan flag: block with hash %s not found", hash)
+		}
+		if !block.IsOrphaned {
+			continue
+		}
+		// Leaving the orphan in place keeps the "highest version = canonical"
+		// invariant; the live writer wins (PR #373 review).
+		for otherHash, other := range r.blocks {
+			if !healing[otherHash] && other.Number == block.Number && !other.IsOrphaned {
+				return fmt.Errorf("clear orphan flag: refusing to un-orphan block %d: canonical row %s already holds this height", block.Number, otherHash)
+			}
 		}
 	}
-	b.IsOrphaned = false
-	r.blocks[hash] = b
+
+	for _, hash := range hashes {
+		block := r.blocks[hash]
+		block.IsOrphaned = false
+		r.blocks[hash] = block
+	}
 	return nil
 }
 
@@ -218,11 +244,11 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAnce
 		}
 	}
 
-	// 3. Rewind the backfill watermark to the common ancestor: FindGaps scans
-	// only above it, so a height left orphan-only here is never re-fetched.
-	if r.backfillWatermark > commonAncestor {
-		r.backfillWatermark = commonAncestor
-	}
+	// 3. Rewind the backfill cursor to the common ancestor: FindGaps scans only
+	// above the watermark, so a height left orphan-only here is never
+	// re-fetched. The generation counts this commit even when the watermark
+	// already sat low enough to need no move.
+	r.rewindCursorLocked(commonAncestor)
 
 	// 4. Calculate version for new block
 	version := 0
@@ -301,26 +327,52 @@ func (r *BlockStateRepository) GetMaxBlockNumber(ctx context.Context) (int64, er
 func (r *BlockStateRepository) GetBackfillWatermark(ctx context.Context) (int64, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.backfillWatermark, nil
+	return r.backfillCursor.Watermark, nil
 }
 
-// SetBackfillWatermark updates the watermark to the given block number.
-func (r *BlockStateRepository) SetBackfillWatermark(ctx context.Context, watermark int64) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.backfillWatermark = watermark
-	return nil
+// GetBackfillCursor returns the watermark together with its generation.
+func (r *BlockStateRepository) GetBackfillCursor(ctx context.Context) (outbound.BackfillCursor, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.backfillCursor, nil
 }
 
-// AdvanceBackfillWatermark moves the watermark from expected to watermark and
-// reports whether it changed.
-func (r *BlockStateRepository) AdvanceBackfillWatermark(ctx context.Context, expected, watermark int64) (bool, error) {
+// RewindBackfillWatermark lowers the watermark to the given block if it sits
+// above it, and counts the rewind in the generation either way.
+func (r *BlockStateRepository) RewindBackfillWatermark(ctx context.Context, to int64) (int64, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.backfillWatermark != expected {
+	previous := r.backfillCursor.Watermark
+	r.rewindCursorLocked(to)
+	return previous, previous > to, nil
+}
+
+// rewindCursorLocked is the cursor half of a rewind; callers hold the lock.
+func (r *BlockStateRepository) rewindCursorLocked(to int64) {
+	r.backfillCursor = outbound.BackfillCursor{
+		Watermark:  min(r.backfillCursor.Watermark, to),
+		Generation: r.backfillCursor.Generation + 1,
+	}
+}
+
+// SeedBackfillCursor puts the cursor at a given position. Test-only: production
+// moves it through AdvanceBackfillWatermark and HandleReorgAtomic, and an
+// unconditional write is what let a reorg rewind be overwritten (ARCT-379).
+func (r *BlockStateRepository) SeedBackfillCursor(watermark, generation int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.backfillCursor = outbound.BackfillCursor{Watermark: watermark, Generation: generation}
+}
+
+// AdvanceBackfillWatermark moves the watermark as long as the stored cursor is
+// still the expected one, and reports whether it changed.
+func (r *BlockStateRepository) AdvanceBackfillWatermark(ctx context.Context, expected outbound.BackfillCursor, watermark int64) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.backfillCursor != expected {
 		return false, nil
 	}
-	r.backfillWatermark = watermark
+	r.backfillCursor.Watermark = watermark
 	return true, nil
 }
 
@@ -336,8 +388,8 @@ func (r *BlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBlock 
 
 	// Adjust minBlock based on watermark
 	effectiveMin := minBlock
-	if r.backfillWatermark >= minBlock {
-		effectiveMin = r.backfillWatermark + 1
+	if r.backfillCursor.Watermark >= minBlock {
+		effectiveMin = r.backfillCursor.Watermark + 1
 	}
 
 	// If watermark covers the entire range, no gaps possible
@@ -415,9 +467,10 @@ func (r *BlockStateRepository) FindOrphanOnlyHeights(ctx context.Context, fromBl
 }
 
 // VerifyChainIntegrity verifies that the canonical chain over the range is
-// unbroken: consecutive blocks are linked by parent_hash, and no height between
-// two canonical blocks is missing. Returns nil if the chain is valid, or an
-// error describing the first violation in ascending block order.
+// unbroken: consecutive blocks are linked by parent_hash, no height between two
+// canonical blocks is missing, no height above the last canonical block is
+// missing, and no height holds two canonical rows. Returns nil if the chain is
+// valid, or an error describing the first violation in ascending block order.
 func (r *BlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlock, toBlock int64) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -426,44 +479,73 @@ func (r *BlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlo
 		return nil // Nothing to verify
 	}
 
-	// Build a sorted list of canonical blocks in range
-	type blockInfo struct {
-		number     int64
-		hash       string
-		parentHash string
+	blocksInRange := r.canonicalBlocksOver(fromBlock, toBlock)
+	if err := verifyOrderedPairs(blocksInRange, true); err != nil {
+		return err
 	}
-	var blocksInRange []blockInfo
+	if len(blocksInRange) == 0 {
+		return nil
+	}
+	if last := blocksInRange[len(blocksInRange)-1].Number; last < toBlock {
+		return fmt.Errorf("chain integrity violation: canonical block(s) %d to %d missing after block %d",
+			last+1, toBlock, last)
+	}
+	return nil
+}
+
+// VerifyParentLinks reports the violations that never repair themselves: a
+// broken parent link and two canonical rows at one height. Missing heights are
+// excluded, so the caller can run this above the backfill watermark, where a
+// hole is the gap filler's live work rather than a defect.
+func (r *BlockStateRepository) VerifyParentLinks(ctx context.Context, fromBlock, toBlock int64) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if fromBlock >= toBlock {
+		return nil
+	}
+	return verifyOrderedPairs(r.canonicalBlocksOver(fromBlock, toBlock), false)
+}
+
+// canonicalBlocksOver returns the canonical blocks in [fromBlock, toBlock],
+// ordered by number then version so two rows at one height keep a deterministic
+// order, as the postgres adapter's window does.
+func (r *BlockStateRepository) canonicalBlocksOver(fromBlock, toBlock int64) []outbound.BlockState {
+	var blocks []outbound.BlockState
 	for _, b := range r.blocks {
 		if !b.IsOrphaned && b.Number >= fromBlock && b.Number <= toBlock {
-			blocksInRange = append(blocksInRange, blockInfo{
-				number:     b.Number,
-				hash:       b.Hash,
-				parentHash: b.ParentHash,
-			})
+			blocks = append(blocks, b)
 		}
 	}
-
-	// Sort by block number
-	sort.Slice(blocksInRange, func(i, j int) bool {
-		return blocksInRange[i].number < blocksInRange[j].number
+	sort.Slice(blocks, func(i, j int) bool {
+		if blocks[i].Number != blocks[j].Number {
+			return blocks[i].Number < blocks[j].Number
+		}
+		return blocks[i].Version < blocks[j].Version
 	})
+	return blocks
+}
 
-	// The range's first block is never flagged: an unseeded chain's watermark
-	// starts at 0, far below its first block.
-	for i := 1; i < len(blocksInRange); i++ {
-		curr := blocksInRange[i]
-		prev := blocksInRange[i-1]
+// verifyOrderedPairs reports the first violation between two adjacent canonical
+// rows. The range's first block is never flagged: an unseeded chain's watermark
+// starts at 0, far below its first block.
+func verifyOrderedPairs(blocks []outbound.BlockState, reportMissing bool) error {
+	for i := 1; i < len(blocks); i++ {
+		curr, prev := blocks[i], blocks[i-1]
 
-		if prev.number < curr.number-1 {
-			return fmt.Errorf("chain integrity violation: canonical block(s) %d to %d missing between blocks %d and %d",
-				prev.number+1, curr.number-1, prev.number, curr.number)
+		if prev.Number == curr.Number {
+			return fmt.Errorf("chain integrity violation: duplicate canonical rows at height %d: %s and %s",
+				curr.Number, prev.Hash, curr.Hash)
 		}
-		if curr.number == prev.number+1 && curr.parentHash != prev.hash {
+		if reportMissing && prev.Number < curr.Number-1 {
+			return fmt.Errorf("chain integrity violation: canonical block(s) %d to %d missing between blocks %d and %d",
+				prev.Number+1, curr.Number-1, prev.Number, curr.Number)
+		}
+		if curr.Number == prev.Number+1 && curr.ParentHash != prev.Hash {
 			return fmt.Errorf("chain integrity violation at block %d: parent_hash %s does not match hash %s of block %d",
-				curr.number, curr.parentHash, prev.hash, prev.number)
+				curr.Number, curr.ParentHash, prev.Hash, prev.Number)
 		}
 	}
-
 	return nil
 }
 

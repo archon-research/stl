@@ -144,10 +144,11 @@ height is canonical — S3 holds only the orphaned fork and every indexer has it
 events at `block_version` 0. `FindGaps` scans only above the backfill
 watermark, so it re-fetches the height only while the watermark still sits
 below it. This check scans the full block range, where **Chain Integrity**
-stops at the watermark — and a fresh occurrence sits *above* the watermark,
-because the reorg that caused it rewound the watermark to the common ancestor
-below, so this check is the only one that names it. A hole older than that
-rewind sits below the watermark and fails both.
+only looks for missing heights up to the watermark — and a fresh occurrence
+sits *above* the watermark, because the reorg that caused it rewound the
+watermark to the common ancestor below, so this check is the only one that
+names it. A hole older than that rewind sits below the watermark and fails
+both.
 
 `block_states` carries a 30-day retention policy
 (`add_retention_policy('block_states', INTERVAL '30 days')`), so the check only
@@ -179,9 +180,11 @@ Repair:
 - **A hole no rewind covered — one predating ARCT-379, or one below every
   reorg since — is repaired by rewinding the watermark by hand,** as long as it
   is still inside the retained window: `UPDATE backfill_watermark SET watermark
-  = <N-1> WHERE chain_id = <id>;`. The next gap pass saves N as version 1 and
-  publishes it, so the indexers append the correction. The orphaned version-0
-  rows stay put as history.
+  = <N-1>, generation = generation + 1 WHERE chain_id = <id>;`. Bump the
+  generation too: a pass already scanning compares against the pair, and would
+  otherwise advance straight back over the height you just re-opened. The next
+  gap pass saves N as version 1 and publishes it, so the indexers append the
+  correction. The orphaned version-0 rows stay put as history.
 - **A hole outside the retained window has no executable repair yet.**
   `raw-block-bulk-downloader --start-block <N> --end-block <N>` (run it with
   `--dry-run` first: it prints the plan per height) writes the canonical block,
@@ -195,31 +198,43 @@ found there is repairable while it is still inside retention.
 ### Special case: `watcher-data-validator` "Chain Integrity" missing blocks
 
 `chain integrity violation: canonical block(s) A to B missing between blocks X
-and Y` means the canonical chain has a hole at A..B that the backfill watermark
+and Y` (or `… missing after block X`, for a hole at the top of the checked
+range) means the canonical chain has a hole at A..B that the backfill watermark
 has already passed — so the gap filler is not working on it and
 `VectorWatcherBackfillWatermarkLagHigh` will not fire for it. Only the lowest
-hole in the range is named; re-run the check after each repair to see the next
-one.
+hole is named, and that is the only one you need: one rewind to A re-opens
+every hole above it too (`FindGaps` returns them all, the pass fills each, and
+the advance parks below the first one it could not fill). Re-running the check
+before the filler has caught up tells you nothing — it can never name a hole
+above the watermark.
 
-The check runs only up to the backfill watermark (the passed message says how
-far: `Parent-hash chain valid through backfill watermark N`). A named hole is
-therefore always **below** the watermark — never a transient head-of-chain gap
-the filler is seconds from closing. Above the watermark is the filler's live
-domain, covered by `backfill_watermark_lag` and
+Below the watermark the check is strict: every height present and linked. Above
+it, only the links are checked (`Parent-hash chain valid through backfill
+watermark N; parent links valid through block M`), because a missing height up
+there is the filler's live work — covered by `backfill_watermark_lag` and
 `VectorWatcherBackfillWatermarkLagHigh` in
-[vector-watcher.md](vector-watcher.md), not by this check.
+[vector-watcher.md](vector-watcher.md) — while a broken link or a duplicated
+height never repairs itself. A named *missing* range is therefore always
+**below** the watermark; a named link break can be either side of it.
 
 Two causes, told apart by `SELECT number, hash, is_orphaned FROM block_states
 WHERE chain_id = <id> AND number BETWEEN A AND B;`:
 
 - **Rows exist but are all orphaned** → the orphan-only case above; repair it
   that way.
-- **No rows at all** → a legacy gap the watermark advanced over before a
-  missing height counted as a violation (the VEC-277 shape). `FindGaps` never
-  scans below the watermark, so rewind it —
-  `UPDATE backfill_watermark SET watermark = A - 1 WHERE chain_id = <id>;` —
-  and the next pass fetches the range; confirm `backfill_watermark_lag` drains
-  and the check passes on the following run.
+- **No rows at all** → the watermark passed a height that was never filled.
+  Three ways in: a pre-#844 unconditional watermark write that overwrote a
+  reorg's rewind; a watermark written by hand past an unfilled height; and a
+  stale-chain recovery whose canonical refetch failed, which before #844
+  orphaned the row without rewinding. `FindGaps` never scans below the
+  watermark, so rewind it — `UPDATE backfill_watermark SET watermark = A - 1,
+  generation = generation + 1 WHERE chain_id = <id>;`, the generation bump for
+  the same reason as above. Then trigger a validator run by hand (Temporal UI →
+  Schedules → `<SERVICE_NAME>` → Trigger, or `temporal schedule trigger
+  --schedule-id <SERVICE_NAME>`) once the watermark has passed B; the repair is
+  done when `backfill_watermark_lag` has drained past B, not when the check
+  passes — right after the rewind it passes whether or not A..B was refetched,
+  because the strict half stops at the watermark you just lowered.
 
 ---
 
