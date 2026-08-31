@@ -16,8 +16,7 @@ func floorMod(a, b int) int {
 	return m
 }
 
-// tickToWordBit is the test-local reference inverse of WordBitToTick.
-func tickToWordBit(tick int32, tickSpacing int) (int16, uint8) {
+func referenceTickToWordBit(tick int32, tickSpacing int) (int16, uint8) {
 	compressed := FloorDiv(int(tick), tickSpacing)
 	return int16(FloorDiv(compressed, 256)), uint8(floorMod(compressed, 256))
 }
@@ -63,9 +62,9 @@ func TestWordBitToTick_RoundTrips(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotWord, gotBit := tickToWordBit(tt.tick, tt.tickSpacing)
+			gotWord, gotBit := referenceTickToWordBit(tt.tick, tt.tickSpacing)
 			if gotWord != tt.wantWord || gotBit != tt.wantBit {
-				t.Errorf("tickToWordBit(%d, %d) = (%d, %d), want (%d, %d)", tt.tick, tt.tickSpacing, gotWord, gotBit, tt.wantWord, tt.wantBit)
+				t.Errorf("referenceTickToWordBit(%d, %d) = (%d, %d), want (%d, %d)", tt.tick, tt.tickSpacing, gotWord, gotBit, tt.wantWord, tt.wantBit)
 			}
 			if got := WordBitToTick(gotWord, gotBit, tt.tickSpacing); got != tt.tick {
 				t.Errorf("WordBitToTick(%d, %d, %d) = %d, want %d (round-trip)", gotWord, gotBit, tt.tickSpacing, got, tt.tick)
@@ -74,11 +73,8 @@ func TestWordBitToTick_RoundTrips(t *testing.T) {
 	}
 }
 
-// TestWordBounds_CoversUsableRange checks the enumerated word range really
-// brackets MIN_TICK/MAX_TICK for each tick spacing in use, and that it stays
-// far below the 65536 words a naive full-int16 scan would issue. It asserts
-// through WordBitToTick rather than recomputing the packing, so a broken
-// FloorDiv cannot satisfy both sides of the comparison.
+// Asserts through WordBitToTick rather than recomputing the packing, so a
+// broken FloorDiv cannot satisfy both sides of the comparison.
 func TestWordBounds_CoversUsableRange(t *testing.T) {
 	for _, tickSpacing := range []int{1, 10, 50, 60, 200} {
 		t.Run(fmt.Sprintf("tickSpacing=%d", tickSpacing), func(t *testing.T) {
@@ -100,9 +96,6 @@ func TestWordBounds_CoversUsableRange(t *testing.T) {
 	}
 }
 
-// TestWordBounds_RejectsNonPositiveTickSpacing pins the guard the V3 registry's
-// bare INT column cannot supply: 0 divides by zero and a negative spacing
-// inverts the bounds, which empties the caller's scan loop without an error.
 func TestWordBounds_RejectsNonPositiveTickSpacing(t *testing.T) {
 	for _, tickSpacing := range []int{0, -1, -60} {
 		t.Run(fmt.Sprintf("tickSpacing=%d", tickSpacing), func(t *testing.T) {
@@ -113,9 +106,6 @@ func TestWordBounds_RejectsNonPositiveTickSpacing(t *testing.T) {
 	}
 }
 
-// TestMergeTickSets_DedupsAndSortsOverlappingRanges pins the union both
-// indexers rely on: a first-touch persist must write each initialized tick once
-// even when the bitmap baseline and the block's own bounds interleave.
 func TestMergeTickSets_DedupsAndSortsOverlappingRanges(t *testing.T) {
 	touched := []int32{180, -120}
 	baseline := []int32{60, -120, 300}

@@ -9,9 +9,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-// Fee ceilings enforced by v4-core, both in hundredths of a bip:
-// LPFeeLibrary.MAX_LP_FEE is 100%, and ProtocolFeeLibrary.MAX_PROTOCOL_FEE (0.1%)
-// applies to each 12-bit half of the packed uint24 protocol fee separately.
+// v4-core fee ceilings in hundredths of a bip; MAX_PROTOCOL_FEE bounds each
+// 12-bit half of the packed uint24 separately.
 const (
 	maxV4LpFee             = 1_000_000
 	maxV4ProtocolFee       = 0xFFFFFF
@@ -20,16 +19,12 @@ const (
 	v4ProtocolFeeHalfShift = 12
 )
 
-// v4-core's TickMath bounds, tighter than the int24 wire range: no pool can
-// reach a tick outside them, so anything wider is a decode or read defect.
+// v4-core TickMath bounds, tighter than the int24 wire range.
 const (
 	minV4Tick = -887272
 	maxV4Tick = 887272
 )
 
-// validatePoolBlockKey checks the versioned block coordinates that every
-// uniswap_v4 row carries as part of its primary key. poolID is the
-// uniswap_v4_pool surrogate id, not the on-chain PoolId hash.
 func validatePoolBlockKey(poolID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
 	if poolID <= 0 {
 		return fmt.Errorf("poolID must be positive, got %d", poolID)
@@ -46,8 +41,6 @@ func validatePoolBlockKey(poolID, blockNumber int64, blockVersion int, blockTime
 	return nil
 }
 
-// validatePoolLogKey checks the log coordinates that make an event row unique
-// within its block.
 func validatePoolLogKey(txHash common.Hash, logIndex int) error {
 	if txHash == (common.Hash{}) {
 		return fmt.Errorf("txHash is required")
@@ -58,7 +51,6 @@ func validatePoolLogKey(txHash common.Hash, logIndex int) error {
 	return nil
 }
 
-// validateV4LpFee bounds an LP fee against LPFeeLibrary.MAX_LP_FEE.
 func validateV4LpFee(field string, fee int) error {
 	if fee < 0 || fee > maxV4LpFee {
 		return fmt.Errorf("%s must be within [0, %d], got %d", field, maxV4LpFee, fee)
@@ -73,8 +65,6 @@ func validateV4TickRange(field string, tick int) error {
 	return nil
 }
 
-// validateV4Ticks enforces the ordered, in-range tick pair Pool.checkTicks
-// requires, so a bad pair is a decode defect rather than a real position.
 func validateV4Ticks(tickLower, tickUpper int) error {
 	if err := validateV4TickRange("tickLower", tickLower); err != nil {
 		return err
@@ -88,8 +78,6 @@ func validateV4Ticks(tickLower, tickUpper int) error {
 	return nil
 }
 
-// requireBigInt rejects a nil numeric field: every uniswap_v4 numeric column is
-// NOT NULL, so a nil here would surface as an opaque driver error at insert.
 func requireBigInt(field string, v *big.Int) error {
 	if v == nil {
 		return fmt.Errorf("%s must not be nil", field)
@@ -97,14 +85,10 @@ func requireBigInt(field string, v *big.Int) error {
 	return nil
 }
 
-// UniswapV4PoolState is a per-touched-block snapshot of one pool's StateView
-// slot0, liquidity and global fee growth. LpFee is only refreshed on blocks the
-// pool is touched, which is sound only for static-fee pools: updateDynamicLPFee
-// emits no event, so a dynamic-fee pool is registered with
-// uniswap_v4_pool.snapshot_supported = false and produces no row here until
-// lp_fee has a refresh path.
+// UniswapV4PoolState is snapshotted only on touched blocks; updateDynamicLPFee
+// emits no event, so dynamic-fee pools are registered snapshot_supported = false.
 type UniswapV4PoolState struct {
-	PoolID               int64 // uniswap_v4_pool surrogate id
+	PoolID               int64
 	BlockNumber          int64
 	BlockVersion         int
 	BlockTimestamp       time.Time
@@ -117,10 +101,6 @@ type UniswapV4PoolState struct {
 	FeeGrowthGlobal1X128 *big.Int
 }
 
-// Validate rejects a zero SqrtPriceX96: StateView.getSlot0 answers all-zeros for
-// an unknown PoolId instead of reverting, so a zero price means the registry row
-// points at a pool this PoolManager never initialized — except on a reorg
-// re-read, see isOrphanedReRead.
 func (s *UniswapV4PoolState) Validate() error {
 	if err := validatePoolBlockKey(s.PoolID, s.BlockNumber, s.BlockVersion, s.BlockTimestamp); err != nil {
 		return err
@@ -149,11 +129,8 @@ func (s *UniswapV4PoolState) Validate() error {
 	return requireBigInt("feeGrowthGlobal1X128", s.FeeGrowthGlobal1X128)
 }
 
-// isOrphanedReRead reports the one legal all-zero snapshot: a reorg re-read
-// (BlockVersion > 0) of a pool whose Initialize the reorg orphaned. StateView
-// then answers all-zeros for every getter, and that row must persist to
-// supersede the orphaned fork's — the same tolerance the tick path has. Nothing
-// short of a complete zero read qualifies, so a half-decoded row still fails.
+// A reorg that orphans a pool's Initialize makes StateView answer all-zeros; that
+// row must still persist, to supersede the orphaned fork's snapshot.
 func (s *UniswapV4PoolState) isOrphanedReRead() bool {
 	if s.BlockVersion <= 0 {
 		return false
@@ -169,8 +146,8 @@ func (s *UniswapV4PoolState) isOrphanedReRead() bool {
 	return true
 }
 
-// requirePositiveSqrtPrice rejects the all-zeros a StateView getter returns for
-// an unknown PoolId, which no initialized pool can ever report.
+// Zero is what a StateView getter answers for a PoolId the PoolManager never
+// initialized; no live pool can report it.
 func requirePositiveSqrtPrice(v *big.Int) error {
 	if err := requireBigInt("sqrtPriceX96", v); err != nil {
 		return err
@@ -194,31 +171,23 @@ func (s *UniswapV4PoolState) validateProtocolFee() error {
 	return nil
 }
 
-// UniswapV4Swap is a PoolManager Swap event. Amount0/Amount1 are the swap
-// BalanceDelta from the swapper's perspective (v4-core applies swapDelta to
-// msg.sender): negative means the swapper owes the PoolManager, positive means
-// the PoolManager owes the swapper — the inverse of the pool-perspective signs
-// on UniswapV3Swap. PoolManager emits the delta before afterSwap applies any
-// hook delta, so it equals what the swapper settled only when the pool's hooks
-// carry no *_RETURNS_DELTA permission.
+// Amount0/Amount1 are the swapper-perspective BalanceDelta (negative = swapper
+// owes the PoolManager), inverse of UniswapV3Swap, before any hook delta.
 type UniswapV4Swap struct {
-	PoolID         int64 // uniswap_v4_pool surrogate id
+	PoolID         int64
 	BlockNumber    int64
 	BlockVersion   int
 	BlockTimestamp time.Time
 	TxHash         common.Hash
 	LogIndex       int
-	// Sender is the PoolManager's msg.sender (the unlocking router), never zero
-	// on-chain, so a zero sender is a malformed decode rather than a real log.
-	Sender       common.Address
-	Amount0      *big.Int
-	Amount1      *big.Int
-	SqrtPriceX96 *big.Int
-	Liquidity    *big.Int
-	Tick         int
-	// Fee is the total swap fee charged (LP fee composed with the protocol fee
-	// via ProtocolFeeLibrary.calculateSwapFee), hundredths of a bip — not the
-	// bare LP fee, which is what pool_state.lp_fee holds.
+	Sender         common.Address // the unlocking router, not the trader
+	Amount0        *big.Int
+	Amount1        *big.Int
+	SqrtPriceX96   *big.Int
+	Liquidity      *big.Int
+	Tick           int
+	// Fee is the LP fee composed with the protocol fee
+	// (ProtocolFeeLibrary.calculateSwapFee), hundredths of a bip.
 	Fee int
 }
 
@@ -250,11 +219,10 @@ func (s *UniswapV4Swap) Validate() error {
 	return validateV4LpFee("fee", s.Fee)
 }
 
-// UniswapV4LiquidityEvent is a PoolManager ModifyLiquidity event. V4 settles
-// through flash accounting, so the log carries no token amounts; the position it
-// touches is identified by (Sender, TickLower, TickUpper, Salt).
+// Flash accounting means the ModifyLiquidity log carries no token amounts; the
+// position is identified by (Sender, TickLower, TickUpper, Salt).
 type UniswapV4LiquidityEvent struct {
-	PoolID         int64 // uniswap_v4_pool surrogate id
+	PoolID         int64
 	BlockNumber    int64
 	BlockVersion   int
 	BlockTimestamp time.Time
@@ -264,7 +232,7 @@ type UniswapV4LiquidityEvent struct {
 	TickLower      int
 	TickUpper      int
 	LiquidityDelta *big.Int    // signed; zero on a fee-collecting poke
-	Salt           common.Hash // caller-chosen position discriminator, commonly zero
+	Salt           common.Hash // caller-chosen position discriminator
 }
 
 func (e *UniswapV4LiquidityEvent) Validate() error {
@@ -283,11 +251,10 @@ func (e *UniswapV4LiquidityEvent) Validate() error {
 	return requireBigInt("liquidityDelta", e.LiquidityDelta)
 }
 
-// UniswapV4Tick is the append-on-change authoritative per-tick state. It carries
-// no Initialized flag because v4-core's TickInfo has none: a tick is initialized
-// exactly when LiquidityGross > 0, so an all-zero row records a cleared tick.
+// A tick is initialized exactly when LiquidityGross > 0 — v4-core's TickInfo has
+// no Initialized flag — so an all-zero row records a cleared tick.
 type UniswapV4Tick struct {
-	PoolID                int64 // uniswap_v4_pool surrogate id
+	PoolID                int64
 	Tick                  int
 	BlockNumber           int64
 	BlockVersion          int
@@ -317,10 +284,8 @@ func (t *UniswapV4Tick) Validate() error {
 	return requireBigInt("feeGrowthOutside1X128", t.FeeGrowthOutside1X128)
 }
 
-// UniswapV4PoolEventName identifies which typed low-frequency PoolManager event
-// produced a row. It is a separate set from V3's PoolEventName: V4 has no
-// per-pool Flash, protocol fees are set through a controller, and observation
-// cardinality does not exist.
+// Deliberately a separate set from V3's PoolEventName: V4 has no per-pool Flash,
+// no observation cardinality, and sets protocol fees through a controller.
 type UniswapV4PoolEventName string
 
 const (
@@ -335,10 +300,8 @@ var validUniswapV4PoolEventNames = map[UniswapV4PoolEventName]struct{}{
 	UniswapV4PoolEventProtocolFeeUpdated: {},
 }
 
-// UniswapV4PoolEvent is a typed low-frequency pool event whose decoded arguments
-// are kept verbatim in Params rather than promoted to columns.
 type UniswapV4PoolEvent struct {
-	PoolID         int64 // uniswap_v4_pool surrogate id
+	PoolID         int64
 	BlockNumber    int64
 	BlockVersion   int
 	BlockTimestamp time.Time

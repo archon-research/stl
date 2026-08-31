@@ -66,8 +66,6 @@ func TestLogBelongsTo(t *testing.T) {
 // DecodeLog
 // ============================================================================
 
-// eventFixture parses a single-event ABI so each test can pick the
-// indexed/non-indexed split DecodeLog branches on.
 func eventFixture(t *testing.T, name, inputsJSON string) abi.Event {
 	t.Helper()
 	a, err := abi.JSON(strings.NewReader(fmt.Sprintf(`[{"type":"event","name":%q,"inputs":%s}]`, name, inputsJSON)))
@@ -86,7 +84,6 @@ func transferEvent(t *testing.T) abi.Event {
 	]`)
 }
 
-// packedData ABI-encodes an event's non-indexed arguments into a log data blob.
 func packedData(t *testing.T, ev abi.Event, values ...any) string {
 	t.Helper()
 	raw, err := ev.Inputs.NonIndexed().Pack(values...)
@@ -245,10 +242,8 @@ func TestDecodeLog(t *testing.T) {
 	})
 }
 
-// TestAssertEveryArgumentDecoded covers the backstop DecodeLog runs after both
-// halves succeeded. It is unreachable through DecodeLog — go-ethereum fills
-// every argument or errors — so the invariant is pinned directly rather than
-// left untested.
+// Unreachable through DecodeLog — go-ethereum fills every argument or errors —
+// so the backstop invariant is pinned directly.
 func TestAssertEveryArgumentDecoded(t *testing.T) {
 	ev := transferEvent(t)
 

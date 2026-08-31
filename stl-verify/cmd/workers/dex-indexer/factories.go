@@ -19,7 +19,7 @@ import (
 // only place that imports both the postgres adapters and the service
 // packages; services never import adapters.
 type Factory interface {
-	// Kind matches cfg.Dex (e.g. "curve", "uniswap-v3", "uniswap-v4") and is the registry key.
+	// Kind matches cfg.Dex and is the registry key.
 	Kind() string
 	// ServiceName feeds dexbootstrap.BootstrapOptions.ServiceName (OTEL/logger identity).
 	ServiceName() string
@@ -135,7 +135,6 @@ func (uniswapV3Factory) BuildHandler(ctx context.Context, deps *dexbootstrap.Dep
 	return service.BlockHandler(), nil
 }
 
-// uniswapV4Factory wires the Uniswap V4 indexer.
 type uniswapV4Factory struct{}
 
 func (uniswapV4Factory) Kind() string         { return "uniswap-v4" }
@@ -175,8 +174,6 @@ func (uniswapV4Factory) BuildHandler(ctx context.Context, deps *dexbootstrap.Dep
 	if err != nil {
 		return nil, fmt.Errorf("creating uniswap v4 service: %w", err)
 	}
-	// snapshotPools is logged separately so a registry that quietly excludes a
-	// pool from state/tick snapshots is visible at boot, not only as missing rows.
 	deps.Logger.Info("uniswap-v4-indexer started",
 		"pools", len(poolRows),
 		"snapshotPools", len(uniswapv4indexer.SnapshottablePools(pools)))

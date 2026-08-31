@@ -1,51 +1,4 @@
 -- Uniswap V4 indexer tables (VEC-475).
--- Creates the registry (uniswap_v4_pool_manager, uniswap_v4_pool) and 5
--- fact/state tables (uniswap_v4_pool_state, uniswap_v4_swap,
--- uniswap_v4_liquidity_event, uniswap_v4_tick, uniswap_v4_pool_event) with full
--- auditability (ADR-0002), plus their column-level COMMENT metadata (consumed
--- by the metadata catalogue), plus the mainnet PoolManager row and the 21
--- cast-verified seed pools.
---
--- V4 is a singleton: one PoolManager contract holds every pool, so a pool has
--- no address of its own. Its identity is
---   PoolId = keccak256(abi.encode(currency0, currency1, fee, tickSpacing, hooks))
--- which is chain-independent (the same key yields the same id on every chain),
--- so the pool's natural key is (chain_id, pool_id).
---
--- Every table here -- registry rows included -- carries processing_version +
--- build_id and is strictly append-only: a correction is a new version appended
--- under a new build_id, never an UPDATE.
---
--- Sibling: 20260701_100000_create_uniswap_v3_tables.sql. The trigger /
--- hypertable / compression / tiering boilerplate mirrors it; the V4-specific
--- deltas are called out in the COMMENTs.
---
--- COMMENT conventions used below (mirrors 20260521_120000_curve_column_
--- comments.sql):
---   [Type]: Dimension (seeded/read-only registry) | Configuration
---           (governance/config) | Operational (append-on-change or bookkeeping
---           state, not partitioned) | Hypertable (time-series facts)
---   Roles:  PK | FK->table.col | Partition | Audit | Derived
---   Scale:  sqrt_price_x96 is Q64.96 fixed point:
---           price(currency1/currency0) = (sqrtPriceX96/2^96)^2, then adjust by
---           10^(dec0-dec1). fee_growth_*_x128 columns are Q128.128 fixed point.
---           fee / lp_fee are hundredths of a bip (1e6 = 100%, 3000 = 0.30%);
---           uniswap_v4_pool.fee additionally uses 8388608 (0x800000) as the
---           dynamic-LP-fee sentinel rather than as a rate. protocol_fee is a
---           PACKED uint24, not a single rate: low 12 bits = the zeroForOne fee,
---           high 12 bits = the oneForZero fee, each in hundredths of a bip and
---           each capped at 1000. tick is a plain integer where
---           price = 1.0001^tick.
---           liquidity / liquidity_gross / liquidity_net are raw on-chain L
---           (sqrt(xy) scaled by the pool's currency decimals; not comparable
---           across pools with different decimals). amount0/amount1 are the
---           swap BalanceDelta from the SWAPPER's perspective (v4-core applies
---           swapDelta to msg.sender), raw native-decimal integers: negative =
---           the swapper owes the PoolManager, positive = the PoolManager owes
---           the swapper -- the INVERSE of uniswap_v3_swap, which signs from
---           the pool's side. They are emitted before afterSwap applies any
---           hook delta, so they equal what the swapper settled only when the
---           pool's hooks carry no *_RETURNS_DELTA permission.
 
 CREATE TABLE IF NOT EXISTS uniswap_v4_pool_manager
 (
@@ -65,8 +18,6 @@ CREATE INDEX IF NOT EXISTS idx_uniswap_v4_pool_manager_protocol ON uniswap_v4_po
 CREATE INDEX IF NOT EXISTS idx_uniswap_v4_pool_manager_pv_lookup
     ON uniswap_v4_pool_manager (chain_id, build_id);
 
--- Prefix 'u4pm' for uniswap_v4_pool_manager. force_custom_plan per VEC-541
--- (see assign_processing_version_uniswap_v4_pool_state).
 CREATE OR REPLACE FUNCTION assign_processing_version_uniswap_v4_pool_manager()
 RETURNS TRIGGER
 SET plan_cache_mode = 'force_custom_plan'
@@ -142,16 +93,14 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_pool
     CHECK (fee <> 8388608 OR NOT snapshot_supported)
 );
 
--- chain_id lookups (LoadPools) are served by the UNIQUE
--- (chain_id, pool_id, processing_version) index, so no separate index is needed.
+-- No chain_id index: LoadPools' lookup is served by UNIQUE (chain_id, pool_id, processing_version).
 CREATE INDEX IF NOT EXISTS idx_uniswap_v4_pool_currency0 ON uniswap_v4_pool (currency0_token_id);
 CREATE INDEX IF NOT EXISTS idx_uniswap_v4_pool_currency1 ON uniswap_v4_pool (currency1_token_id);
 
 CREATE INDEX IF NOT EXISTS idx_uniswap_v4_pool_pv_lookup
     ON uniswap_v4_pool (chain_id, pool_id, build_id);
 
--- Prefix 'u4p' for uniswap_v4_pool. pool_id is hex-encoded into the lock key so
--- it cannot shift with the session's bytea_output setting.
+-- pool_id is hex-encoded into the lock key so it cannot shift with bytea_output.
 CREATE OR REPLACE FUNCTION assign_processing_version_uniswap_v4_pool()
 RETURNS TRIGGER
 SET plan_cache_mode = 'force_custom_plan'
@@ -239,20 +188,15 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_pool_state
     created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
     processing_version      INT         NOT NULL DEFAULT 0,
     build_id                INT         NOT NULL DEFAULT 0,
-    -- A reorg that orphans a pool's Initialize makes StateView answer all zeros
-    -- on the re-read; that tombstone must persist to supersede the orphaned
-    -- fork's row, but a zero on a first observation is still a registry bug.
     CHECK (sqrt_price_x96 > 0 OR (sqrt_price_x96 = 0 AND block_version > 0)),
-    -- block_timestamp must be in the PK: TimescaleDB requires the partition
-    -- column in every unique index on a hypertable.
+    -- TimescaleDB requires the partition column in every unique index on a hypertable.
     PRIMARY KEY (pool_id, block_timestamp, block_number, block_version, processing_version)
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'block_timestamp',
     tsdb.chunk_interval = '1 day',
-    -- Declaring the columnstore off here (every V4 hypertable does) is what makes
-    -- add_compression_policy below effective: tsdb.hypertable otherwise creates a
-    -- 1-day policy up front, and add_compression_policy then returns -1 and keeps it.
+    -- Without columnstore = false, tsdb.hypertable installs its own 1-day policy
+    -- and add_compression_policy below returns -1 rather than replacing it.
     tsdb.columnstore = false
 );
 
@@ -273,9 +217,8 @@ END $$;
 CREATE INDEX IF NOT EXISTS idx_uniswap_v4_pool_state_pv_lookup
     ON uniswap_v4_pool_state (pool_id, block_number, block_version, build_id);
 
--- Prefix 'u4ps' for uniswap_v4_pool_state. Pinned to force_custom_plan so the
--- per-row lookups keep pruning chunks instead of fanning out over every chunk
--- once plpgsql caches a generic plan (VEC-541).
+-- force_custom_plan (VEC-541): once plpgsql caches a generic plan the per-row
+-- lookups stop pruning chunks and fan out over every one.
 CREATE OR REPLACE FUNCTION assign_processing_version_uniswap_v4_pool_state()
 RETURNS TRIGGER
 SET plan_cache_mode = 'force_custom_plan'
@@ -388,8 +331,6 @@ END $$;
 CREATE INDEX IF NOT EXISTS idx_uniswap_v4_swap_pv_lookup
     ON uniswap_v4_swap (pool_id, block_number, block_version, log_index, build_id);
 
--- Prefix 'u4s' for uniswap_v4_swap. force_custom_plan per VEC-541 (see
--- assign_processing_version_uniswap_v4_pool_state).
 CREATE OR REPLACE FUNCTION assign_processing_version_uniswap_v4_swap()
 RETURNS TRIGGER
 SET plan_cache_mode = 'force_custom_plan'
@@ -507,7 +448,6 @@ END $$;
 CREATE INDEX IF NOT EXISTS idx_uniswap_v4_liquidity_event_pv_lookup
     ON uniswap_v4_liquidity_event (pool_id, block_number, block_version, log_index, build_id);
 
--- Prefix 'u4le' for uniswap_v4_liquidity_event. force_custom_plan per VEC-541.
 CREATE OR REPLACE FUNCTION assign_processing_version_uniswap_v4_liquidity_event()
 RETURNS TRIGGER
 SET plan_cache_mode = 'force_custom_plan'
@@ -599,16 +539,11 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_tick
 CREATE INDEX IF NOT EXISTS idx_uniswap_v4_tick_pv_lookup
     ON uniswap_v4_tick (pool_id, tick, block_number, block_version, build_id);
 
--- Serves the reorg-path read of every tick a pool has at one height
--- (TicksForPoolAtBlock). The PK and the pv-lookup index both put tick between
--- the two filtered columns, leaving pool_id the only boundary qual and
--- block_number a per-entry recheck over the pool's whole tick history. This is
--- the set's heaviest-written table, so the trade is one more index maintained
--- on every insert for a bounded read cost on a path only reorgs take.
+-- Serves TicksForPoolAtBlock (reorg path): in the PK and the pv-lookup index
+-- tick sits between the filtered columns, so block_number rechecks every entry.
 CREATE INDEX IF NOT EXISTS idx_uniswap_v4_tick_block_lookup
     ON uniswap_v4_tick (pool_id, block_number, tick);
 
--- Prefix 'u4t' for uniswap_v4_tick. force_custom_plan per VEC-541.
 CREATE OR REPLACE FUNCTION assign_processing_version_uniswap_v4_tick()
 RETURNS TRIGGER
 SET plan_cache_mode = 'force_custom_plan'
@@ -716,7 +651,6 @@ END $$;
 CREATE INDEX IF NOT EXISTS idx_uniswap_v4_pool_event_pv_lookup
     ON uniswap_v4_pool_event (pool_id, block_number, block_version, log_index, build_id);
 
--- Prefix 'u4pe' for uniswap_v4_pool_event. force_custom_plan per VEC-541.
 CREATE OR REPLACE FUNCTION assign_processing_version_uniswap_v4_pool_event()
 RETURNS TRIGGER
 SET plan_cache_mode = 'force_custom_plan'
@@ -782,9 +716,6 @@ COMMENT ON COLUMN uniswap_v4_pool_event.processing_version IS
 COMMENT ON COLUMN uniswap_v4_pool_event.build_id IS
   'Audit. ID of the indexer build (code+config) that wrote this row.';
 
--- Append-only enforcement: the application role may SELECT and INSERT but never
--- mutate or delete.
-
 REVOKE UPDATE, DELETE, TRUNCATE ON uniswap_v4_pool_manager FROM stl_readwrite;
 REVOKE UPDATE, DELETE, TRUNCATE ON uniswap_v4_pool FROM stl_readwrite;
 REVOKE UPDATE, DELETE, TRUNCATE ON uniswap_v4_pool_state FROM stl_readwrite;
@@ -793,11 +724,8 @@ REVOKE UPDATE, DELETE, TRUNCATE ON uniswap_v4_liquidity_event FROM stl_readwrite
 REVOKE UPDATE, DELETE, TRUNCATE ON uniswap_v4_tick FROM stl_readwrite;
 REVOKE UPDATE, DELETE, TRUNCATE ON uniswap_v4_pool_event FROM stl_readwrite;
 
--- Every PoolKey below was re-read from its own Initialize log on Ethereum
--- mainnet (2026-08-19) and its PoolId re-derived as
--- keccak256(abi.encode(currency0, currency1, fee, tickSpacing, hooks)) before
--- being written here; the migration integration test recomputes the same keccak
--- for every seeded row.
+-- Every PoolKey re-read from its own Initialize log on Ethereum mainnet
+-- (2026-08-19); the migration integration test re-derives each PoolId.
 
 INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at, metadata)
 VALUES (
@@ -811,12 +739,9 @@ VALUES (
 )
 ON CONFLICT (chain_id, address) DO NOTHING;
 
--- Counterparty tokens for the seeded pools. Symbols and decimals are read from
--- each contract on mainnet. Native ETH is deliberately absent: address(0)
--- already exists in the token registry as a different worker's "no token"
--- sentinel (symbol '', decimals 0), so V4 maps address(0) to the
--- 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE placeholder seeded by
--- 20260521_110000_create_curve_dex_tables.sql instead.
+-- Symbols and decimals read from each contract on mainnet. Native ETH is absent:
+-- address(0) is already another worker's "no token" sentinel (symbol '', decimals
+-- 0), so V4 maps it to the 0xEeee... placeholder the Curve migration seeds.
 INSERT INTO token (chain_id, address, symbol, decimals)
 VALUES
     (1, '\x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0'::bytea, 'wstETH', 18),
@@ -844,10 +769,6 @@ FROM protocol pr
 WHERE pr.chain_id = 1 AND pr.address = '\x000000000004444c5dc75cB358380D2e3dE08A90'::bytea
 ON CONFLICT (chain_id, processing_version) DO NOTHING;
 
--- The token joins below encode the native-ETH mapping once: address(0) resolves
--- to the 0xEeee... placeholder, every other currency to its own token row. A
--- missing token row drops the pool from the insert, which the post-seed count
--- assertion then rejects.
 WITH seed (pool_id, currency0, currency1, fee, tick_spacing, hooks, deploy_block) AS (
     VALUES
         ('\x1d5b2949ece8754c2d736991c62c5162bd144f497b2212182401b9bae77e2d76'::bytea, '\x0000000000000000000000000000000000000000'::bytea, '\x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0'::bytea,   100,   1, '\x0000000000000000000000000000000000000000'::bytea, 21743144::bigint),
@@ -890,10 +811,6 @@ JOIN token t1 ON t1.chain_id = 1 AND t1.address = CASE
         ELSE s.currency1 END
 ON CONFLICT (chain_id, pool_id, processing_version) DO NOTHING;
 
--- ----------------------------------------------------------------------------
--- Post-seed assertions.
--- ----------------------------------------------------------------------------
-
 DO $$
 DECLARE
     manager_count      INT;
@@ -915,8 +832,6 @@ BEGIN
         RAISE EXCEPTION 'expected exactly 21 UniswapV4 pools, got %', pool_count;
     END IF;
 
-    -- Every seeded PoolKey carries a static fee, so none of them is excluded
-    -- from the state/tick snapshot path.
     SELECT count(*) INTO unsupported_count
     FROM uniswap_v4_pool
     WHERE chain_id = 1 AND NOT snapshot_supported;
@@ -924,9 +839,6 @@ BEGIN
         RAISE EXCEPTION 'expected every seeded UniswapV4 pool to be snapshot_supported, got % excluded', unsupported_count;
     END IF;
 
-    -- The branches are mutually exclusive on purpose: a non-native currency must
-    -- equal its own token address, and address(0) must land on the 0xEeee...
-    -- placeholder rather than the unrelated address(0) "no token" sentinel row.
     SELECT count(*) INTO bad_mapping_count
     FROM uniswap_v4_pool p
     JOIN token t0 ON t0.id = p.currency0_token_id
@@ -954,8 +866,7 @@ BEGIN
         RAISE EXCEPTION 'expected every token referenced by a UniswapV4 pool to have decimals, got % with NULL', null_decimal_count;
     END IF;
 
-    -- A pre-existing registry row with the wrong symbol/decimals would silently
-    -- rescale every amount the V4 tables carry, so pin all 16 here.
+    -- A pre-existing token row with the wrong decimals silently rescales every V4 amount.
     SELECT format('%s: expected (%s, %s), got (%s, %s)',
                   encode(e.address, 'hex'), e.symbol, e.decimals, t.symbol, t.decimals)
     INTO bad_token
@@ -988,9 +899,8 @@ BEGIN
     END IF;
 END $$;
 
--- Address-equality spot checks: pool #1 (native ETH/wstETH, exercises the
--- address(0) -> ETH placeholder mapping), pool #12 (the only hooked pool), and
--- pool #21 (a 6-decimal currency0 against an 18-decimal currency1).
+-- The three shapes that differ: #1 native ETH (address(0) mapping), #12 the only
+-- hooked pool, #21 a 6-decimal currency0.
 DO $$
 DECLARE
     got_currency0 BYTEA;

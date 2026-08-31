@@ -7,14 +7,8 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 )
 
-// RegisteredPool is the static, registry-sourced identity of a watched
-// Uniswap V4 pool.
-//
-// Two distinct identifiers coexist and must not be confused: ID is the
-// uniswap_v4_pool surrogate key every fact row FKs, while PoolIDHash is the
-// on-chain PoolId — keccak256(abi.encode(PoolKey)) — that every PoolManager log
-// is indexed by. The SnapshotPool method below is named PoolID() to match the
-// dexconsumer interface, so the on-chain hash carries the suffixed field name.
+// ID is the uniswap_v4_pool surrogate key every fact row FKs; PoolIDHash is the
+// on-chain PoolId every PoolManager log is indexed by.
 type RegisteredPool struct {
 	ID                int64
 	PoolManager       common.Address
@@ -28,22 +22,15 @@ type RegisteredPool struct {
 	TickSpacing       int
 	Hooks             common.Address
 	DeployBlock       int64
-	// SnapshotSupported is the registry's curated gate on the state/tick
-	// snapshot path alone: a false pool is still decoded and persisted for
-	// events, it just never gets a uniswap_v4_pool_state or uniswap_v4_tick row.
+	// Gates the snapshot path alone: an excluded pool is still decoded and
+	// persisted for events.
 	SnapshotSupported bool
 }
 
-// PoolID and DeployBlockNum implement dexconsumer.SnapshotPool, letting
-// RegisteredPool feed the shared sweep/deploy-gate tracker without
-// dexconsumer depending on uniswapv4indexer.
+// PoolID and DeployBlockNum implement dexconsumer.SnapshotPool.
 func (p RegisteredPool) PoolID() int64         { return p.ID }
 func (p RegisteredPool) DeployBlockNum() int64 { return p.DeployBlock }
 
-// DecodedEvents holds one receipt's typed entities and their capture-net
-// mirror. Captured is a superset of the typed slices plus the singleton's
-// non-pool-keyed governance logs; it deliberately excludes logs belonging to
-// unregistered pools (see DecodeEvents).
 type DecodedEvents struct {
 	Swaps           []*entity.UniswapV4Swap
 	LiquidityEvents []*entity.UniswapV4LiquidityEvent

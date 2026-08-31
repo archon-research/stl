@@ -30,8 +30,6 @@ const stateViewMethodsJSON = `[
 	]}
 ]`
 
-// poolStateABIOnce parses stateViewMethodsJSON exactly once: SnapshotState runs
-// per due pool per block, so re-parsing the JSON each call is pure waste.
 var poolStateABIOnce = sync.OnceValues(func() (*abi.ABI, error) {
 	parsed, err := abis.ParseABI(stateViewMethodsJSON)
 	if err != nil {
@@ -40,21 +38,12 @@ var poolStateABIOnce = sync.OnceValues(func() (*abi.ABI, error) {
 	return parsed, nil
 })
 
-// poolStateABI returns the ABI fragment for the pool-level StateView getters.
-// Unlike V3 these live on a periphery contract, not the pool, and take the
-// PoolId as an argument — so unlike V3 their calldata cannot be pre-packed once
-// for every pool. The tick-level getters live in tick.go.
 func poolStateABI() (*abi.ABI, error) {
 	return poolStateABIOnce()
 }
 
-// SnapshotState reads a pool's slot0, liquidity and global fee growth from
-// StateView in a single multicall batch pinned to blockHash. It returns ONLY
-// pool-level state: tick-level reads live in tick.go.
-//
-// Every read is CORE (AllowFailure=false). V4 has no optional read: unlike V3's
-// observe(), none of these getters has a legitimate revert, so a failure is a
-// data-quality signal that must stop the block rather than zero a column.
+// No StateView getter has a legitimate revert, so every read is AllowFailure=false:
+// a failure is a data-quality signal that must stop the block, not zero a column.
 func SnapshotState(ctx context.Context, mc outbound.Multicaller, pool RegisteredPool, blockHash common.Hash, blockNumber int64, version int, ts time.Time) (*entity.UniswapV4PoolState, error) {
 	stateABI, err := poolStateABI()
 	if err != nil {
@@ -78,10 +67,6 @@ func SnapshotState(ctx context.Context, mc outbound.Multicaller, pool Registered
 	return state, nil
 }
 
-// stateSnapshotReads describes the three-call state batch as self-contained
-// pack/decode units, each closing over the state being built. Keeping every
-// read's Pack next to its Decode means the call order below is the only place
-// that determines wire order.
 func stateSnapshotReads(state *entity.UniswapV4PoolState, stateABI *abi.ABI) []shared.SnapshotRead[RegisteredPool] {
 	stateViewRead := func(method string, decode func(pool RegisteredPool, res outbound.Result) error) shared.SnapshotRead[RegisteredPool] {
 		return shared.SnapshotRead[RegisteredPool]{

@@ -1,7 +1,5 @@
 // Package tickbitmap holds the concentrated-liquidity tick-bitmap arithmetic
-// shared by the Uniswap V3 and V4 indexers. Both protocols pack initialized
-// ticks identically (v4-core's TickBitmap is v3-core's, unchanged), so the
-// floored-division math lives here once instead of per indexer.
+// the Uniswap V3 and V4 indexers share: v4-core's TickBitmap is v3-core's.
 package tickbitmap
 
 import (
@@ -9,20 +7,16 @@ import (
 	"slices"
 )
 
-// MinTick and MaxTick are TickMath's usable tick bounds, identical in v3-core
-// and v4-core. They are the widest range any pool can report regardless of
-// tickSpacing, and are distinct from the int24 wire bounds entity validation
-// uses.
+// MinTick and MaxTick are TickMath's usable bounds, identical in v3-core and
+// v4-core, and distinct from the int24 wire bounds entity validation uses.
 const (
 	MinTick = -887272
 	MaxTick = 887272
 )
 
-// FloorDiv implements floored (as opposed to Go's truncated) integer division:
-// FloorDiv(-1, 256) == -1, whereas Go's native -1/256 == 0. The tick bitmap
-// packs ticks with floored semantics (Solidity's arithmetic shift on a signed
-// int24), so Go's native operator would silently misplace every negative tick
-// into the wrong bitmap word.
+// FloorDiv is floored, not Go-truncated, division: FloorDiv(-1, 256) == -1
+// where Go's -1/256 == 0. The bitmap packs ticks with Solidity's arithmetic
+// shift, so the native operator misplaces every negative tick.
 func FloorDiv(a, b int) int {
 	q := a / b
 	if (a%b != 0) && ((a < 0) != (b < 0)) {
@@ -31,23 +25,16 @@ func FloorDiv(a, b int) int {
 	return q
 }
 
-// WordBitToTick recovers the tick at a given bitmap word/bit for a pool with
-// the given tickSpacing, inverting Solidity's int16(compressed >> 8) /
-// uint8(compressed % 256) packing.
+// WordBitToTick inverts Solidity's int16(compressed >> 8) /
+// uint8(compressed % 256) tick packing.
 func WordBitToTick(word int16, bit uint8, tickSpacing int) int32 {
 	compressed := int(word)*256 + int(bit)
 	return int32(compressed * tickSpacing)
 }
 
-// WordBounds returns the inclusive [minWord, maxWord] range of bitmap word
-// positions that can hold an initialized tick for a pool with the given
-// tickSpacing. Enumerating only this range (rather than every int16) bounds a
-// full bitmap scan at 6,932 words for tickSpacing 1 and 36 for 200, instead of
-// 65,536.
-//
-// tickSpacing must be >= 1: 0 divides by zero and a negative spacing inverts
-// the bounds, which silently empties a caller's scan loop. Only the V4 registry
-// constrains the column (VEC-586 tracks the V3 side), so the guard is here.
+// WordBounds returns the inclusive word range that can hold an initialized
+// tick: 6,932 words for tickSpacing 1 and 36 for 200, not 65,536. Below
+// tickSpacing 1 the range inverts and empties a scan loop, so it errors.
 func WordBounds(tickSpacing int) (int16, int16, error) {
 	if tickSpacing < 1 {
 		return 0, 0, fmt.Errorf("tick spacing %d is below 1", tickSpacing)
@@ -57,20 +44,17 @@ func WordBounds(tickSpacing int) (int16, int16, error) {
 	return int16(minWord), int16(maxWord), nil
 }
 
-// TicksPerCall and BitmapWordsPerCall bound how many per-tick getter and how
-// many bitmap-word sub-calls an indexer packs into one multicall3 aggregate
-// call. A dense pool's first touch enumerates O(10³) initialized ticks and, at
-// tickSpacing 1, ~6932 bitmap words; sending either set in one aggregate call
-// risks exceeding an RPC provider's request/response/gas caps. 500 keeps the
-// worst case to ~14 batches.
+// TicksPerCall and BitmapWordsPerCall cap one multicall3 aggregate: a dense
+// pool's first touch enumerates O(10³) ticks and ~6932 bitmap words at
+// tickSpacing 1, past an RPC provider's request/response/gas caps in one call.
 const (
 	TicksPerCall       = 500
 	BitmapWordsPerCall = 500
 )
 
-// MergeTickSets returns the deduplicated, ascending-sorted union of two tick
-// sets: a pool's first-touch persist must write every initialized tick exactly
-// once, even where the bitmap baseline and the block's own event bounds overlap.
+// MergeTickSets returns the deduplicated, ascending union: a first-touch
+// persist must write every initialized tick exactly once, even where the
+// bitmap baseline and the block's own event bounds overlap.
 func MergeTickSets(a, b []int32) []int32 {
 	seen := make(map[int32]struct{}, len(a)+len(b))
 	out := make([]int32, 0, len(a)+len(b))

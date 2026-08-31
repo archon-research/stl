@@ -189,11 +189,7 @@ func TestCurveRepository_SaveStableswapState_Idempotent(t *testing.T) {
 	if got := save(); got.Attempted != 1 || got.Persisted != 1 {
 		t.Errorf("first save = %+v, want {Attempted:1 Persisted:1}", got)
 	}
-	// The redelivery is the case VectorCurveIndexerNoStateWritten must NOT fire
-	// on: same build -> the trigger reuses the processing_version, so the INSERT
-	// lands on the identical PK and appends nothing. Persisted drops to zero
-	// while Attempted stays at the row the block really tried to persist — which
-	// is why the alert's unless side keys on Attempted.
+	// redelivery; same build -> trigger reuses pv -> ON CONFLICT DO NOTHING
 	if got := save(); got.Attempted != 1 || got.Persisted != 0 {
 		t.Errorf("redelivery = %+v, want {Attempted:1 Persisted:0} (ON CONFLICT DO NOTHING appends nothing, but the block still tried)", got)
 	}

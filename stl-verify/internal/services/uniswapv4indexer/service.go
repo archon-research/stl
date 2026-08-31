@@ -21,7 +21,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
-// UniswapV4ServiceDeps groups the UniswapV4Service's constructor arguments.
 // Telemetry is optional (nil = no-op); every other field is required.
 type UniswapV4ServiceDeps struct {
 	Pools       []RegisteredPool
@@ -34,20 +33,12 @@ type UniswapV4ServiceDeps struct {
 	Telemetry   *dextelemetry.Telemetry
 }
 
-// UniswapV4Service drives per-block event decoding and transactional
-// persistence for the Uniswap V4 indexer.
-//
-// Single-goroutine contract: sqsutil.RunLoop processes one SQS message at a
-// time, so no synchronisation is required on any field. All per-block work
-// happens in local variables inside handleBlock; the only cross-block state is
-// the pool registry, the snapshot tracker (deploy-gate tracking; sweepBlocks=0
-// disables its periodic-sweep half, see NewUniswapV4Service), baselineSeen and
-// neverIndexed. The last two are seeded from the database at construction, so
-// neither is reset by a restart.
+// sqsutil.RunLoop processes one SQS message at a time, so no field is
+// synchronised.
 type UniswapV4Service struct {
 	poolsByID   map[common.Hash]RegisteredPool
 	poolsByRow  map[int64]RegisteredPool
-	pools       []RegisteredPool // ordered for deterministic iteration
+	pools       []RegisteredPool
 	poolManager common.Address
 	multicaller outbound.Multicaller
 	repo        outbound.UniswapV4Repository
@@ -82,22 +73,10 @@ func (d UniswapV4ServiceDeps) validate() error {
 	return nil
 }
 
-// NewUniswapV4Service validates deps and builds a UniswapV4Service. It refuses
-// to boot on an empty registry, on a registry whose PoolIds disagree with their
-// keys (see ValidatePoolKeys), or on one spanning more than one PoolManager:
-// each would leave an indexer that looks healthy while silently writing wrong
-// or no rows.
-//
-// The snapshot tracker is built with sweepBlocks=0: for a static-fee pool V4
-// state is piecewise-constant between touches — every field this indexer
-// snapshots changes only through a PoolManager log keyed by the pool's own
-// PoolId — so unlike Curve there is no periodic heartbeat snapshot to keep quiet
-// pools fresh. A dynamic-fee pool's lp_fee has no log to ride on and no sweep to
-// fall back to, which is why the registry excludes it from snapshots
-// (snapshot_supported = false) while still indexing its events.
-//
-// It reads PoolIDsEverSnapshotted once here, which is why it takes a ctx: that
-// read is what makes baselineSeen and neverIndexed survive a restart.
+// V4 state is piecewise-constant between touches: every field snapshotted here
+// changes only through a PoolManager log keyed by the pool's own PoolId.
+const noPeriodicSweep = 0
+
 func NewUniswapV4Service(ctx context.Context, deps UniswapV4ServiceDeps) (*UniswapV4Service, error) {
 	if err := deps.validate(); err != nil {
 		return nil, err
@@ -105,10 +84,8 @@ func NewUniswapV4Service(ctx context.Context, deps UniswapV4ServiceDeps) (*Unisw
 	if err := ValidatePoolKeys(deps.Pools); err != nil {
 		return nil, err
 	}
-	// Defence in depth over TestPoolManagerABI_RoutesOnlyEventsItDefines, which
-	// already pins these compile-time constants: a broken routing table that
-	// only surfaced in DecodeEvents would fail every receipt of every block and
-	// wedge the queue instead of refusing to boot with the reason.
+	// Fail the boot with the reason: a broken routing table would otherwise fail
+	// every receipt of every block and wedge the queue.
 	if _, err := eventsByID(); err != nil {
 		return nil, err
 	}
@@ -116,13 +93,11 @@ func NewUniswapV4Service(ctx context.Context, deps UniswapV4ServiceDeps) (*Unisw
 	if err != nil {
 		return nil, err
 	}
-	indexed, err := deps.Repo.PoolIDsEverSnapshotted(ctx, deps.ChainID)
+	everSnapshotted, err := deps.Repo.PoolIDsEverSnapshotted(ctx, deps.ChainID)
 	if err != nil {
 		return nil, fmt.Errorf("reading which uniswap v4 pools have ever been indexed on chain %d: %w", deps.ChainID, err)
 	}
-
-	// baselineSeen IS the ever-snapshotted set: see PoolIDsEverSnapshotted.
-	baselineSeen := seenSet(indexed)
+	baselineSeen := seenSet(everSnapshotted)
 	svc := &UniswapV4Service{
 		poolsByID:    indexPoolsByHash(deps.Pools),
 		poolsByRow:   indexPoolsByRowID(deps.Pools),
@@ -135,7 +110,7 @@ func NewUniswapV4Service(ctx context.Context, deps UniswapV4ServiceDeps) (*Unisw
 		chainID:      deps.ChainID,
 		logger:       deps.Logger,
 		telemetry:    deps.Telemetry,
-		tracker:      dexconsumer.NewSnapshotTracker(0),
+		tracker:      dexconsumer.NewSnapshotTracker(noPeriodicSweep),
 		baselineSeen: baselineSeen,
 		neverIndexed: neverIndexedPools(deps.Pools, baselineSeen),
 	}
@@ -144,17 +119,16 @@ func NewUniswapV4Service(ctx context.Context, deps UniswapV4ServiceDeps) (*Unisw
 	return svc, nil
 }
 
-func seenSet(indexed []int64) map[int64]bool {
-	seen := make(map[int64]bool, len(indexed))
-	for _, id := range indexed {
+func seenSet(ids []int64) map[int64]bool {
+	seen := make(map[int64]bool, len(ids))
+	for _, id := range ids {
 		seen[id] = true
 	}
 	return seen
 }
 
-// neverIndexedPools skips pools the registry excludes from snapshots: they
-// produce no state or tick rows by design, so counting them would leave the
-// alert permanently firing.
+// Registry-excluded pools produce no state or tick rows by design; counting them
+// would leave the never-indexed alert permanently firing.
 func neverIndexedPools(pools []RegisteredPool, indexed map[int64]bool) map[int64]bool {
 	never := make(map[int64]bool)
 	for _, pool := range SnapshottablePools(pools) {
@@ -165,9 +139,7 @@ func neverIndexedPools(pools []RegisteredPool, indexed map[int64]bool) map[int64
 	return never
 }
 
-// reportNeverIndexed publishes the count and, while it is non-zero, names the
-// pools: the gauge is what alerts, the log is what says which registry row to
-// check (the gauge carries no per-pool label, on purpose).
+// The gauge carries no per-pool label, so the log names the pools.
 func (s *UniswapV4Service) reportNeverIndexed(ctx context.Context) {
 	s.telemetry.RecordPoolsNeverIndexed(ctx, len(s.neverIndexed))
 	if len(s.neverIndexed) == 0 {
@@ -182,10 +154,8 @@ func (s *UniswapV4Service) reportNeverIndexed(ctx context.Context) {
 		"chainId", s.chainID, "count", len(ids), "poolRowIds", ids, "poolIds", hashes)
 }
 
-// reportExcludedFromSnapshots names the pools the registry drops from the
-// snapshot schedule. Nothing downstream can: the never-indexed gauge iterates
-// the snapshottable set, and their touches file under snapshot_supported
-// "false", which NoPoolsTouched aggregates away.
+// No metric names these pools: the never-indexed gauge skips them, and their
+// touches aggregate away under snapshot_supported "false".
 func (s *UniswapV4Service) reportExcludedFromSnapshots() {
 	var ids []int64
 	var hashes []string
@@ -202,10 +172,6 @@ func (s *UniswapV4Service) reportExcludedFromSnapshots() {
 		"chainId", s.chainID, "count", len(ids), "poolRowIds", ids, "poolIds", hashes)
 }
 
-// poolManagerFor returns the one PoolManager address the registry shares. One
-// worker serves one chain's PoolManager, and the StateView is that deployment's
-// periphery: a registry mixing either address would mean two deployments in one
-// worker, which the log filter and the state reads both silently mis-handle.
 func poolManagerFor(pools []RegisteredPool) (common.Address, error) {
 	first := pools[0]
 	for _, pool := range pools[1:] {
@@ -219,8 +185,7 @@ func poolManagerFor(pools []RegisteredPool) (common.Address, error) {
 	return first.PoolManager, nil
 }
 
-// indexPoolsByHash builds the on-chain PoolId -> pool index used to route every
-// PoolManager log. ValidatePoolKeys has already rejected duplicate PoolIds.
+// ValidatePoolKeys has already rejected duplicate PoolIds.
 func indexPoolsByHash(pools []RegisteredPool) map[common.Hash]RegisteredPool {
 	byHash := make(map[common.Hash]RegisteredPool, len(pools))
 	for _, p := range pools {
@@ -229,8 +194,6 @@ func indexPoolsByHash(pools []RegisteredPool) map[common.Hash]RegisteredPool {
 	return byHash
 }
 
-// indexPoolsByRowID indexes by the uniswap_v4_pool surrogate id, which is how
-// persisted fact rows name a pool.
 func indexPoolsByRowID(pools []RegisteredPool) map[int64]RegisteredPool {
 	byRow := make(map[int64]RegisteredPool, len(pools))
 	for _, p := range pools {
@@ -239,11 +202,7 @@ func indexPoolsByRowID(pools []RegisteredPool) map[int64]RegisteredPool {
 	return byRow
 }
 
-// BlockHandler returns the dexconsumer.BlockHandler for this service. It
-// records uniswap_v4_errors_total once, at this boundary, on any non-nil
-// handler return: handleBlock's inner steps wrap their errors with stage
-// context (for the logs) but do not touch the counter, so no future error path
-// can silently skip the metric.
+// The error counter is recorded once, here, so no inner error path can skip it.
 func (s *UniswapV4Service) BlockHandler() dexconsumer.BlockHandler {
 	return func(ctx context.Context, event outbound.BlockEvent, receipts []shared.TransactionReceipt) error {
 		if err := s.handleBlock(ctx, event, receipts); err != nil {
@@ -254,12 +213,7 @@ func (s *UniswapV4Service) BlockHandler() dexconsumer.BlockHandler {
 	}
 }
 
-// handleBlock decodes every receipt in the block, snapshots the due pools'
-// state and tick rows via multicall (before opening the transaction), and
-// persists swaps, liquidity events, pool events, state, ticks, and captured
-// logs in one transaction. Returning a non-nil error leaves the block for SQS
-// redelivery; nil is returned only after a successful commit. All per-block
-// state is local, so a redelivery reprocesses from scratch with no carryover.
+// Every per-block value is local, so an SQS redelivery reprocesses from scratch.
 func (s *UniswapV4Service) handleBlock(ctx context.Context, event outbound.BlockEvent, receipts []shared.TransactionReceipt) error {
 	blockHash, err := event.ParsedBlockHash()
 	if err != nil {
@@ -304,23 +258,16 @@ func (s *UniswapV4Service) handleBlock(ctx context.Context, event outbound.Block
 
 	s.markSnapshotted(dueSet, baselined, coords.number, coords.version)
 	s.markIndexed(ctx, dueSet)
-	// Recorded only after a successful commit, so the alerts compare pools this
-	// block touched against the state rows that same block queued. Attempted is
-	// what VectorUniswapV4IndexerNotWritingState keys on — persisted goes to
-	// zero on a healthy replay; written stays as volume observability.
+	// NotWritingState keys on attempted, not persisted: a healthy replay appends
+	// no rows and would otherwise look like a stall.
 	s.recordPoolsTouched(ctx, acc.touchedIDs)
 	s.telemetry.RecordStateRowsAttempted(ctx, int(stateRows.Attempted))
 	s.telemetry.RecordStateRows(ctx, int(stateRows.Persisted))
 	return nil
 }
 
-// recordPoolsTouched splits the decode-stage touched set by the registry's
-// snapshot_supported flag. Only the supported half reaches the due set, so only
-// it may gate VectorUniswapV4IndexerNotWritingState, which would otherwise page
-// on a block whose sole touch was an excluded dynamic-fee pool. Both halves
-// stay on one metric because VectorUniswapV4IndexerNoPoolsTouched wants every
-// touch — an excluded pool's log still proves the PoolManager address and the
-// topics[1]/poolsByID routing work — and aggregates the label away.
+// Only the snapshot_supported half reaches the due set, so only it may gate
+// NotWritingState; NoPoolsTouched wants every touch and aggregates the label away.
 func (s *UniswapV4Service) recordPoolsTouched(ctx context.Context, touched map[int64]bool) {
 	supported := 0
 	for id := range touched {
@@ -332,14 +279,11 @@ func (s *UniswapV4Service) recordPoolsTouched(ctx context.Context, touched map[i
 	s.telemetry.RecordPoolsTouched(ctx, len(touched)-supported, attribute.String(snapshotSupportedKey, "false"))
 }
 
-// Spelt as literal "true"/"false" strings rather than attribute.Bool: this is
-// the label VectorUniswapV4IndexerNotWritingState selects on by value.
+// Literal "true"/"false" rather than attribute.Bool: the alert selects on the value.
 const snapshotSupportedKey = "snapshot_supported"
 
-// markIndexed clears the pools this block snapshotted from the never-indexed
-// set and republishes the gauge when it shrank. Every due pool got a state row
-// in the commit that just succeeded — an ON CONFLICT DO NOTHING replay means the
-// row was already there — so a due pool is indexed either way.
+// A due pool is indexed either way: the commit appended its state row, or an
+// ON CONFLICT DO NOTHING replay found it already there.
 func (s *UniswapV4Service) markIndexed(ctx context.Context, dueSet []RegisteredPool) {
 	changed := false
 	for _, pool := range dueSet {
@@ -353,16 +297,9 @@ func (s *UniswapV4Service) markIndexed(ctx context.Context, dueSet []RegisteredP
 	}
 }
 
-// dueSetForBlock selects the pools this block must snapshot: everything
-// dexconsumer.DueSet picks that the registry marks snapshot_supported, plus —
-// on a reorg redelivery — every pool that already has a state row at this
-// height. The tracker lives only in memory, so after a restart DueSet's reorg
-// rule sees nothing and the orphaned fork's (N, v0) rows would stay
-// canonical-latest forever. A pool the registry has since excluded is still
-// re-snapshotted on that path: its rows exist and have to be superseded.
-//
-// DueSet runs over the whole registry rather than the snapshottable subset, so
-// its unregistered-touch and deploy-block guards keep covering excluded pools.
+// The tracker lives only in memory, so a restart would leave the orphaned fork's
+// (N, v0) rows canonical-latest; a reorg redelivery therefore re-snapshots every
+// pool that already has a state row at this height, excluded ones included.
 func (s *UniswapV4Service) dueSetForBlock(ctx context.Context, touched map[int64]bool, coords blockCoords) ([]RegisteredPool, error) {
 	all, err := dexconsumer.DueSet(s.tracker, s.pools, touched, coords.number, coords.version)
 	if err != nil {
@@ -380,14 +317,8 @@ func (s *UniswapV4Service) dueSetForBlock(ctx context.Context, touched map[int64
 	return s.withRegisteredPools(due, priorIDs, coords.number)
 }
 
-// withRegisteredPools adds the pools named by ids that due does not already
-// carry, restoring the ascending-ID order the snapshot loop and the tests rely
-// on. ids are already resolved to current registry versions on the worker's own
-// chain, so one the registry does not name is a genuine registry bug rather
-// than a superseded or foreign row. A deploy block above bn is the same
-// contradiction from the other side — the id reached here because a committed
-// state row provably exists at bn — so it errors rather than leaving the
-// orphaned fork's rows canonical.
+// ids are already resolved to this chain's current registry versions, so one the
+// registry does not name is a genuine bug, not a superseded or foreign row.
 func (s *UniswapV4Service) withRegisteredPools(due []RegisteredPool, ids []int64, bn int64) ([]RegisteredPool, error) {
 	present := make(map[int64]bool, len(due))
 	for _, pool := range due {
@@ -411,10 +342,6 @@ func (s *UniswapV4Service) withRegisteredPools(due []RegisteredPool, ids []int64
 	return due, nil
 }
 
-// blockCoords is the block identity a hash-pinned read needs: the hash the read
-// is pinned to plus the height/version/timestamp its rows are stamped with. It
-// travels as one value so the snapshot helpers take the pool and the work
-// instead of repeating a four-argument tail (same shape as receiptDecoder).
 type blockCoords struct {
 	hash    common.Hash
 	number  int64
@@ -435,17 +362,12 @@ func (acc blockAccumulators) hasEvents() bool {
 	return len(acc.swaps) > 0 || len(acc.liquidity) > 0 || len(acc.poolEvts) > 0 || len(acc.captured) > 0
 }
 
-// decodeBlockEvents decodes each receipt once against the whole registry — the
-// PoolManager is a single contract, so there is no per-pool pass — and
-// accumulates the typed events plus the touched-pool-ID set.
 func (s *UniswapV4Service) decodeBlockEvents(ctx context.Context, receipts []shared.TransactionReceipt, bn int64, ver int, ts time.Time) (blockAccumulators, error) {
 	acc := blockAccumulators{
 		touchedIDs: make(map[int64]bool),
 		liqByPool:  make(map[int64][]*entity.UniswapV4LiquidityEvent),
 	}
 	for _, receipt := range receipts {
-		// Bail with an error, never a silent ack, when the handler-timeout budget
-		// or a shutdown cancelled ctx mid-block.
 		if err := ctx.Err(); err != nil {
 			return blockAccumulators{}, err
 		}
@@ -465,12 +387,8 @@ func (s *UniswapV4Service) decodeBlockEvents(ctx context.Context, receipts []sha
 	return acc, nil
 }
 
-// snapshotDueSet reads each due pool's state and tick rows via multicall,
-// pinned to coords.hash so the read cannot silently answer from a post-reorg
-// fork. It must run BEFORE the DB transaction opens, so archive-RPC latency
-// never pins a pgx connection (pool exhaustion is a stall cause). Returns the
-// pool IDs whose baseline ticks were read this call, so the caller can mark
-// baselineSeen only after a successful persist.
+// Runs before the DB transaction opens, so archive-RPC latency never pins a pgx
+// connection.
 func (s *UniswapV4Service) snapshotDueSet(ctx context.Context, dueSet []RegisteredPool, acc blockAccumulators, coords blockCoords) ([]*entity.UniswapV4PoolState, []*entity.UniswapV4Tick, []int64, error) {
 	var states []*entity.UniswapV4PoolState
 	var ticks []*entity.UniswapV4Tick
@@ -495,22 +413,9 @@ func (s *UniswapV4Service) snapshotDueSet(ctx context.Context, dueSet []Register
 	return states, ticks, baselined, nil
 }
 
-// snapshotPoolTicks reads pool's touched ticks (the bounds of this block's
-// liquidity-changing events) plus, on the pool's first-ever touch, every
-// currently initialized tick (the baseline enumeration). Returning isFirstSeen
-// lets the caller defer marking baselineSeen until after a successful persist,
-// so a failed block re-enumerates the baseline on redelivery instead of
-// silently skipping it forever.
-//
-// On a reorg redelivery (coords.version > 0) it additionally re-reads every
-// tick that already has a row at this block height. dueSetForBlock re-snapshots a pool at
-// (N, v_new) even when the new fork's receipts don't touch it, but TouchedTicks
-// is then empty and the baseline (bitmap scan) only enumerates ticks still
-// initialized on v_new — so a tick initialized only on the orphaned fork would
-// never be re-read and its stale (N, v0) row would stay canonical-latest
-// forever. Re-reading the prior version's ticks at coords.hash produces a
-// superseding (N, v_new) row for each: a now-cleared tick reads back zeroed
-// (getTickInfo never reverts), a still-initialized one gets its v_new value.
+// A tick initialized only on an orphaned fork is invisible to the bitmap scan, so
+// a reorg redelivery also re-reads every tick that has a row at this height; a
+// now-cleared one reads back zeroed, superseding its stale (N, v0) row.
 func (s *UniswapV4Service) snapshotPoolTicks(ctx context.Context, pool RegisteredPool, coords blockCoords, liqEvents []*entity.UniswapV4LiquidityEvent) ([]*entity.UniswapV4Tick, bool, error) {
 	ticksToRead := TouchedTicks(liqEvents)
 
@@ -538,10 +443,6 @@ func (s *UniswapV4Service) snapshotPoolTicks(ctx context.Context, pool Registere
 	return rows, isFirstSeen, nil
 }
 
-// readTicks reads the given tick positions in bounded multicall batches (see
-// tickbitmap.TicksPerCall), decoding every result into an authoritative
-// entity.UniswapV4Tick. Batches are issued in order and their rows concatenated
-// so the returned slice stays aligned with ticksToRead.
 func (s *UniswapV4Service) readTicks(ctx context.Context, pool RegisteredPool, coords blockCoords, ticksToRead []int32) ([]*entity.UniswapV4Tick, error) {
 	if len(ticksToRead) == 0 {
 		return nil, nil
@@ -558,8 +459,6 @@ func (s *UniswapV4Service) readTicks(ctx context.Context, pool RegisteredPool, c
 	return rows, nil
 }
 
-// readTickChunk issues one getTickInfo multicall for a single bounded batch of
-// tick positions and decodes every result positionally.
 func (s *UniswapV4Service) readTickChunk(ctx context.Context, pool RegisteredPool, coords blockCoords, chunk []int32) ([]*entity.UniswapV4Tick, error) {
 	calls, err := BuildTickCalls(pool, chunk)
 	if err != nil {
@@ -584,8 +483,6 @@ func (s *UniswapV4Service) readTickChunk(ctx context.Context, pool RegisteredPoo
 	return rows, nil
 }
 
-// buildBlockWrites runs before the transaction opens, so any future conversion
-// error fails fast without holding a pooled connection.
 func (s *UniswapV4Service) buildBlockWrites(acc blockAccumulators, states []*entity.UniswapV4PoolState, ticks []*entity.UniswapV4Tick, bn int64, ver int, ts time.Time) (outbound.UniswapV4BlockWrites, []dexconsumer.ProtocolEventInput) {
 	writes := outbound.UniswapV4BlockWrites{
 		States:          states,
@@ -597,10 +494,8 @@ func (s *UniswapV4Service) buildBlockWrites(acc blockAccumulators, states []*ent
 	return writes, dexconsumer.ToProtocolEventInputs(acc.captured, s.chainID, bn, ver, ts)
 }
 
-// persistBlock returns how the block's state rows fared: how many were queued,
-// and how many actually appended (zero on an idempotent ON CONFLICT DO NOTHING
-// replay). dexconsumer.PersistBlock only carries the persisted count back, so
-// the attempted count rides out on the closure.
+// PersistBlock carries only the persisted count back, so attempted rides the
+// closure.
 func (s *UniswapV4Service) persistBlock(ctx context.Context, writes outbound.UniswapV4BlockWrites, capturedIns []dexconsumer.ProtocolEventInput, bn int64) (outbound.StateRowCounts, error) {
 	var attempted int64
 	persisted, err := dexconsumer.PersistBlock(ctx, s.txMgr, s.eventWriter, func(ctx context.Context, tx pgx.Tx) (int64, error) {
@@ -617,9 +512,8 @@ func (s *UniswapV4Service) persistBlock(ctx context.Context, writes outbound.Uni
 	return outbound.StateRowCounts{Attempted: attempted, Persisted: persisted}, nil
 }
 
-// markSnapshotted records the tracker and baselineSeen bookkeeping AFTER a
-// successful persist, so a failed block leaves both pools still due and their
-// baselines unenumerated for the next (redelivered) attempt.
+// Called only after a successful persist: a failed block must leave its pools due
+// and their baselines unenumerated.
 func (s *UniswapV4Service) markSnapshotted(dueSet []RegisteredPool, baselined []int64, bn int64, ver int) {
 	ids := make([]int64, len(dueSet))
 	for i, pool := range dueSet {

@@ -16,16 +16,16 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 )
 
-// The Uniswap tick tables share one append-on-change write path and differ only
-// in name and in V3's initialized column.
-var (
-	uniswapV3TickWriter = newUniswapTickWriter("uniswap_v3_tick", true)
-	uniswapV4TickWriter = newUniswapTickWriter("uniswap_v4_tick", false)
+const (
+	uniswapTickHasInitialized = true
+	uniswapTickNoInitialized  = false
 )
 
-// uniswapTickRow is one tick observation in the shape the shared writer
-// persists. initialized is V3-only; a writer whose table lacks the column
-// neither writes nor compares it.
+var (
+	uniswapV3TickWriter = newUniswapTickWriter("uniswap_v3_tick", uniswapTickHasInitialized)
+	uniswapV4TickWriter = newUniswapTickWriter("uniswap_v4_tick", uniswapTickNoInitialized)
+)
+
 type uniswapTickRow struct {
 	poolID                int64
 	tick                  int
@@ -36,12 +36,11 @@ type uniswapTickRow struct {
 	liquidityNet          *big.Int
 	feeGrowthOutside0X128 *big.Int
 	feeGrowthOutside1X128 *big.Int
-	initialized           bool
+	// initialized is V3-only; a writer whose table lacks the column neither
+	// writes nor compares it.
+	initialized bool
 }
 
-// uniswapTickWriter persists the append-on-change rows of one Uniswap tick
-// table. Its SQL is built once per table at package init so the write path
-// below is shared verbatim.
 type uniswapTickWriter struct {
 	table          string
 	hasInitialized bool
@@ -49,9 +48,8 @@ type uniswapTickWriter struct {
 	insertSQL      string
 }
 
-// newUniswapTickWriter builds one table's statements. valueColumns fixes the
-// order of both the scan in readLatestTicks and the bind parameters in
-// insertArgs; the three must be changed together.
+// valueColumns fixes the scan order in readLatestTicks and the bind order in
+// insertArgs; change the three together.
 func newUniswapTickWriter(table string, hasInitialized bool) uniswapTickWriter {
 	valueColumns := []string{
 		"liquidity_gross", "liquidity_net",
@@ -68,11 +66,8 @@ func newUniswapTickWriter(table string, hasInitialized bool) uniswapTickWriter {
 	}
 }
 
-// latestUniswapTicksSQL selects the latest row per (pool_id, tick) among the
-// keys in ($1, $2), at or below the height in $3. The height bound is
-// load-bearing: an out-of-order write (the gap backfiller republishing a missed
-// block) compared against a NEWER row is dropped as unchanged whenever the two
-// agree, leaving that block a permanent hole in the tick's history.
+// The block_number <= $3 bound is load-bearing: compared against a NEWER row,
+// an out-of-order backfill write is dropped as unchanged — a permanent hole.
 func latestUniswapTicksSQL(table string, valueColumns []string) string {
 	selected := make([]string, 0, len(valueColumns))
 	for _, column := range valueColumns {
@@ -107,19 +102,8 @@ func insertUniswapTickSQL(table string, valueColumns []string) string {
 		table, strings.Join(columns, ", "), strings.Join(placeholders, ","))
 }
 
-// writeTicks persists one block's tick rows. It locks every affected
-// (pool_id, tick) slot in sorted order so the read-latest-then-insert decision
-// is serialized against concurrent writers (db/migrations/AGENTS.md
-// read-then-write rule), reads each slot's latest row at or below this block's
-// height, and appends only the ticks that row does not already reflect.
-//
-// Each phase is one round-trip for the whole set — locks in a single unnest()
-// Exec, the reads in a single DISTINCT ON query, the inserts in one pgx.Batch —
-// because a dense pool's first touch covers O(10³) ticks and per-tick
-// round-trips would hold the advisory locks for all of them.
-//
-// Ticks in one block are deduplicated per (pool_id, tick) upstream, so each key
-// appears at most once here and needs no in-batch same-key sequencing.
+// Ticks are deduplicated per (pool_id, tick) upstream, so each key appears at
+// most once here and the batch needs no same-key sequencing.
 func (w uniswapTickWriter) writeTicks(ctx context.Context, tx pgx.Tx, ticks []uniswapTickRow, buildID buildregistry.BuildID) error {
 	if len(ticks) == 0 {
 		return nil
@@ -143,9 +127,8 @@ func (w uniswapTickWriter) writeTicks(ctx context.Context, tx pgx.Tx, ticks []un
 	return w.insertChangedTicks(ctx, tx, ticks, latest, buildID)
 }
 
-// sharedBlockNumber returns the block every tick in the write belongs to. One
-// SaveBlock is one block, and readLatestTicks bounds itself by that height, so
-// a mixed batch would compare a tick against another block's row.
+// readLatestTicks bounds by this height, so a write spanning blocks would
+// compare a tick against another block's row.
 func (w uniswapTickWriter) sharedBlockNumber(ticks []uniswapTickRow) (int64, error) {
 	blockNumber := ticks[0].blockNumber
 	for _, t := range ticks[1:] {
@@ -156,24 +139,15 @@ func (w uniswapTickWriter) sharedBlockNumber(ticks []uniswapTickRow) (int64, err
 	return blockNumber, nil
 }
 
-// lockTickKeys acquires the per-slot advisory lock for every key in one
-// round-trip via unnest(). keys must already be in the canonical sorted order
-// (distinctSortedUniswapTickKeys) so concurrent SaveBlock transactions touching
-// overlapping ticks acquire overlapping locks in the same order and never
-// deadlock.
-//
-// The "<table>|<pool>|<tick>" lock domain is deliberately distinct from the
-// pv-trigger's row-identity key ("uvt|…" / "u4t|…"): this guards the app-level
-// read-latest-then-insert decision, the trigger guards processing_version
-// assignment. They must not be harmonized (same curve_config precedent, see
-// curve_repository.go).
+// The lock domain is deliberately distinct from the pv-trigger's row-identity
+// key: this guards the read-latest-then-insert decision, not processing_version.
 func (w uniswapTickWriter) lockTickKeys(ctx context.Context, tx pgx.Tx, keys []uniswapTickKey) error {
 	lockKeys := make([]string, len(keys))
 	for i, k := range keys {
 		lockKeys[i] = fmt.Sprintf("%s|%d|%d", w.table, k.poolID, k.tick)
 	}
-	// pg_advisory_xact_lock is acquired left-to-right as unnest() yields rows,
-	// preserving the sorted-key lock order.
+	// pg_advisory_xact_lock is taken left-to-right as unnest() yields rows, so
+	// ORDER BY ord preserves the sorted lock order.
 	if _, err := tx.Exec(ctx,
 		`SELECT pg_advisory_xact_lock(hashtextextended(k, 0))
 		 FROM unnest($1::text[]) WITH ORDINALITY AS u(k, ord)
@@ -185,9 +159,6 @@ func (w uniswapTickWriter) lockTickKeys(ctx context.Context, tx pgx.Tx, keys []u
 	return nil
 }
 
-// readLatestTicks fetches each key's latest row at or below blockNumber. Keys
-// with no such row are absent from the map, which the caller treats as "insert
-// unconditionally".
 func (w uniswapTickWriter) readLatestTicks(ctx context.Context, tx pgx.Tx, keys []uniswapTickKey, blockNumber int64) (map[uniswapTickKey]uniswapTickValues, error) {
 	poolIDs := make([]int64, len(keys))
 	tickNums := make([]int32, len(keys))
@@ -236,9 +207,7 @@ func (w uniswapTickWriter) readLatestTicks(ctx context.Context, tx pgx.Tx, keys 
 	return latest, nil
 }
 
-// insertChangedTicks queues an INSERT for every tick whose latest row is absent
-// or does not already reflect it, then sends them in one pgx.Batch. The INSERTs
-// are ordinary statements, so the table's BEFORE INSERT ROW trigger assigns
+// pgx.Batch sends ordinary INSERTs, so the BEFORE INSERT ROW trigger assigns
 // processing_version exactly as it would for a single-row insert.
 func (w uniswapTickWriter) insertChangedTicks(
 	ctx context.Context, tx pgx.Tx,
@@ -279,8 +248,6 @@ func (w uniswapTickWriter) insertChangedTicks(
 	return nil
 }
 
-// insertArgs converts t's numerics and orders the bind parameters exactly as
-// insertUniswapTickSQL names the columns: keys, value columns, build_id.
 func (w uniswapTickWriter) insertArgs(t uniswapTickRow, buildID buildregistry.BuildID) ([]any, error) {
 	args := []any{t.poolID, t.tick, t.blockNumber, t.blockVersion, t.blockTimestamp}
 	for _, numeric := range []struct {
@@ -304,11 +271,8 @@ func (w uniswapTickWriter) insertArgs(t uniswapTickRow, buildID buildregistry.Bu
 	return append(args, int(buildID)), nil
 }
 
-// unchanged reports whether the stored row already makes t redundant. Within
-// one height a differing block_version is a reorg re-observation and must
-// always append, even with identical values; across heights the two versions
-// count different blocks' reorgs and comparing them would append a row claiming
-// a change the chain never made, so only the values decide.
+// block_version counts one block's reorgs, so it decides only at equal height:
+// a differing version there must append; across heights only the values decide.
 func (w uniswapTickWriter) unchanged(latest uniswapTickValues, t uniswapTickRow) bool {
 	if latest.blockNumber == t.blockNumber && latest.blockVersion != t.blockVersion {
 		return false
@@ -327,9 +291,8 @@ type uniswapTickKey struct {
 	tick   int
 }
 
-// distinctSortedUniswapTickKeys returns the affected slots in the canonical
-// lock order, so concurrent SaveBlock transactions touching overlapping ticks
-// never deadlock.
+// Sorted so concurrent transactions touching overlapping ticks take their locks
+// in the same order and never deadlock.
 func distinctSortedUniswapTickKeys(ticks []uniswapTickRow) []uniswapTickKey {
 	seen := make(map[uniswapTickKey]struct{}, len(ticks))
 	for _, t := range ticks {
@@ -348,8 +311,6 @@ func distinctSortedUniswapTickKeys(ticks []uniswapTickRow) []uniswapTickKey {
 	return keys
 }
 
-// uniswapTickValues holds a stored tick row's fields decoded to *big.Int for
-// comparison against a candidate uniswapTickRow.
 type uniswapTickValues struct {
 	blockNumber           int64
 	blockVersion          int

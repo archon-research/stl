@@ -28,9 +28,6 @@ const tickViewMethodsJSON = `[
 	{"name":"getTickBitmap","type":"function","stateMutability":"view","inputs":[{"name":"poolId","type":"bytes32"},{"name":"tick","type":"int16"}],"outputs":[{"name":"","type":"uint256"}]}
 ]`
 
-// tickViewABIOnce parses tickViewMethodsJSON exactly once: this ABI is on the
-// per-tick hot path (DecodeTick, BuildTickCalls, BaselineTicks), so re-parsing
-// the JSON per call is pure waste.
 var tickViewABIOnce = sync.OnceValues(func() (*abi.ABI, error) {
 	parsed, err := abis.ParseABI(tickViewMethodsJSON)
 	if err != nil {
@@ -39,21 +36,12 @@ var tickViewABIOnce = sync.OnceValues(func() (*abi.ABI, error) {
 	return parsed, nil
 })
 
-// tickViewABI returns the ABI fragment for the PoolId-keyed tick getters on
-// StateView. The pool-level getters live in state.go.
 func tickViewABI() (*abi.ABI, error) {
 	return tickViewABIOnce()
 }
 
-// TouchedTicks returns the deduplicated, ascending-sorted union of every
-// TickLower/TickUpper bound whose tick state this block's ModifyLiquidity
-// events actually changed.
-//
-// Zero-delta events are excluded: v4-core's Pool.modifyLiquidity guards its
-// updateTick calls on liquidityDelta != 0, so a fee-collecting poke leaves
-// liquidityGross/Net and feeGrowthOutside untouched. Reading those ticks would
-// be wasted work, and including them would let a permissionless zero-delta call
-// with arbitrary bounds amplify into junk uninitialized-tick rows.
+// v4-core guards its updateTick calls on liquidityDelta != 0, so a zero-delta poke
+// leaves tick state untouched and its arbitrary bounds must not become tick rows.
 func TouchedTicks(events []*entity.UniswapV4LiquidityEvent) []int32 {
 	seen := make(map[int32]struct{}, len(events)*2)
 	for _, e := range events {
@@ -75,9 +63,8 @@ func TouchedTicks(events []*entity.UniswapV4LiquidityEvent) []int32 {
 	return out
 }
 
-// BuildTickCalls packs one getTickInfo(poolId, tick) call per entry in ticks,
-// in the same order as the input, so callers can zip results back to their
-// originating tick positionally.
+// BuildTickCalls packs one getTickInfo call per tick, in input order, so callers
+// can zip results back positionally.
 func BuildTickCalls(pool RegisteredPool, ticks []int32) ([]outbound.Call, error) {
 	a, err := tickViewABI()
 	if err != nil {
@@ -95,10 +82,8 @@ func BuildTickCalls(pool RegisteredPool, ticks []int32) ([]outbound.Call, error)
 	return calls, nil
 }
 
-// DecodeTick decodes one getTickInfo() multicall result into an authoritative
-// entity.UniswapV4Tick. A reverted call is an error, never a silently
-// dropped/zero-value tick: this is an authoritative read, and StateView answers
-// a cleared tick with explicit zeros rather than reverting.
+// A revert is an error, never a zero-value tick: StateView answers a cleared tick
+// with explicit zeros rather than reverting.
 func DecodeTick(pool RegisteredPool, tick int32, blockNumber int64, version int, ts time.Time, res outbound.Result) (*entity.UniswapV4Tick, error) {
 	if !res.Success {
 		return nil, fmt.Errorf("getTickInfo(%s, %d) reverted", pool.PoolIDHash, tick)
@@ -142,12 +127,8 @@ func DecodeTick(pool RegisteredPool, tick int32, blockNumber int64, version int,
 	return result, nil
 }
 
-// BaselineTicks performs a one-time enumeration of every currently initialized
-// tick on pool by scanning its bitmap across the full tickSpacing-derived word
-// range. It is a pure read: callers own logging and retry policy. A reverted
-// call is returned as an error immediately (no partial/best-effort baseline),
-// since a silently incomplete baseline would under-report initialized ticks
-// forever after.
+// BaselineTicks scans the pool's whole bitmap for initialized ticks. A partial
+// result would under-report them forever after, so a failed word errors out.
 func BaselineTicks(ctx context.Context, mc outbound.Multicaller, pool RegisteredPool, blockHash common.Hash) ([]int32, error) {
 	a, err := tickViewABI()
 	if err != nil {

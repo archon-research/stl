@@ -173,9 +173,7 @@ func (s *UniswapV3Service) handleBlock(ctx context.Context, event outbound.Block
 	s.markSnapshotted(dueSet, baselined, bn, ver)
 	// Recorded only after a successful commit, so the alerts compare pools this
 	// block touched against the state rows that same block queued. Not
-	// len(dueSet) — see RecordPoolsTouched. Attempted is what
-	// VectorUniswapV3IndexerNotWritingState keys on — persisted goes to zero on
-	// a healthy replay; written stays as volume observability.
+	// len(dueSet) — see RecordPoolsTouched.
 	s.telemetry.RecordPoolsTouched(ctx, len(acc.touchedIDs))
 	s.telemetry.RecordStateRowsAttempted(ctx, int(stateRows.Attempted))
 	s.telemetry.RecordStateRows(ctx, int(stateRows.Persisted))
@@ -332,10 +330,8 @@ func (s *UniswapV3Service) snapshotPoolTicks(ctx context.Context, pool Registere
 	return rows, isFirstSeen, nil
 }
 
-// readTicks reads the given tick positions in bounded multicall batches (see
-// tickbitmap.TicksPerCall), decoding every result into an authoritative
-// entity.UniswapV3Tick. Batches are issued in order and their rows concatenated
-// so the returned slice stays aligned with ticksToRead.
+// readTicks reads ticksToRead in bounded batches (tickbitmap.TicksPerCall); the
+// batches are issued in order and concatenated, keeping the result aligned with it.
 func (s *UniswapV3Service) readTicks(ctx context.Context, pool RegisteredPool, blockHash common.Hash, bn int64, ver int, ts time.Time, ticksToRead []int32) ([]*entity.UniswapV3Tick, error) {
 	if len(ticksToRead) == 0 {
 		return nil, nil
@@ -395,12 +391,8 @@ func (s *UniswapV3Service) buildBlockWrites(acc blockAccumulators, states []*ent
 	return writes, capturedIns
 }
 
-// persistBlock saves the block writes and captured events in a single DB
-// transaction via dexconsumer.PersistBlock. Returns how the block's state rows
-// fared: how many were queued, and how many actually appended (may be zero on
-// an idempotent ON CONFLICT DO NOTHING replay). dexconsumer.PersistBlock only
-// carries the persisted count back, so the attempted count rides out on the
-// closure.
+// dexconsumer.PersistBlock carries only the persisted count back, so
+// persistBlock rides the attempted count out on the closure.
 func (s *UniswapV3Service) persistBlock(ctx context.Context, writes outbound.UniswapV3BlockWrites, capturedIns []dexconsumer.ProtocolEventInput, bn int64) (outbound.StateRowCounts, error) {
 	var attempted int64
 	persisted, err := dexconsumer.PersistBlock(ctx, s.txMgr, s.eventWriter, func(ctx context.Context, tx pgx.Tx) (int64, error) {

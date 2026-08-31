@@ -34,10 +34,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// alchemyURL builds the real mainnet Alchemy endpoint this harness dials from
-// the ALCHEMY_API_KEY env var (the same variable the workers use). Real network
-// access is the whole point of this build-tagged live-validation gate: it is
-// never compiled into normal `go test`/CI runs.
 func alchemyURL(t *testing.T) string {
 	t.Helper()
 	key := os.Getenv("ALCHEMY_API_KEY")
@@ -47,55 +43,39 @@ func alchemyURL(t *testing.T) string {
 	return "https://eth-mainnet.g.alchemy.com/v2/" + key
 }
 
-// multicall3Address is the canonical Multicall3 deployment address, identical
-// across every EVM chain including mainnet.
 var multicall3Address = common.HexToAddress("0xcA11bde05977b3631167028862bE2a173976CA11")
 
-// busyPoolID is the ETH/wstETH 0.01% pool (tickSpacing 1) — the most active of
-// the 21 seeded pools, and the tickSpacing=1 pool the baseline-tick enumeration
-// is exercised against.
+// ETH/wstETH 0.01%, tickSpacing 1: the most active seeded pool.
 var busyPoolID = common.HexToHash("0x1d5b2949ece8754c2d736991c62c5162bd144f497b2212182401b9bae77e2d76")
 
-// fallbackSwapPoolID is the PYUSD/USDS 0.0005% pool, used to find a real Swap
-// when the busy pool happens to have been quiet across the whole scan window.
+// PYUSD/USDS 0.0005%.
 var fallbackSwapPoolID = common.HexToHash("0xe63e32b2ae40601662f760d6bf5d771057324fbd97784fe1d3717069f7b75d45")
 
-// slot0CrossCheckPools are the pools whose multicall-read slot0 is re-read
-// through a direct eth_call with hand-rolled calldata (see crossCheckSlot0):
-// the busy pool, the hook-bearing dynamic-fee-capable pool, and a 6-decimal
-// stable pool, so the check spans the three shapes in the registry.
+var hookedPoolID = common.HexToHash("0x904e8ad11c6f8abb44ea77c507355900e7f9d2907ab0a29353cb1ef0f06b0852")
+
 var slot0CrossCheckPools = []common.Hash{
 	busyPoolID,
-	common.HexToHash("0x904e8ad11c6f8abb44ea77c507355900e7f9d2907ab0a29353cb1ef0f06b0852"),
+	hookedPoolID,
 	fallbackSwapPoolID,
 }
 
-// wantSeededPools is the pool count the V4 seed migration installs for mainnet.
-// A different count means the migration did not apply cleanly, which would make
-// every downstream assertion meaningless.
 const wantSeededPools = 21
 
-// swapLogsScanDepth bounds how many recent blocks are scanned via eth_getLogs
-// to find a real Swap on the target pool.
 const swapLogsScanDepth = 2000
 
-// liquidityScanDepth is ten times swapLogsScanDepth: ModifyLiquidity on the
-// seeded pools runs at ~2.7 events per 2000 blocks and is clustered, so the
-// swap window is empty on a large fraction of runs with nothing wrong.
+// ModifyLiquidity on the seeded pools runs at ~2.7 events per 2000 blocks and is
+// clustered, so a swap-sized window is empty on many healthy runs.
 const liquidityScanDepth = 20000
 
-// baselineTickSampleSize bounds how many enumerated ticks the report renders.
-// Every tick is read and asserted on (the completeness invariant needs all of
-// them); this only keeps the markdown table readable for a dense pool.
+// Report-table sample only; every enumerated tick is still read and asserted on.
 const baselineTickSampleSize = 25
 
-// maxTickMagnitude is TickMath.MAX_TICK; every decoded tick must fall inside
-// [-maxTickMagnitude, maxTickMagnitude].
+// TickMath.MAX_TICK.
 const maxTickMagnitude = 887272
 
-// liveValidationReportPath is where the human-readable data report is written,
-// in addition to t.Log output. Defaults to the system temp dir; override with
-// LIVE_VALIDATION_REPORT_PATH.
+// LPFeeLibrary.MAX_LP_FEE, in hundredths of a bip.
+const maxLPFeePips = 1_000_000
+
 func liveValidationReportPath() string {
 	if p := os.Getenv("LIVE_VALIDATION_REPORT_PATH"); p != "" {
 		return p
@@ -103,10 +83,6 @@ func liveValidationReportPath() string {
 	return filepath.Join(os.TempDir(), "uniswap-v4-live-validation-report.md")
 }
 
-// TestLiveValidation is the contained live-correctness gate for the Uniswap V4
-// indexer: it exercises the real registry/snapshot/decode/tick/persist code
-// paths against REAL Alchemy + REAL mainnet data, in a throwaway schema on the
-// package's TimescaleDB testcontainer, without touching any cluster.
 func TestLiveValidation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	defer cancel()
@@ -174,14 +150,6 @@ func TestLiveValidation(t *testing.T) {
 		target.number, target.hash, len(regPools), len(states), rep.stateRowsWritten, rep.baselineTickCount)
 }
 
-// -----------------------------------------------------------------------
-// Registry
-// -----------------------------------------------------------------------
-
-// loadRegistry reads the seeded registry through the real repository and runs
-// the same startup gate the worker runs (ValidatePoolKeys), so a seed row whose
-// stored PoolId disagrees with its PoolKey fails here rather than silently
-// indexing nothing.
 func loadRegistry(t *testing.T, ctx context.Context, repo *postgres.UniswapV4Repository, rep *liveReport) []RegisteredPool {
 	t.Helper()
 
@@ -209,12 +177,6 @@ func findPoolByID(pools []RegisteredPool, id common.Hash) (RegisteredPool, bool)
 	return RegisteredPool{}, false
 }
 
-// -----------------------------------------------------------------------
-// Block identity
-// -----------------------------------------------------------------------
-
-// blockInfo identifies one real block for both the pinned state reads and the
-// block_number/version/timestamp columns every persisted row carries.
 type blockInfo struct {
 	number    int64
 	hash      common.Hash
@@ -239,15 +201,6 @@ func blockAtHash(t *testing.T, ctx context.Context, ethClient *ethclient.Client,
 	return blockInfo{number: header.Number.Int64(), hash: hash, timestamp: time.Unix(int64(header.Time), 0).UTC()}
 }
 
-// -----------------------------------------------------------------------
-// State snapshot
-// -----------------------------------------------------------------------
-
-// snapshotAllPools calls SnapshotState for every registered pool, pinned to the
-// target block hash, and records each pool's core fields into rep. Any read
-// reverting or any bound being violated is a fatal finding: StateView answers an
-// unknown PoolId with zeros rather than reverting, so a zero price would mean
-// the registry points at a pool this PoolManager never initialized.
 func snapshotAllPools(t *testing.T, ctx context.Context, mc outbound.Multicaller, pools []RegisteredPool, target blockInfo, rep *liveReport) []*entity.UniswapV4PoolState {
 	t.Helper()
 
@@ -268,13 +221,11 @@ func snapshotAllPools(t *testing.T, ctx context.Context, mc outbound.Multicaller
 	return states
 }
 
-// stateFindings re-asserts the on-chain bounds independently of
-// entity.Validate, so a bound this test cares about cannot be silently relaxed
-// in the entity without the gate noticing.
 func stateFindings(p RegisteredPool, s *entity.UniswapV4PoolState) []string {
 	var out []string
 	prefix := fmt.Sprintf("pool %s (fee %d, tickSpacing %d)", p.PoolIDHash, p.Fee, p.TickSpacing)
 
+	// StateView answers an unknown PoolId with zeros rather than reverting.
 	switch {
 	case s.SqrtPriceX96 == nil:
 		out = append(out, prefix+": SqrtPriceX96 is nil")
@@ -293,8 +244,8 @@ func stateFindings(p RegisteredPool, s *entity.UniswapV4PoolState) []string {
 	if s.Tick < -maxTickMagnitude || s.Tick > maxTickMagnitude {
 		out = append(out, fmt.Sprintf("%s: tick %d outside [-%d, %d]", prefix, s.Tick, maxTickMagnitude, maxTickMagnitude))
 	}
-	if s.LpFee < 0 || s.LpFee > 1_000_000 {
-		out = append(out, fmt.Sprintf("%s: lpFee %d outside [0, 1000000]", prefix, s.LpFee))
+	if s.LpFee < 0 || s.LpFee > maxLPFeePips {
+		out = append(out, fmt.Sprintf("%s: lpFee %d outside [0, %d]", prefix, s.LpFee, maxLPFeePips))
 	}
 	if s.ProtocolFee < 0 || s.ProtocolFee > 0xFFFFFF {
 		out = append(out, fmt.Sprintf("%s: protocolFee %d outside uint24", prefix, s.ProtocolFee))
@@ -309,9 +260,6 @@ func stateFindings(p RegisteredPool, s *entity.UniswapV4PoolState) []string {
 	return out
 }
 
-// poolSnapshotSummary captures one pool's snapshot for the report, independent
-// of entity.UniswapV4PoolState so the report renders even if a field came back
-// nil.
 type poolSnapshotSummary struct {
 	poolID       common.Hash
 	currency0    common.Address
@@ -367,15 +315,8 @@ func persistStates(t *testing.T, ctx context.Context, txMgr outbound.TxManager, 
 	return stateRows.Persisted
 }
 
-// -----------------------------------------------------------------------
-// Independent slot0 cross-check
-// -----------------------------------------------------------------------
-
-// crossCheckSlot0 re-reads three pools' slot0 through a direct eth_call pinned
-// to the same block hash, with hand-rolled calldata and a hand-rolled tuple
-// decode. It shares no code with state.go, so a wrong function selector, a
-// wrong return-tuple order, or a mis-signed int24 in the production path shows
-// up as a value mismatch here rather than as plausible-looking bad data.
+// Shares no code with state.go: a wrong selector, return-tuple order, or int24
+// sign in the production path surfaces as a mismatch, not as plausible data.
 func crossCheckSlot0(t *testing.T, ctx context.Context, ethClient *ethclient.Client, pools []RegisteredPool, states []*entity.UniswapV4PoolState, target blockInfo, rep *liveReport) {
 	t.Helper()
 
@@ -412,7 +353,6 @@ func crossCheckSlot0(t *testing.T, ctx context.Context, ethClient *ethclient.Cli
 	}
 }
 
-// slot0Values is a slot0 tuple decoded without the production ABI.
 type slot0Values struct {
 	sqrtPriceX96 *big.Int
 	tick         int
@@ -427,9 +367,6 @@ type slot0CrossCheck struct {
 	matching bool
 }
 
-// directGetSlot0 issues a raw eth_call to StateView.getSlot0 at blockHash with
-// calldata built from the keccak of the literal signature, and decodes the four
-// returned words by hand.
 func directGetSlot0(ctx context.Context, ethClient *ethclient.Client, stateView common.Address, poolID common.Hash, blockHash common.Hash) (slot0Values, error) {
 	selector := crypto.Keccak256([]byte("getSlot0(bytes32)"))[:4]
 	calldata := append(append([]byte{}, selector...), poolID.Bytes()...)
@@ -449,8 +386,7 @@ func directGetSlot0(ctx context.Context, ethClient *ethclient.Client, stateView 
 	}, nil
 }
 
-// twosComplement interprets a 32-byte ABI word as a signed 256-bit integer,
-// which is how a negative int24 arrives on the wire (sign-extended).
+// A negative int24 arrives sign-extended across the whole 32-byte word.
 func twosComplement(word []byte) *big.Int {
 	v := new(big.Int).SetBytes(word)
 	if word[0]&0x80 != 0 {
@@ -459,12 +395,6 @@ func twosComplement(word []byte) *big.Int {
 	return v
 }
 
-// -----------------------------------------------------------------------
-// Real event decode + persist
-// -----------------------------------------------------------------------
-
-// liveHarness carries the clients, registry and writers that every decode step
-// needs, so each step takes its subject rather than an eleven-argument tail.
 type liveHarness struct {
 	eth         *ethclient.Client
 	rpc         *rpc.Client
@@ -478,10 +408,6 @@ type liveHarness struct {
 	latest      int64
 }
 
-// persistDecoded writes one receipt's typed rows, its tick reads and its
-// protocol_event mirror in a single transaction — the same shape the worker's
-// dexconsumer.PersistBlock uses, so a constraint the live pipeline would hit is
-// hit here too.
 func (h *liveHarness) persistDecoded(t *testing.T, ctx context.Context, decoded DecodedEvents, tickRows []*entity.UniswapV4Tick, block blockInfo) {
 	t.Helper()
 
@@ -501,11 +427,6 @@ func (h *liveHarness) persistDecoded(t *testing.T, ctx context.Context, decoded 
 	}
 }
 
-// decodeAndPersistRealSwap finds a real Swap on the busy pool (falling back to
-// the stable pool if it was quiet), decodes its whole transaction receipt
-// through the production DecodeEvents, asserts the V4-specific invariants, reads
-// any touched ticks at that block's hash, and persists everything — typed rows
-// and the protocol_event capture mirror — in one transaction.
 func (h *liveHarness) decodeAndPersistRealSwap(t *testing.T, ctx context.Context, rep *liveReport) {
 	t.Helper()
 
@@ -553,12 +474,6 @@ func (h *liveHarness) decodeAndPersistRealSwap(t *testing.T, ctx context.Context
 	h.persistDecoded(t, ctx, decoded, tickRows, eventBlock)
 }
 
-// decodeAndPersistRealLiquidityEvent exercises the second write path end to end
-// on real data: a real ModifyLiquidity log is decoded, its position bounds are
-// checked against the pool's own tick spacing, the ticks it touched are read
-// from StateView at that block's hash, and both the event and the tick rows are
-// persisted. Waiting for a ModifyLiquidity to happen to share a receipt with the
-// Swap above would leave this path validated only by luck.
 func (h *liveHarness) decodeAndPersistRealLiquidityEvent(t *testing.T, ctx context.Context, rep *liveReport) {
 	t.Helper()
 
@@ -611,14 +526,8 @@ func (h *liveHarness) decodeAndPersistRealLiquidityEvent(t *testing.T, ctx conte
 	h.persistDecoded(t, ctx, decoded, tickRows, eventBlock)
 }
 
-// newestLiquidityChangingLog picks the newest ModifyLiquidity that actually
-// moves liquidity. Most V4 ModifyLiquidity traffic is zero-delta fee-collecting
-// pokes, which TouchedTicks deliberately ignores — picking one would leave the
-// tick read path unexercised. liquidityDelta is the third non-indexed word of
-// the event data (tickLower, tickUpper, liquidityDelta, salt); this hand-decode
-// only selects a candidate, and the production decoder still produces every
-// value asserted on afterwards. Falls back to the newest log if the whole window
-// is pokes.
+// Event data words are (tickLower, tickUpper, liquidityDelta, salt); most V4
+// ModifyLiquidity traffic is zero-delta pokes, which TouchedTicks ignores.
 func newestLiquidityChangingLog(logs []types.Log) types.Log {
 	for _, l := range logs {
 		if len(l.Data) >= 96 && twosComplement(l.Data[64:96]).Sign() != 0 {
@@ -628,11 +537,7 @@ func newestLiquidityChangingLog(logs []types.Log) types.Log {
 	return logs[0]
 }
 
-// assertLiquidityInvariants checks what v4-core guarantees about a real
-// ModifyLiquidity: an ordered, in-range tick pair, and bounds that are exact
-// multiples of the pool's own tick spacing (Pool.checkTicks plus the
-// tickSpacing validation in modifyLiquidity). A bound that is not a multiple
-// would mean the log was routed to the wrong pool.
+// Guaranteed by v4-core Pool.checkTicks and modifyLiquidity's tickSpacing check.
 func assertLiquidityInvariants(t *testing.T, events []*entity.UniswapV4LiquidityEvent, poolsByID map[common.Hash]RegisteredPool, rep *liveReport) {
 	t.Helper()
 
@@ -663,10 +568,6 @@ func assertLiquidityInvariants(t *testing.T, events []*entity.UniswapV4Liquidity
 	}
 }
 
-// findRecentSwapLog scans the last swapLogsScanDepth blocks for a Swap on the
-// busy pool and, if that pool was quiet, on the stable fallback pool. It filters
-// on the PoolManager address plus topics[1] = PoolId, which is exactly how the
-// singleton is queried for one pool's events.
 func findRecentSwapLog(ctx context.Context, ethClient *ethclient.Client, poolManager common.Address, latest int64) (*swapLogRef, common.Hash, error) {
 	fromBlock := max(latest-swapLogsScanDepth, 0)
 
@@ -683,8 +584,6 @@ func findRecentSwapLog(ctx context.Context, ethClient *ethclient.Client, poolMan
 		if len(logs) == 0 {
 			continue
 		}
-		// Most recent match: freshest data, and the receipt is still trivially
-		// fetchable.
 		sort.Slice(logs, func(i, j int) bool { return logs[i].BlockNumber > logs[j].BlockNumber })
 		l := logs[0]
 		return &swapLogRef{BlockHash: l.BlockHash, BlockNumber: int64(l.BlockNumber), TxHash: l.TxHash, LogIndex: l.Index}, poolID, nil
@@ -692,8 +591,6 @@ func findRecentSwapLog(ctx context.Context, ethClient *ethclient.Client, poolMan
 	return nil, common.Hash{}, nil
 }
 
-// swapLogRef is the minimal identity of the located Swap log — everything the
-// receipt fetch and the report need, without carrying a full types.Log around.
 type swapLogRef struct {
 	BlockHash   common.Hash
 	BlockNumber int64
@@ -701,10 +598,6 @@ type swapLogRef struct {
 	LogIndex    uint
 }
 
-// poolManagerEventTopic0 resolves an event's topic0 straight from the
-// production PoolManager ABI, so the eth_getLogs filter and DecodeEvents track
-// the same event definition: were the ABI signature to drift from the on-chain
-// contract, both would break together rather than silently disagreeing.
 func poolManagerEventTopic0(name string) common.Hash {
 	a, err := PoolManagerABI()
 	if err != nil {
@@ -717,10 +610,6 @@ func poolManagerEventTopic0(name string) common.Hash {
 	return ev.ID
 }
 
-// fetchReceipt calls the real eth_getTransactionReceipt and decodes straight
-// into shared.TransactionReceipt, exercising the exact wire shape (hex-string
-// quantities, lowercase-hex addresses/hashes) a real Alchemy response produces —
-// the thing a fixture-based unit test cannot catch.
 func fetchReceipt(ctx context.Context, rpcClient *rpc.Client, txHash common.Hash) (shared.TransactionReceipt, error) {
 	var receipt shared.TransactionReceipt
 	if err := rpcClient.CallContext(ctx, &receipt, "eth_getTransactionReceipt", txHash); err != nil {
@@ -732,10 +621,7 @@ func fetchReceipt(ctx context.Context, rpcClient *rpc.Client, txHash common.Hash
 	return receipt, nil
 }
 
-// assertSwapInvariants checks the V4-specific properties of every decoded swap:
-// a real router sender, the swapper-perspective BalanceDelta sign convention
-// (one side paid in, the other received), a total fee inside LPFeeLibrary's
-// ceiling, and a tick inside TickMath's range.
+// V4 BalanceDelta is swapper-perspective: exactly one side is negative.
 func assertSwapInvariants(t *testing.T, swaps []*entity.UniswapV4Swap, rep *liveReport) {
 	t.Helper()
 
@@ -755,8 +641,8 @@ func assertSwapInvariants(t *testing.T, swaps []*entity.UniswapV4Swap, rep *live
 		if negatives != 1 {
 			addFinding(t, rep, fmt.Sprintf("%s: sign convention violated — amount0=%s amount1=%s has %d negative sides, want exactly 1", prefix, sw.Amount0, sw.Amount1, negatives))
 		}
-		if sw.Fee < 0 || sw.Fee > 1_000_000 {
-			addFinding(t, rep, fmt.Sprintf("%s: fee %d outside [0, 1000000]", prefix, sw.Fee))
+		if sw.Fee < 0 || sw.Fee > maxLPFeePips {
+			addFinding(t, rep, fmt.Sprintf("%s: fee %d outside [0, %d]", prefix, sw.Fee, maxLPFeePips))
 		}
 		if sw.Tick < -maxTickMagnitude || sw.Tick > maxTickMagnitude {
 			addFinding(t, rep, fmt.Sprintf("%s: tick %d outside [-%d, %d]", prefix, sw.Tick, maxTickMagnitude, maxTickMagnitude))
@@ -767,15 +653,7 @@ func assertSwapInvariants(t *testing.T, swaps []*entity.UniswapV4Swap, rep *live
 	}
 }
 
-// assertUntrackedPoolsNotCaptured proves the high-volume filter works on real
-// data: the singleton emits for thousands of pools, and a log keyed by a PoolId
-// outside the registry must produce neither a typed row nor a protocol_event
-// mirror. This is the assertion that would catch a routing regression that
-// captured everything the PoolManager emits. Returns how many untracked-pool
-// logs the receipts actually contained, so a vacuous run (a receipt that
-// happened to touch only tracked pools) is visible in the report rather than
-// passing silently.
-func assertUntrackedPoolsNotCaptured(t *testing.T, receipts []shared.TransactionReceipt, decoded []DecodedEvents, poolsByID map[common.Hash]RegisteredPool, poolManager common.Address, rep *liveReport) int {
+func assertUntrackedPoolsNotCaptured(t *testing.T, receipts []shared.TransactionReceipt, decoded []DecodedEvents, poolsByID map[common.Hash]RegisteredPool, poolManager common.Address, rep *liveReport) (untrackedLogsSeen int) {
 	t.Helper()
 
 	events, err := eventsByID()
@@ -783,7 +661,6 @@ func assertUntrackedPoolsNotCaptured(t *testing.T, receipts []shared.Transaction
 		t.Fatalf("eventsByID: %v", err)
 	}
 
-	untracked := 0
 	for i, receipt := range receipts {
 		capturedIndexes := make(map[uint]struct{}, len(decoded[i].Captured))
 		for _, c := range decoded[i].Captured {
@@ -804,7 +681,7 @@ func assertUntrackedPoolsNotCaptured(t *testing.T, receipts []shared.Transaction
 			if _, tracked := poolsByID[common.HexToHash(l.Topics[1])]; tracked {
 				continue
 			}
-			untracked++
+			untrackedLogsSeen++
 
 			idx, err := shared.ParseHexUint(l.LogIndex)
 			if err != nil {
@@ -815,14 +692,11 @@ func assertUntrackedPoolsNotCaptured(t *testing.T, receipts []shared.Transaction
 			}
 		}
 	}
-	return untracked
+	return untrackedLogsSeen
 }
 
-// assertBlockWideUntrackedFilter re-runs the untracked-pool assertion over every
-// receipt in the event block. One transaction can easily touch only tracked
-// pools, which would leave the per-receipt check vacuous; a whole mainnet block
-// reliably carries PoolManager traffic for pools outside the 21-pool registry,
-// so this is where the filter is actually put under load.
+// One receipt often touches only tracked pools; a whole mainnet block reliably
+// carries PoolManager logs for pools outside the registry.
 func (h *liveHarness) assertBlockWideUntrackedFilter(t *testing.T, ctx context.Context, eventBlock blockInfo, rep *liveReport) {
 	t.Helper()
 
@@ -846,10 +720,8 @@ func (h *liveHarness) assertBlockWideUntrackedFilter(t *testing.T, ctx context.C
 	}
 }
 
-// readTouchedTicks reads, per pool, the tick bounds this receipt's
-// liquidity-changing events touched, pinned to the event block's hash. Grouping
-// by pool is mandatory in V4: one receipt can carry ModifyLiquidity for several
-// pools, and a tick position only means something relative to its own pool.
+// One receipt can carry ModifyLiquidity for several pools, and a tick position
+// only means something relative to its own pool.
 func (h *liveHarness) readTouchedTicks(t *testing.T, ctx context.Context, decoded DecodedEvents, eventBlock blockInfo) []*entity.UniswapV4Tick {
 	t.Helper()
 	if len(decoded.LiquidityEvents) == 0 {
@@ -890,21 +762,8 @@ func (h *liveHarness) readTouchedTicks(t *testing.T, ctx context.Context, decode
 	return rows
 }
 
-// -----------------------------------------------------------------------
-// Baseline tick enumeration
-// -----------------------------------------------------------------------
-
-// baselineTickCheck enumerates every initialized tick on the tickSpacing=1 busy
-// pool from its real bitmap, asserts the result is a strictly ascending set,
-// re-reads every entry through getTickInfo (an "initialized" tick that reads
-// back with liquidityGross == 0 would mean the bitmap→tick math is wrong), and
-// closes the loop with the AMM's own completeness invariant:
-//
-//	sum(liquidityNet) over all initialized ticks <= currentTick == active liquidity
-//
-// That identity is what makes this more than a spot check — a tick the bitmap
-// scan MISSED cannot be detected by re-reading the ticks it did find, but it
-// breaks the sum. Reading every tick rather than a sample is what buys it.
+// The liquidityNet sum over every enumerated tick is what catches a tick the
+// bitmap scan missed; re-reading only the ticks it found never would.
 func baselineTickCheck(t *testing.T, ctx context.Context, mc outbound.Multicaller, pools []RegisteredPool, states []*entity.UniswapV4PoolState, target blockInfo, rep *liveReport) {
 	t.Helper()
 
@@ -951,8 +810,7 @@ func baselineTickCheck(t *testing.T, ctx context.Context, mc outbound.Multicalle
 	}
 }
 
-// stateForPool returns the snapshot taken for poolID in this run; snapshotAllPools
-// keeps states index-aligned with pools.
+// snapshotAllPools keeps states index-aligned with pools.
 func stateForPool(t *testing.T, pools []RegisteredPool, states []*entity.UniswapV4PoolState, poolID int64) *entity.UniswapV4PoolState {
 	t.Helper()
 	for i, p := range pools {
@@ -977,8 +835,6 @@ func assertAscendingUnique(t *testing.T, ticks []int32, rep *liveReport) {
 	}
 }
 
-// readAllTicks reads every given tick position through getTickInfo in bounded
-// multicall batches, mirroring how the service chunks its own tick reads.
 func readAllTicks(t *testing.T, ctx context.Context, mc outbound.Multicaller, pool RegisteredPool, ticks []int32, target blockInfo) []*entity.UniswapV4Tick {
 	t.Helper()
 
@@ -1003,8 +859,6 @@ func readAllTicks(t *testing.T, ctx context.Context, mc outbound.Multicaller, po
 	return rows
 }
 
-// sampleTicks takes an evenly spread sample of at most n entries, so the report
-// table spans the whole tick range rather than only its densest end.
 func sampleTicks(ticks []*entity.UniswapV4Tick, n int) []*entity.UniswapV4Tick {
 	if len(ticks) <= n {
 		return ticks
@@ -1017,14 +871,6 @@ func sampleTicks(ticks []*entity.UniswapV4Tick, n int) []*entity.UniswapV4Tick {
 	return out
 }
 
-// -----------------------------------------------------------------------
-// Persistence plumbing + table counts
-// -----------------------------------------------------------------------
-
-// newLiveEventWriter builds a dexconsumer.ProtocolEventWriter against a real
-// postgres.EventRepository and the UniswapV4 protocol row's real id (read back
-// from the DB, not assumed), so captured logs persist to the same protocol_event
-// mirror the live worker uses.
 func newLiveEventWriter(t *testing.T, ctx context.Context, dbPool *pgxpool.Pool, buildID buildregistry.BuildID) *dexconsumer.ProtocolEventWriter {
 	t.Helper()
 
@@ -1059,20 +905,12 @@ func queryAllTableCounts(t *testing.T, ctx context.Context, dbPool *pgxpool.Pool
 	return counts
 }
 
-// -----------------------------------------------------------------------
-// Report
-// -----------------------------------------------------------------------
-
-// addFinding records a finding in both the test result and the report, so the
-// markdown deliverable never disagrees with the pass/fail signal.
 func addFinding(t *testing.T, rep *liveReport, msg string) {
 	t.Helper()
 	rep.findings = append(rep.findings, msg)
 	t.Errorf("FINDING: %s", msg)
 }
 
-// liveReport accumulates every observation this test makes for the final
-// markdown deliverable.
 type liveReport struct {
 	poolsLoaded      int
 	poolManager      string
@@ -1119,9 +957,6 @@ type liveReport struct {
 
 func newLiveReport() *liveReport { return &liveReport{} }
 
-// writeAndLog renders the report to markdown, writes it to
-// liveValidationReportPath, and t.Logs it so the data survives in `go test -v`
-// output even if the file write fails.
 func (r *liveReport) writeAndLog(t *testing.T) {
 	t.Helper()
 	md := r.render()

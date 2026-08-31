@@ -6,10 +6,7 @@ import (
 	"testing"
 )
 
-// TestDistinctSortedUniswapTickKeys pins the advisory-lock ordering: every
-// SaveBlock must request overlapping (pool_id, tick) slots in the same
-// sequence, or two concurrent block writers deadlock against each other.
-func TestDistinctSortedUniswapTickKeys(t *testing.T) {
+func TestDistinctSortedUniswapTickKeysGivesOneDeadlockFreeLockOrder(t *testing.T) {
 	tick := func(poolID int64, tick int) uniswapTickRow {
 		return uniswapTickRow{poolID: poolID, tick: tick}
 	}
@@ -38,9 +35,6 @@ func TestDistinctSortedUniswapTickKeys(t *testing.T) {
 	}
 }
 
-// TestSharedBlockNumberRejectsMixedBlocks guards the height bound the
-// latest-row read applies: a batch spanning blocks would compare a tick against
-// a row from a different block and silently skip the insert.
 func TestSharedBlockNumberRejectsMixedBlocks(t *testing.T) {
 	rows := []uniswapTickRow{
 		{poolID: 1, tick: 60, blockNumber: 100, liquidityGross: big.NewInt(1)},
@@ -60,11 +54,7 @@ func TestSharedBlockNumberRejectsMixedBlocks(t *testing.T) {
 	}
 }
 
-// TestUniswapTickWriterUnchanged pins the append-on-change decision, whose two
-// halves are load-bearing for correctness: block_version separates a reorg
-// re-observation from a redelivery, but only within one height — across heights
-// the versions belong to different blocks and only the values may decide.
-func TestUniswapTickWriterUnchanged(t *testing.T) {
+func TestUniswapTickWriterUnchangedIgnoresBlockVersionAcrossHeights(t *testing.T) {
 	stored := func(blockNumber int64, blockVersion int, liquidityNet int64) uniswapTickValues {
 		return uniswapTickValues{
 			blockNumber:           blockNumber,
@@ -109,9 +99,6 @@ func TestUniswapTickWriterUnchanged(t *testing.T) {
 	}
 }
 
-// TestUniswapTickWriterUnchangedComparesInitialized covers the one column the
-// two tables disagree on: V3 must append when initialized flips, and V4, whose
-// table has no such column, must never read anything into that decision.
 func TestUniswapTickWriterUnchangedComparesInitialized(t *testing.T) {
 	prior := uniswapTickValues{
 		blockNumber: 100, blockVersion: 0, initialized: true,
@@ -132,11 +119,8 @@ func TestUniswapTickWriterUnchangedComparesInitialized(t *testing.T) {
 	}
 }
 
-// TestDistinctSortedUniswapTickKeysOrdersExtremePoolIDs documents the
-// comparator's contract, not a reachable scenario: pool_id is a BIGSERIAL, so
-// the database cannot produce a negative or near-MaxInt64 id. The lock order is
-// a deadlock invariant, so the comparator must be correct by construction
-// rather than by the range of its inputs.
+// pool_id is a BIGSERIAL, so these ids are unreachable; the lock order must
+// hold by construction, not by the range of its inputs.
 func TestDistinctSortedUniswapTickKeysOrdersExtremePoolIDs(t *testing.T) {
 	tick := func(poolID int64, tick int) uniswapTickRow {
 		return uniswapTickRow{poolID: poolID, tick: tick}

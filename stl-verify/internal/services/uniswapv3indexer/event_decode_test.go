@@ -794,9 +794,8 @@ func TestDecodeEvents_KnownTopic0MalformedDataReturnsError(t *testing.T) {
 	}
 }
 
-// TestDecodeEvents_KnownTopic0EmptyDataReturnsError proves an Initialize log
-// with no data block stops the block rather than persisting a pool_event whose
-// params are an empty object and a capture-net mirror of the same nothing.
+// An empty data block would otherwise persist a pool_event whose params are an
+// empty object, mirrored by the capture net.
 func TestDecodeEvents_KnownTopic0EmptyDataReturnsError(t *testing.T) {
 	a := poolABIForTest(t)
 	pool := testPool()
