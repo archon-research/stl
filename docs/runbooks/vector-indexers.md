@@ -2567,7 +2567,10 @@ must not wake anyone.
    per pool:
 
    ```sql
-   SELECT count(*) AS current_pools FROM uniswap_v4_pool_current;
+   SELECT count(*) AS current_pools
+   FROM (SELECT DISTINCT ON (chain_id, pool_id) id
+         FROM uniswap_v4_pool
+         ORDER BY chain_id, pool_id, processing_version DESC) cur;
    ```
 
    Then check whether a migration recently seeded a batch of pools, or whether a
