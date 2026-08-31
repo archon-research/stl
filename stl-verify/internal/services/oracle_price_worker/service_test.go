@@ -116,7 +116,7 @@ func (m *mockConsumer) Close() error {
 
 // mockRepo implements outbound.OnchainPriceRepository.
 // Deliberately after the fixtures: the seed helpers stamp valid_from with time.Now(), and
-// oracle_asset_as_of resolves only versions with valid_from <= effective_at.
+// the pinned read resolves only versions with valid_from <= effective_at.
 var testReferenceEffectiveAt = time.Now().UTC().Add(24 * time.Hour)
 
 type mockRepo struct {

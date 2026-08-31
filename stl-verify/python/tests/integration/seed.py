@@ -870,19 +870,54 @@ async def insert_oracle_asset(
         registered_from,
     )
     if not enabled:
-        # A NULL return means nothing was appended, so the fixture did not establish the
-        # state it claims.
-        appended = await conn.fetchval(
-            "SELECT oracle_asset_set_enabled($1, $2, NULL, false, $3, 'test seed: source retired')",
-            oracle_id,
-            token_id,
-            retired_from,
+        await retire_oracle_asset(conn, oracle_id, token_id, retired_from, "test seed: source retired")
+
+
+async def retire_oracle_asset(
+    conn: asyncpg.Connection,
+    oracle_id: int,
+    token_id: int,
+    retired_from: dt.datetime,
+    reason: str,
+) -> None:
+    """Append a disabled version of a non-feed mapping, effective from ``retired_from``.
+
+    There is no writer function, so the caller supplies the version itself: one past the
+    key's current maximum. Raises when the key is already disabled at that instant, because
+    a fixture that appends nothing has not established the state it claims.
+    """
+    appended = await conn.fetchval(
+        """
+        INSERT INTO oracle_asset (
+            oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency,
+            processing_version, valid_from, change_reason)
+        SELECT prev.oracle_id, prev.token_id, false, prev.feed_address, prev.feed_decimals,
+               prev.quote_currency,
+               -- Monotonic over ALL versions of the key, not just the effective one, so a
+               -- backdated retirement still lands on a free primary key.
+               (SELECT max(processing_version) + 1 FROM oracle_asset
+                WHERE oracle_id = $1 AND token_id = $2 AND feed_key = '\\x'::bytea),
+               $3, $4
+        FROM (
+            SELECT * FROM oracle_asset
+            WHERE oracle_id = $1 AND token_id = $2 AND feed_key = '\\x'::bytea
+              AND valid_from <= $3
+            ORDER BY valid_from DESC, processing_version DESC
+            LIMIT 1
+        ) prev
+        WHERE prev.enabled
+        RETURNING processing_version
+        """,
+        oracle_id,
+        token_id,
+        retired_from,
+        reason,
+    )
+    if appended is None:
+        raise AssertionError(
+            f"oracle_asset (oracle_id={oracle_id}, token_id={token_id}) was already "
+            f"retired as of {retired_from.isoformat()}; no version was appended"
         )
-        if appended is None:
-            raise AssertionError(
-                f"oracle_asset (oracle_id={oracle_id}, token_id={token_id}) was already "
-                f"retired as of {retired_from.isoformat()}; no version was appended"
-            )
 
 
 async def _insert_price(conn: asyncpg.Connection, token_id: int, oracle_id: int, price: Decimal) -> None:

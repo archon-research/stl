@@ -5,7 +5,11 @@ from typing import Any
 from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.adapters.postgres.reference_as_of import ReferenceAsOf, ReferenceEffectiveAtProvider
+from app.adapters.postgres.reference_as_of import (
+    ORACLE_ASSET_AS_OF,
+    ReferenceAsOf,
+    ReferenceEffectiveAtProvider,
+)
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.token_catalog import TokenMetadata, TokenPriceQuote
 
@@ -237,7 +241,7 @@ _GET_TOKEN_BY_CHAIN_ADDRESS_SQL = text(
 
 
 _LATEST_PRICE_SQL = text(
-    """
+    f"""
     WITH latest_onchain AS (
         SELECT
             otp.token_id,
@@ -257,7 +261,7 @@ _LATEST_PRICE_SQL = text(
         -- :reference_effective_at is excluded; same-block rows from two oracles
         -- also share the block timestamp, so ties reach this read too.
           AND EXISTS (
-              SELECT 1 FROM oracle_asset_as_of(:reference_effective_at) oa
+              SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
               WHERE oa.oracle_id = otp.oracle_id
                 AND oa.token_id = otp.token_id
                 AND oa.enabled

@@ -57,30 +57,6 @@ Columns kept NULL-able despite a `not_null` canonical, sanctioned.
 - `build_id` was retrofitted onto pre-existing hypertables (ADR-0002, 2026-04-14). TigerData blocks the validating full-table scan that `SET NOT NULL` needs on tiered chunks, so NOT NULL is enforced implicitly via the PK/UNIQUE key + `DEFAULT 0` + backfill; residual nullability is a harmless leftover. Tables created after the convention (`psm3_reserves`, fluid/maple state, `token_total_supply`) declare `build_id NOT NULL` inline and need no exemption.
 - `processing_version` (the audit sibling of `build_id`) is `not_null` too; the same four pre-convention retrofit tables (anchorage ×2, `prime_debt`, `sparklend_reserve_data`) carry a residual nullable `processing_version` for the identical reason and are exempted alongside `build_id`.
 
-### `reference_reads`
-The append-on-change reference tables (ADR-0006 §4) and the objects their conversion creates: `table`, its `current_view`, its `as_of` function, and the `reason` it is governed. Read by `CheckCalculationSQL`, which lints the repository adapters' SQL (Go + Python) for the three ways a read of one of these tables loses reproducibility: the `_current` view (wall-clock bounded), the raw table in a `FROM`/`JOIN` (it holds every version), and the `_as_of` function handed a wall-clock expression instead of the run's recorded `effective_at`. An `INSERT` into the raw table appends a version, so it is not flagged. Wall-clock use is banned throughout any file that reads a converted table; a wall-clock `_as_of` argument is reported separately and is never excusable. Sanctioned exceptions are named in `wall_clock_exempt` below. A converted table absent from this list is not linted, so the conversion can land table by table.
-- `oracle_asset` (VEC-597) is the first entry.
-
-**What the lint does NOT catch.** It is a text matcher over whole `.go`/`.py` files, not a SQL
-parser, so it is a backstop for reintroduction:
-- **Scope is two directories**: `internal/adapters/outbound/postgres` and `python/app` (the roots
-  are in `TestApplicationSQLPinsReferenceReads`). SQL elsewhere is invisible: `.sql` migrations,
-  `internal/services/**`, `cmd/**`, `python/cli`, `python/suraf`, `ts/`, and shell scripts. Test
-  files under the two roots are scanned, so a fixture reading the raw table fails the gate.
-- **Comma-joined FROM lists** (`FROM token t, oracle_asset oa`) are not matched: a comma carries
-  no clause context, so matching it also fires on `TRUNCATE a, b, c` and `GRANT … ON a, b`.
-  Schema-qualified (`public.oracle_asset`), `"quoted"`, and `ONLY` spellings are matched.
-- **Block comments** (`/* … */`) are not stripped, so a banned name inside one is linted as real
-  SQL. Line comments are stripped, and a marker inside a string literal does not start one; a
-  trailing `#` is left in (indistinguishable from Postgres' `#>`/`#>>` operators), which can
-  over-report but never hides a read.
-- **`valid_from`'s column DEFAULT** is invisible: a `DEFAULT now()` contains no `now()` at the
-  INSERT site. `change_reason` being NOT NULL with no default is what forces an author to write
-  both fields explicitly.
-
-### `wall_clock_exempt`
-Files sanctioned for wall-clock use alongside a reference read, with the reason. Matched as a path suffix. One entry today: `token_catalog_repository.py`, whose `NOW()` uses compute `staleness_seconds`, the age of an observation reported to the caller rather than a decision about which reference version applies. An exemption never excuses a wall-clock `effective_at`.
-
 ### `transform_config`
 Upsert key for tables the transform generator can't key from a raw primary key (no usable PK, or a PK that doesn't survive canonicalisation). Each entry gives the column list the generator upserts on. Read by the generator, not by the conformance check. Each key was verified unique against live data (counts omitted as they drift):
 - `prime_debt`: `(prime_id, ilk_name, block_number, block_version, processing_version)`.

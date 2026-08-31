@@ -74,9 +74,9 @@ class TestReferenceEffectiveAt:
     """The reference instant must reject anything Go's resolver would reject.
 
     A value that parses to an unintended instant is worse than one that fails:
-    an instant before every oracle_asset.valid_from makes oracle_asset_as_of
+    an instant before every oracle_asset.valid_from makes the pinned read
     return no rows, and the priced reads then report zeros and 404s rather
-    than erroring (ADR-0006 §4).
+    than erroring.
     """
 
     def test_unset_means_now(self):

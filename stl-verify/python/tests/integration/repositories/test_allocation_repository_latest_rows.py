@@ -36,7 +36,7 @@ from app.adapters.postgres.allocation_position_repository import (
     AllocationRepository,
 )
 from app.adapters.postgres.crypto_lending_reader import _WALLET_LOOKUP_SQL
-from app.adapters.postgres.reference_as_of import utc_now
+from app.adapters.postgres.reference_as_of import ORACLE_ASSET_AS_OF, utc_now
 from app.domain.entities.allocation import EthAddress
 from tests.integration.seed import (
     RTL_DIRECT_BALANCES,
@@ -143,7 +143,7 @@ _HISTORY_RECEIPT_TOKEN_POSITIONS_SQL = text(f"""
             AND po.protocol_id = p.protocol_id
         WHERE otp.token_id = p.underlying_token_id
           AND EXISTS (
-              SELECT 1 FROM oracle_asset_as_of(:reference_effective_at) oa
+              SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
               WHERE oa.oracle_id = otp.oracle_id
                 AND oa.token_id = otp.token_id
                 AND oa.enabled
@@ -188,7 +188,7 @@ LEFT JOIN LATERAL (
         AND po.protocol_id = p.protocol_id
     WHERE otp.token_id = p.underlying_token_id
       AND EXISTS (
-          SELECT 1 FROM oracle_asset_as_of(:reference_effective_at) oa
+          SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
           WHERE oa.oracle_id = otp.oracle_id
             AND oa.token_id = otp.token_id
             AND oa.enabled
@@ -245,7 +245,7 @@ _HISTORY_DIRECT_ASSET_HOLDINGS_SQL = text(f"""
         FROM onchain_token_price otp
         WHERE otp.token_id = lp.token_id
           AND EXISTS (
-              SELECT 1 FROM oracle_asset_as_of(:reference_effective_at) oa
+              SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
               WHERE oa.oracle_id = otp.oracle_id
                 AND oa.token_id = otp.token_id
                 AND oa.enabled
@@ -259,7 +259,7 @@ _HISTORY_DIRECT_ASSET_HOLDINGS_SQL = text(f"""
         FROM onchain_token_price otp
         WHERE otp.token_id = lp.underlying_token_id
           AND EXISTS (
-              SELECT 1 FROM oracle_asset_as_of(:reference_effective_at) oa
+              SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
               WHERE oa.oracle_id = otp.oracle_id
                 AND oa.token_id = otp.token_id
                 AND oa.enabled
@@ -294,7 +294,7 @@ latest_price AS (
     JOIN receipt_token rt ON rt.protocol_id = po.protocol_id AND rt.id = :receipt_token_id
     WHERE otp.token_id = rt.underlying_token_id
       AND EXISTS (
-          SELECT 1 FROM oracle_asset_as_of(:reference_effective_at) oa
+          SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
           WHERE oa.oracle_id = otp.oracle_id
             AND oa.token_id = otp.token_id
             AND oa.enabled

@@ -2,9 +2,11 @@ package testutil
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -126,20 +128,37 @@ func SeedOracleAssetEffectiveFrom(t *testing.T, ctx context.Context, pool *pgxpo
 }
 
 // SetOracleAssetEnabled appends an oracle_asset version toggling enabled, effective from
-// effectiveAt (YYYY-MM-DD, midnight UTC). A NULL return means the value was already that,
-// so the fixture did not establish the state it claims and the seed fails.
+// effectiveAt (YYYY-MM-DD, midnight UTC). There is no writer function, so the version is the
+// key's current maximum plus one. No row appended means the value was already that, so the
+// fixture did not establish the state it claims and the seed fails.
 func SetOracleAssetEnabled(t *testing.T, ctx context.Context, pool *pgxpool.Pool, oracleID, tokenID int64, enabled bool, effectiveAt, reason string) {
 	t.Helper()
 	var processingVersion *int
-	err := pool.QueryRow(ctx,
-		`SELECT oracle_asset_set_enabled($1, $2, NULL, $3, $4, $5)`,
-		oracleID, tokenID, enabled, MustUTCInstant(t, effectiveAt), reason).Scan(&processingVersion)
-	if err != nil {
-		t.Fatalf("failed to set oracle asset enabled=%v (oracle=%d, token=%d): %v", enabled, oracleID, tokenID, err)
-	}
-	if processingVersion == nil {
+	err := pool.QueryRow(ctx, `
+		INSERT INTO oracle_asset (
+			oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency,
+			processing_version, valid_from, change_reason)
+		SELECT prev.oracle_id, prev.token_id, $3, prev.feed_address, prev.feed_decimals,
+		       prev.quote_currency,
+		       (SELECT max(processing_version) + 1 FROM oracle_asset
+		        WHERE oracle_id = $1 AND token_id = $2 AND feed_key = '\x'::bytea),
+		       $4, $5
+		FROM (
+			SELECT * FROM oracle_asset
+			WHERE oracle_id = $1 AND token_id = $2 AND feed_key = '\x'::bytea
+			  AND valid_from <= $4
+			ORDER BY valid_from DESC, processing_version DESC
+			LIMIT 1
+		) prev
+		WHERE prev.enabled <> $3
+		RETURNING processing_version
+	`, oracleID, tokenID, enabled, MustUTCInstant(t, effectiveAt), reason).Scan(&processingVersion)
+	if errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("oracle asset (oracle=%d, token=%d) was already enabled=%v at %s, so no version was appended",
 			oracleID, tokenID, enabled, effectiveAt)
+	}
+	if err != nil {
+		t.Fatalf("failed to set oracle asset enabled=%v (oracle=%d, token=%d): %v", enabled, oracleID, tokenID, err)
 	}
 }
 

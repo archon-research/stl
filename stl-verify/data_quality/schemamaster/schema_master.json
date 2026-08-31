@@ -2243,19 +2243,5 @@
         "persisted_at"
       ]
     }
-  },
-  "reference_reads": [
-    {
-      "table": "oracle_asset",
-      "current_view": "oracle_asset_current",
-      "as_of": "oracle_asset_as_of",
-      "reason": "VEC-597: append-on-change (ADR-0006 §4). Which oracle_asset version a reader used decides which prices it used, so calculation and writer SQL must pin the read to a recorded effective_at."
-    }
-  ],
-  "wall_clock_exempt": [
-    {
-      "path": "python/app/adapters/postgres/token_catalog_repository.py",
-      "reason": "VEC-597: the two NOW() uses compute staleness_seconds, the age of an observation reported to the caller, not a decision about which reference version applies. The oracle_asset read in the same file is pinned to :reference_effective_at."
-    }
-  ]
+  }
 }

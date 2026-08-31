@@ -26,6 +26,7 @@ from tests.integration.seed import (
     insert_reserve_data,
     insert_token,
     insert_user,
+    retire_oracle_asset,
 )
 
 _BLOCK = 30_000_000
@@ -521,12 +522,7 @@ async def test_disabling_a_mapping_drops_the_price_at_read_time(
 
     # Retiring a source is a configuration change on the mapping, not a rewrite
     # of any price history. Append-on-change, so the retirement is a new version.
-    await conn.execute(
-        "SELECT oracle_asset_set_enabled($1, $2, NULL, false, $3, 'test: source retired')",
-        oracle_id,
-        drop_id,
-        ORACLE_ASSET_RETIRED_FROM,
-    )
+    await retire_oracle_asset(conn, oracle_id, drop_id, ORACLE_ASSET_RETIRED_FROM, "test: source retired")
     assert (
         await conn.fetchval(
             "SELECT count(*) FROM token_price_current WHERE oracle_id = $1 AND token_id = $2", oracle_id, drop_id
@@ -579,11 +575,8 @@ async def test_disabling_a_mapping_falls_back_to_the_next_enabled_oracle(
     before = await repository.get_backed_breakdown(protocol_id, debt_id)
     assert {item.symbol: item.price_usd for item in before.items} == {"FALLBACKCOLL": Decimal("10")}
 
-    await conn.execute(
-        "SELECT oracle_asset_set_enabled($1, $2, NULL, false, $3, 'test: primary source retired')",
-        primary_oracle_id,
-        coll_id,
-        ORACLE_ASSET_RETIRED_FROM,
+    await retire_oracle_asset(
+        conn, primary_oracle_id, coll_id, ORACLE_ASSET_RETIRED_FROM, "test: primary source retired"
     )
 
     # Both rows are still cached; the read now picks the backup oracle's price.

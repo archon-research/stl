@@ -78,7 +78,7 @@ func (r *OnchainPriceRepository) GetOracle(ctx context.Context, name string) (*e
 func (r *OnchainPriceRepository) GetEnabledAssets(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) ([]*entity.OracleAsset, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, created_at
-		FROM oracle_asset_as_of($2::timestamptz)
+		FROM `+OracleAssetAsOf("$2::timestamptz")+` oa
 		WHERE oracle_id = $1 AND enabled = true
 		ORDER BY oracle_id, token_id, feed_key
 	`, oracleID, referenceEffectiveAt)
@@ -162,7 +162,7 @@ func (r *OnchainPriceRepository) GetLatestBlock(ctx context.Context, oracleID in
 func (r *OnchainPriceRepository) GetTokenInfos(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) (map[int64]outbound.TokenInfo, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT oa.token_id, t.address, t.decimals
-		FROM oracle_asset_as_of($2::timestamptz) oa
+		FROM `+OracleAssetAsOf("$2::timestamptz")+` oa
 		JOIN token t ON t.id = oa.token_id
 		WHERE oa.oracle_id = $1 AND oa.enabled = true
 		ORDER BY oa.oracle_id, oa.token_id, oa.feed_key
@@ -383,7 +383,7 @@ func (r *OnchainPriceRepository) CopyOracleAssets(ctx context.Context, fromOracl
 		       $3::timestamptz,
 		       format('copied from oracle %s as of %s', $1::bigint,
 		              to_char($3::timestamptz AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
-		FROM oracle_asset_as_of($3::timestamptz)
+		FROM `+OracleAssetAsOf("$3::timestamptz")+` oa
 		WHERE oracle_id = $1 AND enabled = true
 		ON CONFLICT DO NOTHING
 	`, fromOracleID, toOracleID, referenceEffectiveAt)

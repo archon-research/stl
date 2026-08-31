@@ -5,13 +5,17 @@ from decimal import Decimal
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.adapters.postgres.reference_as_of import ReferenceAsOf, ReferenceEffectiveAtProvider
+from app.adapters.postgres.reference_as_of import (
+    ORACLE_ASSET_AS_OF,
+    ReferenceAsOf,
+    ReferenceEffectiveAtProvider,
+)
 from app.domain.entities.backed_breakdown import (
     BackedBreakdown,
     CollateralContribution,
 )
 
-_BACKED_BREAKDOWN_SQL = """
+_BACKED_BREAKDOWN_SQL = f"""
 -- Reads the trigger-maintained *_current tables (newest row per key, see
 -- 20260820_120000_create_current_position_tables.sql) instead of recomputing
 -- latest-over-history per request: the histories are mostly-compressed
@@ -57,7 +61,7 @@ token_prices AS (
     JOIN protocol_oracle po ON po.oracle_id = tpc.oracle_id
     WHERE po.protocol_id = :protocol_id
       AND EXISTS (
-          SELECT 1 FROM oracle_asset_as_of(:reference_effective_at) oa
+          SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
           WHERE oa.oracle_id = tpc.oracle_id
             AND oa.token_id = tpc.token_id
             AND oa.enabled

@@ -13,6 +13,20 @@ from typing import Any
 
 ReferenceEffectiveAtProvider = Callable[[], datetime]
 
+ORACLE_ASSET_AS_OF = """(
+    SELECT DISTINCT ON (oracle_id, token_id, feed_key) *
+    FROM oracle_asset
+    WHERE valid_from <= :reference_effective_at
+    ORDER BY oracle_id, token_id, feed_key, valid_from DESC, processing_version DESC
+)"""
+"""The pinned oracle_asset read, interpolated into a query as a derived table.
+
+Holds the version of each natural key (oracle_id, token_id, feed_key) effective at
+``:reference_effective_at``, which ``ReferenceAsOf.params`` binds. Disabled versions are
+returned too, so a caller filtering on ``enabled`` can still tell "retired then" from
+"never registered".
+"""
+
 
 def utc_now() -> datetime:
     """Now in UTC, timezone-aware, so the bound value is an absolute instant."""
