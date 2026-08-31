@@ -15,6 +15,9 @@ const denied = (name: keyof typeof presetRules) => {
 
 const config = {
   ...boundariesConfig,
+  // The preset has no reason to know about a test runner, so the vitest rules
+  // are inert until named here -- and they are the only gate on the unit tests.
+  plugins: [...boundariesConfig.plugins, 'vitest'],
   categories: {
     correctness: 'error',
     suspicious: 'error',

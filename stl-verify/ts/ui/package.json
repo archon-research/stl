@@ -19,6 +19,7 @@
     "format": "uikit-cli format --write \"src/**/*.ts\" \"src/**/*.tsx\" \"src/**/*.css\" \"scripts/**/*.ts\" panda.config.ts vite.config.ts env.ts oxlint.config.ts .oxfmtrc.ts index.html",
     "format:check": "uikit-cli format --check \"src/**/*.ts\" \"src/**/*.tsx\" \"src/**/*.css\" \"scripts/**/*.ts\" panda.config.ts vite.config.ts env.ts oxlint.config.ts .oxfmtrc.ts index.html",
     "preview": "vite preview",
+    "test": "vitest run",
     "test:explorers": "node scripts/check-explorer-urls.ts",
     "test:prime-grouping": "node scripts/check-prime-grouping.ts",
     "test:metrics-grid": "node scripts/check-metrics-grid.ts",
@@ -40,7 +41,6 @@
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "react-markdown": "10.1.0",
-    "viem": "2.55.13",
     "zod": "4.4.3"
   },
   "devDependencies": {
@@ -56,7 +56,8 @@
     "msw": "2.15.0",
     "openapi-typescript": "7.13.0",
     "postcss": "8.5.26",
-    "vite": "8.2.1"
+    "vite": "8.2.1",
+    "vitest": "4.1.11"
   },
   "optionalDependencies": {
     "lightningcss-darwin-arm64": "1.33.0",

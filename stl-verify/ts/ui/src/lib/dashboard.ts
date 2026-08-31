@@ -75,9 +75,7 @@ function titleCase(value: string): string {
     .replace(/\s+/g, ' ')
     .trim()
     .split(' ')
-    .map((word) =>
-      word.length > 0 ? `${word[0].toUpperCase()}${word.slice(1)}` : word,
-    )
+    .map((word) => `${word.slice(0, 1).toUpperCase()}${word.slice(1)}`)
     .join(' ');
 }
 
@@ -130,7 +128,9 @@ export function getPrimeGroupKey(prime: Prime): string {
 }
 
 export function groupPrimesByVault(primes: Prime[]): PrimeGroup[] {
-  const rowsByKey = new Map<string, Prime[]>();
+  // Non-empty by construction, and typed that way so the representative row and
+  // the address fallback below need no guard for a case the loop cannot produce.
+  const rowsByKey = new Map<string, [Prime, ...Prime[]]>();
 
   for (const prime of primes) {
     const key = getPrimeGroupKey(prime);
@@ -149,12 +149,17 @@ export function groupPrimesByVault(primes: Prime[]): PrimeGroup[] {
     // `mainnet` is the prime's canonical chain for aggregate figures (e.g.
     // risk-capital); fall back to a deterministic pick when no row is on it.
     const mainnetRow = rows.find((row) => row.chain === 'mainnet');
+    // Seedless: `rows` is non-empty by construction, which is what makes this
+    // the lowest address rather than a possibly-absent first element.
+    const lowestByAddress = rows.reduce((lowest, row) =>
+      row.address.localeCompare(lowest.address) < 0 ? row : lowest,
+    );
 
     return {
       key,
       name: rows[0].name,
       vaultAddress: rows[0].prime_vault_address ?? null,
-      primaryProxyAddress: mainnetRow?.address ?? sortedByAddress[0].address,
+      primaryProxyAddress: mainnetRow?.address ?? lowestByAddress.address,
       // Deduped because `/v1/primes` is `DISTINCT ON (proxy_address, chain_id)`,
       // so one address holding positions on two chains yields two rows. Passing
       // it twice to `getAllocationsForProxies` would fetch it twice and
@@ -765,21 +770,24 @@ function toPlainDecimalString(value: string): string | null {
     return null;
   }
 
-  const [mantissa, expPart] = trimmed.split(/[eE]/);
-  if (expPart === undefined) {
+  const exponentAt = trimmed.search(/[eE]/);
+  if (exponentAt === -1) {
     return trimmed;
   }
 
   // A real 1e18-scaled wad has a tiny exponent; a wildly out-of-range one would
   // only make `'0'.repeat(...)` below throw. Reject rather than expand it.
-  const exponent = Number(expPart);
+  const exponent = Number(trimmed.slice(exponentAt + 1));
   if (Math.abs(exponent) > 1000) {
     return null;
   }
 
+  const mantissa = trimmed.slice(0, exponentAt);
   const negative = mantissa.startsWith('-');
   const unsigned = mantissa.replace(/^[+-]/, '');
-  const [intRaw, fracRaw = ''] = unsigned.split('.');
+  // Defaulted, not guarded: `.5e19` is a valid mantissa with no integer digits,
+  // so an empty leading part is data rather than a missing value.
+  const [intRaw = '', fracRaw = ''] = unsigned.split('.');
   const digits = intRaw + fracRaw;
   // Where the decimal point lands, counted in digits from the left of `digits`.
   const pointPos = intRaw.length + exponent;

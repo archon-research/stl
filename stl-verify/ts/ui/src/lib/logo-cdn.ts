@@ -54,8 +54,11 @@ export function buildChainLogoUrl(chainId: number | null): string | null {
 
 function toProtocolSlug(protocolName: string): string | null {
   const normalized = protocolName.trim().toLowerCase();
-  if (normalized in PROTOCOL_SLUG_OVERRIDES) {
-    return PROTOCOL_SLUG_OVERRIDES[normalized];
+  // Read, don't `in`: the table's own entries may be null (a protocol with no
+  // llama icon), while `in` also answers true for `constructor` and friends.
+  const override = PROTOCOL_SLUG_OVERRIDES[normalized];
+  if (override !== undefined) {
+    return override;
   }
 
   return normalized.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');

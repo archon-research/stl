@@ -1189,6 +1189,9 @@ export function AllocationGrid({
     enableSorting: true,
     onSortingChange,
     sorting,
+    // The same identity the grid already selects rows by. Virtualization keys
+    // its measurement cache off it, which a sort would otherwise scramble.
+    getRowId: getAllocationKey,
   });
 
   // Includes the window before a prime is resolved: the page always picks one,
@@ -1585,6 +1588,9 @@ export function AllocationGrid({
               getRowKey={getAllocationKey}
               selectedRowKey={selectedAllocationKey}
               density="compact"
+              // A prime's positions are returned in full — no server-side limit
+              // — so this is the one grid whose row count nothing bounds.
+              virtualized
               // Six nowrap columns push min-content well past this, so it binds
               // only on the loading skeleton, which has no intrinsic width.
               minWidth="48rem"
