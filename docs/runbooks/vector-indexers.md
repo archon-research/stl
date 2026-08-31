@@ -1747,18 +1747,30 @@ not mistaken for a bug during triage.
 ### What it means
 
 `morpho-indexer` recorded more than 25 VaultV2 adapters as `adapter_type=unknown`
-in 24 hours on the labelled `chain`. The classifier probes two selectors on every
-adapter — `morpho()` (`0xd8fbc833`) and `morphoVaultV1()` (`0xe4baaddf`) — and
-records Unknown (DB `adapter_type = 99`) unless **exactly one** answers. There are
-therefore **two** Unknown arms (`classifyAdapter`, `adapter_probe.go`), and they
-mean different things:
+in 24 hours on the labelled `chain`. The classifier probes one marker selector per
+modelled family on every adapter, and records Unknown (DB `adapter_type = 99`)
+unless **exactly one** answers:
 
-- **Both revert** — the contract serves neither marker. A family the probe does
-  not model; the fix is a new marker selector.
-- **Both succeed** — the contract serves *both* markers, so the probe cannot
-  choose. A hybrid adapter, or a proxy/fallback that answers any selector. A third
-  selector does not help here: the fix is a tie-break rule (e.g. prefer the more
-  specific marker, or discriminate on a shape only one family has).
+| Family | Marker | Selector | `adapter_type` |
+|---|---|---|---|
+| MorphoMarketV1AdapterV2 | `morpho()` | `0xd8fbc833` | 1 |
+| MorphoVaultV1Adapter | `morphoVaultV1()` | `0xe4baaddf` | 2 |
+| ERC4626MerklAdapter | `erc4626Vault()` | `0x5920b225` | 3 |
+| BoxAdapter | `box()` | `0x754215a1` | 4 |
+| CompoundV3Adapter | `comet()` | `0xba3e9c12` | 5 |
+
+There are therefore **two** Unknown arms (`classifyAdapter`, `adapter_probe.go`),
+and they mean different things:
+
+- **All revert** — the contract serves no modelled marker. Either a family the
+  probe does not model (the fix is a new marker selector), or a bespoke
+  curator-written adapter, which shares no marker getter with anything and
+  **stays Unknown by design** — the long tail of the mainnet population, and not
+  something a code change can classify.
+- **Several succeed** — the contract serves more than one marker, so the probe
+  cannot choose. A hybrid adapter, or a proxy/fallback that answers any selector.
+  Another selector does not help here: the fix is a tie-break rule (e.g. prefer
+  the more specific marker, or discriminate on a shape only one family has).
 
 Those adapters are still registered and their `realAssets()` still tracked, so this
 is not data loss; what is lost is venue attribution, so nothing downstream can say
@@ -1766,11 +1778,12 @@ what backs the exposure.
 
 **A non-zero Unknown count is normal.** The VEC-218 ticket originally proposed
 "Unknown count stays 0" as the sentinel; live mainnet validation disproved it —
-real adapters exist whose both getters revert, and one 8-minute discovery window
-produced 7+ Unknown registrations. Only a sustained wave is actionable, which is
-what the threshold encodes: the live registration path (`AddAdapter`) fired just
-5 times in 7 days across *all* types on prod mainnet, so >25/day can only come
-from a mass discovery burst or a genuinely new adapter family.
+real adapters exist that answer no marker getter at all, and one 8-minute
+discovery window produced 7+ Unknown registrations. Only a sustained wave is
+actionable, which is what the threshold encodes: the live registration path
+(`AddAdapter`) fired just 5 times in 7 days across *all* types on prod mainnet,
+so >25/day can only come from a mass discovery burst or a genuinely new adapter
+family.
 
 **Expect one firing during the initial VaultV2 bootstrap**, when every existing V2
 vault is discovered at once. Acknowledge and curate.
@@ -1809,24 +1822,27 @@ vault is discovered at once. Acknowledge and curate.
    Unknown, so it should not be, but confirm):
 
    ```bash
-   cast call <adapter> "morpho()(address)"         --rpc-url https://ethereum-rpc.publicnode.com
-   cast call <adapter> "morphoVaultV1()(address)"  --rpc-url https://ethereum-rpc.publicnode.com
+   for m in "morpho()" "morphoVaultV1()" "erc4626Vault()" "box()" "comet()"; do
+     echo -n "$m " && cast call <adapter> "$m(address)" --rpc-url https://ethereum-rpc.publicnode.com
+   done
    ```
 
-   **Read which arm you are in.** Both reverting = an unmodelled family, so go to
-   check 4. Both *answering* = the probe could not choose, which needs a tie-break
-   rule rather than a third selector — expect a hybrid adapter or a
-   proxy/fallback that answers any selector, and check the contract before
-   assuming either family.
-4. **Find the real type** — read the contract on Etherscan and look for the
-   marker getter of the new family (e.g. a `compoundV3()` / `erc4626()` style
-   accessor). That selector is the fix.
+   **Read which arm you are in.** All reverting = an unmodelled family or a
+   bespoke curator adapter, so go to check 4. Several *answering* = the probe
+   could not choose, which needs a tie-break rule rather than another selector —
+   expect a hybrid adapter or a proxy/fallback that answers any selector, and
+   check the contract before assuming either family.
+4. **Find the real type** — read the contract on Etherscan and look for a marker
+   getter shared by a whole family (the way `comet()` identifies every
+   CompoundV3Adapter). That selector is the fix. A one-off getter on a
+   curator-written contract is not a family and buys nothing: those adapters
+   stay Unknown, which is the recorded truth.
 5. **Indexer logs** — `kubectl -n vector logs -l app=morpho-indexer | grep "unknown type"`
    carries vault, adapter and block for every Unknown registration.
 
 ### Common causes
 
-- Morpho deployed a new adapter family the 2-selector probe does not model →
+- Morpho deployed a new adapter family the marker probe does not model →
   extend `adapter_probe.go` with the new marker selector and its
   `entity.MorphoAdapterType`, then **replay / re-seed the affected vaults** so the
   extended probe APPENDS a corrected classification. `morpho_adapter_current` is
