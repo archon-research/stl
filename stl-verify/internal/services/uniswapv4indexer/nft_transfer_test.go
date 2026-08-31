@@ -12,8 +12,7 @@ import (
 )
 
 const (
-	// The singleton v4 PositionManager (ERC-721) on mainnet, and the id of its
-	// registry row in the fixtures below.
+	// Verbatim mainnet address; the registry row id is fixture-local.
 	positionManagerAddr   = "0xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e"
 	positionManagerRowID  = int64(11)
 	erc721TransferTopic0  = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -29,9 +28,8 @@ func testPositionManager() RegisteredPositionManager {
 	}
 }
 
-// posmLog builds a log verbatim from an on-chain topics capture, the way rawLog
-// does for the PoolManager. ERC-721 Transfer indexes all three arguments, so a
-// real log's data block is always empty.
+// posmLog carries an on-chain capture verbatim, as rawLog does. ERC-721 Transfer
+// indexes all three arguments, so a real log's data block is always empty.
 func posmLog(txHash string, topics []string, data, logIndexHex string) shared.Log {
 	return shared.Log{
 		Address:         positionManagerAddr,
@@ -74,9 +72,9 @@ func decodePosmFixture(t *testing.T, log shared.Log) (DecodedEvents, map[int64]b
 	return got, touched
 }
 
-// The expectations are hand-decoded from the topic words above, never derived by
-// running the ABI: topics[3] read as a big-endian integer is the token id, and
-// the low 20 bytes of topics[1]/topics[2] are the two holders.
+// Expectations are hand-decoded from the topic words, never derived by running
+// the ABI: topics[3] big-endian is the token id, the low 20 bytes of
+// topics[1]/topics[2] are the holders.
 func TestDecodeEvents_PositionManagerTransfer(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -140,11 +138,9 @@ func TestDecodeEvents_PositionManagerTransfer(t *testing.T) {
 	}
 }
 
-// ERC-20's Transfer hashes to the same topic0 with a 3-topic layout, so a
-// mis-set posm address would feed a token contract's transfers into this table.
-// The generic ABI decoder rejects the arity too, but only as "topic/field count
-// mismatch", which sends an operator hunting an ABI bug; the assertion is on
-// the message because that difference is the guard's whole reason to exist.
+// A mis-set posm address would feed a token contract's ERC-20 transfers here.
+// The ABI decoder rejects the arity too, but as "topic/field count mismatch",
+// which sends an operator hunting an ABI bug — hence the assertion on wording.
 func TestDecodeEvents_PositionManagerTransferWithWrongTopicCountErrors(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -191,8 +187,8 @@ func TestDecodeEvents_PositionManagerTransferWithWrongTopicCountErrors(t *testin
 	}
 }
 
-// The posm emits Approval, ApprovalForAll and subscription events too. None is
-// indexed here, and none is an error: only Transfer answers who holds a token.
+// Approval, ApprovalForAll and subscriptions are neither indexed nor an error:
+// only Transfer answers who holds a token.
 func TestDecodeEvents_PositionManagerNonTransferLogIsIgnored(t *testing.T) {
 	log := posmLog(posmMoveFixtureTxHash, []string{
 		erc721ApprovalTopic0,
@@ -213,9 +209,8 @@ func TestDecodeEvents_PositionManagerNonTransferLogIsIgnored(t *testing.T) {
 	}
 }
 
-// protocol_event is scoped to the PoolManager's protocol_id, so a posm log
-// mirrored into the capture net would be filed under the wrong protocol; and a
-// transfer touches no pool, so it must not pull one into the snapshot due set.
+// protocol_event is scoped to the PoolManager's protocol_id, so a captured posm
+// log would be filed under the wrong protocol; and a transfer touches no pool.
 func TestDecodeEvents_PositionManagerTransferIsNeitherCapturedNorTouchesAPool(t *testing.T) {
 	got, touched := decodePosmFixture(t, posmMoveFixtureLog())
 	if len(got.Captured) != 0 {
@@ -239,21 +234,30 @@ func TestDecodeEvents_PositionManagerMalformedTopicErrors(t *testing.T) {
 	}
 }
 
-// A posm whose registry row is missing would arrive as the zero address, and
-// LogBelongsTo would then claim every log emitted by address(0).
-func TestPositionManagerFor_RejectsAMixedRegistry(t *testing.T) {
+func posmRegistryPair() (RegisteredPool, RegisteredPool) {
 	first := servicePool()
 	first.PositionManagerID = positionManagerRowID
 	first.PositionManager = common.HexToAddress(positionManagerAddr)
 	second := secondServicePool()
 	second.PositionManagerID = positionManagerRowID
 	second.PositionManager = common.HexToAddress(positionManagerAddr)
+	return first, second
+}
 
-	if got, err := PositionManagerFor([]RegisteredPool{first, second}); err != nil {
+func TestPositionManagerFor_ReturnsTheSharedDeployment(t *testing.T) {
+	first, second := posmRegistryPair()
+
+	got, err := PositionManagerFor([]RegisteredPool{first, second})
+	if err != nil {
 		t.Fatalf("PositionManagerFor on one deployment: %v", err)
-	} else if got != testPositionManager() {
+	}
+	if got != testPositionManager() {
 		t.Errorf("PositionManagerFor = %+v, want %+v", got, testPositionManager())
 	}
+}
+
+func TestPositionManagerFor_RejectsAMixedRegistry(t *testing.T) {
+	first, second := posmRegistryPair()
 
 	for _, tc := range []struct {
 		name string
@@ -272,10 +276,31 @@ func TestPositionManagerFor_RejectsAMixedRegistry(t *testing.T) {
 	}
 }
 
-// Both registry tables reach their address through protocol_id, so a posm row
-// pointing at the PoolManager's protocol row collides the two addresses. The
-// posm branch runs first in decodeLog, so every pool event would then vanish
-// with nothing raising an error.
+// A registry that lost the posm hands every pool address(0), which LogBelongsTo
+// matches: every real transfer is dropped and no decode ever errors.
+func TestPositionManagerFor_RejectsARegistryWithoutAPositionManager(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mut  func(*RegisteredPool)
+	}{
+		{"no address", func(p *RegisteredPool) { p.PositionManager = common.Address{} }},
+		{"no registry row id", func(p *RegisteredPool) { p.PositionManagerID = 0 }},
+		{"negative registry row id", func(p *RegisteredPool) { p.PositionManagerID = -1 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first, second := posmRegistryPair()
+			tc.mut(&first)
+			tc.mut(&second)
+			if _, err := PositionManagerFor([]RegisteredPool{first, second}); err == nil {
+				t.Fatal("PositionManagerFor: want an error for a registry carrying no PositionManager, got nil")
+			}
+		})
+	}
+}
+
+// A posm row pointing at the PoolManager's protocol row collides the two
+// addresses, and the posm branch runs first: every pool event would vanish with
+// nothing raising an error.
 func TestNewUniswapV4Service_RefusesAPositionManagerThatIsThePoolManager(t *testing.T) {
 	pool := servicePool()
 	pool.PositionManager = pool.PoolManager
