@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -102,6 +103,30 @@ func TestGetTokenInfosResolvesTheVersionEffectiveAtTheRecordedInstant(t *testing
 	}
 	if _, ok := afterRetirement[f.tokenID]; ok {
 		t.Errorf("token %d still in token infos as of 2026-12-31, after its source was retired", f.tokenID)
+	}
+}
+
+// The arbiter silently skips a source key the target already holds, so a target carrying a
+// DIFFERENT mapping for that key would otherwise leave a partial copy reported as success.
+func TestCopyOracleAssetsRejectsATargetHoldingAConflictingMapping(t *testing.T) {
+	ctx := context.Background()
+	f := newRetiredSourceFixture(t, ctx, "vec597-copy-conflict", "0x4444444444444444444444444444444444444444", "2026-01-01", "2026-08-20")
+	targetID := testutil.SeedOracle(t, ctx, onchainPricePool, "vec597-conflict-target", "target", 1, "0x8888888888888888888888888888888888888888")
+
+	// Same natural key as the source's, different feed metadata.
+	if _, err := onchainPricePool.Exec(ctx, `
+		INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_decimals, quote_currency, valid_from, change_reason)
+		VALUES ($1, $2, true, 18, 'ETH', $3, 'pre-existing conflicting mapping')`,
+		targetID, f.tokenID, testutil.MustUTCInstant(t, "2026-01-01")); err != nil {
+		t.Fatalf("seed the conflicting target mapping: %v", err)
+	}
+
+	err := f.repo.CopyOracleAssets(ctx, f.oracleID, targetID, mustDate(t, "2026-06-01"))
+	if err == nil {
+		t.Fatal("CopyOracleAssets reported success onto a target already holding a different mapping for the same key")
+	}
+	if !strings.Contains(err.Error(), "absent or differ on the target") {
+		t.Errorf("error = %v, want it to name the unmapped source keys", err)
 	}
 }
 

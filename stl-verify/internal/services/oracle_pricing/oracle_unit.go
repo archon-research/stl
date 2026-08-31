@@ -76,7 +76,7 @@ func LoadOracleUnits(ctx context.Context, repo outbound.OnchainPriceRepository, 
 	logger.Info("loaded oracle units",
 		"loaded", len(units),
 		"total", len(seen),
-		"reference_effective_at", referenceEffectiveAt.UTC().Format(time.RFC3339))
+		"reference_effective_at", referenceEffectiveAt.UTC().Format(time.RFC3339Nano))
 
 	return units, nil
 }

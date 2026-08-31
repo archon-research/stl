@@ -166,7 +166,7 @@ func run(args []string) error {
 	referenceEffectiveAt, err := oracle_pricing.ResolveReferenceEffectiveAt(
 		os.Getenv(oracle_pricing.ReferenceEffectiveAtEnv), time.Now())
 	if err != nil {
-		return err
+		return fmt.Errorf("resolving reference effective time: %w", err)
 	}
 
 	service, err := oracle_backfill.NewService(

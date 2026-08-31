@@ -390,10 +390,37 @@ func (r *OnchainPriceRepository) CopyOracleAssets(ctx context.Context, fromOracl
 	if err != nil {
 		return fmt.Errorf("copying oracle assets from %d to %d: %w", fromOracleID, toOracleID, err)
 	}
+
+	// The arbiter skips a source key the target already holds at processing_version 0, which is
+	// benign only while that existing row carries the same mapping. A differing one leaves the
+	// target partially mapped, and returning nil here would report that as a successful copy.
+	var unmapped int
+	if err := r.pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM `+OracleAssetAsOf("$3::timestamptz")+` src
+		WHERE src.oracle_id = $1 AND src.enabled
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM `+OracleAssetAsOf("$3::timestamptz")+` tgt
+			WHERE tgt.oracle_id = $2
+			  AND tgt.token_id = src.token_id
+			  AND tgt.feed_key = src.feed_key
+			  AND tgt.enabled
+			  AND tgt.feed_decimals IS NOT DISTINCT FROM src.feed_decimals
+			  AND tgt.quote_currency IS NOT DISTINCT FROM src.quote_currency
+		  )
+	`, fromOracleID, toOracleID, referenceEffectiveAt).Scan(&unmapped); err != nil {
+		return fmt.Errorf("verifying copied oracle assets from %d to %d: %w", fromOracleID, toOracleID, err)
+	}
+	if unmapped > 0 {
+		return fmt.Errorf("copying oracle assets from %d to %d: %d of the source's enabled mappings are absent or differ on the target; it already carries conflicting versions",
+			fromOracleID, toOracleID, unmapped)
+	}
+
 	r.logger.Info("copied oracle assets",
 		"from_oracle_id", fromOracleID,
 		"to_oracle_id", toOracleID,
 		"rows", tag.RowsAffected(),
-		"reference_effective_at", referenceEffectiveAt.UTC().Format(time.RFC3339))
+		"reference_effective_at", referenceEffectiveAt.UTC().Format(time.RFC3339Nano))
 	return nil
 }

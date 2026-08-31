@@ -15,6 +15,13 @@
 -- Rows predating this migration keep one version whose valid_from is their created_at. Their real
 -- change history was overwritten before the conversion and is not recoverable.
 
+-- The stored generated column below rewrites the table under ACCESS EXCLUSIVE, and the PK swap
+-- and index builds are non-concurrent, all in the migrator's single transaction. oracle_asset is
+-- a governance table (a few rows per month), so the rewrite itself is trivial; the risk is
+-- queueing behind a long reader and holding pricing reads out while we wait. Fail fast and re-run
+-- instead. Scoped to this transaction via SET LOCAL.
+SET LOCAL lock_timeout = '10s';
+
 ALTER TABLE oracle_asset ADD COLUMN IF NOT EXISTS processing_version integer NOT NULL DEFAULT 0;
 ALTER TABLE oracle_asset ADD COLUMN IF NOT EXISTS valid_from timestamptz;
 ALTER TABLE oracle_asset ADD COLUMN IF NOT EXISTS change_reason text;

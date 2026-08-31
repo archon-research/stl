@@ -36,7 +36,10 @@ type mockRepo struct {
 	copyOracleAssetsFn             func(ctx context.Context, fromOracleID, toOracleID int64) error
 	getAllProtocolOracleBindingsFn func(ctx context.Context) ([]*entity.ProtocolOracle, error)
 
-	referenceEffectiveAt time.Time
+	// One per pinned read: LoadOracleUnits calls both, and a single field would let the
+	// second call's value stand in for the first, hiding a regression in it.
+	enabledAssetsEffectiveAt time.Time
+	tokenInfosEffectiveAt    time.Time
 }
 
 func (m *mockRepo) GetOracle(ctx context.Context, name string) (*entity.Oracle, error) {
@@ -46,7 +49,7 @@ func (m *mockRepo) GetOracle(ctx context.Context, name string) (*entity.Oracle, 
 	return nil, errors.New("not mocked")
 }
 func (m *mockRepo) GetEnabledAssets(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) ([]*entity.OracleAsset, error) {
-	m.referenceEffectiveAt = referenceEffectiveAt
+	m.enabledAssetsEffectiveAt = referenceEffectiveAt
 	if m.getEnabledAssetsFn != nil {
 		return m.getEnabledAssetsFn(ctx, oracleID)
 	}
@@ -65,7 +68,7 @@ func (m *mockRepo) GetLatestBlock(ctx context.Context, oracleID int64) (int64, e
 	return 0, nil
 }
 func (m *mockRepo) GetTokenInfos(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) (map[int64]outbound.TokenInfo, error) {
-	m.referenceEffectiveAt = referenceEffectiveAt
+	m.tokenInfosEffectiveAt = referenceEffectiveAt
 	if m.getTokenInfosFn != nil {
 		return m.getTokenInfosFn(ctx, oracleID)
 	}
@@ -139,9 +142,16 @@ func TestLoadOracleUnitsPinsAssetReadsToTheRecordedInstant(t *testing.T) {
 	if _, err := LoadOracleUnits(context.Background(), repo, 1, testReferenceEffectiveAt, testutil.DiscardLogger()); err != nil {
 		t.Fatalf("LoadOracleUnits: %v", err)
 	}
-	if !repo.referenceEffectiveAt.Equal(testReferenceEffectiveAt) {
-		t.Errorf("oracle_asset read pinned to %s, want the recorded %s",
-			repo.referenceEffectiveAt, testReferenceEffectiveAt)
+	for _, read := range []struct {
+		name string
+		got  time.Time
+	}{
+		{"GetEnabledAssets", repo.enabledAssetsEffectiveAt},
+		{"GetTokenInfos", repo.tokenInfosEffectiveAt},
+	} {
+		if !read.got.Equal(testReferenceEffectiveAt) {
+			t.Errorf("%s pinned to %s, want the recorded %s", read.name, read.got, testReferenceEffectiveAt)
+		}
 	}
 }
 
