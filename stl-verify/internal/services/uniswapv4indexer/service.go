@@ -122,7 +122,7 @@ func NewUniswapV4Service(ctx context.Context, deps UniswapV4ServiceDeps) (*Unisw
 		chainID:         deps.ChainID,
 		logger:          deps.Logger,
 		telemetry:       deps.Telemetry,
-		tracker:         dexconsumer.NewSnapshotTracker(0),
+		tracker:         dexconsumer.NewSnapshotTracker(noPeriodicSweep),
 		baselineSeen:    baselineSeen,
 		neverIndexed:    neverIndexedPools(deps.Pools, baselineSeen),
 	}
