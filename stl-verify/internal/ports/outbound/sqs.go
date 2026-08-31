@@ -5,8 +5,7 @@ import (
 	"time"
 )
 
-// MaxVisibilityBatchSize is the SQS ceiling on one
-// ChangeMessageVisibilityBatch call.
+// MaxVisibilityBatchSize is the SQS ceiling on one ChangeMessageVisibilityBatch.
 const MaxVisibilityBatchSize = 10
 
 // SQSMessage represents a message received from SQS.
@@ -40,15 +39,8 @@ type SQSConsumer interface {
 	DeleteMessage(ctx context.Context, receiptHandle string) error
 
 	// ChangeMessageVisibilityBatch resets how long up to MaxVisibilityBatchSize
-	// received messages stay hidden from other consumers, counted from now. Zero
-	// hands them back immediately: a worker shutting down releases the messages
-	// it will not finish, which on a FIFO queue unblocks the message group for
-	// the successor instead of stalling it until the visibility timeout expires.
-	// One batch call rather than one per message, because under a single cleanup
-	// budget the first throttled per-message call burns that budget in its own
-	// retry chain and strands the rest.
-	// Refusals the queue reports per entry come back keyed by receipt handle;
-	// a non-nil error means the call itself failed and no handle was changed.
+	// messages stay hidden, counted from now; zero hands them back immediately.
+	// Refusals come back keyed by receipt handle; a non-nil error changed nothing.
 	ChangeMessageVisibilityBatch(ctx context.Context, receiptHandles []string, visibility time.Duration) (map[string]error, error)
 
 	// VisibilityTimeout reports the per-receive visibility timeout configured on

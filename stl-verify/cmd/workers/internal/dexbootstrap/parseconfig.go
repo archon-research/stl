@@ -161,11 +161,8 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 		return Config{}, fmt.Errorf("sweep blocks %d must be >= 0", cfg.SweepBlocks)
 	}
 
-	// Range-validate the SQS visibility timeout (from flag OR env). AWS rejects
-	// it at call time, but a bad value should fail fast at boot with a clear
-	// message rather than surfacing as opaque ReceiveMessage errors on the hot
-	// path. VisibilityTimeout: 0–43200 (12h). The wait time is range-checked in
-	// sqs.NewConsumer, the one place every worker's reaches the SDK.
+	// AWS rejects an out-of-range visibility timeout only at call time, as an
+	// opaque ReceiveMessage error. The wait time is checked in sqs.NewConsumer.
 	if cfg.VisibilityTimeout < 0 || cfg.VisibilityTimeout > 43200 {
 		return Config{}, fmt.Errorf("SQS visibility timeout %d out of range [0,43200]", cfg.VisibilityTimeout)
 	}

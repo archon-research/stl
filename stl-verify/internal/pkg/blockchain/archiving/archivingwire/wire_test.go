@@ -9,11 +9,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// TestWaitWithBudget_GivesUpOnWritesThatOutlastTheBudget pins the bound the
-// deferred archive drain needs: it runs after the service's shutdown window has
-// already closed, inside what the kubelet's grace period leaves, so waiting on
-// a stuck write until it finishes is what gets the process SIGKILLed — losing
-// the final telemetry flush along with the write.
 func TestWaitWithBudget_GivesUpOnWritesThatOutlastTheBudget(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -29,8 +24,6 @@ func TestWaitWithBudget_GivesUpOnWritesThatOutlastTheBudget(t *testing.T) {
 	}
 }
 
-// TestWaitWithBudget_ReportsWritesThatFinishInTime is the counterpart: a drain
-// that completes must say so, so the caller does not warn about lost writes.
 func TestWaitWithBudget_ReportsWritesThatFinishInTime(t *testing.T) {
 	var wg sync.WaitGroup
 

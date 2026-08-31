@@ -30,11 +30,8 @@ const (
 )
 
 // DrainTimeout bounds the wait for in-flight archive writes at shutdown. The
-// drain is deferred, so it runs after the service's own shutdown window has
-// closed and shares lifecycle.ShutdownTailBudget with the OTEL flush that
-// follows it; waiting out a stuck write (each is capped at 30s) instead pushes
-// the process past the kubelet's grace period and gets it SIGKILLed, losing the
-// metric flush as well as the write.
+// drain is deferred, so it shares lifecycle.ShutdownTailBudget with the OTEL
+// flush; waiting out a stuck write (capped at 30s) gets the pod SIGKILLed.
 const DrainTimeout = 5 * time.Second
 
 // Wrap decorates a multicaller with archiving. Identity when archiving is off.
@@ -148,8 +145,7 @@ func NewS3WrapFromEnv(ctx context.Context, logger *slog.Logger, chainID, buildID
 	return wrap, drain, nil
 }
 
-// waitWithBudget waits for wg, reporting whether it finished within budget.
-func waitWithBudget(wg *sync.WaitGroup, budget time.Duration) bool {
+func waitWithBudget(wg *sync.WaitGroup, budget time.Duration) (finished bool) {
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)

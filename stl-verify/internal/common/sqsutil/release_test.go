@@ -19,7 +19,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// collectReleaseCounter reads the release counter back as status -> value.
 func collectReleaseCounter(t *testing.T, reader sdkmetric.Reader) map[string]int64 {
 	t.Helper()
 	var rm metricdata.ResourceMetrics
@@ -45,8 +44,6 @@ func collectReleaseCounter(t *testing.T, reader sdkmetric.Reader) map[string]int
 	return out
 }
 
-// installManualMeterProvider points the global provider at a manual reader,
-// where ReleaseMessages resolves its counter.
 func installManualMeterProvider(t *testing.T) sdkmetric.Reader {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
@@ -60,9 +57,6 @@ func installManualMeterProvider(t *testing.T) sdkmetric.Reader {
 	return reader
 }
 
-// TestReleaseMessages_CountsEveryReleaseByOutcome pins the metric behind the
-// rollout-blackout fix: without it a broken release path shows up only as a
-// multi-minute per-chain data gap, with nothing to alert on.
 func TestReleaseMessages_CountsEveryReleaseByOutcome(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -103,11 +97,8 @@ func TestReleaseMessages_CountsEveryReleaseByOutcome(t *testing.T) {
 	}
 }
 
-// TestReleaseMessages_OneSlowReleaseCannotStrandTheRest pins the batching. The
-// release call keeps the SDK's default retryer, so one throttled release can
-// burn the whole shared cleanup budget in its own retry chain; per-message
-// calls would then leave the rest of the held set hidden for the queue's full
-// visibility timeout — the FIFO blackout the release exists to prevent.
+// The release call keeps the SDK's default retryer, so one throttled release
+// can burn the whole shared cleanup budget in its own retry chain.
 func TestReleaseMessages_OneSlowReleaseCannotStrandTheRest(t *testing.T) {
 	const held = 10
 	messages := heldMessages(held)
@@ -126,10 +117,8 @@ func TestReleaseMessages_OneSlowReleaseCannotStrandTheRest(t *testing.T) {
 	}
 }
 
-// TestReleaseMessages_ChunksTheHeldSetToTheSQSBatchCeiling covers the held set
-// that outgrows one batch: the backup worker holds an undispatched tail plus
-// one message per worker, so 10 is not the ceiling on what a shutdown hands
-// back.
+// The backup worker holds an undispatched tail plus one message per worker, so
+// a shutdown can hand back more than one batch's worth.
 func TestReleaseMessages_ChunksTheHeldSetToTheSQSBatchCeiling(t *testing.T) {
 	consumer := &mockConsumer{}
 

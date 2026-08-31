@@ -109,18 +109,14 @@ type Config struct {
 	// when CACHE_MISS_MAX_RETRIES is unset in the environment.
 	CacheMissMaxRetries int
 
-	// HandlerTimeout bounds one message's processing, shutdown or not, so a
-	// dependency that hangs turns into a bounded, redeliverable failure instead
-	// of parking a worker slot for good. It MUST be less than the queue's
-	// visibility timeout so a message is not redelivered while it is still being
-	// processed; Run validates that. Zero uses sqsutil.DefaultHandlerTimeout.
+	// HandlerTimeout bounds one message's processing, shutdown or not. It MUST
+	// stay under the queue's visibility timeout, which Run validates. Zero uses
+	// sqsutil.DefaultHandlerTimeout.
 	HandlerTimeout time.Duration
 
-	// DrainTimeout bounds the grace a message already being processed when the
-	// context is cancelled (SIGTERM) gets to finish. Within it the work keeps a
-	// context detached from the shutdown, so the message can still be deleted;
-	// past it the work is cancelled and its message released to the successor.
-	// Zero uses sqsutil.DefaultDrainTimeout.
+	// DrainTimeout is the grace a message already being processed at SIGTERM
+	// gets to finish; past it it is released to the successor. Zero uses
+	// sqsutil.DefaultDrainTimeout.
 	DrainTimeout time.Duration
 
 	// Metrics is the metrics recorder (optional).
@@ -167,10 +163,6 @@ type Service struct {
 	stopCh            chan struct{}
 	wg                sync.WaitGroup
 
-	// heldMu guards heldForRelease, which collects the messages the pool took
-	// but never started because shutdown had already begun. They are released as
-	// one batch once the pool stops, so the shutdown tail does not scale with the
-	// buffered batch size.
 	heldMu         sync.Mutex
 	heldForRelease []outbound.SQSMessage
 }
@@ -238,14 +230,8 @@ func NewService(
 }
 
 // Run starts the backup service and blocks until the context is cancelled.
-//
-// Shutdown budget (35s, pinned by TestShutdownPathFitsThePodGracePeriod): the
-// workers drain concurrently, so one DrainTimeout covers the pool however many
-// messages it holds; the worst message then needs three cleanup budgets to
-// settle (dead-letter publish, delete, release after the delete fails), and the
-// shared release of everything the pool never started adds a fourth after the
-// pool stops. This binary runs Run directly rather than under lifecycle.Run, so
-// the pod's grace period (minus the deferred OTEL flush) is the only ceiling.
+// This binary runs Run directly rather than under lifecycle.Run, so the pod's
+// grace period is the only shutdown ceiling (TestShutdownPathFitsThePodGracePeriod).
 func (s *Service) Run(ctx context.Context) error {
 	s.logger.Info("starting raw data backup service",
 		"bucket", s.config.Bucket,
@@ -291,10 +277,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 }
 
-// fetchAndDispatch polls one batch and hands it to the workers, reporting
-// whether the fetcher should keep going. Anything the shutdown stops it from
-// dispatching is held for stopFetching to release.
-func (s *Service) fetchAndDispatch(ctx context.Context, msgCh chan<- outbound.SQSMessage) bool {
+func (s *Service) fetchAndDispatch(ctx context.Context, msgCh chan<- outbound.SQSMessage) (keepFetching bool) {
 	messages, err := s.consumer.ReceiveMessages(ctx, s.config.BatchSize)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -305,8 +288,6 @@ func (s *Service) fetchAndDispatch(ctx context.Context, msgCh chan<- outbound.SQ
 		return true
 	}
 
-	// A batch that lands after the signal cannot be started at all, so it goes
-	// straight back rather than through the pool.
 	if ctx.Err() != nil {
 		s.holdForRelease(messages...)
 		return false
@@ -319,10 +300,6 @@ func (s *Service) fetchAndDispatch(ctx context.Context, msgCh chan<- outbound.SQ
 	return true
 }
 
-// stopFetching closes the work channel, waits for the workers to finish or
-// abandon what they already took, hands back everything that never ran, and
-// reports why the fetcher stopped. The whole held set shares one cleanup
-// budget, so the shutdown tail does not scale with the buffered batch size.
 func (s *Service) stopFetching(ctx context.Context, closeMsgCh func(), reason error) error {
 	closeMsgCh()
 	s.wg.Wait()
@@ -347,8 +324,7 @@ func (s *Service) takeHeldMessages() []outbound.SQSMessage {
 	return held
 }
 
-// releaseIfShuttingDown hands a message the shutdown left unsettled straight
-// back. Outside shutdown it stays hidden on purpose: that is the retry pacing.
+// Outside shutdown a message stays hidden on purpose: that is the retry pacing.
 func (s *Service) releaseIfShuttingDown(ctx context.Context, logger *slog.Logger, msg outbound.SQSMessage) {
 	if ctx.Err() == nil {
 		return
@@ -356,9 +332,11 @@ func (s *Service) releaseIfShuttingDown(ctx context.Context, logger *slog.Logger
 	sqsutil.ReleaseMessages(ctx, s.consumer, logger, []outbound.SQSMessage{msg})
 }
 
-// dispatch hands the batch to the workers, returning the tail that shutdown
-// stopped it from handing over.
-func (s *Service) dispatch(ctx context.Context, msgCh chan<- outbound.SQSMessage, messages []outbound.SQSMessage) []outbound.SQSMessage {
+func (s *Service) dispatch(
+	ctx context.Context,
+	msgCh chan<- outbound.SQSMessage,
+	messages []outbound.SQSMessage,
+) (undispatched []outbound.SQSMessage) {
 	for i, msg := range messages {
 		select {
 		case msgCh <- msg:
@@ -376,8 +354,6 @@ func (s *Service) Stop() {
 	})
 }
 
-// worker processes messages from the channel. msgCh is buffered, so shutdown
-// can find queued messages no worker started; those are handed back instead.
 func (s *Service) worker(ctx context.Context, id int, msgCh <-chan outbound.SQSMessage) {
 	defer s.wg.Done()
 	logger := s.logger.With("worker", id)
@@ -391,7 +367,6 @@ func (s *Service) worker(ctx context.Context, id int, msgCh <-chan outbound.SQSM
 	}
 }
 
-// processAndSettle runs one message under the shared drain budget, then settles it.
 func (s *Service) processAndSettle(ctx context.Context, logger *slog.Logger, msg outbound.SQSMessage) {
 	start := time.Now()
 	budget := sqsutil.DrainBudget{Work: s.handlerTimeout(), Drain: s.drainTimeout()}
@@ -416,10 +391,9 @@ func (s *Service) drainTimeout() time.Duration {
 	return sqsutil.DefaultDrainTimeout
 }
 
-// recordLatency records the per-message processing latency, labelled by
-// outcome. Work the shutdown drain abandoned is skipped: its elapsed time is
-// the drain budget, not the message's cost, and feeding that into the histogram
-// would drag p99 up on every rollout (see VectorBackupWorkerLatencyHigh).
+// Abandoned work is skipped: its elapsed time is the drain budget, not the
+// message's cost, and would drag p99 up on every rollout (alert
+// VectorBackupWorkerLatencyHigh).
 func (s *Service) recordLatency(ctx context.Context, start time.Time, outcome sqsutil.DrainOutcome) {
 	if s.metrics == nil || outcome.Abandoned {
 		return
@@ -455,11 +429,8 @@ func (s *Service) handleResult(ctx context.Context, logger *slog.Logger, msg out
 	s.keepForRedelivery(ctx, logger, msg, outcome)
 }
 
-// keepForRedelivery leaves a transiently failed message undeleted so SQS
-// redelivers it, releasing it when the shutdown is what stopped it.
 func (s *Service) keepForRedelivery(ctx context.Context, logger *slog.Logger, msg outbound.SQSMessage, outcome sqsutil.DrainOutcome) {
 	if outcome.Abandoned {
-		// The drain expiring is the shutdown itself, not a processing failure.
 		logger.Info("shutdown drain expired, handing the message to the successor",
 			"messageID", msg.MessageID,
 		)
@@ -477,9 +448,7 @@ func (s *Service) keepForRedelivery(ctx context.Context, logger *slog.Logger, ms
 
 // deadLetterMessage publishes a permanently failed message to the DLQ and, if
 // that succeeds, deletes it from the main queue. If the publish fails the
-// message is preserved (not deleted) so it can be redelivered and retried —
-// during shutdown that means handing it back, since the successor must not wait
-// out the visibility timeout to see it.
+// message is preserved (not deleted) so it can be redelivered and retried.
 func (s *Service) deadLetterMessage(ctx context.Context, logger *slog.Logger, msg outbound.SQSMessage, cause error) {
 	groupID := strconv.FormatInt(s.config.ChainID, 10)
 	settleCtx, cancel := sqsutil.CleanupContext(ctx)
@@ -503,8 +472,6 @@ func (s *Service) deadLetterMessage(ctx context.Context, logger *slog.Logger, ms
 	s.deleteMessage(ctx, logger, msg)
 }
 
-// deleteMessage removes a message from the main queue on the cleanup budget,
-// since a message drained across shutdown is settled on a cancelled context.
 func (s *Service) deleteMessage(ctx context.Context, logger *slog.Logger, msg outbound.SQSMessage) {
 	settleCtx, cancel := sqsutil.CleanupContext(ctx)
 	defer cancel()

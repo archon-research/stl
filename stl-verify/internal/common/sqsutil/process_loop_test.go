@@ -155,11 +155,6 @@ func TestProcessMessages_ChainIDMismatch_SkipsHandler(t *testing.T) {
 	}
 }
 
-// TestProcessMessages_ReleasesMismatchedMessageWhenShutdownKillsItsDelete
-// covers the one settle path that had no shutdown handling: the discard's
-// delete rides the caller's context until shutdown cancels it, and a message
-// whose delete then fails is left in flight — the loop's guard only releases
-// the messages after it.
 func TestProcessMessages_ReleasesMismatchedMessageWhenShutdownKillsItsDelete(t *testing.T) {
 	foreign := outbound.BlockEvent{ChainID: 42, BlockNumber: 200, Version: 0, BlockHash: "0xfoo"}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -168,7 +163,7 @@ func TestProcessMessages_ReleasesMismatchedMessageWhenShutdownKillsItsDelete(t *
 		receive: func(context.Context, int) ([]outbound.SQSMessage, error) {
 			return []outbound.SQSMessage{makeMsg("1", "h1", foreign)}, nil
 		},
-		beforeDelete: cancel, // SIGTERM lands with the discard's delete in flight
+		beforeDelete: cancel,
 	}
 	cfg, _ := recordingConfig(consumer)
 
@@ -245,12 +240,9 @@ func TestRunLoop_StopsOnCancel(t *testing.T) {
 	// If we get here without hanging, test passes.
 }
 
-// receiveRacingShutdown returns a mock receive that models the real consumer's
-// only cancellation-shaped failure: SIGTERM lands after the loop decided to
-// poll but before the poll starts, so the consumer refuses to start it instead
-// of abandoning one in flight (an aborted poll strands the message SQS handed
-// to the dead request). The returned channel must be closed by the test after
-// it cancels, which is what sequences the race.
+// The real consumer refuses to start a poll on a cancelled context rather than
+// abandoning one in flight. The test closes the returned channel after it
+// cancels, which is what sequences the race.
 func receiveRacingShutdown(entered chan<- struct{}, shutdownLanded <-chan struct{}, failure error) func(context.Context, int) ([]outbound.SQSMessage, error) {
 	return func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
 		signalOnce(entered)
@@ -262,10 +254,8 @@ func receiveRacingShutdown(entered chan<- struct{}, shutdownLanded <-chan struct
 	}
 }
 
-// TestRunLoop_ShutdownCancellationIsNotAnError covers the SIGTERM path: the
-// consumer refuses to start a poll on the cancelled context, which is a clean
-// shutdown, not a failure. Logging it at ERROR made every rollout of every SQS
-// worker feed the error-rate alerts.
+// Logging this at ERROR made every rollout of every SQS worker feed the
+// error-rate alerts.
 func TestRunLoop_ShutdownCancellationIsNotAnError(t *testing.T) {
 	receiving := make(chan struct{}, 1)
 	shutdownLanded := make(chan struct{})
@@ -286,8 +276,6 @@ func TestRunLoop_ShutdownCancellationIsNotAnError(t *testing.T) {
 	}
 }
 
-// TestRunLoop_LogsGenuineReceiveFailureAtError is the counterpart guard: the
-// shutdown-quiet path must not swallow a real receive failure.
 func TestRunLoop_LogsGenuineReceiveFailureAtError(t *testing.T) {
 	receiving := make(chan struct{}, 1)
 	consumer := &mockConsumer{
@@ -309,10 +297,8 @@ func TestRunLoop_LogsGenuineReceiveFailureAtError(t *testing.T) {
 	}
 }
 
-// TestRunLoop_LogsNestedReceiveDeadlineRacingShutdownAtError guards the receive
-// path's silent case: the poll budget expiring as SIGTERM lands means the poll
-// was abandoned mid-flight and its message is stranded for the visibility
-// timeout, so it is a real failure and nothing below the loop logs it.
+// A poll budget expiring as SIGTERM lands means the poll was abandoned
+// mid-flight, and nothing below the loop logs it.
 func TestRunLoop_LogsNestedReceiveDeadlineRacingShutdownAtError(t *testing.T) {
 	receiving := make(chan struct{}, 1)
 	shutdownLanded := make(chan struct{})
@@ -495,10 +481,6 @@ func TestProcessMessages_LogsWhenHandlerIgnoresDeadline(t *testing.T) {
 	}
 }
 
-// TestProcessMessages_DrainsInFlightHandlerOnShutdown pins that SIGTERM
-// mid-message leaves the handler a live context and still deletes its message:
-// cancelling it would hold the message for the queue's visibility timeout and
-// stall the FIFO group behind it.
 func TestProcessMessages_DrainsInFlightHandlerOnShutdown(t *testing.T) {
 	consumer := &mockConsumer{
 		batches: [][]outbound.SQSMessage{{makeMsg("1", "h1", blockEvent(100))}},
@@ -537,9 +519,6 @@ func TestProcessMessages_DrainsInFlightHandlerOnShutdown(t *testing.T) {
 	assertNoErrorLogs(t, recorder)
 }
 
-// TestProcessMessages_ReleasesMessageWhenDrainBudgetExpires covers the handler
-// that cannot finish inside the shutdown window: the message must go back to
-// the queue immediately instead of staying hidden until the visibility timeout.
 func TestProcessMessages_ReleasesMessageWhenDrainBudgetExpires(t *testing.T) {
 	consumer := &mockConsumer{
 		batches: [][]outbound.SQSMessage{{makeMsg("1", "h1", blockEvent(100))}},
@@ -578,10 +557,6 @@ func TestProcessMessages_ReleasesMessageWhenDrainBudgetExpires(t *testing.T) {
 	assertNoErrorLogs(t, recorder)
 }
 
-// TestProcessMessages_ReleasesUnstartedBatchRemainderOnShutdown covers messages
-// the batch never started: they were received (hidden) but will not run, so
-// they must be handed straight back rather than held for the visibility
-// timeout.
 func TestProcessMessages_ReleasesUnstartedBatchRemainderOnShutdown(t *testing.T) {
 	consumer := &mockConsumer{
 		batches: [][]outbound.SQSMessage{{
@@ -616,12 +591,6 @@ func TestProcessMessages_ReleasesUnstartedBatchRemainderOnShutdown(t *testing.T)
 	assertNoErrorLogs(t, recorder)
 }
 
-// TestProcessMessages_ReleasesBatchThatArrivesDuringShutdown covers the poll
-// that completes after SIGTERM: the consumer never abandons an in-flight
-// receive, so a batch can land with the loop already shutting down. None of it
-// may be processed, and every message must go straight back to the queue or the
-// successor's FIFO group stalls for the visibility timeout. This is the i == 0
-// case of the loop's shutdown guard, the single owner of that rule.
 func TestProcessMessages_ReleasesBatchThatArrivesDuringShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -658,10 +627,6 @@ func TestProcessMessages_ReleasesBatchThatArrivesDuringShutdown(t *testing.T) {
 	assertNoErrorLogs(t, recorder)
 }
 
-// TestProcessMessages_ReleasesWholeBatchInOneQueueCall pins the shutdown
-// budget: a queue call per message lets a full batch of 10 share one
-// ShutdownCleanupTimeout between 10 retryable calls, so one throttled release
-// starves the rest and strands them for the visibility timeout.
 func TestProcessMessages_ReleasesWholeBatchInOneQueueCall(t *testing.T) {
 	const batchSize = 10
 	batch := make([]outbound.SQSMessage, 0, batchSize)
@@ -692,9 +657,6 @@ func TestProcessMessages_ReleasesWholeBatchInOneQueueCall(t *testing.T) {
 	}
 }
 
-// TestProcessMessages_HandlerFailureLeavesVisibilityUntouched pins the
-// non-shutdown failure path: the queue's visibility timeout is the deliberate
-// retry pacing for a poison pill, so a failing handler must not shorten it.
 func TestProcessMessages_HandlerFailureLeavesVisibilityUntouched(t *testing.T) {
 	consumer := &mockConsumer{
 		batches: [][]outbound.SQSMessage{{makeMsg("1", "h1", blockEvent(100))}},
@@ -719,9 +681,6 @@ func TestProcessMessages_HandlerFailureLeavesVisibilityUntouched(t *testing.T) {
 	}
 }
 
-// TestProcessMessages_GenuineFailureAtShutdownStillLogsError is the counterpart
-// to the quiet drain paths: a real failure racing SIGTERM must still surface at
-// ERROR, while its message is released like any other unfinished one.
 func TestProcessMessages_GenuineFailureAtShutdownStillLogsError(t *testing.T) {
 	consumer := &mockConsumer{
 		batches: [][]outbound.SQSMessage{{makeMsg("1", "h1", blockEvent(100))}},
@@ -758,9 +717,6 @@ func TestProcessMessages_GenuineFailureAtShutdownStillLogsError(t *testing.T) {
 	}
 }
 
-// TestRunLoop_DrainsInFlightMessageOnShutdown is the end-to-end shape of the
-// rollout: cancel the loop while a handler is running, and the loop finishes
-// that message, deletes it and exits without an ERROR record.
 func TestRunLoop_DrainsInFlightMessageOnShutdown(t *testing.T) {
 	consumer := &mockConsumer{
 		batches: [][]outbound.SQSMessage{{makeMsg("1", "h1", blockEvent(100))}},
@@ -787,11 +743,6 @@ func TestRunLoop_DrainsInFlightMessageOnShutdown(t *testing.T) {
 	assertNoErrorLogs(t, recorder)
 }
 
-// TestRunLoop_LogsNestedDeadlineRacingShutdownAtError pins the one deadline the
-// shutdown path must not swallow. The loop's context is a signal.NotifyContext
-// and never carries a deadline, so a DeadlineExceeded arriving with SIGTERM came
-// from a nested budget (handler timeout, RPC or DB per-attempt deadline) and is
-// a real failure.
 func TestRunLoop_LogsNestedDeadlineRacingShutdownAtError(t *testing.T) {
 	consumer := &mockConsumer{
 		batches: [][]outbound.SQSMessage{{makeMsg("1", "h1", blockEvent(100))}},
@@ -817,11 +768,6 @@ func TestRunLoop_LogsNestedDeadlineRacingShutdownAtError(t *testing.T) {
 	}
 }
 
-// TestProcessMessages_ReleasesAnUnsettledMessageWhenShutdownLandsLaterInTheBatch
-// covers the message the shutdown guard cannot see: one left in flight while
-// the context was still live, with SIGTERM landing during a later message's
-// handler. Only the messages the loop never reached were handed back, so the
-// earlier one stalled its FIFO group for the whole visibility timeout.
 func TestProcessMessages_ReleasesAnUnsettledMessageWhenShutdownLandsLaterInTheBatch(t *testing.T) {
 	malformed := outbound.SQSMessage{MessageID: "1", ReceiptHandle: "h1", Body: "{not json"}
 

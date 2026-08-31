@@ -13,13 +13,8 @@ import (
 )
 
 // ReleaseMessages hands received-but-unfinished messages straight back to the
-// queue, because a message left in flight blocks its whole FIFO message group
-// (one chain's block stream) from the successor pod until the visibility
-// timeout expires. The whole set shares one cleanup budget: a budget per
-// message would scale the shutdown tail with the batch size and no longer fit
-// lifecycle.ShutdownTimeout. A failed release only costs the successor the
-// visibility timeout it would have waited anyway, and the process is on its way
-// out, so it is logged rather than propagated.
+// queue: a message left in flight blocks its whole FIFO message group (one
+// chain's block stream) from the successor until the visibility timeout expires.
 func ReleaseMessages(ctx context.Context, consumer outbound.SQSConsumer, logger *slog.Logger, messages []outbound.SQSMessage) {
 	if len(messages) == 0 {
 		return
@@ -34,10 +29,9 @@ func ReleaseMessages(ctx context.Context, consumer outbound.SQSConsumer, logger 
 	}
 }
 
-// releaseChunk hands one batch-sized chunk back in a single queue call. Sharing
-// the cleanup budget across per-message calls would let the first throttled one
-// burn it in the SDK's retry chain and strand every later message; one call per
-// chunk keeps that retry chain shared too.
+// One queue call per chunk, not per message: under the shared cleanup budget
+// the first throttled call would burn it in the SDK's retry chain and strand
+// every message after it.
 func releaseChunk(
 	ctx context.Context,
 	consumer outbound.SQSConsumer,
@@ -53,7 +47,6 @@ func releaseChunk(
 
 	refusals, err := consumer.ChangeMessageVisibilityBatch(ctx, handles, 0)
 	if err != nil {
-		// The call itself failed, so no message in the chunk was released.
 		refusals = make(map[string]error, len(handles))
 		for _, handle := range handles {
 			refusals[handle] = err
@@ -85,25 +78,17 @@ func releaseMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage) {
 
 const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 
-// releaseCounterName counts messages handed back to the queue. The
-// OTel-to-Prometheus exporter normalises it to sqs_message_releases_total.
+// The OTel-to-Prometheus exporter normalises this to sqs_message_releases_total.
 const releaseCounterName = "sqs.message.releases.total"
 
-// Outcome labels on releaseCounterName. A failed release means the message
-// stays hidden for the queue's full visibility timeout, which on a FIFO queue
-// stalls one chain's whole block stream — the blackout the release exists to
-// prevent, so it must be distinguishable from a clean release.
 const (
 	releaseStatusReleased = "released"
 	releaseStatusFailed   = "failed"
 )
 
-// releaseRecorder counts release attempts. Its counter is resolved from the
-// global meter provider per ReleaseMessages call rather than once at startup:
-// every consumer reaches releases through this package's free functions, not
-// through a constructor, so there is no startup hook to build it in — and
-// releases only happen on the settle and shutdown paths, which makes the
-// lookup irrelevant next to the queue call it labels.
+// The counter is resolved per ReleaseMessages call, not once at startup:
+// releases reach this package through free functions, so there is no
+// constructor to build it in, and they only run on the settle/shutdown paths.
 type releaseRecorder struct {
 	releases metric.Int64Counter
 }
@@ -114,8 +99,7 @@ func newReleaseRecorder(logger *slog.Logger) releaseRecorder {
 		metric.WithDescription("SQS messages handed back to the queue during settle/shutdown, by outcome"),
 	)
 	if err != nil {
-		// A counter that fails to build must never break the release path, which
-		// is what keeps the successor pod from stalling; log and record nothing.
+		// Metrics must never break the release path.
 		logger.Error("building "+releaseCounterName+" counter; release metrics disabled", "error", err)
 		return releaseRecorder{}
 	}

@@ -7,9 +7,6 @@ import (
 	"time"
 )
 
-// TestRunDrainable_KeepsWorkAliveAcrossCallerCancellation pins the reason the
-// primitive exists: only work that finishes lets its message be deleted
-// instead of stalling the FIFO group for the visibility timeout.
 func TestRunDrainable_KeepsWorkAliveAcrossCallerCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -37,9 +34,6 @@ func TestRunDrainable_KeepsWorkAliveAcrossCallerCancellation(t *testing.T) {
 	}
 }
 
-// TestRunDrainable_AbandonsWorkPastTheDrainBudget covers the other side:
-// abandonment is the caller's signal to hand the message back, not to report a
-// processing failure.
 func TestRunDrainable_AbandonsWorkPastTheDrainBudget(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -66,8 +60,6 @@ func TestRunDrainable_AbandonsWorkPastTheDrainBudget(t *testing.T) {
 	awaitSignal(t, workCancelled, "the abandoned work to observe its cancellation")
 }
 
-// TestRunDrainable_ReportsWorkThatIgnoredItsBudget guards the case a bare error
-// cannot express: success returned only after the work's own budget expired.
 func TestRunDrainable_ReportsWorkThatIgnoredItsBudget(t *testing.T) {
 	outcome := RunDrainable(context.Background(), DrainBudget{Work: 10 * time.Millisecond}, func(wctx context.Context) error {
 		<-wctx.Done()
@@ -82,8 +74,6 @@ func TestRunDrainable_ReportsWorkThatIgnoredItsBudget(t *testing.T) {
 	}
 }
 
-// TestRunDrainable_ZeroWorkBudgetLeavesWorkUnbounded covers the worker with no
-// per-message timeout of its own: the drain stays the only bound added.
 func TestRunDrainable_ZeroWorkBudgetLeavesWorkUnbounded(t *testing.T) {
 	var hadDeadline bool
 	outcome := RunDrainable(context.Background(), DrainBudget{}, func(wctx context.Context) error {
@@ -99,9 +89,6 @@ func TestRunDrainable_ZeroWorkBudgetLeavesWorkUnbounded(t *testing.T) {
 	}
 }
 
-// TestRunDrainableValue_AbandonedWorkYieldsTheZeroValue pins the reason the
-// value travels with the outcome: abandoned work keeps running while its caller
-// settles the message, so reading its result would race.
 func TestRunDrainableValue_AbandonedWorkYieldsTheZeroValue(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -125,7 +112,6 @@ func TestRunDrainableValue_AbandonedWorkYieldsTheZeroValue(t *testing.T) {
 	}
 }
 
-// TestRunDrainableValue_ReturnsTheWorkValue is the counterpart.
 func TestRunDrainableValue_ReturnsTheWorkValue(t *testing.T) {
 	value, outcome := RunDrainableValue(context.Background(), DrainBudget{}, func(context.Context) (string, error) {
 		return "rpc_fallback", nil

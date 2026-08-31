@@ -8,8 +8,7 @@ import (
 )
 
 // SlogRecorder is a slog.Handler that captures records so tests can assert
-// on emitted logs. It locks, so a test may drive it from several goroutines
-// (e.g. a worker pool logging its shutdown path).
+// on emitted logs.
 type SlogRecorder struct {
 	mu      sync.Mutex
 	Records []slog.Record
@@ -31,7 +30,6 @@ func (h *SlogRecorder) CountWarn(substr string) int {
 	return h.count(slog.LevelWarn, substr)
 }
 
-// MessagesAt returns the messages of every captured record at the given level.
 func (h *SlogRecorder) MessagesAt(level slog.Level) []string {
 	h.mu.Lock()
 	defer h.mu.Unlock()

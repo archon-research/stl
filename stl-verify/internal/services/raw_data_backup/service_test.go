@@ -26,7 +26,6 @@ import (
 // Mock Implementations
 // =============================================================================
 
-// visibilityChange records one ChangeMessageVisibility call.
 type visibilityChange struct {
 	handle     string
 	visibility time.Duration
@@ -166,9 +165,8 @@ type mockBlockCache struct {
 	getErrors map[string]error
 	closed    bool
 
-	// getBlockHook, when set, runs at the start of GetBlock with that read's
-	// context, so a test can park a worker mid-read and inspect the context it
-	// was handed. A non-nil error becomes the read's result.
+	// getBlockHook runs at the start of GetBlock with that read's context; a
+	// non-nil error becomes the read's result.
 	getBlockHook func(ctx context.Context) error
 }
 
@@ -1633,11 +1631,6 @@ func TestRun_ProcessesMessages(t *testing.T) {
 	}
 }
 
-// TestRun_ReleasesBatchThatArrivesDuringShutdown covers the poll that completes
-// after SIGTERM: the consumer never abandons an in-flight receive, so a batch
-// can land with the fetcher already shutting down. Handing it to the workers
-// would fail every message against the cancelled context and keep it hidden for
-// the visibility timeout, stalling the successor's FIFO group.
 func TestRun_ReleasesBatchThatArrivesDuringShutdown(t *testing.T) {
 	consumer := newMockSQSConsumer()
 	cache := newMockBlockCache()
@@ -1671,13 +1664,10 @@ func TestRun_ReleasesBatchThatArrivesDuringShutdown(t *testing.T) {
 	}
 }
 
-// TestShutdownPathFitsThePodGracePeriod pins the budget documented on Run. This
-// binary has no lifecycle.Run window of its own, so the pod's grace period is
-// the only thing between an overrun and a SIGKILL with a message in flight.
 func TestShutdownPathFitsThePodGracePeriod(t *testing.T) {
-	// One drain for the pool, three cleanup budgets to settle the worst message
-	// (DLQ publish, delete, release after the failed delete), and a fourth for
-	// the shared release of everything the pool never started.
+	// The workers drain concurrently, so one drain covers the pool; then three
+	// cleanup budgets settle the worst message (DLQ publish, delete, release
+	// after the failed delete) and a fourth releases what never started.
 	shutdownPath := sqsutil.DefaultDrainTimeout + 4*sqsutil.ShutdownCleanupTimeout
 	chain := shutdownPath + telemetry.ShutdownFlushTimeout
 
@@ -1688,10 +1678,8 @@ func TestShutdownPathFitsThePodGracePeriod(t *testing.T) {
 	}
 }
 
-// deliverOnceThenIdle returns a receive callback that hands the messages over
-// on the first poll and then behaves like the real consumer: it never abandons
-// an in-flight poll and refuses to start a new one once the loop's context is
-// cancelled.
+// Like the real consumer, the returned callback never abandons an in-flight
+// poll and refuses to start a new one once the context is cancelled.
 func deliverOnceThenIdle(messages ...outbound.SQSMessage) func(context.Context, int) ([]outbound.SQSMessage, error) {
 	var delivered atomic.Bool
 	return func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
@@ -1703,10 +1691,8 @@ func deliverOnceThenIdle(messages ...outbound.SQSMessage) func(context.Context, 
 	}
 }
 
-// parkInGetBlockUntilShutdown blocks the worker inside its cache read until the
-// caller cancels, so the test owns the moment SIGTERM lands relative to the
-// in-flight message. observe, when set, receives the context the read held once
-// the shutdown has landed.
+// observe, when set, receives the context the read held once the shutdown has
+// landed.
 func parkInGetBlockUntilShutdown(reading chan<- struct{}, shutdownRequested <-chan struct{}, observe func(context.Context)) func(context.Context) error {
 	return func(ctx context.Context) error {
 		select {
@@ -1721,8 +1707,6 @@ func parkInGetBlockUntilShutdown(reading chan<- struct{}, shutdownRequested <-ch
 	}
 }
 
-// shutdownTestService builds a single-worker service wired to a log recorder,
-// for the shutdown-path tests below.
 func shutdownTestService(t *testing.T, cfg Config, consumer outbound.SQSConsumer, cache outbound.BlockCache, writer outbound.S3Writer) (*Service, *testutil.SlogRecorder) {
 	t.Helper()
 	recorder := &testutil.SlogRecorder{}
@@ -1733,10 +1717,6 @@ func shutdownTestService(t *testing.T, cfg Config, consumer outbound.SQSConsumer
 	return newTestServiceWithClient(t, cfg, consumer, cache, writer, nil, newMockBlockchainClient()), recorder
 }
 
-// TestRun_DrainsInFlightMessageOnShutdown covers the rollout blackout: a worker
-// caught mid-message by SIGTERM used to fail on the cancelled context and take
-// the transient path, which leaves the message in flight for the whole 180s
-// visibility timeout. The work must keep a live context and be deleted.
 func TestRun_DrainsInFlightMessageOnShutdown(t *testing.T) {
 	consumer := newMockSQSConsumer()
 	cache := newMockBlockCache()
@@ -1776,8 +1756,6 @@ func TestRun_DrainsInFlightMessageOnShutdown(t *testing.T) {
 	}
 }
 
-// TestRun_ReleasesInFlightMessageWhenDrainBudgetExpires covers the message the
-// drain cannot finish: released immediately, and not logged as a failure.
 func TestRun_ReleasesInFlightMessageWhenDrainBudgetExpires(t *testing.T) {
 	consumer := newMockSQSConsumer()
 	cache := newMockBlockCache()
@@ -1826,9 +1804,6 @@ func TestRun_ReleasesInFlightMessageWhenDrainBudgetExpires(t *testing.T) {
 	}
 }
 
-// TestRun_ReleasesPreservedMessageWhenDLQPublishFailsDuringShutdown covers the
-// last path that could leave a message in flight: the preserve-for-redelivery
-// branch, which during shutdown must mean handed back.
 func TestRun_ReleasesPreservedMessageWhenDLQPublishFailsDuringShutdown(t *testing.T) {
 	consumer := newMockSQSConsumer()
 	cache := newMockBlockCache()
@@ -1872,9 +1847,6 @@ func TestRun_ReleasesPreservedMessageWhenDLQPublishFailsDuringShutdown(t *testin
 	}
 }
 
-// TestRun_ReleasesBufferedMessagesNeverStartedOnShutdown covers the worker
-// pool's own hazard: msgCh is buffered (Workers*2), so messages handed to the
-// pool but never started would otherwise run on the cancelled context.
 func TestRun_ReleasesBufferedMessagesNeverStartedOnShutdown(t *testing.T) {
 	consumer := newMockSQSConsumer()
 	cache := newMockBlockCache()
@@ -3557,8 +3529,7 @@ type mockMetrics struct {
 	processed []string
 	latencies []string
 
-	// latencyRecorded, when set, receives each latency status as it is
-	// recorded, so a test can wait on the metric rather than on the run.
+	// latencyRecorded lets a test wait on the metric rather than on the run.
 	latencyRecorded chan<- string
 }
 
@@ -3758,10 +3729,8 @@ func TestRun_Metrics_DLQPublishFailedStatus(t *testing.T) {
 	}
 }
 
-// TestRun_BoundsAHandlerParkedOnADependency covers the worker slot nothing
-// bounded: of this worker's dependencies only the S3 leg carries no timeout of
-// its own, so a FileExists -> HeadObject on a half-open connection parked a
-// worker until SIGTERM. Outside shutdown nothing else ever ends that message.
+// Of this worker's dependencies only the S3 leg carries no timeout of its own,
+// so a FileExists -> HeadObject on a half-open connection parks the worker.
 func TestRun_BoundsAHandlerParkedOnADependency(t *testing.T) {
 	consumer := newMockSQSConsumer()
 	cache := newMockBlockCache()
@@ -3803,10 +3772,6 @@ func TestRun_BoundsAHandlerParkedOnADependency(t *testing.T) {
 	}
 }
 
-// TestRun_ReportsAVisibilityTimeoutBelowTheHandlerBudget covers the pairing
-// the handler budget creates: a budget above the queue's visibility timeout
-// lets SQS redeliver a message while it is still being processed, and
-// duplicate work is not something the worker itself would ever report.
 func TestRun_ReportsAVisibilityTimeoutBelowTheHandlerBudget(t *testing.T) {
 	consumer := newMockSQSConsumer()
 	consumer.visibilityTimeout = 100 * time.Millisecond

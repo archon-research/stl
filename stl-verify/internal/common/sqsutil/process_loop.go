@@ -37,12 +37,9 @@ type Config struct {
 	// wait) parks the poll loop forever and silently stalls the queue.
 	HandlerTimeout time.Duration
 
-	// DrainTimeout bounds the grace a handler that is already running when ctx
-	// is cancelled (SIGTERM) gets to finish its message. Within it the handler
-	// keeps working on a context detached from the shutdown, so the message can
-	// be deleted normally; past it the handler is cancelled and its message
-	// released to the successor. It must fit, together with the cleanup calls,
-	// inside lifecycle.ShutdownTimeout. Zero uses DefaultDrainTimeout.
+	// DrainTimeout is the grace a handler already running at SIGTERM gets to
+	// finish; past it its message is released to the successor. Zero uses
+	// DefaultDrainTimeout.
 	DrainTimeout time.Duration
 }
 
@@ -68,18 +65,13 @@ func (c Config) handlerTimeout() time.Duration {
 	return DefaultHandlerTimeout
 }
 
-// DefaultDrainTimeout is the grace a mid-message handler gets after SIGTERM
-// when Config.DrainTimeout is unset. It plus the settle calls that follow it
-// (up to 3x ShutdownCleanupTimeout, see lifecycle.ShutdownTimeout) must stay
-// under lifecycle.ShutdownTimeout, past which the process is killed with the
-// message still in flight — the failure this budget exists to avoid.
+// DefaultDrainTimeout is the drain grace used when Config.DrainTimeout is
+// unset. It plus the settle calls that follow it must stay under
+// lifecycle.ShutdownTimeout; lifecycle's shutdown_budget_test.go asserts that.
 const DefaultDrainTimeout = 15 * time.Second
 
 // ShutdownCleanupTimeout bounds one delete/release call that settles a message
-// after shutdown cancelled the parent context. A single drained message can
-// need three of them in sequence (delete, the release that follows a failed
-// delete, then the release of the rest of the batch), which is how it enters
-// the chain derived on lifecycle.ShutdownTimeout.
+// after shutdown cancelled the parent context.
 const ShutdownCleanupTimeout = 5 * time.Second
 
 func (c Config) drainTimeout() time.Duration {
@@ -134,8 +126,7 @@ func RunLoop(ctx context.Context, cfg Config, handler BlockEventHandler) {
 				}
 				cfg.Logger.Error("error processing messages", "error", err)
 			}
-			// A batch that drained and released cleanly returns no error, so the
-			// cancelled context is the only signal left to stop polling on.
+			// A batch that drained and released cleanly returns no error.
 			if ctx.Err() != nil {
 				return
 			}
@@ -143,11 +134,8 @@ func RunLoop(ctx context.Context, cfg Config, handler BlockEventHandler) {
 	}
 }
 
-// isShutdownCancellation reports whether err is only the shutdown itself — the
-// loop's context cancelled (SIGTERM), or a handler the drain budget abandoned —
-// rather than a processing failure. The loop's context never carries a deadline,
-// so a DeadlineExceeded here always came from a nested budget (handler timeout,
-// RPC or DB per-attempt deadline) and stays a genuine, logged failure.
+// The loop's context never carries a deadline, so a DeadlineExceeded here came
+// from a nested budget (handler, RPC, DB) and stays a genuine, logged failure.
 func isShutdownCancellation(ctx context.Context, err error) bool {
 	return ctx.Err() != nil &&
 		(errors.Is(err, context.Canceled) || errors.Is(err, ErrDrainAbandoned))
@@ -157,14 +145,8 @@ func isShutdownCancellation(ctx context.Context, err error) bool {
 // BlockEvent, calls the handler, and deletes successfully processed messages.
 // Events whose chain ID does not match cfg.ChainID are rejected.
 //
-// Cancelling ctx (SIGTERM) never kills work in progress: the handler already
-// running keeps a context detached from the shutdown until the drain budget
-// expires, so its message can still be deleted. Every message the shutdown
-// leaves unfinished — drain expired, handler failed, body unparseable, never
-// started, or arrived in a poll that completed after the signal — is released
-// back to the queue, because a message left in flight blocks its whole FIFO
-// message group (one chain's block stream) from the successor pod until the
-// visibility timeout expires.
+// Cancelling ctx (SIGTERM) drains the running handler rather than killing it,
+// and every message the shutdown leaves unfinished is released to the successor.
 //
 // Returns a joined error for any failures.
 func ProcessMessages(
@@ -190,9 +172,6 @@ func ProcessMessages(
 	var errs []error
 	var inFlight []outbound.SQSMessage
 	for i, msg := range messages {
-		// The shutdown guard covers a batch that landed after the signal (i == 0,
-		// because the consumer never abandons an in-flight poll) as well as one
-		// the signal interrupted.
 		if ctx.Err() != nil {
 			inFlight = append(inFlight, messages[i:]...)
 			break
@@ -217,8 +196,6 @@ func releaseUnsettledOnShutdown(ctx context.Context, cfg Config, messages []outb
 	releaseMessages(ctx, cfg, messages)
 }
 
-// processMessage parses one message, runs its handler within the handler
-// budget, and then settles the message: deleted, or kept for redelivery.
 func processMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, handler BlockEventHandler) error {
 	var event outbound.BlockEvent
 	if err := json.Unmarshal([]byte(msg.Body), &event); err != nil {
@@ -237,9 +214,7 @@ func processMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, ha
 	return settleMessage(ctx, cfg, msg, outcome)
 }
 
-// discardForeignChainMessage deletes a message for another chain: chain ID is
-// immutable in the message, so redelivery would never succeed. Investigate the
-// queue subscription if this occurs.
+// Chain ID is immutable in the message, so redelivery would never succeed.
 func discardForeignChainMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, event outbound.BlockEvent) {
 	cfg.Logger.Error("chain ID mismatch, deleting message",
 		"messageID", msg.MessageID,
@@ -259,8 +234,6 @@ func discardForeignChainMessage(ctx context.Context, cfg Config, msg outbound.SQ
 	}
 }
 
-// runHandler invokes the handler under the shared drain primitive, so a SIGTERM
-// mid-message does not kill work that can still finish.
 func runHandler(ctx context.Context, cfg Config, event outbound.BlockEvent, handler BlockEventHandler) DrainOutcome {
 	budget := DrainBudget{Work: cfg.handlerTimeout(), Drain: cfg.drainTimeout()}
 	return RunDrainable(ctx, budget, func(hctx context.Context) error {
@@ -268,8 +241,6 @@ func runHandler(ctx context.Context, cfg Config, event outbound.BlockEvent, hand
 	})
 }
 
-// settleMessage deletes a message whose handler completed, or keeps an
-// unfinished one for redelivery.
 func settleMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, outcome DrainOutcome) error {
 	if outcome.Err != nil {
 		return keepMessageForRedelivery(cfg, msg, outcome)
@@ -278,10 +249,6 @@ func settleMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, out
 	return nil
 }
 
-// keepMessageForRedelivery leaves an unfinished message undeleted, returning
-// the failure that ProcessMessages tracks it by: a message that comes back with
-// an error is one releaseUnsettledOnShutdown must hand over if the shutdown has
-// begun by the time the batch ends.
 func keepMessageForRedelivery(cfg Config, msg outbound.SQSMessage, outcome DrainOutcome) error {
 	if !outcome.Abandoned {
 		cfg.Logger.Error("failed to process message",
@@ -293,8 +260,6 @@ func keepMessageForRedelivery(cfg Config, msg outbound.SQSMessage, outcome Drain
 
 func deleteProcessedMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, outcome DrainOutcome) {
 	if outcome.BudgetExceeded {
-		// The work completed, so we still delete; log it so a handler that does
-		// not honour its deadline is visible.
 		cfg.Logger.Warn("handler returned nil after exceeding its timeout budget; deleting anyway",
 			"messageID", msg.MessageID)
 	}
@@ -311,11 +276,9 @@ func deleteProcessedMessage(ctx context.Context, cfg Config, msg outbound.SQSMes
 	}
 }
 
-// CleanupContext returns the context for the queue call that settles a message
-// (delete, dead-letter publish, release). Once shutdown cancelled the parent,
-// that call must still go out, so it runs detached and bounded by
-// ShutdownCleanupTimeout instead. Exported so a worker that runs its own
-// message loop settles messages on the same budget this package does.
+// CleanupContext returns the context for the queue call that settles a message.
+// Once shutdown cancelled the parent, that call must still go out, so it runs
+// detached and bounded by ShutdownCleanupTimeout instead.
 func CleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	if ctx.Err() == nil {
 		return context.WithCancel(ctx)

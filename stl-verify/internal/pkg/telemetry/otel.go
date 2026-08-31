@@ -10,11 +10,9 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 )
 
-// ShutdownFlushTimeout bounds the final telemetry flush. With an unreachable
-// collector the exporters would otherwise block process exit for their internal
-// defaults (10-30s each). The flush is deferred, so it runs after the service's
-// own shutdown window and shares lifecycle.ShutdownTailBudget with the other
-// deferred teardown; overrunning it means the kubelet SIGKILLs mid-flush.
+// ShutdownFlushTimeout bounds the final telemetry flush: with an unreachable
+// collector the exporters block process exit for their own defaults (10-30s
+// each). It is deferred, so it shares lifecycle.ShutdownTailBudget.
 const ShutdownFlushTimeout = 10 * time.Second
 
 // OTELConfig holds the common parameters for OTEL initialization.

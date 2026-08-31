@@ -17,8 +17,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// mockSQSAPI records the last visibility-change batch; the other sqsAPI
-// methods exist only to satisfy the interface.
 type mockSQSAPI struct {
 	visibilityBatchInput *sqs.ChangeMessageVisibilityBatchInput
 	batchFailed          []sqstypes.BatchResultErrorEntry
@@ -50,9 +48,8 @@ func newTestConsumer(client sqsAPI) *Consumer {
 	}
 }
 
-// blockingReceiveAPI models the AWS SDK's context handling: a ReceiveMessage
-// request aborts the instant its context is done, and otherwise completes when
-// the test releases it.
+// A ReceiveMessage request aborts the instant its context is done, the way the
+// AWS SDK's does.
 type blockingReceiveAPI struct {
 	mockSQSAPI
 
@@ -130,7 +127,6 @@ func awaitPollEntered(t *testing.T, api *blockingReceiveAPI) {
 	}
 }
 
-// receiveResult carries what ReceiveMessages returned on its own goroutine.
 type receiveResult struct {
 	messages []outbound.SQSMessage
 	err      error
@@ -147,10 +143,6 @@ func awaitReceiveResult(t *testing.T, results <-chan receiveResult) receiveResul
 	}
 }
 
-// TestConsumer_ReceiveMessages_CompletesAfterCallerCancellation pins that a
-// poll already in flight when ctx is cancelled still delivers its message:
-// abandoning it strands the receipt handle SQS assigned to that request, and
-// the FIFO group behind it, for the whole visibility timeout.
 func TestConsumer_ReceiveMessages_CompletesAfterCallerCancellation(t *testing.T) {
 	api := newBlockingReceiveAPI()
 	consumer := newTestConsumer(api)
@@ -176,9 +168,6 @@ func TestConsumer_ReceiveMessages_CompletesAfterCallerCancellation(t *testing.T)
 	}
 }
 
-// TestConsumer_ReceiveMessages_SkipsTheCallWhenAlreadyCancelled is the
-// counterpart: a detached poll must not start a fresh 20-second wait after
-// shutdown already began.
 func TestConsumer_ReceiveMessages_SkipsTheCallWhenAlreadyCancelled(t *testing.T) {
 	api := newBlockingReceiveAPI()
 	consumer := newTestConsumer(api)
@@ -198,12 +187,6 @@ func TestConsumer_ReceiveMessages_SkipsTheCallWhenAlreadyCancelled(t *testing.T)
 	}
 }
 
-// TestConsumer_ReceiveMessages_DisablesSDKRetriesForThePoll pins the contract
-// pollBudget depends on: with the SDK's default standard retryer a retried
-// ReceiveMessage needs another full WaitTimeSeconds, which the budget would cut
-// off mid-flight — abandoning a poll SQS may already have assigned a message
-// to, and stranding it for the visibility timeout. One attempt per poll keeps
-// retry where the loop can pace it.
 func TestConsumer_ReceiveMessages_DisablesSDKRetriesForThePoll(t *testing.T) {
 	api := newBlockingReceiveAPI()
 	close(api.release)
@@ -220,8 +203,8 @@ func TestConsumer_ReceiveMessages_DisablesSDKRetriesForThePoll(t *testing.T) {
 	if got := retryer.MaxAttempts(); got != 1 {
 		t.Errorf("expected one attempt per poll, got %d", got)
 	}
-	// A throttle is the error the SDK's default retryer would retry, each retry
-	// costing another full WaitTimeSeconds.
+	// The SDK's default retryer retries a throttle, each retry costing another
+	// full WaitTimeSeconds.
 	throttle := &smithy.GenericAPIError{Code: "ThrottlingException", Message: "Rate exceeded"}
 	if retryer.IsErrorRetryable(throttle) {
 		t.Error("expected the poll retryer to refuse retries, leaving retry to the poll loop")
@@ -247,8 +230,6 @@ func TestConsumer_ReceiveMessages_BoundsThePollByWaitTimePlusSlack(t *testing.T)
 	}
 }
 
-// TestNewConsumer_FallsBackToTheDefaultWaitTime pins that an unset knob still
-// reaches ValidateWaitTime as the default rather than as a rejected zero.
 func TestNewConsumer_FallsBackToTheDefaultWaitTime(t *testing.T) {
 	consumer, err := NewConsumer(aws.Config{}, Config{QueueURL: "https://sqs.test/queue.fifo"}, slog.Default())
 	if err != nil {
@@ -312,9 +293,7 @@ func TestConsumer_ChangeMessageVisibilityBatch_SendsOneEntryPerHandle(t *testing
 	}
 }
 
-// TestConsumer_ChangeMessageVisibilityBatch_ReportsPerEntryRefusals covers the
-// batch API's split outcome: a 200 response can still refuse individual
-// entries, and the caller counts and logs releases per message.
+// A 200 response can still refuse individual entries.
 func TestConsumer_ChangeMessageVisibilityBatch_ReportsPerEntryRefusals(t *testing.T) {
 	client := &mockSQSAPI{batchFailed: []sqstypes.BatchResultErrorEntry{{
 		Id:      aws.String("1"),
@@ -335,10 +314,6 @@ func TestConsumer_ChangeMessageVisibilityBatch_ReportsPerEntryRefusals(t *testin
 	}
 }
 
-// TestConsumer_ChangeMessageVisibilityBatch_RejectsAnUnattributableRefusal
-// pins the one refusal shape that must not degrade into a silent success: an
-// entry Id matching no handle in the request leaves the caller unable to say
-// which message stayed hidden.
 func TestConsumer_ChangeMessageVisibilityBatch_RejectsAnUnattributableRefusal(t *testing.T) {
 	client := &mockSQSAPI{batchFailed: []sqstypes.BatchResultErrorEntry{{
 		Id:   aws.String("99"),
@@ -374,12 +349,6 @@ func TestConsumer_ChangeMessageVisibilityBatch_PropagatesError(t *testing.T) {
 	}
 }
 
-// TestNewConsumer_RejectsAWaitTimeOutsideTheSQSLongPollRange covers the band
-// the shutdown-window check waves through: 21-29 seconds fits the window but
-// SQS refuses it, so every ReceiveMessage fails InvalidParameterValue for the
-// life of the pod — and noRetryForPoll turns that into one ERROR line per tick
-// with no boot signal. Six workers parse SQS_WAIT_TIME with a bare Atoi, so the
-// range belongs here, where all of them reach the SDK.
 func TestNewConsumer_RejectsAWaitTimeOutsideTheSQSLongPollRange(t *testing.T) {
 	tests := []struct {
 		name            string
