@@ -11,8 +11,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/uniswapv4bootstrap"
 )
 
-// defaultAlchemyHTTPURL is the mainnet endpoint the API key is appended to when
-// ALCHEMY_HTTP_URL is unset, matching the dex indexer's own default.
 const defaultAlchemyHTTPURL = "https://eth-mainnet.g.alchemy.com/v2"
 
 type config struct {
@@ -21,9 +19,6 @@ type config struct {
 	bootstrap uniswapv4bootstrap.Config
 }
 
-// parseConfig resolves the run's settings from flags first, then the
-// environment. Every knob has a flag so a one-off rerun can narrow the range
-// without touching the deployed environment.
 func parseConfig(args []string) (config, error) {
 	fs := flag.NewFlagSet("uniswap-v4-position-bootstrap", flag.ContinueOnError)
 	dbURL := fs.String("db", "", "PostgreSQL connection URL (default: DATABASE_URL)")
@@ -86,8 +81,7 @@ func (c *config) applyEnvFallbacks() error {
 	)
 }
 
-// fillInt64FromEnv leaves an already-set flag value alone, so a flag always
-// wins over the environment.
+// A flag always wins over the environment.
 func fillInt64FromEnv(into *int64, key string, fallback int64) error {
 	if *into != 0 {
 		return nil
@@ -100,9 +94,6 @@ func fillInt64FromEnv(into *int64, key string, fallback int64) error {
 	return nil
 }
 
-// alchemyURLFromEnv composes the endpoint the way every Alchemy-backed worker
-// does. The trailing slash is trimmed so a configured base ending in "/" does
-// not produce a "//" before the key.
 func alchemyURLFromEnv() (string, error) {
 	apiKey := env.Get("ALCHEMY_API_KEY", "")
 	if apiKey == "" {

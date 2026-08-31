@@ -673,10 +673,6 @@ func (c *Client) call(ctx context.Context, req jsonRPCRequest) (*jsonRPCResponse
 	return c.callClassified(ctx, req, nil)
 }
 
-// callClassified is call with a hook deciding how an RPC-level error surfaces.
-// A nil hook keeps every RPC error retryable, which is what all but GetLogs
-// want; a hook returning a *nonRetryableError short-circuits the backoff loop
-// for a refusal repeating cannot fix.
 func (c *Client) callClassified(ctx context.Context, req jsonRPCRequest, classify func(*jsonRPCError) error) (*jsonRPCResponse, error) {
 	// Start span if telemetry is enabled
 	if c.telemetry != nil {

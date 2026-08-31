@@ -5,8 +5,6 @@ import (
 	"testing"
 )
 
-// setRequiredEnv sets the environment a minimal run needs, so each test only
-// states what it varies.
 func setRequiredEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/stl")

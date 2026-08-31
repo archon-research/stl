@@ -21,10 +21,6 @@ import (
 // integrationPin sits above every seeded pool's deploy block.
 const integrationPin = int64(25_600_000)
 
-// v4BootstrapFixture wires the real Postgres UniswapV4Repository and tx manager
-// against a freshly migrated schema, faking only the two data sources we cannot
-// control: the log-scan RPC and the archive multicall. The registry comes from
-// LoadPools over the migration's own seed.
 type v4BootstrapFixture struct {
 	deps   Deps
 	client *fakeLogScanClient
@@ -71,8 +67,7 @@ func setupBootstrapIntegration(t *testing.T, liquidity int64) *v4BootstrapFixtur
 			Config: Config{
 				ChainID:  testChainID,
 				PinBlock: integrationPin,
-				// One window over the whole seeded history keeps the fixture's log
-				// set in a single GetLogs answer.
+				// One window over the whole seeded history: one GetLogs answer.
 				InitialWindow: 10_000_000,
 				MaxWindow:     10_000_000,
 				PositionBatch: 2,
@@ -85,8 +80,6 @@ func setupBootstrapIntegration(t *testing.T, liquidity int64) *v4BootstrapFixtur
 	}
 }
 
-// run builds a fresh Service over the fixture's deps and runs it, standing in
-// for a second invocation of the binary against the same database.
 func (f *v4BootstrapFixture) run(t *testing.T) Summary {
 	t.Helper()
 	svc, err := New(f.deps)
@@ -100,10 +93,8 @@ func (f *v4BootstrapFixture) run(t *testing.T) Summary {
 	return summary
 }
 
-// seedPosition writes one uniswap_v4_position row for the (ownerA, -100, 200,
-// saltA) slot, standing in for the live indexer having already covered it at
-// blockNumber. Its fee-growth checkpoints are zero, matching what
-// positionReturningMulticaller answers with.
+// The fee-growth checkpoints are zero, matching what
+// positionReturningMulticaller answers, so the state reads back unchanged.
 func (f *v4BootstrapFixture) seedPosition(t *testing.T, poolID, blockNumber, liquidity int64) {
 	t.Helper()
 	_, err := f.db.Exec(context.Background(),
@@ -117,7 +108,6 @@ func (f *v4BootstrapFixture) seedPosition(t *testing.T, poolID, blockNumber, liq
 	}
 }
 
-// poolByHash returns the loaded registry entry for an on-chain PoolId.
 func (f *v4BootstrapFixture) poolByHash(t *testing.T, poolIDHash string) uniswapv4indexer.RegisteredPool {
 	t.Helper()
 	want := common.HexToHash(poolIDHash)
@@ -139,8 +129,7 @@ func countRows(t *testing.T, db *pgxpool.Pool, query string, args ...any) int {
 	return n
 }
 
-// twoPoolLogs answers every window with three ModifyLiquidity logs across two
-// seeded pools, one of them a repeated touch of the same position.
+// One of the three logs is a repeated touch of the same position.
 func (f *v4BootstrapFixture) twoPoolLogs(t *testing.T) func(outbound.LogFilter) ([]outbound.FilteredLog, error) {
 	t.Helper()
 	return func(outbound.LogFilter) ([]outbound.FilteredLog, error) {
@@ -223,8 +212,6 @@ func TestIntegration_ChangedStateOnARerunAppendsANewVersion(t *testing.T) {
 	f.client.GetLogsFn = f.twoPoolLogs(t)
 	f.run(t)
 
-	// A later pin re-reads the same keys and finds a different liquidity, which
-	// is exactly the append-on-change case.
 	const laterPin = integrationPin + 1000
 	f.client.Head = laterPin + 64
 	f.client.HeaderByNumber[laterPin] = header(laterPin, pinHash)
@@ -335,8 +322,7 @@ func TestIntegration_APositionAlreadyCoveredBelowThePinIsNotReWritten(t *testing
 	f := setupBootstrapIntegration(t, 5000)
 	poolA := f.poolByHash(t, poolAIDHash)
 
-	// The live indexer already recorded this exact state lower down, which is
-	// what readLatestPositionsV4's height bound exists to find.
+	// readLatestPositionsV4's height bound is what must find this lower row.
 	const coveredBlock = integrationPin - 100_000
 	f.seedPosition(t, poolA.ID, coveredBlock, 5000)
 

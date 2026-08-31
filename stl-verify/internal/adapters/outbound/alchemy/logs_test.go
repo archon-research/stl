@@ -16,8 +16,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// logsTestClient builds a Client against handler with retries fast enough that
-// a retry-counting test finishes in milliseconds.
 func logsTestClient(t *testing.T, handler http.HandlerFunc) *Client {
 	t.Helper()
 	server := httptest.NewServer(handler)
@@ -35,7 +33,6 @@ func logsTestClient(t *testing.T, handler http.HandlerFunc) *Client {
 	return client
 }
 
-// rpcErrorHandler answers every request with one JSON-RPC error, counting hits.
 func rpcErrorHandler(hits *atomic.Int64, code int, message string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
@@ -48,8 +45,6 @@ func rpcErrorHandler(hits *atomic.Int64, code int, message string) http.HandlerF
 	}
 }
 
-// capturedGetLogsFilter runs one GetLogs against a stub node and returns the
-// filter object it put on the wire.
 func capturedGetLogsFilter(t *testing.T, filter outbound.LogFilter) map[string]any {
 	t.Helper()
 	var captured []any
@@ -109,15 +104,12 @@ const (
 	poolBTestID               = "0xbc21dd4a44766fadfd6447f4b222a6185dcc2e6a3b15eb79e0cc637e30e7e97f"
 )
 
-// TestGetLogs_BuildsThePositionalTopicsArray covers each topic combination the
-// port allows, including the one a singleton emitter needs and JSON-RPC can only
-// express with an explicit null: topic0 unconstrained, topic1 an OR-set.
 func TestGetLogs_BuildsThePositionalTopicsArray(t *testing.T) {
 	tests := []struct {
 		name   string
 		topic0 common.Hash
 		topic1 []common.Hash
-		// want is the expected topics array; nil means the key must be absent.
+		// nil want means the topics key must be absent.
 		want []any
 	}{
 		{
@@ -166,8 +158,6 @@ func TestGetLogs_BuildsThePositionalTopicsArray(t *testing.T) {
 	}
 }
 
-// assertTopicsEqual compares a decoded topics array against its expectation,
-// case-insensitively per hash and allowing a nil placeholder entry.
 func assertTopicsEqual(t *testing.T, got any, want []any) {
 	t.Helper()
 	entries, ok := got.([]any)

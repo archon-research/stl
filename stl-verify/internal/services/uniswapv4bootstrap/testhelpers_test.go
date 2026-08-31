@@ -28,8 +28,7 @@ const (
 	testChainID     = int64(1)
 	poolManagerAddr = "0x000000000004444c5dc75cB358380D2e3dE08A90"
 	stateViewAddr   = "0x7fFE42C4a5DEeA5b0feC41C94C136Cf115597227"
-	// Three real mainnet pools, transcribed from the V4 migration's verified
-	// seed. The whole PoolKey has to be real, not just the id: the constructor
+	// The whole PoolKey has to be real, not just the id: the constructor
 	// re-derives keccak256(abi.encode(key)) and rejects any disagreement.
 	poolAIDHash = "0x1d5b2949ece8754c2d736991c62c5162bd144f497b2212182401b9bae77e2d76"
 	poolBIDHash = "0x84a2753546221b6aedf1b96098235f8eb5494b1ddd7d57583d99b2d174cd2103"
@@ -53,8 +52,6 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// poolFixture is one seeded mainnet pool's identity, from which testPool builds
-// a RegisteredPool whose PoolId the constructor can re-derive.
 type poolFixture struct {
 	id          int64
 	poolIDHash  string
@@ -95,8 +92,6 @@ func testPools() []uniswapv4indexer.RegisteredPool {
 	}
 }
 
-// poolManagerABIForTest independently parses the ModifyLiquidity event so
-// fixtures are built without reaching into the indexer package's ABI.
 func poolManagerABIForTest(t *testing.T) *abi.ABI {
 	t.Helper()
 	a, err := uniswapv4indexer.PoolManagerABI()
@@ -106,8 +101,6 @@ func poolManagerABIForTest(t *testing.T) *abi.ABI {
 	return a
 }
 
-// modifyLiquidityFilteredLog builds one wire-shaped ModifyLiquidity log, as
-// eth_getLogs would return it.
 func modifyLiquidityFilteredLog(t *testing.T, poolIDHash, owner string, tickLower, tickUpper int64, salt string, blockNumber int64, logIndex int) outbound.FilteredLog {
 	t.Helper()
 	ev := poolManagerABIForTest(t).Events["ModifyLiquidity"]
@@ -139,24 +132,15 @@ func modifyLiquidityFilteredLog(t *testing.T, poolIDHash, owner string, tickLowe
 	}
 }
 
-// fakeLogScanClient is the outbound.LogScanClient double every test in this
-// package drives. GetLogsFn owns the whole windowing contract, so a test says
-// which ranges succeed and which are refused; unset, it answers no logs.
 type fakeLogScanClient struct {
 	mu sync.Mutex
 
-	Head    int64
-	HeadErr error
-	// HeadCalls counts head reads, which is how "an explicit pin is still
-	// checked against the head" is distinguished from "the head is skipped".
-	HeadCalls int
-	// HeaderByNumber answers GetBlockHeaderByNumber. A missing height is an
-	// error, so a test never silently pins a block it did not configure.
+	Head           int64
+	HeadErr        error
+	HeadCalls      int
 	HeaderByNumber map[int64]*outbound.BlockHeader
 	HeaderErr      error
-	// HeaderCalls counts header reads, which is how the pin-stability re-read is
-	// distinguished from the initial pin.
-	HeaderCalls int
+	HeaderCalls    int
 
 	GetLogsFn func(outbound.LogFilter) ([]outbound.FilteredLog, error)
 	Filters   []outbound.LogFilter
@@ -204,7 +188,6 @@ func (f *fakeLogScanClient) GetLogs(_ context.Context, filter outbound.LogFilter
 	return f.GetLogsFn(filter)
 }
 
-// header returns a fixture header for blockNumber carrying hash.
 func header(blockNumber int64, hash string) *outbound.BlockHeader {
 	return &outbound.BlockHeader{
 		Number:    "0x" + strconv.FormatInt(blockNumber, 16),
@@ -213,12 +196,7 @@ func header(blockNumber int64, hash string) *outbound.BlockHeader {
 	}
 }
 
-// fakeUniswapV4Repository records SavePositions' batches. Every other port
-// method errors: the bootstrap writes positions and nothing else, and must not
-// reach for the per-block reorg helpers — a silent nil would hide it doing so.
 type fakeUniswapV4Repository struct {
-	// SavePositionsFn overrides one batch's outcome. The returned count stands in
-	// for the rows the append-on-change writer actually inserted.
 	SavePositionsFn func([]*entity.UniswapV4Position) (int64, error)
 	SavedBatches    [][]*entity.UniswapV4Position
 }
@@ -255,7 +233,6 @@ func (f *fakeUniswapV4Repository) PoolIDsEverSnapshotted(context.Context, int64)
 	return nil, errors.New("fake: PoolIDsEverSnapshotted is a live-service read the bootstrap must not make")
 }
 
-// savedPositions flattens every batch's rows in write order.
 func (f *fakeUniswapV4Repository) savedPositions() []*entity.UniswapV4Position {
 	var all []*entity.UniswapV4Position
 	for _, batch := range f.SavedBatches {
@@ -264,8 +241,6 @@ func (f *fakeUniswapV4Repository) savedPositions() []*entity.UniswapV4Position {
 	return all
 }
 
-// capturedLogs is a slog.Handler that keeps every record, so a test can assert
-// on a per-batch log field the Summary deliberately does not carry.
 type capturedLogs struct {
 	mu      sync.Mutex
 	records []slog.Record
@@ -283,8 +258,6 @@ func (c *capturedLogs) Handle(_ context.Context, record slog.Record) error {
 func (c *capturedLogs) WithAttrs([]slog.Attr) slog.Handler { return c }
 func (c *capturedLogs) WithGroup(string) slog.Handler      { return c }
 
-// int64Field returns key's value from every record whose message is msg, in
-// emission order.
 func (c *capturedLogs) int64Field(msg, key string) []int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -304,8 +277,6 @@ func (c *capturedLogs) int64Field(msg, key string) []int64 {
 	return values
 }
 
-// positionReturningMulticaller answers every getPositionInfo sub-call with the
-// same liquidity and fee-growth checkpoints.
 func positionReturningMulticaller(t *testing.T, liquidity int64) *testutil.MockMulticaller {
 	t.Helper()
 	mc := testutil.NewMockMulticaller()
@@ -319,7 +290,6 @@ func positionReturningMulticaller(t *testing.T, liquidity int64) *testutil.MockM
 	return mc
 }
 
-// packPositionInfoReturn encodes a getPositionInfo return tuple.
 func packPositionInfoReturn(t *testing.T, liquidity, feeGrowthInside0, feeGrowthInside1 *big.Int) []byte {
 	t.Helper()
 	const j = `[

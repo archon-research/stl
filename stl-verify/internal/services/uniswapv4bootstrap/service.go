@@ -1,17 +1,6 @@
-// Package uniswapv4bootstrap discovers every historical Uniswap V4 LP position
-// of the registered pools and snapshots each one at a single finality-safe
-// block.
-//
-// It exists because the live indexer can only ever learn a position from a
-// ModifyLiquidity log: v4-core exposes no enumeration, so a position minted
-// before the indexer went live and never touched since is invisible to it
-// forever. This one-shot run closes that hole by replaying the PoolManager's
-// whole ModifyLiquidity history for those pools, then reading each discovered
-// key's authoritative state through the same StateView getter, hash pinning and
-// append-on-change write path the live indexer uses.
-//
-// A run keeps no progress state and is idempotent: the write path appends only
-// where the stored value differs, so re-running writes nothing new.
+// Package uniswapv4bootstrap backfills the LP positions the live indexer can
+// never see: v4-core exposes no position enumeration, so one minted before the
+// indexer went live and never touched since emits no log it could learn from.
 package uniswapv4bootstrap
 
 import (
@@ -31,15 +20,11 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/uniswapv4indexer"
 )
 
-// pinnedBlockVersion is the block_version every backfilled row carries. The pin
-// sits past finality, so the height has exactly one canonical block and the
-// live indexer's reorg versioning has nothing to disagree with.
+// Past finality the height has one canonical block, so the live indexer's
+// reorg versioning has nothing to disagree with.
 const pinnedBlockVersion = 0
 
-// Deps groups the Service's constructor arguments. Every field is required.
 type Deps struct {
-	// Pools is the full registry as LoadPools returned it; the run scans the
-	// snapshot-supported subset, matching the live indexer's snapshot gate.
 	Pools       []uniswapv4indexer.RegisteredPool
 	LogScan     outbound.LogScanClient
 	Multicaller outbound.Multicaller
@@ -49,7 +34,6 @@ type Deps struct {
 	Config      Config
 }
 
-// Service is one bootstrap run's collaborators, resolved once at construction.
 type Service struct {
 	pools       []uniswapv4indexer.RegisteredPool
 	poolsByHash map[common.Hash]uniswapv4indexer.RegisteredPool
@@ -63,27 +47,18 @@ type Service struct {
 	cfg         Config
 }
 
-// Summary is what a run reports, so the operator can tell a genuinely empty
-// history from a scan that silently covered nothing, and a rerun over covered
-// history (PositionsWritten 0) from one that closed a real gap.
-//
-// Run returns it on failure too, carrying the stages that did complete — the
-// pin above all, which is what the operator must resume with.
 type Summary struct {
-	PinnedBlock     int64
-	PinnedHash      common.Hash
-	PinnedTimestamp time.Time
-	FromBlock       int64
-	Pools           int
-	ScanWindows     int
-	ScanNarrowings  int
-	ScanLogs        int
-	Keys            int
-	KeysByPool      map[int64]int
-	PositionsRead   int
-	// PositionsWritten counts the rows the append-on-change writer actually
-	// inserted, which is below PositionsRead wherever the stored state already
-	// matched.
+	PinnedBlock      int64
+	PinnedHash       common.Hash
+	PinnedTimestamp  time.Time
+	FromBlock        int64
+	Pools            int
+	ScanWindows      int
+	ScanNarrowings   int
+	ScanLogs         int
+	Keys             int
+	KeysByPool       map[int64]int
+	PositionsRead    int
 	PositionsWritten int64
 	Batches          int
 }
@@ -102,10 +77,6 @@ func (s *Summary) recordKeys(keysByPool map[int64][]entity.UniswapV4PositionKey)
 	}
 }
 
-// New validates deps and resolves the log filter's fixed parts. It refuses a
-// registry the live indexer would also refuse — PoolIds that disagree with
-// their keys, or more than one PoolManager deployment — plus one with no
-// snapshot-supported pool at all, which would scan the chain and write nothing.
 func New(deps Deps) (*Service, error) {
 	if err := deps.validate(); err != nil {
 		return nil, err
@@ -163,8 +134,6 @@ func (d Deps) validate() error {
 	return nil
 }
 
-// snapshottablePoolsByID returns the snapshot-supported pools in ascending
-// surrogate-id order, so a run's reads, writes and logs are deterministic.
 func snapshottablePoolsByID(all []uniswapv4indexer.RegisteredPool) []uniswapv4indexer.RegisteredPool {
 	pools := uniswapv4indexer.SnapshottablePools(all)
 	slices.SortFunc(pools, func(a, b uniswapv4indexer.RegisteredPool) int {
@@ -181,11 +150,6 @@ func poolsByHash(pools []uniswapv4indexer.RegisteredPool) map[common.Hash]uniswa
 	return byHash
 }
 
-// Run executes the whole bootstrap: pin a finality-safe block, replay the
-// ModifyLiquidity history up to it, prove the pin is still canonical, then read
-// and persist every discovered position at that block. Any failure stops the
-// run; already-committed batches stay, and re-running redoes the work
-// idempotently.
 func (s *Service) Run(ctx context.Context) (Summary, error) {
 	pin, err := pinBlock(ctx, s.logScan, s.cfg.FinalityDepth, s.cfg.PinBlock)
 	if err != nil {
@@ -212,8 +176,7 @@ func (s *Service) Run(ctx context.Context) (Summary, error) {
 	}
 	summary.recordKeys(keysByPool)
 
-	// Before any write: a pin that moved invalidates every key just discovered
-	// and every read about to be issued, so the cheap check goes first.
+	// A pin that moved invalidates every key just discovered, so this precedes any write.
 	if err := assertPinStable(ctx, s.logScan, pin); err != nil {
 		return summary, err
 	}
@@ -244,9 +207,6 @@ func (s *Service) logStart(pin pinnedBlock, from int64) {
 		"initialWindow", s.cfg.InitialWindow, "positionBatch", s.cfg.PositionBatch)
 }
 
-// scanStart resolves the first block to scan: the override when set, otherwise
-// the lowest deploy height among the scanned pools, below which no position of
-// theirs can exist.
 func (s *Service) scanStart(pin pinnedBlock) (int64, error) {
 	from := s.cfg.FromBlock
 	if from == 0 {
@@ -261,8 +221,6 @@ func (s *Service) scanStart(pin pinnedBlock) (int64, error) {
 	return from, nil
 }
 
-// discoverPositionKeys replays [from, to]'s ModifyLiquidity logs and returns
-// the deduplicated, Compare-sorted position keys per pool.
 func (s *Service) discoverPositionKeys(ctx context.Context, from, to int64) (map[int64][]entity.UniswapV4PositionKey, scanStats, error) {
 	scanner := &logWindowScanner{
 		client: s.logScan,
@@ -295,10 +253,8 @@ func (s *Service) discoverPositionKeys(ctx context.Context, from, to int64) (map
 	return found, stats, nil
 }
 
-// baseFilter is the log filter minus its range: the singleton PoolManager, the
-// ModifyLiquidity signature, and the registered pools' on-chain ids as the
-// topic1 OR-set. Narrowing to those ids at the node is what keeps the scan off
-// the thousands of untracked pools the singleton also emits for.
+// Topic1 narrows at the node to the registered pools: the singleton PoolManager
+// also emits ModifyLiquidity for the thousands of pools nothing here tracks.
 func (s *Service) baseFilter() outbound.LogFilter {
 	poolIDs := make([]common.Hash, len(s.pools))
 	for i, pool := range s.pools {
@@ -311,9 +267,8 @@ func (s *Service) baseFilter() outbound.LogFilter {
 	}
 }
 
-// toSharedLogs re-shapes the port's wire logs into the decoder's log type. The
-// hex strings are copied verbatim: validating them is the decoder's job, and
-// normalising anything here would defeat its guard.
+// The hex strings are copied verbatim: normalising any of them here would
+// defeat the decoder's validation guard.
 func toSharedLogs(logs []outbound.FilteredLog) []shared.Log {
 	out := make([]shared.Log, len(logs))
 	for i, l := range logs {
@@ -332,8 +287,6 @@ func toSharedLogs(logs []outbound.FilteredLog) []shared.Log {
 	return out
 }
 
-// snapshotAndPersist reads and writes each pool's positions in bounded batches,
-// pool by pool in ascending id order.
 func (s *Service) snapshotAndPersist(
 	ctx context.Context,
 	keysByPool map[int64][]entity.UniswapV4PositionKey,
@@ -389,9 +342,6 @@ func (s *Service) snapshotPool(
 	return nil
 }
 
-// persist writes one batch through the repository's append-on-change path,
-// which is what makes a rerun a no-op: it appends only where the stored value
-// for the slot differs, and reports how many rows that actually was.
 func (s *Service) persist(ctx context.Context, rows []*entity.UniswapV4Position) (int64, error) {
 	if len(rows) == 0 {
 		return 0, nil

@@ -85,10 +85,6 @@ func MergePositionKeys(a, b []entity.UniswapV4PositionKey) []entity.UniswapV4Pos
 	return out
 }
 
-// modifyLiquidityKey reads the position tuple out of a decoded ModifyLiquidity
-// log's named fields. Both consumers of that event — the per-block typed entity
-// and the historical key scan — go through here, so the two can never disagree
-// on which fields identify a position.
 func modifyLiquidityKey(data map[string]any) (entity.UniswapV4PositionKey, error) {
 	fields, err := bigIntFields(data, "tickLower", "tickUpper")
 	if err != nil {
@@ -140,14 +136,8 @@ func BuildPositionCalls(pool RegisteredPool, keys []entity.UniswapV4PositionKey)
 	return calls, nil
 }
 
-// ReadPositions reads keys' authoritative state at blockHash in bounded
-// multicall batches (see positionsPerCall), stamping every row with the given
-// block identity. Batches are issued in order and their rows concatenated so
-// the returned slice stays aligned with keys.
-//
-// The per-block indexer and the one-shot position bootstrap share it, which is
-// what keeps a backfilled row byte-identical to the live one for the same
-// block: same getter, same hash pinning, same decode.
+// The live indexer and the one-shot position bootstrap share it, which is what
+// keeps a backfilled row byte-identical to the live one for the same block.
 func ReadPositions(
 	ctx context.Context,
 	multicaller outbound.Multicaller,
@@ -173,8 +163,6 @@ func ReadPositions(
 	return rows, nil
 }
 
-// readPositionChunk issues one getPositionInfo multicall for a single bounded
-// batch of positions and decodes every result positionally.
 func readPositionChunk(
 	ctx context.Context,
 	multicaller outbound.Multicaller,

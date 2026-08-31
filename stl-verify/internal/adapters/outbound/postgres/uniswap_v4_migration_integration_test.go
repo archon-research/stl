@@ -1058,8 +1058,6 @@ func TestUniswapV4ColumnComments(t *testing.T) {
 	}
 }
 
-// uniswapV4TableComment returns one table's COMMENT, failing the test when it
-// is absent.
 func uniswapV4TableComment(t *testing.T, ctx context.Context, table string) string {
 	t.Helper()
 
@@ -1076,9 +1074,6 @@ func uniswapV4TableComment(t *testing.T, ctx context.Context, table string) stri
 	return *comment
 }
 
-// The table comment is what the metadata catalogue answers "why is this position
-// missing?" with, and the create migration's answer ("incomplete by
-// construction") stopped being true once the bootstrap backfiller landed.
 func TestUniswapV4PositionCommentDescribesTheBootstrapCoverage(t *testing.T) {
 	comment := uniswapV4TableComment(t, context.Background(), "uniswap_v4_position")
 

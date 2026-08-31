@@ -210,9 +210,6 @@ func (r *UniswapV4Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbou
 	return stateRows, nil
 }
 
-// SavePositions persists a batch of position rows on their own, for the one-shot
-// bootstrap that writes nothing else. Same append-on-change path SaveBlock's
-// position phase takes, so a backfilled row is byte-identical to a live one.
 func (r *UniswapV4Repository) SavePositions(ctx context.Context, tx pgx.Tx, positions []*entity.UniswapV4Position) (int64, error) {
 	return r.writePositions(ctx, tx, positions)
 }
@@ -609,7 +606,7 @@ func sharedBlockNumber[T any](kind string, rows []T, blockNumberOf func(T) int64
 // mirroring uniswapTickWriter: lock every affected slot in the canonical sorted
 // order, read the latest row per slot in one query, then insert only where no
 // prior row exists or v4PositionUnchanged says the stored row does not already
-// reflect it. Returns how many rows the insert phase actually appended.
+// reflect it.
 func (r *UniswapV4Repository) writePositions(ctx context.Context, tx pgx.Tx, positions []*entity.UniswapV4Position) (int64, error) {
 	if len(positions) == 0 {
 		return 0, nil
@@ -758,10 +755,9 @@ func readLatestPositionsV4(ctx context.Context, tx pgx.Tx, keys []v4PositionKey,
 }
 
 // insertChangedPositionsV4 queues an INSERT for every position whose latest row
-// is absent (no prior row) or differs from it, then sends them in one pgx.Batch,
-// returning the number of rows appended. The INSERTs run through the table's
-// BEFORE INSERT ROW trigger, so the per-row processing_version assignment
-// happens exactly as for a single-row insert.
+// is absent (no prior row) or differs from it, then sends them in one pgx.Batch.
+// The INSERTs run through the table's BEFORE INSERT ROW trigger, so the per-row
+// processing_version assignment happens exactly as for a single-row insert.
 func (r *UniswapV4Repository) insertChangedPositionsV4(
 	ctx context.Context, tx pgx.Tx,
 	positions []*entity.UniswapV4Position,

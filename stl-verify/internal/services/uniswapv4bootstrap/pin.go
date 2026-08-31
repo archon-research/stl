@@ -12,19 +12,12 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
-// pinnedBlock is the single block every read is pinned to and every row is
-// stamped with. One block for the whole run is what makes the snapshot
-// internally consistent: a position read at height N and another at N+1000
-// would not describe the same moment.
 type pinnedBlock struct {
 	number int64
 	hash   common.Hash
 	ts     time.Time
 }
 
-// pinBlock resolves the run's pinned block: override when non-zero, otherwise
-// finalityDepth below the head. It reads the header so the run has the hash to
-// pin its state reads to and the timestamp to stamp its rows with.
 func pinBlock(ctx context.Context, client outbound.LogScanClient, finalityDepth, override int64) (pinnedBlock, error) {
 	head, err := client.GetCurrentBlockNumber(ctx)
 	if err != nil {
@@ -42,11 +35,9 @@ func pinBlock(ctx context.Context, client outbound.LogScanClient, finalityDepth,
 	return parsePinnedHeader(number, header)
 }
 
-// finalitySafeHeight resolves the height to pin and refuses one inside the
-// reorg window — an override included. Everything downstream is built on the
-// pin being unreorgable: rows are stamped block_version 0, and a redelivery of
-// a shallow pin's height would make the live indexer re-read every historical
-// position of that pool at once.
+// Everything downstream rests on the pin being unreorgable: rows are stamped
+// block_version 0, and a redelivery of a shallow pin's height would make the
+// live indexer re-read every historical position of that pool at once.
 func finalitySafeHeight(head, finalityDepth, override int64) (int64, error) {
 	deepest := head - finalityDepth
 	if deepest <= 0 {
@@ -62,11 +53,6 @@ func finalitySafeHeight(head, finalityDepth, override int64) (int64, error) {
 	return override, nil
 }
 
-// parsePinnedHeader converts a header into the pin, rejecting every field the
-// run would otherwise carry silently wrong: a truncated hash pins reads to a
-// block that does not exist, a header for another height means the node
-// answered a different question, and a zero timestamp lands rows in 1970 —
-// outside the hypertable chunk every sibling query bounds its scan to.
 func parsePinnedHeader(number int64, header *outbound.BlockHeader) (pinnedBlock, error) {
 	if header == nil {
 		return pinnedBlock{}, fmt.Errorf("block %d: the node returned no header", number)
@@ -85,6 +71,8 @@ func parsePinnedHeader(number int64, header *outbound.BlockHeader) (pinnedBlock,
 	if err != nil {
 		return pinnedBlock{}, fmt.Errorf("block %d: parsing header timestamp %q: %w", number, header.Timestamp, err)
 	}
+	// A zero timestamp lands rows in 1970, outside the chunk every sibling query
+	// bounds its scan to.
 	if seconds <= 0 {
 		return pinnedBlock{}, fmt.Errorf("block %d: header timestamp is %d", number, seconds)
 	}
@@ -96,11 +84,6 @@ func parsePinnedHeader(number int64, header *outbound.BlockHeader) (pinnedBlock,
 	}, nil
 }
 
-// assertPinStable re-reads the pinned height and fails if it now names another
-// block. The pin sits past finality, so this cannot legitimately fire; when it
-// does, the run's whole premise — one stable block behind every read — is gone,
-// and the only safe answer is to stop and re-run against a fresh pin rather
-// than persist a snapshot stitched across two forks.
 func assertPinStable(ctx context.Context, client outbound.LogScanClient, pin pinnedBlock) error {
 	header, err := client.GetBlockHeaderByNumber(ctx, pin.number)
 	if err != nil {
