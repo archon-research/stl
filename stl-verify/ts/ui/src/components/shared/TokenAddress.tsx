@@ -194,7 +194,7 @@ export function TokenAddress({
 
             <Menu.Item
               value="copy-address"
-              onSelect={handleCopy}
+              onSelect={() => void handleCopy()}
               className={css({
                 display: 'flex',
                 alignItems: 'center',

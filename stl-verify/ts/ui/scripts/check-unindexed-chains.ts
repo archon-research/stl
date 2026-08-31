@@ -2,6 +2,21 @@ import assert from 'node:assert/strict';
 
 import { createServer } from 'vite';
 
+/** The allocation-row fields these invariants actually key, label or link off. */
+type AllocationRowFixture = {
+  chain_id: number | null;
+  network: string | null;
+  receipt_token_id: string | null;
+  underlying_token_id: string | null;
+  symbol: string;
+};
+
+/** One entry of the network filter, as `buildNetworkOptions` returns it. */
+type NetworkOption = {
+  value: string;
+  count: number;
+};
+
 /**
  * Reference rows can name a chain STL has no id for, which arrives as a null
  * `chain_id` with the upstream name in `network`. Every invariant below was a
@@ -27,7 +42,9 @@ async function main() {
       getExplorerUrl,
     } = await vite.ssrLoadModule('/src/lib/dashboard.ts');
 
-    const row = (overrides) => ({
+    const row = (
+      overrides: Partial<AllocationRowFixture> = {},
+    ): AllocationRowFixture => ({
       chain_id: 1,
       network: null,
       receipt_token_id: null,
@@ -95,7 +112,7 @@ async function main() {
       plume,
       robinhood,
     ];
-    const options = buildNetworkOptions(mixed);
+    const options: NetworkOption[] = buildNetworkOptions(mixed);
     assert.deepEqual(
       new Set(options.map((option) => option.value)),
       new Set(mixed.map(allocationNetworkKey)),

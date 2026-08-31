@@ -78,12 +78,26 @@ function normalizeRangeSelection<T extends RangeSelection>(selection: T): T {
 // one drift away from a page mixing both provenances.
 const PROVENANCES: readonly Provenance[] = ['indexed', 'reference', 'both'];
 
+/**
+ * A search param arrives as `unknown` and only a primitive can name a value.
+ * Anything else stringifies to '[object Object]', which would then be compared
+ * against the vocabularies below as though someone had typed it.
+ */
+function paramText(value: unknown): string | undefined {
+  return typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean'
+    ? String(value).toLowerCase()
+    : undefined;
+}
+
 export function toProvenance(value: unknown): Provenance | undefined {
-  if (value === undefined || value === null) {
+  const candidate = paramText(value);
+
+  if (candidate === undefined) {
     return undefined;
   }
 
-  const candidate = String(value).toLowerCase();
   return PROVENANCES.includes(candidate as Provenance)
     ? (candidate as Provenance)
     : undefined;
@@ -97,13 +111,13 @@ const REFERENCE_OFF_VALUES = new Set(['false', '0', 'no', 'off']);
 
 function legacyReferenceParam() {
   return z.optional(
-    z
-      .unknown()
-      .transform((value) =>
-        value === undefined || value === null
-          ? undefined
-          : !REFERENCE_OFF_VALUES.has(String(value).toLowerCase()),
-      ),
+    z.unknown().transform((value) =>
+      value === undefined || value === null
+        ? undefined
+        : // A non-primitive is still *present*, so it reads as on -- only the
+          // listed spellings turn it off.
+          !REFERENCE_OFF_VALUES.has(paramText(value) ?? ''),
+    ),
   );
 }
 

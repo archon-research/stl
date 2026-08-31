@@ -6,5 +6,5 @@
     "types": ["node"],
     "preserveSymlinks": true
   },
-  "include": ["src"]
+  "include": ["src", "scripts", "oxlint.config.ts", ".oxfmtrc.ts"]
 }

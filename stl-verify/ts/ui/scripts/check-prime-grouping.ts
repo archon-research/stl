@@ -2,7 +2,23 @@ import assert from 'node:assert/strict';
 
 import { createServer } from 'vite';
 
-function buildPrimeRow(overrides) {
+/** Array#sort defaults to a stringify-and-compare; these are already strings. */
+const byText = (a: string, b: string) => a.localeCompare(b);
+
+/** The prime-row fields vault grouping reads. */
+type PrimeRowFixture = {
+  address: string;
+  chain: string;
+  chain_id: number;
+  id: string;
+  name: string;
+  prime_vault_address: string | null;
+  role: string;
+};
+
+function buildPrimeRow(
+  overrides: Partial<PrimeRowFixture> = {},
+): PrimeRowFixture {
   return {
     address: '0x0000000000000000000000000000000000000000',
     chain: 'mainnet',
@@ -73,12 +89,10 @@ async function main() {
         sparkBase,
       ]);
       assert.deepEqual(
-        [...group.proxyAddresses].sort(),
-        [
-          sparkMainnet.address,
-          sparkAvalanche.address,
-          sparkBase.address,
-        ].sort(),
+        [...group.proxyAddresses].sort(byText),
+        [sparkMainnet.address, sparkAvalanche.address, sparkBase.address].sort(
+          byText,
+        ),
       );
     }
 
@@ -132,7 +146,9 @@ async function main() {
     // proxy address in ascending order, so the pick is deterministic.
     {
       const [group] = groupPrimesByVault([sparkBase, sparkAvalanche]);
-      const expected = [sparkBase.address, sparkAvalanche.address].sort()[0];
+      const expected = [sparkBase.address, sparkAvalanche.address].sort(
+        byText,
+      )[0];
       assert.equal(group.primaryProxyAddress, expected);
     }
 

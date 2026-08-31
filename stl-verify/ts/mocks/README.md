@@ -6,7 +6,7 @@ Offline mocks for the stl-verify UI's API, built on
 One handler array, three consumers:
 
 - `VITE_API_MOCKS=1 npm run dev -w ui` — the browser service worker, no backend
-- `@stl-verify/mocks/node` — msw's node interceptors: `scripts/check-mock-api.mjs`
+- `@stl-verify/mocks/node` — msw's node interceptors: `scripts/check-mock-api.ts`
   today, a vitest suite when one lands
 - a Playwright run against a dev server started with the same flag, resetting
   between cases through `window.resetMocks()`
@@ -50,7 +50,7 @@ why.
    filter the mock ignores is worse than no mock: the screen looks right and the
    filter is untested. A malformed param the mock accepts is the same trap one
    step earlier — it works offline and 422s in staging.
-4. Extend `scripts/check-mock-api.mjs`: one scenario per check, and a negative
+4. Extend `scripts/check-mock-api.ts`: one scenario per check, and a negative
    case for every failure branch. `expectStatus` is the mirror of `request`.
 
 The window and `limit` rules are ported from `python/app/domain/time_series.py`
@@ -80,7 +80,7 @@ it with `jq`, which rejects JSONC.
   — answer through `response.untyped(...)`. That records the gap in the document
   rather than pretending every id resolves. Closing it belongs in the Python
   response models. A 404 there means "not a prime": a real proxy that holds
-  nothing answers `200` with `[]`, and `check-mock-api.mjs` asserts both, because
+  nothing answers `200` with `[]`, and `check-mock-api.ts` asserts both, because
   collapsing them would make an empty allocation table indistinguishable from a
   bad address.
 - **A mocked production build is deliberate.** `VITE_API_MOCKS=1 npm run build`

@@ -132,7 +132,7 @@ export const AAVAUSDC = '0x625e7708f30ca75bfd92586e17077590c60eb4cd';
 /**
  * 500 staging rows trimmed to 24: every id the allocation, activity, risk and
  * price fixtures reference, plus the zero-address row below.
- * `check-mock-api.mjs` asserts that "every id resolves" half, across all
+ * `check-mock-api.ts` asserts that "every id resolves" half, across all
  * proxies.
  *
  * `updated_at` is the only timestamp in the fixture set that is deliberately
