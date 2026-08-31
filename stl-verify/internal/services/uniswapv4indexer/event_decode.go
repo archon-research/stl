@@ -88,19 +88,8 @@ func assertKeyedEventsDispatch(keyed map[string]struct{}) error {
 	return nil
 }
 
-// DecodeEvents extracts typed entities from a single transaction receipt,
-// routing each PoolManager log by its PoolId. Unlike the per-pool V3 decoder it
-// runs ONCE per receipt: V4's emitter is a singleton shared by every pool, so
-// scanning the receipt per registered pool would be O(pools × logs) for the
-// same result. It returns the set of registered pool IDs the receipt touched,
-// which the caller feeds to dexconsumer.DueSet.
-//
-// Capture-net design: a log on the PoolManager is mirrored into Captured
-// whether or not topic0 matched a known event, EXCEPT for logs belonging to
-// pools outside the registry (the singleton emits for thousands of untracked
-// pools) and for the ERC6909 claim-token set (see erc6909Events). A
-// PositionManager log is decoded but never captured: protocol_event is scoped
-// to the PoolManager's protocol_id.
+// DecodeEvents runs once per receipt against the whole registry, and returns the
+// set of registered pool IDs that receipt touched.
 func DecodeEvents(
 	receipt shared.TransactionReceipt,
 	poolsByID map[common.Hash]RegisteredPool,
