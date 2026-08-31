@@ -8,7 +8,7 @@ type ChainMetadata = {
  * Names, explorers and native symbols for the chains we index. Transcribed from
  * viem's definitions, which cost ~180 KiB of formatters and serializers to read.
  */
-export const CHAIN_METADATA: Record<number, ChainMetadata | undefined> = {
+const CHAIN_METADATA: Record<number, ChainMetadata | undefined> = {
   1: {
     name: 'Ethereum',
     explorerUrl: 'https://etherscan.io',
@@ -72,16 +72,4 @@ export function getChainExplorerUrl(
     return null;
   }
   return CHAIN_METADATA[chainId]?.explorerUrl ?? null;
-}
-
-/**
- * Get native currency symbol for a chain
- * @param chainId - Chain ID
- * @returns Native currency symbol (e.g., "ETH", "AVAX"), or null if not available
- */
-export function getNativeSymbol(chainId: number | null): string | null {
-  if (chainId === null) {
-    return null;
-  }
-  return CHAIN_METADATA[chainId]?.nativeSymbol ?? null;
 }

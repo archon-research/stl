@@ -9,7 +9,7 @@ import { flex } from '#styled-system/patterns';
 import { canRestateProvenance, useProvenanceView } from '../../lib/provenance';
 import type { Provenance } from '../../types/allocation';
 
-export type SettingsOption = {
+type SettingsOption = {
   value: string;
   label: string;
   description?: string;

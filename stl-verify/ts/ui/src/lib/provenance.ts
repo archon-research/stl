@@ -55,9 +55,6 @@ export const sourceQuery = { source: PROVENANCE } as const;
 export const showsReference =
   PROVENANCE === 'reference' || PROVENANCE === 'both';
 
-/** Whether the request asked for STL's figures, alone or merged. */
-export const showsIndexed = PROVENANCE === 'indexed' || PROVENANCE === 'both';
-
 /**
  * Whether the provenance on screen can change without fetching anything.
  *

@@ -32,7 +32,7 @@ import {
 
 // Only what the band reads. The caller's summary carries more (a latest-activity
 // timestamp), but asking for it here would couple this to a field it never uses.
-export type AllocationTotals = {
+type AllocationTotals = {
   allocationCount: number;
   totalUsd: number;
 };

@@ -9,7 +9,6 @@ export type PrimeRiskCapital =
   components['schemas']['PrimeRiskCapitalResponse'];
 export type AllocationRiskCapital =
   components['schemas']['AllocationRiskCapitalResponse'];
-export type DataSources = components['schemas']['DataSourcesResponse'];
 export type DataSource = components['schemas']['DataSourceResponse'];
 /** Which provenance a response was answered from -- not a `/v1/data-sources` row. */
 export type Provenance = components['schemas']['Provenance'];
@@ -24,8 +23,6 @@ export type PrimeDebtSnapshot =
 export type RiskBreakdown = components['schemas']['RiskBreakdownResponse'];
 export type Rrc = components['schemas']['RrcEnvelope'];
 export type RrcResult = components['schemas']['RrcResult'];
-export type SurafDetails = components['schemas']['SurafDetails'];
-export type GapSweepDetails = components['schemas']['GapSweepDetails'];
 
 export type PrimesResponse = NonNullable<
   paths['/v1/primes']['get']['responses']['200']['content']['application/json']
@@ -48,11 +45,6 @@ export type AllocationActivityResponse = AllocationActivity[];
 
 export type DataSourcesResponse = NonNullable<
   paths['/v1/data-sources']['get']['responses']['200']['content']['application/json']
->;
-
-// Full envelope returned by the endpoint: { mode, window, data }.
-export type ProtocolEventsEnvelope = NonNullable<
-  paths['/v1/protocol-events']['get']['responses']['200']['content']['application/json']
 >;
 
 // Consumers use the raw rows; the API client unwraps `data`.

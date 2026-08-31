@@ -112,7 +112,7 @@ const activitiesRoute = createRoute({
   validateSearch: activitiesSearchSchema,
 });
 
-export const routeTree = rootRoute.addChildren([
+const routeTree = rootRoute.addChildren([
   indexRoute,
   allocationRoute.addChildren([allocationIndexRoute, allocationPrimeRoute]),
   activitiesRoute,

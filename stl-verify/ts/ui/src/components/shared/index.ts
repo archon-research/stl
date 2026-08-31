@@ -2,7 +2,6 @@ export { ChainLogo } from './ChainLogo';
 export { PageShell } from './PageShell';
 export { ProtocolLogo } from './ProtocolLogo';
 export {
-  isRangePreset,
   presetToRange,
   RangePicker,
   type RangePreset,
@@ -35,4 +34,4 @@ export { tableHeaderTypographyClassName } from './tableStyles';
 export { SummaryMetric } from './SummaryMetric';
 export { TokenAddress } from './TokenAddress';
 export { TokenLogo } from './TokenLogo';
-export { AppTooltip, TruncatedLabel } from './Tooltip';
+export { TruncatedLabel } from './Tooltip';

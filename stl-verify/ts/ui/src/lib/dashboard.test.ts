@@ -17,7 +17,6 @@ import {
   formatCompactNumber,
   formatCompactUsd,
   formatDateTime,
-  formatDeltaSign,
   formatDurationFromSeconds,
   formatFreshnessLabel,
   formatMultiplier,
@@ -27,7 +26,6 @@ import {
   formatUsdPrice,
   formatUsdValue,
   formatWadValue,
-  getAddressLabel,
   getAllocationKey,
   getCategoryLabel,
   getChainLabel,
@@ -259,30 +257,6 @@ describe('formatMultiplier', () => {
 
   it.each(ABSENT_VALUES)('renders the absent value %o as a dash', (input) => {
     expect(formatMultiplier(input)).toBe('—');
-  });
-});
-
-describe('formatDeltaSign', () => {
-  it.each([
-    [1234.5678, '+1,234.57'],
-    [0, '+0'],
-  ])('marks the non-negative %o as %o', (input, expected) => {
-    expect(formatDeltaSign(input)).toBe(expected);
-  });
-
-  it('marks a negative value with a typographic minus and no sign duplication', () => {
-    expect(formatDeltaSign(-1234.5678)).toBe('−1,234.57');
-  });
-
-  it.each([
-    [2_000_000, '+2M'],
-    [-2_000_000, '−2M'],
-  ])('compacts the magnitude of %o as %o', (input, expected) => {
-    expect(formatDeltaSign(input)).toBe(expected);
-  });
-
-  it.each(ABSENT_VALUES)('renders the absent value %o as a dash', (input) => {
-    expect(formatDeltaSign(input)).toBe('—');
   });
 });
 
@@ -1090,11 +1064,5 @@ describe('sortAllocations', () => {
     sortAllocations(allocations);
 
     expect(allocations[0]?.symbol).toBe('A');
-  });
-});
-
-describe('getAddressLabel', () => {
-  it('returns null for an address the dictionary does not hold', () => {
-    expect(getAddressLabel(ADDRESS)).toBeNull();
   });
 });

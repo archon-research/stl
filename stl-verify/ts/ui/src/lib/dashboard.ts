@@ -258,7 +258,7 @@ export function findProtocolMetadata(
 
 // chain_id 0 is the off-chain sentinel (e.g. Anchorage BTC custody), which has
 // no EVM chain and so no name in the chain registry or logo CDN.
-export const OFFCHAIN_CHAIN_ID = 0;
+const OFFCHAIN_CHAIN_ID = 0;
 
 export function getChainLabel(
   chainId: number | null | undefined,
@@ -681,24 +681,6 @@ export function formatMultiplier(
   return `${numeric.toFixed(3)}x`;
 }
 
-export function formatDeltaSign(
-  value: number | string | null | undefined,
-): string {
-  const numeric = parseNumericValue(value);
-
-  if (numeric === null) {
-    return '—';
-  }
-
-  const sign = numeric >= 0 ? '+' : '−';
-  const formattedAmount =
-    Math.abs(numeric) >= 1_000_000
-      ? COMPACT_NUMBER_FORMAT.format(Math.abs(numeric))
-      : TOKEN_NUMBER_FORMAT.format(Math.abs(numeric));
-
-  return `${sign}${formattedAmount}`;
-}
-
 export function formatFreshnessLabel(isoTimestamp: string): string {
   const date = new Date(isoTimestamp);
   const timestamp = date.getTime();
@@ -924,20 +906,4 @@ export function getExplorerUrl(
     return null;
   }
   return `${base.replace(/\/+$/, '')}/${type}/${address}`;
-}
-
-/**
- * Lookup table of well-known contract addresses to human-readable labels.
- * Keys are lowercased hex addresses (without checksum).
- * Extend as needed — used as a best-effort enrichment layer on top of
- * protocol/symbol fields already available from the API.
- */
-const KNOWN_ADDRESS_LABELS: Record<string, string> = {};
-
-/**
- * Returns a human-readable label for a known contract address, or null
- * if the address is not in the local dictionary.
- */
-export function getAddressLabel(address: string): string | null {
-  return KNOWN_ADDRESS_LABELS[address.toLowerCase()] ?? null;
 }

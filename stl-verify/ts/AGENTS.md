@@ -25,6 +25,24 @@ handler).
   and type-checked like the rest — `ui/tsconfig.node.json` and
   `mocks/tsconfig.json` include them. Keep them erasable-syntax only: no enums,
   no parameter properties (`erasableSyntaxOnly` is on).
+- `knip` (`npm run knip`, root `knip.json`) is the gate `noUnusedLocals` cannot
+  be: unused *exports*, unreachable files and undeclared/unused dependencies. It
+  runs in the build job because it needs panda codegen. What the config asserts,
+  and why, since each line is a claim that will eventually go stale:
+  - `ignoreDependencies` holds three packages nothing imports by name —
+    `oxlint-tsgolint` (spawned by oxlint for `--type-aware`) and the two
+    `@pandacss/preset-*` (named as strings in `panda.config.ts`, resolved by
+    panda out of its own tree, so declaring them here would only invite skew
+    against `@pandacss/dev`). `make` is under `ignoreBinaries` for
+    `generate:openapi`.
+  - `src/generated/**` is negated out of ui's `project`, not listed under
+    `ignore`: `ignore` drops a file from the graph, so anything it alone imports
+    turns into a false positive.
+  - `MetricsFootnote.tsx` is a ui `entry` for that same reason. It is parked, not
+    dead (its own docblock says so), and `entry` keeps it out of the report while
+    still following its imports.
+  - An export that exists only to be checked, never consumed, carries
+    `@knipignore` (see `mocks/src/problem.ts`) rather than a config line.
 - `@types/node` tracks the major in `.node-version`; bumping one without the
   other type-checks the node-side code against a runtime nobody runs.
 - On a fresh `npm ci`, run `npm run prepare -w ui` (panda codegen) before `npm run type:check`/`build`, else `#styled-system/*` imports fail.
