@@ -570,13 +570,6 @@ func queueV4NFTTransfers(batch *pgx.Batch, transfers []v4NFTTransferConverted, b
 	}
 }
 
-// sendUniswapV4Batch executes the queued batch and drains every result in queue
-// order, returning both the number of state-row statements it drained and the
-// number of rows they appended. The two diverge on an idempotent replay, where
-// every INSERT conflicts away; counting the attempt here rather than in the
-// service means a repo-layer drop is counted as zero attempts too. The batch
-// reader is always closed before returning so the caller may issue further
-// queries on tx (writeTicks runs after this).
 func sendUniswapV4Batch(ctx context.Context, tx pgx.Tx, batch *pgx.Batch, rows v4BatchRows) (stateRows outbound.StateRowCounts, err error) {
 	br := tx.SendBatch(ctx, batch)
 	defer func() {
