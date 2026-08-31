@@ -192,14 +192,24 @@ post-restart catch-up drains within minutes.
 1. **Is a gap stuck?** Query the chain DB for an orphaned row with no canonical
    row at the same number (the VEC-277 shape) — see the silent-backfill runbook
    above.
-2. **Upstream RPC** — check the Alchemy 429 / error rate; degraded RPC beyond
+2. **Which shape is it?** Compare the orphaned row's hash against the chain:
+   `cast block <N> --field hash --rpc-url <chain rpc>`. A hash the chain **does**
+   know is the VEC-277 over-orphan, healed by un-orphaning the row. A hash the
+   chain does **not** know is the ARCT-379 shape — a losing fork the watcher
+   kept after the canonical broadcast for that height was dropped as
+   `stale_fork`. The gap filler refuses to un-orphan it (doing so would make the
+   losing fork canonical and wedge every height above it), so the watermark
+   stays pinned below N and the lag grows.
+3. **Upstream RPC** — check the Alchemy 429 / error rate; degraded RPC beyond
    the catch-up rate also grows lag.
-3. **Watcher logs** for repeated gap-fill of the same numbers.
+4. **Watcher logs** for repeated gap-fill of the same numbers.
 
 ### Recovery
 
 If it is the VEC-277 orphan-only shape, the self-heal drains it automatically
-once the fix is deployed; otherwise follow
+once the fix is deployed. If it is the ARCT-379 shape, use the repair in
+[vector-cronjobs.md → `watcher-data-validator` "Orphan-only heights"](vector-cronjobs.md#special-case-watcher-data-validator-orphan-only-heights);
+otherwise follow
 [docs/incidents/2026-06-02-arbitrum-backfill-loop.md](../incidents/2026-06-02-arbitrum-backfill-loop.md).
 
 ### Verify recovery

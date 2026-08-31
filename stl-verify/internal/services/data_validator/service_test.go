@@ -20,6 +20,7 @@ type mockBlockStateRepository struct {
 	reorgEvents         []outbound.ReorgEvent
 	chainIntegrityError error
 	orphanOnlyHeights   []int64
+	orphanOnlyErr       error
 }
 
 func (m *mockBlockStateRepository) SaveBlock(ctx context.Context, state outbound.BlockState) (int, error) {
@@ -85,6 +86,10 @@ func (m *mockBlockStateRepository) SetBackfillWatermark(ctx context.Context, wat
 	return nil
 }
 
+func (m *mockBlockStateRepository) AdvanceBackfillWatermark(ctx context.Context, expected, watermark int64) (bool, error) {
+	return true, nil
+}
+
 func (m *mockBlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBlock int64) ([]outbound.BlockRange, error) {
 	return nil, nil
 }
@@ -94,7 +99,7 @@ func (m *mockBlockStateRepository) VerifyChainIntegrity(ctx context.Context, fro
 }
 
 func (m *mockBlockStateRepository) FindOrphanOnlyHeights(ctx context.Context, fromBlock, toBlock int64) ([]int64, error) {
-	return m.orphanOnlyHeights, nil
+	return m.orphanOnlyHeights, m.orphanOnlyErr
 }
 
 func (m *mockBlockStateRepository) MarkPublishComplete(ctx context.Context, hash string) error {
@@ -703,10 +708,12 @@ func TestService_OrphanOnlyHeights(t *testing.T) {
 	tests := []struct {
 		name       string
 		heights    []int64
+		queryErr   error
 		wantStatus string
 	}{
 		{name: "no orphan-only heights", heights: nil, wantStatus: StatusPassed},
 		{name: "orphan-only height reported", heights: []int64{25395651}, wantStatus: StatusFailed},
+		{name: "query failure is an error, not a pass", queryErr: errors.New("connection reset"), wantStatus: StatusError},
 	}
 
 	for _, tt := range tests {
@@ -715,6 +722,7 @@ func TestService_OrphanOnlyHeights(t *testing.T) {
 				minBlockNumber:    1,
 				maxBlockNumber:    30000000,
 				orphanOnlyHeights: tt.heights,
+				orphanOnlyErr:     tt.queryErr,
 			}
 
 			config := DefaultConfig()

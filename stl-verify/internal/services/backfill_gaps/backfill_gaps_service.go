@@ -527,26 +527,14 @@ func (s *BackfillService) processBlockDataInner(ctx context.Context, bd outbound
 		// would leave FindGaps reporting the block as missing forever while
 		// this idempotency check kept skipping the insert.
 		if existing.IsOrphaned {
-			// Before un-orphaning, confirm the row's linkage is still consistent
-			// with the chain we just fetched. The stored parent_hash should
-			// match header.ParentHash (same block, byte-identical), and the
-			// surrounding heights should agree. If not, the stored row is from
-			// a different fork than the one we just fetched and un-orphaning
-			// would mask the divergence — bail out without a write.
+			// A block from another fork can share a height but never a parent,
+			// so a mismatch means the fetch and the stored row disagree about
+			// which chain they are on.
 			if existing.ParentHash != header.ParentHash {
 				return fmt.Errorf("refusing to un-orphan block %d: stored parent_hash %s differs from fetched %s",
 					blockNum, truncateHash(existing.ParentHash), truncateHash(header.ParentHash))
 			}
-			if err := s.validateBlockLinkage(ctx, blockNum, header.Hash, header.ParentHash); err != nil {
-				return fmt.Errorf("refusing to un-orphan block %d: linkage validation failed: %w", blockNum, err)
-			}
-			if clearErr := s.stateRepo.ClearBlockOrphaned(ctx, header.Hash); clearErr != nil {
-				return fmt.Errorf("failed to clear orphan flag on existing block %d: %w", blockNum, clearErr)
-			}
-			s.logger.Info("cleared stale orphan flag on backfilled block",
-				"block", blockNum,
-				"hash", truncateHash(header.Hash))
-			return nil
+			return s.unorphanIfOnCanonicalChain(ctx, blockNum, header.Hash)
 		}
 		s.logger.Debug("block already exists, skipping", "block", blockNum)
 		return nil
@@ -632,6 +620,90 @@ func (s *BackfillService) processBlockDataInner(ctx context.Context, bd outbound
 	}
 
 	return nil
+}
+
+// unorphanAnchorDepth bounds the search for the canonical row an un-orphan
+// candidate has to chain up to. A reorg commit inserts one directly above the
+// run it orphaned, and no rewind reaches further back than the finality window.
+const unorphanAnchorDepth = 64
+
+// unorphanIfOnCanonicalChain clears the orphan flag on the stored row for hash,
+// but only when that row is reachable by following parent_hash down from the
+// nearest canonical row above it, and heals every orphaned row on that walk
+// with it — they are one wrongly-orphaned segment.
+//
+// The stored chain is the only witness available here. A watermark rewind
+// leaves every orphaned height but the last without a canonical successor, so
+// validateBlockLinkage's forward check is skipped, and a node still serving the
+// losing fork would otherwise get that fork promoted back to canonical: the
+// winner is then refused at every height above it, forever (ARCT-379).
+func (s *BackfillService) unorphanIfOnCanonicalChain(ctx context.Context, blockNum int64, hash string) error {
+	anchor, err := s.findCanonicalAnchorAbove(ctx, blockNum)
+	if err != nil {
+		return fmt.Errorf("refusing to un-orphan block %d: %w", blockNum, err)
+	}
+	segment, err := s.walkStoredChainDownTo(ctx, anchor, blockNum, hash)
+	if err != nil {
+		return fmt.Errorf("refusing to un-orphan block %d: %w", blockNum, err)
+	}
+
+	for _, orphanedHash := range segment {
+		if err := s.stateRepo.ClearBlockOrphaned(ctx, orphanedHash); err != nil {
+			return fmt.Errorf("failed to clear orphan flag on existing block %d: %w", blockNum, err)
+		}
+	}
+	s.logger.Info("cleared stale orphan flag on backfilled block",
+		"block", blockNum,
+		"hash", truncateHash(hash),
+		"anchor", anchor.Number,
+		"healedHeights", len(segment))
+	return nil
+}
+
+// findCanonicalAnchorAbove returns the lowest canonical block above blockNum.
+func (s *BackfillService) findCanonicalAnchorAbove(ctx context.Context, blockNum int64) (*outbound.BlockState, error) {
+	for number := blockNum + 1; number <= blockNum+unorphanAnchorDepth; number++ {
+		block, err := s.stateRepo.GetBlockByNumber(ctx, number)
+		if err != nil {
+			return nil, fmt.Errorf("failed to look up block %d: %w", number, err)
+		}
+		if block != nil {
+			return block, nil
+		}
+	}
+	return nil, fmt.Errorf("no canonical block within %d heights above it", unorphanAnchorDepth)
+}
+
+// walkStoredChainDownTo follows parent_hash from anchor down to blockNum and
+// returns the orphaned hashes it crossed. A losing fork never links to the
+// canonical anchor, so a walk that does not arrive at hash is an error.
+func (s *BackfillService) walkStoredChainDownTo(ctx context.Context, anchor *outbound.BlockState, blockNum int64, hash string) ([]string, error) {
+	current := anchor
+	var orphaned []string
+	for current.Number > blockNum {
+		parent, err := s.stateRepo.GetBlockByHash(ctx, current.ParentHash)
+		if err != nil {
+			return nil, fmt.Errorf("failed to look up parent %s of block %d: %w",
+				truncateHash(current.ParentHash), current.Number, err)
+		}
+		if parent == nil {
+			return nil, fmt.Errorf("block %d's parent %s is not stored",
+				current.Number, truncateHash(current.ParentHash))
+		}
+		if parent.Number != current.Number-1 {
+			return nil, fmt.Errorf("block %d's parent %s is stored at height %d",
+				current.Number, truncateHash(current.ParentHash), parent.Number)
+		}
+		if parent.IsOrphaned {
+			orphaned = append(orphaned, parent.Hash)
+		}
+		current = parent
+	}
+	if current.Hash != hash {
+		return nil, fmt.Errorf("the chain below canonical block %d reaches %s at height %d, not %s",
+			anchor.Number, truncateHash(current.Hash), blockNum, truncateHash(hash))
+	}
+	return orphaned, nil
 }
 
 // assertCanonicalRowExists is the post-cycle invariant check for the
@@ -1029,8 +1101,12 @@ func (s *BackfillService) advanceWatermark(ctx context.Context) error {
 			return fmt.Errorf("chain integrity check failed: %w", err)
 		}
 
-		if err := s.stateRepo.SetBackfillWatermark(ctx, newWatermark); err != nil {
+		advanced, err := s.stateRepo.AdvanceBackfillWatermark(ctx, currentWatermark, newWatermark)
+		if err != nil {
 			return fmt.Errorf("failed to set watermark: %w", err)
+		}
+		if !advanced {
+			return s.reportSkippedAdvance(ctx, currentWatermark, newWatermark)
 		}
 		s.logger.Info("advanced backfill watermark",
 			"from", currentWatermark,
@@ -1038,6 +1114,21 @@ func (s *BackfillService) advanceWatermark(ctx context.Context) error {
 			"blocksVerified", newWatermark-currentWatermark)
 	}
 
+	return nil
+}
+
+// reportSkippedAdvance explains a compare-and-set that found the watermark
+// changed: a reorg commit rewound it while this pass was scanning, so the
+// scan's conclusion is stale and the next pass re-runs it against the new value.
+func (s *BackfillService) reportSkippedAdvance(ctx context.Context, expected, newWatermark int64) error {
+	current, err := s.stateRepo.GetBackfillWatermark(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to re-read watermark after skipped advance: %w", err)
+	}
+	s.logger.Info("watermark changed concurrently, skipping advance",
+		"expected", expected,
+		"current", current,
+		"to", newWatermark)
 	return nil
 }
 

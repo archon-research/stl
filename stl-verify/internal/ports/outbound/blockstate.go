@@ -127,9 +127,18 @@ type BlockStateRepository interface {
 	// Returns 0 if no watermark has been set.
 	GetBackfillWatermark(ctx context.Context) (int64, error)
 
-	// SetBackfillWatermark updates the watermark to the given block number.
-	// Should only be called after confirming all blocks up to this number exist.
+	// SetBackfillWatermark updates the watermark to the given block number
+	// unconditionally. It is the seeding channel (a chain's initial cursor, an
+	// operator repair); gap-fill advancement must use AdvanceBackfillWatermark.
 	SetBackfillWatermark(ctx context.Context, watermark int64) error
+
+	// AdvanceBackfillWatermark moves the watermark from expected to watermark,
+	// returning false when the stored value is no longer expected. The gap
+	// filler decides where to advance to from a value it read earlier, and
+	// HandleReorgAtomic can rewind below that value in between; an
+	// unconditional write would put the rewound heights back out of FindGaps'
+	// reach and leave the hole permanently unfilled (ARCT-379).
+	AdvanceBackfillWatermark(ctx context.Context, expected, watermark int64) (bool, error)
 
 	// FindGaps finds missing block ranges between minBlock and maxBlock.
 	// Only considers canonical (non-orphaned) blocks.
@@ -138,10 +147,12 @@ type BlockStateRepository interface {
 	FindGaps(ctx context.Context, minBlock, maxBlock int64) ([]BlockRange, error)
 
 	// FindOrphanOnlyHeights returns block numbers in [fromBlock, toBlock] that
-	// have an orphaned row and no canonical one. Such a height is a hole no
-	// other check sees: FindGaps and VerifyChainIntegrity both read the
-	// canonical view, where the height simply does not exist. Ordered
-	// ascending and capped, so an empty result is the only "all clear".
+	// have an orphaned row and no canonical one. Such a height is a hole the
+	// other checks miss once the backfill watermark has passed it: FindGaps
+	// scans only above the watermark, and VerifyChainIntegrity pairs
+	// consecutive canonical rows on prev_number = number - 1, so a missing
+	// height breaks no pair it looks at. Ordered ascending and capped, so an
+	// empty result is the only "all clear".
 	FindOrphanOnlyHeights(ctx context.Context, fromBlock, toBlock int64) ([]int64, error)
 
 	// VerifyChainIntegrity verifies that the parent_hash chain is properly linked

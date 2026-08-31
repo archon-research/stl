@@ -312,6 +312,18 @@ func (r *BlockStateRepository) SetBackfillWatermark(ctx context.Context, waterma
 	return nil
 }
 
+// AdvanceBackfillWatermark moves the watermark from expected to watermark and
+// reports whether it changed.
+func (r *BlockStateRepository) AdvanceBackfillWatermark(ctx context.Context, expected, watermark int64) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.backfillWatermark != expected {
+		return false, nil
+	}
+	r.backfillWatermark = watermark
+	return true, nil
+}
+
 // FindGaps finds missing block ranges between minBlock and maxBlock.
 // Uses the backfill watermark to skip already-verified blocks.
 func (r *BlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBlock int64) ([]outbound.BlockRange, error) {

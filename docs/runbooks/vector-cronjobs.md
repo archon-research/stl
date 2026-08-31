@@ -138,9 +138,19 @@ watcher saved fork A, the canonical broadcast for N was dropped as `stale_fork`
 (a load-balanced RPC node had not converged when the watcher verified it), and
 the reorg that block N+1 committed orphaned fork A without ever fetching the
 winner. Nothing at that height is canonical — S3 holds only the orphaned fork
-and every indexer has its events at `block_version` 0. Neither `FindGaps` nor
-the **Chain Integrity** check sees it: both read the canonical view, where the
-height simply does not exist.
+and every indexer has its events at `block_version` 0. The other two checks
+miss it once the backfill watermark has passed the height: `FindGaps` scans
+only above the watermark, and **Chain Integrity** pairs consecutive canonical
+rows (`prev_number = number - 1`), so a height with no canonical row breaks no
+pair it looks at.
+
+`block_states` carries a 30-day retention policy
+(`add_retention_policy('block_states', INTERVAL '30 days')`), so the check only
+ever sees the retained window. **This alert clearing without a repair means the
+hole aged out of the check, not that it healed** — the downstream
+`block_version` 0 rows and the S3 objects are untouched by retention. The 14
+staging mainnet heights named in ARCT-379 (25087888 … 25589752) are already
+outside it.
 
 Confirm:
 
@@ -148,21 +158,32 @@ Confirm:
    `SELECT hash, version, is_orphaned FROM block_states WHERE chain_id = <id>
    AND number = <N>;`. One row, orphaned, hash unknown to the chain, is the
    signature.
-2. `increase(chain_reorgs_dropped_total{reorg_dropped_reason="stale_fork"}[1h])`
-   around the block's timestamp — a drop at that height is the cause.
+2. The watcher's Loki line `dropping stale-fork reorg broadcast … block=<N>`
+   around the block's timestamp is the cause. Use it, not
+   `chain_reorgs_dropped_total{reorg_dropped_reason="stale_fork"}`: that counter
+   carries no block label by design (block numbers are unbounded cardinality),
+   so it can only tell you drops happened, never at which height.
 
 Repair:
 
-- **New occurrences heal themselves.** A reorg commit now rewinds
+- **New occurrences heal themselves.** A reorg commit rewinds
   `backfill_watermark` to the common ancestor, so the next gap pass re-fetches
   N and saves it as version 1 (ARCT-379). If the same height is still named two
   poll intervals later, the RPC is still serving the losing fork — re-check
   `cast block <N>`.
-- **Holes predating that rewind need a manual pass.**
+- **A hole no rewind covered — one predating ARCT-379, or one below every
+  reorg since — is repaired by rewinding the watermark by hand,** as long as it
+  is still inside the retained window: `UPDATE backfill_watermark SET watermark
+  = <N-1> WHERE chain_id = <id>;`. The next gap pass saves N as version 1 and
+  publishes it, so the indexers append the correction. The orphaned version-0
+  rows stay put as history.
+- **A hole outside the retained window has no executable repair yet.**
   `raw-block-bulk-downloader --start-block <N> --end-block <N>` stamps the
-  canonical `_1_` objects in S3, and block N must then be re-published as
-  version 1 so the indexers append the correction. The orphaned version-0 rows
-  stay put as history.
+  canonical `_1_` objects in S3, but that fixes S3 only: the indexers' rows stay
+  at `block_version` 0 until the republish tool tracked as **ARCT-383** exists.
+
+Run the check against prod's retained window before the prod deploy — a hole
+found there is repairable while it is still inside retention.
 
 ---
 
@@ -180,7 +201,11 @@ of `VectorCronjobRunFailing`.
 ### First checks
 
 1. Everything under `VectorCronjobRunFailing` — but the failure is now
-   persistent, so look for a hard, non-transient cause.
+   persistent, so look for a hard, non-transient cause. For
+   `watcher-data-validator` that includes an orphan-only height the gap filler
+   cannot heal: it fails every run, so it escalates here about 1h15m after the
+   first failure — see
+   [Special case: `watcher-data-validator` "Orphan-only heights"](#special-case-watcher-data-validator-orphan-only-heights).
 2. **Recent deploys** — `kubectl -n vector rollout history deploy/<deployment>`;
    a bad release is the most common persistent cause. Roll back if so.
 3. **Upstream contract / schema change** — a changed external API response or

@@ -2355,18 +2355,23 @@ func TestProcessBlockData_NoCanonicalRow_FiresInvariant(t *testing.T) {
 
 	client := newMockClient()
 	client.AddBlock(42, "")
+	client.AddBlock(43, "")
 	header := client.GetHeader(42)
 
 	mem := memory.NewBlockStateRepository()
-	// Seed the orphan-only row.
-	if _, err := mem.SaveBlock(ctx, outbound.BlockState{
-		Number:         42,
-		Hash:           header.Hash,
-		ParentHash:     header.ParentHash,
-		ReceivedAt:     time.Now().Unix(),
-		BlockTimestamp: time.Now().Unix(),
-	}); err != nil {
-		t.Fatalf("failed to seed block: %v", err)
+	// Seed the orphan-only row, plus the canonical successor the un-orphan
+	// walk anchors on.
+	for _, number := range []int64{42, 43} {
+		h := client.GetHeader(number)
+		if _, err := mem.SaveBlock(ctx, outbound.BlockState{
+			Number:         number,
+			Hash:           h.Hash,
+			ParentHash:     h.ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
+		}); err != nil {
+			t.Fatalf("failed to seed block %d: %v", number, err)
+		}
 	}
 	if err := mem.MarkBlockOrphaned(ctx, header.Hash); err != nil {
 		t.Fatalf("failed to orphan seeded block: %v", err)

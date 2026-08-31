@@ -5,6 +5,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const blockstateDBName = "test_blockstate"
@@ -47,10 +49,15 @@ func truncateBlockState(t *testing.T, ctx context.Context) {
 // It truncates tables to ensure test isolation within the schema.
 func setupPostgres(t *testing.T) (*BlockStateRepository, func()) {
 	t.Helper()
-	ctx := context.Background()
-	truncateBlockState(t, ctx)
-	repo := NewBlockStateRepository(blockstatePool, 1, nil)
-	return repo, func() {}
+	return setupPostgresWithLogger(t, nil)
+}
+
+// setupPostgresWithLogger is setupPostgres for tests that assert on the
+// repository's log output.
+func setupPostgresWithLogger(t *testing.T, logger *slog.Logger) (*BlockStateRepository, func()) {
+	t.Helper()
+	truncateBlockState(t, context.Background())
+	return NewBlockStateRepository(blockstatePool, 1, logger), func() {}
 }
 
 // TestSaveBlock_DuplicateHashIsIdempotent tests that saving the same block hash
@@ -1988,97 +1995,94 @@ func TestClearBlockOrphaned_RefusesWhenConflictingCanonicalExists(t *testing.T) 
 	}
 }
 
-// TestHandleReorgAtomic_RewindsWatermarkToCommonAncestor is the ARCT-379
-// regression: a reorg orphans the heights above the common ancestor without
-// re-fetching them, so the watermark must drop back to the ancestor or the gap
-// finder (which only scans above the watermark) never sees the resulting hole.
-func TestHandleReorgAtomic_RewindsWatermarkToCommonAncestor(t *testing.T) {
+// commitReorgAbove105 commits a reorg that replaces height 106 and orphans
+// everything above commonAncestor.
+func commitReorgAbove105(t *testing.T, ctx context.Context, repo *BlockStateRepository, commonAncestor int64) {
+	t.Helper()
+	newBlock := outbound.BlockState{
+		Number:         106,
+		Hash:           "0xhash106_prime",
+		ParentHash:     "0xhash105_prime",
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}
+	event := outbound.ReorgEvent{
+		DetectedAt:  time.Now(),
+		BlockNumber: newBlock.Number,
+		OldHash:     "0xhash105",
+		NewHash:     newBlock.Hash,
+		Depth:       int(newBlock.Number - commonAncestor),
+	}
+	if _, err := repo.HandleReorgAtomic(ctx, commonAncestor, event, newBlock); err != nil {
+		t.Fatalf("HandleReorgAtomic: %v", err)
+	}
+}
+
+// TestHandleReorgAtomic_RewindsWatermark is the ARCT-379 regression: a reorg
+// orphans the heights above the common ancestor without re-fetching them, so
+// the watermark must drop back to the ancestor or the gap finder (which only
+// scans above the watermark) never sees the resulting hole. A watermark already
+// below the ancestor must be left alone, and only a real rewind is reported.
+func TestHandleReorgAtomic_RewindsWatermark(t *testing.T) {
+	tests := []struct {
+		name          string
+		watermark     int64
+		wantWatermark int64
+		wantRewindLog int
+	}{
+		{name: "above the common ancestor rewinds", watermark: 105, wantWatermark: 103, wantRewindLog: 1},
+		{name: "below the common ancestor is left alone", watermark: 50, wantWatermark: 50, wantRewindLog: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logs := &testutil.SlogRecorder{}
+			repo, cleanup := setupPostgresWithLogger(t, slog.New(logs))
+			t.Cleanup(cleanup)
+
+			ctx := context.Background()
+			seedCanonicalChain(t, ctx, repo, 100, 105)
+			if err := repo.SetBackfillWatermark(ctx, tt.watermark); err != nil {
+				t.Fatalf("set watermark: %v", err)
+			}
+
+			commitReorgAbove105(t, ctx, repo, 103)
+
+			watermark, err := repo.GetBackfillWatermark(ctx)
+			if err != nil {
+				t.Fatalf("GetBackfillWatermark: %v", err)
+			}
+			if watermark != tt.wantWatermark {
+				t.Errorf("watermark = %d, want %d", watermark, tt.wantWatermark)
+			}
+			if got := logs.CountInfo("rewound backfill watermark"); got != tt.wantRewindLog {
+				t.Errorf("rewind logs = %d, want %d", got, tt.wantRewindLog)
+			}
+		})
+	}
+}
+
+// TestHandleReorgAtomic_RewoundWatermarkExposesOrphanedHeightsToFindGaps is the
+// point of the rewind: the heights the reorg orphaned without replacing are
+// back inside the gap finder's scan range.
+func TestHandleReorgAtomic_RewoundWatermarkExposesOrphanedHeightsToFindGaps(t *testing.T) {
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
 	seedCanonicalChain(t, ctx, repo, 100, 105)
-
 	if err := repo.SetBackfillWatermark(ctx, 105); err != nil {
 		t.Fatalf("set watermark: %v", err)
 	}
 
-	newBlock := outbound.BlockState{
-		Number:         106,
-		Hash:           "0xhash106_prime",
-		ParentHash:     "0xhash105_prime",
-		ReceivedAt:     time.Now().Unix(),
-		BlockTimestamp: time.Now().Unix(),
-	}
-	event := outbound.ReorgEvent{
-		DetectedAt:  time.Now(),
-		BlockNumber: newBlock.Number,
-		OldHash:     "0xhash105",
-		NewHash:     newBlock.Hash,
-		Depth:       3,
-	}
-	if _, err := repo.HandleReorgAtomic(ctx, 103, event, newBlock); err != nil {
-		t.Fatalf("HandleReorgAtomic: %v", err)
-	}
+	commitReorgAbove105(t, ctx, repo, 103)
 
-	t.Run("watermark drops to the common ancestor", func(t *testing.T) {
-		watermark, err := repo.GetBackfillWatermark(ctx)
-		if err != nil {
-			t.Fatalf("GetBackfillWatermark: %v", err)
-		}
-		if watermark != 103 {
-			t.Errorf("watermark = %d, want 103", watermark)
-		}
-	})
-
-	t.Run("gap finder sees the orphaned heights", func(t *testing.T) {
-		gaps, err := repo.FindGaps(ctx, 100, 106)
-		if err != nil {
-			t.Fatalf("FindGaps: %v", err)
-		}
-		if len(gaps) != 1 || gaps[0].From != 104 || gaps[0].To != 105 {
-			t.Errorf("gaps = %v, want [{104 105}]", gaps)
-		}
-	})
-}
-
-// TestHandleReorgAtomic_LeavesLowerWatermarkAlone verifies the rewind never
-// raises a watermark that already sits below the common ancestor.
-func TestHandleReorgAtomic_LeavesLowerWatermarkAlone(t *testing.T) {
-	repo, cleanup := setupPostgres(t)
-	t.Cleanup(cleanup)
-
-	ctx := context.Background()
-	seedCanonicalChain(t, ctx, repo, 100, 105)
-
-	if err := repo.SetBackfillWatermark(ctx, 50); err != nil {
-		t.Fatalf("set watermark: %v", err)
-	}
-
-	newBlock := outbound.BlockState{
-		Number:         106,
-		Hash:           "0xhash106_prime",
-		ParentHash:     "0xhash105_prime",
-		ReceivedAt:     time.Now().Unix(),
-		BlockTimestamp: time.Now().Unix(),
-	}
-	event := outbound.ReorgEvent{
-		DetectedAt:  time.Now(),
-		BlockNumber: newBlock.Number,
-		OldHash:     "0xhash105",
-		NewHash:     newBlock.Hash,
-		Depth:       3,
-	}
-	if _, err := repo.HandleReorgAtomic(ctx, 103, event, newBlock); err != nil {
-		t.Fatalf("HandleReorgAtomic: %v", err)
-	}
-
-	watermark, err := repo.GetBackfillWatermark(ctx)
+	gaps, err := repo.FindGaps(ctx, 100, 106)
 	if err != nil {
-		t.Fatalf("GetBackfillWatermark: %v", err)
+		t.Fatalf("FindGaps: %v", err)
 	}
-	if watermark != 50 {
-		t.Errorf("watermark = %d, want 50", watermark)
+	if len(gaps) != 1 || gaps[0].From != 104 || gaps[0].To != 105 {
+		t.Errorf("gaps = %v, want [{104 105}]", gaps)
 	}
 }
 
@@ -2176,5 +2180,48 @@ func TestFindOrphanOnlyHeights_RespectsRangeBounds(t *testing.T) {
 	}
 	if len(heights) != 1 || heights[0] != 410 {
 		t.Errorf("heights = %v, want [410]", heights)
+	}
+}
+
+// TestAdvanceBackfillWatermark is the compare-and-set the gap filler advances
+// with: a watermark another writer moved (a reorg rewind) must not be
+// overwritten with a value computed from the value it replaced (ARCT-379).
+func TestAdvanceBackfillWatermark(t *testing.T) {
+	tests := []struct {
+		name          string
+		expected      int64
+		wantAdvanced  bool
+		wantWatermark int64
+	}{
+		{name: "matching expected advances", expected: 100, wantAdvanced: true, wantWatermark: 150},
+		{name: "stale expected leaves the stored value", expected: 90, wantAdvanced: false, wantWatermark: 100},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo, cleanup := setupPostgres(t)
+			t.Cleanup(cleanup)
+
+			ctx := context.Background()
+			if err := repo.SetBackfillWatermark(ctx, 100); err != nil {
+				t.Fatalf("SetBackfillWatermark: %v", err)
+			}
+
+			advanced, err := repo.AdvanceBackfillWatermark(ctx, tt.expected, 150)
+			if err != nil {
+				t.Fatalf("AdvanceBackfillWatermark: %v", err)
+			}
+			if advanced != tt.wantAdvanced {
+				t.Errorf("advanced = %v, want %v", advanced, tt.wantAdvanced)
+			}
+
+			watermark, err := repo.GetBackfillWatermark(ctx)
+			if err != nil {
+				t.Fatalf("GetBackfillWatermark: %v", err)
+			}
+			if watermark != tt.wantWatermark {
+				t.Errorf("watermark = %d, want %d", watermark, tt.wantWatermark)
+			}
+		})
 	}
 }

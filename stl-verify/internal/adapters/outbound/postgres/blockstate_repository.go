@@ -470,9 +470,9 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAnce
 	return version, err
 }
 
-// handleReorgAtomicOnce attempts a single reorg operation with SERIALIZABLE isolation.
+// handleReorgAtomicOnce attempts a single reorg operation.
 func (r *BlockStateRepository) handleReorgAtomicOnce(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
-	// Use READ COMMITTED with advisory lock, consistent with saveBlockOnce.
+	// READ COMMITTED plus an advisory lock, consistent with saveBlockOnce.
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return 0, fmt.Errorf("failed to begin transaction: %w", err)
@@ -483,17 +483,15 @@ func (r *BlockStateRepository) handleReorgAtomicOnce(ctx context.Context, common
 		}
 	}()
 
-	// 1. Acquire advisory lock namespaced by chain_id and block number
 	_, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1::int, $2::int)`, r.chainID, newBlock.Number)
 	if err != nil {
 		return 0, fmt.Errorf("failed to acquire advisory lock: %w", err)
 	}
 
-	// 2. Check if this block hash already exists (idempotency).
+	// Idempotency: an earlier attempt may already have stored this hash.
 	var existingVersion int
 	err = tx.QueryRow(ctx, `SELECT version FROM block_states WHERE chain_id = $1 AND hash = $2`, r.chainID, newBlock.Hash).Scan(&existingVersion)
 	if err == nil {
-		// Block already exists - commit and return existing version
 		if commitErr := tx.Commit(ctx); commitErr != nil {
 			return 0, fmt.Errorf("failed to commit transaction: %w", commitErr)
 		}
@@ -502,49 +500,101 @@ func (r *BlockStateRepository) handleReorgAtomicOnce(ctx context.Context, common
 		return 0, fmt.Errorf("failed to check for existing block: %w", err)
 	}
 
-	// 3. Save reorg event
-	reorgQuery := `
-		INSERT INTO reorg_events (chain_id, detected_at, block_number, old_hash, new_hash, depth)
-		VALUES ($1, $2, $3, $4, $5, $6)
-	`
-	_, err = tx.Exec(ctx, reorgQuery, r.chainID, event.DetectedAt, event.BlockNumber, event.OldHash, event.NewHash, event.Depth)
+	if err := r.saveReorgEvent(ctx, tx, event); err != nil {
+		return 0, err
+	}
+	if err := r.orphanBlocksAbove(ctx, tx, commonAncestor); err != nil {
+		return 0, err
+	}
+	rewoundFrom, rewound, err := r.rewindWatermarkTo(ctx, tx, commonAncestor)
 	if err != nil {
-		return 0, fmt.Errorf("failed to save reorg event: %w", err)
+		return 0, err
 	}
-
-	// 4. Mark old blocks as orphaned
-	orphanQuery := `UPDATE block_states SET is_orphaned = TRUE WHERE chain_id = $1 AND number > $2 AND NOT is_orphaned`
-	if _, err = tx.Exec(ctx, orphanQuery, r.chainID, commonAncestor); err != nil {
-		return 0, fmt.Errorf("failed to mark blocks orphaned: %w", err)
-	}
-
-	// 5. Rewind the backfill watermark to the common ancestor: FindGaps scans
-	// only above it, so a height left orphan-only here is never re-fetched.
-	rewindQuery := `UPDATE backfill_watermark SET watermark = $2 WHERE chain_id = $1 AND watermark > $2`
-	if _, err = tx.Exec(ctx, rewindQuery, r.chainID, commonAncestor); err != nil {
-		return 0, fmt.Errorf("failed to rewind backfill watermark: %w", err)
-	}
-
-	// 6. Insert new canonical block
-	// We pass 0 as the version; the BEFORE INSERT trigger will automatically assign
-	// the correct version (MAX(version) + 1) atomically.
-	// We use RETURNING version to get the actually assigned version.
-	insertQuery := `
-		INSERT INTO block_states (chain_id, number, hash, parent_hash, received_at, is_orphaned, version, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, 0, $7)
-		RETURNING version
-	`
-	var version int
-	err = tx.QueryRow(ctx, insertQuery, r.chainID, newBlock.Number, newBlock.Hash, newBlock.ParentHash, newBlock.ReceivedAt, newBlock.IsOrphaned, time.Unix(newBlock.BlockTimestamp, 0).UTC()).Scan(&version)
+	version, err := r.insertCanonicalBlock(ctx, tx, newBlock)
 	if err != nil {
-		return 0, fmt.Errorf("failed to save new block state: %w", err)
+		return 0, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
+	if rewound {
+		r.reportWatermarkRewind(ctx, rewoundFrom, commonAncestor, newBlock.Number)
+	}
 	return version, nil
+}
+
+// saveReorgEvent records the reorg for the validator and the runbooks.
+func (r *BlockStateRepository) saveReorgEvent(ctx context.Context, tx pgx.Tx, event outbound.ReorgEvent) error {
+	query := `
+		INSERT INTO reorg_events (chain_id, detected_at, block_number, old_hash, new_hash, depth)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`
+	if _, err := tx.Exec(ctx, query, r.chainID, event.DetectedAt, event.BlockNumber, event.OldHash, event.NewHash, event.Depth); err != nil {
+		return fmt.Errorf("failed to save reorg event: %w", err)
+	}
+	return nil
+}
+
+// orphanBlocksAbove drops the losing fork out of the canonical view.
+func (r *BlockStateRepository) orphanBlocksAbove(ctx context.Context, tx pgx.Tx, commonAncestor int64) error {
+	query := `UPDATE block_states SET is_orphaned = TRUE WHERE chain_id = $1 AND number > $2 AND NOT is_orphaned`
+	if _, err := tx.Exec(ctx, query, r.chainID, commonAncestor); err != nil {
+		return fmt.Errorf("failed to mark blocks orphaned: %w", err)
+	}
+	return nil
+}
+
+// rewindWatermarkTo lowers the backfill watermark to commonAncestor and reports
+// the value it replaced. FindGaps scans only above the watermark, so a height
+// orphanBlocksAbove leaves without a canonical row is never re-fetched unless
+// the watermark drops back below it (ARCT-379).
+func (r *BlockStateRepository) rewindWatermarkTo(ctx context.Context, tx pgx.Tx, commonAncestor int64) (int64, bool, error) {
+	query := `
+		WITH previous AS (
+			SELECT watermark FROM backfill_watermark WHERE chain_id = $1
+		)
+		UPDATE backfill_watermark SET watermark = $2
+		WHERE chain_id = $1 AND watermark > $2
+		RETURNING (SELECT watermark FROM previous)
+	`
+	var previous int64
+	err := tx.QueryRow(ctx, query, r.chainID, commonAncestor).Scan(&previous)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to rewind backfill watermark: %w", err)
+	}
+	return previous, true, nil
+}
+
+// insertCanonicalBlock stores the reorg's winning block. Version 0 is a
+// placeholder: the BEFORE INSERT trigger assigns MAX(version)+1 atomically.
+func (r *BlockStateRepository) insertCanonicalBlock(ctx context.Context, tx pgx.Tx, newBlock outbound.BlockState) (int, error) {
+	query := `
+		INSERT INTO block_states (chain_id, number, hash, parent_hash, received_at, is_orphaned, version, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, 0, $7)
+		RETURNING version
+	`
+	var version int
+	err := tx.QueryRow(ctx, query, r.chainID, newBlock.Number, newBlock.Hash, newBlock.ParentHash,
+		newBlock.ReceivedAt, newBlock.IsOrphaned, time.Unix(newBlock.BlockTimestamp, 0).UTC()).Scan(&version)
+	if err != nil {
+		return 0, fmt.Errorf("failed to save new block state: %w", err)
+	}
+	return version, nil
+}
+
+// reportWatermarkRewind makes the rewind visible: it silently re-opens a range
+// the gap filler had already retired, and only the winning reorg attempt logs.
+func (r *BlockStateRepository) reportWatermarkRewind(ctx context.Context, from, to, block int64) {
+	trace.SpanFromContext(ctx).SetAttributes(
+		attribute.Int64("backfill.watermark_rewound_from", from),
+		attribute.Int64("backfill.watermark_rewound_to", to),
+	)
+	r.logger.Info("rewound backfill watermark", "from", from, "to", to, "block", block)
 }
 
 // GetReorgEvents retrieves reorg events, ordered by detection time descending.
@@ -656,6 +706,20 @@ func (r *BlockStateRepository) SetBackfillWatermark(ctx context.Context, waterma
 	return nil
 }
 
+// AdvanceBackfillWatermark moves the watermark from expected to watermark and
+// reports whether the row changed.
+func (r *BlockStateRepository) AdvanceBackfillWatermark(ctx context.Context, expected, watermark int64) (bool, error) {
+	tag, err := r.pool.Exec(ctx,
+		`INSERT INTO backfill_watermark (chain_id, watermark) VALUES ($1, $3)
+		 ON CONFLICT (chain_id) DO UPDATE SET watermark = EXCLUDED.watermark
+		 WHERE backfill_watermark.watermark = $2`,
+		r.chainID, expected, watermark)
+	if err != nil {
+		return false, fmt.Errorf("failed to advance backfill watermark: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // FindGaps finds missing block ranges between minBlock and maxBlock.
 // Uses the backfill watermark to skip already-verified blocks, making this O(n) only
 // for blocks above the watermark rather than the entire table.
@@ -740,9 +804,7 @@ func (r *BlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBlock 
 const orphanOnlyHeightLimit = 100
 
 // FindOrphanOnlyHeights returns block numbers in the range whose only rows are
-// orphaned. Plans as an anti-join driven from idx_block_states_orphaned, the
-// canonical probe served by idx_block_states_chain_number_version. At most
-// orphanOnlyHeightLimit heights are returned, ascending.
+// orphaned. At most orphanOnlyHeightLimit heights are returned, ascending.
 func (r *BlockStateRepository) FindOrphanOnlyHeights(ctx context.Context, fromBlock, toBlock int64) ([]int64, error) {
 	if fromBlock > toBlock {
 		return nil, nil

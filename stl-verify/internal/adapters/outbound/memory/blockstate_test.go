@@ -125,3 +125,41 @@ func TestFindOrphanOnlyHeights(t *testing.T) {
 		})
 	}
 }
+
+func TestAdvanceBackfillWatermark(t *testing.T) {
+	tests := []struct {
+		name          string
+		expected      int64
+		wantAdvanced  bool
+		wantWatermark int64
+	}{
+		{name: "matching expected advances", expected: 100, wantAdvanced: true, wantWatermark: 150},
+		{name: "stale expected leaves the stored value", expected: 90, wantAdvanced: false, wantWatermark: 100},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			repo := NewBlockStateRepository()
+			if err := repo.SetBackfillWatermark(ctx, 100); err != nil {
+				t.Fatalf("SetBackfillWatermark: %v", err)
+			}
+
+			advanced, err := repo.AdvanceBackfillWatermark(ctx, tt.expected, 150)
+			if err != nil {
+				t.Fatalf("AdvanceBackfillWatermark: %v", err)
+			}
+			if advanced != tt.wantAdvanced {
+				t.Errorf("advanced = %v, want %v", advanced, tt.wantAdvanced)
+			}
+
+			got, err := repo.GetBackfillWatermark(ctx)
+			if err != nil {
+				t.Fatalf("GetBackfillWatermark: %v", err)
+			}
+			if got != tt.wantWatermark {
+				t.Errorf("watermark = %d, want %d", got, tt.wantWatermark)
+			}
+		})
+	}
+}
