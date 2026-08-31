@@ -2,9 +2,10 @@
 
 Composed at request time from on-chain exposure (receipt-token allocations),
 the on-chain SubProxy treasury (Total Risk Capital), and the default RRC model
-(``gap_sweep``). These are model-derived figures, intentionally independent of
-the upstream Star feed; they are partial (only allocations the model can price
-contribute Required Risk Capital) and will not match Sky's dashboard.
+(``core_model``, falling back to ``gap_sweep`` under ``source=indexed`` where
+core has no data). These are model-derived figures, intentionally independent
+of the upstream Star feed; they are partial (only allocations the model can
+price contribute Required Risk Capital) and will not match Sky's dashboard.
 """
 
 from dataclasses import dataclass

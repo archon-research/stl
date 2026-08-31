@@ -184,24 +184,14 @@ class AllocationRepository:
                 result = await conn.execute(
                     text(
                         """
-                        -- One row per (proxy, chain), matching what this endpoint
-                        -- documents. chain_id belongs in the key because
-                        -- block_number is not comparable across chains: keyed on
-                        -- proxy_address alone, an address holding positions on two
-                        -- chains (a CREATE2 deployment at the same address) would
-                        -- report whichever chain happened to be further ahead, and
-                        -- the derived chain name and the UI's mainnet pick with it.
-                        -- Cardinality is unchanged while every proxy is
-                        -- single-chain, which prime_registry enforces for contract
-                        -- addresses by refusing to index a duplicate.
-                        SELECT DISTINCT ON (proxy_address, ap.chain_id)
+                        SELECT
                             p.name,
-                            encode(proxy_address, 'hex') AS address,
-                            ap.chain_id,
+                            encode(pp.proxy_address, 'hex') AS address,
+                            pp.chain_id,
                             encode(p.vault_address, 'hex') AS vault_address
-                        FROM allocation_position ap
-                        JOIN prime p ON p.id = ap.prime_id
-                        ORDER BY proxy_address, ap.chain_id, block_number DESC
+                        FROM prime_proxy pp
+                        JOIN prime p ON p.id = pp.prime_id
+                        ORDER BY pp.proxy_address, pp.chain_id
                         """
                     )
                 )
@@ -237,14 +227,10 @@ class AllocationRepository:
             raise ValueError(f"Database query failed while fetching primes: {exc}") from exc
 
     async def prime_exists(self, prime_address: EthAddress) -> bool:
-        # Match what list_receipt_token_positions / get_*_usd_exposure can actually
-        # answer: presence in allocation_position.proxy_address. /v1/primes also
-        # defines "prime" as "has any allocation_position row", so this is the
-        # same identity the public API exposes.
         query = text(
             """
             SELECT 1
-            FROM allocation_position
+            FROM prime_proxy
             WHERE proxy_address = decode(:address_hex, 'hex')
             LIMIT 1
             """
@@ -780,7 +766,7 @@ class AllocationRepository:
             """
             WITH target AS (
                 SELECT prime_id
-                FROM allocation_position
+                FROM prime_proxy
                 WHERE proxy_address = decode(:address_hex, 'hex')
                 LIMIT 1
             )
@@ -851,27 +837,20 @@ class AllocationRepository:
         return buckets
 
     async def list_prime_proxy_addresses(self, prime_address: EthAddress) -> list[EthAddress]:
-        """Return every allocation proxy of the prime that owns ``prime_address``.
+        """Return every ALM proxy of the prime that owns ``prime_address``.
 
-        Resolved from ``allocation_position``, not the axis-synome contract, for
-        the reason given below ``alm_proxies_for_prime``: ``/v1/primes`` is built
-        from these same rows, so a contract that has not yet been told about a
-        proxy would make server and client disagree about what a prime is.
-
-        SubProxy treasury wallets are excluded — they hold total capital, not
-        allocations. Returns ``[prime_address]`` for an address with no rows, so
-        the caller narrows to it rather than widening to everything.
+        Returns ``[prime_address]`` for an unknown address.
         """
         subproxies = [bytes.fromhex(address[2:]) for address in subproxy_addresses()]
         query = text("""
-            SELECT DISTINCT encode(ap.proxy_address, 'hex') AS address
-            FROM allocation_position ap
-            WHERE ap.prime_id = (
-                SELECT prime_id FROM allocation_position
+            SELECT DISTINCT encode(pp.proxy_address, 'hex') AS address
+            FROM prime_proxy pp
+            WHERE pp.prime_id = (
+                SELECT prime_id FROM prime_proxy
                 WHERE proxy_address = decode(:address_hex, 'hex')
                 LIMIT 1
             )
-              AND ap.proxy_address NOT IN :subproxy_addrs
+              AND pp.proxy_address NOT IN :subproxy_addrs
             ORDER BY address
         """).bindparams(bindparam("subproxy_addrs", expanding=True))
 
@@ -894,31 +873,20 @@ class AllocationRepository:
     async def primary_proxy_address(self, prime_address: EthAddress) -> str | None:
         """Return the proxy that carries this prime's prime-scoped rows, or ``None``.
 
-        Prime-scoped rows (the Anchorage custody leg) must be attributed to exactly
-        one of a prime's proxies, or a consumer unioning them double-counts. That
-        proxy is resolved from ``allocation_position`` rather than from the
-        axis-synome contract for two reasons: the contract's mainnet ALM proxy may
-        have no rows yet, in which case attributing to it would make the row
-        unreachable; and ``/v1/primes`` — which is what a client groups by — is
-        built from these same rows, so a DB-derived pick cannot disagree with the
-        client's. Mainnet wins when present, else the lowest address, so the pick is
-        deterministic and moves only when the prime's indexed proxy set changes.
-
-        SubProxy treasury wallets are excluded: they hold the denominator, not
-        allocations, and must never carry an allocation row.
+        Mainnet wins when present, else the lowest address.
         """
         subproxies = [bytes.fromhex(address[2:]) for address in subproxy_addresses()]
         query = text(
             """
-            SELECT encode(ap.proxy_address, 'hex') AS address
-            FROM allocation_position ap
-            WHERE ap.prime_id = (
-                SELECT prime_id FROM allocation_position
+            SELECT encode(pp.proxy_address, 'hex') AS address
+            FROM prime_proxy pp
+            WHERE pp.prime_id = (
+                SELECT prime_id FROM prime_proxy
                 WHERE proxy_address = decode(:address_hex, 'hex')
                 LIMIT 1
             )
-              AND ap.proxy_address NOT IN :subproxy_addrs
-            ORDER BY (ap.chain_id = :mainnet_chain_id) DESC, ap.proxy_address ASC
+              AND pp.proxy_address NOT IN :subproxy_addrs
+            ORDER BY (pp.chain_id = :mainnet_chain_id) DESC, pp.proxy_address ASC
             LIMIT 1
             """
         ).bindparams(bindparam("subproxy_addrs", expanding=True))
@@ -964,14 +932,17 @@ class AllocationRepository:
             FROM allocation_position ap
             JOIN token t ON t.id = ap.token_id
             WHERE ap.prime_id = (
-                SELECT prime_id FROM allocation_position
+                SELECT prime_id FROM prime_proxy
                 WHERE proxy_address = decode(:address_hex, 'hex')
                 LIMIT 1
             )
               AND ap.proxy_address IN :subproxy_addrs
               AND t.address = decode(:usds_hex, 'hex')
-            ORDER BY ap.block_number DESC, ap.block_version DESC,
-                     ap.processing_version DESC, ap.log_index DESC
+            -- Stays on the history: it needs prime_id, which the cache does not
+            -- carry. Newer-wins order per _RECEIPT_TOKEN_POSITIONS_SQL.
+            ORDER BY ap.block_number DESC, ap.block_version DESC, ap.created_at DESC,
+                     ap.log_index DESC, ap.direction DESC, ap.tx_hash DESC,
+                     ap.processing_version DESC
             LIMIT 1
             """
         ).bindparams(bindparam("subproxy_addrs", expanding=True))
@@ -1151,6 +1122,26 @@ class AllocationRepository:
         ]
 
 
+# Reads the trigger-maintained caches, not the histories behind them:
+# allocation_position_current holds one row per (proxy, chain, token) and
+# token_price_current one per (oracle, token), so no latest-row DISTINCT ON is left
+# here. Two invariants, CANONICAL for every allocation latest-row read —
+# ``allocation_share_repository``'s as-of LATERAL over the history follows the same
+# newer-wins order, and needs no chain-qualified token join because it matches
+# ``token_id`` directly:
+#   * t.chain_id = ap.chain_id on the token join. Nothing constrains a position's
+#     chain to its token row's, so two cache rows otherwise reach one receipt_token
+#     and the read emits the position twice.
+#   * Newer-wins order, wherever a read still picks by ORDER BY: block_number,
+#     block_version, block_timestamp, log_index, direction, tx_hash,
+#     processing_version, all DESC, with created_at standing in for block_timestamp
+#     over the history. processing_version versions ONE row, so it ranks last;
+#     above log_index it would let a reprocessed earlier event beat a later
+#     original one. direction and tx_hash make the comparison total over the
+#     log_index-0 sweep/event tie: both rows carry the same balance (each path
+#     reads balanceOf at one block hash), so the tiebreak settles only which
+#     activity metadata surfaces, and it surfaces the sweep row.
+#
 # Match positions to receipt tokens only by receipt_token_address: a prime's
 # direct holding of an underlying asset (e.g. raw USDT in the proxy wallet)
 # is not a position in any receipt token that wraps it, and attributing it to
@@ -1180,7 +1171,7 @@ class AllocationRepository:
 # last pre-divergence value (stale but unit-correct) without telemetry.
 _RECEIPT_TOKEN_POSITIONS_SQL = text("""
     WITH latest_receipt_positions AS (
-        SELECT DISTINCT ON (rt.id)
+        SELECT
             rt.id                                    AS receipt_token_id,
             rt.symbol                                AS symbol,
             encode(rt.receipt_token_address, 'hex')  AS receipt_token_address,
@@ -1193,18 +1184,15 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
             ap.balance                               AS balance,
             ap.underlying_value                      AS underlying_value,
             ap.underlying_token_id                   AS position_underlying_token_id,
-            ap.created_at                            AS latest_activity_at,
+            ap.block_timestamp                       AS latest_activity_at,
             ap.direction                             AS latest_activity_action,
             ap.tx_amount                             AS latest_activity_amount
-        FROM allocation_position ap
-        JOIN token t          ON t.id = ap.token_id
+        FROM allocation_position_current ap
+        JOIN token t          ON t.id = ap.token_id AND t.chain_id = ap.chain_id
         JOIN receipt_token rt ON rt.receipt_token_address = t.address AND rt.chain_id = ap.chain_id
         JOIN token ut         ON ut.id = rt.underlying_token_id
         JOIN protocol pr      ON pr.id = rt.protocol_id AND pr.chain_id = ap.chain_id
         WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
-        ORDER BY rt.id,
-                 ap.block_number DESC, ap.block_version DESC,
-                 ap.processing_version DESC, ap.log_index DESC
     )
     SELECT
         p.chain_id,
@@ -1228,20 +1216,20 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
         p.latest_activity_amount
     FROM latest_receipt_positions p
     LEFT JOIN LATERAL (
-        SELECT otp.price_usd
-        FROM onchain_token_price otp
-        JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
+        SELECT tpc.price_usd
+        FROM token_price_current tpc
+        JOIN protocol_oracle po ON po.oracle_id = tpc.oracle_id
             AND po.protocol_id = p.protocol_id
-        WHERE otp.token_id = p.underlying_token_id
+        WHERE tpc.token_id = p.underlying_token_id
         -- enabled-mapping filter + oracle_id tiebreak (rationale on _DIRECT_ASSET_HOLDINGS_SQL).
           AND EXISTS (
               SELECT 1 FROM oracle_asset oa
-              WHERE oa.oracle_id = otp.oracle_id
-                AND oa.token_id = otp.token_id
+              WHERE oa.oracle_id = tpc.oracle_id
+                AND oa.token_id = tpc.token_id
                 AND oa.enabled
           )
-        ORDER BY otp.block_number DESC, otp.block_version DESC,
-                 otp.processing_version DESC, otp.oracle_id DESC
+        ORDER BY tpc.block_number DESC, tpc.block_version DESC,
+                 tpc.processing_version DESC, tpc.oracle_id DESC
         LIMIT 1
     ) lp ON TRUE
     WHERE p.balance > 0
@@ -1283,14 +1271,18 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
             ap.balance,
             ap.underlying_value,
             ap.underlying_token_id,
-            ap.created_at AS latest_activity_at,
+            ap.block_timestamp AS latest_activity_at,
             ap.direction AS latest_activity_action,
             ap.tx_amount AS latest_activity_amount
-        FROM allocation_position ap
+        FROM allocation_position_current ap
         WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
+        -- The cache still holds a row per (chain, token), and nothing forces a
+        -- position's chain onto its token row, so the token_id dedup stays.
+        -- Newer-wins order: rationale on _RECEIPT_TOKEN_POSITIONS_SQL.
         ORDER BY ap.token_id,
-                 ap.block_number DESC, ap.block_version DESC,
-                 ap.processing_version DESC, ap.log_index DESC
+                 ap.block_number DESC, ap.block_version DESC, ap.block_timestamp DESC,
+                 ap.log_index DESC, ap.direction DESC, ap.tx_hash DESC,
+                 ap.processing_version DESC
     )
     SELECT
         lp.chain_id,
@@ -1318,12 +1310,12 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
     LEFT JOIN receipt_token rt
         ON rt.receipt_token_address = t.address AND rt.chain_id = lp.chain_id
     LEFT JOIN LATERAL (
-        SELECT otp.price_usd
-        FROM onchain_token_price otp
-        WHERE otp.token_id = lp.token_id
-        -- Enabled-mapping filter (CANONICAL rationale; every current/latest
-        -- onchain_token_price read across the API repositories carries this
-        -- EXISTS and points here). A price row is eligible only while its
+        SELECT tpc.price_usd
+        FROM token_price_current tpc
+        WHERE tpc.token_id = lp.token_id
+        -- Enabled-mapping filter (CANONICAL rationale; every current/latest price
+        -- read across the API repositories carries this EXISTS and points here).
+        -- A price row is eligible only while its
         -- (oracle_id, token_id) still has an ENABLED oracle_asset mapping.
         -- Retiring a source (oracle_asset.enabled = false) drops it from every
         -- latest-price read immediately at read time, not merely from future
@@ -1339,8 +1331,8 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
         -- enablement tracking is out of scope.
           AND EXISTS (
               SELECT 1 FROM oracle_asset oa
-              WHERE oa.oracle_id = otp.oracle_id
-                AND oa.token_id = otp.token_id
+              WHERE oa.oracle_id = tpc.oracle_id
+                AND oa.token_id = tpc.token_id
                 AND oa.enabled
           )
         -- oracle_id breaks ties when multiple oracles price the same token at
@@ -1349,24 +1341,24 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
         -- Deterministic, and the higher id is the later-registered oracle; the
         -- real ordering signal stays the snapshot keys, because a retired
         -- source stops producing new rows and loses on recency from then on.
-        -- Every ordered onchain_token_price read carries this tiebreaker.
-        ORDER BY otp.block_number DESC, otp.block_version DESC,
-                 otp.processing_version DESC, otp.oracle_id DESC
+        -- Every ordered price read carries this tiebreaker.
+        ORDER BY tpc.block_number DESC, tpc.block_version DESC,
+                 tpc.processing_version DESC, tpc.oracle_id DESC
         LIMIT 1
     ) px ON TRUE
     LEFT JOIN LATERAL (
-        SELECT otp.price_usd
-        FROM onchain_token_price otp
-        WHERE otp.token_id = lp.underlying_token_id
+        SELECT tpc.price_usd
+        FROM token_price_current tpc
+        WHERE tpc.token_id = lp.underlying_token_id
         -- enabled-mapping filter + oracle_id tiebreak (rationale on the px LATERAL above).
           AND EXISTS (
               SELECT 1 FROM oracle_asset oa
-              WHERE oa.oracle_id = otp.oracle_id
-                AND oa.token_id = otp.token_id
+              WHERE oa.oracle_id = tpc.oracle_id
+                AND oa.token_id = tpc.token_id
                 AND oa.enabled
           )
-        ORDER BY otp.block_number DESC, otp.block_version DESC,
-                 otp.processing_version DESC, otp.oracle_id DESC
+        ORDER BY tpc.block_number DESC, tpc.block_version DESC,
+                 tpc.processing_version DESC, tpc.oracle_id DESC
         LIMIT 1
     ) up ON TRUE
     WHERE rt.id IS NULL AND lp.balance > 0
@@ -1423,7 +1415,7 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
 _ANCHORAGE_CUSTODY_HOLDINGS_SQL = text("""
     WITH target_prime AS (
         SELECT prime_id
-        FROM allocation_position
+        FROM prime_proxy
         WHERE proxy_address = decode(:proxy_hex, 'hex')
         LIMIT 1
     ),
@@ -1485,30 +1477,34 @@ WITH latest_position AS (
         COALESCE(ap.underlying_value, ap.balance) AS valuation_units,
         ap.underlying_token_id AS position_underlying_token_id,
         rt.underlying_token_id AS registry_underlying_token_id
-    FROM allocation_position ap
+    FROM allocation_position_current ap
     JOIN receipt_token rt ON rt.id = :receipt_token_id
     JOIN token t ON t.id = ap.token_id AND t.address = rt.receipt_token_address
+                AND t.chain_id = ap.chain_id
     JOIN protocol p ON p.id = rt.protocol_id AND p.chain_id = ap.chain_id
     WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
-    ORDER BY ap.block_number DESC, ap.block_version DESC,
-             ap.processing_version DESC, ap.log_index DESC
+    -- rt is picked by id and never constrained to ap.chain_id, so several cache
+    -- rows can match; newer-wins order per _RECEIPT_TOKEN_POSITIONS_SQL.
+    ORDER BY ap.block_number DESC, ap.block_version DESC, ap.block_timestamp DESC,
+             ap.log_index DESC, ap.direction DESC, ap.tx_hash DESC,
+             ap.processing_version DESC
     LIMIT 1
 ),
 latest_price AS (
-    SELECT otp.price_usd
-    FROM onchain_token_price otp
-    JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
+    SELECT tpc.price_usd
+    FROM token_price_current tpc
+    JOIN protocol_oracle po ON po.oracle_id = tpc.oracle_id
     JOIN receipt_token rt ON rt.protocol_id = po.protocol_id AND rt.id = :receipt_token_id
-    WHERE otp.token_id = rt.underlying_token_id
+    WHERE tpc.token_id = rt.underlying_token_id
     -- enabled-mapping filter + oracle_id tiebreak (rationale on _DIRECT_ASSET_HOLDINGS_SQL).
       AND EXISTS (
           SELECT 1 FROM oracle_asset oa
-          WHERE oa.oracle_id = otp.oracle_id
-            AND oa.token_id = otp.token_id
+          WHERE oa.oracle_id = tpc.oracle_id
+            AND oa.token_id = tpc.token_id
             AND oa.enabled
       )
-    ORDER BY otp.block_number DESC, otp.block_version DESC,
-             otp.processing_version DESC, otp.oracle_id DESC
+    ORDER BY tpc.block_number DESC, tpc.block_version DESC,
+             tpc.processing_version DESC, tpc.oracle_id DESC
     LIMIT 1
 )
 SELECT
@@ -1530,21 +1526,21 @@ WHERE lb.balance > 0
 # where it shows as NULL amount_usd.
 _TOTAL_USD_EXPOSURE_SQL = text("""
 WITH latest_receipt_positions AS (
-    SELECT DISTINCT ON (rt.id)
+    SELECT
         rt.id                  AS receipt_token_id,
         rt.underlying_token_id AS underlying_token_id,
         rt.protocol_id         AS protocol_id,
         ap.balance,
         ap.underlying_value,
         ap.underlying_token_id AS position_underlying_token_id
-    FROM allocation_position ap
-    JOIN token t          ON t.id = ap.token_id
+    FROM allocation_position_current ap
+    -- The chain predicate is what keeps one cache row to one rt.id; here a
+    -- duplicate would inflate the SUM silently. Rationale on
+    -- _RECEIPT_TOKEN_POSITIONS_SQL.
+    JOIN token t          ON t.id = ap.token_id AND t.chain_id = ap.chain_id
     JOIN receipt_token rt ON rt.receipt_token_address = t.address AND rt.chain_id = ap.chain_id
     JOIN protocol pr      ON pr.id = rt.protocol_id AND pr.chain_id = ap.chain_id
     WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
-    ORDER BY rt.id,
-             ap.block_number DESC, ap.block_version DESC,
-             ap.processing_version DESC, ap.log_index DESC
 )
 SELECT COALESCE(SUM(
     CASE
@@ -1556,20 +1552,20 @@ SELECT COALESCE(SUM(
 ), 0) AS total_usd_exposure
 FROM latest_receipt_positions p
 LEFT JOIN LATERAL (
-    SELECT otp.price_usd
-    FROM onchain_token_price otp
-    JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
+    SELECT tpc.price_usd
+    FROM token_price_current tpc
+    JOIN protocol_oracle po ON po.oracle_id = tpc.oracle_id
         AND po.protocol_id = p.protocol_id
-    WHERE otp.token_id = p.underlying_token_id
+    WHERE tpc.token_id = p.underlying_token_id
     -- enabled-mapping filter + oracle_id tiebreak (rationale on _DIRECT_ASSET_HOLDINGS_SQL).
       AND EXISTS (
           SELECT 1 FROM oracle_asset oa
-          WHERE oa.oracle_id = otp.oracle_id
-            AND oa.token_id = otp.token_id
+          WHERE oa.oracle_id = tpc.oracle_id
+            AND oa.token_id = tpc.token_id
             AND oa.enabled
       )
-    ORDER BY otp.block_number DESC, otp.block_version DESC,
-             otp.processing_version DESC, otp.oracle_id DESC
+    ORDER BY tpc.block_number DESC, tpc.block_version DESC,
+             tpc.processing_version DESC, tpc.oracle_id DESC
     LIMIT 1
 ) lp ON TRUE
 WHERE p.balance > 0

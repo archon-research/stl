@@ -14,9 +14,11 @@ handler).
   `type:check`, `build` — **source of truth**.
 - Tools: `npm ci` (oxlint, oxfmt, etc.).
 - On a fresh `npm ci`, run `npm run prepare -w ui` (panda codegen) before `npm run type:check`/`build`, else `#styled-system/*` imports fail.
+- Node ships with an older npm than `engines.npm` requires; run `corepack enable npm` once so npm resolves to the pinned version (`packageManager`).
 
 ```bash
 cd stl-verify/ts
+corepack enable npm
 npm ci
 npm run prepare -w ui                    # panda codegen (needed before type:check/build on fresh install)
 npm run dev --workspace=@stl-verify/ui   # run the UI locally

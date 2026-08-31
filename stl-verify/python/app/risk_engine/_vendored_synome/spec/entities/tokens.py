@@ -42,6 +42,7 @@ class Token(Enum):
     SPARK_USDC = "sparkUSDC"
     SPARK_USDC_BC = "sparkUSDCbc"
     SPARK_USDS = "sparkUSDS"
+    SPARK_USDT_BC = "sparkUSDTbc"
     SP_DAI = "spDai"
     SP_PY_USD = "sppyUSD"
     STAC = "STAC"

@@ -138,6 +138,31 @@ export function preferIndexed(
 }
 
 /**
+ * A row's own RRC/CRR figure for a merged position, or Sky's reference figure
+ * where the model reports none.
+ *
+ * Inverts `preferReference` for these two fields specifically. Every other
+ * merged figure prefers Sky's because Sky prices positions STL does not yet
+ * model — but under `source=both`,
+ * `PrimeRiskCapitalService._model_preference` dispatches to `core_model`
+ * first and never falls back past it, so a merged row's bare
+ * `crr_pct`/`required_risk_capital_usd` already *is* core_model's figure
+ * whenever core priced the position; `reference_*` exists only as the
+ * fallback for a position core_model can't price. Preferring Sky's
+ * unconditionally (as `preferReference` does) would show its published
+ * figure — including a reported 0/0 — over a real core-priced one, which is
+ * the VEC-272 bug. Same coalescing as `preferIndexed`, kept under its own
+ * name so a call site reads as a deliberate RRC/CRR decision rather than the
+ * general STL-over-Sky rule.
+ */
+export function preferModelRiskFigure(
+  modelValue: string | null | undefined,
+  referenceValue: string | null | undefined,
+): string | null {
+  return preferIndexed(modelValue, referenceValue);
+}
+
+/**
  * A composite response as the chosen provenance alone would have answered it.
  *
  * Every display reads a figure as "Sky's, else STL's" (`preferReference`), so

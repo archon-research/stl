@@ -22,7 +22,9 @@ import type {
   AllocationRiskCapital,
   PrimeRiskCapital,
   Prime,
+  Provenance,
   Rrc,
+  RrcResult,
 } from '../../../types/allocation';
 import { ProtocolLogo, SummaryMetric, TokenLogo } from '../../shared';
 import { TabNotePanel, unindexedChainMessage } from './TabStatePanels';
@@ -37,10 +39,36 @@ type RrcTabProps = {
 };
 
 const MODEL_LABELS: Record<string, string> = {
-  suraf: 'SURAF',
+  suraf: 'SURAF (alpha)',
   gap_sweep: 'Gap sweep',
   core_model: 'CORE (alpha)',
 };
+
+// The table's own preference chain (PrimeRiskCapitalService._model_preference):
+// under `source=both` it tries core_model alone — a position core_model can't
+// price there falls back to Sky's reference figure, not gap_sweep; every other
+// source (`indexed`, `reference`) also tries gap_sweep. suraf never appears
+// there, so it's never a fallback candidate even if the drawer's own dispatch
+// priced it.
+const MODEL_PREFERENCE_BOTH = ['core_model'] as const;
+const MODEL_PREFERENCE_DEFAULT = ['core_model', 'gap_sweep'] as const;
+
+// Which model the table would have used for this position, when the table
+// itself carries no model for it (unpriced there, or the row didn't join).
+// Picked from what the drawer actually priced, so the badge never lands on a
+// model that produced no result.
+function fallbackSelectedModel(
+  results: RrcResult[] | undefined,
+  source: Provenance | undefined,
+): string | null {
+  const preference =
+    source === 'both' ? MODEL_PREFERENCE_BOTH : MODEL_PREFERENCE_DEFAULT;
+  return (
+    preference.find((model) =>
+      results?.some((result) => result.risk_model === model),
+    ) ?? null
+  );
+}
 
 type ReferenceFigures = { crrPct: string | null; rrcUsd: string | null };
 
@@ -57,20 +85,31 @@ function toReferenceFigures(
 
 // Sky's own figures for this position. Under `both` they ride beside STL's in
 // the `reference_` fields; under `reference` the bare fields are already Sky's.
+//
+// A pure `source=reference` fetch cannot be told apart from an `indexed` one
+// by `entry.source` alone: `_reference_allocation` (the backend row builder
+// for that path) never sets it, so it sits at the schema default
+// (`indexed`) even though the whole response — and therefore every row — is
+// Sky's. `responseSource`, the envelope's own `source`, is what actually
+// says so; `entry.source === 'reference'` still fires correctly for a
+// Sky-only row inside a `both` merge, which the backend does tag per-row.
 function referenceFigures(
   entry: AllocationRiskCapital | null,
+  responseSource: Provenance | undefined,
 ): ReferenceFigures | null {
-  switch (entry?.source) {
-    case 'both':
-      return toReferenceFigures(
-        entry.reference_required_risk_capital_usd,
-        entry.reference_crr_pct,
-      );
-    case 'reference':
-      return toReferenceFigures(entry.required_risk_capital_usd, entry.crr_pct);
-    default:
-      return null;
+  if (entry === null) {
+    return null;
   }
+  if (responseSource === 'reference' || entry.source === 'reference') {
+    return toReferenceFigures(entry.required_risk_capital_usd, entry.crr_pct);
+  }
+  if (entry.source === 'both') {
+    return toReferenceFigures(
+      entry.reference_required_risk_capital_usd,
+      entry.reference_crr_pct,
+    );
+  }
+  return null;
 }
 
 function ResultRow({
@@ -296,11 +335,27 @@ export function RrcTab({
     );
   }, [isChainMismatch, isEnabled, riskCapital, selectedReceiptToken]);
 
-  const selectedModel = riskCapitalEntry?.model ?? null;
-  const reference = showsReference ? referenceFigures(riskCapitalEntry) : null;
-  // Sky's figure is the one every display prefers when it exists, so its row
-  // carries the badge; a model row is "selected" only when Sky reports nothing.
-  const skySelected = reference !== null;
+  const reference = showsReference
+    ? referenceFigures(riskCapitalEntry, riskCapital?.source)
+    : null;
+  // Which row carries the badge. Under `source=reference` every row is Sky's,
+  // so it always wins. Under `both` the table's own model leads (mirrors
+  // `preferModelRiskFigure`): Sky wins only when the position is wholly
+  // Sky-reported (no join, `entry.source === 'reference'`) or the model
+  // priced nothing for it (`crr_pct` null) and Sky's is the only figure.
+  const skySelected =
+    reference !== null &&
+    (riskCapital?.source !== 'both' ||
+      riskCapitalEntry?.source === 'reference' ||
+      riskCapitalEntry?.crr_pct == null);
+  // The row's own model is the ground truth for what the table used. When the
+  // table has no model for this position (unpriced there, or the position
+  // didn't join), fall back to the same preference chain the backend tries so
+  // the badge still lands on the model the table would have used.
+  const selectedModel = skySelected
+    ? null
+    : (riskCapitalEntry?.model ??
+      fallbackSelectedModel(rrc?.results, riskCapital?.source));
 
   if (!selectedReceiptToken) {
     return (
@@ -373,7 +428,7 @@ export function RrcTab({
           >
             <ResultRow
               isSelected
-              label="Legacy published figure"
+              label="Legacy figure"
               value={`${formatUsdValue(reference.rrcUsd)} · CRR ${formatPercentValue(reference.crrPct, 2)}`}
             />
           </ul>
@@ -462,7 +517,7 @@ export function RrcTab({
             {reference ? (
               <ResultRow
                 isSelected={skySelected}
-                label="Legacy published figure"
+                label="Legacy figure"
                 value={`${formatUsdValue(reference.rrcUsd)} · CRR ${formatPercentValue(reference.crrPct, 2)}`}
               />
             ) : null}

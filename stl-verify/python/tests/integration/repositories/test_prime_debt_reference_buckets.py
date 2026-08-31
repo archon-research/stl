@@ -187,5 +187,7 @@ async def test_resolve_prime_id_prefers_a_vault_address_over_a_matching_proxy(se
         assert resolved_id == vault_prime_id
     finally:
         await conn.execute("DELETE FROM allocation_position WHERE prime_id = $1", proxy_prime_id)
+        # prime_proxy FKs prime, so the identity rows go before the primes do.
+        await conn.execute("DELETE FROM prime_proxy WHERE prime_id = $1", proxy_prime_id)
         await conn.execute("DELETE FROM prime WHERE id = ANY($1::bigint[])", [vault_prime_id, proxy_prime_id])
         await conn.execute("DELETE FROM token WHERE id = $1", token_id)

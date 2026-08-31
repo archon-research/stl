@@ -1,14 +1,19 @@
-"""Integration tests for a proxy the pinned axis-synome contract does not know.
+"""Integration tests for a proxy that has positions but is not declared.
 
 Its own module — and so its own isolated database — because it seeds a third spark
 proxy that ``test_prime_fan_out_api.py`` asserts the absence of.
 
-The state under test is real and reachable: Go loads the committed contract JSON at
-runtime while Python recomputes from its pinned ``axis-synome`` package, so a newly
-deployed tracker can be writing ``allocation_position`` rows for a proxy this
-service has not been told about. Nothing gates the two against each other. What
-must not happen then is a second copy of a prime-scoped row: a consumer unioning a
-prime's proxies would count the $250M Anchorage leg twice.
+The state under test is real and reachable: a newly deployed tracker writes
+``allocation_position`` rows for a proxy before the migration that adds it to
+``prime_proxy`` has landed. ``prime_proxy`` is the declared source of truth, so
+until that row exists the proxy is not a prime address at all — it is not listed,
+and every prime-scoped endpoint 404s for it.
+
+That is a deliberate trade, and it cuts both ways. It makes a second copy of a
+prime-scoped row impossible (a consumer unioning a prime's proxies cannot count the
+$250M Anchorage leg twice), and it makes the undeclared proxy's own positions
+unreachable until the declaration lands. Onboarding a proxy is therefore one PR
+that updates the axis-synome contract and appends the ``prime_proxy`` row together.
 """
 
 import asyncio
@@ -57,12 +62,11 @@ def _custody_rows(client: TestClient, proxy: str) -> list[dict]:
     return [row for row in client.get(f"/v1/primes/{proxy}/allocations").json() if row["scope"] == "prime"]
 
 
-def test_the_off_contract_proxy_is_listed_and_seeded(client: TestClient) -> None:
-    # Guards every assertion below from passing because the fixture is inert:
-    # classify_proxy treats an unknown address as ALM, so it must reach /v1/primes.
+def test_the_undeclared_proxy_is_not_listed(client: TestClient) -> None:
+    """It holds rows under spark's prime_id, but /v1/primes follows prime_proxy."""
     addresses = {row["address"] for row in client.get("/v1/primes").json() if row["name"] == "spark"}
 
-    assert _SPARK_OFF_CONTRACT_ALM in addresses
+    assert _SPARK_OFF_CONTRACT_ALM not in addresses
 
 
 def test_the_custody_leg_is_served_under_exactly_one_proxy(client: TestClient) -> None:
@@ -73,25 +77,20 @@ def test_the_custody_leg_is_served_under_exactly_one_proxy(client: TestClient) -
     assert carrying == [_SPARK_MAINNET_ALM]
 
 
-def test_the_off_contract_proxy_does_not_serve_a_second_copy(client: TestClient) -> None:
-    assert _custody_rows(client, _SPARK_OFF_CONTRACT_ALM) == []
+def test_the_undeclared_proxy_cannot_serve_a_second_copy(client: TestClient) -> None:
+    """The prime-scoped leg stays on exactly one proxy: this one is unreachable."""
+    assert client.get(f"/v1/primes/{_SPARK_OFF_CONTRACT_ALM}/allocations").status_code == 404
 
 
-def test_the_off_contract_proxys_own_holdings_still_surface(client: TestClient) -> None:
-    # Only the prime-scoped row is withheld; the proxy's own positions are its own.
-    rows = client.get(f"/v1/primes/{_SPARK_OFF_CONTRACT_ALM}/allocations").json()
+def test_the_undeclared_proxys_own_holdings_are_unreachable(client: TestClient) -> None:
+    """Its JAAA position is indexed and real, and still cannot be read.
 
-    assert [row["symbol"] for row in rows] == ["JAAA"]
-
-
-def test_risk_capital_answers_for_the_off_contract_proxy_over_itself_alone(client: TestClient) -> None:
-    """No siblings are discoverable for it, which the endpoint documents.
-
-    ``prime_name`` is null and the aggregation covers the queried proxy only, so a
-    consumer can tell this figure apart from a prime-wide one rather than reading
-    it as authoritative for spark.
+    This is the cost of resolving from the declared list rather than from ingest,
+    and it is why the declaration has to ship with the tracker that writes the rows.
     """
-    body = client.get(f"/v1/primes/{_SPARK_OFF_CONTRACT_ALM}/risk-capital").json()
+    assert client.get(f"/v1/primes/{_SPARK_OFF_CONTRACT_ALM}/allocations").status_code == 404
 
-    assert body["prime_name"] is None
-    assert [address.lower() for address in body["prime_proxies"]] == [_SPARK_OFF_CONTRACT_ALM]
+
+def test_risk_capital_does_not_answer_for_the_undeclared_proxy(client: TestClient) -> None:
+    """Better a 404 than a figure a consumer could read as authoritative for spark."""
+    assert client.get(f"/v1/primes/{_SPARK_OFF_CONTRACT_ALM}/risk-capital").status_code == 404

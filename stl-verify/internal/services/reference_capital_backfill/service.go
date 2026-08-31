@@ -80,11 +80,13 @@ func (s *Service) Run(ctx context.Context) error {
 		return err
 	}
 
-	if err := s.sheetRepo.SaveBalanceSheetSnapshots(ctx, snapshots); err != nil {
+	inserted, newDays, err := s.sheetRepo.SaveBalanceSheetSnapshots(ctx, snapshots)
+	if err != nil {
 		return fmt.Errorf("saving balance sheet snapshots: %w", err)
 	}
 
-	s.logger.Info("balance sheet backfill complete", "snapshots", len(snapshots), "daysAgo", s.daysAgo)
+	s.logger.Info("balance sheet backfill complete",
+		"inserted", inserted, "new_days", newDays, "fetched", len(snapshots), "daysAgo", s.daysAgo)
 	return nil
 }
 

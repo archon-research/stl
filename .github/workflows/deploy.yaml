@@ -445,6 +445,9 @@ jobs:
             # Update plain SHA tags (regular services) and prefixed tags
             # (cronjobs: name-SHA).
             # Digits allowed in the name prefix, matching GUARD 4's validator below.
+            # KEEP IN SYNC with ci.yml deploy-base: it reads this file's newTag
+            # off origin/main as the last-promoted marker that main change
+            # detection diffs against (ORB-361).
             sed -i -E "s/(newTag: \")(([a-z0-9]+-)*)[a-f0-9]{40}/\1\2${DEPLOY_SHA}/" "$KUSTOMIZATION"
 
             if git diff --quiet FETCH_HEAD -- "$KUSTOMIZATION"; then

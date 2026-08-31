@@ -471,7 +471,7 @@ export function RiskBreakdownTab({
 
   if (isChainMismatch) {
     return (
-      <TabNotePanel message="Risk breakdown is not yet available for non-mainnet allocations." />
+      <TabNotePanel message="Collateral backing is not yet available for non-mainnet allocations." />
     );
   }
 
@@ -479,7 +479,7 @@ export function RiskBreakdownTab({
     <div className={css({ display: 'grid', gap: '4' })}>
       {errorMessage ? (
         <ErrorState
-          title="Unable to load the risk breakdown."
+          title="Unable to load the collateral backing."
           description={errorMessage}
           tone="critical"
           size="inline"
@@ -603,7 +603,7 @@ export function RiskBreakdownTab({
       !isLoading &&
       breakdown &&
       breakdown.items.length === 0 ? (
-        <TabNotePanel message="This receipt token returned no collateral items for the risk breakdown response." />
+        <TabNotePanel message="This receipt token returned no collateral items for the collateral backing response." />
       ) : null}
 
       {!errorMessage && (isLoading || breakdown) ? (

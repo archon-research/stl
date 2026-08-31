@@ -21,6 +21,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/dextelemetry"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
@@ -96,10 +97,10 @@ func (d *Deps) CommonDeps() dexconsumer.CommonDeps {
 	}
 }
 
-// Bootstrap performs the wire-up shared by every DEX worker: logger, AWS
-// config, SQS consumer, Redis cache, S3 reader, multicall client, Postgres
-// pool, build registry, OTEL init, dex telemetry, and the four shared
-// repositories (txManager, protocolRepo, tokenRepo, eventRepo).
+// Bootstrap performs the wire-up shared by every DEX worker: logger, OTEL init,
+// AWS config, SQS consumer, Redis cache, S3 reader, multicall client, Postgres
+// pool, build registry, dex telemetry, and the four shared repositories
+// (txManager, protocolRepo, tokenRepo, eventRepo).
 //
 // The returned *Deps owns the lifecycle of everything it returns; on
 // success the caller defers Close. On any error mid-setup the partially-
@@ -118,6 +119,20 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 	slog.SetDefault(logger)
 
 	d := &Deps{Logger: logger}
+
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    opts.ServiceName,
+		ServiceVersion: buildinfo.GitHash(),
+		BuildTime:      opts.BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		d.Close()
+		return nil, fmt.Errorf("initializing telemetry: %w", err)
+	}
+	// OTEL shutdown takes a context; use background so a cancelled ctx during
+	// signal-driven teardown doesn't truncate the final metric flush.
+	d.cleanups = append(d.cleanups, func() { shutdownOTEL(context.Background()) })
 
 	awsCfg, err := loadAWSConfig(ctx)
 	if err != nil {
@@ -203,20 +218,6 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 		"commit", buildReg.GitHash(),
 		"branch", opts.GitBranch)
 
-	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    opts.ServiceName,
-		ServiceVersion: buildReg.GitHash(),
-		BuildTime:      opts.BuildTime,
-		Logger:         logger,
-	})
-	if err != nil {
-		d.Close()
-		return nil, fmt.Errorf("initializing telemetry: %w", err)
-	}
-	// OTEL shutdown takes a context; use background so a cancelled ctx during
-	// signal-driven teardown doesn't truncate the final metric flush.
-	d.cleanups = append(d.cleanups, func() { shutdownOTEL(context.Background()) })
-
 	dexTel, err := dextelemetry.NewTelemetry(opts.MetricPrefix, cfg.ChainID)
 	if err != nil {
 		d.Close()
@@ -224,9 +225,8 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 	}
 	d.DexTelemetry = dexTel
 
-	// Multicaller is built after InitOTEL so its telemetry binds to the real
-	// meter provider (emits multicall_batch_size{chain}); resolving the chain
-	// name fails hard rather than emitting an empty chain label.
+	// Resolving the chain name fails hard rather than emitting an empty chain
+	// label on multicall_batch_size{chain}.
 	chainName, err := entity.ChainName(cfg.ChainID)
 	if err != nil {
 		d.Close()

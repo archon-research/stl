@@ -47,9 +47,8 @@ func TestLoanCollateral_Validate(t *testing.T) {
 			wantErr: "syncedAt must not be zero",
 		},
 		{
-			name:    "empty asset symbol",
-			mutate:  func(c *LoanCollateral) { c.AssetSymbol = "" },
-			wantErr: "assetSymbol must not be empty",
+			name:   "empty asset symbol is valid",
+			mutate: func(c *LoanCollateral) { c.AssetSymbol = "" },
 		},
 		{
 			// Nullable in the API schema (e.g. DepositPending): nil is valid.

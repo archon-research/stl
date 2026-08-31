@@ -40,7 +40,7 @@ func setupPostgres(_ context.Context, t *testing.T) (*pgxpool.Pool, func()) {
 //
 // This package builds its own databases instead of cloning the template that has
 // those jobs off already, and a compression job firing mid-test would rewrite a
-// seeded chunk into a columnstore chunk plus a compress_hyper_* twin.
+// seeded chunk into a columnstore chunk plus its columnstore twin.
 func setupMigratedPostgres(ctx context.Context, t *testing.T) (*pgxpool.Pool, func()) {
 	t.Helper()
 

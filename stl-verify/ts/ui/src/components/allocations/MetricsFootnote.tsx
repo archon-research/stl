@@ -1,6 +1,10 @@
 import { css } from '#styled-system/css';
 
-import { formatRatioPercent, parseNumericValue } from '../../lib/dashboard';
+import {
+  formatRatioPercent,
+  parseNumericValue,
+  riskModelCaptionSuffix,
+} from '../../lib/dashboard';
 import type { PrimeRiskCapital, Provenance } from '../../types/allocation';
 
 /**
@@ -49,12 +53,14 @@ export function MetricsFootnote({
         // would claim numbers STL's model did not make.
         <>
           Sky&apos;s published figures where reported, else model-derived (
-          {riskCapital.model}, 15% stress) · {modeledPct} of exposure modeled by
-          STL
+          {riskCapital.model}
+          {riskModelCaptionSuffix(riskCapital.model)}) · {modeledPct} of
+          exposure modeled by STL
         </>
       ) : (
         <>
-          Model-derived ({riskCapital.model}, 15% stress) · {modeledPct} of
+          Model-derived ({riskCapital.model}
+          {riskModelCaptionSuffix(riskCapital.model)}) · {modeledPct} of
           exposure modeled
         </>
       )}

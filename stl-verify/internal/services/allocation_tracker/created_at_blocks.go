@@ -21,6 +21,7 @@ type createdAtBlockKey struct {
 var knownCreatedAtBlocks = map[createdAtBlockKey]int64{
 	{Chain: "mainnet", Contract: common.HexToAddress("0x779224df1c756b4edd899854f32a53e8c2b2ce5d")}:     23118264,
 	{Chain: "mainnet", Contract: common.HexToAddress("0x56a76b428244a50513ec81e225a293d128fd581d")}:     23319630,
+	{Chain: "mainnet", Contract: common.HexToAddress("0xb0c424116172b55cbb6dd3136f5989f7959e5b91")}:     24794487,
 	{Chain: "mainnet", Contract: common.HexToAddress("0xe41a0583334f0dc4e023acd0bfef3667f6fe0597")}:     22932160,
 	{Chain: "mainnet", Contract: common.HexToAddress("0x38464507e02c983f20428a6e8566693fe9e422a9")}:     23896879,
 	{Chain: "mainnet", Contract: common.HexToAddress("0xa632d59b9b804a956bfaa9b48af3a1b74808fc1f")}:     23390887,

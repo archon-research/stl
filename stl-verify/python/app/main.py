@@ -254,7 +254,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             try:
                 await engine.dispose()
             finally:
-                shutdown_telemetry(app.state.tracer_provider)
+                shutdown_telemetry(app.state.telemetry_providers)
 
     application = FastAPI(
         title="stl-verify",
@@ -269,7 +269,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
         openapi_tags=OPENAPI_TAGS,
     )
     application.add_middleware(RequestIdMiddleware)
-    application.state.tracer_provider = setup_telemetry(application, settings)
+    application.state.telemetry_providers = setup_telemetry(application, settings)
 
     @application.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
