@@ -518,7 +518,14 @@ func (r *BlockStateRepository) handleReorgAtomicOnce(ctx context.Context, common
 		return 0, fmt.Errorf("failed to mark blocks orphaned: %w", err)
 	}
 
-	// 5. Insert new canonical block
+	// 5. Rewind the backfill watermark to the common ancestor: FindGaps scans
+	// only above it, so a height left orphan-only here is never re-fetched.
+	rewindQuery := `UPDATE backfill_watermark SET watermark = $2 WHERE chain_id = $1 AND watermark > $2`
+	if _, err = tx.Exec(ctx, rewindQuery, r.chainID, commonAncestor); err != nil {
+		return 0, fmt.Errorf("failed to rewind backfill watermark: %w", err)
+	}
+
+	// 6. Insert new canonical block
 	// We pass 0 as the version; the BEFORE INSERT trigger will automatically assign
 	// the correct version (MAX(version) + 1) atomically.
 	// We use RETURNING version to get the actually assigned version.
@@ -726,6 +733,57 @@ func (r *BlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBlock 
 	}
 
 	return gaps, nil
+}
+
+// orphanOnlyHeightLimit caps FindOrphanOnlyHeights: the caller reports the
+// heights, and enumerating a whole reorg-storm range helps nobody.
+const orphanOnlyHeightLimit = 100
+
+// FindOrphanOnlyHeights returns block numbers in the range whose only rows are
+// orphaned. Plans as an anti-join driven from idx_block_states_orphaned, the
+// canonical probe served by idx_block_states_chain_number_version. At most
+// orphanOnlyHeightLimit heights are returned, ascending.
+func (r *BlockStateRepository) FindOrphanOnlyHeights(ctx context.Context, fromBlock, toBlock int64) ([]int64, error) {
+	if fromBlock > toBlock {
+		return nil, nil
+	}
+
+	query := `
+		SELECT DISTINCT orphaned.number
+		FROM block_states orphaned
+		WHERE orphaned.chain_id = $1
+			AND orphaned.is_orphaned
+			AND orphaned.number >= $2
+			AND orphaned.number <= $3
+			AND NOT EXISTS (
+				SELECT 1 FROM block_states canonical
+				WHERE canonical.chain_id = orphaned.chain_id
+					AND canonical.number = orphaned.number
+					AND NOT canonical.is_orphaned
+			)
+		ORDER BY orphaned.number
+		LIMIT $4
+	`
+
+	rows, err := r.pool.Query(ctx, query, r.chainID, fromBlock, toBlock, orphanOnlyHeightLimit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find orphan-only heights: %w", err)
+	}
+	defer rows.Close()
+
+	var heights []int64
+	for rows.Next() {
+		var number int64
+		if err := rows.Scan(&number); err != nil {
+			return nil, fmt.Errorf("failed to scan orphan-only height: %w", err)
+		}
+		heights = append(heights, number)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating orphan-only heights: %w", err)
+	}
+
+	return heights, nil
 }
 
 // VerifyChainIntegrity verifies that the parent_hash chain is properly linked.

@@ -35,11 +35,16 @@ type ReorgRecorder interface {
 const (
 	// ReorgDropReasonStaleFork: RPC's canonical block at the incoming
 	// number does not match the incoming hash. The broadcast is on a fork
-	// that did not win.
+	// that did not win — or a load-balanced node has not converged yet, in
+	// which case the canonical block for that height is dropped and no later
+	// broadcast re-sends it. It is recovered by the watermark rewind
+	// HandleReorgAtomic performs on the next reorg commit, plus the gap fill
+	// that rewind re-opens (ARCT-379).
 	ReorgDropReasonStaleFork = "stale_fork"
 
 	// ReorgDropReasonVerifyError: RPC verification call failed. Conservative
-	// drop — the next live broadcast will retry once RPC stabilises.
+	// drop; recovery is the same watermark rewind plus gap fill as stale_fork,
+	// not a re-broadcast of the dropped height.
 	ReorgDropReasonVerifyError = "verify_error"
 
 	// ReorgDropReasonStateShifted: another writer committed to block_states

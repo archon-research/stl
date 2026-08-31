@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"strconv"
 	"strings"
 	"time"
 
@@ -97,10 +98,10 @@ func (s *Service) Validate(ctx context.Context) (*Report, error) {
 
 	report := NewReport(fromBlock, toBlock)
 
-	// Run chain integrity check
+	// Run chain integrity checks
 	if s.config.ValidateChainIntegrity {
-		result := s.validateChainIntegrity(ctx, fromBlock, toBlock)
-		report.AddCheck(result)
+		report.AddCheck(s.validateChainIntegrity(ctx, fromBlock, toBlock))
+		report.AddCheck(s.validateNoOrphanOnlyHeights(ctx, fromBlock, toBlock))
 	}
 
 	// Run reorg validation
@@ -203,6 +204,55 @@ func (s *Service) validateChainIntegrity(ctx context.Context, fromBlock, toBlock
 		Message:  "Parent-hash chain valid",
 		Duration: duration,
 	}
+}
+
+// validateNoOrphanOnlyHeights reports heights whose only stored block is
+// orphaned. Chain integrity cannot see them — it compares canonical rows, and
+// such a height has none — yet every consumer downstream is missing that block.
+func (s *Service) validateNoOrphanOnlyHeights(ctx context.Context, fromBlock, toBlock int64) CheckResult {
+	const name = "Orphan-only heights"
+	start := time.Now()
+	s.logger.Info("checking for orphan-only heights", "from", fromBlock, "to", toBlock)
+
+	heights, err := s.blockStateRepo.FindOrphanOnlyHeights(ctx, fromBlock, toBlock)
+	duration := time.Since(start)
+
+	if err != nil {
+		return CheckResult{
+			Name:     name,
+			Status:   StatusError,
+			Message:  fmt.Sprintf("Failed to query orphan-only heights: %v", err),
+			Duration: duration,
+		}
+	}
+
+	if len(heights) == 0 {
+		return CheckResult{
+			Name:     name,
+			Status:   StatusPassed,
+			Message:  "Every height has a canonical block",
+			Duration: duration,
+		}
+	}
+
+	return CheckResult{
+		Name:     name,
+		Status:   StatusFailed,
+		Message:  fmt.Sprintf("%d height(s) have only an orphaned block: %s", len(heights), formatHeights(heights)),
+		Duration: duration,
+		Details: map[string]any{
+			"orphan_only_heights": heights,
+		},
+	}
+}
+
+// formatHeights renders block numbers as a comma-separated list.
+func formatHeights(heights []int64) string {
+	parts := make([]string, len(heights))
+	for i, height := range heights {
+		parts[i] = strconv.FormatInt(height, 10)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // validateReorgs validates each reorg event against the canonical chain source.

@@ -1115,3 +1115,131 @@ func TestIntegration_ProcessBlockData_DifferentHashSkipsUnchanged(t *testing.T) 
 		t.Fatalf("expected no row for fetched (stale-fork) hash, got %+v", fetched)
 	}
 }
+
+// TestIntegration_BackfillLoop_FillsOrphanOnlyHeightAfterReorgRewind is the
+// end-to-end ARCT-379 reproduction. The watcher holds a losing fork at height
+// N, the canonical broadcast for N is dropped as stale_fork, and the next
+// broadcast (N+1) commits a reorg that orphans N without re-fetching it. Only
+// the watermark rewind inside HandleReorgAtomic puts N back inside FindGaps'
+// range; without it the pass below sees no gap and the height stays a hole.
+func TestIntegration_BackfillLoop_FillsOrphanOnlyHeightAfterReorgRewind(t *testing.T) {
+	pgRepo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+
+	const droppedNum int64 = 5
+	const forkHash = "0xARCT379_fork_a_5"
+
+	client := newMockClient()
+	for i := int64(1); i <= 6; i++ {
+		client.AddBlock(i, "")
+	}
+
+	savePublished := func(state outbound.BlockState) {
+		t.Helper()
+		if _, err := pgRepo.SaveBlock(ctx, state); err != nil {
+			t.Fatalf("seed block %d: %v", state.Number, err)
+		}
+		if err := pgRepo.MarkPublishComplete(ctx, state.Hash); err != nil {
+			t.Fatalf("mark published %d: %v", state.Number, err)
+		}
+	}
+
+	for i := int64(1); i < droppedNum; i++ {
+		h := client.GetHeader(i)
+		savePublished(outbound.BlockState{
+			Number:         i,
+			Hash:           h.Hash,
+			ParentHash:     h.ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
+		})
+	}
+	savePublished(outbound.BlockState{
+		Number:         droppedNum,
+		Hash:           forkHash,
+		ParentHash:     client.GetHeader(droppedNum - 1).Hash,
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	})
+	if err := pgRepo.SetBackfillWatermark(ctx, droppedNum); err != nil {
+		t.Fatalf("seed watermark: %v", err)
+	}
+
+	head := client.GetHeader(droppedNum + 1)
+	if _, err := pgRepo.HandleReorgAtomic(ctx, droppedNum-1,
+		outbound.ReorgEvent{
+			DetectedAt:  time.Now(),
+			BlockNumber: droppedNum + 1,
+			OldHash:     forkHash,
+			NewHash:     head.Hash,
+			Depth:       2,
+		},
+		outbound.BlockState{
+			Number:         droppedNum + 1,
+			Hash:           head.Hash,
+			ParentHash:     head.ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
+		}); err != nil {
+		t.Fatalf("HandleReorgAtomic: %v", err)
+	}
+	if err := pgRepo.MarkPublishComplete(ctx, head.Hash); err != nil {
+		t.Fatalf("mark published head: %v", err)
+	}
+
+	orphanOnly, err := pgRepo.FindOrphanOnlyHeights(ctx, 1, droppedNum+1)
+	if err != nil {
+		t.Fatalf("FindOrphanOnlyHeights pre: %v", err)
+	}
+	if len(orphanOnly) != 1 || orphanOnly[0] != droppedNum {
+		t.Fatalf("orphan-only heights pre = %v, want [%d]", orphanOnly, droppedNum)
+	}
+
+	cfg := BackfillConfigDefaults()
+	cfg.BoundaryCheckDepth = -1
+	svc, err := NewBackfillService(cfg, client, pgRepo, memory.NewBlockCache(), &integrationMockEventSink{})
+	if err != nil {
+		t.Fatalf("NewBackfillService: %v", err)
+	}
+	if err := svc.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	t.Run("canonical block is saved as a new version", func(t *testing.T) {
+		got, err := pgRepo.GetBlockByNumber(ctx, droppedNum)
+		if err != nil {
+			t.Fatalf("GetBlockByNumber: %v", err)
+		}
+		if got == nil {
+			t.Fatalf("expected a canonical block at %d, got nil", droppedNum)
+		}
+		if want := client.GetHeader(droppedNum).Hash; got.Hash != want {
+			t.Errorf("hash = %s, want canonical %s", got.Hash, want)
+		}
+		if got.Version != 1 {
+			t.Errorf("version = %d, want 1 (the fork-A row keeps version 0)", got.Version)
+		}
+	})
+
+	t.Run("no orphan-only height remains", func(t *testing.T) {
+		heights, err := pgRepo.FindOrphanOnlyHeights(ctx, 1, droppedNum+1)
+		if err != nil {
+			t.Fatalf("FindOrphanOnlyHeights post: %v", err)
+		}
+		if len(heights) != 0 {
+			t.Errorf("orphan-only heights = %v, want none", heights)
+		}
+	})
+
+	t.Run("watermark advances past the filled height", func(t *testing.T) {
+		watermark, err := pgRepo.GetBackfillWatermark(ctx)
+		if err != nil {
+			t.Fatalf("GetBackfillWatermark: %v", err)
+		}
+		if watermark != droppedNum+1 {
+			t.Errorf("watermark = %d, want %d", watermark, droppedNum+1)
+		}
+	})
+}

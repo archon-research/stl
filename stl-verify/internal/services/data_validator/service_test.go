@@ -19,6 +19,7 @@ type mockBlockStateRepository struct {
 	blocks              map[int64]*outbound.BlockState
 	reorgEvents         []outbound.ReorgEvent
 	chainIntegrityError error
+	orphanOnlyHeights   []int64
 }
 
 func (m *mockBlockStateRepository) SaveBlock(ctx context.Context, state outbound.BlockState) (int, error) {
@@ -90,6 +91,10 @@ func (m *mockBlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBl
 
 func (m *mockBlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlock, toBlock int64) error {
 	return m.chainIntegrityError
+}
+
+func (m *mockBlockStateRepository) FindOrphanOnlyHeights(ctx context.Context, fromBlock, toBlock int64) ([]int64, error) {
+	return m.orphanOnlyHeights, nil
 }
 
 func (m *mockBlockStateRepository) MarkPublishComplete(ctx context.Context, hash string) error {
@@ -239,12 +244,9 @@ func TestService_ValidateChainIntegrity(t *testing.T) {
 				t.Fatalf("Validate() error = %v", err)
 			}
 
-			if len(report.Checks) != 1 {
-				t.Fatalf("expected 1 check, got %d", len(report.Checks))
-			}
-
-			if report.Checks[0].Status != tt.wantStatus {
-				t.Errorf("got status %q, want %q", report.Checks[0].Status, tt.wantStatus)
+			got := findCheck(t, report, "Chain Integrity")
+			if got.Status != tt.wantStatus {
+				t.Errorf("got status %q, want %q", got.Status, tt.wantStatus)
 			}
 		})
 	}
@@ -676,6 +678,66 @@ func TestReport_Success(t *testing.T) {
 			}
 			if got := report.Success(); got != tt.want {
 				t.Errorf("Success() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// findCheck returns the named check from a report, failing the test if absent.
+func findCheck(t *testing.T, report *Report, name string) CheckResult {
+	t.Helper()
+	for _, check := range report.Checks {
+		if check.Name == name {
+			return check
+		}
+	}
+	t.Fatalf("check %q not found in report checks %+v", name, report.Checks)
+	return CheckResult{}
+}
+
+// TestService_OrphanOnlyHeights covers the ARCT-379 hole: a height whose only
+// row is orphaned is invisible to VerifyChainIntegrity (it compares consecutive
+// canonical rows only), so it needs its own check to reach the cronjob's
+// failure exit and the VectorCronjobRunFailing alert.
+func TestService_OrphanOnlyHeights(t *testing.T) {
+	tests := []struct {
+		name       string
+		heights    []int64
+		wantStatus string
+	}{
+		{name: "no orphan-only heights", heights: nil, wantStatus: StatusPassed},
+		{name: "orphan-only height reported", heights: []int64{25395651}, wantStatus: StatusFailed},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := &mockBlockStateRepository{
+				minBlockNumber:    1,
+				maxBlockNumber:    30000000,
+				orphanOnlyHeights: tt.heights,
+			}
+
+			config := DefaultConfig()
+			config.ValidateChainIntegrity = true
+			config.ValidateReorgs = false
+			config.SpotCheckCount = 0
+
+			svc, err := NewService(config, repo, &mockBlockVerifier{})
+			if err != nil {
+				t.Fatalf("NewService() error = %v", err)
+			}
+
+			report, err := svc.Validate(context.Background())
+			if err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+
+			got := findCheck(t, report, "Orphan-only heights")
+			if got.Status != tt.wantStatus {
+				t.Errorf("got status %q, want %q", got.Status, tt.wantStatus)
+			}
+			if tt.wantStatus == StatusFailed && !strings.Contains(got.Message, "25395651") {
+				t.Errorf("message %q should name the offending height", got.Message)
 			}
 		})
 	}

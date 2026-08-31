@@ -129,6 +129,41 @@ does not fire this alert — Temporal retries that run on the new worker.
 `increase(cronjob_runs_total{status="error", service_name="<cronjob>"}[15m]) == 0`
 and a fresh `status="success"` run.
 
+### Special case: `watcher-data-validator` "Orphan-only heights"
+
+The validator fails the run — and so this alert — when its **Orphan-only
+heights** check reports `N height(s) have only an orphaned block: <numbers>`
+(capped at 100 heights). It means block N is stored only on a losing fork: the
+watcher saved fork A, the canonical broadcast for N was dropped as `stale_fork`
+(a load-balanced RPC node had not converged when the watcher verified it), and
+the reorg that block N+1 committed orphaned fork A without ever fetching the
+winner. Nothing at that height is canonical — S3 holds only the orphaned fork
+and every indexer has its events at `block_version` 0. Neither `FindGaps` nor
+the **Chain Integrity** check sees it: both read the canonical view, where the
+height simply does not exist.
+
+Confirm:
+
+1. `cast block <N> --field hash --rpc-url <chain rpc>` against the stored row —
+   `SELECT hash, version, is_orphaned FROM block_states WHERE chain_id = <id>
+   AND number = <N>;`. One row, orphaned, hash unknown to the chain, is the
+   signature.
+2. `increase(chain_reorgs_dropped_total{reorg_dropped_reason="stale_fork"}[1h])`
+   around the block's timestamp — a drop at that height is the cause.
+
+Repair:
+
+- **New occurrences heal themselves.** A reorg commit now rewinds
+  `backfill_watermark` to the common ancestor, so the next gap pass re-fetches
+  N and saves it as version 1 (ARCT-379). If the same height is still named two
+  poll intervals later, the RPC is still serving the losing fork — re-check
+  `cast block <N>`.
+- **Holes predating that rewind need a manual pass.**
+  `raw-block-bulk-downloader --start-block <N> --end-block <N>` stamps the
+  canonical `_1_` objects in S3, and block N must then be re-published as
+  version 1 so the indexers append the correction. The orphaned version-0 rows
+  stay put as history.
+
 ---
 
 ## VectorCronjobAllRunsFailing

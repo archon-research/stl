@@ -1987,3 +1987,194 @@ func TestClearBlockOrphaned_RefusesWhenConflictingCanonicalExists(t *testing.T) 
 		t.Fatalf("expected exactly 1 canonical row at number %d, got %d", num, canonicalCount)
 	}
 }
+
+// TestHandleReorgAtomic_RewindsWatermarkToCommonAncestor is the ARCT-379
+// regression: a reorg orphans the heights above the common ancestor without
+// re-fetching them, so the watermark must drop back to the ancestor or the gap
+// finder (which only scans above the watermark) never sees the resulting hole.
+func TestHandleReorgAtomic_RewindsWatermarkToCommonAncestor(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+	seedCanonicalChain(t, ctx, repo, 100, 105)
+
+	if err := repo.SetBackfillWatermark(ctx, 105); err != nil {
+		t.Fatalf("set watermark: %v", err)
+	}
+
+	newBlock := outbound.BlockState{
+		Number:         106,
+		Hash:           "0xhash106_prime",
+		ParentHash:     "0xhash105_prime",
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}
+	event := outbound.ReorgEvent{
+		DetectedAt:  time.Now(),
+		BlockNumber: newBlock.Number,
+		OldHash:     "0xhash105",
+		NewHash:     newBlock.Hash,
+		Depth:       3,
+	}
+	if _, err := repo.HandleReorgAtomic(ctx, 103, event, newBlock); err != nil {
+		t.Fatalf("HandleReorgAtomic: %v", err)
+	}
+
+	t.Run("watermark drops to the common ancestor", func(t *testing.T) {
+		watermark, err := repo.GetBackfillWatermark(ctx)
+		if err != nil {
+			t.Fatalf("GetBackfillWatermark: %v", err)
+		}
+		if watermark != 103 {
+			t.Errorf("watermark = %d, want 103", watermark)
+		}
+	})
+
+	t.Run("gap finder sees the orphaned heights", func(t *testing.T) {
+		gaps, err := repo.FindGaps(ctx, 100, 106)
+		if err != nil {
+			t.Fatalf("FindGaps: %v", err)
+		}
+		if len(gaps) != 1 || gaps[0].From != 104 || gaps[0].To != 105 {
+			t.Errorf("gaps = %v, want [{104 105}]", gaps)
+		}
+	})
+}
+
+// TestHandleReorgAtomic_LeavesLowerWatermarkAlone verifies the rewind never
+// raises a watermark that already sits below the common ancestor.
+func TestHandleReorgAtomic_LeavesLowerWatermarkAlone(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+	seedCanonicalChain(t, ctx, repo, 100, 105)
+
+	if err := repo.SetBackfillWatermark(ctx, 50); err != nil {
+		t.Fatalf("set watermark: %v", err)
+	}
+
+	newBlock := outbound.BlockState{
+		Number:         106,
+		Hash:           "0xhash106_prime",
+		ParentHash:     "0xhash105_prime",
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}
+	event := outbound.ReorgEvent{
+		DetectedAt:  time.Now(),
+		BlockNumber: newBlock.Number,
+		OldHash:     "0xhash105",
+		NewHash:     newBlock.Hash,
+		Depth:       3,
+	}
+	if _, err := repo.HandleReorgAtomic(ctx, 103, event, newBlock); err != nil {
+		t.Fatalf("HandleReorgAtomic: %v", err)
+	}
+
+	watermark, err := repo.GetBackfillWatermark(ctx)
+	if err != nil {
+		t.Fatalf("GetBackfillWatermark: %v", err)
+	}
+	if watermark != 50 {
+		t.Errorf("watermark = %d, want 50", watermark)
+	}
+}
+
+// seedCanonicalChain saves a linked canonical chain over [from, to].
+func seedCanonicalChain(t *testing.T, ctx context.Context, repo *BlockStateRepository, from, to int64) {
+	t.Helper()
+	for i := from; i <= to; i++ {
+		if _, err := repo.SaveBlock(ctx, outbound.BlockState{
+			Number:         i,
+			Hash:           fmt.Sprintf("0xhash%d", i),
+			ParentHash:     fmt.Sprintf("0xhash%d", i-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
+		}); err != nil {
+			t.Fatalf("seed block %d: %v", i, err)
+		}
+	}
+}
+
+// seedOrphanOnlyHeight saves a block and orphans it, leaving the height with no
+// canonical row — the state a reorg leaves behind when the canonical broadcast
+// for that height was dropped (ARCT-379).
+func seedOrphanOnlyHeight(t *testing.T, ctx context.Context, repo *BlockStateRepository, number int64, hash string) {
+	t.Helper()
+	if _, err := repo.SaveBlock(ctx, outbound.BlockState{
+		Number:         number,
+		Hash:           hash,
+		ParentHash:     fmt.Sprintf("0xparent%d", number),
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("seed block %d: %v", number, err)
+	}
+	if err := repo.MarkBlockOrphaned(ctx, hash); err != nil {
+		t.Fatalf("orphan block %d: %v", number, err)
+	}
+}
+
+func TestFindOrphanOnlyHeights_ReportsHeightWithNoCanonicalRow(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+	seedCanonicalChain(t, ctx, repo, 200, 203)
+	if err := repo.MarkBlockOrphaned(ctx, "0xhash202"); err != nil {
+		t.Fatalf("orphan block 202: %v", err)
+	}
+
+	heights, err := repo.FindOrphanOnlyHeights(ctx, 200, 203)
+	if err != nil {
+		t.Fatalf("FindOrphanOnlyHeights: %v", err)
+	}
+	if len(heights) != 1 || heights[0] != 202 {
+		t.Errorf("heights = %v, want [202]", heights)
+	}
+}
+
+func TestFindOrphanOnlyHeights_IgnoresHeightWithCanonicalSibling(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+	seedOrphanOnlyHeight(t, ctx, repo, 300, "0xfork_a_300")
+	if _, err := repo.SaveBlock(ctx, outbound.BlockState{
+		Number:         300,
+		Hash:           "0xfork_b_300",
+		ParentHash:     "0xparent300",
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("seed canonical sibling: %v", err)
+	}
+
+	heights, err := repo.FindOrphanOnlyHeights(ctx, 300, 300)
+	if err != nil {
+		t.Fatalf("FindOrphanOnlyHeights: %v", err)
+	}
+	if len(heights) != 0 {
+		t.Errorf("heights = %v, want none (the height has a canonical row)", heights)
+	}
+}
+
+func TestFindOrphanOnlyHeights_RespectsRangeBounds(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+	seedOrphanOnlyHeight(t, ctx, repo, 400, "0xorphan_400")
+	seedOrphanOnlyHeight(t, ctx, repo, 410, "0xorphan_410")
+	seedOrphanOnlyHeight(t, ctx, repo, 420, "0xorphan_420")
+
+	heights, err := repo.FindOrphanOnlyHeights(ctx, 405, 415)
+	if err != nil {
+		t.Fatalf("FindOrphanOnlyHeights: %v", err)
+	}
+	if len(heights) != 1 || heights[0] != 410 {
+		t.Errorf("heights = %v, want [410]", heights)
+	}
+}

@@ -107,8 +107,10 @@ type BlockStateRepository interface {
 	// HandleReorgAtomic atomically performs all reorg-related database operations:
 	// 1. Saves the reorg event
 	// 2. Marks all blocks after commonAncestor as orphaned
-	// 3. Saves the new canonical block
-	// This prevents inconsistent state if a crash occurs mid-reorg.
+	// 3. Lowers the backfill watermark to commonAncestor if it sits above it
+	// 4. Saves the new canonical block
+	// This prevents inconsistent state if a crash occurs mid-reorg. Step 3 is
+	// what puts an orphaned-but-not-replaced height back in FindGaps' range.
 	// Returns the version assigned to the new block.
 	HandleReorgAtomic(ctx context.Context, commonAncestor int64, event ReorgEvent, newBlock BlockState) (int, error)
 
@@ -134,6 +136,13 @@ type BlockStateRepository interface {
 	// Uses the backfill watermark to skip already-verified blocks.
 	// Returns an empty slice if there are no gaps.
 	FindGaps(ctx context.Context, minBlock, maxBlock int64) ([]BlockRange, error)
+
+	// FindOrphanOnlyHeights returns block numbers in [fromBlock, toBlock] that
+	// have an orphaned row and no canonical one. Such a height is a hole no
+	// other check sees: FindGaps and VerifyChainIntegrity both read the
+	// canonical view, where the height simply does not exist. Ordered
+	// ascending and capped, so an empty result is the only "all clear".
+	FindOrphanOnlyHeights(ctx context.Context, fromBlock, toBlock int64) ([]int64, error)
 
 	// VerifyChainIntegrity verifies that the parent_hash chain is properly linked
 	// in the given range. Returns nil if the chain is valid, or an error describing

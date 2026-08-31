@@ -12,6 +12,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 
@@ -217,7 +218,13 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAnce
 		}
 	}
 
-	// 3. Calculate version for new block
+	// 3. Rewind the backfill watermark to the common ancestor: FindGaps scans
+	// only above it, so a height left orphan-only here is never re-fetched.
+	if r.backfillWatermark > commonAncestor {
+		r.backfillWatermark = commonAncestor
+	}
+
+	// 4. Calculate version for new block
 	version := 0
 	for _, b := range r.blocks {
 		if b.Number == newBlock.Number {
@@ -227,7 +234,7 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAnce
 		}
 	}
 
-	// 4. Save new block
+	// 5. Save new block
 	newBlock.Version = version
 	r.blocks[newBlock.Hash] = newBlock
 
@@ -359,6 +366,40 @@ func (r *BlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBlock 
 	}
 
 	return gaps, nil
+}
+
+// FindOrphanOnlyHeights returns block numbers in the range whose only blocks
+// are orphaned, ascending.
+func (r *BlockStateRepository) FindOrphanOnlyHeights(ctx context.Context, fromBlock, toBlock int64) ([]int64, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if fromBlock > toBlock {
+		return nil, nil
+	}
+
+	orphaned := make(map[int64]bool)
+	canonical := make(map[int64]bool)
+	for _, b := range r.blocks {
+		if b.Number < fromBlock || b.Number > toBlock {
+			continue
+		}
+		if b.IsOrphaned {
+			orphaned[b.Number] = true
+		} else {
+			canonical[b.Number] = true
+		}
+	}
+
+	var heights []int64
+	for number := range orphaned {
+		if !canonical[number] {
+			heights = append(heights, number)
+		}
+	}
+	slices.Sort(heights)
+
+	return heights, nil
 }
 
 // VerifyChainIntegrity verifies that the parent_hash chain is properly linked.
