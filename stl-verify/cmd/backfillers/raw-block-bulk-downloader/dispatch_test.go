@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const planTestBlock = int64(25395651)
@@ -27,7 +30,7 @@ func dispatch(t *testing.T, cfg Config, keys []string, objects map[string][]byte
 	uploadCh := make(chan UploadJob, 8)
 	traceCh := make(chan traceRequest, 8)
 
-	err := applyBlockPlan(context.Background(), r, planner, cfg, uploadCh, traceCh, stats, discardLogger())
+	err := planAndApply(context.Background(), r, planner, cfg, uploadCh, traceCh, stats, testutil.DiscardLogger())
 	close(uploadCh)
 	close(traceCh)
 
@@ -39,6 +42,33 @@ func dispatch(t *testing.T, cfg Config, keys []string, objects map[string][]byte
 		out.traces = append(out.traces, req)
 	}
 	return out
+}
+
+// planAndApply drives one height through the two steps a block worker takes it
+// through: the plan, then what the plan writes.
+func planAndApply(
+	ctx context.Context,
+	r outbound.BlockData,
+	planner *blockPlanner,
+	cfg Config,
+	uploadCh chan<- UploadJob,
+	traceCh chan<- traceRequest,
+	stats *Stats,
+	logger *slog.Logger,
+) error {
+	state, err := planner.topVersion(ctx, r.BlockNumber)
+	if err != nil {
+		return err
+	}
+	if state.Version == noArchive {
+		return applyDecision(ctx, freshDecision(r.BlockNumber), r, cfg, uploadCh, traceCh, stats, logger)
+	}
+
+	decision, err := planner.decide(ctx, r.BlockNumber, state, r.Block)
+	if err != nil {
+		return err
+	}
+	return applyDecision(ctx, decision, r, cfg, uploadCh, traceCh, stats, logger)
 }
 
 func canonicalBlockData() outbound.BlockData {
@@ -65,7 +95,7 @@ func uploadKeys(jobs []UploadJob) []string {
 	return keys
 }
 
-func TestApplyBlockPlan_RepublishesALosingForkAtTheNextVersion(t *testing.T) {
+func TestApplyDecision_RepublishesALosingForkAtTheNextVersion(t *testing.T) {
 	got := dispatch(t,
 		Config{Bucket: "bucket"},
 		archivedAt(0, s3key.Block, s3key.Receipts, s3key.Traces),
@@ -94,7 +124,7 @@ func TestApplyBlockPlan_RepublishesALosingForkAtTheNextVersion(t *testing.T) {
 	}
 }
 
-func TestApplyBlockPlan_FillsOnlyWhatTheCanonicalVersionLacks(t *testing.T) {
+func TestApplyDecision_FillsOnlyWhatTheCanonicalVersionLacks(t *testing.T) {
 	got := dispatch(t,
 		Config{Bucket: "bucket"},
 		archivedAt(0, s3key.Block, s3key.Receipts),
@@ -118,7 +148,7 @@ func TestApplyBlockPlan_FillsOnlyWhatTheCanonicalVersionLacks(t *testing.T) {
 	}
 }
 
-func TestApplyBlockPlan_ArchivesAnUntouchedHeightAtVersionZero(t *testing.T) {
+func TestApplyDecision_ArchivesAnUntouchedHeightAtVersionZero(t *testing.T) {
 	got := dispatch(t, Config{Bucket: "bucket"}, nil, nil, canonicalBlockData())
 
 	if got.err != nil {
@@ -140,7 +170,30 @@ func TestApplyBlockPlan_ArchivesAnUntouchedHeightAtVersionZero(t *testing.T) {
 	}
 }
 
-func TestApplyBlockPlan_SkipsACompleteCanonicalHeight(t *testing.T) {
+func TestApplyDecision_RepublishesAZeroTxHeightNoArchivedObjectCanIdentify(t *testing.T) {
+	got := dispatch(t,
+		Config{Bucket: "bucket"},
+		archivedAt(0, s3key.Receipts, s3key.Traces),
+		map[string][]byte{s3key.Build(planTestBlock, 0, s3key.Receipts): gzipped(t, []byte(`[]`))},
+		canonicalBlockData())
+
+	if got.err != nil {
+		t.Fatalf("applyBlockPlan() error = %v, want the height repaired rather than failed on every run", got.err)
+	}
+
+	wantKeys := []string{
+		s3key.Build(planTestBlock, 1, s3key.Block),
+		s3key.Build(planTestBlock, 1, s3key.Receipts),
+	}
+	if keys := uploadKeys(got.uploads); !slices.Equal(keys, wantKeys) {
+		t.Errorf("queued uploads = %v, want %v", keys, wantKeys)
+	}
+	if len(got.traces) != 1 || got.traces[0] != (traceRequest{BlockNum: planTestBlock, Version: 1}) {
+		t.Errorf("trace requests = %v, want one at version 1", got.traces)
+	}
+}
+
+func TestApplyDecision_SkipsACompleteCanonicalHeight(t *testing.T) {
 	got := dispatch(t,
 		Config{Bucket: "bucket"},
 		archivedAt(0, s3key.Block, s3key.Receipts, s3key.Traces),
@@ -158,7 +211,7 @@ func TestApplyBlockPlan_SkipsACompleteCanonicalHeight(t *testing.T) {
 	}
 }
 
-func TestApplyBlockPlan_DryRunQueuesNothing(t *testing.T) {
+func TestApplyDecision_DryRunQueuesNothing(t *testing.T) {
 	got := dispatch(t,
 		Config{Bucket: "bucket", DryRun: true},
 		archivedAt(0, s3key.Block, s3key.Receipts, s3key.Traces),
@@ -176,7 +229,7 @@ func TestApplyBlockPlan_DryRunQueuesNothing(t *testing.T) {
 	}
 }
 
-func TestApplyBlockPlan_DryRunCountsTheHeightAsSkipped(t *testing.T) {
+func TestApplyDecision_DryRunCountsTheHeightAsSkipped(t *testing.T) {
 	got := dispatch(t, Config{Bucket: "bucket", DryRun: true}, nil, nil, canonicalBlockData())
 
 	if got.err != nil {
@@ -188,7 +241,7 @@ func TestApplyBlockPlan_DryRunCountsTheHeightAsSkipped(t *testing.T) {
 	}
 }
 
-func TestApplyBlockPlan_AMissingPayloadQueuesNothingAtAll(t *testing.T) {
+func TestApplyDecision_AMissingPayloadQueuesNothingAtAll(t *testing.T) {
 	r := canonicalBlockData()
 	r.Receipts = nil
 
@@ -202,7 +255,7 @@ func TestApplyBlockPlan_AMissingPayloadQueuesNothingAtAll(t *testing.T) {
 	}
 }
 
-func TestApplyBlockPlan_FetchFailureStopsTheHeight(t *testing.T) {
+func TestApplyDecision_FetchFailureStopsTheHeight(t *testing.T) {
 	r := canonicalBlockData()
 	r.ReceiptsErr = errors.New("eth_getBlockReceipts: upstream null result")
 
@@ -213,5 +266,31 @@ func TestApplyBlockPlan_FetchFailureStopsTheHeight(t *testing.T) {
 	}
 	if len(got.uploads) != 0 || len(got.traces) != 0 {
 		t.Errorf("queued uploads = %v and traces = %v after a failed fetch, want neither", uploadKeys(got.uploads), got.traces)
+	}
+}
+
+func TestLogDecision_AFreshHeightStaysOutOfTheInfoLogOfARealRun(t *testing.T) {
+	tests := []struct {
+		name   string
+		dryRun bool
+		action blockAction
+		want   string
+	}{
+		{name: "a fresh height in a real run", action: actionFresh, want: "DEBUG"},
+		{name: "a fresh height in a dry run", dryRun: true, action: actionFresh, want: "INFO"},
+		{name: "a republish", action: actionRepublish, want: "INFO"},
+		{name: "a fill", action: actionFill, want: "INFO"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger, logs := captureLogger()
+
+			logDecision(logger, tt.dryRun, blockDecision{BlockNumber: planTestBlock, Plan: blockPlan{Action: tt.action}})
+
+			if !strings.Contains(logs.String(), "level="+tt.want) {
+				t.Errorf("logged %q, want it at %s: a multi-million-block run must not narrate every fresh height", logs.String(), tt.want)
+			}
+		})
 	}
 }

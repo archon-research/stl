@@ -510,14 +510,13 @@ func partitionsForRange(from, to int64) []string {
 // returns the S3 key with the highest version for each block number.
 //
 // Highest-version-wins is the maintainer-set rule for reading the raw buckets, and
-// the version in the key is NOT always reorg evidence: the one-off
-// raw-block-bulk-downloader run stamped its uploads version 1, so deep history is
-// _1_-only and one transition window holds identical _0_/_1_ twins (hash-verified
-// canonical). Rows replayed from those ranges therefore carry block_version=1 with
-// no reorg behind them — never infer a reorg from block_version alone. That tool
-// now archives a first copy at version 0 and corrections at the next free version
-// (ARCT-379), so a _1_ a later run wrote is a correction of the version below it:
-// that block lost its fork, or held no object able to identify it. A real reorg is
+// the version in the key is NOT always reorg evidence: deep history is _1_-only and
+// one transition window holds identical _0_/_1_ twins (hash-verified canonical), so
+// rows replayed from those ranges carry block_version=1 with no reorg behind them —
+// never infer a reorg from block_version alone. Above that history the
+// raw-block-bulk-downloader archives a first copy at version 0 and corrections at
+// the next free version, so a _1_ it wrote corrects the version below it: that block
+// lost its fork, or held no object able to identify it. A real reorg is
 // watcher-written twins with different block hashes, and the higher version is the
 // canonical re-publish, which this rule selects correctly.
 func listHighestVersionReceipts(

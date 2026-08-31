@@ -10,7 +10,9 @@
 // The archive's contract is highest-version-wins, so every height is weighed
 // against what is already there: a first archive lands at version 0, an archived
 // version whose hash the chain no longer recognises is corrected at the next free
-// version, and nothing is ever overwritten. See planBlock.
+// version, and nothing is ever overwritten. See planBlock. A run refuses a range
+// reaching past the node's finalized head, where a height that loses its fork
+// could never be corrected; --allow-unfinalized overrides that.
 //
 // Usage:
 //
@@ -41,6 +43,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/aws/aws-sdk-go-v2/config"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 // Default settings optimized for local Erigon node
@@ -62,6 +65,8 @@ type Config struct {
 	Bucket     string
 	Region     string
 	DryRun     bool
+
+	AllowUnfinalized bool
 
 	BlockReceiptWorkers int
 	TraceWorkers        int
@@ -174,6 +179,7 @@ func parseFlags() Config {
 	flag.StringVar(&cfg.Bucket, "bucket", "", "S3 bucket name (required)")
 	flag.StringVar(&cfg.Region, "region", "", "AWS region (e.g., eu-west-1)")
 	flag.BoolVar(&cfg.DryRun, "dry-run", false, "Log every block's decision and upload nothing")
+	flag.BoolVar(&cfg.AllowUnfinalized, "allow-unfinalized", false, "Archive past the node's finalized head, accepting that a height that loses its fork stays wrong")
 	flag.IntVar(&cfg.BlockReceiptWorkers, "block-workers", DefaultBlockReceiptWorkers, "Block+receipt worker count")
 	flag.IntVar(&cfg.TraceWorkers, "trace-workers", DefaultTraceWorkers, "Trace worker count")
 	flag.IntVar(&cfg.UploadWorkers, "upload-workers", DefaultUploadWorkers, "S3 upload worker count")
@@ -201,8 +207,14 @@ func validateConfig(cfg Config) error {
 }
 
 func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
+	logStartupInfo(cfg, logger)
+
 	rpcClient, err := createRPCClient(cfg, logger)
 	if err != nil {
+		return err
+	}
+
+	if err := guardFinality(ctx, rpcClient, cfg, logger); err != nil {
 		return err
 	}
 
@@ -215,15 +227,22 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	stats := &Stats{startTime: time.Now()}
 	planner := &blockPlanner{cache: partitionCache, reader: s3Reader, bucket: cfg.Bucket, stats: stats}
 
-	logStartupInfo(cfg, logger)
-
 	stopProgressReporter := startProgressReporter(ctx, stats, cfg.EndBlock-cfg.StartBlock+1, partitionCache, logger)
 	defer stopProgressReporter()
 
 	pipeline := newPipeline(cfg)
+	archiver := blockArchiver{
+		client:   rpcClient,
+		planner:  planner,
+		cfg:      cfg,
+		uploadCh: pipeline.uploadCh,
+		traceCh:  pipeline.traceCollectorCh,
+		stats:    stats,
+		logger:   logger,
+	}
 	pipeline.startUploadWorkers(ctx, s3Writer, stats, logger)
 	pipeline.startTraceCollector(ctx, cfg)
-	pipeline.startBlockReceiptWorkers(ctx, rpcClient, planner, cfg, stats, logger)
+	pipeline.startBlockReceiptWorkers(ctx, archiver)
 	pipeline.startTraceWorkers(ctx, rpcClient, cfg.Bucket, stats, logger)
 	pipeline.feedBlockWork(ctx, cfg.StartBlock, cfg.EndBlock, cfg.BlockBatchSize)
 
@@ -290,6 +309,9 @@ func createS3Clients(ctx context.Context, cfg Config, logger *slog.Logger) (*s3.
 		return nil, nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
+	// Reader and writer share this pool, so it holds both roles at once: sized
+	// to the uploaders alone, the block workers' ranged GETs queue behind PUTs.
+	conns := cfg.BlockReceiptWorkers + cfg.UploadWorkers
 	httpClient := &http.Client{
 		Timeout: 60 * time.Second,
 		Transport: &http.Transport{
@@ -298,9 +320,9 @@ func createS3Clients(ctx context.Context, cfg Config, logger *slog.Logger) (*s3.
 				Timeout:   30 * time.Second,
 				KeepAlive: 30 * time.Second,
 			}).DialContext,
-			MaxIdleConns:          cfg.UploadWorkers * 2,
-			MaxIdleConnsPerHost:   cfg.UploadWorkers,
-			MaxConnsPerHost:       cfg.UploadWorkers,
+			MaxIdleConns:          conns * 2,
+			MaxIdleConnsPerHost:   conns,
+			MaxConnsPerHost:       conns,
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
@@ -308,10 +330,9 @@ func createS3Clients(ctx context.Context, cfg Config, logger *slog.Logger) (*s3.
 		},
 	}
 
-	endpoint := s3.EndpointOptionsFromEnv()
-	writer := s3.NewWriterWithHTTPClient(awsCfg, httpClient, logger, endpoint...)
-	reader := s3.NewReaderWithHTTPClient(awsCfg, httpClient, logger, endpoint...)
-	return writer, reader, nil
+	options := append([]func(*awss3.Options){func(o *awss3.Options) { o.HTTPClient = httpClient }},
+		s3.EndpointOptionsFromEnv()...)
+	return s3.NewWriterWithOptions(awsCfg, logger, options...), s3.NewReaderWithOptions(awsCfg, logger, options...), nil
 }
 
 func logStartupInfo(cfg Config, logger *slog.Logger) {
@@ -327,6 +348,7 @@ func logStartupInfo(cfg Config, logger *slog.Logger) {
 		"traceBatchSize", cfg.TraceBatchSize,
 		"bucket", cfg.Bucket,
 		"dryRun", cfg.DryRun,
+		"allowUnfinalized", cfg.AllowUnfinalized,
 	)
 }
 
@@ -433,12 +455,14 @@ func (p *pipeline) startTraceCollector(ctx context.Context, cfg Config) {
 	})
 }
 
-func (p *pipeline) startBlockReceiptWorkers(ctx context.Context, client *alchemy.Client, planner *blockPlanner, cfg Config, stats *Stats, logger *slog.Logger) {
+func (p *pipeline) startBlockReceiptWorkers(ctx context.Context, archiver blockArchiver) {
 	for i := 0; i < p.blockWorkers; i++ {
 		p.blockWg.Add(1)
 		go func(workerID int) {
 			defer p.blockWg.Done()
-			blockReceiptWorker(ctx, workerID, client, planner, cfg, p.blockWorkCh, p.traceCollectorCh, p.uploadCh, stats, logger)
+			worker := archiver
+			worker.logger = archiver.logger.With("worker", workerID, "type", "block")
+			worker.archiveBatches(ctx, p.blockWorkCh)
 		}(i)
 	}
 }
@@ -477,58 +501,172 @@ func (p *pipeline) waitForCompletion() {
 	p.uploadWg.Wait()
 }
 
-// blockReceiptWorker fetches blocks and receipts, then acts on each height's plan.
-func blockReceiptWorker(
-	ctx context.Context,
-	workerID int,
-	client *alchemy.Client,
-	planner *blockPlanner,
-	cfg Config,
-	workCh <-chan int64,
-	traceCh chan<- traceRequest,
-	uploadCh chan<- UploadJob,
-	stats *Stats,
-	logger *slog.Logger,
-) {
-	logger = logger.With("worker", workerID, "type", "block")
+// blockArchiver archives the batches one block worker is handed.
+type blockArchiver struct {
+	client   *alchemy.Client
+	planner  *blockPlanner
+	cfg      Config
+	uploadCh chan<- UploadJob
+	traceCh  chan<- traceRequest
+	stats    *Stats
+	logger   *slog.Logger
+}
 
+func (a blockArchiver) archiveBatches(ctx context.Context, workCh <-chan int64) {
 	for batchStart := range workCh {
 		if ctx.Err() != nil {
 			return
 		}
+		a.archiveBatch(ctx, batchStart, min(batchStart+int64(a.cfg.BlockBatchSize)-1, a.cfg.EndBlock))
+	}
+}
 
-		batchEnd := min(batchStart+int64(cfg.BlockBatchSize)-1, cfg.EndBlock)
-		results, err := fetchBlocksAndReceipts(ctx, client, batchStart, batchEnd, stats)
-		if err != nil {
-			logger.Warn("batch fetch failed", "from", batchStart, "to", batchEnd, "error", err)
-			stats.blocksFailed.Add(batchEnd - batchStart + 1)
-			continue
-		}
+// archiveBatch archives one inclusive range of heights: it plans each of them
+// first, then pays for the full block and receipts of the heights a plan writes.
+func (a blockArchiver) archiveBatch(ctx context.Context, from, to int64) {
+	planned, err := a.planBatch(ctx, from, to)
+	if err != nil {
+		a.failBatch(from, to, "batch planning failed", err)
+		return
+	}
 
-		for _, r := range results {
-			if err := applyBlockPlan(ctx, r, planner, cfg, uploadCh, traceCh, stats, logger); err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				logger.Warn("block left unarchived", "block", r.BlockNumber, "error", err)
-				stats.blocksFailed.Add(1)
+	payloads, err := a.fetchPlanned(ctx, planned)
+	if err != nil {
+		a.failBatch(from, to, "batch fetch failed", err)
+		return
+	}
+
+	for _, height := range planned {
+		if err := a.archiveHeight(ctx, height, payloads[height.BlockNumber]); err != nil {
+			if ctx.Err() != nil {
+				return
 			}
+			a.logger.Warn("block left unarchived", "block", height.BlockNumber, "error", err)
+			a.stats.blocksFailed.Add(1)
 		}
 	}
 }
 
-// fetchBlocksAndReceipts fetches one inclusive range of blocks with their receipts.
-func fetchBlocksAndReceipts(ctx context.Context, client *alchemy.Client, from, to int64, stats *Stats) ([]outbound.BlockData, error) {
-	blockNums := make([]int64, 0, to-from+1)
+func (a blockArchiver) failBatch(from, to int64, msg string, err error) {
+	a.logger.Warn(msg, "from", from, "to", to, "error", err)
+	a.stats.blocksFailed.Add(to - from + 1)
+}
+
+// plannedHeight is one height's decision, or the failure that stopped it before
+// a decision was reached.
+type plannedHeight struct {
+	BlockNumber int64
+	Decision    blockDecision
+	Err         error
+}
+
+// planBatch decides every height in the range. One the archive already holds a
+// version of is planned from its header, not the megabyte its block and receipts
+// weigh; an untouched one is fresh whatever the chain says, so it costs no read.
+func (a blockArchiver) planBatch(ctx context.Context, from, to int64) ([]plannedHeight, error) {
+	planned := make(map[int64]plannedHeight, to-from+1)
+	states := make(map[int64]archiveState, to-from+1)
+	var archived []int64
+
 	for blockNum := from; blockNum <= to; blockNum++ {
-		blockNums = append(blockNums, blockNum)
+		state, err := a.planner.topVersion(ctx, blockNum)
+		switch {
+		case err != nil:
+			planned[blockNum] = plannedHeight{BlockNumber: blockNum, Err: err}
+		case state.Version == noArchive:
+			planned[blockNum] = plannedHeight{BlockNumber: blockNum, Decision: freshDecision(blockNum)}
+		default:
+			states[blockNum] = state
+			archived = append(archived, blockNum)
+		}
+	}
+
+	headers, err := a.fetchHeaders(ctx, archived)
+	if err != nil {
+		return nil, err
+	}
+	for _, header := range headers {
+		planned[header.BlockNumber] = a.planArchived(ctx, header, states[header.BlockNumber])
+	}
+
+	ordered := make([]plannedHeight, 0, len(planned))
+	for blockNum := from; blockNum <= to; blockNum++ {
+		height, ok := planned[blockNum]
+		if !ok {
+			return nil, fmt.Errorf("block %d: the node answered the batch without it", blockNum)
+		}
+		ordered = append(ordered, height)
+	}
+	return ordered, nil
+}
+
+func (a blockArchiver) planArchived(ctx context.Context, header outbound.BlockData, state archiveState) plannedHeight {
+	if header.BlockErr != nil {
+		return plannedHeight{
+			BlockNumber: header.BlockNumber,
+			Err:         fmt.Errorf("fetching the header of block %d: %w", header.BlockNumber, header.BlockErr),
+		}
+	}
+
+	decision, err := a.planner.decide(ctx, header.BlockNumber, state, header.Block)
+	if err != nil {
+		return plannedHeight{BlockNumber: header.BlockNumber, Err: err}
+	}
+	return plannedHeight{BlockNumber: header.BlockNumber, Decision: decision}
+}
+
+// archiveHeight acts on one height's decision, or surfaces the failure that
+// stopped it from reaching one.
+func (a blockArchiver) archiveHeight(ctx context.Context, height plannedHeight, payload outbound.BlockData) error {
+	if height.Err != nil {
+		return height.Err
+	}
+	return applyDecision(ctx, height.Decision, payload, a.cfg, a.uploadCh, a.traceCh, a.stats, a.logger)
+}
+
+// fetchHeaders fetches the headers the archived heights are planned from.
+func (a blockArchiver) fetchHeaders(ctx context.Context, blockNums []int64) ([]outbound.BlockData, error) {
+	if len(blockNums) == 0 {
+		return nil, nil
 	}
 
 	rpcStart := time.Now()
-	results, err := client.GetBlocksAndReceiptsBatch(ctx, blockNums, true)
-	stats.rpcBlockTime.Add(time.Since(rpcStart).Nanoseconds())
-	stats.rpcBlockCalls.Add(1)
-	return results, err
+	headers, err := a.client.GetBlockHeadersBatch(ctx, blockNums)
+	a.stats.rpcBlockTime.Add(time.Since(rpcStart).Nanoseconds())
+	a.stats.rpcBlockCalls.Add(1)
+	return headers, err
+}
+
+// fetchPlanned fetches the full blocks and receipts the plans write. A dry run
+// writes nothing, so it fetches nothing.
+func (a blockArchiver) fetchPlanned(ctx context.Context, planned []plannedHeight) (map[int64]outbound.BlockData, error) {
+	if a.cfg.DryRun {
+		return nil, nil
+	}
+
+	blockNums := make([]int64, 0, len(planned))
+	for _, height := range planned {
+		if height.Err == nil && needsPayloads(height.Decision.Plan) {
+			blockNums = append(blockNums, height.BlockNumber)
+		}
+	}
+	if len(blockNums) == 0 {
+		return nil, nil
+	}
+
+	rpcStart := time.Now()
+	results, err := a.client.GetBlocksAndReceiptsBatch(ctx, blockNums, true)
+	a.stats.rpcBlockTime.Add(time.Since(rpcStart).Nanoseconds())
+	a.stats.rpcBlockCalls.Add(1)
+	if err != nil {
+		return nil, err
+	}
+
+	payloads := make(map[int64]outbound.BlockData, len(results))
+	for _, result := range results {
+		payloads[result.BlockNumber] = result
+	}
+	return payloads, nil
 }
 
 // traceCollector batches the heights whose traces are still to fetch.

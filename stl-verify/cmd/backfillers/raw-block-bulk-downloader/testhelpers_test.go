@@ -15,8 +15,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/retry"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // fixtureFiller is seeded so a fixture is byte-identical from run to run, and
@@ -37,6 +39,8 @@ type fakeListReader struct {
 	keys  []string
 	delay time.Duration
 	err   error
+	// failures is how many leading calls err answers; zero means every call.
+	failures int
 
 	mu    sync.Mutex
 	calls int
@@ -49,10 +53,11 @@ func (f *fakeListReader) ListFiles(context.Context, string, string) ([]outbound.
 func (f *fakeListReader) ListPrefix(_ context.Context, _, prefix string) ([]string, error) {
 	f.mu.Lock()
 	f.calls++
+	failing := f.err != nil && (f.failures == 0 || f.calls <= f.failures)
 	f.mu.Unlock()
 
 	time.Sleep(f.delay)
-	if f.err != nil {
+	if failing {
 		return nil, f.err
 	}
 	var out []string
@@ -172,15 +177,30 @@ func archivedObjects(t *testing.T, blockNum int64, version int, hash string) map
 	}
 }
 
-func discardLogger() *slog.Logger {
-	return slog.New(slog.DiscardHandler)
+// captureLogger records at Debug so a test can assert the level a line was
+// written at, not only its text.
+func captureLogger() (*slog.Logger, *bytes.Buffer) {
+	var buf bytes.Buffer
+	return slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})), &buf
+}
+
+// newTestPartitionCache gives the cache a retry schedule a test can wait out.
+func newTestPartitionCache(reader outbound.S3Reader) *PartitionCache {
+	cache := NewPartitionCache(reader, "bucket", testutil.DiscardLogger())
+	cache.listRetry = retry.Config{
+		MaxRetries:     listRetryAttempts - 1,
+		InitialBackoff: time.Millisecond,
+		MaxBackoff:     2 * time.Millisecond,
+		BackoffFactor:  2,
+	}
+	return cache
 }
 
 // newTestPlanner wires a planner over a fake partition listing and fake object
 // bodies, with no S3 and no RPC behind it.
 func newTestPlanner(keys []string, objects map[string][]byte) (*blockPlanner, *Stats) {
 	stats := &Stats{}
-	cache := NewPartitionCache(&fakeListReader{keys: keys}, "bucket", discardLogger())
+	cache := newTestPartitionCache(&fakeListReader{keys: keys})
 	return &blockPlanner{
 		cache:  cache,
 		reader: newFakeRangeReader(objects),

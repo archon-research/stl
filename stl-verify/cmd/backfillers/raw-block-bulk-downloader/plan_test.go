@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
-	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
 func stateAt(version int, present ...s3key.DataType) archiveState {
@@ -73,7 +72,7 @@ func TestPlanBlock(t *testing.T) {
 			want:          blockPlan{Action: actionRepublish, Version: 2, DataTypes: all},
 		},
 		{
-			name:          "unreadable archived hash is treated as a losing fork",
+			name:          "an archive that carries no hash is corrected at the next version",
 			state:         stateAt(0, s3key.Traces),
 			archivedHash:  "",
 			canonicalHash: canonicalHash,
@@ -182,6 +181,50 @@ func TestArchivedBlockHash_UnknownWhenNoObjectCarriesOne(t *testing.T) {
 	}
 }
 
+func TestArchivedBlockHash_AReadableObjectWithNoHashIsUnknownRatherThanAFailure(t *testing.T) {
+	const blockNum = int64(25395651)
+
+	tests := []struct {
+		name     string
+		dataType s3key.DataType
+		body     string
+	}{
+		{name: "the empty receipt list of a zero-tx block", dataType: s3key.Receipts, body: `[]`},
+		{name: "a null receipts payload", dataType: s3key.Receipts, body: `null`},
+		{name: "a null block payload", dataType: s3key.Block, body: `null`},
+		{name: "an empty list where the block object should be", dataType: s3key.Block, body: `[]`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			key := s3key.Build(blockNum, 0, tt.dataType)
+			reader := newFakeRangeReader(map[string][]byte{key: gzipped(t, []byte(tt.body))})
+
+			got, err := archivedBlockHash(context.Background(), reader, "bucket", blockNum, stateAt(0, tt.dataType))
+			if err != nil {
+				t.Fatalf("archivedBlockHash() error = %v, want the height planned rather than failed on every run", err)
+			}
+			if got != "" {
+				t.Errorf("archivedBlockHash() = %q, want the empty hash of an object that carries none", got)
+			}
+		})
+	}
+}
+
+func TestArchivedBlockHash_FallsBackToReceiptsWhenTheBlockObjectCarriesNoHash(t *testing.T) {
+	const blockNum = int64(25395651)
+	objects := archivedObjects(t, blockNum, 0, forkHash)
+	objects[s3key.Build(blockNum, 0, s3key.Block)] = gzipped(t, []byte(`null`))
+
+	got, err := archivedBlockHash(context.Background(), newFakeRangeReader(objects), "bucket", blockNum, stateAt(0, s3key.Block, s3key.Receipts))
+	if err != nil {
+		t.Fatalf("archivedBlockHash() error = %v", err)
+	}
+	if got != forkHash {
+		t.Errorf("archivedBlockHash() = %q, want the receipts to answer for a block object that cannot %q", got, forkHash)
+	}
+}
+
 func TestArchivedBlockHash_ErrorsWhenTheHashIsBeyondThePrefix(t *testing.T) {
 	const blockNum = int64(25395651)
 	key := s3key.Build(blockNum, 0, s3key.Block)
@@ -206,13 +249,13 @@ func TestArchivedBlockHash_ReadFailureIsNotAnUnknownHash(t *testing.T) {
 
 func TestPartitionCache_TopVersionReportsTheHighestVersionAndItsDataTypes(t *testing.T) {
 	const blockNum = int64(25395651)
-	cache := NewPartitionCache(&fakeListReader{keys: []string{
+	cache := newTestPartitionCache(&fakeListReader{keys: []string{
 		s3key.Build(blockNum, 0, s3key.Block),
 		s3key.Build(blockNum, 0, s3key.Receipts),
 		s3key.Build(blockNum, 0, s3key.Traces),
 		s3key.Build(blockNum, 1, s3key.Block),
 		s3key.Build(blockNum, 1, s3key.Receipts),
-	}}, "bucket", discardLogger())
+	}})
 
 	state, err := cache.TopVersion(context.Background(), blockNum)
 	if err != nil {
@@ -228,9 +271,9 @@ func TestPartitionCache_TopVersionReportsTheHighestVersionAndItsDataTypes(t *tes
 
 func TestPartitionCache_TopVersionOfAnUnarchivedHeightIsNoArchive(t *testing.T) {
 	const blockNum = int64(25395651)
-	cache := NewPartitionCache(&fakeListReader{keys: []string{
+	cache := newTestPartitionCache(&fakeListReader{keys: []string{
 		s3key.Build(blockNum, 0, s3key.Block),
-	}}, "bucket", discardLogger())
+	}})
 
 	state, err := cache.TopVersion(context.Background(), blockNum+1)
 	if err != nil {
@@ -247,7 +290,7 @@ func TestPartitionCache_ConcurrentReadsListAPartitionOnce(t *testing.T) {
 		keys:  []string{s3key.Build(blockNum, 0, s3key.Block)},
 		delay: 20 * time.Millisecond,
 	}
-	cache := NewPartitionCache(lister, "bucket", discardLogger())
+	cache := newTestPartitionCache(lister)
 
 	var wg sync.WaitGroup
 	for range 50 {
@@ -266,7 +309,7 @@ func TestPartitionCache_ConcurrentReadsListAPartitionOnce(t *testing.T) {
 
 func TestPartitionCache_AFailedListingIsRetried(t *testing.T) {
 	lister := &fakeListReader{err: errors.New("throttled")}
-	cache := NewPartitionCache(lister, "bucket", discardLogger())
+	cache := newTestPartitionCache(lister)
 
 	for range 2 {
 		if _, err := cache.TopVersion(context.Background(), 25395651); err == nil {
@@ -274,8 +317,29 @@ func TestPartitionCache_AFailedListingIsRetried(t *testing.T) {
 		}
 	}
 
-	if got := lister.listings(); got != 2 {
-		t.Errorf("partition listings = %d, want 2: a failed listing must not be cached", got)
+	if got, want := lister.listings(), 2*listRetryAttempts; got != want {
+		t.Errorf("partition listings = %d, want %d: a failed listing must not be cached", got, want)
+	}
+}
+
+func TestPartitionCache_AThrottledListingIsRetriedRatherThanFailingEveryWorkerOnIt(t *testing.T) {
+	const blockNum = int64(25395651)
+	lister := &fakeListReader{
+		keys:     []string{s3key.Build(blockNum, 0, s3key.Block)},
+		err:      errors.New("throttled"),
+		failures: 2,
+	}
+	cache := newTestPartitionCache(lister)
+
+	state, err := cache.TopVersion(context.Background(), blockNum)
+	if err != nil {
+		t.Fatalf("TopVersion() error = %v, want the throttled listings retried before hundreds of heights fail", err)
+	}
+	if state.Version != 0 {
+		t.Errorf("TopVersion() version = %d, want 0 from the listing that finally succeeded", state.Version)
+	}
+	if got := lister.listings(); got != 3 {
+		t.Errorf("partition listings = %d, want 3: two throttled tries and the one that succeeded", got)
 	}
 }
 
@@ -287,11 +351,7 @@ func TestBlockPlanner_DecideRepublishesALosingFork(t *testing.T) {
 		s3key.Build(blockNum, 0, s3key.Traces),
 	}, archivedObjects(t, blockNum, 0, forkHash))
 
-	decision, err := planner.decide(context.Background(), outbound.BlockData{
-		BlockNumber: blockNum,
-		Block:       blockJSON(canonicalHash, 2),
-		Receipts:    receiptsJSON(canonicalHash, 2),
-	})
+	decision, err := planner.decide(context.Background(), blockNum, stateAt(0, s3key.Block, s3key.Receipts, s3key.Traces), blockJSON(canonicalHash, 2))
 	if err != nil {
 		t.Fatalf("decide() error = %v", err)
 	}
@@ -308,10 +368,7 @@ func TestBlockPlanner_DecideRepublishesALosingFork(t *testing.T) {
 func TestBlockPlanner_DecideFailsWhenTheRPCPayloadCarriesNoHash(t *testing.T) {
 	planner, _ := newTestPlanner(nil, nil)
 
-	_, err := planner.decide(context.Background(), outbound.BlockData{
-		BlockNumber: 25395651,
-		Block:       []byte(`{"number":"0x1830003"}`),
-	})
+	_, err := planner.decide(context.Background(), 25395651, stateAt(0, s3key.Block), []byte(`{"number":"0x1830003"}`))
 	if err == nil {
 		t.Fatal("expected an error rather than a plan built on an unknown canonical hash")
 	}

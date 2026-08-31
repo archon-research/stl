@@ -20,36 +20,40 @@ type traceRequest struct {
 	Version  int
 }
 
-// applyBlockPlan decides what a fetched block needs and acts on it: it queues the
-// uploads, hands the trace collector the heights whose traces are still missing,
-// and writes nothing at all in a dry run.
-func applyBlockPlan(
+// applyDecision acts on one height's decision: it queues the uploads, hands the
+// trace collector the heights whose traces are still missing, and writes nothing
+// at all in a dry run.
+func applyDecision(
 	ctx context.Context,
-	r outbound.BlockData,
-	planner *blockPlanner,
+	d blockDecision,
+	payload outbound.BlockData,
 	cfg Config,
 	uploadCh chan<- UploadJob,
 	traceCh chan<- traceRequest,
 	stats *Stats,
 	logger *slog.Logger,
 ) error {
-	if r.BlockErr != nil || r.ReceiptsErr != nil {
-		return fmt.Errorf("fetching block %d: %w", r.BlockNumber, errors.Join(r.BlockErr, r.ReceiptsErr))
-	}
-
-	decision, err := planner.decide(ctx, r)
-	if err != nil {
-		return err
-	}
-	logDecision(logger, cfg.DryRun, decision)
-	stats.recordPlan(decision.Plan.Action)
+	logDecision(logger, cfg.DryRun, d)
+	stats.recordPlan(d.Plan.Action)
 
 	if cfg.DryRun {
 		stats.blocksSkipped.Add(1)
 		stats.tracesSkipped.Add(1)
 		return nil
 	}
-	return queuePlan(ctx, decision.Plan, r, cfg.Bucket, uploadCh, traceCh, stats)
+
+	if needsPayloads(d.Plan) {
+		if err := errors.Join(payload.BlockErr, payload.ReceiptsErr); err != nil {
+			return fmt.Errorf("fetching block %d: %w", d.BlockNumber, err)
+		}
+	}
+	return queuePlan(ctx, d.Plan, payload, cfg.Bucket, uploadCh, traceCh, stats)
+}
+
+// needsPayloads reports whether a plan writes anything the block and receipts
+// RPC calls answer for; a traces-only fill does not.
+func needsPayloads(plan blockPlan) bool {
+	return slices.Contains(plan.DataTypes, s3key.Block) || slices.Contains(plan.DataTypes, s3key.Receipts)
 }
 
 // queuePlan enqueues the block and receipt uploads a plan calls for, then signals
@@ -142,19 +146,26 @@ func requestTraces(ctx context.Context, plan blockPlan, blockNum int64, traceCh 
 }
 
 // logDecision reports one height's decision: every block in a dry run, and
-// anything but a plain skip otherwise.
+// anything but a plain skip otherwise. A fresh height is Debug outside a dry
+// run, because a first pass over a multi-million-block range is all fresh.
 func logDecision(logger *slog.Logger, dryRun bool, d blockDecision) {
 	if !dryRun && d.Plan.Action == actionSkip {
 		return
 	}
-	logger.Info("block plan",
+
+	attrs := []any{
 		"number", d.BlockNumber,
 		"vmax", d.State.Version,
 		"archivedHash", d.ArchivedHash,
 		"canonicalHash", d.CanonicalHash,
 		"action", string(d.Plan.Action),
 		"version", d.Plan.Version,
-	)
+	}
+	if !dryRun && d.Plan.Action == actionFresh {
+		logger.Debug("block plan", attrs...)
+		return
+	}
+	logger.Info("block plan", attrs...)
 }
 
 func payloadFor(r outbound.BlockData, dataType s3key.DataType) json.RawMessage {

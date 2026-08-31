@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"slices"
+	"sync"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -27,8 +28,7 @@ var sharedLocalStackCfg testutil.LocalStackConfig
 // rawBucketPrefix mirrors the raw archive buckets the tool writes to.
 const rawBucketPrefix = "stl-sentineltest-ethereum-raw-"
 
-// forkedBlock is the ARCT-379 shape: a height whose only archived version is a
-// losing fork.
+// forkedBlock is a height whose only archived version is a losing fork.
 const forkedBlock = int64(25395651)
 
 func TestMain(m *testing.M) {
@@ -74,7 +74,7 @@ func TestRunIntegration_AFailedBlockFailsTheRun(t *testing.T) {
 	client, bucket := archiveBucket(t, ctx)
 	seedArchivedVersion(t, ctx, client, bucket, 0, forkHash)
 
-	err := runDownloader(t, ctx, bucket, downloaderRun{rpcFailure: true})
+	_, err := runDownloader(t, ctx, bucket, downloaderRun{rpcFailure: true})
 
 	if err == nil {
 		t.Fatal("expected run() to fail: an exit code of 0 would hide the hole left in the archive")
@@ -126,6 +126,47 @@ func TestRunIntegration_DryRunWritesNothing(t *testing.T) {
 	}
 }
 
+func TestRunIntegration_PlansACanonicalArchiveFromHeadersAlone(t *testing.T) {
+	ctx := context.Background()
+	client, bucket := archiveBucket(t, ctx)
+	seedArchivedVersion(t, ctx, client, bucket, 0, canonicalHash)
+
+	node := mustRunDownloader(t, ctx, bucket, downloaderRun{})
+
+	headers, fullBlocks := node.reads()
+	if fullBlocks != 0 {
+		t.Errorf("full block fetches = %d, want none: an archived height's plan needs one hash, not 0.5-2 MB", fullBlocks)
+	}
+	if headers != 1 {
+		t.Errorf("header fetches = %d, want 1", headers)
+	}
+}
+
+func TestRunIntegration_RefusesARangeAboveTheFinalizedHead(t *testing.T) {
+	ctx := context.Background()
+	client, bucket := archiveBucket(t, ctx)
+
+	_, err := runDownloader(t, ctx, bucket, downloaderRun{finalizedHead: forkedBlock - 1})
+
+	if err == nil {
+		t.Fatal("expected the run refused: a fork archived above the finalized head can never be corrected")
+	}
+	if versions := archivedVersions(t, ctx, client, bucket); len(versions) != 0 {
+		t.Errorf("archived versions = %v, want none: the refusal must land before any write", versions)
+	}
+}
+
+func TestRunIntegration_AllowUnfinalizedArchivesAboveTheFinalizedHead(t *testing.T) {
+	ctx := context.Background()
+	client, bucket := archiveBucket(t, ctx)
+
+	mustRunDownloader(t, ctx, bucket, downloaderRun{finalizedHead: forkedBlock - 1, allowUnfinalized: true})
+
+	if versions := archivedVersions(t, ctx, client, bucket); !slices.Equal(versions, []int{0}) {
+		t.Errorf("archived versions = %v, want %v: --allow-unfinalized overrides the guard", versions, []int{0})
+	}
+}
+
 func archiveBucket(t *testing.T, ctx context.Context) (*awss3.Client, string) {
 	t.Helper()
 
@@ -137,98 +178,179 @@ func archiveBucket(t *testing.T, ctx context.Context) (*awss3.Client, string) {
 
 // downloaderRun is what varies between the runs the tests drive.
 type downloaderRun struct {
-	dryRun     bool
-	rpcFailure bool
+	dryRun           bool
+	rpcFailure       bool
+	allowUnfinalized bool
+	// finalizedHead defaults to the height the tests archive.
+	finalizedHead int64
 }
 
-func mustRunDownloader(t *testing.T, ctx context.Context, bucket string, opts downloaderRun) {
+func mustRunDownloader(t *testing.T, ctx context.Context, bucket string, opts downloaderRun) *fakeErigon {
 	t.Helper()
 
-	if err := runDownloader(t, ctx, bucket, opts); err != nil {
+	node, err := runDownloader(t, ctx, bucket, opts)
+	if err != nil {
 		t.Fatalf("run() error = %v", err)
 	}
+	return node
 }
 
 // runDownloader drives run() against LocalStack and a fake Erigon serving the
 // canonical block.
-func runDownloader(t *testing.T, ctx context.Context, bucket string, opts downloaderRun) error {
+func runDownloader(t *testing.T, ctx context.Context, bucket string, opts downloaderRun) (*fakeErigon, error) {
 	t.Helper()
 
-	rpc := startFakeErigon(t, opts.rpcFailure)
+	node := startFakeErigon(t, opts)
 	t.Setenv("AWS_S3_ENDPOINT", sharedLocalStackCfg.Endpoint)
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 
 	cfg := Config{
-		RPCURL:              rpc.URL,
+		RPCURL:              node.url,
 		StartBlock:          forkedBlock,
 		EndBlock:            forkedBlock,
 		Bucket:              bucket,
 		Region:              sharedLocalStackCfg.Region,
 		DryRun:              opts.dryRun,
+		AllowUnfinalized:    opts.allowUnfinalized,
 		BlockReceiptWorkers: 1,
 		TraceWorkers:        1,
 		UploadWorkers:       1,
 		BlockBatchSize:      1,
 		TraceBatchSize:      1,
 	}
-	return run(ctx, cfg, discardLogger())
+	return node, run(ctx, cfg, testutil.DiscardLogger())
 }
 
-// startFakeErigon answers the batched block, receipt and trace calls with a
-// canonical block at the forked height.
-func startFakeErigon(t *testing.T, failing bool) *httptest.Server {
+// fakeErigon answers the block, receipt and trace calls with a canonical block
+// at the forked height, and counts the reads so a test can tell a header from a
+// full block.
+type fakeErigon struct {
+	url           string
+	failing       bool
+	finalizedHead int64
+
+	mu         sync.Mutex
+	headers    int
+	fullBlocks int
+}
+
+func startFakeErigon(t *testing.T, opts downloaderRun) *fakeErigon {
 	t.Helper()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var requests []struct {
-			ID     int    `json:"id"`
-			Method string `json:"method"`
+	node := &fakeErigon{failing: opts.rpcFailure, finalizedHead: opts.finalizedHead}
+	if node.finalizedHead == 0 {
+		node.finalizedHead = forkedBlock
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(node.serve))
+	t.Cleanup(server.Close)
+	node.url = server.URL
+	return node
+}
+
+func (f *fakeErigon) reads() (headers, fullBlocks int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.headers, f.fullBlocks
+}
+
+// rpcRequest is as much of a JSON-RPC call as the fake node needs to answer it.
+type rpcRequest struct {
+	ID     int               `json:"id"`
+	Method string            `json:"method"`
+	Params []json.RawMessage `json:"params"`
+}
+
+// serve answers a batch with an array and a single call with an object, the way
+// a node does.
+func (f *fakeErigon) serve(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var batch []rpcRequest
+	if err := json.Unmarshal(body, &batch); err == nil {
+		f.reply(w, batch, true)
+		return
+	}
+
+	var single rpcRequest
+	if err := json.Unmarshal(body, &single); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	f.reply(w, []rpcRequest{single}, false)
+}
+
+func (f *fakeErigon) reply(w http.ResponseWriter, requests []rpcRequest, batched bool) {
+	responses := make([]map[string]any, 0, len(requests))
+	for _, req := range requests {
+		// The finalized head answers even on a failing node, so a test of a
+		// failed block is not a test of the finality guard.
+		if f.failing && !isFinalizedTag(req) {
+			responses = append(responses, map[string]any{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"error":   map[string]any{"code": -32000, "message": "block not found"},
+			})
+			continue
 		}
-		if err := json.NewDecoder(r.Body).Decode(&requests); err != nil {
+
+		result, err := f.result(req)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		responses = append(responses, map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result})
+	}
 
-		responses := make([]map[string]any, 0, len(requests))
-		for _, req := range requests {
-			if failing {
-				responses = append(responses, map[string]any{
-					"jsonrpc": "2.0",
-					"id":      req.ID,
-					"error":   map[string]any{"code": -32000, "message": "block not found"},
-				})
-				continue
-			}
-
-			result, err := erigonResult(req.Method)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			responses = append(responses, map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result})
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(responses); err != nil {
-			t.Errorf("encode RPC response: %v", err)
-		}
-	}))
-	t.Cleanup(server.Close)
-	return server
+	w.Header().Set("Content-Type", "application/json")
+	var payload any = responses
+	if !batched {
+		payload = responses[0]
+	}
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		panic(err)
+	}
 }
 
-func erigonResult(method string) (json.RawMessage, error) {
-	switch method {
+func (f *fakeErigon) result(req rpcRequest) (json.RawMessage, error) {
+	switch req.Method {
 	case "eth_getBlockByNumber":
-		return blockJSON(canonicalHash, 2), nil
+		return f.blockResult(req)
 	case "eth_getBlockReceipts":
 		return receiptsJSON(canonicalHash, 2), nil
 	case "trace_block":
 		return tracesJSON(canonicalHash), nil
 	default:
-		return nil, fmt.Errorf("unexpected RPC method %q", method)
+		return nil, fmt.Errorf("unexpected RPC method %q", req.Method)
 	}
+}
+
+func isFinalizedTag(req rpcRequest) bool {
+	return req.Method == "eth_getBlockByNumber" && len(req.Params) > 0 && string(req.Params[0]) == `"finalized"`
+}
+
+func (f *fakeErigon) blockResult(req rpcRequest) (json.RawMessage, error) {
+	if len(req.Params) != 2 {
+		return nil, fmt.Errorf("eth_getBlockByNumber takes 2 params, got %d", len(req.Params))
+	}
+	if isFinalizedTag(req) {
+		return headerJSON(canonicalHash, f.finalizedHead), nil
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if string(req.Params[1]) == "true" {
+		f.fullBlocks++
+		return blockJSON(canonicalHash, 2), nil
+	}
+	f.headers++
+	return headerJSON(canonicalHash, forkedBlock), nil
 }
 
 func seedArchivedVersion(t *testing.T, ctx context.Context, client *awss3.Client, bucket string, version int, hash string) {
@@ -314,6 +436,12 @@ func archivedVersions(t *testing.T, ctx context.Context, client *awss3.Client, b
 	}
 	slices.Sort(versions)
 	return versions
+}
+
+// headerJSON is an eth_getBlockByNumber payload with fullTx false: the fields a
+// header carries, and no transaction bodies.
+func headerJSON(hash string, blockNum int64) []byte {
+	return fmt.Appendf(nil, `{"hash":%q,"number":"0x%x","parentHash":%q}`, hash, blockNum, forkHash)
 }
 
 func tracesJSON(blockHash string) []byte {

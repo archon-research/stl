@@ -79,15 +79,14 @@ func EndpointOptionsFromEnv() []func(*s3.Options) {
 
 // NewReaderWithHTTPClient creates a new S3 Reader with a custom HTTP client.
 // This is useful for controlling connection pooling and timeouts.
-func NewReaderWithHTTPClient(cfg aws.Config, httpClient *http.Client, logger *slog.Logger, optFns ...func(*s3.Options)) *Reader {
+func NewReaderWithHTTPClient(cfg aws.Config, httpClient *http.Client, logger *slog.Logger) *Reader {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	opts := append([]func(*s3.Options){func(o *s3.Options) {
-		o.HTTPClient = httpClient
-	}}, optFns...)
 	return &Reader{
-		client: s3.NewFromConfig(cfg, opts...),
+		client: s3.NewFromConfig(cfg, func(o *s3.Options) {
+			o.HTTPClient = httpClient
+		}),
 		logger: logger,
 	}
 }
