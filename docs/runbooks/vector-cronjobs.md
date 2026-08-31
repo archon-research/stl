@@ -183,8 +183,10 @@ Repair:
   publishes it, so the indexers append the correction. The orphaned version-0
   rows stay put as history.
 - **A hole outside the retained window has no executable repair yet.**
-  `raw-block-bulk-downloader --start-block <N> --end-block <N>` stamps the
-  canonical `_1_` objects in S3, but that fixes S3 only: the indexers' rows stay
+  `raw-block-bulk-downloader --start-block <N> --end-block <N>` (run it with
+  `--dry-run` first: it prints the plan per height) writes the canonical block,
+  receipts and traces at the next free version above the losing fork, but that
+  fixes S3 only: the indexers' rows stay
   at `block_version` 0 until the republish tool tracked as **ARCT-383** exists.
 
 Run the check against prod's retained window before the prod deploy — a hole
