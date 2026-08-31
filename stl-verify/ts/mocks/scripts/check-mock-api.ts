@@ -1437,6 +1437,25 @@ async function checkAReadCanBeMadeToFail() {
   );
 }
 
+/**
+ * Each registry has to be failable on its own. Leaving one of the three out is
+ * what let the token filter go on saying "All tokens" while its two neighbours
+ * reported a failure — the gap was in the control, so nothing could drill it.
+ */
+async function checkEachRegistryCanBeMadeToFail() {
+  const registries = [
+    ['chains', '/v1/chains'],
+    ['protocols', '/v1/protocols'],
+    ['tokens', '/v1/tokens'],
+  ] as const;
+
+  for (const [read, path] of registries) {
+    mockServer.server.use(failingHandler(read));
+
+    await expectStatus(path, {}, 503, `${read}, failing`);
+  }
+}
+
 const checks: [string, () => Promise<void>][] = [
   ['primes list shape', checkPrimesList],
   ['registry lists', checkRegistryLists],
@@ -1507,6 +1526,7 @@ const checks: [string, () => Promise<void>][] = [
   ['illegal windows are rejected', checkIllegalWindowsAreRejected],
   ['rrc rejects an ambiguous identity', checkRrcRejectsAmbiguousIdentity],
   ['a read can be made to fail', checkAReadCanBeMadeToFail],
+  ['each registry can be made to fail', checkEachRegistryCanBeMadeToFail],
 ];
 
 let failed = 0;

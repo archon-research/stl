@@ -42,7 +42,7 @@ export function MetricsFootnote({
       : 'partial';
 
   return (
-    <p className={css({ m: 0, fontSize: 'xs', color: 'text.muted' })}>
+    <p className={css({ m: '0', fontSize: 'xs', color: 'text.muted' })}>
       {provenance === 'reference' ? (
         // No model ran, so the coverage figure below would read as "STL priced
         // all of this" when nothing of STL's did. Attribute the figures to

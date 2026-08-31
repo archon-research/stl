@@ -27,9 +27,12 @@ type TopBarProps = {
   // chunk. Optional: a caller with nothing to warm simply omits it.
   onViewIntent?: (view: 'allocation' | 'activities') => void;
   networkOptions: FilterOption[];
+  /** Whether the empty option list is a failed read rather than a short one. */
+  networkOptionsFailed: boolean;
   onNetworkChange: (value: string | null) => void;
   onProtocolChange: (value: string | null) => void;
   protocolOptions: FilterOption[];
+  protocolOptionsFailed: boolean;
   selectedNetwork: string | null;
   selectedProtocol: string | null;
   selectedView: 'allocation' | 'activities';
@@ -64,7 +67,7 @@ const tabTriggerClassName = css({
   borderBottomWidth: '2px',
   borderBottomStyle: 'solid',
   borderBottomColor: 'transparent',
-  transitionProperty: 'color, border-color',
+  transitionProperty: 'colors',
   transitionDuration: 'fast',
   whiteSpace: 'nowrap',
   _hover: { color: 'text.default' },
@@ -94,19 +97,19 @@ const sidebarToggleClassName = css({
   background: 'surface.default',
   color: 'text.muted',
   cursor: 'pointer',
-  transitionProperty: 'color, border-color',
+  transitionProperty: 'colors',
   transitionDuration: 'fast',
   _hover: { color: 'text.strong', borderColor: 'border.default' },
   _focusVisible: {
     outlineWidth: '2px',
     outlineStyle: 'solid',
     outlineColor: 'interactive.accent',
-    outlineOffset: '2px',
+    outlineOffset: '0.5',
   },
 });
 
 const rangeFieldClassName = css({
-  width: { base: '100%', sm: '14rem' },
+  width: { base: 'full', sm: '56' },
   flexShrink: 0,
 });
 
@@ -128,7 +131,7 @@ function FilterField({
   return (
     <div
       className={css({
-        width: { base: '100%', sm: '11rem' },
+        width: { base: 'full', sm: '44' },
         flexShrink: 0,
       })}
     >
@@ -160,9 +163,11 @@ export function TopBar({
   onViewChange,
   onViewIntent,
   networkOptions,
+  networkOptionsFailed,
   onNetworkChange,
   onProtocolChange,
   protocolOptions,
+  protocolOptionsFailed,
   selectedNetwork,
   selectedProtocol,
   selectedView,
@@ -200,8 +205,9 @@ export function TopBar({
           // because the content column and this slot resolve to different
           // widths; measured against the card at 1680px, both edges land within
           // a pixel.
-          marginLeft: '-16px',
-          marginRight: '-5px',
+          marginLeft: '-4',
+          // A device-pixel correction rather than a spacing choice.
+          marginRight: '[-5px]',
         })}
       >
         <div className={flex({ align: 'center', gap: '4', flexShrink: 0 })}>
@@ -275,7 +281,14 @@ export function TopBar({
             disabled={networkOptions.length === 0}
             onChange={onNetworkChange}
             options={networkOptions}
-            placeholder="All networks"
+            // A registry that failed leaves the same empty, disabled field an
+            // unanswered one does; the placeholder is the only slot that can
+            // say which of the two the reader is looking at. Kept short — the
+            // field is 122px of text and a native select clips without an
+            // ellipsis.
+            placeholder={
+              networkOptionsFailed ? 'Network list failed' : 'All networks'
+            }
             value={selectedNetwork}
           />
           <FilterField
@@ -286,7 +299,9 @@ export function TopBar({
             }
             onChange={onProtocolChange}
             options={protocolOptions}
-            placeholder="All protocols"
+            placeholder={
+              protocolOptionsFailed ? 'Protocol list failed' : 'All protocols'
+            }
             value={selectedProtocol}
           />
           {showRangePicker ? (

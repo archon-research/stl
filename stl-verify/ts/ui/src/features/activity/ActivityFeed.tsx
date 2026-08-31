@@ -73,6 +73,9 @@ type ActivityFeedProps = {
   searchQuery?: string;
   showAllPrimes?: boolean;
   tokenOptions?: string[];
+  // Whether an empty `tokenOptions` is empty because its registry failed. The
+  // two look identical in the filter bar, and only one is a fact about tokens.
+  tokenOptionsFailed?: boolean;
   chainLabels?: ChainLabelLookup;
   // External range control: provided by parent-owned top bar picker.
   externalRangePreset?: RangePreset;
@@ -98,11 +101,15 @@ const ACTION_FILTER_OPTIONS = [
   { label: 'Sweep', value: 'sweep' },
 ];
 
-const filterFieldClassName = css({ display: 'grid', gap: '1', minWidth: 0 });
+const filterFieldClassName = css({
+  display: 'grid',
+  gap: '1',
+  minWidth: '0',
+});
 const filterLabelClassName = css({
   fontSize: 'xs',
   textTransform: 'uppercase',
-  letterSpacing: '0.1em',
+  letterSpacing: 'widest',
   color: 'text.muted',
 });
 
@@ -258,7 +265,7 @@ function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
 
       <pre
         className={css({
-          margin: 0,
+          margin: '0',
           borderRadius: 'sm',
           bg: 'surface.subtle',
           padding: '2',
@@ -266,7 +273,7 @@ function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
           fontSize: 'xs',
           color: 'text.default',
           overflowX: 'auto',
-          maxHeight: '10rem',
+          maxHeight: '40',
         })}
       >
         {formatEventData(event.event_data)}
@@ -835,13 +842,15 @@ function ActivityPageHeader({
         className={css({
           display: 'grid',
           gap: '1',
-          minWidth: { base: '0', md: '18rem' },
-          flex: '1 1 20rem',
+          minWidth: { base: '0', md: '72' },
+          flexGrow: '1',
+          flexShrink: '1',
+          flexBasis: '80',
         })}
       >
         <h1
           className={css({
-            m: 0,
+            m: '0',
             fontSize: { base: '3xl', md: '4xl' },
             lineHeight: 'tight',
             color: 'text.strong',
@@ -899,6 +908,7 @@ type ActivityFilterBarProps = {
   tokenFilter: string | null;
   onTokenFilterChange?: (value: string | null) => void;
   tokenOptions: string[];
+  tokenOptionsFailed: boolean;
   hasActiveFilters: boolean;
   onClearFilters: () => void;
 };
@@ -909,6 +919,7 @@ function ActivityFilterBar({
   tokenFilter,
   onTokenFilterChange,
   tokenOptions,
+  tokenOptionsFailed,
   hasActiveFilters,
   onClearFilters,
 }: ActivityFilterBarProps) {
@@ -942,11 +953,12 @@ function ActivityFilterBar({
             ))}
           </StyledSelect>
         </label>
-        {tokenOptions.length > 0 ? (
+        {tokenOptions.length > 0 || tokenOptionsFailed ? (
           <label className={filterFieldClassName}>
             <span className={filterLabelClassName}>Token</span>
             <StyledSelect
               aria-label="Filter activity by token symbol"
+              disabled={tokenOptions.length === 0}
               value={tokenFilter ?? ''}
               onChange={(event: ChangeEvent<HTMLSelectElement>) =>
                 onTokenFilterChange?.(
@@ -954,7 +966,11 @@ function ActivityFilterBar({
                 )
               }
             >
-              <option value="">All tokens</option>
+              {/* The same slot the network and protocol chips say it in: an
+                  empty, disabled field cannot say which of the two it is. */}
+              <option value="">
+                {tokenOptionsFailed ? 'Token list failed' : 'All tokens'}
+              </option>
               {tokenOptions.map((symbol) => (
                 <option key={symbol} value={symbol}>
                   {symbol}
@@ -1070,8 +1086,10 @@ function ActivityTable({
 
 type ActivityResultsProps = ActivityTableProps & {
   error: string | null;
-  // Rows fetched before the search filter narrows them: only a first load with
-  // nothing on screen yet shows the skeleton, a refetch keeps the current rows.
+  // Rows fetched before the search filter narrows them: the skeleton shows
+  // only while nothing is on screen, so a refetch over rows already fetched
+  // leaves them up. A filter change is a new query key with no rows of its
+  // own, so that one does show the skeleton.
   totalEventCount: number;
   emptyDescription: string;
 };
@@ -1130,6 +1148,7 @@ export function ActivityFeed(props: ActivityFeedProps) {
     showAllPrimes = false,
     chainLabels,
     selectedReceiptToken = null,
+    tokenOptionsFailed = false,
   } = props;
   const {
     isPageMode,
@@ -1224,6 +1243,7 @@ export function ActivityFeed(props: ActivityFeedProps) {
           tokenFilter={tokenFilter}
           onTokenFilterChange={onTokenFilterChange}
           tokenOptions={uniqueTokenOptions}
+          tokenOptionsFailed={tokenOptionsFailed}
           hasActiveFilters={hasActiveFilters}
           onClearFilters={clearFilters}
         />
@@ -1231,7 +1251,7 @@ export function ActivityFeed(props: ActivityFeedProps) {
           className={css({
             display: 'flex',
             flexDirection: 'column',
-            minHeight: '24rem',
+            minHeight: '96',
           })}
         >
           {activityResults}

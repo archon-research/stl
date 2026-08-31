@@ -185,11 +185,11 @@ function AllocationAssetCell({
   );
 
   return (
-    <div className={css({ display: 'grid', gap: '1', minWidth: 0 })}>
+    <div className={css({ display: 'grid', gap: '1', minWidth: '0' })}>
       <div className={flex({ align: 'center', gap: '1.5', wrap: 'wrap' })}>
         <p
           className={css({
-            m: 0,
+            m: '0',
             fontSize: 'sm',
             fontWeight: 'semibold',
             color: 'text.strong',
@@ -260,7 +260,7 @@ function AllocationUnderlyingCell({ allocation }: { allocation: Allocation }) {
   // does for an absent value.
   if (!allocation.underlying_symbol && !allocation.underlying_token_address) {
     return (
-      <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>—</p>
+      <p className={css({ m: '0', fontSize: 'sm', color: 'text.muted' })}>—</p>
     );
   }
 
@@ -287,7 +287,7 @@ function AllocationUnderlyingCell({ allocation }: { allocation: Allocation }) {
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
-            m: 0,
+            m: '0',
           })}
         >
           {allocation.underlying_symbol}
@@ -349,7 +349,7 @@ function AllocationExposureCell({ row }: { row: AllocationGridRow }) {
             // column's `meta.mono`: this cell is a composite (logo, value,
             // address) and mono would restyle all of it.
             fontVariantNumeric: 'tabular-nums',
-            m: 0,
+            m: '0',
           })}
         >
           <span title={valuationTitle}>
@@ -398,7 +398,7 @@ function AllocationActivityCell({ allocation }: { allocation: Allocation }) {
     return (
       <p
         className={css({
-          m: 0,
+          m: '0',
           fontSize: 'sm',
           color: 'text.muted',
         })}
@@ -450,7 +450,7 @@ function AllocationActivityCell({ allocation }: { allocation: Allocation }) {
       </div>
       <p
         className={css({
-          m: 0,
+          m: '0',
           fontSize: 'xs',
           color: 'text.muted',
         })}
@@ -612,7 +612,7 @@ function AllocationRiskCapitalCell({
     return (
       <p
         title="Risk capital is not yet available for non-mainnet allocations."
-        className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}
+        className={css({ m: '0', fontSize: 'sm', color: 'text.muted' })}
       >
         Not yet available
       </p>
@@ -624,7 +624,7 @@ function AllocationRiskCapitalCell({
     return (
       <p
         title={unsettled.title}
-        className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}
+        className={css({ m: '0', fontSize: 'sm', color: 'text.muted' })}
       >
         {unsettled.label}
       </p>
@@ -633,7 +633,9 @@ function AllocationRiskCapitalCell({
 
   if (risk.riskCapitalUsd === null) {
     return (
-      <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>n/a</p>
+      <p className={css({ m: '0', fontSize: 'sm', color: 'text.muted' })}>
+        n/a
+      </p>
     );
   }
 
@@ -641,7 +643,7 @@ function AllocationRiskCapitalCell({
     <p
       title={derivedRiskTitle(risk)}
       className={css({
-        m: 0,
+        m: '0',
         fontSize: 'sm',
         fontWeight: 'semibold',
         color: 'text.strong',
@@ -946,7 +948,7 @@ function AllocationRatioCell({
     return (
       <p
         title={unsettled.title}
-        className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}
+        className={css({ m: '0', fontSize: 'sm', color: 'text.muted' })}
       >
         {state === 'loading' ? unsettled.label : '—'}
       </p>
@@ -957,7 +959,7 @@ function AllocationRatioCell({
     <p
       title={value === null ? undefined : title}
       className={css({
-        m: 0,
+        m: '0',
         fontSize: 'sm',
         fontWeight: 'semibold',
         color: value === null ? 'text.muted' : 'text.strong',
@@ -1270,8 +1272,10 @@ export function AllocationGrid({
             className={css({
               display: 'grid',
               gap: '1',
-              minWidth: { base: '0', md: '18rem' },
-              flex: '1 1 20rem',
+              minWidth: { base: '0', md: '72' },
+              flexGrow: '1',
+              flexShrink: '1',
+              flexBasis: '80',
             })}
           >
             <div className={flex({ align: 'center', gap: '2.5' })}>
@@ -1280,7 +1284,7 @@ export function AllocationGrid({
                   <ProtocolLogo protocolName={selectedPrime.name} size="8" />
                   <h1
                     className={css({
-                      m: 0,
+                      m: '0',
                       fontSize: { base: '3xl', md: '4xl' },
                       lineHeight: 'tight',
                       color: 'text.strong',
@@ -1334,7 +1338,10 @@ export function AllocationGrid({
                 gap: { base: '2.5', md: '4' },
                 justifyContent: { base: 'flex-start', md: 'flex-end' },
                 textAlign: { base: 'left', md: 'right' },
-                flex: '1 1 22rem',
+                flexGrow: '1',
+                flexShrink: '1',
+                // 22rem falls between the 20rem and 24rem steps.
+                flexBasis: '[22rem]',
               })}
             >
               {summary ? (
@@ -1362,7 +1369,9 @@ export function AllocationGrid({
                   <span
                     className={css({
                       fontSize: 'xs',
-                      lineHeight: 'short',
+                      // `short` is no token, so this shipped as an invalid
+                      // `line-height: short` the browser drops; `snug` is 1.375.
+                      lineHeight: 'snug',
                       color: 'text.muted',
                     })}
                   >
@@ -1401,7 +1410,9 @@ export function AllocationGrid({
                   <span
                     className={css({
                       fontSize: 'xs',
-                      lineHeight: 'short',
+                      // `short` is no token, so this shipped as an invalid
+                      // `line-height: short` the browser drops; `snug` is 1.375.
+                      lineHeight: 'snug',
                       color: 'text.muted',
                     })}
                   >
@@ -1477,7 +1488,7 @@ export function AllocationGrid({
           <span
             className={css({
               display: 'inline-flex',
-              width: 'fit-content',
+              width: 'fit',
               alignItems: 'center',
               borderRadius: 'full',
               bg: 'bg.neutral',
@@ -1485,7 +1496,7 @@ export function AllocationGrid({
               py: '1',
               fontSize: 'xs',
               fontWeight: 'semibold',
-              letterSpacing: '0.1em',
+              letterSpacing: 'widest',
               textTransform: 'uppercase',
               color: 'text.muted',
             })}
@@ -1503,13 +1514,13 @@ export function AllocationGrid({
               alignItems: 'end',
               gap: '3',
               minWidth: '0',
-              width: '100%',
+              width: 'full',
               justifySelf: { lg: 'end' },
             })}
           >
             <div
               className={css({
-                width: { base: '100%', sm: '11rem' },
+                width: { base: 'full', sm: '44' },
                 flexShrink: 0,
               })}
             >
@@ -1531,7 +1542,9 @@ export function AllocationGrid({
             </div>
             <div
               className={css({
-                flex: '1 1 16rem',
+                flexGrow: '1',
+                flexShrink: '1',
+                flexBasis: '64',
                 minWidth: '0',
               })}
             >

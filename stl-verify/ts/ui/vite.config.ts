@@ -81,6 +81,12 @@ export default defineConfig(({ mode }) => {
       // preserveSymlinks makes Vite treat a workspace link as a dependency and
       // prebundle it, so an edited fixture keeps serving its old body.
       exclude: ['@archon-research/design-system', '@stl-verify/mocks'],
+      // Reached only from the excluded design system, so the dev server serves
+      // `@tanstack/react-store` raw -- and its CJS `use-sync-external-store`
+      // shim has no named exports, which fails the whole entry graph. Naming
+      // the shim prebundles it without collapsing the two `react-store` copies
+      // in the tree onto one, which is what `include`ing react-store itself did.
+      include: ['use-sync-external-store/shim/with-selector'],
     },
     resolve: {
       preserveSymlinks: true,

@@ -24,7 +24,9 @@ gesture meant to bring it back — is unreachable offline unless something asks
 for a failure:
 
 ```js
-window.failMock('risk-capital');   // also 'prime-debt', 'exposure'
+// also 'prime-debt', 'exposure', 'allocation-activity', and the three
+// registries: 'chains', 'protocols', 'tokens'
+window.failMock('risk-capital');
 window.resetMocks();               // drops it again
 ```
 

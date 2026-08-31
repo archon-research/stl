@@ -34,7 +34,7 @@ type CollapsibleSidebarLayoutProps = {
 // both states and only the sidebar track disappears.
 const rootClassName = css({
   width: 'full',
-  height: '100vh',
+  height: 'screen',
   minWidth: '0',
   overflow: 'hidden',
 });

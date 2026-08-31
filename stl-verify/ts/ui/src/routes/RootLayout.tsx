@@ -61,10 +61,12 @@ function DashboardChrome() {
   const provenanceAvailability = useProvenanceAvailability();
   useProvenanceRedirect(provenanceAvailability, selectedPrimeGroup?.name);
 
-  const { networkOptions, protocolOptions } = useDashboardFilters(
-    selectedView,
-    selectedPrimeGroup,
-  );
+  const {
+    networkOptions,
+    networkOptionsFailed,
+    protocolOptions,
+    protocolOptionsFailed,
+  } = useDashboardFilters(selectedView, selectedPrimeGroup);
 
   // View-local on purpose: collapsing the prime list is a momentary "give me the
   // whole width" gesture, not a preference worth persisting across sessions.
@@ -103,6 +105,7 @@ function DashboardChrome() {
               )}
               hasSelectedPrime={selectedPrime !== null}
               networkOptions={networkOptions}
+              networkOptionsFailed={networkOptionsFailed}
               onNetworkChange={(value) =>
                 updateSearch({ network: value ?? undefined })
               }
@@ -110,6 +113,7 @@ function DashboardChrome() {
                 updateSearch({ protocol: value ?? undefined })
               }
               protocolOptions={protocolOptions}
+              protocolOptionsFailed={protocolOptionsFailed}
               selectedNetwork={search.network ?? null}
               selectedProtocol={search.protocol ?? null}
               selectedView={selectedView}

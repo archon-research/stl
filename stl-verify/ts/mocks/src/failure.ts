@@ -16,15 +16,19 @@ import { mock } from './mock-api.ts';
 import { problemResponse, unavailable } from './problem.ts';
 
 /**
- * The reads worth being able to fail: each backs a card or a series that has
- * its own error state, so failing one exercises a distinct recovery path.
- * Names rather than paths, since this is the surface a Playwright case or a
- * developer types.
+ * The reads worth being able to fail: each backs a card, a series or a filter
+ * that has its own error state, so failing one exercises a distinct recovery
+ * path. Names rather than paths, since this is the surface a Playwright case or
+ * a developer types.
  */
 export const FAILABLE_READS = [
   'risk-capital',
   'prime-debt',
   'exposure',
+  'allocation-activity',
+  'chains',
+  'protocols',
+  'tokens',
 ] as const;
 
 export type FailableRead = (typeof FAILABLE_READS)[number];
@@ -54,5 +58,20 @@ export function failingHandler(
       return mock.get('/v1/primes/{prime_id}/debt', fail);
     case 'exposure':
       return mock.get('/v1/primes/{prime_id}/exposure', fail);
+    // The three registries. Each backs a filter that reports its own failure,
+    // so each needs to be failable on its own -- one of the three left out is
+    // the asymmetry that hid the token filter staying silent.
+    case 'chains':
+      return mock.get('/v1/chains', fail);
+    case 'protocols':
+      return mock.get('/v1/protocols', fail);
+    // Also the catalogue the methodology panel counts, so failing it fails
+    // both the filter's option list and that count.
+    case 'tokens':
+      return mock.get('/v1/tokens', fail);
+    // One path behind two reads: the metric card's bucketed series and the
+    // activity feed's rows. Failing it fails both, which is what the API does.
+    case 'allocation-activity':
+      return mock.get('/v1/allocations/activity', fail);
   }
 }

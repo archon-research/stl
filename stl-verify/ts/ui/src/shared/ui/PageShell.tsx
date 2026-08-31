@@ -25,7 +25,7 @@ export function PageShell({ children }: PageShellProps) {
   return (
     <div
       className={css({
-        minHeight: '100%',
+        minHeight: 'full',
         bg: 'surface.canvas',
         py: { base: '4', md: '5' },
       })}

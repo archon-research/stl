@@ -29,8 +29,8 @@ const triggerClassName = css({
   display: 'inline-flex',
   alignItems: 'center',
   justifyContent: 'center',
-  height: '2.25rem',
-  width: '2.25rem',
+  height: '9',
+  width: '9',
   flexShrink: 0,
   borderWidth: '1px',
   borderStyle: 'solid',
@@ -44,7 +44,7 @@ const triggerClassName = css({
 });
 
 const contentClassName = css({
-  minWidth: '15rem',
+  minWidth: '60',
   borderWidth: '1px',
   borderStyle: 'solid',
   borderColor: 'border.subtle',
@@ -53,7 +53,8 @@ const contentClassName = css({
   boxShadow: 'overlay',
   paddingBlock: '1.5',
   overflow: 'hidden',
-  zIndex: '50',
+  // The preset ships no zIndex scale.
+  zIndex: '[50]',
   _focusVisible: { outline: 'none' },
 });
 
@@ -85,18 +86,21 @@ const indicatorClassName = css({
   display: 'inline-flex',
   alignItems: 'center',
   justifyContent: 'center',
-  height: '1rem',
+  height: '4',
   color: 'text.link',
 });
 
 const optionDescriptionClassName = css({
   fontSize: 'xs',
   color: 'text.muted',
-  lineHeight: 'short',
+  // `short` is no token, so this shipped as an invalid
+  // `line-height: short` the browser drops; `snug` is 1.375.
+  lineHeight: 'snug',
 });
 
 const separatorClassName = css({
-  height: '1px',
+  // Hairline rule; the scale has no 1px step.
+  height: '[1px]',
   marginBlock: '1.5',
   marginInline: '0',
   borderWidth: '0',

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type {
   AllocationActivityEnvelope,
+  ExposureEnvelope,
   PrimeDebtEnvelope,
   TokensResponse,
 } from '../types/allocation';
@@ -10,6 +11,7 @@ import { toQueryErrorMessage } from './errors';
 import {
   activitySeriesQuery,
   debtSeriesQuery,
+  exposureSeriesQuery,
   latestReferenceDebtQuery,
   type SeriesWindow,
   tokenSymbolsQuery,
@@ -111,6 +113,38 @@ describe('the token-symbol projection', () => {
       'DAI',
       'WETH',
     ]);
+  });
+});
+
+describe('envelope payload policy', () => {
+  // `data` is required and non-nullable on every envelope, so a missing one is
+  // a contract violation — and a `select` that throws logs nowhere by itself.
+  it('rejects an envelope whose data is not an array', () => {
+    const error = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+    const select = selectOf<PrimeDebtEnvelope, unknown>(
+      debtSeriesQuery(PRIME, WINDOW),
+    );
+
+    expect(() =>
+      select({
+        mode: 'aggregated',
+        data: null,
+      } as unknown as PrimeDebtEnvelope),
+    ).toThrow(/returned a non-array `data` for an aggregated request/);
+    expect(error).toHaveBeenCalledOnce();
+  });
+
+  it('rejects it on a single-mode series too', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const select = selectOf<ExposureEnvelope, unknown>(
+      exposureSeriesQuery(PRIME, WINDOW),
+    );
+
+    expect(() =>
+      select({ mode: 'aggregated', data: null } as unknown as ExposureEnvelope),
+    ).toThrow(/GET \/v1\/primes\/\{prime_id\}\/exposure returned a non-array/);
   });
 });
 

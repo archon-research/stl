@@ -129,7 +129,7 @@ export function findMetricChart(
 // "TOTA…". A line of its own is the same corner of the card with room to read.
 const cardHeaderClassName = css({
   display: 'flex',
-  width: '100%',
+  width: 'full',
   alignItems: 'center',
   justifyContent: 'space-between',
   gap: '2',
@@ -139,7 +139,7 @@ const cardHeaderClassName = css({
 // beside it every card's title fits, and this is what keeps a longer one from
 // wrapping the header and dropping this card's chart below its row-mates'.
 const cardTitleClassName = css({
-  minWidth: 0,
+  minWidth: '0',
   overflow: 'hidden',
   textOverflow: 'ellipsis',
   whiteSpace: 'nowrap',
@@ -175,7 +175,7 @@ const cardLegendRowClassName = css({
 // keep filling the tile.
 const cardDetailSlotClassName = css({
   flex: '1',
-  minWidth: 0,
+  minWidth: '0',
   overflowWrap: 'anywhere',
 });
 
@@ -397,7 +397,8 @@ const metricsCardClassName = css({
   borderColor: 'border.default',
   bg: 'surface.subtle',
   p: { base: '3', md: '3.5' },
-  boxShadow: 'none',
+  // No 'none' shadow token.
+  boxShadow: '[none]',
   display: 'flex',
   flexDirection: 'column',
   // Uniform gap between label, value, and detail. Avoids `space-between`,
@@ -410,9 +411,10 @@ export const metricDetailClassName = css({
   display: 'grid',
   gridTemplateRows: 'auto 1fr',
   gap: '2',
-  minHeight: '17rem',
+  // Between the 16rem and 18rem steps.
+  minHeight: '[17rem]',
   // One line whether or not it has text, since only some cards carry an
   // observation stamp and an empty row lifts the chart out of line with its
   // row-mates. `1lh` resolves against the caption's own font, not the card's.
-  '& > :first-child': { minHeight: '1lh' },
+  '& > :first-child': { minHeight: '[1lh]' },
 });

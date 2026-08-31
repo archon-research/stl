@@ -1,5 +1,9 @@
 import { isHttpRequestError } from '@archon-research/http-client-react';
-import { QueryCache, QueryClient } from '@tanstack/react-query';
+import {
+  type NetworkMode,
+  QueryCache,
+  QueryClient,
+} from '@tanstack/react-query';
 
 import { logging } from './logging';
 
@@ -41,12 +45,47 @@ function logQueryFailure(
   });
 }
 
-// A 4xx is an answer, not an outage: retrying one only delays the error the
-// caller is already equipped to render. Anything else gets three attempts
-// rather than react-query's default four — this screen issues a dozen requests,
-// and a fourth round of backoff on all of them outlasts anyone's patience.
+/**
+ * Whether a query is allowed to fetch while the browser calls itself offline.
+ *
+ * react-query's `'online'` default parks a query with no cached data in
+ * `pending`/`paused` and leaves it there — `isPending` true, `error`
+ * undefined, no timeout — so a drawer tab opened on an uncached row shows its
+ * skeleton for good. `'always'` lets the fetch run and reject, which is a state
+ * the tab already renders, with a retry the reader can reach.
+ *
+ * The cost is `onlineManager` gating: a query that would have waited out a blip
+ * and resumed on reconnect instead spends its retries on a dead network and
+ * settles as an error, after the full backoff, for the reader to retry.
+ */
+const NETWORK_MODE: NetworkMode = 'always';
+
+/**
+ * The 4xx statuses that say "not now" rather than "no": the request itself was
+ * acceptable and the identical one may well succeed.
+ *
+ * 429 is the one that bites here — this screen opens a dozen requests at once,
+ * so it is the first paint that trips a rate limiter, and `staleTime: Infinity`
+ * on the registries plus `refetchOnWindowFocus: false` mean a query stranded
+ * there stays stranded until the tab is reloaded.
+ */
+const RETRYABLE_CLIENT_ERRORS: ReadonlySet<number> = new Set([
+  408, // Request Timeout
+  425, // Too Early
+  429, // Too Many Requests
+]);
+
+// A 4xx is otherwise an answer, not an outage: retrying one only delays the
+// error the caller is already equipped to render. Anything else gets three
+// attempts rather than react-query's default four — this screen issues a dozen
+// requests, and a fourth round of backoff on all of them outlasts anyone's
+// patience.
 function retryUnlessClientError(failureCount: number, error: Error): boolean {
-  if (isHttpRequestError(error) && error.status < 500) {
+  if (
+    isHttpRequestError(error) &&
+    error.status < 500 &&
+    !RETRYABLE_CLIENT_ERRORS.has(error.status)
+  ) {
     return false;
   }
 
@@ -72,6 +111,7 @@ function createAppQueryClient(): QueryClient {
         // forgets to.
         staleTime: 30_000,
         gcTime: 5 * 60_000,
+        networkMode: NETWORK_MODE,
         // This screen issues a dozen requests on first paint. Refiring them
         // because someone alt-tabbed back is cost without an answer anyone
         // asked for.
