@@ -292,3 +292,41 @@ func TestGzipReadCloser(t *testing.T) {
 		t.Errorf("Close() error = %v", err)
 	}
 }
+
+func TestReadRange_SendsByteRangeAndReturnsObjectAsStored(t *testing.T) {
+	ctx := context.Background()
+
+	var full bytes.Buffer
+	gzWriter := gzip.NewWriter(&full)
+	if _, err := gzWriter.Write([]byte(`{"hash":"0xabc","transactions":[]}`)); err != nil {
+		t.Fatalf("write gzip content: %v", err)
+	}
+	if err := gzWriter.Close(); err != nil {
+		t.Fatalf("close gzip writer: %v", err)
+	}
+	stored := full.Bytes()
+
+	var gotRange string
+	reader := &Reader{
+		client: &mockS3API{
+			getObjectFunc: func(_ context.Context, params *s3.GetObjectInput, _ ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+				if params.Range != nil {
+					gotRange = *params.Range
+				}
+				return &s3.GetObjectOutput{Body: io.NopCloser(bytes.NewReader(stored[:10]))}, nil
+			},
+		},
+		logger: slog.Default(),
+	}
+
+	got, err := reader.ReadRange(ctx, "bucket", "0-999/42_1_block.json.gz", 0, 9)
+	if err != nil {
+		t.Fatalf("ReadRange() error = %v", err)
+	}
+	if gotRange != "bytes=0-9" {
+		t.Errorf("Range header = %q, want %q", gotRange, "bytes=0-9")
+	}
+	if !bytes.Equal(got, stored[:10]) {
+		t.Errorf("ReadRange() = %x, want the stored bytes undecompressed %x", got, stored[:10])
+	}
+}

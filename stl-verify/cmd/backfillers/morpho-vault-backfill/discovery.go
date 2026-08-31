@@ -514,9 +514,12 @@ func partitionsForRange(from, to int64) []string {
 // raw-block-bulk-downloader run stamped its uploads version 1, so deep history is
 // _1_-only and one transition window holds identical _0_/_1_ twins (hash-verified
 // canonical). Rows replayed from those ranges therefore carry block_version=1 with
-// no reorg behind them — never infer a reorg from block_version alone. A real reorg
-// is watcher-written twins with different block hashes, and the higher version is
-// the canonical re-publish, which this rule selects correctly.
+// no reorg behind them — never infer a reorg from block_version alone. That tool
+// now archives a first copy at version 0 and corrections at the next free version
+// (ARCT-379), so a _1_ a later run wrote is a correction of the version below it:
+// that block lost its fork, or held no object able to identify it. A real reorg is
+// watcher-written twins with different block hashes, and the higher version is the
+// canonical re-publish, which this rule selects correctly.
 func listHighestVersionReceipts(
 	ctx context.Context,
 	s3Reader outbound.S3Reader,
