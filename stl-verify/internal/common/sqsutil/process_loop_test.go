@@ -495,12 +495,10 @@ func TestProcessMessages_LogsWhenHandlerIgnoresDeadline(t *testing.T) {
 	}
 }
 
-// TestProcessMessages_DrainsInFlightHandlerOnShutdown covers the rollout
-// blackout measured in kind: SIGTERM mid-message used to cancel the handler,
-// leaving the message in flight for the queue's visibility timeout (300s) and
-// starving the successor pod, which on a FIFO queue is the chain's whole block
-// stream. The handler must instead keep a live context and its message must be
-// deleted.
+// TestProcessMessages_DrainsInFlightHandlerOnShutdown pins that SIGTERM
+// mid-message leaves the handler a live context and still deletes its message:
+// cancelling it would hold the message for the queue's visibility timeout and
+// stall the FIFO group behind it.
 func TestProcessMessages_DrainsInFlightHandlerOnShutdown(t *testing.T) {
 	consumer := &mockConsumer{
 		batches: [][]outbound.SQSMessage{{makeMsg("1", "h1", blockEvent(100))}},

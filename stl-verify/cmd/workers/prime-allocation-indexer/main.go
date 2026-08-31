@@ -376,7 +376,7 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("create service: %w", err)
 	}
 
-	logger.Info("running",
+	logger.Info("starting prime allocation indexer",
 		"chainID", cfg.chainID,
 		"entries", len(entries),
 		"sweepEveryNBlocks", cfg.sweepBlocks)

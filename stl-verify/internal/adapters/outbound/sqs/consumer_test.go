@@ -14,15 +14,12 @@ import (
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	smithy "github.com/aws/smithy-go"
 
-	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// mockSQSAPI records the last visibility-change call of either shape; the
-// other sqsAPI methods exist only to satisfy the interface.
+// mockSQSAPI records the last visibility-change batch; the other sqsAPI
+// methods exist only to satisfy the interface.
 type mockSQSAPI struct {
-	visibilityInput      *sqs.ChangeMessageVisibilityInput
 	visibilityBatchInput *sqs.ChangeMessageVisibilityBatchInput
 	batchFailed          []sqstypes.BatchResultErrorEntry
 	err                  error
@@ -34,14 +31,6 @@ func (m *mockSQSAPI) ReceiveMessage(context.Context, *sqs.ReceiveMessageInput, .
 
 func (m *mockSQSAPI) DeleteMessage(context.Context, *sqs.DeleteMessageInput, ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error) {
 	return &sqs.DeleteMessageOutput{}, nil
-}
-
-func (m *mockSQSAPI) ChangeMessageVisibility(_ context.Context, params *sqs.ChangeMessageVisibilityInput, _ ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityOutput, error) {
-	m.visibilityInput = params
-	if m.err != nil {
-		return nil, m.err
-	}
-	return &sqs.ChangeMessageVisibilityOutput{}, nil
 }
 
 func (m *mockSQSAPI) ChangeMessageVisibilityBatch(_ context.Context, params *sqs.ChangeMessageVisibilityBatchInput, _ ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityBatchOutput, error) {
@@ -158,11 +147,10 @@ func awaitReceiveResult(t *testing.T, results <-chan receiveResult) receiveResul
 	}
 }
 
-// TestConsumer_ReceiveMessages_CompletesAfterCallerCancellation covers the
-// rollout blackout measured in kind: SIGTERM aborted the in-flight long poll,
-// SQS still handed the next message to that dead request, and the receipt
-// handle never reached the process — so nothing could release it and the FIFO
-// group stalled for the whole visibility timeout.
+// TestConsumer_ReceiveMessages_CompletesAfterCallerCancellation pins that a
+// poll already in flight when ctx is cancelled still delivers its message:
+// abandoning it strands the receipt handle SQS assigned to that request, and
+// the FIFO group behind it, for the whole visibility timeout.
 func TestConsumer_ReceiveMessages_CompletesAfterCallerCancellation(t *testing.T) {
 	api := newBlockingReceiveAPI()
 	consumer := newTestConsumer(api)
@@ -259,37 +247,8 @@ func TestConsumer_ReceiveMessages_BoundsThePollByWaitTimePlusSlack(t *testing.T)
 	}
 }
 
-// TestValidatePollBudget_RejectsAWaitTimeThatOutlastsTheShutdownWindow covers
-// the per-worker knob nothing validated: SQS_WAIT_TIME (e.g. morpho-indexer's
-// -wait) sizes pollBudget, and a poll that cannot finish inside
-// lifecycle.ShutdownTimeout means Stop() is abandoned mid-poll and the message
-// SQS handed to it is stranded for the visibility timeout on every rollout —
-// with no signal, because the guardrail test only ever sees the default. It
-// drives the rule directly: every wait time NewConsumer still accepts fits the
-// window, so only ValidateWaitTime rejects at construction today.
-func TestValidatePollBudget_RejectsAWaitTimeThatOutlastsTheShutdownWindow(t *testing.T) {
-	tooLong := int32((lifecycle.ShutdownTimeout-sqsutil.ShutdownCleanupTimeout-receiveSlack)/time.Second) + 1
-
-	tests := []struct {
-		name            string
-		waitTimeSeconds int32
-		wantErr         bool
-	}{
-		{"the SQS long-poll maximum fits", maxLongPollSeconds, false},
-		{"a wait time that outlasts the shutdown window is rejected", tooLong, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := ValidatePollBudget(tt.waitTimeSeconds)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("ValidatePollBudget(%d) error = %v, wantErr %v", tt.waitTimeSeconds, err, tt.wantErr)
-			}
-		})
-	}
-}
-
 // TestNewConsumer_FallsBackToTheDefaultWaitTime pins that an unset knob still
-// reaches both budget checks as the default rather than as a rejected zero.
+// reaches ValidateWaitTime as the default rather than as a rejected zero.
 func TestNewConsumer_FallsBackToTheDefaultWaitTime(t *testing.T) {
 	consumer, err := NewConsumer(aws.Config{}, Config{QueueURL: "https://sqs.test/queue.fifo"}, slog.Default())
 	if err != nil {
@@ -300,7 +259,7 @@ func TestNewConsumer_FallsBackToTheDefaultWaitTime(t *testing.T) {
 	}
 }
 
-func TestConsumer_ChangeMessageVisibility_SendsSecondsInRange(t *testing.T) {
+func TestConsumer_ChangeMessageVisibilityBatch_SendsSecondsInRange(t *testing.T) {
 	tests := []struct {
 		name        string
 		visibility  time.Duration
@@ -317,26 +276,13 @@ func TestConsumer_ChangeMessageVisibility_SendsSecondsInRange(t *testing.T) {
 			client := &mockSQSAPI{}
 			consumer := newTestConsumer(client)
 
-			if err := consumer.ChangeMessageVisibility(context.Background(), "handle-1", tt.visibility); err != nil {
+			if _, err := consumer.ChangeMessageVisibilityBatch(context.Background(), []string{"handle-1"}, tt.visibility); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if got := client.visibilityInput.VisibilityTimeout; got != tt.wantSeconds {
+			if got := client.visibilityBatchInput.Entries[0].VisibilityTimeout; got != tt.wantSeconds {
 				t.Errorf("expected VisibilityTimeout %d, got %d", tt.wantSeconds, got)
 			}
-			if got := *client.visibilityInput.ReceiptHandle; got != "handle-1" {
-				t.Errorf("expected receipt handle handle-1, got %s", got)
-			}
 		})
-	}
-}
-
-func TestConsumer_ChangeMessageVisibility_PropagatesError(t *testing.T) {
-	apiErr := errors.New("receipt handle expired")
-	consumer := newTestConsumer(&mockSQSAPI{err: apiErr})
-
-	err := consumer.ChangeMessageVisibility(context.Background(), "handle-1", 0)
-	if !errors.Is(err, apiErr) {
-		t.Fatalf("expected the SQS error wrapped, got %v", err)
 	}
 }
 

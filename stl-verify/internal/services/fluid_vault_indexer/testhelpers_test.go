@@ -206,9 +206,6 @@ func (stubConsumer) ReceiveMessages(_ context.Context, _ int) ([]outbound.SQSMes
 	return nil, nil
 }
 func (stubConsumer) DeleteMessage(_ context.Context, _ string) error { return nil }
-func (stubConsumer) ChangeMessageVisibility(context.Context, string, time.Duration) error {
-	return nil
-}
 func (stubConsumer) ChangeMessageVisibilityBatch(context.Context, []string, time.Duration) (map[string]error, error) {
 	return nil, nil
 }

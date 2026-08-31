@@ -1,5 +1,3 @@
-// Package lifecycle_test is external so the budget assertions can import the
-// SQS adapter, which imports lifecycle to validate its own poll budget.
 package lifecycle_test
 
 import (

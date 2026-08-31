@@ -207,13 +207,9 @@ func ProcessMessages(
 	return errors.Join(errs...)
 }
 
-// releaseUnsettledOnShutdown is the single owner of "shutdown means hand the
-// rest back": every message the batch still holds, whether the loop never
-// reached it or a failure left it undeleted while the context was still live.
-// Handing back a poison pill does not cost it its retry pacing — a visibility
-// change leaves ApproximateReceiveCount alone, so the redrive policy still
-// walks it to the DLQ — it only spares the successor the queue's whole
-// visibility timeout idling behind it.
+// releaseUnsettledOnShutdown releases poison pills too: a visibility change
+// leaves ApproximateReceiveCount alone, so redrive still walks them to the DLQ.
+// https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-dead-letter-queues.html
 func releaseUnsettledOnShutdown(ctx context.Context, cfg Config, messages []outbound.SQSMessage) {
 	if ctx.Err() == nil {
 		return

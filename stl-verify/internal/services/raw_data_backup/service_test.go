@@ -116,11 +116,6 @@ func (m *mockSQSConsumer) DeleteMessage(ctx context.Context, receiptHandle strin
 	return nil
 }
 
-func (m *mockSQSConsumer) ChangeMessageVisibility(ctx context.Context, receiptHandle string, visibility time.Duration) error {
-	_, err := m.ChangeMessageVisibilityBatch(ctx, []string{receiptHandle}, visibility)
-	return err
-}
-
 func (m *mockSQSConsumer) ChangeMessageVisibilityBatch(ctx context.Context, receiptHandles []string, visibility time.Duration) (map[string]error, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

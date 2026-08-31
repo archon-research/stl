@@ -192,10 +192,6 @@ func (f *fakeSQSConsumer) DeleteMessage(_ context.Context, receiptHandle string)
 	return nil
 }
 
-func (f *fakeSQSConsumer) ChangeMessageVisibility(context.Context, string, time.Duration) error {
-	return nil
-}
-
 func (f *fakeSQSConsumer) ChangeMessageVisibilityBatch(context.Context, []string, time.Duration) (map[string]error, error) {
 	return nil, nil
 }

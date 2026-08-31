@@ -86,14 +86,6 @@ func (m *mockConsumer) DeleteMessage(ctx context.Context, handle string) error {
 	return m.deleteErr
 }
 
-func (m *mockConsumer) ChangeMessageVisibility(ctx context.Context, handle string, visibility time.Duration) error {
-	refusals, err := m.ChangeMessageVisibilityBatch(ctx, []string{handle}, visibility)
-	if err != nil {
-		return err
-	}
-	return refusals[handle]
-}
-
 func (m *mockConsumer) ChangeMessageVisibilityBatch(ctx context.Context, handles []string, visibility time.Duration) (map[string]error, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

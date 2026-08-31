@@ -12,8 +12,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
-	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -21,7 +19,6 @@ import (
 type sqsAPI interface {
 	ReceiveMessage(ctx context.Context, params *sqs.ReceiveMessageInput, optFns ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error)
 	DeleteMessage(ctx context.Context, params *sqs.DeleteMessageInput, optFns ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error)
-	ChangeMessageVisibility(ctx context.Context, params *sqs.ChangeMessageVisibilityInput, optFns ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityOutput, error)
 	ChangeMessageVisibilityBatch(ctx context.Context, params *sqs.ChangeMessageVisibilityBatchInput, optFns ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityBatchOutput, error)
 }
 
@@ -106,9 +103,6 @@ func NewConsumerWithOptions(cfg aws.Config, sqsConfig Config, logger *slog.Logge
 	}
 
 	if err := ValidateWaitTime(sqsConfig.WaitTimeSeconds); err != nil {
-		return nil, err
-	}
-	if err := ValidatePollBudget(sqsConfig.WaitTimeSeconds); err != nil {
 		return nil, err
 	}
 
@@ -196,22 +190,6 @@ func PollBudget(waitTimeSeconds int32) time.Duration {
 	return time.Duration(waitTimeSeconds)*time.Second + receiveSlack
 }
 
-// ValidatePollBudget returns an error if one long poll plus the release of the
-// batch it returns cannot finish inside the graceful-shutdown window. Past that
-// window Stop() is abandoned mid-poll, and the message SQS handed to the
-// abandoned request is stranded for the queue's visibility timeout on every
-// rollout — the blackout the budget exists to prevent. WaitTimeSeconds is a
-// per-worker flag/env (SQS_WAIT_TIME), so this runs at construction the way
-// sqsutil.ValidateVisibilityTimeout runs at loop startup.
-func ValidatePollBudget(waitTimeSeconds int32) error {
-	need := PollBudget(waitTimeSeconds) + sqsutil.ShutdownCleanupTimeout
-	if need >= lifecycle.ShutdownTimeout {
-		return fmt.Errorf("sqs: WaitTimeSeconds %d needs %s to finish one poll and release its batch, "+
-			"which does not fit the graceful-shutdown window %s", waitTimeSeconds, need, lifecycle.ShutdownTimeout)
-	}
-	return nil
-}
-
 // ValidateWaitTime returns an error if the configured long-poll wait is outside
 // the range SQS accepts. Out of range every ReceiveMessage fails
 // InvalidParameterValue for the life of the pod, and noRetryForPoll leaves that
@@ -253,20 +231,6 @@ func (c *Consumer) DeleteMessage(ctx context.Context, receiptHandle string) erro
 	})
 	if err != nil {
 		return fmt.Errorf("failed to delete message: %w", err)
-	}
-	return nil
-}
-
-// ChangeMessageVisibility resets the received message's visibility timeout,
-// counted from now and rounded to whole seconds (the SQS wire unit).
-func (c *Consumer) ChangeMessageVisibility(ctx context.Context, receiptHandle string, visibility time.Duration) error {
-	_, err := c.client.ChangeMessageVisibility(ctx, &sqs.ChangeMessageVisibilityInput{
-		QueueUrl:          aws.String(c.queueURL),
-		ReceiptHandle:     aws.String(receiptHandle),
-		VisibilityTimeout: visibilitySeconds(visibility),
-	})
-	if err != nil {
-		return fmt.Errorf("failed to change message visibility: %w", err)
 	}
 	return nil
 }

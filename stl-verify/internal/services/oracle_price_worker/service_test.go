@@ -106,10 +106,6 @@ func (m *mockConsumer) DeleteMessage(ctx context.Context, receiptHandle string) 
 	return nil
 }
 
-func (m *mockConsumer) ChangeMessageVisibility(context.Context, string, time.Duration) error {
-	return nil
-}
-
 func (m *mockConsumer) ChangeMessageVisibilityBatch(context.Context, []string, time.Duration) (map[string]error, error) {
 	return nil, nil
 }
