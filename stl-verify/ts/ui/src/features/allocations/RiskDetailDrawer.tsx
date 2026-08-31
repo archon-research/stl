@@ -1,7 +1,6 @@
 import { X } from 'lucide-react';
 import {
   useEffect,
-  useRef,
   useState,
   type CSSProperties,
   type MouseEvent,
@@ -87,9 +86,6 @@ export function RiskDetailDrawer({
 }: RiskDetailDrawerProps) {
   const [drawerWidth, setDrawerWidth] = useState(readStoredWidth);
   const [dragState, setDragState] = useState<DragState | null>(null);
-  const drawerWidthRef = useRef(drawerWidth);
-
-  drawerWidthRef.current = drawerWidth;
 
   useEffect(() => {
     if (!isOpen) {
@@ -112,21 +108,25 @@ export function RiskDetailDrawer({
       return;
     }
 
+    // Where the drag has got to, held for the length of the gesture. The two
+    // listeners below are registered once per drag, so a closure over
+    // `drawerWidth` would freeze at the width the drag started from -- which is
+    // what the ref this replaces existed to work around, at the cost of a write
+    // during render that the compiler is free to skip.
+    let draggedWidth = dragState.startSize;
+
     const handleMouseMove = (event: globalThis.MouseEvent) => {
       const delta = dragState.startPosition - event.clientX;
-      const nextWidth = clamp(
+      draggedWidth = clamp(
         dragState.startSize + delta,
         MIN_DRAWER_WIDTH,
         maxDrawerWidth(),
       );
-      setDrawerWidth(nextWidth);
+      setDrawerWidth(draggedWidth);
     };
 
     const handleMouseUp = () => {
-      window.localStorage.setItem(
-        DRAWER_STORAGE_KEY,
-        String(drawerWidthRef.current),
-      );
+      window.localStorage.setItem(DRAWER_STORAGE_KEY, String(draggedWidth));
       setDragState(null);
     };
 

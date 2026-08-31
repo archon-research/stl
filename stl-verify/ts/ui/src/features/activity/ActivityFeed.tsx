@@ -6,8 +6,11 @@ import {
   EmptyState,
   ErrorState,
   numericColumnMeta,
+  RangePicker,
+  type RangePreset,
   SkeletonStack,
   StyledSelect,
+  type TimeRange,
   useDataTable,
 } from '@archon-research/design-system';
 import { isHttpRequestError } from '@archon-research/http-client-react';
@@ -26,6 +29,10 @@ import {
   getChainLabel,
   parseNumericValue,
 } from '../../shared/lib/dashboard';
+import {
+  DEFAULT_RANGE_PRESET,
+  defaultTimeRange,
+} from '../../shared/lib/default-range';
 import { toQueryErrorMessage } from '../../shared/lib/errors';
 import {
   activityQuery,
@@ -42,14 +49,9 @@ import type {
 } from '../../shared/types/allocation';
 import {
   ChainLogo,
-  DEFAULT_RANGE_PRESET,
-  defaultTimeRange,
   PageShell,
   ProtocolLogo,
-  RangePicker,
-  type RangePreset,
   tableHeaderTypographyClassName,
-  type TimeRange,
   TokenAddress,
 } from '../../shared/ui';
 import { unindexedChainMessage } from '../../shared/ui/TabStatePanels';

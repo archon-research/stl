@@ -23,6 +23,9 @@ type TopBarProps = {
   isSidebarCollapsed: boolean;
   onToggleSidebar: () => void;
   onViewChange: (view: 'allocation' | 'activities') => void;
+  // The pointer or focus reaching a tab, which is the cue to fetch that view's
+  // chunk. Optional: a caller with nothing to warm simply omits it.
+  onViewIntent?: (view: 'allocation' | 'activities') => void;
   networkOptions: FilterOption[];
   onNetworkChange: (value: string | null) => void;
   onProtocolChange: (value: string | null) => void;
@@ -155,6 +158,7 @@ export function TopBar({
   isSidebarCollapsed,
   onToggleSidebar,
   onViewChange,
+  onViewIntent,
   networkOptions,
   onNetworkChange,
   onProtocolChange,
@@ -238,10 +242,20 @@ export function TopBar({
             className={css({ flexShrink: 0 })}
           >
             <Tabs.List className={tabsListClassName}>
-              <Tabs.Trigger value="allocation" className={tabTriggerClassName}>
+              <Tabs.Trigger
+                value="allocation"
+                className={tabTriggerClassName}
+                onMouseEnter={() => onViewIntent?.('allocation')}
+                onFocus={() => onViewIntent?.('allocation')}
+              >
                 Allocations
               </Tabs.Trigger>
-              <Tabs.Trigger value="activities" className={tabTriggerClassName}>
+              <Tabs.Trigger
+                value="activities"
+                className={tabTriggerClassName}
+                onMouseEnter={() => onViewIntent?.('activities')}
+                onFocus={() => onViewIntent?.('activities')}
+              >
                 Activities
               </Tabs.Trigger>
             </Tabs.List>

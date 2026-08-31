@@ -5,6 +5,7 @@ import { useMemo } from 'react';
 import { AllocationDrawer } from '../features/allocations/AllocationDrawer';
 import { AllocationGrid } from '../features/allocations/AllocationGrid';
 import { buildMetricCharts } from '../features/allocations/metric-charts';
+import { preloadAllocationDetail } from '../features/allocations/preload';
 import { useAllocationRows } from '../features/allocations/useAllocationRows';
 import { useAllocationSelection } from '../features/allocations/useAllocationSelection';
 import { useFilteredAllocations } from '../features/allocations/useFilteredAllocations';
@@ -116,6 +117,7 @@ export function AllocationRoute() {
         onSelectAllocation={(allocationKey) => {
           updateSearch({ row: allocationKey, drawer: '1' });
         }}
+        onAllocationIntent={preloadAllocationDetail}
         primeDebtSnapshot={metrics.primeDebtSnapshot}
         referenceDebt={metrics.referenceDebt}
         onSearchChange={setGlobalFilter}

@@ -1,3 +1,8 @@
+import {
+  presetToRange,
+  type RangePreset,
+  type TimeRange,
+} from '@archon-research/design-system';
 import { useSearch } from '@tanstack/react-router';
 import {
   createContext,
@@ -8,14 +13,8 @@ import {
 } from 'react';
 
 import { useUpdateSearch } from '../shared/hooks/useUpdateSearch';
-// DEFAULT_RANGE_PRESET comes from the local shared barrel so the temporary 24h
-// override in shared/ui/index.ts applies here too; see that file.
-import {
-  DEFAULT_RANGE_PRESET,
-  presetToRange,
-  type RangePreset,
-  type TimeRange,
-} from '../shared/ui';
+// The 24h override, not the design system's own default; see that module.
+import { DEFAULT_RANGE_PRESET } from '../shared/lib/default-range';
 
 export type TimeRangeSelection = {
   rangePreset: RangePreset;

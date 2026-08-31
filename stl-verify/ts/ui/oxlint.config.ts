@@ -37,6 +37,17 @@ const config = {
     'import/no-cycle': 'error',
     'typescript/no-explicit-any': 'error',
 
+    // The lint half of the React Compiler's own analysis, and the reason the
+    // compiler is wired into the build at all. Off, not passing: the one
+    // finding it had that the compiler would actually miscompile -- a ref
+    // written during render in `RiskDetailDrawer` -- is fixed, and the 5 that
+    // remain are all `EffectSetState`/`EffectDerivationsOfState` on debounce
+    // timers and derived state. Each is a real refactor with its own
+    // behavioural risk, so they are a cleanup PR rather than a blocker. Turn
+    // this to 'error' once they are gone; `--max-warnings=0` means 'warn'
+    // would fail CI just the same.
+    'react/react-compiler': 'off',
+
     // Type-aware rules (`--type-aware` in the lint script). The promise-safety
     // family is the reason the flag is on at all: without it these sit in the
     // effective config reading as coverage while never executing.
@@ -51,13 +62,16 @@ const config = {
     //
     // Narrowing an API envelope union by assertion is the app's normal shape
     // (the response schema cannot express which arm a query selects), so this
-    // one is closer to a design change than a cleanup. 25 findings.
+    // one is closer to a design change than a cleanup. 33 findings, of which 14
+    // are the unit tests asserting fixture literals into response types; app
+    // code carries 19, down from 25, because the query migration collected the
+    // envelope narrowing into `queries.ts`'s selects instead of spreading it.
     'typescript/no-unsafe-type-assertion': 'off',
     // Fires on the standard effect shape: one branch returns a cleanup, the
-    // early-out returns nothing. 14 findings.
+    // early-out returns nothing. 4 findings.
     'typescript/consistent-return': 'off',
-    // Genuinely dead assertions, safe to remove but all in App.tsx and the
-    // chart hooks. 9 findings.
+    // Genuinely dead assertions, safe to remove but spread across the query
+    // selects, the chart builder and the allocation route. 8 findings.
     'typescript/no-unnecessary-type-assertion': 'off',
     // 2 findings, both on router helpers where the parameter documents intent.
     'typescript/no-unnecessary-type-parameters': 'off',

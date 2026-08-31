@@ -61,7 +61,7 @@ import {
 import { TabNotePanel } from '../../shared/ui/TabStatePanels';
 import { getActionColorClass, getActionIcon } from '../activity/action-styles';
 import { findMetricChart, type MetricChartSpec } from './metricCards';
-import { PrimeMetricsBand } from './PrimeMetricsBand';
+import { MetricsBand } from './MetricsBand';
 
 type AllocationGridProps = {
   allocations: Allocation[];
@@ -78,6 +78,9 @@ type AllocationGridProps = {
   isPrimeDebtLoading: boolean;
   localProtocols: LocalProtocolRow[];
   onSelectAllocation: (allocationKey: string) => void;
+  // The pointer reaching the table is the earliest honest signal that a row is
+  // about to be clicked, which is what the drawer's chunk is waiting for.
+  onAllocationIntent?: () => void;
   primeDebtSnapshot: PrimeDebtSnapshot | null;
   referenceDebt: PrimeDebtBucket | null;
   onSearchChange: (value: string) => void;
@@ -978,6 +981,7 @@ export function AllocationGrid({
   isPrimeDebtLoading,
   localProtocols,
   onSelectAllocation,
+  onAllocationIntent,
   primeDebtSnapshot,
   referenceDebt,
   onSearchChange,
@@ -1417,7 +1421,8 @@ export function AllocationGrid({
         {noticeMessage === null ? null : (
           <TabNotePanel message={noticeMessage} />
         )}
-        <PrimeMetricsBand
+        <MetricsBand
+          primeKey={selectedPrime?.id ?? null}
           isSkeleton={showTopMetricsSkeleton}
           hasTopMetrics={hasTopMetrics}
           summary={summary}
@@ -1574,7 +1579,10 @@ export function AllocationGrid({
 
         {!errorMessage &&
         (!areAllocationsSettled || visibleAllocations.length > 0) ? (
-          <div className={tableHeaderTypographyClassName}>
+          <div
+            className={tableHeaderTypographyClassName}
+            onMouseEnter={onAllocationIntent}
+          >
             <DataTable
               table={table}
               isLoading={!areAllocationsSettled}

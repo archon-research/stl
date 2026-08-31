@@ -1,3 +1,4 @@
+import type { RangePreset, TimeRange } from '@archon-research/design-system';
 import { useMemo } from 'react';
 
 import {
@@ -13,7 +14,6 @@ import type {
   TimeSeriesResolution,
   TotalCapitalBucket,
 } from '../../shared/types/allocation';
-import type { RangePreset, TimeRange } from '../../shared/ui';
 import type { ChartDatum } from './metricCards';
 import { usePrimeChartData } from './usePrimeChartData';
 
