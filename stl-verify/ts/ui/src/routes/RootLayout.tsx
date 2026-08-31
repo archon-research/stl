@@ -8,7 +8,11 @@ import { useUpdateSearch } from '../shared/hooks/useUpdateSearch';
 import { CollapsibleSidebarLayout } from '../shared/ui/CollapsibleSidebarLayout';
 import { PrimeSidebar } from '../shared/ui/PrimeSidebar';
 import { TopBar } from '../shared/ui/TopBar';
-import { useSelectedView, useViewNavigation } from './navigation';
+import {
+  useSelectedView,
+  useViewNavigation,
+  useViewPreload,
+} from './navigation';
 import { PrimeSelectionProvider, usePrimeSelection } from './prime-selection';
 import { TimeRangeProvider, useTimeRange } from './time-range';
 import { useDashboardFilters } from './useDashboardFilters';
@@ -36,6 +40,7 @@ const shellClassName = css({
 function DashboardChrome() {
   const selectedView = useSelectedView();
   const navigateToView = useViewNavigation();
+  const preloadView = useViewPreload();
   const updateSearch = useUpdateSearch();
   const search = useSearch({ from: '__root__' });
   const activitiesSearch = useSearch({
@@ -56,10 +61,12 @@ function DashboardChrome() {
   const provenanceAvailability = useProvenanceAvailability();
   useProvenanceRedirect(provenanceAvailability, selectedPrimeGroup?.name);
 
-  const { networkOptions, protocolOptions } = useDashboardFilters(
-    selectedView,
-    selectedPrimeGroup,
-  );
+  const {
+    networkOptions,
+    networkOptionsFailed,
+    protocolOptions,
+    protocolOptionsFailed,
+  } = useDashboardFilters(selectedView, selectedPrimeGroup);
 
   // View-local on purpose: collapsing the prime list is a momentary "give me the
   // whole width" gesture, not a preference worth persisting across sessions.
@@ -98,6 +105,7 @@ function DashboardChrome() {
               )}
               hasSelectedPrime={selectedPrime !== null}
               networkOptions={networkOptions}
+              networkOptionsFailed={networkOptionsFailed}
               onNetworkChange={(value) =>
                 updateSearch({ network: value ?? undefined })
               }
@@ -105,11 +113,15 @@ function DashboardChrome() {
                 updateSearch({ protocol: value ?? undefined })
               }
               protocolOptions={protocolOptions}
+              protocolOptionsFailed={protocolOptionsFailed}
               selectedNetwork={search.network ?? null}
               selectedProtocol={search.protocol ?? null}
               selectedView={selectedView}
               onViewChange={(view) =>
                 navigateToView({ view, primeKey: selectedPrimeId })
+              }
+              onViewIntent={(view) =>
+                preloadView({ view, primeKey: selectedPrimeId })
               }
               rangePreset={rangePreset}
               timeRange={timeRange}

@@ -30,14 +30,18 @@ const ACTION_COLOR_CLASS = {
 
 const DEFAULT_ACTION_COLOR_CLASS = css({ color: 'text.default' });
 
+// Own-property check, not `in`: `action_type` is unvalidated API text, and
+// `'constructor' in ACTION_COLOR_CLASS` is true, which would return a function
+// and leave the element with no colour class at all.
+function isActionType(key: string): key is keyof typeof ACTION_COLOR_CLASS {
+  return Object.hasOwn(ACTION_COLOR_CLASS, key);
+}
+
 export function getActionColorClass(
   actionType: string | null | undefined,
 ): string {
   const key = actionType?.toLowerCase();
-  // Own-property check, not `in`: `action_type` is unvalidated API text, and
-  // `'constructor' in ACTION_COLOR_CLASS` is true, which would return a function
-  // and leave the element with no colour class at all.
-  return key !== undefined && Object.hasOwn(ACTION_COLOR_CLASS, key)
-    ? ACTION_COLOR_CLASS[key as keyof typeof ACTION_COLOR_CLASS]
+  return key !== undefined && isActionType(key)
+    ? ACTION_COLOR_CLASS[key]
     : DEFAULT_ACTION_COLOR_CLASS;
 }

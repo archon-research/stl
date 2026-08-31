@@ -1,4 +1,5 @@
 import type { ChartColorToken } from '@archon-research/charting';
+import type { TimeRange } from '@archon-research/design-system';
 
 import {
   ENCUMBRANCE_AT_RISK_THRESHOLD,
@@ -19,7 +20,6 @@ import type {
   PrimeDebtSnapshot,
   PrimeRiskCapital,
 } from '../../shared/types/allocation';
-import type { TimeRange } from '../../shared/ui';
 import type { ChartDatum, MetricChartSpec } from './metricCards';
 import type { PrimeChartSeries } from './usePrimeChartSeries';
 
@@ -36,8 +36,9 @@ export type MetricChartInputs = {
  * The trend chart each metric card draws, in card order.
  *
  * Cards with nothing to draw are dropped, so the grid never reserves space for
- * an empty plot. Pure, so the card set is derivable in a test without a router
- * or a query client.
+ * an empty plot — unless the read behind one failed, which is not nothing to
+ * say. Pure, so the card set is derivable in a test without a router or a
+ * query client.
  */
 export function buildMetricCharts({
   series,
@@ -159,10 +160,12 @@ export function buildMetricCharts({
   const charts: MetricChartSpec[] = [
     {
       // Balance reconstructed from signed USD net flows, anchored at the
-      // current total. When no activity history is available the card shows
-      // an empty state rather than a flat current-value line.
+      // current total. The one card with no flat current-value fallback — an
+      // absent history is an empty state — so it is also the one that has to
+      // carry its read's failure, or an outage reads as a quiet window.
       key: 'allocation-activity-volume',
       data: series.allocationBalanceSeries,
+      errorMessage: series.activityErrorMessage,
       stroke: 'chart.series.primary',
       formatValue: formatCompactUsd,
     },
@@ -245,5 +248,7 @@ export function buildMetricCharts({
     },
   ];
 
-  return charts.filter((chart) => chart.data.length > 0);
+  return charts.filter(
+    (chart) => chart.data.length > 0 || chart.errorMessage != null,
+  );
 }

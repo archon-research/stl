@@ -1,14 +1,12 @@
 import {
   Badge,
   type BadgeColorPalette,
-  ErrorBoundary,
   ErrorState,
   Panel,
   SkeletonStack,
 } from '@archon-research/design-system';
 import { useQuery } from '@tanstack/react-query';
 import { ChevronDown, ChevronUp } from 'lucide-react';
-import { lazy, Suspense } from 'react';
 
 import { css } from '#styled-system/css';
 
@@ -18,7 +16,6 @@ import {
   formatUsdPrice,
 } from '../../shared/lib/dashboard';
 import { toQueryErrorMessage } from '../../shared/lib/errors';
-import { logging } from '../../shared/lib/logging';
 import {
   dataSourcesQuery,
   DISABLED_ADDRESS,
@@ -28,28 +25,15 @@ import {
   tokensQuery,
 } from '../../shared/lib/queries';
 import type { DataSource } from '../../shared/types/allocation';
+import { LazyRegion, lazyChunk } from '../../shared/ui/LazyRegion';
 
 const NO_SOURCES: DataSource[] = [];
 
 // The panel is collapsed on first paint and its markdown is a module constant,
 // so the renderer can arrive with the body instead of with the app shell.
-const MethodologyMarkdown = lazy(() => import('./MethodologyMarkdown'));
-
-// Module scope because a fallback returning JSX inside the component body reads
-// to `react/no-unstable-nested-components` as a component redefined per render.
-const renderMarkdownLoadError = (loadError: Error) => (
-  <ErrorState
-    title="Failed to load methodology"
-    description="The methodology renderer could not be loaded."
-    errorMessage={loadError.message}
-    tone="critical"
-    size="inline"
-  />
+const MethodologyMarkdown = lazyChunk(
+  async () => (await import('./MethodologyMarkdown')).default,
 );
-
-const reportMarkdownLoadError = (loadError: Error) => {
-  logging.error('Failed to load methodology renderer', { error: loadError });
-};
 
 // Anything not listed reads as neutral: the set of access models is open-ended
 // (it comes from the data-sources API), so an unknown value must not be styled
@@ -150,7 +134,9 @@ export function MethodologyPanel({
     <div
       className={css({
         borderRadius: 'lg',
-        border: '1px solid token(colors.border.hairline)',
+        // The scale has no 1px step: a hairline is a device-pixel rule
+        // rather than a spacing decision.
+        border: '[1px solid token(colors.border.hairline)]',
         bg: 'surface.default',
         overflow: 'hidden',
       })}
@@ -160,20 +146,21 @@ export function MethodologyPanel({
         type="button"
         onClick={onToggle}
         className={css({
-          width: '100%',
+          width: 'full',
           padding: '4',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
           borderBottom: isOpen
-            ? '1px solid token(colors.border.hairline)'
+            ? '[1px solid token(colors.border.hairline)]'
             : 'none',
           bg: 'surface.subtle',
           cursor: 'pointer',
           fontSize: 'sm',
           fontWeight: 'semibold',
           color: 'text.strong',
-          transition: 'background-color 0.2s',
+          transitionProperty: 'colors',
+          transitionDuration: 'normal',
           _hover: { bg: 'surface.default' },
         })}
       >
@@ -187,7 +174,11 @@ export function MethodologyPanel({
 
       {/* Content */}
       {isOpen && (
-        <div className={css({ maxHeight: '600px', overflowY: 'auto' })}>
+        <div
+          // Below the smallest size step, and a scroll cap rather than a
+          // spacing decision.
+          className={css({ maxHeight: '[600px]', overflowY: 'auto' })}
+        >
           {isLoading ? <SkeletonStack count={3} /> : null}
 
           {error ? (
@@ -219,7 +210,8 @@ export function MethodologyPanel({
                 className={css({
                   fontSize: 'sm',
                   color: 'text.default',
-                  lineHeight: '1.7',
+                  // Off the scale, and set for prose rather than for a control.
+                  lineHeight: '[1.7]',
                   '& p': { mb: '2' },
                   '& ul, & ol': { pl: '5', mb: '2' },
                   '& li': { mb: '1' },
@@ -242,14 +234,14 @@ export function MethodologyPanel({
                   },
                 })}
               >
-                <ErrorBoundary
-                  fallback={renderMarkdownLoadError}
-                  onError={reportMarkdownLoadError}
+                <LazyRegion
+                  title="Methodology unavailable"
+                  subject="methodology renderer"
+                  impact="The rest of the panel is unaffected."
+                  pending={<SkeletonStack count={3} />}
                 >
-                  <Suspense fallback={<SkeletonStack count={3} />}>
-                    <MethodologyMarkdown markdown={METHODOLOGY_MARKDOWN} />
-                  </Suspense>
-                </ErrorBoundary>
+                  <MethodologyMarkdown markdown={METHODOLOGY_MARKDOWN} />
+                </LazyRegion>
               </div>
             </div>
 
@@ -268,7 +260,7 @@ export function MethodologyPanel({
               {!selectedTokenAddress ? (
                 <p
                   className={css({
-                    m: 0,
+                    m: '0',
                     fontSize: 'xs',
                     color: 'text.default',
                   })}
@@ -285,7 +277,7 @@ export function MethodologyPanel({
               {selectedTokenAddress && tokenError ? (
                 <p
                   className={css({
-                    m: 0,
+                    m: '0',
                     fontSize: 'xs',
                     color: 'text.warning',
                   })}
@@ -377,12 +369,12 @@ export function MethodologyPanel({
                 className={css({
                   overflowX: 'auto',
                   borderRadius: 'md',
-                  border: '1px solid token(colors.border.hairline)',
+                  border: '[1px solid token(colors.border.hairline)]',
                 })}
               >
                 <table
                   className={css({
-                    width: '100%',
+                    width: 'full',
                     borderCollapse: 'collapse',
                     fontSize: 'xs',
                   })}
@@ -393,12 +385,15 @@ export function MethodologyPanel({
                         <th
                           key={h}
                           className={css({
-                            padding: '2 3',
+                            // Was `padding: '2 3'`, which is no token: Panda
+                            // unitised it and the header cells shipped at 2px.
+                            py: '2',
+                            px: '3',
                             textAlign: 'left',
                             fontWeight: 'semibold',
                             color: 'text.muted',
                             borderBottom:
-                              '1px solid token(colors.border.hairline)',
+                              '[1px solid token(colors.border.hairline)]',
                           })}
                         >
                           {h}
@@ -416,7 +411,7 @@ export function MethodologyPanel({
                           className={css({
                             padding: '3',
                             borderBottom:
-                              '1px solid token(colors.border.hairline)',
+                              '[1px solid token(colors.border.hairline)]',
                             fontWeight: 'semibold',
                             color: 'text.strong',
                           })}
@@ -427,7 +422,7 @@ export function MethodologyPanel({
                           className={css({
                             padding: '3',
                             borderBottom:
-                              '1px solid token(colors.border.hairline)',
+                              '[1px solid token(colors.border.hairline)]',
                             color: 'text.default',
                           })}
                         >
@@ -437,7 +432,7 @@ export function MethodologyPanel({
                           className={css({
                             padding: '3',
                             borderBottom:
-                              '1px solid token(colors.border.hairline)',
+                              '[1px solid token(colors.border.hairline)]',
                             color: 'text.default',
                           })}
                         >
@@ -447,7 +442,7 @@ export function MethodologyPanel({
                           className={css({
                             padding: '3',
                             borderBottom:
-                              '1px solid token(colors.border.hairline)',
+                              '[1px solid token(colors.border.hairline)]',
                           })}
                         >
                           <Badge
@@ -473,7 +468,7 @@ export function MethodologyPanel({
                   className={css({
                     mt: '4',
                     pt: '4',
-                    borderTop: '1px solid token(colors.border.hairline)',
+                    borderTop: '[1px solid token(colors.border.hairline)]',
                     display: 'grid',
                     gap: '2',
                   })}

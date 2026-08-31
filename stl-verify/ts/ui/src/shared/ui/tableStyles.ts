@@ -12,8 +12,11 @@ export const tableHeaderTypographyClassName = css({
   '& thead th': {
     fontSize: 'sm',
     fontWeight: 'semibold',
-    lineHeight: 'shorter',
-    letterSpacing: '0.02em',
+    // `shorter` is no token, so this shipped as an invalid
+    // `line-height: shorter` the browser drops; `tight` is 1.25.
+    lineHeight: 'tight',
+    // Between the 'wide' (0.025em) and 'wider' (0.05em) steps.
+    letterSpacing: '[0.02em]',
     textTransform: 'uppercase',
     color: 'text.default',
   },

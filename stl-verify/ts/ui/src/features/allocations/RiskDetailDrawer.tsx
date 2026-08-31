@@ -1,7 +1,6 @@
 import { X } from 'lucide-react';
 import {
   useEffect,
-  useRef,
   useState,
   type CSSProperties,
   type MouseEvent,
@@ -87,9 +86,6 @@ export function RiskDetailDrawer({
 }: RiskDetailDrawerProps) {
   const [drawerWidth, setDrawerWidth] = useState(readStoredWidth);
   const [dragState, setDragState] = useState<DragState | null>(null);
-  const drawerWidthRef = useRef(drawerWidth);
-
-  drawerWidthRef.current = drawerWidth;
 
   useEffect(() => {
     if (!isOpen) {
@@ -112,21 +108,25 @@ export function RiskDetailDrawer({
       return;
     }
 
+    // Where the drag has got to, held for the length of the gesture. The two
+    // listeners below are registered once per drag, so a closure over
+    // `drawerWidth` would freeze at the width the drag started from -- which is
+    // what the ref this replaces existed to work around, at the cost of a write
+    // during render that the compiler is free to skip.
+    let draggedWidth = dragState.startSize;
+
     const handleMouseMove = (event: globalThis.MouseEvent) => {
       const delta = dragState.startPosition - event.clientX;
-      const nextWidth = clamp(
+      draggedWidth = clamp(
         dragState.startSize + delta,
         MIN_DRAWER_WIDTH,
         maxDrawerWidth(),
       );
-      setDrawerWidth(nextWidth);
+      setDrawerWidth(draggedWidth);
     };
 
     const handleMouseUp = () => {
-      window.localStorage.setItem(
-        DRAWER_STORAGE_KEY,
-        String(drawerWidthRef.current),
-      );
+      window.localStorage.setItem(DRAWER_STORAGE_KEY, String(draggedWidth));
       setDragState(null);
     };
 
@@ -179,15 +179,18 @@ export function RiskDetailDrawer({
         onClick={onClose}
         className={css({
           position: 'fixed',
-          inset: 0,
+          inset: '0',
           bg: 'overlay.backdrop',
           border: 'none',
-          p: 0,
+          p: '0',
           opacity: isOpen ? 1 : 0,
           visibility: isOpen ? 'visible' : 'hidden',
           transitionDuration: 'normal',
-          transitionProperty: 'opacity',
-          zIndex: 30,
+          // The token set names groups of properties, and neither of these
+          // transitions belongs to a group.
+          transitionProperty: '[opacity]',
+          // The preset ships no zIndex scale.
+          zIndex: '[30]',
         })}
       />
 
@@ -196,15 +199,15 @@ export function RiskDetailDrawer({
         style={drawerStyle}
         className={css({
           position: 'fixed',
-          top: 0,
-          right: 0,
-          bottom: 0,
+          top: '0',
+          right: '0',
+          bottom: '0',
           bg: 'surface.default',
           boxShadow: '2xl',
           transform: isOpen ? 'translateX(0)' : 'translateX(100%)',
           transitionDuration: 'normal',
-          transitionProperty: 'transform',
-          zIndex: 40,
+          transitionProperty: '[transform]',
+          zIndex: '[40]',
           display: 'flex',
           flexDirection: 'column',
         })}
@@ -215,25 +218,26 @@ export function RiskDetailDrawer({
           onMouseDown={handleResizeStart}
           className={css({
             position: 'absolute',
-            top: 0,
-            left: 0,
-            bottom: 0,
+            top: '0',
+            left: '0',
+            bottom: '0',
             width: '2',
             border: 'none',
             bg: 'transparent',
-            p: 0,
+            p: '0',
             cursor: 'col-resize',
-            zIndex: 2,
+            zIndex: '[2]',
           })}
         >
           <div
             aria-hidden="true"
             className={css({
               position: 'absolute',
-              top: 0,
-              bottom: 0,
-              left: 0,
-              width: '1px',
+              top: '0',
+              bottom: '0',
+              left: '0',
+              // Hairline divider; the scale has no 1px step.
+              width: '[1px]',
               bg: 'border.subtle',
               opacity: 0.7,
             })}
@@ -260,10 +264,10 @@ export function RiskDetailDrawer({
             <div>
               <p
                 className={css({
-                  m: 0,
+                  m: '0',
                   fontSize: 'xs',
                   textTransform: 'uppercase',
-                  letterSpacing: '0.1em',
+                  letterSpacing: 'widest',
                   color: 'text.muted',
                 })}
               >
@@ -271,7 +275,7 @@ export function RiskDetailDrawer({
               </p>
               <h2
                 className={css({
-                  m: 0,
+                  m: '0',
                   mt: '1',
                   fontSize: 'lg',
                   lineHeight: 'tight',
@@ -283,7 +287,7 @@ export function RiskDetailDrawer({
               {subtitle ? (
                 <div
                   className={css({
-                    m: 0,
+                    m: '0',
                     mt: '1',
                     fontSize: 'sm',
                     color: 'text.default',
@@ -295,7 +299,7 @@ export function RiskDetailDrawer({
               {detail ? (
                 <p
                   className={css({
-                    m: 0,
+                    m: '0',
                     mt: '0.5',
                     fontSize: 'xs',
                     color: 'text.muted',
@@ -324,7 +328,7 @@ export function RiskDetailDrawer({
                 bg: 'surface.default',
                 color: 'text.muted',
                 cursor: 'pointer',
-                transitionProperty: 'background-color, color, border-color',
+                transitionProperty: 'colors',
                 transitionDuration: 'fast',
                 _hover: {
                   bg: 'surface.hover',
@@ -339,8 +343,8 @@ export function RiskDetailDrawer({
 
         <div
           className={css({
-            flex: 1,
-            minHeight: 0,
+            flex: '1',
+            minHeight: '0',
             overflowY: 'auto',
           })}
         >

@@ -16,13 +16,13 @@
     "test:mocks": "NODE_ENV=test node scripts/check-mock-api.ts"
   },
   "dependencies": {
-    "@archon-research/http-client-msw": "0.10.0"
+    "@archon-research/http-client-msw": "0.10.1"
   },
   "devDependencies": {
-    "@archon-research/http-client-core": "0.10.0",
-    "@archon-research/oxfmt-config": "0.10.0",
-    "@archon-research/oxlint-config": "0.10.0",
-    "@archon-research/tsconfig": "0.10.0",
+    "@archon-research/http-client-core": "0.10.1",
+    "@archon-research/oxfmt-config": "0.10.1",
+    "@archon-research/oxlint-config": "0.10.1",
+    "@archon-research/tsconfig": "0.10.1",
     "@stl-verify/ui": "*",
     "@types/node": "24.13.3",
     "msw": "2.15.0"
