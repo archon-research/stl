@@ -11,7 +11,8 @@
 #
 # Why the existing ECR gate cannot cover this (ORB-313, recurrence in #721):
 # verify-ecr-images.sh runs inside update-staging / update-prod, but those jobs
-# first sed every `newTag` to the deploy SHA and only then verify. A hand-written
+# first rewrite every tag to the deploy SHA (the whole block is rendered by
+# render-overlay-images.sh since ORB-362) and only then verify. A hand-written
 # tag is rewritten before it is ever checked, so the gate passes. Meanwhile
 # ArgoCD syncs the *merge commit* — with the hand-written tag still in it —
 # minutes before the bot stamps the real one. In #721 that tag was
@@ -30,9 +31,11 @@
 # needs an ECR-read role for both accounts (provisioned from the infrastructure
 # repo). Until then the majority-SHA case is caught only after merge.
 #
-# A brand-new service therefore cannot introduce its own tag here. Land the image
-# first (see CONTRIBUTING.md section 14, "Pull request workflow"), then let the
-# deploy bot stamp the overlay.
+# Since ORB-362 the block is generated from k8s/image-roster.txt and the Manifests
+# job also runs render-overlay-images.sh --check --allow-missing, which rejects
+# any entry the roster does not render. A brand-new service therefore never
+# touches this block: add its roster line (see CONTRIBUTING.md section 14, "Pull
+# request workflow") and the deploy bot writes the entry.
 #
 # Usage:
 #   check-overlay-tag-consistency.sh [<kustomization> ...]
@@ -134,9 +137,9 @@ if [ "$FAILED" -ne 0 ]; then
 ::error::stamps them, so a tag naming an image that does not exist yet causes
 ::error::ImagePullBackOff, fails the staging health gate, and silently skips the
 ::error::prod promotion (ORB-313).
-::error::For a brand-new service, land its image in a separate PR first, then add
-::error::the overlay entry without a tag edit. See CONTRIBUTING.md section 14,
-::error::"Pull request workflow".
+::error::For a brand-new service, land its image and its k8s/image-roster.txt line
+::error::in a separate PR first; the deploy bot writes the overlay entry (ORB-362).
+::error::See CONTRIBUTING.md section 14, "Pull request workflow".
 MSG
   exit 1
 fi
