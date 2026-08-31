@@ -9,9 +9,6 @@ resources:
   - ../../base/oracle-price-worker
   - ../../base/sparklend-position-tracker
   - ../../base/morpho-indexer
-  # curve-indexer + uniswap-v3-indexer + uniswap-v4-indexer run the shared
-  # dex-indexer image, one Deployment per DEX (DEX env selects the factory).
-  # VEC-329, VEC-475.
   - ../../base/curve-indexer
   - ../../base/uniswap-v3-indexer
   - ../../base/uniswap-v4-indexer

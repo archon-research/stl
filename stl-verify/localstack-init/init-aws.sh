@@ -1,13 +1,7 @@
 #!/bin/bash
-# LocalStack initialization script for STL-Verify — single source of truth.
-#
-# `make kind-infra` generates the `localstack-init` ConfigMap from this file and
-# LocalStack mounts it at /etc/localstack/init/ready.d/init-aws.sh, so the kind
-# cluster runs exactly this script. It can also be run by hand against any
-# LocalStack endpoint (set AWS_ENDPOINT_URL).
-#
-# Creates SNS FIFO topics and SQS FIFO queues that mirror the production AWS setup.
-# Architecture: SNS FIFO → Multiple SQS FIFO queues (fan-out pattern)
+# Mirrors the production AWS setup in LocalStack: one SNS FIFO topic per chain
+# fanning out to SQS FIFO queues, plus the raw-block S3 buckets. `make kind-infra`
+# mounts this exact file into the kind cluster; it also runs standalone.
 
 set -euo pipefail
 
@@ -25,17 +19,11 @@ AWS="aws --endpoint-url=$ENDPOINT"
 export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-test}"
 export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-test}"
 
-# Deployment environment, injected from stl-config. Raw-block bucket names are
-# derived from it as stl-sentinel{DEPLOY_ENV}-{chain}-raw, the exact format
-# chainutil.ValidateS3BucketForChain enforces at worker startup — so the buckets
-# created here and the S3_BUCKET values the workers get cannot drift apart.
+# Bucket names below must keep the stl-sentinel{env}-{chain}-raw shape that
+# chainutil.ValidateS3BucketForChain enforces at worker startup.
 DEPLOY_ENV="${DEPLOY_ENV:-development}"
 
-# Helper: create SNS topic, the two always-on SQS queues (transformer, backup),
-# their subscriptions, and the raw-block S3 bucket for a chain. Every chain gets
-# its own bucket: workers validate that S3_BUCKET matches their CHAIN_ID, so a
-# non-Ethereum worker cannot share the Ethereum bucket.
-# Worker-specific queues (oracle-price, sparklend, etc.) are created separately below.
+# Helper: create SNS topic, SQS queues, subscriptions, and raw-block bucket for a chain.
 create_chain_resources() {
   local CHAIN_NAME=$1
 
@@ -88,9 +76,7 @@ create_chain_resources() {
   $AWS s3 mb "s3://stl-sentinel${DEPLOY_ENV}-${CHAIN_NAME}-raw" --region $REGION
 }
 
-# Helper: create a consumer queue (with DLQ) subscribed to a chain's SNS topic.
-# Local convention is stl-<chain>-<queue>.fifo — no sentinel<env> segment,
-# unlike the EKS queues.
+# Helper: create a consumer queue (with DLQ) subscribed to a chain's SNS topic
 create_consumer_queue() {
   local CHAIN_NAME=$1
   local QUEUE_NAME=$2
@@ -117,15 +103,13 @@ create_consumer_queue() {
 # Create resources for each supported chain
 create_chain_resources "ethereum"
 create_chain_resources "avalanche"
-# L2 chains
 create_chain_resources "base"
 create_chain_resources "optimism"
 create_chain_resources "unichain"
 create_chain_resources "arbitrum"
 create_chain_resources "robinhood"
 
-# Ethereum-only consumers. curve-indexing / uniswap-v3-indexing / uniswap-v4-indexing
-# feed the shared dex-indexer image — one Deployment per DEX, DEX env selects the factory.
+# Ethereum-only consumers
 for queue in morpho-indexing prime-debt curve-indexing uniswap-v3-indexing uniswap-v4-indexing; do
   create_consumer_queue "ethereum" "$queue"
 done
@@ -142,7 +126,6 @@ for chain in base optimism unichain arbitrum; do
   create_consumer_queue "$chain" "psm3-indexer"
 done
 
-# Per-chain raw-block buckets are created by create_chain_resources above.
 echo "Creating stress-test S3 bucket..."
 $AWS s3 mb s3://stress-test-data --region $REGION
 

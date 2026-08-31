@@ -96,11 +96,8 @@ data:
   ARCHIVE_SC_CALLS: "true"
   RAW_SC_BUCKET: "stl-sentinelstaging-raw-sc-calls"
 ---
-# curve-indexer + uniswap-v3-indexer + uniswap-v4-indexer run the shared
-# dex-indexer binary; the DEX key selects the factory. No SC-call archiving
-# (dexbootstrap does not wire the archiving decorator), so no ARCHIVE_SC_CALLS /
-# RAW_SC_BUCKET here. The SQS queue URL, DB, Redis, and Alchemy key come from the
-# matching ExternalSecret.
+# No SC-call archiving on any DEX indexer: dexbootstrap does not wire the
+# archiving decorator, so ARCHIVE_SC_CALLS / RAW_SC_BUCKET would do nothing.
 apiVersion: v1
 kind: ConfigMap
 metadata:

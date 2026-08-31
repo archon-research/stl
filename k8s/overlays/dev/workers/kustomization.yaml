@@ -15,9 +15,6 @@ resources:
   - ../../../base/prime-debt-indexer
   # Dev covers one representative chain (base); PSM3 does not exist on the mainnet chain dev runs.
   - ../../../base/base-psm3-indexer
-  # All three DEX indexers run the one dex-indexer image; the DEX env below
-  # selects the factory. Their pool registries are seeded by migrations, so
-  # they boot against the local database like any other worker.
   - ../../../base/curve-indexer
   - ../../../base/uniswap-v3-indexer
   - ../../../base/uniswap-v4-indexer
@@ -45,8 +42,6 @@ images:
   - name: base-psm3-indexer
     newName: localhost/stl-psm3-indexer
     newTag: local
-  # Shared by curve-indexer + uniswap-v3-indexer + uniswap-v4-indexer (all
-  # three bases use image name `dex-indexer`; DEX env var selects the factory).
   - name: dex-indexer
     newName: localhost/stl-dex-indexer
     newTag: local
@@ -145,12 +140,8 @@ patches:
                     value: "300"
                   - name: AWS_SQS_QUEUE_URL
                     value: http://localstack:4566/000000000000/stl-base-psm3-indexer.fifo
-  # DEX indexers. Prod/staging read DEX from the per-service
-  # <name>-indexer-config ConfigMap; the runtime Component replaces envFrom
-  # with stl-config + stl-secrets, so dev names the DEX explicitly here. The
-  # rest (CHAIN_ID=1, S3_BUCKET, DEPLOY_ENV, ALCHEMY_HTTP_URL, endpoints,
-  # DATABASE_URL, REDIS_ADDR) comes from stl-config, ALCHEMY_API_KEY from
-  # stl-secrets — same as every other dev worker.
+  # The runtime Component replaces envFrom, so DEX cannot arrive from the
+  # per-service ConfigMap the EKS overlays use; each Deployment names it here.
   - patch: |
       apiVersion: apps/v1
       kind: Deployment

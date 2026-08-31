@@ -548,7 +548,6 @@ _dev-up-alchemy-workers:
 	$(call build-if-needed,stl-sparklend-position-tracker:$(LOCAL_TAG),docker-build-sparklend-position-tracker LOCAL=1)
 	$(call build-if-needed,stl-prime-debt-indexer:$(LOCAL_TAG),docker-build-prime-debt-indexer LOCAL=1)
 	$(call build-if-needed,stl-psm3-indexer:$(LOCAL_TAG),docker-build-psm3-indexer LOCAL=1)
-	# One image for curve-indexer + uniswap-v3-indexer + uniswap-v4-indexer.
 	$(call build-if-needed,stl-dex-indexer:$(LOCAL_TAG),docker-build-dex-indexer LOCAL=1)
 	$(MAKE) kind-load-workers kind-deploy-workers
 	@for dep in morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer base-psm3-indexer curve-indexer uniswap-v3-indexer uniswap-v4-indexer; do \
@@ -1720,8 +1719,8 @@ docker-release-fluid-vault-indexer-staging:
 # =============================================================================
 # Docker Build & Push - DEX Indexer
 # =============================================================================
-# One shared image for every DEX deployment (curve-indexer, uniswap-v3-indexer, uniswap-v4-indexer);
-# the DEX env var selects the factory at runtime (cmd/workers/dex-indexer).
+# One shared image for every DEX deployment; the DEX env var selects the factory
+# at runtime (cmd/workers/dex-indexer).
 
 ECR_REPO_DEX_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-dex-indexer
 
@@ -2345,13 +2344,10 @@ kind-infra:
 	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/temporal.yaml
 	# Apply remaining infra resources to the app namespace.
 	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/jaeger.yaml       -n $(KUBE_NS)
-	# localstack-init is generated from the canonical script so there is exactly one
-	# copy of it in the repo; the Deployment mounts it by subPath as init-aws.sh.
 	kubectl --context=$(KUBE_CONTEXT) create configmap localstack-init --from-file=init-aws.sh=localstack-init/init-aws.sh -n $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
-	# LocalStack runs init-aws.sh only at container start and the ConfigMap is a subPath
-	# mount, so a changed script would otherwise never re-run on a warm dev-up and newly
-	# added queues would silently not exist. Stamping the hash of the manifest *and* the
-	# script into the pod template rolls the pod exactly when either changes.
+	# init-aws.sh runs only at container start and a subPath mount never refreshes, so
+	# without a hash in the pod template a changed script silently never re-runs and
+	# newly added queues would not exist on a warm dev-up.
 	sed "s/__LOCALSTACK_MANIFEST_SHA__/$$(cat ../k8s/dev-infra/localstack.yaml localstack-init/init-aws.sh | shasum -a 256 | cut -c1-16)/" ../k8s/dev-infra/localstack.yaml \
 	  | kubectl --context=$(KUBE_CONTEXT) apply -f - -n $(KUBE_NS)
 	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/redis.yaml        -n $(KUBE_NS)
@@ -2517,8 +2513,6 @@ CRONJOB_DEPLOYMENTS := spark-anchorage-indexer offchain-price-indexer reference-
 # The Deployment behind one cmd/cronjobs package name — the same name, except for the
 # anchorage-indexer mismatch above. Targets that take NAME= take the package name.
 deployment_of = $(if $(filter anchorage-indexer,$(1)),spark-anchorage-indexer,$(1))
-# The three DEX workers share one dex-indexer image (DEX env selects the factory),
-# and base-psm3-indexer runs the chain-agnostic psm3-indexer image.
 image_of = $(if $(filter curve-indexer uniswap-v3-indexer uniswap-v4-indexer,$(1)),dex-indexer,$(if $(filter base-psm3-indexer,$(1)),psm3-indexer,$(1)))
 
 # Pattern rule: docker-build-cronjob-<name> builds any cronjob image.
@@ -2594,12 +2588,8 @@ _docker-release-block-republisher-internal:
 kind-load-cronjobs:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="$(foreach cj,$(CRONJOBS),stl-$(cj):$(LOCAL_TAG))"
 
-# Rebuild and redeploy a specific worker or cronjob. NAME is the dev Deployment
-# name; the case below maps it to the image/build target where they differ
-# (the three DEX workers share the dex-indexer image, base-psm3-indexer runs
-# the psm3-indexer image) and to the Deployment where that differs (anchorage).
+# Rebuild and redeploy a specific worker or cronjob.
 # Usage: make kind-redeploy-worker NAME=morpho-indexer
-#        make kind-redeploy-worker NAME=uniswap-v4-indexer
 #        make kind-redeploy-worker NAME=anchorage-indexer
 kind-redeploy-worker:
 	@test -n "$(NAME)" || { echo "ERROR: NAME is required. Example: make kind-redeploy-worker NAME=morpho-indexer"; exit 1; }

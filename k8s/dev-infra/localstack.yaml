@@ -12,11 +12,7 @@ spec:
       labels:
         app: localstack
       annotations:
-        # Substituted by `make kind-infra` with a hash of this file *and* of
-        # stl-verify/localstack-init/init-aws.sh (the canonical script the
-        # localstack-init ConfigMap is generated from), so the pod — and
-        # therefore init-aws.sh, which only runs at container start — is re-run
-        # whenever either changes.
+        # Substituted by `make kind-infra` with a hash of this file + init-aws.sh.
         stl.dev/localstack-manifest-sha: "__LOCALSTACK_MANIFEST_SHA__"
     spec:
       containers:
