@@ -20,7 +20,7 @@
     "uikit:unlink": "uikit-cli unlink"
   },
   "devDependencies": {
-    "@archon-research/uikit-cli": "0.10.0",
+    "@archon-research/uikit-cli": "0.10.1",
     "knip": "6.32.2",
     "oxlint-tsgolint": "7.0.2001",
     "typescript": "7.0.2"

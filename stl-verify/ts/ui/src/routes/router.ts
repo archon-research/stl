@@ -6,19 +6,25 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  lazyRouteComponent,
   parseSearchWith,
   redirect,
   stringifySearchWith,
 } from '@tanstack/react-router';
 import type { z } from 'zod';
 
+import { preloadMetricsBand } from '../features/allocations/preload';
 import {
   activitiesSearchSchema,
   allocationSearchSchema,
   sharedSearchSchema,
 } from '../shared/lib/search-params';
-import { ActivitiesRoute } from './ActivitiesRoute';
-import { AllocationRoute } from './AllocationRoute';
+import {
+  loadActivities,
+  loadAllocationIndex,
+  loadPrimeAllocations,
+  loadShell,
+} from './loaders';
 import { RootLayout } from './RootLayout';
 
 // Every param here is a plain string, and the default JSON round-trip would
@@ -36,6 +42,7 @@ const redirectToValidatedSearch = createValidatedSearchRedirect({
 const rootRoute = createRootRoute({
   validateSearch: sharedSearchSchema,
   component: RootLayout,
+  loader: loadShell,
   beforeLoad: (context) => {
     redirectToValidatedSearch(context);
   },
@@ -95,13 +102,22 @@ const allocationRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/allocation',
   validateSearch: allocationSearchSchema,
-  component: AllocationRoute,
+  // The charts are a chunk of their own and the view's queries take two round
+  // trips to answer, so starting the fetch here -- which `defaultPreload` also
+  // runs on hover -- lands it well before there is anything to plot. The view's
+  // data hangs off the two children below, which are where the prime is known.
+  loader: preloadMetricsBand,
+  component: lazyRouteComponent(
+    () => import('./AllocationRoute'),
+    'AllocationRoute',
+  ),
 });
 
 const allocationIndexRoute = createRoute({
   getParentRoute: () => allocationRoute,
   path: '/',
   beforeLoad: ({ search }) => redirectToPrimePath(search),
+  loader: loadAllocationIndex,
 });
 
 // The prime rides in the path here, so a surviving `?prime=` would name a second
@@ -110,13 +126,23 @@ const allocationPrimeRoute = createRoute({
   getParentRoute: () => allocationRoute,
   path: '$primeId',
   beforeLoad: createSearchParamStripper('prime', { stringifySearch }),
+  // Destructured from the params this route inferred, not from a context the
+  // loader restates: renaming the path segment above is then a type error here
+  // rather than an `undefined` id nobody notices.
+  loader: ({ params }) => {
+    loadPrimeAllocations(params.primeId);
+  },
 });
 
 const activitiesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/activities',
   validateSearch: activitiesSearchSchema,
-  component: ActivitiesRoute,
+  loader: loadActivities,
+  component: lazyRouteComponent(
+    () => import('./ActivitiesRoute'),
+    'ActivitiesRoute',
+  ),
 });
 
 const routeTree = rootRoute.addChildren([
@@ -132,6 +158,12 @@ export const router = createRouter({
   trailingSlash: 'never',
   parseSearch,
   stringifySearch,
+  // Hovering a view's link fetches its chunk and runs its loader, so the switch
+  // is instant for anyone who aimed before they clicked.
+  defaultPreload: 'intent',
+  // TanStack Query owns freshness here. Left at its 30s default the router
+  // keeps a second loader cache with its own opinion, and the two disagree.
+  defaultPreloadStaleTime: 0,
 });
 
 declare module '@tanstack/react-router' {

@@ -1,3 +1,4 @@
+import type { RangePreset, TimeRange } from '@archon-research/design-system';
 import { useMemo } from 'react';
 
 import {
@@ -13,7 +14,6 @@ import type {
   TimeSeriesResolution,
   TotalCapitalBucket,
 } from '../../shared/types/allocation';
-import type { RangePreset, TimeRange } from '../../shared/ui';
 import type { ChartDatum } from './metricCards';
 import { usePrimeChartData } from './usePrimeChartData';
 
@@ -34,6 +34,10 @@ export type PrimeChartSeries = {
   primeCollateralValue: number | null;
   isLoading: boolean;
   errorMessage: string | null;
+  // The activity read's own failure. It travels separately because that card is
+  // the one with no current-value fallback, so its empty series is an empty
+  // state and only this can say the window was not merely quiet.
+  activityErrorMessage: string | null;
 };
 
 // Picks the chart's downsampling resolution for a range. This is deliberately
@@ -124,6 +128,7 @@ export function usePrimeChartSeries(
     exposureBuckets,
     isLoading,
     errorMessage,
+    activityErrorMessage,
   } = usePrimeChartData(
     // Any one of the prime's proxies: the activity and exposure endpoints
     // resolve it prime-wide server-side. Total-capital and debt read
@@ -256,6 +261,7 @@ export function usePrimeChartSeries(
       primeCollateralValue,
       isLoading,
       errorMessage,
+      activityErrorMessage,
     }),
     [
       allocationBalanceSeries,
@@ -272,6 +278,7 @@ export function usePrimeChartSeries(
       primeCollateralValue,
       isLoading,
       errorMessage,
+      activityErrorMessage,
     ],
   );
 }

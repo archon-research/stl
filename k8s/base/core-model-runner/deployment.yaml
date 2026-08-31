@@ -4,13 +4,14 @@ metadata:
   name: core-model-runner
 spec:
   replicas: 1
-  # Explicit, matching the API-server default — ArgoCD must own spec.strategy or
-  # a later change to it cannot prune rollingUpdate. k8s/AGENTS.md, "Rollout strategy".
+  # Recreate, not RollingUpdate (k8s/AGENTS.md: a single Temporal consumer wants
+  # Recreate): the 25% surge rounds up to a second worker on one task queue, and
+  # its short-lived extra pod is what hands Karpenter an underutilized node to
+  # consolidate ~10 min after every deploy — which killed a tick mid-run on
+  # 2026-08-27 (VEC-681) and left a surge pod Pending on a full staging cluster
+  # on 2026-08-31. Overlap-SKIP on the schedule already guarantees one tick.
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 25%
-      maxUnavailable: 25%
+    type: Recreate
   selector:
     matchLabels:
       app: core-model-runner
