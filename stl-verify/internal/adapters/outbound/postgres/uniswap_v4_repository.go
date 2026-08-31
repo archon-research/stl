@@ -602,11 +602,6 @@ func sharedBlockNumber[T any](kind string, rows []T, blockNumberOf func(T) int64
 	return blockNumber, nil
 }
 
-// writePositions persists the append-on-change uniswap_v4_position rows,
-// mirroring uniswapTickWriter: lock every affected slot in the canonical sorted
-// order, read the latest row per slot in one query, then insert only where no
-// prior row exists or v4PositionUnchanged says the stored row does not already
-// reflect it.
 func (r *UniswapV4Repository) writePositions(ctx context.Context, tx pgx.Tx, positions []*entity.UniswapV4Position) (int64, error) {
 	if len(positions) == 0 {
 		return 0, nil
@@ -754,10 +749,6 @@ func readLatestPositionsV4(ctx context.Context, tx pgx.Tx, keys []v4PositionKey,
 	return latest, nil
 }
 
-// insertChangedPositionsV4 queues an INSERT for every position whose latest row
-// is absent (no prior row) or differs from it, then sends them in one pgx.Batch.
-// The INSERTs run through the table's BEFORE INSERT ROW trigger, so the per-row
-// processing_version assignment happens exactly as for a single-row insert.
 func (r *UniswapV4Repository) insertChangedPositionsV4(
 	ctx context.Context, tx pgx.Tx,
 	positions []*entity.UniswapV4Position,

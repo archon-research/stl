@@ -196,10 +196,8 @@ func readPositionChunk(
 	return rows, nil
 }
 
-// DecodePosition decodes one getPositionInfo() multicall result into an
-// authoritative entity.UniswapV4Position. A reverted call is an error, never a
-// silently dropped/zero-value position: this is an authoritative read, and
-// StateView answers a burned position with explicit zeros rather than reverting.
+// DecodePosition treats a revert as an error: getPositionInfo answers even a
+// burned position with zeros, so a revert is never an absent position.
 func DecodePosition(pool RegisteredPool, key entity.UniswapV4PositionKey, blockNumber int64, version int, ts time.Time, res outbound.Result) (*entity.UniswapV4Position, error) {
 	if !res.Success {
 		return nil, fmt.Errorf("getPositionInfo(%s, %s, %d, %d, %s) reverted",

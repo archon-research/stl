@@ -29,13 +29,9 @@ func IsHexWord(value string) bool {
 	return len(value) == 66 && strings.HasPrefix(value, "0x") && common.IsHexHash(value)
 }
 
-// DecodeLog extracts both indexed (from topics) and non-indexed (from data)
-// fields of an ABI event log into a flat map, following the morpho_indexer
-// parseTopics/parseData pattern.
-//
-// A log that cannot fill every argument its event declares is an error, never a
-// partial map: a params blob missing half its fields is indistinguishable from
-// a healthy row once persisted, and repairing it later costs a backfill.
+// DecodeLog flattens an event log's indexed (topics) and non-indexed (data) fields
+// into one map. A log that cannot fill every argument is an error, never a partial
+// map: a half-filled params blob reads as a healthy row once persisted.
 func DecodeLog(ev abi.Event, log Log) (map[string]any, error) {
 	out := make(map[string]any)
 	if err := parseIndexedArgs(ev, log, out); err != nil {
