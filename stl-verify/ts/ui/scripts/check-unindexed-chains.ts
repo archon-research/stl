@@ -40,7 +40,7 @@ async function main() {
       getAllocationKey,
       getChainLabel,
       getExplorerUrl,
-    } = await vite.ssrLoadModule('/src/lib/dashboard.ts');
+    } = await vite.ssrLoadModule('/src/shared/lib/dashboard.ts');
 
     const row = (
       overrides: Partial<AllocationRowFixture> = {},

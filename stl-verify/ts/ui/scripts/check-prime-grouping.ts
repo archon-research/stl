@@ -47,7 +47,7 @@ async function main() {
 
   try {
     const { groupPrimesByVault, findPrimeGroup } = await vite.ssrLoadModule(
-      '/src/lib/dashboard.ts',
+      '/src/shared/lib/dashboard.ts',
     );
 
     // Deliberately the highest-sorting address of the three, so the mainnet

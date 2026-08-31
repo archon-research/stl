@@ -14,7 +14,7 @@ import { createServer } from 'vite';
  * than a silent `undefined === undefined` pass.
  *
  * Mirrors `AppSearchPatch` (shared + allocation + activities schemas) in
- * `src/router/search-params.ts`; importing that type would pull an app-project
+ * `src/shared/lib/search-params.ts`; importing that type would pull an app-project
  * file into this node project's program. Every value is post-validation, so
  * every one of them is a string or absent.
  */
@@ -82,7 +82,7 @@ async function main() {
   });
 
   try {
-    const { router } = await vite.ssrLoadModule('/src/router/routes.ts');
+    const { router } = await vite.ssrLoadModule('/src/routes/router.ts');
     // The harness takes the shipped router's own options, so the parse/stringify
     // and trailing-slash behaviour under test is the one the app runs with.
     const resolve = (url: string) => resolveEntryUrl(router.options, url);
@@ -226,7 +226,7 @@ async function main() {
 
     // The superseded spelling is translated on entry, not stripped: shared links
     // carry it, and dropping it would leave the URL disagreeing with the page
-    // `lib/provenance` had already built from it.
+    // `shared/lib/provenance` had already built from it.
     assert.equal(
       (await applied('/allocation/0xAAA?reference=true')).source,
       'reference',

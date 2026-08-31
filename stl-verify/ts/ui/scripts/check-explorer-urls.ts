@@ -26,7 +26,9 @@ const vite = await createServer({
 });
 
 try {
-  const { getExplorerUrl } = await vite.ssrLoadModule('/src/lib/dashboard.ts');
+  const { getExplorerUrl } = await vite.ssrLoadModule(
+    '/src/shared/lib/dashboard.ts',
+  );
 
   for (const [chainId, explorerBase] of explorerCases) {
     assert.equal(

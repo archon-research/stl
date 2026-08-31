@@ -1,7 +1,7 @@
 /**
  * Node entry: msw's node interceptors over this repo's handlers.
  *
- * `listen()` has to run before `ui/src/lib/api-client.ts` is imported; see the
+ * `listen()` has to run before `ui/src/shared/lib/api-client.ts` is imported; see the
  * README's "Gotchas worth knowing".
  */
 import { setupMockServer } from '@archon-research/http-client-msw/node';

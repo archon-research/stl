@@ -7,7 +7,7 @@
  * case-insensitive equality, matching the `LIKE`/`LOWER()` the repository uses.
  *
  * The `aggregate=true` envelope is a different row shape, not a variant of the
- * same one, and `ui/src/lib/queries.ts` throws from its `select` when it gets
+ * same one, and `ui/src/shared/lib/queries.ts` throws from its `select` when it gets
  * the wrong `mode` — so the mock has to get the mode right or the app fails
  * loudly, which is the point.
  */

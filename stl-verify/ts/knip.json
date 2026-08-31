@@ -19,7 +19,7 @@
         "env.ts",
         "oxlint.config.ts",
         ".oxfmtrc.ts",
-        "src/components/allocations/MetricsFootnote.tsx"
+        "src/features/allocations/MetricsFootnote.tsx"
       ],
       "project": ["**/*.{ts,tsx,js}", "!src/generated/**"]
     },
