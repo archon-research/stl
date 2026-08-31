@@ -38,6 +38,16 @@ spec:
             - name: init-scripts
               mountPath: /etc/localstack/init/ready.d/init-aws.sh
               subPath: init-aws.sh
+          # ready.d runs after LocalStack is already serving, so without this the
+          # `make kind-infra` rollout-status gate opens before init-aws.sh finishes.
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "curl -sf http://localhost:4566/_localstack/init/ready | grep -q '\"completed\": true'"
+            periodSeconds: 5
+            timeoutSeconds: 3
       volumes:
         - name: init-scripts
           configMap:
