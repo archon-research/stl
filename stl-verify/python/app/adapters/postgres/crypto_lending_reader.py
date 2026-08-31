@@ -359,3 +359,13 @@ class PostgresCryptoLendingReader:
 
 def _normalize_protocol_name(protocol_name: str) -> str:
     return _NORMALIZE_RE.sub("_", protocol_name.strip().casefold())
+
+
+def is_morpho_protocol_name(protocol_name: str) -> bool:
+    """Whether a receipt token's protocol is Morpho Blue (a MetaMorpho vault share).
+
+    Public so the composition root can snapshot the Morpho receipt-token ids the
+    CORE model serves via vault→market aggregation, using the same protocol-name
+    normalization the crypto-lending routing uses.
+    """
+    return _normalize_protocol_name(protocol_name) in _MORPHO

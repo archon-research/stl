@@ -16,9 +16,10 @@ from app.adapters.postgres.allocation_position_repository import AllocationRepos
 from app.adapters.postgres.backed_breakdown_repository_maple import MapleBackedBreakdownRepository
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
 from app.adapters.postgres.core_model_results_reader import PostgresCoreModelResultsReader
-from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingReader
+from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingReader, is_morpho_protocol_name
 from app.adapters.postgres.engine import create_db_engine
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
+from app.adapters.postgres.morpho_vault_allocations_repository import MorphoVaultAllocationsRepository
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository, resolve_receipt_token_mapping
 from app.adapters.postgres.reference_as_of import pinned_to
 from app.api.v1 import (
@@ -37,10 +38,11 @@ from app.api.v1 import (
 from app.config import Settings, get_settings
 from app.logging import get_logger, setup_logging
 from app.middleware.request_id import RequestIdMiddleware
+from app.risk_engine.core_model.config import INPUTS_DIR, load_commented_json
 from app.risk_engine.mapping import MappingError, load_asset_mapping
 from app.risk_engine.suraf.loader import load_all_ratings
 from app.risk_engine.suraf.result import SurafResult
-from app.services.core_model_risk_service import CoreModelRiskService
+from app.services.core_model_risk_service import CoreModelRiskService, morpho_market_key_index
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 from app.services.model_registry import ModelRegistry
 from app.services.suraf_rrc_service import SurafRrcService
@@ -194,6 +196,9 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
     core_raw_mapping = load_asset_mapping(settings.core_model_mappings_file)
     logger.info("core model asset->market_key mapping loaded entries=%d", len(core_raw_mapping))
 
+    core_morpho_market_keys = morpho_market_key_index(load_commented_json(Path(INPUTS_DIR) / "market_configs.json"))
+    logger.info("core model morpho market keys loaded entries=%d", len(core_morpho_market_keys))
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_db_engine(
@@ -239,10 +244,22 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             )
             asset_to_market_key = await resolve_receipt_token_mapping(core_raw_mapping, engine)
             core_model_results_reader = PostgresCoreModelResultsReader(engine)
+            # Same startup-snapshot rule as the crypto-lending set above: a
+            # Morpho receipt token registered after boot needs a restart.
+            morpho_asset_ids = frozenset(
+                pair.receipt_token_id
+                for pair in await receipt_token_repo.list_protocol_pairs()
+                if is_morpho_protocol_name(pair.protocol_name)
+            )
             core_model_risk_service = CoreModelRiskService(
                 asset_to_market_key=asset_to_market_key,
                 results_reader=core_model_results_reader,
                 allocation_repo=allocation_repo,
+                receipt_tokens=receipt_token_repo,
+                morpho_allocations=MorphoVaultAllocationsRepository(engine),
+                morpho_market_keys=core_morpho_market_keys,
+                morpho_asset_ids=morpho_asset_ids,
+                min_coverage_pct=settings.core_model_min_coverage_pct,
             )
             model_registry = ModelRegistry([suraf_rrc_service, crypto_lending_risk_service, core_model_risk_service])
 
