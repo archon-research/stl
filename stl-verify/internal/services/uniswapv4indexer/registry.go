@@ -19,6 +19,8 @@ func RegisteredPoolsFromRows(rows []outbound.UniswapV4PoolRow) []RegisteredPool 
 			ID:                row.ID,
 			PoolManager:       row.PoolManager,
 			StateView:         row.StateView,
+			PositionManagerID: row.PositionManagerID,
+			PositionManager:   row.PositionManager,
 			PoolIDHash:        row.PoolIDHash,
 			Currency0:         row.Currency0,
 			Currency1:         row.Currency1,

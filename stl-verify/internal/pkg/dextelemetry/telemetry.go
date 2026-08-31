@@ -33,12 +33,25 @@ type Telemetry struct {
 	poolsTouched        metric.Int64Counter
 	tickRowsWritten     metric.Int64Counter
 	positionRowsWritten metric.Int64Counter
+	nftTransferRows     metric.Int64Counter
 	poolsNeverIndexed   metric.Int64Gauge
 }
 
-// NewTelemetry registers the whole instrument set for one DEX; the
-// OTel-to-Prometheus exporter normalises the dots to underscores and adds
-// `_total`, yielding the series names the alert rules select.
+// NewTelemetry registers eight counters (`<prefix>.blocks.processed`,
+// `<prefix>.errors.total`, `<prefix>.state.rows.written`,
+// `<prefix>.state.rows.attempted`, `<prefix>.pools.touched`,
+// `<prefix>.tick.rows.written`, `<prefix>.position.rows.written`,
+// `<prefix>.nft.transfer.rows.written`), the
+// `<prefix>.block.duration_seconds`
+// histogram, and the `<prefix>.pools.never_indexed` gauge. Every DEX gets the
+// whole set; an instrument a worker never records simply produces no series.
+// The OTel-to-Prometheus exporter normalises the dots to underscores and adds
+// the `_total` suffix to the counters, yielding the metric series names the
+// alert rules expect. The chain NAME (via entity.ChainName) is baked into
+// every datapoint as the `chain` attribute so multi-chain dashboards line up
+// with the morpho/oracle indexers, which label the same way. An unknown chainID
+// is rejected so a worker fails hard at startup rather than emitting an empty or
+// mismatched `chain` label.
 func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 	if prefix == "" {
 		return nil, fmt.Errorf("dextelemetry.NewTelemetry: prefix must be non-empty")
@@ -106,6 +119,11 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 		return nil, err
 	}
 
+	nftTransferRows, err := counter(".nft.transfer.rows.written", "Total NFT transfer event rows written")
+	if err != nil {
+		return nil, err
+	}
+
 	neverIndexed, err := meter.Int64Gauge(
 		prefix+".pools.never_indexed",
 		metric.WithDescription("Registered, snapshot-supported pools that have never produced a state or tick row"),
@@ -125,6 +143,7 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 		poolsTouched:        touched,
 		tickRowsWritten:     tickRows,
 		positionRowsWritten: positionRows,
+		nftTransferRows:     nftTransferRows,
 		poolsNeverIndexed:   neverIndexed,
 	}, nil
 }
@@ -216,4 +235,14 @@ func (t *Telemetry) RecordPositionRows(ctx context.Context, n int) {
 		return
 	}
 	t.positionRowsWritten.Add(ctx, int64(n), metric.WithAttributes(t.chainAttr))
+}
+
+// RecordNFTTransferRows counts the position-NFT Transfer rows a committed block
+// wrote — exact, unlike the two counters above. It is the only evidence posm
+// decoding still works; a wrong address raises no error. n <= 0 is a no-op.
+func (t *Telemetry) RecordNFTTransferRows(ctx context.Context, n int) {
+	if t == nil || n <= 0 {
+		return
+	}
+	t.nftTransferRows.Add(ctx, int64(n), metric.WithAttributes(t.chainAttr))
 }

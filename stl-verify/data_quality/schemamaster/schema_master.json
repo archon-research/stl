@@ -42,6 +42,8 @@
     "uniswap_v4_pool_manager",
     "uniswap_v4_pool_state",
     "uniswap_v4_position",
+    "uniswap_v4_position_manager",
+    "uniswap_v4_position_nft_transfer",
     "uniswap_v4_swap",
     "uniswap_v4_tick"
   ],

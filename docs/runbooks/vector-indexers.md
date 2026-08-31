@@ -1654,7 +1654,7 @@ any overlay; it is applied by hand from
 
 **Tables:** `uniswap_v4_pool_state`, `uniswap_v4_swap`,
 `uniswap_v4_liquidity_event`, `uniswap_v4_tick`, `uniswap_v4_pool_event`,
-`uniswap_v4_position`.
+`uniswap_v4_position`, `uniswap_v4_position_nft_transfer`.
 **Registry:** `uniswap_v4_pool`, keyed by `chain_id` + the 32-byte `pool_id`,
 plus `uniswap_v4_pool_manager`, which holds that chain's StateView address
 directly and its **PoolManager address only through `protocol_id`** — the
@@ -1662,6 +1662,38 @@ address lives on the FK'd `protocol` row, so every query for it joins
 `protocol`. There is no FK between the two registry tables: both are append-only
 version histories matched on `chain_id`, and "current" always means the highest
 `processing_version` per natural key — never the newest `id` or `build_id`.
+`uniswap_v4_position_manager` is a third registry table of the same shape, for
+the ERC-721 PositionManager, and its address comes through `protocol_id` too.
+
+**Who holds a posm position NFT.** `uniswap_v4_position.owner` is the
+*PoolManager-level* owner, which for every PositionManager-managed position is
+the PositionManager contract itself — never the person. The holder lives in
+`uniswap_v4_position_nft_transfer`, one row per ERC-721 `Transfer` log, and the
+two join on `uniswap_v4_position.salt = bytes32(token_id)` (PositionManager
+passes the token id as the salt). Coverage starts at the block the indexer began
+running, not at the PositionManager's deploy block; a historical backfill of the
+transfer log is a separate job. The holder at a height is a plain SELECT:
+
+```sql
+-- Who held posm token 388720 at block 25873334 on chain 1?
+SELECT '0x' || encode(t.to_address, 'hex') AS holder
+FROM uniswap_v4_position_nft_transfer t
+JOIN (
+    SELECT DISTINCT ON (chain_id) id
+    FROM uniswap_v4_position_manager
+    WHERE chain_id = 1
+    ORDER BY chain_id, processing_version DESC
+) m ON m.id = t.position_manager_id
+WHERE t.token_id = 388720
+  AND t.block_number <= 25873334
+ORDER BY t.block_number DESC, t.block_version DESC, t.log_index DESC,
+         t.processing_version DESC
+LIMIT 1;
+```
+
+`log_index DESC` is load-bearing, not decoration: a token can change hands twice
+in one block (it happens on every routed sale), and dropping it silently returns
+the earlier holder. An all-zero `to_address` is a burn, not a holder.
 
 Two invariants worth knowing before you debug anything here:
 
@@ -2516,6 +2548,119 @@ this fires on a pool younger than the window. Step 1 resolves it in one look.
 step-1 SQL returns no rows. Note the gauge only moves after a block actually
 snapshots the pool, so a registry correction needs a worker restart *and* a
 block that touches the corrected pool before it clears.
+
+---
+
+## VectorUniswapV4IndexerNoNFTTransfers
+
+**Severity:** warning · **For:** 10m
+
+The 6h rate window is set by the *failure class*, exactly as on
+[`VectorUniswapV4IndexerNoPoolsTouched`](#vectoruniswapv4indexernopoolstouched):
+every failure this catches is permanent, so a wide window costs detection speed
+and no detections at all. The false-positive pressure is *lower* here than for
+`pools.touched`, not higher — this stream is the whole PositionManager contract
+rather than a curated pool subset, so it has no quiet-registry failure mode. An
+`eth_getLogs` scan of the posm over a 2,001-block window on 2026-08-31 returned
+290 `Transfer` logs (~0.145 per block, ~260 per 6h). The `offset 6h` clause on
+the left side exists for the fresh-deploy reason spelt out on `NoPoolsTouched`.
+
+### What it means
+
+Blocks are advancing (`uniswap_v4_blocks_processed_total{status="success"}` is
+non-zero, both now and 6h ago) but **not one** Uniswap V4 PositionManager
+ERC-721 `Transfer` has been decoded
+(`uniswap_v4_nft_transfer_rows_written_total` is zero or absent) for 6 hours.
+
+`uniswap_v4_position_nft_transfer` is the only source of posm token holders, so
+while this fires "who holds token T" answers with stale data and no query can
+tell. Nothing else in the group covers it:
+[`NoPoolsTouched`](#vectoruniswapv4indexernopoolstouched) gates on
+`pools.touched`, and a posm transfer touches no pool by design — it is
+deliberately kept out of `touchedIDs` because it names no PoolId — so the two
+streams fail independently.
+
+Unlike the pool-keyed streams there is exactly one thing to check: this table is
+keyed off a **single address**, and everything downstream of that address filter
+is a straight-line decode.
+
+### First checks
+
+1. **PositionManager address** — the address is the FK'd `protocol` row's, not a
+   column on `uniswap_v4_position_manager`, so a wrong value can come from
+   either side:
+
+   ```sql
+   SELECT DISTINCT ON (m.chain_id)
+          m.chain_id,
+          pr.name,
+          '0x' || encode(pr.address, 'hex') AS position_manager,
+          pr.metadata->>'role'              AS role,
+          m.deploy_block
+   FROM uniswap_v4_position_manager m
+   JOIN protocol pr ON pr.id = m.protocol_id AND pr.chain_id = m.chain_id
+   ORDER BY m.chain_id, m.processing_version DESC;
+   -- mainnet: UniswapV4PositionManager
+   --          0xbd216513d74c8cf14cf4747e6aaa6420ff64ee9e
+   --          position_manager, 21689089
+   ```
+
+   Confirm on chain that it really is the PositionManager of the *seeded*
+   PoolManager — a posm from another deployment would look perfectly healthy
+   here and index the wrong NFTs:
+
+   ```bash
+   cast call 0xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e 'poolManager()(address)' --rpc-url "$RPC_URL"
+   # -> 0x000000000004444c5dc75cB358380D2e3dE08A90 (the seeded PoolManager)
+   cast call 0xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e 'symbol()(string)' --rpc-url "$RPC_URL"
+   # -> "UNI-V4-POSM"
+   ```
+
+2. **Is the chain actually emitting transfers?** If it is not, nothing is
+   broken; if it is, the worker is the problem.
+
+   ```bash
+   cast logs --from-block $((BLOCK-2000)) --to-block $BLOCK \
+     --address 0xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e \
+     0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef \
+     --rpc-url "$RPC_URL" | grep -c 'blockNumber'
+   ```
+
+3. **Rows actually landing** — the metric counts rows a committed block wrote,
+   so a non-empty recent tail means the metric pipeline broke rather than the
+   decode:
+
+   ```sql
+   SELECT max(block_number) AS newest_block, count(*) AS rows_last_day
+   FROM uniswap_v4_position_nft_transfer
+   WHERE block_timestamp > now() - INTERVAL '1 day';
+   ```
+
+4. **Decode regression** — `decodePositionManagerLog` skips any log whose
+   `topics[0]` is not the ERC-721 `Transfer` hash, and hard-errors on a
+   `Transfer` that does not carry exactly 4 topics. That arity guard is the only
+   thing separating an ERC-721 `Transfer` from the byte-identical ERC-20 one, so
+   a wrong address usually shows up as *errors*, not silence. Silence with the
+   right address points at the topic0 check or at the address filter in
+   `decodeLog` running after the PoolManager branch instead of before it.
+
+### Common causes
+
+- Wrong `protocol.address` for the `UniswapV4PositionManager` row, or a
+  `uniswap_v4_position_manager` row pointing at the wrong `protocol_id` -> the
+  address filter matches nothing and no log is ever considered.
+- A newer registry version appended with a bad address: "current" is the highest
+  `processing_version`, so a correction with a typo supersedes a good row.
+  Fix by appending another superseding row
+  ([Fixing a bad registry row](#fixing-a-bad-registry-row)), never by editing.
+- topic0 or routing regression in `decodePositionManagerLog`.
+- The OTLP metric export broke while the worker is healthy — check step 3
+  before touching the registry.
+
+### Verify recovery
+
+`rate(uniswap_v4_nft_transfer_rows_written_total[6h]) > 0` for the affected
+chain, and the step-3 SQL's `newest_block` tracks the chain head.
 
 ---
 

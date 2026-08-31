@@ -132,13 +132,22 @@ func TestLiveValidation(t *testing.T) {
 
 	crossCheckSlot0(t, ctx, ethClient, regPools, states, target, rep)
 
+	positionManager, err := PositionManagerFor(regPools)
+	if err != nil {
+		t.Fatalf("CORE FAILURE: PositionManagerFor: %v", err)
+	}
+	rep.positionManager = positionManager.Address.Hex()
+
 	h := &liveHarness{
 		eth: ethClient, rpc: rpcClient, mc: mc, txMgr: txMgr, repo: repo, eventWriter: eventWriter,
-		pools: regPools, poolsByID: poolsByID, poolManager: poolManager, latest: int64(latest),
+		pools: regPools, poolsByID: poolsByID, poolManager: poolManager,
+		positionManager: positionManager, latest: int64(latest),
 	}
 
 	h.decodeAndPersistRealSwap(t, ctx, rep)
 	h.decodeAndPersistRealLiquidityEvent(t, ctx, rep)
+	h.checkPositionManagerRegistryMatchesChain(t, ctx, rep)
+	h.decodeAndPersistRealPosmTransfers(t, ctx, rep)
 
 	baselineTickCheck(t, ctx, mc, regPools, states, target, rep)
 
@@ -394,16 +403,17 @@ func twosComplement(word []byte) *big.Int {
 }
 
 type liveHarness struct {
-	eth         *ethclient.Client
-	rpc         *rpc.Client
-	mc          outbound.Multicaller
-	txMgr       outbound.TxManager
-	repo        *postgres.UniswapV4Repository
-	eventWriter *dexconsumer.ProtocolEventWriter
-	pools       []RegisteredPool
-	poolsByID   map[common.Hash]RegisteredPool
-	poolManager common.Address
-	latest      int64
+	eth             *ethclient.Client
+	rpc             *rpc.Client
+	mc              outbound.Multicaller
+	txMgr           outbound.TxManager
+	repo            *postgres.UniswapV4Repository
+	eventWriter     *dexconsumer.ProtocolEventWriter
+	pools           []RegisteredPool
+	poolsByID       map[common.Hash]RegisteredPool
+	poolManager     common.Address
+	positionManager RegisteredPositionManager
+	latest          int64
 }
 
 func (h *liveHarness) persistDecoded(t *testing.T, ctx context.Context, decoded DecodedEvents, tickRows []*entity.UniswapV4Tick, positionRows []*entity.UniswapV4Position, block blockInfo) {
@@ -416,6 +426,7 @@ func (h *liveHarness) persistDecoded(t *testing.T, ctx context.Context, decoded 
 			PoolEvents:      decoded.PoolEvents,
 			Ticks:           tickRows,
 			Positions:       positionRows,
+			NFTTransfers:    decoded.NFTTransfers,
 		}); txErr != nil {
 			return txErr
 		}
@@ -450,7 +461,7 @@ func (h *liveHarness) decodeAndPersistRealSwap(t *testing.T, ctx context.Context
 		t.Fatalf("CORE FAILURE: %v", err)
 	}
 
-	decoded, touched, err := DecodeEvents(receipt, h.poolsByID, h.poolManager, eventBlock.number, 0, eventBlock.timestamp)
+	decoded, touched, err := DecodeEvents(receipt, h.poolsByID, h.poolManager, h.positionManager, eventBlock.number, 0, eventBlock.timestamp)
 	if err != nil {
 		t.Fatalf("CORE FAILURE: DecodeEvents(tx=%s): %v", swapLog.TxHash, err)
 	}
@@ -504,7 +515,7 @@ func (h *liveHarness) decodeAndPersistRealLiquidityEvent(t *testing.T, ctx conte
 		t.Fatalf("CORE FAILURE: %v", err)
 	}
 
-	decoded, _, err := DecodeEvents(receipt, h.poolsByID, h.poolManager, eventBlock.number, 0, eventBlock.timestamp)
+	decoded, _, err := DecodeEvents(receipt, h.poolsByID, h.poolManager, h.positionManager, eventBlock.number, 0, eventBlock.timestamp)
 	if err != nil {
 		t.Fatalf("CORE FAILURE: DecodeEvents(liquidity tx=%s): %v", target.TxHash, err)
 	}
@@ -711,7 +722,7 @@ func (h *liveHarness) assertBlockWideUntrackedFilter(t *testing.T, ctx context.C
 
 	decoded := make([]DecodedEvents, 0, len(receipts))
 	for _, r := range receipts {
-		d, _, err := DecodeEvents(r, h.poolsByID, h.poolManager, eventBlock.number, 0, eventBlock.timestamp)
+		d, _, err := DecodeEvents(r, h.poolsByID, h.poolManager, h.positionManager, eventBlock.number, 0, eventBlock.timestamp)
 		if err != nil {
 			t.Fatalf("CORE FAILURE: DecodeEvents(tx=%s) in block-wide sweep: %v", r.TransactionHash, err)
 		}
@@ -961,6 +972,8 @@ var uniswapV4ReportTables = []string{
 	"uniswap_v4_tick",
 	"uniswap_v4_pool_event",
 	"uniswap_v4_position",
+	"uniswap_v4_position_manager",
+	"uniswap_v4_position_nft_transfer",
 	"protocol_event",
 }
 
@@ -986,11 +999,17 @@ func addFinding(t *testing.T, rep *liveReport, msg string) {
 type liveReport struct {
 	poolsLoaded      int
 	poolManager      string
+	positionManager  string
 	stateView        string
 	blockNumber      int64
 	blockHash        string
 	blockTimestamp   time.Time
 	stateRowsWritten int64
+
+	posmPoolManager    string
+	posmSymbol         string
+	posmSupportsERC721 bool
+	posmTransfers      []*entity.UniswapV4PositionNFTTransfer
 
 	poolSnapshots    []poolSnapshotSummary
 	slot0CrossChecks []slot0CrossCheck
@@ -1046,14 +1065,15 @@ func (r *liveReport) writeAndLog(t *testing.T) {
 func (r *liveReport) render() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Uniswap V4 indexer — live validation report\n\n")
-	fmt.Fprintf(&b, "PoolManager: %s\nStateView: %s\nBlock: %d\nHash: %s\nTimestamp: %s\nPools loaded: %d\nState rows written: %d\n\n",
-		r.poolManager, r.stateView, r.blockNumber, r.blockHash, r.blockTimestamp.Format(time.RFC3339), r.poolsLoaded, r.stateRowsWritten)
+	fmt.Fprintf(&b, "PoolManager: %s\nPositionManager: %s\nStateView: %s\nBlock: %d\nHash: %s\nTimestamp: %s\nPools loaded: %d\nState rows written: %d\n\n",
+		r.poolManager, r.positionManager, r.stateView, r.blockNumber, r.blockHash, r.blockTimestamp.Format(time.RFC3339), r.poolsLoaded, r.stateRowsWritten)
 
 	r.renderSnapshots(&b)
 	r.renderCrossChecks(&b)
 	r.renderSwap(&b)
 	r.renderLiquidity(&b)
 	r.renderBaseline(&b)
+	r.renderTransfers(&b)
 	r.renderCounts(&b)
 	r.renderFindings(&b)
 	return b.String()
@@ -1202,4 +1222,210 @@ func bigOrNil(v *big.Int) string {
 		return "nil"
 	}
 	return v.String()
+}
+
+// -----------------------------------------------------------------------
+// PositionManager registry + real posm Transfer decode
+// -----------------------------------------------------------------------
+
+// posmTransferScanDepth is the eth_getLogs window the posm Transfer scan uses.
+// Mainnet mints and moves posm NFTs many times an hour, so an empty result over
+// this many blocks is a wrong address or a topic regression, not a quiet market.
+const posmTransferScanDepth = int64(2000)
+
+// erc721InterfaceID is the ERC-165 id of ERC-721, which the posm must claim.
+var erc721InterfaceID = [4]byte{0x80, 0xac, 0x58, 0xcd}
+
+// checkPositionManagerRegistryMatchesChain proves the seeded posm really is the
+// PositionManager of the seeded PoolManager. Nothing at runtime can: the
+// address is only ever used as a log filter, so a wrong one silently yields an
+// empty table rather than an error.
+func (h *liveHarness) checkPositionManagerRegistryMatchesChain(t *testing.T, ctx context.Context, rep *liveReport) {
+	t.Helper()
+
+	gotPoolManager, err := callAddressGetter(ctx, h.eth, h.positionManager.Address, "poolManager()")
+	if err != nil {
+		t.Fatalf("CORE FAILURE: posm poolManager(): %v", err)
+	}
+	rep.posmPoolManager = gotPoolManager.Hex()
+	if gotPoolManager != h.poolManager {
+		addFinding(t, rep, fmt.Sprintf("registry posm %s reports poolManager() = %s, but the registry PoolManager is %s: the two registry rows describe different deployments",
+			h.positionManager.Address, gotPoolManager, h.poolManager))
+	}
+
+	symbol, err := callStringGetter(ctx, h.eth, h.positionManager.Address, "symbol()")
+	if err != nil {
+		t.Fatalf("CORE FAILURE: posm symbol(): %v", err)
+	}
+	rep.posmSymbol = symbol
+	if symbol != "UNI-V4-POSM" {
+		addFinding(t, rep, fmt.Sprintf("registry posm %s reports symbol() = %q, want \"UNI-V4-POSM\"", h.positionManager.Address, symbol))
+	}
+
+	supportsERC721, err := callSupportsInterface(ctx, h.eth, h.positionManager.Address, erc721InterfaceID)
+	if err != nil {
+		t.Fatalf("CORE FAILURE: posm supportsInterface(0x80ac58cd): %v", err)
+	}
+	rep.posmSupportsERC721 = supportsERC721
+	if !supportsERC721 {
+		addFinding(t, rep, fmt.Sprintf("registry posm %s does not claim ERC-721 (supportsInterface(0x80ac58cd) = false): a 3-topic ERC-20 Transfer would decode wrong", h.positionManager.Address))
+	}
+}
+
+// decodeAndPersistRealPosmTransfers decodes real posm Transfer logs through the
+// production path, persists them through the real repository, and then asks the
+// chain who holds each token one block after the transfer. ownerOf is the
+// independent oracle: it is read from the contract's own storage, never from
+// the log this indexer decoded.
+func (h *liveHarness) decodeAndPersistRealPosmTransfers(t *testing.T, ctx context.Context, rep *liveReport) {
+	t.Helper()
+
+	logs, err := h.eth.FilterLogs(ctx, ethereum.FilterQuery{
+		FromBlock: big.NewInt(max(h.latest-posmTransferScanDepth, 0)),
+		ToBlock:   big.NewInt(h.latest),
+		Addresses: []common.Address{h.positionManager.Address},
+		Topics:    [][]common.Hash{{positionManagerTransferTopic0(t)}},
+	})
+	if err != nil {
+		t.Fatalf("CORE FAILURE: eth_getLogs posm Transfer: %v", err)
+	}
+	if len(logs) == 0 {
+		addFinding(t, rep, fmt.Sprintf("no posm Transfer in the last %d blocks: mainnet mints and moves position NFTs continuously, so an empty window is a wrong PositionManager address or a topic regression", posmTransferScanDepth))
+		return
+	}
+
+	for _, l := range logs[max(len(logs)-posmTransfersChecked, 0):] {
+		h.decodeOnePosmTransfer(t, ctx, rep, l)
+	}
+}
+
+// posmTransfersChecked bounds the ownerOf cross-checks: each costs an archive
+// eth_call, and the decode path is identical for every log in the window.
+const posmTransfersChecked = 5
+
+func (h *liveHarness) decodeOnePosmTransfer(t *testing.T, ctx context.Context, rep *liveReport, l types.Log) {
+	t.Helper()
+
+	eventBlock := blockAtHash(t, ctx, h.eth, l.BlockHash)
+	receipt, err := fetchReceipt(ctx, h.rpc, l.TxHash)
+	if err != nil {
+		t.Fatalf("CORE FAILURE: %v", err)
+	}
+
+	decoded, touched, err := DecodeEvents(receipt, h.poolsByID, h.poolManager, h.positionManager, eventBlock.number, 0, eventBlock.timestamp)
+	if err != nil {
+		t.Fatalf("CORE FAILURE: DecodeEvents(posm tx=%s): %v", l.TxHash, err)
+	}
+
+	idx := slices.IndexFunc(decoded.NFTTransfers, func(tr *entity.UniswapV4PositionNFTTransfer) bool {
+		return tr.LogIndex == int(l.Index)
+	})
+	if idx < 0 {
+		t.Fatalf("CORE FAILURE: eth_getLogs found a posm Transfer at tx %s log %d but DecodeEvents produced none — signature/topic/routing mismatch", l.TxHash, l.Index)
+	}
+	transfer := decoded.NFTTransfers[idx]
+	rep.posmTransfers = append(rep.posmTransfers, transfer)
+	if len(touched) != 0 {
+		addFinding(t, rep, fmt.Sprintf("posm Transfer at tx %s marked %d pools touched; an NFT transfer touches no pool", l.TxHash, len(touched)))
+	}
+
+	h.persistDecoded(t, ctx, decoded, nil, nil, eventBlock)
+
+	// A burn leaves no holder, and ownerOf then reverts rather than answering.
+	if transfer.To == (common.Address{}) {
+		return
+	}
+	owner, err := callOwnerOfAtBlock(ctx, h.eth, h.positionManager.Address, transfer.TokenID, eventBlock.number)
+	if err != nil {
+		t.Fatalf("CORE FAILURE: ownerOf(%s) at block %d: %v", transfer.TokenID, eventBlock.number, err)
+	}
+	if owner != transfer.To {
+		addFinding(t, rep, fmt.Sprintf("decoded posm Transfer of token %s says the holder is %s, but ownerOf at block %d says %s: from/to are transposed or the token id topic is misread",
+			transfer.TokenID, transfer.To, eventBlock.number, owner))
+	}
+}
+
+// positionManagerTransferTopic0 resolves topic0 from the production
+// PositionManager ABI, so the eth_getLogs filter and the decoder cannot drift
+// apart silently.
+func positionManagerTransferTopic0(t *testing.T) common.Hash {
+	t.Helper()
+	ev, err := positionManagerTransferEvent()
+	if err != nil {
+		t.Fatalf("loading the PositionManager Transfer event: %v", err)
+	}
+	return ev.ID
+}
+
+func callAddressGetter(ctx context.Context, ethClient *ethclient.Client, to common.Address, signature string) (common.Address, error) {
+	out, err := ethClient.CallContract(ctx, ethereum.CallMsg{To: &to, Data: crypto.Keccak256([]byte(signature))[:4]}, nil)
+	if err != nil {
+		return common.Address{}, fmt.Errorf("eth_call %s: %w", signature, err)
+	}
+	if len(out) != 32 {
+		return common.Address{}, fmt.Errorf("%s returned %d bytes, want 32", signature, len(out))
+	}
+	return common.BytesToAddress(out[12:]), nil
+}
+
+// callStringGetter decodes the ABI string return by hand: offset word, length
+// word, then the bytes.
+func callStringGetter(ctx context.Context, ethClient *ethclient.Client, to common.Address, signature string) (string, error) {
+	out, err := ethClient.CallContract(ctx, ethereum.CallMsg{To: &to, Data: crypto.Keccak256([]byte(signature))[:4]}, nil)
+	if err != nil {
+		return "", fmt.Errorf("eth_call %s: %w", signature, err)
+	}
+	if len(out) < 64 {
+		return "", fmt.Errorf("%s returned %d bytes, want at least 64", signature, len(out))
+	}
+	offset := new(big.Int).SetBytes(out[0:32]).Int64()
+	if offset < 0 || offset+32 > int64(len(out)) {
+		return "", fmt.Errorf("%s returned an out-of-range string offset %d", signature, offset)
+	}
+	length := new(big.Int).SetBytes(out[offset : offset+32]).Int64()
+	if length < 0 || offset+32+length > int64(len(out)) {
+		return "", fmt.Errorf("%s returned an out-of-range string length %d", signature, length)
+	}
+	return string(out[offset+32 : offset+32+length]), nil
+}
+
+func callSupportsInterface(ctx context.Context, ethClient *ethclient.Client, to common.Address, interfaceID [4]byte) (bool, error) {
+	calldata := append(crypto.Keccak256([]byte("supportsInterface(bytes4)"))[:4], make([]byte, 32)...)
+	copy(calldata[4:], interfaceID[:])
+	out, err := ethClient.CallContract(ctx, ethereum.CallMsg{To: &to, Data: calldata}, nil)
+	if err != nil {
+		return false, fmt.Errorf("eth_call supportsInterface: %w", err)
+	}
+	if len(out) != 32 {
+		return false, fmt.Errorf("supportsInterface returned %d bytes, want 32", len(out))
+	}
+	return new(big.Int).SetBytes(out).Sign() != 0, nil
+}
+
+func callOwnerOfAtBlock(ctx context.Context, ethClient *ethclient.Client, to common.Address, tokenID *big.Int, blockNumber int64) (common.Address, error) {
+	calldata := append(crypto.Keccak256([]byte("ownerOf(uint256)"))[:4], common.BigToHash(tokenID).Bytes()...)
+	out, err := ethClient.CallContract(ctx, ethereum.CallMsg{To: &to, Data: calldata}, big.NewInt(blockNumber))
+	if err != nil {
+		return common.Address{}, fmt.Errorf("eth_call ownerOf: %w", err)
+	}
+	if len(out) != 32 {
+		return common.Address{}, fmt.Errorf("ownerOf returned %d bytes, want 32", len(out))
+	}
+	return common.BytesToAddress(out[12:]), nil
+}
+
+func (r *liveReport) renderTransfers(b *strings.Builder) {
+	fmt.Fprintf(b, "## PositionManager registry + decoded posm Transfers\n\n")
+	fmt.Fprintf(b, "PositionManager: %s\npoolManager(): %s\nsymbol(): %s\nsupportsInterface(0x80ac58cd): %t\n\n",
+		r.positionManager, r.posmPoolManager, r.posmSymbol, r.posmSupportsERC721)
+	if len(r.posmTransfers) == 0 {
+		fmt.Fprintf(b, "No posm Transfer decoded.\n\n")
+		return
+	}
+	fmt.Fprintf(b, "| block | logIndex | tokenId | from | to |\n|---|---|---|---|---|\n")
+	for _, tr := range r.posmTransfers {
+		fmt.Fprintf(b, "| %d | %d | %s | %s | %s |\n",
+			tr.BlockNumber, tr.LogIndex, tr.TokenID, tr.From.Hex(), tr.To.Hex())
+	}
+	fmt.Fprintln(b)
 }

@@ -294,6 +294,47 @@ func TestTelemetry_NilSafe(t *testing.T) {
 	tel.RecordTickRows(ctx, 0)
 	tel.RecordPositionRows(ctx, 5)
 	tel.RecordPositionRows(ctx, 0)
+	tel.RecordNFTTransferRows(ctx, 5)
+	tel.RecordNFTTransferRows(ctx, 0)
+}
+
+// The NFT-transfer counter is the only signal that posm Transfer decoding still
+// works: a wrong PositionManager address or a topic regression raises no error
+// and empties this series alone, which is what
+// VectorUniswapV4IndexerNoNFTTransfers keys on.
+func TestRecordNFTTransferRows_IncrementsCounter(t *testing.T) {
+	reader := metricsdk.NewManualReader()
+	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
+
+	tel, err := NewTelemetry("uniswap_v4", 1)
+	if err != nil {
+		t.Fatalf("NewTelemetry: %v", err)
+	}
+
+	ctx := context.Background()
+	tel.RecordNFTTransferRows(ctx, 3)
+	tel.RecordNFTTransferRows(ctx, 5)
+	tel.RecordNFTTransferRows(ctx, 0)  // no-op
+	tel.RecordNFTTransferRows(ctx, -1) // no-op
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	const metric = "uniswap_v4.nft.transfer.rows.written"
+	if got := readSingleSumCount(t, &rm, metric); got != 8 {
+		t.Errorf("%s = %d, want 8 (3+5; 0 and -1 are no-ops)", metric, got)
+	}
+	if want := "mainnet"; readChainAttr(t, &rm, metric) != want {
+		t.Errorf("%s chain attr = %q, want %q", metric, readChainAttr(t, &rm, metric), want)
+	}
 }
 
 func TestRecordAppendOnChangeRows_IncrementsItsOwnCounter(t *testing.T) {

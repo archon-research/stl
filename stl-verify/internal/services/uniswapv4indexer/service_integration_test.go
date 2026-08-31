@@ -152,6 +152,7 @@ func TestIntegration_PersistsEveryTableForATouchedBlock(t *testing.T) {
 		swapLog(t, f.pool, "0x0"),
 		modifyLog(t, f.pool, "0x1", -100, 200, 5000),
 		donateLog(t, f.pool, "0x2"),
+		posmMoveFixtureLog(),
 	}}
 	event := blockEvent(integrationBlock)
 	event.BlockHash = common.HexToHash("0xaa").Hex()
@@ -178,8 +179,49 @@ func TestIntegration_PersistsEveryTableForATouchedBlock(t *testing.T) {
 		}
 	}
 
+	if got := countRows(t, ctx, f.db,
+		`SELECT count(*) FROM uniswap_v4_position_nft_transfer WHERE position_manager_id = $1`,
+		f.pool.PositionManagerID); got != 1 {
+		t.Errorf("uniswap_v4_position_nft_transfer rows = %d, want 1", got)
+	}
+
 	if got := countRows(t, ctx, f.db, `SELECT count(*) FROM protocol_event WHERE block_number = $1`, integrationBlock); got != 3 {
-		t.Errorf("protocol_event rows = %d, want 3 (one per decoded PoolManager log)", got)
+		t.Errorf("protocol_event rows = %d, want 3 (one per decoded PoolManager log; the posm transfer is not mirrored)", got)
+	}
+}
+
+// A posm transfer touches no pool, so the due set is empty and every snapshot
+// slice is too. hasEvents is the only thing keeping the block from returning
+// before the write.
+func TestIntegration_PosmTransferOnlyBlockStillWrites(t *testing.T) {
+	ctx := context.Background()
+	f := setupV4Integration(t)
+
+	event := blockEvent(integrationBlock)
+	event.BlockHash = common.HexToHash("0xbb").Hex()
+	receipt := shared.TransactionReceipt{Logs: []shared.Log{posmMoveFixtureLog()}}
+
+	if err := f.svc.BlockHandler()(ctx, event, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	var to []byte
+	if err := f.db.QueryRow(ctx, `
+		SELECT to_address FROM uniswap_v4_position_nft_transfer
+		WHERE position_manager_id = $1 AND token_id = 388720 AND block_number <= $2
+		ORDER BY block_number DESC, block_version DESC, log_index DESC, processing_version DESC
+		LIMIT 1`, f.pool.PositionManagerID, integrationBlock).Scan(&to); err != nil {
+		t.Fatalf("reading the holder of token 388720: %v", err)
+	}
+	if got, want := common.BytesToAddress(to), common.HexToAddress("0xe588dDd13a8bDBee578eAa7c4Fd9780180b2f10C"); got != want {
+		t.Errorf("holder = %s, want %s", got, want)
+	}
+
+	if got := countRows(t, ctx, f.db, `SELECT count(*) FROM uniswap_v4_pool_state WHERE block_number = $1`, integrationBlock); got != 0 {
+		t.Errorf("uniswap_v4_pool_state rows = %d, want 0 (no pool was touched)", got)
+	}
+	if got := countRows(t, ctx, f.db, `SELECT count(*) FROM protocol_event WHERE block_number = $1`, integrationBlock); got != 0 {
+		t.Errorf("protocol_event rows = %d, want 0 (a posm transfer is not mirrored into the capture net)", got)
 	}
 }
 
