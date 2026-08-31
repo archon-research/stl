@@ -2,8 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import react from '@vitejs/plugin-react';
-import { defineConfig } from 'vite';
 import type { Plugin } from 'vite';
+import { defineConfig } from 'vitest/config';
 
 import { resolveAppEnv } from './env';
 
@@ -81,6 +81,16 @@ export default defineConfig(({ mode }) => {
     build: {
       outDir: 'dist',
       sourcemap: false,
+    },
+    // Vitest reuses this config, so `#src/*`, `#styled-system/*` and
+    // preserveSymlinks resolve in tests exactly as they do in the app.
+    test: {
+      // `scripts/` holds the vite-booting regression CLIs, which run themselves
+      // and would boot a second server inside a worker if collected here.
+      include: ['src/**/*.test.{ts,tsx}'],
+      // Every formatter here is locale- and zone-sensitive, so an unpinned
+      // runner would assert one thing locally and another in CI.
+      env: { TZ: 'UTC' },
     },
   };
 });

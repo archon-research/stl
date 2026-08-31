@@ -3,8 +3,9 @@ import { HttpProvider } from '@archon-research/http-client-react';
 import { RouterProvider } from '@tanstack/react-router';
 import { createRoot } from 'react-dom/client';
 
-import { logging } from './lib/logging';
-import { router } from './router/routes';
+import { router } from './routes/router';
+import { logging } from './shared/lib/logging';
+import { createAppQueryClient } from './shared/lib/query-client';
 
 // Required global stylesheet side effects.
 // oxlint-disable-next-line import/no-unassigned-import
@@ -41,7 +42,7 @@ createRoot(document.getElementById('root')!).render(
     }}
   >
     <ThemeProvider>
-      <HttpProvider>
+      <HttpProvider client={createAppQueryClient()}>
         <RouterProvider router={router} />
       </HttpProvider>
     </ThemeProvider>

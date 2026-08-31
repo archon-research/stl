@@ -159,7 +159,7 @@ function readTimestamp(
 }
 
 /** The finest resolution the API permits for a window of the given size. */
-export function minimumResolution(windowMs: number): TimeSeriesResolution {
+function minimumResolution(windowMs: number): TimeSeriesResolution {
   if (windowMs <= 6 * HOUR_MS) return 'PT1M';
   if (windowMs <= DAY_MS) return 'PT5M';
   if (windowMs <= 7 * DAY_MS) return 'PT15M';
