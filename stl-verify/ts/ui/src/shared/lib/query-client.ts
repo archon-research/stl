@@ -1,5 +1,9 @@
 import { isHttpRequestError } from '@archon-research/http-client-react';
-import { QueryCache, QueryClient } from '@tanstack/react-query';
+import {
+  type NetworkMode,
+  QueryCache,
+  QueryClient,
+} from '@tanstack/react-query';
 
 import { logging } from './logging';
 
@@ -40,6 +44,21 @@ function logQueryFailure(
     statusText: http?.statusText,
   });
 }
+
+/**
+ * Whether a query is allowed to fetch while the browser calls itself offline.
+ *
+ * react-query's `'online'` default parks a query with no cached data in
+ * `pending`/`paused` and leaves it there — `isPending` true, `error`
+ * undefined, no timeout — so a drawer tab opened on an uncached row shows its
+ * skeleton for good. `'always'` lets the fetch run and reject, which is a state
+ * the tab already renders, with a retry the reader can reach.
+ *
+ * The cost is `onlineManager` gating: a query that would have waited out a blip
+ * and resumed on reconnect instead spends its retries on a dead network and
+ * settles as an error, after the full backoff, for the reader to retry.
+ */
+const NETWORK_MODE: NetworkMode = 'always';
 
 /**
  * The 4xx statuses that say "not now" rather than "no": the request itself was
@@ -92,6 +111,7 @@ function createAppQueryClient(): QueryClient {
         // forgets to.
         staleTime: 30_000,
         gcTime: 5 * 60_000,
+        networkMode: NETWORK_MODE,
         // This screen issues a dozen requests on first paint. Refiring them
         // because someone alt-tabbed back is cost without an answer anyone
         // asked for.
