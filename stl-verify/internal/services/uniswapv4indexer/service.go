@@ -172,10 +172,8 @@ func (s *UniswapV4Service) reportExcludedFromSnapshots() {
 		"chainId", s.chainID, "count", len(ids), "poolRowIds", ids, "poolIds", hashes)
 }
 
-// PoolManagerFor returns the one PoolManager address the registry shares. One
-// worker serves one chain's PoolManager, and the StateView is that deployment's
-// periphery: a registry mixing either address would mean two deployments in one
-// process, which the log filter and the state reads both silently mis-handle.
+// PoolManagerFor returns the one PoolManager address the registry shares; a
+// mixed registry is two deployments, which the log filter silently mis-handles.
 func PoolManagerFor(pools []RegisteredPool) (common.Address, error) {
 	first := pools[0]
 	for _, pool := range pools[1:] {
