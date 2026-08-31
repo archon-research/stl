@@ -10,11 +10,16 @@ from decimal import Decimal
 from typing import cast
 
 import asyncpg
+import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.morpho_vault_allocations_repository import MorphoVaultAllocationsRepository
 from tests.integration.seed import insert_token, insert_user
+
+# The module-scoped engine binds its pool to one event loop, so every test
+# must run on that loop, as the sibling repository test modules do.
+pytestmark = pytest.mark.asyncio(loop_scope="module")
 
 _SEED_BLOCK_NUMBER = 20_000_000
 _OLDER_BLOCK_NUMBER = _SEED_BLOCK_NUMBER - 1
