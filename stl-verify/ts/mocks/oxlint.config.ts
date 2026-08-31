@@ -1,10 +1,5 @@
 import baseConfig from '@archon-research/oxlint-config/base';
 
-// The preset ships no `rules` key today; spreading whatever it grows is what
-// keeps a future preset rule from being dropped by the override below.
-const presetRules =
-  (baseConfig as { rules?: Record<string, unknown> }).rules ?? {};
-
 const config = {
   ...baseConfig,
   categories: {
@@ -12,7 +7,9 @@ const config = {
     suspicious: 'error',
   },
   rules: {
-    ...presetRules,
+    // Spread rather than replaced: `base` ships `rules: {}` so that a preset
+    // rule added later is not silently dropped by the overrides below.
+    ...baseConfig.rules,
     'no-console': 'error',
 
     // Type-aware rules (`--type-aware` in the lint script). Kept in step with

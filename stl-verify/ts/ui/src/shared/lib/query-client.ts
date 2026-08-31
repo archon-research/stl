@@ -60,7 +60,7 @@ function retryUnlessClientError(failureCount: number, error: Error): boolean {
  * below are stated: the package's factory takes no options, and `HttpProvider`
  * accepts a client.
  */
-export function createAppQueryClient(): QueryClient {
+function createAppQueryClient(): QueryClient {
   return new QueryClient({
     queryCache: new QueryCache({
       onError: (error, query) =>
@@ -81,3 +81,10 @@ export function createAppQueryClient(): QueryClient {
     },
   });
 }
+
+/**
+ * Exported as the instance rather than a factory because the route loaders need
+ * the same cache the components read, and they run outside React — a second
+ * client would have them filling a cache nothing observes.
+ */
+export const queryClient: QueryClient = createAppQueryClient();

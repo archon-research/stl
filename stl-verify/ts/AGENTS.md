@@ -16,10 +16,13 @@ handler).
   `type:check`, `build` — **source of truth**.
 - Tools: `npm ci` (oxlint, oxfmt, etc.).
 - `lint` runs oxlint with `--type-aware` (needs `oxlint-tsgolint`),
-  `--max-warnings=0` (oxlint exits 0 on warnings, and the design-system boundary
-  rule is a warning) and `--report-unused-disable-directives`. The pre-commit
-  hook deliberately omits `--type-aware`: it costs a whole TS program load, and
-  CI is where it belongs.
+  `--max-warnings=0` (oxlint exits 0 on warnings, and the shared presets set
+  `correctness`/`suspicious` to `warn`) and
+  `--report-unused-disable-directives`. `-c` stays explicit even though
+  `uikit-cli` injects it: named, a config that moves is a hard error; discovered,
+  it silently falls back to oxlint's defaults and passes. The pre-commit hook
+  deliberately omits `--type-aware`: it costs a whole TS program load, and CI is
+  where it belongs.
 - Every gate covers `scripts/` too. The `test:*` scripts are **`.ts`, run
   directly by Node** (24 strips types natively), and they are linted, formatted
   and type-checked like the rest — `ui/tsconfig.node.json` and

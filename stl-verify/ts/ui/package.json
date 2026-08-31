@@ -34,11 +34,11 @@
     "doctor": "uikit-cli doctor --codegen"
   },
   "dependencies": {
-    "@archon-research/charting": "0.10.0",
-    "@archon-research/design-system": "0.10.0",
-    "@archon-research/http-client-core": "0.10.0",
-    "@archon-research/http-client-react": "0.10.0",
-    "@archon-research/router-kit": "0.10.0",
+    "@archon-research/charting": "0.10.1",
+    "@archon-research/design-system": "0.10.1",
+    "@archon-research/http-client-core": "0.10.1",
+    "@archon-research/http-client-react": "0.10.1",
+    "@archon-research/router-kit": "0.10.1",
     "@tanstack/react-query": "5.101.4",
     "@tanstack/react-router": "1.170.25",
     "lucide-react": "1.31.0",
@@ -48,9 +48,9 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@archon-research/oxfmt-config": "0.10.0",
-    "@archon-research/oxlint-config": "0.10.0",
-    "@archon-research/tsconfig": "0.10.0",
+    "@archon-research/oxfmt-config": "0.10.1",
+    "@archon-research/oxlint-config": "0.10.1",
+    "@archon-research/tsconfig": "0.10.1",
     "@babel/core": "8.0.1",
     "@pandacss/dev": "1.12.0",
     "@rolldown/plugin-babel": "0.2.3",

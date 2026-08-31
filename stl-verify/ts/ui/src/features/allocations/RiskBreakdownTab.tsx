@@ -110,7 +110,7 @@ function createRiskColumns(chainId: number | null): ColumnDef<RiskItem>[] {
       id: 'symbol',
       header: 'Symbol',
       accessorKey: 'symbol',
-      cell: (info: CellContext<RiskItem, unknown>) => (
+      cell: (info: CellContext<RiskItem>) => (
         <RiskSymbolCell chainId={chainId} symbol={info.getValue() as string} />
       ),
     },
@@ -118,7 +118,7 @@ function createRiskColumns(chainId: number | null): ColumnDef<RiskItem>[] {
       id: 'amount',
       header: 'Amount',
       accessorKey: 'amount',
-      cell: (info: CellContext<RiskItem, unknown>) => {
+      cell: (info: CellContext<RiskItem>) => {
         const value = info.getValue();
         return typeof value === 'string'
           ? parseFloat(value).toFixed(2)
@@ -129,14 +129,14 @@ function createRiskColumns(chainId: number | null): ColumnDef<RiskItem>[] {
       id: 'price_usd',
       header: 'Price USD',
       accessorKey: 'price_usd',
-      cell: (info: CellContext<RiskItem, unknown>) =>
+      cell: (info: CellContext<RiskItem>) =>
         formatUsdPrice(info.getValue() as string | number | null | undefined),
     },
     {
       id: 'amount_usd',
       header: 'Amount USD',
       accessorKey: 'amount_usd',
-      cell: (info: CellContext<RiskItem, unknown>) =>
+      cell: (info: CellContext<RiskItem>) =>
         formatUsdValue(info.getValue() as string | number | null | undefined),
       // The bar expresses each item's backing share of the position, so the USD
       // amount and its backing percentage live in one column instead of two.
@@ -153,7 +153,7 @@ function createRiskColumns(chainId: number | null): ColumnDef<RiskItem>[] {
       id: 'lt',
       header: truncatingHeader('Liquidation Threshold'),
       accessorKey: 'liquidation_threshold',
-      cell: (info: CellContext<RiskItem, unknown>) =>
+      cell: (info: CellContext<RiskItem>) =>
         formatRatioPercent(
           info.getValue() as string | number | null | undefined,
         ),
@@ -162,7 +162,7 @@ function createRiskColumns(chainId: number | null): ColumnDef<RiskItem>[] {
       id: 'bonus',
       header: truncatingHeader('Liquidation Bonus'),
       accessorKey: 'liquidation_bonus',
-      cell: (info: CellContext<RiskItem, unknown>) =>
+      cell: (info: CellContext<RiskItem>) =>
         formatMultiplier(info.getValue() as string | number | null | undefined),
     },
   ];
