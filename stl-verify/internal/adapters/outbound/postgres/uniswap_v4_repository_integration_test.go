@@ -1855,10 +1855,6 @@ func TestUniswapV4Repository_WritePositions_NilNumericWritesNothing(t *testing.T
 	}
 }
 
-// TestUniswapV4Repository_LoadPools_RejectsNativeCurrencyMappedToZeroSentinel
-// pins the one currency mapping that is silently plausible: address(0) already
-// exists in token as a 0-decimals "no token" row, so accepting it would scale
-// every native-ETH amount by 10^0.
 func TestUniswapV4Repository_LoadPools_RejectsNativeCurrencyMappedToZeroSentinel(t *testing.T) {
 	ctx := context.Background()
 	seedUniswapV4RepoPoolManager(t, ctx, newUniswapV4RepoManagerFixture(uniswapV4RepoNativeChainID))

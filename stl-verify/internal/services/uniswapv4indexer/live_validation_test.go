@@ -406,10 +406,6 @@ type liveHarness struct {
 	latest      int64
 }
 
-// persistDecoded writes one receipt's typed rows, its tick reads and its
-// protocol_event mirror in a single transaction — the same shape the worker's
-// dexconsumer.PersistBlock uses, so a constraint the live pipeline would hit is
-// hit here too.
 func (h *liveHarness) persistDecoded(t *testing.T, ctx context.Context, decoded DecodedEvents, tickRows []*entity.UniswapV4Tick, positionRows []*entity.UniswapV4Position, block blockInfo) {
 	t.Helper()
 
@@ -837,21 +833,8 @@ func assertPositionInvariants(t *testing.T, events []*entity.UniswapV4LiquidityE
 	}
 }
 
-// -----------------------------------------------------------------------
-// Baseline tick enumeration
-// -----------------------------------------------------------------------
-
-// baselineTickCheck enumerates every initialized tick on the tickSpacing=1 busy
-// pool from its real bitmap, asserts the result is a strictly ascending set,
-// re-reads every entry through getTickInfo (an "initialized" tick that reads
-// back with liquidityGross == 0 would mean the bitmap→tick math is wrong), and
-// closes the loop with the AMM's own completeness invariant:
-//
-//	sum(liquidityNet) over all initialized ticks <= currentTick == active liquidity
-//
-// That identity is what makes this more than a spot check — a tick the bitmap
-// scan MISSED cannot be detected by re-reading the ticks it did find, but it
-// breaks the sum. Reading every tick rather than a sample is what buys it.
+// The liquidityNet sum over every enumerated tick is what catches a tick the
+// bitmap scan missed; re-reading only the ticks it found never would.
 func baselineTickCheck(t *testing.T, ctx context.Context, mc outbound.Multicaller, pools []RegisteredPool, states []*entity.UniswapV4PoolState, target blockInfo, rep *liveReport) {
 	t.Helper()
 
