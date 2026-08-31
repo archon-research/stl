@@ -1228,17 +1228,15 @@ func bigOrNil(v *big.Int) string {
 // PositionManager registry + real posm Transfer decode
 // -----------------------------------------------------------------------
 
-// posmTransferScanDepth is the eth_getLogs window the posm Transfer scan uses.
-// Mainnet mints and moves posm NFTs many times an hour, so an empty result over
-// this many blocks is a wrong address or a topic regression, not a quiet market.
+// Mainnet moves posm NFTs many times an hour, so an empty window this wide is a
+// wrong address or a topic regression, not a quiet market.
 const posmTransferScanDepth = int64(2000)
 
 // erc721InterfaceID is the ERC-165 id of ERC-721, which the posm must claim.
 var erc721InterfaceID = [4]byte{0x80, 0xac, 0x58, 0xcd}
 
-// checkPositionManagerRegistryMatchesChain proves the seeded posm really is the
-// PositionManager of the seeded PoolManager. Nothing at runtime can: the
-// address is only ever used as a log filter, so a wrong one silently yields an
+// Nothing at runtime can prove the seeded posm belongs to the seeded
+// PoolManager: the address is only ever a log filter, so a wrong one yields an
 // empty table rather than an error.
 func (h *liveHarness) checkPositionManagerRegistryMatchesChain(t *testing.T, ctx context.Context, rep *liveReport) {
 	t.Helper()
@@ -1272,11 +1270,8 @@ func (h *liveHarness) checkPositionManagerRegistryMatchesChain(t *testing.T, ctx
 	}
 }
 
-// decodeAndPersistRealPosmTransfers decodes real posm Transfer logs through the
-// production path, persists them through the real repository, and then asks the
-// chain who holds each token one block after the transfer. ownerOf is the
-// independent oracle: it is read from the contract's own storage, never from
-// the log this indexer decoded.
+// ownerOf is the independent oracle: read from the contract's own storage at the
+// transfer's height, never from the log this indexer decoded.
 func (h *liveHarness) decodeAndPersistRealPosmTransfers(t *testing.T, ctx context.Context, rep *liveReport) {
 	t.Helper()
 
@@ -1294,7 +1289,8 @@ func (h *liveHarness) decodeAndPersistRealPosmTransfers(t *testing.T, ctx contex
 		return
 	}
 
-	for _, l := range logs[max(len(logs)-posmTransfersChecked, 0):] {
+	candidates := lastPosmTransferPerTokenInBlock(logs)
+	for _, l := range candidates[max(len(candidates)-posmTransfersChecked, 0):] {
 		h.decodeOnePosmTransfer(t, ctx, rep, l)
 	}
 }
@@ -1302,6 +1298,29 @@ func (h *liveHarness) decodeAndPersistRealPosmTransfers(t *testing.T, ctx contex
 // posmTransfersChecked bounds the ownerOf cross-checks: each costs an archive
 // eth_call, and the decode path is identical for every log in the window.
 const posmTransfersChecked = 5
+
+// ownerOf at a height answers for the block's LAST transfer of a token — routed
+// sales move one twice — so an earlier one would read as a transposition that
+// never happened. A log the arity guard must reject is kept.
+func lastPosmTransferPerTokenInBlock(logs []types.Log) []types.Log {
+	type site struct {
+		block uint64
+		token common.Hash
+	}
+	newest := make(map[site]uint, len(logs))
+	for _, l := range logs {
+		if len(l.Topics) == erc721TransferTopics {
+			newest[site{l.BlockNumber, l.Topics[3]}] = l.Index
+		}
+	}
+	kept := make([]types.Log, 0, len(logs))
+	for _, l := range logs {
+		if len(l.Topics) != erc721TransferTopics || newest[site{l.BlockNumber, l.Topics[3]}] == l.Index {
+			kept = append(kept, l)
+		}
+	}
+	return kept
+}
 
 func (h *liveHarness) decodeOnePosmTransfer(t *testing.T, ctx context.Context, rep *liveReport, l types.Log) {
 	t.Helper()
@@ -1345,9 +1364,8 @@ func (h *liveHarness) decodeOnePosmTransfer(t *testing.T, ctx context.Context, r
 	}
 }
 
-// positionManagerTransferTopic0 resolves topic0 from the production
-// PositionManager ABI, so the eth_getLogs filter and the decoder cannot drift
-// apart silently.
+// Resolved from the production ABI, so the eth_getLogs filter and the decoder
+// cannot drift apart silently.
 func positionManagerTransferTopic0(t *testing.T) common.Hash {
 	t.Helper()
 	ev, err := positionManagerTransferEvent()

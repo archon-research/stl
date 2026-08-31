@@ -41,8 +41,6 @@ type DecodedEvents struct {
 	Captured        []dexconsumer.CapturedLog
 }
 
-// RegisteredPositionManager pairs the address the log filter matches with the
-// surrogate id every persisted transfer row FKs; decoding needs both at once.
 type RegisteredPositionManager struct {
 	ID      int64
 	Address common.Address

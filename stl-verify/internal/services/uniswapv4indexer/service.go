@@ -90,6 +90,9 @@ func NewUniswapV4Service(ctx context.Context, deps UniswapV4ServiceDeps) (*Unisw
 	if _, err := eventsByID(); err != nil {
 		return nil, err
 	}
+	if _, err := positionManagerTransferEvent(); err != nil {
+		return nil, err
+	}
 	poolManager, err := PoolManagerFor(deps.Pools)
 	if err != nil {
 		return nil, err
@@ -98,8 +101,7 @@ func NewUniswapV4Service(ctx context.Context, deps UniswapV4ServiceDeps) (*Unisw
 	if err != nil {
 		return nil, err
 	}
-	// decodeLog routes the PositionManager first, so one address for both would
-	// silently swallow every pool event.
+	// decodeLog routes the PositionManager branch before the PoolManager's.
 	if positionManager.Address == poolManager {
 		return nil, fmt.Errorf("the registry gives the PoolManager and the PositionManager the same address (%s): every PoolManager log would decode as an NFT transfer", poolManager)
 	}
@@ -199,8 +201,8 @@ func PoolManagerFor(pools []RegisteredPool) (common.Address, error) {
 }
 
 // PositionManagerFor returns the one ERC-721 PositionManager the registry
-// shares, by the same one-deployment rule as PoolManagerFor. A registry that
-// lost it would hand back address(0), which the log filter matches.
+// shares, by PoolManagerFor's one-deployment rule. A registry that lost it would
+// hand back address(0), which the log filter matches.
 func PositionManagerFor(pools []RegisteredPool) (RegisteredPositionManager, error) {
 	first := pools[0]
 	for _, pool := range pools[1:] {
@@ -403,9 +405,8 @@ type blockAccumulators struct {
 	liqByPool    map[int64][]*entity.UniswapV4LiquidityEvent
 }
 
-// hasEvents must count NFT transfers: they touch no pool, so a block whose only
-// V4 activity is a posm transfer has an empty due set and would otherwise be
-// dropped before the write.
+// Must count NFT transfers: they touch no pool, so a block whose only V4
+// activity is a posm transfer would otherwise be dropped before the write.
 func (acc blockAccumulators) hasEvents() bool {
 	return len(acc.swaps) > 0 || len(acc.liquidity) > 0 || len(acc.poolEvts) > 0 ||
 		len(acc.nftTransfers) > 0 || len(acc.captured) > 0

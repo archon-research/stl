@@ -414,9 +414,9 @@ func (e *UniswapV4PoolEvent) Validate() error {
 
 // UniswapV4PositionNFTTransfer is one ERC-721 Transfer log from the V4
 // PositionManager. From is address(0) on a mint and To on a burn, so neither is
-// required. The token's pool is uniswap_v4_position's, keyed salt = bytes32(TokenID).
+// required to be set.
 type UniswapV4PositionNFTTransfer struct {
-	PositionManagerID int64 // uniswap_v4_position_manager surrogate id
+	PositionManagerID int64
 	TokenID           *big.Int
 	BlockNumber       int64
 	BlockVersion      int

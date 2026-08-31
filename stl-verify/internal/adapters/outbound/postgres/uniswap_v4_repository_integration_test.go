@@ -127,9 +127,8 @@ type uniswapV4RepoManagerFixture struct {
 	stateView       common.Address
 	deployBlock     int64
 	buildID         int
-	// positionManager is the chain's ERC-721 PositionManager. The zero address
-	// seeds no uniswap_v4_position_manager row at all, which is the
-	// missing-registry defect.
+	// The zero address seeds no uniswap_v4_position_manager row at all, which is
+	// the missing-registry defect.
 	positionManager common.Address
 	// posmProtocolChainID is the posm protocol row's chain; 0 means chainID.
 	posmProtocolChainID int
@@ -182,9 +181,6 @@ func seedUniswapV4RepoPoolManager(t *testing.T, ctx context.Context, f uniswapV4
 	seedUniswapV4RepoPositionManager(t, ctx, f)
 }
 
-// seedUniswapV4RepoPositionManager upserts the posm protocol row plus one
-// version of the chain's uniswap_v4_position_manager row, skipping both when the
-// fixture leaves positionManager at the zero address.
 func seedUniswapV4RepoPositionManager(t *testing.T, ctx context.Context, f uniswapV4RepoManagerFixture) {
 	t.Helper()
 	if f.positionManager == (common.Address{}) {
@@ -220,8 +216,6 @@ func seedUniswapV4RepoPositionManager(t *testing.T, ctx context.Context, f unisw
 	}
 }
 
-// currentUniswapV4RepoPositionManagerID reads the surrogate id LoadPools must
-// hand back for a chain: the highest-processing_version registry row.
 func currentUniswapV4RepoPositionManagerID(t *testing.T, ctx context.Context, chainID int) int64 {
 	t.Helper()
 	var id int64
@@ -859,7 +853,9 @@ func TestUniswapV4Repository_SaveBlock_IdenticalReplayInsertsNothing(t *testing.
 	}
 }
 
-// Ticks are absent: they go through the append-on-change writer, not the batch.
+// uniswapV4BatchedFactTables are the pool-keyed tables SaveBlock persists
+// through its pgx.Batch; ticks go through the append-on-change writer, and the
+// NFT transfers hang off uniswap_v4_position_manager instead of a pool.
 var uniswapV4BatchedFactTables = []string{
 	"uniswap_v4_pool_state",
 	"uniswap_v4_swap",
@@ -1055,13 +1051,13 @@ func TestUniswapV4Repository_SaveBlock_NamesTheRejectedRowsBatchSection(t *testi
 	for _, tc := range []struct {
 		name          string
 		discriminator byte
-		reject        func(outbound.UniswapV4BlockWrites)
+		reject        func(w *outbound.UniswapV4BlockWrites, managerID int64)
 		wantNamed     string
 	}{
 		{
 			name:          "liquidity_event",
 			discriminator: 0x1c,
-			reject: func(w outbound.UniswapV4BlockWrites) {
+			reject: func(w *outbound.UniswapV4BlockWrites, _ int64) {
 				w.LiquidityEvents[0].TickUpper = w.LiquidityEvents[0].TickLower
 			},
 			wantNamed: "batch liquidity event 0",
@@ -1069,17 +1065,29 @@ func TestUniswapV4Repository_SaveBlock_NamesTheRejectedRowsBatchSection(t *testi
 		{
 			name:          "pool_event",
 			discriminator: 0x1d,
-			// SaveBlock never calls Validate, so the event_name CHECK rejects this.
-			reject: func(w outbound.UniswapV4BlockWrites) {
+			// SaveBlock never calls Validate, so an unknown name is the
+			// event_name CHECK's to reject.
+			reject: func(w *outbound.UniswapV4BlockWrites, _ int64) {
 				w.PoolEvents[0].EventName = entity.UniswapV4PoolEventName("bogus")
 			},
 			wantNamed: "batch pool event 0",
+		},
+		{
+			name:          "nft_transfer",
+			discriminator: 0x1e,
+			reject: func(w *outbound.UniswapV4BlockWrites, managerID int64) {
+				w.NFTTransfers = []*entity.UniswapV4PositionNFTTransfer{
+					newUniswapV4RepoNFTTransfer(managerID, 21800050, 0, 8, -1,
+						uniswapV4MoveFixtureFrom, uniswapV4MoveFixtureTo),
+				}
+			},
+			wantNamed: "batch nft transfer 0",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			poolID := seedUniswapV4RepoTestPool(t, ctx, tc.discriminator)
 			writes := newUniswapV4TestBlockWrites(t, poolID, 21800050, 0)
-			tc.reject(writes)
+			tc.reject(&writes, currentUniswapV4RepoPositionManagerID(t, ctx, uniswapV4RepoSaveChainID))
 
 			repo := newUniswapV4Repo(t)
 			withUniswapV4RollbackTx(t, ctx, func(tx pgx.Tx) {
@@ -2351,9 +2359,9 @@ func newUniswapV4TestState(poolID int64, blockNumber int64, blockVersion int, ti
 	}
 }
 
-// newUniswapV4TestBlockWrites builds one validated row for each of the five
-// fact hypertables, sharing every key but blockVersion so two calls differ
-// exactly as an original and its reorg re-observation do.
+// newUniswapV4TestBlockWrites builds one validated row for each pool-keyed fact
+// table, sharing every key but blockVersion so two calls differ exactly as an
+// original and its reorg re-observation do. NFT transfers are added per case.
 func newUniswapV4TestBlockWrites(t *testing.T, poolID int64, blockNumber int64, blockVersion int) outbound.UniswapV4BlockWrites {
 	t.Helper()
 
@@ -2615,8 +2623,8 @@ func TestUniswapV4Repository_LoadPools_ReturnsThePositionManager(t *testing.T) {
 	}
 }
 
-// A nil PositionManager address would make the decoder match address(0)'s logs,
-// so an absent registry row has to be a named error rather than a zero value.
+// A zero PositionManager address would make the decoder match address(0)'s logs,
+// so an absent registry row has to be a named error, not a zero value.
 func TestUniswapV4Repository_LoadPools_RejectsChainWithPoolsButNoPositionManager(t *testing.T) {
 	ctx := context.Background()
 
@@ -2636,8 +2644,7 @@ func TestUniswapV4Repository_LoadPools_RejectsChainWithPoolsButNoPositionManager
 	}
 }
 
-// The posm registry is versioned like the PoolManager's, so a correction must
-// re-point the whole chain at the new address and surrogate id.
+// The posm registry is versioned, so a correction re-points the whole chain.
 func TestUniswapV4Repository_LoadPools_UsesLatestPositionManagerVersion(t *testing.T) {
 	ctx := context.Background()
 
@@ -2672,9 +2679,8 @@ func TestUniswapV4Repository_LoadPools_UsesLatestPositionManagerVersion(t *testi
 	}
 }
 
-// An inner join would drop the newest posm version whose protocol row is on
-// another chain and hand back the previous version's address, so the defect has
-// to surface as an error naming the table.
+// An inner join would skip the newest posm version whose protocol row is on
+// another chain and hand back the previous version's address.
 func TestUniswapV4Repository_LoadPools_RejectsCrossChainPositionManagerProtocol(t *testing.T) {
 	ctx := context.Background()
 
@@ -2719,18 +2725,21 @@ func newUniswapV4RepoNFTTransfer(managerID, blockNumber int64, blockVersion, log
 	}
 }
 
-// holderOfUniswapV4Token runs the holder-at-block query the table's COMMENT
-// documents, so the ordering the schema promises is exercised rather than
-// re-derived by the test.
+// uniswapV4HolderAtBlockSQL is the holder-at-block query the table's COMMENT and
+// the runbook publish. One copy, so the answer tests read and the plan the index
+// test pins cannot drift from each other or from the documented ordering.
+const uniswapV4HolderAtBlockSQL = `
+	SELECT to_address
+	FROM uniswap_v4_position_nft_transfer
+	WHERE position_manager_id = $1 AND token_id = $2 AND block_number <= $3
+	ORDER BY block_number DESC, block_version DESC, log_index DESC, processing_version DESC
+	LIMIT 1`
+
 func holderOfUniswapV4Token(t *testing.T, ctx context.Context, managerID int64, tokenID int64, atBlock int64) common.Address {
 	t.Helper()
 	var to []byte
-	if err := uniswapV4TestPool.QueryRow(ctx, `
-		SELECT to_address
-		FROM uniswap_v4_position_nft_transfer
-		WHERE position_manager_id = $1 AND token_id = $2 AND block_number <= $3
-		ORDER BY block_number DESC, block_version DESC, log_index DESC, processing_version DESC
-		LIMIT 1`, managerID, tokenID, atBlock).Scan(&to); err != nil {
+	if err := uniswapV4TestPool.QueryRow(ctx, uniswapV4HolderAtBlockSQL,
+		managerID, tokenID, atBlock).Scan(&to); err != nil {
 		t.Fatalf("reading holder of token %d at block %d: %v", tokenID, atBlock, err)
 	}
 	return common.BytesToAddress(to)
@@ -2818,8 +2827,8 @@ func TestUniswapV4Repository_SaveBlock_RoundTripsNFTTransfers(t *testing.T) {
 	}
 }
 
-// A reorg redelivery re-decodes the new fork's logs; the transfer table has no
-// state to re-read, so the whole correction is the appended (N, v1) row set.
+// The table has no state to re-read, so the whole correction is the appended
+// (N, v1) row set.
 func TestUniswapV4Repository_SaveBlock_ReorgAppendsASecondNFTTransferRowSet(t *testing.T) {
 	ctx := context.Background()
 	seedUniswapV4RepoTestPool(t, ctx, 0x56)
@@ -2857,15 +2866,15 @@ func TestUniswapV4Repository_SaveBlock_ReorgAppendsASecondNFTTransferRowSet(t *t
 	}
 }
 
-// A token can change hands twice inside one block, so log_index is part of both
-// the key and the holder ordering: without it the earlier log wins.
+// A token can change hands twice in one block, so log_index is part of both the
+// key and the holder ordering: without it the earlier log wins.
 func TestUniswapV4Repository_NFTTransferHolderAtBlockPicksTheLastLogInTheBlock(t *testing.T) {
 	ctx := context.Background()
 	seedUniswapV4RepoTestPool(t, ctx, 0x57)
 	managerID := currentUniswapV4RepoPositionManagerID(t, ctx, uniswapV4RepoSaveChainID)
 
-	// Both logs are the real mainnet pair on token 113383 at block 25873296:
-	// log 4325 moves it out and log 4363 moves it straight back.
+	// The real mainnet pair on token 113383 at block 25873296: log 4325 moves it
+	// out, log 4363 moves it straight back.
 	const (
 		blockNumber = int64(25873296)
 		tokenID     = int64(113383)
@@ -2888,4 +2897,62 @@ func TestUniswapV4Repository_NFTTransferHolderAtBlockPicksTheLastLogInTheBlock(t
 	if got := holderOfUniswapV4Token(t, ctx, managerID, tokenID, blockNumber); got != owner {
 		t.Errorf("holder at block %d = %s, want %s (log_index DESC must pick log 4363, not 4325)", blockNumber, got, owner)
 	}
+}
+
+// The re-observed fork carries a different transfer set, so the log index moves
+// too: block_version has to outrank log_index or the orphaned log answers.
+func TestUniswapV4Repository_NFTTransferHolderAtBlockPrefersTheNewerBlockVersion(t *testing.T) {
+	ctx := context.Background()
+	seedUniswapV4RepoTestPool(t, ctx, 0x58)
+	managerID := currentUniswapV4RepoPositionManagerID(t, ctx, uniswapV4RepoSaveChainID)
+
+	const (
+		blockNumber = int64(21800120)
+		tokenID     = int64(4243)
+	)
+	orphaned := newUniswapV4RepoNFTTransfer(managerID, blockNumber, 0, 900, tokenID,
+		uniswapV4MoveFixtureFrom, uniswapV4MintFixtureTo)
+	canonical := newUniswapV4RepoNFTTransfer(managerID, blockNumber, 1, 12, tokenID,
+		uniswapV4MoveFixtureFrom, uniswapV4MoveFixtureTo)
+
+	repo := newUniswapV4Repo(t)
+	for _, transfer := range []*entity.UniswapV4PositionNFTTransfer{orphaned, canonical} {
+		withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+			if _, err := repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{
+				NFTTransfers: []*entity.UniswapV4PositionNFTTransfer{transfer},
+			}); err != nil {
+				t.Fatalf("SaveBlock at block_version %d: %v", transfer.BlockVersion, err)
+			}
+		})
+	}
+
+	if got := holderOfUniswapV4Token(t, ctx, managerID, tokenID, blockNumber); got != canonical.To {
+		t.Errorf("holder at block %d = %s, want %s (block_version %d at log %d must beat the orphaned fork's log %d)",
+			blockNumber, got, canonical.To, canonical.BlockVersion, canonical.LogIndex, orphaned.LogIndex)
+	}
+}
+
+// SaveBlock never calls Validate, so a nil token id reaches the NUMERIC
+// conversion and has to name the column, not surface as a bare NOT NULL error.
+func TestUniswapV4Repository_SaveBlock_RejectsANilNFTTransferTokenID(t *testing.T) {
+	ctx := context.Background()
+	seedUniswapV4RepoTestPool(t, ctx, 0x59)
+	managerID := currentUniswapV4RepoPositionManagerID(t, ctx, uniswapV4RepoSaveChainID)
+
+	transfer := newUniswapV4RepoNFTTransfer(managerID, 21800130, 0, 3, 1,
+		uniswapV4MoveFixtureFrom, uniswapV4MoveFixtureTo)
+	transfer.TokenID = nil
+
+	repo := newUniswapV4Repo(t)
+	withUniswapV4RollbackTx(t, ctx, func(tx pgx.Tx) {
+		_, err := repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{
+			NFTTransfers: []*entity.UniswapV4PositionNFTTransfer{transfer},
+		})
+		if err == nil {
+			t.Fatal("SaveBlock with a nil token id: want error, got nil")
+		}
+		if !strings.Contains(err.Error(), "token_id") {
+			t.Errorf("error %q does not name token_id", err)
+		}
+	})
 }

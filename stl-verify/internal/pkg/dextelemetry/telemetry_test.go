@@ -298,10 +298,8 @@ func TestTelemetry_NilSafe(t *testing.T) {
 	tel.RecordNFTTransferRows(ctx, 0)
 }
 
-// The NFT-transfer counter is the only signal that posm Transfer decoding still
-// works: a wrong PositionManager address or a topic regression raises no error
-// and empties this series alone, which is what
-// VectorUniswapV4IndexerNoNFTTransfers keys on.
+// VectorUniswapV4IndexerNoNFTTransfers keys on this series alone: a wrong posm
+// address or a topic regression empties it and raises no error.
 func TestRecordNFTTransferRows_IncrementsCounter(t *testing.T) {
 	reader := metricsdk.NewManualReader()
 	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))

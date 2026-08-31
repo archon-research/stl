@@ -127,8 +127,6 @@ func scanUniswapV4PoolRow(rows pgx.Rows, chainID int64) (outbound.UniswapV4PoolR
 	if poolManager == nil {
 		return row, fmt.Errorf("uniswap_v4_pool_manager row %d for chain %d references protocol %d, which is not on chain %d", *managerID, chainID, *protocolID, chainID)
 	}
-	// A zero PositionManager address is worse than a missing one: the decoder's
-	// address filter would then match every log emitted by address(0).
 	if positionManagerID == nil {
 		return row, fmt.Errorf("chain %d has uniswap_v4 pools (e.g. %d) but no uniswap_v4_position_manager row", chainID, id)
 	}
@@ -420,8 +418,6 @@ type v4BatchRows struct {
 	nftTransfers []v4NFTTransferConverted
 }
 
-// v4NFTTransferConverted holds the pre-converted token id for a
-// uniswap_v4_position_nft_transfer insert.
 type v4NFTTransferConverted struct {
 	t       *entity.UniswapV4PositionNFTTransfer
 	tokenID pgtype.Numeric

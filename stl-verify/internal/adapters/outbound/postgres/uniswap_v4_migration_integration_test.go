@@ -72,11 +72,9 @@ func readUniswapV4MigrationSeededPoolIDs() []string {
 	return poolIDs
 }
 
-// uniswapV4Tables are the 7 tables created by
-// 20260819_120000_create_uniswap_v4_tables.sql, uniswap_v4_position from
-// 20260820_120000_create_uniswap_v4_positions.sql, and the registry plus
-// transfer table from
-// 20260831_130000_create_uniswap_v4_position_nft_transfer.sql.
+// uniswapV4Tables are the 7 tables from
+// 20260819_120000_create_uniswap_v4_tables.sql, uniswap_v4_position, and the
+// registry plus transfer table from the ARCT-385 migration.
 var uniswapV4Tables = []string{
 	"uniswap_v4_pool_manager",
 	"uniswap_v4_pool",
@@ -227,6 +225,59 @@ func TestUniswapV4TickBlockLookupIndexServesReorgTickRead(t *testing.T) {
 
 	if !strings.Contains(plan, "idx_uniswap_v4_tick_block_lookup") {
 		t.Errorf("planner did not choose idx_uniswap_v4_tick_block_lookup for TicksForPoolAtBlock:\n%s", plan)
+	}
+}
+
+// seedUniswapV4NFTTransferPlanHistory spreads one manager's transfers over many
+// tokens and blocks, so one token's history is a small slice of the table; on a
+// handful of rows every candidate index costs the same.
+func seedUniswapV4NFTTransferPlanHistory(t *testing.T, ctx context.Context, managerID, firstBlock int64, blocks, tokens int) {
+	t.Helper()
+	for i := range blocks {
+		if _, err := uniswapV4TestPool.Exec(ctx, `
+			INSERT INTO uniswap_v4_position_nft_transfer
+			    (position_manager_id, token_id, block_number, block_version, block_timestamp,
+			     tx_hash, log_index, from_address, to_address, build_id)
+			SELECT $1, g, $2, 0, '2025-03-01T00:00:00Z'::timestamptz,
+			       '\xddeeff00ddeeff00ddeeff00ddeeff00ddeeff00ddeeff00ddeeff00ddeeff00'::bytea, g,
+			       '\x3b0a17a75a14eaaef42002a4891acf8f9fd8a72e'::bytea,
+			       '\xe588ddd13a8bdbee578eaa7c4fd9780180b2f10c'::bytea, 0
+			FROM generate_series(1, $3) g`,
+			managerID, firstBlock+int64(i), tokens); err != nil {
+			t.Fatalf("seeding nft transfer history at block %d: %v", firstBlock+int64(i), err)
+		}
+	}
+	if _, err := uniswapV4TestPool.Exec(ctx, `VACUUM (ANALYZE) uniswap_v4_position_nft_transfer`); err != nil {
+		t.Fatalf("vacuum analyze uniswap_v4_position_nft_transfer: %v", err)
+	}
+}
+
+// Whether column is resolved by the index or re-checked by a Filter afterwards.
+// Chunk copies of a hypertable index truncate their name at 63 bytes, so
+// matching by name is not an option.
+func uniswapV4PlanIndexCondCovers(plan, column string) bool {
+	for line := range strings.SplitSeq(plan, "\n") {
+		if strings.Contains(line, "Index Cond:") && strings.Contains(line, column) {
+			return true
+		}
+	}
+	return false
+}
+
+// The PK cannot serve the holder query: it leads with block_timestamp, which the
+// question does not bound. Without the token_block index the answer still comes
+// back — after re-checking every transfer the manager ever emitted.
+func TestUniswapV4NFTTransferTokenBlockIndexServesTheHolderQuery(t *testing.T) {
+	ctx := context.Background()
+	managerID := seedUniswapV4PositionManagerOnChain(t, ctx, uniswapV4FactParentChainID+900)
+
+	const firstBlock = int64(22600000)
+	seedUniswapV4NFTTransferPlanHistory(t, ctx, managerID, firstBlock, 60, 40)
+
+	plan := explainUniswapV4Query(t, ctx, uniswapV4HolderAtBlockSQL, managerID, 7, firstBlock+31)
+
+	if !uniswapV4PlanIndexCondCovers(plan, "token_id") {
+		t.Errorf("the holder query does not reach token_id through an index condition, so idx_uniswap_v4_position_nft_transfer_token_block is not serving it:\n%s", plan)
 	}
 }
 
@@ -622,11 +673,9 @@ type uniswapV4ValidFactRow struct {
 	args   []any
 }
 
-// uniswapV4FactParent is the registry row a fact table FKs, and the column that
-// names it. Pool-keyed tables hang off uniswap_v4_pool; the NFT transfers hang
-// off uniswap_v4_position_manager. seed returns a registry row unique to
-// discriminator, so two tests can write the same fact fixture -- whose block
-// number and log_index are baked into the INSERT -- without colliding.
+// uniswapV4FactParent is the registry row a fact table FKs. seed must return a
+// row unique to discriminator: the fixtures bake one block number and log_index
+// into the INSERT, so two tests would otherwise collide.
 type uniswapV4FactParent struct {
 	column string
 	seed   func(t *testing.T, ctx context.Context, discriminator int) int64
@@ -646,9 +695,8 @@ var uniswapV4PositionManagerFactParent = uniswapV4FactParent{
 	},
 }
 
-// uniswapV4FactParentChainID is the base of the synthetic chains the NFT
-// transfer's parent registry rows are seeded on, keeping them off chain 1 whose
-// single PositionManager identity the migration asserts.
+// Synthetic chains for the NFT transfer's parent rows, off chain 1 whose single
+// PositionManager identity the migration asserts.
 const uniswapV4FactParentChainID = 475100
 
 // uniswapV4ValidFactRows covers all seven versioned fact tables. Each pool-keyed
@@ -699,8 +747,7 @@ var uniswapV4ValidFactRows = []uniswapV4ValidFactRow{
 	},
 }
 
-// uniswapV4FactInsertArgs assembles the placeholder list: the parent registry
-// surrogate id, then the constrained values, then build_id.
+// Placeholder order: parent registry id, the constrained values, build_id.
 func uniswapV4FactInsertArgs(parentID int64, values []any, buildID int) []any {
 	args := make([]any, 0, len(values)+2)
 	args = append(args, parentID)
@@ -1063,10 +1110,8 @@ func TestUniswapV4PositionDistinguishesPositionsBySaltAlone(t *testing.T) {
 	}
 }
 
-// The transfer row's widths and sign are the last line of defence for values
-// the decoder reads straight out of a log's topics, so each gets an explicit
-// rejection case. The parameterised INSERT fixes the good columns, so a case
-// varies exactly the one column it names.
+// The CHECKs are the last line of defence for values the decoder reads straight
+// out of a log's topics.
 func TestUniswapV4NFTTransferChecksRejectMalformedRows(t *testing.T) {
 	ctx := context.Background()
 	managerID := seedUniswapV4PositionManager(t, ctx)

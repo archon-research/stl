@@ -2645,39 +2645,19 @@ groups:
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerpoolneverindexed
 
       - alert: VectorUniswapV4IndexerNoNFTTransfers
-        # Silent-empty guard for the posm ERC-721 stream (ARCT-385): blocks are
-        # advancing but not one PositionManager Transfer has been decoded.
-        # uniswap_v4_position_nft_transfer is keyed off ONE address — the
-        # PositionManager — and nothing else in this group watches it: a wrong
-        # address in uniswap_v4_position_manager, a topic0 or arity regression,
-        # or a decode branch that stopped running all leave every other metric
-        # healthy while the table stops growing. None of them raises an error,
-        # so ErrorRatioHigh and Stalled stay quiet too.
+        # Silent-empty guard for the posm ERC-721 stream: blocks advance, not one
+        # PositionManager Transfer decodes. The table is keyed off ONE address,
+        # so a wrong uniswap_v4_position_manager row or a topic0/arity
+        # regression leaves every other metric healthy and raises no error —
+        # ErrorRatioHigh and Stalled stay quiet too.
         #
-        # NoPoolsTouched cannot cover this: it keys on pools.touched, and a posm
-        # transfer touches no pool by design (it is not in touchedIDs), so the
-        # two stream failures are independent.
+        # NoPoolsTouched cannot cover it: a posm transfer is deliberately absent
+        # from touchedIDs, so the two streams fail independently.
         #
-        # 6h window, same failure-class reasoning as NoPoolsTouched above: every
-        # failure this catches is permanent, so a wide window costs detection
-        # speed and no detections at all. The counter-pressure is thinner here
-        # than for pools.touched, not thicker: an eth_getLogs scan of the posm
-        # over a 2,001-block window on 2026-08-31 returned 290 Transfer logs
-        # (~0.145 per block, ~260 per 6h), and unlike the curated pool registry
-        # this stream is the WHOLE contract, not a hand-picked subset, so it has
-        # no quiet-registry failure mode. 6h is margin, not a measurement of the
-        # quiet-period distribution.
-        #
-        # The `offset 6h` clause makes the 6h window real on a fresh deploy, for
-        # the reason spelt out on NoPoolsTouched: the export interval is 15s, so
-        # `rate(...[6h])` on blocks_processed is non-zero ~30s after boot while
-        # the transfer counter is still absent, and `for: 10m` would otherwise
-        # mature on a series minutes old.
-        #
-        # `unless`, not `and … == 0`: RecordNFTTransferRows no-ops for n<=0, so
-        # a worker that never decodes a transfer never creates the series and
-        # `and … == 0` would find no match on the empty right side — blind in
-        # exactly the case this exists for. Do not revert to `and`.
+        # Window, `offset 6h` and `unless` are NoPoolsTouched's, for the reasons
+        # spelt out there — same permanent failure class, and the false-positive
+        # pressure is thinner: this stream is the whole contract, not a curated
+        # subset (2,001 blocks on 2026-08-31 carried 290 Transfers, ~260 per 6h).
         expr: |
           sum by (chain, cluster) (
             rate(uniswap_v4_blocks_processed_total{status="success", k8s_namespace_name="vector"}[6h])

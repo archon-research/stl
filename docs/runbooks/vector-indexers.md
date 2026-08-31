@@ -2626,9 +2626,9 @@ is a straight-line decode.
      --rpc-url "$RPC_URL" | grep -c 'blockNumber'
    ```
 
-3. **Rows actually landing** — the metric counts rows a committed block wrote,
-   so a non-empty recent tail means the metric pipeline broke rather than the
-   decode:
+3. **Rows actually landing** — the metric counts the rows a committed block
+   offered, so a non-empty recent tail means the metric pipeline broke rather
+   than the decode:
 
    ```sql
    SELECT max(block_number) AS newest_block, count(*) AS rows_last_day

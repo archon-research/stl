@@ -15,8 +15,8 @@ type UniswapV4PoolRow struct {
 	ProtocolID  int64
 	PoolManager common.Address
 	StateView   common.Address
-	// The chain's ERC-721 PositionManager, pool-independent but carried here
-	// because the chain's whole registry is loaded in one read.
+	// Chain-level, not pool-level: carried per row because one read loads the
+	// whole registry.
 	PositionManagerID int64
 	PositionManager   common.Address
 	// PoolIDHash is the raw on-chain PoolId — keccak256 of the abi-encoded
@@ -52,13 +52,12 @@ type UniswapV4Repository interface {
 	// histories, so "current" means the highest processing_version per natural
 	// key — per (chain_id, pool_id) for pools, per chain_id for the PoolManager.
 	// A missing PoolManager, a missing PositionManager, a NULL decimals, or a
-	// currency that disagrees with its token row is an error rather than a
-	// skipped pool: without the chain's StateView there is nothing to snapshot,
-	// a zero PositionManager address would make the decoder claim address(0)'s
-	// logs, and the decimals are carried so
-	// downstream consumers can scale and sanity-check the raw amounts this
-	// indexer stores. A currency matches when token.address equals it, or when it
-	// is address(0) and the token row is the
+	// currency that disagrees with its token row is an error rather than a skipped
+	// pool: without the chain's StateView there is nothing to snapshot, a zero
+	// PositionManager address would make the decoder claim address(0)'s logs, and
+	// the decimals are carried so downstream consumers can scale and sanity-check
+	// the raw amounts this indexer stores. A currency matches when token.address
+	// equals it, or when it is address(0) and the token row is the
 	// 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE native-ETH placeholder.
 	LoadPools(ctx context.Context, chainID int64) ([]UniswapV4PoolRow, error)
 	SaveBlock(ctx context.Context, tx pgx.Tx, w UniswapV4BlockWrites) (stateRows StateRowCounts, err error)

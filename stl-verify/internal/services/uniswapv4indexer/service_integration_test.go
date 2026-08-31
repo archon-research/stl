@@ -190,9 +190,8 @@ func TestIntegration_PersistsEveryTableForATouchedBlock(t *testing.T) {
 	}
 }
 
-// A posm transfer touches no pool, so the due set is empty and every snapshot
-// slice is too. hasEvents is the only thing keeping the block from returning
-// before the write.
+// A posm transfer touches no pool, so every snapshot slice is empty too:
+// hasEvents is the only thing keeping the block from returning before the write.
 func TestIntegration_PosmTransferOnlyBlockStillWrites(t *testing.T) {
 	ctx := context.Background()
 	f := setupV4Integration(t)
