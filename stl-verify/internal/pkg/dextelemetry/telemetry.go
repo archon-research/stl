@@ -36,15 +36,9 @@ type Telemetry struct {
 	poolsNeverIndexed   metric.Int64Gauge
 }
 
-// NewTelemetry registers the whole instrument set below under `<prefix>`; every
-// DEX gets all of it, and an instrument a worker never records simply produces
-// no series. The OTel-to-Prometheus exporter normalises the dots to underscores
-// and adds the `_total` suffix to the counters, yielding the metric series names
-// the alert rules expect. The chain NAME (via entity.ChainName) is baked into
-// every datapoint as the `chain` attribute so multi-chain dashboards line up
-// with the morpho/oracle indexers, which label the same way. An unknown chainID
-// is rejected so a worker fails hard at startup rather than emitting an empty or
-// mismatched `chain` label.
+// NewTelemetry registers the whole instrument set for one DEX; the
+// OTel-to-Prometheus exporter normalises the dots to underscores and adds
+// `_total`, yielding the series names the alert rules select.
 func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 	if prefix == "" {
 		return nil, fmt.Errorf("dextelemetry.NewTelemetry: prefix must be non-empty")

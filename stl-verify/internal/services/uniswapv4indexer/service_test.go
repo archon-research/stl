@@ -1916,10 +1916,6 @@ func TestBlockHandler_NoAppendOnChangeRowsOnASwapOnlyBlock(t *testing.T) {
 	}
 }
 
-// TestBlockHandler_RecordsPoolsTouchedOnZeroRowReplay pins the invariant the
-// not-writing-state alert is built on: on an idempotent replay (0 state rows) a
-// block that touched a pool must still advance pools_touched, or the alert's
-// activity gate goes quiet in exactly the case it exists to detect.
 func TestBlockHandler_RecordsPoolsTouchedOnZeroRowReplay(t *testing.T) {
 	pool := servicePool()
 	svc, repo, _, reader := newTelemetryService(t, []RegisteredPool{pool})

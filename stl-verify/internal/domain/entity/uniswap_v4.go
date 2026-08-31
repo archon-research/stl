@@ -362,10 +362,8 @@ func (p *UniswapV4Position) Validate() error {
 	return requireNonNegativeBigInt("feeGrowthInside1LastX128", p.FeeGrowthInside1LastX128)
 }
 
-// UniswapV4PoolEventName identifies which typed low-frequency PoolManager event
-// produced a row. It is a separate set from V3's PoolEventName: V4 has no
-// per-pool Flash, protocol fees are set through a controller, and observation
-// cardinality does not exist.
+// Deliberately a separate set from V3's PoolEventName: V4 has no per-pool Flash,
+// no observation cardinality, and sets protocol fees through a controller.
 type UniswapV4PoolEventName string
 
 const (
