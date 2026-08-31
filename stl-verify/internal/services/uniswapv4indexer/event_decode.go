@@ -88,12 +88,24 @@ func assertKeyedEventsDispatch(keyed map[string]struct{}) error {
 	return nil
 }
 
-// DecodeEvents runs once per receipt against the whole registry, and returns the
-// set of registered pool IDs that receipt touched.
+// DecodeEvents extracts typed entities from a single transaction receipt,
+// routing each PoolManager log by its PoolId. Unlike the per-pool V3 decoder it
+// runs ONCE per receipt: V4's emitter is a singleton shared by every pool, so
+// scanning the receipt per registered pool would be O(pools × logs) for the
+// same result. It returns the set of registered pool IDs the receipt touched,
+// which the caller feeds to dexconsumer.DueSet.
+//
+// Capture-net design: a log on the PoolManager is mirrored into Captured
+// whether or not topic0 matched a known event, EXCEPT for logs belonging to
+// pools outside the registry (the singleton emits for thousands of untracked
+// pools) and for the ERC6909 claim-token set (see erc6909Events). A
+// PositionManager log is decoded but never captured: protocol_event is scoped
+// to the PoolManager's protocol_id.
 func DecodeEvents(
 	receipt shared.TransactionReceipt,
 	poolsByID map[common.Hash]RegisteredPool,
 	poolManager common.Address,
+	positionManager RegisteredPositionManager,
 	blockNumber int64,
 	version int,
 	ts time.Time,
@@ -104,13 +116,14 @@ func DecodeEvents(
 	}
 
 	d := &receiptDecoder{
-		events:      events,
-		poolsByID:   poolsByID,
-		poolManager: poolManager,
-		blockNumber: blockNumber,
-		version:     version,
-		ts:          ts,
-		touched:     make(map[int64]bool),
+		events:          events,
+		poolsByID:       poolsByID,
+		poolManager:     poolManager,
+		positionManager: positionManager,
+		blockNumber:     blockNumber,
+		version:         version,
+		ts:              ts,
+		touched:         make(map[int64]bool),
 	}
 	for _, log := range receipt.Logs {
 		if err := d.decodeLog(log); err != nil {
@@ -121,12 +134,13 @@ func DecodeEvents(
 }
 
 type receiptDecoder struct {
-	events      map[common.Hash]*abi.Event
-	poolsByID   map[common.Hash]RegisteredPool
-	poolManager common.Address
-	blockNumber int64
-	version     int
-	ts          time.Time
+	events          map[common.Hash]*abi.Event
+	poolsByID       map[common.Hash]RegisteredPool
+	poolManager     common.Address
+	positionManager RegisteredPositionManager
+	blockNumber     int64
+	version         int
+	ts              time.Time
 
 	out     DecodedEvents
 	touched map[int64]bool
@@ -143,6 +157,9 @@ func (d *receiptDecoder) decodeLog(log shared.Log) error {
 		return fmt.Errorf("invalid log address %q", log.Address)
 	}
 	addr := common.HexToAddress(log.Address)
+	if shared.LogBelongsTo(addr, d.positionManager.Address) {
+		return d.decodePositionManagerLog(log)
+	}
 	if !shared.LogBelongsTo(addr, d.poolManager) {
 		return nil
 	}
