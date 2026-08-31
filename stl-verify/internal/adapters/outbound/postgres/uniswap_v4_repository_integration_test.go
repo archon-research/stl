@@ -1368,7 +1368,7 @@ func TestUniswapV4Repository_TicksForPoolAtBlock_ReturnsDistinctTicksAscending(t
 // TestUniswapV4Repository_TicksForPoolAtBlock_ResolvesSupersededPoolForward is
 // the tick-side counterpart of the state read: the reorg path supersedes ticks
 // written under the surrogate a registry correction has since retired, so the
-// read has to resolve through uniswap_v4_pool_current like its two siblings.
+// read has to resolve through currentUniswapV4PoolCTE like its two siblings.
 func TestUniswapV4Repository_TicksForPoolAtBlock_ResolvesSupersededPoolForward(t *testing.T) {
 	ctx := context.Background()
 	seedUniswapV4RepoPoolManager(t, ctx, newUniswapV4RepoManagerFixture(uniswapV4RepoSupersededChainID))
