@@ -7,6 +7,7 @@ from app.adapters.postgres.allocation_position_repository import AllocationRepos
 from app.adapters.postgres.prime_capital_stack_repository import PrimeCapitalStackRepository
 from app.adapters.postgres.reference_position_repository import ReferencePositionRepository
 from app.adapters.postgres.reference_risk_capital_repository import ReferenceRiskCapitalRepository
+from app.config import get_settings
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
 from app.ports.reference_capital_repository import ReferenceCapitalRepository
 from app.risk_engine.suraf.result import SurafResult
