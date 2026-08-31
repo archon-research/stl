@@ -199,6 +199,10 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # Initialised before the try: the finally below closes it, and startup
+        # can raise long before the auth block runs (e.g. mapping validation) —
+        # a late declaration turns that real error into an UnboundLocalError.
+        auth_http: httpx.AsyncClient | None = None
         engine = create_db_engine(
             settings.async_database_url,
             pool_size=settings.db_pool_size,
@@ -255,7 +259,6 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             # Auth plane (ADR-015). Built here, beside the engine, so it is
             # disposed in the same finally. Absent from app.state when auth is
             # off — the dependencies treat that as "anonymous, no checks".
-            auth_http: httpx.AsyncClient | None = None
             if settings.auth_enabled:
                 auth_http = httpx.AsyncClient()
                 app.state.verifier = TokenVerifier(
