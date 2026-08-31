@@ -12,6 +12,7 @@ include lint.mk
 		docker-build-offchain-price-backfill docker-release-offchain-price-backfill _docker-release-offchain-price-backfill-internal \
 		docker-build-reference-capital-backfill docker-release-reference-capital-backfill _docker-release-reference-capital-backfill-internal \
 		docker-build-morpho-vault-backfill docker-release-morpho-vault-backfill _docker-release-morpho-vault-backfill-internal \
+		docker-build-block-republisher docker-release-block-republisher _docker-release-block-republisher-internal \
 		build-backfiller-% run-backfiller-% \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
@@ -1184,6 +1185,7 @@ docker-release-all:
 	@echo ""
 	@$(MAKE) _docker-release-reference-capital-backfill-internal ENV=$(ENV)
 	@$(MAKE) _docker-release-morpho-vault-backfill-internal ENV=$(ENV)
+	@$(MAKE) _docker-release-block-republisher-internal ENV=$(ENV)
 	@echo ""
 	@for cj in $(CRONJOBS); do \
 		$(MAKE) _docker-release-cronjob-$$cj-internal ENV=$(ENV) || { echo "ERROR: Failed to release cronjob $$cj"; exit 1; }; \
@@ -2440,6 +2442,18 @@ docker-release-morpho-vault-backfill: ecr-login _docker-release-morpho-vault-bac
 
 _docker-release-morpho-vault-backfill-internal:
 	@$(MAKE) _docker-release-go-service GO_NAME="Morpho Vault Backfill" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/morpho-vault-backfill GO_BIN=morpho-vault-backfill GO_CACHE_KEY="cronjob-morpho-vault-backfill" GO_TAG="morpho-vault-backfill-$(IMAGE_TAG)" GO_LATEST_TAG="morpho-vault-backfill-latest"
+
+# block-republisher (ARCT-383): the on-demand repair that re-publishes a block
+# under a new version. Same lifecycle as the two backfillers above — a
+# long-running worker Deployment polling its task queue — so it needs the same
+# explicit release wiring.
+docker-build-block-republisher:
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/block-republisher --build-arg BIN=block-republisher -t stl-block-republisher:$(LOCAL_TAG) -f Dockerfile.common .
+
+docker-release-block-republisher: ecr-login _docker-release-block-republisher-internal
+
+_docker-release-block-republisher-internal:
+	@$(MAKE) _docker-release-go-service GO_NAME="Block Republisher" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/block-republisher GO_BIN=block-republisher GO_CACHE_KEY="cronjob-block-republisher" GO_TAG="block-republisher-$(IMAGE_TAG)" GO_LATEST_TAG="block-republisher-latest"
 
 kind-load-cronjobs:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="$(foreach cj,$(CRONJOBS),stl-$(cj):$(LOCAL_TAG))"

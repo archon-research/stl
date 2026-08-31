@@ -10,6 +10,37 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 )
 
+// BlockDataExpectation declares which block data types a chain's watcher fetches
+// and caches for every block. It is a chain fact with two readers: a tool that
+// re-publishes a block must produce exactly this set, and a consumer of the
+// block feed may expect to find exactly this set.
+type BlockDataExpectation struct {
+	// ExpectReceipts indicates receipts data is required for this chain.
+	ExpectReceipts bool
+	// ExpectTraces indicates traces data is required for this chain.
+	ExpectTraces bool
+	// ExpectBlobs indicates blob sidecars are required for this chain.
+	ExpectBlobs bool
+}
+
+// DefaultChainExpectations returns the expectations for known chains. These MUST
+// mirror what each chain's watcher actually caches: receipts are always fetched,
+// but traces only when the watcher runs without --enable-traces=false. Today only
+// the ethereum watcher fetches traces; every other chain's watcher sets
+// --enable-traces=false (avalanche and arbitrum have no trace_block on Alchemy at
+// all; base/optimism/unichain support it but the watcher still does not fetch
+// it). Blobs are not fetched anywhere (--enable-blobs is false).
+func DefaultChainExpectations() map[int64]BlockDataExpectation {
+	return map[int64]BlockDataExpectation{
+		1:     {ExpectReceipts: true, ExpectTraces: true, ExpectBlobs: false},  // Ethereum Mainnet
+		43114: {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Avalanche C-Chain
+		8453:  {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Base
+		10:    {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Optimism
+		130:   {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Unichain
+		42161: {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Arbitrum
+	}
+}
+
 // ValidateS3BucketForChain checks that the S3 bucket name has the expected prefix
 // for the given chain ID and deployment environment. This prevents accidentally
 // reading from or writing to the wrong chain's bucket.

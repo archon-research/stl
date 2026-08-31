@@ -65,3 +65,4 @@
 ./internal/services/reference_capital_indexer
 ./cmd/cronjobs/reference-capital-indexer
 ./cmd/cronjobs/morpho-v2-bootstrap
+./internal/services/block_republish

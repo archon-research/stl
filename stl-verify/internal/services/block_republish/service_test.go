@@ -1,0 +1,584 @@
+package block_republish
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/memory"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+)
+
+const (
+	testChainID    = int64(1)
+	testBlock      = int64(25395651)
+	testHash       = "0x1111111111111111111111111111111111111111111111111111111111111111"
+	testParentHash = "0x2222222222222222222222222222222222222222222222222222222222222222"
+	forkHash       = "0x3333333333333333333333333333333333333333333333333333333333333333"
+	testTimestamp  = int64(0x68b0c0c0)
+)
+
+// stubClient answers only the three reads Republish issues. The embedded port is
+// nil, so any other call panics rather than silently returning a zero value.
+type stubClient struct {
+	outbound.BlockchainClient
+
+	headers     []headerReply
+	headerCalls int
+
+	data    outbound.BlockData
+	dataErr error
+
+	head    int64
+	headErr error
+}
+
+type headerReply struct {
+	raw json.RawMessage
+	err error
+}
+
+func (c *stubClient) GetBlockByNumber(context.Context, int64, bool) (json.RawMessage, error) {
+	if c.headerCalls >= len(c.headers) {
+		panic(fmt.Sprintf("unexpected GetBlockByNumber call %d", c.headerCalls+1))
+	}
+	reply := c.headers[c.headerCalls]
+	c.headerCalls++
+	return reply.raw, reply.err
+}
+
+func (c *stubClient) GetBlockDataByHash(context.Context, int64, string, bool) (outbound.BlockData, error) {
+	return c.data, c.dataErr
+}
+
+func (c *stubClient) GetCurrentBlockNumber(context.Context) (int64, error) {
+	return c.head, c.headErr
+}
+
+func headerJSON(hash string) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(
+		`{"number":"0x1836b83","hash":%q,"parentHash":%q,"timestamp":"0x%x"}`,
+		hash, testParentHash, testTimestamp))
+}
+
+func newStubClient() *stubClient {
+	return &stubClient{
+		headers: []headerReply{{raw: headerJSON(testHash)}, {raw: headerJSON(testHash)}},
+		data: outbound.BlockData{
+			BlockNumber: testBlock,
+			Block:       json.RawMessage(`{"hash":"0x11"}`),
+			Receipts:    json.RawMessage(`[{"status":"0x1"}]`),
+			Traces:      json.RawMessage(`[{"type":"call"}]`),
+			Blobs:       json.RawMessage(`[{"index":"0x0"}]`),
+		},
+		head: testBlock + 5000,
+	}
+}
+
+type failingCache struct{ err error }
+
+func (c failingCache) SetBlockData(context.Context, int64, int64, int, outbound.BlockDataInput) error {
+	return c.err
+}
+func (c failingCache) DeleteBlock(context.Context, int64, int64, int) error { return nil }
+func (c failingCache) Close() error                                         { return nil }
+
+type failingSink struct{ err error }
+
+func (s failingSink) Publish(context.Context, outbound.Event) error { return s.err }
+func (s failingSink) Close() error                                  { return nil }
+
+type fixture struct {
+	service *Service
+	client  *stubClient
+	cache   *memory.BlockCache
+	sink    *memory.EventSink
+}
+
+// testConfig is the mainnet watcher's shape: traces on, blobs off.
+func testConfig() Config {
+	return Config{
+		ChainID:      testChainID,
+		EnableTraces: true,
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+}
+
+func newFixture(t *testing.T, client *stubClient) fixture {
+	t.Helper()
+	return newFixtureWith(t, testConfig(), client)
+}
+
+func newFixtureWith(t *testing.T, config Config, client *stubClient) fixture {
+	t.Helper()
+	cache := memory.NewBlockCache()
+	sink := memory.NewEventSink()
+	service := newTestService(t, config, client, cache, sink)
+	return fixture{service: service, client: client, cache: cache, sink: sink}
+}
+
+func newTestService(t *testing.T, config Config, client outbound.BlockchainClient, cache outbound.BlockCacheWriter, sink outbound.EventSink) *Service {
+	t.Helper()
+	service, err := NewService(config, client, cache, sink)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	return service
+}
+
+func (f fixture) cached(t *testing.T, dataType string, version int) json.RawMessage {
+	t.Helper()
+	readers := map[string]func(context.Context, int64, int64, int) (json.RawMessage, error){
+		"block":    f.cache.GetBlock,
+		"receipts": f.cache.GetReceipts,
+		"traces":   f.cache.GetTraces,
+		"blobs":    f.cache.GetBlobs,
+	}
+	read, ok := readers[dataType]
+	if !ok {
+		t.Fatalf("unknown data type %q", dataType)
+	}
+	raw, err := read(context.Background(), testChainID, testBlock, version)
+	if err != nil {
+		t.Fatalf("reading %s from cache: %v", dataType, err)
+	}
+	return raw
+}
+
+func (f fixture) publishedEvent(t *testing.T) outbound.BlockEvent {
+	t.Helper()
+	events := f.sink.GetBlockEvents()
+	if len(events) != 1 {
+		t.Fatalf("published %d block events, want 1", len(events))
+	}
+	return events[0]
+}
+
+func TestRepublish_CachesExactlyTheDataTypesTheChainsWatcherPublishes(t *testing.T) {
+	tests := []struct {
+		name        string
+		enableBlobs bool
+		want        []string
+	}{
+		{name: "mainnet: block, receipts and traces", want: []string{"block", "receipts", "traces"}},
+		{name: "a chain whose watcher also fetches blobs", enableBlobs: true, want: []string{"block", "receipts", "traces", "blobs"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			config := testConfig()
+			config.EnableBlobs = tc.enableBlobs
+			f := newFixtureWith(t, config, newStubClient())
+
+			result, err := f.service.Republish(context.Background(), testBlock, 1)
+			if err != nil {
+				t.Fatalf("Republish: %v", err)
+			}
+
+			if got := fmt.Sprint(result.DataTypes); got != fmt.Sprint(tc.want) {
+				t.Errorf("DataTypes = %v, want %v", got, tc.want)
+			}
+			for _, dataType := range []string{"block", "receipts", "traces", "blobs"} {
+				cached := f.cached(t, dataType, 1)
+				if slices.Contains(tc.want, dataType) == (cached == nil) {
+					t.Errorf("cached %s = %s, want it present only when the watcher publishes it", dataType, cached)
+				}
+			}
+		})
+	}
+}
+
+func TestRepublish_PublishesTheBlockEventAsAReorgBackfillAtTheRequestedVersion(t *testing.T) {
+	f := newFixture(t, newStubClient())
+
+	if _, err := f.service.Republish(context.Background(), testBlock, 2); err != nil {
+		t.Fatalf("Republish: %v", err)
+	}
+
+	event := f.publishedEvent(t)
+	want := outbound.BlockEvent{
+		ChainID:        testChainID,
+		BlockNumber:    testBlock,
+		Version:        2,
+		BlockHash:      testHash,
+		ParentHash:     testParentHash,
+		BlockTimestamp: testTimestamp,
+		IsReorg:        true,
+		IsBackfill:     true,
+	}
+	got := event
+	got.ReceivedAt = want.ReceivedAt
+	if got != want {
+		t.Errorf("published event = %+v, want %+v (ReceivedAt ignored)", got, want)
+	}
+	if event.ReceivedAt.IsZero() {
+		t.Error("published event has a zero ReceivedAt")
+	}
+}
+
+func TestRepublish_ReportsTheBlockItRepublished(t *testing.T) {
+	f := newFixture(t, newStubClient())
+
+	result, err := f.service.Republish(context.Background(), testBlock, 2)
+	if err != nil {
+		t.Fatalf("Republish: %v", err)
+	}
+
+	want := Result{
+		BlockNumber:    testBlock,
+		BlockHash:      testHash,
+		ParentHash:     testParentHash,
+		BlockTimestamp: testTimestamp,
+		Version:        2,
+		DataTypes:      []string{"block", "receipts", "traces"},
+	}
+	if fmt.Sprint(result) != fmt.Sprint(want) {
+		t.Errorf("result = %+v, want %+v", result, want)
+	}
+}
+
+func TestRepublish_RefusesWhenTheHeightsCanonicalHashMovedBetweenTheTwoReads(t *testing.T) {
+	client := newStubClient()
+	client.headers[1] = headerReply{raw: headerJSON(forkHash)}
+	f := newFixture(t, client)
+
+	_, err := f.service.Republish(context.Background(), testBlock, 1)
+
+	if !errors.Is(err, ErrCanonicalHashMoved) {
+		t.Fatalf("error = %v, want ErrCanonicalHashMoved", err)
+	}
+	if errors.Is(err, ErrStructuralData) {
+		t.Error("a live reorg must stay retryable, not be tagged structural")
+	}
+	if got := f.cached(t, "block", 1); got != nil {
+		t.Errorf("cached %s despite the reorg", got)
+	}
+	if count := f.sink.GetEventCount(); count != 0 {
+		t.Errorf("published %d events despite the reorg", count)
+	}
+}
+
+func TestRepublish_IsStructuralWhenTheNodeAnswersNullForTheBlockNumber(t *testing.T) {
+	client := newStubClient()
+	client.headers[0] = headerReply{err: fmt.Errorf("eth_getBlockByNumber: %w", rpcutil.ErrUpstreamNullResult)}
+	f := newFixtureWith(t, testConfig(), client)
+
+	_, err := f.service.Republish(context.Background(), testBlock, 1)
+
+	if !errors.Is(err, ErrStructuralData) {
+		t.Fatalf("error = %v, want ErrStructuralData", err)
+	}
+}
+
+// A height still inside the reorg window can pass the canonical check and be
+// orphaned moments later, writing a second losing fork into the slot meant to
+// correct the first.
+func TestRepublish_RefusesAHeightTooCloseToTheChainHead(t *testing.T) {
+	tests := []struct {
+		name string
+		head int64
+	}{
+		{name: "above the head", head: testBlock - 1},
+		{name: "at the head", head: testBlock},
+		{name: "inside the reorg window", head: testBlock + finalityDepth - 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newStubClient()
+			client.head = tc.head
+			f := newFixtureWith(t, testConfig(), client)
+
+			_, err := f.service.Republish(context.Background(), testBlock, 1)
+
+			if !errors.Is(err, ErrStructuralData) {
+				t.Fatalf("error = %v, want ErrStructuralData", err)
+			}
+			if f.client.headerCalls != 0 {
+				t.Errorf("read the chain %d times for a refused height", f.client.headerCalls)
+			}
+		})
+	}
+}
+
+func TestRepublish_AcceptsTheShallowestSafeHeight(t *testing.T) {
+	client := newStubClient()
+	client.head = testBlock + finalityDepth
+	f := newFixtureWith(t, testConfig(), client)
+
+	if _, err := f.service.Republish(context.Background(), testBlock, 1); err != nil {
+		t.Fatalf("Republish: %v", err)
+	}
+}
+
+// A throttled or timed-out head read says nothing about the block, so tagging it
+// structural would kill a run that the next attempt would complete.
+func TestRepublish_LeavesAFailedHeadReadRetryable(t *testing.T) {
+	client := newStubClient()
+	client.headErr = errors.New("429 Too Many Requests")
+	f := newFixtureWith(t, testConfig(), client)
+
+	_, err := f.service.Republish(context.Background(), testBlock, 1)
+
+	if err == nil {
+		t.Fatal("Republish succeeded without reading the chain head")
+	}
+	if errors.Is(err, ErrStructuralData) {
+		t.Errorf("error = %v, want it left retryable", err)
+	}
+}
+
+func TestRepublish_IsStructuralWhenTheNodeAnswersNullForAnExpectedDataType(t *testing.T) {
+	client := newStubClient()
+	client.data.Receipts = nil
+	f := newFixture(t, client)
+
+	_, err := f.service.Republish(context.Background(), testBlock, 1)
+
+	if !errors.Is(err, ErrStructuralData) {
+		t.Fatalf("error = %v, want ErrStructuralData", err)
+	}
+	if count := f.sink.GetEventCount(); count != 0 {
+		t.Errorf("published %d events for an incomplete payload", count)
+	}
+}
+
+func TestRepublish_IsStructuralWhenAskedForVersionZero(t *testing.T) {
+	f := newFixture(t, newStubClient())
+
+	_, err := f.service.Republish(context.Background(), testBlock, 0)
+
+	if !errors.Is(err, ErrStructuralData) {
+		t.Fatalf("error = %v, want ErrStructuralData", err)
+	}
+	if f.client.headerCalls != 0 {
+		t.Errorf("read the chain %d times for a rejected version", f.client.headerCalls)
+	}
+}
+
+func TestRepublish_LeavesATransientRPCFailureRetryable(t *testing.T) {
+	client := newStubClient()
+	client.dataErr = errors.New("429 Too Many Requests")
+	f := newFixture(t, client)
+
+	_, err := f.service.Republish(context.Background(), testBlock, 1)
+
+	if err == nil {
+		t.Fatal("Republish succeeded against a throttled node")
+	}
+	if errors.Is(err, ErrStructuralData) {
+		t.Errorf("error = %v, want it left retryable", err)
+	}
+}
+
+func TestRepublish_DoesNotPublishWhenTheCacheWriteFails(t *testing.T) {
+	sink := memory.NewEventSink()
+	service := newTestService(t, testConfig(), newStubClient(), failingCache{err: errors.New("redis unavailable")}, sink)
+
+	_, err := service.Republish(context.Background(), testBlock, 1)
+
+	if err == nil {
+		t.Fatal("Republish succeeded against an unwritable cache")
+	}
+	if count := sink.GetEventCount(); count != 0 {
+		t.Errorf("published %d events without a cached payload", count)
+	}
+}
+
+func TestRepublish_SurfacesAPublishFailure(t *testing.T) {
+	service := newTestService(t, testConfig(), newStubClient(), memory.NewBlockCache(), failingSink{err: errors.New("sns unavailable")})
+
+	_, err := service.Republish(context.Background(), testBlock, 1)
+
+	if err == nil {
+		t.Fatal("Republish succeeded when the sink refused the event")
+	}
+}
+
+func TestNewService_RequiresEveryDependency(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  Config
+		client  outbound.BlockchainClient
+		cache   outbound.BlockCacheWriter
+		sink    outbound.EventSink
+		wantErr string
+	}{
+		{
+			name:    "missing client",
+			config:  Config{ChainID: testChainID},
+			cache:   memory.NewBlockCache(),
+			sink:    memory.NewEventSink(),
+			wantErr: "client is required",
+		},
+		{
+			name:    "missing cache",
+			config:  Config{ChainID: testChainID},
+			client:  newStubClient(),
+			sink:    memory.NewEventSink(),
+			wantErr: "cache is required",
+		},
+		{
+			name:    "missing event sink",
+			config:  Config{ChainID: testChainID},
+			client:  newStubClient(),
+			cache:   memory.NewBlockCache(),
+			wantErr: "event sink is required",
+		},
+		{
+			name:    "non-positive chain ID",
+			config:  Config{},
+			client:  newStubClient(),
+			cache:   memory.NewBlockCache(),
+			sink:    memory.NewEventSink(),
+			wantErr: "ChainID",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewService(tc.config, tc.client, tc.cache, tc.sink)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want it to contain %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestRepublish_CachesBlobsWhenTheChainsWatcherFetchesThem(t *testing.T) {
+	config := testConfig()
+	config.EnableBlobs = true
+	f := newFixtureWith(t, config, newStubClient())
+
+	result, err := f.service.Republish(context.Background(), testBlock, 1)
+	if err != nil {
+		t.Fatalf("Republish: %v", err)
+	}
+
+	if got := string(f.cached(t, "blobs", 1)); got != `[{"index":"0x0"}]` {
+		t.Errorf("cached blobs = %s", got)
+	}
+	if got, want := fmt.Sprint(result.DataTypes), fmt.Sprint([]string{"block", "receipts", "traces", "blobs"}); got != want {
+		t.Errorf("DataTypes = %v, want %v", got, want)
+	}
+}
+
+func TestRepublish_RejectsANonPositiveBlockNumber(t *testing.T) {
+	f := newFixture(t, newStubClient())
+
+	_, err := f.service.Republish(context.Background(), 0, 1)
+
+	if !errors.Is(err, ErrStructuralData) {
+		t.Fatalf("error = %v, want ErrStructuralData", err)
+	}
+}
+
+func TestRepublish_IsStructuralWhenTheHeaderCannotBeDecoded(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  json.RawMessage
+	}{
+		{name: "not an object", raw: json.RawMessage(`["0x1"]`)},
+		{name: "no hash", raw: json.RawMessage(`{"parentHash":"0x2","timestamp":"0x1"}`)},
+		{name: "unparseable timestamp", raw: json.RawMessage(`{"hash":"0x1","parentHash":"0x2","timestamp":"later"}`)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newStubClient()
+			client.headers[0] = headerReply{raw: tc.raw}
+			f := newFixtureWith(t, testConfig(), client)
+
+			_, err := f.service.Republish(context.Background(), testBlock, 1)
+
+			if !errors.Is(err, ErrStructuralData) {
+				t.Fatalf("error = %v, want ErrStructuralData", err)
+			}
+		})
+	}
+}
+
+func TestRepublish_LeavesAFailedNumberReadRetryable(t *testing.T) {
+	tests := []struct {
+		name  string
+		index int
+	}{
+		{name: "the first read", index: 0},
+		{name: "the confirming read", index: 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newStubClient()
+			client.headers[tc.index] = headerReply{err: errors.New("dial tcp: connection refused")}
+			f := newFixtureWith(t, testConfig(), client)
+
+			_, err := f.service.Republish(context.Background(), testBlock, 1)
+
+			if err == nil {
+				t.Fatal("Republish succeeded against an unreachable node")
+			}
+			if errors.Is(err, ErrStructuralData) {
+				t.Errorf("error = %v, want it left retryable", err)
+			}
+		})
+	}
+}
+
+func TestRepublish_TreatsTheHeightVanishingOnTheConfirmingReadAsAReorg(t *testing.T) {
+	client := newStubClient()
+	client.headers[1] = headerReply{err: fmt.Errorf("eth_getBlockByNumber: %w", rpcutil.ErrUpstreamNullResult)}
+	f := newFixtureWith(t, testConfig(), client)
+
+	_, err := f.service.Republish(context.Background(), testBlock, 1)
+
+	if !errors.Is(err, ErrCanonicalHashMoved) {
+		t.Fatalf("error = %v, want ErrCanonicalHashMoved", err)
+	}
+}
+
+func TestRepublish_IsStructuralWhenTheConfirmingReadCannotBeDecoded(t *testing.T) {
+	client := newStubClient()
+	client.headers[1] = headerReply{raw: json.RawMessage(`{"parentHash":"0x2","timestamp":"0x1"}`)}
+	f := newFixtureWith(t, testConfig(), client)
+
+	_, err := f.service.Republish(context.Background(), testBlock, 1)
+
+	if !errors.Is(err, ErrStructuralData) {
+		t.Fatalf("error = %v, want ErrStructuralData", err)
+	}
+}
+
+func TestRepublish_LeavesAPerDataTypeRPCFailureRetryable(t *testing.T) {
+	client := newStubClient()
+	client.data.ReceiptsErr = errors.New("504 Gateway Timeout")
+	f := newFixtureWith(t, testConfig(), client)
+
+	_, err := f.service.Republish(context.Background(), testBlock, 1)
+
+	if err == nil {
+		t.Fatal("Republish succeeded with a failed receipts fetch")
+	}
+	if errors.Is(err, ErrStructuralData) {
+		t.Errorf("error = %v, want it left retryable", err)
+	}
+}
+
+func TestNewService_RunsWithoutALogger(t *testing.T) {
+	service, err := NewService(Config{ChainID: testChainID, EnableTraces: true},
+		newStubClient(), memory.NewBlockCache(), memory.NewEventSink())
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	if _, err := service.Republish(context.Background(), testBlock, 1); err != nil {
+		t.Fatalf("Republish: %v", err)
+	}
+}

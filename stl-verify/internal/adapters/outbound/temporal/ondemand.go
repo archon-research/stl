@@ -22,6 +22,9 @@ type WorkerConfig struct {
 	// Name is the task queue and the OTel service name.
 	Name string
 
+	// OpenDatabase opens the app database pool. Optional: a job that touches no
+	// Postgres leaves it nil and gets a nil Dependencies.Pool, so its deployment
+	// needs no database credential.
 	OpenDatabase func(ctx context.Context) (*pgxpool.Pool, error)
 
 	// Register attaches the job's workflows and activities. It runs after the
@@ -46,9 +49,6 @@ func workerOptions(metrics *cronjobMetrics) worker.Options {
 func (c WorkerConfig) validate() error {
 	if c.Name == "" {
 		return fmt.Errorf("WorkerConfig.Name is required")
-	}
-	if c.OpenDatabase == nil {
-		return fmt.Errorf("WorkerConfig.OpenDatabase is required")
 	}
 	if c.Register == nil {
 		return fmt.Errorf("WorkerConfig.Register is required")

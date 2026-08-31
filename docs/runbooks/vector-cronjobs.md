@@ -18,6 +18,7 @@ into TimescaleDB (or validates stored data). Current cronjobs:
 | `reference-capital-backfill` | `reference-capital-backfill` | **on demand** | Seeds the reference balance-sheet history predating the syncer's first run |
 | `morpho-vault-backfill` | `morpho-vault-backfill` | **on demand** | Discovers Morpho vaults from the archived S3 receipts and replays their VaultV2 structured events, for a block range supplied at start time (VEC-218) |
 | `morpho-v2-bootstrap` | `morpho-v2-bootstrap` | **on demand** | One-shot repair of Morpho VaultV2 vaults discovered before atomic discovery (VEC-218) |
+| `block-republisher` | `block-republisher` | **on demand** | Re-publishes named block heights under a new `block_version`, so every indexer appends the canonical block for a height whose only published version is a losing fork (ARCT-383) |
 | `core-model-runner` | `core-model-runner` | 24h | CORE model CRR per market → `core_model_results` (Python harness; staging + prod; N_MC capped at 100 until the sizing in #804 settles) |
 
 > `maple-graphql-indexer` is also a cronjob but has its own richer rules — see
@@ -211,7 +212,7 @@ stale. The only impact is that a new run cannot be started until the pod is back
 Warning severity for that reason.
 
 Currently matches: `offchain-price-backfill`, `reference-capital-backfill`,
-`morpho-vault-backfill`, `morpho-v2-bootstrap`.
+`morpho-vault-backfill`, `morpho-v2-bootstrap`, `block-republisher`.
 
 ### First checks
 
@@ -570,6 +571,127 @@ slowness, all compiled into the worker, so an operator supplies none of it. A ru
 still going after an hour is a stall signal, not normal.
 Unlike the backfill, progress lives in the activity's heartbeat details rather
 than in workflow history; see the resume note at the top of this runbook.
+
+---
+
+### Special case: `block-republisher` (on-demand, no schedule)
+
+Another **on-demand** Temporal worker (`temporal.RunWorker`). Everything said
+about `offchain-price-backfill` above applies — nothing is missed while it is
+down, and it is excluded from `VectorCronjobAllRunsFailing` for the same reason.
+
+**What it repairs.** A height whose only published version is a losing fork
+(ARCT-379): the watcher dropped the canonical broadcast as a `stale_fork`, the
+next block's reorg commit orphaned the height without replacing it, and nothing
+re-fetched it. S3 then holds only that height's `_0_` objects and every indexer
+holds its events at `block_version` 0. Nothing else repairs it — the watcher's
+own retry only reaches non-orphaned `block_states` rows, which the 30-day
+retention drops, and `raw-block-bulk-downloader` repairs S3 without telling the
+indexers.
+
+**How to start a run.** Temporal UI (namespace **`vector`**) → **Start
+Workflow**:
+
+| Field | Value |
+|---|---|
+| Task Queue | `block-republisher` |
+| Workflow Type | `BlockRepublish` |
+| Workflow ID | descriptive and unique, e.g. `block-republisher-2026-09-01` |
+| Input | `{"blocks":[25395651,25087888],"version":1}` |
+
+`blocks` are the heights, processed in the order given, at most **200** per run.
+`version` is the slot they are all published under; it defaults to 1 and must be
+at least 1 — version 0 is the slot holding the data being corrected. Every height
+must sit at least 64 blocks below the chain head. The chain comes from the
+Deployment's `CHAIN_ID`, not from the input. The equivalent CLI
+call:
+
+```bash
+temporal workflow start --namespace vector \
+  --task-queue block-republisher --type BlockRepublish \
+  --workflow-id block-republisher-2026-09-01 \
+  --input '{"blocks":[25395651,25087888],"version":1}'
+```
+
+**Choose the version deliberately.** `block_version` is the reorg counter, so a
+height that genuinely reorged once already has a real version 1. Republishing
+into an occupied slot appends rows that every reader (`ORDER BY block_version
+DESC, processing_version DESC`) prefers over the genuine ones. Before a run,
+check which slots the archive already holds (`$RAW_BUCKET` is the chain's
+`stl-sentinel<env>-<chain>-raw-<suffix>` bucket, as on the backup worker):
+
+```bash
+aws s3 ls s3://$RAW_BUCKET/25395000-25395999/ | grep 25395651_
+```
+
+Only `_0_` present is the ARCT-379 shape; pick 1. If `_1_` is there, pick the
+next free slot.
+
+**What a run does.** One activity per block. It reads the chain head and refuses
+any height inside the 64-block reorg window, reads the block by number (the
+canonical block at fetch time), fetches block + receipts + traces pinned to that
+hash, re-reads the number and **refuses if the canonical hash moved between the
+two reads**, writes the payload to `stl:{chainId}:{number}:{version}:{dataType}`
+in Redis, and publishes a `BlockEvent` at that version on the chain's SNS topic.
+A block takes seconds; a 200-block run takes minutes. The first failing block
+stops the run — the blocks before it are already durable, so the retry is the
+remaining list.
+
+**It does not write `block_states`.** The `assign_block_version` trigger
+overwrites the supplied version with `MAX(version)+1` over the rows surviving at
+that height, and after the 30-day retention there are none — it would hand back
+0 and re-stamp the losing fork's own slot. Writing there would also hand the
+watcher's gap filler an unpublished row to re-publish and pin its backfill
+watermark behind the repaired height. The durable record of a republish is the
+SNS event, the S3 objects and the indexers' rows.
+
+**What to verify afterwards.**
+
+1. The archive holds the new version — `raw-data-backup` writes it from the same
+   event, usually within a minute:
+   ```bash
+   aws s3 ls s3://$RAW_BUCKET/25395000-25395999/ | grep 25395651_1_
+   ```
+   Expect `_1_block`, `_1_receipts` and (Ethereum only) `_1_traces`.
+2. The indexers appended the corrected version:
+   ```sql
+   SELECT block_version, count(*) FROM protocol_event
+   WHERE chain_id = 1 AND block_number = 25395651 GROUP BY 1 ORDER BY 1;
+   ```
+   Expect a `block_version = 1` group alongside the old `0`. Nothing is deleted:
+   the correction is the newer version, and every reader takes the highest.
+3. `morpho-vault-backfill` can now replay the partition the height sits in — its
+   replay reads the archive by partition prefix, so it picks up the `_1_` objects
+   the step above confirmed.
+
+**Failure modes specific to this worker.**
+
+- **`StructuralData` (non-retryable, run goes red immediately)** — the height is
+  above the chain head or within 64 blocks of it (the worker refuses to repair
+  inside the reorg window: two reads seconds apart would both see the same fork,
+  and the "correction" could itself be orphaned), the node answers null for the
+  block or one of its data types, or the input is invalid. Fix the input or point
+  at a node with the history, then start a new run.
+- **Canonical hash moved mid-republish (retryable)** — a reorg deeper than the
+  64-block guard. The activity retries inside a 30-minute envelope, which is
+  normally long enough for the chain to settle.
+- **A republished block poisons an indexer's queue.** SNS FIFO groups by chain,
+  so one block an indexer cannot process head-of-line-blocks every later block on
+  that chain's queue until SQS redrives it to the DLQ. The usual cause is a state
+  read at a height the node has no archive state for. Watch the consumers' stall
+  alerts (`VectorMorphoIndexerStalled`, `VectorOracleIndexerStalled`,
+  `VectorFluidVaultIndexerStalled`, `VectorBackupWorkerStalled`) for the first
+  few minutes of a run — republish a single block first and confirm they stay
+  quiet before running a list.
+- **Nothing arrives downstream** — check the worker actually published
+  (`kubectl -n vector logs deploy/block-republisher | grep 'republished block'`)
+  before suspecting the consumers; SNS FIFO silently drops a repeat of the same
+  `{chainId}:{blockHash}:{version}` inside its five-minute deduplication window.
+
+**Local runs.** The kind cluster's LocalStack topic is `stl-ethereum-blocks.fifo`,
+which the worker's startup guard rejects — it requires the deployed
+`stl-sentinel<env>-<chain>-blocks.fifo` naming for the configured `CHAIN_ID` and
+`DEPLOY_ENV`. Run it against a real environment's topic, or rename the dev topic.
 
 ---
 
@@ -1026,9 +1148,10 @@ exposure.
 ## Adding a new cronjob
 
 Failure + all-failing alerts are automatic (they group by `service_name`).
-`VectorCronjobAllRunsFailing` excludes `maple-graphql-indexer`, the four
+`VectorCronjobAllRunsFailing` excludes `maple-graphql-indexer`, the five
 on-demand jobs (`offchain-price-backfill`, `reference-capital-backfill`,
-`morpho-vault-backfill`, `morpho-v2-bootstrap`), and `core-model-runner`;
+`morpho-vault-backfill`, `morpho-v2-bootstrap`, `block-republisher`), and
+`core-model-runner`;
 `VectorCronjobRunFailing` excludes only maple. Two manual steps:
 
 1. Add the new **Deployment name** to the `deployment=~"..."` regex in the

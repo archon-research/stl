@@ -36,9 +36,8 @@ func TestWorkerConfig_Validate(t *testing.T) {
 			wantErr: "Name is required",
 		},
 		{
-			name:    "missing database opener",
-			mutate:  func(c *WorkerConfig) { c.OpenDatabase = nil },
-			wantErr: "OpenDatabase is required",
+			name:   "no database opener",
+			mutate: func(c *WorkerConfig) { c.OpenDatabase = nil },
 		},
 		{
 			name:    "missing register hook",

@@ -344,6 +344,23 @@ data:
   AWS_REGION: "eu-west-1"
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector-opentelemetry-collector.observability.svc.cluster.local:4317"
 ---
+# On-demand block republisher (ARCT-383) — see docs/runbooks/vector-cronjobs.md.
+# ALCHEMY_HTTP_URL is omitted: the binary defaults to eth-mainnet, matching
+# CHAIN_ID below. AWS_SNS_TOPIC_ARN and REDIS_ADDR arrive via the ExternalSecret,
+# the same infra-config values the ethereum watcher publishes with.
+# DEPLOY_ENV is what the startup guard validates that topic's chain against.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: block-republisher
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "1"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  DEPLOY_ENV: "staging"
+---
 # CEX order book indexer — Coinbase. OKX/Kraken get their own configmaps with the
 # venue-specific EXCHANGE and SYMBOLS (OKX uses dash pairs like BTC-USDT; Kraken
 # uses slash pairs with its own asset names like XBT/USD).

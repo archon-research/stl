@@ -1,0 +1,101 @@
+package main
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+)
+
+// config is the deployment's static configuration. The blocks and the target
+// version are deliberately absent: they are per-run workflow input (see
+// RepublishParams).
+type config struct {
+	chainID        int64
+	deployEnv      string
+	snsTopicARN    string
+	snsEndpoint    string
+	rpcURL         string
+	redisAddr      string
+	redisPassword  string
+	redisKeyPrefix string
+	enableTraces   bool
+	enableBlobs    bool
+}
+
+const (
+	// defaultAlchemyHTTPURL matches the other indexers' default, so a deployment
+	// only has to supply ALCHEMY_HTTP_URL when it is not on mainnet.
+	defaultAlchemyHTTPURL = "https://eth-mainnet.g.alchemy.com/v2"
+
+	defaultRedisAddr = "localhost:6379"
+
+	// defaultRedisKeyPrefix is what production leaves unset; only a test driving
+	// this binary sets REDIS_KEY_PREFIX, to namespace its keys in a shared Redis.
+	defaultRedisKeyPrefix = "stl"
+
+	// cacheTTL is the watcher's own Redis TTL. A republished payload has to
+	// outlive the SQS hop for every subscriber, and nothing more: the backup
+	// worker's RPC fallback covers a consumer that arrives after it expires.
+	cacheTTL = 2 * time.Hour
+)
+
+func loadConfig() (config, error) {
+	chainID, err := chainutil.RequireChainID()
+	if err != nil {
+		return config{}, err
+	}
+	// ExpectReceipts is not read: the watcher fetches receipts unconditionally
+	// (live_data.cacheAndPublishBlockData), so it has no flag to mirror.
+	expectation, known := chainutil.DefaultChainExpectations()[int64(chainID)]
+	if !known {
+		return config{}, fmt.Errorf(
+			"chain %d has no declared block-data shape: add it to chainutil.DefaultChainExpectations, "+
+				"or a republished block would carry a different data set than its watcher publishes", chainID)
+	}
+
+	deployEnv, err := env.Require("DEPLOY_ENV")
+	if err != nil {
+		return config{}, err
+	}
+	snsTopicARN, err := env.Require("AWS_SNS_TOPIC_ARN")
+	if err != nil {
+		return config{}, err
+	}
+	// The chain and the topic arrive as independent variables, and publishing
+	// chain X's blocks onto chain Y's topic would hand every consumer of Y a
+	// version-1 correction built from another chain's data.
+	if err := chainutil.ValidateSNSTopicForChain(int64(chainID), snsTopicARN, deployEnv); err != nil {
+		return config{}, fmt.Errorf("AWS_SNS_TOPIC_ARN / CHAIN_ID mismatch: %w", err)
+	}
+
+	rpcURL, err := resolveRPCURL()
+	if err != nil {
+		return config{}, err
+	}
+
+	return config{
+		chainID:        int64(chainID),
+		deployEnv:      deployEnv,
+		snsTopicARN:    snsTopicARN,
+		snsEndpoint:    env.Get("AWS_SNS_ENDPOINT", ""),
+		rpcURL:         rpcURL,
+		redisAddr:      env.Get("REDIS_ADDR", defaultRedisAddr),
+		redisPassword:  env.Get("REDIS_PASSWORD", ""),
+		redisKeyPrefix: env.Get("REDIS_KEY_PREFIX", defaultRedisKeyPrefix),
+		enableTraces:   expectation.ExpectTraces,
+		enableBlobs:    expectation.ExpectBlobs,
+	}, nil
+}
+
+// resolveRPCURL builds the node URL from the same ALCHEMY_HTTP_URL +
+// ALCHEMY_API_KEY pair every other indexer uses, so this worker's secret wiring
+// matches theirs.
+func resolveRPCURL() (string, error) {
+	apiKey, err := env.Require("ALCHEMY_API_KEY")
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s/%s", env.Get("ALCHEMY_HTTP_URL", defaultAlchemyHTTPURL), apiKey), nil
+}

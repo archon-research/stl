@@ -56,6 +56,9 @@ resources:
   # On-demand Morpho vault backfill worker (VEC-218). No Temporal schedule: idles
   # on its task queue until a run is started by hand from the Temporal UI.
   - ../../base/morpho-vault-backfill
+  # On-demand block republisher (ARCT-383). No Temporal schedule: idles on its
+  # task queue until an operator starts a run with the heights to repair.
+  - ../../base/block-republisher
   # CEX L2 order book indexer fleet — one pod per exchange, same binary,
   # different EXCHANGE/SYMBOLS config (OKX/Kraken added by copying the coinbase
   # base dir + its configmap/external-secret with the exchange-specific values).
