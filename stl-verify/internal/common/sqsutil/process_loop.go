@@ -206,32 +206,22 @@ func processMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, ha
 	}
 
 	if event.ChainID != cfg.ChainID {
-		discardForeignChainMessage(ctx, cfg, msg, event)
-		return nil
+		return discardForeignChainMessage(ctx, cfg, msg, event)
 	}
 
 	outcome := runHandler(ctx, cfg, event, handler)
-	return settleMessage(ctx, cfg, msg, outcome)
+	return settleMessage(ctx, cfg, msg, event, outcome)
 }
 
 // Chain ID is immutable in the message, so redelivery would never succeed.
-func discardForeignChainMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, event outbound.BlockEvent) {
+func discardForeignChainMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, event outbound.BlockEvent) error {
 	cfg.Logger.Error("chain ID mismatch, deleting message",
 		"messageID", msg.MessageID,
 		"expected", cfg.ChainID,
 		"got", event.ChainID,
 		"block", event.BlockNumber)
 
-	cleanupCtx, cancel := CleanupContext(ctx)
-	defer cancel()
-	if err := cfg.Consumer.DeleteMessage(cleanupCtx, msg.ReceiptHandle); err != nil {
-		cfg.Logger.Error("failed to delete mismatched message",
-			"messageID", msg.MessageID,
-			"error", err)
-		if ctx.Err() != nil {
-			releaseMessage(ctx, cfg, msg)
-		}
-	}
+	return deleteSettledMessage(ctx, cfg, msg)
 }
 
 func runHandler(ctx context.Context, cfg Config, event outbound.BlockEvent, handler BlockEventHandler) DrainOutcome {
@@ -241,16 +231,20 @@ func runHandler(ctx context.Context, cfg Config, event outbound.BlockEvent, hand
 	})
 }
 
-func settleMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, outcome DrainOutcome) error {
+func settleMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, event outbound.BlockEvent, outcome DrainOutcome) error {
 	if outcome.Err != nil {
-		return keepMessageForRedelivery(cfg, msg, outcome)
+		return keepMessageForRedelivery(cfg, msg, event, outcome)
 	}
-	deleteProcessedMessage(ctx, cfg, msg, outcome)
-	return nil
+	return deleteProcessedMessage(ctx, cfg, msg, outcome)
 }
 
-func keepMessageForRedelivery(cfg Config, msg outbound.SQSMessage, outcome DrainOutcome) error {
-	if !outcome.Abandoned {
+func keepMessageForRedelivery(cfg Config, msg outbound.SQSMessage, event outbound.BlockEvent, outcome DrainOutcome) error {
+	if outcome.Abandoned {
+		cfg.Logger.Warn("shutdown drain expired with the handler still running; releasing its message",
+			"messageID", msg.MessageID,
+			"block", event.BlockNumber,
+			"drainBudget", cfg.drainTimeout())
+	} else {
 		cfg.Logger.Error("failed to process message",
 			"messageID", msg.MessageID,
 			"error", outcome.Err)
@@ -258,22 +252,27 @@ func keepMessageForRedelivery(cfg Config, msg outbound.SQSMessage, outcome Drain
 	return outcome.Err
 }
 
-func deleteProcessedMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, outcome DrainOutcome) {
+func deleteProcessedMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, outcome DrainOutcome) error {
 	if outcome.BudgetExceeded {
 		cfg.Logger.Warn("handler returned nil after exceeding its timeout budget; deleting anyway",
 			"messageID", msg.MessageID)
 	}
+	return deleteSettledMessage(ctx, cfg, msg)
+}
 
+// A refused delete is returned, not released here: the message then travels
+// with every other unsettled one and releaseUnsettledOnShutdown is the single
+// place that hands any of them back.
+func deleteSettledMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage) error {
 	cleanupCtx, cancel := CleanupContext(ctx)
 	defer cancel()
 	if err := cfg.Consumer.DeleteMessage(cleanupCtx, msg.ReceiptHandle); err != nil {
 		cfg.Logger.Error("failed to delete message",
 			"messageID", msg.MessageID,
 			"error", err)
-		if ctx.Err() != nil {
-			releaseMessage(ctx, cfg, msg)
-		}
+		return fmt.Errorf("deleting message %s: %w", msg.MessageID, err)
 	}
+	return nil
 }
 
 // CleanupContext returns the context for the queue call that settles a message.

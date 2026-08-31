@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -88,7 +87,7 @@ func Bootstrap(ctx context.Context, logger *slog.Logger, chainID, buildID int64,
 // NewS3WrapFromEnv builds the archiving wrap from env config. The returned
 // drain func blocks until all in-flight archive writes finish or DrainTimeout
 // expires; call it during graceful shutdown. All decorators produced by the
-// wrap share one WaitGroup, so a single drain() covers them all.
+// wrap share one drain gate, so a single drain() covers them all.
 func NewS3WrapFromEnv(ctx context.Context, logger *slog.Logger, chainID, buildID int64, source string) (Wrap, func(), error) {
 	if logger == nil {
 		logger = slog.Default()
@@ -124,40 +123,26 @@ func NewS3WrapFromEnv(ctx context.Context, logger *slog.Logger, chainID, buildID
 		return nil, nil, fmt.Errorf("creating call archiver: %w", err)
 	}
 
-	wg := &sync.WaitGroup{}
+	gate := archiving.NewDrainGate()
 	wrap := func(inner outbound.Multicaller) outbound.Multicaller {
 		return archiving.NewMulticaller(inner, archiver, archiving.Config{
 			Source:  source,
 			ChainID: chainID,
 			Chain:   chainName,
 			BuildID: buildID,
-			Wait:    wg,
+			Gate:    gate,
 			Logger:  logger,
 		})
 	}
-	drain := func() {
-		if !waitWithBudget(wg, DrainTimeout) {
-			logger.Warn("raw SC call archive drain budget expired; abandoning in-flight writes",
-				"budget", DrainTimeout)
-		}
-	}
-
-	return wrap, drain, nil
+	return wrap, newDrain(gate, logger), nil
 }
 
-func waitWithBudget(wg *sync.WaitGroup, budget time.Duration) (finished bool) {
-	drained := make(chan struct{})
-	go func() {
-		defer close(drained)
-		wg.Wait()
-	}()
-
-	timer := time.NewTimer(budget)
-	defer timer.Stop()
-	select {
-	case <-drained:
-		return true
-	case <-timer.C:
-		return false
+func newDrain(gate *archiving.DrainGate, logger *slog.Logger) func() {
+	return func() {
+		if finished, outstanding := gate.Drain(DrainTimeout); !finished {
+			logger.Warn("raw SC call archive drain budget expired; abandoning in-flight writes",
+				"budget", DrainTimeout,
+				"outstanding", outstanding)
+		}
 	}
 }

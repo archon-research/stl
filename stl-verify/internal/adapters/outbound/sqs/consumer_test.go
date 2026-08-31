@@ -357,7 +357,7 @@ func TestNewConsumer_RejectsAWaitTimeOutsideTheSQSLongPollRange(t *testing.T) {
 	}{
 		{"the SQS long-poll maximum is accepted", 20, false},
 		{"one second past the maximum is rejected", 21, true},
-		{"a wait time SQS refuses but the shutdown window allows is rejected", 25, true},
+		{"well past the maximum is rejected", 25, true},
 		{"a negative wait time is rejected", -1, true},
 	}
 	for _, tt := range tests {

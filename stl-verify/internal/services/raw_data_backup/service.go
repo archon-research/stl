@@ -288,11 +288,6 @@ func (s *Service) fetchAndDispatch(ctx context.Context, msgCh chan<- outbound.SQ
 		return true
 	}
 
-	if ctx.Err() != nil {
-		s.holdForRelease(messages...)
-		return false
-	}
-
 	if undispatched := s.dispatch(ctx, msgCh, messages); len(undispatched) > 0 {
 		s.holdForRelease(undispatched...)
 		return false
@@ -303,7 +298,7 @@ func (s *Service) fetchAndDispatch(ctx context.Context, msgCh chan<- outbound.SQ
 func (s *Service) stopFetching(ctx context.Context, closeMsgCh func(), reason error) error {
 	closeMsgCh()
 	s.wg.Wait()
-	sqsutil.ReleaseMessages(ctx, s.consumer, s.logger, s.takeHeldMessages())
+	sqsutil.ReleaseMessages(ctx, s.consumer, s.logger, s.config.ChainID, s.takeHeldMessages())
 	return reason
 }
 
@@ -329,7 +324,7 @@ func (s *Service) releaseIfShuttingDown(ctx context.Context, logger *slog.Logger
 	if ctx.Err() == nil {
 		return
 	}
-	sqsutil.ReleaseMessages(ctx, s.consumer, logger, []outbound.SQSMessage{msg})
+	sqsutil.ReleaseMessages(ctx, s.consumer, logger, s.config.ChainID, []outbound.SQSMessage{msg})
 }
 
 func (s *Service) dispatch(
@@ -416,6 +411,11 @@ func (s *Service) recordLatency(ctx context.Context, start time.Time, outcome sq
 // hit from a no-op re-delivery and from an RPC self-heal.
 func (s *Service) handleResult(ctx context.Context, logger *slog.Logger, msg outbound.SQSMessage, status string, outcome sqsutil.DrainOutcome) {
 	if outcome.Err == nil {
+		if outcome.BudgetExceeded {
+			logger.Warn("handler returned nil after exceeding its timeout budget; deleting anyway",
+				"messageID", msg.MessageID,
+			)
+		}
 		s.recordProcessed(ctx, status)
 		s.deleteMessage(ctx, logger, msg)
 		return

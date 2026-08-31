@@ -44,6 +44,27 @@ func collectReleaseCounter(t *testing.T, reader sdkmetric.Reader) map[string]int
 	return out
 }
 
+func collectReleaseChains(t *testing.T, reader sdkmetric.Reader) []string {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collecting metrics: %v", err)
+	}
+	var chains []string
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != releaseCounterName {
+				continue
+			}
+			for _, dp := range m.Data.(metricdata.Sum[int64]).DataPoints {
+				chain, _ := dp.Attributes.Value("chain")
+				chains = append(chains, chain.AsString())
+			}
+		}
+	}
+	return chains
+}
+
 func installManualMeterProvider(t *testing.T) sdkmetric.Reader {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
@@ -88,7 +109,7 @@ func TestReleaseMessages_CountsEveryReleaseByOutcome(t *testing.T) {
 				makeMsg("2", "h2", blockEvent(101)),
 			}
 
-			ReleaseMessages(context.Background(), consumer, slog.Default(), messages)
+			ReleaseMessages(context.Background(), consumer, slog.Default(), 1, messages)
 
 			if got := collectReleaseCounter(t, reader); !maps.Equal(got, tt.want) {
 				t.Errorf("%s = %v, want %v", releaseCounterName, got, tt.want)
@@ -97,10 +118,10 @@ func TestReleaseMessages_CountsEveryReleaseByOutcome(t *testing.T) {
 	}
 }
 
-// The release call keeps the SDK's default retryer, so one throttled release
-// can burn the whole shared cleanup budget in its own retry chain.
+// The release call keeps the SDK's default retryer, so one throttled call can
+// burn a whole cleanup budget in its own retry chain.
 func TestReleaseMessages_OneSlowReleaseCannotStrandTheRest(t *testing.T) {
-	const held = 10
+	const held = 14
 	messages := heldMessages(held)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -110,19 +131,42 @@ func TestReleaseMessages_OneSlowReleaseCannotStrandTheRest(t *testing.T) {
 		slowOnce.Do(func() { time.Sleep(80 * time.Millisecond) })
 	}}
 
-	ReleaseMessages(ctx, consumer, slog.Default(), messages)
+	ReleaseMessages(ctx, consumer, slog.Default(), 1, messages)
 
 	if got := len(consumer.released()); got != held {
 		t.Fatalf("expected all %d held messages released, got %d", held, got)
 	}
 }
 
-// The backup worker holds an undispatched tail plus one message per worker, so
-// a shutdown can hand back more than one batch's worth.
+// Nothing else stops this call: the release runs detached from the cancelled
+// caller, and the backup worker has no lifecycle.Run window around it.
+func TestReleaseMessages_BoundsTheDetachedReleaseByTheCleanupBudget(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	consumer := &mockConsumer{}
+
+	ReleaseMessages(ctx, consumer, slog.Default(), 1, heldMessages(1))
+	latest := time.Now().Add(ShutdownCleanupTimeout)
+
+	calls := consumer.releaseCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected the cancelled caller's release to still go out, got %d calls", len(calls))
+	}
+	if calls[0].deadline.IsZero() {
+		t.Fatal("expected the detached release bounded by a deadline, got none")
+	}
+	if calls[0].deadline.After(latest) {
+		t.Errorf("expected the release deadline within %s, got %s past it",
+			ShutdownCleanupTimeout, calls[0].deadline.Sub(latest))
+	}
+}
+
+// The backup worker's held set is the tail it never dispatched plus its
+// Workers*2 buffer plus what the workers pulled, so it outgrows one batch call.
 func TestReleaseMessages_ChunksTheHeldSetToTheSQSBatchCeiling(t *testing.T) {
 	consumer := &mockConsumer{}
 
-	ReleaseMessages(context.Background(), consumer, slog.Default(), heldMessages(14))
+	ReleaseMessages(context.Background(), consumer, slog.Default(), 1, heldMessages(14))
 
 	calls := consumer.releaseCalls()
 	if len(calls) != 2 {
@@ -130,6 +174,19 @@ func TestReleaseMessages_ChunksTheHeldSetToTheSQSBatchCeiling(t *testing.T) {
 	}
 	if got := []int{len(calls[0].handles), len(calls[1].handles)}; !slices.Equal(got, []int{10, 4}) {
 		t.Errorf("expected chunks of 10 and 4, got %v", got)
+	}
+}
+
+// Every per-chain backup worker shares one service_name, and the backup-worker
+// alerts group by (chain, cluster).
+func TestReleaseMessages_CountsAgainstTheChainName(t *testing.T) {
+	reader := installManualMeterProvider(t)
+	consumer := &mockConsumer{}
+
+	ReleaseMessages(context.Background(), consumer, slog.Default(), 42161, heldMessages(1))
+
+	if got := collectReleaseChains(t, reader); !slices.Equal(got, []string{"arbitrum"}) {
+		t.Errorf("expected the release counted against the chain name, got %v", got)
 	}
 }
 

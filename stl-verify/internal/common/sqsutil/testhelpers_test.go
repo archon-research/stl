@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 type visibilityChange struct {
@@ -28,7 +29,7 @@ type mockConsumer struct {
 	batches            [][]outbound.SQSMessage
 	deletedHandles     []string
 	visibilityReleases []visibilityRelease
-	deleteErr          error
+	deleteErrFor       map[string]error
 	visibilityErr      error
 	visibilityRefusals map[string]error
 	visibilityTimeout  time.Duration // 0 -> a safe default well above the handler budget
@@ -68,10 +69,13 @@ func (m *mockConsumer) DeleteMessage(ctx context.Context, handle string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err, ok := m.deleteErrFor[handle]; ok {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.deletedHandles = append(m.deletedHandles, handle)
-	return m.deleteErr
+	return nil
 }
 
 func (m *mockConsumer) ChangeMessageVisibilityBatch(ctx context.Context, handles []string, visibility time.Duration) (map[string]error, error) {
@@ -143,36 +147,6 @@ func testConfig(consumer *mockConsumer) Config {
 	}
 }
 
-type levelRecorder struct {
-	mu      sync.Mutex
-	records []slog.Record
-}
-
-func (h *levelRecorder) Enabled(context.Context, slog.Level) bool { return true }
-
-func (h *levelRecorder) Handle(_ context.Context, record slog.Record) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.records = append(h.records, record.Clone())
-	return nil
-}
-
-func (h *levelRecorder) WithAttrs([]slog.Attr) slog.Handler { return h }
-
-func (h *levelRecorder) WithGroup(string) slog.Handler { return h }
-
-func (h *levelRecorder) messagesAt(level slog.Level) []string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	var messages []string
-	for _, record := range h.records {
-		if record.Level == level {
-			messages = append(messages, record.Message)
-		}
-	}
-	return messages
-}
-
 func startRunLoop(consumer *mockConsumer, logger *slog.Logger, handler BlockEventHandler) (context.CancelFunc, <-chan struct{}) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -211,8 +185,8 @@ func blockEvent(number int64) outbound.BlockEvent {
 	return outbound.BlockEvent{ChainID: 1, BlockNumber: number, Version: 0, BlockHash: "0xabc"}
 }
 
-func recordingConfig(consumer *mockConsumer) (Config, *levelRecorder) {
-	recorder := &levelRecorder{}
+func recordingConfig(consumer *mockConsumer) (Config, *testutil.SlogRecorder) {
+	recorder := &testutil.SlogRecorder{}
 	cfg := testConfig(consumer)
 	cfg.Logger = slog.New(recorder)
 	return cfg, recorder
@@ -227,9 +201,9 @@ func awaitSignal(t *testing.T, ch <-chan struct{}, what string) {
 	}
 }
 
-func assertNoErrorLogs(t *testing.T, recorder *levelRecorder) {
+func assertNoErrorLogs(t *testing.T, recorder *testutil.SlogRecorder) {
 	t.Helper()
-	if logged := recorder.messagesAt(slog.LevelError); len(logged) > 0 {
+	if logged := recorder.MessagesAt(slog.LevelError); len(logged) > 0 {
 		t.Errorf("expected no ERROR records on the shutdown path, got %v", logged)
 	}
 }

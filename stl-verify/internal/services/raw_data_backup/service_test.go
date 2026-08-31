@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	sqsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
@@ -46,6 +47,7 @@ type mockSQSConsumer struct {
 	receiveDelay      time.Duration
 	closed            bool
 	receiveCallback   func(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error)
+	beforeDelete      func()
 }
 
 func newMockSQSConsumer() *mockSQSConsumer {
@@ -102,6 +104,9 @@ func (m *mockSQSConsumer) ReceiveMessages(ctx context.Context, maxMessages int) 
 func (m *mockSQSConsumer) DeleteMessage(ctx context.Context, receiptHandle string) error {
 	m.deleteCalled.Add(1)
 
+	if m.beforeDelete != nil {
+		m.beforeDelete()
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -1631,6 +1636,8 @@ func TestRun_ProcessesMessages(t *testing.T) {
 	}
 }
 
+// The poll outlives the shutdown signal, so the batch reaches the pool with the
+// context already cancelled: the worker-side guard settles it, unstarted.
 func TestRun_ReleasesBatchThatArrivesDuringShutdown(t *testing.T) {
 	consumer := newMockSQSConsumer()
 	cache := newMockBlockCache()
@@ -1665,10 +1672,13 @@ func TestRun_ReleasesBatchThatArrivesDuringShutdown(t *testing.T) {
 }
 
 func TestShutdownPathFitsThePodGracePeriod(t *testing.T) {
-	// The workers drain concurrently, so one drain covers the pool; then three
-	// cleanup budgets settle the worst message (DLQ publish, delete, release
-	// after the failed delete) and a fourth releases what never started.
-	shutdownPath := sqsutil.DefaultDrainTimeout + 4*sqsutil.ShutdownCleanupTimeout
+	// The detached poll and the worker pool run concurrently; the worst message
+	// then needs three cleanup budgets (DLQ publish, delete, release after the
+	// failed delete), and the held set spans two release chunks.
+	shutdownPath := max(
+		sqsadapter.PollBudget(sqsadapter.ConfigDefaults().WaitTimeSeconds),
+		sqsutil.DefaultDrainTimeout+3*sqsutil.ShutdownCleanupTimeout,
+	) + 2*sqsutil.ShutdownCleanupTimeout
 	chain := shutdownPath + telemetry.ShutdownFlushTimeout
 
 	if chain >= lifecycle.PodTerminationGracePeriod {
@@ -1760,8 +1770,10 @@ func TestRun_ReleasesInFlightMessageWhenDrainBudgetExpires(t *testing.T) {
 	consumer := newMockSQSConsumer()
 	cache := newMockBlockCache()
 	writer := newMockS3Writer()
+	metrics := &mockMetrics{}
 	svc, recorder := shutdownTestService(t,
-		Config{Workers: 1, BatchSize: 1, DrainTimeout: 20 * time.Millisecond}, consumer, cache, writer)
+		Config{Workers: 1, BatchSize: 1, DrainTimeout: 20 * time.Millisecond, Metrics: metrics},
+		consumer, cache, writer)
 
 	_ = cache.SetBlock(context.Background(), 1, 100, 0, json.RawMessage(`{"number":100}`))
 	consumer.receiveCallback = deliverOnceThenIdle(createSQSMessage("msg1", createBlockEvent(1, 100, 0)))
@@ -1801,6 +1813,11 @@ func TestRun_ReleasesInFlightMessageWhenDrainBudgetExpires(t *testing.T) {
 	}
 	if logged := recorder.MessagesAt(slog.LevelError); len(logged) > 0 {
 		t.Errorf("expected an expired drain to stay off the error path, got %v", logged)
+	}
+	// The elapsed time is the drain budget, not the message's cost; recording it
+	// would drag p99 up on every rollout (VectorBackupWorkerLatencyHigh).
+	if got := metrics.LatencyStatuses(); len(got) != 0 {
+		t.Errorf("expected no processing latency for an abandoned message, got %v", got)
 	}
 }
 
@@ -1885,6 +1902,83 @@ func TestRun_ReleasesBufferedMessagesNeverStartedOnShutdown(t *testing.T) {
 	}
 	if got := consumer.GetDeletedHandles(); !slices.Equal(got, []string{"receipt-msg1"}) {
 		t.Errorf("expected only the drained message deleted, got %v", got)
+	}
+}
+
+// Shipped config (workers 2, batch 10) leaves a tail no worker ever sees: the
+// pool absorbs Workers*3, the rest is only ever settled by the fetcher.
+func TestRun_ReleasesTheTailItNeverDispatchedOnShutdown(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	svc, _ := shutdownTestService(t, Config{Workers: 1, BatchSize: 6}, consumer, cache, writer)
+
+	_ = cache.SetBlock(context.Background(), 1, 100, 0, json.RawMessage(`{}`))
+	batch := make([]outbound.SQSMessage, 0, 6)
+	for i := range 6 {
+		batch = append(batch, createSQSMessage(fmt.Sprintf("msg%d", i+1), createBlockEvent(1, int64(100+i), 0)))
+	}
+	consumer.receiveCallback = deliverOnceThenIdle(batch...)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reading := make(chan struct{}, 1)
+	shutdownRequested := make(chan struct{})
+	cache.getBlockHook = parkInGetBlockUntilShutdown(reading, shutdownRequested, nil)
+	go func() {
+		<-reading
+		cancel()
+		close(shutdownRequested)
+	}()
+
+	if err := svc.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	want := []string{"receipt-msg2", "receipt-msg3", "receipt-msg4", "receipt-msg5", "receipt-msg6"}
+	if got := releasedHandles(consumer); !slices.Equal(got, want) {
+		t.Errorf("expected every unstarted message released, got %v", got)
+	}
+	if got := consumer.GetDeletedHandles(); !slices.Equal(got, []string{"receipt-msg1"}) {
+		t.Errorf("expected only the started message deleted, got %v", got)
+	}
+}
+
+// The fetcher and the worker pool hand messages back concurrently, so only the
+// set is deterministic.
+func releasedHandles(consumer *mockSQSConsumer) []string {
+	var handles []string
+	for _, change := range consumer.GetVisibilityChanges() {
+		if change.visibility == 0 {
+			handles = append(handles, change.handle)
+		}
+	}
+	return slices.Sorted(slices.Values(handles))
+}
+
+// The work is done and nothing will retry it; only the release keeps the FIFO
+// group moving once the shutdown has killed the delete.
+func TestRun_ReleasesAProcessedMessageWhenShutdownKillsItsDelete(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	svc, _ := shutdownTestService(t, Config{Workers: 1, BatchSize: 1}, consumer, cache, writer)
+
+	_ = cache.SetBlock(context.Background(), 1, 100, 0, json.RawMessage(`{"number":100}`))
+	consumer.receiveCallback = deliverOnceThenIdle(createSQSMessage("msg1", createBlockEvent(1, 100, 0)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	consumer.beforeDelete = cancel
+
+	if err := svc.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	if got := consumer.GetDeletedHandles(); len(got) != 0 {
+		t.Errorf("expected the cancelled delete to fail, got deletes %v", got)
+	}
+	want := []visibilityChange{{handle: "receipt-msg1", visibility: 0}}
+	if got := consumer.GetVisibilityChanges(); !slices.Equal(got, want) {
+		t.Errorf("expected the undeletable message released for the successor, got %v", got)
 	}
 }
 
@@ -3593,6 +3687,37 @@ func TestRun_Metrics_SuccessStatus(t *testing.T) {
 	}
 	if !slices.Contains(metrics.LatencyStatuses(), "success") {
 		t.Errorf("expected a success latency metric, got %v", metrics.LatencyStatuses())
+	}
+}
+
+// A handler that ignored its cancelled context and still returned nil is
+// deleted anyway, so the breach only exists in this line.
+func TestRun_WarnsWhenAHandlerOutrunsItsBudgetAndStillSucceeds(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	dlq := newMockDeadLetterPublisher()
+	recorder := &testutil.SlogRecorder{}
+	svc := newDLQTestService(t, Config{
+		ChainExpectations: blockOnlyExpectations(),
+		HandlerTimeout:    20 * time.Millisecond,
+		Logger:            slog.New(recorder),
+	}, consumer, cache, writer, dlq)
+
+	_ = cache.SetBlock(context.Background(), 1, 100, 0, json.RawMessage(`{"number":100}`))
+	cache.getBlockHook = func(context.Context) error {
+		time.Sleep(60 * time.Millisecond)
+		return nil
+	}
+	consumer.AddMessage(createSQSMessage("msg1", createBlockEvent(1, 100, 0)))
+
+	runUntilProcessed(t, svc, consumer, dlq)
+
+	if got := recorder.CountWarn("exceeding its timeout budget"); got != 1 {
+		t.Errorf("expected the budget breach warned once, got %d", got)
+	}
+	if got := consumer.GetDeletedHandles(); !slices.Equal(got, []string{"receipt-msg1"}) {
+		t.Errorf("expected the completed work still deleted, got %v", got)
 	}
 }
 

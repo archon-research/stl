@@ -269,9 +269,9 @@ func (s *Service) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop cancels the SQS processing loop and waits for the goroutine to exit, so
-// no in-flight handler outlives shutdown (and no archive write is scheduled
-// after the archiving drain begins).
+// Stop cancels the SQS processing loop and waits for the loop goroutine to
+// exit. A handler the drain abandoned can outlive it; archiving's drain gate is
+// what refuses that handler's late archive write.
 func (s *Service) Stop() error {
 	if s.cancel != nil {
 		s.cancel()

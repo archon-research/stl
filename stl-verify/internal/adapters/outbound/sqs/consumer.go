@@ -99,7 +99,7 @@ func NewConsumerWithOptions(cfg aws.Config, sqsConfig Config, logger *slog.Logge
 		sqsConfig.VisibilityTimeout = defaults.VisibilityTimeout
 	}
 
-	if err := ValidateWaitTime(sqsConfig.WaitTimeSeconds); err != nil {
+	if err := validateWaitTime(sqsConfig.WaitTimeSeconds); err != nil {
 		return nil, err
 	}
 
@@ -171,10 +171,10 @@ func PollBudget(waitTimeSeconds int32) time.Duration {
 	return time.Duration(waitTimeSeconds)*time.Second + receiveSlack
 }
 
-// ValidateWaitTime rejects a long-poll wait outside the range SQS accepts: out
+// validateWaitTime rejects a long-poll wait outside the range SQS accepts: out
 // of range, every ReceiveMessage fails InvalidParameterValue for the life of
 // the pod. Here, because most workers parse SQS_WAIT_TIME with a bare Atoi.
-func ValidateWaitTime(waitTimeSeconds int32) error {
+func validateWaitTime(waitTimeSeconds int32) error {
 	if waitTimeSeconds < 0 || waitTimeSeconds > maxLongPollSeconds {
 		return fmt.Errorf("sqs: WaitTimeSeconds %d is outside the range SQS accepts [0,%d]",
 			waitTimeSeconds, maxLongPollSeconds)

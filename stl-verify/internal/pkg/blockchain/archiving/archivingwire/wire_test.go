@@ -2,33 +2,29 @@ package archivingwire
 
 import (
 	"context"
-	"sync"
+	"log/slog"
 	"testing"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-func TestWaitWithBudget_GivesUpOnWritesThatOutlastTheBudget(t *testing.T) {
-	var wg sync.WaitGroup
-	wg.Add(1)
+func TestNewDrain_ReturnsWithinTheBudgetAndWarnsOnce(t *testing.T) {
+	gate := archiving.NewDrainGate()
 	stuck := make(chan struct{})
-	t.Cleanup(func() { close(stuck); wg.Wait() })
-	go func() {
-		defer wg.Done()
-		<-stuck
-	}()
+	t.Cleanup(func() { close(stuck); gate.Wait() })
+	gate.Go(func() { <-stuck })
+	recorder := &testutil.SlogRecorder{}
 
-	if finished := waitWithBudget(&wg, 20*time.Millisecond); finished {
-		t.Error("expected the drain to give up on a write that outlasts its budget")
+	started := time.Now()
+	newDrain(gate, slog.New(recorder))()
+
+	if elapsed := time.Since(started); elapsed >= 2*DrainTimeout {
+		t.Errorf("expected the drain bounded by %s, it took %s", DrainTimeout, elapsed)
 	}
-}
-
-func TestWaitWithBudget_ReportsWritesThatFinishInTime(t *testing.T) {
-	var wg sync.WaitGroup
-
-	if finished := waitWithBudget(&wg, time.Minute); !finished {
-		t.Error("expected an idle wait group to drain immediately")
+	if got := recorder.CountWarn("archive drain budget expired"); got != 1 {
+		t.Errorf("expected one abandoned-drain warning, got %d", got)
 	}
 }
 
