@@ -22,9 +22,13 @@ export interface PrimeChartData {
   exposureBuckets: ExposureBucket[];
   isLoading: boolean;
   // Set only for the prime-debt chart, which is the primary series; the
-  // activity, total-capital and exposure series are supplementary and degrade
-  // to their current-value fallbacks on failure rather than surfacing an error.
+  // total-capital and exposure series are supplementary and degrade to their
+  // current-value fallbacks on failure rather than surfacing an error.
   errorMessage: string | null;
+  // Its own channel because the activity card has no current-value fallback to
+  // degrade to: an empty series there is an empty state, so a failed read that
+  // travelled as one told the reader the prime had been quiet.
+  activityErrorMessage: string | null;
 }
 
 const NO_DEBT: PrimeDebtBucket[] = [];
@@ -73,5 +77,6 @@ export function usePrimeChartData(
       enabled &&
       (debt.isPending || activity.isPending || totalCapital.isPending),
     errorMessage: toQueryErrorMessage(debt.error),
+    activityErrorMessage: toQueryErrorMessage(activity.error),
   };
 }

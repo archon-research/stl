@@ -63,6 +63,9 @@ export type MetricChartSpec = {
   // prop or a `style` object needs the CSS value.
   stroke: ChartColorToken;
   formatValue: (value: number) => string;
+  // Why the card has nothing to draw, for a card that cannot stand itself up
+  // from a current value: without it a failed read plots as the empty state.
+  errorMessage?: string | null;
   // Ordered ascending. Each draws a dashed limit line with a labelled edge.
   // `showInTooltip` also reports it at the cursor, in its own stroke — for a
   // limit the series is read directly against. Off by default: a limit the
