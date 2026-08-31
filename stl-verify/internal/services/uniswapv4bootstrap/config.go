@@ -2,43 +2,27 @@ package uniswapv4bootstrap
 
 import "fmt"
 
-// Defaults for the knobs a normal run never sets.
 const (
-	// DefaultFinalityDepth is how far below the head the run pins. 64 blocks is
-	// two epochs on Ethereum mainnet — comfortably past finalisation — which is
-	// what lets this backfiller ignore reorgs entirely instead of versioning
-	// rows: the pinned block cannot be reorged out under it.
+	// 64 blocks is two epochs on Ethereum mainnet, past finalisation: the pinned
+	// block cannot be reorged out under the run.
 	DefaultFinalityDepth = int64(64)
-	// DefaultInitialWindow starts the log scan wide and lets the bisect find the
-	// provider's real ceiling, rather than crawling a known-safe 10k range over
-	// four million blocks.
+	// Wide on purpose: the bisect finds the provider's real ceiling in fewer
+	// requests than crawling four million blocks at a known-safe 10k.
 	DefaultInitialWindow = int64(500_000)
-	// DefaultMinWindow is one block: below that there is nothing left to bisect,
-	// and a refusal there is a hard failure rather than a narrower retry.
-	DefaultMinWindow = int64(1)
-	DefaultMaxWindow = int64(1_000_000)
-	// DefaultPositionBatch matches the getPositionInfo multicall cap, so one
-	// persisted batch is one RPC round trip.
+	DefaultMinWindow     = int64(1)
+	DefaultMaxWindow     = int64(1_000_000)
+	// The getPositionInfo multicall cap, so one persisted batch is one round trip.
 	DefaultPositionBatch = 500
 )
 
-// Config is the one-shot run's tuning. Zero values take the defaults above;
-// FromBlock and PinBlock stay zero for a normal run and are set only to
-// reproduce or narrow a run.
 type Config struct {
-	ChainID int64
-	// FromBlock overrides the scan start. Zero means the lowest deploy_block
-	// among the pools being scanned, which is the earliest height any of their
-	// positions can exist at.
-	FromBlock int64
-	// PinBlock overrides the pinned height. Zero means head - FinalityDepth.
+	ChainID       int64
+	FromBlock     int64
 	PinBlock      int64
 	FinalityDepth int64
 	InitialWindow int64
 	MinWindow     int64
 	MaxWindow     int64
-	// PositionBatch bounds how many positions one read-and-persist unit carries,
-	// keeping both the multicall response and the write transaction bounded.
 	PositionBatch int
 }
 
@@ -61,9 +45,8 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
-// Validate reports whether the config is usable once the unset knobs take
-// their defaults. Exported so an entry point can reject bad settings while
-// parsing, before it opens a database connection or dials an RPC endpoint.
+// Validate applies the defaults first, so an entry point can reject bad
+// settings while parsing rather than after it has dialled anything.
 func (c Config) Validate() error {
 	return c.withDefaults().validate()
 }

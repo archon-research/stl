@@ -29,7 +29,6 @@ func testScanner(t *testing.T, client outbound.LogScanClient, policy windowPolic
 	}
 }
 
-// collectRanges records the [from, to] of every window emit saw.
 func collectRanges(ranges *[][2]int64) func(logWindow) error {
 	return func(w logWindow) error {
 		*ranges = append(*ranges, [2]int64{w.from, w.to})
@@ -97,8 +96,7 @@ func TestScan_WalksTheWholeRangeInInitialSizedWindows(t *testing.T) {
 
 func TestScan_ClampsTheLastWindowToTheScanEnd(t *testing.T) {
 	client := newFakeLogScanClient(0, nil)
-	// Anything wider than 25 blocks is refused, so the 100-block window would be
-	// refused had the scan end not clamped it to the range's own 25.
+	// The 100-block window would be refused had the scan end not clamped it to 25.
 	client.GetLogsFn = func(f outbound.LogFilter) ([]outbound.FilteredLog, error) {
 		if f.ToBlock-f.FromBlock+1 > 25 {
 			return nil, fmt.Errorf("provider says no: %w", outbound.ErrLogRangeTooLarge)
@@ -129,8 +127,7 @@ func TestScan_ShrinksARefusedWindowFromItsClampedSpan(t *testing.T) {
 		}
 		return nil, nil
 	}
-	// The nominal window is 20x the range left to scan, so every request is
-	// clamped to the same 5 blocks until the nominal size drops below the clamp.
+	// The nominal window is 20x the range left, so every request clamps to the same 5.
 	scanner := testScanner(t, client, testWindowPolicy(100, 1, 100))
 
 	if _, err := scanner.scan(context.Background(), 1000, 1004, func(logWindow) error { return nil }); err != nil {
@@ -150,8 +147,7 @@ func TestScan_ShrinksARefusedWindowFromItsClampedSpan(t *testing.T) {
 
 func TestScan_BisectsUntilTheProviderAcceptsTheWindow(t *testing.T) {
 	client := newFakeLogScanClient(0, nil)
-	// Only the first stretch is dense, so the bisect count below covers exactly
-	// one narrowing sequence rather than the whole scan's.
+	// Only the first stretch is dense, so the count below covers one narrowing sequence.
 	client.GetLogsFn = func(f outbound.LogFilter) ([]outbound.FilteredLog, error) {
 		if f.FromBlock == 1000 && f.ToBlock-f.FromBlock+1 > 25 {
 			return nil, fmt.Errorf("provider says no: %w", outbound.ErrLogRangeTooLarge)

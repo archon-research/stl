@@ -10,13 +10,8 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
-// modifyLiquidityEventName is the one PoolManager event a position can be
-// discovered from: v4-core exposes no way to enumerate a pool's positions, so a
-// key exists only where a ModifyLiquidity log named it.
 const modifyLiquidityEventName = "ModifyLiquidity"
 
-// ModifyLiquidityTopic0 returns the topic0 an eth_getLogs filter asks for to
-// find every position a pool has ever held.
 func ModifyLiquidityTopic0() (common.Hash, error) {
 	a, err := PoolManagerABI()
 	if err != nil {
@@ -29,16 +24,8 @@ func ModifyLiquidityTopic0() (common.Hash, error) {
 	return ev.ID, nil
 }
 
-// PositionKeysFromLogs decodes a historical batch of ModifyLiquidity logs into
-// the deduplicated, Compare-sorted position keys per registered pool, keyed by
-// the pool's uniswap_v4_pool id. It applies the same emitter, hex-word and
-// PoolId-routing guards the per-block decode path does.
-//
-// A log for a pool outside the registry is dropped, exactly as
-// decodePoolKeyedLog drops one. Everything else fails the batch: the caller
-// asked the node for this contract and this topic0, so a foreign emitter or a
-// different event means the filter or the response is wrong, and silently
-// skipping it would leave a hole no rerun could find.
+// PositionKeysFromLogs drops a log whose PoolId is outside poolsByID; anything
+// else foreign fails the batch, since a skip leaves a hole no rerun would find.
 func PositionKeysFromLogs(
 	logs []shared.Log,
 	poolsByID map[common.Hash]RegisteredPool,
@@ -70,9 +57,6 @@ func PositionKeysFromLogs(
 	return byPool, nil
 }
 
-// decodeScannedModifyLiquidity turns one scanned log into the pool it belongs
-// to and the position key it touched. tracked is false only for a log whose
-// PoolId is outside the registry.
 func decodeScannedModifyLiquidity(
 	ev abi.Event,
 	log shared.Log,
@@ -98,8 +82,6 @@ func decodeScannedModifyLiquidity(
 		return 0, entity.UniswapV4PositionKey{}, false,
 			fmt.Errorf("reading position key from %s log (tx %s, index %s): %w", ev.Name, log.TransactionHash, log.LogIndex, err)
 	}
-	// The key is packed straight into an int24 getPositionInfo argument, which
-	// the ABI encoder does not range-check.
 	if err := key.Validate(); err != nil {
 		return 0, entity.UniswapV4PositionKey{}, false,
 			fmt.Errorf("position key %+v from %s log (tx %s, index %s): %w", key, ev.Name, log.TransactionHash, log.LogIndex, err)
@@ -107,8 +89,6 @@ func decodeScannedModifyLiquidity(
 	return pool.ID, key, true, nil
 }
 
-// assertScannedLogSite rejects anything the node returned that the filter did
-// not ask for, plus the malformed-hex-word cases assertHexWords covers.
 func assertScannedLogSite(ev abi.Event, log shared.Log, poolManager common.Address) error {
 	if !common.IsHexAddress(log.Address) {
 		return fmt.Errorf("scanned log (index %s) has invalid address %q", log.LogIndex, log.Address)
@@ -131,8 +111,7 @@ func assertScannedLogSite(ev abi.Event, log shared.Log, poolManager common.Addre
 	return nil
 }
 
-// mustIndexedPoolID reads topics[1]; assertScannedLogSite has already proved it
-// is present and a full 32-byte hex word.
+// assertScannedLogSite has already proved topics[1] is present and a hex word.
 func mustIndexedPoolID(log shared.Log) common.Hash {
 	return common.HexToHash(log.Topics[1])
 }

@@ -1,13 +1,8 @@
 //go:build livevalidation
 
-// Manual, Alchemy-backed validation of the historical log scan. Never compiled
-// into `go test` or CI: run it by hand with
+// Manual, Alchemy-backed gate. Never compiled into CI; run it by hand with
 //
 //	ALCHEMY_API_KEY=… go test -tags=livevalidation -run TestLiveValidation ./internal/services/uniswapv4bootstrap
-//
-// It exists because the two things this package cannot fake honestly are the
-// provider's range-refusal wording (which the bisect keys off) and the real
-// density of ModifyLiquidity history.
 
 package uniswapv4bootstrap
 
@@ -25,8 +20,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/uniswapv4indexer"
 )
 
-// poolManagerDeployBlock is the mainnet v4-core PoolManager's deploy height —
-// the earliest block any V4 log can exist at.
 const poolManagerDeployBlock = int64(21688329)
 
 func liveClient(t *testing.T) *alchemy.Client {
@@ -46,10 +39,8 @@ func liveClient(t *testing.T) *alchemy.Client {
 	return client
 }
 
-// liveFilter targets every ModifyLiquidity log the mainnet PoolManager emits.
-// poolIDs narrows it to those pools; empty leaves it unfiltered, which is what
-// the density-dependent tests below need — a single seeded pool emits only a
-// few hundred logs across all of V4 history, far under any provider's cap.
+// Empty poolIDs leaves topic1 unfiltered: one seeded pool emits only a few
+// hundred logs across all of V4 history, far under any provider's cap.
 func liveFilter(t *testing.T, poolIDs ...common.Hash) outbound.LogFilter {
 	t.Helper()
 	topic0, err := uniswapv4indexer.ModifyLiquidityTopic0()
@@ -63,9 +54,6 @@ func liveFilter(t *testing.T, poolIDs ...common.Hash) outbound.LogFilter {
 	}
 }
 
-// TestLiveValidation_GetLogsReturnsDecodableModifyLiquidityLogs proves the
-// adapter's wire shape survives the real API: the returned hex strings must
-// pass the decoder's strict guards and yield position keys.
 func TestLiveValidation_GetLogsReturnsDecodableModifyLiquidityLogs(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -94,9 +82,8 @@ func TestLiveValidation_GetLogsReturnsDecodableModifyLiquidityLogs(t *testing.T)
 	t.Logf("decoded %d live logs into %d distinct position keys", len(logs), len(keys[pool.ID]))
 }
 
-// TestLiveValidation_OversizedRangeIsClassifiedAsARangeRefusal is the reason
-// this gate exists: the bisect only works while the adapter still recognises
-// the provider's refusal wording, which is prose it can change at any time.
+// The bisect only works while the adapter still recognises the provider's
+// refusal wording, which is prose it can change at any time.
 func TestLiveValidation_OversizedRangeIsClassifiedAsARangeRefusal(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -107,9 +94,6 @@ func TestLiveValidation_OversizedRangeIsClassifiedAsARangeRefusal(t *testing.T) 
 		t.Fatalf("GetCurrentBlockNumber: %v", err)
 	}
 
-	// Every pool's ModifyLiquidity over all of V4 history in one query is orders
-	// of magnitude past any provider's response cap, whatever the seeded
-	// registry happens to hold.
 	filter := liveFilter(t)
 	filter.FromBlock = poolManagerDeployBlock
 	filter.ToBlock = head - DefaultFinalityDepth
@@ -121,16 +105,11 @@ func TestLiveValidation_OversizedRangeIsClassifiedAsARangeRefusal(t *testing.T) 
 	t.Logf("provider refused %d blocks as expected: %v", filter.ToBlock-filter.FromBlock+1, err)
 }
 
-// liveScanBlocks is how much recent history the coverage test walks: enough to
-// exercise several windows against the real provider, few enough to stay a
-// bounded number of requests.
+// Enough for several windows, few enough to stay a bounded number of requests.
 const liveScanBlocks = int64(100_000)
 
-// TestLiveValidation_AdaptiveScanCoversTheRangeAgainstTheRealProvider drives
-// the scanner end to end against the real provider and checks the windows tile
-// the range with no gap. It deliberately asserts nothing about narrowings: how
-// often the provider refuses depends on chain density in the fortnight it runs,
-// and the refusal wording has its own density-independent test above.
+// Deliberately asserts nothing about narrowings: how often the provider refuses
+// depends on chain density in the fortnight it runs.
 func TestLiveValidation_AdaptiveScanCoversTheRangeAgainstTheRealProvider(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()

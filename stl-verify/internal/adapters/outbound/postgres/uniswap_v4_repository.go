@@ -210,9 +210,6 @@ func (r *UniswapV4Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbou
 	return stateRows, nil
 }
 
-// SavePositions persists a batch of position rows on their own, for the one-shot
-// bootstrap that writes nothing else. Same append-on-change path SaveBlock's
-// position phase takes, so a backfilled row is byte-identical to a live one.
 func (r *UniswapV4Repository) SavePositions(ctx context.Context, tx pgx.Tx, positions []*entity.UniswapV4Position) (int64, error) {
 	return r.writePositions(ctx, tx, positions)
 }

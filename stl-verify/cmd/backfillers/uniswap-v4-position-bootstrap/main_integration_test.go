@@ -39,7 +39,6 @@ func TestMain(m *testing.M) {
 }
 
 const (
-	// The seeded mainnet ETH/wstETH 0.01% pool and its StateView periphery.
 	seededPoolIDHash = "0x1d5b2949ece8754c2d736991c62c5162bd144f497b2212182401b9bae77e2d76"
 	stateViewAddr    = "0x7fFE42C4a5DEeA5b0feC41C94C136Cf115597227"
 	poolManagerAddr  = "0x000000000004444c5dc75cB358380D2e3dE08A90"
@@ -49,28 +48,19 @@ const (
 	pinnedBlockHash  = "0x2222222222222222222222222222222222222222222222222222222222222222"
 
 	// Above every seeded pool's deploy block, so the whole registry is in range.
-	pinnedBlock = int64(25_600_000)
-	// The one position the mock chain reports liquidity for.
+	pinnedBlock       = int64(25_600_000)
 	positionLiquidity = int64(123_456)
 )
 
-// mockChain answers the five JSON-RPC methods the bootstrap issues, over one
-// pool with one historical ModifyLiquidity log.
 type mockChain struct {
-	t *testing.T
-	// getLogsRefusals makes that many leading eth_getLogs answers a range
-	// refusal, so a test can drive the adaptive bisect end to end.
+	t               *testing.T
 	getLogsRefusals int
 	getLogsCalls    int
-	// chainID is what eth_chainId reports; empty makes it fail outright.
-	chainID string
-	// getLogsFatal makes every eth_getLogs answer an error the bisect cannot
-	// recover from.
-	getLogsFatal bool
+	chainID         string
+	getLogsFatal    bool
 }
 
-// mockChainOptions varies the failure the mock injects; the zero value is the
-// healthy mainnet chain every happy-path test drives.
+// The zero value is the healthy chain every happy-path test drives.
 type mockChainOptions struct {
 	refusals     int
 	chainID      string
@@ -89,8 +79,6 @@ func startMockChain(t *testing.T, opts mockChainOptions) *httptest.Server {
 	return server
 }
 
-// chainIDFails reports whether the caller asked for an eth_chainId failure,
-// which the sentinel "fail" spells so the zero value stays healthy.
 func (o mockChainOptions) chainIDFails() bool { return o.chainID == chainIDFailSentinel }
 
 const chainIDFailSentinel = "fail"
@@ -147,8 +135,6 @@ func (c *mockChain) serveHeader(w http.ResponseWriter, req rpcutil.Request) {
 	testutil.WriteRPCResult(w, req.ID, raw)
 }
 
-// serveLogs refuses the configured number of leading queries with a
-// response-size error, then answers with the pool's one historical log.
 func (c *mockChain) serveLogs(w http.ResponseWriter, req rpcutil.Request) {
 	c.getLogsCalls++
 	if c.getLogsFatal {
@@ -166,8 +152,6 @@ func (c *mockChain) serveLogs(w http.ResponseWriter, req rpcutil.Request) {
 	testutil.WriteRPCResult(w, req.ID, raw)
 }
 
-// serveCall answers the aggregate3 batch, giving every getPositionInfo sub-call
-// the same liquidity and zero fee-growth checkpoints.
 func (c *mockChain) serveCall(w http.ResponseWriter, req rpcutil.Request) {
 	var params []json.RawMessage
 	if err := json.Unmarshal(req.Params, &params); err != nil || len(params) == 0 {
@@ -216,8 +200,6 @@ func writeJSONResult(t *testing.T, w http.ResponseWriter, id json.RawMessage, va
 	testutil.WriteRPCResult(w, id, raw)
 }
 
-// modifyLiquidityLogJSON builds the one historical ModifyLiquidity log the mock
-// chain returns, in eth_getLogs' wire shape.
 func modifyLiquidityLogJSON(t *testing.T) map[string]any {
 	t.Helper()
 	poolManagerABI, err := uniswapv4indexer.PoolManagerABI()
@@ -280,8 +262,7 @@ func packPositionInfoReturn(t *testing.T, liquidity *big.Int) []byte {
 	return packed
 }
 
-// runArgs is the flag set every test drives run() with; the pin is fixed so the
-// assertions do not depend on the mock's head.
+// The pin is fixed so assertions do not depend on the mock's head.
 func runArgs(dbURL, rpcURL string) []string {
 	return []string{
 		"-db", dbURL,
@@ -303,7 +284,6 @@ func setupRun(t *testing.T, opts mockChainOptions) (*pgxpool.Pool, []string) {
 	return db, runArgs(dbURL, server.URL)
 }
 
-// withChainID rewrites the -chain-id flag in place.
 func withChainID(args []string, chainID string) []string {
 	for i, arg := range args {
 		if arg == "-chain-id" {

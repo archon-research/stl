@@ -25,8 +25,6 @@ const (
 	testMaxRange = int64(2_000_000)
 )
 
-// bootstrapFixture wires a Service over fakes and hands the test the doubles it
-// asserts on.
 type bootstrapFixture struct {
 	svc    *Service
 	client *fakeLogScanClient
@@ -35,8 +33,6 @@ type bootstrapFixture struct {
 	txMgr  *testutil.MockTxManager
 }
 
-// newFixture builds a Service whose scan covers the fixture pools and whose
-// pin resolves to testPinned. mutate adjusts the deps before construction.
 func newFixture(t *testing.T, mutate func(*Deps)) *bootstrapFixture {
 	t.Helper()
 
@@ -427,8 +423,6 @@ func TestRun_PropagatesEveryStageFailure(t *testing.T) {
 	}
 }
 
-// oneLogFn answers every window with one ModifyLiquidity log, so a test can
-// reach the read-and-persist stage without restating the fixture.
 func oneLogFn(f *bootstrapFixture) func(outbound.LogFilter) ([]outbound.FilteredLog, error) {
 	return func(outbound.LogFilter) ([]outbound.FilteredLog, error) {
 		return []outbound.FilteredLog{{
@@ -509,7 +503,6 @@ func TestRun_MergesKeysAcrossWindows(t *testing.T) {
 		case 1:
 			return []outbound.FilteredLog{modifyLiquidityFilteredLog(t, poolAIDHash, ownerA, -100, 200, saltA, 21_800_000, 0)}, nil
 		case 2:
-			// Same key again in a later window, plus a new one.
 			return []outbound.FilteredLog{
 				modifyLiquidityFilteredLog(t, poolAIDHash, ownerA, -100, 200, saltA, 22_300_000, 0),
 				modifyLiquidityFilteredLog(t, poolAIDHash, ownerB, -100, 200, saltA, 22_300_001, 1),
@@ -673,8 +666,6 @@ func TestRun_WritesEveryRowUnderTheSamePoolAndBlock(t *testing.T) {
 	}
 }
 
-// TestRun_DecodedKeyMatchesTheLog pins that the persisted natural key is the
-// log's tuple, not a re-derivation.
 func TestRun_DecodedKeyMatchesTheLog(t *testing.T) {
 	f := newFixture(t, nil)
 	f.client.GetLogsFn = func(outbound.LogFilter) ([]outbound.FilteredLog, error) {

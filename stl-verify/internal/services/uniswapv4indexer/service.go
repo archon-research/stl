@@ -176,8 +176,6 @@ func (s *UniswapV4Service) reportExcludedFromSnapshots() {
 // worker serves one chain's PoolManager, and the StateView is that deployment's
 // periphery: a registry mixing either address would mean two deployments in one
 // process, which the log filter and the state reads both silently mis-handle.
-// The one-shot position bootstrap applies the same rule, which is why it is
-// exported rather than duplicated.
 func PoolManagerFor(pools []RegisteredPool) (common.Address, error) {
 	first := pools[0]
 	for _, pool := range pools[1:] {

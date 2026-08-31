@@ -326,7 +326,6 @@ func TestDecodePosition_FailureModes(t *testing.T) {
 	}
 }
 
-// positionKeysN builds n distinct keys, varying only the salt.
 func positionKeysN(n int) []entity.UniswapV4PositionKey {
 	keys := make([]entity.UniswapV4PositionKey, n)
 	for i := range keys {

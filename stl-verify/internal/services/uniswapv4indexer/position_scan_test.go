@@ -18,8 +18,7 @@ const (
 	scanSaltB  = "0x00000000000000000000000000000000000000000000000000000000000000bb"
 )
 
-// modifyLiquidityLog builds one ModifyLiquidity log for pool, owner and tick
-// range. liquidityDelta is irrelevant to key discovery, so it stays fixed.
+// liquidityDelta is irrelevant to key discovery, so it stays fixed.
 func modifyLiquidityLog(t *testing.T, poolIDHash, owner string, tickLower, tickUpper int64, salt string) shared.Log {
 	t.Helper()
 	return buildLog(t, "ModifyLiquidity",
