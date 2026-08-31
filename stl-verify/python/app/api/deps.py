@@ -95,9 +95,7 @@ async def _prime_address_map(request: Request) -> dict[str, str]:
     return mapping
 
 
-async def require_prime_view(
-    prime_id: str, request: Request, principal: Principal | None = Depends(get_principal)
-) -> None:
+async def require_prime_view(request: Request, principal: Principal | None = Depends(get_principal)) -> None:
     """Per-resource check for /v1/primes/{prime_id}/* (ADR-011 Plane 2, layer 2).
 
     Resolves the path address to the prime's vault address and asks OpenFGA
@@ -106,6 +104,12 @@ async def require_prime_view(
     """
     if principal is None:
         return
+    # Read the path param from the request rather than declaring it: a declared
+    # parameter is merged into the OpenAPI operation and overrides each route's
+    # own annotated description (four routes use ProxyAddressPathParam, one
+    # PrimeOrProxyAddressPathParam — caught by the schema-drift gate in CI).
+    # The route's own param performs the format validation.
+    prime_id = request.path_params.get("prime_id", "")
     vault = (await _prime_address_map(request)).get(prime_id.lower())
     if vault is None:
         raise HTTPException(status_code=404, detail="prime not found")
