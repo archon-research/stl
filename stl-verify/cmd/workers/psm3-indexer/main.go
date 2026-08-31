@@ -143,6 +143,17 @@ func run(ctx context.Context, args []string) error {
 	}))
 	slog.SetDefault(logger)
 
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    "psm3-indexer",
+		ServiceVersion: buildinfo.GitHash(),
+		BuildTime:      BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("init telemetry: %w", err)
+	}
+	defer shutdownOTEL(context.Background())
+
 	// Per-chain PSM3 addresses, cross-checked against axis-synome so the two
 	// registries cannot drift silently.
 	psm3Cfg, err := psm3Adapter.PSM3ConfigForChain(chainID)
@@ -196,18 +207,6 @@ func run(ctx context.Context, args []string) error {
 		"chainID", chainID,
 		"psm3", psm3Cfg.PSM3.Hex(),
 	)
-
-	// OpenTelemetry
-	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    "psm3-indexer",
-		ServiceVersion: buildReg.GitHash(),
-		BuildTime:      BuildTime,
-		Logger:         logger,
-	})
-	if err != nil {
-		return fmt.Errorf("init telemetry: %w", err)
-	}
-	defer shutdownOTEL(context.Background())
 
 	// Ethereum JSON-RPC client
 	ethClient, err := rpchttp.DialEthereum(ctx, *rpcURL)

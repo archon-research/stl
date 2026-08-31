@@ -185,6 +185,17 @@ func run(ctx context.Context, args []string) error {
 	}))
 	slog.SetDefault(logger)
 
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    "fluid-vault-indexer",
+		ServiceVersion: buildinfo.GitHash(),
+		BuildTime:      BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("initializing telemetry: %w", err)
+	}
+	defer shutdownOTEL(context.Background())
+
 	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{
 		StaticCredentialsFromEnv: true,
 	})
@@ -251,17 +262,6 @@ func run(ctx context.Context, args []string) error {
 		"targetDebtToken", cfg.targetDebtToken.Hex(),
 		"commit", buildReg.GitHash(),
 		"branch", GitBranch)
-
-	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    "fluid-vault-indexer",
-		ServiceVersion: buildReg.GitHash(),
-		BuildTime:      BuildTime,
-		Logger:         logger,
-	})
-	if err != nil {
-		return fmt.Errorf("initializing telemetry: %w", err)
-	}
-	defer shutdownOTEL(context.Background())
 
 	metrics, err := telemetry.NewMetrics("fluid-vault-indexer", cfg.chainName)
 	if err != nil {

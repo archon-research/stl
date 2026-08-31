@@ -5,12 +5,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.adapters.postgres.prime_capital_stack_repository import PrimeCapitalStackRepository
-from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository
-from app.adapters.sky.internal_positions_client import SkyInternalPositionsClient
-from app.adapters.sky.reference_risk_capital_client import SkyReferenceRiskCapitalClient
+from app.adapters.postgres.reference_position_repository import ReferencePositionRepository
+from app.adapters.postgres.reference_risk_capital_repository import ReferenceRiskCapitalRepository
 from app.auth.fga import FgaError, FgaTruncated
 from app.auth.jwt import Principal, TokenError
-from app.config import get_settings
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
 from app.ports.reference_capital_repository import ReferenceCapitalRepository
 from app.risk_engine.suraf.result import SurafResult
@@ -174,17 +172,16 @@ def get_receipt_token_lookup(request: Request) -> ReceiptTokenLookup:
 def get_reference_risk_capital_service_factory(
     request: Request,
 ) -> Callable[[], ReferenceRiskCapitalService]:
-    """Build the upstream Star-monitor service on demand.
+    """Build the stored-reference risk-capital service on demand.
 
     Returned as a factory, not the service, because FastAPI resolves every
-    declared dependency on every request: constructing it eagerly would make a
-    self-mode request build an upstream HTTP client it never uses.
+    declared dependency on every request: a self-mode request would otherwise
+    construct a reader it never calls. Matches the two sibling factories below.
     """
 
     def build() -> ReferenceRiskCapitalService:
         return ReferenceRiskCapitalService(
-            SkyReferenceRiskCapitalClient(get_settings().star_risk_capital_base_url),
-            ReceiptTokenRepository(request.app.state.engine),
+            ReferenceRiskCapitalRepository(request.app.state.engine),
             AllocationRepository(request.app.state.engine),
         )
 
@@ -194,19 +191,11 @@ def get_reference_risk_capital_service_factory(
 def get_reference_positions_service_factory(
     request: Request,
 ) -> Callable[[], ReferencePositionsService]:
-    """Build the upstream balance-sheet service on demand, for the same reason.
-
-    Two upstream clients, because coverage and content come from different
-    hosts: the Star monitor decides whether a prime has reference data at all,
-    the internal feed says what it holds.
-    """
+    """Build the stored-reference balance-sheet service on demand, for the same reason."""
 
     def build() -> ReferencePositionsService:
-        settings = get_settings()
         return ReferencePositionsService(
-            SkyInternalPositionsClient(settings.sky_internal_base_url),
-            SkyReferenceRiskCapitalClient(settings.star_risk_capital_base_url),
-            ReceiptTokenRepository(request.app.state.engine),
+            ReferencePositionRepository(request.app.state.engine),
             AllocationRepository(request.app.state.engine),
         )
 

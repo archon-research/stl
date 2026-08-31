@@ -23,9 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/mock"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
@@ -229,6 +227,19 @@ func TestIntegration_Register_RefusesAChainIDMismatch(t *testing.T) {
 	}
 }
 
+// deleteSeededV2Vaults restores the "no VaultV2 vault known" premise: registry
+// seed migrations now ship VaultV2 rows (20260825 sparkUSDTbc is mainnet's
+// first), so a freshly migrated database no longer holds zero of them. A
+// test-fixture DELETE on this test's throwaway clone — the append-only rule
+// governs production ingest, not test setup.
+func deleteSeededV2Vaults(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	// vault_version 3 = Morpho VaultV2 (entity.MorphoVaultV2).
+	if _, err := pool.Exec(ctx, `DELETE FROM morpho_vault WHERE vault_version = 3`); err != nil {
+		t.Fatalf("deleting the seed-registered VaultV2 vaults: %v", err)
+	}
+}
+
 // The discovery activity must read the archive through the production reader.
 // A range whose receipts carry nothing Morpho-related yields no candidates and
 // no error — the "quiet range" outcome the workflow treats as ordinary.
@@ -237,6 +248,7 @@ func TestIntegration_DiscoverVaults_FindsNoCandidatesInAnUnrelatedRange(t *testi
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
+	deleteSeededV2Vaults(t, ctx, pool)
 	bucket := seedBucket(t, ctx)
 	// Contiguous, and the range below covers exactly these blocks: the scan
 	// refuses a partition slice the archive has a hole in, so a sampled seed
@@ -347,6 +359,7 @@ func TestIntegration_Backfill_SucceedsWithNothingToReplayOverACompleteArchive(t 
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
+	deleteSeededV2Vaults(t, ctx, pool)
 	bucket := seedQuietBlocks(t, ctx, 1, 6, -1)
 	setWorkerEnv(t, bucket, chainFixtureServer(t, "0x1").URL)
 
@@ -441,7 +454,7 @@ func discoverInto(t *testing.T, ctx context.Context, bucket string, vault common
 	if err != nil {
 		t.Fatalf("NewEventExtractor: %v", err)
 	}
-	prober, err := newVaultProber(logger, blockStampedVaultProbe(t))
+	prober, err := newVaultProber(logger, blockStampedVaultProbe(t), cfg.chainID)
 	if err != nil {
 		t.Fatalf("newVaultProber: %v", err)
 	}
@@ -581,6 +594,7 @@ func TestIntegration_ReplayPartition_ReplaysNothingWhenNoV2VaultIsKnown(t *testi
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
+	deleteSeededV2Vaults(t, ctx, pool)
 	// Deliberately an empty bucket: reaching S3 at all here would be the bug.
 	setWorkerEnv(t, seedBucket(t, ctx), chainFixtureServer(t, "0x1").URL)
 	env := newActivityEnv(t, ctx, pool)
@@ -683,45 +697,6 @@ func installTestMeterProvider(t *testing.T) sdkmetric.Reader {
 		}
 	})
 	return reader
-}
-
-// counterValue sums the named int64 counter's data points whose attributes
-// include every entry of want. Attributes outside want are ignored, so a test
-// asserts only the labels it cares about.
-func counterValue(t *testing.T, reader sdkmetric.Reader, name string, want map[string]string) int64 {
-	t.Helper()
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("collecting metrics: %v", err)
-	}
-	var total int64
-	for _, scope := range rm.ScopeMetrics {
-		for _, m := range scope.Metrics {
-			if m.Name != name {
-				continue
-			}
-			sum, ok := m.Data.(metricdata.Sum[int64])
-			if !ok {
-				t.Fatalf("metric %q is %T, want metricdata.Sum[int64]", name, m.Data)
-			}
-			for _, dp := range sum.DataPoints {
-				if hasAttributes(dp.Attributes, want) {
-					total += dp.Value
-				}
-			}
-		}
-	}
-	return total
-}
-
-func hasAttributes(set attribute.Set, want map[string]string) bool {
-	for key, value := range want {
-		got, ok := set.Value(attribute.Key(key))
-		if !ok || got.AsString() != value {
-			return false
-		}
-	}
-	return true
 }
 
 // seedV2VaultRow inserts the protocol, asset token and VaultV2 row a replay

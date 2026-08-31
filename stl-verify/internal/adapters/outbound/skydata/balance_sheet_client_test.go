@@ -203,3 +203,221 @@ func TestFetchHistoryRejectsAWindowHoldingOnlyTheDayInProgress(t *testing.T) {
 		t.Fatal("FetchHistory() = nil, want an error")
 	}
 }
+
+func positionRow(overrides map[string]any) map[string]any {
+	r := map[string]any{
+		"star":             "spark",
+		"protocol":         "sparklend",
+		"network":          "ethereum",
+		"token_symbol":     "spUSDS",
+		"token_name":       "Spark USDS",
+		"address":          "0xc02ab1a5eaa8d1b114ef786d9bde108cd4364359",
+		"wallet_address":   "0x1111111111111111111111111111111111111111",
+		"assets":           "782710914.129541047405509005",
+		"allocated_assets": "700000000.10",
+		"idle_assets":      "82710914.02",
+	}
+	for k, v := range overrides {
+		if v == nil {
+			delete(r, k)
+			continue
+		}
+		r[k] = v
+	}
+	return r
+}
+
+// newPositionsTestClient serves the positions envelope at /allocations/,
+// which wraps results and pagination unlike the historic route's bare list.
+// The returned accessor reads the recorded request target under the same lock
+// the handler writes it with, mirroring newTestClient above.
+func newPositionsTestClient(t *testing.T, rows []map[string]any, total int) (*Client, func() string) {
+	t.Helper()
+	var (
+		mu       sync.Mutex
+		lastPath string
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		lastPath = r.URL.RequestURI()
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		payload := map[string]any{
+			"data": map[string]any{"results": rows, "pagination": map[string]any{"total": total}},
+		}
+		if err := json.NewEncoder(w).Encode(payload); err != nil {
+			t.Errorf("encoding response: %v", err)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	client, err := NewClient(ClientConfig{BaseURL: server.URL, Now: func() time.Time { return testNow }})
+	if err != nil {
+		t.Fatalf("NewClient() = %v", err)
+	}
+	return client, func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return lastPath
+	}
+}
+
+func TestFetchPositionsCarriesEveryFieldUnrounded(t *testing.T) {
+	client, requestURI := newPositionsTestClient(t, []map[string]any{positionRow(nil)}, 1)
+
+	rows, err := client.FetchPositions(context.Background(), []string{"spark"})
+	if err != nil {
+		t.Fatalf("FetchPositions() = %v", err)
+	}
+
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if got := requestURI(); got != "/allocations/?prime=spark&limit=1000" {
+		t.Errorf("request = %q, want GET /allocations/ with prime=spark and limit=1000", got)
+	}
+	got := rows[0]
+	if got.Assets != "782710914.129541047405509005" {
+		t.Errorf("Assets = %q, want the 18-decimal value unrounded", got.Assets)
+	}
+	if got.ChainID == nil || *got.ChainID != 1 {
+		t.Errorf("ChainID = %v, want 1 for network ethereum", got.ChainID)
+	}
+	if got.AllocatedAssets == nil || *got.AllocatedAssets != "700000000.10" {
+		t.Errorf("AllocatedAssets = %v, want the upstream figure", got.AllocatedAssets)
+	}
+	if got.Star != "spark" {
+		t.Errorf("Star = %q, want spark", got.Star)
+	}
+	if got.WalletAddress != "0x1111111111111111111111111111111111111111" {
+		t.Errorf("WalletAddress = %q, want the upstream proxy address", got.WalletAddress)
+	}
+}
+
+func TestFetchPositionsKeepsOmittedOptionalFieldsNil(t *testing.T) {
+	client, _ := newPositionsTestClient(t, []map[string]any{positionRow(map[string]any{
+		"token_name": nil, "allocated_assets": nil, "idle_assets": nil,
+	})}, 1)
+
+	rows, err := client.FetchPositions(context.Background(), []string{"spark"})
+	if err != nil {
+		t.Fatalf("FetchPositions() = %v", err)
+	}
+
+	got := rows[0]
+	if got.TokenName != nil || got.AllocatedAssets != nil || got.IdleAssets != nil {
+		t.Errorf("optional fields = (%v, %v, %v), want all nil — an omitted figure must not become zero",
+			got.TokenName, got.AllocatedAssets, got.IdleAssets)
+	}
+}
+
+func TestFetchPositionsRejectsAnyAbsentRequiredField(t *testing.T) {
+	for _, field := range []string{"protocol", "network", "token_symbol", "address", "assets", "wallet_address"} {
+		t.Run(field, func(t *testing.T) {
+			client, _ := newPositionsTestClient(t, []map[string]any{positionRow(map[string]any{field: nil})}, 1)
+
+			_, err := client.FetchPositions(context.Background(), []string{"spark"})
+
+			if err == nil {
+				t.Fatalf("FetchPositions() = nil, want an error naming %q", field)
+			}
+			if !strings.Contains(err.Error(), field) {
+				t.Errorf("error = %v, want it to name %q", err, field)
+			}
+		})
+	}
+}
+
+func TestFetchPositionsRejectsAnEmptyResult(t *testing.T) {
+	// The route answers an unknown star with 200 and an empty list, so an empty
+	// result for a covered star cannot be told from a broken feed.
+	client, _ := newPositionsTestClient(t, []map[string]any{}, 0)
+
+	if _, err := client.FetchPositions(context.Background(), []string{"spark"}); err == nil {
+		t.Fatal("FetchPositions() = nil, want an error")
+	}
+}
+
+// Reproduces grove's live shape: the same (network, token_address) reported
+// under two proxy wallets, with materially different balances on each — the
+// staging failure this fix addresses ("sky positions for prime grove repeat
+// identity ... on ethereum; the row identity assumption no longer holds").
+// wallet_address is real identity, so this must not be rejected as a
+// duplicate and must yield both rows.
+func TestFetchPositionsKeepsTheSameTokenUnderTwoWalletsDistinct(t *testing.T) {
+	client, _ := newPositionsTestClient(t, []map[string]any{
+		positionRow(map[string]any{
+			"star": "grove", "token_symbol": "AUSD",
+			"wallet_address": "0x00000000efe302beaa2b3e6e1b18d08d69a9012a",
+			"assets":         "1020000",
+		}),
+		positionRow(map[string]any{
+			"star": "grove", "token_symbol": "AUSD",
+			"wallet_address": "0x000000005ce4e5e4e5e4e5e4e5e4e5e4e5e4e5e4",
+			"assets":         "29000000",
+		}),
+	}, 2)
+
+	rows, err := client.FetchPositions(context.Background(), []string{"grove"})
+	if err != nil {
+		t.Fatalf("FetchPositions() = %v, want the two proxy rows to be kept distinct", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2 — one per proxy wallet", len(rows))
+	}
+	if rows[0].WalletAddress == rows[1].WalletAddress {
+		t.Errorf("both rows carry wallet %q, want the two distinct proxy addresses", rows[0].WalletAddress)
+	}
+}
+
+// A duplicate identity that also repeats the same wallet is still rejected:
+// wallet_address narrows identity, it does not widen what counts as a
+// duplicate.
+func TestFetchPositionsRejectsADuplicateRowIdentitySharingTheSameWallet(t *testing.T) {
+	client, _ := newPositionsTestClient(t, []map[string]any{
+		positionRow(map[string]any{"wallet_address": "0x1111111111111111111111111111111111111111"}),
+		positionRow(map[string]any{"wallet_address": "0x1111111111111111111111111111111111111111"}),
+	}, 2)
+
+	if _, err := client.FetchPositions(context.Background(), []string{"spark"}); err == nil {
+		t.Fatal("FetchPositions() = nil, want an error — same wallet, same token, same network is still one identity")
+	}
+}
+
+// A casing difference must not hide a duplicate identity: (network,
+// token_address) is the table's key, and upstream's casing is not
+// trustworthy (see chainIDFor).
+func TestFetchPositionsRejectsADuplicateRowIdentityAcrossCasing(t *testing.T) {
+	client, _ := newPositionsTestClient(t, []map[string]any{
+		positionRow(map[string]any{"network": "ethereum"}),
+		positionRow(map[string]any{"network": "Ethereum"}),
+	}, 2)
+
+	if _, err := client.FetchPositions(context.Background(), []string{"spark"}); err == nil {
+		t.Fatal("FetchPositions() = nil, want an error — a casing-only difference is still the same identity")
+	}
+}
+
+// The feed's own vocabulary is lowercase; a casing difference upstream must
+// still resolve rather than silently reading as an unmapped network.
+func TestFetchPositionsMapsChainIDCaseInsensitively(t *testing.T) {
+	client, _ := newPositionsTestClient(t, []map[string]any{positionRow(map[string]any{"network": "Ethereum"})}, 1)
+
+	rows, err := client.FetchPositions(context.Background(), []string{"spark"})
+	if err != nil {
+		t.Fatalf("FetchPositions() = %v", err)
+	}
+
+	if rows[0].ChainID == nil || *rows[0].ChainID != 1 {
+		t.Errorf("ChainID = %v, want 1 for network \"Ethereum\"", rows[0].ChainID)
+	}
+}
+
+func TestFetchPositionsRejectsATruncatedPage(t *testing.T) {
+	client, _ := newPositionsTestClient(t, []map[string]any{positionRow(nil)}, 59)
+
+	if _, err := client.FetchPositions(context.Background(), []string{"spark"}); err == nil {
+		t.Fatal("FetchPositions() = nil, want an error — a short page reads as rows that do not exist")
+	}
+}

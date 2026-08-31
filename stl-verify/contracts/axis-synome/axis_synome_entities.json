@@ -560,6 +560,16 @@
                 "token_type": "erc4626"
               },
               {
+                "contract_address": "0xb0c424116172b55cbb6dd3136f5989f7959e5b91",
+                "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                "asset_address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+                "star": "spark",
+                "chain": "mainnet",
+                "protocol": "morpho",
+                "allocation_type": "allocation",
+                "token_type": "erc4626"
+              },
+              {
                 "contract_address": "0xe41a0583334f0dc4e023acd0bfef3667f6fe0597",
                 "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
                 "asset_address": "0xdc035d45d973e3ec169d2276ddab16f1e407384f",

@@ -26,7 +26,18 @@ def _settings(*, auth_enabled: bool = False, oidc_issuer: str = "") -> Settings:
 
 
 def test_auth_is_off_by_default() -> None:
-    assert _settings().auth_enabled is False
+    """Constructs Settings WITHOUT passing auth_enabled, so this fails if the
+    production default ever changes — not just if the test helper's does."""
+    settings = Settings(
+        _env_file=None,  # ty: ignore[unknown-argument]
+        log_level="INFO",
+        log_format="console",
+        database_url=SecretStr("postgresql://u:p@localhost/db"),
+        otel_enabled=False,
+        otel_exporter_otlp_endpoint="",
+        otel_service_name="test",
+    )
+    assert settings.auth_enabled is False
 
 
 def test_anonymous_principal_when_dark() -> None:
@@ -58,5 +69,12 @@ def test_openapi_declares_oidc_when_enabled() -> None:
     schema = app.openapi()
     flows = schema["components"]["securitySchemes"]["oidc"]["flows"]["authorizationCode"]
     assert flows["authorizationUrl"].startswith("https://kc/realms/archon/")
-    # and the redirect page the flow needs is actually routed
+
+
+def test_oauth_redirect_route_registered_when_enabled() -> None:
+    """docs_url=None means FastAPI does not auto-register the redirect page;
+    without it the OAuth flow dead-ends silently after login."""
+    from app.main import create_app
+
+    app = create_app(_settings(auth_enabled=True, oidc_issuer="https://kc/realms/archon"))
     assert any(getattr(r, "path", None) == "/docs/oauth2-redirect" for r in app.routes)

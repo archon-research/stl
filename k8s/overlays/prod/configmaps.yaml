@@ -686,6 +686,23 @@ data:
   REFERENCE_CAPITAL_SYNC_INTERVAL: "15m"
   # Risk-capital root, without the /primes route the client appends itself.
   SKY_RISK_CAPITAL_URL: "https://info-sky.blockanalitica.com/star-monitoring/risk-capital"
-  # Balance-sheet feed, read only by the one-off reference-capital-backfill Job.
+  # Balance-sheet feed. Read every cycle by the indexer -- for the per-prime
+  # daily aggregates and the per-position rows the API now serves reference
+  # allocations from -- and by the reference-capital-backfill Deployment, which
+  # seeds the history the indexer cannot reach.
   SKY_DATA_URL: "https://sky.data.blockanalitica.com/internal"
   ENVIRONMENT: "sentinelprod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: core-model-runner
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  # The schedule lives in Temporal state; the worker reconciles a changed
+  # interval into it on startup, so a redeploy is enough (stl-verify/AGENTS.md).
+  CORE_MODEL_RUN_INTERVAL_HOURS: "24"
+  # Same cap as staging; the deployment's memory limit is sized for it — raise
+  # both together (k8s/base/core-model-runner/deployment.yaml).
+  CORE_MODEL_N_MC: "100"

@@ -443,6 +443,52 @@ async function checkCompositeAllocationsAreAUnion() {
   assert.ok(sources.has('reference'), 'no row reports Sky alone');
 }
 
+/**
+ * A reference row's `underlying_*` reflects whether it resolves against STL's
+ * registry, not whether Sky reports one — the response contract is "populated
+ * when the position resolves to STL's registry, null otherwise".
+ */
+async function checkReferenceAllocationsResolveUnderlyingFromRegistry() {
+  const reference = await request(
+    '/v1/primes/{prime_id}/allocations',
+    {
+      params: {
+        path: { prime_id: SPARK_MAINNET_PROXY },
+        query: { source: 'reference' },
+      },
+    },
+    'allocations (reference)',
+  );
+
+  const resolved = reference.filter((row) => row.receipt_token_id != null);
+  const unresolved = reference.filter((row) => row.receipt_token_id == null);
+  assert.ok(resolved.length > 0, 'no resolved reference row to check');
+  assert.ok(unresolved.length > 0, 'no unresolved reference row to check');
+
+  for (const row of resolved) {
+    assert.ok(
+      row.underlying_token_id != null && row.underlying_token_address != null,
+      `${row.symbol}: a row STL's registry resolves should carry an underlying`,
+    );
+    assert.ok(
+      row.underlying_symbol !== '',
+      `${row.symbol}: a resolved row's underlying_symbol should not be empty`,
+    );
+  }
+
+  for (const row of unresolved) {
+    assert.ok(
+      row.underlying_token_id == null && row.underlying_token_address == null,
+      `${row.symbol}: an unresolved row should carry no underlying identity`,
+    );
+    assert.equal(
+      row.underlying_symbol,
+      '',
+      `${row.symbol}: an unresolved row's underlying_symbol should be empty`,
+    );
+  }
+}
+
 async function checkCompositeRiskCapitalKeepsBothFigures() {
   const composite = await request(
     '/v1/primes/{prime_id}/risk-capital',
@@ -1215,6 +1261,10 @@ const checks = [
   ['debt raw snapshots', checkDebtRawSnapshots],
   ['provenance selection', checkProvenanceSelection],
   ['composite allocations are a union', checkCompositeAllocationsAreAUnion],
+  [
+    'reference allocations resolve underlying from the registry',
+    checkReferenceAllocationsResolveUnderlyingFromRegistry,
+  ],
   [
     'position keys join the allocations and risk endpoints',
     checkPositionKeysJoinTheTwoEndpoints,

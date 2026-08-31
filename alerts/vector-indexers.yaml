@@ -355,11 +355,17 @@ groups:
       # ARCHIVE_SC_CALLS=true, so a disabled source has no series and never fires.
 
       - alert: VectorArchivingStalled
-        # No successful S3 archive writes for 10m while the indexer is still
+        # No successful S3 archive writes for 30m while the indexer is still
         # executing multicalls. multicall_batch_size_count increments on the same
         # Execute path that archives, so success==0 with multicalls>0 is a genuine
         # archiving failure, not an idle/disabled source (those have no multicalls,
         # so the guard excludes them).
+        #
+        # Window is 30m, not 10m: on a fresh pod archive_writes_total is exported
+        # one scrape later than multicall_batch_size_count and already reads >0,
+        # and increase() is blind to increments before a series' first sample. On
+        # the ~1 batch/10m sources the next increment then misses a 10m window, so
+        # this false-fired on every deploy rollout. Costs ~20m detection latency.
         #
         # The `or (… * 0)` synthesises a zero-valued success series for a source
         # that has attempted writes but never emitted a success sample; without it
@@ -375,16 +381,16 @@ groups:
         expr: |
           (
             sum by (service_name, chain, cluster) (
-              increase(archive_writes_total{status="success", k8s_namespace_name="vector"}[10m])
+              increase(archive_writes_total{status="success", k8s_namespace_name="vector"}[30m])
             )
             or
             sum by (service_name, chain, cluster) (
-              increase(archive_writes_total{k8s_namespace_name="vector"}[10m])
+              increase(archive_writes_total{k8s_namespace_name="vector"}[30m])
             ) * 0
           ) == 0
           and on (service_name, chain, cluster)
           sum by (service_name, chain, cluster) (
-            increase(multicall_batch_size_count{k8s_namespace_name="vector"}[10m])
+            increase(multicall_batch_size_count{k8s_namespace_name="vector"}[30m])
           ) > 0
         for: 5m
         labels:
@@ -397,7 +403,8 @@ groups:
           description: |
             `{{ $labels.service_name }}` on chain `{{ $labels.chain }}` is still
             executing multicalls but has written no raw SC call archives to S3 for
-            >10m. Replay data is being lost (Alchemy remains the fallback).
+            >30m. Replay data is being lost (Alchemy remains the fallback).
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorarchivingstalled
 
       - alert: VectorArchivingEmptyObjects
         # Any archived object lands in the smallest size bucket (<=64B). A real
@@ -420,6 +427,7 @@ groups:
             `{{ $labels.service_name }}` on chain `{{ $labels.chain }}` wrote one or
             more archived objects <=64 bytes in the last 10m. Inspect the object
             and the encode path; the file is likely missing call/response data.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorarchivingemptyobjects
 
       - alert: VectorArchivingErrorRatioHigh
         # Catches PARTIAL failure: a meaningful fraction of writes erroring while
@@ -456,6 +464,7 @@ groups:
             over 10m while some still succeed. Replay data is being partially lost
             (Alchemy remains the fallback). A total stall is covered separately by
             VectorArchivingStalled.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorarchivingerrorratiohigh
 
   # morpho VaultV2 structured tracking (VEC-218) — the adapter registry, adapter
   # realAssets snapshots, allocation caps and fee-config snapshots the morpho
@@ -1016,9 +1025,12 @@ groups:
         # null-downgrade canary. Rather than firing on ANY null (acmRatio, tvl
         # and collateral_value_usd are legitimately null on many loans/pools —
         # documented schema-nullable), this uses a POSITIVE allowlist of fields
-        # Maple normally populates: pool APYs and Sky-strategy fee fields. A
-        # sustained count here = a contractually-populated field went null =
-        # API schema regression.
+        # Maple normally populates: pool APYs, Sky-strategy fee fields, and the
+        # collateral asset symbol. A sustained count here = a
+        # contractually-populated field went null = API schema regression.
+        #
+        # collateral_asset_symbol is the only allowlisted field whose null is
+        # tolerated rather than fatal, so this rule is its ONLY signal.
         #
         # Excluded pending baseline (ORB-145): loan_acm_ratio, pool_tvl,
         # pool_collateral_value_usd (known-nullable) and syrup_drips_yield_boost
@@ -1027,7 +1039,7 @@ groups:
         expr: |
           sum by (chain, cluster, field) (
             increase(maple_sync_null_downgrades_total{
-              field=~"pool_monthly_apy|pool_spot_apy|strategy_fee_rate|strategy_total_fees_collected",
+              field=~"pool_monthly_apy|pool_spot_apy|strategy_fee_rate|strategy_total_fees_collected|collateral_asset_symbol",
               k8s_namespace_name="vector"
             }[1h])
           ) > 5

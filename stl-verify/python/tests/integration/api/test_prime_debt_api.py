@@ -41,7 +41,20 @@ async def _seed(async_url: str) -> None:
                 )
             ).scalar_one()
 
-            # Ties the proxy address to the prime; the only path by which a proxy resolves.
+            # prime_proxy is static reference data and this proxy is not in the
+            # migration's list, so the scenario declares it — positions alone do
+            # not make an address resolvable.
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO prime_proxy (chain_id, proxy_address, prime_id)
+                    VALUES (1, decode(:proxy, 'hex'), :pid)
+                    ON CONFLICT (chain_id, proxy_address) DO NOTHING
+                    """
+                ),
+                {"pid": spark_prime_id, "proxy": _SPARK_PROXY_ADDR.removeprefix("0x")},
+            )
+
             await conn.execute(
                 text(
                     """
