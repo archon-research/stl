@@ -52,13 +52,9 @@ type UniswapV4Repository interface {
 	// Tick positions already written for pool at blockNumber, so a reorg
 	// redelivery re-reads them; reads committed rows outside any transaction.
 	TicksForPoolAtBlock(ctx context.Context, chainID int64, poolID int64, blockNumber int64) ([]int32, error)
-	// PositionsForPoolAtBlock returns the distinct position keys that already have
-	// a row for pool at blockNumber, in entity.UniswapV4PositionKey.Compare order,
-	// so a reorg redelivery can re-read exactly the positions a prior version
-	// wrote at this height. Positions are only ever discovered from
-	// ModifyLiquidity logs, so the new fork's receipts alone would not name a
-	// position the orphaned fork touched. Reads committed rows outside any
-	// transaction; safe to call before the write tx opens.
+	// PositionsForPoolAtBlock returns the position keys already stored for pool at
+	// blockNumber, in entity.UniswapV4PositionKey.Compare order. A position is
+	// discovered only from a log, so a reorg redelivery cannot name it otherwise.
 	PositionsForPoolAtBlock(ctx context.Context, poolID int64, blockNumber int64) ([]entity.UniswapV4PositionKey, error)
 	// PoolIDsEverSnapshotted returns the CURRENT uniswap_v4_pool ids, ascending,
 	// of the pools on chainID that have at least one uniswap_v4_pool_state or

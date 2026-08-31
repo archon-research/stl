@@ -36,16 +36,11 @@ type Telemetry struct {
 	poolsNeverIndexed   metric.Int64Gauge
 }
 
-// NewTelemetry registers seven counters (`<prefix>.blocks.processed`,
-// `<prefix>.errors.total`, `<prefix>.state.rows.written`,
-// `<prefix>.state.rows.attempted`, `<prefix>.pools.touched`,
-// `<prefix>.tick.rows.written`, `<prefix>.position.rows.written`), the
-// `<prefix>.block.duration_seconds`
-// histogram, and the `<prefix>.pools.never_indexed` gauge. Every DEX gets the
-// whole set; an instrument a worker never records simply produces no series.
-// The OTel-to-Prometheus exporter normalises the dots to underscores and adds
-// the `_total` suffix to the counters, yielding the metric series names the
-// alert rules expect. The chain NAME (via entity.ChainName) is baked into
+// NewTelemetry registers the whole instrument set below under `<prefix>`; every
+// DEX gets all of it, and an instrument a worker never records simply produces
+// no series. The OTel-to-Prometheus exporter normalises the dots to underscores
+// and adds the `_total` suffix to the counters, yielding the metric series names
+// the alert rules expect. The chain NAME (via entity.ChainName) is baked into
 // every datapoint as the `chain` attribute so multi-chain dashboards line up
 // with the morpho/oracle indexers, which label the same way. An unknown chainID
 // is rejected so a worker fails hard at startup rather than emitting an empty or
@@ -212,13 +207,9 @@ func (t *Telemetry) RecordPoolsNeverIndexed(ctx context.Context, n int) {
 	t.poolsNeverIndexed.Record(ctx, int64(n), metric.WithAttributes(t.chainAttr))
 }
 
-// RecordTickRows and RecordPositionRows count the per-tick and per-position rows
-// a committed block OFFERED to the append-on-change writer — an upper bound on
-// the rows actually appended, since the writer drops any whose state is
-// unchanged. They exist to make the deliberate plain-table (not hypertable)
-// choice on uniswap_v4_tick / uniswap_v4_position self-monitoring: the alert
-// that watches unbounded growth reads them, and over-counting only makes it
-// fire early. Nil receiver or n <= 0 are no-ops.
+// RecordTickRows counts the rows a committed block OFFERED to the
+// append-on-change writer: an upper bound, since the writer drops any whose
+// state is unchanged. Over-counting only makes the growth alert fire early.
 func (t *Telemetry) RecordTickRows(ctx context.Context, n int) {
 	if t == nil || n <= 0 {
 		return

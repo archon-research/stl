@@ -770,14 +770,8 @@ func (h *liveHarness) readTouchedTicks(t *testing.T, ctx context.Context, decode
 	return rows
 }
 
-// -----------------------------------------------------------------------
-// Positions
-// -----------------------------------------------------------------------
-
-// readTouchedPositions reads, at the event block's hash, the state of every
-// position the receipt's ModifyLiquidity events touched. Grouping by pool is
-// mandatory: one receipt can carry ModifyLiquidity for several pools, and a
-// position key only means something relative to its own pool.
+// Grouping by pool is mandatory: one receipt can carry ModifyLiquidity for
+// several pools, and a position key only means something within its own pool.
 func (h *liveHarness) readTouchedPositions(t *testing.T, ctx context.Context, decoded DecodedEvents, eventBlock blockInfo) []*entity.UniswapV4Position {
 	t.Helper()
 	if len(decoded.LiquidityEvents) == 0 {
@@ -818,11 +812,9 @@ func (h *liveHarness) readTouchedPositions(t *testing.T, ctx context.Context, de
 	return rows
 }
 
-// assertPositionInvariants closes the loop between the event and the read: a
-// ModifyLiquidity that ADDED liquidity must leave the position holding at least
-// that much, since nothing else in the same block can have removed it. That is
-// what proves the (owner, tickLower, tickUpper, salt) tuple really addresses the
-// position the event names, rather than reading back an unrelated zeroed slot.
+// An added delta must leave the position holding at least that much, which is
+// what proves the key addresses the position the event names rather than an
+// unrelated zeroed slot.
 func assertPositionInvariants(t *testing.T, events []*entity.UniswapV4LiquidityEvent, positions []*entity.UniswapV4Position, rep *liveReport) {
 	t.Helper()
 

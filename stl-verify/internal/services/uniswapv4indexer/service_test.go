@@ -148,17 +148,14 @@ func (m *countingTxManager) WithTransaction(_ context.Context, fn func(pgx.Tx) e
 	return fn(nil)
 }
 
-// recordingMulticaller serves canned results for the state batch, the
-// touched-tick batch, the touched-position batch, and the baseline bitmap scan,
-// disambiguating a batch by its first call's selector. It records how many times
-// each kind of batch ran so tests can assert exactly-once baseline reads and
-// no-RPC-on-quiet-block.
+// recordingMulticaller serves canned results per batch kind, disambiguated by
+// the first call's selector, and counts each kind so tests can assert
+// exactly-once baseline reads and no-RPC-on-quiet-block.
 type recordingMulticaller struct {
 	stateResults    []outbound.Result
 	tickResults     map[int32]outbound.Result
 	baselineResults map[int16]outbound.Result // unlisted words default to an all-zero (no initialized ticks) word
-	// unlisted keys default to an all-zero (never-opened) position, which is what
-	// StateView answers for a key it has no storage for
+	// unlisted keys default to an all-zero (never-opened) position
 	positionResults map[entity.UniswapV4PositionKey]outbound.Result
 
 	executeAtHashCalls int
@@ -297,9 +294,6 @@ func (m *recordingMulticaller) positionInfoResults(calls []outbound.Call) ([]out
 	return out, nil
 }
 
-// positionKeyFromCallData recovers the position identity from a packed
-// getPositionInfo call, so the stub can key its canned results by position
-// rather than by call index.
 func positionKeyFromCallData(a *abi.ABI, callData []byte) (entity.UniswapV4PositionKey, error) {
 	args, err := a.Methods["getPositionInfo"].Inputs.Unpack(callData[4:])
 	if err != nil {
@@ -425,8 +419,6 @@ func swapLog(t *testing.T, pool RegisteredPool, logIndexHex string) shared.Log {
 	return log
 }
 
-// modifySender is the ModifyLiquidity sender modifyLog stamps, hence the owner
-// of every position those logs touch.
 var modifySender = common.HexToAddress("0xbbb")
 
 // modifyLog builds a ModifyLiquidity log for pool over the given tick range,
@@ -436,8 +428,6 @@ func modifyLog(t *testing.T, pool RegisteredPool, logIndexHex string, tickLower,
 	return modifyLogWithSalt(t, pool, logIndexHex, tickLower, tickUpper, liquidityDelta, common.Hash{})
 }
 
-// modifyLogWithSalt builds a ModifyLiquidity log whose salt discriminates it
-// from other positions the same sender holds over the same range.
 func modifyLogWithSalt(t *testing.T, pool RegisteredPool, logIndexHex string, tickLower, tickUpper, liquidityDelta int64, salt common.Hash) shared.Log {
 	t.Helper()
 	log := buildLog(t, "ModifyLiquidity",
@@ -448,8 +438,6 @@ func modifyLogWithSalt(t *testing.T, pool RegisteredPool, logIndexHex string, ti
 	return log
 }
 
-// modifyPositionKey is the position identity a modifyLog over these bounds
-// names.
 func modifyPositionKey(tickLower, tickUpper int) entity.UniswapV4PositionKey {
 	return modifyPositionKeyWithSalt(tickLower, tickUpper, common.Hash{})
 }
@@ -476,9 +464,8 @@ func goodTickResult(t *testing.T) outbound.Result {
 	return outbound.Result{Success: true, ReturnData: packTickInfoReturn(t, big.NewInt(1000), big.NewInt(500), big.NewInt(1), big.NewInt(2))}
 }
 
-// goodPositionResultLiquidity is deliberately unlike any liquidityDelta the
-// modifyLog fixtures emit, so an assertion on it cannot pass by reading the
-// event's delta through instead of the chain's state.
+// Deliberately unlike any liquidityDelta the modifyLog fixtures emit, so an
+// assertion cannot pass by reading the event's delta instead of chain state.
 const goodPositionResultLiquidity = 777_001
 
 func goodPositionResult(t *testing.T) outbound.Result {
@@ -641,8 +628,6 @@ func TestBlockHandler_UnsnapshottablePoolPersistsEventsWithoutState(t *testing.T
 	if len(w.Swaps) != 1 || len(w.LiquidityEvents) != 1 {
 		t.Errorf("Swaps = %d, LiquidityEvents = %d, want 1 and 1 (events still index)", len(w.Swaps), len(w.LiquidityEvents))
 	}
-	// Positions ride the same due set as ticks, so the ModifyLiquidity log above
-	// must not produce one either: the pool has no snapshot path to supersede it.
 	if len(w.States) != 0 || len(w.Ticks) != 0 || len(w.Positions) != 0 {
 		t.Errorf("States = %d, Ticks = %d, Positions = %d, want 0, 0 and 0",
 			len(w.States), len(w.Ticks), len(w.Positions))
@@ -979,8 +964,6 @@ func (m *truncatingBatchMulticaller) ExecuteAtHash(ctx context.Context, calls []
 	return results, nil
 }
 
-// A short result set must never be zipped back against the requested keys: the
-// misalignment would silently stamp one key's state onto another.
 func TestBlockHandler_ResultCountMismatch_NoPersist(t *testing.T) {
 	for _, truncated := range []string{"getTickInfo", "getPositionInfo"} {
 		t.Run(truncated, func(t *testing.T) {
@@ -1486,10 +1469,6 @@ func TestBlockHandler_BaselineAboveTicksPerCallIsChunked(t *testing.T) {
 	}
 }
 
-// TestBlockHandler_ModifyLiquidityPersistsTouchedPosition pins the whole
-// decode -> collect -> read -> persist path for positions: ModifyLiquidity
-// carries no amounts, so the position row read back at the block hash is the
-// only record of what the caller now holds.
 func TestBlockHandler_ModifyLiquidityPersistsTouchedPosition(t *testing.T) {
 	pool := servicePool()
 	svc, repo, mc, _ := newTestService(t, pool)
@@ -1520,9 +1499,6 @@ func TestBlockHandler_ModifyLiquidityPersistsTouchedPosition(t *testing.T) {
 	}
 }
 
-// TestBlockHandler_TwoSaltsOverOneRangeArePersistedSeparately pins salt as part
-// of the identity: two PositionManager NFTs over the same range differ only by
-// salt, and folding them together would lose one position entirely.
 func TestBlockHandler_TwoSaltsOverOneRangeArePersistedSeparately(t *testing.T) {
 	pool := servicePool()
 	svc, repo, mc, _ := newTestService(t, pool)
@@ -1549,10 +1525,6 @@ func TestBlockHandler_TwoSaltsOverOneRangeArePersistedSeparately(t *testing.T) {
 	}
 }
 
-// TestBlockHandler_ZeroDeltaPokeStillReadsThePosition is the mirror image of
-// TestBlockHandler_ZeroDeltaModifyReadsNoTicks: v4-core's Position.update writes
-// both fee-growth checkpoints unconditionally, so a poke moves position state
-// even though it moves no tick state.
 func TestBlockHandler_ZeroDeltaPokeStillReadsThePosition(t *testing.T) {
 	pool := servicePool()
 	svc, repo, mc, _ := newTestService(t, pool)
@@ -1603,9 +1575,6 @@ func TestBlockHandler_NormalBlock_DoesNotReadPriorPositions(t *testing.T) {
 	}
 }
 
-// A position is only ever discovered from a ModifyLiquidity log, so a redelivered
-// block whose new fork does not touch the pool would leave the orphaned fork's
-// row canonical-latest forever without the prior-version re-read.
 func TestBlockHandler_ReorgRedelivery_RereadsPriorVersionPositions(t *testing.T) {
 	pool := servicePool()
 	svc, repo, mc, _ := newTestService(t, pool)
@@ -1637,16 +1606,11 @@ func TestBlockHandler_ReorgRedelivery_RereadsPriorVersionPositions(t *testing.T)
 	if len(positions) != 1 || positions[0].Key() != priorKey {
 		t.Fatalf("v1 position writes = %+v, want exactly the re-read prior position %+v", positions, priorKey)
 	}
-	// getPositionInfo answers a position the new fork never opened with zeros, so
-	// the superseding row records the erasure rather than the stale value.
 	if positions[0].Liquidity.Sign() != 0 || positions[0].BlockVersion != 1 {
 		t.Errorf("re-read position = (liquidity %s, version %d), want (0, 1)", positions[0].Liquidity, positions[0].BlockVersion)
 	}
 }
 
-// The prior-version re-read must survive a restart: a fresh process redelivered
-// block N at v1 has no memory of the orphaned fork, so the pools to re-snapshot
-// come from the persisted state rows and their positions from the DB.
 func TestBlockHandler_ReorgAfterRestart_RereadsPriorVersionPositions(t *testing.T) {
 	pool := servicePool()
 	svc, repo, mc, txMgr := newTestService(t, pool)
@@ -1677,10 +1641,6 @@ func TestBlockHandler_ReorgAfterRestart_RereadsPriorVersionPositions(t *testing.
 	}
 }
 
-// TestBlockHandler_ReorgRedelivery_ReadsNewForkPositionsAndPriorOnes pins the
-// union at the call site: the new fork's own ModifyLiquidity events and the
-// positions a prior version wrote at this height are different sets, and reading
-// only one of them drops a position no later block would rediscover.
 func TestBlockHandler_ReorgRedelivery_ReadsNewForkPositionsAndPriorOnes(t *testing.T) {
 	pool := servicePool()
 	svc, repo, mc, _ := newTestService(t, pool)
@@ -1740,19 +1700,15 @@ func TestBlockHandler_PriorPositionReadError_NoPersist(t *testing.T) {
 	}
 }
 
-// TestBlockHandler_PositionsAbovePerCallCapAreChunked pins the position-read
-// batching: a block touching more positions than one aggregate call may carry
-// must be split and reassembled without losing or duplicating a position.
 func TestBlockHandler_PositionsAbovePerCallCapAreChunked(t *testing.T) {
 	pool := servicePool()
 	svc, repo, mc, _ := newTestService(t, pool)
 	mc.tickResults[-100] = goodTickResult(t)
 	mc.tickResults[200] = goodTickResult(t)
 
-	// One extra position over the cap, all sharing one tick range so the tick
-	// reads stay a single batch and only the position batching is under test.
+	// One tick range for all of them, so only the position batching is chunked.
 	// Each salt gets its own liquidity, so a result set zipped back onto the
-	// wrong keys — the failure mode chunking introduces — cannot pass.
+	// wrong keys cannot pass.
 	const positions = positionsPerCall + 1
 	logs := make([]shared.Log, 0, positions)
 	wantLiquidity := make(map[common.Hash]int64, positions)
@@ -1799,11 +1755,9 @@ func TestBlockHandler_PositionsAbovePerCallCapAreChunked(t *testing.T) {
 	}
 }
 
-// newTelemetryDeps builds a dependency set wired to a REAL
-// dextelemetry.Telemetry (the rest of the suite passes nil, making every
-// Record* call a no-op) plus the multicaller and the ManualReader that collects
-// it. Tests that need the repo staged BEFORE construction — the boot-time
-// reads — use this and construct the service themselves.
+// newTelemetryDeps wires a REAL dextelemetry.Telemetry (the rest of the suite
+// passes nil, making every Record* call a no-op). Callers that need the repo
+// staged BEFORE construction build the service themselves.
 func newTelemetryDeps(t *testing.T, pools []RegisteredPool) (UniswapV4ServiceDeps, *fakeUniswapRepo, *recordingMulticaller, *metricsdk.ManualReader) {
 	t.Helper()
 
@@ -1913,10 +1867,6 @@ func TestBlockHandler_RecordsStateRowsAndPoolsTouched(t *testing.T) {
 	}
 }
 
-// TestBlockHandler_RecordsAppendOnChangeRowsWritten feeds the growth-headroom
-// alert that makes the plain-table (not hypertable) choice on uniswap_v4_tick /
-// uniswap_v4_position self-monitoring: both counters must advance by the rows
-// the committed block offered to the append-on-change writer.
 func TestBlockHandler_RecordsAppendOnChangeRowsWritten(t *testing.T) {
 	pool := servicePool()
 	svc, _, mc, reader := newTelemetryService(t, []RegisteredPool{pool})
@@ -1929,7 +1879,6 @@ func TestBlockHandler_RecordsAppendOnChangeRowsWritten(t *testing.T) {
 	}
 
 	rm := collect(t, reader)
-	// The modify event's two tick bounds, and the one position it names.
 	if rows, ok := sumCounter(t, rm, "uniswap_v4.tick.rows.written"); !ok || rows != 2 {
 		t.Errorf("uniswap_v4.tick.rows.written = %d (present=%t), want 2", rows, ok)
 	}
@@ -1938,8 +1887,6 @@ func TestBlockHandler_RecordsAppendOnChangeRowsWritten(t *testing.T) {
 	}
 }
 
-// A block that writes no tick or position row must leave both counters alone,
-// or the growth-headroom alert measures block traffic instead of table growth.
 func TestBlockHandler_NoAppendOnChangeRowsOnASwapOnlyBlock(t *testing.T) {
 	pool := servicePool()
 	svc, _, mc, reader := newTelemetryService(t, []RegisteredPool{pool})
@@ -1955,7 +1902,6 @@ func TestBlockHandler_NoAppendOnChangeRowsOnASwapOnlyBlock(t *testing.T) {
 	tickRowsBefore, _ := sumCounter(t, before, "uniswap_v4.tick.rows.written")
 	positionRowsBefore, _ := sumCounter(t, before, "uniswap_v4.position.rows.written")
 
-	// A swap on an already-baselined pool reads no tick and touches no position.
 	swap := shared.TransactionReceipt{Logs: []shared.Log{swapLog(t, pool, "0x0")}}
 	if err := bh(context.Background(), blockEvent(201), []shared.TransactionReceipt{swap}); err != nil {
 		t.Fatalf("BlockHandler (swap): %v", err)

@@ -1,27 +1,3 @@
--- Uniswap V4 LP position snapshots (VEC-572).
--- Creates uniswap_v4_position, the append-on-change per-position state read
--- through StateView.getPositionInfo, with full auditability (ADR-0002) and its
--- column-level COMMENT metadata.
---
--- V4's ModifyLiquidity carries no token amounts (flash accounting), but it does
--- identify the position it touched: (sender, tickLower, tickUpper, salt). That
--- tuple is exactly what
---   StateView.getPositionInfo(poolId, owner, tickLower, tickUpper, salt)
---   -> (liquidity, feeGrowthInside0LastX128, feeGrowthInside1LastX128)
--- takes, so every touched position is re-read at the block hash and appended
--- here when its state differs from the latest stored row.
---
--- Sibling: uniswap_v4_tick in 20260819_120000_create_uniswap_v4_tables.sql. The
--- trigger / append-only boilerplate mirrors it, including its deliberate
--- plainness (see the table COMMENT); the position-specific deltas are called out
--- in the COMMENTs.
---
--- COMMENT conventions and scale notes follow that migration:
---   liquidity is raw on-chain L (uint128), not comparable across pools with
---   different currency decimals; fee_growth_inside*_last_x128 are Q128.128
---   fixed point; tick_lower/tick_upper are plain integers where
---   price = 1.0001^tick.
-
 CREATE TABLE IF NOT EXISTS uniswap_v4_position
 (
     pool_id                      BIGINT      NOT NULL REFERENCES uniswap_v4_pool (id),
@@ -47,16 +23,13 @@ CREATE INDEX IF NOT EXISTS idx_uniswap_v4_position_pv_lookup
     ON uniswap_v4_position (pool_id, owner, tick_lower, tick_upper, salt,
                             block_number, block_version, build_id);
 
--- The reorg re-read asks "which positions did this pool write at height N", a
--- prefix the PK cannot serve: it leads with the whole natural key and only then
--- reaches block_number.
+-- The reorg re-read asks which positions a pool wrote at height N; the PK leads
+-- with the whole natural key, so it cannot serve that prefix.
 CREATE INDEX IF NOT EXISTS idx_uniswap_v4_position_pool_block
     ON uniswap_v4_position (pool_id, block_number);
 
--- Prefix 'u4pos' for uniswap_v4_position. owner and salt are hex-encoded into
--- the lock key so it cannot shift with the session's bytea_output setting.
--- force_custom_plan per VEC-541 (see
--- assign_processing_version_uniswap_v4_pool_state).
+-- owner and salt are hex-encoded into the lock key so it cannot shift with the
+-- session's bytea_output setting. force_custom_plan per VEC-541.
 CREATE OR REPLACE FUNCTION assign_processing_version_uniswap_v4_position()
 RETURNS TRIGGER
 SET plan_cache_mode = 'force_custom_plan'
@@ -136,14 +109,9 @@ COMMENT ON COLUMN uniswap_v4_position.processing_version IS
 COMMENT ON COLUMN uniswap_v4_position.build_id IS
   'Audit. ID of the indexer build (code+config) that wrote this row.';
 
--- The gate now covers a third table: positions ride the same due set as ticks,
--- so an excluded pool gets no uniswap_v4_position row either. Restated here
--- because the column's own migration predates this table.
 COMMENT ON COLUMN uniswap_v4_pool.snapshot_supported IS
   'Configuration (curated, load-bearing). Gates the STATE, TICK and POSITION snapshot path only: TRUE = the indexer reads uniswap_v4_pool_state, uniswap_v4_tick and uniswap_v4_position rows for this pool; FALSE = the pool stays registered and its logs are still decoded into uniswap_v4_swap / uniswap_v4_liquidity_event / uniswap_v4_pool_event and mirrored into protocol_event, but no state, tick or position row is ever written for it. Curated the way curve_pool.has_a_precise is, rather than derived: set FALSE for a dynamic-LP-fee pool (fee = 8388608), whose lp_fee updateDynamicLPFee rewrites emitting no event, so a snapshot would silently go stale between touches -- until VEC-573 gives lp_fee a refresh path. A change is a new version row, never an UPDATE.';
 
--- Append-only enforcement: the application role may SELECT and INSERT but never
--- mutate or delete.
 REVOKE UPDATE, DELETE, TRUNCATE ON uniswap_v4_position FROM stl_readwrite;
 
 INSERT INTO migrations (filename)

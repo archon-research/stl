@@ -1399,9 +1399,6 @@ func TestUniswapV4Repository_TicksForPoolAtBlock_UnknownBlockIsEmpty(t *testing.
 	}
 }
 
-// uniswapV4PositionFixture owns one test's pool plus the position save/read
-// helpers, so every append-on-change test starts from rows nothing else can have
-// touched.
 type uniswapV4PositionFixture struct {
 	t      *testing.T
 	ctx    context.Context
@@ -1441,8 +1438,6 @@ func (f uniswapV4PositionFixture) rowCount(key entity.UniswapV4PositionKey) int 
 	return count
 }
 
-// latestValue reads one value column off the canonical-latest row for key, the
-// row a consumer asking "what is this position now" would get.
 func (f uniswapV4PositionFixture) latestValue(key entity.UniswapV4PositionKey, column string) string {
 	f.t.Helper()
 	var value string
@@ -1486,8 +1481,6 @@ func TestUniswapV4Repository_WritePositions_UnchangedValuesDoNotAppend(t *testin
 	}
 }
 
-// A change in any one of the three value columns must append, or that column's
-// history silently flatlines.
 func TestUniswapV4Repository_WritePositions_ChangedValueAppends(t *testing.T) {
 	ctx := context.Background()
 
@@ -1521,8 +1514,6 @@ func TestUniswapV4Repository_WritePositions_ChangedValueAppends(t *testing.T) {
 	}
 }
 
-// A fee-collecting poke leaves liquidity alone but moves both fee-growth
-// checkpoints, which is the change the append must not miss.
 func TestUniswapV4Repository_WritePositions_PokeMovesOnlyFeeGrowthAndStillAppends(t *testing.T) {
 	ctx := context.Background()
 	f := newUniswapV4PositionFixture(t, ctx, 0x25)
@@ -1543,9 +1534,6 @@ func TestUniswapV4Repository_WritePositions_PokeMovesOnlyFeeGrowthAndStillAppend
 	}
 }
 
-// An out-of-order (backfill) write must be compared against the state at or
-// below its own height, never against a newer row that would make it look
-// unchanged and silently drop it.
 func TestUniswapV4Repository_WritePositions_OutOfOrderWriteIsNotComparedAgainstANewerRow(t *testing.T) {
 	ctx := context.Background()
 	f := newUniswapV4PositionFixture(t, ctx, 0x33)
@@ -1572,9 +1560,6 @@ func TestUniswapV4Repository_WritePositions_ReorgReobservationAppends(t *testing
 	}
 }
 
-// The append-on-change decision is per position, not per batch: one SaveBlock
-// carrying an unchanged, a changed and a brand-new position must insert exactly
-// two rows.
 func TestUniswapV4Repository_WritePositions_MixedBatchSkipsOnlyUnchanged(t *testing.T) {
 	ctx := context.Background()
 	f := newUniswapV4PositionFixture(t, ctx, 0x27)
@@ -1613,8 +1598,6 @@ func TestUniswapV4Repository_WritePositions_MixedBatchSkipsOnlyUnchanged(t *test
 	}
 }
 
-// Every natural-key component must discriminate on its own, or two independent
-// positions would share one history and the newer one would look unchanged.
 func TestUniswapV4Repository_WritePositions_EveryKeyComponentSeparatesHistories(t *testing.T) {
 	ctx := context.Background()
 
@@ -1651,8 +1634,6 @@ func TestUniswapV4Repository_WritePositions_EveryKeyComponentSeparatesHistories(
 	}
 }
 
-// The NUMERIC columns are pinned against the widths v4-core really produces:
-// liquidity is a uint128 and each fee-growth checkpoint a full uint256.
 func TestUniswapV4Repository_WritePositions_RoundTripsExtremeNumerics(t *testing.T) {
 	ctx := context.Background()
 	f := newUniswapV4PositionFixture(t, ctx, 0x2c)
@@ -1693,8 +1674,6 @@ func TestUniswapV4Repository_WritePositions_TwoPoolsInOneCall(t *testing.T) {
 		}
 	})
 
-	// Both pools hold the same position key, so a write that lost the pool
-	// dimension would land one row instead of two.
 	for _, tc := range []struct {
 		name   string
 		poolID int64
@@ -1720,8 +1699,6 @@ func TestUniswapV4Repository_PositionsForPoolAtBlock_ReturnsDistinctKeysInOrder(
 	ctx := context.Background()
 	f := newUniswapV4PositionFixture(t, ctx, 0x2f)
 
-	// Each key differs from the next in exactly one component, so the ORDER BY
-	// has to get every level of the natural key right, not just salt.
 	const targetBlock = int64(6200)
 	lowOwner := defaultUniswapV4PositionKey()
 	lowOwner.Owner = common.HexToAddress("0x000000000022D473030F116dDEE9F6B43aC78BA3")
@@ -1739,9 +1716,7 @@ func TestUniswapV4Repository_PositionsForPoolAtBlock_ReturnsDistinctKeysInOrder(
 		f.position(lowTicks, targetBlock, 0, defaultUniswapV4PositionValues()),
 		f.position(lowOwner, targetBlock, 0, defaultUniswapV4PositionValues()),
 	)
-	// A second version of one position at the same block must be deduplicated.
 	f.save(f.position(lowSalt, targetBlock, 1, defaultUniswapV4PositionValues()))
-	// A position at a different block must not appear.
 	f.save(f.position(otherBlock, targetBlock+1, 0, defaultUniswapV4PositionValues()))
 
 	got, err := f.repo.PositionsForPoolAtBlock(ctx, f.poolID, targetBlock)
@@ -1751,8 +1726,7 @@ func TestUniswapV4Repository_PositionsForPoolAtBlock_ReturnsDistinctKeysInOrder(
 	if want := []entity.UniswapV4PositionKey{lowOwner, lowTicks, lowSalt, highSalt}; !slices.Equal(got, want) {
 		t.Errorf("positions = %+v, want %+v", got, want)
 	}
-	// The port promises Compare order, but SQL ORDER BY is what delivers it, so
-	// the two orders are asserted to agree rather than assumed to.
+	// The port promises Compare order; SQL ORDER BY is what has to deliver it.
 	if !slices.IsSortedFunc(got, entity.UniswapV4PositionKey.Compare) {
 		t.Errorf("positions = %+v, want them sorted by UniswapV4PositionKey.Compare", got)
 	}
@@ -1771,8 +1745,6 @@ func TestUniswapV4Repository_PositionsForPoolAtBlock_UnknownBlockIsEmpty(t *test
 	}
 }
 
-// Two rows for one slot in one block would both compare against the same prior
-// state and let ON CONFLICT DO NOTHING drop the second one's values in silence.
 func TestUniswapV4Repository_WritePositions_DuplicateSlotInOneBlockErrors(t *testing.T) {
 	ctx := context.Background()
 	f := newUniswapV4PositionFixture(t, ctx, 0x36)
@@ -1795,10 +1767,6 @@ func TestUniswapV4Repository_WritePositions_DuplicateSlotInOneBlockErrors(t *tes
 	})
 }
 
-// The same block hash read back different values than the row already stored for
-// it means the authoritative read disagrees with itself. The trigger reuses the
-// stored processing_version and ON CONFLICT DO NOTHING discards the insert, so
-// only the row count reveals it — and it must be an error, not a silent skip.
 func TestUniswapV4Repository_WritePositions_ValueDriftAtOneBlockVersionErrors(t *testing.T) {
 	ctx := context.Background()
 	f := newUniswapV4PositionFixture(t, ctx, 0x37)
@@ -1827,8 +1795,6 @@ func TestUniswapV4Repository_WritePositions_ValueDriftAtOneBlockVersionErrors(t 
 	}
 }
 
-// One SaveBlock is one block: a mixed-block position write would compare each
-// row against the wrong height and silently drop it as unchanged.
 func TestUniswapV4Repository_WritePositions_MixedBlockNumbersError(t *testing.T) {
 	ctx := context.Background()
 	f := newUniswapV4PositionFixture(t, ctx, 0x31)
@@ -1848,8 +1814,6 @@ func TestUniswapV4Repository_WritePositions_MixedBlockNumbersError(t *testing.T)
 	})
 }
 
-// Every numeric column is NOT NULL, so a nil must fail the whole write rather
-// than reach the driver as an opaque error or land a NULL.
 func TestUniswapV4Repository_WritePositions_NilNumericWritesNothing(t *testing.T) {
 	ctx := context.Background()
 
@@ -2356,16 +2320,14 @@ func newUniswapV4TestBlockWrites(t *testing.T, poolID int64, blockNumber int64, 
 	}
 }
 
-// uniswapV4PositionValues holds a position row's three append-on-change value
-// columns, so a test can vary one without restating the other two.
 type uniswapV4PositionValues struct {
 	liquidity                *big.Int
 	feeGrowthInside0LastX128 *big.Int
 	feeGrowthInside1LastX128 *big.Int
 }
 
-// defaultUniswapV4PositionValues are three distinct values, so a case that
-// mutates one column cannot pass on another column's value.
+// defaultUniswapV4PositionValues are three distinct values, so a case mutating
+// one column cannot pass on another column's value.
 func defaultUniswapV4PositionValues() uniswapV4PositionValues {
 	return uniswapV4PositionValues{
 		liquidity:                big.NewInt(1000),

@@ -181,10 +181,8 @@ type v4LiquidityEventConverted struct {
 	liquidityDelta pgtype.Numeric
 }
 
-// SaveBlock persists all of a block's uniswap_v4 rows in one pgx.Batch within
-// tx, except ticks and positions (append-on-change, see uniswapTickWriter and
-// writePositions), and returns both the count of state rows the block queued
-// and the count that actually appended.
+// SaveBlock persists a block's uniswap_v4 rows in one pgx.Batch within tx,
+// except ticks and positions, which the append-on-change writers take instead.
 func (r *UniswapV4Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.UniswapV4BlockWrites) (stateRows outbound.StateRowCounts, err error) {
 	rows, err := convertV4BlockWrites(w)
 	if err != nil {
@@ -199,11 +197,9 @@ func (r *UniswapV4Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbou
 		return stateRows, err
 	}
 
-	// pgx forbids new queries while a batch result reader is open, and each
-	// append-on-change insert depends on a prior read of its slot (see
-	// uniswapTickWriter). Ticks before positions is a fixed order: the two lock
-	// domains are disjoint, so a varying phase order would deadlock concurrent
-	// writers across them.
+	// pgx forbids new queries while a batch result reader is open. Ticks before
+	// positions is a fixed order: the two lock domains are disjoint, so a varying
+	// phase order would deadlock concurrent writers across them.
 	if err := uniswapV4TickWriter.writeTicks(ctx, tx, uniswapV4TickRows(w.Ticks), r.buildID); err != nil {
 		return stateRows, err
 	}
@@ -548,11 +544,8 @@ func uniswapV4TickRows(ticks []*entity.UniswapV4Tick) []uniswapTickRow {
 	return rows
 }
 
-// PositionsForPoolAtBlock returns the distinct position keys with a row for pool
-// at blockNumber, in entity.UniswapV4PositionKey.Compare order. A reorg
-// redelivery uses this to re-read exactly the positions a prior version wrote at
-// this height and supersede them at the new version. Queries the connection pool
-// directly (committed rows), not a write transaction.
+// PositionsForPoolAtBlock queries the connection pool for committed rows, so it
+// is safe to call before the write transaction opens.
 func (r *UniswapV4Repository) PositionsForPoolAtBlock(ctx context.Context, poolID int64, blockNumber int64) ([]entity.UniswapV4PositionKey, error) {
 	rows, err := r.pool.Query(ctx,
 		`SELECT DISTINCT owner, tick_lower, tick_upper, salt FROM uniswap_v4_position
@@ -581,8 +574,6 @@ func (r *UniswapV4Repository) PositionsForPoolAtBlock(ctx context.Context, poolI
 			TickUpper: int(tickUpper),
 			Salt:      common.BytesToHash(salt),
 		}
-		// The key leaves here straight into an int24 ABI argument, so a corrupt
-		// stored row must stop the read rather than pack silently out of range.
 		if err := key.Validate(); err != nil {
 			return nil, fmt.Errorf("reading position for pool %d at block %d: %w", poolID, blockNumber, err)
 		}
@@ -594,10 +585,9 @@ func (r *UniswapV4Repository) PositionsForPoolAtBlock(ctx context.Context, poolI
 	return keys, nil
 }
 
-// sharedBlockNumber returns the block every row in an append-on-change write
-// belongs to. One SaveBlock is one block, and the read-latest queries compare
-// against rows at or below that height, so a mixed batch would silently compare
-// across blocks. rows must be non-empty.
+// sharedBlockNumber returns the one block every row belongs to; rows must be
+// non-empty. The read-latest queries bound on that height, so a mixed batch
+// would compare a row against another block's state.
 func sharedBlockNumber[T any](kind string, rows []T, blockNumberOf func(T) int64) (int64, error) {
 	blockNumber := blockNumberOf(rows[0])
 	for _, row := range rows[1:] {
@@ -608,11 +598,6 @@ func sharedBlockNumber[T any](kind string, rows []T, blockNumberOf func(T) int64
 	return blockNumber, nil
 }
 
-// writePositions persists the append-on-change uniswap_v4_position rows,
-// mirroring uniswapTickWriter: lock every affected slot in the canonical sorted
-// order, read the latest row per slot in one query, then insert only where no
-// prior row exists or v4PositionUnchanged says the stored row does not already
-// reflect it.
 func (r *UniswapV4Repository) writePositions(ctx context.Context, tx pgx.Tx, positions []*entity.UniswapV4Position) error {
 	if len(positions) == 0 {
 		return nil
@@ -624,9 +609,8 @@ func (r *UniswapV4Repository) writePositions(ctx context.Context, tx pgx.Tx, pos
 	}
 
 	keys := distinctSortedV4PositionKeys(positions)
-	// insertChangedPositionsV4 walks positions, not keys: a duplicate slot would
-	// compare both rows against the same prior state and let ON CONFLICT DO
-	// NOTHING silently drop the second one's values.
+	// A duplicate slot would compare both rows against the same prior state and
+	// let ON CONFLICT DO NOTHING drop the second one's values in silence.
 	if len(keys) != len(positions) {
 		return fmt.Errorf("uniswap_v4 position write has %d rows for %d distinct slots: one block must touch a position once", len(positions), len(keys))
 	}
@@ -648,9 +632,6 @@ type v4PositionKey struct {
 	key    entity.UniswapV4PositionKey
 }
 
-// distinctSortedV4PositionKeys returns the affected slots in the canonical lock
-// order, so concurrent SaveBlock transactions touching overlapping positions
-// never deadlock.
 func distinctSortedV4PositionKeys(positions []*entity.UniswapV4Position) []v4PositionKey {
 	seen := make(map[v4PositionKey]struct{}, len(positions))
 	for _, p := range positions {
@@ -666,24 +647,15 @@ func distinctSortedV4PositionKeys(positions []*entity.UniswapV4Position) []v4Pos
 	return keys
 }
 
-// lockPositionKeysV4 acquires the per-slot advisory lock for every key in one
-// round-trip via unnest(). keys must already be in the canonical sorted order
-// (distinctSortedV4PositionKeys) so concurrent SaveBlock transactions touching
-// overlapping positions acquire overlapping locks in the same order and never
-// deadlock (db/migrations/AGENTS.md read-then-write rule).
-//
-// The "uniswap_v4_position|…" lock domain is deliberately distinct from the
-// pv-trigger's row-identity key ("u4pos|…|block|version"): this guards the
-// app-level read-latest-then-insert decision, the trigger guards
-// processing_version assignment. They must not be harmonized.
+// lockPositionKeysV4 takes every slot's advisory lock in one round-trip. keys
+// must be in distinctSortedV4PositionKeys order or overlapping writers deadlock.
+// The lock domain is deliberately not the pv-trigger's "u4pos|…|block|version".
 func lockPositionKeysV4(ctx context.Context, tx pgx.Tx, keys []v4PositionKey) error {
 	lockKeys := make([]string, len(keys))
 	for i, k := range keys {
 		lockKeys[i] = fmt.Sprintf("uniswap_v4_position|%d|%s|%d|%d|%s",
 			k.poolID, k.key.Owner.Hex(), k.key.TickLower, k.key.TickUpper, k.key.Salt.Hex())
 	}
-	// pg_advisory_xact_lock is acquired left-to-right as unnest() yields rows,
-	// preserving the sorted-key lock order.
 	if _, err := tx.Exec(ctx,
 		`SELECT pg_advisory_xact_lock(hashtextextended(k, 0))
 		 FROM unnest($1::text[]) WITH ORDINALITY AS u(k, ord)
@@ -695,8 +667,6 @@ func lockPositionKeysV4(ctx context.Context, tx pgx.Tx, keys []v4PositionKey) er
 	return nil
 }
 
-// positionKeyArrays splays the slots into the five parallel arrays the unnest()
-// join takes, one per natural-key column.
 func positionKeyArrays(keys []v4PositionKey) (poolIDs []int64, owners [][]byte, tickLowers, tickUppers []int32, salts [][]byte) {
 	poolIDs = make([]int64, len(keys))
 	owners = make([][]byte, len(keys))
@@ -713,11 +683,9 @@ func positionKeyArrays(keys []v4PositionKey) (poolIDs []int64, owners [][]byte, 
 	return poolIDs, owners, tickLowers, tickUppers, salts
 }
 
-// readLatestPositionsV4 fetches the latest row per slot at or below blockNumber
-// for every key in one query. Keys with no prior row are absent from the
-// returned map, which the caller treats as "insert unconditionally". The height
-// bound keeps an out-of-order (backfill) write from being compared against — and
-// silently dropped as unchanged against — a newer row.
+// readLatestPositionsV4 fetches the latest row per slot at or below blockNumber;
+// slots with no prior row are absent. The height bound keeps an out-of-order
+// backfill write from being dropped as unchanged against a newer row.
 func readLatestPositionsV4(ctx context.Context, tx pgx.Tx, keys []v4PositionKey, blockNumber int64) (map[v4PositionKey]v4PositionValues, error) {
 	poolIDs, owners, tickLowers, tickUppers, salts := positionKeyArrays(keys)
 
@@ -777,10 +745,6 @@ func readLatestPositionsV4(ctx context.Context, tx pgx.Tx, keys []v4PositionKey,
 	return latest, nil
 }
 
-// insertChangedPositionsV4 queues an INSERT for every position whose latest row
-// is absent (no prior row) or differs from it, then sends them in one pgx.Batch.
-// The INSERTs run through the table's BEFORE INSERT ROW trigger, so the per-row
-// processing_version assignment happens exactly as for a single-row insert.
 func (r *UniswapV4Repository) insertChangedPositionsV4(
 	ctx context.Context, tx pgx.Tx,
 	positions []*entity.UniswapV4Position,
@@ -840,21 +804,15 @@ func (r *UniswapV4Repository) insertChangedPositionsV4(
 	return nil
 }
 
-// v4QueuedPosition remembers which slot a queued INSERT belongs to, so a driver
-// error or a discarded row names the position instead of a batch ordinal.
 type v4QueuedPosition struct {
 	slot        v4PositionKey
 	blockNumber int64
-	// supersedesRow marks an insert queued because the values differ from a row
-	// at the SAME (block_number, block_version): the one case where the insert
-	// cannot legitimately be discarded.
+	// supersedesRow marks values differing from a row at the SAME (block_number,
+	// block_version): the one case where a discarded insert is a real
+	// disagreement rather than a replay of an older version.
 	supersedesRow bool
 }
 
-// assertInserted rejects the one way ON CONFLICT DO NOTHING can hide a real
-// disagreement: the same block hash read back different values than the row
-// already stored for it. Every other zero-row outcome is a legitimate replay of
-// an older version alongside a newer one, so only supersedesRow is checked.
 func (q v4QueuedPosition) assertInserted(rowsAffected int64) error {
 	if q.supersedesRow && rowsAffected == 0 {
 		return fmt.Errorf("uniswap_v4 position pool=%d %+v at block %d already stored with different values under this build: the authoritative read disagrees with itself",
@@ -889,8 +847,6 @@ func convertV4Position(p *entity.UniswapV4Position) (v4PositionConverted, error)
 	}, nil
 }
 
-// v4PositionValues holds the latest position row's fields decoded to *big.Int
-// for comparison against a candidate entity.UniswapV4Position.
 type v4PositionValues struct {
 	blockNumber              int64
 	blockVersion             int
@@ -921,9 +877,7 @@ func toV4PositionValues(
 
 // v4PositionUnchanged reports whether the stored row already makes p redundant.
 // Within one height a differing block_version is a reorg re-observation and must
-// always append, even with identical values; across heights the two versions
-// count different blocks' reorgs and comparing them would append a row claiming
-// a change the chain never made, so only the values decide.
+// append; across heights the versions count different blocks, so only values decide.
 func v4PositionUnchanged(latest v4PositionValues, p *entity.UniswapV4Position) bool {
 	if latest.blockNumber == p.BlockNumber && latest.blockVersion != p.BlockVersion {
 		return false

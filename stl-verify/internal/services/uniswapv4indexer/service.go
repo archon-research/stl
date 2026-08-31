@@ -213,13 +213,9 @@ func (s *UniswapV4Service) BlockHandler() dexconsumer.BlockHandler {
 	}
 }
 
-// handleBlock decodes every receipt in the block, snapshots the due pools'
-// state, tick and position rows via multicall (before opening the transaction),
-// and persists swaps, liquidity events, pool events, state, ticks, positions and
-// captured logs in one transaction. Returning a non-nil error leaves the block
-// for SQS redelivery; nil is returned only after a successful commit. All
-// per-block state is local, so a redelivery reprocesses from scratch with no
-// carryover.
+// handleBlock decodes every receipt and snapshots the due pools BEFORE opening
+// the transaction, then persists the block in one. A non-nil error leaves the
+// block for SQS redelivery, and all per-block state is local, so a replay is clean.
 func (s *UniswapV4Service) handleBlock(ctx context.Context, event outbound.BlockEvent, receipts []shared.TransactionReceipt) error {
 	blockHash, err := event.ParsedBlockHash()
 	if err != nil {
@@ -268,15 +264,9 @@ func (s *UniswapV4Service) handleBlock(ctx context.Context, event outbound.Block
 	return nil
 }
 
-// recordBlockMetrics runs only after a successful commit, so the alerts compare
-// pools this block touched against the state rows that same block queued.
-// Attempted is what VectorUniswapV4IndexerNotWritingState keys on — persisted
-// goes to zero on a healthy replay; written stays as volume observability.
-//
-// The tick/position counts come from the write set, not from a DB row count:
-// their writer appends only rows whose state changed, so these are an upper
-// bound on rows landed. The growth-headroom alert they feed only over-estimates
-// as a result, which is the safe direction for it.
+// recordBlockMetrics runs only after a successful commit. Attempted is what
+// VectorUniswapV4IndexerNotWritingState keys on; the tick/position counts come
+// from the write set, so they over-count the rows the writer drops as unchanged.
 func (s *UniswapV4Service) recordBlockMetrics(ctx context.Context, acc blockAccumulators, writes outbound.UniswapV4BlockWrites, stateRows outbound.StateRowCounts) {
 	s.recordPoolsTouched(ctx, acc.touchedIDs)
 	s.telemetry.RecordStateRowsAttempted(ctx, int(stateRows.Attempted))
@@ -407,9 +397,8 @@ func (s *UniswapV4Service) decodeBlockEvents(ctx context.Context, receipts []sha
 	return acc, nil
 }
 
-// blockSnapshots is one block's hash-pinned read output. baselined names the
-// pools whose baseline ticks this call enumerated, so the caller can mark
-// baselineSeen only after a successful persist.
+// blockSnapshots is one block's hash-pinned read output. baselined is returned
+// so the caller marks baselineSeen only after a successful persist.
 type blockSnapshots struct {
 	states    []*entity.UniswapV4PoolState
 	ticks     []*entity.UniswapV4Tick
@@ -423,8 +412,6 @@ func (snaps blockSnapshots) isEmpty() bool {
 	return len(snaps.states) == 0 && len(snaps.ticks) == 0 && len(snaps.positions) == 0
 }
 
-// appendPool must stay exhaustive over the struct's fields; nothing links it to
-// isEmpty at compile time.
 func (snaps *blockSnapshots) appendPool(other blockSnapshots) {
 	snaps.states = append(snaps.states, other.states...)
 	snaps.ticks = append(snaps.ticks, other.ticks...)
@@ -432,10 +419,9 @@ func (snaps *blockSnapshots) appendPool(other blockSnapshots) {
 	snaps.baselined = append(snaps.baselined, other.baselined...)
 }
 
-// snapshotDueSet reads each due pool's state, tick and position rows via
-// multicall, pinned to coords.hash so the read cannot silently answer from a
-// post-reorg fork. It must run BEFORE the DB transaction opens, so archive-RPC
-// latency never pins a pgx connection (pool exhaustion is a stall cause).
+// snapshotDueSet reads the due pools at coords.hash, so no read can answer from
+// a post-reorg fork. It must run BEFORE the DB transaction opens, or archive-RPC
+// latency pins a pgx connection (pool exhaustion is a stall cause).
 func (s *UniswapV4Service) snapshotDueSet(ctx context.Context, dueSet []RegisteredPool, acc blockAccumulators, coords blockCoords) (blockSnapshots, error) {
 	var snaps blockSnapshots
 
@@ -449,7 +435,6 @@ func (s *UniswapV4Service) snapshotDueSet(ctx context.Context, dueSet []Register
 	return snaps, nil
 }
 
-// snapshotPool reads one pool's state, tick and position rows at coords.hash.
 func (s *UniswapV4Service) snapshotPool(ctx context.Context, pool RegisteredPool, coords blockCoords, liqEvents []*entity.UniswapV4LiquidityEvent) (blockSnapshots, error) {
 	state, err := SnapshotState(ctx, s.multicaller, pool, coords.hash, coords.number, coords.version, coords.ts)
 	if err != nil {
@@ -473,16 +458,9 @@ func (s *UniswapV4Service) snapshotPool(ctx context.Context, pool RegisteredPool
 	return snaps, nil
 }
 
-// snapshotPoolPositions reads the positions this block's ModifyLiquidity events
-// touched. There is no baseline enumeration counterpart to BaselineTicks: V4
-// exposes no way to list a pool's positions, so a position is only ever
-// discovered from a log — which is also why the reorg re-read below has no
-// bitmap-scan fallback to lean on.
-//
-// The prior-version re-read on coords.version > 0 exists for the reason
-// snapshotPoolTicks documents; a position the new fork never opened reads back
-// zeroed (getPositionInfo never reverts), so the superseding row records the
-// erasure.
+// snapshotPoolPositions has no baseline-enumeration counterpart to BaselineTicks:
+// V4 cannot list a pool's positions, so one is discovered only from a log — hence
+// the prior-version re-read, which reads a fork-orphaned position back as zeroed.
 func (s *UniswapV4Service) snapshotPoolPositions(ctx context.Context, pool RegisteredPool, coords blockCoords, liqEvents []*entity.UniswapV4LiquidityEvent) ([]*entity.UniswapV4Position, error) {
 	keys := TouchedPositions(liqEvents)
 
@@ -497,10 +475,6 @@ func (s *UniswapV4Service) snapshotPoolPositions(ctx context.Context, pool Regis
 	return s.readPositions(ctx, pool, coords, keys)
 }
 
-// readPositions reads the given positions in bounded multicall batches (see
-// positionsPerCall), decoding every result into an authoritative
-// entity.UniswapV4Position. Batches are issued in order and their rows
-// concatenated so the returned slice stays aligned with keys.
 func (s *UniswapV4Service) readPositions(ctx context.Context, pool RegisteredPool, coords blockCoords, keys []entity.UniswapV4PositionKey) ([]*entity.UniswapV4Position, error) {
 	if len(keys) == 0 {
 		return nil, nil
@@ -517,8 +491,6 @@ func (s *UniswapV4Service) readPositions(ctx context.Context, pool RegisteredPoo
 	return rows, nil
 }
 
-// readPositionChunk issues one getPositionInfo multicall for a single bounded
-// batch of positions and decodes every result positionally.
 func (s *UniswapV4Service) readPositionChunk(ctx context.Context, pool RegisteredPool, coords blockCoords, chunk []entity.UniswapV4PositionKey) ([]*entity.UniswapV4Position, error) {
 	calls, err := BuildPositionCalls(pool, chunk)
 	if err != nil {

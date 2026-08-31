@@ -296,9 +296,6 @@ func TestTelemetry_NilSafe(t *testing.T) {
 	tel.RecordPositionRows(ctx, 0)
 }
 
-// The append-on-change counters exist to make the plain-table (not hypertable)
-// decision on uniswap_v4_tick / uniswap_v4_position self-monitoring, so their
-// series names are what the growth-headroom alert is written against.
 func TestRecordAppendOnChangeRows_IncrementsItsOwnCounter(t *testing.T) {
 	for _, tc := range []struct {
 		metric string

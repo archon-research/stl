@@ -183,14 +183,11 @@ func TestIntegration_PersistsEveryTableForATouchedBlock(t *testing.T) {
 	}
 }
 
-// positionResultWith packs a getPositionInfo return with the given liquidity,
-// so the reorg test can distinguish a live position from a burned (all-zero) one.
 func positionResultWith(t *testing.T, liquidity int64) outbound.Result {
 	t.Helper()
 	return outbound.Result{Success: true, ReturnData: packPositionInfoReturn(t, big.NewInt(liquidity), big.NewInt(0), big.NewInt(0))}
 }
 
-// latestPosition reads the canonical-latest uniswap_v4_position row for key.
 func latestPosition(t *testing.T, ctx context.Context, db *pgxpool.Pool, poolID int64, key entity.UniswapV4PositionKey) (blockNumber int64, blockVersion int, liquidity string) {
 	t.Helper()
 	if err := db.QueryRow(ctx,
@@ -206,11 +203,6 @@ func latestPosition(t *testing.T, ctx context.Context, db *pgxpool.Pool, poolID 
 	return blockNumber, blockVersion, liquidity
 }
 
-// TestIntegration_ReorgReconcilesStalePositions proves the reconciliation
-// against the real writer: a position opened on an orphaned fork (N, v0) is
-// superseded when block N is redelivered at v1 whose receipts do NOT touch the
-// pool. Positions are only ever discovered from logs, so without the
-// prior-version re-read the stale (N, v0) row would stay canonical-latest.
 func TestIntegration_ReorgReconcilesStalePositions(t *testing.T) {
 	ctx := context.Background()
 	f := setupV4Integration(t)
@@ -252,10 +244,6 @@ func TestIntegration_ReorgReconcilesStalePositions(t *testing.T) {
 	}
 }
 
-// TestIntegration_ReorgAfterRestartReconcilesStalePositions is the same
-// reconciliation across a process boundary: the redelivering service has never
-// seen block N, so the positions to re-read can only come from the rows already
-// persisted at that height.
 func TestIntegration_ReorgAfterRestartReconcilesStalePositions(t *testing.T) {
 	ctx := context.Background()
 	f := setupV4Integration(t)
@@ -293,9 +281,6 @@ func TestIntegration_ReorgAfterRestartReconcilesStalePositions(t *testing.T) {
 	}
 }
 
-// TestIntegration_UnchangedPositionDoesNotAppend pins the append-on-change
-// contract end to end: a second block touching the same position with identical
-// read-back state must leave one row, so a poke storm cannot inflate history.
 func TestIntegration_UnchangedPositionDoesNotAppend(t *testing.T) {
 	ctx := context.Background()
 	f := setupV4Integration(t)

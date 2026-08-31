@@ -87,8 +87,7 @@ var uniswapV4Tables = []string{
 // append-only too, so all 8 carry a processing_version trigger.
 var uniswapV4VersionedTables = uniswapV4Tables
 
-// uniswapV4Hypertables excludes the append-on-change tables, which are
-// deliberately plain (see uniswapV4PlainTables).
+// uniswapV4Hypertables excludes the append-on-change tables (uniswapV4PlainTables).
 var uniswapV4Hypertables = []string{
 	"uniswap_v4_pool_state",
 	"uniswap_v4_swap",
@@ -96,10 +95,8 @@ var uniswapV4Hypertables = []string{
 	"uniswap_v4_pool_event",
 }
 
-// uniswapV4PlainTables are the append-on-change fact tables. They are written
-// on-change rather than on every touched block, and each write first reads the
-// latest row per natural key with no time bound the planner could use, so
-// partitioning would fan that lookup out over every chunk.
+// uniswapV4PlainTables are append-on-change: partitioning would fan their
+// read-latest-per-key lookup out over every chunk (see the table COMMENTs).
 var uniswapV4PlainTables = []string{
 	"uniswap_v4_tick",
 	"uniswap_v4_position",
@@ -792,8 +789,6 @@ func TestUniswapV4FactTableChecksAcceptBoundaryValues(t *testing.T) {
 			"\\x1300000000000000000000000000000000000000000000000000000000000004",
 			[]any{887272},
 		},
-		// A burned position reads back all-zero rather than reverting, so the
-		// erasure must insert alongside the widest legal tick range.
 		{
 			"position_full_tick_range_zeroed_out",
 			uniswapV4PositionInsertSQL,
@@ -910,8 +905,6 @@ const uniswapV4FeeCheckInsertWithSnapshotSQL = `
 	        '\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'::bytea,
 	        $2, $3, $4, 60, '\x0000000000000000000000000000000000000000'::bytea, 22000000, $5)`
 
-// owner and salt are fixed-width on chain; a short or long value would make the
-// natural key ambiguous, so the byte lengths are pinned in the schema.
 func TestUniswapV4PositionRejectsWrongOwnerAndSaltWidths(t *testing.T) {
 	ctx := context.Background()
 	poolID := insertTestUniswapV4Pool(t, ctx, "\\x1700000000000000000000000000000000000000000000000000000000000001")
@@ -948,9 +941,6 @@ func TestUniswapV4PositionRejectsWrongOwnerAndSaltWidths(t *testing.T) {
 	}
 }
 
-// The natural key is (pool_id, owner, tick_lower, tick_upper, salt): one sender
-// holds independent positions over the same range discriminated only by salt, so
-// dropping any column would collapse distinct positions into one history.
 func TestUniswapV4PositionPrimaryKeyCoversTheNaturalKeyAndVersion(t *testing.T) {
 	ctx := context.Background()
 
@@ -966,9 +956,8 @@ func TestUniswapV4PositionPrimaryKeyCoversTheNaturalKeyAndVersion(t *testing.T) 
 		t.Fatalf("reading uniswap_v4_position primary key columns: %v", err)
 	}
 
-	// block_timestamp is deliberately absent: it is in the sibling hypertables'
-	// keys only because TimescaleDB demands the partition column, and this table
-	// is not partitioned.
+	// block_timestamp is absent on purpose: the sibling hypertables carry it only
+	// because TimescaleDB demands the partition column in the key.
 	want := []string{
 		"block_number", "block_version", "owner",
 		"pool_id", "processing_version", "salt", "tick_lower", "tick_upper",
@@ -978,8 +967,6 @@ func TestUniswapV4PositionPrimaryKeyCoversTheNaturalKeyAndVersion(t *testing.T) 
 	}
 }
 
-// The salt discriminator has to survive into the row: two positions differing
-// only by salt must be two independent histories, not one overwritten row.
 func TestUniswapV4PositionDistinguishesPositionsBySaltAlone(t *testing.T) {
 	ctx := context.Background()
 	poolID := insertTestUniswapV4Pool(t, ctx, "\\x1700000000000000000000000000000000000000000000000000000000000002")
