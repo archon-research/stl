@@ -2086,19 +2086,25 @@ func TestHandleReorgAtomic_RewoundWatermarkExposesOrphanedHeightsToFindGaps(t *t
 	}
 }
 
+// saveCanonicalBlock saves one canonical block with an explicit parent hash.
+func saveCanonicalBlock(t *testing.T, ctx context.Context, repo *BlockStateRepository, number int64, parentHash string) {
+	t.Helper()
+	if _, err := repo.SaveBlock(ctx, outbound.BlockState{
+		Number:         number,
+		Hash:           fmt.Sprintf("0xhash%d", number),
+		ParentHash:     parentHash,
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("save block %d: %v", number, err)
+	}
+}
+
 // seedCanonicalChain saves a linked canonical chain over [from, to].
 func seedCanonicalChain(t *testing.T, ctx context.Context, repo *BlockStateRepository, from, to int64) {
 	t.Helper()
 	for i := from; i <= to; i++ {
-		if _, err := repo.SaveBlock(ctx, outbound.BlockState{
-			Number:         i,
-			Hash:           fmt.Sprintf("0xhash%d", i),
-			ParentHash:     fmt.Sprintf("0xhash%d", i-1),
-			ReceivedAt:     time.Now().Unix(),
-			BlockTimestamp: time.Now().Unix(),
-		}); err != nil {
-			t.Fatalf("seed block %d: %v", i, err)
-		}
+		saveCanonicalBlock(t, ctx, repo, i, fmt.Sprintf("0xhash%d", i-1))
 	}
 }
 
@@ -2223,5 +2229,95 @@ func TestAdvanceBackfillWatermark(t *testing.T) {
 				t.Errorf("watermark = %d, want %d", watermark, tt.wantWatermark)
 			}
 		})
+	}
+}
+
+// TestVerifyChainIntegrity_ReportsFirstViolation covers the ARCT-379 hole: two
+// canonical rows with a missing height between them used to read as a valid
+// chain, because only pairs where prev = number - 1 were compared.
+func TestVerifyChainIntegrity_ReportsFirstViolation(t *testing.T) {
+	tests := []struct {
+		name            string
+		seed            func(t *testing.T, ctx context.Context, repo *BlockStateRepository)
+		from, to        int64
+		wantErrContains string
+	}{
+		{
+			name: "missing height between two canonical blocks",
+			seed: func(t *testing.T, ctx context.Context, repo *BlockStateRepository) {
+				seedCanonicalChain(t, ctx, repo, 100, 102)
+				seedCanonicalChain(t, ctx, repo, 104, 105)
+			},
+			from:            100,
+			to:              105,
+			wantErrContains: "canonical block(s) 103 to 103 missing between blocks 102 and 104",
+		},
+		{
+			name: "parent hash break",
+			seed: func(t *testing.T, ctx context.Context, repo *BlockStateRepository) {
+				seedCanonicalChain(t, ctx, repo, 100, 103)
+				saveCanonicalBlock(t, ctx, repo, 104, "0xhash101")
+				saveCanonicalBlock(t, ctx, repo, 105, "0xhash104")
+			},
+			from:            100,
+			to:              105,
+			wantErrContains: "chain integrity violation at block 104",
+		},
+		{
+			name: "heights below the first canonical block",
+			seed: func(t *testing.T, ctx context.Context, repo *BlockStateRepository) {
+				seedCanonicalChain(t, ctx, repo, 100, 105)
+			},
+			from: 0,
+			to:   105,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo, cleanup := setupPostgres(t)
+			t.Cleanup(cleanup)
+
+			ctx := context.Background()
+			tt.seed(t, ctx, repo)
+
+			err := repo.VerifyChainIntegrity(ctx, tt.from, tt.to)
+			if tt.wantErrContains == "" {
+				if err != nil {
+					t.Fatalf("VerifyChainIntegrity = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("VerifyChainIntegrity = nil, want error containing %q", tt.wantErrContains)
+			}
+			if !strings.Contains(err.Error(), tt.wantErrContains) {
+				t.Errorf("VerifyChainIntegrity = %v, want error containing %q", err, tt.wantErrContains)
+			}
+		})
+	}
+}
+
+// TestFindOrphanOnlyHeights_ReportsMoreThanOneHundredHeights: the validator
+// reports what this returns, so a cap would under-report a reorg storm.
+func TestFindOrphanOnlyHeights_ReportsMoreThanOneHundredHeights(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+	const first, count = int64(500), int64(150)
+	for number := first; number < first+count; number++ {
+		seedOrphanOnlyHeight(t, ctx, repo, number, fmt.Sprintf("0xorphan_%d", number))
+	}
+
+	heights, err := repo.FindOrphanOnlyHeights(ctx, first, first+count-1)
+	if err != nil {
+		t.Fatalf("FindOrphanOnlyHeights: %v", err)
+	}
+	if int64(len(heights)) != count {
+		t.Fatalf("len(heights) = %d, want %d", len(heights), count)
+	}
+	if heights[0] != first || heights[count-1] != first+count-1 {
+		t.Errorf("heights span [%d, %d], want [%d, %d]", heights[0], heights[count-1], first, first+count-1)
 	}
 }

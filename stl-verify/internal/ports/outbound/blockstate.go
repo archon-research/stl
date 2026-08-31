@@ -148,16 +148,20 @@ type BlockStateRepository interface {
 
 	// FindOrphanOnlyHeights returns block numbers in [fromBlock, toBlock] that
 	// have an orphaned row and no canonical one. Such a height is a hole the
-	// other checks miss once the backfill watermark has passed it: FindGaps
-	// scans only above the watermark, and VerifyChainIntegrity pairs
-	// consecutive canonical rows on prev_number = number - 1, so a missing
-	// height breaks no pair it looks at. Ordered ascending and capped, so an
-	// empty result is the only "all clear".
+	// other checks under-report: FindGaps scans only above the backfill
+	// watermark, and VerifyChainIntegrity reports only the first violation in
+	// its watermark-bounded range. This enumerates every one of them, so an
+	// empty result is the only "all clear". Ordered ascending and uncapped —
+	// the result is bounded by the orphaned rows, which are bounded by reorgs.
 	FindOrphanOnlyHeights(ctx context.Context, fromBlock, toBlock int64) ([]int64, error)
 
-	// VerifyChainIntegrity verifies that the parent_hash chain is properly linked
-	// in the given range. Returns nil if the chain is valid, or an error describing
-	// the first broken link found.
+	// VerifyChainIntegrity verifies that the canonical chain over
+	// [fromBlock, toBlock] is unbroken: consecutive blocks are linked by
+	// parent_hash, and no height between two canonical blocks is missing.
+	// Returns nil if the chain is valid, or an error describing the first
+	// violation in ascending block order. Heights below the range's first
+	// canonical block are not violations — the backfill watermark starts at 0
+	// on an unseeded chain, well below its first block.
 	// This should be called after backfill completes to ensure eventual consistency.
 	VerifyChainIntegrity(ctx context.Context, fromBlock, toBlock int64) error
 

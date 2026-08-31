@@ -132,17 +132,22 @@ and a fresh `status="success"` run.
 ### Special case: `watcher-data-validator` "Orphan-only heights"
 
 The validator fails the run — and so this alert — when its **Orphan-only
-heights** check reports `N height(s) have only an orphaned block: <numbers>`
-(capped at 100 heights). It means block N is stored only on a losing fork: the
-watcher saved fork A, the canonical broadcast for N was dropped as `stale_fork`
-(a load-balanced RPC node had not converged when the watcher verified it), and
-the reorg that block N+1 committed orphaned fork A without ever fetching the
-winner. Nothing at that height is canonical — S3 holds only the orphaned fork
-and every indexer has its events at `block_version` 0. The other two checks
-miss it once the backfill watermark has passed the height: `FindGaps` scans
-only above the watermark, and **Chain Integrity** pairs consecutive canonical
-rows (`prev_number = number - 1`), so a height with no canonical row breaks no
-pair it looks at.
+heights** check reports `N height(s) have only an orphaned block: <numbers>`.
+The count is exact; the message names the first 100 heights and appends
+`(+K more)`, with the full list in the check's `orphan_only_heights` detail.
+
+It means block N is stored only on a losing fork: the watcher saved fork A, the
+canonical broadcast for N was dropped as `stale_fork` (a load-balanced RPC node
+had not converged when the watcher verified it), and the reorg that block N+1
+committed orphaned fork A without ever fetching the winner. Nothing at that
+height is canonical — S3 holds only the orphaned fork and every indexer has its
+events at `block_version` 0. `FindGaps` scans only above the backfill
+watermark, so it re-fetches the height only while the watermark still sits
+below it. This check scans the full block range, where **Chain Integrity**
+stops at the watermark — and a fresh occurrence sits *above* the watermark,
+because the reorg that caused it rewound the watermark to the common ancestor
+below, so this check is the only one that names it. A hole older than that
+rewind sits below the watermark and fails both.
 
 `block_states` carries a 30-day retention policy
 (`add_retention_policy('block_states', INTERVAL '30 days')`), so the check only
@@ -184,6 +189,35 @@ Repair:
 
 Run the check against prod's retained window before the prod deploy — a hole
 found there is repairable while it is still inside retention.
+
+### Special case: `watcher-data-validator` "Chain Integrity" missing blocks
+
+`chain integrity violation: canonical block(s) A to B missing between blocks X
+and Y` means the canonical chain has a hole at A..B that the backfill watermark
+has already passed — so the gap filler is not working on it and
+`VectorWatcherBackfillWatermarkLagHigh` will not fire for it. Only the lowest
+hole in the range is named; re-run the check after each repair to see the next
+one.
+
+The check runs only up to the backfill watermark (the passed message says how
+far: `Parent-hash chain valid through backfill watermark N`). A named hole is
+therefore always **below** the watermark — never a transient head-of-chain gap
+the filler is seconds from closing. Above the watermark is the filler's live
+domain, covered by `backfill_watermark_lag` and
+`VectorWatcherBackfillWatermarkLagHigh` in
+[vector-watcher.md](vector-watcher.md), not by this check.
+
+Two causes, told apart by `SELECT number, hash, is_orphaned FROM block_states
+WHERE chain_id = <id> AND number BETWEEN A AND B;`:
+
+- **Rows exist but are all orphaned** → the orphan-only case above; repair it
+  that way.
+- **No rows at all** → a legacy gap the watermark advanced over before a
+  missing height counted as a violation (the VEC-277 shape). `FindGaps` never
+  scans below the watermark, so rewind it —
+  `UPDATE backfill_watermark SET watermark = A - 1 WHERE chain_id = <id>;` —
+  and the next pass fetches the range; confirm `backfill_watermark_lag` drains
+  and the check passes on the following run.
 
 ---
 

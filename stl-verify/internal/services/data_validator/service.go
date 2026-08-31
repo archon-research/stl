@@ -181,34 +181,71 @@ func (s *Service) resolveBlockRange(ctx context.Context) (int64, int64, error) {
 	return fromBlock, toBlock, nil
 }
 
-// validateChainIntegrity verifies parent-hash linkage using the repository method.
+// validateChainIntegrity verifies parent-hash linkage up to the backfill
+// watermark. Above it is the gap filler's live domain, where an out-of-order
+// arrival is a hole for seconds; backfill_watermark_lag alerts on that instead.
 func (s *Service) validateChainIntegrity(ctx context.Context, fromBlock, toBlock int64) CheckResult {
+	const name = "Chain Integrity"
 	start := time.Now()
-	s.logger.Info("validating chain integrity", "from", fromBlock, "to", toBlock)
 
-	err := s.blockStateRepo.VerifyChainIntegrity(ctx, fromBlock, toBlock)
+	watermark, err := s.blockStateRepo.GetBackfillWatermark(ctx)
+	if err != nil {
+		return CheckResult{
+			Name:     name,
+			Status:   StatusError,
+			Message:  fmt.Sprintf("Failed to read backfill watermark: %v", err),
+			Duration: time.Since(start),
+		}
+	}
+
+	verifyTo := toBlock
+	if watermark > 0 {
+		verifyTo = min(toBlock, watermark)
+	}
+	if verifyTo < fromBlock {
+		return CheckResult{
+			Name:     name,
+			Status:   StatusPassed,
+			Message:  fmt.Sprintf("Skipped: backfill watermark %d is below the range start %d", watermark, fromBlock),
+			Duration: time.Since(start),
+		}
+	}
+
+	s.logger.Info("validating chain integrity", "from", fromBlock, "to", verifyTo, "watermark", watermark)
+
+	err = s.blockStateRepo.VerifyChainIntegrity(ctx, fromBlock, verifyTo)
 	duration := time.Since(start)
 
 	if err != nil {
 		return CheckResult{
-			Name:     "Chain Integrity",
+			Name:     name,
 			Status:   StatusFailed,
 			Message:  err.Error(),
 			Duration: duration,
 		}
 	}
 
+	message := fmt.Sprintf("Parent-hash chain valid through block %d", verifyTo)
+	if verifyTo == watermark {
+		message = fmt.Sprintf("Parent-hash chain valid through backfill watermark %d", watermark)
+	}
+
 	return CheckResult{
-		Name:     "Chain Integrity",
+		Name:     name,
 		Status:   StatusPassed,
-		Message:  "Parent-hash chain valid",
+		Message:  message,
 		Duration: duration,
 	}
 }
 
+// orphanOnlyHeightsListed caps how many heights the message names; the reported
+// count stays exact and Details carries the full list.
+const orphanOnlyHeightsListed = 100
+
 // validateNoOrphanOnlyHeights reports heights whose only stored block is
-// orphaned. Chain integrity cannot see them — it compares canonical rows, and
-// such a height has none — yet every consumer downstream is missing that block.
+// orphaned. It scans the full range and names every one, where chain integrity
+// stops at the watermark and at the first hole — and a fresh occurrence sits
+// above the watermark, since the reorg that caused it rewound the watermark.
 func (s *Service) validateNoOrphanOnlyHeights(ctx context.Context, fromBlock, toBlock int64) CheckResult {
 	const name = "Orphan-only heights"
 	start := time.Now()
@@ -238,7 +275,7 @@ func (s *Service) validateNoOrphanOnlyHeights(ctx context.Context, fromBlock, to
 	return CheckResult{
 		Name:     name,
 		Status:   StatusFailed,
-		Message:  fmt.Sprintf("%d height(s) have only an orphaned block: %s", len(heights), formatHeights(heights)),
+		Message:  fmt.Sprintf("%d height(s) have only an orphaned block: %s", len(heights), formatHeights(heights, orphanOnlyHeightsListed)),
 		Duration: duration,
 		Details: map[string]any{
 			"orphan_only_heights": heights,
@@ -246,13 +283,19 @@ func (s *Service) validateNoOrphanOnlyHeights(ctx context.Context, fromBlock, to
 	}
 }
 
-// formatHeights renders block numbers as a comma-separated list.
-func formatHeights(heights []int64) string {
-	parts := make([]string, len(heights))
-	for i, height := range heights {
+// formatHeights renders block numbers as a comma-separated list, naming at most
+// limit of them and summarising the remainder.
+func formatHeights(heights []int64, limit int) string {
+	listed, suffix := heights, ""
+	if len(heights) > limit {
+		listed, suffix = heights[:limit], fmt.Sprintf(" (+%d more)", len(heights)-limit)
+	}
+
+	parts := make([]string, len(listed))
+	for i, height := range listed {
 		parts[i] = strconv.FormatInt(height, 10)
 	}
-	return strings.Join(parts, ", ")
+	return strings.Join(parts, ", ") + suffix
 }
 
 // validateReorgs validates each reorg event against the canonical chain source.

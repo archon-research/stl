@@ -799,12 +799,9 @@ func (r *BlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBlock 
 	return gaps, nil
 }
 
-// orphanOnlyHeightLimit caps FindOrphanOnlyHeights: the caller reports the
-// heights, and enumerating a whole reorg-storm range helps nobody.
-const orphanOnlyHeightLimit = 100
-
 // FindOrphanOnlyHeights returns block numbers in the range whose only rows are
-// orphaned. At most orphanOnlyHeightLimit heights are returned, ascending.
+// orphaned. Ascending and uncapped: the result is bounded by the orphaned rows,
+// which are bounded by reorgs, and a capped count would under-report a storm.
 func (r *BlockStateRepository) FindOrphanOnlyHeights(ctx context.Context, fromBlock, toBlock int64) ([]int64, error) {
 	if fromBlock > toBlock {
 		return nil, nil
@@ -824,10 +821,9 @@ func (r *BlockStateRepository) FindOrphanOnlyHeights(ctx context.Context, fromBl
 					AND NOT canonical.is_orphaned
 			)
 		ORDER BY orphaned.number
-		LIMIT $4
 	`
 
-	rows, err := r.pool.Query(ctx, query, r.chainID, fromBlock, toBlock, orphanOnlyHeightLimit)
+	rows, err := r.pool.Query(ctx, query, r.chainID, fromBlock, toBlock)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find orphan-only heights: %w", err)
 	}
@@ -848,16 +844,17 @@ func (r *BlockStateRepository) FindOrphanOnlyHeights(ctx context.Context, fromBl
 	return heights, nil
 }
 
-// VerifyChainIntegrity verifies that the parent_hash chain is properly linked.
-// It checks that each block's parent_hash matches the hash of the previous block number.
-// Returns nil if the chain is valid, or an error describing the first broken link.
+// VerifyChainIntegrity verifies that the canonical chain over the range is
+// unbroken: consecutive blocks are linked by parent_hash, and no height between
+// two canonical blocks is missing. Returns nil if the chain is valid, or an
+// error describing the first violation in ascending block order.
 func (r *BlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlock, toBlock int64) error {
 	if fromBlock >= toBlock {
 		return nil // Nothing to verify
 	}
 
-	// Query that finds the first block where parent_hash doesn't match
-	// the hash of the previous block number
+	// LAG leaves the range's first block unpaired, so it is never flagged: an
+	// unseeded chain's watermark starts at 0, far below its first block.
 	query := `
 		WITH ordered_blocks AS (
 			SELECT number, hash, parent_hash,
@@ -868,9 +865,12 @@ func (r *BlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlo
 		)
 		SELECT number, hash, parent_hash, prev_hash, prev_number
 		FROM ordered_blocks
-		WHERE prev_hash IS NOT NULL
-			AND prev_number = number - 1
-			AND parent_hash != prev_hash
+		WHERE prev_number IS NOT NULL
+			AND (
+				prev_number < number - 1
+				OR (prev_number = number - 1 AND parent_hash != prev_hash)
+			)
+		ORDER BY number
 		LIMIT 1
 	`
 
@@ -885,6 +885,11 @@ func (r *BlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlo
 			return nil // Chain is valid
 		}
 		return fmt.Errorf("failed to verify chain integrity: %w", err)
+	}
+
+	if prevBlockNum < brokenBlock-1 {
+		return fmt.Errorf("chain integrity violation: canonical block(s) %d to %d missing between blocks %d and %d",
+			prevBlockNum+1, brokenBlock-1, prevBlockNum, brokenBlock)
 	}
 
 	return fmt.Errorf("chain integrity violation at block %d: parent_hash %s does not match hash %s of block %d",

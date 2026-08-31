@@ -414,8 +414,10 @@ func (r *BlockStateRepository) FindOrphanOnlyHeights(ctx context.Context, fromBl
 	return heights, nil
 }
 
-// VerifyChainIntegrity verifies that the parent_hash chain is properly linked.
-// Returns nil if the chain is valid, or an error describing the first broken link.
+// VerifyChainIntegrity verifies that the canonical chain over the range is
+// unbroken: consecutive blocks are linked by parent_hash, and no height between
+// two canonical blocks is missing. Returns nil if the chain is valid, or an
+// error describing the first violation in ascending block order.
 func (r *BlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlock, toBlock int64) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -446,17 +448,19 @@ func (r *BlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlo
 		return blocksInRange[i].number < blocksInRange[j].number
 	})
 
-	// Check each consecutive pair
+	// The range's first block is never flagged: an unseeded chain's watermark
+	// starts at 0, far below its first block.
 	for i := 1; i < len(blocksInRange); i++ {
 		curr := blocksInRange[i]
 		prev := blocksInRange[i-1]
 
-		// Only check if blocks are consecutive
-		if curr.number == prev.number+1 {
-			if curr.parentHash != prev.hash {
-				return fmt.Errorf("chain integrity violation at block %d: parent_hash %s does not match hash %s of block %d",
-					curr.number, curr.parentHash, prev.hash, prev.number)
-			}
+		if prev.number < curr.number-1 {
+			return fmt.Errorf("chain integrity violation: canonical block(s) %d to %d missing between blocks %d and %d",
+				prev.number+1, curr.number-1, prev.number, curr.number)
+		}
+		if curr.number == prev.number+1 && curr.parentHash != prev.hash {
+			return fmt.Errorf("chain integrity violation at block %d: parent_hash %s does not match hash %s of block %d",
+				curr.number, curr.parentHash, prev.hash, prev.number)
 		}
 	}
 

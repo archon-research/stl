@@ -565,6 +565,10 @@ func TestVerifyChainIntegrity_EmptyRange(t *testing.T) {
 	}
 }
 
+// TestVerifyChainIntegrity_WithGaps guards the watermark against a hole the
+// gap filler already stepped over: block 5 and 6 are consecutive and correctly
+// linked, so before ARCT-379 the missing block 4 let the whole range read as
+// valid and the watermark advanced past it for good.
 func TestVerifyChainIntegrity_WithGaps(t *testing.T) {
 
 	repo, cleanup := setupPostgres(t)
@@ -575,15 +579,15 @@ func TestVerifyChainIntegrity_WithGaps(t *testing.T) {
 	for i := int64(1); i <= 3; i++ {
 		saveBlock(t, ctx, repo, i)
 	}
-	// Block 5's parent_hash points to 4 (which doesn't exist in DB, but that's okay)
 	saveBlock(t, ctx, repo, 5)
 	saveBlock(t, ctx, repo, 6)
 
-	// This should pass because we only check consecutive blocks that exist
-	// Block 5 and 6 are consecutive and properly linked
 	err := repo.VerifyChainIntegrity(ctx, 1, 6)
-	if err != nil {
-		t.Errorf("expected valid chain with gaps (only consecutive blocks checked), got: %v", err)
+	if err == nil {
+		t.Fatal("expected the missing block 4 to be reported, got nil")
+	}
+	if !strings.Contains(err.Error(), "canonical block(s) 4 to 4 missing between blocks 3 and 5") {
+		t.Errorf("error should name the missing block 4, got: %v", err)
 	}
 }
 

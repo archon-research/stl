@@ -21,6 +21,13 @@ type mockBlockStateRepository struct {
 	chainIntegrityError error
 	orphanOnlyHeights   []int64
 	orphanOnlyErr       error
+	backfillWatermark   int64
+
+	// chainIntegrityViolationAt reports a violation only when that height falls
+	// inside the range VerifyChainIntegrity is asked to check; verifiedTo
+	// records the upper bound the service actually asked for.
+	chainIntegrityViolationAt int64
+	verifiedTo                int64
 }
 
 func (m *mockBlockStateRepository) SaveBlock(ctx context.Context, state outbound.BlockState) (int, error) {
@@ -79,7 +86,7 @@ func (m *mockBlockStateRepository) GetMaxBlockNumber(ctx context.Context) (int64
 }
 
 func (m *mockBlockStateRepository) GetBackfillWatermark(ctx context.Context) (int64, error) {
-	return 0, nil
+	return m.backfillWatermark, nil
 }
 
 func (m *mockBlockStateRepository) SetBackfillWatermark(ctx context.Context, watermark int64) error {
@@ -95,6 +102,13 @@ func (m *mockBlockStateRepository) FindGaps(ctx context.Context, minBlock, maxBl
 }
 
 func (m *mockBlockStateRepository) VerifyChainIntegrity(ctx context.Context, fromBlock, toBlock int64) error {
+	m.verifiedTo = toBlock
+	if m.chainIntegrityViolationAt > 0 &&
+		m.chainIntegrityViolationAt >= fromBlock && m.chainIntegrityViolationAt <= toBlock {
+		return fmt.Errorf("chain integrity violation: canonical block(s) %d to %d missing between blocks %d and %d",
+			m.chainIntegrityViolationAt, m.chainIntegrityViolationAt,
+			m.chainIntegrityViolationAt-1, m.chainIntegrityViolationAt+1)
+	}
 	return m.chainIntegrityError
 }
 
@@ -746,6 +760,147 @@ func TestService_OrphanOnlyHeights(t *testing.T) {
 			}
 			if tt.wantStatus == StatusFailed && !strings.Contains(got.Message, "25395651") {
 				t.Errorf("message %q should name the offending height", got.Message)
+			}
+		})
+	}
+}
+
+// TestService_OrphanOnlyHeights_ReportsExactCountAndTruncatesMessage: a reorg
+// storm must be reported at its real size, not at the length of the list the
+// message can carry.
+func TestService_OrphanOnlyHeights_ReportsExactCountAndTruncatesMessage(t *testing.T) {
+	heights := make([]int64, 150)
+	for i := range heights {
+		heights[i] = int64(25000000 + i)
+	}
+
+	repo := &mockBlockStateRepository{
+		minBlockNumber:    1,
+		maxBlockNumber:    30000000,
+		orphanOnlyHeights: heights,
+	}
+
+	config := DefaultConfig()
+	config.ValidateChainIntegrity = true
+	config.ValidateReorgs = false
+	config.SpotCheckCount = 0
+
+	svc, err := NewService(config, repo, &mockBlockVerifier{})
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	report, err := svc.Validate(context.Background())
+	if err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	got := findCheck(t, report, "Orphan-only heights")
+	if got.Status != StatusFailed {
+		t.Fatalf("got status %q, want %q", got.Status, StatusFailed)
+	}
+	if !strings.Contains(got.Message, "150 height(s)") {
+		t.Errorf("message %q should report the exact count", got.Message)
+	}
+	if !strings.Contains(got.Message, "25000099") {
+		t.Errorf("message %q should list the first 100 heights", got.Message)
+	}
+	if strings.Contains(got.Message, "25000100") {
+		t.Errorf("message %q should list no more than the first 100 heights", got.Message)
+	}
+	if !strings.Contains(got.Message, "(+50 more)") {
+		t.Errorf("message %q should summarise the heights it does not list", got.Message)
+	}
+
+	details, ok := got.Details["orphan_only_heights"].([]int64)
+	if !ok {
+		t.Fatalf("Details[orphan_only_heights] = %T, want []int64", got.Details["orphan_only_heights"])
+	}
+	if len(details) != len(heights) {
+		t.Errorf("Details carries %d heights, want %d", len(details), len(heights))
+	}
+}
+
+// TestService_ChainIntegrity_BoundedByWatermark: everything above the backfill
+// watermark is the gap filler's live domain, where an out-of-order arrival is a
+// hole for seconds. Verifying it would fail an hourly run on a gap that
+// backfill_watermark_lag already covers.
+func TestService_ChainIntegrity_BoundedByWatermark(t *testing.T) {
+	tests := []struct {
+		name            string
+		fromBlock       int64
+		watermark       int64
+		violationAt     int64
+		wantStatus      string
+		wantVerifiedTo  int64
+		wantMsgContains string
+	}{
+		{
+			name:            "gap above the watermark is not verified",
+			watermark:       500,
+			violationAt:     800,
+			wantStatus:      StatusPassed,
+			wantVerifiedTo:  500,
+			wantMsgContains: "watermark 500",
+		},
+		{
+			name:           "hole below the watermark fails",
+			watermark:      500,
+			violationAt:    300,
+			wantStatus:     StatusFailed,
+			wantVerifiedTo: 500,
+		},
+		{
+			name:           "unset watermark verifies the whole range",
+			watermark:      0,
+			violationAt:    800,
+			wantStatus:     StatusFailed,
+			wantVerifiedTo: 1000,
+		},
+		{
+			name:            "watermark below the range start skips the check",
+			fromBlock:       900,
+			watermark:       500,
+			wantStatus:      StatusPassed,
+			wantVerifiedTo:  0,
+			wantMsgContains: "watermark 500 is below the range start 900",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := &mockBlockStateRepository{
+				minBlockNumber:            1,
+				maxBlockNumber:            1000,
+				backfillWatermark:         tt.watermark,
+				chainIntegrityViolationAt: tt.violationAt,
+			}
+
+			config := DefaultConfig()
+			config.FromBlock = tt.fromBlock
+			config.ValidateChainIntegrity = true
+			config.ValidateReorgs = false
+			config.SpotCheckCount = 0
+
+			svc, err := NewService(config, repo, &mockBlockVerifier{})
+			if err != nil {
+				t.Fatalf("NewService() error = %v", err)
+			}
+
+			report, err := svc.Validate(context.Background())
+			if err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+
+			got := findCheck(t, report, "Chain Integrity")
+			if got.Status != tt.wantStatus {
+				t.Errorf("got status %q, want %q (message %q)", got.Status, tt.wantStatus, got.Message)
+			}
+			if repo.verifiedTo != tt.wantVerifiedTo {
+				t.Errorf("verified up to block %d, want %d", repo.verifiedTo, tt.wantVerifiedTo)
+			}
+			if tt.wantMsgContains != "" && !strings.Contains(got.Message, tt.wantMsgContains) {
+				t.Errorf("message %q should contain %q", got.Message, tt.wantMsgContains)
 			}
 		})
 	}
