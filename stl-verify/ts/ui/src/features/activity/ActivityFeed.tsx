@@ -1086,8 +1086,10 @@ function ActivityTable({
 
 type ActivityResultsProps = ActivityTableProps & {
   error: string | null;
-  // Rows fetched before the search filter narrows them: only a first load with
-  // nothing on screen yet shows the skeleton, a refetch keeps the current rows.
+  // Rows fetched before the search filter narrows them: the skeleton shows
+  // only while nothing is on screen, so a refetch over rows already fetched
+  // leaves them up. A filter change is a new query key with no rows of its
+  // own, so that one does show the skeleton.
   totalEventCount: number;
   emptyDescription: string;
 };
