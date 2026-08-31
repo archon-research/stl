@@ -32,7 +32,7 @@ For any UI change, confirm:
 6. Overlays: drawer and tooltip use tokenized overlay colors and handle focus correctly. Tooltip bubbles come from the upstream `tooltip` recipe — a bubble rendering as bare unpositioned text means the recipe is missing, not mis-styled.
 7. Empty, loading, and error: each data region degrades gracefully.
 8. Loading placeholders: every region uses `SkeletonStack`/`SkeletonRows`, which now pulse by default. Check the pulse runs, that no skeleton is brighter than its resting state, and that it goes static under `prefers-reduced-motion`.
-9. Row expansion (`ActivityFeed`): the expander column is discoverable, the detail panel loads per transaction, and expanding a second row leaves the first correct. Re-expanding refetches — there is no per-hash cache at HEAD.
+9. Row expansion (`ActivityFeed`): the expander column is discoverable, the detail panel loads per transaction, and expanding a second row leaves the first correct. Re-expanding a row already seen issues no request — the events are cached per tx hash for an hour, since a settled transaction's events do not change. A second request on re-expand means the cache key moved, or `staleTime`/`gcTime` on `CACHE.settledTx` dropped below the gap between expansions — the panel unmounts on collapse, so `gcTime` is what carries the entry across.
 10. Styling coverage: `panda.config.ts` narrows `staticCss` to the recipes this app renders, so a newly imported design-system component renders **completely unstyled** until its recipe key is added. Any component that suddenly looks like unstyled HTML is this, not a token bug.
 
 ## Known visual-risk areas

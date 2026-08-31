@@ -100,7 +100,7 @@ async function main() {
     // (proxy_address, chain_id), so this shape is reachable — for a proxy the
     // axis-synome contract does not know, since `_index_proxies` raises on a
     // duplicate address for contract-known ones. A repeat here would make
-    // `getAllocationsForProxies` fetch that proxy twice and double-count it.
+    // `the per-proxy allocation queries` fetch that proxy twice and double-count it.
     {
       const offContractMainnet = buildPrimeRow({
         address: '0xaaaa000000000000000000000000000000000a',

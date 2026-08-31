@@ -1,4 +1,4 @@
-/** Every endpoint `ui/src/lib/api.ts` calls, in one array. */
+/** Every endpoint `ui/src/lib/queries.ts` calls, in one array. */
 import type { MockHandler } from '@archon-research/http-client-msw';
 
 import { allocationHandlers } from './allocations.ts';

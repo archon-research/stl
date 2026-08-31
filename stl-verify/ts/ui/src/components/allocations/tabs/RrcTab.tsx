@@ -3,27 +3,30 @@ import {
   ErrorState,
   SkeletonStack,
 } from '@archon-research/design-system';
-import { useEffect, useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { useMemo } from 'react';
 
 import { css, cx } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import { getRrc } from '../../../lib/api';
 import {
   formatPercentValue,
   formatTokenAmount,
   formatUsdValue,
 } from '../../../lib/dashboard';
-import { isAbortError, toErrorMessage } from '../../../lib/errors';
-import { logging } from '../../../lib/logging';
+import { toQueryErrorMessage } from '../../../lib/errors';
 import { showsReference } from '../../../lib/provenance';
+import {
+  DISABLED_ADDRESS,
+  DISABLED_CHAIN_ID,
+  rrcQuery,
+} from '../../../lib/queries';
 import type {
   Allocation,
   AllocationRiskCapital,
   PrimeRiskCapital,
   Prime,
   Provenance,
-  Rrc,
   RrcResult,
 } from '../../../types/allocation';
 import { ProtocolLogo, SummaryMetric, TokenLogo } from '../../shared';
@@ -236,15 +239,13 @@ export function RrcTab({
   selectedPrime,
   riskCapital,
 }: RrcTabProps) {
-  const [rrc, setRrc] = useState<Rrc | null>(null);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-
   const receiptTokenId = selectedReceiptToken?.receipt_token_id ?? null;
   const chainId = selectedReceiptToken?.chain_id ?? null;
+  // Falsy rather than nullish, matching the other two drawer reads: an empty
+  // address would still build a request path that looks well-formed.
   const receiptTokenAddress =
-    selectedReceiptToken?.receipt_token_address ?? null;
-  const primeAddress = selectedPrime?.address ?? null;
+    selectedReceiptToken?.receipt_token_address || null;
+  const primeAddress = selectedPrime?.address || null;
   // The RRC endpoint scales a pool share to the exact (chain_id, prime
   // address) pair, so it only resolves for the chain selectedPrime.address
   // actually holds a position on — the prime's primary proxy's chain, today
@@ -259,61 +260,26 @@ export function RrcTab({
     selectedPrime !== null &&
     chainId !== selectedPrime.chain_id;
 
-  useEffect(() => {
-    if (
-      !isEnabled ||
-      chainId === null ||
-      receiptTokenId === null ||
-      receiptTokenAddress === null ||
-      primeAddress === null ||
-      isChainMismatch
-    ) {
-      setRrc(null);
-      setErrorMessage(null);
-      setIsLoading(false);
-      return;
-    }
+  const canLoadRrc =
+    isEnabled &&
+    chainId !== null &&
+    receiptTokenId !== null &&
+    receiptTokenAddress !== null &&
+    primeAddress !== null &&
+    !isChainMismatch;
 
-    const controller = new AbortController();
+  const rrcResult = useQuery({
+    ...rrcQuery(
+      chainId ?? DISABLED_CHAIN_ID,
+      receiptTokenAddress ?? DISABLED_ADDRESS,
+      primeAddress ?? DISABLED_ADDRESS,
+    ),
+    enabled: canLoadRrc,
+  });
 
-    setIsLoading(true);
-    setErrorMessage(null);
-    setRrc(null);
-
-    void getRrc(chainId, receiptTokenAddress, primeAddress, controller.signal)
-      .then((response) => {
-        setRrc(response);
-      })
-      .catch((error: unknown) => {
-        if (isAbortError(error)) {
-          return;
-        }
-
-        logging.error('Failed to load required risk capital (RRC)', {
-          error,
-          chainId,
-          receiptTokenId,
-          receiptTokenAddress,
-          primeAddress,
-        });
-        setErrorMessage(toErrorMessage(error));
-        setRrc(null);
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) {
-          setIsLoading(false);
-        }
-      });
-
-    return () => controller.abort();
-  }, [
-    chainId,
-    isChainMismatch,
-    isEnabled,
-    primeAddress,
-    receiptTokenAddress,
-    receiptTokenId,
-  ]);
+  const rrc = rrcResult.data ?? null;
+  const isLoading = canLoadRrc && rrcResult.isPending;
+  const errorMessage = toQueryErrorMessage(rrcResult.error);
 
   // Which model the prime's reported requirement comes from, and Sky's figures
   // for the same position: the RRC response carries neither, since it runs every

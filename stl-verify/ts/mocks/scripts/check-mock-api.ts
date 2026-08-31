@@ -21,8 +21,8 @@ import type { paths } from '../src/schema.ts';
 
 /**
  * Drives the mock handlers through the same `createApiClient` the app builds its
- * API layer on — `ui/src/lib/api.ts` reaches it via `http-client-react`, which
- * re-exports this exact function.
+ * API layer on — `ui/src/lib/api-client.ts` reaches it via `http-client-react`,
+ * which re-exports this exact function.
  *
  * The value it holds is not coverage: a handler path that does not match, a query
  * param the client serializes differently than the handler reads it, or an

@@ -6,25 +6,30 @@ import {
   Panel,
   SkeletonStack,
 } from '@archon-research/design-system';
+import { useQuery } from '@tanstack/react-query';
 import { ChevronDown, ChevronUp } from 'lucide-react';
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { lazy, Suspense } from 'react';
 
 import { css } from '#styled-system/css';
 
-import {
-  getDataSources,
-  getToken,
-  getTokenPrice,
-  getTokens,
-} from '../../lib/api';
 import {
   formatDateTime,
   formatFreshnessLabel,
   formatUsdPrice,
 } from '../../lib/dashboard';
-import { isAbortError, toErrorMessage } from '../../lib/errors';
+import { toQueryErrorMessage } from '../../lib/errors';
 import { logging } from '../../lib/logging';
-import type { DataSource, Token, TokenPrice } from '../../types/allocation';
+import {
+  dataSourcesQuery,
+  DISABLED_ADDRESS,
+  DISABLED_CHAIN_ID,
+  tokenPriceQuery,
+  tokenQuery,
+  tokensQuery,
+} from '../../lib/queries';
+import type { DataSource } from '../../types/allocation';
+
+const NO_SOURCES: DataSource[] = [];
 
 // The panel is collapsed on first paint and its markdown is a module constant,
 // so the renderer can arrive with the body instead of with the app shell.
@@ -90,146 +95,56 @@ export function MethodologyPanel({
   selectedTokenSymbol,
   selectedChainId,
 }: MethodologyPanelProps) {
-  const [sources, setSources] = useState<DataSource[]>([]);
-  const [methodologyText] = useState<string>(METHODOLOGY_MARKDOWN);
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [catalogPreviewCount, setCatalogPreviewCount] = useState<number>(0);
-  const [selectedToken, setSelectedToken] = useState<Token | null>(null);
-  const [tokenPrice, setTokenPrice] = useState<TokenPrice | null>(null);
-  const [isTokenLoading, setIsTokenLoading] = useState(false);
-  const [tokenError, setTokenError] = useState<string | null>(null);
+  // Every read below is gated on the panel being open: it is collapsed on first
+  // paint, and none of this belongs in the app's first wave of requests.
+  const dataSourcesResult = useQuery({
+    ...dataSourcesQuery(),
+    enabled: isOpen,
+  });
+  const sources = dataSourcesResult.data ?? NO_SOURCES;
+  const isLoading = isOpen && dataSourcesResult.isPending;
+  const error = toQueryErrorMessage(dataSourcesResult.error);
 
-  useEffect(() => {
-    if (!isOpen) {
-      return;
-    }
+  const chainId = selectedChainId ?? null;
+  // Falsy rather than nullish: an empty address is as unaskable as an absent
+  // one, and it would still build a request path that looks well-formed.
+  const tokenAddress = selectedTokenAddress || null;
+  const canLoadToken = isOpen && chainId !== null && tokenAddress !== null;
 
-    const abortController = new AbortController();
+  const tokenResult = useQuery({
+    ...tokenQuery(
+      chainId ?? DISABLED_CHAIN_ID,
+      tokenAddress ?? DISABLED_ADDRESS,
+    ),
+    enabled: canLoadToken,
+  });
+  const tokenPriceResult = useQuery({
+    ...tokenPriceQuery(
+      chainId ?? DISABLED_CHAIN_ID,
+      tokenAddress ?? DISABLED_ADDRESS,
+    ),
+    enabled: canLoadToken,
+  });
+  // The catalogue slice this token's symbol belongs to, read only for its size.
+  const catalogResult = useQuery({
+    ...tokensQuery({
+      chain_id: chainId ?? DISABLED_CHAIN_ID,
+      symbol: selectedTokenSymbol ?? undefined,
+      limit: 200,
+    }),
+    enabled: canLoadToken,
+  });
 
-    async function fetchSources() {
-      setIsLoading(true);
-      setError(null);
-
-      try {
-        const response = await getDataSources(abortController.signal);
-        setSources(response.sources ?? []);
-      } catch (err) {
-        if (isAbortError(err)) {
-          return;
-        }
-
-        const errorMsg = toErrorMessage(err);
-        setError(errorMsg);
-        logging.error('Failed to fetch data sources', {
-          error: err,
-          errorMessage: errorMsg,
-        });
-      } finally {
-        setIsLoading(false);
-      }
-    }
-
-    // `fetchSources` handles its own failures, so there is nothing to await.
-    void fetchSources();
-
-    return () => abortController.abort();
-  }, [isOpen]);
-
-  useEffect(() => {
-    if (!isOpen) {
-      return;
-    }
-
-    if (
-      !selectedTokenAddress ||
-      selectedChainId === null ||
-      selectedChainId === undefined
-    ) {
-      setSelectedToken(null);
-      setTokenPrice(null);
-      setCatalogPreviewCount(0);
-      setTokenError(null);
-      setIsTokenLoading(false);
-      return;
-    }
-
-    const chainId = selectedChainId;
-    const tokenAddress = selectedTokenAddress;
-
-    const abortController = new AbortController();
-
-    async function fetchTokenTransparency() {
-      setIsTokenLoading(true);
-      setTokenError(null);
-      setSelectedToken(null);
-      setTokenPrice(null);
-      setCatalogPreviewCount(0);
-
-      const [tokenResult, tokenPriceResult, tokensResult] =
-        await Promise.allSettled([
-          getToken(chainId, tokenAddress, abortController.signal),
-          getTokenPrice(chainId, tokenAddress, abortController.signal),
-          getTokens(
-            {
-              chain_id: chainId,
-              symbol: selectedTokenSymbol ?? undefined,
-              limit: 200,
-            },
-            abortController.signal,
-          ),
-        ]);
-
-      if (abortController.signal.aborted) {
-        return;
-      }
-
-      if (tokenResult.status === 'fulfilled') {
-        setSelectedToken(tokenResult.value);
-      } else {
-        setSelectedToken(null);
-        const errorMsg = toErrorMessage(tokenResult.reason);
-        setTokenError(errorMsg);
-        logging.error('Failed to fetch selected token from catalog', {
-          error: tokenResult.reason,
-          errorMessage: errorMsg,
-          chainId,
-          tokenAddress,
-        });
-      }
-
-      if (tokenPriceResult.status === 'fulfilled') {
-        setTokenPrice(tokenPriceResult.value);
-      } else {
-        setTokenPrice(null);
-        const errorMsg = toErrorMessage(tokenPriceResult.reason);
-        setTokenError((previous) => previous ?? errorMsg);
-        logging.error('Failed to fetch selected token price', {
-          error: tokenPriceResult.reason,
-          errorMessage: errorMsg,
-          chainId,
-          tokenAddress,
-        });
-      }
-
-      if (tokensResult.status === 'fulfilled') {
-        setCatalogPreviewCount(tokensResult.value.length);
-      } else {
-        logging.warn('Failed to fetch token catalog preview', {
-          error: tokensResult.reason,
-          selectedChainId,
-          selectedTokenSymbol,
-        });
-        setCatalogPreviewCount(0);
-      }
-
-      setIsTokenLoading(false);
-    }
-
-    void fetchTokenTransparency();
-
-    return () => abortController.abort();
-  }, [isOpen, selectedChainId, selectedTokenAddress, selectedTokenSymbol]);
+  const selectedToken = tokenResult.data ?? null;
+  const tokenPrice = tokenPriceResult.data ?? null;
+  const catalogPreviewCount = catalogResult.data?.length ?? 0;
+  const isTokenLoading =
+    canLoadToken && (tokenResult.isPending || tokenPriceResult.isPending);
+  // The catalogue count degrades to zero on its own, so only the two reads the
+  // block is actually about can put it into its error state.
+  const tokenError =
+    toQueryErrorMessage(tokenResult.error) ??
+    toQueryErrorMessage(tokenPriceResult.error);
 
   return (
     <div
@@ -332,7 +247,7 @@ export function MethodologyPanel({
                   onError={reportMarkdownLoadError}
                 >
                   <Suspense fallback={<SkeletonStack count={3} />}>
-                    <MethodologyMarkdown markdown={methodologyText} />
+                    <MethodologyMarkdown markdown={METHODOLOGY_MARKDOWN} />
                   </Suspense>
                 </ErrorBoundary>
               </div>

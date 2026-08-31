@@ -4,6 +4,7 @@ import { RouterProvider } from '@tanstack/react-router';
 import { createRoot } from 'react-dom/client';
 
 import { logging } from './lib/logging';
+import { createAppQueryClient } from './lib/query-client';
 import { router } from './router/routes';
 
 // Required global stylesheet side effects.
@@ -41,7 +42,7 @@ createRoot(document.getElementById('root')!).render(
     }}
   >
     <ThemeProvider>
-      <HttpProvider>
+      <HttpProvider client={createAppQueryClient()}>
         <RouterProvider router={router} />
       </HttpProvider>
     </ThemeProvider>
