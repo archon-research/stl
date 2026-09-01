@@ -2485,6 +2485,81 @@ func newUnseededChainRepository(t *testing.T, ctx context.Context) *BlockStateRe
 	return NewBlockStateRepository(blockstatePool, chainID, nil)
 }
 
+// TestRewindBackfillWatermark pins the rewind against the SQL the reorg commit
+// and the stale-chain recovery share: the watermark only ever moves down, and
+// the rewind count is bumped whether or not it moved — a no-op rewind that left
+// the count alone is what let a compare-and-set match across a reorg and retire
+// the height that reorg had just emptied (ARCT-379).
+func TestRewindBackfillWatermark(t *testing.T) {
+	tests := []struct {
+		name          string
+		unseededChain bool
+		to            int64
+		wantPrevious  int64
+		wantRewound   bool
+		wantCursor    outbound.BackfillCursor
+	}{
+		{
+			name:         "a target below the watermark lowers it",
+			to:           90,
+			wantPrevious: 100,
+			wantRewound:  true,
+			wantCursor:   outbound.BackfillCursor{Watermark: 90, RewindCount: 3},
+		},
+		{
+			name:         "a target at the watermark counts without moving it",
+			to:           100,
+			wantPrevious: 100,
+			wantCursor:   outbound.BackfillCursor{Watermark: 100, RewindCount: 3},
+		},
+		{
+			name:         "a target above the watermark counts without raising it",
+			to:           120,
+			wantPrevious: 100,
+			wantCursor:   outbound.BackfillCursor{Watermark: 100, RewindCount: 3},
+		},
+		{
+			name:          "a chain with no row is seeded unset and counted",
+			unseededChain: true,
+			to:            90,
+			wantCursor:    outbound.BackfillCursor{RewindCount: 1},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo, cleanup := setupPostgres(t)
+			t.Cleanup(cleanup)
+
+			ctx := context.Background()
+			if tt.unseededChain {
+				repo = newUnseededChainRepository(t, ctx)
+			} else {
+				seedWatermark(t, ctx, repo, 100, 2)
+			}
+
+			previous, rewound, err := repo.RewindBackfillWatermark(ctx, tt.to)
+			if err != nil {
+				t.Fatalf("RewindBackfillWatermark: %v", err)
+			}
+			if previous != tt.wantPrevious {
+				t.Errorf("previous = %d, want %d", previous, tt.wantPrevious)
+			}
+			if rewound != tt.wantRewound {
+				t.Errorf("rewound = %v, want %v", rewound, tt.wantRewound)
+			}
+
+			cursor, err := repo.GetBackfillCursor(ctx)
+			if err != nil {
+				t.Fatalf("GetBackfillCursor: %v", err)
+			}
+			if cursor != tt.wantCursor {
+				t.Errorf("cursor = %+v, want %+v", cursor, tt.wantCursor)
+			}
+		})
+	}
+}
+
 // TestVerifyChainIntegrity_ReportsFirstViolation covers the ARCT-379 hole: two
 // canonical rows with a missing height between them used to read as a valid
 // chain, because only pairs where prev = number - 1 were compared.
