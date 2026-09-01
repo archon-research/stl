@@ -14,6 +14,14 @@
 --
 -- Rows predating this migration keep one version whose valid_from is their created_at. Their real
 -- change history was overwritten before the conversion and is not recoverable.
+--
+-- This file must sort LAST among migrations that touch oracle_asset. Dropping the pre-conversion
+-- unique indexes (oracle_asset_nonfeed_unique / _feed_unique) below leaves any earlier-dated
+-- `INSERT ... ON CONFLICT (oracle_id, token_id) ...` with no constraint to match, which fails the
+-- whole run on a fresh database: that is exactly how 20260831_140000 broke this branch. It is
+-- dated after that seed rather than at the ticket's start date for that reason. A new migration
+-- that conflict-targets those indexes must land BEFORE this one, or be written against the
+-- append-on-change key (oracle_id, token_id, feed_key, processing_version) instead.
 
 -- The stored generated column below rewrites the table under ACCESS EXCLUSIVE, and the PK swap
 -- and index builds are non-concurrent, all in the migrator's single transaction. oracle_asset is
@@ -96,4 +104,4 @@ BEGIN
     END LOOP;
 END $$;
 
-INSERT INTO migrations (filename) VALUES ('20260821_120000_convert_oracle_asset_append_on_change.sql') ON CONFLICT (filename) DO NOTHING;
+INSERT INTO migrations (filename) VALUES ('20260901_120000_convert_oracle_asset_append_on_change.sql') ON CONFLICT (filename) DO NOTHING;
