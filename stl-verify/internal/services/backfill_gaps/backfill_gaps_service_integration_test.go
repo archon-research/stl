@@ -839,7 +839,7 @@ func TestBackfillService_WatermarkLag_ClampedNonNegative(t *testing.T) {
 	}
 	// Watermark sits AHEAD of the canonical head (the post-orphaning state):
 	// head(5) - watermark(100) = -95 before clamping.
-	seedWatermark(t, ctx, repo, testChainID, 100)
+	seedWatermark(t, ctx, repo, testChainID, 100, 0)
 
 	rec := &fakeBackfillRecorder{}
 	svc, err := NewBackfillService(
@@ -1139,12 +1139,12 @@ func forkHash(number int64) string {
 // seedWatermark parks a chain's cursor. Seeding is SQL, not a port method:
 // production only moves the cursor through AdvanceBackfillWatermark's
 // compare-and-set or a reorg commit's rewind (ARCT-379).
-func seedWatermark(t *testing.T, ctx context.Context, repo *postgres.BlockStateRepository, chainID, watermark int64) {
+func seedWatermark(t *testing.T, ctx context.Context, repo *postgres.BlockStateRepository, chainID, watermark, generation int64) {
 	t.Helper()
 	if _, err := repo.Pool().Exec(ctx,
-		`INSERT INTO backfill_watermark (chain_id, watermark, generation) VALUES ($1, $2, 0)
+		`INSERT INTO backfill_watermark (chain_id, watermark, generation) VALUES ($1, $2, $3)
 		 ON CONFLICT (chain_id) DO UPDATE SET watermark = EXCLUDED.watermark, generation = EXCLUDED.generation`,
-		chainID, watermark); err != nil {
+		chainID, watermark, generation); err != nil {
 		t.Fatalf("seed watermark: %v", err)
 	}
 }
@@ -1193,15 +1193,17 @@ func seedPublishedForkRun(t *testing.T, ctx context.Context, repo *postgres.Bloc
 
 // commitReorgAt commits the reorg the next canonical broadcast triggers: it
 // orphans every height above commonAncestor and inserts newHead as canonical,
-// leaving the heights in between stored only on the losing fork.
-func commitReorgAt(t *testing.T, ctx context.Context, repo *postgres.BlockStateRepository, client *testutil.MockBlockchainClient, commonAncestor, newHead int64) {
+// leaving the heights in between with no canonical row. orphanedHead is the row
+// the reorg replaces: a losing fork in most fixtures, and the chain's own
+// canonical head where the replaced broadcast was the dropped one.
+func commitReorgAt(t *testing.T, ctx context.Context, repo *postgres.BlockStateRepository, client *testutil.MockBlockchainClient, commonAncestor, newHead int64, orphanedHead string) {
 	t.Helper()
 	head := client.GetHeader(newHead)
 	if _, err := repo.HandleReorgAtomic(ctx, commonAncestor,
 		outbound.ReorgEvent{
 			DetectedAt:  time.Now(),
 			BlockNumber: newHead,
-			OldHash:     forkHash(newHead - 1),
+			OldHash:     orphanedHead,
 			NewHash:     head.Hash,
 			Depth:       int(newHead - commonAncestor),
 		},
@@ -1240,8 +1242,8 @@ func TestIntegration_BackfillLoop_FillsOrphanOnlyHeightAfterReorgRewind(t *testi
 
 	seedPublishedCanonicalChain(t, ctx, pgRepo, client, 1, droppedNum-1)
 	seedPublishedForkRun(t, ctx, pgRepo, client, droppedNum, droppedNum)
-	seedWatermark(t, ctx, pgRepo, 1, droppedNum)
-	commitReorgAt(t, ctx, pgRepo, client, droppedNum-1, droppedNum+1)
+	seedWatermark(t, ctx, pgRepo, 1, droppedNum, 0)
+	commitReorgAt(t, ctx, pgRepo, client, droppedNum-1, droppedNum+1, forkHash(droppedNum))
 
 	orphanOnly, err := pgRepo.FindOrphanOnlyHeights(ctx, 1, droppedNum+1)
 	if err != nil {
@@ -1297,9 +1299,9 @@ func TestIntegration_BackfillLoop_FillsOrphanOnlyHeightAfterReorgRewind(t *testi
 }
 
 // reorgInjectingRepo commits a reorg from inside a pass, at the named
-// repository call. Every named point sits between the scan advanceWatermark
-// computes its target from and the write it makes at the end, so each one is a
-// reorg the pass must not overwrite.
+// repository call, once. Every named point sits between the scan
+// advanceWatermark computes its target from and the write it makes at the end,
+// so each one is a reorg the pass must not overwrite.
 type reorgInjectingRepo struct {
 	*postgres.BlockStateRepository
 	at    string
@@ -1327,14 +1329,14 @@ func (r *reorgInjectingRepo) GetMaxBlockNumber(ctx context.Context) (int64, erro
 	return r.BlockStateRepository.GetMaxBlockNumber(ctx)
 }
 
-func (r *reorgInjectingRepo) GetMinUnpublishedBlock(ctx context.Context) (int64, bool, error) {
-	r.trigger("GetMinUnpublishedBlock")
-	return r.BlockStateRepository.GetMinUnpublishedBlock(ctx)
-}
-
+// The integrity check is a pass's last read before the compare-and-set, so a
+// reorg fired once it has passed is one only the cursor itself can refuse.
 func (r *reorgInjectingRepo) VerifyChainIntegrity(ctx context.Context, fromBlock, toBlock int64) error {
-	r.trigger("VerifyChainIntegrity")
-	return r.BlockStateRepository.VerifyChainIntegrity(ctx, fromBlock, toBlock)
+	err := r.BlockStateRepository.VerifyChainIntegrity(ctx, fromBlock, toBlock)
+	if err == nil {
+		r.trigger("VerifyChainIntegrity")
+	}
+	return err
 }
 
 // TestIntegration_BackfillLoop_ReorgRewindSurvivesConcurrentWatermarkAdvance is
@@ -1357,14 +1359,14 @@ func TestIntegration_BackfillLoop_ReorgRewindSurvivesConcurrentWatermarkAdvance(
 
 	seedPublishedCanonicalChain(t, ctx, pgRepo, client, 1, droppedNum-1)
 	seedPublishedForkRun(t, ctx, pgRepo, client, droppedNum, droppedNum)
-	seedWatermark(t, ctx, pgRepo, 1, droppedNum)
+	seedWatermark(t, ctx, pgRepo, 1, droppedNum, 0)
 
 	repo := &reorgInjectingRepo{
 		BlockStateRepository: pgRepo,
 		at:                   "GetMaxBlockNumber",
 		onNth:                2,
 		fire: func() {
-			commitReorgAt(t, ctx, pgRepo, client, droppedNum-1, droppedNum+1)
+			commitReorgAt(t, ctx, pgRepo, client, droppedNum-1, droppedNum+1, forkHash(droppedNum))
 		},
 	}
 
@@ -1415,89 +1417,73 @@ func TestIntegration_BackfillLoop_ReorgRewindSurvivesConcurrentWatermarkAdvance(
 	})
 }
 
-// TestIntegration_BackfillLoop_NoOpRewindStillBlocksTheAdvance is the ARCT-379
-// round-2 regression: the ordinary staging state has the watermark at head-1,
-// which is where a reorg's common ancestor lands too, so the rewind changes
-// nothing and a compare-and-set on the watermark alone still matches. The pass
-// then advances over the height the reorg had just orphaned, and no later pass
-// ever scans it again. Only a term every reorg commit changes can refuse it.
+// TestIntegration_BackfillLoop_NoOpRewindStillBlocksTheAdvance pins the term
+// that has to refuse the advance here. The ordinary staging state has the
+// watermark at head-1, which is where a reorg's common ancestor lands too, so
+// LEAST() leaves the watermark exactly where the pass read it and a
+// compare-and-set on the watermark alone still matches. The reorg is committed
+// once the pass's integrity check has passed — the last read before the write —
+// so nothing but the cursor's generation is left to catch it, and an advance
+// here retires the height the reorg just emptied.
 func TestIntegration_BackfillLoop_NoOpRewindStillBlocksTheAdvance(t *testing.T) {
-	tests := []string{"GetMinUnpublishedBlock", "VerifyChainIntegrity"}
+	pgRepo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
 
-	for _, at := range tests {
-		t.Run("reorg commits at "+at, func(t *testing.T) {
-			pgRepo, cleanup := setupPostgres(t)
-			t.Cleanup(cleanup)
+	ctx := context.Background()
 
-			ctx := context.Background()
+	const emptiedNum, newHead, generation int64 = 5, 6, 7
 
-			const droppedNum int64 = 5
+	client := newMockClient()
+	for i := int64(1); i <= newHead; i++ {
+		client.AddBlock(i, "")
+	}
 
-			client := newMockClient()
-			for i := int64(1); i <= droppedNum+1; i++ {
-				client.AddBlock(i, "")
-			}
+	seedPublishedCanonicalChain(t, ctx, pgRepo, client, 1, emptiedNum)
+	seedWatermark(t, ctx, pgRepo, 1, emptiedNum-1, generation)
 
-			seedPublishedCanonicalChain(t, ctx, pgRepo, client, 1, droppedNum-1)
-			seedPublishedForkRun(t, ctx, pgRepo, client, droppedNum, droppedNum)
-			// The watermark already sits at the common ancestor, so the reorg's
-			// rewind is a no-op and leaves the stored watermark untouched.
-			seedWatermark(t, ctx, pgRepo, 1, droppedNum-1)
+	repo := &reorgInjectingRepo{
+		BlockStateRepository: pgRepo,
+		at:                   "VerifyChainIntegrity",
+		onNth:                1,
+		fire: func() {
+			commitReorgAt(t, ctx, pgRepo, client, emptiedNum-1, newHead, client.GetHeader(emptiedNum).Hash)
+		},
+	}
 
-			repo := &reorgInjectingRepo{
-				BlockStateRepository: pgRepo,
-				at:                   at,
-				onNth:                1,
-				fire: func() {
-					commitReorgAt(t, ctx, pgRepo, client, droppedNum-1, droppedNum+1)
-				},
-			}
+	logs := &testutil.SlogRecorder{}
+	metrics := &fakeBackfillRecorder{}
+	cfg := BackfillConfigDefaults()
+	cfg.Logger = slog.New(logs)
+	cfg.Metrics = metrics
+	svc, err := NewBackfillService(cfg, client, repo, memory.NewBlockCache(), &integrationMockEventSink{})
+	if err != nil {
+		t.Fatalf("NewBackfillService: %v", err)
+	}
+	if err := svc.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
 
-			cfg := BackfillConfigDefaults()
-			// The stored head is still the losing fork here, so the boundary check
-			// would recover it before the race under test ever runs.
-			cfg.BoundaryCheckDepth = -1
-			svc, err := NewBackfillService(cfg, client, repo, memory.NewBlockCache(), &integrationMockEventSink{})
-			if err != nil {
-				t.Fatalf("NewBackfillService: %v", err)
-			}
-			if err := svc.RunOnce(ctx); err != nil {
-				t.Fatalf("RunOnce: %v", err)
-			}
+	cursor, err := pgRepo.GetBackfillCursor(ctx)
+	if err != nil {
+		t.Fatalf("GetBackfillCursor: %v", err)
+	}
+	if want := (outbound.BackfillCursor{Watermark: emptiedNum - 1, Generation: generation + 1}); cursor != want {
+		t.Fatalf("cursor = %+v, want %+v (the pass retired the height the reorg emptied)", cursor, want)
+	}
 
-			watermark, err := pgRepo.GetBackfillWatermark(ctx)
-			if err != nil {
-				t.Fatalf("GetBackfillWatermark: %v", err)
-			}
-			if watermark != droppedNum-1 {
-				t.Fatalf("watermark = %d, want %d (the pass advanced over the height the reorg orphaned)", watermark, droppedNum-1)
-			}
+	if got := metrics.SkippedAdvances(); got != 1 {
+		t.Errorf("skipped advances = %d, want 1", got)
+	}
+	if got := logs.CountInfo("watermark changed concurrently, skipping advance"); got != 1 {
+		t.Errorf("refused-advance log records = %d, want 1", got)
+	}
 
-			if err := svc.RunOnce(ctx); err != nil {
-				t.Fatalf("second RunOnce: %v", err)
-			}
-
-			got, err := pgRepo.GetBlockByNumber(ctx, droppedNum)
-			if err != nil {
-				t.Fatalf("GetBlockByNumber: %v", err)
-			}
-			if got == nil {
-				t.Fatalf("expected a canonical block at %d, got nil", droppedNum)
-			}
-			if want := client.GetHeader(droppedNum).Hash; got.Hash != want {
-				t.Errorf("hash = %s, want canonical %s", got.Hash, want)
-			}
-			if got.Version != 1 {
-				t.Errorf("version = %d, want 1 (the fork-A row keeps version 0)", got.Version)
-			}
-			heights, err := pgRepo.FindOrphanOnlyHeights(ctx, 1, droppedNum+1)
-			if err != nil {
-				t.Fatalf("FindOrphanOnlyHeights: %v", err)
-			}
-			if len(heights) != 0 {
-				t.Errorf("orphan-only heights = %v, want none", heights)
-			}
-		})
+	heights, err := pgRepo.FindOrphanOnlyHeights(ctx, 1, newHead)
+	if err != nil {
+		t.Fatalf("FindOrphanOnlyHeights: %v", err)
+	}
+	if len(heights) != 1 || heights[0] != emptiedNum {
+		t.Errorf("orphan-only heights = %v, want [%d] (still inside the gap finder's range)", heights, emptiedNum)
 	}
 }
 
@@ -1517,7 +1503,7 @@ func TestIntegration_AdvanceWatermark_ReachesHeadOnAContiguousChain(t *testing.T
 		client.AddBlock(i, "")
 	}
 	seedPublishedCanonicalChain(t, ctx, pgRepo, client, 1, head)
-	seedWatermark(t, ctx, pgRepo, 1, 2)
+	seedWatermark(t, ctx, pgRepo, 1, 2, 0)
 
 	cfg := BackfillConfigDefaults()
 	cfg.BoundaryCheckDepth = -1
@@ -1570,7 +1556,7 @@ func TestIntegration_BackfillLoop_StaleChainRecoveryRewindsWatermark(t *testing.
 		client.AddBlock(i, "")
 	}
 	seedPublishedCanonicalChain(t, ctx, pgRepo, client, 1, staleTo)
-	seedWatermark(t, ctx, pgRepo, 1, staleTo)
+	seedWatermark(t, ctx, pgRepo, 1, staleTo, 0)
 
 	// The chain moved on under the stored rows: both stale heights now serve a
 	// different hash, and the refetch of the lower one fails.
@@ -1659,8 +1645,8 @@ func TestIntegration_BackfillLoop_RefusesToUnOrphanLosingForkRun(t *testing.T) {
 
 	seedPublishedCanonicalChain(t, ctx, pgRepo, client, 1, forkFrom-1)
 	seedPublishedForkRun(t, ctx, pgRepo, client, forkFrom, forkTo)
-	seedWatermark(t, ctx, pgRepo, 1, forkTo)
-	commitReorgAt(t, ctx, pgRepo, client, forkFrom-1, forkTo+1)
+	seedWatermark(t, ctx, pgRepo, 1, forkTo, 0)
+	commitReorgAt(t, ctx, pgRepo, client, forkFrom-1, forkTo+1, forkHash(forkTo))
 
 	// The load-balanced node has not converged: it still serves the losing fork.
 	client.SetBlockHeader(forkFrom, forkHash(forkFrom), canonicalLow.ParentHash)
@@ -1781,7 +1767,7 @@ func TestIntegration_BackfillLoop_RefusesTheForkTheAnchorDoesNotDescendTo(t *tes
 			t.Fatalf("orphan %s: %v", hash, err)
 		}
 	}
-	seedWatermark(t, ctx, pgRepo, 1, contested-1)
+	seedWatermark(t, ctx, pgRepo, 1, contested-1, 0)
 
 	// The node serves the fork the successor does not descend from.
 	client.SetBlockHeader(contested, forkHash(contested), sharedParent)
