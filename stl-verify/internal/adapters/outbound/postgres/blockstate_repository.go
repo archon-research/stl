@@ -972,15 +972,17 @@ func (r *BlockStateRepository) VerifyParentLinks(ctx context.Context, fromBlock,
 
 // verifyOrderedPairs reports the first violation between two adjacent canonical
 // rows. The version tiebreak keeps two rows at one height in a deterministic
-// order, so the pair that reports them is always the same one.
+// order, so the pair that reports them is always the same one; it runs
+// descending to match idx_block_states_chain_number_version, which an ascending
+// tiebreak would leave to an Incremental Sort.
 func (r *BlockStateRepository) verifyOrderedPairs(ctx context.Context, fromBlock, toBlock int64, reportMissing bool) error {
 	// LAG leaves the range's first block unpaired, so it is never flagged: an
 	// unseeded chain's watermark starts at 0, far below its first block.
 	query := `
 		WITH ordered_blocks AS (
 			SELECT number, hash, parent_hash,
-				LAG(hash) OVER (ORDER BY number, version) as prev_hash,
-				LAG(number) OVER (ORDER BY number, version) as prev_number
+				LAG(hash) OVER (ORDER BY number, version DESC) as prev_hash,
+				LAG(number) OVER (ORDER BY number, version DESC) as prev_number
 			FROM block_states
 			WHERE chain_id = $1 AND NOT is_orphaned AND number >= $2 AND number <= $3
 		)

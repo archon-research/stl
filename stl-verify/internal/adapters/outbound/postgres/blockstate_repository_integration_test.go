@@ -2509,7 +2509,7 @@ func TestVerifyChainIntegrity_ReportsFirstViolation(t *testing.T) {
 			},
 			from:            100,
 			to:              105,
-			wantErrContains: "duplicate canonical rows at height 103",
+			wantErrContains: "duplicate canonical rows at height 103: 0xhash103_twin and 0xhash103",
 		},
 		{
 			name: "parent break below a missing height is reported first",
@@ -2632,7 +2632,7 @@ func TestVerifyParentLinks(t *testing.T) {
 			},
 			from:            100,
 			to:              105,
-			wantErrContains: "duplicate canonical rows at height 103",
+			wantErrContains: "duplicate canonical rows at height 103: 0xhash103_twin and 0xhash103",
 		},
 	}
 

@@ -508,8 +508,9 @@ func (r *BlockStateRepository) VerifyParentLinks(ctx context.Context, fromBlock,
 }
 
 // canonicalBlocksOver returns the canonical blocks in [fromBlock, toBlock],
-// ordered by number then version so two rows at one height keep a deterministic
-// order, as the postgres adapter's window does.
+// ordered by number ascending then version descending so two rows at one height
+// keep a deterministic order, matching the postgres adapter's window — whose
+// descending tiebreak is the one idx_block_states_chain_number_version holds.
 func (r *BlockStateRepository) canonicalBlocksOver(fromBlock, toBlock int64) []outbound.BlockState {
 	var blocks []outbound.BlockState
 	for _, b := range r.blocks {
@@ -521,7 +522,7 @@ func (r *BlockStateRepository) canonicalBlocksOver(fromBlock, toBlock int64) []o
 		if blocks[i].Number != blocks[j].Number {
 			return blocks[i].Number < blocks[j].Number
 		}
-		return blocks[i].Version < blocks[j].Version
+		return blocks[i].Version > blocks[j].Version
 	})
 	return blocks
 }
