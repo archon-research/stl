@@ -511,6 +511,121 @@ func TestIntegration_UpsertIdempotency(t *testing.T) {
 	}
 }
 
+// insertTestTokenlessPriceAsset registers a CoinGecko asset with no token row
+// (token_id NULL) and returns its id. Idempotent: the migration may already
+// seed the same source_asset_id.
+func insertTestTokenlessPriceAsset(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sourceID int64, sourceAssetID, symbol, name string) int64 {
+	t.Helper()
+	_, err := pool.Exec(ctx, `
+		INSERT INTO offchain_price_asset (source_id, source_asset_id, token_id, symbol, name, enabled, created_at, updated_at)
+		VALUES ($1, $2, NULL, $3, $4, true, NOW(), NOW())
+		ON CONFLICT (source_id, source_asset_id) DO NOTHING
+	`, sourceID, sourceAssetID, symbol, name)
+	if err != nil {
+		t.Fatalf("failed to insert token-less price asset: %v", err)
+	}
+	var assetID int64
+	if err := pool.QueryRow(ctx,
+		`SELECT id FROM offchain_price_asset WHERE source_id = $1 AND source_asset_id = $2`,
+		sourceID, sourceAssetID,
+	).Scan(&assetID); err != nil {
+		t.Fatalf("failed to read back token-less price asset: %v", err)
+	}
+	return assetID
+}
+
+func newIntegrationService(t *testing.T, pool *pgxpool.Pool, baseURL string) *Service {
+	t.Helper()
+	client, err := coingecko.NewClient(coingecko.ClientConfig{
+		APIKey:          "test-api-key",
+		BaseURL:         baseURL,
+		RateLimitPerMin: 10000,
+	})
+	if err != nil {
+		t.Fatalf("failed to create coingecko client: %v", err)
+	}
+	repo, err := postgres.NewPriceRepository(pool, nil, 0, 100)
+	if err != nil {
+		t.Fatalf("failed to create price repository: %v", err)
+	}
+	service, err := NewService(ServiceConfig{ChainID: 1, Concurrency: 2}, client, repo)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+	return service
+}
+
+func TestIntegration_FetchCurrentPrices_TokenlessAsset(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+	mockServer := setupMockCoinGeckoServer(t)
+	t.Cleanup(mockServer.Close)
+
+	var sourceID int64
+	if err := pool.QueryRow(ctx, `SELECT id FROM offchain_price_source WHERE name = 'coingecko'`).Scan(&sourceID); err != nil {
+		t.Fatalf("failed to get coingecko source: %v", err)
+	}
+	assetID := insertTestTokenlessPriceAsset(t, ctx, pool, sourceID, "ripple", "XRP", "XRP")
+
+	service := newIntegrationService(t, pool, mockServer.URL)
+
+	if err := service.FetchCurrentPrices(ctx, []string{"ripple"}); err != nil {
+		t.Fatalf("FetchCurrentPrices failed: %v", err)
+	}
+
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_asset_price WHERE asset_id = $1`, assetID).Scan(&count); err != nil {
+		t.Fatalf("failed to query offchain_asset_price: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 asset price record, got %d", count)
+	}
+}
+
+func TestIntegration_AssetPriceUpsertIdempotency(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+	mockServer := setupMockCoinGeckoServer(t)
+	t.Cleanup(mockServer.Close)
+
+	var sourceID int64
+	if err := pool.QueryRow(ctx, `SELECT id FROM offchain_price_source WHERE name = 'coingecko'`).Scan(&sourceID); err != nil {
+		t.Fatalf("failed to get coingecko source: %v", err)
+	}
+	assetID := insertTestTokenlessPriceAsset(t, ctx, pool, sourceID, "hyperliquid", "HYPE", "Hyperliquid")
+
+	service := newIntegrationService(t, pool, mockServer.URL)
+
+	from := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	if err := service.FetchHistoricalData(ctx, []string{"hyperliquid"}, from, to); err != nil {
+		t.Fatalf("FetchHistoricalData (first) failed: %v", err)
+	}
+	var countAfterFirst int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_asset_price WHERE asset_id = $1`, assetID).Scan(&countAfterFirst); err != nil {
+		t.Fatalf("failed to query offchain_asset_price count: %v", err)
+	}
+	if countAfterFirst == 0 {
+		t.Fatal("expected historical asset prices to be stored")
+	}
+
+	if err := service.FetchHistoricalData(ctx, []string{"hyperliquid"}, from, to); err != nil {
+		t.Fatalf("FetchHistoricalData (second) failed: %v", err)
+	}
+	var countAfterSecond int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_asset_price WHERE asset_id = $1`, assetID).Scan(&countAfterSecond); err != nil {
+		t.Fatalf("failed to query offchain_asset_price count: %v", err)
+	}
+	if countAfterFirst != countAfterSecond {
+		t.Errorf("expected idempotent upsert: first=%d, second=%d", countAfterFirst, countAfterSecond)
+	}
+}
+
 func TestIntegration_NoEnabledAssets(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)

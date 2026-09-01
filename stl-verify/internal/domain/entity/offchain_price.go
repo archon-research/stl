@@ -101,6 +101,50 @@ func (pa *PriceAsset) Validate() error {
 	return nil
 }
 
+// AssetPrice stores price data for assets with no token row (XRP, HYPE, native
+// BTC/SOL): keyed by the offchain_price_asset catalog row instead of a token_id,
+// because these assets have no on-chain address to make a token from.
+type AssetPrice struct {
+	AssetID      int64
+	SourceID     int16
+	PriceUSD     float64
+	MarketCapUSD *float64
+	VolumeUSD    *float64
+	Timestamp    time.Time
+}
+
+// NewAssetPrice creates a new AssetPrice entity with validation.
+func NewAssetPrice(assetID int64, sourceID int16, priceUSD float64, marketCapUSD *float64, volumeUSD *float64, timestamp time.Time) (*AssetPrice, error) {
+	ap := &AssetPrice{
+		AssetID:      assetID,
+		SourceID:     sourceID,
+		PriceUSD:     priceUSD,
+		MarketCapUSD: marketCapUSD,
+		VolumeUSD:    volumeUSD,
+		Timestamp:    timestamp,
+	}
+	if err := ap.Validate(); err != nil {
+		return nil, fmt.Errorf("NewAssetPrice: %w", err)
+	}
+	return ap, nil
+}
+
+func (ap *AssetPrice) Validate() error {
+	if ap.AssetID <= 0 {
+		return fmt.Errorf("assetID must be positive, got %d", ap.AssetID)
+	}
+	if ap.SourceID <= 0 {
+		return fmt.Errorf("sourceID must be positive, got %d", ap.SourceID)
+	}
+	if ap.PriceUSD < 0 {
+		return fmt.Errorf("priceUSD must be non-negative, got %f", ap.PriceUSD)
+	}
+	if ap.Timestamp.IsZero() {
+		return fmt.Errorf("timestamp must not be zero")
+	}
+	return nil
+}
+
 // TokenPrice stores price data for on-chain tokens.
 type TokenPrice struct {
 	TokenID      int64

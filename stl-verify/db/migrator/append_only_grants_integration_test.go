@@ -29,6 +29,8 @@ var convertedAppendOnlyTables = []string{
 	"morpho_adapter_state",
 	"morpho_vault_cap",
 	"morpho_vault_fee",
+	// VEC-652: append-only from birth, REVOKE in the creating migration.
+	"offchain_asset_price",
 	"psm3_alm_shares",
 	// VEC-402 (#625): SELECT+INSERT only, with the owner-side REVOKE too. position_classification
 	// is NOT here — #625 no longer touches it, and its own migration still grants full DML.

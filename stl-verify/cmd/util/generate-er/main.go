@@ -117,6 +117,7 @@ var tablePriority = map[string]int{
 	"offchain_price_asset":   51,
 	"onchain_token_price":    60,
 	"offchain_token_price":   61,
+	"offchain_asset_price":   62,
 	"block_states":           90,
 	"reorg_events":           91,
 	"backfill_watermark":     92,

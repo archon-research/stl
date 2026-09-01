@@ -332,9 +332,10 @@ type backfillActivities struct {
 // emptiness judgement to the workflow (see assertCoverage).
 //
 // Idempotent *within one build*, which is what makes Temporal's activity retries
-// safe. The write is ON CONFLICT DO NOTHING on the primary key
-// (token_id, source_id, processing_version, timestamp), and the
-// assign_processing_version_offchain_token_price trigger reuses the existing
+// safe. Both destination tables (offchain_token_price for token-keyed assets,
+// offchain_asset_price for assets with no token row) write ON CONFLICT DO NOTHING
+// on their primary key (id column, source_id, processing_version, timestamp), and
+// their assign_processing_version_* triggers reuse the existing
 // version only when a row with the same natural key AND the same build_id exists.
 // Re-running a range from a *different* build therefore lands a second copy at
 // processing_version+1 rather than doing nothing — additive by design, and read
