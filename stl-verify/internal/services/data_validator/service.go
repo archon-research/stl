@@ -229,12 +229,7 @@ func (s *Service) validateChainIntegrity(ctx context.Context, fromBlock, toBlock
 		verifyTo = min(toBlock, watermark)
 	}
 	if verifyTo < fromBlock {
-		return CheckResult{
-			Name:     name,
-			Status:   StatusSkipped,
-			Message:  fmt.Sprintf("Skipped: backfill watermark %d is below the range start %d", watermark, fromBlock),
-			Duration: time.Since(start),
-		}
+		return s.verifyParentLinksOnly(ctx, name, start, fromBlock, toBlock, watermark)
 	}
 
 	s.logger.Info("validating chain integrity",
@@ -253,6 +248,28 @@ func (s *Service) validateChainIntegrity(ctx context.Context, fromBlock, toBlock
 		Name:     name,
 		Status:   StatusPassed,
 		Message:  chainValidMessage(watermark, verifyTo, toBlock),
+		Duration: time.Since(start),
+	}
+}
+
+// verifyParentLinksOnly is the check that survives a watermark below the range
+// start. The break that pins the watermark there is the one a Skipped result
+// would hide until 30-day retention drops the rows and hides it for good.
+func (s *Service) verifyParentLinksOnly(ctx context.Context, name string, start time.Time, fromBlock, toBlock, watermark int64) CheckResult {
+	skipped := fmt.Sprintf("the strict missing-height check was skipped because backfill watermark %d is below the range start %d", watermark, fromBlock)
+
+	if err := s.blockStateRepo.VerifyParentLinks(ctx, fromBlock, toBlock); err != nil {
+		return CheckResult{
+			Name:     name,
+			Status:   StatusFailed,
+			Message:  fmt.Sprintf("%s (%s)", err.Error(), skipped),
+			Duration: time.Since(start),
+		}
+	}
+	return CheckResult{
+		Name:     name,
+		Status:   StatusPassed,
+		Message:  fmt.Sprintf("Parent links valid through block %d; %s", toBlock, skipped),
 		Duration: time.Since(start),
 	}
 }

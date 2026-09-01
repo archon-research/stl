@@ -894,11 +894,21 @@ func TestService_ChainIntegrity_BoundedByWatermark(t *testing.T) {
 			wantVerified: []outbound.BlockRange{{From: 1, To: 1000}},
 		},
 		{
-			name:            "watermark below the range start skips the check",
+			name:            "watermark below the range start still verifies the parent links",
 			fromBlock:       900,
 			watermark:       500,
-			wantStatus:      StatusSkipped,
+			wantStatus:      StatusPassed,
+			wantParentLinks: []outbound.BlockRange{{From: 900, To: 1000}},
 			wantMsgContains: "watermark 500 is below the range start 900",
+		},
+		{
+			name:            "a broken link is reported even when the strict check is skipped",
+			fromBlock:       900,
+			watermark:       500,
+			parentViolation: 950,
+			wantStatus:      StatusFailed,
+			wantParentLinks: []outbound.BlockRange{{From: 900, To: 1000}},
+			wantMsgContains: "at block 950",
 		},
 	}
 
