@@ -130,7 +130,7 @@ func newMulticaller(
 		return nil, nil, fmt.Errorf("creating the multicall client: %w", err)
 	}
 
-	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.bootstrap.ChainID, int64(buildID), "uniswap-v4-position-bootstrap")
+	archiveWrap, _, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.bootstrap.ChainID, int64(buildID), "uniswap-v4-position-bootstrap")
 	if err != nil {
 		ethClient.Close()
 		return nil, nil, err
