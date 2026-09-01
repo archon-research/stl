@@ -675,7 +675,7 @@ func benchSeedWatermark(t *testing.T, ctx context.Context, repo *BlockStateRepos
 	t.Helper()
 	if _, err := repo.Pool().Exec(ctx,
 		`INSERT INTO backfill_watermark (chain_id, watermark, generation) VALUES ($1, $2, 0)
-		 ON CONFLICT (chain_id) DO UPDATE SET watermark = EXCLUDED.watermark`,
+		 ON CONFLICT (chain_id) DO UPDATE SET watermark = EXCLUDED.watermark, generation = EXCLUDED.generation`,
 		repo.chainID, watermark); err != nil {
 		t.Fatalf("seed watermark: %v", err)
 	}

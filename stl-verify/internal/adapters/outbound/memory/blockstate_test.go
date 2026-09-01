@@ -515,3 +515,86 @@ func TestClearBlocksOrphaned_RefusesAnAlreadyCanonicalRowWhoseHeightIsTaken(t *t
 		t.Fatal("ClearBlocksOrphaned = nil, want a refusal: 0xhash103_twin already holds height 103")
 	}
 }
+
+// TestFindOrphanOnlyHeights_ReturnsAscending pins the order the port promises.
+// This adapter collects the heights out of a map, whose iteration order the
+// runtime shuffles on every call, and the validator prints the result for an
+// operator to work through.
+func TestFindOrphanOnlyHeights_ReturnsAscending(t *testing.T) {
+	ctx := context.Background()
+	repo := NewBlockStateRepository()
+
+	for _, number := range []int64{104, 100, 107, 102, 106, 101, 105, 103} {
+		hash := fmt.Sprintf("0xorphan%d", number)
+		saveCanonicalBlockAs(t, ctx, repo, number, hash, fmt.Sprintf("0xparent%d", number))
+		if err := repo.MarkBlockOrphaned(ctx, hash); err != nil {
+			t.Fatalf("orphan %d: %v", number, err)
+		}
+	}
+
+	got, err := repo.FindOrphanOnlyHeights(ctx, 100, 107)
+	if err != nil {
+		t.Fatalf("FindOrphanOnlyHeights: %v", err)
+	}
+	want := []int64{100, 101, 102, 103, 104, 105, 106, 107}
+	if !slices.Equal(got, want) {
+		t.Errorf("heights = %v, want %v", got, want)
+	}
+}
+
+// TestRewindBackfillWatermark pins both halves of the contract: the watermark
+// only ever moves down, and the generation counts the rewind whether or not it
+// moved — a no-op rewind that left the generation alone is what let a
+// compare-and-set match across a reorg and retire the hole it had just opened.
+func TestRewindBackfillWatermark(t *testing.T) {
+	tests := []struct {
+		name        string
+		to          int64
+		wantRewound bool
+		wantCursor  outbound.BackfillCursor
+	}{
+		{
+			name:        "a target below the watermark lowers it",
+			to:          90,
+			wantRewound: true,
+			wantCursor:  outbound.BackfillCursor{Watermark: 90, Generation: 3},
+		},
+		{
+			name:       "a target above the watermark counts without raising it",
+			to:         120,
+			wantCursor: outbound.BackfillCursor{Watermark: 100, Generation: 3},
+		},
+		{
+			name:       "a target at the watermark counts without moving it",
+			to:         100,
+			wantCursor: outbound.BackfillCursor{Watermark: 100, Generation: 3},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			repo := NewBlockStateRepository()
+			repo.SeedBackfillCursor(100, 2)
+
+			previous, rewound, err := repo.RewindBackfillWatermark(ctx, tt.to)
+			if err != nil {
+				t.Fatalf("RewindBackfillWatermark: %v", err)
+			}
+			if previous != 100 {
+				t.Errorf("previous = %d, want 100", previous)
+			}
+			if rewound != tt.wantRewound {
+				t.Errorf("rewound = %v, want %v", rewound, tt.wantRewound)
+			}
+
+			got, err := repo.GetBackfillCursor(ctx)
+			if err != nil {
+				t.Fatalf("GetBackfillCursor: %v", err)
+			}
+			if got != tt.wantCursor {
+				t.Errorf("cursor = %+v, want %+v", got, tt.wantCursor)
+			}
+		})
+	}
+}
