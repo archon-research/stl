@@ -3007,3 +3007,143 @@ async def seed_receipt_position_latest_rows(db_url: str) -> None:
             await _rtl_seed_positions(conn, prime_id=prime_id, tokens=tokens)
     finally:
         await conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Pass-through breakdown seed
+#
+# Directly-held allocated assets that are NOT registered receipt tokens, for
+# the risk-breakdown pass-through fallback: a self-referential holding split
+# across two proxies of one prime plus a proxy of another prime, a wrapper
+# whose underlying differs, an unpriced holding, a positionless token, and a
+# SubProxy treasury row that must never count as an allocation.
+# ---------------------------------------------------------------------------
+
+PT_SELF_TOKEN_HEX = "a1" * 20  # self-referential underlying (PYUSD shape)
+PT_WRAPPER_TOKEN_HEX = "a2" * 20  # underlying differs (sparkPrimeUSDC1 shape)
+PT_UNDERLYING_TOKEN_HEX = "a3" * 20  # the wrapper's underlying (USDC shape)
+PT_UNPRICED_TOKEN_HEX = "a4" * 20  # position but no oracle price
+PT_POSITIONLESS_TOKEN_HEX = "a5" * 20  # token row without any position
+PT_MIXED_TOKEN_HEX = "a6" * 20  # wrapper with one valued and one unvalued row
+PT_PROXY_A_HEX = "b1" * 20
+PT_PROXY_B_HEX = "b2" * 20
+PT_OTHER_PRIME_PROXY_HEX = "b3" * 20
+
+
+async def seed_pass_through_positions(db_url: str) -> None:
+    """Seed the pass-through breakdown scenarios into the given database."""
+    conn = await asyncpg.connect(db_url)
+    try:
+        async with conn.transaction():
+            prime_a = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('pt_prime_a', $1) RETURNING id",
+                bytes.fromhex("c1" * 20),
+            )
+            prime_b = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('pt_prime_b', $1) RETURNING id",
+                bytes.fromhex("c2" * 20),
+            )
+            oracle_id = await insert_oracle(conn, "pt_oracle", bytes.fromhex("d1" * 20))
+
+            self_id = await insert_token(conn, "PTSELF", 6, bytes.fromhex(PT_SELF_TOKEN_HEX))
+            wrapper_id = await insert_token(conn, "PTWRAP", 18, bytes.fromhex(PT_WRAPPER_TOKEN_HEX))
+            underlying_id = await insert_token(conn, "PTUSDC", 6, bytes.fromhex(PT_UNDERLYING_TOKEN_HEX))
+            unpriced_id = await insert_token(conn, "PTDARK", 18, bytes.fromhex(PT_UNPRICED_TOKEN_HEX))
+            await insert_token(conn, "PTIDLE", 18, bytes.fromhex(PT_POSITIONLESS_TOKEN_HEX))
+            mixed_id = await insert_token(conn, "PTMIX", 18, bytes.fromhex(PT_MIXED_TOKEN_HEX))
+
+            for token_id, price in [(self_id, "1.0002"), (underlying_id, "0.9999")]:
+                await insert_oracle_asset(conn, oracle_id, token_id)
+                await insert_onchain_price(conn, token_id=token_id, oracle_id=oracle_id, price=price, block=1000)
+
+            for proxy_hex, prime_id, balance, tx in [
+                (PT_PROXY_A_HEX, prime_a, "100.5", "01" * 32),
+                (PT_PROXY_B_HEX, prime_a, "50", "02" * 32),
+                (PT_OTHER_PRIME_PROXY_HEX, prime_b, "7", "03" * 32),
+            ]:
+                # prime_proxy is reference data (VEC-651): the prime filter
+                # resolves proxies through it, not through positions.
+                await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=proxy_hex)
+                await insert_allocation_position(
+                    conn,
+                    token_id=self_id,
+                    prime_id=prime_id,
+                    proxy_hex=proxy_hex,
+                    balance=Decimal(balance),
+                    block=2000,
+                    tx=tx,
+                    direction="in",
+                    underlying_value=Decimal(balance),
+                    underlying_token_id=self_id,
+                )
+            await insert_allocation_position(
+                conn,
+                token_id=self_id,
+                prime_id=prime_a,
+                proxy_hex=min(subproxy_addresses()).removeprefix("0x"),
+                balance=Decimal("100000"),
+                block=2000,
+                tx="04" * 32,
+                direction="in",
+            )
+
+            await insert_allocation_position(
+                conn,
+                token_id=wrapper_id,
+                prime_id=prime_a,
+                proxy_hex=PT_PROXY_A_HEX,
+                balance=Decimal("19650000"),
+                block=2000,
+                tx="05" * 32,
+                direction="in",
+                underlying_value=Decimal("20320203.5"),
+                underlying_token_id=underlying_id,
+            )
+            await insert_allocation_position(
+                conn,
+                token_id=unpriced_id,
+                prime_id=prime_a,
+                proxy_hex=PT_PROXY_A_HEX,
+                balance=Decimal("42"),
+                block=2000,
+                tx="06" * 32,
+                direction="in",
+            )
+
+            # Wrapper with one valued and one unvalued row: a partial
+            # SUM(underlying_value) must not surface as the full exposure.
+            await insert_allocation_position(
+                conn,
+                token_id=mixed_id,
+                prime_id=prime_a,
+                proxy_hex=PT_PROXY_A_HEX,
+                balance=Decimal("10"),
+                block=2000,
+                tx="07" * 32,
+                direction="in",
+                underlying_value=Decimal("9.9"),
+                underlying_token_id=underlying_id,
+            )
+            await insert_allocation_position(
+                conn,
+                token_id=mixed_id,
+                prime_id=prime_a,
+                proxy_hex=PT_PROXY_B_HEX,
+                balance=Decimal("5"),
+                block=2000,
+                tx="08" * 32,
+                direction="in",
+            )
+
+            await store_test_ids(
+                conn,
+                {
+                    "pt_self_id": self_id,
+                    "pt_wrapper_id": wrapper_id,
+                    "pt_underlying_id": underlying_id,
+                    "pt_unpriced_id": unpriced_id,
+                    "pt_mixed_id": mixed_id,
+                },
+            )
+    finally:
+        await conn.close()

@@ -19,6 +19,7 @@ from app.adapters.postgres.core_model_results_reader import PostgresCoreModelRes
 from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingReader
 from app.adapters.postgres.engine import create_db_engine
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
+from app.adapters.postgres.pass_through_breakdown_repository import PassThroughBreakdownRepository
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository, resolve_receipt_token_mapping
 from app.api.v1 import (
     allocations,
@@ -247,6 +248,8 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             app.state.crypto_lending_risk_service = crypto_lending_risk_service
             app.state.model_registry = model_registry
             app.state.receipt_token_lookup = receipt_token_repo
+            app.state.allocation_repository = allocation_repo
+            app.state.pass_through_breakdown_repository = PassThroughBreakdownRepository(engine)
 
             instrument_sqlalchemy_engine(engine)
             yield

@@ -1,10 +1,13 @@
 import logging
+from collections.abc import Callable
 from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from app.adapters.postgres.allocation_position_repository import AllocationRepository
+from app.adapters.postgres.pass_through_breakdown_repository import PassThroughBreakdownRepository
 from app.api._share_errors import share_error_503
 from app.api._validators import (
     ChainIdPath,
@@ -13,8 +16,10 @@ from app.api._validators import (
     TokenAddressPath,
 )
 from app.api.deps import (
+    get_allocation_repository_factory,
     get_crypto_lending_risk_service,
     get_model_registry,
+    get_pass_through_breakdown_repository_factory,
     get_receipt_token_lookup,
 )
 from app.api.v1._resolvers import (
@@ -42,6 +47,7 @@ router = APIRouter(tags=["risk"])
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
+_HUNDRED = Decimal("100")
 
 
 def _parse_optional_prime(prime_id: str | None) -> EthAddress | None:
@@ -97,7 +103,9 @@ class RiskBreakdownItemResponse(BaseModel):
         description=(
             "Latest USD price for the backing token. Null when the price is unavailable "
             "(e.g. a Maple custody asset whose attested price is missing); in that case "
-            "`amount` is 0 while `amount_usd` is still the attested USD value."
+            "`amount` is 0 while `amount_usd` is still the attested USD value. On a "
+            "pass-through breakdown the inverse holds: an unpriced asset keeps its real "
+            "`amount` and reports `amount_usd` 0."
         ),
         examples=["3340.55"],
     )
@@ -123,7 +131,14 @@ class RiskBreakdownItemResponse(BaseModel):
 class RiskBreakdownResponse(BaseModel):
     """Risk-enriched breakdown of a receipt token's backing collateral."""
 
-    receipt_token_id: int = Field(description="Surrogate id of the receipt token.", examples=[42])
+    receipt_token_id: int | None = Field(
+        description=(
+            "Surrogate id of the receipt token. Null when the breakdown is the "
+            "pass-through fallback for a directly-held allocated asset that is "
+            "not a registered receipt token."
+        ),
+        examples=[42],
+    )
     items: list[RiskBreakdownItemResponse] = Field(description="One entry per backing-token row.")
 
     model_config = {
@@ -197,6 +212,50 @@ async def _compute_risk_breakdown(
                 liquidation_bonus=item.liquidation_bonus,
             )
             for item in breakdown.items
+        ],
+    )
+
+
+async def _compute_pass_through_breakdown(
+    chain_id: int,
+    token_address: EthAddress,
+    prime_id: EthAddress | None,
+    repo: PassThroughBreakdownRepository,
+    allocation_repo: AllocationRepository,
+) -> RiskBreakdownResponse:
+    """Single-item breakdown for a directly-held allocated asset (no receipt token).
+
+    The asset backs itself one-to-one: `backing_pct` 100, no liquidation
+    params, null `receipt_token_id`. Still 404s when the token has no
+    allocation position, so the endpoint stays scoped to allocated assets
+    rather than becoming a generic price API.
+    """
+    proxies = await allocation_repo.list_prime_proxy_addresses(prime_id) if prime_id is not None else None
+    holding = await repo.get_holding(chain_id, token_address, proxies)
+    if holding is None:
+        raise HTTPException(404, "Token is neither a known receipt token nor a directly-held allocated asset")
+    # Info-level so an asset that SHOULD be registered in receipt_token stays
+    # observable instead of being silently served by the fallback.
+    logger.info(
+        "pass-through breakdown fallback engaged chain_id=%s token_address=%s token_id=%s",
+        chain_id,
+        token_address,
+        holding.token_id,
+    )
+    amount_usd = holding.amount * holding.price_usd if holding.price_usd is not None else _ZERO
+    return RiskBreakdownResponse(
+        receipt_token_id=None,
+        items=[
+            RiskBreakdownItemResponse(
+                token_id=holding.token_id,
+                symbol=holding.symbol,
+                amount=holding.amount,
+                backing_pct=_HUNDRED,
+                amount_usd=amount_usd,
+                price_usd=holding.price_usd,
+                liquidation_threshold=None,
+                liquidation_bonus=None,
+            )
         ],
     )
 
@@ -293,12 +352,17 @@ async def get_bad_debt_by_address(
         "Return the full risk-enriched collateral breakdown for the receipt-token "
         "position at `(chain_id, token_address)`.\n\n"
         "`token_address` is the **receipt-token** address (e.g. `aUSDC`, `spWETH`), "
-        "not the underlying ERC-20 address. Passing an underlying address yields a "
-        "`404` whose body suggests matching receipt tokens.\n\n"
+        "not the underlying ERC-20 address.\n\n"
+        "For a directly-held allocated asset that is not a registered receipt token "
+        "(e.g. PYUSD, BUIDL-I), the endpoint falls back to a pass-through breakdown: "
+        "a single item for the asset itself (or its tracked underlying), "
+        "`backing_pct` 100, null liquidation fields, and a null `receipt_token_id`.\n\n"
         "Pass an optional `prime_id` to scale the breakdown to that prime's position "
-        "(per-prime, pro-rata by pool share); omit it for the pool-level breakdown.\n\n"
+        "(per-prime, pro-rata by pool share for a receipt token; the prime's own "
+        "positions on the pass-through path); omit it for the pool-level breakdown.\n\n"
         "Errors:\n"
-        "- `404` if the receipt token is not found.\n"
+        "- `404` if the token is neither a known receipt token nor a directly-held "
+        "allocated asset.\n"
         "- `422` if `chain_id` < 1, `token_address` is malformed, or `prime_id` is malformed.\n"
         "- `503` (`share_data_*`) if the allocation-share lookup fails."
     ),
@@ -315,9 +379,17 @@ async def get_risk_breakdown_by_address(
     ] = None,
     service: CryptoLendingRiskService = Depends(get_crypto_lending_risk_service),
     lookup: ReceiptTokenLookup = Depends(get_receipt_token_lookup),
+    pass_through_repo: Callable[[], PassThroughBreakdownRepository] = Depends(
+        get_pass_through_breakdown_repository_factory
+    ),
+    allocation_repo: Callable[[], AllocationRepository] = Depends(get_allocation_repository_factory),
 ) -> RiskBreakdownResponse:
-    info = await resolve_receipt_token(chain_id, token_address, lookup)
-    return await _compute_risk_breakdown(info.receipt_token_id, service, _parse_optional_prime(prime_id))
+    address = EthAddress(token_address)
+    prime = _parse_optional_prime(prime_id)
+    info = await lookup.get_by_chain_and_address(chain_id, address)
+    if info is None:
+        return await _compute_pass_through_breakdown(chain_id, address, prime, pass_through_repo(), allocation_repo())
+    return await _compute_risk_breakdown(info.receipt_token_id, service, prime)
 
 
 # ---------------------------------------------------------------------------

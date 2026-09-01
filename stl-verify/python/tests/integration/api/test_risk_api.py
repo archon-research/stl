@@ -1,12 +1,17 @@
-"""Integration tests for the risk API warm-up behavior.
+"""Integration tests for the risk API warm-up and pass-through behavior.
 
-These tests cover the case where a ``receipt_token`` row exists before the
-prime-allocation-indexer has created the matching ``token`` row for the
-receipt token's own address. The API should treat that as "data not indexed
-yet" (HTTP 503), not "unknown receipt token" (HTTP 404).
+Warm-up: a ``receipt_token`` row exists before the prime-allocation-indexer
+has created the matching ``token`` row for the receipt token's own address.
+The API should treat that as "data not indexed yet" (HTTP 503), not "unknown
+receipt token" (HTTP 404).
+
+Pass-through: a directly-held allocated asset that is not a registered
+receipt token still gets a breakdown — a single self-backed item built from
+``allocation_position_current`` — instead of a 404.
 """
 
 import asyncio
+from decimal import Decimal
 from pathlib import Path
 
 import asyncpg
@@ -16,6 +21,14 @@ from pydantic import SecretStr
 
 from app.config import Settings
 from app.main import create_app
+from tests.integration.seed import (
+    PT_POSITIONLESS_TOKEN_HEX,
+    PT_PROXY_A_HEX,
+    PT_SELF_TOKEN_HEX,
+    PT_UNPRICED_TOKEN_HEX,
+    PT_WRAPPER_TOKEN_HEX,
+    seed_pass_through_positions,
+)
 
 _RECEIPT_TOKEN_ADDRESS_HEX = "59cd1c87501baa753d0b5b5ab5d8416a45cd71dc"
 _PRIME_ID = "0x" + "ab" * 20
@@ -235,3 +248,97 @@ def test_post_scenario_returns_422_when_neither_identity_supplied(client: TestCl
     )
 
     assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Pass-through breakdown fallback for directly-held allocated assets
+# ---------------------------------------------------------------------------
+
+# syrupUSDG: migration-seeded receipt token with no indexed pool, so the
+# receipt path (not the fallback) must keep serving it.
+_SYRUP_USDG_HEX = "87b65c4aaffa76881f9e96f3e7ed945ddfc3cd7a"
+
+
+@pytest.fixture(scope="module")
+def pass_through_seed(db_url: str) -> None:
+    asyncio.run(seed_pass_through_positions(db_url))
+
+
+def test_breakdown_falls_back_to_pass_through_for_directly_held_asset(
+    client: TestClient, pass_through_seed: None
+) -> None:
+    response = client.get(f"/v1/risk/1/0x{PT_SELF_TOKEN_HEX}/breakdown")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["receipt_token_id"] is None
+    assert len(body["items"]) == 1
+    item = body["items"][0]
+    assert item["symbol"] == "PTSELF"
+    assert Decimal(item["amount"]) == Decimal("157.5")
+    assert Decimal(item["backing_pct"]) == Decimal("100")
+    assert Decimal(item["price_usd"]) == Decimal("1.0002")
+    assert Decimal(item["amount_usd"]) == Decimal("157.5") * Decimal("1.0002")
+    assert item["liquidation_threshold"] is None
+    assert item["liquidation_bonus"] is None
+
+
+def test_pass_through_breakdown_reports_the_underlying_when_it_differs(
+    client: TestClient, pass_through_seed: None
+) -> None:
+    response = client.get(f"/v1/risk/1/0x{PT_WRAPPER_TOKEN_HEX}/breakdown")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["receipt_token_id"] is None
+    (item,) = body["items"]
+    assert item["symbol"] == "PTUSDC"
+    assert Decimal(item["amount"]) == Decimal("20320203.5")
+    assert Decimal(item["price_usd"]) == Decimal("0.9999")
+
+
+def test_pass_through_breakdown_serves_unpriced_asset_with_null_price(
+    client: TestClient, pass_through_seed: None
+) -> None:
+    response = client.get(f"/v1/risk/1/0x{PT_UNPRICED_TOKEN_HEX}/breakdown")
+
+    assert response.status_code == 200, response.text
+    (item,) = response.json()["items"]
+    assert Decimal(item["amount"]) == Decimal("42")
+    assert item["price_usd"] is None
+    assert Decimal(item["amount_usd"]) == Decimal("0")
+
+
+def test_pass_through_breakdown_narrows_to_the_primes_proxies(client: TestClient, pass_through_seed: None) -> None:
+    # PT_PROXY_A resolves to pt_prime_a, whose proxies hold 100.5 + 50; the
+    # other prime's 7 must drop out.
+    response = client.get(f"/v1/risk/1/0x{PT_SELF_TOKEN_HEX}/breakdown?prime_id=0x{PT_PROXY_A_HEX}")
+
+    assert response.status_code == 200, response.text
+    (item,) = response.json()["items"]
+    assert Decimal(item["amount"]) == Decimal("150.5")
+
+
+def test_pass_through_breakdown_returns_404_for_unknown_prime(client: TestClient, pass_through_seed: None) -> None:
+    # An unknown prime narrows to itself (list_prime_proxy_addresses returns
+    # [prime_address]), which holds no positions.
+    response = client.get(f"/v1/risk/1/0x{PT_SELF_TOKEN_HEX}/breakdown?prime_id=0x" + "cd" * 20)
+
+    assert response.status_code == 404
+
+
+def test_pass_through_breakdown_returns_404_without_allocation_position(
+    client: TestClient, pass_through_seed: None
+) -> None:
+    response = client.get(f"/v1/risk/1/0x{PT_POSITIONLESS_TOKEN_HEX}/breakdown")
+
+    assert response.status_code == 404
+
+
+def test_breakdown_keeps_receipt_path_with_integer_receipt_token_id(
+    client: TestClient, pass_through_seed: None
+) -> None:
+    response = client.get(f"/v1/risk/1/0x{_SYRUP_USDG_HEX}/breakdown")
+
+    assert response.status_code == 200, response.text
+    assert isinstance(response.json()["receipt_token_id"], int)

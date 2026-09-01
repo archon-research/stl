@@ -4,6 +4,7 @@ from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
+from app.adapters.postgres.pass_through_breakdown_repository import PassThroughBreakdownRepository
 from app.adapters.postgres.prime_capital_stack_repository import PrimeCapitalStackRepository
 from app.adapters.postgres.reference_position_repository import ReferencePositionRepository
 from app.adapters.postgres.reference_risk_capital_repository import ReferenceRiskCapitalRepository
@@ -80,6 +81,23 @@ def get_model_registry(request: Request) -> ModelRegistry:
 def get_receipt_token_lookup(request: Request) -> ReceiptTokenLookup:
     """Extract the receipt-token lookup built at startup."""
     return request.app.state.receipt_token_lookup
+
+
+def get_pass_through_breakdown_repository_factory(
+    request: Request,
+) -> Callable[[], PassThroughBreakdownRepository]:
+    """Hand out the startup-built pass-through breakdown repository on demand.
+
+    A factory, not the repository, because FastAPI resolves every declared
+    dependency on every request and the pass-through fallback is the rare
+    path; matches the reference-service factories below.
+    """
+    return lambda: request.app.state.pass_through_breakdown_repository
+
+
+def get_allocation_repository_factory(request: Request) -> Callable[[], AllocationRepository]:
+    """Hand out the startup-built allocation repository on demand, for the same reason."""
+    return lambda: request.app.state.allocation_repository
 
 
 def get_reference_risk_capital_service_factory(
