@@ -2257,7 +2257,7 @@
                 "type": "null"
               }
             ],
-            "description": "Latest USD price for the backing token. Null when the price is unavailable (e.g. a Maple custody asset whose attested price is missing); in that case `amount` is 0 while `amount_usd` is still the attested USD value.",
+            "description": "Latest USD price for the backing token. Null when the price is unavailable (e.g. a Maple custody asset whose attested price is missing); in that case `amount` is 0 while `amount_usd` is still the attested USD value. On a pass-through breakdown the inverse holds: an unpriced asset keeps its real `amount` and reports `amount_usd` 0.",
             "examples": [
               "3340.55"
             ],

@@ -103,7 +103,9 @@ class RiskBreakdownItemResponse(BaseModel):
         description=(
             "Latest USD price for the backing token. Null when the price is unavailable "
             "(e.g. a Maple custody asset whose attested price is missing); in that case "
-            "`amount` is 0 while `amount_usd` is still the attested USD value."
+            "`amount` is 0 while `amount_usd` is still the attested USD value. On a "
+            "pass-through breakdown the inverse holds: an unpriced asset keeps its real "
+            "`amount` and reports `amount_usd` 0."
         ),
         examples=["3340.55"],
     )
@@ -231,7 +233,7 @@ async def _compute_pass_through_breakdown(
     proxies = await allocation_repo.list_prime_proxy_addresses(prime_id) if prime_id is not None else None
     holding = await repo.get_holding(chain_id, token_address, proxies)
     if holding is None:
-        raise HTTPException(404, "Receipt token not found")
+        raise HTTPException(404, "Token is neither a known receipt token nor a directly-held allocated asset")
     # Info-level so an asset that SHOULD be registered in receipt_token stays
     # observable instead of being silently served by the fallback.
     logger.info(

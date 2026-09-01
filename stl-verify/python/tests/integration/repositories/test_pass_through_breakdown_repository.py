@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from app.adapters.postgres.pass_through_breakdown_repository import PassThroughBreakdownRepository
 from app.domain.entities.allocation import EthAddress
 from tests.integration.seed import (
+    PT_MIXED_TOKEN_HEX,
     PT_POSITIONLESS_TOKEN_HEX,
     PT_PROXY_A_HEX,
     PT_PROXY_B_HEX,
@@ -86,6 +87,20 @@ async def test_collapses_to_the_underlying_when_it_differs(
     assert holding.symbol == "PTUSDC"
     assert holding.amount == Decimal("20320203.5")
     assert holding.price_usd == Decimal("0.9999")
+
+
+async def test_partially_valued_wrapper_stays_the_held_token(
+    repository: PassThroughBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    # One row carries underlying_value, the other does not: collapsing to the
+    # underlying would report the partial sum as the full exposure.
+    holding = await repository.get_holding(1, EthAddress("0x" + PT_MIXED_TOKEN_HEX))
+
+    assert holding is not None
+    assert holding.token_id == test_ids["pt_mixed_id"]
+    assert holding.symbol == "PTMIX"
+    assert holding.amount == Decimal("15")
+    assert holding.price_usd is None
 
 
 async def test_unpriced_token_yields_null_price(

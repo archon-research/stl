@@ -23,6 +23,7 @@ from app.config import Settings
 from app.main import create_app
 from tests.integration.seed import (
     PT_POSITIONLESS_TOKEN_HEX,
+    PT_PROXY_A_HEX,
     PT_SELF_TOKEN_HEX,
     PT_UNPRICED_TOKEN_HEX,
     PT_WRAPPER_TOKEN_HEX,
@@ -306,6 +307,24 @@ def test_pass_through_breakdown_serves_unpriced_asset_with_null_price(
     assert Decimal(item["amount"]) == Decimal("42")
     assert item["price_usd"] is None
     assert Decimal(item["amount_usd"]) == Decimal("0")
+
+
+def test_pass_through_breakdown_narrows_to_the_primes_proxies(client: TestClient, pass_through_seed: None) -> None:
+    # PT_PROXY_A resolves to pt_prime_a, whose proxies hold 100.5 + 50; the
+    # other prime's 7 must drop out.
+    response = client.get(f"/v1/risk/1/0x{PT_SELF_TOKEN_HEX}/breakdown?prime_id=0x{PT_PROXY_A_HEX}")
+
+    assert response.status_code == 200, response.text
+    (item,) = response.json()["items"]
+    assert Decimal(item["amount"]) == Decimal("150.5")
+
+
+def test_pass_through_breakdown_returns_404_for_unknown_prime(client: TestClient, pass_through_seed: None) -> None:
+    # An unknown prime narrows to itself (list_prime_proxy_addresses returns
+    # [prime_address]), which holds no positions.
+    response = client.get(f"/v1/risk/1/0x{PT_SELF_TOKEN_HEX}/breakdown?prime_id=0x" + "cd" * 20)
+
+    assert response.status_code == 404
 
 
 def test_pass_through_breakdown_returns_404_without_allocation_position(

@@ -38,10 +38,12 @@ def _holding_sql(with_proxy_filter: bool) -> TextClause:
             ap.token_id,
             SUM(ap.balance) AS balance,
             MAX(ap.underlying_token_id) AS underlying_token_id,
-            SUM(ap.underlying_value) AS underlying_value
+            SUM(ap.underlying_value) AS underlying_value,
+            COUNT(*) = COUNT(ap.underlying_value) AS fully_valued
         FROM allocation_position_current ap
         JOIN token t ON t.id = ap.token_id
         WHERE ap.chain_id = :chain_id
+          AND t.chain_id = :chain_id
           AND t.address = decode(:token_hex, 'hex')
           AND ap.proxy_address NOT IN :subproxy_addrs
           {proxy_filter}
@@ -54,6 +56,7 @@ def _holding_sql(with_proxy_filter: bool) -> TextClause:
         p.underlying_token_id,
         ut.symbol AS underlying_symbol,
         p.underlying_value,
+        p.fully_valued,
         self_px.price_usd  AS token_price_usd,
         under_px.price_usd AS underlying_price_usd
     FROM position p
@@ -113,10 +116,15 @@ class PassThroughBreakdownRepository:
         if row is None:
             return None
 
+        # Collapse to the underlying only when EVERY contributing row carries a
+        # redeemable value: a partial SUM(underlying_value) would silently
+        # understate exposure (NULL is never zero exposure). The NULL-symbol
+        # gate mirrors the ut join guard in _DIRECT_ASSET_HOLDINGS_SQL.
         underlying_differs = (
-            row.underlying_token_id is not None
+            row.fully_valued
+            and row.underlying_token_id is not None
             and row.underlying_token_id != row.token_id
-            and row.underlying_value is not None
+            and row.underlying_symbol is not None
         )
         if underlying_differs:
             return PassThroughHolding(

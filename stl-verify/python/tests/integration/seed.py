@@ -3024,6 +3024,7 @@ PT_WRAPPER_TOKEN_HEX = "a2" * 20  # underlying differs (sparkPrimeUSDC1 shape)
 PT_UNDERLYING_TOKEN_HEX = "a3" * 20  # the wrapper's underlying (USDC shape)
 PT_UNPRICED_TOKEN_HEX = "a4" * 20  # position but no oracle price
 PT_POSITIONLESS_TOKEN_HEX = "a5" * 20  # token row without any position
+PT_MIXED_TOKEN_HEX = "a6" * 20  # wrapper with one valued and one unvalued row
 PT_PROXY_A_HEX = "b1" * 20
 PT_PROXY_B_HEX = "b2" * 20
 PT_OTHER_PRIME_PROXY_HEX = "b3" * 20
@@ -3049,6 +3050,7 @@ async def seed_pass_through_positions(db_url: str) -> None:
             underlying_id = await insert_token(conn, "PTUSDC", 6, bytes.fromhex(PT_UNDERLYING_TOKEN_HEX))
             unpriced_id = await insert_token(conn, "PTDARK", 18, bytes.fromhex(PT_UNPRICED_TOKEN_HEX))
             await insert_token(conn, "PTIDLE", 18, bytes.fromhex(PT_POSITIONLESS_TOKEN_HEX))
+            mixed_id = await insert_token(conn, "PTMIX", 18, bytes.fromhex(PT_MIXED_TOKEN_HEX))
 
             for token_id, price in [(self_id, "1.0002"), (underlying_id, "0.9999")]:
                 await insert_oracle_asset(conn, oracle_id, token_id)
@@ -3059,6 +3061,9 @@ async def seed_pass_through_positions(db_url: str) -> None:
                 (PT_PROXY_B_HEX, prime_a, "50", "02" * 32),
                 (PT_OTHER_PRIME_PROXY_HEX, prime_b, "7", "03" * 32),
             ]:
+                # prime_proxy is reference data (VEC-651): the prime filter
+                # resolves proxies through it, not through positions.
+                await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=proxy_hex)
                 await insert_allocation_position(
                     conn,
                     token_id=self_id,
@@ -3105,6 +3110,31 @@ async def seed_pass_through_positions(db_url: str) -> None:
                 direction="in",
             )
 
+            # Wrapper with one valued and one unvalued row: a partial
+            # SUM(underlying_value) must not surface as the full exposure.
+            await insert_allocation_position(
+                conn,
+                token_id=mixed_id,
+                prime_id=prime_a,
+                proxy_hex=PT_PROXY_A_HEX,
+                balance=Decimal("10"),
+                block=2000,
+                tx="07" * 32,
+                direction="in",
+                underlying_value=Decimal("9.9"),
+                underlying_token_id=underlying_id,
+            )
+            await insert_allocation_position(
+                conn,
+                token_id=mixed_id,
+                prime_id=prime_a,
+                proxy_hex=PT_PROXY_B_HEX,
+                balance=Decimal("5"),
+                block=2000,
+                tx="08" * 32,
+                direction="in",
+            )
+
             await store_test_ids(
                 conn,
                 {
@@ -3112,6 +3142,7 @@ async def seed_pass_through_positions(db_url: str) -> None:
                     "pt_wrapper_id": wrapper_id,
                     "pt_underlying_id": underlying_id,
                     "pt_unpriced_id": unpriced_id,
+                    "pt_mixed_id": mixed_id,
                 },
             )
     finally:
