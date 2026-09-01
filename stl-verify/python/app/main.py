@@ -262,7 +262,10 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             if settings.auth_enabled:
                 auth_http = httpx.AsyncClient()
                 app.state.verifier = TokenVerifier(
-                    issuer=settings.oidc_issuer, audience=settings.oidc_audience, http=auth_http
+                    issuer=settings.oidc_issuer,
+                    audience=settings.oidc_audience,
+                    http=auth_http,
+                    jwks_url=settings.oidc_jwks_url or None,
                 )
                 app.state.fga = FgaClient(
                     base_url=settings.openfga_url,
@@ -380,6 +383,11 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
                     },
                 }
             }
+            # Declaring the scheme is not enough: Swagger only attaches the
+            # authorized token to operations that carry a security REQUIREMENT.
+            # Root-level so every operation inherits it (the probes gain a
+            # cosmetic padlock in the docs; they are not gated in the app).
+            full["security"] = [{"oidc": []}]
         application.openapi_schema = full
         return application.openapi_schema
 

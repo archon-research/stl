@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     auth_enabled: bool = False
     oidc_issuer: str = ""  # e.g. http://keycloak.auth.svc/realms/archon
     oidc_audience: str = ""  # `aud` the API validates
+    # Where THIS process fetches the JWKS. Empty = derive from the issuer.
+    # Needed because the issuer is the token's `iss` (Keycloak's KC_HOSTNAME,
+    # browser-reachable) while pods fetch keys from the in-cluster Service.
+    oidc_jwks_url: str = ""
     openfga_url: str = ""  # e.g. http://openfga.auth.svc:8080
     # Published by the openfga-store ConfigMap (store/model ids are created by
     # the store-bootstrap Job; they cannot be known at deploy-authoring time).

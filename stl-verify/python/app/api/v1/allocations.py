@@ -15,7 +15,7 @@ from app.api._validators import (
     ProxyAddressPathParam,
 )
 from app.api.deps import (
-    allowed_prime_addresses,
+    allowed_prime_vaults,
     get_engine,
     get_reference_positions_service_factory,
     require_prime_view,
@@ -409,13 +409,14 @@ async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationS
 )
 async def list_primes(
     service: AllocationService = Depends(_get_service),
-    allowed: frozenset[str] | None = Depends(allowed_prime_addresses),
+    allowed: frozenset[str] | None = Depends(allowed_prime_vaults),
 ):
     primes = await service.list_primes()
-    # ListObjects pushed into the filter (ADR-015): the check and the query
-    # cannot drift apart. None means auth is off — no filtering.
+    # ListObjects pushed into the filter (ADR-015). This endpoint returns the
+    # whole (small) primes table with no LIMIT, so an in-memory filter cannot
+    # truncate anything; keyed by VAULT — the authorization identity.
     if allowed is not None:
-        primes = [p for p in primes if p.address.lower() in allowed]
+        primes = [p for p in primes if (p.prime_vault_address or "").lower() in allowed]
     return [
         PrimeResponse(
             id=p.id,
@@ -957,7 +958,7 @@ async def list_allocation_activity(
     time_series: TimeSeriesQuery = Depends(get_time_series_query_params),
     limit: int = Query(100, ge=1, le=1000, description="Max results (default 100, max 1000)."),
     service: AllocationService = Depends(_get_service),
-    allowed: frozenset[str] | None = Depends(allowed_prime_addresses),
+    allowed: frozenset[str] | None = Depends(allowed_prime_vaults),
 ) -> AllocationActivityEnvelope:
     """Errors:
 
@@ -969,9 +970,15 @@ async def list_allocation_activity(
     parsed_prime_id = EthAddress(prime_id) if prime_id is not None else None
     # Per-resource authz (ADR-015). `allowed` is None when auth is off.
     if allowed is not None:
-        if parsed_prime_id is not None and str(parsed_prime_id).lower() not in allowed:
-            raise HTTPException(status_code=403, detail="not permitted for this prime")
-        if time_series.aggregate and parsed_prime_id is None:
+        if parsed_prime_id is not None:
+            # An explicitly requested prime is gated up front (404/403); the
+            # raw path below ALSO joins authorization into the query itself.
+            vault = await service.get_prime_vault_address(parsed_prime_id)
+            if vault is None:
+                raise HTTPException(status_code=404, detail="prime not found")
+            if vault.lower() not in allowed:
+                raise HTTPException(status_code=403, detail="not permitted for this prime")
+        elif time_series.aggregate:
             # Buckets aggregate across primes and cannot be filtered per row
             # after the fact; scope the aggregation to a prime you may view.
             raise HTTPException(status_code=422, detail="prime_id is required for aggregated activity")
@@ -1008,6 +1015,7 @@ async def list_allocation_activity(
             )
 
         events = await service.list_allocation_activity(
+            allowed_vaults=(None if allowed is None else [EthAddress(v) for v in allowed]),
             prime_id=parsed_prime_id,
             chain_id=chain_id,
             protocol_name=protocol_name,
@@ -1052,6 +1060,5 @@ async def list_allocation_activity(
                 created_at=e.created_at.isoformat(),
             )
             for e in events
-            if allowed is None or e.prime_address.lower() in allowed
         ],
     )

@@ -615,6 +615,61 @@ class AllocationRepository:
             )
             raise ValueError(f"Database query failed while fetching total USD exposure: {exc}") from exc
 
+    async def get_prime_vault_address(self, address: EthAddress) -> str | None:
+        """Resolve a vault-or-proxy address to its prime's vault address.
+
+        One indexed point query — the authorization object id for a prime is
+        its vault address, and callers may present any of the prime's proxies.
+        Returns a lowercase 0x-prefixed address, or None if unknown.
+        """
+        sql = text(
+            """
+            SELECT encode(p.vault_address, 'hex') AS vault
+            FROM prime p
+            WHERE p.vault_address = :addr
+            UNION
+            SELECT encode(p.vault_address, 'hex') AS vault
+            FROM prime_proxy pp
+            JOIN prime p ON p.id = pp.prime_id
+            WHERE pp.proxy_address = :addr
+            LIMIT 1
+            """
+        )
+        try:
+            async with self._engine.connect() as conn:
+                row = (await conn.execute(sql, {"addr": address.to_bytes()})).first()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise ValueError(f"Database query failed while resolving prime vault: {exc}") from exc
+        return ("0x" + row.vault) if row and row.vault else None
+
+    async def list_proxy_addresses_for_vaults(self, vaults: Sequence[EthAddress]) -> list[EthAddress]:
+        """Every ALM proxy address belonging to the given prime vaults.
+
+        Feeds the activity query's proxy filter so authorization happens in the
+        WHERE clause, before ORDER BY/LIMIT — filtering after the limit returns
+        silently incomplete pages.
+        """
+        if not vaults:
+            return []
+        sql = text(
+            """
+            SELECT encode(pp.proxy_address, 'hex') AS address
+            FROM prime_proxy pp
+            JOIN prime p ON p.id = pp.prime_id
+            WHERE p.vault_address = ANY(:vaults)
+            """
+        )
+        try:
+            async with self._engine.connect() as conn:
+                rows = (await conn.execute(sql, {"vaults": [v.to_bytes() for v in vaults]})).fetchall()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise ValueError(f"Database query failed while resolving vault proxies: {exc}") from exc
+        return [EthAddress("0x" + r.address) for r in rows]
+
     async def list_allocation_activity(
         self,
         *,

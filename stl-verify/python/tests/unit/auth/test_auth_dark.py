@@ -60,6 +60,7 @@ def test_openapi_has_no_security_scheme_when_dark() -> None:
     app = create_app(_settings())
     schema = app.openapi()
     assert "securitySchemes" not in schema.get("components", {})
+    assert "security" not in schema
 
 
 def test_openapi_declares_oidc_when_enabled() -> None:
@@ -69,6 +70,9 @@ def test_openapi_declares_oidc_when_enabled() -> None:
     schema = app.openapi()
     flows = schema["components"]["securitySchemes"]["oidc"]["flows"]["authorizationCode"]
     assert flows["authorizationUrl"].startswith("https://kc/realms/archon/")
+    # Declaring the scheme is not enough — Swagger only ATTACHES the token to
+    # operations that carry a security requirement (review L2-B3).
+    assert schema["security"] == [{"oidc": []}]
 
 
 def test_oauth_redirect_route_registered_when_enabled() -> None:

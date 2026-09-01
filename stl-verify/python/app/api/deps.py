@@ -9,6 +9,8 @@ from app.adapters.postgres.reference_position_repository import ReferencePositio
 from app.adapters.postgres.reference_risk_capital_repository import ReferenceRiskCapitalRepository
 from app.auth.fga import FgaError, FgaTruncated
 from app.auth.jwt import Principal, TokenError
+from app.config import get_settings
+from app.domain.entities.allocation import EthAddress
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
 from app.ports.reference_capital_repository import ReferenceCapitalRepository
 from app.risk_engine.suraf.result import SurafResult
@@ -18,35 +20,32 @@ from app.services.reference_positions_service import ReferencePositionsService
 from app.services.reference_risk_capital_service import ReferenceRiskCapitalService
 
 
-def _auth_on(request: Request) -> bool:
-    return bool(getattr(request.app.state, "verifier", None))
-
-
 async def get_principal(request: Request) -> Principal | None:
     """Resolve the caller from the token the app verifies ITSELF.
 
     Never from proxy-written claim headers — edge-agnostic, so the same code
-    serves the Tailscale-only present and the Envoy edge later without resting
-    on a NetworkPolicy staying correct. With auth off (the default) every caller
-    is anonymous (None) and no request-time work happens.
+    serves the Tailscale-only present and the Envoy edge later. With
+    auth_enabled=False (the default) every caller is anonymous (None) and no
+    request-time work happens. FastAPI caches this per request, so gates and
+    handlers share one resolution without any manual state.
     """
-    if not _auth_on(request):
+    if not get_settings().auth_enabled:
         return None
-    cached = getattr(request.state, "principal", None)
-    if cached is not None:
-        return cached
+    verifier = getattr(request.app.state, "verifier", None)
+    if verifier is None:
+        # Enabled but the lifespan never built a verifier: fail CLOSED rather
+        # than treating everyone as anonymous.
+        raise HTTPException(status_code=503, detail="auth enabled but verifier not initialised")
     header = request.headers.get("authorization", "")
     scheme, _, token = header.partition(" ")
     if scheme.lower() != "bearer" or not token:
         raise HTTPException(status_code=401, detail="bearer token required", headers={"WWW-Authenticate": "Bearer"})
     try:
-        principal = await request.app.state.verifier.verify(token)
+        return await verifier.verify(token)
     except TokenError as exc:
         raise HTTPException(
             status_code=401, detail=f"invalid token: {exc}", headers={"WWW-Authenticate": "Bearer"}
         ) from exc
-    request.state.principal = principal
-    return principal
 
 
 def require_role(role: str) -> Callable:
@@ -70,65 +69,41 @@ require_viewer = require_role("org:viewer")
 require_analyst = require_role("org:analyst")
 
 
-async def _prime_address_map(request: Request) -> dict[str, str]:
-    """address (vault or proxy) → prime vault address, all lowercase.
-
-    Built from the primes table and cached on app state for 60s. The OpenFGA
-    object id for a prime is its vault address — the one identity shared by all
-    of a prime's proxies, and what the reconciler writes from Keycloak.
-    """
-    import time
-
-    st = request.app.state
-    cache = getattr(st, "prime_address_map", None)
-    if cache and time.monotonic() - cache[0] < 60:
-        return cache[1]
-    repo = AllocationRepository(st.engine)
-    mapping: dict[str, str] = {}
-    for p in await repo.list_primes():
-        vault = (p.prime_vault_address or "").lower()
-        if not vault:
-            continue
-        mapping[vault] = vault
-        mapping[p.address.lower()] = vault
-    st.prime_address_map = (time.monotonic(), mapping)
-    return mapping
+async def _vault_for(request: Request, address: str) -> str | None:
+    """Vault address for a vault-or-proxy address — one indexed point query."""
+    repo = AllocationRepository(request.app.state.engine)
+    return await repo.get_prime_vault_address(EthAddress(address))
 
 
 async def require_prime_view(request: Request, principal: Principal | None = Depends(get_principal)) -> None:
     """Per-resource check for /v1/primes/{prime_id}/* (ADR-011 Plane 2, layer 2).
 
-    Resolves the path address to the prime's vault address and asks OpenFGA
-    `can_view`. Unknown address → 404 (same as the handler would say); denied →
-    403; OpenFGA unreachable → 503, failing CLOSED.
+    Reads the path param from the request rather than declaring it: a declared
+    parameter is merged into the OpenAPI operation and overrides each route's
+    own annotated description. The route's own param does the format validation.
+    The OpenFGA object id is the prime's VAULT address — the identity shared by
+    all of a prime's proxies, and what the reconciler writes.
     """
     if principal is None:
         return
-    # Read the path param from the request rather than declaring it: a declared
-    # parameter is merged into the OpenAPI operation and overrides each route's
-    # own annotated description (four routes use ProxyAddressPathParam, one
-    # PrimeOrProxyAddressPathParam — caught by the schema-drift gate in CI).
-    # The route's own param performs the format validation.
-    prime_id = request.path_params.get("prime_id", "")
-    vault = (await _prime_address_map(request)).get(prime_id.lower())
+    vault = await _vault_for(request, request.path_params.get("prime_id", ""))
     if vault is None:
         raise HTTPException(status_code=404, detail="prime not found")
     try:
-        allowed = await request.app.state.fga.check(principal.fga_user, "can_view", f"prime:{vault}")
+        allowed = await request.app.state.fga.check(principal.fga_user, "can_view", f"prime:{vault.lower()}")
     except FgaError as exc:
         raise HTTPException(status_code=503, detail="authorization service unavailable") from exc
     if not allowed:
         raise HTTPException(status_code=403, detail="not permitted for this prime")
 
 
-async def allowed_prime_addresses(
+async def allowed_prime_vaults(
     request: Request, principal: Principal | None = Depends(get_principal)
 ) -> frozenset[str] | None:
-    """Every address (vault + proxies) of the primes the caller can view, or
-    None when auth is off (meaning: no filtering). Feeds the list endpoints.
-
-    ListObjects at its ceiling raises 500: a partial allow-list pushed into a
-    WHERE clause is a correctness bug that looks like missing data.
+    """Vault addresses of the primes the caller may view; None = auth off (no
+    filtering). Consumers push this into the QUERY so authorization applies
+    before ORDER BY/LIMIT. At the ListObjects ceiling this raises: a silently
+    partial allow-list is a correctness bug that looks like missing data.
     """
     if principal is None:
         return None
@@ -138,9 +113,7 @@ async def allowed_prime_addresses(
         raise HTTPException(status_code=500, detail="authorization result truncated") from exc
     except FgaError as exc:
         raise HTTPException(status_code=503, detail="authorization service unavailable") from exc
-    vaults_l = {v.lower() for v in vaults}
-    mapping = await _prime_address_map(request)
-    return frozenset(addr for addr, vault in mapping.items() if vault in vaults_l)
+    return frozenset(v.lower() for v in vaults)
 
 
 def get_engine(request: Request) -> AsyncEngine:

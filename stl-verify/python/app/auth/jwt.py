@@ -42,11 +42,15 @@ class Principal:
 
 
 class TokenVerifier:
-    def __init__(self, *, issuer: str, audience: str, http: httpx.AsyncClient) -> None:
+    def __init__(self, *, issuer: str, audience: str, http: httpx.AsyncClient, jwks_url: str | None = None) -> None:
+        # `issuer` must equal the `iss` CLAIM in tokens (Keycloak derives it
+        # from KC_HOSTNAME) and doubles as the browser-facing OAuth base.
+        # `jwks_url` is where THIS process fetches keys — in-cluster that is
+        # the Service address, which is not the token issuer.
         self._issuer = issuer.rstrip("/")
         self._audience = audience
         self._http = http
-        self._jwks_url = f"{self._issuer}/protocol/openid-connect/certs"
+        self._jwks_url = jwks_url or f"{self._issuer}/protocol/openid-connect/certs"
         self._jwks: PyJWKSet | None = None
         self._jwks_fetched_at = 0.0
 

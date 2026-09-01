@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
 
@@ -66,6 +67,10 @@ class AllocationService:
             return None
         return await self._repository.list_prime_proxy_addresses(prime_id)
 
+    async def get_prime_vault_address(self, address: EthAddress) -> str | None:
+        """Vault address for a vault-or-proxy address — one indexed point query."""
+        return await self._repository.get_prime_vault_address(address)
+
     async def list_allocation_activity(
         self,
         *,
@@ -78,9 +83,23 @@ class AllocationService:
         from_timestamp: datetime | None = None,
         to_timestamp: datetime | None = None,
         limit: int = 100,
+        allowed_vaults: Sequence[EthAddress] | None = None,
     ) -> list[AllocationActivityEvent]:
+        proxy_addresses = await self._prime_proxies(prime_id)
+        if allowed_vaults is not None:
+            # Authorization joins the query: restrict to the caller's primes'
+            # proxies BEFORE the repository applies ORDER BY/LIMIT. Filtering
+            # rows after the limit returns silently incomplete pages.
+            allowed = await self._repository.list_proxy_addresses_for_vaults(allowed_vaults)
+            if proxy_addresses is None:
+                proxy_addresses = allowed
+            else:
+                allowed_set = set(allowed)
+                proxy_addresses = [a for a in proxy_addresses if a in allowed_set]
+            if not proxy_addresses:
+                return []
         return await self._repository.list_allocation_activity(
-            proxy_addresses=await self._prime_proxies(prime_id),
+            proxy_addresses=proxy_addresses,
             chain_id=chain_id,
             protocol_name=protocol_name,
             action_type=action_type,

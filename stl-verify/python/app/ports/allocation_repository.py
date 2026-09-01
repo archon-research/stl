@@ -99,6 +99,14 @@ class AllocationRepositoryPort(Protocol):
         """
         ...
 
+    async def get_prime_vault_address(self, address: EthAddress) -> str | None:
+        """Vault address for a vault-or-proxy address, or None if unknown."""
+        ...
+
+    async def list_proxy_addresses_for_vaults(self, vaults: Sequence[EthAddress]) -> list[EthAddress]:
+        """Every ALM proxy address belonging to the given prime vaults."""
+        ...
+
     async def list_allocation_activity(
         self,
         *,
