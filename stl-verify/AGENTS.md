@@ -101,6 +101,8 @@ make ci                 # test-race, fmt/imports/tidy checks, golangci-lint (vet
 make install-hooks      # Install lefthook git pre-commit hooks (auto-runs on dev-up)
 make format             # Auto-format all code locally (Go, Python, TS)
 make lint               # Run linters locally (delegates to language pipelines)
+make check-file FILE=<path>    # Per-file gate: gofmt + tag-aware go vet for that package (~6s)
+make check-pkgs PKGS='./a ./b' # Same plus golangci-lint, for a set of packages (~20s/pkg)
 
 # Docker (ARM64 for Fargate Graviton)
 make docker-release ENV=sentinelstaging          # Build and push watcher image
@@ -120,6 +122,8 @@ a full cluster on one machine without colliding on ports, image tags or data dir
 - Pre-commit hooks: gofmt, goimports (staged files only)
 - CI (`go-ci.yml`): fmt/imports/tidy checks + golangci-lint v2 (covers go vet, staticcheck, and go fix's modernizers — config in `.golangci.yml`) + vulncheck — **source of truth**
 - Install tools with `make tools`; golangci-lint is version-pinned because the config schema is version-coupled, so rerun it when a stale local binary rejects `.golangci.yml`. Don't bypass hooks.
+- `$(go env GOPATH)/bin` must be on your PATH. The make targets call `$(GOBIN)/golangci-lint` by absolute path, so they work without it — but bare `golangci-lint`, `goimports`, `staticcheck` and `gopls` do not resolve, and an editor or coding agent that probes for them concludes the repo has no linter and skips the checks entirely.
+- **While editing, check the file you just changed** with `make check-file FILE=<path>`, and the packages you touched with `make check-pkgs PKGS='./a ./b'` before you call the work done. `CHECK_TAGS` (`integration,e2e,benchmark`, mirroring `.vscode/settings.json`) is why these catch what a bare `go vet ./...` cannot: 116 `_test.go` files sit behind a `//go:build` tag, and an untagged vet compiles none of them, so a broken integration test would otherwise surface first in the CI integration shard. Claude Code runs both automatically via the hooks in `.claude/settings.json`; other agents must run them by hand.
 
 ## Code Conventions
 

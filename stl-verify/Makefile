@@ -4,7 +4,7 @@
 # Include language-agnostic linting targets
 include lint.mk
 
-.PHONY: all test test-race test-integration test-integration-shard integration-shard-check ci-service-check test-templates-clean lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-watcher-robinhood run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax run-allocation-tracker-robinhood help ci ci-checks install-hooks format \
+.PHONY: all test test-race test-integration test-integration-shard integration-shard-check ci-service-check test-templates-clean lint vet check-file check-pkg check-pkgs fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-watcher-robinhood run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax run-allocation-tracker-robinhood help ci ci-checks install-hooks format \
 	dev-up dev-up-rebuild dev-up-workers dev-up-or-resume dev-preflight dev-env dev-secrets dev-env-files dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-image _docker-release-go-service \
@@ -244,6 +244,41 @@ vet:
 	@echo "==> Running go vet..."
 	go vet ./...
 
+# Build tags the per-file checks compile with. Mirrors .vscode/settings.json
+# go.buildTags: without them `go vet` compiles none of the //go:build-guarded
+# test files, so an edit to an integration test gets its first typecheck in CI.
+CHECK_TAGS ?= integration,e2e,benchmark
+
+# Per-file gate for editors and coding agents: seconds, not a full ci-checks run.
+check-file:
+	@test -n "$(FILE)" || { echo "usage: make check-file FILE=<path to a .go file>"; exit 2; }
+	@test -f "$(FILE)" || { echo "check-file: no such file: $(FILE)"; exit 2; }
+	@out=$$(gofmt -s -l "$(FILE)"); \
+	if [ -n "$$out" ]; then echo "Not formatted (run gofmt -s -w $(FILE)):"; echo "$$out"; exit 1; fi
+	@$(MAKE) --no-print-directory check-pkg PKG="$$(dirname "$(FILE)")"
+
+# Tag-aware typecheck of one package. PKG may be absolute or relative to stl-verify.
+check-pkg:
+	@test -n "$(PKG)" || { echo "usage: make check-pkg PKG=<package dir>"; exit 2; }
+	@pkg="$(PKG)"; \
+	case "$$pkg" in "$(CURDIR)"/*) pkg="$${pkg#$(CURDIR)/}";; esac; \
+	case "$$pkg" in ./*) ;; *) pkg="./$$pkg";; esac; \
+	echo "==> go vet -tags=$(CHECK_TAGS) $$pkg"; \
+	go vet -tags=$(CHECK_TAGS) "$$pkg"
+
+# gofmt + tag-aware vet + golangci-lint over a space-separated package list.
+# golangci-lint runs without the extra tags because CI's run is the source of
+# truth and matching it keeps this from reporting findings CI never would; the
+# separate vet is what covers the //go:build-guarded files golangci-lint skips.
+check-pkgs:
+	@test -n "$(PKGS)" || { echo "usage: make check-pkgs PKGS='./a ./b'"; exit 2; }
+	@out=$$(gofmt -s -l $(PKGS)); \
+	if [ -n "$$out" ]; then echo "Files not formatted (run gofmt -s -w on them):"; echo "$$out"; exit 1; fi
+	@echo "==> go vet -tags=$(CHECK_TAGS) $(PKGS)"
+	@go vet -tags=$(CHECK_TAGS) $(PKGS)
+	@echo "==> golangci-lint run $(PKGS)"
+	@$(GOBIN)/golangci-lint run $(PKGS)
+
 # Apply go fix modernizations
 fix:
 	@echo "==> Applying go fix..."
@@ -364,6 +399,15 @@ tools:
 	go install github.com/go-delve/delve/cmd/dlv@latest
 	go install golang.org/x/tools/gopls@latest
 	go install github.com/evilmartians/lefthook@latest
+	@case ":$$PATH:" in \
+	  *":$(GOBIN):"*) ;; \
+	  *) echo ""; \
+	     echo "WARNING: $(GOBIN) is not on PATH."; \
+	     echo "  Bare 'golangci-lint', 'goimports', 'staticcheck' and 'gopls' will not resolve,"; \
+	     echo "  so editors and coding agents silently skip them. Add it to your shell PATH:"; \
+	     echo "    export PATH=\"\$$(go env GOPATH)/bin:\$$PATH\""; \
+	     echo "";; \
+	esac
 
 # CI target for lint/format/static/security checks. go vet, staticcheck, and
 # go fix -diff are covered by golangci-lint v2 (govet, staticcheck, modernize

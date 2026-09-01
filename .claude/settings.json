@@ -10,6 +10,31 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/go-check-edited.sh\"",
+            "timeout": 90,
+            "statusMessage": "go vet (tagged)"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/go-check-session.sh\"",
+            "timeout": 300,
+            "statusMessage": "gofmt + vet + golangci-lint"
+          }
+        ]
+      }
     ]
   },
   "enabledPlugins": {
