@@ -2794,13 +2794,14 @@ func TestUnorphanWalk_RefusesWithTheReasonThatApplies(t *testing.T) {
 			}
 
 			err = service.processBlockData(ctx, batch[0])
-			if tt.wantErrContains == "" {
+			switch {
+			case tt.wantErrContains == "":
 				if err != nil {
 					t.Fatalf("processBlockData = %v, want nil", err)
 				}
-			} else if err == nil {
+			case err == nil:
 				t.Fatalf("processBlockData = nil, want an error containing %q", tt.wantErrContains)
-			} else if !strings.Contains(err.Error(), tt.wantErrContains) {
+			case !strings.Contains(err.Error(), tt.wantErrContains):
 				t.Errorf("processBlockData = %v, want an error containing %q", err, tt.wantErrContains)
 			}
 
