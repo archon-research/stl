@@ -2670,3 +2670,147 @@ func TestAdvanceWatermark_SkippedAdvanceIsCounted(t *testing.T) {
 		t.Errorf("skipped advance chain = %d, want 42161", got)
 	}
 }
+
+// seedStoredChain stores the mock client's canonical blocks over [from, to].
+func seedStoredChain(t *testing.T, ctx context.Context, client *testutil.MockBlockchainClient, repo *memory.BlockStateRepository, from, to int64) {
+	t.Helper()
+	for number := from; number <= to; number++ {
+		header := client.GetHeader(number)
+		saveBlockState(t, ctx, repo, number, header.Hash, header.ParentHash)
+	}
+}
+
+// orphanStoredRange orphans the stored rows carrying the client's canonical
+// hashes over [from, to].
+func orphanStoredRange(t *testing.T, ctx context.Context, client *testutil.MockBlockchainClient, repo *memory.BlockStateRepository, from, to int64) {
+	t.Helper()
+	for number := from; number <= to; number++ {
+		if err := repo.MarkBlockOrphaned(ctx, client.GetHeader(number).Hash); err != nil {
+			t.Fatalf("orphan block %d: %v", number, err)
+		}
+	}
+}
+
+// TestUnorphanWalk_RefusesWithTheReasonThatApplies pins unorphanAnchorDepth and
+// the reason behind each refusal. Every rejection shares one "refusing to
+// un-orphan" wrapper, so asserting on the wrapper leaves the guards themselves
+// — the only thing between a losing fork and promotion to canonical — free to
+// be deleted, and the depth free to be any number at all.
+func TestUnorphanWalk_RefusesWithTheReasonThatApplies(t *testing.T) {
+	// anchorDepth restates unorphanAnchorDepth as a literal on purpose: a test
+	// that reads the constant moves with it and pins nothing.
+	const (
+		target          int64 = 100
+		anchorDepth     int64 = 64
+		unstoredParent        = "0xnoparent"
+		misplacedParent       = "0xmisplaced"
+		forkA                 = "0xfork_a"
+		forkB                 = "0xfork_b"
+	)
+
+	tests := []struct {
+		name            string
+		seed            func(t *testing.T, ctx context.Context, client *testutil.MockBlockchainClient, repo *memory.BlockStateRepository)
+		wantErrContains string
+		wantHealed      bool
+	}{
+		{
+			name: "an anchor exactly at the depth limit heals the run below it",
+			seed: func(t *testing.T, ctx context.Context, client *testutil.MockBlockchainClient, repo *memory.BlockStateRepository) {
+				seedStoredChain(t, ctx, client, repo, target, target+anchorDepth)
+				orphanStoredRange(t, ctx, client, repo, target, target+anchorDepth-1)
+			},
+			wantHealed: true,
+		},
+		{
+			name: "an anchor one height beyond the depth limit is out of reach",
+			seed: func(t *testing.T, ctx context.Context, client *testutil.MockBlockchainClient, repo *memory.BlockStateRepository) {
+				seedStoredChain(t, ctx, client, repo, target, target+anchorDepth+1)
+				orphanStoredRange(t, ctx, client, repo, target, target+anchorDepth)
+			},
+			wantErrContains: fmt.Sprintf("no canonical block within %d heights above it", anchorDepth),
+		},
+		{
+			name: "the anchor's parent is not stored",
+			seed: func(t *testing.T, ctx context.Context, client *testutil.MockBlockchainClient, repo *memory.BlockStateRepository) {
+				seedStoredChain(t, ctx, client, repo, target, target)
+				orphanStoredRange(t, ctx, client, repo, target, target)
+				saveBlockState(t, ctx, repo, target+2, "0xanchor2", unstoredParent)
+			},
+			wantErrContains: fmt.Sprintf("block %d's parent %s is not stored", target+2, unstoredParent),
+		},
+		{
+			name: "the anchor's parent is stored at another height",
+			seed: func(t *testing.T, ctx context.Context, client *testutil.MockBlockchainClient, repo *memory.BlockStateRepository) {
+				seedStoredChain(t, ctx, client, repo, target, target)
+				orphanStoredRange(t, ctx, client, repo, target, target)
+				saveBlockState(t, ctx, repo, target+3, misplacedParent, client.GetHeader(target+2).Hash)
+				saveBlockState(t, ctx, repo, target+2, "0xanchor2", misplacedParent)
+			},
+			wantErrContains: fmt.Sprintf("block %d's parent %s is stored at height %d", target+2, misplacedParent, target+3),
+		},
+		{
+			name: "the walk ends on the other fork stored at the height",
+			seed: func(t *testing.T, ctx context.Context, client *testutil.MockBlockchainClient, repo *memory.BlockStateRepository) {
+				sharedParent := client.GetHeader(target - 1).Hash
+				saveBlockState(t, ctx, repo, target, forkA, sharedParent)
+				saveBlockState(t, ctx, repo, target, forkB, sharedParent)
+				for _, hash := range []string{forkA, forkB} {
+					if err := repo.MarkBlockOrphaned(ctx, hash); err != nil {
+						t.Fatalf("orphan %s: %v", hash, err)
+					}
+				}
+				saveBlockState(t, ctx, repo, target+1, "0xanchor1", forkB)
+				client.SetBlockHeader(target, forkA, sharedParent)
+			},
+			wantErrContains: fmt.Sprintf("the chain below canonical block %d reaches %s at height %d, not %s",
+				target+1, forkB, target, forkA),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			client := newMockClient()
+			for number := target - 1; number <= target+anchorDepth+2; number++ {
+				client.AddBlock(number, "")
+			}
+			repo := memory.NewBlockStateRepository()
+			tt.seed(t, ctx, client, repo)
+
+			service, err := NewBackfillService(BackfillConfig{
+				ChainID:            1,
+				BatchSize:          10,
+				BoundaryCheckDepth: -1,
+				Logger:             slog.New(&testutil.SlogRecorder{}),
+			}, client, repo, memory.NewBlockCache(), memory.NewEventSink())
+			if err != nil {
+				t.Fatalf("NewBackfillService: %v", err)
+			}
+
+			batch, err := client.GetBlocksBatch(ctx, []int64{target}, true)
+			if err != nil {
+				t.Fatalf("GetBlocksBatch: %v", err)
+			}
+
+			err = service.processBlockData(ctx, batch[0])
+			if tt.wantErrContains == "" {
+				if err != nil {
+					t.Fatalf("processBlockData = %v, want nil", err)
+				}
+			} else if err == nil {
+				t.Fatalf("processBlockData = nil, want an error containing %q", tt.wantErrContains)
+			} else if !strings.Contains(err.Error(), tt.wantErrContains) {
+				t.Errorf("processBlockData = %v, want an error containing %q", err, tt.wantErrContains)
+			}
+
+			canonical, err := repo.GetBlockByNumber(ctx, target)
+			if err != nil {
+				t.Fatalf("GetBlockByNumber(%d): %v", target, err)
+			}
+			if (canonical != nil) != tt.wantHealed {
+				t.Errorf("canonical row at %d = %+v, want healed = %v", target, canonical, tt.wantHealed)
+			}
+		})
+	}
+}
