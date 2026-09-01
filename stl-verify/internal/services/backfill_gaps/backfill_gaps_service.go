@@ -938,6 +938,8 @@ func (s *BackfillService) recoverFromStaleChain(ctx context.Context, staleBlocks
 // orphanEmptiedHeight orphans a block that has no replacement, rewinding first:
 // a crash between the two leaves a height rescanned for nothing, where the
 // other order leaves a hole below the watermark that FindGaps never reaches.
+// A failed rewind returns before orphaning: the row stays canonical, so it
+// stays in the incomplete-publish retry set and the reconcile is re-attempted.
 func (s *BackfillService) orphanEmptiedHeight(ctx context.Context, block outbound.BlockState, reason string) error {
 	if err := s.rewindWatermarkBelow(ctx, block.Number, reason); err != nil {
 		return err
