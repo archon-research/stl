@@ -237,6 +237,10 @@ func (s *Service) resolveBlockRange(ctx context.Context) (validationRange, error
 // a duplicated height never repairs itself: it pins the watermark, so the
 // bounded check would never reach it and detection would fall back to the lag
 // alert 1000 blocks later (ARCT-379).
+//
+// Watermark 0 means no gap filler has ever advanced — a deployment with
+// ENABLE_BACKFILL=false, or a chain before its first pass — so the strict check
+// covers the whole range on purpose: with no filler, every hole is permanent.
 func (s *Service) validateChainIntegrity(ctx context.Context, rng validationRange, watermark int64) CheckResult {
 	const name = "Chain Integrity"
 	start := time.Now()
