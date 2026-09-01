@@ -90,6 +90,9 @@ type BackfillRecorder interface {
 	// pass's cursor read and its write: contention, self-healing next pass. A
 	// wedged cursor is the opposite shape — this counter at zero with the lag
 	// gauge climbing. Per-chain attribution comes from service.name.
+	// Diagnostic only, no alert rule by design: a refusal self-heals on the next
+	// pass, and a cursor that stays stuck pages through
+	// VectorWatcherBackfillWatermarkLagHigh.
 	RecordWatermarkAdvanceSkipped(ctx context.Context, chainID int64)
 }
 
