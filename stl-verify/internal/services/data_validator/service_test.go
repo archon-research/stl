@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +34,11 @@ type mockBlockStateRepository struct {
 	parentLinkViolationAt     int64
 	verifiedRanges            []outbound.BlockRange
 	parentLinkRanges          []outbound.BlockRange
+
+	// cursorReads names every cursor and max-block read in the order they were
+	// made; a watermark read after the max block is the race the ordering
+	// avoids.
+	cursorReads []string
 }
 
 func (m *mockBlockStateRepository) SaveBlock(ctx context.Context, state outbound.BlockState) (int, error) {
@@ -91,14 +97,17 @@ func (m *mockBlockStateRepository) GetMinBlockNumber(ctx context.Context) (int64
 }
 
 func (m *mockBlockStateRepository) GetMaxBlockNumber(ctx context.Context) (int64, error) {
+	m.cursorReads = append(m.cursorReads, "GetMaxBlockNumber")
 	return m.maxBlockNumber, nil
 }
 
 func (m *mockBlockStateRepository) GetBackfillWatermark(ctx context.Context) (int64, error) {
+	m.cursorReads = append(m.cursorReads, "GetBackfillWatermark")
 	return m.backfillWatermark, nil
 }
 
 func (m *mockBlockStateRepository) GetBackfillCursor(ctx context.Context) (outbound.BackfillCursor, error) {
+	m.cursorReads = append(m.cursorReads, "GetBackfillCursor")
 	return outbound.BackfillCursor{Watermark: m.backfillWatermark}, nil
 }
 
@@ -1003,5 +1012,98 @@ func TestService_Validate_LogsEveryNonPassedCheck(t *testing.T) {
 	}
 	if got := logs.CountWarn("validation check failed"); got != 2 {
 		t.Errorf("failed-check warnings = %d, want 2", got)
+	}
+}
+
+// TestService_ChainIntegrity_WatermarkAboveTheData: FindGaps scans only above
+// the watermark, so heights between the last canonical block and a watermark
+// above it are never scanned and never filled — and the min(toBlock, watermark)
+// clamp reported that state as a chain valid through its last block (ARCT-379).
+func TestService_ChainIntegrity_WatermarkAboveTheData(t *testing.T) {
+	tests := []struct {
+		name            string
+		toBlock         int64
+		watermark       int64
+		wantStatus      string
+		wantMsgContains []string
+	}{
+		{
+			name:            "a watermark above the last canonical block fails",
+			watermark:       2000,
+			wantStatus:      StatusFailed,
+			wantMsgContains: []string{"watermark 2000 is above the last canonical block 1000", "1001..2000"},
+		},
+		{
+			name:       "a requested range ending below the watermark is not an anomaly",
+			toBlock:    300,
+			watermark:  500,
+			wantStatus: StatusPassed,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := &mockBlockStateRepository{
+				minBlockNumber:    1,
+				maxBlockNumber:    1000,
+				backfillWatermark: tt.watermark,
+			}
+
+			config := DefaultConfig()
+			config.ToBlock = tt.toBlock
+			config.ValidateChainIntegrity = true
+			config.ValidateReorgs = false
+			config.SpotCheckCount = 0
+
+			svc, err := NewService(config, repo, &mockBlockVerifier{})
+			if err != nil {
+				t.Fatalf("NewService() error = %v", err)
+			}
+
+			report, err := svc.Validate(context.Background())
+			if err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+
+			got := findCheck(t, report, "Chain Integrity")
+			if got.Status != tt.wantStatus {
+				t.Errorf("got status %q, want %q (message %q)", got.Status, tt.wantStatus, got.Message)
+			}
+			for _, want := range tt.wantMsgContains {
+				if !strings.Contains(got.Message, want) {
+					t.Errorf("message %q should contain %q", got.Message, want)
+				}
+			}
+		})
+	}
+}
+
+// TestService_Validate_ReadsTheCursorBeforeTheLastCanonicalBlock: the gap
+// filler advances the watermark every few seconds, so a watermark read after
+// the last canonical block can exceed it with nothing wrong. Read before it,
+// and read once, the excess can only be a cursor above the data.
+func TestService_Validate_ReadsTheCursorBeforeTheLastCanonicalBlock(t *testing.T) {
+	repo := &mockBlockStateRepository{
+		minBlockNumber:    1,
+		maxBlockNumber:    1000,
+		backfillWatermark: 1000,
+	}
+
+	config := DefaultConfig()
+	config.ValidateChainIntegrity = true
+	config.ValidateReorgs = false
+	config.SpotCheckCount = 0
+
+	svc, err := NewService(config, repo, &mockBlockVerifier{})
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	if _, err := svc.Validate(context.Background()); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	want := []string{"GetBackfillCursor", "GetMaxBlockNumber"}
+	if !slices.Equal(repo.cursorReads, want) {
+		t.Errorf("cursor reads = %v, want %v", repo.cursorReads, want)
 	}
 }

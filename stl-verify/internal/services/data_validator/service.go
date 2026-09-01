@@ -85,10 +85,16 @@ func NewService(
 
 // Validate runs all configured validations and returns a report.
 func (s *Service) Validate(ctx context.Context) (*Report, error) {
-	fromBlock, toBlock, err := s.resolveBlockRange(ctx)
+	watermark, err := s.readWatermarkBeforeResolvingRange(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	rng, err := s.resolveBlockRange(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("resolving block range: %w", err)
 	}
+	fromBlock, toBlock := rng.from, rng.to
 
 	s.logger.Info("starting validation",
 		"from_block", fromBlock,
@@ -100,7 +106,7 @@ func (s *Service) Validate(ctx context.Context) (*Report, error) {
 
 	// Run chain integrity checks
 	if s.config.ValidateChainIntegrity {
-		report.AddCheck(s.validateChainIntegrity(ctx, fromBlock, toBlock))
+		report.AddCheck(s.validateChainIntegrity(ctx, rng, watermark))
 		report.AddCheck(s.validateNoOrphanOnlyHeights(ctx, fromBlock, toBlock))
 	}
 
@@ -163,18 +169,43 @@ func (s *Service) reportCheckOutcomes(report *Report) {
 	}
 }
 
+// readWatermarkBeforeResolvingRange reads the backfill cursor, and is called
+// ahead of resolveBlockRange so the last canonical block is the later of the
+// two reads: the gap filler polls every few seconds, and a watermark read after
+// the range could outrun it with nothing wrong.
+func (s *Service) readWatermarkBeforeResolvingRange(ctx context.Context) (int64, error) {
+	cursor, err := s.blockStateRepo.GetBackfillCursor(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("reading backfill cursor: %w", err)
+	}
+	return cursor.Watermark, nil
+}
+
+// validationRange is the range to validate plus the last canonical block it was
+// resolved against. A caller-supplied ToBlock narrows the bounds but says
+// nothing about where the data ends, which is what the watermark is judged by.
+type validationRange struct {
+	from, to      int64
+	lastCanonical int64
+}
+
 // resolveBlockRange determines the actual block range to validate.
-func (s *Service) resolveBlockRange(ctx context.Context) (int64, int64, error) {
+func (s *Service) resolveBlockRange(ctx context.Context) (validationRange, error) {
 	// GetMin/MaxBlockNumber return 0 for both an empty table and a genesis-only
 	// table, so emptiness can't be inferred from them. Check existence directly:
 	// a nil last block means nothing has been ingested yet, which is a hard
 	// failure for a validation run.
 	lastBlock, err := s.blockStateRepo.GetLastBlock(ctx)
 	if err != nil {
-		return 0, 0, fmt.Errorf("getting last block: %w", err)
+		return validationRange{}, fmt.Errorf("getting last block: %w", err)
 	}
 	if lastBlock == nil {
-		return 0, 0, fmt.Errorf("no blocks found in database to validate (chain may not be ingested yet)")
+		return validationRange{}, fmt.Errorf("no blocks found in database to validate (chain may not be ingested yet)")
+	}
+
+	maxBlock, err := s.blockStateRepo.GetMaxBlockNumber(ctx)
+	if err != nil {
+		return validationRange{}, fmt.Errorf("getting max block: %w", err)
 	}
 
 	fromBlock := s.config.FromBlock
@@ -183,24 +214,20 @@ func (s *Service) resolveBlockRange(ctx context.Context) (int64, int64, error) {
 	if fromBlock == 0 {
 		minBlock, err := s.blockStateRepo.GetMinBlockNumber(ctx)
 		if err != nil {
-			return 0, 0, fmt.Errorf("getting min block: %w", err)
+			return validationRange{}, fmt.Errorf("getting min block: %w", err)
 		}
 		fromBlock = minBlock
 	}
 
 	if toBlock == 0 {
-		maxBlock, err := s.blockStateRepo.GetMaxBlockNumber(ctx)
-		if err != nil {
-			return 0, 0, fmt.Errorf("getting max block: %w", err)
-		}
 		toBlock = maxBlock
 	}
 
 	if fromBlock > toBlock {
-		return 0, 0, fmt.Errorf("from_block (%d) > to_block (%d)", fromBlock, toBlock)
+		return validationRange{}, fmt.Errorf("from_block (%d) > to_block (%d)", fromBlock, toBlock)
 	}
 
-	return fromBlock, toBlock, nil
+	return validationRange{from: fromBlock, to: toBlock, lastCanonical: maxBlock}, nil
 }
 
 // validateChainIntegrity verifies the stored chain under two bounds. Up to the
@@ -210,18 +237,13 @@ func (s *Service) resolveBlockRange(ctx context.Context) (int64, int64, error) {
 // a duplicated height never repairs itself: it pins the watermark, so the
 // bounded check would never reach it and detection would fall back to the lag
 // alert 1000 blocks later (ARCT-379).
-func (s *Service) validateChainIntegrity(ctx context.Context, fromBlock, toBlock int64) CheckResult {
+func (s *Service) validateChainIntegrity(ctx context.Context, rng validationRange, watermark int64) CheckResult {
 	const name = "Chain Integrity"
 	start := time.Now()
 
-	watermark, err := s.blockStateRepo.GetBackfillWatermark(ctx)
-	if err != nil {
-		return CheckResult{
-			Name:     name,
-			Status:   StatusError,
-			Message:  fmt.Sprintf("Failed to read backfill watermark: %v", err),
-			Duration: time.Since(start),
-		}
+	fromBlock, toBlock := rng.from, rng.to
+	if watermark > rng.lastCanonical {
+		return watermarkAboveDataFailure(name, start, watermark, rng.lastCanonical)
 	}
 
 	verifyTo := toBlock
@@ -248,6 +270,20 @@ func (s *Service) validateChainIntegrity(ctx context.Context, fromBlock, toBlock
 		Name:     name,
 		Status:   StatusPassed,
 		Message:  chainValidMessage(watermark, verifyTo, toBlock),
+		Duration: time.Since(start),
+	}
+}
+
+// watermarkAboveDataFailure reports the state the min(toBlock, watermark) clamp
+// hid: FindGaps scans only above the watermark, so heights between the last
+// canonical block and a watermark above it are never scanned, and never filled.
+func watermarkAboveDataFailure(name string, start time.Time, watermark, lastCanonical int64) CheckResult {
+	return CheckResult{
+		Name:   name,
+		Status: StatusFailed,
+		Message: fmt.Sprintf(
+			"Backfill watermark %d is above the last canonical block %d: heights %d..%d hold no row and the gap filler will never scan them",
+			watermark, lastCanonical, lastCanonical+1, watermark),
 		Duration: time.Since(start),
 	}
 }
