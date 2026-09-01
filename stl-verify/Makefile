@@ -633,6 +633,24 @@ dev-env-files:
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://robinhood-mainnet.g.alchemy.com/v2" \
+		"ALCHEMY_WS_URL=wss://robinhood-mainnet.g.alchemy.com/v2" \
+		"CHAIN_ID=4663" \
+		"AWS_SNS_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
+		"AWS_ACCESS_KEY_ID=test" \
+		"AWS_SECRET_ACCESS_KEY=test" \
+		"AWS_REGION=us-east-1" \
+		"AWS_SNS_TOPIC_ARN=arn:aws:sns:us-east-1:000000000000:stl-robinhood-blocks.fifo" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
+		"REDIS_ADDR=127.0.0.1:$(KIND_HOST_REDIS_PORT)" \
+		"REDIS_PASSWORD=" \
+		"JAEGER_ENDPOINT=127.0.0.1:$(KIND_HOST_OTLP_PORT)" \
+		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
+		"ENABLE_BACKFILL=false" \
+		> cmd/base/watcher/.env.robinhood && \
+	printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
 		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
 		"AWS_SQS_QUEUE_URL=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)/000000000000/stl-ethereum-oracle-price.fifo" \
 		"AWS_SQS_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
@@ -731,6 +749,24 @@ dev-env-files:
 		"DEPLOY_ENV=development" \
 		"LOG_LEVEL=debug" \
 		> cmd/workers/prime-allocation-indexer/.env.avax && \
+	printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://robinhood-mainnet.g.alchemy.com/v2" \
+		"AWS_SQS_QUEUE_URL=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)/000000000000/stl-robinhood-allocation-tracker.fifo" \
+		"AWS_SQS_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
+		"AWS_S3_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
+		"AWS_ACCESS_KEY_ID=test" \
+		"AWS_SECRET_ACCESS_KEY=test" \
+		"AWS_REGION=us-east-1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
+		"REDIS_ADDR=127.0.0.1:$(KIND_HOST_REDIS_PORT)" \
+		"REDIS_PASSWORD=" \
+		"CHAIN_ID=4663" \
+		"S3_BUCKET=stl-sentineldevelopment-robinhood-raw" \
+		"DEPLOY_ENV=development" \
+		"LOG_LEVEL=debug" \
+		> cmd/workers/prime-allocation-indexer/.env.robinhood && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \

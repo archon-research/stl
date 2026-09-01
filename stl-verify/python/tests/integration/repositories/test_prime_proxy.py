@@ -49,7 +49,7 @@ async def repository(async_db_url: str) -> AsyncIterator[AllocationRepository]:
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_the_migration_declares_the_full_proxy_list(conn: asyncpg.Connection) -> None:
-    """Eleven rows, and every one resolves to a real prime.
+    """Twelve rows, and every one resolves to a real prime.
 
     A prime name in the migration that does not match ``prime.name`` would drop its
     proxies silently, and every endpoint for them would return empty rather than fail.
@@ -59,7 +59,7 @@ async def test_the_migration_declares_the_full_proxy_list(conn: asyncpg.Connecti
         "FROM prime_proxy pp JOIN prime p ON p.id = pp.prime_id"
     )
 
-    assert len(rows) == 11
+    assert len(rows) == 12
     assert {row["name"] for row in rows} == {"spark", "grove"}
 
 
