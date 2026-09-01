@@ -200,10 +200,18 @@ post-restart catch-up drains within minutes.
    `stale_fork`. The gap filler refuses to un-orphan it (doing so would make the
    losing fork canonical and wedge every height above it), so the watermark
    stays pinned below N and the lag grows.
-3. **Is every advance being refused?** A non-zero
-   `backfill_watermark_advance_skipped_total` on the same `service_name` means
-   a reorg keeps landing mid-scan; sustained alongside a flat lag it is a
-   cursor no pass can move, not a busy chain.
+3. **Read `backfill_watermark_advance_skipped_total` the right way round.** A
+   non-zero rate on the same `service_name` means a reorg commit landed
+   between a pass's cursor read and its compare-and-set write: the pass's
+   conclusion was stale and it declined to advance, and the next pass re-runs
+   the scan against the new cursor. That is contention, and it self-heals — it
+   is *not* the wedge signature. Every wedge shape returns before the
+   compare-and-set is ever attempted, so the counter stays at **zero** while
+   the cursor is stuck: the ARCT-379 shape in step 2 (the target never rises
+   above the pinned watermark), a target capped at an unpublished block, and a
+   persistent chain-integrity violation over the range being retired. **A
+   wedge is this counter at zero with the lag gauge climbing**; a busy chain is
+   this counter ticking with the lag still draining.
 4. **Upstream RPC** — check the Alchemy 429 / error rate; degraded RPC beyond
    the catch-up rate also grows lag.
 5. **Watcher logs** for repeated gap-fill of the same numbers.
