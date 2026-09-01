@@ -34,15 +34,17 @@ def utc_now() -> datetime:
 
 
 def pinned_to(effective_at: datetime | None) -> ReferenceEffectiveAtProvider:
-    """A provider fixed to effective_at, or the default when it is None.
+    """A provider fixed to effective_at in UTC, or the default when it is None.
 
-    A naive value is taken as UTC, because the settings accept a bare ``YYYY-MM-DD``.
+    A naive value is rejected rather than assumed to be UTC: bound naive, Postgres reads it
+    in the session's TimeZone instead of as an absolute instant.
     """
     if effective_at is None:
         return utc_now
     if effective_at.tzinfo is None:
-        effective_at = effective_at.replace(tzinfo=UTC)
-    return lambda: effective_at
+        raise ValueError(f"reference effective instant {effective_at.isoformat()} carries no timezone")
+    pinned = effective_at.astimezone(UTC)
+    return lambda: pinned
 
 
 class ReferenceAsOf:

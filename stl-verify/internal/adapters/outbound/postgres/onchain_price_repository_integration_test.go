@@ -6,7 +6,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -47,15 +46,6 @@ func newRetiredSourceFixture(t *testing.T, ctx context.Context, oracleName, toke
 	return retiredSourceFixture{repo: repo, oracleID: oracleID, tokenID: tokenID}
 }
 
-func mustDate(t *testing.T, value string) time.Time {
-	t.Helper()
-	d, err := time.Parse(time.DateOnly, value)
-	if err != nil {
-		t.Fatalf("parse date %q: %v", value, err)
-	}
-	return d
-}
-
 func TestGetEnabledAssetsResolvesTheVersionEffectiveAtTheRecordedInstant(t *testing.T) {
 	ctx := context.Background()
 	f := newRetiredSourceFixture(t, ctx, "vec597-assets", "0x1111111111111111111111111111111111111111", "2026-01-01", "2026-08-20")
@@ -71,7 +61,7 @@ func TestGetEnabledAssetsResolvesTheVersionEffectiveAtTheRecordedInstant(t *test
 		{"after the retirement", "2026-12-31", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			assets, err := f.repo.GetEnabledAssets(ctx, f.oracleID, mustDate(t, tc.effectiveAt))
+			assets, err := f.repo.GetEnabledAssets(ctx, f.oracleID, testutil.MustUTCInstant(t, tc.effectiveAt))
 			if err != nil {
 				t.Fatalf("GetEnabledAssets(%s): %v", tc.effectiveAt, err)
 			}
@@ -89,7 +79,7 @@ func TestGetTokenInfosResolvesTheVersionEffectiveAtTheRecordedInstant(t *testing
 	ctx := context.Background()
 	f := newRetiredSourceFixture(t, ctx, "vec597-infos", "0x2222222222222222222222222222222222222222", "2026-01-01", "2026-08-20")
 
-	whileEnabled, err := f.repo.GetTokenInfos(ctx, f.oracleID, mustDate(t, "2026-06-01"))
+	whileEnabled, err := f.repo.GetTokenInfos(ctx, f.oracleID, testutil.MustUTCInstant(t, "2026-06-01"))
 	if err != nil {
 		t.Fatalf("GetTokenInfos while enabled: %v", err)
 	}
@@ -97,7 +87,7 @@ func TestGetTokenInfosResolvesTheVersionEffectiveAtTheRecordedInstant(t *testing
 		t.Errorf("token %d missing from token infos as of 2026-06-01", f.tokenID)
 	}
 
-	afterRetirement, err := f.repo.GetTokenInfos(ctx, f.oracleID, mustDate(t, "2026-12-31"))
+	afterRetirement, err := f.repo.GetTokenInfos(ctx, f.oracleID, testutil.MustUTCInstant(t, "2026-12-31"))
 	if err != nil {
 		t.Fatalf("GetTokenInfos after retirement: %v", err)
 	}
@@ -129,7 +119,7 @@ func TestCopyOracleAssetsRejectsATargetHoldingAConflictingMapping(t *testing.T) 
 		t.Fatalf("seed the conflicting target mapping: %v", err)
 	}
 
-	err := f.repo.CopyOracleAssets(ctx, f.oracleID, targetID, mustDate(t, "2026-06-01"))
+	err := f.repo.CopyOracleAssets(ctx, f.oracleID, targetID, testutil.MustUTCInstant(t, "2026-06-01"))
 	if err == nil {
 		t.Fatal("CopyOracleAssets reported success onto a target already holding a different mapping for the same key")
 	}
@@ -155,10 +145,10 @@ func TestCopyOracleAssetsCopiesTheVersionEffectiveAtTheRecordedInstant(t *testin
 	f := newRetiredSourceFixture(t, ctx, "vec597-copy", "0x3333333333333333333333333333333333333333", "2026-01-01", "2026-08-20")
 	targetID := testutil.SeedOracle(t, ctx, onchainPricePool, "vec597-copy-target", "target", 1, "0x9999999999999999999999999999999999999999")
 
-	if err := f.repo.CopyOracleAssets(ctx, f.oracleID, targetID, mustDate(t, "2026-12-31")); err != nil {
+	if err := f.repo.CopyOracleAssets(ctx, f.oracleID, targetID, testutil.MustUTCInstant(t, "2026-12-31")); err != nil {
 		t.Fatalf("CopyOracleAssets after retirement: %v", err)
 	}
-	assets, err := f.repo.GetEnabledAssets(ctx, targetID, mustDate(t, "2026-12-31"))
+	assets, err := f.repo.GetEnabledAssets(ctx, targetID, testutil.MustUTCInstant(t, "2026-12-31"))
 	if err != nil {
 		t.Fatalf("GetEnabledAssets on the target: %v", err)
 	}
@@ -166,10 +156,10 @@ func TestCopyOracleAssetsCopiesTheVersionEffectiveAtTheRecordedInstant(t *testin
 		t.Errorf("copied %d assets from a fully retired oracle, want 0", len(assets))
 	}
 
-	if err := f.repo.CopyOracleAssets(ctx, f.oracleID, targetID, mustDate(t, "2026-06-01")); err != nil {
+	if err := f.repo.CopyOracleAssets(ctx, f.oracleID, targetID, testutil.MustUTCInstant(t, "2026-06-01")); err != nil {
 		t.Fatalf("CopyOracleAssets while enabled: %v", err)
 	}
-	assets, err = f.repo.GetEnabledAssets(ctx, targetID, mustDate(t, "2026-06-01"))
+	assets, err = f.repo.GetEnabledAssets(ctx, targetID, testutil.MustUTCInstant(t, "2026-06-01"))
 	if err != nil {
 		t.Fatalf("GetEnabledAssets on the target: %v", err)
 	}

@@ -25,7 +25,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/oracle_backfill"
-	"github.com/archon-research/stl/stl-verify/internal/services/oracle_pricing"
 )
 
 func main() {
@@ -163,8 +162,7 @@ func run(args []string) error {
 		return fmt.Errorf("creating repository: %w", err)
 	}
 
-	referenceEffectiveAt, err := oracle_pricing.ResolveReferenceEffectiveAt(
-		os.Getenv(oracle_pricing.ReferenceEffectiveAtEnv), time.Now())
+	referenceEffectiveAt, err := env.ReferenceEffectiveAt(time.Now().UTC())
 	if err != nil {
 		return fmt.Errorf("resolving reference effective time: %w", err)
 	}

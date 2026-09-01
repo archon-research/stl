@@ -33,7 +33,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/oracle_price_worker"
-	"github.com/archon-research/stl/stl-verify/internal/services/oracle_pricing"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
@@ -242,8 +241,7 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating repository: %w", err)
 	}
 
-	referenceEffectiveAt, err := oracle_pricing.ResolveReferenceEffectiveAt(
-		os.Getenv(oracle_pricing.ReferenceEffectiveAtEnv), time.Now())
+	referenceEffectiveAt, err := env.ReferenceEffectiveAt(time.Now().UTC())
 	if err != nil {
 		return fmt.Errorf("resolving reference effective time: %w", err)
 	}

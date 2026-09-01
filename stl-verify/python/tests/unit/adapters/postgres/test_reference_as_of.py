@@ -1,6 +1,8 @@
 """The reference effective instant bound into reference-table reads (ADR-0006 §4)."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
+
+import pytest
 
 from app.adapters.postgres.reference_as_of import ReferenceAsOf, pinned_to, utc_now
 
@@ -31,9 +33,14 @@ def test_pinned_to_an_instant_ignores_the_clock() -> None:
     assert pinned_to(_JUNE_1)() == _JUNE_1
 
 
-def test_pinned_to_a_naive_instant_is_taken_as_utc() -> None:
-    """The settings accept a bare YYYY-MM-DD, which parses to a naive midnight."""
-    assert pinned_to(datetime(2026, 6, 1))() == datetime(2026, 6, 1, tzinfo=UTC)
+def test_pinned_to_a_zoned_instant_is_normalised_to_utc() -> None:
+    assert pinned_to(datetime(2026, 6, 1, 16, 30, tzinfo=timezone(timedelta(hours=2))))() == _JUNE_1
+
+
+def test_pinned_to_a_naive_instant_is_rejected() -> None:
+    """Bound naive, Postgres would read it in the session's TimeZone."""
+    with pytest.raises(ValueError, match="carries no timezone"):
+        pinned_to(datetime(2026, 6, 1))
 
 
 def test_pinned_to_none_falls_back_to_now() -> None:

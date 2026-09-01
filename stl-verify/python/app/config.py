@@ -1,5 +1,5 @@
 import functools
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -26,25 +26,28 @@ def async_database_url(database_url: str) -> str:
 
 
 def parse_reference_effective_at(raw: str) -> datetime:
-    """Parse a reference effective instant, mirroring Go's ResolveReferenceEffectiveAt.
+    """Parse a reference effective instant, mirroring Go's env.ReferenceEffectiveAt.
 
-    Accepts RFC 3339, or a bare ``YYYY-MM-DD`` meaning that day's midnight UTC. A value
-    carrying no offset is rejected rather than assumed to be UTC, and anything else
-    raises, so a typo fails startup instead of pinning the run to an unintended instant.
+    One format, RFC 3339 UTC (ADR-0006 §5). A missing offset, a non-UTC offset and a future
+    instant all raise, so a typo fails startup instead of pinning the API to an unintended
+    instant — and an instant nothing can have observed resolves reference versions that did
+    not exist yet.
     """
-    try:
-        return datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=UTC)
-    except ValueError:
-        pass
+    example = "e.g. 2026-06-01T00:00:00Z"
     try:
         parsed = datetime.fromisoformat(raw)
     except ValueError:
-        raise ValueError(f"reference_effective_at={raw!r} is neither RFC 3339 nor YYYY-MM-DD") from None
-    if parsed.tzinfo is None:
+        raise ValueError(f"reference_effective_at={raw!r} is not RFC 3339 UTC ({example})") from None
+    offset = parsed.utcoffset()
+    if offset is None:
+        raise ValueError(f"reference_effective_at={raw!r} carries no UTC offset; write it as {example}")
+    if offset != timedelta(0):
         raise ValueError(
-            f"reference_effective_at={raw!r} has no UTC offset; write it as "
-            f"{raw}Z (or YYYY-MM-DD for that day's midnight UTC)"
+            f"reference_effective_at={raw!r} must be UTC; write the same instant with a Z offset "
+            f"({parsed.astimezone(UTC).isoformat()})"
         )
+    if parsed > datetime.now(UTC):
+        raise ValueError(f"reference_effective_at={raw!r} is in the future")
     return parsed.astimezone(UTC)
 
 

@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -85,13 +85,12 @@ class TestReferenceEffectiveAt:
     @pytest.mark.parametrize(
         ("raw", "expected"),
         [
-            ("2026-06-01", datetime(2026, 6, 1, tzinfo=UTC)),
             ("2026-06-01T02:30:00Z", datetime(2026, 6, 1, 2, 30, tzinfo=UTC)),
-            # A non-UTC offset is normalised, not truncated.
-            ("2026-06-01T02:30:00+02:00", datetime(2026, 6, 1, 0, 30, tzinfo=UTC)),
+            ("2026-06-01T02:30:00+00:00", datetime(2026, 6, 1, 2, 30, tzinfo=UTC)),
+            ("2026-06-01T02:30:00.123456Z", datetime(2026, 6, 1, 2, 30, 0, 123456, tzinfo=UTC)),
         ],
     )
-    def test_accepts_rfc3339_and_bare_dates(self, raw, expected):
+    def test_accepts_rfc3339_utc(self, raw, expected):
         settings = Settings.model_validate({"reference_effective_at": raw})
         assert settings.resolved_reference_effective_at() == expected
 
@@ -106,9 +105,19 @@ class TestReferenceEffectiveAt:
             "0",
             # Reading an operator's local wall clock as UTC resolves the wrong version.
             "2026-06-01T02:30:00",
+            "2026-06-01",
+            # One format everywhere: a non-UTC offset is rejected, not normalised.
+            "2026-06-01T02:30:00+02:00",
             "not-a-date",
         ],
     )
     def test_rejects_values_that_would_resolve_to_an_unintended_instant(self, raw):
         with pytest.raises(ValidationError):
             Settings.model_validate({"reference_effective_at": raw})
+
+    def test_rejects_a_future_instant(self):
+        """An instant nothing has observed yet resolves reference versions that do not exist."""
+        future = (datetime.now(UTC) + timedelta(days=1)).isoformat().replace("+00:00", "Z")
+
+        with pytest.raises(ValidationError):
+            Settings.model_validate({"reference_effective_at": future})

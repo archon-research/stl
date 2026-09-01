@@ -98,7 +98,7 @@ func NewService(
 	}
 	// Not defaulted at load time, because a run that silently read "now" would look normal.
 	if config.ReferenceEffectiveAt.IsZero() {
-		return nil, fmt.Errorf("config.ReferenceEffectiveAt must be set; resolve it with oracle_pricing.ResolveReferenceEffectiveAt")
+		return nil, fmt.Errorf("config.ReferenceEffectiveAt must be set")
 	}
 
 	defaults := configDefaults()
