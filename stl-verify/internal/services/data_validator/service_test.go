@@ -25,6 +25,7 @@ type mockBlockStateRepository struct {
 	orphanOnlyHeights   []int64
 	orphanOnlyErr       error
 	backfillWatermark   int64
+	backfillCursorErr   error
 
 	// chainIntegrityViolationAt and parentLinkViolationAt report a violation
 	// only when that height falls inside the range the corresponding check is
@@ -108,6 +109,9 @@ func (m *mockBlockStateRepository) GetBackfillWatermark(ctx context.Context) (in
 
 func (m *mockBlockStateRepository) GetBackfillCursor(ctx context.Context) (outbound.BackfillCursor, error) {
 	m.cursorReads = append(m.cursorReads, "GetBackfillCursor")
+	if m.backfillCursorErr != nil {
+		return outbound.BackfillCursor{}, m.backfillCursorErr
+	}
 	return outbound.BackfillCursor{Watermark: m.backfillWatermark}, nil
 }
 
@@ -1105,5 +1109,27 @@ func TestService_Validate_ReadsTheCursorBeforeTheLastCanonicalBlock(t *testing.T
 	want := []string{"GetBackfillCursor", "GetMaxBlockNumber"}
 	if !slices.Equal(repo.cursorReads, want) {
 		t.Errorf("cursor reads = %v, want %v", repo.cursorReads, want)
+	}
+}
+
+// TestService_Validate_FailsWhenTheCursorIsUnreadable: the watermark decides
+// which bound every height in the range is checked under, so a run that cannot
+// read it stops instead of reporting the chain under a silently-zero cursor.
+func TestService_Validate_FailsWhenTheCursorIsUnreadable(t *testing.T) {
+	repo := &mockBlockStateRepository{
+		minBlockNumber:    1,
+		maxBlockNumber:    1000,
+		backfillCursorErr: errors.New("connection refused"),
+	}
+
+	svc, err := NewService(DefaultConfig(), repo, &mockBlockVerifier{})
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	if _, err := svc.Validate(context.Background()); err == nil {
+		t.Fatal("Validate() error = nil, want the cursor read failure")
+	} else if !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("error %q should carry the cursor read failure", err)
 	}
 }
