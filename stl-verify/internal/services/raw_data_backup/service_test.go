@@ -7,12 +7,17 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	sqsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
@@ -1766,6 +1771,41 @@ func TestRun_DrainsInFlightMessageOnShutdown(t *testing.T) {
 	}
 }
 
+// A shutdown that lands while the fetcher is inside its long poll leaves through
+// fetchAndDispatch, not the select, so without a marker of its own half the
+// worker's shutdowns cannot be timed from the logs.
+func TestRun_LogsTheShutdownThatLandsInsideThePoll(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	svc, recorder := shutdownTestService(t, Config{Workers: 1, BatchSize: 1},
+		consumer, newMockBlockCache(), newMockS3Writer())
+
+	polling := make(chan struct{}, 1)
+	consumer.receiveCallback = func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+		select {
+		case polling <- struct{}{}:
+		default:
+		}
+		<-ctx.Done()
+		return nil, fmt.Errorf("not starting a poll: %w", ctx.Err())
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-polling
+		cancel()
+	}()
+
+	if err := svc.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+
+	const want = "shutdown cancelled the poll, stopping message fetcher"
+	if got := recorder.MessagesAt(slog.LevelInfo); !slices.Contains(got, want) {
+		t.Errorf("expected an INFO %q marking why the fetcher stopped, got %v", want, got)
+	}
+}
+
 func TestRun_ReleasesInFlightMessageWhenDrainBudgetExpires(t *testing.T) {
 	consumer := newMockSQSConsumer()
 	cache := newMockBlockCache()
@@ -2278,6 +2318,94 @@ func TestRun_HandlesDeleteMessageError(t *testing.T) {
 	if len(keys) != 1 {
 		t.Errorf("expected 1 file, got %d", len(keys))
 	}
+}
+
+// runWithARefusedDelete drives one message whose delete SQS refuses, and returns
+// the metrics the run produced.
+func runWithARefusedDelete(t *testing.T) (*mockMetrics, sdkmetric.Reader) {
+	t.Helper()
+	reader := installManualMeterProvider(t)
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	dlq := newMockDeadLetterPublisher()
+	metrics := &mockMetrics{}
+	svc := newDLQTestService(t, Config{
+		ChainExpectations: blockOnlyExpectations(),
+		Metrics:           metrics,
+	}, consumer, cache, newMockS3Writer(), dlq)
+
+	_ = cache.SetBlock(context.Background(), 1, 100, 0, json.RawMessage(`{"number":100}`))
+	consumer.AddMessage(createSQSMessage("msg1", createBlockEvent(1, 100, 0)))
+	consumer.deleteErr = errors.New("AccessDenied: DeleteMessage")
+
+	runUntilProcessed(t, svc, consumer, dlq)
+	return metrics, reader
+}
+
+// The message stays on the queue and the block is processed again on every
+// redelivery, so reporting it processed both double-counts the block and keeps
+// VectorBackupWorkerStalled (rate(blocks_processed_total) == 0) quiet.
+func TestRun_ARefusedDeleteIsNotReportedProcessed(t *testing.T) {
+	metrics, _ := runWithARefusedDelete(t)
+
+	if got := metrics.ProcessedStatuses(); len(got) != 0 {
+		t.Errorf("processed statuses = %v, want none: nothing was settled", got)
+	}
+}
+
+func TestRun_ARefusedDeleteIsCountedAsAFailedSettle(t *testing.T) {
+	_, reader := runWithARefusedDelete(t)
+
+	want := map[settleKey]int64{{op: "delete", status: "failed"}: 1}
+	if got := collectSettleCounter(t, reader); !maps.Equal(got, want) {
+		t.Errorf("sqs.message.settles.total = %v, want %v", got, want)
+	}
+}
+
+type settleKey struct {
+	op     string
+	status string
+}
+
+// Keyed off the wire name and labels rather than the package constants: the
+// alert rules match on exactly these strings.
+func collectSettleCounter(t *testing.T, reader sdkmetric.Reader) map[settleKey]int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collecting metrics: %v", err)
+	}
+	counts := make(map[settleKey]int64)
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "sqs.message.settles.total" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric %q is %T, want metricdata.Sum[int64]", m.Name, m.Data)
+			}
+			for _, dp := range sum.DataPoints {
+				op, _ := dp.Attributes.Value("op")
+				status, _ := dp.Attributes.Value("status")
+				counts[settleKey{op: op.AsString(), status: status.AsString()}] += dp.Value
+			}
+		}
+	}
+	return counts
+}
+
+func installManualMeterProvider(t *testing.T) sdkmetric.Reader {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	previous := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(previous)
+		_ = mp.Shutdown(context.Background())
+	})
+	return reader
 }
 
 // =============================================================================

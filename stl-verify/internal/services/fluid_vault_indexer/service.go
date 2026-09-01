@@ -187,8 +187,26 @@ func validateDependencies(
 // Start loads the registry, reconciles all existing vaults against the resolver
 // at the latest block (so vaults that predate the indexer are picked up — not
 // just ones whose VaultDeployed event arrives later), then runs the SQS
+// The visibility-timeout guard is fatal, so it runs before any startup I/O: a
+// misconfigured pod would otherwise re-run the whole sweep on every
+// CrashLoopBackOff cycle before refusing.
+func (s *Service) consumeLoop() sqsutil.Config {
+	return sqsutil.Config{
+		Consumer:     s.consumer,
+		MaxMessages:  s.config.MaxMessages,
+		PollInterval: s.config.PollInterval,
+		Logger:       s.logger,
+		ChainID:      s.config.ChainID,
+	}
+}
+
 // processing loop until ctx is cancelled.
 func (s *Service) Start(ctx context.Context) error {
+	loop := s.consumeLoop()
+	if err := loop.Validate(); err != nil {
+		return err
+	}
+
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
 	if err := s.registry.LoadFromDB(ctx, s.vaultRepo, s.config.ChainID); err != nil {
@@ -201,17 +219,6 @@ func (s *Service) Start(ctx context.Context) error {
 	}
 	if err := s.ReconcileVaults(ctx, int64(head)); err != nil {
 		return fmt.Errorf("startup vault reconcile: %w", err)
-	}
-
-	loop := sqsutil.Config{
-		Consumer:     s.consumer,
-		MaxMessages:  s.config.MaxMessages,
-		PollInterval: s.config.PollInterval,
-		Logger:       s.logger,
-		ChainID:      s.config.ChainID,
-	}
-	if err := loop.Validate(); err != nil {
-		return err
 	}
 
 	s.wg.Go(func() {

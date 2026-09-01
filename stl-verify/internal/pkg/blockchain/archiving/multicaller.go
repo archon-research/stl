@@ -148,7 +148,9 @@ func (m *Multicaller) Address() common.Address { return m.inner.Address() }
 // for a directly-constructed decorator (tests).
 func (m *Multicaller) Close() { m.cfg.Gate.Wait() }
 
-// recordWrite increments archive.writes.total with the outcome status.
+// recordWrite increments archive.writes.total with the outcome status. Only a
+// write that still owns its batch's status calls it; a drain that expired
+// already counted the rest as lost.
 func (m *Multicaller) recordWrite(err error) {
 	status := writeStatusSuccess
 	if err != nil {
@@ -216,7 +218,9 @@ func (m *Multicaller) archiveRecord(ctx context.Context, record outbound.CallBat
 	archiveCtx, cancel := context.WithTimeout(ctx, archiveTimeout)
 	defer cancel()
 	err := m.archiver.Archive(archiveCtx, record)
-	m.recordWrite(err)
+	if m.cfg.Gate.ClaimOutcome() {
+		m.recordWrite(err)
+	}
 	if err != nil {
 		// A failed write is a permanent, unretried loss of an archived batch, so
 		// surface it at error level rather than burying it in warnings.

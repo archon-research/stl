@@ -77,7 +77,9 @@ groups:
         #
         # Residual (same as VectorAllocationTrackerStalled): a live pod whose OTLP
         # export dies lets BOTH series staleness-expire, so `== 0` returns no data
-        # and this goes silent. morpho has no kube-state Down companion yet — see
+        # and this goes silent. Process death — including the boot refusal a bad
+        # SQS_VISIBILITY_TIMEOUT causes — is covered by the platform's PodNotReady
+        # and DeploymentReplicasMismatch rules, not by anything in this file; see
         # the runbook.
         expr: |
           (
@@ -484,44 +486,51 @@ groups:
       # status is "ok" or "failed". Either failure leaves the message hidden for
       # the queue's whole visibility timeout, and because each chain is its own
       # FIFO group that means the chain's block stream stops until it expires.
-      # Every SQS worker binary emits it, so these rules are not indexer-specific;
-      # they live here beside the other cross-binary rules.
+      # Every SQS worker binary emits it — the eight that consume through
+      # sqsutil.ProcessMessages, and raw-data-backup, which runs its own
+      # fetch/dispatch loop but settles through the exported sqsutil.DeleteMessage
+      # and sqsutil.ReleaseMessages. So these rules are not indexer-specific; they
+      # live here beside the other cross-binary rules.
 
       - alert: VectorSQSReleaseFailed
         # A refused ChangeMessageVisibilityBatch leaves the message hidden for the
         # queue's whole visibility timeout, stalling that chain's FIFO block stream
         # until it expires — the blackout the release exists to prevent.
         #
-        # Gated on recurrence, not presence: a single refused release self-heals
-        # when the visibility timeout expires and needs nobody, while the same
-        # failure across two pod lifetimes in 6h means throttling or a missing
-        # ChangeMessageVisibilityBatch permission on the release path, which does.
+        # Two present_over_time legs over disjoint windows: failing NOW (the last
+        # 30m) and failing BEFORE that (the 6h ending 30m ago). Both must hold, so
+        # the rule needs a failure that persists across more than half an hour.
         #
-        # max_over_time, not increase(): the series is born at shutdown and gets
-        # one export before the pod dies, so increase() is blind to it (the same
-        # first-sample blindness documented on VectorArchivingStalled above).
-        # count() then counts the pod lifetimes that failed a release, so > 1 is
-        # two separate shutdowns rather than one shutdown losing a whole chunk.
+        # present_over_time, not increase() or max_over_time+count(): the series is
+        # born at shutdown and gets one export before the pod dies, so increase() is
+        # blind to it (the same first-sample blindness documented on
+        # VectorArchivingStalled above). Counting pod LIFETIMES instead was the
+        # previous shape and could not fire in steady state: releases run only at
+        # shutdown, so one lifetime contributes exactly one series and the rule
+        # demanded two restarts in 6h — measured flat at 1 for 14 of 24 hours on
+        # every mainnet service, which is exactly when a never-self-healing cause
+        # (an IAM role without sqs:ChangeMessageVisibilityBatch) would be invisible.
+        # A ratio of failed:ok cannot work either: in that IAM case there is no
+        # status="ok" series at all, so the ratio evaluates empty.
         #
-        # The present_over_time leg is what keeps that count a statement about NOW.
-        # A dead pod's series stays inside the [6h] window long after the pod is
-        # gone, so the count alone latches: once two lifetimes have failed it is
-        # pinned at 2 for six hours, a healthy successor exports no failed series
-        # and cannot bring it down, and the value can only rise. Routine rollouts
-        # held three staging services there. Requiring a failed-release series that
-        # is still being exported within the last 30m means the rule fires on a
-        # genuine recurrence and clears ~30m after the last failing pod is gone,
-        # while still re-firing if it happens again.
+        # What each leg buys, checked against staging series and in promqltest:
+        #   - one self-healing refusal cannot fire it (a single burst satisfies both
+        #     legs only at the instant it sits on the window boundary, which `for`
+        #     outlives), and neither can one rollout of a multi-replica deployment;
+        #   - a pod whose every release fails, or a crashloop under one pod name,
+        #     fires within one lifetime;
+        #   - the recency leg clears it ~30m after the last failing pod is gone,
+        #     which is what unbroke the old latch: a dead pod's series stayed inside
+        #     the [6h] window and pinned the alert on for six hours while a healthy
+        #     successor exported nothing that could bring it down.
         expr: |
           count by (service_name, chain, cluster) (
-            max_over_time(sqs_message_settles_total{op="release", status="failed", k8s_namespace_name="vector"}[6h])
-          ) > 1
+            present_over_time(sqs_message_settles_total{op="release", status="failed", k8s_namespace_name="vector"}[30m])
+          ) > 0
           and on (service_name, chain, cluster)
-          (
-            count by (service_name, chain, cluster) (
-              present_over_time(sqs_message_settles_total{op="release", status="failed", k8s_namespace_name="vector"}[30m])
-            ) > 0
-          )
+          count by (service_name, chain, cluster) (
+            present_over_time(sqs_message_settles_total{op="release", status="failed", k8s_namespace_name="vector"}[6h] offset 30m)
+          ) > 0
         for: 5m
         labels:
           team: vector
@@ -531,11 +540,12 @@ groups:
         annotations:
           summary: "Vector SQS message release failing repeatedly for {{ $labels.service_name }} on {{ $labels.chain }}"
           description: |
-            `{{ $labels.service_name }}` on chain `{{ $labels.chain }}` failed to hand
-            in-flight SQS messages back to the queue in {{ $value }} separate pod
-            lifetimes over 6h, the most recent of them within the last 30m. Each
-            failure leaves those messages hidden for the queue's visibility timeout,
-            stalling that chain's FIFO block stream.
+            `{{ $labels.service_name }}` on chain `{{ $labels.chain }}` has failed to
+            hand in-flight SQS messages back to the queue within the last 30m, and was
+            already failing them earlier in the preceding 6h. That is not the one-off a
+            visibility timeout heals on its own. Each failure leaves those messages
+            hidden for the queue's whole visibility timeout, stalling that chain's FIFO
+            block stream.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorsqsreleasefailed
 
       - alert: VectorSQSDeleteFailed

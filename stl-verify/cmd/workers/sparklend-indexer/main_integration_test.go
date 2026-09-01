@@ -114,11 +114,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 		}, nil)
 	}()
 
-	select {
-	case <-sqsState.FirstCallReceived:
-	case <-time.After(30 * time.Second):
-		t.Fatal("timed out waiting for worker to start polling SQS")
-	}
+	testutil.WaitForFirstPoll(t, errCh, sqsState.FirstCallReceived)
 
 	// Wait until the Borrow event is fully processed (borrower row written) so the
 	// run loop is idle before we shut down, avoiding a context-cancelled mid-write.

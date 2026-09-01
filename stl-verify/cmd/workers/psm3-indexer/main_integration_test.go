@@ -347,19 +347,11 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 		}, nil)
 	}()
 
-	deadline := time.After(15 * time.Second)
-	for {
+	testutil.WaitForWorkerCondition(t, errCh, 15*time.Second, func() bool {
 		var count int
 		err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM psm3_reserves`).Scan(&count)
-		if err == nil && count >= 1 {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for psm3 snapshot to be written")
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
+		return err == nil && count >= 1
+	}, "a psm3 snapshot to be written")
 
 	var (
 		addrBytes                              []byte
@@ -456,23 +448,11 @@ func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 		}, nil)
 	}()
 
-	deadline := time.After(15 * time.Second)
-	for {
+	testutil.WaitForWorkerCondition(t, errCh, 15*time.Second, func() bool {
 		var count int
 		err := pool.QueryRow(ctx, `SELECT COUNT(DISTINCT block_number) FROM psm3_reserves`).Scan(&count)
-		if err == nil && count >= wantRows {
-			break
-		}
-		select {
-		case <-deadline:
-			var got int
-			if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM psm3_reserves`).Scan(&got); err != nil {
-				t.Fatalf("timed out and failed to query count: %v", err)
-			}
-			t.Fatalf("timed out: want %d rows, have %d", wantRows, got)
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
+		return err == nil && count >= wantRows
+	}, fmt.Sprintf("psm3_reserves rows for %d distinct blocks", wantRows))
 
 	// Events are processed in order, so once the last distinct block landed
 	// the earlier duplicate has been handled too — it must not add a row.

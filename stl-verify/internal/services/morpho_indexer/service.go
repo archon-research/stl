@@ -245,22 +245,29 @@ func newService(
 	}, nil
 }
 
-// Start begins the SQS message processing loop.
-func (s *Service) Start(ctx context.Context) error {
-	s.ctx, s.cancel = context.WithCancel(ctx)
-
-	if err := s.LoadVaultRegistry(ctx); err != nil {
-		return err
-	}
-
-	loop := sqsutil.Config{
+// The visibility-timeout guard is fatal, so it runs before any startup I/O: a
+// misconfigured pod would otherwise re-run the whole sweep on every
+// CrashLoopBackOff cycle before refusing.
+func (s *Service) consumeLoop() sqsutil.Config {
+	return sqsutil.Config{
 		Consumer:     s.consumer,
 		MaxMessages:  s.config.MaxMessages,
 		PollInterval: s.config.PollInterval,
 		Logger:       s.logger,
 		ChainID:      s.config.ChainID,
 	}
+}
+
+// Start begins the SQS message processing loop.
+func (s *Service) Start(ctx context.Context) error {
+	loop := s.consumeLoop()
 	if err := loop.Validate(); err != nil {
+		return err
+	}
+
+	s.ctx, s.cancel = context.WithCancel(ctx)
+
+	if err := s.LoadVaultRegistry(ctx); err != nil {
 		return err
 	}
 

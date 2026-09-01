@@ -50,6 +50,33 @@ func TestDrainGate_ReportsWorkThatOutlastsTheBudget(t *testing.T) {
 	}
 }
 
+// A write that recorded its outcome just before the budget expired is not lost:
+// its goroutine is still winding down, but its batch already has its one status,
+// and counting it again is what made the runbook's parity identity absorb holes.
+func TestDrainGate_DoesNotAbandonAWriteThatAlreadyClaimedItsOutcome(t *testing.T) {
+	gate := NewDrainGate(nil)
+	claimed := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release); gate.Wait() })
+	gate.Go(func() {
+		if !gate.ClaimOutcome() {
+			t.Error("expected a write running before the drain to own its outcome")
+		}
+		close(claimed)
+		<-release
+	})
+	<-claimed
+
+	clean, lost := gate.Drain(20 * time.Millisecond)
+
+	if lost != 0 {
+		t.Errorf("lost = %d, want 0: the write had already recorded its own status", lost)
+	}
+	if !clean {
+		t.Error("expected the drain to report nothing abandoned")
+	}
+}
+
 func TestDrainGate_ReportsWorkThatFinishesInTime(t *testing.T) {
 	gate := NewDrainGate(nil)
 	gate.Go(func() {})

@@ -94,13 +94,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 		errCh <- run(runCtx, slog.Default(), 1)
 	}()
 
-	select {
-	case <-sqsState.FirstCallReceived:
-	case err := <-errCh:
-		t.Fatalf("run returned before polling SQS: %v", err)
-	case <-time.After(30 * time.Second):
-		t.Fatal("timed out waiting for service to start polling SQS")
-	}
+	testutil.WaitForFirstPoll(t, errCh, sqsState.FirstCallReceived)
 
 	cancel()
 

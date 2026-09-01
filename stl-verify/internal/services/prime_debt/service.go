@@ -126,9 +126,27 @@ func NewVaultDebtService(
 	}, nil
 }
 
+// The visibility-timeout guard is fatal, so it runs before any startup I/O: a
+// misconfigured pod would otherwise re-run the whole sweep on every
+// CrashLoopBackOff cycle before refusing.
+func (s *VaultDebtService) consumeLoop() sqsutil.Config {
+	return sqsutil.Config{
+		Consumer:     s.sqsConsumer,
+		MaxMessages:  s.config.MaxMessages,
+		PollInterval: s.config.PollInterval,
+		Logger:       s.logger,
+		ChainID:      s.config.ChainID,
+	}
+}
+
 // Start loads primes, resolves ilks, then starts the SQS processing loop.
 // It returns when ctx is cancelled (clean shutdown) or if initial setup fails.
 func (s *VaultDebtService) Start(ctx context.Context) error {
+	loop := s.consumeLoop()
+	if err := loop.Validate(); err != nil {
+		return err
+	}
+
 	primes, err := s.repo.GetPrimes(ctx)
 	if err != nil {
 		return fmt.Errorf("load primes: %w", err)
@@ -150,17 +168,6 @@ func (s *VaultDebtService) Start(ctx context.Context) error {
 	s.resolved = resolved
 	s.blocksSinceSweep = s.config.SweepEveryNBlocks - 1 // first block triggers immediate read
 	s.ctx, s.cancel = context.WithCancel(ctx)
-
-	loop := sqsutil.Config{
-		Consumer:     s.sqsConsumer,
-		MaxMessages:  s.config.MaxMessages,
-		PollInterval: s.config.PollInterval,
-		Logger:       s.logger,
-		ChainID:      s.config.ChainID,
-	}
-	if err := loop.Validate(); err != nil {
-		return err
-	}
 
 	s.wg.Go(func() {
 		sqsutil.RunLoop(s.ctx, loop, s.processBlock)

@@ -594,6 +594,22 @@ func TestStart_RegistryLoadFailure(t *testing.T) {
 	}
 }
 
+func TestStart_RefusesAVisibilityTimeoutAReceiveCanOutrun(t *testing.T) {
+	h := newTestHarness(t)
+	h.consumer.VisibilityTimeoutFn = func() time.Duration { return 30 * time.Second }
+
+	err := h.svc.Start(context.Background())
+	if err == nil {
+		_ = h.svc.Stop()
+		t.Fatal("Start accepted a 30s visibility timeout; a booted worker never crashloops on it, because " +
+			"ProcessMessages revalidates on every poll and RunLoop only logs what it returns, so the pod reports " +
+			"Ready and spins logging forever while the queue never drains")
+	}
+	if !strings.Contains(err.Error(), "visibility timeout") {
+		t.Errorf("Start error = %q, want it to name the visibility timeout", err)
+	}
+}
+
 func TestStop_NilCancel(t *testing.T) {
 	h := newTestHarness(t)
 	h.svc.cancel = nil

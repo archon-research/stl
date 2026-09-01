@@ -281,16 +281,5 @@ func deleteProcessedMessage(ctx context.Context, cfg Config, msg outbound.SQSMes
 // with every other unsettled one and releaseUnsettledOnShutdown is the single
 // place that hands any of them back.
 func deleteSettledMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage) error {
-	cleanupCtx, cancel := CleanupContext(ctx)
-	defer cancel()
-
-	err := cfg.Consumer.DeleteMessage(cleanupCtx, msg.ReceiptHandle)
-	newSettleRecorder(cfg.Logger, cfg.ChainID).record(cleanupCtx, settleOpDelete, settleStatus(err))
-	if err != nil {
-		cfg.Logger.Error("failed to delete message",
-			"messageID", msg.MessageID,
-			"error", err)
-		return fmt.Errorf("deleting message %s: %w", msg.MessageID, err)
-	}
-	return nil
+	return DeleteMessage(ctx, cfg.Consumer, cfg.Logger, cfg.ChainID, msg)
 }

@@ -154,10 +154,11 @@ func (r *fakePSM3Repo) allSaved() []*entity.PSM3Reserves {
 
 // fakeSQSConsumer is a controllable in-memory SQS consumer.
 type fakeSQSConsumer struct {
-	mu       sync.Mutex
-	messages []outbound.SQSMessage
-	served   int
-	deleted  []string
+	mu                sync.Mutex
+	messages          []outbound.SQSMessage
+	served            int
+	deleted           []string
+	visibilityTimeout time.Duration
 }
 
 func newFakeSQSConsumer(events []outbound.BlockEvent) *fakeSQSConsumer {
@@ -198,7 +199,12 @@ func (f *fakeSQSConsumer) ChangeMessageVisibilityBatch(context.Context, []string
 
 func (f *fakeSQSConsumer) Close() error { return nil }
 
-func (f *fakeSQSConsumer) VisibilityTimeout() time.Duration { return 180 * time.Second }
+func (f *fakeSQSConsumer) VisibilityTimeout() time.Duration {
+	if f.visibilityTimeout > 0 {
+		return f.visibilityTimeout
+	}
+	return 180 * time.Second
+}
 
 func (f *fakeSQSConsumer) deleteCount() int {
 	f.mu.Lock()
@@ -366,6 +372,23 @@ func TestStart_BlockQuerierError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "get latest block") {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestStart_RefusesAVisibilityTimeoutAReceiveCanOutrun(t *testing.T) {
+	consumer := newFakeSQSConsumer(nil)
+	consumer.visibilityTimeout = 30 * time.Second
+	svc := newService(t, defaultConfig(1), newFakePSM3Caller(), &fakePSM3Repo{}, consumer)
+
+	err := svc.Start(context.Background())
+	if err == nil {
+		_ = svc.Stop()
+		t.Fatal("Start accepted a 30s visibility timeout; a booted worker never crashloops on it, because " +
+			"ProcessMessages revalidates on every poll and RunLoop only logs what it returns, so the pod reports " +
+			"Ready and spins logging forever while the queue never drains")
+	}
+	if !strings.Contains(err.Error(), "visibility timeout") {
+		t.Errorf("Start error = %q, want it to name the visibility timeout", err)
 	}
 }
 

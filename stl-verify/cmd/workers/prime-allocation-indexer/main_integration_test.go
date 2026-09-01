@@ -127,12 +127,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 		}, nil)
 	}()
 
-	// Wait for the service to start (SQS ReceiveMessage call indicates it's polling)
-	select {
-	case <-sqsState.FirstCallReceived:
-	case <-time.After(30 * time.Second):
-		t.Fatal("timed out waiting for service to start")
-	}
+	testutil.WaitForFirstPoll(t, errCh, sqsState.FirstCallReceived)
 
 	// Service is running and polling SQS. Trigger graceful shutdown.
 	cancel()
@@ -232,11 +227,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 		}, nil)
 	}()
 
-	select {
-	case <-sqsState.FirstCallReceived:
-	case <-time.After(30 * time.Second):
-		t.Fatal("timed out waiting for worker to start polling SQS")
-	}
+	testutil.WaitForFirstPoll(t, errCh, sqsState.FirstCallReceived)
 
 	// Wait until the transfer is fully processed (allocation_position row written)
 	// so the run loop is idle before we shut down, avoiding a context-cancelled

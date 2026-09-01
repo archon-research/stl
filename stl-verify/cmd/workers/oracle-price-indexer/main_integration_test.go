@@ -164,12 +164,7 @@ func setupIntegrationTest(t *testing.T, opts ...setupOption) *integrationEnv {
 		}, nil)
 	}()
 
-	// Wait for the service to start (SQS ReceiveMessage call indicates it's polling)
-	select {
-	case <-sqsState.FirstCallReceived:
-	case <-time.After(30 * time.Second):
-		t.Fatal("timed out waiting for service to start")
-	}
+	testutil.WaitForFirstPoll(t, errCh, sqsState.FirstCallReceived)
 
 	return &integrationEnv{
 		pool:       pool,

@@ -114,11 +114,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 		}, nil)
 	}()
 
-	select {
-	case <-sqsState.FirstCallReceived:
-	case <-time.After(30 * time.Second):
-		t.Fatal("timed out waiting for service to start polling SQS")
-	}
+	testutil.WaitForFirstPoll(t, errCh, sqsState.FirstCallReceived)
 
 	cancel()
 

@@ -16,6 +16,7 @@ import (
 	smithy "github.com/aws/smithy-go"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 type mockSQSAPI struct {
@@ -408,6 +409,49 @@ func TestConsumer_ReceiveMessages_PropagatesAPollFailure(t *testing.T) {
 	}
 	if len(messages) != 0 {
 		t.Errorf("expected no messages alongside the failure, got %+v", messages)
+	}
+}
+
+// A long poll that outruns its budget returned no message, which is what an
+// empty receive returns too. Reporting it as a failure puts an ERROR line on
+// every slow idle poll — and low-traffic chains idle-poll constantly — while a
+// genuine refusal must stay on the error path the alerts key on.
+func TestConsumer_ReceiveMessages_SeparatesAPollBudgetExpiryFromAFailure(t *testing.T) {
+	tests := []struct {
+		name       string
+		receiveErr error
+		wantErr    bool
+		wantWarns  int
+	}{
+		{
+			name:       "a poll that outran its budget is an empty poll",
+			receiveErr: fmt.Errorf("operation error SQS ReceiveMessage: %w", context.DeadlineExceeded),
+			wantWarns:  1,
+		},
+		{
+			name:       "a refused poll stays a failure",
+			receiveErr: errors.New("InvalidParameterValue"),
+			wantErr:    true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := &testutil.SlogRecorder{}
+			consumer := newTestConsumer(&mockSQSAPI{receiveErr: tt.receiveErr})
+			consumer.logger = slog.New(recorder)
+
+			messages, err := consumer.ReceiveMessages(context.Background(), 1)
+
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Fatalf("ReceiveMessages error = %v, want error: %v", err, tt.wantErr)
+			}
+			if len(messages) != 0 {
+				t.Errorf("expected no messages, got %+v", messages)
+			}
+			if got := recorder.CountWarn("outran its budget"); got != tt.wantWarns {
+				t.Errorf("budget-expiry warnings = %d, want %d (records: %v)", got, tt.wantWarns, recorder.Records)
+			}
+		})
 	}
 }
 

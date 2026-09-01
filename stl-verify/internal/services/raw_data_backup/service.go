@@ -244,7 +244,9 @@ func validateVisibility(config Config, consumer outbound.SQSConsumer) error {
 }
 
 // The pool works through a batch in rounds, so a round is what one visibility
-// clock has to cover.
+// clock has to cover. The fetcher polls again before the buffer drains, so this
+// bound holds only because one chain is one FIFO group (sns.EventSink): SQS
+// delivers no more of a group while a message of it is in flight.
 func inFlightPerReceive(config Config) int {
 	workers := max(config.Workers, 1)
 	return (config.BatchSize + workers - 1) / workers
@@ -298,6 +300,7 @@ func (s *Service) fetchAndDispatch(ctx context.Context, msgCh chan<- outbound.SQ
 	messages, err := s.consumer.ReceiveMessages(ctx, s.config.BatchSize)
 	if err != nil {
 		if ctx.Err() != nil {
+			s.logger.Info("shutdown cancelled the poll, stopping message fetcher", "error", err)
 			return false
 		}
 		s.logger.Error("failed to receive messages", "error", err)
@@ -306,6 +309,8 @@ func (s *Service) fetchAndDispatch(ctx context.Context, msgCh chan<- outbound.SQ
 	}
 
 	if undispatched := s.dispatch(ctx, msgCh, messages); len(undispatched) > 0 {
+		s.logger.Info("shutdown interrupted the dispatch, stopping message fetcher",
+			"heldForRelease", len(undispatched))
 		s.holdForRelease(undispatched...)
 		return false
 	}
@@ -433,8 +438,7 @@ func (s *Service) handleResult(ctx context.Context, logger *slog.Logger, msg out
 				"messageID", msg.MessageID,
 			)
 		}
-		s.recordProcessed(ctx, status)
-		s.deleteMessage(ctx, logger, msg)
+		s.settleProcessed(ctx, logger, msg, status)
 		return
 	}
 
@@ -485,20 +489,27 @@ func (s *Service) deadLetterMessage(ctx context.Context, logger *slog.Logger, ms
 		"messageID", msg.MessageID,
 		"cause", cause,
 	)
-	s.recordProcessed(ctx, statusDeadLettered)
-	s.deleteMessage(ctx, logger, msg)
+	s.settleProcessed(ctx, logger, msg, statusDeadLettered)
 }
 
-func (s *Service) deleteMessage(ctx context.Context, logger *slog.Logger, msg outbound.SQSMessage) {
-	settleCtx, cancel := sqsutil.CleanupContext(ctx)
-	defer cancel()
-	if err := s.consumer.DeleteMessage(settleCtx, msg.ReceiptHandle); err != nil {
-		logger.Error("failed to delete message",
-			"messageID", msg.MessageID,
-			"error", err,
-		)
+// A refused delete leaves the message for redelivery, so the block is processed
+// again and the DLQ publish repeated; counting it now would report a block the
+// worker never settled and keep VectorBackupWorkerStalled quiet while it loops.
+func (s *Service) settleProcessed(ctx context.Context, logger *slog.Logger, msg outbound.SQSMessage, status string) {
+	if err := s.deleteMessage(ctx, logger, msg); err != nil {
+		return
+	}
+	s.recordProcessed(ctx, status)
+}
+
+// Through sqsutil so this loop's deletes reach sqs.message.settles.total too;
+// it is the only worker that settles outside ProcessMessages.
+func (s *Service) deleteMessage(ctx context.Context, logger *slog.Logger, msg outbound.SQSMessage) error {
+	err := sqsutil.DeleteMessage(ctx, s.consumer, logger, s.config.ChainID, msg)
+	if err != nil {
 		s.releaseIfShuttingDown(ctx, logger, msg)
 	}
+	return err
 }
 
 // recordProcessed increments the processed-blocks counter with the given status.

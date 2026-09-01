@@ -3,6 +3,7 @@ package sqs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -137,6 +138,7 @@ func (c *Consumer) ReceiveMessages(ctx context.Context, maxMessages int) ([]outb
 	pollCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.pollBudget())
 	defer cancel()
 
+	started := time.Now()
 	result, err := c.client.ReceiveMessage(pollCtx, &sqs.ReceiveMessageInput{
 		QueueUrl:            aws.String(c.queueURL),
 		MaxNumberOfMessages: clampBatchSize(maxMessages),
@@ -146,7 +148,7 @@ func (c *Consumer) ReceiveMessages(ctx context.Context, maxMessages int) ([]outb
 		MessageAttributeNames: []string{"All"},
 	}, noRetryForPoll)
 	if err != nil {
-		return nil, fmt.Errorf("failed to receive messages: %w", err)
+		return c.classifyPollFailure(started, err)
 	}
 
 	messages := toSQSMessages(result.Messages)
@@ -155,6 +157,22 @@ func (c *Consumer) ReceiveMessages(ctx context.Context, maxMessages int) ([]outb
 	}
 
 	return messages, nil
+}
+
+// A poll that outran its budget returned no message, which is what an empty
+// receive returns too; only the elapsed time differs. Reporting it as a failure
+// puts an ERROR line on every slow idle poll, and the error-rate alerts key on
+// those. pollCtx is detached from the caller's, so its only deadline is the
+// budget — a DeadlineExceeded here can be nothing else.
+func (c *Consumer) classifyPollFailure(started time.Time, err error) ([]outbound.SQSMessage, error) {
+	if errors.Is(err, context.DeadlineExceeded) {
+		c.logger.Warn("long poll outran its budget with no message; treating it as an empty receive",
+			"budget", c.pollBudget(),
+			"elapsed", time.Since(started),
+			"error", err)
+		return nil, nil
+	}
+	return nil, fmt.Errorf("failed to receive messages: %w", err)
 }
 
 // noRetryForPoll gives the long poll one attempt: a retried ReceiveMessage

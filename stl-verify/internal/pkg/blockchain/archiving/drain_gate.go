@@ -13,7 +13,9 @@ type DrainGate struct {
 	mu          sync.Mutex
 	idle        *sync.Cond
 	draining    bool
+	expired     bool
 	outstanding int
+	unclaimed   int
 	logger      *slog.Logger
 }
 
@@ -36,6 +38,7 @@ func (g *DrainGate) Go(work func()) bool {
 		return false
 	}
 	g.outstanding++
+	g.unclaimed++
 	go func() {
 		defer g.finish()
 		work()
@@ -50,6 +53,30 @@ func (g *DrainGate) finish() {
 	if g.outstanding == 0 {
 		g.idle.Broadcast()
 	}
+}
+
+// ClaimOutcome reports whether this write still owns the one status its batch
+// gets. A drain that expires counts every unclaimed write as lost, so a write
+// that lands afterwards must not record a second status for the same batch.
+func (g *DrainGate) ClaimOutcome() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.expired {
+		return false
+	}
+	g.unclaimed--
+	return true
+}
+
+// expire closes the accounting for good and reports how many writes the drain
+// abandoned. Taking the count under the same lock that stops later claims is
+// what keeps a write landing at the budget edge to exactly one status.
+func (g *DrainGate) expire() (lost int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.expired = true
+	lost, g.unclaimed = g.unclaimed, 0
+	return lost
 }
 
 // Wait blocks until the writes already running finish, leaving the gate open.
@@ -70,12 +97,20 @@ func (g *DrainGate) WaitBounded(budget time.Duration) (finished bool, outstandin
 }
 
 // Drain closes the gate for good, then waits up to budget for the writes
-// already running. It reports whether they all finished and how many did not.
-func (g *DrainGate) Drain(budget time.Duration) (finished bool, outstanding int) {
+// already running. It reports whether it abandoned nothing, and how many writes
+// it abandoned. An abandoned write keeps running but no longer records its own
+// outcome, so the caller's lost count is that batch's only status; a write that
+// claimed its outcome before the budget expired is not abandoned even though its
+// goroutine is still winding down.
+func (g *DrainGate) Drain(budget time.Duration) (clean bool, lost int) {
 	if g.close() {
 		g.logger.Warn("archive drain gate was already closed; this drain can only wait out what the first one left behind")
 	}
-	return g.waitFor(budget)
+	if drained, _ := g.waitFor(budget); drained {
+		return true, 0
+	}
+	lost = g.expire()
+	return lost == 0, lost
 }
 
 // close shuts the gate and reports whether it was already shut.

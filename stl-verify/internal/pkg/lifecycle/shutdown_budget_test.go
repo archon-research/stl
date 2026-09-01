@@ -29,6 +29,24 @@ func shutdownTailBudget() time.Duration {
 	return archivingwire.DrainTimeout + telemetry.ShutdownFlushTimeout
 }
 
+// Every ceiling below is satisfied by a zero budget, which would abandon work
+// that had already succeeded rather than wait the moment out.
+func TestEveryShutdownBudgetHasAFloor(t *testing.T) {
+	budgets := map[string]time.Duration{
+		"archivingwire.DrainTimeout":     archivingwire.DrainTimeout,
+		"sqsutil.DefaultDrainTimeout":    sqsutil.DefaultDrainTimeout,
+		"sqsutil.SettleTimeout":          sqsutil.SettleTimeout,
+		"telemetry.ShutdownFlushTimeout": telemetry.ShutdownFlushTimeout,
+	}
+	for name, budget := range budgets {
+		t.Run(name, func(t *testing.T) {
+			if budget <= 0 {
+				t.Errorf("%s is %s; a non-positive budget abandons work instead of waiting for it", name, budget)
+			}
+		})
+	}
+}
+
 func TestShutdownPathsFitTheLifecycleWindow(t *testing.T) {
 	for name, budget := range shutdownPathBudgets() {
 		t.Run(name, func(t *testing.T) {

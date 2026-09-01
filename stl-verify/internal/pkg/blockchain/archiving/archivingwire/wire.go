@@ -156,17 +156,23 @@ func newWait(gate *archiving.DrainGate, logger *slog.Logger, budget time.Duratio
 	}
 }
 
+// A non-positive budget would abandon every write in flight on every shutdown,
+// including ones already about to land, so it floors to DrainTimeout the way
+// sqsutil's drain floors to its own default.
 func newDrain(gate *archiving.DrainGate, logger *slog.Logger, writes *archiving.WriteCounter, budget time.Duration) func() {
+	if budget <= 0 {
+		budget = DrainTimeout
+	}
 	return func() {
-		finished, outstanding := gate.Drain(budget)
+		finished, lost := gate.Drain(budget)
 		if finished {
 			return
 		}
-		// These batches die with the process, after their queue message was
-		// deleted, and never reach the success or error count.
-		writes.Record(archiving.WriteStatusLost, int64(outstanding))
+		// The gate stopped these batches from claiming an outcome, so this is the
+		// only status they get; their queue message is already deleted.
+		writes.Record(archiving.WriteStatusLost, int64(lost))
 		logger.Warn("raw SC call archive drain budget expired; abandoning in-flight writes",
 			"budget", budget,
-			"outstanding", outstanding)
+			"lost", lost)
 	}
 }

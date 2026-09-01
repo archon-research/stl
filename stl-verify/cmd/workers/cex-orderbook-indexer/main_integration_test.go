@@ -67,22 +67,14 @@ func TestRunHappyPath(t *testing.T) {
 	go func() { runErr <- run(ctx, factory, nil) }()
 
 	// Wait until at least one tick has persisted a row, then stop.
-	deadline := time.After(10 * time.Second)
-	for {
+	testutil.WaitForWorkerCondition(t, runErr, 10*time.Second, func() bool {
 		var count int
 		if err := pool.QueryRow(context.Background(),
 			`SELECT COUNT(*) FROM cex_orderbook_snapshots WHERE exchange = 'coinbase'`).Scan(&count); err != nil {
 			t.Fatalf("count: %v", err)
 		}
-		if count >= 2 { // one row per symbol
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatal("no snapshots persisted before deadline")
-		case <-time.After(25 * time.Millisecond):
-		}
-	}
+		return count >= 2 // one row per symbol
+	}, "a snapshot row per symbol")
 
 	cancel()
 	select {
