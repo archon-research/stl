@@ -336,6 +336,26 @@
                 "protocol": "agora",
                 "allocation_type": "asset",
                 "token_type": "erc20"
+              },
+              {
+                "contract_address": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+                "wallet_address": "0x29626c2d8ca49a51e4deceec5499e52983c42bd5",
+                "asset_address": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+                "star": "grove",
+                "chain": "robinhood",
+                "protocol": "",
+                "allocation_type": "asset",
+                "token_type": "erc20"
+              },
+              {
+                "contract_address": "0xbeeff039907422219fb367e525954ddc092854d9",
+                "wallet_address": "0x29626c2d8ca49a51e4deceec5499e52983c42bd5",
+                "asset_address": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+                "star": "grove",
+                "chain": "robinhood",
+                "protocol": "grove-x-steakhouse-usdg-morpho-vault",
+                "allocation_type": "allocation",
+                "token_type": "erc4626"
               }
             ],
             "spark": [
@@ -1082,6 +1102,14 @@
                   "star": "grove",
                   "chain": "monad",
                   "address": "0x94b398acb2fce988871218221ea6a4a2b26cccbc",
+                  "role": "alm"
+                }
+              ],
+              "robinhood": [
+                {
+                  "star": "grove",
+                  "chain": "robinhood",
+                  "address": "0x29626c2d8ca49a51e4deceec5499e52983c42bd5",
                   "role": "alm"
                 }
               ]
