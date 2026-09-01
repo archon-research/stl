@@ -4,6 +4,7 @@ package migrator_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -69,8 +70,11 @@ func TestOracleAssetAsOfReadsTheVersionEffectiveThen(t *testing.T) {
 	oracleID, tokenID := seedOracleAsset(ctx, t, pool, "vec597-asof", true, "2026-01-01")
 	appendVersion(ctx, t, pool, oracleID, tokenID, false, 1, "2026-08-20", "VEC-549: retired")
 
-	query := `SELECT oa.enabled FROM ` + postgres.OracleAssetAsOf("$1") + ` oa
-		WHERE oa.oracle_id = $2 AND oa.token_id = $3`
+	query := fmt.Sprintf(`
+		SELECT oa.enabled
+		FROM %s oa
+		WHERE oa.oracle_id = $2 AND oa.token_id = $3
+	`, postgres.OracleAssetAsOf("$1"))
 
 	for _, tc := range []struct {
 		name        string

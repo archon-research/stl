@@ -75,13 +75,15 @@ func (r *OnchainPriceRepository) GetOracle(ctx context.Context, name string) (*e
 
 // Ordered by the natural key, not by id: a re-versioned row gets a fresh id, so id order would
 // reshuffle the list on every mapping change.
+var enabledAssetsSQL = fmt.Sprintf(`
+	SELECT id, oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, created_at
+	FROM %s oa
+	WHERE oracle_id = $1 AND enabled = true
+	ORDER BY oracle_id, token_id, feed_key
+`, OracleAssetAsOf("$2::timestamptz"))
+
 func (r *OnchainPriceRepository) GetEnabledAssets(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) ([]*entity.OracleAsset, error) {
-	rows, err := r.pool.Query(ctx, `
-		SELECT id, oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, created_at
-		FROM `+OracleAssetAsOf("$2::timestamptz")+` oa
-		WHERE oracle_id = $1 AND enabled = true
-		ORDER BY oracle_id, token_id, feed_key
-	`, oracleID, referenceEffectiveAt)
+	rows, err := r.pool.Query(ctx, enabledAssetsSQL, oracleID, referenceEffectiveAt)
 	if err != nil {
 		return nil, fmt.Errorf("querying enabled oracle assets: %w", err)
 	}
@@ -159,14 +161,16 @@ func (r *OnchainPriceRepository) GetLatestBlock(ctx context.Context, oracleID in
 
 // Same effective_at as GetEnabledAssets, or a unit would carry an asset it never resolved an
 // address for.
+var tokenInfosSQL = fmt.Sprintf(`
+	SELECT oa.token_id, t.address, t.decimals
+	FROM %s oa
+	JOIN token t ON t.id = oa.token_id
+	WHERE oa.oracle_id = $1 AND oa.enabled = true
+	ORDER BY oa.oracle_id, oa.token_id, oa.feed_key
+`, OracleAssetAsOf("$2::timestamptz"))
+
 func (r *OnchainPriceRepository) GetTokenInfos(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) (map[int64]outbound.TokenInfo, error) {
-	rows, err := r.pool.Query(ctx, `
-		SELECT oa.token_id, t.address, t.decimals
-		FROM `+OracleAssetAsOf("$2::timestamptz")+` oa
-		JOIN token t ON t.id = oa.token_id
-		WHERE oa.oracle_id = $1 AND oa.enabled = true
-		ORDER BY oa.oracle_id, oa.token_id, oa.feed_key
-	`, oracleID, referenceEffectiveAt)
+	rows, err := r.pool.Query(ctx, tokenInfosSQL, oracleID, referenceEffectiveAt)
 	if err != nil {
 		return nil, fmt.Errorf("querying token infos: %w", err)
 	}
@@ -376,40 +380,48 @@ func (r *OnchainPriceRepository) GetAllProtocolOracleBindings(ctx context.Contex
 // dated rows; change_reason renders it in UTC so the text never depends on the session TimeZone.
 // Zero rows copied is legitimate but logged, because the target is then registered with no assets
 // and the symptom surfaces much later in a different process.
+// change_reason is rendered in Go and bound as a parameter: the text is a description for a human
+// reader, not a value SQL needs to compute, and formatting it here keeps the query free of a
+// session-TimeZone-dependent to_char.
+var copyOracleAssetsSQL = fmt.Sprintf(`
+	INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, valid_from, change_reason)
+	SELECT $2, token_id, enabled, feed_address, feed_decimals, quote_currency, $3::timestamptz, $4
+	FROM %s oa
+	WHERE oracle_id = $1 AND enabled = true
+	ON CONFLICT DO NOTHING
+`, OracleAssetAsOf("$3::timestamptz"))
+
+// The arbiter skips a source key the target already holds at processing_version 0, which is benign
+// only while that existing row carries the same mapping. A differing one leaves the target
+// partially mapped, and reporting success would hide it.
+var unmappedSourceAssetsSQL = fmt.Sprintf(`
+	SELECT count(*)
+	FROM %[1]s src
+	WHERE src.oracle_id = $1 AND src.enabled
+	  AND NOT EXISTS (
+		SELECT 1
+		FROM %[1]s tgt
+		WHERE tgt.oracle_id = $2
+		  AND tgt.token_id = src.token_id
+		  AND tgt.feed_key = src.feed_key
+		  AND tgt.enabled
+		  AND tgt.feed_decimals IS NOT DISTINCT FROM src.feed_decimals
+		  AND tgt.quote_currency IS NOT DISTINCT FROM src.quote_currency
+	  )
+`, OracleAssetAsOf("$3::timestamptz"))
+
 func (r *OnchainPriceRepository) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64, referenceEffectiveAt time.Time) error {
-	tag, err := r.pool.Exec(ctx, `
-		INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, valid_from, change_reason)
-		SELECT $2, token_id, enabled, feed_address, feed_decimals, quote_currency,
-		       $3::timestamptz,
-		       format('copied from oracle %s as of %s', $1::bigint,
-		              to_char($3::timestamptz AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
-		FROM `+OracleAssetAsOf("$3::timestamptz")+` oa
-		WHERE oracle_id = $1 AND enabled = true
-		ON CONFLICT DO NOTHING
-	`, fromOracleID, toOracleID, referenceEffectiveAt)
+	changeReason := fmt.Sprintf("copied from oracle %d as of %s",
+		fromOracleID, referenceEffectiveAt.UTC().Format(time.RFC3339))
+
+	tag, err := r.pool.Exec(ctx, copyOracleAssetsSQL, fromOracleID, toOracleID, referenceEffectiveAt, changeReason)
 	if err != nil {
 		return fmt.Errorf("copying oracle assets from %d to %d: %w", fromOracleID, toOracleID, err)
 	}
 
-	// The arbiter skips a source key the target already holds at processing_version 0, which is
-	// benign only while that existing row carries the same mapping. A differing one leaves the
-	// target partially mapped, and returning nil here would report that as a successful copy.
 	var unmapped int
-	if err := r.pool.QueryRow(ctx, `
-		SELECT count(*)
-		FROM `+OracleAssetAsOf("$3::timestamptz")+` src
-		WHERE src.oracle_id = $1 AND src.enabled
-		  AND NOT EXISTS (
-			SELECT 1
-			FROM `+OracleAssetAsOf("$3::timestamptz")+` tgt
-			WHERE tgt.oracle_id = $2
-			  AND tgt.token_id = src.token_id
-			  AND tgt.feed_key = src.feed_key
-			  AND tgt.enabled
-			  AND tgt.feed_decimals IS NOT DISTINCT FROM src.feed_decimals
-			  AND tgt.quote_currency IS NOT DISTINCT FROM src.quote_currency
-		  )
-	`, fromOracleID, toOracleID, referenceEffectiveAt).Scan(&unmapped); err != nil {
+	if err := r.pool.QueryRow(ctx, unmappedSourceAssetsSQL,
+		fromOracleID, toOracleID, referenceEffectiveAt).Scan(&unmapped); err != nil {
 		return fmt.Errorf("verifying copied oracle assets from %d to %d: %w", fromOracleID, toOracleID, err)
 	}
 	if unmapped > 0 {
