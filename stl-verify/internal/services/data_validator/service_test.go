@@ -839,8 +839,11 @@ func TestService_OrphanOnlyHeights_ReportsExactCountAndTruncatesMessage(t *testi
 	if !ok {
 		t.Fatalf("Details[orphan_only_heights] = %T, want []int64", got.Details["orphan_only_heights"])
 	}
-	if len(details) != len(heights) {
-		t.Errorf("Details carries %d heights, want %d", len(details), len(heights))
+	if len(details) != orphanOnlyHeightsListed {
+		t.Errorf("Details carries %d heights, want the %d it is capped at", len(details), orphanOnlyHeightsListed)
+	}
+	if got.Details["orphan_only_height_count"] != len(heights) {
+		t.Errorf("Details[orphan_only_height_count] = %v, want %d", got.Details["orphan_only_height_count"], len(heights))
 	}
 }
 

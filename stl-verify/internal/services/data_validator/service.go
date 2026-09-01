@@ -303,8 +303,9 @@ func chainValidMessage(watermark, verifyTo, toBlock int64) string {
 	return fmt.Sprintf("Parent-hash chain valid through %s; parent links valid through block %d", through, toBlock)
 }
 
-// orphanOnlyHeightsListed caps how many heights the message names; the reported
-// count stays exact and Details carries the full list.
+// orphanOnlyHeightsListed caps how many heights both the message and Details
+// name — reportCheckOutcomes puts Details in one slog record, and Loki drops a
+// line over 256 KB. The reported count stays exact.
 const orphanOnlyHeightsListed = 100
 
 // validateNoOrphanOnlyHeights reports heights whose only stored block is
@@ -343,7 +344,8 @@ func (s *Service) validateNoOrphanOnlyHeights(ctx context.Context, fromBlock, to
 		Message:  fmt.Sprintf("%d height(s) have only an orphaned block: %s", len(heights), formatHeights(heights, orphanOnlyHeightsListed)),
 		Duration: duration,
 		Details: map[string]any{
-			"orphan_only_heights": heights,
+			"orphan_only_heights":      heights[:min(len(heights), orphanOnlyHeightsListed)],
+			"orphan_only_height_count": len(heights),
 		},
 	}
 }
