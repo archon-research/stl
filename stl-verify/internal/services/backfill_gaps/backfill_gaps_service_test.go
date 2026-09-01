@@ -2814,3 +2814,136 @@ func TestUnorphanWalk_RefusesWithTheReasonThatApplies(t *testing.T) {
 		})
 	}
 }
+
+// TestBackfillService_RetryOrphanRewindsTheWatermark: the retry loop orphans a
+// block the chain reorged away, emptying its height. FindGaps scans only above
+// the watermark, so without a rewind that height leaves the gap filler's reach
+// for good — the ARCT-379 hole, reached here through the second of the two
+// paths that orphan outside a reorg commit.
+func TestBackfillService_RetryOrphanRewindsTheWatermark(t *testing.T) {
+	ctx := t.Context()
+
+	client := newMockClient()
+	client.AddBlock(1, "")
+	anchor := client.GetHeader(1)
+	client.SetBlockHeader(2, "0x"+strings.Repeat("c", 64), anchor.Hash)
+
+	stateRepo := memory.NewBlockStateRepository()
+	saveBlockState(t, ctx, stateRepo, 1, anchor.Hash, anchor.ParentHash)
+	if err := stateRepo.MarkPublishComplete(ctx, anchor.Hash); err != nil {
+		t.Fatalf("mark block 1 published: %v", err)
+	}
+	reorgedAway := "0x" + strings.Repeat("a", 64)
+	saveBlockState(t, ctx, stateRepo, 2, reorgedAway, anchor.Hash)
+	stateRepo.SeedBackfillCursor(2, 0)
+
+	service, err := NewBackfillService(BackfillConfig{
+		ChainID:            1,
+		BatchSize:          10,
+		BoundaryCheckDepth: -1,
+		Logger:             slog.New(&testutil.SlogRecorder{}),
+	}, client, stateRepo, memory.NewBlockCache(), memory.NewEventSink())
+	if err != nil {
+		t.Fatalf("NewBackfillService: %v", err)
+	}
+	if err := service.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	block, err := stateRepo.GetBlockByHash(ctx, reorgedAway)
+	if err != nil {
+		t.Fatalf("GetBlockByHash: %v", err)
+	}
+	if block == nil || !block.IsOrphaned {
+		t.Fatalf("block = %+v, want it orphaned by the retry reconcile", block)
+	}
+
+	cursor, err := stateRepo.GetBackfillCursor(ctx)
+	if err != nil {
+		t.Fatalf("GetBackfillCursor: %v", err)
+	}
+	if want := (outbound.BackfillCursor{Watermark: 1, Generation: 1}); cursor != want {
+		t.Errorf("cursor = %+v, want %+v (below the emptied height)", cursor, want)
+	}
+}
+
+// linkageBreaksAfterSaveRepo makes the post-save linkage re-check fail the way
+// a live writer landing mid-save does: the successor row appears between the
+// two validateBlockLinkage calls.
+type linkageBreaksAfterSaveRepo struct {
+	outbound.BlockStateRepository
+	saved     bool
+	successor outbound.BlockState
+}
+
+func (r *linkageBreaksAfterSaveRepo) SaveBlock(ctx context.Context, state outbound.BlockState) (int, error) {
+	version, err := r.BlockStateRepository.SaveBlock(ctx, state)
+	r.saved = true
+	return version, err
+}
+
+func (r *linkageBreaksAfterSaveRepo) GetBlockByNumber(ctx context.Context, number int64) (*outbound.BlockState, error) {
+	if r.saved && number == r.successor.Number {
+		successor := r.successor
+		return &successor, nil
+	}
+	return r.BlockStateRepository.GetBlockByNumber(ctx, number)
+}
+
+// TestBackfillService_PostSaveRaceOrphanRewindsTheWatermark is the same hole on
+// the gap-fill path: the block is saved, the re-check finds a successor that
+// does not name it, and orphaning the row it just wrote empties the height.
+func TestBackfillService_PostSaveRaceOrphanRewindsTheWatermark(t *testing.T) {
+	ctx := t.Context()
+	const target int64 = 5
+
+	client := newMockClient()
+	for number := int64(1); number <= target; number++ {
+		client.AddBlock(number, "")
+	}
+
+	stateRepo := memory.NewBlockStateRepository()
+	stateRepo.SeedBackfillCursor(target, 0)
+	repo := &linkageBreaksAfterSaveRepo{
+		BlockStateRepository: stateRepo,
+		successor: outbound.BlockState{
+			Number:     target + 1,
+			Hash:       "0xsuccessor",
+			ParentHash: "0xanother_fork",
+		},
+	}
+
+	service, err := NewBackfillService(BackfillConfig{
+		ChainID:            1,
+		BatchSize:          10,
+		BoundaryCheckDepth: -1,
+		Logger:             slog.New(&testutil.SlogRecorder{}),
+	}, client, repo, memory.NewBlockCache(), memory.NewEventSink())
+	if err != nil {
+		t.Fatalf("NewBackfillService: %v", err)
+	}
+
+	batch, err := client.GetBlocksBatch(ctx, []int64{target}, true)
+	if err != nil {
+		t.Fatalf("GetBlocksBatch: %v", err)
+	}
+	if err := service.processBlockData(ctx, batch[0]); err == nil {
+		t.Fatal("processBlockData = nil, want the post-save linkage failure")
+	}
+
+	block, err := stateRepo.GetBlockByHash(ctx, client.GetHeader(target).Hash)
+	if err != nil {
+		t.Fatalf("GetBlockByHash: %v", err)
+	}
+	if block == nil || !block.IsOrphaned {
+		t.Fatalf("block = %+v, want it orphaned after the race was detected", block)
+	}
+
+	cursor, err := stateRepo.GetBackfillCursor(ctx)
+	if err != nil {
+		t.Fatalf("GetBackfillCursor: %v", err)
+	}
+	if want := (outbound.BackfillCursor{Watermark: target - 1, Generation: 1}); cursor != want {
+		t.Errorf("cursor = %+v, want %+v (below the emptied height)", cursor, want)
+	}
+}

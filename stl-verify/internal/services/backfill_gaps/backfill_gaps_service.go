@@ -601,7 +601,7 @@ func (s *BackfillService) processBlockDataInner(ctx context.Context, bd outbound
 			"error", err)
 
 		// Mark the invalid block we just saved as orphaned so it doesn't break the chain
-		if orphanErr := s.stateRepo.MarkBlockOrphaned(ctx, header.Hash); orphanErr != nil {
+		if orphanErr := s.orphanEmptiedHeight(ctx, state, "post-save linkage race"); orphanErr != nil {
 			s.logger.Error("failed to orphan invalid block after race detected",
 				"block", blockNum, "error", orphanErr)
 		}
@@ -888,7 +888,7 @@ func (s *BackfillService) recoverFromStaleChain(ctx context.Context, staleBlocks
 	// orphaned. Phase 2's refetch is allowed to fail, and nothing else lowers
 	// the cursor, so without this a failed refetch leaves an orphan-only height
 	// below the watermark that no later pass ever scans (ARCT-379).
-	if err := s.rewindWatermarkBelow(ctx, lowestStale); err != nil {
+	if err := s.rewindWatermarkBelow(ctx, lowestStale, "stale chain recovery"); err != nil {
 		return err
 	}
 
@@ -935,8 +935,18 @@ func (s *BackfillService) recoverFromStaleChain(ctx context.Context, staleBlocks
 	return nil
 }
 
+// orphanEmptiedHeight orphans a block that has no replacement, rewinding first:
+// a crash between the two leaves a height rescanned for nothing, where the
+// other order leaves a hole below the watermark that FindGaps never reaches.
+func (s *BackfillService) orphanEmptiedHeight(ctx context.Context, block outbound.BlockState, reason string) error {
+	if err := s.rewindWatermarkBelow(ctx, block.Number, reason); err != nil {
+		return err
+	}
+	return s.stateRepo.MarkBlockOrphaned(ctx, block.Hash)
+}
+
 // rewindWatermarkBelow drops the backfill cursor below the given height.
-func (s *BackfillService) rewindWatermarkBelow(ctx context.Context, height int64) error {
+func (s *BackfillService) rewindWatermarkBelow(ctx context.Context, height int64, reason string) error {
 	target := height - 1
 	previous, rewound, err := s.stateRepo.RewindBackfillWatermark(ctx, target)
 	if err != nil {
@@ -946,7 +956,7 @@ func (s *BackfillService) rewindWatermarkBelow(ctx context.Context, height int64
 		s.logger.Info("rewound backfill watermark",
 			"from", previous,
 			"to", target,
-			"reason", "stale chain recovery")
+			"reason", reason)
 	}
 	return nil
 }
@@ -1352,7 +1362,7 @@ func (s *BackfillService) reconcileOrphanedRetry(ctx context.Context, block outb
 		"block", block.Number,
 		"storedHash", truncateHash(block.Hash),
 		"canonicalHash", truncateHash(header.Hash))
-	if err := s.stateRepo.MarkBlockOrphaned(ctx, block.Hash); err != nil {
+	if err := s.orphanEmptiedHeight(ctx, block, "reorged away during publish retry"); err != nil {
 		return false, fmt.Errorf("mark orphaned: %w", err)
 	}
 	return true, nil
