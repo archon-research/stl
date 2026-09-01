@@ -148,12 +148,18 @@ func (s *Service) Validate(ctx context.Context) (*Report, error) {
 	return report, nil
 }
 
-// reportCheckOutcomes logs every check that did not pass. The report object
-// never leaves the process — the runner keeps counts, the alert fires on the
-// exit code — so the log is the only route by which a check's message and
-// details (the heights the runbook tells the operator to read) reach anyone.
+// reportCheckOutcomes logs every check: what it cost, and — where it did not
+// pass — what it found. The report object never leaves the process (the runner
+// keeps counts, the alert fires on the exit code), so the log is the only route
+// by which a check's duration, message and details (the heights the runbook
+// tells the operator to read) reach anyone.
 func (s *Service) reportCheckOutcomes(report *Report) {
 	for _, check := range report.Checks {
+		s.logger.Info("validation check finished",
+			"check", check.Name,
+			"status", check.Status,
+			"duration_ms", float64(check.Duration.Microseconds())/1000)
+
 		attrs := []any{"check", check.Name, "message", check.Message}
 		if len(check.Details) > 0 {
 			attrs = append(attrs, "details", check.Details)

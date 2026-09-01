@@ -1133,3 +1133,64 @@ func TestService_Validate_FailsWhenTheCursorIsUnreadable(t *testing.T) {
 		t.Errorf("error %q should carry the cursor read failure", err)
 	}
 }
+
+// TestService_Validate_LogsEveryCheckDuration: the report never leaves the
+// process, so a check that passes leaves no other trace — how long each one
+// took is visible only if the finish line carries it.
+func TestService_Validate_LogsEveryCheckDuration(t *testing.T) {
+	repo := &mockBlockStateRepository{
+		minBlockNumber:    1,
+		maxBlockNumber:    1000,
+		backfillWatermark: 1000,
+	}
+
+	logs := &testutil.SlogRecorder{}
+	config := DefaultConfig()
+	config.Logger = slog.New(logs)
+	config.ValidateChainIntegrity = true
+	config.ValidateReorgs = false
+	config.SpotCheckCount = 0
+
+	svc, err := NewService(config, repo, &mockBlockVerifier{})
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	report, err := svc.Validate(context.Background())
+	if err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	if got := logs.CountInfo("validation check finished"); got != len(report.Checks) {
+		t.Fatalf("finish records = %d, want one per check (%d)", got, len(report.Checks))
+	}
+	for _, check := range report.Checks {
+		attrs := finishRecordAttrs(t, logs, check.Name)
+		if attrs["status"] != check.Status {
+			t.Errorf("%s: status attr = %v, want %q", check.Name, attrs["status"], check.Status)
+		}
+		if _, ok := attrs["duration_ms"]; !ok {
+			t.Errorf("%s: finish record carries no duration_ms", check.Name)
+		}
+	}
+}
+
+// finishRecordAttrs returns the attributes of the finish record for one check.
+func finishRecordAttrs(t *testing.T, logs *testutil.SlogRecorder, name string) map[string]any {
+	t.Helper()
+	for _, record := range logs.Records {
+		if record.Message != "validation check finished" {
+			continue
+		}
+		attrs := map[string]any{}
+		record.Attrs(func(a slog.Attr) bool {
+			attrs[a.Key] = a.Value.Any()
+			return true
+		})
+		if attrs["check"] == name {
+			return attrs
+		}
+	}
+	t.Fatalf("no finish record for check %q", name)
+	return nil
+}
