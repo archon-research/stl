@@ -571,6 +571,32 @@ func TestFetchCurrentPrices_AllAssetsUnmapped(t *testing.T) {
 	}
 }
 
+func TestFetchCurrentPrices_AssetUpsertFails(t *testing.T) {
+	provider := newMockProvider("coingecko", true)
+	repo := newMockRepository()
+
+	repo.enabledAssets = []*entity.PriceAsset{
+		createAsset(1, "ripple", "XRP", nil), // token-less: routes to the asset store
+	}
+	repo.upsertAssetPricesErr = errors.New("database write error")
+
+	ts := time.Now().Truncate(time.Second)
+	provider.currentPrices = []outbound.PriceData{
+		createPriceData("ripple", 2.5, ts),
+	}
+
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
+
+	err := svc.FetchCurrentPrices(context.Background(), nil)
+
+	if err == nil {
+		t.Fatal("expected the asset-store failure to surface")
+	}
+	if !errors.Is(err, repo.upsertAssetPricesErr) {
+		t.Errorf("expected the repository error in the chain, got: %v", err)
+	}
+}
+
 func TestFetchCurrentPrices_UpsertFails(t *testing.T) {
 	provider := newMockProvider("coingecko", true)
 	repo := newMockRepository()
@@ -1090,10 +1116,6 @@ func TestBackfillChunk_AcceptsAWindowExactlyAtTheHourlyCeiling(t *testing.T) {
 	}
 }
 
-// Transient faults must stay retryable. ErrInvalidRequest makes a Temporal
-// activity non-retryable, so tagging a provider outage or a database blip with it
-// would turn one bad minute into a permanently failed backfill. Without this,
-// wrapping either error in ErrInvalidRequest passes the suite.
 func TestBackfillChunk_TokenlessAssetStoresToAssetPrices(t *testing.T) {
 	from := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	provider := newMockProvider("coingecko", true)
@@ -1119,6 +1141,10 @@ func TestBackfillChunk_TokenlessAssetStoresToAssetPrices(t *testing.T) {
 	}
 }
 
+// Transient faults must stay retryable. ErrInvalidRequest makes a Temporal
+// activity non-retryable, so tagging a provider outage or a database blip with it
+// would turn one bad minute into a permanently failed backfill. Without this,
+// wrapping either error in ErrInvalidRequest passes the suite.
 func TestBackfillChunk_KeepsTransientFailuresRetryable(t *testing.T) {
 	from := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	tokenID := int64(100)
@@ -1571,7 +1597,7 @@ func TestBuildAssetMap_Empty(t *testing.T) {
 // Tests: Conversion Functions (Direct)
 // =============================================================================
 
-func TestConvertHistoricalPrices_NilTokenID(t *testing.T) {
+func TestConvertHistoricalPrices_TokenlessAssetRoutesToAssetPrices(t *testing.T) {
 	provider := newMockProvider("coingecko", true)
 	repo := newMockRepository()
 

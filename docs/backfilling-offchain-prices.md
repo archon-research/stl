@@ -14,7 +14,8 @@ related_docs:
 
 # Backfilling Off-Chain Prices
 
-How to load historical CoinGecko prices into `offchain_token_price` for a date range
+How to load historical CoinGecko prices into `offchain_token_price` (token-keyed
+assets) or `offchain_asset_price` (assets with no token row) for a date range
 you choose. This is the operator's view — for how the job is built, or how to add
 another on-demand job, see [temporal_guide.md](temporal_guide.md).
 
@@ -156,6 +157,17 @@ JOIN offchain_price_source s ON s.id = p.source_id
 WHERE t.chain_id = 1 AND s.name = 'coingecko'
   AND t.symbol IN ('WETH','WBTC')
 GROUP BY t.symbol;
+```
+
+For a token-less asset the rows are in `offchain_asset_price` instead:
+
+```sql
+SELECT a.symbol, COUNT(*) AS rows,
+       MIN(p.timestamp) AS earliest, MAX(p.timestamp) AS latest
+FROM offchain_asset_price p
+JOIN offchain_price_asset a ON a.id = p.asset_id
+WHERE a.source_asset_id IN ('ripple','hyperliquid')
+GROUP BY a.symbol;
 ```
 
 Roughly **8,760 rows per asset per year** (hourly). Spot-check a known value — WETH

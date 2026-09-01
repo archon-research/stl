@@ -24,9 +24,10 @@ func TestNewAssetPrice(t *testing.T) {
 		{name: "zero timestamp", assetID: 1, sourceID: 1, priceUSD: 1, wantErr: true},
 	}
 
+	marketCap, volume := 19_000_000.0, 285_000.0
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ap, err := NewAssetPrice(tc.assetID, tc.sourceID, tc.priceUSD, nil, nil, tc.timestamp)
+			ap, err := NewAssetPrice(tc.assetID, tc.sourceID, tc.priceUSD, &marketCap, &volume, tc.timestamp)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("expected an error")
@@ -38,6 +39,9 @@ func TestNewAssetPrice(t *testing.T) {
 			}
 			if ap.AssetID != tc.assetID || ap.SourceID != tc.sourceID || ap.PriceUSD != tc.priceUSD {
 				t.Errorf("fields not carried through: %+v", ap)
+			}
+			if ap.MarketCapUSD != &marketCap || ap.VolumeUSD != &volume {
+				t.Errorf("pointer fields not carried through: %+v", ap)
 			}
 		})
 	}

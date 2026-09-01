@@ -16,6 +16,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/coingecko"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -290,6 +291,17 @@ func TestIntegration_FetchCurrentPrices_AllEnabledAssets(t *testing.T) {
 	// Verify at least the expected minimum (SparkLend seeds 18 tokens)
 	if priceCount < 15 {
 		t.Errorf("expected at least 15 price records from seed data, got %d", priceCount)
+	}
+
+	// The migration also seeds two token-less assets (ripple, hyperliquid);
+	// the same sweep must land their prices in the asset-keyed store.
+	var assetPriceCount int
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_asset_price`).Scan(&assetPriceCount)
+	if err != nil {
+		t.Fatalf("failed to query asset_price count: %v", err)
+	}
+	if assetPriceCount != 2 {
+		t.Errorf("expected 2 asset-keyed price records (ripple, hyperliquid), got %d", assetPriceCount)
 	}
 }
 
@@ -623,6 +635,74 @@ func TestIntegration_AssetPriceUpsertIdempotency(t *testing.T) {
 	}
 	if countAfterFirst != countAfterSecond {
 		t.Errorf("expected idempotent upsert: first=%d, second=%d", countAfterFirst, countAfterSecond)
+	}
+}
+
+// A replay from a different build must land correction rows at
+// processing_version+1, not vanish into ON CONFLICT DO NOTHING — the contract
+// next_processing_version_offchain_asset_price exists to keep (ADR-0002 §3).
+func TestIntegration_AssetPriceCrossBuildReplayAppendsNewVersions(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+	mockServer := setupMockCoinGeckoServer(t)
+	t.Cleanup(mockServer.Close)
+
+	var sourceID int64
+	if err := pool.QueryRow(ctx, `SELECT id FROM offchain_price_source WHERE name = 'coingecko'`).Scan(&sourceID); err != nil {
+		t.Fatalf("failed to get coingecko source: %v", err)
+	}
+	assetID := insertTestTokenlessPriceAsset(t, ctx, pool, sourceID, "ripple", "XRP", "XRP")
+
+	client, err := coingecko.NewClient(coingecko.ClientConfig{
+		APIKey:          "test-api-key",
+		BaseURL:         mockServer.URL,
+		RateLimitPerMin: 10000,
+	})
+	if err != nil {
+		t.Fatalf("failed to create coingecko client: %v", err)
+	}
+
+	from := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2024, 1, 1, 6, 0, 0, 0, time.UTC)
+
+	runWithBuild := func(buildID int) {
+		t.Helper()
+		repo, err := postgres.NewPriceRepository(pool, nil, buildregistry.BuildID(buildID), 100)
+		if err != nil {
+			t.Fatalf("failed to create price repository: %v", err)
+		}
+		service, err := NewService(ServiceConfig{ChainID: 1, Concurrency: 2}, client, repo)
+		if err != nil {
+			t.Fatalf("failed to create service: %v", err)
+		}
+		if err := service.FetchHistoricalData(ctx, []string{"ripple"}, from, to); err != nil {
+			t.Fatalf("FetchHistoricalData (build %d) failed: %v", buildID, err)
+		}
+	}
+
+	runWithBuild(0)
+	var v0Count int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_asset_price WHERE asset_id = $1`, assetID).Scan(&v0Count); err != nil {
+		t.Fatalf("failed to count rows: %v", err)
+	}
+	if v0Count == 0 {
+		t.Fatal("expected the first build's rows to be stored")
+	}
+
+	runWithBuild(1)
+	var total, maxVersion int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*), MAX(processing_version) FROM offchain_asset_price WHERE asset_id = $1`, assetID,
+	).Scan(&total, &maxVersion); err != nil {
+		t.Fatalf("failed to count rows after replay: %v", err)
+	}
+	if total != 2*v0Count {
+		t.Errorf("expected the replay to append a full second version set: first=%d, total=%d", v0Count, total)
+	}
+	if maxVersion != 1 {
+		t.Errorf("expected max processing_version 1 after a new-build replay, got %d", maxVersion)
 	}
 }
 

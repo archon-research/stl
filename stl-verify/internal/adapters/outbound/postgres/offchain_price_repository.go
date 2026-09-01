@@ -140,39 +140,16 @@ func (r *PriceRepository) UpsertPrices(ctx context.Context, prices []*entity.Tok
 			a.Timestamp.Compare(b.Timestamp),
 		)
 	})
-
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer rollback(ctx, tx, r.logger)
-
-	for i := 0; i < len(prices); i += r.batchSize {
-		end := min(i+r.batchSize, len(prices))
-		batch := prices[i:end]
-
-		if err := r.upsertPriceBatch(ctx, tx, batch); err != nil {
-			return err
-		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("committing transaction: %w", err)
-	}
-	return nil
+	return upsertInBatches(ctx, r, prices, r.upsertPriceBatch)
 }
 
 // UpsertAssetPrices inserts asset-keyed price records (offchain_asset_price) in
 // batches — the store for assets with no token row, where UpsertPrices cannot
 // write. Same idempotency contract: ON CONFLICT DO NOTHING on the primary key,
-// with the build-aware trigger assigning processing_version.
+// with the build-aware version rule deciding processing_version.
 func (r *PriceRepository) UpsertAssetPrices(ctx context.Context, prices []*entity.AssetPrice) error {
-	if len(prices) == 0 {
-		return nil
-	}
-
 	// Sorted for the same reason as UpsertPrices: the per-row advisory lock in
-	// assign_processing_version_offchain_asset_price must be acquired in a
+	// next_processing_version_offchain_asset_price must be acquired in a
 	// transaction-stable order across concurrent callers (ADR-0002 §3).
 	slices.SortFunc(prices, func(a, b *entity.AssetPrice) int {
 		return cmp.Or(
@@ -181,6 +158,15 @@ func (r *PriceRepository) UpsertAssetPrices(ctx context.Context, prices []*entit
 			a.Timestamp.Compare(b.Timestamp),
 		)
 	})
+	return upsertInBatches(ctx, r, prices, r.upsertAssetPriceBatch)
+}
+
+// upsertInBatches runs batchFn over fixed-size slices of rows inside one
+// transaction, so a mid-run failure rolls the whole upsert back.
+func upsertInBatches[T any](ctx context.Context, r *PriceRepository, rows []T, batchFn func(context.Context, pgx.Tx, []T) error) error {
+	if len(rows) == 0 {
+		return nil
+	}
 
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -188,9 +174,9 @@ func (r *PriceRepository) UpsertAssetPrices(ctx context.Context, prices []*entit
 	}
 	defer rollback(ctx, tx, r.logger)
 
-	for i := 0; i < len(prices); i += r.batchSize {
-		end := min(i+r.batchSize, len(prices))
-		if err := r.upsertAssetPriceBatch(ctx, tx, prices[i:end]); err != nil {
+	for i := 0; i < len(rows); i += r.batchSize {
+		end := min(i+r.batchSize, len(rows))
+		if err := batchFn(ctx, tx, rows[i:end]); err != nil {
 			return err
 		}
 	}
@@ -208,7 +194,7 @@ func (r *PriceRepository) upsertAssetPriceBatch(ctx context.Context, tx pgx.Tx, 
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO offchain_asset_price (asset_id, source_id, timestamp, price_usd, market_cap_usd, volume_usd, build_id)
+		INSERT INTO offchain_asset_price (asset_id, source_id, timestamp, price_usd, market_cap_usd, volume_usd, processing_version, build_id)
 		VALUES `)
 
 	args := make([]any, 0, len(prices)*7)
@@ -217,8 +203,13 @@ func (r *PriceRepository) upsertAssetPriceBatch(ctx context.Context, tx pgx.Tx, 
 			sb.WriteString(", ")
 		}
 		baseIdx := i * 7
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d)",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7))
+		// The INSERT, not the trigger, decides processing_version: on a
+		// columnstored chunk the ON CONFLICT arbiter resolves before row
+		// triggers fire, and a trigger-assigned version reaches it as DEFAULT 0,
+		// silently discarding corrections (ADR-0002 §3; see the migration).
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, next_processing_version_offchain_asset_price($%d, $%d, $%d, $%d), $%d)",
+			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6,
+			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+7, baseIdx+7))
 
 		args = append(args, price.AssetID, price.SourceID, price.Timestamp, price.PriceUSD, price.MarketCapUSD, price.VolumeUSD, int(r.buildID))
 	}

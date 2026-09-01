@@ -47,43 +47,79 @@ ALTER TABLE offchain_asset_price SET (
 
 SELECT add_compression_policy('offchain_asset_price', INTERVAL '60 days', if_not_exists => TRUE);
 
+-- Covering index for the version rule's per-key lookups, matching
+-- idx_offchain_token_price_pv_lookup (20260424_120000).
+CREATE INDEX IF NOT EXISTS idx_offchain_asset_price_pv_lookup
+    ON offchain_asset_price (asset_id, source_id, timestamp, processing_version DESC);
+
 DO $$ BEGIN
     PERFORM add_tiering_policy('offchain_asset_price', INTERVAL '1 year', if_not_exists => TRUE);
 EXCEPTION WHEN undefined_function THEN
     RAISE NOTICE 'add_tiering_policy not available, skipping tiering for offchain_asset_price';
 END $$;
 
--- Build-aware processing-version trigger with advisory lock (ADR-0002 §3).
--- Same build_id retry → reuse version (idempotent); new build_id → MAX+1.
-CREATE OR REPLACE FUNCTION assign_processing_version_offchain_asset_price()
-RETURNS TRIGGER
+-- The version rule, callable from both the INSERT and the trigger. Same
+-- build_id retry → reuse version (idempotent); new build_id → MAX+1.
+--
+-- The INSERT must call this in its VALUES list rather than leave the version to
+-- the trigger: on a columnstored chunk TimescaleDB resolves ON CONFLICT before
+-- row triggers fire, so a trigger-assigned version reaches the arbiter as
+-- DEFAULT 0 and the correction row is silently discarded (see
+-- 20260821_120000_morpho_adapter_state_version_function.sql and ADR-0002 §3).
+--
+-- VOLATILE is spelled out because correctness rests on it: a STABLE function
+-- would read the calling statement's snapshot, so a writer released from the
+-- advisory lock would recompute the version the previous writer already used.
+CREATE OR REPLACE FUNCTION next_processing_version_offchain_asset_price(
+    p_asset_id  BIGINT,
+    p_source_id SMALLINT,
+    p_timestamp TIMESTAMPTZ,
+    p_build_id  INT)
+RETURNS INT
+VOLATILE
 SET plan_cache_mode = 'force_custom_plan'
 AS $$
 DECLARE
     existing_ver INT;
     max_ver      INT;
 BEGIN
+    -- Timestamp wrapped in EXTRACT(epoch FROM …) so the key is TimeZone/DateStyle-stable.
     PERFORM pg_advisory_xact_lock(hashtextextended(
-        format('oap|%s|%s|%s', NEW.asset_id, NEW.source_id, EXTRACT(epoch FROM NEW.timestamp)), 0));
+        format('oap|%s|%s|%s', p_asset_id, p_source_id, EXTRACT(epoch FROM p_timestamp)), 0));
 
     SELECT processing_version INTO existing_ver
     FROM offchain_asset_price
-    WHERE asset_id  = NEW.asset_id
-      AND source_id = NEW.source_id
-      AND timestamp = NEW.timestamp
-      AND build_id  = NEW.build_id
+    WHERE asset_id  = p_asset_id
+      AND source_id = p_source_id
+      AND timestamp = p_timestamp
+      AND build_id  = p_build_id
     LIMIT 1;
 
     IF FOUND THEN
-        NEW.processing_version := existing_ver;
-    ELSE
-        SELECT COALESCE(MAX(processing_version), -1) INTO max_ver
-        FROM offchain_asset_price
-        WHERE asset_id  = NEW.asset_id
-          AND source_id = NEW.source_id
-          AND timestamp = NEW.timestamp;
-        NEW.processing_version := max_ver + 1;
+        RETURN existing_ver;
     END IF;
+
+    SELECT COALESCE(MAX(processing_version), -1) INTO max_ver
+    FROM offchain_asset_price
+    WHERE asset_id  = p_asset_id
+      AND source_id = p_source_id
+      AND timestamp = p_timestamp;
+    RETURN max_ver + 1;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION next_processing_version_offchain_asset_price(BIGINT, SMALLINT, TIMESTAMPTZ, INT) IS
+  'Returns the processing_version an offchain_asset_price row at (asset_id, source_id, timestamp) must carry for build_id: the version that build already wrote there, else MAX+1. Takes the row''s advisory lock (ADR-0002 §3) and holds it for the transaction. Call it in the INSERT''s VALUES list: on a columnstored chunk TimescaleDB resolves ON CONFLICT before row triggers fire, so a version left to the trigger reaches the arbiter as DEFAULT 0 and the correction row is silently discarded.';
+
+-- The trigger delegates to the same rule, as the floor for writers that do not
+-- call the function (psql, ad-hoc scripts) on rowstore chunks.
+CREATE OR REPLACE FUNCTION assign_processing_version_offchain_asset_price()
+RETURNS TRIGGER
+SET plan_cache_mode = 'force_custom_plan'
+AS $$
+BEGIN
+    NEW.processing_version := next_processing_version_offchain_asset_price(
+        NEW.asset_id, NEW.source_id, NEW.timestamp, NEW.build_id);
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -120,6 +156,16 @@ REVOKE UPDATE, DELETE ON offchain_asset_price FROM stl_readwrite;
 -- and neither exists as a mainnet ERC-20, so token_id stays NULL and their
 -- prices land in offchain_asset_price. IDs verified against the CoinGecko API.
 -- Enabled: the scheduled offchain-price sweep keeps the series current.
+-- ON CONFLICT DO NOTHING: a pre-existing catalog row (operator-configured)
+-- deliberately wins over this seed.
+DO $$ BEGIN
+    -- The seed below joins on this row; without the guard a missing source row
+    -- would insert zero rows silently, and a once-applied migration never re-runs.
+    IF NOT EXISTS (SELECT 1 FROM offchain_price_source WHERE name = 'coingecko') THEN
+        RAISE EXCEPTION 'offchain_price_source has no coingecko row; the XRP/HYPE seed would be a silent no-op';
+    END IF;
+END $$;
+
 INSERT INTO offchain_price_asset (source_id, source_asset_id, token_id, name, symbol, enabled)
 SELECT ps.id, pa.source_asset_id, NULL, pa.name, pa.symbol, true
 FROM offchain_price_source ps,
