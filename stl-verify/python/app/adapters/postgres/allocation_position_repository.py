@@ -178,7 +178,7 @@ class AllocationRepository:
             )
             raise ValueError(f"Database query failed while fetching protocols: {exc}") from exc
 
-    async def list_primes(self) -> list[Prime]:
+    async def list_primes(self, allowed_vaults: Sequence[EthAddress] | None = None) -> list[Prime]:
         try:
             async with self._engine.connect() as conn:
                 result = await conn.execute(
@@ -191,9 +191,14 @@ class AllocationRepository:
                             encode(p.vault_address, 'hex') AS vault_address
                         FROM prime_proxy pp
                         JOIN prime p ON p.id = pp.prime_id
+                        WHERE (
+                            CAST(:allowed_vaults AS BYTEA[]) IS NULL
+                            OR p.vault_address = ANY(CAST(:allowed_vaults AS BYTEA[]))
+                        )
                         ORDER BY pp.proxy_address, pp.chain_id
                         """
-                    )
+                    ),
+                    {"allowed_vaults": (None if allowed_vaults is None else [v.to_bytes() for v in allowed_vaults])},
                 )
                 primes: list[Prime] = []
                 for row in result:
@@ -627,7 +632,7 @@ class AllocationRepository:
             SELECT encode(p.vault_address, 'hex') AS vault
             FROM prime p
             WHERE p.vault_address = :addr
-            UNION
+            UNION ALL
             SELECT encode(p.vault_address, 'hex') AS vault
             FROM prime_proxy pp
             JOIN prime p ON p.id = pp.prime_id
@@ -644,32 +649,6 @@ class AllocationRepository:
             raise ValueError(f"Database query failed while resolving prime vault: {exc}") from exc
         return ("0x" + row.vault) if row and row.vault else None
 
-    async def list_proxy_addresses_for_vaults(self, vaults: Sequence[EthAddress]) -> list[EthAddress]:
-        """Every ALM proxy address belonging to the given prime vaults.
-
-        Feeds the activity query's proxy filter so authorization happens in the
-        WHERE clause, before ORDER BY/LIMIT — filtering after the limit returns
-        silently incomplete pages.
-        """
-        if not vaults:
-            return []
-        sql = text(
-            """
-            SELECT encode(pp.proxy_address, 'hex') AS address
-            FROM prime_proxy pp
-            JOIN prime p ON p.id = pp.prime_id
-            WHERE p.vault_address = ANY(:vaults)
-            """
-        )
-        try:
-            async with self._engine.connect() as conn:
-                rows = (await conn.execute(sql, {"vaults": [v.to_bytes() for v in vaults]})).fetchall()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            raise ValueError(f"Database query failed while resolving vault proxies: {exc}") from exc
-        return [EthAddress("0x" + r.address) for r in rows]
-
     async def list_allocation_activity(
         self,
         *,
@@ -682,10 +661,12 @@ class AllocationRepository:
         from_timestamp: datetime | None = None,
         to_timestamp: datetime | None = None,
         limit: int = 100,
+        allowed_vaults: Sequence[EthAddress] | None = None,
     ) -> list[AllocationActivityEvent]:
         # Escape LIKE metacharacters to prevent pattern injection
         params = {
             "proxy_addrs": (None if proxy_addresses is None else [a.to_bytes() for a in proxy_addresses]),
+            "allowed_vaults": (None if allowed_vaults is None else [v.to_bytes() for v in allowed_vaults]),
             "chain_id": chain_id,
             "protocol_name": _escape_like_pattern(protocol_name) if protocol_name else None,
             "action_type": action_type,
@@ -1664,6 +1645,9 @@ LEFT JOIN LATERAL (
     LIMIT 1
 ) AS protocol_match ON TRUE
 WHERE (CAST(:proxy_addrs AS BYTEA[]) IS NULL OR ap.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[])))
+    -- authorization filter: NULL = auth off (no filter); [] = caller may view
+    -- no primes (no rows). Applied before ORDER BY/LIMIT with the other filters.
+    AND (CAST(:allowed_vaults AS BYTEA[]) IS NULL OR p.vault_address = ANY(CAST(:allowed_vaults AS BYTEA[])))
     AND ap.direction IS NOT NULL
     AND ap.tx_amount IS NOT NULL
     AND ap.balance IS NOT NULL

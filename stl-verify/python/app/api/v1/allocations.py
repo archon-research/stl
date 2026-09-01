@@ -411,12 +411,9 @@ async def list_primes(
     service: AllocationService = Depends(_get_service),
     allowed: frozenset[str] | None = Depends(allowed_prime_vaults),
 ):
-    primes = await service.list_primes()
-    # ListObjects pushed into the filter (ADR-015). This endpoint returns the
-    # whole (small) primes table with no LIMIT, so an in-memory filter cannot
-    # truncate anything; keyed by VAULT — the authorization identity.
-    if allowed is not None:
-        primes = [p for p in primes if (p.prime_vault_address or "").lower() in allowed]
+    # ListObjects pushed into the QUERY (ADR-015): unauthorized primes never
+    # leave PostgreSQL. None = auth off; [] = caller may view none (no rows).
+    primes = await service.list_primes(allowed_vaults=(None if allowed is None else [EthAddress(v) for v in allowed]))
     return [
         PrimeResponse(
             id=p.id,

@@ -29,7 +29,7 @@ class AllocationRepositoryPort(Protocol):
         """Return protocol metadata used by the UI."""
         ...
 
-    async def list_primes(self) -> list[Prime]:
+    async def list_primes(self, allowed_vaults: Sequence[EthAddress] | None = None) -> list[Prime]:
         """Return all distinct primes."""
         ...
 
@@ -103,10 +103,6 @@ class AllocationRepositoryPort(Protocol):
         """Vault address for a vault-or-proxy address, or None if unknown."""
         ...
 
-    async def list_proxy_addresses_for_vaults(self, vaults: Sequence[EthAddress]) -> list[EthAddress]:
-        """Every ALM proxy address belonging to the given prime vaults."""
-        ...
-
     async def list_allocation_activity(
         self,
         *,
@@ -119,6 +115,7 @@ class AllocationRepositoryPort(Protocol):
         from_timestamp: datetime | None = None,
         to_timestamp: datetime | None = None,
         limit: int = 100,
+        allowed_vaults: Sequence[EthAddress] | None = None,
     ) -> list[AllocationActivityEvent]:
         """Return allocation activity events with optional filters.
 
