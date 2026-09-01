@@ -64,7 +64,7 @@ func TestRunHappyPath(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	runErr := make(chan error, 1)
-	go func() { runErr <- run(ctx, factory) }()
+	go func() { runErr <- run(ctx, factory, nil) }()
 
 	// Wait until at least one tick has persisted a row, then stop.
 	deadline := time.After(10 * time.Second)

@@ -207,7 +207,7 @@ func TestExecute(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := &recordingArchiver{}
-			gate := NewDrainGate()
+			gate := NewDrainGate(nil)
 			d := newTestDecorator(&stubInner{results: tt.innerResults, err: tt.innerErr}, rec, gate)
 
 			ctx := WithBlockVersion(context.Background(), tt.blockVersion)
@@ -249,7 +249,7 @@ func TestExecuteAtHash(t *testing.T) {
 
 	t.Run("forwards results and inner error without archiving", func(t *testing.T) {
 		rec := &recordingArchiver{}
-		gate := NewDrainGate()
+		gate := NewDrainGate(nil)
 		d := newTestDecorator(&stubInner{results: []outbound.Result{{Success: true}}, err: errBoom}, rec, gate)
 
 		res, err := d.ExecuteAtHash(context.Background(), []outbound.Call{{CallData: []byte{0x01}}}, common.HexToHash("0xabc"))
@@ -267,7 +267,7 @@ func TestExecuteAtHash(t *testing.T) {
 
 	t.Run("stamps BlockNumber from the context on the hash-pinned path", func(t *testing.T) {
 		rec := &recordingArchiver{}
-		gate := NewDrainGate()
+		gate := NewDrainGate(nil)
 		d := newTestDecorator(&stubInner{results: []outbound.Result{
 			{Success: true, ReturnData: []byte{0xaa}},
 			{Success: false, ReturnData: []byte{0xbb}},
@@ -306,7 +306,7 @@ func TestExecuteAtHash(t *testing.T) {
 	t.Run("stamps BlockNumber 0 and warns when the context carries no number", func(t *testing.T) {
 		var logBuf bytes.Buffer
 		rec := &recordingArchiver{}
-		gate := NewDrainGate()
+		gate := NewDrainGate(nil)
 		d := NewMulticaller(&stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}, rec, Config{
 			Source:  "oracle-price",
 			ChainID: 1,
@@ -344,7 +344,7 @@ func TestExecuteAtHash(t *testing.T) {
 // argument-less ExecuteAtHash path, never an override of an explicit number.
 func TestExecutePositionalBlockNumberWinsOverContext(t *testing.T) {
 	rec := &recordingArchiver{}
-	gate := NewDrainGate()
+	gate := NewDrainGate(nil)
 	d := newTestDecorator(&stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}, rec, gate)
 
 	ctx := WithBlockNumber(context.Background(), 999)
@@ -366,7 +366,7 @@ func TestExecutePositionalBlockNumberWinsOverContext(t *testing.T) {
 // Close still drains cleanly.
 func TestExecuteSucceedsWhenArchiveErrors(t *testing.T) {
 	inner := &stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}
-	gate := NewDrainGate()
+	gate := NewDrainGate(nil)
 	d := newTestDecorator(inner, errArchiver{err: errors.New("s3 down")}, gate)
 
 	res, err := d.Execute(context.Background(), []outbound.Call{{CallData: []byte{0x01}}}, big.NewInt(1))
@@ -383,7 +383,7 @@ func TestExecuteSucceedsWhenArchiveErrors(t *testing.T) {
 // recovered rather than propagated (which would crash the process).
 func TestExecuteSurvivesArchivePanic(t *testing.T) {
 	inner := &stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}
-	gate := NewDrainGate()
+	gate := NewDrainGate(nil)
 	d := newTestDecorator(inner, panicArchiver{}, gate)
 
 	res, err := d.Execute(context.Background(), []outbound.Call{{CallData: []byte{0x01}}}, big.NewInt(1))
@@ -417,7 +417,7 @@ func TestExecuteRecordsArchiveWriteStatus(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			inner := &stubInner{results: []outbound.Result{{Success: true}}}
 			arch := errArchiver{err: tc.archiveErr}
-			gate := NewDrainGate()
+			gate := NewDrainGate(nil)
 			m := NewMulticaller(inner, arch, Config{
 				Source:        "test-source",
 				ChainID:       1,
@@ -449,7 +449,7 @@ func TestExecuteEmptyBatchSkipsMetric(t *testing.T) {
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
 
 	rec := &recordingArchiver{}
-	gate := NewDrainGate()
+	gate := NewDrainGate(nil)
 	m := NewMulticaller(&stubInner{results: []outbound.Result{}}, rec, Config{
 		Source:        "test-source",
 		ChainID:       1,
@@ -483,7 +483,7 @@ func TestExecuteCountsOneBatchOnTruncation(t *testing.T) {
 
 	inner := &stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}
 	rec := &recordingArchiver{}
-	gate := NewDrainGate()
+	gate := NewDrainGate(nil)
 	m := NewMulticaller(inner, rec, Config{
 		Source:        "test-source",
 		ChainID:       1,
@@ -537,7 +537,7 @@ func TestExecuteCompletesArchiveAfterCallerCancels(t *testing.T) {
 	}
 
 	inner := &stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}
-	gate := NewDrainGate()
+	gate := NewDrainGate(nil)
 	d := newTestDecorator(inner, arch, gate)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -606,7 +606,7 @@ func TestExecuteRefusesAndCountsAWriteScheduledAfterTheDrainBegan(t *testing.T) 
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
 
 	rec := &recordingArchiver{}
-	gate := NewDrainGate()
+	gate := NewDrainGate(nil)
 	var logs bytes.Buffer
 	m := NewMulticaller(&stubInner{results: []outbound.Result{{Success: true}}}, rec, Config{
 		Source:        "test-source",

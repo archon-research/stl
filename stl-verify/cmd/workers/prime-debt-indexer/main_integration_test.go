@@ -242,7 +242,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	err := run(context.Background(), []string{
 		"-db", "postgres://invalid:invalid@localhost:1/nonexistent?connect_timeout=1",
 		"-queue", "http://localhost/test-queue",
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error for bad connection config")
 	}
@@ -296,7 +296,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 			"-vat", "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b",
 			"-queue", sqsServer.URL + "/queue/test",
 			"-sweep-blocks", "1",
-		})
+		}, nil)
 	}()
 
 	deadline := time.After(15 * time.Second)
@@ -377,7 +377,7 @@ func TestRunIntegration_NoPrimesInDB(t *testing.T) {
 		"-db", dbURL,
 		"-vat", "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b",
 		"-queue", sqsServer.URL + "/queue/test",
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error when no primes are registered")
 	}
@@ -445,7 +445,7 @@ func TestRunIntegration_MultipleVaults(t *testing.T) {
 			"-vat", vatAddr,
 			"-queue", sqsServer.URL + "/queue/test",
 			"-sweep-blocks", "1",
-		})
+		}, nil)
 	}()
 
 	deadline := time.After(15 * time.Second)
@@ -553,7 +553,7 @@ func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 			"-vat", vatAddr,
 			"-queue", sqsServer.URL + "/queue/test",
 			"-sweep-blocks", "1",
-		})
+		}, nil)
 	}()
 
 	deadline := time.After(15 * time.Second)
@@ -650,7 +650,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 			"-vat", vatAddr,
 			"-queue", sqsServer.URL + "/queue/test",
 			"-sweep-blocks", "1",
-		})
+		}, nil)
 	}()
 
 	// Wait until a debt snapshot is written so the sweep (and its multicalls) has run.
@@ -747,7 +747,7 @@ func TestRunIntegration_InvalidVatFlag(t *testing.T) {
 		"-db", dbURL,
 		"-vat", "not-a-valid-address",
 		"-queue", sqsServer.URL + "/queue/test",
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error for invalid vat address")
 	}

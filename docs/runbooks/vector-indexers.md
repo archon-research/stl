@@ -2247,7 +2247,11 @@ Signals:
 
 - `archive_writes_total{status,source,chain,service_name}` — one sample per
   attempted S3 object write, from the archiving decorator. `status` is
-  `success`, `error`, or `abandoned` (refused by the shutdown drain gate).
+  `success`, `error`, `abandoned` (the shutdown drain gate refused the batch, so
+  the write never started) or `lost` (the write was still in flight when the
+  5s drain budget expired, so it never finished and its outcome is unknown).
+  `abandoned` and `lost` are both permanent: the message that produced the batch
+  was already deleted from SQS, so nothing will retry them.
 - `archive_object_size_bytes` — compressed-object-size histogram, from the S3
   adapter.
 
@@ -2262,12 +2266,26 @@ is a `warning` rather than a page. It also means `archive_writes_total` *lags*
 `multicall_batch_size_count` by one S3 round-trip, and on a freshly started pod
 that lag is enough to shift which counter gets exported first (see
 `VectorArchivingStalled` below). On graceful shutdown `archivingwire`'s `drain()`
-is bounded by `archivingwire.DrainTimeout` (5s) and then closes the drain gate,
-which refuses any batch a still-running handler schedules afterwards and counts
-it as `status="abandoned"`. A rollout can therefore end *below*
-`multicall == archive_success` parity; the shortfall is bounded by the writes
-still in flight at SIGTERM and is visible as `abandoned` (or as a warning line,
-`raw SC call archive drain budget expired`).
+is bounded by `archivingwire.DrainTimeout` (5s). Batches a still-running handler
+schedules after that budget expires are refused by the drain gate and counted as
+`status="abandoned"`; writes already in flight when it expires are counted as
+`status="lost"` and logged as `raw SC call archive drain budget expired`. Every
+rollout therefore ends *below* `multicall == archive_success` parity by the
+number of writes in flight or scheduled at SIGTERM.
+
+What the `multicall == archive_success` parity check can and cannot tell you,
+now that `abandoned` and `lost` both exist:
+
+- It **can** size the shortfall: `multicall_batch_size_count` minus
+  `archive_writes_total{status="success"}` within one pod is the number of
+  batches that will need re-fetching from Alchemy on replay, whatever the cause.
+- It **can** tell you whether the shortfall is explained. If it equals
+  `error + abandoned + lost`, every missing batch is accounted for by a known
+  path and there is no unexplained hole.
+- It **cannot**, on its own, separate a rollout from a fault. A non-zero gap is
+  the normal state after any restart, so "parity looks off" is never a finding
+  by itself. Only a gap that `error + abandoned + lost` does *not* account for,
+  or one that keeps growing inside a single pod, means the write path is broken.
 
 ---
 
@@ -2314,14 +2332,15 @@ write path.
 
    ```promql
    sum(archive_writes_total{status="success", service_name="<svc>", chain="<chain>"})
-   sum(archive_writes_total{status="abandoned", service_name="<svc>", chain="<chain>"})
+   sum by (status) (archive_writes_total{status=~"error|abandoned|lost", service_name="<svc>", chain="<chain>"})
    sum(multicall_batch_size_count{service_name="<svc>", chain="<chain>"})
    ```
 
-   Exact parity is not guaranteed: the shutdown drain is bounded by
-   `archivingwire.DrainTimeout` (5s), so a pod can exit with writes abandoned.
-   A small, static gap that matches the `abandoned` count is a rollout, not a
-   fault. A *growing* gap is a genuine stall.
+   Exact parity is not guaranteed and its absence is not by itself a fault: the
+   shutdown drain is bounded by `archivingwire.DrainTimeout` (5s), so every pod
+   exits with some writes `abandoned` and some `lost`. A static gap that
+   `error + abandoned + lost` fully accounts for is a rollout. A gap those three
+   do not account for, or one that keeps growing, is a genuine stall.
 4. **Pod logs** — `kubectl -n vector logs <pod> --tail=200 | grep -i archiv`.
    Look for `archiving raw SC calls` failures, S3 `AccessDenied`,
    `NoSuchBucket`, or `context deadline exceeded` (the 30s `archiveTimeout`).
@@ -2446,6 +2465,11 @@ while some still succeed — partial loss of replay data. `VectorArchivingStalle
 keys on `success == 0` and so cannot see this case by construction; this rule is
 its partial-failure counterpart.
 
+The denominator is `archive_writes_total{status=~"success|error"}`, not the bare
+counter: `abandoned` and `lost` are writes S3 never answered, and both arrive in
+a burst on every rollout, so counting them would dilute the ratio precisely when
+a broken write path is most likely to show up.
+
 It is an **error ratio**, not an absolute rate, on purpose: archive write
 cadence varies across sources by orders of magnitude (~1/10m on unichain
 prime-allocation vs
@@ -2476,7 +2500,9 @@ miss a low-rate source's total failure or false-fire on a high-rate one. The
    underlying cause as the same incident.
 4. **Quantify the loss** — the gap between `multicall_batch_size_count` and
    `archive_writes_total{status="success"}` within the current pod is the number
-   of batches that will need re-fetching from Alchemy on replay.
+   of batches that will need re-fetching from Alchemy on replay. Subtract
+   `abandoned + lost` to get the part this alert is responsible for; the rest is
+   the shutdown drain and is expected.
 
 ### Common causes
 
@@ -2492,24 +2518,25 @@ miss a low-rate source's total failure or false-fire on a high-rate one. The
 sum by (service_name, chain) (rate(archive_writes_total{status="error"}[10m])) == 0
 ```
 
-and counter parity restored — near-equal `multicall_batch_size_count` and
-`archive_writes_total{status="success"}` within the pod, allowing for anything
-counted as `abandoned` by the shutdown drain gate.
+and counter parity restored — `multicall_batch_size_count` minus
+`archive_writes_total{status="success"}` within the pod fully accounted for by
+`error + abandoned + lost`, per the parity guidance in the section intro.
 
 ---
 
 ## VectorSQSReleaseFailed
 
-**Severity:** warning · **For:** 5m · **Window:** 6h
+**Severity:** warning · **For:** 5m · **Windows:** 6h count · 30m recency
 
 ### What it means
 
 On shutdown every SQS worker hands its received-but-unfinished messages back to
 the queue with `ChangeMessageVisibilityBatch(visibility=0)` so the successor pod
-picks them up immediately. `sqs_message_releases_total{status="failed"}` counts
-the messages whose release SQS refused. A failed release is not lost data — SQS redelivers the
-message when the visibility timeout expires — but the queue is FIFO per chain, so
-until then that chain's whole block stream is blocked behind it.
+picks them up immediately. `sqs_message_settles_total{op="release",
+status="failed"}` counts the messages whose release SQS refused. A failed release
+is not lost data — SQS redelivers the message when the visibility timeout
+expires — but the queue is FIFO per chain, so until then that chain's whole block
+stream is blocked behind it.
 
 The rule counts **pod lifetimes**, not messages: one refused batch call marks
 every handle in that chunk, so a single bad shutdown is one series with a large
@@ -2517,17 +2544,29 @@ value, and `> 1` means the failure recurred across two separate shutdowns within
 6h. A one-off is self-healing and needs no action; a recurring one means the
 release path itself is broken, and every rollout from here on stalls the chain.
 
+The second leg — `present_over_time(...[30m]) > 0` — is what makes the alert a
+statement about *now*. Dead pods' series stay inside the 6h window long after
+the pods are gone, so the count alone could only rise and stayed pinned once two
+lifetimes had failed. Requiring a failed-release series still being exported in
+the last 30m means the alert fires on a live recurrence and clears about 30m
+after the last failing pod is gone. **If this alert is firing, a pod exported a
+failed release within the last 30 minutes** — it is not a leftover from an
+earlier rollout.
+
 ### First checks (≤5 min)
 
-1. **Find the failures in the logs** — the release logs each one:
+1. **Find the failures in the logs.** The pod that failed the release is gone
+   (releases only run at shutdown), so `kubectl logs --previous` cannot reach
+   it — `--previous` only reads a restarted container in a *live* pod. Query
+   Loki, which keeps the terminated pod's logs:
 
-   ```bash
-   kubectl -n vector logs <pod> --previous --tail=500 \
-     | grep "failed to release in-flight message"
+   ```logql
+   {k8s_namespace_name="vector", service_name="<svc>"} |= "failed to release in-flight message"
    ```
 
-   The `error` field carries the SQS error verbatim and classifies the rest of
-   this list.
+   Narrow to the failing pod with `k8s_pod_name="<pod>"` once you have it. The
+   `error` field carries the SQS error verbatim and classifies the rest of this
+   list.
 2. **`AccessDenied` / `is not authorized to perform: sqs:ChangeMessageVisibility`**
    → the pod's IAM role is missing `ChangeMessageVisibilityBatch` on that queue.
    This is the one cause that never self-heals: fix the policy (the queue's
@@ -2536,11 +2575,15 @@ release path itself is broken, and every rollout from here on stalls the chain.
    Correlate with a mass rollout or a backfill hammering the same queue; the
    release runs under a 5s cleanup budget per batch, so a throttled retry chain
    can exhaust it.
-4. **`context deadline exceeded`** → the release outlived `ShutdownCleanupTimeout`
-   (5s). Same remedy as throttling; check for SQS latency on the AWS dashboard.
+4. **`context deadline exceeded`** → the release outlived `SettleTimeout` (5s),
+   the per-call budget for settling one message. Same remedy as throttling;
+   check for SQS latency on the AWS dashboard.
 5. **`ReceiptHandleIsInvalid`** → the message was already redelivered before the
-   release landed, i.e. the handler outran the visibility timeout. Check
-   `ValidateVisibilityTimeout` warnings at startup and the handler budget.
+   release landed, i.e. the handler outran the visibility timeout. The worker now
+   refuses to start when the configured visibility timeout cannot cover a whole
+   receive (see *A worker that will not start* below), so a running pod's config
+   is already known good — measure how long the handler actually took against its
+   budget instead.
 6. **Confirm the chain actually stalled** — the blocked group shows up as a gap
    in that chain's `blocks_processed_total`; if there is none, the messages were
    redelivered before anything noticed.
@@ -2552,17 +2595,118 @@ release path itself is broken, and every rollout from here on stalls the chain.
 - A handler that outlived the queue's visibility timeout, so its receipt handle
   had already expired by the time the shutdown tried to release it.
 
+### A worker that will not start
+
+`ValidateVisibilityTimeout` is a boot check, not a warning: the queue's
+visibility timeout must strictly exceed the wall time one whole receive can take
+— messages-per-receive × the handler budget, plus the shutdown drain and the two
+settle calls that follow it — and a worker whose config fails that refuses to
+construct. The misconfiguration therefore shows up as a **CrashLoopBackOff pod
+whose logs end at the boot error** (`SQS visibility timeout … must exceed …`),
+never as a warning line in a running pod. The error states the required minimum;
+raise the queue's visibility timeout to clear it, or lower the handler budget /
+messages per receive. There is nothing to diagnose at runtime, because the
+process never got that far — and conversely, a **running** pod has already
+passed this check, so a `ReceiptHandleIsInvalid` on a live worker is a handler
+that overran its budget in practice, not a bad config.
+
 ### Verify recovery
 
-Roll the affected deployment and confirm the next shutdown releases cleanly:
+The 6h count leg does **not** come back down — the failed pods' series sit in the
+window until they age out, by design. Recovery is the recency leg going empty:
 
 ```promql
 count by (service_name, chain, cluster) (
-  max_over_time(sqs_message_releases_total{status="failed", k8s_namespace_name="vector"}[6h])
+  present_over_time(sqs_message_settles_total{op="release", status="failed", k8s_namespace_name="vector"}[30m])
 )
 ```
 
-back to `1` or absent, with `sqs_message_releases_total{status="released"}`
-advancing on the newest pod.
+No result for the affected `service_name`/`chain` means no pod has exported a
+failed release in the last 30m and the alert has cleared. Then roll the affected
+deployment and confirm the next shutdown releases cleanly: that query stays
+empty across the rollout, and `sqs_message_settles_total{op="release",
+status="ok"}` advances on the newest pod.
+
+---
+
+## VectorSQSDeleteFailed
+
+**Severity:** warning · **For:** 5m · **Window:** 30m
+
+### What it means
+
+Every message a worker finishes is settled with `DeleteMessage`.
+`sqs_message_settles_total{op="delete", status="failed"}` counts the deletes SQS
+refused. A refused delete is the same blackout as a refused release, on the path
+that runs for *every* message rather than only at shutdown: the message stays
+hidden for the queue's whole visibility timeout, that chain's FIFO group
+delivers nothing while it is hidden, and when it reappears the block is
+processed a second time.
+
+Gated on recurrence: `> 1` refused delete in 30m. A single one costs one
+visibility timeout of latency and a re-processed block, then self-heals, so it
+does not page anybody. Two or more means the delete path itself is broken and
+the chain will keep re-processing the same block instead of advancing.
+
+Unlike `VectorSQSReleaseFailed` this rule uses `increase()` rather than counting
+pod lifetimes: the delete counter lives for the whole pod lifetime and is
+scraped repeatedly, and the failure that matters here recurs *inside one pod* —
+a missing `sqs:DeleteMessage` permission fails every delete of a single pod, and
+counting series could never take that past 1.
+
+### First checks (≤5 min)
+
+1. **Find the failures in the logs** — the delete path logs each one at ERROR:
+
+   ```logql
+   {k8s_namespace_name="vector", service_name="<svc>"} |= "failed to delete message"
+   ```
+
+   The `error` field carries the SQS error verbatim and classifies the rest of
+   this list. The pod is usually still alive here, so
+   `kubectl -n vector logs <pod> --tail=200 | grep "failed to delete message"`
+   works too.
+2. **`AccessDenied` / `is not authorized to perform: sqs:DeleteMessage`** → the
+   pod's IAM role is missing `DeleteMessage` on that queue. This never
+   self-heals and is the reason this rule exists: the worker processes each
+   block, fails to delete it, and re-processes it forever. Fix the policy (the
+   queue's IRSA role lives in the infrastructure repo).
+3. **`ReceiptHandleIsInvalid`** → the receipt handle had already expired, i.e.
+   the handler outran the queue's visibility timeout. The pod is running, so
+   the boot-time `ValidateVisibilityTimeout` check passed and the *configured*
+   pair is fine — this is a handler that took longer than its budget in
+   practice. Check handler duration against `HandlerTimeout` and the queue's
+   visibility timeout.
+4. **`ThrottlingException` / `RequestThrottled`** → SQS throttling. Correlate
+   with a backfill or a mass rollout hammering the same queue.
+5. **`context deadline exceeded`** → the delete outlived `SettleTimeout` (5s),
+   which bounds a settle on the live path too. Check SQS latency on the AWS
+   dashboard.
+6. **Confirm the chain is stalling or looping** — the worker's own
+   blocks-processed counter (`<service>_blocks_processed_total`, name varies by
+   indexer) keeps advancing while that chain's persisted block height does not:
+   the same block is being handled over and over because its delete never
+   sticks. A flat counter instead means the group is simply blocked behind the
+   hidden message.
+
+### Common causes
+
+- IAM policy missing `sqs:DeleteMessage` on the worker's queue.
+- A handler that outlived the queue's visibility timeout, so its receipt handle
+  had expired before the delete went out.
+- SQS throttling under concurrent backfill load.
+- A queue recreated (or repointed) under a running pod, invalidating handles.
+
+### Verify recovery
+
+```promql
+sum by (service_name, chain, cluster) (
+  increase(sqs_message_settles_total{op="delete", status="failed", k8s_namespace_name="vector"}[30m])
+)
+```
+
+back to `0` or absent for the affected source, with
+`sqs_message_settles_total{op="delete", status="ok"}` advancing and that chain's
+block height moving again.
 
 ---

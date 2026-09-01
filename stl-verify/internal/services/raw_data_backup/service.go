@@ -93,7 +93,10 @@ type Config struct {
 	// Workers is the number of concurrent message processors.
 	Workers int
 
-	// BatchSize is how many messages to fetch at once (max 10).
+	// BatchSize is how many messages one receive may put in flight (max 10).
+	// SQS starts one visibility clock for all of them, so anything above Workers
+	// leaves the surplus queued against a clock that is already running. Zero
+	// uses Workers.
 	BatchSize int
 
 	// ChainExpectations maps chain IDs to their data expectations.
@@ -110,8 +113,8 @@ type Config struct {
 	CacheMissMaxRetries int
 
 	// HandlerTimeout bounds one message's processing, shutdown or not. It MUST
-	// stay under the queue's visibility timeout, which Run validates. Zero uses
-	// sqsutil.DefaultHandlerTimeout.
+	// stay under the queue's visibility timeout, which NewService validates.
+	// Zero uses sqsutil.DefaultHandlerTimeout.
 	HandlerTimeout time.Duration
 
 	// DrainTimeout is the grace a message already being processed at SIGTERM
@@ -128,10 +131,11 @@ type Config struct {
 
 // ConfigDefaults returns sensible defaults for the backup service.
 func ConfigDefaults() Config {
+	const workers = 4
 	return Config{
 		ChainID:             1,
-		Workers:             4,
-		BatchSize:           10,
+		Workers:             workers,
+		BatchSize:           workers,
 		CacheMissMaxRetries: 3,
 		Logger:              slog.Default(),
 	}
@@ -203,7 +207,7 @@ func NewService(
 		config.Workers = defaults.Workers
 	}
 	if config.BatchSize <= 0 {
-		config.BatchSize = defaults.BatchSize
+		config.BatchSize = config.Workers
 	}
 	if config.Logger == nil {
 		config.Logger = defaults.Logger
@@ -213,6 +217,10 @@ func NewService(
 	chainExpectations := config.ChainExpectations
 	if chainExpectations == nil {
 		chainExpectations = DefaultChainExpectations()
+	}
+
+	if err := validateVisibility(config, consumer); err != nil {
+		return nil, err
 	}
 
 	return &Service{
@@ -229,6 +237,19 @@ func NewService(
 	}, nil
 }
 
+// A misconfigured visibility timeout duplicates every message the pool
+// processes, so the worker refuses to start rather than serve on.
+func validateVisibility(config Config, consumer outbound.SQSConsumer) error {
+	return sqsutil.ValidateVisibilityTimeout(consumer.VisibilityTimeout(), config.HandlerTimeout, inFlightPerReceive(config))
+}
+
+// The pool works through a batch in rounds, so a round is what one visibility
+// clock has to cover.
+func inFlightPerReceive(config Config) int {
+	workers := max(config.Workers, 1)
+	return (config.BatchSize + workers - 1) / workers
+}
+
 // Run starts the backup service and blocks until the context is cancelled.
 // This binary runs Run directly rather than under lifecycle.Run, so the pod's
 // grace period is the only shutdown ceiling (TestShutdownPathFitsThePodGracePeriod).
@@ -238,10 +259,6 @@ func (s *Service) Run(ctx context.Context) error {
 		"workers", s.config.Workers,
 		"chainID", s.config.ChainID,
 	)
-
-	if err := sqsutil.ValidateVisibilityTimeout(s.consumer.VisibilityTimeout(), s.config.HandlerTimeout); err != nil {
-		s.logger.Error("SQS visibility timeout is misconfigured", "error", err)
-	}
 
 	// Create a channel for messages to process
 	msgCh := make(chan outbound.SQSMessage, s.config.Workers*2)

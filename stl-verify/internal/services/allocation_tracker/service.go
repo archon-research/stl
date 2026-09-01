@@ -143,14 +143,19 @@ func validateScopedEntriesAndProxies(entries []*TokenEntry, proxies []ProxyConfi
 func (s *Service) Start(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
+	loop := sqsutil.Config{
+		Consumer:     s.sqsConsumer,
+		MaxMessages:  s.config.MaxMessages,
+		PollInterval: s.config.PollInterval,
+		Logger:       s.logger,
+		ChainID:      s.config.ChainID,
+	}
+	if err := loop.Validate(); err != nil {
+		return err
+	}
+
 	s.wg.Go(func() {
-		sqsutil.RunLoop(s.ctx, sqsutil.Config{
-			Consumer:     s.sqsConsumer,
-			MaxMessages:  s.config.MaxMessages,
-			PollInterval: s.config.PollInterval,
-			Logger:       s.logger,
-			ChainID:      s.config.ChainID,
-		}, s.processBlock)
+		sqsutil.RunLoop(s.ctx, loop, s.processBlock)
 	})
 
 	s.logger.Info("started",

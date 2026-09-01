@@ -124,3 +124,22 @@ func TestRunDrainableValue_ReturnsTheWorkValue(t *testing.T) {
 		t.Errorf("expected the work's value, got %q", value)
 	}
 }
+
+// A zero Drain reads as permissive but arms an already-fired timer, so the
+// select can abandon work that has already returned.
+func TestRunDrainableValue_FloorsANonPositiveDrainBudget(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	value, outcome := RunDrainableValue(ctx, DrainBudget{Work: time.Second}, func(context.Context) (int, error) {
+		time.Sleep(10 * time.Millisecond)
+		return 7, nil
+	})
+
+	if outcome.Abandoned {
+		t.Fatalf("expected a zero drain budget floored, not work that succeeded abandoned: %v", outcome.Err)
+	}
+	if value != 7 {
+		t.Errorf("expected the completed work's value, got %d", value)
+	}
+}

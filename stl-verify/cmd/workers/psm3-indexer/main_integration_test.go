@@ -262,7 +262,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	err := run(context.Background(), []string{
 		"-db", "postgres://invalid:invalid@localhost:1/nonexistent?connect_timeout=1",
 		"-queue", "http://localhost/test-queue",
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error for bad connection config")
 	}
@@ -284,7 +284,7 @@ func TestRunIntegration_UnknownChainID(t *testing.T) {
 	err := run(context.Background(), []string{
 		"-db", dbURL,
 		"-queue", sqsServer.URL + "/queue/test",
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error for chain without a PSM3 deployment")
 	}
@@ -308,7 +308,7 @@ func TestRunIntegration_ImmutableMismatch(t *testing.T) {
 	err := run(context.Background(), []string{
 		"-db", dbURL,
 		"-queue", sqsServer.URL + "/queue/test",
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error when on-chain usds() mismatches config")
 	}
@@ -344,7 +344,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 			"-db", dbURL,
 			"-queue", sqsServer.URL + "/queue/test",
 			"-sweep-blocks", "1",
-		})
+		}, nil)
 	}()
 
 	deadline := time.After(15 * time.Second)
@@ -453,7 +453,7 @@ func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 			"-db", dbURL,
 			"-queue", sqsServer.URL + "/queue/test",
 			"-sweep-blocks", "1",
-		})
+		}, nil)
 	}()
 
 	deadline := time.After(15 * time.Second)

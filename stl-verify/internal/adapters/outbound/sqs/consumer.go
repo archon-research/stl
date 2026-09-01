@@ -45,9 +45,10 @@ type Config struct {
 	WaitTimeSeconds int32
 
 	// VisibilityTimeout is how long a message is hidden from other consumers
-	// after being received. It must exceed the worker per-message handler budget
-	// so a message is not redelivered while it is still being processed.
-	// Defaults to 180 seconds (see ConfigDefaults).
+	// after being received. SQS starts one clock for every message a receive
+	// returns, so it must cover all of them plus the shutdown drain and settles;
+	// sqsutil.ValidateVisibilityTimeout is the enforced form of that, checked at
+	// boot. Defaults to 180 seconds (see ConfigDefaults).
 	VisibilityTimeout int32
 
 	// BaseEndpoint is an optional override for the SQS endpoint.
@@ -59,9 +60,9 @@ type Config struct {
 func ConfigDefaults() Config {
 	return Config{
 		WaitTimeSeconds: maxLongPollSeconds,
-		// Must exceed the worker per-message handler budget
-		// (sqsutil.DefaultHandlerTimeout = 120s) so a message is not redelivered
-		// while its handler is still running.
+		// Covers one message per receive at the default handler budget plus the
+		// shutdown drain and settles (145s); consumer_defaults_test.go pins that
+		// against sqsutil.ValidateVisibilityTimeout rather than the literal.
 		VisibilityTimeout: 180,
 	}
 }
@@ -245,20 +246,27 @@ func visibilityBatchEntries(receiptHandles []string, visibility time.Duration) [
 	return entries
 }
 
-// An Id matching no handle fails the whole call rather than being dropped: the
-// caller counts releases per message, so it would read as a success.
+// An Id matching no handle is reported rather than dropped: the caller counts
+// releases per message, so a dropped refusal would read as a success. The
+// entries SQS did name travel with it — the batch was applied either way, and
+// failing them all would misreport every message it released.
 func refusalsByHandle(receiptHandles []string, failed []sqstypes.BatchResultErrorEntry) (map[string]error, error) {
 	if len(failed) == 0 {
 		return nil, nil
 	}
 	refusals := make(map[string]error, len(failed))
+	var unattributable []string
 	for _, entry := range failed {
 		index, err := strconv.Atoi(aws.ToString(entry.Id))
 		if err != nil || index < 0 || index >= len(receiptHandles) {
-			return nil, fmt.Errorf("failed to change message visibility: SQS refused entry %q, which matches no handle in the request",
-				aws.ToString(entry.Id))
+			unattributable = append(unattributable, aws.ToString(entry.Id))
+			continue
 		}
 		refusals[receiptHandles[index]] = fmt.Errorf("%s: %s", aws.ToString(entry.Code), aws.ToString(entry.Message))
+	}
+	if len(unattributable) > 0 {
+		return refusals, fmt.Errorf("failed to change message visibility: SQS refused entries %v, which match no handle in the request",
+			unattributable)
 	}
 	return refusals, nil
 }

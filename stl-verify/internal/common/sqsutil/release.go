@@ -5,11 +5,6 @@ import (
 	"log/slog"
 	"slices"
 
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
-
-	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -21,7 +16,7 @@ func ReleaseMessages(ctx context.Context, consumer outbound.SQSConsumer, logger 
 		return
 	}
 
-	recorder := newReleaseRecorder(logger, chainID)
+	recorder := newSettleRecorder(logger, chainID)
 
 	for chunk := range slices.Chunk(messages, outbound.MaxVisibilityBatchSize) {
 		releaseChunk(ctx, consumer, logger, recorder, chunk)
@@ -35,7 +30,7 @@ func releaseChunk(
 	parent context.Context,
 	consumer outbound.SQSConsumer,
 	logger *slog.Logger,
-	recorder releaseRecorder,
+	recorder settleRecorder,
 	messages []outbound.SQSMessage,
 ) {
 	ctx, cancel := CleanupContext(parent)
@@ -49,77 +44,37 @@ func releaseChunk(
 
 	refusals, err := consumer.ChangeMessageVisibilityBatch(ctx, handles, 0)
 	if err != nil {
-		refusals = make(map[string]error, len(handles))
-		for _, handle := range handles {
-			refusals[handle] = err
-		}
+		refusals = refusalsForCallFailure(logger, handles, refusals, err)
 	}
 
 	for _, msg := range messages {
-		recorder.record(ctx, releaseOutcome(logger, msg, refusals[msg.ReceiptHandle]))
+		recorder.record(ctx, settleOpRelease, releaseOutcome(logger, msg, refusals[msg.ReceiptHandle]))
 	}
 }
 
-func releaseOutcome(logger *slog.Logger, msg outbound.SQSMessage, err error) string {
-	if err == nil {
-		return releaseStatusReleased
+// Refusals alongside the error mean the batch was applied, so only the handles
+// it names stayed hidden; a nil map means the call itself never landed.
+func refusalsForCallFailure(logger *slog.Logger, handles []string, refusals map[string]error, err error) map[string]error {
+	if refusals != nil {
+		logger.Error("releasing in-flight messages reported a refusal it could not attribute", "error", err)
+		return refusals
 	}
-	logger.Warn("failed to release in-flight message; it stays hidden until the visibility timeout expires",
-		"messageID", msg.MessageID,
-		"error", err)
-	return releaseStatusFailed
+	failed := make(map[string]error, len(handles))
+	for _, handle := range handles {
+		failed[handle] = err
+	}
+	return failed
+}
+
+func releaseOutcome(logger *slog.Logger, msg outbound.SQSMessage, err error) string {
+	if err != nil {
+		logger.Warn("failed to release in-flight message; it stays hidden until the visibility timeout expires",
+			"messageID", msg.MessageID,
+			"error", err)
+	}
+	return settleStatus(err)
 }
 
 func releaseMessages(ctx context.Context, cfg Config, messages []outbound.SQSMessage) {
 	ReleaseMessages(ctx, cfg.Consumer, cfg.Logger, cfg.ChainID, messages)
-}
-
-const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
-
-// The OTel-to-Prometheus exporter normalises this to sqs_message_releases_total.
-const releaseCounterName = "sqs.message.releases.total"
-
-const (
-	releaseStatusReleased = "released"
-	releaseStatusFailed   = "failed"
-)
-
-// The counter is resolved per ReleaseMessages call, not once at startup:
-// releases reach this package through free functions, so there is no
-// constructor to build it in, and they only run on the settle/shutdown paths.
-type releaseRecorder struct {
-	releases metric.Int64Counter
-	chain    attribute.KeyValue
-}
-
-func newReleaseRecorder(logger *slog.Logger, chainID int64) releaseRecorder {
-	releases, err := otel.GetMeterProvider().Meter(instrumentationName).Int64Counter(
-		releaseCounterName,
-		metric.WithDescription("SQS messages handed back to the queue during settle/shutdown, by outcome"),
-	)
-	if err != nil {
-		// Metrics must never break the release path.
-		logger.Error("building "+releaseCounterName+" counter; release metrics disabled", "error", err)
-		return releaseRecorder{}
-	}
-	return releaseRecorder{releases: releases, chain: chainAttribute(logger, chainID)}
-}
-
-// The chain name, not the ID: every sibling instrument labels `chain` that way
-// and the backup-worker alerts group by it.
-func chainAttribute(logger *slog.Logger, chainID int64) attribute.KeyValue {
-	name, err := entity.ChainName(chainID)
-	if err != nil {
-		logger.Error("resolving the chain name for "+releaseCounterName,
-			"chainID", chainID,
-			"error", err)
-	}
-	return attribute.String("chain", name)
-}
-
-func (r releaseRecorder) record(ctx context.Context, status string) {
-	if r.releases == nil {
-		return
-	}
-	r.releases.Add(ctx, 1, metric.WithAttributes(r.chain, attribute.String("status", status)))
 }

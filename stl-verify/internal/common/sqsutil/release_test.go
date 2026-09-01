@@ -12,92 +12,29 @@ import (
 	"testing"
 	"time"
 
-	"go.opentelemetry.io/otel"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
-
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
-
-func collectReleaseCounter(t *testing.T, reader sdkmetric.Reader) map[string]int64 {
-	t.Helper()
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("collecting metrics: %v", err)
-	}
-	out := make(map[string]int64)
-	for _, scope := range rm.ScopeMetrics {
-		for _, m := range scope.Metrics {
-			if m.Name != releaseCounterName {
-				continue
-			}
-			sum, ok := m.Data.(metricdata.Sum[int64])
-			if !ok {
-				t.Fatalf("metric %q is %T, want metricdata.Sum[int64]", releaseCounterName, m.Data)
-			}
-			for _, dp := range sum.DataPoints {
-				status, _ := dp.Attributes.Value("status")
-				out[status.AsString()] = dp.Value
-			}
-		}
-	}
-	return out
-}
-
-func collectReleaseChains(t *testing.T, reader sdkmetric.Reader) []string {
-	t.Helper()
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("collecting metrics: %v", err)
-	}
-	var chains []string
-	for _, scope := range rm.ScopeMetrics {
-		for _, m := range scope.Metrics {
-			if m.Name != releaseCounterName {
-				continue
-			}
-			for _, dp := range m.Data.(metricdata.Sum[int64]).DataPoints {
-				chain, _ := dp.Attributes.Value("chain")
-				chains = append(chains, chain.AsString())
-			}
-		}
-	}
-	return chains
-}
-
-func installManualMeterProvider(t *testing.T) sdkmetric.Reader {
-	t.Helper()
-	reader := sdkmetric.NewManualReader()
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	previous := otel.GetMeterProvider()
-	otel.SetMeterProvider(mp)
-	t.Cleanup(func() {
-		otel.SetMeterProvider(previous)
-		_ = mp.Shutdown(context.Background())
-	})
-	return reader
-}
 
 func TestReleaseMessages_CountsEveryReleaseByOutcome(t *testing.T) {
 	tests := []struct {
 		name          string
 		visibilityErr error
 		refusals      map[string]error
-		want          map[string]int64
+		want          map[settleKey]int64
 	}{
 		{
 			name: "successful releases",
-			want: map[string]int64{releaseStatusReleased: 2},
+			want: map[settleKey]int64{{op: "release", status: "ok"}: 2},
 		},
 		{
 			name:          "refused releases",
 			visibilityErr: errors.New("AccessDenied: ChangeMessageVisibility"),
-			want:          map[string]int64{releaseStatusFailed: 2},
+			want:          map[settleKey]int64{{op: "release", status: "failed"}: 2},
 		},
 		{
 			name:     "one entry of the batch refused",
 			refusals: map[string]error{"h2": errors.New("ReceiptHandleIsInvalid")},
-			want:     map[string]int64{releaseStatusReleased: 1, releaseStatusFailed: 1},
+			want:     map[settleKey]int64{{op: "release", status: "ok"}: 1, {op: "release", status: "failed"}: 1},
 		},
 	}
 	for _, tt := range tests {
@@ -111,8 +48,8 @@ func TestReleaseMessages_CountsEveryReleaseByOutcome(t *testing.T) {
 
 			ReleaseMessages(context.Background(), consumer, slog.Default(), 1, messages)
 
-			if got := collectReleaseCounter(t, reader); !maps.Equal(got, tt.want) {
-				t.Errorf("%s = %v, want %v", releaseCounterName, got, tt.want)
+			if got := collectSettleCounter(t, reader); !maps.Equal(got, tt.want) {
+				t.Errorf("settles = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -146,7 +83,7 @@ func TestReleaseMessages_BoundsTheDetachedReleaseByTheCleanupBudget(t *testing.T
 	consumer := &mockConsumer{}
 
 	ReleaseMessages(ctx, consumer, slog.Default(), 1, heldMessages(1))
-	latest := time.Now().Add(ShutdownCleanupTimeout)
+	latest := time.Now().Add(SettleTimeout)
 
 	calls := consumer.releaseCalls()
 	if len(calls) != 1 {
@@ -157,7 +94,7 @@ func TestReleaseMessages_BoundsTheDetachedReleaseByTheCleanupBudget(t *testing.T
 	}
 	if calls[0].deadline.After(latest) {
 		t.Errorf("expected the release deadline within %s, got %s past it",
-			ShutdownCleanupTimeout, calls[0].deadline.Sub(latest))
+			SettleTimeout, calls[0].deadline.Sub(latest))
 	}
 }
 
@@ -185,7 +122,7 @@ func TestReleaseMessages_CountsAgainstTheChainName(t *testing.T) {
 
 	ReleaseMessages(context.Background(), consumer, slog.Default(), 42161, heldMessages(1))
 
-	if got := collectReleaseChains(t, reader); !slices.Equal(got, []string{"arbitrum"}) {
+	if got := collectSettleChains(t, reader); !slices.Equal(got, []string{"arbitrum"}) {
 		t.Errorf("expected the release counted against the chain name, got %v", got)
 	}
 }
@@ -196,4 +133,21 @@ func heldMessages(count int) []outbound.SQSMessage {
 		messages = append(messages, makeMsg(strconv.Itoa(i), fmt.Sprintf("h%d", i), blockEvent(int64(100+i))))
 	}
 	return messages
+}
+
+// A refusal map alongside the error means SQS applied the batch, so the handles
+// it did not name were genuinely released.
+func TestReleaseMessages_DoesNotFailTheWholeChunkForOneUnattributableRefusal(t *testing.T) {
+	reader := installManualMeterProvider(t)
+	consumer := &mockConsumer{
+		visibilityErr:     errors.New("SQS refused entries [99], which match no handle in the request"),
+		visibilityPartial: map[string]error{"h1": errors.New("ReceiptHandleIsInvalid")},
+	}
+
+	ReleaseMessages(context.Background(), consumer, slog.Default(), 1, heldMessages(3))
+
+	want := map[settleKey]int64{{op: "release", status: "ok"}: 2, {op: "release", status: "failed"}: 1}
+	if got := collectSettleCounter(t, reader); !maps.Equal(got, want) {
+		t.Errorf("settles = %v, want %v", got, want)
+	}
 }

@@ -111,7 +111,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 			"-queue", "http://localhost/test-queue",
 			"-db", dbURL,
 			"-redis", sharedRedisAddr,
-		})
+		}, nil)
 	}()
 
 	select {

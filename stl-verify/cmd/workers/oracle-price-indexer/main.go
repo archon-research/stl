@@ -48,7 +48,7 @@ func init() {
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 
-	err := run(ctx, os.Args[1:])
+	err := run(ctx, os.Args[1:], lifecycle.ForceExitAfter(lifecycle.ShutdownTailBudget))
 	cancel()
 	if err != nil {
 		slog.Error("fatal", "error", err)
@@ -130,7 +130,7 @@ func parseConfig(args []string) (cliConfig, error) {
 	return cfg, nil
 }
 
-func run(ctx context.Context, args []string) error {
+func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	cfg, err := parseConfig(args)
 	if err != nil {
 		return err
@@ -230,7 +230,7 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
-	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "oracle-price")
+	archiveWrap, _, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "oracle-price")
 	if err != nil {
 		return err
 	}
@@ -273,5 +273,5 @@ func run(ctx context.Context, args []string) error {
 	}
 	service.WithTelemetry(oracleTelemetry)
 
-	return lifecycle.Run(ctx, logger, service)
+	return lifecycle.RunWithTimeoutGuard(ctx, logger, onShutdownTimeout, service)
 }

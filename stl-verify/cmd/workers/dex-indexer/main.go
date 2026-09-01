@@ -85,13 +85,18 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("building %s handler: %w", f.Kind(), err)
 	}
 
-	bp := dexconsumer.NewBlockProcessor(deps.CacheReader, deps.DexTelemetry, handler)
-	sqsutil.RunLoop(ctx, sqsutil.Config{
+	loop := sqsutil.Config{
 		Consumer:     deps.SQSConsumer,
 		MaxMessages:  cfg.MaxMessages,
 		PollInterval: 1 * time.Second,
 		Logger:       deps.Logger,
 		ChainID:      cfg.ChainID,
-	}, bp.ProcessBlockEvent)
+	}
+	if err := loop.Validate(); err != nil {
+		return err
+	}
+
+	bp := dexconsumer.NewBlockProcessor(deps.CacheReader, deps.DexTelemetry, handler)
+	sqsutil.RunLoop(ctx, loop, bp.ProcessBlockEvent)
 	return nil
 }

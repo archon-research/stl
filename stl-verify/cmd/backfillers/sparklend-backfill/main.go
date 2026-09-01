@@ -217,7 +217,7 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("creating multicall client: %w", err)
 	}
-	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "sparklend-backfill")
+	archiveWrap, _, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "sparklend-backfill")
 	if err != nil {
 		return err
 	}

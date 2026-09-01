@@ -72,7 +72,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 		"-queue", "http://localhost/test-queue",
 		"-redis", "localhost:6379",
 		"-db", "postgres://invalid:invalid@localhost:1/nonexistent?connect_timeout=1",
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error for bad connection config")
 	}
@@ -124,7 +124,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 			"-queue", "http://localhost/test-queue",
 			"-db", dbURL,
 			"-redis", sharedRedisAddr,
-		})
+		}, nil)
 	}()
 
 	// Wait for the service to start (SQS ReceiveMessage call indicates it's polling)
@@ -229,7 +229,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 			"-queue", "http://localhost/test-queue",
 			"-db", dbURL,
 			"-redis", sharedRedisAddr,
-		})
+		}, nil)
 	}()
 
 	select {

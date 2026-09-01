@@ -18,6 +18,8 @@ type DrainBudget struct {
 
 	// Drain bounds how long work already running when ctx is cancelled may keep
 	// going. Past it the caller must hand back whatever message it was holding.
+	// Zero uses DefaultDrainTimeout: an unbounded value would park shutdown, and
+	// a zero one would abandon work that has already succeeded.
 	Drain time.Duration
 }
 
@@ -84,6 +86,9 @@ func drainWork[T any](
 	done <-chan workResult[T],
 ) (T, DrainOutcome) {
 	var zero T
+	if budget <= 0 {
+		budget = DefaultDrainTimeout
+	}
 	drain := time.NewTimer(budget)
 	defer drain.Stop()
 

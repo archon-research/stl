@@ -48,18 +48,22 @@ func Enabled() bool {
 // so callers can apply the returned Wrap unconditionally.
 func identityWrap(inner outbound.Multicaller) outbound.Multicaller { return inner }
 
-// Bootstrap returns the archiving Wrap and a drain func for a worker entrypoint.
-// When ARCHIVE_SC_CALLS is unset the Wrap is the identity and drain is a no-op,
-// so callers wire it unconditionally:
+// Bootstrap returns the archiving Wrap, a reusable wait and the process-exit
+// drain for a worker entrypoint. When ARCHIVE_SC_CALLS is unset the Wrap is the
+// identity and both funcs are no-ops, so callers wire them unconditionally:
 //
-//	wrap, drain, err := archivingwire.Bootstrap(ctx, logger, chainID, buildID, "source")
+//	wrap, wait, drain, err := archivingwire.Bootstrap(ctx, logger, chainID, buildID, "source")
 //	if err != nil { return err }
 //	defer drain()
 //	mc = wrap(mc)
 //
+// wait blocks on the writes in flight and leaves archiving usable afterwards, so
+// a unit of work that ends (a Temporal activity) can wait out its own writes.
+// drain shuts archiving for good and belongs at the process's exit, once.
+//
 // This keeps the enable/build/log/drain wiring in one place instead of repeating
 // it across every cmd binary.
-func Bootstrap(ctx context.Context, logger *slog.Logger, chainID, buildID int64, source string) (Wrap, func(), error) {
+func Bootstrap(ctx context.Context, logger *slog.Logger, chainID, buildID int64, source string) (Wrap, func(), func(), error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -74,38 +78,39 @@ func Bootstrap(ctx context.Context, logger *slog.Logger, chainID, buildID int64,
 			}
 		}
 		logger.Info("raw SC call archiving disabled")
-		return identityWrap, func() {}, nil
+		return identityWrap, func() {}, func() {}, nil
 	}
-	wrap, drain, err := NewS3WrapFromEnv(ctx, logger, chainID, buildID, source)
+	wrap, wait, drain, err := NewS3WrapFromEnv(ctx, logger, chainID, buildID, source)
 	if err != nil {
-		return nil, nil, fmt.Errorf("wiring SC call archiver: %w", err)
+		return nil, nil, nil, fmt.Errorf("wiring SC call archiver: %w", err)
 	}
 	logger.Info("raw SC call archiving enabled", "bucket", env.Get(EnvBucket, ""))
-	return wrap, drain, nil
+	return wrap, wait, drain, nil
 }
 
-// NewS3WrapFromEnv builds the archiving wrap from env config. The returned
-// drain func blocks until all in-flight archive writes finish or DrainTimeout
-// expires; call it during graceful shutdown. All decorators produced by the
-// wrap share one drain gate, so a single drain() covers them all.
-func NewS3WrapFromEnv(ctx context.Context, logger *slog.Logger, chainID, buildID int64, source string) (Wrap, func(), error) {
+// NewS3WrapFromEnv builds the archiving wrap from env config, plus the two
+// shutdown handles that go with it. Both block until the writes in flight
+// finish or DrainTimeout expires: wait leaves archiving usable afterwards,
+// drain refuses every later write and counts the ones it kills as lost. All
+// decorators produced by the wrap share one drain gate, so one pair covers them.
+func NewS3WrapFromEnv(ctx context.Context, logger *slog.Logger, chainID, buildID int64, source string) (Wrap, func(), func(), error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
 	bucket := env.Get(EnvBucket, "")
 	if bucket == "" {
-		return nil, nil, fmt.Errorf("%s is required when %s=true", EnvBucket, EnvFlag)
+		return nil, nil, nil, fmt.Errorf("%s is required when %s=true", EnvBucket, EnvFlag)
 	}
 
 	chainName, err := entity.ChainName(chainID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolving chain name for archiving metrics: %w", err)
+		return nil, nil, nil, fmt.Errorf("resolving chain name for archiving metrics: %w", err)
 	}
 
 	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{StaticCredentialsFromEnv: true})
 	if err != nil {
-		return nil, nil, fmt.Errorf("loading AWS config: %w", err)
+		return nil, nil, nil, fmt.Errorf("loading AWS config: %w", err)
 	}
 
 	var writer outbound.S3Writer
@@ -120,10 +125,10 @@ func NewS3WrapFromEnv(ctx context.Context, logger *slog.Logger, chainID, buildID
 
 	archiver, err := s3adapter.NewCallArchiver(writer, bucket, chainName, logger, nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("creating call archiver: %w", err)
+		return nil, nil, nil, fmt.Errorf("creating call archiver: %w", err)
 	}
 
-	gate := archiving.NewDrainGate()
+	gate := archiving.NewDrainGate(logger)
 	wrap := func(inner outbound.Multicaller) outbound.Multicaller {
 		return archiving.NewMulticaller(inner, archiver, archiving.Config{
 			Source:  source,
@@ -134,15 +139,34 @@ func NewS3WrapFromEnv(ctx context.Context, logger *slog.Logger, chainID, buildID
 			Logger:  logger,
 		})
 	}
-	return wrap, newDrain(gate, logger), nil
+	writes := archiving.NewWriteCounter(nil, chainName, source, logger)
+	return wrap, newWait(gate, logger, DrainTimeout), newDrain(gate, logger, writes, DrainTimeout), nil
 }
 
-func newDrain(gate *archiving.DrainGate, logger *slog.Logger) func() {
+// newWait waits out the writes in flight without closing the gate, so the next
+// unit of work on the same process still archives. The writes it leaves running
+// keep going and still record their own outcome.
+func newWait(gate *archiving.DrainGate, logger *slog.Logger, budget time.Duration) func() {
 	return func() {
-		if finished, outstanding := gate.Drain(DrainTimeout); !finished {
-			logger.Warn("raw SC call archive drain budget expired; abandoning in-flight writes",
-				"budget", DrainTimeout,
+		if finished, outstanding := gate.WaitBounded(budget); !finished {
+			logger.Warn("raw SC call archive writes outlasted the wait budget; leaving them running",
+				"budget", budget,
 				"outstanding", outstanding)
 		}
+	}
+}
+
+func newDrain(gate *archiving.DrainGate, logger *slog.Logger, writes *archiving.WriteCounter, budget time.Duration) func() {
+	return func() {
+		finished, outstanding := gate.Drain(budget)
+		if finished {
+			return
+		}
+		// These batches die with the process, after their queue message was
+		// deleted, and never reach the success or error count.
+		writes.Record(archiving.WriteStatusLost, int64(outstanding))
+		logger.Warn("raw SC call archive drain budget expired; abandoning in-flight writes",
+			"budget", budget,
+			"outstanding", outstanding)
 	}
 }

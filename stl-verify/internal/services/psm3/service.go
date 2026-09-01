@@ -103,7 +103,7 @@ func NewService(
 		config.SweepEveryNBlocks = defaultSweepEveryNBlocks
 	}
 	if config.MaxMessages == 0 {
-		config.MaxMessages = 10
+		config.MaxMessages = 1
 	}
 	if config.PollInterval == 0 {
 		config.PollInterval = 100 * time.Millisecond
@@ -139,14 +139,19 @@ func (s *Service) Start(ctx context.Context) error {
 	s.blocksSinceSweep = s.config.SweepEveryNBlocks - 1 // first block triggers immediate read
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
+	loop := sqsutil.Config{
+		Consumer:     s.sqsConsumer,
+		MaxMessages:  s.config.MaxMessages,
+		PollInterval: s.config.PollInterval,
+		Logger:       s.logger,
+		ChainID:      s.config.ChainID,
+	}
+	if err := loop.Validate(); err != nil {
+		return err
+	}
+
 	s.wg.Go(func() {
-		sqsutil.RunLoop(s.ctx, sqsutil.Config{
-			Consumer:     s.sqsConsumer,
-			MaxMessages:  s.config.MaxMessages,
-			PollInterval: s.config.PollInterval,
-			Logger:       s.logger,
-			ChainID:      s.config.ChainID,
-		}, s.processBlock)
+		sqsutil.RunLoop(s.ctx, loop, s.processBlock)
 	})
 
 	s.logger.Info("psm3 service started",

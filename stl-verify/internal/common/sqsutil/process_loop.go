@@ -17,8 +17,14 @@ type BlockEventHandler func(ctx context.Context, event outbound.BlockEvent) erro
 
 // Config holds configuration for the SQS processing loop.
 type Config struct {
-	Consumer     outbound.SQSConsumer
-	MaxMessages  int
+	Consumer outbound.SQSConsumer
+
+	// MaxMessages is how many messages one receive may put in flight. The loop
+	// settles them one at a time against a visibility clock SQS starts for the
+	// whole batch, so raising it multiplies the visibility timeout Validate
+	// demands. Zero means one.
+	MaxMessages int
+
 	PollInterval time.Duration
 	Logger       *slog.Logger
 
@@ -30,11 +36,12 @@ type Config struct {
 	// elapses the handler's context is cancelled; the handler is expected to
 	// return promptly with an error, and the message is left undeleted so SQS
 	// redelivers it (and eventually DLQs it via the queue's redrive policy).
-	// It MUST be less than the queue's visibility timeout so a message is not
-	// redelivered while its handler is still running. Zero uses
-	// DefaultHandlerTimeout. A worker must never run a handler unbounded: an
-	// unbounded handler that blocks on a stuck dependency (e.g. a Postgres lock
-	// wait) parks the poll loop forever and silently stalls the queue.
+	// Validate rejects a queue whose visibility timeout cannot cover every
+	// message of a receive at this budget, so a message is not redelivered while
+	// its handler is still running. Zero uses DefaultHandlerTimeout. A worker
+	// must never run a handler unbounded: an unbounded handler that blocks on a
+	// stuck dependency (e.g. a Postgres lock wait) parks the poll loop forever
+	// and silently stalls the queue.
 	HandlerTimeout time.Duration
 
 	// DrainTimeout is the grace a handler already running at SIGTERM gets to
@@ -43,12 +50,17 @@ type Config struct {
 	DrainTimeout time.Duration
 }
 
-// Validate checks that required fields are set.
+// Validate checks the config at boot: a worker whose visibility timeout cannot
+// cover a receive must refuse to start rather than duplicate every message it
+// processes.
 func (c Config) Validate() error {
 	if c.ChainID == 0 {
 		return fmt.Errorf("sqsutil.Config: ChainID must be set")
 	}
-	return nil
+	if c.Consumer == nil {
+		return nil
+	}
+	return ValidateVisibilityTimeout(c.Consumer.VisibilityTimeout(), c.HandlerTimeout, c.MaxMessages)
 }
 
 // DefaultHandlerTimeout bounds a message handler when Config.HandlerTimeout is
@@ -70,10 +82,6 @@ func (c Config) handlerTimeout() time.Duration {
 // lifecycle.ShutdownTimeout; lifecycle's shutdown_budget_test.go asserts that.
 const DefaultDrainTimeout = 15 * time.Second
 
-// ShutdownCleanupTimeout bounds one delete/release call that settles a message
-// after shutdown cancelled the parent context.
-const ShutdownCleanupTimeout = 5 * time.Second
-
 func (c Config) drainTimeout() time.Duration {
 	if c.DrainTimeout > 0 {
 		return c.DrainTimeout
@@ -81,56 +89,63 @@ func (c Config) drainTimeout() time.Duration {
 	return DefaultDrainTimeout
 }
 
-// ValidateVisibilityTimeout returns an error if the SQS visibility timeout does
-// not strictly exceed the per-message handler budget. If it does not, a message
-// can be redelivered while its handler is still running (duplicate processing /
-// re-entrant lock contention). handlerTimeout <= 0 means DefaultHandlerTimeout.
-// Callers building an SQS consumer should validate their configured visibility
-// timeout against the handler budget they pass to RunLoop.
-func ValidateVisibilityTimeout(visibilityTimeout, handlerTimeout time.Duration) error {
+// ValidateVisibilityTimeout returns an error unless the SQS visibility timeout
+// strictly exceeds the wall time a whole receive can take. SQS starts one
+// visibility clock for every message it hands back, the loop settles them
+// serially, and shutdown adds a drain plus the two settle calls that follow it;
+// a timeout below that sum lets a message be redelivered while its handler is
+// still running (duplicate processing / re-entrant lock contention).
+// handlerTimeout <= 0 means DefaultHandlerTimeout, inFlightPerReceive <= 0 means
+// one, and the drain is budgeted at DefaultDrainTimeout.
+func ValidateVisibilityTimeout(visibilityTimeout, handlerTimeout time.Duration, inFlightPerReceive int) error {
 	budget := handlerTimeout
 	if budget <= 0 {
 		budget = DefaultHandlerTimeout
 	}
-	if visibilityTimeout <= budget {
-		return fmt.Errorf("sqsutil: SQS visibility timeout %s must exceed the handler budget %s, "+
-			"otherwise a message can be redelivered while its handler is still running", visibilityTimeout, budget)
+	inFlight := max(inFlightPerReceive, 1)
+	needed := time.Duration(inFlight)*budget + DefaultDrainTimeout + 2*SettleTimeout
+	if visibilityTimeout <= needed {
+		return fmt.Errorf("sqsutil: SQS visibility timeout %s must exceed %s, the wall time %d message(s) per receive "+
+			"take at a %s handler budget plus the %s shutdown drain and two %s settle calls, "+
+			"otherwise a message can be redelivered while its handler is still running",
+			visibilityTimeout, needed, inFlight, budget, DefaultDrainTimeout, SettleTimeout)
 	}
 	return nil
 }
 
-// RunLoop polls SQS on a ticker interval and delegates each parsed BlockEvent
-// to the handler. It blocks until ctx is cancelled.
+// RunLoop polls SQS and delegates each parsed BlockEvent to the handler. It
+// blocks until ctx is cancelled.
 //
-// At startup it logs an error (but still runs) if the consumer's visibility
-// timeout does not exceed the handler budget: that misconfiguration lets a
-// message be redelivered while its handler is still running.
+// A receive that returned messages is followed immediately by the next one:
+// PollInterval paces an idle queue, and pacing a backlog by it instead would
+// cap catch-up at one receive per interval.
 func RunLoop(ctx context.Context, cfg Config, handler BlockEventHandler) {
-	if cfg.Consumer != nil {
-		if err := ValidateVisibilityTimeout(cfg.Consumer.VisibilityTimeout(), cfg.HandlerTimeout); err != nil {
-			cfg.Logger.Error("SQS visibility timeout is misconfigured", "error", err)
-		}
-	}
-
-	ticker := time.NewTicker(cfg.PollInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if err := ProcessMessages(ctx, cfg, handler); err != nil {
-				if isShutdownCancellation(ctx, err) {
-					return
-				}
-				cfg.Logger.Error("error processing messages", "error", err)
-			}
-			// A batch that drained and released cleanly returns no error.
-			if ctx.Err() != nil {
+	for ctx.Err() == nil {
+		received, err := ProcessMessages(ctx, cfg, handler)
+		if err != nil {
+			if isShutdownCancellation(ctx, err) {
 				return
 			}
+			cfg.Logger.Error("error processing messages", "error", err)
 		}
+		// A batch that drained and released cleanly returns no error.
+		if ctx.Err() != nil {
+			return
+		}
+		if received == 0 && !waitBeforeNextPoll(ctx, cfg.PollInterval) {
+			return
+		}
+	}
+}
+
+func waitBeforeNextPoll(ctx context.Context, interval time.Duration) bool {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -148,23 +163,25 @@ func isShutdownCancellation(ctx context.Context, err error) bool {
 // Cancelling ctx (SIGTERM) drains the running handler rather than killing it,
 // and every message the shutdown leaves unfinished is released to the successor.
 //
-// Returns a joined error for any failures.
+// It reports how many messages the receive returned, so a caller can poll again
+// straight away while the queue still has a backlog, plus a joined error for any
+// failures.
 func ProcessMessages(
 	ctx context.Context,
 	cfg Config,
 	handler BlockEventHandler,
-) error {
+) (received int, err error) {
 	if err := cfg.Validate(); err != nil {
-		return fmt.Errorf("invalid config: %w", err)
+		return 0, fmt.Errorf("invalid config: %w", err)
 	}
 
 	messages, err := cfg.Consumer.ReceiveMessages(ctx, cfg.MaxMessages)
 	if err != nil {
-		return fmt.Errorf("receiving messages: %w", err)
+		return 0, fmt.Errorf("receiving messages: %w", err)
 	}
 
 	if len(messages) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	cfg.Logger.Info("received messages", "count", len(messages))
@@ -183,7 +200,7 @@ func ProcessMessages(
 	}
 	releaseUnsettledOnShutdown(ctx, cfg, inFlight)
 
-	return errors.Join(errs...)
+	return len(messages), errors.Join(errs...)
 }
 
 // releaseUnsettledOnShutdown releases poison pills too: a visibility change
@@ -266,21 +283,14 @@ func deleteProcessedMessage(ctx context.Context, cfg Config, msg outbound.SQSMes
 func deleteSettledMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage) error {
 	cleanupCtx, cancel := CleanupContext(ctx)
 	defer cancel()
-	if err := cfg.Consumer.DeleteMessage(cleanupCtx, msg.ReceiptHandle); err != nil {
+
+	err := cfg.Consumer.DeleteMessage(cleanupCtx, msg.ReceiptHandle)
+	newSettleRecorder(cfg.Logger, cfg.ChainID).record(cleanupCtx, settleOpDelete, settleStatus(err))
+	if err != nil {
 		cfg.Logger.Error("failed to delete message",
 			"messageID", msg.MessageID,
 			"error", err)
 		return fmt.Errorf("deleting message %s: %w", msg.MessageID, err)
 	}
 	return nil
-}
-
-// CleanupContext returns the context for the queue call that settles a message.
-// Once shutdown cancelled the parent, that call must still go out, so it runs
-// detached and bounded by ShutdownCleanupTimeout instead.
-func CleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	if ctx.Err() == nil {
-		return context.WithCancel(ctx)
-	}
-	return context.WithTimeout(context.WithoutCancel(ctx), ShutdownCleanupTimeout)
 }

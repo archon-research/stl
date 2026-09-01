@@ -1677,8 +1677,8 @@ func TestShutdownPathFitsThePodGracePeriod(t *testing.T) {
 	// failed delete), and the held set spans two release chunks.
 	shutdownPath := max(
 		sqsadapter.PollBudget(sqsadapter.ConfigDefaults().WaitTimeSeconds),
-		sqsutil.DefaultDrainTimeout+3*sqsutil.ShutdownCleanupTimeout,
-	) + 2*sqsutil.ShutdownCleanupTimeout
+		sqsutil.DefaultDrainTimeout+3*sqsutil.SettleTimeout,
+	) + 2*sqsutil.SettleTimeout
 	chain := shutdownPath + telemetry.ShutdownFlushTimeout
 
 	if chain >= lifecycle.PodTerminationGracePeriod {
@@ -1868,7 +1868,9 @@ func TestRun_ReleasesBufferedMessagesNeverStartedOnShutdown(t *testing.T) {
 	consumer := newMockSQSConsumer()
 	cache := newMockBlockCache()
 	writer := newMockS3Writer()
-	svc, _ := shutdownTestService(t, Config{Workers: 1, BatchSize: 3}, consumer, cache, writer)
+	config := Config{Workers: 1, BatchSize: 3}
+	consumer.visibilityTimeout = visibilityCovering(config)
+	svc, _ := shutdownTestService(t, config, consumer, cache, writer)
 
 	for _, block := range []int64{100, 101, 102} {
 		_ = cache.SetBlock(context.Background(), 1, block, 0, json.RawMessage(`{}`))
@@ -1911,7 +1913,9 @@ func TestRun_ReleasesTheTailItNeverDispatchedOnShutdown(t *testing.T) {
 	consumer := newMockSQSConsumer()
 	cache := newMockBlockCache()
 	writer := newMockS3Writer()
-	svc, _ := shutdownTestService(t, Config{Workers: 1, BatchSize: 6}, consumer, cache, writer)
+	config := Config{Workers: 1, BatchSize: 6}
+	consumer.visibilityTimeout = visibilityCovering(config)
+	svc, _ := shutdownTestService(t, config, consumer, cache, writer)
 
 	_ = cache.SetBlock(context.Background(), 1, 100, 0, json.RawMessage(`{}`))
 	batch := make([]outbound.SQSMessage, 0, 6)
@@ -2285,14 +2289,19 @@ func TestRun_MultipleWorkersProcessConcurrently(t *testing.T) {
 	cache := newMockBlockCache()
 	writer := newMockS3Writer()
 
-	svc, _ := NewService(Config{
+	config := Config{
 		ChainID:           1,
 		Bucket:            "test-bucket",
 		Workers:           4,
 		BatchSize:         10,
 		ChainExpectations: blockOnlyExpectations(),
 		Logger:            testutil.DiscardLogger(),
-	}, consumer, cache, writer, newMockDeadLetterPublisher(), newMockBlockchainClient())
+	}
+	consumer.visibilityTimeout = visibilityCovering(config)
+	svc, err := NewService(config, consumer, cache, writer, newMockDeadLetterPublisher(), newMockBlockchainClient())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	ctx := context.Background()
 
@@ -2535,8 +2544,8 @@ func TestConfigDefaults(t *testing.T) {
 	if defaults.Workers != 4 {
 		t.Errorf("expected Workers=4, got %d", defaults.Workers)
 	}
-	if defaults.BatchSize != 10 {
-		t.Errorf("expected BatchSize=10, got %d", defaults.BatchSize)
+	if defaults.BatchSize != defaults.Workers {
+		t.Errorf("expected one message per worker, got BatchSize=%d for %d workers", defaults.BatchSize, defaults.Workers)
 	}
 	if defaults.Logger == nil {
 		t.Error("expected Logger to be set")
@@ -2845,13 +2854,18 @@ func TestRun_ContextCancelledDuringMessageSend(t *testing.T) {
 	cache := newMockBlockCache()
 	writer := newMockS3Writer()
 
-	svc, _ := NewService(Config{
+	config := Config{
 		ChainID:   1,
 		Bucket:    "test-bucket",
 		Workers:   1,
 		BatchSize: 100,
 		Logger:    testutil.DiscardLogger(),
-	}, consumer, cache, writer, newMockDeadLetterPublisher(), newMockBlockchainClient())
+	}
+	consumer.visibilityTimeout = visibilityCovering(config)
+	svc, err := NewService(config, consumer, cache, writer, newMockDeadLetterPublisher(), newMockBlockchainClient())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	// Create many messages
 	for i := range 100 {
@@ -3897,18 +3911,44 @@ func TestRun_BoundsAHandlerParkedOnADependency(t *testing.T) {
 	}
 }
 
-func TestRun_ReportsAVisibilityTimeoutBelowTheHandlerBudget(t *testing.T) {
+// SQS starts one visibility clock for the whole batch, so a pool that has to
+// work through it in rounds must fit every round inside that clock.
+func TestNewService_RejectsAVisibilityTimeoutTheBatchCanOutrun(t *testing.T) {
 	consumer := newMockSQSConsumer()
-	consumer.visibilityTimeout = 100 * time.Millisecond
-	svc, recorder := shutdownTestService(t,
-		Config{Workers: 1, BatchSize: 1, HandlerTimeout: time.Second},
-		consumer, newMockBlockCache(), newMockS3Writer())
+	consumer.visibilityTimeout = 180 * time.Second
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_ = svc.Run(ctx)
+	_, err := NewService(Config{
+		ChainID:   1,
+		Bucket:    "test-bucket",
+		Workers:   4,
+		BatchSize: 10,
+		Logger:    testutil.DiscardLogger(),
+	}, consumer, newMockBlockCache(), newMockS3Writer(), newMockDeadLetterPublisher(), newMockBlockchainClient())
 
-	if logged := recorder.MessagesAt(slog.LevelError); !slices.Contains(logged, "SQS visibility timeout is misconfigured") {
-		t.Errorf("expected the misconfigured visibility timeout reported at ERROR, got %v", logged)
+	if err == nil {
+		t.Fatal("expected 10 messages per receive across 4 workers rejected against a 180s visibility timeout")
 	}
+}
+
+func TestNewService_DefaultsTheBatchSizeToTheWorkerCount(t *testing.T) {
+	svc, err := NewService(Config{
+		ChainID: 1,
+		Bucket:  "test-bucket",
+		Workers: 4,
+		Logger:  testutil.DiscardLogger(),
+	}, newMockSQSConsumer(), newMockBlockCache(), newMockS3Writer(), newMockDeadLetterPublisher(), newMockBlockchainClient())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if svc.config.BatchSize != 4 {
+		t.Errorf("BatchSize = %d, want one message per worker so none waits out its visibility clock in a queue", svc.config.BatchSize)
+	}
+}
+
+// A test that fans a batch wider than its worker pool has to widen the
+// visibility clock with it, the way a deployment would.
+func visibilityCovering(config Config) time.Duration {
+	return time.Duration(inFlightPerReceive(config))*sqsutil.DefaultHandlerTimeout +
+		sqsutil.DefaultDrainTimeout + 3*sqsutil.SettleTimeout
 }

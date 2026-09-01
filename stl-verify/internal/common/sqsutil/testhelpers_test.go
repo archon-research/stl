@@ -9,6 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
@@ -31,6 +35,7 @@ type mockConsumer struct {
 	visibilityReleases []visibilityRelease
 	deleteErrFor       map[string]error
 	visibilityErr      error
+	visibilityPartial  map[string]error
 	visibilityRefusals map[string]error
 	visibilityTimeout  time.Duration // 0 -> a safe default well above the handler budget
 
@@ -88,7 +93,7 @@ func (m *mockConsumer) ChangeMessageVisibilityBatch(ctx context.Context, handles
 		m.onRelease()
 	}
 	if m.visibilityErr != nil {
-		return nil, m.visibilityErr
+		return m.visibilityPartial, m.visibilityErr
 	}
 	return m.refusalsFor(handles), nil
 }
@@ -141,24 +146,32 @@ func makeMsg(id, handle string, event outbound.BlockEvent) outbound.SQSMessage {
 func testConfig(consumer *mockConsumer) Config {
 	return Config{
 		Consumer:    consumer,
-		MaxMessages: 10,
+		MaxMessages: 1,
 		Logger:      slog.Default(),
 		ChainID:     1,
 	}
 }
 
 func startRunLoop(consumer *mockConsumer, logger *slog.Logger, handler BlockEventHandler) (context.CancelFunc, <-chan struct{}) {
+	return startLoop(runLoopConfig(consumer, logger), handler)
+}
+
+func runLoopConfig(consumer *mockConsumer, logger *slog.Logger) Config {
+	return Config{
+		Consumer:     consumer,
+		MaxMessages:  1,
+		PollInterval: 10 * time.Millisecond,
+		Logger:       logger,
+		ChainID:      1,
+	}
+}
+
+func startLoop(cfg Config, handler BlockEventHandler) (context.CancelFunc, <-chan struct{}) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunLoop(ctx, Config{
-			Consumer:     consumer,
-			MaxMessages:  10,
-			PollInterval: 10 * time.Millisecond,
-			Logger:       logger,
-			ChainID:      1,
-		}, handler)
+		RunLoop(ctx, cfg, handler)
 	}()
 	return cancel, done
 }
@@ -206,4 +219,67 @@ func assertNoErrorLogs(t *testing.T, recorder *testutil.SlogRecorder) {
 	if logged := recorder.MessagesAt(slog.LevelError); len(logged) > 0 {
 		t.Errorf("expected no ERROR records on the shutdown path, got %v", logged)
 	}
+}
+
+type settleKey struct {
+	op     string
+	status string
+}
+
+// Keyed off the wire name and labels rather than the package constants: the
+// alert rules match on exactly these strings.
+func collectSettleCounter(t *testing.T, reader sdkmetric.Reader) map[settleKey]int64 {
+	t.Helper()
+	counts := make(map[settleKey]int64)
+	for _, dp := range settleDataPoints(t, reader) {
+		op, _ := dp.Attributes.Value("op")
+		status, _ := dp.Attributes.Value("status")
+		counts[settleKey{op: op.AsString(), status: status.AsString()}] += dp.Value
+	}
+	return counts
+}
+
+func collectSettleChains(t *testing.T, reader sdkmetric.Reader) []string {
+	t.Helper()
+	var chains []string
+	for _, dp := range settleDataPoints(t, reader) {
+		chain, _ := dp.Attributes.Value("chain")
+		chains = append(chains, chain.AsString())
+	}
+	return chains
+}
+
+func settleDataPoints(t *testing.T, reader sdkmetric.Reader) []metricdata.DataPoint[int64] {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collecting metrics: %v", err)
+	}
+	var points []metricdata.DataPoint[int64]
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "sqs.message.settles.total" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric %q is %T, want metricdata.Sum[int64]", m.Name, m.Data)
+			}
+			points = append(points, sum.DataPoints...)
+		}
+	}
+	return points
+}
+
+func installManualMeterProvider(t *testing.T) sdkmetric.Reader {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	previous := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(previous)
+		_ = mp.Shutdown(context.Background())
+	})
+	return reader
 }

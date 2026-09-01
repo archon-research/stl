@@ -63,7 +63,7 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 	queueURL := fs.String("queue", "", "SQS Queue URL")
 	redisAddr := fs.String("redis", "", "Redis address")
 	dbURL := fs.String("db", "", "PostgreSQL connection URL")
-	maxMessages := fs.Int("max", 10, "Max messages per poll")
+	maxMessages := fs.Int("max", 1, "Max messages per receive; more raises the visibility timeout the queue must carry")
 	waitTime := fs.Int("wait", 20, "Wait time in seconds (long polling)")
 	visibilityTimeout := fs.Int("visibility-timeout", 300, "SQS visibility timeout in seconds")
 	sweepBlocks := fs.Int64("sweep-blocks", 50, "Blocks between guaranteed state snapshots (0 disables)")

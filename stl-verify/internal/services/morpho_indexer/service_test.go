@@ -27,8 +27,8 @@ import (
 func TestConfigDefaults(t *testing.T) {
 	defaults := ConfigDefaults()
 
-	if defaults.MaxMessages != 10 {
-		t.Errorf("MaxMessages = %d, want 10", defaults.MaxMessages)
+	if defaults.MaxMessages != 1 {
+		t.Errorf("MaxMessages = %d, want one message per receive so the visibility clock covers it", defaults.MaxMessages)
 	}
 	if defaults.PollInterval == 0 {
 		t.Error("PollInterval should not be zero")

@@ -16,12 +16,12 @@ import (
 func shutdownPathBudgets() map[string]time.Duration {
 	return map[string]time.Duration{
 		"poll completes after SIGTERM, then its batch is released": sqsadapter.PollBudget(
-			sqsadapter.ConfigDefaults().WaitTimeSeconds) + sqsutil.ShutdownCleanupTimeout,
+			sqsadapter.ConfigDefaults().WaitTimeSeconds) + sqsutil.SettleTimeout,
 
 		// Two cleanup budgets: the delete, then the one release that hands back
 		// everything the batch left unsettled — RunLoop batches are one chunk.
 		"handler drains to its budget, then the batch is settled": sqsutil.DefaultDrainTimeout +
-			2*sqsutil.ShutdownCleanupTimeout,
+			2*sqsutil.SettleTimeout,
 	}
 }
 

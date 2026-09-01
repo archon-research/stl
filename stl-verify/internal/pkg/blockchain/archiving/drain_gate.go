@@ -1,6 +1,7 @@
 package archiving
 
 import (
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -13,10 +14,15 @@ type DrainGate struct {
 	idle        *sync.Cond
 	draining    bool
 	outstanding int
+	logger      *slog.Logger
 }
 
-func NewDrainGate() *DrainGate {
-	gate := &DrainGate{}
+// NewDrainGate builds an open gate. A nil logger falls back to slog.Default().
+func NewDrainGate(logger *slog.Logger) *DrainGate {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	gate := &DrainGate{logger: logger}
 	gate.idle = sync.NewCond(&gate.mu)
 	return gate
 }
@@ -55,13 +61,33 @@ func (g *DrainGate) Wait() {
 	}
 }
 
+// WaitBounded waits up to budget for the writes already running and leaves the
+// gate open, so the next unit of work on this process still archives. It
+// reports whether they all finished and how many did not; the ones that did not
+// keep running and still record their own outcome.
+func (g *DrainGate) WaitBounded(budget time.Duration) (finished bool, outstanding int) {
+	return g.waitFor(budget)
+}
+
 // Drain closes the gate for good, then waits up to budget for the writes
 // already running. It reports whether they all finished and how many did not.
 func (g *DrainGate) Drain(budget time.Duration) (finished bool, outstanding int) {
-	g.mu.Lock()
-	g.draining = true
-	g.mu.Unlock()
+	if g.close() {
+		g.logger.Warn("archive drain gate was already closed; this drain can only wait out what the first one left behind")
+	}
+	return g.waitFor(budget)
+}
 
+// close shuts the gate and reports whether it was already shut.
+func (g *DrainGate) close() (alreadyClosed bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	alreadyClosed = g.draining
+	g.draining = true
+	return alreadyClosed
+}
+
+func (g *DrainGate) waitFor(budget time.Duration) (finished bool, outstanding int) {
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
@@ -74,8 +100,12 @@ func (g *DrainGate) Drain(budget time.Duration) (finished bool, outstanding int)
 	case <-drained:
 		return true, 0
 	case <-timer.C:
-		return false, g.Outstanding()
 	}
+
+	// The last write can land as the budget expires, and a shortfall reported
+	// with nothing outstanding reads to an operator as nothing lost.
+	outstanding = g.Outstanding()
+	return outstanding == 0, outstanding
 }
 
 // Outstanding reports how many archive writes are still running.

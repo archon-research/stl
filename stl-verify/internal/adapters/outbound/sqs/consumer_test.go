@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -21,9 +22,16 @@ type mockSQSAPI struct {
 	visibilityBatchInput *sqs.ChangeMessageVisibilityBatchInput
 	batchFailed          []sqstypes.BatchResultErrorEntry
 	err                  error
+
+	receiveInput *sqs.ReceiveMessageInput
+	receiveErr   error
 }
 
-func (m *mockSQSAPI) ReceiveMessage(context.Context, *sqs.ReceiveMessageInput, ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+func (m *mockSQSAPI) ReceiveMessage(_ context.Context, params *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+	m.receiveInput = params
+	if m.receiveErr != nil {
+		return nil, m.receiveErr
+	}
 	return &sqs.ReceiveMessageOutput{}, nil
 }
 
@@ -370,5 +378,99 @@ func TestNewConsumer_RejectsAWaitTimeOutsideTheSQSLongPollRange(t *testing.T) {
 				t.Fatalf("NewConsumer(WaitTimeSeconds=%d) error = %v, wantErr %v", tt.waitTimeSeconds, err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// The Id is the only thing making SQS's echoed refusal resolvable back to a
+// handle, so drift lands a refusal on the wrong message.
+func TestConsumer_ChangeMessageVisibilityBatch_NumbersEachEntryByItsIndex(t *testing.T) {
+	client := &mockSQSAPI{}
+	consumer := newTestConsumer(client)
+
+	if _, err := consumer.ChangeMessageVisibilityBatch(context.Background(), []string{"handle-1", "handle-2", "handle-3"}, 0); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for i, entry := range client.visibilityBatchInput.Entries {
+		if got, want := aws.ToString(entry.Id), strconv.Itoa(i); got != want {
+			t.Errorf("entry %d carries Id %q, want %q", i, got, want)
+		}
+	}
+}
+
+func TestConsumer_ReceiveMessages_PropagatesAPollFailure(t *testing.T) {
+	pollErr := errors.New("InvalidParameterValue")
+	consumer := newTestConsumer(&mockSQSAPI{receiveErr: pollErr})
+
+	messages, err := consumer.ReceiveMessages(context.Background(), 1)
+	if !errors.Is(err, pollErr) {
+		t.Fatalf("expected the poll failure wrapped, got %v", err)
+	}
+	if len(messages) != 0 {
+		t.Errorf("expected no messages alongside the failure, got %+v", messages)
+	}
+}
+
+func TestConsumer_ReceiveMessages_ClampsTheBatchSizeToWhatSQSAccepts(t *testing.T) {
+	tests := []struct {
+		name        string
+		maxMessages int
+		want        int32
+	}{
+		{"zero asks for one message", 0, 1},
+		{"negative asks for one message", -5, 1},
+		{"one passes through", 1, 1},
+		{"the SQS ceiling passes through", 10, 10},
+		{"above the ceiling is clamped", 25, 10},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &mockSQSAPI{}
+			consumer := newTestConsumer(client)
+
+			if _, err := consumer.ReceiveMessages(context.Background(), tt.maxMessages); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got := client.receiveInput.MaxNumberOfMessages; got != tt.want {
+				t.Errorf("maxMessages %d asked SQS for %d, want %d", tt.maxMessages, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConsumer_VisibilityTimeout_ReportsTheConfiguredSeconds(t *testing.T) {
+	consumer, err := NewConsumer(aws.Config{}, Config{
+		QueueURL:          "https://sqs.test/queue.fifo",
+		VisibilityTimeout: 300,
+	}, slog.Default())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := consumer.VisibilityTimeout(); got != 300*time.Second {
+		t.Errorf("VisibilityTimeout() = %s, want %s", got, 300*time.Second)
+	}
+}
+
+// SQS applied the batch before echoing an Id that matches no handle, so the
+// entries it did name are the only ones still hidden.
+func TestConsumer_ChangeMessageVisibilityBatch_KeepsTheRefusalsItAttributedAlongsideTheError(t *testing.T) {
+	client := &mockSQSAPI{batchFailed: []sqstypes.BatchResultErrorEntry{
+		{Id: aws.String("1"), Code: aws.String("ReceiptHandleIsInvalid")},
+		{Id: aws.String("99"), Code: aws.String("ReceiptHandleIsInvalid")},
+	}}
+	consumer := newTestConsumer(client)
+
+	refusals, err := consumer.ChangeMessageVisibilityBatch(context.Background(),
+		[]string{"handle-1", "handle-2", "handle-3"}, 0)
+
+	if err == nil {
+		t.Fatal("expected the unattributable refusal reported")
+	}
+	if refusals["handle-2"] == nil {
+		t.Error("expected the refusal SQS did attribute kept alongside the error")
+	}
+	if len(refusals) != 1 {
+		t.Errorf("expected only the attributed refusal, got %v", refusals)
 	}
 }

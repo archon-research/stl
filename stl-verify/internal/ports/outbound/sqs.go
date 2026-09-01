@@ -40,7 +40,9 @@ type SQSConsumer interface {
 
 	// ChangeMessageVisibilityBatch resets how long up to MaxVisibilityBatchSize
 	// messages stay hidden, counted from now; zero hands them back immediately.
-	// Refusals come back keyed by receipt handle; a non-nil error changed nothing.
+	// Refusals come back keyed by receipt handle. A non-nil error with a nil map
+	// changed nothing; with a non-nil map the batch was applied and the map is
+	// every refusal that could be attributed.
 	ChangeMessageVisibilityBatch(ctx context.Context, receiptHandles []string, visibility time.Duration) (map[string]error, error)
 
 	// VisibilityTimeout reports the per-receive visibility timeout configured on

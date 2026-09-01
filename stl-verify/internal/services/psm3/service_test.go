@@ -198,7 +198,7 @@ func (f *fakeSQSConsumer) ChangeMessageVisibilityBatch(context.Context, []string
 
 func (f *fakeSQSConsumer) Close() error { return nil }
 
-func (f *fakeSQSConsumer) VisibilityTimeout() time.Duration { return 30 * time.Second }
+func (f *fakeSQSConsumer) VisibilityTimeout() time.Duration { return 180 * time.Second }
 
 func (f *fakeSQSConsumer) deleteCount() int {
 	f.mu.Lock()
@@ -231,7 +231,7 @@ func defaultConfig(sweepEveryN int) psm3.Config {
 		SweepEveryNBlocks: sweepEveryN,
 		ChainID:           testChainID,
 		PSM3Address:       testPSM3Address,
-		MaxMessages:       10,
+		MaxMessages:       1,
 		PollInterval:      10 * time.Millisecond,
 	}
 }

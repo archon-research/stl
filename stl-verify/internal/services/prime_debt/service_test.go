@@ -316,7 +316,7 @@ func defaultConfig(sweepEveryN int) prime_debt.Config {
 	return prime_debt.Config{
 		SweepEveryNBlocks: sweepEveryN,
 		ChainID:           testChainID,
-		MaxMessages:       10,
+		MaxMessages:       1,
 		PollInterval:      10 * time.Millisecond,
 	}
 }

@@ -29,12 +29,22 @@ type Service interface {
 // Run starts each service in order, blocks until ctx is cancelled, then stops
 // them in reverse order within ShutdownTimeout.
 func Run(ctx context.Context, logger *slog.Logger, services ...Service) error {
-	return run(ctx, logger, ShutdownTimeout, services)
+	return run(ctx, logger, ShutdownTimeout, nil, services)
+}
+
+// RunWithTimeoutGuard is Run with onShutdownTimeout called on a shutdown
+// timeout, before the error reaches the caller and so before the caller's
+// deferred cleanup starts unwinding — the only point at which that cleanup can
+// still be bounded, since it waits on the goroutines that just missed the
+// deadline. main passes ForceExitAfter; an in-process caller such as a test
+// passes nil, because ForceExitAfter would take the test binary down with it.
+func RunWithTimeoutGuard(ctx context.Context, logger *slog.Logger, onShutdownTimeout func(), services ...Service) error {
+	return run(ctx, logger, ShutdownTimeout, onShutdownTimeout, services)
 }
 
 // run carries the timeout as a parameter so the tests do not have to wait
 // ShutdownTimeout to exercise the deadline branch.
-func run(ctx context.Context, logger *slog.Logger, timeout time.Duration, services []Service) error {
+func run(ctx context.Context, logger *slog.Logger, timeout time.Duration, onShutdownTimeout func(), services []Service) error {
 	if err := start(ctx, services, logger); err != nil {
 		return err
 	}
@@ -56,6 +66,9 @@ func run(ctx context.Context, logger *slog.Logger, timeout time.Duration, servic
 		logger.Info("shutdown complete")
 		return nil
 	case <-shutdownCtx.Done():
+		if onShutdownTimeout != nil {
+			onShutdownTimeout()
+		}
 		return ErrShutdownTimedOut
 	}
 }

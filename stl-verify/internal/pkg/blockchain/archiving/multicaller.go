@@ -10,20 +10,10 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rawsckey"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/ethereum/go-ethereum/common"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
 
 const archiveTimeout = 30 * time.Second
-
-const (
-	writeStatusSuccess = "success"
-	writeStatusError   = "error"
-	// writeStatusAbandoned marks a batch the drain gate refused, so a rollout
-	// that drops writes is countable rather than only inferable from parity.
-	writeStatusAbandoned = "abandoned"
-)
 
 // Config holds the static metadata stamped onto every archived call.
 type Config struct {
@@ -52,35 +42,23 @@ type Multicaller struct {
 	inner    outbound.Multicaller
 	archiver outbound.CallArchiver
 	cfg      Config
-	writes   metric.Int64Counter
+	writes   *WriteCounter
 }
 
 var _ outbound.Multicaller = (*Multicaller)(nil)
 
 // NewMulticaller wraps inner so its calls are archived via arch.
 func NewMulticaller(inner outbound.Multicaller, arch outbound.CallArchiver, cfg Config) *Multicaller {
-	if cfg.Gate == nil {
-		cfg.Gate = NewDrainGate()
-	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
+	}
+	if cfg.Gate == nil {
+		cfg.Gate = NewDrainGate(cfg.Logger)
 	}
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
 	}
-	if cfg.MeterProvider == nil {
-		cfg.MeterProvider = otel.GetMeterProvider()
-	}
-	writes, err := cfg.MeterProvider.
-		Meter("github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving").
-		Int64Counter("archive.writes.total", metric.WithDescription("Raw SC call archive write attempts by status"))
-	if err != nil {
-		// Metrics must never break the archiving hot path, so a counter that
-		// fails to construct is logged and left nil (recordWrite no-ops on nil)
-		// rather than failing NewMulticaller. This intentionally differs from the
-		// fail-hard rule used for core dependencies.
-		cfg.Logger.Error("building archive.writes.total counter; archive metrics disabled", "error", err)
-	}
+	writes := NewWriteCounter(cfg.MeterProvider, cfg.Chain, cfg.Source, cfg.Logger)
 	return &Multicaller{inner: inner, archiver: arch, cfg: cfg, writes: writes}
 }
 
@@ -170,26 +148,13 @@ func (m *Multicaller) Address() common.Address { return m.inner.Address() }
 // for a directly-constructed decorator (tests).
 func (m *Multicaller) Close() { m.cfg.Gate.Wait() }
 
-// recordWrite increments archive.writes.total with the outcome status. It
-// records against a background context because the counter increment is
-// independent of the archive operation's timeout.
+// recordWrite increments archive.writes.total with the outcome status.
 func (m *Multicaller) recordWrite(err error) {
 	status := writeStatusSuccess
 	if err != nil {
 		status = writeStatusError
 	}
-	m.recordWriteStatus(status)
-}
-
-func (m *Multicaller) recordWriteStatus(status string) {
-	if m.writes == nil {
-		return
-	}
-	m.writes.Add(context.Background(), 1, metric.WithAttributes(
-		attribute.String("chain", m.cfg.Chain),
-		attribute.String("source", m.cfg.Source),
-		attribute.String("status", status),
-	))
+	m.writes.Record(status, 1)
 }
 
 func (m *Multicaller) buildBatchRecord(calls []outbound.Call, results []outbound.Result, blockNumber *big.Int, blockVersion int, mcAddr string) outbound.CallBatchRecord {
@@ -223,7 +188,7 @@ func (m *Multicaller) scheduleArchive(ctx context.Context, record outbound.CallB
 	if m.cfg.Gate.Go(func() { m.archiveRecord(ctx, record) }) {
 		return
 	}
-	m.recordWriteStatus(writeStatusAbandoned)
+	m.writes.Record(writeStatusAbandoned, 1)
 	m.cfg.Logger.Warn("archive drain already began; dropping this SC call batch",
 		"source", record.Source,
 		"block", record.BlockNumber,

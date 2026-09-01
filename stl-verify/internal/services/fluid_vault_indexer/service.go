@@ -203,14 +203,19 @@ func (s *Service) Start(ctx context.Context) error {
 		return fmt.Errorf("startup vault reconcile: %w", err)
 	}
 
+	loop := sqsutil.Config{
+		Consumer:     s.consumer,
+		MaxMessages:  s.config.MaxMessages,
+		PollInterval: s.config.PollInterval,
+		Logger:       s.logger,
+		ChainID:      s.config.ChainID,
+	}
+	if err := loop.Validate(); err != nil {
+		return err
+	}
+
 	s.wg.Go(func() {
-		sqsutil.RunLoop(s.ctx, sqsutil.Config{
-			Consumer:     s.consumer,
-			MaxMessages:  s.config.MaxMessages,
-			PollInterval: s.config.PollInterval,
-			Logger:       s.logger,
-			ChainID:      s.config.ChainID,
-		}, s.processBlockEvent)
+		sqsutil.RunLoop(s.ctx, loop, s.processBlockEvent)
 	})
 
 	s.logger.Info("fluid vault indexer started",
