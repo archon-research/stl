@@ -410,23 +410,40 @@ var unmappedSourceAssetsSQL = fmt.Sprintf(`
 	  )
 `, OracleAssetAsOf("$3::timestamptz"))
 
+// The INSERT and its verification share one transaction. The arbiter skips only the conflicting
+// keys, so a target holding a conflicting version still takes every other source mapping: on
+// autocommit the caller got an error while that subset stayed behind, registering the target as
+// partially mapped. Appending cannot undo it either — the table forbids DELETE, so the residue
+// could only be superseded by a further disabling version. Rolling back leaves the target as it
+// was, which is the only outcome the error message honestly describes.
 func (r *OnchainPriceRepository) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64, referenceEffectiveAt time.Time) error {
 	changeReason := fmt.Sprintf("copied from oracle %d as of %s",
 		fromOracleID, referenceEffectiveAt.UTC().Format(time.RFC3339))
 
-	tag, err := r.pool.Exec(ctx, copyOracleAssetsSQL, fromOracleID, toOracleID, referenceEffectiveAt, changeReason)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer rollback(ctx, tx, r.logger)
+
+	tag, err := tx.Exec(ctx, copyOracleAssetsSQL, fromOracleID, toOracleID, referenceEffectiveAt, changeReason)
 	if err != nil {
 		return fmt.Errorf("copying oracle assets from %d to %d: %w", fromOracleID, toOracleID, err)
 	}
 
+	// Reads the rows the INSERT just wrote: the count is what the commit would make visible.
 	var unmapped int
-	if err := r.pool.QueryRow(ctx, unmappedSourceAssetsSQL,
+	if err := tx.QueryRow(ctx, unmappedSourceAssetsSQL,
 		fromOracleID, toOracleID, referenceEffectiveAt).Scan(&unmapped); err != nil {
 		return fmt.Errorf("verifying copied oracle assets from %d to %d: %w", fromOracleID, toOracleID, err)
 	}
 	if unmapped > 0 {
 		return fmt.Errorf("copying oracle assets from %d to %d: %d of the source's enabled mappings are absent or differ on the target; it already carries conflicting versions",
 			fromOracleID, toOracleID, unmapped)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing the oracle asset copy from %d to %d: %w", fromOracleID, toOracleID, err)
 	}
 
 	r.logger.Info("copied oracle assets",

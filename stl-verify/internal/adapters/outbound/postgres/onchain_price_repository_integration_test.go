@@ -108,10 +108,18 @@ func TestGetTokenInfosResolvesTheVersionEffectiveAtTheRecordedInstant(t *testing
 
 // The arbiter silently skips a source key the target already holds, so a target carrying a
 // DIFFERENT mapping for that key would otherwise leave a partial copy reported as success.
+//
+// The source carries a SECOND, non-conflicting mapping so the rejected copy has something to
+// leave behind: the arbiter skips only the conflicting key, so that second row inserts cleanly
+// and the verification then fails on the first. Before the copy became transactional the row
+// stayed committed, registering the target as partially mapped behind the caller's error.
 func TestCopyOracleAssetsRejectsATargetHoldingAConflictingMapping(t *testing.T) {
 	ctx := context.Background()
 	f := newRetiredSourceFixture(t, ctx, "vec597-copy-conflict", "0x4444444444444444444444444444444444444444", "2026-01-01", "2026-08-20")
 	targetID := testutil.SeedOracle(t, ctx, onchainPricePool, "vec597-conflict-target", "target", 1, "0x8888888888888888888888888888888888888888")
+
+	cleanTokenID := testutil.SeedToken(t, ctx, onchainPricePool, 1, "0x5555555555555555555555555555555555555555", "CLEAN", 18)
+	testutil.SeedOracleAssetEffectiveFrom(t, ctx, onchainPricePool, f.oracleID, cleanTokenID, "2026-01-01")
 
 	// Same natural key as the source's, different feed metadata.
 	if _, err := onchainPricePool.Exec(ctx, `
@@ -127,6 +135,18 @@ func TestCopyOracleAssetsRejectsATargetHoldingAConflictingMapping(t *testing.T) 
 	}
 	if !strings.Contains(err.Error(), "absent or differ on the target") {
 		t.Errorf("error = %v, want it to name the unmapped source keys", err)
+	}
+
+	// Counts the raw table, not a pinned read: a row left behind at any valid_from is a partial
+	// copy, and the point is that the failed call wrote nothing at all.
+	var leftBehind int
+	if err := onchainPricePool.QueryRow(ctx, `
+		SELECT count(*) FROM oracle_asset WHERE oracle_id = $1 AND token_id = $2`,
+		targetID, cleanTokenID).Scan(&leftBehind); err != nil {
+		t.Fatalf("counting the target's rows for the non-conflicting token: %v", err)
+	}
+	if leftBehind != 0 {
+		t.Errorf("the rejected copy left %d row(s) for the non-conflicting token on the target, want 0: the copy is not atomic", leftBehind)
 	}
 }
 
