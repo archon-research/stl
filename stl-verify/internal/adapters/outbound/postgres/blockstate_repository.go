@@ -618,12 +618,12 @@ func (r *BlockStateRepository) orphanBlocksAbove(ctx context.Context, tx pgx.Tx,
 }
 
 // rewindWatermarkTo lowers the backfill watermark to commonAncestor, counts the
-// reorg in the cursor's generation, and reports the value it replaced. FindGaps
-// scans only above the watermark, so a height orphanBlocksAbove leaves without a
-// canonical row is never re-fetched unless the watermark drops back below it —
-// and where the watermark already sits at or below the ancestor the generation
-// bump is the only thing that stops a pass which scanned before this commit
-// from retiring that height anyway (ARCT-379).
+// reorg in the cursor's rewind count, and reports the value it replaced.
+// FindGaps scans only above the watermark, so a height orphanBlocksAbove leaves
+// without a canonical row is never re-fetched unless the watermark drops back
+// below it — and where the watermark already sits at or below the ancestor the
+// rewind count bump is the only thing that stops a pass which scanned before
+// this commit from retiring that height anyway (ARCT-379).
 func (r *BlockStateRepository) rewindWatermarkTo(ctx context.Context, tx pgx.Tx, commonAncestor int64) (int64, bool, error) {
 	// Read the row under its lock rather than through a CTE beside the write: a
 	// CTE reports the statement snapshot, which is not the row the write
@@ -641,10 +641,10 @@ func (r *BlockStateRepository) rewindWatermarkTo(ctx context.Context, tx pgx.Tx,
 	// Watermark 0 on a chain with no row keeps the "unset" reading every
 	// caller already has for a missing row.
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO backfill_watermark (chain_id, watermark, generation) VALUES ($1, 0, 1)
+		`INSERT INTO backfill_watermark (chain_id, watermark, rewind_count) VALUES ($1, 0, 1)
 		 ON CONFLICT (chain_id) DO UPDATE
 		 SET watermark = LEAST(backfill_watermark.watermark, $2),
-		     generation = backfill_watermark.generation + 1`,
+		     rewind_count = backfill_watermark.rewind_count + 1`,
 		r.chainID, commonAncestor); err != nil {
 		return 0, false, fmt.Errorf("failed to rewind backfill watermark: %w", err)
 	}
@@ -769,13 +769,13 @@ func (r *BlockStateRepository) GetBackfillWatermark(ctx context.Context) (int64,
 	return cursor.Watermark, nil
 }
 
-// GetBackfillCursor returns the watermark together with its generation, or the
-// zero cursor when this chain has no row yet.
+// GetBackfillCursor returns the watermark together with its rewind count, or
+// the zero cursor when this chain has no row yet.
 func (r *BlockStateRepository) GetBackfillCursor(ctx context.Context) (outbound.BackfillCursor, error) {
 	var cursor outbound.BackfillCursor
 	err := r.pool.QueryRow(ctx,
-		`SELECT watermark, generation FROM backfill_watermark WHERE chain_id = $1`,
-		r.chainID).Scan(&cursor.Watermark, &cursor.Generation)
+		`SELECT watermark, rewind_count FROM backfill_watermark WHERE chain_id = $1`,
+		r.chainID).Scan(&cursor.Watermark, &cursor.RewindCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return outbound.BackfillCursor{}, nil
 	}
@@ -786,7 +786,7 @@ func (r *BlockStateRepository) GetBackfillCursor(ctx context.Context) (outbound.
 }
 
 // RewindBackfillWatermark lowers the watermark to the given block if it sits
-// above it and bumps the generation either way, in its own transaction. The
+// above it and bumps the rewind count either way, in its own transaction. The
 // reorg commit does the same write inside its own; this is the entry point for
 // every other path that empties a height, such as the backfill's stale-chain
 // recovery.
@@ -817,8 +817,8 @@ func (r *BlockStateRepository) RewindBackfillWatermark(ctx context.Context, to i
 func (r *BlockStateRepository) AdvanceBackfillWatermark(ctx context.Context, expected outbound.BackfillCursor, watermark int64) (bool, error) {
 	tag, err := r.pool.Exec(ctx,
 		`UPDATE backfill_watermark SET watermark = $4
-		 WHERE chain_id = $1 AND watermark = $2 AND generation = $3`,
-		r.chainID, expected.Watermark, expected.Generation, watermark)
+		 WHERE chain_id = $1 AND watermark = $2 AND rewind_count = $3`,
+		r.chainID, expected.Watermark, expected.RewindCount, watermark)
 	if err != nil {
 		return false, fmt.Errorf("failed to advance backfill watermark: %w", err)
 	}
@@ -834,7 +834,7 @@ func (r *BlockStateRepository) AdvanceBackfillWatermark(ctx context.Context, exp
 	// DO NOTHING leaves a row another writer seeded first alone, and reports it
 	// as the refusal it is.
 	tag, err = r.pool.Exec(ctx,
-		`INSERT INTO backfill_watermark (chain_id, watermark, generation) VALUES ($1, $2, 0)
+		`INSERT INTO backfill_watermark (chain_id, watermark, rewind_count) VALUES ($1, $2, 0)
 		 ON CONFLICT (chain_id) DO NOTHING`,
 		r.chainID, watermark)
 	if err != nil {

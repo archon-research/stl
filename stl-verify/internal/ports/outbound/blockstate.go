@@ -63,17 +63,17 @@ type BlockRange struct {
 }
 
 // BackfillCursor is what the gap filler compares against when it retires a
-// range: the watermark plus the count of reorg commits behind it. A reorg whose
-// common ancestor sits at or below the watermark changes only the generation,
+// range: the watermark plus the count of rewinds behind it. A reorg whose
+// common ancestor sits at or below the watermark changes only the rewind count,
 // and that is the ordinary case — the watermark normally trails head by one, so
-// without the generation a pass that straddled such a reorg would still match
+// without the rewind count a pass that straddled such a reorg would still match
 // and advance over the height the reorg orphaned (ARCT-379).
 type BackfillCursor struct {
 	// Watermark is the highest block number verified as gap-free.
 	Watermark int64
 
-	// Generation counts the reorg commits that have touched this chain's cursor.
-	Generation int64
+	// RewindCount counts the rewinds applied to this chain's cursor.
+	RewindCount int64
 }
 
 // BlockStateRepository defines the interface for persisting block state.
@@ -137,7 +137,7 @@ type BlockStateRepository interface {
 	// 1. Saves the reorg event
 	// 2. Marks all blocks after commonAncestor as orphaned
 	// 3. Lowers the backfill watermark to commonAncestor if it sits above it,
-	//    and bumps the cursor's generation either way
+	//    and bumps the cursor's rewind count either way
 	// 4. Saves the new canonical block
 	// This prevents inconsistent state if a crash occurs mid-reorg. Step 3 is
 	// what puts an orphaned-but-not-replaced height back in FindGaps' range.
@@ -157,13 +157,13 @@ type BlockStateRepository interface {
 	// Returns 0 if no watermark has been set.
 	GetBackfillWatermark(ctx context.Context) (int64, error)
 
-	// GetBackfillCursor returns the watermark together with its generation.
+	// GetBackfillCursor returns the watermark together with its rewind count.
 	// Returns the zero cursor when no row has been written for this chain.
 	GetBackfillCursor(ctx context.Context) (BackfillCursor, error)
 
 	// RewindBackfillWatermark lowers the watermark to the given block if it
-	// sits above it, and counts the rewind in the cursor's generation either
-	// way. It reports the value it replaced and whether that value was above
+	// sits above it, and bumps the cursor's rewind count either way. It
+	// reports the value it replaced and whether that value was above
 	// the target. Every path that drops a canonical row without replacing it —
 	// a reorg commit, the backfill's stale-chain recovery — must call it, or
 	// the height it emptied stays below the watermark and out of FindGaps'

@@ -2863,7 +2863,7 @@ func TestBackfillService_RetryOrphanRewindsTheWatermark(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetBackfillCursor: %v", err)
 	}
-	if want := (outbound.BackfillCursor{Watermark: 1, Generation: 1}); cursor != want {
+	if want := (outbound.BackfillCursor{Watermark: 1, RewindCount: 1}); cursor != want {
 		t.Errorf("cursor = %+v, want %+v (below the emptied height)", cursor, want)
 	}
 }
@@ -2944,7 +2944,7 @@ func TestBackfillService_PostSaveRaceOrphanRewindsTheWatermark(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetBackfillCursor: %v", err)
 	}
-	if want := (outbound.BackfillCursor{Watermark: target - 1, Generation: 1}); cursor != want {
+	if want := (outbound.BackfillCursor{Watermark: target - 1, RewindCount: 1}); cursor != want {
 		t.Errorf("cursor = %+v, want %+v (below the emptied height)", cursor, want)
 	}
 }

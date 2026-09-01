@@ -1164,9 +1164,9 @@ func (s *BackfillService) reportSkippedAdvance(ctx context.Context, expected out
 	}
 	s.logger.Info("watermark changed concurrently, skipping advance",
 		"expected", expected.Watermark,
-		"expectedGeneration", expected.Generation,
+		"expectedRewindCount", expected.RewindCount,
 		"current", current.Watermark,
-		"currentGeneration", current.Generation,
+		"currentRewindCount", current.RewindCount,
 		"to", target)
 	return nil
 }

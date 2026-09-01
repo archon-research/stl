@@ -40,12 +40,12 @@ func truncateBlockState(t *testing.T, ctx context.Context) {
 	}
 	// Reset backfill_watermark to default value instead of deleting, and put
 	// back a row a sibling test deleted, so no test inherits a missing cursor.
-	_, err = blockstatePool.Exec(ctx, `UPDATE backfill_watermark SET watermark = 0, generation = 0`)
+	_, err = blockstatePool.Exec(ctx, `UPDATE backfill_watermark SET watermark = 0, rewind_count = 0`)
 	if err != nil {
 		t.Fatalf("failed to reset backfill_watermark: %v", err)
 	}
 	_, err = blockstatePool.Exec(ctx,
-		`INSERT INTO backfill_watermark (chain_id, watermark, generation) VALUES (1, 0, 0)
+		`INSERT INTO backfill_watermark (chain_id, watermark, rewind_count) VALUES (1, 0, 0)
 		 ON CONFLICT (chain_id) DO NOTHING`)
 	if err != nil {
 		t.Fatalf("failed to restore backfill_watermark row: %v", err)
@@ -57,12 +57,12 @@ func truncateBlockState(t *testing.T, ctx context.Context) {
 // AdvanceBackfillWatermark's compare-and-set or a reorg commit's rewind, and an
 // unconditional writer on the port is what let a rewind be overwritten
 // (ARCT-379).
-func seedWatermark(t *testing.T, ctx context.Context, repo *BlockStateRepository, watermark, generation int64) {
+func seedWatermark(t *testing.T, ctx context.Context, repo *BlockStateRepository, watermark, rewindCount int64) {
 	t.Helper()
 	if _, err := repo.Pool().Exec(ctx,
-		`INSERT INTO backfill_watermark (chain_id, watermark, generation) VALUES ($1, $2, $3)
-		 ON CONFLICT (chain_id) DO UPDATE SET watermark = EXCLUDED.watermark, generation = EXCLUDED.generation`,
-		repo.chainID, watermark, generation); err != nil {
+		`INSERT INTO backfill_watermark (chain_id, watermark, rewind_count) VALUES ($1, $2, $3)
+		 ON CONFLICT (chain_id) DO UPDATE SET watermark = EXCLUDED.watermark, rewind_count = EXCLUDED.rewind_count`,
+		repo.chainID, watermark, rewindCount); err != nil {
 		t.Fatalf("seed watermark: %v", err)
 	}
 }
@@ -2113,8 +2113,8 @@ func TestHandleReorgAtomic_RewindsWatermark(t *testing.T) {
 		wantCursor    outbound.BackfillCursor
 		wantRewindLog int
 	}{
-		{name: "above the common ancestor rewinds", watermark: 105, wantCursor: outbound.BackfillCursor{Watermark: 103, Generation: 8}, wantRewindLog: 1},
-		{name: "below the common ancestor keeps its value and still counts the reorg", watermark: 50, wantCursor: outbound.BackfillCursor{Watermark: 50, Generation: 8}, wantRewindLog: 0},
+		{name: "above the common ancestor rewinds", watermark: 105, wantCursor: outbound.BackfillCursor{Watermark: 103, RewindCount: 8}, wantRewindLog: 1},
+		{name: "below the common ancestor keeps its value and still counts the reorg", watermark: 50, wantCursor: outbound.BackfillCursor{Watermark: 50, RewindCount: 8}, wantRewindLog: 0},
 	}
 
 	for _, tt := range tests {
@@ -2125,7 +2125,7 @@ func TestHandleReorgAtomic_RewindsWatermark(t *testing.T) {
 
 			ctx := context.Background()
 			seedCanonicalChain(t, ctx, repo, 100, 105)
-			seedWatermark(t, ctx, repo, tt.watermark, tt.wantCursor.Generation-1)
+			seedWatermark(t, ctx, repo, tt.watermark, tt.wantCursor.RewindCount-1)
 
 			commitReorgAbove105(t, ctx, repo, 103)
 
@@ -2429,9 +2429,9 @@ func TestAdvanceBackfillWatermark(t *testing.T) {
 		wantAdvanced  bool
 		wantWatermark int64
 	}{
-		{name: "matching expected advances", expected: outbound.BackfillCursor{Watermark: 100, Generation: 2}, wantAdvanced: true, wantWatermark: 150},
-		{name: "stale watermark leaves the stored value", expected: outbound.BackfillCursor{Watermark: 90, Generation: 2}, wantAdvanced: false, wantWatermark: 100},
-		{name: "a reorg since the scan leaves the stored value", expected: outbound.BackfillCursor{Watermark: 100, Generation: 1}, wantAdvanced: false, wantWatermark: 100},
+		{name: "matching expected advances", expected: outbound.BackfillCursor{Watermark: 100, RewindCount: 2}, wantAdvanced: true, wantWatermark: 150},
+		{name: "stale watermark leaves the stored value", expected: outbound.BackfillCursor{Watermark: 90, RewindCount: 2}, wantAdvanced: false, wantWatermark: 100},
+		{name: "a reorg since the scan leaves the stored value", expected: outbound.BackfillCursor{Watermark: 100, RewindCount: 1}, wantAdvanced: false, wantWatermark: 100},
 		{name: "unset expected seeds a chain with no row", unseededChain: true, wantAdvanced: true, wantWatermark: 150},
 		{name: "stale expected on a chain with no row refuses", unseededChain: true, expected: outbound.BackfillCursor{Watermark: 90}, wantAdvanced: false, wantWatermark: 0},
 	}

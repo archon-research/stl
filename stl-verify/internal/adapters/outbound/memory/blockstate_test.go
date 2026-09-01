@@ -71,8 +71,8 @@ func TestHandleReorgAtomic_RewindsWatermark(t *testing.T) {
 		watermark  int64
 		wantCursor outbound.BackfillCursor
 	}{
-		{name: "above the common ancestor rewinds", watermark: 105, wantCursor: outbound.BackfillCursor{Watermark: 103, Generation: 1}},
-		{name: "below the common ancestor keeps its value and still counts the reorg", watermark: 50, wantCursor: outbound.BackfillCursor{Watermark: 50, Generation: 1}},
+		{name: "above the common ancestor rewinds", watermark: 105, wantCursor: outbound.BackfillCursor{Watermark: 103, RewindCount: 1}},
+		{name: "below the common ancestor keeps its value and still counts the reorg", watermark: 50, wantCursor: outbound.BackfillCursor{Watermark: 50, RewindCount: 1}},
 	}
 
 	for _, tt := range tests {
@@ -155,9 +155,9 @@ func TestAdvanceBackfillWatermark(t *testing.T) {
 		wantAdvanced  bool
 		wantWatermark int64
 	}{
-		{name: "matching expected advances", expected: outbound.BackfillCursor{Watermark: 100, Generation: 2}, wantAdvanced: true, wantWatermark: 150},
-		{name: "stale watermark leaves the stored value", expected: outbound.BackfillCursor{Watermark: 90, Generation: 2}, wantAdvanced: false, wantWatermark: 100},
-		{name: "a reorg since the scan leaves the stored value", expected: outbound.BackfillCursor{Watermark: 100, Generation: 1}, wantAdvanced: false, wantWatermark: 100},
+		{name: "matching expected advances", expected: outbound.BackfillCursor{Watermark: 100, RewindCount: 2}, wantAdvanced: true, wantWatermark: 150},
+		{name: "stale watermark leaves the stored value", expected: outbound.BackfillCursor{Watermark: 90, RewindCount: 2}, wantAdvanced: false, wantWatermark: 100},
+		{name: "a reorg since the scan leaves the stored value", expected: outbound.BackfillCursor{Watermark: 100, RewindCount: 1}, wantAdvanced: false, wantWatermark: 100},
 		{name: "unset expected seeds a cursor that was never written", unset: true, wantAdvanced: true, wantWatermark: 150},
 		{name: "stale expected against an unwritten cursor refuses", unset: true, expected: outbound.BackfillCursor{Watermark: 90}, wantAdvanced: false, wantWatermark: 0},
 	}
@@ -543,8 +543,8 @@ func TestFindOrphanOnlyHeights_ReturnsAscending(t *testing.T) {
 }
 
 // TestRewindBackfillWatermark pins both halves of the contract: the watermark
-// only ever moves down, and the generation counts the rewind whether or not it
-// moved — a no-op rewind that left the generation alone is what let a
+// only ever moves down, and the rewind count is bumped whether or not the
+// watermark moved — a no-op rewind that left it alone is what let a
 // compare-and-set match across a reorg and retire the hole it had just opened.
 func TestRewindBackfillWatermark(t *testing.T) {
 	tests := []struct {
@@ -557,17 +557,17 @@ func TestRewindBackfillWatermark(t *testing.T) {
 			name:        "a target below the watermark lowers it",
 			to:          90,
 			wantRewound: true,
-			wantCursor:  outbound.BackfillCursor{Watermark: 90, Generation: 3},
+			wantCursor:  outbound.BackfillCursor{Watermark: 90, RewindCount: 3},
 		},
 		{
 			name:       "a target above the watermark counts without raising it",
 			to:         120,
-			wantCursor: outbound.BackfillCursor{Watermark: 100, Generation: 3},
+			wantCursor: outbound.BackfillCursor{Watermark: 100, RewindCount: 3},
 		},
 		{
 			name:       "a target at the watermark counts without moving it",
 			to:         100,
-			wantCursor: outbound.BackfillCursor{Watermark: 100, Generation: 3},
+			wantCursor: outbound.BackfillCursor{Watermark: 100, RewindCount: 3},
 		},
 	}
 

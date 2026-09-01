@@ -1139,12 +1139,12 @@ func forkHash(number int64) string {
 // seedWatermark parks a chain's cursor. Seeding is SQL, not a port method:
 // production only moves the cursor through AdvanceBackfillWatermark's
 // compare-and-set or a reorg commit's rewind (ARCT-379).
-func seedWatermark(t *testing.T, ctx context.Context, repo *postgres.BlockStateRepository, chainID, watermark, generation int64) {
+func seedWatermark(t *testing.T, ctx context.Context, repo *postgres.BlockStateRepository, chainID, watermark, rewindCount int64) {
 	t.Helper()
 	if _, err := repo.Pool().Exec(ctx,
-		`INSERT INTO backfill_watermark (chain_id, watermark, generation) VALUES ($1, $2, $3)
-		 ON CONFLICT (chain_id) DO UPDATE SET watermark = EXCLUDED.watermark, generation = EXCLUDED.generation`,
-		chainID, watermark, generation); err != nil {
+		`INSERT INTO backfill_watermark (chain_id, watermark, rewind_count) VALUES ($1, $2, $3)
+		 ON CONFLICT (chain_id) DO UPDATE SET watermark = EXCLUDED.watermark, rewind_count = EXCLUDED.rewind_count`,
+		chainID, watermark, rewindCount); err != nil {
 		t.Fatalf("seed watermark: %v", err)
 	}
 }
@@ -1423,7 +1423,7 @@ func TestIntegration_BackfillLoop_ReorgRewindSurvivesConcurrentWatermarkAdvance(
 // LEAST() leaves the watermark exactly where the pass read it and a
 // compare-and-set on the watermark alone still matches. The reorg is committed
 // once the pass's integrity check has passed — the last read before the write —
-// so nothing but the cursor's generation is left to catch it, and an advance
+// so nothing but the cursor's rewind count is left to catch it, and an advance
 // here retires the height the reorg just emptied.
 func TestIntegration_BackfillLoop_NoOpRewindStillBlocksTheAdvance(t *testing.T) {
 	pgRepo, cleanup := setupPostgres(t)
@@ -1431,7 +1431,7 @@ func TestIntegration_BackfillLoop_NoOpRewindStillBlocksTheAdvance(t *testing.T) 
 
 	ctx := context.Background()
 
-	const emptiedNum, newHead, generation int64 = 5, 6, 7
+	const emptiedNum, newHead, rewindCount int64 = 5, 6, 7
 
 	client := newMockClient()
 	for i := int64(1); i <= newHead; i++ {
@@ -1439,7 +1439,7 @@ func TestIntegration_BackfillLoop_NoOpRewindStillBlocksTheAdvance(t *testing.T) 
 	}
 
 	seedPublishedCanonicalChain(t, ctx, pgRepo, client, 1, emptiedNum)
-	seedWatermark(t, ctx, pgRepo, 1, emptiedNum-1, generation)
+	seedWatermark(t, ctx, pgRepo, 1, emptiedNum-1, rewindCount)
 
 	repo := &reorgInjectingRepo{
 		BlockStateRepository: pgRepo,
@@ -1467,7 +1467,7 @@ func TestIntegration_BackfillLoop_NoOpRewindStillBlocksTheAdvance(t *testing.T) 
 	if err != nil {
 		t.Fatalf("GetBackfillCursor: %v", err)
 	}
-	if want := (outbound.BackfillCursor{Watermark: emptiedNum - 1, Generation: generation + 1}); cursor != want {
+	if want := (outbound.BackfillCursor{Watermark: emptiedNum - 1, RewindCount: rewindCount + 1}); cursor != want {
 		t.Fatalf("cursor = %+v, want %+v (the pass retired the height the reorg emptied)", cursor, want)
 	}
 

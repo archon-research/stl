@@ -249,7 +249,7 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAnce
 
 	// 3. Rewind the backfill cursor to the common ancestor: FindGaps scans only
 	// above the watermark, so a height left orphan-only here is never
-	// re-fetched. The generation counts this commit even when the watermark
+	// re-fetched. The rewind count includes this commit even when the watermark
 	// already sat low enough to need no move.
 	r.rewindCursorLocked(commonAncestor)
 
@@ -333,7 +333,7 @@ func (r *BlockStateRepository) GetBackfillWatermark(ctx context.Context) (int64,
 	return r.backfillCursor.Watermark, nil
 }
 
-// GetBackfillCursor returns the watermark together with its generation.
+// GetBackfillCursor returns the watermark together with its rewind count.
 func (r *BlockStateRepository) GetBackfillCursor(ctx context.Context) (outbound.BackfillCursor, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -341,7 +341,7 @@ func (r *BlockStateRepository) GetBackfillCursor(ctx context.Context) (outbound.
 }
 
 // RewindBackfillWatermark lowers the watermark to the given block if it sits
-// above it, and counts the rewind in the generation either way.
+// above it, and bumps the rewind count either way.
 func (r *BlockStateRepository) RewindBackfillWatermark(ctx context.Context, to int64) (int64, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -353,18 +353,18 @@ func (r *BlockStateRepository) RewindBackfillWatermark(ctx context.Context, to i
 // rewindCursorLocked is the cursor half of a rewind; callers hold the lock.
 func (r *BlockStateRepository) rewindCursorLocked(to int64) {
 	r.backfillCursor = outbound.BackfillCursor{
-		Watermark:  min(r.backfillCursor.Watermark, to),
-		Generation: r.backfillCursor.Generation + 1,
+		Watermark:   min(r.backfillCursor.Watermark, to),
+		RewindCount: r.backfillCursor.RewindCount + 1,
 	}
 }
 
 // SeedBackfillCursor puts the cursor at a given position. Test-only: production
 // moves it through AdvanceBackfillWatermark and HandleReorgAtomic, and an
 // unconditional write is what let a reorg rewind be overwritten (ARCT-379).
-func (r *BlockStateRepository) SeedBackfillCursor(watermark, generation int64) {
+func (r *BlockStateRepository) SeedBackfillCursor(watermark, rewindCount int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.backfillCursor = outbound.BackfillCursor{Watermark: watermark, Generation: generation}
+	r.backfillCursor = outbound.BackfillCursor{Watermark: watermark, RewindCount: rewindCount}
 }
 
 // AdvanceBackfillWatermark moves the watermark as long as the stored cursor is

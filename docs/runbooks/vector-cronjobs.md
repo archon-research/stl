@@ -180,11 +180,11 @@ Repair:
 - **A hole no rewind covered — one predating ARCT-379, or one below every
   reorg since — is repaired by rewinding the watermark by hand,** as long as it
   is still inside the retained window: `UPDATE backfill_watermark SET watermark
-  = <N-1>, generation = generation + 1 WHERE chain_id = <id>;`. Bump the
-  generation too: a pass already scanning compares against the pair, and would
-  otherwise advance straight back over the height you just re-opened. The next
-  gap pass saves N as version 1 and publishes it, so the indexers append the
-  correction. The orphaned version-0 rows stay put as history.
+  = <N-1>, rewind_count = rewind_count + 1 WHERE chain_id = <id>;`. Bump the
+  rewind count too: a pass already scanning compares against the pair, and
+  would otherwise advance straight back over the height you just re-opened. The
+  next gap pass saves N as version 1 and publishes it, so the indexers append
+  the correction. The orphaned version-0 rows stay put as history.
 - **A hole outside the retained window has no executable repair yet.**
   `raw-block-bulk-downloader --bucket <raw bucket> --start-block <N>
   --end-block <N>` will not do it as the tool stands. Every key it builds and
@@ -235,13 +235,13 @@ WHERE chain_id = <id> AND number BETWEEN A AND B;`:
   stale-chain recovery whose canonical refetch failed, which before #844
   orphaned the row without rewinding. `FindGaps` never scans below the
   watermark, so rewind it — `UPDATE backfill_watermark SET watermark = A - 1,
-  generation = generation + 1 WHERE chain_id = <id>;`, the generation bump for
-  the same reason as above. Then trigger a validator run by hand (Temporal UI →
-  Schedules → `<SERVICE_NAME>` → Trigger, or `temporal schedule trigger
-  --schedule-id <SERVICE_NAME>`) once the watermark has passed B; the repair is
-  done when `backfill_watermark_lag` has drained past B, not when the check
-  passes — right after the rewind it passes whether or not A..B was refetched,
-  because the strict half stops at the watermark you just lowered.
+  rewind_count = rewind_count + 1 WHERE chain_id = <id>;`, the rewind count
+  bump for the same reason as above. Then trigger a validator run by hand
+  (Temporal UI → Schedules → `<SERVICE_NAME>` → Trigger, or `temporal schedule
+  trigger --schedule-id <SERVICE_NAME>`) once the watermark has passed B; the
+  repair is done when `backfill_watermark_lag` has drained past B, not when the
+  check passes — right after the rewind it passes whether or not A..B was
+  refetched, because the strict half stops at the watermark you just lowered.
 
 ### Pre-flight before deploying the ARCT-379 validator checks
 
@@ -252,10 +252,10 @@ state that is already in the database, so a hole that has been sitting there
 since long before the rollout fails the very first hourly run:
 `VectorCronjobRunFailing` immediately, `VectorCronjobAllRunsFailing`
 (critical, pages) about 1h15m later. The repair is the one above — one
-`UPDATE backfill_watermark SET watermark = <below the lowest hole>, generation
-= generation + 1 WHERE chain_id = <id>;` per chain, which re-opens every hole
-above it in the same rewind — but it is a repair you want made before the
-pager goes off, not after.
+`UPDATE backfill_watermark SET watermark = <below the lowest hole>,
+rewind_count = rewind_count + 1 WHERE chain_id = <id>;` per chain, which
+re-opens every hole above it in the same rewind — but it is a repair you want
+made before the pager goes off, not after.
 
 `watcher-data-validator` runs on **six** chains in both staging and prod —
 chain ids 1, 10, 130, 8453, 42161 and 43114, one deployment each in

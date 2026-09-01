@@ -1495,8 +1495,8 @@ func truncate(s string, maxLen int) string {
 func seedWatermark(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chainID, watermark int64) {
 	t.Helper()
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO backfill_watermark (chain_id, watermark, generation) VALUES ($1, $2, 0)
-		 ON CONFLICT (chain_id) DO UPDATE SET watermark = EXCLUDED.watermark, generation = EXCLUDED.generation`,
+		`INSERT INTO backfill_watermark (chain_id, watermark, rewind_count) VALUES ($1, $2, 0)
+		 ON CONFLICT (chain_id) DO UPDATE SET watermark = EXCLUDED.watermark, rewind_count = EXCLUDED.rewind_count`,
 		chainID, watermark); err != nil {
 		t.Fatalf("seed watermark: %v", err)
 	}
