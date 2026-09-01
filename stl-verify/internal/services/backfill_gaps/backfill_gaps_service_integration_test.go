@@ -1745,3 +1745,78 @@ func TestIntegration_BackfillLoop_RefusesToUnOrphanLosingForkRun(t *testing.T) {
 		}
 	})
 }
+
+// rivalForkHash names the second losing fork at a height, for the case where
+// two orphaned rows share one height and the anchor descends to only one.
+func rivalForkHash(number int64) string {
+	return fmt.Sprintf("0xARCT379_fork_b_%d", number)
+}
+
+// TestIntegration_BackfillLoop_RefusesTheForkTheAnchorDoesNotDescendTo pins the
+// terminal check of the un-orphan walk. Two orphaned rows share a height; the
+// canonical successor's parent_hash names one of them, and the node serves the
+// other. Without the check the walk returns the segment it crossed and the heal
+// promotes the fork the chain above does NOT descend from — the wrong fork,
+// silently canonical, with the winner refused at that height from then on.
+func TestIntegration_BackfillLoop_RefusesTheForkTheAnchorDoesNotDescendTo(t *testing.T) {
+	pgRepo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+
+	const contested, successor int64 = 5, 6
+
+	client := newMockClient()
+	for i := int64(1); i <= successor; i++ {
+		client.AddBlock(i, "")
+	}
+	sharedParent := client.GetHeader(contested - 1).Hash
+
+	seedPublishedCanonicalChain(t, ctx, pgRepo, client, 1, contested-1)
+	savePublishedBlock(t, ctx, pgRepo, contested, forkHash(contested), sharedParent)
+	savePublishedBlock(t, ctx, pgRepo, contested, rivalForkHash(contested), sharedParent)
+	savePublishedBlock(t, ctx, pgRepo, successor, client.GetHeader(successor).Hash, rivalForkHash(contested))
+	for _, hash := range []string{forkHash(contested), rivalForkHash(contested)} {
+		if err := pgRepo.MarkBlockOrphaned(ctx, hash); err != nil {
+			t.Fatalf("orphan %s: %v", hash, err)
+		}
+	}
+	seedWatermark(t, ctx, pgRepo, 1, contested-1)
+
+	// The node serves the fork the successor does not descend from.
+	client.SetBlockHeader(contested, forkHash(contested), sharedParent)
+
+	logs := &testutil.SlogRecorder{}
+	cfg := BackfillConfigDefaults()
+	cfg.Logger = slog.New(logs)
+	svc, err := NewBackfillService(cfg, client, pgRepo, memory.NewBlockCache(), &integrationMockEventSink{})
+	if err != nil {
+		t.Fatalf("NewBackfillService: %v", err)
+	}
+	if err := svc.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	wantReason := fmt.Sprintf("the chain below canonical block %d reaches %s at height %d, not %s",
+		successor, truncateHash(rivalForkHash(contested)), contested, truncateHash(forkHash(contested)))
+	if !logs.ContainsAttr(wantReason) {
+		t.Errorf("no log record carries the terminal-hash refusal %q", wantReason)
+	}
+
+	got, err := pgRepo.GetBlockByNumber(ctx, contested)
+	if err != nil {
+		t.Fatalf("GetBlockByNumber(%d): %v", contested, err)
+	}
+	if got != nil {
+		t.Errorf("height %d has canonical row %+v, want none — neither fork may be promoted", contested, got)
+	}
+	for _, hash := range []string{forkHash(contested), rivalForkHash(contested)} {
+		block, err := pgRepo.GetBlockByHash(ctx, hash)
+		if err != nil {
+			t.Fatalf("GetBlockByHash(%s): %v", hash, err)
+		}
+		if block == nil || !block.IsOrphaned {
+			t.Errorf("block %s = %+v, want it still orphaned", hash, block)
+		}
+	}
+}
