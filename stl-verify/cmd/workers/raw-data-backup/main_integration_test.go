@@ -96,6 +96,8 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 
 	select {
 	case <-sqsState.FirstCallReceived:
+	case err := <-errCh:
+		t.Fatalf("run returned before polling SQS: %v", err)
 	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for service to start polling SQS")
 	}
