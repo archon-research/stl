@@ -2581,6 +2581,16 @@ func TestVerifyChainIntegrity_ReportsFirstViolation(t *testing.T) {
 			wantErrContains: "canonical block(s) 103 to 103 missing between blocks 102 and 104",
 		},
 		{
+			name: "a wide gap names the canonical blocks that bound it",
+			seed: func(t *testing.T, ctx context.Context, repo *BlockStateRepository) {
+				seedCanonicalChain(t, ctx, repo, 100, 102)
+				seedCanonicalChain(t, ctx, repo, 110, 111)
+			},
+			from:            100,
+			to:              111,
+			wantErrContains: "canonical block(s) 103 to 109 missing between blocks 102 and 110",
+		},
+		{
 			name: "parent hash break",
 			seed: func(t *testing.T, ctx context.Context, repo *BlockStateRepository) {
 				seedCanonicalChain(t, ctx, repo, 100, 103)
