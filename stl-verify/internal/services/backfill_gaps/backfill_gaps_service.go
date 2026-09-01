@@ -646,7 +646,7 @@ func (s *BackfillService) unorphanIfOnCanonicalChain(ctx context.Context, blockN
 		return fmt.Errorf("refusing to un-orphan block %d: %w", blockNum, err)
 	}
 
-	if err := s.stateRepo.ClearBlocksOrphaned(ctx, segment); err != nil {
+	if err := s.stateRepo.ClearBlocksOrphaned(ctx, anchor.Hash, segment); err != nil {
 		return fmt.Errorf("failed to clear orphan flag on existing block %d: %w", blockNum, err)
 	}
 	s.logger.Info("cleared stale orphan flag on backfilled block",

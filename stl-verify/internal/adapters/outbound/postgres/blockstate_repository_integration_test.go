@@ -1900,6 +1900,10 @@ func TestSaveBlock_TriggerQueryPlanIsEfficient(t *testing.T) {
 	}
 }
 
+// anchorHash203 is the canonical row above the 200-202 orphaned segment the
+// heal tests use; ClearBlocksOrphaned refuses a segment with no live anchor.
+const anchorHash203 = "0xsegment_anchor_203"
+
 // seedOrphanedSegment seeds a linked run of orphaned blocks over [from, to] and
 // returns their hashes in ascending block order.
 func seedOrphanedSegment(t *testing.T, ctx context.Context, repo *BlockStateRepository, from, to int64) []string {
@@ -1947,15 +1951,16 @@ func TestClearBlocksOrphaned(t *testing.T) {
 
 	ctx := context.Background()
 	hashes := seedOrphanedSegment(t, ctx, repo, 200, 202)
+	saveCanonicalBlockAs(t, ctx, repo, 203, anchorHash203, "0xsegment_202")
 
-	if err := repo.ClearBlocksOrphaned(ctx, hashes); err != nil {
+	if err := repo.ClearBlocksOrphaned(ctx, anchorHash203, hashes); err != nil {
 		t.Fatalf("ClearBlocksOrphaned: %v", err)
 	}
 	if got := canonicalHashesAt(t, ctx, 200, 202); len(got) != len(hashes) {
 		t.Fatalf("canonical hashes = %v, want all of %v", got, hashes)
 	}
 
-	if err := repo.ClearBlocksOrphaned(ctx, hashes); err != nil {
+	if err := repo.ClearBlocksOrphaned(ctx, anchorHash203, hashes); err != nil {
 		t.Fatalf("ClearBlocksOrphaned (idempotent call): %v", err)
 	}
 }
@@ -1970,12 +1975,37 @@ func TestClearBlocksOrphaned_ClearsNoneWhenAHashIsMissing(t *testing.T) {
 
 	ctx := context.Background()
 	hashes := seedOrphanedSegment(t, ctx, repo, 200, 202)
+	saveCanonicalBlockAs(t, ctx, repo, 203, anchorHash203, "0xsegment_202")
 
-	if err := repo.ClearBlocksOrphaned(ctx, append(hashes, "0xdoes_not_exist")); err == nil {
+	if err := repo.ClearBlocksOrphaned(ctx, anchorHash203, append(hashes, "0xdoes_not_exist")); err == nil {
 		t.Fatal("expected an error for the unknown hash, got nil")
 	}
 	if got := canonicalHashesAt(t, ctx, 200, 202); len(got) != 0 {
 		t.Errorf("canonical hashes = %v, want none (the failed heal must clear nothing)", got)
+	}
+}
+
+// TestClearBlocksOrphaned_RefusesWhenTheAnchorIsNoLongerCanonical is the
+// ARCT-379 round-3 race: the caller computes the segment on the pool, so a
+// reorg can orphan the anchor between the walk and this call. A plain read
+// cannot see that under READ COMMITTED once the tx is open — the anchor is
+// taken FOR UPDATE, and the whole heal refused when it is no longer canonical.
+func TestClearBlocksOrphaned_RefusesWhenTheAnchorIsNoLongerCanonical(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+	hashes := seedOrphanedSegment(t, ctx, repo, 200, 202)
+	saveCanonicalBlockAs(t, ctx, repo, 203, anchorHash203, "0xsegment_202")
+	if err := repo.MarkBlockOrphaned(ctx, anchorHash203); err != nil {
+		t.Fatalf("orphan the anchor: %v", err)
+	}
+
+	if err := repo.ClearBlocksOrphaned(ctx, anchorHash203, hashes); err == nil {
+		t.Fatal("expected ClearBlocksOrphaned to refuse an orphaned anchor, got nil")
+	}
+	if got := canonicalHashesAt(t, ctx, 200, 202); len(got) != 0 {
+		t.Errorf("canonical hashes = %v, want none (the segment must stay orphaned)", got)
 	}
 }
 
@@ -2022,7 +2052,9 @@ func TestClearBlocksOrphaned_RefusesWhenConflictingCanonicalExists(t *testing.T)
 	// Attempting to clear the orphan flag on the losing row must fail — the
 	// guard inside ClearBlocksOrphaned should detect the conflicting
 	// canonical row and bail.
-	if err := repo.ClearBlocksOrphaned(ctx, []string{orphanHash}); err == nil {
+	saveCanonicalBlockAs(t, ctx, repo, num+1, "0xclear_race_anchor_701", canonicalHash)
+
+	if err := repo.ClearBlocksOrphaned(ctx, "0xclear_race_anchor_701", []string{orphanHash}); err == nil {
 		t.Fatal("expected ClearBlocksOrphaned to refuse with conflicting canonical row, got nil")
 	}
 

@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -212,7 +213,7 @@ func TestClearBlocksOrphaned_ClearsTheSegmentAsOneUnit(t *testing.T) {
 				}
 			}
 
-			err := repo.ClearBlocksOrphaned(ctx, tt.hashes)
+			err := repo.ClearBlocksOrphaned(ctx, "0xhash104", tt.hashes)
 			if tt.wantErr && err == nil {
 				t.Fatal("ClearBlocksOrphaned = nil, want an error")
 			}
@@ -456,5 +457,61 @@ func TestVerifyParentLinks(t *testing.T) {
 				t.Errorf("VerifyParentLinks = %v, want error containing %q", err, tt.wantErrContains)
 			}
 		})
+	}
+}
+
+// TestClearBlocksOrphaned_RefusesWhenTheAnchorIsNoLongerCanonical mirrors the
+// postgres adapter: the caller computes the segment from a read taken outside
+// this call, so a reorg can orphan the anchor in between — and clearing then
+// promotes a run nothing canonical descends from.
+func TestClearBlocksOrphaned_RefusesWhenTheAnchorIsNoLongerCanonical(t *testing.T) {
+	tests := []struct {
+		name       string
+		anchorHash string
+	}{
+		{name: "a reorg orphaned the anchor mid-walk", anchorHash: "0xhash104"},
+		{name: "the anchor is not stored at all", anchorHash: "0xhash_never_stored"},
+	}
+
+	segment := []string{"0xhash101", "0xhash102", "0xhash103"}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			repo := NewBlockStateRepository()
+			seedCanonicalChain(t, ctx, repo, 100, 105)
+			for _, hash := range append(slices.Clone(segment), "0xhash104") {
+				if err := repo.MarkBlockOrphaned(ctx, hash); err != nil {
+					t.Fatalf("orphan %s: %v", hash, err)
+				}
+			}
+
+			if err := repo.ClearBlocksOrphaned(ctx, tt.anchorHash, segment); err == nil {
+				t.Fatal("ClearBlocksOrphaned = nil, want a refusal")
+			}
+			for _, hash := range segment {
+				block, err := repo.GetBlockByHash(ctx, hash)
+				if err != nil {
+					t.Fatalf("GetBlockByHash(%s): %v", hash, err)
+				}
+				if block == nil || !block.IsOrphaned {
+					t.Errorf("block %s = %+v, want it still orphaned", hash, block)
+				}
+			}
+		})
+	}
+}
+
+// TestClearBlocksOrphaned_RefusesAnAlreadyCanonicalRowWhoseHeightIsTaken: this
+// adapter skipped a hash that was already canonical, so it never looked at that
+// height — where postgres refuses because a second canonical row holds it.
+func TestClearBlocksOrphaned_RefusesAnAlreadyCanonicalRowWhoseHeightIsTaken(t *testing.T) {
+	ctx := context.Background()
+	repo := NewBlockStateRepository()
+	seedCanonicalChain(t, ctx, repo, 100, 105)
+	saveCanonicalBlockAs(t, ctx, repo, 103, "0xhash103_twin", "0xhash102")
+
+	if err := repo.ClearBlocksOrphaned(ctx, "0xhash104", []string{"0xhash103"}); err == nil {
+		t.Fatal("ClearBlocksOrphaned = nil, want a refusal: 0xhash103_twin already holds height 103")
 	}
 }

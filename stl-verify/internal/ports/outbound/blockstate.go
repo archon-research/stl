@@ -125,7 +125,13 @@ type BlockStateRepository interface {
 	// Idempotent: clearing an already-canonical row is a no-op. Returns an
 	// error, having changed nothing, if any hash is unknown or if another
 	// canonical row already holds one of the heights.
-	ClearBlocksOrphaned(ctx context.Context, hashes []string) error
+	//
+	// anchorHash is the canonical row the caller walked down from. The segment
+	// is computed before this call, so a reorg landing in between can orphan
+	// that anchor, and clearing would then promote a fork nothing descends
+	// from. The anchor is re-read here under a row lock and the whole set
+	// refused if it is no longer canonical (ARCT-379).
+	ClearBlocksOrphaned(ctx context.Context, anchorHash string, hashes []string) error
 
 	// HandleReorgAtomic atomically performs all reorg-related database operations:
 	// 1. Saves the reorg event

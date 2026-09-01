@@ -353,15 +353,17 @@ func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash strin
 // contained those hashes. Idempotent: an already-canonical row is left as it is.
 //
 // Every height is taken under the same per-(chain_id, number) advisory lock
-// saveBlockOnce and handleReorgAtomicOnce use, in ascending order so two
-// healers cannot deadlock. Without the lock a concurrent live reorg can insert
-// a new canonical row at one of these numbers between the lookup and the
-// update, leaving two non-orphaned rows at one height and breaking the
-// "highest version = canonical" invariant. The lookup is split from the UPDATE
-// (two statements) to avoid the TimescaleDB XX000 quirk on self-referencing
+// saveBlockOnce uses, in ascending order so two healers cannot deadlock.
+// Without the lock a concurrent live reorg can insert a new canonical row at
+// one of these numbers between the lookup and the update, leaving two
+// non-orphaned rows at one height and breaking the "highest version =
+// canonical" invariant. handleReorgAtomicOnce takes that lock only on the block
+// it inserts and orphans everything above it unlocked, so the anchor is locked
+// FOR UPDATE here instead. The lookup is split from the UPDATE (two statements)
+// to avoid the TimescaleDB XX000 quirk on self-referencing
 // UPDATE-with-SELECT-from-same-hypertable that the external review flagged.
 // See VEC-277 / PR #373 review Finding 6.
-func (r *BlockStateRepository) ClearBlocksOrphaned(ctx context.Context, hashes []string) error {
+func (r *BlockStateRepository) ClearBlocksOrphaned(ctx context.Context, anchorHash string, hashes []string) error {
 	if len(hashes) == 0 {
 		return nil
 	}
@@ -378,6 +380,9 @@ func (r *BlockStateRepository) ClearBlocksOrphaned(ctx context.Context, hashes [
 
 	numbers, err := r.lockHeightsOf(ctx, tx, hashes)
 	if err != nil {
+		return err
+	}
+	if err := r.lockCanonicalAnchor(ctx, tx, anchorHash); err != nil {
 		return err
 	}
 	if err := r.refuseConflictingCanonical(ctx, tx, numbers, hashes); err != nil {
@@ -436,6 +441,24 @@ func (r *BlockStateRepository) lockHeightsOf(ctx context.Context, tx pgx.Tx, has
 		}
 	}
 	return numbers, nil
+}
+
+// lockCanonicalAnchor holds the row the caller's walk started from for the rest
+// of the transaction. A plain read would not: the segment was computed on the
+// pool, and a reorg commit landing since can have orphaned the anchor, leaving
+// this heal to promote a run nothing canonical descends from.
+func (r *BlockStateRepository) lockCanonicalAnchor(ctx context.Context, tx pgx.Tx, anchorHash string) error {
+	var locked int
+	err := tx.QueryRow(ctx,
+		`SELECT 1 FROM block_states WHERE chain_id = $1 AND hash = $2 AND NOT is_orphaned FOR UPDATE`,
+		r.chainID, anchorHash).Scan(&locked)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("clear orphan flag: refusing to un-orphan: anchor %s is no longer canonical", anchorHash)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to lock the canonical anchor: %w", err)
+	}
+	return nil
 }
 
 // refuseConflictingCanonical stops the heal when another row already holds one

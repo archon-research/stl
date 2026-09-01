@@ -187,11 +187,17 @@ func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash strin
 
 // ClearBlocksOrphaned clears the is_orphaned flag on every named block, or on
 // none of them. Mirrors the postgres adapter contract: idempotent on
-// already-canonical rows, and refuses the whole set when a hash is unknown or
-// when a different canonical row already occupies one of the numbers.
-func (r *BlockStateRepository) ClearBlocksOrphaned(ctx context.Context, hashes []string) error {
+// already-canonical rows, and refuses the whole set when a hash is unknown,
+// when a different canonical row already occupies one of the numbers, or when
+// anchorHash — the canonical row the caller walked down from — is gone or has
+// itself been orphaned since.
+func (r *BlockStateRepository) ClearBlocksOrphaned(ctx context.Context, anchorHash string, hashes []string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if anchor, ok := r.blocks[anchorHash]; !ok || anchor.IsOrphaned {
+		return fmt.Errorf("clear orphan flag: refusing to un-orphan: anchor %s is no longer canonical", anchorHash)
+	}
 
 	healing := make(map[string]bool, len(hashes))
 	for _, hash := range hashes {
@@ -201,9 +207,6 @@ func (r *BlockStateRepository) ClearBlocksOrphaned(ctx context.Context, hashes [
 		block, ok := r.blocks[hash]
 		if !ok {
 			return fmt.Errorf("clear orphan flag: block with hash %s not found", hash)
-		}
-		if !block.IsOrphaned {
-			continue
 		}
 		// Leaving the orphan in place keeps the "highest version = canonical"
 		// invariant; the live writer wins (PR #373 review).

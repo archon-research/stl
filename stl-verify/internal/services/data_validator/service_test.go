@@ -78,7 +78,7 @@ func (m *mockBlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash s
 	return nil
 }
 
-func (m *mockBlockStateRepository) ClearBlocksOrphaned(ctx context.Context, hashes []string) error {
+func (m *mockBlockStateRepository) ClearBlocksOrphaned(ctx context.Context, anchorHash string, hashes []string) error {
 	return nil
 }
 

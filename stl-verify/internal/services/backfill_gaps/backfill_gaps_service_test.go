@@ -2329,7 +2329,7 @@ type stuckOrphanRepo struct {
 	outbound.BlockStateRepository
 }
 
-func (s *stuckOrphanRepo) ClearBlocksOrphaned(_ context.Context, _ []string) error {
+func (s *stuckOrphanRepo) ClearBlocksOrphaned(_ context.Context, _ string, _ []string) error {
 	// Pretend to succeed without actually clearing the flag.
 	return nil
 }
