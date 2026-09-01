@@ -75,7 +75,8 @@ const (
 type BackfillRecorder interface {
 	// RecordBackfillGapNoCanonical increments the counter that fires when a
 	// per-block gap-fill cycle completes without producing a non-orphaned
-	// canonical row. Labelled by chain.
+	// canonical row. Per-chain attribution comes from service.name; the chainID
+	// argument reaches no metric attribute.
 	RecordBackfillGapNoCanonical(ctx context.Context, chainID int64)
 
 	// RecordWatermarkLag records the current backfill lag (highest known block
@@ -85,10 +86,10 @@ type BackfillRecorder interface {
 	RecordWatermarkLag(ctx context.Context, lag int64)
 
 	// RecordWatermarkAdvanceSkipped increments the counter for a compare-and-set
-	// the stored cursor refused: a reorg committed while the pass was scanning,
-	// so its conclusion was dropped and the next pass re-runs it. A one-off is
-	// routine; a chain refused pass after pass is a wedged cursor, which
-	// otherwise looks exactly like a chain with nothing to do. Labelled by chain.
+	// the stored cursor refused. A non-zero rate means a reorg landed between a
+	// pass's cursor read and its write: contention, self-healing next pass. A
+	// wedged cursor is the opposite shape — this counter at zero with the lag
+	// gauge climbing. Per-chain attribution comes from service.name.
 	RecordWatermarkAdvanceSkipped(ctx context.Context, chainID int64)
 }
 

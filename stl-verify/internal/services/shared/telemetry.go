@@ -107,9 +107,9 @@ func NewServiceTelemetryWithProvider(mp metric.MeterProvider) (*ServiceTelemetry
 	}
 
 	// backfill.watermark_advance_skipped counts passes whose advance the stored
-	// cursor refused. Isolated increments are the reorg race working as
-	// designed; a sustained rate alongside a flat backfill.watermark_lag is a
-	// cursor no pass can move (ARCT-379).
+	// cursor refused. A non-zero rate is a reorg landing between a pass's cursor
+	// read and its write: contention, self-healing next pass. A wedged cursor is
+	// this counter at zero with backfill.watermark_lag climbing (ARCT-379).
 	t.backfillWatermarkAdvanceSkips, err = meter.Int64Counter(
 		"backfill.watermark_advance_skipped.total",
 		metric.WithDescription("Backfill passes whose watermark advance was refused because a reorg moved the cursor mid-scan"),
