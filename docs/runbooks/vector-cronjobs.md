@@ -186,14 +186,21 @@ Repair:
   gap pass saves N as version 1 and publishes it, so the indexers append the
   correction. The orphaned version-0 rows stay put as history.
 - **A hole outside the retained window has no executable repair yet.**
-  `raw-block-bulk-downloader --start-block <N> --end-block <N>` (run it with
-  `--dry-run` first: it prints the plan per height) writes the canonical block,
-  receipts and traces at the next free version above the losing fork, but that
-  fixes S3 only: the indexers' rows stay
-  at `block_version` 0 until the republish tool tracked as **ARCT-383** exists.
+  `raw-block-bulk-downloader --bucket <raw bucket> --start-block <N>
+  --end-block <N>` will not do it as the tool stands. Every key it builds and
+  every existence check it makes is pinned to a literal version `1`, and its
+  uploads go through `WriteFileIfNotExists`, so at a losing-fork height it
+  finds the fork's own `<N>_1_*` objects already in place, counts the block as
+  skipped and moves on — a silent no-op, never an overwrite. There is no
+  `--dry-run` flag either; the tool exits 2 on one. Republishing the canonical
+  block, receipts and traces at the next free version above the losing fork
+  needs **#849**, which adds `-dry-run` and next-free-version writing. Even
+  then it fixes S3 only: the indexers' rows stay at `block_version` 0 until the
+  republisher (**ARCT-383**, #850) re-emits the block event at the new version.
 
-Run the check against prod's retained window before the prod deploy — a hole
-found there is repairable while it is still inside retention.
+Before the prod deploy, run the pre-flight queries below against prod's
+retained window — a hole found there is repairable while it is still inside
+retention.
 
 ### Special case: `watcher-data-validator` "Chain Integrity" missing blocks
 
@@ -235,6 +242,82 @@ WHERE chain_id = <id> AND number BETWEEN A AND B;`:
   done when `backfill_watermark_lag` has drained past B, not when the check
   passes — right after the rewind it passes whether or not A..B was refetched,
   because the strict half stops at the watermark you just lowered.
+
+### Pre-flight before deploying the ARCT-379 validator checks
+
+Both special cases above rest on checks #844 adds or widens —
+`FindOrphanOnlyHeights`, and the missing-height, duplicate-canonical and
+broken-parent-link violations `VerifyChainIntegrity` now reports. They judge
+state that is already in the database, so a hole that has been sitting there
+since long before the rollout fails the very first hourly run:
+`VectorCronjobRunFailing` immediately, `VectorCronjobAllRunsFailing`
+(critical, pages) about 1h15m later. The repair is the one above — one
+`UPDATE backfill_watermark SET watermark = <below the lowest hole>, generation
+= generation + 1 WHERE chain_id = <id>;` per chain, which re-opens every hole
+above it in the same rewind — but it is a repair you want made before the
+pager goes off, not after.
+
+`watcher-data-validator` runs on **six** chains in both staging and prod —
+chain ids 1, 10, 130, 8453, 42161 and 43114, one deployment each in
+`k8s/overlays/{staging,prod}/kustomization.yaml` — so run all three queries
+once per chain. All three are read-only, and `block_states`' 30-day retention
+bounds them: only the retained window is checkable, and only a hole inside it
+is repairable. Expected outcome: **zero rows on every chain, or repair first.**
+
+**1. Orphan-only heights.** This is the query `FindOrphanOnlyHeights`
+(`internal/adapters/outbound/postgres/blockstate_repository.go`) runs, minus
+its range bound. Sub-second; served by `idx_block_states_orphaned`.
+
+```sql
+SELECT DISTINCT o.number
+FROM block_states o
+WHERE o.chain_id = <id> AND o.is_orphaned
+  AND NOT EXISTS (SELECT 1 FROM block_states c
+                  WHERE c.chain_id = o.chain_id AND c.number = o.number AND NOT c.is_orphaned)
+ORDER BY o.number;
+```
+
+**2. Chain integrity below the watermark** — missing heights, duplicate
+canonical rows and broken parent links in one pass, the three violations
+`VerifyChainIntegrity` reports. Bound it by the chain's
+`backfill_watermark.watermark` above and `min(number)` over its canonical rows
+below. Measured on staging at ≤16 s on the largest chain.
+
+```sql
+WITH ordered_blocks AS (
+  SELECT number, hash, parent_hash,
+         LAG(hash)   OVER (ORDER BY number, version DESC) AS prev_hash,
+         LAG(number) OVER (ORDER BY number, version DESC) AS prev_number
+  FROM block_states
+  WHERE chain_id = <id> AND NOT is_orphaned AND number >= <min> AND number <= <watermark>)
+SELECT prev_number + 1 AS first_missing, number - 1 AS last_missing, prev_number, number
+FROM ordered_blocks
+WHERE prev_number IS NOT NULL
+  AND (prev_number = number OR prev_number < number - 1
+       OR (prev_number = number - 1 AND parent_hash != prev_hash))
+ORDER BY number LIMIT 1;
+```
+
+**3. The tail.** The pair scan has no successor to flag a hole at the *top* of
+the range against, so check that separately:
+
+```sql
+SELECT max(number) FROM block_states WHERE chain_id = <id> AND NOT is_orphaned;
+```
+
+must be **≥ that chain's watermark**. A max below it is the shape a watermark
+parked on an unfilled height leaves, and the validator fails the run on it.
+
+Staging, as of 2026-09-01: zero orphan-only heights, zero integrity violations
+and `max(number)` at or above the watermark on all six chains — nothing to
+repair there. Run the same three against prod before the prod deploy.
+
+If the pre-flight does turn something up, or you would rather not race the
+first hourly run, propose in the PR — and get a human to approve it, per
+[alerts/AGENTS.md](../../alerts/AGENTS.md) — that `VectorCronjobRunFailing`
+and `VectorCronjobAllRunsFailing` for `watcher-data-validator` be silenced for
+the deploy window: keep the rewind tracked, and silence the alert while that
+is open.
 
 ---
 
