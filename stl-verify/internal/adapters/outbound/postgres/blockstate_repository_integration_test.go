@@ -2652,6 +2652,19 @@ func TestVerifyChainIntegrity_ReportsFirstViolation(t *testing.T) {
 			to:              105,
 			wantErrContains: "canonical block(s) 102 to 102 missing between blocks 101 and 103",
 		},
+		{
+			name: "the lower of two parent breaks is reported",
+			seed: func(t *testing.T, ctx context.Context, repo *BlockStateRepository) {
+				seedCanonicalChain(t, ctx, repo, 100, 101)
+				saveCanonicalBlock(t, ctx, repo, 102, "0xhash100")
+				saveCanonicalBlock(t, ctx, repo, 103, "0xhash102")
+				saveCanonicalBlock(t, ctx, repo, 104, "0xhash102")
+				saveCanonicalBlock(t, ctx, repo, 105, "0xhash104")
+			},
+			from:            100,
+			to:              105,
+			wantErrContains: "chain integrity violation at block 102",
+		},
 	}
 
 	for _, tt := range tests {
@@ -2676,6 +2689,37 @@ func TestVerifyChainIntegrity_ReportsFirstViolation(t *testing.T) {
 				t.Errorf("VerifyChainIntegrity = %v, want error containing %q", err, tt.wantErrContains)
 			}
 		})
+	}
+}
+
+// TestReportEarliestOrderedPairViolation_ScansBelowTheWitness pins the second
+// phase on its own: the probe's witness is whichever violation the plan reached
+// first, so the re-scan has to bound the range above by it, never below.
+func TestReportEarliestOrderedPairViolation_ScansBelowTheWitness(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+	seedCanonicalChain(t, ctx, repo, 100, 101)
+	saveCanonicalBlock(t, ctx, repo, 102, "0xhash100")
+	saveCanonicalBlock(t, ctx, repo, 103, "0xhash102")
+	saveCanonicalBlock(t, ctx, repo, 104, "0xhash102")
+	saveCanonicalBlock(t, ctx, repo, 105, "0xhash104")
+
+	witness := &orderedPairViolation{
+		number:     104,
+		hash:       "0xhash104",
+		parentHash: "0xhash102",
+		prevHash:   "0xhash103",
+		prevNumber: 103,
+	}
+
+	err := repo.reportEarliestOrderedPairViolation(ctx, 100, witness, true)
+	if err == nil {
+		t.Fatal("reportEarliestOrderedPairViolation = nil, want the violation at block 102")
+	}
+	if !strings.Contains(err.Error(), "chain integrity violation at block 102") {
+		t.Errorf("reportEarliestOrderedPairViolation = %v, want the violation at block 102", err)
 	}
 }
 

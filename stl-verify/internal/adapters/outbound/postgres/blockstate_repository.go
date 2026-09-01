@@ -999,9 +999,73 @@ func (r *BlockStateRepository) VerifyParentLinks(ctx context.Context, fromBlock,
 // descending to match idx_block_states_chain_number_version, which an ascending
 // tiebreak would leave to an Incremental Sort.
 func (r *BlockStateRepository) verifyOrderedPairs(ctx context.Context, fromBlock, toBlock int64, reportMissing bool) error {
-	// LAG leaves the range's first block unpaired, so it is never flagged: an
-	// unseeded chain's watermark starts at 0, far below its first block.
-	query := `
+	// No ORDER BY: Postgres pushes a LIMIT's fast-start fraction into the window
+	// subquery only when the outer level carries no sort clause, and the
+	// total-cost plan it picks instead sorts the whole range to disk.
+	witness, err := r.findOrderedPairViolation(ctx, anyOrderedPairViolation, fromBlock, toBlock, reportMissing)
+	if err != nil || witness == nil {
+		return err
+	}
+	return r.reportEarliestOrderedPairViolation(ctx, fromBlock, witness, reportMissing)
+}
+
+// reportEarliestOrderedPairViolation re-runs the scan bounded above by the
+// witness, so the ORDER BY only ever sorts a range that ends at a violation. An
+// empty re-run means the data was repaired since the probe; the witness stands.
+func (r *BlockStateRepository) reportEarliestOrderedPairViolation(ctx context.Context, fromBlock int64, witness *orderedPairViolation, reportMissing bool) error {
+	earliest, err := r.findOrderedPairViolation(ctx, firstOrderedPairViolation, fromBlock, witness.number, reportMissing)
+	if err != nil {
+		return err
+	}
+	if earliest == nil {
+		earliest = witness
+	}
+	return orderedPairViolationError(earliest)
+}
+
+// findOrderedPairViolation returns nil when the range holds no violation.
+func (r *BlockStateRepository) findOrderedPairViolation(ctx context.Context, query string, fromBlock, toBlock int64, reportMissing bool) (*orderedPairViolation, error) {
+	var v orderedPairViolation
+	err := r.pool.QueryRow(ctx, query, r.chainID, fromBlock, toBlock, reportMissing).Scan(
+		&v.number, &v.hash, &v.parentHash, &v.prevHash, &v.prevNumber,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to verify chain integrity: %w", err)
+	}
+	return &v, nil
+}
+
+// orderedPairViolation is a canonical row and the row that precedes it in
+// (number, version DESC) order, where the two fail to form a valid chain link.
+type orderedPairViolation struct {
+	number     int64
+	hash       string
+	parentHash string
+	prevHash   string
+	prevNumber int64
+}
+
+func orderedPairViolationError(v *orderedPairViolation) error {
+	if v.prevNumber == v.number {
+		return fmt.Errorf("chain integrity violation: duplicate canonical rows at height %d: %s and %s",
+			v.number, v.prevHash, v.hash)
+	}
+	if v.prevNumber < v.number-1 {
+		return fmt.Errorf("chain integrity violation: canonical block(s) %d to %d missing between blocks %d and %d",
+			v.prevNumber+1, v.number-1, v.prevNumber, v.number)
+	}
+	return fmt.Errorf("chain integrity violation at block %d: parent_hash %s does not match hash %s of block %d",
+		v.number, v.parentHash, v.prevHash, v.prevNumber)
+}
+
+// orderedPairScan is the CTE and violation predicate both verifyOrderedPairs
+// statements run; they differ only in the tail appended below. LAG leaves the
+// range's first block unpaired, so it is never flagged: an unseeded chain's
+// watermark starts at 0, far below its first block.
+const orderedPairScan = `
 		WITH ordered_blocks AS (
 			SELECT number, hash, parent_hash,
 				LAG(hash) OVER (ORDER BY number, version DESC) as prev_hash,
@@ -1016,36 +1080,12 @@ func (r *BlockStateRepository) verifyOrderedPairs(ctx context.Context, fromBlock
 				prev_number = number
 				OR (prev_number < number - 1 AND $4)
 				OR (prev_number = number - 1 AND parent_hash != prev_hash)
-			)
-		ORDER BY number
-		LIMIT 1
-	`
+			)`
 
-	var brokenBlock, prevBlockNum int64
-	var blockHash, parentHash, prevHash string
-
-	err := r.pool.QueryRow(ctx, query, r.chainID, fromBlock, toBlock, reportMissing).Scan(
-		&brokenBlock, &blockHash, &parentHash, &prevHash, &prevBlockNum,
-	)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil // Chain is valid
-		}
-		return fmt.Errorf("failed to verify chain integrity: %w", err)
-	}
-
-	if prevBlockNum == brokenBlock {
-		return fmt.Errorf("chain integrity violation: duplicate canonical rows at height %d: %s and %s",
-			brokenBlock, prevHash, blockHash)
-	}
-	if prevBlockNum < brokenBlock-1 {
-		return fmt.Errorf("chain integrity violation: canonical block(s) %d to %d missing between blocks %d and %d",
-			prevBlockNum+1, brokenBlock-1, prevBlockNum, brokenBlock)
-	}
-
-	return fmt.Errorf("chain integrity violation at block %d: parent_hash %s does not match hash %s of block %d",
-		brokenBlock, parentHash, prevHash, prevBlockNum)
-}
+const (
+	anyOrderedPairViolation   = orderedPairScan + "\n\t\tLIMIT 1\n\t"
+	firstOrderedPairViolation = orderedPairScan + "\n\t\tORDER BY number\n\t\tLIMIT 1\n\t"
+)
 
 // verifyRangeReachesEnd reports heights missing above the last canonical row.
 // The pair scan has no successor to flag them against, so a hole at the top of
