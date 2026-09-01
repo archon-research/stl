@@ -31,10 +31,8 @@ MAINNET_CHAIN_ID = 1
 # a genuine zero rather than as absent data. Anything summed or reported per chain
 # has to know the difference; ``test_chain_names.py`` fails if the two sides drift.
 SERVED_TRACKER_CHAINS: frozenset[str] = frozenset(
-    {"mainnet", "avalanche-c", "base", "optimism", "unichain", "arbitrum"}
+    {"mainnet", "avalanche-c", "base", "optimism", "unichain", "arbitrum", "robinhood"}
 )
-# Robinhood is acknowledged but not yet served; see
-# stl-verify/internal/services/allocation_tracker/chains.go.
 
 
 def chain_name_for(chain_id: int | None) -> str | None:
