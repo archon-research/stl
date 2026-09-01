@@ -212,6 +212,7 @@ func positionRow(overrides map[string]any) map[string]any {
 		"token_symbol":     "spUSDS",
 		"token_name":       "Spark USDS",
 		"address":          "0xc02ab1a5eaa8d1b114ef786d9bde108cd4364359",
+		"wallet_address":   "0x1111111111111111111111111111111111111111",
 		"assets":           "782710914.129541047405509005",
 		"allocated_assets": "700000000.10",
 		"idle_assets":      "82710914.02",
@@ -289,6 +290,9 @@ func TestFetchPositionsCarriesEveryFieldUnrounded(t *testing.T) {
 	if got.Star != "spark" {
 		t.Errorf("Star = %q, want spark", got.Star)
 	}
+	if got.WalletAddress != "0x1111111111111111111111111111111111111111" {
+		t.Errorf("WalletAddress = %q, want the upstream proxy address", got.WalletAddress)
+	}
 }
 
 func TestFetchPositionsKeepsOmittedOptionalFieldsNil(t *testing.T) {
@@ -309,7 +313,7 @@ func TestFetchPositionsKeepsOmittedOptionalFieldsNil(t *testing.T) {
 }
 
 func TestFetchPositionsRejectsAnyAbsentRequiredField(t *testing.T) {
-	for _, field := range []string{"protocol", "network", "token_symbol", "address", "assets"} {
+	for _, field := range []string{"protocol", "network", "token_symbol", "address", "assets", "wallet_address"} {
 		t.Run(field, func(t *testing.T) {
 			client, _ := newPositionsTestClient(t, []map[string]any{positionRow(map[string]any{field: nil})}, 1)
 
@@ -335,11 +339,49 @@ func TestFetchPositionsRejectsAnEmptyResult(t *testing.T) {
 	}
 }
 
-func TestFetchPositionsRejectsADuplicateRowIdentity(t *testing.T) {
-	client, _ := newPositionsTestClient(t, []map[string]any{positionRow(nil), positionRow(nil)}, 2)
+// Reproduces grove's live shape: the same (network, token_address) reported
+// under two proxy wallets, with materially different balances on each — the
+// staging failure this fix addresses ("sky positions for prime grove repeat
+// identity ... on ethereum; the row identity assumption no longer holds").
+// wallet_address is real identity, so this must not be rejected as a
+// duplicate and must yield both rows.
+func TestFetchPositionsKeepsTheSameTokenUnderTwoWalletsDistinct(t *testing.T) {
+	client, _ := newPositionsTestClient(t, []map[string]any{
+		positionRow(map[string]any{
+			"star": "grove", "token_symbol": "AUSD",
+			"wallet_address": "0x00000000efe302beaa2b3e6e1b18d08d69a9012a",
+			"assets":         "1020000",
+		}),
+		positionRow(map[string]any{
+			"star": "grove", "token_symbol": "AUSD",
+			"wallet_address": "0x000000005ce4e5e4e5e4e5e4e5e4e5e4e5e4e5e4",
+			"assets":         "29000000",
+		}),
+	}, 2)
+
+	rows, err := client.FetchPositions(context.Background(), []string{"grove"})
+	if err != nil {
+		t.Fatalf("FetchPositions() = %v, want the two proxy rows to be kept distinct", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2 — one per proxy wallet", len(rows))
+	}
+	if rows[0].WalletAddress == rows[1].WalletAddress {
+		t.Errorf("both rows carry wallet %q, want the two distinct proxy addresses", rows[0].WalletAddress)
+	}
+}
+
+// A duplicate identity that also repeats the same wallet is still rejected:
+// wallet_address narrows identity, it does not widen what counts as a
+// duplicate.
+func TestFetchPositionsRejectsADuplicateRowIdentitySharingTheSameWallet(t *testing.T) {
+	client, _ := newPositionsTestClient(t, []map[string]any{
+		positionRow(map[string]any{"wallet_address": "0x1111111111111111111111111111111111111111"}),
+		positionRow(map[string]any{"wallet_address": "0x1111111111111111111111111111111111111111"}),
+	}, 2)
 
 	if _, err := client.FetchPositions(context.Background(), []string{"spark"}); err == nil {
-		t.Fatal("FetchPositions() = nil, want an error — a duplicate identity would silently conflict away at insert")
+		t.Fatal("FetchPositions() = nil, want an error — same wallet, same token, same network is still one identity")
 	}
 }
 

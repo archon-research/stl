@@ -914,6 +914,12 @@ export interface components {
        * @example 1
        */
       underlying_token_id?: number | null;
+      /**
+       * Wallet Address
+       * @description The ALM proxy holding this position, as upstream reports it. Populated on reference rows only — the same (`network`, `receipt_token_address`/`held_token_address`) can legitimately recur under a prime's different proxy wallets, and this is what distinguishes those rows. `null` on an indexed row, which is already scoped to a single queried proxy.
+       * @example 0x1234567890abcdef1234567890abcdef12345678
+       */
+      wallet_address?: string | null;
     };
     /**
      * AllocationRiskCapitalResponse

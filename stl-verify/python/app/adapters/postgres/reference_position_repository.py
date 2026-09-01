@@ -54,7 +54,7 @@ _POSITIONS_SQL = text(
         LIMIT 1
     ),
     latest AS (
-        SELECT DISTINCT ON (p.network, p.token_address)
+        SELECT DISTINCT ON (p.network, p.token_address, p.wallet_address)
             p.synced_at,
             p.network,
             p.chain_id,
@@ -62,6 +62,7 @@ _POSITIONS_SQL = text(
             p.token_symbol,
             p.token_name,
             p.token_address,
+            p.wallet_address,
             p.assets_usd,
             p.allocated_assets_usd,
             p.idle_assets_usd,
@@ -71,7 +72,7 @@ _POSITIONS_SQL = text(
         FROM prime_reference_position p
         WHERE p.prime_id = (SELECT id FROM target)
           AND p.synced_at = (SELECT synced_at FROM cycle)
-        ORDER BY p.network, p.token_address, p.processing_version DESC
+        ORDER BY p.network, p.token_address, p.wallet_address, p.processing_version DESC
     )
     SELECT
         r.synced_at,
@@ -81,6 +82,7 @@ _POSITIONS_SQL = text(
         r.token_symbol,
         r.token_name,
         r.token_address,
+        r.wallet_address,
         r.assets_usd,
         r.allocated_assets_usd,
         r.idle_assets_usd,
@@ -133,6 +135,7 @@ def _position(row) -> ReferencePosition:
         symbol=row.token_symbol,
         name=text_or_empty(row.token_name),
         token_address=row.token_address,
+        wallet_address=row.wallet_address,
         assets_usd=required_decimal(row.assets_usd, "assets_usd"),
         allocated_assets_usd=optional_decimal(row.allocated_assets_usd, "allocated_assets_usd"),
         idle_assets_usd=optional_decimal(row.idle_assets_usd, "idle_assets_usd"),

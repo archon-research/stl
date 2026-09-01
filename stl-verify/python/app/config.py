@@ -64,6 +64,19 @@ class Settings(BaseSettings):
     otel_enabled: bool
     otel_exporter_otlp_endpoint: str
     otel_service_name: str
+    # --- auth plane (ADR-015; enforcement lands in a follow-up) ------------
+    # All defaulted so the app ships dark: with auth_enabled=False nothing
+    # below is read and behaviour is byte-identical. One flag reverts the
+    # whole auth path (claim reading, JWT verify, FGA checks) by design.
+    auth_enabled: bool = False
+    oidc_issuer: str = ""  # e.g. http://keycloak.auth.svc/realms/archon
+    oidc_audience: str = ""  # `aud` the API validates
+    openfga_url: str = ""  # e.g. http://openfga.auth.svc:8080
+    # Published by the openfga-store ConfigMap (store/model ids are created by
+    # the store-bootstrap Job; they cannot be known at deploy-authoring time).
+    openfga_store_id: str = ""
+    openfga_model_id: str = ""
+
     risk_default_gap_pct: Decimal = Field(default=Decimal("0.15"), ge=0, le=1)
     suraf_inputs_dir: Path = ENV_DIR / "suraf" / "inputs"
     suraf_mappings_file: Path = ENV_DIR / "suraf" / "mappings" / "asset_to_rating.json"

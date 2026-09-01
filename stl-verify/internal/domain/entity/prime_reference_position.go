@@ -30,6 +30,11 @@ type PrimeReferencePosition struct {
 	// Nil when upstream omits it.
 	TokenName    *string
 	TokenAddress string
+	// Which of the prime's proxy wallets holds the position. Part of row
+	// identity: the same token address recurs under a prime's different
+	// proxies (verified live on grove, whose Uni V3 LP position splits across
+	// two proxies at materially different balances).
+	WalletAddress string
 
 	AssetsUSD string
 	// Nil when upstream omits them, which is distinct from zero.

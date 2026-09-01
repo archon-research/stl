@@ -369,6 +369,7 @@ func (s *Service) toPositions(
 			TokenSymbol:        row.TokenSymbol,
 			TokenName:          row.TokenName,
 			TokenAddress:       row.TokenAddress,
+			WalletAddress:      row.WalletAddress,
 			AssetsUSD:          row.Assets,
 			AllocatedAssetsUSD: row.AllocatedAssets,
 			IdleAssetsUSD:      row.IdleAssets,

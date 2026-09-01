@@ -170,6 +170,17 @@ class AllocationResponse(BaseModel):
         ),
         examples=["ethereum"],
     )
+    wallet_address: str | None = Field(
+        default=None,
+        description=(
+            "The ALM proxy holding this position, as upstream reports it. Populated on reference "
+            "rows only — the same (`network`, `receipt_token_address`/`held_token_address`) can "
+            "legitimately recur under a prime's different proxy wallets, and this is what "
+            "distinguishes those rows. `null` on an indexed row, which is already scoped to a "
+            "single queried proxy."
+        ),
+        examples=["0x1234567890abcdef1234567890abcdef12345678"],
+    )
     receipt_token_id: int | None = Field(
         default=None,
         description="Surrogate id of the receipt token. `null` for direct asset holdings.",
@@ -620,15 +631,24 @@ async def _merged_allocations(
     merged: list[AllocationResponse] = []
     matched: set[int] = set()
     for row in reference:
+        # `wallet_address` narrows a reference row's identity but not
+        # `PositionFacts` (indexed rows carry no wallet to narrow against), so
+        # grove's two proxy rows for one token answer to the same key. Skipping
+        # an already-matched counterpart keeps the first wallet bound to it and
+        # falls the rest through to a plain reference row, instead of copying
+        # the same indexed `amount_usd` into the merged list twice.
         counterpart = next(
-            (by_identity[key] for key in position_identities(_position_facts(row)) if key in by_identity),
+            (
+                by_identity[key]
+                for key in position_identities(_position_facts(row))
+                if key in by_identity and id(by_identity[key]) not in matched
+            ),
             None,
         )
-        if counterpart is not None:
-            matched.add(id(counterpart))
         if counterpart is None:
             merged.append(row.model_copy(update={"source": Provenance.REFERENCE}))
             continue
+        matched.add(id(counterpart))
         # STL's own figures lead where both report a position: they are computed
         # from the chain rather than reported. The two disagree by ~1% on
         # exposure, which a consumer needs told rather than averaged away.
@@ -719,6 +739,7 @@ def _reference_allocation_row(
     return AllocationResponse(
         chain_id=row.chain_id,
         network=row.network,
+        wallet_address=row.wallet_address,
         receipt_token_id=row.receipt_token_id,
         receipt_token_address=row.token_address if as_address(row.token_address) else None,
         # Unlike the Star monitor's breakdown, this feed names no loan token
