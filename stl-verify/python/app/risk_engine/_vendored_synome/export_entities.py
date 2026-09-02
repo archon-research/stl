@@ -17,6 +17,7 @@ from app.risk_engine._vendored_synome.spec.entities.assets_missing_from_atlas im
     MISSING_FROM_ATLAS_BY_PRIME,
 )
 from app.risk_engine._vendored_synome.spec.entities.networks import STL_CHAIN_BY_NETWORK
+from app.risk_engine._vendored_synome.spec.entities.primes import PrimeAgent
 from app.risk_engine._vendored_synome.spec.entities.protocol_sets import (
     ATOKEN_PROTOCOLS,
     ERC4626_PROTOCOLS,
@@ -109,9 +110,11 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
 
 
-def _prime_to_star(prime: PrimeName | str) -> str:
-    text = prime.value if isinstance(prime, PrimeName) else str(prime)
-    return text.lower().replace(" ", "-")
+def _prime_to_star(prime: PrimeAgent | PrimeName) -> str:
+    # Both paths must slug the PrimeName *value* ("Launch Agent 7"), never the
+    # Enum member name ("LAUNCH_AGENT_7") — the two diverge for multi-word primes.
+    name = prime.value.name if isinstance(prime, PrimeAgent) else prime.value
+    return str(name).lower().replace(" ", "-")
 
 
 def _token_type(protocol: Protocol | None, chain: str, token_name: str) -> TokenType:
@@ -156,10 +159,7 @@ VENDORED_WHEEL_VERSION = "0.2.0.dev202607240944"
 VENDORED_UPSTREAM_COMMIT = "d136e461f177cad555e0c5fc3f497fc37df9dc5f"
 
 
-def build_axis_synome_contract(
-    version: str | None = None,
-    axis_synome_git_commit: str | None = None,
-) -> AxisSynomeContract:
+def build_axis_synome_contract() -> AxisSynomeContract:
     # Canonical ALM Proxy per (star, chain). This is the wallet that holds the
     # operational allocation positions, and the wallet that every token entry on
     # that (star, chain) binds to.
@@ -170,7 +170,7 @@ def build_axis_synome_contract(
         if chain is None:
             continue
 
-        star = _prime_to_star(deployment.prime.name)
+        star = _prime_to_star(deployment.prime)
         alm_proxy_by_key[(star, chain)] = str(deployment.address).lower()
 
     # All wallets to export per (star, chain): the canonical ALM Proxy first,
@@ -186,7 +186,7 @@ def build_axis_synome_contract(
         if chain is None:
             continue
 
-        star = _prime_to_star(prime.name)
+        star = _prime_to_star(prime)
         for address in addresses:
             address = str(address).lower()
             existing = proxies_by_key.setdefault((star, chain), [])
@@ -310,8 +310,8 @@ def build_axis_synome_contract(
         ]
 
     return AxisSynomeContract(
-        version=version or VENDORED_WHEEL_VERSION,
-        axis_synome_git_commit=axis_synome_git_commit or VENDORED_UPSTREAM_COMMIT,
+        version=VENDORED_WHEEL_VERSION,
+        axis_synome_git_commit=VENDORED_UPSTREAM_COMMIT,
         axis_synome=AxisSynomeModel(
             spec=SpecModel(
                 entities=EntitiesModel(
@@ -323,16 +323,8 @@ def build_axis_synome_contract(
     )
 
 
-def export_axis_synome_contract(
-    data_path: Path,
-    schema_path: Path,
-    version: str | None,
-    axis_synome_git_commit: str | None,
-) -> None:
-    config = build_axis_synome_contract(
-        version=version,
-        axis_synome_git_commit=axis_synome_git_commit,
-    )
+def export_axis_synome_contract(data_path: Path, schema_path: Path) -> None:
+    config = build_axis_synome_contract()
 
     data_path.parent.mkdir(parents=True, exist_ok=True)
     schema_path.parent.mkdir(parents=True, exist_ok=True)
@@ -362,26 +354,8 @@ def main() -> None:
         default=Path("generated/stl/axis_synome_entities.schema.json"),
         help="Output JSON schema path",
     )
-    parser.add_argument(
-        "--version",
-        type=str,
-        default=None,
-        help="Version string embedded in exported config (default: the vendoring-baseline wheel version)",
-    )
-    parser.add_argument(
-        "--git-commit",
-        type=str,
-        default=None,
-        help="axis-synome git commit embedded in exported config (default: the vendoring-baseline upstream commit)",
-    )
-
     args = parser.parse_args()
-    export_axis_synome_contract(
-        args.out,
-        args.schema_out,
-        version=args.version,
-        axis_synome_git_commit=args.git_commit,
-    )
+    export_axis_synome_contract(args.out, args.schema_out)
 
 
 if __name__ == "__main__":
