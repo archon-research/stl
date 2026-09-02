@@ -89,10 +89,17 @@ figures while still answering 200 — the worst failure shape available. This is
 policy plus a CI assertion that no name ever maps to a different `prime.id` than before, not by
 machinery: the failure needs two events, a rename and then a reuse, and both go through review.
 
-Responses echo the prime's *current* name, and additionally carry `prime_key`, an opaque
-identifier that never changes. The echoed name matches what the entity is called; `prime_key` is
-the durable handle a client keys on. Retired names stay listed as aliases in the catalogue.
-`prime_key` is a field, never a URL segment.
+Every prime-scoped row carries `prime_key`, an opaque identifier that never changes; the
+envelope repeats it, alongside the prime's echoed *current* name, when the request was scoped to
+one prime. The echoed name matches what the entity is called; `prime_key` is the durable handle a
+client keys on. Retired names stay listed as aliases in the catalogue. `prime_key` is a field,
+never a URL segment.
+
+The key rides the row rather than the envelope because the unscoped history path returns rows for
+several primes. Per envelope, a row in `data[]` would carry no prime identity except the request
+it came from, so the same row fetched scoped and unscoped would acquire two client-side
+identities — the one thing a durable key exists to prevent. The same rule applies to the
+token-scoped datasets, whose entity today sits only in the path.
 
 Where two upstreams report the same quantity for the same entity, they are two series
 discriminated by source — not one series with duplicate points. A response never contains two
@@ -111,12 +118,18 @@ response, and the datasets genuinely differ: prices carry currency and source, e
 figure, capital-held components. Typed per-dataset responses serve the PRD's first-named
 consumer better than a lowest common denominator.
 
+Every family carries the same shapes: history across the whole dataset, history for one entity,
+and the two single-observation routes. The unscoped history path is what makes row-level identity
+load-bearing in decision 1 — it is the one shape where a response spans entities.
+
 The path shape, parameter names and response envelope are uniform across every dataset. This is
 the load-bearing half: without it, dataset-oriented paths are just the status quo that produced
 the inconsistencies in the Context. Uniformity is not self-enforcing today — the only mechanism
 is code review, which is what produced them — so it needs a conformance test over the generated
 OpenAPI schema asserting that every route carries the envelope, the agreed parameter names and
-the declared error shapes.
+the declared error shapes, and that every prime-scoped response model carries a `prime_key`
+property. The error shapes have to be declared somewhere before that last assertion means
+anything, which is what the rejection contract in decision 5 does.
 
 Where "consistent with the current API format" conflicts with bringing the whole surface onto
 one pattern, the consistent surface wins.
@@ -166,6 +179,20 @@ naming the actual count and a window that would fit.
 
 Rejecting, not truncating and not paginating.
 
+Rejections are structured. The 422 body carries a stable error code, the actual point count, the
+max-points limit, and a suggested `from_timestamp`/`to_timestamp` — or a `frequency` — that would
+fit, as fields, with the human-readable message alongside. Because rejection replaces the
+truncation flag, this body is the only signal a caller gets that a request was too big, so it has
+to be machine-readable rather than prose: a client re-tiles the window or drops to a fitting
+frequency without parsing an error message. One model serves every 422 on the surface, not only
+this one.
+
+The rule governs history, not every list. The catalogue paginates, by keyset on the series id — a
+catalogue is a list that grows, and a torn read of one is harmless next to a torn read of a
+series. The non-series list endpoints stay bounded too, under one ceiling unified across the
+surface and with truncation reported explicitly; today their ceilings disagree and none of them
+reports anything.
+
 Truncation with a completeness flag is only marginally better than silent truncation: a
 statistic computed over a silently shortened series is wrong and looks right, and a flag is easy
 to ignore — the failure lands on the consumer the PRD names first.
@@ -185,8 +212,15 @@ declared cadence let a caller size a request before issuing it.
 
 `GET /v1/series` lists the series the API can serve, so a client discovers identifiers instead
 of guessing them. Each descriptor carries an opaque internal series id, the alias identifiers
-the series answers to, its dataset, unit, source and licence, its series kind and time axis, and
-its first and last observation timestamps.
+the series answers to, its dataset, unit, source and licence, its series kind and time axis, the
+entity key, and its first and last observation timestamps.
+
+The entity key is the part the rest of the descriptor does not cover. Kind, axis and unit say what
+a point *means*; the entity key says what it is *of* — the response fields that identify the thing
+a row is about, which is `prime_key` for a prime-scoped series, chain and token address for a
+token series, and empty for the datasets that have no single entity. Without it a client keying
+rows into a store infers identity per dataset from prose, which is the guessing this endpoint
+exists to remove.
 
 The internal series id is deliberately opaque and not a parsable naming scheme, so it can be
 re-pointed without becoming a contract. It stays a catalogue key and never becomes addressable:
@@ -287,7 +321,8 @@ unprefixed fields removable rather than merely discouraged.
 
 **`prime_key` has to be minted before anything ships**, and must be stable from first
 assignment — its whole purpose is to be the one identifier that never changes. Nothing generates
-one today.
+one today. Because the key rides every row rather than the envelope, the mint is a precondition
+for the unscoped history path as much as for the scoped ones.
 
 **One consequence of multi-form addressing must be documented prominently.** Passing a proxy
 address returns the *whole* prime, including chains that proxy has nothing to do with. Query
@@ -345,9 +380,20 @@ is a real cost to callers, paid down by the catalogue: a client that reads first
 timestamps and declared cadence can size a request before issuing it. It also means the response
 envelope carries no truncation flag, because history never truncates.
 
+**Decision 5 makes the shipped `limit` parameter non-conforming on the history routes.** Several
+V1 routes carry one today, under ceilings that disagree with each other. On a history route it
+goes: a defaulted limit is the silent truncation decision 5 rejects, and it is worse than the
+truncation-with-a-flag alternative because there is no flag. On a list route it stays, under the
+unified ceiling, and starts reporting truncation.
+
+**Decision 5 obliges a typed error model where the code has a string.** The shared time-series
+query adapter in `app/api/time_series.py` raises its 422 with a stringified domain error, so
+every rejection on the surface is prose a client would have to parse. Every time-series route
+depends on that one adapter, which is where the rejection contract lands.
+
 **Decision 6 adds an endpoint that must be built and then kept populated.** Series kind, time
-axis, source and cadence are registry metadata authored per series, not derived at query time.
-They land in one schema even though several decisions each contributed a field.
+axis, source, cadence and the entity key are registry metadata authored per series, not derived
+at query time. They land in one schema even though several decisions each contributed a field.
 
 **Decision 7 adds a required field to every series descriptor** — the kind — and an optional
 per-point field on filled points. Row-wise point encoding makes the latter cheap: a
