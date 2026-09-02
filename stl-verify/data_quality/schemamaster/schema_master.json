@@ -967,6 +967,11 @@
       "type": "numeric",
       "class": "S"
     },
+    "rewind_count": {
+      "type": "int8",
+      "class": "S",
+      "not_null": true
+    },
     "scaled_balance": {
       "type": "numeric",
       "class": "D"

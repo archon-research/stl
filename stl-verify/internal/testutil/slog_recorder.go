@@ -30,6 +30,12 @@ func (h *SlogRecorder) CountWarn(substr string) int {
 	return h.count(slog.LevelWarn, substr)
 }
 
+// CountInfo returns how many captured info-level records contain substr in
+// their message.
+func (h *SlogRecorder) CountInfo(substr string) int {
+	return h.count(slog.LevelInfo, substr)
+}
+
 func (h *SlogRecorder) MessagesAt(level slog.Level) []string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -40,6 +46,26 @@ func (h *SlogRecorder) MessagesAt(level slog.Level) []string {
 		}
 	}
 	return messages
+}
+
+// ContainsAttr reports whether any captured record carries an attribute whose
+// formatted value contains substr.
+func (h *SlogRecorder) ContainsAttr(substr string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.Records {
+		found := false
+		r.Attrs(func(a slog.Attr) bool {
+			if strings.Contains(a.Value.String(), substr) {
+				found = true
+			}
+			return !found
+		})
+		if found {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *SlogRecorder) count(level slog.Level, substr string) int {
