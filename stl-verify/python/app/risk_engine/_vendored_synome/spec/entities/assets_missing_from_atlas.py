@@ -579,6 +579,40 @@ GROVE_MAINNET_RISK_CAPITAL_USDS: Final[Asset] = Asset(
 Atlas A.6.1.1.2.2.6.1.2.1.1.1.3.1.1.2."""
 
 
+# Robinhood Chain (ARCT-374). The Atlas has no documents for Grove on Robinhood
+# yet (no ALM Proxy Contract, no instance configuration documents); addresses and
+# holdings were verified on-chain: the vault's asset() is USDG and the Grove ALM
+# Proxy (0x29626c2d…42BD5) holds both positions.
+
+GROVE_ROBINHOOD_ASSET_USDG: Final[Asset] = Asset(
+    token=Token.USDG,
+    network=Network.ROBINHOOD,
+    address=EvmAddress("0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"),
+    protocol=None,
+    allocation_type=AllocationType.ASSET,
+    token_type=TokenType.ERC20,
+    underlying_asset_address=EvmAddress("0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"),
+    underlying_assets=(Token.USDG,),
+    categories={AssetCategory.CASH_STABLECOIN},
+)
+"""Robinhood USDG (Paxos Global Dollar) held idle (see the Robinhood note)."""
+
+
+GROVE_ROBINHOOD_STEAKHOUSE_USDG: Final[Asset] = Asset(
+    token=Token.GROVE_USDG,
+    network=Network.ROBINHOOD,
+    address=EvmAddress("0xBEEff039907422219Fb367e525954DDC092854d9"),
+    protocol=Protocol.GROVE_STEAKHOUSE_USDG_MORPHO_VAULT,
+    allocation_type=AllocationType.ALLOCATION,
+    token_type=TokenType.ERC4626,
+    underlying_asset_address=EvmAddress("0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"),
+    underlying_assets=(Token.USDG,),
+    categories={AssetCategory.LENDING_MARKET},
+)
+"""Robinhood Grove x Steakhouse USDG Morpho vault (groveUSDG, see the Robinhood
+note)."""
+
+
 GROVE_MONAD_ASSET_AUSD: Final[Asset] = Asset(
     token=Token.AUSD,
     network=Network.MONAD,
@@ -638,5 +672,7 @@ MISSING_FROM_ATLAS_BY_PRIME: Final[dict[PrimeName, list[Asset]]] = {
         GROVE_MAINNET_POL_USDS,
         GROVE_MAINNET_RISK_CAPITAL_USDS,
         GROVE_MONAD_ASSET_AUSD,
+        GROVE_ROBINHOOD_ASSET_USDG,
+        GROVE_ROBINHOOD_STEAKHOUSE_USDG,
     ],
 }

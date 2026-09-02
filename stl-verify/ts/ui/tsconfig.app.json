@@ -5,10 +5,8 @@
     "types": ["vite/client"],
     "jsx": "react-jsx",
     "composite": true,
-    "skipLibCheck": true,
     "preserveSymlinks": true,
     "paths": {
-      "*": ["./*"],
       "#src/*": ["./src/*"],
       "#styled-system/*": ["./styled-system/*"]
     }

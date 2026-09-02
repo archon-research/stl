@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.openapi.docs import get_swagger_ui_html, get_swagger_ui_oauth2_redirect_html
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import text
@@ -20,6 +20,7 @@ from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingRea
 from app.adapters.postgres.engine import create_db_engine
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository, resolve_receipt_token_mapping
+from app.adapters.postgres.reference_as_of import pinned_to
 from app.api.v1 import (
     allocations,
     data_sources,
@@ -139,7 +140,23 @@ def _is_asset_path(requested_path: str) -> bool:
     return requested_path.split("/", 1)[0] == "assets"
 
 
-def configure_docs(application: FastAPI) -> None:
+def configure_docs(application: FastAPI, settings: Settings) -> None:
+    # With auth on, Swagger gets an Authorize button (authorization-code +
+    # PKCE against Keycloak) and the redirect page it needs. The redirect
+    # route is NOT auto-registered because docs_url=None — without it the
+    # OAuth flow dead-ends silently after login (ADR-015, app-code notes).
+    init_oauth = None
+    if settings.auth_enabled and settings.oidc_issuer:
+        init_oauth = {
+            "clientId": "swagger-ui",
+            "usePkceWithAuthorizationCodeGrant": True,
+            "scopes": "openid profile",
+        }
+
+        @application.get("/docs/oauth2-redirect", include_in_schema=False)
+        async def swagger_ui_redirect():
+            return get_swagger_ui_oauth2_redirect_html()
+
     @application.get("/docs", include_in_schema=False)
     async def swagger_ui_html():
         openapi_url = application.openapi_url or "/openapi.json"
@@ -147,6 +164,8 @@ def configure_docs(application: FastAPI) -> None:
             openapi_url=openapi_url,
             title=f"{application.title} - Swagger UI",
             swagger_favicon_url=DOCS_FAVICON_URL,
+            oauth2_redirect_url="/docs/oauth2-redirect" if init_oauth else None,
+            init_oauth=init_oauth,
         )
 
 
@@ -190,14 +209,18 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
                 await conn.execute(text("SELECT 1"))
 
             asset_to_rating = await resolve_receipt_token_mapping(raw_mapping, engine)
-            allocation_repo = AllocationRepository(engine)
+            # Published on app.state so every route resolves the same provider via
+            # deps.get_reference_as_of; a per-route default would leave most unpinned.
+            reference_effective_at = pinned_to(settings.resolved_reference_effective_at())
+            app.state.reference_effective_at = reference_effective_at
+            allocation_repo = AllocationRepository(engine, reference_effective_at)
             suraf_rrc_service = SurafRrcService(asset_to_rating, suraf_ratings, allocation_repo)
 
             receipt_token_repo = ReceiptTokenRepository(engine)
             crypto_lending_reader = PostgresCryptoLendingReader(
                 receipt_token_repo=receipt_token_repo,
-                aave_breakdown_repo=AaveLikeBackedBreakdownRepository(engine),
-                morpho_breakdown_repo=MorphoBackedBreakdownRepository(engine),
+                aave_breakdown_repo=AaveLikeBackedBreakdownRepository(engine, reference_effective_at),
+                morpho_breakdown_repo=MorphoBackedBreakdownRepository(engine, reference_effective_at),
                 maple_breakdown_repo=MapleBackedBreakdownRepository(engine),
                 aave_liq_repo=AaveLikeLiquidationParamsRepository(engine),
                 morpho_liq_repo=MorphoLiquidationParamsRepository(engine),
@@ -314,13 +337,30 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             routes=application.routes,
             tags=application.openapi_tags,
         )
-        application.openapi_schema = strip_internal_operations(full)
+        full = strip_internal_operations(full)
+        # Swagger's Authorize button exists only if the schema declares a
+        # security scheme. Emitted only when auth is on, so the published
+        # /openapi.json is unchanged while the app ships dark.
+        if settings.auth_enabled and settings.oidc_issuer:
+            full.setdefault("components", {})["securitySchemes"] = {
+                "oidc": {
+                    "type": "oauth2",
+                    "flows": {
+                        "authorizationCode": {
+                            "authorizationUrl": f"{settings.oidc_issuer}/protocol/openid-connect/auth",
+                            "tokenUrl": f"{settings.oidc_issuer}/protocol/openid-connect/token",
+                            "scopes": {"openid": "", "profile": ""},
+                        }
+                    },
+                }
+            }
+        application.openapi_schema = full
         return application.openapi_schema
 
     # FastAPI's documented openapi override pattern
     application.openapi = public_openapi  # ty: ignore[invalid-assignment]
 
-    configure_docs(application)
+    configure_docs(application, settings)
     configure_static_hosting(application, static_dir or DEFAULT_STATIC_DIR)
     return application
 

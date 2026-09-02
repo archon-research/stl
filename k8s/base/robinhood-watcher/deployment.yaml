@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: robinhood-watcher
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: robinhood-watcher
+  template:
+    metadata:
+      labels:
+        app: robinhood-watcher
+    spec:
+      serviceAccountName: robinhood-watcher
+      containers:
+        - name: robinhood-watcher
+          # Image name used as the Kustomize images transformer key.
+          # The overlay kustomization.yaml overrides newName + newTag.
+          image: robinhood-watcher
+          args: ["--enable-traces=false"]
+          env:
+            # Inject the deployment name so each per-chain watcher emits a
+            # distinct OTEL service.name (e.g. "watcher", "arbitrum-watcher").
+            - name: SERVICE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['app']
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: robinhood-watcher-config
+            - secretRef:
+                # Populated by ExternalSecret — secret name mirrors the service.
+                name: robinhood-watcher
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "100m"
+              memory: "1024Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f watcher"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

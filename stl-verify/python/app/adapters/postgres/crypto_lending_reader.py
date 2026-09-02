@@ -27,7 +27,7 @@ from app.logging import get_logger
 
 logger = get_logger(__name__)
 
-_AAVE_LIKE = frozenset({"sparklend", "aave_v2", "aave_v3", "aave_v3_lido", "aave_v3_rwa"})
+_AAVE_LIKE = frozenset({"sparklend", "aave_v2", "aave_v3", "aave_v3_lido", "aave_v3_rwa", "aave_v3_avalanche"})
 _MORPHO = frozenset({"morpho_blue"})
 _MAPLE = frozenset({"maple"})
 # Protocols eligible for the gap-sweep RRC model (feeds ``list_supported_asset_ids`` →

@@ -89,7 +89,7 @@ func TestParseConfig_HappyPath(t *testing.T) {
 	if cfg.AlchemyURL != "https://eth-mainnet.g.alchemy.com/v2/key" {
 		t.Errorf("AlchemyURL = %q, default Alchemy URL not applied", cfg.AlchemyURL)
 	}
-	if cfg.MaxMessages != 10 || cfg.WaitTime != 20 || cfg.VisibilityTimeout != 300 {
+	if cfg.MaxMessages != 1 || cfg.WaitTime != 20 || cfg.VisibilityTimeout != 300 {
 		t.Errorf("defaults not applied: max=%d wait=%d vis=%d", cfg.MaxMessages, cfg.WaitTime, cfg.VisibilityTimeout)
 	}
 	if cfg.Dex != "curve" {
