@@ -324,24 +324,22 @@ ORDER BY number LIMIT 1;
 
 **3. The tail.** The pair scan has no successor to flag a hole at the *top* of
 the strict band against, so check that separately — but check the same thing
-the validator checks. Its tail query is `MAX(number) … number <= verifyTo`
-against `verifyTo = min(max canonical, watermark)`, so it fails exactly when
-there is **no canonical row at that height**. An unbounded `max(number)` gets
-this wrong in both directions: with the watermark below the head it always
-passes, including when the validator fails; with the watermark above the head
-it always fails, when the validator passes.
+the validator checks. The validator fails when there is no canonical row at the
+watermark height (`verifyRangeReachesEnd`), and it fails when the watermark
+sits above the last canonical row altogether — the state a hand-written
+watermark or a pre-#844 overwritten rewind leaves. Both collapse into one
+comparison:
 
 ```sql
 SELECT w.watermark,
        (SELECT max(number) FROM block_states
-         WHERE chain_id = <id> AND NOT is_orphaned AND number <= w.watermark) AS tail,
-       LEAST(w.watermark, (SELECT max(number) FROM block_states
-                            WHERE chain_id = <id> AND NOT is_orphaned))       AS want
+         WHERE chain_id = <id> AND NOT is_orphaned AND number <= w.watermark) AS tail
 FROM backfill_watermark w WHERE w.chain_id = <id>;
 ```
 
-`tail` must equal `want`. A lower `tail` is the shape a watermark parked on an
-unfilled height leaves, and the validator fails the run on it. A chain with no
+`tail` must equal `w.watermark`. A lower `tail` is either a watermark parked on
+an unfilled height or a watermark past the head, and the validator fails the
+run on both. A chain with no
 `backfill_watermark` row, or `watermark = 0`, is vacuous here — the validator
 verifies the whole range and the tail check cannot fail.
 
