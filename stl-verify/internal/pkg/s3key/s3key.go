@@ -100,3 +100,46 @@ func validDataType(dt DataType) bool {
 	}
 	return false
 }
+
+// HeightPrefix is the key prefix every object for one height shares, for a
+// listing narrowed to that height. The trailing underscore is what keeps a
+// longer height sharing the partition — 10 against 1 — out of the listing.
+func HeightPrefix(blockNumber int64) string {
+	return fmt.Sprintf("%s/%d_", partition.GetPartition(blockNumber), blockNumber)
+}
+
+// FirstCorrectionVersion is the lowest version a correction may occupy: version
+// 0 is the slot being corrected.
+const FirstCorrectionVersion = 1
+
+// HighestVersion returns the highest version the given keys carry for
+// blockNumber, and whether any of them names that height at all. An object at a
+// version occupies the slot whatever data type it holds, so a height archived
+// only halfway still counts as taken. Keys naming another height, another
+// partition, or nothing this package recognises are ignored.
+func HighestVersion(keys []string, blockNumber int64) (int, bool) {
+	part := partition.GetPartition(blockNumber)
+
+	highest, found := 0, false
+	for _, key := range keys {
+		parsed, ok := Parse(key)
+		if !ok || parsed.BlockNumber != blockNumber || parsed.Partition != part {
+			continue
+		}
+		if !found || parsed.Version > highest {
+			highest, found = parsed.Version, true
+		}
+	}
+	return highest, found
+}
+
+// NextVersion returns the version a correction for a height must be written
+// under: one past the highest version the archive already holds, and the first
+// correction slot where it holds nothing. Never 0 — that slot carries the data
+// being corrected.
+func NextVersion(highest int, found bool) int {
+	if !found {
+		return FirstCorrectionVersion
+	}
+	return max(highest+1, FirstCorrectionVersion)
+}

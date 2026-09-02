@@ -16,15 +16,25 @@
 // # How to start a run
 //
 // This carries no schedule: the worker idles on its task queue, so deploying it
-// never starts a run. An operator supplies the heights and the target version:
+// never starts a run. An operator supplies the heights, and nothing else:
 //
 //	temporal workflow start --namespace vector \
 //	  --task-queue block-republisher --type BlockRepublish \
 //	  --workflow-id block-republisher-<date> \
-//	  --input '{"blocks":[25395651,25087888],"version":1}'
+//	  --input '{"blocks":[25395651,25087888]}'
 //
-// The chain comes from CHAIN_ID, not from the input. version defaults to 1 and
-// must be at least 1: version 0 is the slot holding the data being corrected.
+// The chain comes from CHAIN_ID, not from the input.
+//
+// # Which version each height lands at
+//
+// Not the operator's choice: the version is read off the raw archive S3_BUCKET
+// names, per height, as one past the highest <number>_<version>_* object already
+// there — 1 where there is none, never 0, which holds the data being corrected.
+// An object at a version occupies it whatever data type it carries, so a
+// half-written correction still moves the next one up, and two heights in one
+// run routinely land at different versions. An input naming a version, or any
+// other field this workflow does not take, fails the run: a run started from an
+// older runbook must stop rather than mean something else.
 //
 // # What it does not write
 //
@@ -37,12 +47,16 @@
 // therefore the SNS event, the <number>_<version>_* objects the raw-data-backup
 // worker writes from it, and the block_version rows the indexers append.
 //
-// # Idempotency
+// # Repeats
 //
-// A repeat of the same (chain, number, hash, version) is a no-op: inside SNS
-// FIFO's five-minute deduplication window the event never reaches the queues,
-// and outside it every append-only consumer re-derives the same rows from
-// identical data.
+// A retry is safe; a second run is not free. The version is settled once per
+// height, in its own activity, so a republish Temporal retries lands in the slot
+// the run already chose: the same cache keys and the same event, which SNS FIFO
+// drops inside its five-minute window and every append-only consumer re-derives
+// identically outside it. Starting a second run over a height that already
+// succeeded is the different case — raw-data-backup has written that version's
+// objects by then, so the height moves to the next slot and gains an identical
+// correction. Re-run a height only when its run failed.
 package main
 
 import (
@@ -62,6 +76,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
+	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	snsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -125,6 +140,7 @@ func register(ctx context.Context, deps temporal.Dependencies, r worker.Registry
 	}
 
 	r.RegisterWorkflowWithOptions(republishWorkflow, workflow.RegisterOptions{Name: workflowTypeName})
+	r.RegisterActivityWithOptions(activities.DeriveVersion, activity.RegisterOptions{Name: deriveVersionActivityName})
 	r.RegisterActivityWithOptions(activities.RepublishBlock, activity.RegisterOptions{Name: republishActivityName})
 	return nil
 }
@@ -139,11 +155,19 @@ func newRepublishActivities(ctx context.Context, logger *slog.Logger, cfg config
 	if err != nil {
 		return nil, err
 	}
+	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{StaticCredentialsFromEnv: true})
+	if err != nil {
+		return nil, fmt.Errorf("loading AWS config: %w", err)
+	}
 	cache, err := openBlockCache(ctx, cfg, logger)
 	if err != nil {
 		return nil, err
 	}
-	sink, err := openEventSink(ctx, cfg, logger)
+	archive, err := openArchiveVersions(ctx, awsCfg, cfg, logger)
+	if err != nil {
+		return nil, err
+	}
+	sink, err := openEventSink(awsCfg, cfg, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -153,17 +177,30 @@ func newRepublishActivities(ctx context.Context, logger *slog.Logger, cfg config
 		EnableTraces: cfg.enableTraces,
 		EnableBlobs:  cfg.enableBlobs,
 		Logger:       logger,
-	}, client, cache, sink)
+	}, client, archive, cache, sink)
 	if err != nil {
 		return nil, fmt.Errorf("creating the block republish service: %w", err)
 	}
 
 	logger.Info("block-republisher configured",
 		"chainID", cfg.chainID, "chain", chainName, "environment", cfg.deployEnv,
-		"topic", cfg.snsTopicARN, "redis", cfg.redisAddr,
+		"topic", cfg.snsTopicARN, "redis", cfg.redisAddr, "archive", cfg.s3Bucket,
 		"enableTraces", cfg.enableTraces, "enableBlobs", cfg.enableBlobs)
 
 	return &republishActivities{service: service}, nil
+}
+
+// openArchiveVersions reads the same raw bucket the backup worker writes, which
+// is what decides the version slot a repair lands in. Like the Redis dial below
+// it probes at startup, so a bucket this pod may not list shows up as a worker
+// that will not start rather than as a repair that dies mid-run. No object is
+// ever read or written, so s3:ListBucket is the whole grant it needs.
+func openArchiveVersions(ctx context.Context, awsCfg aws.Config, cfg config, logger *slog.Logger) (*s3adapter.ArchiveVersionReader, error) {
+	archive := s3adapter.NewArchiveVersionReader(s3adapter.NewReaderFromEnv(awsCfg, logger), cfg.s3Bucket)
+	if err := archive.Ping(ctx); err != nil {
+		return nil, fmt.Errorf("this pod's Pod Identity needs s3:ListBucket on %s: %w", cfg.s3Bucket, err)
+	}
+	return archive, nil
 }
 
 // newChainClient builds the same batched RPC client the watcher fetches a block
@@ -214,12 +251,7 @@ func openBlockCache(ctx context.Context, cfg config, logger *slog.Logger) (*redi
 // look like a slow block.
 const publishTimeout = 30 * time.Second
 
-func openEventSink(ctx context.Context, cfg config, logger *slog.Logger) (*snsadapter.EventSink, error) {
-	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{StaticCredentialsFromEnv: true})
-	if err != nil {
-		return nil, fmt.Errorf("loading AWS config: %w", err)
-	}
-
+func openEventSink(awsCfg aws.Config, cfg config, logger *slog.Logger) (*snsadapter.EventSink, error) {
 	// Custom endpoint so the same binary talks to LocalStack in kind and in tests.
 	snsClient := awssns.NewFromConfig(awsCfg, func(o *awssns.Options) {
 		if cfg.snsEndpoint != "" {

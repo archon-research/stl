@@ -15,13 +15,15 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
 // ErrStructuralData marks a failure that reproduces identically on every
 // attempt: a block the node will not serve, a payload it answers null for, a
-// version below 1. A transient fault (RPC/cache/SNS network error, throttling,
-// timeout) must never wrap it — surviving those is what a retry envelope is for.
+// height that is not a height. A transient fault (RPC/archive/cache/SNS network
+// error, throttling, timeout) must never wrap it — surviving those is what a
+// retry envelope is for.
 var ErrStructuralData = errors.New("structural data defect")
 
 // ErrCanonicalHashMoved marks a reorg observed mid-republish: the height's
@@ -29,10 +31,6 @@ var ErrStructuralData = errors.New("structural data defect")
 // NOT structural — the chain settles and a later attempt succeeds, whereas
 // publishing what was read would enshrine a second losing fork.
 var ErrCanonicalHashMoved = errors.New("the height's canonical hash moved mid-republish")
-
-// minVersion is the lowest version a republish may target; version 0 holds the
-// data being corrected.
-const minVersion = 1
 
 // finalityDepth matches the watcher's own FinalityBlockCount: the depth past
 // which it stops looking for reorgs.
@@ -61,19 +59,23 @@ type Result struct {
 
 // Service republishes single blocks. It holds no per-run state.
 type Service struct {
-	config Config
-	client outbound.BlockchainClient
-	cache  outbound.BlockCacheWriter
-	sink   outbound.EventSink
-	logger *slog.Logger
+	config  Config
+	client  outbound.BlockchainClient
+	archive outbound.ArchiveVersionReader
+	cache   outbound.BlockCacheWriter
+	sink    outbound.EventSink
+	logger  *slog.Logger
 }
 
-func NewService(config Config, client outbound.BlockchainClient, cache outbound.BlockCacheWriter, sink outbound.EventSink) (*Service, error) {
+func NewService(config Config, client outbound.BlockchainClient, archive outbound.ArchiveVersionReader, cache outbound.BlockCacheWriter, sink outbound.EventSink) (*Service, error) {
 	if config.ChainID <= 0 {
 		return nil, fmt.Errorf("ChainID must be positive, got %d", config.ChainID)
 	}
 	if client == nil {
 		return nil, fmt.Errorf("blockchain client is required")
+	}
+	if archive == nil {
+		return nil, fmt.Errorf("archive version reader is required")
 	}
 	if cache == nil {
 		return nil, fmt.Errorf("block cache is required")
@@ -86,16 +88,45 @@ func NewService(config Config, client outbound.BlockchainClient, cache outbound.
 		logger = slog.Default()
 	}
 	return &Service{
-		config: config,
-		client: client,
-		cache:  cache,
-		sink:   sink,
-		logger: logger.With("component", "block-republish"),
+		config:  config,
+		client:  client,
+		archive: archive,
+		cache:   cache,
+		sink:    sink,
+		logger:  logger.With("component", "block-republish"),
 	}, nil
 }
 
+// NextFreeVersion reports the version a repair of this height must land in: one
+// past what the raw archive already holds, and the first correction slot where
+// it holds nothing. Callers settle this once and hand it to Republish, so a
+// retried republish reuses the slot instead of stepping past the objects its own
+// first attempt caused.
+func (s *Service) NextFreeVersion(ctx context.Context, blockNumber int64) (int, error) {
+	if err := validateHeight(blockNumber); err != nil {
+		return 0, err
+	}
+
+	highest, archived, err := s.archive.HighestVersion(ctx, blockNumber)
+	if err != nil {
+		return 0, fmt.Errorf("reading what the archive holds at block %d: %w", blockNumber, err)
+	}
+
+	version := s3key.NextVersion(highest, archived)
+	s.logger.Info("derived the republish version from the archive",
+		"chainID", s.config.ChainID,
+		"block", blockNumber,
+		"archived", archived,
+		"highestArchivedVersion", highest,
+		"version", version,
+	)
+	return version, nil
+}
+
 // Republish caches the canonical block at blockNumber under version and
-// announces it on the chain's block feed.
+// announces it on the chain's block feed. It never reads the archive: a repeat
+// of the same (height, version) re-caches the same keys and re-publishes the
+// same event, which every consumer already deduplicates.
 func (s *Service) Republish(ctx context.Context, blockNumber int64, version int) (Result, error) {
 	if err := validateTarget(blockNumber, version); err != nil {
 		return Result{}, err
@@ -150,12 +181,19 @@ func (s *Service) Republish(ctx context.Context, blockNumber int64, version int)
 }
 
 func validateTarget(blockNumber int64, version int) error {
+	if err := validateHeight(blockNumber); err != nil {
+		return err
+	}
+	if version < s3key.FirstCorrectionVersion {
+		return fmt.Errorf("version must be at least %d, got %d — version 0 is the slot being corrected: %w",
+			s3key.FirstCorrectionVersion, version, ErrStructuralData)
+	}
+	return nil
+}
+
+func validateHeight(blockNumber int64) error {
 	if blockNumber <= 0 {
 		return fmt.Errorf("block number must be positive, got %d: %w", blockNumber, ErrStructuralData)
-	}
-	if version < minVersion {
-		return fmt.Errorf("version must be at least %d, got %d — version 0 is the slot being corrected: %w",
-			minVersion, version, ErrStructuralData)
 	}
 	return nil
 }

@@ -1,6 +1,7 @@
 package s3key
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -269,5 +270,139 @@ func TestBuildThenParse(t *testing.T) {
 		if got.DataType != tt.dataType {
 			t.Errorf("round-trip DataType = %q, want %q", got.DataType, tt.dataType)
 		}
+	}
+}
+
+func TestHighestVersion(t *testing.T) {
+	const height = int64(25395651)
+	part := "25395000-25395999"
+
+	tests := []struct {
+		name        string
+		keys        []string
+		wantVersion int
+		wantFound   bool
+	}{
+		{
+			name: "an archive holding nothing at the height",
+			keys: nil,
+		},
+		{
+			name:      "only the live version",
+			keys:      []string{part + "/25395651_0_block.json.gz", part + "/25395651_0_receipts.json.gz"},
+			wantFound: true,
+		},
+		{
+			name: "a partial correction still occupies its slot",
+			keys: []string{
+				part + "/25395651_0_block.json.gz",
+				part + "/25395651_0_receipts.json.gz",
+				part + "/25395651_1_block.json.gz",
+			},
+			wantVersion: 1,
+			wantFound:   true,
+		},
+		{
+			name: "the highest version wins whatever order the listing arrives in",
+			keys: []string{
+				part + "/25395651_4_traces.json.gz",
+				part + "/25395651_0_block.json.gz",
+				part + "/25395651_2_block.json.gz",
+			},
+			wantVersion: 4,
+			wantFound:   true,
+		},
+		{
+			name: "another height in the same partition says nothing about this one",
+			keys: []string{part + "/25395650_7_block.json.gz", part + "/25395652_9_block.json.gz"},
+		},
+		{
+			name: "a key filed under another partition is not this height's",
+			keys: []string{"0-999/25395651_7_block.json.gz"},
+		},
+		{
+			name: "unparseable keys are ignored",
+			keys: []string{
+				part + "/25395651_x_block.json.gz",
+				part + "/25395651_1_unknown.json.gz",
+				part + "/README.txt",
+				part + "/",
+			},
+		},
+		{
+			name: "a malformed key does not hide a real one",
+			keys: []string{part + "/25395651_x_block.json.gz", part + "/25395651_3_block.json.gz"},
+
+			wantVersion: 3,
+			wantFound:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			version, found := HighestVersion(tt.keys, height)
+
+			if found != tt.wantFound {
+				t.Fatalf("HighestVersion found = %v, want %v", found, tt.wantFound)
+			}
+			if found && version != tt.wantVersion {
+				t.Errorf("HighestVersion = %d, want %d", version, tt.wantVersion)
+			}
+		})
+	}
+}
+
+func TestNextVersion(t *testing.T) {
+	tests := []struct {
+		name    string
+		highest int
+		found   bool
+		want    int
+	}{
+		{name: "an empty height starts at the first correction slot", want: 1},
+		{name: "the live version is corrected at 1", highest: 0, found: true, want: 1},
+		{name: "an occupied correction slot moves the next one up", highest: 1, found: true, want: 2},
+		{name: "a height corrected many times keeps counting", highest: 9, found: true, want: 10},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := NextVersion(tt.highest, tt.found); got != tt.want {
+				t.Errorf("NextVersion(%d, %v) = %d, want %d", tt.highest, tt.found, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHeightPrefix(t *testing.T) {
+	tests := []struct {
+		name        string
+		blockNumber int64
+		want        string
+	}{
+		{name: "a height mid-partition", blockNumber: 25395651, want: "25395000-25395999/25395651_"},
+		{name: "the first block of a partition", blockNumber: 1000, want: "1000-1999/1000_"},
+		{name: "block zero", blockNumber: 0, want: "0-999/0_"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := HeightPrefix(tt.blockNumber); got != tt.want {
+				t.Errorf("HeightPrefix(%d) = %q, want %q", tt.blockNumber, got, tt.want)
+			}
+		})
+	}
+}
+
+// Heights 1 and 10 share partition 0-999, so only the trailing underscore keeps
+// one out of the other's listing.
+func TestHeightPrefix_ExcludesALongerHeightSharingThePartition(t *testing.T) {
+	prefix := HeightPrefix(1)
+
+	if neighbour := Build(10, 1, Block); strings.HasPrefix(neighbour, prefix) {
+		t.Errorf("%q starts with %q", neighbour, prefix)
+	}
+	if own := Build(1, 1, Block); !strings.HasPrefix(own, prefix) {
+		t.Errorf("%q does not start with %q", own, prefix)
 	}
 }

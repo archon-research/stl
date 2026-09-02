@@ -82,6 +82,20 @@ func newStubClient() *stubClient {
 	}
 }
 
+// stubArchive stands in for the raw archive, reporting the highest version a
+// height already holds an object at.
+type stubArchive struct {
+	highest int
+	found   bool
+	err     error
+	calls   int
+}
+
+func (a *stubArchive) HighestVersion(context.Context, int64) (int, bool, error) {
+	a.calls++
+	return a.highest, a.found, a.err
+}
+
 type failingCache struct{ err error }
 
 func (c failingCache) SetBlockData(context.Context, int64, int64, int, outbound.BlockDataInput) error {
@@ -98,8 +112,13 @@ func (s failingSink) Close() error                                  { return nil
 type fixture struct {
 	service *Service
 	client  *stubClient
+	archive *stubArchive
 	cache   *memory.BlockCache
 	sink    *memory.EventSink
+}
+
+func (f fixture) archiveHolds(highest int) {
+	f.archive.highest, f.archive.found = highest, true
 }
 
 // testConfig is the mainnet watcher's shape: traces on, blobs off.
@@ -118,15 +137,16 @@ func newFixture(t *testing.T, client *stubClient) fixture {
 
 func newFixtureWith(t *testing.T, config Config, client *stubClient) fixture {
 	t.Helper()
+	archive := &stubArchive{}
 	cache := memory.NewBlockCache()
 	sink := memory.NewEventSink()
-	service := newTestService(t, config, client, cache, sink)
-	return fixture{service: service, client: client, cache: cache, sink: sink}
+	service := newTestService(t, config, client, archive, cache, sink)
+	return fixture{service: service, client: client, archive: archive, cache: cache, sink: sink}
 }
 
-func newTestService(t *testing.T, config Config, client outbound.BlockchainClient, cache outbound.BlockCacheWriter, sink outbound.EventSink) *Service {
+func newTestService(t *testing.T, config Config, client outbound.BlockchainClient, archive outbound.ArchiveVersionReader, cache outbound.BlockCacheWriter, sink outbound.EventSink) *Service {
 	t.Helper()
-	service, err := NewService(config, client, cache, sink)
+	service, err := NewService(config, client, archive, cache, sink)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -195,7 +215,7 @@ func TestRepublish_CachesExactlyTheDataTypesTheChainsWatcherPublishes(t *testing
 	}
 }
 
-func TestRepublish_PublishesTheBlockEventAsAReorgBackfillAtTheRequestedVersion(t *testing.T) {
+func TestRepublish_PublishesTheBlockEventAsAReorgBackfillAtTheGivenVersion(t *testing.T) {
 	f := newFixture(t, newStubClient())
 
 	if _, err := f.service.Republish(context.Background(), testBlock, 2); err != nil {
@@ -350,6 +370,101 @@ func TestRepublish_IsStructuralWhenTheNodeAnswersNullForAnExpectedDataType(t *te
 	}
 }
 
+// The archive decides the slot: one past whatever it already holds, and the
+// first correction slot at a height it holds nothing for. Version 0 is never a
+// target — it carries the data being corrected.
+func TestNextFreeVersion_DerivesTheSlotFromWhatTheArchiveHolds(t *testing.T) {
+	tests := []struct {
+		name    string
+		archive stubArchive
+		want    int
+	}{
+		{name: "an orphan-only height the archive never received", want: 1},
+		{name: "the live version alone", archive: stubArchive{found: true}, want: 1},
+		{name: "a slot already taken by an earlier correction", archive: stubArchive{highest: 1, found: true}, want: 2},
+		{name: "a height corrected repeatedly", archive: stubArchive{highest: 4, found: true}, want: 5},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, newStubClient())
+			*f.archive = tc.archive
+
+			version, err := f.service.NextFreeVersion(context.Background(), testBlock)
+			if err != nil {
+				t.Fatalf("NextFreeVersion: %v", err)
+			}
+
+			if version != tc.want {
+				t.Errorf("version = %d, want %d", version, tc.want)
+			}
+		})
+	}
+}
+
+func TestNextFreeVersion_LogsTheVersionItChose(t *testing.T) {
+	var logged strings.Builder
+	config := testConfig()
+	config.Logger = slog.New(slog.NewTextHandler(&logged, nil))
+	f := newFixtureWith(t, config, newStubClient())
+	f.archiveHolds(2)
+
+	if _, err := f.service.NextFreeVersion(context.Background(), testBlock); err != nil {
+		t.Fatalf("NextFreeVersion: %v", err)
+	}
+
+	for _, want := range []string{fmt.Sprintf("block=%d", testBlock), "version=3"} {
+		if !strings.Contains(logged.String(), want) {
+			t.Errorf("logs = %s, want a line carrying %q", logged.String(), want)
+		}
+	}
+}
+
+// A throttled listing says nothing about the height. Killing it as structural
+// would take a repairable block out of the run for good, and republishing
+// regardless would write over a slot that is already occupied.
+func TestNextFreeVersion_LeavesAFailedArchiveReadRetryable(t *testing.T) {
+	f := newFixture(t, newStubClient())
+	f.archive.err = errors.New("503 SlowDown")
+
+	_, err := f.service.NextFreeVersion(context.Background(), testBlock)
+
+	if err == nil {
+		t.Fatal("NextFreeVersion succeeded without reading the archive")
+	}
+	if errors.Is(err, ErrStructuralData) {
+		t.Errorf("error = %v, want it left retryable", err)
+	}
+}
+
+func TestNextFreeVersion_RejectsANonPositiveHeightWithoutListing(t *testing.T) {
+	f := newFixture(t, newStubClient())
+
+	_, err := f.service.NextFreeVersion(context.Background(), 0)
+
+	if !errors.Is(err, ErrStructuralData) {
+		t.Fatalf("error = %v, want ErrStructuralData", err)
+	}
+	if f.archive.calls != 0 {
+		t.Errorf("listed the archive %d times for a height that is not one", f.archive.calls)
+	}
+}
+
+// The version is settled before a republish starts and handed to it. Reading the
+// archive here would move the slot on a retry — the block's own publish is what
+// fills the one it was given.
+func TestRepublish_NeverReadsTheArchive(t *testing.T) {
+	f := newFixture(t, newStubClient())
+
+	if _, err := f.service.Republish(context.Background(), testBlock, 2); err != nil {
+		t.Fatalf("Republish: %v", err)
+	}
+
+	if f.archive.calls != 0 {
+		t.Errorf("listed the archive %d times while republishing", f.archive.calls)
+	}
+}
+
 func TestRepublish_IsStructuralWhenAskedForVersionZero(t *testing.T) {
 	f := newFixture(t, newStubClient())
 
@@ -380,7 +495,7 @@ func TestRepublish_LeavesATransientRPCFailureRetryable(t *testing.T) {
 
 func TestRepublish_DoesNotPublishWhenTheCacheWriteFails(t *testing.T) {
 	sink := memory.NewEventSink()
-	service := newTestService(t, testConfig(), newStubClient(), failingCache{err: errors.New("redis unavailable")}, sink)
+	service := newTestService(t, testConfig(), newStubClient(), &stubArchive{}, failingCache{err: errors.New("redis unavailable")}, sink)
 
 	_, err := service.Republish(context.Background(), testBlock, 1)
 
@@ -393,7 +508,7 @@ func TestRepublish_DoesNotPublishWhenTheCacheWriteFails(t *testing.T) {
 }
 
 func TestRepublish_SurfacesAPublishFailure(t *testing.T) {
-	service := newTestService(t, testConfig(), newStubClient(), memory.NewBlockCache(), failingSink{err: errors.New("sns unavailable")})
+	service := newTestService(t, testConfig(), newStubClient(), &stubArchive{}, memory.NewBlockCache(), failingSink{err: errors.New("sns unavailable")})
 
 	_, err := service.Republish(context.Background(), testBlock, 1)
 
@@ -407,6 +522,7 @@ func TestNewService_RequiresEveryDependency(t *testing.T) {
 		name    string
 		config  Config
 		client  outbound.BlockchainClient
+		archive outbound.ArchiveVersionReader
 		cache   outbound.BlockCacheWriter
 		sink    outbound.EventSink
 		wantErr string
@@ -414,14 +530,24 @@ func TestNewService_RequiresEveryDependency(t *testing.T) {
 		{
 			name:    "missing client",
 			config:  Config{ChainID: testChainID},
+			archive: &stubArchive{},
 			cache:   memory.NewBlockCache(),
 			sink:    memory.NewEventSink(),
 			wantErr: "client is required",
 		},
 		{
+			name:    "missing archive reader",
+			config:  Config{ChainID: testChainID},
+			client:  newStubClient(),
+			cache:   memory.NewBlockCache(),
+			sink:    memory.NewEventSink(),
+			wantErr: "archive version reader is required",
+		},
+		{
 			name:    "missing cache",
 			config:  Config{ChainID: testChainID},
 			client:  newStubClient(),
+			archive: &stubArchive{},
 			sink:    memory.NewEventSink(),
 			wantErr: "cache is required",
 		},
@@ -429,6 +555,7 @@ func TestNewService_RequiresEveryDependency(t *testing.T) {
 			name:    "missing event sink",
 			config:  Config{ChainID: testChainID},
 			client:  newStubClient(),
+			archive: &stubArchive{},
 			cache:   memory.NewBlockCache(),
 			wantErr: "event sink is required",
 		},
@@ -436,6 +563,7 @@ func TestNewService_RequiresEveryDependency(t *testing.T) {
 			name:    "non-positive chain ID",
 			config:  Config{},
 			client:  newStubClient(),
+			archive: &stubArchive{},
 			cache:   memory.NewBlockCache(),
 			sink:    memory.NewEventSink(),
 			wantErr: "ChainID",
@@ -444,7 +572,7 @@ func TestNewService_RequiresEveryDependency(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := NewService(tc.config, tc.client, tc.cache, tc.sink)
+			_, err := NewService(tc.config, tc.client, tc.archive, tc.cache, tc.sink)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("error = %v, want it to contain %q", err, tc.wantErr)
 			}
@@ -573,7 +701,7 @@ func TestRepublish_LeavesAPerDataTypeRPCFailureRetryable(t *testing.T) {
 
 func TestNewService_RunsWithoutALogger(t *testing.T) {
 	service, err := NewService(Config{ChainID: testChainID, EnableTraces: true},
-		newStubClient(), memory.NewBlockCache(), memory.NewEventSink())
+		newStubClient(), &stubArchive{}, memory.NewBlockCache(), memory.NewEventSink())
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

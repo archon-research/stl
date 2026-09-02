@@ -8,14 +8,15 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 )
 
-// config is the deployment's static configuration. The blocks and the target
-// version are deliberately absent: they are per-run workflow input (see
-// RepublishParams).
+// config is the deployment's static configuration. The blocks are deliberately
+// absent — they are per-run workflow input (see RepublishParams) — and so is the
+// version, which each run derives per height from what s3Bucket already holds.
 type config struct {
 	chainID        int64
 	deployEnv      string
 	snsTopicARN    string
 	snsEndpoint    string
+	s3Bucket       string
 	rpcURL         string
 	redisAddr      string
 	redisPassword  string
@@ -70,6 +71,17 @@ func loadConfig() (config, error) {
 		return config{}, fmt.Errorf("AWS_SNS_TOPIC_ARN / CHAIN_ID mismatch: %w", err)
 	}
 
+	// The raw archive is what the version of every repaired height is derived
+	// from, so another chain's bucket would answer for heights this chain never
+	// published — and land the correction in an occupied slot.
+	s3Bucket, err := env.Require("S3_BUCKET")
+	if err != nil {
+		return config{}, err
+	}
+	if err := chainutil.ValidateS3BucketForChain(int64(chainID), s3Bucket, deployEnv); err != nil {
+		return config{}, fmt.Errorf("S3_BUCKET / CHAIN_ID mismatch: %w", err)
+	}
+
 	rpcURL, err := resolveRPCURL()
 	if err != nil {
 		return config{}, err
@@ -80,6 +92,7 @@ func loadConfig() (config, error) {
 		deployEnv:      deployEnv,
 		snsTopicARN:    snsTopicARN,
 		snsEndpoint:    env.Get("AWS_SNS_ENDPOINT", ""),
+		s3Bucket:       s3Bucket,
 		rpcURL:         rpcURL,
 		redisAddr:      env.Get("REDIS_ADDR", defaultRedisAddr),
 		redisPassword:  env.Get("REDIS_PASSWORD", ""),

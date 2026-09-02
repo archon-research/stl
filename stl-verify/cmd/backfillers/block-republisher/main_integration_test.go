@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +21,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	awssns "github.com/aws/aws-sdk-go-v2/service/sns"
 	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
@@ -26,62 +29,87 @@ import (
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 var (
-	sharedRedisAddr      string
-	sharedLocalStackCfg  testutil.LocalStackConfig
-	integrationChainID   = int64(1)
-	integrationBlock     = int64(25395651)
-	integrationBlockHash = "0x4d1c1a52b1f5e5a0c6f0b0a0d9e8c7b6a594837261504f3e2d1c0b9a8f7e6d5c"
-	integrationParent    = "0xaabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
-	integrationTimestamp = int64(0x68b0c0c0)
+	sharedRedisAddr     string
+	sharedLocalStackCfg testutil.LocalStackConfig
+	integrationChainID  = int64(1)
 
-	// integrationHeadDepth puts the block well outside the reorg window the
+	// integrationHeadDepth puts both blocks well outside the reorg window the
 	// service refuses to repair inside.
 	integrationHeadDepth = int64(5000)
 )
+
+// blockFixture is one height the mock node serves and the archive holds
+// something for.
+type blockFixture struct {
+	number    int64
+	hash      string
+	parent    string
+	timestamp int64
+}
+
+// orphanOnly is the ARCT-379 shape: the archive holds the losing fork's _0_
+// objects and nothing else, so the repair belongs at version 1.
+var orphanOnly = blockFixture{
+	number:    25395651,
+	hash:      "0x4d1c1a52b1f5e5a0c6f0b0a0d9e8c7b6a594837261504f3e2d1c0b9a8f7e6d5c",
+	parent:    "0xaabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+	timestamp: 0x68b0c0c0,
+}
+
+// alreadyCorrected reorged once before, so version 1 is taken — by a single
+// object, which is enough to occupy the slot — and the repair belongs at 2.
+var alreadyCorrected = blockFixture{
+	number:    25087888,
+	hash:      "0x9f8e7d6c5b4a39281706f5e4d3c2b1a09988776655443322110ffeeddccbbaa9",
+	parent:    "0x1122334455667788991122334455667788991122334455667788991122334455",
+	timestamp: 0x68a0b0b0,
+}
 
 func TestMain(m *testing.M) {
 	os.Exit(testutil.RunShared(m, testutil.Shared{
 		RedisAddr:          &sharedRedisAddr,
 		LocalStack:         &sharedLocalStackCfg,
-		LocalStackServices: "sns,sqs",
+		LocalStackServices: "s3,sns,sqs",
 	}))
 }
 
 // TestRepublish_LandsInTheCacheAndOnTheTopic drives the deployed wiring — register,
-// loadConfig, the real Redis adapter, the real SNS adapter and the real batched RPC
-// client — against LocalStack and an in-process node. It is what proves the two
-// things a consumer depends on and a unit test with fakes cannot: the cache keys
-// carry the requested version, and the SNS message that reaches a subscribed FIFO
-// queue is the block event for that version.
+// loadConfig, the real Redis adapter, the real S3 and SNS adapters and the real
+// batched RPC client — against LocalStack and an in-process node. It is what proves
+// the three things a consumer depends on and a unit test with fakes cannot: the
+// version comes from the objects actually in the archive, the cache keys carry that
+// version, and the SNS message that reaches a subscribed FIFO queue is the block
+// event for it.
 func TestRepublish_LandsInTheCacheAndOnTheTopic(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
 	deployment := newDeployment(t, ctx)
+	deployment.archive(t, ctx, orphanOnly, 0, s3key.Block, s3key.Receipts, s3key.Traces)
+	deployment.archive(t, ctx, alreadyCorrected, 0, s3key.Block, s3key.Receipts, s3key.Traces)
+	deployment.archive(t, ctx, alreadyCorrected, 1, s3key.Block)
+
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
 	if err := register(ctx, temporal.Dependencies{Logger: discardLogger()}, env); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 
-	env.ExecuteWorkflow(workflowTypeName, RepublishParams{Blocks: []int64{integrationBlock}, Version: new(1)})
+	env.ExecuteWorkflow(workflowTypeName, input(orphanOnly.number, alreadyCorrected.number))
 
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("workflow: %v", err)
 	}
-	var result RepublishResult
-	if err := env.GetWorkflowResult(&result); err != nil {
-		t.Fatalf("decoding the workflow result: %v", err)
-	}
-	if len(result.Republished) != 1 || result.Republished[0].BlockHash != integrationBlockHash {
-		t.Fatalf("result = %+v, want one block republished at hash %s", result, integrationBlockHash)
-	}
-	assertCachedUnderVersion(t, ctx, deployment.keyPrefix)
-	assertPublishedEvent(t, ctx, deployment.sqs, deployment.queueURL)
+	assertRepublishedVersions(t, env, map[int64]int{orphanOnly.number: 1, alreadyCorrected.number: 2})
+	assertCachedUnderVersion(t, ctx, deployment.keyPrefix, orphanOnly, 1)
+	assertCachedUnderVersion(t, ctx, deployment.keyPrefix, alreadyCorrected, 2)
+	assertPublishedEvents(t, ctx, deployment.sqs, deployment.queueURL,
+		map[int64]int{orphanOnly.number: 1, alreadyCorrected.number: 2})
 }
 
 // TestRegister_RefusesAConfigItCannotPublishWith keeps the startup guard on the
@@ -102,29 +130,54 @@ func TestRegister_RefusesAConfigItCannotPublishWith(t *testing.T) {
 	}
 }
 
+// TestRegister_RefusesAnArchiveItCannotList keeps the startup probe on the path a
+// deployment reaches: a bucket this pod may not list — a missing Pod Identity
+// grant, or a name that is not there — must stop the worker rather than fail
+// every height of the first run.
+func TestRegister_RefusesAnArchiveItCannotList(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	newDeployment(t, ctx)
+	t.Setenv("S3_BUCKET", "stl-sentinel"+deployEnv+"-ethereum-raw-never-created")
+
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	err := register(ctx, temporal.Dependencies{Logger: discardLogger()}, env)
+
+	if err == nil || !strings.Contains(err.Error(), "s3:ListBucket") {
+		t.Fatalf("error = %v, want one naming the listing grant it needs", err)
+	}
+}
+
 // deployment is the environment a deployed pod would find: a chain-named FIFO
-// topic with a queue subscribed to it, a node to read blocks from, and the env
-// vars the ConfigMap and ExternalSecret supply.
+// topic with a queue subscribed to it, the chain's raw archive bucket, a node to
+// read blocks from, and the env vars the ConfigMap and ExternalSecret supply.
 type deployment struct {
+	s3        *awss3.Client
 	sqs       *awssqs.Client
 	topicARN  string
 	queueURL  string
+	bucket    string
 	keyPrefix string
 }
+
+// deployEnv is what chainutil's guards check the topic and bucket names against,
+// so the environment the test declares and the names it creates have to agree.
+const deployEnv = "brtest"
 
 func newDeployment(t *testing.T, ctx context.Context) deployment {
 	t.Helper()
 	snsc, sqsc := awsClients(t, ctx)
 
-	// The topic name is what chainutil.ValidateSNSTopicForChain checks against
-	// CHAIN_ID and DEPLOY_ENV, so the deploy environment the test declares and the
-	// topic it creates have to agree.
-	const deployEnv = "brtest"
 	topicARN := createFifoTopic(t, ctx, snsc, "stl-sentinel"+deployEnv+"-ethereum-blocks.fifo")
 	queueURL := createFifoQueue(t, ctx, sqsc, testutil.SQSTestFifoQueueName(t, "block-republisher-"))
 	subscribeQueueToTopic(t, ctx, snsc, sqsc, topicARN, queueURL)
 
-	node := startMockRPCServer(t)
+	s3c := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
+	bucket := testutil.S3TestBucketName(t, "stl-sentinel"+deployEnv+"-ethereum-raw-")
+	testutil.EnsureBucket(t, ctx, s3c, bucket)
+
+	node := startMockRPCServer(t, orphanOnly, alreadyCorrected)
 	t.Cleanup(node.Close)
 
 	keyPrefix := testutil.SanitizeTestName(t.Name())
@@ -132,6 +185,8 @@ func newDeployment(t *testing.T, ctx context.Context) deployment {
 	t.Setenv("DEPLOY_ENV", deployEnv)
 	t.Setenv("AWS_SNS_TOPIC_ARN", topicARN)
 	t.Setenv("AWS_SNS_ENDPOINT", sharedLocalStackCfg.Endpoint)
+	t.Setenv("AWS_S3_ENDPOINT", sharedLocalStackCfg.Endpoint)
+	t.Setenv("S3_BUCKET", bucket)
 	t.Setenv("AWS_REGION", sharedLocalStackCfg.Region)
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
@@ -140,14 +195,47 @@ func newDeployment(t *testing.T, ctx context.Context) deployment {
 	t.Setenv("REDIS_ADDR", sharedRedisAddr)
 	t.Setenv("REDIS_KEY_PREFIX", keyPrefix)
 
-	return deployment{sqs: sqsc, topicARN: topicARN, queueURL: queueURL, keyPrefix: keyPrefix}
+	return deployment{s3: s3c, sqs: sqsc, topicARN: topicARN, queueURL: queueURL, bucket: bucket, keyPrefix: keyPrefix}
+}
+
+// archive puts the height's objects for one version into the raw bucket, the way
+// raw-data-backup would have. Only the keys matter — nothing reads the bodies.
+func (d deployment) archive(t *testing.T, ctx context.Context, block blockFixture, version int, dataTypes ...s3key.DataType) {
+	t.Helper()
+	for _, dataType := range dataTypes {
+		key := s3key.Build(block.number, version, dataType)
+		if _, err := d.s3.PutObject(ctx, &awss3.PutObjectInput{
+			Bucket: aws.String(d.bucket),
+			Key:    aws.String(key),
+			Body:   bytes.NewReader([]byte("archived")),
+		}); err != nil {
+			t.Fatalf("seeding %s: %v", key, err)
+		}
+	}
 }
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
+func assertRepublishedVersions(t *testing.T, env *testsuite.TestWorkflowEnvironment, want map[int64]int) {
+	t.Helper()
+	var result RepublishResult
+	if err := env.GetWorkflowResult(&result); err != nil {
+		t.Fatalf("decoding the workflow result: %v", err)
+	}
+	if len(result.Republished) != len(want) {
+		t.Fatalf("result = %+v, want %d blocks republished", result, len(want))
+	}
+	for _, republished := range result.Republished {
+		if got := republished.Version; got != want[republished.BlockNumber] {
+			t.Errorf("block %d republished at version %d, want %d",
+				republished.BlockNumber, got, want[republished.BlockNumber])
+		}
+	}
+}
+
 // assertCachedUnderVersion reads the raw keys rather than going back through the
 // adapter: the key layout is the contract every worker builds its own read from.
-func assertCachedUnderVersion(t *testing.T, ctx context.Context, keyPrefix string) {
+func assertCachedUnderVersion(t *testing.T, ctx context.Context, keyPrefix string, block blockFixture, version int) {
 	t.Helper()
 	client := redis.NewClient(&redis.Options{Addr: sharedRedisAddr})
 	t.Cleanup(func() {
@@ -164,45 +252,63 @@ func assertCachedUnderVersion(t *testing.T, ctx context.Context, keyPrefix strin
 		return count
 	}
 	key := func(version int, dataType string) string {
-		return fmt.Sprintf("%s:%d:%d:%d:%s", keyPrefix, integrationChainID, integrationBlock, version, dataType)
+		return fmt.Sprintf("%s:%d:%d:%d:%s", keyPrefix, integrationChainID, block.number, version, dataType)
 	}
 
 	for _, dataType := range []string{"block", "receipts", "traces"} {
-		if exists(key(1, dataType)) != 1 {
-			t.Errorf("cache key %s is missing", key(1, dataType))
+		if exists(key(version, dataType)) != 1 {
+			t.Errorf("cache key %s is missing", key(version, dataType))
 		}
 	}
 	// Ethereum's watcher fetches no blobs, so republishing them would hand the
 	// backup worker a data type it does not expect at this version.
-	if exists(key(1, "blobs")) != 0 {
-		t.Errorf("cache key %s was written; this chain's watcher publishes no blobs", key(1, "blobs"))
+	if exists(key(version, "blobs")) != 0 {
+		t.Errorf("cache key %s was written; this chain's watcher publishes no blobs", key(version, "blobs"))
 	}
-	// Nothing may land in the version-0 slot: that is the losing fork's data.
-	if exists(key(0, "block")) != 0 {
-		t.Errorf("cache key %s was written; a republish must never touch version 0", key(0, "block"))
+	// Nothing may land in a slot the archive already holds: version 0 is the
+	// losing fork's data, and every version below the chosen one is taken.
+	for occupied := range version {
+		if exists(key(occupied, "block")) != 0 {
+			t.Errorf("cache key %s was written; that slot is already occupied", key(occupied, "block"))
+		}
 	}
 }
 
-func assertPublishedEvent(t *testing.T, ctx context.Context, sqsc *awssqs.Client, queueURL string) {
+func assertPublishedEvents(t *testing.T, ctx context.Context, sqsc *awssqs.Client, queueURL string, want map[int64]int) {
 	t.Helper()
-	body := receiveOneSQSMessage(t, ctx, sqsc, queueURL, 30*time.Second)
+	seen := make(map[int64]outbound.BlockEvent, len(want))
+	for range want {
+		body := receiveOneSQSMessage(t, ctx, sqsc, queueURL, 30*time.Second)
+		var event outbound.BlockEvent
+		if err := json.Unmarshal([]byte(body), &event); err != nil {
+			t.Fatalf("decoding the delivered BlockEvent: %v", err)
+		}
+		seen[event.BlockNumber] = event
+	}
 
-	var event outbound.BlockEvent
-	if err := json.Unmarshal([]byte(body), &event); err != nil {
-		t.Fatalf("decoding the delivered BlockEvent: %v", err)
+	for _, block := range []blockFixture{orphanOnly, alreadyCorrected} {
+		event, delivered := seen[block.number]
+		if !delivered {
+			t.Fatalf("no event delivered for block %d", block.number)
+		}
+		assertEventDescribes(t, event, block, want[block.number])
 	}
-	if event.ChainID != integrationChainID || event.BlockNumber != integrationBlock {
-		t.Errorf("event = %+v, want chain %d block %d", event, integrationChainID, integrationBlock)
+}
+
+func assertEventDescribes(t *testing.T, event outbound.BlockEvent, block blockFixture, version int) {
+	t.Helper()
+	if event.ChainID != integrationChainID {
+		t.Errorf("event = %+v, want chain %d", event, integrationChainID)
 	}
-	if event.Version != 1 {
-		t.Errorf("event version = %d, want the requested 1", event.Version)
+	if event.Version != version {
+		t.Errorf("block %d published at version %d, want the free slot %d", block.number, event.Version, version)
 	}
-	if event.BlockHash != integrationBlockHash || event.ParentHash != integrationParent {
+	if event.BlockHash != block.hash || event.ParentHash != block.parent {
 		t.Errorf("event hashes = %s / %s, want %s / %s",
-			event.BlockHash, event.ParentHash, integrationBlockHash, integrationParent)
+			event.BlockHash, event.ParentHash, block.hash, block.parent)
 	}
-	if event.BlockTimestamp != integrationTimestamp {
-		t.Errorf("event block timestamp = %d, want %d", event.BlockTimestamp, integrationTimestamp)
+	if event.BlockTimestamp != block.timestamp {
+		t.Errorf("event block timestamp = %d, want %d", event.BlockTimestamp, block.timestamp)
 	}
 	if !event.IsReorg || !event.IsBackfill {
 		t.Errorf("event flags = reorg %t / backfill %t, want both set", event.IsReorg, event.IsBackfill)
@@ -230,14 +336,21 @@ func awsClients(t *testing.T, ctx context.Context) (*awssns.Client, *awssqs.Clie
 	return snsc, sqsc
 }
 
-// startMockRPCServer answers the three reads Republish issues, with the same
-// canonical hash on both by-number reads so no reorg is detected.
-func startMockRPCServer(t *testing.T) *httptest.Server {
+// startMockRPCServer answers the reads Republish issues for every fixture, with
+// the same canonical hash on both by-number reads so no reorg is detected.
+func startMockRPCServer(t *testing.T, fixtures ...blockFixture) *httptest.Server {
 	t.Helper()
-	header := json.RawMessage(fmt.Sprintf(`{"number":"0x1836b83","hash":%q,"parentHash":%q,"timestamp":"0x%x"}`,
-		integrationBlockHash, integrationParent, integrationTimestamp))
-	fullBlock := json.RawMessage(fmt.Sprintf(`{"number":"0x1836b83","hash":%q,"parentHash":%q,"timestamp":"0x%x","transactions":[]}`,
-		integrationBlockHash, integrationParent, integrationTimestamp))
+	headers := make(map[int64]json.RawMessage, len(fixtures))
+	fullBlocks := make(map[string]json.RawMessage, len(fixtures))
+	var head int64
+	for _, block := range fixtures {
+		headers[block.number] = json.RawMessage(fmt.Sprintf(`{"number":"0x%x","hash":%q,"parentHash":%q,"timestamp":"0x%x"}`,
+			block.number, block.hash, block.parent, block.timestamp))
+		fullBlocks[strings.ToLower(block.hash)] = json.RawMessage(fmt.Sprintf(
+			`{"number":"0x%x","hash":%q,"parentHash":%q,"timestamp":"0x%x","transactions":[]}`,
+			block.number, block.hash, block.parent, block.timestamp))
+		head = max(head, block.number+integrationHeadDepth)
+	}
 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -249,11 +362,11 @@ func startMockRPCServer(t *testing.T) *httptest.Server {
 			out := rpcResp{JSONRPC: "2.0", ID: req.ID}
 			switch req.Method {
 			case "eth_blockNumber":
-				out.Result = json.RawMessage(fmt.Sprintf(`"0x%x"`, integrationBlock+integrationHeadDepth))
+				out.Result = json.RawMessage(fmt.Sprintf(`"0x%x"`, head))
 			case "eth_getBlockByNumber":
-				out.Result = header
+				out.Result = headers[hexParam(t, req)]
 			case "eth_getBlockByHash":
-				out.Result = fullBlock
+				out.Result = fullBlocks[strings.ToLower(stringParam(req))]
 			case "eth_getBlockReceipts":
 				out.Result = json.RawMessage(`[]`)
 			case "trace_block":
@@ -280,6 +393,23 @@ func startMockRPCServer(t *testing.T) *httptest.Server {
 		}
 		writeJSON(t, w, answer(single))
 	}))
+}
+
+func stringParam(req rpcReq) string {
+	if len(req.Params) == 0 {
+		return ""
+	}
+	param, _ := req.Params[0].(string)
+	return param
+}
+
+func hexParam(t *testing.T, req rpcReq) int64 {
+	t.Helper()
+	number, err := strconv.ParseInt(strings.TrimPrefix(stringParam(req), "0x"), 16, 64)
+	if err != nil {
+		t.Errorf("%s asked for %q, which is not a block number", req.Method, stringParam(req))
+	}
+	return number
 }
 
 type rpcReq struct {
@@ -367,6 +497,12 @@ func receiveOneSQSMessage(t *testing.T, ctx context.Context, sqsc *awssqs.Client
 		if len(out.Messages) > 0 {
 			if out.Messages[0].Body == nil {
 				t.Fatalf("received an SQS message with no body")
+			}
+			if _, err := sqsc.DeleteMessage(ctx, &awssqs.DeleteMessageInput{
+				QueueUrl:      aws.String(queueURL),
+				ReceiptHandle: out.Messages[0].ReceiptHandle,
+			}); err != nil {
+				t.Fatalf("delete message: %v", err)
 			}
 			return *out.Messages[0].Body
 		}

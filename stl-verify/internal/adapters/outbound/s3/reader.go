@@ -150,6 +150,19 @@ func (r *Reader) ListPrefix(ctx context.Context, bucket, prefix string) ([]strin
 	return keys, nil
 }
 
+// ProbeListAccess issues the cheapest listing S3 offers, for a caller checking
+// at startup that it may list the bucket at all.
+func (r *Reader) ProbeListAccess(ctx context.Context, bucket string) error {
+	_, err := r.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+		Bucket:  aws.String(bucket),
+		MaxKeys: aws.Int32(1),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list bucket %s: %w", bucket, err)
+	}
+	return nil
+}
+
 // StreamFile returns a reader for the file content.
 // If the file is gzipped (.gz extension), the reader automatically decompresses.
 // The caller is responsible for closing the reader.

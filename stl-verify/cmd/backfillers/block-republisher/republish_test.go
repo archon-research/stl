@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -25,8 +26,41 @@ func blocks(n int) []int64 {
 	return list
 }
 
-// republishStub stands in for the real activity, recording what it was asked to
-// do and letting a case fail a chosen block.
+// input renders heights as the JSON an operator types into the Input box.
+func input(numbers ...int64) json.RawMessage {
+	encoded, err := json.Marshal(struct {
+		Blocks []int64 `json:"blocks"`
+	}{Blocks: numbers})
+	if err != nil {
+		panic(err)
+	}
+	return encoded
+}
+
+// deriveStub stands in for the archive listing, answering the version each
+// height would be given and recording how often it was asked.
+type deriveStub struct {
+	seen     []int64
+	versions map[int64]int
+}
+
+func registerDeriveStub(env *testsuite.TestWorkflowEnvironment, versions map[int64]int) *deriveStub {
+	stub := &deriveStub{versions: versions}
+	env.RegisterActivityWithOptions(
+		func(_ context.Context, number int64) (int, error) {
+			stub.seen = append(stub.seen, number)
+			if version, ok := stub.versions[number]; ok {
+				return version, nil
+			}
+			return 1, nil
+		},
+		activity.RegisterOptions{Name: deriveVersionActivityName},
+	)
+	return stub
+}
+
+// republishStub stands in for the real activity, recording every attempt it was
+// asked for and letting a case fail a chosen one.
 type republishStub struct {
 	seen []blockWork
 }
@@ -62,6 +96,19 @@ func failAt(number int64) func(blockWork) error {
 	}
 }
 
+// failFirstAttempt is the shape a rolled pod leaves behind: the event is already
+// on the topic, and the activity never got to report it.
+func failFirstAttempt() func(blockWork) error {
+	attempts := 0
+	return func(blockWork) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("the pod was rolled after publishing")
+		}
+		return nil
+	}
+}
+
 func workflowResult(t *testing.T, env *testsuite.TestWorkflowEnvironment) RepublishResult {
 	t.Helper()
 	var result RepublishResult
@@ -84,62 +131,77 @@ func queryProgress(t *testing.T, env *testsuite.TestWorkflowEnvironment) republi
 	return progress
 }
 
-func TestRepublishParams_Resolve(t *testing.T) {
+func TestBlocksFromInput(t *testing.T) {
 	tests := []struct {
 		name            string
-		in              RepublishParams
-		wantBlocks      []int64
-		wantVersion     int
+		in              json.RawMessage
+		want            []int64
 		wantErrContains string
 	}{
 		{
-			name:        "an omitted version means the first correction slot",
-			in:          RepublishParams{Blocks: []int64{25395651}},
-			wantBlocks:  []int64{25395651},
-			wantVersion: 1,
+			name: "the heights, in the order they were given",
+			in:   json.RawMessage(`{"blocks":[25395651,25087888]}`),
+			want: []int64{25395651, 25087888},
 		},
 		{
-			name:        "an explicit version is honoured",
-			in:          RepublishParams{Blocks: []int64{25395651}, Version: new(3)},
-			wantBlocks:  []int64{25395651},
-			wantVersion: 3,
-		},
-		{
-			name:            "version 0 is the slot being corrected, never a target",
-			in:              RepublishParams{Blocks: []int64{25395651}, Version: new(0)},
+			name:            "an input still choosing the version",
+			in:              json.RawMessage(`{"blocks":[25395651],"version":1}`),
 			wantErrContains: "version",
 		},
 		{
-			name:            "a negative version is rejected",
-			in:              RepublishParams{Blocks: []int64{25395651}, Version: new(-1)},
-			wantErrContains: "version",
+			name:            "an input naming a field this workflow does not take",
+			in:              json.RawMessage(`{"blocks":[25395651],"dryRun":true}`),
+			wantErrContains: "dryRun",
 		},
 		{
 			name:            "no blocks is nothing to do, not an empty success",
-			in:              RepublishParams{},
+			in:              json.RawMessage(`{}`),
+			wantErrContains: "blocks",
+		},
+		{
+			name:            "an empty list",
+			in:              json.RawMessage(`{"blocks":[]}`),
 			wantErrContains: "blocks",
 		},
 		{
 			name:            "a non-positive block number is a typo",
-			in:              RepublishParams{Blocks: []int64{25395651, 0}},
+			in:              json.RawMessage(`{"blocks":[25395651,0]}`),
 			wantErrContains: "block number",
 		},
 		{
-			name:        "the widest accepted run",
-			in:          RepublishParams{Blocks: blocks(maxBlocksPerRun)},
-			wantBlocks:  blocks(maxBlocksPerRun),
-			wantVersion: 1,
+			name:            "the same height twice",
+			in:              json.RawMessage(`{"blocks":[25395651,25087888,25395651]}`),
+			wantErrContains: "25395651",
+		},
+		{
+			name: "the widest accepted run",
+			in:   input(blocks(maxBlocksPerRun)...),
+			want: blocks(maxBlocksPerRun),
 		},
 		{
 			name:            "one block over the ceiling",
-			in:              RepublishParams{Blocks: blocks(maxBlocksPerRun + 1)},
+			in:              input(blocks(maxBlocksPerRun + 1)...),
 			wantErrContains: fmt.Sprintf("%d", maxBlocksPerRun),
+		},
+		{
+			name:            "a run started with no input at all",
+			wantErrContains: "EOF",
+		},
+		{
+			name:            "an input that is not an object",
+			in:              json.RawMessage(`[25395651]`),
+			wantErrContains: "cannot unmarshal array",
+		},
+		{
+			name:            "a second object after the first",
+			in:              json.RawMessage(`{"blocks":[25395651]} {"blocks":[25087888]}`),
+			wantErrContains: "one object",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := tc.in.resolve()
+			got, err := blocksFromInput(tc.in)
 
 			if tc.wantErrContains != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErrContains) {
@@ -148,47 +210,46 @@ func TestRepublishParams_Resolve(t *testing.T) {
 				return
 			}
 			if err != nil {
-				t.Fatalf("resolve: %v", err)
+				t.Fatalf("blocksFromInput: %v", err)
 			}
-			if got.Version != tc.wantVersion {
-				t.Errorf("version = %d, want %d", got.Version, tc.wantVersion)
-			}
-			if len(got.Blocks) != len(tc.wantBlocks) {
-				t.Fatalf("blocks = %d entries, want %d", len(got.Blocks), len(tc.wantBlocks))
-			}
-			for i := range got.Blocks {
-				if got.Blocks[i] != tc.wantBlocks[i] {
-					t.Fatalf("blocks[%d] = %d, want %d", i, got.Blocks[i], tc.wantBlocks[i])
-				}
+			if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Errorf("blocks = %v, want %v", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestRepublishWorkflow_RepublishesEveryBlockAtTheRequestedVersion(t *testing.T) {
+func TestRepublishWorkflow_ReportsThePerHeightVersionEachBlockLandedAt(t *testing.T) {
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	registerDeriveStub(env, map[int64]int{25395651: 1, 25087888: 2})
 	stub := registerRepublishStub(env, neverFails)
 
-	env.ExecuteWorkflow(republishWorkflow, RepublishParams{Blocks: []int64{25395651, 25087888}, Version: new(1)})
+	env.ExecuteWorkflow(republishWorkflow, input(25395651, 25087888))
 
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("workflow: %v", err)
 	}
-	want := []blockWork{{Number: 25395651, Version: 1}, {Number: 25087888, Version: 1}}
+	want := []blockWork{{Number: 25395651, Version: 1}, {Number: 25087888, Version: 2}}
 	if fmt.Sprint(stub.seen) != fmt.Sprint(want) {
 		t.Errorf("activity calls = %v, want %v", stub.seen, want)
 	}
 	result := workflowResult(t, env)
-	if result.Requested != 2 || len(result.Republished) != 2 || result.Version != 1 {
-		t.Errorf("result = %+v, want 2 of 2 republished at version 1", result)
+	if result.Requested != 2 || len(result.Republished) != 2 {
+		t.Fatalf("result = %+v, want 2 of 2 republished", result)
+	}
+	for i, want := range []int{1, 2} {
+		if got := result.Republished[i].Version; got != want {
+			t.Errorf("block %d republished at version %d, want %d", result.Republished[i].BlockNumber, got, want)
+		}
 	}
 }
 
 func TestRepublishWorkflow_StopsAtTheFirstFailingBlock(t *testing.T) {
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	registerDeriveStub(env, nil)
 	stub := registerRepublishStub(env, failAt(25087888))
 
-	env.ExecuteWorkflow(republishWorkflow, RepublishParams{Blocks: []int64{25395651, 25087888, 25396903}})
+	env.ExecuteWorkflow(republishWorkflow, input(25395651, 25087888, 25396903))
 
 	if env.GetWorkflowError() == nil {
 		t.Fatal("the workflow succeeded despite a failed block")
@@ -200,15 +261,38 @@ func TestRepublishWorkflow_StopsAtTheFirstFailingBlock(t *testing.T) {
 	}
 }
 
+// A retried republish must land in the slot the run already settled on. Deriving
+// the version inside the retry would step past the objects the first attempt's
+// own publish caused, correcting the height twice.
+func TestRepublishWorkflow_RetriesARepublishAtTheVersionItAlreadyChose(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	derive := registerDeriveStub(env, map[int64]int{25395651: 2})
+	stub := registerRepublishStub(env, failFirstAttempt())
+
+	env.ExecuteWorkflow(republishWorkflow, input(25395651))
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("workflow: %v", err)
+	}
+	want := []blockWork{{Number: 25395651, Version: 2}, {Number: 25395651, Version: 2}}
+	if fmt.Sprint(stub.seen) != fmt.Sprint(want) {
+		t.Errorf("republish attempts = %v, want the retry at the same version", stub.seen)
+	}
+	if fmt.Sprint(derive.seen) != fmt.Sprint([]int64{25395651}) {
+		t.Errorf("derived the version for %v, want it read once and reused", derive.seen)
+	}
+}
+
 // A failing run must still expose what it managed to republish, so the operator
 // knows which blocks to leave out of the retry. Asserted through the progress
 // query, not the result: Temporal discards the result payload of a workflow that
 // returns a non-nil error.
 func TestRepublishWorkflow_ExposesWhatItRepublishedBeforeFailing(t *testing.T) {
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	registerDeriveStub(env, nil)
 	registerRepublishStub(env, failAt(25087888))
 
-	env.ExecuteWorkflow(republishWorkflow, RepublishParams{Blocks: []int64{25395651, 25087888}})
+	env.ExecuteWorkflow(republishWorkflow, input(25395651, 25087888))
 
 	progress := queryProgress(t, env)
 	if progress.Total != 2 {
@@ -219,25 +303,41 @@ func TestRepublishWorkflow_ExposesWhatItRepublishedBeforeFailing(t *testing.T) {
 	}
 }
 
-func TestRepublishWorkflow_RejectsInvalidParamsWithoutTouchingTheChain(t *testing.T) {
-	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	stub := registerRepublishStub(env, neverFails)
+// An input written against the old runbook must stop the run rather than quietly
+// mean something else: the version it names is no longer the version the blocks
+// would land at.
+func TestRepublishWorkflow_RejectsAnUnusableInputWithoutTouchingTheChain(t *testing.T) {
+	tests := []struct {
+		name string
+		in   json.RawMessage
+	}{
+		{name: "one still choosing the version", in: json.RawMessage(`{"blocks":[25395651],"version":1}`)},
+		{name: "one naming a field this workflow does not take", in: json.RawMessage(`{"blocks":[25395651],"dryRun":true}`)},
+	}
 
-	env.ExecuteWorkflow(republishWorkflow, RepublishParams{Blocks: []int64{25395651}, Version: new(0)})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+			derive := registerDeriveStub(env, nil)
+			stub := registerRepublishStub(env, neverFails)
 
-	err := env.GetWorkflowError()
-	if err == nil {
-		t.Fatal("the workflow accepted version 0")
-	}
-	var appErr *temporalsdk.ApplicationError
-	if !errors.As(err, &appErr) {
-		t.Fatalf("error = %v, want a Temporal application error", err)
-	}
-	if !appErr.NonRetryable() {
-		t.Error("invalid parameters must be rejected non-retryably")
-	}
-	if len(stub.seen) != 0 {
-		t.Errorf("republished %v for invalid params, want nothing", stub.seen)
+			env.ExecuteWorkflow(republishWorkflow, tc.in)
+
+			err := env.GetWorkflowError()
+			if err == nil {
+				t.Fatal("the workflow accepted the input")
+			}
+			var appErr *temporalsdk.ApplicationError
+			if !errors.As(err, &appErr) {
+				t.Fatalf("error = %v, want a Temporal application error", err)
+			}
+			if !appErr.NonRetryable() {
+				t.Error("an unusable input must be rejected non-retryably")
+			}
+			if len(derive.seen) != 0 || len(stub.seen) != 0 {
+				t.Errorf("touched %v / %v for an unusable input, want nothing", derive.seen, stub.seen)
+			}
+		})
 	}
 }
 

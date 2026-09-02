@@ -8,6 +8,11 @@ import (
 const (
 	ethereumTopicARN = "arn:aws:sns:eu-west-1:579039992622:stl-sentinelstaging-ethereum-blocks.fifo"
 	baseTopicARN     = "arn:aws:sns:eu-west-1:579039992622:stl-sentinelstaging-base-blocks.fifo"
+
+	// The Terraform-generated suffix is what makes these names unguessable, and
+	// what ValidateS3BucketForChain deliberately ignores.
+	ethereumRawBucket = "stl-sentinelstaging-ethereum-raw-89d540d0"
+	baseRawBucket     = "stl-sentinelstaging-base-raw-89d540d0"
 )
 
 func TestLoadConfig(t *testing.T) {
@@ -18,6 +23,7 @@ func TestLoadConfig(t *testing.T) {
 		"DEPLOY_ENV":        "staging",
 		"AWS_SNS_TOPIC_ARN": ethereumTopicARN,
 		"AWS_SNS_ENDPOINT":  "",
+		"S3_BUCKET":         ethereumRawBucket,
 		"ALCHEMY_API_KEY":   "test-key",
 		"ALCHEMY_HTTP_URL":  "",
 		"REDIS_ADDR":        "",
@@ -37,6 +43,7 @@ func TestLoadConfig(t *testing.T) {
 				chainID:        1,
 				deployEnv:      "staging",
 				snsTopicARN:    ethereumTopicARN,
+				s3Bucket:       ethereumRawBucket,
 				rpcURL:         defaultAlchemyHTTPURL + "/test-key",
 				redisAddr:      defaultRedisAddr,
 				redisKeyPrefix: defaultRedisKeyPrefix,
@@ -48,12 +55,14 @@ func TestLoadConfig(t *testing.T) {
 			override: map[string]string{
 				"CHAIN_ID":          "8453",
 				"AWS_SNS_TOPIC_ARN": baseTopicARN,
+				"S3_BUCKET":         baseRawBucket,
 				"ALCHEMY_HTTP_URL":  "https://base-mainnet.g.alchemy.com/v2",
 			},
 			want: config{
 				chainID:        8453,
 				deployEnv:      "staging",
 				snsTopicARN:    baseTopicARN,
+				s3Bucket:       baseRawBucket,
 				rpcURL:         "https://base-mainnet.g.alchemy.com/v2/test-key",
 				redisAddr:      defaultRedisAddr,
 				redisKeyPrefix: defaultRedisKeyPrefix,
@@ -67,6 +76,7 @@ func TestLoadConfig(t *testing.T) {
 				deployEnv:      "staging",
 				snsTopicARN:    ethereumTopicARN,
 				snsEndpoint:    "http://localstack:4566",
+				s3Bucket:       ethereumRawBucket,
 				rpcURL:         defaultAlchemyHTTPURL + "/test-key",
 				redisAddr:      "redis:6379",
 				redisPassword:  "hunter2",
@@ -103,6 +113,21 @@ func TestLoadConfig(t *testing.T) {
 			name:            "another environment's topic",
 			override:        map[string]string{"DEPLOY_ENV": "prod"},
 			wantErrContains: "sns topic",
+		},
+		{
+			name:            "an absent archive bucket leaves no version to derive",
+			override:        map[string]string{"S3_BUCKET": ""},
+			wantErrContains: "S3_BUCKET",
+		},
+		{
+			name:            "another chain's archive bucket",
+			override:        map[string]string{"S3_BUCKET": baseRawBucket},
+			wantErrContains: "bucket",
+		},
+		{
+			name:            "another environment's archive bucket",
+			override:        map[string]string{"S3_BUCKET": "stl-sentinelprod-ethereum-raw-89d540d0"},
+			wantErrContains: "bucket",
 		},
 		{
 			name:            "an absent alchemy key is a hard error, never an unauthenticated URL",

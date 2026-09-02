@@ -18,7 +18,7 @@ into TimescaleDB (or validates stored data). Current cronjobs:
 | `reference-capital-backfill` | `reference-capital-backfill` | **on demand** | Seeds the reference balance-sheet history predating the syncer's first run |
 | `morpho-vault-backfill` | `morpho-vault-backfill` | **on demand** | Discovers Morpho vaults from the archived S3 receipts and replays their VaultV2 structured events, for a block range supplied at start time (VEC-218) |
 | `morpho-v2-bootstrap` | `morpho-v2-bootstrap` | **on demand** | One-shot repair of Morpho VaultV2 vaults discovered before atomic discovery (VEC-218) |
-| `block-republisher` | `block-republisher` | **on demand** | Re-publishes named block heights under a new `block_version`, so every indexer appends the canonical block for a height whose only published version is a losing fork (ARCT-383) |
+| `block-republisher` | `block-republisher` | **on demand** | Re-publishes named block heights under the next `block_version` their raw archive leaves free, so every indexer appends the canonical block for a height whose only published version is a losing fork (ARCT-383) |
 | `core-model-runner` | `core-model-runner` | 24h | CORE model CRR per market → `core_model_results` (Python harness; staging + prod; N_MC capped at 100 until the sizing in #804 settles) |
 
 > `maple-graphql-indexer` is also a cronjob but has its own richer rules — see
@@ -208,8 +208,11 @@ Repair:
   next free version above the losing fork, dry run first — needs **#849**,
   which adds `--dry-run`, `--allow-unfinalized` and next-free-version writing.
   Even then it fixes S3 only: the indexers' rows stay at `block_version` 0
-  until the republisher (**ARCT-383**, #850) re-emits the block event at the new
-  version.
+  until the republisher (**ARCT-383**, #850) re-emits the block event. The
+  republisher derives that version the same way, per height, from the objects in
+  the raw bucket — so run it *before* any bulk-downloader repair of the same
+  height: the `_1_` objects that repair wrote push the event to version 2, and
+  the archive ends up holding the same canonical block twice.
 
 Before the prod deploy, run the pre-flight queries below against prod's
 retained window — a hole found there is repairable while it is still inside
@@ -829,45 +832,78 @@ Workflow**:
 | Task Queue | `block-republisher` |
 | Workflow Type | `BlockRepublish` |
 | Workflow ID | descriptive and unique, e.g. `block-republisher-2026-09-01` |
-| Input | `{"blocks":[25395651,25087888],"version":1}` |
+| Input | `{"blocks":[25395651,25087888]}` |
 
-`blocks` are the heights, processed in the order given, at most **200** per run.
-`version` is the slot they are all published under; it defaults to 1 and must be
-at least 1 — version 0 is the slot holding the data being corrected. Every height
-must sit at least 64 blocks below the chain head. The chain comes from the
-Deployment's `CHAIN_ID`, not from the input. The equivalent CLI
-call:
+`blocks` are the heights, processed in the order given, at most **200** per run,
+each named at most once, and they are the whole input. Every height must sit at
+least 64 blocks below the chain head. The chain comes from the Deployment's
+`CHAIN_ID`, and the version from the archive (below) — neither is an input. An
+input carrying `version`, or any other field, **fails the run non-retryably**: a
+run started from the old runbook line must stop rather than quietly do something
+else. The equivalent CLI call:
 
 ```bash
 temporal workflow start --namespace vector \
   --task-queue block-republisher --type BlockRepublish \
   --workflow-id block-republisher-2026-09-01 \
-  --input '{"blocks":[25395651,25087888],"version":1}'
+  --input '{"blocks":[25395651,25087888]}'
 ```
 
-**Choose the version deliberately.** `block_version` is the reorg counter, so a
-height that genuinely reorged once already has a real version 1. Republishing
-into an occupied slot appends rows that every reader (`ORDER BY block_version
-DESC, processing_version DESC`) prefers over the genuine ones. Before a run,
-check which slots the archive already holds (`$RAW_BUCKET` is the chain's
-`stl-sentinel<env>-<chain>-raw-<suffix>` bucket, as on the backup worker):
+**The version comes from the archive, per height.** `block_version` is the reorg
+counter, so a height that genuinely reorged once already has a real version 1,
+and republishing into an occupied slot would append rows that every reader
+(`ORDER BY block_version DESC, processing_version DESC`) prefers over the genuine
+ones. So the worker lists the height's own prefix in the chain's raw bucket
+(`S3_BUCKET`) and publishes at **one past the highest `<number>_<version>_*`
+object there — 1 where there is none, never 0**, which holds the data being
+corrected. An object at a version occupies it whatever data type it carries, so a
+half-written correction still moves the next one up. Two heights in one run
+routinely land at different versions; each block's own version is in the result,
+in the `progress` query and in the worker's log line for it.
+
+You can predict what a height will get, though nothing requires you to
+(`$RAW_BUCKET` is the chain's `stl-sentinel<env>-<chain>-raw-<suffix>` bucket, as
+on the backup worker):
 
 ```bash
 aws s3 ls s3://$RAW_BUCKET/25395000-25395999/ | grep 25395651_
 ```
 
-Only `_0_` present is the ARCT-379 shape; pick 1. If `_1_` is there, pick the
-next free slot.
+Only `_0_` present is the ARCT-379 shape, and that height will be republished at
+1; a height that also shows `_1_` goes to 2.
 
-**What a run does.** One activity per block. It reads the chain head and refuses
-any height inside the 64-block reorg window, reads the block by number (the
-canonical block at fetch time), fetches block + receipts + traces pinned to that
-hash, re-reads the number and **refuses if the canonical hash moved between the
-two reads**, writes the payload to `stl:{chainId}:{number}:{version}:{dataType}`
-in Redis, and publishes a `BlockEvent` at that version on the chain's SNS topic.
-A block takes seconds; a 200-block run takes minutes. The first failing block
-stops the run — the blocks before it are already durable, so the retry is the
-remaining list.
+The archive is written by `raw-data-backup` from the event, so it trails a
+healthy run by up to a minute — and stays behind for good if that worker
+dead-lettered the block. If a height holds fewer versions than you expect, check
+what the indexers have before starting a run:
+
+```sql
+SELECT max(block_version) FROM protocol_event WHERE chain_id = 1 AND block_number = 25395651;
+```
+
+A version there that the archive does not hold means the repair would land on a
+slot the indexers already have: fix the archive gap (the backup worker's DLQ)
+first.
+
+**Before the first run.** The ServiceAccount's EKS Pod Identity association needs
+`sns:Publish` on the chain's blocks topic and `s3:ListBucket` on the chain's raw
+bucket — no object is ever read or written. The worker lists that bucket once at
+startup, so a missing grant or a mistyped `S3_BUCKET` shows up as a pod that will
+not start (`this pod's Pod Identity needs s3:ListBucket on <bucket>` in the log),
+not as a repair that dies on its first height.
+
+**What a run does.** Two activities per block. `DeriveVersion` lists the height's
+archive prefix and settles the version, which Temporal records in the workflow's
+history — that is what makes a retried republish reuse the slot instead of
+stepping past the objects its own first attempt caused. `RepublishBlock` then
+reads the chain head and refuses any height inside the 64-block reorg window,
+reads the block by number (the canonical block at fetch time), fetches block +
+receipts + traces pinned to that hash, re-reads the number and **refuses if the
+canonical hash moved between the two reads**, writes the payload to
+`stl:{chainId}:{number}:{version}:{dataType}` in Redis, and publishes a
+`BlockEvent` at that version on the chain's SNS topic. A block takes seconds; a
+200-block run takes minutes. The first failing block stops the run — the blocks
+before it are already durable, so the retry is the remaining list.
 
 **It does not write `block_states`.** The `assign_block_version` trigger
 overwrites the supplied version with `MAX(version)+1` over the rows surviving at
@@ -877,14 +913,19 @@ watcher's gap filler an unpublished row to re-publish and pin its backfill
 watermark behind the repaired height. The durable record of a republish is the
 SNS event, the S3 objects and the indexers' rows.
 
-**What to verify afterwards.**
+**What to verify afterwards.** Take each height's version from the run's result
+(or the `progress` query): they need not be the same, and the checks below are
+per height. The example uses a height that landed at 1.
 
 1. The archive holds the new version — `raw-data-backup` writes it from the same
    event, usually within a minute:
    ```bash
    aws s3 ls s3://$RAW_BUCKET/25395000-25395999/ | grep 25395651_1_
    ```
-   Expect `_1_block`, `_1_receipts` and (Ethereum only) `_1_traces`.
+   Expect `_1_block`, `_1_receipts` and (Ethereum only) `_1_traces`. This is also
+   what makes a re-run of the same height idempotent in the sense that matters:
+   the next run reads these objects and would go to 2, so an accidental repeat
+   appends a new version rather than overwriting one.
 2. The indexers appended the corrected version:
    ```sql
    SELECT block_version, count(*) FROM protocol_event
@@ -901,12 +942,21 @@ SNS event, the S3 objects and the indexers' rows.
 - **`StructuralData` (non-retryable, run goes red immediately)** — the height is
   above the chain head or within 64 blocks of it (the worker refuses to repair
   inside the reorg window: two reads seconds apart would both see the same fork,
-  and the "correction" could itself be orphaned), the node answers null for the
-  block or one of its data types, or the input is invalid. Fix the input or point
-  at a node with the history, then start a new run.
+  and the "correction" could itself be orphaned), or the node answers null for
+  the block or one of its data types. Point at a node with the history, then
+  start a new run.
+- **`InvalidParams` (non-retryable, nothing is republished)** — the input is not
+  the object this workflow takes: an empty or oversized `blocks` list, a
+  non-positive height, or a field it does not accept, `version` above all. Fix
+  the input and start a new run; nothing was published, so the list is unchanged.
 - **Canonical hash moved mid-republish (retryable)** — a reorg deeper than the
   64-block guard. The activity retries inside a 30-minute envelope, which is
   normally long enough for the chain to settle.
+- **The archive listing fails (retryable)** — a throttled `ListObjectsV2` on the
+  raw bucket leaves the height with no version to publish under, so
+  `DeriveVersion` retries rather than guessing, and settles inside the 30-minute
+  envelope. A missing `s3:ListBucket` grant cannot show up here: the startup
+  probe would have kept the pod from starting.
 - **A republished block poisons an indexer's queue.** SNS FIFO groups by chain,
   so one block an indexer cannot process head-of-line-blocks every later block on
   that chain's queue until SQS redrives it to the DLQ. The usual cause is a state
@@ -915,6 +965,13 @@ SNS event, the S3 objects and the indexers' rows.
   `VectorFluidVaultIndexerStalled`, `VectorBackupWorkerStalled`) for the first
   few minutes of a run — republish a single block first and confirm they stay
   quiet before running a list.
+- **A block is published twice.** An activity Temporal cancelled (a rolled pod)
+  or timed out after its publish is retried at the version the run already
+  settled on, so the repeat is the same event: SNS FIFO drops it inside its
+  five-minute window, and outside it every append-only consumer re-derives
+  identical rows. The case to avoid is a second **run** over a height that
+  already succeeded — the archive holds that version by then, so it lands one
+  slot further along. Naming the same height twice in one run is refused outright.
 - **Nothing arrives downstream** — check the worker actually published
   (`kubectl -n vector logs deploy/block-republisher | grep 'republished block'`)
   before suspecting the consumers; SNS FIFO silently drops a repeat of the same
@@ -924,6 +981,7 @@ SNS event, the S3 objects and the indexers' rows.
 which the worker's startup guard rejects — it requires the deployed
 `stl-sentinel<env>-<chain>-blocks.fifo` naming for the configured `CHAIN_ID` and
 `DEPLOY_ENV`. Run it against a real environment's topic, or rename the dev topic.
+`S3_BUCKET` is guarded the same way, against `stl-sentinel<env>-<chain>-raw`.
 
 ---
 
