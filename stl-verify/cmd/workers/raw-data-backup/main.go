@@ -303,7 +303,6 @@ func run(ctx context.Context, logger *slog.Logger, workers int) error {
 		ChainID:             cfg.chainID,
 		Bucket:              cfg.bucket,
 		Workers:             cfg.workers,
-		BatchSize:           10, // Max messages per SQS receive call
 		CacheMissMaxRetries: cfg.cacheMissMaxRetries,
 		Logger:              logger,
 		Metrics:             metricsRec,

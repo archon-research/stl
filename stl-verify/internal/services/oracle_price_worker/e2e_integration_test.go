@@ -353,6 +353,10 @@ func (c *eventSinkConsumer) DeleteCount() int {
 	return len(c.deleted)
 }
 
+func (c *eventSinkConsumer) ChangeMessageVisibilityBatch(context.Context, []string, time.Duration) (map[string]error, error) {
+	return nil, nil
+}
+
 func (c *eventSinkConsumer) VisibilityTimeout() time.Duration {
 	return 300 * time.Second
 }

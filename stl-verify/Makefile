@@ -783,7 +783,7 @@ dev-env-files:
 		"JAEGER_ENDPOINT=127.0.0.1:$(KIND_HOST_OTLP_PORT)" \
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"SQS_WAIT_TIME=1" \
-		"SQS_VISIBILITY_TIMEOUT=30" \
+		"SQS_VISIBILITY_TIMEOUT=180" \
 		"LOG_LEVEL=debug" \
 		> cmd/workers/morpho-indexer/.env
 	@printf '%s\n' \

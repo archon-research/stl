@@ -84,6 +84,7 @@ type mockConsumer struct {
 	deleteMessageFn     func(ctx context.Context, receiptHandle string) error
 	deleteMessageCalls  int
 	receiveMessageCalls int
+	visibilityTimeout   time.Duration
 }
 
 func (m *mockConsumer) ReceiveMessages(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error) {
@@ -106,7 +107,14 @@ func (m *mockConsumer) DeleteMessage(ctx context.Context, receiptHandle string) 
 	return nil
 }
 
+func (m *mockConsumer) ChangeMessageVisibilityBatch(context.Context, []string, time.Duration) (map[string]error, error) {
+	return nil, nil
+}
+
 func (m *mockConsumer) VisibilityTimeout() time.Duration {
+	if m.visibilityTimeout > 0 {
+		return m.visibilityTimeout
+	}
 	return 300 * time.Second
 }
 
@@ -678,6 +686,28 @@ func TestStart_MulticallerFactoryErrorFailsStartup(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "creating multicaller") {
 		t.Errorf("error = %q, expected it to contain 'creating multicaller'", err)
+	}
+}
+
+func TestStart_RefusesAVisibilityTimeoutAReceiveCanOutrun(t *testing.T) {
+	repo := &mockRepo{}
+	defaultRepoSetup(repo)
+
+	consumer := &mockConsumer{visibilityTimeout: 30 * time.Second}
+	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, dummyMulticallerFactory(), testReferenceEffectiveAt)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	err = svc.Start(context.Background())
+	if err == nil {
+		_ = svc.Stop()
+		t.Fatal("Start accepted a 30s visibility timeout; a booted worker never crashloops on it, because " +
+			"ProcessMessages revalidates on every poll and RunLoop only logs what it returns, so the pod reports " +
+			"Ready and spins logging forever while the queue never drains")
+	}
+	if !strings.Contains(err.Error(), "visibility timeout") {
+		t.Errorf("Start error = %q, want it to name the visibility timeout", err)
 	}
 }
 

@@ -63,7 +63,7 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 	queueURL := fs.String("queue", "", "SQS Queue URL")
 	redisAddr := fs.String("redis", "", "Redis address")
 	dbURL := fs.String("db", "", "PostgreSQL connection URL")
-	maxMessages := fs.Int("max", 10, "Max messages per poll")
+	maxMessages := fs.Int("max", 1, "Max messages per receive; more raises the visibility timeout the queue must carry")
 	waitTime := fs.Int("wait", 20, "Wait time in seconds (long polling)")
 	visibilityTimeout := fs.Int("visibility-timeout", 300, "SQS visibility timeout in seconds")
 	sweepBlocks := fs.Int64("sweep-blocks", 50, "Blocks between guaranteed state snapshots (0 disables)")
@@ -161,13 +161,8 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 		return Config{}, fmt.Errorf("sweep blocks %d must be >= 0", cfg.SweepBlocks)
 	}
 
-	// Range-validate the SQS timings (from flag OR env). AWS rejects these at
-	// call time, but a bad value should fail fast at boot with a clear message
-	// rather than surfacing as opaque ReceiveMessage errors on the hot path.
-	// WaitTimeSeconds: 0–20 (long-poll max). VisibilityTimeout: 0–43200 (12h).
-	if cfg.WaitTime < 0 || cfg.WaitTime > 20 {
-		return Config{}, fmt.Errorf("SQS wait time %d out of range [0,20]", cfg.WaitTime)
-	}
+	// AWS rejects an out-of-range visibility timeout only at call time, as an
+	// opaque ReceiveMessage error. The wait time is checked in sqs.NewConsumer.
 	if cfg.VisibilityTimeout < 0 || cfg.VisibilityTimeout > 43200 {
 		return Config{}, fmt.Errorf("SQS visibility timeout %d out of range [0,43200]", cfg.VisibilityTimeout)
 	}
