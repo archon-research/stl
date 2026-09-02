@@ -115,6 +115,10 @@ func (m *mockConsumer) Close() error {
 }
 
 // mockRepo implements outbound.OnchainPriceRepository.
+// Deliberately after the fixtures: the seed helpers stamp valid_from with time.Now(), and
+// the pinned read resolves only versions with valid_from <= effective_at.
+var testReferenceEffectiveAt = time.Now().UTC().Add(24 * time.Hour)
+
 type mockRepo struct {
 	mu                             sync.Mutex
 	getOracleFn                    func(ctx context.Context, name string) (*entity.Oracle, error)
@@ -132,6 +136,8 @@ type mockRepo struct {
 
 	upsertPricesCalls int
 	lastUpserted      []*entity.OnchainTokenPrice
+
+	referenceEffectiveAt time.Time
 }
 
 func (m *mockRepo) GetOracle(ctx context.Context, name string) (*entity.Oracle, error) {
@@ -141,7 +147,8 @@ func (m *mockRepo) GetOracle(ctx context.Context, name string) (*entity.Oracle, 
 	return nil, errors.New("GetOracle not mocked")
 }
 
-func (m *mockRepo) GetEnabledAssets(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error) {
+func (m *mockRepo) GetEnabledAssets(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) ([]*entity.OracleAsset, error) {
+	m.referenceEffectiveAt = referenceEffectiveAt
 	if m.getEnabledAssetsFn != nil {
 		return m.getEnabledAssetsFn(ctx, oracleID)
 	}
@@ -162,7 +169,8 @@ func (m *mockRepo) GetLatestBlock(ctx context.Context, oracleID int64) (int64, e
 	return 0, nil
 }
 
-func (m *mockRepo) GetTokenInfos(ctx context.Context, oracleID int64) (map[int64]outbound.TokenInfo, error) {
+func (m *mockRepo) GetTokenInfos(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) (map[int64]outbound.TokenInfo, error) {
+	m.referenceEffectiveAt = referenceEffectiveAt
 	if m.getTokenInfosFn != nil {
 		return m.getTokenInfosFn(ctx, oracleID)
 	}
@@ -208,7 +216,7 @@ func (m *mockRepo) InsertProtocolOracleBinding(ctx context.Context, binding *ent
 	return nil, errors.New("InsertProtocolOracleBinding not mocked")
 }
 
-func (m *mockRepo) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64) error {
+func (m *mockRepo) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64, referenceEffectiveAt time.Time) error {
 	if m.copyOracleAssetsFn != nil {
 		return m.copyOracleAssetsFn(ctx, fromOracleID, toOracleID)
 	}
@@ -372,7 +380,7 @@ func TestNewService(t *testing.T) {
 
 	// Separate test for nil newMulticaller since the table always passes dummyMulticallerFactory().
 	t.Run("error nil newMulticaller", func(t *testing.T) {
-		_, err := NewService(validConfig(), consumer, cache, repo, nil)
+		_, err := NewService(validConfig(), consumer, cache, repo, nil, testReferenceEffectiveAt)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -383,7 +391,7 @@ func TestNewService(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			svc, err := NewService(tc.config, tc.consumer, tc.cacheReader, tc.repo, dummyMulticallerFactory())
+			svc, err := NewService(tc.config, tc.consumer, tc.cacheReader, tc.repo, dummyMulticallerFactory(), testReferenceEffectiveAt)
 
 			if tc.wantErr {
 				if err == nil {
@@ -610,7 +618,7 @@ func TestStart(t *testing.T) {
 				new(big.Int).Mul(big.NewInt(1), big.NewInt(1e8)),
 			})
 
-			svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+			svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 			if err != nil {
 				t.Fatalf("NewService failed: %v", err)
 			}
@@ -659,7 +667,7 @@ func TestStart_MulticallerFactoryErrorFailsStartup(t *testing.T) {
 		return nil, errors.New("no rpc endpoint configured")
 	}
 
-	svc, err := NewService(validConfig(), &mockConsumer{}, defaultBlockCacheReader(), repo, factory)
+	svc, err := NewService(validConfig(), &mockConsumer{}, defaultBlockCacheReader(), repo, factory, testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -722,7 +730,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+		svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -805,7 +813,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 			},
 		}
 
-		svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+		svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -852,7 +860,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+		svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -893,7 +901,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+		svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -944,7 +952,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+		svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1002,7 +1010,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+		svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1059,7 +1067,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+		svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1124,7 +1132,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+		svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1184,7 +1192,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+		svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1250,7 +1258,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+		svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1299,7 +1307,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+		svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -1370,7 +1378,7 @@ func TestProcessBlock_AaveOracle_UpsertFailureIsRetriable(t *testing.T) {
 		},
 	}
 
-	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -1433,7 +1441,7 @@ func TestProcessBlock_AaveOracle_ReorgRepublishBypassesCache(t *testing.T) {
 		},
 	}
 
-	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -1543,7 +1551,7 @@ func TestStart_FeedOracle(t *testing.T) {
 
 	mc := newFeedMulticaller(t, []*big.Int{big.NewInt(200_000_000_000)})
 
-	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -1618,7 +1626,7 @@ func TestStart_ChronicleOracle(t *testing.T) {
 		return chronicleMC, nil
 	}
 
-	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, factory)
+	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, factory, testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -1674,7 +1682,7 @@ func TestProcessBlock_FeedOracle(t *testing.T) {
 	cfg := validConfig()
 	cfg.PollInterval = 1 * time.Millisecond
 
-	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -1745,7 +1753,7 @@ func TestProcessBlock_FeedOracle_ChangeDetection(t *testing.T) {
 	cfg := validConfig()
 	cfg.PollInterval = 1 * time.Millisecond
 
-	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -1855,7 +1863,7 @@ func TestProcessBlock_FeedOracle_NonUSDConversion(t *testing.T) {
 	cfg := validConfig()
 	cfg.PollInterval = 1 * time.Millisecond
 
-	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -1951,7 +1959,7 @@ func TestProcessBlock_FeedOracle_AllFeedsFail(t *testing.T) {
 	cfg := validConfig()
 	cfg.PollInterval = 1 * time.Millisecond
 
-	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -2006,7 +2014,7 @@ func TestProcessBlock_MissingBlockHash_ReturnsError(t *testing.T) {
 	cfg := validConfig()
 	cfg.PollInterval = 1 * time.Millisecond
 
-	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -2076,7 +2084,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 			},
 		}
 
-		svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+		svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -2136,7 +2144,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 			},
 		}
 
-		svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+		svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -2201,7 +2209,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 			},
 		}
 
-		svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+		svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -2253,7 +2261,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 			new(big.Int).Mul(big.NewInt(1), big.NewInt(1e8)),
 		})
 
-		svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+		svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -2290,7 +2298,7 @@ func TestStop(t *testing.T) {
 		consumer := &mockConsumer{}
 		mc := &testutil.MockMulticaller{}
 
-		svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+		svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -2320,7 +2328,7 @@ func TestStop(t *testing.T) {
 		cfg := validConfig()
 		cfg.PollInterval = 1 * time.Millisecond
 
-		svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+		svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 		if err != nil {
 			t.Fatalf("NewService: %v", err)
 		}
@@ -2366,7 +2374,7 @@ func runProcessBlockWithCache(t *testing.T, cache outbound.BlockCacheReader) (*S
 	}
 	mc := newFeedMulticaller(t, []*big.Int{big.NewInt(200_000_000_000)})
 
-	svc, err := NewService(validConfig(), consumer, cache, repo, multicallFactoryFor(mc))
+	svc, err := NewService(validConfig(), consumer, cache, repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

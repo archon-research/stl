@@ -85,6 +85,9 @@ type Service struct {
 
 	telemetry *Telemetry
 
+	// Pins which oracle_asset versions the units are built from (ADR-0006 §4).
+	referenceEffectiveAt time.Time
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup // tracks the SQS run loop so Stop can drain it
@@ -105,6 +108,7 @@ func NewService(
 	cacheReader outbound.BlockCacheReader,
 	repo outbound.OnchainPriceRepository,
 	newMulticaller MulticallerFactory,
+	referenceEffectiveAt time.Time,
 ) (*Service, error) {
 	if consumer == nil {
 		return nil, fmt.Errorf("consumer cannot be nil")
@@ -117,6 +121,9 @@ func NewService(
 	}
 	if newMulticaller == nil {
 		return nil, fmt.Errorf("newMulticaller cannot be nil")
+	}
+	if referenceEffectiveAt.IsZero() {
+		return nil, fmt.Errorf("referenceEffectiveAt cannot be zero")
 	}
 
 	config.ApplyDefaults()
@@ -145,16 +152,17 @@ func NewService(
 	}
 
 	return &Service{
-		config:         config,
-		consumer:       consumer,
-		cacheReader:    cacheReader,
-		repo:           repo,
-		newMulticaller: newMulticaller,
-		oracleABI:      oracleABI,
-		feedABI:        feedABI,
-		shareABI:       shareABI,
-		curvePoolABI:   curvePoolABI,
-		logger:         config.Logger.With("component", "oracle-price-worker"),
+		config:               config,
+		consumer:             consumer,
+		cacheReader:          cacheReader,
+		repo:                 repo,
+		newMulticaller:       newMulticaller,
+		oracleABI:            oracleABI,
+		feedABI:              feedABI,
+		shareABI:             shareABI,
+		curvePoolABI:         curvePoolABI,
+		referenceEffectiveAt: referenceEffectiveAt,
+		logger:               config.Logger.With("component", "oracle-price-worker"),
 	}, nil
 }
 
@@ -194,7 +202,7 @@ func (s *Service) Stop() error {
 }
 
 func (s *Service) initialize(ctx context.Context) error {
-	shared, err := oracle_pricing.LoadOracleUnits(ctx, s.repo, s.config.ChainID, s.logger)
+	shared, err := oracle_pricing.LoadOracleUnits(ctx, s.repo, s.config.ChainID, s.referenceEffectiveAt, s.logger)
 	if err != nil {
 		return err
 	}

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -161,12 +162,18 @@ func run(args []string) error {
 		return fmt.Errorf("creating repository: %w", err)
 	}
 
+	referenceEffectiveAt, err := env.ReferenceEffectiveAt(time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("resolving reference effective time: %w", err)
+	}
+
 	service, err := oracle_backfill.NewService(
 		oracle_backfill.Config{
-			ChainID:     cfg.chainID,
-			Concurrency: cfg.concurrency,
-			BatchSize:   cfg.batchSize,
-			Logger:      logger,
+			ChainID:              cfg.chainID,
+			Concurrency:          cfg.concurrency,
+			BatchSize:            cfg.batchSize,
+			Logger:               logger,
+			ReferenceEffectiveAt: referenceEffectiveAt,
 		},
 		ethClient,
 		newMulticaller,

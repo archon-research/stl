@@ -41,6 +41,10 @@ type Config struct {
 	Concurrency int
 	BatchSize   int
 	Logger      *slog.Logger
+
+	// ReferenceEffectiveAt pins which oracle_asset versions this run reads (ADR-0006 §4).
+	// NewService rejects a zero value.
+	ReferenceEffectiveAt time.Time
 }
 
 func configDefaults() Config {
@@ -91,6 +95,10 @@ func NewService(
 	}
 	if config.ChainID <= 0 {
 		return nil, fmt.Errorf("config.ChainID must be > 0")
+	}
+	// Not defaulted at load time, because a run that silently read "now" would look normal.
+	if config.ReferenceEffectiveAt.IsZero() {
+		return nil, fmt.Errorf("config.ReferenceEffectiveAt must be set")
 	}
 
 	defaults := configDefaults()
@@ -198,7 +206,7 @@ func (s *Service) validateFeedDecimals(ctx context.Context, workUnits []*oracleW
 // buildOracleWorkUnits loads all enabled oracles from DB, deduplicates by oracle_id,
 // and builds the per-oracle data structures needed for price fetching.
 func (s *Service) buildOracleWorkUnits(ctx context.Context) ([]*oracleWorkUnit, error) {
-	shared, err := oracle_pricing.LoadOracleUnits(ctx, s.repo, s.config.ChainID, s.logger)
+	shared, err := oracle_pricing.LoadOracleUnits(ctx, s.repo, s.config.ChainID, s.config.ReferenceEffectiveAt, s.logger)
 	if err != nil {
 		return nil, err
 	}

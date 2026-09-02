@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
@@ -240,6 +241,11 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating repository: %w", err)
 	}
 
+	referenceEffectiveAt, err := env.ReferenceEffectiveAt(time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("resolving reference effective time: %w", err)
+	}
+
 	service, err := oracle_price_worker.NewService(
 		shared.SQSConsumerConfig{
 			Logger:  logger,
@@ -260,6 +266,7 @@ func run(ctx context.Context, args []string) error {
 			// mc is the telemetry-instrumented client built once at startup.
 			return archiveWrap(mc), nil
 		},
+		referenceEffectiveAt,
 	)
 	if err != nil {
 		return fmt.Errorf("creating service: %w", err)
