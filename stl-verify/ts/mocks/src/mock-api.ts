@@ -9,7 +9,7 @@ import type { paths } from './schema.ts';
  * handler array answer the browser's relative `/v1/...` and the absolute URL a
  * node test has to issue.
  */
-export const MOCK_API_BASE_URL = '';
+const MOCK_API_BASE_URL = '';
 
 /**
  * Any base URL works for a client pointed at these handlers, since they match on

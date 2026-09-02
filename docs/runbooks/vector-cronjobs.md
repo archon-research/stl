@@ -228,8 +228,9 @@ Currently matches: `offchain-price-backfill`, `reference-capital-backfill`,
 - **`ImagePullBackOff`** — much the most likely. `cmd/backfillers/` is not
   auto-discovered, so the release needs its explicit
   `_docker-release-offchain-price-backfill-internal` line in `docker-release-all`
-  **and** its entry in `deploy.yaml`'s `CRONJOBS` promotion list. Missing either
-  ships a tag nothing built.
+  **and** its `cronjob offchain-price-backfill ...` line in `k8s/image-roster.txt`
+  (which drives promotion and the overlay `images:` entry, ORB-362). Missing
+  either leaves the pod without a pullable image.
 - **Missing config/secret** — the pod fails at startup wiring; the log names the
   variable (e.g. `required env var COINGECKO_API_KEY is not set`).
 
@@ -288,7 +289,8 @@ scheduled cronjob. Two things differ when it pages:
 `ImagePullBackOff` here most often means the image was never built — the binary
 lives under `cmd/backfillers/`, which is **not** auto-discovered, so it needs its
 explicit `_docker-release-offchain-price-backfill-internal` line in
-`docker-release-all` and its entry in `deploy.yaml`'s `CRONJOBS` promotion list.
+`docker-release-all` and its `cronjob` line in `k8s/image-roster.txt` (promotion
+and the overlay `images:` entry are generated from it, ORB-362).
 
 ---
 

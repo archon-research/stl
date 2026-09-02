@@ -4,7 +4,7 @@
 # Include language-agnostic linting targets
 include lint.mk
 
-.PHONY: all test test-race test-integration test-integration-shard integration-shard-check ci-service-check test-templates-clean lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks install-hooks format \
+.PHONY: all test test-race test-integration test-integration-shard integration-shard-check ci-service-check test-templates-clean lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-watcher-robinhood run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax run-allocation-tracker-robinhood help ci ci-checks install-hooks format \
 	dev-up dev-up-rebuild dev-up-workers dev-up-or-resume dev-preflight dev-env dev-secrets dev-env-files dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-image _docker-release-go-service \
@@ -50,7 +50,7 @@ include lint.mk
 		kind-create kind-delete kind-infra kind-config kind-secrets kind-bootstrap-db kind-migrate \
 		kind-load-migrate kind-load-watcher kind-load-workers kind-load-python-api kind-load-cronjobs \
 		kind-deploy-apps kind-deploy-workers kind-deploy-data-validator check-dev-overlay-sync \
-		check-reloader-opt-in \
+		check-reloader-opt-in check-overlay-images \
 		kind-redeploy-watcher kind-redeploy-worker \
 		docker-build-migrate \
 		kind-infra-ci kind-ci-up kind-ci-down \
@@ -127,6 +127,12 @@ run-watcher-avax:
 	@echo "==> Running Avalanche watcher (chain_id=43114)..."
 	@set -a && . cmd/base/watcher/.env.avax && [ -f cmd/base/watcher/.env.avax.local ] && . cmd/base/watcher/.env.avax.local; set +a && go run ./cmd/base/watcher --enable-traces=false
 
+# Run the Robinhood watcher (requires dev-up first)
+# Robinhood Chain does not support trace_block, so traces are disabled.
+run-watcher-robinhood:
+	@echo "==> Running Robinhood watcher (chain_id=4663)..."
+	@set -a && . cmd/base/watcher/.env.robinhood && [ -f cmd/base/watcher/.env.robinhood.local ] && . cmd/base/watcher/.env.robinhood.local; set +a && go run ./cmd/base/watcher --enable-traces=false
+
 # Run the oracle price worker (requires dev-up first)
 run-oracle-price-worker:
 	@echo "==> Running oracle price worker..."
@@ -155,6 +161,12 @@ run-allocation-tracker:
 run-allocation-tracker-avax:
 	@echo "==> Running Avalanche allocation tracker (chain_id=43114)..."
 	@set -a && . cmd/workers/prime-allocation-indexer/.env.avax && [ -f cmd/workers/prime-allocation-indexer/.env.avax.local ] && . cmd/workers/prime-allocation-indexer/.env.avax.local; set +a && unset AWS_PROFILE AWS_DEFAULT_PROFILE && BUILD_GIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo dev) go run ./cmd/workers/prime-allocation-indexer
+
+# Run the Robinhood allocation tracker (requires dev-up first). See run-allocation-tracker
+# for why AWS_PROFILE is unset and BUILD_GIT_HASH is passed.
+run-allocation-tracker-robinhood:
+	@echo "==> Running Robinhood allocation tracker (chain_id=4663)..."
+	@set -a && . cmd/workers/prime-allocation-indexer/.env.robinhood && [ -f cmd/workers/prime-allocation-indexer/.env.robinhood.local ] && . cmd/workers/prime-allocation-indexer/.env.robinhood.local; set +a && unset AWS_PROFILE AWS_DEFAULT_PROFILE && BUILD_GIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo dev) go run ./cmd/workers/prime-allocation-indexer
 
 # Run the SparkLend position tracker (requires dev-up first)
 run-sparklend-position-tracker:
@@ -356,7 +368,7 @@ tools:
 # CI target for lint/format/static/security checks. go vet, staticcheck, and
 # go fix -diff are covered by golangci-lint v2 (govet, staticcheck, modernize
 # linters — see .golangci.yml); running them separately tripled analysis time.
-ci-checks: fmt-check goimports-check tidy-check shared-container-check integration-shard-check ci-service-check golangci-lint vulncheck
+ci-checks: fmt-check goimports-check tidy-check shared-container-check integration-shard-check ci-service-check check-overlay-images golangci-lint vulncheck
 
 # CI target: everything with strict checks
 # Order: fast checks first (fail fast), then expensive checks
@@ -621,6 +633,24 @@ dev-env-files:
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://robinhood-mainnet.g.alchemy.com/v2" \
+		"ALCHEMY_WS_URL=wss://robinhood-mainnet.g.alchemy.com/v2" \
+		"CHAIN_ID=4663" \
+		"AWS_SNS_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
+		"AWS_ACCESS_KEY_ID=test" \
+		"AWS_SECRET_ACCESS_KEY=test" \
+		"AWS_REGION=us-east-1" \
+		"AWS_SNS_TOPIC_ARN=arn:aws:sns:us-east-1:000000000000:stl-robinhood-blocks.fifo" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
+		"REDIS_ADDR=127.0.0.1:$(KIND_HOST_REDIS_PORT)" \
+		"REDIS_PASSWORD=" \
+		"JAEGER_ENDPOINT=127.0.0.1:$(KIND_HOST_OTLP_PORT)" \
+		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
+		"ENABLE_BACKFILL=false" \
+		> cmd/base/watcher/.env.robinhood && \
+	printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
 		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
 		"AWS_SQS_QUEUE_URL=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)/000000000000/stl-ethereum-oracle-price.fifo" \
 		"AWS_SQS_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
@@ -722,6 +752,24 @@ dev-env-files:
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://robinhood-mainnet.g.alchemy.com/v2" \
+		"AWS_SQS_QUEUE_URL=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)/000000000000/stl-robinhood-allocation-tracker.fifo" \
+		"AWS_SQS_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
+		"AWS_S3_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
+		"AWS_ACCESS_KEY_ID=test" \
+		"AWS_SECRET_ACCESS_KEY=test" \
+		"AWS_REGION=us-east-1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
+		"REDIS_ADDR=127.0.0.1:$(KIND_HOST_REDIS_PORT)" \
+		"REDIS_PASSWORD=" \
+		"CHAIN_ID=4663" \
+		"S3_BUCKET=stl-sentineldevelopment-robinhood-raw" \
+		"DEPLOY_ENV=development" \
+		"LOG_LEVEL=debug" \
+		> cmd/workers/prime-allocation-indexer/.env.robinhood && \
+	printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
 		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
 		"AWS_SQS_QUEUE_URL=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)/000000000000/stl-ethereum-morpho-indexing.fifo" \
 		"AWS_SQS_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
@@ -735,7 +783,7 @@ dev-env-files:
 		"JAEGER_ENDPOINT=127.0.0.1:$(KIND_HOST_OTLP_PORT)" \
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"SQS_WAIT_TIME=1" \
-		"SQS_VISIBILITY_TIMEOUT=30" \
+		"SQS_VISIBILITY_TIMEOUT=180" \
 		"LOG_LEVEL=debug" \
 		> cmd/workers/morpho-indexer/.env
 	@printf '%s\n' \
@@ -2323,6 +2371,15 @@ check-reloader-opt-in:
 	  exit 1; \
 	fi
 	@echo "✓ dev: no Reloader annotations (correct — no controller locally)"
+
+# ORB-362: the staging/prod images blocks are generated from ../k8s/image-roster.txt
+# by ../scripts/deploy/render-overlay-images.sh. Fails on an entry the roster does not
+# render (hand edit, wrong repo, orphan alias); roster lines the bot has not written
+# yet are reported as pending. Same check as the Manifests CI job.
+check-overlay-images:
+	@for env in staging prod; do \
+	  ../scripts/deploy/render-overlay-images.sh --env $$env --check ../k8s/overlays/$$env/kustomization.yaml --allow-missing || exit 1; \
+	done
 
 # Apply the dev core overlay (watcher, python-api, cronjobs) — reuses k8s/base.
 # Images must already be built + loaded into kind.
