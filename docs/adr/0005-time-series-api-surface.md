@@ -42,13 +42,14 @@ most endpoints predate the convention.
 
 *The meaning of a timestamp was decided per table at ingest.* Two meanings exist in the schema:
 event time (when the fact happened) and observation time (when we looked). An audit of the six
-feeds backing the three first-release datasets found that only one — Sky's risk-capital payload
-behind `prime_capital_stack` — publishes no event time in any form. One feed (`prime_debt`)
-stores poll time while already storing the block number needed to resolve a real one. Two feeds
-are event-time but documented as observation-time: `offchain_token_price.timestamp` carries
-CoinGecko's own `last_updated_at`, and `allocation_position.created_at` carries the block
-timestamp. Taking the column comments at face value would have had us declare prices an
-observation-time series — wrong, and wrong about the flagship dataset.
+feeds backing the three first-release datasets found that only one — Sky's
+Star-monitoring risk-capital payload behind `prime_capital_stack` — publishes no event time in
+any form. One feed (`prime_debt`) stores poll time while already storing the block number
+needed to resolve a real one. Two feeds are event-time but documented as observation-time:
+`offchain_token_price.timestamp` carries CoinGecko's own `last_updated_at`, and
+`allocation_position.created_at` carries the block timestamp. Taking the column comments at face
+value would have had us declare prices an observation-time series — wrong, and wrong about the
+flagship dataset.
 
 *No on-chain value is a durable prime identity.* Verified by `eth_call` against mainnet and
 Sky's chainlog: the vault we call "grove" reports an ilk of `ALLOCATOR-BLOOM-A`; a separate,
@@ -318,6 +319,18 @@ silently insert ingest time into an event-time series with nothing failing.
 explicit sign-off as a labelled exception. Worth noting alongside that
 `prime_reference_balance_sheet` *is* event-time at daily granularity, which may make it the
 better basis for "capital held".
+
+**One series outside that audit fails decision 3 without qualifying for its exception.** The audit
+covered the six feeds behind the three first-release datasets, so it did not reach
+`protocol_event`, which backs `/v1/protocol-events`. That route windows and buckets on
+`created_at`, a `DEFAULT NOW()` ingest column, so it is on observation time as built. The
+exception does not apply: its upstream is the chain, which timestamps every block, so the event
+time exists and this is a gap to close at ingest. It is `prime_debt`'s defect one step worse —
+`prime_debt` already stores `block_number` and can resolve a real timestamp at ingest, whereas
+`protocol_event` has no `block_timestamp` column at all, so closing it needs a column, a writer
+change across every indexer that writes the table, and a backfill. Until then the catalogue
+declares the axis `observation` with a tracked gap and a required cadence, and the
+never-interleave rule means the series is not comparable with the event-time datasets.
 
 **Decision 4 means a past answer is not reproducible through this API.** A consumer that needs
 to reconstruct what we said last Tuesday goes to the database and the append-only guarantees,
