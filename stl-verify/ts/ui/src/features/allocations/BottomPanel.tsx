@@ -54,7 +54,9 @@ type DrawerSearchPatch = {
 };
 
 const segmentedControlStyles = segmentedControl();
-const toggleGroupClassName = `${segmentedControlStyles.group} ${css({ p: '0.25', gap: '0.5' })}`;
+// `0.25` is no token, so Panda unitised it and this shipped as
+// a quarter of a pixel; `1` is the 0.25rem step that was meant.
+const toggleGroupClassName = `${segmentedControlStyles.group} ${css({ p: '1', gap: '0.5' })}`;
 const toggleClassName = `${segmentedControlStyles.item} ${css({
   minHeight: '8',
   px: '2.5',
@@ -204,7 +206,7 @@ export function BottomPanel({
               gap: '1',
               bg: 'transparent',
               border: 'none',
-              p: 0,
+              p: '0',
               fontSize: 'sm',
               fontWeight: 'medium',
               color: 'text.link',
@@ -239,14 +241,16 @@ export function BottomPanel({
               className={css({
                 display: 'grid',
                 gap: '1',
-                flex: '1 1 12rem',
+                flexGrow: '1',
+                flexShrink: '1',
+                flexBasis: '48',
               })}
             >
               <span
                 className={css({
                   fontSize: 'xs',
                   textTransform: 'uppercase',
-                  letterSpacing: '0.1em',
+                  letterSpacing: 'widest',
                   color: 'text.muted',
                 })}
               >
@@ -274,7 +278,9 @@ export function BottomPanel({
 
           <div
             className={css({
-              flex: '2 1 18rem',
+              flexGrow: '2',
+              flexShrink: '1',
+              flexBasis: '72',
             })}
           >
             <SearchInput

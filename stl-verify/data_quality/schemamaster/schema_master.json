@@ -226,6 +226,10 @@
       "type": "numeric",
       "class": "S"
     },
+    "change_reason": {
+      "type": "text",
+      "class": "A"
+    },
     "checksum": {
       "type": "text",
       "class": "S"
@@ -448,6 +452,10 @@
     },
     "feed_decimals": {
       "type": "int2",
+      "class": "S"
+    },
+    "feed_key": {
+      "type": "bytea",
       "class": "S"
     },
     "filename": {
@@ -959,6 +967,11 @@
       "type": "numeric",
       "class": "S"
     },
+    "rewind_count": {
+      "type": "int8",
+      "class": "S",
+      "not_null": true
+    },
     "scaled_balance": {
       "type": "numeric",
       "class": "D"
@@ -1204,6 +1217,11 @@
     "utilization": {
       "type": "numeric",
       "class": "S"
+    },
+    "valid_from": {
+      "type": "timestamptz",
+      "class": "A",
+      "semantics": "effective_time"
     },
     "variable_borrow_index": {
       "type": "numeric",

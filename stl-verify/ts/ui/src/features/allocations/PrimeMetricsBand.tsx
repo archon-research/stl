@@ -1,5 +1,10 @@
 import { SyncedChartGroup } from '@archon-research/charting';
-import { Badge, type BadgeColorPalette } from '@archon-research/design-system';
+import {
+  Badge,
+  type BadgeColorPalette,
+  SurfaceMessageBody,
+  SurfaceMessageRoot,
+} from '@archon-research/design-system';
 import type { ReactNode } from 'react';
 
 import { css, cx } from '#styled-system/css';
@@ -13,17 +18,17 @@ import {
 } from '../../shared/lib/dashboard';
 import type { PrimeRiskCapital } from '../../shared/types/allocation';
 import { ExposureCard, PrimeCollateralCard } from './HiddenMetricCards';
+import { MetricCardLegend, MetricCardTrend } from './metricCardChart';
 import {
   MetricCard,
   MetricCardError,
-  MetricCardLegend,
   MetricCardSkeleton,
-  MetricCardTrend,
   type MetricChartSpec,
   metricCaptionClassName,
   metricDetailClassName,
   metricsGridClassName,
   metricsGridStyle,
+  MetricsBandSkeleton,
   preferredFigure,
   TOP_METRIC_CARD_LABELS,
   type TopMetricCard,
@@ -46,7 +51,7 @@ type BandCharts = {
   debt: MetricChartSpec | null;
 };
 
-type PrimeMetricsBandProps = {
+export type PrimeMetricsBandProps = {
   isSkeleton: boolean;
   hasTopMetrics: boolean;
   summary: AllocationTotals | null;
@@ -79,12 +84,62 @@ type PrimeMetricsBandProps = {
   chartsErrorMessage: string | null;
 };
 
+// The card takes the flexible row and the note the fixed one, so a stale cell's
+// figure and chart stay on the baseline its row-mates are compared against —
+// which is the only reason the band is a grid at all.
+const staleCellClassName = css({
+  display: 'grid',
+  gridTemplateRows: '1fr auto',
+  gap: '2',
+});
+
+// The same warning tint the chart's own failure line wears, so "something did
+// not load" reads the same wherever it appears in the band.
+const staleNoteClassName = css({
+  fontSize: 'xs',
+  color: 'text.warning',
+  py: '2',
+  px: '2.5',
+});
+
+/**
+ * A card still holding the figure from before its read failed.
+ *
+ * A note rather than an `ErrorState`: the figure above it is real, only older
+ * than the page otherwise claims, and the critical treatment is what a card
+ * with no figure at all gets. The raw failure rides the frame's `title` — six
+ * of these carrying a 503 body would be the tallest thing on the page.
+ */
+function StaleMetricCell({
+  children,
+  errorMessage,
+}: {
+  children: ReactNode;
+  errorMessage: string;
+}) {
+  return (
+    <div className={staleCellClassName}>
+      {children}
+      <SurfaceMessageRoot tone="muted" title={errorMessage}>
+        {/* The `body` slot's `mt` clears a title this note does not have. */}
+        <SurfaceMessageBody className={staleNoteClassName}>
+          {/* `useRetryEmptyOn` deliberately leaves a read that already has data
+              alone, so a reload is the only retry this card has. */}
+          Last refresh failed — this figure may be stale. Reload to retry.
+        </SurfaceMessageBody>
+      </SurfaceMessageRoot>
+    </div>
+  );
+}
+
 /**
  * One metric's cell, whatever state it is in.
  *
  * The grid is always the full set of cards: a missing cell shifted every one
  * after it, so a card that cannot render holds its place as an error or a
- * placeholder instead of disappearing.
+ * placeholder instead of disappearing. A card that *can* render still reports a
+ * failed read — the figure it is showing came from the read before it, and
+ * nothing else on the card says so.
  */
 function MetricCardCell({
   card,
@@ -95,11 +150,16 @@ function MetricCardCell({
   rendered: ReactNode;
   errorMessage: string | null;
 }) {
+  const label = TOP_METRIC_CARD_LABELS[card];
+
   if (rendered !== null) {
-    return rendered;
+    return errorMessage === null ? (
+      rendered
+    ) : (
+      <StaleMetricCell errorMessage={errorMessage}>{rendered}</StaleMetricCell>
+    );
   }
 
-  const label = TOP_METRIC_CARD_LABELS[card];
   return errorMessage === null ? (
     <MetricCardSkeleton label={label} />
   ) : (
@@ -114,7 +174,8 @@ function MetricCardCell({
 
 // chartsErrorMessage tracks the primary (prime-debt) series only; every
 // supplementary card degrades to its own fallback instead of reporting an error
-// that did not happen to it.
+// that did not happen to it. The activity card has no fallback to degrade to,
+// so its failure rides its own chart spec and is read off it below.
 function TotalAllocationCard({
   summary,
   overallSummary,
@@ -129,6 +190,7 @@ function TotalAllocationCard({
   isChartsLoading: boolean;
 }) {
   const isFiltered = hasSearchQuery && overallSummary !== null;
+  const chartErrorMessage = chart?.errorMessage ?? null;
 
   return (
     <MetricCard
@@ -139,6 +201,7 @@ function TotalAllocationCard({
           chart={chart}
           seriesLabel="allocation"
           isLoading={isChartsLoading}
+          errorMessage={chartErrorMessage}
         />
       }
       value={
@@ -156,7 +219,7 @@ function TotalAllocationCard({
           <MetricCardTrend
             chart={chart}
             isLoading={isChartsLoading}
-            errorMessage={null}
+            errorMessage={chartErrorMessage}
           />
         </div>
       }
@@ -380,19 +443,7 @@ export function PrimeMetricsBand({
   chartsErrorMessage,
 }: PrimeMetricsBandProps) {
   if (isSkeleton) {
-    return (
-      <div
-        className={metricsGridClassName}
-        style={metricsGridStyle(VISIBLE_TOP_METRIC_CARDS.length)}
-      >
-        {VISIBLE_TOP_METRIC_CARDS.map((card) => (
-          <MetricCardSkeleton
-            key={`metrics-skeleton-${card}`}
-            label={TOP_METRIC_CARD_LABELS[card]}
-          />
-        ))}
-      </div>
-    );
+    return <MetricsBandSkeleton />;
   }
 
   if (!hasTopMetrics) {

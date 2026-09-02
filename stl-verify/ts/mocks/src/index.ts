@@ -14,6 +14,12 @@ import { getMockHandlers } from './handlers/index.ts';
 export const mocks = setupMocks(getMockHandlers());
 
 export { MOCK_ORIGIN } from './mock-api.ts';
+export {
+  FAILABLE_READS,
+  failingHandler,
+  isFailableRead,
+  type FailableRead,
+} from './failure.ts';
 export { SPARK_TX_HASH } from './fixtures/allocations.ts';
 export {
   GROVE_MAINNET_PROXY,

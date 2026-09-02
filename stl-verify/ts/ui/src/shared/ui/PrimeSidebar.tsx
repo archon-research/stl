@@ -44,10 +44,10 @@ export function PrimeSidebar({
       className={css({
         display: 'flex',
         flexDirection: 'column',
-        width: '100%',
-        maxWidth: '100%',
-        height: '100%',
-        minHeight: 0,
+        width: 'full',
+        maxWidth: 'full',
+        height: 'full',
+        minHeight: '0',
         overflow: 'hidden',
         boxSizing: 'border-box',
         bg: 'surface.default',
@@ -55,7 +55,7 @@ export function PrimeSidebar({
     >
       <div
         className={css({
-          width: '100%',
+          width: 'full',
           boxSizing: 'border-box',
           px: '5',
           py: '4',
@@ -80,17 +80,19 @@ export function PrimeSidebar({
             className={css({
               display: 'grid',
               gap: '0.5',
-              minWidth: 0,
+              minWidth: '0',
             })}
           >
             <span
               className={css({
                 display: 'block',
-                m: 0,
+                m: '0',
                 fontSize: '2xl',
-                lineHeight: '0.95',
-                letterSpacing: '0.05em',
-                fontWeight: '700',
+                // Between the `none` (1) and `tight` (1.25) steps, and a wordmark
+                // is drawn rather than set.
+                lineHeight: '[0.95]',
+                letterSpacing: 'wider',
+                fontWeight: 'bold',
                 textTransform: 'uppercase',
                 color: 'text.strong',
               })}
@@ -104,11 +106,13 @@ export function PrimeSidebar({
       <div
         className={css({
           flex: '1',
-          minHeight: 0,
-          width: '100%',
+          minHeight: '0',
+          width: 'full',
           overflowY: 'auto',
           overflowX: 'hidden',
-          scrollbarWidth: 'none',
+          // Panda maps this property through the size scale, and `none` is
+          // the CSS value the property actually takes.
+          scrollbarWidth: '[none]',
           '&::-webkit-scrollbar': {
             display: 'none',
           },
@@ -149,7 +153,7 @@ export function PrimeSidebar({
                   disabled={primeButtonsDisabled}
                   onClick={() => onSelectPrime(primeGroup.key)}
                   className={css({
-                    width: '100%',
+                    width: 'full',
                     boxSizing: 'border-box',
                     textAlign: 'left',
                     borderRadius: 'md',
@@ -163,8 +167,7 @@ export function PrimeSidebar({
                     py: '3.5',
                     cursor: 'pointer',
                     transitionDuration: 'fast',
-                    transitionProperty:
-                      'background-color, border-color, transform',
+                    transitionProperty: 'common',
                     _hover: {
                       // Neutral grey wash, not accent-tinted `interactive.hover`
                       // — see DESIGN.md, "The Signal Budget Rule".
@@ -188,19 +191,19 @@ export function PrimeSidebar({
                       className={css({
                         display: 'grid',
                         gap: '0.5',
-                        minWidth: 0,
+                        minWidth: '0',
                       })}
                     >
                       <div
                         className={flex({
                           align: 'baseline',
                           gap: '1.5',
-                          minWidth: 0,
+                          minWidth: '0',
                         })}
                       >
                         <p
                           className={css({
-                            m: 0,
+                            m: '0',
                             fontSize: 'sm',
                             fontWeight: 'semibold',
                             color: 'text.strong',
@@ -244,7 +247,7 @@ export function PrimeSidebar({
 
       <div
         className={css({
-          width: '100%',
+          width: 'full',
           boxSizing: 'border-box',
           px: '5',
           pt: '3',
@@ -260,7 +263,7 @@ export function PrimeSidebar({
             align: 'center',
             justify: 'space-between',
             gap: '3',
-            width: '100%',
+            width: 'full',
             cursor: canShowAllPrimes ? 'pointer' : 'not-allowed',
             opacity: canShowAllPrimes ? 1 : 0.5,
           })}
@@ -282,7 +285,7 @@ export function PrimeSidebar({
 
       <div
         className={css({
-          width: '100%',
+          width: 'full',
           boxSizing: 'border-box',
           px: '4',
           py: '3',

@@ -130,6 +130,234 @@ does not fire this alert — Temporal retries that run on the new worker.
 `increase(cronjob_runs_total{status="error", service_name="<cronjob>"}[15m]) == 0`
 and a fresh `status="success"` run.
 
+### Special case: `watcher-data-validator` "Orphan-only heights"
+
+The validator fails the run — and so this alert — when its **Orphan-only
+heights** check reports `N height(s) have only an orphaned block: <numbers>`.
+The count is exact; the message names the first 100 heights and appends
+`(+K more)`, with the full list in the check's `orphan_only_heights` detail.
+
+It means block N is stored only on a losing fork: the watcher saved fork A, the
+canonical broadcast for N was dropped as `stale_fork` (a load-balanced RPC node
+had not converged when the watcher verified it), and the reorg that block N+1
+committed orphaned fork A without ever fetching the winner. Nothing at that
+height is canonical — S3 holds only the orphaned fork and every indexer has its
+events at `block_version` 0. `FindGaps` scans only above the backfill
+watermark, so it re-fetches the height only while the watermark still sits
+below it. This check scans the full block range, where **Chain Integrity**
+only looks for missing heights up to the watermark — and a fresh occurrence
+sits *above* the watermark, because the reorg that caused it rewound the
+watermark to the common ancestor below, so this check is the only one that
+names it. A hole older than that rewind sits below the watermark and fails
+both.
+
+`block_states` carries a 30-day retention policy
+(`add_retention_policy('block_states', INTERVAL '30 days')`), so the check only
+ever sees the retained window. **This alert clearing without a repair means the
+hole aged out of the check, not that it healed** — the downstream
+`block_version` 0 rows and the S3 objects are untouched by retention. The 14
+staging mainnet heights named in ARCT-379 (25087888 … 25589752) are already
+outside it.
+
+Confirm:
+
+1. `cast block <N> --field hash --rpc-url <chain rpc>` against the stored row —
+   `SELECT hash, version, is_orphaned FROM block_states WHERE chain_id = <id>
+   AND number = <N>;`. One row, orphaned, hash unknown to the chain, is the
+   signature.
+2. The watcher's Loki line `dropping stale-fork reorg broadcast … block=<N>`
+   around the block's timestamp is the cause. Use it, not
+   `chain_reorgs_dropped_total{reorg_dropped_reason="stale_fork"}`: that counter
+   carries no block label by design (block numbers are unbounded cardinality),
+   so it can only tell you drops happened, never at which height.
+
+Repair:
+
+- **New occurrences heal themselves.** A reorg commit rewinds
+  `backfill_watermark` to the common ancestor, so the next gap pass re-fetches
+  N and saves it as version 1 (ARCT-379). If the same height is still named two
+  poll intervals later, the RPC is still serving the losing fork — re-check
+  `cast block <N>`.
+- **A hole no rewind covered — one predating ARCT-379, or one below every
+  reorg since — is repaired by rewinding the watermark by hand,** as long as it
+  is still inside the retained window: `UPDATE backfill_watermark SET watermark
+  = <N-1>, rewind_count = rewind_count + 1 WHERE chain_id = <id>;`. Bump the
+  rewind count too: a pass already scanning compares against the pair, and
+  would otherwise advance straight back over the height you just re-opened. The
+  next gap pass saves N as version 1 and publishes it, so the indexers append
+  the correction. The orphaned version-0 rows stay put as history.
+- **A hole outside the retained window has no safe executable repair yet.**
+  `raw-block-bulk-downloader --bucket <raw bucket> --rpc-url <chain rpc>
+  --start-block <N> --end-block <N>` looks like the repair and is not one.
+  Every key it builds and every existence check it makes is pinned to a literal
+  version `1`, and it never reads what the archive already holds. The losing
+  fork sits at version **0**, not 1 — `assign_block_version()` is
+  `COALESCE(MAX(version), -1) + 1`, so the first row at a height is version 0,
+  and the raw-data-backup-worker builds the key from `event.Version`. So at an
+  orphan-only height the tool finds no `<N>_1_*`, refetches the height **by
+  number**, and writes the canonical block, receipts and traces at `<N>_1_*`.
+  That is the right answer for the single-reorg shape by coincidence, not by
+  design: at a height that already holds a `_1_` it skips (uploads go through
+  `WriteFileIfNotExists`, so it never overwrites), and where the canonical
+  block belongs at version 2 it cannot express that. Pointed at anything but a
+  hole it is actively harmful — every healthy height is version 0, so it
+  refetches and writes a duplicate `_1_` copy of block, receipts and traces for
+  every block in the range, which is how deep history came to be `_1_`-only
+  (`cmd/backfillers/morpho-vault-backfill/discovery.go`). There is no
+  `--dry-run` flag either; the tool exits 2 on one. Doing this deliberately —
+  next free version above the losing fork, dry run first — needs **#849**,
+  which adds `--dry-run`, `--allow-unfinalized` and next-free-version writing.
+  Even then it fixes S3 only: the indexers' rows stay at `block_version` 0
+  until the republisher (**ARCT-383**, #850) re-emits the block event at the new
+  version.
+
+Before the prod deploy, run the pre-flight queries below against prod's
+retained window — a hole found there is repairable while it is still inside
+retention.
+
+### Special case: `watcher-data-validator` "Chain Integrity" missing blocks
+
+`chain integrity violation: canonical block(s) A to B missing between blocks X
+and Y` (or `… missing after block X`, for a hole at the top of the checked
+range) means the canonical chain has a hole at A..B that the backfill watermark
+has already passed — so the gap filler is not working on it and
+`VectorWatcherBackfillWatermarkLagHigh` will not fire for it. Only the lowest
+hole is named, and that is the only one you need: one rewind to A re-opens
+every hole above it too (`FindGaps` returns them all, the pass fills each, and
+the advance parks below the first one it could not fill). Re-running the check
+before the filler has caught up tells you nothing — it can never name a hole
+above the watermark.
+
+Below the watermark the check is strict: every height present and linked. Above
+it, only the links are checked (`Parent-hash chain valid through backfill
+watermark N; parent links valid through block M`), because a missing height up
+there is the filler's live work — covered by `backfill_watermark_lag` and
+`VectorWatcherBackfillWatermarkLagHigh` in
+[vector-watcher.md](vector-watcher.md) — while a broken link or a duplicated
+height never repairs itself. A named *missing* range is therefore always
+**below** the watermark; a named link break can be either side of it.
+
+Two causes, told apart by `SELECT number, hash, is_orphaned FROM block_states
+WHERE chain_id = <id> AND number BETWEEN A AND B;`:
+
+- **Rows exist but are all orphaned** → the orphan-only case above; repair it
+  that way.
+- **No rows at all** → the watermark passed a height that was never filled.
+  Three ways in: a pre-#844 unconditional watermark write that overwrote a
+  reorg's rewind; a watermark written by hand past an unfilled height; and a
+  stale-chain recovery whose canonical refetch failed, which before #844
+  orphaned the row without rewinding. `FindGaps` never scans below the
+  watermark, so rewind it — `UPDATE backfill_watermark SET watermark = A - 1,
+  rewind_count = rewind_count + 1 WHERE chain_id = <id>;`, the rewind count
+  bump for the same reason as above. Then trigger a validator run by hand
+  (Temporal UI → Schedules → `<SERVICE_NAME>` → Trigger, or `temporal schedule
+  trigger --schedule-id <SERVICE_NAME>`) once the watermark has passed B; the
+  repair is done when `backfill_watermark_lag` has drained past B, not when the
+  check passes — right after the rewind it passes whether or not A..B was
+  refetched, because the strict half stops at the watermark you just lowered.
+
+### Pre-flight before deploying the ARCT-379 validator checks
+
+Both special cases above rest on checks #844 adds or widens —
+`FindOrphanOnlyHeights`, and the missing-height, duplicate-canonical and
+broken-parent-link violations `VerifyChainIntegrity` now reports. They judge
+state that is already in the database, so a hole that has been sitting there
+since long before the rollout fails the very first hourly run:
+`VectorCronjobRunFailing` immediately, `VectorCronjobAllRunsFailing`
+(critical, pages) about 1h15m later. The repair is the one above — one
+`UPDATE backfill_watermark SET watermark = <below the lowest hole>,
+rewind_count = rewind_count + 1 WHERE chain_id = <id>;` per chain, which
+re-opens every hole above it in the same rewind — but it is a repair you want
+made before the pager goes off, not after.
+
+`watcher-data-validator` runs on **three** chains in both staging and prod —
+chain ids 1, 130 and 42161. All six per-chain deployments are listed in
+`k8s/overlays/{staging,prod}/kustomization.yaml`, but `optimism-`, `base-` and
+`avalanche-watcher-data-validator` are `replicas: 0` in
+`k8s/base/<chain>-watcher-data-validator/deployment.yaml` with no overlay
+patch, because the Etherscan cross-check is not covered for those chains yet —
+so run the three queries once per **enabled** chain. All three are read-only,
+and `block_states`' 30-day retention bounds them: only the retained window is
+checkable, and only a hole inside it is repairable. Expected outcome on every
+chain: **zero rows from queries 1 and 2, and `tail = want` from query 3 — or
+repair first.**
+
+**1. Orphan-only heights.** This is the query `FindOrphanOnlyHeights`
+(`internal/adapters/outbound/postgres/blockstate_repository.go`) runs, minus
+its range bound. Sub-second; served by `idx_block_states_orphaned`.
+
+```sql
+SELECT DISTINCT o.number
+FROM block_states o
+WHERE o.chain_id = <id> AND o.is_orphaned
+  AND NOT EXISTS (SELECT 1 FROM block_states c
+                  WHERE c.chain_id = o.chain_id AND c.number = o.number AND NOT c.is_orphaned)
+ORDER BY o.number;
+```
+
+**2. Chain integrity** — missing heights below the watermark, plus duplicate
+canonical rows and broken parent links over the **whole** retained window. The
+validator checks two bands: `VerifyChainIntegrity` runs the strict form up to
+`min(max canonical, watermark)`, and `VerifyParentLinks` runs the
+links-and-duplicates form from there to the top canonical row, so a pre-flight
+bounded at the watermark misses every violation above it. One pass does both —
+only the missing-height arm carries the watermark bound. Measured on staging at
+14 s on the largest chain (42161, ~10.8 M heights).
+
+```sql
+WITH ordered_blocks AS (
+  SELECT number, hash, parent_hash,
+         LAG(hash)   OVER (ORDER BY number, version DESC) AS prev_hash,
+         LAG(number) OVER (ORDER BY number, version DESC) AS prev_number
+  FROM block_states
+  WHERE chain_id = <id> AND NOT is_orphaned)
+SELECT prev_number, number,
+       CASE WHEN prev_number = number     THEN 'duplicate canonical rows'
+            WHEN prev_number < number - 1 THEN 'missing ' || (prev_number + 1) || '..' || (number - 1)
+            ELSE 'broken parent link' END AS violation
+FROM ordered_blocks
+WHERE prev_number IS NOT NULL
+  AND (prev_number = number
+       OR (prev_number < number - 1 AND number <= <watermark>)
+       OR (prev_number = number - 1 AND parent_hash != prev_hash))
+ORDER BY number LIMIT 1;
+```
+
+**3. The tail.** The pair scan has no successor to flag a hole at the *top* of
+the strict band against, so check that separately — but check the same thing
+the validator checks. The validator fails when there is no canonical row at the
+watermark height (`verifyRangeReachesEnd`), and it fails when the watermark
+sits above the last canonical row altogether — the state a hand-written
+watermark or a pre-#844 overwritten rewind leaves. Both collapse into one
+comparison:
+
+```sql
+SELECT w.watermark,
+       (SELECT max(number) FROM block_states
+         WHERE chain_id = <id> AND NOT is_orphaned AND number <= w.watermark) AS tail
+FROM backfill_watermark w WHERE w.chain_id = <id>;
+```
+
+`tail` must equal `w.watermark`. A lower `tail` is either a watermark parked on
+an unfilled height or a watermark past the head, and the validator fails the
+run on both. A chain with no
+`backfill_watermark` row, or `watermark = 0`, is vacuous here — the validator
+verifies the whole range and the tail check cannot fail.
+
+Staging, as of 2026-09-01, on the three enabled chains: zero orphan-only
+heights, zero integrity violations over the whole retained window, and
+`tail = want` on each — nothing to repair there. Run the same three against
+prod before the prod deploy.
+
+If the pre-flight does turn something up, or you would rather not race the
+first hourly run, propose in the PR — and get a human to approve it, per
+[alerts/AGENTS.md](../../alerts/AGENTS.md) — that `VectorCronjobRunFailing` and
+`VectorCronjobAllRunsFailing` be silenced for the deploy window on
+`service_name=~"(unichain-|arbitrum-)?watcher-data-validator"`. `service_name`
+is the pod's own `app` label, injected as `SERVICE_NAME` through the downward
+API, so a matcher on the literal `watcher-data-validator` silences mainnet
+only. Keep the rewind tracked, and silence the alert while that is open.
+
 ---
 
 ## VectorCronjobAllRunsFailing
@@ -146,7 +374,11 @@ of `VectorCronjobRunFailing`.
 ### First checks
 
 1. Everything under `VectorCronjobRunFailing` — but the failure is now
-   persistent, so look for a hard, non-transient cause.
+   persistent, so look for a hard, non-transient cause. For
+   `watcher-data-validator` that includes an orphan-only height the gap filler
+   cannot heal: it fails every run, so it escalates here about 1h15m after the
+   first failure — see
+   [Special case: `watcher-data-validator` "Orphan-only heights"](#special-case-watcher-data-validator-orphan-only-heights).
 2. **Recent deploys** — `kubectl -n vector rollout history deploy/<deployment>`;
    a bad release is the most common persistent cause. Roll back if so.
 3. **Upstream contract / schema change** — a changed external API response or

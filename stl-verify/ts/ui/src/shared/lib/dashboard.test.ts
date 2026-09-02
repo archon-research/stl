@@ -788,6 +788,15 @@ describe('getChainLabel', () => {
 });
 
 describe('getProtocolLabel', () => {
+  it.each(['constructor', 'toString', 'valueOf'])(
+    'title-cases the prototype key %o instead of reading a function off it',
+    (name) => {
+      expect(getProtocolLabel(name)).toBe(
+        name.charAt(0).toUpperCase() + name.slice(1),
+      );
+    },
+  );
+
   it.each([null, undefined, DIRECT_PROTOCOL_FILTER_VALUE])(
     'labels %o as a direct holding',
     (protocol) => {

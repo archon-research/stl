@@ -12,6 +12,14 @@ export default defineConfig({
   // Defaults to 'warn', which lets a config that fails validation (an unknown
   // token, a malformed recipe) pass codegen and reach the build.
   validation: 'error',
+  // A design system is a claim about which values are allowed, and without
+  // these two the claim is unenforced: a raw `16px` or `var(--…)` type-checks
+  // and ships. On, a token-backed property takes only a token, and a property
+  // whose values Panda knows (`position`, `display`, …) takes only one of them.
+  // The `[value]` escape hatch still works, and is the deliberate way to say a
+  // raw value is meant -- so every one of them below carries a reason.
+  strictTokens: true,
+  strictPropertyValues: true,
   include: ['./src/**/*.{ts,tsx,js,jsx}'],
   exclude: [],
   gitignore: true,

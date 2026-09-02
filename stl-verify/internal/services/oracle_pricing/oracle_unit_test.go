@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 
@@ -17,6 +18,9 @@ import (
 // ---------------------------------------------------------------------------
 // Mock repo
 // ---------------------------------------------------------------------------
+
+// A fixed date, so no test depends on the wall clock.
+var testReferenceEffectiveAt = time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 
 type mockRepo struct {
 	getOracleFn                    func(ctx context.Context, name string) (*entity.Oracle, error)
@@ -31,6 +35,11 @@ type mockRepo struct {
 	insertProtocolOracleBindingFn  func(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error)
 	copyOracleAssetsFn             func(ctx context.Context, fromOracleID, toOracleID int64) error
 	getAllProtocolOracleBindingsFn func(ctx context.Context) ([]*entity.ProtocolOracle, error)
+
+	// One per pinned read: LoadOracleUnits calls both, and a single field would let the
+	// second call's value stand in for the first, hiding a regression in it.
+	enabledAssetsEffectiveAt time.Time
+	tokenInfosEffectiveAt    time.Time
 }
 
 func (m *mockRepo) GetOracle(ctx context.Context, name string) (*entity.Oracle, error) {
@@ -39,7 +48,8 @@ func (m *mockRepo) GetOracle(ctx context.Context, name string) (*entity.Oracle, 
 	}
 	return nil, errors.New("not mocked")
 }
-func (m *mockRepo) GetEnabledAssets(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error) {
+func (m *mockRepo) GetEnabledAssets(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) ([]*entity.OracleAsset, error) {
+	m.enabledAssetsEffectiveAt = referenceEffectiveAt
 	if m.getEnabledAssetsFn != nil {
 		return m.getEnabledAssetsFn(ctx, oracleID)
 	}
@@ -57,7 +67,8 @@ func (m *mockRepo) GetLatestBlock(ctx context.Context, oracleID int64) (int64, e
 	}
 	return 0, nil
 }
-func (m *mockRepo) GetTokenInfos(ctx context.Context, oracleID int64) (map[int64]outbound.TokenInfo, error) {
+func (m *mockRepo) GetTokenInfos(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) (map[int64]outbound.TokenInfo, error) {
+	m.tokenInfosEffectiveAt = referenceEffectiveAt
 	if m.getTokenInfosFn != nil {
 		return m.getTokenInfosFn(ctx, oracleID)
 	}
@@ -93,7 +104,7 @@ func (m *mockRepo) InsertProtocolOracleBinding(ctx context.Context, binding *ent
 	}
 	return nil, errors.New("not mocked")
 }
-func (m *mockRepo) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64) error {
+func (m *mockRepo) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64, referenceEffectiveAt time.Time) error {
 	if m.copyOracleAssetsFn != nil {
 		return m.copyOracleAssetsFn(ctx, fromOracleID, toOracleID)
 	}
@@ -109,6 +120,40 @@ func (m *mockRepo) GetAllProtocolOracleBindings(ctx context.Context) ([]*entity.
 // ---------------------------------------------------------------------------
 // TestLoadOracleUnits
 // ---------------------------------------------------------------------------
+
+func TestLoadOracleUnitsPinsAssetReadsToTheRecordedInstant(t *testing.T) {
+	repo := &mockRepo{
+		getEnabledOraclesByChainFn: func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
+			return []*entity.Oracle{{
+				ID: 1, Name: "sparklend", Address: [20]byte{0xBB},
+				Enabled: true, OracleType: entity.OracleTypeAave,
+			}}, nil
+		},
+		getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+			return []*entity.OracleAsset{{ID: 1, OracleID: 1, TokenID: 1, Enabled: true}}, nil
+		},
+		getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+			return map[int64]outbound.TokenInfo{
+				1: {Address: common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").Bytes()},
+			}, nil
+		},
+	}
+
+	if _, err := LoadOracleUnits(context.Background(), repo, 1, testReferenceEffectiveAt, testutil.DiscardLogger()); err != nil {
+		t.Fatalf("LoadOracleUnits: %v", err)
+	}
+	for _, read := range []struct {
+		name string
+		got  time.Time
+	}{
+		{"GetEnabledAssets", repo.enabledAssetsEffectiveAt},
+		{"GetTokenInfos", repo.tokenInfosEffectiveAt},
+	} {
+		if !read.got.Equal(testReferenceEffectiveAt) {
+			t.Errorf("%s pinned to %s, want the recorded %s", read.name, read.got, testReferenceEffectiveAt)
+		}
+	}
+}
 
 func TestLoadOracleUnits(t *testing.T) {
 	wethAddr := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
@@ -466,7 +511,7 @@ func TestLoadOracleUnits(t *testing.T) {
 			repo := tt.setupRepo()
 			logger := testutil.DiscardLogger()
 
-			units, err := LoadOracleUnits(context.Background(), repo, 1, logger)
+			units, err := LoadOracleUnits(context.Background(), repo, 1, testReferenceEffectiveAt, logger)
 
 			if tt.wantErr {
 				if err == nil {
@@ -606,7 +651,7 @@ func TestLoadOracleUnits_ERC4626(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			repo := tt.setupRepo()
-			units, err := LoadOracleUnits(context.Background(), repo, 1, testutil.DiscardLogger())
+			units, err := LoadOracleUnits(context.Background(), repo, 1, testReferenceEffectiveAt, testutil.DiscardLogger())
 
 			if tt.wantErr {
 				if err == nil {
@@ -779,7 +824,7 @@ func TestLoadOracleUnits_CurveLPNG(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			repo := tt.setupRepo()
-			units, err := LoadOracleUnits(context.Background(), repo, 1, testutil.DiscardLogger())
+			units, err := LoadOracleUnits(context.Background(), repo, 1, testReferenceEffectiveAt, testutil.DiscardLogger())
 
 			if tt.wantErr {
 				if err == nil {

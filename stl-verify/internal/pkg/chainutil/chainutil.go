@@ -38,6 +38,7 @@ func DefaultChainExpectations() map[int64]BlockDataExpectation {
 		10:    {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Optimism
 		130:   {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Unichain
 		42161: {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Arbitrum
+		4663:  {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Robinhood Chain
 	}
 }
 

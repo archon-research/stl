@@ -3,6 +3,7 @@ import { useEffect, useMemo } from 'react';
 
 import { useAllocationRows } from '../features/allocations/useAllocationRows';
 import {
+  hasCompleteRows,
   useChainLabels,
   useLocalChains,
   useLocalProtocols,
@@ -21,6 +22,11 @@ import type { DashboardView } from './navigation';
 export type DashboardFilters = {
   networkOptions: FilterOption[];
   protocolOptions: FilterOption[];
+  // Whether an empty chip list is empty because its registry failed. The two
+  // look identical in the top bar, and only one of them is a fact about the
+  // data.
+  networkOptionsFailed: boolean;
+  protocolOptionsFailed: boolean;
 };
 
 /**
@@ -30,6 +36,13 @@ export type DashboardFilters = {
  * Activities spans every prime, so its options come from the global registries;
  * allocations scope to the selected prime's holdings, which is why the shell
  * reads the prime's rows even though the grid is what draws them.
+ *
+ * Pruning is the destructive half and is held to a higher bar: it only runs
+ * once the options are known to be the whole set. A registry that failed
+ * supplies no such set, and pruning against it would delete a reader's
+ * `?network=` on the strength of a list that was never fetched — leaving the
+ * feed silently widened to every chain, with a reload no longer carrying the
+ * filter back.
  */
 export function useDashboardFilters(
   view: DashboardView,
@@ -38,8 +51,8 @@ export function useDashboardFilters(
   const search = useSearch({ from: '__root__' });
   const updateSearch = useUpdateSearch();
   const chainLabels = useChainLabels();
-  const localChains = useLocalChains();
-  const localProtocols = useLocalProtocols();
+  const chains = useLocalChains();
+  const protocols = useLocalProtocols();
 
   const isActivitiesView = view === 'activities';
 
@@ -55,49 +68,54 @@ export function useDashboardFilters(
   const networkOptions = useMemo(
     () =>
       isActivitiesView
-        ? buildNetworkOptionsFromMetadata(localChains)
+        ? buildNetworkOptionsFromMetadata(chains.rows)
         : buildNetworkOptions(allocations, chainLabels),
-    [allocations, chainLabels, isActivitiesView, localChains],
+    [allocations, chainLabels, chains.rows, isActivitiesView],
   );
 
   const protocolOptions = useMemo(
     () =>
       isActivitiesView
-        ? buildProtocolOptionsFromMetadata(localProtocols)
-        : buildProtocolOptions(allocations, localProtocols),
-    [allocations, isActivitiesView, localProtocols],
+        ? buildProtocolOptionsFromMetadata(protocols.rows)
+        : buildProtocolOptions(allocations, protocols.rows),
+    [allocations, isActivitiesView, protocols.rows],
   );
 
-  // Only rows loaded for this exact prime are an authoritative option list; []
-  // or another prime's rows read as "no such option" and wipe ?network=. The
-  // rows are keyed by proxy, so a prime's own answer is the only one that can
-  // be in hand for it.
-  const networkOptionsLoading = isActivitiesView
-    ? localChains.length === 0
-    : !areAllocationsLoaded;
-  const protocolOptionsLoading = isActivitiesView
-    ? localProtocols.length === 0
-    : !areAllocationsLoaded;
+  // Pruning deletes `?network=` and nothing puts it back, so it needs a list
+  // that is complete — not merely one that has stopped loading.
+  const canPruneNetwork = isActivitiesView
+    ? hasCompleteRows(chains)
+    : areAllocationsLoaded;
+  const canPruneProtocol = isActivitiesView
+    ? hasCompleteRows(protocols)
+    : areAllocationsLoaded;
 
   useEffect(() => {
-    if (networkOptionsLoading || !selectedNetwork) {
+    if (!canPruneNetwork || !selectedNetwork) {
       return;
     }
 
     if (!networkOptions.some((option) => option.value === selectedNetwork)) {
       updateSearch({ network: undefined });
     }
-  }, [networkOptionsLoading, networkOptions, selectedNetwork, updateSearch]);
+  }, [canPruneNetwork, networkOptions, selectedNetwork, updateSearch]);
 
   useEffect(() => {
-    if (protocolOptionsLoading || !selectedProtocol) {
+    if (!canPruneProtocol || !selectedProtocol) {
       return;
     }
 
     if (!protocolOptions.some((option) => option.value === selectedProtocol)) {
       updateSearch({ protocol: undefined });
     }
-  }, [protocolOptionsLoading, protocolOptions, selectedProtocol, updateSearch]);
+  }, [canPruneProtocol, protocolOptions, selectedProtocol, updateSearch]);
 
-  return { networkOptions, protocolOptions };
+  // Registry-driven only: the allocations view builds its chips from the
+  // prime's own rows, which a failed registry leaves labelled but present.
+  return {
+    networkOptions,
+    protocolOptions,
+    networkOptionsFailed: isActivitiesView && chains.isError,
+    protocolOptionsFailed: isActivitiesView && protocols.isError,
+  };
 }

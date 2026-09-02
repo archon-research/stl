@@ -3,6 +3,9 @@
 
 # Ensure `uv run` targets the project environment even if an unrelated venv is active.
 UV := env -u VIRTUAL_ENV uv
+# Port the dev server binds to. Override to run on a non-default port, e.g. to
+# run more than one instance side by side: `make run PORT=8123`.
+PORT ?= 8000
 TS_DIR := ../ts
 STATIC_DIR := app/static
 OPENAPI_SCHEMA := $(TS_DIR)/ui/src/generated/openapi-schema.json
@@ -40,7 +43,7 @@ export-axis-synome-contract:
 
 # Run the FastAPI dev server (requires dev-up in stl-verify/ first)
 run:
-	$(UV) run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+	$(UV) run uvicorn app.main:app --reload --host 0.0.0.0 --port $(PORT)
 
 run-static: build-ui-static
-	$(UV) run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+	$(UV) run uvicorn app.main:app --reload --host 0.0.0.0 --port $(PORT)

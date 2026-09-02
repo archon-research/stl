@@ -93,34 +93,47 @@ function bucketQuery(range: SeriesWindow) {
   };
 }
 
+// `Array.isArray` is the entire check either way; carrying it in a predicate
+// keeps the arm the caller named from needing an assertion to come back.
+function isEnvelopeRows<TRows>(data: unknown): data is TRows {
+  return Array.isArray(data);
+}
+
 /**
- * Rejects an envelope whose `mode` is not the one the request asked for.
+ * Unwraps an envelope's rows, rejecting one that did not hold up: a `mode`
+ * other than the one the request asked for, or a `data` that is not an array.
  *
- * The rows of each mode have incompatible shapes, so a disagreement is a
- * backend contract violation rather than "no data" — surface it instead of
- * handing back mis-typed rows. Thrown from a `select`, which react-query
- * reports as the query's own error.
+ * Both are backend contract violations rather than "no data" — the rows of each
+ * mode have incompatible shapes, and `data` is required and non-nullable on
+ * every envelope — so surface them instead of handing back mis-typed rows or
+ * drawing an empty view over a broken payload. Thrown from a `select`, which
+ * react-query reports as the query's own error.
+ *
+ * `TRows` is the arm the caller asked for, stated once as a type argument and
+ * constrained to one the envelope can actually carry. The schema types `data`
+ * as the union of every mode's rows without discriminating on `mode`, so the
+ * correlation cannot be inferred -- see VEC-686.
  */
-function requireEnvelopeMode<TEnvelope extends { mode: string }>(
-  envelope: TEnvelope,
-  expected: TEnvelope['mode'],
-  label: string,
-): void {
-  if (envelope.mode === expected) {
-    return;
+function requireEnvelopeRows<
+  TEnvelope extends { mode: string; data: unknown },
+  TRows extends TEnvelope['data'],
+>(envelope: TEnvelope, expected: TEnvelope['mode'], label: string): TRows {
+  const { data, mode } = envelope;
+  if (mode === expected && isEnvelopeRows<TRows>(data)) {
+    return data;
   }
 
+  const fault = mode === expected ? 'a non-array `data`' : `"${mode}"`;
   // The cache's `onError` only ever sees a rejected `queryFn`; a throwing
   // `select` is caught by the observer, so this would otherwise log nowhere.
   logging.error('API envelope contract violation', {
     label,
     expected,
-    actual: envelope.mode,
+    mode,
+    fault,
   });
 
-  throw new Error(
-    `${label} returned "${envelope.mode}" for an ${expected} request`,
-  );
+  throw new Error(`${label} returned ${fault} for an ${expected} request`);
 }
 
 // Selects are module-level so their identity is stable: react-query re-runs a
@@ -129,27 +142,44 @@ function requireEnvelopeMode<TEnvelope extends { mode: string }>(
 const selectLatestDebtSnapshot = (
   envelope: PrimeDebtEnvelope,
 ): PrimeDebtSnapshot | null => {
-  requireEnvelopeMode(envelope, 'raw', 'GET /v1/primes/{prime_id}/debt');
-  return (envelope.data as PrimeDebtSnapshot[])[0] ?? null;
+  const snapshots = requireEnvelopeRows<PrimeDebtEnvelope, PrimeDebtSnapshot[]>(
+    envelope,
+    'raw',
+    'GET /v1/primes/{prime_id}/debt',
+  );
+  return snapshots[0] ?? null;
 };
 
 const selectLatestDebtBucket = (
   envelope: PrimeDebtEnvelope,
 ): PrimeDebtBucket | null => {
-  requireEnvelopeMode(envelope, 'aggregated', 'GET /v1/primes/{prime_id}/debt');
-  return (envelope.data as PrimeDebtBucket[])[0] ?? null;
+  const buckets = requireEnvelopeRows<PrimeDebtEnvelope, PrimeDebtBucket[]>(
+    envelope,
+    'aggregated',
+    'GET /v1/primes/{prime_id}/debt',
+  );
+  return buckets[0] ?? null;
 };
 
-const selectDebtBuckets = (envelope: PrimeDebtEnvelope): PrimeDebtBucket[] => {
-  requireEnvelopeMode(envelope, 'aggregated', 'GET /v1/primes/{prime_id}/debt');
-  return sortByBucketStart(envelope.data as PrimeDebtBucket[]);
-};
+const selectDebtBuckets = (envelope: PrimeDebtEnvelope): PrimeDebtBucket[] =>
+  sortByBucketStart(
+    requireEnvelopeRows<PrimeDebtEnvelope, PrimeDebtBucket[]>(
+      envelope,
+      'aggregated',
+      'GET /v1/primes/{prime_id}/debt',
+    ),
+  );
 
 const selectActivityBuckets = (
   envelope: AllocationActivityEnvelope,
 ): AllocationActivityBucket[] => {
   if (envelope.mode === 'aggregated') {
-    return sortByBucketStart(envelope.data as AllocationActivityBucket[]);
+    return sortByBucketStart(
+      requireEnvelopeRows<
+        AllocationActivityEnvelope,
+        AllocationActivityBucket[]
+      >(envelope, 'aggregated', 'GET /v1/allocations/activity'),
+    );
   }
 
   // Both series ask for `aggregate=true`, so this is the same violation the
@@ -163,24 +193,43 @@ const selectActivityBuckets = (
 const selectTotalCapitalBuckets = (
   envelope: TotalCapitalEnvelope,
 ): TotalCapitalBucket[] =>
-  sortByBucketStart(envelope.data as TotalCapitalBucket[]);
+  sortByBucketStart(
+    requireEnvelopeRows<TotalCapitalEnvelope, TotalCapitalBucket[]>(
+      envelope,
+      'aggregated',
+      'GET /v1/primes/{prime_id}/total-capital',
+    ),
+  );
 
 const selectExposureBuckets = (envelope: ExposureEnvelope): ExposureBucket[] =>
-  sortByBucketStart(envelope.data as ExposureBucket[]);
+  sortByBucketStart(
+    requireEnvelopeRows<ExposureEnvelope, ExposureBucket[]>(
+      envelope,
+      'aggregated',
+      'GET /v1/primes/{prime_id}/exposure',
+    ),
+  );
 
 const selectDataSources = (response: DataSourcesResponse) =>
   response.sources ?? NO_DATA_SOURCES;
 
 const selectRawActivity = (
   envelope: AllocationActivityEnvelope,
-): AllocationActivityResponse => {
-  requireEnvelopeMode(envelope, 'raw', 'GET /v1/allocations/activity');
-  return envelope.data as AllocationActivityResponse;
-};
+): AllocationActivityResponse =>
+  requireEnvelopeRows<AllocationActivityEnvelope, AllocationActivityResponse>(
+    envelope,
+    'raw',
+    'GET /v1/allocations/activity',
+  );
 
 const selectProtocolEvents = (
   envelope: ProtocolEventsEnvelope,
-): ProtocolEventsResponse => envelope.data as ProtocolEventsResponse;
+): ProtocolEventsResponse =>
+  requireEnvelopeRows<ProtocolEventsEnvelope, ProtocolEventsResponse>(
+    envelope,
+    'raw',
+    'GET /v1/protocol-events',
+  );
 
 const selectTokenSymbols = (tokens: TokensResponse): string[] =>
   Array.from(
@@ -365,9 +414,10 @@ export const debtSeriesQuery = (primeId: string, window: SeriesWindow) =>
     },
   );
 
-// The three supplementary series. Each degrades to its card's current-value
-// fallback on failure rather than blanking the view, which is why they log at
-// `warn` and why nothing reads their errors.
+// The three supplementary series, which log at `warn` because a failure
+// degrades a card rather than blanking the view. Activity is the exception:
+// its card has no current-value fallback, so an empty series would read as "no
+// activity" and its error *is* read, to say so.
 
 export const activitySeriesQuery = (primeId: string, window: SeriesWindow) =>
   api.queryOptions(

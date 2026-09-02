@@ -202,14 +202,36 @@ post-restart catch-up drains within minutes.
 1. **Is a gap stuck?** Query the chain DB for an orphaned row with no canonical
    row at the same number (the VEC-277 shape) — see the silent-backfill runbook
    above.
-2. **Upstream RPC** — check the Alchemy 429 / error rate; degraded RPC beyond
+2. **Which shape is it?** Compare the orphaned row's hash against the chain:
+   `cast block <N> --field hash --rpc-url <chain rpc>`. A hash the chain **does**
+   know is the VEC-277 over-orphan, healed by un-orphaning the row. A hash the
+   chain does **not** know is the ARCT-379 shape — a losing fork the watcher
+   kept after the canonical broadcast for that height was dropped as
+   `stale_fork`. The gap filler refuses to un-orphan it (doing so would make the
+   losing fork canonical and wedge every height above it), so the watermark
+   stays pinned below N and the lag grows.
+3. **Read `backfill_watermark_advance_skipped_total` the right way round.** A
+   non-zero rate on the same `service_name` means a reorg commit landed
+   between a pass's cursor read and its compare-and-set write: the pass's
+   conclusion was stale and it declined to advance, and the next pass re-runs
+   the scan against the new cursor. That is contention, and it self-heals — it
+   is *not* the wedge signature. Every wedge shape returns before the
+   compare-and-set is ever attempted, so the counter stays at **zero** while
+   the cursor is stuck: the ARCT-379 shape in step 2 (the target never rises
+   above the pinned watermark), a target capped at an unpublished block, and a
+   persistent chain-integrity violation over the range being retired. **A
+   wedge is this counter at zero with the lag gauge climbing**; a busy chain is
+   this counter ticking with the lag still draining.
+4. **Upstream RPC** — check the Alchemy 429 / error rate; degraded RPC beyond
    the catch-up rate also grows lag.
-3. **Watcher logs** for repeated gap-fill of the same numbers.
+5. **Watcher logs** for repeated gap-fill of the same numbers.
 
 ### Recovery
 
 If it is the VEC-277 orphan-only shape, the self-heal drains it automatically
-once the fix is deployed; otherwise follow
+once the fix is deployed. If it is the ARCT-379 shape, use the repair in
+[vector-cronjobs.md → `watcher-data-validator` "Orphan-only heights"](vector-cronjobs.md#special-case-watcher-data-validator-orphan-only-heights);
+otherwise follow
 [docs/incidents/2026-06-02-arbitrum-backfill-loop.md](../incidents/2026-06-02-arbitrum-backfill-loop.md).
 A height whose `block_states` rows have aged out of the 30-day retention is past
 the self-heal and needs the `block-republisher` (see

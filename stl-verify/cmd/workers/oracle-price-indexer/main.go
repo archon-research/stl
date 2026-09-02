@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
@@ -47,7 +48,7 @@ func init() {
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 
-	err := run(ctx, os.Args[1:])
+	err := run(ctx, os.Args[1:], lifecycle.ForceExitAfter(lifecycle.ShutdownTailBudget))
 	cancel()
 	if err != nil {
 		slog.Error("fatal", "error", err)
@@ -129,7 +130,7 @@ func parseConfig(args []string) (cliConfig, error) {
 	return cfg, nil
 }
 
-func run(ctx context.Context, args []string) error {
+func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	cfg, err := parseConfig(args)
 	if err != nil {
 		return err
@@ -229,7 +230,7 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
-	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "oracle-price")
+	archiveWrap, _, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "oracle-price")
 	if err != nil {
 		return err
 	}
@@ -238,6 +239,11 @@ func run(ctx context.Context, args []string) error {
 	repo, err := postgres.NewOnchainPriceRepository(pool, logger, buildReg.BuildID(), 0)
 	if err != nil {
 		return fmt.Errorf("creating repository: %w", err)
+	}
+
+	referenceEffectiveAt, err := env.ReferenceEffectiveAt(time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("resolving reference effective time: %w", err)
 	}
 
 	service, err := oracle_price_worker.NewService(
@@ -260,11 +266,12 @@ func run(ctx context.Context, args []string) error {
 			// mc is the telemetry-instrumented client built once at startup.
 			return archiveWrap(mc), nil
 		},
+		referenceEffectiveAt,
 	)
 	if err != nil {
 		return fmt.Errorf("creating service: %w", err)
 	}
 	service.WithTelemetry(oracleTelemetry)
 
-	return lifecycle.Run(ctx, logger, service)
+	return lifecycle.RunWithTimeoutGuard(ctx, logger, onShutdownTimeout, service)
 }

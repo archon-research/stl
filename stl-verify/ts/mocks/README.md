@@ -17,6 +17,33 @@ VITE_API_MOCKS=1 npm run dev -w ui   # the app, offline
 npm run test:mocks -w mocks          # the self-test
 ```
 
+## Reaching an error state
+
+Every fixture succeeds, so the app's recovery behaviour — a failed card, and the
+gesture meant to bring it back — is unreachable offline unless something asks
+for a failure:
+
+```js
+// also 'prime-debt', 'exposure', 'allocation-activity', and the three
+// registries: 'chains', 'protocols', 'tokens'
+window.failMock('risk-capital');
+window.resetMocks();               // drops it again
+```
+
+It answers `503` with a FastAPI-shaped `detail`, which is what the real API
+returns when a downstream lookup fails, and unlike a `404` is a failure the app
+is expected to recover from rather than render as an empty prime.
+
+The request is held in session storage and reinstalled when the worker starts,
+because a runtime `use()` does not survive a document navigation — and the app
+performs one on the provenance-fallback redirect, which would otherwise heal the
+state a case is testing halfway through it.
+
+`failingHandler` is exhaustive over the failable reads, so adding a name without
+a path fails to compile. `scripts/check-mock-api.ts` covers the control itself:
+if it stops producing a failure, every recovery path built on it stops being
+exercised and nothing else would say so.
+
 ## Why the types come from the ui workspace
 
 `src/schema.ts` imports the generated `paths` and `components` from

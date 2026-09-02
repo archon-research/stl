@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -136,7 +137,7 @@ func run(args []string) error {
 	}
 
 	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
-	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "oracle-price")
+	archiveWrap, _, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "oracle-price")
 	if err != nil {
 		return err
 	}
@@ -161,12 +162,18 @@ func run(args []string) error {
 		return fmt.Errorf("creating repository: %w", err)
 	}
 
+	referenceEffectiveAt, err := env.ReferenceEffectiveAt(time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("resolving reference effective time: %w", err)
+	}
+
 	service, err := oracle_backfill.NewService(
 		oracle_backfill.Config{
-			ChainID:     cfg.chainID,
-			Concurrency: cfg.concurrency,
-			BatchSize:   cfg.batchSize,
-			Logger:      logger,
+			ChainID:              cfg.chainID,
+			Concurrency:          cfg.concurrency,
+			BatchSize:            cfg.batchSize,
+			Logger:               logger,
+			ReferenceEffectiveAt: referenceEffectiveAt,
 		},
 		ethClient,
 		newMulticaller,
