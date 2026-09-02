@@ -488,7 +488,7 @@ Run it locally with `uv run python -m cli.workers.<my_worker>.main` (from `stl-v
   delete on success; let it redrive on failure.
 - Handle `SIGINT` / `SIGTERM` — finish the in-flight message, close
   the DB pool, exit within Go's `lifecycle.ShutdownTimeout` (40s) plus
-  `lifecycle.ShutdownTailBudget` (15s), the Python equivalent of
+  `lifecycle.ShutdownTailBudget` (45s), the Python equivalent of
   `lifecycle.Run`.
 - Read block data from Redis using the exact cache-key convention
   above; do not refetch from Alchemy unless cache-miss rate indicates

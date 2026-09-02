@@ -116,6 +116,9 @@ The watcher handles `SIGINT` and `SIGTERM` signals gracefully:
 1. Stops accepting new blocks
 2. Completes in-flight processing
 3. Closes database connections
-4. Shuts down within 25 seconds (compatible with Fargate's 30s default)
+4. Shuts down within `lifecycle.ShutdownTimeout` (40s) plus a 15s cleanup,
+   inside the pod's 90s `terminationGracePeriodSeconds`. On ECS the task's
+   `stopTimeout` must be raised to 90s to match; the 30s default SIGKILLs
+   mid-shutdown.
 
 Press `Ctrl+C` to stop the watcher.

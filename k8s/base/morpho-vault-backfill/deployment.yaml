@@ -59,4 +59,4 @@ spec:
       # WorkerStopTimeout, so an in-flight activity is cancelled on shutdown and
       # Temporal retries it on the next worker. Safe because every write is an
       # idempotent append.
-      terminationGracePeriodSeconds: 60
+      terminationGracePeriodSeconds: 90

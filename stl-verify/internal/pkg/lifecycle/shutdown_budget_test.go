@@ -6,6 +6,7 @@ import (
 
 	sqsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
@@ -44,6 +45,17 @@ func TestEveryShutdownBudgetHasAFloor(t *testing.T) {
 				t.Errorf("%s is %s; a non-positive budget abandons work instead of waiting for it", name, budget)
 			}
 		})
+	}
+}
+
+// A write the drain gives up on is unrecoverable: its SQS message is already
+// deleted, so nothing retries it. The drain must therefore outlast the bound
+// the write itself runs under, or a healthy-but-slow PUT is lost on rollout.
+func TestTheArchiveDrainOutlastsOneWritesOwnTimeout(t *testing.T) {
+	if archivingwire.DrainTimeout < archiving.ArchiveTimeout {
+		t.Errorf("archivingwire.DrainTimeout (%s) is shorter than archiving.ArchiveTimeout (%s), "+
+			"so a write still inside its own budget is abandoned and counted lost",
+			archivingwire.DrainTimeout, archiving.ArchiveTimeout)
 	}
 }
 

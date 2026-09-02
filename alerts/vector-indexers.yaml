@@ -441,11 +441,14 @@ groups:
         # multicall_batch_size_count but never archive).
         #
         # The status matcher on the denominator is load-bearing. `abandoned` (the
-        # drain gate refused the batch) and `lost` (the write was still in flight
-        # when the 5s drain budget expired) are neither successes nor errors, and
-        # both appear in a burst on every rollout — exactly when a broken write
-        # path is most likely. An unmatched denominator would count them and push
-        # the ratio DOWN at that moment, so the rule pins it to success|error.
+        # drain gate refused a batch a still-running handler scheduled after the
+        # drain began) is neither a success nor an error and appears in a burst on
+        # every rollout — exactly when a broken write path is most likely. An
+        # unmatched denominator would count it and push the ratio DOWN at that
+        # moment, so the rule pins it to success|error. `lost` is excluded for the
+        # same arithmetic reason, though it should now be absent entirely:
+        # DrainTimeout (35s) covers archiveTimeout (30s), so VectorArchiveWriteLost
+        # below treats a single one as something to look at.
         # clamp_min avoids a divide-by-zero when a source has no writes
         # (ratio → 0, never fires), so no multicall guard is needed.
         expr: |
@@ -475,6 +478,45 @@ groups:
             (Alchemy remains the fallback). A total stall is covered separately by
             VectorArchivingStalled.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorarchivingerrorratiohigh
+
+      - alert: VectorArchiveWriteLost
+        # status="lost" means the shutdown drain gave up on a write that was
+        # still in flight. Its SQS message was deleted before the write started,
+        # so nothing retries it: the batch is gone and only re-fetchable from
+        # Alchemy. Since ARCT-401 the drain budget (archivingwire.DrainTimeout,
+        # 35s) covers a write's own bound (archiving.ArchiveTimeout, 30s), so a
+        # write that outlives the drain has already outlived its own deadline —
+        # a wedged S3 client or a throttled bucket, not a rollout. One is worth
+        # a look; there is no rate here to threshold.
+        #
+        # max_over_time, not increase(): the `lost` series is born during the
+        # deferred drain and gets exactly ONE sample, at the final OTEL flush,
+        # before the process exits. increase() needs two points in the window and
+        # so can never see it — the same first-sample blindness documented on
+        # VectorArchivingStalled and VectorSQSReleaseFailed. Verified in
+        # promqltest: on a one-sample series max_over_time fires and increase()
+        # returns nothing. Summing the per-pod maxima makes $value the number of
+        # writes lost, and the 30m window is also the auto-resolve: the sample
+        # falls out and the alert clears on its own.
+        expr: |
+          sum by (service_name, chain, cluster) (
+            max_over_time(archive_writes_total{status="lost", k8s_namespace_name="vector"}[30m])
+          ) > 0
+        for: 5m
+        labels:
+          team: vector
+          severity: warning
+          component: archiving
+          namespace: vector
+        annotations:
+          summary: "Vector archive write lost for {{ $labels.service_name }} on {{ $labels.chain }}"
+          description: |
+            `{{ $labels.service_name }}` on chain `{{ $labels.chain }}` lost
+            `{{ $value }}` raw SC call archive write(s) at shutdown: they outlived
+            the 35s drain budget, which itself covers the 30s per-write timeout.
+            Those batches are unrecoverable — their SQS messages are already
+            deleted — and point at a wedged or throttled S3 client, not a rollout.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorarchivewritelost
 
       # ---------------------------------------------------------------------
       # SQS message settlement (VEC-475)
