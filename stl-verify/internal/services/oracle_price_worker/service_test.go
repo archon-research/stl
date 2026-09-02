@@ -694,7 +694,7 @@ func TestStart_RefusesAVisibilityTimeoutAReceiveCanOutrun(t *testing.T) {
 	defaultRepoSetup(repo)
 
 	consumer := &mockConsumer{visibilityTimeout: 30 * time.Second}
-	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, dummyMulticallerFactory())
+	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, dummyMulticallerFactory(), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
