@@ -83,8 +83,8 @@ func TestMorphoBlueDeployBlock(t *testing.T) {
 		wantErr bool
 	}{
 		{"ethereum mainnet", 1, 18883124, false},
-		{"base", 8453, 18925795, false},
-		{"arbitrum", 42161, 226833208, false},
+		{"base", 8453, 13977148, false},
+		{"arbitrum has a different singleton address", 42161, 0, true},
 		{"unknown chain", 999, 0, true},
 	}
 	for _, tt := range tests {
