@@ -27,3 +27,12 @@ type S3Reader interface {
 	// If the file is gzipped (.gz extension), the reader automatically decompresses.
 	StreamFile(ctx context.Context, bucket, key string) (io.ReadCloser, error)
 }
+
+// S3RangeReader reads part of an object. It is separate from S3Reader so only
+// the callers that need a partial read take the dependency.
+type S3RangeReader interface {
+	// ReadRange returns bytes [start,end] of the object exactly as stored, so a
+	// gzipped object comes back compressed: a range of a gzip stream cannot be
+	// decompressed on its own.
+	ReadRange(ctx context.Context, bucket, key string, start, end int64) ([]byte, error)
+}

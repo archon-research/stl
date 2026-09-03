@@ -2163,7 +2163,8 @@ deploy-bulk-download: build-bulk-download-arm64
 	cat dist/bulk-download-linux-arm64 | tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) 'cat > ~/bulk-download && chmod +x ~/bulk-download'
 	@echo "==> Deployed to ~/bulk-download on Erigon node."
 
-# Run bulk-download on Erigon node (dry-run by default)
+# Run bulk-download on Erigon node (dry-run by default: logs the archive decision
+# per block — fresh / skip / fill / republish, and the version — and uploads nothing)
 # Usage: make erigon-bulk-download ERIGON_USER=<user> ERIGON_IP=<ip> BUCKET=<bucket> START=16000000 END=16001000 [DRY_RUN=false]
 DRY_RUN ?= true
 erigon-bulk-download:
