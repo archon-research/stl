@@ -511,6 +511,18 @@ func receiveOneSQSMessage(t *testing.T, ctx context.Context, sqsc *awssqs.Client
 	return ""
 }
 
+// Both names are spelled out rather than compared to their constants, which
+// would rename together and pin nothing. The alert regex in
+// alerts/vector-cronjobs.yaml and the runbook carry the same two strings.
+func TestDeployedNames_MatchTheAlertsAndTheRunbook(t *testing.T) {
+	if taskQueueName != "block-republisher" {
+		t.Errorf("taskQueueName = %q, want %q", taskQueueName, "block-republisher")
+	}
+	if workflowTypeName != "BlockRepublish" {
+		t.Errorf("workflowTypeName = %q, want %q", workflowTypeName, "BlockRepublish")
+	}
+}
+
 // run() is the whole binary from main()'s point of view. Cancelling before it
 // reaches Temporal is the one path a test can drive without a server, and it is
 // what proves the signal context actually stops the worker.

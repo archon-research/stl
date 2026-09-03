@@ -849,6 +849,20 @@ temporal workflow start --namespace vector \
   --input '{"blocks":[25395651,25087888]}'
 ```
 
+**Only list heights that actually need repairing.** The worker never compares
+what the archive holds against the canonical chain — it republishes every height
+you name. A healthy height listed by mistake gets an identical extra version:
+harmless to readers, which take the highest, but permanent, in S3 and in every
+indexer. Confirm each candidate first with the bulk downloader's dry run (#849),
+which reads the height's archived block hash and reports it against the chain:
+
+```bash
+raw-block-bulk-downloader --dry-run --bucket $RAW_BUCKET --rpc-url <chain rpc> \
+  --start-block 25395651 --end-block 25395651
+```
+
+List only the heights it reports as archived ≠ canonical.
+
 **The version comes from the archive, per height.** `block_version` is the reorg
 counter, so a height that genuinely reorged once already has a real version 1,
 and republishing into an occupied slot would append rows that every reader
@@ -877,9 +891,26 @@ healthy run by up to a minute — and stays behind for good if that worker
 dead-lettered the block. If a height holds fewer versions than you expect, check
 what the indexers have before starting a run:
 
+`protocol_event` is not the only place a version lands — 37 public tables carry a
+`block_version` today (`allocation_position`, `position_state`,
+`token_total_supply`, `psm3_reserves`, `fluid_vault_state`, `onchain_token_price`
+and the `morpho_*`, `curve_*`, `uniswap_v3_*` and `sparklend_reserve_data*`
+families among them). Generate the check rather than maintaining that list here:
+
 ```sql
-SELECT max(block_version) FROM protocol_event WHERE chain_id = 1 AND block_number = 25395651;
+SELECT string_agg(
+         format('SELECT %L AS source, max(block_version) AS block_version FROM %I WHERE block_number = %s',
+                table_name, table_name, 25395651),
+         E'\nUNION ALL ' ORDER BY table_name)
+FROM information_schema.columns
+WHERE table_schema = 'public' AND column_name = 'block_version';
 ```
+
+Run what it prints. Only seven of those tables carry a `chain_id` of their own
+(`protocol_event`, `allocation_position`, `allocation_position_current`,
+`position_state`, `psm3_reserves`, `psm3_alm_shares`, `token_total_supply`); the
+rest reach the chain through a registry FK, so on a multi-chain database read a
+hit as "some chain has this version" and confirm before acting on it.
 
 A version there that the archive does not hold means the repair would land on a
 slot the indexers already have: fix the archive gap (the backup worker's DLQ)
@@ -887,7 +918,8 @@ first.
 
 **Before the first run.** The ServiceAccount's EKS Pod Identity association needs
 `sns:Publish` on the chain's blocks topic and `s3:ListBucket` on the chain's raw
-bucket — no object is ever read or written. The worker lists that bucket once at
+bucket — no object is ever read or written; it is provisioned by
+archon-research/infrastructure#667 (merged). The worker lists that bucket once at
 startup, so a missing grant or a mistyped `S3_BUCKET` shows up as a pod that will
 not start (`this pod's Pod Identity needs s3:ListBucket on <bucket>` in the log),
 not as a repair that dies on its first height.
@@ -967,9 +999,11 @@ per height. The example uses a height that landed at 1.
   quiet before running a list.
 - **A block is published twice.** An activity Temporal cancelled (a rolled pod)
   or timed out after its publish is retried at the version the run already
-  settled on, so the repeat is the same event: SNS FIFO drops it inside its
-  five-minute window, and outside it every append-only consumer re-derives
-  identical rows. The case to avoid is a second **run** over a height that
+  settled on, so the repeat is the same event. The activity heartbeats every 10s
+  against a 30s timeout, so a killed worker is noticed within 30s and the retry
+  usually lands inside SNS FIFO's five-minute deduplication window, where the
+  repeat never reaches the queues at all; outside it every append-only consumer
+  re-derives identical rows anyway. The case to avoid is a second **run** over a height that
   already succeeded — the archive holds that version by then, so it lands one
   slot further along. Naming the same height twice in one run is refused outright.
 - **Nothing arrives downstream** — check the worker actually published

@@ -187,7 +187,10 @@ func newRepublishActivities(ctx context.Context, logger *slog.Logger, cfg config
 		"topic", cfg.snsTopicARN, "redis", cfg.redisAddr, "archive", cfg.s3Bucket,
 		"enableTraces", cfg.enableTraces, "enableBlobs", cfg.enableBlobs)
 
-	return &republishActivities{service: service}, nil
+	return &republishActivities{
+		service:  service,
+		progress: temporal.NewActivityProgress[republishHeartbeat](),
+	}, nil
 }
 
 // openArchiveVersions reads the same raw bucket the backup worker writes, which

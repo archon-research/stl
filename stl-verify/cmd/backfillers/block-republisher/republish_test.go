@@ -414,3 +414,60 @@ func TestRepublishActivityOptions_RideOutALiveReorg(t *testing.T) {
 			options.RetryPolicy.MaximumAttempts)
 	}
 }
+
+// heartbeatStub stands in for the activity's progress store, recording what a
+// beat would carry.
+type heartbeatStub struct {
+	saved []republishHeartbeat
+	beats int
+}
+
+func (h *heartbeatStub) SaveProgress(_ context.Context, beat republishHeartbeat) error {
+	h.saved = append(h.saved, beat)
+	return nil
+}
+
+func (h *heartbeatStub) Beat(context.Context) { h.beats++ }
+
+func (h *heartbeatStub) Reset() { h.saved, h.beats = nil, 0 }
+
+// The details are what tells an operator whether a slow block is fetching,
+// caching or publishing, rather than only that its worker is alive.
+func TestRecordPhase_CarriesTheHeightItsVersionAndThePhase(t *testing.T) {
+	store := &heartbeatStub{}
+	activities := &republishActivities{progress: store}
+
+	report := activities.recordPhase(blockWork{Number: 25395651, Version: 2})
+	report(context.Background(), block_republish.PhaseFetching)
+	report(context.Background(), block_republish.PhaseCaching)
+
+	want := []republishHeartbeat{
+		{Block: 25395651, Version: 2, Phase: "fetching"},
+		{Block: 25395651, Version: 2, Phase: "caching"},
+	}
+	if fmt.Sprint(store.saved) != fmt.Sprint(want) {
+		t.Errorf("heartbeats = %v, want %v", store.saved, want)
+	}
+}
+
+// A rolled pod is noticed within the heartbeat timeout rather than at the
+// attempt's own ceiling, so the retry republishes the same event while SNS FIFO
+// is still deduplicating it.
+func TestRepublishActivityOptions_NoticeADeadWorkerInsideTheDedupWindow(t *testing.T) {
+	options := republishActivityOptions()
+
+	if options.HeartbeatTimeout != heartbeatTimeoutFactor*heartbeatInterval {
+		t.Errorf("HeartbeatTimeout = %s, want %s", options.HeartbeatTimeout, heartbeatTimeoutFactor*heartbeatInterval)
+	}
+	if options.HeartbeatTimeout <= heartbeatInterval {
+		t.Errorf("HeartbeatTimeout %s leaves no grace over the %s ticker", options.HeartbeatTimeout, heartbeatInterval)
+	}
+	if options.HeartbeatTimeout >= options.StartToCloseTimeout {
+		t.Errorf("HeartbeatTimeout %s is not tighter than StartToClose %s, so it detects nothing sooner",
+			options.HeartbeatTimeout, options.StartToCloseTimeout)
+	}
+	if options.HeartbeatTimeout+options.RetryPolicy.InitialInterval >= snsDeduplicationWindow {
+		t.Errorf("a dead worker costs %s before the retry, past the %s deduplication window",
+			options.HeartbeatTimeout+options.RetryPolicy.InitialInterval, snsDeduplicationWindow)
+	}
+}

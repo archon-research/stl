@@ -197,7 +197,7 @@ func TestRepublish_CachesExactlyTheDataTypesTheChainsWatcherPublishes(t *testing
 			config.EnableBlobs = tc.enableBlobs
 			f := newFixtureWith(t, config, newStubClient())
 
-			result, err := f.service.Republish(context.Background(), testBlock, 1)
+			result, err := f.service.Republish(context.Background(), testBlock, 1, nil)
 			if err != nil {
 				t.Fatalf("Republish: %v", err)
 			}
@@ -218,7 +218,7 @@ func TestRepublish_CachesExactlyTheDataTypesTheChainsWatcherPublishes(t *testing
 func TestRepublish_PublishesTheBlockEventAsAReorgBackfillAtTheGivenVersion(t *testing.T) {
 	f := newFixture(t, newStubClient())
 
-	if _, err := f.service.Republish(context.Background(), testBlock, 2); err != nil {
+	if _, err := f.service.Republish(context.Background(), testBlock, 2, nil); err != nil {
 		t.Fatalf("Republish: %v", err)
 	}
 
@@ -243,10 +243,30 @@ func TestRepublish_PublishesTheBlockEventAsAReorgBackfillAtTheGivenVersion(t *te
 	}
 }
 
+// The phases are what a caller turns into activity heartbeats, so a worker that
+// dies mid-block is noticed in seconds and the Temporal UI says which step a slow
+// one is in.
+func TestRepublish_ReportsEveryPhaseItEnters(t *testing.T) {
+	f := newFixture(t, newStubClient())
+	var phases []Phase
+
+	_, err := f.service.Republish(context.Background(), testBlock, 1, func(_ context.Context, phase Phase) {
+		phases = append(phases, phase)
+	})
+	if err != nil {
+		t.Fatalf("Republish: %v", err)
+	}
+
+	want := []Phase{PhaseFetching, PhaseCaching, PhasePublishing}
+	if fmt.Sprint(phases) != fmt.Sprint(want) {
+		t.Errorf("phases = %v, want %v", phases, want)
+	}
+}
+
 func TestRepublish_ReportsTheBlockItRepublished(t *testing.T) {
 	f := newFixture(t, newStubClient())
 
-	result, err := f.service.Republish(context.Background(), testBlock, 2)
+	result, err := f.service.Republish(context.Background(), testBlock, 2, nil)
 	if err != nil {
 		t.Fatalf("Republish: %v", err)
 	}
@@ -269,7 +289,7 @@ func TestRepublish_RefusesWhenTheHeightsCanonicalHashMovedBetweenTheTwoReads(t *
 	client.headers[1] = headerReply{raw: headerJSON(forkHash)}
 	f := newFixture(t, client)
 
-	_, err := f.service.Republish(context.Background(), testBlock, 1)
+	_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
 
 	if !errors.Is(err, ErrCanonicalHashMoved) {
 		t.Fatalf("error = %v, want ErrCanonicalHashMoved", err)
@@ -285,15 +305,26 @@ func TestRepublish_RefusesWhenTheHeightsCanonicalHashMovedBetweenTheTwoReads(t *
 	}
 }
 
-func TestRepublish_IsStructuralWhenTheNodeAnswersNullForTheBlockNumber(t *testing.T) {
+// The finality guard already proved this height sits far below the head a synced
+// node reported, so a null here is a lagging replica, not a height that is not
+// there. Killing the block would take a repairable one out of the run for good.
+func TestRepublish_LeavesANullFirstReadRetryable(t *testing.T) {
 	client := newStubClient()
 	client.headers[0] = headerReply{err: fmt.Errorf("eth_getBlockByNumber: %w", rpcutil.ErrUpstreamNullResult)}
 	f := newFixtureWith(t, testConfig(), client)
 
-	_, err := f.service.Republish(context.Background(), testBlock, 1)
+	_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
 
-	if !errors.Is(err, ErrStructuralData) {
-		t.Fatalf("error = %v, want ErrStructuralData", err)
+	if err == nil {
+		t.Fatal("Republish succeeded against a node with no block at the height")
+	}
+	if errors.Is(err, ErrStructuralData) {
+		t.Errorf("error = %v, want it left retryable", err)
+	}
+	for _, want := range []string{fmt.Sprint(testBlock), "below the chain head"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to mention %q", err, want)
+		}
 	}
 }
 
@@ -316,7 +347,7 @@ func TestRepublish_RefusesAHeightTooCloseToTheChainHead(t *testing.T) {
 			client.head = tc.head
 			f := newFixtureWith(t, testConfig(), client)
 
-			_, err := f.service.Republish(context.Background(), testBlock, 1)
+			_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
 
 			if !errors.Is(err, ErrStructuralData) {
 				t.Fatalf("error = %v, want ErrStructuralData", err)
@@ -333,7 +364,7 @@ func TestRepublish_AcceptsTheShallowestSafeHeight(t *testing.T) {
 	client.head = testBlock + finalityDepth
 	f := newFixtureWith(t, testConfig(), client)
 
-	if _, err := f.service.Republish(context.Background(), testBlock, 1); err != nil {
+	if _, err := f.service.Republish(context.Background(), testBlock, 1, nil); err != nil {
 		t.Fatalf("Republish: %v", err)
 	}
 }
@@ -345,7 +376,7 @@ func TestRepublish_LeavesAFailedHeadReadRetryable(t *testing.T) {
 	client.headErr = errors.New("429 Too Many Requests")
 	f := newFixtureWith(t, testConfig(), client)
 
-	_, err := f.service.Republish(context.Background(), testBlock, 1)
+	_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
 
 	if err == nil {
 		t.Fatal("Republish succeeded without reading the chain head")
@@ -360,7 +391,7 @@ func TestRepublish_IsStructuralWhenTheNodeAnswersNullForAnExpectedDataType(t *te
 	client.data.Receipts = nil
 	f := newFixture(t, client)
 
-	_, err := f.service.Republish(context.Background(), testBlock, 1)
+	_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
 
 	if !errors.Is(err, ErrStructuralData) {
 		t.Fatalf("error = %v, want ErrStructuralData", err)
@@ -456,7 +487,7 @@ func TestNextFreeVersion_RejectsANonPositiveHeightWithoutListing(t *testing.T) {
 func TestRepublish_NeverReadsTheArchive(t *testing.T) {
 	f := newFixture(t, newStubClient())
 
-	if _, err := f.service.Republish(context.Background(), testBlock, 2); err != nil {
+	if _, err := f.service.Republish(context.Background(), testBlock, 2, nil); err != nil {
 		t.Fatalf("Republish: %v", err)
 	}
 
@@ -468,7 +499,7 @@ func TestRepublish_NeverReadsTheArchive(t *testing.T) {
 func TestRepublish_IsStructuralWhenAskedForVersionZero(t *testing.T) {
 	f := newFixture(t, newStubClient())
 
-	_, err := f.service.Republish(context.Background(), testBlock, 0)
+	_, err := f.service.Republish(context.Background(), testBlock, 0, nil)
 
 	if !errors.Is(err, ErrStructuralData) {
 		t.Fatalf("error = %v, want ErrStructuralData", err)
@@ -483,7 +514,7 @@ func TestRepublish_LeavesATransientRPCFailureRetryable(t *testing.T) {
 	client.dataErr = errors.New("429 Too Many Requests")
 	f := newFixture(t, client)
 
-	_, err := f.service.Republish(context.Background(), testBlock, 1)
+	_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
 
 	if err == nil {
 		t.Fatal("Republish succeeded against a throttled node")
@@ -497,7 +528,7 @@ func TestRepublish_DoesNotPublishWhenTheCacheWriteFails(t *testing.T) {
 	sink := memory.NewEventSink()
 	service := newTestService(t, testConfig(), newStubClient(), &stubArchive{}, failingCache{err: errors.New("redis unavailable")}, sink)
 
-	_, err := service.Republish(context.Background(), testBlock, 1)
+	_, err := service.Republish(context.Background(), testBlock, 1, nil)
 
 	if err == nil {
 		t.Fatal("Republish succeeded against an unwritable cache")
@@ -510,7 +541,7 @@ func TestRepublish_DoesNotPublishWhenTheCacheWriteFails(t *testing.T) {
 func TestRepublish_SurfacesAPublishFailure(t *testing.T) {
 	service := newTestService(t, testConfig(), newStubClient(), &stubArchive{}, memory.NewBlockCache(), failingSink{err: errors.New("sns unavailable")})
 
-	_, err := service.Republish(context.Background(), testBlock, 1)
+	_, err := service.Republish(context.Background(), testBlock, 1, nil)
 
 	if err == nil {
 		t.Fatal("Republish succeeded when the sink refused the event")
@@ -585,7 +616,7 @@ func TestRepublish_CachesBlobsWhenTheChainsWatcherFetchesThem(t *testing.T) {
 	config.EnableBlobs = true
 	f := newFixtureWith(t, config, newStubClient())
 
-	result, err := f.service.Republish(context.Background(), testBlock, 1)
+	result, err := f.service.Republish(context.Background(), testBlock, 1, nil)
 	if err != nil {
 		t.Fatalf("Republish: %v", err)
 	}
@@ -601,7 +632,7 @@ func TestRepublish_CachesBlobsWhenTheChainsWatcherFetchesThem(t *testing.T) {
 func TestRepublish_RejectsANonPositiveBlockNumber(t *testing.T) {
 	f := newFixture(t, newStubClient())
 
-	_, err := f.service.Republish(context.Background(), 0, 1)
+	_, err := f.service.Republish(context.Background(), 0, 1, nil)
 
 	if !errors.Is(err, ErrStructuralData) {
 		t.Fatalf("error = %v, want ErrStructuralData", err)
@@ -624,7 +655,7 @@ func TestRepublish_IsStructuralWhenTheHeaderCannotBeDecoded(t *testing.T) {
 			client.headers[0] = headerReply{raw: tc.raw}
 			f := newFixtureWith(t, testConfig(), client)
 
-			_, err := f.service.Republish(context.Background(), testBlock, 1)
+			_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
 
 			if !errors.Is(err, ErrStructuralData) {
 				t.Fatalf("error = %v, want ErrStructuralData", err)
@@ -648,7 +679,7 @@ func TestRepublish_LeavesAFailedNumberReadRetryable(t *testing.T) {
 			client.headers[tc.index] = headerReply{err: errors.New("dial tcp: connection refused")}
 			f := newFixtureWith(t, testConfig(), client)
 
-			_, err := f.service.Republish(context.Background(), testBlock, 1)
+			_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
 
 			if err == nil {
 				t.Fatal("Republish succeeded against an unreachable node")
@@ -665,7 +696,7 @@ func TestRepublish_TreatsTheHeightVanishingOnTheConfirmingReadAsAReorg(t *testin
 	client.headers[1] = headerReply{err: fmt.Errorf("eth_getBlockByNumber: %w", rpcutil.ErrUpstreamNullResult)}
 	f := newFixtureWith(t, testConfig(), client)
 
-	_, err := f.service.Republish(context.Background(), testBlock, 1)
+	_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
 
 	if !errors.Is(err, ErrCanonicalHashMoved) {
 		t.Fatalf("error = %v, want ErrCanonicalHashMoved", err)
@@ -677,7 +708,7 @@ func TestRepublish_IsStructuralWhenTheConfirmingReadCannotBeDecoded(t *testing.T
 	client.headers[1] = headerReply{raw: json.RawMessage(`{"parentHash":"0x2","timestamp":"0x1"}`)}
 	f := newFixtureWith(t, testConfig(), client)
 
-	_, err := f.service.Republish(context.Background(), testBlock, 1)
+	_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
 
 	if !errors.Is(err, ErrStructuralData) {
 		t.Fatalf("error = %v, want ErrStructuralData", err)
@@ -689,7 +720,7 @@ func TestRepublish_LeavesAPerDataTypeRPCFailureRetryable(t *testing.T) {
 	client.data.ReceiptsErr = errors.New("504 Gateway Timeout")
 	f := newFixtureWith(t, testConfig(), client)
 
-	_, err := f.service.Republish(context.Background(), testBlock, 1)
+	_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
 
 	if err == nil {
 		t.Fatal("Republish succeeded with a failed receipts fetch")
@@ -706,7 +737,7 @@ func TestNewService_RunsWithoutALogger(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 
-	if _, err := service.Republish(context.Background(), testBlock, 1); err != nil {
+	if _, err := service.Republish(context.Background(), testBlock, 1, nil); err != nil {
 		t.Fatalf("Republish: %v", err)
 	}
 }

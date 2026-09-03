@@ -47,6 +47,27 @@ type Config struct {
 	Logger       *slog.Logger
 }
 
+// Phase names the step a republish has entered. A caller reports it as activity
+// liveness, so a worker that dies mid-block is noticed long before the attempt's
+// own timeout.
+type Phase string
+
+const (
+	PhaseFetching   Phase = "fetching"
+	PhaseCaching    Phase = "caching"
+	PhasePublishing Phase = "publishing"
+)
+
+// PhaseReporter is told each phase as it starts. A nil reporter is a caller that
+// needs no liveness signal.
+type PhaseReporter func(ctx context.Context, phase Phase)
+
+func (r PhaseReporter) enter(ctx context.Context, phase Phase) {
+	if r != nil {
+		r(ctx, phase)
+	}
+}
+
 // Result is what one republished block landed as.
 type Result struct {
 	BlockNumber    int64    `json:"blockNumber"`
@@ -123,14 +144,16 @@ func (s *Service) NextFreeVersion(ctx context.Context, blockNumber int64) (int, 
 	return version, nil
 }
 
-// Republish caches the canonical block at blockNumber under version and
-// announces it on the chain's block feed. It never reads the archive: a repeat
-// of the same (height, version) re-caches the same keys and re-publishes the
-// same event, which every consumer already deduplicates.
-func (s *Service) Republish(ctx context.Context, blockNumber int64, version int) (Result, error) {
+// Republish caches the canonical block at blockNumber under version, reporting
+// each phase as it starts, and announces it on the chain's block feed. It never
+// reads the archive: a repeat of the same (height, version) re-caches the same
+// keys and re-publishes the same event, which every consumer already
+// deduplicates.
+func (s *Service) Republish(ctx context.Context, blockNumber int64, version int, report PhaseReporter) (Result, error) {
 	if err := validateTarget(blockNumber, version); err != nil {
 		return Result{}, err
 	}
+	report.enter(ctx, PhaseFetching)
 
 	head, err := s.client.GetCurrentBlockNumber(ctx)
 	if err != nil {
@@ -154,10 +177,12 @@ func (s *Service) Republish(ctx context.Context, blockNumber int64, version int)
 		return Result{}, err
 	}
 
+	report.enter(ctx, PhaseCaching)
 	if err := s.cache.SetBlockData(ctx, s.config.ChainID, blockNumber, version, data); err != nil {
 		return Result{}, fmt.Errorf("caching block %d at version %d: %w", blockNumber, version, err)
 	}
 
+	report.enter(ctx, PhasePublishing)
 	if err := s.publish(ctx, blockNumber, version, block); err != nil {
 		return Result{}, err
 	}
@@ -224,9 +249,12 @@ type blockHeader struct {
 
 func (s *Service) canonicalHeader(ctx context.Context, blockNumber, head int64) (blockHeader, error) {
 	raw, err := s.client.GetBlockByNumber(ctx, blockNumber, false)
+	// Not structural: the head read above already proved a synced node knows this
+	// height, so a null here is a replica behind that head, and the next attempt
+	// asks a different one.
 	if isUpstreamNull(raw, err) {
-		return blockHeader{}, fmt.Errorf("the node has no block %d, %d blocks below the chain head %d: %w",
-			blockNumber, head-blockNumber, head, ErrStructuralData)
+		return blockHeader{}, fmt.Errorf("the node has no block %d, %d blocks below the chain head %d",
+			blockNumber, head-blockNumber, head)
 	}
 	if err != nil {
 		return blockHeader{}, fmt.Errorf("reading block %d by number: %w", blockNumber, err)

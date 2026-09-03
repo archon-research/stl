@@ -11,6 +11,7 @@ import (
 	temporalsdk "go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/services/block_republish"
 )
 
@@ -25,6 +26,18 @@ const (
 	// It is also the only channel a FAILING run has: Temporal discards the result
 	// payload of a workflow that returns an error.
 	progressQueryName = "progress"
+
+	// heartbeatInterval is how often a running republish reports liveness, and
+	// heartbeatTimeoutFactor the grace Temporal allows over it so one missed ping
+	// cannot fail a live attempt. Together they decide how long a killed worker
+	// looks alive: short enough that the retry's identical event still lands
+	// inside snsDeduplicationWindow.
+	heartbeatInterval      = 10 * time.Second
+	heartbeatTimeoutFactor = 3
+
+	// snsDeduplicationWindow is SNS FIFO's fixed deduplication window. A retry
+	// that reaches it inside this window never reaches the queues at all.
+	snsDeduplicationWindow = 5 * time.Minute
 
 	// maxBlocksPerRun bounds a mistyped input. Each block is one activity of
 	// ~6 history events, so 200 is nowhere near Temporal's 51,200-event ceiling —
@@ -73,6 +86,14 @@ func (p RepublishParams) resolve() ([]int64, error) {
 		seen[number] = true
 	}
 	return p.Blocks, nil
+}
+
+// republishHeartbeat is what a beat carries, so a slow block shows in the
+// Temporal UI as the step it is in rather than only as a live worker.
+type republishHeartbeat struct {
+	Block   int64  `json:"block"`
+	Version int    `json:"version"`
+	Phase   string `json:"phase"`
 }
 
 // blockWork is one height and the version settled for it. The version travels
@@ -205,6 +226,11 @@ func republishActivityOptions() workflow.ActivityOptions {
 		// the chain settles, which is minutes.
 		ScheduleToCloseTimeout: 30 * time.Minute,
 
+		// Without this a worker killed mid-block looks alive until StartToClose
+		// above, and the retry's identical event would arrive after SNS FIFO has
+		// forgotten the first one.
+		HeartbeatTimeout: heartbeatTimeoutFactor * heartbeatInterval,
+
 		RetryPolicy: &temporalsdk.RetryPolicy{
 			InitialInterval:    5 * time.Second,
 			BackoffCoefficient: 2.0,
@@ -213,8 +239,16 @@ func republishActivityOptions() workflow.ActivityOptions {
 	}
 }
 
+// heartbeater is the slice of temporal.ActivityProgress these activities use:
+// the phase a block is in, and the liveness ping that re-sends it.
+type heartbeater interface {
+	temporal.ProgressHeartbeater
+	SaveProgress(ctx context.Context, beat republishHeartbeat) error
+}
+
 type republishActivities struct {
-	service *block_republish.Service
+	service  *block_republish.Service
+	progress heartbeater
 }
 
 // DeriveVersion reads the version this height's raw archive leaves free. It is
@@ -223,6 +257,9 @@ type republishActivities struct {
 // version recorded here, not at the one the archive would report by then.
 func (a *republishActivities) DeriveVersion(ctx context.Context, blockNumber int64) (version int, err error) {
 	defer func() { err = nonRetryableIfStructural(err) }()
+
+	stopHeartbeat := temporal.StartHeartbeat(ctx, heartbeatInterval, nil)
+	defer stopHeartbeat()
 
 	version, err = a.service.NextFreeVersion(ctx, blockNumber)
 	if err != nil {
@@ -236,11 +273,29 @@ func (a *republishActivities) DeriveVersion(ctx context.Context, blockNumber int
 func (a *republishActivities) RepublishBlock(ctx context.Context, work blockWork) (result block_republish.Result, err error) {
 	defer func() { err = nonRetryableIfStructural(err) }()
 
-	result, err = a.service.Republish(ctx, work.Number, work.Version)
+	a.progress.Reset()
+	stopHeartbeat := temporal.StartHeartbeat(ctx, heartbeatInterval, a.progress)
+	defer stopHeartbeat()
+
+	result, err = a.service.Republish(ctx, work.Number, work.Version, a.recordPhase(work))
 	if err != nil {
 		return block_republish.Result{}, fmt.Errorf("republishing block %d at version %d: %w", work.Number, work.Version, err)
 	}
 	return result, nil
+}
+
+// recordPhase puts the step a block is in into the heartbeat details, which the
+// liveness ticker then re-sends until the next phase replaces it.
+func (a *republishActivities) recordPhase(work blockWork) block_republish.PhaseReporter {
+	return func(ctx context.Context, phase block_republish.Phase) {
+		// SaveProgress cannot fail: a heartbeat the server rejects surfaces as a
+		// cancelled activity context on the next read, not as an error here.
+		_ = a.progress.SaveProgress(ctx, republishHeartbeat{
+			Block:   work.Number,
+			Version: work.Version,
+			Phase:   string(phase),
+		})
+	}
 }
 
 // nonRetryableIfStructural stops Temporal retrying a verdict that cannot change.

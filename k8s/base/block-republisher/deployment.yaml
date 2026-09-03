@@ -61,8 +61,10 @@ spec:
               cpu: "500m"
               memory: "512Mi"
       # The worker does NOT drain: an in-flight activity is cancelled on shutdown
-      # and Temporal retries it on the next worker. Safe because the version is
-      # settled in workflow history before anything is published, so the retry
-      # republishes into the same slot — the same event, which SNS FIFO and every
-      # append-only consumer already deduplicate.
+      # and Temporal retries it on the next worker. The version is settled in
+      # workflow history before anything is published and the activity heartbeats
+      # every 10s against a 30s timeout, so a killed pod is noticed within 30s and
+      # the retry republishes the same event into the same slot — usually inside
+      # SNS FIFO's five-minute deduplication window, and harmless outside it
+      # because every consumer is append-only and re-derives identical rows.
       terminationGracePeriodSeconds: 60
