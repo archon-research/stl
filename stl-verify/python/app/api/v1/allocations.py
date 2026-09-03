@@ -21,6 +21,7 @@ from app.api.deps import (
     get_reference_as_of,
     get_reference_positions_service_factory,
     require_prime_view,
+    vault_filter,
 )
 from app.api.provenance import (
     get_requested_provenance,
@@ -418,7 +419,7 @@ async def list_primes(
 ):
     # ListObjects pushed into the QUERY (ADR-015): unauthorized primes never
     # leave PostgreSQL. None = auth off; [] = caller may view none (no rows).
-    primes = await service.list_primes(allowed_vaults=(None if allowed is None else [EthAddress(v) for v in allowed]))
+    primes = await service.list_primes(allowed_vaults=vault_filter(allowed))
     return [
         PrimeResponse(
             id=p.id,
@@ -1017,7 +1018,7 @@ async def list_allocation_activity(
             )
 
         events = await service.list_allocation_activity(
-            allowed_vaults=(None if allowed is None else [EthAddress(v) for v in allowed]),
+            allowed_vaults=vault_filter(allowed),
             prime_id=parsed_prime_id,
             chain_id=chain_id,
             protocol_name=protocol_name,

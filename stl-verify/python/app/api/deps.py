@@ -12,7 +12,7 @@ from app.adapters.postgres.reference_risk_capital_repository import ReferenceRis
 from app.auth.fga import FgaClient, FgaError, FgaTruncated
 from app.auth.jwt import JwksUnavailable, Principal, TokenError
 from app.config import get_settings
-from app.domain.entities.allocation import EthAddress
+from app.domain.entities.allocation import EthAddress, as_address
 from app.logging import get_logger
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
 from app.ports.reference_capital_repository import ReferenceCapitalRepository
@@ -42,15 +42,9 @@ def _emit_decision(
 ) -> None:
     """Emit one structured authorization decision event (ADR-015 gate 3).
 
-    The field NAMES are the contract here, not the message: they become the
-    Loki query surface now and the S3 audit archive later, so renaming one
-    breaks a saved query and a retained record. ``request_id`` is attached by
-    the formatter from ``RequestIdMiddleware``'s context var — the correlation
-    anchor the ADR names — so it is deliberately absent from this signature.
-
-    Denials are WARNING and allows are INFO. Never carries the bearer token,
-    an FGA api key, or any other credential: a principal id and a resource id
-    are the whole payload.
+    The field NAMES are the contract: renaming one breaks a saved Loki query
+    and, later, a retained audit record. ``request_id`` is absent deliberately
+    — the formatter attaches it. Never carries a credential of any kind.
     """
     payload: dict[str, object] = {
         "event": AUTHZ_EVENT,
@@ -80,10 +74,8 @@ async def get_principal(request: Request) -> Principal | None:
     """Resolve the caller from the token the app verifies ITSELF.
 
     Never from proxy-written claim headers — edge-agnostic, so the same code
-    serves the Tailscale-only present and the Envoy edge later. With
-    auth_enabled=False (the default) every caller is anonymous (None) and no
-    request-time work happens. FastAPI caches this per request, so gates and
-    handlers share one resolution without any manual state.
+    serves the Tailscale-only present and the Envoy edge later. Anonymous
+    (None) with auth off, which every gate below treats as "no checks".
     """
     if not get_settings().auth_enabled:
         return None
@@ -110,9 +102,8 @@ async def get_principal(request: Request) -> Principal | None:
             status_code=401, detail=f"invalid token: {exc}", headers={"WWW-Authenticate": "Bearer"}
         ) from exc
     except JwksUnavailable as exc:
-        # Our dependency is down, not the caller's token. 503 like an OpenFGA
-        # outage — a 401 here would tell every caller to go re-authenticate
-        # against a Keycloak that is already struggling.
+        # 503, not 401: telling every caller to go re-authenticate would only
+        # add load to a Keycloak that is already struggling.
         _emit_decision(
             request, gate="authn", decision="deny", reason="jwks_unavailable", status=503, fields={"error": str(exc)}
         )
@@ -123,8 +114,8 @@ def require_role(role: str) -> Callable:
     """Coarse RBAC gate (ADR-011 Plane 2, layer 1) — applied per ROUTER.
 
     Never as global middleware: kubelet probes hit /v1/status and /v1/ready
-    directly and would 401 → CrashLoop. Keycloak expands composites into
-    realm_access.roles, so org:admin tokens also carry org:analyst and org:viewer.
+    directly and would 401 → CrashLoop. Keycloak expands composites, so an
+    org:admin token also carries org:analyst and org:viewer.
     """
 
     async def _dep(request: Request, principal: Principal | None = Depends(get_principal)) -> None:
@@ -152,9 +143,8 @@ require_analyst = require_role("org:analyst")
 def _fga_or_503(request: Request, *, gate: str, principal: Principal | None) -> FgaClient:
     """The OpenFGA client, or 503 — mirrors the verifier guard in get_principal.
 
-    An app with auth on but no client on state is misconfigured, not open: an
-    unguarded attribute read would surface as an AttributeError 500 and read
-    like a bug in the check rather than a deployment that half-landed.
+    A half-landed deployment is not an open app; an unguarded read would
+    surface as an AttributeError 500 instead.
     """
     fga = getattr(request.app.state, "fga", None)
     if fga is None:
@@ -166,14 +156,9 @@ def _fga_or_503(request: Request, *, gate: str, principal: Principal | None) -> 
 async def _vault_for(request: Request, address: EthAddress) -> str | None:
     """Vault address for a vault-or-proxy address — one indexed point query.
 
-    Built with the process-wide reference provider, exactly as every route
-    factory builds this repository (``reference_effective_at``, ADR-0006 §4).
-    A one-argument construction is a TypeError, which is a 500 on every gated
-    prime-scoped request rather than anything a test double would notice.
-
-    Takes an already-parsed address: the repository reports a failed DB query
-    as ValueError too, and a caller that parsed here could not tell a
-    malformed id (422) from a database that is down (500).
+    Takes the process-wide reference provider like every route factory does
+    (ADR-0006 §4): a one-argument construction is a TypeError, so a 500 on
+    every gated request.
     """
     repo = AllocationRepository(request.app.state.engine, request.app.state.reference_effective_at)
     return await repo.get_prime_vault_address(address)
@@ -182,15 +167,11 @@ async def _vault_for(request: Request, address: EthAddress) -> str | None:
 async def _check_prime_view(request: Request, principal: Principal | None, prime_id: str | None) -> None:
     """The per-resource ``prime:can_view`` check (ADR-011 Plane 2, layer 2).
 
-    One implementation behind three dependencies, because the prime id reaches
-    us three ways: a path segment on ``/v1/primes/{prime_id}/*``, a query
-    parameter on the risk routes, and a body field on the RRC POSTs. The
-    OpenFGA object id is always the prime's VAULT address — the identity
-    shared by all of a prime's proxies, and what the reconciler writes.
-
-    ``prime_id is None`` means the request is not prime-scoped at all (the
-    optional ``?prime_id=`` on the breakdown routes), so there is no resource
-    to check and the router's role gate is the whole control.
+    One implementation behind three dependencies — the prime id reaches us as a
+    path segment, a query parameter or a body field. The object id is always
+    the VAULT address: the identity shared by all of a prime's proxies, and
+    what the reconciler writes. ``prime_id is None`` is not prime-scoped at
+    all, so the router's role gate is the whole control.
     """
     if principal is None:  # auth off
         return
@@ -199,17 +180,29 @@ async def _check_prime_view(request: Request, principal: Principal | None, prime
     try:
         address = EthAddress(prime_id)
     except ValueError as exc:
-        # This dependency resolves BEFORE the route's own parameter
-        # validation, so without this the API's documented 422 for a
-        # malformed id would become a 500.
+        # Resolves BEFORE the route's own validator, so without this parse the
+        # API's documented 422 for a malformed id would be a 500.
         _emit_decision(
             request, gate="prime", decision="deny", reason="malformed_prime_id", status=422, principal=principal
         )
         raise HTTPException(status_code=422, detail="malformed prime id") from exc
-    # Before the lookup: an app with auth on and no client is misconfigured,
-    # and should say so rather than spend a query finding out.
+    # Before the lookup, so a misconfigured app says so without spending a query.
     fga = _fga_or_503(request, gate="prime", principal=principal)
-    vault = await _vault_for(request, address)
+    try:
+        vault = await _vault_for(request, address)
+    except ValueError as exc:
+        # The repository reports a failed query as ValueError. A database blip
+        # behind the gate is our failure, not a bad request: 503, like OpenFGA.
+        _emit_decision(
+            request,
+            gate="prime",
+            decision="deny",
+            reason="prime_lookup_unavailable",
+            status=503,
+            principal=principal,
+            fields={"error": str(exc)},
+        )
+        raise HTTPException(status_code=503, detail="prime lookup unavailable") from exc
     if vault is None:
         _emit_decision(
             request, gate="prime", decision="deny", reason="prime_not_found", status=404, principal=principal
@@ -324,7 +317,13 @@ async def allowed_prime_vaults(
             resource="prime:*",
         )
         raise HTTPException(status_code=503, detail="authorization service unavailable") from exc
-    allowed = frozenset(v.lower() for v in vaults)
+    # Lowercase FIRST (the regex rejects a `0X` prefix), then drop what is still
+    # not an address: it matches no vault_address, so dropping it grants nothing
+    # and keeps one bad tuple — written by another system — from 500ing everyone.
+    allowed = frozenset(str(a) for a in (as_address(v.lower()) for v in vaults) if a is not None)
+    fields: dict[str, object] = {"prime_count": len(allowed)}
+    if len(allowed) != len(vaults):
+        fields["malformed_count"] = len(vaults) - len(allowed)
     # The COUNT, never the list: an allow-list runs to the ListObjects ceiling
     # and would put thousands of addresses in one log line.
     _emit_decision(
@@ -334,9 +333,17 @@ async def allowed_prime_vaults(
         reason="filtered",
         principal=principal,
         resource="prime:*",
-        fields={"prime_count": len(allowed)},
+        fields=fields,
     )
     return allowed
+
+
+def vault_filter(allowed: frozenset[str] | None) -> list[EthAddress] | None:
+    """``allowed_prime_vaults`` as the query parameter the repositories take.
+
+    One helper, not a comprehension per route: forgetting it discloses primes.
+    """
+    return None if allowed is None else [EthAddress(v) for v in allowed]
 
 
 def get_engine(request: Request) -> AsyncEngine:

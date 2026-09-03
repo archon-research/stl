@@ -341,3 +341,67 @@ def test_decision_events_reach_the_json_log_as_queryable_fields():
     assert emitted["principal"] == "user:u1"
     assert emitted["resource"] == f"prime:{VAULT}"
     assert emitted["level"] == "WARNING"
+
+
+# --- failures behind the gate stay 503, and stay visible --------------------
+#
+# Each of these used to escape the dependency as a bare 500: no decision event,
+# so the Loki alert on that event never fires for what is really an outage.
+
+
+def test_a_database_outage_behind_the_prime_gate_is_503_not_500(monkeypatch, caplog):
+    """AllocationRepository reports a failed query as ValueError. Unhandled,
+    that is a 500 on every prime-scoped route the moment the database blips."""
+    c = _app(fga=AsyncMock(), principal=_principal({"org:viewer"}))
+    monkeypatch.setattr(deps, "_vault_for", AsyncMock(side_effect=ValueError("Database query failed")))
+
+    with caplog.at_level(logging.INFO, logger="app.api.deps"):
+        response = c.get(f"/v1/primes/{PROXY}/debt")
+
+    assert response.status_code == 503
+    assert [(e["gate"], e["decision"], e["reason"]) for e in _events(caplog)] == [
+        ("prime", "deny", "prime_lookup_unavailable")
+    ]
+
+
+def _allow_list_client(objects: frozenset[str]) -> tuple[TestClient, AsyncMock]:
+    fga = AsyncMock()
+    fga.list_objects.return_value = objects
+    app = FastAPI()
+    app.state.fga = fga
+    app.dependency_overrides[deps.get_principal] = lambda: _principal({"org:viewer"})
+
+    @app.get("/v1/primes")
+    async def primes(allowed: frozenset[str] | None = Depends(deps.allowed_prime_vaults)):
+        return sorted(allowed or [])
+
+    return TestClient(app), fga
+
+
+def test_a_malformed_object_id_in_the_tuple_store_does_not_take_the_route_down():
+    """The tuple reconciler is a different system. One id that is not an
+    address must not 500 /v1/primes for everyone — and cannot grant anything,
+    since it matches no vault_address."""
+    client, _ = _allow_list_client(frozenset({VAULT, "prime-with-no-address", ""}))
+
+    response = client.get("/v1/primes")
+
+    assert response.status_code == 200
+    assert response.json() == [VAULT]
+
+
+def test_a_dropped_object_id_is_counted_on_the_decision_event(caplog):
+    with caplog.at_level(logging.INFO, logger="app.api.deps"):
+        client, _ = _allow_list_client(frozenset({VAULT, "not-an-address"}))
+        assert client.get("/v1/primes").status_code == 200
+
+    (event,) = [r for r in caplog.records if getattr(r, "event", None) == deps.AUTHZ_EVENT]
+    assert (event.prime_count, event.malformed_count) == (1, 1)
+
+
+def test_an_uppercase_0x_prefix_is_normalised_not_dropped():
+    """The address regex is case-sensitive on the `x`, so lowercasing has to
+    happen BEFORE the parse or a `0X`-prefixed tuple silently loses access."""
+    client, _ = _allow_list_client(frozenset({VAULT.replace("0x", "0X").upper()}))
+
+    assert client.get("/v1/primes").json() == [VAULT]
