@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS offchain_asset_price (
 ALTER TABLE offchain_asset_price SET (
     timescaledb.compress,
     timescaledb.compress_segmentby = 'asset_id',
-    timescaledb.compress_orderby = 'timestamp DESC'
+    timescaledb.compress_orderby = 'timestamp DESC, processing_version DESC'
 );
 
 SELECT add_compression_policy('offchain_asset_price', INTERVAL '60 days', if_not_exists => TRUE);
@@ -152,6 +152,21 @@ COMMENT ON COLUMN offchain_asset_price.build_id IS
 -- processing_version rows.
 REVOKE UPDATE, DELETE ON offchain_asset_price FROM stl_readwrite;
 
+-- offchain_only declares, rather than infers, that an asset's prices belong in
+-- offchain_asset_price. token_id NULL alone cannot carry that meaning: the
+-- original seed resolved token_id by symbol match, so a mismatch or an asset
+-- registered before its token row leaves token_id NULL by ACCIDENT, and routing
+-- on the absence would silently bury such an asset's prices in a table nothing
+-- reads. The fetcher refuses assets that are neither token-linked nor declared
+-- offchain-only.
+ALTER TABLE offchain_price_asset
+    ADD COLUMN IF NOT EXISTS offchain_only BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE offchain_price_asset
+    ADD CONSTRAINT offchain_price_asset_identity_check
+    CHECK (NOT (offchain_only AND token_id IS NOT NULL));
+COMMENT ON COLUMN offchain_price_asset.offchain_only IS
+  'Roles: Configuration. TRUE = the asset deliberately has no token row (native of a non-indexed ecosystem: XRP, HYPE, native BTC/SOL) and its prices are stored in offchain_asset_price. FALSE with token_id NULL is a configuration defect the fetcher refuses.';
+
 -- XRP and HYPE back >$150M of Syrup debt the CORE model simulates (VEC-652),
 -- and neither exists as a mainnet ERC-20, so token_id stays NULL and their
 -- prices land in offchain_asset_price. IDs verified against the CoinGecko API.
@@ -166,8 +181,8 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-INSERT INTO offchain_price_asset (source_id, source_asset_id, token_id, name, symbol, enabled)
-SELECT ps.id, pa.source_asset_id, NULL, pa.name, pa.symbol, true
+INSERT INTO offchain_price_asset (source_id, source_asset_id, token_id, name, symbol, enabled, offchain_only)
+SELECT ps.id, pa.source_asset_id, NULL, pa.name, pa.symbol, true, true
 FROM offchain_price_source ps,
      (VALUES
          ('ripple', 'XRP', 'XRP'),

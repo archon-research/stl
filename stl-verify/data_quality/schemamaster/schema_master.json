@@ -802,6 +802,10 @@
       "type": "text",
       "class": "S"
     },
+    "offchain_only": {
+      "type": "bool",
+      "class": "S"
+    },
     "operation_id": {
       "type": "text",
       "class": "R"

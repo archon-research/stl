@@ -72,7 +72,7 @@ func (r *PriceRepository) GetSourceByName(ctx context.Context, name string) (*en
 // GetEnabledAssets retrieves all enabled assets for a given source.
 func (r *PriceRepository) GetEnabledAssets(ctx context.Context, sourceID int64) ([]*entity.PriceAsset, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, source_id, source_asset_id, token_id, name, symbol, enabled, created_at, updated_at
+		SELECT id, source_id, source_asset_id, token_id, offchain_only, name, symbol, enabled, created_at, updated_at
 		FROM offchain_price_asset
 		WHERE source_id = $1 AND enabled = true
 		ORDER BY id
@@ -92,7 +92,7 @@ func (r *PriceRepository) GetAssetsBySourceAssetIDs(ctx context.Context, sourceI
 	}
 
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, source_id, source_asset_id, token_id, name, symbol, enabled, created_at, updated_at
+		SELECT id, source_id, source_asset_id, token_id, offchain_only, name, symbol, enabled, created_at, updated_at
 		FROM offchain_price_asset
 		WHERE source_id = $1 AND source_asset_id = ANY($2)
 		ORDER BY id
@@ -110,7 +110,7 @@ func scanPriceAssets(rows pgx.Rows) ([]*entity.PriceAsset, error) {
 	for rows.Next() {
 		var pa entity.PriceAsset
 		if err := rows.Scan(
-			&pa.ID, &pa.SourceID, &pa.SourceAssetID, &pa.TokenID, &pa.Name, &pa.Symbol, &pa.Enabled, &pa.CreatedAt, &pa.UpdatedAt,
+			&pa.ID, &pa.SourceID, &pa.SourceAssetID, &pa.TokenID, &pa.OffchainOnly, &pa.Name, &pa.Symbol, &pa.Enabled, &pa.CreatedAt, &pa.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scanning price asset: %w", err)
 		}
@@ -158,7 +158,26 @@ func (r *PriceRepository) UpsertAssetPrices(ctx context.Context, prices []*entit
 			a.Timestamp.Compare(b.Timestamp),
 		)
 	})
-	return upsertInBatches(ctx, r, prices, r.upsertAssetPriceBatch)
+
+	// Two rows sharing the natural key inside one statement would race the
+	// version rule against itself and ON CONFLICT would drop the second row
+	// silently. Duplicates are adjacent after the sort: collapse agreeing ones,
+	// refuse disagreeing ones rather than silently keep one observation.
+	deduped := prices[:0]
+	for _, p := range prices {
+		if len(deduped) > 0 {
+			last := deduped[len(deduped)-1]
+			if last.AssetID == p.AssetID && last.SourceID == p.SourceID && last.Timestamp.Equal(p.Timestamp) {
+				if last.PriceUSD != p.PriceUSD {
+					return fmt.Errorf("conflicting prices for asset %d at %s in one batch: %v vs %v",
+						p.AssetID, p.Timestamp.Format("2006-01-02T15:04:05Z07:00"), last.PriceUSD, p.PriceUSD)
+				}
+				continue
+			}
+		}
+		deduped = append(deduped, p)
+	}
+	return upsertInBatches(ctx, r, deduped, r.upsertAssetPriceBatch)
 }
 
 // upsertInBatches runs batchFn over fixed-size slices of rows inside one

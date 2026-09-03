@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/coingecko"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -529,8 +531,8 @@ func TestIntegration_UpsertIdempotency(t *testing.T) {
 func insertTestTokenlessPriceAsset(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sourceID int64, sourceAssetID, symbol, name string) int64 {
 	t.Helper()
 	_, err := pool.Exec(ctx, `
-		INSERT INTO offchain_price_asset (source_id, source_asset_id, token_id, symbol, name, enabled, created_at, updated_at)
-		VALUES ($1, $2, NULL, $3, $4, true, NOW(), NOW())
+		INSERT INTO offchain_price_asset (source_id, source_asset_id, token_id, offchain_only, symbol, name, enabled, created_at, updated_at)
+		VALUES ($1, $2, NULL, true, $3, $4, true, NOW(), NOW())
 		ON CONFLICT (source_id, source_asset_id) DO NOTHING
 	`, sourceID, sourceAssetID, symbol, name)
 	if err != nil {
@@ -587,12 +589,34 @@ func TestIntegration_FetchCurrentPrices_TokenlessAsset(t *testing.T) {
 		t.Fatalf("FetchCurrentPrices failed: %v", err)
 	}
 
+	// Read the stored values back, not just a row count: a transposed column in
+	// the hand-built INSERT list would keep every count green while feeding the
+	// volatility calibration the wrong numbers.
 	var count int
-	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_asset_price WHERE asset_id = $1`, assetID).Scan(&count); err != nil {
+	var priceUSD, marketCapUSD float64
+	var storedSourceID int16
+	var storedTS time.Time
+	if err := pool.QueryRow(ctx, `
+		SELECT COUNT(*) OVER (), price_usd, market_cap_usd, source_id, timestamp
+		FROM offchain_asset_price WHERE asset_id = $1
+		ORDER BY timestamp DESC LIMIT 1`, assetID,
+	).Scan(&count, &priceUSD, &marketCapUSD, &storedSourceID, &storedTS); err != nil {
 		t.Fatalf("failed to query offchain_asset_price: %v", err)
 	}
 	if count != 1 {
 		t.Errorf("expected 1 asset price record, got %d", count)
+	}
+	if priceUSD != 100.0 {
+		t.Errorf("expected the mock's price 100.0, got %v", priceUSD)
+	}
+	if marketCapUSD != 1000000000.0 {
+		t.Errorf("expected the mock's market cap 1e9, got %v", marketCapUSD)
+	}
+	if int64(storedSourceID) != sourceID {
+		t.Errorf("expected source_id %d, got %d", sourceID, storedSourceID)
+	}
+	if storedTS.IsZero() || time.Since(storedTS) > time.Hour {
+		t.Errorf("expected a recent observation timestamp, got %v", storedTS)
 	}
 }
 
@@ -691,18 +715,139 @@ func TestIntegration_AssetPriceCrossBuildReplayAppendsNewVersions(t *testing.T) 
 		t.Fatal("expected the first build's rows to be stored")
 	}
 
+	// Run build 1 TWICE: the first replay must append a full pv=1 copy, and the
+	// retry must converge on it. Assert the exact (processing_version, build_id)
+	// pairs — if the stored build_id ever diverged from the one the version rule
+	// keyed on, every retry would append pv=2, pv=3, … unbounded.
 	runWithBuild(1)
-	var total, maxVersion int
+	runWithBuild(1)
+	rows, err := pool.Query(ctx, `
+		SELECT processing_version, build_id, COUNT(*)
+		FROM offchain_asset_price WHERE asset_id = $1
+		GROUP BY processing_version, build_id ORDER BY processing_version`, assetID)
+	if err != nil {
+		t.Fatalf("failed to read version sets after replay: %v", err)
+	}
+	defer rows.Close()
+	type versionSet struct{ pv, build, count int }
+	var got []versionSet
+	for rows.Next() {
+		var v versionSet
+		if err := rows.Scan(&v.pv, &v.build, &v.count); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		got = append(got, v)
+	}
+	want := []versionSet{{0, 0, v0Count}, {1, 1, v0Count}}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("version sets after replay+retry = %+v, want %+v", got, want)
+	}
+}
+
+// compressAssetPriceChunks columnstores every chunk of offchain_asset_price —
+// the state the 60-day compression policy puts any chunk in before a historical
+// replay touches it.
+func compressAssetPriceChunks(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	var chunks int
 	if err := pool.QueryRow(ctx,
-		`SELECT COUNT(*), MAX(processing_version) FROM offchain_asset_price WHERE asset_id = $1`, assetID,
-	).Scan(&total, &maxVersion); err != nil {
-		t.Fatalf("failed to count rows after replay: %v", err)
+		`SELECT count(*)::int FROM (SELECT compress_chunk(c) FROM show_chunks('offchain_asset_price') c) s`,
+	).Scan(&chunks); err != nil {
+		t.Fatalf("compress offchain_asset_price chunks: %v", err)
 	}
-	if total != 2*v0Count {
-		t.Errorf("expected the replay to append a full second version set: first=%d, total=%d", v0Count, total)
+	if chunks == 0 {
+		t.Fatal("offchain_asset_price has no chunk to compress; the seed write did not land")
 	}
-	if maxVersion != 1 {
-		t.Errorf("expected max processing_version 1 after a new-build replay, got %d", maxVersion)
+}
+
+func assetPriceVersions(t *testing.T, ctx context.Context, pool *pgxpool.Pool, assetID int64, ts time.Time) []string {
+	t.Helper()
+	rows, err := pool.Query(ctx, `
+		SELECT processing_version, build_id, price_usd
+		FROM offchain_asset_price WHERE asset_id = $1 AND timestamp = $2
+		ORDER BY processing_version`, assetID, ts)
+	if err != nil {
+		t.Fatalf("read asset price versions: %v", err)
+	}
+	defer rows.Close()
+	var versions []string
+	for rows.Next() {
+		var pv, build int
+		var price float64
+		if err := rows.Scan(&pv, &build, &price); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		versions = append(versions, fmt.Sprintf("pv=%d build=%d price=%v", pv, build, price))
+	}
+	return versions
+}
+
+func upsertOneAssetPrice(t *testing.T, ctx context.Context, pool *pgxpool.Pool, buildID int, assetID, sourceID int64, price float64, ts time.Time) {
+	t.Helper()
+	repo, err := postgres.NewPriceRepository(pool, nil, buildregistry.BuildID(buildID), 100)
+	if err != nil {
+		t.Fatalf("failed to create price repository: %v", err)
+	}
+	ap, err := entity.NewAssetPrice(assetID, int16(sourceID), price, nil, nil, ts)
+	if err != nil {
+		t.Fatalf("failed to build asset price: %v", err)
+	}
+	if err := repo.UpsertAssetPrices(ctx, []*entity.AssetPrice{ap}); err != nil {
+		t.Fatalf("UpsertAssetPrices (build %d) failed: %v", buildID, err)
+	}
+}
+
+// A reprocess under a new build must append its correction row even when the
+// chunk it lands in is already columnstored. That works only because the INSERT
+// itself calls next_processing_version_offchain_asset_price: on a columnstored
+// chunk the ON CONFLICT arbiter resolves before row triggers fire, so a
+// trigger-assigned version would reach it as DEFAULT 0 and the correction row
+// would be silently discarded (20260821_120000, ADR-0002 §3).
+func TestIntegration_AssetPriceNewBuildAppendsIntoACompressedChunk(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+
+	var sourceID int64
+	if err := pool.QueryRow(ctx, `SELECT id FROM offchain_price_source WHERE name = 'coingecko'`).Scan(&sourceID); err != nil {
+		t.Fatalf("failed to get coingecko source: %v", err)
+	}
+	assetID := insertTestTokenlessPriceAsset(t, ctx, pool, sourceID, "ripple", "XRP", "XRP")
+	ts := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	upsertOneAssetPrice(t, ctx, pool, 0, assetID, sourceID, 1.5, ts)
+	compressAssetPriceChunks(t, ctx, pool)
+	upsertOneAssetPrice(t, ctx, pool, 1, assetID, sourceID, 2.5, ts)
+
+	got := assetPriceVersions(t, ctx, pool, assetID, ts)
+	want := []string{"pv=0 build=0 price=1.5", "pv=1 build=1 price=2.5"}
+	if !slices.Equal(got, want) {
+		t.Errorf("versions at the observation = %v, want %v", got, want)
+	}
+}
+
+// The other direction of the same arbiter: a same-build retry against a
+// columnstored chunk must converge on the row it already wrote, not duplicate it.
+func TestIntegration_AssetPriceSameBuildRetryDedupesInACompressedChunk(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+
+	var sourceID int64
+	if err := pool.QueryRow(ctx, `SELECT id FROM offchain_price_source WHERE name = 'coingecko'`).Scan(&sourceID); err != nil {
+		t.Fatalf("failed to get coingecko source: %v", err)
+	}
+	assetID := insertTestTokenlessPriceAsset(t, ctx, pool, sourceID, "hyperliquid", "HYPE", "Hyperliquid")
+	ts := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	upsertOneAssetPrice(t, ctx, pool, 0, assetID, sourceID, 1.5, ts)
+	compressAssetPriceChunks(t, ctx, pool)
+	upsertOneAssetPrice(t, ctx, pool, 0, assetID, sourceID, 9.9, ts)
+
+	got := assetPriceVersions(t, ctx, pool, assetID, ts)
+	want := []string{"pv=0 build=0 price=1.5"}
+	if !slices.Equal(got, want) {
+		t.Errorf("versions at the observation = %v, want %v", got, want)
 	}
 }
 

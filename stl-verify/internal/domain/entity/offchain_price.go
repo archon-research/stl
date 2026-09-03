@@ -51,11 +51,20 @@ func (ps *PriceSource) Validate() error {
 }
 
 // PriceAsset represents a tracked asset for a specific source.
+//
+// Exactly one of two identities is valid: TokenID set (prices go to
+// offchain_token_price), or OffchainOnly true (no token exists by design —
+// XRP, HYPE, native BTC/SOL — prices go to offchain_asset_price). TokenID nil
+// with OffchainOnly false is a configuration defect: the original catalog seed
+// resolved token ids by symbol match, so a mismatch leaves TokenID nil by
+// accident, and treating that as "offchain asset" would bury its prices in a
+// table nothing reads.
 type PriceAsset struct {
 	ID            int64
 	SourceID      int64
 	SourceAssetID string
 	TokenID       *int64
+	OffchainOnly  bool
 	Name          string
 	Symbol        string
 	Enabled       bool

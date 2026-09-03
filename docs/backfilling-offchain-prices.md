@@ -227,3 +227,9 @@ deactivated; if requests come back HTTP 401, put a working key in
 | Per-chunk timeout | 10 min, with a 30-min envelope including retries |
 | Re-running a filled range | Safe and additive — `ON CONFLICT DO NOTHING` |
 | Rows are never deleted | Corrections append a new `processing_version` |
+
+One caveat on "additive": it holds fully for `offchain_asset_price` (the INSERT
+decides the version, so corrections land even in compressed chunks). For
+`offchain_token_price`, filling a gap works, but re-writing an already-present
+timestamp from a **new build** is silently dropped once the chunk is compressed
+(2-day policy, so effectively any historical range) — tracked as VEC-615.

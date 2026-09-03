@@ -204,12 +204,16 @@ func pastHour() (from, to time.Time) {
 	return now.Add(-time.Hour), now
 }
 
+// createAsset builds a well-configured catalog row: token-linked, or declared
+// offchain-only when there is no token. The misconfigured third state (neither)
+// is built by clearing OffchainOnly at the test site.
 func createAsset(id int64, sourceAssetID, symbol string, tokenID *int64) *entity.PriceAsset {
 	return &entity.PriceAsset{
 		ID:            id,
 		SourceID:      1,
 		SourceAssetID: sourceAssetID,
 		TokenID:       tokenID,
+		OffchainOnly:  tokenID == nil,
 		Name:          symbol,
 		Symbol:        symbol,
 		Enabled:       true,
@@ -568,6 +572,26 @@ func TestFetchCurrentPrices_AllAssetsUnmapped(t *testing.T) {
 		if len(call) != 0 {
 			t.Error("expected no token-keyed prices for a token-less asset")
 		}
+	}
+}
+
+func TestFetchCurrentPrices_MisconfiguredAssetIsRefused(t *testing.T) {
+	provider := newMockProvider("coingecko", true)
+	repo := newMockRepository()
+
+	asset := createAsset(1, "mystery", "MYS", nil)
+	asset.OffchainOnly = false // token_id NULL by accident, not by declaration
+	repo.enabledAssets = []*entity.PriceAsset{asset}
+
+	ts := time.Now().Truncate(time.Second)
+	provider.currentPrices = []outbound.PriceData{createPriceData("mystery", 1.0, ts)}
+
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
+
+	err := svc.FetchCurrentPrices(context.Background(), nil)
+
+	if err == nil || !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected the misconfigured catalog row to be refused with ErrInvalidRequest, got: %v", err)
 	}
 }
 
@@ -1009,9 +1033,20 @@ func TestBackfillChunk_RejectsRequestsThatCannotSucceed(t *testing.T) {
 		supportsHistorical bool
 		asset              string
 		tokenID            *int64
+		misconfigured      bool // token_id NULL without offchain_only: an accidental catalog state
 		from, to           time.Time
 		wantErrContains    string
 	}{
+		{
+			name:               "asset has neither a token link nor an offchain_only declaration",
+			supportsHistorical: true,
+			asset:              "weth",
+			tokenID:            nil,
+			misconfigured:      true,
+			from:               from,
+			to:                 from.Add(24 * time.Hour),
+			wantErrContains:    "not declared offchain_only",
+		},
 		{
 			name:               "provider cannot serve history at all",
 			supportsHistorical: false,
@@ -1066,7 +1101,11 @@ func TestBackfillChunk_RejectsRequestsThatCannotSucceed(t *testing.T) {
 				return singlePricePoint(id, f), nil
 			}
 			repo := newMockRepository()
-			repo.assetsByIDs = []*entity.PriceAsset{createAsset(1, "weth", "WETH", tc.tokenID)}
+			asset := createAsset(1, "weth", "WETH", tc.tokenID)
+			if tc.misconfigured {
+				asset.OffchainOnly = false
+			}
+			repo.assetsByIDs = []*entity.PriceAsset{asset}
 
 			svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
@@ -1607,10 +1646,12 @@ func TestConvertHistoricalPrices_TokenlessAssetRoutesToAssetPrices(t *testing.T)
 	asset := createAsset(7, "ripple", "XRP", nil)
 	assetMap := map[string]*entity.PriceAsset{"ripple": asset}
 
-	data := &outbound.HistoricalData{
-		SourceAssetID: "ripple",
-		Prices:        []outbound.PricePoint{{Timestamp: time.Now(), PriceUSD: 100.0}},
-	}
+	ts := time.Now().Truncate(time.Second)
+	data := createHistoricalData("ripple",
+		[]outbound.PricePoint{{Timestamp: ts, PriceUSD: 100.0}},
+		[]outbound.VolumePoint{{Timestamp: ts, VolumeUSD: 285000.0}},
+		[]outbound.MarketCapPoint{{Timestamp: ts, MarketCapUSD: 19000000.0}},
+	)
 
 	tokenPrices, assetPrices, err := svc.convertHistoricalPrices(data, assetMap)
 
@@ -1623,8 +1664,21 @@ func TestConvertHistoricalPrices_TokenlessAssetRoutesToAssetPrices(t *testing.T)
 	if len(assetPrices) != 1 {
 		t.Fatalf("expected 1 asset-keyed price, got %d", len(assetPrices))
 	}
-	if assetPrices[0].AssetID != 7 {
-		t.Errorf("expected asset_id 7, got %d", assetPrices[0].AssetID)
+	got := assetPrices[0]
+	if got.AssetID != 7 || got.SourceID != 1 {
+		t.Errorf("expected asset_id 7 / source_id 1, got %d / %d", got.AssetID, got.SourceID)
+	}
+	if got.PriceUSD != 100.0 {
+		t.Errorf("expected price 100.0, got %v", got.PriceUSD)
+	}
+	if !got.Timestamp.Equal(data.Prices[0].Timestamp) {
+		t.Errorf("expected the point's timestamp %v, got %v", data.Prices[0].Timestamp, got.Timestamp)
+	}
+	if got.MarketCapUSD == nil || *got.MarketCapUSD != 19000000.0 {
+		t.Errorf("expected market cap 19000000.0, got %v", got.MarketCapUSD)
+	}
+	if got.VolumeUSD == nil || *got.VolumeUSD != 285000.0 {
+		t.Errorf("expected volume 285000.0, got %v", got.VolumeUSD)
 	}
 }
 

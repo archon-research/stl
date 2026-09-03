@@ -14,11 +14,22 @@ import (
 )
 
 // ErrInvalidRequest marks a request that will fail identically no matter how
-// many times it is retried: a mistyped asset ID, an inverted or over-wide
-// window. A caller with a retry budget (a Temporal activity) matches on it to
-// fail fast, so an operator sees "you typed the ID wrong" immediately rather
-// than after a retry budget has been spent on a fixed answer.
+// many times it is retried: a mistyped asset ID, a misconfigured catalog row,
+// an inverted or over-wide window. A caller with a retry budget (a Temporal
+// activity) matches on it to fail fast, so an operator sees "you typed the ID
+// wrong" immediately rather than after a retry budget has been spent on a
+// fixed answer.
 var ErrInvalidRequest = errors.New("invalid request")
+
+// errMisconfiguredAsset flags a catalog row that is neither token-linked nor
+// declared offchain-only. That state is token_id NULL by ACCIDENT (the catalog
+// seed resolves token ids by symbol match, which can miss), not by design;
+// routing it to offchain_asset_price would silently bury the asset's prices in
+// a table its consumers never read, so the run refuses instead.
+func errMisconfiguredAsset(sourceAssetID string) error {
+	return fmt.Errorf("asset %s has no token_id and is not declared offchain_only in offchain_price_asset; "+
+		"link its token row or set offchain_only before fetching it: %w", sourceAssetID, ErrInvalidRequest)
+}
 
 // MaxHourlyWindow is the widest range CoinGecko still answers at hourly
 // resolution. Past it the API silently drops to daily and gives no signal.
@@ -135,9 +146,15 @@ func (s *Service) FetchCurrentPrices(ctx context.Context, assetIDs []string) err
 }
 
 // storePrices writes each kind to its own table, sequentially. A failure between
-// the two writes propagates and fails the whole run; both upserts are idempotent
-// (ON CONFLICT DO NOTHING under a build-aware version trigger), so the retry
-// re-covers the half that already landed without duplicating it.
+// the two writes propagates and fails the whole run. A retry under the SAME
+// build_id re-covers the half that already landed without duplicating it (the
+// build-aware version rule reuses that build's version and ON CONFLICT drops the
+// row); a retry from a NEW build instead appends a full processing_version+1
+// copy — additive by design, never corrupt (see FetchChunk in the backfiller).
+//
+// Deliberate coupling: once token-less assets are enabled, every sweep writes
+// both tables, so an asset-store failure fails the whole (idempotent) run rather
+// than letting the token series look healthy while the new store silently rots.
 func (s *Service) storePrices(ctx context.Context, tokenPrices []*entity.TokenPrice, assetPrices []*entity.AssetPrice) error {
 	if err := s.repo.UpsertPrices(ctx, tokenPrices); err != nil {
 		return fmt.Errorf("storing token prices: %w", err)
@@ -412,6 +429,9 @@ func (s *Service) convertCurrentPrices(prices []outbound.PriceData, assets []*en
 		}
 
 		if asset.TokenID == nil {
+			if !asset.OffchainOnly {
+				return nil, nil, errMisconfiguredAsset(p.SourceAssetID)
+			}
 			ap, err := entity.NewAssetPrice(asset.ID, int16(asset.SourceID), p.PriceUSD, p.MarketCapUSD, nil, p.Timestamp)
 			if err != nil {
 				return nil, nil, fmt.Errorf("invalid price data for asset %s: %w", p.SourceAssetID, err)
@@ -437,6 +457,9 @@ func (s *Service) convertHistoricalPrices(data *outbound.HistoricalData, assetMa
 	asset, ok := assetMap[data.SourceAssetID]
 	if !ok {
 		return nil, nil, fmt.Errorf("historical data for unknown asset: %s", data.SourceAssetID)
+	}
+	if asset.TokenID == nil && !asset.OffchainOnly {
+		return nil, nil, errMisconfiguredAsset(data.SourceAssetID)
 	}
 
 	// Build maps of timestamps to market caps and volumes for efficient lookup
