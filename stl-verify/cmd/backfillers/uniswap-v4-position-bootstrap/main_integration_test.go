@@ -439,6 +439,8 @@ func TestRegisterIntegration_RefusesAChainIDMismatch(t *testing.T) {
 	t.Cleanup(cleanup)
 	server := startMockChain(t, mockChainOptions{})
 	setWorkerEnv(t, "8453", server.URL)
+	// Off mainnet the depth has no default; the refusal under test must still be the one that fails.
+	t.Setenv("FINALITY_DEPTH", "64")
 
 	_, err := registerWorker(t, db)
 
@@ -465,6 +467,8 @@ func TestRegisterIntegration_RefusesAChainWithNoRegisteredPools(t *testing.T) {
 	t.Cleanup(cleanup)
 	server := startMockChain(t, mockChainOptions{chainID: "0x2105"})
 	setWorkerEnv(t, "8453", server.URL)
+	// Off mainnet the depth has no default; the refusal under test must still be the one that fails.
+	t.Setenv("FINALITY_DEPTH", "64")
 
 	_, err := registerWorker(t, db)
 
