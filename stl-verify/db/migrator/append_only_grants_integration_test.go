@@ -35,6 +35,7 @@ var convertedAppendOnlyTables = []string{
 	// VEC-402 (#625): SELECT+INSERT only, with the owner-side REVOKE too. position_classification
 	// is NOT here — #625 no longer touches it, and its own migration still grants full DML.
 	"position_state",
+	"oracle_asset",
 }
 
 // TestConvertedTablesAreAppendOnly asserts the DB-level half of the append-only rule:
@@ -88,7 +89,7 @@ func TestConvertedTablesAreAppendOnly(t *testing.T) {
 // k8s/base/morpho-indexer + 20260122_140100), an UPDATE on a converted table is refused
 // with SQLSTATE 42501 before it can match a single row.
 //
-// One table is enough: the privilege semantics are identical across the five, and the
+// One table is enough: the privilege semantics are identical across the converted set, and the
 // catalogue test is what enumerates them. What this adds is the proof that the group
 // membership actually carries the revoke through to the role that connects.
 func TestConvertedTablesRejectUpdateAsTheLoginRole(t *testing.T) {

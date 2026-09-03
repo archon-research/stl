@@ -103,7 +103,7 @@ func NewService(
 		config.SweepEveryNBlocks = defaultSweepEveryNBlocks
 	}
 	if config.MaxMessages == 0 {
-		config.MaxMessages = 10
+		config.MaxMessages = 1
 	}
 	if config.PollInterval == 0 {
 		config.PollInterval = 100 * time.Millisecond
@@ -126,7 +126,25 @@ func NewService(
 // Start resolves the PSM3 immutables at the latest block, then starts the SQS
 // processing loop. It returns when initial setup fails; the loop runs until
 // ctx is cancelled.
+// The visibility-timeout guard is fatal, so it runs before any startup I/O: a
+// misconfigured pod would otherwise re-run the whole sweep on every
+// CrashLoopBackOff cycle before refusing.
+func (s *Service) consumeLoop() sqsutil.Config {
+	return sqsutil.Config{
+		Consumer:     s.sqsConsumer,
+		MaxMessages:  s.config.MaxMessages,
+		PollInterval: s.config.PollInterval,
+		Logger:       s.logger,
+		ChainID:      s.config.ChainID,
+	}
+}
+
 func (s *Service) Start(ctx context.Context) error {
+	loop := s.consumeLoop()
+	if err := loop.Validate(); err != nil {
+		return err
+	}
+
 	blockNum, err := s.blockQuerier.BlockNumber(ctx)
 	if err != nil {
 		return fmt.Errorf("get latest block for immutable resolution: %w", err)
@@ -140,13 +158,7 @@ func (s *Service) Start(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
 	s.wg.Go(func() {
-		sqsutil.RunLoop(s.ctx, sqsutil.Config{
-			Consumer:     s.sqsConsumer,
-			MaxMessages:  s.config.MaxMessages,
-			PollInterval: s.config.PollInterval,
-			Logger:       s.logger,
-			ChainID:      s.config.ChainID,
-		}, s.processBlock)
+		sqsutil.RunLoop(s.ctx, loop, s.processBlock)
 	})
 
 	s.logger.Info("psm3 service started",

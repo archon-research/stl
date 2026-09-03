@@ -1123,3 +1123,110 @@ func TestClientConfigDefaults_IncludesRetryConfig(t *testing.T) {
 		t.Errorf("expected BackoffFactor=2.0, got %v", defaults.BackoffFactor)
 	}
 }
+
+// --- Test: GetFinalizedBlockNumber ---
+
+func TestGetFinalizedBlockNumber_AsksForTheFinalizedTag(t *testing.T) {
+	var gotParams []any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req jsonRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("failed to decode request: %v", err)
+		}
+		if req.Method != "eth_getBlockByNumber" {
+			t.Errorf("expected method=eth_getBlockByNumber, got %s", req.Method)
+		}
+		gotParams = req.Params
+
+		resp := jsonRPCResponse{JSONRPC: "2.0", ID: 1, Result: json.RawMessage(`{"number":"0x1830003"}`)}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	blockNum, err := testClient(t, server.URL).GetFinalizedBlockNumber(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if blockNum != 0x1830003 {
+		t.Errorf("expected blockNum=%d, got %d", 0x1830003, blockNum)
+	}
+	if len(gotParams) != 2 || gotParams[0] != "finalized" || gotParams[1] != false {
+		t.Errorf("params = %v, want the finalized tag without transaction bodies", gotParams)
+	}
+}
+
+func TestGetFinalizedBlockNumber_UnsupportedTagIsAnError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      1,
+			Error:   &jsonRPCError{Code: -32601, Message: "the method does not exist"},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	if _, err := testClient(t, server.URL).GetFinalizedBlockNumber(context.Background()); err == nil {
+		t.Fatal("expected an error rather than a height a node never reported")
+	}
+}
+
+// --- Test: GetBlockHeadersBatch ---
+
+func TestGetBlockHeadersBatch_AsksForOneHeaderPerBlock(t *testing.T) {
+	var gotRequests []jsonRPCRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotRequests); err != nil {
+			t.Errorf("failed to decode requests: %v", err)
+		}
+
+		responses := make([]jsonRPCResponse, len(gotRequests))
+		for i, req := range gotRequests {
+			responses[i] = jsonRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`{"hash":"0xabc"}`)}
+		}
+		if err := json.NewEncoder(w).Encode(responses); err != nil {
+			t.Errorf("failed to encode responses: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	results, err := testClient(t, server.URL).GetBlockHeadersBatch(context.Background(), []int64{100, 101})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(gotRequests) != 2 {
+		t.Fatalf("requests = %d, want one per block and nothing else", len(gotRequests))
+	}
+	for _, req := range gotRequests {
+		if req.Method != "eth_getBlockByNumber" || len(req.Params) != 2 || req.Params[1] != false {
+			t.Errorf("request = %+v, want eth_getBlockByNumber without transaction bodies", req)
+		}
+	}
+	if len(results) != 2 || results[0].BlockNumber != 100 || results[1].BlockNumber != 101 {
+		t.Errorf("results = %+v, want one per requested block in order", results)
+	}
+	if results[0].BlockErr != nil || string(results[0].Block) != `{"hash":"0xabc"}` {
+		t.Errorf("result = %+v, want the header the node returned", results[0])
+	}
+}
+
+func TestGetBlockHeadersBatch_NoBlocksMakesNoCall(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("an empty batch must not reach the node")
+	}))
+	defer server.Close()
+
+	results, err := testClient(t, server.URL).GetBlockHeadersBatch(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if results != nil {
+		t.Errorf("results = %v, want none", results)
+	}
+}

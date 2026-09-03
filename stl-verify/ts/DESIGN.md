@@ -231,9 +231,9 @@ Two forms, and the distinction matters: props the package owns (`buildChartTheme
 
 ## Typography
 
-**Display Font:** IBM Plex Sans, SF Pro Text, Segoe UI, sans-serif  
-**Body Font:** IBM Plex Sans, SF Pro Text, Segoe UI, sans-serif  
-**Label Font:** IBM Plex Sans, SF Pro Text, Segoe UI, sans-serif  
+**Display Font:** IBM Plex Sans, SF Pro Text, Segoe UI, sans-serif
+**Body Font:** IBM Plex Sans, SF Pro Text, Segoe UI, sans-serif
+**Label Font:** IBM Plex Sans, SF Pro Text, Segoe UI, sans-serif
 **Mono Font** (`fonts.mono`, used for every on-chain address and hash): `ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace`
 
 **Character:** Utility-first and technically neutral. Typography supports quick parsing with minimal personality overhead.

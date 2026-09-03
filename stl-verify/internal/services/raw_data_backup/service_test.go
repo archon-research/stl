@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -13,7 +15,15 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
+	sqsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
+	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
@@ -22,19 +32,27 @@ import (
 // Mock Implementations
 // =============================================================================
 
+type visibilityChange struct {
+	handle     string
+	visibility time.Duration
+}
+
 // mockSQSConsumer is a mock implementation of outbound.SQSConsumer.
 type mockSQSConsumer struct {
-	mu              sync.Mutex
-	messages        []outbound.SQSMessage
-	deletedHandles  []string
-	receiveErr      error
-	deleteErr       error
-	receiveCount    int
-	receiveCalled   atomic.Int32
-	deleteCalled    atomic.Int32
-	receiveDelay    time.Duration
-	closed          bool
-	receiveCallback func(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error)
+	mu                sync.Mutex
+	messages          []outbound.SQSMessage
+	deletedHandles    []string
+	visibilityChanges []visibilityChange
+	visibilityTimeout time.Duration // 0 -> a safe default well above the handler budget
+	receiveErr        error
+	deleteErr         error
+	receiveCount      int
+	receiveCalled     atomic.Int32
+	deleteCalled      atomic.Int32
+	receiveDelay      time.Duration
+	closed            bool
+	receiveCallback   func(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error)
+	beforeDelete      func()
 }
 
 func newMockSQSConsumer() *mockSQSConsumer {
@@ -86,9 +104,17 @@ func (m *mockSQSConsumer) ReceiveMessages(ctx context.Context, maxMessages int) 
 	return result, nil
 }
 
+// DeleteMessage refuses a cancelled context the way the AWS SDK does, so a
+// test catches cleanup that is still riding the shutdown-cancelled context.
 func (m *mockSQSConsumer) DeleteMessage(ctx context.Context, receiptHandle string) error {
 	m.deleteCalled.Add(1)
 
+	if m.beforeDelete != nil {
+		m.beforeDelete()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if m.deleteErr != nil {
 		return m.deleteErr
 	}
@@ -99,7 +125,22 @@ func (m *mockSQSConsumer) DeleteMessage(ctx context.Context, receiptHandle strin
 	return nil
 }
 
+func (m *mockSQSConsumer) ChangeMessageVisibilityBatch(ctx context.Context, receiptHandles []string, visibility time.Duration) (map[string]error, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, handle := range receiptHandles {
+		m.visibilityChanges = append(m.visibilityChanges, visibilityChange{handle: handle, visibility: visibility})
+	}
+	return nil, nil
+}
+
 func (m *mockSQSConsumer) VisibilityTimeout() time.Duration {
+	if m.visibilityTimeout > 0 {
+		return m.visibilityTimeout
+	}
 	return 300 * time.Second
 }
 
@@ -118,6 +159,12 @@ func (m *mockSQSConsumer) GetDeletedHandles() []string {
 	return result
 }
 
+func (m *mockSQSConsumer) GetVisibilityChanges() []visibilityChange {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.visibilityChanges)
+}
+
 // mockBlockCache is a mock implementation of outbound.BlockCache.
 type mockBlockCache struct {
 	mu        sync.RWMutex
@@ -127,6 +174,10 @@ type mockBlockCache struct {
 	blobs     map[string]json.RawMessage
 	getErrors map[string]error
 	closed    bool
+
+	// getBlockHook runs at the start of GetBlock with that read's context; a
+	// non-nil error becomes the read's result.
+	getBlockHook func(ctx context.Context) error
 }
 
 func newMockBlockCache() *mockBlockCache {
@@ -185,6 +236,11 @@ func (m *mockBlockCache) SetBlockData(ctx context.Context, chainID, blockNumber 
 }
 
 func (m *mockBlockCache) GetBlock(ctx context.Context, chainID, blockNumber int64, version int) (json.RawMessage, error) {
+	if m.getBlockHook != nil {
+		if err := m.getBlockHook(ctx); err != nil {
+			return nil, err
+		}
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	key := m.key(chainID, blockNumber, version)
@@ -1585,6 +1641,391 @@ func TestRun_ProcessesMessages(t *testing.T) {
 	}
 }
 
+// The poll outlives the shutdown signal, so the batch reaches the pool with the
+// context already cancelled: the worker-side guard settles it, unstarted.
+func TestRun_ReleasesBatchThatArrivesDuringShutdown(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	svc := newTestServiceWithClient(t, Config{
+		ChainID:           1,
+		Bucket:            "test-bucket",
+		Workers:           1,
+		ChainExpectations: blockOnlyExpectations(),
+	}, consumer, cache, writer, nil, newMockBlockchainClient())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	consumer.receiveCallback = func(context.Context, int) ([]outbound.SQSMessage, error) {
+		cancel() // the poll outlives the shutdown signal, then delivers
+		return []outbound.SQSMessage{createSQSMessage("msg1", createBlockEvent(1, 100, 0))}, nil
+	}
+
+	if err := svc.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	want := []visibilityChange{{handle: "receipt-msg1", visibility: 0}}
+	if got := consumer.GetVisibilityChanges(); !slices.Equal(got, want) {
+		t.Errorf("expected the batch released for the successor, got %v", got)
+	}
+	if got := consumer.GetDeletedHandles(); len(got) != 0 {
+		t.Errorf("expected no deletes after shutdown began, got %v", got)
+	}
+	if keys := writer.GetAllKeys(); len(keys) != 0 {
+		t.Errorf("expected nothing backed up after shutdown began, got %v", keys)
+	}
+}
+
+func TestShutdownPathFitsThePodGracePeriod(t *testing.T) {
+	// The detached poll and the worker pool run concurrently; the worst message
+	// then needs three cleanup budgets (DLQ publish, delete, release after the
+	// failed delete), and the held set spans two release chunks.
+	shutdownPath := max(
+		sqsadapter.PollBudget(sqsadapter.ConfigDefaults().WaitTimeSeconds),
+		sqsutil.DefaultDrainTimeout+3*sqsutil.SettleTimeout,
+	) + 2*sqsutil.SettleTimeout
+	chain := shutdownPath + telemetry.ShutdownFlushTimeout
+
+	if chain >= lifecycle.PodTerminationGracePeriod {
+		t.Errorf("the backup worker's shutdown chain needs %s (drain path %s + OTEL flush %s), "+
+			"which does not fit the pod grace period (%s)",
+			chain, shutdownPath, telemetry.ShutdownFlushTimeout, lifecycle.PodTerminationGracePeriod)
+	}
+}
+
+// Like the real consumer, the returned callback never abandons an in-flight
+// poll and refuses to start a new one once the context is cancelled.
+func deliverOnceThenIdle(messages ...outbound.SQSMessage) func(context.Context, int) ([]outbound.SQSMessage, error) {
+	var delivered atomic.Bool
+	return func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+		if delivered.CompareAndSwap(false, true) {
+			return messages, nil
+		}
+		<-ctx.Done()
+		return nil, fmt.Errorf("not starting a poll: %w", ctx.Err())
+	}
+}
+
+// observe, when set, receives the context the read held once the shutdown has
+// landed.
+func parkInGetBlockUntilShutdown(reading chan<- struct{}, shutdownRequested <-chan struct{}, observe func(context.Context)) func(context.Context) error {
+	return func(ctx context.Context) error {
+		select {
+		case reading <- struct{}{}:
+		default:
+		}
+		<-shutdownRequested
+		if observe != nil {
+			observe(ctx)
+		}
+		return nil
+	}
+}
+
+func shutdownTestService(t *testing.T, cfg Config, consumer outbound.SQSConsumer, cache outbound.BlockCache, writer outbound.S3Writer) (*Service, *testutil.SlogRecorder) {
+	t.Helper()
+	recorder := &testutil.SlogRecorder{}
+	cfg.ChainID = 1
+	cfg.Bucket = "test-bucket"
+	cfg.ChainExpectations = blockOnlyExpectations()
+	cfg.Logger = slog.New(recorder)
+	return newTestServiceWithClient(t, cfg, consumer, cache, writer, nil, newMockBlockchainClient()), recorder
+}
+
+func TestRun_DrainsInFlightMessageOnShutdown(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	svc, recorder := shutdownTestService(t, Config{Workers: 1, BatchSize: 1}, consumer, cache, writer)
+
+	_ = cache.SetBlock(context.Background(), 1, 100, 0, json.RawMessage(`{"number":100}`))
+	consumer.receiveCallback = deliverOnceThenIdle(createSQSMessage("msg1", createBlockEvent(1, 100, 0)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reading := make(chan struct{}, 1)
+	shutdownRequested := make(chan struct{})
+	var readCtxErr error
+	cache.getBlockHook = parkInGetBlockUntilShutdown(reading, shutdownRequested,
+		func(readCtx context.Context) { readCtxErr = readCtx.Err() })
+	go func() {
+		<-reading
+		cancel()
+		close(shutdownRequested)
+	}()
+
+	if err := svc.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	if readCtxErr != nil {
+		t.Errorf("expected the in-flight read to keep a live context across shutdown, got %v", readCtxErr)
+	}
+	if got := consumer.GetDeletedHandles(); !slices.Equal(got, []string{"receipt-msg1"}) {
+		t.Errorf("expected the drained message deleted, got %v", got)
+	}
+	if got := consumer.GetVisibilityChanges(); len(got) != 0 {
+		t.Errorf("expected no release for a message that finished, got %v", got)
+	}
+	if logged := recorder.MessagesAt(slog.LevelError); len(logged) > 0 {
+		t.Errorf("expected no ERROR records on a clean shutdown, got %v", logged)
+	}
+}
+
+// A shutdown that lands while the fetcher is inside its long poll leaves through
+// fetchAndDispatch, not the select, so without a marker of its own half the
+// worker's shutdowns cannot be timed from the logs.
+func TestRun_LogsTheShutdownThatLandsInsideThePoll(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	svc, recorder := shutdownTestService(t, Config{Workers: 1, BatchSize: 1},
+		consumer, newMockBlockCache(), newMockS3Writer())
+
+	polling := make(chan struct{}, 1)
+	consumer.receiveCallback = func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+		select {
+		case polling <- struct{}{}:
+		default:
+		}
+		<-ctx.Done()
+		return nil, fmt.Errorf("not starting a poll: %w", ctx.Err())
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-polling
+		cancel()
+	}()
+
+	if err := svc.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+
+	const want = "shutdown cancelled the poll, stopping message fetcher"
+	if got := recorder.MessagesAt(slog.LevelInfo); !slices.Contains(got, want) {
+		t.Errorf("expected an INFO %q marking why the fetcher stopped, got %v", want, got)
+	}
+}
+
+func TestRun_ReleasesInFlightMessageWhenDrainBudgetExpires(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	metrics := &mockMetrics{}
+	svc, recorder := shutdownTestService(t,
+		Config{Workers: 1, BatchSize: 1, DrainTimeout: 20 * time.Millisecond, Metrics: metrics},
+		consumer, cache, writer)
+
+	_ = cache.SetBlock(context.Background(), 1, 100, 0, json.RawMessage(`{"number":100}`))
+	consumer.receiveCallback = deliverOnceThenIdle(createSQSMessage("msg1", createBlockEvent(1, 100, 0)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reading := make(chan struct{}, 1)
+	readAbandoned := make(chan struct{})
+	cache.getBlockHook = func(readCtx context.Context) error {
+		select {
+		case reading <- struct{}{}:
+		default:
+		}
+		<-readCtx.Done()
+		close(readAbandoned)
+		return readCtx.Err()
+	}
+	go func() {
+		<-reading
+		cancel()
+	}()
+
+	if err := svc.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	select {
+	case <-readAbandoned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the abandoned read never observed its cancellation")
+	}
+	want := []visibilityChange{{handle: "receipt-msg1", visibility: 0}}
+	if got := consumer.GetVisibilityChanges(); !slices.Equal(got, want) {
+		t.Errorf("expected the abandoned message released for the successor, got %v", got)
+	}
+	if got := consumer.GetDeletedHandles(); len(got) != 0 {
+		t.Errorf("expected no delete for an unfinished message, got %v", got)
+	}
+	if logged := recorder.MessagesAt(slog.LevelError); len(logged) > 0 {
+		t.Errorf("expected an expired drain to stay off the error path, got %v", logged)
+	}
+	// The elapsed time is the drain budget, not the message's cost; recording it
+	// would drag p99 up on every rollout (VectorBackupWorkerLatencyHigh).
+	if got := metrics.LatencyStatuses(); len(got) != 0 {
+		t.Errorf("expected no processing latency for an abandoned message, got %v", got)
+	}
+}
+
+func TestRun_ReleasesPreservedMessageWhenDLQPublishFailsDuringShutdown(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	deadLetter := newMockDeadLetterPublisher()
+	deadLetter.publishErr = errors.New("SNS unavailable")
+	recorder := &testutil.SlogRecorder{}
+	svc := newTestServiceWithClient(t, Config{
+		ChainID:           1,
+		Bucket:            "test-bucket",
+		Workers:           1,
+		BatchSize:         1,
+		ChainExpectations: blockOnlyExpectations(),
+		Logger:            slog.New(recorder),
+	}, consumer, cache, writer, deadLetter, newMockBlockchainClient())
+
+	// A null payload is permanent: it can never become valid on redelivery.
+	_ = cache.SetBlock(context.Background(), 1, 100, 0, json.RawMessage(`null`))
+	consumer.receiveCallback = deliverOnceThenIdle(createSQSMessage("msg1", createBlockEvent(1, 100, 0)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reading := make(chan struct{}, 1)
+	shutdownRequested := make(chan struct{})
+	cache.getBlockHook = parkInGetBlockUntilShutdown(reading, shutdownRequested, nil)
+	go func() {
+		<-reading
+		cancel()
+		close(shutdownRequested)
+	}()
+
+	if err := svc.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	want := []visibilityChange{{handle: "receipt-msg1", visibility: 0}}
+	if got := consumer.GetVisibilityChanges(); !slices.Equal(got, want) {
+		t.Errorf("expected the preserved message released for the successor, got %v", got)
+	}
+	if got := consumer.GetDeletedHandles(); len(got) != 0 {
+		t.Errorf("expected no delete when the DLQ publish failed, got %v", got)
+	}
+}
+
+func TestRun_ReleasesBufferedMessagesNeverStartedOnShutdown(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	config := Config{Workers: 1, BatchSize: 3}
+	consumer.visibilityTimeout = visibilityCovering(config)
+	svc, _ := shutdownTestService(t, config, consumer, cache, writer)
+
+	for _, block := range []int64{100, 101, 102} {
+		_ = cache.SetBlock(context.Background(), 1, block, 0, json.RawMessage(`{}`))
+	}
+	consumer.receiveCallback = deliverOnceThenIdle(
+		createSQSMessage("msg1", createBlockEvent(1, 100, 0)),
+		createSQSMessage("msg2", createBlockEvent(1, 101, 0)),
+		createSQSMessage("msg3", createBlockEvent(1, 102, 0)),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reading := make(chan struct{}, 1)
+	shutdownRequested := make(chan struct{})
+	cache.getBlockHook = parkInGetBlockUntilShutdown(reading, shutdownRequested, nil)
+	go func() {
+		<-reading
+		cancel()
+		close(shutdownRequested)
+	}()
+
+	if err := svc.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	want := []visibilityChange{
+		{handle: "receipt-msg2", visibility: 0},
+		{handle: "receipt-msg3", visibility: 0},
+	}
+	if got := consumer.GetVisibilityChanges(); !slices.Equal(got, want) {
+		t.Errorf("expected the buffered messages released for the successor, got %v", got)
+	}
+	if got := consumer.GetDeletedHandles(); !slices.Equal(got, []string{"receipt-msg1"}) {
+		t.Errorf("expected only the drained message deleted, got %v", got)
+	}
+}
+
+// Shipped config (workers 2, batch 10) leaves a tail no worker ever sees: the
+// pool absorbs Workers*3, the rest is only ever settled by the fetcher.
+func TestRun_ReleasesTheTailItNeverDispatchedOnShutdown(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	config := Config{Workers: 1, BatchSize: 6}
+	consumer.visibilityTimeout = visibilityCovering(config)
+	svc, _ := shutdownTestService(t, config, consumer, cache, writer)
+
+	_ = cache.SetBlock(context.Background(), 1, 100, 0, json.RawMessage(`{}`))
+	batch := make([]outbound.SQSMessage, 0, 6)
+	for i := range 6 {
+		batch = append(batch, createSQSMessage(fmt.Sprintf("msg%d", i+1), createBlockEvent(1, int64(100+i), 0)))
+	}
+	consumer.receiveCallback = deliverOnceThenIdle(batch...)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reading := make(chan struct{}, 1)
+	shutdownRequested := make(chan struct{})
+	cache.getBlockHook = parkInGetBlockUntilShutdown(reading, shutdownRequested, nil)
+	go func() {
+		<-reading
+		cancel()
+		close(shutdownRequested)
+	}()
+
+	if err := svc.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	want := []string{"receipt-msg2", "receipt-msg3", "receipt-msg4", "receipt-msg5", "receipt-msg6"}
+	if got := releasedHandles(consumer); !slices.Equal(got, want) {
+		t.Errorf("expected every unstarted message released, got %v", got)
+	}
+	if got := consumer.GetDeletedHandles(); !slices.Equal(got, []string{"receipt-msg1"}) {
+		t.Errorf("expected only the started message deleted, got %v", got)
+	}
+}
+
+// The fetcher and the worker pool hand messages back concurrently, so only the
+// set is deterministic.
+func releasedHandles(consumer *mockSQSConsumer) []string {
+	var handles []string
+	for _, change := range consumer.GetVisibilityChanges() {
+		if change.visibility == 0 {
+			handles = append(handles, change.handle)
+		}
+	}
+	return slices.Sorted(slices.Values(handles))
+}
+
+// The work is done and nothing will retry it; only the release keeps the FIFO
+// group moving once the shutdown has killed the delete.
+func TestRun_ReleasesAProcessedMessageWhenShutdownKillsItsDelete(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	svc, _ := shutdownTestService(t, Config{Workers: 1, BatchSize: 1}, consumer, cache, writer)
+
+	_ = cache.SetBlock(context.Background(), 1, 100, 0, json.RawMessage(`{"number":100}`))
+	consumer.receiveCallback = deliverOnceThenIdle(createSQSMessage("msg1", createBlockEvent(1, 100, 0)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	consumer.beforeDelete = cancel
+
+	if err := svc.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	if got := consumer.GetDeletedHandles(); len(got) != 0 {
+		t.Errorf("expected the cancelled delete to fail, got deletes %v", got)
+	}
+	want := []visibilityChange{{handle: "receipt-msg1", visibility: 0}}
+	if got := consumer.GetVisibilityChanges(); !slices.Equal(got, want) {
+		t.Errorf("expected the undeletable message released for the successor, got %v", got)
+	}
+}
+
 func TestRun_StopsOnContextCancel(t *testing.T) {
 	consumer := newMockSQSConsumer()
 	cache := newMockBlockCache()
@@ -1879,6 +2320,94 @@ func TestRun_HandlesDeleteMessageError(t *testing.T) {
 	}
 }
 
+// runWithARefusedDelete drives one message whose delete SQS refuses, and returns
+// the metrics the run produced.
+func runWithARefusedDelete(t *testing.T) (*mockMetrics, sdkmetric.Reader) {
+	t.Helper()
+	reader := installManualMeterProvider(t)
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	dlq := newMockDeadLetterPublisher()
+	metrics := &mockMetrics{}
+	svc := newDLQTestService(t, Config{
+		ChainExpectations: blockOnlyExpectations(),
+		Metrics:           metrics,
+	}, consumer, cache, newMockS3Writer(), dlq)
+
+	_ = cache.SetBlock(context.Background(), 1, 100, 0, json.RawMessage(`{"number":100}`))
+	consumer.AddMessage(createSQSMessage("msg1", createBlockEvent(1, 100, 0)))
+	consumer.deleteErr = errors.New("AccessDenied: DeleteMessage")
+
+	runUntilProcessed(t, svc, consumer, dlq)
+	return metrics, reader
+}
+
+// The message stays on the queue and the block is processed again on every
+// redelivery, so reporting it processed both double-counts the block and keeps
+// VectorBackupWorkerStalled (rate(blocks_processed_total) == 0) quiet.
+func TestRun_ARefusedDeleteIsNotReportedProcessed(t *testing.T) {
+	metrics, _ := runWithARefusedDelete(t)
+
+	if got := metrics.ProcessedStatuses(); len(got) != 0 {
+		t.Errorf("processed statuses = %v, want none: nothing was settled", got)
+	}
+}
+
+func TestRun_ARefusedDeleteIsCountedAsAFailedSettle(t *testing.T) {
+	_, reader := runWithARefusedDelete(t)
+
+	want := map[settleKey]int64{{op: "delete", status: "failed"}: 1}
+	if got := collectSettleCounter(t, reader); !maps.Equal(got, want) {
+		t.Errorf("sqs.message.settles.total = %v, want %v", got, want)
+	}
+}
+
+type settleKey struct {
+	op     string
+	status string
+}
+
+// Keyed off the wire name and labels rather than the package constants: the
+// alert rules match on exactly these strings.
+func collectSettleCounter(t *testing.T, reader sdkmetric.Reader) map[settleKey]int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collecting metrics: %v", err)
+	}
+	counts := make(map[settleKey]int64)
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "sqs.message.settles.total" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric %q is %T, want metricdata.Sum[int64]", m.Name, m.Data)
+			}
+			for _, dp := range sum.DataPoints {
+				op, _ := dp.Attributes.Value("op")
+				status, _ := dp.Attributes.Value("status")
+				counts[settleKey{op: op.AsString(), status: status.AsString()}] += dp.Value
+			}
+		}
+	}
+	return counts
+}
+
+func installManualMeterProvider(t *testing.T) sdkmetric.Reader {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	previous := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(previous)
+		_ = mp.Shutdown(context.Background())
+	})
+	return reader
+}
+
 // =============================================================================
 // Tests: Concurrent Workers
 // =============================================================================
@@ -1888,14 +2417,19 @@ func TestRun_MultipleWorkersProcessConcurrently(t *testing.T) {
 	cache := newMockBlockCache()
 	writer := newMockS3Writer()
 
-	svc, _ := NewService(Config{
+	config := Config{
 		ChainID:           1,
 		Bucket:            "test-bucket",
 		Workers:           4,
 		BatchSize:         10,
 		ChainExpectations: blockOnlyExpectations(),
 		Logger:            testutil.DiscardLogger(),
-	}, consumer, cache, writer, newMockDeadLetterPublisher(), newMockBlockchainClient())
+	}
+	consumer.visibilityTimeout = visibilityCovering(config)
+	svc, err := NewService(config, consumer, cache, writer, newMockDeadLetterPublisher(), newMockBlockchainClient())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	ctx := context.Background()
 
@@ -2138,8 +2672,8 @@ func TestConfigDefaults(t *testing.T) {
 	if defaults.Workers != 4 {
 		t.Errorf("expected Workers=4, got %d", defaults.Workers)
 	}
-	if defaults.BatchSize != 10 {
-		t.Errorf("expected BatchSize=10, got %d", defaults.BatchSize)
+	if defaults.BatchSize != defaults.Workers {
+		t.Errorf("expected one message per worker, got BatchSize=%d for %d workers", defaults.BatchSize, defaults.Workers)
 	}
 	if defaults.Logger == nil {
 		t.Error("expected Logger to be set")
@@ -2448,13 +2982,18 @@ func TestRun_ContextCancelledDuringMessageSend(t *testing.T) {
 	cache := newMockBlockCache()
 	writer := newMockS3Writer()
 
-	svc, _ := NewService(Config{
+	config := Config{
 		ChainID:   1,
 		Bucket:    "test-bucket",
 		Workers:   1,
 		BatchSize: 100,
 		Logger:    testutil.DiscardLogger(),
-	}, consumer, cache, writer, newMockDeadLetterPublisher(), newMockBlockchainClient())
+	}
+	consumer.visibilityTimeout = visibilityCovering(config)
+	svc, err := NewService(config, consumer, cache, writer, newMockDeadLetterPublisher(), newMockBlockchainClient())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	// Create many messages
 	for i := range 100 {
@@ -3225,6 +3764,9 @@ type mockMetrics struct {
 	mu        sync.Mutex
 	processed []string
 	latencies []string
+
+	// latencyRecorded lets a test wait on the metric rather than on the run.
+	latencyRecorded chan<- string
 }
 
 var _ outbound.BackupMetricsRecorder = (*mockMetrics)(nil)
@@ -3233,6 +3775,12 @@ func (m *mockMetrics) RecordProcessingLatency(ctx context.Context, duration time
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.latencies = append(m.latencies, status)
+	if m.latencyRecorded != nil {
+		select {
+		case m.latencyRecorded <- status:
+		default:
+		}
+	}
 }
 
 func (m *mockMetrics) RecordBlockProcessed(ctx context.Context, status string) {
@@ -3281,6 +3829,37 @@ func TestRun_Metrics_SuccessStatus(t *testing.T) {
 	}
 	if !slices.Contains(metrics.LatencyStatuses(), "success") {
 		t.Errorf("expected a success latency metric, got %v", metrics.LatencyStatuses())
+	}
+}
+
+// A handler that ignored its cancelled context and still returned nil is
+// deleted anyway, so the breach only exists in this line.
+func TestRun_WarnsWhenAHandlerOutrunsItsBudgetAndStillSucceeds(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	dlq := newMockDeadLetterPublisher()
+	recorder := &testutil.SlogRecorder{}
+	svc := newDLQTestService(t, Config{
+		ChainExpectations: blockOnlyExpectations(),
+		HandlerTimeout:    20 * time.Millisecond,
+		Logger:            slog.New(recorder),
+	}, consumer, cache, writer, dlq)
+
+	_ = cache.SetBlock(context.Background(), 1, 100, 0, json.RawMessage(`{"number":100}`))
+	cache.getBlockHook = func(context.Context) error {
+		time.Sleep(60 * time.Millisecond)
+		return nil
+	}
+	consumer.AddMessage(createSQSMessage("msg1", createBlockEvent(1, 100, 0)))
+
+	runUntilProcessed(t, svc, consumer, dlq)
+
+	if got := recorder.CountWarn("exceeding its timeout budget"); got != 1 {
+		t.Errorf("expected the budget breach warned once, got %d", got)
+	}
+	if got := consumer.GetDeletedHandles(); !slices.Equal(got, []string{"receipt-msg1"}) {
+		t.Errorf("expected the completed work still deleted, got %v", got)
 	}
 }
 
@@ -3415,4 +3994,89 @@ func TestRun_Metrics_DLQPublishFailedStatus(t *testing.T) {
 	if !slices.Contains(metrics.ProcessedStatuses(), "dlq_publish_failed") {
 		t.Errorf("expected a dlq_publish_failed processed metric, got %v", metrics.ProcessedStatuses())
 	}
+}
+
+// Of this worker's dependencies only the S3 leg carries no timeout of its own,
+// so a FileExists -> HeadObject on a half-open connection parks the worker.
+func TestRun_BoundsAHandlerParkedOnADependency(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	latencies := make(chan string, 1)
+	svc, _ := shutdownTestService(t, Config{
+		Workers:        1,
+		BatchSize:      1,
+		HandlerTimeout: 50 * time.Millisecond,
+		Metrics:        &mockMetrics{latencyRecorded: latencies},
+	}, consumer, cache, writer)
+
+	_ = cache.SetBlock(context.Background(), 1, 100, 0, json.RawMessage(`{"number":100}`))
+	consumer.receiveCallback = deliverOnceThenIdle(createSQSMessage("msg1", createBlockEvent(1, 100, 0)))
+	cache.getBlockHook = func(readCtx context.Context) error {
+		<-readCtx.Done()
+		return readCtx.Err()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- svc.Run(ctx) }()
+
+	select {
+	case status := <-latencies:
+		if status != latencyStatusError {
+			t.Errorf("expected the expired handler recorded as %q, got %q", latencyStatusError, status)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the handler outlived its budget: no processing-latency metric within 1s")
+	}
+
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after cancellation")
+	}
+}
+
+// SQS starts one visibility clock for the whole batch, so a pool that has to
+// work through it in rounds must fit every round inside that clock.
+func TestNewService_RejectsAVisibilityTimeoutTheBatchCanOutrun(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	consumer.visibilityTimeout = 180 * time.Second
+
+	_, err := NewService(Config{
+		ChainID:   1,
+		Bucket:    "test-bucket",
+		Workers:   4,
+		BatchSize: 10,
+		Logger:    testutil.DiscardLogger(),
+	}, consumer, newMockBlockCache(), newMockS3Writer(), newMockDeadLetterPublisher(), newMockBlockchainClient())
+
+	if err == nil {
+		t.Fatal("expected 10 messages per receive across 4 workers rejected against a 180s visibility timeout")
+	}
+}
+
+func TestNewService_DefaultsTheBatchSizeToTheWorkerCount(t *testing.T) {
+	svc, err := NewService(Config{
+		ChainID: 1,
+		Bucket:  "test-bucket",
+		Workers: 4,
+		Logger:  testutil.DiscardLogger(),
+	}, newMockSQSConsumer(), newMockBlockCache(), newMockS3Writer(), newMockDeadLetterPublisher(), newMockBlockchainClient())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if svc.config.BatchSize != 4 {
+		t.Errorf("BatchSize = %d, want one message per worker so none waits out its visibility clock in a queue", svc.config.BatchSize)
+	}
+}
+
+// A test that fans a batch wider than its worker pool has to widen the
+// visibility clock with it, the way a deployment would.
+func visibilityCovering(config Config) time.Duration {
+	return time.Duration(inFlightPerReceive(config))*sqsutil.DefaultHandlerTimeout +
+		sqsutil.DefaultDrainTimeout + 3*sqsutil.SettleTimeout
 }
