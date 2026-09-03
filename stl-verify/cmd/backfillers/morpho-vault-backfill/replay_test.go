@@ -6,13 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
+	ethtypes "github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
@@ -20,6 +23,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 func mustV2Topics(t *testing.T) map[common.Hash]struct{} {
@@ -403,5 +407,83 @@ func TestCollectPartitionV2Logs_BoundsConcurrencyToWorkers(t *testing.T) {
 	}
 	if maxInFlight.Load() < 2 {
 		t.Error("downloads never overlapped; collection is still serial")
+	}
+}
+
+// fakeChainReader answers the replay's two header reads from fixed values, so a
+// test can pose each node state the orphan verdict has to tell apart.
+type fakeChainReader struct {
+	byHashErr   error
+	canonical   *ethtypes.Header
+	byNumberErr error
+}
+
+func (f *fakeChainReader) HeaderByHash(context.Context, common.Hash) (*ethtypes.Header, error) {
+	if f.byHashErr == nil {
+		return nil, errors.New("fakeChainReader: no by-hash outcome configured")
+	}
+	return nil, f.byHashErr
+}
+
+func (f *fakeChainReader) HeaderByNumber(context.Context, *big.Int) (*ethtypes.Header, error) {
+	return f.canonical, f.byNumberErr
+}
+
+// A failed header read decides whether the partition stops for good or is retried, and
+// a replica behind head answers null for a hash it has not reached yet: only a canonical
+// header at the same height with a DIFFERENT hash proves an orphaned archive object.
+func TestReplayPartition_ClassifiesAFailedHeaderRead(t *testing.T) {
+	vault := common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2")
+	const block = int64(25395651)
+	archivedHash := common.HexToHash(fmt.Sprintf("0x%064x", block))
+	canonical := &ethtypes.Header{Number: big.NewInt(block), Time: 1_700_000_000}
+	key := s3key.Build(block, 0, s3key.Receipts)
+
+	tests := []struct {
+		name           string
+		chain          *fakeChainReader
+		wantStructural bool
+		wantInMessage  []string
+	}{
+		{
+			name:           "a different canonical hash at that height proves the orphan",
+			chain:          &fakeChainReader{byHashErr: ethereum.NotFound, canonical: canonical},
+			wantStructural: true,
+			wantInMessage:  []string{"25395651", key, archivedHash.Hex(), canonical.Hash().Hex()},
+		},
+		{
+			name:           "no canonical header either, so the node is simply behind",
+			chain:          &fakeChainReader{byHashErr: ethereum.NotFound, byNumberErr: ethereum.NotFound},
+			wantStructural: false,
+		},
+		{
+			name:           "the canonical read failed, so nothing is proven",
+			chain:          &fakeChainReader{byHashErr: ethereum.NotFound, byNumberErr: errors.New("rpc down")},
+			wantStructural: false,
+		},
+		{
+			name:           "a transport failure on the by-hash read",
+			chain:          &fakeChainReader{byHashErr: errors.New("rpc down")},
+			wantStructural: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := v2LogPartitionFixture(t, vault, block, block)
+			_, err := replayPartition(context.Background(), testutil.DiscardLogger(), reader, nil, tt.chain,
+				config{bucket: "bucket", goroutines: 1}, blockRange{From: block, To: block},
+				partition.GetPartition(block), vaultSet(vault), mustV2Topics(t))
+			if err == nil {
+				t.Fatal("a header read that failed must stop the partition")
+			}
+			if got := errors.Is(err, errStructuralData); got != tt.wantStructural {
+				t.Errorf("errors.Is(err, errStructuralData) = %t, want %t: %v", got, tt.wantStructural, err)
+			}
+			for _, want := range tt.wantInMessage {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not name %q", err, want)
+				}
+			}
+		})
 	}
 }

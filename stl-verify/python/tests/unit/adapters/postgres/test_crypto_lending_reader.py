@@ -141,15 +141,50 @@ async def test_list_supported_asset_ids_filters_supported_protocols(
 ) -> None:
     receipt_token_repo.list_protocol_pairs = AsyncMock(
         return_value=[
-            ReceiptTokenProtocolPair(receipt_token_id=1, protocol_name="Aave V3"),
-            ReceiptTokenProtocolPair(receipt_token_id=2, protocol_name="morpho-blue"),
-            ReceiptTokenProtocolPair(receipt_token_id=3, protocol_name="Unsupported"),
-            ReceiptTokenProtocolPair(receipt_token_id=4, protocol_name="Aave V3 Avalanche"),
+            ReceiptTokenProtocolPair(receipt_token_id=1, protocol_name="Aave V3", chain_id=1),
+            ReceiptTokenProtocolPair(receipt_token_id=2, protocol_name="morpho-blue", chain_id=1),
+            ReceiptTokenProtocolPair(receipt_token_id=3, protocol_name="Unsupported", chain_id=1),
+            ReceiptTokenProtocolPair(receipt_token_id=4, protocol_name="Aave V3 Avalanche", chain_id=43114),
         ]
     )
 
     assert await reader.list_supported_asset_ids() == {1, 2, 4}
     receipt_token_repo.list_protocol_pairs.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_list_morpho_asset_ids_filters_by_protocol_and_chain(
+    reader: PostgresCryptoLendingReader,
+    receipt_token_repo: MagicMock,
+) -> None:
+    # Every spelling the normalization must fold, plus a Base vault and a
+    # non-Morpho protocol that must both be excluded.
+    receipt_token_repo.list_protocol_pairs = AsyncMock(
+        return_value=[
+            ReceiptTokenProtocolPair(receipt_token_id=1, protocol_name="Morpho Blue", chain_id=1),
+            ReceiptTokenProtocolPair(receipt_token_id=2, protocol_name="morpho-blue", chain_id=1),
+            ReceiptTokenProtocolPair(receipt_token_id=3, protocol_name="MORPHO_BLUE", chain_id=1),
+            ReceiptTokenProtocolPair(receipt_token_id=4, protocol_name="Morpho Blue", chain_id=8453),
+            ReceiptTokenProtocolPair(receipt_token_id=5, protocol_name="SparkLend", chain_id=1),
+        ]
+    )
+
+    assert await reader.list_morpho_asset_ids(chain_id=1) == frozenset({1, 2, 3})
+
+
+@pytest.mark.asyncio
+async def test_list_morpho_asset_ids_scopes_to_the_requested_chain(
+    reader: PostgresCryptoLendingReader,
+    receipt_token_repo: MagicMock,
+) -> None:
+    receipt_token_repo.list_protocol_pairs = AsyncMock(
+        return_value=[
+            ReceiptTokenProtocolPair(receipt_token_id=1, protocol_name="Morpho Blue", chain_id=1),
+            ReceiptTokenProtocolPair(receipt_token_id=4, protocol_name="Morpho Blue", chain_id=8453),
+        ]
+    )
+
+    assert await reader.list_morpho_asset_ids(chain_id=8453) == frozenset({4})
 
 
 @pytest.mark.asyncio
@@ -517,8 +552,8 @@ async def test_list_supported_asset_ids_excludes_maple(
 ) -> None:
     receipt_token_repo.list_protocol_pairs = AsyncMock(
         return_value=[
-            ReceiptTokenProtocolPair(receipt_token_id=1, protocol_name="Aave V3"),
-            ReceiptTokenProtocolPair(receipt_token_id=2, protocol_name="maple"),
+            ReceiptTokenProtocolPair(receipt_token_id=1, protocol_name="Aave V3", chain_id=1),
+            ReceiptTokenProtocolPair(receipt_token_id=2, protocol_name="maple", chain_id=1),
         ]
     )
 
