@@ -626,10 +626,23 @@ data:
   OTEL_SERVICE_NAME: "stl-verify-python-api"
   # Auth plane (ADR-015) — SHIPS DARK. Flipping AUTH_ENABLED to "true" turns on
   # token verification, per-router role gates and OpenFGA checks in one move;
-  # everything below it is inert until then. Endpoints are in-cluster names in
+  # everything below it is inert until then. OpenFGA is an in-cluster name in
   # the auth namespace (NetworkPolicy there admits vector).
   AUTH_ENABLED: "false"
-  OIDC_ISSUER: "http://keycloak.auth.svc/realms/archon"
+  # The issuer and the JWKS URL name the same Keycloak by two different names,
+  # and both are load-bearing:
+  #
+  #  * OIDC_ISSUER must equal the `iss` CLAIM, which Keycloak derives from its
+  #    KC_HOSTNAME (`http://keycloak-staging`, fixed in the infrastructure repo
+  #    at gitops/tooling/archon-staging/keycloak/manifests/deployment.yaml).
+  #    app/auth/jwt.py compares it exactly, so the .svc form here would 401
+  #    every token. It is also what the Swagger Authorize button redirects a
+  #    BROWSER to, which the .svc name could not serve either.
+  #  * OIDC_JWKS_URL is where this POD fetches signing keys. MagicDNS resolves
+  #    `keycloak-staging` for tailnet clients, not for a pod, so key fetching
+  #    has to use the cluster Service name.
+  OIDC_ISSUER: "http://keycloak-staging/realms/archon"
+  OIDC_JWKS_URL: "http://keycloak.auth.svc/realms/archon/protocol/openid-connect/certs"
   OIDC_AUDIENCE: "python-api"
   OPENFGA_URL: "http://openfga.auth.svc:8080"
   OPENFGA_STORE_NAME: "auth"
