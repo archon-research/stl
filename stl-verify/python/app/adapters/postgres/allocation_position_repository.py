@@ -97,6 +97,19 @@ def _strip_hex_prefix(tx_hash: str | None) -> str | None:
     return tx_hash
 
 
+def _loggable_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Bind parameters reduced to something safe to put on one log line.
+
+    List values become their LENGTH: ``allowed_vaults`` is the caller's whole
+    authorization set, runs to the OpenFGA ListObjects ceiling, and deps.py
+    deliberately logs it as a count and never as a list.
+    """
+    return {
+        key: (f"[{len(value)} values]" if isinstance(value, list | tuple) else None if value is None else str(value))
+        for key, value in params.items()
+    }
+
+
 def _safe_decimal(value: Any, field_name: str, row_identifier: Any = None) -> Decimal:
     """Convert value to Decimal with error context for debugging.
 
@@ -629,9 +642,8 @@ class AllocationRepository:
     async def get_prime_vault_address(self, address: EthAddress) -> str | None:
         """Resolve a vault-or-proxy address to its prime's vault address.
 
-        One indexed point query — the authorization object id for a prime is
-        its vault address, and callers may present any of the prime's proxies.
-        Returns a lowercase 0x-prefixed address, or None if unknown.
+        The authorization object id for a prime is its vault address, and
+        callers may present any of the prime's proxies. Lowercase 0x-prefixed.
         """
         sql = text(
             """
@@ -703,7 +715,7 @@ class AllocationRepository:
             logger.error(
                 "Allocation activity query failed",
                 extra={
-                    "params": {k: str(v) if v is not None else None for k, v in params.items()},
+                    "params": _loggable_params(params),
                     "error_type": type(exc).__name__,
                 },
                 exc_info=True,
@@ -768,7 +780,7 @@ class AllocationRepository:
             logger.error(
                 "Allocation activity bucket query failed",
                 extra={
-                    "params": {k: str(v) if v is not None else None for k, v in params.items()},
+                    "params": _loggable_params(params),
                     "error_type": type(exc).__name__,
                 },
                 exc_info=True,

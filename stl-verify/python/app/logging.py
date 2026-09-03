@@ -13,11 +13,9 @@ from app.middleware.request_id import request_id_var
 
 _APP_LOGGER_NAME = "app"
 
-# Every attribute the logging module itself puts on a record. Anything else got
-# there through a caller's ``extra=``, and is emitted as its own top-level JSON
-# field rather than being dropped — that is what makes an authorization
-# decision event (ADR-015 gate 3) a Loki query surface instead of a string to
-# regex. Derived from a real record so it tracks the interpreter's own set.
+# Anything NOT here reached the record through a caller's ``extra=`` and is
+# emitted as its own JSON field — what makes a decision event (ADR-015 gate 3)
+# queryable in Loki. Derived from a real record so it tracks the interpreter.
 _STANDARD_RECORD_ATTRS = frozenset(logging.LogRecord("", 0, "", 0, "", None, None).__dict__) | {
     "message",
     "asctime",
