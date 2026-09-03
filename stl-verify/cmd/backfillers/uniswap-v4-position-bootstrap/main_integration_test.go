@@ -388,7 +388,9 @@ func TestRunIntegration_RejectsAnUnreachableDatabase(t *testing.T) {
 func TestRunIntegration_RejectsAChainIDMismatch(t *testing.T) {
 	_, args := setupRun(t, mockChainOptions{})
 
-	err := run(context.Background(), withChainID(args, "8453"))
+	// Off mainnet the depth has no default; the mismatch must still be what fails.
+	args = append(withChainID(args, "8453"), "-finality-depth", "64")
+	err := run(context.Background(), args)
 	if err == nil {
 		t.Fatal("expected an error: the endpoint serves another chain")
 	}
@@ -418,7 +420,9 @@ func TestRunIntegration_RejectsAnUnreadableChainID(t *testing.T) {
 func TestRunIntegration_RejectsAChainWithNoRegisteredPools(t *testing.T) {
 	_, args := setupRun(t, mockChainOptions{chainID: "0x2105"})
 
-	err := run(context.Background(), withChainID(args, "8453"))
+	// Off mainnet the depth has no default; the mismatch must still be what fails.
+	args = append(withChainID(args, "8453"), "-finality-depth", "64")
+	err := run(context.Background(), args)
 	if err == nil {
 		t.Fatal("expected an error: chain 8453 has no seeded uniswap v4 registry")
 	}

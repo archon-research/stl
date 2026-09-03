@@ -4,7 +4,9 @@ import "fmt"
 
 const (
 	// 64 blocks is two epochs on Ethereum mainnet, past finalisation: the pinned
-	// block cannot be reorged out under the run.
+	// block cannot be reorged out under the run. It is a mainnet number (two
+	// minutes on Base, sixteen seconds on Arbitrum), so it is the default on
+	// mainnet only; every other chain states its own depth.
 	DefaultFinalityDepth = int64(64)
 	// Wide on purpose: the bisect finds the provider's real ceiling in fewer
 	// requests than crawling four million blocks at a known-safe 10k.
@@ -26,8 +28,10 @@ type Config struct {
 	PositionBatch int
 }
 
+const mainnetChainID = int64(1)
+
 func (c Config) withDefaults() Config {
-	if c.FinalityDepth == 0 {
+	if c.FinalityDepth == 0 && c.ChainID == mainnetChainID {
 		c.FinalityDepth = DefaultFinalityDepth
 	}
 	if c.InitialWindow == 0 {
@@ -57,6 +61,10 @@ func (c Config) validate() error {
 		return fmt.Errorf("chainID must be positive, got %d", c.ChainID)
 	case c.FinalityDepth < 0:
 		return fmt.Errorf("finality depth must not be negative, got %d", c.FinalityDepth)
+	// An explicit pin alone is not enough: finalitySafeHeight's reorg-window
+	// refusal is `pin > head - depth`, which a zero depth disables.
+	case c.FinalityDepth == 0:
+		return fmt.Errorf("chain %d has no default finality depth: pass one explicitly (%d is two mainnet epochs and means nothing elsewhere)", c.ChainID, DefaultFinalityDepth)
 	case c.FromBlock < 0:
 		return fmt.Errorf("fromBlock must not be negative, got %d", c.FromBlock)
 	case c.PinBlock < 0:

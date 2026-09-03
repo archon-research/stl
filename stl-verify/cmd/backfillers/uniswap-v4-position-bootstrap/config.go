@@ -26,7 +26,7 @@ func parseConfig(args []string) (config, error) {
 	chainID := fs.Int64("chain-id", 0, "Chain ID (default: CHAIN_ID, else 1)")
 	fromBlock := fs.Int64("from", 0, "First block to scan (default: FROM_BLOCK, else the lowest pool deploy_block)")
 	pinBlock := fs.Int64("pin", 0, "Block to snapshot at (default: PIN_BLOCK, else head minus the finality depth)")
-	finalityDepth := fs.Int64("finality-depth", 0, fmt.Sprintf("Blocks below the head to pin at (default %d)", uniswapv4bootstrap.DefaultFinalityDepth))
+	finalityDepth := fs.Int64("finality-depth", 0, fmt.Sprintf("Blocks below the head to pin at (default %d on mainnet; required on every other chain)", uniswapv4bootstrap.DefaultFinalityDepth))
 	initialWindow := fs.Int64("initial-window", 0, fmt.Sprintf("Blocks per eth_getLogs window before adaptation (default %d)", uniswapv4bootstrap.DefaultInitialWindow))
 	minWindow := fs.Int64("min-window", 0, fmt.Sprintf("Smallest window the bisect may narrow to (default %d)", uniswapv4bootstrap.DefaultMinWindow))
 	maxWindow := fs.Int64("max-window", 0, fmt.Sprintf("Largest window the growth may widen to (default %d)", uniswapv4bootstrap.DefaultMaxWindow))
