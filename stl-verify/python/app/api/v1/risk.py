@@ -16,6 +16,8 @@ from app.api.deps import (
     get_crypto_lending_risk_service,
     get_model_registry,
     get_receipt_token_lookup,
+    require_prime_view_body,
+    require_prime_view_query,
 )
 from app.api.v1._resolvers import (
     AssetById,
@@ -230,6 +232,7 @@ async def get_bad_debt(
     response_model=RiskBreakdownResponse,
     summary="Risk-enriched collateral breakdown (deprecated)",
     deprecated=True,
+    dependencies=[Depends(require_prime_view_query)],
     description=(
         "Return the full risk-enriched collateral breakdown for a receipt-token position: "
         "one row per backing token with amount, USD value, price, liquidation threshold, and bonus.\n\n"
@@ -289,6 +292,7 @@ async def get_bad_debt_by_address(
     "/risk/{chain_id}/{token_address}/breakdown",
     response_model=RiskBreakdownResponse,
     summary="Risk-enriched collateral breakdown (by chain id and receipt-token address)",
+    dependencies=[Depends(require_prime_view_query)],
     description=(
         "Return the full risk-enriched collateral breakdown for the receipt-token "
         "position at `(chain_id, token_address)`.\n\n"
@@ -426,6 +430,7 @@ class RrcEnvelope(BaseModel):
     "/risk/rrc",
     response_model=RrcEnvelope,
     summary="Risk capital (RRC) at default stress",
+    dependencies=[Depends(require_prime_view_query)],
     description=(
         "Compute RRC at default stress for every model that applies to the asset. "
         "Identify the asset by **exactly one** of:\n\n"
@@ -480,6 +485,7 @@ async def get_rrc(
     "/risk/rrc/scenario",
     response_model=RrcEnvelope,
     summary="Risk capital (RRC) with scenario overrides",
+    dependencies=[Depends(require_prime_view_body)],
     description=(
         "Compute RRC with per-model scenario overrides for every applicable model. "
         "Identify the asset by **exactly one** of `asset_id` (deprecated) or "
@@ -513,6 +519,7 @@ async def post_rrc_scenario(
     response_model=RrcEnvelope,
     include_in_schema=False,
     deprecated=True,
+    dependencies=[Depends(require_prime_view_body)],
 )
 async def post_rrc(
     body: RrcRequest,
