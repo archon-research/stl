@@ -813,16 +813,19 @@ func wireAdapterReads(t *testing.T, mc *testutil.MockMulticaller, headHash commo
 		}
 		return nil, errors.New("unexpected hash-pinned multicall")
 	}
-	// The adapter type probe is number-pinned: morpho() succeeds, morphoVaultV1()
-	// reverts ⇒ MarketV1.
+	// The adapter type probe is number-pinned: morpho() succeeds, every other
+	// marker reverts ⇒ MarketV1.
+	prober, err := morpho_indexer.NewAdapterProber()
+	if err != nil {
+		t.Fatalf("NewAdapterProber: %v", err)
+	}
 	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) != 2 || calls[0].Target != adapter {
+		if len(calls) != prober.NumProbeCalls() || calls[0].Target != adapter {
 			return nil, errors.New("unexpected number-pinned multicall")
 		}
-		return []outbound.Result{
-			{Success: true, ReturnData: pack(adapterABI.Methods["morpho"].Outputs, common.HexToAddress("0x1"))},
-			{Success: false},
-		}, nil
+		results := make([]outbound.Result, len(calls))
+		results[0] = outbound.Result{Success: true, ReturnData: pack(adapterABI.Methods["morpho"].Outputs, common.HexToAddress("0x1"))}
+		return results, nil
 	}
 }
 
