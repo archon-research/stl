@@ -1,6 +1,7 @@
 package s3key
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -282,6 +283,7 @@ func TestHighestVersion(t *testing.T) {
 		keys        []string
 		wantVersion int
 		wantFound   bool
+		wantErr     bool
 	}{
 		{
 			name: "an archive holding nothing at the height",
@@ -321,27 +323,53 @@ func TestHighestVersion(t *testing.T) {
 			keys: []string{"0-999/25395651_7_block.json.gz"},
 		},
 		{
-			name: "unparseable keys are ignored",
+			name: "an object of a type this binary does not know still occupies its version",
 			keys: []string{
-				part + "/25395651_x_block.json.gz",
+				part + "/25395651_0_block.json.gz",
 				part + "/25395651_1_unknown.json.gz",
-				part + "/README.txt",
-				part + "/",
 			},
+			wantVersion: 1,
+			wantFound:   true,
 		},
 		{
-			name: "a malformed key does not hide a real one",
-			keys: []string{part + "/25395651_x_block.json.gz", part + "/25395651_3_block.json.gz"},
-
-			wantVersion: 3,
+			name:        "a data type added after this binary shipped, in any shape",
+			keys:        []string{part + "/25395651_2_withdrawals.msgpack"},
+			wantVersion: 2,
 			wantFound:   true,
+		},
+		{
+			name:    "a key carrying no version at all",
+			keys:    []string{part + "/25395651_x_block.json.gz"},
+			wantErr: true,
+		},
+		{
+			name:    "an object that is not a block payload",
+			keys:    []string{part + "/README.txt"},
+			wantErr: true,
+		},
+		{
+			name:    "a malformed key hides the real ones rather than being skipped",
+			keys:    []string{part + "/25395651_x_block.json.gz", part + "/25395651_3_block.json.gz"},
+			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			version, found := HighestVersion(tt.keys, height)
+			version, found, err := HighestVersion(tt.keys, height)
 
+			if tt.wantErr {
+				if !errors.Is(err, ErrUnrecognisedKey) {
+					t.Fatalf("error = %v, want ErrUnrecognisedKey", err)
+				}
+				if !strings.Contains(err.Error(), tt.keys[0]) {
+					t.Errorf("error = %v, want it to name %q", err, tt.keys[0])
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("HighestVersion: %v", err)
+			}
 			if found != tt.wantFound {
 				t.Fatalf("HighestVersion found = %v, want %v", found, tt.wantFound)
 			}
@@ -419,15 +447,16 @@ func TestPartitionPrefix(t *testing.T) {
 func TestOccupancies(t *testing.T) {
 	part := "25395000-25395999"
 
-	index := Occupancies([]string{
+	index, err := Occupancies([]string{
 		part + "/25395651_0_block.json.gz",
 		part + "/25395651_0_receipts.json.gz",
 		part + "/25395651_1_block.json.gz",
 		part + "/25395652_0_traces.json.gz",
-		part + "/25395653_x_block.json.gz",
 		"0-999/25395654_9_block.json.gz",
-		part + "/manifest.txt",
 	})
+	if err != nil {
+		t.Fatalf("Occupancies: %v", err)
+	}
 
 	if len(index) != 2 {
 		t.Fatalf("index = %v, want only the two heights it can read", index)
@@ -447,5 +476,56 @@ func TestOccupancies(t *testing.T) {
 	}
 	if _, ok := index[25395654]; ok {
 		t.Error("indexed a key filed under another partition than its height's")
+	}
+}
+
+// An object whose type this binary does not know still fills the slot, so a
+// correction has to go above it rather than on top of it.
+func TestOccupancies_AnUnknownTypeOccupiesWithoutJoiningTheDataTypes(t *testing.T) {
+	part := "25395000-25395999"
+
+	index, err := Occupancies([]string{
+		part + "/25395651_1_block.json.gz",
+		part + "/25395651_2_withdrawals.json.gz",
+	})
+	if err != nil {
+		t.Fatalf("Occupancies: %v", err)
+	}
+
+	top := index[25395651]
+	if top.Version != 2 {
+		t.Errorf("top version = %d, want the unknown object's 2", top.Version)
+	}
+	if len(top.DataTypes) != 0 {
+		t.Errorf("data types = %v, want none this binary can name", top.DataTypes)
+	}
+}
+
+// Nothing under an archive prefix should be unreadable, and a caller cannot tell
+// whether such an object occupies a version — so it fails rather than guesses.
+func TestOccupancies_RefusesAKeyItCannotRead(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{name: "no version", key: "25395000-25395999/25395651_x_block.json.gz"},
+		{name: "no stem at all", key: "25395000-25395999/manifest.txt"},
+		{name: "a directory marker", key: "25395000-25395999/"},
+		{name: "a negative height", key: "25395000-25395999/-1_1_block.json.gz"},
+		{name: "no partition", key: "25395651_1_block.json.gz"},
+		{name: "a stem with nothing after it", key: "25395000-25395999/25395651_1_"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Occupancies([]string{"25395000-25395999/25395651_0_block.json.gz", tc.key})
+
+			if !errors.Is(err, ErrUnrecognisedKey) {
+				t.Fatalf("error = %v, want ErrUnrecognisedKey", err)
+			}
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Errorf("error = %v, want it to name %q", err, tc.key)
+			}
+		})
 	}
 }

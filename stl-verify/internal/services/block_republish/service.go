@@ -130,6 +130,11 @@ func (s *Service) NextFreeVersion(ctx context.Context, blockNumber int64) (int, 
 
 	highest, archived, err := s.archive.HighestVersion(ctx, blockNumber)
 	if err != nil {
+		// An object under the height's own prefix that carries no version is a
+		// slot nothing can read, and no attempt will read it differently.
+		if errors.Is(err, s3key.ErrUnrecognisedKey) {
+			return 0, fmt.Errorf("reading what the archive holds at block %d: %v: %w", blockNumber, err, ErrStructuralData)
+		}
 		return 0, fmt.Errorf("reading what the archive holds at block %d: %w", blockNumber, err)
 	}
 

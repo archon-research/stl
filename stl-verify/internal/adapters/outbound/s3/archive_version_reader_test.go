@@ -11,6 +11,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 )
 
 const (
@@ -98,6 +100,21 @@ func TestArchiveVersionReader_ReportsWhatTheArchiveHoldsAtTheHeight(t *testing.T
 				t.Errorf("version = %d, want %d", version, tc.wantVersion)
 			}
 		})
+	}
+}
+
+// An object under the height's own prefix that carries no version is a slot
+// nothing can read, so the height fails rather than being planned around.
+func TestArchiveVersionReader_SurfacesAKeyItCannotRead(t *testing.T) {
+	mock, _ := listingOf("25395000-25395999/25395651_0_block.json.gz", "25395000-25395999/notes.txt")
+
+	_, _, err := newArchiveVersions(mock).HighestVersion(context.Background(), archiveHeight)
+
+	if !errors.Is(err, s3key.ErrUnrecognisedKey) {
+		t.Fatalf("error = %v, want ErrUnrecognisedKey", err)
+	}
+	if !strings.Contains(err.Error(), "notes.txt") {
+		t.Errorf("error = %v, want it to name the key", err)
 	}
 }
 

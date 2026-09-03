@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -105,15 +106,17 @@ func TestPlanBlock(t *testing.T) {
 }
 
 func TestIndexPartition(t *testing.T) {
-	index := indexPartition([]string{
+	index, err := indexPartition([]string{
 		"21000000-21000999/21000042_0_block.json.gz",
 		"21000000-21000999/21000042_0_receipts.json.gz",
 		"21000000-21000999/21000042_0_traces.json.gz",
 		"21000000-21000999/21000042_1_block.json.gz",
 		"21000000-21000999/21000042_1_receipts.json.gz",
 		"21000000-21000999/21000043_0_receipts.json.gz",
-		"21000000-21000999/manifest.txt",
 	})
+	if err != nil {
+		t.Fatalf("indexPartition: %v", err)
+	}
 
 	got, ok := index[21000042]
 	if !ok {
@@ -129,7 +132,23 @@ func TestIndexPartition(t *testing.T) {
 		t.Errorf("present at top version = %v, want block and receipts", got.Present)
 	}
 	if len(index) != 2 {
-		t.Errorf("indexed heights = %d, want 2 (the unparsable key is not one)", len(index))
+		t.Errorf("indexed heights = %d, want 2", len(index))
+	}
+}
+
+// An object the tool cannot read says nothing about which versions the partition
+// holds, so planning around it would write over an occupied slot.
+func TestIndexPartition_FailsOnAKeyItCannotRead(t *testing.T) {
+	_, err := indexPartition([]string{
+		"21000000-21000999/21000042_0_block.json.gz",
+		"21000000-21000999/manifest.txt",
+	})
+
+	if !errors.Is(err, s3key.ErrUnrecognisedKey) {
+		t.Fatalf("error = %v, want ErrUnrecognisedKey", err)
+	}
+	if !strings.Contains(err.Error(), "manifest.txt") {
+		t.Errorf("error = %v, want it to name the key", err)
 	}
 }
 

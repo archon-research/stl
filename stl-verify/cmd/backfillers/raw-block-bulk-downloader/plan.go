@@ -116,13 +116,19 @@ func missingTypes(present map[s3key.DataType]bool) []s3key.DataType {
 
 // indexPartition folds a partition listing into what the archive holds at each
 // height. The fold is shared with the block republisher, which reads the same
-// objects to decide the version it corrects a height at.
-func indexPartition(keys []string) map[int64]archiveState {
-	index := make(map[int64]archiveState)
-	for blockNum, top := range s3key.Occupancies(keys) {
+// objects to decide the version it corrects a height at, and it refuses a key it
+// cannot read rather than plan around a slot it cannot see.
+func indexPartition(keys []string) (map[int64]archiveState, error) {
+	occupied, err := s3key.Occupancies(keys)
+	if err != nil {
+		return nil, err
+	}
+
+	index := make(map[int64]archiveState, len(occupied))
+	for blockNum, top := range occupied {
 		index[blockNum] = archiveState{Version: top.Version, Present: top.DataTypes}
 	}
-	return index
+	return index, nil
 }
 
 // hashSource is where an archived object carries the block hash.
@@ -350,7 +356,10 @@ func (pc *PartitionCache) listPartition(ctx context.Context, part string) error 
 	if err != nil {
 		return fmt.Errorf("failed to list partition %s: %w", part, err)
 	}
-	index := indexPartition(keyList)
+	index, err := indexPartition(keyList)
+	if err != nil {
+		return fmt.Errorf("reading partition %s: %w", part, err)
+	}
 
 	pc.mu.Lock()
 	defer pc.mu.Unlock()

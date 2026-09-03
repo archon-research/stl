@@ -46,6 +46,9 @@ func (r *ArchiveVersionReader) HighestVersion(ctx context.Context, blockNumber i
 		return 0, false, fmt.Errorf("listing s3://%s/%s: %w", r.bucket, prefix, err)
 	}
 
-	version, found := s3key.HighestVersion(keys, blockNumber)
+	version, found, err := s3key.HighestVersion(keys, blockNumber)
+	if err != nil {
+		return 0, false, fmt.Errorf("reading s3://%s/%s: %w", r.bucket, prefix, err)
+	}
 	return version, found, nil
 }

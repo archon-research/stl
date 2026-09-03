@@ -13,6 +13,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/memory"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -465,6 +466,19 @@ func TestNextFreeVersion_LeavesAFailedArchiveReadRetryable(t *testing.T) {
 	}
 	if errors.Is(err, ErrStructuralData) {
 		t.Errorf("error = %v, want it left retryable", err)
+	}
+}
+
+// Nothing under the height's own prefix should be unreadable, and no retry can
+// change that, so the run must stop on it rather than burn its envelope.
+func TestNextFreeVersion_IsStructuralWhenTheArchiveHoldsAKeyItCannotRead(t *testing.T) {
+	f := newFixture(t, newStubClient())
+	f.archive.err = fmt.Errorf("listing s3://bucket/25395000-25395999/25395651_: %w", s3key.ErrUnrecognisedKey)
+
+	_, err := f.service.NextFreeVersion(context.Background(), testBlock)
+
+	if !errors.Is(err, ErrStructuralData) {
+		t.Fatalf("error = %v, want ErrStructuralData", err)
 	}
 }
 

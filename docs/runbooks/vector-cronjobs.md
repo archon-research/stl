@@ -971,12 +971,22 @@ per height. The example uses a height that landed at 1.
 
 **Failure modes specific to this worker.**
 
-- **`StructuralData` (non-retryable, run goes red immediately)** — the height is
-  above the chain head or within 64 blocks of it (the worker refuses to repair
+- **`StructuralData`: the height is above the chain head or within 64 blocks of
+  it** (non-retryable, run goes red immediately). The worker refuses to repair
   inside the reorg window: two reads seconds apart would both see the same fork,
-  and the "correction" could itself be orphaned), or the node answers null for
-  the block or one of its data types. Point at a node with the history, then
-  start a new run.
+  and the "correction" could itself be orphaned. A different node does not help —
+  wait until the height is deep enough (64 blocks is about 13 minutes on
+  mainnet), then start a new run.
+- **`StructuralData`: the node answers null for the block's payload**
+  (non-retryable). A height this far below the head that a node cannot serve is a
+  node without the history, not a height that is not there. Point at one that has
+  it — an archive node — and start a new run. (A null on the *first* by-number
+  read is treated as a lagging replica and retried instead; it is the payload
+  reads, pinned to the hash, that fail the run.)
+- **`StructuralData`: an object under the height's archive prefix carries no
+  version** (non-retryable). `DeriveVersion` cannot tell which slot is free while
+  something it cannot read sits there. The error names the key: remove or rename
+  it, then start a new run.
 - **`InvalidParams` (non-retryable, nothing is republished)** — the input is not
   the object this workflow takes: an empty or oversized `blocks` list, a
   non-positive height, or a field it does not accept, `version` above all. Fix
