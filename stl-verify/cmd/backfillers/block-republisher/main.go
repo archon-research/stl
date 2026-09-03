@@ -1,62 +1,7 @@
-// Package main implements an on-demand Temporal worker that re-publishes
-// already-mined blocks under a new version, so every consumer of the chain's
-// block feed appends them as a correction.
-//
-// # What it heals
-//
-// A height whose only published version is a losing fork (ARCT-379): the
-// canonical broadcast was dropped as a stale fork, the next block's reorg commit
-// orphaned the height without replacing it, and nothing re-fetched it. S3 holds
-// only that height's _0_ objects and every indexer holds its events at
-// block_version 0. Nothing else in the pipeline can repair it — the watcher's
-// retryBlockPublish only reaches non-orphaned block_states rows, which the
-// 30-day retention has already dropped, and raw-block-bulk-downloader repairs S3
-// alone, without telling the indexers.
-//
-// # How to start a run
-//
-// This carries no schedule: the worker idles on its task queue, so deploying it
-// never starts a run. An operator supplies the heights, and nothing else:
-//
-//	temporal workflow start --namespace vector \
-//	  --task-queue block-republisher --type BlockRepublish \
-//	  --workflow-id block-republisher-<date> \
-//	  --input '{"blocks":[25395651,25087888]}'
-//
-// The chain comes from CHAIN_ID, not from the input.
-//
-// # Which version each height lands at
-//
-// Not the operator's choice: the version is read off the raw archive S3_BUCKET
-// names, per height, as one past the highest <number>_<version>_* object already
-// there — 1 where there is none, never 0, which holds the data being corrected.
-// An object at a version occupies it whatever data type it carries, so a
-// half-written correction still moves the next one up, and two heights in one
-// run routinely land at different versions. An input naming a version, or any
-// other field this workflow does not take, fails the run: a run started from an
-// older runbook must stop rather than mean something else.
-//
-// # What it does not write
-//
-// block_states. Its assign_block_version trigger overwrites whatever version the
-// caller supplies with MAX(version)+1 over the rows surviving at that height —
-// after the 30-day retention there are none, so it would hand back 0 and
-// re-stamp the losing fork's own slot. Writing there would also hand the
-// watcher's gap filler an unpublished row to re-publish and pin its backfill
-// watermark behind the repaired height. The durable record of a republish is
-// therefore the SNS event, the <number>_<version>_* objects the raw-data-backup
-// worker writes from it, and the block_version rows the indexers append.
-//
-// # Repeats
-//
-// A retry is safe; a second run is not free. The version is settled once per
-// height, in its own activity, so a republish Temporal retries lands in the slot
-// the run already chose: the same cache keys and the same event, which SNS FIFO
-// drops inside its five-minute window and every append-only consumer re-derives
-// identically outside it. Starting a second run over a height that already
-// succeeded is the different case — raw-data-backup has written that version's
-// objects by then, so the height moves to the next slot and gains an identical
-// correction. Re-run a height only when its run failed.
+// Package main is the block-republisher: an on-demand Temporal worker that
+// re-publishes a mined height under the next archive version so every consumer
+// appends the canonical block. Operation and the version rule are in
+// docs/runbooks/vector-cronjobs.md, section "block-republisher".
 package main
 
 import (
