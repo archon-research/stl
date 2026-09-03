@@ -15,7 +15,6 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/blocktime"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
@@ -492,7 +491,7 @@ func (a *backfillActivities) ReplayPartition(ctx context.Context, work partition
 		return partitionReplay{}, fmt.Errorf("deriving VaultV2 structured topics: %w: %w", err, errStructuralData)
 	}
 
-	events, err := replayPartition(ctx, a.logger, a.s3Reader, svc, blocktime.New(a.ethClient),
+	events, err := replayPartition(ctx, a.logger, a.s3Reader, svc, a.ethClient,
 		a.cfg, work.Range, work.Partition, v2Vaults, topics)
 	if err != nil {
 		return partitionReplay{}, err
