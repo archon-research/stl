@@ -13,12 +13,28 @@ from app.middleware.request_id import request_id_var
 
 _APP_LOGGER_NAME = "app"
 
+# Every attribute the logging module itself puts on a record. Anything else got
+# there through a caller's ``extra=``, and is emitted as its own top-level JSON
+# field rather than being dropped — that is what makes an authorization
+# decision event (ADR-015 gate 3) a Loki query surface instead of a string to
+# regex. Derived from a real record so it tracks the interpreter's own set.
+_STANDARD_RECORD_ATTRS = frozenset(logging.LogRecord("", 0, "", 0, "", None, None).__dict__) | {
+    "message",
+    "asctime",
+    "taskName",
+}
+
+
+def _record_extras(record: logging.LogRecord) -> dict[str, object]:
+    """Caller-supplied ``extra=`` fields on ``record``, in insertion order."""
+    return {key: value for key, value in record.__dict__.items() if key not in _STANDARD_RECORD_ATTRS}
+
 
 class JsonFormatter(logging.Formatter):
     """Formats log records as single-line JSON objects."""
 
     def format(self, record: logging.LogRecord) -> str:
-        log_entry: dict[str, str] = {
+        log_entry: dict[str, object] = {
             "timestamp": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
@@ -28,6 +44,11 @@ class JsonFormatter(logging.Formatter):
         request_id = _get_request_id()
         if request_id is not None:
             log_entry["request_id"] = request_id
+
+        # setdefault, not update: an `extra` key must never overwrite the
+        # envelope fields every line is parsed by.
+        for key, value in _record_extras(record).items():
+            log_entry.setdefault(key, value)
 
         if record.exc_info and record.exc_info[0] is not None:
             log_entry["exception"] = self.formatException(record.exc_info)
@@ -45,6 +66,10 @@ class TextFormatter(logging.Formatter):
         request_id = _get_request_id()
         if request_id is not None:
             base += f" [request_id={request_id}]"
+
+        extras = _record_extras(record)
+        if extras:
+            base += " " + " ".join(f"{key}={value}" for key, value in extras.items())
 
         if record.exc_info and record.exc_info[0] is not None:
             base += f"\n{self.formatException(record.exc_info)}"
