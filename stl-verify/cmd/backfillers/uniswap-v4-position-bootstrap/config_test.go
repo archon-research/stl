@@ -7,7 +7,10 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/uniswapv4bootstrap"
 )
 
-const mainnetRPCURL = "https://eth-mainnet.g.alchemy.com/v2"
+const (
+	mainnetRPCURL = "https://eth-mainnet.g.alchemy.com/v2"
+	baseRPCURL    = "https://base-mainnet.g.alchemy.com/v2"
+)
 
 func TestLoadConfig(t *testing.T) {
 	// The complete valid environment; each case overrides one key, and an empty
@@ -77,6 +80,19 @@ func TestLoadConfig(t *testing.T) {
 			name:            "another chain needs its own endpoint",
 			override:        map[string]string{"CHAIN_ID": "8453"},
 			wantErrContains: "ALCHEMY_HTTP_URL",
+		},
+		{
+			name:            "an off-mainnet chain has no default finality depth",
+			override:        map[string]string{"CHAIN_ID": "8453", "ALCHEMY_HTTP_URL": baseRPCURL},
+			wantErrContains: "finality depth",
+		},
+		{
+			name:     "an off-mainnet chain takes its finality depth from the environment",
+			override: map[string]string{"CHAIN_ID": "8453", "ALCHEMY_HTTP_URL": baseRPCURL, "FINALITY_DEPTH": "200"},
+			want: config{
+				rpcURL:    baseRPCURL + "/test-key",
+				bootstrap: uniswapv4bootstrap.Config{ChainID: 8453, FinalityDepth: 200},
+			},
 		},
 		{
 			name:            "an unparseable knob is refused rather than defaulted",
