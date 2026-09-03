@@ -624,28 +624,22 @@ data:
   OTEL_ENABLED: "true"
   OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
   OTEL_SERVICE_NAME: "stl-verify-python-api"
-  # Auth plane (ADR-015) — SHIPS DARK. Flipping AUTH_ENABLED to "true" turns on
-  # token verification, per-router role gates and OpenFGA checks in one move;
-  # everything below it is inert until then. OpenFGA is an in-cluster name in
-  # the auth namespace (NetworkPolicy there admits vector).
+  # Auth plane (ADR-015) — ships dark. Flipping AUTH_ENABLED turns on token
+  # verification, the per-router role gates and the OpenFGA checks together.
   AUTH_ENABLED: "false"
-  # The issuer and the JWKS URL name the same Keycloak by two different names,
-  # and both are load-bearing:
-  #
-  #  * OIDC_ISSUER must equal the `iss` CLAIM, which Keycloak derives from its
-  #    KC_HOSTNAME (`http://keycloak-staging`, fixed in the infrastructure repo
-  #    at gitops/tooling/archon-staging/keycloak/manifests/deployment.yaml).
-  #    app/auth/jwt.py compares it exactly, so the .svc form here would 401
-  #    every token. It is also what the Swagger Authorize button redirects a
-  #    BROWSER to, which the .svc name could not serve either.
-  #  * OIDC_JWKS_URL is where this POD fetches signing keys. MagicDNS resolves
-  #    `keycloak-staging` for tailnet clients, not for a pod, so key fetching
-  #    has to use the cluster Service name.
+  # Two names for one Keycloak. OIDC_ISSUER must equal the `iss` CLAIM
+  # (KC_HOSTNAME), which jwt.py compares exactly and Swagger sends a BROWSER to;
+  # OIDC_JWKS_URL is where this POD fetches keys, and MagicDNS does not resolve
+  # `keycloak-staging` inside a pod.
   OIDC_ISSUER: "http://keycloak-staging/realms/archon"
   OIDC_JWKS_URL: "http://keycloak.auth.svc/realms/archon/protocol/openid-connect/certs"
   OIDC_AUDIENCE: "python-api"
   OPENFGA_URL: "http://openfga.auth.svc:8080"
   OPENFGA_STORE_NAME: "auth"
+  # Must track OpenFGA's own OPENFGA_LIST_OBJECTS_MAX_RESULTS (server default
+  # 1000, set in the infrastructure repo). A ceiling ABOVE the server's max
+  # makes a truncated allow-list read as complete and silently under-return.
+  OPENFGA_LIST_CEILING: "1000"
   # DB pool for the API, declared here rather than left baked into the image so it
   # can be tuned by editing config and restarting — this ConfigMap is consumed via
   # envFrom with no hash suffix. A prime-scoped risk-capital request opens

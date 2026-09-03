@@ -74,21 +74,19 @@ class Settings(BaseSettings):
     auth_enabled: bool = False
     oidc_issuer: str = ""  # e.g. http://keycloak.auth.svc/realms/archon
     oidc_audience: str = ""  # `aud` the API validates
-    # Where THIS process fetches the JWKS. Empty = derive from the issuer.
-    # Needed because the issuer is the token's `iss` (Keycloak's KC_HOSTNAME,
-    # browser-reachable) while pods fetch keys from the in-cluster Service.
+    # Split from the issuer because `iss` is Keycloak's browser-reachable
+    # KC_HOSTNAME while pods fetch keys from the in-cluster Service. Empty =
+    # derive from the issuer.
     oidc_jwks_url: str = ""
     openfga_url: str = ""  # e.g. http://openfga.auth.svc:8080
     # Published by the openfga-store ConfigMap (store/model ids are created by
     # the store-bootstrap Job; they cannot be known at deploy-authoring time).
     openfga_store_id: str = ""
     openfga_model_id: str = ""
-    # Resolved by name at first use (store/model ids are server-assigned and
-    # published in another namespace); model = latest, kept safe by the CI gate.
     openfga_store_name: str = "auth"
     openfga_api_key: SecretStr = SecretStr("")
-    # ListObjects feeds a SQL WHERE; reaching the ceiling fails closed (500)
-    # rather than returning a silently partial result.
+    # Must track OpenFGA's own OPENFGA_LIST_OBJECTS_MAX_RESULTS: a ceiling
+    # above the server's max makes a truncated allow-list look complete.
     openfga_list_ceiling: int = 1000
 
     risk_default_gap_pct: Decimal = Field(default=Decimal("0.15"), ge=0, le=1)

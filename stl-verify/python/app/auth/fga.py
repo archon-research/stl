@@ -19,6 +19,19 @@ class FgaTruncated(FgaError):
     """ListObjects hit its result ceiling; a partial allow-list must not be used."""
 
 
+def _as_object(resp: httpx.Response) -> dict:
+    """The response body as a JSON object, or ValueError.
+
+    Both callers turn that into FgaError -> 503. Unhandled, a 200 carrying an
+    ingress error page escapes as a 500 with no decision event, so the Loki
+    alert never fires for what is really an OpenFGA outage.
+    """
+    body = resp.json()
+    if not isinstance(body, dict):
+        raise ValueError(f"expected a JSON object from OpenFGA, got {type(body).__name__}")
+    return body
+
+
 class FgaClient:
     def __init__(
         self, *, base_url: str, api_key: str, store_name: str, http: httpx.AsyncClient, list_ceiling: int = 1000
@@ -34,18 +47,19 @@ class FgaClient:
         try:
             resp = await self._http.post(f"{self._base}{path}", json=body, headers=self._headers, timeout=5.0)
             resp.raise_for_status()
-        except httpx.HTTPError as exc:
+            return _as_object(resp)
+        except (httpx.HTTPError, ValueError) as exc:
             raise FgaError(str(exc)) from exc
-        return resp.json()
 
     async def store_id(self) -> str:
         if self._store_id is None:
             try:
                 resp = await self._http.get(f"{self._base}/stores", headers=self._headers, timeout=5.0)
                 resp.raise_for_status()
-            except httpx.HTTPError as exc:
+                stores = _as_object(resp).get("stores", [])
+            except (httpx.HTTPError, ValueError) as exc:
                 raise FgaError(str(exc)) from exc
-            match = [s for s in resp.json().get("stores", []) if s.get("name") == self._store_name]
+            match = [s for s in stores if isinstance(s, dict) and s.get("name") == self._store_name]
             if not match:
                 raise FgaError(f"OpenFGA store {self._store_name!r} not found")
             self._store_id = match[0]["id"]
@@ -67,6 +81,8 @@ class FgaClient:
         sid = await self.store_id()
         data = await self._post(f"/stores/{sid}/list-objects", {"user": user, "relation": relation, "type": obj_type})
         objs = data.get("objects", [])
+        if not isinstance(objs, list) or not all(isinstance(o, str) for o in objs):
+            raise FgaError("OpenFGA ListObjects returned a malformed objects list")
         if len(objs) >= self._ceiling:
             raise FgaTruncated(f"ListObjects returned {len(objs)} objects — at the {self._ceiling} ceiling")
         prefix = f"{obj_type}:"

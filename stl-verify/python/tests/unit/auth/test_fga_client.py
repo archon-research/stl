@@ -63,3 +63,48 @@ async def test_missing_store_is_an_error():
 
     with pytest.raises(FgaError, match="not found"):
         await _client(handler).store_id()
+
+
+# --- responses that are not the JSON we asked for --------------------------
+#
+# Every one of these is an OpenFGA outage wearing a 200: an ingress error page,
+# a half-written body, a proxy's own JSON. They must surface as FgaError (503
+# plus a decision event) rather than escaping the dependency as a bare 500.
+
+
+def _body(text: str):
+    """Every request answers 200 with ``text`` as the body."""
+    return lambda req: httpx.Response(200, text=text)
+
+
+def _store_then(payload):
+    """The store lookup succeeds; every other call answers 200 with ``payload``."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/stores":
+            return httpx.Response(200, json={"stores": [{"id": "S1", "name": "auth"}]})
+        return httpx.Response(200, json=payload)
+
+    return handler
+
+
+async def test_a_200_with_a_non_json_body_is_an_fga_error():
+    with pytest.raises(FgaError):
+        await _client(_body("<html>502 Bad Gateway</html>")).check("user:u", "can_view", "prime:x")
+
+
+async def test_a_200_with_a_non_json_body_on_the_store_lookup_is_an_fga_error():
+    with pytest.raises(FgaError):
+        await _client(_body("not json")).store_id()
+
+
+async def test_a_json_body_that_is_not_an_object_is_an_fga_error():
+    with pytest.raises(FgaError):
+        await _client(_store_then(["unexpected"])).list_objects("user:u", "can_view", "prime")
+
+
+async def test_a_malformed_objects_list_fails_closed():
+    """Never a partial allow-list: it feeds a SQL WHERE, so junk in the list
+    would silently narrow what the caller can see instead of failing."""
+    with pytest.raises(FgaError):
+        await _client(_store_then({"objects": ["prime:0xabc", 17]})).list_objects("user:u", "can_view", "prime")
