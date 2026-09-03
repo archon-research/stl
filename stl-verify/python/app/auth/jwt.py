@@ -1,13 +1,9 @@
 """JWT verification against the Keycloak realm's JWKS.
 
-Verifies signature, ``iss``, ``aud`` and ``exp``; extracts the principal.
-The JWKS is cached and refreshed on an unknown ``kid`` so key rotation in
-Keycloak does not need a redeploy.
-
-Two failure modes, deliberately different: a bad token is the caller's
-problem (``TokenError`` -> 401), while keys we cannot fetch are ours
-(``JwksUnavailable`` -> 503, matching how an OpenFGA outage surfaces). A
-token is never rejected as invalid because our own dependency was down.
+Two failure modes, deliberately different: a bad token is the caller's problem
+(``TokenError`` -> 401), while keys we cannot fetch are ours
+(``JwksUnavailable`` -> 503, matching how an OpenFGA outage surfaces). A token
+is never rejected as invalid because our own dependency was down.
 """
 
 from __future__ import annotations
@@ -25,18 +21,20 @@ from app.logging import get_logger
 logger = get_logger(__name__)
 
 _JWKS_TTL_SECONDS = 600
-# Floor between two *forced* refreshes. An unknown `kid` is the rotation
-# signal, but it is also attacker-controlled: without a floor, a stream of
-# tokens carrying junk kids turns every unauthenticated request into a fetch
-# against Keycloak. Well under the TTL, so a real rotation is still picked up
-# within seconds.
+# Floor between two *forced* refreshes. An unknown `kid` is the rotation signal,
+# but it is also attacker-controlled: without a floor a stream of junk kids
+# turns every unauthenticated request into a fetch against Keycloak.
 _JWKS_MIN_REFRESH_SECONDS = 30
+# Ceiling on the fallback below, which never advances `_jwks_fetched_at` and so
+# would re-enter forever. Six refresh intervals: rides out a Keycloak restart,
+# but a key REVOKED there stops verifying within the hour, not for the outage.
+_JWKS_MAX_STALE_SECONDS = 3600
 # Keycloak and the API are different pods on different nodes. PyJWT's default
 # leeway is 0, so any positive skew makes `iat`/`nbf` land in the future and
 # raises ImmatureSignatureError on a token that is perfectly valid.
 _CLOCK_SKEW_LEEWAY_SECONDS = 45
-# Only RS256 is accepted. Read from the JWKS entry instead, a key served with
-# a weaker `alg` would decide how its own signature is checked.
+# Pinned, never read from the token or the JWKS entry: a key served with a
+# weaker `alg` would otherwise decide how its own signature is checked.
 _ALGORITHMS = ["RS256"]
 
 
@@ -45,7 +43,7 @@ class TokenError(Exception):
 
 
 class JwksUnavailable(Exception):
-    """The signing keys could not be fetched and nothing usable is cached.
+    """Keys could not be fetched, and the cache is empty or too stale to serve.
 
     Our dependency failed, not the caller's token — surfaces as 503.
     """
@@ -62,22 +60,33 @@ class Principal:
     subject: str
     roles: frozenset[str]
     organizations: frozenset[str]
+    #: Set only for a client-credentials token — see ``_service_account_client``.
     client_id: str | None
 
     @property
     def fga_user(self) -> str:
-        # Machines authenticate with client credentials; their token has a
-        # service-account `sub`, but the graph keys them by client id.
         return f"service:{self.client_id}" if self.client_id else f"user:{self.subject}"
+
+
+def _service_account_client(claims: dict) -> str | None:
+    """The client id, but only for a token issued to the CLIENT itself.
+
+    A ``client_id`` claim alone is not that signal — a realm may map it into
+    user tokens too, and keying on it there collapses all of that client's
+    users onto one FGA subject. Keycloak's ``service-account-<client_id>``
+    username does distinguish them.
+    """
+    client_id = claims.get("client_id") or claims.get("clientId")
+    if not isinstance(client_id, str) or not client_id:
+        return None
+    return client_id if claims.get("preferred_username") == f"service-account-{client_id}" else None
 
 
 def _is_signing_key(key: PyJWK) -> bool:
     """False for keys Keycloak publishes for encryption, not signature.
 
-    A realm's JWKS carries RSA-OAEP entries alongside the RS256 signing keys.
-    They are never valid for verification, and matching one on ``kid`` alone
-    would reject a good token. PyJWT exposes no public accessor for the raw
-    JWK, hence the guarded private read.
+    Matching an RSA-OAEP entry on ``kid`` alone would reject a good token.
+    PyJWT exposes no public accessor for the raw JWK, hence the private read.
     """
     raw = getattr(key, "_jwk_data", None)
     if not isinstance(raw, dict):
@@ -97,9 +106,8 @@ class TokenVerifier:
         self._jwks_url = jwks_url or f"{self._issuer}/protocol/openid-connect/certs"
         self._jwks: PyJWKSet | None = None
         self._jwks_fetched_at = 0.0
-        # Serialises refreshes. Without it, N concurrent requests arriving on a
-        # cold cache (or right after a rotation) each fire their own fetch and
-        # race on the assignment.
+        # Serialises refreshes: without it, N requests on a cold cache each fire
+        # their own fetch and race on the assignment.
         self._refresh_lock = asyncio.Lock()
 
     def _needs_fetch(self, *, force: bool) -> bool:
@@ -126,19 +134,34 @@ class TokenVerifier:
             try:
                 jwks = await self._fetch_jwks()
             except (httpx.HTTPError, jwt.PyJWTError, ValueError) as exc:
-                if self._jwks is not None:
-                    # Keys rotate rarely and the cached set stays valid for the
-                    # old kids; refusing every request during a Keycloak blip
-                    # would be the worse failure.
+                age = time.monotonic() - self._jwks_fetched_at
+                if self._jwks is not None and age <= _JWKS_MAX_STALE_SECONDS:
+                    # The cached set stays valid for the old kids, and refusing
+                    # every request during a Keycloak blip is the worse failure.
                     logger.warning(
                         "jwks refresh failed, serving cached keys",
-                        extra={"event": "authn.jwks_refresh_failed", "jwks_url": self._jwks_url, "error": str(exc)},
+                        extra={
+                            "event": "authn.jwks_refresh_failed",
+                            "jwks_url": self._jwks_url,
+                            "stale_seconds": int(age),
+                            "error": str(exc),
+                        },
                     )
                     return self._jwks
+                cached = self._jwks is not None
                 logger.error(
-                    "jwks unavailable and nothing cached",
-                    extra={"event": "authn.jwks_unavailable", "jwks_url": self._jwks_url, "error": str(exc)},
+                    "jwks unavailable",
+                    extra={
+                        "event": "authn.jwks_unavailable",
+                        "jwks_url": self._jwks_url,
+                        "stale_seconds": int(age) if cached else None,
+                        "error": str(exc),
+                    },
                 )
+                if cached:
+                    raise JwksUnavailable(
+                        f"cached keys are {int(age)}s stale, past the {_JWKS_MAX_STALE_SECONDS}s ceiling: {exc}"
+                    ) from exc
                 raise JwksUnavailable(str(exc)) from exc
             self._jwks = jwks
             self._jwks_fetched_at = time.monotonic()
@@ -177,5 +200,5 @@ class TokenVerifier:
             subject=claims["sub"],
             roles=frozenset(claims.get("realm_access", {}).get("roles", [])),
             organizations=frozenset(orgs.keys() if isinstance(orgs, dict) else orgs),
-            client_id=claims.get("client_id") or claims.get("clientId"),
+            client_id=_service_account_client(claims),
         )
