@@ -406,3 +406,46 @@ func TestHeightPrefix_ExcludesALongerHeightSharingThePartition(t *testing.T) {
 		t.Errorf("%q does not start with %q", own, prefix)
 	}
 }
+
+func TestPartitionPrefix(t *testing.T) {
+	if got, want := PartitionPrefix("25395000-25395999"), "25395000-25395999/"; got != want {
+		t.Errorf("PartitionPrefix = %q, want %q", got, want)
+	}
+	if key := Build(25395651, 1, Block); !strings.HasPrefix(key, PartitionPrefix("25395000-25395999")) {
+		t.Errorf("%q does not start with its own partition prefix", key)
+	}
+}
+
+func TestOccupancies(t *testing.T) {
+	part := "25395000-25395999"
+
+	index := Occupancies([]string{
+		part + "/25395651_0_block.json.gz",
+		part + "/25395651_0_receipts.json.gz",
+		part + "/25395651_1_block.json.gz",
+		part + "/25395652_0_traces.json.gz",
+		part + "/25395653_x_block.json.gz",
+		"0-999/25395654_9_block.json.gz",
+		part + "/manifest.txt",
+	})
+
+	if len(index) != 2 {
+		t.Fatalf("index = %v, want only the two heights it can read", index)
+	}
+
+	top := index[25395651]
+	if top.Version != 1 {
+		t.Errorf("top version = %d, want the highest object present", top.Version)
+	}
+	// The correction only got its block object written, and the lower version's
+	// receipts belong to the slot it replaced.
+	if !top.DataTypes[Block] || top.DataTypes[Receipts] {
+		t.Errorf("data types = %v, want the top version's alone", top.DataTypes)
+	}
+	if got := index[25395652]; got.Version != 0 || !got.DataTypes[Traces] {
+		t.Errorf("index[25395652] = %+v, want version 0 holding traces", got)
+	}
+	if _, ok := index[25395654]; ok {
+		t.Error("indexed a key filed under another partition than its height's")
+	}
+}

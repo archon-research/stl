@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/aws/smithy-go"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 )
@@ -373,3 +376,49 @@ func TestBlockPlanner_DecideFailsWhenTheRPCPayloadCarriesNoHash(t *testing.T) {
 		t.Fatal("expected an error rather than a plan built on an unknown canonical hash")
 	}
 }
+
+func TestRetryableListing(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "a dropped connection", err: errors.New("dial tcp 52.0.0.1:443: i/o timeout"), want: true},
+		{name: "a deadline", err: context.DeadlineExceeded, want: true},
+		{name: "S3 asking for less traffic", err: &smithy.GenericAPIError{Code: "SlowDown"}, want: true},
+		{name: "throttling", err: &smithy.GenericAPIError{Code: "Throttling"}, want: true},
+		{name: "the request rate ceiling", err: &smithy.GenericAPIError{Code: "RequestLimitExceeded"}, want: true},
+		{name: "a server fault", err: &smithy.GenericAPIError{Code: "InternalError", Fault: smithy.FaultServer}, want: true},
+		{name: "an unmodelled 5xx", err: statusError{code: "GatewayProblem", status: 503}, want: true},
+		{name: "a grant the run does not have", err: &smithy.GenericAPIError{Code: "AccessDenied", Fault: smithy.FaultClient}, want: false},
+		{name: "a bucket that is not there", err: &smithy.GenericAPIError{Code: "NoSuchBucket", Fault: smithy.FaultClient}, want: false},
+		{name: "credentials that have expired", err: &smithy.GenericAPIError{Code: "ExpiredToken", Fault: smithy.FaultClient}, want: false},
+		{name: "credentials that are not ours", err: &smithy.GenericAPIError{Code: "InvalidAccessKeyId", Fault: smithy.FaultClient}, want: false},
+		{
+			name: "a permanent failure the caller wrapped",
+			err:  fmt.Errorf("listing partition 0-999: %w", &smithy.GenericAPIError{Code: "AccessDenied", Fault: smithy.FaultClient}),
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := retryableListing(tc.err); got != tc.want {
+				t.Errorf("retryableListing(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// statusError is an API error whose code says nothing but whose HTTP status
+// does, the shape a proxy or an unmodelled fault arrives as.
+type statusError struct {
+	code   string
+	status int
+}
+
+func (e statusError) Error() string                 { return e.code }
+func (e statusError) ErrorCode() string             { return e.code }
+func (e statusError) ErrorMessage() string          { return e.code }
+func (e statusError) ErrorFault() smithy.ErrorFault { return smithy.FaultUnknown }
+func (e statusError) HTTPStatusCode() int           { return e.status }

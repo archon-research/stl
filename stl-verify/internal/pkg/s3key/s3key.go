@@ -108,6 +108,44 @@ func HeightPrefix(blockNumber int64) string {
 	return fmt.Sprintf("%s/%d_", partition.GetPartition(blockNumber), blockNumber)
 }
 
+// PartitionPrefix is the key prefix every object in one partition shares, for a
+// listing of the whole partition.
+func PartitionPrefix(partitionStr string) string {
+	return partitionStr + "/"
+}
+
+// Occupancy is what a listing holds at one height: the highest version any
+// object carries, and the data types stored under that version.
+type Occupancy struct {
+	Version   int
+	DataTypes map[DataType]bool
+}
+
+// Occupancies folds listed keys into what each height holds. A key this package
+// cannot parse, or one filed under a partition that is not its own height's, is
+// ignored — both are corrupt rather than an occupied slot.
+func Occupancies(keys []string) map[int64]Occupancy {
+	index := make(map[int64]Occupancy)
+	for _, key := range keys {
+		parsed, ok := Parse(key)
+		if !ok || parsed.Partition != partition.GetPartition(parsed.BlockNumber) {
+			continue
+		}
+
+		top, seen := index[parsed.BlockNumber]
+		switch {
+		case !seen || parsed.Version > top.Version:
+			index[parsed.BlockNumber] = Occupancy{
+				Version:   parsed.Version,
+				DataTypes: map[DataType]bool{parsed.DataType: true},
+			}
+		case parsed.Version == top.Version:
+			top.DataTypes[parsed.DataType] = true
+		}
+	}
+	return index
+}
+
 // FirstCorrectionVersion is the lowest version a correction may occupy: version
 // 0 is the slot being corrected.
 const FirstCorrectionVersion = 1
@@ -115,22 +153,10 @@ const FirstCorrectionVersion = 1
 // HighestVersion returns the highest version the given keys carry for
 // blockNumber, and whether any of them names that height at all. An object at a
 // version occupies the slot whatever data type it holds, so a height archived
-// only halfway still counts as taken. Keys naming another height, another
-// partition, or nothing this package recognises are ignored.
+// only halfway still counts as taken.
 func HighestVersion(keys []string, blockNumber int64) (int, bool) {
-	part := partition.GetPartition(blockNumber)
-
-	highest, found := 0, false
-	for _, key := range keys {
-		parsed, ok := Parse(key)
-		if !ok || parsed.BlockNumber != blockNumber || parsed.Partition != part {
-			continue
-		}
-		if !found || parsed.Version > highest {
-			highest, found = parsed.Version, true
-		}
-	}
-	return highest, found
+	top, found := Occupancies(keys)[blockNumber]
+	return top.Version, found
 }
 
 // NextVersion returns the version a correction for a height must be written

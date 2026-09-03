@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/aws/smithy-go"
+
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/retry"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
@@ -88,7 +90,11 @@ func planBlock(state archiveState, archivedHash, canonicalHash string) blockPlan
 		return blockPlan{Action: actionFresh, Version: 0, DataTypes: slices.Clone(archivedTypes)}
 	}
 	if archivedHash == "" || !strings.EqualFold(archivedHash, canonicalHash) {
-		return blockPlan{Action: actionRepublish, Version: state.Version + 1, DataTypes: slices.Clone(archivedTypes)}
+		return blockPlan{
+			Action:    actionRepublish,
+			Version:   s3key.NextVersion(state.Version, true),
+			DataTypes: slices.Clone(archivedTypes),
+		}
 	}
 
 	missing := missingTypes(state.Present)
@@ -108,26 +114,13 @@ func missingTypes(present map[s3key.DataType]bool) []s3key.DataType {
 	return missing
 }
 
-// indexPartition folds a partition listing into the highest version present at
-// each height, with the data types stored under it.
+// indexPartition folds a partition listing into what the archive holds at each
+// height. The fold is shared with the block republisher, which reads the same
+// objects to decide the version it corrects a height at.
 func indexPartition(keys []string) map[int64]archiveState {
 	index := make(map[int64]archiveState)
-	for _, key := range keys {
-		parsed, ok := s3key.Parse(key)
-		if !ok {
-			continue
-		}
-
-		state, seen := index[parsed.BlockNumber]
-		switch {
-		case !seen || parsed.Version > state.Version:
-			index[parsed.BlockNumber] = archiveState{
-				Version: parsed.Version,
-				Present: map[s3key.DataType]bool{parsed.DataType: true},
-			}
-		case parsed.Version == state.Version:
-			state.Present[parsed.DataType] = true
-		}
+	for blockNum, top := range s3key.Occupancies(keys) {
+		index[blockNum] = archiveState{Version: top.Version, Present: top.DataTypes}
 	}
 	return index
 }
@@ -368,13 +361,43 @@ func (pc *PartitionCache) listPartition(ctx context.Context, part string) error 
 }
 
 func (pc *PartitionCache) listPrefixWithRetry(ctx context.Context, part string) ([]string, error) {
-	alwaysRetry := func(error) bool { return true }
 	logAttempt := func(attempt int, err error, backoff time.Duration) {
 		pc.logger.Warn("retrying a partition listing", "partition", part, "attempt", attempt, "backoff", backoff, "error", err)
 	}
-	return retry.Do(ctx, pc.listRetry, alwaysRetry, logAttempt, func() ([]string, error) {
-		return pc.s3Reader.ListPrefix(ctx, pc.bucket, part+"/")
+	return retry.Do(ctx, pc.listRetry, retryableListing, logAttempt, func() ([]string, error) {
+		return pc.s3Reader.ListPrefix(ctx, pc.bucket, s3key.PartitionPrefix(part))
 	})
+}
+
+// retryableAPICodes are the S3 error codes worth another attempt: throttling,
+// and the server-side faults that do not always carry a server fault flag.
+var retryableAPICodes = map[string]bool{
+	"SlowDown":             true,
+	"Throttling":           true,
+	"ThrottlingException":  true,
+	"RequestThrottled":     true,
+	"RequestLimitExceeded": true,
+	"RequestTimeout":       true,
+	"InternalError":        true,
+	"ServiceUnavailable":   true,
+}
+
+// retryableListing decides whether a failed partition listing is worth another
+// attempt. Retrying a permanent API error — a missing grant, a bucket that is
+// not there, credentials that have expired — costs five attempts per partition
+// on top of the SDK's own retries and walks the whole range before failing,
+// which is why anything the service answers as a client fault stops the run.
+func retryableListing(err error) bool {
+	var apiErr smithy.APIError
+	if !errors.As(err, &apiErr) {
+		return true
+	}
+	if retryableAPICodes[apiErr.ErrorCode()] || apiErr.ErrorFault() == smithy.FaultServer {
+		return true
+	}
+
+	var statusErr interface{ HTTPStatusCode() int }
+	return errors.As(err, &statusErr) && statusErr.HTTPStatusCode() >= 500
 }
 
 // TopVersion returns what the archive holds at a height, loading that partition's

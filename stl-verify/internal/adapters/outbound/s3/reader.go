@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -22,6 +21,7 @@ import (
 type s3API interface {
 	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
 	ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
+	HeadBucket(ctx context.Context, params *s3.HeadBucketInput, optFns ...func(*s3.Options)) (*s3.HeadBucketOutput, error)
 }
 
 // Compile-time checks that Reader implements the read ports.
@@ -75,20 +75,6 @@ func EndpointOptionsFromEnv() []func(*s3.Options) {
 		o.BaseEndpoint = aws.String(endpoint)
 		o.UsePathStyle = true
 	}}
-}
-
-// NewReaderWithHTTPClient creates a new S3 Reader with a custom HTTP client.
-// This is useful for controlling connection pooling and timeouts.
-func NewReaderWithHTTPClient(cfg aws.Config, httpClient *http.Client, logger *slog.Logger) *Reader {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	return &Reader{
-		client: s3.NewFromConfig(cfg, func(o *s3.Options) {
-			o.HTTPClient = httpClient
-		}),
-		logger: logger,
-	}
 }
 
 // ListFiles lists all files in the bucket with the given prefix.
@@ -151,6 +137,17 @@ func (r *Reader) ListPrefix(ctx context.Context, bucket, prefix string) ([]strin
 	}
 
 	return keys, nil
+}
+
+// HeadBucket reports whether the bucket exists and this caller may list it: the
+// single call a long job makes before starting, rather than discovering the
+// answer once per partition.
+func (r *Reader) HeadBucket(ctx context.Context, bucket string) error {
+	_, err := r.client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(bucket)})
+	if err != nil {
+		return fmt.Errorf("failed to head bucket %s: %w", bucket, err)
+	}
+	return nil
 }
 
 // ProbeListAccess issues the cheapest listing S3 offers, for a caller checking

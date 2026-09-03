@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -164,6 +165,24 @@ func TestRunIntegration_AllowUnfinalizedArchivesAboveTheFinalizedHead(t *testing
 
 	if versions := archivedVersions(t, ctx, client, bucket); !slices.Equal(versions, []int{0}) {
 		t.Errorf("archived versions = %v, want %v: --allow-unfinalized overrides the guard", versions, []int{0})
+	}
+}
+
+// A bucket the run cannot reach — a typo, or a grant it does not have — must
+// stop it at startup rather than after every partition has burned its retries.
+func TestRunIntegration_RefusesABucketItCannotReach(t *testing.T) {
+	ctx := context.Background()
+	missing := testutil.S3TestBucketName(t, rawBucketPrefix)
+
+	_, err := runDownloader(t, ctx, missing, downloaderRun{})
+
+	if err == nil {
+		t.Fatal("run() succeeded against a bucket that is not there")
+	}
+	for _, want := range []string{missing, "s3:ListBucket"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to mention %q", err, want)
+		}
 	}
 }
 

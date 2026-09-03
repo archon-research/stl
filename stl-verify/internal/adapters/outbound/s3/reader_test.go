@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -18,6 +19,14 @@ import (
 type mockS3API struct {
 	listObjectsV2Func func(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
 	getObjectFunc     func(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
+	headBucketFunc    func(ctx context.Context, params *s3.HeadBucketInput, optFns ...func(*s3.Options)) (*s3.HeadBucketOutput, error)
+}
+
+func (m *mockS3API) HeadBucket(ctx context.Context, params *s3.HeadBucketInput, optFns ...func(*s3.Options)) (*s3.HeadBucketOutput, error) {
+	if m.headBucketFunc != nil {
+		return m.headBucketFunc(ctx, params, optFns...)
+	}
+	return &s3.HeadBucketOutput{}, nil
 }
 
 func (m *mockS3API) ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
@@ -328,5 +337,42 @@ func TestReadRange_SendsByteRangeAndReturnsObjectAsStored(t *testing.T) {
 	}
 	if !bytes.Equal(got, stored[:10]) {
 		t.Errorf("ReadRange() = %x, want the stored bytes undecompressed %x", got, stored[:10])
+	}
+}
+
+// HeadBucket is the startup probe a caller runs before a long job: it answers
+// "does this bucket exist and may I list it" in one call.
+func TestHeadBucket(t *testing.T) {
+	tests := []struct {
+		name    string
+		headErr error
+		wantErr bool
+	}{
+		{name: "a bucket the caller may list"},
+		{name: "a bucket that is not there", headErr: errors.New("NotFound"), wantErr: true},
+		{name: "a bucket the caller may not list", headErr: errors.New("AccessDenied"), wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var seen s3.HeadBucketInput
+			mock := &mockS3API{headBucketFunc: func(_ context.Context, params *s3.HeadBucketInput, _ ...func(*s3.Options)) (*s3.HeadBucketOutput, error) {
+				seen = *params
+				return &s3.HeadBucketOutput{}, tc.headErr
+			}}
+			reader := &Reader{client: mock, logger: slog.Default()}
+
+			err := reader.HeadBucket(context.Background(), "stl-sentinelstaging-ethereum-raw")
+
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("HeadBucket error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got := aws.ToString(seen.Bucket); got != "stl-sentinelstaging-ethereum-raw" {
+				t.Errorf("headed bucket %q, want the one asked for", got)
+			}
+			if tc.wantErr && !strings.Contains(err.Error(), "stl-sentinelstaging-ethereum-raw") {
+				t.Errorf("error = %v, want it to name the bucket", err)
+			}
+		})
 	}
 }
