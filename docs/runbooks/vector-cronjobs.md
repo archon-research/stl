@@ -928,11 +928,16 @@ bucket (which versions are taken) and `s3:GetObject` on it (the first kilobytes 
 the top version's block object, to tell an already-canonical height from a losing
 fork). Nothing is ever written to S3. `sns:Publish` and `s3:ListBucket` come from
 archon-research/infrastructure#667 (merged); `s3:GetObject` needs its own infra
-change. `ALCHEMY_HTTP_URL` is required too, with no mainnet default: a deployment
-without it would refuse to start rather than fetch another chain's blocks. The worker lists that bucket once at
-startup, so a missing grant or a mistyped `S3_BUCKET` shows up as a pod that will
-not start (`this pod's Pod Identity needs s3:ListBucket on <bucket>` in the log),
-not as a repair that dies on its first height.
+change. The worker proves both S3 grants at startup — one `ListObjectsV2` and one
+one-byte ranged `GetObject` of `0-999/0_startup-probe`, a key that cannot exist —
+so a missing grant is a pod that will not start, logging `this pod needs
+s3:ListBucket` or `this pod needs s3:GetObject on that bucket`, rather than a run
+that dies on its first archived height. `ALCHEMY_HTTP_URL` is required too, with
+no mainnet default: a deployment without it would refuse to start rather than
+fetch another chain's blocks. The worker lists that bucket once at
+startup (and reads one byte of a key that cannot exist), so a missing grant or a
+mistyped `S3_BUCKET` shows up as a pod that will not start, not as a repair that
+dies on its first height.
 
 **What a run does.** Two activities per block. `DeriveVersion` lists the height's
 archive prefix and settles the version, which Temporal records in the workflow's

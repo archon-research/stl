@@ -193,15 +193,15 @@ func newRepublishActivities(ctx context.Context, logger *slog.Logger, cfg config
 	}, nil
 }
 
-// openArchiveReader reads the same raw bucket the backup worker writes, which
-// is what decides the version slot a repair lands in. Like the Redis dial below
-// it probes at startup, so a bucket this pod may not list shows up as a worker
-// that will not start rather than as a repair that dies mid-run. No object is
-// ever read or written, so s3:ListBucket is the whole grant it needs.
+// openArchiveReader reads the same raw bucket the backup worker writes: which
+// version slots are taken, and the block the top one holds. Like the Redis dial
+// below it probes at startup — one listing and one ranged read — so a bucket this
+// pod may not use shows up as a worker that will not start rather than as a
+// repair that dies mid-run. Nothing is ever written.
 func openArchiveReader(ctx context.Context, awsCfg aws.Config, cfg config, logger *slog.Logger) (*s3adapter.ArchiveReader, error) {
 	archive := s3adapter.NewArchiveReader(s3adapter.NewReaderFromEnv(awsCfg, logger), cfg.s3Bucket)
 	if err := archive.Ping(ctx); err != nil {
-		return nil, fmt.Errorf("this pod's Pod Identity needs s3:ListBucket on %s: %w", cfg.s3Bucket, err)
+		return nil, fmt.Errorf("the raw archive %s is unusable: %w", cfg.s3Bucket, err)
 	}
 	return archive, nil
 }

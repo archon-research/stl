@@ -16,7 +16,9 @@
 # publish under, without the object read it cannot tell an already-canonical
 # height from a losing fork, and without sns:Publish every block fails on
 # AccessDenied at the publish step — after the cache write has already landed.
-# Nothing is ever written to S3.
+# Startup proves both S3 grants (one listing, one one-byte ranged read of a key
+# that cannot exist), so a missing one is a pod that will not start. Nothing is
+# ever written to S3.
 #
 # replicas: 1 — one pod on one task queue. A run's blocks are republished
 # sequentially by the workflow, so a second replica would buy nothing and double

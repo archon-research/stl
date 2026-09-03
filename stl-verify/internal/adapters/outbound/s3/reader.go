@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -213,6 +215,21 @@ func (r *Reader) ReadRange(ctx context.Context, bucket, key string, start, end i
 		return nil, fmt.Errorf("failed to read range of object %s/%s: %w", bucket, key, err)
 	}
 	return data, nil
+}
+
+// isAccessDenied tells a refusal from any other failure: S3 answers AccessDenied
+// for a missing grant, and a proxy in front of it may refuse with a bare 403.
+func isAccessDenied(err error) bool {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "AccessDenied", "AllAccessDisabled", "Forbidden":
+			return true
+		}
+	}
+
+	var statusErr interface{ HTTPStatusCode() int }
+	return errors.As(err, &statusErr) && statusErr.HTTPStatusCode() == http.StatusForbidden
 }
 
 // isMissingObject tells the one answer that means "nothing at this key" from a

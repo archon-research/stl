@@ -2,6 +2,7 @@ package s3
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/archiveblock"
@@ -32,14 +33,36 @@ func NewArchiveReader(lister archiveObjects, bucket string) *ArchiveReader {
 	return &ArchiveReader{lister: lister, bucket: bucket}
 }
 
-// Ping reports whether the archive can be listed at all, so a missing grant or a
-// bucket that is not there stops the worker at startup instead of failing every
-// height of the first run.
+// probeObjectKey is what the startup read asks for: under a real partition prefix
+// so a prefix-scoped grant covers it, and named so nothing can ever be stored
+// there — its absence is the answer the probe expects.
+var probeObjectKey = s3key.HeightPrefix(0) + "startup-probe"
+
+// Ping reports whether the archive can be used at all: listed, and read. A
+// missing grant or a bucket that is not there stops the worker at startup instead
+// of failing every height of the first run.
 func (r *ArchiveReader) Ping(ctx context.Context) error {
 	if err := r.lister.ProbeListAccess(ctx, r.bucket); err != nil {
-		return fmt.Errorf("listing s3://%s: %w", r.bucket, err)
+		return fmt.Errorf("listing s3://%s: this pod needs s3:ListBucket on that bucket: %w", r.bucket, err)
 	}
-	return nil
+	return r.probeObjectRead(ctx)
+}
+
+// probeObjectRead reads one byte of a key that does not exist. Listing proves
+// nothing about reading, and deciding whether a height is already canonical reads
+// objects — so a bucket this pod may list but not read would fail every archived
+// height of the first run, half an hour in.
+func (r *ArchiveReader) probeObjectRead(ctx context.Context) error {
+	_, err := r.lister.ReadRange(ctx, r.bucket, probeObjectKey, 0, 0)
+	switch {
+	case err == nil, errors.Is(err, outbound.ErrObjectNotFound):
+		return nil
+	case isAccessDenied(err):
+		return fmt.Errorf("reading s3://%s/%s: this pod needs s3:GetObject on that bucket: %w",
+			r.bucket, probeObjectKey, err)
+	default:
+		return fmt.Errorf("reading s3://%s/%s: %w", r.bucket, probeObjectKey, err)
+	}
 }
 
 func (r *ArchiveReader) HighestVersion(ctx context.Context, blockNumber int64) (int, bool, error) {

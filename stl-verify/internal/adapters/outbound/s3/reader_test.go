@@ -42,7 +42,7 @@ func (m *mockS3API) GetObject(ctx context.Context, params *s3.GetObjectInput, op
 	if m.getObjectFunc != nil {
 		return m.getObjectFunc(ctx, params, optFns...)
 	}
-	return &s3.GetObjectOutput{}, nil
+	return &s3.GetObjectOutput{Body: io.NopCloser(bytes.NewReader(nil))}, nil
 }
 
 func TestNewReader(t *testing.T) {

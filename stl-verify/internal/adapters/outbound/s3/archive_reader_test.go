@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 )
@@ -262,3 +263,93 @@ func TestArchiveReader_BlockHashAtSurfacesAFailedRead(t *testing.T) {
 		t.Errorf("error = %v, want it to name the bucket", err)
 	}
 }
+
+// The version check reads objects, so startup has to prove it may: a bucket this
+// pod can list but not read would otherwise fail every archived height half an
+// hour into the first run. The probe key cannot exist, so its absence is the
+// expected answer and only a refusal is a failure.
+func TestArchiveReader_PingProvesItMayReadAnObject(t *testing.T) {
+	var seen []*s3.GetObjectInput
+	mock, _ := listingOf()
+	mock.getObjectFunc = func(_ context.Context, params *s3.GetObjectInput, _ ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+		seen = append(seen, params)
+		return nil, &types.NoSuchKey{}
+	}
+
+	if err := newArchiveReader(mock).Ping(context.Background()); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+
+	if len(seen) != 1 {
+		t.Fatalf("object reads = %d, want one probe", len(seen))
+	}
+	if got := aws.ToString(seen[0].Bucket); got != archiveBucket {
+		t.Errorf("probed bucket %q, want %q", got, archiveBucket)
+	}
+	// Under a real partition prefix, so a prefix-scoped grant covers it.
+	if got, want := aws.ToString(seen[0].Key), "0-999/0_startup-probe"; got != want {
+		t.Errorf("probed key %q, want %q", got, want)
+	}
+	if got, want := aws.ToString(seen[0].Range), "bytes=0-0"; got != want {
+		t.Errorf("probed range %q, want %q — a whole object is never fetched", got, want)
+	}
+}
+
+func TestArchiveReader_PingFailsWhenObjectReadsAreRefused(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "AccessDenied", err: &smithy.GenericAPIError{Code: "AccessDenied", Fault: smithy.FaultClient}},
+		{name: "AllAccessDisabled", err: &smithy.GenericAPIError{Code: "AllAccessDisabled", Fault: smithy.FaultClient}},
+		{name: "a proxy answering 403", err: forbiddenError{}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mock, _ := listingOf()
+			mock.getObjectFunc = func(context.Context, *s3.GetObjectInput, ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+				return nil, tc.err
+			}
+
+			err := newArchiveReader(mock).Ping(context.Background())
+
+			if err == nil {
+				t.Fatal("Ping succeeded against a bucket it may not read")
+			}
+			for _, want := range []string{archiveBucket, "s3:GetObject"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %v, want it to mention %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// A throttled or unreachable probe fails startup too, but it is not a grant
+// problem and must not be reported as one.
+func TestArchiveReader_PingSurfacesAFailedProbeRead(t *testing.T) {
+	mock, _ := listingOf()
+	mock.getObjectFunc = func(context.Context, *s3.GetObjectInput, ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+		return nil, errors.New("dial tcp 52.0.0.1:443: i/o timeout")
+	}
+
+	err := newArchiveReader(mock).Ping(context.Background())
+
+	if err == nil {
+		t.Fatal("Ping succeeded against an unreachable bucket")
+	}
+	if strings.Contains(err.Error(), "s3:GetObject") {
+		t.Errorf("error = %v, want a network failure left distinct from a missing grant", err)
+	}
+}
+
+// forbiddenError is a refusal that carries no S3 error code, the shape a proxy in
+// front of the bucket produces.
+type forbiddenError struct{}
+
+func (forbiddenError) Error() string                 { return "403 Forbidden" }
+func (forbiddenError) ErrorCode() string             { return "" }
+func (forbiddenError) ErrorMessage() string          { return "403 Forbidden" }
+func (forbiddenError) ErrorFault() smithy.ErrorFault { return smithy.FaultClient }
+func (forbiddenError) HTTPStatusCode() int           { return 403 }
