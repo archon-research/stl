@@ -394,9 +394,12 @@ func run(ctx context.Context, args []string) error {
 5. **Add k8s manifests** under `k8s/base/<my-worker>/`:
    `deployment.yaml`, `serviceaccount.yaml`, `kustomization.yaml`. Copy
    `k8s/base/oracle-price-worker/` as the template. Wire the new service
-   into `k8s/overlays/{staging,prod}/kustomization.yaml` and, for local
-   kind, `k8s/overlays/dev/workers/kustomization.yaml` (add the base dir
-   under `resources:` and a `localhost/stl-<name>:local` `images:` entry).
+   into `k8s/overlays/{staging,prod}/kustomization.yaml` by adding the base
+   dir under `resources:` only — the `images:` block there is generated from
+   `k8s/image-roster.txt`, so add one roster line instead (kind, image name,
+   the `image:` alias your manifests use; ORB-362). For local kind,
+   `k8s/overlays/dev/workers/kustomization.yaml` still takes both the base
+   dir under `resources:` and a `localhost/stl-<name>:local` `images:` entry.
 6. **Add build/deploy targets to the Makefile** (`docker-build-<name>`,
    `docker-release-<name>`, and register the worker in the `run-*` /
    `kind-load-workers` / `kind-deploy-workers` groupings). Grep for an
@@ -484,8 +487,9 @@ Run it locally with `uv run python -m cli.workers.<my_worker>.main` (from `stl-v
 - Long-poll SQS receive; process one message at a time in FIFO order;
   delete on success; let it redrive on failure.
 - Handle `SIGINT` / `SIGTERM` — finish the in-flight message, close
-  the DB pool, exit within ~25s (the Python equivalent of Go's
-  `lifecycle.Run`).
+  the DB pool, exit within Go's `lifecycle.ShutdownTimeout` (40s) plus
+  `lifecycle.ShutdownTailBudget` (15s), the Python equivalent of
+  `lifecycle.Run`.
 - Read block data from Redis using the exact cache-key convention
   above; do not refetch from Alchemy unless cache-miss rate indicates
   a real bug.
@@ -589,9 +593,12 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
    `k8s/base/offchain-price-indexer/` as the template — cronjob
    Deployments are small (50m/64Mi requests) because the work happens
    inside Temporal activities. Register the service in
-   `k8s/overlays/{staging,prod}/kustomization.yaml` and, for local kind
-   runs, in `k8s/overlays/dev/kustomization.yaml` (add the base dir to
-   `resources:` and a `localhost/stl-<name>:local` entry under `images:`).
+   `k8s/overlays/{staging,prod}/kustomization.yaml` (base dir under
+   `resources:` only — the `images:` block is generated from
+   `k8s/image-roster.txt`, so add a `cronjob <name> <alias>` roster line
+   instead; ORB-362) and, for local kind runs, in
+   `k8s/overlays/dev/kustomization.yaml` (add the base dir to `resources:`
+   and a `localhost/stl-<name>:local` entry under `images:`).
 4. **Wire the Makefile.** Image builds auto-discover via the
    `CRONJOBS := ...` glob, so a `docker-build-cronjob-<name>` target is
    already covered. Add the k8s Deployment name to `CRONJOB_DEPLOYMENTS`
@@ -976,7 +983,8 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
    message on `main` and your intermediate commits are discarded
    automatically.
 5. **Merge to `main`** — CI then triggers `.github/workflows/deploy.yaml`,
-   which bumps image tags in `k8s/overlays/staging/kustomization.yaml`
+   which regenerates the `images:` block of
+   `k8s/overlays/staging/kustomization.yaml` from `k8s/image-roster.txt`
    and ArgoCD rolls the change into the `vector` namespace on the
    staging EKS cluster. Once staging is healthy, the same run promotes
    the images to the prod ECR, auto-commits the prod tag bump to `main`,
@@ -990,26 +998,32 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
    not just against the push itself — so a docs-only merge can carry an
    earlier merge's deploy, or retry a promotion that failed (ORB-361).
 6. **Adding a brand-new service image? Split it across two PRs.** If one PR
-   both introduces a new image (a new `make docker-*` target, or a base that
-   references an image name never built before) *and* the Deployment/CronJob
-   that runs it, ArgoCD syncs the new manifest on merge *before* the image
-   exists in ECR: the pods sit in `ImagePullBackOff` and the staging health
-   gate can hard-fail and skip prod promotion (see ORB-313). Instead:
-   - **PR 1** adds the build (Makefile target + the `SERVICES` / `CRONJOBS`
-     promotion lists in `.github/workflows/deploy.yaml`) so the image is
-     built and pushed to ECR.
-   - **PR 2** adds the `k8s/base/...` Deployment plus overlay wiring that
-     references it.
+   both introduces a new image (a new `make docker-*` target plus its
+   `k8s/image-roster.txt` line) *and* the Deployment/CronJob that runs it,
+   ArgoCD syncs the new manifest on merge *before* the image exists in ECR
+   and before the deploy bot has rendered its `images:` entry: the pods sit
+   in `ImagePullBackOff` until that run's stamp lands (see ORB-313). Instead:
+   - **PR 1** adds the build (Makefile target) and the roster line. The next
+     deploy builds and pushes the image and writes its overlay entries.
+   - **PR 2** adds the `k8s/base/...` Deployment plus the `resources:` entry
+     that references it — it renders against the entry PR 1's deploy wrote.
 
    This split is a recommendation, not an enforced rule. A combined PR still
    works: `build-push-staging` builds the new image in the same run before
-   `update-staging` stamps it, and the 900s staging health wait tolerates the
-   brief first-rollout `ImagePullBackOff`. Splitting simply avoids that race.
-   `scripts/deploy/verify-ecr-images.sh` (run before each stamp) is the backstop
-   for what the split does not cover: an image that was never built, or a prod
-   overlay entry missing from the `SERVICES` / `CRONJOBS` promotion list. It
-   fails the deploy with an explicit missing-image list instead of letting a
-   silent prod `ImagePullBackOff` through.
+   `update-staging` renders the block, and the staging health gate tolerates
+   the brief first-rollout `ImagePullBackOff`. Splitting simply avoids that
+   race. Never hand-add an `images:` entry (the old "copy a sibling's tag"
+   placeholder): the Manifests check rejects anything the roster does not
+   render, and the bot rewrites the block wholesale on every deploy (ORB-362).
+   The one sanctioned hand edit is removal: dropping or re-homing an image
+   means deleting its stale entry in the same PR as the roster change. (A
+   re-home leaves the alias unpinned in the merge commit until the post-merge
+   rewrite — the same brief `ImagePullBackOff` window as a first rollout.)
+   `scripts/deploy/verify-ecr-images.sh` (run before each stamp) remains the
+   backstop for an image that was never built — e.g. a roster line without a
+   matching Makefile release target. It fails the deploy with an explicit
+   missing-image list instead of letting a silent prod `ImagePullBackOff`
+   through.
 
 ---
 

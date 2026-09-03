@@ -50,6 +50,7 @@ class Protocol(Enum):
     FLUID_FINANCE_ERC4626_VAULT = "Fluid Finance erc4626 Vault"
     GROVE_STEAKHOUSE_AUSD_MORPHO_VAULT = "Grove x Steakhouse aUSD Morpho Vault"
     GROVE_STEAKHOUSE_USDC_HIGH_YIELD_VAULT_V2 = "Grove x Steakhouse USDC High Yield Vault V2"
+    GROVE_STEAKHOUSE_USDG_MORPHO_VAULT = "Grove x Steakhouse USDG Morpho Vault"
     STEAKHOUSE_PYUSD_MORPHO_VAULT = "Steakhouse pyUSD Morpho Vault"
 
 
@@ -112,6 +113,7 @@ ERC4626_PROTOCOLS = {
     Protocol.STEAKHOUSE_PYUSD_MORPHO_VAULT,
     Protocol.GROVE_STEAKHOUSE_AUSD_MORPHO_VAULT,
     Protocol.GROVE_STEAKHOUSE_USDC_HIGH_YIELD_VAULT_V2,
+    Protocol.GROVE_STEAKHOUSE_USDG_MORPHO_VAULT,
     Protocol.ARKIS,
 }
 

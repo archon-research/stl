@@ -705,7 +705,7 @@ func TestBackfillWorkflow_ExposesPartialCountsAfterFailure(t *testing.T) {
 func TestReplayPartition_NamesThePartitionOnAnEarlyFailure(t *testing.T) {
 	// A nil pool fails the first step, buildReplayService, which is the earliest
 	// of those paths.
-	activities := &backfillActivities{logger: slog.Default(), archiveDrain: func() {}}
+	activities := &backfillActivities{logger: slog.Default(), archiveWait: func() {}}
 
 	_, err := activities.ReplayPartition(context.Background(), partitionWork{
 		Range:     blockRange{From: 1000, To: 1999},
@@ -725,7 +725,7 @@ func TestReplayPartition_NamesThePartitionOnAnEarlyFailure(t *testing.T) {
 // on a later attempt, so leaving it retryable spends the partition's whole 2h
 // envelope on a verdict the first millisecond already reached.
 func TestReplayPartition_ConstructorValidationIsNotRetried(t *testing.T) {
-	activities := &backfillActivities{logger: slog.Default(), archiveDrain: func() {}}
+	activities := &backfillActivities{logger: slog.Default(), archiveWait: func() {}}
 
 	_, err := activities.ReplayPartition(context.Background(), partitionWork{Partition: "1000-1999"})
 
@@ -740,11 +740,11 @@ func TestReplayPartition_ConstructorValidationIsNotRetried(t *testing.T) {
 // that is unreachable right now is exactly what the retry envelope is for.
 func TestReplayPartition_AnUnreachableDatabaseStaysRetryable(t *testing.T) {
 	activities := &backfillActivities{
-		logger:       slog.Default(),
-		pool:         unreachablePool(t),
-		multicaller:  testutil.NewMockMulticaller(),
-		cfg:          config{chainID: mainnetChainID},
-		archiveDrain: func() {},
+		logger:      slog.Default(),
+		pool:        unreachablePool(t),
+		multicaller: testutil.NewMockMulticaller(),
+		cfg:         config{chainID: mainnetChainID},
+		archiveWait: func() {},
 	}
 
 	_, err := activities.ReplayPartition(context.Background(), partitionWork{Partition: "1000-1999"})

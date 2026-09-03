@@ -1,8 +1,9 @@
 import functools
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
@@ -24,6 +25,32 @@ def async_database_url(database_url: str) -> str:
     return url.set(query=query).render_as_string(hide_password=False)
 
 
+def parse_reference_effective_at(raw: str) -> datetime:
+    """Parse a reference effective instant, mirroring Go's env.ReferenceEffectiveAt.
+
+    One format, RFC 3339 UTC (ADR-0006 §5). A missing offset, a non-UTC offset and a future
+    instant all raise, so a typo fails startup instead of pinning the API to an unintended
+    instant — and an instant nothing can have observed resolves reference versions that did
+    not exist yet.
+    """
+    example = "e.g. 2026-06-01T00:00:00Z"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        raise ValueError(f"reference_effective_at={raw!r} is not RFC 3339 UTC ({example})") from None
+    offset = parsed.utcoffset()
+    if offset is None:
+        raise ValueError(f"reference_effective_at={raw!r} carries no UTC offset; write it as {example}")
+    if offset != timedelta(0):
+        raise ValueError(
+            f"reference_effective_at={raw!r} must be UTC; write the same instant with a Z offset "
+            f"({parsed.astimezone(UTC).isoformat()})"
+        )
+    if parsed > datetime.now(UTC):
+        raise ValueError(f"reference_effective_at={raw!r} is in the future")
+    return parsed.astimezone(UTC)
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
@@ -40,6 +67,19 @@ class Settings(BaseSettings):
     otel_enabled: bool
     otel_exporter_otlp_endpoint: str
     otel_service_name: str
+    # --- auth plane (ADR-015; enforcement lands in a follow-up) ------------
+    # All defaulted so the app ships dark: with auth_enabled=False nothing
+    # below is read and behaviour is byte-identical. One flag reverts the
+    # whole auth path (claim reading, JWT verify, FGA checks) by design.
+    auth_enabled: bool = False
+    oidc_issuer: str = ""  # e.g. http://keycloak.auth.svc/realms/archon
+    oidc_audience: str = ""  # `aud` the API validates
+    openfga_url: str = ""  # e.g. http://openfga.auth.svc:8080
+    # Published by the openfga-store ConfigMap (store/model ids are created by
+    # the store-bootstrap Job; they cannot be known at deploy-authoring time).
+    openfga_store_id: str = ""
+    openfga_model_id: str = ""
+
     risk_default_gap_pct: Decimal = Field(default=Decimal("0.15"), ge=0, le=1)
     suraf_inputs_dir: Path = ENV_DIR / "suraf" / "inputs"
     suraf_mappings_file: Path = ENV_DIR / "suraf" / "mappings" / "asset_to_rating.json"
@@ -52,6 +92,32 @@ class Settings(BaseSettings):
     # Maximum age (in seconds) of a token_total_supply row before the risk API
     # treats it as stale and returns HTTP 503.
     allocation_share_max_stale_seconds: int = 1800
+    # Pins which append-on-change reference versions the read path resolves (ADR-0006 §4).
+    # Unset means now (UTC).
+    #
+    # A string parsed by the validator below, not a `datetime`, because pydantic reads a
+    # bare numeric string as a Unix timestamp: `2026` becomes 1970-01-01T00:33:46Z and
+    # `20260601` becomes 1970-08-23. Both precede every valid_from, so the priced reads
+    # would collapse to zeros and 404s instead of failing.
+    reference_effective_at: str | None = None
+
+    @field_validator("reference_effective_at")
+    @classmethod
+    def _validate_reference_effective_at(cls, raw: str | None) -> str | None:
+        if raw is None or raw == "":
+            return None
+        parse_reference_effective_at(raw)
+        return raw
+
+    def resolved_reference_effective_at(self) -> datetime | None:
+        """The parsed reference instant, or None when unset (meaning now, UTC).
+
+        Cannot raise; the validator above already parsed this at settings construction.
+        """
+        if self.reference_effective_at is None:
+            return None
+        return parse_reference_effective_at(self.reference_effective_at)
+
     # Connection-pool ceiling per replica. Set explicitly rather than left on
     # SQLAlchemy's 5 + 10, because a prime-scoped risk-capital request is a
     # concurrent fan-out rather than a single query: every repository read opens

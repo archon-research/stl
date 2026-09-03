@@ -402,16 +402,18 @@ func replayActivityOptions() workflow.ActivityOptions {
 // here outlives a single run; anything scoped to one run (the block range)
 // arrives as activity input.
 type backfillActivities struct {
-	cfg          config
-	logger       *slog.Logger
-	pool         *pgxpool.Pool
-	buildID      buildregistry.BuildID
-	s3Reader     outbound.S3Reader
-	extractor    *morpho_indexer.EventExtractor
-	prober       *vaultProber
-	ethClient    *ethclient.Client
-	multicaller  outbound.Multicaller
-	archiveDrain func()
+	cfg         config
+	logger      *slog.Logger
+	pool        *pgxpool.Pool
+	buildID     buildregistry.BuildID
+	s3Reader    outbound.S3Reader
+	extractor   *morpho_indexer.EventExtractor
+	prober      *vaultProber
+	ethClient   *ethclient.Client
+	multicaller outbound.Multicaller
+	// archiveWait waits out this activity's archive writes without closing the
+	// gate: the next activity on this worker must still be able to archive.
+	archiveWait func()
 }
 
 // DiscoverVaults scans one sub-range's S3 receipts for candidate addresses,
@@ -424,11 +426,11 @@ type backfillActivities struct {
 func (a *backfillActivities) DiscoverVaults(ctx context.Context, work discoveryWork) (result discoveryResult, err error) {
 	defer func() { err = nonRetryableIfStructural(err) }()
 
-	// Deferred before the drain so it stops LAST: the drain blocks on in-flight
+	// Deferred before the wait so it stops LAST: the wait blocks on in-flight
 	// archive writes, and an unheartbeated wait there reads as a dead worker.
 	stopHeartbeat := temporal.StartHeartbeat(ctx, heartbeatInterval, nil)
 	defer stopHeartbeat()
-	defer a.archiveDrain()
+	defer a.archiveWait()
 
 	rng := work.Range
 	got, err := discoverAndPersistVaults(ctx, a.logger, a.s3Reader, a.extractor, a.prober, a.pool, a.buildID, a.cfg, rng, work.ProbeBlock)
@@ -468,7 +470,7 @@ func (a *backfillActivities) ReplayPartition(ctx context.Context, work partition
 
 	stopHeartbeat := temporal.StartHeartbeat(ctx, heartbeatInterval, nil)
 	defer stopHeartbeat()
-	defer a.archiveDrain()
+	defer a.archiveWait()
 
 	svc, counted, err := buildReplayService(a.logger, a.multicaller, a.pool, a.buildID, a.cfg.chainID)
 	if err != nil {

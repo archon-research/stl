@@ -77,7 +77,9 @@ groups:
         #
         # Residual (same as VectorAllocationTrackerStalled): a live pod whose OTLP
         # export dies lets BOTH series staleness-expire, so `== 0` returns no data
-        # and this goes silent. morpho has no kube-state Down companion yet — see
+        # and this goes silent. Process death — including the boot refusal a bad
+        # SQS_VISIBILITY_TIMEOUT causes — is covered by the platform's PodNotReady
+        # and DeploymentReplicasMismatch rules, not by anything in this file; see
         # the runbook.
         expr: |
           (
@@ -432,11 +434,19 @@ groups:
       - alert: VectorArchivingErrorRatioHigh
         # Catches PARTIAL failure: a meaningful fraction of writes erroring while
         # some still succeed. VectorArchivingStalled keys on success==0 and so
-        # cannot see this (successes > 0 means it never fires). Denominated on total
-        # attempts (success + error) from the same counter, so it is immune to the
-        # multicall/RPC faults that would distort a multicall-count denominator
-        # (failed/empty Executes inflate multicall_batch_size_count but never
-        # archive). clamp_min avoids a divide-by-zero when a source has no writes
+        # cannot see this (successes > 0 means it never fires). Denominated on the
+        # statuses that represent a write S3 actually answered — success + error —
+        # from the same counter, so it is immune to the multicall/RPC faults that
+        # would distort a multicall-count denominator (failed/empty Executes inflate
+        # multicall_batch_size_count but never archive).
+        #
+        # The status matcher on the denominator is load-bearing. `abandoned` (the
+        # drain gate refused the batch) and `lost` (the write was still in flight
+        # when the 5s drain budget expired) are neither successes nor errors, and
+        # both appear in a burst on every rollout — exactly when a broken write
+        # path is most likely. An unmatched denominator would count them and push
+        # the ratio DOWN at that moment, so the rule pins it to success|error.
+        # clamp_min avoids a divide-by-zero when a source has no writes
         # (ratio → 0, never fires), so no multicall guard is needed.
         expr: |
           sum by (service_name, chain, cluster) (
@@ -445,7 +455,7 @@ groups:
           /
           clamp_min(
             sum by (service_name, chain, cluster) (
-              rate(archive_writes_total{k8s_namespace_name="vector"}[10m])
+              rate(archive_writes_total{status=~"success|error", k8s_namespace_name="vector"}[10m])
             ),
             0.001
           )
@@ -465,6 +475,116 @@ groups:
             (Alchemy remains the fallback). A total stall is covered separately by
             VectorArchivingStalled.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorarchivingerrorratiohigh
+
+      # ---------------------------------------------------------------------
+      # SQS message settlement (VEC-475)
+      # ---------------------------------------------------------------------
+      # sqs_message_settles_total{op,status,chain,service_name} is emitted by
+      # internal/common/sqsutil every time a message is settled: op="delete" on
+      # the normal completion path, which runs for every message, and op="release"
+      # when a shutdown hands received-but-unfinished messages back to the queue.
+      # status is "ok" or "failed". Either failure leaves the message hidden for
+      # the queue's whole visibility timeout, and because each chain is its own
+      # FIFO group that means the chain's block stream stops until it expires.
+      # Every SQS worker binary emits it — the eight that consume through
+      # sqsutil.ProcessMessages, and raw-data-backup, which runs its own
+      # fetch/dispatch loop but settles through the exported sqsutil.DeleteMessage
+      # and sqsutil.ReleaseMessages. So these rules are not indexer-specific; they
+      # live here beside the other cross-binary rules.
+
+      - alert: VectorSQSReleaseFailed
+        # A refused ChangeMessageVisibilityBatch leaves the message hidden for the
+        # queue's whole visibility timeout, stalling that chain's FIFO block stream
+        # until it expires — the blackout the release exists to prevent.
+        #
+        # Two present_over_time legs over disjoint windows: failing NOW (the last
+        # 30m) and failing BEFORE that (the 6h ending 30m ago). Both must hold, so
+        # the rule needs a failure that persists across more than half an hour.
+        #
+        # present_over_time, not increase() or max_over_time+count(): the series is
+        # born at shutdown and gets one export before the pod dies, so increase() is
+        # blind to it (the same first-sample blindness documented on
+        # VectorArchivingStalled above). Counting pod LIFETIMES instead was the
+        # previous shape and could not fire in steady state: releases run only at
+        # shutdown, so one lifetime contributes exactly one series and the rule
+        # demanded two restarts in 6h — measured flat at 1 for 14 of 24 hours on
+        # every mainnet service, which is exactly when a never-self-healing cause
+        # (an IAM role without sqs:ChangeMessageVisibilityBatch) would be invisible.
+        # A ratio of failed:ok cannot work either: in that IAM case there is no
+        # status="ok" series at all, so the ratio evaluates empty.
+        #
+        # What each leg buys, checked against staging series and in promqltest:
+        #   - one self-healing refusal cannot fire it (a single burst satisfies both
+        #     legs only at the instant it sits on the window boundary, which `for`
+        #     outlives), and neither can one rollout of a multi-replica deployment;
+        #   - a pod whose every release fails, or a crashloop under one pod name,
+        #     fires within one lifetime;
+        #   - the recency leg clears it ~30m after the last failing pod is gone,
+        #     which is what unbroke the old latch: a dead pod's series stayed inside
+        #     the [6h] window and pinned the alert on for six hours while a healthy
+        #     successor exported nothing that could bring it down.
+        expr: |
+          count by (service_name, chain, cluster) (
+            present_over_time(sqs_message_settles_total{op="release", status="failed", k8s_namespace_name="vector"}[30m])
+          ) > 0
+          and on (service_name, chain, cluster)
+          count by (service_name, chain, cluster) (
+            present_over_time(sqs_message_settles_total{op="release", status="failed", k8s_namespace_name="vector"}[6h] offset 30m)
+          ) > 0
+        for: 5m
+        labels:
+          team: vector
+          severity: warning
+          component: sqs
+          namespace: vector
+        annotations:
+          summary: "Vector SQS message release failing repeatedly for {{ $labels.service_name }} on {{ $labels.chain }}"
+          description: |
+            `{{ $labels.service_name }}` on chain `{{ $labels.chain }}` has failed to
+            hand in-flight SQS messages back to the queue within the last 30m, and was
+            already failing them earlier in the preceding 6h. That is not the one-off a
+            visibility timeout heals on its own. Each failure leaves those messages
+            hidden for the queue's whole visibility timeout, stalling that chain's FIFO
+            block stream.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorsqsreleasefailed
+
+      - alert: VectorSQSDeleteFailed
+        # The same blackout as a refused release, on the path that runs for EVERY
+        # message rather than only at shutdown: a DeleteMessage SQS refuses on a
+        # live context leaves the message hidden for the queue's whole visibility
+        # timeout, after which it is redelivered and the block is processed again.
+        # While it is hidden that chain's FIFO group delivers nothing.
+        #
+        # increase(), not the count-of-pod-lifetimes shape VectorSQSReleaseFailed
+        # uses. That shape is right for a series born at shutdown and exported
+        # once; the delete counter lives for the whole pod lifetime and is scraped
+        # repeatedly, and the failure that matters recurs WITHIN one pod — an IAM
+        # policy missing sqs:DeleteMessage fails every delete of a single pod and
+        # is a single series, which counting series could never take past 1.
+        #
+        # > 1 over 30m, not > 0: one refused delete costs a visibility timeout of
+        # latency and a re-processed block, then self-heals, so it needs nobody.
+        # Two or more increments is a delete path that is actually broken. The
+        # rule clears on its own once the failures leave the window.
+        expr: |
+          sum by (service_name, chain, cluster) (
+            increase(sqs_message_settles_total{op="delete", status="failed", k8s_namespace_name="vector"}[30m])
+          ) > 1
+        for: 5m
+        labels:
+          team: vector
+          severity: warning
+          component: sqs
+          namespace: vector
+        annotations:
+          summary: "Vector SQS message delete failing for {{ $labels.service_name }} on {{ $labels.chain }}"
+          description: |
+            `{{ $labels.service_name }}` on chain `{{ $labels.chain }}` failed
+            {{ $value }} SQS message deletes in the last 30m. Every refused delete
+            hides that message for the queue's visibility timeout and then has it
+            redelivered, so the chain's FIFO block stream stalls and the block is
+            processed again.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorsqsdeletefailed
 
   # morpho VaultV2 structured tracking (VEC-218) — the adapter registry, adapter
   # realAssets snapshots, allocation caps and fee-config snapshots the morpho

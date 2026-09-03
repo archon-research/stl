@@ -39,3 +39,11 @@ ts:
   - .github/workflows/ci.yml
   - .github/workflows/deploy.yaml
   - .github/workflows/ts-ci.yml
+
+# ORB-362: a roster or renderer change must run the deploy even when no code
+# changed — the bot regenerates the overlays' images blocks from the roster, so
+# a new image entry only reaches ArgoCD through a deploy run. No test suite keys
+# off this group; only call-deploy in ci.yml does.
+deploy:
+  - k8s/image-roster.txt
+  - scripts/deploy/render-overlay-images.sh

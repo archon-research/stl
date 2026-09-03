@@ -163,10 +163,11 @@ func newActivityEnv(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *test
 	if err != nil {
 		t.Fatalf("loading the worker configuration: %v", err)
 	}
-	activities, err := newBackfillActivities(ctx, newDeps(t, pool), cfg)
+	activities, drainArchive, err := newBackfillActivities(ctx, newDeps(t, pool), cfg)
 	if err != nil {
 		t.Fatalf("wiring the backfill activities: %v", err)
 	}
+	t.Cleanup(drainArchive)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestActivityEnvironment()
 	env.RegisterActivity(activities)
@@ -187,7 +188,7 @@ func TestIntegration_Register_ExposesTheDocumentedWorkflowType(t *testing.T) {
 	setWorkerEnv(t, seedBucket(t, ctx), server.URL)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	if err := register(ctx, newDeps(t, pool), env); err != nil {
+	if err := newBackfillWorker(t).register(ctx, newDeps(t, pool), env); err != nil {
 		t.Fatalf("running the production registration: %v", err)
 	}
 	// Mocked so the run proves the registered names resolve, not that S3 holds
@@ -217,7 +218,7 @@ func TestIntegration_Register_RefusesAChainIDMismatch(t *testing.T) {
 	setWorkerEnv(t, seedBucket(t, ctx), server.URL)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	err := register(ctx, newDeps(t, pool), env)
+	err := newBackfillWorker(t).register(ctx, newDeps(t, pool), env)
 
 	if err == nil {
 		t.Fatal("expected registration to fail when the node reports another chain")
@@ -338,7 +339,7 @@ func TestIntegration_Backfill_FailsOnAnArchiveGapWhenNoV2VaultIsKnown(t *testing
 	setWorkerEnv(t, bucket, chainFixtureServer(t, "0x1").URL)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	if err := register(ctx, newDeps(t, pool), env); err != nil {
+	if err := newBackfillWorker(t).register(ctx, newDeps(t, pool), env); err != nil {
 		t.Fatalf("running the production registration: %v", err)
 	}
 	env.ExecuteWorkflow("MorphoVaultBackfill", BackfillParams{From: 1, To: 6})
@@ -364,7 +365,7 @@ func TestIntegration_Backfill_SucceedsWithNothingToReplayOverACompleteArchive(t 
 	setWorkerEnv(t, bucket, chainFixtureServer(t, "0x1").URL)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	if err := register(ctx, newDeps(t, pool), env); err != nil {
+	if err := newBackfillWorker(t).register(ctx, newDeps(t, pool), env); err != nil {
 		t.Fatalf("running the production registration: %v", err)
 	}
 	env.ExecuteWorkflow("MorphoVaultBackfill", BackfillParams{From: 1, To: 6})
@@ -814,4 +815,13 @@ func replayOnePartition(t *testing.T, env *testsuite.TestActivityEnvironment, wo
 		t.Fatalf("decoding the activity result: %v", err)
 	}
 	return replayed
+}
+
+// newBackfillWorker builds the entrypoint's registrar and drains the archive it
+// wires when the test ends, the way run does when the worker stops.
+func newBackfillWorker(t *testing.T) *backfillWorker {
+	t.Helper()
+	backfill := &backfillWorker{}
+	t.Cleanup(backfill.drain)
+	return backfill
 }

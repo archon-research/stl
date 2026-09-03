@@ -24,8 +24,11 @@ type s3API interface {
 	ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
 }
 
-// Compile-time check that Reader implements outbound.S3Reader
-var _ outbound.S3Reader = (*Reader)(nil)
+// Compile-time checks that Reader implements the read ports.
+var (
+	_ outbound.S3Reader      = (*Reader)(nil)
+	_ outbound.S3RangeReader = (*Reader)(nil)
+)
 
 // Reader implements the S3Reader interface using the AWS SDK.
 type Reader struct {
@@ -176,6 +179,26 @@ func (r *Reader) StreamFile(ctx context.Context, bucket, key string) (io.ReadClo
 	}
 
 	return result.Body, nil
+}
+
+// ReadRange returns the requested byte range of an object as stored. Unlike
+// StreamFile it never decompresses: a slice of a gzip stream is not one.
+func (r *Reader) ReadRange(ctx context.Context, bucket, key string, start, end int64) ([]byte, error) {
+	result, err := r.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", start, end)),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get range of object %s/%s: %w", bucket, key, err)
+	}
+	defer result.Body.Close()
+
+	data, err := io.ReadAll(result.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read range of object %s/%s: %w", bucket, key, err)
+	}
+	return data, nil
 }
 
 // gzipReadCloser wraps a gzip reader and the underlying body for proper cleanup.
