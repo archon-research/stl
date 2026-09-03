@@ -23,13 +23,17 @@ class MorphoVaultMarketAllocation:
     """The vault's latest supply into one Blue market, in loan-token units.
 
     ``supply_assets`` is positive by contract: a fully exited market is not an
-    allocation, so implementations drop zero-supply rows.
+    allocation, so implementations drop zero-supply rows. Enforced here because
+    the aggregation divides by allocation sums.
     """
 
-    morpho_market_id: int
     collateral_symbol: str
     loan_symbol: str
     supply_assets: Decimal
+
+    def __post_init__(self) -> None:
+        if self.supply_assets <= 0:
+            raise ValueError(f"supply_assets must be positive, got {self.supply_assets}")
 
 
 @dataclass(frozen=True)
@@ -44,7 +48,6 @@ class MorphoVaultAllocations:
     """
 
     vault_id: int
-    loan_token_symbol: str
     total_assets: Decimal
     allocations: tuple[MorphoVaultMarketAllocation, ...]
 

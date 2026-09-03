@@ -86,6 +86,9 @@ class Settings(BaseSettings):
     core_model_mappings_file: Path = (
         ENV_DIR / "app" / "risk_engine" / "core_model" / "mappings" / "asset_to_market_key.json"
     )
+    core_model_market_configs_file: Path = (
+        ENV_DIR / "app" / "risk_engine" / "core_model" / "inputs" / "market_configs.json"
+    )
     # Below this CORE coverage of a Morpho vault's assets (idle counts as
     # covered) the aggregate is data-unavailable and callers fall back.
     core_model_min_coverage_pct: Decimal = Field(default=Decimal("50"), ge=0, le=100)

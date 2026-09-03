@@ -1,9 +1,10 @@
-"""Integration tests for MorphoVaultAllocationsRepository.
+"""Integration tests for PostgresMorphoVaultAllocationsReader.
 
-The repository serves the CORE model's vault→market weights, so the scenario
-pins the reads the service depends on: latest-row-wins for both positions and
-vault state, decimal scaling into loan-token units, exited markets dropped,
-and the no-state / unknown-vault degradations.
+The reader serves the CORE model's vault→market weights, so the scenario pins
+the reads the service depends on: latest-row-wins for both positions and vault
+state (across blocks and across versions within one block), other users'
+positions excluded, decimal scaling into loan-token units, exited markets
+dropped, and the no-state / unknown-vault degradations.
 """
 
 from decimal import Decimal
@@ -14,7 +15,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.adapters.postgres.morpho_vault_allocations_repository import MorphoVaultAllocationsRepository
+from app.adapters.postgres.morpho_vault_allocations_reader import PostgresMorphoVaultAllocationsReader
 from tests.integration.seed import insert_token, insert_user
 
 # The module-scoped engine binds its pool to one event loop, so every test
@@ -109,17 +110,19 @@ async def _insert_morpho_vault_state(
     morpho_vault_id: int,
     total_assets: str,
     block_number: int,
+    block_version: int = 0,
 ) -> None:
     await conn.execute(
         """
         INSERT INTO morpho_vault_state
             (morpho_vault_id, block_number, block_version, timestamp,
              total_assets, total_shares)
-        VALUES ($1, $2, 0, NOW(), $3, $3)
+        VALUES ($1, $2, $4, NOW(), $3, $3)
         """,
         morpho_vault_id,
         block_number,
         total_assets,
+        block_version,
     )
 
 
@@ -129,28 +132,33 @@ async def _insert_morpho_market_position(
     morpho_market_id: int,
     supply_assets: str,
     block_number: int,
+    block_version: int = 0,
 ) -> None:
     await conn.execute(
         """
         INSERT INTO morpho_market_position
             (user_id, morpho_market_id, block_number, block_version, timestamp,
              supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
-        VALUES ($1, $2, $3, 0, NOW(), $4, 0, 0, $4, 0)
+        VALUES ($1, $2, $3, $5, NOW(), $4, 0, 0, $4, 0)
         """,
         user_id,
         morpho_market_id,
         block_number,
         supply_assets,
+        block_version,
     )
 
 
 # ---------------------------------------------------------------------------
 # Scenario: a 1M-USDC vault (6 decimals) supplying two Blue markets.
 #
-#   WETH/USDC:  latest supply 400,000 USDC — an older 100,000 row must lose.
+#   WETH/USDC:  latest supply 400,000 USDC — an older-block 100,000 row and a
+#               same-block lower-version 350,000 row (reorg replacement) lose;
+#               another user's 900,000 position carries no weight.
 #   WBTC/USDC:  supply 300,000 USDC.
 #   XAUT/USDC:  fully exited — latest row has supply 0 and must not appear.
-#   Vault state: an older 999,000 snapshot must lose to the 1,000,000 one.
+#   Vault state: an older-block 999,000 snapshot and a same-block
+#               lower-version 990,000 one must lose to the 1,000,000 one.
 #
 # A second vault has no state row and no positions (total 0, no allocations).
 # ---------------------------------------------------------------------------
@@ -171,11 +179,19 @@ async def _seed_data(db_url: str) -> None:
             conn, protocol_id, _VAULT_ADDRESS, usdc_id, name="Morpho USDC Vault", symbol="mUSDC"
         )
         await _insert_morpho_vault_state(conn, vault_id, "999000000000", _OLDER_BLOCK_NUMBER)
-        await _insert_morpho_vault_state(conn, vault_id, "1000000000000", _SEED_BLOCK_NUMBER)
+        await _insert_morpho_vault_state(conn, vault_id, "990000000000", _SEED_BLOCK_NUMBER, block_version=0)
+        await _insert_morpho_vault_state(conn, vault_id, "1000000000000", _SEED_BLOCK_NUMBER, block_version=1)
 
         weth_market_id = await _insert_morpho_market(conn, protocol_id, b"\x01" * 32, usdc_id, weth_id)
         await _insert_morpho_market_position(conn, vault_user_id, weth_market_id, "100000000000", _OLDER_BLOCK_NUMBER)
-        await _insert_morpho_market_position(conn, vault_user_id, weth_market_id, "400000000000", _SEED_BLOCK_NUMBER)
+        await _insert_morpho_market_position(
+            conn, vault_user_id, weth_market_id, "350000000000", _SEED_BLOCK_NUMBER, block_version=0
+        )
+        await _insert_morpho_market_position(
+            conn, vault_user_id, weth_market_id, "400000000000", _SEED_BLOCK_NUMBER, block_version=1
+        )
+        rival_user_id = await insert_user(conn, b"\xab" * 20)
+        await _insert_morpho_market_position(conn, rival_user_id, weth_market_id, "900000000000", _SEED_BLOCK_NUMBER)
 
         wbtc_market_id = await _insert_morpho_market(conn, protocol_id, b"\x02" * 32, usdc_id, wbtc_id)
         await _insert_morpho_market_position(conn, vault_user_id, wbtc_market_id, "300000000000", _SEED_BLOCK_NUMBER)
@@ -196,21 +212,30 @@ async def _seed_data(db_url: str) -> None:
 async def repository(async_db_url: str, _seed_data: None):
     engine = create_async_engine(async_db_url)
     try:
-        yield MorphoVaultAllocationsRepository(engine)
+        yield PostgresMorphoVaultAllocationsReader(engine)
     finally:
         await engine.dispose()
 
 
-async def test_latest_positions_win_and_are_scaled_to_loan_token_units(repository) -> None:
+async def test_latest_rows_win_and_are_scaled_to_loan_token_units(repository) -> None:
+    # WETH 400K only if both the older block AND the same-block lower version
+    # lose; total 1M only if the same tie-break holds for vault state.
     vault = await repository.get_vault_allocations(_VAULT_ADDRESS, 1)
 
     assert vault is not None
-    assert vault.loan_token_symbol == "USDC"
     assert vault.total_assets == Decimal("1000000")
     assert [(a.collateral_symbol, a.loan_symbol, a.supply_assets) for a in vault.allocations] == [
         ("WETH", "USDC", Decimal("400000")),
         ("WBTC", "USDC", Decimal("300000")),
     ]
+
+
+async def test_other_users_positions_carry_no_weight(repository) -> None:
+    # The rival user's 900K WETH/USDC supply must not appear as vault weight.
+    vault = await repository.get_vault_allocations(_VAULT_ADDRESS, 1)
+
+    assert vault is not None
+    assert max(a.supply_assets for a in vault.allocations) == Decimal("400000")
 
 
 async def test_exited_market_carries_no_allocation(repository) -> None:

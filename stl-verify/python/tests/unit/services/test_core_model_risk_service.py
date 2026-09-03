@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -10,8 +11,14 @@ from app.domain.entities.allocation import EthAddress
 from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.risk import CoreModelDetails, RrcResult
 from app.domain.exceptions import InvalidOverrideError, ModelDataUnavailableError
-from app.ports.core_model_results_reader import CoreModelResult
-from app.ports.morpho_vault_allocations import MorphoVaultAllocations, MorphoVaultMarketAllocation
+from app.ports.core_model_results_reader import CoreModelResult, CoreModelResultsReader
+from app.ports.morpho_vault_allocations_reader import (
+    MorphoVaultAllocations,
+    MorphoVaultAllocationsReader,
+    MorphoVaultMarketAllocation,
+)
+from app.ports.receipt_token_lookup import ReceiptTokenLookup
+from app.risk_engine.core_model.config import INPUTS_DIR, load_commented_json
 from app.services.core_model_risk_service import CoreModelRiskService, morpho_market_key_index
 
 _PRIME = EthAddress("0xBcca60bB61934080951369a648Fb03DF4F96263C")
@@ -37,15 +44,17 @@ _MORPHO_KEYS = {
 }
 _MORPHO_ASSET = 7
 
-_INFO = ReceiptTokenInfo(
-    receipt_token_id=_MORPHO_ASSET,
-    protocol_id=3,
-    underlying_token_id=2,
-    receipt_token_address=b"\xaa" * 20,
-    chain_id=1,
-    protocol_name="Morpho Blue",
-    receipt_token_token_id=None,
-)
+
+def _info(chain_id: int = 1) -> ReceiptTokenInfo:
+    return ReceiptTokenInfo(
+        receipt_token_id=_MORPHO_ASSET,
+        protocol_id=3,
+        underlying_token_id=2,
+        receipt_token_address=b"\xaa" * 20,
+        chain_id=chain_id,
+        protocol_name="Morpho Blue",
+        receipt_token_token_id=None,
+    )
 
 
 def _morpho_result(
@@ -71,9 +80,8 @@ def _morpho_result(
     )
 
 
-def _alloc(collateral: str, supply: str, *, loan: str = "USDC", market_id: int = 1) -> MorphoVaultMarketAllocation:
+def _alloc(collateral: str, supply: str, *, loan: str = "USDC") -> MorphoVaultMarketAllocation:
     return MorphoVaultMarketAllocation(
-        morpho_market_id=market_id,
         collateral_symbol=collateral,
         loan_symbol=loan,
         supply_assets=Decimal(supply),
@@ -86,7 +94,6 @@ def _vault(
 ) -> MorphoVaultAllocations:
     return MorphoVaultAllocations(
         vault_id=11,
-        loan_token_symbol="USDC",
         total_assets=Decimal(total_assets),
         allocations=allocations,
     )
@@ -99,12 +106,12 @@ def _service(
     usd_exposure_error: Exception | None = None,
     *,
     results_by_key: dict[str, CoreModelResult] | None = None,
-    receipt_token: ReceiptTokenInfo | None = _INFO,
+    receipt_token: ReceiptTokenInfo | None = _info(),
     vault: MorphoVaultAllocations | None = None,
     morpho_asset_ids: frozenset[int] = frozenset(),
     min_coverage_pct: Decimal = Decimal("50"),
 ) -> CoreModelRiskService:
-    results_reader = AsyncMock()
+    results_reader = AsyncMock(spec=CoreModelResultsReader)
     if results_by_key is not None:
         results_reader.get_latest.side_effect = lambda key: results_by_key.get(key)
     else:
@@ -114,12 +121,12 @@ def _service(
         allocation_repo.get_usd_exposure.side_effect = usd_exposure_error
     else:
         allocation_repo.get_usd_exposure.return_value = usd_exposure
-    receipt_tokens = AsyncMock()
+    receipt_tokens = AsyncMock(spec=ReceiptTokenLookup)
     receipt_tokens.get.return_value = receipt_token
-    morpho_allocations = AsyncMock()
+    morpho_allocations = AsyncMock(spec=MorphoVaultAllocationsReader)
     morpho_allocations.get_vault_allocations.return_value = vault
     return CoreModelRiskService(
-        asset_to_market_key=asset_to_market_key or {1: "sparklend_usdc"},
+        asset_to_market_key={1: "sparklend_usdc"} if asset_to_market_key is None else asset_to_market_key,
         results_reader=results_reader,
         allocation_repo=allocation_repo,
         receipt_tokens=receipt_tokens,
@@ -190,8 +197,8 @@ async def test_compute_raises_typed_error_when_prime_has_no_position():
         await svc.compute(1, _PRIME, {})
 
 
-async def test_compute_rejects_asset_no_shape_serves():
-    svc = _service()
+async def test_compute_rejects_asset_no_shape_serves_before_any_lookup():
+    svc = _service(usd_exposure_error=AssertionError("exposure must not be read for an unsupported asset"))
     with pytest.raises(ValueError, match="unsupported asset_id=99"):
         await svc.compute(99, _PRIME, {})
 
@@ -245,44 +252,23 @@ async def test_compute_rejects_exceeding_max_usd_exposure():
         await svc.compute(1, _PRIME, {"usd_exposure": "2e15"})
 
 
-async def test_get_latest_result_returns_result_for_known_asset():
-    svc = _service()
-    result = await svc.get_latest_result(1)
-    assert result is not None
-    assert result.market_key == "sparklend_usdc"
-    assert result.crr_el_pct == Decimal("12.5")
-
-
-async def test_get_latest_result_returns_none_for_unknown_asset():
-    svc = _service()
-    result = await svc.get_latest_result(99)
-    assert result is None
-
-
-async def test_get_latest_result_returns_none_when_no_db_row():
-    svc = _service(get_latest_return=None)
-    result = await svc.get_latest_result(1)
-    assert result is None
-
-
-async def test_get_latest_result_returns_none_for_morpho_asset():
-    # A vault share has no single market, so the 1:1 lookup answers None.
-    svc = _morpho_service(vault=_vault(_alloc("CBBTC", "400000")))
-    assert await svc.get_latest_result(_MORPHO_ASSET) is None
-
-
 # ---------------------------------------------------------------------------
 # Morpho vault-share aggregation
 # ---------------------------------------------------------------------------
 
 
 async def test_morpho_fully_covered_vault_weights_crr_by_allocation():
-    # 1M total: 400K cbBTC (el 2.0), 300K WETH (el 1.0), 300K idle at 0.
+    # 1M total: 400K cbBTC (el 2.0, es 3.0, var 2.5), 300K WETH (el 1.0,
+    # es 1.5, var 0.5), 300K idle at 0.
     svc = _morpho_service(
         vault=_vault(_alloc("CBBTC", "400000"), _alloc("WETH", "300000")),
         results_by_key={
-            "morpho_cbbtc-usdc": _morpho_result("morpho_cbbtc-usdc", "2.0", n_mc=5000, forecast_step=30),
-            "morpho_weth-usdc": _morpho_result("morpho_weth-usdc", "1.0", n_mc=100, forecast_step=14),
+            "morpho_cbbtc-usdc": _morpho_result(
+                "morpho_cbbtc-usdc", "2.0", crr_es="3.0", crr_var="2.5", n_mc=5000, forecast_step=30
+            ),
+            "morpho_weth-usdc": _morpho_result(
+                "morpho_weth-usdc", "1.0", crr_es="1.5", crr_var="0.5", n_mc=100, forecast_step=14
+            ),
         },
     )
     result = await svc.compute(_MORPHO_ASSET, _PRIME, {})
@@ -291,6 +277,8 @@ async def test_morpho_fully_covered_vault_weights_crr_by_allocation():
     assert result.rrc_usd == Decimal("110.00")  # 10000 * 1.1%
     details = result.details
     assert isinstance(details, CoreModelDetails)
+    assert details.crr_es_pct == Decimal("1.6500")  # (400K*3.0 + 300K*1.5) / 1M
+    assert details.crr_var_pct == Decimal("1.1500")  # (400K*2.5 + 300K*0.5) / 1M
     assert details.protocol == "MORPHO"
     assert details.hhi is None
     assert details.coverage_pct == Decimal("100.00")
@@ -302,14 +290,17 @@ async def test_morpho_fully_covered_vault_weights_crr_by_allocation():
         ("morpho_cbbtc-usdc", Decimal("40.00")),
         ("morpho_weth-usdc", Decimal("30.00")),
     ]
-    assert details.markets[0].computed_at == _NOW
+    first = details.markets[0]
+    assert (first.crr_el_pct, first.crr_es_pct, first.crr_var_pct) == (Decimal("2.0"), Decimal("3.0"), Decimal("2.5"))
+    assert first.n_mc == 5000
+    assert first.computed_at == _NOW
 
 
 async def test_morpho_lltv_tranches_of_one_pair_merge_into_one_slice():
     # Two Blue markets share the cbBTC/USDC pair (different LLTVs): one CORE
     # market key, so their weights add into a single slice and a single read.
     svc = _morpho_service(
-        vault=_vault(_alloc("CBBTC", "400000", market_id=1), _alloc("CBBTC", "200000", market_id=2)),
+        vault=_vault(_alloc("CBBTC", "400000"), _alloc("CBBTC", "200000")),
         results_by_key={"morpho_cbbtc-usdc": _morpho_result("morpho_cbbtc-usdc", "2.0")},
     )
     result = await svc.compute(_MORPHO_ASSET, _PRIME, {})
@@ -321,18 +312,6 @@ async def test_morpho_lltv_tranches_of_one_pair_merge_into_one_slice():
     ]
     # crr_el = 600K*2.0 / (600K + 400K idle)
     assert result.comparable_crr_pct == Decimal("1.2000")
-
-
-async def test_morpho_coverage_equal_to_the_minimum_is_served():
-    # covered = 400K + 300K idle = 70% with the threshold set exactly there.
-    svc = _morpho_service(
-        vault=_vault(_alloc("CBBTC", "400000"), _alloc("XAUT", "300000")),
-        results_by_key={"morpho_cbbtc-usdc": _morpho_result("morpho_cbbtc-usdc", "2.0")},
-        min_coverage_pct=Decimal("70"),
-    )
-    result = await svc.compute(_MORPHO_ASSET, _PRIME, {})
-    assert isinstance(result.details, CoreModelDetails)
-    assert result.details.coverage_pct == Decimal("70.00")
 
 
 async def test_morpho_uncovered_slice_is_excluded_and_reported_as_coverage():
@@ -362,12 +341,56 @@ async def test_morpho_coverage_below_minimum_is_not_served():
         await svc.compute(_MORPHO_ASSET, _PRIME, {})
 
 
+async def test_morpho_coverage_gate_compares_unrounded_coverage():
+    # True coverage 49.995% would display as 50.00 after rounding; the gate
+    # must still refuse it against a 50% minimum, and say the exact figure.
+    svc = _morpho_service(
+        vault=_vault(_alloc("CBBTC", "499950"), _alloc("XAUT", "500050")),
+        results_by_key={"morpho_cbbtc-usdc": _morpho_result("morpho_cbbtc-usdc", "2.0")},
+    )
+    with pytest.raises(ModelDataUnavailableError, match="49.9950%"):
+        await svc.compute(_MORPHO_ASSET, _PRIME, {})
+
+
+async def test_morpho_coverage_just_above_minimum_is_served():
+    svc = _morpho_service(
+        vault=_vault(_alloc("CBBTC", "500040"), _alloc("XAUT", "499960")),
+        results_by_key={"morpho_cbbtc-usdc": _morpho_result("morpho_cbbtc-usdc", "2.0")},
+    )
+    result = await svc.compute(_MORPHO_ASSET, _PRIME, {})
+    assert isinstance(result.details, CoreModelDetails)
+    assert result.details.coverage_pct == Decimal("50.00")
+
+
+async def test_morpho_coverage_equal_to_the_minimum_is_served():
+    # covered = 400K + 300K idle = 70% with the threshold set exactly there.
+    svc = _morpho_service(
+        vault=_vault(_alloc("CBBTC", "400000"), _alloc("XAUT", "300000")),
+        results_by_key={"morpho_cbbtc-usdc": _morpho_result("morpho_cbbtc-usdc", "2.0")},
+        min_coverage_pct=Decimal("70"),
+    )
+    result = await svc.compute(_MORPHO_ASSET, _PRIME, {})
+    assert isinstance(result.details, CoreModelDetails)
+    assert result.details.coverage_pct == Decimal("70.00")
+
+
 async def test_morpho_no_covered_market_is_not_served():
     svc = _morpho_service(
         vault=_vault(_alloc("XAUT", "400000")),
         results_by_key={},
     )
-    with pytest.raises(ModelDataUnavailableError, match="coverage is 0%"):
+    with pytest.raises(ModelDataUnavailableError, match="idle liquidity alone is not served"):
+        await svc.compute(_MORPHO_ASSET, _PRIME, {})
+
+
+async def test_morpho_idle_heavy_vault_with_only_uncovered_markets_is_not_served():
+    # 70% idle + 30% uncovered would pass a 50% coverage gate, but with no
+    # computed market there are no model params to report: refused by design.
+    svc = _morpho_service(
+        vault=_vault(_alloc("XAUT", "300000")),
+        results_by_key={},
+    )
+    with pytest.raises(ModelDataUnavailableError, match="idle liquidity alone is not served"):
         await svc.compute(_MORPHO_ASSET, _PRIME, {})
 
 
@@ -389,9 +412,9 @@ async def test_morpho_allocations_exceeding_stale_total_assets_stay_a_partition(
     assert result.comparable_crr_pct == Decimal("1.5714")
 
 
-async def test_morpho_collateral_symbols_match_case_insensitively():
+async def test_morpho_symbols_match_case_insensitively_on_both_sides():
     svc = _morpho_service(
-        vault=_vault(_alloc("cbBTC", "400000"), _alloc("weth", "600000")),
+        vault=_vault(_alloc("cbBTC", "400000", loan="usdc"), _alloc("weth", "600000")),
         results_by_key={
             "morpho_cbbtc-usdc": _morpho_result("morpho_cbbtc-usdc", "2.0"),
             "morpho_weth-usdc": _morpho_result("morpho_weth-usdc", "1.0"),
@@ -428,12 +451,29 @@ async def test_morpho_missing_receipt_token_record_is_not_served():
         await svc.compute(_MORPHO_ASSET, _PRIME, {})
 
 
+async def test_morpho_non_mainnet_vault_is_not_served():
+    # Market keys match by symbol pair only; without this gate a Base vault's
+    # cbBTC/USDC allocation would silently take the mainnet result.
+    svc = _morpho_service(
+        receipt_token=_info(chain_id=8453),
+        vault=_vault(_alloc("CBBTC", "400000")),
+        results_by_key={"morpho_cbbtc-usdc": _morpho_result("morpho_cbbtc-usdc", "2.0")},
+    )
+    with pytest.raises(ModelDataUnavailableError, match="mainnet-only"):
+        await svc.compute(_MORPHO_ASSET, _PRIME, {})
+
+
 async def test_morpho_static_mapping_wins_over_vault_aggregation():
     # An asset in both shapes serves the 1:1 market, not the vault aggregate.
     svc = _morpho_service(asset_to_market_key={_MORPHO_ASSET: "sparklend_usdc"})
     result = await svc.compute(_MORPHO_ASSET, _PRIME, {})
     assert isinstance(result.details, CoreModelDetails)
     assert result.details.protocol == "SPARKLEND"
+
+
+def test_vault_market_allocation_rejects_non_positive_supply():
+    with pytest.raises(ValueError, match="supply_assets must be positive"):
+        _alloc("CBBTC", "0")
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +489,13 @@ def test_morpho_market_key_index_indexes_morpho_pairs_uppercased():
     assert morpho_market_key_index(configs) == {("CBBTC", "USDC"): "morpho_cbbtc-usdc"}
 
 
+def test_morpho_market_key_index_fills_omitted_keys_from_the_runner_defaults():
+    # The cronjob resolves the same entry through load_params, so an omitted
+    # MORPHO_MARKET/LOAN_TOKEN must index under the defaults, not crash boot.
+    configs = {"morpho_default": {"PROTOCOL": "MORPHO"}}
+    assert morpho_market_key_index(configs) == {("CBBTC", "USDC"): "morpho_default"}
+
+
 def test_morpho_market_key_index_rejects_duplicate_pairs():
     configs = {
         "morpho_a": {"PROTOCOL": "MORPHO", "MORPHO_MARKET": "CBBTC", "LOAN_TOKEN": "USDC"},
@@ -460,10 +507,6 @@ def test_morpho_market_key_index_rejects_duplicate_pairs():
 
 def test_morpho_market_key_index_indexes_the_packaged_market_configs():
     """The real market_configs.json parses and carries the two live Blue pairs."""
-    from pathlib import Path
-
-    from app.risk_engine.core_model.config import INPUTS_DIR, load_commented_json
-
     index = morpho_market_key_index(load_commented_json(Path(INPUTS_DIR) / "market_configs.json"))
     assert index[("CBBTC", "USDC")] == "morpho_cbbtc-usdc"
     assert index[("WETH", "USDC")] == "morpho_weth-usdc"

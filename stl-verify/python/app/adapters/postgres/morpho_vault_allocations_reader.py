@@ -11,16 +11,16 @@ from decimal import Decimal
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.ports.morpho_vault_allocations import (
+from app.adapters.postgres._reading import reading
+from app.ports.morpho_vault_allocations_reader import (
     MorphoVaultAllocations,
     MorphoVaultMarketAllocation,
 )
 
-# The vault, its loan token, and its latest total_assets (NULL with no state
-# row yet — a vault the indexer created but has not snapshotted).
+# The vault, its loan-token decimals, and its latest total_assets (NULL with no
+# state row yet — a vault the indexer created but has not snapshotted).
 _VAULT_SQL = text("""
     SELECT v.id AS vault_id,
-           t.symbol AS loan_symbol,
            t.decimals AS loan_decimals,
            vs.total_assets
     FROM morpho_vault v
@@ -52,8 +52,7 @@ _ALLOCATIONS_SQL = text("""
         ORDER BY mp.morpho_market_id,
                  mp.block_number DESC, mp.block_version DESC, mp.processing_version DESC
     )
-    SELECT lp.morpho_market_id,
-           ct.symbol AS collateral_symbol,
+    SELECT ct.symbol AS collateral_symbol,
            lt.symbol AS loan_symbol,
            lt.decimals AS loan_decimals,
            lp.supply_assets
@@ -66,38 +65,44 @@ _ALLOCATIONS_SQL = text("""
 """)
 
 
-class MorphoVaultAllocationsRepository:
+def _token_units(raw: object, decimals: int) -> Decimal:
+    return Decimal(str(raw)) / (Decimal(10) ** decimals)
+
+
+class PostgresMorphoVaultAllocationsReader:
     """Postgres reader for a Morpho vault's per-market allocations."""
 
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
 
     async def get_vault_allocations(self, receipt_token_address: bytes, chain_id: int) -> MorphoVaultAllocations | None:
-        async with self._engine.connect() as conn:
+        async with reading(self._engine, what=f"morpho vault allocations chain_id={chain_id}") as conn:
             vault_row = (
                 await conn.execute(_VAULT_SQL, {"addr": receipt_token_address, "chain_id": chain_id})
             ).fetchone()
-            if vault_row is None:
-                return None
-            rows = (await conn.execute(_ALLOCATIONS_SQL, {"vault_id": vault_row.vault_id})).fetchall()
+            rows = (
+                []
+                if vault_row is None
+                else (await conn.execute(_ALLOCATIONS_SQL, {"vault_id": vault_row.vault_id})).fetchall()
+            )
 
+        if vault_row is None:
+            return None
         total_assets = (
-            Decimal(str(vault_row.total_assets)) / (Decimal(10) ** int(vault_row.loan_decimals))
+            _token_units(vault_row.total_assets, int(vault_row.loan_decimals))
             if vault_row.total_assets is not None
             else Decimal("0")
         )
         allocations = tuple(
             MorphoVaultMarketAllocation(
-                morpho_market_id=row.morpho_market_id,
                 collateral_symbol=row.collateral_symbol,
                 loan_symbol=row.loan_symbol,
-                supply_assets=Decimal(str(row.supply_assets)) / (Decimal(10) ** int(row.loan_decimals)),
+                supply_assets=_token_units(row.supply_assets, int(row.loan_decimals)),
             )
             for row in rows
         )
         return MorphoVaultAllocations(
             vault_id=vault_row.vault_id,
-            loan_token_symbol=vault_row.loan_symbol,
             total_assets=total_assets,
             allocations=allocations,
         )

@@ -14,23 +14,34 @@ Two serving shapes:
 """
 
 import asyncio
+import logging
 from collections.abc import Mapping
+from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
-from typing import Any, NamedTuple
+from typing import Any
 
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.risk import CoreModelDetails, CoreModelMarketAllocation, ModelName, RrcResult
 from app.domain.exceptions import ModelDataUnavailableError
 from app.ports.allocation_repository import AllocationRepositoryPort
 from app.ports.core_model_results_reader import CoreModelResult, CoreModelResultsReader
-from app.ports.morpho_vault_allocations import MorphoVaultAllocations, MorphoVaultAllocationsReader
+from app.ports.morpho_vault_allocations_reader import MorphoVaultAllocations, MorphoVaultAllocationsReader
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
+from app.risk_engine.core_model.config import load_params
 from app.services._overrides import parse_usd_exposure_override
+
+logger = logging.getLogger(__name__)
 
 _HUNDRED = Decimal("100")
 _USD_CENT = Decimal("0.01")
 _PCT = Decimal("0.01")
 _CRR_PCT = Decimal("0.0001")
+_MORPHO_PROTOCOL = "MORPHO"
+
+# CORE market keys are Ethereum-only (the positions reader refuses any other
+# network), so vault aggregation must never match another chain's allocations
+# to them. Both the boot snapshot and the service gate on this.
+MAINNET_CHAIN_ID = 1
 
 
 def morpho_market_key_index(market_configs: Mapping[str, Mapping[str, Any]]) -> dict[tuple[str, str], str]:
@@ -39,33 +50,36 @@ def morpho_market_key_index(market_configs: Mapping[str, Mapping[str, Any]]) -> 
     A Blue market key spans the token pair, not one LLTV tranche, and the pair
     is matched by display symbol — the same identity the runner's positions
     reader uses to select the markets it computes (``MORPHO_MARKET`` is the
-    collateral symbol). Call at startup: a malformed config must fail the boot,
-    not the first Morpho request.
+    collateral symbol). Each entry resolves through ``load_params`` so an
+    omitted key takes the same default the runner would use. Call at startup:
+    a malformed config must fail the boot, not the first Morpho request.
     """
     index: dict[tuple[str, str], str] = {}
     for market_key, config in market_configs.items():
-        if str(config.get("PROTOCOL", "")).upper() != "MORPHO":
+        if str(config.get("PROTOCOL", "")).upper() != _MORPHO_PROTOCOL:
             continue
-        pair = (str(config["MORPHO_MARKET"]).upper(), str(config["LOAN_TOKEN"]).upper())
+        params = load_params(overrides=dict(config))
+        pair = (str(params["MORPHO_MARKET"]).upper(), str(params["LOAN_TOKEN"]).upper())
         if pair in index:
             raise ValueError(f"duplicate MORPHO market pair {pair}: {index[pair]!r} and {market_key!r}")
         index[pair] = market_key
     return index
 
 
-class _CoveredMarket(NamedTuple):
+@dataclass(frozen=True)
+class _CoveredMarket:
     """One CORE-computed market with the vault supply allocated to it."""
 
     supply: Decimal
     result: CoreModelResult
 
 
-class _WeightBase(NamedTuple):
+@dataclass(frozen=True)
+class _WeightBase:
     """The weight partition of a vault: covered supply + idle over ``total``."""
 
     total: Decimal
     covered_weight: Decimal
-    coverage_pct: Decimal
 
 
 class CoreModelRiskService:
@@ -79,7 +93,7 @@ class CoreModelRiskService:
 
     def __init__(
         self,
-        asset_to_market_key: dict[int, str],
+        asset_to_market_key: Mapping[int, str],
         results_reader: CoreModelResultsReader,
         allocation_repo: AllocationRepositoryPort,
         *,
@@ -101,25 +115,19 @@ class CoreModelRiskService:
     def applies_to(self, asset_id: int, prime_id: EthAddress) -> bool:  # noqa: ARG002
         return asset_id in self._asset_to_market_key or asset_id in self._morpho_asset_ids
 
-    async def get_latest_result(self, asset_id: int) -> CoreModelResult | None:
-        market_key = self._asset_to_market_key.get(asset_id)
-        if market_key is None:
-            return None
-        return await self._results_reader.get_latest(market_key)
-
     async def compute(
         self,
         asset_id: int,
         prime_id: EthAddress,
         overrides: Mapping[str, Any],
     ) -> RrcResult:
-        usd_exposure = await self._resolve_usd_exposure(asset_id, prime_id, overrides)
         market_key = self._asset_to_market_key.get(asset_id)
+        if market_key is None and asset_id not in self._morpho_asset_ids:
+            raise ValueError(f"unsupported asset_id={asset_id}")
+        usd_exposure = await self._resolve_usd_exposure(asset_id, prime_id, overrides)
         if market_key is not None:
             return await self._compute_direct(asset_id, prime_id, usd_exposure, market_key)
-        if asset_id in self._morpho_asset_ids:
-            return await self._compute_morpho_vault(asset_id, prime_id, usd_exposure)
-        raise ValueError(f"unsupported asset_id={asset_id}")
+        return await self._compute_morpho_vault(asset_id, prime_id, usd_exposure)
 
     async def _compute_direct(
         self,
@@ -166,19 +174,24 @@ class CoreModelRiskService:
         without a computed CORE result — is excluded from the weighted average
         and reported through ``coverage_pct``; below the configured minimum the
         aggregate is not served at all, so the caller's preference chain falls
-        back instead of extrapolating from a thin covered slice.
+        back instead of extrapolating from a thin covered slice. At least one
+        computed market is required: idle liquidity alone carries none of the
+        model params an aggregate must report.
         """
         vault = await self._resolve_vault(asset_id)
         covered = await self._covered_markets(vault)
         if not covered:
             raise ModelDataUnavailableError(
                 f"no CORE-computed market behind any allocation of asset_id={asset_id} "
-                f"(vault_id={vault.vault_id}); coverage is 0%"
+                f"(vault_id={vault.vault_id}); idle liquidity alone is not served"
             )
         base = self._weight_base(vault, covered)
-        if base.coverage_pct < self._min_coverage_pct:
+        # Exact comparison: quantizing first would round true 49.995% coverage
+        # up to a 50% minimum and serve it.
+        if base.covered_weight * _HUNDRED < self._min_coverage_pct * base.total:
+            exact_pct = (base.covered_weight / base.total * _HUNDRED).quantize(_CRR_PCT, rounding=ROUND_HALF_EVEN)
             raise ModelDataUnavailableError(
-                f"CORE coverage for asset_id={asset_id} is {base.coverage_pct}% of vault assets, "
+                f"CORE coverage for asset_id={asset_id} is {exact_pct}% of vault assets, "
                 f"below the {self._min_coverage_pct}% minimum (vault_id={vault.vault_id})"
             )
         details = self._aggregate_details(covered, base)
@@ -198,8 +211,8 @@ class CoreModelRiskService:
                 supply_by_key[key] = supply_by_key.get(key, Decimal("0")) + alloc.supply_assets
         results = await asyncio.gather(*(self._results_reader.get_latest(key) for key in supply_by_key))
         covered = [
-            _CoveredMarket(supply, result)
-            for supply, result in zip(supply_by_key.values(), results, strict=True)
+            _CoveredMarket(supply=supply, result=result)
+            for (_key, supply), result in zip(supply_by_key.items(), results, strict=True)
             if result is not None
         ]
         return sorted(covered, key=lambda market: market.supply, reverse=True)
@@ -209,12 +222,12 @@ class CoreModelRiskService:
         allocated = sum((alloc.supply_assets for alloc in vault.allocations), Decimal("0"))
         # State and position snapshots are written at different blocks, so the
         # allocation sum can transiently exceed total_assets; the larger of the
-        # two keeps the weights a partition (idle >= 0, coverage <= 100).
+        # two keeps the weights a partition (idle >= 0, coverage <= 100). A
+        # covered market implies allocated > 0, so total is never zero here.
         total = max(vault.total_assets, allocated)
         idle = total - allocated
         covered_weight = sum((market.supply for market in covered), Decimal("0")) + idle
-        coverage_pct = (covered_weight / total * _HUNDRED).quantize(_PCT, rounding=ROUND_HALF_EVEN)
-        return _WeightBase(total=total, covered_weight=covered_weight, coverage_pct=coverage_pct)
+        return _WeightBase(total=total, covered_weight=covered_weight)
 
     @staticmethod
     def _aggregate_details(covered: list[_CoveredMarket], base: _WeightBase) -> CoreModelDetails:
@@ -222,19 +235,28 @@ class CoreModelRiskService:
             total_value = sum((weight * value for weight, value in values), Decimal("0"))
             return (total_value / base.covered_weight).quantize(_CRR_PCT, rounding=ROUND_HALF_EVEN)
 
+        forecast_steps = {market.result.forecast_step for market in covered}
+        copula_types = {market.result.copula_type for market in covered}
+        if len(forecast_steps) > 1 or len(copula_types) > 1:
+            # Config-driven params are expected to agree across markets; a
+            # divergence makes the aggregate's reported params approximate.
+            logger.warning(
+                "morpho vault slices disagree on model params (forecast_steps=%s, copula_types=%s); "
+                "the aggregate reports the minimum horizon and the largest slice's copula",
+                sorted(forecast_steps),
+                sorted(copula_types),
+            )
         return CoreModelDetails(
             risk_model="core_model",
             crr_el_pct=weighted([(market.supply, market.result.crr_el_pct) for market in covered]),
             crr_es_pct=weighted([(market.supply, market.result.crr_es_pct) for market in covered]),
             crr_var_pct=weighted([(market.supply, market.result.crr_var_pct) for market in covered]),
             hhi=None,
-            protocol="MORPHO",
-            forecast_step=min(market.result.forecast_step for market in covered),
+            protocol=_MORPHO_PROTOCOL,
+            forecast_step=min(forecast_steps),
             n_mc=min(market.result.n_mc for market in covered),
-            # Every market config pins the same copula; per-slice params stay
-            # visible in ``markets`` if that ever diverges.
             copula_type=covered[0].result.copula_type,
-            coverage_pct=base.coverage_pct,
+            coverage_pct=(base.covered_weight / base.total * _HUNDRED).quantize(_PCT, rounding=ROUND_HALF_EVEN),
             markets=tuple(
                 CoreModelMarketAllocation(
                     market_key=market.result.market_key,
@@ -272,6 +294,12 @@ class CoreModelRiskService:
         info = await self._receipt_tokens.get(asset_id)
         if info is None:
             raise ModelDataUnavailableError(f"no receipt-token record for asset_id={asset_id}")
+        if info.chain_id != MAINNET_CHAIN_ID:
+            # Second layer behind the boot snapshot's chain filter: symbol-pair
+            # matching would otherwise hand another chain's vault mainnet results.
+            raise ModelDataUnavailableError(
+                f"CORE markets are mainnet-only; asset_id={asset_id} is on chain {info.chain_id}"
+            )
         vault = await self._morpho_allocations.get_vault_allocations(info.receipt_token_address, info.chain_id)
         if vault is None:
             raise ModelDataUnavailableError(

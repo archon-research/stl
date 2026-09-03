@@ -119,6 +119,20 @@ class PostgresCryptoLendingReader:
             row.receipt_token_id for row in rows if _normalize_protocol_name(row.protocol_name) in _SUPPORTED_PROTOCOLS
         }
 
+    async def list_morpho_asset_ids(self, chain_id: int) -> frozenset[int]:
+        """Return the receipt_token_ids of Morpho vault shares on ``chain_id``.
+
+        Serves the CORE model's vault aggregation, which is chain-gated (its
+        market keys are mainnet-only); classification lives here so the
+        protocol-name normalization has one home.
+        """
+        rows = await self._receipt_token_repo.list_protocol_pairs()
+        return frozenset(
+            row.receipt_token_id
+            for row in rows
+            if row.chain_id == chain_id and _normalize_protocol_name(row.protocol_name) in _MORPHO
+        )
+
     async def get_receipt_token(self, receipt_token_id: int) -> ReceiptTokenInfo | None:
         return await self._receipt_token_repo.get(receipt_token_id)
 
@@ -359,13 +373,3 @@ class PostgresCryptoLendingReader:
 
 def _normalize_protocol_name(protocol_name: str) -> str:
     return _NORMALIZE_RE.sub("_", protocol_name.strip().casefold())
-
-
-def is_morpho_protocol_name(protocol_name: str) -> bool:
-    """Whether a receipt token's protocol is Morpho Blue (a MetaMorpho vault share).
-
-    Public so the composition root can snapshot the Morpho receipt-token ids the
-    CORE model serves via vault→market aggregation, using the same protocol-name
-    normalization the crypto-lending routing uses.
-    """
-    return _normalize_protocol_name(protocol_name) in _MORPHO
