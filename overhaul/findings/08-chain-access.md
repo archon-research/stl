@@ -97,6 +97,21 @@ Repo-wide hand-rolled mock/fake/stub types: 155.
 **Ports** implemented here: `Multicaller`, `BlockchainClient`, `BlockSubscriber`,
 `BlockVerifier`, `PSM3Caller`, `VatCaller`, `CallArchiver` (consumed).
 
+**The three layers, deletion-tested.** The names suggest overlap; the responsibilities barely
+touch.
+
+| layer | what it actually does | delete it? |
+|---|---|---|
+| `adapters/outbound/alchemy` (1,624) | the *block-payload* path only: `eth_newHeads` WebSocket + HTTP JSON-RPC for block/receipts/traces/blobs. Used by the watcher, `raw_data_backup`, `backfill_gaps`, `null-payload-refill`. Zero state reads, zero `eth_call`. | **Earns its keep** for the 6 live methods (batched by-hash fetch, null-result handling, telemetry). But 7 of its 13 port methods are dead (F08.7) and its retry loop and WebSocket mechanics duplicate `rpchttp`/`wsclient` (F08.5, F08.8) — ~40% of it is duplication or dead weight. |
+| `pkg/blockchain` (1,459) | **not** a chain-access layer: 73% is oracle-price fetching, plus a protocol registry, two oracle resolvers, the `Multicall3` address, and `ExecutePinned`. | **Would not vanish, but does not belong** — split into `oraclepricing` + `protocolregistry` + the pin package (F08.11). Nothing here mediates chain access except `ExecutePinned` (30 lines). |
+| `pkg/blockchain/multicall` (375) | the real state-read layer: `aggregate3` pack/unpack, hash- and number-pinned entry points, nil/zero rejection, batched `eth_call` fallback for `msg.sender == 0` contracts. | **Deepest module in the area.** Delete it and 51 call sites hand-roll `aggregate3` packing and the pin argument. Two adapters + one decorator = a genuine seam. |
+| `adapters/outbound/blockchain` (674) | two protocol-specific callers (`PSM3Caller`, `VatCaller`) sitting *on top of* `Multicaller`, behind their own ports. | **Earns its keep as a location**, but the two files are inconsistent siblings: divergent count-check helpers (F08.2) and opposite error stances (F08.13). |
+
+So the layering is fine; the problems are that one layer is misnamed and mis-scoped (F08.11),
+the topmost one duplicates two shared packages (F08.5, F08.8), and the state-read layer's
+strongest asset — being the single place a pin is validated — is undermined by the pin being
+chosen 51 times upstream (F08.1).
+
 **Largest functions** (non-test, in area):
 
 | lines | location |
@@ -294,8 +309,8 @@ three local types and the four fetchers.
 
 **Benefits.** ~250 lines deleted. One place to fix the swallowed-symbol bug. Locality: the
 "static metadata is number-pinned on purpose" rationale is stated once (it is currently
-copy-pasted as a 4-line comment at `aavelike:585-588`, `morpho:267-271`, `morpho:1239-1241`,
-`allocation_tracker:482-484`).
+copy-pasted as a 4-line comment at `aavelike:585-588`, `morpho:268-272`, `morpho:1239-1241`,
+`allocation_tracker:484-486`).
 
 **Risk / migration.** Behaviour change: two indexers start erroring on an undecodable symbol
 instead of storing `""`. That is the desired direction but needs a check for existing `''`

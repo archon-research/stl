@@ -48,7 +48,7 @@ Three things are inverted relative to the stated architecture:
 |---|---|
 | `ports/outbound` files / LOC | 46 (45 src + 1 test) / 2,263 src LOC |
 | `ports/inbound` files / LOC | 1 / 32 |
-| Interfaces: outbound / inbound | 59 / 2 |
+| Interfaces: outbound / inbound | 59 / 2 (+1 outbound port misfiled in `domain/entity`, §F09.13) |
 | Non-interface types declared in `ports/outbound` | **44 structs + 1 string enum** |
 | Port files importing `jackc/pgx/v5` | **18 / 45 (40%)** |
 | Port methods taking `tx pgx.Tx` | **44** |
@@ -154,6 +154,10 @@ has **zero non-test importers** (verified: `grep -rn 'adapters/outbound/memory' 
 | `Repository` | repository.go | 1 | **0** (only `memory.Repository`, test-only pkg) | 2 | 2 | **dead** |
 | `VerificationService` | inbound/services.go | 1 | 1 (`services.VerificationService`, never wired) | 0 | 2 | **dead** |
 | `HealthChecker` | inbound/services.go | 2 | **0** | 1 | 1 | **dead** |
+
+The census covers the 61 interfaces declared under `internal/ports/`. It **misses one**:
+`entity.BlockQuerier` (`internal/domain/entity/debt_types.go:11`) is an outbound port declared in the
+domain package — 1 method, 3 consuming services, 4 test doubles, 0 compile-time assertions. See F09.13.
 
 Notes on the census: `S3Reader`/`S3RangeReader`, `S3Writer`/`S3Overwriter`,
 `AnchorageSnapshotRepository`/`AnchorageOperationRepository`,
@@ -744,6 +748,81 @@ F09.4 (delete dead, S) → F09.11 (move `common`, S) → F09.1 (`pgx.Tx` → `Tx
 F09.3 (`BlockRef`, L) → F09.6 (validation helpers, M) → F09.8 merges (M) →
 F09.2 store grouping (XL, one context per PR) → F09.5 (entity/ports type migration, L) →
 F09.7 (test doubles, tracks F09.2).
+
+---
+
+### F09.13 — Domain purity: an outbound port is declared inside `domain/entity`, and it is the only reason the domain imports `context`
+
+**Strength**: Strong
+**Files**: `internal/domain/entity/debt_types.go:1-13`, consumed at
+`internal/services/prime_debt/service.go:72,87`, `internal/services/psm3/service.go:63,78`,
+`internal/services/fluid_vault_indexer/service.go:72,96,159`
+**Problem** (probe 4): `go list -f '{{.Imports}}' ./internal/domain/...` returns
+
+```
+entity:       [bytes context encoding/json fmt go-ethereum/common go-ethereum/crypto
+               maps math math/big slices strings time]
+entity/maple: [fmt math/big time]
+```
+
+Three non-stdlib/non-pure entries, in descending severity:
+
+1. **`context`** — imported by exactly one file, `debt_types.go`, because that file declares a port:
+   ```go
+   // BlockQuerier abstracts block number lookups from an Ethereum node.
+   type BlockQuerier interface {
+       BlockNumber(ctx context.Context) (uint64, error)
+   }
+   ```
+   Its own doc comment says "from an Ethereum node" — it is an outbound infrastructure port, sitting
+   in the innermost layer. It is consumed by 3 services as `entity.BlockQuerier`, has **4
+   hand-rolled test doubles** (`psm3.fakeBlockQuerier`, `prime_debt.fakeBlockQuerier`,
+   `fluid_vault_indexer.stubBlockQuerier` ×2), and **no `var _` production assertion anywhere** — so
+   it is a 60th port that my `ports/`-scoped census in §2a does not even see, and whose production
+   implementation is unverified by the compiler.
+
+2. **`go-ethereum/common` + `go-ethereum/crypto`** across 15 files. `common.Address`/`common.Hash`
+   are arguably part of the domain's vocabulary (an address *is* a domain concept), so this is
+   defensible — but it directly contradicts `entity/maple/doc.go`'s claim that the parent package
+   "has no dependencies outside the standard library".
+
+3. **`encoding/json`** in `protocol_event.go`, `curve.go`, `uniswap_v3.go` — a serialisation format
+   inside domain entities. `protocol_event.go` validates `"%s must be valid JSON"` (2 sites), i.e.
+   the domain checks a persistence encoding.
+
+`entity/maple` is the only genuinely pure package in the tree (`fmt`, `math/big`, `time`).
+
+Same file, second issue: `DebtResult` (`debt_types.go:35-41`) carries `Reverted bool` and
+`Err error` as *fields*, with a 14-line doc comment explaining that exactly one of
+`{Rate+Art, Reverted, Err}` is meaningful. That is a sum type modelled as a struct with three
+mutually-exclusive states, in a codebase whose `AGENTS.md` forbids swallowing partial failures — the
+invariant is enforced only by that comment and by whatever each of the 3 consumers remembers to
+check.
+
+**Proposed change**: move `BlockQuerier` to `ports/outbound` (or fold its single method into
+`BlockchainClient`, which already has 12 methods including block reads, and which `alchemy.Client`
+already implements — likely making `BlockQuerier` deletable outright); add the missing `var _`
+assertion for whatever satisfies it in production. Move `DebtQuery`/`DebtResult` alongside
+`VatCaller` in the ports package (they are that port's request/response DTOs and are already used in
+its signature at `ports/outbound/vat_caller.go:27`), and replace `DebtResult`'s three-state struct
+with an explicit outcome — either a small enum field plus a constructor per case, or three typed
+results — so the "exactly one of" invariant is checked by the compiler. Then `domain/entity` drops
+`context` and gets closer to the purity its own doc comments claim. Add a CI guard: a
+`go list`-based check that `./internal/domain/...` imports nothing beyond stdlib plus an explicit
+allowlist (`go-ethereum/common`, `go-ethereum/crypto`) — that is 5 lines in `Makefile`'s `ci-checks`
+and it prevents the next `context`.
+
+**Benefits**: the innermost layer stops declaring infrastructure; the port census becomes complete
+and compiler-checked; the 4 `BlockQuerier` doubles collapse into the `BlockchainClient` double that
+`testutil` already has (F09.7); `DebtResult`'s tri-state comment becomes a type.
+**Risk / migration**: `BlockQuerier`'s move is a pure import change across 3 services + 4 test
+files. Folding it into `BlockchainClient` needs a check that the 3 consuming services can accept the
+bigger dependency — if not, keep it as its own 1-method port but in the right package. The
+`DebtResult` reshape is the only part that changes behaviour and needs care: the `Reverted` path is
+Spark's documented "no debt this block" signal under `AllowFailure: true`, so the three-way
+distinction must be preserved exactly, not collapsed.
+**Size**: S (move + CI guard) / M (including the `DebtResult` reshape)
+**Depends on / enables**: feeds F09.5 and F09.7
 
 ## 4. Cross-area observations
 

@@ -18,7 +18,7 @@ commit; no PR). Started 2026-09-03 from `main` at `c4e0a8f2`.
 |---|---|---|---|
 | 01 | findings/01-morpho.md | services/morpho_indexer, morpho_v2_bootstrap, cmd morpho-*, postgres morpho repos | FINAL (15 findings) |
 | 02 | findings/02-allocation-prime-aave.md | services/allocation_tracker, aavelike_position_tracker, pkg/aavelike, prime_debt, sparklend*, reference_capital_*, their cmd/ and repos | running |
-| 03 | findings/03-dex-amm.md | services/curveindexer, uniswapv3indexer, pkg/uniswapv3, fluid_vault_indexer, psm3, dexconsumer, cex_orderbook_indexer, adapters/orderbook, pkg/wsclient, dextelemetry, cmd dex-*/cex-* | running |
+| 03 | findings/03-dex-amm.md | services/curveindexer, uniswapv3indexer, pkg/uniswapv3, fluid_vault_indexer, psm3, dexconsumer, cex_orderbook_indexer, adapters/orderbook, pkg/wsclient, dextelemetry, cmd dex-*/cex-* | FINAL (17 findings) |
 | 04 | findings/04-pricing.md | services/oracle_price_worker, oracle_backfill, oracle_pricing, offchain_price_fetcher, live_data, adapters coingecko/sky/skydata, inbound http, cmd oracle-*/offchain-* | FINAL (16 findings) |
 | 05 | findings/05-block-pipeline.md | cmd/base/watcher, services/backfill_gaps, raw_data_backup, data_validator, transform_worker, adapters s3/sns/sqs/redis/cache/memory/blockverifier, common/sqsutil, pkg/lifecycle, postgres blockstate repo | running |
 | 06 | findings/06-offchain-temporal-shared.md | services/anchorage_tracker, maple_graphql_indexer, adapters/maple, entity/maple, adapters/etherscan, adapters/temporal, services/shared, pkg httpclient/retry/proxytls/telemetry/env | FINAL (13 findings) |

@@ -1,4 +1,4 @@
-Status: DRAFT — investigation in progress
+Status: FINAL
 # 11 — Test infrastructure, test doubles, lint/CI/build tooling, dependency hygiene
 
 ## 1. Area map
@@ -33,7 +33,7 @@ meta-test proving `GOEXPERIMENT=goroutineleakprofile` fires).
                                 │ imports
                     internal/ports/outbound (61 interfaces)
                                 ▲
-        148 hand-rolled doubles │ (Mock*/fake*/stub*) in 71 files,
+        148 hand-rolled doubles │ (Mock*/fake*/stub*) in 76 files,
         scattered across 60+ packages; 11 ports have ≥3 doubles
 
    internal/pkg/testutils  (17 lines, 1 func, 1 importer)   ← name collides with testutil
@@ -61,7 +61,7 @@ hand-written shard manifests.
 | Build tags in use | `integration` (113), `integration \|\| livevalidation` (1), `livevalidation` (1), `leaktest` (1), `benchmark` (1). No `e2e`-tagged file exists although `make e2e` runs `-tags=e2e` |
 | Packages with test files | 112 (67 unit-only, 5 integration-only) |
 | Port interfaces in `internal/ports` | 61 |
-| **Hand-rolled test doubles** | **148** in 71 files |
+| **Hand-rolled test doubles** | **148** in 76 files |
 | Ports with ≥3 independent doubles | 11 |
 | Mocking libraries | none generated. `testify/mock` in **3** files (Temporal's own mock testsuite); `gomock` in 0 files (indirect via `go.temporal.io/sdk`); no `//go:generate` for moq/mockery/mockgen |
 | `//nolint` directives | **4** (2 revive, 1 gosec, 1 errcheck) in 4 files |
@@ -163,7 +163,7 @@ func (m *MockTokenRepository) GetOrCreateToken(...) (int64, error) {
 
 That is precisely `moq`'s output shape. So the codebase has *already converged on the generated
 form* — it just types it out by hand, 148 times, under three different name prefixes
-(`Mock` 62, `fake` 55, `stub` 31), in 71 files, with no shared home. Consequences visible in the code:
+(`mock`/`Mock` 77, `fake` 48, `stub`/`Stub` 23), in 76 files, with no shared home. Consequences visible in the code:
 
 - **Port change ⇒ N-file fan-out.** Adding a method to `outbound.SQSConsumer` breaks 8 doubles in 8
   packages. `TxManager`, `Multicaller` and `S3Reader` are 6 each.
