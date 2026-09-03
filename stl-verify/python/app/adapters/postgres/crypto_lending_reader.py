@@ -1,6 +1,6 @@
 import asyncio
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from decimal import Decimal
 
 from sqlalchemy import text
@@ -111,6 +111,7 @@ class PostgresCryptoLendingReader:
         self._morpho_liq_repo = morpho_liq_repo
         self._engine = engine
         self._allocation_share_max_stale_seconds = allocation_share_max_stale_seconds
+        self._aave_liq_inflight: dict[int, asyncio.Task[dict[int, LiquidationParams]]] = {}
 
     async def list_supported_asset_ids(self) -> set[int]:
         """Return every receipt_token_id whose protocol is supported by crypto lending."""
@@ -209,7 +210,8 @@ class PostgresCryptoLendingReader:
         normalized = _normalize_protocol_name(info.protocol_name)
 
         if normalized in _AAVE_LIKE:
-            return await self._aave_liq_repo.get_params(info.protocol_id, token_ids)
+            params = await self._aave_params_for_protocol(info.protocol_id)
+            return {tid: params[tid] for tid in token_ids if tid in params}
 
         if normalized in _MORPHO:
             return await self._morpho_liq_repo.get_params(backed_asset_id, token_ids)
@@ -223,6 +225,33 @@ class PostgresCryptoLendingReader:
             return {}
 
         raise ValueError(f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})")
+
+    def _aave_params_for_protocol(self, protocol_id: int) -> Awaitable[dict[int, LiquidationParams]]:
+        """Read one protocol's aave-like liquidation params once, however many allocations ask.
+
+        These params are protocol-wide config, but ``get_liquidation_params`` is
+        called once per allocation, so a prime holding three allocations of the same
+        protocol ran the same query three times. Those computes all run inside a
+        single ``asyncio.gather`` (``PrimeRiskCapitalService``), so their lookups
+        overlap: the first starts the read and the rest await the same task.
+
+        The entry is dropped as soon as the read resolves, so this is a
+        coalescing window, not a cache — a later request re-reads the
+        trigger-maintained table and sees any reserve change since. Requests that do
+        happen to overlap share one read, which is sound for the same reason the
+        allocations within one request can: the params are protocol-level config
+        read at "now", with no per-request as-of semantics.
+
+        ``shield`` because the task is shared: without it one awaiter being
+        cancelled — a client disconnecting mid-request — would cancel the read out
+        from under any other request that had joined the same task.
+        """
+        task = self._aave_liq_inflight.get(protocol_id)
+        if task is None:
+            task = asyncio.create_task(self._aave_liq_repo.get_params(protocol_id))
+            self._aave_liq_inflight[protocol_id] = task
+            task.add_done_callback(lambda _: self._aave_liq_inflight.pop(protocol_id, None))
+        return asyncio.shield(task)
 
     async def get_share(self, info: ReceiptTokenInfo, prime_id: EthAddress) -> Decimal:
         normalized = _normalize_protocol_name(info.protocol_name)

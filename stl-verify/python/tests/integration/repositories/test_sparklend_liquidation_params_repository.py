@@ -88,10 +88,7 @@ async def repository(async_db_url: str, _seed_data: None, test_ids: dict[str, in
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_returns_normalised_params_for_known_tokens(repository, test_ids: dict[str, int]) -> None:
-    result = await repository.get_params(
-        protocol_id=test_ids["protocol_id"],
-        token_ids=[test_ids["weth_id"], test_ids["cbbtc_id"]],
-    )
+    result = await repository.get_params(protocol_id=test_ids["protocol_id"])
 
     assert test_ids["weth_id"] in result
     assert test_ids["cbbtc_id"] in result
@@ -106,12 +103,51 @@ async def test_returns_normalised_params_for_known_tokens(repository, test_ids: 
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_missing_token_absent_from_result(repository, test_ids: dict[str, int]) -> None:
-    result = await repository.get_params(protocol_id=test_ids["protocol_id"], token_ids=[99999])
-    assert 99999 not in result
+async def test_another_protocols_reserves_are_not_returned(repository, db_url: str, test_ids: dict[str, int]) -> None:
+    """The read is protocol-scoped, so a same-token reserve elsewhere must not leak in."""
+    conn = await asyncpg.connect(db_url)
+    try:
+        other_protocol_id = cast(int, await conn.fetchval("SELECT id FROM protocol WHERE name = 'Aave V3'"))
+        await _insert_reserve_with_liq_params(
+            conn,
+            other_protocol_id,
+            test_ids["weth_id"],
+            20_000_001,
+            liquidation_threshold_bps=6000,
+            liquidation_bonus_bps=12000,
+        )
+    finally:
+        await conn.close()
+
+    result = await repository.get_params(protocol_id=test_ids["protocol_id"])
+    assert result[test_ids["weth_id"]].liquidation_threshold == Decimal("0.825")
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_empty_token_ids_returns_empty_dict(repository, test_ids: dict[str, int]) -> None:
-    result = await repository.get_params(protocol_id=test_ids["protocol_id"], token_ids=[])
-    assert result == {}
+async def test_reserve_disabled_as_collateral_drops_out(repository, db_url: str, test_ids: dict[str, int]) -> None:
+    """A reserve the protocol has since stopped accepting as collateral is not returned.
+
+    The old query filtered on usage_as_collateral_enabled *before* reducing to the
+    newest row, so it could keep serving an older, still-enabled row after the
+    protocol disabled the reserve. Reading the newest row and filtering that is what
+    the flag means, and matches how the backed-breakdown query reads this table.
+    """
+    conn = await asyncpg.connect(db_url)
+    try:
+        await conn.execute(
+            """
+            INSERT INTO sparklend_reserve_data
+                (protocol_id, token_id, block_number, block_version,
+                 usage_as_collateral_enabled, liquidation_threshold, liquidation_bonus)
+            VALUES ($1, $2, $3, 0, false, 7000, 11000)
+            """,
+            test_ids["protocol_id"],
+            test_ids["cbbtc_id"],
+            20_000_002,
+        )
+    finally:
+        await conn.close()
+
+    result = await repository.get_params(protocol_id=test_ids["protocol_id"])
+    assert test_ids["cbbtc_id"] not in result
+    assert test_ids["weth_id"] in result
