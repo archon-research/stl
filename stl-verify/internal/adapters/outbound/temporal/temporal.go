@@ -206,6 +206,10 @@ func newBootstrap(
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
 		ServiceName:    name,
 		ServiceVersion: meta.Commit,
@@ -232,6 +236,9 @@ func newBootstrap(
 	temporalClient, err := createClient()
 	if err != nil {
 		unwind()
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, fmt.Errorf("creating temporal client: %w", err)
 	}
 	opened = append(opened, temporalClient.Close)

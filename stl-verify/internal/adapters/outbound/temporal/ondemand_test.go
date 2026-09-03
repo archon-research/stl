@@ -208,3 +208,15 @@ func TestRunWorker_RejectsInvalidConfigBeforeAnySetup(t *testing.T) {
 		t.Error("database was opened despite an invalid config")
 	}
 }
+
+func TestNewBootstrap_SurfacesACancelledContextWithoutDialingTemporal(t *testing.T) {
+	t.Setenv("TEMPORAL_HOST_PORT", "127.0.0.1:1")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := newBootstrap(ctx, BuildMeta{Commit: "test"}, "cancelled", nil)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("newBootstrap = %v, want the cancelled context, not a dial error", err)
+	}
+}
