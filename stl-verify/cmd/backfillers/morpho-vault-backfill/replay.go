@@ -137,8 +137,8 @@ func replayPartition(
 	return len(entries), nil
 }
 
-// classifyUnknownBlockHash proves the orphan or does not: only a canonical header at
-// the same height with a different hash makes an unresolvable archived hash structural.
+// Only a canonical header at the same height with a different hash makes an
+// unresolvable archived hash structural; anything else is a node that is behind.
 func classifyUnknownBlockHash(ctx context.Context, chain chainReader, e v2LogEntry, key string, notFound error) error {
 	canonical, err := chain.HeaderByNumber(ctx, big.NewInt(e.blockNumber))
 	if err != nil {
