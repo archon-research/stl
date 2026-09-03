@@ -158,6 +158,43 @@ func TestNewService_RequiresChainID(t *testing.T) {
 	}
 }
 
+func TestStart_RefusesAVisibilityTimeoutAReceiveCanOutrun(t *testing.T) {
+	consumer := &testutil.MockSQSConsumer{
+		VisibilityTimeoutFn: func() time.Duration { return 30 * time.Second },
+	}
+	entries := []*TokenEntry{{
+		ContractAddress: common.HexToAddress("0x1111"),
+		WalletAddress:   common.HexToAddress("0xaaaa"),
+		Star:            "spark",
+		Chain:           "mainnet",
+		TokenType:       "erc20",
+	}}
+	proxies := []ProxyConfig{{
+		Star:    "spark",
+		Chain:   "mainnet",
+		Address: common.HexToAddress("0xaaaa"),
+	}}
+
+	svc, err := NewService(
+		Config{ChainID: 1, Logger: quietLogger()},
+		consumer, testutil.NewMockBlockCache(), NewSourceRegistry(quietLogger()), entries, &testHandler{}, proxies,
+	)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	err = svc.Start(context.Background())
+	if err == nil {
+		_ = svc.Stop()
+		t.Fatal("Start accepted a 30s visibility timeout; a booted worker never crashloops on it, because " +
+			"ProcessMessages revalidates on every poll and RunLoop only logs what it returns, so the pod reports " +
+			"Ready and spins logging forever while the queue never drains")
+	}
+	if !strings.Contains(err.Error(), "visibility timeout") {
+		t.Errorf("Start error = %q, want it to name the visibility timeout", err)
+	}
+}
+
 // ── processBlock ──
 
 func TestProcessBlock_CacheMiss_ReturnsError(t *testing.T) {

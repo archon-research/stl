@@ -161,15 +161,10 @@ func setupIntegrationTest(t *testing.T, opts ...setupOption) *integrationEnv {
 			"-queue", "http://localhost/test-queue",
 			"-db", dbURL,
 			"-redis", sharedRedisAddr,
-		})
+		}, nil)
 	}()
 
-	// Wait for the service to start (SQS ReceiveMessage call indicates it's polling)
-	select {
-	case <-sqsState.FirstCallReceived:
-	case <-time.After(30 * time.Second):
-		t.Fatal("timed out waiting for service to start")
-	}
+	testutil.WaitForFirstPoll(t, errCh, sqsState.FirstCallReceived)
 
 	return &integrationEnv{
 		pool:       pool,
@@ -299,7 +294,7 @@ func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 		"-queue", "http://localhost/test-queue",
 		"-redis", sharedRedisAddr,
 		"-db", "postgres://invalid:invalid@localhost:1/nonexistent?connect_timeout=1",
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error for bad database URL")
 	}

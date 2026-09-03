@@ -1,8 +1,9 @@
 import functools
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
@@ -22,6 +23,32 @@ def async_database_url(database_url: str) -> str:
     query = dict(url.query)
     query.pop("sslmode", None)
     return url.set(query=query).render_as_string(hide_password=False)
+
+
+def parse_reference_effective_at(raw: str) -> datetime:
+    """Parse a reference effective instant, mirroring Go's env.ReferenceEffectiveAt.
+
+    One format, RFC 3339 UTC (ADR-0006 §5). A missing offset, a non-UTC offset and a future
+    instant all raise, so a typo fails startup instead of pinning the API to an unintended
+    instant — and an instant nothing can have observed resolves reference versions that did
+    not exist yet.
+    """
+    example = "e.g. 2026-06-01T00:00:00Z"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        raise ValueError(f"reference_effective_at={raw!r} is not RFC 3339 UTC ({example})") from None
+    offset = parsed.utcoffset()
+    if offset is None:
+        raise ValueError(f"reference_effective_at={raw!r} carries no UTC offset; write it as {example}")
+    if offset != timedelta(0):
+        raise ValueError(
+            f"reference_effective_at={raw!r} must be UTC; write the same instant with a Z offset "
+            f"({parsed.astimezone(UTC).isoformat()})"
+        )
+    if parsed > datetime.now(UTC):
+        raise ValueError(f"reference_effective_at={raw!r} is in the future")
+    return parsed.astimezone(UTC)
 
 
 class Settings(BaseSettings):
@@ -76,6 +103,32 @@ class Settings(BaseSettings):
     # Maximum age (in seconds) of a token_total_supply row before the risk API
     # treats it as stale and returns HTTP 503.
     allocation_share_max_stale_seconds: int = 1800
+    # Pins which append-on-change reference versions the read path resolves (ADR-0006 §4).
+    # Unset means now (UTC).
+    #
+    # A string parsed by the validator below, not a `datetime`, because pydantic reads a
+    # bare numeric string as a Unix timestamp: `2026` becomes 1970-01-01T00:33:46Z and
+    # `20260601` becomes 1970-08-23. Both precede every valid_from, so the priced reads
+    # would collapse to zeros and 404s instead of failing.
+    reference_effective_at: str | None = None
+
+    @field_validator("reference_effective_at")
+    @classmethod
+    def _validate_reference_effective_at(cls, raw: str | None) -> str | None:
+        if raw is None or raw == "":
+            return None
+        parse_reference_effective_at(raw)
+        return raw
+
+    def resolved_reference_effective_at(self) -> datetime | None:
+        """The parsed reference instant, or None when unset (meaning now, UTC).
+
+        Cannot raise; the validator above already parsed this at settings construction.
+        """
+        if self.reference_effective_at is None:
+            return None
+        return parse_reference_effective_at(self.reference_effective_at)
+
     # Connection-pool ceiling per replica. Set explicitly rather than left on
     # SQLAlchemy's 5 + 10, because a prime-scoped risk-capital request is a
     # concurrent fan-out rather than a single query: every repository read opens

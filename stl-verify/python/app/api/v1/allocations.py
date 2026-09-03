@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
+from app.adapters.postgres.reference_as_of import ReferenceEffectiveAtProvider
 from app.api._validators import (
     OptionalEthAddressParam,
     OptionalTxHashParam,
@@ -17,6 +18,7 @@ from app.api._validators import (
 from app.api.deps import (
     allowed_prime_vaults,
     get_engine,
+    get_reference_as_of,
     get_reference_positions_service_factory,
     require_prime_view,
 )
@@ -391,8 +393,11 @@ class AllocationActivityResponse(BaseModel):
     created_at: str = Field(description="ISO-8601 timestamp the event row was persisted.")
 
 
-async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationService:
-    return AllocationService(AllocationRepository(engine))
+async def _get_service(
+    engine: AsyncEngine = Depends(get_engine),
+    reference_as_of: ReferenceEffectiveAtProvider = Depends(get_reference_as_of),
+) -> AllocationService:
+    return AllocationService(AllocationRepository(engine, reference_as_of))
 
 
 @router.get(

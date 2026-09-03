@@ -14,6 +14,11 @@ from app.adapters.postgres._time_window import (
     required_time_window_clause,
     time_bucket_expr,
 )
+from app.adapters.postgres.reference_as_of import (
+    ORACLE_ASSET_AS_OF,
+    ReferenceAsOf,
+    ReferenceEffectiveAtProvider,
+)
 from app.domain.chain_names import MAINNET_CHAIN_ID, chain_name_for
 from app.domain.entities.allocation import (
     AnchorageCustodyHolding,
@@ -116,8 +121,9 @@ def _safe_decimal(value: Any, field_name: str, row_identifier: Any = None) -> De
 
 
 class AllocationRepository:
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(self, engine: AsyncEngine, reference_effective_at: ReferenceEffectiveAtProvider) -> None:
         self._engine = engine
+        self._reference = ReferenceAsOf(reference_effective_at)
 
     async def list_chains(self) -> list[ChainMetadata]:
         try:
@@ -264,7 +270,7 @@ class AllocationRepository:
             async with self._engine.connect() as conn:
                 result = await conn.execute(
                     _RECEIPT_TOKEN_POSITIONS_SQL,
-                    {"proxy_hex": prime_id.hex},
+                    self._reference.params(proxy_hex=prime_id.hex),
                 )
                 rows = result.fetchall()
             positions = [
@@ -320,7 +326,7 @@ class AllocationRepository:
             async with self._engine.connect() as conn:
                 result = await conn.execute(
                     _DIRECT_ASSET_HOLDINGS_SQL,
-                    {"proxy_hex": prime_id.hex, "uv_token_addrs": _UNDERLYING_VALUE_TOKEN_ADDRS},
+                    self._reference.params(proxy_hex=prime_id.hex, uv_token_addrs=_UNDERLYING_VALUE_TOKEN_ADDRS),
                 )
                 holdings = [
                     DirectAssetHolding(
@@ -561,7 +567,7 @@ class AllocationRepository:
             async with self._engine.connect() as conn:
                 result = await conn.execute(
                     _USD_EXPOSURE_SQL,
-                    {"receipt_token_id": receipt_token_id, "proxy_hex": prime_id.hex},
+                    self._reference.params(receipt_token_id=receipt_token_id, proxy_hex=prime_id.hex),
                 )
                 row = result.fetchone()
 
@@ -597,7 +603,7 @@ class AllocationRepository:
         """Return total priced USD exposure across all current receipt-token positions."""
         try:
             async with self._engine.connect() as conn:
-                result = await conn.execute(_TOTAL_USD_EXPOSURE_SQL, {"proxy_hex": prime_id.hex})
+                result = await conn.execute(_TOTAL_USD_EXPOSURE_SQL, self._reference.params(proxy_hex=prime_id.hex))
                 row = result.fetchone()
 
             if row is None or row.total_usd_exposure is None:
@@ -754,7 +760,7 @@ class AllocationRepository:
 
         try:
             async with self._engine.connect() as conn:
-                result = await conn.execute(_ALLOCATION_ACTIVITY_BUCKETS_SQL, params)
+                result = await conn.execute(_ALLOCATION_ACTIVITY_BUCKETS_SQL, self._reference.params(**params))
                 rows = result.fetchall()
         except asyncio.CancelledError:
             raise
@@ -1042,7 +1048,7 @@ class AllocationRepository:
         position event until the next one.
         """
         query = text(
-            """
+            f"""
             WITH position_buckets AS (
                 SELECT
                     rt.id AS receipt_token_id,
@@ -1093,9 +1099,10 @@ class AllocationRepository:
                     WHERE otp.token_id = pk.underlying_token_id
                     -- enabled-mapping filter (rationale on _DIRECT_ASSET_HOLDINGS_SQL):
                     -- a retired source's tail must not serve any bucket after
-                    -- retirement (nor, given the no-history simplification, before).
+                    -- retirement (nor, given the one-instant-per-query tradeoff
+                    -- recorded there, before).
                       AND EXISTS (
-                          SELECT 1 FROM oracle_asset oa
+                          SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
                           WHERE oa.oracle_id = otp.oracle_id
                             AND oa.token_id = otp.token_id
                             AND oa.enabled
@@ -1127,7 +1134,7 @@ class AllocationRepository:
 
         try:
             async with self._engine.connect() as conn:
-                result = await conn.execute(query, params)
+                result = await conn.execute(query, self._reference.params(**params))
                 rows = result.fetchall()
         except asyncio.CancelledError:
             raise
@@ -1205,7 +1212,7 @@ class AllocationRepository:
 # refusal via ``_record_receipt_valuation_gaps``; the exposure-buckets read
 # nulls the divergent observation before ``last()``, so ``locf`` carries the
 # last pre-divergence value (stale but unit-correct) without telemetry.
-_RECEIPT_TOKEN_POSITIONS_SQL = text("""
+_RECEIPT_TOKEN_POSITIONS_SQL = text(f"""
     WITH latest_receipt_positions AS (
         SELECT
             rt.id                                    AS receipt_token_id,
@@ -1259,7 +1266,7 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
         WHERE tpc.token_id = p.underlying_token_id
         -- enabled-mapping filter + oracle_id tiebreak (rationale on _DIRECT_ASSET_HOLDINGS_SQL).
           AND EXISTS (
-              SELECT 1 FROM oracle_asset oa
+              SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
               WHERE oa.oracle_id = tpc.oracle_id
                 AND oa.token_id = tpc.token_id
                 AND oa.enabled
@@ -1299,7 +1306,7 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
 # join): either all three columns emit or none do, because ``token.symbol`` is
 # nullable and a partial identity would let the endpoint compose a hybrid of
 # underlying id/address with the held token's symbol.
-_DIRECT_ASSET_HOLDINGS_SQL = text("""
+_DIRECT_ASSET_HOLDINGS_SQL = text(f"""
     WITH latest_positions AS (
         SELECT DISTINCT ON (ap.token_id)
             ap.chain_id,
@@ -1351,22 +1358,23 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
         WHERE tpc.token_id = lp.token_id
         -- Enabled-mapping filter (CANONICAL rationale; every current/latest price
         -- read across the API repositories carries this EXISTS and points here).
-        -- A price row is eligible only while its
-        -- (oracle_id, token_id) still has an ENABLED oracle_asset mapping.
-        -- Retiring a source (oracle_asset.enabled = false) drops it from every
-        -- latest-price read immediately at read time, not merely from future
-        -- collection. The snapshot-key ordering and the oracle_id tiebreak
-        -- below cannot rescue correctness on their own: a reorg can republish a
-        -- frozen/retired source's row at a FRESH (max) block while a
-        -- change-suppressed live feed writes no newer row, so the retired
+        -- A price row is eligible only while its (oracle_id, token_id) had an
+        -- ENABLED mapping as of :reference_effective_at. The snapshot-key ordering
+        -- and the oracle_id tiebreak below cannot rescue correctness on their own:
+        -- a reorg can republish a frozen/retired source's row at a FRESH (max)
+        -- block while a change-suppressed live feed writes no newer row, so the
+        -- retired
         -- source would otherwise beat the live one indefinitely.
-        -- Tradeoff: oracle_asset.enabled carries no history, so a retired
-        -- source vanishes from ALL price reads including the historical/LOCF
-        -- time-series buckets — even buckets before its retirement that
-        -- legitimately used it. Accepted simplification; per-block temporal
-        -- enablement tracking is out of scope.
+        -- The mapping is append-on-change, so the version read is the one
+        -- effective at the recorded instant. Read through the _as_of function,
+        -- never the raw table (every version) or the _current view (wall-clock
+        -- bounded). ADR-0006 §4, enforced by the schemamaster lint.
+        -- Tradeoff: ONE instant is bound per query, not one per time_bucket, and
+        -- an unset reference_effective_at resolves to now, so a retired source
+        -- still vanishes from historical/LOCF buckets that predate its
+        -- retirement. Per-bucket temporal enablement is out of scope.
           AND EXISTS (
-              SELECT 1 FROM oracle_asset oa
+              SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
               WHERE oa.oracle_id = tpc.oracle_id
                 AND oa.token_id = tpc.token_id
                 AND oa.enabled
@@ -1388,7 +1396,7 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
         WHERE tpc.token_id = lp.underlying_token_id
         -- enabled-mapping filter + oracle_id tiebreak (rationale on the px LATERAL above).
           AND EXISTS (
-              SELECT 1 FROM oracle_asset oa
+              SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
               WHERE oa.oracle_id = tpc.oracle_id
                 AND oa.token_id = tpc.token_id
                 AND oa.enabled
@@ -1506,7 +1514,7 @@ _ANCHORAGE_CUSTODY_HOLDINGS_SQL = text("""
 # _RECEIPT_TOKEN_POSITIONS_SQL. The open-position filter stays on the raw share
 # balance, and the units x price multiplication happens here in NUMERIC
 # arithmetic for consistency with the other valuation reads.
-_USD_EXPOSURE_SQL = text("""
+_USD_EXPOSURE_SQL = text(f"""
 WITH latest_position AS (
     SELECT
         ap.balance,
@@ -1534,7 +1542,7 @@ latest_price AS (
     WHERE tpc.token_id = rt.underlying_token_id
     -- enabled-mapping filter + oracle_id tiebreak (rationale on _DIRECT_ASSET_HOLDINGS_SQL).
       AND EXISTS (
-          SELECT 1 FROM oracle_asset oa
+          SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
           WHERE oa.oracle_id = tpc.oracle_id
             AND oa.token_id = tpc.token_id
             AND oa.enabled
@@ -1560,7 +1568,7 @@ WHERE lb.balance > 0
 # _RECEIPT_TOKEN_POSITIONS_SQL. A refused or unpriced position contributes
 # nothing to the SUM (NULL terms are skipped), matching the positions list
 # where it shows as NULL amount_usd.
-_TOTAL_USD_EXPOSURE_SQL = text("""
+_TOTAL_USD_EXPOSURE_SQL = text(f"""
 WITH latest_receipt_positions AS (
     SELECT
         rt.id                  AS receipt_token_id,
@@ -1595,7 +1603,7 @@ LEFT JOIN LATERAL (
     WHERE tpc.token_id = p.underlying_token_id
     -- enabled-mapping filter + oracle_id tiebreak (rationale on _DIRECT_ASSET_HOLDINGS_SQL).
       AND EXISTS (
-          SELECT 1 FROM oracle_asset oa
+          SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
           WHERE oa.oracle_id = tpc.oracle_id
             AND oa.token_id = tpc.token_id
             AND oa.enabled
@@ -1750,7 +1758,7 @@ WITH receipt_token_price AS (
               AND otp.token_id = rt.underlying_token_id
             -- enabled-mapping filter + oracle_id tiebreak (rationale on _DIRECT_ASSET_HOLDINGS_SQL).
               AND EXISTS (
-                  SELECT 1 FROM oracle_asset oa
+                  SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
                   WHERE oa.oracle_id = otp.oracle_id
                     AND oa.token_id = otp.token_id
                     AND oa.enabled
