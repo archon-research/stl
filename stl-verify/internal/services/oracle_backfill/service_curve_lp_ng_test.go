@@ -207,7 +207,7 @@ func TestRun_CurveLPNGOracle(t *testing.T) {
 	mcFactory := curveBackfillFactory(t, recorder, pricingByBlock)
 
 	svc, err := NewService(
-		Config{ChainID: 1, Concurrency: 1, BatchSize: 100, Logger: testutil.DiscardLogger()},
+		Config{ChainID: 1, Concurrency: 1, BatchSize: 100, Logger: testutil.DiscardLogger(), ReferenceEffectiveAt: testReferenceEffectiveAt},
 		curveHeaderFetcher(),
 		mcFactory,
 		repo,
@@ -278,7 +278,7 @@ func TestRun_CurveLPNGOracle_PoolCallFailureSkipsBlock(t *testing.T) {
 	mcFactory := curveBackfillFactory(t, recorder, pricingByBlock)
 
 	svc, err := NewService(
-		Config{ChainID: 1, Concurrency: 1, BatchSize: 100, Logger: testutil.DiscardLogger()},
+		Config{ChainID: 1, Concurrency: 1, BatchSize: 100, Logger: testutil.DiscardLogger(), ReferenceEffectiveAt: testReferenceEffectiveAt},
 		curveHeaderFetcher(),
 		mcFactory,
 		repo,
@@ -329,7 +329,7 @@ func TestRun_CurveLPNGOracle_HeaderFetchFailureSkipsBlock(t *testing.T) {
 	}
 
 	svc, err := NewService(
-		Config{ChainID: 1, Concurrency: 1, BatchSize: 100, Logger: testutil.DiscardLogger()},
+		Config{ChainID: 1, Concurrency: 1, BatchSize: 100, Logger: testutil.DiscardLogger(), ReferenceEffectiveAt: testReferenceEffectiveAt},
 		headerFetcher,
 		mcFactory,
 		repo,
@@ -382,7 +382,7 @@ func TestRun_CurveLPNGOracle_ClampsToDeploymentBlock(t *testing.T) {
 	mcFactory := curveBackfillFactory(t, recorder, pricingByBlock)
 
 	svc, err := NewService(
-		Config{ChainID: 1, Concurrency: 1, BatchSize: 100, Logger: testutil.DiscardLogger()},
+		Config{ChainID: 1, Concurrency: 1, BatchSize: 100, Logger: testutil.DiscardLogger(), ReferenceEffectiveAt: testReferenceEffectiveAt},
 		curveHeaderFetcher(),
 		mcFactory,
 		repo,
@@ -440,7 +440,7 @@ func TestRun_CurveLPNGFeedDecimalsValidation(t *testing.T) {
 	}
 
 	svc, err := NewService(
-		Config{ChainID: 1, Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger()},
+		Config{ChainID: 1, Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger(), ReferenceEffectiveAt: testReferenceEffectiveAt},
 		&mockHeaderFetcher{},
 		mcFactory,
 		repo,

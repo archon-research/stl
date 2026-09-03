@@ -62,6 +62,20 @@ type BlockRange struct {
 	To int64
 }
 
+// BackfillCursor is what the gap filler compares against when it retires a
+// range: the watermark plus the count of rewinds behind it. A reorg whose
+// common ancestor sits at or below the watermark changes only the rewind count,
+// and that is the ordinary case — the watermark normally trails head by one, so
+// without the rewind count a pass that straddled such a reorg would still match
+// and advance over the height the reorg orphaned (ARCT-379).
+type BackfillCursor struct {
+	// Watermark is the highest block number verified as gap-free.
+	Watermark int64
+
+	// RewindCount counts the rewinds applied to this chain's cursor.
+	RewindCount int64
+}
+
 // BlockStateRepository defines the interface for persisting block state.
 // Used for tracking the last processed block, detecting reorgs, and deduplication.
 type BlockStateRepository interface {
@@ -80,6 +94,12 @@ type BlockStateRepository interface {
 	// Returns nil if the block is not found.
 	GetBlockByNumber(ctx context.Context, number int64) (*BlockState, error)
 
+	// GetLowestCanonicalAbove retrieves the lowest canonical block whose number
+	// is in (number, maxNumber]. Returns nil if the range holds none. The
+	// un-orphan walk anchors on it, and the bound keeps an isolated orphan from
+	// scanning the table.
+	GetLowestCanonicalAbove(ctx context.Context, number, maxNumber int64) (*BlockState, error)
+
 	// GetBlockByHash retrieves a block state by its hash.
 	// Returns nil if the block is not found. Used for deduplication.
 	GetBlockByHash(ctx context.Context, hash string) (*BlockState, error)
@@ -97,18 +117,30 @@ type BlockStateRepository interface {
 	// The block is kept for historical purposes but excluded from canonical queries.
 	MarkBlockOrphaned(ctx context.Context, hash string) error
 
-	// ClearBlockOrphaned clears the is_orphaned flag on a block identified by hash.
-	// Used by the backfill loop to self-heal rows that were over-orphaned (e.g. a
-	// late-arriving block misclassified as a reorg). Idempotent: clearing an
-	// already-canonical row is a no-op. Returns an error if the block does not
-	// exist; the caller is responsible for verifying the row exists first.
-	ClearBlockOrphaned(ctx context.Context, hash string) error
+	// ClearBlocksOrphaned clears the is_orphaned flag on every named block, or
+	// on none of them. Used by the backfill loop to self-heal a run that was
+	// over-orphaned (e.g. a late-arriving block misclassified as a reorg);
+	// healing it row by row would leave the chain half-restored when one row
+	// fails, which neither the gap finder nor the un-orphan walk can repair.
+	// Idempotent: clearing an already-canonical row is a no-op. Returns an
+	// error, having changed nothing, if any hash is unknown or if another
+	// canonical row already holds one of the heights.
+	//
+	// anchorHash is the canonical row the caller walked down from. The segment
+	// is computed before this call, so a reorg landing in between can orphan
+	// that anchor, and clearing would then promote a fork nothing descends
+	// from. The anchor is re-read here under a row lock and the whole set
+	// refused if it is no longer canonical (ARCT-379).
+	ClearBlocksOrphaned(ctx context.Context, anchorHash string, hashes []string) error
 
 	// HandleReorgAtomic atomically performs all reorg-related database operations:
 	// 1. Saves the reorg event
 	// 2. Marks all blocks after commonAncestor as orphaned
-	// 3. Saves the new canonical block
-	// This prevents inconsistent state if a crash occurs mid-reorg.
+	// 3. Lowers the backfill watermark to commonAncestor if it sits above it,
+	//    and bumps the cursor's rewind count either way
+	// 4. Saves the new canonical block
+	// This prevents inconsistent state if a crash occurs mid-reorg. Step 3 is
+	// what puts an orphaned-but-not-replaced height back in FindGaps' range.
 	// Returns the version assigned to the new block.
 	HandleReorgAtomic(ctx context.Context, commonAncestor int64, event ReorgEvent, newBlock BlockState) (int, error)
 
@@ -125,9 +157,28 @@ type BlockStateRepository interface {
 	// Returns 0 if no watermark has been set.
 	GetBackfillWatermark(ctx context.Context) (int64, error)
 
-	// SetBackfillWatermark updates the watermark to the given block number.
-	// Should only be called after confirming all blocks up to this number exist.
-	SetBackfillWatermark(ctx context.Context, watermark int64) error
+	// GetBackfillCursor returns the watermark together with its rewind count.
+	// Returns the zero cursor when no row has been written for this chain.
+	GetBackfillCursor(ctx context.Context) (BackfillCursor, error)
+
+	// RewindBackfillWatermark lowers the watermark to the given block if it
+	// sits above it, and bumps the cursor's rewind count either way. It
+	// reports the value it replaced and whether that value was above
+	// the target. Every path that drops a canonical row without replacing it —
+	// a reorg commit, the backfill's stale-chain recovery — must call it, or
+	// the height it emptied stays below the watermark and out of FindGaps'
+	// reach for good (ARCT-379).
+	RewindBackfillWatermark(ctx context.Context, to int64) (previous int64, rewound bool, err error)
+
+	// AdvanceBackfillWatermark moves the watermark to watermark, returning
+	// false when the stored cursor is no longer expected. The gap filler
+	// decides where to advance to from a cursor it read earlier, and
+	// HandleReorgAtomic can move that cursor in between; an unconditional
+	// write would put the rewound heights back out of FindGaps' reach and
+	// leave the hole permanently unfilled (ARCT-379). The zero cursor also
+	// seeds a chain whose row does not exist yet; any other expected cursor is
+	// refused against a missing row.
+	AdvanceBackfillWatermark(ctx context.Context, expected BackfillCursor, watermark int64) (bool, error)
 
 	// FindGaps finds missing block ranges between minBlock and maxBlock.
 	// Only considers canonical (non-orphaned) blocks.
@@ -135,9 +186,32 @@ type BlockStateRepository interface {
 	// Returns an empty slice if there are no gaps.
 	FindGaps(ctx context.Context, minBlock, maxBlock int64) ([]BlockRange, error)
 
-	// VerifyChainIntegrity verifies that the parent_hash chain is properly linked
-	// in the given range. Returns nil if the chain is valid, or an error describing
-	// the first broken link found.
+	// FindOrphanOnlyHeights returns block numbers in [fromBlock, toBlock] that
+	// have an orphaned row and no canonical one. Such a height is a hole the
+	// other checks under-report: FindGaps scans only above the backfill
+	// watermark, and VerifyChainIntegrity reports only the first violation in
+	// its watermark-bounded range. This enumerates every one of them, so an
+	// empty result is the only "all clear". Ordered ascending and uncapped —
+	// the result is bounded by the orphaned rows, which are bounded by reorgs.
+	FindOrphanOnlyHeights(ctx context.Context, fromBlock, toBlock int64) ([]int64, error)
+
+	// VerifyParentLinks reports the violations that never repair themselves: a
+	// broken parent link between consecutive canonical blocks, and two
+	// canonical rows at one height. Missing heights are excluded, so a caller
+	// can run this above the backfill watermark, where a hole is the gap
+	// filler's live work rather than a defect. Returns nil if there is none,
+	// or an error describing the first in ascending block order.
+	VerifyParentLinks(ctx context.Context, fromBlock, toBlock int64) error
+
+	// VerifyChainIntegrity verifies that the canonical chain over
+	// [fromBlock, toBlock] is unbroken: consecutive blocks are linked by
+	// parent_hash, and no height between two canonical blocks is missing.
+	// A height above the last canonical block in range, and two canonical rows
+	// at one height, are violations too.
+	// Returns nil if the chain is valid, or an error describing the first
+	// violation in ascending block order. Heights below the range's first
+	// canonical block are not violations — the backfill watermark starts at 0
+	// on an unseeded chain, well below its first block.
 	// This should be called after backfill completes to ensure eventual consistency.
 	VerifyChainIntegrity(ctx context.Context, fromBlock, toBlock int64) error
 

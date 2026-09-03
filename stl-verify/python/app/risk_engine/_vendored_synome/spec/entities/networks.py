@@ -11,6 +11,7 @@ class Network(Enum):
     PLASMA = "Plasma"
     PLUME = "Plume"
     MONAD = "Monad"
+    ROBINHOOD = "Robinhood"
 
 
 L2_PSM_NETWORKS = {
@@ -41,4 +42,5 @@ STL_CHAIN_BY_NETWORK = {
     Network.PLASMA: "plasma",
     Network.PLUME: "plume",
     Network.MONAD: "monad",
+    Network.ROBINHOOD: "robinhood",
 }
