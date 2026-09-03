@@ -12,6 +12,7 @@ from app.config import Settings
 
 
 def _settings(*, auth_enabled: bool = False, oidc_issuer: str = "") -> Settings:
+    """Dark by default; enabling auth also fills in what create_app demands."""
     return Settings(
         _env_file=None,  # ty: ignore[unknown-argument]
         log_level="INFO",
@@ -22,6 +23,8 @@ def _settings(*, auth_enabled: bool = False, oidc_issuer: str = "") -> Settings:
         otel_service_name="test",
         auth_enabled=auth_enabled,
         oidc_issuer=oidc_issuer,
+        oidc_audience="python-api" if auth_enabled else "",
+        openfga_url="http://openfga.auth.svc:8080" if auth_enabled else "",
     )
 
 

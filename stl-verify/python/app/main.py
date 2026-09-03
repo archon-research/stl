@@ -175,8 +175,24 @@ def configure_docs(application: FastAPI, settings: Settings) -> None:
         )
 
 
+# Blank fails each of these somewhere else — an empty audience 401s every token,
+# an empty issuer reports "malformed token" — so the AUTH_ENABLED flip would be
+# an outage debugged from the wrong error. OPENFGA_API_KEY is excluded: keyless
+# OpenFGA is valid, and a wrong key is already a plain 503.
+_REQUIRED_AUTH_SETTINGS = ("oidc_issuer", "oidc_audience", "openfga_url", "openfga_store_name")
+
+
+def _check_auth_settings(settings: Settings) -> None:
+    if not settings.auth_enabled:
+        return
+    missing = [name for name in _REQUIRED_AUTH_SETTINGS if not str(getattr(settings, name, "")).strip()]
+    if missing:
+        raise RuntimeError(f"auth_enabled is true but these settings are blank: {', '.join(missing)}")
+
+
 def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
     setup_logging(log_level=settings.log_level, log_format=settings.log_format)
+    _check_auth_settings(settings)
 
     # Validate risk-engine config before acquiring any resources so a bad
     # configuration fails startup without leaking a telemetry provider or
@@ -205,9 +221,8 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        # Initialised before the try: the finally below closes it, and startup
-        # can raise long before the auth block runs (e.g. mapping validation) —
-        # a late declaration turns that real error into an UnboundLocalError.
+        # Before the try: the finally closes it, and a startup error raised
+        # before the auth block would otherwise become an UnboundLocalError.
         auth_http: httpx.AsyncClient | None = None
         engine = create_db_engine(
             settings.async_database_url,
@@ -276,9 +291,8 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             app.state.model_registry = model_registry
             app.state.receipt_token_lookup = receipt_token_repo
 
-            # Auth plane (ADR-015). Built here, beside the engine, so it is
-            # disposed in the same finally. Absent from app.state when auth is
-            # off — the dependencies treat that as "anonymous, no checks".
+            # Beside the engine so it is disposed in the same finally. Absent
+            # from app.state when auth is off, which the gates read as anonymous.
             if settings.auth_enabled:
                 auth_http = httpx.AsyncClient()
                 app.state.verifier = TokenVerifier(
@@ -359,11 +373,10 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
 
         return JSONResponse(status_code=422, content={"detail": serializable_errors})
 
-    # Coarse RBAC per ROUTER, never as global middleware: the probes on
-    # status.router are reached by kubelet directly and would 401 → CrashLoop.
-    # Gates are no-ops while auth_enabled is false.
+    # Per ROUTER, never global middleware — see require_role. status.router is
+    # deliberately ungated: kubelet reaches its probes directly.
     viewer = [Depends(require_viewer)]
-    analyst = [Depends(require_analyst)]  # /v1/risk/* incl. bad-debt: org:analyst+
+    analyst = [Depends(require_analyst)]
     application.include_router(status.router, prefix="/v1")
     application.include_router(allocations.router, prefix="/v1", dependencies=viewer)
     application.include_router(tokens.router, prefix="/v1", dependencies=viewer)
@@ -403,10 +416,9 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
                     },
                 }
             }
-            # Declaring the scheme is not enough: Swagger only attaches the
-            # authorized token to operations that carry a security REQUIREMENT.
-            # Root-level so every operation inherits it (the probes gain a
-            # cosmetic padlock in the docs; they are not gated in the app).
+            # Swagger attaches the token only to operations carrying a security
+            # REQUIREMENT, not merely a declared scheme. Root-level, so the
+            # ungated probes gain a cosmetic padlock.
             full["security"] = [{"oidc": []}]
         application.openapi_schema = full
         return application.openapi_schema

@@ -41,6 +41,7 @@ def _settings(*, auth_enabled: bool) -> Settings:
         auth_enabled=auth_enabled,
         oidc_issuer=ISSUER,
         oidc_audience="python-api",
+        openfga_url="http://openfga.auth.svc:8080",
     )
 
 
@@ -167,3 +168,24 @@ def test_dark_app_serves_data_routes_unauthenticated(monkeypatch) -> None:
     client = _client(_settings(auth_enabled=False), monkeypatch)
     assert client.get("/v1/status").status_code == 200
     assert client.get("/v1/primes").status_code == 200
+
+
+# --- startup refuses a half-configured auth plane ---------------------------
+
+
+@pytest.mark.parametrize("blank", ["oidc_issuer", "oidc_audience", "openfga_url", "openfga_store_name"])
+def test_a_blank_required_setting_refuses_to_start(blank: str) -> None:
+    """Each of these fails at RUNTIME pointing somewhere else — a blank audience
+    401s every token, a blank issuer reports "malformed token" — so the
+    AUTH_ENABLED flip would be an outage debugged from the wrong error."""
+    settings = _settings(auth_enabled=True).model_copy(update={blank: ""})
+
+    with pytest.raises(RuntimeError, match=blank):
+        create_app(settings)
+
+
+def test_the_same_blanks_are_fine_while_auth_is_dark() -> None:
+    """Nothing is read while the flag is off, so nothing may block startup."""
+    dark = _settings(auth_enabled=False).model_copy(update={"oidc_issuer": "", "oidc_audience": "", "openfga_url": ""})
+
+    assert create_app(dark) is not None
