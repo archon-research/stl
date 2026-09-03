@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -62,6 +63,13 @@ var orphanOnly = blockFixture{
 	timestamp: 0x68b0c0c0,
 }
 
+// The hashes the archive holds in these fixtures: a losing fork at version 0, and
+// a second one at version 1 where a correction was attempted before.
+const (
+	losingFork = "0x1111111111111111111111111111111111111111111111111111111111111111"
+	secondFork = "0x2222222222222222222222222222222222222222222222222222222222222222"
+)
+
 // alreadyCorrected reorged once before, so version 1 is taken — by a single
 // object, which is enough to occupy the slot — and the repair belongs at 2.
 var alreadyCorrected = blockFixture{
@@ -91,9 +99,9 @@ func TestRepublish_LandsInTheCacheAndOnTheTopic(t *testing.T) {
 	defer cancel()
 
 	deployment := newDeployment(t, ctx)
-	deployment.archive(t, ctx, orphanOnly, 0, s3key.Block, s3key.Receipts, s3key.Traces)
-	deployment.archive(t, ctx, alreadyCorrected, 0, s3key.Block, s3key.Receipts, s3key.Traces)
-	deployment.archive(t, ctx, alreadyCorrected, 1, s3key.Block)
+	deployment.archive(t, ctx, orphanOnly, 0, losingFork, s3key.Block, s3key.Receipts, s3key.Traces)
+	deployment.archive(t, ctx, alreadyCorrected, 0, losingFork, s3key.Block, s3key.Receipts, s3key.Traces)
+	deployment.archive(t, ctx, alreadyCorrected, 1, secondFork, s3key.Block)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
 	if err := register(ctx, temporal.Dependencies{Logger: discardLogger()}, env); err != nil {
@@ -110,6 +118,30 @@ func TestRepublish_LandsInTheCacheAndOnTheTopic(t *testing.T) {
 	assertCachedUnderVersion(t, ctx, deployment.keyPrefix, alreadyCorrected, 2)
 	assertPublishedEvents(t, ctx, deployment.sqs, deployment.queueURL,
 		map[int64]int{orphanOnly.number: 1, alreadyCorrected.number: 2})
+}
+
+// A height whose archive already holds the canonical block needs no repair, and
+// republishing it would append an identical correction for good. The worker
+// refuses it while deriving the version, so nothing is cached or published.
+func TestRepublish_RefusesAHeightTheArchiveAlreadyHoldsCanonically(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	deployment := newDeployment(t, ctx)
+	deployment.archive(t, ctx, orphanOnly, 0, orphanOnly.hash, s3key.Block, s3key.Receipts, s3key.Traces)
+
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	if err := register(ctx, temporal.Dependencies{Logger: discardLogger()}, env); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	env.ExecuteWorkflow(workflowTypeName, input(orphanOnly.number))
+
+	err := env.GetWorkflowError()
+	if err == nil || !strings.Contains(err.Error(), "already canonical") {
+		t.Fatalf("error = %v, want the run refused for a height that needs no repair", err)
+	}
+	assertNothingCached(t, ctx, deployment.keyPrefix, orphanOnly)
 }
 
 // TestRegister_RefusesAConfigItCannotPublishWith keeps the startup guard on the
@@ -199,19 +231,40 @@ func newDeployment(t *testing.T, ctx context.Context) deployment {
 }
 
 // archive puts the height's objects for one version into the raw bucket, the way
-// raw-data-backup would have. Only the keys matter — nothing reads the bodies.
-func (d deployment) archive(t *testing.T, ctx context.Context, block blockFixture, version int, dataTypes ...s3key.DataType) {
+// raw-data-backup would have: gzipped payloads naming the block they hold, which
+// is what the worker compares against the canonical chain.
+func (d deployment) archive(t *testing.T, ctx context.Context, block blockFixture, version int, hash string, dataTypes ...s3key.DataType) {
 	t.Helper()
+	bodies := map[s3key.DataType]string{
+		s3key.Block:    fmt.Sprintf(`{"hash":%q,"number":"0x%x"}`, hash, block.number),
+		s3key.Receipts: fmt.Sprintf(`[{"blockHash":%q}]`, hash),
+		s3key.Traces:   `[]`,
+	}
+
 	for _, dataType := range dataTypes {
 		key := s3key.Build(block.number, version, dataType)
 		if _, err := d.s3.PutObject(ctx, &awss3.PutObjectInput{
 			Bucket: aws.String(d.bucket),
 			Key:    aws.String(key),
-			Body:   bytes.NewReader([]byte("archived")),
+			Body:   bytes.NewReader(gzipped(t, bodies[dataType])),
 		}); err != nil {
 			t.Fatalf("seeding %s: %v", key, err)
 		}
 	}
+}
+
+func gzipped(t *testing.T, payload string) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write([]byte(payload)); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	return buf.Bytes()
 }
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -271,6 +324,25 @@ func assertCachedUnderVersion(t *testing.T, ctx context.Context, keyPrefix strin
 		if exists(key(occupied, "block")) != 0 {
 			t.Errorf("cache key %s was written; that slot is already occupied", key(occupied, "block"))
 		}
+	}
+}
+
+func assertNothingCached(t *testing.T, ctx context.Context, keyPrefix string, block blockFixture) {
+	t.Helper()
+	client := redis.NewClient(&redis.Options{Addr: sharedRedisAddr})
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("closing the redis client: %v", err)
+		}
+	})
+
+	pattern := fmt.Sprintf("%s:%d:%d:*", keyPrefix, integrationChainID, block.number)
+	keys, err := client.Keys(ctx, pattern).Result()
+	if err != nil {
+		t.Fatalf("KEYS %s: %v", pattern, err)
+	}
+	if len(keys) != 0 {
+		t.Errorf("cached %v for a height that needed no repair", keys)
 	}
 }
 

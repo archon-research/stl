@@ -849,19 +849,25 @@ temporal workflow start --namespace vector \
   --input '{"blocks":[25395651,25087888]}'
 ```
 
-**Only list heights that actually need repairing.** The worker never compares
-what the archive holds against the canonical chain — it republishes every height
-you name. A healthy height listed by mistake gets an identical extra version:
-harmless to readers, which take the highest, but permanent, in S3 and in every
-indexer. Confirm each candidate first with the bulk downloader's dry run (#849),
-which reads the height's archived block hash and reports it against the chain:
+**A height that needs no repair is refused, not republished.** While deriving the
+version the worker reads the block hash out of the first 8 KB of the top archived
+version's `_block` object (falling back to its `_receipts`) and compares it with
+the canonical hash the node reports. If they match, that height fails
+`StructuralData` — "already canonical in the archive at version N" — before
+anything is cached or published, so a healthy height listed by mistake cannot
+gain a permanent identical extra version. A version that names no block at all
+(no `_block`, no `_receipts`, or only a data type this binary does not know) is
+treated as a height to repair, and the run proceeds at the next slot.
+
+That makes the bulk downloader's dry run (#849) a cheap pre-check rather than a
+safety net — useful for sizing a run before you start it:
 
 ```bash
 raw-block-bulk-downloader --dry-run --bucket $RAW_BUCKET --rpc-url <chain rpc> \
   --start-block 25395651 --end-block 25395651
 ```
 
-List only the heights it reports as archived ≠ canonical.
+It reports each height as archived ≠ canonical or not, from the same read.
 
 **The version comes from the archive, per height.** `block_version` is the reorg
 counter, so a height that genuinely reorged once already has a real version 1,
@@ -917,9 +923,13 @@ slot the indexers already have: fix the archive gap (the backup worker's DLQ)
 first.
 
 **Before the first run.** The ServiceAccount's EKS Pod Identity association needs
-`sns:Publish` on the chain's blocks topic and `s3:ListBucket` on the chain's raw
-bucket — no object is ever read or written; it is provisioned by
-archon-research/infrastructure#667 (merged). The worker lists that bucket once at
+`sns:Publish` on the chain's blocks topic, `s3:ListBucket` on the chain's raw
+bucket (which versions are taken) and `s3:GetObject` on it (the first kilobytes of
+the top version's block object, to tell an already-canonical height from a losing
+fork). Nothing is ever written to S3. `sns:Publish` and `s3:ListBucket` come from
+archon-research/infrastructure#667 (merged); `s3:GetObject` needs its own infra
+change. `ALCHEMY_HTTP_URL` is required too, with no mainnet default: a deployment
+without it would refuse to start rather than fetch another chain's blocks. The worker lists that bucket once at
 startup, so a missing grant or a mistyped `S3_BUCKET` shows up as a pod that will
 not start (`this pod's Pod Identity needs s3:ListBucket on <bucket>` in the log),
 not as a repair that dies on its first height.
@@ -983,6 +993,11 @@ per height. The example uses a height that landed at 1.
   it — an archive node — and start a new run. (A null on the *first* by-number
   read is treated as a lagging replica and retried instead; it is the payload
   reads, pinned to the hash, that fail the run.)
+- **`StructuralData`: the archive already holds the canonical block at the
+  height's top version** (non-retryable). Nothing to repair: the archived hash
+  and the chain's agree. The message names the version and the hash. Drop that
+  height from the list — a re-run cannot change the answer, and forcing it would
+  append an identical correction every reader then prefers.
 - **`StructuralData`: an object under the height's archive prefix carries no
   version** (non-retryable). `DeriveVersion` cannot tell which slot is free while
   something it cannot read sits there. The error names the key: remove or rename

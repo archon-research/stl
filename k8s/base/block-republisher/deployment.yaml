@@ -9,13 +9,14 @@
 # writes the Redis block cache and publishes to the chain's SNS topic, and
 # deliberately never touches block_states (see the binary's package doc).
 #
-# sns:Publish on the chain's blocks topic and s3:ListBucket on the chain's raw
-# bucket come from an EKS Pod Identity association on this ServiceAccount,
-# granted in the infra repo (k8s/README.md). Both must exist before the first
-# run: without the listing no block gets as far as a version to publish under,
-# and without sns:Publish every block fails on AccessDenied at the publish step —
-# after the cache write has already landed. The archive is only ever listed, so
-# s3:ListBucket is the whole S3 grant.
+# sns:Publish on the chain's blocks topic, and s3:ListBucket plus s3:GetObject on
+# the chain's raw bucket, come from an EKS Pod Identity association on this
+# ServiceAccount, granted in the infra repo (k8s/README.md). All three must exist
+# before the first run: without the listing no block gets as far as a version to
+# publish under, without the object read it cannot tell an already-canonical
+# height from a losing fork, and without sns:Publish every block fails on
+# AccessDenied at the publish step — after the cache write has already landed.
+# Nothing is ever written to S3.
 #
 # replicas: 1 — one pod on one task queue. A run's blocks are republished
 # sequentially by the workflow, so a second replica would buy nothing and double

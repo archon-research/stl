@@ -12,6 +12,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -199,6 +200,9 @@ func (r *Reader) ReadRange(ctx context.Context, bucket, key string, start, end i
 		Key:    aws.String(key),
 		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", start, end)),
 	})
+	if isMissingObject(err) {
+		return nil, fmt.Errorf("%s/%s: %w", bucket, key, outbound.ErrObjectNotFound)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get range of object %s/%s: %w", bucket, key, err)
 	}
@@ -209,6 +213,14 @@ func (r *Reader) ReadRange(ctx context.Context, bucket, key string, start, end i
 		return nil, fmt.Errorf("failed to read range of object %s/%s: %w", bucket, key, err)
 	}
 	return data, nil
+}
+
+// isMissingObject tells the one answer that means "nothing at this key" from a
+// read that failed: S3 models it as NoSuchKey, and a HEAD-shaped 404 as NotFound.
+func isMissingObject(err error) bool {
+	var noSuchKey *s3types.NoSuchKey
+	var notFound *s3types.NotFound
+	return errors.As(err, &noSuchKey) || errors.As(err, &notFound)
 }
 
 // gzipReadCloser wraps a gzip reader and the underlying body for proper cleanup.

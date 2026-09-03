@@ -20,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/archiveblock"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
@@ -421,15 +422,25 @@ func storedBlockHash(t *testing.T, ctx context.Context, client *awss3.Client, bu
 		t.Fatalf("read %s: %v", key, err)
 	}
 
-	depth, field := 2, "blockHash"
 	if dataType == s3key.Block {
-		depth, field = 1, "hash"
+		hash, ok := archiveblock.HashFromPayload(plain)
+		if !ok {
+			t.Fatalf("no hash in %s", key)
+		}
+		return hash
 	}
-	hash, ok := jsonStringField(plain, depth, field)
-	if !ok {
-		t.Fatalf("no %s in %s", field, key)
+
+	// Receipts and traces are lists whose entries name the block they belong to.
+	var entries []struct {
+		BlockHash string `json:"blockHash"`
 	}
-	return hash
+	if err := json.Unmarshal(plain, &entries); err != nil {
+		t.Fatalf("decoding %s: %v", key, err)
+	}
+	if len(entries) == 0 || entries[0].BlockHash == "" {
+		t.Fatalf("no blockHash in %s", key)
+	}
+	return entries[0].BlockHash
 }
 
 func archivedVersions(t *testing.T, ctx context.Context, client *awss3.Client, bucket string) []int {

@@ -2,6 +2,7 @@ package outbound
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
 )
@@ -27,6 +28,11 @@ type S3Reader interface {
 	// If the file is gzipped (.gz extension), the reader automatically decompresses.
 	StreamFile(ctx context.Context, bucket, key string) (io.ReadCloser, error)
 }
+
+// ErrObjectNotFound is what a reader answers for a key that is not there, so a
+// caller can tell "nothing at this key" — an archive that never received it —
+// from a read that failed.
+var ErrObjectNotFound = errors.New("s3 object not found")
 
 // S3RangeReader reads part of an object. It is separate from S3Reader so only
 // the callers that need a partial read take the dependency.

@@ -26,10 +26,6 @@ type config struct {
 }
 
 const (
-	// defaultAlchemyHTTPURL matches the other indexers' default, so a deployment
-	// only has to supply ALCHEMY_HTTP_URL when it is not on mainnet.
-	defaultAlchemyHTTPURL = "https://eth-mainnet.g.alchemy.com/v2"
-
 	defaultRedisAddr = "localhost:6379"
 
 	// defaultRedisKeyPrefix is what production leaves unset; only a test driving
@@ -104,11 +100,17 @@ func loadConfig() (config, error) {
 
 // resolveRPCURL builds the node URL from the same ALCHEMY_HTTP_URL +
 // ALCHEMY_API_KEY pair every other indexer uses, so this worker's secret wiring
-// matches theirs.
+// matches theirs. Neither has a default: a deployment that forgot the URL would
+// otherwise fetch mainnet blocks for its own chain's heights and publish them on
+// its own chain's topic.
 func resolveRPCURL() (string, error) {
+	httpURL, err := env.Require("ALCHEMY_HTTP_URL")
+	if err != nil {
+		return "", err
+	}
 	apiKey, err := env.Require("ALCHEMY_API_KEY")
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%s/%s", env.Get("ALCHEMY_HTTP_URL", defaultAlchemyHTTPURL), apiKey), nil
+	return fmt.Sprintf("%s/%s", httpURL, apiKey), nil
 }

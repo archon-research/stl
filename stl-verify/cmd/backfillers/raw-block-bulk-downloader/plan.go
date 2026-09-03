@@ -1,13 +1,10 @@
 package main
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"maps"
 	"slices"
@@ -18,15 +15,12 @@ import (
 
 	"github.com/aws/smithy-go"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/archiveblock"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/retry"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
-
-// archiveHashPrefixBytes is how much of an archived object is fetched to read
-// its block hash: the hash sits in the first JSON fields, so a prefix is enough.
-const archiveHashPrefixBytes = 8 << 10
 
 // noArchive is the version of a height the archive holds nothing for.
 const noArchive = -1
@@ -129,151 +123,6 @@ func indexPartition(keys []string) (map[int64]archiveState, error) {
 		index[blockNum] = archiveState{Version: top.Version, Present: top.DataTypes}
 	}
 	return index, nil
-}
-
-// hashSource is where an archived object carries the block hash.
-type hashSource struct {
-	DataType s3key.DataType
-	Depth    int
-	Field    string
-}
-
-var hashSources = []hashSource{
-	{s3key.Block, 1, "hash"},
-	{s3key.Receipts, 2, "blockHash"},
-}
-
-// archivedBlockHash reads the block hash the archive holds at the height's top
-// version, from the block object or else the receipts. It returns "" when
-// neither is there to answer.
-func archivedBlockHash(ctx context.Context, reader outbound.S3RangeReader, bucket string, blockNum int64, state archiveState) (string, error) {
-	part := partition.GetPartition(blockNum)
-
-	for _, source := range hashSources {
-		if !state.Present[source.DataType] {
-			continue
-		}
-
-		key := s3key.BuildWithPartition(part, blockNum, state.Version, source.DataType)
-		hash, err := hashFromArchivedObject(ctx, reader, bucket, key, source.Depth, source.Field)
-		if err != nil {
-			return "", err
-		}
-		if hash != "" {
-			return hash, nil
-		}
-	}
-	return "", nil
-}
-
-// hashFromArchivedObject returns the hash an object carries, or "" for one that
-// reads fine and carries none: a zero-tx block's empty receipt list and a null
-// payload identify no block, and neither may fail the height on every run.
-func hashFromArchivedObject(ctx context.Context, reader outbound.S3RangeReader, bucket, key string, depth int, field string) (string, error) {
-	stored, err := reader.ReadRange(ctx, bucket, key, 0, archiveHashPrefixBytes-1)
-	if err != nil {
-		return "", fmt.Errorf("reading %s: %w", key, err)
-	}
-
-	plain, err := gunzipPrefix(stored)
-	if err != nil {
-		return "", fmt.Errorf("decompressing %s: %w", key, err)
-	}
-
-	hash, outcome := scanJSONStringField(plain, depth, field)
-	if outcome == fieldTruncated {
-		return "", fmt.Errorf("no %s in the first %d bytes of %s", field, archiveHashPrefixBytes, key)
-	}
-	return hash, nil
-}
-
-// gunzipPrefix decompresses what it can of a truncated gzip stream: the
-// unexpected EOF that ends a ranged read is the expected outcome here.
-func gunzipPrefix(stored []byte) ([]byte, error) {
-	gz, err := gzip.NewReader(bytes.NewReader(stored))
-	if err != nil {
-		return nil, err
-	}
-	defer gz.Close()
-
-	plain, err := io.ReadAll(gz)
-	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
-		return nil, err
-	}
-	return plain, nil
-}
-
-// fieldOutcome tells a document that carries no such field from a prefix that
-// ended before the field could appear.
-type fieldOutcome int
-
-const (
-	fieldFound fieldOutcome = iota
-	fieldAbsent
-	fieldTruncated
-)
-
-// jsonStringField returns the first string value of the named field at the given
-// object depth, tolerating a document truncated mid-object.
-func jsonStringField(doc []byte, depth int, field string) (string, bool) {
-	value, outcome := scanJSONStringField(doc, depth, field)
-	return value, outcome == fieldFound
-}
-
-// scanJSONStringField looks for the first string value of the named field at the
-// given object depth. A complete document that closed without the field is
-// fieldAbsent; one whose last token ran into the end of a truncated prefix is
-// fieldTruncated.
-func scanJSONStringField(doc []byte, depth int, field string) (string, fieldOutcome) {
-	dec := json.NewDecoder(bytes.NewReader(doc))
-	var objectFrames []bool
-	expectKey, wanted, seen := false, false, false
-
-	for {
-		token, err := dec.Token()
-		if err != nil {
-			if seen && len(objectFrames) == 0 && errors.Is(err, io.EOF) {
-				return "", fieldAbsent
-			}
-			return "", fieldTruncated
-		}
-		seen = true
-
-		if delim, ok := token.(json.Delim); ok {
-			switch delim {
-			case '{':
-				objectFrames = append(objectFrames, true)
-				expectKey = true
-			case '[':
-				objectFrames = append(objectFrames, false)
-				expectKey = false
-			default:
-				objectFrames = objectFrames[:len(objectFrames)-1]
-				expectKey = len(objectFrames) > 0 && objectFrames[len(objectFrames)-1]
-			}
-			wanted = false
-			continue
-		}
-
-		if len(objectFrames) == 0 || !objectFrames[len(objectFrames)-1] {
-			continue
-		}
-		if expectKey {
-			key, _ := token.(string)
-			wanted = len(objectFrames) == depth && key == field
-			expectKey = false
-			continue
-		}
-
-		expectKey = true
-		if wanted {
-			value, ok := token.(string)
-			if !ok {
-				return "", fieldAbsent
-			}
-			return value, fieldFound
-		}
-	}
 }
 
 // PartitionCache caches what the archive holds, one listing per S3 partition.
@@ -455,13 +304,13 @@ func (p *blockPlanner) topVersion(ctx context.Context, blockNum int64) (archiveS
 // reports for it. Only the hash is read from the payload, so a header answers
 // as well as a full block.
 func (p *blockPlanner) decide(ctx context.Context, blockNum int64, state archiveState, payload json.RawMessage) (blockDecision, error) {
-	canonicalHash, ok := jsonStringField(payload, 1, "hash")
+	canonicalHash, ok := archiveblock.HashFromPayload(payload)
 	if !ok {
 		return blockDecision{}, fmt.Errorf("block %d: RPC payload carries no hash", blockNum)
 	}
 
 	s3Start := time.Now()
-	archivedHash, err := archivedBlockHash(ctx, p.reader, p.bucket, blockNum, state)
+	archivedHash, _, err := archiveblock.Hash(ctx, p.reader, p.bucket, blockNum, state.Version)
 	p.stats.s3CheckTime.Add(time.Since(s3Start).Nanoseconds())
 	p.stats.s3CheckCalls.Add(1)
 	if err != nil {

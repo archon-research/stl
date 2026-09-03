@@ -13,6 +13,8 @@ const (
 	// what ValidateS3BucketForChain deliberately ignores.
 	ethereumRawBucket = "stl-sentinelstaging-ethereum-raw-89d540d0"
 	baseRawBucket     = "stl-sentinelstaging-base-raw-89d540d0"
+
+	ethereumRPCURL = "https://eth-mainnet.g.alchemy.com/v2"
 )
 
 func TestLoadConfig(t *testing.T) {
@@ -25,7 +27,7 @@ func TestLoadConfig(t *testing.T) {
 		"AWS_SNS_ENDPOINT":  "",
 		"S3_BUCKET":         ethereumRawBucket,
 		"ALCHEMY_API_KEY":   "test-key",
-		"ALCHEMY_HTTP_URL":  "",
+		"ALCHEMY_HTTP_URL":  ethereumRPCURL,
 		"REDIS_ADDR":        "",
 		"REDIS_PASSWORD":    "",
 		"REDIS_KEY_PREFIX":  "",
@@ -44,7 +46,7 @@ func TestLoadConfig(t *testing.T) {
 				deployEnv:      "staging",
 				snsTopicARN:    ethereumTopicARN,
 				s3Bucket:       ethereumRawBucket,
-				rpcURL:         defaultAlchemyHTTPURL + "/test-key",
+				rpcURL:         ethereumRPCURL + "/test-key",
 				redisAddr:      defaultRedisAddr,
 				redisKeyPrefix: defaultRedisKeyPrefix,
 				enableTraces:   true,
@@ -77,7 +79,7 @@ func TestLoadConfig(t *testing.T) {
 				snsTopicARN:    ethereumTopicARN,
 				snsEndpoint:    "http://localstack:4566",
 				s3Bucket:       ethereumRawBucket,
-				rpcURL:         defaultAlchemyHTTPURL + "/test-key",
+				rpcURL:         ethereumRPCURL + "/test-key",
 				redisAddr:      "redis:6379",
 				redisPassword:  "hunter2",
 				redisKeyPrefix: "isolated",
@@ -133,6 +135,33 @@ func TestLoadConfig(t *testing.T) {
 			name:            "an absent alchemy key is a hard error, never an unauthenticated URL",
 			override:        map[string]string{"ALCHEMY_API_KEY": ""},
 			wantErrContains: "ALCHEMY_API_KEY",
+		},
+		{
+			// A default would hand a non-mainnet deployment mainnet blocks for its
+			// heights and publish them on its own chain's topic.
+			name:            "an absent node URL is refused rather than defaulted to mainnet",
+			override:        map[string]string{"ALCHEMY_HTTP_URL": ""},
+			wantErrContains: "ALCHEMY_HTTP_URL",
+		},
+		{
+			// Presence is all this binary checks: an operator who points an L2 at a
+			// mainnet URL gets exactly what the ConfigMap says, and the SNS topic and
+			// bucket guards are what catch a cross-chain deployment.
+			name: "a chain pointed at another chain's node is passed through",
+			override: map[string]string{
+				"CHAIN_ID":          "8453",
+				"AWS_SNS_TOPIC_ARN": baseTopicARN,
+				"S3_BUCKET":         baseRawBucket,
+			},
+			want: config{
+				chainID:        8453,
+				deployEnv:      "staging",
+				snsTopicARN:    baseTopicARN,
+				s3Bucket:       baseRawBucket,
+				rpcURL:         ethereumRPCURL + "/test-key",
+				redisAddr:      defaultRedisAddr,
+				redisKeyPrefix: defaultRedisKeyPrefix,
+			},
 		},
 	}
 

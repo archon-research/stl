@@ -357,6 +357,9 @@ data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "1"
+  # Required, not defaulted: a deployment without it would fetch another chain's
+  # blocks for its heights. The value is the ethereum watcher's own.
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
   AWS_REGION: "eu-west-1"
   AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
   DEPLOY_ENV: "staging"

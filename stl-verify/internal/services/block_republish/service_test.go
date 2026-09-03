@@ -83,18 +83,26 @@ func newStubClient() *stubClient {
 	}
 }
 
-// stubArchive stands in for the raw archive, reporting the highest version a
-// height already holds an object at.
+// stubArchive stands in for the raw archive: the highest version a height already
+// holds an object at, and the block that version names.
 type stubArchive struct {
 	highest int
 	found   bool
 	err     error
 	calls   int
+
+	hash      string
+	hashFound bool
+	hashErr   error
 }
 
 func (a *stubArchive) HighestVersion(context.Context, int64) (int, bool, error) {
 	a.calls++
 	return a.highest, a.found, a.err
+}
+
+func (a *stubArchive) BlockHashAt(context.Context, int64, int) (string, bool, error) {
+	return a.hash, a.hashFound, a.hashErr
 }
 
 type failingCache struct{ err error }
@@ -122,6 +130,13 @@ func (f fixture) archiveHolds(highest int) {
 	f.archive.highest, f.archive.found = highest, true
 }
 
+// archiveHoldsFork is a height whose top archived version names a losing fork:
+// the shape a repair exists for.
+func (f fixture) archiveHoldsFork(highest int) {
+	f.archiveHolds(highest)
+	f.archive.hash, f.archive.hashFound = forkHash, true
+}
+
 // testConfig is the mainnet watcher's shape: traces on, blobs off.
 func testConfig() Config {
 	return Config{
@@ -145,7 +160,7 @@ func newFixtureWith(t *testing.T, config Config, client *stubClient) fixture {
 	return fixture{service: service, client: client, archive: archive, cache: cache, sink: sink}
 }
 
-func newTestService(t *testing.T, config Config, client outbound.BlockchainClient, archive outbound.ArchiveVersionReader, cache outbound.BlockCacheWriter, sink outbound.EventSink) *Service {
+func newTestService(t *testing.T, config Config, client outbound.BlockchainClient, archive outbound.ArchiveReader, cache outbound.BlockCacheWriter, sink outbound.EventSink) *Service {
 	t.Helper()
 	service, err := NewService(config, client, archive, cache, sink)
 	if err != nil {
@@ -421,6 +436,7 @@ func TestNextFreeVersion_DerivesTheSlotFromWhatTheArchiveHolds(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t, newStubClient())
 			*f.archive = tc.archive
+			f.archive.hash, f.archive.hashFound = forkHash, tc.archive.found
 
 			version, err := f.service.NextFreeVersion(context.Background(), testBlock)
 			if err != nil {
@@ -434,12 +450,128 @@ func TestNextFreeVersion_DerivesTheSlotFromWhatTheArchiveHolds(t *testing.T) {
 	}
 }
 
+// Republishing a height whose archive already holds the canonical block appends
+// an identical correction that every reader then prefers — permanently, in S3 and
+// in every indexer. No retry changes that, so the height is refused outright.
+func TestNextFreeVersion_RefusesAHeightAlreadyCanonicalInTheArchive(t *testing.T) {
+	f := newFixture(t, newStubClient())
+	f.archiveHolds(1)
+	f.archive.hash, f.archive.hashFound = strings.ToUpper(testHash), true
+
+	_, err := f.service.NextFreeVersion(context.Background(), testBlock)
+
+	if !errors.Is(err, ErrStructuralData) {
+		t.Fatalf("error = %v, want ErrStructuralData", err)
+	}
+	for _, want := range []string{fmt.Sprint(testBlock), "version 1", testHash} {
+		if !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(want)) {
+			t.Errorf("error = %v, want it to mention %q", err, want)
+		}
+	}
+}
+
+func TestNextFreeVersion_ProceedsWhenTheArchivedBlockIsAFork(t *testing.T) {
+	f := newFixture(t, newStubClient())
+	f.archiveHoldsFork(1)
+
+	version, err := f.service.NextFreeVersion(context.Background(), testBlock)
+	if err != nil {
+		t.Fatalf("NextFreeVersion: %v", err)
+	}
+
+	if version != 2 {
+		t.Errorf("version = %d, want the slot above the fork", version)
+	}
+}
+
+// A top version nothing can name a block from — no block object, no receipts, or
+// only a data type this binary does not know — is a height to repair.
+func TestNextFreeVersion_ProceedsWhenTheArchiveNamesNoBlockAtTheTopVersion(t *testing.T) {
+	f := newFixture(t, newStubClient())
+	f.archiveHolds(4)
+
+	version, err := f.service.NextFreeVersion(context.Background(), testBlock)
+	if err != nil {
+		t.Fatalf("NextFreeVersion: %v", err)
+	}
+
+	if version != 5 {
+		t.Errorf("version = %d, want the slot above the unreadable one", version)
+	}
+	if f.client.headerCalls != 0 {
+		t.Errorf("read the chain %d times with no archived hash to compare", f.client.headerCalls)
+	}
+}
+
+func TestNextFreeVersion_LeavesAFailedHashReadRetryable(t *testing.T) {
+	f := newFixture(t, newStubClient())
+	f.archiveHolds(1)
+	f.archive.hashErr = errors.New("503 SlowDown")
+
+	_, err := f.service.NextFreeVersion(context.Background(), testBlock)
+
+	if err == nil {
+		t.Fatal("NextFreeVersion succeeded without reading the archived block")
+	}
+	if errors.Is(err, ErrStructuralData) {
+		t.Errorf("error = %v, want it left retryable", err)
+	}
+}
+
+func TestNextFreeVersion_RefusesAHeightTooCloseToTheChainHead(t *testing.T) {
+	client := newStubClient()
+	client.head = testBlock + finalityDepth - 1
+	f := newFixtureWith(t, testConfig(), client)
+
+	_, err := f.service.NextFreeVersion(context.Background(), testBlock)
+
+	if !errors.Is(err, ErrStructuralData) {
+		t.Fatalf("error = %v, want ErrStructuralData", err)
+	}
+	if f.archive.calls != 0 {
+		t.Errorf("listed the archive %d times for a refused height", f.archive.calls)
+	}
+}
+
+func TestNextFreeVersion_LeavesAFailedHeadReadRetryable(t *testing.T) {
+	client := newStubClient()
+	client.headErr = errors.New("429 Too Many Requests")
+	f := newFixtureWith(t, testConfig(), client)
+
+	_, err := f.service.NextFreeVersion(context.Background(), testBlock)
+
+	if err == nil {
+		t.Fatal("NextFreeVersion succeeded without reading the chain head")
+	}
+	if errors.Is(err, ErrStructuralData) {
+		t.Errorf("error = %v, want it left retryable", err)
+	}
+}
+
+// The comparison needs the canonical hash, so a by-number read that fails must
+// not read as "the archive differs".
+func TestNextFreeVersion_SurfacesAFailedCanonicalRead(t *testing.T) {
+	client := newStubClient()
+	client.headers[0] = headerReply{err: errors.New("dial tcp: connection refused")}
+	f := newFixtureWith(t, testConfig(), client)
+	f.archiveHoldsFork(1)
+
+	_, err := f.service.NextFreeVersion(context.Background(), testBlock)
+
+	if err == nil {
+		t.Fatal("NextFreeVersion succeeded without the canonical hash to compare")
+	}
+	if errors.Is(err, ErrStructuralData) {
+		t.Errorf("error = %v, want it left retryable", err)
+	}
+}
+
 func TestNextFreeVersion_LogsTheVersionItChose(t *testing.T) {
 	var logged strings.Builder
 	config := testConfig()
 	config.Logger = slog.New(slog.NewTextHandler(&logged, nil))
 	f := newFixtureWith(t, config, newStubClient())
-	f.archiveHolds(2)
+	f.archiveHoldsFork(2)
 
 	if _, err := f.service.NextFreeVersion(context.Background(), testBlock); err != nil {
 		t.Fatalf("NextFreeVersion: %v", err)
@@ -567,7 +699,7 @@ func TestNewService_RequiresEveryDependency(t *testing.T) {
 		name    string
 		config  Config
 		client  outbound.BlockchainClient
-		archive outbound.ArchiveVersionReader
+		archive outbound.ArchiveReader
 		cache   outbound.BlockCacheWriter
 		sink    outbound.EventSink
 		wantErr string

@@ -91,7 +91,7 @@ func (f *fakeRangeReader) ReadRange(_ context.Context, _, key string, start, end
 	}
 	body, ok := f.objects[key]
 	if !ok {
-		return nil, errors.New("no such key: " + key)
+		return nil, fmt.Errorf("%s: %w", key, outbound.ErrObjectNotFound)
 	}
 	f.ranges[key] = end - start + 1
 	if start >= int64(len(body)) {
@@ -104,12 +104,6 @@ func (f *fakeListReader) listings() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
-}
-
-// blockJSONWithLateHash puts the hash behind more incompressible filler than a
-// prefix read fetches.
-func blockJSONWithLateHash(hash string) []byte {
-	return fmt.Appendf(nil, `{"extraData":%q,"hash":%q,"number":"0x1830003"}`, randomHex(64<<10), hash)
 }
 
 func gzipped(t *testing.T, payload []byte) []byte {

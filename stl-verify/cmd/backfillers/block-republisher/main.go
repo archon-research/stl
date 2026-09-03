@@ -163,7 +163,7 @@ func newRepublishActivities(ctx context.Context, logger *slog.Logger, cfg config
 	if err != nil {
 		return nil, err
 	}
-	archive, err := openArchiveVersions(ctx, awsCfg, cfg, logger)
+	archive, err := openArchiveReader(ctx, awsCfg, cfg, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -193,13 +193,13 @@ func newRepublishActivities(ctx context.Context, logger *slog.Logger, cfg config
 	}, nil
 }
 
-// openArchiveVersions reads the same raw bucket the backup worker writes, which
+// openArchiveReader reads the same raw bucket the backup worker writes, which
 // is what decides the version slot a repair lands in. Like the Redis dial below
 // it probes at startup, so a bucket this pod may not list shows up as a worker
 // that will not start rather than as a repair that dies mid-run. No object is
 // ever read or written, so s3:ListBucket is the whole grant it needs.
-func openArchiveVersions(ctx context.Context, awsCfg aws.Config, cfg config, logger *slog.Logger) (*s3adapter.ArchiveVersionReader, error) {
-	archive := s3adapter.NewArchiveVersionReader(s3adapter.NewReaderFromEnv(awsCfg, logger), cfg.s3Bucket)
+func openArchiveReader(ctx context.Context, awsCfg aws.Config, cfg config, logger *slog.Logger) (*s3adapter.ArchiveReader, error) {
+	archive := s3adapter.NewArchiveReader(s3adapter.NewReaderFromEnv(awsCfg, logger), cfg.s3Bucket)
 	if err := archive.Ping(ctx); err != nil {
 		return nil, fmt.Errorf("this pod's Pod Identity needs s3:ListBucket on %s: %w", cfg.s3Bucket, err)
 	}

@@ -42,6 +42,7 @@ func input(numbers ...int64) json.RawMessage {
 type deriveStub struct {
 	seen     []int64
 	versions map[int64]int
+	err      error
 }
 
 func registerDeriveStub(env *testsuite.TestWorkflowEnvironment, versions map[int64]int) *deriveStub {
@@ -49,6 +50,9 @@ func registerDeriveStub(env *testsuite.TestWorkflowEnvironment, versions map[int
 	env.RegisterActivityWithOptions(
 		func(_ context.Context, number int64) (int, error) {
 			stub.seen = append(stub.seen, number)
+			if stub.err != nil {
+				return 0, stub.err
+			}
 			if version, ok := stub.versions[number]; ok {
 				return version, nil
 			}
@@ -338,6 +342,28 @@ func TestRepublishWorkflow_RejectsAnUnusableInputWithoutTouchingTheChain(t *test
 				t.Errorf("touched %v / %v for an unusable input, want nothing", derive.seen, stub.seen)
 			}
 		})
+	}
+}
+
+// A height the archive already holds the canonical block for is refused while
+// deriving its version, so nothing is cached and nothing is published.
+func TestRepublishWorkflow_PublishesNothingWhenTheVersionCannotBeDerived(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	derive := registerDeriveStub(env, nil)
+	derive.err = temporalsdk.NewNonRetryableApplicationError(
+		"block 25395651 is already canonical in the archive at version 1", "StructuralData", block_republish.ErrStructuralData)
+	stub := registerRepublishStub(env, neverFails)
+
+	env.ExecuteWorkflow(republishWorkflow, input(25395651))
+
+	if env.GetWorkflowError() == nil {
+		t.Fatal("the workflow succeeded for a height it could not derive a version for")
+	}
+	if len(derive.seen) != 1 {
+		t.Errorf("derived %v, want the one height it was given", derive.seen)
+	}
+	if len(stub.seen) != 0 {
+		t.Errorf("republished %v after the version could not be derived", stub.seen)
 	}
 }
 

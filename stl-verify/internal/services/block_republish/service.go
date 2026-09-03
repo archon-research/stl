@@ -82,13 +82,13 @@ type Result struct {
 type Service struct {
 	config  Config
 	client  outbound.BlockchainClient
-	archive outbound.ArchiveVersionReader
+	archive outbound.ArchiveReader
 	cache   outbound.BlockCacheWriter
 	sink    outbound.EventSink
 	logger  *slog.Logger
 }
 
-func NewService(config Config, client outbound.BlockchainClient, archive outbound.ArchiveVersionReader, cache outbound.BlockCacheWriter, sink outbound.EventSink) (*Service, error) {
+func NewService(config Config, client outbound.BlockchainClient, archive outbound.ArchiveReader, cache outbound.BlockCacheWriter, sink outbound.EventSink) (*Service, error) {
 	if config.ChainID <= 0 {
 		return nil, fmt.Errorf("ChainID must be positive, got %d", config.ChainID)
 	}
@@ -119,23 +119,33 @@ func NewService(config Config, client outbound.BlockchainClient, archive outboun
 }
 
 // NextFreeVersion reports the version a repair of this height must land in: one
-// past what the raw archive already holds, and the first correction slot where
-// it holds nothing. Callers settle this once and hand it to Republish, so a
-// retried republish reuses the slot instead of stepping past the objects its own
-// first attempt caused.
+// past what the raw archive already holds, and the first correction slot where it
+// holds nothing. Callers settle this once and hand it to Republish, so a retried
+// republish reuses the slot instead of stepping past the objects its own first
+// attempt caused. It refuses a height the archive already holds the canonical
+// block for — the whole check happens here, before anything is cached or
+// published.
 func (s *Service) NextFreeVersion(ctx context.Context, blockNumber int64) (int, error) {
 	if err := validateHeight(blockNumber); err != nil {
 		return 0, err
 	}
 
-	highest, archived, err := s.archive.HighestVersion(ctx, blockNumber)
+	head, err := s.client.GetCurrentBlockNumber(ctx)
 	if err != nil {
-		// An object under the height's own prefix that carries no version is a
-		// slot nothing can read, and no attempt will read it differently.
-		if errors.Is(err, s3key.ErrUnrecognisedKey) {
-			return 0, fmt.Errorf("reading what the archive holds at block %d: %v: %w", blockNumber, err, ErrStructuralData)
+		return 0, fmt.Errorf("reading the chain head: %w", err)
+	}
+	if err := refuseNearHead(blockNumber, head); err != nil {
+		return 0, err
+	}
+
+	highest, archived, err := s.archivedTopVersion(ctx, blockNumber)
+	if err != nil {
+		return 0, err
+	}
+	if archived {
+		if err := s.refuseIfAlreadyCanonical(ctx, blockNumber, head, highest); err != nil {
+			return 0, err
 		}
-		return 0, fmt.Errorf("reading what the archive holds at block %d: %w", blockNumber, err)
 	}
 
 	version := s3key.NextVersion(highest, archived)
@@ -147,6 +157,45 @@ func (s *Service) NextFreeVersion(ctx context.Context, blockNumber int64) (int, 
 		"version", version,
 	)
 	return version, nil
+}
+
+func (s *Service) archivedTopVersion(ctx context.Context, blockNumber int64) (int, bool, error) {
+	highest, archived, err := s.archive.HighestVersion(ctx, blockNumber)
+	if err != nil {
+		// An object under the height's own prefix that carries no version is a
+		// slot nothing can read, and no attempt will read it differently.
+		if errors.Is(err, s3key.ErrUnrecognisedKey) {
+			return 0, false, fmt.Errorf("reading what the archive holds at block %d: %v: %w", blockNumber, err, ErrStructuralData)
+		}
+		return 0, false, fmt.Errorf("reading what the archive holds at block %d: %w", blockNumber, err)
+	}
+	return highest, archived, nil
+}
+
+// refuseIfAlreadyCanonical stops a height whose top archived version already
+// holds the canonical block. Republishing it would append an identical
+// correction that every reader then prefers — permanently, in S3 and in every
+// indexer — so the operator's list, not a retry, is what has to change. A version
+// naming no block at all is a height to repair, which is why only a hash that
+// matches refuses.
+func (s *Service) refuseIfAlreadyCanonical(ctx context.Context, blockNumber, head int64, version int) error {
+	archivedHash, found, err := s.archive.BlockHashAt(ctx, blockNumber, version)
+	if err != nil {
+		return fmt.Errorf("reading the block the archive holds at block %d version %d: %w", blockNumber, version, err)
+	}
+	if !found {
+		return nil
+	}
+
+	block, err := s.canonicalHeader(ctx, blockNumber, head)
+	if err != nil {
+		return err
+	}
+	if strings.EqualFold(archivedHash, block.Hash) {
+		return fmt.Errorf("block %d is already canonical in the archive at version %d (hash %s); nothing to republish: %w",
+			blockNumber, version, archivedHash, ErrStructuralData)
+	}
+	return nil
 }
 
 // Republish caches the canonical block at blockNumber under version, reporting

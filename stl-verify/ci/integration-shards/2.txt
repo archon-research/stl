@@ -47,6 +47,7 @@
 ./internal/adapters/outbound/blockverifier
 ./internal/pkg/httpclient
 ./internal/pkg/partition
+./internal/pkg/archiveblock
 ./internal/pkg/gziputil
 ./internal/pkg/hexutil
 ./cmd/backfillers/raw-block-bulk-downloader
