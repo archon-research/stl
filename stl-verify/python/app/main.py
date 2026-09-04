@@ -318,6 +318,9 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
         openapi_tags=OPENAPI_TAGS,
     )
     application.add_middleware(RequestIdMiddleware)
+    # The gates read THIS object, not a fresh get_settings(): an app built with
+    # auth on must enforce it whatever the process environment says.
+    application.state.settings = settings
     application.state.telemetry_providers = setup_telemetry(application, settings)
 
     @application.exception_handler(RequestValidationError)

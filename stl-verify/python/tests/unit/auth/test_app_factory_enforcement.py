@@ -5,6 +5,9 @@ which proves the dependencies work but says nothing about whether they are
 attached to the real routers. These go through ``create_app``, so a gate
 dropped from one ``include_router`` line fails here and nowhere else.
 
+Nothing here overrides a dependency or patches the settings: the switch itself
+is under test, so the app has to enforce what it was BUILT with.
+
 TestClient is deliberately NOT used as a context manager: the lifespan opens a
 database connection, and none of this needs one.
 """
@@ -97,10 +100,7 @@ def _principal(*roles: str) -> Principal:
     return Principal(subject="u1", roles=frozenset(roles), organizations=frozenset(), client_id=None)
 
 
-def _client(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> TestClient:
-    # The gates read the process-wide settings rather than the ones create_app
-    # was handed; in the app those are the same object (`create_app(get_settings())`).
-    monkeypatch.setattr(deps, "get_settings", lambda: settings)
+def _client(settings: Settings) -> TestClient:
     app = create_app(settings)
     app.state.engine = _StubEngine()
     app.state.reference_effective_at = utc_now
@@ -114,8 +114,8 @@ def _client(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
 
 @pytest.fixture
-def client(monkeypatch) -> TestClient:
-    return _client(_settings(auth_enabled=True), monkeypatch)
+def client() -> TestClient:
+    return _client(_settings(auth_enabled=True))
 
 
 @pytest.mark.parametrize("path", ["/v1/status", "/v1/ready"])
@@ -162,12 +162,33 @@ def test_analyst_clears_the_role_gate_and_reaches_the_prime_check(client: TestCl
     assert response.status_code == 503
 
 
-def test_dark_app_serves_data_routes_unauthenticated(monkeypatch) -> None:
+def test_dark_app_serves_data_routes_unauthenticated() -> None:
     """The E1 contract at the factory level: none of the above changes
     behaviour while AUTH_ENABLED is false."""
-    client = _client(_settings(auth_enabled=False), monkeypatch)
+    client = _client(_settings(auth_enabled=False))
     assert client.get("/v1/status").status_code == 200
     assert client.get("/v1/primes").status_code == 200
+
+
+# --- the switch is the app's, not the environment's -------------------------
+
+
+def test_the_gates_read_the_settings_the_app_was_built_with(monkeypatch) -> None:
+    """``create_app`` validates the object it is handed and builds the verifier
+    from it. A gate re-reading ``get_settings()`` would serve every route
+    ungated here while the app advertises auth as on — and no test could drive
+    the enforcing path without overriding a dependency."""
+    monkeypatch.setattr(deps, "get_settings", lambda: _settings(auth_enabled=False))
+
+    assert _client(_settings(auth_enabled=True)).get("/v1/primes").status_code == 401
+
+
+def test_a_dark_app_stays_dark_whatever_the_environment_says(monkeypatch) -> None:
+    """The same rule in the other direction, which is the one that matters
+    while the flag is off in production."""
+    monkeypatch.setattr(deps, "get_settings", lambda: _settings(auth_enabled=True))
+
+    assert _client(_settings(auth_enabled=False)).get("/v1/primes").status_code == 200
 
 
 # --- startup refuses a half-configured auth plane ---------------------------

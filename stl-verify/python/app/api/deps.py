@@ -11,7 +11,7 @@ from app.adapters.postgres.reference_position_repository import ReferencePositio
 from app.adapters.postgres.reference_risk_capital_repository import ReferenceRiskCapitalRepository
 from app.auth.fga import FgaClient, FgaError, FgaTruncated
 from app.auth.jwt import JwksUnavailable, Principal, TokenError
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.domain.entities.allocation import EthAddress, as_address
 from app.logging import get_logger
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
@@ -72,6 +72,18 @@ def log_auth_event(
     )
 
 
+def settings_for(request: Request) -> Settings:
+    """The settings the app was BUILT with, not a fresh read of the environment.
+
+    ``create_app`` validates the object it is handed and wires the verifier and
+    FGA client from it, so a gate reading ``get_settings()`` instead can serve
+    every route ungated while the app advertises auth as on. The fallback is for
+    an app assembled by hand — some tests mount routers onto a bare FastAPI.
+    """
+    stashed = getattr(request.app.state, "settings", None)
+    return stashed if stashed is not None else get_settings()
+
+
 async def get_principal(request: Request) -> Principal | None:
     """Resolve the caller from the token the app verifies ITSELF.
 
@@ -79,7 +91,7 @@ async def get_principal(request: Request) -> Principal | None:
     serves the Tailscale-only present and the Envoy edge later. Anonymous
     (None) with auth off, which every gate below treats as "no checks".
     """
-    if not get_settings().auth_enabled:
+    if not settings_for(request).auth_enabled:
         return None
     verifier = getattr(request.app.state, "verifier", None)
     if verifier is None:
