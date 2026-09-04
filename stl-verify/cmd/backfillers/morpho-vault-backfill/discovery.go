@@ -696,12 +696,12 @@ func persistVaults(
 		return fmt.Errorf("creating protocol repository: %w", err)
 	}
 
-	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 0)
+	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 0, runID)
 	if err != nil {
 		return fmt.Errorf("creating token repository: %w", err)
 	}
 
-	receiptTokenRepo, err := postgres.NewReceiptTokenRepository(pool, logger)
+	receiptTokenRepo, err := postgres.NewReceiptTokenRepository(pool, logger, runID)
 	if err != nil {
 		return fmt.Errorf("creating receipt token repository: %w", err)
 	}

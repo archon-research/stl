@@ -179,7 +179,7 @@ func run(args []string) error {
 		return fmt.Errorf("creating tx manager: %w", err)
 	}
 
-	userRepo, err := postgres.NewUserRepository(pool, logger, 0)
+	userRepo, err := postgres.NewUserRepository(pool, logger, 0, runID)
 	if err != nil {
 		return fmt.Errorf("creating user repository: %w", err)
 	}
@@ -189,7 +189,7 @@ func run(args []string) error {
 		return fmt.Errorf("creating protocol repository: %w", err)
 	}
 
-	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 0)
+	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 0, runID)
 	if err != nil {
 		return fmt.Errorf("creating token repository: %w", err)
 	}
@@ -201,12 +201,12 @@ func run(args []string) error {
 
 	eventRepo := postgres.NewEventRepository(logger, buildReg.BuildID(), runID)
 
-	receiptTokenRepo, err := postgres.NewReceiptTokenRepository(pool, logger)
+	receiptTokenRepo, err := postgres.NewReceiptTokenRepository(pool, logger, runID)
 	if err != nil {
 		return fmt.Errorf("creating receipt token repository: %w", err)
 	}
 
-	debtTokenRepo, err := postgres.NewDebtTokenRepository(pool, logger)
+	debtTokenRepo, err := postgres.NewDebtTokenRepository(pool, logger, runID)
 	if err != nil {
 		return fmt.Errorf("creating debt token repository: %w", err)
 	}
