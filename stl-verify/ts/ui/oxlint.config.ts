@@ -15,8 +15,16 @@ const config = {
 
     // The one rule the preset does not name that this app still wants.
     // `restriction` would reach it, and would also carry `max-lines` and
-    // friends. 0 violations, so it is a ratchet rather than a backlog.
+    // friends (added by name below, for the same reason). 0 violations, so
+    // it is a ratchet rather than a backlog.
     'typescript/no-explicit-any': 'error',
+
+    // Ratchets, not a design target: thresholds hold today's worst offender
+    // plus small headroom, so a PR can only be stopped from making these
+    // worse. Tighten the numbers as the worst files below shrink.
+    'max-lines-per-function': ['error', { max: 500 }], // worst: MethodologyPanel, 438
+    'max-lines': ['error', { max: 950 }], // worst outside tests: dashboard.ts, 915
+    'import/max-dependencies': ['error', { max: 21 }], // worst: AllocationRoute.tsx, 19
 
     // The lint half of the React Compiler's own analysis, and the reason the
     // compiler is wired into the build at all. Off, not passing: the one
@@ -63,6 +71,14 @@ const config = {
       files: ['scripts/**'],
       rules: {
         'no-console': 'off',
+      },
+    },
+    {
+      // Long describe blocks track the app surface under test, not runaway
+      // complexity; max-lines-per-function still bounds a single test.
+      files: ['**/*.test.ts', '**/*.test.tsx'],
+      rules: {
+        'max-lines': 'off',
       },
     },
   ],

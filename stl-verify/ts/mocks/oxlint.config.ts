@@ -12,6 +12,10 @@ const config = {
     ...baseConfig.rules,
     'no-console': 'error',
 
+    // Ratchet (ORB-377), matching ui/oxlint.config.ts: 0 violations at the
+    // rule's own default (10), so no local threshold is needed here.
+    'import/max-dependencies': 'error',
+
     // Type-aware rules (`--type-aware` in the lint script). Kept in step with
     // ui/oxlint.config.ts so a floating promise is caught on either side of the
     // workspace; see that file for why the style rules below are off.
