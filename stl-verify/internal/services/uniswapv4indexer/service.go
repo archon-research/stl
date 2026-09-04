@@ -317,23 +317,24 @@ func (s *UniswapV4Service) dueSetForBlock(ctx context.Context, touched map[int64
 	return s.withRegisteredPools(due, priorIDs, coords.number)
 }
 
-// ids are already resolved to this chain's current registry versions, so one the
-// registry does not name is a genuine bug, not a superseded or foreign row.
-func (s *UniswapV4Service) withRegisteredPools(due []RegisteredPool, ids []int64, bn int64) ([]RegisteredPool, error) {
-	present := make(map[int64]bool, len(due))
+// PoolIds are natural keys, so a registry version appended after boot resolves to
+// the same boot-time pool. One this process does not know at all was registered
+// after it loaded the registry — a restart reloads it — or is absent from it.
+func (s *UniswapV4Service) withRegisteredPools(due []RegisteredPool, poolIDs []common.Hash, bn int64) ([]RegisteredPool, error) {
+	present := make(map[common.Hash]bool, len(due))
 	for _, pool := range due {
-		present[pool.ID] = true
+		present[pool.PoolIDHash] = true
 	}
-	for _, id := range ids {
+	for _, id := range poolIDs {
 		if present[id] {
 			continue
 		}
-		pool, known := s.poolsByRow[id]
+		pool, known := s.poolsByID[id]
 		if !known {
-			return nil, fmt.Errorf("pool %d has uniswap_v4_pool_state rows but is absent from the registry: registry bug", id)
+			return nil, fmt.Errorf("pool %s has uniswap_v4_pool_state rows at block %d but this process does not know it: registered after boot (restart to reload) or absent from the registry", id, bn)
 		}
 		if pool.DeployBlock > bn {
-			return nil, fmt.Errorf("pool %d has uniswap_v4_pool_state rows at block %d but is registered as deployed at block %d: registry bug", id, bn, pool.DeployBlock)
+			return nil, fmt.Errorf("pool %d has uniswap_v4_pool_state rows at block %d but is registered as deployed at block %d: registry bug", pool.ID, bn, pool.DeployBlock)
 		}
 		present[id] = true
 		due = append(due, pool)

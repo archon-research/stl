@@ -1644,10 +1644,10 @@ func TestUniswapV4Repository_PoolIDsWithStateAtBlock_ReturnsDistinctPoolsAscendi
 	if err != nil {
 		t.Fatalf("PoolIDsWithStateAtBlock: %v", err)
 	}
-	want := []int64{poolA, poolB}
-	slices.Sort(want)
+	// PoolIds, bytewise ascending: poolB (0x10) sorts before poolA (0x12).
+	want := []common.Hash{{0x10}, {0x12}}
 	if !slices.Equal(got, want) {
-		t.Errorf("pool ids = %v, want %v", got, want)
+		t.Errorf("pool ids = %v, want %v (pools %d and %d)", got, want, poolB, poolA)
 	}
 }
 
@@ -1676,12 +1676,15 @@ func TestUniswapV4Repository_PoolIDsWithStateAtBlock_ExcludesOtherChains(t *test
 	if err != nil {
 		t.Fatalf("PoolIDsWithStateAtBlock: %v", err)
 	}
-	if !slices.Equal(got, []int64{homePool}) {
-		t.Errorf("pool ids = %v, want %v (the neighbouring chain's pool %d must not leak in)", got, []int64{homePool}, neighbourPool)
+	if want := []common.Hash{{0x13}}; !slices.Equal(got, want) {
+		t.Errorf("pool ids = %v, want %v (pool %d; the neighbouring chain's pool %d must not leak in)", got, want, homePool, neighbourPool)
 	}
 }
 
-func TestUniswapV4Repository_PoolIDsWithStateAtBlock_ResolvesSupersededPoolForward(t *testing.T) {
+// A registry correction appends a new version with a new surrogate id; state rows
+// written under the old one and the new one are the same pool, and a worker that
+// booted on either version must resolve them to its own row.
+func TestUniswapV4Repository_PoolIDsWithStateAtBlock_ResolvesEveryRegistryVersionToOnePoolId(t *testing.T) {
 	ctx := context.Background()
 	seedUniswapV4RepoPoolManager(t, ctx, newUniswapV4RepoManagerFixture(uniswapV4RepoSupersededChainID))
 
@@ -1709,8 +1712,8 @@ func TestUniswapV4Repository_PoolIDsWithStateAtBlock_ResolvesSupersededPoolForwa
 	if err != nil {
 		t.Fatalf("PoolIDsWithStateAtBlock: %v", err)
 	}
-	if !slices.Equal(got, []int64{currentID}) {
-		t.Errorf("pool ids = %v, want %v (the superseded %d must resolve forward)", got, []int64{currentID}, supersededID)
+	if want := []common.Hash{fixture.poolID}; !slices.Equal(got, want) {
+		t.Errorf("pool ids = %v, want %v (the one PoolId behind superseded row %d and current row %d)", got, want, supersededID, currentID)
 	}
 }
 

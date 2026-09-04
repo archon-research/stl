@@ -43,9 +43,11 @@ type UniswapV4Repository interface {
 	// PoolManager/StateView and token decimals; an unresolvable pool is an error.
 	LoadPools(ctx context.Context, chainID int64) ([]UniswapV4PoolRow, error)
 	SaveBlock(ctx context.Context, tx pgx.Tx, w UniswapV4BlockWrites) (stateRows StateRowCounts, err error)
-	// Pools on chainID with a state row at blockNumber, ascending; a reorg
-	// redelivery unions them into its due set. blockTimestamp prunes chunks (VEC-541).
-	PoolIDsWithStateAtBlock(ctx context.Context, chainID int64, blockNumber int64, blockTimestamp time.Time) ([]int64, error)
+	// On-chain PoolIds of the pools on chainID with a state row at blockNumber,
+	// ascending; a reorg redelivery unions them into its due set. Natural keys, not
+	// surrogate ids: a registry version appended after a worker booted must not
+	// change what that worker resolves. blockTimestamp prunes chunks (VEC-541).
+	PoolIDsWithStateAtBlock(ctx context.Context, chainID int64, blockNumber int64, blockTimestamp time.Time) ([]common.Hash, error)
 	// Tick positions already written for pool at blockNumber, so a reorg
 	// redelivery re-reads them; reads committed rows outside any transaction.
 	TicksForPoolAtBlock(ctx context.Context, chainID int64, poolID int64, blockNumber int64) ([]int32, error)

@@ -212,31 +212,33 @@ const currentUniswapV4PoolCTE = `
 
 // The ±1 day block_timestamp band is what prunes chunks; filtering on
 // block_number alone scans every chunk of the hypertable on each reorg (VEC-541).
-const poolIDsWithStateAtBlockSQL = currentUniswapV4PoolCTE + `
-	SELECT DISTINCT cur.id
+// Natural keys, not surrogate ids: rows written under a superseded registry
+// version name the same PoolId, and a version appended after a worker booted
+// must not change what that worker resolves — it loaded the registry once.
+const poolIDsWithStateAtBlockSQL = `
+	SELECT DISTINCT p.pool_id
 	FROM uniswap_v4_pool_state s
 	JOIN uniswap_v4_pool p ON p.id = s.pool_id
-	JOIN cur ON cur.chain_id = p.chain_id AND cur.pool_id = p.pool_id
 	WHERE p.chain_id = $1
 	  AND s.block_number = $2
 	  AND s.block_timestamp BETWEEN $3::timestamptz - INTERVAL '1 day'
 	                            AND $3::timestamptz + INTERVAL '1 day'
-	ORDER BY cur.id`
+	ORDER BY p.pool_id`
 
-func (r *UniswapV4Repository) PoolIDsWithStateAtBlock(ctx context.Context, chainID int64, blockNumber int64, blockTimestamp time.Time) ([]int64, error) {
+func (r *UniswapV4Repository) PoolIDsWithStateAtBlock(ctx context.Context, chainID int64, blockNumber int64, blockTimestamp time.Time) ([]common.Hash, error) {
 	rows, err := r.pool.Query(ctx, poolIDsWithStateAtBlockSQL, chainID, blockNumber, blockTimestamp)
 	if err != nil {
 		return nil, fmt.Errorf("querying pools with state at block %d: %w", blockNumber, err)
 	}
 	defer rows.Close()
 
-	var poolIDs []int64
+	var poolIDs []common.Hash
 	for rows.Next() {
-		var poolID int64
+		var poolID []byte
 		if err := rows.Scan(&poolID); err != nil {
 			return nil, fmt.Errorf("scanning pool id with state at block %d: %w", blockNumber, err)
 		}
-		poolIDs = append(poolIDs, poolID)
+		poolIDs = append(poolIDs, common.BytesToHash(poolID))
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterating pools with state at block %d: %w", blockNumber, err)
