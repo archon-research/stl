@@ -370,6 +370,8 @@ func servicePool() RegisteredPool {
 		ID:                7,
 		PoolManager:       poolManagerAddress(),
 		StateView:         common.HexToAddress(stateViewAddr),
+		PositionManagerID: positionManagerRowID,
+		PositionManager:   common.HexToAddress(positionManagerAddr),
 		PoolIDHash:        common.HexToHash(wbtcWstethPoolID),
 		Currency0:         common.HexToAddress(wbtcAddress),
 		Currency1:         common.HexToAddress(wstethAddress),

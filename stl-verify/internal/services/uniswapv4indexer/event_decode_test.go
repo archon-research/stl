@@ -108,7 +108,7 @@ func corruptHexWord(word string) string { return word[:34] + "z" + word[35:] }
 
 func decodeFixture(t *testing.T, log shared.Log, pools map[common.Hash]RegisteredPool) (DecodedEvents, map[int64]bool) {
 	t.Helper()
-	got, touched, err := DecodeEvents(receiptOf(log), pools, poolManagerAddress(), blockNumber, blockVer, blockTS)
+	got, touched, err := DecodeEvents(receiptOf(log), pools, poolManagerAddress(), testPositionManager(), blockNumber, blockVer, blockTS)
 	if err != nil {
 		t.Fatalf("DecodeEvents: %v", err)
 	}
@@ -584,7 +584,7 @@ func TestDecodeEvents_MultipleReceiptLogsAccumulate(t *testing.T) {
 
 	got, touched, err := DecodeEvents(
 		receiptOf(swapFixtureLog(), modifyLiquidityFixtureLog(), untracked),
-		poolsByIDOf(swapPool, modifyPool), poolManagerAddress(), blockNumber, blockVer, blockTS,
+		poolsByIDOf(swapPool, modifyPool), poolManagerAddress(), testPositionManager(), blockNumber, blockVer, blockTS,
 	)
 	if err != nil {
 		t.Fatalf("DecodeEvents: %v", err)
@@ -726,7 +726,7 @@ func TestDecodeEvents_MalformedLogsReturnError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, err := DecodeEvents(receiptOf(tt.log), poolsByIDOf(pool), poolManagerAddress(), blockNumber, blockVer, blockTS)
+			_, _, err := DecodeEvents(receiptOf(tt.log), poolsByIDOf(pool), poolManagerAddress(), testPositionManager(), blockNumber, blockVer, blockTS)
 			if err == nil {
 				t.Fatalf("DecodeEvents: want error for %s, got nil", tt.name)
 			}
@@ -747,7 +747,7 @@ func TestDecodeEvents_EmptyDataIsAnError(t *testing.T) {
 	)
 	log.Data = "0x"
 
-	_, _, err := DecodeEvents(receiptOf(log), poolsByIDOf(pool), poolManagerAddress(), blockNumber, blockVer, blockTS)
+	_, _, err := DecodeEvents(receiptOf(log), poolsByIDOf(pool), poolManagerAddress(), testPositionManager(), blockNumber, blockVer, blockTS)
 	if err == nil {
 		t.Fatal("DecodeEvents: want error for a Donate log with no data, got nil")
 	}
@@ -822,7 +822,7 @@ func TestDecodeEvents_EntityValidationFailureIsAnError(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := decodeTestPool(7, ethWstethPoolID)
-			_, _, err := DecodeEvents(receiptOf(tc.log(t)), poolsByIDOf(pool), poolManagerAddress(), blockNumber, blockVer, blockTS)
+			_, _, err := DecodeEvents(receiptOf(tc.log(t)), poolsByIDOf(pool), poolManagerAddress(), testPositionManager(), blockNumber, blockVer, blockTS)
 			if err == nil {
 				t.Fatalf("DecodeEvents: want error for %s, got nil", tc.name)
 			}

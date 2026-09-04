@@ -13,6 +13,8 @@ type RegisteredPool struct {
 	ID                int64
 	PoolManager       common.Address
 	StateView         common.Address
+	PositionManagerID int64
+	PositionManager   common.Address
 	PoolIDHash        common.Hash
 	Currency0         common.Address
 	Currency1         common.Address
@@ -35,5 +37,11 @@ type DecodedEvents struct {
 	Swaps           []*entity.UniswapV4Swap
 	LiquidityEvents []*entity.UniswapV4LiquidityEvent
 	PoolEvents      []*entity.UniswapV4PoolEvent
+	NFTTransfers    []*entity.UniswapV4PositionNFTTransfer
 	Captured        []dexconsumer.CapturedLog
+}
+
+type RegisteredPositionManager struct {
+	ID      int64
+	Address common.Address
 }

@@ -2644,6 +2644,52 @@ groups:
             logs the offending PoolIds at boot.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerpoolneverindexed
 
+      - alert: VectorUniswapV4IndexerNoNFTTransfers
+        # Silent-empty guard for the posm ERC-721 stream: blocks advance, not one
+        # PositionManager Transfer decodes. The table is keyed off ONE address,
+        # so a wrong uniswap_v4_position_manager row or a topic0/arity
+        # regression leaves every other metric healthy and raises no error —
+        # ErrorRatioHigh and Stalled stay quiet too.
+        #
+        # NoPoolsTouched cannot cover it: a posm transfer is deliberately absent
+        # from touchedIDs, so the two streams fail independently.
+        #
+        # Window, `offset 6h` and `unless` are NoPoolsTouched's, for the reasons
+        # spelt out there — same permanent failure class, and the false-positive
+        # pressure is thinner: this stream is the whole contract, not a curated
+        # subset (2,001 blocks on 2026-08-31 carried 290 Transfers, ~260 per 6h).
+        expr: |
+          sum by (chain, cluster) (
+            rate(uniswap_v4_blocks_processed_total{status="success", k8s_namespace_name="vector"}[6h])
+          ) > 0
+          and
+          sum by (chain, cluster) (
+            rate(uniswap_v4_blocks_processed_total{status="success", k8s_namespace_name="vector"}[6h] offset 6h)
+          ) > 0
+          unless
+          sum by (chain, cluster) (
+            rate(uniswap_v4_nft_transfer_rows_written_total{k8s_namespace_name="vector"}[6h])
+          ) > 0
+        for: 10m
+        labels:
+          team: vector
+          severity: warning
+          component: uniswap-v4-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector uniswap-v4-indexer decoding no posm NFT transfers on {{ $labels.chain }}"
+          description: |
+            `uniswap-v4-indexer` on chain `{{ $labels.chain }}` has processed
+            blocks successfully for 6h without decoding a single Uniswap V4
+            PositionManager ERC-721 `Transfer`. Mainnet moves posm position NFTs
+            continuously, so six hours of silence is a matching failure rather
+            than a lull: suspect a wrong PositionManager address in
+            `uniswap_v4_position_manager` (the address is the FK'd `protocol`
+            row's), or a regression in the topic0 / 4-topic guard in
+            `decodePositionManagerLog`. `uniswap_v4_position_nft_transfer` is
+            the only source of posm token holders, so it is going stale.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexernonfttransfers
+
       # =====================================================================
       # VEC-572 — design-decision watchdog. Self-contained; keep it last in
       # this group.

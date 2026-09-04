@@ -31,6 +31,9 @@ const (
 	uniswapV4StateViewHex   = "\\x7fFE42C4a5DEeA5b0feC41C94C136Cf115597227"
 	uniswapV4DeployBlock    = 21688329
 
+	uniswapV4PositionManagerHex         = "\\xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e"
+	uniswapV4PositionManagerDeployBlock = 21689089
+
 	uniswapV4NativeCurrencyHex = "\\x0000000000000000000000000000000000000000"
 	uniswapV4EthPlaceholderHex = "\\xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 	uniswapV4NoHooksHex        = "\\x0000000000000000000000000000000000000000"
@@ -69,9 +72,9 @@ func readUniswapV4MigrationSeededPoolIDs() []string {
 	return poolIDs
 }
 
-// uniswapV4Tables are the 7 tables created by
-// 20260819_120000_create_uniswap_v4_tables.sql plus uniswap_v4_position from
-// 20260820_120000_create_uniswap_v4_positions.sql.
+// uniswapV4Tables are the 7 tables from
+// 20260819_120000_create_uniswap_v4_tables.sql, uniswap_v4_position, and the
+// registry plus transfer table from the ARCT-385 migration.
 var uniswapV4Tables = []string{
 	"uniswap_v4_pool_manager",
 	"uniswap_v4_pool",
@@ -81,10 +84,12 @@ var uniswapV4Tables = []string{
 	"uniswap_v4_tick",
 	"uniswap_v4_pool_event",
 	"uniswap_v4_position",
+	"uniswap_v4_position_manager",
+	"uniswap_v4_position_nft_transfer",
 }
 
 // uniswapV4VersionedTables is every table above: registry rows are versioned and
-// append-only too, so all 8 carry a processing_version trigger.
+// append-only too, so all 10 carry a processing_version trigger.
 var uniswapV4VersionedTables = uniswapV4Tables
 
 // uniswapV4Hypertables excludes the append-on-change tables (uniswapV4PlainTables).
@@ -93,6 +98,7 @@ var uniswapV4Hypertables = []string{
 	"uniswap_v4_swap",
 	"uniswap_v4_liquidity_event",
 	"uniswap_v4_pool_event",
+	"uniswap_v4_position_nft_transfer",
 }
 
 // uniswapV4PlainTables are append-on-change: partitioning would fan their
@@ -222,6 +228,59 @@ func TestUniswapV4TickBlockLookupIndexServesReorgTickRead(t *testing.T) {
 	}
 }
 
+// seedUniswapV4NFTTransferPlanHistory spreads one manager's transfers over many
+// tokens and blocks, so one token's history is a small slice of the table; on a
+// handful of rows every candidate index costs the same.
+func seedUniswapV4NFTTransferPlanHistory(t *testing.T, ctx context.Context, managerID, firstBlock int64, blocks, tokens int) {
+	t.Helper()
+	for i := range blocks {
+		if _, err := uniswapV4TestPool.Exec(ctx, `
+			INSERT INTO uniswap_v4_position_nft_transfer
+			    (position_manager_id, token_id, block_number, block_version, block_timestamp,
+			     tx_hash, log_index, from_address, to_address, build_id)
+			SELECT $1, g, $2, 0, '2025-03-01T00:00:00Z'::timestamptz,
+			       '\xddeeff00ddeeff00ddeeff00ddeeff00ddeeff00ddeeff00ddeeff00ddeeff00'::bytea, g,
+			       '\x3b0a17a75a14eaaef42002a4891acf8f9fd8a72e'::bytea,
+			       '\xe588ddd13a8bdbee578eaa7c4fd9780180b2f10c'::bytea, 0
+			FROM generate_series(1, $3) g`,
+			managerID, firstBlock+int64(i), tokens); err != nil {
+			t.Fatalf("seeding nft transfer history at block %d: %v", firstBlock+int64(i), err)
+		}
+	}
+	if _, err := uniswapV4TestPool.Exec(ctx, `VACUUM (ANALYZE) uniswap_v4_position_nft_transfer`); err != nil {
+		t.Fatalf("vacuum analyze uniswap_v4_position_nft_transfer: %v", err)
+	}
+}
+
+// Whether column is resolved by the index or re-checked by a Filter afterwards.
+// Chunk copies of a hypertable index truncate their name at 63 bytes, so
+// matching by name is not an option.
+func uniswapV4PlanIndexCondCovers(plan, column string) bool {
+	for line := range strings.SplitSeq(plan, "\n") {
+		if strings.Contains(line, "Index Cond:") && strings.Contains(line, column) {
+			return true
+		}
+	}
+	return false
+}
+
+// The PK cannot serve the holder query: it leads with block_timestamp, which the
+// question does not bound. Without the token_block index the answer still comes
+// back — after re-checking every transfer the manager ever emitted.
+func TestUniswapV4NFTTransferTokenBlockIndexServesTheHolderQuery(t *testing.T) {
+	ctx := context.Background()
+	managerID := seedUniswapV4PositionManagerOnChain(t, ctx, uniswapV4FactParentChainID+900)
+
+	const firstBlock = int64(22600000)
+	seedUniswapV4NFTTransferPlanHistory(t, ctx, managerID, firstBlock, 60, 40)
+
+	plan := explainUniswapV4Query(t, ctx, uniswapV4HolderAtBlockSQL, managerID, 7, firstBlock+31)
+
+	if !uniswapV4PlanIndexCondCovers(plan, "token_id") {
+		t.Errorf("the holder query does not reach token_id through an index condition, so idx_uniswap_v4_position_nft_transfer_token_block is not serving it:\n%s", plan)
+	}
+}
+
 func TestUniswapV4ProcessingVersionTriggersExist(t *testing.T) {
 	ctx := context.Background()
 
@@ -272,7 +331,7 @@ func TestUniswapV4ProcessingVersionTriggersForceCustomPlan(t *testing.T) {
 func TestUniswapV4CompressedFactTablesHaveAVersionFunction(t *testing.T) {
 	ctx := context.Background()
 
-	for _, table := range uniswapV4BatchedFactTables {
+	for _, table := range uniswapV4Hypertables {
 		t.Run(table, func(t *testing.T) {
 			fn := "next_processing_version_" + table
 			var volatility string
@@ -317,6 +376,7 @@ func TestUniswapV4RegistryTablesAreUniquePerVersion(t *testing.T) {
 	}{
 		{"uniswap_v4_pool_manager", []string{"chain_id", "processing_version"}},
 		{"uniswap_v4_pool", []string{"chain_id", "pool_id", "processing_version"}},
+		{"uniswap_v4_position_manager", []string{"chain_id", "processing_version"}},
 	}
 
 	for _, tc := range cases {
@@ -362,6 +422,9 @@ func TestUniswapV4ForeignKeys(t *testing.T) {
 		{"uniswap_v4_tick", "pool_id", "uniswap_v4_pool"},
 		{"uniswap_v4_pool_event", "pool_id", "uniswap_v4_pool"},
 		{"uniswap_v4_position", "pool_id", "uniswap_v4_pool"},
+		{"uniswap_v4_position_manager", "chain_id", "chain"},
+		{"uniswap_v4_position_manager", "protocol_id", "protocol"},
+		{"uniswap_v4_position_nft_transfer", "position_manager_id", "uniswap_v4_position_manager"},
 	}
 
 	for _, tc := range cases {
@@ -581,6 +644,15 @@ const (
 		        22000005, 0, '2025-02-01T00:05:00Z'::timestamptz,
 		        $4::numeric, $5::numeric, $6::numeric, $7)`
 
+	uniswapV4NFTTransferInsertSQL = `
+		INSERT INTO uniswap_v4_position_nft_transfer
+		    (position_manager_id, token_id, block_number, block_version, block_timestamp,
+		     tx_hash, log_index, from_address, to_address, build_id)
+		VALUES ($1, $2::numeric, 22000006, 0, '2025-02-01T00:06:00Z'::timestamptz,
+		        '\xddeeff00ddeeff00ddeeff00ddeeff00ddeeff00ddeeff00ddeeff00ddeeff00'::bytea,
+		        0, '\x3b0a17a75a14eaaef42002a4891acf8f9fd8a72e'::bytea,
+		        '\xe588ddd13a8bdbee578eaa7c4fd9780180b2f10c'::bytea, $3)`
+
 	uniswapV4PoolEventInsertSQL = `
 		INSERT INTO uniswap_v4_pool_event
 		    (pool_id, block_number, block_version, block_timestamp,
@@ -591,57 +663,94 @@ const (
 		        '{"sqrtPriceX96": "79228162514264337593543950336", "tick": 0}'::jsonb, $2)`
 )
 
+// uniswapV4ValidFactRow is one fact table plus in-range values for every column
+// its CHECK constraints govern, ordered as the INSERT expects them between the
+// parent registry id and build_id.
 type uniswapV4ValidFactRow struct {
-	table     string
-	insert    string
-	poolIDHex string
-	args      []any
+	table  string
+	insert string
+	parent uniswapV4FactParent
+	args   []any
 }
 
-// uniswapV4ValidFactRows covers all six versioned fact tables. Each gets its own
-// registry pool so the shared block/log_index values cannot collide.
+// uniswapV4FactParent is the registry row a fact table FKs. seed must return a
+// row unique to discriminator: the fixtures bake one block number and log_index
+// into the INSERT, so two tests would otherwise collide.
+type uniswapV4FactParent struct {
+	column string
+	seed   func(t *testing.T, ctx context.Context, discriminator int) int64
+}
+
+var uniswapV4PoolFactParent = uniswapV4FactParent{
+	column: "pool_id",
+	seed: func(t *testing.T, ctx context.Context, discriminator int) int64 {
+		return insertTestUniswapV4Pool(t, ctx, fmt.Sprintf("\\x11%062d", discriminator))
+	},
+}
+
+var uniswapV4PositionManagerFactParent = uniswapV4FactParent{
+	column: "position_manager_id",
+	seed: func(t *testing.T, ctx context.Context, discriminator int) int64 {
+		return seedUniswapV4PositionManagerOnChain(t, ctx, uniswapV4FactParentChainID+discriminator)
+	},
+}
+
+// Synthetic chains for the NFT transfer's parent rows, off chain 1 whose single
+// PositionManager identity the migration asserts.
+const uniswapV4FactParentChainID = 475100
+
+// uniswapV4ValidFactRows covers all seven versioned fact tables. Each pool-keyed
+// one gets its own registry pool so the shared block/log_index values cannot
+// collide.
 var uniswapV4ValidFactRows = []uniswapV4ValidFactRow{
 	{
-		table:     "uniswap_v4_pool_state",
-		insert:    uniswapV4PoolStateInsertSQL,
-		poolIDHex: "\\x1100000000000000000000000000000000000000000000000000000000000001",
-		args:      []any{"79228162514264337593543950336", 0, 0, 3000},
+		table:  "uniswap_v4_pool_state",
+		insert: uniswapV4PoolStateInsertSQL,
+		parent: uniswapV4PoolFactParent,
+		args:   []any{"79228162514264337593543950336", 0, 0, 3000},
 	},
 	{
-		table:     "uniswap_v4_swap",
-		insert:    uniswapV4SwapInsertSQL,
-		poolIDHex: "\\x1100000000000000000000000000000000000000000000000000000000000002",
-		args:      []any{"79228162514264337593543950336", 0, 3000},
+		table:  "uniswap_v4_swap",
+		insert: uniswapV4SwapInsertSQL,
+		parent: uniswapV4PoolFactParent,
+		args:   []any{"79228162514264337593543950336", 0, 3000},
 	},
 	{
-		table:     "uniswap_v4_liquidity_event",
-		insert:    uniswapV4LiquidityEventInsertSQL,
-		poolIDHex: "\\x1100000000000000000000000000000000000000000000000000000000000003",
-		args:      []any{-120, 120},
+		table:  "uniswap_v4_liquidity_event",
+		insert: uniswapV4LiquidityEventInsertSQL,
+		parent: uniswapV4PoolFactParent,
+		args:   []any{-120, 120},
 	},
 	{
-		table:     "uniswap_v4_tick",
-		insert:    uniswapV4TickInsertSQL,
-		poolIDHex: "\\x1100000000000000000000000000000000000000000000000000000000000004",
-		args:      []any{-120},
+		table:  "uniswap_v4_tick",
+		insert: uniswapV4TickInsertSQL,
+		parent: uniswapV4PoolFactParent,
+		args:   []any{-120},
 	},
 	{
-		table:     "uniswap_v4_pool_event",
-		insert:    uniswapV4PoolEventInsertSQL,
-		poolIDHex: "\\x1100000000000000000000000000000000000000000000000000000000000005",
-		args:      nil,
+		table:  "uniswap_v4_pool_event",
+		insert: uniswapV4PoolEventInsertSQL,
+		parent: uniswapV4PoolFactParent,
+		args:   nil,
 	},
 	{
-		table:     "uniswap_v4_position",
-		insert:    uniswapV4PositionInsertSQL,
-		poolIDHex: "\\x1100000000000000000000000000000000000000000000000000000000000006",
-		args:      []any{-120, 120, "1000000000000000000", "0", "0"},
+		table:  "uniswap_v4_position",
+		insert: uniswapV4PositionInsertSQL,
+		parent: uniswapV4PoolFactParent,
+		args:   []any{-120, 120, "1000000000000000000", "0", "0"},
+	},
+	{
+		table:  "uniswap_v4_position_nft_transfer",
+		insert: uniswapV4NFTTransferInsertSQL,
+		parent: uniswapV4PositionManagerFactParent,
+		args:   []any{"388720"},
 	},
 }
 
-func uniswapV4FactInsertArgs(poolID int64, values []any, buildID int) []any {
+// Placeholder order: parent registry id, the constrained values, build_id.
+func uniswapV4FactInsertArgs(parentID int64, values []any, buildID int) []any {
 	args := make([]any, 0, len(values)+2)
-	args = append(args, poolID)
+	args = append(args, parentID)
 	args = append(args, values...)
 	return append(args, buildID)
 }
@@ -649,16 +758,16 @@ func uniswapV4FactInsertArgs(poolID int64, values []any, buildID int) []any {
 func TestUniswapV4ProcessingVersionTriggerAppendsFactCorrection(t *testing.T) {
 	ctx := context.Background()
 
-	for _, tc := range uniswapV4ValidFactRows {
+	for i, tc := range uniswapV4ValidFactRows {
 		t.Run(tc.table, func(t *testing.T) {
-			poolID := insertTestUniswapV4Pool(t, ctx, tc.poolIDHex)
+			parentID := tc.parent.seed(t, ctx, 100+i)
 			insert := tc.insert + `
 		ON CONFLICT DO NOTHING
 		RETURNING processing_version`
 
 			var pv int
 			if err := uniswapV4TestPool.QueryRow(ctx, insert,
-				uniswapV4FactInsertArgs(poolID, tc.args, 0)...).Scan(&pv); err != nil {
+				uniswapV4FactInsertArgs(parentID, tc.args, 0)...).Scan(&pv); err != nil {
 				t.Fatalf("inserting under build 0: %v", err)
 			}
 			if pv != 0 {
@@ -666,7 +775,7 @@ func TestUniswapV4ProcessingVersionTriggerAppendsFactCorrection(t *testing.T) {
 			}
 
 			if err := uniswapV4TestPool.QueryRow(ctx, insert,
-				uniswapV4FactInsertArgs(poolID, tc.args, 1)...).Scan(&pv); err != nil {
+				uniswapV4FactInsertArgs(parentID, tc.args, 1)...).Scan(&pv); err != nil {
 				t.Fatalf("appending a correction under build 1: %v", err)
 			}
 			if pv != 1 {
@@ -674,7 +783,7 @@ func TestUniswapV4ProcessingVersionTriggerAppendsFactCorrection(t *testing.T) {
 			}
 
 			tag, err := uniswapV4TestPool.Exec(ctx, tc.insert+" ON CONFLICT DO NOTHING",
-				uniswapV4FactInsertArgs(poolID, tc.args, 1)...)
+				uniswapV4FactInsertArgs(parentID, tc.args, 1)...)
 			if err != nil {
 				t.Fatalf("re-inserting under build 1: %v", err)
 			}
@@ -684,7 +793,7 @@ func TestUniswapV4ProcessingVersionTriggerAppendsFactCorrection(t *testing.T) {
 
 			var versions int
 			if err := uniswapV4TestPool.QueryRow(ctx,
-				"SELECT count(*) FROM "+tc.table+" WHERE pool_id = $1", poolID).Scan(&versions); err != nil {
+				"SELECT count(*) FROM "+tc.table+" WHERE "+tc.parent.column+" = $1", parentID).Scan(&versions); err != nil {
 				t.Fatalf("counting %s versions: %v", tc.table, err)
 			}
 			if versions != 2 {
@@ -1001,6 +1110,113 @@ func TestUniswapV4PositionDistinguishesPositionsBySaltAlone(t *testing.T) {
 	}
 }
 
+// The CHECKs are the last line of defence for values the decoder reads straight
+// out of a log's topics.
+func TestUniswapV4NFTTransferChecksRejectMalformedRows(t *testing.T) {
+	ctx := context.Background()
+	managerID := seedUniswapV4PositionManager(t, ctx)
+
+	insert := `
+		INSERT INTO uniswap_v4_position_nft_transfer
+		    (position_manager_id, token_id, block_number, block_version, block_timestamp,
+		     tx_hash, log_index, from_address, to_address, build_id)
+		VALUES ($1, $2::numeric, 22000020, 0, '2025-02-01T00:20:00Z'::timestamptz,
+		        $3::bytea, 0, $4::bytea, $5::bytea, 0)`
+
+	const (
+		goodTxHash = "\\xddeeff00ddeeff00ddeeff00ddeeff00ddeeff00ddeeff00ddeeff00ddeeff00"
+		goodFrom   = "\\x3b0a17a75a14eaaef42002a4891acf8f9fd8a72e"
+		goodTo     = "\\xe588ddd13a8bdbee578eaa7c4fd9780180b2f10c"
+	)
+
+	cases := []struct {
+		name    string
+		tokenID string
+		txHash  string
+		from    string
+		to      string
+	}{
+		{"negative token id", "-1", goodTxHash, goodFrom, goodTo},
+		{"short tx hash", "1", "\\xddeeff00", goodFrom, goodTo},
+		{"tx hash padded to 33 bytes", "1", goodTxHash + "00", goodFrom, goodTo},
+		{"from address 19 bytes", "1", goodTxHash, "\\x3b0a17a75a14eaaef42002a4891acf8f9fd8a7", goodTo},
+		{"from address 32 bytes", "1", goodTxHash, goodTxHash, goodTo},
+		{"to address 19 bytes", "1", goodTxHash, goodFrom, "\\xe588ddd13a8bdbee578eaa7c4fd9780180b2f1"},
+		{"to address 32 bytes", "1", goodTxHash, goodFrom, goodTxHash},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := uniswapV4TestPool.Exec(ctx, insert, managerID, tc.tokenID, tc.txHash, tc.from, tc.to)
+			requireUniswapV4CheckViolation(t, err)
+		})
+	}
+}
+
+// A mint reads from = address(0) and a burn reads to = address(0); both are
+// ordinary rows, and a token id at the uint256 ceiling still has to fit.
+func TestUniswapV4NFTTransferAcceptsMintBurnAndMaxTokenID(t *testing.T) {
+	ctx := context.Background()
+	managerID := seedUniswapV4PositionManager(t, ctx)
+
+	const zeroAddress = "\\x0000000000000000000000000000000000000000"
+	const maxUint256 = "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+
+	cases := []struct {
+		name     string
+		logIndex int
+		tokenID  string
+		from     string
+		to       string
+	}{
+		{"mint from address(0)", 1, "1", zeroAddress, "\\x4423b0d6955af39b48cf215577a79ce574299d3f"},
+		{"burn to address(0)", 2, "1", "\\x4423b0d6955af39b48cf215577a79ce574299d3f", zeroAddress},
+		{"token id at the uint256 ceiling", 3, maxUint256, zeroAddress, zeroAddress},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := uniswapV4TestPool.Exec(ctx, `
+				INSERT INTO uniswap_v4_position_nft_transfer
+				    (position_manager_id, token_id, block_number, block_version, block_timestamp,
+				     tx_hash, log_index, from_address, to_address, build_id)
+				VALUES ($1, $2::numeric, 22000021, 0, '2025-02-01T00:21:00Z'::timestamptz,
+				        '\xddeeff00ddeeff00ddeeff00ddeeff00ddeeff00ddeeff00ddeeff00ddeeff00'::bytea,
+				        $3, $4::bytea, $5::bytea, 0)`,
+				managerID, tc.tokenID, tc.logIndex, tc.from, tc.to); err != nil {
+				t.Fatalf("row was rejected: %v", err)
+			}
+		})
+	}
+}
+
+// log_index has to be in the key, not just in the ordering: one token can be
+// transferred twice in a block, and both rows must survive.
+func TestUniswapV4NFTTransferPrimaryKeyCoversTheLogSiteAndVersion(t *testing.T) {
+	ctx := context.Background()
+
+	var columns []string
+	if err := uniswapV4TestPool.QueryRow(ctx, `
+		SELECT array_agg(a.attname ORDER BY a.attname)
+		FROM pg_constraint con
+		JOIN pg_class c ON c.oid = con.conrelid
+		JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = ANY(con.conkey)
+		WHERE c.relname = 'uniswap_v4_position_nft_transfer'
+		  AND pg_table_is_visible(c.oid)
+		  AND con.contype = 'p'`).Scan(&columns); err != nil {
+		t.Fatalf("reading uniswap_v4_position_nft_transfer primary key columns: %v", err)
+	}
+
+	// token_id is deliberately absent: a log site is already unique without it.
+	want := []string{
+		"block_number", "block_timestamp", "block_version",
+		"log_index", "position_manager_id", "processing_version",
+	}
+	if !slices.Equal(columns, want) {
+		t.Errorf("uniswap_v4_position_nft_transfer PK = %v, want %v", columns, want)
+	}
+}
+
 func TestUniswapV4ColumnComments(t *testing.T) {
 	ctx := context.Background()
 
@@ -1209,6 +1425,7 @@ func seedUniswapV4Registry(t *testing.T, ctx context.Context) int64 {
 	t.Helper()
 
 	poolManagerID := seedUniswapV4PoolManager(t, ctx)
+	seedUniswapV4PositionManager(t, ctx)
 	for _, tok := range uniswapV4SeedTokens {
 		seedUniswapV4Token(t, ctx, tok.addrHex, tok.symbol, tok.decimals)
 	}
@@ -1566,6 +1783,54 @@ func currentUniswapV4PoolManagerID(t *testing.T, ctx context.Context) int64 {
 	return poolManagerID
 }
 
+func seedUniswapV4PositionManager(t *testing.T, ctx context.Context) int64 {
+	t.Helper()
+	return seedUniswapV4PositionManagerOnChain(t, ctx, 1)
+}
+
+func seedUniswapV4PositionManagerOnChain(t *testing.T, ctx context.Context, chainID int) int64 {
+	t.Helper()
+
+	if _, err := uniswapV4TestPool.Exec(ctx,
+		`INSERT INTO chain (chain_id, name) VALUES ($1, $2) ON CONFLICT (chain_id) DO NOTHING`,
+		chainID, fmt.Sprintf("uniswap_v4_posm_test_%d", chainID)); err != nil {
+		t.Fatalf("seeding chain %d: %v", chainID, err)
+	}
+	if _, err := uniswapV4TestPool.Exec(ctx, `
+		INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, metadata)
+		VALUES ($1, $2::bytea, 'UniswapV4PositionManager', 'dex', $3, '{"role":"position_manager"}'::jsonb)
+		ON CONFLICT (chain_id, address) DO NOTHING`,
+		chainID, uniswapV4PositionManagerHex, uniswapV4PositionManagerDeployBlock); err != nil {
+		t.Fatalf("seeding UniswapV4PositionManager protocol row on chain %d: %v", chainID, err)
+	}
+
+	var protocolID int64
+	if err := uniswapV4TestPool.QueryRow(ctx,
+		`SELECT id FROM protocol WHERE chain_id = $1 AND address = $2::bytea`,
+		chainID, uniswapV4PositionManagerHex).Scan(&protocolID); err != nil {
+		t.Fatalf("reading UniswapV4PositionManager protocol id on chain %d: %v", chainID, err)
+	}
+
+	if _, err := uniswapV4TestPool.Exec(ctx, `
+		INSERT INTO uniswap_v4_position_manager (chain_id, protocol_id, deploy_block, build_id)
+		VALUES ($1, $2, $3, 0)
+		ON CONFLICT (chain_id, processing_version) DO NOTHING`,
+		chainID, protocolID, uniswapV4PositionManagerDeployBlock,
+	); err != nil {
+		t.Fatalf("seeding uniswap_v4_position_manager row on chain %d: %v", chainID, err)
+	}
+
+	var managerID int64
+	if err := uniswapV4TestPool.QueryRow(ctx, `
+		SELECT id FROM uniswap_v4_position_manager
+		WHERE chain_id = $1
+		ORDER BY processing_version DESC
+		LIMIT 1`, chainID).Scan(&managerID); err != nil {
+		t.Fatalf("reading current uniswap_v4_position_manager row on chain %d: %v", chainID, err)
+	}
+	return managerID
+}
+
 func seedUniswapV4Token(t *testing.T, ctx context.Context, addrHex, symbol string, decimals int) int64 {
 	t.Helper()
 
@@ -1720,11 +1985,10 @@ func uniswapV4CreatedAtCases(t *testing.T, ctx context.Context) []uniswapV4Creat
 	}
 
 	for i, row := range uniswapV4ValidFactRows {
-		poolID := insertTestUniswapV4Pool(t, ctx, fmt.Sprintf("\\x19%062d", i))
 		cases = append(cases, uniswapV4CreatedAtCase{
 			table:  row.table,
 			insert: row.insert,
-			args:   uniswapV4FactInsertArgs(poolID, row.args, 0),
+			args:   uniswapV4FactInsertArgs(row.parent.seed(t, ctx, 200+i), row.args, 0),
 		})
 	}
 	return cases

@@ -94,6 +94,7 @@ func DecodeEvents(
 	receipt shared.TransactionReceipt,
 	poolsByID map[common.Hash]RegisteredPool,
 	poolManager common.Address,
+	positionManager RegisteredPositionManager,
 	blockNumber int64,
 	version int,
 	ts time.Time,
@@ -104,13 +105,14 @@ func DecodeEvents(
 	}
 
 	d := &receiptDecoder{
-		events:      events,
-		poolsByID:   poolsByID,
-		poolManager: poolManager,
-		blockNumber: blockNumber,
-		version:     version,
-		ts:          ts,
-		touched:     make(map[int64]bool),
+		events:          events,
+		poolsByID:       poolsByID,
+		poolManager:     poolManager,
+		positionManager: positionManager,
+		blockNumber:     blockNumber,
+		version:         version,
+		ts:              ts,
+		touched:         make(map[int64]bool),
 	}
 	for _, log := range receipt.Logs {
 		if err := d.decodeLog(log); err != nil {
@@ -121,12 +123,13 @@ func DecodeEvents(
 }
 
 type receiptDecoder struct {
-	events      map[common.Hash]*abi.Event
-	poolsByID   map[common.Hash]RegisteredPool
-	poolManager common.Address
-	blockNumber int64
-	version     int
-	ts          time.Time
+	events          map[common.Hash]*abi.Event
+	poolsByID       map[common.Hash]RegisteredPool
+	poolManager     common.Address
+	positionManager RegisteredPositionManager
+	blockNumber     int64
+	version         int
+	ts              time.Time
 
 	out     DecodedEvents
 	touched map[int64]bool
@@ -143,6 +146,9 @@ func (d *receiptDecoder) decodeLog(log shared.Log) error {
 		return fmt.Errorf("invalid log address %q", log.Address)
 	}
 	addr := common.HexToAddress(log.Address)
+	if shared.LogBelongsTo(addr, d.positionManager.Address) {
+		return d.decodePositionManagerLog(log)
+	}
 	if !shared.LogBelongsTo(addr, d.poolManager) {
 		return nil
 	}

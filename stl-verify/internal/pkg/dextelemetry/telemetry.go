@@ -33,6 +33,7 @@ type Telemetry struct {
 	poolsTouched        metric.Int64Counter
 	tickRowsWritten     metric.Int64Counter
 	positionRowsWritten metric.Int64Counter
+	nftTransferRows     metric.Int64Counter
 	poolsNeverIndexed   metric.Int64Gauge
 }
 
@@ -106,6 +107,11 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 		return nil, err
 	}
 
+	nftTransferRows, err := counter(".nft.transfer.rows.written", "Total NFT transfer event rows written")
+	if err != nil {
+		return nil, err
+	}
+
 	neverIndexed, err := meter.Int64Gauge(
 		prefix+".pools.never_indexed",
 		metric.WithDescription("Registered, snapshot-supported pools that have never produced a state or tick row"),
@@ -125,6 +131,7 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 		poolsTouched:        touched,
 		tickRowsWritten:     tickRows,
 		positionRowsWritten: positionRows,
+		nftTransferRows:     nftTransferRows,
 		poolsNeverIndexed:   neverIndexed,
 	}, nil
 }
@@ -216,4 +223,14 @@ func (t *Telemetry) RecordPositionRows(ctx context.Context, n int) {
 		return
 	}
 	t.positionRowsWritten.Add(ctx, int64(n), metric.WithAttributes(t.chainAttr))
+}
+
+// RecordNFTTransferRows counts the posm Transfer rows a committed block offered,
+// the only evidence that decoding still works: a wrong PositionManager address
+// raises no error and empties this series alone.
+func (t *Telemetry) RecordNFTTransferRows(ctx context.Context, n int) {
+	if t == nil || n <= 0 {
+		return
+	}
+	t.nftTransferRows.Add(ctx, int64(n), metric.WithAttributes(t.chainAttr))
 }
