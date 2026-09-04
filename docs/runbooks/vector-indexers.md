@@ -1382,8 +1382,10 @@ and total supplies via Multicall3, and appends `allocation_position` /
 re-reads every tracked entry to catch transfer-less balance changes (interest
 accrual, rebases). One instance per chain — mainnet, avalanche, base (VEC-499),
 optimism, unichain, arbitrum (ARCT-216), robinhood (ARCT-397) — all reusing one
-`service_name` and differing only by the `chain` label, so the chain-scoped alerts
-below cover every chain without per-instance edits.
+`service_name` and differing only by the `chain` label, so the chain-scoped
+alerts below cover every chain without per-instance edits. robinhood's manifests
+live in `k8s/base` only and are not yet referenced from a cluster overlay, so no
+`robinhood-allocation-tracker` pod or `chain="robinhood"` series exists yet.
 
 **Metric coverage (VEC-499):** the shared `telemetry.Metrics` recorder emits one
 sample per consumed block — `blocks_processed_total{service_name="prime-allocation-indexer",
@@ -1397,11 +1399,11 @@ below).
 **`<deployment>` / `app` label per chain:** each per-chain instance has its **own**
 Deployment and `app` label equal to its deployment name — mainnet →
 `allocation-tracker`, every other chain → `<chain>-allocation-tracker`
-(`avalanche-`, `base-`, `optimism-`, `unichain-`, `arbitrum-`, `robinhood-`). The
-Down alert carries a `deployment` label (use
-`{{ $labels.deployment }}` in its commands); the chain-scoped alerts below carry
-only `chain`, so substitute the matching `<deployment>` from this mapping in their
-`kubectl` selectors (`-l app=allocation-tracker` matches mainnet pods only).
+(`avalanche-`, `base-`, `optimism-`, `unichain-`, `arbitrum-`, `robinhood-`).
+The Down alert carries a `deployment` label (use `{{ $labels.deployment }}` in
+its commands); the chain-scoped alerts below carry only `chain`, so substitute
+the matching `<deployment>` from this mapping in their `kubectl` selectors
+(`-l app=allocation-tracker` matches mainnet pods only).
 
 ---
 

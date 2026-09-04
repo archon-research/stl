@@ -310,18 +310,17 @@ over-orphaning, so a single occurrence is a signal rather than confirmed damage.
 Sustained occurrences mean upstream is degraded and the watcher is doing
 defensive work it should not need to.
 
-**`robinhood-watcher` (ARCT-397).** robinhood is a single-sequencer Arbitrum
-Orbit chain, so it belongs on the allow-list on the same grounds as the other
-rollups — but expect this alert to fire there more often than anywhere else.
-ARCT-374 QA showed Alchemy's `newHeads` subscription omits heads under burst on
-robinhood (the same gaps were observed on two independent WS connections, so it
-is upstream, not our client), which drives the watcher onto the out-of-order /
-gap-fill path far more than on the other chains. Treat a robinhood occurrence
-that correlates with an Alchemy burst as the known upstream behaviour: confirm
-via the first checks that the gap self-healed (`backfill_watermark_lag` returns
-to baseline and `backfill_gap_fill_no_canonical_total` is flat) rather than
-assuming over-orphaning. Repeated firings with orphan churn are still a real
-signal and should be escalated like any other chain.
+**`robinhood-watcher` (ARCT-397).** robinhood is a single-sequencer chain, so it
+joined the allow-list on the same grounds as the other rollups. Do NOT discount a
+robinhood firing as "upstream is dropping heads again": a head that Alchemy omits
+and then delivers late still links cleanly onto our chain, so it is recorded as
+`outcome="late_arrival"` — the bucket this rule deliberately excludes (see
+`OutOfOrderOutcomeLateArrival` in
+`stl-verify/internal/ports/outbound/metrics.go`). Omitted heads therefore show
+up in VectorWatcherOutOfOrderBlocksHigh, not here. Reaching
+`outcome="reorg"` on a single-sequencer chain means the block did not link, which
+is the dangerous case on every chain in the allow-list including this one. Triage
+it exactly as the first checks describe.
 
 ### Verify recovery
 
