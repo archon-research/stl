@@ -17,7 +17,7 @@ type SQSConsumerConfig struct {
 // SQSConsumerConfigDefaults returns default values for SQS consumer configuration.
 func SQSConsumerConfigDefaults() SQSConsumerConfig {
 	return SQSConsumerConfig{
-		MaxMessages:  10,
+		MaxMessages:  1,
 		PollInterval: 100 * time.Millisecond,
 		Logger:       slog.Default(),
 	}

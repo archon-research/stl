@@ -12,6 +12,10 @@ This is an npm monorepo containing the frontend applications for STL Verify.
 ## Setup
 
 ```bash
+# Node ships with an older npm than this repo requires; Corepack installs
+# the pinned npm (see package.json's packageManager field) on first use.
+corepack enable npm
+
 # Install dependencies (from the workspace root: stl-verify/ts)
 npm install
 

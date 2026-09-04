@@ -1,6 +1,12 @@
 package outbound
 
-import "context"
+import (
+	"context"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+)
 
 // RiskCapitalPrimeSnapshot is one prime's risk-capital figures from an upstream
 // monitor, as decimal strings exactly as reported.
@@ -38,4 +44,50 @@ type RiskCapitalProvider interface {
 	// the monitor does not cover is simply absent from the result; absence is a
 	// statement about coverage and never means zero exposure.
 	FetchPrimeSnapshots(ctx context.Context, stars []string) ([]RiskCapitalPrimeSnapshot, error)
+}
+
+// RiskCapitalAllocationRow is one row of a prime's per-allocation risk-capital
+// breakdown from an upstream monitor, as decimal strings exactly as reported.
+//
+// Parsing and rescaling belong to the consumer, not the transport: every figure
+// is carried raw so a change in upstream's encoding surfaces as a parse failure
+// rather than as a silently wrong number. CRR is the upstream 0-1 fraction.
+type RiskCapitalAllocationRow struct {
+	Star string
+
+	Protocol string
+	Network  string
+	// Nil for a network the vendor vocabulary has no chain id for.
+	ChainID *int64
+
+	Symbol string
+	// Nil when the monitor omits them.
+	Name             *string
+	TokenAddress     string
+	LoanTokenAddress *string
+	LoanTokenSymbol  *string
+
+	Exposure            string
+	RequiredRiskCapital string
+	CRR                 string
+}
+
+// RiskCapitalAllocationProvider fetches the per-allocation breakdown behind the
+// prime-level snapshots.
+type RiskCapitalAllocationProvider interface {
+	// FetchPrimeAllocations returns the breakdown rows for each of `stars`.
+	// Unlike FetchPrimeSnapshots, the caller must pass only stars the monitor
+	// covers (taken from the same cycle's snapshots): the breakdown route
+	// answers an unknown star with a 500 indistinguishable from a fault.
+	// A covered star may legitimately return zero rows only when its exposure
+	// is zero; the caller owns that cross-check because exposure arrives on the
+	// snapshot, not here.
+	FetchPrimeAllocations(ctx context.Context, stars []string) ([]RiskCapitalAllocationRow, error)
+}
+
+// PrimeCapitalStackAllocationRepository persists per-allocation breakdown rows.
+type PrimeCapitalStackAllocationRepository interface {
+	// SaveCapitalStackAllocations writes within the caller's transaction, so the
+	// caller controls what else commits or rolls back with it.
+	SaveCapitalStackAllocations(ctx context.Context, tx pgx.Tx, allocations []entity.PrimeCapitalStackAllocation) error
 }

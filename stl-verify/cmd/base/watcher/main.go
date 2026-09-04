@@ -10,16 +10,15 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
-	"os/signal"
 	"runtime"
 	"runtime/trace"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 
@@ -30,6 +29,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/services/backfill_gaps"
 	"github.com/archon-research/stl/stl-verify/internal/services/live_data"
@@ -70,88 +70,108 @@ func main() {
 		os.Exit(0)
 	}
 
-	// run owns every deferred cleanup; main only reports and sets the exit
-	// code, so no os.Exit can strand a pending defer.
-	if err := run(cliOptions{
-		enableTraces: *enableTraces,
-		enableBlobs:  *enableBlobs,
-		parallelRPC:  *parallelRPC,
-		pprofAddr:    *pprofAddr,
-		traceFile:    *traceFile,
-	}); err != nil {
+	ctx, stop := lifecycle.SignalContext(context.Background())
+
+	// main holds no defers, so the os.Exit below cannot strand cleanup; every
+	// deferred close lives in run and has already unwound by this point.
+	err := run(ctx, cliOptions{
+		enableTraces:      *enableTraces,
+		enableBlobs:       *enableBlobs,
+		parallelRPC:       *parallelRPC,
+		pprofAddr:         *pprofAddr,
+		traceFile:         *traceFile,
+		onShutdownTimeout: lifecycle.ForceExitAfter(cleanupTimeout),
+	})
+	stop()
+	if err != nil {
 		slog.Error("stl-watcher exited with error", "error", err)
 		os.Exit(1)
 	}
 }
 
+// cleanupTimeout bounds the deferred closes that run after a shutdown timeout.
+// pgxpool.Close blocks until every acquired connection is handed back, and the
+// goroutines still holding them are the ones that just missed
+// lifecycle.ShutdownTimeout. Together the two fit inside the pod's 60s
+// terminationGracePeriodSeconds (k8s/base/watcher/deployment.yaml).
+const cleanupTimeout = 15 * time.Second
+
 type cliOptions struct {
-	pprofAddr    string
-	traceFile    string
+	pprofAddr string
+	traceFile string
+
+	// onShutdownTimeout bounds the cleanup that follows a shutdown timeout.
+	// main supplies the process-killing one; tests leave it nil, so a timeout
+	// fails the test instead of taking the whole test binary down with it.
+	onShutdownTimeout func()
+
 	enableTraces bool
 	enableBlobs  bool
 	parallelRPC  bool
 }
 
-func run(opts cliOptions) (err error) {
+// watcherConfig is the env-driven configuration, read and validated before any
+// connection is opened so a missing variable cannot cost a pool and a Redis
+// handshake first.
+type watcherConfig struct {
+	alchemyAPIKey  string
+	alchemyHTTPURL string
+	alchemyWSURL   string
+	chainName      string
+	postgresURL    string
+	redisAddr      string
+	redisPassword  string
+	snsEndpoint    string
+	snsTopicARN    string
+	chainID        int64
+	enableBackfill bool
+}
+
+// dependencies are the outbound adapters the services are built from. The three
+// that need closing (cache, eventSink, and the pool behind blockState) are
+// opened and deferred by run; the rest hold no resource of their own.
+type dependencies struct {
+	subscriber *alchemy.Subscriber
+	client     *alchemy.Client
+	blockState *postgres.BlockStateRepository
+	cache      *rediscache.BlockCache
+	eventSink  *snsadapter.EventSink
+	metrics    *shared.ServiceTelemetry
+}
+
+func run(ctx context.Context, opts cliOptions) (err error) {
 	if opts.traceFile != "" {
-		f, cerr := os.Create(opts.traceFile)
-		if cerr != nil {
-			return fmt.Errorf("creating trace file: %w", cerr)
+		stopTrace, terr := startTrace(opts.traceFile)
+		if terr != nil {
+			return terr
 		}
-		if cerr := trace.Start(f); cerr != nil {
-			_ = f.Close()
-			return fmt.Errorf("starting trace: %w", cerr)
-		}
-		// Close reports the flush failure that would otherwise leave a
-		// silently truncated trace behind.
-		defer func() {
-			trace.Stop()
-			if cerr := f.Close(); cerr != nil {
-				err = errors.Join(err, fmt.Errorf("closing trace file: %w", cerr))
-			}
-		}()
+		defer func() { err = errors.Join(err, stopTrace()) }()
 	}
 
-	// Set up context with cancellation (created early for consistent use throughout init)
-	ctx, cancel := context.WithCancel(context.Background())
+	// Derived so an early return cancels anything run started, independently of
+	// whether the parent context is still live.
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Set up structured logging
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
 	slog.SetDefault(logger)
 
-	// Log version info on startup
 	logger.Info("starting stl-watcher",
 		"commit", GitCommit,
 		"branch", GitBranch,
 		"buildTime", BuildTime,
 	)
 
-	// Start pprof server if enabled
-	if opts.pprofAddr != "" {
-		// Enable block and mutex profiling
-		runtime.SetBlockProfileRate(1)
-		runtime.SetMutexProfileFraction(1)
-		runtime.SetCPUProfileRate(1)
+	startPprofServer(opts.pprofAddr, logger)
 
-		go func() {
-			logger.Info("starting pprof server", "addr", opts.pprofAddr)
-			if err := http.ListenAndServe(opts.pprofAddr, nil); err != nil {
-				logger.Error("pprof server failed", "error", err)
-			}
-		}()
-	}
-
-	// Initialize OpenTelemetry tracing and metrics.
 	// ServiceName is resolved from the environment so that each per-chain
 	// watcher deployment (arbitrum-watcher, base-watcher, etc.) reports a
 	// distinct service.name in Prometheus/Tempo, instead of all collapsing
 	// into a single "stl-watcher" time series.
-	serviceName := resolveServiceName(os.Getenv)
 	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    serviceName,
+		ServiceName:    resolveServiceName(os.Getenv),
 		ServiceVersion: GitCommit,
 		BuildTime:      BuildTime,
 		Logger:         logger,
@@ -161,38 +181,192 @@ func run(opts cliOptions) (err error) {
 	}
 	defer shutdownOTEL(context.Background())
 
-	// Get configuration from environment
-	alchemyAPIKey := env.Get("ALCHEMY_API_KEY", "")
-	alchemyHTTPURL := env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
-	alchemyWSURL := env.Get("ALCHEMY_WS_URL", "wss://eth-mainnet.g.alchemy.com/v2")
-	if alchemyAPIKey == "" {
-		return errors.New("ALCHEMY_API_KEY environment variable is required")
-	}
-	chainIDStr, err := requireEnv("CHAIN_ID")
+	cfg, err := loadWatcherConfig()
 	if err != nil {
 		return err
 	}
-	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
-	if err != nil {
-		return fmt.Errorf("CHAIN_ID must be a valid integer: %w", err)
-	}
 
-	postgresURL := env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable")
-
-	// Set up PostgreSQL connection pool for block state tracking
-	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(postgresURL))
+	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(cfg.postgresURL))
 	if err != nil {
 		return fmt.Errorf("connecting to PostgreSQL: %w", err)
 	}
 	defer pool.Close()
-
-	blockStateRepo := postgres.NewBlockStateRepository(pool, chainID, logger)
-
 	logger.Info("PostgreSQL connected, block state tracking enabled")
 
-	// Create Alchemy subscriber (WebSocket only)
-	subscriberConfig := alchemy.SubscriberConfig{
-		WebSocketURL:      fmt.Sprintf("%s/%s", alchemyWSURL, alchemyAPIKey),
+	cache, err := openRedisCache(ctx, cfg, logger)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := cache.Close(); err != nil {
+			logger.Warn("failed to close Redis connection", "error", err)
+		}
+	}()
+	logger.Info("Redis cache connected", "addr", cfg.redisAddr)
+
+	eventSink, err := openEventSink(ctx, cfg, logger)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := eventSink.Close(); err != nil {
+			logger.Error("failed to close SNS event sink", "error", err)
+		}
+	}()
+	logger.Info("SNS event sink created", "endpoint", cfg.snsEndpoint, "topic", cfg.snsTopicARN)
+
+	deps, err := openDependencies(cfg, opts, pool, cache, eventSink, logger)
+	if err != nil {
+		return err
+	}
+
+	live, backfill, err := newServices(cfg, opts, deps, logger)
+	if err != nil {
+		return err
+	}
+
+	return serveUntilShutdown(ctx, live, backfill, opts.onShutdownTimeout, logger)
+}
+
+// startTrace begins an execution trace into path and returns the stop function
+// that flushes and closes it.
+func startTrace(path string) (func() error, error) {
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, fmt.Errorf("creating trace file: %w", err)
+	}
+	if err := trace.Start(f); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("starting trace: %w", err)
+	}
+	return func() error {
+		trace.Stop()
+		// Close reports the flush failure that would otherwise leave a
+		// silently truncated trace behind.
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("closing trace file: %w", err)
+		}
+		return nil
+	}, nil
+}
+
+// startPprofServer serves pprof on addr in the background, and is a no-op when
+// addr is empty. Block and mutex profiling are global rates, so they are only
+// turned on when someone is there to read them.
+func startPprofServer(addr string, logger *slog.Logger) {
+	if addr == "" {
+		return
+	}
+	runtime.SetBlockProfileRate(1)
+	runtime.SetMutexProfileFraction(1)
+	runtime.SetCPUProfileRate(1)
+
+	go func() {
+		logger.Info("starting pprof server", "addr", addr)
+		if err := http.ListenAndServe(addr, nil); err != nil {
+			logger.Error("pprof server failed", "error", err)
+		}
+	}()
+}
+
+func loadWatcherConfig() (watcherConfig, error) {
+	apiKey, err := env.Require("ALCHEMY_API_KEY")
+	if err != nil {
+		return watcherConfig{}, err
+	}
+	chainIDStr, err := env.Require("CHAIN_ID")
+	if err != nil {
+		return watcherConfig{}, err
+	}
+	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
+	if err != nil {
+		return watcherConfig{}, fmt.Errorf("CHAIN_ID must be a valid integer: %w", err)
+	}
+	// The chain name becomes the `chain` metric label; an unknown CHAIN_ID is a
+	// misconfiguration that would silently emit an empty chain, so fail hard
+	// like the parse above.
+	chainName, err := entity.ChainName(chainID)
+	if err != nil {
+		return watcherConfig{}, fmt.Errorf("resolving chain name for metrics: %w", err)
+	}
+	snsTopicARN, err := env.Require("AWS_SNS_TOPIC_ARN")
+	if err != nil {
+		return watcherConfig{}, err
+	}
+	return watcherConfig{
+		alchemyAPIKey:  apiKey,
+		alchemyHTTPURL: env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2"),
+		alchemyWSURL:   env.Get("ALCHEMY_WS_URL", "wss://eth-mainnet.g.alchemy.com/v2"),
+		chainName:      chainName,
+		postgresURL:    env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"),
+		redisAddr:      env.Get("REDIS_ADDR", "localhost:6379"),
+		redisPassword:  env.Get("REDIS_PASSWORD", ""),
+		snsEndpoint:    env.Get("AWS_SNS_ENDPOINT", "http://localhost:4566"),
+		snsTopicARN:    snsTopicARN,
+		chainID:        chainID,
+		enableBackfill: env.Get("ENABLE_BACKFILL", "false") == "true",
+	}, nil
+}
+
+func openRedisCache(ctx context.Context, cfg watcherConfig, logger *slog.Logger) (*rediscache.BlockCache, error) {
+	cache, err := rediscache.NewBlockCache(rediscache.Config{
+		Addr:      cfg.redisAddr,
+		Password:  cfg.redisPassword,
+		DB:        0,
+		TTL:       2 * time.Hour,
+		KeyPrefix: "stl",
+	}, logger)
+	if err != nil {
+		return nil, fmt.Errorf("creating Redis cache: %w", err)
+	}
+	if err := cache.Ping(ctx); err != nil {
+		return nil, fmt.Errorf("connecting to Redis at %s: %w", cfg.redisAddr, err)
+	}
+	return cache, nil
+}
+
+func openEventSink(ctx context.Context, cfg watcherConfig, logger *slog.Logger) (*snsadapter.EventSink, error) {
+	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{
+		StaticCredentialsFromEnv: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("loading AWS config: %w", err)
+	}
+	if os.Getenv("AWS_ACCESS_KEY_ID") != "" {
+		logger.Info("using static AWS credentials from environment")
+	} else {
+		logger.Info("using default AWS credential chain (IAM role / instance profile)")
+	}
+
+	// Custom endpoint so the same binary talks to LocalStack in tests.
+	snsClient := sns.NewFromConfig(awsCfg, func(o *sns.Options) {
+		if cfg.snsEndpoint != "" {
+			o.BaseEndpoint = aws.String(cfg.snsEndpoint)
+		}
+	})
+
+	eventSink, err := snsadapter.NewEventSink(snsClient, snsadapter.Config{
+		TopicARN: cfg.snsTopicARN,
+		Logger:   logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating SNS event sink: %w", err)
+	}
+	return eventSink, nil
+}
+
+// openDependencies builds the adapters that need no closing on top of the three
+// run already owns.
+func openDependencies(
+	cfg watcherConfig,
+	opts cliOptions,
+	pool *pgxpool.Pool,
+	cache *rediscache.BlockCache,
+	eventSink *snsadapter.EventSink,
+	logger *slog.Logger,
+) (dependencies, error) {
+	subscriber, err := alchemy.NewSubscriber(alchemy.SubscriberConfig{
+		WebSocketURL:      fmt.Sprintf("%s/%s", cfg.alchemyWSURL, cfg.alchemyAPIKey),
 		InitialBackoff:    1 * time.Second,
 		MaxBackoff:        30 * time.Second,
 		PingInterval:      30 * time.Second,
@@ -201,27 +375,20 @@ func run(opts cliOptions) (err error) {
 		ChannelBufferSize: 100,
 		HealthTimeout:     30 * time.Second,
 		Logger:            logger,
-	}
-	subscriber, err := alchemy.NewSubscriber(subscriberConfig)
+	})
 	if err != nil {
-		return fmt.Errorf("creating subscriber: %w", err)
+		return dependencies{}, fmt.Errorf("creating subscriber: %w", err)
 	}
 
-	// Create OpenTelemetry instrumentation for Alchemy client. The chain name
-	// becomes the `chain` metric label; an unknown CHAIN_ID is a misconfiguration
-	// that would silently emit an empty chain, so fail hard like the parse above.
-	chainName, err := entity.ChainName(chainID)
+	// Instrument construction fails on a bad instrument definition, not on a
+	// transient condition, so continuing here would mean running blind forever.
+	alchemyTelemetry, err := alchemy.NewTelemetry(cfg.chainName)
 	if err != nil {
-		return fmt.Errorf("resolving chain name for metrics: %w", err)
-	}
-	alchemyTelemetry, err := alchemy.NewTelemetry(chainName)
-	if err != nil {
-		logger.Warn("failed to create alchemy telemetry, continuing without instrumentation", "error", err)
+		return dependencies{}, fmt.Errorf("creating alchemy telemetry: %w", err)
 	}
 
-	// Create Alchemy HTTP client
 	client, err := alchemy.NewClient(alchemy.ClientConfig{
-		HTTPURL:      fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey),
+		HTTPURL:      fmt.Sprintf("%s/%s", cfg.alchemyHTTPURL, cfg.alchemyAPIKey),
 		EnableTraces: opts.enableTraces,
 		EnableBlobs:  opts.enableBlobs,
 		ParallelRPC:  opts.parallelRPC,
@@ -229,194 +396,104 @@ func run(opts cliOptions) (err error) {
 		Telemetry:    alchemyTelemetry,
 	})
 	if err != nil {
-		return fmt.Errorf("creating client: %w", err)
+		return dependencies{}, fmt.Errorf("creating client: %w", err)
 	}
-
 	logger.Info("alchemy client configured",
 		"enableTraces", opts.enableTraces,
 		"enableBlobs", opts.enableBlobs,
 		"parallelRPC", opts.parallelRPC,
-		"chainID", chainID,
+		"chainID", cfg.chainID,
 	)
 
-	// Create Redis cache
-	redisAddr := env.Get("REDIS_ADDR", "localhost:6379")
-	cache, err := rediscache.NewBlockCache(rediscache.Config{
-		Addr:      redisAddr,
-		Password:  env.Get("REDIS_PASSWORD", ""),
-		DB:        0,
-		TTL:       2 * time.Hour,
-		KeyPrefix: "stl",
-	}, logger)
-	if err != nil {
-		return fmt.Errorf("creating Redis cache: %w", err)
-	}
-	if err := cache.Ping(context.Background()); err != nil {
-		return fmt.Errorf("connecting to Redis at %s: %w", redisAddr, err)
-	}
-	logger.Info("Redis cache connected", "addr", redisAddr)
-	defer func() {
-		if err := cache.Close(); err != nil {
-			logger.Warn("failed to close Redis connection", "error", err)
-		}
-	}()
-
-	// Create SNS event sink
-	snsEndpoint := env.Get("AWS_SNS_ENDPOINT", "http://localhost:4566")
-
-	// Single SNS FIFO topic for all event types
-	snsTopicARN, err := requireEnv("AWS_SNS_TOPIC_ARN")
-	if err != nil {
-		return err
-	}
-
-	awsCfg, err := awsconfig.Load(context.Background(), awsconfig.Options{
-		StaticCredentialsFromEnv: true,
-	})
-	if err != nil {
-		return fmt.Errorf("loading AWS config: %w", err)
-	}
-	if os.Getenv("AWS_ACCESS_KEY_ID") != "" {
-		logger.Info("using static AWS credentials from environment")
-	} else {
-		logger.Info("using default AWS credential chain (IAM role / instance profile)")
-	}
-
-	// Create SNS client with custom endpoint for LocalStack
-	snsClient := sns.NewFromConfig(awsCfg, func(o *sns.Options) {
-		if snsEndpoint != "" {
-			o.BaseEndpoint = aws.String(snsEndpoint)
-		}
-	})
-
-	eventSink, err := snsadapter.NewEventSink(snsClient, snsadapter.Config{
-		TopicARN: snsTopicARN,
-		Logger:   logger,
-	})
-	if err != nil {
-		return fmt.Errorf("creating SNS event sink: %w", err)
-	}
-	defer func() {
-		if err := eventSink.Close(); err != nil {
-			logger.Error("failed to close SNS event sink", "error", err)
-		}
-	}()
-	logger.Info("SNS event sink created",
-		"endpoint", snsEndpoint,
-		"topic", snsTopicARN,
-	)
-
-	// Construct the service-level telemetry recorder once and share it
-	// between live and backfill. This wires both:
-	//   - ReorgRecorder       (LiveConfig.Metrics)
-	//   - BackfillRecorder    (BackfillConfig.Metrics)
-	// onto the OTel global meter provider initialised above.
+	// One recorder shared by live and backfill, wiring ReorgRecorder
+	// (LiveConfig.Metrics) and BackfillRecorder (BackfillConfig.Metrics) onto
+	// the OTel global meter provider initialised above.
 	serviceTelemetry, err := shared.NewServiceTelemetry()
 	if err != nil {
-		return fmt.Errorf("creating service telemetry: %w", err)
+		return dependencies{}, fmt.Errorf("creating service telemetry: %w", err)
 	}
 
-	// Create LiveService (handles WebSocket subscription and reorg detection)
-	config := live_data.LiveConfig{
-		ChainID:            chainID,
-		FinalityBlockCount: 64,
-		EnableTraces:       opts.enableTraces,
-		EnableBlobs:        opts.enableBlobs,
-		Logger:             logger,
-		Metrics:            serviceTelemetry,
-	}
+	return dependencies{
+		subscriber: subscriber,
+		client:     client,
+		blockState: postgres.NewBlockStateRepository(pool, cfg.chainID, logger),
+		cache:      cache,
+		eventSink:  eventSink,
+		metrics:    serviceTelemetry,
+	}, nil
+}
 
-	liveService, err := live_data.NewLiveService(
-		config,
-		subscriber,
-		client,
-		blockStateRepo,
-		cache,
-		eventSink,
+// newServices returns the live service and, when ENABLE_BACKFILL is set, the
+// backfill service. A nil backfill service means the feature is off.
+func newServices(cfg watcherConfig, opts cliOptions, deps dependencies, logger *slog.Logger) (*live_data.LiveService, *backfill_gaps.BackfillService, error) {
+	live, err := live_data.NewLiveService(
+		live_data.LiveConfig{
+			ChainID:            cfg.chainID,
+			FinalityBlockCount: 64,
+			EnableTraces:       opts.enableTraces,
+			EnableBlobs:        opts.enableBlobs,
+			Logger:             logger,
+			Metrics:            deps.metrics,
+		},
+		deps.subscriber,
+		deps.client,
+		deps.blockState,
+		deps.cache,
+		deps.eventSink,
 	)
 	if err != nil {
-		return fmt.Errorf("creating live service: %w", err)
+		return nil, nil, fmt.Errorf("creating live service: %w", err)
 	}
 
-	// Create BackfillService (handles gap filling from DB state)
-	var backfillService *backfill_gaps.BackfillService
-	enableBackfill := env.Get("ENABLE_BACKFILL", "false") == "true"
-	if enableBackfill {
-		backfillConfig, err := loadBackfillConfig(chainID, opts.enableTraces, opts.enableBlobs, logger, serviceTelemetry)
-		if err != nil {
-			return fmt.Errorf("invalid backfill config: %w", err)
-		}
-
-		logger.Info("backfill config",
-			"chainID", backfillConfig.ChainID,
-			"batchSize", backfillConfig.BatchSize,
-			"pollInterval", backfillConfig.PollInterval,
-		)
-
-		backfillService, err = backfill_gaps.NewBackfillService(
-			backfillConfig,
-			client,
-			blockStateRepo,
-			cache,
-			eventSink,
-		)
-		if err != nil {
-			return fmt.Errorf("creating backfill service: %w", err)
-		}
+	if !cfg.enableBackfill {
+		return live, nil, nil
 	}
 
-	// Handle shutdown signals
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	// Start both services
-	logger.Info("starting live service...")
-	if err := liveService.Start(ctx); err != nil {
-		return fmt.Errorf("starting live service: %w", err)
+	backfillConfig, err := loadBackfillConfig(cfg.chainID, opts.enableTraces, opts.enableBlobs, logger, deps.metrics)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid backfill config: %w", err)
 	}
+	logger.Info("backfill config",
+		"chainID", backfillConfig.ChainID,
+		"batchSize", backfillConfig.BatchSize,
+		"pollInterval", backfillConfig.PollInterval,
+	)
 
-	if enableBackfill && backfillService != nil {
-		logger.Info("starting backfill service...")
-		if err := backfillService.Start(ctx); err != nil {
-			return fmt.Errorf("starting backfill service: %w", err)
-		}
+	backfill, err := backfill_gaps.NewBackfillService(
+		backfillConfig,
+		deps.client,
+		deps.blockState,
+		deps.cache,
+		deps.eventSink,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating backfill service: %w", err)
 	}
+	return live, backfill, nil
+}
 
-	logger.Info("services started, waiting for blocks...", "backfill", enableBackfill)
-
-	// Wait for shutdown signal
-	sig := <-sigChan
-	logger.Info("received signal, shutting down...", "signal", sig)
-
-	// Cancel context first to signal all goroutines to stop
-	cancel()
-
-	// Create shutdown timeout context
-	// Fargate default stopTimeout is 30s; we use 25s to ensure clean logging before force-kill
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 25*time.Second)
-	defer shutdownCancel()
-
-	// Stop services with timeout
-	shutdownDone := make(chan struct{})
-	go func() {
-		defer close(shutdownDone)
-		if enableBackfill && backfillService != nil {
-			if err := backfillService.Stop(); err != nil {
-				logger.Error("error stopping backfill service", "error", err)
-			}
-		}
-		if err := liveService.Stop(); err != nil {
-			logger.Error("error stopping live service", "error", err)
-		}
-	}()
-
-	select {
-	case <-shutdownDone:
-		logger.Info("shutdown complete")
-		return nil
-	case <-shutdownCtx.Done():
-		return errors.New("shutdown timed out")
+// serveUntilShutdown runs the services until ctx is cancelled. On a shutdown
+// timeout it calls onShutdownTimeout before returning, because run's deferred
+// closes wait on the same goroutines that just missed the deadline — returning
+// the error is not by itself enough to bound process exit.
+func serveUntilShutdown(
+	ctx context.Context,
+	live *live_data.LiveService,
+	backfill *backfill_gaps.BackfillService,
+	onShutdownTimeout func(),
+	logger *slog.Logger,
+) error {
+	services := []lifecycle.Service{live}
+	if backfill != nil {
+		services = append(services, backfill)
 	}
+	logger.Info("starting services...", "backfill", backfill != nil)
+
+	err := lifecycle.Run(ctx, logger, services...)
+	if errors.Is(err, lifecycle.ErrShutdownTimedOut) && onShutdownTimeout != nil {
+		onShutdownTimeout()
+	}
+	return err
 }
 
 // resolveServiceName returns the OTEL service.name for this watcher process.
@@ -438,15 +515,6 @@ func resolveServiceName(getenv func(string) string) string {
 		}
 	}
 	return defaultServiceName
-}
-
-// requireEnv returns the value of an environment variable, or an error when unset.
-func requireEnv(key string) (string, error) {
-	value := os.Getenv(key)
-	if value == "" {
-		return "", fmt.Errorf("required environment variable not set: %s", key)
-	}
-	return value, nil
 }
 
 // loadBackfillConfig reads the env-driven backfill knobs. Defaults preserve the

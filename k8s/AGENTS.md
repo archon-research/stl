@@ -33,13 +33,21 @@ Root repo map and cross-cutting rules: [../AGENTS.md](../AGENTS.md).
 
 ## Deploy
 
-- **Never hand-edit image tags** in `k8s/overlays/{staging,prod}/kustomization.yaml` — CI owns them (staging bumps on merge; prod via the gated `production` GitHub Environment approval).
-  Guard: the `Manifests` CI job runs `scripts/deploy/check-overlay-tag-consistency.sh`,
-  which fails a PR whose tags do not all name one commit — the bot stamps a whole file to a
-  single deploy SHA, so a hand-written tag is the odd one out. This has to block the merge:
-  ArgoCD syncs the merge commit before the bot stamps it, so a tag naming an image that does
-  not exist yet reaches the cluster as ImagePullBackOff, fails the staging health gate, and
-  skips the prod promotion (ORB-313). A brand-new service lands its image in a separate PR
-  first (CONTRIBUTING.md section 14).
+- **Never hand-edit the `images:` block** in `k8s/overlays/{staging,prod}/kustomization.yaml` — it is
+  generated from `k8s/image-roster.txt` by `scripts/deploy/render-overlay-images.sh`, and the deploy bot
+  rewrites it wholesale on every deploy (staging on merge; prod stamped by the same run, rolled
+  out only after the `production` GitHub Environment approval). Adding an image = one roster line (kind, name, the `image:` aliases the bases
+  use) plus the base dir under `resources:`; the next deploy pins it (ORB-362). Removing or
+  re-homing an image: change the roster and delete the stale entry in the same PR — the one
+  sanctioned hand edit, since the bot only rewrites the block after merge. The prod block's tag is
+  also CI's record of the last promoted SHA — main change detection diffs each push against it (ORB-361).
+  Guards: the `Manifests` CI job runs `scripts/deploy/check-overlay-tag-consistency.sh` (all tags name
+  one commit) and `render-overlay-images.sh --check --allow-missing` (every entry is one the roster
+  renders; roster lines the bot has not written yet are pending, not errors); locally: `make
+  check-overlay-images` in `stl-verify/`. Both must block the merge:
+  ArgoCD syncs the merge commit before the bot writes the block, so a hand-written tag naming an image
+  that does not exist reaches the cluster as ImagePullBackOff, fails the staging health gate, and skips
+  the prod promotion (ORB-313). A brand-new service lands its build + roster line in a separate PR first
+  (CONTRIBUTING.md section 14).
 - Merging to `main` deploys to staging via ArgoCD, then prod after manual approval.
 - AWS resources (SQS queues, SNS subscriptions, IAM, secrets) live in a separate private infrastructure repo and must land **before** the code that needs them.

@@ -13,6 +13,7 @@ CHAIN_ID_TO_NAME: dict[int, str] = {
     1: "mainnet",
     10: "optimism",
     130: "unichain",
+    4663: "robinhood",
     8453: "base",
     42161: "arbitrum",
     43114: "avalanche-c",
@@ -30,18 +31,21 @@ MAINNET_CHAIN_ID = 1
 # a genuine zero rather than as absent data. Anything summed or reported per chain
 # has to know the difference; ``test_chain_names.py`` fails if the two sides drift.
 SERVED_TRACKER_CHAINS: frozenset[str] = frozenset(
-    {"mainnet", "avalanche-c", "base", "optimism", "unichain", "arbitrum"}
+    {"mainnet", "avalanche-c", "base", "optimism", "unichain", "arbitrum", "robinhood"}
 )
 
 
-def chain_name_for(chain_id: int) -> str | None:
+def chain_name_for(chain_id: int | None) -> str | None:
     """Return the internal chain name for ``chain_id``, or ``None`` if unknown.
 
     Returns ``None`` rather than raising: an unrecognised chain id means a
     position exists on a chain this vocabulary has not been taught, which must
-    surface as a null field on the response rather than a failed request.
+    surface as a null field on the response rather than a failed request. A
+    ``None`` id is the same answer one step earlier — reference rows carry one
+    for a network STL has no id for, and 0 is unavailable because it already
+    means off-chain custody.
     """
-    return CHAIN_ID_TO_NAME.get(chain_id)
+    return None if chain_id is None else CHAIN_ID_TO_NAME.get(chain_id)
 
 
 def chain_is_served(chain: str | None) -> bool:

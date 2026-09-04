@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Callable
+from datetime import datetime
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -7,8 +8,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
+from app.adapters.postgres.reference_as_of import ReferenceEffectiveAtProvider
 from app.api._validators import ProxyAddressPathParam
-from app.api.deps import get_engine, get_model_registry, get_reference_risk_capital_service_factory
+from app.api.deps import get_engine, get_model_registry, get_reference_as_of, get_reference_risk_capital_service_factory
 from app.api.provenance import (
     get_requested_provenance,
     resolve_or_422,
@@ -16,7 +18,6 @@ from app.api.provenance import (
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime_risk_capital import AllocationRiskCapital, PrimeRiskCapital, UnpricedReason
 from app.domain.entities.reference_risk_capital import ReferenceAllocation, ReferencePrimeRiskCapital
-from app.domain.exceptions import ReferenceDataUnavailableError
 from app.domain.position_identity import PositionFacts, position_identities
 from app.domain.prime_registry import ProxyKind, alm_proxies_for_prime, classify_proxy
 from app.domain.provenance import Provenance
@@ -215,18 +216,21 @@ class PrimeRiskCapitalResponse(BaseModel):
         default=Provenance.INDEXED,
         description=(
             "Provenance of the figures in this response. `indexed` is STL's own on-chain model; "
-            "`reference` is Sky's Star Agents Risk Capital & Requirements Monitor; `both` carries the "
-            "two side by side, STL's in the unprefixed fields and Sky's in the `reference_`-prefixed "
-            "ones. Never reconciled: no field holds a blend of the two, and `both` degrades to "
-            "`indexed` — reporting itself as such — when the monitor cannot be read."
+            "`reference` is Sky's Star Agents Risk Capital & Requirements Monitor as STL observed "
+            "it; `both` carries the two side by side, STL's in the unprefixed fields and Sky's in "
+            "the `reference_`-prefixed ones. Never reconciled: no field holds a blend of the two, "
+            "and `both` degrades to `indexed` — reporting itself as such — for a prime no reference "
+            "cycle has ever reported on."
         ),
     )
     model: str | None = Field(
         description=(
-            "Default RRC model used (e.g. `gap_sweep`). `null` under `source=reference`, which runs no "
-            "model; under `source=both` it is STL's model, since the unprefixed figures are STL's."
+            "The default RRC model this view prefers (`core_model`). `null` under `source=reference`, "
+            "which runs no model; under `source=both` it is STL's preference, since the unprefixed "
+            "figures are STL's. A given `per_allocation` row can still carry a different model: "
+            "`indexed` falls back to `gap_sweep` for a position `core_model` has no data for."
         ),
-        examples=["gap_sweep"],
+        examples=["core_model"],
     )
     exposure_usd: PlainDecimal = Field(
         description=(
@@ -299,6 +303,17 @@ class PrimeRiskCapitalResponse(BaseModel):
             "Sky's reported encumbrance, its own required over its own total. Populated only under "
             "`source=both`; never a ratio built from one provenance over the other."
         ),
+    )
+    reference_synced_at: datetime | None = Field(
+        default=None,
+        description=(
+            "When the Sky figures in this response were observed. Populated wherever the response "
+            "carries them (`source=reference` or `source=both`), and `null` under `source=indexed`. "
+            "STL reads them from its own record of the monitor rather than the monitor itself, so "
+            "they are as of the last sync cycle — up to 15 minutes old. Consumers should show this "
+            "rather than implying the figures are current."
+        ),
+        examples=["2026-08-26T09:15:00+00:00"],
     )
     prime_exposure_usd: PlainDecimal = Field(
         default=Decimal("0"),
@@ -393,8 +408,9 @@ class PrimeRiskCapitalResponse(BaseModel):
 async def _get_service(
     engine: AsyncEngine = Depends(get_engine),
     registry: ModelRegistry = Depends(get_model_registry),
+    reference_as_of: ReferenceEffectiveAtProvider = Depends(get_reference_as_of),
 ) -> PrimeRiskCapitalService:
-    return PrimeRiskCapitalService(AllocationRepository(engine), registry)
+    return PrimeRiskCapitalService(AllocationRepository(engine, reference_as_of), registry)
 
 
 @router.get(
@@ -404,7 +420,8 @@ async def _get_service(
     summary="Self-computed prime risk capital",
     description=(
         "Compute the prime's capital metrics from on-chain data and the default RRC model "
-        "(`gap_sweep`), with no dependency on the upstream Star feed. Returns exposure (priced "
+        "(`core_model`, falling back to `gap_sweep` under `source=indexed` where core has no data), "
+        "with no dependency on the upstream Star feed. Returns exposure (priced "
         "receipt-token allocations), Total Risk Capital (on-chain treasury), Required Risk Capital "
         "(sum of per-allocation model RRC), encumbrance, a `modeled_pct` coverage figure, and a "
         "per-allocation breakdown. The figures are model-derived and partial (only allocations the "
@@ -460,7 +477,7 @@ async def get_prime_risk_capital(
     if source is Provenance.REFERENCE:
         return _with_encumbrance_contributions(await _reference_response(prime_address, reference_services()))
 
-    indexed = _self_response(await service.compute(prime_address))
+    indexed = _self_response(await service.compute(prime_address, source))
     if source is Provenance.INDEXED:
         return _with_encumbrance_contributions(indexed)
 
@@ -488,10 +505,15 @@ def _with_encumbrance_contributions(
                     update={
                         "encumbrance_contribution": (
                             None
-                            # The denominator is this response's own total, so a
-                            # row Sky alone reports has no share of it — leaving
-                            # it in would stop the column summing to the ratio.
-                            if allocation.required_risk_capital_usd is None or allocation.source is Provenance.REFERENCE
+                            # Under `both` the denominator is STL's own total, so a
+                            # row Sky alone reports (source=reference there) has no
+                            # comparable share of it — leaving it in would stop the
+                            # column summing to the ratio. A pure `source=reference`
+                            # response has no STL half to be incomparable with: every
+                            # row is `reference` there, against Sky's own total, so
+                            # the exclusion does not apply.
+                            if allocation.required_risk_capital_usd is None
+                            or (response.source is Provenance.BOTH and allocation.source is Provenance.REFERENCE)
                             else allocation.required_risk_capital_usd / total
                         )
                     }
@@ -566,17 +588,18 @@ async def _with_reference_totals(
 
     The two cannot share a field: they populate disjoint sets — Sky's junior and
     senior splits have no STL equivalent, STL's model name has no Sky one — and
-    the figures they do share disagree by STL's chain coverage. An unreadable
-    reference half leaves STL's own answer whole rather than failing it.
+    the figures they do share disagree by STL's chain coverage. A prime with no
+    reference figures at all leaves STL's own answer whole rather than failing
+    it; every other outcome is an error, and surfaces as one.
     """
     try:
         reference = await _reference_response(prime_address, reference_service)
     except HTTPException as exc:
-        if exc.status_code not in (404, 502):
+        if exc.status_code != 404:
             raise
-        logger.warning(
-            "Serving STL's risk capital alone; the reference half is unavailable",
-            extra={"prime_address": str(prime_address), "status_code": exc.status_code},
+        logger.info(
+            "Serving STL's risk capital alone; no reference cycle has reported on this prime",
+            extra={"prime_address": str(prime_address)},
         )
         return indexed
 
@@ -588,6 +611,7 @@ async def _with_reference_totals(
             "reference_prime_required_risk_capital_usd": reference.prime_required_risk_capital_usd,
             "reference_total_risk_capital_usd": reference.total_risk_capital_usd,
             "reference_prime_encumbrance_ratio": reference.prime_encumbrance_ratio,
+            "reference_synced_at": reference.reference_synced_at,
             # Sky reports these and STL models none of them, so they belong to
             # the merged answer whole.
             "junior_risk_capital_usd": reference.junior_risk_capital_usd,
@@ -626,22 +650,18 @@ def _self_response(result: PrimeRiskCapital) -> PrimeRiskCapitalResponse:
 async def _reference_response(
     prime_address: EthAddress, reference_service: ReferenceRiskCapitalService
 ) -> PrimeRiskCapitalResponse:
-    """Project the upstream Star monitor's snapshot onto the same response."""
-    try:
-        snapshot = await reference_service.get(prime_address)
-    except ReferenceDataUnavailableError as exc:
-        raise HTTPException(status_code=502, detail=f"Reference risk-capital upstream unavailable: {exc}") from exc
-
+    """Project STL's stored Star-monitor snapshot onto the same response."""
+    snapshot = await reference_service.get(prime_address)
     if snapshot is None:
         raise HTTPException(
             status_code=404,
-            detail="The upstream Star monitor does not track this prime, so it has no reference risk capital",
+            detail="No reference risk capital has been observed for this prime",
         )
     return _project_reference(prime_address, snapshot)
 
 
 def _project_reference(prime_address: EthAddress, snapshot: ReferencePrimeRiskCapital) -> PrimeRiskCapitalResponse:
-    """Map an upstream snapshot onto the response, prime-scoped fields included.
+    """Map an observed snapshot onto the response, prime-scoped fields included.
 
     Upstream reports per prime, so the proxy-scoped and `prime_`-scoped figures
     carry the same values here — unlike self mode, where they genuinely differ.
@@ -683,6 +703,7 @@ def _project_reference(prime_address: EthAddress, snapshot: ReferencePrimeRiskCa
         epi_utilization=snapshot.epi_utilization,
         spj_utilization=snapshot.spj_utilization,
         exposure_share=snapshot.exposure_share,
+        reference_synced_at=snapshot.synced_at,
     )
 
 
@@ -724,6 +745,7 @@ def _reference_allocation(row: ReferenceAllocation) -> AllocationRiskCapitalResp
         exposure_usd=row.exposure_usd,
         applied=True,
         required_risk_capital_usd=row.required_risk_capital_usd,
+        source=Provenance.REFERENCE,
         crr_pct=row.crr_pct,
         model=None,
         unpriced_reason=None,

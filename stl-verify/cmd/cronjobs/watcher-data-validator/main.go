@@ -92,9 +92,17 @@ func setupRunner(_ context.Context, deps temporal.Dependencies) (temporal.Runner
 			return fmt.Errorf("running validation: %w", err)
 		}
 		report.Finalize()
-		if !report.Success() {
-			return fmt.Errorf("validation failed: %d failures, %d errors", report.Failed, report.Errors)
-		}
-		return nil
+		return validationError(report)
 	}), nil
+}
+
+// validationError turns a report into the runner's error. That error is what
+// the Temporal UI shows and what the alert quotes, so it carries the messages
+// the runbook tells the operator to read, not just how many there were.
+func validationError(report *data_validator.Report) error {
+	if report.Success() {
+		return nil
+	}
+	return fmt.Errorf("validation failed: %d failures, %d errors — %s",
+		report.Failed, report.Errors, report.FailureSummary())
 }

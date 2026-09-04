@@ -85,10 +85,35 @@ class DataProvenanceService:
             ),
             DataSource(
                 name="Star Agents Risk Capital & Requirements Monitor",
-                host="https://info.skyeco.com/required-risk-capital",
+                host="https://info-sky.blockanalitica.com/star-monitoring/risk-capital",
                 access_model=SourceAccessModel.PUBLIC,
-                role="Risk capital requirements and monitor metrics by star (reference/parity)",
-                caveat="Kept for parity checks; no longer the source of the dashboard's risk-capital figures.",
+                role=(
+                    "Risk capital requirements, the per-allocation breakdown behind them, and monitor "
+                    "metrics by star (the `reference` provenance)"
+                ),
+                caveat=(
+                    "Not the source of the dashboard's own risk-capital figures. Read by STL's "
+                    "reference-capital indexer every 15 minutes rather than per request, so a served "
+                    "figure is as of the last cycle and carries the time it was observed. The monitor "
+                    "publishes no history, so figures only exist from the indexer's first cycle "
+                    "forward."
+                ),
+            ),
+            DataSource(
+                name="Sky Internal Balance-Sheet Feed",
+                host="https://sky.data.blockanalitica.com/internal",
+                access_model=SourceAccessModel.PUBLIC,
+                role=(
+                    "Per-position balance sheets and per-prime daily aggregates by star, behind the "
+                    "`reference` provenance on the allocation list, total capital and debt"
+                ),
+                caveat=(
+                    "A different host and a different question from the monitor above: the balance "
+                    "sheet (every position, summing to the prime's assets), not the priced "
+                    "risk-bearing subset. Read by the reference-capital indexer every 15 minutes "
+                    "rather than per request; its daily aggregates are also seeded backwards by the "
+                    "reference-capital backfill, which is the only source of reference history."
+                ),
             ),
             # Off-chain custody
             DataSource(

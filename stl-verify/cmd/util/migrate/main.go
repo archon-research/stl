@@ -4,10 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 )
 
 func main() {
@@ -19,7 +20,10 @@ func main() {
 }
 
 func run() error {
-	connStr := requireEnv("DATABASE_URL")
+	connStr, err := env.Require("DATABASE_URL")
+	if err != nil {
+		return err
+	}
 	ctx := context.Background()
 
 	pool, err := pgxpool.New(ctx, connStr)
@@ -33,12 +37,4 @@ func run() error {
 		return fmt.Errorf("migration failed: %w", err)
 	}
 	return nil
-}
-
-func requireEnv(key string) string {
-	value := os.Getenv(key)
-	if value == "" {
-		log.Fatalf("required environment variable not set: %s", key)
-	}
-	return value
 }

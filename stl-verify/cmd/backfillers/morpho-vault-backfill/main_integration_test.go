@@ -23,9 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/mock"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
@@ -165,10 +163,11 @@ func newActivityEnv(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *test
 	if err != nil {
 		t.Fatalf("loading the worker configuration: %v", err)
 	}
-	activities, err := newBackfillActivities(ctx, newDeps(t, pool), cfg)
+	activities, drainArchive, err := newBackfillActivities(ctx, newDeps(t, pool), cfg)
 	if err != nil {
 		t.Fatalf("wiring the backfill activities: %v", err)
 	}
+	t.Cleanup(drainArchive)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestActivityEnvironment()
 	env.RegisterActivity(activities)
@@ -189,7 +188,7 @@ func TestIntegration_Register_ExposesTheDocumentedWorkflowType(t *testing.T) {
 	setWorkerEnv(t, seedBucket(t, ctx), server.URL)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	if err := register(ctx, newDeps(t, pool), env); err != nil {
+	if err := newBackfillWorker(t).register(ctx, newDeps(t, pool), env); err != nil {
 		t.Fatalf("running the production registration: %v", err)
 	}
 	// Mocked so the run proves the registered names resolve, not that S3 holds
@@ -219,13 +218,26 @@ func TestIntegration_Register_RefusesAChainIDMismatch(t *testing.T) {
 	setWorkerEnv(t, seedBucket(t, ctx), server.URL)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	err := register(ctx, newDeps(t, pool), env)
+	err := newBackfillWorker(t).register(ctx, newDeps(t, pool), env)
 
 	if err == nil {
 		t.Fatal("expected registration to fail when the node reports another chain")
 	}
 	if !strings.Contains(err.Error(), "chain ID mismatch") {
 		t.Errorf("error = %v, want it to name the chain ID mismatch", err)
+	}
+}
+
+// deleteSeededV2Vaults restores the "no VaultV2 vault known" premise: registry
+// seed migrations now ship VaultV2 rows (20260825 sparkUSDTbc is mainnet's
+// first), so a freshly migrated database no longer holds zero of them. A
+// test-fixture DELETE on this test's throwaway clone — the append-only rule
+// governs production ingest, not test setup.
+func deleteSeededV2Vaults(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	// vault_version 3 = Morpho VaultV2 (entity.MorphoVaultV2).
+	if _, err := pool.Exec(ctx, `DELETE FROM morpho_vault WHERE vault_version = 3`); err != nil {
+		t.Fatalf("deleting the seed-registered VaultV2 vaults: %v", err)
 	}
 }
 
@@ -237,6 +249,7 @@ func TestIntegration_DiscoverVaults_FindsNoCandidatesInAnUnrelatedRange(t *testi
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
+	deleteSeededV2Vaults(t, ctx, pool)
 	bucket := seedBucket(t, ctx)
 	// Contiguous, and the range below covers exactly these blocks: the scan
 	// refuses a partition slice the archive has a hole in, so a sampled seed
@@ -306,7 +319,8 @@ func TestIntegration_DiscoverVaults_FailsOnAnUndecodableMorphoBlueLog(t *testing
 	env := newActivityEnv(t, ctx, pool)
 
 	var activities *backfillActivities
-	if _, err := env.ExecuteActivity(activities.DiscoverVaults, blockRange{From: 0, To: 999}); err == nil {
+	work := discoveryWork{Range: blockRange{From: 0, To: 999}, ProbeBlock: 999}
+	if _, err := env.ExecuteActivity(activities.DiscoverVaults, work); err == nil {
 		t.Fatal("expected an undecodable Morpho Blue log to fail the activity")
 	}
 }
@@ -325,7 +339,7 @@ func TestIntegration_Backfill_FailsOnAnArchiveGapWhenNoV2VaultIsKnown(t *testing
 	setWorkerEnv(t, bucket, chainFixtureServer(t, "0x1").URL)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	if err := register(ctx, newDeps(t, pool), env); err != nil {
+	if err := newBackfillWorker(t).register(ctx, newDeps(t, pool), env); err != nil {
 		t.Fatalf("running the production registration: %v", err)
 	}
 	env.ExecuteWorkflow("MorphoVaultBackfill", BackfillParams{From: 1, To: 6})
@@ -346,11 +360,12 @@ func TestIntegration_Backfill_SucceedsWithNothingToReplayOverACompleteArchive(t 
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
+	deleteSeededV2Vaults(t, ctx, pool)
 	bucket := seedQuietBlocks(t, ctx, 1, 6, -1)
 	setWorkerEnv(t, bucket, chainFixtureServer(t, "0x1").URL)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	if err := register(ctx, newDeps(t, pool), env); err != nil {
+	if err := newBackfillWorker(t).register(ctx, newDeps(t, pool), env); err != nil {
 		t.Fatalf("running the production registration: %v", err)
 	}
 	env.ExecuteWorkflow("MorphoVaultBackfill", BackfillParams{From: 1, To: 6})
@@ -368,6 +383,186 @@ func TestIntegration_Backfill_SucceedsWithNothingToReplayOverACompleteArchive(t 
 	if got.Discovered == nil || got.Discovered.KnownV2Vaults != 0 {
 		t.Errorf("Discovered = %+v, want a run that found no VaultV2 vault", got.Discovered)
 	}
+}
+
+// Splitting the scan is a resilience change, not a semantic one: a run cut into
+// sub-ranges must persist exactly the rows a whole-range run does. The vault here
+// is active on both sides of a partition edge — the shape the split puts at risk,
+// since it becomes a candidate of every sub-range that sees it and the metadata
+// the first probe reads is what the tables keep.
+func TestIntegration_DiscoverVaults_ASplitRunPersistsWhatAWholeRunDoes(t *testing.T) {
+	ctx := context.Background()
+	// Straddles the 0-999 / 1000-1999 partition edge, so the split falls exactly
+	// where the sub-range walk would put it.
+	const (
+		firstBlock    = int64(995)
+		partitionEdge = int64(999)
+		lastBlock     = int64(1004)
+	)
+	vault := common.HexToAddress("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	bucket := seedVaultActivity(t, ctx, vault, firstBlock, lastBlock, partitionEdge-2, partitionEdge+3)
+	setWorkerEnv(t, bucket, chainFixtureServer(t, "0x1").URL)
+
+	var whole, split persistedVault
+	t.Run("over the whole range", func(t *testing.T) {
+		whole = discoverInto(t, ctx, bucket, vault, lastBlock,
+			[]blockRange{{From: firstBlock, To: lastBlock}})
+	})
+	t.Run("over one sub-range per partition", func(t *testing.T) {
+		split = discoverInto(t, ctx, bucket, vault, lastBlock,
+			[]blockRange{{From: firstBlock, To: partitionEdge}, {From: partitionEdge + 1, To: lastBlock}})
+	})
+
+	if whole != split {
+		t.Errorf("a split run persisted %+v, want the whole run's %+v", split, whole)
+	}
+}
+
+// persistedVault is everything one discovered vault put in the database, across
+// the three tables discovery writes, plus those tables' row counts.
+type persistedVault struct {
+	VaultRows      int
+	TokenRows      int
+	ReceiptRows    int
+	Name           string
+	Symbol         string
+	Version        int
+	CreatedAtBlock int64
+	AssetSymbol    string
+	AssetDecimals  int
+	ReceiptSymbol  string
+}
+
+// discoverInto runs the discovery pipeline over each range in order against a
+// database of this subtest's own, exactly as the workflow drives it — every
+// sub-range probed at the run's own end block — and reads back what it wrote.
+func discoverInto(t *testing.T, ctx context.Context, bucket string, vault common.Address, probeBlock int64, ranges []blockRange) persistedVault {
+	t.Helper()
+
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	t.Cleanup(cleanup)
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loading the worker configuration: %v", err)
+	}
+	logger := testutil.DiscardLogger()
+	s3Reader, err := newS3Reader(ctx, logger, cfg)
+	if err != nil {
+		t.Fatalf("building the S3 reader: %v", err)
+	}
+	extractor, err := morpho_indexer.NewEventExtractor()
+	if err != nil {
+		t.Fatalf("NewEventExtractor: %v", err)
+	}
+	prober, err := newVaultProber(logger, blockStampedVaultProbe(t), cfg.chainID)
+	if err != nil {
+		t.Fatalf("newVaultProber: %v", err)
+	}
+	buildReg, err := buildregistry.New(ctx, pool)
+	if err != nil {
+		t.Fatalf("registering the build: %v", err)
+	}
+
+	for _, rng := range ranges {
+		if _, err := discoverAndPersistVaults(ctx, logger, s3Reader, extractor, prober, pool,
+			buildReg.BuildID(), cfg, rng, probeBlock); err != nil {
+			t.Fatalf("discovering over blocks %d-%d: %v", rng.From, rng.To, err)
+		}
+	}
+	return readPersistedVault(t, ctx, pool, vault)
+}
+
+// blockStampedVaultProbe confirms every candidate as a VaultV2 whose name and
+// symbol carry the block the probe was pinned to. Real VaultV2 name/symbol are
+// mutable setters, so stamping them is what makes a sub-range probed at its own
+// end block persist different rows than a whole-range run.
+func blockStampedVaultProbe(t *testing.T) *testutil.MockMulticaller {
+	t.Helper()
+
+	sharedProber, err := morpho_indexer.NewVaultProber()
+	if err != nil {
+		t.Fatalf("NewVaultProber: %v", err)
+	}
+	probeCalls := sharedProber.NumProbeCalls()
+	metadataCalls := sharedProber.NumDetailsCalls() + numAssetExtensionCalls
+
+	asset := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+	mc := testutil.NewMockMulticaller()
+	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case probeCalls:
+			return v2ProbeResults(t, asset,
+				common.HexToAddress("0xcccc000000000000000000000000000000000000"),
+				common.HexToAddress("0xdddd000000000000000000000000000000000000")), nil
+		case metadataCalls:
+			return concatResults(
+				vaultDetailsResults(t, fmt.Sprintf("Vault at %s", blockNumber), fmt.Sprintf("v%s", blockNumber), 18, false),
+				[]outbound.Result{okStringResult(t, "USDC"), okUint8Result(t, 6)},
+			), nil
+		}
+		return nil, fmt.Errorf("unexpected multicall of %d calls: this fixture probes exactly one candidate", len(calls))
+	}
+	return mc
+}
+
+// readPersistedVault joins the three tables discovery writes for one vault, and
+// counts their rows: both runs start from the same migrated template, so a count
+// that differs is a row the split run wrote and the whole run did not.
+func readPersistedVault(t *testing.T, ctx context.Context, pool *pgxpool.Pool, vault common.Address) persistedVault {
+	t.Helper()
+
+	var got persistedVault
+	err := pool.QueryRow(ctx,
+		`SELECT (SELECT count(*) FROM morpho_vault),
+		        (SELECT count(*) FROM token),
+		        (SELECT count(*) FROM receipt_token),
+		        v.name, v.symbol, v.vault_version, v.created_at_block,
+		        t.symbol, t.decimals, rt.symbol
+		 FROM morpho_vault v
+		 JOIN token t ON t.id = v.asset_token_id
+		 JOIN receipt_token rt ON rt.chain_id = v.chain_id AND rt.receipt_token_address = v.address
+		 WHERE v.chain_id = 1 AND v.address = $1`, vault.Bytes()).Scan(
+		&got.VaultRows, &got.TokenRows, &got.ReceiptRows,
+		&got.Name, &got.Symbol, &got.Version, &got.CreatedAtBlock,
+		&got.AssetSymbol, &got.AssetDecimals, &got.ReceiptSymbol)
+	if err != nil {
+		t.Fatalf("reading back the persisted vault: %v", err)
+	}
+	return got
+}
+
+// seedVaultActivity archives a receipt per block in [from,to], with the vault's
+// VaultV2 AccrueInterest — the log that makes an address a candidate — in the two
+// named blocks and unrelated ERC20 noise everywhere else.
+func seedVaultActivity(t *testing.T, ctx context.Context, vault common.Address, from, to int64, activeBlocks ...int64) string {
+	t.Helper()
+
+	v2ABI, err := abis.GetMetaMorphoV2AccrueInterestABI()
+	if err != nil {
+		t.Fatalf("GetMetaMorphoV2AccrueInterestABI: %v", err)
+	}
+	active := make(map[int64]bool, len(activeBlocks))
+	for _, block := range activeBlocks {
+		active[block] = true
+	}
+
+	bucket := seedBucket(t, ctx)
+	for block := from; block <= to; block++ {
+		log := shared.Log{
+			Address: "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+			Topics:  []string{"0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"},
+		}
+		if active[block] {
+			log = shared.Log{Address: vault.Hex(), Topics: []string{v2ABI.Events["AccrueInterest"].ID.Hex()}}
+		}
+		putReceipts(t, ctx, bucket, block, []shared.TransactionReceipt{{
+			TransactionHash: fmt.Sprintf("0x%064x", block),
+			BlockHash:       fmt.Sprintf("0x%064x", block),
+			Logs:            []shared.Log{log},
+		}})
+	}
+	return bucket
 }
 
 // seedQuietBlocks archives one unrelated-ERC20 receipt per block in [from,to],
@@ -400,6 +595,7 @@ func TestIntegration_ReplayPartition_ReplaysNothingWhenNoV2VaultIsKnown(t *testi
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
+	deleteSeededV2Vaults(t, ctx, pool)
 	// Deliberately an empty bucket: reaching S3 at all here would be the bug.
 	setWorkerEnv(t, seedBucket(t, ctx), chainFixtureServer(t, "0x1").URL)
 	env := newActivityEnv(t, ctx, pool)
@@ -504,45 +700,6 @@ func installTestMeterProvider(t *testing.T) sdkmetric.Reader {
 	return reader
 }
 
-// counterValue sums the named int64 counter's data points whose attributes
-// include every entry of want. Attributes outside want are ignored, so a test
-// asserts only the labels it cares about.
-func counterValue(t *testing.T, reader sdkmetric.Reader, name string, want map[string]string) int64 {
-	t.Helper()
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("collecting metrics: %v", err)
-	}
-	var total int64
-	for _, scope := range rm.ScopeMetrics {
-		for _, m := range scope.Metrics {
-			if m.Name != name {
-				continue
-			}
-			sum, ok := m.Data.(metricdata.Sum[int64])
-			if !ok {
-				t.Fatalf("metric %q is %T, want metricdata.Sum[int64]", name, m.Data)
-			}
-			for _, dp := range sum.DataPoints {
-				if hasAttributes(dp.Attributes, want) {
-					total += dp.Value
-				}
-			}
-		}
-	}
-	return total
-}
-
-func hasAttributes(set attribute.Set, want map[string]string) bool {
-	for key, value := range want {
-		got, ok := set.Value(attribute.Key(key))
-		if !ok || got.AsString() != value {
-			return false
-		}
-	}
-	return true
-}
-
 // seedV2VaultRow inserts the protocol, asset token and VaultV2 row a replay
 // expects to already exist — replay never discovers, it only drives logs of
 // vaults the database already holds.
@@ -594,13 +751,17 @@ func addAdapterLog(t *testing.T, vault, adapter common.Address) shared.Log {
 }
 
 // wireAdapterRegistrationReads answers the two chain reads registering an adapter
-// issues: the number-pinned type probe (morpho() succeeds, morphoVaultV1()
+// issues: the number-pinned type probe (morpho() succeeds, every other marker
 // reverts ⇒ MarketV1) and the hash-pinned realAssets() seed.
 func wireAdapterRegistrationReads(t *testing.T, mc *testutil.MockMulticaller, adapter common.Address) {
 	t.Helper()
 	adapterABI, err := abis.GetVaultV2AdapterReadABI()
 	if err != nil {
 		t.Fatalf("GetVaultV2AdapterReadABI: %v", err)
+	}
+	prober, err := morpho_indexer.NewAdapterProber()
+	if err != nil {
+		t.Fatalf("NewAdapterProber: %v", err)
 	}
 	pack := func(args abi.Arguments, values ...any) []byte {
 		data, err := args.Pack(values...)
@@ -611,13 +772,12 @@ func wireAdapterRegistrationReads(t *testing.T, mc *testutil.MockMulticaller, ad
 	}
 
 	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) != 2 || calls[0].Target != adapter {
+		if len(calls) != prober.NumProbeCalls() || calls[0].Target != adapter {
 			return nil, fmt.Errorf("unexpected number-pinned multicall of %d calls", len(calls))
 		}
-		return []outbound.Result{
-			{Success: true, ReturnData: pack(adapterABI.Methods["morpho"].Outputs, common.HexToAddress("0x1"))},
-			{Success: false},
-		}, nil
+		results := make([]outbound.Result, len(calls))
+		results[0] = outbound.Result{Success: true, ReturnData: pack(adapterABI.Methods["morpho"].Outputs, common.HexToAddress("0x1"))}
+		return results, nil
 	}
 	mc.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		if len(calls) != 1 || calls[0].Target != adapter {
@@ -631,7 +791,7 @@ func runDiscovery(t *testing.T, env *testsuite.TestActivityEnvironment, rng bloc
 	t.Helper()
 
 	var activities *backfillActivities
-	encoded, err := env.ExecuteActivity(activities.DiscoverVaults, rng)
+	encoded, err := env.ExecuteActivity(activities.DiscoverVaults, discoveryWork{Range: rng, ProbeBlock: rng.To})
 	if err != nil {
 		t.Fatalf("DiscoverVaults: %v", err)
 	}
@@ -655,4 +815,13 @@ func replayOnePartition(t *testing.T, env *testsuite.TestActivityEnvironment, wo
 		t.Fatalf("decoding the activity result: %v", err)
 	}
 	return replayed
+}
+
+// newBackfillWorker builds the entrypoint's registrar and drains the archive it
+// wires when the test ends, the way run does when the worker stops.
+func newBackfillWorker(t *testing.T) *backfillWorker {
+	t.Helper()
+	backfill := &backfillWorker{}
+	t.Cleanup(backfill.drain)
+	return backfill
 }

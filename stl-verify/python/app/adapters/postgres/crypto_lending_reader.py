@@ -27,7 +27,7 @@ from app.logging import get_logger
 
 logger = get_logger(__name__)
 
-_AAVE_LIKE = frozenset({"sparklend", "aave_v2", "aave_v3", "aave_v3_lido", "aave_v3_rwa"})
+_AAVE_LIKE = frozenset({"sparklend", "aave_v2", "aave_v3", "aave_v3_lido", "aave_v3_rwa", "aave_v3_avalanche"})
 _MORPHO = frozenset({"morpho_blue"})
 _MAPLE = frozenset({"maple"})
 # Protocols eligible for the gap-sweep RRC model (feeds ``list_supported_asset_ids`` →
@@ -37,31 +37,37 @@ _MAPLE = frozenset({"maple"})
 _SUPPORTED_PROTOCOLS = _AAVE_LIKE | _MORPHO
 _NORMALIZE_RE = re.compile(r"[\s\-_]+")
 
+# Reads allocation_position_current, one row per (proxy_address, chain_id, token_id).
+# Both CTEs pin token_id — latest_receipt by t.address, latest_underlying by the
+# receipt_token row's underlying_token_id, each unique within a chain — so that PK
+# admits at most one row per proxy per CTE and no latest-row dedup is needed. Chain
+# predicates: rationale on allocation_position_repository._RECEIPT_TOKEN_POSITIONS_SQL.
 _WALLET_LOOKUP_SQL = """
 WITH latest_receipt AS (
     -- Most-recent balance snapshot per wallet for the receipt token itself.
-    -- DISTINCT ON ensures we read the current state, not a historical peak.
-    SELECT DISTINCT ON (ap.proxy_address)
+    SELECT
         ap.proxy_address,
         ap.balance
-    FROM allocation_position ap
-    JOIN token t ON t.id = ap.token_id AND t.address = :receipt_token_address
+    FROM allocation_position_current ap
+    JOIN token t ON t.id = ap.token_id AND t.chain_id = ap.chain_id
+                AND t.address = :receipt_token_address
     WHERE ap.chain_id = :chain_id
-    ORDER BY ap.proxy_address, ap.block_number DESC, ap.block_version DESC,
-             ap.processing_version DESC, ap.log_index DESC
 ),
 latest_underlying AS (
     -- Most-recent balance snapshot per wallet for the underlying token.
-    SELECT DISTINCT ON (ap.proxy_address)
+    -- rt.chain_id = ap.chain_id scopes the registry to the chain asked about:
+    -- receipt_token.underlying_token_id carries no chain constraint, so another
+    -- chain's registration of the same address otherwise answers with ITS
+    -- underlying's holders.
+    SELECT
         ap.proxy_address,
         ap.balance
-    FROM allocation_position ap
-    JOIN token t ON t.id = ap.token_id
+    FROM allocation_position_current ap
+    JOIN token t ON t.id = ap.token_id AND t.chain_id = ap.chain_id
     JOIN receipt_token rt ON rt.underlying_token_id = t.id
                          AND rt.receipt_token_address = :receipt_token_address
+                         AND rt.chain_id = ap.chain_id
     WHERE ap.chain_id = :chain_id
-    ORDER BY ap.proxy_address, ap.block_number DESC, ap.block_version DESC,
-             ap.processing_version DESC, ap.log_index DESC
 ),
 candidates AS (
     -- Prefer wallets that explicitly hold the receipt token. Fall back to a
@@ -112,6 +118,20 @@ class PostgresCryptoLendingReader:
         return {
             row.receipt_token_id for row in rows if _normalize_protocol_name(row.protocol_name) in _SUPPORTED_PROTOCOLS
         }
+
+    async def list_morpho_asset_ids(self, chain_id: int) -> frozenset[int]:
+        """Return the receipt_token_ids of Morpho vault shares on ``chain_id``.
+
+        Serves the CORE model's vault aggregation, which is chain-gated (its
+        market keys are mainnet-only); classification lives here so the
+        protocol-name normalization has one home.
+        """
+        rows = await self._receipt_token_repo.list_protocol_pairs()
+        return frozenset(
+            row.receipt_token_id
+            for row in rows
+            if row.chain_id == chain_id and _normalize_protocol_name(row.protocol_name) in _MORPHO
+        )
 
     async def get_receipt_token(self, receipt_token_id: int) -> ReceiptTokenInfo | None:
         return await self._receipt_token_repo.get(receipt_token_id)

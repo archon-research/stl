@@ -12,13 +12,20 @@
  * `underlying_token_id` resolves in `TOKENS` on its own chain, every priced
  * allocation has a `per_allocation` entry in the risk-capital fixture, and three
  * activity rows carry transactions whose events the tx endpoint answers for.
- * `check-mock-api.mjs` asserts each of those; break one and it fails rather than
+ * `check-mock-api.ts` asserts each of those; break one and it fails rather than
  * the dashboard quietly rendering holes. The first of them is structural here:
  * the addresses, symbols and chain a row would otherwise repeat beside its ids
  * are read off `TOKENS` by id, so a row cannot name one token and label itself
  * with another's symbol.
  */
-import { DAY_MS, MINUTE_MS, SECOND_MS, iso, offsetIsoAgo } from '../clock.ts';
+import {
+  DAY_MS,
+  MINUTE_MS,
+  REFERENCE_SYNCED_AGO_MS,
+  SECOND_MS,
+  iso,
+  offsetIsoAgo,
+} from '../clock.ts';
 import { positionKeys } from '../identity.ts';
 import type { Allocation, AllocationActivity } from '../schema.ts';
 import type { PrimeName } from './registry.ts';
@@ -32,6 +39,7 @@ import {
 } from './registry.ts';
 
 const LAST_SWEEP_AGO = 5 * MINUTE_MS + 13 * SECOND_MS;
+
 const LAST_TRANSFER_AGO = 85 * SECOND_MS;
 /** The custody snapshot is two months stale on purpose; see DATA_SOURCES. */
 const CUSTODY_SNAPSHOT_AGO = 63 * DAY_MS;
@@ -335,6 +343,12 @@ export function seedAllocations(
  * make the comparison the flag exists for silently compare two different primes.
  * `undefined` is "the monitor does not track this prime", which the endpoint
  * answers as a 404.
+ *
+ * `selfRows` echo STL's own indexed positions, so their `underlying_*` already
+ * matches what the real API resolves through its registry for a row it
+ * indexes — no separate enrichment needed here. `skyOnlyAllocations` carries
+ * the other half of the contract: rows STL does not index at all, whose
+ * `underlying_*` stay null/`''`.
  */
 export function seedReferenceAllocations(
   nowMs: number,
@@ -353,6 +367,7 @@ export function seedReferenceAllocations(
         balance: null,
         scope: 'prime',
         source: 'reference',
+        reference_synced_at: iso(nowMs - REFERENCE_SYNCED_AGO_MS),
       })),
     ...skyOnlyAllocations(nowMs, primeName),
   ];
@@ -365,6 +380,8 @@ export function seedReferenceAllocations(
  * carry the three properties that make them awkward: no receipt token (so no
  * `receipt_token_id` to join a risk row by), no token quantity, and — for the
  * Arkis vault — an exposure large enough to matter against STL's own totals.
+ * `underlying_symbol` stays `''` here, matching the real API: these positions
+ * do not resolve against STL's registry, so nothing is there to name them with.
  */
 /** The Arkis vault Sky reports and STL does not index. */
 const ARKIS_VAULT = '0x38464507e02c983f20428a6e8566693fe9e422a9';
@@ -373,6 +390,7 @@ function skyOnlyAllocations(nowMs: number, primeName: PrimeName): Allocation[] {
   if (primeName !== 'spark') return [];
 
   const observedAt = iso(nowMs - 13 * MINUTE_MS);
+  const syncedAt = iso(nowMs - REFERENCE_SYNCED_AGO_MS);
   return [
     {
       chain_id: 1,
@@ -382,7 +400,9 @@ function skyOnlyAllocations(nowMs: number, primeName: PrimeName): Allocation[] {
       underlying_token_id: null,
       underlying_token_address: null,
       symbol: 'sparkPrimeUSDC1',
-      underlying_symbol: 'USDC',
+      // Unresolved against STL's receipt-token registry, like the id/address
+      // above: this feed names no underlying of its own.
+      underlying_symbol: '',
       protocol_name: 'Arkis',
       position_keys: [`position:1:${ARKIS_VAULT}`],
       balance: null,
@@ -393,6 +413,7 @@ function skyOnlyAllocations(nowMs: number, primeName: PrimeName): Allocation[] {
       category: 'allocation',
       scope: 'prime',
       source: 'reference',
+      reference_synced_at: syncedAt,
     },
     {
       chain_id: 1,
@@ -402,7 +423,7 @@ function skyOnlyAllocations(nowMs: number, primeName: PrimeName): Allocation[] {
       underlying_token_id: null,
       underlying_token_address: null,
       symbol: 'UNI-V4-PYUSD-USDS',
-      underlying_symbol: 'USDS',
+      underlying_symbol: '',
       protocol_name: 'uniswap',
       // A pool id is not an address, so this one can only key on its symbol.
       position_keys: ['symbol:1:uniswap:uni-v4-pyusd-usds'],
@@ -414,6 +435,7 @@ function skyOnlyAllocations(nowMs: number, primeName: PrimeName): Allocation[] {
       category: 'allocation',
       scope: 'prime',
       source: 'reference',
+      reference_synced_at: syncedAt,
     },
   ];
 }
@@ -443,16 +465,23 @@ export function seedCompositeAllocations(
   );
 
   return [
-    ...indexed.map((allocation): Allocation => ({
-      ...allocation,
-      source:
-        allocation.receipt_token_id != null &&
-        referenceRows.some(
-          (row) => row.receipt_token_id === allocation.receipt_token_id,
-        )
-          ? 'both'
-          : 'indexed',
-    })),
+    ...indexed.map((allocation): Allocation => {
+      const reported =
+        allocation.receipt_token_id != null
+          ? referenceRows.find(
+              (row) => row.receipt_token_id === allocation.receipt_token_id,
+            )
+          : undefined;
+      return {
+        ...allocation,
+        source: reported ? 'both' : 'indexed',
+        // Sky's figure and the cycle it was observed at travel together: the
+        // API sets both in one copy, so a stamp beside an empty comparison
+        // cell is a state staging cannot produce.
+        reference_amount_usd: reported?.amount_usd ?? null,
+        reference_synced_at: reported?.reference_synced_at ?? null,
+      };
+    }),
     ...referenceRows.filter(
       (row) =>
         row.receipt_token_id == null || !indexedIds.has(row.receipt_token_id),

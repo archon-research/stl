@@ -53,7 +53,7 @@ func main() {
 		cancel()
 	}()
 
-	err := run(ctx, os.Args[1:])
+	err := run(ctx, os.Args[1:], lifecycle.ForceExitAfter(lifecycle.ShutdownTailBudget))
 	cancel()
 	if err != nil {
 		slog.Error("psm3-indexer exited with error", "error", err)
@@ -63,7 +63,7 @@ func main() {
 
 // run is the entry point for the psm3-indexer.
 // It is extracted from main() to allow integration testing.
-func run(ctx context.Context, args []string) error {
+func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	fs := flag.NewFlagSet("psm3-indexer", flag.ContinueOnError)
 	dbURL := fs.String("db", env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"), "PostgreSQL connection string")
 	rpcURL := fs.String("rpc", env.Get("ETH_RPC_URL", ""), "Ethereum JSON-RPC endpoint (e.g. https://base-mainnet.g.alchemy.com/v2/<key>)")
@@ -143,6 +143,17 @@ func run(ctx context.Context, args []string) error {
 	}))
 	slog.SetDefault(logger)
 
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    "psm3-indexer",
+		ServiceVersion: buildinfo.GitHash(),
+		BuildTime:      BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("init telemetry: %w", err)
+	}
+	defer shutdownOTEL(context.Background())
+
 	// Per-chain PSM3 addresses, cross-checked against axis-synome so the two
 	// registries cannot drift silently.
 	psm3Cfg, err := psm3Adapter.PSM3ConfigForChain(chainID)
@@ -197,18 +208,6 @@ func run(ctx context.Context, args []string) error {
 		"psm3", psm3Cfg.PSM3.Hex(),
 	)
 
-	// OpenTelemetry
-	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    "psm3-indexer",
-		ServiceVersion: buildReg.GitHash(),
-		BuildTime:      BuildTime,
-		Logger:         logger,
-	})
-	if err != nil {
-		return fmt.Errorf("init telemetry: %w", err)
-	}
-	defer shutdownOTEL(context.Background())
-
 	// Ethereum JSON-RPC client
 	ethClient, err := rpchttp.DialEthereum(ctx, *rpcURL)
 	if err != nil {
@@ -252,7 +251,7 @@ func run(ctx context.Context, args []string) error {
 			SweepEveryNBlocks: *sweepBlocks,
 			ChainID:           chainID,
 			PSM3Address:       psm3Cfg.PSM3,
-			MaxMessages:       10,
+			MaxMessages:       1,
 			PollInterval:      100 * time.Millisecond,
 			Logger:            logger,
 			Telemetry:         svcTelemetry,
@@ -271,5 +270,5 @@ func run(ctx context.Context, args []string) error {
 		"chainID", chainID,
 	)
 
-	return lifecycle.Run(ctx, logger, svc)
+	return lifecycle.RunWithTimeoutGuard(ctx, logger, onShutdownTimeout, svc)
 }

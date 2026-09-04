@@ -10,7 +10,7 @@ Note that CRR is an expected loss, not a tail loss by construction. However, the
 
 This directory contains the CORE model as integrated into the STL service. The original standalone version lives in [`core_model_copy/`](https://github.com/TWave-code/core_model_copy). The integration wires CORE as a first-class `RiskModel` backed by a pre-compute cronjob and a thin API service that reads the results.
 
-The model reads static parquet snapshots in this PR; the parquet-to-live-table swaps land in the next PR of the stack (see the PR description).
+Each market picks its data sources per input via the `*_SOURCE` flags in `inputs/market_configs.json` — `postgres` reads the live tables, `parquet` the static snapshots (that file is the list of which markets run live; `CORE_MODEL_*_SOURCE` env vars override globally, e.g. the dev overlay pins local kind back to parquet). [`DATA_GAPS.md`](DATA_GAPS.md) tracks what keeps the rest on parquet, and what brings each one back.
 
 ---
 
@@ -241,16 +241,11 @@ The full params dict is stored as JSONB in `core_model_results.params` for audit
 
 ### Step 3 — Query via the risk API
 
-```
-GET /v1/risk/1/{receipt_token_address}/core-model
-```
-
-Returns the latest pre-computed CRR result for the receipt token (no `prime_id` required — this is raw model output, not exposure-weighted RRC).
-
-The existing RRC endpoint also includes core model results when the asset is mapped:
+There is no standalone core-model endpoint. `/v1/risk/rrc` includes the core model's result
+in `results[]` (scaled to the given prime's exposure) whenever the asset is mapped:
 
 ```
-GET /v1/risk/rrc?chain_id=1&token_address={address}&prime_id={address}
+GET /v1/risk/rrc?chain_id=1&token_address={receipt_token_address}&prime_id={address}
 ```
 
 ### asset_id → market_key mapping
@@ -352,7 +347,7 @@ The current `asset_to_market_key.json` mapping assumes a 1:1 relationship betwee
 2. **Virtual receipt tokens**: introduce a synthetic receipt token in the DB (not backed by a real on-chain address) to represent the aggregate Morpho cbBTC/USDC or WETH/USDC market. Requires a schema decision.
 3. **Separate query path**: add a market-key-based endpoint that bypasses receipt token resolution entirely — useful if the Morpho core model result is consumed without a specific prime's exposure context.
 
-Until this is resolved, `morpho_cbbtc-usdc` and `morpho_weth-usdc` remain configured in `market_configs.json` and can be run by the cronjob, but cannot be served through the `asset_to_market_key.json` mapping or the `/core-model` API endpoint.
+Until this is resolved, `morpho_cbbtc-usdc` and `morpho_weth-usdc` remain configured in `market_configs.json` and can be run by the cronjob, but cannot be served through the `asset_to_market_key.json` mapping or `/v1/risk/rrc`.
 
 ### Syrup, Anchorage, Galaxy — no receipt tokens in the DB
 

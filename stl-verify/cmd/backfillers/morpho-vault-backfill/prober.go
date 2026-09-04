@@ -6,15 +6,34 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"net/http"
+	"slices"
+	"sync"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/erc20meta"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/rpcerr"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 )
+
+// Only the probe phase tags this: a confirmed vault must never be discarded over
+// its metadata read.
+var errProbeGasExhausted = errors.New("probe call exhausted the eth_call gas budget")
+
+// Narrowing any other error answers a throttled provider with more requests:
+// every level of the bisection re-enters rpchttp's retry budget.
+func isNarrowableError(err error) bool {
+	if rpcerr.IsGasExhausted(err) {
+		return true
+	}
+	var httpErr rpc.HTTPError
+	return errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusRequestEntityTooLarge
+}
 
 // confirmedVault holds metadata for a confirmed Morpho-family vault
 // (MetaMorpho V1/V1.1 or Morpho VaultV2).
@@ -39,20 +58,48 @@ type vaultProber struct {
 	sharedProber *morpho_indexer.VaultProber
 	erc20ABI     *abi.ABI
 	logger       *slog.Logger
+	telemetry    *morpho_indexer.Telemetry // optional, nil-safe
+	unprobeable  unprobeableSet
 }
 
-// probeAllCandidates checks each candidate address by calling the shared probe
-// (MORPHO/asset/curator/liquidityAdapter) via multicall. Returns confirmed
-// vaults with their metadata.
+// The prober outlives every run while each run probes at its own block, so a
+// verdict left unscoped would hide a proxy upgrade or redeploy between two runs.
+type unprobeableKey struct {
+	addr  common.Address
+	block int64
+}
+
+type unprobeableSet struct {
+	mu   sync.Mutex
+	seen map[unprobeableKey]int
+}
+
+func (s *unprobeableSet) add(addr common.Address, block int64, exhaustedSelectors int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.seen == nil {
+		s.seen = make(map[unprobeableKey]int)
+	}
+	s.seen[unprobeableKey{addr: addr, block: block}] = exhaustedSelectors
+}
+
+func (s *unprobeableSet) lookup(addr common.Address, block int64) (exhaustedSelectors int, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	exhaustedSelectors, ok = s.seen[unprobeableKey{addr: addr, block: block}]
+	return exhaustedSelectors, ok
+}
+
 func (p *vaultProber) probeAllCandidates(
 	ctx context.Context,
 	candidates map[common.Address]int64,
 	probeBlock int64,
 	batchSize int,
 ) ([]confirmedVault, error) {
-	addrs := make([]common.Address, 0, len(candidates))
-	for addr := range candidates {
-		addrs = append(addrs, addr)
+	addrs, classified := p.probeOrder(candidates, probeBlock)
+	for _, addr := range classified {
+		exhausted, _ := p.unprobeable.lookup(addr, probeBlock)
+		p.discardUnprobeable(ctx, addr, probeBlock, discardFromMemo, exhausted)
 	}
 
 	blockNum := new(big.Int).SetInt64(probeBlock)
@@ -81,18 +128,44 @@ func (p *vaultProber) probeAllCandidates(
 	return confirmed, nil
 }
 
-// probeBatchWithRetry tries probeBatch, and on failure retries with progressively
-// smaller sub-batches down to single-address probes. This handles "out of gas"
-// errors from the multicall when a batch contains contracts that consume excessive gas.
-//
-// At the single-address floor there is nothing left to split, so the error is
-// propagated (failing the run) rather than swallowed. By that point the only
-// errors reaching here are transport failures (429 / timeout / 5xx, already
-// retried to exhaustion by the rpchttp client) or a structural-transport error
-// out of the multicall — ErrNotVault is consumed as a per-result Success:false
-// inside collectProbeConfirmed and never surfaces as an error. Swallowing here
-// would permanently black-hole a real vault while the backfill run exits 0;
-// failing loudly is safe because a backfiller re-run is idempotent.
+// Sorted because map order reshuffles batch composition between attempts, leaving
+// a batch failure and the bisection off it unable to reproduce.
+func (p *vaultProber) probeOrder(candidates map[common.Address]int64, probeBlock int64) (probeable, classified []common.Address) {
+	addrs := make([]common.Address, 0, len(candidates))
+	for addr := range candidates {
+		addrs = append(addrs, addr)
+	}
+	slices.SortFunc(addrs, common.Address.Cmp)
+
+	probeable = make([]common.Address, 0, len(addrs))
+	for _, addr := range addrs {
+		if _, ok := p.unprobeable.lookup(addr, probeBlock); ok {
+			classified = append(classified, addr)
+			continue
+		}
+		probeable = append(probeable, addr)
+	}
+	return probeable, classified
+}
+
+type discardSource string
+
+const (
+	discardFromProbe discardSource = "probe"
+	discardFromMemo  discardSource = "memo"
+)
+
+func (p *vaultProber) discardUnprobeable(ctx context.Context, addr common.Address, probeBlock int64, source discardSource, exhaustedSelectors int) {
+	p.unprobeable.add(addr, probeBlock, exhaustedSelectors)
+	p.logger.Warn("discarding unprobeable candidate",
+		"address", addr.Hex(),
+		"probeBlock", probeBlock,
+		"reason", string(morpho_indexer.UnprobeableGasExhausted),
+		"source", string(source),
+		"exhaustedSelectors", exhaustedSelectors)
+	p.telemetry.RecordUnprobeableCandidate(ctx, morpho_indexer.UnprobeableGasExhausted)
+}
+
 func (p *vaultProber) probeBatchWithRetry(
 	ctx context.Context,
 	batch []common.Address,
@@ -109,10 +182,16 @@ func (p *vaultProber) probeBatchWithRetry(
 	}
 
 	if len(batch) == 1 {
+		if errors.Is(err, errProbeGasExhausted) {
+			return p.probeCandidateSelectorwise(ctx, batch[0], firstBlocks, blockNum)
+		}
 		return nil, fmt.Errorf("probing candidate %s: %w", batch[0].Hex(), err)
 	}
 
-	// Batch failed — retry with halved batch size, down to individual probes.
+	if !isNarrowableError(err) {
+		return nil, err
+	}
+
 	p.logger.Warn("batch probe failed, retrying with smaller batches",
 		"batchSize", len(batch),
 		"error", err)
@@ -127,6 +206,69 @@ func (p *vaultProber) probeBatchWithRetry(
 		return nil, err
 	}
 	return append(left, right...), nil
+}
+
+func (p *vaultProber) probeCandidateSelectorwise(
+	ctx context.Context,
+	addr common.Address,
+	firstBlocks map[common.Address]int64,
+	blockNum *big.Int,
+) ([]confirmedVault, error) {
+	results, exhausted, err := p.isolateProbeCalls(ctx, addr, blockNum)
+	if err != nil {
+		return nil, fmt.Errorf("probing candidate %s: %w", addr.Hex(), err)
+	}
+	if got, want := len(results), p.sharedProber.NumProbeCalls(); got != want {
+		return nil, fmt.Errorf("expected %d isolated probe results for %s, got %d", want, addr.Hex(), got)
+	}
+
+	if _, err := p.sharedProber.ParseProbeResults(results[0], results[1], results[2], results[3], addr); err != nil {
+		var notVault *morpho_indexer.ErrNotVault
+		if !errors.As(err, &notVault) {
+			return nil, fmt.Errorf("parsing isolated probe results for %s: %w", addr.Hex(), err)
+		}
+		p.discardUnprobeable(ctx, addr, blockNum.Int64(), discardFromProbe, exhausted)
+		return nil, nil
+	}
+
+	p.logger.Warn("candidate confirmed after probing one selector at a time",
+		"address", addr.Hex(),
+		"exhaustedSelectors", exhausted,
+		"totalSelectors", len(results))
+	return p.confirmProbedBatch(ctx, []common.Address{addr}, results, firstBlocks, blockNum)
+}
+
+func (p *vaultProber) isolateProbeCalls(ctx context.Context, addr common.Address, blockNum *big.Int) ([]outbound.Result, int, error) {
+	calls := p.sharedProber.ProbeCalls(addr)
+	results := make([]outbound.Result, 0, len(calls))
+	exhausted := 0
+	for _, call := range calls {
+		result, err := p.executeIsolatedProbeCall(ctx, call, blockNum)
+		switch {
+		case err == nil:
+			results = append(results, result)
+		case errors.Is(err, errProbeGasExhausted):
+			results = append(results, outbound.Result{})
+			exhausted++
+		default:
+			return nil, 0, err
+		}
+	}
+	return results, exhausted, nil
+}
+
+func (p *vaultProber) executeIsolatedProbeCall(ctx context.Context, call outbound.Call, blockNum *big.Int) (outbound.Result, error) {
+	results, err := p.multicaller.Execute(ctx, []outbound.Call{call}, blockNum)
+	if err != nil {
+		if rpcerr.IsGasExhausted(err) {
+			return outbound.Result{}, fmt.Errorf("isolated probe call: %w: %w", err, errProbeGasExhausted)
+		}
+		return outbound.Result{}, fmt.Errorf("isolated probe call: %w", err)
+	}
+	if len(results) != 1 {
+		return outbound.Result{}, fmt.Errorf("expected 1 result for an isolated probe call, got %d", len(results))
+	}
+	return results[0], nil
 }
 
 // confirmedProbe pairs a probe-confirmed vault address with the version the
@@ -155,9 +297,22 @@ func (p *vaultProber) probeBatch(
 
 	results, err := p.multicaller.Execute(ctx, calls, blockNum)
 	if err != nil {
+		if rpcerr.IsGasExhausted(err) {
+			return nil, fmt.Errorf("multicall probe: %w: %w", err, errProbeGasExhausted)
+		}
 		return nil, fmt.Errorf("multicall probe: %w", err)
 	}
 
+	return p.confirmProbedBatch(ctx, batch, results, firstBlocks, blockNum)
+}
+
+func (p *vaultProber) confirmProbedBatch(
+	ctx context.Context,
+	batch []common.Address,
+	results []outbound.Result,
+	firstBlocks map[common.Address]int64,
+	blockNum *big.Int,
+) ([]confirmedVault, error) {
 	probeConfirmed, err := p.collectProbeConfirmed(batch, results)
 	if err != nil {
 		return nil, err

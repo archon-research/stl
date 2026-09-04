@@ -17,7 +17,7 @@ import (
 type LoanCollateral struct {
 	LoanID           int64
 	SyncedAt         time.Time
-	AssetSymbol      string
+	AssetSymbol      string   // empty when the API reports a null asset symbol
 	AssetAmount      *big.Int // nil when the API reports null
 	AssetDecimals    int16
 	AssetValueUSD    *big.Int // nil when the API reports null
@@ -65,9 +65,8 @@ func (c *LoanCollateral) Validate() error {
 	if c.SyncedAt.IsZero() {
 		return fmt.Errorf("syncedAt must not be zero")
 	}
-	if c.AssetSymbol == "" {
-		return fmt.Errorf("assetSymbol must not be empty")
-	}
+	// AssetSymbol is not required: it is a label, and the loans phase snapshot is
+	// all-or-nothing, so a missing one is a downgrade, not every loan's loss.
 	if err := requireNonNegBigIntIfSet("assetAmount", c.AssetAmount); err != nil {
 		return err
 	}

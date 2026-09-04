@@ -200,11 +200,19 @@ func (m *mockMetrics) ProcessedStatuses() []string {
 
 // stubConsumer is a minimal SQSConsumer; the service tests drive processBlockEvent
 // directly rather than through the poll loop, so receive/delete are no-ops.
-type stubConsumer struct{}
+type stubConsumer struct{ visibilityTimeout time.Duration }
 
 func (stubConsumer) ReceiveMessages(_ context.Context, _ int) ([]outbound.SQSMessage, error) {
 	return nil, nil
 }
 func (stubConsumer) DeleteMessage(_ context.Context, _ string) error { return nil }
-func (stubConsumer) VisibilityTimeout() time.Duration                { return 5 * time.Minute }
-func (stubConsumer) Close() error                                    { return nil }
+func (stubConsumer) ChangeMessageVisibilityBatch(context.Context, []string, time.Duration) (map[string]error, error) {
+	return nil, nil
+}
+func (c stubConsumer) VisibilityTimeout() time.Duration {
+	if c.visibilityTimeout > 0 {
+		return c.visibilityTimeout
+	}
+	return 5 * time.Minute
+}
+func (stubConsumer) Close() error { return nil }

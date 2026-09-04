@@ -32,6 +32,10 @@ import (
 // 2), and persist the confirmed vaults (phase 3). A phase with nothing to carry
 // forward returns what it did reach rather than an error; the caller's V2 replay
 // phase still runs off the vaults already in the database.
+//
+// probeBlock is separate from rng because a run scans in sub-ranges but probes
+// all of them at one block — the metadata it reads there is what gets persisted
+// (see discoveryWork.ProbeBlock).
 func discoverAndPersistVaults(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -42,6 +46,7 @@ func discoverAndPersistVaults(
 	buildID buildregistry.BuildID,
 	cfg config,
 	rng blockRange,
+	probeBlock int64,
 ) (discoveryResult, error) {
 	candidates, err := scanBlockRange(ctx, logger, s3Reader, extractor, cfg.bucket, rng.From, rng.To, cfg.goroutines)
 	if err != nil {
@@ -54,7 +59,7 @@ func discoverAndPersistVaults(
 		return got, nil
 	}
 
-	vaults, err := prober.probeAllCandidates(ctx, candidates, rng.To, cfg.probeBatch)
+	vaults, err := prober.probeAllCandidates(ctx, candidates, probeBlock, cfg.probeBatch)
 	if err != nil {
 		return discoveryResult{}, fmt.Errorf("probing candidates: %w", err)
 	}
@@ -505,13 +510,15 @@ func partitionsForRange(from, to int64) []string {
 // returns the S3 key with the highest version for each block number.
 //
 // Highest-version-wins is the maintainer-set rule for reading the raw buckets, and
-// the version in the key is NOT always reorg evidence: the one-off
-// raw-block-bulk-downloader run stamped its uploads version 1, so deep history is
-// _1_-only and one transition window holds identical _0_/_1_ twins (hash-verified
-// canonical). Rows replayed from those ranges therefore carry block_version=1 with
-// no reorg behind them — never infer a reorg from block_version alone. A real reorg
-// is watcher-written twins with different block hashes, and the higher version is
-// the canonical re-publish, which this rule selects correctly.
+// the version in the key is NOT always reorg evidence: deep history is _1_-only and
+// one transition window holds identical _0_/_1_ twins (hash-verified canonical), so
+// rows replayed from those ranges carry block_version=1 with no reorg behind them —
+// never infer a reorg from block_version alone. Above that history the
+// raw-block-bulk-downloader archives a first copy at version 0 and corrections at
+// the next free version, so a _1_ it wrote corrects the version below it: that block
+// lost its fork, or held no object able to identify it. A real reorg is
+// watcher-written twins with different block hashes, and the higher version is the
+// canonical re-publish, which this rule selects correctly.
 func listHighestVersionReceipts(
 	ctx context.Context,
 	s3Reader outbound.S3Reader,

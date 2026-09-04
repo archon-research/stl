@@ -396,6 +396,57 @@ func (c *Client) GetCurrentBlockNumber(ctx context.Context) (int64, error) {
 	return hexutil.ParseInt64(result)
 }
 
+// GetFinalizedBlockNumber fetches the number of the head the node considers
+// final. A node that does not serve the "finalized" tag answers with an RPC
+// error or a null result, both of which surface as an error rather than a height.
+func (c *Client) GetFinalizedBlockNumber(ctx context.Context) (int64, error) {
+	raw, err := c.callSingle(ctx, "eth_getBlockByNumber", "finalized", []any{"finalized", false})
+	if err != nil {
+		return 0, err
+	}
+
+	var header outbound.BlockHeader
+	if err := json.Unmarshal(raw, &header); err != nil {
+		return 0, fmt.Errorf("failed to parse finalized block: %w", err)
+	}
+	return hexutil.ParseInt64(header.Number)
+}
+
+// GetBlockHeadersBatch fetches block headers — no transaction bodies, no
+// receipts — for multiple blocks in a single batched RPC call.
+func (c *Client) GetBlockHeadersBatch(ctx context.Context, blockNums []int64) ([]outbound.BlockData, error) {
+	if len(blockNums) == 0 {
+		return nil, nil
+	}
+
+	requests := make([]jsonRPCRequest, len(blockNums))
+	for i, blockNum := range blockNums {
+		requests[i] = jsonRPCRequest{
+			JSONRPC: "2.0",
+			ID:      i,
+			Method:  "eth_getBlockByNumber",
+			Params:  []any{fmt.Sprintf("0x%x", blockNum), false},
+		}
+	}
+
+	responses, err := c.callBatch(ctx, requests)
+	if err != nil {
+		return nil, err
+	}
+
+	respMap := make(map[int]*jsonRPCResponse, len(responses))
+	for i := range responses {
+		respMap[responses[i].ID] = &responses[i]
+	}
+
+	results := make([]outbound.BlockData, len(blockNums))
+	for i, blockNum := range blockNums {
+		results[i] = outbound.BlockData{BlockNumber: blockNum}
+		results[i].Block, results[i].BlockErr = extractResult(respMap[i], nil, "eth_getBlockByNumber", strconv.FormatInt(blockNum, 10))
+	}
+	return results, nil
+}
+
 // GetBlocksBatch fetches all data for multiple blocks in a single batched RPC call.
 func (c *Client) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx bool) ([]outbound.BlockData, error) {
 	if len(blockNums) == 0 {

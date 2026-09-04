@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
@@ -51,11 +53,13 @@ func TestPrimeCapitalStackRepositoryPreservesEighteenDecimalPrecision(t *testing
 	if err != nil {
 		t.Fatalf("tx manager: %v", err)
 	}
-	repo := NewPrimeCapitalStackRepository(pool, txm, nil)
+	repo := NewPrimeCapitalStackRepository(pool, nil)
 	syncedAt := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
 
-	if err := repo.SavePrimeCapitalSnapshots(ctx, []entity.PrimeCapitalStackSnapshot{
-		capitalStackSnapshot(primeID, syncedAt, 1),
+	if err := txm.WithTransaction(ctx, func(tx pgx.Tx) error {
+		return repo.SavePrimeCapitalSnapshots(ctx, tx, []entity.PrimeCapitalStackSnapshot{
+			capitalStackSnapshot(primeID, syncedAt, 1),
+		})
 	}); err != nil {
 		t.Fatalf("SavePrimeCapitalSnapshots() = %v", err)
 	}
@@ -92,12 +96,14 @@ func TestPrimeCapitalStackRepositoryIsIdempotentWithinABuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tx manager: %v", err)
 	}
-	repo := NewPrimeCapitalStackRepository(pool, txm, nil)
+	repo := NewPrimeCapitalStackRepository(pool, nil)
 	syncedAt := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
 	snapshot := capitalStackSnapshot(primeID, syncedAt, 1)
 
 	for range 2 {
-		if err := repo.SavePrimeCapitalSnapshots(ctx, []entity.PrimeCapitalStackSnapshot{snapshot}); err != nil {
+		if err := txm.WithTransaction(ctx, func(tx pgx.Tx) error {
+			return repo.SavePrimeCapitalSnapshots(ctx, tx, []entity.PrimeCapitalStackSnapshot{snapshot})
+		}); err != nil {
 			t.Fatalf("SavePrimeCapitalSnapshots() = %v", err)
 		}
 	}
@@ -129,12 +135,14 @@ func TestPrimeCapitalStackRepositoryAppendsACorrectionForANewBuild(t *testing.T)
 	if err != nil {
 		t.Fatalf("tx manager: %v", err)
 	}
-	repo := NewPrimeCapitalStackRepository(pool, txm, nil)
+	repo := NewPrimeCapitalStackRepository(pool, nil)
 	syncedAt := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
 
 	for _, buildID := range []int{1, 2} {
-		if err := repo.SavePrimeCapitalSnapshots(ctx, []entity.PrimeCapitalStackSnapshot{
-			capitalStackSnapshot(primeID, syncedAt, buildID),
+		if err := txm.WithTransaction(ctx, func(tx pgx.Tx) error {
+			return repo.SavePrimeCapitalSnapshots(ctx, tx, []entity.PrimeCapitalStackSnapshot{
+				capitalStackSnapshot(primeID, syncedAt, buildID),
+			})
 		}); err != nil {
 			t.Fatalf("SavePrimeCapitalSnapshots(build=%d) = %v", buildID, err)
 		}

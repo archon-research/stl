@@ -69,19 +69,15 @@ class PrimeDebtRepository:
                 p.vault_address = decode(:address_hex, 'hex')
                 OR EXISTS (
                     SELECT 1
-                    FROM allocation_position ap
-                    WHERE ap.prime_id = p.id
-                      AND ap.proxy_address = decode(:address_hex, 'hex')
+                    FROM prime_proxy pp
+                    WHERE pp.prime_id = p.id
+                      AND pp.proxy_address = decode(:address_hex, 'hex')
                 )
             )
         """
 
     async def resolve_prime_id(self, prime_address: EthAddress) -> int | None:
-        """Resolve either prime identity to its ``prime.id``, or ``None`` if unknown.
-
-        Proxy ownership is not globally unique, so an address can match several primes;
-        the vault match wins, then the lowest ``prime.id``, keeping resolution deterministic.
-        """
+        """Resolve either prime identity (vault or proxy address) to ``prime.id``."""
         query = text(
             """
             SELECT p.id

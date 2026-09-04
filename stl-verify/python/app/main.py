@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.openapi.docs import get_swagger_ui_html, get_swagger_ui_oauth2_redirect_html
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import text
@@ -19,7 +19,9 @@ from app.adapters.postgres.core_model_results_reader import PostgresCoreModelRes
 from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingReader
 from app.adapters.postgres.engine import create_db_engine
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
+from app.adapters.postgres.morpho_vault_allocations_reader import PostgresMorphoVaultAllocationsReader
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository, resolve_receipt_token_mapping
+from app.adapters.postgres.reference_as_of import pinned_to
 from app.api.v1 import (
     allocations,
     data_sources,
@@ -36,10 +38,11 @@ from app.api.v1 import (
 from app.config import Settings, get_settings
 from app.logging import get_logger, setup_logging
 from app.middleware.request_id import RequestIdMiddleware
+from app.risk_engine.core_model.config import load_commented_json
 from app.risk_engine.mapping import MappingError, load_asset_mapping
 from app.risk_engine.suraf.loader import load_all_ratings
 from app.risk_engine.suraf.result import SurafResult
-from app.services.core_model_risk_service import CoreModelRiskService
+from app.services.core_model_risk_service import MAINNET_CHAIN_ID, CoreModelRiskService, morpho_market_key_index
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 from app.services.model_registry import ModelRegistry
 from app.services.suraf_rrc_service import SurafRrcService
@@ -139,7 +142,23 @@ def _is_asset_path(requested_path: str) -> bool:
     return requested_path.split("/", 1)[0] == "assets"
 
 
-def configure_docs(application: FastAPI) -> None:
+def configure_docs(application: FastAPI, settings: Settings) -> None:
+    # With auth on, Swagger gets an Authorize button (authorization-code +
+    # PKCE against Keycloak) and the redirect page it needs. The redirect
+    # route is NOT auto-registered because docs_url=None — without it the
+    # OAuth flow dead-ends silently after login (ADR-015, app-code notes).
+    init_oauth = None
+    if settings.auth_enabled and settings.oidc_issuer:
+        init_oauth = {
+            "clientId": "swagger-ui",
+            "usePkceWithAuthorizationCodeGrant": True,
+            "scopes": "openid profile",
+        }
+
+        @application.get("/docs/oauth2-redirect", include_in_schema=False)
+        async def swagger_ui_redirect():
+            return get_swagger_ui_oauth2_redirect_html()
+
     @application.get("/docs", include_in_schema=False)
     async def swagger_ui_html():
         openapi_url = application.openapi_url or "/openapi.json"
@@ -147,6 +166,8 @@ def configure_docs(application: FastAPI) -> None:
             openapi_url=openapi_url,
             title=f"{application.title} - Swagger UI",
             swagger_favicon_url=DOCS_FAVICON_URL,
+            oauth2_redirect_url="/docs/oauth2-redirect" if init_oauth else None,
+            init_oauth=init_oauth,
         )
 
 
@@ -175,6 +196,9 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
     core_raw_mapping = load_asset_mapping(settings.core_model_mappings_file)
     logger.info("core model asset->market_key mapping loaded entries=%d", len(core_raw_mapping))
 
+    core_morpho_market_keys = morpho_market_key_index(load_commented_json(settings.core_model_market_configs_file))
+    logger.info("core model morpho market keys loaded entries=%d", len(core_morpho_market_keys))
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_db_engine(
@@ -190,14 +214,18 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
                 await conn.execute(text("SELECT 1"))
 
             asset_to_rating = await resolve_receipt_token_mapping(raw_mapping, engine)
-            allocation_repo = AllocationRepository(engine)
+            # Published on app.state so every route resolves the same provider via
+            # deps.get_reference_as_of; a per-route default would leave most unpinned.
+            reference_effective_at = pinned_to(settings.resolved_reference_effective_at())
+            app.state.reference_effective_at = reference_effective_at
+            allocation_repo = AllocationRepository(engine, reference_effective_at)
             suraf_rrc_service = SurafRrcService(asset_to_rating, suraf_ratings, allocation_repo)
 
             receipt_token_repo = ReceiptTokenRepository(engine)
             crypto_lending_reader = PostgresCryptoLendingReader(
                 receipt_token_repo=receipt_token_repo,
-                aave_breakdown_repo=AaveLikeBackedBreakdownRepository(engine),
-                morpho_breakdown_repo=MorphoBackedBreakdownRepository(engine),
+                aave_breakdown_repo=AaveLikeBackedBreakdownRepository(engine, reference_effective_at),
+                morpho_breakdown_repo=MorphoBackedBreakdownRepository(engine, reference_effective_at),
                 maple_breakdown_repo=MapleBackedBreakdownRepository(engine),
                 aave_liq_repo=AaveLikeLiquidationParamsRepository(engine),
                 morpho_liq_repo=MorphoLiquidationParamsRepository(engine),
@@ -216,10 +244,20 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             )
             asset_to_market_key = await resolve_receipt_token_mapping(core_raw_mapping, engine)
             core_model_results_reader = PostgresCoreModelResultsReader(engine)
+            # Same startup-snapshot rule as the crypto-lending set above: a
+            # Morpho receipt token registered after boot needs a restart.
+            # Mainnet only — CORE market keys are Ethereum-only, and symbol-pair
+            # matching would hand another chain's vault mainnet results.
+            morpho_asset_ids = await crypto_lending_reader.list_morpho_asset_ids(chain_id=MAINNET_CHAIN_ID)
             core_model_risk_service = CoreModelRiskService(
                 asset_to_market_key=asset_to_market_key,
                 results_reader=core_model_results_reader,
                 allocation_repo=allocation_repo,
+                receipt_tokens=receipt_token_repo,
+                morpho_allocations=PostgresMorphoVaultAllocationsReader(engine),
+                morpho_market_keys=core_morpho_market_keys,
+                morpho_asset_ids=morpho_asset_ids,
+                min_coverage_pct=settings.core_model_min_coverage_pct,
             )
             model_registry = ModelRegistry([suraf_rrc_service, crypto_lending_risk_service, core_model_risk_service])
 
@@ -227,7 +265,6 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             app.state.suraf_ratings = suraf_ratings
             app.state.asset_to_rating = asset_to_rating
             app.state.crypto_lending_risk_service = crypto_lending_risk_service
-            app.state.core_model_risk_service = core_model_risk_service
             app.state.model_registry = model_registry
             app.state.receipt_token_lookup = receipt_token_repo
 
@@ -237,7 +274,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             try:
                 await engine.dispose()
             finally:
-                shutdown_telemetry(app.state.tracer_provider)
+                shutdown_telemetry(app.state.telemetry_providers)
 
     application = FastAPI(
         title="stl-verify",
@@ -252,7 +289,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
         openapi_tags=OPENAPI_TAGS,
     )
     application.add_middleware(RequestIdMiddleware)
-    application.state.tracer_provider = setup_telemetry(application, settings)
+    application.state.telemetry_providers = setup_telemetry(application, settings)
 
     @application.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -315,13 +352,30 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             routes=application.routes,
             tags=application.openapi_tags,
         )
-        application.openapi_schema = strip_internal_operations(full)
+        full = strip_internal_operations(full)
+        # Swagger's Authorize button exists only if the schema declares a
+        # security scheme. Emitted only when auth is on, so the published
+        # /openapi.json is unchanged while the app ships dark.
+        if settings.auth_enabled and settings.oidc_issuer:
+            full.setdefault("components", {})["securitySchemes"] = {
+                "oidc": {
+                    "type": "oauth2",
+                    "flows": {
+                        "authorizationCode": {
+                            "authorizationUrl": f"{settings.oidc_issuer}/protocol/openid-connect/auth",
+                            "tokenUrl": f"{settings.oidc_issuer}/protocol/openid-connect/token",
+                            "scopes": {"openid": "", "profile": ""},
+                        }
+                    },
+                }
+            }
+        application.openapi_schema = full
         return application.openapi_schema
 
     # FastAPI's documented openapi override pattern
     application.openapi = public_openapi  # ty: ignore[invalid-assignment]
 
-    configure_docs(application)
+    configure_docs(application, settings)
     configure_static_hosting(application, static_dir or DEFAULT_STATIC_DIR)
     return application
 
