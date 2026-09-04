@@ -75,6 +75,21 @@ func TestNewDrain_CountsNothingLostWhenTheWritesFinish(t *testing.T) {
 	}
 }
 
+// DrainTimeout is sized for the slowest write, not for the common shutdown:
+// paying it on every rollout would add most of a minute to each pod's exit.
+func TestNewDrain_ReturnsWithoutSpendingItsBudgetWhenNothingIsInFlight(t *testing.T) {
+	gate := archiving.NewDrainGate(nil)
+	writes, _ := newTestWriteCounter(t)
+
+	started := time.Now()
+	newDrain(gate, slog.New(&testutil.SlogRecorder{}), writes, time.Minute)()
+
+	if elapsed := time.Since(started); elapsed > drainTestBudget {
+		t.Errorf("a drain with nothing in flight took %s; it must return without spending its %s budget",
+			elapsed, time.Minute)
+	}
+}
+
 // A zero budget would abandon every write in flight on every shutdown, so it
 // must floor rather than expire the drain the moment it starts.
 func TestNewDrain_FloorsANonPositiveBudget(t *testing.T) {

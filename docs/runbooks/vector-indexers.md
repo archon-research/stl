@@ -2277,7 +2277,8 @@ Signals:
   attempted S3 object write, from the archiving decorator. `status` is
   `success`, `error`, `abandoned` (the shutdown drain gate refused the batch, so
   the write never started) or `lost` (the write was still in flight when the
-  5s drain budget expired). Every batch gets **exactly one** of the four: an
+  35s drain budget expired, i.e. it had already outlived its own 30s timeout —
+  see `VectorArchiveWriteLost`). Every batch gets **exactly one** of the four: an
   expired drain closes the gate's outcome claim as it counts the writes it
   abandoned, so a `lost` write that happens to land during the OTEL flush no
   longer records a second `success` or `error` for the same batch.
@@ -2297,14 +2298,19 @@ is a `warning` rather than a page. It also means `archive_writes_total` *lags*
 `multicall_batch_size_count` by one S3 round-trip, and on a freshly started pod
 that lag is enough to shift which counter gets exported first (see
 `VectorArchivingStalled` below). On graceful shutdown `archivingwire`'s `drain()`
-is bounded by `archivingwire.DrainTimeout` (5s). Batches a still-running handler
-schedules after that budget expires are refused by the drain gate and counted as
-`status="abandoned"`; writes already in flight when it expires are counted as
-`status="lost"` and logged as `raw SC call archive drain budget expired`. A lost
-write keeps running until the process dies — it may still reach S3 — but the gate
-has taken its outcome claim, so it never adds a second status. Every
-rollout therefore ends *below* `multicall == archive_success` parity by the
-number of writes in flight or scheduled at SIGTERM.
+is bounded by `archivingwire.DrainTimeout` (35s), which since ARCT-401 covers a
+single write's own `archiveTimeout` (30s) — so a write in flight at SIGTERM
+lands, or records its own `error`, inside the drain. Batches a still-running
+handler schedules *after* the drain began are still refused by the gate and
+counted as `status="abandoned"`, which remains the normal rollout artefact.
+`status="lost"` is not: it now means a write outlived the whole 35s budget, is
+logged as `raw SC call archive drain budget expired`, and raises
+`VectorArchiveWriteLost`. A lost write keeps running until the process dies — it
+may still reach S3 — but the gate has taken its outcome claim, so it never adds
+a second status. A rollout therefore ends *below* `multicall == archive_success`
+parity by the number of batches scheduled after the drain began, and the drain
+itself costs nothing when nothing is in flight: it returns as soon as the writes
+finish, so an idle pod still exits in ~1-2s.
 
 What the `multicall == archive_success` parity check can and cannot tell you,
 now that `abandoned` and `lost` both exist:
@@ -2370,11 +2376,12 @@ write path.
    sum(multicall_batch_size_count{service_name="<svc>", chain="<chain>"})
    ```
 
-   Exact parity is not guaranteed and its absence is not by itself a fault: the
-   shutdown drain is bounded by `archivingwire.DrainTimeout` (5s), so every pod
-   exits with some writes `abandoned` and some `lost`. A static gap that
-   `error + abandoned + lost` fully accounts for is a rollout. A gap those three
-   do not account for, or one that keeps growing, is a genuine stall.
+   Exact parity is not guaranteed and its absence is not by itself a fault: a
+   pod that shuts down mid-block exits with some writes `abandoned` (scheduled
+   after the drain began). A static gap that `error + abandoned + lost` fully
+   accounts for is a rollout. A gap those three do not account for, or one that
+   keeps growing, is a genuine stall. Any `lost` at all is its own finding —
+   see `VectorArchiveWriteLost`.
 4. **Pod logs** — `kubectl -n vector logs <pod> --tail=200 | grep -i archiv`.
    Look for `archiving raw SC calls` failures, S3 `AccessDenied`,
    `NoSuchBucket`, or `context deadline exceeded` (the 30s `archiveTimeout`).
@@ -2500,9 +2507,11 @@ keys on `success == 0` and so cannot see this case by construction; this rule is
 its partial-failure counterpart.
 
 The denominator is `archive_writes_total{status=~"success|error"}`, not the bare
-counter: `abandoned` and `lost` are writes S3 never answered, and both arrive in
-a burst on every rollout, so counting them would dilute the ratio precisely when
-a broken write path is most likely to show up.
+counter: `abandoned` is a write S3 never answered and arrives in a burst on every
+rollout, so counting it would dilute the ratio precisely when a broken write path
+is most likely to show up. `lost` is excluded for the same arithmetic reason,
+though since ARCT-401 it should not appear at all — one is its own alert
+(`VectorArchiveWriteLost`).
 
 It is an **error ratio**, not an absolute rate, on purpose: archive write
 cadence varies across sources by orders of magnitude (~1/10m on unichain
@@ -2535,8 +2544,9 @@ miss a low-rate source's total failure or false-fire on a high-rate one. The
 4. **Quantify the loss** — the gap between `multicall_batch_size_count` and
    `archive_writes_total{status="success"}` within the current pod is the number
    of batches that will need re-fetching from Alchemy on replay. Subtract
-   `abandoned + lost` to get the part this alert is responsible for; the rest is
-   the shutdown drain and is expected.
+   `abandoned` to get the part this alert is responsible for; that remainder is
+   the shutdown drain and is expected. Any `lost` in the same window is a second,
+   separate finding (`VectorArchiveWriteLost`), not shutdown slack.
 
 ### Common causes
 
@@ -2555,6 +2565,104 @@ sum by (service_name, chain) (rate(archive_writes_total{status="error"}[10m])) =
 and counter parity restored — `multicall_batch_size_count` minus
 `archive_writes_total{status="success"}` within the pod fully accounted for by
 `error + abandoned + lost`, per the parity guidance in the section intro.
+
+---
+
+## VectorArchiveWriteLost
+
+**Severity:** warning · **For:** 5m · **Window:** 30m
+
+### What it means
+
+A worker's shutdown drain gave up on a raw SC call archive write that was still
+in flight, and counted it `status="lost"`. That batch is unrecoverable: its SQS
+message was deleted before the write was scheduled, so nothing retries it and
+the only way back to that data is a re-fetch from Alchemy.
+
+Before ARCT-401 this was a routine rollout artefact — the drain was budgeted at
+5s while a single write's own `archiveTimeout` is 30s, so any PUT slower than 5s
+died on every deploy. It is now the opposite: `archivingwire.DrainTimeout` is
+35s, so a write the drain kills has already outlived the 30s deadline it runs
+under. Every healthy write either lands or records its own `error` inside the
+drain, which makes `lost` structurally absent and this alert actionable by
+construction. **One lost write means someone must look.**
+
+The rule is `max_over_time(...[30m])`, not `increase()`: the `lost` series is
+born inside the deferred drain and gets exactly one exported sample, at the
+final OTEL flush, before the process exits. `increase()` needs two points in the
+window and is blind to it — the same first-sample blindness documented under
+`VectorArchivingStalled` and `VectorSQSReleaseFailed`. It also means the alert
+resolves itself: 30m after the sample it falls out of the window.
+
+**Known gap (ARCT-390):** `morpho-vault-backfill` cannot fire this rule. It runs
+under `temporal.RunWorker`, whose deferred `boot.close()` shuts OTEL down before
+the caller's deferred archive drain runs, so its `lost` (and `abandoned`)
+increments are recorded after the exporter is gone and never leave the pod. For
+that binary the only evidence is the pod log line
+`raw SC call archive drain budget expired`.
+
+### First checks (≤5 min)
+
+1. **Find the pod and the count** — the alert is grouped by source, so start by
+   splitting it back out:
+
+   ```promql
+   max_over_time(archive_writes_total{status="lost", service_name="<svc>", chain="<chain>"}[30m])
+   ```
+
+   One pod with a small count is one bad shutdown; several pods, or a count in
+   the tens, is a write path that was wedged before the rollout began.
+2. **Read the drain warning** — it carries the budget and the count:
+
+   ```bash
+   kubectl -n vector logs <pod> --previous | grep "archive drain budget expired"
+   ```
+
+   The pod is gone by the time this fires, so `--previous` (or Loki over the
+   alert window) is the only way to it.
+3. **Was the write path already failing?** — a wedged client normally leaves a
+   trail before shutdown:
+
+   ```promql
+   sum by (service_name, chain) (increase(archive_writes_total{status="error"}[1h]))
+   ```
+
+   Errors alongside the lost write point at S3 (throttling, credentials); no
+   errors at all points at a PUT that hung without returning.
+4. **Check for S3 throttling across sources** — `SlowDown` / `503` in the logs
+   of *any* archiving source in the same window means the bucket, not the pod.
+   A concurrent backfill is the usual trigger.
+5. **Confirm the budget is what the code says it is** — `archivingwire.DrainTimeout`
+   (35s) must be ≥ `archiving.ArchiveTimeout` (30s) and the pod's
+   `terminationGracePeriodSeconds` (90s) must hold
+   `lifecycle.ShutdownTimeout` (40s) + `lifecycle.ShutdownTailBudget` (45s).
+   `TestTheArchiveDrainOutlastsOneWritesOwnTimeout` and the sibling budget tests
+   in `internal/pkg/lifecycle/shutdown_budget_test.go` assert the Go half; the
+   manifests are not covered by any test, so a grace period edited back to 60s
+   would reintroduce this silently.
+
+### Common causes
+
+- S3 throttling (`SlowDown`) or regional degradation holding a PUT past 30s.
+- A wedged HTTP client — a connection that neither completes nor errors, so the
+  write sits out both its own timeout and the drain.
+- Object sizes grown far past the norm (check `archive_object_size_bytes`), so a
+  single PUT genuinely needs more than 30s on a slow path.
+- Someone lowered `archivingwire.DrainTimeout` below `archiving.ArchiveTimeout`,
+  or a manifest's `terminationGracePeriodSeconds` back below 85s, so the kubelet
+  SIGKILLs mid-drain. Check the diff of the last deploy.
+
+### Verify recovery
+
+No new samples in a fresh 30m window after the next rollout:
+
+```promql
+max_over_time(archive_writes_total{status="lost", service_name="<svc>", chain="<chain>"}[30m])
+```
+
+should return no series at all. A zero-valued result is not the expected shape —
+the counter is only ever recorded with a positive value, so a healthy source has
+no `status="lost"` series in the first place.
 
 ---
 
