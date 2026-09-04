@@ -62,14 +62,19 @@ class FgaClient:
             match = [s for s in stores if isinstance(s, dict) and s.get("name") == self._store_name]
             if not match:
                 raise FgaError(f"OpenFGA store {self._store_name!r} not found")
-            self._store_id = match[0]["id"]
+            sid = match[0].get("id")
+            if not isinstance(sid, str) or not sid:
+                raise FgaError(f"OpenFGA store {self._store_name!r} has no usable id")
+            self._store_id = sid
         return self._store_id
 
     async def check(self, user: str, relation: str, obj: str) -> bool:
         sid = await self.store_id()
         body = {"tuple_key": {"user": user, "relation": relation, "object": obj}}
         data = await self._post(f"/stores/{sid}/check", body)
-        return bool(data.get("allowed"))
+        # `is True`, not bool(): a body that stringifies the field would make
+        # "false" truthy and turn a deny into an allow.
+        return data.get("allowed") is True
 
     async def list_objects(self, user: str, relation: str, obj_type: str) -> frozenset[str]:
         """Object ids (without the ``type:`` prefix) the user has ``relation`` on.
@@ -80,7 +85,9 @@ class FgaClient:
         """
         sid = await self.store_id()
         data = await self._post(f"/stores/{sid}/list-objects", {"user": user, "relation": relation, "type": obj_type})
-        objs = data.get("objects", [])
+        if "objects" not in data:
+            raise FgaError("OpenFGA ListObjects returned no objects field")
+        objs = data["objects"]
         if not isinstance(objs, list) or not all(isinstance(o, str) for o in objs):
             raise FgaError("OpenFGA ListObjects returned a malformed objects list")
         if len(objs) >= self._ceiling:

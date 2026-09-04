@@ -179,8 +179,13 @@ async def test_jwks_unreachable_with_no_cache_is_not_a_token_error(keypair):
 
 
 def _age_cache(verifier: TokenVerifier, seconds: float, monkeypatch) -> None:
-    """Backdate the cached key set so the next verify tries to refresh."""
+    """Backdate the cached key set so the next verify tries to refresh.
+
+    Both clocks move, because real time moves both: the success clock drives
+    the staleness ceiling, the attempt clock drives the refresh floor.
+    """
     monkeypatch.setattr(verifier, "_jwks_fetched_at", time.monotonic() - seconds)
+    monkeypatch.setattr(verifier, "_jwks_attempted_at", time.monotonic() - seconds)
 
 
 async def test_cached_keys_are_served_when_a_refresh_fails(keypair, monkeypatch):
@@ -300,3 +305,21 @@ async def test_algorithm_is_pinned_not_read_from_the_token(keypair):
     forged = _forge_hs256(public_pem, {"iss": ISS, "aud": AUD, "sub": "attacker", "iat": now, "exp": now + 300})
     with pytest.raises(TokenError):
         await _verifier(keypair).verify(forged)
+
+
+async def test_a_failing_refresh_is_attempted_once_per_floor_not_once_per_request(keypair, monkeypatch):
+    """The floor has to bound the OUTAGE, which is the only time it matters.
+
+    Keyed on the success clock alone it bounded nothing: every request past the
+    TTL fired its own fetch, each behind a 5s timeout, so a Keycloak blip
+    stalled the API and hammered Keycloak while it was coming back.
+    """
+    endpoint = _CountingJwks(_jwks(keypair), fail_after=1)
+    verifier = endpoint.verifier()
+    await verifier.verify(_token(keypair))
+    assert endpoint.calls == 1
+
+    _age_cache(verifier, _JWKS_TTL_SECONDS + 60, monkeypatch)
+    for _ in range(20):
+        assert (await verifier.verify(_token(keypair))).subject == "user-123"
+    assert endpoint.calls == 2  # one retry for the whole burst, not twenty

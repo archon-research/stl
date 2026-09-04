@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
+from typing import cast
 
 import httpx
 import jwt
@@ -68,6 +69,31 @@ class Principal:
         return f"service:{self.client_id}" if self.client_id else f"user:{self.subject}"
 
 
+def _string_set(container: object, key: str, label: str) -> frozenset[str]:
+    """Names from a claim that is a list of strings, or a dict keyed by them.
+
+    A bare string is refused rather than iterated: "acme" would otherwise
+    become four single-character orgs and feed authorization.
+    """
+    if container is None:
+        return frozenset()
+    if not isinstance(container, dict):
+        raise TokenError(f"{label} is not an object")
+    value: object = cast("dict[str, object]", container).get(key)
+    if value is None:
+        return frozenset()
+    if isinstance(value, dict):
+        value = list(value.keys())
+    if not isinstance(value, list):
+        raise TokenError(f"{label} is not a list of strings")
+    names: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise TokenError(f"{label} is not a list of strings")
+        names.append(item)
+    return frozenset(names)
+
+
 def _service_account_client(claims: dict) -> str | None:
     """The client id, but only for a token issued to the CLIENT itself.
 
@@ -78,6 +104,14 @@ def _service_account_client(claims: dict) -> str | None:
     """
     client_id = claims.get("client_id") or claims.get("clientId")
     if not isinstance(client_id, str) or not client_id:
+        return None
+    # preferred_username alone is user-controlled, so a user named
+    # service-account-<client> could claim that client's identity. A
+    # client-credentials token also carries no interactive session and its azp
+    # is the client itself; neither is settable by the end user.
+    if claims.get("sid") or claims.get("session_state"):
+        return None
+    if claims.get("azp") not in (None, client_id):
         return None
     return client_id if claims.get("preferred_username") == f"service-account-{client_id}" else None
 
@@ -106,6 +140,11 @@ class TokenVerifier:
         self._jwks_url = jwks_url or f"{self._issuer}/protocol/openid-connect/certs"
         self._jwks: PyJWKSet | None = None
         self._jwks_fetched_at = 0.0
+        # Separate from _jwks_fetched_at, which only advances on success so the
+        # staleness ceiling measures the outage. This one advances on every
+        # attempt, so a failing Keycloak costs one fetch per interval, not one
+        # per request.
+        self._jwks_attempted_at = 0.0
         # Serialises refreshes: without it, N requests on a cold cache each fire
         # their own fetch and race on the assignment.
         self._refresh_lock = asyncio.Lock()
@@ -113,27 +152,39 @@ class TokenVerifier:
     def _needs_fetch(self, *, force: bool) -> bool:
         if self._jwks is None:
             return True
-        age = time.monotonic() - self._jwks_fetched_at
+        since_attempt = time.monotonic() - self._jwks_attempted_at
+        if since_attempt < _JWKS_MIN_REFRESH_SECONDS:
+            return False
         if force:
-            return age >= _JWKS_MIN_REFRESH_SECONDS
-        return age > _JWKS_TTL_SECONDS
+            return True
+        return time.monotonic() - self._jwks_fetched_at > _JWKS_TTL_SECONDS
 
     async def _fetch_jwks(self) -> PyJWKSet:
         resp = await self._http.get(self._jwks_url, timeout=5.0)
         resp.raise_for_status()
-        return PyJWKSet.from_dict(resp.json())
+        body = resp.json()
+        if not isinstance(body, dict):
+            raise ValueError(f"expected a JSON object from the JWKS endpoint, got {type(body).__name__}")
+        return PyJWKSet.from_dict(body)
+
+    def _serve_cached(self, jwks: PyJWKSet) -> PyJWKSet:
+        age = time.monotonic() - self._jwks_fetched_at
+        if age > _JWKS_MAX_STALE_SECONDS:
+            raise JwksUnavailable(f"cached keys are {int(age)}s stale, past the {_JWKS_MAX_STALE_SECONDS}s ceiling")
+        return jwks
 
     async def _jwks_set(self, *, force: bool = False) -> PyJWKSet:
         if not self._needs_fetch(force=force) and self._jwks is not None:
-            return self._jwks
+            return self._serve_cached(self._jwks)
         async with self._refresh_lock:
             # Re-checked under the lock: whoever held it may already have done
             # the work, and a burst must cost Keycloak one fetch, not N.
             if not self._needs_fetch(force=force) and self._jwks is not None:
-                return self._jwks
+                return self._serve_cached(self._jwks)
+            self._jwks_attempted_at = time.monotonic()
             try:
                 jwks = await self._fetch_jwks()
-            except (httpx.HTTPError, jwt.PyJWTError, ValueError) as exc:
+            except (httpx.HTTPError, jwt.PyJWTError, ValueError, AttributeError, TypeError) as exc:
                 age = time.monotonic() - self._jwks_fetched_at
                 if self._jwks is not None and age <= _JWKS_MAX_STALE_SECONDS:
                     # The cached set stays valid for the old kids, and refusing
@@ -167,7 +218,7 @@ class TokenVerifier:
             self._jwks_fetched_at = time.monotonic()
             return jwks
 
-    async def _key_for(self, token: str) -> PyJWK:
+    async def _keys_for(self, token: str) -> list[PyJWK]:
         try:
             kid = jwt.get_unverified_header(token).get("kid")
         except jwt.PyJWTError as exc:
@@ -176,29 +227,36 @@ class TokenVerifier:
             raise TokenError("token has no kid")
         for attempt in (False, True):  # second pass refreshes the JWKS (rotation)
             jwks = await self._jwks_set(force=attempt)
-            for key in jwks.keys:
-                if key.key_id == kid and _is_signing_key(key):
-                    return key
+            candidates = [k for k in jwks.keys if k.key_id == kid and _is_signing_key(k)]
+            if candidates:
+                return candidates
         raise TokenError("unknown signing key")
 
     async def verify(self, token: str) -> Principal:
-        key = await self._key_for(token)
-        try:
-            claims = jwt.decode(
-                token,
-                key.key,
-                algorithms=_ALGORITHMS,
-                audience=self._audience,
-                issuer=self._issuer,
-                leeway=_CLOCK_SKEW_LEEWAY_SECONDS,
-                options={"require": ["exp", "iat", "sub"]},
-            )
-        except jwt.PyJWTError as exc:
-            raise TokenError(str(exc)) from exc
-        orgs = claims.get("organization") or {}
+        # Keycloak can publish more than one key under a kid across a rotation,
+        # so a failure on the first is not a failure on the token.
+        keys = await self._keys_for(token)
+        last: Exception | None = None
+        claims = None
+        for key in keys:
+            try:
+                claims = jwt.decode(
+                    token,
+                    key.key,
+                    algorithms=_ALGORITHMS,
+                    audience=self._audience,
+                    issuer=self._issuer,
+                    leeway=_CLOCK_SKEW_LEEWAY_SECONDS,
+                    options={"require": ["exp", "iat", "sub"]},
+                )
+                break
+            except jwt.PyJWTError as exc:
+                last = exc
+        if claims is None:
+            raise TokenError(str(last)) from last
         return Principal(
             subject=claims["sub"],
-            roles=frozenset(claims.get("realm_access", {}).get("roles", [])),
-            organizations=frozenset(orgs.keys() if isinstance(orgs, dict) else orgs),
+            roles=_string_set(claims.get("realm_access"), "roles", "realm_access.roles"),
+            organizations=_string_set(claims, "organization", "organization"),
             client_id=_service_account_client(claims),
         )
