@@ -145,6 +145,11 @@ func parseConfig(args []string) (cliConfig, error) {
 		}
 		cfg.sweepBlocks = v
 	}
+	// A non-positive cadence sweeps on every block: ~864k snapshots/day/position
+	// on a 100ms-block chain, so a configmap typo must not reach the service.
+	if cfg.sweepBlocks < 1 {
+		return cliConfig{}, fmt.Errorf("sweep blocks must be at least 1, got %d (-sweep-blocks flag or SWEEP_BLOCKS env var)", cfg.sweepBlocks)
+	}
 
 	chainIDStr := env.Get("CHAIN_ID", "1")
 	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)

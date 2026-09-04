@@ -22,6 +22,10 @@ type mockSource struct {
 	err        error
 	returnNil  bool // return (nil, nil) — a contract violation the registry must surface
 	called     int
+
+	// errCalls > 0 fails only the leading errCalls invocations with err, so a
+	// test can model a transient RPC failure that later recovers.
+	errCalls int
 }
 
 func (m *mockSource) Name() string { return m.name }
@@ -32,7 +36,7 @@ func (m *mockSource) Supports(tokenType, protocol string) bool {
 
 func (m *mockSource) FetchBalances(ctx context.Context, entries []*TokenEntry, blockHash common.Hash) (*FetchResult, error) {
 	m.called++
-	if m.err != nil {
+	if m.err != nil && (m.errCalls == 0 || m.called <= m.errCalls) {
 		return nil, m.err
 	}
 	if m.returnNil {

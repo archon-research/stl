@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -424,6 +425,155 @@ func TestProcessBlock_MissingBlockHash_ReturnsError(t *testing.T) {
 	}
 	if len(handler.batches) != 0 {
 		t.Errorf("HandleBatch called %d times, want 0 (block must not be persisted)", len(handler.batches))
+	}
+}
+
+// ── sweep cadence ──
+
+// newCadenceTracker builds a tracker over one entry that always resolves to a
+// balance, so every sweep reaches the handler and is countable. errCalls leading
+// source calls fail, modelling a transient RPC error mid-backlog.
+func newCadenceTracker(t *testing.T, sweepEveryN, errCalls int) (*Service, *testHandler) {
+	t.Helper()
+
+	entry := &TokenEntry{
+		ContractAddress: common.HexToAddress("0x1111"),
+		WalletAddress:   common.HexToAddress("0xaaaa"),
+		Star:            "spark",
+		Chain:           "mainnet",
+		TokenType:       "erc20",
+	}
+	result := NewFetchResult()
+	result.Balances[entry.Key()] = &PositionBalance{Balance: big.NewInt(1), UnderlyingValue: big.NewInt(1)}
+
+	source := &mockSource{
+		name:       "erc20",
+		tokenTypes: map[string]bool{"erc20": true},
+		result:     result,
+		errCalls:   errCalls,
+	}
+	if errCalls > 0 {
+		source.err = fmt.Errorf("temporary rpc error")
+	}
+
+	logger := quietLogger()
+	registry := NewSourceRegistry(logger)
+	registry.Register(source)
+
+	receipts := mustMarshalReceipts(t, []TransactionReceipt{})
+	cache := testutil.NewMockBlockCache()
+	cache.GetReceiptsFn = func(context.Context, int64, int64, int) (json.RawMessage, error) {
+		return receipts, nil
+	}
+
+	handler := &testHandler{}
+	svc, err := NewService(
+		Config{ChainID: 1, SweepEveryNBlocks: sweepEveryN, Logger: logger},
+		nil,
+		cache,
+		registry,
+		[]*TokenEntry{entry},
+		handler,
+		[]ProxyConfig{{Star: "spark", Chain: "mainnet", Address: common.HexToAddress("0xaaaa")}},
+	)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	return svc, handler
+}
+
+// driveBacklog feeds count consecutive blocks from first through the tracker the
+// way a drained SQS backlog does, returning the blocks whose processing failed.
+func driveBacklog(t *testing.T, svc *Service, first int64, count int) []int64 {
+	t.Helper()
+
+	var failed []int64
+	for i := range count {
+		event := outbound.BlockEvent{
+			ChainID:        1,
+			BlockNumber:    first + int64(i),
+			BlockTimestamp: 1700000000,
+			BlockHash:      testBlockHash.Hex(),
+		}
+		if err := svc.processBlock(context.Background(), event); err != nil {
+			failed = append(failed, event.BlockNumber)
+		}
+	}
+	return failed
+}
+
+// sweptBlocks returns, in order, the blocks a periodic sweep persisted.
+func sweptBlocks(handler *testHandler) []int64 {
+	var blocks []int64
+	for _, batch := range handler.batches {
+		for _, snapshot := range batch.Snapshots {
+			if snapshot.Direction == DirectionSweep {
+				blocks = append(blocks, snapshot.BlockNumber)
+			}
+		}
+	}
+	return blocks
+}
+
+// TestProcessBlock_SweepsOnEveryNthConsumedBlock: the cadence counts consumed
+// messages and starts at zero, so a backlog drained back-to-back sweeps on the
+// Nth block and no other — never on consecutive blocks, and never on the first.
+func TestProcessBlock_SweepsOnEveryNthConsumedBlock(t *testing.T) {
+	const first int64 = 50701400
+
+	tests := []struct {
+		name        string
+		sweepEveryN int
+		blocks      int
+		want        []int64
+	}{
+		{
+			name:        "mainnet default",
+			sweepEveryN: 75,
+			blocks:      225,
+			want:        []int64{first + 74, first + 149, first + 224},
+		},
+		{
+			name:        "robinhood cadence",
+			sweepEveryN: 6000,
+			blocks:      12000,
+			want:        []int64{first + 5999, first + 11999},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, handler := newCadenceTracker(t, tt.sweepEveryN, 0)
+
+			if failed := driveBacklog(t, svc, first, tt.blocks); failed != nil {
+				t.Fatalf("processBlock failed on blocks %v", failed)
+			}
+
+			if got := sweptBlocks(handler); !slices.Equal(got, tt.want) {
+				t.Errorf("swept blocks = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestProcessBlock_SweepFailureRetriesOnTheNextBlock: a failed sweep leaves the
+// counter past N (VEC-188), so the retry lands on the next block consumed —
+// the only path that ever sweeps consecutive blocks.
+func TestProcessBlock_SweepFailureRetriesOnTheNextBlock(t *testing.T) {
+	const first int64 = 50701400
+	const sweepEveryN = 75
+
+	svc, handler := newCadenceTracker(t, sweepEveryN, 2)
+
+	failed := driveBacklog(t, svc, first, 2*sweepEveryN+2)
+
+	wantFailed := []int64{first + 74, first + 75}
+	if !slices.Equal(failed, wantFailed) {
+		t.Fatalf("failed blocks = %v, want %v", failed, wantFailed)
+	}
+	want := []int64{first + 76, first + 151}
+	if got := sweptBlocks(handler); !slices.Equal(got, want) {
+		t.Errorf("swept blocks = %v, want %v (a success must restart the full cadence)", got, want)
 	}
 }
 

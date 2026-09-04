@@ -270,6 +270,24 @@ data:
   ARCHIVE_SC_CALLS: "true"
   RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
 ---
+# Robinhood's ~100ms blocks make the 75-block default a sweep every ~7.5s;
+# 6000 holds it to the ~10 minutes the ARCT-216 chains use (ARCT-400).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: robinhood-allocation-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://robinhood-mainnet.g.alchemy.com/v2"
+  DEPLOY_ENV: "prod"
+  CHAIN_ID: "4663"
+  ENVIRONMENT: "sentinelprod"
+  SWEEP_BLOCKS: "6000"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#383.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
