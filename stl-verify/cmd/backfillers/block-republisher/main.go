@@ -1,6 +1,7 @@
 // Package main is the block-republisher: an on-demand Temporal worker that
 // re-publishes a mined height under the next archive version so every consumer
-// appends the canonical block. Operation and the version rule are in
+// appends the canonical block. One deployment serves one chain, on that chain's
+// task queue. Operation and the version rule are in
 // docs/runbooks/vector-cronjobs.md, section "block-republisher".
 package main
 
@@ -51,22 +52,21 @@ func init() {
 	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
 }
 
-const (
-	// taskQueueName is the Temporal task queue an operator starts a run on, and
-	// also the OTel service name the vector-cronjobs alerts select by.
-	taskQueueName = "block-republisher"
-
-	// workflowTypeName is what an operator types into the Temporal UI's "Workflow
-	// Type" field, so it is registered explicitly rather than derived from the Go
-	// function name — a rename must not invalidate the runbook or muscle memory.
-	workflowTypeName = "BlockRepublish"
-)
+// workflowTypeName is what an operator types into the Temporal UI's "Workflow
+// Type" field, so it is registered explicitly rather than derived from the Go
+// function name — a rename must not invalidate the runbook or muscle memory.
+const workflowTypeName = "BlockRepublish"
 
 func run(ctx context.Context) error {
+	taskQueue, err := taskQueueName()
+	if err != nil {
+		return fmt.Errorf("resolving the task queue: %w", err)
+	}
+
 	return temporal.RunWorker(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporal.WorkerConfig{
-		Name:       taskQueueName,
+		Name:       taskQueue,
 		NoDatabase: true,
 		Register:   register,
 	})

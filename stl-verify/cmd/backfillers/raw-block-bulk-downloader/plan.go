@@ -40,9 +40,6 @@ func defaultListRetry() retry.Config {
 	}
 }
 
-// archivedTypes are the data types this tool archives, in upload order.
-var archivedTypes = []s3key.DataType{s3key.Block, s3key.Receipts, s3key.Traces}
-
 // archiveState is what the archive holds at one height: the highest object
 // version present, and the data types stored under it.
 type archiveState struct {
@@ -76,31 +73,31 @@ type blockDecision struct {
 	Plan          blockPlan
 }
 
-// planBlock decides what one height needs. A top version whose hash is not the
-// canonical one, or that no archived object carries a hash for, is corrected at
-// version+1.
-func planBlock(state archiveState, archivedHash, canonicalHash string) blockPlan {
+// planBlock decides what one height needs, against the data types the chain's
+// archive holds. A top version whose hash is not the canonical one, or that no
+// archived object carries a hash for, is corrected at version+1.
+func planBlock(types []s3key.DataType, state archiveState, archivedHash, canonicalHash string) blockPlan {
 	if state.Version == noArchive {
-		return blockPlan{Action: actionFresh, Version: 0, DataTypes: slices.Clone(archivedTypes)}
+		return blockPlan{Action: actionFresh, Version: 0, DataTypes: slices.Clone(types)}
 	}
 	if archivedHash == "" || !strings.EqualFold(archivedHash, canonicalHash) {
 		return blockPlan{
 			Action:    actionRepublish,
 			Version:   s3key.NextVersion(state.Version, true),
-			DataTypes: slices.Clone(archivedTypes),
+			DataTypes: slices.Clone(types),
 		}
 	}
 
-	missing := missingTypes(state.Present)
+	missing := missingTypes(types, state.Present)
 	if len(missing) == 0 {
 		return blockPlan{Action: actionSkip, Version: state.Version}
 	}
 	return blockPlan{Action: actionFill, Version: state.Version, DataTypes: missing}
 }
 
-func missingTypes(present map[s3key.DataType]bool) []s3key.DataType {
+func missingTypes(types []s3key.DataType, present map[s3key.DataType]bool) []s3key.DataType {
 	var missing []s3key.DataType
-	for _, dataType := range archivedTypes {
+	for _, dataType := range types {
 		if !present[dataType] {
 			missing = append(missing, dataType)
 		}
@@ -291,6 +288,7 @@ type blockPlanner struct {
 	cache  *PartitionCache
 	reader outbound.S3RangeReader
 	bucket string
+	types  []s3key.DataType
 	stats  *Stats
 }
 
@@ -328,18 +326,18 @@ func (p *blockPlanner) decide(ctx context.Context, blockNum int64, state archive
 		State:         state,
 		ArchivedHash:  archivedHash,
 		CanonicalHash: canonicalHash,
-		Plan:          planBlock(state, archivedHash, canonicalHash),
+		Plan:          planBlock(p.types, state, archivedHash, canonicalHash),
 	}, nil
 }
 
-// freshDecision is the decision for a height the archive holds nothing at: it
-// needs every data type at version 0 whatever the chain reports, so nothing is
-// read to reach it.
-func freshDecision(blockNum int64) blockDecision {
+// fresh is the decision for a height the archive holds nothing at: it needs
+// every data type at version 0 whatever the chain reports, so nothing is read to
+// reach it.
+func (p *blockPlanner) fresh(blockNum int64) blockDecision {
 	state := archiveState{Version: noArchive}
 	return blockDecision{
 		BlockNumber: blockNum,
 		State:       state,
-		Plan:        planBlock(state, "", ""),
+		Plan:        planBlock(p.types, state, "", ""),
 	}
 }

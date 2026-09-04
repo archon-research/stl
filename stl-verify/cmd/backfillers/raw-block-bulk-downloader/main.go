@@ -1,11 +1,16 @@
-// Package main provides a CLI tool for bulk downloading Ethereum block data.
-// It fetches blocks, receipts, and traces from a local Erigon node and writes to S3.
+// Package main provides a CLI tool for bulk downloading block data from any
+// chain the repo archives. It fetches blocks, receipts, and traces from a node
+// and writes to that chain's raw bucket.
 //
 // Architecture:
-//   - RPC workers fetch block+receipt data from Erigon
+//   - RPC workers fetch block+receipt data from the node
 //   - As blocks complete, they're immediately queued for trace fetching (pipelined)
 //   - S3 uploads happen asynchronously in a separate upload pool
 //   - This decouples RPC fetching from S3 I/O for maximum throughput
+//
+// --chain-id decides which data types the archive holds (only Ethereum's carries
+// traces) and is checked against the bucket's own chain, so an L2 run reports
+// neither missing traces nor another chain's heights.
 //
 // The archive's contract is highest-version-wins, so every height is weighed
 // against what is already there: a first archive lands at version 0, an archived
@@ -14,9 +19,14 @@
 // reaching past the node's finalized head, where a height that loses its fork
 // could never be corrected; --allow-unfinalized overrides that.
 //
+// With --dry-run it writes nothing and is the audit for ARCT-379 holes; --report
+// leaves every non-skip decision in a file, one JSON object per line, where a
+// "republish" row is a height whose only archived version is a losing fork.
+//
 // Usage:
 //
 //	./bulk-download \
+//	  --chain-id=1 \
 //	  --rpc-url=http://localhost:8545 \
 //	  --start-block=16000000 \
 //	  --end-block=21000000 \
@@ -26,7 +36,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"flag"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -56,24 +66,6 @@ const (
 	DefaultTimeout             = 120 * time.Second
 	DefaultMaxRetries          = 3
 )
-
-// Config holds the CLI configuration.
-type Config struct {
-	RPCURL     string
-	StartBlock int64
-	EndBlock   int64
-	Bucket     string
-	Region     string
-	DryRun     bool
-
-	AllowUnfinalized bool
-
-	BlockReceiptWorkers int
-	TraceWorkers        int
-	UploadWorkers       int
-	BlockBatchSize      int
-	TraceBatchSize      int
-}
 
 // Stats tracks download progress and timing metrics.
 type Stats struct {
@@ -170,42 +162,6 @@ func main() {
 	logger.Info("download complete")
 }
 
-func parseFlags() Config {
-	var cfg Config
-
-	flag.StringVar(&cfg.RPCURL, "rpc-url", "http://localhost:8545", "RPC endpoint URL")
-	flag.Int64Var(&cfg.StartBlock, "start-block", 0, "Starting block number (required)")
-	flag.Int64Var(&cfg.EndBlock, "end-block", 0, "Ending block number (required)")
-	flag.StringVar(&cfg.Bucket, "bucket", "", "S3 bucket name (required)")
-	flag.StringVar(&cfg.Region, "region", "", "AWS region (e.g., eu-west-1)")
-	flag.BoolVar(&cfg.DryRun, "dry-run", false, "Log every block's decision and upload nothing")
-	flag.BoolVar(&cfg.AllowUnfinalized, "allow-unfinalized", false, "Archive past the node's finalized head, accepting that a height that loses its fork stays wrong")
-	flag.IntVar(&cfg.BlockReceiptWorkers, "block-workers", DefaultBlockReceiptWorkers, "Block+receipt worker count")
-	flag.IntVar(&cfg.TraceWorkers, "trace-workers", DefaultTraceWorkers, "Trace worker count")
-	flag.IntVar(&cfg.UploadWorkers, "upload-workers", DefaultUploadWorkers, "S3 upload worker count")
-	flag.IntVar(&cfg.BlockBatchSize, "block-batch-size", DefaultBlockBatchSize, "Blocks per batch for block+receipt fetching")
-	flag.IntVar(&cfg.TraceBatchSize, "trace-batch-size", DefaultTraceBatchSize, "Blocks per batch for trace fetching")
-	flag.Parse()
-
-	return cfg
-}
-
-func validateConfig(cfg Config) error {
-	if cfg.StartBlock == 0 {
-		return fmt.Errorf("--start-block is required")
-	}
-	if cfg.EndBlock == 0 {
-		return fmt.Errorf("--end-block is required")
-	}
-	if cfg.EndBlock < cfg.StartBlock {
-		return fmt.Errorf("--end-block must be >= --start-block")
-	}
-	if cfg.Bucket == "" {
-		return fmt.Errorf("--bucket is required")
-	}
-	return nil
-}
-
 func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	logStartupInfo(cfg, logger)
 
@@ -226,9 +182,18 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 		return err
 	}
 
+	types, err := chainDataTypes(cfg.ChainID)
+	if err != nil {
+		return err
+	}
+	report, err := newDecisionReport(cfg.ReportPath)
+	if err != nil {
+		return err
+	}
+
 	partitionCache := NewPartitionCache(s3Reader, cfg.Bucket, logger)
 	stats := &Stats{startTime: time.Now()}
-	planner := &blockPlanner{cache: partitionCache, reader: s3Reader, bucket: cfg.Bucket, stats: stats}
+	planner := &blockPlanner{cache: partitionCache, reader: s3Reader, bucket: cfg.Bucket, types: types, stats: stats}
 
 	stopProgressReporter := startProgressReporter(ctx, stats, cfg.EndBlock-cfg.StartBlock+1, partitionCache, logger)
 	defer stopProgressReporter()
@@ -237,6 +202,7 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	archiver := blockArchiver{
 		client:   rpcClient,
 		planner:  planner,
+		report:   report,
 		cfg:      cfg,
 		uploadCh: pipeline.uploadCh,
 		traceCh:  pipeline.traceCollectorCh,
@@ -252,7 +218,7 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	pipeline.waitForCompletion()
 
 	logFinalStats(stats, partitionCache, logger)
-	return failureError(stats)
+	return errors.Join(failureError(stats), report.close())
 }
 
 // failureError reports the holes a run left behind: an operator reading only the
@@ -351,6 +317,7 @@ func checkArchiveReachable(ctx context.Context, reader *s3.Reader, bucket string
 
 func logStartupInfo(cfg Config, logger *slog.Logger) {
 	logger.Info("starting pipelined bulk download",
+		"chainID", cfg.ChainID,
 		"rpcURL", cfg.RPCURL,
 		"startBlock", cfg.StartBlock,
 		"endBlock", cfg.EndBlock,
@@ -362,6 +329,7 @@ func logStartupInfo(cfg Config, logger *slog.Logger) {
 		"traceBatchSize", cfg.TraceBatchSize,
 		"bucket", cfg.Bucket,
 		"dryRun", cfg.DryRun,
+		"report", cfg.ReportPath,
 		"allowUnfinalized", cfg.AllowUnfinalized,
 	)
 }
@@ -519,6 +487,7 @@ func (p *pipeline) waitForCompletion() {
 type blockArchiver struct {
 	client   *alchemy.Client
 	planner  *blockPlanner
+	report   *decisionReport
 	cfg      Config
 	uploadCh chan<- UploadJob
 	traceCh  chan<- traceRequest
@@ -589,7 +558,7 @@ func (a blockArchiver) planBatch(ctx context.Context, from, to int64) ([]planned
 		case err != nil:
 			planned[blockNum-from].Err = err
 		case state.Version == noArchive:
-			planned[blockNum-from].Decision = freshDecision(blockNum)
+			planned[blockNum-from].Decision = a.planner.fresh(blockNum)
 		default:
 			states[blockNum] = state
 			archived = append(archived, blockNum)
@@ -629,7 +598,7 @@ func (a blockArchiver) archiveHeight(ctx context.Context, height plannedHeight, 
 	if height.Err != nil {
 		return height.Err
 	}
-	return applyDecision(ctx, height.Decision, payload, a.cfg, a.uploadCh, a.traceCh, a.stats, a.logger)
+	return a.applyDecision(ctx, height.Decision, payload)
 }
 
 // fetchHeaders fetches the headers the archived heights are planned from.

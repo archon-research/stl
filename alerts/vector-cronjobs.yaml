@@ -27,11 +27,12 @@
 # template's `Cluster:` header is populated. `namespace` is a static rule label
 # (mimir-rules-sync lint forbids `cluster`/`env` as static labels but allows it).
 #
-# Seven services are EXCLUDED from VectorCronjobAllRunsFailing by service_name:
+# Seven jobs are EXCLUDED from VectorCronjobAllRunsFailing by service_name:
 # maple-graphql-indexer, which has richer dedicated rules in
-# vector-indexers.yaml (VEC-320); the five on-demand jobs —
+# vector-indexers.yaml (VEC-320); the five on-demand ones —
 # offchain-price-backfill, reference-capital-backfill, morpho-vault-backfill,
-# morpho-v2-bootstrap and block-republisher, none of which carries a schedule;
+# morpho-v2-bootstrap and block-republisher (one deployment per chain, below),
+# none of which carries a schedule;
 # and core-model-runner, which does carry a schedule but ticks only every 24h with
 # no retry (RetryPolicy.maximum_attempts=1) — see VectorCronjobAllRunsFailing
 # for why "no successes in an hour" is their healthy state. Every other
@@ -39,6 +40,12 @@
 # ones are covered by VectorCronjobRunFailing (and VectorOnDemandWorkerDown /
 # VectorCronjobWorkerDown for availability) instead; core-model-runner also
 # gets its own stall rule, VectorCoreModelRunnerStale.
+#
+# block-republisher is deployed once per chain with a raw archive, each on its
+# own task queue and therefore its own service_name and Deployment name:
+# `block-republisher` (ethereum) and `<chain>-block-republisher` for arbitrum,
+# avalanche, base, optimism and unichain. The rules below match the family with
+# one regex so a chain is never left uncovered by a forgotten copy.
 #
 # Severity → routing (per the alerting routing spec):
 #   critical       → pages, prod #at_stl_prod_alerts / staging
@@ -98,7 +105,8 @@ groups:
         #
         # On-demand jobs (temporal.RunWorker: offchain-price-backfill,
         # reference-capital-backfill, morpho-vault-backfill,
-        # morpho-v2-bootstrap, block-republisher) are excluded: they run only
+        # morpho-v2-bootstrap, and every chain's block-republisher) are
+        # excluded: they run only
         # when a human starts them, so "zero successes in the last hour" is their
         # healthy state and a single failed run is by definition
         # errors=1/successes=0, which would page critical for a run the operator
@@ -125,7 +133,7 @@ groups:
                 service_name!="reference-capital-backfill",
                 service_name!="morpho-v2-bootstrap",
                 service_name!="morpho-vault-backfill",
-                service_name!="block-republisher",
+                service_name!~"((arbitrum|avalanche|base|optimism|unichain)-)?block-republisher",
                 service_name!="core-model-runner",
                 k8s_namespace_name="vector"
               }[1h])
@@ -141,7 +149,7 @@ groups:
                 service_name!="reference-capital-backfill",
                 service_name!="morpho-v2-bootstrap",
                 service_name!="morpho-vault-backfill",
-                service_name!="block-republisher",
+                service_name!~"((arbitrum|avalanche|base|optimism|unichain)-)?block-republisher",
                 service_name!="core-model-runner",
                 k8s_namespace_name="vector"
               }[1h])
@@ -239,7 +247,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_status_replicas_available{
                 namespace="vector",
-                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill|block-republisher"
+                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill|((arbitrum|avalanche|base|optimism|unichain)-)?block-republisher"
               }
             ) < 1
           )
@@ -247,7 +255,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_spec_replicas{
                 namespace="vector",
-                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill|block-republisher"
+                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill|((arbitrum|avalanche|base|optimism|unichain)-)?block-republisher"
               }
             ) > 0
           )

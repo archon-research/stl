@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -47,7 +48,7 @@ func TestRunIntegration_RepublishesALosingForkAtTheNextVersion(t *testing.T) {
 
 	mustRunDownloader(t, ctx, bucket, downloaderRun{})
 
-	for _, dataType := range archivedTypes {
+	for _, dataType := range ethereumTypes() {
 		if got := storedBlockHash(t, ctx, client, bucket, 1, dataType); got != canonicalHash {
 			t.Errorf("%s at version 1 carries hash %q, want the canonical %q", dataType, got, canonicalHash)
 		}
@@ -97,7 +98,7 @@ func TestRunIntegration_CorrectsATwiceForkedHeightAtVersionTwo(t *testing.T) {
 	if versions := archivedVersions(t, ctx, client, bucket); !slices.Equal(versions, []int{0, 1, 2}) {
 		t.Errorf("archived versions = %v, want %v: a second correction goes above the losing top version", versions, []int{0, 1, 2})
 	}
-	for _, dataType := range archivedTypes {
+	for _, dataType := range ethereumTypes() {
 		if got := storedBlockHash(t, ctx, client, bucket, 2, dataType); got != canonicalHash {
 			t.Errorf("%s at version 2 carries hash %q, want the canonical %q", dataType, got, canonicalHash)
 		}
@@ -113,6 +114,28 @@ func TestRunIntegration_LeavesACanonicalArchiveUntouched(t *testing.T) {
 
 	if versions := archivedVersions(t, ctx, client, bucket); !slices.Equal(versions, []int{0}) {
 		t.Errorf("archived versions = %v, want only the canonical %v: a re-run must not duplicate it", versions, []int{0})
+	}
+}
+
+// The audit an operator runs on a chain: a dry run over the archive leaves the
+// holes it found in a file, and touches nothing.
+func TestRunIntegration_ADryRunReportsTheHoleItLeftInPlace(t *testing.T) {
+	ctx := context.Background()
+	client, bucket := archiveBucket(t, ctx)
+	seedArchivedVersion(t, ctx, client, bucket, 0, forkHash)
+	reportPath := filepath.Join(t.TempDir(), "holes.jsonl")
+
+	mustRunDownloader(t, ctx, bucket, downloaderRun{dryRun: true, reportPath: reportPath})
+
+	lines := reportLines(t, reportPath)
+	if len(lines) != 1 {
+		t.Fatalf("report lines = %+v, want the one forked height", lines)
+	}
+	if lines[0].Block != forkedBlock || lines[0].Action != actionRepublish || lines[0].Version != 1 {
+		t.Errorf("report line = %+v, want block %d republished at version 1", lines[0], forkedBlock)
+	}
+	if versions := archivedVersions(t, ctx, client, bucket); !slices.Equal(versions, []int{0}) {
+		t.Errorf("archived versions after the audit = %v, want only the seeded %v", versions, []int{0})
 	}
 }
 
@@ -203,6 +226,8 @@ type downloaderRun struct {
 	allowUnfinalized bool
 	// finalizedHead defaults to the height the tests archive.
 	finalizedHead int64
+	// reportPath is where the run writes its decisions; empty means no report.
+	reportPath string
 }
 
 func mustRunDownloader(t *testing.T, ctx context.Context, bucket string, opts downloaderRun) *fakeErigon {
@@ -226,12 +251,14 @@ func runDownloader(t *testing.T, ctx context.Context, bucket string, opts downlo
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 
 	cfg := Config{
+		ChainID:             ethereumChainID,
 		RPCURL:              node.url,
 		StartBlock:          forkedBlock,
 		EndBlock:            forkedBlock,
 		Bucket:              bucket,
 		Region:              sharedLocalStackCfg.Region,
 		DryRun:              opts.dryRun,
+		ReportPath:          opts.reportPath,
 		AllowUnfinalized:    opts.allowUnfinalized,
 		BlockReceiptWorkers: 1,
 		TraceWorkers:        1,

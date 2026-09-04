@@ -54,8 +54,15 @@ resources:
   # on its task queue until a run is started by hand from the Temporal UI.
   - ../../base/morpho-vault-backfill
   # On-demand block republisher (ARCT-383). No Temporal schedule: idles on its
-  # task queue until an operator starts a run with the heights to repair.
+  # task queue until an operator starts a run with the heights to repair. One
+  # per chain with a raw archive, each on its own task queue; Robinhood has no
+  # backup worker, so it has no archive to repair against and no worker here.
   - ../../base/block-republisher
+  - ../../base/arbitrum-block-republisher
+  - ../../base/avalanche-block-republisher
+  - ../../base/base-block-republisher
+  - ../../base/optimism-block-republisher
+  - ../../base/unichain-block-republisher
   # CEX L2 order book indexer fleet — one pod per exchange, same binary,
   # different EXCHANGE/SYMBOLS config (mirrors the staging fleet, VEC-374/VEC-380).
   - ../../base/cex-orderbook-indexer-coinbase

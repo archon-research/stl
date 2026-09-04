@@ -2197,8 +2197,11 @@ deploy-bulk-download: build-bulk-download-arm64
 
 # Run bulk-download on Erigon node (dry-run by default: logs the archive decision
 # per block — fresh / skip / fill / republish, and the version — and uploads nothing)
-# Usage: make erigon-bulk-download ERIGON_USER=<user> ERIGON_IP=<ip> BUCKET=<bucket> START=16000000 END=16001000 [DRY_RUN=false]
+# Usage: make erigon-bulk-download ERIGON_USER=<user> ERIGON_IP=<ip> BUCKET=<bucket> START=16000000 END=16001000 [DRY_RUN=false] [CHAIN_ID=1] [REPORT=~/holes.jsonl]
+# CHAIN_ID defaults to Ethereum, the chain this node serves; REPORT lands on the node.
 DRY_RUN ?= true
+# Scoped, because erigon-sparklend-backfill reads CHAIN_ID from the command line.
+erigon-bulk-download: CHAIN_ID ?= 1
 erigon-bulk-download:
 	$(call require_erigon_vars)
 	@if [ -z "$(BUCKET)" ]; then \
@@ -2208,9 +2211,11 @@ erigon-bulk-download:
 	fi
 	@echo "==> Running bulk-download on Erigon node..."
 	tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) '~/bulk-download \
+		--chain-id=$(CHAIN_ID) \
 		--start-block=$(START) \
 		--end-block=$(END) \
 		--bucket=$(BUCKET) \
+		$(if $(REPORT),--report=$(REPORT),) \
 		$(if $(filter true,$(DRY_RUN)),--dry-run,)'
 
 # Build sparklend-backfill binary for ARM64 Linux (to run on Erigon node)

@@ -187,8 +187,9 @@ Repair:
   next gap pass saves N as version 1 and publishes it, so the indexers append
   the correction. The orphaned version-0 rows stay put as history.
 - **A hole outside the retained window has no safe executable repair yet.**
-  `raw-block-bulk-downloader --bucket <raw bucket> --rpc-url <chain rpc>
-  --start-block <N> --end-block <N>` looks like the repair and is not one.
+  `raw-block-bulk-downloader --chain-id <id> --bucket <raw bucket> --rpc-url
+  <chain rpc> --start-block <N> --end-block <N>` looks like the repair and is
+  not one.
   Every key it builds and every existence check it makes is pinned to a literal
   version `1`, and it never reads what the archive already holds. The losing
   fork sits at version **0**, not 1 — `assign_block_version()` is
@@ -850,12 +851,27 @@ own retry only reaches non-orphaned `block_states` rows, which the 30-day
 retention drops, and `raw-block-bulk-downloader` repairs S3 without telling the
 indexers.
 
+**One run repairs one chain.** Every chain with a raw archive runs its own
+worker, on its own task queue, against its own topic, Redis and bucket — the
+`blocks` you pass are that chain's heights, and there is no way to mix chains in
+one run. Robinhood has a watcher but no backup worker, so it has no raw archive
+to derive a version from and no republisher is deployed for it.
+
+| Chain | Task queue = `service_name` | Deployment | `S3_BUCKET` (infra-config property) |
+|---|---|---|---|
+| Ethereum | `block-republisher` | `block-republisher` | `ethereum_s3_bucket` |
+| Arbitrum | `arbitrum-block-republisher` | `arbitrum-block-republisher` | `arbitrum_s3_bucket` |
+| Avalanche | `avalanche-block-republisher` | `avalanche-block-republisher` | `avalanche_s3_bucket` |
+| Base | `base-block-republisher` | `base-block-republisher` | `base_s3_bucket` |
+| Optimism | `optimism-block-republisher` | `optimism-block-republisher` | `optimism_s3_bucket` |
+| Unichain | `unichain-block-republisher` | `unichain-block-republisher` | `unichain_s3_bucket` |
+
 **How to start a run.** Temporal UI (namespace **`vector`**) → **Start
 Workflow**:
 
 | Field | Value |
 |---|---|
-| Task Queue | `block-republisher` |
+| Task Queue | that chain's queue from the table above |
 | Workflow Type | `BlockRepublish` |
 | Workflow ID | descriptive and unique, e.g. `block-republisher-2026-09-01` |
 | Input | `{"blocks":[25395651,25087888]}` |
@@ -875,6 +891,8 @@ temporal workflow start --namespace vector \
   --input '{"blocks":[25395651,25087888]}'
 ```
 
+(`--task-queue` is the chain's; the example is Ethereum's.)
+
 **A height that needs no repair is refused, not republished.** While deriving the
 version the worker reads the block hash out of the first 8 KB of the top archived
 version's `_block` object (falling back to its `_receipts`) and compares it with
@@ -888,15 +906,42 @@ archive holds nothing for has no object to compare against at all: it is repaire
 at version 1 on your word alone, and logs a warning saying so — list such a height
 only once the dry run below or the indexers have proved the fork.
 
-That makes the bulk downloader's dry run (#849) a cheap pre-check rather than a
-safety net — useful for sizing a run before you start it:
+**Finding holes on a chain.** `raw-block-bulk-downloader --dry-run` is the audit
+for every chain: it reads each height's top archived hash, compares it with the
+one the chain reports, and writes nothing at all. `--report` leaves the answer in
+a file instead of the log, so a dry run over a million heights ends as a list you
+can act on:
 
 ```bash
-raw-block-bulk-downloader --dry-run --bucket $RAW_BUCKET --rpc-url <chain rpc> \
-  --start-block 25395651 --end-block 25395651
+bulk-download --dry-run --chain-id 42161 \
+  --rpc-url <that chain's RPC> --bucket $RAW_BUCKET \
+  --start-block 380000000 --end-block 380999999 \
+  --report ~/arbitrum-holes.jsonl
 ```
 
-It reports each height as archived ≠ canonical or not, from the same read.
+`--chain-id` decides which data types that chain's archive is expected to hold —
+only Ethereum's carries traces — and is checked against the bucket's own chain
+segment, so a mismatched pair is refused at startup rather than reported as a
+range full of holes. The report carries one JSON object per height that needs
+something (a height that needs nothing is left out):
+
+- `"action":"republish"` — **the hole this worker repairs**: the archive's top
+  version at that height is not the canonical block. Feed those `block` numbers
+  to that chain's task queue.
+- `"action":"fresh"` — the archive holds nothing at that height: a gap, not a
+  fork. The republisher would repair it at version 1 on your word alone, so fix
+  the gap first (the backup worker's DLQ), or let a real downloader run archive
+  it.
+- `"action":"fill"` — the canonical version is there but a data type is not
+  (`missing` names it). A real downloader run writes the missing object; there is
+  nothing to republish.
+
+The counts are in the run's final `download complete` line too (`planFresh`,
+`planSkip`, `planFill`, `planRepublish`), so a range with no `republish` needs no
+report read at all.
+
+Pointed at a single height it is also the cheap pre-check before a run, from the
+same read the worker itself does.
 
 **The version comes from the archive, per height.** `block_version` is the reorg
 counter, so a height that genuinely reorged once already has a real version 1,
@@ -975,7 +1020,10 @@ the highest version anywhere it matters.
 `sns:Publish` on the chain's blocks topic, `s3:ListBucket` on the chain's raw
 bucket (which versions are taken) and `s3:GetObject` on it (the first kilobytes of
 the top version's block object, to tell an already-canonical height from a losing
-fork). Nothing is ever written to S3. `sns:Publish` and `s3:ListBucket` come from
+fork). Nothing is ever written to S3. Each chain has its own ServiceAccount
+(`<chain>-block-republisher`) and therefore its own association: a chain whose
+association is missing is a pod that never becomes Ready — a crash loop on the
+startup probes, and `VectorOnDemandWorkerDown` 30 minutes later. `sns:Publish` and `s3:ListBucket` come from
 archon-research/infrastructure#667 (merged); `s3:GetObject` from
 archon-research/infrastructure#669, merged and applied on staging and prod on
 2026-09-03. The worker proves both S3 grants at startup — one `ListObjectsV2`
@@ -1092,7 +1140,8 @@ per height. The example uses a height that landed at 1.
   already succeeded — the archive holds that version by then, so it lands one
   slot further along. Naming the same height twice in one run is refused outright.
 - **Nothing arrives downstream** — check the worker actually published
-  (`kubectl -n vector logs deploy/block-republisher | grep 'republished block'`)
+  (`kubectl -n vector logs deploy/<chain>-block-republisher | grep 'republished
+  block'`, unprefixed on Ethereum)
   before suspecting the consumers; SNS FIFO silently drops a repeat of the same
   `{chainId}:{blockHash}:{version}` inside its five-minute deduplication window.
 

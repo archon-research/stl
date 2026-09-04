@@ -618,9 +618,17 @@ func receiveOneSQSMessage(t *testing.T, ctx context.Context, sqsc *awssqs.Client
 // Both names are spelled out rather than compared to their constants, which
 // would rename together and pin nothing. The alert regex in
 // alerts/vector-cronjobs.yaml and the runbook carry the same two strings.
+// Every chain's queue name is pinned in config_test.go.
 func TestDeployedNames_MatchTheAlertsAndTheRunbook(t *testing.T) {
-	if taskQueueName != "block-republisher" {
-		t.Errorf("taskQueueName = %q, want %q", taskQueueName, "block-republisher")
+	t.Setenv("CHAIN_ID", "1")
+
+	queue, err := taskQueueName()
+	if err != nil {
+		t.Fatalf("taskQueueName() error = %v", err)
+	}
+
+	if queue != "block-republisher" {
+		t.Errorf("taskQueueName() = %q, want %q", queue, "block-republisher")
 	}
 	if workflowTypeName != "BlockRepublish" {
 		t.Errorf("workflowTypeName = %q, want %q", workflowTypeName, "BlockRepublish")
@@ -634,6 +642,7 @@ func TestDeployedNames_MatchTheAlertsAndTheRunbook(t *testing.T) {
 // is a shutdown, not a failure: surfacing the cancelled context would exit 1 and
 // make an ordinary rollout read like a crash.
 func TestRun_StopsCleanlyWhenTheContextIsCancelled(t *testing.T) {
+	t.Setenv("CHAIN_ID", "1")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 

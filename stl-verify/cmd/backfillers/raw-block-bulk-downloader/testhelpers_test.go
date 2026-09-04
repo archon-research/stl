@@ -190,15 +190,29 @@ func newTestPartitionCache(reader outbound.S3Reader) *PartitionCache {
 	return cache
 }
 
+// ethereumTypes is the data type set of the chain most of these tests plan
+// against; chainDataTypes is what a run derives it from.
+func ethereumTypes() []s3key.DataType {
+	return []s3key.DataType{s3key.Block, s3key.Receipts, s3key.Traces}
+}
+
 // newTestPlanner wires a planner over a fake partition listing and fake object
 // bodies, with no S3 and no RPC behind it.
-func newTestPlanner(keys []string, objects map[string][]byte) (*blockPlanner, *Stats) {
+func newTestPlanner(t *testing.T, chainID int64, keys []string, objects map[string][]byte) (*blockPlanner, *Stats) {
+	t.Helper()
+
+	types, err := chainDataTypes(chainID)
+	if err != nil {
+		t.Fatalf("chainDataTypes(%d): %v", chainID, err)
+	}
+
 	stats := &Stats{}
 	cache := newTestPartitionCache(&fakeListReader{keys: keys})
 	return &blockPlanner{
 		cache:  cache,
 		reader: newFakeRangeReader(objects),
 		bucket: "bucket",
+		types:  types,
 		stats:  stats,
 	}, stats
 }

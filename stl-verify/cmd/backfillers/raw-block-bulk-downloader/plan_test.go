@@ -24,7 +24,7 @@ func stateAt(version int, present ...s3key.DataType) archiveState {
 }
 
 func TestPlanBlock(t *testing.T) {
-	all := []s3key.DataType{s3key.Block, s3key.Receipts, s3key.Traces}
+	all := ethereumTypes()
 
 	tests := []struct {
 		name          string
@@ -93,7 +93,7 @@ func TestPlanBlock(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := planBlock(tt.state, tt.archivedHash, tt.canonicalHash)
+			got := planBlock(ethereumTypes(), tt.state, tt.archivedHash, tt.canonicalHash)
 
 			if got.Action != tt.want.Action || got.Version != tt.want.Version {
 				t.Errorf("planBlock() action/version = %s/%d, want %s/%d", got.Action, got.Version, tt.want.Action, tt.want.Version)
@@ -126,7 +126,7 @@ func TestPlanBlock_AStrayObjectAboveTheCanonicalPairMovesTheCorrectionUp(t *test
 	}
 
 	// archiveblock.Hash finds no block or receipts object at version 3.
-	got := planBlock(state, "", canonicalHash)
+	got := planBlock(ethereumTypes(), state, "", canonicalHash)
 
 	if got.Action != actionRepublish || got.Version != 4 {
 		t.Errorf("planBlock() = %s at version %d, want %s at 4", got.Action, got.Version, actionRepublish)
@@ -278,7 +278,7 @@ func TestPartitionCache_AThrottledListingIsRetriedRatherThanFailingEveryWorkerOn
 
 func TestBlockPlanner_DecideRepublishesALosingFork(t *testing.T) {
 	const blockNum = int64(25395651)
-	planner, _ := newTestPlanner([]string{
+	planner, _ := newTestPlanner(t, ethereumChainID, []string{
 		s3key.Build(blockNum, 0, s3key.Block),
 		s3key.Build(blockNum, 0, s3key.Receipts),
 		s3key.Build(blockNum, 0, s3key.Traces),
@@ -299,7 +299,7 @@ func TestBlockPlanner_DecideRepublishesALosingFork(t *testing.T) {
 }
 
 func TestBlockPlanner_DecideFailsWhenTheRPCPayloadCarriesNoHash(t *testing.T) {
-	planner, _ := newTestPlanner(nil, nil)
+	planner, _ := newTestPlanner(t, ethereumChainID, nil, nil)
 
 	_, err := planner.decide(context.Background(), 25395651, stateAt(0, s3key.Block), []byte(`{"number":"0x1830003"}`))
 	if err == nil {
@@ -354,3 +354,16 @@ func (e statusError) ErrorCode() string             { return e.code }
 func (e statusError) ErrorMessage() string          { return e.code }
 func (e statusError) ErrorFault() smithy.ErrorFault { return smithy.FaultUnknown }
 func (e statusError) HTTPStatusCode() int           { return e.status }
+
+// An L2's archive holds no traces, so a height whose block and receipts are
+// canonical needs nothing. Planned against Ethereum's data types it would be
+// filled forever with traces the chain cannot answer for.
+func TestPlanBlock_AChainWithoutTracesIsCompleteWithoutThem(t *testing.T) {
+	l2 := []s3key.DataType{s3key.Block, s3key.Receipts}
+
+	got := planBlock(l2, stateAt(0, s3key.Block, s3key.Receipts), canonicalHash, canonicalHash)
+
+	if got.Action != actionSkip {
+		t.Errorf("planBlock() = %s writing %v, want skip: this chain archives no traces", got.Action, got.DataTypes)
+	}
+}
