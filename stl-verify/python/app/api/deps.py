@@ -29,7 +29,7 @@ logger = get_logger(__name__)
 AUTHZ_EVENT = "authz.decision"
 
 
-def _emit_decision(
+def log_auth_event(
     request: Request,
     *,
     gate: str,
@@ -83,19 +83,19 @@ async def get_principal(request: Request) -> Principal | None:
     if verifier is None:
         # Enabled but the lifespan never built a verifier: fail CLOSED rather
         # than treating everyone as anonymous.
-        _emit_decision(request, gate="authn", decision="deny", reason="verifier_unwired", status=503)
+        log_auth_event(request, gate="authn", decision="deny", reason="verifier_unwired", status=503)
         raise HTTPException(status_code=503, detail="auth enabled but verifier not initialised")
     header = request.headers.get("authorization", "")
     scheme, _, token = header.partition(" ")
     if scheme.lower() != "bearer" or not token:
-        _emit_decision(request, gate="authn", decision="deny", reason="missing_bearer", status=401)
+        log_auth_event(request, gate="authn", decision="deny", reason="missing_bearer", status=401)
         raise HTTPException(status_code=401, detail="bearer token required", headers={"WWW-Authenticate": "Bearer"})
     try:
         return await verifier.verify(token)
     except TokenError as exc:
         # PyJWT's own message ("Signature has expired", "Audience doesn't
         # match"). Diagnostic, and never any part of the token itself.
-        _emit_decision(
+        log_auth_event(
             request, gate="authn", decision="deny", reason="invalid_token", status=401, fields={"error": str(exc)}
         )
         raise HTTPException(
@@ -104,7 +104,7 @@ async def get_principal(request: Request) -> Principal | None:
     except JwksUnavailable as exc:
         # 503, not 401: telling every caller to go re-authenticate would only
         # add load to a Keycloak that is already struggling.
-        _emit_decision(
+        log_auth_event(
             request, gate="authn", decision="deny", reason="jwks_unavailable", status=503, fields={"error": str(exc)}
         )
         raise HTTPException(status_code=503, detail="token verification unavailable") from exc
@@ -122,7 +122,7 @@ def require_role(role: str) -> Callable:
         if principal is None:  # auth off
             return
         if role not in principal.roles:
-            _emit_decision(
+            log_auth_event(
                 request,
                 gate="role",
                 decision="deny",
@@ -148,7 +148,7 @@ def _fga_or_503(request: Request, *, gate: str, principal: Principal | None) -> 
     """
     fga = getattr(request.app.state, "fga", None)
     if fga is None:
-        _emit_decision(request, gate=gate, decision="deny", reason="authz_unwired", status=503, principal=principal)
+        log_auth_event(request, gate=gate, decision="deny", reason="authz_unwired", status=503, principal=principal)
         raise HTTPException(status_code=503, detail="auth enabled but authorization client not initialised")
     return fga
 
@@ -182,7 +182,7 @@ async def _check_prime_view(request: Request, principal: Principal | None, prime
     except ValueError as exc:
         # Resolves BEFORE the route's own validator, so without this parse the
         # API's documented 422 for a malformed id would be a 500.
-        _emit_decision(
+        log_auth_event(
             request, gate="prime", decision="deny", reason="malformed_prime_id", status=422, principal=principal
         )
         raise HTTPException(status_code=422, detail="malformed prime id") from exc
@@ -193,7 +193,7 @@ async def _check_prime_view(request: Request, principal: Principal | None, prime
     except ValueError as exc:
         # The repository reports a failed query as ValueError. A database blip
         # behind the gate is our failure, not a bad request: 503, like OpenFGA.
-        _emit_decision(
+        log_auth_event(
             request,
             gate="prime",
             decision="deny",
@@ -204,7 +204,7 @@ async def _check_prime_view(request: Request, principal: Principal | None, prime
         )
         raise HTTPException(status_code=503, detail="prime lookup unavailable") from exc
     if vault is None:
-        _emit_decision(
+        log_auth_event(
             request, gate="prime", decision="deny", reason="prime_not_found", status=404, principal=principal
         )
         raise HTTPException(status_code=404, detail="prime not found")
@@ -212,7 +212,7 @@ async def _check_prime_view(request: Request, principal: Principal | None, prime
     try:
         allowed = await fga.check(principal.fga_user, "can_view", resource)
     except FgaError as exc:
-        _emit_decision(
+        log_auth_event(
             request,
             gate="prime",
             decision="deny",
@@ -223,7 +223,7 @@ async def _check_prime_view(request: Request, principal: Principal | None, prime
         )
         raise HTTPException(status_code=503, detail="authorization service unavailable") from exc
     if not allowed:
-        _emit_decision(
+        log_auth_event(
             request,
             gate="prime",
             decision="deny",
@@ -233,7 +233,7 @@ async def _check_prime_view(request: Request, principal: Principal | None, prime
             resource=resource,
         )
         raise HTTPException(status_code=403, detail="not permitted for this prime")
-    _emit_decision(request, gate="prime", decision="allow", reason="permitted", principal=principal, resource=resource)
+    log_auth_event(request, gate="prime", decision="allow", reason="permitted", principal=principal, resource=resource)
 
 
 async def require_prime_view(request: Request, principal: Principal | None = Depends(get_principal)) -> None:
@@ -296,7 +296,7 @@ async def allowed_prime_vaults(
     try:
         vaults = await fga.list_objects(principal.fga_user, "can_view", "prime")
     except FgaTruncated as exc:
-        _emit_decision(
+        log_auth_event(
             request,
             gate="prime_list",
             decision="deny",
@@ -307,7 +307,7 @@ async def allowed_prime_vaults(
         )
         raise HTTPException(status_code=500, detail="authorization result truncated") from exc
     except FgaError as exc:
-        _emit_decision(
+        log_auth_event(
             request,
             gate="prime_list",
             decision="deny",
@@ -326,7 +326,7 @@ async def allowed_prime_vaults(
         fields["malformed_count"] = len(vaults) - len(allowed)
     # The COUNT, never the list: an allow-list runs to the ListObjects ceiling
     # and would put thousands of addresses in one log line.
-    _emit_decision(
+    log_auth_event(
         request,
         gate="prime_list",
         decision="allow",

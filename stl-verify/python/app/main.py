@@ -39,6 +39,7 @@ from app.api.v1 import (
 )
 from app.auth.fga import FgaClient
 from app.auth.jwt import TokenVerifier
+from app.auth.settings import check_auth_settings
 from app.config import Settings, get_settings
 from app.logging import get_logger, setup_logging
 from app.middleware.request_id import RequestIdMiddleware
@@ -175,24 +176,9 @@ def configure_docs(application: FastAPI, settings: Settings) -> None:
         )
 
 
-# Blank fails each of these somewhere else — an empty audience 401s every token,
-# an empty issuer reports "malformed token" — so the AUTH_ENABLED flip would be
-# an outage debugged from the wrong error. OPENFGA_API_KEY is excluded: keyless
-# OpenFGA is valid, and a wrong key is already a plain 503.
-_REQUIRED_AUTH_SETTINGS = ("oidc_issuer", "oidc_audience", "openfga_url", "openfga_store_name")
-
-
-def _check_auth_settings(settings: Settings) -> None:
-    if not settings.auth_enabled:
-        return
-    missing = [name for name in _REQUIRED_AUTH_SETTINGS if not str(getattr(settings, name, "")).strip()]
-    if missing:
-        raise RuntimeError(f"auth_enabled is true but these settings are blank: {', '.join(missing)}")
-
-
 def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
     setup_logging(log_level=settings.log_level, log_format=settings.log_format)
-    _check_auth_settings(settings)
+    check_auth_settings(settings)
 
     # Validate risk-engine config before acquiring any resources so a bad
     # configuration fails startup without leaking a telemetry provider or
