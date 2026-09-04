@@ -5,9 +5,13 @@ The allow-list is the only part of the enforcement change that lives in SQL, so
 ``ANY(ARRAY[]::BYTEA[])`` matching nothing, and a NULL cast short-circuiting the
 predicate, are both database behaviour that a mock cannot get wrong.
 
+The AGGREGATED feed is here too: a bucket is a SUM over many primes, so a
+missing predicate there is not a row the caller can spot but a number that
+quietly includes primes they may not view.
+
 ``get_prime_vault_address`` is here for the same reason — it is what the
 per-resource gate resolves an OpenFGA object id with, so a wrong answer is a
-403 on a prime the caller owns or a check against the wrong prime entirely.
+denial on a prime the caller owns or a check against the wrong prime entirely.
 
 Seeded from the migration's own declared primes plus ``seed_prime_fan_out``, so
 the filter runs against the real vault and proxy addresses rather than ones
@@ -16,6 +20,7 @@ invented here.
 
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -159,3 +164,45 @@ async def test_every_address_of_a_prime_resolves_to_its_vault(
     """The gate keys the OpenFGA object id on this, so a caller presenting any
     of a prime's addresses must reach the same ``prime:<vault>`` resource."""
     assert await repository.get_prime_vault_address(presented) == expected
+
+
+# --- list_activity_buckets --------------------------------------------------
+
+
+async def _bucket_events(repository: AllocationRepository, allowed) -> int:
+    now = datetime.now(UTC)
+    buckets = await repository.list_activity_buckets(
+        allowed_vaults=allowed,
+        from_timestamp=now - timedelta(days=1),
+        to_timestamp=now + timedelta(hours=1),
+        bucket_seconds=86400.0,
+        limit=1000,
+    )
+    return sum(bucket.event_count for bucket in buckets)
+
+
+async def _raw_events(repository: AllocationRepository, allowed) -> int:
+    return len(await repository.list_allocation_activity(allowed_vaults=allowed, limit=1000))
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_buckets_without_an_allow_list_span_every_prime(repository: AllocationRepository) -> None:
+    unfiltered = await _bucket_events(repository, None)
+
+    assert unfiltered > 0
+    assert unfiltered == await _raw_events(repository, None)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_buckets_count_only_the_permitted_primes_events(repository: AllocationRepository) -> None:
+    """The aggregate and the feed have to agree: a bucket that counts rows the
+    raw path filters out is the same disclosure, summed."""
+    permitted = await _bucket_events(repository, [SPARK_VAULT])
+
+    assert permitted == await _raw_events(repository, [SPARK_VAULT])
+    assert permitted < await _bucket_events(repository, None)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_buckets_with_an_empty_allow_list_return_no_rows(repository: AllocationRepository) -> None:
+    assert await _bucket_events(repository, []) == 0

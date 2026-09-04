@@ -755,10 +755,12 @@ class AllocationRepository:
         to_timestamp: datetime,
         bucket_seconds: float,
         limit: int = 100,
+        allowed_vaults: Sequence[EthAddress] | None = None,
     ) -> list[AllocationActivityBucket]:
         """Return allocation activity counts and tx-amount sums per time bucket."""
         params = {
             "proxy_addrs": (None if proxy_addresses is None else [a.to_bytes() for a in proxy_addresses]),
+            "allowed_vaults": (None if allowed_vaults is None else [v.to_bytes() for v in allowed_vaults]),
             "chain_id": chain_id,
             "protocol_name": _escape_like_pattern(protocol_name) if protocol_name else None,
             "action_type": action_type,
@@ -1916,6 +1918,9 @@ LEFT JOIN nearest_share_ratio nearest_ratio
     AND nearest_ratio.chain_id = ap.chain_id
     AND nearest_ratio.block_number = ap.block_number
 WHERE (CAST(:proxy_addrs AS BYTEA[]) IS NULL OR ap.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[])))
+    -- authorization filter, same contract as _ALLOCATION_ACTIVITY_SQL: an
+    -- aggregate spans primes, so the allow-list has to bound the rows it sums.
+    AND (CAST(:allowed_vaults AS BYTEA[]) IS NULL OR p.vault_address = ANY(CAST(:allowed_vaults AS BYTEA[])))
     AND ap.direction IS NOT NULL
     AND ap.tx_amount IS NOT NULL
     AND ap.created_at IS NOT NULL

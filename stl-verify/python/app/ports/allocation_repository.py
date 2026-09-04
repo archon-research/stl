@@ -137,10 +137,12 @@ class AllocationRepositoryPort(Protocol):
         to_timestamp: datetime,
         bucket_seconds: float,
         limit: int = 100,
+        allowed_vaults: Sequence[EthAddress] | None = None,
     ) -> list[AllocationActivityBucket]:
         """Return allocation activity aggregated into time buckets.
 
-        ``proxy_addresses`` follows ``list_allocation_activity``'s contract.
+        ``proxy_addresses`` and ``allowed_vaults`` follow
+        ``list_allocation_activity``'s contract.
         """
         ...
 

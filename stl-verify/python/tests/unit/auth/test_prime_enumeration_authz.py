@@ -71,7 +71,7 @@ def allocation_service() -> AsyncMock:
     service = AsyncMock(spec=AllocationService)
     service.list_primes.return_value = [_prime("spark", VAULT)]
     service.list_allocation_activity.return_value = []
-    service.get_prime_vault_address.return_value = VAULT
+    service.list_activity_buckets.return_value = []
     return service
 
 
@@ -133,3 +133,50 @@ def test_provenance_reports_only_primes_the_caller_may_view(client: TestClient, 
 def test_activity_pushes_the_allow_list_into_the_query(client: TestClient, allocation_service: AsyncMock) -> None:
     assert client.get("/v1/allocations/activity").status_code == 200
     assert allocation_service.list_allocation_activity.await_args.kwargs["allowed_vaults"] == [EthAddress(VAULT)]
+
+
+# --- the aggregated activity path -------------------------------------------
+#
+# Buckets sum across primes. The route used to refuse an unscoped aggregate and
+# that was the whole control; the allow-list now travels into the bucket query
+# as well, so the invariant lives with the rows it is about.
+
+OTHER = "0x" + "c" * 40
+
+
+@pytest.mark.parametrize("client", [frozenset({VAULT})], indirect=True)
+def test_aggregated_activity_pushes_the_allow_list_into_the_query(
+    client: TestClient, allocation_service: AsyncMock
+) -> None:
+    assert client.get(f"/v1/allocations/activity?aggregate=true&prime_id={VAULT}").status_code == 200
+    assert allocation_service.list_activity_buckets.await_args.kwargs["allowed_vaults"] == [EthAddress(VAULT)]
+
+
+@pytest.mark.parametrize("client", [frozenset({VAULT})], indirect=True)
+def test_an_unscoped_aggregate_is_refused_while_authorization_is_on(client: TestClient) -> None:
+    """One number over every prime the caller may view is not a view anyone
+    asked for; name the prime the bucket is about."""
+    response = client.get("/v1/allocations/activity?aggregate=true")
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "prime_id is required for aggregated activity"
+
+
+@pytest.mark.parametrize("client", [None], indirect=True)
+def test_an_unscoped_aggregate_is_unchanged_while_auth_is_dark(
+    client: TestClient, allocation_service: AsyncMock
+) -> None:
+    assert client.get("/v1/allocations/activity?aggregate=true").status_code == 200
+    assert allocation_service.list_activity_buckets.await_args.kwargs["allowed_vaults"] is None
+
+
+@pytest.mark.parametrize("client", [frozenset({VAULT})], indirect=True)
+@pytest.mark.parametrize("aggregate", ["", "&aggregate=true"], ids=["raw", "aggregated"])
+def test_a_prime_the_caller_may_not_view_is_an_empty_list_not_a_denial(client: TestClient, aggregate: str) -> None:
+    """prime_id is a FILTER here, not a path resource. A 403 on a prime that
+    exists and a 404 on one that does not would between them enumerate the
+    primes the list filtering is there to hide; both are no rows instead."""
+    response = client.get(f"/v1/allocations/activity?prime_id={OTHER}{aggregate}")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == []

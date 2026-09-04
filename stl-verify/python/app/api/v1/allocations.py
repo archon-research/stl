@@ -965,26 +965,21 @@ async def list_allocation_activity(
 ) -> AllocationActivityEnvelope:
     """Errors:
 
-    - 422 if ``prime_id`` is malformed (or ``limit`` is out of range).
+    - 422 if ``prime_id`` is malformed (or ``limit`` is out of range), or if
+      ``aggregate=true`` without a ``prime_id`` while authorization is on.
     - 200 with an empty ``data`` list if filters match no rows — including when
-      ``prime_id`` is well-formed but unknown. ``prime_id`` is treated as
-      a filter here, not a path resource.
+      ``prime_id`` is well-formed but unknown, and when the caller may not view
+      it. ``prime_id`` is treated as a filter here, not a path resource, so
+      neither answer discloses which primes exist.
     """
     parsed_prime_id = EthAddress(prime_id) if prime_id is not None else None
-    # Per-resource authz (ADR-015). `allowed` is None when auth is off.
-    if allowed is not None:
-        if parsed_prime_id is not None:
-            # An explicitly requested prime is gated up front (404/403); the
-            # raw path below ALSO joins authorization into the query itself.
-            vault = await service.get_prime_vault_address(parsed_prime_id)
-            if vault is None:
-                raise HTTPException(status_code=404, detail="prime not found")
-            if vault.lower() not in allowed:
-                raise HTTPException(status_code=403, detail="not permitted for this prime")
-        elif time_series.aggregate:
-            # Buckets aggregate across primes and cannot be filtered per row
-            # after the fact; scope the aggregation to a prime you may view.
-            raise HTTPException(status_code=422, detail="prime_id is required for aggregated activity")
+    # Per-resource authz (ADR-015) is the allow-list in the SQL WHERE, on both
+    # the raw and the aggregated path: an unknown or unpermitted prime_id
+    # matches no rows. `allowed` is None when auth is off.
+    if allowed is not None and parsed_prime_id is None and time_series.aggregate:
+        # A bucket is one number over many primes; scope it to a named prime
+        # rather than serving the caller's whole permitted set as a total.
+        raise HTTPException(status_code=422, detail="prime_id is required for aggregated activity")
     # Selective = an index-seekable exact filter. Substring filters
     # (protocol_name/token_symbol) and low-cardinality filters (chain_id,
     # action_type) do not qualify because they cannot prune chunks.
@@ -1000,6 +995,7 @@ async def list_allocation_activity(
     try:
         if time_series.aggregate:
             buckets = await service.list_activity_buckets(
+                allowed_vaults=vault_filter(allowed),
                 prime_id=parsed_prime_id,
                 chain_id=chain_id,
                 protocol_name=protocol_name,

@@ -67,10 +67,6 @@ class AllocationService:
             return None
         return await self._repository.list_prime_proxy_addresses(prime_id)
 
-    async def get_prime_vault_address(self, address: EthAddress) -> str | None:
-        """Vault address for a vault-or-proxy address — one indexed point query."""
-        return await self._repository.get_prime_vault_address(address)
-
     async def list_allocation_activity(
         self,
         *,
@@ -114,9 +110,13 @@ class AllocationService:
         to_timestamp: datetime,
         bucket_seconds: float,
         limit: int = 100,
+        allowed_vaults: Sequence[EthAddress] | None = None,
     ) -> list[AllocationActivityBucket]:
+        # Same contract as the raw feed: the allow-list lands in the SQL WHERE,
+        # so an aggregate can only ever sum rows the caller may view.
         return await self._repository.list_activity_buckets(
             proxy_addresses=await self._prime_proxies(prime_id),
+            allowed_vaults=allowed_vaults,
             chain_id=chain_id,
             protocol_name=protocol_name,
             action_type=action_type,
