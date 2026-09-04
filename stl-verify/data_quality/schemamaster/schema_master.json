@@ -344,6 +344,10 @@
       "type": "numeric",
       "class": "D"
     },
+    "deal_type_code": {
+      "type": "text",
+      "class": "S"
+    },
     "decimals": {
       "type": "int2",
       "class": "S"
