@@ -101,6 +101,18 @@ ON CONFLICT (position_id) DO UPDATE SET
 -- third one converges. Still forward-only: coordinates are never lowered, only equalled. IS DISTINCT
 -- FROM, not <>, because chain_id and protocol_id are nullable -- <> yields NULL and skips the repair.
 -- A converged re-run still updates nothing, so the no-deadlock and no-op properties are unchanged.
+--
+-- One consequence names the WRONG repair channel, so it is stated here: this arm makes a
+-- CACHE-ONLY correction self-reverting. A plain UPDATE that changes a payload column without
+-- moving the coordinates leaves the row at coordinates EQUAL to history with a drifted payload --
+-- exactly what this arm converges -- so the next rebuild reinstates the value from the spine.
+-- Measured: quantity 100 in history, an operator UPDATE to 999, one rebuild, back to 100. The
+-- plain UPDATE this file documents repairs ONLY the ahead-of-history class, where the coordinates
+-- themselves are wrong; a wrong VALUE at correct coordinates is corrected by appending a spine row
+-- at a higher processing_version, never by writing this table. (The trigger reverts it too, but
+-- only if a later spine row lands at exactly the coordinates the operator wrote: the spine's PK is
+-- (position_id, block_number, block_version, processing_version, block_timestamp), so the same
+-- coordinates cannot simply be re-appended -- measured, SQLSTATE 23505.)
 WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_version, EXCLUDED.block_timestamp)
     > (position_current.block_number, position_current.block_version, position_current.processing_version, position_current.block_timestamp)
    OR ((EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_version, EXCLUDED.block_timestamp)

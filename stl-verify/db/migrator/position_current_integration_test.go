@@ -479,6 +479,56 @@ func TestPositionCurrentUTCDerivationIgnoresSessionTimeZone(t *testing.T) {
 	}
 }
 
+// A cache-only correction is self-reverting, which is why the plain UPDATE this table's record
+// documents repairs the ahead-of-history class ONLY. An UPDATE that changes a payload column without
+// moving the coordinates leaves the row at coordinates EQUAL to history, which the converge arm exists
+// to overwrite, so the next rebuild reinstates the spine's value. A wrong value at correct coordinates
+// is corrected by appending a higher-processing_version spine row instead.
+func TestPositionCurrentCacheOnlyCorrectionSelfReverts(t *testing.T) {
+	f := newPositionCurrentFixture(t)
+	f.observe("selfrevert", 100, 100, 0, 0, "2026-01-01T00:00:00Z")
+	if qty, _, _ := f.current("selfrevert"); qty != 100 {
+		t.Fatalf("cache = %d before the operator write; want 100 from history", qty)
+	}
+
+	// The operator "fix": payload only, coordinates untouched.
+	if _, err := f.pool.Exec(f.ctx,
+		`UPDATE position_current SET quantity = 999 WHERE position_id = sha256($1::bytea)`,
+		"selfrevert"); err != nil {
+		t.Fatal(err)
+	}
+	if qty, _, _ := f.current("selfrevert"); qty != 999 {
+		t.Fatalf("the operator UPDATE did not take (%d); the assertion below would prove nothing", qty)
+	}
+
+	f.rebuild()
+	if qty, _, _ := f.current("selfrevert"); qty != 100 {
+		t.Errorf("cache = %d after the rebuild; want 100. A cache-only correction must self-revert, "+
+			"otherwise the converge arm is not overwriting an equal-coordinate payload drift and the "+
+			"record's \"append a higher processing_version instead\" guidance is wrong", qty)
+	}
+}
+
+// The same coordinates cannot simply be re-appended to the spine, so the trigger reverts a cache-only
+// correction only when a LATER observation happens to land at exactly the coordinates the operator wrote.
+func TestPositionStateRejectsASameCoordinateReAppend(t *testing.T) {
+	f := newPositionCurrentFixture(t)
+	f.observe("dupcoord", 100, 100, 0, 0, "2026-01-01T00:00:00Z")
+	_, err := f.pool.Exec(f.ctx, `
+		INSERT INTO position_state
+		    (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
+		     block_number, block_version, processing_version, block_timestamp, projection, build_id)
+		VALUES (sha256($1::bytea), 1, 1, 'inst-' || $1, substr(md5($1) || md5($1), 1, 40), 555,
+		        100, 0, 0, '2026-01-01T00:00:00Z'::timestamptz, 'public.p', 0)`, "dupcoord")
+	if err == nil {
+		t.Fatal("the spine accepted a second row at identical coordinates; the PK no longer covers " +
+			"(position_id, block_number, block_version, processing_version, block_timestamp)")
+	}
+	if !strings.Contains(err.Error(), "23505") && !strings.Contains(err.Error(), "duplicate key") {
+		t.Errorf("re-append failed with %v; want a unique-violation from the spine PK", err)
+	}
+}
+
 func TestPositionCurrentRebuildDoesNotRegressARowAheadOfHistory(t *testing.T) {
 	// The state the backfill's own newer-wins WHERE exists for: a cached row NEWER than anything history
 	// holds. It must survive the rebuild: the merge is forward-only, and lowering a cached row on the
