@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 )
 
@@ -118,5 +119,18 @@ func TestChainDataTypes(t *testing.T) {
 				t.Errorf("chainDataTypes(%d) = %v, want %v", tc.chainID, got, tc.want)
 			}
 		})
+	}
+}
+
+// No chain declares blob sidecars today, and this binary has no fetch path for
+// them: createRPCClient never enables blobs and payloadFor answers nil for the
+// type, so every height of the first chain to declare them would fail. Refusing
+// the shape at startup is the difference between a run that will not start and
+// an archive full of holes.
+func TestArchivableTypes_RefusesAChainExpectingBlobSidecars(t *testing.T) {
+	_, err := archivableTypes(ethereumChainID, chainutil.BlockDataExpectation{ExpectReceipts: true, ExpectBlobs: true})
+
+	if err == nil || !strings.Contains(err.Error(), "blob") {
+		t.Fatalf("error = %v, want one naming the blob sidecars this tool cannot fetch", err)
 	}
 }

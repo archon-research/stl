@@ -84,12 +84,22 @@ func chainDataTypes(chainID int64) ([]s3key.DataType, error) {
 				"or this run would archive a different data set than its watcher publishes", chainID)
 	}
 
+	return archivableTypes(chainID, expectation)
+}
+
+// archivableTypes refuses a shape this binary cannot fetch: nothing here asks a
+// node for blob sidecars — createRPCClient never enables them and payloadFor
+// answers nil — so a chain declaring them would fail every height instead.
+func archivableTypes(chainID int64, expectation chainutil.BlockDataExpectation) ([]s3key.DataType, error) {
+	if expectation.ExpectBlobs {
+		return nil, fmt.Errorf(
+			"chain %d declares %s, which this tool has no fetch path for: give createRPCClient and payloadFor one "+
+				"before archiving that chain", chainID, s3key.Blobs)
+	}
+
 	types := []s3key.DataType{s3key.Block, s3key.Receipts}
 	if expectation.ExpectTraces {
 		types = append(types, s3key.Traces)
-	}
-	if expectation.ExpectBlobs {
-		types = append(types, s3key.Blobs)
 	}
 	return types, nil
 }
