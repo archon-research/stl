@@ -245,6 +245,62 @@ func TestPositionDailyIsAHypertableOnAsOfDateWithSevenDayChunks(t *testing.T) {
 	}
 }
 
+// position_daily deliberately carries NO compression policy, against this directory's rule that a
+// time-series table gets a hypertable, a compression policy and tiering in its creating migration. The
+// deviation is the point of this test: adding a policy in good faith, because the rule says to, makes
+// the first whole-day reprocess fail in production, and nothing else here would catch it.
+//
+// Asserted on the compression JOB and on compression_enabled, not on
+// timescaledb_information.hypertable_compression_settings -- that view lists position_daily whether or
+// not compression is on, so it cannot tell the two apart.
+func TestPositionDailyHasNoCompressionPolicy(t *testing.T) {
+	f := newPositionDailyFixture(t)
+
+	const reason = "position_daily's maintainer upserts in place with ON CONFLICT DO UPDATE, and a " +
+		"reprocess rewriting a whole day for every position exceeds max_tuples_decompressed_per_dml_" +
+		"transaction (measured 100,050 against the 100,000 limit, where the same rows via DO NOTHING " +
+		"are free). Compression and this write path are incompatible, not merely costly. VEC-566 " +
+		"carries the sanctioned exception or the write-path change; until one lands, a policy here " +
+		"breaks the first bulk reprocess in production"
+
+	var jobs int
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT count(*) FROM timescaledb_information.jobs
+		 WHERE hypertable_name = 'position_daily' AND proc_name = 'policy_compression'`).Scan(&jobs); err != nil {
+		t.Fatal(err)
+	}
+	if jobs != 0 {
+		t.Errorf("position_daily has %d compression policy job(s); want none. %s", jobs, reason)
+	}
+
+	var enabled bool
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT compression_enabled FROM timescaledb_information.hypertables
+		 WHERE hypertable_name = 'position_daily'`).Scan(&enabled); err != nil {
+		t.Fatal(err)
+	}
+	if enabled {
+		t.Errorf("position_daily has compression enabled; want it off. %s", reason)
+	}
+
+	// Positive control: position_state does carry both, so neither query above is one that returns
+	// nothing whatever the state of the database.
+	var stateJobs int
+	var stateEnabled bool
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT (SELECT count(*) FROM timescaledb_information.jobs
+		         WHERE hypertable_name = 'position_state' AND proc_name = 'policy_compression'),
+		       (SELECT compression_enabled FROM timescaledb_information.hypertables
+		         WHERE hypertable_name = 'position_state')`).Scan(&stateJobs, &stateEnabled); err != nil {
+		t.Fatal(err)
+	}
+	if stateJobs == 0 || !stateEnabled {
+		t.Errorf("the control failed: position_state reports %d compression jobs and enabled=%v, so "+
+			"these queries cannot detect a policy and the assertions above prove nothing",
+			stateJobs, stateEnabled)
+	}
+}
+
 func TestPositionDailyRowsRouteToChunksByAsOfDate(t *testing.T) {
 	f := newPositionDailyFixture(t)
 	f.observe("routing", 60, 1100, 0, 0, "2026-08-01T00:00:00Z")
