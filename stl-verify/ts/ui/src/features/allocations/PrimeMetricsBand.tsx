@@ -382,7 +382,7 @@ function PrimeDebtCard({
 }) {
   return (
     <MetricCard
-      label="Prime debt exposure"
+      label={TOP_METRIC_CARD_LABELS['prime-debt']}
       info="What the prime has drawn against its allocator vault: the minted debt for its ilk, in USDS terms. The indexed figure is read from chain state; the reference figure is the legacy feed's own reported debt."
       infoHref="https://sky-atlas.io/#1c09308d-b7cd-495c-b547-baf628a6e323"
       infoLinkText="Sky Atlas A.3.7.1.2 →"
