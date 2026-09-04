@@ -118,10 +118,17 @@ CREATE INDEX IF NOT EXISTS idx_uniswap_v4_position_nft_transfer_token_block
     ON uniswap_v4_position_nft_transfer
        (position_manager_id, token_id, block_number DESC, block_version DESC, log_index DESC);
 
--- Prefix 'u4pnt' for uniswap_v4_position_nft_transfer. force_custom_plan per
--- VEC-541 (see assign_processing_version_uniswap_v4_pool_state).
-CREATE OR REPLACE FUNCTION assign_processing_version_uniswap_v4_position_nft_transfer()
-RETURNS TRIGGER
+-- Prefix 'u4pnt' for uniswap_v4_position_nft_transfer. Same VEC-615 shape as
+-- uniswap_v4_pool_state's (see the note there): the INSERT calls the version
+-- function, the trigger delegates to it, force_custom_plan per VEC-541.
+CREATE OR REPLACE FUNCTION next_processing_version_uniswap_v4_position_nft_transfer(
+    p_position_manager_id BIGINT,
+    p_block_number        BIGINT,
+    p_block_version       INT,
+    p_log_index           INT,
+    p_build_id            INT)
+RETURNS INT
+VOLATILE
 SET plan_cache_mode = 'force_custom_plan'
 AS $$
 DECLARE
@@ -129,29 +136,42 @@ DECLARE
     max_ver      INT;
 BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(
-        format('u4pnt|%s|%s|%s|%s', NEW.position_manager_id, NEW.block_number,
-               NEW.block_version, NEW.log_index), 0));
+        format('u4pnt|%s|%s|%s|%s', p_position_manager_id, p_block_number,
+               p_block_version, p_log_index), 0));
 
     SELECT processing_version INTO existing_ver
     FROM uniswap_v4_position_nft_transfer
-    WHERE position_manager_id = NEW.position_manager_id
-      AND block_number        = NEW.block_number
-      AND block_version       = NEW.block_version
-      AND log_index           = NEW.log_index
-      AND build_id            = NEW.build_id
+    WHERE position_manager_id = p_position_manager_id
+      AND block_number        = p_block_number
+      AND block_version       = p_block_version
+      AND log_index           = p_log_index
+      AND build_id            = p_build_id
     LIMIT 1;
 
     IF FOUND THEN
-        NEW.processing_version := existing_ver;
-    ELSE
-        SELECT COALESCE(MAX(processing_version), -1) INTO max_ver
-        FROM uniswap_v4_position_nft_transfer
-        WHERE position_manager_id = NEW.position_manager_id
-          AND block_number        = NEW.block_number
-          AND block_version       = NEW.block_version
-          AND log_index           = NEW.log_index;
-        NEW.processing_version := max_ver + 1;
+        RETURN existing_ver;
     END IF;
+
+    SELECT COALESCE(MAX(processing_version), -1) INTO max_ver
+    FROM uniswap_v4_position_nft_transfer
+    WHERE position_manager_id = p_position_manager_id
+      AND block_number        = p_block_number
+      AND block_version       = p_block_version
+      AND log_index           = p_log_index;
+    RETURN max_ver + 1;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION next_processing_version_uniswap_v4_position_nft_transfer(BIGINT, BIGINT, INT, INT, INT) IS
+  'Returns the processing_version a uniswap_v4_position_nft_transfer row at (position_manager, block, block_version, log_index) must carry for build_id: the version that build already wrote there, else MAX+1. Takes the key''s advisory lock (ADR-0002 §3) for the transaction. Call it in the INSERT''s VALUES list: on a columnstored chunk ON CONFLICT is resolved before row triggers fire, so a version left to the trigger is DEFAULT 0 there and the correction row is silently discarded (VEC-615).';
+
+CREATE OR REPLACE FUNCTION assign_processing_version_uniswap_v4_position_nft_transfer()
+RETURNS TRIGGER
+SET plan_cache_mode = 'force_custom_plan'
+AS $$
+BEGIN
+    NEW.processing_version := next_processing_version_uniswap_v4_position_nft_transfer(
+        NEW.position_manager_id, NEW.block_number, NEW.block_version, NEW.log_index, NEW.build_id);
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;

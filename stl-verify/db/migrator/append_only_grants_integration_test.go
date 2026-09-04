@@ -42,6 +42,9 @@ var convertedAppendOnlyTables = []string{
 	"uniswap_v4_liquidity_event",
 	"uniswap_v4_tick",
 	"uniswap_v4_pool_event",
+	// ARCT-385 (#854): the posm registry row and the ERC-721 Transfer stream.
+	"uniswap_v4_position_manager",
+	"uniswap_v4_position_nft_transfer",
 }
 
 // TestConvertedTablesAreAppendOnly asserts the DB-level half of the append-only rule:

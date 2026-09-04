@@ -331,7 +331,7 @@ func TestUniswapV4ProcessingVersionTriggersForceCustomPlan(t *testing.T) {
 func TestUniswapV4CompressedFactTablesHaveAVersionFunction(t *testing.T) {
 	ctx := context.Background()
 
-	for _, table := range uniswapV4BatchedFactTables {
+	for _, table := range uniswapV4Hypertables {
 		t.Run(table, func(t *testing.T) {
 			fn := "next_processing_version_" + table
 			var volatility string

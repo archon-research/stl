@@ -2829,6 +2829,62 @@ func TestUniswapV4Repository_SaveBlock_RoundTripsNFTTransfers(t *testing.T) {
 
 // The table has no state to re-read, so the whole correction is the appended
 // (N, v1) row set.
+// Same VEC-615 shape as the four fact tables (SaveBlock_NewBuildAppendsIntoACompressedChunk):
+// once the chunk is columnstored, a trigger-assigned version is discarded by the arbiter.
+func TestUniswapV4Repository_SaveBlock_NewBuildAppendsNFTTransferIntoACompressedChunk(t *testing.T) {
+	ctx := context.Background()
+	seedUniswapV4RepoTestPool(t, ctx, 0x57)
+	managerID := currentUniswapV4RepoPositionManagerID(t, ctx, uniswapV4RepoSaveChainID)
+
+	const blockNumber = int64(25001000)
+	transfer := &entity.UniswapV4PositionNFTTransfer{
+		PositionManagerID: managerID,
+		TokenID:           big.NewInt(4242),
+		BlockNumber:       blockNumber,
+		BlockTimestamp:    uniswapV4TestBlockTime(blockNumber),
+		TxHash:            uniswapV4MintFixtureTx,
+		LogIndex:          9,
+		From:              common.Address{},
+		To:                uniswapV4MintFixtureTo,
+	}
+	if err := transfer.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	writes := outbound.UniswapV4BlockWrites{NFTTransfers: []*entity.UniswapV4PositionNFTTransfer{transfer}}
+
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		if _, err := NewUniswapV4Repository(uniswapV4TestPool, testUniswapV4BuildID).SaveBlock(ctx, tx, writes); err != nil {
+			t.Fatalf("SaveBlock at build %d: %v", testUniswapV4BuildID, err)
+		}
+	})
+	compressUniswapV4ChunkHolding(t, ctx, "uniswap_v4_position_nft_transfer", transfer.BlockTimestamp)
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		if _, err := NewUniswapV4Repository(uniswapV4TestPool, testUniswapV4RebuildID).SaveBlock(ctx, tx, writes); err != nil {
+			t.Fatalf("SaveBlock at build %d into a compressed chunk: %v", testUniswapV4RebuildID, err)
+		}
+	})
+
+	rows, err := uniswapV4TestPool.Query(ctx, `
+		SELECT processing_version, build_id FROM uniswap_v4_position_nft_transfer
+		WHERE position_manager_id = $1 AND block_number = $2 ORDER BY processing_version`, managerID, blockNumber)
+	if err != nil {
+		t.Fatalf("read back versions: %v", err)
+	}
+	defer rows.Close()
+	var got [][2]int
+	for rows.Next() {
+		var pv, build int
+		if err := rows.Scan(&pv, &build); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		got = append(got, [2]int{pv, build})
+	}
+	want := [][2]int{{0, int(testUniswapV4BuildID)}, {1, int(testUniswapV4RebuildID)}}
+	if !slices.Equal(got, want) {
+		t.Errorf("(processing_version, build_id) = %v, want %v (the rebuild's correction row was dropped by the compressed chunk's arbiter)", got, want)
+	}
+}
+
 func TestUniswapV4Repository_SaveBlock_ReorgAppendsASecondNFTTransferRowSet(t *testing.T) {
 	ctx := context.Background()
 	seedUniswapV4RepoTestPool(t, ctx, 0x56)

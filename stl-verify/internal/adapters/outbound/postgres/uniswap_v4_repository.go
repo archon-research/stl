@@ -561,8 +561,9 @@ func queueV4NFTTransfers(batch *pgx.Batch, transfers []v4NFTTransferConverted, b
 		batch.Queue(
 			`INSERT INTO uniswap_v4_position_nft_transfer
 			   (position_manager_id, token_id, block_number, block_version, block_timestamp,
-			    tx_hash, log_index, from_address, to_address, build_id)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+			    tx_hash, log_index, from_address, to_address, processing_version, build_id)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,
+			         next_processing_version_uniswap_v4_position_nft_transfer($1,$3,$4,$7,$10), $10)
 			 ON CONFLICT (position_manager_id, block_timestamp, block_number, block_version, log_index, processing_version) DO NOTHING`,
 			t.PositionManagerID, c.tokenID, t.BlockNumber, t.BlockVersion, t.BlockTimestamp,
 			t.TxHash.Bytes(), t.LogIndex, t.From.Bytes(), t.To.Bytes(), int(buildID),
