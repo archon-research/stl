@@ -40,7 +40,7 @@ type fakeUniswapRepo struct {
 	ticksForPoolCalls []fakePoolBlockKey
 	ticksForPoolErr   error
 
-	poolsWithState      map[int64][]int64
+	poolsWithState      map[int64][]common.Hash
 	poolsWithStateCalls []fakeStateBlockKey
 	poolsWithStateErr   error
 
@@ -74,7 +74,7 @@ func (r *fakeUniswapRepo) TicksForPoolAtBlock(_ context.Context, chainID int64, 
 	return r.priorTicks[key], nil
 }
 
-func (r *fakeUniswapRepo) PoolIDsWithStateAtBlock(_ context.Context, chainID int64, blockNumber int64, blockTime time.Time) ([]int64, error) {
+func (r *fakeUniswapRepo) PoolIDsWithStateAtBlock(_ context.Context, chainID int64, blockNumber int64, blockTime time.Time) ([]common.Hash, error) {
 	r.poolsWithStateCalls = append(r.poolsWithStateCalls,
 		fakeStateBlockKey{chainID: chainID, blockNumber: blockNumber, blockTime: blockTime})
 	if r.poolsWithStateErr != nil {
@@ -1138,7 +1138,7 @@ func TestBlockHandler_ReorgAfterRestart_ResnapshotsPoolsWithStateAtThatBlock(t *
 
 	const priorTick = int32(300)
 	mc.tickResults[priorTick] = goodTickResult(t)
-	repo.poolsWithState = map[int64][]int64{200: {pool.ID}}
+	repo.poolsWithState = map[int64][]common.Hash{200: {pool.PoolIDHash}}
 	repo.priorTicks = map[fakePoolBlockKey][]int32{{chainID: testChainID, poolID: pool.ID, blockNumber: 200}: {priorTick}}
 
 	reorg := blockEvent(200)
@@ -1170,7 +1170,7 @@ func TestBlockHandler_ReorgPriorStateBelowDeployBlock_Errors(t *testing.T) {
 	pool := servicePool()
 	pool.DeployBlock = 500
 	svc, repo, _, txMgr := newTestService(t, pool)
-	repo.poolsWithState = map[int64][]int64{200: {pool.ID}}
+	repo.poolsWithState = map[int64][]common.Hash{200: {pool.PoolIDHash}}
 
 	reorg := blockEvent(200)
 	reorg.Version = 1
@@ -1186,19 +1186,24 @@ func TestBlockHandler_ReorgPriorStateBelowDeployBlock_Errors(t *testing.T) {
 	}
 }
 
+// A PoolId this process never loaded is not a schema defect: the common cause is a
+// pool registered after boot, and the error has to send the operator to a restart.
 func TestBlockHandler_ReorgWithUnregisteredPriorState_Errors(t *testing.T) {
 	pool := servicePool()
 	svc, repo, _, txMgr := newTestService(t, pool)
-	repo.poolsWithState = map[int64][]int64{200: {pool.ID + 1000}}
+	repo.poolsWithState = map[int64][]common.Hash{200: {common.HexToHash("0xdead")}}
 
 	reorg := blockEvent(200)
 	reorg.Version = 1
 	err := svc.BlockHandler()(context.Background(), reorg, nil)
 	if err == nil {
-		t.Fatal("BlockHandler: want error for a persisted pool absent from the registry, got nil")
+		t.Fatal("BlockHandler: want error for a persisted pool this process does not know, got nil")
 	}
-	if !strings.Contains(err.Error(), "registry bug") {
-		t.Errorf("error %q does not identify the registry bug", err)
+	if !strings.Contains(err.Error(), "restart to reload") {
+		t.Errorf("error %q does not send the operator to a restart", err)
+	}
+	if strings.Contains(err.Error(), "registry bug") {
+		t.Errorf("error %q calls a post-boot registration a registry bug", err)
 	}
 	if txMgr.calls != 0 || repo.saveBlockCalls != 0 {
 		t.Errorf("tx calls = %d, SaveBlock calls = %d, want 0 and 0", txMgr.calls, repo.saveBlockCalls)
@@ -1219,7 +1224,7 @@ func TestBlockHandler_ReorgReReadOfOrphanedPool_PersistsZeroStateTombstone(t *te
 		feeGrowthGlobal1: big.NewInt(0),
 	}
 	mc.stateResults = buildStateResults(t, zeroed)
-	repo.poolsWithState = map[int64][]int64{200: {pool.ID}}
+	repo.poolsWithState = map[int64][]common.Hash{200: {pool.PoolIDHash}}
 
 	reorg := blockEvent(200)
 	reorg.Version = 1
