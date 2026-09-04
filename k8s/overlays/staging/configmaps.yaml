@@ -606,6 +606,29 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: robinhood-backup-worker-config
+data:
+  CHAIN_ID: "4663"
+  # Cache-miss RPC fallback only, not the hot path; same endpoint the watcher uses
+  # (#825, ARCT-377).
+  ALCHEMY_HTTP_URL: "https://robinhood-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  # 10, where every other chain runs 2. rawdatabackup defaults BatchSize to WORKERS
+  # (NewService), and sns.EventSink publishes a chain's blocks under one FIFO
+  # MessageGroupId, so SQS returns at most WORKERS messages and none more until that
+  # batch settles: WORKERS is the pipeline depth, not just a worker count. At the
+  # ~100ms a message costs (one HeadObject, two Redis reads, two PUTs) WORKERS=2
+  # leaves only ~1.5x headroom over Robinhood's ~10 blk/s, and nothing alerts on
+  # falling behind — VectorBackupWorkerStalled needs the rate at exactly zero.
+  # 10 is the most SQS returns in one ReceiveMessage (clampBatchSize), so it is also
+  # the ceiling: past here the lever is per-message latency, not this value.
+  WORKERS: "10"
+  DEPLOY_ENV: "staging"
+  ENVIRONMENT: "sentinelstaging"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: avalanche-oracle-price-worker-config
 data:
   AWS_REGION: "eu-west-1"

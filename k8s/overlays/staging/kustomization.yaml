@@ -34,6 +34,12 @@ resources:
   - ../../base/arbitrum-watcher
   - ../../base/arbitrum-backup-worker
   - ../../base/arbitrum-allocation-tracker
+  # Robinhood Chain (4663). Wired before the watcher and the allocation tracker
+  # (#825, ARCT-377) on purpose: the queue is already provisioned
+  # (infrastructure#658), so a consumer that arrives first idles on an empty queue,
+  # while a watcher that arrives first fills a queue nothing drains until SQS
+  # retention ages the messages out.
+  - ../../base/robinhood-backup-worker
   - ../../base/prime-debt-indexer
   - ../../base/base-psm3-indexer
   - ../../base/optimism-psm3-indexer
