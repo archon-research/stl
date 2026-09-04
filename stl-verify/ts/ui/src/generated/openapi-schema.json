@@ -942,11 +942,23 @@
       },
       "CoreModelDetails": {
         "additionalProperties": false,
-        "description": "CORE model-specific output embedded in an RrcResult.\n\n``crr_el_pct`` is the expected-loss CRR used as the primary capital\ncharge (0-100 scale, e.g. ``Decimal(\"12.5\")`` means 12.5%).\n``hhi`` is the Herfindahl-Hirschman Index of borrower concentration\nexpressed as a percentage; ``None`` when liquidation analysis was\nnot run or the market had fewer than two borrowers.",
+        "description": "CORE model-specific output embedded in an RrcResult.\n\n``crr_el_pct`` is the expected-loss CRR used as the primary capital\ncharge (0-100 scale, e.g. ``Decimal(\"12.5\")`` means 12.5%).\n``hhi`` is the Herfindahl-Hirschman Index of borrower concentration\nexpressed as a percentage; ``None`` when liquidation analysis was\nnot run or the market had fewer than two borrowers.\n\nA direct 1:1 market result (SparkLend) leaves ``coverage_pct`` and\n``markets`` as ``None``. A Morpho vault share aggregates over the vault's\nBlue markets instead: ``crr_*_pct`` are allocation-weighted averages over\nthe covered markets plus idle liquidity at zero risk \u2014 exact for expected\nloss (linear in allocations), indicative for ES/VaR (quantiles are not\nadditive, and cross-market dependence is not modeled). ``coverage_pct`` is\nthe share of vault assets whose market has a computed result (idle counts\nas covered), ``markets`` carries the per-market slices, ``hhi`` is\n``None``, and ``forecast_step``/``n_mc`` are the minimum across slices.",
         "properties": {
           "copula_type": {
             "title": "Copula Type",
             "type": "string"
+          },
+          "coverage_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Coverage Pct"
           },
           "crr_el_pct": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
@@ -979,6 +991,20 @@
             ],
             "title": "Hhi"
           },
+          "markets": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/CoreModelMarketAllocation"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Markets"
+          },
           "n_mc": {
             "title": "N Mc",
             "type": "integer"
@@ -1005,6 +1031,56 @@
           "copula_type"
         ],
         "title": "CoreModelDetails",
+        "type": "object"
+      },
+      "CoreModelMarketAllocation": {
+        "additionalProperties": false,
+        "description": "One Blue market slice behind an aggregated Morpho vault-share result.\n\n``allocation_pct`` is this market's share of the vault's total assets on a\n0-100 scale. ``computed_at`` is when this market's CORE result was\ncomputed \u2014 slices of one aggregate can have different staleness.",
+        "properties": {
+          "allocation_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Allocation Pct",
+            "type": "string"
+          },
+          "computed_at": {
+            "format": "date-time",
+            "title": "Computed At",
+            "type": "string"
+          },
+          "crr_el_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Crr El Pct",
+            "type": "string"
+          },
+          "crr_es_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Crr Es Pct",
+            "type": "string"
+          },
+          "crr_var_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Crr Var Pct",
+            "type": "string"
+          },
+          "market_key": {
+            "title": "Market Key",
+            "type": "string"
+          },
+          "n_mc": {
+            "title": "N Mc",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "market_key",
+          "allocation_pct",
+          "crr_el_pct",
+          "crr_es_pct",
+          "crr_var_pct",
+          "n_mc",
+          "computed_at"
+        ],
+        "title": "CoreModelMarketAllocation",
         "type": "object"
       },
       "DataSourceResponse": {

@@ -42,6 +42,12 @@ func adapterTypeLabel(t *entity.MorphoAdapterType) string {
 		return "market_v1"
 	case entity.MorphoAdapterTypeVaultV1:
 		return "vault_v1"
+	case entity.MorphoAdapterTypeERC4626Merkl:
+		return "erc4626_merkl"
+	case entity.MorphoAdapterTypeBox:
+		return "box"
+	case entity.MorphoAdapterTypeCompoundV3:
+		return "compound_v3"
 	case entity.MorphoAdapterTypeUnknown:
 		return "unknown"
 	default:

@@ -625,22 +625,25 @@ groups:
     rules:
       - alert: VectorMorphoV2UnknownAdapters
         # A VaultV2 holds its liquidity in adapter contracts, one per downstream
-        # venue. The indexer classifies each with a 2-getter on-chain probe
-        # (MarketV1 / VaultV1) and records the adapter as Unknown (type 99) rather
-        # than dropping it unless EXACTLY ONE getter answers. Unknown therefore has
-        # two arms (classifyAdapter, adapter_probe.go) that triage must tell apart:
-        # both REVERT is a family the probe does not model (fix = a new marker
-        # selector), while both SUCCEED is a hybrid adapter or a proxy/fallback
-        # answering any selector (fix = a tie-break rule; a third selector cannot
-        # help). Unknown means "we persist the adapter and its realAssets, but we
-        # cannot say what venue backs it", so a growing Unknown population degrades
-        # every downstream composition read.
+        # venue. The indexer classifies each with a 5-getter on-chain probe
+        # (MarketV1 / VaultV1 / ERC4626Merkl / Box / CompoundV3) and records the
+        # adapter as Unknown (type 99) rather than dropping it unless EXACTLY ONE
+        # getter answers. Unknown therefore has two arms (classifyAdapter,
+        # adapter_probe.go) that triage must tell apart: ALL REVERT is a family
+        # the probe does not model (fix = a new marker selector) — but bespoke
+        # curator-written adapters share no marker getter at all and stay Unknown
+        # by design, so only a family with one is fixable. SEVERAL ANSWERING is a
+        # hybrid adapter or a proxy/fallback answering any selector (fix = a
+        # tie-break rule; another selector cannot help). Unknown means "we persist
+        # the adapter and its realAssets, but we cannot say what venue backs it",
+        # so a growing Unknown population degrades every downstream composition
+        # read.
         #
         # THRESHOLD, NOT ZERO. The VEC-218 ticket proposed "Unknown count stays 0"
         # as the sentinel; live mainnet validation disproved it — real, legitimate
-        # adapters exist whose both probe getters revert, and a single 8-minute
-        # discovery window produced 7+ Unknown registrations. Zero is not the
-        # healthy value, so this alerts on a sustained wave instead.
+        # adapters exist that answer no marker getter at all, and a single
+        # 8-minute discovery window produced 7+ Unknown registrations. Zero is not
+        # the healthy value, so this alerts on a sustained wave instead.
         #
         # Sizing (measured on prod mainnet, morpho_events_processed_total, 7d):
         # AddAdapter fired 5 times and RemoveAdapter 0 times across ALL adapter
@@ -677,10 +680,10 @@ groups:
           description: |
             `morpho-indexer` on chain `{{ $labels.chain }}` recorded
             `{{ $value | printf "%.0f" }}` VaultV2 adapters as type Unknown in 24h
-            — both on-chain classification getters reverted. Their realAssets are
-            still tracked, but nothing downstream can attribute the exposure to a
-            venue. A sustained wave means a new adapter family needs a third
-            probe selector.
+            — no on-chain classification getter answered, or several did. Their
+            realAssets are still tracked, but nothing downstream can attribute the
+            exposure to a venue. A sustained wave means a new adapter family needs
+            its own probe selector.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormorphov2unknownadapters
 
       - alert: VectorMorphoV2LazyAdapterRegistrations
@@ -782,25 +785,34 @@ groups:
         # VectorMorphoIndexerStalled (critical, 15m) pages long before either and
         # the runbook's first check is to rule out a loop, which is a better trade
         # than going blind on a real liquidity run every time one block errors.
+        #
+        # SCOPED to the live indexer. morpho-vault-backfill and morpho-v2-bootstrap
+        # replay history through the same handlers and count on this same
+        # instrument under their own service_name, and neither emits
+        # morpho_blocks_processed_total, so the loop gate cannot suppress them.
+        # The 2026-08-28 staging era backfill replayed 2,604 ForceDeallocate at up
+        # to 1,025/h and held this firing for 7h against ~1/h of real activity.
+        # Replayed history is not a liquidity run; the replay workers' series stay
+        # on the dashboard as backfill progress.
         expr: |
           sum by (chain, cluster) (
             increase(morpho_events_processed_total{
-              event_type="ForceDeallocate", k8s_namespace_name="vector"
+              event_type="ForceDeallocate", service_name="morpho-indexer", k8s_namespace_name="vector"
             }[1h])
           ) > 20
           unless on (chain, cluster)
           (
             sum by (chain, cluster) (
-              rate(morpho_blocks_processed_total{status="error", k8s_namespace_name="vector"}[1h])
+              rate(morpho_blocks_processed_total{status="error", service_name="morpho-indexer", k8s_namespace_name="vector"}[1h])
             ) > 0
             and on (chain, cluster)
             (
               sum by (chain, cluster) (
-                rate(morpho_blocks_processed_total{status="success", k8s_namespace_name="vector"}[1h])
+                rate(morpho_blocks_processed_total{status="success", service_name="morpho-indexer", k8s_namespace_name="vector"}[1h])
               )
               or
               sum by (chain, cluster) (
-                rate(morpho_blocks_processed_total{k8s_namespace_name="vector"}[1h])
+                rate(morpho_blocks_processed_total{service_name="morpho-indexer", k8s_namespace_name="vector"}[1h])
               ) * 0
             ) == 0
           )

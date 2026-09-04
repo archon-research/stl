@@ -762,6 +762,26 @@ version to its trigger.
 - `partition ... missing receipt block(s) ... (S3 gap)` → the archive is
   genuinely incomplete for that partition. Replay hard-stops rather than replay
   a thinned partition; repair S3 and re-run the same range.
+- `block <N> (<partition>/<N>_<v>_receipts.json.gz): archived hash 0x… is an
+  orphaned fork, canonical hash at that height is 0x…: fetching header for block
+  0x…: not found` → the node does not know the archived hash but does know a
+  different block at that height, so the block's highest-version receipts object
+  is an orphaned fork: the watcher published it and never re-published the
+  canonical block (a missed reorg), and the live indexers ingested it too.
+  Structural — the run fails on the first attempt instead of burning the 2h retry
+  envelope (87 attempts, 2026-08-29 staging, block 25395651). The error names the
+  canonical hash itself, so `cast block <N> --field hash` is only a cross-check.
+  Re-archive the canonical receipts at a higher version, re-run from that block,
+  and audit the live tables at that block: the orphaned rows are the ones at the
+  orphaned object's version — the `<v>` in the key the error names, which is
+  `block_version` 0 only when that object is version 0 — and the append-only
+  correction is a re-publish of the canonical block, not an edit.
+- The same `fetching header for block 0x…: not found` **without** a canonical
+  hash (it ends `reading the canonical header at that height: …`, or `yet it is
+  the canonical hash at that height`) is left retryable on purpose: a
+  load-balanced RPC replica a few blocks behind head also answers null for a hash
+  it has not reached yet, and nothing is proven until a by-number read returns a
+  different hash. If it keeps failing, the node — not S3 — is what to look at.
 - An adapter-classification failure — same cause and same recovery as the
   bootstrap's, below; the two share the VaultV2 replay path.
 
@@ -773,6 +793,8 @@ Both history jobs emit the same `morpho_v2_*` metrics as the live indexer (the
 replay path is metered since VEC-218), so the V2 volume alerts in
 `vector-indexers.yaml` can fire during a deliberate replay or bootstrap run —
 expected, not an incident; the run is operator-initiated and visible here.
+`VectorMorphoV2ForceDeallocateSurge` is the exception: it is scoped to the live
+indexer's `service_name`, because replayed history is not a liquidity run.
 
 A third **on-demand** Temporal worker (`temporal.RunWorker`). Everything said
 about `offchain-price-backfill` above applies — nothing is missed while it is
