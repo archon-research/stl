@@ -1,28 +1,6 @@
--- VEC-403: materialize Morpho vault positions into the position_state spine (+ current classification).
---
--- Native, per-instrument grain (VEC-400). A Morpho (MetaMorpho) vault is a SINGLE native instrument —
--- the ERC-4626 vault contract — so unlike the market case (VEC-402) there is no loan/collateral split
--- and no fan-out: one raw morpho_vault_position row is one position. instrument_key = the vault's
--- contract address (the VEC-412 bridge form for an ERC-4626 vault); holder_id = the on-chain user
--- address; quantity = assets (underlying-denominated deposit). deal_type = LOAN (a vault deposit lends
--- to the underlying markets and earns yield) — a classification attribute of the INSTRUMENT, resolved
--- instrument-side and never part of the id. The spine stores observations only.
---
--- Two data facts drive the projection (verified live 2026-07-24; closure re-verified 2026-07-28):
---   * 164 (user,vault,block_number,block_version) groups carry a second row — reprocessing, not a
---     duplicate: the rows differ by processing_version (verified: 0 same-pv duplicates on prod).
---     processing_version is part of the observation axis and position_state PK, so both versions are
---     retained; position_current picks the latest pv. DISTINCT ON only dedups a genuine same-(...,pv)
---     collision, keeping the latest timestamp.
---   * Positions close: 81,200 vault deposits are observed transitioning from a positive quantity to 0
---     (of 94,813 zero-asset rows), and morpho_vault_position records that exit as a real row. The
---     projection must emit ONE closing zero-observation per real transition-to-zero — otherwise
---     position_current (VEC-409) reports an exited deposit as still open — while dropping leading and
---     repeated zeros. The LAG filter `quantity > 0 OR prev_quantity > 0` (prev per position, ordered by
---     block) does exactly this, replacing the earlier blanket `WHERE assets > 0`.
---
--- DDL/function only. Population runs out of band (a 4M-row INSERT..SELECT does not belong in the
--- migrator's single transaction), mirroring block_time, the transform _bootstrap functions, and VEC-402.
+-- VEC-403: materialize Morpho vault positions into the position_state spine on the native
+-- per-instrument grain (VEC-400). A MetaMorpho vault is a SINGLE native instrument, so unlike the
+-- market case there is no fan-out: one raw row is one position, keyed by the vault address. #626.
 
 -- Per-protocol projection: raw Morpho vault positions -> native position rows. VEC-409 reads the
 -- per-protocol outputs from position_state; this view is the materializer's source of truth.
@@ -59,12 +37,9 @@ WHERE quantity > 0 OR prev_qty > 0;
 
 COMMENT ON VIEW position_morpho_vault IS '[Operational] VEC-403 projection: Morpho vault positions as native position rows (one per vault deposit; instrument_key = vault contract address). Emits the shared position_state column contract consumed by materialize_position_projection(); one row per (position_id, observation), including one closing zero-quantity row on a real exit (VEC-409 closure). deal_type_code is part of the contract and is validated, but the spine does not store it.';
 
--- Append the observations via the shared materializer (defined with the position_state spine, VEC-402).
--- The projection view above holds all the Morpho-vault-specific logic; the identical plumbing --
--- contract validation, the temp snapshot, the four checks, the append -- is not duplicated here.
--- p_build_id is the ADR-0002 code-provenance record stamped on every appended row; the scheduled
--- runner passes the build_registry id it resolved, and 0 means pre-tracking. Idempotent; run out of
--- band; returns position_state rows appended.
+-- Appends via the shared materializer defined with the spine; the projection view above holds all the
+-- Morpho-vault-specific logic. p_build_id is the ADR-0002 provenance record stamped on every appended
+-- row (0 = pre-tracking). Idempotent, run out of band; returns position_state rows appended.
 CREATE OR REPLACE FUNCTION materialize_morpho_vault(p_build_id integer DEFAULT 0) RETURNS bigint
     LANGUAGE sql AS $fn$
     SELECT materialize_position_projection('position_morpho_vault'::regclass, p_build_id);
