@@ -13,12 +13,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/archiveblock"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
@@ -164,6 +166,24 @@ func TestRunIntegration_AllowUnfinalizedArchivesAboveTheFinalizedHead(t *testing
 
 	if versions := archivedVersions(t, ctx, client, bucket); !slices.Equal(versions, []int{0}) {
 		t.Errorf("archived versions = %v, want %v: --allow-unfinalized overrides the guard", versions, []int{0})
+	}
+}
+
+// A bucket the run cannot reach — a typo, or a grant it does not have — must
+// stop it at startup rather than after every partition has burned its retries.
+func TestRunIntegration_RefusesABucketItCannotReach(t *testing.T) {
+	ctx := context.Background()
+	missing := testutil.S3TestBucketName(t, rawBucketPrefix)
+
+	_, err := runDownloader(t, ctx, missing, downloaderRun{})
+
+	if err == nil {
+		t.Fatal("run() succeeded against a bucket that is not there")
+	}
+	for _, want := range []string{missing, "s3:ListBucket"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to mention %q", err, want)
+		}
 	}
 }
 
@@ -402,15 +422,25 @@ func storedBlockHash(t *testing.T, ctx context.Context, client *awss3.Client, bu
 		t.Fatalf("read %s: %v", key, err)
 	}
 
-	depth, field := 2, "blockHash"
 	if dataType == s3key.Block {
-		depth, field = 1, "hash"
+		hash, ok := archiveblock.HashFromPayload(plain)
+		if !ok {
+			t.Fatalf("no hash in %s", key)
+		}
+		return hash
 	}
-	hash, ok := jsonStringField(plain, depth, field)
-	if !ok {
-		t.Fatalf("no %s in %s", field, key)
+
+	// Receipts and traces are lists whose entries name the block they belong to.
+	var entries []struct {
+		BlockHash string `json:"blockHash"`
 	}
-	return hash
+	if err := json.Unmarshal(plain, &entries); err != nil {
+		t.Fatalf("decoding %s: %v", key, err)
+	}
+	if len(entries) == 0 || entries[0].BlockHash == "" {
+		t.Fatalf("no blockHash in %s", key)
+	}
+	return entries[0].BlockHash
 }
 
 func archivedVersions(t *testing.T, ctx context.Context, client *awss3.Client, bucket string) []int {

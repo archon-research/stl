@@ -3,10 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/aws/smithy-go"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 )
@@ -101,16 +105,46 @@ func TestPlanBlock(t *testing.T) {
 	}
 }
 
+// The version fold is shared with the block republisher, and it counts a key
+// whose suffix names no data type — a stray upload, a rename — as occupying its
+// version. So an object above a complete canonical pair makes the top version
+// one nothing carries a hash for, and the height is corrected above that rather
+// than skipped: the archive keeps a copy of the canonical block it already had.
+func TestPlanBlock_AStrayObjectAboveTheCanonicalPairMovesTheCorrectionUp(t *testing.T) {
+	index, err := indexPartition([]string{
+		"21000000-21000999/21000042_2_block.json.gz",
+		"21000000-21000999/21000042_2_receipts.json.gz",
+		"21000000-21000999/21000042_3_foo.json.gz",
+	})
+	if err != nil {
+		t.Fatalf("indexPartition: %v", err)
+	}
+
+	state := index[21000042]
+	if state.Version != 3 {
+		t.Fatalf("top version = %d, want the stray object's 3", state.Version)
+	}
+
+	// archiveblock.Hash finds no block or receipts object at version 3.
+	got := planBlock(state, "", canonicalHash)
+
+	if got.Action != actionRepublish || got.Version != 4 {
+		t.Errorf("planBlock() = %s at version %d, want %s at 4", got.Action, got.Version, actionRepublish)
+	}
+}
+
 func TestIndexPartition(t *testing.T) {
-	index := indexPartition([]string{
+	index, err := indexPartition([]string{
 		"21000000-21000999/21000042_0_block.json.gz",
 		"21000000-21000999/21000042_0_receipts.json.gz",
 		"21000000-21000999/21000042_0_traces.json.gz",
 		"21000000-21000999/21000042_1_block.json.gz",
 		"21000000-21000999/21000042_1_receipts.json.gz",
 		"21000000-21000999/21000043_0_receipts.json.gz",
-		"21000000-21000999/manifest.txt",
 	})
+	if err != nil {
+		t.Fatalf("indexPartition: %v", err)
+	}
 
 	got, ok := index[21000042]
 	if !ok {
@@ -126,124 +160,23 @@ func TestIndexPartition(t *testing.T) {
 		t.Errorf("present at top version = %v, want block and receipts", got.Present)
 	}
 	if len(index) != 2 {
-		t.Errorf("indexed heights = %d, want 2 (the unparsable key is not one)", len(index))
+		t.Errorf("indexed heights = %d, want 2", len(index))
 	}
 }
 
-func TestArchivedBlockHash_ReadsBlockHashFromATruncatedObject(t *testing.T) {
-	const blockNum = int64(25395651)
-	objects := archivedObjects(t, blockNum, 0, forkHash)
-	reader := newFakeRangeReader(objects)
-	state := stateAt(0, s3key.Block, s3key.Receipts, s3key.Traces)
+// An object the tool cannot read says nothing about which versions the partition
+// holds, so planning around it would write over an occupied slot.
+func TestIndexPartition_FailsOnAKeyItCannotRead(t *testing.T) {
+	_, err := indexPartition([]string{
+		"21000000-21000999/21000042_0_block.json.gz",
+		"21000000-21000999/manifest.txt",
+	})
 
-	got, err := archivedBlockHash(context.Background(), reader, "bucket", blockNum, state)
-	if err != nil {
-		t.Fatalf("archivedBlockHash() error = %v", err)
+	if !errors.Is(err, s3key.ErrUnrecognisedKey) {
+		t.Fatalf("error = %v, want ErrUnrecognisedKey", err)
 	}
-	if got != forkHash {
-		t.Errorf("archivedBlockHash() = %q, want %q", got, forkHash)
-	}
-
-	key := s3key.Build(blockNum, 0, s3key.Block)
-	if asked := reader.ranges[key]; asked != archiveHashPrefixBytes {
-		t.Errorf("requested %d bytes of %s, want a %d-byte prefix", asked, key, archiveHashPrefixBytes)
-	}
-	if int64(len(objects[key])) <= archiveHashPrefixBytes {
-		t.Fatalf("fixture object is %d bytes: too small to prove the read was partial", len(objects[key]))
-	}
-}
-
-func TestArchivedBlockHash_FallsBackToReceiptsWhenTheBlockObjectIsMissing(t *testing.T) {
-	const blockNum = int64(25395651)
-	objects := archivedObjects(t, blockNum, 0, forkHash)
-	delete(objects, s3key.Build(blockNum, 0, s3key.Block))
-	state := stateAt(0, s3key.Receipts, s3key.Traces)
-
-	got, err := archivedBlockHash(context.Background(), newFakeRangeReader(objects), "bucket", blockNum, state)
-	if err != nil {
-		t.Fatalf("archivedBlockHash() error = %v", err)
-	}
-	if got != forkHash {
-		t.Errorf("archivedBlockHash() = %q, want the blockHash of the first receipt %q", got, forkHash)
-	}
-}
-
-func TestArchivedBlockHash_UnknownWhenNoObjectCarriesOne(t *testing.T) {
-	const blockNum = int64(25395651)
-	state := stateAt(0, s3key.Traces)
-
-	got, err := archivedBlockHash(context.Background(), newFakeRangeReader(nil), "bucket", blockNum, state)
-	if err != nil {
-		t.Fatalf("archivedBlockHash() error = %v", err)
-	}
-	if got != "" {
-		t.Errorf("archivedBlockHash() = %q, want the empty hash of an archive that cannot answer", got)
-	}
-}
-
-func TestArchivedBlockHash_AReadableObjectWithNoHashIsUnknownRatherThanAFailure(t *testing.T) {
-	const blockNum = int64(25395651)
-
-	tests := []struct {
-		name     string
-		dataType s3key.DataType
-		body     string
-	}{
-		{name: "the empty receipt list of a zero-tx block", dataType: s3key.Receipts, body: `[]`},
-		{name: "a null receipts payload", dataType: s3key.Receipts, body: `null`},
-		{name: "a null block payload", dataType: s3key.Block, body: `null`},
-		{name: "an empty list where the block object should be", dataType: s3key.Block, body: `[]`},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			key := s3key.Build(blockNum, 0, tt.dataType)
-			reader := newFakeRangeReader(map[string][]byte{key: gzipped(t, []byte(tt.body))})
-
-			got, err := archivedBlockHash(context.Background(), reader, "bucket", blockNum, stateAt(0, tt.dataType))
-			if err != nil {
-				t.Fatalf("archivedBlockHash() error = %v, want the height planned rather than failed on every run", err)
-			}
-			if got != "" {
-				t.Errorf("archivedBlockHash() = %q, want the empty hash of an object that carries none", got)
-			}
-		})
-	}
-}
-
-func TestArchivedBlockHash_FallsBackToReceiptsWhenTheBlockObjectCarriesNoHash(t *testing.T) {
-	const blockNum = int64(25395651)
-	objects := archivedObjects(t, blockNum, 0, forkHash)
-	objects[s3key.Build(blockNum, 0, s3key.Block)] = gzipped(t, []byte(`null`))
-
-	got, err := archivedBlockHash(context.Background(), newFakeRangeReader(objects), "bucket", blockNum, stateAt(0, s3key.Block, s3key.Receipts))
-	if err != nil {
-		t.Fatalf("archivedBlockHash() error = %v", err)
-	}
-	if got != forkHash {
-		t.Errorf("archivedBlockHash() = %q, want the receipts to answer for a block object that cannot %q", got, forkHash)
-	}
-}
-
-func TestArchivedBlockHash_ErrorsWhenTheHashIsBeyondThePrefix(t *testing.T) {
-	const blockNum = int64(25395651)
-	key := s3key.Build(blockNum, 0, s3key.Block)
-	reader := newFakeRangeReader(map[string][]byte{key: gzipped(t, blockJSONWithLateHash(forkHash))})
-
-	_, err := archivedBlockHash(context.Background(), reader, "bucket", blockNum, stateAt(0, s3key.Block))
-	if err == nil {
-		t.Fatal("expected an error: a hash the prefix could not answer must not be read as a losing fork")
-	}
-}
-
-func TestArchivedBlockHash_ReadFailureIsNotAnUnknownHash(t *testing.T) {
-	const blockNum = int64(25395651)
-	reader := newFakeRangeReader(archivedObjects(t, blockNum, 0, forkHash))
-	reader.err = errors.New("access denied")
-
-	_, err := archivedBlockHash(context.Background(), reader, "bucket", blockNum, stateAt(0, s3key.Block))
-	if err == nil {
-		t.Fatal("expected the read failure to surface, not a silent republish")
+	if !strings.Contains(err.Error(), "manifest.txt") {
+		t.Errorf("error = %v, want it to name the key", err)
 	}
 }
 
@@ -373,3 +306,51 @@ func TestBlockPlanner_DecideFailsWhenTheRPCPayloadCarriesNoHash(t *testing.T) {
 		t.Fatal("expected an error rather than a plan built on an unknown canonical hash")
 	}
 }
+
+func TestRetryableListing(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "a dropped connection", err: errors.New("dial tcp 52.0.0.1:443: i/o timeout"), want: true},
+		{name: "the run being shut down", err: context.Canceled, want: false},
+		{name: "the run's own deadline", err: context.DeadlineExceeded, want: false},
+		{name: "a cancellation the SDK wrapped", err: fmt.Errorf("listing partition 0-999: %w", context.Canceled), want: false},
+		{name: "S3 asking for less traffic", err: &smithy.GenericAPIError{Code: "SlowDown"}, want: true},
+		{name: "throttling", err: &smithy.GenericAPIError{Code: "Throttling"}, want: true},
+		{name: "the request rate ceiling", err: &smithy.GenericAPIError{Code: "RequestLimitExceeded"}, want: true},
+		{name: "a server fault", err: &smithy.GenericAPIError{Code: "InternalError", Fault: smithy.FaultServer}, want: true},
+		{name: "an unmodelled 5xx", err: statusError{code: "GatewayProblem", status: 503}, want: true},
+		{name: "a grant the run does not have", err: &smithy.GenericAPIError{Code: "AccessDenied", Fault: smithy.FaultClient}, want: false},
+		{name: "a bucket that is not there", err: &smithy.GenericAPIError{Code: "NoSuchBucket", Fault: smithy.FaultClient}, want: false},
+		{name: "credentials that have expired", err: &smithy.GenericAPIError{Code: "ExpiredToken", Fault: smithy.FaultClient}, want: false},
+		{name: "credentials that are not ours", err: &smithy.GenericAPIError{Code: "InvalidAccessKeyId", Fault: smithy.FaultClient}, want: false},
+		{
+			name: "a permanent failure the caller wrapped",
+			err:  fmt.Errorf("listing partition 0-999: %w", &smithy.GenericAPIError{Code: "AccessDenied", Fault: smithy.FaultClient}),
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := retryableListing(tc.err); got != tc.want {
+				t.Errorf("retryableListing(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// statusError is an API error whose code says nothing but whose HTTP status
+// does, the shape a proxy or an unmodelled fault arrives as.
+type statusError struct {
+	code   string
+	status int
+}
+
+func (e statusError) Error() string                 { return e.code }
+func (e statusError) ErrorCode() string             { return e.code }
+func (e statusError) ErrorMessage() string          { return e.code }
+func (e statusError) ErrorFault() smithy.ErrorFault { return smithy.FaultUnknown }
+func (e statusError) HTTPStatusCode() int           { return e.status }

@@ -47,6 +47,7 @@
 ./internal/adapters/outbound/blockverifier
 ./internal/pkg/httpclient
 ./internal/pkg/partition
+./internal/pkg/archiveblock
 ./internal/pkg/gziputil
 ./internal/pkg/hexutil
 ./cmd/backfillers/raw-block-bulk-downloader
@@ -65,3 +66,4 @@
 ./internal/services/reference_capital_indexer
 ./cmd/cronjobs/reference-capital-indexer
 ./cmd/cronjobs/morpho-v2-bootstrap
+./internal/services/block_republish

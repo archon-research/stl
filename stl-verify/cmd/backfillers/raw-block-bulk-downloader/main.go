@@ -222,6 +222,9 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	if err := checkArchiveReachable(ctx, s3Reader, cfg.Bucket); err != nil {
+		return err
+	}
 
 	partitionCache := NewPartitionCache(s3Reader, cfg.Bucket, logger)
 	stats := &Stats{startTime: time.Now()}
@@ -333,6 +336,17 @@ func createS3Clients(ctx context.Context, cfg Config, logger *slog.Logger) (*s3.
 	options := append([]func(*awss3.Options){func(o *awss3.Options) { o.HTTPClient = httpClient }},
 		s3.EndpointOptionsFromEnv()...)
 	return s3.NewWriterWithOptions(awsCfg, logger, options...), s3.NewReaderWithOptions(awsCfg, logger, options...), nil
+}
+
+// checkArchiveReachable fails the run before any worker starts. Without it a
+// bucket that is not there, or one this run may not list, is discovered once per
+// partition — and the run walks the whole range before saying so.
+func checkArchiveReachable(ctx context.Context, reader *s3.Reader, bucket string) error {
+	if err := reader.HeadBucket(ctx, bucket); err != nil {
+		return fmt.Errorf("cannot reach the archive bucket %s; it must exist and this run needs s3:ListBucket on it: %w",
+			bucket, err)
+	}
+	return nil
 }
 
 func logStartupInfo(cfg Config, logger *slog.Logger) {
@@ -564,40 +578,34 @@ type plannedHeight struct {
 // version of is planned from its header, not the megabyte its block and receipts
 // weigh; an untouched one is fresh whatever the chain says, so it costs no read.
 func (a blockArchiver) planBatch(ctx context.Context, from, to int64) ([]plannedHeight, error) {
-	planned := make(map[int64]plannedHeight, to-from+1)
+	planned := make([]plannedHeight, to-from+1)
 	states := make(map[int64]archiveState, to-from+1)
 	var archived []int64
 
 	for blockNum := from; blockNum <= to; blockNum++ {
+		planned[blockNum-from] = plannedHeight{BlockNumber: blockNum}
 		state, err := a.planner.topVersion(ctx, blockNum)
 		switch {
 		case err != nil:
-			planned[blockNum] = plannedHeight{BlockNumber: blockNum, Err: err}
+			planned[blockNum-from].Err = err
 		case state.Version == noArchive:
-			planned[blockNum] = plannedHeight{BlockNumber: blockNum, Decision: freshDecision(blockNum)}
+			planned[blockNum-from].Decision = freshDecision(blockNum)
 		default:
 			states[blockNum] = state
 			archived = append(archived, blockNum)
 		}
 	}
 
+	// GetBlockHeadersBatch answers one entry per requested height, in order, with
+	// BlockErr set where a response is missing, so every archived height lands.
 	headers, err := a.fetchHeaders(ctx, archived)
 	if err != nil {
 		return nil, err
 	}
 	for _, header := range headers {
-		planned[header.BlockNumber] = a.planArchived(ctx, header, states[header.BlockNumber])
+		planned[header.BlockNumber-from] = a.planArchived(ctx, header, states[header.BlockNumber])
 	}
-
-	ordered := make([]plannedHeight, 0, len(planned))
-	for blockNum := from; blockNum <= to; blockNum++ {
-		height, ok := planned[blockNum]
-		if !ok {
-			return nil, fmt.Errorf("block %d: the node answered the batch without it", blockNum)
-		}
-		ordered = append(ordered, height)
-	}
-	return ordered, nil
+	return planned, nil
 }
 
 func (a blockArchiver) planArchived(ctx context.Context, header outbound.BlockData, state archiveState) plannedHeight {
