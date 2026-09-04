@@ -1,7 +1,10 @@
 // Package main is the block-republisher: an on-demand Temporal worker that
 // re-publishes a mined height under the next archive version so every consumer
-// appends the canonical block. Operation and the version rule are in
-// docs/runbooks/vector-cronjobs.md, section "block-republisher".
+// appends the canonical block. Every payload is read by number and held to the
+// canonical hash the run derived — an archive node serves trace_block by hash
+// only near the head, and every hole this repairs is far older than that.
+// Operation and the version rule are in docs/runbooks/vector-cronjobs.md,
+// section "block-republisher".
 package main
 
 import (
@@ -150,8 +153,8 @@ func openArchiveReader(ctx context.Context, awsCfg aws.Config, cfg config, logge
 	return archive, nil
 }
 
-// newChainClient builds the same batched RPC client the watcher fetches a block
-// with, so a republished payload is byte-for-byte the shape a live one has.
+// newChainClient builds the same RPC client the watcher fetches a block with, so
+// a republished payload is byte-for-byte the shape a live one has.
 func newChainClient(chainName string, cfg config, logger *slog.Logger) (*alchemy.Client, error) {
 	telemetry, err := alchemy.NewTelemetry(chainName)
 	if err != nil {
@@ -161,8 +164,8 @@ func newChainClient(chainName string, cfg config, logger *slog.Logger) (*alchemy
 		HTTPURL:      cfg.rpcURL,
 		EnableTraces: cfg.enableTraces,
 		EnableBlobs:  cfg.enableBlobs,
-		// Batched, not parallel: a repair run has no latency budget, and it shares
-		// the Alchemy key with the live watcher.
+		// A republish issues one read per data type; this governs only the
+		// by-hash batch it does not use.
 		ParallelRPC: false,
 		Logger:      logger,
 		Telemetry:   telemetry,

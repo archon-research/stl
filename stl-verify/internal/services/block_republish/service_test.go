@@ -29,16 +29,17 @@ const (
 	archivedKey    = "25395000-25395999/25395651_1_block.json.gz"
 )
 
-// stubClient answers only the three reads Republish issues. The embedded port is
-// nil, so any other call panics rather than silently returning a zero value.
+// stubClient answers only the by-number reads Republish issues. The embedded
+// port is nil, so any other call panics rather than silently returning a zero
+// value.
 type stubClient struct {
 	outbound.BlockchainClient
 
 	headers     []headerReply
 	headerCalls int
 
-	data    outbound.BlockData
-	dataErr error
+	payloads outbound.BlockData
+	fetches  int
 
 	head    int64
 	headErr error
@@ -49,7 +50,13 @@ type headerReply struct {
 	err error
 }
 
-func (c *stubClient) GetBlockByNumber(context.Context, int64, bool) (json.RawMessage, error) {
+// GetBlockByNumber serves the header reads from the scripted replies, and the
+// full-transaction read from the payload set.
+func (c *stubClient) GetBlockByNumber(_ context.Context, _ int64, fullTx bool) (json.RawMessage, error) {
+	if fullTx {
+		c.fetches++
+		return c.payloads.Block, c.payloads.BlockErr
+	}
 	if c.headerCalls >= len(c.headers) {
 		panic(fmt.Sprintf("unexpected GetBlockByNumber call %d", c.headerCalls+1))
 	}
@@ -58,8 +65,25 @@ func (c *stubClient) GetBlockByNumber(context.Context, int64, bool) (json.RawMes
 	return reply.raw, reply.err
 }
 
+func (c *stubClient) GetBlockReceipts(context.Context, int64) (json.RawMessage, error) {
+	c.fetches++
+	return c.payloads.Receipts, c.payloads.ReceiptsErr
+}
+
+func (c *stubClient) GetBlockTraces(context.Context, int64) (json.RawMessage, error) {
+	c.fetches++
+	return c.payloads.Traces, c.payloads.TracesErr
+}
+
+func (c *stubClient) GetBlobSidecars(context.Context, int64) (json.RawMessage, error) {
+	c.fetches++
+	return c.payloads.Blobs, c.payloads.BlobsErr
+}
+
+// Alchemy serves trace_block by hash only near the head, and every height this
+// repairs is far older than that.
 func (c *stubClient) GetBlockDataByHash(context.Context, int64, string, bool) (outbound.BlockData, error) {
-	return c.data, c.dataErr
+	panic("Republish fetched by hash")
 }
 
 func (c *stubClient) GetCurrentBlockNumber(context.Context) (int64, error) {
@@ -76,18 +100,40 @@ func headerJSONAt(number int64, hash string) json.RawMessage {
 		number, hash, testParentHash, testTimestamp))
 }
 
+// blockPayload is the full-transaction block a node serves by number: it holds
+// one transaction, so an empty receipt or trace list for it is a lagging answer.
+// It carries the fields the event does, which the republish now reads from here
+// rather than from a header of its own.
 func blockPayload(hash string) json.RawMessage {
-	return json.RawMessage(fmt.Sprintf(`{"number":"0x%x","hash":%q,"transactions":[]}`, testBlock, hash))
+	return blockPayloadAt(testBlock, hash, `[{"hash":"0xaa"}]`)
+}
+
+func emptyBlockPayload(hash string) json.RawMessage {
+	return blockPayloadAt(testBlock, hash, `[]`)
+}
+
+func blockPayloadAt(number int64, hash, transactions string) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(
+		`{"number":"0x%x","hash":%q,"parentHash":%q,"timestamp":"0x%x","transactions":%s}`,
+		number, hash, testParentHash, testTimestamp, transactions))
+}
+
+func receiptsPayload(blockHash string) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(`[{"blockHash":%q,"status":"0x1"}]`, blockHash))
+}
+
+func tracesPayload(blockHash string) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(`[{"blockHash":%q,"type":"call"}]`, blockHash))
 }
 
 func newStubClient() *stubClient {
 	return &stubClient{
 		headers: []headerReply{{raw: headerJSON(testHash)}, {raw: headerJSON(testHash)}},
-		data: outbound.BlockData{
+		payloads: outbound.BlockData{
 			BlockNumber: testBlock,
 			Block:       blockPayload(testHash),
-			Receipts:    json.RawMessage(`[{"status":"0x1"}]`),
-			Traces:      json.RawMessage(`[{"type":"call"}]`),
+			Receipts:    receiptsPayload(testHash),
+			Traces:      tracesPayload(testHash),
 			Blobs:       json.RawMessage(`[{"index":"0x0"}]`),
 		},
 		head: testBlock + 5000,
@@ -231,7 +277,7 @@ func TestRepublish_CachesExactlyTheDataTypesTheChainsWatcherPublishes(t *testing
 			config.EnableBlobs = tc.enableBlobs
 			f := newFixtureWith(t, config, newStubClient())
 
-			result, err := f.service.Republish(context.Background(), testBlock, 1, nil)
+			result, err := f.service.Republish(context.Background(), testBlock, 1, testHash, nil)
 			if err != nil {
 				t.Fatalf("Republish: %v", err)
 			}
@@ -252,7 +298,7 @@ func TestRepublish_CachesExactlyTheDataTypesTheChainsWatcherPublishes(t *testing
 func TestRepublish_PublishesTheBlockEventAsAReorgBackfillAtTheGivenVersion(t *testing.T) {
 	f := newFixture(t, newStubClient())
 
-	if _, err := f.service.Republish(context.Background(), testBlock, 2, nil); err != nil {
+	if _, err := f.service.Republish(context.Background(), testBlock, 2, testHash, nil); err != nil {
 		t.Fatalf("Republish: %v", err)
 	}
 
@@ -284,7 +330,7 @@ func TestRepublish_ReportsEveryPhaseItEnters(t *testing.T) {
 	f := newFixture(t, newStubClient())
 	var phases []Phase
 
-	_, err := f.service.Republish(context.Background(), testBlock, 1, func(_ context.Context, phase Phase) {
+	_, err := f.service.Republish(context.Background(), testBlock, 1, testHash, func(_ context.Context, phase Phase) {
 		phases = append(phases, phase)
 	})
 	if err != nil {
@@ -300,7 +346,7 @@ func TestRepublish_ReportsEveryPhaseItEnters(t *testing.T) {
 func TestRepublish_ReportsTheBlockItRepublished(t *testing.T) {
 	f := newFixture(t, newStubClient())
 
-	result, err := f.service.Republish(context.Background(), testBlock, 2, nil)
+	result, err := f.service.Republish(context.Background(), testBlock, 2, testHash, nil)
 	if err != nil {
 		t.Fatalf("Republish: %v", err)
 	}
@@ -318,129 +364,44 @@ func TestRepublish_ReportsTheBlockItRepublished(t *testing.T) {
 	}
 }
 
-func TestRepublish_RefusesWhenTheHeightsCanonicalHashMovedBetweenTheTwoReads(t *testing.T) {
-	client := newStubClient()
-	client.headers[1] = headerReply{raw: headerJSON(forkHash)}
-	f := newFixture(t, client)
-
-	_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
-
-	if !errors.Is(err, ErrCanonicalHashMoved) {
-		t.Fatalf("error = %v, want ErrCanonicalHashMoved", err)
-	}
-	if errors.Is(err, ErrStructuralData) {
-		t.Error("a live reorg must stay retryable, not be tagged structural")
-	}
-	if got := f.cached(t, "block", 1); got != nil {
-		t.Errorf("cached %s despite the reorg", got)
-	}
-	if count := f.sink.GetEventCount(); count != 0 {
-		t.Errorf("published %d events despite the reorg", count)
-	}
-}
-
-// The finality guard already proved this height sits far below the head a synced
-// node reported, so a null here is a lagging replica, not a height that is not
-// there. Killing the block would take a repairable one out of the run for good.
-func TestRepublish_LeavesANullFirstReadRetryable(t *testing.T) {
-	client := newStubClient()
-	client.headers[0] = headerReply{err: fmt.Errorf("eth_getBlockByNumber: %w", rpcutil.ErrUpstreamNullResult)}
-	f := newFixtureWith(t, testConfig(), client)
-
-	_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
-
-	if err == nil {
-		t.Fatal("Republish succeeded against a node with no block at the height")
-	}
-	if errors.Is(err, ErrStructuralData) {
-		t.Errorf("error = %v, want it left retryable", err)
-	}
-	for _, want := range []string{fmt.Sprint(testBlock), "below the chain head"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error = %v, want it to mention %q", err, want)
-		}
-	}
-}
-
-// A height still inside the reorg window can pass the canonical check and be
-// orphaned moments later, writing a second losing fork into the slot meant to
-// correct the first.
-func TestRepublish_RefusesAHeightTooCloseToTheChainHead(t *testing.T) {
+// The derivation already proved a synced node knows this height, so a null data
+// type is a replica behind the head it read. Nothing is cached or published.
+func TestRepublish_LeavesANullDataTypeRetryable(t *testing.T) {
 	tests := []struct {
-		name string
-		head int64
+		name  string
+		serve func(*stubClient)
 	}{
-		{name: "above the head", head: testBlock - 1},
-		{name: "at the head", head: testBlock},
-		{name: "inside the reorg window", head: testBlock + finalityDepth - 1},
+		{name: "a missing receipts payload", serve: func(c *stubClient) { c.payloads.Receipts = nil }},
+		{name: "a literal null traces payload", serve: func(c *stubClient) { c.payloads.Traces = json.RawMessage(`null`) }},
+		{
+			name: "the adapter's null sentinel on the block",
+			serve: func(c *stubClient) {
+				c.payloads.BlockErr = fmt.Errorf("eth_getBlockByNumber: %w", rpcutil.ErrUpstreamNullResult)
+			},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			client := newStubClient()
-			client.head = tc.head
-			f := newFixtureWith(t, testConfig(), client)
+			tc.serve(client)
+			f := newFixture(t, client)
 
-			_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
+			_, err := f.service.Republish(context.Background(), testBlock, 1, testHash, nil)
 
-			if !errors.Is(err, ErrStructuralData) {
-				t.Fatalf("error = %v, want ErrStructuralData", err)
+			if err == nil {
+				t.Fatal("Republish succeeded on an incomplete payload")
 			}
-			if f.client.headerCalls != 0 {
-				t.Errorf("read the chain %d times for a refused height", f.client.headerCalls)
+			if errors.Is(err, ErrStructuralData) {
+				t.Errorf("error = %v, want it left retryable", err)
+			}
+			if got := f.cached(t, "block", 1); got != nil {
+				t.Errorf("cached %s from an incomplete payload", got)
+			}
+			if count := f.sink.GetEventCount(); count != 0 {
+				t.Errorf("published %d events for an incomplete payload", count)
 			}
 		})
-	}
-}
-
-func TestRepublish_AcceptsTheShallowestSafeHeight(t *testing.T) {
-	client := newStubClient()
-	client.head = testBlock + finalityDepth
-	f := newFixtureWith(t, testConfig(), client)
-
-	if _, err := f.service.Republish(context.Background(), testBlock, 1, nil); err != nil {
-		t.Fatalf("Republish: %v", err)
-	}
-}
-
-// A throttled or timed-out head read says nothing about the block, so tagging it
-// structural would kill a run that the next attempt would complete.
-func TestRepublish_LeavesAFailedHeadReadRetryable(t *testing.T) {
-	client := newStubClient()
-	client.headErr = errors.New("429 Too Many Requests")
-	f := newFixtureWith(t, testConfig(), client)
-
-	_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
-
-	if err == nil {
-		t.Fatal("Republish succeeded without reading the chain head")
-	}
-	if errors.Is(err, ErrStructuralData) {
-		t.Errorf("error = %v, want it left retryable", err)
-	}
-}
-
-// The head read already proved a synced node knows this height, so a null data
-// type is a replica behind that head — the same verdict the by-number read gets.
-// Nothing is cached or published either way.
-func TestRepublish_LeavesANullDataTypeRetryable(t *testing.T) {
-	client := newStubClient()
-	client.data.Receipts = nil
-	f := newFixture(t, client)
-
-	_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
-
-	if err == nil {
-		t.Fatal("Republish succeeded on an incomplete payload")
-	}
-	if errors.Is(err, ErrStructuralData) {
-		t.Errorf("error = %v, want it left retryable", err)
-	}
-	if got := f.cached(t, "block", 1); got != nil {
-		t.Errorf("cached %s from an incomplete payload", got)
-	}
-	if count := f.sink.GetEventCount(); count != 0 {
-		t.Errorf("published %d events for an incomplete payload", count)
 	}
 }
 
@@ -465,7 +426,7 @@ func TestNextFreeVersion_DerivesTheSlotFromWhatTheArchiveHolds(t *testing.T) {
 			*f.archive = tc.archive
 			f.archive.hash, f.archive.hashFound = forkHash, tc.archive.found
 
-			version, err := f.service.NextFreeVersion(context.Background(), testBlock)
+			version, _, err := f.service.NextFreeVersion(context.Background(), testBlock)
 			if err != nil {
 				t.Fatalf("NextFreeVersion: %v", err)
 			}
@@ -489,7 +450,7 @@ func TestNextFreeVersion_RefusesAHeightAlreadyCanonicalInTheArchive(t *testing.T
 	f.archiveHolds(1)
 	f.archive.hash, f.archive.hashFound = strings.ToUpper(testHash), true
 
-	_, err := f.service.NextFreeVersion(context.Background(), testBlock)
+	_, _, err := f.service.NextFreeVersion(context.Background(), testBlock)
 
 	if !errors.Is(err, ErrStructuralData) {
 		t.Fatalf("error = %v, want ErrStructuralData", err)
@@ -505,7 +466,7 @@ func TestNextFreeVersion_ProceedsWhenTheArchivedBlockIsAFork(t *testing.T) {
 	f := newFixture(t, newStubClient())
 	f.archiveHoldsFork(1)
 
-	version, err := f.service.NextFreeVersion(context.Background(), testBlock)
+	version, _, err := f.service.NextFreeVersion(context.Background(), testBlock)
 	if err != nil {
 		t.Fatalf("NextFreeVersion: %v", err)
 	}
@@ -521,7 +482,7 @@ func TestNextFreeVersion_ProceedsWhenTheArchiveNamesNoBlockAtTheTopVersion(t *te
 	f := newFixture(t, newStubClient())
 	f.archiveHolds(4)
 
-	version, err := f.service.NextFreeVersion(context.Background(), testBlock)
+	version, _, err := f.service.NextFreeVersion(context.Background(), testBlock)
 	if err != nil {
 		t.Fatalf("NextFreeVersion: %v", err)
 	}
@@ -529,8 +490,8 @@ func TestNextFreeVersion_ProceedsWhenTheArchiveNamesNoBlockAtTheTopVersion(t *te
 	if version != 5 {
 		t.Errorf("version = %d, want the slot above the unreadable one", version)
 	}
-	if f.client.headerCalls != 0 {
-		t.Errorf("read the chain %d times with no archived hash to compare", f.client.headerCalls)
+	if f.client.headerCalls != 1 {
+		t.Errorf("read the chain %d times, want the one read the republish verifies against", f.client.headerCalls)
 	}
 }
 
@@ -539,7 +500,7 @@ func TestNextFreeVersion_LeavesAFailedHashReadRetryable(t *testing.T) {
 	f.archiveHolds(1)
 	f.archive.hashErr = errors.New("503 SlowDown")
 
-	_, err := f.service.NextFreeVersion(context.Background(), testBlock)
+	_, _, err := f.service.NextFreeVersion(context.Background(), testBlock)
 
 	if err == nil {
 		t.Fatal("NextFreeVersion succeeded without reading the archived block")
@@ -557,7 +518,7 @@ func TestNextFreeVersion_IsStructuralWhenTheArchivedObjectCannotBeRead(t *testin
 	f.archiveHolds(1)
 	f.archive.hashErr = fmt.Errorf("reading %s: %w", archivedKey, archiveblock.ErrUnreadable)
 
-	_, err := f.service.NextFreeVersion(context.Background(), testBlock)
+	_, _, err := f.service.NextFreeVersion(context.Background(), testBlock)
 
 	if !errors.Is(err, ErrStructuralData) {
 		t.Fatalf("error = %v, want ErrStructuralData", err)
@@ -572,7 +533,7 @@ func TestNextFreeVersion_RefusesAHeightTooCloseToTheChainHead(t *testing.T) {
 	client.head = testBlock + finalityDepth - 1
 	f := newFixtureWith(t, testConfig(), client)
 
-	_, err := f.service.NextFreeVersion(context.Background(), testBlock)
+	_, _, err := f.service.NextFreeVersion(context.Background(), testBlock)
 
 	if !errors.Is(err, ErrStructuralData) {
 		t.Fatalf("error = %v, want ErrStructuralData", err)
@@ -587,7 +548,7 @@ func TestNextFreeVersion_LeavesAFailedHeadReadRetryable(t *testing.T) {
 	client.headErr = errors.New("429 Too Many Requests")
 	f := newFixtureWith(t, testConfig(), client)
 
-	_, err := f.service.NextFreeVersion(context.Background(), testBlock)
+	_, _, err := f.service.NextFreeVersion(context.Background(), testBlock)
 
 	if err == nil {
 		t.Fatal("NextFreeVersion succeeded without reading the chain head")
@@ -605,7 +566,7 @@ func TestNextFreeVersion_SurfacesAFailedCanonicalRead(t *testing.T) {
 	f := newFixtureWith(t, testConfig(), client)
 	f.archiveHoldsFork(1)
 
-	_, err := f.service.NextFreeVersion(context.Background(), testBlock)
+	_, _, err := f.service.NextFreeVersion(context.Background(), testBlock)
 
 	if err == nil {
 		t.Fatal("NextFreeVersion succeeded without the canonical hash to compare")
@@ -622,7 +583,7 @@ func TestNextFreeVersion_LogsTheVersionItChose(t *testing.T) {
 	f := newFixtureWith(t, config, newStubClient())
 	f.archiveHoldsFork(2)
 
-	if _, err := f.service.NextFreeVersion(context.Background(), testBlock); err != nil {
+	if _, _, err := f.service.NextFreeVersion(context.Background(), testBlock); err != nil {
 		t.Fatalf("NextFreeVersion: %v", err)
 	}
 
@@ -640,7 +601,7 @@ func TestNextFreeVersion_LeavesAFailedArchiveReadRetryable(t *testing.T) {
 	f := newFixture(t, newStubClient())
 	f.archive.err = errors.New("503 SlowDown")
 
-	_, err := f.service.NextFreeVersion(context.Background(), testBlock)
+	_, _, err := f.service.NextFreeVersion(context.Background(), testBlock)
 
 	if err == nil {
 		t.Fatal("NextFreeVersion succeeded without reading the archive")
@@ -656,7 +617,7 @@ func TestNextFreeVersion_IsStructuralWhenTheArchiveHoldsAKeyItCannotRead(t *test
 	f := newFixture(t, newStubClient())
 	f.archive.err = fmt.Errorf("listing s3://bucket/25395000-25395999/25395651_: %w", s3key.ErrUnrecognisedKey)
 
-	_, err := f.service.NextFreeVersion(context.Background(), testBlock)
+	_, _, err := f.service.NextFreeVersion(context.Background(), testBlock)
 
 	if !errors.Is(err, ErrStructuralData) {
 		t.Fatalf("error = %v, want ErrStructuralData", err)
@@ -666,7 +627,7 @@ func TestNextFreeVersion_IsStructuralWhenTheArchiveHoldsAKeyItCannotRead(t *test
 func TestNextFreeVersion_RejectsANonPositiveHeightWithoutListing(t *testing.T) {
 	f := newFixture(t, newStubClient())
 
-	_, err := f.service.NextFreeVersion(context.Background(), 0)
+	_, _, err := f.service.NextFreeVersion(context.Background(), 0)
 
 	if !errors.Is(err, ErrStructuralData) {
 		t.Fatalf("error = %v, want ErrStructuralData", err)
@@ -682,7 +643,7 @@ func TestNextFreeVersion_RejectsANonPositiveHeightWithoutListing(t *testing.T) {
 func TestRepublish_NeverReadsTheArchive(t *testing.T) {
 	f := newFixture(t, newStubClient())
 
-	if _, err := f.service.Republish(context.Background(), testBlock, 2, nil); err != nil {
+	if _, err := f.service.Republish(context.Background(), testBlock, 2, testHash, nil); err != nil {
 		t.Fatalf("Republish: %v", err)
 	}
 
@@ -694,28 +655,13 @@ func TestRepublish_NeverReadsTheArchive(t *testing.T) {
 func TestRepublish_IsStructuralWhenAskedForANegativeVersion(t *testing.T) {
 	f := newFixture(t, newStubClient())
 
-	_, err := f.service.Republish(context.Background(), testBlock, -1, nil)
+	_, err := f.service.Republish(context.Background(), testBlock, -1, testHash, nil)
 
 	if !errors.Is(err, ErrStructuralData) {
 		t.Fatalf("error = %v, want ErrStructuralData", err)
 	}
-	if f.client.headerCalls != 0 {
-		t.Errorf("read the chain %d times for a rejected version", f.client.headerCalls)
-	}
-}
-
-func TestRepublish_LeavesATransientRPCFailureRetryable(t *testing.T) {
-	client := newStubClient()
-	client.dataErr = errors.New("429 Too Many Requests")
-	f := newFixture(t, client)
-
-	_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
-
-	if err == nil {
-		t.Fatal("Republish succeeded against a throttled node")
-	}
-	if errors.Is(err, ErrStructuralData) {
-		t.Errorf("error = %v, want it left retryable", err)
+	if f.client.fetches != 0 {
+		t.Errorf("read the chain %d times for a rejected version", f.client.fetches)
 	}
 }
 
@@ -723,7 +669,7 @@ func TestRepublish_DoesNotPublishWhenTheCacheWriteFails(t *testing.T) {
 	sink := memory.NewEventSink()
 	service := newTestService(t, testConfig(), newStubClient(), &stubArchive{}, failingCache{err: errors.New("redis unavailable")}, sink)
 
-	_, err := service.Republish(context.Background(), testBlock, 1, nil)
+	_, err := service.Republish(context.Background(), testBlock, 1, testHash, nil)
 
 	if err == nil {
 		t.Fatal("Republish succeeded against an unwritable cache")
@@ -736,7 +682,7 @@ func TestRepublish_DoesNotPublishWhenTheCacheWriteFails(t *testing.T) {
 func TestRepublish_SurfacesAPublishFailure(t *testing.T) {
 	service := newTestService(t, testConfig(), newStubClient(), &stubArchive{}, memory.NewBlockCache(), failingSink{err: errors.New("sns unavailable")})
 
-	_, err := service.Republish(context.Background(), testBlock, 1, nil)
+	_, err := service.Republish(context.Background(), testBlock, 1, testHash, nil)
 
 	if err == nil {
 		t.Fatal("Republish succeeded when the sink refused the event")
@@ -811,7 +757,7 @@ func TestRepublish_CachesBlobsWhenTheChainsWatcherFetchesThem(t *testing.T) {
 	config.EnableBlobs = true
 	f := newFixtureWith(t, config, newStubClient())
 
-	result, err := f.service.Republish(context.Background(), testBlock, 1, nil)
+	result, err := f.service.Republish(context.Background(), testBlock, 1, testHash, nil)
 	if err != nil {
 		t.Fatalf("Republish: %v", err)
 	}
@@ -827,101 +773,41 @@ func TestRepublish_CachesBlobsWhenTheChainsWatcherFetchesThem(t *testing.T) {
 func TestRepublish_RejectsANonPositiveBlockNumber(t *testing.T) {
 	f := newFixture(t, newStubClient())
 
-	_, err := f.service.Republish(context.Background(), 0, 1, nil)
+	_, err := f.service.Republish(context.Background(), 0, 1, testHash, nil)
 
 	if !errors.Is(err, ErrStructuralData) {
 		t.Fatalf("error = %v, want ErrStructuralData", err)
 	}
 }
 
-func TestRepublish_IsStructuralWhenTheHeaderCannotBeDecoded(t *testing.T) {
+func TestRepublish_LeavesAFailedPayloadReadRetryable(t *testing.T) {
 	tests := []struct {
 		name string
-		raw  json.RawMessage
+		fail func(*stubClient)
 	}{
-		{name: "not an object", raw: json.RawMessage(`["0x1"]`)},
-		{name: "no hash", raw: json.RawMessage(`{"parentHash":"0x2","timestamp":"0x1"}`)},
-		{name: "unparseable timestamp", raw: json.RawMessage(`{"hash":"0x1","parentHash":"0x2","timestamp":"later"}`)},
+		{name: "the block", fail: func(c *stubClient) { c.payloads.BlockErr = errors.New("504 Gateway Timeout") }},
+		{name: "the receipts", fail: func(c *stubClient) { c.payloads.ReceiptsErr = errors.New("504 Gateway Timeout") }},
+		{name: "the traces", fail: func(c *stubClient) { c.payloads.TracesErr = errors.New("504 Gateway Timeout") }},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			client := newStubClient()
-			client.headers[0] = headerReply{raw: tc.raw}
+			tc.fail(client)
 			f := newFixtureWith(t, testConfig(), client)
 
-			_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
-
-			if !errors.Is(err, ErrStructuralData) {
-				t.Fatalf("error = %v, want ErrStructuralData", err)
-			}
-		})
-	}
-}
-
-func TestRepublish_LeavesAFailedNumberReadRetryable(t *testing.T) {
-	tests := []struct {
-		name  string
-		index int
-	}{
-		{name: "the first read", index: 0},
-		{name: "the confirming read", index: 1},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			client := newStubClient()
-			client.headers[tc.index] = headerReply{err: errors.New("dial tcp: connection refused")}
-			f := newFixtureWith(t, testConfig(), client)
-
-			_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
+			_, err := f.service.Republish(context.Background(), testBlock, 1, testHash, nil)
 
 			if err == nil {
-				t.Fatal("Republish succeeded against an unreachable node")
+				t.Fatal("Republish succeeded with a failed fetch")
 			}
 			if errors.Is(err, ErrStructuralData) {
 				t.Errorf("error = %v, want it left retryable", err)
 			}
+			if count := f.sink.GetEventCount(); count != 0 {
+				t.Errorf("published %d events for a block it could not fetch", count)
+			}
 		})
-	}
-}
-
-func TestRepublish_TreatsTheHeightVanishingOnTheConfirmingReadAsAReorg(t *testing.T) {
-	client := newStubClient()
-	client.headers[1] = headerReply{err: fmt.Errorf("eth_getBlockByNumber: %w", rpcutil.ErrUpstreamNullResult)}
-	f := newFixtureWith(t, testConfig(), client)
-
-	_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
-
-	if !errors.Is(err, ErrCanonicalHashMoved) {
-		t.Fatalf("error = %v, want ErrCanonicalHashMoved", err)
-	}
-}
-
-func TestRepublish_IsStructuralWhenTheConfirmingReadCannotBeDecoded(t *testing.T) {
-	client := newStubClient()
-	client.headers[1] = headerReply{raw: json.RawMessage(`{"parentHash":"0x2","timestamp":"0x1"}`)}
-	f := newFixtureWith(t, testConfig(), client)
-
-	_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
-
-	if !errors.Is(err, ErrStructuralData) {
-		t.Fatalf("error = %v, want ErrStructuralData", err)
-	}
-}
-
-func TestRepublish_LeavesAPerDataTypeRPCFailureRetryable(t *testing.T) {
-	client := newStubClient()
-	client.data.ReceiptsErr = errors.New("504 Gateway Timeout")
-	f := newFixtureWith(t, testConfig(), client)
-
-	_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
-
-	if err == nil {
-		t.Fatal("Republish succeeded with a failed receipts fetch")
-	}
-	if errors.Is(err, ErrStructuralData) {
-		t.Errorf("error = %v, want it left retryable", err)
 	}
 }
 
@@ -932,34 +818,8 @@ func TestNewService_RunsWithoutALogger(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 
-	if _, err := service.Republish(context.Background(), testBlock, 1, nil); err != nil {
+	if _, err := service.Republish(context.Background(), testBlock, 1, testHash, nil); err != nil {
 		t.Fatalf("Republish: %v", err)
-	}
-}
-
-// A replica answering by number with a neighbouring height would have its block
-// cached and published under the requested one, so the header has to say which
-// height it describes.
-func TestRepublish_RefusesAHeaderDescribingADifferentHeight(t *testing.T) {
-	client := newStubClient()
-	client.headers[0] = headerReply{raw: headerJSONAt(testBlock-1, testHash)}
-	f := newFixtureWith(t, testConfig(), client)
-
-	_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
-
-	if !errors.Is(err, ErrStructuralData) {
-		t.Fatalf("error = %v, want ErrStructuralData", err)
-	}
-	for _, want := range []string{fmt.Sprint(testBlock), fmt.Sprint(testBlock - 1)} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error = %v, want it to name %q", err, want)
-		}
-	}
-	if got := f.cached(t, "block", 1); got != nil {
-		t.Errorf("cached %s from a header describing another height", got)
-	}
-	if count := f.sink.GetEventCount(); count != 0 {
-		t.Errorf("published %d events from a header describing another height", count)
 	}
 }
 
@@ -969,49 +829,10 @@ func TestNextFreeVersion_RefusesAHeaderDescribingADifferentHeight(t *testing.T) 
 	f := newFixtureWith(t, testConfig(), client)
 	f.archiveHoldsFork(1)
 
-	_, err := f.service.NextFreeVersion(context.Background(), testBlock)
+	_, _, err := f.service.NextFreeVersion(context.Background(), testBlock)
 
 	if !errors.Is(err, ErrStructuralData) {
 		t.Fatalf("error = %v, want ErrStructuralData", err)
-	}
-}
-
-// The by-hash read is what pins every data type to one block. A node that
-// answered it with something else would have that block cached under this height
-// while the event published the canonical header beside it.
-func TestRepublish_RefusesABlockPayloadThatIsNotTheHashItWasFetchedAt(t *testing.T) {
-	tests := []struct {
-		name     string
-		payload  json.RawMessage
-		mentions []string
-	}{
-		{name: "a payload naming another block", payload: blockPayload(forkHash), mentions: []string{forkHash, testHash}},
-		{name: "a payload naming no block", payload: json.RawMessage(`{"number":"0x1"}`), mentions: []string{testHash}},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			client := newStubClient()
-			client.data.Block = tc.payload
-			f := newFixtureWith(t, testConfig(), client)
-
-			_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
-
-			if !errors.Is(err, ErrStructuralData) {
-				t.Fatalf("error = %v, want ErrStructuralData", err)
-			}
-			for _, want := range tc.mentions {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("error = %v, want it to name %q", err, want)
-				}
-			}
-			if got := f.cached(t, "block", 1); got != nil {
-				t.Errorf("cached %s from a payload naming another block", got)
-			}
-			if count := f.sink.GetEventCount(); count != 0 {
-				t.Errorf("published %d events from a payload naming another block", count)
-			}
-		})
 	}
 }
 
@@ -1024,7 +845,7 @@ func TestNextFreeVersion_WarnsWhenTheArchiveHoldsNothingToCompareAgainst(t *test
 	config.Logger = slog.New(recorder)
 	f := newFixtureWith(t, config, newStubClient())
 
-	version, err := f.service.NextFreeVersion(context.Background(), testBlock)
+	version, _, err := f.service.NextFreeVersion(context.Background(), testBlock)
 	if err != nil {
 		t.Fatalf("NextFreeVersion: %v", err)
 	}
@@ -1049,7 +870,7 @@ func TestNextFreeVersion_DoesNotWarnWhenTheArchiveHoldsTheHeight(t *testing.T) {
 	f := newFixtureWith(t, config, newStubClient())
 	f.archiveHoldsFork(1)
 
-	if _, err := f.service.NextFreeVersion(context.Background(), testBlock); err != nil {
+	if _, _, err := f.service.NextFreeVersion(context.Background(), testBlock); err != nil {
 		t.Fatalf("NextFreeVersion: %v", err)
 	}
 
@@ -1076,7 +897,7 @@ func TestArchivedVersion_PublishesAtTheVersionTheRepairedArchiveHolds(t *testing
 			f := newFixture(t, newStubClient())
 			f.archiveHoldsCanonical(tc.highest)
 
-			version, err := f.service.ArchivedVersion(context.Background(), testBlock)
+			version, _, err := f.service.ArchivedVersion(context.Background(), testBlock)
 			if err != nil {
 				t.Fatalf("ArchivedVersion: %v", err)
 			}
@@ -1119,7 +940,7 @@ func TestArchivedVersion_RefusesAnArchiveThatDoesNotHoldTheCanonicalBlock(t *tes
 			f := newFixture(t, newStubClient())
 			tc.archive(f)
 
-			_, err := f.service.ArchivedVersion(context.Background(), testBlock)
+			_, _, err := f.service.ArchivedVersion(context.Background(), testBlock)
 
 			if !errors.Is(err, ErrStructuralData) {
 				t.Fatalf("error = %v, want ErrStructuralData", err)
@@ -1138,7 +959,7 @@ func TestArchivedVersion_RefusesAHeightTooCloseToTheChainHead(t *testing.T) {
 	client.head = testBlock + finalityDepth - 1
 	f := newFixtureWith(t, testConfig(), client)
 
-	_, err := f.service.ArchivedVersion(context.Background(), testBlock)
+	_, _, err := f.service.ArchivedVersion(context.Background(), testBlock)
 
 	if !errors.Is(err, ErrStructuralData) {
 		t.Fatalf("error = %v, want ErrStructuralData", err)
@@ -1153,7 +974,7 @@ func TestArchivedVersion_LeavesAFailedHashReadRetryable(t *testing.T) {
 	f.archiveHolds(1)
 	f.archive.hashErr = errors.New("503 SlowDown")
 
-	_, err := f.service.ArchivedVersion(context.Background(), testBlock)
+	_, _, err := f.service.ArchivedVersion(context.Background(), testBlock)
 
 	if err == nil {
 		t.Fatal("ArchivedVersion succeeded without reading the archived block")
@@ -1172,7 +993,7 @@ func TestArchivedVersion_LogsTheRepairedDerivation(t *testing.T) {
 	f := newFixtureWith(t, config, newStubClient())
 	f.archiveHoldsCanonical(2)
 
-	if _, err := f.service.ArchivedVersion(context.Background(), testBlock); err != nil {
+	if _, _, err := f.service.ArchivedVersion(context.Background(), testBlock); err != nil {
 		t.Fatalf("ArchivedVersion: %v", err)
 	}
 
@@ -1189,7 +1010,7 @@ func TestArchivedVersion_LogsTheRepairedDerivation(t *testing.T) {
 func TestRepublish_PublishesAtVersionZeroWhenTheRunDerivedIt(t *testing.T) {
 	f := newFixture(t, newStubClient())
 
-	result, err := f.service.Republish(context.Background(), testBlock, 0, nil)
+	result, err := f.service.Republish(context.Background(), testBlock, 0, testHash, nil)
 	if err != nil {
 		t.Fatalf("Republish: %v", err)
 	}
@@ -1202,5 +1023,270 @@ func TestRepublish_PublishesAtVersionZeroWhenTheRunDerivedIt(t *testing.T) {
 	}
 	if got := f.cached(t, "block", 0); got == nil {
 		t.Error("cached nothing at version 0")
+	}
+}
+
+// Fetching by number lets a replica behind the head answer with another block's
+// receipts or traces, and caching those would publish one block's logs under
+// another's hash. Retryable: the next attempt asks again.
+func TestRepublish_LeavesAPayloadDescribingAnotherBlockRetryable(t *testing.T) {
+	tests := []struct {
+		name     string
+		serve    func(*stubClient)
+		mentions []string
+	}{
+		{
+			name:     "receipts naming another block",
+			serve:    func(c *stubClient) { c.payloads.Receipts = receiptsPayload(forkHash) },
+			mentions: []string{"receipts", forkHash, testHash},
+		},
+		{
+			name:     "traces naming another block",
+			serve:    func(c *stubClient) { c.payloads.Traces = tracesPayload(forkHash) },
+			mentions: []string{"traces", forkHash, testHash},
+		},
+		{
+			name:     "receipts naming no block at all",
+			serve:    func(c *stubClient) { c.payloads.Receipts = json.RawMessage(`[{"status":"0x1"}]`) },
+			mentions: []string{"receipts", "no block"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newStubClient()
+			tc.serve(client)
+			f := newFixtureWith(t, testConfig(), client)
+
+			_, err := f.service.Republish(context.Background(), testBlock, 1, testHash, nil)
+
+			if err == nil {
+				t.Fatal("Republish succeeded on a payload describing another block")
+			}
+			if errors.Is(err, ErrStructuralData) {
+				t.Errorf("error = %v, want it left retryable", err)
+			}
+			for _, want := range tc.mentions {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %v, want it to mention %q", err, want)
+				}
+			}
+			if got := f.cached(t, "block", 1); got != nil {
+				t.Errorf("cached %s from a payload set describing another block", got)
+			}
+			if count := f.sink.GetEventCount(); count != 0 {
+				t.Errorf("published %d events from a payload set describing another block", count)
+			}
+		})
+	}
+}
+
+// An empty list is what a lagging replica answers with, and the only block it is
+// the truth for is one with no transactions.
+func TestRepublish_LeavesAnEmptyPayloadForABlockWithTransactionsRetryable(t *testing.T) {
+	tests := []struct {
+		name  string
+		serve func(*stubClient)
+	}{
+		{name: "no receipts", serve: func(c *stubClient) { c.payloads.Receipts = json.RawMessage(`[]`) }},
+		{name: "no traces", serve: func(c *stubClient) { c.payloads.Traces = json.RawMessage(`[]`) }},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newStubClient()
+			tc.serve(client)
+			f := newFixtureWith(t, testConfig(), client)
+
+			_, err := f.service.Republish(context.Background(), testBlock, 1, testHash, nil)
+
+			if err == nil {
+				t.Fatal("Republish succeeded on an empty payload for a block with transactions")
+			}
+			if errors.Is(err, ErrStructuralData) {
+				t.Errorf("error = %v, want it left retryable", err)
+			}
+			if !strings.Contains(err.Error(), "transactions") {
+				t.Errorf("error = %v, want it to say the block has transactions", err)
+			}
+			if got := f.cached(t, "block", 1); got != nil {
+				t.Errorf("cached %s from an incomplete payload set", got)
+			}
+			if count := f.sink.GetEventCount(); count != 0 {
+				t.Errorf("published %d events from an incomplete payload set", count)
+			}
+		})
+	}
+}
+
+func TestRepublish_AcceptsEmptyReceiptsAndTracesForABlockWithNoTransactions(t *testing.T) {
+	client := newStubClient()
+	client.payloads.Block = emptyBlockPayload(testHash)
+	client.payloads.Receipts = json.RawMessage(`[]`)
+	client.payloads.Traces = json.RawMessage(`[]`)
+	f := newFixtureWith(t, testConfig(), client)
+
+	result, err := f.service.Republish(context.Background(), testBlock, 1, testHash, nil)
+	if err != nil {
+		t.Fatalf("Republish: %v", err)
+	}
+
+	if got, want := fmt.Sprint(result.DataTypes), fmt.Sprint([]string{"block", "receipts", "traces"}); got != want {
+		t.Errorf("DataTypes = %v, want %v", got, want)
+	}
+	for _, dataType := range []string{"receipts", "traces"} {
+		if got := string(f.cached(t, dataType, 1)); got != `[]` {
+			t.Errorf("cached %s = %s, want the empty list the node served", dataType, got)
+		}
+	}
+}
+
+func TestRepublish_CachesThePayloadsItFetchedAtTheVersion(t *testing.T) {
+	f := newFixture(t, newStubClient())
+
+	if _, err := f.service.Republish(context.Background(), testBlock, 3, testHash, nil); err != nil {
+		t.Fatalf("Republish: %v", err)
+	}
+
+	want := map[string]json.RawMessage{
+		"block":    blockPayload(testHash),
+		"receipts": receiptsPayload(testHash),
+		"traces":   tracesPayload(testHash),
+	}
+	for dataType, payload := range want {
+		if got := string(f.cached(t, dataType, 3)); got != string(payload) {
+			t.Errorf("cached %s = %s, want %s", dataType, got, payload)
+		}
+	}
+	if got := f.publishedEvent(t).Version; got != 3 {
+		t.Errorf("published version = %d, want 3", got)
+	}
+}
+
+// Without the hash its derivation read, a republish has nothing to hold the
+// payloads to — and the run that derived one is the only caller.
+func TestRepublish_RejectsARunThatDerivedNoCanonicalHash(t *testing.T) {
+	f := newFixture(t, newStubClient())
+
+	_, err := f.service.Republish(context.Background(), testBlock, 1, "", nil)
+
+	if !errors.Is(err, ErrStructuralData) {
+		t.Fatalf("error = %v, want ErrStructuralData", err)
+	}
+	if f.client.fetches != 0 {
+		t.Errorf("read the chain %d times with nothing to verify against", f.client.fetches)
+	}
+}
+
+// The height reorged after its version was derived, or the node answered with an
+// orphan. Either way the block is not the one this run is repairing to, and
+// publishing it would enshrine a second losing fork.
+func TestRepublish_RefusesABlockThatIsNotTheOneTheRunDerived(t *testing.T) {
+	client := newStubClient()
+	client.payloads.Block = blockPayload(forkHash)
+	f := newFixtureWith(t, testConfig(), client)
+
+	_, err := f.service.Republish(context.Background(), testBlock, 1, testHash, nil)
+
+	if !errors.Is(err, ErrCanonicalHashMoved) {
+		t.Fatalf("error = %v, want ErrCanonicalHashMoved", err)
+	}
+	if errors.Is(err, ErrStructuralData) {
+		t.Error("a height that moved must stay retryable, not be tagged structural")
+	}
+	for _, want := range []string{forkHash, testHash} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to name %q", err, want)
+		}
+	}
+	if got := f.cached(t, "block", 1); got != nil {
+		t.Errorf("cached %s from a block the run did not derive", got)
+	}
+	if count := f.sink.GetEventCount(); count != 0 {
+		t.Errorf("published %d events from a block the run did not derive", count)
+	}
+}
+
+func TestRepublish_LeavesABlockPayloadNamingNoBlockRetryable(t *testing.T) {
+	client := newStubClient()
+	client.payloads.Block = json.RawMessage(`{"number":"0x1"}`)
+	f := newFixtureWith(t, testConfig(), client)
+
+	_, err := f.service.Republish(context.Background(), testBlock, 1, testHash, nil)
+
+	if err == nil {
+		t.Fatal("Republish succeeded on a payload naming no block")
+	}
+	if errors.Is(err, ErrStructuralData) {
+		t.Errorf("error = %v, want it left retryable", err)
+	}
+	if !strings.Contains(err.Error(), testHash) {
+		t.Errorf("error = %v, want it to name the hash the run derived", err)
+	}
+}
+
+// A replica answering by number with a neighbouring height would have its block
+// cached and published under the height that was asked for.
+func TestRepublish_RefusesABlockPayloadDescribingADifferentHeight(t *testing.T) {
+	client := newStubClient()
+	client.payloads.Block = blockPayloadAt(testBlock-1, testHash, `[]`)
+	f := newFixtureWith(t, testConfig(), client)
+
+	_, err := f.service.Republish(context.Background(), testBlock, 1, testHash, nil)
+
+	if !errors.Is(err, ErrStructuralData) {
+		t.Fatalf("error = %v, want ErrStructuralData", err)
+	}
+	for _, want := range []string{fmt.Sprint(testBlock), fmt.Sprint(testBlock - 1)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to name %q", err, want)
+		}
+	}
+	if got := f.cached(t, "block", 1); got != nil {
+		t.Errorf("cached %s from a payload describing another height", got)
+	}
+}
+
+// The event's timestamp comes from the payload now, so a payload that cannot
+// answer for it stops the height rather than publishing a zero.
+func TestRepublish_IsStructuralWhenTheBlockPayloadCannotBeDecoded(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload json.RawMessage
+	}{
+		{name: "no timestamp", payload: json.RawMessage(fmt.Sprintf(`{"number":"0x%x","hash":%q,"transactions":[]}`, testBlock, testHash))},
+		{name: "an unparseable timestamp", payload: json.RawMessage(fmt.Sprintf(`{"number":"0x%x","hash":%q,"timestamp":"later","transactions":[]}`, testBlock, testHash))},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newStubClient()
+			client.payloads.Block = tc.payload
+			f := newFixtureWith(t, testConfig(), client)
+
+			_, err := f.service.Republish(context.Background(), testBlock, 1, testHash, nil)
+
+			if !errors.Is(err, ErrStructuralData) {
+				t.Fatalf("error = %v, want ErrStructuralData", err)
+			}
+		})
+	}
+}
+
+// The three payload reads are the whole RPC cost of a republish: the hash comes
+// from the derivation, and at this depth a second read of it can only confirm
+// what the first one saw.
+func TestRepublish_ReadsTheChainThreeTimes(t *testing.T) {
+	f := newFixture(t, newStubClient())
+
+	if _, err := f.service.Republish(context.Background(), testBlock, 1, testHash, nil); err != nil {
+		t.Fatalf("Republish: %v", err)
+	}
+
+	if f.client.fetches != 3 {
+		t.Errorf("issued %d payload reads, want block, receipts and traces", f.client.fetches)
+	}
+	if f.client.headerCalls != 0 {
+		t.Errorf("read the canonical header %d times, want it taken from the derivation", f.client.headerCalls)
 	}
 }
