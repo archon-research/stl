@@ -1387,6 +1387,13 @@ alerts below cover every chain without per-instance edits. robinhood's manifests
 live in `k8s/base` only and are not yet referenced from a cluster overlay, so no
 `robinhood-allocation-tracker` pod or `chain="robinhood"` series exists yet.
 
+`SWEEP_BLOCKS` must be a positive block count here: unlike the curve indexer
+above, the allocation tracker has no `SWEEP_BLOCKS=0` "sweep disabled" mode, and
+a non-positive value makes the pod refuse to start rather than silently fall back
+to the 75-block default. Pick it per chain so the sweep lands ~10 minutes apart in
+wall-clock terms — 300 at 2s blocks (optimism), 600 at 1s (unichain), 2400 at
+~250ms (arbitrum).
+
 **Metric coverage (VEC-499):** the shared `telemetry.Metrics` recorder emits one
 sample per consumed block — `blocks_processed_total{service_name="prime-allocation-indexer",
 chain, status}` and the seconds-bucket histogram `processing_duration_seconds`

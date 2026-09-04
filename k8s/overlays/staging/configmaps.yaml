@@ -215,7 +215,7 @@ data:
   ARCHIVE_SC_CALLS: "true"
   RAW_SC_BUCKET: "stl-sentinelstaging-raw-sc-calls"
 ---
-# The three L2 trackers below (ARCT-216) set SWEEP_BLOCKS because the 75-block
+# The three L2 trackers immediately below (ARCT-216) set SWEEP_BLOCKS because the 75-block
 # default is block-count based: at these chains' cadences it would re-read and
 # append every tracked position every ~19s (arbitrum) to ~75s (unichain). The
 # values normalise the sweep to ~10 minutes, matching the psm3-indexer configmaps

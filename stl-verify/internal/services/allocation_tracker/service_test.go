@@ -146,6 +146,30 @@ func TestNewService_RejectsChainScopedInputMismatch(t *testing.T) {
 	}
 }
 
+func TestNewService_RejectsNegativeSweepCadence(t *testing.T) {
+	registry := NewSourceRegistry(ConfigDefaults().Logger)
+	entries := []*TokenEntry{{
+		ContractAddress: common.HexToAddress("0x1111"),
+		WalletAddress:   common.HexToAddress("0xaaaa"),
+		Star:            "spark",
+		Chain:           "mainnet",
+		TokenType:       "erc20",
+	}}
+	proxies := []ProxyConfig{{
+		Star:    "spark",
+		Chain:   "mainnet",
+		Address: common.HexToAddress("0xaaaa"),
+	}}
+
+	_, err := NewService(
+		Config{ChainID: 1, SweepEveryNBlocks: -1},
+		nil, nil, registry, entries, &testHandler{}, proxies,
+	)
+	if err == nil || !strings.Contains(err.Error(), "must not be negative") {
+		t.Fatalf("error = %v, want a negative-cadence rejection (it would sweep on every block)", err)
+	}
+}
+
 func TestNewService_RequiresChainID(t *testing.T) {
 	handler := &testHandler{}
 	registry := NewSourceRegistry(ConfigDefaults().Logger)
@@ -430,10 +454,18 @@ func TestProcessBlock_MissingBlockHash_ReturnsError(t *testing.T) {
 
 // ── sweep cadence ──
 
-// newCadenceTracker builds a tracker over one entry that always resolves to a
-// balance, so every sweep reaches the handler and is countable. errCalls leading
-// source calls fail, modelling a transient RPC error mid-backlog.
-func newCadenceTracker(t *testing.T, sweepEveryN, errCalls int) (*Service, *testHandler) {
+// trackerFixture is a tracker over a single entry, plus the handles its tests
+// drive and assert on.
+type trackerFixture struct {
+	svc     *Service
+	handler *testHandler
+	source  *mockSource
+}
+
+// newTracker builds a tracker whose one entry of tokenType resolves to bal
+// through sourceName, sweeping every sweepEveryN consumed blocks. Blocks it is
+// driven with carry no receipts, so only the periodic sweep produces snapshots.
+func newTracker(t *testing.T, tokenType, sourceName string, bal *PositionBalance, sweepEveryN int) *trackerFixture {
 	t.Helper()
 
 	entry := &TokenEntry{
@@ -441,21 +473,16 @@ func newCadenceTracker(t *testing.T, sweepEveryN, errCalls int) (*Service, *test
 		WalletAddress:   common.HexToAddress("0xaaaa"),
 		Star:            "spark",
 		Chain:           "mainnet",
-		TokenType:       "erc20",
+		TokenType:       tokenType,
 	}
 	result := NewFetchResult()
-	result.Balances[entry.Key()] = &PositionBalance{Balance: big.NewInt(1), UnderlyingValue: big.NewInt(1)}
+	result.Balances[entry.Key()] = bal
 
 	source := &mockSource{
-		name:       "erc20",
-		tokenTypes: map[string]bool{"erc20": true},
+		name:       sourceName,
+		tokenTypes: map[string]bool{tokenType: true},
 		result:     result,
-		errCalls:   errCalls,
 	}
-	if errCalls > 0 {
-		source.err = fmt.Errorf("temporary rpc error")
-	}
-
 	logger := quietLogger()
 	registry := NewSourceRegistry(logger)
 	registry.Register(source)
@@ -479,14 +506,17 @@ func newCadenceTracker(t *testing.T, sweepEveryN, errCalls int) (*Service, *test
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	return svc, handler
+	return &trackerFixture{svc: svc, handler: handler, source: source}
+}
+
+func newCadenceFixture(t *testing.T, sweepEveryN int) *trackerFixture {
+	t.Helper()
+	return newTracker(t, "erc20", "erc20", &PositionBalance{Balance: big.NewInt(1), UnderlyingValue: big.NewInt(1)}, sweepEveryN)
 }
 
 // driveBacklog feeds count consecutive blocks from first through the tracker the
 // way a drained SQS backlog does, returning the blocks whose processing failed.
-func driveBacklog(t *testing.T, svc *Service, first int64, count int) []int64 {
-	t.Helper()
-
+func (f *trackerFixture) driveBacklog(first int64, count int) []int64 {
 	var failed []int64
 	for i := range count {
 		event := outbound.BlockEvent{
@@ -495,17 +525,16 @@ func driveBacklog(t *testing.T, svc *Service, first int64, count int) []int64 {
 			BlockTimestamp: 1700000000,
 			BlockHash:      testBlockHash.Hex(),
 		}
-		if err := svc.processBlock(context.Background(), event); err != nil {
+		if err := f.svc.processBlock(context.Background(), event); err != nil {
 			failed = append(failed, event.BlockNumber)
 		}
 	}
 	return failed
 }
 
-// sweptBlocks returns, in order, the blocks a periodic sweep persisted.
-func sweptBlocks(handler *testHandler) []int64 {
+func (f *trackerFixture) sweptBlocks() []int64 {
 	var blocks []int64
-	for _, batch := range handler.batches {
+	for _, batch := range f.handler.batches {
 		for _, snapshot := range batch.Snapshots {
 			if snapshot.Direction == DirectionSweep {
 				blocks = append(blocks, snapshot.BlockNumber)
@@ -516,8 +545,8 @@ func sweptBlocks(handler *testHandler) []int64 {
 }
 
 // TestProcessBlock_SweepsOnEveryNthConsumedBlock: the cadence counts consumed
-// messages and starts at zero, so a backlog drained back-to-back sweeps on the
-// Nth block and no other — never on consecutive blocks, and never on the first.
+// messages and starts at zero, so a drained backlog sweeps on the Nth block and
+// no other — never on consecutive blocks, and never on the first.
 func TestProcessBlock_SweepsOnEveryNthConsumedBlock(t *testing.T) {
 	const first int64 = 50701400
 
@@ -528,13 +557,13 @@ func TestProcessBlock_SweepsOnEveryNthConsumedBlock(t *testing.T) {
 		want        []int64
 	}{
 		{
-			name:        "mainnet default",
+			name:        "75-block default",
 			sweepEveryN: 75,
 			blocks:      225,
 			want:        []int64{first + 74, first + 149, first + 224},
 		},
 		{
-			name:        "robinhood cadence",
+			name:        "6000-block cadence",
 			sweepEveryN: 6000,
 			blocks:      12000,
 			want:        []int64{first + 5999, first + 11999},
@@ -543,13 +572,13 @@ func TestProcessBlock_SweepsOnEveryNthConsumedBlock(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc, handler := newCadenceTracker(t, tt.sweepEveryN, 0)
+			f := newCadenceFixture(t, tt.sweepEveryN)
 
-			if failed := driveBacklog(t, svc, first, tt.blocks); failed != nil {
+			if failed := f.driveBacklog(first, tt.blocks); len(failed) > 0 {
 				t.Fatalf("processBlock failed on blocks %v", failed)
 			}
 
-			if got := sweptBlocks(handler); !slices.Equal(got, tt.want) {
+			if got := f.sweptBlocks(); !slices.Equal(got, tt.want) {
 				t.Errorf("swept blocks = %v, want %v", got, tt.want)
 			}
 		})
@@ -557,23 +586,41 @@ func TestProcessBlock_SweepsOnEveryNthConsumedBlock(t *testing.T) {
 }
 
 // TestProcessBlock_SweepFailureRetriesOnTheNextBlock: a failed sweep leaves the
-// counter past N (VEC-188), so the retry lands on the next block consumed —
-// the only path that ever sweeps consecutive blocks.
+// counter past N, so the retry lands on the next block consumed — the only path
+// that ever sweeps consecutive blocks.
 func TestProcessBlock_SweepFailureRetriesOnTheNextBlock(t *testing.T) {
 	const first int64 = 50701400
 	const sweepEveryN = 75
 
-	svc, handler := newCadenceTracker(t, sweepEveryN, 2)
+	f := newCadenceFixture(t, sweepEveryN)
+	f.source.err = fmt.Errorf("temporary rpc error")
+	f.source.errCalls = 2
 
-	failed := driveBacklog(t, svc, first, 2*sweepEveryN+2)
+	failed := f.driveBacklog(first, sweepEveryN+3)
 
-	wantFailed := []int64{first + 74, first + 75}
-	if !slices.Equal(failed, wantFailed) {
-		t.Fatalf("failed blocks = %v, want %v", failed, wantFailed)
+	if want := []int64{first + 74, first + 75}; !slices.Equal(failed, want) {
+		t.Fatalf("failed blocks = %v, want %v", failed, want)
 	}
-	want := []int64{first + 76, first + 151}
-	if got := sweptBlocks(handler); !slices.Equal(got, want) {
-		t.Errorf("swept blocks = %v, want %v (a success must restart the full cadence)", got, want)
+	if got, want := f.sweptBlocks(), []int64{first + 76}; !slices.Equal(got, want) {
+		t.Errorf("swept blocks = %v, want %v", got, want)
+	}
+}
+
+// TestProcessBlock_SweepSuccessRestartsTheFullCadence: only a success resets the
+// counter, so the sweep that recovers a failure run is followed by a full N
+// blocks of quiet rather than by more consecutive sweeps.
+func TestProcessBlock_SweepSuccessRestartsTheFullCadence(t *testing.T) {
+	const first int64 = 50701400
+	const sweepEveryN = 75
+
+	f := newCadenceFixture(t, sweepEveryN)
+	f.source.err = fmt.Errorf("temporary rpc error")
+	f.source.errCalls = 2
+
+	f.driveBacklog(first, 2*sweepEveryN+2)
+
+	if got, want := f.sweptBlocks(), []int64{first + 76, first + 151}; !slices.Equal(got, want) {
+		t.Errorf("swept blocks = %v, want %v", got, want)
 	}
 }
 
@@ -582,45 +629,15 @@ func TestProcessBlock_SweepFailureRetriesOnTheNextBlock(t *testing.T) {
 // handler received.
 func runSweepWithBalance(t *testing.T, tokenType, sourceName string, bal *PositionBalance) *PositionSnapshot {
 	t.Helper()
-	cache := testutil.NewMockBlockCache()
-	cache.SetReceipts(1, 500, 0, mustMarshalReceipts(t, []TransactionReceipt{}))
 
-	entry := &TokenEntry{
-		ContractAddress: common.HexToAddress("0x1111"),
-		WalletAddress:   common.HexToAddress("0xbbbb"),
-		TokenType:       tokenType,
+	f := newTracker(t, tokenType, sourceName, bal, 1)
+	if failed := f.driveBacklog(500, 1); len(failed) > 0 {
+		t.Fatalf("processBlock failed on blocks %v", failed)
 	}
-	result := NewFetchResult()
-	result.Balances[entry.Key()] = bal
-
-	registry := NewSourceRegistry(slog.New(slog.NewTextHandler(io.Discard, nil)))
-	registry.Register(&mockSource{
-		name:       sourceName,
-		tokenTypes: map[string]bool{tokenType: true},
-		result:     result,
-	})
-
-	handler := &testHandler{}
-	svc := &Service{
-		cache:            cache,
-		extractor:        NewTransferExtractor(nil),
-		registry:         registry,
-		entries:          []*TokenEntry{entry},
-		handler:          handler,
-		logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
-		config:           Config{ChainID: 1, SweepEveryNBlocks: 1},
-		blocksSinceSweep: 0,
+	if len(f.handler.batches) != 1 || len(f.handler.batches[0].Snapshots) != 1 {
+		t.Fatalf("expected 1 batch with 1 snapshot, got %d batches", len(f.handler.batches))
 	}
-
-	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 500, Version: 0, BlockTimestamp: 1700000000, BlockHash: testBlockHash.Hex()}
-	if err := svc.processBlock(context.Background(), event); err != nil {
-		t.Fatalf("processBlock: %v", err)
-	}
-
-	if len(handler.batches) != 1 || len(handler.batches[0].Snapshots) != 1 {
-		t.Fatalf("expected 1 batch with 1 snapshot, got %d batches", len(handler.batches))
-	}
-	return handler.batches[0].Snapshots[0]
+	return f.handler.batches[0].Snapshots[0]
 }
 
 func TestSweep_ThreadsUnderlyingValueOntoSnapshot(t *testing.T) {
