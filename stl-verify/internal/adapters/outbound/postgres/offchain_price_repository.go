@@ -25,12 +25,13 @@ type PriceRepository struct {
 	pool      *pgxpool.Pool
 	logger    *slog.Logger
 	buildID   buildregistry.BuildID
+	runID     buildregistry.RunID
 	batchSize int
 }
 
 // NewPriceRepository creates a new PostgreSQL Price repository.
 // If batchSize is <= 0, a default batch size of 1000 is used.
-func NewPriceRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildregistry.BuildID, batchSize int) (*PriceRepository, error) {
+func NewPriceRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildregistry.BuildID, runID buildregistry.RunID, batchSize int) (*PriceRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
 	}
@@ -44,6 +45,7 @@ func NewPriceRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildre
 		pool:      pool,
 		logger:    logger,
 		buildID:   buildID,
+		runID:     runID,
 		batchSize: batchSize,
 	}, nil
 }
@@ -169,19 +171,19 @@ func (r *PriceRepository) upsertPriceBatch(ctx context.Context, tx pgx.Tx, price
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO offchain_token_price (token_id, source_id, timestamp, price_usd, market_cap_usd, volume_usd, build_id)
+		INSERT INTO offchain_token_price (token_id, source_id, timestamp, price_usd, market_cap_usd, volume_usd, build_id, run_id)
 		VALUES `)
 
-	args := make([]any, 0, len(prices)*7)
+	args := make([]any, 0, len(prices)*8)
 	for i, price := range prices {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 7
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d)",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7))
+		baseIdx := i * 8
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8))
 
-		args = append(args, price.TokenID, price.SourceID, price.Timestamp, price.PriceUSD, price.MarketCapUSD, price.VolumeUSD, int(r.buildID))
+		args = append(args, price.TokenID, price.SourceID, price.Timestamp, price.PriceUSD, price.MarketCapUSD, price.VolumeUSD, int(r.buildID), r.runID)
 	}
 
 	sb.WriteString(` ON CONFLICT (token_id, source_id, processing_version, timestamp) DO NOTHING`)

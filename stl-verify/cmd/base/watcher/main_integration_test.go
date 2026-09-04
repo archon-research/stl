@@ -95,6 +95,7 @@ func TestRun_ShutsDownCleanlyOnContextCancel(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 	t.Setenv("AWS_REGION", sharedLocalStackCfg.Region)
+	testutil.SetDevIdentity(t)
 
 	runCtx, stopRun := context.WithCancel(ctx)
 	defer stopRun()

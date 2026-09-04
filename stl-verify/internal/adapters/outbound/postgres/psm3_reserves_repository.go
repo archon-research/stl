@@ -22,10 +22,11 @@ type PSM3ReservesRepository struct {
 	txm     *TxManager
 	logger  *slog.Logger
 	buildID buildregistry.BuildID
+	runID   buildregistry.RunID
 }
 
 // NewPSM3ReservesRepository creates a new PSM3ReservesRepository.
-func NewPSM3ReservesRepository(txm *TxManager, logger *slog.Logger, buildID buildregistry.BuildID) *PSM3ReservesRepository {
+func NewPSM3ReservesRepository(txm *TxManager, logger *slog.Logger, buildID buildregistry.BuildID, runID buildregistry.RunID) *PSM3ReservesRepository {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -33,6 +34,7 @@ func NewPSM3ReservesRepository(txm *TxManager, logger *slog.Logger, buildID buil
 		txm:     txm,
 		logger:  logger.With("component", "psm3-reserves-repo"),
 		buildID: buildID,
+		runID:   runID,
 	}
 }
 
@@ -48,8 +50,8 @@ func (r *PSM3ReservesRepository) SaveReserves(ctx context.Context, snap *entity.
 				usds_balance, susds_balance, usdc_balance,
 				total_assets, conversion_rate, total_shares,
 				block_number, block_version, block_timestamp,
-				source, build_id
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+				source, build_id, run_id
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 			ON CONFLICT (chain_id, block_number, block_version, processing_version, block_timestamp) DO NOTHING
 		`
 
@@ -67,6 +69,7 @@ func (r *PSM3ReservesRepository) SaveReserves(ctx context.Context, snap *entity.
 			snap.BlockTimestamp,
 			snap.Source,
 			int(r.buildID),
+			r.runID,
 		)
 		if err != nil {
 			return fmt.Errorf("insert psm3 reserves (chain=%d block=%d): %w", snap.ChainID, snap.BlockNumber, err)
@@ -90,8 +93,8 @@ func (r *PSM3ReservesRepository) saveALMPositions(ctx context.Context, tx pgx.Tx
 			chain_id, address, prime_id, alm_address,
 			shares, asset_value,
 			block_number, block_version, block_timestamp,
-			source, build_id
-		) VALUES ($1, $2, (SELECT id FROM prime WHERE name = $3), $4, $5, $6, $7, $8, $9, $10, $11)
+			source, build_id, run_id
+		) VALUES ($1, $2, (SELECT id FROM prime WHERE name = $3), $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		ON CONFLICT (chain_id, alm_address, block_number, block_version, processing_version, block_timestamp) DO NOTHING
 	`
 
@@ -108,6 +111,7 @@ func (r *PSM3ReservesRepository) saveALMPositions(ctx context.Context, tx pgx.Tx
 			snap.BlockTimestamp,
 			snap.Source,
 			int(r.buildID),
+			r.runID,
 		)
 		if err != nil {
 			return fmt.Errorf("insert psm3 alm shares (chain=%d block=%d prime=%s): %w",

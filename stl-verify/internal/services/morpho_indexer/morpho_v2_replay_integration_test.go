@@ -263,20 +263,21 @@ func buildReplayServiceForTest(t *testing.T, ctx context.Context, pool *pgxpool.
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	buildID := buildregistry.BuildID(1)
+	runID := buildregistry.RunID(1)
 
 	txManager, err := postgres.NewTxManager(pool, logger)
 	if err != nil {
 		t.Fatalf("NewTxManager: %v", err)
 	}
-	morphoRepo, err := postgres.NewMorphoRepository(pool, logger, buildID)
+	morphoRepo, err := postgres.NewMorphoRepository(pool, logger, buildID, runID)
 	if err != nil {
 		t.Fatalf("NewMorphoRepository: %v", err)
 	}
-	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildID, 0)
+	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildID, runID, 0)
 	if err != nil {
 		t.Fatalf("NewProtocolRepository: %v", err)
 	}
-	eventRepo := postgres.NewEventRepository(logger, buildID)
+	eventRepo := postgres.NewEventRepository(logger, buildID, runID)
 
 	cfg := ConfigDefaults()
 	cfg.ChainID = fx.ChainID

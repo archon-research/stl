@@ -26,6 +26,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 )
@@ -60,6 +61,7 @@ type Deps struct {
 	Multicaller   outbound.Multicaller
 	PostgresPool  *pgxpool.Pool
 	BuildRegistry *buildregistry.Registry
+	RunID         buildregistry.RunID
 
 	TxManager    outbound.TxManager
 	ProtocolRepo outbound.ProtocolRepository
@@ -203,12 +205,13 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 	d.cleanups = append(d.cleanups, func() { pool.Close() })
 	logger.Info("PostgreSQL connected")
 
-	buildReg, err := buildregistry.New(ctx, pool)
+	buildReg, runID, err := writerrun.Open(ctx, pool)
 	if err != nil {
 		d.Close()
-		return nil, fmt.Errorf("registering build: %w", err)
+		return nil, err
 	}
 	d.BuildRegistry = buildReg
+	d.RunID = runID
 
 	logger.Info("starting "+opts.ServiceName,
 		"dex", cfg.Dex,
@@ -249,17 +252,17 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 		d.Close()
 		return nil, fmt.Errorf("creating transaction manager: %w", err)
 	}
-	d.ProtocolRepo, err = postgres.NewProtocolRepository(pool, logger, buildReg.BuildID(), defaultRepoBatchSize)
+	d.ProtocolRepo, err = postgres.NewProtocolRepository(pool, logger, buildReg.BuildID(), runID, defaultRepoBatchSize)
 	if err != nil {
 		d.Close()
 		return nil, fmt.Errorf("creating protocol repository: %w", err)
 	}
-	d.TokenRepo, err = postgres.NewTokenRepository(pool, logger, defaultRepoBatchSize)
+	d.TokenRepo, err = postgres.NewTokenRepository(pool, logger, defaultRepoBatchSize, runID)
 	if err != nil {
 		d.Close()
 		return nil, fmt.Errorf("creating token repository: %w", err)
 	}
-	d.EventRepo = postgres.NewEventRepository(logger, buildReg.BuildID())
+	d.EventRepo = postgres.NewEventRepository(logger, buildReg.BuildID(), runID)
 
 	return d, nil
 }

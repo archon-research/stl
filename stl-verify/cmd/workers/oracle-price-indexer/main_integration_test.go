@@ -133,7 +133,7 @@ func setupIntegrationTest(t *testing.T, opts ...setupOption) *integrationEnv {
 		seedBlockNum, seedBlockNum))
 
 	// Configure environment for run()
-	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetDevIdentity(t)
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
@@ -284,7 +284,7 @@ func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer rpcServer.Close()
 
-	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetDevIdentity(t)
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 	t.Setenv("S3_BUCKET", testutil.S3TestBucketName(t, rawBucketPrefix))

@@ -36,21 +36,21 @@ import (
 // so no attempt can reach a different verdict. Add a step that DOES touch the
 // network or the database and it must stay untagged — the retry envelope is what
 // carries a blip.
-func buildReplayService(logger *slog.Logger, multicaller outbound.Multicaller, pool *pgxpool.Pool, buildID buildregistry.BuildID, chainID int64) (*morpho_indexer.Service, *countingMorphoRepository, error) {
+func buildReplayService(logger *slog.Logger, multicaller outbound.Multicaller, pool *pgxpool.Pool, buildID buildregistry.BuildID, runID buildregistry.RunID, chainID int64) (*morpho_indexer.Service, *countingMorphoRepository, error) {
 	txManager, err := postgres.NewTxManager(pool, logger)
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating tx manager: %w: %w", err, errStructuralData)
 	}
-	morphoRepo, err := postgres.NewMorphoRepository(pool, logger, buildID)
+	morphoRepo, err := postgres.NewMorphoRepository(pool, logger, buildID, runID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating morpho repository: %w: %w", err, errStructuralData)
 	}
 	countingRepo := newCountingMorphoRepository(morphoRepo)
-	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildID, 0)
+	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildID, runID, 0)
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating protocol repository: %w: %w", err, errStructuralData)
 	}
-	eventRepo := postgres.NewEventRepository(logger, buildID)
+	eventRepo := postgres.NewEventRepository(logger, buildID, runID)
 
 	svcConfig, err := morpho_indexer.NewReplayConfig(chainID, logger)
 	if err != nil {
@@ -67,8 +67,8 @@ func buildReplayService(logger *slog.Logger, multicaller outbound.Multicaller, p
 // knownV2VaultCount reports how many VaultV2 vaults the database holds, read
 // through the same registry load every replay activity performs — so a zero here
 // is exactly the answer each of them would reach on its own.
-func knownV2VaultCount(ctx context.Context, logger *slog.Logger, multicaller outbound.Multicaller, pool *pgxpool.Pool, buildID buildregistry.BuildID, chainID int64) (int, error) {
-	svc, _, err := buildReplayService(logger, multicaller, pool, buildID, chainID)
+func knownV2VaultCount(ctx context.Context, logger *slog.Logger, multicaller outbound.Multicaller, pool *pgxpool.Pool, buildID buildregistry.BuildID, runID buildregistry.RunID, chainID int64) (int, error) {
+	svc, _, err := buildReplayService(logger, multicaller, pool, buildID, runID, chainID)
 	if err != nil {
 		return 0, fmt.Errorf("building replay service: %w", err)
 	}

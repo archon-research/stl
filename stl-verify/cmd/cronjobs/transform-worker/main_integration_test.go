@@ -37,6 +37,7 @@ func TestTransformWorker_RunOnce(t *testing.T) {
 
 	ctx := context.Background()
 
+	testutil.SetDevIdentity(t)
 	runner, err := setupRunner(ctx, temporal.Dependencies{Pool: pool, Logger: slog.Default()})
 	if err != nil {
 		t.Fatalf("setupRunner: %v", err)
@@ -107,6 +108,7 @@ func TestTransformWorker_QueueCapturesBackfill(t *testing.T) {
 
 	ctx := context.Background()
 
+	testutil.SetDevIdentity(t)
 	runner, err := setupRunner(ctx, temporal.Dependencies{Pool: pool, Logger: slog.Default()})
 	if err != nil {
 		t.Fatalf("setupRunner: %v", err)
@@ -255,6 +257,7 @@ func TestTransformWorker_CorrectionReEnqueue(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
+	testutil.SetDevIdentity(t)
 	runner, err := setupRunner(ctx, temporal.Dependencies{Pool: pool, Logger: slog.Default()})
 	if err != nil {
 		t.Fatalf("setupRunner: %v", err)
@@ -346,6 +349,7 @@ func TestTransformWorker_MultiIterationDrain(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
+	testutil.SetDevIdentity(t)
 	runner, err := setupRunner(ctx, temporal.Dependencies{Pool: pool, Logger: slog.Default()})
 	if err != nil {
 		t.Fatalf("setupRunner: %v", err)

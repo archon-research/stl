@@ -17,13 +17,13 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/services/aavelike_position_tracker"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 	"github.com/archon-research/stl/stl-verify/internal/services/sparklend_backfill"
@@ -169,9 +169,9 @@ func run(args []string) error {
 	defer pool.Close()
 	logger.Info("PostgreSQL connected")
 
-	buildReg, err := buildregistry.New(ctx, pool)
+	buildReg, runID, err := writerrun.Open(ctx, pool)
 	if err != nil {
-		return fmt.Errorf("registering build: %w", err)
+		return err
 	}
 
 	txManager, err := postgres.NewTxManager(pool, logger)
@@ -179,34 +179,34 @@ func run(args []string) error {
 		return fmt.Errorf("creating tx manager: %w", err)
 	}
 
-	userRepo, err := postgres.NewUserRepository(pool, logger, 0)
+	userRepo, err := postgres.NewUserRepository(pool, logger, 0, runID)
 	if err != nil {
 		return fmt.Errorf("creating user repository: %w", err)
 	}
 
-	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildReg.BuildID(), 0)
+	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildReg.BuildID(), runID, 0)
 	if err != nil {
 		return fmt.Errorf("creating protocol repository: %w", err)
 	}
 
-	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 0)
+	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 0, runID)
 	if err != nil {
 		return fmt.Errorf("creating token repository: %w", err)
 	}
 
-	positionRepo, err := postgres.NewPositionRepository(pool, logger, buildReg.BuildID(), 0)
+	positionRepo, err := postgres.NewPositionRepository(pool, logger, buildReg.BuildID(), runID, 0)
 	if err != nil {
 		return fmt.Errorf("creating position repository: %w", err)
 	}
 
-	eventRepo := postgres.NewEventRepository(logger, buildReg.BuildID())
+	eventRepo := postgres.NewEventRepository(logger, buildReg.BuildID(), runID)
 
-	receiptTokenRepo, err := postgres.NewReceiptTokenRepository(pool, logger)
+	receiptTokenRepo, err := postgres.NewReceiptTokenRepository(pool, logger, runID)
 	if err != nil {
 		return fmt.Errorf("creating receipt token repository: %w", err)
 	}
 
-	debtTokenRepo, err := postgres.NewDebtTokenRepository(pool, logger)
+	debtTokenRepo, err := postgres.NewDebtTokenRepository(pool, logger, runID)
 	if err != nil {
 		return fmt.Errorf("creating debt token repository: %w", err)
 	}

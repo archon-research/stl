@@ -22,6 +22,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/cex_orderbook_indexer"
 )
@@ -172,7 +173,12 @@ func run(ctx context.Context, makeProvider providerFactory, onShutdownTimeout fu
 	defer pool.Close()
 	logger.Info("PostgreSQL connected")
 
-	repo, err := postgres.NewOrderbookSnapshotRepository(pool, logger)
+	_, runID, err := writerrun.Open(ctx, pool)
+	if err != nil {
+		return err
+	}
+
+	repo, err := postgres.NewOrderbookSnapshotRepository(pool, logger, runID)
 	if err != nil {
 		return fmt.Errorf("creating repository: %w", err)
 	}

@@ -87,6 +87,7 @@ type Service struct {
 
 	// Pins which oracle_asset versions the units are built from (ADR-0006 §4).
 	referenceEffectiveAt time.Time
+	preloadedUnits       []*oracle_pricing.OracleUnit
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -97,6 +98,13 @@ type Service struct {
 // WithTelemetry sets the telemetry instance for the service. Call before Start.
 func (s *Service) WithTelemetry(t *Telemetry) {
 	s.telemetry = t
+}
+
+// WithUnits supplies the oracle units the binary loaded inside its writer run's
+// transaction (ADR-0006 §2), so Start builds on the reference view the run recorded
+// instead of loading one of its own. Call before Start.
+func (s *Service) WithUnits(units []*oracle_pricing.OracleUnit) {
+	s.preloadedUnits = units
 }
 
 // NewService creates a new oracle price worker service.
@@ -214,7 +222,7 @@ func (s *Service) Stop() error {
 }
 
 func (s *Service) initialize(ctx context.Context) error {
-	shared, err := oracle_pricing.LoadOracleUnits(ctx, s.repo, s.config.ChainID, s.referenceEffectiveAt, s.logger)
+	shared, err := s.oracleUnits(ctx)
 	if err != nil {
 		return err
 	}
@@ -254,6 +262,14 @@ func (s *Service) initialize(ctx context.Context) error {
 
 	s.logger.Info("initialized", "oracles", len(s.units))
 	return nil
+}
+
+// A load here runs outside any writer run's snapshot; the binaries preload (WithUnits).
+func (s *Service) oracleUnits(ctx context.Context) ([]*oracle_pricing.OracleUnit, error) {
+	if s.preloadedUnits != nil {
+		return s.preloadedUnits, nil
+	}
+	return oracle_pricing.LoadOracleUnits(ctx, s.repo, s.config.ChainID, s.referenceEffectiveAt, s.logger)
 }
 
 func (s *Service) logOracleUnit(su *oracle_pricing.OracleUnit, cached map[int64]float64) {

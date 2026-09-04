@@ -406,6 +406,7 @@ type backfillActivities struct {
 	logger      *slog.Logger
 	pool        *pgxpool.Pool
 	buildID     buildregistry.BuildID
+	runID       buildregistry.RunID
 	s3Reader    outbound.S3Reader
 	extractor   *morpho_indexer.EventExtractor
 	prober      *vaultProber
@@ -433,12 +434,12 @@ func (a *backfillActivities) DiscoverVaults(ctx context.Context, work discoveryW
 	defer a.archiveWait()
 
 	rng := work.Range
-	got, err := discoverAndPersistVaults(ctx, a.logger, a.s3Reader, a.extractor, a.prober, a.pool, a.buildID, a.cfg, rng, work.ProbeBlock)
+	got, err := discoverAndPersistVaults(ctx, a.logger, a.s3Reader, a.extractor, a.prober, a.pool, a.buildID, a.runID, a.cfg, rng, work.ProbeBlock)
 	if err != nil {
 		return discoveryResult{}, fmt.Errorf("discovering vaults over blocks %d-%d: %w", rng.From, rng.To, err)
 	}
 
-	got.KnownV2Vaults, err = knownV2VaultCount(ctx, a.logger, a.multicaller, a.pool, a.buildID, a.cfg.chainID)
+	got.KnownV2Vaults, err = knownV2VaultCount(ctx, a.logger, a.multicaller, a.pool, a.buildID, a.runID, a.cfg.chainID)
 	if err != nil {
 		return discoveryResult{}, fmt.Errorf("counting the known VaultV2 vaults: %w", err)
 	}
@@ -472,7 +473,7 @@ func (a *backfillActivities) ReplayPartition(ctx context.Context, work partition
 	defer stopHeartbeat()
 	defer a.archiveWait()
 
-	svc, counted, err := buildReplayService(a.logger, a.multicaller, a.pool, a.buildID, a.cfg.chainID)
+	svc, counted, err := buildReplayService(a.logger, a.multicaller, a.pool, a.buildID, a.runID, a.cfg.chainID)
 	if err != nil {
 		return partitionReplay{}, fmt.Errorf("building replay service: %w", err)
 	}

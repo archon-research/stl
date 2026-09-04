@@ -442,7 +442,7 @@ func TestE2E_VEC242_NullBlockBodyRejected_RetryThenWorkerProcesses(t *testing.T)
 	tokenID := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000051", "VTK", 18)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID)
 
-	priceRepo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 100)
+	priceRepo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("NewOnchainPriceRepository: %v", err)
 	}

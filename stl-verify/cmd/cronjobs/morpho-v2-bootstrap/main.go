@@ -74,7 +74,6 @@ import (
 	"go.temporal.io/sdk/worker"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
@@ -82,6 +81,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_v2_bootstrap"
 )
@@ -222,9 +222,9 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies, progress morph
 // configuration — the same one the morpho-vault-backfill uses. The
 // bootstrap drives the real handlers through it rather than reimplementing them.
 func buildReplayService(ctx context.Context, deps temporal.Dependencies, chainID int64, ethClient *ethclient.Client) (*morpho_indexer.Service, error) {
-	buildReg, err := buildregistry.New(ctx, deps.Pool)
+	buildReg, runID, err := writerrun.Open(ctx, deps.Pool)
 	if err != nil {
-		return nil, fmt.Errorf("registering build: %w", err)
+		return nil, err
 	}
 
 	multicaller, err := multicall.NewClient(ethClient, blockchain.Multicall3)
@@ -235,15 +235,15 @@ func buildReplayService(ctx context.Context, deps temporal.Dependencies, chainID
 	if err != nil {
 		return nil, fmt.Errorf("creating tx manager: %w", err)
 	}
-	morphoRepo, err := postgres.NewMorphoRepository(deps.Pool, deps.Logger, buildReg.BuildID())
+	morphoRepo, err := postgres.NewMorphoRepository(deps.Pool, deps.Logger, buildReg.BuildID(), runID)
 	if err != nil {
 		return nil, fmt.Errorf("creating morpho repository: %w", err)
 	}
-	protocolRepo, err := postgres.NewProtocolRepository(deps.Pool, deps.Logger, buildReg.BuildID(), 0)
+	protocolRepo, err := postgres.NewProtocolRepository(deps.Pool, deps.Logger, buildReg.BuildID(), runID, 0)
 	if err != nil {
 		return nil, fmt.Errorf("creating protocol repository: %w", err)
 	}
-	eventRepo := postgres.NewEventRepository(deps.Logger, buildReg.BuildID())
+	eventRepo := postgres.NewEventRepository(deps.Logger, buildReg.BuildID(), runID)
 
 	svcConfig, err := morpho_indexer.NewReplayConfig(chainID, deps.Logger)
 	if err != nil {

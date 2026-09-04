@@ -1,15 +1,19 @@
 //go:build integration
 
-package buildregistry
+package buildregistry_test
 
 import (
 	"context"
 	"strings"
 	"testing"
 
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
+
+const testDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func setupDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
@@ -18,11 +22,12 @@ func setupDB(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
-func TestNew_FirstRegistration(t *testing.T) {
+func TestNew_RegistersTheProcessIdentity(t *testing.T) {
 	pool := setupDB(t)
 	t.Setenv("BUILD_GIT_HASH", "abc123def456")
+	t.Setenv(buildregistry.ImageDigestEnv, testDigest)
 
-	reg, err := New(context.Background(), pool)
+	reg, err := buildregistry.New(context.Background(), pool)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -33,73 +38,100 @@ func TestNew_FirstRegistration(t *testing.T) {
 	if reg.GitHash() != "abc123def456" {
 		t.Errorf("GitHash() = %q, want %q", reg.GitHash(), "abc123def456")
 	}
+	if reg.Service() == "" {
+		t.Error("Service() is empty, want the test binary's name")
+	}
+	if reg.ImageDigest() != testDigest {
+		t.Errorf("ImageDigest() = %q, want %q", reg.ImageDigest(), testDigest)
+	}
+
+	var service, digest string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT service, image_digest FROM build_registry WHERE id = $1`, int(reg.BuildID())).Scan(&service, &digest); err != nil {
+		t.Fatalf("read registered row: %v", err)
+	}
+	if service != reg.Service() || digest != testDigest {
+		t.Errorf("registered (%q, %q), want (%q, %q)", service, digest, reg.Service(), testDigest)
+	}
+}
+
+func TestNew_DevIdentityRegistersTheDevDigest(t *testing.T) {
+	pool := setupDB(t)
+	t.Setenv("BUILD_GIT_HASH", "dev")
+	testutil.SetDevIdentity(t)
+
+	reg, err := buildregistry.New(context.Background(), pool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if reg.ImageDigest() != buildregistry.DevImageDigest {
+		t.Errorf("ImageDigest() = %q, want %q", reg.ImageDigest(), buildregistry.DevImageDigest)
+	}
+}
+
+func TestNew_MissingDigestIsAHardError(t *testing.T) {
+	pool := setupDB(t)
+	t.Setenv("BUILD_GIT_HASH", "abc123def456")
+	t.Setenv(buildregistry.ImageDigestEnv, "")
+	t.Setenv(buildregistry.DevIdentityEnv, "")
+
+	_, err := buildregistry.New(context.Background(), pool)
+	if err == nil || !strings.Contains(err.Error(), buildregistry.ImageDigestEnv) {
+		t.Fatalf("New() error = %v, want one naming %s", err, buildregistry.ImageDigestEnv)
+	}
 }
 
 func TestNew_IdempotentReregistration(t *testing.T) {
 	pool := setupDB(t)
 	t.Setenv("BUILD_GIT_HASH", "idempotent-hash")
+	t.Setenv(buildregistry.ImageDigestEnv, testDigest)
 
-	reg1, err := New(context.Background(), pool)
+	reg1, err := buildregistry.New(context.Background(), pool)
 	if err != nil {
 		t.Fatalf("first New: %v", err)
 	}
-
-	reg2, err := New(context.Background(), pool)
+	reg2, err := buildregistry.New(context.Background(), pool)
 	if err != nil {
 		t.Fatalf("second New: %v", err)
 	}
-
 	if reg1.BuildID() != reg2.BuildID() {
 		t.Errorf("BuildID mismatch: %d != %d", reg1.BuildID(), reg2.BuildID())
 	}
 }
 
-func TestNew_DifferentHashesDifferentIDs(t *testing.T) {
-	pool := setupDB(t)
-
-	t.Setenv("BUILD_GIT_HASH", "hash-aaa")
-	reg1, err := New(context.Background(), pool)
-	if err != nil {
-		t.Fatalf("first New: %v", err)
+func TestNew_DistinctArtefactsGetDistinctIDs(t *testing.T) {
+	ctx := context.Background()
+	base := buildregistry.Identity{GitHash: "hash-aaa", Service: "svc", ImageDigest: testDigest}
+	tests := []struct {
+		name  string
+		other buildregistry.Identity
+	}{
+		{"different git hash", buildregistry.Identity{GitHash: "hash-bbb", Service: "svc", ImageDigest: testDigest}},
+		{"different service", buildregistry.Identity{GitHash: "hash-aaa", Service: "other-svc", ImageDigest: testDigest}},
+		{"different image digest", buildregistry.Identity{GitHash: "hash-aaa", Service: "svc", ImageDigest: buildregistry.DevImageDigest}},
 	}
-
-	t.Setenv("BUILD_GIT_HASH", "hash-bbb")
-	reg2, err := New(context.Background(), pool)
-	if err != nil {
-		t.Fatalf("second New: %v", err)
-	}
-
-	if reg1.BuildID() == reg2.BuildID() {
-		t.Errorf("different hashes should have different IDs, both got %d", reg1.BuildID())
-	}
-}
-
-func TestNew_EmptyHashNoEnvVar(t *testing.T) {
-	pool := setupDB(t)
-	// Set to empty string — os.Getenv returns "" for both unset and empty,
-	// so this effectively clears the fallback. t.Setenv auto-restores after test.
-	t.Setenv("BUILD_GIT_HASH", "")
-	_, err := New(context.Background(), pool)
-	// In test binaries, VCS info is typically available from the Go build,
-	// so New() succeeds via that path. If VCS info is unavailable, it should
-	// fail with a clear error.
-	if err != nil {
-		if !strings.Contains(err.Error(), "git hash not available") {
-			t.Errorf("unexpected error: %v", err)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pool := setupDB(t)
+			reg1, err := buildregistry.NewWithIdentity(ctx, pool, base)
+			if err != nil {
+				t.Fatalf("first NewWithIdentity: %v", err)
+			}
+			reg2, err := buildregistry.NewWithIdentity(ctx, pool, tt.other)
+			if err != nil {
+				t.Fatalf("second NewWithIdentity: %v", err)
+			}
+			if reg1.BuildID() == reg2.BuildID() {
+				t.Errorf("distinct artefacts share build_id %d", reg1.BuildID())
+			}
+		})
 	}
 }
 
-func TestNew_BuildTimePopulated(t *testing.T) {
+func TestNewWithIdentity_RejectsAnIncompleteIdentity(t *testing.T) {
 	pool := setupDB(t)
-	t.Setenv("BUILD_GIT_HASH", "buildtime-test")
-
-	reg, err := New(context.Background(), pool)
-	if err != nil {
-		t.Fatalf("New: %v", err)
+	_, err := buildregistry.NewWithIdentity(context.Background(), pool, buildregistry.Identity{GitHash: "abc", Service: "svc"})
+	if err == nil || !strings.Contains(err.Error(), "incomplete") {
+		t.Fatalf("NewWithIdentity() error = %v, want an incomplete-identity error", err)
 	}
-
-	// BuildTime comes from VCS info, which may or may not be available in tests.
-	// Just verify the accessor doesn't panic.
-	_ = reg.BuildTime()
 }

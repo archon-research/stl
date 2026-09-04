@@ -44,6 +44,7 @@ func discoverAndPersistVaults(
 	prober *vaultProber,
 	pool *pgxpool.Pool,
 	buildID buildregistry.BuildID,
+	runID buildregistry.RunID,
 	cfg config,
 	rng blockRange,
 	probeBlock int64,
@@ -74,7 +75,7 @@ func discoverAndPersistVaults(
 	if err != nil {
 		return discoveryResult{}, fmt.Errorf("getting deploy block: %w: %w", err, errStructuralData)
 	}
-	if err := persistVaults(ctx, pool, logger, vaults, cfg.chainID, deployBlock, buildID); err != nil {
+	if err := persistVaults(ctx, pool, logger, vaults, cfg.chainID, deployBlock, buildID, runID); err != nil {
 		return discoveryResult{}, fmt.Errorf("persisting vaults: %w", err)
 	}
 	logger.Info("vaults persisted", "count", got.Vaults)
@@ -678,28 +679,29 @@ func persistVaults(
 	chainID int64,
 	deployBlock int64,
 	buildID buildregistry.BuildID,
+	runID buildregistry.RunID,
 ) error {
 	txManager, err := postgres.NewTxManager(pool, logger)
 	if err != nil {
 		return fmt.Errorf("creating tx manager: %w", err)
 	}
 
-	morphoRepo, err := postgres.NewMorphoRepository(pool, logger, buildID)
+	morphoRepo, err := postgres.NewMorphoRepository(pool, logger, buildID, runID)
 	if err != nil {
 		return fmt.Errorf("creating morpho repository: %w", err)
 	}
 
-	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildID, 0)
+	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildID, runID, 0)
 	if err != nil {
 		return fmt.Errorf("creating protocol repository: %w", err)
 	}
 
-	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 0)
+	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 0, runID)
 	if err != nil {
 		return fmt.Errorf("creating token repository: %w", err)
 	}
 
-	receiptTokenRepo, err := postgres.NewReceiptTokenRepository(pool, logger)
+	receiptTokenRepo, err := postgres.NewReceiptTokenRepository(pool, logger, runID)
 	if err != nil {
 		return fmt.Errorf("creating receipt token repository: %w", err)
 	}

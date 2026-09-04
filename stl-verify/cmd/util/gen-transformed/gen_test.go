@@ -158,3 +158,29 @@ func TestJoinFor_ConflictingJoins(t *testing.T) {
 		t.Errorf("joinFor err = %v, want 'disagree on join'", err)
 	}
 }
+
+func TestPlan_RunIDIsNotCarried(t *testing.T) {
+	reg, err := schemamaster.Load()
+	if err != nil {
+		t.Fatalf("load register: %v", err)
+	}
+	s := rawSchema("maple_syrup_global_state",
+		[]string{"chain_id", "synced_at", "tvl", "processing_version", "build_id", "run_id"},
+		[]string{"chain_id", "synced_at", "processing_version"})
+
+	p, err := plan(reg, s)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if slices.Contains(p.columns, "run_id") {
+		t.Errorf("columns = %v, want run_id absent", p.columns)
+	}
+	for _, expr := range p.selectExprs {
+		if strings.Contains(expr, "run_id") {
+			t.Errorf("selectExprs carries %q, want run_id absent", expr)
+		}
+	}
+	if !slices.Contains(p.columns, "build_id") {
+		t.Errorf("columns = %v, want build_id still carried", p.columns)
+	}
+}

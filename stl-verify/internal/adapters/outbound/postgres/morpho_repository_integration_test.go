@@ -19,8 +19,10 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const morphoDBName = "test_morpho"
@@ -80,6 +82,16 @@ type morphoTestFixture struct {
 	userID      int64
 }
 
+func (f *morphoTestFixture) newRunRepo(t *testing.T, ctx context.Context) (*MorphoRepository, buildregistry.RunID) {
+	t.Helper()
+	buildID, runID := testutil.OpenTestRun(t, ctx, f.pool)
+	repo, err := NewMorphoRepository(f.pool, nil, buildID, runID)
+	if err != nil {
+		t.Fatalf("NewMorphoRepository: %v", err)
+	}
+	return repo, runID
+}
+
 // setupMorphoTest returns a connected MorphoRepository using the schema-specific pool.
 func setupMorphoTest(t *testing.T) *morphoTestFixture {
 	t.Helper()
@@ -87,7 +99,7 @@ func setupMorphoTest(t *testing.T) *morphoTestFixture {
 
 	truncateMorpho(t, ctx)
 
-	repo, err := NewMorphoRepository(morphoPool, nil, 0)
+	repo, err := NewMorphoRepository(morphoPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("failed to create repository: %v", err)
 	}
@@ -215,6 +227,7 @@ func TestGetOrCreateMarket_CreateNew(t *testing.T) {
 	fixture := setupMorphoTest(t)
 
 	ctx := context.Background()
+	repo, runID := fixture.newRunRepo(t, ctx)
 	marketID := common.BytesToHash([]byte("test-market-id-1234567890abcdef"))
 
 	market := &entity.MorphoMarket{
@@ -235,7 +248,7 @@ func TestGetOrCreateMarket_CreateNew(t *testing.T) {
 	}
 	defer tx.Rollback(ctx)
 
-	id, err := fixture.repo.GetOrCreateMarket(ctx, tx, market)
+	id, err := repo.GetOrCreateMarket(ctx, tx, market)
 	if err != nil {
 		t.Fatalf("GetOrCreateMarket failed: %v", err)
 	}
@@ -246,6 +259,12 @@ func TestGetOrCreateMarket_CreateNew(t *testing.T) {
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("failed to commit: %v", err)
 	}
+
+	var gotRunID *int64
+	if err := fixture.pool.QueryRow(ctx, `SELECT run_id FROM morpho_market WHERE id = $1`, id).Scan(&gotRunID); err != nil {
+		t.Fatalf("reading back: %v", err)
+	}
+	testutil.RequireRunID(t, gotRunID, runID)
 
 	// Verify via GetMarketByMarketID
 	got, err := fixture.repo.GetMarketByMarketID(ctx, 1, marketID)
@@ -338,6 +357,7 @@ func TestSaveMarketState_Basic(t *testing.T) {
 
 	ctx := context.Background()
 	marketDBID := fixture.createTestMarket(t, ctx, []byte("state-test-market-id-12345678ab"))
+	repo, runID := fixture.newRunRepo(t, ctx)
 
 	state := &entity.MorphoMarketState{
 		MorphoMarketID:    marketDBID,
@@ -357,7 +377,7 @@ func TestSaveMarketState_Basic(t *testing.T) {
 	}
 	defer tx.Rollback(ctx)
 
-	err = fixture.repo.SaveMarketState(ctx, tx, state)
+	err = repo.SaveMarketState(ctx, tx, state)
 	if err != nil {
 		t.Fatalf("SaveMarketState failed: %v", err)
 	}
@@ -368,13 +388,15 @@ func TestSaveMarketState_Basic(t *testing.T) {
 
 	// Verify by querying directly
 	var totalSupplyAssets, totalBorrowAssets, fee string
+	var gotRunID *int64
 	err = fixture.pool.QueryRow(ctx,
-		`SELECT total_supply_assets, total_borrow_assets, fee FROM morpho_market_state WHERE morpho_market_id = $1 AND block_number = $2 AND block_version = 0`,
+		`SELECT total_supply_assets, total_borrow_assets, fee, run_id FROM morpho_market_state WHERE morpho_market_id = $1 AND block_number = $2 AND block_version = 0`,
 		marketDBID, int64(19000000),
-	).Scan(&totalSupplyAssets, &totalBorrowAssets, &fee)
+	).Scan(&totalSupplyAssets, &totalBorrowAssets, &fee, &gotRunID)
 	if err != nil {
 		t.Fatalf("failed to query market state: %v", err)
 	}
+	testutil.RequireRunID(t, gotRunID, runID)
 	if totalSupplyAssets != "1000000000000" {
 		t.Errorf("totalSupplyAssets mismatch: got %s, want 1000000000000", totalSupplyAssets)
 	}
@@ -733,6 +755,7 @@ func TestGetOrCreateVault_CreateNew(t *testing.T) {
 	fixture := setupMorphoTest(t)
 
 	ctx := context.Background()
+	repo, runID := fixture.newRunRepo(t, ctx)
 	vaultAddr := []byte("vault-addr-123456789")
 
 	vault := &entity.MorphoVault{
@@ -752,7 +775,7 @@ func TestGetOrCreateVault_CreateNew(t *testing.T) {
 	}
 	defer tx.Rollback(ctx)
 
-	id, err := fixture.repo.GetOrCreateVault(ctx, tx, vault)
+	id, err := repo.GetOrCreateVault(ctx, tx, vault)
 	if err != nil {
 		t.Fatalf("GetOrCreateVault failed: %v", err)
 	}
@@ -763,6 +786,12 @@ func TestGetOrCreateVault_CreateNew(t *testing.T) {
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("failed to commit: %v", err)
 	}
+
+	var gotRunID *int64
+	if err := fixture.pool.QueryRow(ctx, `SELECT run_id FROM morpho_vault WHERE id = $1`, id).Scan(&gotRunID); err != nil {
+		t.Fatalf("reading back: %v", err)
+	}
+	testutil.RequireRunID(t, gotRunID, runID)
 
 	// Verify via GetVaultByAddress
 	got, err := fixture.repo.GetVaultByAddress(ctx, 1, common.BytesToAddress(vaultAddr))
@@ -1998,7 +2027,7 @@ func TestObserveAdapterMembership_IdempotentReAppendAndNewBuild(t *testing.T) {
 		t.Fatalf("a same-build re-observation must dedupe, got %d rows: %s", got, fixture.describeMembership(t, ctx, id))
 	}
 
-	repoBuild1, err := NewMorphoRepository(morphoPool, nil, 1)
+	repoBuild1, err := NewMorphoRepository(morphoPool, nil, 1, 1)
 	if err != nil {
 		t.Fatalf("NewMorphoRepository build 1: %v", err)
 	}
@@ -2592,7 +2621,7 @@ func TestSaveAdapterState_DifferentBuildNewVersion(t *testing.T) {
 	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x1d))
 	adapterID := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x1e), 24481834)
 
-	repoBuild1, err := NewMorphoRepository(morphoPool, nil, 1)
+	repoBuild1, err := NewMorphoRepository(morphoPool, nil, 1, 1)
 	if err != nil {
 		t.Fatalf("NewMorphoRepository build 1: %v", err)
 	}
@@ -2716,7 +2745,7 @@ func TestSaveAdapterState_NewBuildAppendsIntoACompressedChunk(t *testing.T) {
 	}
 	fixture.compressAdapterStateChunks(t, ctx)
 
-	repoBuild1, err := NewMorphoRepository(morphoPool, nil, 1)
+	repoBuild1, err := NewMorphoRepository(morphoPool, nil, 1, 1)
 	if err != nil {
 		t.Fatalf("NewMorphoRepository build 1: %v", err)
 	}
@@ -2927,11 +2956,11 @@ func TestSaveVaultCap_DifferentBuildNewVersion(t *testing.T) {
 	ctx := context.Background()
 	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x26))
 
-	repoBuild1, err := NewMorphoRepository(morphoPool, nil, 1)
+	repoBuild1, err := NewMorphoRepository(morphoPool, nil, 1, 1)
 	if err != nil {
 		t.Fatalf("NewMorphoRepository build 1: %v", err)
 	}
-	repoBuild2, err := NewMorphoRepository(morphoPool, nil, 2)
+	repoBuild2, err := NewMorphoRepository(morphoPool, nil, 2, 2)
 	if err != nil {
 		t.Fatalf("NewMorphoRepository build 2: %v", err)
 	}
@@ -3120,11 +3149,11 @@ func TestSaveVaultFee_DifferentBuildNewVersion(t *testing.T) {
 	ctx := context.Background()
 	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x32))
 
-	repoBuild1, err := NewMorphoRepository(morphoPool, nil, 1)
+	repoBuild1, err := NewMorphoRepository(morphoPool, nil, 1, 1)
 	if err != nil {
 		t.Fatalf("NewMorphoRepository build 1: %v", err)
 	}
-	repoBuild2, err := NewMorphoRepository(morphoPool, nil, 2)
+	repoBuild2, err := NewMorphoRepository(morphoPool, nil, 2, 2)
 	if err != nil {
 		t.Fatalf("NewMorphoRepository build 2: %v", err)
 	}

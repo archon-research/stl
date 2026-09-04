@@ -27,6 +27,7 @@ type ProtocolRepository struct {
 	logger    *slog.Logger
 	batchSize int
 	buildID   buildregistry.BuildID
+	runID     buildregistry.RunID
 }
 
 // NewProtocolRepository creates a new PostgreSQL Protocol repository.
@@ -35,7 +36,7 @@ type ProtocolRepository struct {
 //
 // Note: This function does not verify that the database connection is alive.
 // Use a separate health check or call pool.Ping() if connection validation is needed.
-func NewProtocolRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildregistry.BuildID, batchSize int) (*ProtocolRepository, error) {
+func NewProtocolRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildregistry.BuildID, runID buildregistry.RunID, batchSize int) (*ProtocolRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
 	}
@@ -50,6 +51,7 @@ func NewProtocolRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buil
 		logger:    logger,
 		batchSize: batchSize,
 		buildID:   buildID,
+		runID:     runID,
 	}, nil
 }
 
@@ -62,12 +64,12 @@ func (r *ProtocolRepository) GetOrCreateProtocol(ctx context.Context, tx pgx.Tx,
 	// whichever worker wins the INSERT race, subsequent LEAST() merges still produce
 	// the correct minimum created_at_block.
 	err := tx.QueryRow(ctx,
-		`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block)
-		 VALUES ($1, $2, $3, $4, $5)
+		`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, run_id)
+		 VALUES ($1, $2, $3, $4, $5, $6)
 		 ON CONFLICT (chain_id, address) DO UPDATE SET
 		     created_at_block = LEAST(protocol.created_at_block, EXCLUDED.created_at_block)
 		 RETURNING id`,
-		chainID, addressBytes, name, protocolType, createdAtBlock).Scan(&protocolID)
+		chainID, addressBytes, name, protocolType, createdAtBlock, r.runID).Scan(&protocolID)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get or create protocol: %w", err)
 	}
@@ -115,7 +117,7 @@ func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context
 	var sb strings.Builder
 	sb.WriteString(`
 		INSERT INTO sparklend_reserve_data (
-			protocol_id, token_id, block_number, block_version, build_id,
+			protocol_id, token_id, block_number, block_version, build_id, run_id,
 			unbacked, accrued_to_treasury_scaled, total_a_token, total_stable_debt, total_variable_debt,
 			liquidity_rate, variable_borrow_rate, stable_borrow_rate, average_stable_borrow_rate,
 			liquidity_index, variable_borrow_index, last_update_timestamp,
@@ -123,18 +125,18 @@ func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context
 			usage_as_collateral_enabled, borrowing_enabled, stable_borrow_rate_enabled, is_active, is_frozen
 		) VALUES `)
 
-	args := make([]any, 0, len(data)*27)
+	args := make([]any, 0, len(data)*28)
 	for i, d := range data {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 27
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+		baseIdx := i * 28
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8,
 			baseIdx+9, baseIdx+10, baseIdx+11, baseIdx+12, baseIdx+13, baseIdx+14, baseIdx+15, baseIdx+16,
 			baseIdx+17, baseIdx+18, baseIdx+19, baseIdx+20, baseIdx+21, baseIdx+22, baseIdx+23, baseIdx+24,
-			baseIdx+25, baseIdx+26, baseIdx+27))
-		args = append(args, d.ProtocolID, d.TokenID, d.BlockNumber, d.BlockVersion, int(r.buildID))
+			baseIdx+25, baseIdx+26, baseIdx+27, baseIdx+28))
+		args = append(args, d.ProtocolID, d.TokenID, d.BlockNumber, d.BlockVersion, int(r.buildID), r.runID)
 
 		for _, valToConvert := range []*big.Int{
 			d.Unbacked,

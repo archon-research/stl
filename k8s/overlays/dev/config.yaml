@@ -20,6 +20,8 @@ data:
   JAEGER_ENDPOINT: jaeger:4317
   ENVIRONMENT: development
   DEPLOY_ENV: development
+  # kind images carry no IMAGE_DIGEST (the deploy pipeline injects it); register as "dev".
+  STL_DEV_IDENTITY: "1"
   ALCHEMY_HTTP_URL: https://eth-mainnet.g.alchemy.com/v2
   ALCHEMY_WS_URL: wss://eth-mainnet.g.alchemy.com/v2
   ENABLE_BACKFILL: "false"

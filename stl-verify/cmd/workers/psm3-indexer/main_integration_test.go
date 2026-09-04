@@ -236,7 +236,7 @@ func enqueueBlockEvents(t *testing.T, sqsState *testutil.MockSQSServer, startBlo
 
 func setCommonEnv(t *testing.T, rpcURL, sqsURL string) {
 	t.Helper()
-	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetDevIdentity(t)
 	t.Setenv("ETH_RPC_URL", rpcURL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsURL)
 	t.Setenv("AWS_REGION", "us-east-1")

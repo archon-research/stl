@@ -32,6 +32,7 @@ func TestSetupRunner_WiresService(t *testing.T) {
 
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("ETHERSCAN_API_KEY", "test-key")
+	testutil.SetDevIdentity(t)
 
 	deps := temporal.Dependencies{
 		Pool:   pool,

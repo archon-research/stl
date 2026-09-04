@@ -54,4 +54,6 @@
 ./cmd/backfillers/reference-capital-backfill
 ./internal/services/morpho_v2_bootstrap
 ./internal/pkg/blockchain/blocktime
+./internal/pkg/oraclewire
+./internal/pkg/writerrun
 ./cmd/backfillers/block-republisher

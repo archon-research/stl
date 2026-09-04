@@ -212,6 +212,11 @@ Before modifying anything under `internal/adapters/outbound/postgres/`, read and
 2. Implement the method in `internal/services/`
 3. Add HTTP handler in `internal/adapters/inbound/`
 
+### New binary that connects to Postgres
+1. Call `buildregistry.New(ctx, pool)` — it hard-errors unless the git hash, the binary name and `IMAGE_DIGEST` all resolve; the deploy pipeline injects the digest, and `STL_DEV_IDENTITY=1` (dev overlay, `make run-*`, `testutil.SetDevIdentity`) stands in for it locally.
+2. Resolve `env.ReferenceEffectiveAt(time.Now().UTC())` once and open the run: `buildReg.OpenRun(ctx, referenceEffectiveAt, load)`. `load` runs inside the run's `REPEATABLE READ` transaction and is where startup reads of an append-on-change reference table belong (see `internal/pkg/oraclewire`); pass `nil` when the binary reads none.
+3. Pass the `RunID` into every repository constructor alongside the `BuildID`. A binary with no Postgres connection opens no run.
+
 ### New External Dependency
 1. Define interface in `internal/ports/outbound/`
 2. Implement adapter in `internal/adapters/outbound/<name>/`

@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const userDBName = "test_user"
@@ -36,7 +37,8 @@ func TestGetOrCreateUser_CreatesNewUser(t *testing.T) {
 	truncateUser(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewUserRepository(userPool, nil, 0)
+	_, runID := testutil.OpenTestRun(t, ctx, userPool)
+	repo, err := NewUserRepository(userPool, nil, 0, runID)
 	if err != nil {
 		t.Fatalf("NewUserRepository: %v", err)
 	}
@@ -62,23 +64,25 @@ func TestGetOrCreateUser_CreatesNewUser(t *testing.T) {
 	}
 
 	var firstSeenBlock int64
+	var gotRunID *int64
 	err = userPool.QueryRow(ctx,
-		`SELECT first_seen_block FROM "user" WHERE chain_id = $1 AND address = $2`,
+		`SELECT first_seen_block, run_id FROM "user" WHERE chain_id = $1 AND address = $2`,
 		1, user.Address.Bytes(),
-	).Scan(&firstSeenBlock)
+	).Scan(&firstSeenBlock, &gotRunID)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
 	if firstSeenBlock != 100 {
 		t.Errorf("first_seen_block = %d, want 100", firstSeenBlock)
 	}
+	testutil.RequireRunID(t, gotRunID, runID)
 }
 
 func TestGetOrCreateUser_IdempotentReturnsSameID(t *testing.T) {
 	truncateUser(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewUserRepository(userPool, nil, 0)
+	repo, err := NewUserRepository(userPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewUserRepository: %v", err)
 	}
@@ -123,7 +127,7 @@ func TestGetOrCreateUser_FirstSeenBlockUsesLeast(t *testing.T) {
 	truncateUser(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewUserRepository(userPool, nil, 0)
+	repo, err := NewUserRepository(userPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewUserRepository: %v", err)
 	}
@@ -176,7 +180,7 @@ func TestGetOrCreateUser_ConcurrentRaceReturnsSameID(t *testing.T) {
 	truncateUser(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewUserRepository(userPool, nil, 0)
+	repo, err := NewUserRepository(userPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewUserRepository: %v", err)
 	}
@@ -255,7 +259,7 @@ func TestGetOrCreateUsers_DedupesBatch(t *testing.T) {
 	truncateUser(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewUserRepository(userPool, nil, 0)
+	repo, err := NewUserRepository(userPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewUserRepository: %v", err)
 	}
@@ -284,7 +288,7 @@ func TestGetOrCreateUsers_MixedChainBatchRejected(t *testing.T) {
 	truncateUser(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewUserRepository(userPool, nil, 0)
+	repo, err := NewUserRepository(userPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewUserRepository: %v", err)
 	}
@@ -312,7 +316,7 @@ func TestGetOrCreateUsers_NilBlockInsertsNull(t *testing.T) {
 	truncateUser(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewUserRepository(userPool, nil, 0)
+	repo, err := NewUserRepository(userPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewUserRepository: %v", err)
 	}
@@ -342,7 +346,7 @@ func TestGetOrCreateUsers_NilBlockPreservesExisting(t *testing.T) {
 	truncateUser(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewUserRepository(userPool, nil, 0)
+	repo, err := NewUserRepository(userPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewUserRepository: %v", err)
 	}
@@ -382,7 +386,7 @@ func TestGetOrCreateUsers_NullBlockSelfHeals(t *testing.T) {
 	truncateUser(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewUserRepository(userPool, nil, 0)
+	repo, err := NewUserRepository(userPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewUserRepository: %v", err)
 	}

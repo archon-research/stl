@@ -121,6 +121,7 @@ func newActivityEnv(t *testing.T, ctx context.Context, pool *pgxpool.Pool, baseU
 	// The build registry refuses to register a build it cannot identify, and a
 	// `go test` binary carries no VCS stamp.
 	t.Setenv("BUILD_GIT_HASH", "integration-test")
+	testutil.SetDevIdentity(t)
 
 	service, err := newPriceFetcher(ctx, temporal.Dependencies{Pool: pool, Logger: testutil.DiscardLogger()})
 	if err != nil {
@@ -142,6 +143,7 @@ func newWorkflowEnv(t *testing.T, ctx context.Context, pool *pgxpool.Pool, baseU
 	t.Setenv("COINGECKO_API_KEY", "test-api-key")
 	t.Setenv("COINGECKO_BASE_URL", baseURL)
 	t.Setenv("BUILD_GIT_HASH", "integration-test")
+	testutil.SetDevIdentity(t)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
 	deps := temporal.Dependencies{Pool: pool, Logger: testutil.DiscardLogger()}

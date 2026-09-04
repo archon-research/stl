@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -19,12 +20,14 @@ var _ outbound.PrimeReferencePositionRepository = (*PrimeReferencePositionReposi
 type PrimeReferencePositionRepository struct {
 	pool   *pgxpool.Pool
 	logger *slog.Logger
+	runID  buildregistry.RunID
 }
 
 // NewPrimeReferencePositionRepository creates a new PrimeReferencePositionRepository.
 func NewPrimeReferencePositionRepository(
 	pool *pgxpool.Pool,
 	logger *slog.Logger,
+	runID buildregistry.RunID,
 ) *PrimeReferencePositionRepository {
 	if logger == nil {
 		logger = slog.Default()
@@ -32,6 +35,7 @@ func NewPrimeReferencePositionRepository(
 	return &PrimeReferencePositionRepository{
 		pool:   pool,
 		logger: logger.With("component", "prime-reference-position-repo"),
+		runID:  runID,
 	}
 }
 
@@ -66,9 +70,10 @@ func (r *PrimeReferencePositionRepository) SaveReferencePositions(
 			allocated_assets_usd,
 			idle_assets_usd,
 			source,
-			build_id
+			build_id,
+			run_id
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		ON CONFLICT (prime_id, synced_at, network, token_address, wallet_address, processing_version) DO NOTHING
 	`
 
@@ -90,6 +95,7 @@ func (r *PrimeReferencePositionRepository) SaveReferencePositions(
 			p.IdleAssetsUSD,
 			p.Source,
 			p.BuildID,
+			r.runID,
 		)
 	}
 
