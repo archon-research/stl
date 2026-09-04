@@ -87,8 +87,9 @@ func TestLiveValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadPools: %v", err)
 	}
-	if len(poolRows) != 18 {
-		t.Fatalf("LoadPools returned %d pools, want 18 (seed migration did not apply cleanly)", len(poolRows))
+	// 19 = the 18 VEC-261 wstETH/stETH pools + the ARCT-384 AUSD/USDC pool.
+	if len(poolRows) != 19 {
+		t.Fatalf("LoadPools returned %d pools, want 19 (seed migration did not apply cleanly)", len(poolRows))
 	}
 	regPools := toRegisteredPools(poolRows)
 	rep.poolsLoaded = len(regPools)
