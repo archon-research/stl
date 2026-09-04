@@ -1,51 +1,37 @@
 -- Resync every column-owned sequence to max(column) — LOCAL DEV ONLY (ARCT-399).
 --
--- Why this exists
--- ---------------
--- The kind dev database is periodically filled by bulk-importing rows carrying
--- their own explicit ids (a staging clone). An explicit id does not advance the
--- table's sequence, so afterwards `token_id_seq.last_value` sat at 1454 while
--- `max(token.id)` was 6,156,714: every INSERT of a genuinely new row collided
--- with an already-imported one and failed with
---   duplicate key value violates unique constraint "token_pkey" (SQLSTATE 23505)
--- until nextval() eventually stumbled onto a free id. The upsert code is not at
--- fault — it conflicts on (chain_id, address), a different constraint from the
--- one the lagging sequence violates, so ON CONFLICT cannot absorb it.
+-- Bulk-importing rows into the kind dev database carries their explicit ids along,
+-- and an explicit id does not advance the table's sequence; the next genuinely new
+-- INSERT then collides on the pkey. Why this is dev-only, how to run it, and what
+-- to do when it fails: k8s/README.md § "Bulk-importing rows into the dev database".
 --
--- Staging and prod cannot reach this state: ids there only ever come from the
--- sequence. This script is therefore an operational repair for the dev clone
--- path and MUST NOT be turned into a migration in stl-verify/db/migrations/ —
--- it would then run against staging/prod, where it is at best a no-op and at
--- worst papers over a real anomaly.
+-- Monotonic by construction: it only ever advances a sequence, and skips empty
+-- tables, so it can never manufacture the collision it exists to prevent. Safe to
+-- re-run, and safe to run while the app is writing.
 --
--- What it does
--- ------------
--- Walks every sequence that is OWNED BY a table column (`serial`/`bigserial`
--- via a pg_depend 'a' dependency, and GENERATED ... AS IDENTITY via 'i') and
--- fast-forwards it past max(column). No table name is hard-coded, so a new
--- table is covered the day it is created.
+-- It is one transaction, so it holds an AccessShareLock on every table it probes
+-- until it commits — fine in dev, where nothing takes conflicting DDL locks.
 --
--- Properties:
---   * Idempotent — a second run finds nothing to do and reports 0 resynced.
---   * Monotonic — it only ever advances a sequence. A sequence already ahead of
---     max(column) (the normal, healthy case) is left alone, so a run can never
---     manufacture the very collision it exists to prevent.
---   * Empty tables are skipped: max(column) IS NULL means there is no row to
---     collide with, and rewinding the sequence to its start would be a
---     regression, not a fix.
---   * TimescaleDB internals are excluded — `_timescaledb_catalog` sequences are
---     Timescale's to manage, and hypertable chunks are not resynced
---     individually (max() on the parent hypertable already spans every chunk).
+-- Scope: sequences with an OWNED BY link (pg_depend 'a' = serial/bigserial,
+-- 'i' = GENERATED ... AS IDENTITY). A bare CREATE SEQUENCE used as a column
+-- DEFAULT records its dependency in the opposite direction and is invisible here;
+-- the tail of this script warns if one ever appears rather than leaving that as a
+-- comment nobody reads. TimescaleDB's own `_timescaledb_catalog` sequences are
+-- also out of scope: nothing here repairs them, and a restore that includes them
+-- needs timescaledb_pre_restore()/timescaledb_post_restore() instead.
+
+-- Bound the whole run. Most max() probes below are an index scan on the sequence
+-- column and return instantly, but sparklend_reserve_data is a columnstore
+-- hypertable whose id is neither compress_segmentby nor compress_orderby
+-- (20260410_140000), so once its chunks compress, max(id) has to decompress them.
+-- This runs inside `make dev-up`, so cap it: a clear "canceling statement due to
+-- statement timeout" beats a bring-up that hangs until kubectl gives up. If you
+-- hit it, re-run with a larger timeout — the script is idempotent.
 --
--- Out of scope: a sequence that is merely a column DEFAULT without an OWNED BY
--- link, which PostgreSQL records as a normal ('n') dependency rather than the
--- 'a'/'i' this walks. No such sequence exists — every sequence in the schema
--- comes from SERIAL/BIGSERIAL (`grep -i 'create sequence' db/migrations/*.sql`
--- is empty), and they all carry OWNED BY. Write a migration with a bare
--- CREATE SEQUENCE and you are on your own for the dev clone.
---
--- Safe to re-run at any time. Runs as the database owner/superuser, because
--- setval() needs UPDATE on the sequence.
+-- This has to be its own top-level statement: statement_timeout is armed when the
+-- outer statement begins, so a SET LOCAL inside the DO block below would be
+-- silently ignored (verified — the block ran to completion past its own timeout).
+SET statement_timeout = '120s';
 
 DO $resync$
 DECLARE
@@ -54,15 +40,17 @@ DECLARE
     last_val   bigint;
     is_called  boolean;
     next_val   bigint;  -- the value nextval() would hand out right now
+    unmatched  text[];
     scanned    integer := 0;
     resynced   integer := 0;
+    empty      integer := 0;
+    failed     integer := 0;
 BEGIN
     FOR r IN
-        SELECT seq.oid::regclass        AS seq_ident,
-               tbl.oid::regclass        AS tbl_ident,
-               quote_ident(att.attname) AS col_ident,
-               att.attname              AS col_name,
-               s.increment_by           AS increment_by
+        SELECT seq.oid::regclass AS seq_ident,
+               tbl.oid::regclass AS tbl_ident,
+               att.attname       AS col_name,
+               s.seqincrement    AS increment_by
         FROM pg_class seq
         JOIN pg_namespace seq_ns
           ON seq_ns.oid = seq.relnamespace
@@ -80,16 +68,18 @@ BEGIN
         JOIN pg_attribute att
           ON att.attrelid = tbl.oid
          AND att.attnum   = dep.refobjsubid
-        JOIN pg_sequences s
-          ON s.schemaname   = seq_ns.nspname
-         AND s.sequencename = seq.relname
+        -- pg_sequence, the catalog, not the pg_sequences view: the view silently
+        -- drops any sequence the caller lacks privileges on, which would shrink
+        -- the walk to nothing instead of erroring if this ran as a lesser role.
+        JOIN pg_sequence s
+          ON s.seqrelid = seq.oid
         WHERE seq.relkind = 'S'
           AND tbl.relkind IN ('r', 'p')       -- ordinary + partitioned tables
           AND NOT att.attisdropped
           AND dep.refobjsubid > 0             -- column-owned, not table-owned
           -- Descending sequences are never used for surrogate keys, and
           -- "fast-forward past max()" is meaningless for them.
-          AND s.increment_by > 0
+          AND s.seqincrement > 0
           AND seq_ns.nspname NOT IN ('pg_catalog', 'information_schema')
           AND tbl_ns.nspname NOT IN ('pg_catalog', 'information_schema')
           AND seq_ns.nspname NOT LIKE '\_timescaledb%'
@@ -98,9 +88,9 @@ BEGIN
     LOOP
         scanned := scanned + 1;
 
-        -- No ONLY: on a hypertable (or a partitioned table) the rows live in
+        -- No ONLY: on a hypertable or a partitioned table the rows live in
         -- child chunks, and max() must span all of them.
-        EXECUTE format('SELECT max(%s) FROM %s', r.col_ident, r.tbl_ident)
+        EXECUTE format('SELECT max(%I) FROM %s', r.col_name, r.tbl_ident)
            INTO max_id;
 
         EXECUTE format('SELECT last_value, is_called FROM %s', r.seq_ident)
@@ -110,16 +100,75 @@ BEGIN
                          ELSE last_val
                     END;
 
-        -- Nothing to collide with, or the sequence is already past the data.
-        CONTINUE WHEN max_id IS NULL OR max_id < next_val;
+        IF max_id IS NULL THEN
+            empty := empty + 1;
+            CONTINUE;
+        END IF;
 
-        PERFORM setval(r.seq_ident, max_id, true);
-        resynced := resynced + 1;
-        RAISE NOTICE 'resynced % : next value was %, max(%.%) is % -> next value is now %',
-            r.seq_ident, next_val, r.tbl_ident, r.col_name, max_id, max_id + r.increment_by;
+        CONTINUE WHEN max_id < next_val;
+
+        -- Degrade one unrepairable sequence to a warning instead of aborting the
+        -- loop: an uncaught error would abandon every sequence later in the scan
+        -- order and suppress the summary below. The classic case is a column
+        -- widened to bigint whose serial sequence kept maxvalue 2147483647.
+        BEGIN
+            -- GREATEST against a fresh read of last_value, in the same statement,
+            -- so a worker that called nextval() past max_id since the guard above
+            -- is not rewound into the collision this exists to prevent. Narrow,
+            -- not airtight — scale the writers down first if you want certainty.
+            EXECUTE format(
+                'SELECT setval(%L::regclass, GREATEST($1, (SELECT last_value FROM %s)), true)',
+                r.seq_ident::text, r.seq_ident)
+              USING max_id;
+            resynced := resynced + 1;
+            RAISE NOTICE 'resynced % : next value was %, max(%.%) is % -> next value is now %',
+                r.seq_ident, next_val, r.tbl_ident, r.col_name, max_id, max_id + r.increment_by;
+        EXCEPTION WHEN OTHERS THEN
+            failed := failed + 1;
+            RAISE WARNING 'could not resync % to max(%.%) = % : %',
+                r.seq_ident, r.tbl_ident, r.col_name, max_id, SQLERRM;
+        END;
     END LOOP;
 
-    RAISE NOTICE 'sequence resync complete: % column-owned sequence(s) scanned, % resynced, % already correct',
-        scanned, resynced, scanned - resynced;
+    RAISE NOTICE 'sequence resync: % scanned, % resynced, % already ahead, % empty, % failed',
+        scanned, resynced, scanned - resynced - empty - failed, empty, failed;
+
+    -- Zero sequences found is not success — it is what running against a database
+    -- whose migrations have not been applied looks like. Without this, a genuine
+    -- no-op and a wrong-database run print the same green summary.
+    IF scanned = 0 THEN
+        RAISE WARNING 'no column-owned sequences found in % — are the migrations applied?',
+            current_database();
+    END IF;
+
+    -- A sequence with no OWNED BY link is outside the walk above and stays
+    -- stale after an import. None exists today (every id column is SERIAL or
+    -- BIGSERIAL); this says so at the moment that stops being true, which a
+    -- comment could not.
+    SELECT array_agg(seq.oid::regclass::text ORDER BY seq.oid::regclass::text)
+      INTO unmatched
+      FROM pg_class seq
+      JOIN pg_namespace ns ON ns.oid = seq.relnamespace
+     WHERE seq.relkind = 'S'
+       AND ns.nspname NOT IN ('pg_catalog', 'information_schema')
+       AND ns.nspname NOT LIKE '\_timescaledb%'
+       AND NOT EXISTS (
+           SELECT 1 FROM pg_depend dep
+            WHERE dep.classid    = 'pg_class'::regclass
+              AND dep.objid      = seq.oid
+              AND dep.refclassid = 'pg_class'::regclass
+              AND dep.deptype IN ('a', 'i')
+       );
+
+    IF unmatched IS NOT NULL THEN
+        RAISE WARNING 'not resynced (no OWNED BY column): %. Give the sequence an OWNED BY, or resync it by hand after an import.',
+            array_to_string(unmatched, ', ');
+    END IF;
+
+    IF failed > 0 THEN
+        RAISE EXCEPTION '% sequence(s) could not be resynced (see the warnings above)', failed;
+    END IF;
 END
 $resync$;
+
+RESET statement_timeout;

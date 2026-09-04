@@ -2403,26 +2403,39 @@ kind-migrate: kind-bootstrap-db
 	kubectl --context=$(KUBE_CONTEXT) wait --for=condition=complete job/migrate -n $(KUBE_NS) --timeout=300s
 	@echo "==> Migration logs:"
 	kubectl --context=$(KUBE_CONTEXT) logs -l job-name=migrate -n $(KUBE_NS) || true
-	@$(MAKE) --no-print-directory kind-resync-sequences
+	@echo "$(KUBE_CONTEXT)" | grep -q '^kind-' \
+	  && $(MAKE) --no-print-directory kind-resync-sequences \
+	  || echo "==> $(KUBE_CONTEXT) is not a kind context — skipping the dev sequence resync."
 
 # Fast-forward every column-owned sequence past max(column) in the kind dev DB
-# (ARCT-399). LOCAL DEV ONLY — staging and prod take their ids only from the
-# sequence and can never drift; this must never become a migration.
+# (ARCT-399). LOCAL DEV ONLY. Run it after ANY bulk import / staging clone into
+# the dev database — importing rows with explicit ids leaves the sequences behind
+# max(id), and the next new INSERT then dies on the pkey.
 #
-# Run it after ANY bulk import / staging clone into the dev database. It is also
-# chained onto kind-migrate, so `dev-up`, `dev-db` and `dev-reset` leave the
-# sequences correct no matter which order the import and the bring-up happened
-# in. Idempotent and monotonic: on a clean database it resyncs nothing, and it
-# never rewinds a sequence — see ../k8s/dev-infra/sql/resync-sequences.sql.
+# kind-migrate also chains it, which covers a bring-up over an already-imported
+# database. It does NOT cover the other order: import into a running cluster and
+# you must run this yourself.
+#
+# Idempotent and monotonic — on a healthy database it resyncs nothing and never
+# rewinds. Rationale and the not-a-migration argument live in k8s/README.md
+# § "Bulk-importing rows into the dev database"; the SQL is
+# ../k8s/dev-infra/sql/resync-sequences.sql.
 kind-resync-sequences:
 	@$(require_kind_context)
 	@echo "==> Resyncing id sequences to max(id) (dev clone repair, ARCT-399)..."
-	kubectl --context=$(KUBE_CONTEXT) create configmap dev-sequence-resync-sql \
+	kubectl --context=$(KUBE_CONTEXT) delete job/resync-sequences --ignore-not-found -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) create configmap resync-sequences-sql \
 	  --from-file=resync-sequences.sql=../k8s/dev-infra/sql/resync-sequences.sql \
 	  -n $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
-	kubectl --context=$(KUBE_CONTEXT) delete job/resync-sequences --ignore-not-found -n $(KUBE_NS)
-	$(call kind-apply-rendered,cat ../k8s/dev-infra/jobs/resync-sequences.yaml,-n $(KUBE_NS))
-	kubectl --context=$(KUBE_CONTEXT) wait --for=condition=complete job/resync-sequences -n $(KUBE_NS) --timeout=300s
+	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/jobs/resync-sequences.yaml -n $(KUBE_NS)
+	@echo "==> Waiting for the sequence resync to complete..."
+	@# `wait --for=condition=complete` cannot see a Failed Job, so a SQL error
+	@# surfaces as a timeout. Dump the logs before make aborts, or the psql error
+	@# — the only thing that says what went wrong — is never printed.
+	@kubectl --context=$(KUBE_CONTEXT) wait --for=condition=complete job/resync-sequences -n $(KUBE_NS) --timeout=300s \
+	  || { echo "ERROR: resync-sequences did not complete. Job logs:"; \
+	       kubectl --context=$(KUBE_CONTEXT) logs -l job-name=resync-sequences -n $(KUBE_NS) --tail=-1 || true; \
+	       exit 1; }
 	@echo "==> Sequence resync logs:"
 	kubectl --context=$(KUBE_CONTEXT) logs -l job-name=resync-sequences -n $(KUBE_NS) || true
 

@@ -4,8 +4,9 @@
 # the next genuinely-new INSERT fail on the primary key.
 #
 # The SQL lives in ../sql/resync-sequences.sql and reaches the pod through the
-# `dev-sequence-resync-sql` ConfigMap, which `make kind-resync-sequences`
-# creates from that file — apply this Job through that target, not by hand.
+# `resync-sequences-sql` ConfigMap, which `make kind-resync-sequences` creates
+# from that file — apply this Job through that target, not by hand, or the pod
+# parks on a missing mount.
 #
 # Deliberately NOT a migration: staging and prod take their ids only from the
 # sequence and must never run this (see stl-verify/db/migrations/AGENTS.md).
@@ -14,7 +15,13 @@ kind: Job
 metadata:
   name: resync-sequences
 spec:
-  backoffLimit: 3
+  # Every failure mode here is deterministic (a SQL error, a bad mount), and the
+  # one transient case — the database not being up — is the initContainer's job.
+  # Retrying would only delay the real error.
+  backoffLimit: 0
+  # Give the Job a Failed condition ahead of the Makefile's 300s wait, so a pod
+  # stuck on a missing ConfigMap surfaces as a failure rather than a timeout.
+  activeDeadlineSeconds: 240
   template:
     spec:
       restartPolicy: Never
@@ -31,8 +38,8 @@ spec:
           # Kubernetes expands $(ADMIN_DATABASE_URL) from the container's env.
           command: ["psql", "$(ADMIN_DATABASE_URL)", "-v", "ON_ERROR_STOP=1", "-f", "/sql/resync-sequences.sql"]
           env:
-            # setval() needs UPDATE on the sequence, so this runs as the
-            # superuser URL rather than as stl_migrator.
+            # The superuser URL, matching bootstrap-db: setval() needs USAGE or
+            # UPDATE on every sequence regardless of who owns it.
             - name: ADMIN_DATABASE_URL
               valueFrom:
                 configMapKeyRef:
@@ -45,4 +52,4 @@ spec:
       volumes:
         - name: sql
           configMap:
-            name: dev-sequence-resync-sql
+            name: resync-sequences-sql

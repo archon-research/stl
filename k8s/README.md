@@ -231,9 +231,9 @@ make kind-deploy-mock-blockchain-server-s3
 
 There is no automated clone target — a staging clone into the kind database is
 done by hand, and it is a *logical* import (see
-[ADR-0006](../docs/adr/0006-data-reproducibility-and-append-only-guarantees.md):
-never do this to staging or prod, where a logical restore resets the xid space).
-Whatever you use to get the rows in — `pg_dump`/`pg_restore`, `\copy`, a
+[ADR-0006](../docs/adr/0006-data-reproducibility-and-append-only-guarantees.md),
+Proposed: never do this to staging or prod, where a logical restore resets the
+xid space). Whatever you use to get the rows in — `pg_dump`/`pg_restore`, `\copy`, a
 hand-written `INSERT` script — the rows arrive carrying their **own explicit
 ids**, and an explicit id does not advance the table's sequence. Afterwards
 every sequence sits far behind `max(id)` of its table, and the next genuinely
@@ -243,11 +243,11 @@ new row fails with:
 ERROR: duplicate key value violates unique constraint "token_pkey" (SQLSTATE 23505)
 ```
 
-That is not a code bug and not race-related (ARCT-399): the upsert conflicts on
-`(chain_id, address)`, a different constraint from the one the lagging `id`
-sequence violates, so `ON CONFLICT` cannot absorb it.
+That is not a code bug (ARCT-399): the upsert conflicts on `(chain_id, address)`,
+a different constraint from the one the lagging `id` sequence violates, so
+`ON CONFLICT` cannot absorb it.
 
-**So: after any bulk import or clone into the dev DB, run**
+After any bulk import or clone into the dev DB, run:
 
 ```bash
 cd stl-verify
@@ -255,20 +255,29 @@ make kind-resync-sequences
 ```
 
 It runs [`dev-infra/sql/resync-sequences.sql`](dev-infra/sql/resync-sequences.sql)
-as a one-off Job, walking every sequence owned by a table column (`serial`,
-`bigserial`, and `GENERATED ... AS IDENTITY`) and fast-forwarding it past
-`max(column)`. No table name is hard-coded, so new tables are covered
-automatically. It is idempotent and monotonic — it never rewinds a sequence, so
-running it when nothing is wrong is a no-op you can repeat freely.
+as a one-off Job, walking every sequence owned by a table column and
+fast-forwarding it past `max(column)`. No table name is hard-coded, so new tables
+are covered automatically. It is idempotent and monotonic — it never rewinds a
+sequence, so running it when nothing is wrong is a no-op you can repeat freely,
+and it is safe to run while the watcher and workers are writing.
 
-`make kind-migrate` also chains it, so `dev-up`, `dev-db` and `dev-reset` leave
-the sequences correct whichever order you imported and brought the cluster up
-in. Only the standalone target covers "cluster already running, clone just
-landed".
+`make kind-migrate` chains it too, so a bring-up over an already-imported
+database fixes the sequences on the way through. That does not help the other
+order: if you import into a cluster that is already up — the usual case — run the
+standalone target yourself.
 
-This is deliberately **not** a database migration. Staging and prod take their
-ids only from the sequence and can never drift; a migration would run there too
-and paper over a real anomaly (see
+If the target stalls and then fails, the Job errored:
+`kubectl logs job/resync-sequences -n vector` has the `psql` output. The script
+caps itself at 120s (`SET statement_timeout`), which one table can legitimately
+exceed: `sparklend_reserve_data.id` is neither `compress_segmentby` nor
+`compress_orderby`, so once its chunks compress, `max(id)` has to decompress
+them. Re-run with a larger timeout if you hit it.
+
+This is deliberately **not** a database migration. In staging and prod ids come
+from the sequence, except where a migration seeds an explicit one — and those
+migrations resync that single sequence themselves, as the `setval` at the end of
+`20260410_100000_create_build_registry.sql` does. A schema-wide resync there
+would be a no-op at best, and would paper over a real anomaly at worst (see
 [stl-verify/db/migrations/AGENTS.md](../stl-verify/db/migrations/AGENTS.md)).
 
 ## Fast Iteration

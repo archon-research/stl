@@ -889,15 +889,14 @@ ArgoCD PreSync hook in staging/prod.
    an old table is debt, not permission.
 6. Use `CREATE INDEX CONCURRENTLY` on big tables. Test on staging first.
 
-**Not everything DB-shaped is a migration.** Repairs that only ever apply to the
-local kind database live in `k8s/dev-infra/sql/` and run as a dev-only Job — a
-migration would run in staging and prod too, where the problem cannot occur and
-the "fix" would hide a real anomaly. The one case today is
-`resync-sequences.sql`: after bulk-importing staging rows into the dev DB (they
-carry explicit ids, which do not advance the sequences) every new INSERT fails
-with `duplicate key value violates unique constraint "…_pkey"`. Run
-`make kind-resync-sequences` after any such import — `make kind-migrate` chains
-it, so `dev-up`/`dev-db`/`dev-reset` are covered already. Details:
+7. **If a migration seeds an explicit id** into a `SERIAL`/identity column, end
+   it with a `setval` on that table's sequence, or the next ordinary insert
+   collides — `20260410_100000_create_build_registry.sql` is the pattern.
+
+**Not everything DB-shaped is a migration.** Repairs that only apply to the local
+kind database live in `k8s/dev-infra/sql/` and run as a dev-only Job. Today that
+is `resync-sequences.sql`: run `make kind-resync-sequences` after bulk-importing
+rows into the dev DB. See
 [k8s/README.md § Bulk-importing rows into the dev database](k8s/README.md#bulk-importing-rows-into-the-dev-database-staging-clone).
 
 ---

@@ -7,11 +7,7 @@ Root repo map and cross-cutting rules: [../AGENTS.md](../AGENTS.md).
 - `k8s/overlays/staging/` — staging-specific patches (namespace, images/image tags)
 - `k8s/overlays/dev/` — local kind overlay (localhost/*:local images, shared stl-config/stl-secrets via a runtime Component); `workers/` sub-overlay for Alchemy-key workers
 - `k8s/dev-infra/` — local-only artifacts with no EKS equivalent: infra (timescaledb, redis, localstack, temporal, jaeger, mock-blockchain-server), `jobs/`, `sql/`, and `kind.yaml` (the kind cluster definition); applied imperatively by `stl-verify/Makefile`
-
-## Dev-only database maintenance (`dev-infra/sql/`)
-
-- `dev-infra/sql/` holds SQL that repairs the **local kind database only**, run by a Job in `dev-infra/jobs/`. Today that is `resync-sequences.sql` (ARCT-399): the dev DB is periodically filled by bulk-importing staging rows with explicit ids, which leaves every sequence behind `max(id)` and makes the next new INSERT fail on the pkey. `make kind-resync-sequences` fast-forwards them; `make kind-migrate` chains it, so `dev-up`/`dev-db`/`dev-reset` cover it too.
-- **Nothing here may become a migration.** Staging and prod take their ids only from the sequence and cannot drift, so the same SQL there is at best a no-op and at worst hides a real anomaly. Anything added to `dev-infra/sql/` must say in its header why it is dev-only, and must be idempotent and safe to re-run (the resync is also *monotonic* — it never rewinds a sequence).
+- `k8s/dev-infra/sql/` holds SQL that repairs the **local kind database only**, run by a Job in `dev-infra/jobs/` and never by the migrator. Anything added here must state in its header why it is dev-only, and must be idempotent and safe to re-run. Today: `resync-sequences.sql` (`make kind-resync-sequences`, ARCT-399) — see [README.md](README.md#bulk-importing-rows-into-the-dev-database-staging-clone).
 
 ## Config / secret rollouts (EKS only)
 
