@@ -1631,8 +1631,12 @@ whose history predates its registration. It is not scheduled and not wired into
 any overlay; it is applied by hand from
 `k8s/base/uniswap-v4-position-bootstrap/`.
 
-- **Pin semantics.** The whole run snapshots one block: `head - 64` by default
-  (two epochs, comfortably past finalisation), overridable with `-pin`. One
+- **Pin semantics.** The whole run snapshots one block: on mainnet `head - 64`
+  by default (two epochs, comfortably past finalisation), overridable with
+  `-pin`. Every other chain must pass `-finality-depth`: 64 blocks is two
+  minutes on Base and sixteen seconds on Arbitrum, so there is no default off
+  mainnet, and the run refuses to start without one even when `-pin` is given,
+  because the reorg-window refusal below is `pin > head - depth`. One
   block for the run is what makes the snapshot internally consistent, and being
   past finality is what lets every row carry `block_version = 0`. A `-pin` above
   `head - finality-depth` is **refused**, with an error naming the head and the
@@ -1664,6 +1668,52 @@ version histories matched on `chain_id`, and "current" always means the highest
 `processing_version` per natural key — never the newest `id` or `build_id`.
 `uniswap_v4_position_manager` is a third registry table of the same shape, for
 the ERC-721 PositionManager, and its address comes through `protocol_id` too.
+
+### Adding a chain
+
+Nothing in the worker is mainnet-specific; a second chain is a queue, a
+migration and a Deployment, in that order. What already holds without any
+change: the SQS loop deletes a message whose chain id is not the worker's
+(`chain ID mismatch, deleting message`), `entity.ChainName` fails boot on an
+unknown chain id, `dexbootstrap` refuses to boot off mainnet without
+`ALCHEMY_HTTP_URL`, `ValidatePoolKeys` refuses a registry whose PoolIds do not
+hash from their keys, and every registry and fact table is keyed on `chain_id`
+(a PoolId is identical across chains for an identical PoolKey, which is why the
+natural key is `(chain_id, pool_id)` and never `pool_id` alone).
+
+1. **Infrastructure repo** — the chain's `uniswap_v4_indexing` SQS queue, IAM
+   role and pod identity, mirroring archon-research/infrastructure#617 for
+   ethereum. The chain must already have a watcher and backup worker (mainnet,
+   arbitrum, base, optimism, unichain and avalanche do); a chain id missing
+   from `entity.ChainIDToName` is chain onboarding, not a V4 task.
+2. **One additive migration**, every value read from chain and asserted in a
+   `DO` block (the `20260831_120000_seed_prime_dex_pools.sql` shape): a
+   `protocol` row for the chain's PoolManager; a `uniswap_v4_pool_manager` row
+   with its StateView address and deploy block; a `uniswap_v4_position_manager`
+   row for its PositionManager; a native-currency placeholder `token` row
+   (`0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE`, that chain's native symbol
+   and decimals — only chain 1 has one today, and without it the pool seed's
+   token join inserts nothing); the pools' `token` rows; the pools themselves,
+   each from its own `Initialize` log. Extend the expectation list in
+   `uniswap_v4_migration_integration_test.go`.
+3. **Kubernetes** — copy `k8s/base/uniswap-v4-indexer/` to
+   `k8s/base/<chain>-uniswap-v4-indexer/`, changing only the names, where
+   `<chain>` is the `entity.ChainName` value verbatim (`base`, `avalanche-c`):
+   that name is what the Down and Stalled rules derive their `chain` label
+   from, and the `app` label must equal the Deployment name. Add its ConfigMap
+   (`DEX=uniswap-v4`, `CHAIN_ID`, `ALCHEMY_HTTP_URL`), its ExternalSecret
+   (queue URL, `DATABASE_URL`, `ALCHEMY_API_KEY`), the overlay `resources:`
+   entries, and the `k8s/image-roster.txt` line.
+4. **Alerts** — nothing to copy: every rule in the group is chain-generic. On
+   the first deploy confirm that
+   `kube_deployment_status_replicas_available{deployment="<chain>-uniswap-v4-indexer"}`
+   exists and that `uniswap_v4_blocks_processed_total{chain="<chain>"}` carries
+   the same chain value; if they differ, the naming rule was not followed and
+   `VectorUniswapV4IndexerStalled` will fire on a phantom chain.
+5. **Bootstrap** — run `uniswap-v4-position-bootstrap` once by hand with
+   `-chain-id`, the chain's RPC endpoint and an explicit `-finality-depth`
+   chosen for that chain's finality (see *Pin semantics* above); the mainnet
+   Job manifest is not reusable as-is.
 
 **Who holds a posm position NFT.** `uniswap_v4_position.owner` is the
 *PoolManager-level* owner, which for every PositionManager-managed position is
@@ -1793,9 +1843,10 @@ row is wrong.
 
 ### What it means
 
-The `uniswap-v4-indexer` Deployment has <1 available replica for 10 minutes. No
-pod is running, so nothing is written to any `uniswap_v4_*` table and the SQS
-backlog is growing.
+A uniswap-v4-indexer Deployment has <1 available replica for 10 minutes. No
+pod is running, so nothing is written to any `uniswap_v4_*` table for that
+chain and its SQS backlog is growing. The alert names the Deployment
+(`deployment`) and the chain it serves (`chain`).
 
 This rule reads `kube_deployment_status_replicas_available` from
 kube-state-metrics, which is independent of the OTel pipeline. That is the whole
@@ -1806,30 +1857,43 @@ single-PoolManager check, and the boot-time `PoolIDsEverSnapshotted` read each
 refuse to start rather than index wrong or invisible data — which makes a boot
 crash-loop a routine failure mode here, not an exotic one.
 
+kube-state knows nothing about chains and exports no Deployment labels, so
+`chain` is derived from the Deployment name: the bare `uniswap-v4-indexer` is
+mainnet and every other chain's Deployment is `<chain>-uniswap-v4-indexer` with
+the `entity.ChainName` value verbatim (`base-uniswap-v4-indexer`,
+`avalanche-c-uniswap-v4-indexer`), so the derived label equals the `chain` the
+worker emits on its own series. One rule covers every chain; a new chain gets a
+Deployment that follows the naming rule, never a copy of this rule
+([Adding a chain](#adding-a-chain)).
+
 ### First checks (<=5 min)
 
-1. **Pod status** — `kubectl -n vector get pods -l app=uniswap-v4-indexer`.
-2. **Why it is not ready** — `kubectl -n vector describe deployment/uniswap-v4-indexer`
+`$DEPLOY` below is the alert's `deployment` label; the pods' `app` label equals
+it.
+
+1. **Pod status** — `kubectl -n vector get pods -l app=$DEPLOY`.
+2. **Why it is not ready** — `kubectl -n vector describe deployment/$DEPLOY`
    and, for a crash loop, the *previous* container's logs:
-   `kubectl -n vector logs -l app=uniswap-v4-indexer --previous --tail=100`.
+   `kubectl -n vector logs -l app=$DEPLOY --previous --tail=100`.
 3. **Registry refusal** — the fail-fast startup errors are self-identifying:
-   `kubectl -n vector logs -l app=uniswap-v4-indexer --previous | grep -E "registry bug|PoolManager|StateView|no uniswap v4 pools|ever been indexed"`
+   `kubectl -n vector logs -l app=$DEPLOY --previous | grep -E "registry bug|PoolManager|StateView|no uniswap v4 pools|ever been indexed"`
    - `... : registry bug` — `ValidatePoolKeys` recomputed a PoolId that
      disagrees with the seeded one, or two rows share a PoolId.
    - `pools A and B have different PoolManager/StateView addresses` — the
      registry spans two deployments; one worker serves one.
    - `no uniswap v4 pools registered for chain N` — the chain has no
-     current-version `uniswap_v4_pool` rows.
+     current-version `uniswap_v4_pool` rows. On a newly added chain this is
+     the seeding migration missing, not a bad row.
    - `reading which uniswap v4 pools have ever been indexed on chain N` — the
      boot read against TimescaleDB failed; this is a DB availability problem,
      not a registry one.
-
    Every one of these is fixed by appending a superseding registry row
    ([Fixing a bad registry row](#fixing-a-bad-registry-row)) or by restoring the
    database — never by editing the offending row in place.
-4. **Secrets/config present** — a missing key from the `uniswap-v4-indexer`
+4. **Secrets/config present** — a missing key from the Deployment's
    ExternalSecret (queue URL, `DATABASE_URL`, `ALCHEMY_API_KEY`, `REDIS_ADDR`)
-   crashes the worker on startup by design.
+   crashes the worker on startup by design; off mainnet so does a missing
+   `ALCHEMY_HTTP_URL` in its ConfigMap.
 5. **Node/scheduling** — a pending pod means node capacity or taints, not the
    worker.
 
@@ -1844,9 +1908,9 @@ crash-loop a routine failure mode here, not an exotic one.
 
 ### Verify recovery
 
-`kube_deployment_status_replicas_available{deployment="uniswap-v4-indexer"} >= 1`,
-and the pod logs show the `uniswap-v4-indexer started` line with a non-zero
-`pools` count.
+`kube_deployment_status_replicas_available{deployment="$DEPLOY"} >= 1`, and the
+pod logs show the `uniswap-v4-indexer started` line with a non-zero `pools`
+count.
 
 ---
 
@@ -1856,8 +1920,9 @@ and the pod logs show the `uniswap-v4-indexer started` line with a non-zero
 
 ### What it means
 
-The worker is **up** (>=1 replica) but has consumed **no block for 15 minutes**:
-`rate(uniswap_v4_blocks_processed_total{status="success", chain="mainnet"}[5m])`
+A uniswap-v4-indexer Deployment is **up** (>=1 replica) but has consumed **no
+block for 15 minutes** on its chain:
+`rate(uniswap_v4_blocks_processed_total{status="success", chain="<chain>"}[5m])`
 is zero — or the series has **vanished entirely**. The expression zero-fills from
 kube-state-metrics, so a dead OTLP export with a live pod still fires; without
 that zero-fill the counter would simply staleness-expire and the rule would
@@ -1870,19 +1935,18 @@ or tick updates are being recorded. The worker consumes one `BlockEvent` per
 block (~12s on mainnet) and counts every one, touched pools or not, so this is
 never a quiet market.
 
-Because the zero-fill comes from kube-state-metrics, which knows nothing about
-chains, this rule *aggregates* by `cluster` only — but it still *carries* a
-`chain` label: `chain: mainnet` is re-added as a static rule label, and the rate
-is pinned to `chain="mainnet"` so a second chain's Deployment cannot mask this
-one's stall. Aggregating without `chain` and carrying no `chain` are different
-things. This is not the odd one out either: it is one of the group's two
-kube-state-keyed rules, and
-[`VectorUniswapV4IndexerDown`](#vectoruniswapv4indexerdown) is built the same way
-(`max by (cluster)` plus a static `chain: mainnet`). The five metric-keyed rules
-in the group — ErrorRatioHigh, BlockLatencyHigh, NotWritingState, NoPoolsTouched,
-PoolNeverIndexed — derive `chain` from the series instead. A second chain gets
-its own copy of this pair, with its own deployment name and its own static
-chain.
+The zero-fill comes from kube-state-metrics, which knows nothing about chains,
+so the rule derives `chain` from the Deployment name exactly as
+[`VectorUniswapV4IndexerDown`](#vectoruniswapv4indexerdown) does (bare name =
+mainnet, otherwise the `entity.ChainName` prefix) and joins both the zero-fill
+and the replica gate `on (chain, cluster)` against the worker's own `chain`
+label. That is what lets one chain reach zero on its own series while another
+chain's Deployment keeps running, and what keeps a dead second-chain pod in
+Down's lane rather than this one's. The metric-keyed rules in the group —
+ErrorRatioHigh, BlockLatencyHigh, NotWritingState, NoPoolsTouched,
+PoolNeverIndexed, NoNFTTransfers — derive `chain` from the series directly.
+One rule covers every chain; a new chain needs the Deployment naming rule and
+nothing else ([Adding a chain](#adding-a-chain)).
 
 ### First checks (<=5 min)
 
@@ -1892,13 +1956,15 @@ chain.
    pod is alive and this is a wedged consume loop or a dead metrics export.
 2. **Recent logs** — look for decode panics, DB connection errors,
    `context deadline exceeded`, or SQS poll failures:
-   `kubectl -n vector logs -l app=uniswap-v4-indexer --tail=100`
+   `kubectl -n vector logs -l app=$DEPLOY --tail=100`, where `$DEPLOY` is the
+   chain's Deployment (`uniswap-v4-indexer` on mainnet,
+   `<chain>-uniswap-v4-indexer` elsewhere)
 3. **OTLP export** — if the logs show blocks still being processed while the
    counter is flat, the metrics pipeline is the problem, not the worker; other
    OTel series from the pod will be flat or absent too.
 4. **Upstream lag** — confirm the watcher is producing blocks for this chain
    (if not, the root cause is upstream — see `VectorWatcherNoBlocks`).
-5. **SQS queue depth** — check the uniswap-v4-indexer SQS queue. A depth of 0
+5. **SQS queue depth** — check that chain's uniswap-v4-indexer SQS queue. A depth of 0
    with no processing means the consumer lost its connection or the queue is
    empty.
 6. **TimescaleDB health** — connection pool exhaustion or replication lag can
@@ -1924,10 +1990,8 @@ A startup registry refusal is **not** in this list: it kills the pod, so it fire
 
 ### Verify recovery
 
-`sum by (cluster) (rate(uniswap_v4_blocks_processed_total{status="success", chain="mainnet"}[5m])) > 0`
-in the affected cluster. Keep the `chain` pin: without it the sum adds up every
-chain's rate, and once a second Deployment exists one chain's stall would never
-reach zero.
+`sum by (chain, cluster) (rate(uniswap_v4_blocks_processed_total{status="success"}[5m])) > 0`
+for the alert's `chain` in the affected cluster.
 
 ---
 
@@ -1975,7 +2039,9 @@ not an alert.
 
 1. **Dominant error class** — `sum by (operation)(rate(uniswap_v4_errors_total[10m]))`
    to see which operation is failing most.
-2. **Pod logs** — `kubectl -n vector logs -l app=uniswap-v4-indexer | grep "ERROR"`
+2. **Pod logs** — `kubectl -n vector logs -l app=$DEPLOY | grep "ERROR"`, where
+   `$DEPLOY` is the alert's chain's Deployment (`uniswap-v4-indexer` on mainnet,
+   `<chain>-uniswap-v4-indexer` elsewhere).
 3. **Zero sqrt price** — a `sqrt_price_x96` validation error names a registry
    bug, not a transient fault. StateView returns zeros (no revert) for a PoolId
    it has never seen, and `Validate` rejects that rather than persisting a fake
@@ -2123,7 +2189,9 @@ lag in Uniswap V4 pool state.
 4. **DB write latency** — confirm TimescaleDB is not under I/O pressure. The
    append-on-change tick writer takes per-`(pool, tick)` advisory locks, so a
    block touching a wide tick range serializes more work.
-5. **Pod CPU/memory** — `kubectl top pod -n vector -l app=uniswap-v4-indexer`.
+5. **Pod CPU/memory** — `kubectl top pod -n vector -l app=$DEPLOY`, where
+   `$DEPLOY` is the alert's chain's Deployment (`uniswap-v4-indexer` on mainnet,
+   `<chain>-uniswap-v4-indexer` elsewhere).
 
 ### Common causes
 
@@ -2450,7 +2518,8 @@ this fires on a pool younger than the window. Step 1 resolves it in one look.
    and tells you immediately whether the pool is new:
 
    ```bash
-   kubectl -n vector logs -l app=uniswap-v4-indexer | \
+   # $DEPLOY: uniswap-v4-indexer on mainnet, <chain>-uniswap-v4-indexer elsewhere
+   kubectl -n vector logs -l app=$DEPLOY | \
      grep "have never produced a state or tick row"
    ```
 

@@ -2212,15 +2212,27 @@ groups:
         # or invisible data. Without this rule such a pod emits no uniswap_v4_*
         # series at all, and the metric-keyed rules below have nothing to key on.
         #
-        # kube-state knows nothing about chains, so `chain` is a STATIC label
-        # here: one Deployment serves one chain, and this Deployment is mainnet's.
-        # A second chain gets its own copy with its own deployment name and its
-        # own static chain (the entity.ChainName value, e.g. `base`).
+        # kube-state knows nothing about chains and exports no Deployment labels,
+        # so `chain` is derived from the Deployment NAME. One Deployment serves one
+        # chain: the bare name is mainnet, every other chain is
+        # `<chain>-uniswap-v4-indexer` with the entity.ChainName value verbatim
+        # (`base-`, `avalanche-c-`), so the derived label equals the `chain` the
+        # worker itself emits. The two label_replace calls are the whole mapping:
+        # the first captures the prefix, the second turns "no prefix" into
+        # mainnet. A second chain is covered by this rule as written and must
+        # not get a copy; VectorUniswapV4IndexerStalled repeats the same mapping
+        # so that its zero-fill joins the worker's own `chain` label.
         expr: |
-          max by (cluster) (
-            kube_deployment_status_replicas_available{
-              deployment="uniswap-v4-indexer", namespace="vector"
-            }
+          label_replace(
+            label_replace(
+              max by (deployment, cluster) (
+                kube_deployment_status_replicas_available{
+                  deployment=~"(.*-)?uniswap-v4-indexer", namespace="vector"
+                }
+              ),
+              "chain", "$1", "deployment", "^(.*)-uniswap-v4-indexer$"
+            ),
+            "chain", "mainnet", "chain", "^$"
           ) < 1
         for: 10m
         labels:
@@ -2228,15 +2240,14 @@ groups:
           severity: critical
           component: uniswap-v4-indexer
           namespace: vector
-          chain: mainnet
         annotations:
-          summary: "Vector uniswap-v4-indexer has no available replica on mainnet"
+          summary: "Vector uniswap-v4-indexer has no available replica on {{ $labels.chain }} ({{ $labels.deployment }})"
           description: |
-            `uniswap-v4-indexer` Deployment has <1 available replica for >10m.
+            `{{ $labels.deployment }}` Deployment has <1 available replica for >10m.
             The worker is not running; no Uniswap V4 swaps, liquidity events,
-            pool state or ticks are being written and the SQS backlog is
-            growing. A boot-time registry rejection looks exactly like this —
-            check the previous container's logs first.
+            pool state or ticks are being written for `{{ $labels.chain }}` and
+            the SQS backlog is growing. A boot-time registry rejection looks
+            exactly like this — check the previous container's logs first.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerdown
 
       - alert: VectorUniswapV4IndexerStalled
@@ -2249,35 +2260,48 @@ groups:
         # VectorFluidVaultIndexerStalled above.
         #
         # The zero-fill can only come from kube-state, which knows nothing about
-        # chains, so this pair is PER-DEPLOYMENT and therefore per-chain: the rate
-        # is pinned to `chain="mainnet"` (this Deployment's chain, the
-        # entity.ChainName value the worker labels with) and `chain` is re-added
-        # as a static label. Without that pin, `sum by (cluster)` would add up
-        # every chain's rate and one chain stalling would never reach zero once a
-        # second Deployment exists. A second chain gets its own copy of this pair
-        # with its own deployment name and its own chain, in both places.
+        # chains, so its `chain` is derived from the Deployment name exactly as
+        # VectorUniswapV4IndexerDown derives it (prefix = entity.ChainName, bare
+        # name = mainnet). That derived label is what lets the zero-fill `or` and
+        # the replica gate join `on (chain, cluster)` against the worker's own
+        # `chain` label: one chain stalling reaches zero on its own series while
+        # a second chain's Deployment keeps running, and a dead second-chain pod
+        # is Down's case, not this rule's. A second chain must not get a copy of
+        # this rule — it needs the naming rule and nothing else.
         expr: |
           (
             (
-              sum by (cluster) (
+              sum by (chain, cluster) (
                 rate(uniswap_v4_blocks_processed_total{
-                  status="success", chain="mainnet", k8s_namespace_name="vector"
+                  status="success", k8s_namespace_name="vector"
                 }[5m])
               )
               or
-              max by (cluster) (
-                kube_deployment_status_replicas_available{
-                  deployment="uniswap-v4-indexer", namespace="vector"
-                }
+              max by (chain, cluster) (
+                label_replace(
+                  label_replace(
+                    kube_deployment_status_replicas_available{
+                      deployment=~"(.*-)?uniswap-v4-indexer", namespace="vector"
+                    },
+                    "chain", "$1", "deployment", "^(.*)-uniswap-v4-indexer$"
+                  ),
+                  "chain", "mainnet", "chain", "^$"
+                )
               ) * 0
             ) == 0
           )
-          and on (cluster)
+          and on (chain, cluster)
           (
-            max by (cluster) (
-              kube_deployment_status_replicas_available{
-                deployment="uniswap-v4-indexer", namespace="vector"
-              }
+            max by (chain, cluster) (
+              label_replace(
+                label_replace(
+                  kube_deployment_status_replicas_available{
+                    deployment=~"(.*-)?uniswap-v4-indexer", namespace="vector"
+                  },
+                  "chain", "$1", "deployment", "^(.*)-uniswap-v4-indexer$"
+                ),
+                "chain", "mainnet", "chain", "^$"
+              )
             ) >= 1
           )
         for: 15m
@@ -2286,19 +2310,15 @@ groups:
           severity: critical
           component: uniswap-v4-indexer
           namespace: vector
-          chain: mainnet
         annotations:
-          summary: "Vector uniswap-v4-indexer stalled on mainnet (no block consumed >15m)"
+          summary: "Vector uniswap-v4-indexer stalled on {{ $labels.chain }} (no block consumed >15m)"
           description: |
-            `uniswap-v4-indexer` is up but has consumed no block for >15m (or its
-            uniswap_v4_blocks_processed_total series vanished). The SQS consume
-            loop is wedged or the OTLP metric export broke; Uniswap V4 pool state
-            in TimescaleDB is going stale. Check the pod logs and SQS backlog.
+            The `{{ $labels.chain }}` uniswap-v4-indexer Deployment is up but has
+            consumed no block for >15m (or its uniswap_v4_blocks_processed_total
+            series vanished). The SQS consume loop is wedged or the OTLP metric
+            export broke; Uniswap V4 pool state for `{{ $labels.chain }}` in
+            TimescaleDB is going stale. Check the pod logs and SQS backlog.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerstalled
-
-      # ---------------------------------------------------------------------
-      # WARNING
-      # ---------------------------------------------------------------------
 
       - alert: VectorUniswapV4IndexerErrorRatioHigh
         # A RATIO (error/total), not an absolute error rate, because
@@ -2737,8 +2757,11 @@ groups:
         # the first tick/position row lands the series do not exist and a bare
         # `sum(rate(...))` is ABSENT, not zero — the `+` would then yield an
         # empty vector and the rule would be silently un-evaluable rather than
-        # simply under threshold. Gated on >=1 replica so a scaled-down
-        # deployment does not evaluate at all.
+        # simply under threshold. Gated on >=1 replica of ANY V4 Deployment (the
+        # same `(.*-)?uniswap-v4-indexer` name rule Down and Stalled derive
+        # `chain` from) so a fully scaled-down fleet does not evaluate at all,
+        # while one chain's Deployment being down does not blind the table-wide
+        # budget to the chains still writing.
         expr: |
           (
             (
@@ -2748,7 +2771,7 @@ groups:
               or
               max by (cluster) (
                 kube_deployment_status_replicas_available{
-                  deployment="uniswap-v4-indexer", namespace="vector"
+                  deployment=~"(.*-)?uniswap-v4-indexer", namespace="vector"
                 }
               ) * 0
             )
@@ -2760,7 +2783,7 @@ groups:
               or
               max by (cluster) (
                 kube_deployment_status_replicas_available{
-                  deployment="uniswap-v4-indexer", namespace="vector"
+                  deployment=~"(.*-)?uniswap-v4-indexer", namespace="vector"
                 }
               ) * 0
             )
@@ -2769,7 +2792,7 @@ groups:
           (
             max by (cluster) (
               kube_deployment_status_replicas_available{
-                deployment="uniswap-v4-indexer", namespace="vector"
+                deployment=~"(.*-)?uniswap-v4-indexer", namespace="vector"
               }
             ) >= 1
           )
