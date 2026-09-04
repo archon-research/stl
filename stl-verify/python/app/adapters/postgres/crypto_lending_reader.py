@@ -304,7 +304,25 @@ class PostgresCryptoLendingReader:
 
         return results
 
-    async def get_legacy_share(self, info: ReceiptTokenInfo) -> Decimal:
+    async def resolve_legacy_wallet(self, info: ReceiptTokenInfo) -> EthAddress | None:
+        """The wallet a no-``prime_id`` read is really answering about, or None.
+
+        Aave-like legacy share is ONE holder's balance over supply, so those
+        responses are that holder's position, not a pool aggregate; the caller
+        has to be authorized for it. None where no wallet is involved and the
+        share is genuinely pool-wide (Morpho's flat 1, and every protocol with
+        no legacy share at all).
+        """
+        if _normalize_protocol_name(info.protocol_name) not in _AAVE_LIKE:
+            return None
+        self._require_receipt_token_token_id(info)
+        try:
+            wallet_address = await self._lookup_wallet(info.receipt_token_address, info.chain_id)
+        except ValueError as exc:
+            raise MissingShareError(str(exc)) from exc
+        return EthAddress("0x" + wallet_address.hex())
+
+    async def get_legacy_share(self, info: ReceiptTokenInfo, wallet: EthAddress | None = None) -> Decimal:
         normalized = _normalize_protocol_name(info.protocol_name)
 
         if normalized in _MORPHO:
@@ -316,10 +334,16 @@ class PostgresCryptoLendingReader:
             raise ValueError(f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})")
 
         token_id = self._require_receipt_token_token_id(info)
-        try:
-            wallet_address = await self._lookup_wallet(info.receipt_token_address, info.chain_id)
-        except ValueError as exc:
-            raise MissingShareError(str(exc)) from exc
+        if wallet is not None:
+            # The caller resolved it already and had it authorized; computing
+            # from a second lookup would be checking one wallet and reporting
+            # another.
+            wallet_address = wallet.to_bytes()
+        else:
+            try:
+                wallet_address = await self._lookup_wallet(info.receipt_token_address, info.chain_id)
+            except ValueError as exc:
+                raise MissingShareError(str(exc)) from exc
         return await self._load_share(
             chain_id=info.chain_id,
             token_id=token_id,
@@ -348,7 +372,9 @@ class PostgresCryptoLendingReader:
         Legacy endpoints do not provide a ``prime_id``, so for Aave-like
         assets we infer a wallet by preferring the largest current holder of
         the receipt token itself and falling back to the underlying token only
-        if no receipt-token holder exists.
+        if no receipt-token holder exists. The winner is one real prime's
+        proxy, which is why ``resolve_legacy_wallet`` exists: the route gates
+        on it before any figures are computed.
         """
         token_hex = receipt_token_address.hex()
         try:

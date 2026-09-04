@@ -182,14 +182,13 @@ async def _vault_for(request: Request, address: EthAddress) -> str | None:
     return await repo.get_prime_vault_address(address)
 
 
-async def _check_prime_view(request: Request, principal: Principal | None, prime_id: str | None) -> None:
+async def check_prime_view(request: Request, principal: Principal | None, prime_id: str | None) -> None:
     """The per-resource ``prime:can_view`` check (ADR-011 Plane 2, layer 2).
 
-    One implementation behind three dependencies — the prime id reaches us as a
-    path segment, a query parameter or a body field. The object id is always
-    the VAULT address: the identity shared by all of a prime's proxies, and
-    what the reconciler writes. ``prime_id is None`` is not prime-scoped at
-    all, so the router's role gate is the whole control.
+    One implementation behind every caller — the prime id reaches us as a path
+    segment, a query parameter, a body field, or the wallet a pool-level risk
+    read resolves to. The object id is always the VAULT address: the identity
+    shared by all of a prime's proxies, and what the reconciler writes.
 
     An unknown prime and one the caller may not view answer the same 404. A
     distinct code tells an unauthorized caller which primes exist, the fact the
@@ -265,7 +264,7 @@ async def require_prime_view(request: Request, principal: Principal | None = Dep
     parameter is merged into the OpenAPI operation and overrides each route's
     own annotated description. The route's own param does the format validation.
     """
-    await _check_prime_view(request, principal, request.path_params.get("prime_id"))
+    await check_prime_view(request, principal, request.path_params.get("prime_id"))
 
 
 async def require_prime_view_query(request: Request, principal: Principal | None = Depends(get_principal)) -> None:
@@ -276,7 +275,7 @@ async def require_prime_view_query(request: Request, principal: Principal | None
     an analyst able to read any prime's risk through this router (ADR-015 wants
     BOTH the coarse role gate and the per-resource check).
     """
-    await _check_prime_view(request, principal, request.query_params.get("prime_id"))
+    await check_prime_view(request, principal, request.query_params.get("prime_id"))
 
 
 async def require_prime_view_body(request: Request, principal: Principal | None = Depends(get_principal)) -> None:
@@ -290,7 +289,7 @@ async def require_prime_view_body(request: Request, principal: Principal | None 
     """
     if principal is None:  # auth off — never touch the body
         return
-    await _check_prime_view(request, principal, await _body_prime_id(request))
+    await check_prime_view(request, principal, await _body_prime_id(request))
 
 
 async def _body_prime_id(request: Request) -> str | None:
