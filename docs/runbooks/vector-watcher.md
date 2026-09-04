@@ -310,17 +310,26 @@ over-orphaning, so a single occurrence is a signal rather than confirmed damage.
 Sustained occurrences mean upstream is degraded and the watcher is doing
 defensive work it should not need to.
 
+Known detection gap: `increase()` cannot see a series' first sample, so the very
+first `outcome="reorg"` classification on a newly onboarded chain does not fire —
+only the second one does. If you are investigating a chain's first weeks, query
+`live_block_out_of_order_total{outcome="reorg"}` directly rather than trusting
+the alert's silence.
+
 **`robinhood-watcher` (ARCT-397).** robinhood is a single-sequencer chain, so it
-joined the allow-list on the same grounds as the other rollups. Do NOT discount a
-robinhood firing as "upstream is dropping heads again": a head that Alchemy omits
-and then delivers late still links cleanly onto our chain, so it is recorded as
-`outcome="late_arrival"` — the bucket this rule deliberately excludes (see
-`OutOfOrderOutcomeLateArrival` in
-`stl-verify/internal/ports/outbound/metrics.go`). Omitted heads therefore show
-up in VectorWatcherOutOfOrderBlocksHigh, not here. Reaching
-`outcome="reorg"` on a single-sequencer chain means the block did not link, which
-is the dangerous case on every chain in the allow-list including this one. Triage
-it exactly as the first checks describe.
+joined the allow-list on the same grounds as the other rollups. Its manifests
+live in `k8s/base` only and are not yet referenced from a cluster overlay, so
+`service_name="robinhood-watcher"` emits nothing today — this applies from the
+moment it is deployed.
+
+Do NOT discount a robinhood firing as "upstream is dropping heads again". A head
+Alchemy omits and then delivers late still links cleanly onto our chain, so it is
+recorded as `outcome="late_arrival"` (see `OutOfOrderOutcomeLateArrival` in
+`stl-verify/internal/ports/outbound/metrics.go`) — the bucket this rule
+deliberately excludes. Omitted heads surface in
+VectorWatcherOutOfOrderBlocksHigh, not here. Reaching `outcome="reorg"` means the
+block did not link, which on a single-sequencer chain is the dangerous case on
+robinhood exactly as on the other five. Triage it as the first checks describe.
 
 ### Verify recovery
 
