@@ -1,31 +1,14 @@
--- VEC-406: materialize Sky prime debt into the position_state spine (+ current classification).
---
--- Native, per-instrument grain (VEC-400). One prime_debt row is one position: the prime's debt in a
--- given Sky ilk. holder_id = the prime's on-chain vault address; quantity = debt_wad; deal_type = BORROW
--- (Sky debt is a borrow). event-time = synced_at (native; no block_time join needed).
---
--- instrument_key = ilk_name (the native MakerDAO/Sky ilk identifier, e.g. ALLOCATOR-SPARK-A; the string
--- form of the on-chain bytes32 ilk). NOTE: the bridge comment (VEC-412) describes the Sky native key as
--- "ilk-registry address ':' ilk". The ilk-registry address is not carried on prime_debt and is not a
--- code/config constant, so it is not available to hash here — and a remembered address must never be
--- baked into a hashed position_id. ilk_name alone is the native, globally-unique ilk id within Sky's
--- single VAT, so it is used as the instrument_key. VEC-419 must key the Sky bridge rows on the SAME
--- form; if a registry prefix is wanted later, the registry address needs a real source first.
---
--- chain_id is the Sky mainnet constant 1 (prime_debt carries no chain_id column); protocol_id is NULL
--- (Sky prime debt is not protocol-scoped — see schema_master required_keys exempt). Unlike Morpho,
--- prime_debt carries its own processing_version, so it flows into the spine's processing_version.
---
--- Closure (VEC-409): the projection emits ONE closing zero-observation per real transition-to-zero
--- (debt repaid), via the LAG filter `quantity > 0 OR prev_quantity > 0` — uniform with VEC-402/403 —
--- rather than the earlier blanket `WHERE debt_wad > 0`. On live data today this is behaviour-identical:
--- verified 2026-07-28 there are no negative debt_wad rows and ZERO positive->0 transitions (Sky prime
--- debt is not observed repaying to 0 in prime_debt; the 3 zero rows are standalone and dropped either
--- way). The filter is in place so that if a prime ever repays to 0, position_current closes it
--- automatically instead of reporting stale debt.
---
--- DDL/function only. Population runs out of band, mirroring block_time, the transform _bootstrap
--- functions, and VEC-402/403.
+-- VEC-406: materialize Sky prime debt into the position_state spine on the native per-instrument
+-- grain (VEC-400). One prime_debt row is one position: the prime's debt in a Sky ilk, held by the
+-- prime's vault address. Closure and data verification: #627.
+
+-- instrument_key = ilk_name, NOT the bridge comment's "ilk-registry address ':' ilk": the registry
+-- address is not on prime_debt and not a code constant, and a remembered address must never be baked
+-- into a hashed position_id. VEC-419 must key the Sky bridge rows on this same form.
+
+-- chain_id is the Sky mainnet constant 1 (prime_debt has no chain_id); protocol_id is NULL, since Sky
+-- prime debt is not protocol-scoped. prime_debt carries its own processing_version, which flows
+-- through to the spine's.
 
 -- Per-protocol projection: raw Sky prime debt -> native position rows. VEC-409 reads the per-protocol
 -- outputs from position_state; this view is the materializer's source of truth.
