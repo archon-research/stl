@@ -14,6 +14,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -2109,5 +2110,149 @@ func TestVaultDiscovery_AssetSymbolRevert_StoresEmptySymbol(t *testing.T) {
 	}
 	if assetCall.symbol != "" {
 		t.Errorf("asset token symbol = %q, want empty (pending marker for sweep)", assetCall.symbol)
+	}
+}
+
+// A trapping candidate's gas exhaustion is a verdict, not a transient: retrying
+// the block would park it in the DLQ and stall the FIFO queue behind it.
+func TestProcessBlockEvent_VaultDiscovery_MorphoBluePath_TrappingCandidateIsDiscardedLoudly(t *testing.T) {
+	h := newTestHarness(t)
+	reader := h.recordMetrics(t)
+	logs := h.captureLogs()
+	h.setupMarketExistsInDB(testMarketID, 42)
+	isolated := trappingResponder(h.svc.blockchainSvc.vaultProber, trappingCandidate,
+		[vaultProbeCallsPerAddress]isolatedAnswer{reverts(), reverts(), reverts(), reverts()})
+
+	h.multicaller.ExecuteFn = func(ctx context.Context, calls []outbound.Call, block *big.Int) ([]outbound.Result, error) {
+		if len(calls) == 2 {
+			return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
+		}
+		return isolated(ctx, calls, block)
+	}
+
+	log := h.makeSupplyLog(testMarketID, trappingCandidate, trappingCandidate, big.NewInt(1000), big.NewInt(900))
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+		t.Fatalf("a trapping candidate must not fail the block: %v", err)
+	}
+	assertTrappingCandidateDiscardedLoudly(t, h, reader, logs)
+}
+
+func TestProcessBlockEvent_VaultDiscovery_TrappingCandidateIsDiscardedLoudly(t *testing.T) {
+	h := newTestHarness(t)
+	reader := h.recordMetrics(t)
+	logs := h.captureLogs()
+	h.multicaller.ExecuteFn = trappingResponder(h.svc.blockchainSvc.vaultProber, trappingCandidate,
+		[vaultProbeCallsPerAddress]isolatedAnswer{reverts(), reverts(), reverts(), reverts()})
+
+	log := h.makeDiscoveryTriggerLog(trappingCandidate)
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+		t.Fatalf("a trapping candidate must not fail the block: %v", err)
+	}
+	assertTrappingCandidateDiscardedLoudly(t, h, reader, logs)
+}
+
+// MORPHO() answering alone makes the rejection vault-shaped as well; the
+// unprobeable disposition must still win so the counter sees the discard.
+func TestProcessBlockEvent_VaultDiscovery_VaultShapedTrappingCandidateIsCountedUnprobeable(t *testing.T) {
+	h := newTestHarness(t)
+	reader := h.recordMetrics(t)
+	logs := h.captureLogs()
+	h.multicaller.ExecuteFn = trappingResponder(h.svc.blockchainSvc.vaultProber, trappingCandidate,
+		[vaultProbeCallsPerAddress]isolatedAnswer{answers(MorphoBlueAddress), reverts(), reverts(), reverts()})
+
+	log := h.makeDiscoveryTriggerLog(trappingCandidate)
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+		t.Fatalf("a trapping candidate must not fail the block: %v", err)
+	}
+	assertTrappingCandidateDiscardedLoudly(t, h, reader, logs)
+}
+
+func assertTrappingCandidateDiscardedLoudly(t *testing.T, h *serviceTestHarness, reader sdkmetric.Reader, logs *capturingHandler) {
+	t.Helper()
+	if !h.svc.vaultRegistry.IsKnownNotVault(trappingCandidate) {
+		t.Error("a trapping candidate must enter the negative cache so it is never re-probed")
+	}
+	want := map[string]string{"reason": string(UnprobeableGasExhausted)}
+	if got := counterValue(t, reader, "morpho.vault.candidates.unprobeable", want); got != 1 {
+		t.Errorf("morpho.vault.candidates.unprobeable%v = %d, want 1", want, got)
+	}
+	if !logs.hasWarnContaining("discarding unprobeable candidate") {
+		t.Error("the discard must be a WARN naming the candidate, not a DEBUG line")
+	}
+}
+
+func TestProcessBlockEvent_VaultDiscovery_ThrottledSelectorwiseProbeRetriesViaSQS(t *testing.T) {
+	h := newTestHarness(t)
+	h.multicaller.ExecuteFn = trappingResponder(h.svc.blockchainSvc.vaultProber, trappingCandidate,
+		[vaultProbeCallsPerAddress]isolatedAnswer{answers(MorphoBlueAddress), throttled(), reverts(), reverts()})
+
+	log := h.makeDiscoveryTriggerLog(trappingCandidate)
+	err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)})
+	if !errors.Is(err, throttledRPCError{}) {
+		t.Fatalf("a throttled isolated probe call must fail the block for redelivery, got %v", err)
+	}
+	if h.svc.vaultRegistry.IsKnownNotVault(trappingCandidate) {
+		t.Error("a throttled probe must not enter the negative cache — that would black-hole a real vault")
+	}
+}
+
+// setupVaultAnsweringOneSelectorAtATime serves a MetaMorpho vault whose batched
+// probe exhausts gas but whose selectors answer alone, plus the reads that
+// follow discovery.
+func (h *serviceTestHarness) setupVaultAnsweringOneSelectorAtATime(vault common.Address) {
+	isolated := trappingResponder(h.svc.blockchainSvc.vaultProber, vault,
+		[vaultProbeCallsPerAddress]isolatedAnswer{answers(MorphoBlueAddress), answers(testLoanToken), reverts(), reverts()})
+	h.multicaller.ExecuteFn = func(ctx context.Context, calls []outbound.Call, block *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 2:
+			if calls[0].Target == vault {
+				return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
+			}
+			return h.tokenMetadataResults("WETH", 18), nil
+		case 3:
+			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil
+		case 4:
+			if !h.isProbeMulticall(calls) {
+				return h.vaultDetailResults("Vault", "VLT", 18, false), nil
+			}
+		}
+		return isolated(ctx, calls, block)
+	}
+}
+
+// Discarding on the batched verdict would silently drop a vault that answers
+// alone.
+func TestProcessBlockEvent_VaultDiscovery_VaultAnsweringOneSelectorAtATimeIsRegistered(t *testing.T) {
+	h := newTestHarness(t)
+	h.setupVaultAnsweringOneSelectorAtATime(trappingCandidate)
+	var vaultCreated bool
+	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVault) (int64, error) {
+		vaultCreated = true
+		return 99, nil
+	}
+
+	log := h.makeDiscoveryTriggerLog(trappingCandidate)
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+	if !vaultCreated {
+		t.Error("a vault confirmed one selector at a time must be registered")
+	}
+	if h.svc.vaultRegistry.IsKnownNotVault(trappingCandidate) {
+		t.Error("a confirmed vault must not enter the negative cache")
+	}
+}
+
+func TestProcessBlockEvent_VaultDiscovery_VaultAnsweringOneSelectorAtATimeIsWarned(t *testing.T) {
+	h := newTestHarness(t)
+	logs := h.captureLogs()
+	h.setupVaultAnsweringOneSelectorAtATime(trappingCandidate)
+
+	log := h.makeDiscoveryTriggerLog(trappingCandidate)
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+	if !logs.hasWarnContaining("vault confirmed one selector at a time") {
+		t.Error("the selector-wise confirmation must be a WARN so an odd vault is visible in logs")
 	}
 }
