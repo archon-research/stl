@@ -31,6 +31,12 @@ const (
 	positionCurrentBackfill = "20260819_150100_backfill_position_current.sql"
 )
 
+// coords is one observation's version tuple, used by the per-leg tables below.
+type coords struct {
+	block, bv, pv int
+	ts            string
+}
+
 // orderByPositionIDRE matches an ORDER BY whose FIRST key is position_id, qualified or not. Both writers
 // into position_current must sweep its PK in that order: it is the only total order a block_timestamp
 // cannot permute, and ordering either writer by time reopens the deadlock class.
@@ -549,10 +555,6 @@ func TestPositionCurrentRebuildDoesNotRegressARowAheadOfHistory(t *testing.T) {
 // unequal, so dropping that leg makes the comparison false and the cache is not raised; the reject case
 // covers ordering, where a leading pv would let older history win.
 func TestPositionCurrentRebuildNewerWinsPerKeyColumn(t *testing.T) {
-	type coords struct {
-		block, bv, pv int
-		ts            string
-	}
 	cases := []struct {
 		name    string
 		id      string
@@ -707,6 +709,7 @@ func TestPositionCurrentMigrationPinsItsLoadBearingInvariants(t *testing.T) {
 	ddl := lineCommentRE.ReplaceAllString(ddlRaw, "")
 	backfillRaw := migrationSource(t, positionCurrentBackfill)
 	backfill := lineCommentRE.ReplaceAllString(backfillRaw, "")
+	region := lineCommentRE.ReplaceAllString(rebuildRegion(t), "")
 
 	if positionCurrentDDL >= positionCurrentBackfill {
 		t.Fatalf("%s does not sort before %s, so the migrator would backfill before the trigger exists",
@@ -743,7 +746,6 @@ func TestPositionCurrentMigrationPinsItsLoadBearingInvariants(t *testing.T) {
 	})
 
 	t.Run("the REBUILD region carries its settings as executable sql", func(t *testing.T) {
-		region := lineCommentRE.ReplaceAllString(rebuildRegion(t), "")
 		for _, want := range []string{
 			"SET LOCAL lock_timeout",
 			"SET LOCAL timescaledb.enable_tiered_reads",
@@ -773,7 +775,6 @@ func TestPositionCurrentMigrationPinsItsLoadBearingInvariants(t *testing.T) {
 	})
 
 	t.Run("both writers sweep the PK in position_id order", func(t *testing.T) {
-		region := lineCommentRE.ReplaceAllString(rebuildRegion(t), "")
 		if !orderByPositionIDRE.MatchString(region) {
 			t.Error("the rebuild does not order by p.position_id first, so it can cross the trigger's " +
 				"upsert order and deadlock live ingest")
@@ -1143,10 +1144,6 @@ func TestPositionCurrentRebuildWritesNothingWhenItsGuardFires(t *testing.T) {
 // leg except the one under test -- so no leg is redundant with another, and the cache is emptied first so
 // no ON CONFLICT guard can mask the pick. Deleting each leg in turn kills its own case and no other.
 func TestPositionCurrentRebuildPickPerKeyColumn(t *testing.T) {
-	type coords struct {
-		block, bv, pv int
-		ts            string
-	}
 	cases := []struct {
 		name          string
 		id            string
