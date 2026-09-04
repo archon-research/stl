@@ -2,9 +2,9 @@
 -- grain (VEC-400). One prime_debt row is one position: the prime's debt in a Sky ilk, held by the
 -- prime's vault address. Closure and data verification: #627.
 
--- instrument_key = ilk_name, NOT the bridge comment's "ilk-registry address ':' ilk": the registry
--- address is not on prime_debt and not a code constant, and a remembered address must never be baked
--- into a hashed position_id. VEC-419 must key the Sky bridge rows on this same form.
+-- instrument_key = ilk_name: the ilk-registry address is not carried on prime_debt and is not a code
+-- constant, and a remembered address must never be baked into a hashed position_id. ilk_name is
+-- globally unique within Sky's single VAT, so it identifies the instrument on its own.
 
 -- chain_id is the Sky mainnet constant 1 (prime_debt has no chain_id); protocol_id is NULL, since Sky
 -- prime debt is not protocol-scoped. prime_debt carries its own processing_version, which flows
