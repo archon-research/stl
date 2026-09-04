@@ -1,7 +1,7 @@
 # Refactoring candidates
 
-Status: DRAFT v1 — synthesised from findings 01, 03–11. Findings 02 (allocation/prime/aave),
-12 (git-history metrics) and 13 (python/ts/k8s/alerts) are still to be merged in.
+Status: v2 — synthesised from findings 01–11 and 13. Finding 12 (git-history metrics) supplies
+the baselines in `ROADMAP.md` and is merged there as it lands.
 
 Each candidate is one program of work that several area reports point at from different sides.
 `F<area>.<n>` ids reference `findings/`. Vocabulary (module, seam, depth, deletion test) is in
@@ -40,13 +40,30 @@ new value types (`Block`, opaque `Tx`) that let the existing seams enforce what 
 | C12 | Test infrastructure: generated doubles, `testutil` split, size and boundary lint | Strong | M–L | — |
 | C13 | Build and deploy: Makefile docker targets, image roster, one image | Worth exploring | M–L | C2 |
 | C14 | Split god files and grab-bag packages into cohesive modules | Worth exploring | M–L each | C1, C2 |
+| C15 | `PositionSource` owns interpretation, not the prime-positions handler | Strong | L | — |
 
 ---
 
 ## C1 — Block identity as a value; block-pinned `StateReader` seam
 
 **Strength** Strong · **Size** XL (~8–10 PRs of M/L) · **Feeds from** F08.1, F09.3, F01.3,
-F08.6, F03.2, F03.6, F05.13, F05.9, F09.9, F09.10, F03.7, F04.1 (its `BlockRef` half)
+F08.6, F03.2, F03.6, F05.13, F05.9, F09.9, F09.10, F03.7, F04.1 (its `BlockRef` half), F02.8,
+F02.4, F02.7
+
+> **Prior work exists.** Phase 1 of exactly this seam is implemented on the remote branch
+> `toreluntang/vec-na/blockpin-statereader-seam` (12 commits, 16 files, +1,023/−263, tip
+> 2026-07-10, never opened as a PR): an opaque `outbound.BlockPin` value with `PinForEvent` /
+> `PinForSettledBlock` / `PinForStaticRead` constructors and a `PinMode`, a `StateReader` port
+> with a production adapter in `pkg/blockchain/statereader`, an archiving decorator keyed from
+> the pin, a shared `testutil.StateReaderStub` that records pin modes, and the Fluid migration
+> that fixes the live reorg bug. `main` is 600 commits ahead of it; a trial merge shows no
+> textual conflicts. Its 1,121-line plan is the untracked
+> `docs/superpowers/plans/2026-07-09-blockpin-statereader-seam.md`. The July design locked a
+> *lean* pin (number, version, hash, mode — no chain id, no timestamp); the September evidence
+> (125 functions carrying chain id and timestamp alongside the pin, the cache key needing chain
+> id, 7 `time.Unix(event.BlockTimestamp)` sites) argues for a fuller identity value. See
+> decision D1 in `ROADMAP.md`. The two are compatible: `BlockRef` (identity) can carry a
+> `Pin()`.
 
 **Problem.** There is no type for "which block". An AST scan finds **125 non-test functions**
 threading three or more of (chainID, number, hash, version, timestamp) as loose parameters, in two
@@ -99,8 +116,10 @@ block params: 125 → ~0. Bespoke `Multicaller` doubles: 11 → 0.
 
 **Strength** Strong · **Size** XL (lands one worker per PR; rehearsed once already) ·
 **Feeds from** F10.1, F10.7, F10.2, F10.3, F10.5, F10.6, F10.10, F01.14, F01.12, F05.1, F05.2,
-F05.8, F05.16, F03.3, F03.4, F03.17, F04.10, F04.16, F06.9, F08.12, F11 cross-area (4 copies of
-`TestParseConfig`), F06 cross-area (build metadata in 21 mains; 11 localhost DSN defaults)
+F05.8, F05.16, F03.3, F03.4, F03.17, F04.10, F04.16, F06.9, F08.12, F02.9, F02.15, F02.16,
+F11 cross-area (4 copies of `TestParseConfig`), F06 cross-area (build metadata in 21 mains; 11
+localhost DSN defaults), F02 cross-area (`otel.go:47` pays for a runtime ordering assertion
+because the invariant cannot be linted across N hand-rolled mains)
 
 **Problem.** This is the "why PRs are big" candidate. Across the 7 SQS worker roots, 1,480
 substantive lines hold only 489 distinct ones (**67% duplicate**); `morpho` and `fluid-vault`
@@ -115,7 +134,12 @@ fluid and psm3 (F03.3); three ack/retry policies for a failed block (F03.17); an
 contract that is `json.Unmarshal` into a bare struct, so an SNS envelope without raw delivery
 decodes to an all-zero event that the loop deletes as "foreign chain" (F05.1). Six workers
 default `CHAIN_ID` to mainnet when the variable is missing (F10.3). 11 of 32 binaries never
-initialise telemetry (F10.5).
+initialise telemetry (F10.5). The allocation/prime family confirms it from its side: six
+composition roots hand-roll 1,007 bootstrap lines, a 37-line eight-repository block appears three
+times differing by one error string, and of 42 edits to its three worker mains since March
+**zero** were driven by a new source, chain or prime (F02.9). Five shared helpers exist and are
+bypassed, each bypass carrying the hazard the helper was written to prevent, e.g. a backfiller
+re-inlining the S3 reader on the wrong endpoint variable (F02.15).
 
 **Shape.** Three modules the repo already has in embryo:
 
@@ -148,8 +172,8 @@ psm3, prime-debt, raw-data-backup. Each adoption *changes behaviour where copies
 ## C3 — One on-chain read dialect
 
 **Strength** Strong · **Size** L–XL · **Depends on** C1 · **Feeds from** F08.2, F01.2, F04.7,
-F08.3, F03.13, F09.9, F08.4, F03.8, F03.10, F03.5, F03.1, F03.9, F08.11, 03 cross-area (three
-in-service multicall adapters with no port)
+F08.3, F03.13, F09.9, F08.4, F03.8, F03.10, F03.5, F03.1, F03.9, F08.11, F02.2, F02.3, F02.7,
+F02.4, 03 cross-area (three in-service multicall adapters with no port)
 
 **Problem.** The pack → execute → count-check → unpack skeleton is written **~35 times** across
 17 files with divergent count checks (`<` vs `!=`) (F08.2); Morpho alone has 18 copies (F01.2),
@@ -161,7 +185,11 @@ Curve's two handlers are one handler with two ABIs: **617 of 1,159 lines line-id
 by 40 hand-written 22-line `SnapshotRead` builders where `uniswapv3indexer/state.go:171-246` does
 the same job with three combinators (F03.1). `morpho_indexer/blockchain_service.go` (1,408),
 `pkg/aavelike/blockchain_service.go` (1,124) and fluid's `blockchain_service.go` are all multicall
-adapters living outside `adapters/`, with no port (03 cross-area, F03.5).
+adapters living outside `adapters/`, with no port (03 cross-area, F03.5). The allocation/prime
+family adds ~10 more skeleton copies, a fourth token-metadata implementation, three levels of
+on-chain-read abstraction doing one job, and the only two packages injecting a concrete
+`*ethclient.Client` — costing an 84 KB test file and one double for eight ports (F02.2, F02.3,
+F02.7, F02.4).
 
 **Shape.** `StateReader.ReadNamed` (from C1) is the one dialect; an `abis` registry parsed once at
 init returning `*abi.ABI` (no error); one `erc20meta.Reader` behind one `TokenMetadata` type; a
@@ -180,7 +208,7 @@ handler lines: 2,182 → ~1,200.
 ## C4 — Registries instead of hand-maintained lists and type switches
 
 **Strength** Strong · **Size** L · **Feeds from** F01.1, F01.5, F01.6, F04.1, F03.10, F04.11,
-F09.9, 04 cross-area (five overlapping chain tables)
+F09.9, F13.1, F02.10, 04 cross-area (five overlapping chain tables)
 
 **Problem.** One Morpho VaultV2 event name appears at **18 non-test sites in 6 hand-maintained
 lists** that must agree; `replay.go:190` says "Keep in sync with the dispatch switch" (F01.1).
@@ -189,7 +217,10 @@ oracle type touched 21 and 25 files, while adding a *feed* is a one-file migrati
 identity lives in five overlapping tables (`entity.ChainIDToName`, `ChainIDToS3Bucket`,
 `allocation_tracker/chains.go`, `sky`, `skydata`) with three spellings for mainnet (04 cross-area,
 F04.11). Curve's two 200-line `liquidity_decode.go` functions are an ABI arg-spec table written as
-a switch (F03.10).
+a switch (F03.10). The chain table crosses the language boundary: Python defines
+`MAINNET_CHAIN_ID = 1` twice, once guarded by a test that scrapes Go's `chain.go` and once
+unguarded in the copy `main.py` actually imports (F13.1). Allocation's source→token-type routing
+is a first-match-wins scan with no disjointness guard, and the gap has already bitten (F02.10).
 
 **Shape.** Per protocol, one registry table (event name → ABI, decoder, handler, replay policy,
 telemetry label) that every consumer iterates; an `OraclePricer` interface with a registry keyed
@@ -286,6 +317,10 @@ F08.7, F04.5, F05.14, F04 cross-area (AGENTS.md recipes describe the dead code)
   no test. Move to `cmd/util/mock-blockchain-server`'s own package.
 - `cmd/util/generate-er` (807 lines): output covers 32 of 128 tables, last regenerated 89
   migrations ago; `schema_master.json` already exists.
+- `internal/services/sparklend` (34 lines): dead, and the third copy of `TransactionReceipt`
+  (F02.11). `VEC-277-root-cause-findings.md` at the repo root: an agent scratchpad duplicating
+  `docs/incidents/2026-06-02-arbitrum-backfill-loop.md` (F13.7). `docs/superpowers/plans/` is
+  untracked planning material; move the block-pin plan into `overhaul/` if it is kept (F13.8).
 - Two `cmd/` directories holding only an untracked `.env`; `shared.LogBelongsTo` and
   `shared.FormatAmount`; `pkg/testutils` (17 lines, one letter from `testutil`);
   `blockverifier` factory with one kind; `proxytls` HTTPS support nothing wires; the
@@ -299,8 +334,7 @@ F08.7, F04.5, F05.14, F04 cross-area (AGENTS.md recipes describe the dead code)
 ## C8 — Worker and backfiller share one pipeline
 
 **Strength** Strong · **Size** L · **Feeds from** F04.2, F04.3, F04.9, F01.10, F05.3, F05.12,
-08 cross-area (`blocktime` memo unused by `oracle_backfill`); report 02 will add the Aave/
-Sparklend pair
+F02.5, F02.16, 08 cross-area (`blocktime` memo unused by `oracle_backfill`)
 
 **Problem.** `oracle_price_worker/service.go` (759) and `oracle_backfill/service.go` (702) hold
 **10 matched function pairs** and five undocumented divergences: Aave reads batched
@@ -310,6 +344,9 @@ opposite error policies (F04.2). `cacheAndPublishBlockData` exists twice with op
 `MarkPublishComplete` failure policy (F05.3). Three independent notions of "the version at height
 N", one derived from S3 by a hand-rolled JSON scanner that never reads `block_states` (F05.12).
 Two channel pools and two bisect-retry loops across the Morpho backfiller and bootstrap (F01.10).
+The reference-capital indexer and backfill duplicate ~60 lines and the copy omits star
+normalisation, so a mixed-case star fails only in backfill (F02.5); two Aave-like backfillers
+reuse the worker core two different ways, one the model and one a duplicate (F02.16).
 
 **Shape.** One `Pricer`/`Indexer` core per protocol taking a `StateReader` (C1); the worker and the
 backfiller are two *drivers* (live events vs a block range) over the same core. Divergences
@@ -363,6 +400,10 @@ once from `Config`); `chainName` resolved once at the config boundary in the wor
 | F04.4 | "non-positive is not a price" enforced at 8 sites with 3 verdicts; the entity permits zero | M |
 | F04.8 | Oracle prices round-trip through `float64` into `NUMERIC(30,18)`; change detection compares floats | M |
 | F06.6 | Retry-stable snapshot timestamp honoured by 1 of 6 cronjobs | S–M |
+| F02.15 | `sparklend-backfill` reads `AWS_ENDPOINT_URL` where the shared S3 reader keys on `AWS_S3_ENDPOINT` | S |
+| F02.10 | Source→token-type routing is first-match-wins with no disjointness guard | S |
+| F13.6 | `alerts.yml` hardcodes a 6-file allowlist; a 7th alert-rule file is silently not synced | S |
+| F02.5 | Reference-capital backfill skips star normalisation on lookup | S |
 | 08 cross-area | `alchemy/subscriber.go:406` drops a block header when the channel is full; needs an explicit decision | decision |
 | 05 cross-area | Cache-miss fallback is Redis→S3 for indexers and Redis→RPC for backup; a payload absent from both is a permanent FIFO stall | decision |
 
@@ -391,7 +432,9 @@ subscriber sits on `wsclient`.
 ## C12 — Test infrastructure
 
 **Strength** Strong · **Size** M–L · **Feeds from** F11.1, F09.7, F03.7, F05.16, F11.6, F11.8,
-F11.3, F10.4, F11.4, F11.5, F11.9, F11.11, F11.12, F01.13, F07.8
+F11.3, F10.4, F11.4, F11.5, F11.9, F11.11, F11.12, F01.13, F07.8, F02.14, F13.4, 02 cross-area
+(`testutil` ships `MockSQSConsumer` and `MockTxManager`; none of the 14 hand-rolled sites use
+them, while the six ports that *are* hand-rolled everywhere have no shared double)
 
 **Problem.** **148 hand-rolled port doubles** in 76 files; 11 ports have ≥3 independent copies
 (`SQSConsumer` 8, `TxManager` — a one-method port — 10); `testutil/mock_*.go` already uses the
@@ -416,14 +459,16 @@ with `--new-from-rev` so the backlog is a ratchet, not a wall; shard manifests g
 ## C13 — Build and deploy
 
 **Strength** Worth exploring · **Size** M–L · **Depends on** C2 · **Feeds from** F11.2, F10.8,
-F11.10, 04 cross-area (three near-identical k8s deployments per worker per chain); report 13
-will add k8s detail
+F11.10, F13.5, 04 cross-area (three near-identical k8s deployments per worker per chain)
 
 **Problem.** 951 of 2,846 Makefile lines are 82 near-identical docker targets although a
 parameterised helper already exists and one of three families uses it (F11.2). One image per
 binary costs 21 target groups, 24 roster lines and 54 Deployments; the stated blocker does not
 block (F10.8). Container image tags are declared twice and kept in sync by a 100-line grep script
-(F11.10). The Avalanche oracle commit needed 9 k8s files for a 1-line Go change.
+(F11.10). The Avalanche oracle commit needed 9 k8s files for a 1-line Go change. **34 of 56**
+`k8s/base/` directories (61%) are per-chain copies of five binary shapes differing only by name
+substitution, while the dev overlay already composes from shared bases with a Kustomize
+`Component` — the fix has local precedent (F13.5).
 
 **Shape.** Once C2 makes every worker a `Worker` value, one `stl-worker <name>` image with a
 registry, one Deployment template per chain.
@@ -440,5 +485,30 @@ log-and-continue); `live_data_service.go` (1,163, the watcher's reorg logic misf
 price-sounding name); `BlockStateRepository` (25 methods, six concerns → three ledgers);
 `services/shared` (four unrelated modules: DEX decode helpers, watcher telemetry, config, dead
 utils); `pkg/blockchain` (four concerns under a name that promises chain access);
-`processReceipt` (137 lines); Maple's four sync phases; `raw-block-bulk-downloader/main.go` (893)
+`aavelike_position_tracker/service.go` (1,161 lines, nine responsibilities behind one 13-argument
+constructor, F02.6); `processReceipt` (137 lines); Maple's four sync phases; Python's
+`simulate_liquidations` (446 lines) and `AllocationRepository` (1,883 lines, F13.2, F13.3); `raw-block-bulk-downloader/main.go` (893)
 and `generate-er/main.go` (807) as whole programs in `main.go`; seven test files over 2,500 lines.
+
+---
+
+## C15 — `PositionSource` owns interpretation, not the prime-positions handler
+
+**Strength** Strong · **Size** L (2–4 PRs) · **Feeds from** F02.1, F02.10, F02.12, F02.13
+
+**Problem.** `allocation_tracker`'s `PositionSource` is a real seam for *reading* positions, but
+interpretation leaked out of it: `PositionBalance` carries four fields documented "set only by
+source X", the position shape is four parallel structs hand-copied at five sites, and all 8
+commits touching `types.go` since March also touched `handler_prime_positions.go` (8 of 8). That
+pair is the repo's second- and third-most-churned service files (F02.1). Three services
+re-implement the periodic-sweep counter with three semantics (F02.13).
+
+**Shape.** Denomination and token-type policy move into each source behind the existing
+interface; the handler consumes one interpreted `Position` value. ~165 handler lines collapse
+and `types.go` stops co-changing with the handler.
+
+**Deletion test.** Delete the interpretation from the handler and it must reappear in each
+source — which is where it belongs. Earns its keep.
+
+**Metric moved.** `types.go` ↔ handler co-change: 8/8 → ~0. Hand-copy sites of the position
+shape: 5 → 1.

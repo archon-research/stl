@@ -1,7 +1,8 @@
 # Progress log
 
 Working branch: `toreluntang/vec-na/architecture-overhaul-findings` (pushed after every logical
-commit; no PR). Started 2026-09-03 from `main` at `c4e0a8f2`.
+commit; no PR). Started 2026-09-03 from `main` at `c4e0a8f2`. Investigation complete except the
+git-history report; synthesis written 2026-09-04.
 
 ## How to resume in a fresh session
 
@@ -30,18 +31,30 @@ commit; no PR). Started 2026-09-03 from `main` at `c4e0a8f2`.
 | 12 | findings/12-history-metrics.md | git history 2026-01 → now: PR size, ripple metrics, co-change clusters, cost of a new indexer | DRAFT on disk; agent resumed after rate limit |
 | 13 | findings/13-python-ts-k8s-alerts.md | python/, ts/, k8s/, alerts/, docs/runbooks, cross-language contracts, repo hygiene | FINAL |
 
-## Next (synthesis, after all reports are FINAL)
+## Synthesis status
 
-1. Read the "Findings" and "Cross-area observations" sections of every report.
-2. Write `CANDIDATES.md`: the deduplicated, repo-wide list of refactoring candidates. Each
-   candidate names the finding ids that feed it, its strength, size, dependencies, and the
-   deletion-test verdict. Expect the same theme to surface from several areas (block identity /
-   pinned reads, the block-event runner, multicall decode skeleton, composition-root skeleton,
-   registry-vs-hand-maintained-lists, test-double sprawl, port granularity).
-3. Write `ROADMAP.md`: candidates sequenced into phases of PR-sized slices, ordered by
-   dependency and value, with the metric each phase should move (median PR size, files touched
-   per new indexer, hand-rolled doubles, main.go churn).
-4. Commit and push. Then execution starts, one slice per PR, with this file as the log.
+- `CANDIDATES.md` v2 written: 15 candidates from findings 01–11 and 13 (2026-09-04).
+- `ROADMAP.md` v1 written: four phases, six maintainer decisions, a metrics table. The `(F12)`
+  baselines wait for `findings/12`.
+- `README.md` indexes the folder.
+
+## Discoveries that change the plan
+
+- **Phase 1 of candidate C1 already exists** on `origin/toreluntang/vec-na/blockpin-statereader-seam`
+  (12 commits, 16 files, +1,023/−263, tip 2026-07-10, no PR ever opened). `main` is 600 commits
+  ahead; a trial merge shows no textual conflicts. Its plan is the untracked
+  `docs/superpowers/plans/2026-07-09-blockpin-statereader-seam.md`. Roadmap slice 0.1 is to rebase
+  and land it; decision D1 (lean pin vs full identity) does not block that.
+- PR #551 (consolidating `Multicaller` doubles onto `testutil.MockMulticaller`) merged 2026-07-10,
+  which is why the chain-access report found the shared double widely adopted.
+
+## Next
+
+1. When `findings/12-history-metrics.md` is `FINAL`, fill the `(F12)` baselines in `ROADMAP.md`
+   and commit. Then **pause** (maintainer's instruction, 2026-09-04).
+2. On resume: the maintainer reads `CANDIDATES.md` and `ROADMAP.md`, takes decisions D1–D6, and
+   picks Phase 0 slices. Execution is one slice per PR from a branch named per repo convention;
+   each PR updates this file.
 
 ## Early signals worth carrying forward
 
