@@ -249,6 +249,48 @@ func TestUniswapV4ProcessingVersionTriggersForceCustomPlan(t *testing.T) {
 	}
 }
 
+// The four compressed fact tables carry the VEC-615 shape: a next_processing_version_*
+// function the INSERT calls and the trigger delegates to. VOLATILE and force_custom_plan
+// are asserted because both are load-bearing and neither is checked by the catalogue.
+func TestUniswapV4CompressedFactTablesHaveAVersionFunction(t *testing.T) {
+	ctx := context.Background()
+
+	for _, table := range uniswapV4BatchedFactTables {
+		t.Run(table, func(t *testing.T) {
+			fn := "next_processing_version_" + table
+			var volatility string
+			var proconfig []string
+			if err := uniswapV4TestPool.QueryRow(ctx, `
+				SELECT p.provolatile, COALESCE(p.proconfig, '{}')
+				FROM pg_proc p
+				JOIN pg_namespace n ON n.oid = p.pronamespace
+				WHERE n.nspname = 'public' AND p.proname = $1`, fn).Scan(&volatility, &proconfig); err != nil {
+				t.Fatalf("%s: %v (a compressed hypertable whose version only the trigger assigns drops corrections, VEC-615)", fn, err)
+			}
+			if volatility != "v" {
+				t.Errorf("%s provolatile = %q, want v: a STABLE version rule reads the calling statement's snapshot and hands two serialized writers the same version", fn, volatility)
+			}
+			if !slices.Contains(proconfig, "plan_cache_mode=force_custom_plan") {
+				t.Errorf("%s proconfig = %v, want plan_cache_mode=force_custom_plan", fn, proconfig)
+			}
+
+			var triggerSrc string
+			if err := uniswapV4TestPool.QueryRow(ctx, `
+				SELECT p.prosrc
+				FROM pg_trigger tg
+				JOIN pg_class c ON c.oid = tg.tgrelid
+				JOIN pg_proc p ON p.oid = tg.tgfoid
+				WHERE NOT tg.tgisinternal AND c.relname = $1
+				  AND p.proname = 'assign_processing_version_' || $1`, table).Scan(&triggerSrc); err != nil {
+				t.Fatalf("reading %s's trigger function: %v", table, err)
+			}
+			if !strings.Contains(triggerSrc, fn+"(") {
+				t.Errorf("%s's trigger does not delegate to %s, so the INSERT and the trigger can disagree on the version and the lock key", table, fn)
+			}
+		})
+	}
+}
+
 func TestUniswapV4RegistryTablesAreUniquePerVersion(t *testing.T) {
 	ctx := context.Background()
 

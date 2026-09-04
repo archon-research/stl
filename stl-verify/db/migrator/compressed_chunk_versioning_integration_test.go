@@ -43,13 +43,6 @@ func TestCompressedConvertedHypertablesHaveAVersionFunction(t *testing.T) {
 	// table's function + INSERT-side call land.
 	versionFunctionPending := map[string]string{
 		"psm3_alm_shares": "VEC-615",
-		// VEC-475 (#711): trigger-assigned processing_version on four compressed
-		// hypertables, so a correction into a compressed chunk is dropped exactly as
-		// VEC-615 describes; queued on that sweep rather than fixed in the seed PR.
-		"uniswap_v4_pool_state":      "VEC-615",
-		"uniswap_v4_swap":            "VEC-615",
-		"uniswap_v4_liquidity_event": "VEC-615",
-		"uniswap_v4_pool_event":      "VEC-615",
 	}
 
 	for _, table := range tables {

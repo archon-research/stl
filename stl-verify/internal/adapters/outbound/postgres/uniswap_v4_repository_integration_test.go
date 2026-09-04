@@ -896,6 +896,63 @@ func TestUniswapV4Repository_SaveBlock_NewBuildBumpsProcessingVersion(t *testing
 	}
 }
 
+// Once a chunk is columnstored, TimescaleDB resolves ON CONFLICT before row triggers
+// fire: a processing_version left to the trigger reaches the arbiter as DEFAULT 0,
+// matches the pv=0 row already there, and the correction is discarded with no error
+// (VEC-615). Every fact table here compresses at 2 days, so that is every chunk a
+// rebuild or a backfill replay touches.
+func TestUniswapV4Repository_SaveBlock_NewBuildAppendsIntoACompressedChunk(t *testing.T) {
+	ctx := context.Background()
+	poolID := seedUniswapV4RepoTestPool(t, ctx, 0x1c)
+
+	const blockNumber = int64(25000000)
+	writes := newUniswapV4TestBlockWrites(t, poolID, blockNumber, 0)
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		if _, err := NewUniswapV4Repository(uniswapV4TestPool, testUniswapV4BuildID).SaveBlock(ctx, tx, writes); err != nil {
+			t.Fatalf("SaveBlock at build %d: %v", testUniswapV4BuildID, err)
+		}
+	})
+	for _, table := range uniswapV4BatchedFactTables {
+		compressUniswapV4ChunkHolding(t, ctx, table, uniswapV4TestBlockTime(blockNumber))
+	}
+
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		if _, err := NewUniswapV4Repository(uniswapV4TestPool, testUniswapV4RebuildID).SaveBlock(ctx, tx, writes); err != nil {
+			t.Fatalf("SaveBlock at build %d into compressed chunks: %v", testUniswapV4RebuildID, err)
+		}
+	})
+
+	for _, table := range uniswapV4BatchedFactTables {
+		t.Run(table, func(t *testing.T) {
+			got := uniswapV4RowBuilds(t, ctx, table, poolID, blockNumber)
+			want := [][2]int{
+				{0, int(testUniswapV4BuildID)},
+				{1, int(testUniswapV4RebuildID)},
+			}
+			if !slices.Equal(got, want) {
+				t.Errorf("(processing_version, build_id) = %v, want %v (the rebuild's correction row was dropped by the compressed chunk's arbiter)", got, want)
+			}
+		})
+	}
+}
+
+// compressUniswapV4ChunkHolding columnstores only the chunk that holds rows at ts, so
+// the rest of the file's fixtures stay on rowstore and this test cannot mask theirs.
+func compressUniswapV4ChunkHolding(t *testing.T, ctx context.Context, table string, ts time.Time) {
+	t.Helper()
+	var chunks int
+	if err := uniswapV4TestPool.QueryRow(ctx, `
+		SELECT count(*)::int FROM (
+			SELECT compress_chunk(c, if_not_compressed => true)
+			FROM show_chunks($1::regclass, newer_than => $2::timestamptz - INTERVAL '2 days', older_than => $2::timestamptz + INTERVAL '2 days') c
+		) s`, table, ts).Scan(&chunks); err != nil {
+		t.Fatalf("compress the %s chunk around %s: %v", table, ts, err)
+	}
+	if chunks == 0 {
+		t.Fatalf("%s has no chunk around %s to compress; the seed write did not land", table, ts)
+	}
+}
+
 func TestUniswapV4Repository_SaveBlock_CountsOnlyTheStateSectionsRows(t *testing.T) {
 	ctx := context.Background()
 	poolID := seedUniswapV4RepoTestPool(t, ctx, 0x1b)

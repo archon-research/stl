@@ -219,8 +219,22 @@ CREATE INDEX IF NOT EXISTS idx_uniswap_v4_pool_state_pv_lookup
 
 -- force_custom_plan (VEC-541): once plpgsql caches a generic plan the per-row
 -- lookups stop pruning chunks and fan out over every one.
-CREATE OR REPLACE FUNCTION assign_processing_version_uniswap_v4_pool_state()
-RETURNS TRIGGER
+-- The version rule lives in a function the INSERT calls in its VALUES list and the
+-- trigger delegates to, so both share one rule and one advisory-lock key (ADR-0002 §3).
+-- The trigger alone is not enough: once a chunk is columnstored, TimescaleDB resolves
+-- ON CONFLICT before row triggers fire, so a version left to the trigger reaches the
+-- arbiter as DEFAULT 0, matches the pv=0 row already there, and the correction row is
+-- silently discarded (VEC-615; measured in 20260821_120000_morpho_adapter_state_version_function.sql).
+-- VOLATILE is load-bearing: a STABLE function would read the calling statement's
+-- snapshot, and a writer released from the lock would recompute the version the writer
+-- it waited for just used. The same three sibling tables below follow this one.
+CREATE OR REPLACE FUNCTION next_processing_version_uniswap_v4_pool_state(
+    p_pool_id       BIGINT,
+    p_block_number  BIGINT,
+    p_block_version INT,
+    p_build_id      INT)
+RETURNS INT
+VOLATILE
 SET plan_cache_mode = 'force_custom_plan'
 AS $$
 DECLARE
@@ -228,26 +242,39 @@ DECLARE
     max_ver      INT;
 BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(
-        format('u4ps|%s|%s|%s', NEW.pool_id, NEW.block_number, NEW.block_version), 0));
+        format('u4ps|%s|%s|%s', p_pool_id, p_block_number, p_block_version), 0));
 
     SELECT processing_version INTO existing_ver
     FROM uniswap_v4_pool_state
-    WHERE pool_id       = NEW.pool_id
-      AND block_number  = NEW.block_number
-      AND block_version = NEW.block_version
-      AND build_id      = NEW.build_id
+    WHERE pool_id       = p_pool_id
+      AND block_number  = p_block_number
+      AND block_version = p_block_version
+      AND build_id      = p_build_id
     LIMIT 1;
 
     IF FOUND THEN
-        NEW.processing_version := existing_ver;
-    ELSE
-        SELECT COALESCE(MAX(processing_version), -1) INTO max_ver
-        FROM uniswap_v4_pool_state
-        WHERE pool_id       = NEW.pool_id
-          AND block_number  = NEW.block_number
-          AND block_version = NEW.block_version;
-        NEW.processing_version := max_ver + 1;
+        RETURN existing_ver;
     END IF;
+
+    SELECT COALESCE(MAX(processing_version), -1) INTO max_ver
+    FROM uniswap_v4_pool_state
+    WHERE pool_id       = p_pool_id
+          AND block_number  = p_block_number
+          AND block_version = p_block_version;
+    RETURN max_ver + 1;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION next_processing_version_uniswap_v4_pool_state(BIGINT, BIGINT, INT, INT) IS
+  'Returns the processing_version a uniswap_v4_pool_state row at (pool, block, block_version) must carry for build_id: the version that build already wrote there, else MAX+1. Takes the key''s advisory lock (ADR-0002 §3) for the transaction. Call it in the INSERT''s VALUES list: on a columnstored chunk ON CONFLICT is resolved before row triggers fire, so a version left to the trigger is DEFAULT 0 there and the correction row is silently discarded (VEC-615).';
+
+CREATE OR REPLACE FUNCTION assign_processing_version_uniswap_v4_pool_state()
+RETURNS TRIGGER
+SET plan_cache_mode = 'force_custom_plan'
+AS $$
+BEGIN
+    NEW.processing_version := next_processing_version_uniswap_v4_pool_state(
+        NEW.pool_id, NEW.block_number, NEW.block_version, NEW.build_id);
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -331,8 +358,16 @@ END $$;
 CREATE INDEX IF NOT EXISTS idx_uniswap_v4_swap_pv_lookup
     ON uniswap_v4_swap (pool_id, block_number, block_version, log_index, build_id);
 
-CREATE OR REPLACE FUNCTION assign_processing_version_uniswap_v4_swap()
-RETURNS TRIGGER
+-- Same rule as uniswap_v4_pool_state's (see the note there): the INSERT calls it, the
+-- trigger delegates to it, and a columnstored chunk cannot drop a correction (VEC-615).
+CREATE OR REPLACE FUNCTION next_processing_version_uniswap_v4_swap(
+    p_pool_id       BIGINT,
+    p_block_number  BIGINT,
+    p_block_version INT,
+    p_log_index     INT,
+    p_build_id      INT)
+RETURNS INT
+VOLATILE
 SET plan_cache_mode = 'force_custom_plan'
 AS $$
 DECLARE
@@ -340,28 +375,41 @@ DECLARE
     max_ver      INT;
 BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(
-        format('u4s|%s|%s|%s|%s', NEW.pool_id, NEW.block_number, NEW.block_version, NEW.log_index), 0));
+        format('u4s|%s|%s|%s|%s', p_pool_id, p_block_number, p_block_version, p_log_index), 0));
 
     SELECT processing_version INTO existing_ver
     FROM uniswap_v4_swap
-    WHERE pool_id       = NEW.pool_id
-      AND block_number  = NEW.block_number
-      AND block_version = NEW.block_version
-      AND log_index     = NEW.log_index
-      AND build_id      = NEW.build_id
+    WHERE pool_id       = p_pool_id
+      AND block_number  = p_block_number
+      AND block_version = p_block_version
+      AND log_index     = p_log_index
+      AND build_id      = p_build_id
     LIMIT 1;
 
     IF FOUND THEN
-        NEW.processing_version := existing_ver;
-    ELSE
-        SELECT COALESCE(MAX(processing_version), -1) INTO max_ver
-        FROM uniswap_v4_swap
-        WHERE pool_id       = NEW.pool_id
-          AND block_number  = NEW.block_number
-          AND block_version = NEW.block_version
-          AND log_index     = NEW.log_index;
-        NEW.processing_version := max_ver + 1;
+        RETURN existing_ver;
     END IF;
+
+    SELECT COALESCE(MAX(processing_version), -1) INTO max_ver
+    FROM uniswap_v4_swap
+    WHERE pool_id       = p_pool_id
+          AND block_number  = p_block_number
+          AND block_version = p_block_version
+          AND log_index     = p_log_index;
+    RETURN max_ver + 1;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION next_processing_version_uniswap_v4_swap(BIGINT, BIGINT, INT, INT, INT) IS
+  'Returns the processing_version a uniswap_v4_swap row at (pool, block, block_version, log_index) must carry for build_id: the version that build already wrote there, else MAX+1. Takes the key''s advisory lock (ADR-0002 §3) for the transaction. Call it in the INSERT''s VALUES list: on a columnstored chunk ON CONFLICT is resolved before row triggers fire, so a version left to the trigger is DEFAULT 0 there and the correction row is silently discarded (VEC-615).';
+
+CREATE OR REPLACE FUNCTION assign_processing_version_uniswap_v4_swap()
+RETURNS TRIGGER
+SET plan_cache_mode = 'force_custom_plan'
+AS $$
+BEGIN
+    NEW.processing_version := next_processing_version_uniswap_v4_swap(
+        NEW.pool_id, NEW.block_number, NEW.block_version, NEW.log_index, NEW.build_id);
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -448,8 +496,16 @@ END $$;
 CREATE INDEX IF NOT EXISTS idx_uniswap_v4_liquidity_event_pv_lookup
     ON uniswap_v4_liquidity_event (pool_id, block_number, block_version, log_index, build_id);
 
-CREATE OR REPLACE FUNCTION assign_processing_version_uniswap_v4_liquidity_event()
-RETURNS TRIGGER
+-- Same rule as uniswap_v4_pool_state's (see the note there): the INSERT calls it, the
+-- trigger delegates to it, and a columnstored chunk cannot drop a correction (VEC-615).
+CREATE OR REPLACE FUNCTION next_processing_version_uniswap_v4_liquidity_event(
+    p_pool_id       BIGINT,
+    p_block_number  BIGINT,
+    p_block_version INT,
+    p_log_index     INT,
+    p_build_id      INT)
+RETURNS INT
+VOLATILE
 SET plan_cache_mode = 'force_custom_plan'
 AS $$
 DECLARE
@@ -457,28 +513,41 @@ DECLARE
     max_ver      INT;
 BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(
-        format('u4le|%s|%s|%s|%s', NEW.pool_id, NEW.block_number, NEW.block_version, NEW.log_index), 0));
+        format('u4le|%s|%s|%s|%s', p_pool_id, p_block_number, p_block_version, p_log_index), 0));
 
     SELECT processing_version INTO existing_ver
     FROM uniswap_v4_liquidity_event
-    WHERE pool_id       = NEW.pool_id
-      AND block_number  = NEW.block_number
-      AND block_version = NEW.block_version
-      AND log_index     = NEW.log_index
-      AND build_id      = NEW.build_id
+    WHERE pool_id       = p_pool_id
+      AND block_number  = p_block_number
+      AND block_version = p_block_version
+      AND log_index     = p_log_index
+      AND build_id      = p_build_id
     LIMIT 1;
 
     IF FOUND THEN
-        NEW.processing_version := existing_ver;
-    ELSE
-        SELECT COALESCE(MAX(processing_version), -1) INTO max_ver
-        FROM uniswap_v4_liquidity_event
-        WHERE pool_id       = NEW.pool_id
-          AND block_number  = NEW.block_number
-          AND block_version = NEW.block_version
-          AND log_index     = NEW.log_index;
-        NEW.processing_version := max_ver + 1;
+        RETURN existing_ver;
     END IF;
+
+    SELECT COALESCE(MAX(processing_version), -1) INTO max_ver
+    FROM uniswap_v4_liquidity_event
+    WHERE pool_id       = p_pool_id
+          AND block_number  = p_block_number
+          AND block_version = p_block_version
+          AND log_index     = p_log_index;
+    RETURN max_ver + 1;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION next_processing_version_uniswap_v4_liquidity_event(BIGINT, BIGINT, INT, INT, INT) IS
+  'Returns the processing_version a uniswap_v4_liquidity_event row at (pool, block, block_version, log_index) must carry for build_id: the version that build already wrote there, else MAX+1. Takes the key''s advisory lock (ADR-0002 §3) for the transaction. Call it in the INSERT''s VALUES list: on a columnstored chunk ON CONFLICT is resolved before row triggers fire, so a version left to the trigger is DEFAULT 0 there and the correction row is silently discarded (VEC-615).';
+
+CREATE OR REPLACE FUNCTION assign_processing_version_uniswap_v4_liquidity_event()
+RETURNS TRIGGER
+SET plan_cache_mode = 'force_custom_plan'
+AS $$
+BEGIN
+    NEW.processing_version := next_processing_version_uniswap_v4_liquidity_event(
+        NEW.pool_id, NEW.block_number, NEW.block_version, NEW.log_index, NEW.build_id);
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -651,8 +720,16 @@ END $$;
 CREATE INDEX IF NOT EXISTS idx_uniswap_v4_pool_event_pv_lookup
     ON uniswap_v4_pool_event (pool_id, block_number, block_version, log_index, build_id);
 
-CREATE OR REPLACE FUNCTION assign_processing_version_uniswap_v4_pool_event()
-RETURNS TRIGGER
+-- Same rule as uniswap_v4_pool_state's (see the note there): the INSERT calls it, the
+-- trigger delegates to it, and a columnstored chunk cannot drop a correction (VEC-615).
+CREATE OR REPLACE FUNCTION next_processing_version_uniswap_v4_pool_event(
+    p_pool_id       BIGINT,
+    p_block_number  BIGINT,
+    p_block_version INT,
+    p_log_index     INT,
+    p_build_id      INT)
+RETURNS INT
+VOLATILE
 SET plan_cache_mode = 'force_custom_plan'
 AS $$
 DECLARE
@@ -660,28 +737,41 @@ DECLARE
     max_ver      INT;
 BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(
-        format('u4pe|%s|%s|%s|%s', NEW.pool_id, NEW.block_number, NEW.block_version, NEW.log_index), 0));
+        format('u4pe|%s|%s|%s|%s', p_pool_id, p_block_number, p_block_version, p_log_index), 0));
 
     SELECT processing_version INTO existing_ver
     FROM uniswap_v4_pool_event
-    WHERE pool_id       = NEW.pool_id
-      AND block_number  = NEW.block_number
-      AND block_version = NEW.block_version
-      AND log_index     = NEW.log_index
-      AND build_id      = NEW.build_id
+    WHERE pool_id       = p_pool_id
+      AND block_number  = p_block_number
+      AND block_version = p_block_version
+      AND log_index     = p_log_index
+      AND build_id      = p_build_id
     LIMIT 1;
 
     IF FOUND THEN
-        NEW.processing_version := existing_ver;
-    ELSE
-        SELECT COALESCE(MAX(processing_version), -1) INTO max_ver
-        FROM uniswap_v4_pool_event
-        WHERE pool_id       = NEW.pool_id
-          AND block_number  = NEW.block_number
-          AND block_version = NEW.block_version
-          AND log_index     = NEW.log_index;
-        NEW.processing_version := max_ver + 1;
+        RETURN existing_ver;
     END IF;
+
+    SELECT COALESCE(MAX(processing_version), -1) INTO max_ver
+    FROM uniswap_v4_pool_event
+    WHERE pool_id       = p_pool_id
+          AND block_number  = p_block_number
+          AND block_version = p_block_version
+          AND log_index     = p_log_index;
+    RETURN max_ver + 1;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION next_processing_version_uniswap_v4_pool_event(BIGINT, BIGINT, INT, INT, INT) IS
+  'Returns the processing_version a uniswap_v4_pool_event row at (pool, block, block_version, log_index) must carry for build_id: the version that build already wrote there, else MAX+1. Takes the key''s advisory lock (ADR-0002 §3) for the transaction. Call it in the INSERT''s VALUES list: on a columnstored chunk ON CONFLICT is resolved before row triggers fire, so a version left to the trigger is DEFAULT 0 there and the correction row is silently discarded (VEC-615).';
+
+CREATE OR REPLACE FUNCTION assign_processing_version_uniswap_v4_pool_event()
+RETURNS TRIGGER
+SET plan_cache_mode = 'force_custom_plan'
+AS $$
+BEGIN
+    NEW.processing_version := next_processing_version_uniswap_v4_pool_event(
+        NEW.pool_id, NEW.block_number, NEW.block_version, NEW.log_index, NEW.build_id);
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
