@@ -13,13 +13,15 @@ import (
 
 // reportLine is one height's decision as the report carries it. A `republish`
 // row is a hole: the archive's top version at that height is a losing fork.
+// DataTypes is what the plan writes, not what the height lacks: only a `fill`
+// row's is the absent set.
 type reportLine struct {
 	Block         int64            `json:"block"`
 	Action        blockAction      `json:"action"`
 	Version       int              `json:"version"`
 	ArchivedHash  string           `json:"archivedHash"`
 	CanonicalHash string           `json:"canonicalHash"`
-	Missing       []s3key.DataType `json:"missing"`
+	DataTypes     []s3key.DataType `json:"dataTypes"`
 }
 
 // decisionReport is the machine-readable half of a run: one JSON object per
@@ -65,7 +67,7 @@ func (r *decisionReport) record(d blockDecision) error {
 		Version:       d.Plan.Version,
 		ArchivedHash:  d.ArchivedHash,
 		CanonicalHash: d.CanonicalHash,
-		Missing:       d.Plan.DataTypes,
+		DataTypes:     d.Plan.DataTypes,
 	}
 	if err := r.enc.Encode(line); err != nil {
 		return fmt.Errorf("writing block %d to the report: %w", d.BlockNumber, err)

@@ -931,9 +931,13 @@ something (a height that needs nothing is left out):
   fork. The republisher would repair it at version 1 on your word alone, so fix
   the gap first (the backup worker's DLQ), or let a real downloader run archive
   it.
-- `"action":"fill"` — the canonical version is there but a data type is not
-  (`missing` names it). A real downloader run writes the missing object; there is
-  nothing to republish.
+- `"action":"fill"` — the canonical version is there but a data type is not. A
+  real downloader run writes the missing object; there is nothing to republish.
+
+`dataTypes` names what a real downloader run would write at that height, not
+what the height lacks: on a `fill` row it is exactly the absent types, and on
+`fresh` and `republish` it is every type that chain's archive holds (block and
+receipts, plus traces on Ethereum), because both write a whole version.
 
 The counts are in the run's final `download complete` line too (`planFresh`,
 `planSkip`, `planFill`, `planRepublish`), so a range with no `republish` needs no

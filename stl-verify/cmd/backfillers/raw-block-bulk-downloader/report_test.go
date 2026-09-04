@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -80,7 +81,7 @@ func TestDecisionReport_WritesOneLinePerNonSkipDecision(t *testing.T) {
 			Version:       1,
 			ArchivedHash:  forkHash,
 			CanonicalHash: canonicalHash,
-			Missing:       ethereumTypes(),
+			DataTypes:     ethereumTypes(),
 		},
 		{
 			Block:         25395653,
@@ -88,7 +89,7 @@ func TestDecisionReport_WritesOneLinePerNonSkipDecision(t *testing.T) {
 			Version:       0,
 			ArchivedHash:  canonicalHash,
 			CanonicalHash: canonicalHash,
-			Missing:       []s3key.DataType{s3key.Traces},
+			DataTypes:     []s3key.DataType{s3key.Traces},
 		},
 	}
 	got := reportLines(t, path)
@@ -98,7 +99,7 @@ func TestDecisionReport_WritesOneLinePerNonSkipDecision(t *testing.T) {
 	for i := range want {
 		if got[i].Block != want[i].Block || got[i].Action != want[i].Action || got[i].Version != want[i].Version ||
 			got[i].ArchivedHash != want[i].ArchivedHash || got[i].CanonicalHash != want[i].CanonicalHash ||
-			!slices.Equal(got[i].Missing, want[i].Missing) {
+			!slices.Equal(got[i].DataTypes, want[i].DataTypes) {
 			t.Errorf("report line %d = %+v, want %+v", i, got[i], want[i])
 		}
 	}
@@ -129,4 +130,51 @@ func TestDecisionReport_ADryRunRecordsTheHoleItFound(t *testing.T) {
 		t.Errorf("report line hashes = archived %q / canonical %q, want %q / %q",
 			lines[0].ArchivedHash, lines[0].CanonicalHash, forkHash, canonicalHash)
 	}
+}
+
+// The keys are the operator-facing half of the report — what the runbook
+// documents and what a jq filter over a million-height audit selects on — so a
+// rename is a decision, not a refactor.
+func TestDecisionReport_NamesTheFieldsTheRunbookDocuments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "holes.jsonl")
+	report, err := newDecisionReport(path)
+	if err != nil {
+		t.Fatalf("newDecisionReport: %v", err)
+	}
+
+	if err := report.record(blockDecision{
+		BlockNumber:   planTestBlock,
+		ArchivedHash:  forkHash,
+		CanonicalHash: canonicalHash,
+		Plan:          blockPlan{Action: actionRepublish, Version: 1, DataTypes: ethereumTypes()},
+	}); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	if err := report.close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	want := []string{"block", "action", "version", "archivedHash", "canonicalHash", "dataTypes"}
+	got := slices.Sorted(maps.Keys(decodedFields(t, path)))
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("report fields = %v, want %v", got, want)
+	}
+}
+
+// decodedFields reads the first report line as the JSON it is, rather than
+// through reportLine, so the tags are asserted and not assumed.
+func decodedFields(t *testing.T, path string) map[string]any {
+	t.Helper()
+
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the report: %v", err)
+	}
+	fields := map[string]any{}
+	first, _, _ := strings.Cut(strings.TrimSpace(string(body)), "\n")
+	if err := json.Unmarshal([]byte(first), &fields); err != nil {
+		t.Fatalf("decoding report line %q: %v", first, err)
+	}
+	return fields
 }
