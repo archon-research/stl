@@ -137,29 +137,82 @@ func TestDecisionReport_ADryRunRecordsTheHoleItFound(t *testing.T) {
 // documents and what a jq filter over a million-height audit selects on — so a
 // rename is a decision, not a refactor.
 func TestDecisionReport_NamesTheFieldsTheRunbookDocuments(t *testing.T) {
+	tests := []struct {
+		name  string
+		write func(*decisionReport) error
+		want  []string
+	}{
+		{
+			name: "a height whose archived version is a losing fork",
+			write: func(r *decisionReport) error {
+				return r.record(blockDecision{
+					BlockNumber:   planTestBlock,
+					ArchivedHash:  forkHash,
+					CanonicalHash: canonicalHash,
+					Plan:          blockPlan{Action: actionRepublish, Version: 1, DataTypes: ethereumTypes()},
+				})
+			},
+			want: []string{"block", "action", "version", "archivedHash", "canonicalHash", "dataTypes"},
+		},
+		{
+			name: "a height that reached no decision at all",
+			write: func(r *decisionReport) error {
+				return r.recordError(planTestBlock, errors.New("eth_getBlockByNumber: block not found"))
+			},
+			want: []string{"block", "action", "version", "archivedHash", "canonicalHash", "error"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "holes.jsonl")
+			report, err := newDecisionReport(path)
+			if err != nil {
+				t.Fatalf("newDecisionReport: %v", err)
+			}
+
+			if err := tc.write(report); err != nil {
+				t.Fatalf("writing the row: %v", err)
+			}
+			if err := report.close(); err != nil {
+				t.Fatalf("close: %v", err)
+			}
+
+			got := slices.Sorted(maps.Keys(decodedFields(t, path)))
+			slices.Sort(tc.want)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("report fields = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A height the run could not plan or fetch is something an operator has to act
+// on too. Left out of the report it reads as a height that needed nothing,
+// which is the one thing the file is supposed to rule out.
+func TestDecisionReport_RecordsAHeightThatReachedNoDecision(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "holes.jsonl")
 	report, err := newDecisionReport(path)
 	if err != nil {
 		t.Fatalf("newDecisionReport: %v", err)
 	}
 
-	if err := report.record(blockDecision{
-		BlockNumber:   planTestBlock,
-		ArchivedHash:  forkHash,
-		CanonicalHash: canonicalHash,
-		Plan:          blockPlan{Action: actionRepublish, Version: 1, DataTypes: ethereumTypes()},
-	}); err != nil {
-		t.Fatalf("record: %v", err)
+	if err := report.recordError(planTestBlock, errors.New("eth_getBlockByNumber: block not found")); err != nil {
+		t.Fatalf("recordError: %v", err)
 	}
 	if err := report.close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 
-	want := []string{"block", "action", "version", "archivedHash", "canonicalHash", "dataTypes"}
-	got := slices.Sorted(maps.Keys(decodedFields(t, path)))
-	slices.Sort(want)
-	if !slices.Equal(got, want) {
-		t.Errorf("report fields = %v, want %v", got, want)
+	lines := reportLines(t, path)
+	if len(lines) != 1 {
+		t.Fatalf("report lines = %+v, want the one failed height", lines)
+	}
+	if lines[0].Block != planTestBlock || lines[0].Action != actionError {
+		t.Errorf("report line = %+v, want block %d recorded as an error", lines[0], planTestBlock)
+	}
+	if !strings.Contains(lines[0].Error, "block not found") {
+		t.Errorf("report line error = %q, want the failure that stopped the height", lines[0].Error)
 	}
 }
 

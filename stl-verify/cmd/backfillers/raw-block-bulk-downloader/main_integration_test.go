@@ -211,6 +211,31 @@ func TestRunIntegration_RefusesABucketItCannotReach(t *testing.T) {
 	}
 }
 
+// --report is the run's complete action list, so a height the run failed on has
+// to be in it: without a row it is indistinguishable from one that needed
+// nothing, and the next operator repairs everything but it.
+func TestRunIntegration_AFailedHeightIsInTheReport(t *testing.T) {
+	ctx := context.Background()
+	client, bucket := archiveBucket(t, ctx)
+	seedArchivedVersion(t, ctx, client, bucket, 0, forkHash)
+	reportPath := filepath.Join(t.TempDir(), "holes.jsonl")
+
+	if _, err := runDownloader(t, ctx, bucket, downloaderRun{rpcFailure: true, reportPath: reportPath}); err == nil {
+		t.Fatal("expected run() to fail: an exit code of 0 would hide the hole left in the archive")
+	}
+
+	lines := reportLines(t, reportPath)
+	if len(lines) != 1 {
+		t.Fatalf("report lines = %+v, want the one height the run could not archive", lines)
+	}
+	if lines[0].Block != forkedBlock || lines[0].Action != actionError {
+		t.Errorf("report line = %+v, want block %d recorded as an error", lines[0], forkedBlock)
+	}
+	if lines[0].Error == "" {
+		t.Error("the error row carries no error: the report has to say why the height was left alone")
+	}
+}
+
 // A report path the run cannot write is the operator's whole answer, so it must
 // stop the run before it spends an hour of RPC and S3 reads reaching it.
 func TestRunIntegration_RefusesAnUnwritableReportBeforeAnyWork(t *testing.T) {

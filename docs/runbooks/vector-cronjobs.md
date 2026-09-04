@@ -933,15 +933,21 @@ something (a height that needs nothing is left out):
   it.
 - `"action":"fill"` — the canonical version is there but a data type is not. A
   real downloader run writes the missing object; there is nothing to republish.
+- `"action":"error"` — the run reached no decision for that height at all, and
+  `error` says why (a node that would not answer, an archived object it could
+  not read). The height is neither proven healthy nor proven a hole: fix the
+  cause and re-run the range over it before acting on the rest.
 
 `dataTypes` names what a real downloader run would write at that height, not
 what the height lacks: on a `fill` row it is exactly the absent types, and on
 `fresh` and `republish` it is every type that chain's archive holds (block and
-receipts, plus traces on Ethereum), because both write a whole version.
+receipts, plus traces on Ethereum), because both write a whole version. An
+`error` row reached no plan, so it carries none.
 
 The counts are in the run's final `download complete` line too (`planFresh`,
-`planSkip`, `planFill`, `planRepublish`), so a range with no `republish` needs no
-report read at all.
+`planSkip`, `planFill`, `planRepublish`, and `blocksFailed` for the `error`
+rows), so a range with no `republish` and no failures needs no report read at
+all.
 
 Pointed at a single height it is also the cheap pre-check before a run, from the
 same read the worker itself does.

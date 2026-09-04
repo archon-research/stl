@@ -12,6 +12,10 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 )
 
+// actionError is the report's own action, for a height that reached no plan at
+// all. It is not a blockPlan any worker acts on.
+const actionError blockAction = "error"
+
 // reportLine is one height's decision as the report carries it. A `republish`
 // row is a hole: the archive's top version at that height is a losing fork.
 // DataTypes is what the plan writes, not what the height lacks: only a `fill`
@@ -22,7 +26,8 @@ type reportLine struct {
 	Version       int              `json:"version"`
 	ArchivedHash  string           `json:"archivedHash"`
 	CanonicalHash string           `json:"canonicalHash"`
-	DataTypes     []s3key.DataType `json:"dataTypes"`
+	DataTypes     []s3key.DataType `json:"dataTypes,omitempty"`
+	Error         string           `json:"error,omitempty"`
 }
 
 // decisionReport is the machine-readable half of a run: one JSON object per
@@ -74,6 +79,17 @@ func (r *decisionReport) record(d blockDecision) error {
 		CanonicalHash: d.CanonicalHash,
 		DataTypes:     d.Plan.DataTypes,
 	})
+}
+
+// recordError records a height the run reached no decision for. A failure left
+// out of the report is indistinguishable from a height that needed nothing,
+// which is the one thing the file exists to rule out.
+func (r *decisionReport) recordError(blockNum int64, cause error) error {
+	if r == nil {
+		return nil
+	}
+
+	return r.write(reportLine{Block: blockNum, Action: actionError, Error: cause.Error()})
 }
 
 func (r *decisionReport) write(line reportLine) error {

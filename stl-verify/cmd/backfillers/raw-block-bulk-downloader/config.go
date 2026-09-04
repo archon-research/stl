@@ -38,7 +38,7 @@ func parseFlags() Config {
 	flag.StringVar(&cfg.Bucket, "bucket", "", "S3 bucket name (required)")
 	flag.StringVar(&cfg.Region, "region", "", "AWS region (e.g., eu-west-1)")
 	flag.BoolVar(&cfg.DryRun, "dry-run", false, "Log every block's decision and upload nothing")
-	flag.StringVar(&cfg.ReportPath, "report", "", "Write every non-skip decision to this file, one JSON object per line")
+	flag.StringVar(&cfg.ReportPath, "report", "", "Write every height needing action to this file — decisions and failures alike — one JSON object per line")
 	flag.BoolVar(&cfg.AllowUnfinalized, "allow-unfinalized", false, "Archive past the node's finalized head, accepting that a height that loses its fork stays wrong")
 	flag.IntVar(&cfg.BlockReceiptWorkers, "block-workers", DefaultBlockReceiptWorkers, "Block+receipt worker count")
 	flag.IntVar(&cfg.TraceWorkers, "trace-workers", DefaultTraceWorkers, "Trace worker count")

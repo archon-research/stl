@@ -20,7 +20,8 @@
 // could never be corrected; --allow-unfinalized overrides that.
 //
 // With --dry-run it writes nothing and is the audit for ARCT-379 holes; --report
-// leaves every non-skip decision in a file, one JSON object per line, where a
+// leaves every height needing action in a file, one JSON object per line: every
+// non-skip decision, plus an "error" row for every height that reached none. A
 // "republish" row is a height whose only archived version is a losing fork.
 //
 // Usage:
@@ -566,15 +567,32 @@ func (a blockArchiver) archiveBatch(ctx context.Context, from, to int64) {
 			if ctx.Err() != nil {
 				return
 			}
-			a.logger.Warn("block left unarchived", "block", height.BlockNumber, "error", err)
-			a.stats.blocksFailed.Add(1)
+			a.failHeight(height.BlockNumber, err)
 		}
 	}
 }
 
-func (a blockArchiver) failBatch(from, to int64, msg string, err error) {
-	a.logger.Warn(msg, "from", from, "to", to, "error", err)
+func (a blockArchiver) failHeight(blockNum int64, cause error) {
+	a.logger.Warn("block left unarchived", "block", blockNum, "error", cause)
+	a.stats.blocksFailed.Add(1)
+	a.recordFailure(blockNum, cause)
+}
+
+func (a blockArchiver) failBatch(from, to int64, msg string, cause error) {
+	a.logger.Warn(msg, "from", from, "to", to, "error", cause)
 	a.stats.blocksFailed.Add(to - from + 1)
+	for blockNum := from; blockNum <= to; blockNum++ {
+		a.recordFailure(blockNum, cause)
+	}
+}
+
+// recordFailure leaves the height in the report as well as the log, so --report
+// is the whole list of what needs acting on and not only the heights that
+// reached a plan.
+func (a blockArchiver) recordFailure(blockNum int64, cause error) {
+	if err := a.report.recordError(blockNum, cause); err != nil {
+		a.abort(err)
+	}
 }
 
 // plannedHeight is one height's decision, or the failure that stopped it before
