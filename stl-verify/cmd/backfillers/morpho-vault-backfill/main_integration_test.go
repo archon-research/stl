@@ -23,9 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/mock"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
@@ -165,10 +163,11 @@ func newActivityEnv(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *test
 	if err != nil {
 		t.Fatalf("loading the worker configuration: %v", err)
 	}
-	activities, err := newBackfillActivities(ctx, newDeps(t, pool), cfg)
+	activities, drainArchive, err := newBackfillActivities(ctx, newDeps(t, pool), cfg)
 	if err != nil {
 		t.Fatalf("wiring the backfill activities: %v", err)
 	}
+	t.Cleanup(drainArchive)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestActivityEnvironment()
 	env.RegisterActivity(activities)
@@ -189,7 +188,7 @@ func TestIntegration_Register_ExposesTheDocumentedWorkflowType(t *testing.T) {
 	setWorkerEnv(t, seedBucket(t, ctx), server.URL)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	if err := register(ctx, newDeps(t, pool), env); err != nil {
+	if err := newBackfillWorker(t).register(ctx, newDeps(t, pool), env); err != nil {
 		t.Fatalf("running the production registration: %v", err)
 	}
 	// Mocked so the run proves the registered names resolve, not that S3 holds
@@ -219,13 +218,26 @@ func TestIntegration_Register_RefusesAChainIDMismatch(t *testing.T) {
 	setWorkerEnv(t, seedBucket(t, ctx), server.URL)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	err := register(ctx, newDeps(t, pool), env)
+	err := newBackfillWorker(t).register(ctx, newDeps(t, pool), env)
 
 	if err == nil {
 		t.Fatal("expected registration to fail when the node reports another chain")
 	}
 	if !strings.Contains(err.Error(), "chain ID mismatch") {
 		t.Errorf("error = %v, want it to name the chain ID mismatch", err)
+	}
+}
+
+// deleteSeededV2Vaults restores the "no VaultV2 vault known" premise: registry
+// seed migrations now ship VaultV2 rows (20260825 sparkUSDTbc is mainnet's
+// first), so a freshly migrated database no longer holds zero of them. A
+// test-fixture DELETE on this test's throwaway clone — the append-only rule
+// governs production ingest, not test setup.
+func deleteSeededV2Vaults(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	// vault_version 3 = Morpho VaultV2 (entity.MorphoVaultV2).
+	if _, err := pool.Exec(ctx, `DELETE FROM morpho_vault WHERE vault_version = 3`); err != nil {
+		t.Fatalf("deleting the seed-registered VaultV2 vaults: %v", err)
 	}
 }
 
@@ -237,6 +249,7 @@ func TestIntegration_DiscoverVaults_FindsNoCandidatesInAnUnrelatedRange(t *testi
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
+	deleteSeededV2Vaults(t, ctx, pool)
 	bucket := seedBucket(t, ctx)
 	// Contiguous, and the range below covers exactly these blocks: the scan
 	// refuses a partition slice the archive has a hole in, so a sampled seed
@@ -326,7 +339,7 @@ func TestIntegration_Backfill_FailsOnAnArchiveGapWhenNoV2VaultIsKnown(t *testing
 	setWorkerEnv(t, bucket, chainFixtureServer(t, "0x1").URL)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	if err := register(ctx, newDeps(t, pool), env); err != nil {
+	if err := newBackfillWorker(t).register(ctx, newDeps(t, pool), env); err != nil {
 		t.Fatalf("running the production registration: %v", err)
 	}
 	env.ExecuteWorkflow("MorphoVaultBackfill", BackfillParams{From: 1, To: 6})
@@ -347,11 +360,12 @@ func TestIntegration_Backfill_SucceedsWithNothingToReplayOverACompleteArchive(t 
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
+	deleteSeededV2Vaults(t, ctx, pool)
 	bucket := seedQuietBlocks(t, ctx, 1, 6, -1)
 	setWorkerEnv(t, bucket, chainFixtureServer(t, "0x1").URL)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	if err := register(ctx, newDeps(t, pool), env); err != nil {
+	if err := newBackfillWorker(t).register(ctx, newDeps(t, pool), env); err != nil {
 		t.Fatalf("running the production registration: %v", err)
 	}
 	env.ExecuteWorkflow("MorphoVaultBackfill", BackfillParams{From: 1, To: 6})
@@ -441,7 +455,7 @@ func discoverInto(t *testing.T, ctx context.Context, bucket string, vault common
 	if err != nil {
 		t.Fatalf("NewEventExtractor: %v", err)
 	}
-	prober, err := newVaultProber(logger, blockStampedVaultProbe(t))
+	prober, err := newVaultProber(logger, blockStampedVaultProbe(t), cfg.chainID)
 	if err != nil {
 		t.Fatalf("newVaultProber: %v", err)
 	}
@@ -581,6 +595,7 @@ func TestIntegration_ReplayPartition_ReplaysNothingWhenNoV2VaultIsKnown(t *testi
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
+	deleteSeededV2Vaults(t, ctx, pool)
 	// Deliberately an empty bucket: reaching S3 at all here would be the bug.
 	setWorkerEnv(t, seedBucket(t, ctx), chainFixtureServer(t, "0x1").URL)
 	env := newActivityEnv(t, ctx, pool)
@@ -685,45 +700,6 @@ func installTestMeterProvider(t *testing.T) sdkmetric.Reader {
 	return reader
 }
 
-// counterValue sums the named int64 counter's data points whose attributes
-// include every entry of want. Attributes outside want are ignored, so a test
-// asserts only the labels it cares about.
-func counterValue(t *testing.T, reader sdkmetric.Reader, name string, want map[string]string) int64 {
-	t.Helper()
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("collecting metrics: %v", err)
-	}
-	var total int64
-	for _, scope := range rm.ScopeMetrics {
-		for _, m := range scope.Metrics {
-			if m.Name != name {
-				continue
-			}
-			sum, ok := m.Data.(metricdata.Sum[int64])
-			if !ok {
-				t.Fatalf("metric %q is %T, want metricdata.Sum[int64]", name, m.Data)
-			}
-			for _, dp := range sum.DataPoints {
-				if hasAttributes(dp.Attributes, want) {
-					total += dp.Value
-				}
-			}
-		}
-	}
-	return total
-}
-
-func hasAttributes(set attribute.Set, want map[string]string) bool {
-	for key, value := range want {
-		got, ok := set.Value(attribute.Key(key))
-		if !ok || got.AsString() != value {
-			return false
-		}
-	}
-	return true
-}
-
 // seedV2VaultRow inserts the protocol, asset token and VaultV2 row a replay
 // expects to already exist — replay never discovers, it only drives logs of
 // vaults the database already holds.
@@ -775,13 +751,17 @@ func addAdapterLog(t *testing.T, vault, adapter common.Address) shared.Log {
 }
 
 // wireAdapterRegistrationReads answers the two chain reads registering an adapter
-// issues: the number-pinned type probe (morpho() succeeds, morphoVaultV1()
+// issues: the number-pinned type probe (morpho() succeeds, every other marker
 // reverts ⇒ MarketV1) and the hash-pinned realAssets() seed.
 func wireAdapterRegistrationReads(t *testing.T, mc *testutil.MockMulticaller, adapter common.Address) {
 	t.Helper()
 	adapterABI, err := abis.GetVaultV2AdapterReadABI()
 	if err != nil {
 		t.Fatalf("GetVaultV2AdapterReadABI: %v", err)
+	}
+	prober, err := morpho_indexer.NewAdapterProber()
+	if err != nil {
+		t.Fatalf("NewAdapterProber: %v", err)
 	}
 	pack := func(args abi.Arguments, values ...any) []byte {
 		data, err := args.Pack(values...)
@@ -792,13 +772,12 @@ func wireAdapterRegistrationReads(t *testing.T, mc *testutil.MockMulticaller, ad
 	}
 
 	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) != 2 || calls[0].Target != adapter {
+		if len(calls) != prober.NumProbeCalls() || calls[0].Target != adapter {
 			return nil, fmt.Errorf("unexpected number-pinned multicall of %d calls", len(calls))
 		}
-		return []outbound.Result{
-			{Success: true, ReturnData: pack(adapterABI.Methods["morpho"].Outputs, common.HexToAddress("0x1"))},
-			{Success: false},
-		}, nil
+		results := make([]outbound.Result, len(calls))
+		results[0] = outbound.Result{Success: true, ReturnData: pack(adapterABI.Methods["morpho"].Outputs, common.HexToAddress("0x1"))}
+		return results, nil
 	}
 	mc.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		if len(calls) != 1 || calls[0].Target != adapter {
@@ -836,4 +815,13 @@ func replayOnePartition(t *testing.T, env *testsuite.TestActivityEnvironment, wo
 		t.Fatalf("decoding the activity result: %v", err)
 	}
 	return replayed
+}
+
+// newBackfillWorker builds the entrypoint's registrar and drains the archive it
+// wires when the test ends, the way run does when the worker stops.
+func newBackfillWorker(t *testing.T) *backfillWorker {
+	t.Helper()
+	backfill := &backfillWorker{}
+	t.Cleanup(backfill.drain)
+	return backfill
 }

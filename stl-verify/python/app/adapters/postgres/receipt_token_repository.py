@@ -17,18 +17,12 @@ logger = get_logger(__name__)
 # receipt-token metadata anyway lets the API distinguish "not indexed yet"
 # (warm-up → 503) from "unknown receipt token" (→ 404), and lets non-Aave
 # branches (e.g. Morpho) resolve without ever needing receipt_token_token_id.
-#
-# INNER JOIN to `token` for the underlying, unlike the receipt-token-address
-# one above: `receipt_token.underlying_token_id` is NOT NULL and FKs straight
-# to `token(id)`, so the row always exists — no lazy-creation gap to guard.
 _RECEIPT_TOKEN_BASE_SELECT = """
 SELECT rt.id, rt.protocol_id, rt.underlying_token_id, rt.receipt_token_address,
        p.chain_id, p.name AS protocol_name,
-       t.id AS receipt_token_token_id,
-       ut.address AS underlying_token_address, ut.symbol AS underlying_symbol
+       t.id AS receipt_token_token_id
 FROM receipt_token rt
 JOIN protocol p ON p.id = rt.protocol_id
-JOIN token ut ON ut.id = rt.underlying_token_id
 LEFT JOIN token t ON t.chain_id = p.chain_id AND t.address = rt.receipt_token_address
 """
 
@@ -39,7 +33,7 @@ _RECEIPT_TOKEN_BY_ADDRESS_SQL = (
 )
 
 _RECEIPT_TOKEN_ROUTING_SQL = """
-SELECT rt.id AS receipt_token_id, p.name AS protocol_name
+SELECT rt.id AS receipt_token_id, p.name AS protocol_name, rt.chain_id
 FROM receipt_token rt
 JOIN protocol p ON p.id = rt.protocol_id
 ORDER BY rt.id
@@ -58,8 +52,6 @@ def _row_to_receipt_token_info(row) -> ReceiptTokenInfo | None:
         chain_id=row.chain_id,
         protocol_name=row.protocol_name,
         receipt_token_token_id=row.receipt_token_token_id,
-        underlying_token_address=bytes(row.underlying_token_address),
-        underlying_symbol=row.underlying_symbol,
     )
 
 
@@ -107,7 +99,9 @@ class ReceiptTokenRepository:
             raise
 
         return [
-            ReceiptTokenProtocolPair(receipt_token_id=row.receipt_token_id, protocol_name=row.protocol_name)
+            ReceiptTokenProtocolPair(
+                receipt_token_id=row.receipt_token_id, protocol_name=row.protocol_name, chain_id=row.chain_id
+            )
             for row in rows
         ]
 

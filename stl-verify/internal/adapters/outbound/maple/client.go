@@ -292,6 +292,8 @@ type poolWire struct {
 }
 
 type collateralWire struct {
+	// Non-pointer on purpose: a null asset symbol decodes to "" and is a null
+	// downgrade, not a phase failure (see entity maple.LoanCollateral).
 	Asset            string       `json:"asset"`
 	AssetAmount      *string      `json:"assetAmount"`   // nullable in schema
 	AssetValueUSD    *string      `json:"assetValueUsd"` // nullable in schema

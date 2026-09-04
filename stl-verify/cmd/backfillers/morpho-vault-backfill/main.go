@@ -42,6 +42,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
@@ -99,25 +100,44 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("startup configuration: %w", err)
 	}
 
+	backfill := &backfillWorker{}
+	defer backfill.drain()
+
 	return temporal.RunWorker(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporal.WorkerConfig{
 		Name:         jobName,
 		OpenDatabase: postgres.PoolOpener(postgres.DefaultDBConfig(dbURL)),
-		Register:     register,
+		Register:     backfill.register,
 	})
 }
 
-func register(ctx context.Context, deps temporal.Dependencies, r worker.Registry) error {
+// backfillWorker carries the process-scoped teardown register produces:
+// temporal.WorkerConfig gives it nowhere to return one, and the archive drain
+// still has to run once, when the worker exits.
+type backfillWorker struct {
+	drainArchive func()
+}
+
+// drain closes archiving for good. The activities only ever wait out their own
+// writes, so without this a stopping worker abandons whatever is still running.
+func (b *backfillWorker) drain() {
+	if b.drainArchive != nil {
+		b.drainArchive()
+	}
+}
+
+func (b *backfillWorker) register(ctx context.Context, deps temporal.Dependencies, r worker.Registry) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return fmt.Errorf("loading configuration: %w", err)
 	}
 
-	activities, err := newBackfillActivities(ctx, deps, cfg)
+	activities, drainArchive, err := newBackfillActivities(ctx, deps, cfg)
 	if err != nil {
 		return fmt.Errorf("wiring the backfill activities: %w", err)
 	}
+	b.drainArchive = drainArchive
 
 	workflows := &backfillWorkflows{chainID: cfg.chainID}
 	r.RegisterWorkflowWithOptions(workflows.Backfill, workflow.RegisterOptions{Name: workflowTypeName})
@@ -125,55 +145,58 @@ func register(ctx context.Context, deps temporal.Dependencies, r worker.Registry
 	return nil
 }
 
-func newBackfillActivities(ctx context.Context, deps temporal.Dependencies, cfg config) (*backfillActivities, error) {
+// newBackfillActivities returns the activities plus the archive drain the
+// worker owes at exit: the activities themselves only wait, so that the worker
+// keeps archiving across runs.
+func newBackfillActivities(ctx context.Context, deps temporal.Dependencies, cfg config) (*backfillActivities, func(), error) {
 	buildReg, err := buildregistry.New(ctx, deps.Pool)
 	if err != nil {
-		return nil, fmt.Errorf("registering build: %w", err)
+		return nil, nil, fmt.Errorf("registering build: %w", err)
 	}
 
 	s3Reader, err := newS3Reader(ctx, deps.Logger, cfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	ethClient, err := dialChain(ctx, cfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	multicaller, err := multicall.NewClient(ethClient, blockchain.Multicall3)
 	if err != nil {
-		return nil, fmt.Errorf("creating multicall client: %w", err)
+		return nil, nil, fmt.Errorf("creating multicall client: %w", err)
 	}
 
-	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, deps.Logger, cfg.chainID, int64(buildReg.BuildID()), "morpho-vault")
+	archiveWrap, archiveWait, archiveDrain, err := archivingwire.Bootstrap(ctx, deps.Logger, cfg.chainID, int64(buildReg.BuildID()), "morpho-vault")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	multicaller = archiveWrap(multicaller)
 
-	prober, err := newVaultProber(deps.Logger, multicaller)
+	prober, err := newVaultProber(deps.Logger, multicaller, cfg.chainID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	extractor, err := morpho_indexer.NewEventExtractor()
 	if err != nil {
-		return nil, fmt.Errorf("creating event extractor: %w", err)
+		return nil, nil, fmt.Errorf("creating event extractor: %w", err)
 	}
 
 	return &backfillActivities{
-		cfg:          cfg,
-		logger:       deps.Logger,
-		pool:         deps.Pool,
-		buildID:      buildReg.BuildID(),
-		s3Reader:     s3Reader,
-		extractor:    extractor,
-		prober:       prober,
-		ethClient:    ethClient,
-		multicaller:  multicaller,
-		archiveDrain: archiveDrain,
-	}, nil
+		cfg:         cfg,
+		logger:      deps.Logger,
+		pool:        deps.Pool,
+		buildID:     buildReg.BuildID(),
+		s3Reader:    s3Reader,
+		extractor:   extractor,
+		prober:      prober,
+		ethClient:   ethClient,
+		multicaller: multicaller,
+		archiveWait: archiveWait,
+	}, archiveDrain, nil
 }
 
 // newS3Reader sizes its connection pool off the scan's worker count, which is
@@ -229,7 +252,7 @@ func dialChain(ctx context.Context, cfg config) (*ethclient.Client, error) {
 	return ethClient, nil
 }
 
-func newVaultProber(logger *slog.Logger, multicaller outbound.Multicaller) (*vaultProber, error) {
+func newVaultProber(logger *slog.Logger, multicaller outbound.Multicaller, chainID int64) (*vaultProber, error) {
 	sharedProber, err := morpho_indexer.NewVaultProber()
 	if err != nil {
 		return nil, fmt.Errorf("creating vault prober: %w", err)
@@ -238,10 +261,19 @@ func newVaultProber(logger *slog.Logger, multicaller outbound.Multicaller) (*vau
 	if err != nil {
 		return nil, fmt.Errorf("loading ERC20 ABI: %w", err)
 	}
+	chainName, err := entity.ChainName(chainID)
+	if err != nil {
+		return nil, fmt.Errorf("resolving the chain name for telemetry: %w", err)
+	}
+	probeTelemetry, err := morpho_indexer.NewTelemetry(chainName)
+	if err != nil {
+		return nil, fmt.Errorf("creating morpho telemetry: %w", err)
+	}
 	return &vaultProber{
 		multicaller:  multicaller,
 		sharedProber: sharedProber,
 		erc20ABI:     erc20ABI,
 		logger:       logger,
+		telemetry:    probeTelemetry,
 	}, nil
 }

@@ -81,7 +81,7 @@ type SeriesRequest = {
   source: Provenance;
 };
 
-export type SeriesQuery = {
+type SeriesQuery = {
   fromTimestamp: string | null;
   toTimestamp: string | null;
   resolution: string | null;

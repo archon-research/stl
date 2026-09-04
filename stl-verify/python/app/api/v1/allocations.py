@@ -9,12 +9,13 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
+from app.adapters.postgres.reference_as_of import ReferenceEffectiveAtProvider
 from app.api._validators import (
     OptionalEthAddressParam,
     OptionalTxHashParam,
     ProxyAddressPathParam,
 )
-from app.api.deps import get_engine, get_reference_positions_service_factory
+from app.api.deps import get_engine, get_reference_as_of, get_reference_positions_service_factory
 from app.api.provenance import (
     get_requested_provenance,
     resolve_or_422,
@@ -29,7 +30,6 @@ from app.domain.entities.allocation import (
 )
 from app.domain.entities.allocation_category import AllocationCategory
 from app.domain.entities.reference_position import ReferencePosition
-from app.domain.exceptions import ReferenceDataUnavailableError
 from app.domain.position_identity import PositionFacts, position_identities
 from app.domain.provenance import Provenance
 from app.domain.serialization import PlainDecimal
@@ -170,6 +170,17 @@ class AllocationResponse(BaseModel):
         ),
         examples=["ethereum"],
     )
+    wallet_address: str | None = Field(
+        default=None,
+        description=(
+            "The ALM proxy holding this position, as upstream reports it. Populated on reference "
+            "rows only — the same (`network`, `receipt_token_address`/`held_token_address`) can "
+            "legitimately recur under a prime's different proxy wallets, and this is what "
+            "distinguishes those rows. `null` on an indexed row, which is already scoped to a "
+            "single queried proxy."
+        ),
+        examples=["0x1234567890abcdef1234567890abcdef12345678"],
+    )
     receipt_token_id: int | None = Field(
         default=None,
         description="Surrogate id of the receipt token. `null` for direct asset holdings.",
@@ -197,8 +208,8 @@ class AllocationResponse(BaseModel):
         description=(
             "Surrogate id of the underlying token. For direct holdings, this is the held asset itself, "
             "unless the holding is valued on the underlying-value basis (allowlisted). `null` for off-chain "
-            "custody holdings (e.g. Anchorage BTC), which have no token-registry row. On a reference row, "
-            "populated when the position resolves to STL's registry, null otherwise."
+            "custody holdings (e.g. Anchorage BTC), which have no token-registry row, and for a reference "
+            "row (`source=reference`) whose position does not resolve to STL's receipt-token registry."
         ),
         examples=[1],
     )
@@ -207,8 +218,8 @@ class AllocationResponse(BaseModel):
         description=(
             "0x-prefixed underlying-token contract address. For direct holdings, this is the held asset itself, "
             "unless the holding is valued on the underlying-value basis (allowlisted). `null` for off-chain "
-            "custody holdings (e.g. Anchorage BTC), which have no on-chain address. On a reference row, "
-            "populated when the position resolves to STL's registry, null otherwise."
+            "custody holdings (e.g. Anchorage BTC), which have no on-chain address, and for a reference row "
+            "(`source=reference`) whose position does not resolve to STL's receipt-token registry."
         ),
         examples=["0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"],
     )
@@ -219,8 +230,11 @@ class AllocationResponse(BaseModel):
     underlying_symbol: str = Field(
         description=(
             "Underlying-token symbol. For direct holdings, same as ``symbol``, "
-            "unless the holding is valued on the underlying-value basis (allowlisted). On a reference row, "
-            "populated when the position resolves to STL's registry, empty otherwise."
+            "unless the holding is valued on the underlying-value basis (allowlisted). Empty on a reference "
+            "row (`source=reference`) whose position does not resolve to STL's receipt-token registry — "
+            "that feed never names an underlying of its own — and also empty on a resolved reference row "
+            "whose registry token has no symbol recorded yet; `underlying_token_id`/`underlying_token_address` "
+            "are the reliable resolution signal, not this field."
         ),
         examples=["USDC"],
     )
@@ -254,6 +268,17 @@ class AllocationResponse(BaseModel):
             "`balance`, and Sky's figure is what a total can fall back to."
         ),
         examples=["1234567.89"],
+    )
+    reference_synced_at: datetime | None = Field(
+        default=None,
+        description=(
+            "When Sky's figures for this row were observed. Populated on any row carrying them — "
+            "a `reference` row, or a `both` row's `reference_amount_usd` — and `null` on an "
+            "indexed-only row. STL reads them from its own record of the feed rather than the feed "
+            "itself, so they are as of the last sync cycle, up to 15 minutes old. Consumers should "
+            "show this rather than implying the figures are current."
+        ),
+        examples=["2026-08-26T09:15:00+00:00"],
     )
     latest_activity_at: str | None = Field(
         default=None,
@@ -362,8 +387,11 @@ class AllocationActivityResponse(BaseModel):
     created_at: str = Field(description="ISO-8601 timestamp the event row was persisted.")
 
 
-async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationService:
-    return AllocationService(AllocationRepository(engine))
+async def _get_service(
+    engine: AsyncEngine = Depends(get_engine),
+    reference_as_of: ReferenceEffectiveAtProvider = Depends(get_reference_as_of),
+) -> AllocationService:
+    return AllocationService(AllocationRepository(engine, reference_as_of))
 
 
 @router.get(
@@ -450,9 +478,10 @@ async def list_protocols(service: AllocationService = Depends(_get_service)):
         "rows' `amount_usd`, so the two halves of `both` are comparable — deliberately not the Star "
         "monitor's risk-capital breakdown, whose `exposure` covers only the priced subset and runs "
         "about a third smaller. These rows carry no `balance` and no activity fields, which "
-        "upstream does not publish. `underlying_token_id`, `underlying_token_address` and "
-        "`underlying_symbol` are populated when the position resolves to STL's registry, null "
-        "otherwise — upstream names no loan token of its own."
+        "upstream does not publish, and a `reference_synced_at` naming the sync cycle they were "
+        "observed at rather than implying they are current. `underlying_*` are populated when the "
+        "position resolves to STL's receipt-token registry (the feed itself names no underlying) "
+        "and `null`/empty otherwise."
     ),
 )
 async def list_allocations(
@@ -575,20 +604,21 @@ async def _merged_allocations(
     single proxy's rows matches whatever that one chain happens to hold — for
     spark, 8 of 12 against its mainnet proxy and 0 against its Base one.
 
-    A reference half that cannot be read leaves the indexed rows as they are.
+    A prime with no reference data at all leaves the indexed rows as they are.
     Every row states its own provenance, so an answer with nothing from Sky in
-    it says so without an envelope to carry the notice.
+    it says so without an envelope to carry the notice. Every other outcome is
+    an error, and surfaces as one.
     """
     indexed = await _prime_wide_indexed_allocations(prime_address, service)
 
     try:
         reference = await _reference_allocations(prime_address, reference_service)
     except HTTPException as exc:
-        if exc.status_code not in (404, 502):
+        if exc.status_code != 404:
             raise
-        logger.warning(
-            "Serving indexed allocations alone; the reference half is unavailable",
-            extra={"prime_address": str(prime_address), "status_code": exc.status_code},
+        logger.info(
+            "Serving indexed allocations alone; no reference cycle has reported on this prime",
+            extra={"prime_address": str(prime_address)},
         )
         return indexed
 
@@ -601,15 +631,24 @@ async def _merged_allocations(
     merged: list[AllocationResponse] = []
     matched: set[int] = set()
     for row in reference:
+        # `wallet_address` narrows a reference row's identity but not
+        # `PositionFacts` (indexed rows carry no wallet to narrow against), so
+        # grove's two proxy rows for one token answer to the same key. Skipping
+        # an already-matched counterpart keeps the first wallet bound to it and
+        # falls the rest through to a plain reference row, instead of copying
+        # the same indexed `amount_usd` into the merged list twice.
         counterpart = next(
-            (by_identity[key] for key in position_identities(_position_facts(row)) if key in by_identity),
+            (
+                by_identity[key]
+                for key in position_identities(_position_facts(row))
+                if key in by_identity and id(by_identity[key]) not in matched
+            ),
             None,
         )
-        if counterpart is not None:
-            matched.add(id(counterpart))
         if counterpart is None:
             merged.append(row.model_copy(update={"source": Provenance.REFERENCE}))
             continue
+        matched.add(id(counterpart))
         # STL's own figures lead where both report a position: they are computed
         # from the chain rather than reported. The two disagree by ~1% on
         # exposure, which a consumer needs told rather than averaged away.
@@ -619,7 +658,13 @@ async def _merged_allocations(
         # a real balance and a null `amount_usd` — six of spark's rows, $423M —
         # and discarding Sky's figure left a consumer nothing to fall back to.
         merged.append(
-            counterpart.model_copy(update={"source": Provenance.BOTH, "reference_amount_usd": row.amount_usd})
+            counterpart.model_copy(
+                update={
+                    "source": Provenance.BOTH,
+                    "reference_amount_usd": row.amount_usd,
+                    "reference_synced_at": row.reference_synced_at,
+                }
+            )
         )
 
     merged.extend(row for row in indexed if id(row) not in matched)
@@ -657,7 +702,7 @@ async def _prime_wide_indexed_allocations(
 async def _reference_allocations(
     prime_address: EthAddress, reference_service: ReferencePositionsService
 ) -> list[AllocationResponse]:
-    """List the positions upstream reports this prime holds.
+    """List the positions upstream reported this prime holds.
 
     Sourced from Sky's balance-sheet feed rather than the Star monitor's
     risk-capital breakdown. The monitor answers a different question — the
@@ -666,30 +711,26 @@ async def _reference_allocations(
     figures 1.5x apart in one column. The balance sheet is the same measurement
     STL's own rows carry, and reports every position rather than the priced ones.
     """
-    try:
-        positions = await reference_service.get(prime_address)
+    snapshot = await reference_service.get(prime_address)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No reference allocations have been observed for this prime",
+        )
 
-        if positions is None:
-            # Not a ReferenceDataUnavailableError, so this propagates past the
-            # handler below rather than being rewritten to a 502.
-            raise HTTPException(
-                status_code=404,
-                detail="The upstream Star monitor does not track this prime, so it reports no allocations",
-            )
-
-        category_service = AllocationCategoryService()
-        return [
-            _reference_allocation_row(row, category_service).model_copy(update={"source": Provenance.REFERENCE})
-            for row in positions
-        ]
-    except ReferenceDataUnavailableError as exc:
-        raise HTTPException(status_code=502, detail=f"Reference allocations upstream unavailable: {exc}") from exc
+    category_service = AllocationCategoryService()
+    return [
+        _reference_allocation_row(row, snapshot.synced_at, category_service).model_copy(
+            update={"source": Provenance.REFERENCE}
+        )
+        for row in snapshot.positions
+    ]
 
 
 def _reference_allocation_row(
-    row: ReferencePosition, category_service: AllocationCategoryService
+    row: ReferencePosition, synced_at: datetime, category_service: AllocationCategoryService
 ) -> AllocationResponse:
-    """Project an upstream position onto the allocation model.
+    """Project an observed upstream position onto the allocation model.
 
     A network STL has no chain id for yields a null ``chain_id``, with
     ``network`` naming it: upstream adds chains before STL indexes them, and 0
@@ -698,12 +739,11 @@ def _reference_allocation_row(
     return AllocationResponse(
         chain_id=row.chain_id,
         network=row.network,
+        wallet_address=row.wallet_address,
         receipt_token_id=row.receipt_token_id,
         receipt_token_address=row.token_address if as_address(row.token_address) else None,
-        # Both or neither, per the model's invariant — true here because the
-        # service sets them from the same registry lookup as `receipt_token_id`.
-        # This feed names no loan token of its own; populated when the position
-        # resolves to STL's registry, null otherwise.
+        # Unlike the Star monitor's breakdown, this feed names no loan token
+        # itself; see ReferencePosition for where these come from instead.
         underlying_token_id=row.underlying_token_id,
         underlying_token_address=row.underlying_token_address,
         symbol=row.symbol,
@@ -713,6 +753,7 @@ def _reference_allocation_row(
         # `assets`, the whole holding — the same measurement STL's own rows
         # carry, and the one the prime's `assets` total decomposes into.
         amount_usd=row.assets_usd,
+        reference_synced_at=synced_at,
         latest_activity_at=None,
         latest_activity_action=None,
         latest_activity_amount=None,

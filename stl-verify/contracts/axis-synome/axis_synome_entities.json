@@ -336,6 +336,26 @@
                 "protocol": "agora",
                 "allocation_type": "asset",
                 "token_type": "erc20"
+              },
+              {
+                "contract_address": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+                "wallet_address": "0x29626c2d8ca49a51e4deceec5499e52983c42bd5",
+                "asset_address": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+                "star": "grove",
+                "chain": "robinhood",
+                "protocol": "",
+                "allocation_type": "asset",
+                "token_type": "erc20"
+              },
+              {
+                "contract_address": "0xbeeff039907422219fb367e525954ddc092854d9",
+                "wallet_address": "0x29626c2d8ca49a51e4deceec5499e52983c42bd5",
+                "asset_address": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+                "star": "grove",
+                "chain": "robinhood",
+                "protocol": "grove-x-steakhouse-usdg-morpho-vault",
+                "allocation_type": "allocation",
+                "token_type": "erc4626"
               }
             ],
             "spark": [
@@ -553,6 +573,16 @@
                 "contract_address": "0x56a76b428244a50513ec81e225a293d128fd581d",
                 "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
                 "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                "star": "spark",
+                "chain": "mainnet",
+                "protocol": "morpho",
+                "allocation_type": "allocation",
+                "token_type": "erc4626"
+              },
+              {
+                "contract_address": "0xb0c424116172b55cbb6dd3136f5989f7959e5b91",
+                "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                "asset_address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
                 "star": "spark",
                 "chain": "mainnet",
                 "protocol": "morpho",
@@ -1072,6 +1102,14 @@
                   "star": "grove",
                   "chain": "monad",
                   "address": "0x94b398acb2fce988871218221ea6a4a2b26cccbc",
+                  "role": "alm"
+                }
+              ],
+              "robinhood": [
+                {
+                  "star": "grove",
+                  "chain": "robinhood",
+                  "address": "0x29626c2d8ca49a51e4deceec5499e52983c42bd5",
                   "role": "alm"
                 }
               ]

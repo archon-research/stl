@@ -129,6 +129,234 @@ does not fire this alert — Temporal retries that run on the new worker.
 `increase(cronjob_runs_total{status="error", service_name="<cronjob>"}[15m]) == 0`
 and a fresh `status="success"` run.
 
+### Special case: `watcher-data-validator` "Orphan-only heights"
+
+The validator fails the run — and so this alert — when its **Orphan-only
+heights** check reports `N height(s) have only an orphaned block: <numbers>`.
+The count is exact; the message names the first 100 heights and appends
+`(+K more)`, with the full list in the check's `orphan_only_heights` detail.
+
+It means block N is stored only on a losing fork: the watcher saved fork A, the
+canonical broadcast for N was dropped as `stale_fork` (a load-balanced RPC node
+had not converged when the watcher verified it), and the reorg that block N+1
+committed orphaned fork A without ever fetching the winner. Nothing at that
+height is canonical — S3 holds only the orphaned fork and every indexer has its
+events at `block_version` 0. `FindGaps` scans only above the backfill
+watermark, so it re-fetches the height only while the watermark still sits
+below it. This check scans the full block range, where **Chain Integrity**
+only looks for missing heights up to the watermark — and a fresh occurrence
+sits *above* the watermark, because the reorg that caused it rewound the
+watermark to the common ancestor below, so this check is the only one that
+names it. A hole older than that rewind sits below the watermark and fails
+both.
+
+`block_states` carries a 30-day retention policy
+(`add_retention_policy('block_states', INTERVAL '30 days')`), so the check only
+ever sees the retained window. **This alert clearing without a repair means the
+hole aged out of the check, not that it healed** — the downstream
+`block_version` 0 rows and the S3 objects are untouched by retention. The 14
+staging mainnet heights named in ARCT-379 (25087888 … 25589752) are already
+outside it.
+
+Confirm:
+
+1. `cast block <N> --field hash --rpc-url <chain rpc>` against the stored row —
+   `SELECT hash, version, is_orphaned FROM block_states WHERE chain_id = <id>
+   AND number = <N>;`. One row, orphaned, hash unknown to the chain, is the
+   signature.
+2. The watcher's Loki line `dropping stale-fork reorg broadcast … block=<N>`
+   around the block's timestamp is the cause. Use it, not
+   `chain_reorgs_dropped_total{reorg_dropped_reason="stale_fork"}`: that counter
+   carries no block label by design (block numbers are unbounded cardinality),
+   so it can only tell you drops happened, never at which height.
+
+Repair:
+
+- **New occurrences heal themselves.** A reorg commit rewinds
+  `backfill_watermark` to the common ancestor, so the next gap pass re-fetches
+  N and saves it as version 1 (ARCT-379). If the same height is still named two
+  poll intervals later, the RPC is still serving the losing fork — re-check
+  `cast block <N>`.
+- **A hole no rewind covered — one predating ARCT-379, or one below every
+  reorg since — is repaired by rewinding the watermark by hand,** as long as it
+  is still inside the retained window: `UPDATE backfill_watermark SET watermark
+  = <N-1>, rewind_count = rewind_count + 1 WHERE chain_id = <id>;`. Bump the
+  rewind count too: a pass already scanning compares against the pair, and
+  would otherwise advance straight back over the height you just re-opened. The
+  next gap pass saves N as version 1 and publishes it, so the indexers append
+  the correction. The orphaned version-0 rows stay put as history.
+- **A hole outside the retained window has no safe executable repair yet.**
+  `raw-block-bulk-downloader --bucket <raw bucket> --rpc-url <chain rpc>
+  --start-block <N> --end-block <N>` looks like the repair and is not one.
+  Every key it builds and every existence check it makes is pinned to a literal
+  version `1`, and it never reads what the archive already holds. The losing
+  fork sits at version **0**, not 1 — `assign_block_version()` is
+  `COALESCE(MAX(version), -1) + 1`, so the first row at a height is version 0,
+  and the raw-data-backup-worker builds the key from `event.Version`. So at an
+  orphan-only height the tool finds no `<N>_1_*`, refetches the height **by
+  number**, and writes the canonical block, receipts and traces at `<N>_1_*`.
+  That is the right answer for the single-reorg shape by coincidence, not by
+  design: at a height that already holds a `_1_` it skips (uploads go through
+  `WriteFileIfNotExists`, so it never overwrites), and where the canonical
+  block belongs at version 2 it cannot express that. Pointed at anything but a
+  hole it is actively harmful — every healthy height is version 0, so it
+  refetches and writes a duplicate `_1_` copy of block, receipts and traces for
+  every block in the range, which is how deep history came to be `_1_`-only
+  (`cmd/backfillers/morpho-vault-backfill/discovery.go`). There is no
+  `--dry-run` flag either; the tool exits 2 on one. Doing this deliberately —
+  next free version above the losing fork, dry run first — needs **#849**,
+  which adds `--dry-run`, `--allow-unfinalized` and next-free-version writing.
+  Even then it fixes S3 only: the indexers' rows stay at `block_version` 0
+  until the republisher (**ARCT-383**, #850) re-emits the block event at the new
+  version.
+
+Before the prod deploy, run the pre-flight queries below against prod's
+retained window — a hole found there is repairable while it is still inside
+retention.
+
+### Special case: `watcher-data-validator` "Chain Integrity" missing blocks
+
+`chain integrity violation: canonical block(s) A to B missing between blocks X
+and Y` (or `… missing after block X`, for a hole at the top of the checked
+range) means the canonical chain has a hole at A..B that the backfill watermark
+has already passed — so the gap filler is not working on it and
+`VectorWatcherBackfillWatermarkLagHigh` will not fire for it. Only the lowest
+hole is named, and that is the only one you need: one rewind to A re-opens
+every hole above it too (`FindGaps` returns them all, the pass fills each, and
+the advance parks below the first one it could not fill). Re-running the check
+before the filler has caught up tells you nothing — it can never name a hole
+above the watermark.
+
+Below the watermark the check is strict: every height present and linked. Above
+it, only the links are checked (`Parent-hash chain valid through backfill
+watermark N; parent links valid through block M`), because a missing height up
+there is the filler's live work — covered by `backfill_watermark_lag` and
+`VectorWatcherBackfillWatermarkLagHigh` in
+[vector-watcher.md](vector-watcher.md) — while a broken link or a duplicated
+height never repairs itself. A named *missing* range is therefore always
+**below** the watermark; a named link break can be either side of it.
+
+Two causes, told apart by `SELECT number, hash, is_orphaned FROM block_states
+WHERE chain_id = <id> AND number BETWEEN A AND B;`:
+
+- **Rows exist but are all orphaned** → the orphan-only case above; repair it
+  that way.
+- **No rows at all** → the watermark passed a height that was never filled.
+  Three ways in: a pre-#844 unconditional watermark write that overwrote a
+  reorg's rewind; a watermark written by hand past an unfilled height; and a
+  stale-chain recovery whose canonical refetch failed, which before #844
+  orphaned the row without rewinding. `FindGaps` never scans below the
+  watermark, so rewind it — `UPDATE backfill_watermark SET watermark = A - 1,
+  rewind_count = rewind_count + 1 WHERE chain_id = <id>;`, the rewind count
+  bump for the same reason as above. Then trigger a validator run by hand
+  (Temporal UI → Schedules → `<SERVICE_NAME>` → Trigger, or `temporal schedule
+  trigger --schedule-id <SERVICE_NAME>`) once the watermark has passed B; the
+  repair is done when `backfill_watermark_lag` has drained past B, not when the
+  check passes — right after the rewind it passes whether or not A..B was
+  refetched, because the strict half stops at the watermark you just lowered.
+
+### Pre-flight before deploying the ARCT-379 validator checks
+
+Both special cases above rest on checks #844 adds or widens —
+`FindOrphanOnlyHeights`, and the missing-height, duplicate-canonical and
+broken-parent-link violations `VerifyChainIntegrity` now reports. They judge
+state that is already in the database, so a hole that has been sitting there
+since long before the rollout fails the very first hourly run:
+`VectorCronjobRunFailing` immediately, `VectorCronjobAllRunsFailing`
+(critical, pages) about 1h15m later. The repair is the one above — one
+`UPDATE backfill_watermark SET watermark = <below the lowest hole>,
+rewind_count = rewind_count + 1 WHERE chain_id = <id>;` per chain, which
+re-opens every hole above it in the same rewind — but it is a repair you want
+made before the pager goes off, not after.
+
+`watcher-data-validator` runs on **three** chains in both staging and prod —
+chain ids 1, 130 and 42161. All six per-chain deployments are listed in
+`k8s/overlays/{staging,prod}/kustomization.yaml`, but `optimism-`, `base-` and
+`avalanche-watcher-data-validator` are `replicas: 0` in
+`k8s/base/<chain>-watcher-data-validator/deployment.yaml` with no overlay
+patch, because the Etherscan cross-check is not covered for those chains yet —
+so run the three queries once per **enabled** chain. All three are read-only,
+and `block_states`' 30-day retention bounds them: only the retained window is
+checkable, and only a hole inside it is repairable. Expected outcome on every
+chain: **zero rows from queries 1 and 2, and `tail = want` from query 3 — or
+repair first.**
+
+**1. Orphan-only heights.** This is the query `FindOrphanOnlyHeights`
+(`internal/adapters/outbound/postgres/blockstate_repository.go`) runs, minus
+its range bound. Sub-second; served by `idx_block_states_orphaned`.
+
+```sql
+SELECT DISTINCT o.number
+FROM block_states o
+WHERE o.chain_id = <id> AND o.is_orphaned
+  AND NOT EXISTS (SELECT 1 FROM block_states c
+                  WHERE c.chain_id = o.chain_id AND c.number = o.number AND NOT c.is_orphaned)
+ORDER BY o.number;
+```
+
+**2. Chain integrity** — missing heights below the watermark, plus duplicate
+canonical rows and broken parent links over the **whole** retained window. The
+validator checks two bands: `VerifyChainIntegrity` runs the strict form up to
+`min(max canonical, watermark)`, and `VerifyParentLinks` runs the
+links-and-duplicates form from there to the top canonical row, so a pre-flight
+bounded at the watermark misses every violation above it. One pass does both —
+only the missing-height arm carries the watermark bound. Measured on staging at
+14 s on the largest chain (42161, ~10.8 M heights).
+
+```sql
+WITH ordered_blocks AS (
+  SELECT number, hash, parent_hash,
+         LAG(hash)   OVER (ORDER BY number, version DESC) AS prev_hash,
+         LAG(number) OVER (ORDER BY number, version DESC) AS prev_number
+  FROM block_states
+  WHERE chain_id = <id> AND NOT is_orphaned)
+SELECT prev_number, number,
+       CASE WHEN prev_number = number     THEN 'duplicate canonical rows'
+            WHEN prev_number < number - 1 THEN 'missing ' || (prev_number + 1) || '..' || (number - 1)
+            ELSE 'broken parent link' END AS violation
+FROM ordered_blocks
+WHERE prev_number IS NOT NULL
+  AND (prev_number = number
+       OR (prev_number < number - 1 AND number <= <watermark>)
+       OR (prev_number = number - 1 AND parent_hash != prev_hash))
+ORDER BY number LIMIT 1;
+```
+
+**3. The tail.** The pair scan has no successor to flag a hole at the *top* of
+the strict band against, so check that separately — but check the same thing
+the validator checks. The validator fails when there is no canonical row at the
+watermark height (`verifyRangeReachesEnd`), and it fails when the watermark
+sits above the last canonical row altogether — the state a hand-written
+watermark or a pre-#844 overwritten rewind leaves. Both collapse into one
+comparison:
+
+```sql
+SELECT w.watermark,
+       (SELECT max(number) FROM block_states
+         WHERE chain_id = <id> AND NOT is_orphaned AND number <= w.watermark) AS tail
+FROM backfill_watermark w WHERE w.chain_id = <id>;
+```
+
+`tail` must equal `w.watermark`. A lower `tail` is either a watermark parked on
+an unfilled height or a watermark past the head, and the validator fails the
+run on both. A chain with no
+`backfill_watermark` row, or `watermark = 0`, is vacuous here — the validator
+verifies the whole range and the tail check cannot fail.
+
+Staging, as of 2026-09-01, on the three enabled chains: zero orphan-only
+heights, zero integrity violations over the whole retained window, and
+`tail = want` on each — nothing to repair there. Run the same three against
+prod before the prod deploy.
+
+If the pre-flight does turn something up, or you would rather not race the
+first hourly run, propose in the PR — and get a human to approve it, per
+[alerts/AGENTS.md](../../alerts/AGENTS.md) — that `VectorCronjobRunFailing` and
+`VectorCronjobAllRunsFailing` be silenced for the deploy window on
+`service_name=~"(unichain-|arbitrum-)?watcher-data-validator"`. `service_name`
+is the pod's own `app` label, injected as `SERVICE_NAME` through the downward
+API, so a matcher on the literal `watcher-data-validator` silences mainnet
+only. Keep the rewind tracked, and silence the alert while that is open.
+
 ---
 
 ## VectorCronjobAllRunsFailing
@@ -145,7 +373,11 @@ of `VectorCronjobRunFailing`.
 ### First checks
 
 1. Everything under `VectorCronjobRunFailing` — but the failure is now
-   persistent, so look for a hard, non-transient cause.
+   persistent, so look for a hard, non-transient cause. For
+   `watcher-data-validator` that includes an orphan-only height the gap filler
+   cannot heal: it fails every run, so it escalates here about 1h15m after the
+   first failure — see
+   [Special case: `watcher-data-validator` "Orphan-only heights"](#special-case-watcher-data-validator-orphan-only-heights).
 2. **Recent deploys** — `kubectl -n vector rollout history deploy/<deployment>`;
    a bad release is the most common persistent cause. Roll back if so.
 3. **Upstream contract / schema change** — a changed external API response or
@@ -228,8 +460,9 @@ Currently matches: `offchain-price-backfill`, `reference-capital-backfill`,
 - **`ImagePullBackOff`** — much the most likely. `cmd/backfillers/` is not
   auto-discovered, so the release needs its explicit
   `_docker-release-offchain-price-backfill-internal` line in `docker-release-all`
-  **and** its entry in `deploy.yaml`'s `CRONJOBS` promotion list. Missing either
-  ships a tag nothing built.
+  **and** its `cronjob offchain-price-backfill ...` line in `k8s/image-roster.txt`
+  (which drives promotion and the overlay `images:` entry, ORB-362). Missing
+  either leaves the pod without a pullable image.
 - **Missing config/secret** — the pod fails at startup wiring; the log names the
   variable (e.g. `required env var COINGECKO_API_KEY is not set`).
 
@@ -288,7 +521,8 @@ scheduled cronjob. Two things differ when it pages:
 `ImagePullBackOff` here most often means the image was never built — the binary
 lives under `cmd/backfillers/`, which is **not** auto-discovered, so it needs its
 explicit `_docker-release-offchain-price-backfill-internal` line in
-`docker-release-all` and its entry in `deploy.yaml`'s `CRONJOBS` promotion list.
+`docker-release-all` and its `cronjob` line in `k8s/image-roster.txt` (promotion
+and the overlay `images:` entry are generated from it, ORB-362).
 
 ---
 
@@ -520,6 +754,26 @@ version to its trigger.
 - `partition ... missing receipt block(s) ... (S3 gap)` → the archive is
   genuinely incomplete for that partition. Replay hard-stops rather than replay
   a thinned partition; repair S3 and re-run the same range.
+- `block <N> (<partition>/<N>_<v>_receipts.json.gz): archived hash 0x… is an
+  orphaned fork, canonical hash at that height is 0x…: fetching header for block
+  0x…: not found` → the node does not know the archived hash but does know a
+  different block at that height, so the block's highest-version receipts object
+  is an orphaned fork: the watcher published it and never re-published the
+  canonical block (a missed reorg), and the live indexers ingested it too.
+  Structural — the run fails on the first attempt instead of burning the 2h retry
+  envelope (87 attempts, 2026-08-29 staging, block 25395651). The error names the
+  canonical hash itself, so `cast block <N> --field hash` is only a cross-check.
+  Re-archive the canonical receipts at a higher version, re-run from that block,
+  and audit the live tables at that block: the orphaned rows are the ones at the
+  orphaned object's version — the `<v>` in the key the error names, which is
+  `block_version` 0 only when that object is version 0 — and the append-only
+  correction is a re-publish of the canonical block, not an edit.
+- The same `fetching header for block 0x…: not found` **without** a canonical
+  hash (it ends `reading the canonical header at that height: …`, or `yet it is
+  the canonical hash at that height`) is left retryable on purpose: a
+  load-balanced RPC replica a few blocks behind head also answers null for a hash
+  it has not reached yet, and nothing is proven until a by-number read returns a
+  different hash. If it keeps failing, the node — not S3 — is what to look at.
 - An adapter-classification failure — same cause and same recovery as the
   bootstrap's, below; the two share the VaultV2 replay path.
 
@@ -531,6 +785,8 @@ Both history jobs emit the same `morpho_v2_*` metrics as the live indexer (the
 replay path is metered since VEC-218), so the V2 volume alerts in
 `vector-indexers.yaml` can fire during a deliberate replay or bootstrap run —
 expected, not an incident; the run is operator-initiated and visible here.
+`VectorMorphoV2ForceDeallocateSurge` is the exception: it is scoped to the live
+indexer's `service_name`, because replayed history is not a liquidity run.
 
 A third **on-demand** Temporal worker (`temporal.RunWorker`). Everything said
 about `offchain-price-backfill` above applies — nothing is missed while it is
@@ -706,6 +962,18 @@ records nothing is a permanent hole — it cannot be backfilled afterwards.
 observed value as if it were current, rather than going null. The stall is
 invisible from both the error path and the API.
 
+This alert also fires if `reference_capital_sync_snapshots_written_total`
+stops being emitted at all (a collector drop or a metric rename), not only
+when it is present and reads zero — check that the series still exists at all
+before chasing an upstream cause.
+
+**Serving impact.** This table is also where the API reads *coverage* from, and
+where `/v1/primes/{id}/risk-capital` reads its reference totals. A stall does
+not lose coverage — the existing rows still answer it — so nothing starts
+404ing; instead the reference figures freeze while `reference_synced_at` falls
+further behind, and `/v1/provenance/available` keeps offering `reference` for
+every prime that has ever been covered.
+
 **Triage.**
 
 1. Confirm the worker is cycling rather than wedged:
@@ -762,6 +1030,192 @@ absent.
 
 Do not "fix" this by relaxing the syncer to accept partial coverage silently.
 The alert exists precisely because a partially-covered cycle looks healthy.
+
+---
+
+## VectorReferenceCapitalIndexerAllocationsZero
+
+**What it means.** Cycles are succeeding but `prime_capital_stack_allocation`
+received no rows for an hour. The per-allocation breakdown behind the
+prime-level totals has stopped advancing, and like the prime-level series it
+cannot be backfilled afterwards — the monitor publishes no history.
+
+**Why it is not caught by the generic rules.** The run returns no error, so
+`VectorCronjobRunFailing` stays quiet — and the service deliberately fails a
+cycle whose covered primes report exposure with an empty breakdown, so a
+successful cycle writing zero rows means every covered prime reported zero
+exposure. That is either a market state worth confirming or an upstream fault
+wearing its shape.
+
+**Triage.**
+
+1. Confirm the worker is cycling:
+   `kubectl -n vector logs deploy/reference-capital-indexer --tail=100`.
+2. Ask the breakdown route directly for a covered prime:
+   `curl -s "$SKY_RISK_CAPITAL_URL/primes/spark/allocations/?limit=500" | jq '.data.results | length'`.
+   Rows here with zero rows landing means the payload changed shape — the
+   client should have errored, so check its logs for parse failures.
+3. Cross-check the prime-level series: if
+   `VectorReferenceCapitalIndexerWritesZero` is also firing, treat that as the
+   primary signal — the whole feed stalled, not just the breakdown.
+
+**Serving impact.** `/v1/primes/{id}/risk-capital?source=reference` reads its
+`per_allocation` breakdown from this table, pinned to the same cycle its totals
+came from so the two cannot be mixed. A totals row with no matching breakdown
+and non-zero exposure — every cycle recorded before 2026-08-26, before this
+table existed — is skipped rather than served: the reader falls back to that
+prime's last complete cycle, or to a **404** (`both` degrading to `indexed`) if
+it has none. It cannot 500 for this reason — the three reference tables land in
+one transaction, so a cycle that wrote totals always wrote its breakdown too.
+
+**Resolution.** Same posture as `WritesZero`: upstream coverage is upstream's.
+Confirm what the monitor reports and reconcile; the gap in the series stays.
+
+---
+
+## VectorReferenceCapitalIndexerPositionsZero
+
+**What it means.** Cycles are succeeding but
+`reference_capital_sync_positions_written_total` recorded no increase for an
+hour. This points at the counter, not the pipeline: see below for why.
+
+**Why it is not caught by the generic rules, and why it is not a data gap.**
+The positions client fails the whole cycle on an empty result for a covered
+prime — the feed answers unknown primes with `200` and an empty list, so
+emptiness is deliberately never persisted — and `Run` fails before persisting
+anything if the cycle's snapshot set is empty. So a cycle that reports success
+always covers at least one star and always wrote at least one position row.
+Zero on this counter while cycles succeed can therefore only mean the counter
+itself broke (collector drop, metric rename, a missed recording call), never
+that positions stopped landing.
+
+**A third failure mode this alert cannot catch.** A prime the Star monitor
+covers but this positions feed does not carry makes every cycle fail loudly
+instead — `VectorCronjobRunFailing` fires, not this alert. The escape hatch is
+a deliberate team decision to gate positions on the positions feed's own
+coverage — a code change, never a silent skip.
+
+**Triage.**
+
+1. Confirm the worker is cycling:
+   `kubectl -n vector logs deploy/reference-capital-indexer --tail=100`.
+2. Compare against the table:
+   `SELECT max(synced_at) FROM prime_reference_position;` — if rows are
+   landing at the expected cadence, this is telemetry-only: fix the counter
+   (check the metric name/labels and that `RecordPositionsWritten` is on the
+   success path), not the pipeline.
+3. If rows are genuinely not landing despite cycles succeeding, that
+   contradicts the invariant above — treat it as a code regression in the
+   positions client's empty-result guard, not a routine data gap.
+
+**Serving impact.** `/v1/primes/{id}/allocations?source=reference` reads this
+table, taking the newest cycle that has rows, so a stall serves a frozen balance
+sheet rather than an empty list — `reference_synced_at` on each row is what says
+how old it is. A prime that has *never* had rows here answers `404` on that
+endpoint, deliberately: an empty list would claim the prime holds nothing.
+`/v1/provenance/available` may still offer `reference` for it, since coverage
+there comes from `prime_capital_stack`.
+
+**Resolution.** A telemetry fix ships as a normal PR; no upstream reconciliation
+or accepted gap applies here, unlike `WritesZero`/`AllocationsZero`.
+
+---
+
+## VectorReferenceCapitalIndexerBalanceSheetPrimeUncovered
+
+**What it means.** A prime STL tracks was absent from every day the
+balance-sheet feed's fetch window held for an hour. That prime's balance
+sheet is frozen while every other tracked prime keeps advancing, and because
+the read path gap-fills with `locf`, its `/debt` and `/total-capital` series
+keep serving the last observed value as if it were current.
+
+**Why it is not caught by the generic rules.** The cycle succeeds and still
+inserts rows for every other covered prime, so neither the error rules nor
+`VectorReferenceCapitalIndexerBalanceSheetStalled` fire — this is the single
+tracked-prime version of that gap, the balance-sheet analogue of
+`VectorReferenceCapitalIndexerPrimeUncovered`.
+
+**Triage.**
+
+1. `{{ $labels.star }}` names the prime. Ask the feed directly for its recent
+   days:
+   `curl -s "$SKY_DATA_URL/primes/historic/?days_ago=3" | jq -r '.data[].star' | sort -u`.
+   If the star is absent from that list, the feed dropped it; a
+   similar-but-different name present instead means the vocabulary drifted.
+2. Compare against the table for when the prime last landed a row:
+   `SELECT max(observed_at) FROM prime_reference_balance_sheet WHERE prime_id =
+   (SELECT id FROM prime WHERE name = '<star>');`
+3. Compare against what STL tracks — the same axis-synome contract the
+   snapshot-level `PrimeUncovered` triage uses. Note the `prime` table is
+   **not** the tracked set.
+
+**Resolution.**
+
+- *Feed dropped the prime.* Nothing to fix in the service; the balance sheet
+  is correctly frozen. Decide with the team whether the prime should still be
+  tracked, and silence the alert while that is open.
+- *Name drifted.* Fix it in the axis-synome contract, not by mapping the name
+  in the indexer — a local alias would hide the next drift.
+
+Do not "fix" this by relaxing the indexer to accept partial balance-sheet
+coverage silently. The alert exists precisely because a partially-covered
+cycle looks healthy.
+
+---
+
+## VectorReferenceCapitalIndexerBalanceSheetStalled
+
+**What it means.** Cycles are succeeding but `prime_reference_balance_sheet`
+has had zero newly-inserted rows for 36h. The daily balance-sheet write path
+has stopped advancing for every tracked prime at once, and via `locf` every
+prime's `/debt` and `/total-capital` series is now frozen on its last value.
+
+**Why it is not caught by the generic rules, and why the window is 36h.** The
+run returns no error, so `VectorCronjobRunFailing` stays quiet. Unlike
+`WritesZero`/`AllocationsZero`/`PositionsZero`, which use a 1h window, this
+feed publishes one day per prime per UTC day and the client deliberately drops
+the current in-progress day — so on most cycles the insert count is
+legitimately zero, and a 1h window would false-positive on every run that
+happens to land between upstream publish times. `[36h]` on the `increase()`,
+with a matching `for: 2h`, gives the daily cadence room to land at least once
+before this fires. The underlying counter only counts a day's first-ever
+insert (`processing_version=0`), not a build's correction to an
+already-stored day, so a deploy replaying the lookback cannot silence it.
+
+**Triage.**
+
+1. Confirm the worker is cycling:
+   `kubectl -n vector logs deploy/reference-capital-indexer --tail=100`. Each
+   cycle logs `balance sheet advanced inserted=<n> new_days=<n> fetched=<n>`.
+   `inserted` includes build corrections to already-stored days and goes
+   non-zero on almost every cycle after a deploy — it is not the alert's
+   signal. `new_days` is: it only goes non-zero roughly once per day per
+   prime, when that prime's newly-completed day lands for the first time. If
+   you never see a non-zero `new_days` across a full day, that corroborates
+   the alert.
+2. Ask the feed directly whether it has published recent days at all:
+   `curl -s "$SKY_DATA_URL/primes/historic/?days_ago=3" | jq '.data | group_by(.star) | map({star: .[0].star, dates: map(.date)})'`.
+3. Compare against the table:
+   `SELECT prime_id, max(observed_at) FROM prime_reference_balance_sheet GROUP
+   BY prime_id;` — if every prime's `max(observed_at)` is stuck more than a day
+   or two in the past while the feed above shows fresh dates, the client is
+   failing to parse or persist rather than the feed being empty; check the pod
+   logs for parse failures.
+4. If only one prime is affected rather than the whole feed, that is
+   `VectorReferenceCapitalIndexerBalanceSheetPrimeUncovered` instead — treat
+   that as the primary signal.
+
+**Resolution.** If the feed itself has gone stale (step 2 shows no dates newer
+than the last insert), this is upstream — confirm with the team and wait. If
+the feed has fresh data but the client is not persisting it, this is a service
+bug: fix the parse/insert path, not the alert's window. The gap in the series
+stays regardless — say so rather than backfilling from a different feed, which
+would splice a different measurement.
+
+**First-deploy note.** The counter series starts younger than the 36h window
+on a fresh rollout, so this can fire once before the first day lands even on a
+healthy worker. Check the deployment timestamp before treating a very-recent
+first firing as a real stall.
 
 ---
 

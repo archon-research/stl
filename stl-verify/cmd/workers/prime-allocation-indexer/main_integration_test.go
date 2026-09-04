@@ -72,7 +72,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 		"-queue", "http://localhost/test-queue",
 		"-redis", "localhost:6379",
 		"-db", "postgres://invalid:invalid@localhost:1/nonexistent?connect_timeout=1",
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error for bad connection config")
 	}
@@ -124,15 +124,10 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 			"-queue", "http://localhost/test-queue",
 			"-db", dbURL,
 			"-redis", sharedRedisAddr,
-		})
+		}, nil)
 	}()
 
-	// Wait for the service to start (SQS ReceiveMessage call indicates it's polling)
-	select {
-	case <-sqsState.FirstCallReceived:
-	case <-time.After(30 * time.Second):
-		t.Fatal("timed out waiting for service to start")
-	}
+	testutil.WaitForFirstPoll(t, errCh, sqsState.FirstCallReceived)
 
 	// Service is running and polling SQS. Trigger graceful shutdown.
 	cancel()
@@ -229,14 +224,10 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 			"-queue", "http://localhost/test-queue",
 			"-db", dbURL,
 			"-redis", sharedRedisAddr,
-		})
+		}, nil)
 	}()
 
-	select {
-	case <-sqsState.FirstCallReceived:
-	case <-time.After(30 * time.Second):
-		t.Fatal("timed out waiting for worker to start polling SQS")
-	}
+	testutil.WaitForFirstPoll(t, errCh, sqsState.FirstCallReceived)
 
 	// Wait until the transfer is fully processed (allocation_position row written)
 	// so the run loop is idle before we shut down, avoiding a context-cancelled

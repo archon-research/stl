@@ -26,6 +26,7 @@
 ./internal/pkg/retry
 ./internal/services/transform_worker
 ./internal/pkg/rpchttp
+./internal/pkg/skyenvelope
 ./internal/adapters/outbound/sns
 ./internal/common/sqsutil
 ./internal/pkg/blockchain

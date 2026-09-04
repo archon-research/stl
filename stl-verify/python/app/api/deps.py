@@ -5,9 +5,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.adapters.postgres.prime_capital_stack_repository import PrimeCapitalStackRepository
-from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository
-from app.adapters.sky.internal_positions_client import SkyInternalPositionsClient
-from app.adapters.sky.reference_risk_capital_client import SkyReferenceRiskCapitalClient
+from app.adapters.postgres.reference_as_of import ReferenceEffectiveAtProvider
+from app.adapters.postgres.reference_position_repository import ReferencePositionRepository
+from app.adapters.postgres.reference_risk_capital_repository import ReferenceRiskCapitalRepository
 from app.config import get_settings
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
 from app.ports.reference_capital_repository import ReferenceCapitalRepository
@@ -18,9 +18,53 @@ from app.services.reference_positions_service import ReferencePositionsService
 from app.services.reference_risk_capital_service import ReferenceRiskCapitalService
 
 
+class Principal:
+    """The authenticated caller, derived from a verified JWT.
+
+    Deliberately edge-agnostic: the principal comes from the token the app
+    verifies itself, never from proxy-written claim headers, so the same code
+    works behind Tailscale today and behind the Envoy edge later without
+    resting on a NetworkPolicy staying correct.
+    """
+
+    __slots__ = ("subject", "roles", "org")
+
+    def __init__(self, subject: str, roles: frozenset[str], org: str | None):
+        self.subject = subject
+        self.roles = roles
+        self.org = org
+
+
+def get_principal(request: Request) -> Principal | None:
+    """Resolve the caller for the current request.
+
+    Ships dark: with auth_enabled=False (the default) every caller is
+    anonymous (None) and no request-time work happens. With the flag on, this
+    fails CLOSED until the verifier lands — enabling auth before deploying
+    enforcement must reject traffic, not silently wave it through.
+    """
+    settings = get_settings()
+    if not settings.auth_enabled:
+        return None
+    # Replaced by the JWT verification middleware (pyjwt against Keycloak
+    # JWKS) in the enforcement change. Until then the flag must not be on.
+    from fastapi import HTTPException
+
+    raise HTTPException(status_code=503, detail="auth_enabled is set but the token verifier is not deployed")
+
+
 def get_engine(request: Request) -> AsyncEngine:
     """Extract the shared SQLAlchemy engine from application state."""
     return request.app.state.engine
+
+
+def get_reference_as_of(request: Request) -> ReferenceEffectiveAtProvider:
+    """Extract the process-wide reference effective-instant provider (ADR-0006 §4).
+
+    Every repository reading a converted reference table takes this, so one setting
+    pins the whole API. Resolved once at startup from `reference_effective_at`.
+    """
+    return request.app.state.reference_effective_at
 
 
 def get_suraf_ratings(request: Request) -> dict[str, SurafResult]:
@@ -51,18 +95,17 @@ def get_receipt_token_lookup(request: Request) -> ReceiptTokenLookup:
 def get_reference_risk_capital_service_factory(
     request: Request,
 ) -> Callable[[], ReferenceRiskCapitalService]:
-    """Build the upstream Star-monitor service on demand.
+    """Build the stored-reference risk-capital service on demand.
 
     Returned as a factory, not the service, because FastAPI resolves every
-    declared dependency on every request: constructing it eagerly would make a
-    self-mode request build an upstream HTTP client it never uses.
+    declared dependency on every request: a self-mode request would otherwise
+    construct a reader it never calls. Matches the two sibling factories below.
     """
 
     def build() -> ReferenceRiskCapitalService:
         return ReferenceRiskCapitalService(
-            SkyReferenceRiskCapitalClient(get_settings().star_risk_capital_base_url),
-            ReceiptTokenRepository(request.app.state.engine),
-            AllocationRepository(request.app.state.engine),
+            ReferenceRiskCapitalRepository(request.app.state.engine),
+            AllocationRepository(request.app.state.engine, request.app.state.reference_effective_at),
         )
 
     return build
@@ -71,20 +114,12 @@ def get_reference_risk_capital_service_factory(
 def get_reference_positions_service_factory(
     request: Request,
 ) -> Callable[[], ReferencePositionsService]:
-    """Build the upstream balance-sheet service on demand, for the same reason.
-
-    Two upstream clients, because coverage and content come from different
-    hosts: the Star monitor decides whether a prime has reference data at all,
-    the internal feed says what it holds.
-    """
+    """Build the stored-reference balance-sheet service on demand, for the same reason."""
 
     def build() -> ReferencePositionsService:
-        settings = get_settings()
         return ReferencePositionsService(
-            SkyInternalPositionsClient(settings.sky_internal_base_url),
-            SkyReferenceRiskCapitalClient(settings.star_risk_capital_base_url),
-            ReceiptTokenRepository(request.app.state.engine),
-            AllocationRepository(request.app.state.engine),
+            ReferencePositionRepository(request.app.state.engine),
+            AllocationRepository(request.app.state.engine, request.app.state.reference_effective_at),
         )
 
     return build

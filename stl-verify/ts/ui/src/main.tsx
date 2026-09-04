@@ -1,10 +1,12 @@
 import { ErrorBoundary, ThemeProvider } from '@archon-research/design-system';
 import { HttpProvider } from '@archon-research/http-client-react';
 import { RouterProvider } from '@tanstack/react-router';
+import type { ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 
-import { logging } from './lib/logging';
-import { router } from './router/routes';
+import { router } from './routes/router';
+import { logging } from './shared/lib/logging';
+import { queryClient } from './shared/lib/query-client';
 
 // Required global stylesheet side effects.
 // oxlint-disable-next-line import/no-unassigned-import
@@ -30,20 +32,30 @@ if (import.meta.env.VITE_API_MOCKS === '1') {
   }
 }
 
+// Commit counting is an offline instrument, so it arrives the same way the
+// worker does: an `import.meta.env` compare the bundler folds, which takes the
+// dynamic import -- and React's profiling build with it -- out of a real build.
+const instrument: (tree: ReactNode) => ReactNode =
+  import.meta.env.VITE_API_MOCKS === '1'
+    ? (await import('./shared/lib/commit-profiler')).withCommitProfiler
+    : (tree) => tree;
+
 createRoot(document.getElementById('root')!).render(
-  <ErrorBoundary
-    onError={(error, errorInfo) => {
-      logging.error('React error boundary caught rendering error', {
-        error,
-        componentStack: errorInfo.componentStack,
-        errorBoundary: true,
-      });
-    }}
-  >
-    <ThemeProvider>
-      <HttpProvider>
-        <RouterProvider router={router} />
-      </HttpProvider>
-    </ThemeProvider>
-  </ErrorBoundary>,
+  instrument(
+    <ErrorBoundary
+      onError={(error, errorInfo) => {
+        logging.error('React error boundary caught rendering error', {
+          error,
+          componentStack: errorInfo.componentStack,
+          errorBoundary: true,
+        });
+      }}
+    >
+      <ThemeProvider>
+        <HttpProvider client={queryClient}>
+          <RouterProvider router={router} />
+        </HttpProvider>
+      </ThemeProvider>
+    </ErrorBoundary>,
+  ),
 );

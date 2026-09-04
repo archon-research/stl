@@ -49,6 +49,32 @@ func TestIsEVMRevert(t *testing.T) {
 	}
 }
 
+func TestIsGasExhausted(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     error
+		wantGas bool
+	}{
+		{name: "nil error is not gas exhaustion", err: nil, wantGas: false},
+		{name: "alchemy out-of-gas answer is gas exhaustion", err: &fakeRPCErr{code: -32000, msg: "out of gas: gas required exceeds: 550000000"}, wantGas: true},
+		{name: "geth 'gas required exceeds allowance' is gas exhaustion", err: &fakeRPCErr{code: -32000, msg: "gas required exceeds allowance (50000000)"}, wantGas: true},
+		{name: "capitalised 'Out of gas' is gas exhaustion", err: &fakeRPCErr{code: -32000, msg: "Out of gas"}, wantGas: true},
+		{name: "wrapped out-of-gas is still gas exhaustion (errors.As climbs)", err: fmt.Errorf("multicall probe: %w", &fakeRPCErr{code: -32000, msg: "out of gas"}), wantGas: true},
+		{name: "execution revert is NOT gas exhaustion", err: &fakeRPCErr{code: 3, msg: "execution reverted"}, wantGas: false},
+		{name: "alchemy 429 rate limit is NOT gas exhaustion", err: &fakeRPCErr{code: 429, msg: "Your app has exceeded its compute units per second capacity"}, wantGas: false},
+		{name: "plain stdlib error naming gas is NOT gas exhaustion", err: errors.New("out of gas"), wantGas: false},
+		{name: "net.OpError (network) is NOT gas exhaustion", err: &net.OpError{Op: "dial", Err: errors.New("timeout")}, wantGas: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsGasExhausted(tt.err); got != tt.wantGas {
+				t.Errorf("IsGasExhausted(%v) = %v, want %v", tt.err, got, tt.wantGas)
+			}
+		})
+	}
+}
+
 func TestRequireAllSucceeded(t *testing.T) {
 	t.Run("nil results is an error", func(t *testing.T) {
 		if err := RequireAllSucceeded(nil, "test"); err == nil {
