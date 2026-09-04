@@ -202,13 +202,9 @@ func TestPositionDailySameDayReprocessReplacesThatDay(t *testing.T) {
 	}
 }
 
-// Limit 2 in the migration header. as_of_date comes from the winning row's timestamp and the upsert is
-// keyed on it, so a reprocess landing on a different date writes a NEW row and nothing retracts the old
-// one -- the backfill reproduces the same state, so a rebuild cannot repair it either. Append-only means
-// the original observation still sits on the old date, so this agrees with deriving the grain from
-// position_state; only an expectation that a correction retracts the old day is disappointed. Pinned so
-// the behaviour is a decision rather than a surprise: if it is ever made to retract, this is the test
-// that should change.
+// as_of_date comes from the winning row's timestamp and the upsert is keyed on it, so a reprocess
+// landing on another date writes a NEW row and nothing retracts the old one. Append-only means the
+// original still sits on the old date, so this agrees with deriving the grain from position_state.
 func TestPositionDailyCorrectionAcrossUTCMidnightLeavesTheOldDate(t *testing.T) {
 	f := newPositionDailyFixture(t)
 	f.observe("midnight", 10, 900, 0, 0, "2026-05-10T23:30:00Z")
@@ -245,14 +241,9 @@ func TestPositionDailyIsAHypertableOnAsOfDateWithSevenDayChunks(t *testing.T) {
 	}
 }
 
-// position_daily deliberately carries NO compression policy, against this directory's rule that a
-// time-series table gets a hypertable, a compression policy and tiering in its creating migration. The
-// deviation is the point of this test: adding a policy in good faith, because the rule says to, makes
-// the first whole-day reprocess fail in production, and nothing else here would catch it.
-//
-// Asserted on the compression JOB and on compression_enabled, not on
-// timescaledb_information.hypertable_compression_settings -- that view lists position_daily whether or
-// not compression is on, so it cannot tell the two apart.
+// position_daily deliberately carries NO compression policy: adding one in good faith, because the
+// house rule says to, makes the first whole-day reprocess fail in production. Asserted on the job
+// and compression_enabled, not hypertable_compression_settings, which lists it either way.
 func TestPositionDailyHasNoCompressionPolicy(t *testing.T) {
 	f := newPositionDailyFixture(t)
 
@@ -357,10 +348,8 @@ func TestPositionDailyTriggerFunctionPinsSearchPath(t *testing.T) {
 	}
 }
 
-// The statement trigger decides twice: which row of the batch wins for a (position, date) -- its
-// DISTINCT ON order -- and whether that winner beats the cached row -- the ON CONFLICT guard. Inserting
-// one row per statement only ever exercises the guard, so a leg dropped from the pick survives. These
-// insert a whole batch in one statement with the other legs held equal.
+// The statement trigger decides twice: which row of a batch wins for a (position, date), and whether
+// that winner beats the cached row. One row per statement exercises only the second.
 func TestPositionDailyIntraBatchPickPerKeyColumn(t *testing.T) {
 	holder := strings.Repeat("a", 40)
 	cases := []struct {
@@ -497,11 +486,9 @@ func TestPositionDailyCopiesEveryColumnFromTheWinner(t *testing.T) {
 	}
 }
 
-// One case per leg of the BACKFILL's newer-wins WHERE. The trigger's pick is covered above; this
-// statement's own comparison was only ever exercised where its pick was already the newest thing in the
-// table, so dropping or reordering a leg here passed. Each accept case leaves exactly one leg unequal,
-// so dropping that leg makes the comparison false and the day is not raised; the reject case covers
-// ordering, where a leading processing_version would let older history win.
+// One case per leg of the BACKFILL's newer-wins WHERE, which was only exercised where its own pick
+// was already newest. Each accept case leaves one leg unequal; the reject case covers ordering.
+// Both timestamps stay on as_of_date, which a CHECK pins, so the ts leg moves no row to another day.
 func TestPositionDailyRebuildNewerWinsPerKeyColumn(t *testing.T) {
 	const date = "2026-07-01"
 	type coords struct {
@@ -571,10 +558,8 @@ func TestPositionDailyRebuildNewerWinsPerKeyColumn(t *testing.T) {
 	}
 }
 
-// An orphan row -- one whose position has no history at all -- survives the rebuild. The merge is
-// forward-only: it raises a day and never removes one, so this class cannot be repaired in role, and
-// removing it needs the owner because DELETE and TRUNCATE are both revoked. Asserted so the limit the
-// migration documents is a tested property rather than a claim.
+// An orphan row -- one whose position has no history -- survives the rebuild, because the merge is
+// forward-only. Removing it needs the owner: DELETE and TRUNCATE are both revoked.
 func TestPositionDailyRebuildCannotRemoveAnOrphanRow(t *testing.T) {
 	f := newPositionDailyFixture(t)
 	const date = "2026-07-15"
@@ -661,9 +646,8 @@ func (f *positionDailyFixture) snapshot() map[string]int {
 
 func TestPositionDailyRebuildOverwritesARowLandedInTheWindow(t *testing.T) {
 	// The window: TRUNCATE commits, ingest appends an OLDER observation, the trigger lands it in the
-	// now-empty cache (no conflict, so newer-wins never runs), and only then does the rebuild run. With
-	// ON CONFLICT DO NOTHING the older row is kept and no later insert can correct it, because every
-	// later insert compares against the poisoned row and loses.
+	// now-empty cache with no conflict, and only then does the rebuild run. Under DO NOTHING the older
+	// row is kept and no later insert can correct it.
 	f := newPositionDailyFixture(t)
 	f.observe("rebuild-race", 10, 1600, 0, 0, "2026-11-01T00:00:00Z")
 	f.observe("rebuild-race", 20, 1700, 0, 0, "2026-11-01T06:00:00Z")
