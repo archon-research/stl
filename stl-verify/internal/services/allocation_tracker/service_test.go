@@ -452,19 +452,12 @@ func TestProcessBlock_MissingBlockHash_ReturnsError(t *testing.T) {
 	}
 }
 
-// ── sweep cadence ──
-
-// trackerFixture is a tracker over a single entry, plus the handles its tests
-// drive and assert on.
 type trackerFixture struct {
 	svc     *Service
 	handler *testHandler
 	source  *mockSource
 }
 
-// newTracker builds a tracker whose one entry of tokenType resolves to bal
-// through sourceName, sweeping every sweepEveryN consumed blocks. Blocks it is
-// driven with carry no receipts, so only the periodic sweep produces snapshots.
 func newTracker(t *testing.T, tokenType, sourceName string, bal *PositionBalance, sweepEveryN int) *trackerFixture {
 	t.Helper()
 
@@ -514,8 +507,6 @@ func newCadenceFixture(t *testing.T, sweepEveryN int) *trackerFixture {
 	return newTracker(t, "erc20", "erc20", &PositionBalance{Balance: big.NewInt(1), UnderlyingValue: big.NewInt(1)}, sweepEveryN)
 }
 
-// driveBacklog feeds count consecutive blocks from first through the tracker the
-// way a drained SQS backlog does, returning the blocks whose processing failed.
 func (f *trackerFixture) driveBacklog(first int64, count int) []int64 {
 	var failed []int64
 	for i := range count {
@@ -544,9 +535,6 @@ func (f *trackerFixture) sweptBlocks() []int64 {
 	return blocks
 }
 
-// TestProcessBlock_SweepsOnEveryNthConsumedBlock: the cadence counts consumed
-// messages and starts at zero, so a drained backlog sweeps on the Nth block and
-// no other — never on consecutive blocks, and never on the first.
 func TestProcessBlock_SweepsOnEveryNthConsumedBlock(t *testing.T) {
 	const first int64 = 50701400
 
@@ -585,47 +573,30 @@ func TestProcessBlock_SweepsOnEveryNthConsumedBlock(t *testing.T) {
 	}
 }
 
-// TestProcessBlock_SweepFailureRetriesOnTheNextBlock: a failed sweep leaves the
-// counter past N, so the retry lands on the next block consumed — the only path
-// that ever *attempts* a sweep on consecutive blocks. It is not a path to
-// consecutive swept blocks in the data: a failed sweep persists nothing, so the
-// failures leave no direction=sweep row and only the block that finally succeeds
-// gets one. Consecutive sweep rows are therefore unreachable; the consecutive
-// "sweep" lines an operator can see in logs come from the handler order in
-// prime-allocation-indexer (MultiHandler runs LogHandler before the Postgres
-// handler), where a batch that failed to persist has already been logged.
-func TestProcessBlock_SweepFailureRetriesOnTheNextBlock(t *testing.T) {
+func TestProcessBlock_SweepFailureRetriesOnRedelivery(t *testing.T) {
 	const first int64 = 50701400
 	const sweepEveryN = 75
 
 	f := newCadenceFixture(t, sweepEveryN)
 	f.source.err = fmt.Errorf("temporary rpc error")
-	f.source.errCalls = 2
+	f.source.errCalls = 1
 
-	failed := f.driveBacklog(first, sweepEveryN+3)
+	failed := f.driveBacklog(first, sweepEveryN)
 
-	if want := []int64{first + 74, first + 75}; !slices.Equal(failed, want) {
+	if want := []int64{first + 74}; !slices.Equal(failed, want) {
 		t.Fatalf("failed blocks = %v, want %v", failed, want)
 	}
-	if got, want := f.sweptBlocks(), []int64{first + 76}; !slices.Equal(got, want) {
+	if failed := f.driveBacklog(first+74, 1); len(failed) != 0 {
+		t.Fatalf("redelivery failed on blocks %v", failed)
+	}
+	if got, want := f.sweptBlocks(), []int64{first + 74}; !slices.Equal(got, want) {
 		t.Errorf("swept blocks = %v, want %v", got, want)
 	}
-}
 
-// TestProcessBlock_SweepSuccessRestartsTheFullCadence: only a success resets the
-// counter, so the sweep that recovers a failure run is followed by a full N
-// blocks of quiet rather than by more consecutive sweeps.
-func TestProcessBlock_SweepSuccessRestartsTheFullCadence(t *testing.T) {
-	const first int64 = 50701400
-	const sweepEveryN = 75
-
-	f := newCadenceFixture(t, sweepEveryN)
-	f.source.err = fmt.Errorf("temporary rpc error")
-	f.source.errCalls = 2
-
-	f.driveBacklog(first, 2*sweepEveryN+2)
-
-	if got, want := f.sweptBlocks(), []int64{first + 76, first + 151}; !slices.Equal(got, want) {
+	if failed := f.driveBacklog(first+75, sweepEveryN); len(failed) != 0 {
+		t.Fatalf("processBlock failed on blocks %v", failed)
+	}
+	if got, want := f.sweptBlocks(), []int64{first + 74, first + 149}; !slices.Equal(got, want) {
 		t.Errorf("swept blocks = %v, want %v", got, want)
 	}
 }

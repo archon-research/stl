@@ -1383,9 +1383,7 @@ re-reads every tracked entry to catch transfer-less balance changes (interest
 accrual, rebases). One instance per chain — mainnet, avalanche, base (VEC-499),
 optimism, unichain, arbitrum (ARCT-216), robinhood (ARCT-397) — all reusing one
 `service_name` and differing only by the `chain` label, so the chain-scoped
-alerts below cover every chain without per-instance edits. robinhood's manifests
-live in `k8s/base` only and are not yet referenced from a cluster overlay, so no
-`robinhood-allocation-tracker` pod or `chain="robinhood"` series exists yet.
+alerts below cover every chain without per-instance edits.
 
 `SWEEP_BLOCKS` must be a positive block count here: unlike the curve indexer
 above, the allocation tracker has no `SWEEP_BLOCKS=0` "sweep disabled" mode, and

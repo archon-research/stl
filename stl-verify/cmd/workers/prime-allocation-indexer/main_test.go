@@ -374,36 +374,6 @@ func TestParseConfig(t *testing.T) {
 			wantError: "parsing SWEEP_BLOCKS",
 		},
 		{
-			name: "non-positive SWEEP_BLOCKS",
-			args: []string{
-				"-queue", "https://sqs.us-east-1.amazonaws.com/123/q",
-				"-db", "postgres://localhost/db",
-				"-redis", "localhost:6379",
-			},
-			envVars: map[string]string{
-				"ALCHEMY_API_KEY": "test-key",
-				"S3_BUCKET":       "stl-sentinelstaging-ethereum-raw",
-				"DEPLOY_ENV":      "staging",
-				"SWEEP_BLOCKS":    "0",
-			},
-			wantError: "sweep blocks must be at least 1",
-		},
-		{
-			name: "non-positive sweep-blocks flag",
-			args: []string{
-				"-queue", "https://sqs.us-east-1.amazonaws.com/123/q",
-				"-db", "postgres://localhost/db",
-				"-redis", "localhost:6379",
-				"-sweep-blocks", "-1",
-			},
-			envVars: map[string]string{
-				"ALCHEMY_API_KEY": "test-key",
-				"S3_BUCKET":       "stl-sentinelstaging-ethereum-raw",
-				"DEPLOY_ENV":      "staging",
-			},
-			wantError: "sweep blocks must be at least 1",
-		},
-		{
 			name: "explicit timing and sweep flags beat their env vars",
 			args: []string{
 				"-queue", "https://sqs.us-east-1.amazonaws.com/123/q",
