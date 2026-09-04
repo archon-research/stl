@@ -217,7 +217,7 @@ func (f *fakeUniswapV4Repository) LoadPools(context.Context, int64) ([]outbound.
 	return nil, errors.New("fake: LoadPools is the caller's job, not the bootstrap's")
 }
 
-func (f *fakeUniswapV4Repository) PoolIDsWithStateAtBlock(context.Context, int64, int64, time.Time) ([]int64, error) {
+func (f *fakeUniswapV4Repository) PoolIDsWithStateAtBlock(context.Context, int64, int64, time.Time) ([]common.Hash, error) {
 	return nil, errors.New("fake: PoolIDsWithStateAtBlock is a reorg-path read the bootstrap must not make")
 }
 
