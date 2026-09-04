@@ -62,12 +62,12 @@ func (d *deriveStub) blocks() []int64 {
 func registerDeriveStub(env *testsuite.TestWorkflowEnvironment, versions map[int64]int) *deriveStub {
 	stub := &deriveStub{versions: versions}
 	env.RegisterActivityWithOptions(
-		func(_ context.Context, request versionRequest) (derivation, error) {
+		func(_ context.Context, request versionRequest) (derivedVersionHash, error) {
 			stub.seen = append(stub.seen, request)
 			if stub.err != nil {
-				return derivation{}, stub.err
+				return derivedVersionHash{}, stub.err
 			}
-			derived := derivation{Version: 1, Hash: stubHash(request.Block)}
+			derived := derivedVersionHash{Version: 1, Hash: stubHash(request.Block)}
 			if version, ok := stub.versions[request.Block]; ok {
 				derived.Version = version
 			}
