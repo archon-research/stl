@@ -1,4 +1,4 @@
-Status: DRAFT — investigation in progress
+Status: FINAL
 
 # 02 — Prime / allocation / Aave-like lending stack
 
@@ -122,7 +122,7 @@ constructor (`service.go:76-90`).
 
 ### Test doubles
 
-28 hand-rolled doubles in the area, despite `internal/testutil/` already shipping
+30 hand-rolled doubles in the area, despite `internal/testutil/` already shipping
 `mock_multicaller.go`, `mock_sqs_consumer.go`, `mock_block_cache.go`, `mock_tx_manager.go`,
 `mock_token_repository.go`, `mock_protocol_repository.go`, `mock_user_repository.go`,
 `mock_event_repository.go`, `mock_receipt_token_repository.go`, `mock_debt_token_repository.go`.
@@ -130,7 +130,7 @@ constructor (`service.go:76-90`).
 | package | doubles | notes |
 |---|---|---|
 | `reference_capital_indexer` | 10 | imports no `testutil`; `fakeTxManager` (`service_test.go:60`) duplicates `testutil/mock_tx_manager.go` |
-| `allocation_tracker` | 8 | `mockHandler` (`log_handler_test.go:14`) and `testHandler` (`service_test.go:27`) both double the same in-package `AllocationHandler` |
+| `allocation_tracker` | 9 | `mockHandler` (`log_handler_test.go:14`) and `testHandler` (`service_test.go:27`) both double the same in-package `AllocationHandler`; `mockSource` (`source_registry_test.go:18`) and `placeholderMockSource` (`:284`) both double `PositionSource` |
 | `prime_debt` | 4 | `fakeSQSConsumer` (`service_test.go:43`) duplicates `testutil/mock_sqs_consumer.go` |
 | `reference_capital_backfill` | 3 | `mockPrimeRepo` / `mockSheetRepo` are same-named twins of `reference_capital_indexer`'s |
 | `sparklend_backfill` | 2 | |
@@ -154,6 +154,10 @@ Repo-wide, `outbound.Multicaller` is hand-doubled in 7 test files, `outbound.SQS
 | star→prime-id resolution | 3 divergent conventions |
 | `unpackUint256` helper | 2 definitions, different signatures |
 | `TransactionReceipt` struct | 3 definitions |
+| excess duplicated lines across the 6 composition roots | **~484 of 2165 (22%)** |
+| boilerplate share per root | 43% / 39% / 31% / 30% / 24% (SQS+backfill) vs 2–3% (the two Temporal roots) |
+| shared helper exists but is bypassed | 5 (`chainutil.RequireChainID`, `ValidateS3BucketForChain`, `s3.NewReaderFromEnv`, `awsconfig.Load`, `env.GetInt`/`lifecycle.SignalContext`) |
+| backfillers with no OTEL and no multicall telemetry | 2 of 2 (the worker they share a core with has both) |
 
 ---
 
@@ -680,13 +684,55 @@ The co-change matrix confirms the three mains are one unit, not three:
 `prime-allocation ∩ sparklend` = 11 shared commits (of 18 and 12);
 `sparklend ∩ prime-debt` = 10 (of 12 and 12).
 
+Measured duplication across the six roots (2165 lines total): **~484 excess lines, 22% pure
+copy-paste**, verified with `diff` over extracted ranges. Byte-identical blocks include the
+logger construction (5 copies, `prime-allocation:186-189`, `prime-debt:162-165`,
+`sparklend:167-170`, `aave-snapshot:191-194`, `sparklend-backfill:109-112`), `awsconfig.Load`
+(3 copies), the SQS consumer + defer (3), the S3 reader + cache reader (2), and the
+`archivingwire.Bootstrap` ceremony (5). Boilerplate share per file: `sparklend-indexer` 43%,
+`sparklend-backfill` 39%, `prime-allocation-indexer` 31%, `prime-debt-indexer` 30%,
+`aave-snapshot` 24%.
+
+The single largest block is the **8-repository construction, 37 lines, three times**:
+`sparklend-indexer/main.go:252-288`, `aave-like-user-snapshot-indexer/main.go:252-288`,
+`sparklend-backfill/main.go:177-213`. `diff` over all three shows exactly one differing line:
+
+```
+-  return fmt.Errorf("creating transaction manager: %w", err)   // sparklend-indexer:254
++  return fmt.Errorf("creating tx manager: %w", err)            // the two backfillers
+```
+
+Those eight repositories are precisely the eight `aavelike_position_tracker.NewService` takes
+(F02.6), so the bundle already has a name — it just has no type.
+
+The two Temporal roots prove the seam works: `reference-capital-backfill` (82 + 191 lines) and
+`reference-capital-indexer` (150) go through `temporal.RunWorker` / `temporal.RunCronjob` and
+carry **~2–3% boilerplate and not one function over 67 lines**. `dex-indexer` (118 lines) does
+the same through `dexbootstrap`. The three SQS workers in this area, which have no such helper,
+are 385 / 337 / 285.
+
+For balance: `prime-allocation-indexer`'s *domain* wiring is already correctly extracted —
+`at.BuildSourceRegistry` (`:313`), `at.EntriesAndProxiesForChainID` (`:325`) and
+`at.AssertServedTrackerChain` (`:182`) are each the sole production caller of a tested helper,
+the result of `baa304c2` hoisting 47 lines out of `main`. The residual 217-line `run` is
+infrastructure, not domain. And `postgres.WorkerDBConfig` vs `DefaultDBConfig` is a *deliberate*
+split (`postgres/db.go:87-91` — workers get a `lock_timeout`, backfillers and crons do not), not
+drift.
+
+The duplication extends into the tests: `main_test.go` in the three workers totals ~850 lines
+that each independently re-test the same `SQS_WAIT_TIME` / `SQS_VISIBILITY_TIMEOUT` precedence
+rules with their own `setEnv` / `baseEnv` / `clearEnv` helpers, while
+`dexbootstrap/parseconfig_test.go` tests the shared version once.
+
 **Proposed change**
 Generalise `dexbootstrap` into `cmd/workers/internal/workerboot`: `ParseConfig` (the common env
 vars and the flag-wins-over-env precedence rule that `58f9c196` had to fix in three places),
 `Bootstrap` (pool via `postgres.WorkerDBConfig`, Redis cache, SQS consumer, multicaller,
 `rpchttp.DialEthereum`, telemetry in the correct order, archiving wire), `Deps.Close()`, and
-`lifecycle.Run`. Each `main.go` keeps only what is genuinely its own: which service to construct
-and which repositories it needs. `dex-indexer` at 118 lines is the target shape.
+`lifecycle.Run`. Add the missing pieces the grep shows have no home at all: a logger constructor
+(18 inlined copies across `cmd/`) and an `AaveLikeRepos` bundle for the 37-line block. Each
+`main.go` keeps only what is genuinely its own: which service to construct and which repositories
+it needs. `dex-indexer` at 118 lines is the target shape.
 
 **Benefits**
 Turns 16 WIRING + 8 CONFIG + 6 RIPPLE touches into 1 edit each. Makes the telemetry-ordering
@@ -905,7 +951,7 @@ unintentional).
 
 ---
 
-### F02.14 — Hygiene: 34 over-long functions, 6 unpaired test files, 2 untested composition roots, 28 hand-rolled doubles beside a shared mock package
+### F02.14 — Hygiene: 34 over-long functions, 6 unpaired test files, 2 untested composition roots, 30 hand-rolled doubles beside a shared mock package
 
 **Strength**: Strong
 **Size**: M (or fold into the findings above)
@@ -927,7 +973,7 @@ unintentional).
 - **2 composition roots with zero test files**: `cmd/backfillers/reference-capital-backfill`
   (273 lines across `main.go` + `backfill.go`) and `cmd/cronjobs/reference-capital-indexer`
   (150 lines), against *"`main.go` entry points should also have 100% coverage"*.
-- **28 hand-rolled doubles** while `internal/testutil/` already ships mocks for
+- **30 hand-rolled doubles** while `internal/testutil/` already ships mocks for
   `Multicaller`, `SQSConsumer`, `BlockCache`, `TxManager`, `TokenRepository`, `ProtocolRepository`,
   `UserRepository`, `EventRepository`, `ReceiptTokenRepository`, `DebtTokenRepository`.
   `reference_capital_indexer` (10 doubles) imports no `testutil` at all;
@@ -935,7 +981,8 @@ unintentional).
   `testutil/mock_sqs_consumer.go`; `reference_capital_indexer/service_test.go:60` hand-rolls
   `fakeTxManager` next to `testutil/mock_tx_manager.go`.
 - `allocation_tracker` doubles its own in-package `AllocationHandler` twice
-  (`log_handler_test.go:14` `mockHandler`, `service_test.go:27` `testHandler`).
+  (`log_handler_test.go:14` `mockHandler`, `service_test.go:27` `testHandler`) and its own
+  `PositionSource` twice (`source_registry_test.go:18`, `:284`).
 
 **Proposed change**
 Enable `funlen`/`gocognit` in `.golangci.yml` with a baseline at today's worst so the count can
@@ -949,6 +996,181 @@ is how *"a 254-line function once slipped through"*, and this area currently hol
 
 **Risk / migration**
 Independent of every other finding; each bullet is its own small PR.
+
+---
+
+### F02.15 — Five shared helpers exist and are bypassed by these binaries, and each bypass carries the exact hazard the helper was written to prevent
+
+**Strength**: Strong
+**Size**: S
+
+**Files / evidence**
+
+**(a) `CHAIN_ID` silently defaults to mainnet in all three workers.**
+```go
+chainIDStr := env.Get("CHAIN_ID", "1")   // prime-allocation-indexer/main.go:149
+chainIDStr := env.Get("CHAIN_ID", "1")   // sparklend-indexer/main.go:141
+chainIDStr := env.Get("CHAIN_ID", "1")   // prime-debt-indexer/main.go:129
+```
+`chainutil.RequireChainID` (`internal/pkg/chainutil/chainutil.go:98-108`) exists and is used by
+six other binaries (`morpho-vault-backfill/config.go`, `offchain-price-backfill/main.go`,
+`maple-graphql-indexer/main.go`, `morpho-v2-bootstrap/main.go`, `offchain-price-indexer/main.go`,
+`watcher-data-validator/main.go`). `dexbootstrap/parseconfig.go:175-178` refuses the default
+outright, and names the hazard in the error string:
+```go
+return Config{}, fmt.Errorf("CHAIN_ID environment variable is required (no silent default to mainnet)")
+```
+Given `servedTrackerChains` now lists seven chains (`chains.go:49-57`), an unset or typo'd
+`CHAIN_ID` on any non-mainnet tracker boots it as a second mainnet indexer.
+
+**(b) `S3_BUCKET` and `DEPLOY_ENV` are read but never cross-checked.**
+`prime-allocation-indexer/main.go:156-164` and `sparklend-indexer/main.go:148-156` both require
+the two vars and then never compare them. `chainutil.ValidateS3BucketForChain` exists;
+`dexbootstrap/parseconfig.go:195-201` calls it with the rationale stated:
+*"Catches a staging-bucket / prod-deploy mixup at boot — pre-fix, this would only surface as
+missing/stale data hours later."*
+
+**(c) `sparklend-backfill` re-inlines the S3 reader on a different env var.**
+`s3/reader.go:56-60` is unusually explicit about why the helper exists:
+
+> *NewReaderFromEnv creates a Reader honouring `AWS_S3_ENDPOINT`, the LocalStack override every
+> worker needs in kind/dev. **Six worker entrypoints previously inlined this same block;
+> sparklend-indexer omitted it and its S3 fallback was silently unreachable in dev as a result**,
+> which is why the convention lives here rather than at each call site.*
+
+`cmd/backfillers/sparklend-backfill/main.go:144` and `:156` inline it anyway, keyed on
+**`AWS_ENDPOINT_URL`** where the helper (`s3/reader.go:70`) keys on **`AWS_S3_ENDPOINT`**. The
+same class of bug the helper was written to eliminate, recurring in the sibling binary — and it
+is live: `sparklend-indexer` uses `NewReaderFromEnv` (`:219`) and the backfiller does not, so the
+worker and its own backfiller read LocalStack config from different variables.
+
+**(d) `sparklend-backfill` bypasses `awsconfig.Load`.**
+`main.go:141-151` hand-rolls `config.LoadDefaultConfig`, losing the AKID-without-secret guard at
+`internal/pkg/awsconfig/awsconfig.go:59-67`. The three workers all use the helper
+(`prime-allocation:202`, `prime-debt:178`, `sparklend:183`).
+
+**(e) `env.GetInt` and `lifecycle.SignalContext` exist and are unused here.**
+The three workers hand-roll `strconv.Atoi(env.Get(...))` for the SQS timings (14 duplicated lines
+×3) while `env.GetInt` (`internal/pkg/env/env.go:29`) is used by four other binaries. Graceful
+shutdown appears in three different shapes across the six roots — `signal.NotifyContext`
+(prime-allocation, sparklend, both reference-capital), a manual `sigChan` + goroutine
+(prime-debt), and a manual `sigChan` + goroutine + logging (the two backfillers, byte-identical
+to each other, 19 lines) — while `lifecycle.SignalContext` (`lifecycle.go:120`) exists and only
+`cmd/base/watcher/main.go:73` uses it.
+
+**Problem**
+Every one of these is a helper that was written *because* of a production incident, whose
+rationale is recorded in its own doc comment, and which these binaries do not call. This is not
+duplication for its own sake — it is the mechanism by which a fixed bug comes back. `dexbootstrap`
+itself records the pattern (`bootstrap.go:267-271`): *"Pre-N8-1/N8-2 this function inlined its own
+version with a us-east-1 default and no guard — that divergence is exactly what the dedup pass was
+supposed to eliminate."*
+
+**Proposed change**
+(a)–(e) are five independent one-to-ten-line changes, landable today and worth doing before the
+larger F02.9 refactor: swap in `chainutil.RequireChainID`, add the
+`ValidateS3BucketForChain` cross-check, replace the inlined S3 reader with `NewReaderFromEnv`
+(which also fixes the env-var name), use `awsconfig.Load`, and use `env.GetInt` /
+`lifecycle.SignalContext`. Then F02.9 makes the bypass structurally impossible.
+
+**Benefits**
+Removes a silent-mainnet failure mode on six deployed trackers, a staging/prod bucket mixup that
+currently surfaces "hours later", and a dev-only S3 divergence between a worker and its own
+backfiller.
+
+**Risk / migration**
+(a) is behaviour-changing by design: a tracker with no `CHAIN_ID` starts failing instead of
+starting as mainnet. Check the k8s overlays set it for every instance before landing — the
+`servedTrackerChains` list (`chains.go:49-57`) enumerates the seven that must.
+
+**Depends on / enables** Precursor to F02.9.
+
+---
+
+### F02.16 — Two backfillers reuse the same worker core two different ways; one is the model and one duplicates it, and both run blind
+
+**Strength**: Strong
+**Size**: M
+
+**Files**
+- The model: `internal/services/sparklend_backfill/service.go:22-26` (`ReceiptProcessor`), consumed at `cmd/backfillers/sparklend-backfill/main.go:251-260`
+- The anti-model: `cmd/backfillers/aave-like-user-snapshot-indexer/main.go:303-308`, `:310-327`, `:332-449`
+- `internal/services/aavelike_position_tracker/service.go:99-106`, `:232-239`, `:241-259`, `:928-1061`, `:1115-1160`
+
+**Problem**
+`sparklend-backfill` gets this exactly right. It declares a one-method seam and says who
+satisfies it:
+
+```go
+// sparklend_backfill/service.go:22-26
+// ReceiptProcessor processes transaction receipts for a given block.
+// Satisfied by *aavelike_position_tracker.Service.
+type ReceiptProcessor interface {
+    ProcessReceipts(ctx context.Context, chainID, blockNumber int64, version int,
+        receipts []shared.TransactionReceipt, blockTimestamp time.Time) error
+}
+```
+
+`ProcessReceipts` (`service.go:232-239`) and the worker's `fetchAndProcessReceipts`
+(`service.go:196-231`) both delegate to the same private `processReceipts`
+(`service.go:241-259`). One implementation of event extraction and position snapshotting, two
+drivers: SQS-triggered and S3-scan. Zero domain logic re-implemented. **This is the pattern the
+area should copy.**
+
+`aave-like-user-snapshot-indexer` reaches around it. It builds its own reader —
+
+```go
+erc20ABI, err := abis.GetERC20ABI()                                    // main.go:303
+reader := aavelike.NewPositionReader(ethClient, mc, erc20ABI, logger)  // main.go:308
+```
+
+— and then hands `ethClient, mc` to `NewService` (`main.go:317-318`), which builds a
+byte-equivalent reader from the same two calls (`service.go:100-106`). The process holds **two
+`PositionReader`s**. And because it never calls `Start`, the service's internal reader, its
+`EventExtractor` and its ABI load are all dead weight: I verified `PersistUserPositionBatch`
+(`service.go:928-1061`) references neither `s.reader` nor `s.eventExtractor`.
+
+Everything between reading and persisting is then re-implemented inline in the 268-line `run`
+(the largest function in the area): block resolution (`:332-343`), finalisation check
+(`:345-354`), timestamp fetch (`:356-361`), batching, errgroup fan-out, per-batch result mapping
+and progress logging (`:363-449`). None of it exists in the service layer for any other caller.
+
+The service does support the backfill shape — `validateDependencies` (`service.go:1115-1160`)
+opens with *"consumer and cacheReader may be nil in backfill mode (ProcessReceipts only)"* and
+the binary passes `nil, // no SQS consumer` / `nil, // no cache reader` (`:315-316`). The seam
+exists; the backfiller uses half of it.
+
+**Both backfillers also run uninstrumented.** Verified by grep:
+
+| binary | `InitOTEL` | multicall telemetry |
+|---|---|---|
+| `cmd/workers/sparklend-indexer` | 1 | 3 |
+| `cmd/backfillers/aave-like-user-snapshot-indexer` | **0** | **0** |
+| `cmd/backfillers/sparklend-backfill` | **0** | **0** |
+
+The same `aavelike_position_tracker` core is observable under one composition root and blind
+under the other two — so a backfill that silently under-writes positions produces no metric and
+trips no alert, which is the failure mode AGENTS.md's never-swallow rules exist to make loud.
+
+**Proposed change**
+Give the snapshot backfiller the same shape as the receipt backfiller: declare the seam it needs
+(`UserPositionSnapshotter` — batch resolution, fan-out and persistence) in
+`aavelike_position_tracker`, satisfied by the service, and let `main.go` supply only the user
+list and the block. Drop the duplicate `PositionReader` and let the service own the read path.
+Add OTEL and multicall telemetry to both backfillers — F02.9's shared bootstrap makes this the
+default rather than a per-binary decision.
+
+**Benefits**
+Deletes ~120 lines from a 268-line `run` and moves the batching/fan-out logic somewhere testable.
+Removes a duplicated reader and three dead dependencies. Makes backfill runs observable with the
+same dashboards as the worker.
+
+**Risk / migration**
+Extract the batch orchestration into the service first with the existing behaviour preserved,
+then delete the inline copy. `PersistUserPositionBatch` is the shared entry point and is already
+covered by `service_test.go`. Telemetry is additive and independent — land it first.
+
+**Depends on / enables** Pairs with F02.6, F02.9.
 
 ---
 
@@ -971,6 +1193,23 @@ Independent of every other finding; each bullet is its own small PR.
 - `TokenMetadata` is declared in `morpho_indexer/blockchain_service.go:73` and
   `fluid_vault_indexer/blockchain_service.go:30` as well — those areas share F02.3's problem.
 - `psm3/service.go` shares the sweep-counter pattern and is the outlier on failure policy (F02.13).
+- Repo-wide test-double proliferation, well beyond this area: `outbound.SQSConsumer` is hand-mocked
+  in **7** packages and `outbound.TxManager` in **7**, while `internal/testutil/mock_sqs_consumer.go`
+  and `mock_tx_manager.go` already ship both and none of the 14 sites use them. A
+  `GetBlockByNumber` client is hand-mocked in **11** places; `outbound.S3Reader` in **6** with no
+  shared mock at all. Conversely `testutil` has no `MockPositionRepository`, `MockS3Reader`,
+  `MockPrimeRepository`, `MockPrimeBalanceSheetRepository`, `MockBalanceSheetProvider` or
+  `MockVatCaller` — exactly the set that gets hand-rolled. `internal/pkg/aavelike` is the model:
+  zero hand-rolled doubles, `testutil` in both test files.
+- `cmd/workers/morpho-indexer/main.go` (340 lines, 91-line `parseConfig`, 180-line `run`) and
+  `cmd/workers/psm3-indexer/main.go` (274 lines, 209-line `run`, no `parseConfig` at all) share
+  the same shape. My area's three workers are not outliers — the family norm is the problem, which
+  is why F02.9 should be owned repo-wide.
+- `cmd/backfillers/reference-capital-backfill/backfill.go:175-191` is
+  `cmd/cronjobs/reference-capital-indexer/main.go:126-150` **minus** the case-duplicate guard the
+  cronjob added, whose own comment — *"would silently conflict away while telemetry still counts
+  them"* — applies verbatim to the backfiller, which has the same `ON CONFLICT DO NOTHING`
+  exposure. Same root cause as F02.5; fix together.
 - The four `reference_capital` provider ports are the same shape
   (`Fetch…(ctx, stars, …) ([]Row, error)` over decimal strings keyed by `Star`) and repeat the same
   *"parsing belongs to the consumer, not the transport"* rationale three times

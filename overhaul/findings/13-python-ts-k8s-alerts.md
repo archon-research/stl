@@ -1,9 +1,6 @@
-Status: DRAFT — investigation in progress
+Status: FINAL
 
 # 13 — Python / TS / k8s / alerts survey
-
-(Draft checkpoint: metrics gathered, findings 1-8 drafted below. Still to finish: final
-open-questions pass, cross-area observations consolidation, word-count trim of summary.)
 
 ## 1. Area map
 
@@ -101,20 +98,25 @@ is testable); smaller diffs when one rule changes.
 fixed seeds before splitting. Real risk of subtly changing vectorized semantics.
 **Size**: M
 
-### F13.3 — `AllocationRepository` is an 1883-line, 21-method god file
+### F13.3 — `AllocationRepository` is a 16-method port / 1883-line, 21-method god file
 **Strength**: Worth exploring
-**Files**: `stl-verify/python/app/adapters/postgres/allocation_position_repository.py:1-1883`
+**Files**: `stl-verify/python/app/adapters/postgres/allocation_position_repository.py:1-1883`, `stl-verify/python/app/ports/allocation_repository.py:23-182`
 **Problem**: One repository class backs essentially every allocation/exposure/total-capital query
 (chains, protocols, primes, receipt-token positions, direct holdings, custody holdings, usd
 exposure, activity buckets, total-capital buckets, exposure buckets, proxy addresses...). ~1090
 lines of class body plus ~790 lines of trailing module-level SQL-text constants referenced by the
 methods above them (forward references, valid Python but non-obvious to a reader scanning top to
-bottom).
+bottom). This isn't just a file-size problem: `AllocationRepositoryPort(Protocol)` itself declares
+16 methods across five unrelated read-models, so any caller/test needing this port must know all
+16 — by the brief's vocabulary this is a shallow port (interface nearly as complex as the one
+implementation behind it) with exactly one adapter and, per `app/services/`, effectively one
+caller-family.
 **Proposed change**: Split by read-model (positions vs custody vs activity/exposure buckets vs
-total-capital) into sibling repositories or at least sibling modules; co-locate each SQL constant
-directly above/inside the method that uses it instead of a shared tail block.
+total-capital) into sibling ports+repositories, or at least sibling modules within one repository;
+co-locate each SQL constant directly above/inside the method that uses it instead of a shared tail
+block.
 **Benefits**: Locality — a change to activity-bucket SQL no longer requires scrolling past 20
-unrelated methods; smaller PRs.
+unrelated methods; smaller PRs; narrower fakes for services that only need one read-model.
 **Risk / migration**: Pure reorganization if done by cut-paste; watch for the module-level SQL
 constants that are shared between two methods (check before splitting).
 **Size**: M
@@ -209,12 +211,31 @@ architecture decisions alongside `docs/adr/`.
 **Risk / migration**: None, it isn't tracked.
 **Size**: S
 
+### F13.9 — A Decimal-as-string money field is parsed to a JS `float` for display
+**Strength**: Speculative
+**Files**: `stl-verify/ts/ui/src/features/allocations/RiskBreakdownTab.tsx:120`
+**Problem**: `cell: ({ row }) => parseFloat(row.original.amount).toFixed(2)` converts an API
+`amount` field to a native JS number. The generated OpenAPI types document sibling money fields
+(`tx_amount`, `total_tx_amount`) explicitly as "Decimal serialized as a JSON string" specifically to
+preserve precision (`stl-verify/python/AGENTS.md`'s "Money is `Decimal` serialized as JSON strings,
+never floats" rule). This one cell re-introduces a float round-trip that the wire format was
+designed to avoid — display-only today (`.toFixed(2)`), but the pattern is one copy-paste away from
+a real precision bug if reused for a calculation.
+**Proposed change**: Format the decimal string directly (e.g. a shared `formatDecimalString` helper
+already implied by `dashboard.ts`'s formatting toolkit) instead of round-tripping through `Number`.
+**Benefits**: Keeps the "never floats" invariant enforced at one seam instead of by convention at
+every cell renderer.
+**Risk / migration**: None; display formatting only.
+**Size**: S
+
 ## 4. Cross-area observations
 
 - The BlockPin/StateReader seam plan in `docs/superpowers/plans/2026-07-09-blockpin-statereader-seam.md`
   targets `fluid_vault_indexer`'s live reorg bug and explicitly defers curve/psm3/vat/aavelike/oracle/morpho/
   allocation_tracker migrations — directly relevant to whichever Go agent is covering indexer reorg
-  handling.
+  handling. A matching gitignored worktree (`.claude/worktrees/vec-na-blockpin-statereader-seam/`)
+  shows this plan was at least partially executed locally; whether that work landed anywhere is
+  outside this agent's visibility (read-only, and the worktree is local-only).
 - `stl-verify/data_quality/schemamaster/` is Go code (schema-conformance checker against
   `information_schema`) living outside the normal `cmd/`/`internal/` tree — worth the Go-service
   agent confirming it's intentionally exempt from that layout.
@@ -222,13 +243,22 @@ architecture decisions alongside `docs/adr/`.
   appear to be repo-local copies of the same-named skills already available globally
   (`pr-respond`, `pr-review-response`) — unclear if intentional or accidental duplication; flagged,
   not analyzed in depth (outside this agent's remit).
+- `docs/linear_issues_proposal.md` is intentionally tracked (added by commit `714bf492`,
+  "SEN-N/A: Add Reference Docs") — a product/roadmap backlog, not architecture docs. Harmless but
+  doesn't match root `AGENTS.md`'s definition of `docs/` ("architecture diagrams and entity
+  relations"); low priority.
+
+- `k8s/overlays/dev/workers/` and `data-validator/` sub-overlays reference the shared
+  `k8s/base/<name>` dirs plus the `runtime` component rather than duplicating them — confirms the
+  duplication in F13.5 is confined to `base/` itself, and that "compose from a shared base via
+  Kustomize, don't copy directories" is already how the rest of the dev overlay works, i.e. F13.5's
+  fix has local precedent.
 
 ## 5. Open questions
 
-- Whether `docs/linear_issues_proposal.md` and the untracked `.claude/commands`/`.claude/workflows`
-  are intentional in-progress work or stray — not yet determined (checkpoint cut investigation short;
-  see final version).
-- Whether `k8s/overlays/dev/workers/` and `data-validator/` sub-overlays (mentioned in `k8s/AGENTS.md`)
-  have the same per-chain duplication as `base/` — not yet checked.
-- Whether splitting `AllocationRepository` (F13.3) is worth the churn given it's all read-only
-  queries behind one port today — need to check `app/ports/allocation_repository.py`'s shape first.
+- Whether the two `FakeRiskModel` copies (F13.4) also disagree on behavior in a way that masks a
+  bug (vs. just being redundant code) was not fully checked line-by-line — worth a closer diff
+  before merging them.
+- Did not verify whether any Go code reads Python's `_vendored_synome` CSVs/JSON directly outside
+  the `contracts/axis-synome/*.json` export path — assumed no based on the documented flow in
+  `stl-verify/python/AGENTS.md`.
