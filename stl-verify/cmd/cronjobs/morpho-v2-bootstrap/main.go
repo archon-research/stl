@@ -154,7 +154,7 @@ func (b *bootstrapWorker) register(ctx context.Context, deps temporal.Dependenci
 
 	runner, cleanup, err := setupRunner(ctx, deps, progress)
 	if err != nil {
-		return err
+		return fmt.Errorf("setting up bootstrap runner: %w", err)
 	}
 	if err := temporal.RegisterRunner(r, temporal.RunnerJob{
 		WorkflowType: workflowTypeName,
@@ -163,7 +163,7 @@ func (b *bootstrapWorker) register(ctx context.Context, deps temporal.Dependenci
 		Progress:     progress,
 	}); err != nil {
 		cleanup()
-		return err
+		return fmt.Errorf("registering bootstrap runner: %w", err)
 	}
 	b.cleanup = cleanup
 	return nil
@@ -203,19 +203,19 @@ var bootstrapActivityTimeouts = temporal.ActivityTimeouts{
 func setupRunner(ctx context.Context, deps temporal.Dependencies, progress morpho_v2_bootstrap.ProgressStore) (temporal.Runner, func(), error) {
 	chainID, err := chainutil.RequireChainID()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("requiring chain ID: %w", err)
 	}
 
 	sweepConfig, err := parseSweepConfig(os.Getenv)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("parsing sweep config: %w", err)
 	}
 	sweepConfig.ChainID = int64(chainID)
 	sweepConfig.Logger = deps.Logger
 
 	rpcURL, err := chainutil.AlchemyRPCURL(int64(chainID))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("resolving RPC URL: %w", err)
 	}
 	// The sweep issues long, wide eth_getLogs requests; the default 60s client
 	// budget would abort them before the node finished collecting results.

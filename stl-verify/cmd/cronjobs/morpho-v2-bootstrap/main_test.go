@@ -52,6 +52,9 @@ func TestSetupRunner_RequiresChainID(t *testing.T) {
 	if !strings.Contains(err.Error(), "CHAIN_ID") {
 		t.Errorf("error %q should mention CHAIN_ID", err.Error())
 	}
+	if !strings.Contains(err.Error(), "requiring chain ID") {
+		t.Errorf("error %q should identify the failed operation", err.Error())
+	}
 }
 
 func TestSetupRunner_RequiresAlchemyKey(t *testing.T) {
@@ -64,6 +67,28 @@ func TestSetupRunner_RequiresAlchemyKey(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ALCHEMY_API_KEY") {
 		t.Errorf("error %q should mention ALCHEMY_API_KEY", err.Error())
+	}
+	if !strings.Contains(err.Error(), "resolving RPC URL") {
+		t.Errorf("error %q should identify the failed operation", err.Error())
+	}
+}
+
+func TestSetupRunner_IdentifiesSweepConfigFailure(t *testing.T) {
+	t.Setenv("CHAIN_ID", "1")
+	t.Setenv("BOOTSTRAP_BLOCK_CHUNK_SIZE", "lots")
+
+	_, _, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
+	if err == nil || !strings.Contains(err.Error(), "parsing sweep config") {
+		t.Fatalf("err = %v, want sweep-config operation context", err)
+	}
+}
+
+func TestRegister_IdentifiesRunnerSetupFailure(t *testing.T) {
+	t.Setenv("CHAIN_ID", "")
+
+	err := (&bootstrapWorker{}).register(context.Background(), discardDeps(), nil)
+	if err == nil || !strings.Contains(err.Error(), "setting up bootstrap runner") {
+		t.Fatalf("err = %v, want runner-setup operation context", err)
 	}
 }
 
