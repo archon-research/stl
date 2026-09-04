@@ -63,6 +63,9 @@ type VaultMetadata struct {
 	Asset    common.Address
 	Decimals uint8
 	Version  entity.MorphoVaultVersion
+	// ProbedSelectorwise: the batched probe exhausted gas and the vault was
+	// confirmed one selector at a time (see VaultProbeResult).
+	ProbedSelectorwise bool
 }
 
 // TokenMetadata holds token metadata from on-chain reads.
@@ -1074,8 +1077,9 @@ func (s *blockchainService) getVaultMetadata(ctx context.Context, vaultAddress c
 	// from the probe context, so no explicit check is needed here.)
 	if probe.Version != entity.MorphoVaultV2 && probe.MorphoAddr != MorphoBlueAddress {
 		return nil, &ErrNotVault{
-			Err:         fmt.Errorf("MORPHO() returned %s, expected %s — not a MetaMorpho vault", probe.MorphoAddr.Hex(), MorphoBlueAddress.Hex()),
-			VaultShaped: true, // MORPHO() returned an address — it's vault-shaped, just not ours.
+			Err:                fmt.Errorf("MORPHO() returned %s, expected %s — not a MetaMorpho vault", probe.MorphoAddr.Hex(), MorphoBlueAddress.Hex()),
+			VaultShaped:        true, // MORPHO() returned an address — it's vault-shaped, just not ours.
+			ProbedSelectorwise: probe.ProbedSelectorwise,
 		}
 	}
 
@@ -1084,6 +1088,7 @@ func (s *blockchainService) getVaultMetadata(ctx context.Context, vaultAddress c
 		return nil, fmt.Errorf("fetching vault details: %w", err)
 	}
 	md.Asset = probe.AssetAddr
+	md.ProbedSelectorwise = probe.ProbedSelectorwise
 
 	return md, nil
 }

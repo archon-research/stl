@@ -1043,3 +1043,60 @@ func (h *serviceTestHarness) setupMarketNotInDB() {
 		return nil, fmt.Errorf("unexpected call count: %d", len(calls))
 	}
 }
+
+// --- Trapping-candidate probe fixtures ---
+
+// A real mainnet contract whose dispatcher jumps into invalid bytecode on every
+// probe selector (VEC-698).
+var trappingCandidate = common.HexToAddress("0x4ECeF7bd1eD0c9f64a3a5c1a785A3Bb39DC5dF6A")
+
+type gasExhaustedRPCError struct{}
+
+func (gasExhaustedRPCError) Error() string  { return "out of gas: gas required exceeds: 550000000" }
+func (gasExhaustedRPCError) ErrorCode() int { return -32000 }
+
+type throttledRPCError struct{}
+
+func (throttledRPCError) Error() string  { return "429 Too Many Requests" }
+func (throttledRPCError) ErrorCode() int { return 429 }
+
+// isolatedAnswer is what one eth_call for a single probe selector returns.
+type isolatedAnswer struct {
+	result outbound.Result
+	err    error
+}
+
+func answers(addr common.Address) isolatedAnswer {
+	data, err := abi.Arguments{{Type: mustABIType("address")}}.Pack(addr)
+	if err != nil {
+		panic(fmt.Sprintf("packing address: %v", err))
+	}
+	return isolatedAnswer{result: outbound.Result{Success: true, ReturnData: data}}
+}
+
+func reverts() isolatedAnswer   { return isolatedAnswer{} }
+func exhausts() isolatedAnswer  { return isolatedAnswer{err: gasExhaustedRPCError{}} }
+func throttled() isolatedAnswer { return isolatedAnswer{err: throttledRPCError{}} }
+
+// trappingResponder answers the batched probe with gas exhaustion and each
+// isolated probe call from perSelector, given in ProbeCalls order
+// (MORPHO, asset, curator, liquidityAdapter).
+func trappingResponder(p *VaultProber, addr common.Address, perSelector [vaultProbeCallsPerAddress]isolatedAnswer) func(context.Context, []outbound.Call, *big.Int) ([]outbound.Result, error) {
+	bySelector := make(map[string]isolatedAnswer, vaultProbeCallsPerAddress)
+	for i, call := range p.ProbeCalls(addr) {
+		bySelector[string(call.CallData)] = perSelector[i]
+	}
+	return func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) != 1 {
+			return nil, gasExhaustedRPCError{}
+		}
+		a, ok := bySelector[string(calls[0].CallData)]
+		if !ok || calls[0].Target != addr {
+			return nil, fmt.Errorf("unexpected isolated call to %s with selector %x", calls[0].Target.Hex(), calls[0].CallData[:4])
+		}
+		if a.err != nil {
+			return nil, a.err
+		}
+		return []outbound.Result{a.result}, nil
+	}
+}

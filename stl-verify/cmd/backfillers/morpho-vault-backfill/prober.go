@@ -214,7 +214,7 @@ func (p *vaultProber) probeCandidateSelectorwise(
 	firstBlocks map[common.Address]int64,
 	blockNum *big.Int,
 ) ([]confirmedVault, error) {
-	results, exhausted, err := p.isolateProbeCalls(ctx, addr, blockNum)
+	results, exhausted, err := p.sharedProber.ProbeSelectorwise(ctx, p.multicaller, addr, blockNum)
 	if err != nil {
 		return nil, fmt.Errorf("probing candidate %s: %w", addr.Hex(), err)
 	}
@@ -236,39 +236,6 @@ func (p *vaultProber) probeCandidateSelectorwise(
 		"exhaustedSelectors", exhausted,
 		"totalSelectors", len(results))
 	return p.confirmProbedBatch(ctx, []common.Address{addr}, results, firstBlocks, blockNum)
-}
-
-func (p *vaultProber) isolateProbeCalls(ctx context.Context, addr common.Address, blockNum *big.Int) ([]outbound.Result, int, error) {
-	calls := p.sharedProber.ProbeCalls(addr)
-	results := make([]outbound.Result, 0, len(calls))
-	exhausted := 0
-	for _, call := range calls {
-		result, err := p.executeIsolatedProbeCall(ctx, call, blockNum)
-		switch {
-		case err == nil:
-			results = append(results, result)
-		case errors.Is(err, errProbeGasExhausted):
-			results = append(results, outbound.Result{})
-			exhausted++
-		default:
-			return nil, 0, err
-		}
-	}
-	return results, exhausted, nil
-}
-
-func (p *vaultProber) executeIsolatedProbeCall(ctx context.Context, call outbound.Call, blockNum *big.Int) (outbound.Result, error) {
-	results, err := p.multicaller.Execute(ctx, []outbound.Call{call}, blockNum)
-	if err != nil {
-		if rpcerr.IsGasExhausted(err) {
-			return outbound.Result{}, fmt.Errorf("isolated probe call: %w: %w", err, errProbeGasExhausted)
-		}
-		return outbound.Result{}, fmt.Errorf("isolated probe call: %w", err)
-	}
-	if len(results) != 1 {
-		return outbound.Result{}, fmt.Errorf("expected 1 result for an isolated probe call, got %d", len(results))
-	}
-	return results[0], nil
 }
 
 // confirmedProbe pairs a probe-confirmed vault address with the version the

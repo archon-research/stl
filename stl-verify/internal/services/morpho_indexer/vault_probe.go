@@ -11,6 +11,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/rpcerr"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -25,9 +26,14 @@ import (
 // at the wrong Morpho Blue, or a partial VaultV2 that only exposes one of the
 // V2 markers. Discovery callers should log these at WARN+ so a future Morpho
 // V3 doesn't sit invisible the way V2 did pre-VEC-198.
+//
+// ProbedSelectorwise is set when the batched probe blew the node's eth_call
+// gas budget and the address still answered as a non-vault one selector at a
+// time: a trapping contract, not a quiet non-vault.
 type ErrNotVault struct {
-	Err         error
-	VaultShaped bool
+	Err                error
+	VaultShaped        bool
+	ProbedSelectorwise bool
 }
 
 func (e *ErrNotVault) Error() string { return e.Err.Error() }
@@ -42,10 +48,14 @@ func (e *ErrNotVault) Unwrap() error { return e.Err }
 //   - V1: MORPHO() succeeds. The detail-fetch phase may upgrade this to V1.1
 //     if skimRecipient() also succeeds.
 //   - V2: curator() and liquidityAdapter() succeed; MORPHO() reverts. Final.
+//
+// ProbedSelectorwise reports that the batched probe blew the node's eth_call
+// gas budget and this verdict came from asking each selector alone.
 type VaultProbeResult struct {
-	MorphoAddr common.Address
-	AssetAddr  common.Address
-	Version    entity.MorphoVaultVersion
+	MorphoAddr         common.Address
+	AssetAddr          common.Address
+	Version            entity.MorphoVaultVersion
+	ProbedSelectorwise bool
 }
 
 // VaultDetails holds vault metadata fetched from on-chain reads.
@@ -182,8 +192,16 @@ func NewVaultProber() (*VaultProber, error) {
 // ProbeVault calls MORPHO(), asset(), curator(), and liquidityAdapter() on a
 // single address to determine if it is a Morpho-family vault. Returns
 // ErrNotVault if neither the MetaMorpho nor the VaultV2 path can be confirmed.
+//
+// A contract that traps on unrecognised selectors (jumps into invalid bytecode)
+// burns the gas aggregate3 shares across the batch, so the node answers "out of
+// gas" for the whole probe. That is the candidate's own answer, not a transport
+// fault: the probe then asks each selector alone and decides on those results.
 func (p *VaultProber) ProbeVault(ctx context.Context, mc outbound.Multicaller, addr common.Address, blockNum *big.Int) (*VaultProbeResult, error) {
 	results, err := mc.Execute(ctx, p.ProbeCalls(addr), blockNum)
+	if rpcerr.IsGasExhausted(err) {
+		return p.probeVaultSelectorwise(ctx, mc, addr, blockNum)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("multicall vault probe: %w", err)
 	}
@@ -191,6 +209,58 @@ func (p *VaultProber) ProbeVault(ctx context.Context, mc outbound.Multicaller, a
 		return nil, fmt.Errorf("expected %d probe results, got %d", vaultProbeCallsPerAddress, len(results))
 	}
 	return p.ParseProbeResults(results[0], results[1], results[2], results[3], addr)
+}
+
+func (p *VaultProber) probeVaultSelectorwise(ctx context.Context, mc outbound.Multicaller, addr common.Address, blockNum *big.Int) (*VaultProbeResult, error) {
+	results, _, err := p.ProbeSelectorwise(ctx, mc, addr, blockNum)
+	if err != nil {
+		return nil, fmt.Errorf("selector-wise vault probe: %w", err)
+	}
+	probe, err := p.ParseProbeResults(results[0], results[1], results[2], results[3], addr)
+	if err != nil {
+		var nv *ErrNotVault
+		if errors.As(err, &nv) {
+			nv.ProbedSelectorwise = true
+		}
+		return nil, err
+	}
+	probe.ProbedSelectorwise = true
+	return probe, nil
+}
+
+// ProbeSelectorwise issues each probe selector as its own eth_call, for an
+// address whose batched probe exhausted the gas budget. A selector that
+// exhausts it even alone is returned as a failed call and counted — the shape
+// AllowFailure gives a revert — so ParseProbeResults decides as usual. Any
+// other error is the transport's and propagates.
+func (p *VaultProber) ProbeSelectorwise(ctx context.Context, mc outbound.Multicaller, addr common.Address, blockNum *big.Int) ([]outbound.Result, int, error) {
+	calls := p.ProbeCalls(addr)
+	results := make([]outbound.Result, 0, len(calls))
+	exhausted := 0
+	for _, call := range calls {
+		result, err := executeIsolated(ctx, mc, call, blockNum)
+		if rpcerr.IsGasExhausted(err) {
+			results = append(results, outbound.Result{})
+			exhausted++
+			continue
+		}
+		if err != nil {
+			return nil, 0, err
+		}
+		results = append(results, result)
+	}
+	return results, exhausted, nil
+}
+
+func executeIsolated(ctx context.Context, mc outbound.Multicaller, call outbound.Call, blockNum *big.Int) (outbound.Result, error) {
+	results, err := mc.Execute(ctx, []outbound.Call{call}, blockNum)
+	if err != nil {
+		return outbound.Result{}, fmt.Errorf("isolated probe call: %w", err)
+	}
+	if len(results) != 1 {
+		return outbound.Result{}, fmt.Errorf("expected 1 result for an isolated probe call, got %d", len(results))
+	}
+	return results[0], nil
 }
 
 // ProbeCalls returns the probe multicall calls for a single address.

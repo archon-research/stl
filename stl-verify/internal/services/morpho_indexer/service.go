@@ -559,12 +559,11 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 			// The narrow gate also keeps the probe well clear of legacy
 			// ERC20s (BAT, STORJ, deployed pre-Solidity-0.4.10) that
 			// terminate unrecognised selector calls with `INVALID` (0xfe)
-			// instead of `REVERT`. `INVALID` consumes all available gas,
+			// instead of `REVERT`. `INVALID` consumes all available gas
 			// and Multicall3's `aggregate3` doesn't bound per-sub-call gas,
-			// so a 4-call probe (VEC-198) against such contracts blows past
-			// Alchemy's 550M `eth_call` cap and surfaces as a transient
-			// transport error — never reaches `ErrNotVault`, never enters
-			// the negative cache, retries forever.
+			// so such a probe blows past the node's `eth_call` cap and
+			// ProbeVault recovers selector-wise at four extra calls: keep
+			// the gate narrow.
 			//
 			// Same predicate is used by the morpho-vault-backfill
 			// (see cmd/backfillers/morpho-vault-backfill/discovery.go), so the
@@ -574,28 +573,16 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 			}
 			s.logger.Debug("attempting vault discovery", "address", logAddress.Hex(), "tx", receipt.TransactionHash)
 			if err := s.tryDiscoverVault(ctx, log, logAddress, chainID, blockNumber, blockHash, blockVersion, blockTimestamp); err != nil {
-				var nv *ErrNotVault
-				if errors.As(err, &nv) {
-					s.vaultRegistry.MarkNotVault(logAddress)
-					if nv.VaultShaped {
-						// Address exposes at least one of MORPHO/curator/liquidityAdapter
-						// but didn't match a known vault flavour. Surface at WARN —
-						// pre-VEC-198 this case (Morpho VaultV2) sat invisible for ~225
-						// days; if Morpho ships a V3 we want a signal in logs/dashboards.
-						s.logger.Warn("vault-shaped address rejected by probe — possible new vault flavour",
-							"address", logAddress.Hex(), "reason", err)
-					} else {
-						s.logger.Debug("not a Morpho-family vault", "address", logAddress.Hex(), "reason", err)
-					}
-				} else {
-					s.logger.Warn("vault discovery failed (will retry)", "address", logAddress.Hex(), "error", err)
-					// VEC-188: keep the first failure. A later success for the
-					// same vault address does NOT retroactively process the
-					// earlier log — that log's event was never saved. Surfacing
-					// the error forces SQS to redeliver so BOTH logs are retried.
-					if _, seen := discoveryErrs[logAddress]; !seen {
-						discoveryErrs[logAddress] = fmt.Errorf("vault discovery for %s in tx %s: %w", logAddress.Hex(), receipt.TransactionHash, err)
-					}
+				if s.discardIfNotVault(ctx, logAddress, err, discoveryPathVaultActivity) {
+					continue
+				}
+				s.logger.Warn("vault discovery failed (will retry)", "address", logAddress.Hex(), "error", err)
+				// VEC-188: keep the first failure. A later success for the
+				// same vault address does NOT retroactively process the
+				// earlier log — that log's event was never saved. Surfacing
+				// the error forces SQS to redeliver so BOTH logs are retried.
+				if _, seen := discoveryErrs[logAddress]; !seen {
+					discoveryErrs[logAddress] = fmt.Errorf("vault discovery for %s in tx %s: %w", logAddress.Hex(), receipt.TransactionHash, err)
 				}
 			}
 			// Intentionally no delete(discoveryErrs, logAddress) on success:
