@@ -52,6 +52,9 @@ var convertedAppendOnlyTables = []string{
 	// (20260714_160000); a statement-level trigger raises on any real mutation.
 	"build_registry",
 	"writer_run",
+	// ARCT-385 (#854): the posm registry row and the ERC-721 Transfer stream.
+	"uniswap_v4_position_manager",
+	"uniswap_v4_position_nft_transfer",
 }
 
 // TestConvertedTablesAreAppendOnly asserts the DB-level half of the append-only rule:
