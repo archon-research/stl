@@ -25,8 +25,8 @@
 # regex `~".*watcher"` to follow up on PR #369, which gave each per-chain
 # watcher a distinct OTel service.name (e.g. "stl-watcher",
 # "arbitrum-watcher", "base-watcher", "optimism-watcher", "avalanche-watcher",
-# "unichain-watcher"). The old equality matcher silently broke for every
-# L2 chain
+# "unichain-watcher", "robinhood-watcher"). The old equality matcher silently
+# broke for every L2 chain.
 # The regex still scopes to the `vector` namespace, so non-watcher
 # services that happen to end in "watcher" elsewhere cannot pollute the
 # series.
@@ -317,8 +317,12 @@ groups:
         # impossible, so any occurrence is the over-orphaning trigger firing.
         # Ethereum (the bare `watcher`) reorgs normally (depth 1, a few times a
         # day) and is deliberately not listed. ADD new single-sequencer chains to
-        # this list when onboarding them. Scoping by service_name is interim; the
-        # proper fix is a chain-behavior label (reorgs_expected) so alerts stop
+        # this list when onboarding them. robinhood (an Arbitrum Orbit chain,
+        # ARCT-397) is listed for that reason and matters most here: ARCT-374 QA
+        # showed Alchemy `newHeads` omits heads under burst on it (identical gaps
+        # on two independent WS connections), so it exercises the out-of-order /
+        # gap-fill path more than any other chain. Scoping by service_name is
+        # interim; the proper fix is a chain-behavior label (reorgs_expected) so alerts stop
         # hardcoding chain names: see VEC-295. increase()>0 with a short dwell
         # catches even a single burst, which the broader sustained-rate
         # VectorWatcherOutOfOrderBlocksHigh rule can miss.
@@ -326,7 +330,7 @@ groups:
           sum by (service_name, cluster) (
             increase(live_block_out_of_order_total{
               k8s_namespace_name="vector",
-              service_name=~"(arbitrum|optimism|base|unichain|avalanche)-watcher",
+              service_name=~"(arbitrum|optimism|base|unichain|avalanche|robinhood)-watcher",
               outcome="reorg"
             }[10m])
           ) > 0

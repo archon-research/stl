@@ -1381,9 +1381,9 @@ and total supplies via Multicall3, and appends `allocation_position` /
 `SweepEveryNBlocks`, default 75; the L2 instances override it via `SWEEP_BLOCKS`)
 re-reads every tracked entry to catch transfer-less balance changes (interest
 accrual, rebases). One instance per chain — mainnet, avalanche, base (VEC-499),
-optimism, unichain, arbitrum (ARCT-216) — all reusing one `service_name` and
-differing only by the `chain` label, so the chain-scoped alerts below cover every
-chain without per-instance edits.
+optimism, unichain, arbitrum (ARCT-216), robinhood (ARCT-397) — all reusing one
+`service_name` and differing only by the `chain` label, so the chain-scoped alerts
+below cover every chain without per-instance edits.
 
 **Metric coverage (VEC-499):** the shared `telemetry.Metrics` recorder emits one
 sample per consumed block — `blocks_processed_total{service_name="prime-allocation-indexer",
@@ -1397,8 +1397,8 @@ below).
 **`<deployment>` / `app` label per chain:** each per-chain instance has its **own**
 Deployment and `app` label equal to its deployment name — mainnet →
 `allocation-tracker`, every other chain → `<chain>-allocation-tracker`
-(`avalanche-`, `base-`, `optimism-`, `unichain-`, `arbitrum-`). The Down alert
-carries a `deployment` label (use
+(`avalanche-`, `base-`, `optimism-`, `unichain-`, `arbitrum-`, `robinhood-`). The
+Down alert carries a `deployment` label (use
 `{{ $labels.deployment }}` in its commands); the chain-scoped alerts below carry
 only `chain`, so substitute the matching `<deployment>` from this mapping in their
 `kubectl` selectors (`-l app=allocation-tracker` matches mainnet pods only).
@@ -1639,7 +1639,7 @@ USD exposure computed from these rows silently undercounts (VEC-307).
 
 1. `sum by (token, reason) (increase(allocation_underlying_value_failures_total[6h]))`
    -- which contracts, which reason.
-2. Logs: `{app=~"(avalanche-|base-|optimism-|unichain-|arbitrum-)?allocation-tracker"} |= "underlying value not computable"`
+2. Logs: `{app=~"(avalanche-|base-|optimism-|unichain-|arbitrum-|robinhood-)?allocation-tracker"} |= "underlying value not computable"`
    -- carries token, wallet, block, reason.
 3. Rows stay NULL until the next successful sweep writes new rows (the table
    is append-only; nothing backfills automatically). Consumers fall back to

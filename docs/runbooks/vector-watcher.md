@@ -284,10 +284,10 @@ is nonzero over the last 10m: a header arrived at or below the canonical head
 and did NOT link cleanly onto our chain, so it was routed to reorg handling
 rather than classified as a clean gap fill. The rule is scoped to an explicit
 allow-list of the single-sequencer rollup watchers (arbitrum, optimism, base,
-unichain, avalanche), where a real reorg is essentially impossible, so this is
-the over-orphaning trigger from the 2026-06-02 incident. Ethereum (the bare
-`watcher`) reorgs normally (depth 1, a few times a day) and is deliberately not
-listed. New single-sequencer chains must be added to the allow-list when
+unichain, avalanche, robinhood), where a real reorg is essentially impossible, so
+this is the over-orphaning trigger from the 2026-06-02 incident. Ethereum (the
+bare `watcher`) reorgs normally (depth 1, a few times a day) and is deliberately
+not listed. New single-sequencer chains must be added to the allow-list when
 onboarded. Scoping by service name is interim; the proper fix is a chain-behavior
 label so alerts stop hardcoding chain names (see VEC-295). Unlike
 VectorWatcherOutOfOrderBlocksHigh (a sustained-rate warning across all outcomes),
@@ -309,6 +309,19 @@ verification before any state mutation, and the backfill self-heals any
 over-orphaning, so a single occurrence is a signal rather than confirmed damage.
 Sustained occurrences mean upstream is degraded and the watcher is doing
 defensive work it should not need to.
+
+**`robinhood-watcher` (ARCT-397).** robinhood is a single-sequencer Arbitrum
+Orbit chain, so it belongs on the allow-list on the same grounds as the other
+rollups — but expect this alert to fire there more often than anywhere else.
+ARCT-374 QA showed Alchemy's `newHeads` subscription omits heads under burst on
+robinhood (the same gaps were observed on two independent WS connections, so it
+is upstream, not our client), which drives the watcher onto the out-of-order /
+gap-fill path far more than on the other chains. Treat a robinhood occurrence
+that correlates with an Alchemy burst as the known upstream behaviour: confirm
+via the first checks that the gap self-healed (`backfill_watermark_lag` returns
+to baseline and `backfill_gap_fill_no_canonical_total` is flat) rather than
+assuming over-orphaning. Repeated firings with orphan churn are still a real
+signal and should be escalated like any other chain.
 
 ### Verify recovery
 
