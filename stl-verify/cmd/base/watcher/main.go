@@ -372,18 +372,7 @@ func openDependencies(
 		return dependencies{}, fmt.Errorf("creating alchemy telemetry: %w", err)
 	}
 
-	subscriber, err := alchemy.NewSubscriber(alchemy.SubscriberConfig{
-		WebSocketURL:      fmt.Sprintf("%s/%s", cfg.alchemyWSURL, cfg.alchemyAPIKey),
-		InitialBackoff:    1 * time.Second,
-		MaxBackoff:        30 * time.Second,
-		PingInterval:      30 * time.Second,
-		PongTimeout:       10 * time.Second,
-		ReadTimeout:       60 * time.Second,
-		ChannelBufferSize: 100,
-		HealthTimeout:     30 * time.Second,
-		Logger:            logger,
-		Telemetry:         alchemyTelemetry,
-	})
+	subscriber, err := alchemy.NewSubscriber(newSubscriberConfig(cfg, logger, alchemyTelemetry))
 	if err != nil {
 		return dependencies{}, fmt.Errorf("creating subscriber: %w", err)
 	}
@@ -422,6 +411,24 @@ func openDependencies(
 		eventSink:  eventSink,
 		metrics:    serviceTelemetry,
 	}, nil
+}
+
+// newSubscriberConfig builds the watcher's WebSocket subscriber settings.
+// telemetry is optional to the adapter but never optional here: without it the
+// subscriber's blocks received/dropped counters emit nothing.
+func newSubscriberConfig(cfg watcherConfig, logger *slog.Logger, telemetry *alchemy.Telemetry) alchemy.SubscriberConfig {
+	return alchemy.SubscriberConfig{
+		WebSocketURL:      fmt.Sprintf("%s/%s", cfg.alchemyWSURL, cfg.alchemyAPIKey),
+		InitialBackoff:    1 * time.Second,
+		MaxBackoff:        30 * time.Second,
+		PingInterval:      30 * time.Second,
+		PongTimeout:       10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		ChannelBufferSize: 100,
+		HealthTimeout:     30 * time.Second,
+		Logger:            logger,
+		Telemetry:         telemetry,
+	}
 }
 
 // newServices returns the live service and, when ENABLE_BACKFILL is set, the

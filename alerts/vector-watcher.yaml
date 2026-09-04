@@ -73,6 +73,43 @@ groups:
             Check watcher pod logs and Alchemy availability before restarting.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatchernoblocks
 
+      - alert: VectorWatcherNoHeadersReceived
+        # The WebSocket subscriber stopped forwarding newHeads while the process
+        # is otherwise alive. VectorWatcherNoBlocks above does NOT catch this:
+        # its `alchemy_client_requests_total` series is fed by the HTTP client
+        # that live AND backfill share, and backfill re-verifies its boundary
+        # blocks with eth_getBlockByNumber every poll interval (5s in both
+        # overlays), so a watcher whose socket has gone silent still keeps that
+        # counter well above zero. This rule reads the subscriber directly.
+        #
+        # Window is 5m so the slowest chain (Ethereum, ~12s blocks) still has
+        # ~25 headers in it; anything shorter risks firing on a normal L1 lull.
+        expr: |
+          sum by (service_name, cluster) (
+            rate(alchemy_subscriber_blocks_received_total{
+              k8s_namespace_name="vector",
+              service_name=~".*watcher"
+            }[5m])
+          ) == 0
+        for: 5m
+        labels:
+          team: vector
+          severity: critical
+          component: watcher
+          namespace: vector
+        annotations:
+          summary: "Vector watcher receiving no block headers on {{ $labels.service_name }}"
+          description: |
+            `alchemy_subscriber_blocks_received_total` on
+            `{{ $labels.service_name }}` has been flat for >5m: the Alchemy
+            WebSocket subscriber is delivering nothing even though the process
+            is still issuing RPC calls. Live ingestion for that chain is
+            stopped and only backfill is keeping the chain whole.
+
+            Check the subscriber's reconnect/stall counters and the pod logs
+            before restarting.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatchernoheadersreceived
+
       - alert: VectorWatcherAlchemyErrorsHigh
         # Sustained Alchemy RPC error rate >50% for 10m. Captures upstream
         # outage, auth failure, or quota exhaustion. Below 50% the watcher's
@@ -212,12 +249,12 @@ groups:
         annotations:
           summary: "Vector watcher dropped block headers on {{ $labels.service_name }}"
           description: |
-            `alchemy_subscriber_blocks_dropped_total` on
-            `{{ $labels.service_name }}` is nonzero over the last 10m: the
-            subscriber's 100-slot header buffer filled and headers were
-            discarded before the live path saw them. The consumer is stalled
-            (slow RPC fetch, Redis/SNS backpressure, or a blocked persist).
-            Expect gaps that only backfill will heal.
+            `{{ $labels.service_name }}` discarded
+            `{{ $value | printf "%.0f" }}` block headers in the last 10m: the
+            subscriber's 100-slot buffer filled and the headers never reached
+            the live path. The consumer is stalled (slow RPC fetch, Redis/SNS
+            backpressure, or a blocked persist). Expect gaps that only backfill
+            will heal.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatcherblocksdropped
 
       # ---------------------------------------------------------------------

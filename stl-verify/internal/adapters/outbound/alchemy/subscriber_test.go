@@ -853,10 +853,11 @@ func TestSubscribe_HandlesSubscriptionError(t *testing.T) {
 	}
 }
 
-// newBlockFloodServer serves the newHeads subscription and then writes
-// totalBlocks headers back to back, counting each one it wrote into blocksSent.
-// It outpaces any consumer, so a subscriber with a small buffer must drop.
-func newBlockFloodServer(blocksSent *atomic.Int32, totalBlocks int) *mockWSServer {
+// newBlockFloodServer writes totalBlocks headers 5ms apart: enough to overflow a
+// subscriber whose buffer is smaller and is left undrained. The returned counter
+// tracks how many headers actually reached the wire.
+func newBlockFloodServer(totalBlocks int) (*mockWSServer, *atomic.Int32) {
+	blocksSent := &atomic.Int32{}
 	return newMockWSServer(func(conn *websocket.Conn) {
 		defer conn.Close()
 
@@ -891,15 +892,14 @@ func newBlockFloodServer(blocksSent *atomic.Int32, totalBlocks int) *mockWSServe
 		}
 
 		<-time.After(time.Second)
-	})
+	}), blocksSent
 }
 
 func TestSubscribe_ChannelBufferFull(t *testing.T) {
-	blocksSent := atomic.Int32{}
 	const totalBlocks = 20
 	const bufferSize = 5
 
-	server := newBlockFloodServer(&blocksSent, totalBlocks)
+	server, blocksSent := newBlockFloodServer(totalBlocks)
 	defer server.Close()
 
 	sub, err := NewSubscriber(SubscriberConfig{
@@ -961,21 +961,51 @@ drainLoop:
 	t.Logf("sent %d blocks, received %d, dropped %d", blocksSent.Load(), received, dropped)
 }
 
-func TestSubscribe_ChannelBufferFullRecordsDropMetric(t *testing.T) {
+// newTestTelemetry returns telemetry wired to a manual reader so a test can
+// collect what the subscriber recorded.
+func newTestTelemetry(t *testing.T, chain string) (*Telemetry, *sdkmetric.ManualReader) {
+	t.Helper()
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	tel, err := NewTelemetryWithProviders(tracenoop.NewTracerProvider(), mp, "base")
+	tel, err := NewTelemetryWithProviders(tracenoop.NewTracerProvider(), mp, chain)
 	if err != nil {
 		t.Fatalf("failed to create telemetry: %v", err)
 	}
+	return tel, reader
+}
 
-	blocksSent := atomic.Int32{}
-	server := newBlockFloodServer(&blocksSent, 20)
+// collectRecorded polls until metricName has a data point. An instrument the SDK
+// never recorded exports nothing, so the deadline is the only failure mode.
+func collectRecorded(ctx context.Context, t *testing.T, reader *sdkmetric.ManualReader, metricName string) metricdata.ResourceMetrics {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		var rm metricdata.ResourceMetrics
+		if err := reader.Collect(ctx, &rm); err != nil {
+			t.Fatalf("collect metrics: %v", err)
+		}
+		if _, ok := metrictest.ChainValue(rm, metricName); ok {
+			return rm
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("%s was never recorded", metricName)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func TestSubscribe_ChannelBufferFullRecordsDropMetric(t *testing.T) {
+	const totalBlocks = 20
+	const bufferSize = 5
+
+	tel, reader := newTestTelemetry(t, "base")
+	server, _ := newBlockFloodServer(totalBlocks)
 	defer server.Close()
 
 	sub, err := NewSubscriber(SubscriberConfig{
 		WebSocketURL:      server.URL(),
-		ChannelBufferSize: 5,
+		ChannelBufferSize: bufferSize,
 		ReadTimeout:       5 * time.Second,
 		Telemetry:         tel,
 	})
@@ -989,22 +1019,16 @@ func TestSubscribe_ChannelBufferFullRecordsDropMetric(t *testing.T) {
 	if _, err := sub.Subscribe(ctx); err != nil {
 		t.Fatalf("failed to subscribe: %v", err)
 	}
-	defer func() { _ = sub.Unsubscribe() }()
+	defer func() {
+		if err := sub.Unsubscribe(); err != nil {
+			t.Logf("unsubscribe returned error: %v", err)
+		}
+	}()
 
 	// Nothing reads the headers channel, so it fills and the flood overflows it.
-	time.Sleep(500 * time.Millisecond)
+	rm := collectRecorded(ctx, t, reader, "alchemy.subscriber.blocks.dropped.total")
 
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(ctx, &rm); err != nil {
-		t.Fatalf("collect metrics: %v", err)
-	}
-	chain, ok := metrictest.ChainValue(rm, "alchemy.subscriber.blocks.dropped.total")
-	if !ok {
-		t.Fatal("expected alchemy.subscriber.blocks.dropped.total to be recorded when the channel is full")
-	}
-	if chain != "base" {
-		t.Errorf("drop metric chain = %q, want base", chain)
-	}
+	metrictest.RequireChain(t, rm, "base", "alchemy.subscriber.blocks.dropped.total")
 }
 
 func TestSubscribe_ContextCancellation(t *testing.T) {
@@ -1574,12 +1598,7 @@ func TestSubscribe_DataSilenceTriggersReconnectDespitePong(t *testing.T) {
 }
 
 func TestSubscribe_DataSilenceRecordsStallMetric(t *testing.T) {
-	reader := sdkmetric.NewManualReader()
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	tel, err := NewTelemetryWithProviders(tracenoop.NewTracerProvider(), mp, "base")
-	if err != nil {
-		t.Fatalf("failed to create telemetry: %v", err)
-	}
+	tel, reader := newTestTelemetry(t, "base")
 
 	connectCount := atomic.Int32{}
 	server := newPongAliveSilentServer(&connectCount)
@@ -1617,17 +1636,9 @@ func TestSubscribe_DataSilenceRecordsStallMetric(t *testing.T) {
 		}
 	}
 
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(ctx, &rm); err != nil {
-		t.Fatalf("collect metrics: %v", err)
-	}
-	chain, ok := metrictest.ChainValue(rm, "alchemy.subscriber.stalls.total")
-	if !ok {
-		t.Fatal("expected alchemy.subscriber.stalls.total to be recorded when the watchdog fires")
-	}
-	if chain != "base" {
-		t.Errorf("stall metric chain = %q, want base", chain)
-	}
+	rm := collectRecorded(ctx, t, reader, "alchemy.subscriber.stalls.total")
+
+	metrictest.RequireChain(t, rm, "base", "alchemy.subscriber.stalls.total")
 }
 
 func TestSubscribe_DataFlowingDoesNotTriggerWatchdog(t *testing.T) {

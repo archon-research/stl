@@ -47,6 +47,67 @@ for the chain. Cross-check downstream lag in the Vector dashboard.
 
 ---
 
+## VectorWatcherNoHeadersReceived
+
+**Severity:** critical · **For:** 5m
+
+### What it means
+
+`alchemy_subscriber_blocks_received_total` on the labelled `service_name` has been
+flat for over 5 minutes: the Alchemy WebSocket subscriber is forwarding no
+`newHeads` at all. Live ingestion for that chain has stopped. Blocks will still
+land eventually, but only through the backfill loop, minutes to hours late and
+without the live SNS fan-out that the indexers consume.
+
+This is the counterpart to `VectorWatcherNoBlocks`, and the two are not
+interchangeable. `VectorWatcherNoBlocks` watches
+`alchemy_client_requests_total{rpc_method="eth_getBlockByNumber"}`, which the live
+path and the backfill loop both feed through one shared HTTP client. Backfill
+re-verifies its boundary blocks on every poll (5s), so that counter stays busy
+even when the socket has gone completely silent — a dead subscriber does not fire
+it. This rule reads the subscriber itself.
+
+### First checks (≤5 min)
+
+1. **Is the socket flapping or just silent?** Compare
+   `rate(alchemy_subscriber_reconnections_total[10m])` and
+   `increase(alchemy_subscriber_stalls_total[10m])` for the same
+   `service_name`. Stalls climbing means the data-freshness watchdog is firing
+   and forcing reconnects that do not recover; both flat means the connection
+   looks healthy to us but is delivering nothing.
+2. **Pod logs** — `kubectl -n vector logs <watcher pod> --tail=200`. Look for
+   `no newHeads within HealthTimeout`, repeated
+   `WebSocket connection lost, reconnecting...`, or `failed to connect`.
+3. **Alchemy status page** — https://status.alchemy.com/ — confirm WebSocket
+   availability for that chain specifically; the HTTP endpoint can be healthy
+   while the subscription endpoint is not.
+4. **Did the chain itself halt?** Check an explorer for the chain's head. A
+   genuinely halted chain produces this alert legitimately, and there is nothing
+   to fix on our side.
+
+### Common causes
+
+- Alchemy WebSocket subscription silently dropped without closing the socket —
+  the watchdog should force a reconnect, so if this persists the reconnect is
+  failing too.
+- Alchemy WebSocket outage or subscription quota exhaustion for that chain.
+- Network path to the WebSocket endpoint blocked while HTTP still works.
+
+### Recovery
+
+Restart the watcher pod (`kubectl -n vector delete pod <pod>`); the Deployment
+recreates it and the subscription is re-established from scratch. If the alert
+returns after a restart, the problem is upstream — check the Alchemy status page
+and the API key's WebSocket quota. Backfill will close the gap once headers flow
+again; track it with `backfill_watermark_lag`.
+
+### Verify recovery
+
+`rate(alchemy_subscriber_blocks_received_total[5m])` returns to roughly the
+chain's block rate, and `backfill_watermark_lag` drains back toward zero.
+
+---
+
 ## VectorWatcherAlchemyErrorsHigh
 
 **Severity:** critical · **For:** 10m
@@ -152,17 +213,16 @@ returns below 0.2 sustained.
 nonzero over the last 10m. The Alchemy WebSocket subscriber forwards each
 `newHeads` header into a 100-slot buffered channel with a non-blocking send, so a
 header is only discarded once that buffer is full — i.e. the live consumer fell
-~100 blocks behind the socket. On a fast chain (Robinhood, ~10 blocks/s) that is
-~10 seconds of stall; on Ethereum it is ~20 minutes.
+~100 blocks behind the socket. How long that took depends on the chain: ~20
+minutes on Ethereum (~12s blocks), ~3 minutes on an L2 at ~2s, and seconds on a
+chain producing several blocks a second.
 
 A dropped header never reaches the live path, so the block lands in Postgres only
 when backfill picks the gap up.
 
 This counter is also the cheap way to answer the ARCT-374 question when a gap
 appears: **drops here mean our channel dropped it; silence here means Alchemy
-never delivered it.** Before ARCT-398 the watcher never set `Telemetry` on the
-subscriber, so the counter was never emitted and that distinction needed a
-parallel-connection experiment.
+never delivered it.**
 
 ### First checks (≤5 min)
 
@@ -186,17 +246,18 @@ parallel-connection experiment.
 
 ### Recovery
 
-Backfill heals the dropped heights on its own; no manual repair is normally
-needed. Fix the stall (the cause from step 2), then confirm the heights from the
-log line exist as canonical rows. If backfill is not catching them, follow
-`VectorWatcherBackfillWatermarkLagHigh`.
+Fix the consumer stall identified in step 2 — that is the action this alert asks
+for. Then confirm the heights from the log line exist as canonical rows. Backfill
+normally heals them on its own (every overlay watcher runs `ENABLE_BACKFILL=true`;
+check the chain's configmap if in doubt), so manual repair is rarely needed. If
+backfill is not catching them, follow `VectorWatcherBackfillWatermarkLagHigh`.
 
 ### Verify recovery
 
 `increase(alchemy_subscriber_blocks_dropped_total[10m])` returns to zero while
 `rate(alchemy_subscriber_blocks_received_total[5m])` still tracks the chain's
 block rate — received at zero means the subscriber stopped delivering entirely,
-which is `VectorWatcherNoBlocks`, not this alert.
+which is `VectorWatcherNoHeadersReceived`, not this alert.
 
 ---
 
