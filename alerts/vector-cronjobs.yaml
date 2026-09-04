@@ -27,14 +27,18 @@
 # template's `Cluster:` header is populated. `namespace` is a static rule label
 # (mimir-rules-sync lint forbids `cluster`/`env` as static labels but allows it).
 #
-# Five services are EXCLUDED by service_name: maple-graphql-indexer, which has
-# richer dedicated rules in vector-indexers.yaml (VEC-320), and the four
-# on-demand jobs — offchain-price-backfill, reference-capital-backfill,
-# morpho-vault-backfill and morpho-v2-bootstrap, none of which carries a schedule — see
-# VectorCronjobAllRunsFailing for why "no successes in an hour" is their healthy
-# state. Every other cronjob, including any added later, is covered
-# automatically; on-demand workers are covered by VectorCronjobRunFailing and
-# VectorOnDemandWorkerDown instead.
+# Seven services are EXCLUDED from VectorCronjobAllRunsFailing by service_name:
+# maple-graphql-indexer, which has richer dedicated rules in
+# vector-indexers.yaml (VEC-320); the five on-demand jobs —
+# offchain-price-backfill, reference-capital-backfill, morpho-vault-backfill,
+# morpho-v2-bootstrap and block-republisher, none of which carries a schedule;
+# and core-model-runner, which does carry a schedule but ticks only every 24h with
+# no retry (RetryPolicy.maximum_attempts=1) — see VectorCronjobAllRunsFailing
+# for why "no successes in an hour" is their healthy state. Every other
+# cronjob, including any added later, is covered automatically; the excluded
+# ones are covered by VectorCronjobRunFailing (and VectorOnDemandWorkerDown /
+# VectorCronjobWorkerDown for availability) instead; core-model-runner also
+# gets its own stall rule, VectorCoreModelRunnerStale.
 #
 # Severity → routing (per the alerting routing spec):
 #   critical       → pages, prod #at_stl_prod_alerts / staging
@@ -94,7 +98,7 @@ groups:
         #
         # On-demand jobs (temporal.RunWorker: offchain-price-backfill,
         # reference-capital-backfill, morpho-vault-backfill,
-        # morpho-v2-bootstrap) are excluded: they run only
+        # morpho-v2-bootstrap, block-republisher) are excluded: they run only
         # when a human starts them, so "zero successes in the last hour" is their
         # healthy state and a single failed run is by definition
         # errors=1/successes=0, which would page critical for a run the operator
@@ -102,10 +106,15 @@ groups:
         # cronjob_runs_total and are covered by the VectorCronjobRunFailing
         # warning above (the right severity) plus VectorOnDemandWorkerDown.
         #
-        # The 1h window spans >=1 cycle for even the
-        # slowest cronjob (watcher-data-validator, 1h) and many cycles for the
-        # faster ones. Distinct from VectorCronjobWorkerDown: here the worker
-        # IS running and emitting metrics, every run just errors.
+        # core-model-runner (scheduled, but 24h interval with no retry) is
+        # excluded for the same reason: one failed tick is errors=1/successes=0
+        # for a full day. VectorCronjobRunFailing still warns on it, and
+        # VectorCoreModelRunnerStale below is its critical rule.
+        #
+        # The 1h window spans >=1 cycle for every other covered cronjob — even
+        # the slowest of them, watcher-data-validator (1h), and many cycles for
+        # the faster ones. Distinct from VectorCronjobWorkerDown: here the
+        # worker IS running and emitting metrics, every run just errors.
         expr: |
           (
             sum by (service_name, cluster) (
@@ -116,6 +125,8 @@ groups:
                 service_name!="reference-capital-backfill",
                 service_name!="morpho-v2-bootstrap",
                 service_name!="morpho-vault-backfill",
+                service_name!="block-republisher",
+                service_name!="core-model-runner",
                 k8s_namespace_name="vector"
               }[1h])
             ) > 0
@@ -130,6 +141,8 @@ groups:
                 service_name!="reference-capital-backfill",
                 service_name!="morpho-v2-bootstrap",
                 service_name!="morpho-vault-backfill",
+                service_name!="block-republisher",
+                service_name!="core-model-runner",
                 k8s_namespace_name="vector"
               }[1h])
             ) == 0
@@ -226,7 +239,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_status_replicas_available{
                 namespace="vector",
-                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill"
+                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill|block-republisher"
               }
             ) < 1
           )
@@ -234,7 +247,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_spec_replicas{
                 namespace="vector",
-                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill"
+                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill|block-republisher"
               }
             ) > 0
           )
@@ -253,6 +266,75 @@ groups:
             back. Check the pod (CrashLoopBackOff, OOM, image pull); an
             ImagePullBackOff here usually means the release wiring is missing.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorondemandworkerdown
+
+      # -----------------------------------------------------------------------
+      # CRITICAL — core-model-runner has not completed a tick in 30h
+      # -----------------------------------------------------------------------
+      - alert: VectorCoreModelRunnerStale
+        # Stall rule for the one scheduled cronjob excluded from
+        # VectorCronjobAllRunsFailing. "Completed" = status success OR error: a
+        # tick that fails is VectorCronjobRunFailing's business (warning, daily,
+        # and one gap-y market fails the whole tick — see run_markets), so
+        # counting errors as completions keeps that from escalating into a
+        # permanent page. What this rule catches is a tick that leaves no
+        # completion at all while the pod stays 1/1 available: a deploy mid-tick
+        # (status="canceled", no retry, day lost), a hang (the sync activity
+        # never learns of the 4h server-side timeout, so nothing is recorded),
+        # or a SIGKILL mid Monte Carlo. The API serves the newest
+        # core_model_results row with no age check, so a silent stop means a
+        # stale published number.
+        #
+        # Window: 24h interval + 4h TICK_TIMEOUT + 2h slack, so two healthy
+        # completions are at most ~28h apart.
+        #
+        # The `offset` gate requires the (zero-seeded) success series to have
+        # existed a window ago. Without it every cold start pages: the seed is
+        # 0 from the first export and the first tick is at the next 00:00 UTC.
+        # It gates on the series existing, not on total>0 — a hung tick records
+        # nothing, which is exactly what must still fire.
+        #
+        # Residual: a live pod whose OTLP export dies lets the series
+        # staleness-expire; `increase()` then has <2 samples, returns no data,
+        # and this rule goes silent. VectorCronjobWorkerDown does not cover it
+        # (the pod is 1/1) — see the runbook.
+        expr: |
+          (
+            sum by (cluster) (
+              increase(cronjob_runs_total{
+                service_name="core-model-runner",
+                status=~"success|error",
+                k8s_namespace_name="vector"
+              }[30h])
+            ) == 0
+          )
+          and on (cluster) (
+            sum by (cluster) (
+              count_over_time(cronjob_runs_total{
+                service_name="core-model-runner",
+                status="success",
+                k8s_namespace_name="vector"
+              }[1h] offset 29h)
+            ) > 0
+          )
+        for: 30m
+        labels:
+          team: vector
+          severity: critical
+          component: temporal-cronjobs
+          namespace: vector
+        annotations:
+          summary: "Vector cronjob `core-model-runner` has not completed a tick in 30h"
+          description: |
+            `core-model-runner` recorded no completed run (success or error) in
+            the last 30h (schedule is 24h, a tick may take up to 4h).
+            `core_model_results` has stopped advancing while the API keeps
+            serving its newest row as the current CRR. The tick was canceled by
+            a deploy mid-run (no retry, so the day is lost), hung past its 4h
+            timeout without recording anything, or the schedule stopped firing.
+            Check the Temporal UI (vector namespace -> Schedules ->
+            core-model-runner) and the pod logs; trigger the schedule by hand
+            once the cause is fixed.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorcoremodelrunnerstale
 
       # =======================================================================
       # transform-worker (VEC-484): queue-drain and parity rules
@@ -376,25 +458,23 @@ groups:
       # Sky's Star monitor publishes no history, so a cycle that records nothing
       # leaves a hole that can never be backfilled — and the read path gap-fills
       # with locf, so a stalled series keeps serving its last value as current.
-      # Neither rule below is covered by the generic cronjob rules above: both
-      # failures happen on runs that report success.
+      # None of the rules below is covered by the generic cronjob rules above:
+      # every failure they catch happens on a run that reports success.
       - alert: VectorReferenceCapitalIndexerWritesZero
         # Cycling but persisting nothing. The monitor covers every tracked prime
         # today, so a healthy cycle always writes; zero means it returned an
         # empty-but-successful payload. Gated on "cycling AND zero" so it does
         # not duplicate the worker-down rules when the worker is simply down.
+        # `unless` (not `== 0`) also fires when the counter series is entirely
+        # absent — a collector drop or metric rename — which `== 0` cannot.
         expr: |
-          (
-            sum by (cluster) (
-              rate(cronjob_runs_total{service_name="reference-capital-indexer", status="success", k8s_namespace_name="vector"}[1h])
-            ) > 0
-          )
-          and
-          (
-            sum by (cluster) (
-              increase(reference_capital_sync_snapshots_written_total{k8s_namespace_name="vector"}[1h])
-            ) == 0
-          )
+          sum by (cluster) (
+            rate(cronjob_runs_total{service_name="reference-capital-indexer", status="success", k8s_namespace_name="vector"}[1h])
+          ) > 0
+          unless
+          sum by (cluster) (
+            increase(reference_capital_sync_snapshots_written_total{k8s_namespace_name="vector"}[1h])
+          ) > 0
         for: 30m
         labels:
           team: vector
@@ -435,6 +515,131 @@ groups:
             monitor's `/primes/` route before assuming an outage.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorreferencecapitalindexerprimeuncovered
 
+      - alert: VectorReferenceCapitalIndexerAllocationsZero
+        # The per-allocation breakdown stalled while cycles succeed. Every row is
+        # keyed by the cycle's fresh synced_at, so written == inserted, and a
+        # healthy cycle always writes: the service fails a cycle whose covered
+        # primes report exposure with no breakdown. Zero therefore means every
+        # covered prime reported zero exposure — worth eyes either way.
+        # `unless` (not `== 0`) also fires when the counter series is entirely
+        # absent — a collector drop or metric rename — which `== 0` cannot.
+        expr: |
+          sum by (cluster) (
+            rate(cronjob_runs_total{service_name="reference-capital-indexer", status="success", k8s_namespace_name="vector"}[1h])
+          ) > 0
+          unless
+          sum by (cluster) (
+            increase(reference_capital_sync_allocations_written_total{k8s_namespace_name="vector"}[1h])
+          ) > 0
+        for: 30m
+        labels:
+          team: vector
+          severity: warning
+          component: reference-capital-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector reference-capital-indexer wrote 0 allocation breakdown rows"
+          description: |
+            `prime_capital_stack_allocation` received 0 rows over 1h while cycles
+            succeeded. The per-allocation reference breakdown has stopped
+            advancing; like the prime-level series, this history cannot be
+            backfilled afterwards — the monitor publishes none.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorreferencecapitalindexerallocationszero
+
+      - alert: VectorReferenceCapitalIndexerPositionsZero
+        # The positions counter stalled while cycles succeed. A successful cycle
+        # always writes at least one row per covered star: Run fails before
+        # persisting if snapshots are empty, and the positions client fails the
+        # whole cycle on an empty result for a covered prime — so a covered set
+        # is never empty when a cycle succeeds. Zero here therefore means the
+        # counter itself broke (collector drop, metric rename, missed recording
+        # call), not a stalled series.
+        # `unless` (not `== 0`) also fires when the counter series is entirely
+        # absent, which `== 0` cannot.
+        expr: |
+          sum by (cluster) (
+            rate(cronjob_runs_total{service_name="reference-capital-indexer", status="success", k8s_namespace_name="vector"}[1h])
+          ) > 0
+          unless
+          sum by (cluster) (
+            increase(reference_capital_sync_positions_written_total{k8s_namespace_name="vector"}[1h])
+          ) > 0
+        for: 30m
+        labels:
+          team: vector
+          severity: warning
+          component: reference-capital-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector reference-capital-indexer: positions counter stopped moving"
+          description: |
+            `reference_capital_sync_positions_written_total` recorded 0 over 1h
+            while cycles succeeded. A successful cycle always writes at least one
+            position row, so this is the counter itself breaking (collector drop,
+            metric rename, missed recording call) — confirm against
+            `prime_reference_position` before assuming the series stalled.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorreferencecapitalindexerpositionszero
+
+      # -----------------------------------------------------------------------
+      # WARNING — a prime dropped out of the balance-sheet feed (B6 gap)
+      # -----------------------------------------------------------------------
+      - alert: VectorReferenceCapitalIndexerBalanceSheetPrimeUncovered
+        # Like PrimeUncovered above, but for the balance-sheet feed the indexer
+        # reads independently of the Star monitor: a cycle still succeeds and
+        # still advances every other prime's balance sheet, so nothing else
+        # catches this one prime's /debt and /total-capital series freezing.
+        expr: |
+          sum by (star, cluster) (
+            increase(reference_capital_sync_balance_sheet_primes_uncovered_total{k8s_namespace_name="vector"}[1h])
+          ) > 0
+        for: 30m
+        labels:
+          team: vector
+          severity: warning
+          component: reference-capital-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector reference-capital-indexer: prime `{{ $labels.star }}` not covered by the balance-sheet feed"
+          description: |
+            The balance-sheet feed reported no day for `{{ $labels.star }}` in any
+            cycle's fetch window over the last hour, so its /debt and
+            /total-capital series are frozen while every other prime advances.
+            Confirm against the feed directly before assuming an outage.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorreferencecapitalindexerbalancesheetprimeuncovered
+
+      # -----------------------------------------------------------------------
+      # WARNING — the balance-sheet write path stalled (B6 gap)
+      # -----------------------------------------------------------------------
+      - alert: VectorReferenceCapitalIndexerBalanceSheetStalled
+        # Zero balance-sheet days inserted while cycles keep succeeding.
+        # [36h]: the feed publishes at most one new day per prime per day, so
+        # a shorter window false-positives on every normal no-new-day cycle.
+        # The counter only counts a day's first-ever insert, not a build's
+        # correction to one already stored, so a deploy cannot silence this.
+        # `unless` (not `== 0`) also fires when the series is absent.
+        expr: |
+          sum by (cluster) (
+            rate(cronjob_runs_total{service_name="reference-capital-indexer", status="success", k8s_namespace_name="vector"}[1h])
+          ) > 0
+          unless
+          sum by (cluster) (
+            increase(reference_capital_sync_balance_sheet_days_inserted_total{k8s_namespace_name="vector"}[36h])
+          ) > 0
+        for: 2h
+        labels:
+          team: vector
+          severity: warning
+          component: reference-capital-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector reference-capital-indexer inserted 0 balance-sheet days in 36h"
+          description: |
+            `prime_reference_balance_sheet` received 0 newly-inserted rows over
+            36h while cycles kept succeeding. The daily balance-sheet write path
+            has stopped advancing for every tracked prime, and each prime's
+            /debt and /total-capital series is now frozen on its last value via
+            locf.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorreferencecapitalindexerbalancesheetstalled
       - alert: VectorPositionMaterializerSilentlyEmpty
         # Runs are succeeding but no observation has been appended for any view in
         # 6 hours. On a chain producing blocks that is not a plausible steady

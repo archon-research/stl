@@ -3,19 +3,26 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "packageManager": "npm@12.0.2",
+  "engines": {
+    "npm": ">=12.0.0 <13.0.0"
+  },
   "scripts": {
     "build": "npm run build --workspace=@stl-verify/ui",
     "doctor": "npm run doctor --workspaces --if-present",
     "format": "npm run format --workspaces --if-present",
     "format:check": "npm run format:check --workspaces --if-present",
     "generate:openapi": "make -C ../python export-openapi-schema && npm run generate:openapi-types --workspace=@stl-verify/ui",
+    "knip": "knip",
     "lint": "npm run lint --workspaces --if-present",
     "type:check": "npm run type:check --workspaces --if-present",
     "uikit:link": "uikit-cli link",
     "uikit:unlink": "uikit-cli unlink"
   },
   "devDependencies": {
-    "@archon-research/uikit-cli": "0.10.0",
+    "@archon-research/uikit-cli": "0.10.1",
+    "knip": "6.32.2",
+    "oxlint-tsgolint": "7.0.2001",
     "typescript": "7.0.2"
   },
   "workspaces": [

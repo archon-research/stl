@@ -94,11 +94,12 @@ func TestVersionedTablesKeepTheirColumnstoreLayout(t *testing.T) {
 }
 
 // Both per-row trigger statements have to keep pruning to one chunk once that chunk is in the
-// columnstore, where the covering index no longer exists and the lookup reaches the compress_hyper_*
-// twin instead. Same assertions as the row-store fixture, plus the twin the plan must name exactly
-// once: a second twin, or a second row-store chunk, is the fan-out the force_custom_plan setting
-// exists to prevent. What the twin is indexed by is pinned by the test above, not here — a fixture
-// chunk holds one segment, so no plan shape here changes when segmentby does.
+// columnstore, where the covering index no longer exists and the lookup reaches the chunk's
+// columnstore twin instead. Same assertions as the row-store fixture, plus that twin, which the plan
+// must name and name alone: a second twin, or a second row-store chunk, is the fan-out the
+// force_custom_plan setting exists to prevent. What the twin is indexed by is pinned by the test
+// above, not here — a fixture chunk holds one segment, so no plan shape here changes when segmentby
+// does.
 func TestProcessingVersionTriggerLookupsPruneToOneCompressedChunk(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -119,17 +120,20 @@ func TestProcessingVersionTriggerLookupsPruneToOneCompressedChunk(t *testing.T) 
 		// The compression is inside the subtest so one table's failure cannot abort the others, and so a
 		// filtered run compresses only the table it was asked about.
 		t.Run(tc.tableName, func(t *testing.T) {
-			compressChunk(t, ctx, pool, probeChunk(t, ctx, conn, tc))
+			chunk := probeChunk(t, ctx, conn, tc)
+			compressChunk(t, ctx, pool, chunk)
+			probeTwin := columnstoreTwinOf(t, ctx, pool, chunk)
+			twins := columnstoreTwinNames(t, ctx, pool)
 
 			for _, lookup := range tc.triggerLookups() {
 				t.Run(lookup.label, func(t *testing.T) {
 					plan := explainWarmedLookup(t, ctx, conn, lookup)
 					assertLookupPrunedToOneChunk(t, plan, tc.tableName+" "+lookup.label,
 						maxCompressedTriggerLookupBuffers)
-					if twins := plan.compressedChunkNames(); len(twins) != 1 {
-						t.Fatalf("%s %s lookup read %d columnstore twins, want exactly 1: the probe key's chunk "+
+					if read := plan.compressedChunkNames(twins); !slices.Equal(read, []string{probeTwin}) {
+						t.Fatalf("%s %s lookup read the columnstore twins %v, want only %s: the probe key's chunk "+
 							"is compressed, so its twin is where the lookup reads the batches from\nplan:\n%s",
-							tc.tableName, lookup.label, len(twins), plan.raw)
+							tc.tableName, lookup.label, read, probeTwin, plan.raw)
 					}
 				})
 			}
@@ -268,6 +272,20 @@ func compressChunk(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chunk 
 	if !compressed {
 		t.Fatalf("%s is still a row-store chunk after compress_chunk", chunk)
 	}
+}
+
+// The columnstore twin one chunk's batches live in, under the bare relation name an EXPLAIN plan
+// reports. Read from the catalogue, which is the only source that survives TimescaleDB renaming the
+// twin between releases — see compressedChunkNames.
+func columnstoreTwinOf(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chunk string) string {
+	t.Helper()
+
+	var twin string
+	if err := pool.QueryRow(ctx, columnstoreTwinQuery+`
+		WHERE settings.relid = $1::regclass`, chunk).Scan(&twin); err != nil {
+		t.Fatalf("resolve the columnstore twin of %s: %v", chunk, err)
+	}
+	return twin
 }
 
 // Two days of prime_debt rows a chunk apart, written through the real trigger. Isolation comes from the

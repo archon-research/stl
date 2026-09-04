@@ -36,6 +36,43 @@ func WaitForCondition(t *testing.T, timeout time.Duration, condition func() bool
 	t.Fatalf("timeout waiting for: %s", description)
 }
 
+// WorkerStartupTimeout bounds a worker binary's boot in an integration test.
+const WorkerStartupTimeout = 30 * time.Second
+
+// WaitForFirstPoll blocks until the worker's first SQS receive lands. Reading
+// errCh is what makes a boot refusal visible: a binary that returns from run()
+// before polling otherwise reports a bare timeout with none of its own error.
+func WaitForFirstPoll(t *testing.T, errCh <-chan error, firstCall <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-firstCall:
+	case err := <-errCh:
+		t.Fatalf("run returned before polling SQS: %v", err)
+	case <-time.After(WorkerStartupTimeout):
+		t.Fatal("timed out waiting for the worker to start polling SQS")
+	}
+}
+
+// WaitForWorkerCondition is WaitForCondition for a worker binary under test: it
+// fails with the binary's own error when run() returns before the condition
+// holds, rather than waiting out the deadline with nothing to report.
+func WaitForWorkerCondition(t *testing.T, errCh <-chan error, timeout time.Duration, condition func() bool, description string) {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		if condition() {
+			return
+		}
+		select {
+		case err := <-errCh:
+			t.Fatalf("run returned before %s: %v", description, err)
+		case <-deadline:
+			t.Fatalf("timeout waiting for: %s", description)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 // WaitFor polls condition with a ticker until it returns true or the timeout expires.
 // Returns true if the condition was met, false on timeout.
 func WaitFor(t *testing.T, timeout time.Duration, interval time.Duration, condition func() bool) bool {

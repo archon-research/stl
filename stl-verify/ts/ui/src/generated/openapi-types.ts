@@ -24,28 +24,6 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  '/v1/capital-metrics': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    /**
-     * List per-prime capital metrics
-     * @description Join each tracked prime with the latest row from the upstream Star risk-capital monitor and return derived capital metrics: risk capital, first-loss capital, total capital, and the buffer between them. Primes without a matching upstream row are still returned, with zeroed metrics and a `validation_note` explaining why. A `502` is returned only when the upstream call itself fails.
-     *
-     *     Returns one row per ALM proxy, but every metric on a row is **prime-level** — the upstream Star monitor reports per prime, so a prime's rows carry identical figures and are not additive. Dedupe by `prime_vault_address` before aggregating. `prime_id` is deprecated: it holds a proxy address despite its name.
-     */
-    get: operations['list_capital_metrics_v1_capital_metrics_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
   '/v1/chains': {
     parameters: {
       query?: never;
@@ -117,7 +95,7 @@ export interface paths {
      * List a prime's current allocations
      * @description Return every current allocation held by the given prime — receipt-token positions (enriched with USD value when a price is available), direct asset holdings (tokens held in the proxy with no registered receipt-token wrapper, surfaced with `receipt_token_id`, `receipt_token_address` and `protocol_name` set to `null`, and `amount_usd` valued from the token's oracle price when one exists), and off-chain Anchorage BTC custody (chain_id 0, `protocol_name` `anchorage`, `amount_usd` the loan drawn against the collateral). Each row includes the latest activity timestamp and a derived `category` (`allocation` / `pol` / `psm3` / `asset` / `custody`). Rows are proxy-scoped except the Anchorage custody leg, which is prime-scoped and returned only under the one proxy of the prime that carries its prime-scoped rows (its mainnet proxy when indexed, else its lowest-addressed one) — see the `scope` field.
      *
-     *     Under `source=reference` (and the reference half of `source=both`) the rows are Sky's published balance sheet instead: every position the prime holds, prime-scoped, with `amount_usd` carrying upstream's `assets`. That is the same measurement as the indexed rows' `amount_usd`, so the two halves of `both` are comparable — deliberately not the Star monitor's risk-capital breakdown, whose `exposure` covers only the priced subset and runs about a third smaller. These rows carry no `balance`, no `underlying_symbol` and no activity fields, which upstream does not publish.
+     *     Under `source=reference` (and the reference half of `source=both`) the rows are Sky's published balance sheet instead: every position the prime holds, prime-scoped, with `amount_usd` carrying upstream's `assets`. That is the same measurement as the indexed rows' `amount_usd`, so the two halves of `both` are comparable — deliberately not the Star monitor's risk-capital breakdown, whose `exposure` covers only the priced subset and runs about a third smaller. These rows carry no `balance` and no activity fields, which upstream does not publish, and a `reference_synced_at` naming the sync cycle they were observed at rather than implying they are current. `underlying_*` are populated when the position resolves to STL's receipt-token registry (the feed itself names no underlying) and `null`/empty otherwise.
      */
     get: operations['list_allocations_v1_primes__prime_id__allocations_get'];
     put?: never;
@@ -177,7 +155,7 @@ export interface paths {
     };
     /**
      * Self-computed prime risk capital
-     * @description Compute the prime's capital metrics from on-chain data and the default RRC model (`gap_sweep`), with no dependency on the upstream Star feed. Returns exposure (priced receipt-token allocations), Total Risk Capital (on-chain treasury), Required Risk Capital (sum of per-allocation model RRC), encumbrance, a `modeled_pct` coverage figure, and a per-allocation breakdown. The figures are model-derived and partial (only allocations the model can price contribute Required Risk Capital) and will not match Sky's dashboard. A backed allocation whose pool-share lookup can't be resolved (e.g. a warm-up window or an un-indexed receipt token) is reported as unpriced (`applied=false` with an `unpriced_reason`) rather than failing the whole response. Returns `404` if the prime is unknown, and also if the address is a SubProxy treasury wallet: those hold a prime's treasury rather than its allocations, so they have no prime-level risk capital to report. Read the treasury at `/v1/primes/{prime_id}/total-capital` with one of the prime's ALM proxies, which `/v1/primes` lists.
+     * @description Compute the prime's capital metrics from on-chain data and the default RRC model (`core_model`, falling back to `gap_sweep` under `source=indexed` where core has no data), with no dependency on the upstream Star feed. Returns exposure (priced receipt-token allocations), Total Risk Capital (on-chain treasury), Required Risk Capital (sum of per-allocation model RRC), encumbrance, a `modeled_pct` coverage figure, and a per-allocation breakdown. The figures are model-derived and partial (only allocations the model can price contribute Required Risk Capital) and will not match Sky's dashboard. A backed allocation whose pool-share lookup can't be resolved (e.g. a warm-up window or an un-indexed receipt token) is reported as unpriced (`applied=false` with an `unpriced_reason`) rather than failing the whole response. Returns `404` if the prime is unknown, and also if the address is a SubProxy treasury wallet: those hold a prime's treasury rather than its allocations, so they have no prime-level risk capital to report. Read the treasury at `/v1/primes/{prime_id}/total-capital` with one of the prime's ALM proxies, which `/v1/primes` lists.
      *
      *     Figures without a prefix are scoped to the proxy in the path. Figures prefixed `prime_` are scoped to the whole prime — summed across the ALM proxies of the prime the given address belongs to that sit on chains STL indexes — and are therefore identical whichever proxy you query; use `prime_per_chain` for the split and `prime_unserved_chains` for what is missing from it. The one exception is an address the axis-synome contract does not list: it has no discoverable siblings, so its `prime_` figures cover that proxy alone and will not agree with what the prime's known proxies report. `total_risk_capital_usd` is prime-wide despite having no prefix. `prime_id` breaks the convention the other way — it is the queried proxy address rather than the prime — and is deprecated in favour of the identically-valued `proxy_address`. `encumbrance_ratio` is deprecated because it mixes the two scopes; use `prime_encumbrance_ratio`.
      */
@@ -395,32 +373,6 @@ export interface paths {
      *     - `503` (`share_data_*`) if the allocation-share lookup fails.
      */
     get: operations['get_risk_breakdown_by_address_v1_risk__chain_id___token_address__breakdown_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/risk/{chain_id}/{token_address}/core-model': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    /**
-     * Latest CORE model result (by chain id and receipt-token address)
-     * @description Return the latest pre-computed CORE model result for the receipt token at `(chain_id, token_address)`.
-     *
-     *     `token_address` is the **receipt-token** address (e.g. `spUSDC`, `spWETH`), not the underlying ERC-20 address.
-     *
-     *     Errors:
-     *     - `404` if the receipt token is unknown or has no pre-computed result.
-     *     - `422` if `chain_id` < 1 or `token_address` is malformed.
-     */
-    get: operations['get_core_model_result_by_address_v1_risk__chain_id___token_address__core_model_get'];
     put?: never;
     post?: never;
     delete?: never;
@@ -799,10 +751,11 @@ export interface components {
      *     - Receipt-token positions (e.g. spUSDT wrapping USDT): all fields populated.
      *     - Direct asset holdings (e.g. PYUSD held in the proxy with no wrapper):
      *       ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` are
-     *       null; ``symbol`` names the held asset. ``underlying_*`` usually point at
-     *       the held asset itself, except holdings valued on the underlying-value
-     *       basis (allowlisted, e.g. a Uni V3 pool position valued in USDC) with a
-     *       resolvable underlying, where they point at that underlying.
+     *       null; ``symbol`` and ``held_token_address`` name the held asset.
+     *       ``underlying_*`` usually point at the held asset itself, except holdings
+     *       valued on the underlying-value basis (allowlisted, e.g. a Uni V3 pool
+     *       position valued in USDC) with a resolvable underlying, where they point
+     *       at that underlying.
      *       ``amount_usd`` is populated when an oracle price exists for the pricing
      *       basis and null otherwise (e.g. LP/curve shares with no oracle feed).
      *     - Off-chain custody holdings (Anchorage BTC): ``chain_id`` is 0 (the
@@ -855,6 +808,12 @@ export interface components {
        * @example 1
        */
       chain_id: number | null;
+      /**
+       * Held Token Address
+       * @description 0x-prefixed address of the token held in the proxy, on a direct asset holding. It names what the position *is*, unlike `underlying_token_address`, which names the token the holding is *priced* through — a different asset wherever a wrapper is valued through the token it wraps. `null` on receipt-token positions, where `receipt_token_address` already names the held token, and on off-chain custody holdings, which have no on-chain address.
+       * @example 0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+       */
+      held_token_address?: string | null;
       /**
        * Latest Activity Action
        * @description Direction of the most recent activity (`in`, `out`, `sweep`), or `null`.
@@ -913,6 +872,12 @@ export interface components {
        */
       reference_amount_usd?: string | null;
       /**
+       * Reference Synced At
+       * @description When Sky's figures for this row were observed. Populated on any row carrying them — a `reference` row, or a `both` row's `reference_amount_usd` — and `null` on an indexed-only row. STL reads them from its own record of the feed rather than the feed itself, so they are as of the last sync cycle, up to 15 minutes old. Consumers should show this rather than implying the figures are current.
+       * @example 2026-08-26T09:15:00+00:00
+       */
+      reference_synced_at?: string | null;
+      /**
        * Scope
        * @description Whether the row belongs to the queried proxy (`proxy`) or to the prime as a whole (`prime`). A `prime`-scoped row is served under the prime's primary proxy only, so unioning a prime's proxies never double-counts it.
        * @default proxy
@@ -933,22 +898,28 @@ export interface components {
       symbol: string;
       /**
        * Underlying Symbol
-       * @description Underlying-token symbol. For direct holdings, same as ``symbol``, unless the holding is valued on the underlying-value basis (allowlisted).
+       * @description Underlying-token symbol. For direct holdings, same as ``symbol``, unless the holding is valued on the underlying-value basis (allowlisted). Empty on a reference row (`source=reference`) whose position does not resolve to STL's receipt-token registry — that feed never names an underlying of its own — and also empty on a resolved reference row whose registry token has no symbol recorded yet; `underlying_token_id`/`underlying_token_address` are the reliable resolution signal, not this field.
        * @example USDC
        */
       underlying_symbol: string;
       /**
        * Underlying Token Address
-       * @description 0x-prefixed underlying-token contract address. For direct holdings, this is the held asset itself, unless the holding is valued on the underlying-value basis (allowlisted). `null` for off-chain custody holdings (e.g. Anchorage BTC), which have no on-chain address.
+       * @description 0x-prefixed underlying-token contract address. For direct holdings, this is the held asset itself, unless the holding is valued on the underlying-value basis (allowlisted). `null` for off-chain custody holdings (e.g. Anchorage BTC), which have no on-chain address, and for a reference row (`source=reference`) whose position does not resolve to STL's receipt-token registry.
        * @example 0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
        */
       underlying_token_address?: string | null;
       /**
        * Underlying Token Id
-       * @description Surrogate id of the underlying token. For direct holdings, this is the held asset itself, unless the holding is valued on the underlying-value basis (allowlisted). `null` for off-chain custody holdings (e.g. Anchorage BTC), which have no token-registry row.
+       * @description Surrogate id of the underlying token. For direct holdings, this is the held asset itself, unless the holding is valued on the underlying-value basis (allowlisted). `null` for off-chain custody holdings (e.g. Anchorage BTC), which have no token-registry row, and for a reference row (`source=reference`) whose position does not resolve to STL's receipt-token registry.
        * @example 1
        */
       underlying_token_id?: number | null;
+      /**
+       * Wallet Address
+       * @description The ALM proxy holding this position, as upstream reports it. Populated on reference rows only — the same (`network`, `receipt_token_address`/`held_token_address`) can legitimately recur under a prime's different proxy wallets, and this is what distinguishes those rows. `null` on an indexed row, which is already scoped to a single queried proxy.
+       * @example 0x1234567890abcdef1234567890abcdef12345678
+       */
+      wallet_address?: string | null;
     };
     /**
      * AllocationRiskCapitalResponse
@@ -1085,106 +1056,6 @@ export interface components {
       receipt_token_id: number;
     };
     /**
-     * CapitalMetricsResponse
-     * @description Prime-level capital metrics for risk and alert management.
-     * @example {
-     *       "benchmark_source": "https://example.com/star-rrc",
-     *       "capital_buffer": "2500000",
-     *       "encumbrance_ratio": "0.85",
-     *       "exposure": "1900000000",
-     *       "is_validated": false,
-     *       "prime_id": "0x1601843c5e9bc251a3272907010afa41fa18347e",
-     *       "prime_name": "spark",
-     *       "prime_vault_address": "0x691a6c29e9e96dd897718305427ad5d534db16ba",
-     *       "required_risk_capital": "7500000",
-     *       "scope": "prime",
-     *       "timestamp": "2026-05-07T12:00:00Z",
-     *       "total_risk_capital": "10000000",
-     *       "validation_note": "Sourced from Star Agents Risk Capital & Requirements Monitor."
-     *     }
-     */
-    CapitalMetricsResponse: {
-      /**
-       * Benchmark Source
-       * @description URL of the upstream benchmark source used to populate the row.
-       */
-      benchmark_source?: string | null;
-      /**
-       * Capital Buffer
-       * @description `max(total_risk_capital - required_risk_capital, 0)` — unencumbered risk capital (USD).
-       * @example 2500000
-       */
-      capital_buffer: string;
-      /**
-       * Encumbrance Ratio
-       * @description Required Risk Capital as a share of Total Risk Capital (upstream `risk_tolerance_ratio`). `null` when not validated.
-       * @example 0.85
-       */
-      encumbrance_ratio?: string | null;
-      /**
-       * Exposure
-       * @description Total USD exposure across the prime's allocations (upstream `exposure`).
-       * @example 1900000000
-       */
-      exposure: string;
-      /**
-       * Is Validated
-       * @description Whether the row was validated against on-chain state.
-       * @default false
-       */
-      is_validated: boolean;
-      /**
-       * Prime Id
-       * @deprecated
-       * @description DEPRECATED — despite the name this is one of the prime's ALM **proxy** addresses, not a prime identifier, and this endpoint returns one row per proxy. Its value is unchanged for backwards compatibility. Use `prime_vault_address` or `prime_name` to identify the prime.
-       * @example 0x1601843c5e9bc251a3272907010afa41fa18347e
-       */
-      prime_id: string;
-      /**
-       * Prime Name
-       * @description Human-readable prime name.
-       * @example Acme Prime
-       */
-      prime_name: string;
-      /**
-       * Prime Vault Address
-       * @description The prime's on-chain vault address — identical across the prime's rows. Dedupe on this before aggregating.
-       * @example 0x691a6c29e9e96dd897718305427ad5d534db16ba
-       */
-      prime_vault_address?: string | null;
-      /**
-       * Required Risk Capital
-       * @description Required Risk Capital (RRC) reported by upstream `financial_rrc` (USD).
-       * @example 7500000
-       */
-      required_risk_capital: string;
-      /**
-       * Scope
-       * @description Always `prime`: every metric on this row describes the whole prime, not the proxy in `prime_id`. The row repeats once per ALM proxy, so summing rows triple-counts. Dedupe by `prime_vault_address` first.
-       * @default prime
-       * @example prime
-       * @constant
-       */
-      scope: 'prime';
-      /**
-       * Timestamp
-       * @description ISO-8601 timestamp the snapshot was assembled.
-       * @example 2026-05-07T12:00:00Z
-       */
-      timestamp: string;
-      /**
-       * Total Risk Capital
-       * @description Total Risk Capital reported by upstream `total_rc` (USD).
-       * @example 10000000
-       */
-      total_risk_capital: string;
-      /**
-       * Validation Note
-       * @description Human-readable note about validation, e.g. why a row is missing or unmatched.
-       */
-      validation_note?: string | null;
-    };
-    /**
      * ChainResponse
      * @description An EVM chain that STL tracks data for.
      */
@@ -1250,10 +1121,22 @@ export interface components {
      *     ``hhi`` is the Herfindahl-Hirschman Index of borrower concentration
      *     expressed as a percentage; ``None`` when liquidation analysis was
      *     not run or the market had fewer than two borrowers.
+     *
+     *     A direct 1:1 market result (SparkLend) leaves ``coverage_pct`` and
+     *     ``markets`` as ``None``. A Morpho vault share aggregates over the vault's
+     *     Blue markets instead: ``crr_*_pct`` are allocation-weighted averages over
+     *     the covered markets plus idle liquidity at zero risk — exact for expected
+     *     loss (linear in allocations), indicative for ES/VaR (quantiles are not
+     *     additive, and cross-market dependence is not modeled). ``coverage_pct`` is
+     *     the share of vault assets whose market has a computed result (idle counts
+     *     as covered), ``markets`` carries the per-market slices, ``hhi`` is
+     *     ``None``, and ``forecast_step``/``n_mc`` are the minimum across slices.
      */
     CoreModelDetails: {
       /** Copula Type */
       copula_type: string;
+      /** Coverage Pct */
+      coverage_pct?: string | null;
       /** Crr El Pct */
       crr_el_pct: string;
       /** Crr Es Pct */
@@ -1264,6 +1147,8 @@ export interface components {
       forecast_step: number;
       /** Hhi */
       hhi: string | null;
+      /** Markets */
+      markets?: components['schemas']['CoreModelMarketAllocation'][] | null;
       /** N Mc */
       n_mc: number;
       /** Protocol */
@@ -1275,77 +1160,31 @@ export interface components {
       risk_model: 'core_model';
     };
     /**
-     * CoreModelResultResponse
-     * @description Latest pre-computed CORE model result for a receipt token.
+     * CoreModelMarketAllocation
+     * @description One Blue market slice behind an aggregated Morpho vault-share result.
+     *
+     *     ``allocation_pct`` is this market's share of the vault's total assets on a
+     *     0-100 scale. ``computed_at`` is when this market's CORE result was
+     *     computed — slices of one aggregate can have different staleness.
      */
-    CoreModelResultResponse: {
-      /**
-       * Asset Id
-       * @description Surrogate id of the receipt token.
-       * @example 42
-       */
-      asset_id: number;
+    CoreModelMarketAllocation: {
+      /** Allocation Pct */
+      allocation_pct: string;
       /**
        * Computed At
        * Format: date-time
-       * @description UTC timestamp of when this result was computed.
-       * @example 2026-06-01T12:00:00+00:00
        */
       computed_at: string;
-      /**
-       * Copula Type
-       * @description Cross-asset dependence structure.
-       * @example T-COPULA
-       */
-      copula_type: string;
-      /**
-       * Crr El Pct
-       * @description Expected-loss CRR as a 0-100 percentage.
-       * @example 12.5
-       */
+      /** Crr El Pct */
       crr_el_pct: string;
-      /**
-       * Crr Es Pct
-       * @description Expected-shortfall CRR as a 0-100 percentage.
-       * @example 15.0
-       */
+      /** Crr Es Pct */
       crr_es_pct: string;
-      /**
-       * Crr Var Pct
-       * @description Value-at-Risk CRR as a 0-100 percentage.
-       * @example 10.0
-       */
+      /** Crr Var Pct */
       crr_var_pct: string;
-      /**
-       * Forecast Step
-       * @description Forecast horizon in calendar days.
-       * @example 14
-       */
-      forecast_step: number;
-      /**
-       * Hhi
-       * @description Herfindahl-Hirschman Index of borrower concentration (0-100), or null.
-       * @example 22.3
-       */
-      hhi: string | null;
-      /**
-       * Market Key
-       * @description Market key used by the core-model-runner cronjob.
-       * @example sparklend_usdc
-       */
+      /** Market Key */
       market_key: string;
-      /**
-       * N Mc
-       * @description Number of Monte Carlo price scenarios.
-       * @example 10000
-       */
+      /** N Mc */
       n_mc: number;
-      /**
-       * Protocol
-       * @description Protocol identifier used by the model.
-       * @example SPARKLEND
-       */
-      protocol: string;
     };
     /**
      * DataSourceResponse
@@ -1587,7 +1426,7 @@ export interface components {
     PrimeProvenanceResponse: {
       /**
        * Available
-       * @description Provenances this prime can be served from. `indexed` is always present — a prime is only listed because STL indexes it. `reference` and `both` appear together, and only when Sky's monitor covers the prime.
+       * @description Provenances this prime can be served from. `indexed` is always present — a prime is only listed because STL indexes it. `reference` and `both` appear together, and only when STL has observed at least one reference cycle for the prime.
        * @example [
        *       "indexed",
        *       "reference",
@@ -1720,8 +1559,8 @@ export interface components {
       junior_risk_capital_usd?: string | null;
       /**
        * Model
-       * @description Default RRC model used (e.g. `gap_sweep`). `null` under `source=reference`, which runs no model; under `source=both` it is STL's model, since the unprefixed figures are STL's.
-       * @example gap_sweep
+       * @description The default RRC model this view prefers (`core_model`). `null` under `source=reference`, which runs no model; under `source=both` it is STL's preference, since the unprefixed figures are STL's. A given `per_allocation` row can still carry a different model: `indexed` falls back to `gap_sweep` for a position `core_model` has no data for.
+       * @example core_model
        */
       model: string | null;
       /**
@@ -1823,6 +1662,12 @@ export interface components {
        */
       reference_prime_required_risk_capital_usd?: string | null;
       /**
+       * Reference Synced At
+       * @description When the Sky figures in this response were observed. Populated wherever the response carries them (`source=reference` or `source=both`), and `null` under `source=indexed`. STL reads them from its own record of the monitor rather than the monitor itself, so they are as of the last sync cycle — up to 15 minutes old. Consumers should show this rather than implying the figures are current.
+       * @example 2026-08-26T09:15:00+00:00
+       */
+      reference_synced_at?: string | null;
+      /**
        * Reference Total Risk Capital Usd
        * @description Sky's reported total risk capital. Populated only under `source=both`.
        */
@@ -1838,7 +1683,7 @@ export interface components {
        */
       senior_risk_capital_usd?: string | null;
       /**
-       * @description Provenance of the figures in this response. `indexed` is STL's own on-chain model; `reference` is Sky's Star Agents Risk Capital & Requirements Monitor; `both` carries the two side by side, STL's in the unprefixed fields and Sky's in the `reference_`-prefixed ones. Never reconciled: no field holds a blend of the two, and `both` degrades to `indexed` — reporting itself as such — when the monitor cannot be read.
+       * @description Provenance of the figures in this response. `indexed` is STL's own on-chain model; `reference` is Sky's Star Agents Risk Capital & Requirements Monitor as STL observed it; `both` carries the two side by side, STL's in the unprefixed fields and Sky's in the `reference_`-prefixed ones. Never reconciled: no field holds a blend of the two, and `both` degrades to `indexed` — reporting itself as such — for a prime no reference cycle has ever reported on.
        * @default indexed
        */
       source: components['schemas']['Provenance'];
@@ -2031,7 +1876,8 @@ export interface components {
       primes: components['schemas']['PrimeProvenanceResponse'][];
       /**
        * Reference Upstream Reachable
-       * @description Whether Sky's monitor answered. When `false` every prime reports `indexed` alone — unknown coverage is reported as no coverage, so a client is never told a provenance is available and then handed an error for it.
+       * @deprecated
+       * @description DEPRECATED — always `true`. Coverage is now read from STL's own record of the reference feeds rather than by calling them, so there is no upstream to be unreachable: a read that fails is a `500` and cannot answer at all. Retained so clients that branch on it keep working. Read `available` per prime instead.
        */
       reference_upstream_reachable: boolean;
     };
@@ -2632,26 +2478,6 @@ export interface operations {
       };
     };
   };
-  list_capital_metrics_v1_capital_metrics_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['CapitalMetricsResponse'][];
-        };
-      };
-    };
-  };
   list_chains_v1_chains_get: {
     parameters: {
       query?: never;
@@ -3180,40 +3006,6 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['RiskBreakdownResponse'];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
-    };
-  };
-  get_core_model_result_by_address_v1_risk__chain_id___token_address__core_model_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        /** @description EVM chain id. */
-        chain_id: number;
-        /** @description 0x-prefixed token contract address (40 hex chars). */
-        token_address: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['CoreModelResultResponse'];
         };
       };
       /** @description Validation Error */

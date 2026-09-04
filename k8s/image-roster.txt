@@ -1,0 +1,62 @@
+# k8s/image-roster.txt — the deploy roster (ORB-362).
+#
+# One line per image the pipeline promotes and pins. (The build list is still
+# stl-verify/Makefile's docker-release-all: a roster line needs a matching
+# release target, or verify-ecr-images.sh fails the stamp with a missing-image
+# list.)
+#
+#   <kind> <name> <alias> [<alias> ...]
+#
+#   kind   service — its own ECR repo, stl-sentinel<env>-<name>, tagged <sha>
+#          cronjob — the shared stl-sentinel<env>-cronjob repo, tagged <name>-<sha>
+#                    (cmd/cronjobs/<name>, or a one-off backfiller built the same way)
+#   name   the image: the repo suffix (service) or the tag prefix (cronjob)
+#   alias  every `image:` name a k8s/base/*/ manifest uses for it. Several bases
+#          share one binary and differ only by env (per-chain watchers, per-DEX
+#          indexers, per-exchange order books): list each alias. `-` = no alias
+#          (built and promoted, but pinned only by a hand-maintained overlay such
+#          as k8s/overlays/*/bootstrap/).
+#
+# Names and aliases are lowercase [a-z0-9-] and unique across the file; column
+# alignment is cosmetic. Removing or re-homing an image is the one sanctioned
+# hand edit of a generated block: change the roster AND delete the stale entry
+# from each overlay's images block in the same PR (the bot only rewrites the
+# block after merge, so the PR check would otherwise flag the leftover entry).
+# A re-home leaves the alias unpinned in the merge commit until that rewrite —
+# the same brief ImagePullBackOff window as a first rollout.
+#
+# scripts/deploy/render-overlay-images.sh renders this into the `images:` block
+# of k8s/overlays/{staging,prod}/kustomization.yaml; the deploy bot rewrites that
+# block wholesale on every deploy, and deploy.yaml promotes exactly these names
+# to prod. Never edit the generated blocks. Adding an image = one line here plus
+# its base manifests and `resources:` entry; the next deploy pins it.
+# `#` starts a comment; blank lines are ignored.
+
+# ---- services: dedicated ECR repo stl-sentinel<env>-<name>, tag <sha> -----------
+service watcher                    watcher arbitrum-watcher avalanche-watcher base-watcher optimism-watcher unichain-watcher  # one binary, chain via env
+service backup-worker              backup-worker arbitrum-backup-worker avalanche-backup-worker base-backup-worker optimism-backup-worker unichain-backup-worker
+service oracle-price-worker        oracle-price-worker avalanche-oracle-price-worker base-oracle-price-worker
+service sparklend-position-tracker sparklend-position-tracker avalanche-sparklend-position-tracker
+service allocation-tracker         allocation-tracker avalanche-allocation-tracker base-allocation-tracker  # arbitrum/optimism/unichain bases use `allocation-tracker` directly
+service psm3-indexer               arbitrum-psm3-indexer base-psm3-indexer optimism-psm3-indexer unichain-psm3-indexer
+service morpho-indexer             morpho-indexer
+service prime-debt-indexer         prime-debt-indexer
+service fluid-vault-indexer        fluid-vault-indexer
+service dex-indexer                dex-indexer                # curve-indexer + uniswap-v3-indexer bases; DEX env selects the factory
+service cex-orderbook-indexer      cex-orderbook-indexer      # one image for every per-exchange order book pod; EXCHANGE env selects
+service migrate                    migrate
+service python-api                 python-api core-model-runner  # core-model-runner is a Python entry point shipped inside the python-api image
+
+# ---- cronjobs: shared ECR repo stl-sentinel<env>-cronjob, tag <name>-<sha> ------
+cronjob anchorage-indexer          spark-anchorage-indexer
+cronjob maple-graphql-indexer      maple-graphql-indexer
+cronjob offchain-price-indexer     offchain-price-indexer
+cronjob offchain-price-backfill    offchain-price-backfill
+cronjob reference-capital-indexer  reference-capital-indexer
+cronjob reference-capital-backfill reference-capital-backfill
+cronjob watcher-data-validator     watcher-data-validator arbitrum-watcher-data-validator avalanche-watcher-data-validator base-watcher-data-validator optimism-watcher-data-validator unichain-watcher-data-validator
+cronjob transform-worker           transform-worker
+cronjob transform-bootstrap        -                          # one-off Job; pinned by hand in k8s/overlays/*/bootstrap/
+cronjob morpho-v2-bootstrap        morpho-v2-bootstrap
+cronjob morpho-vault-backfill      morpho-vault-backfill
+cronjob block-republisher          block-republisher

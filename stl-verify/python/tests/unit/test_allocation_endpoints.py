@@ -3,7 +3,6 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
@@ -96,32 +95,6 @@ def _override_service(service: AsyncMock):
         yield service
 
     return _dep
-
-
-def _stub_star_payload(monkeypatch, *, star: str):
-    from app.api.v1 import allocations
-
-    async def _fake_payload():
-        return allocations.StarRiskCapitalResponse.model_validate(
-            {
-                "status": 200,
-                "success": True,
-                "data": {
-                    "results": [
-                        {
-                            "star": star,
-                            "exposure": "100.00",
-                            "total_rc": "50.00",
-                            "financial_rrc": "20.00",
-                            "exposure_share": "10.00%",
-                            "risk_tolerance_ratio": "2.00",
-                        }
-                    ]
-                },
-            }
-        )
-
-    monkeypatch.setattr(allocations, "_fetch_star_risk_capital_payload", _fake_payload)
 
 
 def test_list_primes_labels_each_proxy_with_chain_and_role():
@@ -254,8 +227,10 @@ def test_list_allocations_returns_200_with_enriched_holdings():
             "position_keys": ["token:1", "position:1:0x" + "a" * 40],
             "source": "indexed",
             "network": None,
+            "wallet_address": None,
             "receipt_token_id": 1,
             "receipt_token_address": "0x" + "a" * 40,
+            "held_token_address": None,
             "underlying_token_id": 10,
             "underlying_token_address": "0x" + "b" * 40,
             "symbol": "aUSDC",
@@ -264,6 +239,7 @@ def test_list_allocations_returns_200_with_enriched_holdings():
             "balance": "100.0",
             "amount_usd": None,
             "reference_amount_usd": None,
+            "reference_synced_at": None,
             "latest_activity_at": None,
             "latest_activity_action": None,
             "latest_activity_amount": None,
@@ -275,16 +251,16 @@ def test_list_allocations_returns_200_with_enriched_holdings():
 
 
 def test_a_wrapper_priced_through_its_underlying_is_not_keyed_on_it():
-    """A wrapper STL has no registry entry for must not key on its underlying.
+    """A wrapper STL has no registry entry for keys on itself, not its underlying.
 
     `sparkPrimeUSDC1` is held as a direct asset priced through USDC, so its row
-    carries USDC's address. Keying it there matched it to Sky's own plain-USDC
-    row — which reports $0 — so the merged row claimed Sky valued a $20.3M
-    position at nothing while Sky's real row for it went unjoined.
+    reports USDC as its underlying. Keying it there matched it to Sky's own
+    plain-USDC row — which reports $0 — so the merged row claimed Sky valued a
+    $20.3M position at nothing while Sky's real row for it went unjoined.
 
-    The symbols are what separate the two: a genuine direct holding *is* its
-    underlying and the two agree, so it keeps the address key (pinned by the
-    test below).
+    Its own address is what it answers to, whether or not an underlying is
+    projected: a genuine direct holding *is* the token it holds too (pinned by
+    the test below), so both shapes key the same way.
     """
     from app.api.v1 import allocations
 
@@ -303,10 +279,42 @@ def test_a_wrapper_priced_through_its_underlying_is_not_keyed_on_it():
 
     assert response.status_code == 200
     (row,) = response.json()
-    # Still reports the underlying it is priced through — only the key is
-    # withheld, leaving the symbol as the last resort rather than no key at all.
+    # Still reports the underlying it is priced through; only the key ignores it.
     assert row["underlying_token_address"] == "0x" + "e" * 40
-    assert row["position_keys"] == ["symbol:1::sparkprimeusdc1"]
+    assert row["held_token_address"] == "0x" + "d" * 40
+    assert row["position_keys"] == ["position:1:0x" + "d" * 40]
+
+
+def test_a_wrapper_and_the_asset_it_is_priced_through_never_share_a_key():
+    """The wrapper and a plain holding of its underlying are two positions.
+
+    Both are direct holdings on the same chain naming USDC as their underlying,
+    which is exactly the pair that collapsed into one when the underlying's
+    address keyed both.
+    """
+    from app.api.v1 import allocations
+
+    usdc_address = "0x" + "e" * 40
+    wrapper = make_direct_asset_holding(
+        symbol="sparkPrimeUSDC1",
+        token_id=3,
+        token_address="0x" + "d" * 40,
+        underlying_token_id=4,
+        underlying_token_address=usdc_address,
+        underlying_symbol="USDC",
+    )
+    plain_usdc = make_direct_asset_holding(symbol="USDC", token_id=4, token_address=usdc_address)
+    service = _make_service(direct_holdings=[wrapper, plain_usdc])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    wrapper_row, plain_row = response.json()
+    assert wrapper_row["position_keys"] == ["position:1:0x" + "d" * 40]
+    assert plain_row["position_keys"] == [f"position:1:{usdc_address}"]
+    assert not set(wrapper_row["position_keys"]) & set(plain_row["position_keys"])
 
 
 def test_list_allocations_returns_direct_asset_rows_with_null_receipt_fields():
@@ -332,8 +340,10 @@ def test_list_allocations_returns_direct_asset_rows_with_null_receipt_fields():
             "position_keys": ["position:1:0x" + "c" * 40],
             "source": "indexed",
             "network": None,
+            "wallet_address": None,
             "receipt_token_id": None,
             "receipt_token_address": None,
+            "held_token_address": "0x" + "c" * 40,
             "underlying_token_id": 99,
             "underlying_token_address": "0x" + "c" * 40,
             "symbol": "PYUSD",
@@ -342,6 +352,7 @@ def test_list_allocations_returns_direct_asset_rows_with_null_receipt_fields():
             "balance": "250.0",
             "amount_usd": None,
             "reference_amount_usd": None,
+            "reference_synced_at": None,
             "latest_activity_at": None,
             "latest_activity_action": None,
             "latest_activity_amount": None,
@@ -508,8 +519,10 @@ def test_list_allocations_surfaces_anchorage_custody_row():
             "position_keys": ["custody:anchorage"],
             "source": "indexed",
             "network": None,
+            "wallet_address": None,
             "receipt_token_id": None,
             "receipt_token_address": None,
+            "held_token_address": None,
             "underlying_token_id": None,
             "underlying_token_address": None,
             "symbol": "BTC",
@@ -518,6 +531,7 @@ def test_list_allocations_surfaces_anchorage_custody_row():
             "balance": "4722.61",
             "amount_usd": "250000000",
             "reference_amount_usd": None,
+            "reference_synced_at": None,
             "latest_activity_at": ANCHORAGE_FROZEN_AS_OF.isoformat(),
             "latest_activity_action": None,
             "latest_activity_amount": None,
@@ -1136,279 +1150,6 @@ def test_list_allocation_activity_sets_no_store_when_bounds_not_pinned():
 
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
-
-
-# --- capital-metrics endpoint ---
-
-
-def test_list_capital_metrics_maps_star_risk_capital_data(monkeypatch):
-    """Metrics are sourced from Star risk capital upstream, matched by prime name."""
-    from app.api.v1 import allocations
-
-    grove_addr = _VALID_ADDR
-    spark_addr = "0x" + "cd" * 20
-
-    service = _make_service(
-        primes=[
-            _prime(grove_addr, name="grove"),
-            _prime(spark_addr, name="spark"),
-        ]
-    )
-    app.dependency_overrides[allocations._get_service] = _override_service(service)
-
-    async def _fake_payload():
-        return allocations.StarRiskCapitalResponse.model_validate(
-            {
-                "status": 200,
-                "success": True,
-                "data": {
-                    "results": [
-                        {
-                            "star": "grove",
-                            "exposure": "500.00",
-                            "total_rc": "100.00",
-                            "financial_rrc": "40.00",
-                            "exposure_share": "50.00%",
-                            "risk_tolerance_ratio": "5.00",
-                        },
-                        {
-                            "star": "spark",
-                            "exposure": "200.00",
-                            "total_rc": "80.00",
-                            "financial_rrc": "30.00",
-                            "exposure_share": "20.00%",
-                            "risk_tolerance_ratio": "2.50",
-                        },
-                    ]
-                },
-            }
-        )
-
-    monkeypatch.setattr(allocations, "_fetch_star_risk_capital_payload", _fake_payload)
-    client = TestClient(app)
-
-    response = client.get("/v1/capital-metrics")
-
-    assert response.status_code == 200
-    data = response.json()
-    assert len(data) == 2
-
-    grove = next(m for m in data if m["prime_id"] == grove_addr)
-    assert grove["exposure"] == "500.00"
-    assert grove["total_risk_capital"] == "100.00"
-    assert grove["required_risk_capital"] == "40.00"
-    assert grove["capital_buffer"] == "60.00"
-    assert grove["encumbrance_ratio"] == "5.00"
-
-    spark = next(m for m in data if m["prime_id"] == spark_addr)
-    assert spark["exposure"] == "200.00"
-    assert spark["encumbrance_ratio"] == "2.50"
-
-
-def test_list_capital_metrics_returns_defaults_for_primes_with_no_star_row(monkeypatch):
-    """Primes not present in Star risk capital data are returned with default metric values."""
-    from app.api.v1 import allocations
-
-    grove_addr = _VALID_ADDR
-    service = _make_service(
-        primes=[
-            _prime(grove_addr, name="grove"),
-            _prime("0x" + "ee" * 20, name="unknown-prime"),
-        ]
-    )
-    app.dependency_overrides[allocations._get_service] = _override_service(service)
-
-    async def _fake_payload():
-        return allocations.StarRiskCapitalResponse.model_validate(
-            {
-                "status": 200,
-                "success": True,
-                "data": {
-                    "results": [
-                        {
-                            "star": "grove",
-                            "exposure": "100.00",
-                            "total_rc": "50.00",
-                            "financial_rrc": "20.00",
-                            "exposure_share": "10.00%",
-                            "risk_tolerance_ratio": "2.00",
-                        }
-                    ]
-                },
-            }
-        )
-
-    monkeypatch.setattr(allocations, "_fetch_star_risk_capital_payload", _fake_payload)
-    client = TestClient(app)
-
-    response = client.get("/v1/capital-metrics")
-
-    assert response.status_code == 200
-    data = response.json()
-    assert len(data) == 2
-    grove = next(item for item in data if item["prime_name"] == "grove")
-    assert grove["exposure"] == "100.00"
-
-    missing = next(item for item in data if item["prime_name"] == "unknown-prime")
-    assert missing["exposure"] == "0"
-    assert missing["capital_buffer"] == "0"
-    assert missing["required_risk_capital"] == "0"
-    assert missing["total_risk_capital"] == "0"
-    assert missing["encumbrance_ratio"] is None
-    assert missing["validation_note"] == "No upstream Star risk-capital row matched this prime."
-
-
-def test_list_capital_metrics_returns_502_for_invalid_numeric_payload(monkeypatch):
-    from app.api.v1 import allocations
-
-    grove_addr = _VALID_ADDR
-    service = _make_service(primes=[_prime(grove_addr, name="grove")])
-    app.dependency_overrides[allocations._get_service] = _override_service(service)
-
-    async def _fake_payload():
-        return allocations.StarRiskCapitalResponse.model_validate(
-            {
-                "status": 200,
-                "success": True,
-                "data": {
-                    "results": [
-                        {
-                            "star": "grove",
-                            "exposure": "not-a-number",
-                            "total_rc": "50.00",
-                            "financial_rrc": "20.00",
-                            "exposure_share": "10.00%",
-                            "risk_tolerance_ratio": "2.00",
-                        }
-                    ]
-                },
-            }
-        )
-
-    monkeypatch.setattr(allocations, "_fetch_star_risk_capital_payload", _fake_payload)
-    client = TestClient(app)
-
-    response = client.get("/v1/capital-metrics")
-
-    assert response.status_code == 502
-    assert "invalid numeric value" in response.json()["detail"]
-
-
-def test_list_capital_metrics_returns_502_when_upstream_fetch_fails(monkeypatch):
-    from app.api.v1 import allocations
-
-    service = _make_service(primes=[_prime(_VALID_ADDR, name="grove")])
-    app.dependency_overrides[allocations._get_service] = _override_service(service)
-
-    async def _raise_fetch_error():
-        raise HTTPException(status_code=502, detail="Risk capital upstream request failed")
-
-    monkeypatch.setattr(allocations, "_fetch_star_risk_capital_payload", _raise_fetch_error)
-    client = TestClient(app)
-
-    response = client.get("/v1/capital-metrics")
-
-    assert response.status_code == 502
-    assert response.json() == {"detail": "Risk capital upstream request failed"}
-
-
-def test_list_capital_metrics_returns_empty_when_payload_has_no_data(monkeypatch):
-    from app.api.v1 import allocations
-
-    service = _make_service(primes=[_prime(_VALID_ADDR, name="grove")])
-    app.dependency_overrides[allocations._get_service] = _override_service(service)
-
-    async def _fake_payload_without_data():
-        return allocations.StarRiskCapitalResponse.model_validate(
-            {
-                "status": 200,
-                "success": True,
-                "data": None,
-            }
-        )
-
-    monkeypatch.setattr(allocations, "_fetch_star_risk_capital_payload", _fake_payload_without_data)
-    client = TestClient(app)
-
-    response = client.get("/v1/capital-metrics")
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert len(payload) == 1
-    assert payload[0]["prime_id"] == _VALID_ADDR
-    assert payload[0]["exposure"] == "0"
-    assert payload[0]["is_validated"] is False
-
-
-def test_capital_metrics_still_returns_one_row_per_proxy(monkeypatch):
-    from app.api.v1 import allocations
-
-    service = _make_service(
-        primes=[
-            _prime(_SPARK_MAINNET_ALM, chain_id=1, chain="mainnet"),
-            _prime(_SPARK_BASE_ALM, chain_id=8453, chain="base"),
-            _prime(_SPARK_AVALANCHE_ALM, chain_id=43114, chain="avalanche-c"),
-        ]
-    )
-    _stub_star_payload(monkeypatch, star="spark")
-    app.dependency_overrides[allocations._get_service] = _override_service(service)
-
-    body = TestClient(app).get("/v1/capital-metrics").json()
-
-    assert len(body) == 3
-
-
-def test_capital_metrics_marks_every_row_as_prime_scoped(monkeypatch):
-    from app.api.v1 import allocations
-
-    service = _make_service(primes=[_prime(_SPARK_MAINNET_ALM), _prime(_SPARK_AVALANCHE_ALM, chain_id=43114)])
-    _stub_star_payload(monkeypatch, star="spark")
-    app.dependency_overrides[allocations._get_service] = _override_service(service)
-
-    body = TestClient(app).get("/v1/capital-metrics").json()
-
-    assert {row["scope"] for row in body} == {"prime"}
-
-
-def test_capital_metrics_exposes_a_dedupe_key_shared_across_a_primes_rows(monkeypatch):
-    from app.api.v1 import allocations
-
-    service = _make_service(primes=[_prime(_SPARK_MAINNET_ALM), _prime(_SPARK_AVALANCHE_ALM, chain_id=43114)])
-    _stub_star_payload(monkeypatch, star="spark")
-    app.dependency_overrides[allocations._get_service] = _override_service(service)
-
-    body = TestClient(app).get("/v1/capital-metrics").json()
-
-    assert {row["prime_vault_address"] for row in body} == {_SPARK_VAULT}
-
-
-def test_capital_metrics_exposes_the_dedupe_key_when_no_upstream_row_matches(monkeypatch):
-    from app.api.v1 import allocations
-
-    service = _make_service(primes=[_prime(_SPARK_MAINNET_ALM)])
-    _stub_star_payload(monkeypatch, star="someone_else")
-    app.dependency_overrides[allocations._get_service] = _override_service(service)
-
-    body = TestClient(app).get("/v1/capital-metrics").json()
-
-    assert body[0]["exposure"] == "0"
-    assert body[0]["prime_vault_address"] == _SPARK_VAULT
-
-
-def test_capital_metrics_prime_id_is_marked_deprecated():
-    properties = app.openapi()["components"]["schemas"]["CapitalMetricsResponse"]["properties"]
-
-    assert properties["prime_id"]["deprecated"] is True
-
-
-def test_capital_metrics_does_not_deprecate_the_numeric_fields():
-    properties = app.openapi()["components"]["schemas"]["CapitalMetricsResponse"]["properties"]
-
-    for field in ("exposure", "capital_buffer", "required_risk_capital", "total_risk_capital", "encumbrance_ratio"):
-        assert "deprecated" not in properties[field], field
-
-
-# --- data-sources endpoint ---
 
 
 def test_get_data_sources_returns_200_with_sources():

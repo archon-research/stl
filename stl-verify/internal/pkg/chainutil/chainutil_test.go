@@ -3,6 +3,8 @@ package chainutil
 import (
 	"strings"
 	"testing"
+
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
 
 func TestValidateS3BucketForChain(t *testing.T) {
@@ -252,5 +254,23 @@ func TestEnvironmentFromBucket(t *testing.T) {
 				t.Errorf("EnvironmentFromBucket() = %q, want %q", env, tt.wantEnv)
 			}
 		})
+	}
+}
+
+// Every chain the repo watches needs a declared block-data shape: a tool that
+// re-publishes a block reads this to decide what to fetch, and refuses to start
+// on a chain the map does not answer for.
+func TestDefaultChainExpectations_CoversEveryKnownChain(t *testing.T) {
+	expectations := DefaultChainExpectations()
+
+	for chainID, name := range entity.ChainIDToS3Bucket {
+		if _, ok := expectations[chainID]; !ok {
+			t.Errorf("chain %d (%s) has no declared block-data expectation", chainID, name)
+		}
+	}
+	for chainID := range expectations {
+		if _, ok := entity.ChainIDToS3Bucket[chainID]; !ok {
+			t.Errorf("chain %d is declared here but is not a chain the repo watches", chainID)
+		}
 	}
 }

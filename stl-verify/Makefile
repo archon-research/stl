@@ -4,7 +4,7 @@
 # Include language-agnostic linting targets
 include lint.mk
 
-.PHONY: all test test-race test-integration test-integration-shard integration-shard-check ci-service-check test-templates-clean lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks install-hooks format \
+.PHONY: all test test-race test-integration test-integration-shard integration-shard-check ci-service-check test-templates-clean lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-watcher-robinhood run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax run-allocation-tracker-robinhood help ci ci-checks install-hooks format \
 	dev-up dev-up-rebuild dev-up-workers dev-up-or-resume dev-preflight dev-env dev-secrets dev-env-files dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-image _docker-release-go-service \
@@ -12,6 +12,7 @@ include lint.mk
 		docker-build-offchain-price-backfill docker-release-offchain-price-backfill _docker-release-offchain-price-backfill-internal \
 		docker-build-reference-capital-backfill docker-release-reference-capital-backfill _docker-release-reference-capital-backfill-internal \
 		docker-build-morpho-vault-backfill docker-release-morpho-vault-backfill _docker-release-morpho-vault-backfill-internal \
+		docker-build-block-republisher docker-release-block-republisher _docker-release-block-republisher-internal \
 		build-backfiller-% run-backfiller-% \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
@@ -50,7 +51,7 @@ include lint.mk
 		kind-create kind-delete kind-infra kind-config kind-secrets kind-bootstrap-db kind-migrate \
 		kind-load-migrate kind-load-watcher kind-load-workers kind-load-python-api kind-load-cronjobs \
 		kind-deploy-apps kind-deploy-workers kind-deploy-data-validator check-dev-overlay-sync \
-		check-reloader-opt-in \
+		check-reloader-opt-in check-overlay-images \
 		kind-redeploy-watcher kind-redeploy-worker \
 		docker-build-migrate \
 		kind-infra-ci kind-ci-up kind-ci-down \
@@ -61,7 +62,7 @@ include lint.mk
 		kind-build-mock-blockchain-server kind-load-mock-blockchain-server kind-deploy-mock-blockchain-server kind-deploy-mock-blockchain-server-s3 \
 		kind-use-mock kind-use-alchemy k6-stress-test stress-test-data stress-test kind-clean \
 		build-cronjob-% run-cronjob-% run-cronjob-solo \
-		kind-scale-down-% kind-scale-up-% dev-endpoints dev-psql \
+		kind-scale-down-% kind-scale-up-% dev-endpoints kind-free-offset dev-up-new dev-psql \
 		temporal-schedules temporal-schedule-describe temporal-trigger temporal-workflow-describe temporal-cli
 
 # Go bin path for installed tools
@@ -70,6 +71,7 @@ GOBIN := $(shell go env GOPATH)/bin
 # Local kind cluster name — single source of truth; KUBE_CONTEXT is derived from it.
 # To target EKS: KUBE_CONTEXT=<arn> KUBE_NS=<ns>
 KIND_CLUSTER ?= vector
+KIND_CLUSTER_GIVEN := $(filter command line environment,$(origin KIND_CLUSTER))
 KUBE_CONTEXT ?= kind-$(KIND_CLUSTER)
 KUBE_NS      ?= vector
 
@@ -79,10 +81,18 @@ require_kind_context = echo "$(KUBE_CONTEXT)" | grep -q '^kind-' || { echo "ERRO
 
 # Host ports the kind node publishes. A second cluster on the same machine needs its
 # own set, so every mapped port is derived from one offset:
+#   make dev-up-new                                      (free offset, derived name)
 #   KIND_CLUSTER=<name> KIND_PORT_OFFSET=<n> make dev-up
 # Only host-side addresses shift; in-cluster service DNS (localstack:4566,
 # mock-blockchain-server:8546) is unaffected.
-KIND_PORT_OFFSET ?= 0
+KIND_PORT_BASES := 5432 5433 6379 4566 16686 4317 7233 8233 8546 8547
+
+# An existing cluster carries its offset in the host port its control plane publishes for
+# 30432, so KIND_CLUSTER alone reaches it; cluster `vector` is offset 0 by convention and
+# calls no docker. _GIVEN is read before the `:=` freeze turns $(origin) into "file".
+KIND_PORT_OFFSET_GIVEN := $(filter command line environment,$(origin KIND_PORT_OFFSET))
+KIND_PORT_OFFSET ?= $(if $(filter vector,$(KIND_CLUSTER)),0,$(shell p=$$(docker inspect $(KIND_CLUSTER)-control-plane --format '{{range index .HostConfig.PortBindings "30432/tcp"}}{{.HostPort}}{{end}}' 2>/dev/null | tr -dc 0-9); echo $$(( $${p:-5432} - 5432 ))))
+KIND_PORT_OFFSET := $(KIND_PORT_OFFSET)
 KIND_HOST_PG_PORT          := $(shell expr 5432 + $(KIND_PORT_OFFSET))
 KIND_HOST_TEMPORAL_DB_PORT := $(shell expr 5433 + $(KIND_PORT_OFFSET))
 KIND_HOST_REDIS_PORT       := $(shell expr 6379 + $(KIND_PORT_OFFSET))
@@ -127,6 +137,12 @@ run-watcher-avax:
 	@echo "==> Running Avalanche watcher (chain_id=43114)..."
 	@set -a && . cmd/base/watcher/.env.avax && [ -f cmd/base/watcher/.env.avax.local ] && . cmd/base/watcher/.env.avax.local; set +a && go run ./cmd/base/watcher --enable-traces=false
 
+# Run the Robinhood watcher (requires dev-up first)
+# Robinhood Chain does not support trace_block, so traces are disabled.
+run-watcher-robinhood:
+	@echo "==> Running Robinhood watcher (chain_id=4663)..."
+	@set -a && . cmd/base/watcher/.env.robinhood && [ -f cmd/base/watcher/.env.robinhood.local ] && . cmd/base/watcher/.env.robinhood.local; set +a && go run ./cmd/base/watcher --enable-traces=false
+
 # Run the oracle price worker (requires dev-up first)
 run-oracle-price-worker:
 	@echo "==> Running oracle price worker..."
@@ -155,6 +171,12 @@ run-allocation-tracker:
 run-allocation-tracker-avax:
 	@echo "==> Running Avalanche allocation tracker (chain_id=43114)..."
 	@set -a && . cmd/workers/prime-allocation-indexer/.env.avax && [ -f cmd/workers/prime-allocation-indexer/.env.avax.local ] && . cmd/workers/prime-allocation-indexer/.env.avax.local; set +a && unset AWS_PROFILE AWS_DEFAULT_PROFILE && BUILD_GIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo dev) go run ./cmd/workers/prime-allocation-indexer
+
+# Run the Robinhood allocation tracker (requires dev-up first). See run-allocation-tracker
+# for why AWS_PROFILE is unset and BUILD_GIT_HASH is passed.
+run-allocation-tracker-robinhood:
+	@echo "==> Running Robinhood allocation tracker (chain_id=4663)..."
+	@set -a && . cmd/workers/prime-allocation-indexer/.env.robinhood && [ -f cmd/workers/prime-allocation-indexer/.env.robinhood.local ] && . cmd/workers/prime-allocation-indexer/.env.robinhood.local; set +a && unset AWS_PROFILE AWS_DEFAULT_PROFILE && BUILD_GIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo dev) go run ./cmd/workers/prime-allocation-indexer
 
 # Run the SparkLend position tracker (requires dev-up first)
 run-sparklend-position-tracker:
@@ -356,7 +378,7 @@ tools:
 # CI target for lint/format/static/security checks. go vet, staticcheck, and
 # go fix -diff are covered by golangci-lint v2 (govet, staticcheck, modernize
 # linters — see .golangci.yml); running them separately tripled analysis time.
-ci-checks: fmt-check goimports-check tidy-check shared-container-check integration-shard-check ci-service-check golangci-lint vulncheck
+ci-checks: fmt-check goimports-check tidy-check shared-container-check integration-shard-check ci-service-check check-overlay-images golangci-lint vulncheck
 
 # CI target: everything with strict checks
 # Order: fast checks first (fail fast), then expensive checks
@@ -491,6 +513,8 @@ dev-up:
 	  echo "    make kind-use-alchemy && make kind-secrets && make kind-deploy-data-validator"; \
 	  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; \
 	fi
+	@echo ""
+	@$(MAKE) --no-print-directory dev-endpoints
 
 # Build and deploy workers that require API keys.
 # Checks which keys are available and only deploys workers whose dependencies are met.
@@ -621,6 +645,24 @@ dev-env-files:
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://robinhood-mainnet.g.alchemy.com/v2" \
+		"ALCHEMY_WS_URL=wss://robinhood-mainnet.g.alchemy.com/v2" \
+		"CHAIN_ID=4663" \
+		"AWS_SNS_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
+		"AWS_ACCESS_KEY_ID=test" \
+		"AWS_SECRET_ACCESS_KEY=test" \
+		"AWS_REGION=us-east-1" \
+		"AWS_SNS_TOPIC_ARN=arn:aws:sns:us-east-1:000000000000:stl-robinhood-blocks.fifo" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
+		"REDIS_ADDR=127.0.0.1:$(KIND_HOST_REDIS_PORT)" \
+		"REDIS_PASSWORD=" \
+		"JAEGER_ENDPOINT=127.0.0.1:$(KIND_HOST_OTLP_PORT)" \
+		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
+		"ENABLE_BACKFILL=false" \
+		> cmd/base/watcher/.env.robinhood && \
+	printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
 		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
 		"AWS_SQS_QUEUE_URL=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)/000000000000/stl-ethereum-oracle-price.fifo" \
 		"AWS_SQS_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
@@ -722,6 +764,24 @@ dev-env-files:
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://robinhood-mainnet.g.alchemy.com/v2" \
+		"AWS_SQS_QUEUE_URL=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)/000000000000/stl-robinhood-allocation-tracker.fifo" \
+		"AWS_SQS_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
+		"AWS_S3_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
+		"AWS_ACCESS_KEY_ID=test" \
+		"AWS_SECRET_ACCESS_KEY=test" \
+		"AWS_REGION=us-east-1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
+		"REDIS_ADDR=127.0.0.1:$(KIND_HOST_REDIS_PORT)" \
+		"REDIS_PASSWORD=" \
+		"CHAIN_ID=4663" \
+		"S3_BUCKET=stl-sentineldevelopment-robinhood-raw" \
+		"DEPLOY_ENV=development" \
+		"LOG_LEVEL=debug" \
+		> cmd/workers/prime-allocation-indexer/.env.robinhood && \
+	printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
 		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
 		"AWS_SQS_QUEUE_URL=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)/000000000000/stl-ethereum-morpho-indexing.fifo" \
 		"AWS_SQS_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
@@ -735,7 +795,7 @@ dev-env-files:
 		"JAEGER_ENDPOINT=127.0.0.1:$(KIND_HOST_OTLP_PORT)" \
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"SQS_WAIT_TIME=1" \
-		"SQS_VISIBILITY_TIMEOUT=30" \
+		"SQS_VISIBILITY_TIMEOUT=180" \
 		"LOG_LEVEL=debug" \
 		> cmd/workers/morpho-indexer/.env
 	@printf '%s\n' \
@@ -854,6 +914,25 @@ dev-env-files:
 dev-up-rebuild:
 	$(MAKE) dev-up COLD=1
 
+# A whole cluster of your own, alongside whatever is already running: a free port offset
+# and a name derived from it, then the ordinary dev-up. An explicit KIND_CLUSTER /
+# KIND_PORT_OFFSET wins over the derived one; COLD=1 passes through.
+dev-up-new:
+	@if [ -n "$(KIND_PORT_OFFSET_GIVEN)" ]; then \
+	  offset=$(KIND_PORT_OFFSET); \
+	else \
+	  offset=$$($(MAKE) --no-print-directory kind-free-offset) || exit 1; \
+	fi; \
+	if [ -n "$(KIND_CLUSTER_GIVEN)" ]; then name=$(KIND_CLUSTER); else name=vector-$$offset; fi; \
+	[ "$$name" != vector ] || { echo "ERROR: dev-up-new refuses the shared default cluster 'vector'. Pass KIND_CLUSTER=<other name>."; exit 1; }; \
+	kind get clusters 2>/dev/null | grep -qx "$$name" && { echo "ERROR: kind cluster '$$name' already exists — 'KIND_CLUSTER=$$name make dev-up-or-resume' brings it back up."; exit 1; }; \
+	[ -z "$$(docker ps -aq --filter name=^$$name-control-plane$$)" ] || { echo "ERROR: container '$$name-control-plane' already exists — remove it first."; exit 1; }; \
+	[ ! -e "$$HOME/.$$name" ] || { echo "ERROR: data dir $$HOME/.$$name already exists — 'KIND_CLUSTER=$$name make dev-wipe' removes it."; exit 1; }; \
+	echo "==> New cluster $$name at KIND_PORT_OFFSET=$$offset"; \
+	$(MAKE) dev-up KIND_CLUSTER=$$name KIND_PORT_OFFSET=$$offset || exit 1; \
+	echo "Follow-up commands need the cluster only — the offset is derived from it:"; \
+	echo "    export KIND_CLUSTER=$$name"
+
 dev-down: kind-delete
 
 # Suspend local kind nodes without deleting cluster state.
@@ -962,7 +1041,10 @@ BUILD_TIME ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 # file is unreachable, but a stale value here silently builds images on an older
 # toolchain — 1.26.3 shipped the stdlib CVEs that vulncheck flags.
 GO_VERSION ?= $(shell cat ../.go-version 2>/dev/null || cat .go-version 2>/dev/null || echo "1.26.5")
-PYTHON_VERSION ?= $(shell cat ../.python-version 2>/dev/null || cat .python-version 2>/dev/null || echo "3.12")
+# Read from ../.python-version (patch-pinned; also drives uv and CI setup-python).
+# Keep the literal fallback in step with that file — it feeds the python-api image
+# base tag, and Docker Hub needs the full patch version.
+PYTHON_VERSION ?= $(shell cat ../.python-version 2>/dev/null || cat .python-version 2>/dev/null || echo "3.12.14")
 
 # Image tag (default to git sha, can override)
 IMAGE_TAG ?= $(GIT_COMMIT)
@@ -1181,6 +1263,7 @@ docker-release-all:
 	@echo ""
 	@$(MAKE) _docker-release-reference-capital-backfill-internal ENV=$(ENV)
 	@$(MAKE) _docker-release-morpho-vault-backfill-internal ENV=$(ENV)
+	@$(MAKE) _docker-release-block-republisher-internal ENV=$(ENV)
 	@echo ""
 	@for cj in $(CRONJOBS); do \
 		$(MAKE) _docker-release-cronjob-$$cj-internal ENV=$(ENV) || { echo "ERROR: Failed to release cronjob $$cj"; exit 1; }; \
@@ -2112,7 +2195,8 @@ deploy-bulk-download: build-bulk-download-arm64
 	cat dist/bulk-download-linux-arm64 | tailscale ssh $(ERIGON_USER)@$(ERIGON_IP) 'cat > ~/bulk-download && chmod +x ~/bulk-download'
 	@echo "==> Deployed to ~/bulk-download on Erigon node."
 
-# Run bulk-download on Erigon node (dry-run by default)
+# Run bulk-download on Erigon node (dry-run by default: logs the archive decision
+# per block — fresh / skip / fill / republish, and the version — and uploads nothing)
 # Usage: make erigon-bulk-download ERIGON_USER=<user> ERIGON_IP=<ip> BUCKET=<bucket> START=16000000 END=16001000 [DRY_RUN=false]
 DRY_RUN ?= true
 erigon-bulk-download:
@@ -2172,9 +2256,52 @@ erigon-sparklend-backfill:
 # Local kind Cluster
 # =============================================================================
 
+# The ten host ports an offset needs, and which of them are taken. A container's
+# PortBindings count as taken even while it is stopped: a suspended kind cluster holds
+# no socket but reclaims its ports on dev-resume.
+define kind_port_probe
+reserved=" $$(cids=$$(docker ps -aq 2>/dev/null); [ -z "$$cids" ] || docker inspect --format '{{range .HostConfig.PortBindings}}{{range .}}{{.HostPort}} {{end}}{{end}}' $$cids 2>/dev/null | tr '\n' ' ') "; \
+if command -v nc >/dev/null 2>&1; then \
+  listening() { nc -z 127.0.0.1 "$$1" >/dev/null 2>&1; }; \
+else \
+  listening() { lsof -nP -iTCP:"$$1" -sTCP:LISTEN >/dev/null 2>&1; }; \
+fi; \
+offset_ports() { for b in $(KIND_PORT_BASES); do echo $$((b + $$1)); done; }; \
+ports_in_use() { \
+  used=""; \
+  for p in "$$@"; do \
+    if listening "$$p"; then used="$$used $$p"; \
+    else case "$$reserved" in *" $$p "*) used="$$used $$p";; esac; fi; \
+  done; \
+  echo $$used; \
+};
+endef
+
+# Lowest offset whose ten host ports are all free, for a cluster alongside the ones
+# already on this machine. Offset 0 is cluster `vector`'s by convention.
+kind-free-offset:
+	@$(kind_port_probe) \
+	off=100; \
+	while [ $$off -le 9000 ]; do \
+	  if [ -z "$$(ports_in_use $$(offset_ports $$off))" ]; then echo $$off; exit 0; fi; \
+	  off=$$((off + 100)); \
+	done; \
+	echo "ERROR: no offset in 100..9000 leaves all ten host ports ($(KIND_PORT_BASES)) free." >&2; \
+	exit 1
+
 # kind.yaml is a template: the placeholders below (cluster name, every host port,
 # the data dir) are substituted here, so it is never a valid kind config on disk.
 kind-create:
+	@kind get clusters 2>/dev/null | grep -qx $(KIND_CLUSTER) || { \
+	  $(kind_port_probe) \
+	  busy="$$(ports_in_use $$(offset_ports $(KIND_PORT_OFFSET)))"; \
+	  [ -z "$$busy" ] || { \
+	    echo "ERROR: KIND_PORT_OFFSET=$(KIND_PORT_OFFSET) wants host port(s) that are taken: $$busy"; \
+	    echo "       Another kind cluster (running or suspended) or process holds them."; \
+	    echo "       'make dev-up-new' brings up a cluster on a free offset; 'make kind-free-offset' just prints one."; \
+	    exit 1; \
+	  }; \
+	}
 	@mkdir -p $$HOME/.$(KIND_CLUSTER)/timescaledb $$HOME/.$(KIND_CLUSTER)/temporal-db
 	@OTHERS=$$(kind get clusters 2>/dev/null | grep -v '^$(KIND_CLUSTER)$$' || true); \
 	if [ -n "$$OTHERS" ]; then \
@@ -2321,6 +2448,15 @@ check-reloader-opt-in:
 	fi
 	@echo "✓ dev: no Reloader annotations (correct — no controller locally)"
 
+# ORB-362: the staging/prod images blocks are generated from ../k8s/image-roster.txt
+# by ../scripts/deploy/render-overlay-images.sh. Fails on an entry the roster does not
+# render (hand edit, wrong repo, orphan alias); roster lines the bot has not written
+# yet are reported as pending. Same check as the Manifests CI job.
+check-overlay-images:
+	@for env in staging prod; do \
+	  ../scripts/deploy/render-overlay-images.sh --env $$env --check ../k8s/overlays/$$env/kustomization.yaml --allow-missing || exit 1; \
+	done
+
 # Apply the dev core overlay (watcher, python-api, cronjobs) — reuses k8s/base.
 # Images must already be built + loaded into kind.
 kind-deploy-apps: check-dev-overlay-sync
@@ -2428,6 +2564,18 @@ docker-release-morpho-vault-backfill: ecr-login _docker-release-morpho-vault-bac
 
 _docker-release-morpho-vault-backfill-internal:
 	@$(MAKE) _docker-release-go-service GO_NAME="Morpho Vault Backfill" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/morpho-vault-backfill GO_BIN=morpho-vault-backfill GO_CACHE_KEY="cronjob-morpho-vault-backfill" GO_TAG="morpho-vault-backfill-$(IMAGE_TAG)" GO_LATEST_TAG="morpho-vault-backfill-latest"
+
+# block-republisher (ARCT-383): the on-demand repair that re-publishes a block
+# under a new version. Same lifecycle as the two backfillers above — a
+# long-running worker Deployment polling its task queue — so it needs the same
+# explicit release wiring.
+docker-build-block-republisher:
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/block-republisher --build-arg BIN=block-republisher -t stl-block-republisher:$(LOCAL_TAG) -f Dockerfile.common .
+
+docker-release-block-republisher: ecr-login _docker-release-block-republisher-internal
+
+_docker-release-block-republisher-internal:
+	@$(MAKE) _docker-release-go-service GO_NAME="Block Republisher" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/block-republisher GO_BIN=block-republisher GO_CACHE_KEY="cronjob-block-republisher" GO_TAG="block-republisher-$(IMAGE_TAG)" GO_LATEST_TAG="block-republisher-latest"
 
 kind-load-cronjobs:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="$(foreach cj,$(CRONJOBS),stl-$(cj):$(LOCAL_TAG))"

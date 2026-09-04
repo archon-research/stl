@@ -1,176 +1,77 @@
-"""Coverage gating and registry resolution for the upstream balance sheet."""
+"""Address resolution and pass-through for the stored balance sheet.
 
-import asyncio
+The resolution scenarios themselves live in ``test_star_resolution.py``; these
+cover what this service adds on top of them.
+"""
+
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
-import pytest
-
 from app.domain.entities.allocation import EthAddress
-from app.domain.entities.reference_position import ReferencePosition
-from app.services.reference_positions_service import (
-    _RESOLVE_CONCURRENCY,
-    ReferencePositionsService,
-)
+from app.domain.entities.reference_position import ReferencePosition, ReferencePositionSnapshot
+from app.services.reference_positions_service import ReferencePositionsService
 
-_PROXY = EthAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
-_TOKEN = "0x" + "cd" * 20
-_V4_POOL_ID = "0x" + "ef" * 32
+# A real axis-synome spark ALM proxy: the service resolves the star through the
+# contract, so a placeholder address would resolve to no prime at all.
+_SPARK_ALM = EthAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
+_UNKNOWN_PROXY = EthAddress("0x" + "ab" * 20)
+_SYNCED_AT = datetime(2026, 8, 26, 9, 15, tzinfo=UTC)
 
 
-def _position(
-    *,
-    network: str = "ethereum",
-    token_address: str = _TOKEN,
-    chain_id: int | None = 1,
-    chain: str | None = "mainnet",
-) -> ReferencePosition:
+def _position() -> ReferencePosition:
     return ReferencePosition(
         protocol_name="sparklend",
-        network=network,
+        network="ethereum",
         symbol="spUSDS",
         name="Spark USDS",
-        token_address=token_address,
-        wallet_address=str(_PROXY),
+        token_address="0x" + "cd" * 20,
+        wallet_address="0x" + "ef" * 20,
         assets_usd=Decimal("787379142.91"),
         allocated_assets_usd=None,
         idle_assets_usd=None,
-        allocation_type="allocation",
-        chain_id=chain_id,
-        chain=chain,
+        receipt_token_id=41,
+        chain_id=1,
+        chain="mainnet",
     )
 
 
-def _service(
-    *,
-    positions: tuple[ReferencePosition, ...] = (),
-    tracked: frozenset[str] = frozenset({"spark"}),
-    receipt_token_id: int | None = 41,
-    primes: list | None = None,
-):
-    position_provider = AsyncMock()
-    position_provider.get_positions.return_value = positions
-
-    coverage = AsyncMock()
-    coverage.tracked_stars.return_value = tracked
-
-    receipt_tokens = AsyncMock()
-    receipt_tokens.get_by_chain_and_address.return_value = (
-        None if receipt_token_id is None else AsyncMock(receipt_token_id=receipt_token_id)
-    )
-
+def _service(snapshot: ReferencePositionSnapshot | None):
+    provider = AsyncMock()
+    provider.get_positions.return_value = snapshot
     directory = AsyncMock()
-    directory.list_primes.return_value = primes or []
-
-    service = ReferencePositionsService(position_provider, coverage, receipt_tokens, directory)
-    return service, position_provider, receipt_tokens
+    directory.list_primes.return_value = []
+    return ReferencePositionsService(provider, directory), provider
 
 
-@pytest.mark.asyncio
-async def test_returns_none_when_the_monitor_does_not_cover_the_prime(monkeypatch):
-    # Coverage is the Star monitor's answer, not this feed's: the feed serves an
-    # unknown star 200-with-no-rows, which is indistinguishable from a prime that
-    # holds nothing. Asking the wrong source would publish "holds nothing".
-    monkeypatch.setattr("app.services.reference_positions_service.prime_name_for", lambda _: "obex")
-    service, positions, _ = _service(tracked=frozenset({"spark"}))
+async def test_serves_the_rows_and_the_cycle_they_were_observed_at() -> None:
+    # The registry join is the reader's SQL now, so the service passes rows
+    # through untouched rather than re-resolving them.
+    service, _ = _service(ReferencePositionSnapshot(synced_at=_SYNCED_AT, positions=(_position(),)))
 
-    assert await service.get(_PROXY) is None
-    positions.get_positions.assert_not_awaited()
+    snapshot = await service.get(_SPARK_ALM)
 
-
-@pytest.mark.asyncio
-async def test_an_empty_feed_for_a_covered_prime_is_not_none(monkeypatch):
-    # The distinction the gate exists to preserve: a covered prime reporting no
-    # positions is an empty list, which is a claim; `None` means "no reference
-    # data at all", which is a different one. Collapsing them would turn a
-    # genuinely empty balance sheet into a 404.
-    monkeypatch.setattr("app.services.reference_positions_service.prime_name_for", lambda _: "spark")
-    service, _, _ = _service(positions=(), tracked=frozenset({"spark"}))
-
-    assert await service.get(_PROXY) == ()
+    assert snapshot is not None
+    assert snapshot.synced_at == _SYNCED_AT
+    assert [row.receipt_token_id for row in snapshot.positions] == [41]
 
 
-@pytest.mark.asyncio
-async def test_returns_none_when_the_address_names_no_prime(monkeypatch):
-    monkeypatch.setattr("app.services.reference_positions_service.prime_name_for", lambda _: None)
-    service, positions, _ = _service()
+async def test_asks_the_reader_for_the_resolved_star() -> None:
+    service, provider = _service(ReferencePositionSnapshot(synced_at=_SYNCED_AT, positions=()))
 
-    assert await service.get(_PROXY) is None
-    positions.get_positions.assert_not_awaited()
+    await service.get(_SPARK_ALM)
 
-
-@pytest.mark.asyncio
-async def test_attaches_stls_receipt_token_id(monkeypatch):
-    monkeypatch.setattr("app.services.reference_positions_service.prime_name_for", lambda _: "spark")
-    service, _, _ = _service(positions=(_position(),), receipt_token_id=41)
-
-    (row,) = await service.get(_PROXY)
-
-    assert row.receipt_token_id == 41
+    provider.get_positions.assert_awaited_once_with("spark")
 
 
-@pytest.mark.asyncio
-async def test_keeps_a_row_stl_does_not_index(monkeypatch):
-    # Most of this feed is positions STL has no registry entry for — that is why
-    # it carries 59 rows against the monitor's 11. An unresolved id must not drop
-    # the row.
-    monkeypatch.setattr("app.services.reference_positions_service.prime_name_for", lambda _: "spark")
-    service, _, _ = _service(positions=(_position(),), receipt_token_id=None)
+async def test_returns_none_when_no_cycle_has_reported_on_the_prime() -> None:
+    service, _ = _service(None)
 
-    (row,) = await service.get(_PROXY)
-
-    assert row.receipt_token_id is None
-    assert row.symbol == "spUSDS"
+    assert await service.get(_SPARK_ALM) is None
 
 
-@pytest.mark.asyncio
-async def test_skips_the_registry_lookup_where_it_cannot_succeed(monkeypatch):
-    # A pool id is not an address and an unmapped chain has no id to look up, so
-    # the query is not issued rather than issued and allowed to miss.
-    monkeypatch.setattr("app.services.reference_positions_service.prime_name_for", lambda _: "spark")
-    service, _, receipt_tokens = _service(
-        positions=(
-            _position(token_address=_V4_POOL_ID),
-            _position(network="plume", chain_id=None, chain=None),
-        )
-    )
+async def test_returns_none_without_asking_when_the_address_names_no_prime() -> None:
+    service, provider = _service(ReferencePositionSnapshot(synced_at=_SYNCED_AT, positions=(_position(),)))
 
-    rows = await service.get(_PROXY)
-
-    assert [row.receipt_token_id for row in rows] == [None, None]
-    receipt_tokens.get_by_chain_and_address.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_registry_lookups_stay_inside_the_connection_pool(monkeypatch):
-    """The enrichment fan-out is capped, not left to the row count.
-
-    Each lookup opens its own connection, and this feed carries an order of
-    magnitude more rows than the breakdown it replaced. Unbounded, one request
-    can queue for more connections than the pool holds and then time out on a
-    queue it created itself.
-    """
-    monkeypatch.setattr("app.services.reference_positions_service.prime_name_for", lambda _: "spark")
-    service, _, receipt_tokens = _service(
-        positions=tuple(_position() for _ in range(_RESOLVE_CONCURRENCY * 4)),
-    )
-
-    live = 0
-    peak = 0
-
-    async def counting_lookup(*_args, **_kwargs):
-        nonlocal live, peak
-        live += 1
-        peak = max(peak, live)
-        # Yields, so every task that is allowed to start has started before any
-        # finishes — without this the peak reads 1 whatever the limit is.
-        await asyncio.sleep(0)
-        live -= 1
-        return None
-
-    receipt_tokens.get_by_chain_and_address.side_effect = counting_lookup
-
-    rows = await service.get(_PROXY)
-
-    assert len(rows) == _RESOLVE_CONCURRENCY * 4
-    assert peak <= _RESOLVE_CONCURRENCY
+    assert await service.get(_UNKNOWN_PROXY) is None
+    provider.get_positions.assert_not_awaited()

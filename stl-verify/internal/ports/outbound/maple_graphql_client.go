@@ -25,7 +25,7 @@ type MapleLoanMeta struct {
 // during DepositPending); the client keeps such a collateral with nil values
 // so "collateral pending" stays distinguishable from "no collateral".
 type MapleLoanCollateral struct {
-	Asset            string   // symbol, e.g. "BTC", "USDC", "SOL"
+	Asset            string   // symbol, e.g. "BTC", "USDC", "SOL"; empty when the API reports null
 	AssetAmount      *big.Int // native decimals; nil when the API reports null
 	AssetValueUSD    *big.Int // per-unit USD price, 8 decimals; nil when the API reports null
 	Decimals         int

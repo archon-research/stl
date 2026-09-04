@@ -207,8 +207,9 @@ make run-cronjob-<your-job>              # run locally against the kind Temporal
 
 Cronjob images are discovered automatically from `cmd/cronjobs/*`:
 `make docker-build-cronjob-<your-job>` and `make docker-release-cronjob-<your-job> ENV=...`.
-The image build is automatic; **promotion is not** — add the job to `deploy.yaml`'s
-`CRONJOBS` list or its tag is never stamped.
+The image build is automatic; **promotion and pinning are not** — add a
+`cronjob <your-job> <your-job>` line to `k8s/image-roster.txt` (ORB-362), which
+drives both the prod promotion and the overlays' generated `images:` entries.
 
 **Verify:** open the local Temporal UI, select namespace `vector`, confirm a schedule
 named `<your-job>` appears under Schedules and that a workflow execution runs.
@@ -252,6 +253,7 @@ whatever input the job declares. Nothing here has a schedule or a button.
 | `cmd/backfillers/offchain-price-backfill` | `offchain-price-backfill` | `OffchainPriceBackfill` | `{"assets":["weth"],"from":"2020-01-01T00:00:00Z","to":"2026-08-05T00:00:00Z"}` |
 | `cmd/backfillers/morpho-vault-backfill` | `morpho-vault-backfill` | `MorphoVaultBackfill` | `{"from":24765588,"to":24786366}` (or `{"to":24786366,"fromV2Deploy":true}` for the whole VaultV2 era) |
 | `cmd/cronjobs/morpho-v2-bootstrap` | `morpho-v2-bootstrap` | `MorphoV2Bootstrap` | none (`{}` is accepted and ignored) |
+| `cmd/backfillers/block-republisher` | `block-republisher` | `BlockRepublish` | `{"blocks":[25395651,25087888]}` (the version is derived per height from the raw archive; naming one, or any other field, fails the run) |
 
 ### Shape of an on-demand job
 
@@ -390,6 +392,15 @@ task queue to receive a hand-started run. Model it on
 `k8s/base/offchain-price-backfill/` — including its `strategy: {type: Recreate}`, so a
 rollout never runs two pods against the same task queue.
 
+Declare that strategy in the *same* commit that first adds the Deployment. Retrofitting it
+onto a workload already running in staging or prod cannot be applied: the API server has
+since defaulted a `rollingUpdate` block that ArgoCD does not own, server-side apply only
+prunes what it owns, and every sync of the whole Application then fails — indefinitely,
+with app health still green. That is what `reference-capital-backfill` hit in #640; undoing
+it took two merges (restore an explicit `RollingUpdate`, then change it once that is
+Synced). Declaring it up front is the only point at which it costs nothing; see
+`k8s/AGENTS.md`, "Rollout strategy".
+
 Backfillers are **not** auto-discovered like cronjobs, so the release needs wiring in
 three places. Miss any of them and the tag is promoted without an image ever being
 built, which surfaces as `ImagePullBackOff`:
@@ -399,8 +410,9 @@ built, which surfaces as `ImagePullBackOff`:
    pattern rules already work; the docker ones do not).
 2. A `_docker-release-<name>-internal` line in the `docker-release-all` target
    (`stl-verify/Makefile`), or nothing builds the image on release.
-3. An entry in `deploy.yaml`'s `CRONJOBS` promotion list, or `verify-ecr-images.sh`
-   refuses to stamp the environment — for *every* service, not just this one.
+3. A `cronjob <name> <alias>` line in `k8s/image-roster.txt` — promotion and the
+   overlay `images:` entries are both generated from it (ORB-362). Without it the
+   Deployment renders an unpinned image name and sits in `ImagePullBackOff`.
 
 ## Local development
 

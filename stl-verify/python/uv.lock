@@ -14,11 +14,8 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-08-17T13:07:15.170125Z"
+exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P7D"
-
-[options.exclude-newer-package]
-axis-synome = "2100-01-01T23:00:00Z"
 
 [[package]]
 name = "annotated-doc"
@@ -131,19 +128,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ba/7a/15e37d45e7f7c94facc1e9148c0e455e8f33c08f0b8a0b1deb2c5171771b/asyncpg-0.31.0-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:8df714dba348efcc162d2adf02d213e5fab1bd9f557e1305633e851a61814a7a", size = 3429426, upload-time = "2025-11-24T23:26:41.032Z" },
     { url = "https://files.pythonhosted.org/packages/13/d5/71437c5f6ae5f307828710efbe62163974e71237d5d46ebd2869ea052d10/asyncpg-0.31.0-cp314-cp314t-win32.whl", hash = "sha256:1b41f1afb1033f2b44f3234993b15096ddc9cd71b21a42dbd87fc6a57b43d65d", size = 614495, upload-time = "2025-11-24T23:26:42.659Z" },
     { url = "https://files.pythonhosted.org/packages/3c/d7/8fb3044eaef08a310acfe23dae9a8e2e07d305edc29a53497e52bc76eca7/asyncpg-0.31.0-cp314-cp314t-win_amd64.whl", hash = "sha256:bd4107bb7cdd0e9e65fae66a62afd3a249663b844fa34d479f6d5b3bef9c04c3", size = 706062, upload-time = "2025-11-24T23:26:44.086Z" },
-]
-
-[[package]]
-name = "axis-synome"
-version = "0.2.0.dev202607240944"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "eth-hash", extra = ["pycryptodome"] },
-    { name = "pydantic" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/c3/5b/41b7ffbd65851fcb5a53f200bf0f889ab00335dee22edc393dfb2086a6ec/axis_synome-0.2.0.dev202607240944.tar.gz", hash = "sha256:9d757d2125a2c7ab9ca3ec20bafcce42068b85dc267f6967732375b7c807d75c", size = 336211, upload-time = "2026-07-24T09:44:46.484Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/5d/4a/409458200638b7c7592135b3f6aa1210127ae99bf949095db31ffa45d6ea/axis_synome-0.2.0.dev202607240944-py3-none-any.whl", hash = "sha256:fa5c8dd7828530554380c2f772f16e292ebd22534ceefbd34eae8704c1aef593", size = 227108, upload-time = "2026-07-24T09:44:45.165Z" },
 ]
 
 [[package]]
@@ -1418,7 +1402,7 @@ source = { editable = "." }
 dependencies = [
     { name = "arch" },
     { name = "asyncpg" },
-    { name = "axis-synome" },
+    { name = "eth-hash", extra = ["pycryptodome"] },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "joblib" },
@@ -1454,7 +1438,7 @@ dev = [
 requires-dist = [
     { name = "arch", specifier = ">=8.0.0" },
     { name = "asyncpg" },
-    { name = "axis-synome", specifier = "==0.2.0.dev202607240944" },
+    { name = "eth-hash", extras = ["pycryptodome"], specifier = ">=0.8.0" },
     { name = "fastapi" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "httpx", marker = "extra == 'dev'" },

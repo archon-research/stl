@@ -7,6 +7,13 @@
 //   - S3 uploads happen asynchronously in a separate upload pool
 //   - This decouples RPC fetching from S3 I/O for maximum throughput
 //
+// The archive's contract is highest-version-wins, so every height is weighed
+// against what is already there: a first archive lands at version 0, an archived
+// version whose hash the chain no longer recognises is corrected at the next free
+// version, and nothing is ever overwritten. See planBlock. A run refuses a range
+// reaching past the node's finalized head, where a height that loses its fork
+// could never be corrected; --allow-unfinalized overrides that.
+//
 // Usage:
 //
 //	./bulk-download \
@@ -33,10 +40,10 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/aws/aws-sdk-go-v2/config"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 // Default settings optimized for local Erigon node
@@ -57,6 +64,9 @@ type Config struct {
 	EndBlock   int64
 	Bucket     string
 	Region     string
+	DryRun     bool
+
+	AllowUnfinalized bool
 
 	BlockReceiptWorkers int
 	TraceWorkers        int
@@ -81,6 +91,11 @@ type Stats struct {
 	uploadsCompleted atomic.Int64
 	uploadsFailed    atomic.Int64
 
+	planFresh     atomic.Int64
+	planSkip      atomic.Int64
+	planFill      atomic.Int64
+	planRepublish atomic.Int64
+
 	// Timing metrics (in nanoseconds)
 	rpcBlockTime atomic.Int64 // Time spent in RPC calls for blocks+receipts
 	rpcTraceTime atomic.Int64 // Time spent in RPC calls for traces
@@ -96,152 +111,25 @@ type Stats struct {
 	startTime time.Time
 }
 
+func (s *Stats) recordPlan(action blockAction) {
+	switch action {
+	case actionFresh:
+		s.planFresh.Add(1)
+	case actionSkip:
+		s.planSkip.Add(1)
+	case actionFill:
+		s.planFill.Add(1)
+	case actionRepublish:
+		s.planRepublish.Add(1)
+	}
+}
+
 // UploadJob represents an S3 upload to be performed asynchronously.
 type UploadJob struct {
 	Bucket   string
 	Key      string
 	Data     []byte // Raw uncompressed data (S3 writer handles compression)
-	DataType string // "block", "receipts", or "traces"
-	BlockNum int64
-}
-
-// PartitionCache caches the list of existing keys per S3 partition.
-type PartitionCache struct {
-	mu        sync.RWMutex
-	cache     map[string]map[string]struct{}
-	s3Reader  outbound.S3Reader
-	bucket    string
-	logger    *slog.Logger
-	hitCount  atomic.Int64
-	missCount atomic.Int64
-}
-
-func NewPartitionCache(s3Reader outbound.S3Reader, bucket string, logger *slog.Logger) *PartitionCache {
-	return &PartitionCache{
-		cache:    make(map[string]map[string]struct{}),
-		s3Reader: s3Reader,
-		bucket:   bucket,
-		logger:   logger,
-	}
-}
-
-// ensurePartitionLoaded loads a partition into the cache if not already present.
-func (pc *PartitionCache) ensurePartitionLoaded(ctx context.Context, partition string) error {
-	pc.mu.RLock()
-	_, ok := pc.cache[partition]
-	pc.mu.RUnlock()
-
-	if ok {
-		pc.hitCount.Add(1)
-		return nil
-	}
-
-	pc.missCount.Add(1)
-
-	prefix := partition + "/"
-	keyList, err := pc.s3Reader.ListPrefix(ctx, pc.bucket, prefix)
-	if err != nil {
-		return fmt.Errorf("failed to list partition %s: %w", partition, err)
-	}
-
-	keySet := make(map[string]struct{}, len(keyList))
-	for _, key := range keyList {
-		keySet[key] = struct{}{}
-	}
-
-	pc.mu.Lock()
-	// Double-check in case another goroutine loaded it while we were fetching
-	if _, ok := pc.cache[partition]; !ok {
-		pc.cache[partition] = keySet
-		pc.logger.Debug("loaded partition from S3", "partition", partition, "keyCount", len(keySet))
-	}
-	pc.mu.Unlock()
-
-	return nil
-}
-
-func (pc *PartitionCache) HasBlockAndReceipts(ctx context.Context, blockNum int64) (bool, error) {
-	partition := partition.GetPartition(blockNum)
-	if err := pc.ensurePartitionLoaded(ctx, partition); err != nil {
-		return false, err
-	}
-
-	blockKey := s3key.BuildWithPartition(partition, blockNum, 1, s3key.Block)
-	receiptsKey := s3key.BuildWithPartition(partition, blockNum, 1, s3key.Receipts)
-
-	pc.mu.RLock()
-	defer pc.mu.RUnlock()
-
-	keySet, ok := pc.cache[partition]
-	if !ok {
-		return false, nil
-	}
-
-	_, hasBlock := keySet[blockKey]
-	_, hasReceipts := keySet[receiptsKey]
-	return hasBlock && hasReceipts, nil
-}
-
-// HasAllData checks if block, receipts, AND traces all exist for a block.
-// Use this to determine if a block can be completely skipped.
-func (pc *PartitionCache) HasAllData(ctx context.Context, blockNum int64) (bool, error) {
-	partition := partition.GetPartition(blockNum)
-	if err := pc.ensurePartitionLoaded(ctx, partition); err != nil {
-		return false, err
-	}
-
-	blockKey := s3key.BuildWithPartition(partition, blockNum, 1, s3key.Block)
-	receiptsKey := s3key.BuildWithPartition(partition, blockNum, 1, s3key.Receipts)
-	tracesKey := s3key.BuildWithPartition(partition, blockNum, 1, s3key.Traces)
-
-	pc.mu.RLock()
-	defer pc.mu.RUnlock()
-
-	keySet, ok := pc.cache[partition]
-	if !ok {
-		return false, nil
-	}
-
-	_, hasBlock := keySet[blockKey]
-	_, hasReceipts := keySet[receiptsKey]
-	_, hasTraces := keySet[tracesKey]
-	return hasBlock && hasReceipts && hasTraces, nil
-}
-
-func (pc *PartitionCache) HasTraces(ctx context.Context, blockNum int64) (bool, error) {
-	partition := partition.GetPartition(blockNum)
-	if err := pc.ensurePartitionLoaded(ctx, partition); err != nil {
-		return false, err
-	}
-
-	tracesKey := s3key.BuildWithPartition(partition, blockNum, 1, s3key.Traces)
-
-	pc.mu.RLock()
-	defer pc.mu.RUnlock()
-
-	keySet, ok := pc.cache[partition]
-	if !ok {
-		return false, nil
-	}
-
-	_, exists := keySet[tracesKey]
-	return exists, nil
-}
-
-func (pc *PartitionCache) MarkWritten(blockNum int64, dataType string) {
-	partition := partition.GetPartition(blockNum)
-	key := s3key.BuildWithPartition(partition, blockNum, 1, s3key.DataType(dataType))
-
-	pc.mu.Lock()
-	defer pc.mu.Unlock()
-
-	if keySet, ok := pc.cache[partition]; ok {
-		keySet[key] = struct{}{}
-	}
-}
-
-func (pc *PartitionCache) GetStats() (hits, misses int64) {
-	return pc.hitCount.Load(), pc.missCount.Load()
+	DataType s3key.DataType
 }
 
 func main() {
@@ -290,6 +178,8 @@ func parseFlags() Config {
 	flag.Int64Var(&cfg.EndBlock, "end-block", 0, "Ending block number (required)")
 	flag.StringVar(&cfg.Bucket, "bucket", "", "S3 bucket name (required)")
 	flag.StringVar(&cfg.Region, "region", "", "AWS region (e.g., eu-west-1)")
+	flag.BoolVar(&cfg.DryRun, "dry-run", false, "Log every block's decision and upload nothing")
+	flag.BoolVar(&cfg.AllowUnfinalized, "allow-unfinalized", false, "Archive past the node's finalized head, accepting that a height that loses its fork stays wrong")
 	flag.IntVar(&cfg.BlockReceiptWorkers, "block-workers", DefaultBlockReceiptWorkers, "Block+receipt worker count")
 	flag.IntVar(&cfg.TraceWorkers, "trace-workers", DefaultTraceWorkers, "Trace worker count")
 	flag.IntVar(&cfg.UploadWorkers, "upload-workers", DefaultUploadWorkers, "S3 upload worker count")
@@ -317,8 +207,14 @@ func validateConfig(cfg Config) error {
 }
 
 func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
+	logStartupInfo(cfg, logger)
+
 	rpcClient, err := createRPCClient(cfg, logger)
 	if err != nil {
+		return err
+	}
+
+	if err := guardFinality(ctx, rpcClient, cfg, logger); err != nil {
 		return err
 	}
 
@@ -326,26 +222,47 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	if err := checkArchiveReachable(ctx, s3Reader, cfg.Bucket); err != nil {
+		return err
+	}
 
 	partitionCache := NewPartitionCache(s3Reader, cfg.Bucket, logger)
 	stats := &Stats{startTime: time.Now()}
-
-	logStartupInfo(cfg, logger)
+	planner := &blockPlanner{cache: partitionCache, reader: s3Reader, bucket: cfg.Bucket, stats: stats}
 
 	stopProgressReporter := startProgressReporter(ctx, stats, cfg.EndBlock-cfg.StartBlock+1, partitionCache, logger)
 	defer stopProgressReporter()
 
 	pipeline := newPipeline(cfg)
-	pipeline.startUploadWorkers(ctx, s3Writer, partitionCache, stats, logger)
-	pipeline.startTraceCollector(ctx, cfg, partitionCache, stats, logger)
-	pipeline.startBlockReceiptWorkers(ctx, rpcClient, partitionCache, cfg, stats, logger)
-	pipeline.startTraceWorkers(ctx, rpcClient, partitionCache, cfg.Bucket, stats, logger)
+	archiver := blockArchiver{
+		client:   rpcClient,
+		planner:  planner,
+		cfg:      cfg,
+		uploadCh: pipeline.uploadCh,
+		traceCh:  pipeline.traceCollectorCh,
+		stats:    stats,
+		logger:   logger,
+	}
+	pipeline.startUploadWorkers(ctx, s3Writer, stats, logger)
+	pipeline.startTraceCollector(ctx, cfg)
+	pipeline.startBlockReceiptWorkers(ctx, archiver)
+	pipeline.startTraceWorkers(ctx, rpcClient, cfg.Bucket, stats, logger)
 	pipeline.feedBlockWork(ctx, cfg.StartBlock, cfg.EndBlock, cfg.BlockBatchSize)
 
 	pipeline.waitForCompletion()
 
 	logFinalStats(stats, partitionCache, logger)
-	return nil
+	return failureError(stats)
+}
+
+// failureError reports the holes a run left behind: an operator reading only the
+// exit code would take the summary line for a complete archive.
+func failureError(stats *Stats) error {
+	blocks, traces, uploads := stats.blocksFailed.Load(), stats.tracesFailed.Load(), stats.uploadsFailed.Load()
+	if blocks == 0 && traces == 0 && uploads == 0 {
+		return nil
+	}
+	return fmt.Errorf("archive incomplete: %d blocks, %d traces and %d uploads failed; re-run the same range", blocks, traces, uploads)
 }
 
 func createRPCClient(cfg Config, logger *slog.Logger) (*alchemy.Client, error) {
@@ -395,6 +312,9 @@ func createS3Clients(ctx context.Context, cfg Config, logger *slog.Logger) (*s3.
 		return nil, nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
+	// Reader and writer share this pool, so it holds both roles at once: sized
+	// to the uploaders alone, the block workers' ranged GETs queue behind PUTs.
+	conns := cfg.BlockReceiptWorkers + cfg.UploadWorkers
 	httpClient := &http.Client{
 		Timeout: 60 * time.Second,
 		Transport: &http.Transport{
@@ -403,9 +323,9 @@ func createS3Clients(ctx context.Context, cfg Config, logger *slog.Logger) (*s3.
 				Timeout:   30 * time.Second,
 				KeepAlive: 30 * time.Second,
 			}).DialContext,
-			MaxIdleConns:          cfg.UploadWorkers * 2,
-			MaxIdleConnsPerHost:   cfg.UploadWorkers,
-			MaxConnsPerHost:       cfg.UploadWorkers,
+			MaxIdleConns:          conns * 2,
+			MaxIdleConnsPerHost:   conns,
+			MaxConnsPerHost:       conns,
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
@@ -413,9 +333,20 @@ func createS3Clients(ctx context.Context, cfg Config, logger *slog.Logger) (*s3.
 		},
 	}
 
-	writer := s3.NewWriterWithHTTPClient(awsCfg, httpClient, logger)
-	reader := s3.NewReaderWithHTTPClient(awsCfg, httpClient, logger)
-	return writer, reader, nil
+	options := append([]func(*awss3.Options){func(o *awss3.Options) { o.HTTPClient = httpClient }},
+		s3.EndpointOptionsFromEnv()...)
+	return s3.NewWriterWithOptions(awsCfg, logger, options...), s3.NewReaderWithOptions(awsCfg, logger, options...), nil
+}
+
+// checkArchiveReachable fails the run before any worker starts. Without it a
+// bucket that is not there, or one this run may not list, is discovered once per
+// partition — and the run walks the whole range before saying so.
+func checkArchiveReachable(ctx context.Context, reader *s3.Reader, bucket string) error {
+	if err := reader.HeadBucket(ctx, bucket); err != nil {
+		return fmt.Errorf("cannot reach the archive bucket %s; it must exist and this run needs s3:ListBucket on it: %w",
+			bucket, err)
+	}
+	return nil
 }
 
 func logStartupInfo(cfg Config, logger *slog.Logger) {
@@ -430,6 +361,8 @@ func logStartupInfo(cfg Config, logger *slog.Logger) {
 		"blockBatchSize", cfg.BlockBatchSize,
 		"traceBatchSize", cfg.TraceBatchSize,
 		"bucket", cfg.Bucket,
+		"dryRun", cfg.DryRun,
+		"allowUnfinalized", cfg.AllowUnfinalized,
 	)
 }
 
@@ -452,6 +385,10 @@ func logFinalStats(stats *Stats, cache *PartitionCache, logger *slog.Logger) {
 		"tracesFailed", stats.tracesFailed.Load(),
 		"uploadsCompleted", stats.uploadsCompleted.Load(),
 		"uploadsFailed", stats.uploadsFailed.Load(),
+		"planFresh", stats.planFresh.Load(),
+		"planSkip", stats.planSkip.Load(),
+		"planFill", stats.planFill.Load(),
+		"planRepublish", stats.planRepublish.Load(),
 		"totalBytesWritten", formatBytes(stats.blockBytesWritten.Load()+stats.traceBytesWritten.Load()),
 		"blocksPerSec", fmt.Sprintf("%.1f", float64(stats.blocksProcessed.Load()+stats.blocksSkipped.Load())/elapsed.Seconds()),
 		"elapsed", elapsed.Round(time.Second),
@@ -490,9 +427,9 @@ func avgDuration(totalNanos, count int64) time.Duration {
 // pipeline coordinates the concurrent worker pools for bulk downloading.
 type pipeline struct {
 	blockWorkCh      chan int64
-	traceWorkCh      chan []int64
+	traceWorkCh      chan []traceRequest
 	uploadCh         chan UploadJob
-	traceCollectorCh chan int64
+	traceCollectorCh chan traceRequest
 
 	uploadWorkers int
 	traceWorkers  int
@@ -506,48 +443,50 @@ type pipeline struct {
 func newPipeline(cfg Config) *pipeline {
 	return &pipeline{
 		blockWorkCh:      make(chan int64, cfg.BlockReceiptWorkers*2),
-		traceWorkCh:      make(chan []int64, cfg.TraceWorkers*2),
+		traceWorkCh:      make(chan []traceRequest, cfg.TraceWorkers*2),
 		uploadCh:         make(chan UploadJob, cfg.UploadWorkers*4),
-		traceCollectorCh: make(chan int64, 10000),
+		traceCollectorCh: make(chan traceRequest, 10000),
 		uploadWorkers:    cfg.UploadWorkers,
 		traceWorkers:     cfg.TraceWorkers,
 		blockWorkers:     cfg.BlockReceiptWorkers,
 	}
 }
 
-func (p *pipeline) startUploadWorkers(ctx context.Context, writer outbound.S3Writer, cache *PartitionCache, stats *Stats, logger *slog.Logger) {
+func (p *pipeline) startUploadWorkers(ctx context.Context, writer outbound.S3Writer, stats *Stats, logger *slog.Logger) {
 	for i := 0; i < p.uploadWorkers; i++ {
 		p.uploadWg.Add(1)
 		go func(workerID int) {
 			defer p.uploadWg.Done()
-			uploadWorker(ctx, workerID, writer, cache, p.uploadCh, stats, logger)
+			uploadWorker(ctx, workerID, writer, p.uploadCh, stats, logger)
 		}(i)
 	}
 }
 
-func (p *pipeline) startTraceCollector(ctx context.Context, cfg Config, cache *PartitionCache, stats *Stats, logger *slog.Logger) {
+func (p *pipeline) startTraceCollector(ctx context.Context, cfg Config) {
 	p.traceWg.Go(func() {
 		defer close(p.traceWorkCh)
-		traceCollector(ctx, cfg, p.traceCollectorCh, p.traceWorkCh, cache, stats, logger)
+		traceCollector(ctx, cfg, p.traceCollectorCh, p.traceWorkCh)
 	})
 }
 
-func (p *pipeline) startBlockReceiptWorkers(ctx context.Context, client *alchemy.Client, cache *PartitionCache, cfg Config, stats *Stats, logger *slog.Logger) {
+func (p *pipeline) startBlockReceiptWorkers(ctx context.Context, archiver blockArchiver) {
 	for i := 0; i < p.blockWorkers; i++ {
 		p.blockWg.Add(1)
 		go func(workerID int) {
 			defer p.blockWg.Done()
-			blockReceiptWorker(ctx, workerID, client, cache, cfg, p.blockWorkCh, p.traceCollectorCh, p.uploadCh, stats, logger)
+			worker := archiver
+			worker.logger = archiver.logger.With("worker", workerID, "type", "block")
+			worker.archiveBatches(ctx, p.blockWorkCh)
 		}(i)
 	}
 }
 
-func (p *pipeline) startTraceWorkers(ctx context.Context, client *alchemy.Client, cache *PartitionCache, bucket string, stats *Stats, logger *slog.Logger) {
+func (p *pipeline) startTraceWorkers(ctx context.Context, client *alchemy.Client, bucket string, stats *Stats, logger *slog.Logger) {
 	for i := 0; i < p.traceWorkers; i++ {
 		p.traceWg.Add(1)
 		go func(workerID int) {
 			defer p.traceWg.Done()
-			traceWorker(ctx, workerID, client, cache, bucket, p.traceWorkCh, p.uploadCh, stats, logger)
+			traceWorker(ctx, workerID, client, bucket, p.traceWorkCh, p.uploadCh, stats, logger)
 		}(i)
 	}
 }
@@ -576,158 +515,171 @@ func (p *pipeline) waitForCompletion() {
 	p.uploadWg.Wait()
 }
 
-// blockReceiptWorker fetches blocks and receipts, queues S3 uploads, and signals trace collection.
-func blockReceiptWorker(
-	ctx context.Context,
-	workerID int,
-	client *alchemy.Client,
-	partitionCache *PartitionCache,
-	cfg Config,
-	workCh <-chan int64,
-	traceCollectorCh chan<- int64,
-	uploadCh chan<- UploadJob,
-	stats *Stats,
-	logger *slog.Logger,
-) {
-	logger = logger.With("worker", workerID, "type", "block")
+// blockArchiver archives the batches one block worker is handed.
+type blockArchiver struct {
+	client   *alchemy.Client
+	planner  *blockPlanner
+	cfg      Config
+	uploadCh chan<- UploadJob
+	traceCh  chan<- traceRequest
+	stats    *Stats
+	logger   *slog.Logger
+}
 
+func (a blockArchiver) archiveBatches(ctx context.Context, workCh <-chan int64) {
 	for batchStart := range workCh {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return
-		default:
 		}
+		a.archiveBatch(ctx, batchStart, min(batchStart+int64(a.cfg.BlockBatchSize)-1, a.cfg.EndBlock))
+	}
+}
 
-		batchEnd := min(batchStart+int64(cfg.BlockBatchSize)-1, cfg.EndBlock)
+// archiveBatch archives one inclusive range of heights: it plans each of them
+// first, then pays for the full block and receipts of the heights a plan writes.
+func (a blockArchiver) archiveBatch(ctx context.Context, from, to int64) {
+	planned, err := a.planBatch(ctx, from, to)
+	if err != nil {
+		a.failBatch(from, to, "batch planning failed", err)
+		return
+	}
 
-		// Check what exists and build fetch list
-		blocksToFetch := make([]int64, 0, batchEnd-batchStart+1)
+	payloads, err := a.fetchPlanned(ctx, planned)
+	if err != nil {
+		a.failBatch(from, to, "batch fetch failed", err)
+		return
+	}
 
-		s3CheckStart := time.Now()
-		for blockNum := batchStart; blockNum <= batchEnd; blockNum++ {
-			// Check if ALL data (block, receipts, traces) exists
-			hasAllData, err := partitionCache.HasAllData(ctx, blockNum)
-			if err != nil {
-				logger.Warn("failed to check S3", "block", blockNum, "error", err)
-				blocksToFetch = append(blocksToFetch, blockNum)
-				continue
-			}
-
-			if hasAllData {
-				// All 3 files exist - completely skip this block
-				stats.blocksSkipped.Add(1)
-				stats.tracesSkipped.Add(1)
-			} else {
-				// Check if just block+receipts exist (need traces only)
-				hasBlockAndReceipts, err := partitionCache.HasBlockAndReceipts(ctx, blockNum)
-				if err != nil {
-					logger.Warn("failed to check S3", "block", blockNum, "error", err)
-					blocksToFetch = append(blocksToFetch, blockNum)
-					continue
-				}
-
-				if hasBlockAndReceipts {
-					// Block+receipts exist but traces missing - signal for trace fetch only
-					stats.blocksSkipped.Add(1)
-					select {
-					case traceCollectorCh <- blockNum:
-					case <-ctx.Done():
-						return
-					}
-				} else {
-					// Need to fetch block+receipts (and traces)
-					blocksToFetch = append(blocksToFetch, blockNum)
-				}
-			}
-		}
-		stats.s3CheckTime.Add(time.Since(s3CheckStart).Nanoseconds())
-		stats.s3CheckCalls.Add(1)
-
-		if len(blocksToFetch) == 0 {
-			continue
-		}
-
-		// Fetch blocks and receipts
-		rpcStart := time.Now()
-		results, err := client.GetBlocksAndReceiptsBatch(ctx, blocksToFetch, true)
-		stats.rpcBlockTime.Add(time.Since(rpcStart).Nanoseconds())
-		stats.rpcBlockCalls.Add(1)
-		if err != nil {
-			logger.Warn("batch fetch failed", "from", batchStart, "to", batchEnd, "error", err)
-			for range blocksToFetch {
-				stats.blocksFailed.Add(1)
-			}
-			continue
-		}
-
-		// Queue uploads and signal for traces
-		for _, r := range results {
-			if r.BlockErr != nil || r.ReceiptsErr != nil {
-				logger.Warn("block data has errors", "block", r.BlockNumber, "blockErr", r.BlockErr, "receiptsErr", r.ReceiptsErr)
-				stats.blocksFailed.Add(1)
-				continue
-			}
-
-			partition := partition.GetPartition(r.BlockNumber)
-
-			// Queue block upload
-			if r.Block != nil {
-				select {
-				case uploadCh <- UploadJob{
-					Bucket:   cfg.Bucket,
-					Key:      s3key.BuildWithPartition(partition, r.BlockNumber, 1, s3key.Block),
-					Data:     r.Block,
-					DataType: "block",
-					BlockNum: r.BlockNumber,
-				}:
-					stats.uploadsQueued.Add(1)
-				case <-ctx.Done():
-					return
-				}
-			}
-
-			// Queue receipts upload
-			if r.Receipts != nil {
-				select {
-				case uploadCh <- UploadJob{
-					Bucket:   cfg.Bucket,
-					Key:      s3key.BuildWithPartition(partition, r.BlockNumber, 1, s3key.Receipts),
-					Data:     r.Receipts,
-					DataType: "receipts",
-					BlockNum: r.BlockNumber,
-				}:
-					stats.uploadsQueued.Add(1)
-				case <-ctx.Done():
-					return
-				}
-			}
-
-			stats.blocksProcessed.Add(1)
-
-			// Signal for trace fetching
-			select {
-			case traceCollectorCh <- r.BlockNumber:
-			case <-ctx.Done():
+	for _, height := range planned {
+		if err := a.archiveHeight(ctx, height, payloads[height.BlockNumber]); err != nil {
+			if ctx.Err() != nil {
 				return
 			}
+			a.logger.Warn("block left unarchived", "block", height.BlockNumber, "error", err)
+			a.stats.blocksFailed.Add(1)
+		}
+	}
+}
+
+func (a blockArchiver) failBatch(from, to int64, msg string, err error) {
+	a.logger.Warn(msg, "from", from, "to", to, "error", err)
+	a.stats.blocksFailed.Add(to - from + 1)
+}
+
+// plannedHeight is one height's decision, or the failure that stopped it before
+// a decision was reached.
+type plannedHeight struct {
+	BlockNumber int64
+	Decision    blockDecision
+	Err         error
+}
+
+// planBatch decides every height in the range. One the archive already holds a
+// version of is planned from its header, not the megabyte its block and receipts
+// weigh; an untouched one is fresh whatever the chain says, so it costs no read.
+func (a blockArchiver) planBatch(ctx context.Context, from, to int64) ([]plannedHeight, error) {
+	planned := make([]plannedHeight, to-from+1)
+	states := make(map[int64]archiveState, to-from+1)
+	var archived []int64
+
+	for blockNum := from; blockNum <= to; blockNum++ {
+		planned[blockNum-from] = plannedHeight{BlockNumber: blockNum}
+		state, err := a.planner.topVersion(ctx, blockNum)
+		switch {
+		case err != nil:
+			planned[blockNum-from].Err = err
+		case state.Version == noArchive:
+			planned[blockNum-from].Decision = freshDecision(blockNum)
+		default:
+			states[blockNum] = state
+			archived = append(archived, blockNum)
 		}
 	}
 
-	// Signal that this worker is done sending to trace collector
-	// (handled by closing traceCollectorCh after all workers done)
+	// GetBlockHeadersBatch answers one entry per requested height, in order, with
+	// BlockErr set where a response is missing, so every archived height lands.
+	headers, err := a.fetchHeaders(ctx, archived)
+	if err != nil {
+		return nil, err
+	}
+	for _, header := range headers {
+		planned[header.BlockNumber-from] = a.planArchived(ctx, header, states[header.BlockNumber])
+	}
+	return planned, nil
 }
 
-// traceCollector batches blocks for trace fetching.
-func traceCollector(
-	ctx context.Context,
-	cfg Config,
-	inCh <-chan int64,
-	outCh chan<- []int64,
-	partitionCache *PartitionCache,
-	stats *Stats,
-	logger *slog.Logger,
-) {
-	batch := make([]int64, 0, cfg.TraceBatchSize)
+func (a blockArchiver) planArchived(ctx context.Context, header outbound.BlockData, state archiveState) plannedHeight {
+	if header.BlockErr != nil {
+		return plannedHeight{
+			BlockNumber: header.BlockNumber,
+			Err:         fmt.Errorf("fetching the header of block %d: %w", header.BlockNumber, header.BlockErr),
+		}
+	}
+
+	decision, err := a.planner.decide(ctx, header.BlockNumber, state, header.Block)
+	if err != nil {
+		return plannedHeight{BlockNumber: header.BlockNumber, Err: err}
+	}
+	return plannedHeight{BlockNumber: header.BlockNumber, Decision: decision}
+}
+
+// archiveHeight acts on one height's decision, or surfaces the failure that
+// stopped it from reaching one.
+func (a blockArchiver) archiveHeight(ctx context.Context, height plannedHeight, payload outbound.BlockData) error {
+	if height.Err != nil {
+		return height.Err
+	}
+	return applyDecision(ctx, height.Decision, payload, a.cfg, a.uploadCh, a.traceCh, a.stats, a.logger)
+}
+
+// fetchHeaders fetches the headers the archived heights are planned from.
+func (a blockArchiver) fetchHeaders(ctx context.Context, blockNums []int64) ([]outbound.BlockData, error) {
+	if len(blockNums) == 0 {
+		return nil, nil
+	}
+
+	rpcStart := time.Now()
+	headers, err := a.client.GetBlockHeadersBatch(ctx, blockNums)
+	a.stats.rpcBlockTime.Add(time.Since(rpcStart).Nanoseconds())
+	a.stats.rpcBlockCalls.Add(1)
+	return headers, err
+}
+
+// fetchPlanned fetches the full blocks and receipts the plans write. A dry run
+// writes nothing, so it fetches nothing.
+func (a blockArchiver) fetchPlanned(ctx context.Context, planned []plannedHeight) (map[int64]outbound.BlockData, error) {
+	if a.cfg.DryRun {
+		return nil, nil
+	}
+
+	blockNums := make([]int64, 0, len(planned))
+	for _, height := range planned {
+		if height.Err == nil && needsPayloads(height.Decision.Plan) {
+			blockNums = append(blockNums, height.BlockNumber)
+		}
+	}
+	if len(blockNums) == 0 {
+		return nil, nil
+	}
+
+	rpcStart := time.Now()
+	results, err := a.client.GetBlocksAndReceiptsBatch(ctx, blockNums, true)
+	a.stats.rpcBlockTime.Add(time.Since(rpcStart).Nanoseconds())
+	a.stats.rpcBlockCalls.Add(1)
+	if err != nil {
+		return nil, err
+	}
+
+	payloads := make(map[int64]outbound.BlockData, len(results))
+	for _, result := range results {
+		payloads[result.BlockNumber] = result
+	}
+	return payloads, nil
+}
+
+// traceCollector batches the heights whose traces are still to fetch.
+func traceCollector(ctx context.Context, cfg Config, inCh <-chan traceRequest, outCh chan<- []traceRequest) {
+	batch := make([]traceRequest, 0, cfg.TraceBatchSize)
 	flushTimer := time.NewTimer(500 * time.Millisecond)
 	defer flushTimer.Stop()
 
@@ -735,43 +687,24 @@ func traceCollector(
 		if len(batch) == 0 {
 			return
 		}
-		// Filter out blocks that already have traces
-		toProcess := make([]int64, 0, len(batch))
-		for _, blockNum := range batch {
-			hasTraces, err := partitionCache.HasTraces(ctx, blockNum)
-			if err != nil {
-				logger.Warn("failed to check traces", "block", blockNum, "error", err)
-				toProcess = append(toProcess, blockNum)
-				continue
-			}
-			if hasTraces {
-				stats.tracesSkipped.Add(1)
-			} else {
-				toProcess = append(toProcess, blockNum)
-			}
+		select {
+		case outCh <- batch:
+		case <-ctx.Done():
+			return
 		}
-
-		if len(toProcess) > 0 {
-			select {
-			case outCh <- toProcess:
-			case <-ctx.Done():
-				return
-			}
-		}
-		batch = make([]int64, 0, cfg.TraceBatchSize)
+		batch = make([]traceRequest, 0, cfg.TraceBatchSize)
 	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case blockNum, ok := <-inCh:
+		case req, ok := <-inCh:
 			if !ok {
-				// Channel closed, flush remaining
 				flush()
 				return
 			}
-			batch = append(batch, blockNum)
+			batch = append(batch, req)
 			if len(batch) >= cfg.TraceBatchSize {
 				flush()
 				flushTimer.Reset(500 * time.Millisecond)
@@ -783,14 +716,13 @@ func traceCollector(
 	}
 }
 
-// traceWorker fetches traces and queues S3 uploads.
+// traceWorker fetches traces and queues them for upload at the version the plan chose.
 func traceWorker(
 	ctx context.Context,
 	workerID int,
 	client *alchemy.Client,
-	partitionCache *PartitionCache,
 	bucket string,
-	workCh <-chan []int64,
+	workCh <-chan []traceRequest,
 	uploadCh chan<- UploadJob,
 	stats *Stats,
 	logger *slog.Logger,
@@ -798,39 +730,40 @@ func traceWorker(
 	logger = logger.With("worker", workerID, "type", "trace")
 
 	for batch := range workCh {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return
-		default:
+		}
+
+		blockNums := make([]int64, len(batch))
+		for i, req := range batch {
+			blockNums[i] = req.BlockNum
 		}
 
 		rpcStart := time.Now()
-		traces, errs := client.GetTracesBatch(ctx, batch)
+		traces, errs := client.GetTracesBatch(ctx, blockNums)
 		stats.rpcTraceTime.Add(time.Since(rpcStart).Nanoseconds())
 		stats.rpcTraceCalls.Add(1)
 
-		for _, blockNum := range batch {
-			if err, hasErr := errs[blockNum]; hasErr {
-				logger.Warn("trace fetch failed", "block", blockNum, "error", err)
+		for _, req := range batch {
+			if err, hasErr := errs[req.BlockNum]; hasErr {
+				logger.Warn("trace fetch failed", "block", req.BlockNum, "error", err)
 				stats.tracesFailed.Add(1)
 				continue
 			}
 
-			traceData, ok := traces[blockNum]
+			traceData, ok := traces[req.BlockNum]
 			if !ok {
-				logger.Warn("missing trace data", "block", blockNum)
+				logger.Warn("missing trace data", "block", req.BlockNum)
 				stats.tracesFailed.Add(1)
 				continue
 			}
 
-			partition := partition.GetPartition(blockNum)
 			select {
 			case uploadCh <- UploadJob{
 				Bucket:   bucket,
-				Key:      s3key.BuildWithPartition(partition, blockNum, 1, s3key.Traces),
+				Key:      s3key.Build(req.BlockNum, req.Version, s3key.Traces),
 				Data:     traceData,
-				DataType: "traces",
-				BlockNum: blockNum,
+				DataType: s3key.Traces,
 			}:
 				stats.uploadsQueued.Add(1)
 			case <-ctx.Done():
@@ -847,7 +780,6 @@ func uploadWorker(
 	ctx context.Context,
 	workerID int,
 	s3Writer outbound.S3Writer,
-	partitionCache *PartitionCache,
 	workCh <-chan UploadJob,
 	stats *Stats,
 	logger *slog.Logger,
@@ -874,12 +806,11 @@ func uploadWorker(
 
 		if written {
 			switch job.DataType {
-			case "block", "receipts":
+			case s3key.Block, s3key.Receipts:
 				stats.blockBytesWritten.Add(int64(len(job.Data)))
-			case "traces":
+			case s3key.Traces:
 				stats.traceBytesWritten.Add(int64(len(job.Data)))
 			}
-			partitionCache.MarkWritten(job.BlockNum, job.DataType)
 		}
 		stats.uploadsCompleted.Add(1)
 	}
@@ -939,6 +870,8 @@ func reportProgress(ctx context.Context, stats *Stats, totalBlocks int64, partit
 			logger.Info("progress",
 				"pct", fmt.Sprintf("%.1f%%", pct),
 				"blocks", fmt.Sprintf("%d/%d/%d", blocksProcessed, blocksSkipped, blocksFailed),
+				"plans", fmt.Sprintf("fresh %d / skip %d / fill %d / republish %d",
+					stats.planFresh.Load(), stats.planSkip.Load(), stats.planFill.Load(), stats.planRepublish.Load()),
 				"traces", fmt.Sprintf("%d/%d/%d", tracesProcessed, tracesSkipped, tracesFailed),
 				"uploads", fmt.Sprintf("%d pending", uploadsPending),
 				"blk/s", fmt.Sprintf("%.1f", blocksPerSec),

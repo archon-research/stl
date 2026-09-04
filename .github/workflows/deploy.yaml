@@ -134,46 +134,49 @@ jobs:
           role-to-assume: arn:aws:iam::579039992622:role/stl-sentinelstaging-github-actions-ecr
           aws-region: eu-west-1
 
-      - name: Commit and push to main (via API for verified commits)
+      # ORB-362: the images block is rendered wholesale from the roster at the
+      # exact main commit the bump is parented on (FETCH_HEAD), so the committed
+      # block is always "what the roster at this revision renders" — the same
+      # invariant deploy-prod verifies for prod, held here by construction (no
+      # separate validator runs on staging).
+      - name: Render staging images block and commit to main (via API for verified commits)
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SHA: ${{ inputs.sha || github.sha }}
+          REPO: ${{ github.repository }}
+          KUSTOMIZATION: k8s/overlays/staging/kustomization.yaml
+          ROSTER: k8s/image-roster.txt
         run: |
-          SHA=${{ inputs.sha || github.sha }}
-          REPO="${{ github.repository }}"
+          set -euo pipefail
 
           # Retry loop to handle concurrent updates to main
           MAX_RETRIES=3
-          for attempt in $(seq 1 $MAX_RETRIES); do
+          for attempt in $(seq 1 "$MAX_RETRIES"); do
             echo "Attempt ${attempt}/${MAX_RETRIES}"
 
-            # Fetch latest main and apply the tag update on top of it
-            git fetch origin main
-            git checkout FETCH_HEAD -- k8s/overlays/staging/kustomization.yaml
-            # Update plain SHA tags (regular services) and prefixed tags (cronjobs: name-SHA)
-            # The name-prefix class must allow digits (morpho-v2-bootstrap), and
-            # must match the [a-z0-9]+- the GUARD 4 validator below already uses.
-            # A prefix this pattern cannot match leaves a stale tag behind, which
-            # then fails ECR verification here and GUARD 4 in prod — blocking every
-            # prod deploy, not just this service's. The trailing hyphen is what
-            # keeps the group out of the 40-char hex SHA (which has none).
-            sed -i -E "s/(newTag: \")(([a-z0-9]+-)*)[a-f0-9]{40}/\1\2$SHA/" k8s/overlays/staging/kustomization.yaml
+            # Fetch latest main. The overlay, the roster and the renderer all
+            # come from that exact commit, and the bump is parented on it, so a
+            # roster or renderer merge racing this job cannot leave the block
+            # out of step with the tree deploy-prod validates.
+            git fetch -q origin main
+            MAIN_SHA=$(git rev-parse FETCH_HEAD)
+            git checkout -q FETCH_HEAD -- "$KUSTOMIZATION" "$ROSTER" scripts/deploy/render-overlay-images.sh
 
-            # Check if the file actually changed vs current main
-            if git diff --quiet FETCH_HEAD -- k8s/overlays/staging/kustomization.yaml; then
+            scripts/deploy/render-overlay-images.sh --env staging --tag "$SHA" --write "$KUSTOMIZATION"
+
+            if git diff --quiet FETCH_HEAD -- "$KUSTOMIZATION"; then
               echo "No changes to commit"
               exit 0
             fi
 
             # ORB-299/ORB-313: verify the exact file about to be committed (this
-            # fetched-and-stamped overlay), not the workflow's initial checkout,
+            # fetched-and-rendered overlay), not the workflow's initial checkout,
             # so a concurrent merge cannot slip an unbuilt image past the gate.
-            if ! scripts/deploy/verify-ecr-images.sh --kustomization k8s/overlays/staging/kustomization.yaml; then
+            if ! scripts/deploy/verify-ecr-images.sh --kustomization "$KUSTOMIZATION"; then
               echo "::error::Refusing to stamp staging: overlay references image(s) missing from ECR."
               exit 1
             fi
 
-            # Get current main HEAD and its tree
-            MAIN_SHA=$(gh api "repos/${REPO}/git/ref/heads/main" --jq '.object.sha')
             BASE_TREE=$(gh api "repos/${REPO}/git/commits/${MAIN_SHA}" --jq '.tree.sha')
 
             # Create a new tree with the updated file
@@ -183,10 +186,10 @@ jobs:
           {
             "base_tree": "${BASE_TREE}",
             "tree": [{
-              "path": "k8s/overlays/staging/kustomization.yaml",
+              "path": "${KUSTOMIZATION}",
               "mode": "100644",
               "type": "blob",
-              "content": $(cat k8s/overlays/staging/kustomization.yaml | jq -Rs .)
+              "content": $(jq -Rs . < "$KUSTOMIZATION")
             }]
           }
           TREE_EOF
@@ -200,20 +203,20 @@ jobs:
               --field "parents[]=${MAIN_SHA}" \
               --jq '.sha')
 
-            # Try to fast-forward main — fails if main moved since we read MAIN_SHA
-            REF_OUTPUT=$(gh api "repos/${REPO}/git/refs/heads/main" \
+            # Fast-forward main — fails if main moved since we fetched MAIN_SHA.
+            if REF_OUTPUT=$(gh api "repos/${REPO}/git/refs/heads/main" \
               --method PATCH \
-              --field "sha=${NEW_COMMIT}" 2>&1) && {
+              --field "sha=${NEW_COMMIT}" 2>&1); then
               echo "Successfully updated main to ${NEW_COMMIT}"
               exit 0
-            }
+            fi
 
             echo "Ref update failed: ${REF_OUTPUT}"
             echo "Retrying..."
             sleep 1
           done
 
-          echo "Failed to update main after ${MAX_RETRIES} attempts"
+          echo "::error::Failed to update main after ${MAX_RETRIES} attempts"
           exit 1
 
   wait-staging-healthy:
@@ -232,11 +235,20 @@ jobs:
       cancel-in-progress: false
     permissions:
       id-token: write
+    # The verdict of whichever attempt last ran: later attempts only run when
+    # the earlier one failed, so the highest-numbered non-empty summary is the
+    # final one. Consumed by notify-staging-failure so the Slack alert names the
+    # cause instead of just the job.
+    outputs:
+      failure-summary: >-
+        ${{ steps.wait-attempt-3.outputs.failure-summary
+            || steps.wait-attempt-2.outputs.failure-summary
+            || steps.wait-attempt-1.outputs.failure-summary }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: archon-research/github-actions
-          ref: a42ba946a0cb774eef6a0d321a2545d2c1310b29  # argocd-wait (DNS fix #20)
+          ref: dc756115d19ddccb2877312f420905e90b3b6d67  # argocd-wait failure diagnostics (github-actions #59)
           ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
           path: .github-actions
           persist-credentials: false
@@ -324,11 +336,37 @@ jobs:
       STAGING_ROLE_ARN: arn:aws:iam::579039992622:role/stl-sentinelstaging-github-actions-ecr
       PROD_REGISTRY: 030797368798.dkr.ecr.eu-west-1.amazonaws.com
       PROD_ROLE_ARN: arn:aws:iam::030797368798:role/stl-sentinelprod-github-actions-ecr
-      SERVICES: watcher backup-worker oracle-price-worker sparklend-position-tracker morpho-indexer allocation-tracker prime-debt-indexer psm3-indexer dex-indexer fluid-vault-indexer cex-orderbook-indexer migrate python-api
-      CRONJOBS: anchorage-indexer maple-graphql-indexer offchain-price-indexer watcher-data-validator transform-worker transform-bootstrap offchain-price-backfill reference-capital-indexer reference-capital-backfill morpho-v2-bootstrap morpho-vault-backfill position-materializer
     permissions:
       id-token: write
+      contents: read
     steps:
+      # ORB-362: the promotion list IS the roster — the same file that renders
+      # the overlays' images blocks — read at the built SHA so we promote exactly
+      # what build-push-staging produced. If the roster on main has grown since,
+      # verify-ecr-images fails the prod stamp closed and the next run heals it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Read the promotion roster
+        run: |
+          set -euo pipefail
+          # Assign before echoing so an invalid roster fails this step instead of
+          # being masked by echo's exit status.
+          SERVICES=$(scripts/deploy/render-overlay-images.sh --list services | tr '\n' ' ')
+          CRONJOBS=$(scripts/deploy/render-overlay-images.sh --list cronjobs | tr '\n' ' ')
+          if [ -z "$SERVICES" ] || [ -z "$CRONJOBS" ]; then
+            echo "::error::roster produced an empty promotion list (services='${SERVICES}' cronjobs='${CRONJOBS}')"
+            exit 1
+          fi
+          {
+            echo "SERVICES=${SERVICES}"
+            echo "CRONJOBS=${CRONJOBS}"
+          } >> "$GITHUB_ENV"
+          echo "services: ${SERVICES}"
+          echo "cronjobs: ${CRONJOBS}"
+
       # Pull images from staging ECR, retag and push to prod (no build needed)
       - name: Configure AWS credentials (staging)
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
@@ -410,15 +448,19 @@ jobs:
           role-to-assume: arn:aws:iam::030797368798:role/stl-sentinelprod-github-actions-ecr
           aws-region: eu-west-1
 
-      # Auto-merge the prod image-tag bump straight to main (no PR), guarded so a
+      # Auto-merge the prod image bump straight to main (no PR), guarded so a
       # compromised CI/bot cannot smuggle anything else into a prod deploy:
       #   1. the diff must touch ONLY k8s/overlays/prod/kustomization.yaml,
-      #   2. every changed line must be a `newTag:` line, and
-      #   3. every image in the file must resolve to our prod ECR account.
+      #   2. outside the generated images block the file must be byte-identical,
+      #   3. every image in the file must resolve to our prod ECR account, and
+      #   4. the images block must be exactly what k8s/image-roster.txt renders
+      #      for prod at DEPLOY_SHA (ORB-362; the roster is reviewed code and,
+      #      by guard 1, untouched here).
       # Any violation fails the job closed; nothing is committed. stl-prod stays
       # on MANUAL sync, so this commit does not roll out until the gated
       # deploy-prod job runs `argocd app sync` on the approved revision.
-      - name: Bump, validate, and commit prod image tags to main
+      # deploy-prod re-derives 1–4 independently on the committed revision.
+      - name: Render, validate, and commit prod image tags to main
         id: commit
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -426,6 +468,7 @@ jobs:
           REPO: ${{ github.repository }}
           PROD_ECR_PREFIX: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-
           KUSTOMIZATION: k8s/overlays/prod/kustomization.yaml
+          ROSTER: k8s/image-roster.txt
         run: |
           set -euo pipefail
 
@@ -439,13 +482,19 @@ jobs:
           for attempt in $(seq 1 "$MAX_RETRIES"); do
             echo "Attempt ${attempt}/${MAX_RETRIES}"
 
-            git fetch origin main
-            git checkout FETCH_HEAD -- "$KUSTOMIZATION"
+            # The overlay, the roster and the renderer all come from the exact
+            # main commit the bump is parented on, so a roster or renderer merge
+            # racing this job cannot leave the block out of step with the tree
+            # deploy-prod validates.
+            git fetch -q origin main
+            MAIN_SHA=$(git rev-parse FETCH_HEAD)
+            git checkout -q FETCH_HEAD -- "$KUSTOMIZATION" "$ROSTER" scripts/deploy/render-overlay-images.sh
 
-            # Update plain SHA tags (regular services) and prefixed tags
-            # (cronjobs: name-SHA).
-            # Digits allowed in the name prefix, matching GUARD 4's validator below.
-            sed -i -E "s/(newTag: \")(([a-z0-9]+-)*)[a-f0-9]{40}/\1\2${DEPLOY_SHA}/" "$KUSTOMIZATION"
+            # Render the whole images block from the roster (ORB-362). ci.yml
+            # deploy-base reads this file's newTag off origin/main as the
+            # last-promoted marker that main change detection diffs against
+            # (ORB-361); the renderer owns the tag shape both rely on.
+            scripts/deploy/render-overlay-images.sh --env prod --tag "$DEPLOY_SHA" --write "$KUSTOMIZATION"
 
             if git diff --quiet FETCH_HEAD -- "$KUSTOMIZATION"; then
               echo "Prod already at ${DEPLOY_SHA}; nothing to commit"
@@ -461,16 +510,14 @@ jobs:
               exit 1
             fi
 
-            # GUARD 2: every changed content line must be a `newTag:` line.
-            # -U0 = no context; ignore the +++/--- file headers.
-            OFFENDING=$(git diff -U0 FETCH_HEAD -- "$KUSTOMIZATION" \
-              | grep -E '^[+-]' \
-              | grep -Ev '^(\+\+\+|---)' \
-              | grep -Ev '^[+-][[:space:]]*newTag:' \
-              || true)
-            if [ -n "$OFFENDING" ]; then
-              echo "::error::Prod deploy diff changes non-newTag lines:"
-              echo "$OFFENDING"
+            # GUARD 2: outside the generated images block the file must be
+            # byte-identical to main — the renderer may replace that block and
+            # nothing else.
+            git show "FETCH_HEAD:${KUSTOMIZATION}" > "${RUNNER_TEMP}/kustomization.main.yaml"
+            if ! diff -u \
+                <(scripts/deploy/render-overlay-images.sh --strip "${RUNNER_TEMP}/kustomization.main.yaml") \
+                <(scripts/deploy/render-overlay-images.sh --strip "$KUSTOMIZATION"); then
+              echo "::error::Prod deploy diff changes ${KUSTOMIZATION} outside the images block."
               exit 1
             fi
 
@@ -488,29 +535,24 @@ jobs:
               exit 1
             fi
 
-            # GUARD 4: every tag must be (optional name prefix +) exactly this
-            # deploy SHA — fail closed on any unexpected tag value.
-            BAD_TAGS=$(grep -E '^[[:space:]]*newTag:' "$KUSTOMIZATION" \
-              | grep -Ev "^[[:space:]]*newTag:[[:space:]]*\"([a-z0-9]+-)*${DEPLOY_SHA}\"[[:space:]]*$" \
-              || true)
-            if [ -n "$BAD_TAGS" ]; then
-              echo "::error::Prod tags do not all target ${DEPLOY_SHA}:"
-              echo "$BAD_TAGS"
+            # GUARD 4: the images block must be exactly the roster's render for
+            # prod at DEPLOY_SHA — every entry, repo and tag, byte for byte.
+            if ! scripts/deploy/render-overlay-images.sh --env prod --tag "$DEPLOY_SHA" --check "$KUSTOMIZATION"; then
+              echo "::error::Prod images block is not what k8s/image-roster.txt renders at ${DEPLOY_SHA}."
               exit 1
             fi
 
-            # ORB-299: verify every image the (now SHA-stamped) prod overlay
+            # ORB-299: verify every image the (now rendered) prod overlay
             # references exists in prod ECR, against the exact file about to be
-            # committed. Fails closed before the stamp; catches promotion-list
-            # drift and any image a concurrent merge added but this run did not
-            # push.
+            # committed. Promotion-list drift is gone by construction (list and
+            # block share the roster); this still catches a roster on main that
+            # grew past what this run built, failing closed until the next run.
             if ! scripts/deploy/verify-ecr-images.sh --kustomization "$KUSTOMIZATION"; then
               echo "::error::Refusing to stamp prod: overlay references image(s) missing from prod ECR."
               exit 1
             fi
 
             SHORT_SHA=${DEPLOY_SHA:0:7}
-            MAIN_SHA=$(gh api "repos/${REPO}/git/ref/heads/main" --jq '.object.sha')
             BASE_TREE=$(gh api "repos/${REPO}/git/commits/${MAIN_SHA}" --jq '.tree.sha')
 
             NEW_TREE=$(gh api "repos/${REPO}/git/trees" \
@@ -535,7 +577,7 @@ jobs:
               --field "parents[]=${MAIN_SHA}" \
               --jq '.sha')
 
-            # Fast-forward main — fails if main moved since we read MAIN_SHA.
+            # Fast-forward main — fails if main moved since we fetched MAIN_SHA.
             if REF_OUTPUT=$(gh api "repos/${REPO}/git/refs/heads/main" \
               --method PATCH \
               --field "sha=${NEW_COMMIT}" 2>&1); then
@@ -565,6 +607,10 @@ jobs:
         Build & Push Images (Staging)=${{ needs.build-push-staging.result }}
         Update Staging Image Tags=${{ needs.update-staging.result }}
         Wait for Staging Healthy=${{ needs.wait-staging-healthy.result }}
+      # Empty for the two build/tag jobs, which report their own failures well
+      # enough; set when the ArgoCD gate is what failed, where the job name
+      # alone said nothing and the reason had to be dug out of the ArgoCD UI.
+      body: ${{ needs.wait-staging-healthy.outputs.failure-summary && format('```{0}```', needs.wait-staging-healthy.outputs.failure-summary) || '' }}
     secrets:
       slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_STAGING }}
       gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}

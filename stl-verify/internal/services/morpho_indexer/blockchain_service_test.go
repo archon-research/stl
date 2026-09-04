@@ -1908,14 +1908,10 @@ func TestGetAdapterType_NumberPinned(t *testing.T) {
 	viaNumber := false
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 		viaNumber = true
-		if len(calls) != 2 || blockNumber == nil || blockNumber.Int64() != 20000000 {
+		if len(calls) != adapterProbeCallsPerAdapter || blockNumber == nil || blockNumber.Int64() != 20000000 {
 			t.Errorf("unexpected calls=%d blockNumber=%v", len(calls), blockNumber)
 		}
-		// morpho() succeeds, morphoVaultV1() reverts → MarketV1.
-		return []outbound.Result{
-			{Success: true, ReturnData: h.packAddress(MorphoBlueAddress)},
-			{Success: false, ReturnData: nil},
-		}, nil
+		return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
 	}
 	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		t.Fatal("getAdapterType must use Execute (number-pinned), not ExecuteAtHash")

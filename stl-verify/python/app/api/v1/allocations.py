@@ -1,28 +1,26 @@
 import asyncio
 import logging
 from collections.abc import Callable
-from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from datetime import datetime
 from typing import Annotated, Literal
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
+from app.adapters.postgres.reference_as_of import ReferenceEffectiveAtProvider
 from app.api._validators import (
     OptionalEthAddressParam,
     OptionalTxHashParam,
     ProxyAddressPathParam,
 )
-from app.api.deps import get_engine, get_reference_positions_service_factory
+from app.api.deps import get_engine, get_reference_as_of, get_reference_positions_service_factory
 from app.api.provenance import (
     get_requested_provenance,
     resolve_or_422,
 )
 from app.api.time_series import TimeSeriesWindow, apply_cache_control, build_window, get_time_series_query_params
-from app.config import get_settings
 from app.domain.entities.allocation import (
     AnchorageCustodyHolding,
     DirectAssetHolding,
@@ -32,7 +30,6 @@ from app.domain.entities.allocation import (
 )
 from app.domain.entities.allocation_category import AllocationCategory
 from app.domain.entities.reference_position import ReferencePosition
-from app.domain.exceptions import ReferenceDataUnavailableError
 from app.domain.position_identity import PositionFacts, position_identities
 from app.domain.provenance import Provenance
 from app.domain.serialization import PlainDecimal
@@ -118,10 +115,11 @@ class AllocationResponse(BaseModel):
     - Receipt-token positions (e.g. spUSDT wrapping USDT): all fields populated.
     - Direct asset holdings (e.g. PYUSD held in the proxy with no wrapper):
       ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` are
-      null; ``symbol`` names the held asset. ``underlying_*`` usually point at
-      the held asset itself, except holdings valued on the underlying-value
-      basis (allowlisted, e.g. a Uni V3 pool position valued in USDC) with a
-      resolvable underlying, where they point at that underlying.
+      null; ``symbol`` and ``held_token_address`` name the held asset.
+      ``underlying_*`` usually point at the held asset itself, except holdings
+      valued on the underlying-value basis (allowlisted, e.g. a Uni V3 pool
+      position valued in USDC) with a resolvable underlying, where they point
+      at that underlying.
       ``amount_usd`` is populated when an oracle price exists for the pricing
       basis and null otherwise (e.g. LP/curve shares with no oracle feed).
     - Off-chain custody holdings (Anchorage BTC): ``chain_id`` is 0 (the
@@ -172,6 +170,17 @@ class AllocationResponse(BaseModel):
         ),
         examples=["ethereum"],
     )
+    wallet_address: str | None = Field(
+        default=None,
+        description=(
+            "The ALM proxy holding this position, as upstream reports it. Populated on reference "
+            "rows only — the same (`network`, `receipt_token_address`/`held_token_address`) can "
+            "legitimately recur under a prime's different proxy wallets, and this is what "
+            "distinguishes those rows. `null` on an indexed row, which is already scoped to a "
+            "single queried proxy."
+        ),
+        examples=["0x1234567890abcdef1234567890abcdef12345678"],
+    )
     receipt_token_id: int | None = Field(
         default=None,
         description="Surrogate id of the receipt token. `null` for direct asset holdings.",
@@ -182,12 +191,25 @@ class AllocationResponse(BaseModel):
         description="0x-prefixed receipt-token contract address. `null` for direct asset holdings.",
         examples=["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"],
     )
+    held_token_address: str | None = Field(
+        default=None,
+        description=(
+            "0x-prefixed address of the token held in the proxy, on a direct asset holding. It names "
+            "what the position *is*, unlike `underlying_token_address`, which names the token the "
+            "holding is *priced* through — a different asset wherever a wrapper is valued through "
+            "the token it wraps. `null` on receipt-token positions, where `receipt_token_address` "
+            "already names the held token, and on off-chain custody holdings, which have no on-chain "
+            "address."
+        ),
+        examples=["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"],
+    )
     underlying_token_id: int | None = Field(
         default=None,
         description=(
             "Surrogate id of the underlying token. For direct holdings, this is the held asset itself, "
             "unless the holding is valued on the underlying-value basis (allowlisted). `null` for off-chain "
-            "custody holdings (e.g. Anchorage BTC), which have no token-registry row."
+            "custody holdings (e.g. Anchorage BTC), which have no token-registry row, and for a reference "
+            "row (`source=reference`) whose position does not resolve to STL's receipt-token registry."
         ),
         examples=[1],
     )
@@ -196,7 +218,8 @@ class AllocationResponse(BaseModel):
         description=(
             "0x-prefixed underlying-token contract address. For direct holdings, this is the held asset itself, "
             "unless the holding is valued on the underlying-value basis (allowlisted). `null` for off-chain "
-            "custody holdings (e.g. Anchorage BTC), which have no on-chain address."
+            "custody holdings (e.g. Anchorage BTC), which have no on-chain address, and for a reference row "
+            "(`source=reference`) whose position does not resolve to STL's receipt-token registry."
         ),
         examples=["0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"],
     )
@@ -207,7 +230,11 @@ class AllocationResponse(BaseModel):
     underlying_symbol: str = Field(
         description=(
             "Underlying-token symbol. For direct holdings, same as ``symbol``, "
-            "unless the holding is valued on the underlying-value basis (allowlisted)."
+            "unless the holding is valued on the underlying-value basis (allowlisted). Empty on a reference "
+            "row (`source=reference`) whose position does not resolve to STL's receipt-token registry — "
+            "that feed never names an underlying of its own — and also empty on a resolved reference row "
+            "whose registry token has no symbol recorded yet; `underlying_token_id`/`underlying_token_address` "
+            "are the reliable resolution signal, not this field."
         ),
         examples=["USDC"],
     )
@@ -241,6 +268,17 @@ class AllocationResponse(BaseModel):
             "`balance`, and Sky's figure is what a total can fall back to."
         ),
         examples=["1234567.89"],
+    )
+    reference_synced_at: datetime | None = Field(
+        default=None,
+        description=(
+            "When Sky's figures for this row were observed. Populated on any row carrying them — "
+            "a `reference` row, or a `both` row's `reference_amount_usd` — and `null` on an "
+            "indexed-only row. STL reads them from its own record of the feed rather than the feed "
+            "itself, so they are as of the last sync cycle, up to 15 minutes old. Consumers should "
+            "show this rather than implying the figures are current."
+        ),
+        examples=["2026-08-26T09:15:00+00:00"],
     )
     latest_activity_at: str | None = Field(
         default=None,
@@ -315,95 +353,6 @@ class AllocationResponse(BaseModel):
         return self
 
 
-class CapitalMetricsResponse(BaseModel):
-    """Prime-level capital metrics for risk and alert management."""
-
-    prime_id: str = Field(
-        deprecated=True,
-        description=(
-            "DEPRECATED — despite the name this is one of the prime's ALM **proxy** addresses, "
-            "not a prime identifier, and this endpoint returns one row per proxy. Its value is "
-            "unchanged for backwards compatibility. Use `prime_vault_address` or `prime_name` "
-            "to identify the prime."
-        ),
-        examples=["0x1601843c5e9bc251a3272907010afa41fa18347e"],
-    )
-    prime_name: str = Field(description="Human-readable prime name.", examples=["Acme Prime"])
-    exposure: PlainDecimal = Field(
-        description="Total USD exposure across the prime's allocations (upstream `exposure`).",
-        examples=["1900000000"],
-    )
-    capital_buffer: PlainDecimal = Field(
-        description="`max(total_risk_capital - required_risk_capital, 0)` — unencumbered risk capital (USD).",
-        examples=["2500000"],
-    )
-    required_risk_capital: PlainDecimal = Field(
-        description="Required Risk Capital (RRC) reported by upstream `financial_rrc` (USD).",
-        examples=["7500000"],
-    )
-    total_risk_capital: PlainDecimal = Field(
-        description="Total Risk Capital reported by upstream `total_rc` (USD).",
-        examples=["10000000"],
-    )
-    encumbrance_ratio: PlainDecimal | None = Field(
-        default=None,
-        description=(
-            "Required Risk Capital as a share of Total Risk Capital "
-            "(upstream `risk_tolerance_ratio`). `null` when not validated."
-        ),
-        examples=["0.85"],
-    )
-    timestamp: str = Field(
-        description="ISO-8601 timestamp the snapshot was assembled.",
-        examples=["2026-05-07T12:00:00Z"],
-    )
-    benchmark_source: str | None = Field(
-        default=None,
-        description="URL of the upstream benchmark source used to populate the row.",
-    )
-    is_validated: bool = Field(default=False, description="Whether the row was validated against on-chain state.")
-    validation_note: str | None = Field(
-        default=None,
-        description="Human-readable note about validation, e.g. why a row is missing or unmatched.",
-    )
-    prime_vault_address: str | None = Field(
-        default=None,
-        description=(
-            "The prime's on-chain vault address — identical across the prime's rows. Dedupe on this before aggregating."
-        ),
-        examples=["0x691a6c29e9e96dd897718305427ad5d534db16ba"],
-    )
-    scope: Literal["prime"] = Field(
-        default="prime",
-        description=(
-            "Always `prime`: every metric on this row describes the whole prime, not the proxy in "
-            "`prime_id`. The row repeats once per ALM proxy, so summing rows triple-counts. "
-            "Dedupe by `prime_vault_address` first."
-        ),
-        examples=["prime"],
-    )
-
-    model_config = {
-        "json_schema_extra": {
-            "example": {
-                "prime_id": "0x1601843c5e9bc251a3272907010afa41fa18347e",
-                "prime_name": "spark",
-                "exposure": "1900000000",
-                "capital_buffer": "2500000",
-                "required_risk_capital": "7500000",
-                "total_risk_capital": "10000000",
-                "encumbrance_ratio": "0.85",
-                "timestamp": "2026-05-07T12:00:00Z",
-                "benchmark_source": "https://example.com/star-rrc",
-                "is_validated": False,
-                "validation_note": "Sourced from Star Agents Risk Capital & Requirements Monitor.",
-                "prime_vault_address": "0x691a6c29e9e96dd897718305427ad5d534db16ba",
-                "scope": "prime",
-            }
-        }
-    }
-
-
 class AllocationActivityResponse(BaseModel):
     """Allocation activity event record for timeline feeds."""
 
@@ -438,112 +387,11 @@ class AllocationActivityResponse(BaseModel):
     created_at: str = Field(description="ISO-8601 timestamp the event row was persisted.")
 
 
-class StarRiskCapitalRowResponse(BaseModel):
-    """Internal upstream payload row from the Star risk-capital monitor."""
-
-    star: str
-    exposure: str
-    total_rc: str
-    financial_rrc: str
-    exposure_share: str
-    risk_tolerance_ratio: str
-
-
-class StarRiskCapitalDataResponse(BaseModel):
-    results: list[StarRiskCapitalRowResponse] = []
-
-
-class StarRiskCapitalResponse(BaseModel):
-    data: StarRiskCapitalDataResponse | None = None
-    status: int | None = None
-    success: bool | None = None
-
-
-async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationService:
-    return AllocationService(AllocationRepository(engine))
-
-
-async def _fetch_star_risk_capital_payload() -> StarRiskCapitalResponse:
-    settings = get_settings()
-    timeout = httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
-
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.get(settings.star_risk_capital_upstream_url)
-    except httpx.HTTPError as exc:
-        logger.exception(
-            "Failed to fetch Star risk capital upstream",
-            extra={"upstream_url": settings.star_risk_capital_upstream_url},
-        )
-        raise HTTPException(status_code=502, detail="Risk capital upstream request failed") from exc
-
-    if not response.is_success:
-        logger.error(
-            "Star risk capital upstream returned non-success status",
-            extra={
-                "upstream_url": settings.star_risk_capital_upstream_url,
-                "status_code": response.status_code,
-                "response_preview": response.text[:500],
-            },
-        )
-        raise HTTPException(
-            status_code=502,
-            detail=f"Risk capital upstream returned status {response.status_code}",
-        )
-
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        logger.exception(
-            "Star risk capital upstream returned invalid JSON",
-            extra={"upstream_url": settings.star_risk_capital_upstream_url},
-        )
-        raise HTTPException(status_code=502, detail="Risk capital upstream returned invalid JSON") from exc
-
-    try:
-        parsed = StarRiskCapitalResponse.model_validate(payload)
-    except ValidationError as exc:
-        logger.exception(
-            "Star risk capital upstream response had unexpected shape",
-            extra={
-                "upstream_url": settings.star_risk_capital_upstream_url,
-                "validation_errors": exc.errors(),
-            },
-        )
-        raise HTTPException(status_code=502, detail="Risk capital upstream response shape mismatch") from exc
-
-    if parsed.success is False or (parsed.status is not None and parsed.status >= 400):
-        logger.error(
-            "Star risk capital upstream reported failure",
-            extra={
-                "upstream_url": settings.star_risk_capital_upstream_url,
-                "upstream_status": parsed.status,
-                "upstream_success": parsed.success,
-            },
-        )
-        raise HTTPException(status_code=502, detail="Risk capital upstream reported failure")
-
-    return parsed
-
-
-def _to_decimal(value: str, *, field: str, prime_name: str) -> Decimal:
-    try:
-        return Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as exc:
-        logger.error(
-            "Invalid numeric value in Star risk capital payload",
-            extra={
-                "field": field,
-                "prime_name": prime_name,
-                "value": value,
-            },
-        )
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                f"Risk capital upstream returned invalid numeric value for field '{field}' and prime '{prime_name}'"
-            ),
-        ) from exc
+async def _get_service(
+    engine: AsyncEngine = Depends(get_engine),
+    reference_as_of: ReferenceEffectiveAtProvider = Depends(get_reference_as_of),
+) -> AllocationService:
+    return AllocationService(AllocationRepository(engine, reference_as_of))
 
 
 @router.get(
@@ -572,92 +420,6 @@ async def list_primes(service: AllocationService = Depends(_get_service)):
         )
         for p in primes
     ]
-
-
-@router.get(
-    "/capital-metrics",
-    response_model=list[CapitalMetricsResponse],
-    tags=["capital", "internal"],
-    summary="List per-prime capital metrics",
-    description=(
-        "Join each tracked prime with the latest row from the upstream Star risk-capital monitor "
-        "and return derived capital metrics: risk capital, first-loss capital, total capital, "
-        "and the buffer between them. Primes without a matching upstream row are still returned, "
-        "with zeroed metrics and a `validation_note` explaining why. A `502` is returned only when "
-        "the upstream call itself fails.\n\n"
-        "Returns one row per ALM proxy, but every metric on a row is **prime-level** — the upstream Star "
-        "monitor reports per prime, so a prime's rows carry identical figures and are not additive. Dedupe "
-        "by `prime_vault_address` before aggregating. `prime_id` is deprecated: it holds a proxy address "
-        "despite its name."
-    ),
-)
-async def list_capital_metrics(
-    service: AllocationService = Depends(_get_service),
-) -> list[CapitalMetricsResponse]:
-    primes = await service.list_primes()
-    star_payload = await _fetch_star_risk_capital_payload()
-    rows = star_payload.data.results if star_payload.data else []
-
-    settings = get_settings()
-    metrics = []
-    for prime in primes:
-        row = next(
-            (r for r in rows if r.star.strip().lower() == prime.name.strip().lower()),
-            None,
-        )
-        if not row:
-            logger.warning(
-                "No upstream risk capital data found for prime",
-                extra={
-                    "prime_id": prime.id,
-                    "prime_name": prime.name,
-                    "upstream_url": settings.star_risk_capital_upstream_url,
-                },
-            )
-            metrics.append(
-                CapitalMetricsResponse(
-                    prime_id=prime.id,
-                    prime_name=prime.name,
-                    exposure=Decimal("0"),
-                    capital_buffer=Decimal("0"),
-                    required_risk_capital=Decimal("0"),
-                    total_risk_capital=Decimal("0"),
-                    encumbrance_ratio=None,
-                    timestamp=datetime.now(timezone.utc).isoformat(),
-                    benchmark_source=settings.star_risk_capital_upstream_url,
-                    is_validated=False,
-                    validation_note="No upstream Star risk-capital row matched this prime.",
-                    prime_vault_address=prime.prime_vault_address,
-                )
-            )
-            continue
-
-        total_rc = _to_decimal(row.total_rc, field="total_rc", prime_name=prime.name)
-        financial_rrc = _to_decimal(row.financial_rrc, field="financial_rrc", prime_name=prime.name)
-        capital_buffer = max(total_rc - financial_rrc, Decimal("0"))
-
-        metrics.append(
-            CapitalMetricsResponse(
-                prime_id=prime.id,
-                prime_name=prime.name,
-                exposure=_to_decimal(row.exposure, field="exposure", prime_name=prime.name),
-                capital_buffer=capital_buffer,
-                required_risk_capital=financial_rrc,
-                total_risk_capital=total_rc,
-                encumbrance_ratio=_to_decimal(
-                    row.risk_tolerance_ratio,
-                    field="risk_tolerance_ratio",
-                    prime_name=prime.name,
-                ),
-                timestamp=datetime.now(timezone.utc).isoformat(),
-                benchmark_source=settings.star_risk_capital_upstream_url,
-                is_validated=False,
-                validation_note="Sourced from Star Agents Risk Capital & Requirements Monitor.",
-                prime_vault_address=prime.prime_vault_address,
-            )
-        )
-
-    return metrics
 
 
 @router.get(
@@ -715,8 +477,11 @@ async def list_protocols(service: AllocationService = Depends(_get_service)):
         "`amount_usd` carrying upstream's `assets`. That is the same measurement as the indexed "
         "rows' `amount_usd`, so the two halves of `both` are comparable — deliberately not the Star "
         "monitor's risk-capital breakdown, whose `exposure` covers only the priced subset and runs "
-        "about a third smaller. These rows carry no `balance`, no `underlying_symbol` and no "
-        "activity fields, which upstream does not publish."
+        "about a third smaller. These rows carry no `balance` and no activity fields, which "
+        "upstream does not publish, and a `reference_synced_at` naming the sync cycle they were "
+        "observed at rather than implying they are current. `underlying_*` are populated when the "
+        "position resolves to STL's receipt-token registry (the feed itself names no underlying) "
+        "and `null`/empty otherwise."
     ),
 )
 async def list_allocations(
@@ -810,39 +575,21 @@ async def _custody_applies(prime_address: EthAddress, service: AllocationService
 def _position_facts(row: AllocationResponse) -> PositionFacts:
     """Read a projected row back as the facts that identify its position.
 
-    The receipt token where there is one, else the held asset itself — never the
-    underlying of a wrapped position, which two different vaults can share.
+    The receipt token where there is one, else the token actually held — never
+    the underlying a position is priced through, which two different vaults can
+    share. `sparkPrimeUSDC1` is held directly and priced through USDC: keyed on
+    USDC's address it matched Sky's own plain-USDC row, which reports $0, so the
+    merged row claimed Sky valued a $20.3M position at nothing while Sky's real
+    row for it went unjoined.
     """
     return PositionFacts(
         chain_id=row.chain_id,
         network=row.network,
-        position_address=row.receipt_token_address or _held_asset_address(row),
+        position_address=row.receipt_token_address or row.held_token_address,
         receipt_token_id=row.receipt_token_id,
         protocol_name=row.protocol_name,
         symbol=row.symbol,
     )
-
-
-def _held_asset_address(row: AllocationResponse) -> str | None:
-    """``underlying_token_address`` only where it really is the position.
-
-    A direct holding *is* its underlying — STL holds the plain asset, and the
-    two symbols agree. A wrapper STL has no registry entry for is filed the same
-    way but is not: `sparkPrimeUSDC1` carries USDC's address with USDC as its
-    underlying symbol, and keying it there matched it to Sky's own plain-USDC
-    row, which reports $0. The merged row then claimed Sky valued a $20.3M
-    position at nothing, while Sky's real row for it went unjoined.
-
-    Differing symbols are what separates the two: the underlying's address
-    identifies the underlying, and only a row that *is* that asset may be
-    keyed on it.
-    """
-    if row.underlying_token_address is None:
-        return None
-
-    held = (row.symbol or "").strip().lower()
-    underlying = (row.underlying_symbol or "").strip().lower()
-    return row.underlying_token_address if held == underlying else None
 
 
 async def _merged_allocations(
@@ -857,20 +604,21 @@ async def _merged_allocations(
     single proxy's rows matches whatever that one chain happens to hold — for
     spark, 8 of 12 against its mainnet proxy and 0 against its Base one.
 
-    A reference half that cannot be read leaves the indexed rows as they are.
+    A prime with no reference data at all leaves the indexed rows as they are.
     Every row states its own provenance, so an answer with nothing from Sky in
-    it says so without an envelope to carry the notice.
+    it says so without an envelope to carry the notice. Every other outcome is
+    an error, and surfaces as one.
     """
     indexed = await _prime_wide_indexed_allocations(prime_address, service)
 
     try:
         reference = await _reference_allocations(prime_address, reference_service)
     except HTTPException as exc:
-        if exc.status_code not in (404, 502):
+        if exc.status_code != 404:
             raise
-        logger.warning(
-            "Serving indexed allocations alone; the reference half is unavailable",
-            extra={"prime_address": str(prime_address), "status_code": exc.status_code},
+        logger.info(
+            "Serving indexed allocations alone; no reference cycle has reported on this prime",
+            extra={"prime_address": str(prime_address)},
         )
         return indexed
 
@@ -883,15 +631,24 @@ async def _merged_allocations(
     merged: list[AllocationResponse] = []
     matched: set[int] = set()
     for row in reference:
+        # `wallet_address` narrows a reference row's identity but not
+        # `PositionFacts` (indexed rows carry no wallet to narrow against), so
+        # grove's two proxy rows for one token answer to the same key. Skipping
+        # an already-matched counterpart keeps the first wallet bound to it and
+        # falls the rest through to a plain reference row, instead of copying
+        # the same indexed `amount_usd` into the merged list twice.
         counterpart = next(
-            (by_identity[key] for key in position_identities(_position_facts(row)) if key in by_identity),
+            (
+                by_identity[key]
+                for key in position_identities(_position_facts(row))
+                if key in by_identity and id(by_identity[key]) not in matched
+            ),
             None,
         )
-        if counterpart is not None:
-            matched.add(id(counterpart))
         if counterpart is None:
             merged.append(row.model_copy(update={"source": Provenance.REFERENCE}))
             continue
+        matched.add(id(counterpart))
         # STL's own figures lead where both report a position: they are computed
         # from the chain rather than reported. The two disagree by ~1% on
         # exposure, which a consumer needs told rather than averaged away.
@@ -901,7 +658,13 @@ async def _merged_allocations(
         # a real balance and a null `amount_usd` — six of spark's rows, $423M —
         # and discarding Sky's figure left a consumer nothing to fall back to.
         merged.append(
-            counterpart.model_copy(update={"source": Provenance.BOTH, "reference_amount_usd": row.amount_usd})
+            counterpart.model_copy(
+                update={
+                    "source": Provenance.BOTH,
+                    "reference_amount_usd": row.amount_usd,
+                    "reference_synced_at": row.reference_synced_at,
+                }
+            )
         )
 
     merged.extend(row for row in indexed if id(row) not in matched)
@@ -939,7 +702,7 @@ async def _prime_wide_indexed_allocations(
 async def _reference_allocations(
     prime_address: EthAddress, reference_service: ReferencePositionsService
 ) -> list[AllocationResponse]:
-    """List the positions upstream reports this prime holds.
+    """List the positions upstream reported this prime holds.
 
     Sourced from Sky's balance-sheet feed rather than the Star monitor's
     risk-capital breakdown. The monitor answers a different question — the
@@ -948,30 +711,26 @@ async def _reference_allocations(
     figures 1.5x apart in one column. The balance sheet is the same measurement
     STL's own rows carry, and reports every position rather than the priced ones.
     """
-    try:
-        positions = await reference_service.get(prime_address)
+    snapshot = await reference_service.get(prime_address)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No reference allocations have been observed for this prime",
+        )
 
-        if positions is None:
-            # Not a ReferenceDataUnavailableError, so this propagates past the
-            # handler below rather than being rewritten to a 502.
-            raise HTTPException(
-                status_code=404,
-                detail="The upstream Star monitor does not track this prime, so it reports no allocations",
-            )
-
-        category_service = AllocationCategoryService()
-        return [
-            _reference_allocation_row(row, category_service).model_copy(update={"source": Provenance.REFERENCE})
-            for row in positions
-        ]
-    except ReferenceDataUnavailableError as exc:
-        raise HTTPException(status_code=502, detail=f"Reference allocations upstream unavailable: {exc}") from exc
+    category_service = AllocationCategoryService()
+    return [
+        _reference_allocation_row(row, snapshot.synced_at, category_service).model_copy(
+            update={"source": Provenance.REFERENCE}
+        )
+        for row in snapshot.positions
+    ]
 
 
 def _reference_allocation_row(
-    row: ReferencePosition, category_service: AllocationCategoryService
+    row: ReferencePosition, synced_at: datetime, category_service: AllocationCategoryService
 ) -> AllocationResponse:
-    """Project an upstream position onto the allocation model.
+    """Project an observed upstream position onto the allocation model.
 
     A network STL has no chain id for yields a null ``chain_id``, with
     ``network`` naming it: upstream adds chains before STL indexes them, and 0
@@ -980,20 +739,21 @@ def _reference_allocation_row(
     return AllocationResponse(
         chain_id=row.chain_id,
         network=row.network,
+        wallet_address=row.wallet_address,
         receipt_token_id=row.receipt_token_id,
         receipt_token_address=row.token_address if as_address(row.token_address) else None,
-        # Both or neither, per the model's invariant. This feed names no loan
-        # token at all — unlike the Star monitor's breakdown, which carried a
-        # symbol for it.
-        underlying_token_id=None,
-        underlying_token_address=None,
+        # Unlike the Star monitor's breakdown, this feed names no loan token
+        # itself; see ReferencePosition for where these come from instead.
+        underlying_token_id=row.underlying_token_id,
+        underlying_token_address=row.underlying_token_address,
         symbol=row.symbol,
-        underlying_symbol="",
+        underlying_symbol=row.underlying_symbol,
         protocol_name=row.protocol_name,
         balance=None,
         # `assets`, the whole holding — the same measurement STL's own rows
         # carry, and the one the prime's `assets` total decomposes into.
         amount_usd=row.assets_usd,
+        reference_synced_at=synced_at,
         latest_activity_at=None,
         latest_activity_action=None,
         latest_activity_amount=None,
@@ -1035,6 +795,7 @@ def _direct_asset_row(holding: DirectAssetHolding, category_service: AllocationC
         chain_id=holding.chain_id,
         receipt_token_id=None,
         receipt_token_address=None,
+        held_token_address=holding.token_address,
         underlying_token_id=underlying_id,
         underlying_token_address=underlying_address,
         symbol=holding.symbol,

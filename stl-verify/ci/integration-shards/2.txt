@@ -26,6 +26,7 @@
 ./internal/pkg/retry
 ./internal/services/transform_worker
 ./internal/pkg/rpchttp
+./internal/pkg/skyenvelope
 ./internal/adapters/outbound/sns
 ./internal/common/sqsutil
 ./internal/pkg/blockchain
@@ -46,6 +47,7 @@
 ./internal/adapters/outbound/blockverifier
 ./internal/pkg/httpclient
 ./internal/pkg/partition
+./internal/pkg/archiveblock
 ./internal/pkg/gziputil
 ./internal/pkg/hexutil
 ./cmd/backfillers/raw-block-bulk-downloader
@@ -64,5 +66,6 @@
 ./internal/services/reference_capital_indexer
 ./cmd/cronjobs/reference-capital-indexer
 ./cmd/cronjobs/morpho-v2-bootstrap
+./internal/services/block_republish
 ./cmd/cronjobs/position-materializer
 ./internal/services/position_materializer

@@ -1,16 +1,22 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"math/big"
+	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/rpc"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
@@ -93,26 +99,46 @@ func TestCollectProbeConfirmed(t *testing.T) {
 func TestProbeBatchWithRetry_SingleAddressTransportErrorFailsRun(t *testing.T) {
 	t.Parallel()
 
-	prober, mc := newTestVaultProberWithMock(t)
-	transportErr := errors.New("429 Too Many Requests (retries exhausted)")
-	mc.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		return nil, transportErr
+	tests := []struct {
+		name         string
+		transportErr error
+	}{
+		{name: "transport error carrying no JSON-RPC shape", transportErr: errors.New("429 Too Many Requests (retries exhausted)")},
+		{name: "JSON-RPC rate limit", transportErr: &rateLimitedRPCError{}},
 	}
 
-	addr := common.HexToAddress("0x1111111111111111111111111111111111111111")
-	firstBlocks := map[common.Address]int64{addr: 100}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	vaults, err := prober.probeBatchWithRetry(context.Background(), []common.Address{addr}, firstBlocks, big.NewInt(100))
-	if err == nil {
-		t.Fatalf("expected single-address transport error to fail the run, got nil (vaults=%+v)", vaults)
-	}
-	if !errors.Is(err, transportErr) {
-		t.Errorf("expected wrapped transport error, got %v", err)
-	}
-	if vaults != nil {
-		t.Errorf("expected no vaults on error, got %+v", vaults)
+			prober, mc := newTestVaultProberWithMock(t)
+			mc.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+				return nil, tc.transportErr
+			}
+
+			addr := common.HexToAddress("0x1111111111111111111111111111111111111111")
+			firstBlocks := map[common.Address]int64{addr: 100}
+
+			vaults, err := prober.probeBatchWithRetry(context.Background(), []common.Address{addr}, firstBlocks, big.NewInt(100))
+			if err == nil {
+				t.Fatalf("expected single-address transport error to fail the run, got nil (vaults=%+v)", vaults)
+			}
+			if !errors.Is(err, tc.transportErr) {
+				t.Errorf("expected wrapped transport error, got %v", err)
+			}
+			if vaults != nil {
+				t.Errorf("expected no vaults on error, got %+v", vaults)
+			}
+		})
 	}
 }
+
+type rateLimitedRPCError struct{}
+
+func (rateLimitedRPCError) Error() string {
+	return "Your app has exceeded its compute units per second capacity"
+}
+func (rateLimitedRPCError) ErrorCode() int { return 429 }
 
 // newTestVaultProber builds a *vaultProber suitable for collectProbeConfirmed
 // tests. The multicaller and erc20ABI fields are unused because
@@ -718,5 +744,464 @@ func TestFetchVaultMetadata_MultiVault(t *testing.T) {
 	}
 	if got, want := vaults[1].FirstBlock, int64(67890); got != want {
 		t.Errorf("vaults[1].FirstBlock: want %d, got %d", want, got)
+	}
+}
+
+// A real mainnet address: its dispatcher jumps into invalid bytecode.
+const unprobeableCandidate = "0x4ECeF7bd1eD0c9f64a3a5c1a785A3Bb39DC5dF6A"
+
+type gasExhaustedRPCError struct{}
+
+func (gasExhaustedRPCError) Error() string  { return "out of gas: gas required exceeds: 550000000" }
+func (gasExhaustedRPCError) ErrorCode() int { return -32000 }
+
+// The boundary follows the node's eth_call gas cap, so it varies by provider.
+const trapsExhaustingOneMulticall = 3
+
+type trapping struct {
+	selects    func(outbound.Call) bool
+	exhaustsAt int
+}
+
+func vaultProbeResponder(t *testing.T, p *vaultProber, node trapping, asset common.Address) func(context.Context, []outbound.Call, *big.Int) ([]outbound.Result, error) {
+	t.Helper()
+	probeAnswers := v1ProbeAnswers(t, p, asset)
+	return func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		trapped := 0
+		for _, call := range calls {
+			if node.selects(call) {
+				trapped++
+			}
+		}
+		if trapped >= node.exhaustsAt {
+			return nil, gasExhaustedRPCError{}
+		}
+		if _, probing := probeAnswers[string(calls[0].CallData)]; probing {
+			out := make([]outbound.Result, 0, len(calls))
+			for _, call := range calls {
+				if node.selects(call) {
+					out = append(out, outbound.Result{})
+					continue
+				}
+				out = append(out, probeAnswers[string(call.CallData)])
+			}
+			return out, nil
+		}
+		return repeatResults(len(calls)/(p.sharedProber.NumDetailsCalls()+numAssetExtensionCalls), func() []outbound.Result {
+			return concatResults(
+				vaultDetailsResults(t, "Vault", "vSYM", 18, false),
+				[]outbound.Result{okStringResult(t, "USDC"), okUint8Result(t, 6)},
+			)
+		}), nil
+	}
+}
+
+func v1ProbeAnswers(t *testing.T, p *vaultProber, asset common.Address) map[string]outbound.Result {
+	t.Helper()
+	calls := p.sharedProber.ProbeCalls(common.Address{})
+	results := v1ProbeResults(t, morpho_indexer.MorphoBlueAddress, asset)
+	answers := make(map[string]outbound.Result, len(calls))
+	for i, call := range calls {
+		answers[string(call.CallData)] = results[i]
+	}
+	return answers
+}
+
+func trapsEverySelector(addr common.Address) trapping {
+	return trapping{
+		selects:    func(call outbound.Call) bool { return call.Target == addr },
+		exhaustsAt: trapsExhaustingOneMulticall,
+	}
+}
+
+func trapsNothing() trapping {
+	return trapping{selects: func(outbound.Call) bool { return false }, exhaustsAt: trapsExhaustingOneMulticall}
+}
+
+func trapsUnderATightGasCap(addr common.Address, callData ...[]byte) trapping {
+	return trapping{
+		selects: func(call outbound.Call) bool {
+			return call.Target == addr && slices.ContainsFunc(callData, func(data []byte) bool {
+				return bytes.Equal(call.CallData, data)
+			})
+		},
+		exhaustsAt: 1,
+	}
+}
+
+func repeatResults(n int, window func() []outbound.Result) []outbound.Result {
+	var out []outbound.Result
+	for range n {
+		out = append(out, window()...)
+	}
+	return out
+}
+
+func TestProbeAllCandidates_IsolatesGasExhaustedCandidate(t *testing.T) {
+	t.Parallel()
+
+	poison := common.HexToAddress(unprobeableCandidate)
+	prober, mc := newTestVaultProberWithMock(t)
+	mc.ExecuteFn = vaultProbeResponder(t, prober, trapsEverySelector(poison), common.HexToAddress("0xaaaa000000000000000000000000000000000000"))
+
+	candidates := map[common.Address]int64{
+		poison: 100,
+		common.HexToAddress("0x1111111111111111111111111111111111111111"): 101,
+		common.HexToAddress("0x2222222222222222222222222222222222222222"): 102,
+		common.HexToAddress("0x3333333333333333333333333333333333333333"): 103,
+	}
+
+	vaults, err := prober.probeAllCandidates(context.Background(), candidates, 100, len(candidates))
+	if err != nil {
+		t.Fatalf("probeAllCandidates: unexpected error: %v", err)
+	}
+	if len(vaults) != 3 {
+		t.Fatalf("expected the 3 probeable candidates to confirm, got %d: %+v", len(vaults), vaults)
+	}
+	for _, v := range vaults {
+		if v.Address == poison {
+			t.Errorf("the unprobeable candidate must not confirm as a vault: %+v", v)
+		}
+	}
+}
+
+func TestProbeAllCandidates_ProbesCandidatesInAddressOrder(t *testing.T) {
+	t.Parallel()
+
+	prober, mc := newTestVaultProberWithMock(t)
+	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return repeatResults(len(calls)/prober.sharedProber.NumProbeCalls(), notVaultProbeResults), nil
+	}
+
+	// Descending: map iteration rotates insertion order at this size, so ascending
+	// would reproduce the sorted order with no sort at all.
+	candidates := make(map[common.Address]int64)
+	want := make([]common.Address, 0, 8)
+	for i := int64(8); i >= 1; i-- {
+		candidates[common.BigToAddress(big.NewInt(i))] = i
+	}
+	for i := int64(1); i <= 8; i++ {
+		want = append(want, common.BigToAddress(big.NewInt(i)))
+	}
+
+	if _, err := prober.probeAllCandidates(context.Background(), candidates, 100, 1); err != nil {
+		t.Fatalf("probeAllCandidates: unexpected error: %v", err)
+	}
+
+	got := make([]common.Address, 0, len(mc.Invocations))
+	for _, inv := range mc.Invocations {
+		got = append(got, inv.Calls[0].Target)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("probe order = %v, want ascending address order %v", got, want)
+	}
+}
+
+func TestProbeAllCandidates_CountsDiscardedUnprobeableCandidate(t *testing.T) {
+	t.Parallel()
+
+	poison := common.HexToAddress(unprobeableCandidate)
+	prober, mc := newTestVaultProberWithMock(t)
+	mc.ExecuteFn = vaultProbeResponder(t, prober, trapsEverySelector(poison), common.HexToAddress("0xaaaa000000000000000000000000000000000000"))
+
+	reader := sdkmetric.NewManualReader()
+	prober.telemetry = newProbeTelemetry(t, reader)
+
+	if _, err := prober.probeAllCandidates(context.Background(), map[common.Address]int64{poison: 100}, 100, 1); err != nil {
+		t.Fatalf("probeAllCandidates: unexpected error: %v", err)
+	}
+
+	want := map[string]string{"reason": string(morpho_indexer.UnprobeableGasExhausted), "chain": "mainnet"}
+	if got := counterValue(t, reader, "morpho.vault.candidates.unprobeable", want); got != 1 {
+		t.Errorf("morpho.vault.candidates.unprobeable%v = %d, want 1", want, got)
+	}
+}
+
+func TestProbeAllCandidates_LogsDiscardedUnprobeableCandidate(t *testing.T) {
+	t.Parallel()
+
+	poison := common.HexToAddress(unprobeableCandidate)
+	prober, mc := newTestVaultProberWithMock(t)
+	mc.ExecuteFn = vaultProbeResponder(t, prober, trapsEverySelector(poison), common.HexToAddress("0xaaaa000000000000000000000000000000000000"))
+
+	var logged bytes.Buffer
+	prober.logger = slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	if _, err := prober.probeAllCandidates(context.Background(), map[common.Address]int64{poison: 100}, 100, 1); err != nil {
+		t.Fatalf("probeAllCandidates: unexpected error: %v", err)
+	}
+
+	for _, want := range []string{"level=WARN", "discarding unprobeable candidate", poison.Hex(), string(morpho_indexer.UnprobeableGasExhausted)} {
+		if !strings.Contains(logged.String(), want) {
+			t.Errorf("discard log: want substring %q, got %q", want, logged.String())
+		}
+	}
+}
+
+func TestProbeAllCandidates_SkipsCandidateClassifiedInAnEarlierSubRange(t *testing.T) {
+	t.Parallel()
+
+	poison := common.HexToAddress(unprobeableCandidate)
+	prober, mc := newTestVaultProberWithMock(t)
+	mc.ExecuteFn = vaultProbeResponder(t, prober, trapsEverySelector(poison), common.HexToAddress("0xaaaa000000000000000000000000000000000000"))
+	candidates := map[common.Address]int64{
+		poison: 100,
+		common.HexToAddress("0x1111111111111111111111111111111111111111"): 101,
+	}
+
+	if _, err := prober.probeAllCandidates(context.Background(), candidates, 100, len(candidates)); err != nil {
+		t.Fatalf("first sub-range: unexpected error: %v", err)
+	}
+	mc.Invocations = nil
+
+	vaults, err := prober.probeAllCandidates(context.Background(), candidates, 100, len(candidates))
+	if err != nil {
+		t.Fatalf("second sub-range: unexpected error: %v", err)
+	}
+	if len(vaults) != 1 {
+		t.Fatalf("expected the probeable candidate to confirm, got %d: %+v", len(vaults), vaults)
+	}
+	for _, inv := range mc.Invocations {
+		for _, call := range inv.Calls {
+			if call.Target == poison {
+				t.Fatalf("the classified candidate was probed again: %v", inv.Calls)
+			}
+		}
+	}
+}
+
+func TestProbeBatchWithRetry_MetadataGasExhaustionFailsRun(t *testing.T) {
+	t.Parallel()
+
+	addr := common.HexToAddress("0x7777777777777777777777777777777777777777")
+	prober, mc := newTestVaultProberWithMock(t)
+	probeSelector := prober.sharedProber.ProbeCalls(addr)[0].CallData
+	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if !bytes.Equal(calls[0].CallData, probeSelector) {
+			return nil, gasExhaustedRPCError{}
+		}
+		return v1ProbeResults(t, morpho_indexer.MorphoBlueAddress, common.HexToAddress("0xaaaa000000000000000000000000000000000000")), nil
+	}
+
+	firstBlocks := map[common.Address]int64{addr: 100}
+	vaults, err := prober.probeBatchWithRetry(context.Background(), []common.Address{addr}, firstBlocks, big.NewInt(100))
+	if err == nil {
+		t.Fatalf("expected a gas-exhausted metadata read to fail the run, got nil (vaults=%+v)", vaults)
+	}
+	if !strings.Contains(err.Error(), "multicall metadata") {
+		t.Errorf("error: want it to name the metadata phase, got %q", err.Error())
+	}
+}
+
+func newProbeTelemetry(t *testing.T, reader sdkmetric.Reader) *morpho_indexer.Telemetry {
+	t.Helper()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	tel, err := morpho_indexer.NewTelemetryWithProviders(tracenoop.NewTracerProvider(), provider, "mainnet")
+	if err != nil {
+		t.Fatalf("NewTelemetryWithProviders: %v", err)
+	}
+	return tel
+}
+
+func TestProbeBatchWithRetry_ConfirmsVaultWhoseIsolatedSelectorsStillExhaust(t *testing.T) {
+	t.Parallel()
+
+	addr := common.HexToAddress(unprobeableCandidate)
+	prober, mc := newTestVaultProberWithMock(t)
+	probeCalls := prober.sharedProber.ProbeCalls(addr)
+	tightCap := trapsUnderATightGasCap(addr, probeCalls[2].CallData, probeCalls[3].CallData)
+	mc.ExecuteFn = vaultProbeResponder(t, prober, tightCap,
+		common.HexToAddress("0xaaaa000000000000000000000000000000000000"))
+
+	vaults, err := prober.probeBatchWithRetry(context.Background(), []common.Address{addr},
+		map[common.Address]int64{addr: 100}, big.NewInt(100))
+	if err != nil {
+		t.Fatalf("probeBatchWithRetry: unexpected error: %v", err)
+	}
+	if len(vaults) != 1 {
+		t.Fatalf("expected the vault to confirm off its answering selectors, got %d: %+v", len(vaults), vaults)
+	}
+	if vaults[0].Address != addr {
+		t.Errorf("confirmed address: want %s, got %s", addr.Hex(), vaults[0].Address.Hex())
+	}
+	if _, classified := prober.unprobeable.lookup(addr, 100); classified {
+		t.Errorf("a candidate that answers MORPHO() and asset() must not be classified unprobeable")
+	}
+}
+
+func TestProbeBatchWithRetry_DiscardsCandidateAnsweringNoIsolatedSelector(t *testing.T) {
+	t.Parallel()
+
+	addr := common.HexToAddress(unprobeableCandidate)
+	prober, mc := newTestVaultProberWithMock(t)
+	mc.ExecuteFn = vaultProbeResponder(t, prober, trapsEverySelector(addr),
+		common.HexToAddress("0xaaaa000000000000000000000000000000000000"))
+	var logged bytes.Buffer
+	prober.logger = slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	vaults, err := prober.probeBatchWithRetry(context.Background(), []common.Address{addr},
+		map[common.Address]int64{addr: 100}, big.NewInt(100))
+	if err != nil {
+		t.Fatalf("probeBatchWithRetry: unexpected error: %v", err)
+	}
+	if len(vaults) != 0 {
+		t.Fatalf("expected no vault, got %+v", vaults)
+	}
+	exhausted, classified := prober.unprobeable.lookup(addr, 100)
+	if !classified {
+		t.Fatalf("a candidate answering no isolated selector must be classified unprobeable")
+	}
+	if exhausted != 0 {
+		t.Errorf("exhaustedSelectors = %d, want 0: at a mainnet-sized cap an isolated trap answers instead of exhausting", exhausted)
+	}
+	if !strings.Contains(logged.String(), "exhaustedSelectors=0") {
+		t.Errorf("discard WARN must report the evidence it decided without; got %q", logged.String())
+	}
+}
+
+func TestProbeAllCandidates_CountsMemoHitsLikeFreshDiscards(t *testing.T) {
+	t.Parallel()
+
+	poison := common.HexToAddress(unprobeableCandidate)
+	prober, mc := newTestVaultProberWithMock(t)
+	mc.ExecuteFn = vaultProbeResponder(t, prober, trapsEverySelector(poison),
+		common.HexToAddress("0xaaaa000000000000000000000000000000000000"))
+
+	reader := sdkmetric.NewManualReader()
+	prober.telemetry = newProbeTelemetry(t, reader)
+	var logged bytes.Buffer
+	prober.logger = slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	candidates := map[common.Address]int64{poison: 100}
+	for subRange := range 2 {
+		if _, err := prober.probeAllCandidates(context.Background(), candidates, 100, 1); err != nil {
+			t.Fatalf("sub-range %d: unexpected error: %v", subRange, err)
+		}
+	}
+
+	want := map[string]string{"reason": string(morpho_indexer.UnprobeableGasExhausted), "chain": "mainnet"}
+	if got := counterValue(t, reader, "morpho.vault.candidates.unprobeable", want); got != 2 {
+		t.Errorf("morpho.vault.candidates.unprobeable%v = %d, want 2: the memo hit must count too", want, got)
+	}
+	if got := strings.Count(logged.String(), "discarding unprobeable candidate"); got != 2 {
+		t.Errorf("discard WARNs = %d, want 2: the memo hit must log too; got %q", got, logged.String())
+	}
+	for source, want := range map[string]int{"source=probe": 1, "source=memo": 1} {
+		if got := strings.Count(logged.String(), source); got != want {
+			t.Errorf("%q WARNs = %d, want %d: the two discards must be distinguishable; got %q", source, got, want, logged.String())
+		}
+	}
+}
+
+func TestProbeAllCandidates_ReprobesAClassifiedCandidateAtADifferentBlock(t *testing.T) {
+	t.Parallel()
+
+	poison := common.HexToAddress(unprobeableCandidate)
+	prober, mc := newTestVaultProberWithMock(t)
+	mc.ExecuteFn = vaultProbeResponder(t, prober, trapsEverySelector(poison),
+		common.HexToAddress("0xaaaa000000000000000000000000000000000000"))
+	candidates := map[common.Address]int64{poison: 100}
+
+	if _, err := prober.probeAllCandidates(context.Background(), candidates, 100, 1); err != nil {
+		t.Fatalf("first run: unexpected error: %v", err)
+	}
+	mc.Invocations = nil
+
+	if _, err := prober.probeAllCandidates(context.Background(), candidates, 200, 1); err != nil {
+		t.Fatalf("second run: unexpected error: %v", err)
+	}
+
+	if len(mc.Invocations) == 0 {
+		t.Fatalf("a run at another block must re-probe rather than reuse the earlier block's verdict")
+	}
+	if _, classified := prober.unprobeable.lookup(poison, 200); !classified {
+		t.Errorf("the second block's verdict must be remembered under its own block")
+	}
+}
+
+func TestProbeBatchWithRetry_TransientErrorBubblesWithoutNarrowing(t *testing.T) {
+	t.Parallel()
+
+	prober, mc := newTestVaultProberWithMock(t)
+	transportErr := &rateLimitedRPCError{}
+	mc.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return nil, transportErr
+	}
+
+	batch := make([]common.Address, 0, 50)
+	firstBlocks := make(map[common.Address]int64, 50)
+	for i := int64(1); i <= 50; i++ {
+		addr := common.BigToAddress(big.NewInt(i))
+		batch = append(batch, addr)
+		firstBlocks[addr] = i
+	}
+
+	vaults, err := prober.probeBatchWithRetry(context.Background(), batch, firstBlocks, big.NewInt(100))
+	if err == nil {
+		t.Fatalf("expected the transient error to fail the run, got nil (vaults=%+v)", vaults)
+	}
+	if !errors.Is(err, transportErr) {
+		t.Errorf("expected the wrapped transport error, got %v", err)
+	}
+	if mc.CallCount != 1 {
+		t.Errorf("multicalls issued = %d, want 1: a transient must bubble, not be narrowed", mc.CallCount)
+	}
+}
+
+func TestProbeCandidateSelectorwise_TransientErrorDuringFanOutFailsRun(t *testing.T) {
+	t.Parallel()
+
+	addr := common.HexToAddress(unprobeableCandidate)
+	prober, mc := newTestVaultProberWithMock(t)
+	transportErr := &rateLimitedRPCError{}
+	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) == 1 {
+			return nil, transportErr
+		}
+		return nil, gasExhaustedRPCError{}
+	}
+
+	vaults, err := prober.probeBatchWithRetry(context.Background(), []common.Address{addr},
+		map[common.Address]int64{addr: 100}, big.NewInt(100))
+	if err == nil {
+		t.Fatalf("expected a throttled isolated probe call to fail the run, got nil (vaults=%+v)", vaults)
+	}
+	if !errors.Is(err, transportErr) {
+		t.Errorf("expected the wrapped transport error, got %v", err)
+	}
+	if _, classified := prober.unprobeable.lookup(addr, 100); classified {
+		t.Errorf("a transient failure must not classify the candidate unprobeable")
+	}
+}
+
+func TestProbeBatchWithRetry_OversizedRequestNarrowsInsteadOfFailing(t *testing.T) {
+	t.Parallel()
+
+	const maxCallsPerRequest = 8
+
+	prober, mc := newTestVaultProberWithMock(t)
+	answer := vaultProbeResponder(t, prober, trapsNothing(), common.HexToAddress("0xaaaa000000000000000000000000000000000000"))
+	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNum *big.Int) ([]outbound.Result, error) {
+		if len(calls) > maxCallsPerRequest {
+			return nil, rpc.HTTPError{StatusCode: http.StatusRequestEntityTooLarge, Status: "413 Request Entity Too Large"}
+		}
+		return answer(ctx, calls, blockNum)
+	}
+
+	batch := make([]common.Address, 0, 4)
+	firstBlocks := make(map[common.Address]int64, 4)
+	for i := int64(1); i <= 4; i++ {
+		addr := common.BigToAddress(big.NewInt(i))
+		batch = append(batch, addr)
+		firstBlocks[addr] = i
+	}
+
+	vaults, err := prober.probeBatchWithRetry(context.Background(), batch, firstBlocks, big.NewInt(100))
+	if err != nil {
+		t.Fatalf("probeBatchWithRetry: unexpected error: %v", err)
+	}
+	if len(vaults) != len(batch) {
+		t.Fatalf("expected every candidate to confirm once the batch fits, got %d: %+v", len(vaults), vaults)
 	}
 }

@@ -242,7 +242,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	err := run(context.Background(), []string{
 		"-db", "postgres://invalid:invalid@localhost:1/nonexistent?connect_timeout=1",
 		"-queue", "http://localhost/test-queue",
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error for bad connection config")
 	}
@@ -296,22 +296,14 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 			"-vat", "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b",
 			"-queue", sqsServer.URL + "/queue/test",
 			"-sweep-blocks", "1",
-		})
+		}, nil)
 	}()
 
-	deadline := time.After(15 * time.Second)
-	for {
+	testutil.WaitForWorkerCondition(t, errCh, 15*time.Second, func() bool {
 		var count int
 		err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM prime_debt`).Scan(&count)
-		if err == nil && count >= 1 {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for debt snapshot to be written")
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
+		return err == nil && count >= 1
+	}, "a debt snapshot to be written")
 
 	var ilkName, debtWad string
 	var primeID, blockNumber int64
@@ -377,7 +369,7 @@ func TestRunIntegration_NoPrimesInDB(t *testing.T) {
 		"-db", dbURL,
 		"-vat", "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b",
 		"-queue", sqsServer.URL + "/queue/test",
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error when no primes are registered")
 	}
@@ -445,22 +437,14 @@ func TestRunIntegration_MultipleVaults(t *testing.T) {
 			"-vat", vatAddr,
 			"-queue", sqsServer.URL + "/queue/test",
 			"-sweep-blocks", "1",
-		})
+		}, nil)
 	}()
 
-	deadline := time.After(15 * time.Second)
-	for {
+	testutil.WaitForWorkerCondition(t, errCh, 15*time.Second, func() bool {
 		var count int
 		err := pool.QueryRow(ctx, `SELECT COUNT(DISTINCT prime_id) FROM prime_debt`).Scan(&count)
-		if err == nil && count >= len(primes) {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for snapshots from all primes")
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
+		return err == nil && count >= len(primes)
+	}, "snapshots from all primes")
 
 	rows, err := pool.Query(ctx, `
 		SELECT p.name, pd.ilk_name, pd.debt_wad::text, pd.block_number
@@ -553,26 +537,14 @@ func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 			"-vat", vatAddr,
 			"-queue", sqsServer.URL + "/queue/test",
 			"-sweep-blocks", "1",
-		})
+		}, nil)
 	}()
 
-	deadline := time.After(15 * time.Second)
-	for {
+	testutil.WaitForWorkerCondition(t, errCh, 15*time.Second, func() bool {
 		var count int
 		err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM prime_debt`).Scan(&count)
-		if err == nil && count >= wantRows {
-			break
-		}
-		select {
-		case <-deadline:
-			var got int
-			if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM prime_debt`).Scan(&got); err != nil {
-				t.Fatalf("timed out and failed to query count: %v", err)
-			}
-			t.Fatalf("timed out: want %d rows, have %d", wantRows, got)
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
+		return err == nil && count >= wantRows
+	}, fmt.Sprintf("%d prime_debt rows", wantRows))
 
 	var distinctTimes int
 	if err := pool.QueryRow(ctx, `SELECT COUNT(DISTINCT synced_at) FROM prime_debt`).Scan(&distinctTimes); err != nil {
@@ -650,11 +622,11 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 			"-vat", vatAddr,
 			"-queue", sqsServer.URL + "/queue/test",
 			"-sweep-blocks", "1",
-		})
+		}, nil)
 	}()
 
 	// Wait until a debt snapshot is written so the sweep (and its multicalls) has run.
-	testutil.WaitForCondition(t, 15*time.Second, func() bool {
+	testutil.WaitForWorkerCondition(t, errCh, 15*time.Second, func() bool {
 		var count int
 		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM prime_debt`).Scan(&count); err != nil {
 			return false
@@ -747,7 +719,7 @@ func TestRunIntegration_InvalidVatFlag(t *testing.T) {
 		"-db", dbURL,
 		"-vat", "not-a-valid-address",
 		"-queue", sqsServer.URL + "/queue/test",
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error for invalid vat address")
 	}

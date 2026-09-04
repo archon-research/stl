@@ -8,6 +8,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
+from app.adapters.postgres.reference_as_of import utc_now
 from app.domain.entities.backed_breakdown import BackedBreakdown
 from tests.integration.seed import insert_oracle_asset, insert_token, insert_user, store_test_ids
 
@@ -532,7 +533,7 @@ async def repository(
         repository_class = cast(Any, MorphoBackedBreakdownRepository)
         yield cast(
             ProtocolScopedBackedBreakdownRepository,
-            repository_class(engine),
+            repository_class(engine, utc_now),
         )
     finally:
         await engine.dispose()

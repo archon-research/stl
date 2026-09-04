@@ -346,6 +346,25 @@ data:
   AWS_REGION: "eu-west-1"
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector-opentelemetry-collector.observability.svc.cluster.local:4317"
 ---
+# On-demand block republisher (ARCT-383) — see docs/runbooks/vector-cronjobs.md.
+# AWS_SNS_TOPIC_ARN and REDIS_ADDR arrive via the ExternalSecret, the same
+# infra-config values the ethereum watcher publishes with.
+# DEPLOY_ENV is what the startup guard validates that topic's chain against.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: block-republisher
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "1"
+  # Required, not defaulted: a deployment without it would fetch another chain's
+  # blocks for its heights. The value is the ethereum watcher's own.
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  DEPLOY_ENV: "prod"
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -686,6 +705,23 @@ data:
   REFERENCE_CAPITAL_SYNC_INTERVAL: "15m"
   # Risk-capital root, without the /primes route the client appends itself.
   SKY_RISK_CAPITAL_URL: "https://info-sky.blockanalitica.com/star-monitoring/risk-capital"
-  # Balance-sheet feed, read only by the one-off reference-capital-backfill Job.
+  # Balance-sheet feed. Read every cycle by the indexer -- for the per-prime
+  # daily aggregates and the per-position rows the API now serves reference
+  # allocations from -- and by the reference-capital-backfill Deployment, which
+  # seeds the history the indexer cannot reach.
   SKY_DATA_URL: "https://sky.data.blockanalitica.com/internal"
   ENVIRONMENT: "sentinelprod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: core-model-runner
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  # The schedule lives in Temporal state; the worker reconciles a changed
+  # interval into it on startup, so a redeploy is enough (stl-verify/AGENTS.md).
+  CORE_MODEL_RUN_INTERVAL_HOURS: "24"
+  # Same cap as staging; the deployment's memory limit is sized for it — raise
+  # both together (k8s/base/core-model-runner/deployment.yaml).
+  CORE_MODEL_N_MC: "100"

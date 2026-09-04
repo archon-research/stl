@@ -30,9 +30,13 @@ const RESOLUTION_INTERVAL_MS: Record<TimeSeriesResolution, number> = {
   P1D: DAY_MS,
 };
 
-const RESOLUTIONS = Object.keys(
+// `Object.keys` is `string[]` however the record is typed, and the record is
+// the single source of truth for which resolutions exist -- so filter, not cast.
+const RESOLUTIONS: TimeSeriesResolution[] = Object.keys(
   RESOLUTION_INTERVAL_MS,
-) as TimeSeriesResolution[];
+).filter((key): key is TimeSeriesResolution =>
+  Object.hasOwn(RESOLUTION_INTERVAL_MS, key),
+);
 
 const DEFAULT_WINDOW_MS = DAY_MS;
 const MAX_WINDOW_MS = 366 * DAY_MS;
@@ -159,7 +163,7 @@ function readTimestamp(
 }
 
 /** The finest resolution the API permits for a window of the given size. */
-export function minimumResolution(windowMs: number): TimeSeriesResolution {
+function minimumResolution(windowMs: number): TimeSeriesResolution {
   if (windowMs <= 6 * HOUR_MS) return 'PT1M';
   if (windowMs <= DAY_MS) return 'PT5M';
   if (windowMs <= 7 * DAY_MS) return 'PT15M';

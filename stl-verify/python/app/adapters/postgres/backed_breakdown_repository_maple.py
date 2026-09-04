@@ -93,6 +93,9 @@ coll AS (
      AND c.processing_version = ll.processing_version
     WHERE c.asset_amount    IS NOT NULL
       AND c.asset_value_usd IS NOT NULL
+      -- symbol is the grouping key, so an unidentified asset (Maple returned a
+      -- null symbol) would merge unrelated collaterals under a blank label.
+      AND c.asset_symbol     <> ''
 ),
 liquidity AS (
     -- BREAKING ASSUMPTION: pool liquidity is valued at $1/unit. This is correct ONLY
@@ -136,10 +139,11 @@ ORDER BY amount_usd DESC
 )
 
 # Observability companion to the breakdown query: reports the silent degrades the
-# breakdown itself cannot surface — collateral rows dropped for null amount/value (so
-# backing_pct is recomputed over survivors), whether a pool_state liquidity snapshot
-# exists, and whether the underlying is priceable at $1. pool_cycle always yields one
-# row (max() over zero rows is NULL), so has_pool_state is a clean boolean.
+# breakdown itself cannot surface — collateral rows dropped for a null amount/value or
+# an unidentified asset (so backing_pct is recomputed over survivors), whether a
+# pool_state liquidity snapshot exists, and whether the underlying is priceable at $1.
+# pool_cycle always yields one row (max() over zero rows is NULL), so has_pool_state is
+# a clean boolean.
 _MAPLE_BREAKDOWN_DIAGNOSTICS_SQL = (
     _POOL_CYCLE_LOANS_CTE
     + """,
@@ -150,7 +154,7 @@ dropped AS (
       ON c.maple_loan_id      = ll.loan_id
      AND c.synced_at          = ll.synced_at
      AND c.processing_version = ll.processing_version
-    WHERE c.asset_amount IS NULL OR c.asset_value_usd IS NULL
+    WHERE c.asset_amount IS NULL OR c.asset_value_usd IS NULL OR c.asset_symbol = ''
 )
 SELECT (SELECT underlying_symbol FROM pool)           AS underlying_symbol,
        (SELECT synced_at IS NOT NULL FROM pool_cycle) AS has_pool_state,
@@ -222,8 +226,9 @@ class MapleBackedBreakdownRepository:
             return
         if diag.null_collateral_count:
             logger.warning(
-                "Maple breakdown pool_id=%d dropped %d active-loan collateral row(s) with null amount/value; "
-                "backing_pct is recomputed over the surviving rows and understates total backing",
+                "Maple breakdown pool_id=%d dropped %d active-loan collateral row(s) with a null amount/value "
+                "or no asset symbol; backing_pct is recomputed over the surviving rows and understates "
+                "total backing",
                 pool_id,
                 diag.null_collateral_count,
             )

@@ -99,7 +99,7 @@ func TestStart_ERC4626Oracle(t *testing.T) {
 	}
 
 	mc := newERC4626Multicaller(t, testutil.E18(1), big.NewInt(100_000_000))
-	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestProcessBlock_ERC4626Oracle(t *testing.T) {
 	cfg := validConfig()
 	cfg.PollInterval = 1 * time.Millisecond
 
-	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestProcessBlock_ERC4626Oracle_UnderlyingFeedDecimalsMismatch(t *testing.T)
 		},
 	}
 
-	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -298,7 +298,7 @@ func TestProcessBlock_ERC4626Oracle_UnderlyingDecimalsMismatch(t *testing.T) {
 		},
 	}
 
-	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -361,7 +361,7 @@ func TestProcessBlock_ERC4626Oracle_VaultFails(t *testing.T) {
 	cfg := validConfig()
 	cfg.PollInterval = 1 * time.Millisecond
 
-	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

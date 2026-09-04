@@ -29,6 +29,9 @@ jobs:
           cache: npm
           cache-dependency-path: stl-verify/ts/package-lock.json
 
+      - name: Enable Corepack
+        run: corepack enable npm
+
       - name: Install dependencies
         run: npm ci
 
@@ -61,6 +64,9 @@ jobs:
           cache: npm
           cache-dependency-path: stl-verify/ts/package-lock.json
 
+      - name: Enable Corepack
+        run: corepack enable npm
+
       - name: Install dependencies
         run: npm ci
 
@@ -69,6 +75,18 @@ jobs:
 
       - name: Design-system doctor
         run: npm run doctor
+
+      # First of the test steps: the unit suite is the cheapest signal in the
+      # job, and it covers the same lib the regression scripts below reach
+      # through the running app.
+      - name: Run unit tests
+        run: npm run test -w ui
+
+      # Belongs with lint by nature, but not in the lint job: knip resolves the
+      # whole import graph, and `#styled-system/*` only exists after codegen, so
+      # there it would read every module reaching the design system as unused.
+      - name: Nothing unreachable, unused or undeclared
+        run: npm run knip
 
       # These scripts run after codegen, not before: each loads app source
       # through vite, and the router tree already reaches #styled-system/* via
@@ -115,3 +133,10 @@ jobs:
 
       - name: Build workspace
         run: npm run build
+
+      # Last, and only here: it reads dist/, so it is the one step that needs
+      # the build to have run. Rolldown folds a chunk group back into the entry
+      # without an error when nothing dynamically imports it, and no other step
+      # in this job would notice.
+      - name: Lazy chunks stay off the critical path
+        run: npm run test:bundle-budget -w ui
