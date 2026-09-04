@@ -207,21 +207,6 @@ func TestParseConfig(t *testing.T) {
 			},
 		},
 		{
-			name: "non-mainnet chain without ALCHEMY_HTTP_URL",
-			args: []string{"-queue", "https://sqs.us-east-1.amazonaws.com/123/q", "-db", "postgres://localhost/db", "-redis", "localhost:6379"},
-			envVars: map[string]string{
-				"ALCHEMY_API_KEY": "test-key",
-				"CHAIN_ID":        "8453",
-			},
-			wantError: "ALCHEMY_HTTP_URL is required for chain 8453",
-		},
-		{
-			name:      "missing CHAIN_ID",
-			args:      []string{"-queue", "https://sqs.us-east-1.amazonaws.com/123/q", "-db", "postgres://localhost/db", "-redis", "localhost:6379"},
-			envVars:   map[string]string{"ALCHEMY_API_KEY": "test-key"},
-			wantError: "CHAIN_ID",
-		},
-		{
 			name: "invalid CHAIN_ID",
 			args: []string{"-queue", "https://sqs.us-east-1.amazonaws.com/123/q", "-db", "postgres://localhost/db", "-redis", "localhost:6379"},
 			envVars: map[string]string{

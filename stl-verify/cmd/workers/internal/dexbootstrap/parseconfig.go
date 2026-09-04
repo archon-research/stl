@@ -105,6 +105,9 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 	if cfg.DBURL == "" {
 		return Config{}, fmt.Errorf("database URL not provided (use -db flag or DATABASE_URL env var)")
 	}
+	if _, err := env.Require("ALCHEMY_API_KEY"); err != nil {
+		return Config{}, fmt.Errorf("resolving Alchemy RPC URL: %w", err)
+	}
 
 	if cfg.RedisAddr == "" {
 		cfg.RedisAddr = env.Get("REDIS_ADDR", "")
@@ -188,7 +191,7 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 
 	cfg.AlchemyURL, err = chainutil.AlchemyRPCURL(cfg.ChainID)
 	if err != nil {
-		return Config{}, err
+		return Config{}, fmt.Errorf("resolving Alchemy RPC URL: %w", err)
 	}
 
 	return cfg, nil

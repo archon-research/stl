@@ -310,6 +310,55 @@ func TestAlchemyRPCURL(t *testing.T) {
 			want:    "https://base-mainnet.g.alchemy.com/v2/secret",
 		},
 		{
+			name:    "a remote cleartext endpoint is rejected before adding the key",
+			chainID: 1,
+			apiKey:  "secret",
+			httpURL: "http://alchemy.example.com/v2",
+			wantErr: "ALCHEMY_HTTP_URL must use HTTPS",
+		},
+		{
+			name:    "a loopback endpoint may use HTTP for local RPC fixtures",
+			chainID: 1,
+			apiKey:  "secret",
+			httpURL: "http://127.0.0.1:8545/v2",
+			want:    "http://127.0.0.1:8545/v2/secret",
+		},
+		{
+			name:    "an endpoint without a host is rejected during configuration",
+			chainID: 1,
+			apiKey:  "secret",
+			httpURL: "https:alchemy.example.com/v2",
+			wantErr: "ALCHEMY_HTTP_URL must be an absolute URL",
+		},
+		{
+			name:    "an endpoint with only a port is rejected during configuration",
+			chainID: 1,
+			apiKey:  "secret",
+			httpURL: "https://:443/v2",
+			wantErr: "ALCHEMY_HTTP_URL must be an absolute URL",
+		},
+		{
+			name:    "a query cannot capture the API key",
+			chainID: 1,
+			apiKey:  "secret",
+			httpURL: "https://alchemy.example.com/v2?network=mainnet",
+			wantErr: "ALCHEMY_HTTP_URL must not contain user info, a query, or a fragment",
+		},
+		{
+			name:    "a fragment cannot capture the API key",
+			chainID: 1,
+			apiKey:  "secret",
+			httpURL: "https://alchemy.example.com/v2#rpc",
+			wantErr: "ALCHEMY_HTTP_URL must not contain user info, a query, or a fragment",
+		},
+		{
+			name:    "credentials are not accepted in the endpoint",
+			chainID: 1,
+			apiKey:  "secret",
+			httpURL: "https://user:password@alchemy.example.com/v2",
+			wantErr: "ALCHEMY_HTTP_URL must not contain user info, a query, or a fragment",
+		},
+		{
 			name:    "a non-mainnet chain must name its endpoint",
 			chainID: 8453,
 			apiKey:  "secret",
@@ -319,7 +368,7 @@ func TestAlchemyRPCURL(t *testing.T) {
 			name:    "an absent key is a hard error, never an unauthenticated URL",
 			chainID: 1,
 			httpURL: "https://eth-mainnet.g.alchemy.com/v2",
-			wantErr: "ALCHEMY_API_KEY",
+			wantErr: "requiring ALCHEMY_API_KEY",
 		},
 	}
 	for _, tc := range tests {
@@ -400,6 +449,7 @@ func TestAssertChainID(t *testing.T) {
 }
 
 func TestAssertChainID_BoundsTheProbeWithItsOwnDeadline(t *testing.T) {
+	started := time.Now()
 	var deadline time.Time
 	node := chainIDReaderFunc(func(ctx context.Context) (*big.Int, error) {
 		deadline, _ = ctx.Deadline()
@@ -411,5 +461,8 @@ func TestAssertChainID_BoundsTheProbeWithItsOwnDeadline(t *testing.T) {
 	}
 	if deadline.IsZero() {
 		t.Fatal("the probe ran without a deadline; a sick node would hold startup for the dialer's whole retry budget")
+	}
+	if got := deadline.Sub(started); got < chainIDProbeTimeout-time.Second || got > chainIDProbeTimeout+time.Second {
+		t.Fatalf("probe deadline = %s from start, want approximately %s", got, chainIDProbeTimeout)
 	}
 }

@@ -125,30 +125,48 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("startup configuration: %w", err)
 	}
 
+	bootstrap := &bootstrapWorker{}
+	defer bootstrap.close()
+
 	return temporal.RunWorker(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporal.WorkerConfig{
 		Name:         taskQueueName,
 		OpenDatabase: postgres.PoolOpener(postgres.DefaultDBConfig(dbURL)),
-		Register:     register,
+		Register:     bootstrap.register,
 	})
 }
 
-func register(ctx context.Context, deps temporal.Dependencies, r worker.Registry) error {
+type bootstrapWorker struct {
+	cleanup func()
+}
+
+func (b *bootstrapWorker) close() {
+	if b.cleanup != nil {
+		b.cleanup()
+	}
+}
+
+func (b *bootstrapWorker) register(ctx context.Context, deps temporal.Dependencies, r worker.Registry) error {
 	// One store, shared by the sweep and the liveness heartbeat: the ticker
 	// re-sends what the sweep recorded instead of erasing it with a bare ping.
 	progress := temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]()
 
-	runner, err := setupRunner(ctx, deps, progress)
+	runner, cleanup, err := setupRunner(ctx, deps, progress)
 	if err != nil {
 		return err
 	}
-	return temporal.RegisterRunner(r, temporal.RunnerJob{
+	if err := temporal.RegisterRunner(r, temporal.RunnerJob{
 		WorkflowType: workflowTypeName,
 		Runner:       runner,
 		Timeouts:     bootstrapActivityTimeouts,
 		Progress:     progress,
-	})
+	}); err != nil {
+		cleanup()
+		return err
+	}
+	b.cleanup = cleanup
+	return nil
 }
 
 // bootstrapActivityTimeouts sizes one run against a full mainnet sweep: ~2M
@@ -182,44 +200,50 @@ var bootstrapActivityTimeouts = temporal.ActivityTimeouts{
 	Heartbeat:       time.Minute,
 }
 
-func setupRunner(ctx context.Context, deps temporal.Dependencies, progress morpho_v2_bootstrap.ProgressStore) (temporal.Runner, error) {
+func setupRunner(ctx context.Context, deps temporal.Dependencies, progress morpho_v2_bootstrap.ProgressStore) (temporal.Runner, func(), error) {
 	chainID, err := chainutil.RequireChainID()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	sweepConfig, err := parseSweepConfig(os.Getenv)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	sweepConfig.ChainID = int64(chainID)
 	sweepConfig.Logger = deps.Logger
 
 	rpcURL, err := chainutil.AlchemyRPCURL(int64(chainID))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// The sweep issues long, wide eth_getLogs requests; the default 60s client
 	// budget would abort them before the node finished collecting results.
 	ethClient, err := rpchttp.DialEthereum(ctx, rpcURL, rpchttp.WithClientTimeout(5*time.Minute))
 	if err != nil {
-		return nil, fmt.Errorf("connecting to RPC: %w", err)
+		return nil, nil, fmt.Errorf("connecting to RPC: %w", err)
 	}
+	completed := false
+	defer func() {
+		if !completed {
+			ethClient.Close()
+		}
+	}()
 	if err := chainutil.AssertChainID(ctx, ethClient, int64(chainID)); err != nil {
-		ethClient.Close()
-		return nil, fmt.Errorf("verifying the RPC node's chain: %w", err)
+		return nil, nil, fmt.Errorf("verifying the RPC node's chain: %w", err)
 	}
 
 	replayService, err := buildReplayService(ctx, deps, int64(chainID), ethClient)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	service, err := morpho_v2_bootstrap.NewService(sweepConfig, ethClient, replayService, progress)
 	if err != nil {
-		return nil, fmt.Errorf("creating morpho v2 bootstrap service: %w", err)
+		return nil, nil, fmt.Errorf("creating morpho v2 bootstrap service: %w", err)
 	}
-	return temporal.RunnerFunc(service.Run), nil
+	completed = true
+	return temporal.RunnerFunc(service.Run), ethClient.Close, nil
 }
 
 // buildReplayService wires the morpho-indexer service in its replay

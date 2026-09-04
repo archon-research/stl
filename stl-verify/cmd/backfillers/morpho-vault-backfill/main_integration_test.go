@@ -187,6 +187,10 @@ func TestIntegration_Register_RefusesAChainIDMismatch(t *testing.T) {
 	ctx := context.Background()
 	server := testutil.StartChainIDRPC(t, 42161)
 	setWorkerEnv(t, seedBucket(t, ctx), server.URL)
+	var buildsBefore int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM build_registry`).Scan(&buildsBefore); err != nil {
+		t.Fatalf("counting builds before registration: %v", err)
+	}
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
 	err := newBackfillWorker(t).register(ctx, newDeps(t, pool), env)
@@ -196,6 +200,13 @@ func TestIntegration_Register_RefusesAChainIDMismatch(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "chain ID mismatch") {
 		t.Errorf("error = %v, want it to name the chain ID mismatch", err)
+	}
+	var buildsAfter int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM build_registry`).Scan(&buildsAfter); err != nil {
+		t.Fatalf("counting builds after registration: %v", err)
+	}
+	if buildsAfter != buildsBefore {
+		t.Errorf("build rows = %d after mismatch, want unchanged at %d", buildsAfter, buildsBefore)
 	}
 }
 

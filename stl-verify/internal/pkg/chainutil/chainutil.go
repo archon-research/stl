@@ -4,8 +4,11 @@ package chainutil
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
+	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -148,13 +151,12 @@ const (
 	defaultAlchemyHTTPURL        = "https://eth-mainnet.g.alchemy.com/v2"
 )
 
-// AlchemyRPCURL joins ALCHEMY_HTTP_URL and ALCHEMY_API_KEY into the node URL the
-// indexers dial. The built-in endpoint default is mainnet-only, so every other
-// chain must set ALCHEMY_HTTP_URL explicitly rather than silently index mainnet.
+// AlchemyRPCURL builds a credentialed node URL; its endpoint default is
+// mainnet-only, and remote endpoints must use HTTPS.
 func AlchemyRPCURL(chainID int64) (string, error) {
 	apiKey, err := env.Require("ALCHEMY_API_KEY")
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("requiring ALCHEMY_API_KEY: %w", err)
 	}
 	baseURL := env.Get("ALCHEMY_HTTP_URL", "")
 	if baseURL == "" && chainID != ethereumMainnetChainID {
@@ -162,6 +164,21 @@ func AlchemyRPCURL(chainID int64) (string, error) {
 	}
 	if baseURL == "" {
 		baseURL = defaultAlchemyHTTPURL
+	}
+	parsedURL, err := url.Parse(baseURL)
+	if err != nil {
+		return "", fmt.Errorf("parsing ALCHEMY_HTTP_URL: %w", err)
+	}
+	if parsedURL.Hostname() == "" {
+		return "", errors.New("ALCHEMY_HTTP_URL must be an absolute URL")
+	}
+	if parsedURL.User != nil || parsedURL.RawQuery != "" || parsedURL.ForceQuery || strings.Contains(baseURL, "#") {
+		return "", errors.New("ALCHEMY_HTTP_URL must not contain user info, a query, or a fragment")
+	}
+	hostIP := net.ParseIP(parsedURL.Hostname())
+	isLoopback := strings.EqualFold(parsedURL.Hostname(), "localhost") || hostIP.IsLoopback()
+	if parsedURL.Scheme != "https" && !(parsedURL.Scheme == "http" && isLoopback) {
+		return "", errors.New("ALCHEMY_HTTP_URL must use HTTPS unless it targets loopback")
 	}
 	return strings.TrimRight(baseURL, "/") + "/" + apiKey, nil
 }
@@ -176,10 +193,8 @@ type ChainIDReader interface {
 // (60s to 5m, with retries) are sized for heavy calls, not for failing a sick node fast.
 const chainIDProbeTimeout = 15 * time.Second
 
-// AssertChainID refuses a node that disagrees with the configured chain. Every
-// block number and contract address a job handles is meaningless on another
-// chain, and the mismatch would otherwise surface far downstream (missing S3
-// keys, mainnet state written under another chain id) rather than as itself.
+// AssertChainID refuses a node on another chain before its chain-scoped data can
+// be read or written under the configured chain ID.
 func AssertChainID(ctx context.Context, node ChainIDReader, want int64) error {
 	ctx, cancel := context.WithTimeout(ctx, chainIDProbeTimeout)
 	defer cancel()

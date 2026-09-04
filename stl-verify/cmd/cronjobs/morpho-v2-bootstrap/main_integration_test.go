@@ -17,8 +17,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// setWorkerEnv installs the environment a deployed pod would have, with the RPC
-// fixture answering nodeChain to CHAIN_ID=configuredChain.
 func setWorkerEnv(t *testing.T, configuredChain, nodeChain int64) {
 	t.Helper()
 
@@ -26,6 +24,28 @@ func setWorkerEnv(t *testing.T, configuredChain, nodeChain int64) {
 	t.Setenv("CHAIN_ID", strconv.FormatInt(configuredChain, 10))
 	t.Setenv("ALCHEMY_API_KEY", "test-key")
 	t.Setenv("ALCHEMY_HTTP_URL", testutil.StartChainIDRPC(t, nodeChain).URL)
+}
+
+func TestBootstrapWorkerClosesRegisteredResources(t *testing.T) {
+	closed := false
+	bootstrap := &bootstrapWorker{cleanup: func() { closed = true }}
+
+	bootstrap.close()
+
+	if !closed {
+		t.Fatal("worker shutdown did not close its process-scoped resources")
+	}
+}
+
+func TestSetupRunner_RequiresAlchemyHTTPURLOffMainnet(t *testing.T) {
+	t.Setenv("CHAIN_ID", "8453")
+	t.Setenv("ALCHEMY_API_KEY", "key")
+	t.Setenv("ALCHEMY_HTTP_URL", "")
+
+	_, _, err := setupRunner(context.Background(), temporal.Dependencies{}, temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
+	if err == nil || !strings.Contains(err.Error(), "ALCHEMY_HTTP_URL") {
+		t.Fatalf("err = %v, want the non-mainnet endpoint requirement", err)
+	}
 }
 
 // The type name is spelled out rather than read from workflowTypeName: the
@@ -38,7 +58,9 @@ func TestIntegration_Register_RunsTheDocumentedWorkflowTypeWithNoInput(t *testin
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
 	deps := temporal.Dependencies{Pool: pool, Logger: slog.Default()}
-	if err := register(context.Background(), deps, env); err != nil {
+	bootstrap := &bootstrapWorker{}
+	t.Cleanup(bootstrap.close)
+	if err := bootstrap.register(context.Background(), deps, env); err != nil {
 		t.Fatalf("running the production registration: %v", err)
 	}
 	env.OnActivity("Execute", mock.Anything, mock.Anything).Return(nil)
@@ -65,10 +87,11 @@ func TestSetupRunner_WiresAgainstAMigratedDatabase(t *testing.T) {
 	defer cleanup()
 	setWorkerEnv(t, 1, 1)
 
-	runner, err := setupRunner(context.Background(), temporal.Dependencies{Pool: pool, Logger: slog.Default()}, temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
+	runner, cleanup, err := setupRunner(context.Background(), temporal.Dependencies{Pool: pool, Logger: slog.Default()}, temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
 	if err != nil {
 		t.Fatalf("setupRunner: %v", err)
 	}
+	t.Cleanup(cleanup)
 	if runner == nil {
 		t.Fatal("setupRunner returned a nil runner")
 	}
@@ -82,7 +105,7 @@ func TestSetupRunner_RejectsAnUnsupportedChain(t *testing.T) {
 	defer cleanup()
 	setWorkerEnv(t, 8453, 8453)
 
-	_, err := setupRunner(context.Background(), temporal.Dependencies{Pool: pool, Logger: slog.Default()}, temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
+	_, _, err := setupRunner(context.Background(), temporal.Dependencies{Pool: pool, Logger: slog.Default()}, temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
 	if err == nil || !strings.Contains(err.Error(), "no known factory deploy block") {
 		t.Fatalf("err = %v, want the rejection of a chain with no known VaultV2 factory deploy block", err)
 	}
@@ -95,7 +118,7 @@ func TestSetupRunner_RefusesAChainIDMismatch(t *testing.T) {
 	defer cleanup()
 	setWorkerEnv(t, 8453, 1)
 
-	_, err := setupRunner(context.Background(), temporal.Dependencies{Pool: pool, Logger: slog.Default()}, temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
+	_, _, err := setupRunner(context.Background(), temporal.Dependencies{Pool: pool, Logger: slog.Default()}, temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
 	if err == nil || !strings.Contains(err.Error(), "RPC chain ID mismatch: RPC reports 1, config says 8453") {
 		t.Fatalf("err = %v, want the chain-id mismatch", err)
 	}

@@ -97,9 +97,8 @@ func StartMockEthRPC(t *testing.T, numTokens int) *httptest.Server {
 	}))
 }
 
-// StartChainIDRPC serves the one JSON-RPC call a composition root makes at
-// startup, the chain-id check against CHAIN_ID, and fails the test on any other
-// method so a wiring test cannot quietly start talking to a node it has not got.
+// StartChainIDRPC serves startup's chain-ID check and fails the test on any
+// other method, keeping wiring fixtures intentionally narrow.
 func StartChainIDRPC(t *testing.T, chainID int64) *httptest.Server {
 	t.Helper()
 

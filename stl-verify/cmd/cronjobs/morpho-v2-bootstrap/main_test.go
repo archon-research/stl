@@ -45,7 +45,7 @@ func TestSetupRunner_RequiresChainID(t *testing.T) {
 	t.Setenv("CHAIN_ID", "")
 	t.Setenv("ALCHEMY_API_KEY", "key")
 
-	_, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
+	_, _, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
 	if err == nil {
 		t.Fatal("missing CHAIN_ID should error, got nil")
 	}
@@ -58,26 +58,12 @@ func TestSetupRunner_RequiresAlchemyKey(t *testing.T) {
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("ALCHEMY_API_KEY", "")
 
-	_, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
+	_, _, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
 	if err == nil {
 		t.Fatal("missing ALCHEMY_API_KEY should error, got nil")
 	}
 	if !strings.Contains(err.Error(), "ALCHEMY_API_KEY") {
 		t.Errorf("error %q should mention ALCHEMY_API_KEY", err.Error())
-	}
-}
-
-func TestSetupRunner_RequiresAlchemyHTTPURLOffMainnet(t *testing.T) {
-	t.Setenv("CHAIN_ID", "8453")
-	t.Setenv("ALCHEMY_API_KEY", "key")
-	t.Setenv("ALCHEMY_HTTP_URL", "")
-
-	_, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
-	if err == nil {
-		t.Fatal("a non-mainnet chain with no ALCHEMY_HTTP_URL should error, got nil")
-	}
-	if !strings.Contains(err.Error(), "ALCHEMY_HTTP_URL") {
-		t.Errorf("error %q should mention ALCHEMY_HTTP_URL", err.Error())
 	}
 }
 
