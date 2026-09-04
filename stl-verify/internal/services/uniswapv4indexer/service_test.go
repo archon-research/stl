@@ -1617,7 +1617,7 @@ func TestBlockHandler_ReorgAfterRestart_RereadsPriorVersionPositions(t *testing.
 
 	priorKey := modifyPositionKey(-100, 200)
 	mc.positionResults[priorKey] = goodPositionResult(t)
-	repo.poolsWithState = map[int64][]int64{200: {pool.ID}}
+	repo.poolsWithState = map[int64][]common.Hash{200: {pool.PoolIDHash}}
 	repo.priorPositions = map[fakePoolBlockKey][]entity.UniswapV4PositionKey{
 		{poolID: pool.ID, blockNumber: 200}: {priorKey},
 	}
