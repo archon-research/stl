@@ -1,7 +1,6 @@
 package archiveblock
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,40 +36,21 @@ func ListBlockHash(payload []byte) (string, error) {
 }
 
 // HasTransactions reports whether a block payload's transaction list holds an
-// entry. It reads no further than that list, so a payload of megabytes costs the
-// header fields ahead of it. A payload that cannot answer is an error: whether
-// the block had transactions is the only thing that makes an empty receipt or
-// trace list legitimate.
+// entry; a payload without the list cannot answer and is an error.
 func HasTransactions(payload []byte) (bool, error) {
-	dec := json.NewDecoder(bytes.NewReader(payload))
-	if open, err := dec.Token(); err != nil || open != json.Delim('{') {
-		return false, errors.New("the payload is not a block object")
+	var block struct {
+		Transactions *[]json.RawMessage `json:"transactions"`
 	}
-	for dec.More() {
-		key, err := dec.Token()
-		if err != nil {
-			return false, fmt.Errorf("reading the payload's fields: %w", err)
-		}
-		if key != transactionsField {
-			var skipped json.RawMessage
-			if err := dec.Decode(&skipped); err != nil {
-				return false, fmt.Errorf("reading past %v: %w", key, err)
-			}
-			continue
-		}
-		if open, err := dec.Token(); err != nil || open != json.Delim('[') {
-			return false, fmt.Errorf("the payload's %s are not a list", transactionsField)
-		}
-		return dec.More(), nil
+	if err := json.Unmarshal(payload, &block); err != nil {
+		return false, fmt.Errorf("decoding the block payload: %w", err)
 	}
-	return false, fmt.Errorf("the payload carries no %s", transactionsField)
+	if block.Transactions == nil {
+		return false, fmt.Errorf("the payload carries no %s", transactionsField)
+	}
+	return len(*block.Transactions) > 0, nil
 }
 
 func emptyList(payload []byte) bool {
-	dec := json.NewDecoder(bytes.NewReader(payload))
-	if open, err := dec.Token(); err != nil || open != json.Delim('[') {
-		return false
-	}
-	closed, err := dec.Token()
-	return err == nil && closed == json.Delim(']')
+	var elements *[]json.RawMessage
+	return json.Unmarshal(payload, &elements) == nil && elements != nil && len(*elements) == 0
 }
