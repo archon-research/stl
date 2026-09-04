@@ -1,8 +1,8 @@
 # Progress log
 
 Working branch: `toreluntang/vec-na/architecture-overhaul-findings` (pushed after every logical
-commit; no PR). Started 2026-09-03 from `main` at `c4e0a8f2`. Investigation complete except the
-git-history report; synthesis written 2026-09-04.
+commit; no PR). Started 2026-09-03 from `main` at `c4e0a8f2`. Investigation complete; synthesis written
+2026-09-04.
 
 ## How to resume in a fresh session
 
@@ -28,14 +28,14 @@ git-history report; synthesis written 2026-09-04.
 | 09 | findings/09-ports-domain.md | ports/inbound, ports/outbound (59 interfaces), domain/entity, common; per-port adapter/consumer table | FINAL |
 | 10 | findings/10-composition-roots.md | all 34 cmd/*/main.go, dexbootstrap, pkg/env, lifecycle, telemetry init; main.go churn classification | FINAL (11 findings) |
 | 11 | findings/11-testing-tooling.md | testutil, 148 hand-rolled test doubles, .golangci.yml, Makefiles, lefthook, CI workflows, go.mod hygiene | FINAL |
-| 12 | findings/12-history-metrics.md | git history 2026-01 → now: PR size, ripple metrics, co-change clusters, cost of a new indexer | DRAFT on disk; agent resumed after rate limit |
+| 12 | findings/12-history-metrics.md | git history 2026-01 → now: PR size, ripple metrics, co-change clusters, cost of a new indexer | FINAL |
 | 13 | findings/13-python-ts-k8s-alerts.md | python/, ts/, k8s/, alerts/, docs/runbooks, cross-language contracts, repo hygiene | FINAL |
 
 ## Synthesis status
 
 - `CANDIDATES.md` v2 written: 15 candidates from findings 01–11 and 13 (2026-09-04).
-- `ROADMAP.md` v1 written: four phases, six maintainer decisions, a metrics table. The `(F12)`
-  baselines wait for `findings/12`.
+- `ROADMAP.md` v1 written: four phases, six maintainer decisions, a metrics table with history
+  baselines from `findings/12`.
 - `README.md` indexes the folder.
 
 ## Discoveries that change the plan
@@ -50,8 +50,8 @@ git-history report; synthesis written 2026-09-04.
 
 ## Next
 
-1. When `findings/12-history-metrics.md` is `FINAL`, fill the `(F12)` baselines in `ROADMAP.md`
-   and commit. Then **pause** (maintainer's instruction, 2026-09-04).
+1. **Paused** here on 2026-09-04 at the maintainer's request, with all 13 reports final and the
+   synthesis committed.
 2. On resume: the maintainer reads `CANDIDATES.md` and `ROADMAP.md`, takes decisions D1–D6, and
    picks Phase 0 slices. Execution is one slice per PR from a branch named per repo convention;
    each PR updates this file.

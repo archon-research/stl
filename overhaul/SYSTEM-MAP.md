@@ -7,7 +7,7 @@ Snapshot of the repo as of 2026-09-03 (main at `c4e0a8f2`). Numbers come from `w
 
 | Part | What | Size |
 |---|---|---|
-| `stl-verify/` Go module | block watcher, 34 binaries, hexagonal layout | 874 files, 259k lines, Go 1.26, 117 direct deps |
+| `stl-verify/` Go module | block watcher, 32 binaries, hexagonal layout | 874 files, 259k lines, Go 1.26, 117 direct deps |
 | `stl-verify/python/` | APIs, risk models, some cronjobs | 316 files, 52k lines (excl. venv) |
 | `stl-verify/ts/` | frontend only | 116 files |
 | `stl-verify/db/migrations/` | SQL, auto-applied | 128 files |
@@ -46,7 +46,7 @@ postgres 31.5k · alchemy 6.4k · orderbook 4.5k · maple 2.8k · temporal 2.7k 
 s3 1.6k · memory 1.6k · blockchain 1.5k · sqs 1.2k · sns 1.1k · etherscan 0.9k · sky 0.8k ·
 skydata 0.8k · coingecko 0.7k · cache 0.5k · http (inbound) 0.4k · blockverifier 0.1k
 
-## Binaries (34)
+## Binaries (32 Go programs; 34 `cmd/` leaf directories, two of which hold only an untracked `.env` — F03.14, F10.11)
 
 | Group | Binaries |
 |---|---|

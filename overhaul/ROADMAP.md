@@ -1,7 +1,8 @@
 # Roadmap
 
-Status: v1 — sequencing of the candidates in `CANDIDATES.md`. Baselines marked `(F12)` are filled
-from `findings/12-history-metrics.md` when it lands; the rest are measured in the area reports.
+Status: v1 — sequencing of the candidates in `CANDIDATES.md`. History baselines come from
+`findings/12-history-metrics.md` (619 PR units on `main`, 2026-01-01 → 2026-09-03, deploy-bot
+commits excluded); the rest are measured in the area reports.
 
 ## Principles
 
@@ -107,13 +108,20 @@ interpretation.
 ## Metrics
 
 Code-shape metrics are recomputed per phase by scripts under `overhaul/metrics/` (slice 0.7);
-history metrics come from `findings/12`.
+history metrics come from `findings/12`. Note what the history says about where the pain is: the
+overall median has been flat-to-falling all year while volume grew five-fold; the growth is in
+the tail, and the tail is made of PRs that touch the shared layers. The roadmap therefore attacks
+the amplifiers (ports, composition roots, block identity) rather than the median.
 
 | Metric | Baseline | Source | Target |
 |---|---|---|---|
-| Median files per PR (non-deploy commits) | 7 (F12 refines) | git | 4–5 |
+| Files per PR: median / p90 / max | 5 / 29 / 96 | F12 | 4 / 15 / — |
+| PRs of ≥40 files per month | 15 in August alone | F12 | ≤ 2 |
+| Median files of a PR that touches `ports/`, `domain/`, `pkg/` or `testutil/` | 21–22 (vs 5 overall) | F12 | ≤ 10 |
+| `ports/`-touching PRs that also touch ≥3 service packages | 33.8% | F12 | < 10% |
+| Service-package PRs that also touch that package's `main.go` | 20.3% | F12 | < 5% |
 | `main.go` edits that are ripple from another package | 47% | F10.1 | ~0 |
-| Files touched to add a worker (fixed cost) | (F12) | git | `cmd/` 1 file + service + k8s component |
+| Files touched to add a worker (boilerplate floor) | 19–31 | F12 | `cmd/` 1 file + service + k8s component |
 | Multicall state reads pinned by number outside a `StaticProber` | 23 of 51 | F08.1 | 0 |
 | Non-test functions with ≥3 block-identity params | 125 | F09.3 | 0 |
 | Copies of the multicall pack/execute/check/unpack skeleton | ~35 | F08.2 | 0 |
