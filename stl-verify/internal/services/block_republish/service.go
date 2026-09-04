@@ -27,11 +27,11 @@ import (
 // retry envelope is for.
 var ErrStructuralData = errors.New("structural data defect")
 
-// ErrCanonicalHashMoved marks a reorg observed mid-republish: the height's
-// canonical hash is no longer the one whose payload was fetched. Deliberately
-// NOT structural — the chain settles and a later attempt succeeds, whereas
+// ErrCanonicalHashMoved marks a height whose block is not the one the run
+// derived: it reorged since, or the node answered wrong. Deliberately NOT
+// structural — the chain settles and a later attempt succeeds, whereas
 // publishing what was read would enshrine a second losing fork.
-var ErrCanonicalHashMoved = errors.New("the height's canonical hash moved mid-republish")
+var ErrCanonicalHashMoved = errors.New("the height's block is not the one the run derived")
 
 // finalityDepth matches the watcher's own FinalityBlockCount: the depth past
 // which it stops looking for reorgs.
@@ -119,26 +119,31 @@ func NewService(config Config, client outbound.BlockchainClient, archive outboun
 	}, nil
 }
 
-// NextFreeVersion reports the version a repair of this height must land in: one
-// past what the raw archive already holds, and the first correction slot where it
-// holds nothing. Callers settle this once and hand it to Republish, so a retried
-// republish reuses the slot instead of stepping past the objects its own first
-// attempt caused. It refuses a height the archive already holds the canonical
-// block for — the whole check happens here, before anything is cached or
-// published.
-func (s *Service) NextFreeVersion(ctx context.Context, blockNumber int64) (int, error) {
+// NextFreeVersion reports the version a repair of this height must land in —
+// one past what the raw archive already holds, and the first correction slot
+// where it holds nothing — with the canonical block that repair must carry.
+// Callers settle both once and hand them to Republish, so a retried republish
+// reuses the slot instead of stepping past the objects its own first attempt
+// caused, and verifies against the block this read saw. It refuses a height the
+// archive already holds the canonical block for — the whole check happens here,
+// before anything is cached or published.
+func (s *Service) NextFreeVersion(ctx context.Context, blockNumber int64) (int, string, error) {
 	head, err := s.settledHeight(ctx, blockNumber)
 	if err != nil {
-		return 0, err
+		return 0, "", err
+	}
+	block, err := s.canonicalHeader(ctx, blockNumber, head)
+	if err != nil {
+		return 0, "", err
 	}
 
 	highest, archived, err := s.archivedTopVersion(ctx, blockNumber)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	if archived {
-		if err := s.refuseIfAlreadyCanonical(ctx, blockNumber, head, highest); err != nil {
-			return 0, err
+		if err := s.refuseIfAlreadyCanonical(ctx, blockNumber, block.Hash, highest); err != nil {
+			return 0, "", err
 		}
 	} else {
 		s.logger.Warn("repairing a height the archive holds nothing for; no archived object to compare with the canonical chain",
@@ -154,8 +159,9 @@ func (s *Service) NextFreeVersion(ctx context.Context, blockNumber int64) (int, 
 		"archived", archived,
 		"highestArchivedVersion", highest,
 		"version", version,
+		"hash", block.Hash,
 	)
-	return version, nil
+	return version, block.Hash, nil
 }
 
 // ArchivedVersion reports the version to republish a height at when the raw
@@ -164,23 +170,25 @@ func (s *Service) NextFreeVersion(ctx context.Context, blockNumber int64) (int, 
 // the version those objects occupy rather than one past it. It refuses anything
 // but that state, and unlike NextFreeVersion it may answer 0 — a repair of a
 // height the archive never held writes there.
-func (s *Service) ArchivedVersion(ctx context.Context, blockNumber int64) (int, error) {
+func (s *Service) ArchivedVersion(ctx context.Context, blockNumber int64) (int, string, error) {
 	head, err := s.settledHeight(ctx, blockNumber)
 	if err != nil {
-		return 0, err
+		return 0, "", err
+	}
+	block, err := s.canonicalHeader(ctx, blockNumber, head)
+	if err != nil {
+		return 0, "", err
 	}
 
 	version, archived, err := s.archivedTopVersion(ctx, blockNumber)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	if !archived {
-		return 0, fmt.Errorf("archiveRepaired set but the archive holds nothing at block %d: %w", blockNumber, ErrStructuralData)
+		return 0, "", fmt.Errorf("archiveRepaired set but the archive holds nothing at block %d: %w", blockNumber, ErrStructuralData)
 	}
-
-	hash, err := s.confirmArchiveIsCanonical(ctx, blockNumber, head, version)
-	if err != nil {
-		return 0, err
+	if err := s.confirmArchiveIsCanonical(ctx, blockNumber, block.Hash, version); err != nil {
+		return 0, "", err
 	}
 
 	s.logger.Info("derived the republish version from the repaired archive",
@@ -188,33 +196,28 @@ func (s *Service) ArchivedVersion(ctx context.Context, blockNumber int64) (int, 
 		"block", blockNumber,
 		"archiveRepaired", true,
 		"version", version,
-		"hash", hash,
+		"hash", block.Hash,
 	)
-	return version, nil
+	return version, block.Hash, nil
 }
 
 // confirmArchiveIsCanonical holds an archiveRepaired run to the one state it
 // exists for: publishing at a version whose archived block is not the canonical
 // one would enshrine a fork in the slot meant to correct it.
-func (s *Service) confirmArchiveIsCanonical(ctx context.Context, blockNumber, head int64, version int) (string, error) {
+func (s *Service) confirmArchiveIsCanonical(ctx context.Context, blockNumber int64, hash string, version int) error {
 	archivedHash, found, err := s.archivedHash(ctx, blockNumber, version)
 	if err != nil {
-		return "", err
+		return err
 	}
 	if !found {
-		return "", fmt.Errorf("the archive's top version %d at block %d names no block; drop archiveRepaired: %w",
+		return fmt.Errorf("the archive's top version %d at block %d names no block; drop archiveRepaired: %w",
 			version, blockNumber, ErrStructuralData)
 	}
-
-	block, err := s.canonicalHeader(ctx, blockNumber, head)
-	if err != nil {
-		return "", err
+	if !strings.EqualFold(archivedHash, hash) {
+		return fmt.Errorf("the archive's top version %d at block %d is not the canonical block (%s, want %s); drop archiveRepaired: %w",
+			version, blockNumber, archivedHash, hash, ErrStructuralData)
 	}
-	if !strings.EqualFold(archivedHash, block.Hash) {
-		return "", fmt.Errorf("the archive's top version %d at block %d is not the canonical block (%s, want %s); drop archiveRepaired: %w",
-			version, blockNumber, archivedHash, block.Hash, ErrStructuralData)
-	}
-	return archivedHash, nil
+	return nil
 }
 
 // settledHeight refuses a height that is not one, and one the chain is still
@@ -252,7 +255,7 @@ func (s *Service) archivedTopVersion(ctx context.Context, blockNumber int64) (in
 // indexer — so the operator's list, not a retry, is what has to change. A version
 // naming no block at all is a height to repair, which is why only a hash that
 // matches refuses.
-func (s *Service) refuseIfAlreadyCanonical(ctx context.Context, blockNumber, head int64, version int) error {
+func (s *Service) refuseIfAlreadyCanonical(ctx context.Context, blockNumber int64, hash string, version int) error {
 	archivedHash, found, err := s.archivedHash(ctx, blockNumber, version)
 	if err != nil {
 		return err
@@ -260,12 +263,7 @@ func (s *Service) refuseIfAlreadyCanonical(ctx context.Context, blockNumber, hea
 	if !found {
 		return nil
 	}
-
-	block, err := s.canonicalHeader(ctx, blockNumber, head)
-	if err != nil {
-		return err
-	}
-	if strings.EqualFold(archivedHash, block.Hash) {
+	if strings.EqualFold(archivedHash, hash) {
 		return fmt.Errorf("block %d is already canonical in the archive at version %d (hash %s); nothing to republish: %w",
 			blockNumber, version, archivedHash, ErrStructuralData)
 	}
@@ -287,68 +285,53 @@ func (s *Service) archivedHash(ctx context.Context, blockNumber int64, version i
 	return hash, found, nil
 }
 
-// Republish caches the canonical block at blockNumber under version, reporting
-// each phase as it starts, and announces it on the chain's block feed. It never
-// reads the archive: a repeat of the same (height, version) re-caches the same
-// keys and re-publishes the same event, which every consumer already
-// deduplicates.
-func (s *Service) Republish(ctx context.Context, blockNumber int64, version int, report PhaseReporter) (Result, error) {
-	if err := validateTarget(blockNumber, version); err != nil {
+// Republish caches the block the run derived under version, reporting each phase
+// as it starts, and announces it on the chain's block feed. It takes the
+// canonical hash rather than re-reading it: the derivation read it at a height
+// already at least finalityDepth blocks below the head, where a second read can
+// only confirm what the first one saw. It never reads the archive either — a
+// repeat of the same (height, version) re-caches the same keys and re-publishes
+// the same event, which every consumer already deduplicates.
+func (s *Service) Republish(ctx context.Context, blockNumber int64, version int, canonicalHash string, report PhaseReporter) (Result, error) {
+	if err := validateTarget(blockNumber, version, canonicalHash); err != nil {
 		return Result{}, err
 	}
 	report.enter(ctx, PhaseFetching)
 
-	head, err := s.client.GetCurrentBlockNumber(ctx)
+	fetched, err := s.fetchAtHeight(ctx, blockNumber, canonicalHash)
 	if err != nil {
-		return Result{}, fmt.Errorf("reading the chain head: %w", err)
-	}
-	if err := refuseNearHead(blockNumber, head); err != nil {
-		return Result{}, err
-	}
-
-	block, err := s.canonicalHeader(ctx, blockNumber, head)
-	if err != nil {
-		return Result{}, err
-	}
-
-	data, dataTypes, err := s.fetchPinnedToHash(ctx, blockNumber, block.Hash)
-	if err != nil {
-		return Result{}, err
-	}
-
-	if err := s.confirmStillCanonical(ctx, blockNumber, block.Hash); err != nil {
 		return Result{}, err
 	}
 
 	report.enter(ctx, PhaseCaching)
-	if err := s.cache.SetBlockData(ctx, s.config.ChainID, blockNumber, version, data); err != nil {
+	if err := s.cache.SetBlockData(ctx, s.config.ChainID, blockNumber, version, fetched.data); err != nil {
 		return Result{}, fmt.Errorf("caching block %d at version %d: %w", blockNumber, version, err)
 	}
 
 	report.enter(ctx, PhasePublishing)
-	if err := s.publish(ctx, blockNumber, version, block); err != nil {
+	if err := s.publish(ctx, blockNumber, version, fetched.header); err != nil {
 		return Result{}, err
 	}
 
 	s.logger.Info("republished block",
 		"chainID", s.config.ChainID,
 		"block", blockNumber,
-		"hash", block.Hash,
-		"parentHash", block.ParentHash,
+		"hash", fetched.header.Hash,
+		"parentHash", fetched.header.ParentHash,
 		"version", version,
-		"dataTypes", dataTypes,
+		"dataTypes", fetched.dataTypes,
 	)
 	return Result{
 		BlockNumber:    blockNumber,
-		BlockHash:      block.Hash,
-		ParentHash:     block.ParentHash,
-		BlockTimestamp: block.timestamp,
+		BlockHash:      fetched.header.Hash,
+		ParentHash:     fetched.header.ParentHash,
+		BlockTimestamp: fetched.header.timestamp,
 		Version:        version,
-		DataTypes:      dataTypes,
+		DataTypes:      fetched.dataTypes,
 	}, nil
 }
 
-func validateTarget(blockNumber int64, version int) error {
+func validateTarget(blockNumber int64, version int, canonicalHash string) error {
 	if err := validateHeight(blockNumber); err != nil {
 		return err
 	}
@@ -356,6 +339,11 @@ func validateTarget(blockNumber int64, version int) error {
 	// caller that answers it; the default one never yields a slot below 1.
 	if version < 0 {
 		return fmt.Errorf("version must not be negative, got %d: %w", version, ErrStructuralData)
+	}
+	// The derivation read the canonical block to settle the version; without its
+	// hash there is nothing to hold the fetched payloads to.
+	if canonicalHash == "" {
+		return fmt.Errorf("block %d was handed no canonical hash to verify against: %w", blockNumber, ErrStructuralData)
 	}
 	return nil
 }
@@ -368,9 +356,10 @@ func validateHeight(blockNumber int64) error {
 }
 
 // refuseNearHead keeps a repair off the part of the chain that is still moving.
-// The two by-number reads are seconds apart, so a height inside the reorg window
-// can pass the canonical check and be orphaned moments later — writing a second
-// losing fork into the slot meant to correct the first.
+// The canonical hash is read once, when the version is derived, and the payload
+// fetched against it moments later; a height inside the reorg window can be
+// orphaned between the two — writing a second losing fork into the slot meant to
+// correct the first.
 func refuseNearHead(blockNumber, head int64) error {
 	if blockNumber > head {
 		return fmt.Errorf("block %d is above the chain head %d: %w", blockNumber, head, ErrStructuralData)
@@ -407,111 +396,143 @@ func (s *Service) canonicalHeader(ctx context.Context, blockNumber, head int64) 
 	return decodeHeader(blockNumber, raw)
 }
 
-// fetchPinnedToHash reads the payload the event will point at, pinned to the
-// hash rather than the number so every data type describes one block even if the
-// height reorgs while the batch is in flight.
-func (s *Service) fetchPinnedToHash(ctx context.Context, blockNumber int64, hash string) (outbound.BlockDataInput, []string, error) {
-	fetched, err := s.client.GetBlockDataByHash(ctx, blockNumber, hash, true)
-	if err != nil {
-		return outbound.BlockDataInput{}, nil, fmt.Errorf("fetching block %d at hash %s: %w", blockNumber, hash, err)
-	}
+// fetchedBlock is what one height's reads produced: the payload set to cache,
+// the data types it covers, and the header the event carries.
+type fetchedBlock struct {
+	data      outbound.BlockDataInput
+	dataTypes []string
+	header    blockHeader
+}
 
-	dataTypes, err := validatePayloads(blockNumber, hash, s.publishedPayloads(fetched))
-	if err != nil {
-		return outbound.BlockDataInput{}, nil, err
-	}
-	if err := confirmPayloadHash(blockNumber, hash, fetched.Block); err != nil {
-		return outbound.BlockDataInput{}, nil, err
-	}
+// fetchAtHeight reads the payload the event will point at, by number: an archive
+// node serves trace_block by hash only within a few thousand blocks of the head,
+// and every height this repairs is far older than that. Each answer is then held
+// to the hash the run derived, which is what asking by hash used to guarantee.
+func (s *Service) fetchAtHeight(ctx context.Context, blockNumber int64, hash string) (fetchedBlock, error) {
+	var fetched fetchedBlock
+	var err error
 
-	data := outbound.BlockDataInput{Block: fetched.Block, Receipts: fetched.Receipts}
+	if fetched.data.Block, fetched.header, err = s.readBlock(ctx, blockNumber, hash); err != nil {
+		return fetchedBlock{}, err
+	}
+	fetched.dataTypes = []string{"block"}
+
+	if fetched.data.Receipts, err = s.readList(ctx, "receipts", blockNumber, hash, fetched.data.Block, s.client.GetBlockReceipts); err != nil {
+		return fetchedBlock{}, err
+	}
+	fetched.dataTypes = append(fetched.dataTypes, "receipts")
+
+	// Traces and blobs follow the same switches the watcher runs with, so the
+	// republished cache entry carries the data types the live one did.
 	if s.config.EnableTraces {
-		data.Traces = fetched.Traces
+		if fetched.data.Traces, err = s.readList(ctx, "traces", blockNumber, hash, fetched.data.Block, s.client.GetBlockTraces); err != nil {
+			return fetchedBlock{}, err
+		}
+		fetched.dataTypes = append(fetched.dataTypes, "traces")
 	}
 	if s.config.EnableBlobs {
-		data.Blobs = fetched.Blobs
-	}
-	return data, dataTypes, nil
-}
-
-type payload struct {
-	name     string
-	raw      json.RawMessage
-	fetchErr error
-}
-
-// publishedPayloads lists what this chain's watcher caches for a block. Block
-// and receipts are unconditional; traces and blobs follow the same switches the
-// watcher runs with, so the republished cache entry matches the live one.
-func (s *Service) publishedPayloads(fetched outbound.BlockData) []payload {
-	payloads := []payload{
-		{name: "block", raw: fetched.Block, fetchErr: fetched.BlockErr},
-		{name: "receipts", raw: fetched.Receipts, fetchErr: fetched.ReceiptsErr},
-	}
-	if s.config.EnableTraces {
-		payloads = append(payloads, payload{name: "traces", raw: fetched.Traces, fetchErr: fetched.TracesErr})
-	}
-	if s.config.EnableBlobs {
-		payloads = append(payloads, payload{name: "blobs", raw: fetched.Blobs, fetchErr: fetched.BlobsErr})
-	}
-	return payloads
-}
-
-// validatePayloads refuses an incomplete answer rather than caching a hole: a
-// consumer that finds one data type missing dead-letters the block, and the
-// republish would have to be redone anyway.
-func validatePayloads(blockNumber int64, hash string, payloads []payload) ([]string, error) {
-	names := make([]string, 0, len(payloads))
-	for _, p := range payloads {
-		// Not structural, for the same reason canonicalHeader's null is not.
-		if isUpstreamNull(p.raw, p.fetchErr) {
-			return nil, fmt.Errorf("the node has no %s for block %d at hash %s; a node this far below the head that cannot serve it is behind",
-				p.name, blockNumber, hash)
+		// An empty sidecar list is the truth for every block without blob
+		// transactions, so presence is all an answer can be held to.
+		if fetched.data.Blobs, err = s.readPayload(ctx, "blobs", blockNumber, s.client.GetBlobSidecars); err != nil {
+			return fetchedBlock{}, err
 		}
-		if p.fetchErr != nil {
-			return nil, fmt.Errorf("fetching %s for block %d at hash %s: %w", p.name, blockNumber, hash, p.fetchErr)
-		}
-		names = append(names, p.name)
+		fetched.dataTypes = append(fetched.dataTypes, "blobs")
 	}
-	return names, nil
+	return fetched, nil
 }
 
-// confirmPayloadHash holds the by-hash answer to the hash it was pinned to:
-// pinning keeps the data types consistent with each other, not with the header
-// the event carries beside them.
-func confirmPayloadHash(blockNumber int64, hash string, block json.RawMessage) error {
-	got, found := archiveblock.HashFromPayload(block)
-	if !found {
-		return fmt.Errorf("the payload fetched for block %d at hash %s carries no hash: %w",
-			blockNumber, hash, ErrStructuralData)
+// numberRead is one data type's by-number read on the blockchain port.
+type numberRead func(ctx context.Context, blockNumber int64) (json.RawMessage, error)
+
+// readPayload issues one read and refuses an incomplete answer rather than
+// caching a hole: a consumer that finds one data type missing dead-letters the
+// block, and the republish would have to be redone anyway.
+func (s *Service) readPayload(ctx context.Context, name string, blockNumber int64, read numberRead) (json.RawMessage, error) {
+	raw, err := read(ctx, blockNumber)
+	// Not structural, for the same reason canonicalHeader's null is not.
+	if isUpstreamNull(raw, err) {
+		return nil, fmt.Errorf("the node has no %s for block %d; a node this far below the head that cannot serve it is behind",
+			name, blockNumber)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("fetching %s for block %d: %w", name, blockNumber, err)
+	}
+	return raw, nil
+}
+
+// readBlock answers with the payload to cache and the header the event carries:
+// the block fetched by number is the one document that names both.
+func (s *Service) readBlock(ctx context.Context, blockNumber int64, hash string) (json.RawMessage, blockHeader, error) {
+	raw, err := s.readPayload(ctx, "block", blockNumber, func(ctx context.Context, number int64) (json.RawMessage, error) {
+		return s.client.GetBlockByNumber(ctx, number, true)
+	})
+	if err != nil {
+		return nil, blockHeader{}, err
+	}
+	if err := confirmPayloadHash(blockNumber, hash, raw); err != nil {
+		return nil, blockHeader{}, err
+	}
+	header, err := decodeHeader(blockNumber, raw)
+	if err != nil {
+		return nil, blockHeader{}, err
+	}
+	return raw, header, nil
+}
+
+func (s *Service) readList(ctx context.Context, name string, blockNumber int64, hash string, block json.RawMessage, read numberRead) (json.RawMessage, error) {
+	raw, err := s.readPayload(ctx, name, blockNumber, read)
+	if err != nil {
+		return nil, err
+	}
+	if err := confirmListDescribesBlock(name, blockNumber, hash, raw, block); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// confirmListDescribesBlock holds a receipts or traces answer to the block the
+// header named. It is not structural: a replica behind the head answers the same
+// by-number call with another height's list, or with none at all, and the next
+// attempt asks again — the verdict an upstream null gets.
+func confirmListDescribesBlock(name string, blockNumber int64, hash string, list, block json.RawMessage) error {
+	got, err := archiveblock.ListBlockHash(list)
+	if errors.Is(err, archiveblock.ErrEmptyList) {
+		return confirmBlockHasNoTransactions(name, blockNumber, block)
+	}
+	if err != nil {
+		return fmt.Errorf("the %s fetched for block %d name no block: %w", name, blockNumber, err)
 	}
 	if !strings.EqualFold(got, hash) {
-		return fmt.Errorf("the payload fetched for block %d at hash %s names block %s instead: %w",
-			blockNumber, hash, got, ErrStructuralData)
+		return fmt.Errorf("the %s fetched for block %d name block %s, not the canonical %s", name, blockNumber, got, hash)
 	}
 	return nil
 }
 
-// confirmStillCanonical re-reads the height once the payload is in hand. Pinning
-// to the hash keeps the payload self-consistent but says nothing about whether
-// that hash is still canonical — a node serves an orphan by hash just as
-// happily. Without this second read, a republish started moments before a reorg
-// would enshrine a fresh losing fork as the correction.
-func (s *Service) confirmStillCanonical(ctx context.Context, blockNumber int64, want string) error {
-	raw, err := s.client.GetBlockByNumber(ctx, blockNumber, false)
-	if isUpstreamNull(raw, err) {
-		return fmt.Errorf("block %d left the canonical chain mid-republish: %w", blockNumber, ErrCanonicalHashMoved)
-	}
+// confirmBlockHasNoTransactions is what makes an empty list an answer rather
+// than a hole: a block with transactions has both receipts and traces.
+func confirmBlockHasNoTransactions(name string, blockNumber int64, block json.RawMessage) error {
+	populated, err := archiveblock.HasTransactions(block)
 	if err != nil {
-		return fmt.Errorf("re-reading block %d by number: %w", blockNumber, err)
+		return fmt.Errorf("reading the transactions of block %d: %w", blockNumber, err)
 	}
-	current, err := decodeHeader(blockNumber, raw)
-	if err != nil {
-		return err
+	if populated {
+		return fmt.Errorf("the node has no %s for block %d, which has transactions", name, blockNumber)
 	}
-	if !strings.EqualFold(current.Hash, want) {
-		return fmt.Errorf("block %d moved from %s to %s between the two reads: %w",
-			blockNumber, want, current.Hash, ErrCanonicalHashMoved)
+	return nil
+}
+
+// confirmPayloadHash holds the block payload to the hash the run derived: a node
+// serves an orphan, or a neighbouring height, by number just as happily. Not
+// structural — the height reorged after the derivation read it, or the node
+// answered wrong, and both clear on a later attempt or a re-derived run.
+func confirmPayloadHash(blockNumber int64, hash string, block json.RawMessage) error {
+	got, found := archiveblock.HashFromPayload(block)
+	if !found {
+		return fmt.Errorf("the payload fetched for block %d carries no hash, want the derived %s", blockNumber, hash)
+	}
+	if !strings.EqualFold(got, hash) {
+		return fmt.Errorf("block %d came back as %s, not the %s this run derived: %w",
+			blockNumber, got, hash, ErrCanonicalHashMoved)
 	}
 	return nil
 }
