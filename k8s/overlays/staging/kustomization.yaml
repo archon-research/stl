@@ -91,148 +91,151 @@ images:
   # (ORB-362). Add or move an image in the roster instead.
   - name: allocation-tracker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-allocation-tracker
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: arbitrum-backup-worker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: arbitrum-psm3-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-psm3-indexer
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: arbitrum-watcher
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-watcher
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: arbitrum-watcher-data-validator
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
-    newTag: "watcher-data-validator-84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "watcher-data-validator-eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: avalanche-allocation-tracker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-allocation-tracker
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: avalanche-backup-worker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: avalanche-oracle-price-worker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-oracle-price-worker
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: avalanche-sparklend-position-tracker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-sparklend-position-tracker
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: avalanche-watcher
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-watcher
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: avalanche-watcher-data-validator
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
-    newTag: "watcher-data-validator-84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "watcher-data-validator-eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: backup-worker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: base-allocation-tracker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-allocation-tracker
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: base-backup-worker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: base-oracle-price-worker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-oracle-price-worker
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: base-psm3-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-psm3-indexer
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: base-watcher
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-watcher
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: base-watcher-data-validator
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
-    newTag: "watcher-data-validator-84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "watcher-data-validator-eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: block-republisher
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
-    newTag: "block-republisher-84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "block-republisher-eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: cex-orderbook-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cex-orderbook-indexer
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: core-model-runner
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-python-api
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: dex-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-dex-indexer
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: fluid-vault-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-fluid-vault-indexer
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: maple-graphql-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
-    newTag: "maple-graphql-indexer-84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "maple-graphql-indexer-eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: migrate
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-migrate
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: morpho-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-morpho-indexer
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: morpho-v2-bootstrap
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
-    newTag: "morpho-v2-bootstrap-84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "morpho-v2-bootstrap-eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: morpho-vault-backfill
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
-    newTag: "morpho-vault-backfill-84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "morpho-vault-backfill-eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: offchain-price-backfill
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
-    newTag: "offchain-price-backfill-84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "offchain-price-backfill-eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: offchain-price-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
-    newTag: "offchain-price-indexer-84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "offchain-price-indexer-eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: optimism-backup-worker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: optimism-psm3-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-psm3-indexer
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: optimism-watcher
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-watcher
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: optimism-watcher-data-validator
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
-    newTag: "watcher-data-validator-84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "watcher-data-validator-eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: oracle-price-worker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-oracle-price-worker
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: prime-debt-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-prime-debt-indexer
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: python-api
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-python-api
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: reference-capital-backfill
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
-    newTag: "reference-capital-backfill-84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "reference-capital-backfill-eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: reference-capital-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
-    newTag: "reference-capital-indexer-84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "reference-capital-indexer-eb21d42dab7f73c0924fdb256396dc685b80bebd"
+  - name: robinhood-backup-worker
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: spark-anchorage-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
-    newTag: "anchorage-indexer-84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "anchorage-indexer-eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: sparklend-position-tracker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-sparklend-position-tracker
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: transform-worker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
-    newTag: "transform-worker-84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "transform-worker-eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: unichain-backup-worker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: unichain-psm3-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-psm3-indexer
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: unichain-watcher
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-watcher
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: unichain-watcher-data-validator
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
-    newTag: "watcher-data-validator-84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "watcher-data-validator-eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: watcher
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-watcher
-    newTag: "84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "eb21d42dab7f73c0924fdb256396dc685b80bebd"
   - name: watcher-data-validator
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
-    newTag: "watcher-data-validator-84d25b4a50a79737b4f28fead8a0f5622a1df28c"
+    newTag: "watcher-data-validator-eb21d42dab7f73c0924fdb256396dc685b80bebd"
 
 patches:
   # ---------------------------------------------------------------------------
