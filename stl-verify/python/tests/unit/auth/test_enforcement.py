@@ -114,7 +114,7 @@ def test_viewer_gate_and_analyst_gate():
     assert analyst.get("/v1/risk/x").status_code == 200
 
 
-@pytest.mark.parametrize("allowed,expected", [(True, 200), (False, 403)])
+@pytest.mark.parametrize("allowed,expected", [(True, 200), (False, 404)])
 def test_prime_check_uses_the_resolved_vault(monkeypatch, allowed, expected):
     fga = AsyncMock()
     fga.check.return_value = allowed
@@ -126,10 +126,18 @@ def test_prime_check_uses_the_resolved_vault(monkeypatch, allowed, expected):
     fga.check.assert_awaited_once_with("user:u1", "can_view", f"prime:{VAULT}")
 
 
-def test_unknown_prime_is_404_not_403(monkeypatch):
-    c = _app(fga=AsyncMock(), principal=_principal({"org:viewer"}))
-    monkeypatch.setattr(deps, "_vault_for", AsyncMock(return_value=None))
-    assert c.get(f"/v1/primes/{PROXY}/debt").status_code == 404
+@pytest.mark.parametrize("vault,allowed", [(None, True), (VAULT, False)], ids=["unknown", "not-permitted"])
+def test_unknown_and_unpermitted_are_indistinguishable(monkeypatch, vault, allowed):
+    """A different code for a prime that does not exist would tell an
+    unauthorized caller which ones do — the fact the list filtering hides."""
+    fga = AsyncMock()
+    fga.check.return_value = allowed
+    c = _app(fga=fga, principal=_principal({"org:viewer"}))
+    monkeypatch.setattr(deps, "_vault_for", AsyncMock(return_value=vault))
+
+    response = c.get(f"/v1/primes/{PROXY}/debt")
+
+    assert (response.status_code, response.json()) == (404, {"detail": "prime not found"})
 
 
 def test_malformed_prime_id_is_422_not_500(monkeypatch):
@@ -284,7 +292,7 @@ def test_missing_bearer_emits_a_decision_event(monkeypatch, caplog):
 @pytest.mark.parametrize(
     "allowed,decision,reason",
     [(True, "allow", "permitted"), (False, "deny", "not_permitted")],
-)
+)  # the event still tells the two denials apart; only the response does not
 def test_prime_check_emits_a_decision_event_naming_the_resource(monkeypatch, caplog, allowed, decision, reason):
     fga = AsyncMock()
     fga.check.return_value = allowed

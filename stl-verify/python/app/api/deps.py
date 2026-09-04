@@ -30,6 +30,10 @@ logger = get_logger(__name__)
 #     | json | event="authz.decision"
 AUTHZ_EVENT = "authz.decision"
 
+# One body for both prime denials, so the response cannot be read as an
+# existence oracle. Which one it was lives in the decision event.
+PRIME_DENIED_DETAIL = "prime not found"
+
 
 def log_auth_event(
     request: Request,
@@ -186,6 +190,10 @@ async def _check_prime_view(request: Request, principal: Principal | None, prime
     the VAULT address: the identity shared by all of a prime's proxies, and
     what the reconciler writes. ``prime_id is None`` is not prime-scoped at
     all, so the router's role gate is the whole control.
+
+    An unknown prime and one the caller may not view answer the same 404. A
+    distinct code tells an unauthorized caller which primes exist, the fact the
+    list filtering hides; the decision event keeps the two apart.
     """
     if principal is None:  # auth off
         return
@@ -221,7 +229,7 @@ async def _check_prime_view(request: Request, principal: Principal | None, prime
         log_auth_event(
             request, gate="prime", decision="deny", reason="prime_not_found", status=404, principal=principal
         )
-        raise HTTPException(status_code=404, detail="prime not found")
+        raise HTTPException(status_code=404, detail=PRIME_DENIED_DETAIL)
     resource = f"prime:{vault.lower()}"
     try:
         allowed = await fga.check(principal.fga_user, "can_view", resource)
@@ -242,11 +250,11 @@ async def _check_prime_view(request: Request, principal: Principal | None, prime
             gate="prime",
             decision="deny",
             reason="not_permitted",
-            status=403,
+            status=404,
             principal=principal,
             resource=resource,
         )
-        raise HTTPException(status_code=403, detail="not permitted for this prime")
+        raise HTTPException(status_code=404, detail=PRIME_DENIED_DETAIL)
     log_auth_event(request, gate="prime", decision="allow", reason="permitted", principal=principal, resource=resource)
 
 

@@ -126,7 +126,8 @@ PRIME_SCOPED_ROUTES = [
 def test_analyst_cannot_read_a_prime_they_may_not_view(resolves_to_vault, method, path, body):
     fga = _deny()
     response = _client(fga=fga, principal=_principal()).request(method, path, json=body)
-    assert response.status_code == 403
+    # 404, not 403: a denial must not read as "this prime exists".
+    assert response.status_code == 404
     fga.check.assert_awaited_once_with("user:u1", "can_view", f"prime:{VAULT}")
 
 
