@@ -1,0 +1,48 @@
+# LOCAL DEV ONLY (ARCT-399). Fast-forwards every column-owned sequence past
+# max(column) after rows have been bulk-imported into the kind dev database with
+# explicit ids (a staging clone), which leaves the sequences behind and makes
+# the next genuinely-new INSERT fail on the primary key.
+#
+# The SQL lives in ../sql/resync-sequences.sql and reaches the pod through the
+# `dev-sequence-resync-sql` ConfigMap, which `make kind-resync-sequences`
+# creates from that file — apply this Job through that target, not by hand.
+#
+# Deliberately NOT a migration: staging and prod take their ids only from the
+# sequence and must never run this (see stl-verify/db/migrations/AGENTS.md).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: resync-sequences
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: wait-for-db
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -c
+            - until pg_isready -h timescaledb -U postgres; do echo "waiting for timescaledb..."; sleep 2; done
+      containers:
+        - name: resync-sequences
+          image: postgres:16-alpine
+          # Kubernetes expands $(ADMIN_DATABASE_URL) from the container's env.
+          command: ["psql", "$(ADMIN_DATABASE_URL)", "-v", "ON_ERROR_STOP=1", "-f", "/sql/resync-sequences.sql"]
+          env:
+            # setval() needs UPDATE on the sequence, so this runs as the
+            # superuser URL rather than as stl_migrator.
+            - name: ADMIN_DATABASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-config
+                  key: DATABASE_URL
+          volumeMounts:
+            - name: sql
+              mountPath: /sql
+              readOnly: true
+      volumes:
+        - name: sql
+          configMap:
+            name: dev-sequence-resync-sql

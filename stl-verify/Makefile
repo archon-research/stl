@@ -48,7 +48,7 @@ include lint.mk
         erigon-run build-bulk-download-arm64 deploy-bulk-download erigon-bulk-download \
 		build-oracle-pricing-backfill-arm64 deploy-oracle-pricing-backfill deploy-oracle-pricing-backfill-worker \
 		build-sparklend-backfill-arm64 deploy-sparklend-backfill erigon-sparklend-backfill \
-		kind-create kind-delete kind-infra kind-config kind-secrets kind-bootstrap-db kind-migrate \
+		kind-create kind-delete kind-infra kind-config kind-secrets kind-bootstrap-db kind-migrate kind-resync-sequences \
 		kind-load-migrate kind-load-watcher kind-load-workers kind-load-python-api kind-load-cronjobs \
 		kind-deploy-apps kind-deploy-workers kind-deploy-data-validator check-dev-overlay-sync \
 		check-reloader-opt-in check-overlay-images \
@@ -2403,6 +2403,28 @@ kind-migrate: kind-bootstrap-db
 	kubectl --context=$(KUBE_CONTEXT) wait --for=condition=complete job/migrate -n $(KUBE_NS) --timeout=300s
 	@echo "==> Migration logs:"
 	kubectl --context=$(KUBE_CONTEXT) logs -l job-name=migrate -n $(KUBE_NS) || true
+	@$(MAKE) --no-print-directory kind-resync-sequences
+
+# Fast-forward every column-owned sequence past max(column) in the kind dev DB
+# (ARCT-399). LOCAL DEV ONLY — staging and prod take their ids only from the
+# sequence and can never drift; this must never become a migration.
+#
+# Run it after ANY bulk import / staging clone into the dev database. It is also
+# chained onto kind-migrate, so `dev-up`, `dev-db` and `dev-reset` leave the
+# sequences correct no matter which order the import and the bring-up happened
+# in. Idempotent and monotonic: on a clean database it resyncs nothing, and it
+# never rewinds a sequence — see ../k8s/dev-infra/sql/resync-sequences.sql.
+kind-resync-sequences:
+	@$(require_kind_context)
+	@echo "==> Resyncing id sequences to max(id) (dev clone repair, ARCT-399)..."
+	kubectl --context=$(KUBE_CONTEXT) create configmap dev-sequence-resync-sql \
+	  --from-file=resync-sequences.sql=../k8s/dev-infra/sql/resync-sequences.sql \
+	  -n $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
+	kubectl --context=$(KUBE_CONTEXT) delete job/resync-sequences --ignore-not-found -n $(KUBE_NS)
+	$(call kind-apply-rendered,cat ../k8s/dev-infra/jobs/resync-sequences.yaml,-n $(KUBE_NS))
+	kubectl --context=$(KUBE_CONTEXT) wait --for=condition=complete job/resync-sequences -n $(KUBE_NS) --timeout=300s
+	@echo "==> Sequence resync logs:"
+	kubectl --context=$(KUBE_CONTEXT) logs -l job-name=resync-sequences -n $(KUBE_NS) || true
 
 kind-load-watcher:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-watcher:$(LOCAL_TAG)"
