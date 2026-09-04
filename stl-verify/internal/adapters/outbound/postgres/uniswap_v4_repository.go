@@ -203,11 +203,15 @@ func (r *UniswapV4Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbou
 	if err := uniswapV4TickWriter.writeTicks(ctx, tx, uniswapV4TickRows(w.Ticks), r.buildID); err != nil {
 		return stateRows, err
 	}
-	if err := r.writePositions(ctx, tx, w.Positions); err != nil {
+	if _, err := r.writePositions(ctx, tx, w.Positions); err != nil {
 		return stateRows, err
 	}
 
 	return stateRows, nil
+}
+
+func (r *UniswapV4Repository) SavePositions(ctx context.Context, tx pgx.Tx, positions []*entity.UniswapV4Position) (int64, error) {
+	return r.writePositions(ctx, tx, positions)
 }
 
 // currentUniswapV4PoolCTE maps a superseded registry surrogate forward to the
@@ -598,30 +602,30 @@ func sharedBlockNumber[T any](kind string, rows []T, blockNumberOf func(T) int64
 	return blockNumber, nil
 }
 
-func (r *UniswapV4Repository) writePositions(ctx context.Context, tx pgx.Tx, positions []*entity.UniswapV4Position) error {
+func (r *UniswapV4Repository) writePositions(ctx context.Context, tx pgx.Tx, positions []*entity.UniswapV4Position) (int64, error) {
 	if len(positions) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	blockNumber, err := sharedBlockNumber("position", positions, func(p *entity.UniswapV4Position) int64 { return p.BlockNumber })
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	keys := distinctSortedV4PositionKeys(positions)
 	// A duplicate slot would compare both rows against the same prior state and
 	// let ON CONFLICT DO NOTHING drop the second one's values in silence.
 	if len(keys) != len(positions) {
-		return fmt.Errorf("uniswap_v4 position write has %d rows for %d distinct slots: one block must touch a position once", len(positions), len(keys))
+		return 0, fmt.Errorf("uniswap_v4 position write has %d rows for %d distinct slots: one block must touch a position once", len(positions), len(keys))
 	}
 
 	if err := lockPositionKeysV4(ctx, tx, keys); err != nil {
-		return err
+		return 0, err
 	}
 
 	latest, err := readLatestPositionsV4(ctx, tx, keys, blockNumber)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	return r.insertChangedPositionsV4(ctx, tx, positions, latest)
@@ -749,7 +753,7 @@ func (r *UniswapV4Repository) insertChangedPositionsV4(
 	ctx context.Context, tx pgx.Tx,
 	positions []*entity.UniswapV4Position,
 	latest map[v4PositionKey]v4PositionValues,
-) (err error) {
+) (inserted int64, err error) {
 	batch := &pgx.Batch{}
 	var queued []v4QueuedPosition
 	for i, p := range positions {
@@ -760,7 +764,7 @@ func (r *UniswapV4Repository) insertChangedPositionsV4(
 		}
 		converted, convErr := convertV4Position(p)
 		if convErr != nil {
-			return fmt.Errorf("position %d: converting pool=%d %+v: %w", i, p.PoolID, slot.key, convErr)
+			return 0, fmt.Errorf("position %d: converting pool=%d %+v: %w", i, p.PoolID, slot.key, convErr)
 		}
 		batch.Queue(
 			`INSERT INTO uniswap_v4_position
@@ -783,7 +787,7 @@ func (r *UniswapV4Repository) insertChangedPositionsV4(
 	}
 
 	if len(queued) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	br := tx.SendBatch(ctx, batch)
@@ -795,13 +799,14 @@ func (r *UniswapV4Repository) insertChangedPositionsV4(
 	for _, q := range queued {
 		tag, execErr := br.Exec()
 		if execErr != nil {
-			return fmt.Errorf("inserting uniswap_v4 position pool=%d %+v at block %d: %w", q.slot.poolID, q.slot.key, q.blockNumber, execErr)
+			return 0, fmt.Errorf("inserting uniswap_v4 position pool=%d %+v at block %d: %w", q.slot.poolID, q.slot.key, q.blockNumber, execErr)
 		}
 		if err := q.assertInserted(tag.RowsAffected()); err != nil {
-			return err
+			return 0, err
 		}
+		inserted += tag.RowsAffected()
 	}
-	return nil
+	return inserted, nil
 }
 
 type v4QueuedPosition struct {

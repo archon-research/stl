@@ -13,6 +13,7 @@ include lint.mk
 		docker-build-reference-capital-backfill docker-release-reference-capital-backfill _docker-release-reference-capital-backfill-internal \
 		docker-build-morpho-vault-backfill docker-release-morpho-vault-backfill _docker-release-morpho-vault-backfill-internal \
 		docker-build-block-republisher docker-release-block-republisher _docker-release-block-republisher-internal \
+		docker-build-uniswap-v4-position-bootstrap docker-release-uniswap-v4-position-bootstrap _docker-release-uniswap-v4-position-bootstrap-internal \
 		build-backfiller-% run-backfiller-% \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
@@ -804,6 +805,15 @@ dev-env-files:
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
 		"LOG_LEVEL=debug" \
 		> cmd/backfillers/oracle-pricing-backfill/.env
+	@set -a; . ../.env.secrets 2>/dev/null; set +a; \
+	printf '%s\n' \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
+		"CHAIN_ID=1" \
+		"BUILD_GIT_HASH=dev" \
+		"LOG_LEVEL=debug" \
+		> cmd/backfillers/uniswap-v4-position-bootstrap/.env
 	@set -a; . ../.env.secrets; set +a; \
 	printf '%s\n' \
 		"CHAIN_ID=1" \
@@ -1266,6 +1276,8 @@ docker-release-all:
 	@$(MAKE) _docker-release-reference-capital-backfill-internal ENV=$(ENV)
 	@$(MAKE) _docker-release-morpho-vault-backfill-internal ENV=$(ENV)
 	@$(MAKE) _docker-release-block-republisher-internal ENV=$(ENV)
+	@echo ""
+	@$(MAKE) _docker-release-uniswap-v4-position-bootstrap-internal ENV=$(ENV)
 	@echo ""
 	@for cj in $(CRONJOBS); do \
 		$(MAKE) _docker-release-cronjob-$$cj-internal ENV=$(ENV) || { echo "ERROR: Failed to release cronjob $$cj"; exit 1; }; \
@@ -2547,6 +2559,16 @@ docker-release-reference-capital-backfill: ecr-login _docker-release-reference-c
 
 _docker-release-reference-capital-backfill-internal:
 	@$(MAKE) _docker-release-go-service GO_NAME="Reference Capital Backfill" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/reference-capital-backfill GO_BIN=reference-capital-backfill GO_CACHE_KEY="cronjob-reference-capital-backfill" GO_TAG="reference-capital-backfill-$(IMAGE_TAG)" GO_LATEST_TAG="reference-capital-backfill-latest"
+
+# uniswap-v4-position-bootstrap (VEC-639): not a cronjob (it registers no Temporal
+# schedule) so it is not auto-discovered; it only shares the cronjob ECR repo.
+docker-build-uniswap-v4-position-bootstrap:
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/uniswap-v4-position-bootstrap --build-arg BIN=uniswap-v4-position-bootstrap -t stl-uniswap-v4-position-bootstrap:local -f Dockerfile.common .
+
+docker-release-uniswap-v4-position-bootstrap: ecr-login _docker-release-uniswap-v4-position-bootstrap-internal
+
+_docker-release-uniswap-v4-position-bootstrap-internal:
+	@$(MAKE) _docker-release-go-service GO_NAME="Uniswap V4 Position Bootstrap" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/uniswap-v4-position-bootstrap GO_BIN=uniswap-v4-position-bootstrap GO_CACHE_KEY="cronjob-uniswap-v4-position-bootstrap" GO_TAG="uniswap-v4-position-bootstrap-$(IMAGE_TAG)" GO_LATEST_TAG="uniswap-v4-position-bootstrap-latest"
 
 # offchain-price-backfill (VEC-540): the on-demand CoinGecko history backfill. Not a
 # cronjob (it registers no Temporal schedule) so it is not auto-discovered, but it is

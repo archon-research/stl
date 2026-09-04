@@ -23,6 +23,12 @@ func LogBelongsTo(addr common.Address, addrs ...common.Address) bool {
 	return slices.Contains(addrs, addr)
 }
 
+// IsHexWord reports whether value is a full 32-byte hex word. common.HexToHash
+// pads a short one into a plausible-looking wrong hash instead of failing.
+func IsHexWord(value string) bool {
+	return len(value) == 66 && strings.HasPrefix(value, "0x") && common.IsHexHash(value)
+}
+
 // DecodeLog flattens an event log's indexed (topics) and non-indexed (data) fields
 // into one map. A log that cannot fill every argument is an error, never a partial
 // map: a half-filled params blob reads as a healthy row once persisted.

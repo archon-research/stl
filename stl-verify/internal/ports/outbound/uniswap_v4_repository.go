@@ -44,6 +44,10 @@ type UniswapV4Repository interface {
 	// PoolManager/StateView and token decimals; an unresolvable pool is an error.
 	LoadPools(ctx context.Context, chainID int64) ([]UniswapV4PoolRow, error)
 	SaveBlock(ctx context.Context, tx pgx.Tx, w UniswapV4BlockWrites) (stateRows StateRowCounts, err error)
+	// SavePositions persists position rows alone, through the same
+	// append-on-change path SaveBlock's position phase takes, and returns how
+	// many rows it inserted — zero when every slot's stored state already matches.
+	SavePositions(ctx context.Context, tx pgx.Tx, positions []*entity.UniswapV4Position) (insertedRows int64, err error)
 	// On-chain PoolIds of the pools on chainID with a state row at blockNumber,
 	// ascending; a reorg redelivery unions them into its due set. Natural keys, not
 	// surrogate ids: a registry version appended after a worker booted must not

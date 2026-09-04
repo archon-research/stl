@@ -1,6 +1,7 @@
 package uniswapv4indexer
 
 import (
+	"context"
 	"fmt"
 	"math/big"
 	"slices"
@@ -8,11 +9,13 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/tickbitmap"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
 // StateView overloads getPositionInfo: this is the five-argument form, selector
@@ -82,8 +85,38 @@ func MergePositionKeys(a, b []entity.UniswapV4PositionKey) []entity.UniswapV4Pos
 	return out
 }
 
-// BuildPositionCalls packs one getPositionInfo call per key, in key order, so
-// results zip back positionally.
+func modifyLiquidityKey(data map[string]any) (entity.UniswapV4PositionKey, error) {
+	fields, err := bigIntFields(data, "tickLower", "tickUpper")
+	if err != nil {
+		return entity.UniswapV4PositionKey{}, err
+	}
+	owner, err := shared.GetAddrField(data, "sender")
+	if err != nil {
+		return entity.UniswapV4PositionKey{}, err
+	}
+	salt, err := shared.GetHashField(data, "salt")
+	if err != nil {
+		return entity.UniswapV4PositionKey{}, err
+	}
+	tickLower, err := int24Value("tickLower", fields["tickLower"])
+	if err != nil {
+		return entity.UniswapV4PositionKey{}, err
+	}
+	tickUpper, err := int24Value("tickUpper", fields["tickUpper"])
+	if err != nil {
+		return entity.UniswapV4PositionKey{}, err
+	}
+	return entity.UniswapV4PositionKey{
+		Owner:     owner,
+		TickLower: tickLower,
+		TickUpper: tickUpper,
+		Salt:      salt,
+	}, nil
+}
+
+// BuildPositionCalls packs one getPositionInfo(poolId, owner, tickLower,
+// tickUpper, salt) call per entry in keys, in the same order as the input, so
+// callers can zip results back to their originating position positionally.
 func BuildPositionCalls(pool RegisteredPool, keys []entity.UniswapV4PositionKey) ([]outbound.Call, error) {
 	a, err := positionViewABI()
 	if err != nil {
@@ -101,6 +134,66 @@ func BuildPositionCalls(pool RegisteredPool, keys []entity.UniswapV4PositionKey)
 		calls[i] = outbound.Call{Target: pool.StateView, AllowFailure: false, CallData: data}
 	}
 	return calls, nil
+}
+
+// The live indexer and the one-shot position bootstrap share it, which is what
+// keeps a backfilled row byte-identical to the live one for the same block.
+func ReadPositions(
+	ctx context.Context,
+	multicaller outbound.Multicaller,
+	pool RegisteredPool,
+	keys []entity.UniswapV4PositionKey,
+	blockHash common.Hash,
+	blockNumber int64,
+	version int,
+	ts time.Time,
+) ([]*entity.UniswapV4Position, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+
+	rows := make([]*entity.UniswapV4Position, 0, len(keys))
+	for chunk := range slices.Chunk(keys, positionsPerCall) {
+		chunkRows, err := readPositionChunk(ctx, multicaller, pool, chunk, blockHash, blockNumber, version, ts)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, chunkRows...)
+	}
+	return rows, nil
+}
+
+func readPositionChunk(
+	ctx context.Context,
+	multicaller outbound.Multicaller,
+	pool RegisteredPool,
+	chunk []entity.UniswapV4PositionKey,
+	blockHash common.Hash,
+	blockNumber int64,
+	version int,
+	ts time.Time,
+) ([]*entity.UniswapV4Position, error) {
+	calls, err := BuildPositionCalls(pool, chunk)
+	if err != nil {
+		return nil, fmt.Errorf("building position calls for pool %s block %d: %w", pool.PoolIDHash, blockNumber, err)
+	}
+	results, err := multicaller.ExecuteAtHash(ctx, calls, blockHash)
+	if err != nil {
+		return nil, fmt.Errorf("executing position multicall for pool %s block %d: %w", pool.PoolIDHash, blockNumber, err)
+	}
+	if len(results) != len(chunk) {
+		return nil, fmt.Errorf("pool %s block %d: got %d position results, want %d", pool.PoolIDHash, blockNumber, len(results), len(chunk))
+	}
+
+	rows := make([]*entity.UniswapV4Position, 0, len(chunk))
+	for i, key := range chunk {
+		row, err := DecodePosition(pool, key, blockNumber, version, ts, results[i])
+		if err != nil {
+			return nil, fmt.Errorf("decoding position %+v for pool %s block %d: %w", key, pool.PoolIDHash, blockNumber, err)
+		}
+		rows = append(rows, row)
+	}
+	return rows, nil
 }
 
 // DecodePosition treats a revert as an error: getPositionInfo answers even a
