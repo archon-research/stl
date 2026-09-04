@@ -91,6 +91,10 @@
       "type": "numeric",
       "class": "S"
     },
+    "as_of_date": {
+      "type": "date",
+      "class": "S"
+    },
     "asks": {
       "type": "jsonb",
       "class": "R"
@@ -1459,6 +1463,10 @@
     "oracle_asset": {
       "type": "config",
       "owner": "pricing"
+    },
+    "position_current": {
+      "type": "derived",
+      "owner": "prime"
     },
     "position_state": {
       "type": "derived",

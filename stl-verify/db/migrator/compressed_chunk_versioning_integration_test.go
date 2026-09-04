@@ -60,14 +60,21 @@ func TestCompressedConvertedHypertablesHaveAVersionFunction(t *testing.T) {
 			// table name has to be maintained (after AGENTS.md, convertedAppendOnlyTables and
 			// schema_master), and it silently rots. This cannot: the moment such a table gains a
 			// trigger it re-enters scope and fails below for want of the function.
-			var userTriggers int
+			// Only a BEFORE INSERT ROW trigger can produce the defect: it is the one shape that can set
+			// NEW.processing_version before the ON CONFLICT arbiter resolves. tgtype bits are 1 = ROW,
+			// 2 = BEFORE, 4 = INSERT, and all three are required. BEFORE alone was too broad -- a
+			// BEFORE ... FOR EACH STATEMENT trigger matched it and demanded a version function for a
+			// trigger that cannot touch NEW at all -- and a BEFORE UPDATE/DELETE trigger never runs on
+			// the INSERT path this argument is about.
+			var assigningTriggers int
 			if err := pool.QueryRow(ctx, `
 				SELECT count(*) FROM pg_trigger
-				WHERE tgrelid = $1::regclass AND NOT tgisinternal`, table).Scan(&userTriggers); err != nil {
-				t.Fatalf("look up triggers on %s: %v", table, err)
+				WHERE tgrelid = $1::regclass AND NOT tgisinternal
+				  AND (tgtype & 3) = 3 AND (tgtype & 4) <> 0`, table).Scan(&assigningTriggers); err != nil {
+				t.Fatalf("look up BEFORE INSERT row triggers on %s: %v", table, err)
 			}
-			if userTriggers == 0 {
-				t.Skipf("%s carries no trigger, so its INSERT supplies processing_version itself and no "+
+			if assigningTriggers == 0 {
+				t.Skipf("%s carries no BEFORE INSERT row trigger, so its INSERT supplies processing_version itself and no "+
 					"version function applies (behaviour covered by TestPositionState/\"a correction for "+
 					"a position an already-compressed chunk holds is stored, not dropped\")", table)
 			}
