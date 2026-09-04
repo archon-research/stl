@@ -12,6 +12,7 @@ include lint.mk
 		docker-build-offchain-price-backfill docker-release-offchain-price-backfill _docker-release-offchain-price-backfill-internal \
 		docker-build-reference-capital-backfill docker-release-reference-capital-backfill _docker-release-reference-capital-backfill-internal \
 		docker-build-morpho-vault-backfill docker-release-morpho-vault-backfill _docker-release-morpho-vault-backfill-internal \
+		docker-build-block-republisher docker-release-block-republisher _docker-release-block-republisher-internal \
 		build-backfiller-% run-backfiller-% \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
@@ -61,7 +62,7 @@ include lint.mk
 		kind-build-mock-blockchain-server kind-load-mock-blockchain-server kind-deploy-mock-blockchain-server kind-deploy-mock-blockchain-server-s3 \
 		kind-use-mock kind-use-alchemy k6-stress-test stress-test-data stress-test kind-clean \
 		build-cronjob-% run-cronjob-% run-cronjob-solo \
-		kind-scale-down-% kind-scale-up-% dev-endpoints dev-psql \
+		kind-scale-down-% kind-scale-up-% dev-endpoints kind-free-offset dev-up-new dev-psql \
 		temporal-schedules temporal-schedule-describe temporal-trigger temporal-workflow-describe temporal-cli
 
 # Go bin path for installed tools
@@ -70,6 +71,7 @@ GOBIN := $(shell go env GOPATH)/bin
 # Local kind cluster name — single source of truth; KUBE_CONTEXT is derived from it.
 # To target EKS: KUBE_CONTEXT=<arn> KUBE_NS=<ns>
 KIND_CLUSTER ?= vector
+KIND_CLUSTER_GIVEN := $(filter command line environment,$(origin KIND_CLUSTER))
 KUBE_CONTEXT ?= kind-$(KIND_CLUSTER)
 KUBE_NS      ?= vector
 
@@ -79,10 +81,18 @@ require_kind_context = echo "$(KUBE_CONTEXT)" | grep -q '^kind-' || { echo "ERRO
 
 # Host ports the kind node publishes. A second cluster on the same machine needs its
 # own set, so every mapped port is derived from one offset:
+#   make dev-up-new                                      (free offset, derived name)
 #   KIND_CLUSTER=<name> KIND_PORT_OFFSET=<n> make dev-up
 # Only host-side addresses shift; in-cluster service DNS (localstack:4566,
 # mock-blockchain-server:8546) is unaffected.
-KIND_PORT_OFFSET ?= 0
+KIND_PORT_BASES := 5432 5433 6379 4566 16686 4317 7233 8233 8546 8547
+
+# An existing cluster carries its offset in the host port its control plane publishes for
+# 30432, so KIND_CLUSTER alone reaches it; cluster `vector` is offset 0 by convention and
+# calls no docker. _GIVEN is read before the `:=` freeze turns $(origin) into "file".
+KIND_PORT_OFFSET_GIVEN := $(filter command line environment,$(origin KIND_PORT_OFFSET))
+KIND_PORT_OFFSET ?= $(if $(filter vector,$(KIND_CLUSTER)),0,$(shell p=$$(docker inspect $(KIND_CLUSTER)-control-plane --format '{{range index .HostConfig.PortBindings "30432/tcp"}}{{.HostPort}}{{end}}' 2>/dev/null | tr -dc 0-9); echo $$(( $${p:-5432} - 5432 ))))
+KIND_PORT_OFFSET := $(KIND_PORT_OFFSET)
 KIND_HOST_PG_PORT          := $(shell expr 5432 + $(KIND_PORT_OFFSET))
 KIND_HOST_TEMPORAL_DB_PORT := $(shell expr 5433 + $(KIND_PORT_OFFSET))
 KIND_HOST_REDIS_PORT       := $(shell expr 6379 + $(KIND_PORT_OFFSET))
@@ -503,6 +513,8 @@ dev-up:
 	  echo "    make kind-use-alchemy && make kind-secrets && make kind-deploy-data-validator"; \
 	  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; \
 	fi
+	@echo ""
+	@$(MAKE) --no-print-directory dev-endpoints
 
 # Build and deploy workers that require API keys.
 # Checks which keys are available and only deploys workers whose dependencies are met.
@@ -922,6 +934,25 @@ dev-env-files:
 dev-up-rebuild:
 	$(MAKE) dev-up COLD=1
 
+# A whole cluster of your own, alongside whatever is already running: a free port offset
+# and a name derived from it, then the ordinary dev-up. An explicit KIND_CLUSTER /
+# KIND_PORT_OFFSET wins over the derived one; COLD=1 passes through.
+dev-up-new:
+	@if [ -n "$(KIND_PORT_OFFSET_GIVEN)" ]; then \
+	  offset=$(KIND_PORT_OFFSET); \
+	else \
+	  offset=$$($(MAKE) --no-print-directory kind-free-offset) || exit 1; \
+	fi; \
+	if [ -n "$(KIND_CLUSTER_GIVEN)" ]; then name=$(KIND_CLUSTER); else name=vector-$$offset; fi; \
+	[ "$$name" != vector ] || { echo "ERROR: dev-up-new refuses the shared default cluster 'vector'. Pass KIND_CLUSTER=<other name>."; exit 1; }; \
+	kind get clusters 2>/dev/null | grep -qx "$$name" && { echo "ERROR: kind cluster '$$name' already exists — 'KIND_CLUSTER=$$name make dev-up-or-resume' brings it back up."; exit 1; }; \
+	[ -z "$$(docker ps -aq --filter name=^$$name-control-plane$$)" ] || { echo "ERROR: container '$$name-control-plane' already exists — remove it first."; exit 1; }; \
+	[ ! -e "$$HOME/.$$name" ] || { echo "ERROR: data dir $$HOME/.$$name already exists — 'KIND_CLUSTER=$$name make dev-wipe' removes it."; exit 1; }; \
+	echo "==> New cluster $$name at KIND_PORT_OFFSET=$$offset"; \
+	$(MAKE) dev-up KIND_CLUSTER=$$name KIND_PORT_OFFSET=$$offset || exit 1; \
+	echo "Follow-up commands need the cluster only — the offset is derived from it:"; \
+	echo "    export KIND_CLUSTER=$$name"
+
 dev-down: kind-delete
 
 # Suspend local kind nodes without deleting cluster state.
@@ -1252,6 +1283,7 @@ docker-release-all:
 	@echo ""
 	@$(MAKE) _docker-release-reference-capital-backfill-internal ENV=$(ENV)
 	@$(MAKE) _docker-release-morpho-vault-backfill-internal ENV=$(ENV)
+	@$(MAKE) _docker-release-block-republisher-internal ENV=$(ENV)
 	@echo ""
 	@for cj in $(CRONJOBS); do \
 		$(MAKE) _docker-release-cronjob-$$cj-internal ENV=$(ENV) || { echo "ERROR: Failed to release cronjob $$cj"; exit 1; }; \
@@ -2247,9 +2279,52 @@ erigon-sparklend-backfill:
 # Local kind Cluster
 # =============================================================================
 
+# The ten host ports an offset needs, and which of them are taken. A container's
+# PortBindings count as taken even while it is stopped: a suspended kind cluster holds
+# no socket but reclaims its ports on dev-resume.
+define kind_port_probe
+reserved=" $$(cids=$$(docker ps -aq 2>/dev/null); [ -z "$$cids" ] || docker inspect --format '{{range .HostConfig.PortBindings}}{{range .}}{{.HostPort}} {{end}}{{end}}' $$cids 2>/dev/null | tr '\n' ' ') "; \
+if command -v nc >/dev/null 2>&1; then \
+  listening() { nc -z 127.0.0.1 "$$1" >/dev/null 2>&1; }; \
+else \
+  listening() { lsof -nP -iTCP:"$$1" -sTCP:LISTEN >/dev/null 2>&1; }; \
+fi; \
+offset_ports() { for b in $(KIND_PORT_BASES); do echo $$((b + $$1)); done; }; \
+ports_in_use() { \
+  used=""; \
+  for p in "$$@"; do \
+    if listening "$$p"; then used="$$used $$p"; \
+    else case "$$reserved" in *" $$p "*) used="$$used $$p";; esac; fi; \
+  done; \
+  echo $$used; \
+};
+endef
+
+# Lowest offset whose ten host ports are all free, for a cluster alongside the ones
+# already on this machine. Offset 0 is cluster `vector`'s by convention.
+kind-free-offset:
+	@$(kind_port_probe) \
+	off=100; \
+	while [ $$off -le 9000 ]; do \
+	  if [ -z "$$(ports_in_use $$(offset_ports $$off))" ]; then echo $$off; exit 0; fi; \
+	  off=$$((off + 100)); \
+	done; \
+	echo "ERROR: no offset in 100..9000 leaves all ten host ports ($(KIND_PORT_BASES)) free." >&2; \
+	exit 1
+
 # kind.yaml is a template: the placeholders below (cluster name, every host port,
 # the data dir) are substituted here, so it is never a valid kind config on disk.
 kind-create:
+	@kind get clusters 2>/dev/null | grep -qx $(KIND_CLUSTER) || { \
+	  $(kind_port_probe) \
+	  busy="$$(ports_in_use $$(offset_ports $(KIND_PORT_OFFSET)))"; \
+	  [ -z "$$busy" ] || { \
+	    echo "ERROR: KIND_PORT_OFFSET=$(KIND_PORT_OFFSET) wants host port(s) that are taken: $$busy"; \
+	    echo "       Another kind cluster (running or suspended) or process holds them."; \
+	    echo "       'make dev-up-new' brings up a cluster on a free offset; 'make kind-free-offset' just prints one."; \
+	    exit 1; \
+	  }; \
+	}
 	@mkdir -p $$HOME/.$(KIND_CLUSTER)/timescaledb $$HOME/.$(KIND_CLUSTER)/temporal-db
 	@OTHERS=$$(kind get clusters 2>/dev/null | grep -v '^$(KIND_CLUSTER)$$' || true); \
 	if [ -n "$$OTHERS" ]; then \
@@ -2512,6 +2587,18 @@ docker-release-morpho-vault-backfill: ecr-login _docker-release-morpho-vault-bac
 
 _docker-release-morpho-vault-backfill-internal:
 	@$(MAKE) _docker-release-go-service GO_NAME="Morpho Vault Backfill" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/morpho-vault-backfill GO_BIN=morpho-vault-backfill GO_CACHE_KEY="cronjob-morpho-vault-backfill" GO_TAG="morpho-vault-backfill-$(IMAGE_TAG)" GO_LATEST_TAG="morpho-vault-backfill-latest"
+
+# block-republisher (ARCT-383): the on-demand repair that re-publishes a block
+# under a new version. Same lifecycle as the two backfillers above — a
+# long-running worker Deployment polling its task queue — so it needs the same
+# explicit release wiring.
+docker-build-block-republisher:
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/block-republisher --build-arg BIN=block-republisher -t stl-block-republisher:$(LOCAL_TAG) -f Dockerfile.common .
+
+docker-release-block-republisher: ecr-login _docker-release-block-republisher-internal
+
+_docker-release-block-republisher-internal:
+	@$(MAKE) _docker-release-go-service GO_NAME="Block Republisher" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/block-republisher GO_BIN=block-republisher GO_CACHE_KEY="cronjob-block-republisher" GO_TAG="block-republisher-$(IMAGE_TAG)" GO_LATEST_TAG="block-republisher-latest"
 
 kind-load-cronjobs:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="$(foreach cj,$(CRONJOBS),stl-$(cj):$(LOCAL_TAG))"

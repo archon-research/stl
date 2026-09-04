@@ -23,13 +23,13 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
-// morphoBlueDeployBlocks maps chain IDs to the block at which Morpho Blue
-// was deployed on that chain. Morpho Blue is deployed via CREATE2 at the
-// same address on all chains, but each deployment occurred at a different block.
+// morphoBlueDeployBlocks maps chain IDs to the block at which Morpho Blue was
+// deployed at MorphoBlueAddress. Only chains where the singleton lives at that
+// CREATE2 address belong here; Arbitrum's deployment is at a different address
+// (0x6c247b1F6182318877311737BaC0844bAa518F5e) and is deliberately absent.
 var morphoBlueDeployBlocks = map[int64]int64{
-	1:     18883124,  // Ethereum mainnet
-	8453:  18925795,  // Base
-	42161: 226833208, // Arbitrum
+	1:    18883124, // Ethereum mainnet
+	8453: 13977148, // Base
 }
 
 // MorphoBlueDeployBlock returns the deploy block for the given chain ID.

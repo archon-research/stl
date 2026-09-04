@@ -2494,10 +2494,13 @@ owner()                            // → address
 performanceFee()                   // → uint96
 managementFee()                    // → uint96
 
-// Adapter interface (both adapter types)
+// Adapter interface (all adapter types)
 realAssets()                       // → uint256 (total assets held by this adapter)
 morpho()                           // → address (present on MorphoMarketV1AdapterV2; used for type detection)
 morphoVaultV1()                    // → address (present on MorphoVaultV1Adapter; returns the wrapped V1 vault address)
+erc4626Vault()                     // → address (present on ERC4626MerklAdapter; returns the wrapped ERC-4626 vault)
+box()                              // → address (present on BoxAdapter; returns the wrapped Morpho Box)
+comet()                            // → address (present on CompoundV3Adapter; returns the wrapped Compound V3 Comet)
 marketParamsListLength()           // → uint256 (MorphoMarketV1AdapterV2 only; number of markets in adapter)
 marketParamsList(uint256 index)    // → MarketParams tuple (MorphoMarketV1AdapterV2 only; needed to compute marketId)
 
@@ -2543,9 +2546,14 @@ async function getV1VaultAllocations(vaultAddress: Address, blockNumber: bigint)
 
 **V2 vault allocation query (archive node, any block):**
 
-Adapter type detection uses two probe calls:
-- `morphoVaultV1()` succeeds → `MorphoVaultV1Adapter` (wraps a V1 vault)
+Adapter type detection uses one marker probe call per modelled family; exactly one
+answers on a real adapter, and none or several means the adapter is recorded as
+Unknown (bespoke curator-written adapters share no marker and stay there):
 - `morpho()` succeeds → `MorphoMarketV1AdapterV2` (holds Morpho Blue supply shares directly)
+- `morphoVaultV1()` succeeds → `MorphoVaultV1Adapter` (wraps a V1 vault)
+- `erc4626Vault()` succeeds → `ERC4626MerklAdapter` (wraps an external ERC-4626 vault, rewards via Merkl)
+- `box()` succeeds → `BoxAdapter` (wraps a Morpho Box)
+- `comet()` succeeds → `CompoundV3Adapter` (wraps a Compound V3 Comet)
 
 ```typescript
 async function getV2VaultAllocations(vaultAddress: Address, blockNumber: bigint) {

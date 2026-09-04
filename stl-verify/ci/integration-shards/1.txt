@@ -56,3 +56,4 @@
 ./internal/pkg/blockchain/blocktime
 ./internal/pkg/oraclewire
 ./internal/pkg/writerrun
+./cmd/backfillers/block-republisher

@@ -118,13 +118,16 @@ with `make dev-wipe`.
 Need a second cluster next to someone else's (two agents, one machine)?
 
 ```bash
-KIND_CLUSTER=mine KIND_PORT_OFFSET=100 make dev-up
+make dev-up-new                                  # free offset, name derived from it
+KIND_CLUSTER=mine KIND_PORT_OFFSET=100 make dev-up   # or name and offset yourself
 ```
 
 It gets its own cluster name, host ports (every mapped port +100), image
 tags (`stl-*:local-mine`) and data dir (`~/.mine`), so it cannot disturb
-the default `vector` cluster. Every `run-*`, `dev-*` and `kind-*` target
-honours the same two variables — export them in the shell you work in.
+the default `vector` cluster. `dev-up-new` prints the host endpoints when
+it is done; afterwards only `export KIND_CLUSTER=<name>` is needed, since
+every `run-*`, `dev-*` and `kind-*` target derives the offset from the
+cluster's own control plane.
 
 > **⚠️ You need an Alchemy key for anything to actually work.** By
 > default `make dev-up` points the watcher at a **mock blockchain

@@ -744,13 +744,17 @@ func addAdapterLog(t *testing.T, vault, adapter common.Address) shared.Log {
 }
 
 // wireAdapterRegistrationReads answers the two chain reads registering an adapter
-// issues: the number-pinned type probe (morpho() succeeds, morphoVaultV1()
+// issues: the number-pinned type probe (morpho() succeeds, every other marker
 // reverts ⇒ MarketV1) and the hash-pinned realAssets() seed.
 func wireAdapterRegistrationReads(t *testing.T, mc *testutil.MockMulticaller, adapter common.Address) {
 	t.Helper()
 	adapterABI, err := abis.GetVaultV2AdapterReadABI()
 	if err != nil {
 		t.Fatalf("GetVaultV2AdapterReadABI: %v", err)
+	}
+	prober, err := morpho_indexer.NewAdapterProber()
+	if err != nil {
+		t.Fatalf("NewAdapterProber: %v", err)
 	}
 	pack := func(args abi.Arguments, values ...any) []byte {
 		data, err := args.Pack(values...)
@@ -761,13 +765,12 @@ func wireAdapterRegistrationReads(t *testing.T, mc *testutil.MockMulticaller, ad
 	}
 
 	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) != 2 || calls[0].Target != adapter {
+		if len(calls) != prober.NumProbeCalls() || calls[0].Target != adapter {
 			return nil, fmt.Errorf("unexpected number-pinned multicall of %d calls", len(calls))
 		}
-		return []outbound.Result{
-			{Success: true, ReturnData: pack(adapterABI.Methods["morpho"].Outputs, common.HexToAddress("0x1"))},
-			{Success: false},
-		}, nil
+		results := make([]outbound.Result, len(calls))
+		results[0] = outbound.Result{Success: true, ReturnData: pack(adapterABI.Methods["morpho"].Outputs, common.HexToAddress("0x1"))}
+		return results, nil
 	}
 	mc.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		if len(calls) != 1 || calls[0].Target != adapter {

@@ -119,6 +119,20 @@ class PostgresCryptoLendingReader:
             row.receipt_token_id for row in rows if _normalize_protocol_name(row.protocol_name) in _SUPPORTED_PROTOCOLS
         }
 
+    async def list_morpho_asset_ids(self, chain_id: int) -> frozenset[int]:
+        """Return the receipt_token_ids of Morpho vault shares on ``chain_id``.
+
+        Serves the CORE model's vault aggregation, which is chain-gated (its
+        market keys are mainnet-only); classification lives here so the
+        protocol-name normalization has one home.
+        """
+        rows = await self._receipt_token_repo.list_protocol_pairs()
+        return frozenset(
+            row.receipt_token_id
+            for row in rows
+            if row.chain_id == chain_id and _normalize_protocol_name(row.protocol_name) in _MORPHO
+        )
+
     async def get_receipt_token(self, receipt_token_id: int) -> ReceiptTokenInfo | None:
         return await self._receipt_token_repo.get(receipt_token_id)
 
