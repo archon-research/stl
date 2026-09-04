@@ -184,6 +184,42 @@ groups:
             VectorWatcherAlchemyErrorsHigh.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatcheralchemyretrieshigh
 
+      - alert: VectorWatcherBlocksDropped
+        # The subscriber's newHeads channel is a 100-slot buffer and a header is
+        # only dropped once it is full, i.e. the live consumer fell ~100 blocks
+        # behind the socket. Zero in steady state, so any occurrence is
+        # actionable: a dropped header reaches Postgres only via backfill.
+        # It is also the cheap in-prod way to tell "our channel dropped it" from
+        # "Alchemy never delivered it" when a gap appears (ARCT-374) — drops here
+        # mean us, silence here means upstream.
+        #
+        # These subscriber metrics carry a `chain` label of their own, but the
+        # grouping follows the rest of this file (service_name identifies the
+        # chain) so the Slack template renders the same header everywhere.
+        expr: |
+          sum by (service_name, cluster) (
+            increase(alchemy_subscriber_blocks_dropped_total{
+              k8s_namespace_name="vector",
+              service_name=~".*watcher"
+            }[10m])
+          ) > 0
+        for: 1m
+        labels:
+          team: vector
+          severity: warning
+          component: watcher
+          namespace: vector
+        annotations:
+          summary: "Vector watcher dropped block headers on {{ $labels.service_name }}"
+          description: |
+            `alchemy_subscriber_blocks_dropped_total` on
+            `{{ $labels.service_name }}` is nonzero over the last 10m: the
+            subscriber's 100-slot header buffer filled and headers were
+            discarded before the live path saw them. The consumer is stalled
+            (slow RPC fetch, Redis/SNS backpressure, or a blocked persist).
+            Expect gaps that only backfill will heal.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatcherblocksdropped
+
       # ---------------------------------------------------------------------
       # VEC-277: backfill silent-failure surface (2026-06-02 arbitrum incident)
       # ---------------------------------------------------------------------

@@ -142,6 +142,64 @@ returns below 0.2 sustained.
 
 ---
 
+## VectorWatcherBlocksDropped
+
+**Severity:** warning · **For:** 1m
+
+### What it means
+
+`alchemy_subscriber_blocks_dropped_total` on the labelled `service_name` is
+nonzero over the last 10m. The Alchemy WebSocket subscriber forwards each
+`newHeads` header into a 100-slot buffered channel with a non-blocking send, so a
+header is only discarded once that buffer is full — i.e. the live consumer fell
+~100 blocks behind the socket. On a fast chain (Robinhood, ~10 blocks/s) that is
+~10 seconds of stall; on Ethereum it is ~20 minutes.
+
+A dropped header never reaches the live path, so the block lands in Postgres only
+when backfill picks the gap up.
+
+This counter is also the cheap way to answer the ARCT-374 question when a gap
+appears: **drops here mean our channel dropped it; silence here means Alchemy
+never delivered it.** Before ARCT-398 the watcher never set `Telemetry` on the
+subscriber, so the counter was never emitted and that distinction needed a
+parallel-connection experiment.
+
+### First checks (≤5 min)
+
+1. **Watcher logs** — the drop path logs `channel full, dropping block` with the
+   block number. `kubectl -n vector logs <watcher pod> | grep 'dropping block'`
+   gives the exact heights lost.
+2. **What stalled the consumer** — the live path fetches the block body, receipts
+   (and traces on Ethereum) from Alchemy, writes Redis, then publishes to SNS.
+   Check `VectorWatcherAlchemyLatencyHigh` / `VectorWatcherAlchemyRetriesHigh`
+   for a slow RPC leg, then Redis and SNS publish errors in the same logs.
+3. **Confirm the gap is being healed** — check `backfill_watermark_lag` and the
+   backfill logs for the heights from step 1.
+
+### Common causes
+
+- Alchemy RPC latency spike or a 429 storm slowing the per-block fetch below the
+  chain's block rate.
+- Redis or SNS backpressure / errors blocking the persist step.
+- Watcher pod CPU-throttled or a noisy-neighbour node, so the consumer goroutine
+  cannot keep up.
+
+### Recovery
+
+Backfill heals the dropped heights on its own; no manual repair is normally
+needed. Fix the stall (the cause from step 2), then confirm the heights from the
+log line exist as canonical rows. If backfill is not catching them, follow
+`VectorWatcherBackfillWatermarkLagHigh`.
+
+### Verify recovery
+
+`increase(alchemy_subscriber_blocks_dropped_total[10m])` returns to zero while
+`rate(alchemy_subscriber_blocks_received_total[5m])` still tracks the chain's
+block rate — received at zero means the subscriber stopped delivering entirely,
+which is `VectorWatcherNoBlocks`, not this alert.
+
+---
+
 ## VectorWatcherSilentBackfillNoCanonical
 
 **Severity:** critical · **For:** 10m

@@ -853,34 +853,25 @@ func TestSubscribe_HandlesSubscriptionError(t *testing.T) {
 	}
 }
 
-func TestSubscribe_ChannelBufferFull(t *testing.T) {
-	blocksSent := atomic.Int32{}
-	const totalBlocks = 20
-	const bufferSize = 5
-
-	server := newMockWSServer(func(conn *websocket.Conn) {
+// newBlockFloodServer serves the newHeads subscription and then writes
+// totalBlocks headers back to back, counting each one it wrote into blocksSent.
+// It outpaces any consumer, so a subscriber with a small buffer must drop.
+func newBlockFloodServer(blocksSent *atomic.Int32, totalBlocks int) *mockWSServer {
+	return newMockWSServer(func(conn *websocket.Conn) {
 		defer conn.Close()
 
-		// Read subscription request
 		var req jsonRPCRequest
 		if err := conn.ReadJSON(&req); err != nil {
 			return
 		}
-
-		// Send subscription response
-		resp := jsonRPCResponse{
-			JSONRPC: "2.0",
-			ID:      1,
-			Result:  json.RawMessage(`"0x1234"`),
-		}
+		resp := jsonRPCResponse{JSONRPC: "2.0", ID: 1, Result: json.RawMessage(`"0x1234"`)}
 		if err := conn.WriteJSON(resp); err != nil {
 			return
 		}
 
-		// Flood with blocks (more than buffer size)
 		for i := range totalBlocks {
 			header := outbound.BlockHeader{
-				Number:     fmt.Sprintf("0x%x", 1000+i), // Valid hex block numbers
+				Number:     fmt.Sprintf("0x%x", 1000+i),
 				Hash:       "0xabc",
 				ParentHash: "0xdef",
 			}
@@ -901,6 +892,14 @@ func TestSubscribe_ChannelBufferFull(t *testing.T) {
 
 		<-time.After(time.Second)
 	})
+}
+
+func TestSubscribe_ChannelBufferFull(t *testing.T) {
+	blocksSent := atomic.Int32{}
+	const totalBlocks = 20
+	const bufferSize = 5
+
+	server := newBlockFloodServer(&blocksSent, totalBlocks)
 	defer server.Close()
 
 	sub, err := NewSubscriber(SubscriberConfig{
@@ -960,6 +959,52 @@ drainLoop:
 		t.Error("expected some blocks to be dropped, but none were")
 	}
 	t.Logf("sent %d blocks, received %d, dropped %d", blocksSent.Load(), received, dropped)
+}
+
+func TestSubscribe_ChannelBufferFullRecordsDropMetric(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	tel, err := NewTelemetryWithProviders(tracenoop.NewTracerProvider(), mp, "base")
+	if err != nil {
+		t.Fatalf("failed to create telemetry: %v", err)
+	}
+
+	blocksSent := atomic.Int32{}
+	server := newBlockFloodServer(&blocksSent, 20)
+	defer server.Close()
+
+	sub, err := NewSubscriber(SubscriberConfig{
+		WebSocketURL:      server.URL(),
+		ChannelBufferSize: 5,
+		ReadTimeout:       5 * time.Second,
+		Telemetry:         tel,
+	})
+	if err != nil {
+		t.Fatalf("failed to create subscriber: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := sub.Subscribe(ctx); err != nil {
+		t.Fatalf("failed to subscribe: %v", err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	// Nothing reads the headers channel, so it fills and the flood overflows it.
+	time.Sleep(500 * time.Millisecond)
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("collect metrics: %v", err)
+	}
+	chain, ok := metrictest.ChainValue(rm, "alchemy.subscriber.blocks.dropped.total")
+	if !ok {
+		t.Fatal("expected alchemy.subscriber.blocks.dropped.total to be recorded when the channel is full")
+	}
+	if chain != "base" {
+		t.Errorf("drop metric chain = %q, want base", chain)
+	}
 }
 
 func TestSubscribe_ContextCancellation(t *testing.T) {

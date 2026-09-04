@@ -365,6 +365,13 @@ func openDependencies(
 	eventSink *snsadapter.EventSink,
 	logger *slog.Logger,
 ) (dependencies, error) {
+	// Instrument construction fails on a bad instrument definition, not on a
+	// transient condition, so continuing here would mean running blind forever.
+	alchemyTelemetry, err := alchemy.NewTelemetry(cfg.chainName)
+	if err != nil {
+		return dependencies{}, fmt.Errorf("creating alchemy telemetry: %w", err)
+	}
+
 	subscriber, err := alchemy.NewSubscriber(alchemy.SubscriberConfig{
 		WebSocketURL:      fmt.Sprintf("%s/%s", cfg.alchemyWSURL, cfg.alchemyAPIKey),
 		InitialBackoff:    1 * time.Second,
@@ -375,16 +382,10 @@ func openDependencies(
 		ChannelBufferSize: 100,
 		HealthTimeout:     30 * time.Second,
 		Logger:            logger,
+		Telemetry:         alchemyTelemetry,
 	})
 	if err != nil {
 		return dependencies{}, fmt.Errorf("creating subscriber: %w", err)
-	}
-
-	// Instrument construction fails on a bad instrument definition, not on a
-	// transient condition, so continuing here would mean running blind forever.
-	alchemyTelemetry, err := alchemy.NewTelemetry(cfg.chainName)
-	if err != nil {
-		return dependencies{}, fmt.Errorf("creating alchemy telemetry: %w", err)
 	}
 
 	client, err := alchemy.NewClient(alchemy.ClientConfig{
