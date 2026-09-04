@@ -23,6 +23,13 @@ spec:
       containers:
         - name: avalanche-sparklend-position-tracker
           image: avalanche-sparklend-position-tracker
+          env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: avalanche-sparklend-position-tracker
+                  optional: true
           envFrom:
             - configMapRef:
                 name: otel-config

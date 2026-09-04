@@ -2455,7 +2455,9 @@ check-reloader-opt-in:
 check-overlay-images:
 	@for env in staging prod; do \
 	  ../scripts/deploy/render-overlay-images.sh --env $$env --check ../k8s/overlays/$$env/kustomization.yaml --allow-missing || exit 1; \
+	  ../scripts/deploy/render-overlay-images.sh --env $$env --alias transform-bootstrap --check ../k8s/overlays/$$env/bootstrap/kustomization.yaml --allow-missing || exit 1; \
 	done
+	@../scripts/deploy/check-image-digest-injection.sh
 
 # Apply the dev core overlay (watcher, python-api, cronjobs) — reuses k8s/base.
 # Images must already be built + loaded into kind.

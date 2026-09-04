@@ -21,13 +21,15 @@
 # and the deploy-prod revision contract compare against.
 #
 # Usage:
-#   render-overlay-images.sh --env staging|prod --tag <40-hex> --print
-#   render-overlay-images.sh --env staging|prod --tag <40-hex> --write <kustomization>
-#   render-overlay-images.sh --env staging|prod [--tag <40-hex>] --check <kustomization> [--allow-missing]
+#   render-overlay-images.sh --env staging|prod --tag <40-hex> [--alias <alias>] --print
+#   render-overlay-images.sh --env staging|prod --tag <40-hex> [--alias <alias>] --write <kustomization>
+#   render-overlay-images.sh --env staging|prod [--tag <40-hex>] [--alias <alias>] --check <kustomization> [--allow-missing]
 #   render-overlay-images.sh --strip <kustomization>
 #   render-overlay-images.sh --list services|cronjobs|aliases
 #   [--roster <path>]   default: <repo root>/k8s/image-roster.txt
 #
+#   --alias   render one roster alias. Used for independently rendered manual
+#             overlays, such as transform-bootstrap.
 #   --print   emit the rendered block.
 #   --write   replace the file's images block in place; everything else is kept.
 #   --check   byte-exact: the file's block must equal the render. Without --tag,
@@ -41,8 +43,9 @@
 #             one hand edit it expects: removing or re-homing an image means
 #             deleting its stale entry from the block in the same PR as the roster
 #             change (the bot cannot run before merge).
-#   --strip   print the file without its images block (the deploy-prod contract
-#             diffs this against the parent revision).
+#   --strip   print the file without its generated images block and named image
+#             digest ConfigMap (the deploy-prod contract diffs this against the
+#             parent revision).
 #   --list    print the roster's names of one kind, one per line (deploy.yaml's
 #             promotion loops), or every alias (for humans).
 #
@@ -67,6 +70,7 @@ MODE=""
 TARGET=""
 LIST_KIND=""
 ALLOW_MISSING=0
+ONLY_ALIAS=""
 
 usage() { sed -n '/^# Usage:/,/^# Region:/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
 
@@ -78,6 +82,7 @@ while [ $# -gt 0 ]; do
     --env)           ENV_NAME="$(val "$1" "${2:-}")"; shift 2 ;;
     --tag)           TAG="$(val "$1" "${2:-}")"; shift 2 ;;
     --roster)        ROSTER="$(val "$1" "${2:-}")"; shift 2 ;;
+    --alias)         ONLY_ALIAS="$(val "$1" "${2:-}")"; shift 2 ;;
     --print)         MODE="print"; shift ;;
     --write)         MODE="write"; TARGET="$(val "$1" "${2:-}")"; shift 2 ;;
     --check)         MODE="check"; TARGET="$(val "$1" "${2:-}")"; shift 2 ;;
@@ -144,12 +149,18 @@ render_entries() {
   local prefix parsed
   prefix="$(registry_prefix "$ENV_NAME")"
   parsed="$(parse_roster)"
-  printf '%s\n' "$parsed" | awk -v p="$prefix" -v tag="$TAG" '
-    $3 == "-" { next }
+  printf '%s\n' "$parsed" | awk -v p="$prefix" -v tag="$TAG" -v only="$ONLY_ALIAS" '
+    $3 == "-" || (only != "" && $3 != only) { next }
     {
       if ($1 == "service") { nn = p $2; nt = tag } else { nn = p "cronjob"; nt = $2 "-" tag }
       printf "%s\t%s\t%s\n", $3, nn, nt
     }' | LC_ALL=C sort
+}
+
+require_alias() {
+  [ -z "$ONLY_ALIAS" ] && return
+  [[ "$ONLY_ALIAS" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || die "--alias must be lowercase [a-z0-9-] (got '${ONLY_ALIAS}')"
+  parse_roster | awk -v alias="$ONLY_ALIAS" '$3 == alias { found = 1 } END { exit !found }' || die "--alias '${ONLY_ALIAS}' is not in ${ROSTER}"
 }
 
 # $1 = file of render_entries output -> the block text.
@@ -266,20 +277,48 @@ case "$MODE" in
     ;;
 
   strip)
-    split_target
-    cat "$PRE" "$POST"
+    awk '
+      function flush_config_map() {
+        if (!is_digest_map) printf "%s", config_map
+        config_map = ""; is_digest_map = 0
+      }
+      {
+        # The named digest generator is generated output. The ECR verifier
+        # separately requires its entire block to be the canonical render.
+        if (in_config_map) {
+          if ($0 !~ /^[^[:space:]#]/) {
+            config_map = config_map $0 "\n"
+            if ($0 ~ /^[[:space:]]*-[[:space:]]*name:[[:space:]]*stl-verify-image-digests[[:space:]]*$/) is_digest_map = 1
+            next
+          }
+          flush_config_map(); in_config_map = 0
+        }
+
+        if (in_images) {
+          if ($0 ~ /^[[:space:]]*$/ || $0 ~ /^[[:space:]]/) next
+          in_images = 0
+        }
+
+        if ($0 ~ /^images:/) { in_images = 1; next }
+        if ($0 ~ /^configMapGenerator:/) { in_config_map = 1; config_map = $0 "\n"; next }
+        print
+      }
+      END { if (in_config_map) flush_config_map() }
+    ' "$TARGET"
     ;;
 
   print)
-    require_env; require_tag "--print"
+    require_env; require_tag "--print"; require_alias
     ENTRIES="$(tmpfile)"; render_entries > "$ENTRIES"
+    [ -s "$ENTRIES" ] || die "no image entries rendered"
     block_from_entries "$ENTRIES"
     ;;
 
   write)
-    require_env; require_tag "--write"
+    require_env; require_tag "--write"; require_alias
     split_target
     ENTRIES="$(tmpfile)"; render_entries > "$ENTRIES"
+    [ -s "$ENTRIES" ] || die "no image entries rendered"
     OUT="$(tmpfile)"
     {
       cat "$PRE"
@@ -293,11 +332,12 @@ case "$MODE" in
     ;;
 
   check)
-    require_env
+    require_env; require_alias
     split_target
     [ -s "$REGION" ] || die "${TARGET}: no images: block found"
     if [ -n "$TAG" ]; then require_tag "--check"; else TAG="$(derived_tag)"; fi
     WANT_ENTRIES="$(tmpfile)"; render_entries > "$WANT_ENTRIES"
+    [ -s "$WANT_ENTRIES" ] || die "no image entries rendered"
     if [ "$ALLOW_MISSING" = "0" ]; then
       WANT_BLOCK="$(tmpfile)"; block_from_entries "$WANT_ENTRIES" > "$WANT_BLOCK"
       if ! diff -u "$REGION" "$WANT_BLOCK"; then

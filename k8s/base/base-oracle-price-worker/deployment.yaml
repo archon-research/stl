@@ -25,6 +25,13 @@ spec:
           # Distinct image key — overlay maps this to the oracle-price-worker ECR repo.
           # Same binary as oracle-price-worker; chain is selected via CHAIN_ID env var.
           image: base-oracle-price-worker
+          env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: base-oracle-price-worker
+                  optional: true
           envFrom:
             - configMapRef:
                 name: otel-config

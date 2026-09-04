@@ -22,6 +22,12 @@ spec:
           image: arbitrum-watcher
           args: ["--enable-traces=false"]
           env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: arbitrum-watcher
+                  optional: true
             # Inject the deployment name so each per-chain watcher emits a
             # distinct OTEL service.name (e.g. "watcher", "arbitrum-watcher").
             - name: SERVICE_NAME

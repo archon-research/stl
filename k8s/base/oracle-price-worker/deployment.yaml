@@ -23,6 +23,13 @@ spec:
       containers:
         - name: oracle-price-worker
           image: oracle-price-worker
+          env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: oracle-price-worker
+                  optional: true
           envFrom:
             - configMapRef:
                 name: otel-config

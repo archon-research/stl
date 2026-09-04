@@ -23,6 +23,13 @@ spec:
       containers:
         - name: base-backup-worker
           image: base-backup-worker
+          env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: base-backup-worker
+                  optional: true
           envFrom:
             - configMapRef:
                 name: otel-config

@@ -33,9 +33,12 @@ Root repo map and cross-cutting rules: [../AGENTS.md](../AGENTS.md).
 
 ## Deploy
 
-- **Never hand-edit the `images:` block** in `k8s/overlays/{staging,prod}/kustomization.yaml` — it is
-  generated from `k8s/image-roster.txt` by `scripts/deploy/render-overlay-images.sh`, and the deploy bot
-  rewrites it wholesale on every deploy (staging on merge; prod stamped by the same run, rolled
+- **Never hand-edit the generated blocks** in `k8s/overlays/{staging,prod}/kustomization.yaml` — the `images:`
+  block is generated from `k8s/image-roster.txt` by `scripts/deploy/render-overlay-images.sh`, while the
+  stable `stl-verify-image-digests` ConfigMap generator is resolved from those stamped ECR images by
+  `scripts/deploy/render-image-digests.sh`. The staging gate renders the standard and manual bootstrap
+  overlays and proves every `IMAGE_DIGEST` key resolves through that map to the ECR-verified value. The
+  deploy bot rewrites both wholesale on every deploy (staging on merge; prod stamped by the same run, rolled
   out only after the `production` GitHub Environment approval). Adding an image = one roster line (kind, name, the `image:` aliases the bases
   use) plus the base dir under `resources:`; the next deploy pins it (ORB-362). Removing or
   re-homing an image: change the roster and delete the stale entry in the same PR — the one
@@ -49,5 +52,10 @@ Root repo map and cross-cutting rules: [../AGENTS.md](../AGENTS.md).
   that does not exist reaches the cluster as ImagePullBackOff, fails the staging health gate, and skips
   the prod promotion (ORB-313). A brand-new service lands its build + roster line in a separate PR first
   (CONTRIBUTING.md section 14).
+- `k8s/overlays/{staging,prod}/bootstrap/kustomization.yaml` has its own generated `images:` block for the
+  manually applied `transform-bootstrap` Job. The bot stamps it with the same release as the shared digest
+  ConfigMap; do not hand-pin or edit its tag.
+- ECR tag immutability is an infrastructure prerequisite for this stamp: the infra repository must enforce it
+  for every `stl-sentinel<env>-*` repository before a deployed binary relies on `IMAGE_DIGEST`.
 - Merging to `main` deploys to staging via ArgoCD, then prod after manual approval.
 - AWS resources (SQS queues, SNS subscriptions, IAM, secrets) live in a separate private infrastructure repo and must land **before** the code that needs them.

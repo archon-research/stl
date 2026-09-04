@@ -1022,11 +1022,10 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
    means deleting its stale entry in the same PR as the roster change. (A
    re-home leaves the alias unpinned in the merge commit until the post-merge
    rewrite — the same brief `ImagePullBackOff` window as a first rollout.)
-   `scripts/deploy/verify-ecr-images.sh` (run before each stamp) remains the
-   backstop for an image that was never built — e.g. a roster line without a
-   matching Makefile release target. It fails the deploy with an explicit
-   missing-image list instead of letting a silent prod `ImagePullBackOff`
-   through.
+   `scripts/deploy/render-image-digests.sh` resolves every stamped image with
+   ECR before it writes the deploy commit. A roster line without a matching
+   Makefile release target therefore fails the stamp with its missing or
+   invalid digest instead of reaching prod as an `ImagePullBackOff`.
 
 ---
 

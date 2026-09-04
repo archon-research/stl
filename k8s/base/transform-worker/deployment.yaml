@@ -30,6 +30,12 @@ spec:
         - name: transform-worker
           image: transform-worker
           env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: transform-worker
+                  optional: true
             # Inject the deployment name so the worker registers its Temporal
             # schedule/task queue under this name (cfg.Name) and its metrics
             # carry service_name="transform-worker".

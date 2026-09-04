@@ -113,6 +113,8 @@ jobs:
     permissions:
       contents: read
       id-token: write  # AWS OIDC for the pre-stamp ECR verify
+    outputs:
+      staging_sha: ${{ steps.commit.outputs.staging_sha }}
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -134,17 +136,16 @@ jobs:
           role-to-assume: arn:aws:iam::579039992622:role/stl-sentinelstaging-github-actions-ecr
           aws-region: eu-west-1
 
-      # ORB-362: the images block is rendered wholesale from the roster at the
-      # exact main commit the bump is parented on (FETCH_HEAD), so the committed
-      # block is always "what the roster at this revision renders" — the same
-      # invariant deploy-prod verifies for prod, held here by construction (no
-      # separate validator runs on staging).
-      - name: Render staging images block and commit to main (via API for verified commits)
+      # The image block, ECR-resolved digest map, and manual bootstrap tag are
+      # stamped from one main revision and committed atomically.
+      - name: Render staging image identities and commit to main (via API for verified commits)
+        id: commit
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           SHA: ${{ inputs.sha || github.sha }}
           REPO: ${{ github.repository }}
           KUSTOMIZATION: k8s/overlays/staging/kustomization.yaml
+          BOOTSTRAP: k8s/overlays/staging/bootstrap/kustomization.yaml
           ROSTER: k8s/image-roster.txt
         run: |
           set -euo pipefail
@@ -160,26 +161,25 @@ jobs:
             # out of step with the tree deploy-prod validates.
             git fetch -q origin main
             MAIN_SHA=$(git rev-parse FETCH_HEAD)
-            git checkout -q FETCH_HEAD -- "$KUSTOMIZATION" "$ROSTER" scripts/deploy/render-overlay-images.sh
+            git checkout -q FETCH_HEAD -- "$KUSTOMIZATION" "$BOOTSTRAP" "$ROSTER" scripts/deploy/render-overlay-images.sh scripts/deploy/render-image-digests.sh
 
             scripts/deploy/render-overlay-images.sh --env staging --tag "$SHA" --write "$KUSTOMIZATION"
+            scripts/deploy/render-overlay-images.sh --env staging --tag "$SHA" --alias transform-bootstrap --write "$BOOTSTRAP"
+            scripts/deploy/render-image-digests.sh --write "$KUSTOMIZATION"
 
-            if git diff --quiet FETCH_HEAD -- "$KUSTOMIZATION"; then
+            if git diff --quiet FETCH_HEAD -- "$KUSTOMIZATION" "$BOOTSTRAP"; then
               echo "No changes to commit"
+              echo "staging_sha=${MAIN_SHA}" >> "$GITHUB_OUTPUT"
               exit 0
             fi
 
-            # ORB-299/ORB-313: verify the exact file about to be committed (this
-            # fetched-and-rendered overlay), not the workflow's initial checkout,
-            # so a concurrent merge cannot slip an unbuilt image past the gate.
-            if ! scripts/deploy/verify-ecr-images.sh --kustomization "$KUSTOMIZATION"; then
-              echo "::error::Refusing to stamp staging: overlay references image(s) missing from ECR."
-              exit 1
-            fi
+            # render-image-digests resolves every stamped image with ECR
+            # BatchGetImage and fails before this point for a missing or invalid
+            # digest, so the generated mapping is the pre-commit image gate.
 
             BASE_TREE=$(gh api "repos/${REPO}/git/commits/${MAIN_SHA}" --jq '.tree.sha')
 
-            # Create a new tree with the updated file
+            # Create a new tree with the atomically stamped deployment inputs.
             NEW_TREE=$(gh api "repos/${REPO}/git/trees" \
               --method POST \
               --input - <<TREE_EOF | jq -r '.sha'
@@ -190,6 +190,11 @@ jobs:
               "mode": "100644",
               "type": "blob",
               "content": $(jq -Rs . < "$KUSTOMIZATION")
+            }, {
+              "path": "${BOOTSTRAP}",
+              "mode": "100644",
+              "type": "blob",
+              "content": $(jq -Rs . < "$BOOTSTRAP")
             }]
           }
           TREE_EOF
@@ -198,7 +203,7 @@ jobs:
             # Create a verified commit via the API
             NEW_COMMIT=$(gh api "repos/${REPO}/git/commits" \
               --method POST \
-              --field "message=deploy(staging): update image tags to ${SHA}" \
+              --field "message=deploy(staging): stamp image identities to ${SHA}" \
               --field "tree=${NEW_TREE}" \
               --field "parents[]=${MAIN_SHA}" \
               --jq '.sha')
@@ -208,6 +213,7 @@ jobs:
               --method PATCH \
               --field "sha=${NEW_COMMIT}" 2>&1); then
               echo "Successfully updated main to ${NEW_COMMIT}"
+              echo "staging_sha=${NEW_COMMIT}" >> "$GITHUB_OUTPUT"
               exit 0
             fi
 
@@ -245,6 +251,12 @@ jobs:
             || steps.wait-attempt-2.outputs.failure-summary
             || steps.wait-attempt-1.outputs.failure-summary }}
     steps:
+      - name: Checkout stamped staging revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.update-staging.outputs.staging_sha }}
+          persist-credentials: false
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: archon-research/github-actions
@@ -320,6 +332,15 @@ jobs:
           aws-role-arn: arn:aws:iam::030797368798:role/archonprod-github-actions-argocd-wait
           tailscale-secret-id: archon-prod-argocd-ci-tailscale-oauth
           argocd-token-secret-id: archon-prod-argocd-ci-token
+
+      - name: Configure AWS credentials (staging ECR read)
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: arn:aws:iam::579039992622:role/stl-sentinelstaging-github-actions-ecr
+          aws-region: eu-west-1
+
+      - name: Verify rendered IMAGE_DIGEST references
+        run: scripts/deploy/verify-rendered-image-digests.sh
 
   build-push-prod:
     name: Build & Push Images (Prod)
@@ -448,19 +469,18 @@ jobs:
           role-to-assume: arn:aws:iam::030797368798:role/stl-sentinelprod-github-actions-ecr
           aws-region: eu-west-1
 
-      # Auto-merge the prod image bump straight to main (no PR), guarded so a
+      # Auto-merge the prod image identity stamp straight to main (no PR), guarded so a
       # compromised CI/bot cannot smuggle anything else into a prod deploy:
-      #   1. the diff must touch ONLY k8s/overlays/prod/kustomization.yaml,
-      #   2. outside the generated images block the file must be byte-identical,
+      #   1. the diff may touch only the generated overlay and bootstrap files,
+      #   2. outside the generated blocks those files must be byte-identical,
       #   3. every image in the file must resolve to our prod ECR account, and
-      #   4. the images block must be exactly what k8s/image-roster.txt renders
-      #      for prod at DEPLOY_SHA (ORB-362; the roster is reviewed code and,
-      #      by guard 1, untouched here).
+      #   4. images, bootstrap tag, and digest map must match their roster/ECR
+      #      source at DEPLOY_SHA (the roster is reviewed code and untouched here).
       # Any violation fails the job closed; nothing is committed. stl-prod stays
       # on MANUAL sync, so this commit does not roll out until the gated
       # deploy-prod job runs `argocd app sync` on the approved revision.
       # deploy-prod re-derives 1–4 independently on the committed revision.
-      - name: Render, validate, and commit prod image tags to main
+      - name: Render, validate, and commit prod image identities to main
         id: commit
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -468,6 +488,7 @@ jobs:
           REPO: ${{ github.repository }}
           PROD_ECR_PREFIX: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-
           KUSTOMIZATION: k8s/overlays/prod/kustomization.yaml
+          BOOTSTRAP: k8s/overlays/prod/bootstrap/kustomization.yaml
           ROSTER: k8s/image-roster.txt
         run: |
           set -euo pipefail
@@ -494,29 +515,37 @@ jobs:
             # last-promoted marker that main change detection diffs against
             # (ORB-361); the renderer owns the tag shape both rely on.
             scripts/deploy/render-overlay-images.sh --env prod --tag "$DEPLOY_SHA" --write "$KUSTOMIZATION"
+            scripts/deploy/render-overlay-images.sh --env prod --tag "$DEPLOY_SHA" --alias transform-bootstrap --write "$BOOTSTRAP"
+            scripts/deploy/render-image-digests.sh --write "$KUSTOMIZATION"
 
-            if git diff --quiet FETCH_HEAD -- "$KUSTOMIZATION"; then
+            if git diff --quiet FETCH_HEAD -- "$KUSTOMIZATION" "$BOOTSTRAP"; then
               echo "Prod already at ${DEPLOY_SHA}; nothing to commit"
               echo "changed=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
 
-            # GUARD 1: only the prod kustomization may change.
+            # GUARD 1: only generated prod deployment inputs may change.
             CHANGED_FILES=$(git diff --name-only FETCH_HEAD)
-            if [ "$CHANGED_FILES" != "$KUSTOMIZATION" ]; then
+            UNEXPECTED_FILES=$(printf '%s\n' "$CHANGED_FILES" | grep -F -x -v -e "$KUSTOMIZATION" -e "$BOOTSTRAP" || true)
+            if [ -n "$UNEXPECTED_FILES" ]; then
               echo "::error::Prod deploy diff touches unexpected files:"
-              echo "$CHANGED_FILES"
+              echo "$UNEXPECTED_FILES"
               exit 1
             fi
 
-            # GUARD 2: outside the generated images block the file must be
-            # byte-identical to main — the renderer may replace that block and
-            # nothing else.
+            # GUARD 2: outside generated blocks both files must be byte-identical.
             git show "FETCH_HEAD:${KUSTOMIZATION}" > "${RUNNER_TEMP}/kustomization.main.yaml"
             if ! diff -u \
                 <(scripts/deploy/render-overlay-images.sh --strip "${RUNNER_TEMP}/kustomization.main.yaml") \
                 <(scripts/deploy/render-overlay-images.sh --strip "$KUSTOMIZATION"); then
-              echo "::error::Prod deploy diff changes ${KUSTOMIZATION} outside the images block."
+              echo "::error::Prod deploy diff changes ${KUSTOMIZATION} outside generated blocks."
+              exit 1
+            fi
+            git show "FETCH_HEAD:${BOOTSTRAP}" > "${RUNNER_TEMP}/bootstrap.main.yaml"
+            if ! diff -u \
+                <(scripts/deploy/render-overlay-images.sh --strip "${RUNNER_TEMP}/bootstrap.main.yaml") \
+                <(scripts/deploy/render-overlay-images.sh --strip "$BOOTSTRAP"); then
+              echo "::error::Prod deploy diff changes ${BOOTSTRAP} outside its generated images block."
               exit 1
             fi
 
@@ -527,7 +556,7 @@ jobs:
               /^[[:space:]]*newName:/ {
                 v=$0; sub(/^[[:space:]]*newName:[[:space:]]*/,"",v); gsub(/^"|"$/,"",v)
                 if (index(v,p)!=1) print
-              }' "$KUSTOMIZATION")
+              }' "$KUSTOMIZATION" "$BOOTSTRAP")
             if [ -n "$BAD_IMAGES" ]; then
               echo "::error::Prod kustomization references images outside the prod ECR account:"
               echo "$BAD_IMAGES"
@@ -540,16 +569,13 @@ jobs:
               echo "::error::Prod images block is not what k8s/image-roster.txt renders at ${DEPLOY_SHA}."
               exit 1
             fi
-
-            # ORB-299: verify every image the (now rendered) prod overlay
-            # references exists in prod ECR, against the exact file about to be
-            # committed. Promotion-list drift is gone by construction (list and
-            # block share the roster); this still catches a roster on main that
-            # grew past what this run built, failing closed until the next run.
-            if ! scripts/deploy/verify-ecr-images.sh --kustomization "$KUSTOMIZATION"; then
-              echo "::error::Refusing to stamp prod: overlay references image(s) missing from prod ECR."
+            if ! scripts/deploy/render-overlay-images.sh --env prod --tag "$DEPLOY_SHA" --alias transform-bootstrap --check "$BOOTSTRAP"; then
+              echo "::error::Prod bootstrap image tag is not what k8s/image-roster.txt renders at ${DEPLOY_SHA}."
               exit 1
             fi
+            # render-image-digests resolves every stamped image with ECR
+            # BatchGetImage and fails before this point for a missing or invalid
+            # digest, so the generated mapping is the pre-commit image gate.
 
             SHORT_SHA=${DEPLOY_SHA:0:7}
             BASE_TREE=$(gh api "repos/${REPO}/git/commits/${MAIN_SHA}" --jq '.tree.sha')
@@ -564,6 +590,11 @@ jobs:
               "mode": "100644",
               "type": "blob",
               "content": $(jq -Rs . < "$KUSTOMIZATION")
+            }, {
+              "path": "${BOOTSTRAP}",
+              "mode": "100644",
+              "type": "blob",
+              "content": $(jq -Rs . < "$BOOTSTRAP")
             }]
           }
           TREE_EOF
@@ -571,7 +602,7 @@ jobs:
 
             NEW_COMMIT=$(gh api "repos/${REPO}/git/commits" \
               --method POST \
-              --field "message=deploy(prod): update image tags to ${SHORT_SHA}" \
+              --field "message=deploy(prod): stamp image identities to ${SHORT_SHA}" \
               --field "tree=${NEW_TREE}" \
               --field "parents[]=${MAIN_SHA}" \
               --jq '.sha')

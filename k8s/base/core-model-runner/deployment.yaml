@@ -41,6 +41,12 @@ spec:
             - secretRef:
                 name: core-model-runner
           env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: core-model-runner
+                  optional: true
             - name: CORE_MODEL_MARKET_KEY
               value: "all"
           # Larger than the other cronjobs (50m/64Mi, IO against an external

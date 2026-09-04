@@ -45,6 +45,13 @@ spec:
       containers:
         - name: python-api
           image: python-api
+          env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: python-api
+                  optional: true
           ports:
             - containerPort: 8000
               protocol: TCP

@@ -38,6 +38,13 @@ spec:
       containers:
         - name: morpho-vault-backfill
           image: morpho-vault-backfill
+          env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: morpho-vault-backfill
+                  optional: true
           envFrom:
             - configMapRef:
                 name: otel-config

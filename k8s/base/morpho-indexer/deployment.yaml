@@ -23,6 +23,13 @@ spec:
       containers:
         - name: morpho-indexer
           image: morpho-indexer
+          env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: morpho-indexer
+                  optional: true
           envFrom:
             - configMapRef:
                 name: otel-config

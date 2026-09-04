@@ -23,6 +23,13 @@ spec:
       containers:
         - name: spark-anchorage-indexer
           image: spark-anchorage-indexer
+          env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: spark-anchorage-indexer
+                  optional: true
           envFrom:
             - configMapRef:
                 name: spark-anchorage-indexer

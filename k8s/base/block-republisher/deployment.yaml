@@ -47,6 +47,13 @@ spec:
       containers:
         - name: block-republisher
           image: block-republisher
+          env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: block-republisher
+                  optional: true
           envFrom:
             - configMapRef:
                 name: otel-config

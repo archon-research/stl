@@ -20,6 +20,13 @@ spec:
       containers:
         - name: morpho-v2-bootstrap
           image: morpho-v2-bootstrap
+          env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: morpho-v2-bootstrap
+                  optional: true
           envFrom:
             - configMapRef:
                 name: otel-config

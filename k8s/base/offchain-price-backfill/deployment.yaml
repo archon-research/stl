@@ -35,6 +35,13 @@ spec:
       containers:
         - name: offchain-price-backfill
           image: offchain-price-backfill
+          env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: offchain-price-backfill
+                  optional: true
           envFrom:
             - configMapRef:
                 name: offchain-price-backfill

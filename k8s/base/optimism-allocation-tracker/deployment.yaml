@@ -23,6 +23,13 @@ spec:
       containers:
         - name: optimism-allocation-tracker
           image: allocation-tracker
+          env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: allocation-tracker
+                  optional: true
           envFrom:
             - configMapRef:
                 name: otel-config

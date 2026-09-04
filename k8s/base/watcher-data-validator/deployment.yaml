@@ -24,6 +24,12 @@ spec:
         - name: watcher-data-validator
           image: watcher-data-validator
           env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: watcher-data-validator
+                  optional: true
             # Inject the deployment name so this validator registers its own
             # Temporal schedule/task queue (cfg.Name) distinct from other chains.
             - name: SERVICE_NAME

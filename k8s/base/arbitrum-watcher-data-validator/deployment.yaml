@@ -26,6 +26,12 @@ spec:
           # The overlay kustomization.yaml overrides newName + newTag.
           image: arbitrum-watcher-data-validator
           env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: arbitrum-watcher-data-validator
+                  optional: true
             # Inject the deployment name so this validator registers its own
             # Temporal schedule/task queue (cfg.Name) distinct from other chains.
             - name: SERVICE_NAME

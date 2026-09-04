@@ -23,6 +23,13 @@ spec:
       containers:
         - name: offchain-price-indexer
           image: offchain-price-indexer
+          env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: offchain-price-indexer
+                  optional: true
           envFrom:
             - configMapRef:
                 name: otel-config

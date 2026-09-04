@@ -7,6 +7,8 @@ on:
     paths-ignore:
       - 'k8s/overlays/staging/kustomization.yaml'
       - 'k8s/overlays/prod/kustomization.yaml'
+      - 'k8s/overlays/staging/bootstrap/kustomization.yaml'
+      - 'k8s/overlays/prod/bootstrap/kustomization.yaml'
   pull_request:
   merge_group:
   workflow_dispatch:
@@ -175,7 +177,14 @@ jobs:
         run: |
           for env in staging prod; do
             scripts/deploy/render-overlay-images.sh --env "$env" --check "k8s/overlays/$env/kustomization.yaml" --allow-missing
+            scripts/deploy/render-overlay-images.sh --env "$env" --alias transform-bootstrap --check "k8s/overlays/$env/bootstrap/kustomization.yaml" --allow-missing
           done
+
+      - name: Image digest injection covers every stamped workload
+        run: scripts/deploy/check-image-digest-injection.sh
+
+      - name: Image digest renderer test
+        run: scripts/deploy/render-image-digests_test.sh
 
   ci-passed:
     name: Success

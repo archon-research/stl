@@ -25,6 +25,13 @@ spec:
           # Image name used as the Kustomize images transformer key.
           # The overlay kustomization.yaml overrides newName + newTag.
           image: arbitrum-psm3-indexer
+          env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: arbitrum-psm3-indexer
+                  optional: true
           envFrom:
             - configMapRef:
                 name: otel-config

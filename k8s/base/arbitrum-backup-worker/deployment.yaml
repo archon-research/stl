@@ -23,6 +23,13 @@ spec:
       containers:
         - name: arbitrum-backup-worker
           image: arbitrum-backup-worker
+          env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: arbitrum-backup-worker
+                  optional: true
           envFrom:
             - configMapRef:
                 name: otel-config

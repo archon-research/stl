@@ -23,6 +23,13 @@ spec:
       containers:
         - name: maple-graphql-indexer
           image: maple-graphql-indexer
+          env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: maple-graphql-indexer
+                  optional: true
           envFrom:
             - configMapRef:
                 name: otel-config

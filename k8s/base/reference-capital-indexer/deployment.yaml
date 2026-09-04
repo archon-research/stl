@@ -26,6 +26,13 @@ spec:
       containers:
         - name: reference-capital-indexer
           image: reference-capital-indexer
+          env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: reference-capital-indexer
+                  optional: true
           envFrom:
             - configMapRef:
                 name: otel-config

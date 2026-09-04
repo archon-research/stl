@@ -29,6 +29,13 @@ spec:
           # newName + newTag. All three exchange pods share one binary, selected at
           # runtime by EXCHANGE.
           image: cex-orderbook-indexer
+          env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: cex-orderbook-indexer
+                  optional: true
           envFrom:
             - configMapRef:
                 name: otel-config

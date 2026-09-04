@@ -23,6 +23,13 @@ spec:
       containers:
         - name: optimism-backup-worker
           image: optimism-backup-worker
+          env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: optimism-backup-worker
+                  optional: true
           envFrom:
             - configMapRef:
                 name: otel-config

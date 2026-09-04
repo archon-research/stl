@@ -55,6 +55,13 @@ spec:
       containers:
         - name: reference-capital-backfill
           image: reference-capital-backfill
+          env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: reference-capital-backfill
+                  optional: true
           # No args: the window is the workflow's input, supplied per run.
           #
           # otel-config is required, not decorative — RunWorker's interceptor emits

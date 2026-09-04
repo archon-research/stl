@@ -105,6 +105,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      id-token: write
     outputs:
       reviewed: ${{ steps.classify.outputs.reviewed }}
     steps:
@@ -115,6 +116,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Configure AWS credentials (prod ECR read)
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: arn:aws:iam::030797368798:role/stl-sentinelprod-github-actions-ecr
+          aws-region: eu-west-1
+
       # KEEP IN SYNC with "Re-validate deploy revision (fail closed)" in
       # deploy-prod. That copy is authoritative; this one only fails faster.
       - name: Classify and validate
@@ -124,6 +131,7 @@ jobs:
           REPO: ${{ github.repository }}
           DEPLOY_SHA: ${{ github.sha }}
           KUSTOMIZATION: k8s/overlays/prod/kustomization.yaml
+          BOOTSTRAP: k8s/overlays/prod/bootstrap/kustomization.yaml
           PROD_ECR_PREFIX: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-
         run: |
           set -euo pipefail
@@ -141,9 +149,10 @@ jobs:
             PARENT=$(git rev-parse "${DEPLOY_SHA}^")
 
             CHANGED_FILES=$(git diff --name-only "${PARENT}" "${DEPLOY_SHA}")
-            if [ "$CHANGED_FILES" != "$KUSTOMIZATION" ]; then
+            UNEXPECTED_FILES=$(printf '%s\n' "$CHANGED_FILES" | grep -F -x -v -e "$KUSTOMIZATION" -e "$BOOTSTRAP" || true)
+            if [ -n "$UNEXPECTED_FILES" ]; then
               echo "::error::Unreviewed revision ${DEPLOY_SHA} changes files beyond ${KUSTOMIZATION}:"
-              echo "$CHANGED_FILES"
+              echo "$UNEXPECTED_FILES"
               exit 1
             fi
 
@@ -157,8 +166,23 @@ jobs:
               echo "::error::Unreviewed revision ${DEPLOY_SHA} changes ${KUSTOMIZATION} outside the generated images block."
               exit 1
             fi
+            git show "${PARENT}:${BOOTSTRAP}" > "${RUNNER_TEMP}/bootstrap.parent.yaml"
+            if ! diff -u \
+                <(scripts/deploy/render-overlay-images.sh --strip "${RUNNER_TEMP}/bootstrap.parent.yaml") \
+                <(scripts/deploy/render-overlay-images.sh --strip "$BOOTSTRAP"); then
+              echo "::error::Unreviewed revision ${DEPLOY_SHA} changes ${BOOTSTRAP} outside its generated images block."
+              exit 1
+            fi
             if ! scripts/deploy/render-overlay-images.sh --env prod --check "$KUSTOMIZATION"; then
               echo "::error::Unreviewed revision ${DEPLOY_SHA}: the prod images block is not what k8s/image-roster.txt renders."
+              exit 1
+            fi
+            if ! scripts/deploy/render-overlay-images.sh --env prod --alias transform-bootstrap --check "$BOOTSTRAP"; then
+              echo "::error::Unreviewed revision ${DEPLOY_SHA}: the prod bootstrap tag is not what k8s/image-roster.txt renders."
+              exit 1
+            fi
+            if ! scripts/deploy/render-image-digests.sh --verify "$KUSTOMIZATION"; then
+              echo "::error::Unreviewed revision ${DEPLOY_SHA}: the prod image digest ConfigMap does not match ECR."
               exit 1
             fi
           fi
@@ -170,14 +194,14 @@ jobs:
             /^[[:space:]]*newName:/ {
               v=$0; sub(/^[[:space:]]*newName:[[:space:]]*/,"",v); gsub(/^"|"$/,"",v)
               if (index(v,p)!=1) print
-            }' "$KUSTOMIZATION")
+            }' "$KUSTOMIZATION" "$BOOTSTRAP")
           if [ -n "$BAD_IMAGES" ]; then
             echo "::error::Prod kustomization references images outside the prod ECR account:"
             echo "$BAD_IMAGES"
             exit 1
           fi
 
-          BAD_TAGS=$(grep -E '^[[:space:]]*newTag:' "$KUSTOMIZATION" \
+          BAD_TAGS=$(grep -h -E '^[[:space:]]*newTag:' "$KUSTOMIZATION" "$BOOTSTRAP" \
             | grep -Ev '^[[:space:]]*newTag:[[:space:]]*"([a-z0-9]+-)*[a-f0-9]{40}"[[:space:]]*$' \
             || true)
           if [ -n "$BAD_TAGS" ]; then
@@ -456,11 +480,18 @@ jobs:
           path: .github-actions
           persist-credentials: false
 
+      - name: Configure AWS credentials (prod ECR read)
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: arn:aws:iam::030797368798:role/stl-sentinelprod-github-actions-ecr
+          aws-region: eu-west-1
+
       - name: Re-validate deploy revision (fail closed)
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           KUSTOMIZATION: k8s/overlays/prod/kustomization.yaml
+          BOOTSTRAP: k8s/overlays/prod/bootstrap/kustomization.yaml
         run: |
           set -euo pipefail
 
@@ -477,9 +508,10 @@ jobs:
             PARENT=$(git rev-parse "${DEPLOY_SHA}^")
 
             CHANGED_FILES=$(git diff --name-only "${PARENT}" "${DEPLOY_SHA}")
-            if [ "$CHANGED_FILES" != "$KUSTOMIZATION" ]; then
+            UNEXPECTED_FILES=$(printf '%s\n' "$CHANGED_FILES" | grep -F -x -v -e "$KUSTOMIZATION" -e "$BOOTSTRAP" || true)
+            if [ -n "$UNEXPECTED_FILES" ]; then
               echo "::error::Unreviewed revision ${DEPLOY_SHA} changes files beyond ${KUSTOMIZATION}:"
-              echo "$CHANGED_FILES"
+              echo "$UNEXPECTED_FILES"
               exit 1
             fi
 
@@ -493,8 +525,23 @@ jobs:
               echo "::error::Unreviewed revision ${DEPLOY_SHA} changes ${KUSTOMIZATION} outside the generated images block."
               exit 1
             fi
+            git show "${PARENT}:${BOOTSTRAP}" > "${RUNNER_TEMP}/bootstrap.parent.yaml"
+            if ! diff -u \
+                <(scripts/deploy/render-overlay-images.sh --strip "${RUNNER_TEMP}/bootstrap.parent.yaml") \
+                <(scripts/deploy/render-overlay-images.sh --strip "$BOOTSTRAP"); then
+              echo "::error::Unreviewed revision ${DEPLOY_SHA} changes ${BOOTSTRAP} outside its generated images block."
+              exit 1
+            fi
             if ! scripts/deploy/render-overlay-images.sh --env prod --check "$KUSTOMIZATION"; then
               echo "::error::Unreviewed revision ${DEPLOY_SHA}: the prod images block is not what k8s/image-roster.txt renders."
+              exit 1
+            fi
+            if ! scripts/deploy/render-overlay-images.sh --env prod --alias transform-bootstrap --check "$BOOTSTRAP"; then
+              echo "::error::Unreviewed revision ${DEPLOY_SHA}: the prod bootstrap tag is not what k8s/image-roster.txt renders."
+              exit 1
+            fi
+            if ! scripts/deploy/render-image-digests.sh --verify "$KUSTOMIZATION"; then
+              echo "::error::Unreviewed revision ${DEPLOY_SHA}: the prod image digest ConfigMap does not match ECR."
               exit 1
             fi
           fi
@@ -506,14 +553,14 @@ jobs:
             /^[[:space:]]*newName:/ {
               v=$0; sub(/^[[:space:]]*newName:[[:space:]]*/,"",v); gsub(/^"|"$/,"",v)
               if (index(v,p)!=1) print
-            }' "$KUSTOMIZATION")
+            }' "$KUSTOMIZATION" "$BOOTSTRAP")
           if [ -n "$BAD_IMAGES" ]; then
             echo "::error::Prod kustomization references images outside the prod ECR account:"
             echo "$BAD_IMAGES"
             exit 1
           fi
 
-          BAD_TAGS=$(grep -E '^[[:space:]]*newTag:' "$KUSTOMIZATION" \
+          BAD_TAGS=$(grep -h -E '^[[:space:]]*newTag:' "$KUSTOMIZATION" "$BOOTSTRAP" \
             | grep -Ev '^[[:space:]]*newTag:[[:space:]]*"([a-z0-9]+-)*[a-f0-9]{40}"[[:space:]]*$' \
             || true)
           if [ -n "$BAD_TAGS" ]; then

@@ -28,6 +28,13 @@ spec:
           # DEX=curve from curve-indexer-config, defined per overlay (VEC-329).
           # Not defined in this base, so this base is not overlay-wired until then.
           image: dex-indexer
+          env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: dex-indexer
+                  optional: true
           envFrom:
             - configMapRef:
                 name: otel-config

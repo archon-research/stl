@@ -27,6 +27,13 @@ spec:
       containers:
         - name: transform-bootstrap
           image: transform-bootstrap
+          env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: transform-bootstrap
+                  optional: true
           # -from is the backfill start; override per env in the overlay. -step is
           # the per-call window. statement_timeout=0 and tiered reads are set by the
           # tool itself, not here.
