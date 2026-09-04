@@ -113,10 +113,11 @@ groups:
           summary: "Vector watcher receiving no block headers on {{ $labels.service_name }}"
           description: |
             `alchemy_subscriber_blocks_received_total` on
-            `{{ $labels.service_name }}` has been flat for >5m (a 5m rate
-            window plus `for: 5m`, so up to ~10m from onset) even though the
-            process is still issuing RPC calls. Live ingestion for that chain
-            is stopped and only backfill is keeping the chain whole.
+            `{{ $labels.service_name }}` has been flat — or was never emitted
+            at all — for >5m (a 5m rate window plus `for: 5m`, so up to ~10m
+            from onset) even though the process is still issuing RPC calls.
+            Live ingestion for that chain is stopped and only backfill is
+            keeping the chain whole.
 
             Check `alchemy_subscriber_blocks_dropped_total` FIRST: if it is
             climbing, the socket is fine and the live consumer is wedged —
