@@ -856,6 +856,14 @@ worker, on its own task queue, against its own topic, Redis and bucket — the
 one run. Robinhood has a watcher but no backup worker, so it has no raw archive
 to derive a version from and no republisher is deployed for it.
 
+The three chain-bearing variables are all checked against `CHAIN_ID` at startup,
+so a cross-chain deployment is a pod that will not start rather than corrections
+built from the wrong chain: `AWS_SNS_TOPIC_ARN` against the topic name,
+`S3_BUCKET` against the bucket prefix, and `ALCHEMY_HTTP_URL` against the chain
+the node itself reports for `eth_chainId`. The last is the only guard on the
+node URL — a mismatch there would read another chain's blocks and publish them,
+correctly named, onto this chain's topic.
+
 | Chain | Task queue = `service_name` | Deployment | `S3_BUCKET` (infra-config property) |
 |---|---|---|---|
 | Ethereum | `block-republisher` | `block-republisher` | `ethereum_s3_bucket` |

@@ -188,6 +188,27 @@ func TestRegister_RefusesAConfigItCannotPublishWith(t *testing.T) {
 	}
 }
 
+// TestRegister_RefusesANodeOnAnotherChain: CHAIN_ID and ALCHEMY_HTTP_URL arrive
+// as independent variables, and neither the topic nor the bucket guard can see
+// a mismatch between them — every height would be read from the wrong chain and
+// published, correctly named, onto this chain's topic.
+func TestRegister_RefusesANodeOnAnotherChain(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	newDeployment(t, ctx)
+	elsewhere := startMockRPCServerOnChain(t, 8453, orphanOnly, alreadyCorrected)
+	t.Cleanup(elsewhere.Close)
+	t.Setenv("ALCHEMY_HTTP_URL", elsewhere.URL)
+
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	err := register(ctx, temporal.Dependencies{Logger: discardLogger()}, env)
+
+	if err == nil || !strings.Contains(err.Error(), "8453") {
+		t.Fatalf("error = %v, want one naming the chain the node reports", err)
+	}
+}
+
 // TestRegister_RefusesAnArchiveItCannotList keeps the startup probe on the path a
 // deployment reaches: a bucket this pod may not list — a missing Pod Identity
 // grant, or a name that is not there — must stop the worker rather than fail
@@ -441,8 +462,17 @@ func awsClients(t *testing.T, ctx context.Context) (*awssns.Client, *awssqs.Clie
 }
 
 // startMockRPCServer answers the by-number reads Republish issues for every
-// fixture, with the same canonical hash on every one so no reorg is detected.
+// fixture, with the same canonical hash on every one so no reorg is detected,
+// and reports the chain the deployment is configured for.
 func startMockRPCServer(t *testing.T, fixtures ...blockFixture) *httptest.Server {
+	t.Helper()
+
+	return startMockRPCServerOnChain(t, integrationChainID, fixtures...)
+}
+
+// startMockRPCServerOnChain is the same node reporting a chain of its own, which
+// is what the worker's startup guard weighs CHAIN_ID against.
+func startMockRPCServerOnChain(t *testing.T, chainID int64, fixtures ...blockFixture) *httptest.Server {
 	t.Helper()
 	headers := make(map[int64]json.RawMessage, len(fixtures))
 	fullBlocks := make(map[int64]json.RawMessage, len(fixtures))
@@ -465,6 +495,8 @@ func startMockRPCServer(t *testing.T, fixtures ...blockFixture) *httptest.Server
 		answer := func(req rpcReq) rpcResp {
 			out := rpcResp{JSONRPC: "2.0", ID: req.ID}
 			switch req.Method {
+			case "eth_chainId":
+				out.Result = json.RawMessage(fmt.Sprintf(`"0x%x"`, chainID))
 			case "eth_blockNumber":
 				out.Result = json.RawMessage(fmt.Sprintf(`"0x%x"`, head))
 			case "eth_getBlockByNumber":

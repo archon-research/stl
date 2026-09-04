@@ -144,9 +144,9 @@ func TestLoadConfig(t *testing.T) {
 			wantErrContains: "ALCHEMY_HTTP_URL",
 		},
 		{
-			// Presence is all this binary checks: an operator who points an L2 at a
-			// mainnet URL gets exactly what the ConfigMap says, and the SNS topic and
-			// bucket guards are what catch a cross-chain deployment.
+			// Presence is all loadConfig checks: the URL it builds is exactly what the
+			// ConfigMap says. What the node behind it actually serves is weighed
+			// against CHAIN_ID at startup instead, where a node can answer for itself.
 			name: "a chain pointed at another chain's node is passed through",
 			override: map[string]string{
 				"CHAIN_ID":          "8453",

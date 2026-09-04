@@ -453,6 +453,56 @@ func TestGetBlobSidecars_Success(t *testing.T) {
 	}
 }
 
+// --- Test: ChainID ---
+
+// A worker reads its chain from configuration and its blocks from a URL; the
+// node is the only thing that can say the two agree.
+func TestChainID_ReportsTheChainTheNodeServes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req jsonRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("failed to decode request: %v", err)
+		}
+		if req.Method != "eth_chainId" {
+			t.Errorf("expected method=eth_chainId, got %s", req.Method)
+		}
+
+		resp := jsonRPCResponse{JSONRPC: "2.0", ID: 1, Result: json.RawMessage(`"0xa4b1"`)}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	chainID, err := testClient(t, server.URL).ChainID(context.Background())
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chainID != 42161 {
+		t.Errorf("expected chainID=42161, got %d", chainID)
+	}
+}
+
+func TestChainID_InvalidResult(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := jsonRPCResponse{JSONRPC: "2.0", ID: 1, Result: json.RawMessage(`42161`)} // Should be a hex string
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	_, err := testClient(t, server.URL).ChainID(context.Background())
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to parse chain ID") {
+		t.Errorf("expected parse error, got %v", err)
+	}
+}
+
 // --- Test: GetCurrentBlockNumber ---
 
 func TestGetCurrentBlockNumber_Success(t *testing.T) {
