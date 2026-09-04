@@ -53,12 +53,12 @@ func (r *MorphoRepository) GetOrCreateMarket(ctx context.Context, tx pgx.Tx, mar
 	var id int64
 	// The no-op SET is required so that DO UPDATE ... RETURNING id works on conflict.
 	err = tx.QueryRow(ctx,
-		`INSERT INTO morpho_market (chain_id, protocol_id, market_id, loan_token_id, collateral_token_id, oracle_address, irm_address, lltv, created_at_block)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		`INSERT INTO morpho_market (chain_id, protocol_id, market_id, loan_token_id, collateral_token_id, oracle_address, irm_address, lltv, created_at_block, run_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		 ON CONFLICT (chain_id, market_id) DO UPDATE SET protocol_id = EXCLUDED.protocol_id
 		 RETURNING id`,
 		market.ChainID, market.ProtocolID, market.MarketID.Bytes(), market.LoanTokenID, market.CollateralTokenID,
-		market.OracleAddress.Bytes(), market.IrmAddress.Bytes(), lltv, market.CreatedAtBlock,
+		market.OracleAddress.Bytes(), market.IrmAddress.Bytes(), lltv, market.CreatedAtBlock, r.runID,
 	).Scan(&id)
 
 	if err != nil {
@@ -160,7 +160,7 @@ func (r *MorphoRepository) SaveMarketState(ctx context.Context, tx pgx.Tx, state
 		 ON CONFLICT (morpho_market_id, block_number, block_version, processing_version, timestamp) DO NOTHING`,
 		state.MorphoMarketID, state.BlockNumber, state.BlockVersion, state.BlockTimestamp,
 		totalSupplyAssets, totalSupplyShares, totalBorrowAssets, totalBorrowShares,
-		state.LastUpdate, fee, prevBorrowRate, interestAccrued, feeShares, int(r.buildID), int64(r.runID),
+		state.LastUpdate, fee, prevBorrowRate, interestAccrued, feeShares, int(r.buildID), r.runID,
 	)
 	if err != nil {
 		return fmt.Errorf("saving morpho market state: %w", err)
@@ -196,7 +196,7 @@ func (r *MorphoRepository) SaveMarketPosition(ctx context.Context, tx pgx.Tx, po
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		 ON CONFLICT (user_id, morpho_market_id, block_number, block_version, processing_version, timestamp) DO NOTHING`,
 		position.UserID, position.MorphoMarketID, position.BlockNumber, position.BlockVersion, position.Timestamp,
-		supplyShares, borrowShares, collateral, supplyAssets, borrowAssets, int(r.buildID), int64(r.runID),
+		supplyShares, borrowShares, collateral, supplyAssets, borrowAssets, int(r.buildID), r.runID,
 	)
 	if err != nil {
 		return fmt.Errorf("saving morpho market position: %w", err)
@@ -213,13 +213,13 @@ func (r *MorphoRepository) SaveMarketPosition(ctx context.Context, tx pgx.Tx, po
 func (r *MorphoRepository) GetOrCreateVault(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault) (int64, error) {
 	var id int64
 	err := tx.QueryRow(ctx,
-		`INSERT INTO morpho_vault (chain_id, protocol_id, address, name, symbol, asset_token_id, vault_version, created_at_block)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		`INSERT INTO morpho_vault (chain_id, protocol_id, address, name, symbol, asset_token_id, vault_version, created_at_block, run_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 ON CONFLICT (chain_id, address) DO UPDATE SET
 		     created_at_block = LEAST(morpho_vault.created_at_block, EXCLUDED.created_at_block)
 		 RETURNING id`,
 		vault.ChainID, vault.ProtocolID, vault.Address, vault.Name, vault.Symbol,
-		vault.AssetTokenID, vault.VaultVersion, vault.CreatedAtBlock,
+		vault.AssetTokenID, vault.VaultVersion, vault.CreatedAtBlock, r.runID,
 	).Scan(&id)
 
 	if err != nil {
@@ -308,7 +308,7 @@ func (r *MorphoRepository) SaveVaultState(ctx context.Context, tx pgx.Tx, state 
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		 ON CONFLICT (morpho_vault_id, block_number, block_version, processing_version, timestamp) DO NOTHING`,
 		state.MorphoVaultID, state.BlockNumber, state.BlockVersion, state.BlockTimestamp,
-		totalAssets, totalShares, feeShares, newTotalAssets, previousTotalAssets, managementFeeShares, int(r.buildID), int64(r.runID),
+		totalAssets, totalShares, feeShares, newTotalAssets, previousTotalAssets, managementFeeShares, int(r.buildID), r.runID,
 	)
 	if err != nil {
 		return fmt.Errorf("saving morpho vault state: %w", err)
@@ -332,7 +332,7 @@ func (r *MorphoRepository) SaveVaultPosition(ctx context.Context, tx pgx.Tx, pos
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 ON CONFLICT (user_id, morpho_vault_id, block_number, block_version, processing_version, timestamp) DO NOTHING`,
 		position.UserID, position.MorphoVaultID, position.BlockNumber, position.BlockVersion, position.Timestamp,
-		shares, assets, int(r.buildID), int64(r.runID),
+		shares, assets, int(r.buildID), r.runID,
 	)
 	if err != nil {
 		return fmt.Errorf("saving morpho vault position: %w", err)
@@ -398,7 +398,7 @@ func (r *MorphoRepository) adapterIdentityID(ctx context.Context, tx pgx.Tx, ide
 		 VALUES ($1, $2, $3, $4, $5)
 		 ON CONFLICT (morpho_vault_id, address) DO NOTHING
 		 RETURNING id`,
-		identity.MorphoVaultID, identity.Address, identity.AssetTokenID, int(r.buildID), int64(r.runID),
+		identity.MorphoVaultID, identity.Address, identity.AssetTokenID, int(r.buildID), r.runID,
 	).Scan(&id)
 	if err == nil {
 		return id, nil
@@ -479,7 +479,7 @@ func (r *MorphoRepository) appendMembership(ctx context.Context, tx pgx.Tx, adap
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		 ON CONFLICT (morpho_adapter_id, block_number, block_version, log_index, processing_version) DO NOTHING`,
 		adapterID, m.BlockNumber, m.BlockVersion, m.LogIndex, m.Timestamp,
-		m.IsMember, adapterType, string(m.ObservedVia), int(r.buildID), int64(r.runID),
+		m.IsMember, adapterType, string(m.ObservedVia), int(r.buildID), r.runID,
 	)
 	if err != nil {
 		return false, fmt.Errorf("recording adapter %d membership at block %d: %w", adapterID, m.BlockNumber, err)
@@ -613,7 +613,7 @@ func (r *MorphoRepository) SaveAdapterState(ctx context.Context, tx pgx.Tx, stat
 		`INSERT INTO morpho_adapter_state (morpho_adapter_id, block_number, block_version, timestamp, real_assets, processing_version, build_id, run_id)
 		 VALUES ($1, $2, $3, $4, $5, next_processing_version_morpho_adapter_state($1, $2, $3, $4, $6), $6, $7)
 		 ON CONFLICT (morpho_adapter_id, block_number, block_version, timestamp, processing_version) DO NOTHING`,
-		state.MorphoAdapterID, state.BlockNumber, state.BlockVersion, state.Timestamp, realAssets, int(r.buildID), int64(r.runID),
+		state.MorphoAdapterID, state.BlockNumber, state.BlockVersion, state.Timestamp, realAssets, int(r.buildID), r.runID,
 	)
 	if err != nil {
 		return false, fmt.Errorf("saving morpho adapter state: %w", err)
@@ -642,7 +642,7 @@ func (r *MorphoRepository) SaveVaultCap(ctx context.Context, tx pgx.Tx, vaultCap
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		 ON CONFLICT (morpho_vault_id, cap_id, block_number, block_version, timestamp, processing_version) DO NOTHING`,
 		vaultCap.MorphoVaultID, vaultCap.CapID, vaultCap.IDData, absoluteCap, relativeCap,
-		vaultCap.BlockNumber, vaultCap.BlockVersion, vaultCap.Timestamp, int(r.buildID), int64(r.runID),
+		vaultCap.BlockNumber, vaultCap.BlockVersion, vaultCap.Timestamp, int(r.buildID), r.runID,
 	)
 	if err != nil {
 		return false, fmt.Errorf("saving morpho vault cap: %w", err)
@@ -675,7 +675,7 @@ func (r *MorphoRepository) SaveVaultFee(ctx context.Context, tx pgx.Tx, vaultFee
 		 ON CONFLICT (morpho_vault_id, block_number, block_version, timestamp, processing_version) DO NOTHING`,
 		vaultFee.MorphoVaultID, performanceFee, managementFee,
 		vaultFee.PerformanceFeeRecipient, vaultFee.ManagementFeeRecipient,
-		vaultFee.BlockNumber, vaultFee.BlockVersion, vaultFee.Timestamp, int(r.buildID), int64(r.runID),
+		vaultFee.BlockNumber, vaultFee.BlockVersion, vaultFee.Timestamp, int(r.buildID), r.runID,
 	)
 	if err != nil {
 		return false, fmt.Errorf("saving morpho vault fee: %w", err)

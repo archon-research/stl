@@ -36,7 +36,8 @@ func TestGetOrCreateProtocol_CreatesNewProtocol(t *testing.T) {
 	truncateProtocol(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewProtocolRepository(protocolPool, nil, 0, 0, 0)
+	buildID, runID := testutil.OpenTestRun(t, ctx, protocolPool)
+	repo, err := NewProtocolRepository(protocolPool, nil, buildID, runID, 0)
 	if err != nil {
 		t.Fatalf("NewProtocolRepository: %v", err)
 	}
@@ -63,16 +64,18 @@ func TestGetOrCreateProtocol_CreatesNewProtocol(t *testing.T) {
 	}
 
 	var name string
+	var gotRunID *int64
 	err = protocolPool.QueryRow(ctx,
-		`SELECT name FROM protocol WHERE chain_id = $1 AND address = $2`,
+		`SELECT name, run_id FROM protocol WHERE chain_id = $1 AND address = $2`,
 		1, addr.Bytes(),
-	).Scan(&name)
+	).Scan(&name, &gotRunID)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
 	if name != "TestProtocol" {
 		t.Errorf("name = %q, want TestProtocol", name)
 	}
+	testutil.RequireRunID(t, gotRunID, runID)
 }
 
 func TestGetOrCreateProtocol_IdempotentReturnsSameID(t *testing.T) {
@@ -284,7 +287,5 @@ func TestUpsertReserveData_WrittenRowsCarryTheRunID(t *testing.T) {
 	).Scan(&gotRunID); err != nil {
 		t.Fatalf("reading back: %v", err)
 	}
-	if gotRunID == nil || *gotRunID != int64(runID) {
-		t.Errorf("run_id = %v, want %d", gotRunID, runID)
-	}
+	testutil.RequireRunID(t, gotRunID, runID)
 }

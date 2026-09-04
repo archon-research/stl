@@ -295,7 +295,7 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 		return fmt.Errorf("creating protocol repository: %w", err)
 	}
 
-	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 0)
+	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 0, runID)
 	if err != nil {
 		return fmt.Errorf("creating token repository: %w", err)
 	}

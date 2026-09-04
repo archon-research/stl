@@ -44,7 +44,6 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 
 	// CHAIN_ID=1 lets ParseConfig accept the default mainnet Alchemy endpoint
 	// convention and pass the S3-bucket / chain cross-check for "ethereum".
-	t.Setenv("BUILD_GIT_HASH", "test")
 	testutil.SetDevIdentity(t)
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
@@ -113,7 +112,6 @@ func setupDexRunEnv(t *testing.T, dex string) dexRunEnv {
 	bucket := testutil.S3TestBucketName(t, rawBucketPrefix)
 	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 
-	t.Setenv("BUILD_GIT_HASH", "test")
 	testutil.SetDevIdentity(t)
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)

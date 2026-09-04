@@ -58,7 +58,7 @@ func setupERC4626Integration(t *testing.T, ctx context.Context) *erc4626Integrat
 	if err != nil {
 		t.Fatalf("tx manager: %v", err)
 	}
-	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 1)
+	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 1, runID)
 	if err != nil {
 		t.Fatalf("token repo: %v", err)
 	}

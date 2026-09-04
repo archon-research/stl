@@ -183,7 +183,7 @@ func (r *PriceRepository) upsertPriceBatch(ctx context.Context, tx pgx.Tx, price
 		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8))
 
-		args = append(args, price.TokenID, price.SourceID, price.Timestamp, price.PriceUSD, price.MarketCapUSD, price.VolumeUSD, int(r.buildID), int64(r.runID))
+		args = append(args, price.TokenID, price.SourceID, price.Timestamp, price.PriceUSD, price.MarketCapUSD, price.VolumeUSD, int(r.buildID), r.runID)
 	}
 
 	sb.WriteString(` ON CONFLICT (token_id, source_id, processing_version, timestamp) DO NOTHING`)

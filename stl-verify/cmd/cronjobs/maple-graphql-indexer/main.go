@@ -79,12 +79,12 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 		return nil, fmt.Errorf("creating maple repository: %w", err)
 	}
 
-	tokenRepo, err := postgres.NewTokenRepository(deps.Pool, logger, 0)
+	tokenRepo, err := postgres.NewTokenRepository(deps.Pool, logger, 0, runID)
 	if err != nil {
 		return nil, fmt.Errorf("creating token repository: %w", err)
 	}
 
-	userRepo, err := postgres.NewUserRepository(deps.Pool, logger, 0)
+	userRepo, err := postgres.NewUserRepository(deps.Pool, logger, 0, runID)
 	if err != nil {
 		return nil, fmt.Errorf("creating user repository: %w", err)
 	}

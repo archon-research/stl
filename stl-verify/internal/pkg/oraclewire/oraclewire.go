@@ -41,7 +41,7 @@ func OpenRun(
 		return err
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("opening writer run: %w", err)
+		return nil, nil, err
 	}
 	return repo, units, nil
 }

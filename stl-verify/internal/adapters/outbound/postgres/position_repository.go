@@ -60,7 +60,7 @@ func (r *PositionRepository) SaveBorrower(ctx context.Context, tx pgx.Tx, b *ent
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version, processing_version, created_at) DO NOTHING`,
 		b.UserID, b.ProtocolID, b.TokenID, b.BlockNumber, b.BlockVersion,
-		b.Amount, b.Change, b.EventType, b.TxHash, b.CreatedAt, int(r.buildID), int64(r.runID))
+		b.Amount, b.Change, b.EventType, b.TxHash, b.CreatedAt, int(r.buildID), r.runID)
 
 	if err != nil {
 		return fmt.Errorf("failed to save borrower: %w", err)
@@ -98,7 +98,7 @@ func (r *PositionRepository) SaveBorrowers(ctx context.Context, tx pgx.Tx, borro
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 			 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version, processing_version, created_at) DO NOTHING`,
 			b.UserID, b.ProtocolID, b.TokenID, b.BlockNumber, b.BlockVersion,
-			b.Amount, b.Change, b.EventType, b.TxHash, b.CreatedAt, int(r.buildID), int64(r.runID),
+			b.Amount, b.Change, b.EventType, b.TxHash, b.CreatedAt, int(r.buildID), r.runID,
 		)
 	}
 
@@ -130,7 +130,7 @@ func (r *PositionRepository) SaveBorrowerCollateral(ctx context.Context, tx pgx.
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version, processing_version, created_at) DO NOTHING`,
 		bc.UserID, bc.ProtocolID, bc.TokenID, bc.BlockNumber, bc.BlockVersion,
-		bc.Amount, bc.Change, bc.EventType, bc.TxHash, bc.CollateralEnabled, bc.CreatedAt, int(r.buildID), int64(r.runID))
+		bc.Amount, bc.Change, bc.EventType, bc.TxHash, bc.CollateralEnabled, bc.CreatedAt, int(r.buildID), r.runID)
 
 	if err != nil {
 		return fmt.Errorf("failed to save collateral: %w", err)
@@ -167,7 +167,7 @@ func (r *PositionRepository) SaveBorrowerCollaterals(ctx context.Context, tx pgx
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 			 ON CONFLICT (user_id, protocol_id, token_id, block_number, block_version, processing_version, created_at) DO NOTHING`,
 			bc.UserID, bc.ProtocolID, bc.TokenID, bc.BlockNumber, bc.BlockVersion,
-			bc.Amount, bc.Change, bc.EventType, bc.TxHash, bc.CollateralEnabled, bc.CreatedAt, int(r.buildID), int64(r.runID),
+			bc.Amount, bc.Change, bc.EventType, bc.TxHash, bc.CollateralEnabled, bc.CreatedAt, int(r.buildID), r.runID,
 		)
 	}
 

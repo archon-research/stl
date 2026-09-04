@@ -262,7 +262,7 @@ func (r *OnchainPriceRepository) upsertPriceBatch(ctx context.Context, tx pgx.Tx
 		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8))
 
-		args = append(args, price.TokenID, price.OracleID, price.BlockNumber, price.BlockVersion, price.Timestamp, price.PriceUSD, int(r.buildID), int64(r.runID))
+		args = append(args, price.TokenID, price.OracleID, price.BlockNumber, price.BlockVersion, price.Timestamp, price.PriceUSD, int(r.buildID), r.runID)
 	}
 
 	sb.WriteString(` ON CONFLICT (token_id, oracle_id, block_number, block_version, processing_version, timestamp) DO NOTHING`)
@@ -336,11 +336,11 @@ func (r *OnchainPriceRepository) InsertOracle(ctx context.Context, oracle *entit
 		return nil, fmt.Errorf("inserting oracle: oracle_type is required")
 	}
 	err := r.db.QueryRow(ctx, `
-		INSERT INTO oracle (name, display_name, chain_id, address, oracle_type, deployment_block, enabled, price_decimals)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO oracle (name, display_name, chain_id, address, oracle_type, deployment_block, enabled, price_decimals, run_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		RETURNING id, created_at, updated_at
 	`, oracle.Name, oracle.DisplayName, oracle.ChainID, oracle.Address.Bytes(),
-		oracle.OracleType, oracle.DeploymentBlock, oracle.Enabled, oracle.PriceDecimals,
+		oracle.OracleType, oracle.DeploymentBlock, oracle.Enabled, oracle.PriceDecimals, r.runID,
 	).Scan(&oracle.ID, &oracle.CreatedAt, &oracle.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("inserting oracle: %w", err)
@@ -351,10 +351,10 @@ func (r *OnchainPriceRepository) InsertOracle(ctx context.Context, oracle *entit
 // InsertProtocolOracleBinding inserts a new protocol-oracle binding.
 func (r *OnchainPriceRepository) InsertProtocolOracleBinding(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error) {
 	err := r.db.QueryRow(ctx, `
-		INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block)
-		VALUES ($1, $2, $3)
+		INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block, run_id)
+		VALUES ($1, $2, $3, $4)
 		RETURNING id, created_at
-	`, binding.ProtocolID, binding.OracleID, binding.FromBlock,
+	`, binding.ProtocolID, binding.OracleID, binding.FromBlock, r.runID,
 	).Scan(&binding.ID, &binding.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("inserting protocol oracle binding: %w", err)
@@ -438,7 +438,7 @@ func (r *OnchainPriceRepository) CopyOracleAssets(ctx context.Context, fromOracl
 	}
 	defer rollback(ctx, tx, r.logger)
 
-	tag, err := tx.Exec(ctx, copyOracleAssetsSQL, fromOracleID, toOracleID, referenceEffectiveAt, changeReason, int64(r.runID))
+	tag, err := tx.Exec(ctx, copyOracleAssetsSQL, fromOracleID, toOracleID, referenceEffectiveAt, changeReason, r.runID)
 	if err != nil {
 		return fmt.Errorf("copying oracle assets from %d to %d: %w", fromOracleID, toOracleID, err)
 	}

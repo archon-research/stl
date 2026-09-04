@@ -80,7 +80,8 @@ func TestSavePositions_PersistsUnderlyingValuation(t *testing.T) {
 		t.Fatalf("delete allocation_position: %v", err)
 	}
 
-	tokenRepo, err := NewTokenRepository(allocUnderlyingPool, nil, 0)
+	buildID, runID := testutil.OpenTestRun(t, ctx, allocUnderlyingPool)
+	tokenRepo, err := NewTokenRepository(allocUnderlyingPool, nil, 0, runID)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
@@ -90,7 +91,6 @@ func TestSavePositions_PersistsUnderlyingValuation(t *testing.T) {
 		t.Fatalf("NewTxManager: %v", err)
 	}
 
-	buildID, runID := testutil.OpenTestRun(t, ctx, allocUnderlyingPool)
 	repo := NewAllocationRepository(allocUnderlyingPool, txm, tokenRepo, nil, buildID, runID)
 
 	vaultAddr := common.HexToAddress("0x38464507e02c983f20428a6e8566693fe9e422a9")
@@ -175,9 +175,7 @@ func TestSavePositions_PersistsUnderlyingValuation(t *testing.T) {
 	if underlyingValueStr != "20102052.000000" {
 		t.Fatalf("position A underlying_value = %q, want 20102052.000000", underlyingValueStr)
 	}
-	if gotRunID == nil || *gotRunID != int64(runID) {
-		t.Fatalf("position A run_id = %v, want %d", gotRunID, runID)
-	}
+	testutil.RequireRunID(t, gotRunID, runID)
 
 	// Confirm that underlying_token_id points to the USDC token row.
 	var usdcTokenID int64
@@ -236,7 +234,7 @@ func TestSavePositions_ResolvesUnderlyingWhenShareTokenAlreadySeen(t *testing.T)
 		t.Fatalf("delete allocation_position: %v", err)
 	}
 
-	tokenRepo, err := NewTokenRepository(allocUnderlyingPool, nil, 0)
+	tokenRepo, err := NewTokenRepository(allocUnderlyingPool, nil, 0, buildregistry.RunID(1))
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}

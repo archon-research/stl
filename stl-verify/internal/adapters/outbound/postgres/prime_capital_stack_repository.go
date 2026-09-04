@@ -99,7 +99,7 @@ func (r *PrimeCapitalStackRepository) SavePrimeCapitalSnapshots(
 			s.SPJUtilization,
 			s.Source,
 			s.BuildID,
-			int64(r.runID),
+			r.runID,
 		)
 	}
 

@@ -98,9 +98,7 @@ func TestSaveOrderbookSnapshots(t *testing.T) {
 	if eventTime == nil || !eventTime.Equal(venueTime) {
 		t.Errorf("BTC event_time = %v, want %v", eventTime, venueTime)
 	}
-	if gotRunID == nil || *gotRunID != int64(runID) {
-		t.Errorf("BTC run_id = %v, want %d", gotRunID, runID)
-	}
+	testutil.RequireRunID(t, gotRunID, runID)
 	assertTuples(t, "BTC bids", bidsJSON, [][2]string{{"65000.10", "0.5"}, {"65000.00", "1.20000000"}})
 	assertTuples(t, "BTC asks", asksJSON, [][2]string{{"65001.00", "2"}})
 

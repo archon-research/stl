@@ -72,9 +72,7 @@ func TestPrimeCapitalStackRepositoryPreservesEighteenDecimalPrecision(t *testing
 		FROM prime_capital_stack WHERE prime_id = $1`, primeID).Scan(&exposure, &junior, &gotRunID); err != nil {
 		t.Fatalf("reading back: %v", err)
 	}
-	if gotRunID == nil || *gotRunID != int64(runID) {
-		t.Errorf("run_id = %v, want %d", gotRunID, runID)
-	}
+	testutil.RequireRunID(t, gotRunID, runID)
 	if exposure != "2098090654.811942249063867795" {
 		t.Errorf("exposure_usd = %s, want the 18-decimal value unrounded", exposure)
 	}

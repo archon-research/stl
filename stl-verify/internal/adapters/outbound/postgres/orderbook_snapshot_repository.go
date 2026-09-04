@@ -51,7 +51,7 @@ func (r *OrderbookSnapshotRepository) Save(ctx context.Context, snapshots []enti
 	if len(snapshots) == 0 {
 		return nil
 	}
-	sql, args, err := buildOrderbookSnapshotInsert(snapshots, int64(r.runID))
+	sql, args, err := buildOrderbookSnapshotInsert(snapshots, r.runID)
 	if err != nil {
 		return err
 	}
@@ -65,7 +65,7 @@ func (r *OrderbookSnapshotRepository) Save(ctx context.Context, snapshots []enti
 // event_time is a nullable *time.Time so a snapshot with no venue time stores SQL
 // NULL; bids/asks are JSONB ["price","size"] tuple arrays. It is split out from
 // Save so the placeholder-vs-arg count is unit-testable without a database.
-func buildOrderbookSnapshotInsert(snapshots []entity.OrderbookSnapshot, runID int64) (string, []any, error) {
+func buildOrderbookSnapshotInsert(snapshots []entity.OrderbookSnapshot, runID buildregistry.RunID) (string, []any, error) {
 	cols := len(orderbookSnapshotColumns)
 	var sb strings.Builder
 	sb.WriteString("INSERT INTO cex_orderbook_snapshots (")

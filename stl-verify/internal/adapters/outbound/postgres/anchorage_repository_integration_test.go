@@ -48,9 +48,7 @@ func TestAnchorageSaveSnapshots_WrittenRowsCarryTheRunID(t *testing.T) {
 	).Scan(&gotRunID); err != nil {
 		t.Fatalf("reading back: %v", err)
 	}
-	if gotRunID == nil || *gotRunID != int64(runID) {
-		t.Errorf("run_id = %v, want %d", gotRunID, runID)
-	}
+	testutil.RequireRunID(t, gotRunID, runID)
 }
 
 func TestAnchorageSaveOperations_WrittenRowsCarryTheRunID(t *testing.T) {
@@ -72,7 +70,5 @@ func TestAnchorageSaveOperations_WrittenRowsCarryTheRunID(t *testing.T) {
 	).Scan(&gotRunID); err != nil {
 		t.Fatalf("reading back: %v", err)
 	}
-	if gotRunID == nil || *gotRunID != int64(runID) {
-		t.Errorf("run_id = %v, want %d", gotRunID, runID)
-	}
+	testutil.RequireRunID(t, gotRunID, runID)
 }

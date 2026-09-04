@@ -33,7 +33,5 @@ func TestPrimeDebtSaveDebtSnapshots_WrittenRowsCarryTheRunID(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT run_id FROM prime_debt WHERE prime_id = $1`, primeID).Scan(&gotRunID); err != nil {
 		t.Fatalf("reading back: %v", err)
 	}
-	if gotRunID == nil || *gotRunID != int64(runID) {
-		t.Errorf("run_id = %v, want %d", gotRunID, runID)
-	}
+	testutil.RequireRunID(t, gotRunID, runID)
 }

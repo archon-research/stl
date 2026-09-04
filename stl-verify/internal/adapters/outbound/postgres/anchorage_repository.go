@@ -82,7 +82,7 @@ func (r *AnchorageRepository) SaveSnapshots(ctx context.Context, snapshots []ent
 	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		for i := 0; i < len(snapshots); i += snapshotBatchSize {
 			end := min(i+snapshotBatchSize, len(snapshots))
-			if err := insertSnapshotBatch(ctx, tx, snapshots[i:end], int(r.buildID), int64(r.runID)); err != nil {
+			if err := insertSnapshotBatch(ctx, tx, snapshots[i:end], int(r.buildID), r.runID); err != nil {
 				return err
 			}
 		}
@@ -90,7 +90,7 @@ func (r *AnchorageRepository) SaveSnapshots(ctx context.Context, snapshots []ent
 	})
 }
 
-func insertSnapshotBatch(ctx context.Context, tx pgx.Tx, batch []entity.AnchoragePackageSnapshot, buildID int, runID int64) error {
+func insertSnapshotBatch(ctx context.Context, tx pgx.Tx, batch []entity.AnchoragePackageSnapshot, buildID int, runID buildregistry.RunID) error {
 	const cols = 21
 	valueStrings := make([]string, 0, len(batch))
 	valueArgs := make([]any, 0, len(batch)*cols)
@@ -168,7 +168,7 @@ func (r *AnchorageRepository) SaveOperations(ctx context.Context, operations []e
 	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		for i := 0; i < len(operations); i += operationBatchSize {
 			end := min(i+operationBatchSize, len(operations))
-			if err := insertOperationBatch(ctx, tx, operations[i:end], int(r.buildID), int64(r.runID)); err != nil {
+			if err := insertOperationBatch(ctx, tx, operations[i:end], int(r.buildID), r.runID); err != nil {
 				return err
 			}
 		}
@@ -176,7 +176,7 @@ func (r *AnchorageRepository) SaveOperations(ctx context.Context, operations []e
 	})
 }
 
-func insertOperationBatch(ctx context.Context, tx pgx.Tx, batch []entity.AnchorageOperation, buildID int, runID int64) error {
+func insertOperationBatch(ctx context.Context, tx pgx.Tx, batch []entity.AnchorageOperation, buildID int, runID buildregistry.RunID) error {
 	const cols = 12
 	valueStrings := make([]string, 0, len(batch))
 	valueArgs := make([]any, 0, len(batch)*cols)

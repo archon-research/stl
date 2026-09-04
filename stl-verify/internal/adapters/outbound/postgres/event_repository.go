@@ -47,7 +47,7 @@ func (r *EventRepository) SaveEvent(ctx context.Context, tx pgx.Tx, event *entit
 		 ON CONFLICT (chain_id, block_number, block_version, tx_hash, log_index, processing_version, created_at) DO NOTHING`,
 		event.ChainID, event.ProtocolID, event.BlockNumber, event.BlockVersion,
 		event.TxHash, event.LogIndex, event.ContractAddress, event.EventName, event.EventData,
-		event.CreatedAt, int(r.buildID), int64(r.runID))
+		event.CreatedAt, int(r.buildID), r.runID)
 
 	if err != nil {
 		return fmt.Errorf("failed to save protocol event: %w", err)
@@ -72,7 +72,7 @@ func (r *EventRepository) SaveBatch(ctx context.Context, tx pgx.Tx, evts []*enti
 			 ON CONFLICT (chain_id, block_number, block_version, tx_hash, log_index, processing_version, created_at) DO NOTHING`,
 			event.ChainID, event.ProtocolID, event.BlockNumber, event.BlockVersion,
 			event.TxHash, event.LogIndex, event.ContractAddress, event.EventName, event.EventData,
-			event.CreatedAt, int(r.buildID), int64(r.runID),
+			event.CreatedAt, int(r.buildID), r.runID,
 		)
 	}
 	br := tx.SendBatch(ctx, batch)

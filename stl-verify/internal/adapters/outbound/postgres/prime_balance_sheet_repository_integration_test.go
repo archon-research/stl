@@ -58,9 +58,7 @@ func TestPrimeBalanceSheetRepositoryPreservesEighteenDecimalPrecision(t *testing
 	if treasury != "48142491.085806286854722044" {
 		t.Errorf("treasury_balance_usd = %s, want the 18-decimal value unrounded", treasury)
 	}
-	if gotRunID == nil || *gotRunID != int64(runID) {
-		t.Errorf("run_id = %v, want %d", gotRunID, runID)
-	}
+	testutil.RequireRunID(t, gotRunID, runID)
 }
 
 // SaveBalanceSheetSnapshots returns the rows actually inserted, not the batch

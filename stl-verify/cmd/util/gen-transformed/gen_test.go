@@ -159,9 +159,6 @@ func TestJoinFor_ConflictingJoins(t *testing.T) {
 	}
 }
 
-// TestPlan_RunIDIsNotCarried: writer provenance (run_id, VEC-598) stays on the raw row.
-// The transformed layer is not yet append-only (ADR-0006 §1), and the committed bucket-1
-// CTAS cannot grow a column, so the generator must not project it.
 func TestPlan_RunIDIsNotCarried(t *testing.T) {
 	reg, err := schemamaster.Load()
 	if err != nil {

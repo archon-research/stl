@@ -119,7 +119,7 @@ func (r *PrimeDebtRepository) SaveDebtSnapshots(ctx context.Context, debts []*en
 				d.BlockVersion,
 				d.SyncedAt,
 				int(r.buildID),
-				int64(r.runID),
+				r.runID,
 			)
 		}
 

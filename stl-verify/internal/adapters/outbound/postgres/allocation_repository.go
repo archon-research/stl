@@ -203,7 +203,7 @@ func (r *AllocationRepository) buildInsertArgs(
 		pos.Direction,
 		pos.CreatedAt,
 		int(r.buildID),
-		int64(r.runID),
+		r.runID,
 		underlyingValue,
 		underlyingTokenID,
 		encodeAddress(pos.FromAddress),

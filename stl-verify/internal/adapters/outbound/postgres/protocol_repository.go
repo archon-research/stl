@@ -64,12 +64,12 @@ func (r *ProtocolRepository) GetOrCreateProtocol(ctx context.Context, tx pgx.Tx,
 	// whichever worker wins the INSERT race, subsequent LEAST() merges still produce
 	// the correct minimum created_at_block.
 	err := tx.QueryRow(ctx,
-		`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block)
-		 VALUES ($1, $2, $3, $4, $5)
+		`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, run_id)
+		 VALUES ($1, $2, $3, $4, $5, $6)
 		 ON CONFLICT (chain_id, address) DO UPDATE SET
 		     created_at_block = LEAST(protocol.created_at_block, EXCLUDED.created_at_block)
 		 RETURNING id`,
-		chainID, addressBytes, name, protocolType, createdAtBlock).Scan(&protocolID)
+		chainID, addressBytes, name, protocolType, createdAtBlock, r.runID).Scan(&protocolID)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get or create protocol: %w", err)
 	}
@@ -136,7 +136,7 @@ func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context
 			baseIdx+9, baseIdx+10, baseIdx+11, baseIdx+12, baseIdx+13, baseIdx+14, baseIdx+15, baseIdx+16,
 			baseIdx+17, baseIdx+18, baseIdx+19, baseIdx+20, baseIdx+21, baseIdx+22, baseIdx+23, baseIdx+24,
 			baseIdx+25, baseIdx+26, baseIdx+27, baseIdx+28))
-		args = append(args, d.ProtocolID, d.TokenID, d.BlockNumber, d.BlockVersion, int(r.buildID), int64(r.runID))
+		args = append(args, d.ProtocolID, d.TokenID, d.BlockNumber, d.BlockVersion, int(r.buildID), r.runID)
 
 		for _, valToConvert := range []*big.Int{
 			d.Unbacked,

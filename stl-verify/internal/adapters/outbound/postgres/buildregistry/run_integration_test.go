@@ -179,3 +179,30 @@ func TestOpenRun_ReferenceDataAsOfTheRunSurvivesALaterAppend(t *testing.T) {
 		t.Error("reference data as of the run resolves the version appended after it, not the one the run loaded")
 	}
 }
+
+func TestRunID_BindsNullForZeroAndTheValueOtherwise(t *testing.T) {
+	ctx := context.Background()
+	pool := setupDB(t)
+	tests := []struct {
+		name     string
+		runID    buildregistry.RunID
+		wantNull bool
+	}{
+		{"zero is NULL", 0, true},
+		{"a run id is itself", 42, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got *int64
+			if err := pool.QueryRow(ctx, `SELECT $1::bigint`, tt.runID).Scan(&got); err != nil {
+				t.Fatalf("bind RunID: %v", err)
+			}
+			if tt.wantNull != (got == nil) {
+				t.Fatalf("bound %v, wantNull=%v", got, tt.wantNull)
+			}
+			if got != nil && *got != int64(tt.runID) {
+				t.Fatalf("bound %d, want %d", *got, tt.runID)
+			}
+		})
+	}
+}

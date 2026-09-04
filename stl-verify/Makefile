@@ -2095,8 +2095,9 @@ build-cronjob-%:
 	@echo "==> Built: dist/$*"
 
 # BUILD_GIT_HASH is stamped from HEAD rather than left at the .env's "dev": build_registry
-# keys rows by git hash, so "dev" collapses every local build into one build_id and the rows
-# a run wrote stop being attributable to the commit that wrote them. See run-allocation-tracker.
+# keys artefacts by (git_hash, service, image_digest), so "dev" collapses every local build
+# into one build_id and the rows a run wrote stop being attributable to the commit that wrote
+# them. See run-allocation-tracker.
 # STL_DEV_IDENTITY lets a local process register without the IMAGE_DIGEST the deploy
 # pipeline injects; a deployed binary without one refuses to start (buildregistry).
 run-cronjob-%:

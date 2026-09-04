@@ -56,7 +56,6 @@ func TestRunHappyPath(t *testing.T) {
 	t.Setenv("ORDERBOOK_DEPTH", "100")
 	t.Setenv("ORDERBOOK_INTERVAL", "50ms")
 	t.Setenv("ENVIRONMENT", "development")
-	t.Setenv("BUILD_GIT_HASH", "test")
 	testutil.SetDevIdentity(t)
 
 	factory := func(exchange string, _ orderbook.Config) (outbound.OrderbookProvider, error) {

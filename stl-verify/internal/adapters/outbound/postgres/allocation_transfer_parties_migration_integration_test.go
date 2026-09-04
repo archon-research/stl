@@ -92,7 +92,7 @@ func TestSavePositions_PersistsTransferParties(t *testing.T) {
 		t.Fatalf("look up spark prime: %v", err)
 	}
 
-	tokenRepo, err := NewTokenRepository(allocTransferPartiesPool, nil, 0)
+	tokenRepo, err := NewTokenRepository(allocTransferPartiesPool, nil, 0, buildregistry.RunID(1))
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}

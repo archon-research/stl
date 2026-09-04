@@ -250,9 +250,7 @@ func TestSaveBorrower_RepayWithZeroBalance(t *testing.T) {
 	if err := fixture.pool.QueryRow(ctx, `SELECT run_id FROM borrower WHERE block_number = 1100`).Scan(&gotRunID); err != nil {
 		t.Fatalf("query run_id: %v", err)
 	}
-	if gotRunID == nil || *gotRunID != int64(runID) {
-		t.Errorf("run_id = %v, want %d", gotRunID, runID)
-	}
+	testutil.RequireRunID(t, gotRunID, runID)
 }
 
 func TestSaveBorrowerCollaterals_EmptyRecords(t *testing.T) {

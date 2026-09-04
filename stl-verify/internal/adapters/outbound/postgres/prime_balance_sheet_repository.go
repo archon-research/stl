@@ -89,7 +89,7 @@ func (r *PrimeBalanceSheetRepository) SaveBalanceSheetSnapshots(
 				s.BackstopCapitalUSD,
 				s.Source,
 				s.BuildID,
-				int64(r.runID),
+				r.runID,
 			)
 		}
 

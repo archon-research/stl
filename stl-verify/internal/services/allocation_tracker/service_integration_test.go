@@ -52,7 +52,7 @@ func TestIntegration_SubProxyAndAlmProxy_AreIndexedAndQueryable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tx manager: %v", err)
 	}
-	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 1)
+	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 1, runID)
 	if err != nil {
 		t.Fatalf("token repo: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestIntegration_SweepPosition_UsesZeroTxHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tx manager: %v", err)
 	}
-	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 1)
+	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 1, runID)
 	if err != nil {
 		t.Fatalf("token repo: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestIntegration_UsdcTransferToSubProxy_IsIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tx manager: %v", err)
 	}
-	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 1)
+	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 1, runID)
 	if err != nil {
 		t.Fatalf("token repo: %v", err)
 	}

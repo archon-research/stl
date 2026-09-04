@@ -95,7 +95,7 @@ func (r *PrimeReferencePositionRepository) SaveReferencePositions(
 			p.IdleAssetsUSD,
 			p.Source,
 			p.BuildID,
-			int64(r.runID),
+			r.runID,
 		)
 	}
 

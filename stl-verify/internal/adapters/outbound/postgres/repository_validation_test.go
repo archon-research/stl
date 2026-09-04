@@ -6,7 +6,7 @@ import (
 
 // TestNewTokenRepository_NilDB tests that NewTokenRepository returns an error when pool is nil.
 func TestNewTokenRepository_NilDB(t *testing.T) {
-	_, err := NewTokenRepository(nil, nil, 0)
+	_, err := NewTokenRepository(nil, nil, 0, 0)
 	if err == nil {
 		t.Fatal("expected error when pool is nil, got nil")
 	}
@@ -18,7 +18,7 @@ func TestNewTokenRepository_NilDB(t *testing.T) {
 
 // TestNewUserRepository_NilDB tests that NewUserRepository returns an error when pool is nil.
 func TestNewUserRepository_NilDB(t *testing.T) {
-	_, err := NewUserRepository(nil, nil, 0)
+	_, err := NewUserRepository(nil, nil, 0, 0)
 	if err == nil {
 		t.Fatal("expected error when pool is nil, got nil")
 	}

@@ -97,7 +97,7 @@ func (r *PrimeCapitalStackAllocationRepository) SaveCapitalStackAllocations(
 			a.CRR,
 			a.Source,
 			a.BuildID,
-			int64(r.runID),
+			r.runID,
 		)
 	}
 

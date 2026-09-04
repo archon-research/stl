@@ -92,7 +92,7 @@ func setupCurrentTables(t *testing.T) *currentTablesFixture {
 	if err != nil {
 		t.Fatalf("new onchain price repository: %v", err)
 	}
-	tokenRepo, err := NewTokenRepository(currentTablesPool, nil, 0)
+	tokenRepo, err := NewTokenRepository(currentTablesPool, nil, 0, buildregistry.RunID(1))
 	if err != nil {
 		t.Fatalf("new token repository: %v", err)
 	}

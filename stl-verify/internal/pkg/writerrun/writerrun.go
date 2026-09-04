@@ -28,7 +28,7 @@ func Open(ctx context.Context, pool *pgxpool.Pool) (*buildregistry.Registry, bui
 	}
 	runID, err := reg.OpenRun(ctx, referenceEffectiveAt, nil)
 	if err != nil {
-		return nil, 0, fmt.Errorf("opening writer run: %w", err)
+		return nil, 0, err
 	}
 	return reg, runID, nil
 }

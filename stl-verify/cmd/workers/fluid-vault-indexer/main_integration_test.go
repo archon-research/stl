@@ -46,7 +46,6 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer rpcServer.Close()
 
-	t.Setenv("BUILD_GIT_HASH", "test")
 	testutil.SetDevIdentity(t)
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
@@ -90,7 +89,6 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	rawBucket := testutil.S3TestBucketName(t, rawBucketPrefix)
 	testutil.EnsureBucket(t, ctx, s3Client, rawBucket)
 
-	t.Setenv("BUILD_GIT_HASH", "test")
 	testutil.SetDevIdentity(t)
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)

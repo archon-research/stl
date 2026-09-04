@@ -32,10 +32,24 @@ func OpenTestRun(t *testing.T, ctx context.Context, pool *pgxpool.Pool) (buildre
 	return reg.BuildID(), runID
 }
 
-// SetDevIdentity lets a binary driven by this test resolve its artefact without an
-// IMAGE_DIGEST, the way `make run-*` and the kind overlay do.
+// SetDevIdentity lets a binary driven by this test resolve its artefact the way
+// `make run-*` and the kind overlay do: a stand-in git hash for a `go run` build that
+// embeds no VCS info, and the dev image digest in place of IMAGE_DIGEST.
 func SetDevIdentity(t *testing.T) {
 	t.Helper()
+	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv(buildregistry.DevIdentityEnv, "1")
 	t.Setenv(buildregistry.ImageDigestEnv, "")
+}
+
+// RequireRunID fails the test unless a row's run_id (scanned as *int64, the column is
+// nullable) names want.
+func RequireRunID(t *testing.T, got *int64, want buildregistry.RunID) {
+	t.Helper()
+	if got == nil {
+		t.Fatalf("run_id = NULL, want %d", want)
+	}
+	if *got != int64(want) {
+		t.Fatalf("run_id = %d, want %d", *got, want)
+	}
 }

@@ -7,8 +7,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -169,4 +172,55 @@ func TestCopyOracleAssetsCopiesTheVersionEffectiveAtTheRecordedInstant(t *testin
 	if assets[0].TokenID != f.tokenID {
 		t.Errorf("copied asset token_id = %d, want %d", assets[0].TokenID, f.tokenID)
 	}
+}
+
+func newOnchainPriceRunRepo(t *testing.T, ctx context.Context) (*OnchainPriceRepository, buildregistry.RunID) {
+	t.Helper()
+	if _, err := onchainPricePool.Exec(ctx, `TRUNCATE oracle, protocol_oracle CASCADE`); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	buildID, runID := testutil.OpenTestRun(t, ctx, onchainPricePool)
+	repo, err := NewOnchainPriceRepository(onchainPricePool, nil, buildID, runID, 0)
+	if err != nil {
+		t.Fatalf("NewOnchainPriceRepository: %v", err)
+	}
+	return repo, runID
+}
+
+func TestInsertOracle_WrittenRowCarriesTheRunID(t *testing.T) {
+	ctx := context.Background()
+	repo, runID := newOnchainPriceRunRepo(t, ctx)
+
+	oracle, err := repo.InsertOracle(ctx, &entity.Oracle{
+		Name: "run-id-oracle", DisplayName: "Run ID Oracle", ChainID: 1,
+		Address:    common.HexToAddress("0x8105f69D9C41644c6A0803fDA7D03Aa70996cFD9"),
+		OracleType: entity.OracleTypeAave, DeploymentBlock: 100, Enabled: true, PriceDecimals: 8,
+	})
+	if err != nil {
+		t.Fatalf("InsertOracle: %v", err)
+	}
+
+	var gotRunID *int64
+	if err := onchainPricePool.QueryRow(ctx, `SELECT run_id FROM oracle WHERE id = $1`, oracle.ID).Scan(&gotRunID); err != nil {
+		t.Fatalf("reading back: %v", err)
+	}
+	testutil.RequireRunID(t, gotRunID, runID)
+}
+
+func TestInsertProtocolOracleBinding_WrittenRowCarriesTheRunID(t *testing.T) {
+	ctx := context.Background()
+	repo, runID := newOnchainPriceRunRepo(t, ctx)
+	protocolID := testutil.SeedProtocol(t, ctx, onchainPricePool, 1, "0xC13e21B648A5Ee794902342038FF3aDAB66BE987", "SparkLend", "lending", 100, "")
+	oracleID := testutil.SeedOracle(t, ctx, onchainPricePool, "run-id-oracle", "Run ID Oracle", 1, "0x8105f69D9C41644c6A0803fDA7D03Aa70996cFD9")
+
+	binding, err := repo.InsertProtocolOracleBinding(ctx, &entity.ProtocolOracle{ProtocolID: protocolID, OracleID: oracleID, FromBlock: 100})
+	if err != nil {
+		t.Fatalf("InsertProtocolOracleBinding: %v", err)
+	}
+
+	var gotRunID *int64
+	if err := onchainPricePool.QueryRow(ctx, `SELECT run_id FROM protocol_oracle WHERE id = $1`, binding.ID).Scan(&gotRunID); err != nil {
+		t.Fatalf("reading back: %v", err)
+	}
+	testutil.RequireRunID(t, gotRunID, runID)
 }

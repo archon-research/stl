@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const debtTokenDBName = "test_debt_token"
@@ -38,7 +39,7 @@ func seedDebtTokenDeps(t *testing.T, ctx context.Context, chainID int64) (int64,
 	if err != nil {
 		t.Fatalf("NewProtocolRepository: %v", err)
 	}
-	tokenRepo, err := NewTokenRepository(debtTokenPool, nil, 0)
+	tokenRepo, err := NewTokenRepository(debtTokenPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
@@ -79,7 +80,8 @@ func TestGetOrCreateDebtToken(t *testing.T) {
 				truncateDebtToken(t, ctx)
 				protocolID, tokenID := seedDebtTokenDeps(t, ctx, 1)
 
-				repo, err := NewDebtTokenRepository(debtTokenPool, nil)
+				_, runID := testutil.OpenTestRun(t, ctx, debtTokenPool)
+				repo, err := NewDebtTokenRepository(debtTokenPool, nil, runID)
 				if err != nil {
 					t.Fatalf("NewDebtTokenRepository: %v", err)
 				}
@@ -112,9 +114,10 @@ func TestGetOrCreateDebtToken(t *testing.T) {
 				// Verify the row exists with correct values.
 				var variableSymbol, stableSymbol string
 				var createdAtBlock int64
+				var gotRunID *int64
 				err = debtTokenPool.QueryRow(ctx,
-					`SELECT variable_symbol, stable_symbol, created_at_block FROM debt_token WHERE id = $1`, id,
-				).Scan(&variableSymbol, &stableSymbol, &createdAtBlock)
+					`SELECT variable_symbol, stable_symbol, created_at_block, run_id FROM debt_token WHERE id = $1`, id,
+				).Scan(&variableSymbol, &stableSymbol, &createdAtBlock, &gotRunID)
 				if err != nil {
 					t.Fatalf("query: %v", err)
 				}
@@ -127,6 +130,7 @@ func TestGetOrCreateDebtToken(t *testing.T) {
 				if createdAtBlock != 500 {
 					t.Errorf("created_at_block = %d, want 500", createdAtBlock)
 				}
+				testutil.RequireRunID(t, gotRunID, runID)
 			},
 		},
 		{
@@ -135,7 +139,7 @@ func TestGetOrCreateDebtToken(t *testing.T) {
 				truncateDebtToken(t, ctx)
 				protocolID, tokenID := seedDebtTokenDeps(t, ctx, 1)
 
-				repo, err := NewDebtTokenRepository(debtTokenPool, nil)
+				repo, err := NewDebtTokenRepository(debtTokenPool, nil, 0)
 				if err != nil {
 					t.Fatalf("NewDebtTokenRepository: %v", err)
 				}
@@ -195,7 +199,7 @@ func TestGetOrCreateDebtToken(t *testing.T) {
 				truncateDebtToken(t, ctx)
 				protocolID, tokenID := seedDebtTokenDeps(t, ctx, 1)
 
-				repo, err := NewDebtTokenRepository(debtTokenPool, nil)
+				repo, err := NewDebtTokenRepository(debtTokenPool, nil, 0)
 				if err != nil {
 					t.Fatalf("NewDebtTokenRepository: %v", err)
 				}
@@ -241,7 +245,7 @@ func TestGetOrCreateDebtToken(t *testing.T) {
 				truncateDebtToken(t, ctx)
 				protocolID, tokenID := seedDebtTokenDeps(t, ctx, 1)
 
-				repo, err := NewDebtTokenRepository(debtTokenPool, nil)
+				repo, err := NewDebtTokenRepository(debtTokenPool, nil, 0)
 				if err != nil {
 					t.Fatalf("NewDebtTokenRepository: %v", err)
 				}

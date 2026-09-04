@@ -32,7 +32,7 @@ func setupFluidIntegration(t *testing.T) *fluidIntegrationFixture {
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
-	tokenRepo, err := postgres.NewTokenRepository(pool, nil, 0)
+	tokenRepo, err := postgres.NewTokenRepository(pool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}

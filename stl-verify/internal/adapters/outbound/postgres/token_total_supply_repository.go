@@ -153,7 +153,7 @@ func (r *TokenTotalSupplyRepository) buildInsertArgs(
 		s.BlockTimestamp,
 		s.Source,
 		int(r.buildID),
-		int64(r.runID),
+		r.runID,
 	}
 	return query, args
 }

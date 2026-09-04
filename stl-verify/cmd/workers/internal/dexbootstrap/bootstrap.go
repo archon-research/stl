@@ -257,7 +257,7 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 		d.Close()
 		return nil, fmt.Errorf("creating protocol repository: %w", err)
 	}
-	d.TokenRepo, err = postgres.NewTokenRepository(pool, logger, defaultRepoBatchSize)
+	d.TokenRepo, err = postgres.NewTokenRepository(pool, logger, defaultRepoBatchSize, runID)
 	if err != nil {
 		d.Close()
 		return nil, fmt.Errorf("creating token repository: %w", err)

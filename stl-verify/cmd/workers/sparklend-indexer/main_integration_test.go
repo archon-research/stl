@@ -88,7 +88,6 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 		blockNum, version, blockNum,
 	))
 
-	t.Setenv("BUILD_GIT_HASH", "test")
 	testutil.SetDevIdentity(t)
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)

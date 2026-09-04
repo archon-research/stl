@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
@@ -62,6 +63,16 @@ func setupFluidTest(t *testing.T) *fluidTestFixture {
 	f := &fluidTestFixture{repo: repo, pool: fluidPool}
 	f.createTestFixtures(t, ctx)
 	return f
+}
+
+func (f *fluidTestFixture) newRunRepo(t *testing.T, ctx context.Context) (*FluidVaultRepository, buildregistry.RunID) {
+	t.Helper()
+	buildID, runID := testutil.OpenTestRun(t, ctx, f.pool)
+	repo, err := NewFluidVaultRepository(f.pool, nil, buildID, runID, 0)
+	if err != nil {
+		t.Fatalf("NewFluidVaultRepository: %v", err)
+	}
+	return repo, runID
 }
 
 func (f *fluidTestFixture) createTestFixtures(t *testing.T, ctx context.Context) {
@@ -142,6 +153,8 @@ func bytes20(first byte) []byte {
 func TestFluidRecordVaults_CreateAndGetAll(t *testing.T) {
 	f := setupFluidTest(t)
 	ctx := context.Background()
+	repo, runID := f.newRunRepo(t, ctx)
+	f.repo = repo
 
 	id := f.createVault(t, ctx, f.newTestVault(0xaa))
 	if id <= 0 {
@@ -168,6 +181,12 @@ func TestFluidRecordVaults_CreateAndGetAll(t *testing.T) {
 	if got.CollateralTokenID != f.collTokenID || got.DebtTokenID != f.debtTokenID {
 		t.Errorf("token ids = (%d,%d), want (%d,%d)", got.CollateralTokenID, got.DebtTokenID, f.collTokenID, f.debtTokenID)
 	}
+
+	var gotRunID *int64
+	if err := f.pool.QueryRow(ctx, `SELECT run_id FROM fluid_vault WHERE id = $1`, id).Scan(&gotRunID); err != nil {
+		t.Fatalf("reading back: %v", err)
+	}
+	testutil.RequireRunID(t, gotRunID, runID)
 }
 
 func TestFluidRecordVaults_MixedChainsFails(t *testing.T) {
@@ -323,11 +342,7 @@ func TestFluidSaveVaultStates_BasicWithOptionalFields(t *testing.T) {
 	f := setupFluidTest(t)
 	ctx := context.Background()
 	vaultID := f.createVault(t, ctx, f.newTestVault(0xd1))
-	buildID, runID := testutil.OpenTestRun(t, ctx, f.pool)
-	repo, err := NewFluidVaultRepository(f.pool, nil, buildID, runID, 0)
-	if err != nil {
-		t.Fatalf("NewFluidVaultRepository: %v", err)
-	}
+	repo, runID := f.newRunRepo(t, ctx)
 
 	ts := time.Unix(1700000000, 0).UTC()
 	s := newFluidState(vaultID, 19600000, 0, ts)
@@ -356,9 +371,7 @@ func TestFluidSaveVaultStates_BasicWithOptionalFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query state: %v", err)
 	}
-	if gotRunID == nil || *gotRunID != int64(runID) {
-		t.Errorf("run_id = %v, want %d", gotRunID, runID)
-	}
+	testutil.RequireRunID(t, gotRunID, runID)
 	if totalCollateral != "1000000" || totalDebt != "400000" {
 		t.Errorf("totals = (%s,%s), want (1000000,400000)", totalCollateral, totalDebt)
 	}

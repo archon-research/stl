@@ -77,9 +77,7 @@ func TestPrimeReferencePositionRepositoryPreservesEighteenDecimalPrecision(t *te
 	if assets != "782710914.129541047405509005" {
 		t.Errorf("assets_usd = %s, want the 18-decimal value unrounded", assets)
 	}
-	if gotRunID == nil || *gotRunID != int64(runID) {
-		t.Errorf("run_id = %v, want %d", gotRunID, runID)
-	}
+	testutil.RequireRunID(t, gotRunID, runID)
 }
 
 func TestPrimeReferencePositionRepositoryKeepsOptionalFieldsNull(t *testing.T) {

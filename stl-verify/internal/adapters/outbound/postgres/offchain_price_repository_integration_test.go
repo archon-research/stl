@@ -34,7 +34,5 @@ func TestPriceRepositoryUpsertPrices_WrittenRowsCarryTheRunID(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT run_id FROM offchain_token_price WHERE token_id = 1 AND source_id = 1`).Scan(&gotRunID); err != nil {
 		t.Fatalf("reading back: %v", err)
 	}
-	if gotRunID == nil || *gotRunID != int64(runID) {
-		t.Errorf("run_id = %v, want %d", gotRunID, runID)
-	}
+	testutil.RequireRunID(t, gotRunID, runID)
 }

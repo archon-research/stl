@@ -347,7 +347,7 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	}
 	logger.Info("primes loaded", "count", len(primes))
 
-	tokenRepo, err := postgres.NewTokenRepository(dbPool, logger, 1)
+	tokenRepo, err := postgres.NewTokenRepository(dbPool, logger, 1, runID)
 	if err != nil {
 		return fmt.Errorf("token repo: %w", err)
 	}

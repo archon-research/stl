@@ -20,7 +20,6 @@ import (
 func setWorkerEnv(t *testing.T, chainID string) {
 	t.Helper()
 
-	t.Setenv("BUILD_GIT_HASH", "test")
 	testutil.SetDevIdentity(t)
 	t.Setenv("CHAIN_ID", chainID)
 	t.Setenv("ALCHEMY_API_KEY", "test-key")

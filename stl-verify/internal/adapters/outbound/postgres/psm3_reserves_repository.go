@@ -69,7 +69,7 @@ func (r *PSM3ReservesRepository) SaveReserves(ctx context.Context, snap *entity.
 			snap.BlockTimestamp,
 			snap.Source,
 			int(r.buildID),
-			int64(r.runID),
+			r.runID,
 		)
 		if err != nil {
 			return fmt.Errorf("insert psm3 reserves (chain=%d block=%d): %w", snap.ChainID, snap.BlockNumber, err)
@@ -111,7 +111,7 @@ func (r *PSM3ReservesRepository) saveALMPositions(ctx context.Context, tx pgx.Tx
 			snap.BlockTimestamp,
 			snap.Source,
 			int(r.buildID),
-			int64(r.runID),
+			r.runID,
 		)
 		if err != nil {
 			return fmt.Errorf("insert psm3 alm shares (chain=%d block=%d prime=%s): %w",
