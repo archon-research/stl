@@ -79,6 +79,22 @@ func validV4Tick() *UniswapV4Tick {
 	}
 }
 
+func validV4Position() *UniswapV4Position {
+	return &UniswapV4Position{
+		PoolID:                   1,
+		Owner:                    v4Sender,
+		TickLower:                -100,
+		TickUpper:                100,
+		Salt:                     v4Salt,
+		BlockNumber:              100,
+		BlockVersion:             0,
+		BlockTimestamp:           time.Unix(1, 0).UTC(),
+		Liquidity:                big.NewInt(1000),
+		FeeGrowthInside0LastX128: big.NewInt(0),
+		FeeGrowthInside1LastX128: big.NewInt(0),
+	}
+}
+
 func validV4PoolEvent() *UniswapV4PoolEvent {
 	return &UniswapV4PoolEvent{
 		PoolID:         1,
@@ -269,6 +285,111 @@ func TestUniswapV4Tick_Validate(t *testing.T) {
 			tk := validV4Tick()
 			tc.mut(tk)
 			assertValidateErr(t, tk.Validate(), tc.wantErr)
+		})
+	}
+}
+
+func TestUniswapV4Position_Validate(t *testing.T) {
+	cases := []struct {
+		name    string
+		mut     func(*UniswapV4Position)
+		wantErr bool
+	}{
+		{"ok", func(*UniswapV4Position) {}, false},
+		{"missing pool id", func(p *UniswapV4Position) { p.PoolID = 0 }, true},
+		{"missing owner", func(p *UniswapV4Position) { p.Owner = common.Address{} }, true},
+		{"tick_lower below TickMath min", func(p *UniswapV4Position) { p.TickLower = -887273 }, true},
+		{"tick_upper above TickMath max", func(p *UniswapV4Position) { p.TickUpper = 887273 }, true},
+		{"full-range ticks at TickMath boundaries", func(p *UniswapV4Position) { p.TickLower, p.TickUpper = -887272, 887272 }, false},
+		{"tick_lower equal tick_upper", func(p *UniswapV4Position) { p.TickUpper = p.TickLower }, true},
+		{"tick_lower greater than tick_upper", func(p *UniswapV4Position) { p.TickLower, p.TickUpper = 100, -100 }, true},
+		{"zero salt", func(p *UniswapV4Position) { p.Salt = common.Hash{} }, false},
+		{"missing block number", func(p *UniswapV4Position) { p.BlockNumber = 0 }, true},
+		{"negative block version", func(p *UniswapV4Position) { p.BlockVersion = -1 }, true},
+		{"missing block timestamp", func(p *UniswapV4Position) { p.BlockTimestamp = time.Time{} }, true},
+		{"nil liquidity", func(p *UniswapV4Position) { p.Liquidity = nil }, true},
+		{"nil fee growth inside0", func(p *UniswapV4Position) { p.FeeGrowthInside0LastX128 = nil }, true},
+		{"nil fee growth inside1", func(p *UniswapV4Position) { p.FeeGrowthInside1LastX128 = nil }, true},
+		{"all zero position info", func(p *UniswapV4Position) { p.Liquidity = big.NewInt(0) }, false},
+		{"negative liquidity", func(p *UniswapV4Position) { p.Liquidity = big.NewInt(-1) }, true},
+		{"negative fee growth inside0", func(p *UniswapV4Position) { p.FeeGrowthInside0LastX128 = big.NewInt(-1) }, true},
+		{"negative fee growth inside1", func(p *UniswapV4Position) { p.FeeGrowthInside1LastX128 = big.NewInt(-1) }, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := validV4Position()
+			tc.mut(p)
+			assertValidateErr(t, p.Validate(), tc.wantErr)
+		})
+	}
+}
+
+func TestUniswapV4PositionKey_Validate(t *testing.T) {
+	cases := []struct {
+		name    string
+		mut     func(*UniswapV4PositionKey)
+		wantErr bool
+	}{
+		{"ok", func(*UniswapV4PositionKey) {}, false},
+		{"missing owner", func(k *UniswapV4PositionKey) { k.Owner = common.Address{} }, true},
+		{"tick_lower below TickMath min", func(k *UniswapV4PositionKey) { k.TickLower = -887273 }, true},
+		{"tick_upper above TickMath max", func(k *UniswapV4PositionKey) { k.TickUpper = 887273 }, true},
+		{"tick_lower greater than tick_upper", func(k *UniswapV4PositionKey) { k.TickLower, k.TickUpper = 100, -100 }, true},
+		{"zero salt", func(k *UniswapV4PositionKey) { k.Salt = common.Hash{} }, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			k := validV4Position().Key()
+			tc.mut(&k)
+			assertValidateErr(t, k.Validate(), tc.wantErr)
+		})
+	}
+}
+
+func TestUniswapV4Position_Key(t *testing.T) {
+	p := validV4Position()
+
+	want := UniswapV4PositionKey{Owner: v4Sender, TickLower: -100, TickUpper: 100, Salt: v4Salt}
+	if got := p.Key(); got != want {
+		t.Errorf("Key() = %+v, want %+v", got, want)
+	}
+}
+
+func TestUniswapV4PositionKey_Compare(t *testing.T) {
+	base := UniswapV4PositionKey{
+		Owner:     common.HexToAddress("0x22"),
+		TickLower: -100,
+		TickUpper: 100,
+		Salt:      common.HexToHash("0x22"),
+	}
+	lowerOwner := base
+	lowerOwner.Owner = common.HexToAddress("0x11")
+	lowerTickLower := base
+	lowerTickLower.TickLower = -200
+	lowerTickUpper := base
+	lowerTickUpper.TickUpper = 50
+	lowerSalt := base
+	lowerSalt.Salt = common.HexToHash("0x11")
+
+	cases := []struct {
+		name string
+		a, b UniswapV4PositionKey
+		want int
+	}{
+		{"equal keys", base, base, 0},
+		{"owner takes precedence over the tick range", lowerOwner, lowerTickLower, -1},
+		{"tick_lower breaks an owner tie", lowerTickLower, base, -1},
+		{"tick_upper breaks a tick_lower tie", lowerTickUpper, base, -1},
+		{"salt breaks a tick-range tie", lowerSalt, base, -1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.a.Compare(tc.b); got != tc.want {
+				t.Errorf("a.Compare(b) = %d, want %d", got, tc.want)
+			}
+			if got := tc.b.Compare(tc.a); got != -tc.want {
+				t.Errorf("b.Compare(a) = %d, want %d (the order must be antisymmetric)", got, -tc.want)
+			}
 		})
 	}
 }

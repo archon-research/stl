@@ -1,9 +1,12 @@
 package postgres
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
+	"slices"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -178,6 +181,8 @@ type v4LiquidityEventConverted struct {
 	liquidityDelta pgtype.Numeric
 }
 
+// SaveBlock persists a block's uniswap_v4 rows in one pgx.Batch within tx,
+// except ticks and positions, which the append-on-change writers take instead.
 func (r *UniswapV4Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.UniswapV4BlockWrites) (stateRows outbound.StateRowCounts, err error) {
 	rows, err := convertV4BlockWrites(w)
 	if err != nil {
@@ -192,9 +197,13 @@ func (r *UniswapV4Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbou
 		return stateRows, err
 	}
 
-	// pgx forbids new queries while a batch result reader is open, and each tick
-	// insert depends on a prior read of its slot (see uniswapTickWriter).
+	// pgx forbids new queries while a batch result reader is open. Ticks before
+	// positions is a fixed order: the two lock domains are disjoint, so a varying
+	// phase order would deadlock concurrent writers across them.
 	if err := uniswapV4TickWriter.writeTicks(ctx, tx, uniswapV4TickRows(w.Ticks), r.buildID); err != nil {
+		return stateRows, err
+	}
+	if err := r.writePositions(ctx, tx, w.Positions); err != nil {
 		return stateRows, err
 	}
 
@@ -533,4 +542,347 @@ func uniswapV4TickRows(ticks []*entity.UniswapV4Tick) []uniswapTickRow {
 		}
 	}
 	return rows
+}
+
+// PositionsForPoolAtBlock queries the connection pool for committed rows, so it
+// is safe to call before the write transaction opens.
+func (r *UniswapV4Repository) PositionsForPoolAtBlock(ctx context.Context, poolID int64, blockNumber int64) ([]entity.UniswapV4PositionKey, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT DISTINCT owner, tick_lower, tick_upper, salt FROM uniswap_v4_position
+		 WHERE pool_id = $1 AND block_number = $2
+		 ORDER BY owner, tick_lower, tick_upper, salt`,
+		poolID, blockNumber,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying positions for pool %d at block %d: %w", poolID, blockNumber, err)
+	}
+	defer rows.Close()
+
+	var keys []entity.UniswapV4PositionKey
+	for rows.Next() {
+		var (
+			owner                []byte
+			tickLower, tickUpper int32
+			salt                 []byte
+		)
+		if err := rows.Scan(&owner, &tickLower, &tickUpper, &salt); err != nil {
+			return nil, fmt.Errorf("scanning position for pool %d at block %d: %w", poolID, blockNumber, err)
+		}
+		key := entity.UniswapV4PositionKey{
+			Owner:     common.BytesToAddress(owner),
+			TickLower: int(tickLower),
+			TickUpper: int(tickUpper),
+			Salt:      common.BytesToHash(salt),
+		}
+		if err := key.Validate(); err != nil {
+			return nil, fmt.Errorf("reading position for pool %d at block %d: %w", poolID, blockNumber, err)
+		}
+		keys = append(keys, key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating positions for pool %d at block %d: %w", poolID, blockNumber, err)
+	}
+	return keys, nil
+}
+
+// sharedBlockNumber returns the one block every row belongs to; rows must be
+// non-empty. The read-latest queries bound on that height, so a mixed batch
+// would compare a row against another block's state.
+func sharedBlockNumber[T any](kind string, rows []T, blockNumberOf func(T) int64) (int64, error) {
+	blockNumber := blockNumberOf(rows[0])
+	for _, row := range rows[1:] {
+		if got := blockNumberOf(row); got != blockNumber {
+			return 0, fmt.Errorf("uniswap_v4 %s write spans blocks %d and %d: one SaveBlock is one block", kind, blockNumber, got)
+		}
+	}
+	return blockNumber, nil
+}
+
+func (r *UniswapV4Repository) writePositions(ctx context.Context, tx pgx.Tx, positions []*entity.UniswapV4Position) error {
+	if len(positions) == 0 {
+		return nil
+	}
+
+	blockNumber, err := sharedBlockNumber("position", positions, func(p *entity.UniswapV4Position) int64 { return p.BlockNumber })
+	if err != nil {
+		return err
+	}
+
+	keys := distinctSortedV4PositionKeys(positions)
+	// A duplicate slot would compare both rows against the same prior state and
+	// let ON CONFLICT DO NOTHING drop the second one's values in silence.
+	if len(keys) != len(positions) {
+		return fmt.Errorf("uniswap_v4 position write has %d rows for %d distinct slots: one block must touch a position once", len(positions), len(keys))
+	}
+
+	if err := lockPositionKeysV4(ctx, tx, keys); err != nil {
+		return err
+	}
+
+	latest, err := readLatestPositionsV4(ctx, tx, keys, blockNumber)
+	if err != nil {
+		return err
+	}
+
+	return r.insertChangedPositionsV4(ctx, tx, positions, latest)
+}
+
+type v4PositionKey struct {
+	poolID int64
+	key    entity.UniswapV4PositionKey
+}
+
+func distinctSortedV4PositionKeys(positions []*entity.UniswapV4Position) []v4PositionKey {
+	seen := make(map[v4PositionKey]struct{}, len(positions))
+	for _, p := range positions {
+		seen[v4PositionKey{poolID: p.PoolID, key: p.Key()}] = struct{}{}
+	}
+	keys := make([]v4PositionKey, 0, len(seen))
+	for k := range seen {
+		keys = append(keys, k)
+	}
+	slices.SortFunc(keys, func(a, b v4PositionKey) int {
+		return cmp.Or(cmp.Compare(a.poolID, b.poolID), a.key.Compare(b.key))
+	})
+	return keys
+}
+
+// lockPositionKeysV4 takes every slot's advisory lock in one round-trip. keys
+// must be in distinctSortedV4PositionKeys order or overlapping writers deadlock.
+// The lock domain is deliberately not the pv-trigger's "u4pos|…|block|version".
+func lockPositionKeysV4(ctx context.Context, tx pgx.Tx, keys []v4PositionKey) error {
+	lockKeys := make([]string, len(keys))
+	for i, k := range keys {
+		lockKeys[i] = fmt.Sprintf("uniswap_v4_position|%d|%s|%d|%d|%s",
+			k.poolID, k.key.Owner.Hex(), k.key.TickLower, k.key.TickUpper, k.key.Salt.Hex())
+	}
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended(k, 0))
+		 FROM unnest($1::text[]) WITH ORDINALITY AS u(k, ord)
+		 ORDER BY ord`,
+		lockKeys,
+	); err != nil {
+		return fmt.Errorf("locking %d uniswap_v4 position slots: %w", len(keys), err)
+	}
+	return nil
+}
+
+func positionKeyArrays(keys []v4PositionKey) (poolIDs []int64, owners [][]byte, tickLowers, tickUppers []int32, salts [][]byte) {
+	poolIDs = make([]int64, len(keys))
+	owners = make([][]byte, len(keys))
+	tickLowers = make([]int32, len(keys))
+	tickUppers = make([]int32, len(keys))
+	salts = make([][]byte, len(keys))
+	for i, k := range keys {
+		poolIDs[i] = k.poolID
+		owners[i] = k.key.Owner.Bytes()
+		tickLowers[i] = int32(k.key.TickLower)
+		tickUppers[i] = int32(k.key.TickUpper)
+		salts[i] = k.key.Salt.Bytes()
+	}
+	return poolIDs, owners, tickLowers, tickUppers, salts
+}
+
+// readLatestPositionsV4 fetches the latest row per slot at or below blockNumber;
+// slots with no prior row are absent. The height bound keeps an out-of-order
+// backfill write from being dropped as unchanged against a newer row.
+func readLatestPositionsV4(ctx context.Context, tx pgx.Tx, keys []v4PositionKey, blockNumber int64) (map[v4PositionKey]v4PositionValues, error) {
+	poolIDs, owners, tickLowers, tickUppers, salts := positionKeyArrays(keys)
+
+	rows, err := tx.Query(ctx,
+		`SELECT DISTINCT ON (p.pool_id, p.owner, p.tick_lower, p.tick_upper, p.salt)
+		        p.pool_id, p.owner, p.tick_lower, p.tick_upper, p.salt,
+		        p.block_number, p.block_version,
+		        p.liquidity, p.fee_growth_inside0_last_x128, p.fee_growth_inside1_last_x128
+		 FROM uniswap_v4_position p
+		 JOIN unnest($1::bigint[], $2::bytea[], $3::int[], $4::int[], $5::bytea[])
+		      AS k(pool_id, owner, tick_lower, tick_upper, salt)
+		   ON p.pool_id = k.pool_id AND p.owner = k.owner
+		  AND p.tick_lower = k.tick_lower AND p.tick_upper = k.tick_upper
+		  AND p.salt = k.salt
+		 WHERE p.block_number <= $6
+		 ORDER BY p.pool_id, p.owner, p.tick_lower, p.tick_upper, p.salt,
+		          p.block_number DESC, p.block_version DESC, p.processing_version DESC`,
+		poolIDs, owners, tickLowers, tickUppers, salts, blockNumber,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying latest uniswap_v4 positions for %d slots: %w", len(keys), err)
+	}
+	defer rows.Close()
+
+	latest := make(map[v4PositionKey]v4PositionValues, len(keys))
+	for rows.Next() {
+		var (
+			poolID               int64
+			owner, salt          []byte
+			tickLower, tickUpper int32
+			priorBlockNumber     int64
+			blockVersion         int
+			liquidity            pgtype.Numeric
+			feeGrowthInside0     pgtype.Numeric
+			feeGrowthInside1     pgtype.Numeric
+		)
+		if err := rows.Scan(&poolID, &owner, &tickLower, &tickUpper, &salt,
+			&priorBlockNumber, &blockVersion,
+			&liquidity, &feeGrowthInside0, &feeGrowthInside1); err != nil {
+			return nil, fmt.Errorf("scanning latest uniswap_v4 position row: %w", err)
+		}
+		slot := v4PositionKey{poolID: poolID, key: entity.UniswapV4PositionKey{
+			Owner:     common.BytesToAddress(owner),
+			TickLower: int(tickLower),
+			TickUpper: int(tickUpper),
+			Salt:      common.BytesToHash(salt),
+		}}
+		values, convErr := toV4PositionValues(priorBlockNumber, blockVersion, liquidity, feeGrowthInside0, feeGrowthInside1)
+		if convErr != nil {
+			return nil, fmt.Errorf("reading latest uniswap_v4 position for pool=%d %+v: %w", poolID, slot.key, convErr)
+		}
+		latest[slot] = values
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating latest uniswap_v4 positions: %w", err)
+	}
+	return latest, nil
+}
+
+func (r *UniswapV4Repository) insertChangedPositionsV4(
+	ctx context.Context, tx pgx.Tx,
+	positions []*entity.UniswapV4Position,
+	latest map[v4PositionKey]v4PositionValues,
+) (err error) {
+	batch := &pgx.Batch{}
+	var queued []v4QueuedPosition
+	for i, p := range positions {
+		slot := v4PositionKey{poolID: p.PoolID, key: p.Key()}
+		prior, hasPrior := latest[slot]
+		if hasPrior && v4PositionUnchanged(prior, p) {
+			continue
+		}
+		converted, convErr := convertV4Position(p)
+		if convErr != nil {
+			return fmt.Errorf("position %d: converting pool=%d %+v: %w", i, p.PoolID, slot.key, convErr)
+		}
+		batch.Queue(
+			`INSERT INTO uniswap_v4_position
+			   (pool_id, owner, tick_lower, tick_upper, salt,
+			    block_number, block_version, block_timestamp,
+			    liquidity, fee_growth_inside0_last_x128, fee_growth_inside1_last_x128, build_id)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+			 ON CONFLICT (pool_id, owner, tick_lower, tick_upper, salt,
+			              block_number, block_version, processing_version) DO NOTHING`,
+			p.PoolID, p.Owner.Bytes(), p.TickLower, p.TickUpper, p.Salt.Bytes(),
+			p.BlockNumber, p.BlockVersion, p.BlockTimestamp,
+			converted.liquidity, converted.feeGrowthInside0LastX128,
+			converted.feeGrowthInside1LastX128, int(r.buildID),
+		)
+		queued = append(queued, v4QueuedPosition{
+			slot:          slot,
+			blockNumber:   p.BlockNumber,
+			supersedesRow: hasPrior && prior.blockNumber == p.BlockNumber && prior.blockVersion == p.BlockVersion,
+		})
+	}
+
+	if len(queued) == 0 {
+		return nil
+	}
+
+	br := tx.SendBatch(ctx, batch)
+	defer func() {
+		if closeErr := br.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing uniswap_v4 position batch: %w", closeErr))
+		}
+	}()
+	for _, q := range queued {
+		tag, execErr := br.Exec()
+		if execErr != nil {
+			return fmt.Errorf("inserting uniswap_v4 position pool=%d %+v at block %d: %w", q.slot.poolID, q.slot.key, q.blockNumber, execErr)
+		}
+		if err := q.assertInserted(tag.RowsAffected()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type v4QueuedPosition struct {
+	slot        v4PositionKey
+	blockNumber int64
+	// supersedesRow marks values differing from a row at the SAME (block_number,
+	// block_version): the one case where a discarded insert is a real
+	// disagreement rather than a replay of an older version.
+	supersedesRow bool
+}
+
+func (q v4QueuedPosition) assertInserted(rowsAffected int64) error {
+	if q.supersedesRow && rowsAffected == 0 {
+		return fmt.Errorf("uniswap_v4 position pool=%d %+v at block %d already stored with different values under this build: the authoritative read disagrees with itself",
+			q.slot.poolID, q.slot.key, q.blockNumber)
+	}
+	return nil
+}
+
+type v4PositionConverted struct {
+	liquidity                pgtype.Numeric
+	feeGrowthInside0LastX128 pgtype.Numeric
+	feeGrowthInside1LastX128 pgtype.Numeric
+}
+
+func convertV4Position(p *entity.UniswapV4Position) (v4PositionConverted, error) {
+	liquidity, err := BigIntToNumericRequired(p.Liquidity, "liquidity")
+	if err != nil {
+		return v4PositionConverted{}, err
+	}
+	feeGrowthInside0LastX128, err := BigIntToNumericRequired(p.FeeGrowthInside0LastX128, "fee_growth_inside0_last_x128")
+	if err != nil {
+		return v4PositionConverted{}, err
+	}
+	feeGrowthInside1LastX128, err := BigIntToNumericRequired(p.FeeGrowthInside1LastX128, "fee_growth_inside1_last_x128")
+	if err != nil {
+		return v4PositionConverted{}, err
+	}
+	return v4PositionConverted{
+		liquidity:                liquidity,
+		feeGrowthInside0LastX128: feeGrowthInside0LastX128,
+		feeGrowthInside1LastX128: feeGrowthInside1LastX128,
+	}, nil
+}
+
+type v4PositionValues struct {
+	blockNumber              int64
+	blockVersion             int
+	liquidity                *big.Int
+	feeGrowthInside0LastX128 *big.Int
+	feeGrowthInside1LastX128 *big.Int
+}
+
+func toV4PositionValues(
+	blockNumber int64, blockVersion int,
+	liquidity, feeGrowthInside0LastX128, feeGrowthInside1LastX128 pgtype.Numeric,
+) (v4PositionValues, error) {
+	var v v4PositionValues
+	var err error
+	if v.liquidity, err = NumericToNullableBigInt(liquidity); err != nil {
+		return v, fmt.Errorf("liquidity: %w", err)
+	}
+	if v.feeGrowthInside0LastX128, err = NumericToNullableBigInt(feeGrowthInside0LastX128); err != nil {
+		return v, fmt.Errorf("fee_growth_inside0_last_x128: %w", err)
+	}
+	if v.feeGrowthInside1LastX128, err = NumericToNullableBigInt(feeGrowthInside1LastX128); err != nil {
+		return v, fmt.Errorf("fee_growth_inside1_last_x128: %w", err)
+	}
+	v.blockNumber = blockNumber
+	v.blockVersion = blockVersion
+	return v, nil
+}
+
+// v4PositionUnchanged reports whether the stored row already makes p redundant.
+// Within one height a differing block_version is a reorg re-observation and must
+// append; across heights the versions count different blocks, so only values decide.
+func v4PositionUnchanged(latest v4PositionValues, p *entity.UniswapV4Position) bool {
+	if latest.blockNumber == p.BlockNumber && latest.blockVersion != p.BlockVersion {
+		return false
+	}
+	return bigIntEqual(latest.liquidity, p.Liquidity) &&
+		bigIntEqual(latest.feeGrowthInside0LastX128, p.FeeGrowthInside0LastX128) &&
+		bigIntEqual(latest.feeGrowthInside1LastX128, p.FeeGrowthInside1LastX128)
 }

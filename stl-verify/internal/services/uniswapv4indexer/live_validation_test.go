@@ -406,7 +406,7 @@ type liveHarness struct {
 	latest      int64
 }
 
-func (h *liveHarness) persistDecoded(t *testing.T, ctx context.Context, decoded DecodedEvents, tickRows []*entity.UniswapV4Tick, block blockInfo) {
+func (h *liveHarness) persistDecoded(t *testing.T, ctx context.Context, decoded DecodedEvents, tickRows []*entity.UniswapV4Tick, positionRows []*entity.UniswapV4Position, block blockInfo) {
 	t.Helper()
 
 	err := h.txMgr.WithTransaction(ctx, func(tx pgx.Tx) error {
@@ -415,6 +415,7 @@ func (h *liveHarness) persistDecoded(t *testing.T, ctx context.Context, decoded 
 			LiquidityEvents: decoded.LiquidityEvents,
 			PoolEvents:      decoded.PoolEvents,
 			Ticks:           tickRows,
+			Positions:       positionRows,
 		}); txErr != nil {
 			return txErr
 		}
@@ -469,7 +470,7 @@ func (h *liveHarness) decodeAndPersistRealSwap(t *testing.T, ctx context.Context
 
 	tickRows := h.readTouchedTicks(t, ctx, decoded, eventBlock)
 	rep.touchedTickCount = len(tickRows)
-	h.persistDecoded(t, ctx, decoded, tickRows, eventBlock)
+	h.persistDecoded(t, ctx, decoded, tickRows, h.readTouchedPositions(t, ctx, decoded, eventBlock), eventBlock)
 }
 
 func (h *liveHarness) decodeAndPersistRealLiquidityEvent(t *testing.T, ctx context.Context, rep *liveReport) {
@@ -521,7 +522,12 @@ func (h *liveHarness) decodeAndPersistRealLiquidityEvent(t *testing.T, ctx conte
 	if len(tickRows) == 0 {
 		t.Logf("note: every ModifyLiquidity in tx %s carried liquidityDelta == 0 (a fee-collecting poke), so no tick was re-read", target.TxHash)
 	}
-	h.persistDecoded(t, ctx, decoded, tickRows, eventBlock)
+
+	positionRows := h.readTouchedPositions(t, ctx, decoded, eventBlock)
+	assertPositionInvariants(t, decoded.LiquidityEvents, positionRows, rep)
+	rep.liquidityPositionRows = positionRows
+
+	h.persistDecoded(t, ctx, decoded, tickRows, positionRows, eventBlock)
 }
 
 // Event data words are (tickLower, tickUpper, liquidityDelta, salt); most V4
@@ -760,6 +766,73 @@ func (h *liveHarness) readTouchedTicks(t *testing.T, ctx context.Context, decode
 	return rows
 }
 
+// Grouping by pool is mandatory: one receipt can carry ModifyLiquidity for
+// several pools, and a position key only means something within its own pool.
+func (h *liveHarness) readTouchedPositions(t *testing.T, ctx context.Context, decoded DecodedEvents, eventBlock blockInfo) []*entity.UniswapV4Position {
+	t.Helper()
+	if len(decoded.LiquidityEvents) == 0 {
+		return nil
+	}
+
+	byPool := make(map[int64][]*entity.UniswapV4LiquidityEvent)
+	for _, e := range decoded.LiquidityEvents {
+		byPool[e.PoolID] = append(byPool[e.PoolID], e)
+	}
+
+	var rows []*entity.UniswapV4Position
+	for _, pool := range h.pools {
+		events := byPool[pool.ID]
+		if len(events) == 0 {
+			continue
+		}
+		keys := TouchedPositions(events)
+		calls, err := BuildPositionCalls(pool, keys)
+		if err != nil {
+			t.Fatalf("BuildPositionCalls(pool=%s): %v", pool.PoolIDHash, err)
+		}
+		results, err := h.mc.ExecuteAtHash(ctx, calls, eventBlock.hash)
+		if err != nil {
+			t.Fatalf("CORE FAILURE: ExecuteAtHash(touched positions, pool=%s): %v", pool.PoolIDHash, err)
+		}
+		if len(results) != len(calls) {
+			t.Fatalf("CORE FAILURE: pool %s got %d position results, want %d", pool.PoolIDHash, len(results), len(calls))
+		}
+		for i, key := range keys {
+			row, err := DecodePosition(pool, key, eventBlock.number, 0, eventBlock.timestamp, results[i])
+			if err != nil {
+				t.Fatalf("DecodePosition(pool=%s, %+v): %v", pool.PoolIDHash, key, err)
+			}
+			rows = append(rows, row)
+		}
+	}
+	return rows
+}
+
+// An added delta must leave the position holding at least that much, which is
+// what proves the key addresses the position the event names rather than an
+// unrelated zeroed slot.
+func assertPositionInvariants(t *testing.T, events []*entity.UniswapV4LiquidityEvent, positions []*entity.UniswapV4Position, rep *liveReport) {
+	t.Helper()
+
+	byKey := make(map[entity.UniswapV4PositionKey]*entity.UniswapV4Position, len(positions))
+	for _, p := range positions {
+		byKey[p.Key()] = p
+	}
+
+	for _, e := range events {
+		key := entity.UniswapV4PositionKey{Owner: e.Sender, TickLower: e.TickLower, TickUpper: e.TickUpper, Salt: e.Salt}
+		got, read := byKey[key]
+		if !read {
+			addFinding(t, rep, fmt.Sprintf("ModifyLiquidity tx=%s logIndex=%d touched position %+v but no getPositionInfo row was read for it", e.TxHash, e.LogIndex, key))
+			continue
+		}
+		if e.LiquidityDelta.Sign() > 0 && got.Liquidity.Cmp(e.LiquidityDelta) < 0 {
+			addFinding(t, rep, fmt.Sprintf("position %+v reads back liquidity %s after an add of %s: the read is not addressing the position the event names",
+				key, got.Liquidity, e.LiquidityDelta))
+		}
+	}
+}
+
 // The liquidityNet sum over every enumerated tick is what catches a tick the
 // bitmap scan missed; re-reading only the ticks it found never would.
 func baselineTickCheck(t *testing.T, ctx context.Context, mc outbound.Multicaller, pools []RegisteredPool, states []*entity.UniswapV4PoolState, target blockInfo, rep *liveReport) {
@@ -887,6 +960,7 @@ var uniswapV4ReportTables = []string{
 	"uniswap_v4_liquidity_event",
 	"uniswap_v4_tick",
 	"uniswap_v4_pool_event",
+	"uniswap_v4_position",
 	"protocol_event",
 }
 
@@ -936,11 +1010,12 @@ type liveReport struct {
 	touchedTickCount       int
 	swapDecodeNote         string
 
-	liquidityBlockNumber int64
-	liquidityTxHash      string
-	liquidityEvents      []*entity.UniswapV4LiquidityEvent
-	liquidityTickRows    int
-	liquidityDecodeNote  string
+	liquidityBlockNumber  int64
+	liquidityTxHash       string
+	liquidityEvents       []*entity.UniswapV4LiquidityEvent
+	liquidityTickRows     int
+	liquidityPositionRows []*entity.UniswapV4Position
+	liquidityDecodeNote   string
 
 	baselineTickCount     int
 	baselineTickMin       int32
@@ -1063,6 +1138,22 @@ func (r *liveReport) renderLiquidity(b *strings.Builder) {
 	for _, e := range r.liquidityEvents {
 		fmt.Fprintf(b, "- poolRowID=%d logIndex=%d sender=%s tickLower=%d tickUpper=%d liquidityDelta=%s salt=%s\n",
 			e.PoolID, e.LogIndex, e.Sender.Hex(), e.TickLower, e.TickUpper, bigOrNil(e.LiquidityDelta), e.Salt.Hex())
+	}
+	fmt.Fprintln(b)
+	r.renderPositions(b)
+}
+
+func (r *liveReport) renderPositions(b *strings.Builder) {
+	fmt.Fprintf(b, "### Positions read back at that block's hash\n\n")
+	if len(r.liquidityPositionRows) == 0 {
+		fmt.Fprintf(b, "None.\n\n")
+		return
+	}
+	fmt.Fprintf(b, "| poolRowID | owner | tickLower | tickUpper | salt | liquidity | feeGrowthInside0LastX128 | feeGrowthInside1LastX128 |\n|---|---|---|---|---|---|---|---|\n")
+	for _, p := range r.liquidityPositionRows {
+		fmt.Fprintf(b, "| %d | %s | %d | %d | %s | %s | %s | %s |\n",
+			p.PoolID, p.Owner.Hex(), p.TickLower, p.TickUpper, p.Salt.Hex(),
+			bigOrNil(p.Liquidity), bigOrNil(p.FeeGrowthInside0LastX128), bigOrNil(p.FeeGrowthInside1LastX128))
 	}
 	fmt.Fprintln(b)
 }

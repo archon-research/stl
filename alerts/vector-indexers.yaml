@@ -2644,6 +2644,107 @@ groups:
             logs the offending PoolIds at boot.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerpoolneverindexed
 
+      # =====================================================================
+      # VEC-572 — design-decision watchdog. Self-contained; keep it last in
+      # this group.
+      # =====================================================================
+      - alert: VectorUniswapV4AppendOnChangeGrowthHigh
+        # uniswap_v4_tick and uniswap_v4_position are deliberately PLAIN tables,
+        # not hypertables (see their COMMENT ON TABLE and the runbook section).
+        # Both are append-on-change: each write first reads the latest row per
+        # natural key with no time bound the planner could use, so partitioning
+        # would fan that lookup out over every chunk (the VEC-541 cost profile)
+        # while buying nothing a plain index does not. That trade is only right
+        # while the tables stay small. This rule is the tripwire on the
+        # assumption — nothing is broken when it fires.
+        #
+        # Threshold derivation:
+        #   - a plain PostgreSQL table gets uncomfortable to operate past
+        #     ~100M rows (index depth, autovacuum, bloat on rewrite);
+        #   - today's rate across both tables is ~10-100 rows/day;
+        #   - trip at a combined 250k rows/day sustained = 2.9 rows/s
+        #     (250000 / 86400 = 2.894), i.e. ~90M rows/year — roughly a year of
+        #     runway from the moment it fires, enough to plan and ship the
+        #     hypertable conversion without urgency.
+        # That is 3-4 orders of magnitude above today, so it cannot fire on
+        # ordinary growth: reaching it means a registry expansion or a traffic
+        # regime change that invalidates the plain-table premise.
+        #
+        # 6h rate window AND `for: 6h`: the signal is a sustained regime change,
+        # never a burst. A backfill, or a pool's first-touch baseline tick
+        # enumeration (O(10³) ticks in one block), spikes the instantaneous rate
+        # by design and must not wake anyone; 6h of both smooths those away.
+        #
+        # The counters count rows OFFERED to the append-on-change writer, which
+        # then drops the unchanged ones, so this over-estimates real table
+        # growth — deliberately: firing early on a headroom warning is the safe
+        # direction.
+        #
+        # `sum by (cluster)` WITHOUT `chain`, unlike every other rule in this
+        # group: the budget belongs to the TABLE, and one uniswap_v4_position /
+        # uniswap_v4_tick holds every chain's rows (they key on the pool
+        # surrogate, which spans chains). Splitting by chain would compare each
+        # chain's share against the whole table's budget and under-fire.
+        #
+        # Zero-filled from kube-state, same shape as
+        # VectorFluidVaultIndexerStalled: both counters no-op for n<=0, so until
+        # the first tick/position row lands the series do not exist and a bare
+        # `sum(rate(...))` is ABSENT, not zero — the `+` would then yield an
+        # empty vector and the rule would be silently un-evaluable rather than
+        # simply under threshold. Gated on >=1 replica so a scaled-down
+        # deployment does not evaluate at all.
+        expr: |
+          (
+            (
+              sum by (cluster) (
+                rate(uniswap_v4_tick_rows_written_total{k8s_namespace_name="vector"}[6h])
+              )
+              or
+              max by (cluster) (
+                kube_deployment_status_replicas_available{
+                  deployment="uniswap-v4-indexer", namespace="vector"
+                }
+              ) * 0
+            )
+            +
+            (
+              sum by (cluster) (
+                rate(uniswap_v4_position_rows_written_total{k8s_namespace_name="vector"}[6h])
+              )
+              or
+              max by (cluster) (
+                kube_deployment_status_replicas_available{
+                  deployment="uniswap-v4-indexer", namespace="vector"
+                }
+              ) * 0
+            )
+          ) > 2.9
+          and on (cluster)
+          (
+            max by (cluster) (
+              kube_deployment_status_replicas_available{
+                deployment="uniswap-v4-indexer", namespace="vector"
+              }
+            ) >= 1
+          )
+        for: 6h
+        labels:
+          team: vector
+          severity: warning
+          component: uniswap-v4-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector uniswap_v4 append-on-change tables outgrowing their plain-table budget"
+          description: |
+            Combined append-on-change write rate into `uniswap_v4_tick` +
+            `uniswap_v4_position` has exceeded 250k rows/day (2.9 rows/s)
+            sustained for 6h — about 90M rows/year against the ~100M-row budget
+            those deliberately-plain (non-hypertable) tables were sized for.
+            Nothing is broken; this is the tripwire on that design choice. Check
+            the real row counts, and if the rate is the new normal plan the
+            hypertable conversion migration described in the runbook.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4appendonchangegrowthhigh
+
   # CEX order book indexer (VEC-374). Streams L2 books from an exchange over a
   # WebSocket and persists periodic top-N snapshots. One pod per exchange
   # (service_name="cex-orderbook-indexer-<exchange>", label `exchange`). Unlike
