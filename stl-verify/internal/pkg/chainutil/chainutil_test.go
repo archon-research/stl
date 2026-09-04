@@ -1,8 +1,13 @@
 package chainutil
 
 import (
+	"context"
+	"errors"
+	"math"
+	"math/big"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
@@ -272,5 +277,139 @@ func TestDefaultChainExpectations_CoversEveryKnownChain(t *testing.T) {
 		if _, ok := entity.ChainIDToS3Bucket[chainID]; !ok {
 			t.Errorf("chain %d is declared here but is not a chain the repo watches", chainID)
 		}
+	}
+}
+
+func TestAlchemyRPCURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		chainID int64
+		apiKey  string
+		httpURL string
+		want    string
+		wantErr string
+	}{
+		{
+			name:    "mainnet falls back to the built-in endpoint",
+			chainID: 1,
+			apiKey:  "secret",
+			want:    "https://eth-mainnet.g.alchemy.com/v2/secret",
+		},
+		{
+			name:    "an explicit endpoint wins on mainnet",
+			chainID: 1,
+			apiKey:  "secret",
+			httpURL: "https://eth-sepolia.g.alchemy.com/v2",
+			want:    "https://eth-sepolia.g.alchemy.com/v2/secret",
+		},
+		{
+			name:    "a trailing slash does not double up before the key",
+			chainID: 8453,
+			apiKey:  "secret",
+			httpURL: "https://base-mainnet.g.alchemy.com/v2/",
+			want:    "https://base-mainnet.g.alchemy.com/v2/secret",
+		},
+		{
+			name:    "a non-mainnet chain must name its endpoint",
+			chainID: 8453,
+			apiKey:  "secret",
+			wantErr: "ALCHEMY_HTTP_URL is required for chain 8453",
+		},
+		{
+			name:    "an absent key is a hard error, never an unauthenticated URL",
+			chainID: 1,
+			httpURL: "https://eth-mainnet.g.alchemy.com/v2",
+			wantErr: "ALCHEMY_API_KEY",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ALCHEMY_API_KEY", tc.apiKey)
+			t.Setenv("ALCHEMY_HTTP_URL", tc.httpURL)
+
+			got, err := AlchemyRPCURL(tc.chainID)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want one mentioning %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("AlchemyRPCURL: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("url = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+type chainIDReaderFunc func(ctx context.Context) (*big.Int, error)
+
+func (f chainIDReaderFunc) ChainID(ctx context.Context) (*big.Int, error) { return f(ctx) }
+
+func TestAssertChainID(t *testing.T) {
+	tests := []struct {
+		name    string
+		node    *big.Int
+		nodeErr error
+		want    int64
+		wantErr string
+	}{
+		{name: "the node agrees with the config", node: big.NewInt(8453), want: 8453},
+		{
+			name:    "the node is on another chain",
+			node:    big.NewInt(1),
+			want:    8453,
+			wantErr: "RPC chain ID mismatch: RPC reports 1, config says 8453",
+		},
+		{
+			name:    "a chain id beyond int64 is a mismatch, not a truncated match",
+			node:    new(big.Int).Add(big.NewInt(math.MaxInt64), big.NewInt(2)),
+			want:    1,
+			wantErr: "RPC chain ID mismatch",
+		},
+		{
+			name:    "an unreachable node is reported as such",
+			nodeErr: errors.New("connection refused"),
+			want:    1,
+			wantErr: "fetching RPC chain ID: connection refused",
+		},
+		{
+			name:    "a nil answer is a mismatch, not a panic",
+			want:    1,
+			wantErr: "RPC chain ID mismatch",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			node := chainIDReaderFunc(func(context.Context) (*big.Int, error) { return tc.node, tc.nodeErr })
+
+			err := AssertChainID(context.Background(), node, tc.want)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("AssertChainID: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want one mentioning %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestAssertChainID_BoundsTheProbeWithItsOwnDeadline(t *testing.T) {
+	var deadline time.Time
+	node := chainIDReaderFunc(func(ctx context.Context) (*big.Int, error) {
+		deadline, _ = ctx.Deadline()
+		return big.NewInt(1), nil
+	})
+
+	if err := AssertChainID(context.Background(), node, 1); err != nil {
+		t.Fatalf("AssertChainID: %v", err)
+	}
+	if deadline.IsZero() {
+		t.Fatal("the probe ran without a deadline; a sick node would hold startup for the dialer's whole retry budget")
 	}
 }

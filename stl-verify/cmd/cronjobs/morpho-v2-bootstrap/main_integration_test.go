@@ -5,6 +5,8 @@ package main
 import (
 	"context"
 	"log/slog"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/mock"
@@ -15,15 +17,15 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// setWorkerEnv installs the environment a deployed pod would have. Dialing an
-// HTTP RPC URL opens no connection, so no node is needed to prove the wiring.
-func setWorkerEnv(t *testing.T, chainID string) {
+// setWorkerEnv installs the environment a deployed pod would have, with the RPC
+// fixture answering nodeChain to CHAIN_ID=configuredChain.
+func setWorkerEnv(t *testing.T, configuredChain, nodeChain int64) {
 	t.Helper()
 
 	t.Setenv("BUILD_GIT_HASH", "test")
-	t.Setenv("CHAIN_ID", chainID)
+	t.Setenv("CHAIN_ID", strconv.FormatInt(configuredChain, 10))
 	t.Setenv("ALCHEMY_API_KEY", "test-key")
-	t.Setenv("ALCHEMY_HTTP_URL", "http://127.0.0.1:1/v2")
+	t.Setenv("ALCHEMY_HTTP_URL", testutil.StartChainIDRPC(t, nodeChain).URL)
 }
 
 // The type name is spelled out rather than read from workflowTypeName: the
@@ -32,7 +34,7 @@ func setWorkerEnv(t *testing.T, chainID string) {
 func TestIntegration_Register_RunsTheDocumentedWorkflowTypeWithNoInput(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
-	setWorkerEnv(t, "1")
+	setWorkerEnv(t, 1, 1)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
 	deps := temporal.Dependencies{Pool: pool, Logger: slog.Default()}
@@ -61,7 +63,7 @@ func TestIntegration_Register_RunsTheDocumentedWorkflowTypeWithNoInput(t *testin
 func TestSetupRunner_WiresAgainstAMigratedDatabase(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
-	setWorkerEnv(t, "1")
+	setWorkerEnv(t, 1, 1)
 
 	runner, err := setupRunner(context.Background(), temporal.Dependencies{Pool: pool, Logger: slog.Default()}, temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
 	if err != nil {
@@ -78,9 +80,23 @@ func TestSetupRunner_WiresAgainstAMigratedDatabase(t *testing.T) {
 func TestSetupRunner_RejectsAnUnsupportedChain(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
-	setWorkerEnv(t, "8453")
+	setWorkerEnv(t, 8453, 8453)
 
-	if _, err := setupRunner(context.Background(), temporal.Dependencies{Pool: pool, Logger: slog.Default()}, temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]()); err == nil {
-		t.Fatal("expected setupRunner to reject a chain with no known VaultV2 factory deploy block")
+	_, err := setupRunner(context.Background(), temporal.Dependencies{Pool: pool, Logger: slog.Default()}, temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
+	if err == nil || !strings.Contains(err.Error(), "no known factory deploy block") {
+		t.Fatalf("err = %v, want the rejection of a chain with no known VaultV2 factory deploy block", err)
+	}
+}
+
+// TestSetupRunner_RefusesAChainIDMismatch: a Base pod handed a mainnet URL must
+// stop here, before the replay service can write mainnet state under chain 8453.
+func TestSetupRunner_RefusesAChainIDMismatch(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	setWorkerEnv(t, 8453, 1)
+
+	_, err := setupRunner(context.Background(), temporal.Dependencies{Pool: pool, Logger: slog.Default()}, temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
+	if err == nil || !strings.Contains(err.Error(), "RPC chain ID mismatch: RPC reports 1, config says 8453") {
+		t.Fatalf("err = %v, want the chain-id mismatch", err)
 	}
 }

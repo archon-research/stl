@@ -49,6 +49,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -230,9 +231,6 @@ func newS3Reader(ctx context.Context, logger *slog.Logger, cfg config) (*s3adapt
 	return s3adapter.NewReaderWithOptions(awsCfg, logger, options...), nil
 }
 
-// dialChain connects to the node and refuses a chain that disagrees with
-// CHAIN_ID: every block number in a run's range is meaningless on another chain,
-// and the mismatch would surface as missing S3 keys rather than as itself.
 func dialChain(ctx context.Context, cfg config) (*ethclient.Client, error) {
 	// Retry 429/5xx/network errors via rpchttp so transient RPC failures don't
 	// fail a partition that would have succeeded.
@@ -242,12 +240,9 @@ func dialChain(ctx context.Context, cfg config) (*ethclient.Client, error) {
 	}
 
 	ethClient := ethclient.NewClient(rpcClient)
-	rpcChainID, err := ethClient.ChainID(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("fetching RPC chain ID: %w", err)
-	}
-	if rpcChainID.Int64() != cfg.chainID {
-		return nil, fmt.Errorf("RPC chain ID mismatch: RPC reports %d, config says %d", rpcChainID.Int64(), cfg.chainID)
+	if err := chainutil.AssertChainID(ctx, ethClient, cfg.chainID); err != nil {
+		ethClient.Close()
+		return nil, fmt.Errorf("verifying the RPC node's chain: %w", err)
 	}
 	return ethClient, nil
 }

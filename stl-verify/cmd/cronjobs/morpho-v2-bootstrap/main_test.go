@@ -67,45 +67,17 @@ func TestSetupRunner_RequiresAlchemyKey(t *testing.T) {
 	}
 }
 
-func TestResolveRPCURL(t *testing.T) {
-	tests := []struct {
-		name    string
-		env     map[string]string
-		want    string
-		wantErr string
-	}{
-		{
-			name: "defaults to eth mainnet",
-			env:  map[string]string{"ALCHEMY_API_KEY": "secret"},
-			want: "https://eth-mainnet.g.alchemy.com/v2/secret",
-		},
-		{
-			name: "honours an explicit base url",
-			env:  map[string]string{"ALCHEMY_API_KEY": "secret", "ALCHEMY_HTTP_URL": "https://base-mainnet.g.alchemy.com/v2"},
-			want: "https://base-mainnet.g.alchemy.com/v2/secret",
-		},
-		{
-			name:    "an absent key is a hard error, never an unauthenticated URL",
-			env:     map[string]string{},
-			wantErr: "ALCHEMY_API_KEY",
-		},
+func TestSetupRunner_RequiresAlchemyHTTPURLOffMainnet(t *testing.T) {
+	t.Setenv("CHAIN_ID", "8453")
+	t.Setenv("ALCHEMY_API_KEY", "key")
+	t.Setenv("ALCHEMY_HTTP_URL", "")
+
+	_, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
+	if err == nil {
+		t.Fatal("a non-mainnet chain with no ALCHEMY_HTTP_URL should error, got nil")
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := resolveRPCURL(func(k string) string { return tc.env[k] })
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("err = %v, want one mentioning %q", err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("resolveRPCURL: %v", err)
-			}
-			if got != tc.want {
-				t.Fatalf("url = %q, want %q", got, tc.want)
-			}
-		})
+	if !strings.Contains(err.Error(), "ALCHEMY_HTTP_URL") {
+		t.Errorf("error %q should mention ALCHEMY_HTTP_URL", err.Error())
 	}
 }
 

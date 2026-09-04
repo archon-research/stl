@@ -97,6 +97,33 @@ func StartMockEthRPC(t *testing.T, numTokens int) *httptest.Server {
 	}))
 }
 
+// StartChainIDRPC serves the one JSON-RPC call a composition root makes at
+// startup, the chain-id check against CHAIN_ID, and fails the test on any other
+// method so a wiring test cannot quietly start talking to a node it has not got.
+func StartChainIDRPC(t *testing.T, chainID int64) *httptest.Server {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req rpcutil.Request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decoding the RPC request: %v", err)
+			return
+		}
+		if req.Method != "eth_chainId" {
+			t.Errorf("unexpected RPC method %q; this fixture only serves eth_chainId", req.Method)
+		}
+		result, err := json.Marshal(fmt.Sprintf("0x%x", chainID))
+		if err != nil {
+			t.Errorf("encoding the chain id: %v", err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		WriteRPCResult(w, req.ID, json.RawMessage(result))
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
 // WriteRPCResult writes a JSON-RPC success response.
 func WriteRPCResult(w http.ResponseWriter, id, result json.RawMessage) {
 	rpcutil.WriteResult(w, id, result)

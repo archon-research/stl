@@ -195,7 +195,7 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies, progress morph
 	sweepConfig.ChainID = int64(chainID)
 	sweepConfig.Logger = deps.Logger
 
-	rpcURL, err := resolveRPCURL(os.Getenv)
+	rpcURL, err := chainutil.AlchemyRPCURL(int64(chainID))
 	if err != nil {
 		return nil, err
 	}
@@ -204,6 +204,10 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies, progress morph
 	ethClient, err := rpchttp.DialEthereum(ctx, rpcURL, rpchttp.WithClientTimeout(5*time.Minute))
 	if err != nil {
 		return nil, fmt.Errorf("connecting to RPC: %w", err)
+	}
+	if err := chainutil.AssertChainID(ctx, ethClient, int64(chainID)); err != nil {
+		ethClient.Close()
+		return nil, fmt.Errorf("verifying the RPC node's chain: %w", err)
 	}
 
 	replayService, err := buildReplayService(ctx, deps, int64(chainID), ethClient)
@@ -277,19 +281,4 @@ func parseSweepConfig(getenv func(string) string) (morpho_v2_bootstrap.Config, e
 		cfg.AddressBatchSize = size
 	}
 	return cfg, nil
-}
-
-// resolveRPCURL builds the node URL from the same ALCHEMY_HTTP_URL +
-// ALCHEMY_API_KEY pair every other indexer uses, so this cronjob's secret wiring
-// matches the workers'.
-func resolveRPCURL(getenv func(string) string) (string, error) {
-	apiKey := getenv("ALCHEMY_API_KEY")
-	if apiKey == "" {
-		return "", fmt.Errorf("ALCHEMY_API_KEY environment variable is required")
-	}
-	baseURL := getenv("ALCHEMY_HTTP_URL")
-	if baseURL == "" {
-		baseURL = "https://eth-mainnet.g.alchemy.com/v2"
-	}
-	return fmt.Sprintf("%s/%s", baseURL, apiKey), nil
 }

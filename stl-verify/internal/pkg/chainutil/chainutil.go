@@ -1,10 +1,14 @@
-// Package chainutil provides utilities for working with blockchain chain IDs and names.
+// Package chainutil provides utilities for working with blockchain chain IDs and
+// names, and for cross-checking a deployment's configured chain against its wiring.
 package chainutil
 
 import (
+	"context"
 	"fmt"
+	"math/big"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -137,4 +141,55 @@ func RequireChainID() (int, error) {
 		return 0, fmt.Errorf("CHAIN_ID must be a valid integer: %w", err)
 	}
 	return id, nil
+}
+
+const (
+	ethereumMainnetChainID int64 = 1
+	defaultAlchemyHTTPURL        = "https://eth-mainnet.g.alchemy.com/v2"
+)
+
+// AlchemyRPCURL joins ALCHEMY_HTTP_URL and ALCHEMY_API_KEY into the node URL the
+// indexers dial. The built-in endpoint default is mainnet-only, so every other
+// chain must set ALCHEMY_HTTP_URL explicitly rather than silently index mainnet.
+func AlchemyRPCURL(chainID int64) (string, error) {
+	apiKey, err := env.Require("ALCHEMY_API_KEY")
+	if err != nil {
+		return "", err
+	}
+	baseURL := env.Get("ALCHEMY_HTTP_URL", "")
+	if baseURL == "" && chainID != ethereumMainnetChainID {
+		return "", fmt.Errorf("ALCHEMY_HTTP_URL is required for chain %d (the default endpoint is mainnet-only)", chainID)
+	}
+	if baseURL == "" {
+		baseURL = defaultAlchemyHTTPURL
+	}
+	return strings.TrimRight(baseURL, "/") + "/" + apiKey, nil
+}
+
+// ChainIDReader is the one node method AssertChainID needs, so the check is
+// testable without an *ethclient.Client.
+type ChainIDReader interface {
+	ChainID(ctx context.Context) (*big.Int, error)
+}
+
+// chainIDProbeTimeout bounds the startup probe on its own: the dialers' budgets
+// (60s to 5m, with retries) are sized for heavy calls, not for failing a sick node fast.
+const chainIDProbeTimeout = 15 * time.Second
+
+// AssertChainID refuses a node that disagrees with the configured chain. Every
+// block number and contract address a job handles is meaningless on another
+// chain, and the mismatch would otherwise surface far downstream (missing S3
+// keys, mainnet state written under another chain id) rather than as itself.
+func AssertChainID(ctx context.Context, node ChainIDReader, want int64) error {
+	ctx, cancel := context.WithTimeout(ctx, chainIDProbeTimeout)
+	defer cancel()
+
+	got, err := node.ChainID(ctx)
+	if err != nil {
+		return fmt.Errorf("fetching RPC chain ID: %w", err)
+	}
+	if got == nil || !got.IsInt64() || got.Int64() != want {
+		return fmt.Errorf("RPC chain ID mismatch: RPC reports %s, config says %d", got, want)
+	}
+	return nil
 }

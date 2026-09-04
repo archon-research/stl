@@ -61,6 +61,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	defer rpcServer.Close()
 
 	t.Setenv("BUILD_GIT_HASH", "test")
+	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 	t.Setenv("S3_BUCKET", testutil.S3TestBucketName(t, rawBucketPrefix))
@@ -101,6 +102,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 
 	t.Setenv("BUILD_GIT_HASH", "test")
+	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
@@ -457,6 +459,10 @@ func buildMorphoAccrueInterestMockRPC(t *testing.T) *httptest.Server {
 			testutil.WriteRPCError(w, json.RawMessage(`1`), -32700, "parse error")
 			return
 		}
+		if req.Method == "eth_chainId" {
+			testutil.WriteRPCResult(w, req.ID, json.RawMessage(`"0x1"`))
+			return
+		}
 		if req.Method != "eth_call" {
 			testutil.WriteRPCError(w, req.ID, -32601, "method not found: "+req.Method)
 			return
@@ -517,4 +523,24 @@ func hasSelector(callData, selector []byte) bool {
 		}
 	}
 	return true
+}
+
+// TestRunIntegration_RefusesAChainIDMismatch: a Base pod handed a mainnet URL
+// must stop at startup, before it reads mainnet state and writes it under 8453.
+func TestRunIntegration_RefusesAChainIDMismatch(t *testing.T) {
+	t.Setenv("BUILD_GIT_HASH", "test")
+	t.Setenv("CHAIN_ID", "1")
+	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
+	t.Setenv("ALCHEMY_HTTP_URL", testutil.StartChainIDRPC(t, 42161).URL)
+	t.Setenv("S3_BUCKET", testutil.S3TestBucketName(t, rawBucketPrefix))
+	t.Setenv("DEPLOY_ENV", testDeployEnv)
+
+	err := run(context.Background(), []string{
+		"-queue", "http://localhost/test-queue",
+		"-db", "postgres://unreached:unreached@localhost:1/unreached",
+		"-redis", sharedRedisAddr,
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "RPC chain ID mismatch: RPC reports 42161, config says 1") {
+		t.Fatalf("err = %v, want the chain-id mismatch", err)
+	}
 }
