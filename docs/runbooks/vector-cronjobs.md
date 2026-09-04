@@ -18,7 +18,7 @@ into TimescaleDB (or validates stored data). Current cronjobs:
 | `reference-capital-backfill` | `reference-capital-backfill` | **on demand** | Seeds the reference balance-sheet history predating the syncer's first run |
 | `morpho-vault-backfill` | `morpho-vault-backfill` | **on demand** | Discovers Morpho vaults from the archived S3 receipts and replays their VaultV2 structured events, for a block range supplied at start time (VEC-218) |
 | `morpho-v2-bootstrap` | `morpho-v2-bootstrap` | **on demand** | One-shot repair of Morpho VaultV2 vaults discovered before atomic discovery (VEC-218) |
-| `block-republisher` | `block-republisher` | **on demand** | Re-publishes named block heights under the next `block_version` their raw archive leaves free, so every indexer appends the canonical block for a height whose only published version is a losing fork (ARCT-383) |
+| `block-republisher`, `<chain>-block-republisher` | `block-republisher`, `<chain>-block-republisher` | **on demand** | Re-publishes named block heights under the next `block_version` their raw archive leaves free, so every indexer appends the canonical block for a height whose only published version is a losing fork (ARCT-383). One deployment per chain — see the table under its section below |
 | `core-model-runner` | `core-model-runner` | 24h | CORE model CRR per market → `core_model_results` (Python harness; staging + prod; N_MC capped at 100 until the sizing in #804 settles) |
 
 > `maple-graphql-indexer` is also a cronjob but has its own richer rules — see
@@ -186,38 +186,35 @@ Repair:
   would otherwise advance straight back over the height you just re-opened. The
   next gap pass saves N as version 1 and publishes it, so the indexers append
   the correction. The orphaned version-0 rows stay put as history.
-- **A hole outside the retained window has no safe executable repair yet.**
-  `raw-block-bulk-downloader --chain-id <id> --bucket <raw bucket> --rpc-url
-  <chain rpc> --start-block <N> --end-block <N>` looks like the repair and is
-  not one.
-  Every key it builds and every existence check it makes is pinned to a literal
-  version `1`, and it never reads what the archive already holds. The losing
-  fork sits at version **0**, not 1 — `assign_block_version()` is
-  `COALESCE(MAX(version), -1) + 1`, so the first row at a height is version 0,
-  and the raw-data-backup-worker builds the key from `event.Version`. So at an
-  orphan-only height the tool finds no `<N>_1_*`, refetches the height **by
-  number**, and writes the canonical block, receipts and traces at `<N>_1_*`.
-  That is the right answer for the single-reorg shape by coincidence, not by
-  design: at a height that already holds a `_1_` it skips (uploads go through
-  `WriteFileIfNotExists`, so it never overwrites), and where the canonical
-  block belongs at version 2 it cannot express that. Pointed at anything but a
-  hole it is actively harmful — every healthy height is version 0, so it
-  refetches and writes a duplicate `_1_` copy of block, receipts and traces for
-  every block in the range, which is how deep history came to be `_1_`-only
-  (`cmd/backfillers/morpho-vault-backfill/discovery.go`). There is no
-  `--dry-run` flag either; the tool exits 2 on one. Doing this deliberately —
-  next free version above the losing fork, dry run first — needs **#849**,
-  which adds `--dry-run`, `--allow-unfinalized` and next-free-version writing.
-  Even then it fixes S3 only: the indexers' rows stay at `block_version` 0
-  until the republisher (**ARCT-383**, #850) re-emits the block event. The
-  republisher derives that version the same way, per height, from the objects in
-  the raw bucket, so the order is a rule, not a preference: **republisher first,
-  bulk downloader after.** The other way round, the `_1_` objects the repair
-  wrote push the event to version 2 and the archive ends up holding the same
-  canonical block twice — and the republisher refuses the height outright,
-  because the archive's top version is by then already canonical. The recovery
-  for a height #849 has already repaired is `"archiveRepaired": true` (below),
-  which republishes at the version those objects occupy instead of past them.
+- **A hole outside the retained window is repaired by the audit and the
+  republisher, in that order.** The archive is what both halves of the repair
+  read, so start by auditing it. `raw-block-bulk-downloader --dry-run --report`
+  writes nothing at all and leaves one JSON object per height that needs
+  something — see **Finding holes on a chain** under `block-republisher` below
+  for the flags and the row shapes:
+
+  ```bash
+  bulk-download --dry-run --chain-id <id> --rpc-url <chain rpc> \
+    --bucket <that chain's raw bucket> \
+    --start-block <N> --end-block <N> --report ~/holes.jsonl
+  ```
+
+  An `"action":"republish"` row is this hole: the archive's top version at that
+  height is a losing fork. Feed those `block` numbers to that chain's
+  `block-republisher` queue (**ARCT-383**, #850), which derives each height's
+  version from the objects in the raw bucket and re-emits the block event, so
+  the indexers append the canonical block. Then run the same command without
+  `--dry-run` to correct S3 itself (**#849**: next free version above the losing
+  fork, never a literal `_1_`). The order is a rule, not a preference:
+  **republisher first, bulk downloader after.** The other way round, the objects
+  the repair wrote push the event to the next version and the archive ends up
+  holding the same canonical block twice — and the republisher refuses the
+  height outright, because the archive's top version is by then already
+  canonical. For a height the downloader has already repaired, republish it with
+  `"archiveRepaired": true` (below), which publishes at the version those
+  objects occupy instead of past them. An `"action":"fresh"` row is a gap rather
+  than a fork — the archive holds nothing at that height — and the republisher
+  would repair it on your word alone; fix the gap first.
 
 Before the prod deploy, run the pre-flight queries below against prod's
 retained window — a hole found there is repairable while it is still inside
@@ -452,7 +449,9 @@ stale. The only impact is that a new run cannot be started until the pod is back
 Warning severity for that reason.
 
 Currently matches: `offchain-price-backfill`, `reference-capital-backfill`,
-`morpho-vault-backfill`, `morpho-v2-bootstrap`, `block-republisher`.
+`morpho-vault-backfill`, `morpho-v2-bootstrap`, and every chain's republisher —
+`block-republisher` and `<chain>-block-republisher`, which the rule matches with
+one prefix-agnostic regex rather than a list of chains.
 
 ### First checks
 
@@ -1625,10 +1624,10 @@ exposure.
 ## Adding a new cronjob
 
 Failure + all-failing alerts are automatic (they group by `service_name`).
-`VectorCronjobAllRunsFailing` excludes `maple-graphql-indexer`, the five
-on-demand jobs (`offchain-price-backfill`, `reference-capital-backfill`,
-`morpho-vault-backfill`, `morpho-v2-bootstrap`, `block-republisher`), and
-`core-model-runner`;
+`VectorCronjobAllRunsFailing` excludes `maple-graphql-indexer`, the on-demand
+jobs (`offchain-price-backfill`, `reference-capital-backfill`,
+`morpho-vault-backfill`, `morpho-v2-bootstrap`, and every chain's republisher:
+`block-republisher` and `<chain>-block-republisher`), and `core-model-runner`;
 `VectorCronjobRunFailing` excludes only maple. Two manual steps:
 
 1. Add the new **Deployment name** to the `deployment=~"..."` regex in the
