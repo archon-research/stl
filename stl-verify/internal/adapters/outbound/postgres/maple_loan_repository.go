@@ -28,12 +28,13 @@ type MapleGraphQLRepository struct {
 	pool      *pgxpool.Pool
 	logger    *slog.Logger
 	buildID   buildregistry.BuildID
+	runID     buildregistry.RunID
 	batchSize int
 }
 
 // NewMapleGraphQLRepository creates a new PostgreSQL Maple GraphQL repository.
 // If batchSize is <= 0, a default batch size of 1000 is used.
-func NewMapleGraphQLRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildregistry.BuildID, batchSize int) (*MapleGraphQLRepository, error) {
+func NewMapleGraphQLRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildregistry.BuildID, runID buildregistry.RunID, batchSize int) (*MapleGraphQLRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
 	}
@@ -47,6 +48,7 @@ func NewMapleGraphQLRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID 
 		pool:      pool,
 		logger:    logger,
 		buildID:   buildID,
+		runID:     runID,
 		batchSize: batchSize,
 	}, nil
 }
@@ -161,9 +163,9 @@ func (r *MapleGraphQLRepository) SavePoolStates(ctx context.Context, tx pgx.Tx, 
 }
 
 func (r *MapleGraphQLRepository) savePoolStateBatch(ctx context.Context, tx pgx.Tx, states []*maple.PoolState) (int64, error) {
-	const cols = 10
+	const cols = 11
 	var sb strings.Builder
-	sb.WriteString(`INSERT INTO maple_pool_state (maple_pool_id, synced_at, tvl, liquid_assets, collateral_value_usd, principal_out, utilization, monthly_apy, spot_apy, build_id) VALUES `)
+	sb.WriteString(`INSERT INTO maple_pool_state (maple_pool_id, synced_at, tvl, liquid_assets, collateral_value_usd, principal_out, utilization, monthly_apy, spot_apy, build_id, run_id) VALUES `)
 
 	args := make([]any, 0, len(states)*cols)
 	for i, s := range states {
@@ -179,7 +181,7 @@ func (r *MapleGraphQLRepository) savePoolStateBatch(ctx context.Context, tx pgx.
 		writeValuesPlaceholders(&sb, i, cols)
 		args = append(args, s.PoolID, s.SyncedAt, optionalNumeric(s.TVL), liquidAssets,
 			optionalNumeric(s.CollateralValueUSD), principalOut, s.Utilization,
-			optionalNumeric(s.MonthlyAPY), optionalNumeric(s.SpotAPY), int(r.buildID))
+			optionalNumeric(s.MonthlyAPY), optionalNumeric(s.SpotAPY), int(r.buildID), int64(r.runID))
 	}
 	sb.WriteString(` ON CONFLICT (maple_pool_id, synced_at, processing_version) DO NOTHING`)
 
@@ -299,9 +301,9 @@ func (r *MapleGraphQLRepository) SaveLoanStates(ctx context.Context, tx pgx.Tx, 
 }
 
 func (r *MapleGraphQLRepository) saveLoanStateBatch(ctx context.Context, tx pgx.Tx, states []*maple.LoanState) (int64, error) {
-	const cols = 6
+	const cols = 7
 	var sb strings.Builder
-	sb.WriteString(`INSERT INTO maple_loan_state (maple_loan_id, synced_at, state, principal_owed, acm_ratio, build_id) VALUES `)
+	sb.WriteString(`INSERT INTO maple_loan_state (maple_loan_id, synced_at, state, principal_owed, acm_ratio, build_id, run_id) VALUES `)
 
 	args := make([]any, 0, len(states)*cols)
 	for i, s := range states {
@@ -311,7 +313,7 @@ func (r *MapleGraphQLRepository) saveLoanStateBatch(ctx context.Context, tx pgx.
 		}
 
 		writeValuesPlaceholders(&sb, i, cols)
-		args = append(args, s.LoanID, s.SyncedAt, s.State, principalOwed, optionalNumeric(s.AcmRatio), int(r.buildID))
+		args = append(args, s.LoanID, s.SyncedAt, s.State, principalOwed, optionalNumeric(s.AcmRatio), int(r.buildID), int64(r.runID))
 	}
 	sb.WriteString(` ON CONFLICT (maple_loan_id, synced_at, processing_version) DO NOTHING`)
 
@@ -344,15 +346,15 @@ func (r *MapleGraphQLRepository) SaveLoanCollaterals(ctx context.Context, tx pgx
 }
 
 func (r *MapleGraphQLRepository) saveLoanCollateralBatch(ctx context.Context, tx pgx.Tx, collaterals []*maple.LoanCollateral) (int64, error) {
-	const cols = 10
+	const cols = 11
 	var sb strings.Builder
-	sb.WriteString(`INSERT INTO maple_loan_collateral (maple_loan_id, synced_at, asset_symbol, asset_amount, asset_decimals, asset_value_usd, state, custodian, liquidation_level, build_id) VALUES `)
+	sb.WriteString(`INSERT INTO maple_loan_collateral (maple_loan_id, synced_at, asset_symbol, asset_amount, asset_decimals, asset_value_usd, state, custodian, liquidation_level, build_id, run_id) VALUES `)
 
 	args := make([]any, 0, len(collaterals)*cols)
 	for i, c := range collaterals {
 		writeValuesPlaceholders(&sb, i, cols)
 		args = append(args, c.LoanID, c.SyncedAt, c.AssetSymbol, optionalNumeric(c.AssetAmount), c.AssetDecimals,
-			optionalNumeric(c.AssetValueUSD), nullIfEmpty(c.State), nullIfEmpty(c.Custodian), optionalNumeric(c.LiquidationLevel), int(r.buildID))
+			optionalNumeric(c.AssetValueUSD), nullIfEmpty(c.State), nullIfEmpty(c.Custodian), optionalNumeric(c.LiquidationLevel), int(r.buildID), int64(r.runID))
 	}
 	sb.WriteString(` ON CONFLICT (maple_loan_id, synced_at, processing_version) DO NOTHING`)
 
@@ -550,9 +552,9 @@ func (r *MapleGraphQLRepository) SaveSkyStrategyStates(ctx context.Context, tx p
 }
 
 func (r *MapleGraphQLRepository) saveSkyStrategyStateBatch(ctx context.Context, tx pgx.Tx, states []*maple.SkyStrategyState) (int64, error) {
-	const cols = 9
+	const cols = 10
 	var sb strings.Builder
-	sb.WriteString(`INSERT INTO maple_sky_strategy_state (maple_sky_strategy_id, synced_at, state, currently_deployed, deposited_assets, withdrawn_assets, strategy_fee_rate, total_fees_collected, build_id) VALUES `)
+	sb.WriteString(`INSERT INTO maple_sky_strategy_state (maple_sky_strategy_id, synced_at, state, currently_deployed, deposited_assets, withdrawn_assets, strategy_fee_rate, total_fees_collected, build_id, run_id) VALUES `)
 
 	args := make([]any, 0, len(states)*cols)
 	for i, s := range states {
@@ -571,7 +573,7 @@ func (r *MapleGraphQLRepository) saveSkyStrategyStateBatch(ctx context.Context, 
 
 		writeValuesPlaceholders(&sb, i, cols)
 		args = append(args, s.SkyStrategyID, s.SyncedAt, s.State, currentlyDeployed, depositedAssets,
-			withdrawnAssets, optionalNumeric(s.StrategyFeeRate), optionalNumeric(s.TotalFeesCollected), int(r.buildID))
+			withdrawnAssets, optionalNumeric(s.StrategyFeeRate), optionalNumeric(s.TotalFeesCollected), int(r.buildID), int64(r.runID))
 	}
 	sb.WriteString(` ON CONFLICT (maple_sky_strategy_id, synced_at, processing_version) DO NOTHING`)
 
@@ -603,11 +605,11 @@ func (r *MapleGraphQLRepository) SaveSyrupGlobalState(ctx context.Context, tx pg
 	}
 
 	inserted, err := r.execInsert(ctx, tx, "maple_syrup_global_state",
-		`INSERT INTO maple_syrup_global_state (chain_id, synced_at, tvl, apy, collateral_apy, pool_apy, drips_yield_boost, build_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		`INSERT INTO maple_syrup_global_state (chain_id, synced_at, tvl, apy, collateral_apy, pool_apy, drips_yield_boost, build_id, run_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 ON CONFLICT (chain_id, synced_at, processing_version) DO NOTHING`,
 		[]any{state.ChainID, state.SyncedAt, tvl, apy, collateralAPY, poolAPY,
-			optionalNumeric(state.DripsYieldBoost), int(r.buildID)},
+			optionalNumeric(state.DripsYieldBoost), int(r.buildID), int64(r.runID)},
 	)
 	if err != nil {
 		return err

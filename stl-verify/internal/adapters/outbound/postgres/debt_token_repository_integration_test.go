@@ -34,7 +34,7 @@ func truncateDebtToken(t *testing.T, ctx context.Context) {
 func seedDebtTokenDeps(t *testing.T, ctx context.Context, chainID int64) (int64, int64) {
 	t.Helper()
 
-	protocolRepo, err := NewProtocolRepository(debtTokenPool, nil, 0, 0)
+	protocolRepo, err := NewProtocolRepository(debtTokenPool, nil, 0, 0, 0)
 	if err != nil {
 		t.Fatalf("NewProtocolRepository: %v", err)
 	}

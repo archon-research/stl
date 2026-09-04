@@ -70,6 +70,7 @@ func TestSetupRunner_WiresService(t *testing.T) {
 
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("BUILD_GIT_HASH", "test-hash")
+	testutil.SetDevIdentity(t)
 	t.Setenv("MAPLE_GRAPHQL_ENDPOINT", server.URL)
 
 	runner, err := setupRunner(ctx, temporal.Dependencies{Pool: pool})
@@ -109,6 +110,7 @@ func TestSetupRunner_UsesScheduledAtFromContext(t *testing.T) {
 
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("BUILD_GIT_HASH", "test-hash")
+	testutil.SetDevIdentity(t)
 	t.Setenv("MAPLE_GRAPHQL_ENDPOINT", server.URL)
 
 	runner, err := setupRunner(ctx, temporal.Dependencies{Pool: pool})
@@ -157,6 +159,7 @@ func TestSetupRunner_RejectsNonMainnetChain(t *testing.T) {
 
 	t.Setenv("CHAIN_ID", "137")
 	t.Setenv("BUILD_GIT_HASH", "test-hash")
+	testutil.SetDevIdentity(t)
 
 	_, err := setupRunner(ctx, temporal.Dependencies{Pool: pool})
 	if err == nil {

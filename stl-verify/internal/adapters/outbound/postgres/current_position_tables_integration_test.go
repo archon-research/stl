@@ -84,11 +84,11 @@ func setupCurrentTables(t *testing.T) *currentTablesFixture {
 	ctx := context.Background()
 	resetCurrentTables(t, ctx)
 
-	positionRepo, err := NewPositionRepository(currentTablesPool, nil, 0, 100)
+	positionRepo, err := NewPositionRepository(currentTablesPool, nil, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("new position repository: %v", err)
 	}
-	priceRepo, err := NewOnchainPriceRepository(currentTablesPool, nil, 0, 100)
+	priceRepo, err := NewOnchainPriceRepository(currentTablesPool, nil, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("new onchain price repository: %v", err)
 	}
@@ -100,7 +100,7 @@ func setupCurrentTables(t *testing.T) *currentTablesFixture {
 	if err != nil {
 		t.Fatalf("new tx manager: %v", err)
 	}
-	allocRepo := NewAllocationRepository(currentTablesPool, txm, tokenRepo, nil, buildregistry.BuildID(1))
+	allocRepo := NewAllocationRepository(currentTablesPool, txm, tokenRepo, nil, buildregistry.BuildID(1), buildregistry.RunID(1))
 
 	f := &currentTablesFixture{
 		positionRepo: positionRepo, priceRepo: priceRepo, allocRepo: allocRepo,
@@ -574,7 +574,7 @@ func (f *currentTablesFixture) saveAllocations(t *testing.T, ctx context.Context
 // version only when build_id matches too, so a re-save from another build lands as
 // processing_version + 1 instead of colliding with ON CONFLICT DO NOTHING.
 func (f *currentTablesFixture) allocRepoForBuild(buildID int) *AllocationRepository {
-	return NewAllocationRepository(currentTablesPool, f.txm, f.tokenRepo, nil, buildregistry.BuildID(buildID))
+	return NewAllocationRepository(currentTablesPool, f.txm, f.tokenRepo, nil, buildregistry.BuildID(buildID), buildregistry.RunID(1))
 }
 
 // cachedAllocation returns the whole payload of one cache row, which is what the

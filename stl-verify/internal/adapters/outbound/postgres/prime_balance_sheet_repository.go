@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -20,10 +21,11 @@ type PrimeBalanceSheetRepository struct {
 	pool   *pgxpool.Pool
 	txm    *TxManager
 	logger *slog.Logger
+	runID  buildregistry.RunID
 }
 
 // NewPrimeBalanceSheetRepository creates a new PrimeBalanceSheetRepository.
-func NewPrimeBalanceSheetRepository(pool *pgxpool.Pool, txm *TxManager, logger *slog.Logger) *PrimeBalanceSheetRepository {
+func NewPrimeBalanceSheetRepository(pool *pgxpool.Pool, txm *TxManager, logger *slog.Logger, runID buildregistry.RunID) *PrimeBalanceSheetRepository {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -31,6 +33,7 @@ func NewPrimeBalanceSheetRepository(pool *pgxpool.Pool, txm *TxManager, logger *
 		pool:   pool,
 		txm:    txm,
 		logger: logger.With("component", "prime-balance-sheet-repo"),
+		runID:  runID,
 	}
 }
 
@@ -64,9 +67,10 @@ func (r *PrimeBalanceSheetRepository) SaveBalanceSheetSnapshots(
 				debt_usd,
 				backstop_capital_usd,
 				source,
-				build_id
+				build_id,
+				run_id
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 			ON CONFLICT (prime_id, observed_at, processing_version) DO NOTHING
 			RETURNING processing_version
 		`
@@ -85,6 +89,7 @@ func (r *PrimeBalanceSheetRepository) SaveBalanceSheetSnapshots(
 				s.BackstopCapitalUSD,
 				s.Source,
 				s.BuildID,
+				int64(r.runID),
 			)
 		}
 

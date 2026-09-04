@@ -1,6 +1,6 @@
 //go:build integration
 
-package buildregistry
+package buildregistry_test
 
 import (
 	"os"

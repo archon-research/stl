@@ -58,22 +58,27 @@ func TestPrimeReferencePositionRepositoryPreservesEighteenDecimalPrecision(t *te
 
 	primeID := seedReferencePrime(t, ctx, pool, "spark-prp-precision")
 	txm := newReferenceRepoTxm(t, pool)
-	repo := NewPrimeReferencePositionRepository(pool, nil)
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	repo := NewPrimeReferencePositionRepository(pool, nil, runID)
 	syncedAt := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 
 	if err := savePositions(t, ctx, txm, repo, []entity.PrimeReferencePosition{
-		referencePosition(primeID, syncedAt, 1),
+		referencePosition(primeID, syncedAt, int(buildID)),
 	}); err != nil {
 		t.Fatalf("SaveReferencePositions() = %v", err)
 	}
 
 	var assets string
+	var gotRunID *int64
 	if err := pool.QueryRow(ctx, `
-		SELECT assets_usd::text FROM prime_reference_position WHERE prime_id = $1`, primeID).Scan(&assets); err != nil {
+		SELECT assets_usd::text, run_id FROM prime_reference_position WHERE prime_id = $1`, primeID).Scan(&assets, &gotRunID); err != nil {
 		t.Fatalf("reading back: %v", err)
 	}
 	if assets != "782710914.129541047405509005" {
 		t.Errorf("assets_usd = %s, want the 18-decimal value unrounded", assets)
+	}
+	if gotRunID == nil || *gotRunID != int64(runID) {
+		t.Errorf("run_id = %v, want %d", gotRunID, runID)
 	}
 }
 
@@ -84,7 +89,7 @@ func TestPrimeReferencePositionRepositoryKeepsOptionalFieldsNull(t *testing.T) {
 
 	primeID := seedReferencePrime(t, ctx, pool, "spark-prp-null")
 	txm := newReferenceRepoTxm(t, pool)
-	repo := NewPrimeReferencePositionRepository(pool, nil)
+	repo := NewPrimeReferencePositionRepository(pool, nil, 0)
 	position := referencePosition(primeID, time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC), 1)
 	position.ChainID = nil
 	position.TokenName = nil
@@ -116,7 +121,7 @@ func TestPrimeReferencePositionRepositoryIsIdempotentWithinABuild(t *testing.T) 
 
 	primeID := seedReferencePrime(t, ctx, pool, "spark-prp-idem")
 	txm := newReferenceRepoTxm(t, pool)
-	repo := NewPrimeReferencePositionRepository(pool, nil)
+	repo := NewPrimeReferencePositionRepository(pool, nil, 0)
 	position := referencePosition(primeID, time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC), 1)
 
 	for range 2 {
@@ -143,7 +148,7 @@ func TestPrimeReferencePositionRepositoryAppendsACorrectionForANewBuild(t *testi
 
 	primeID := seedReferencePrime(t, ctx, pool, "spark-prp-correction")
 	txm := newReferenceRepoTxm(t, pool)
-	repo := NewPrimeReferencePositionRepository(pool, nil)
+	repo := NewPrimeReferencePositionRepository(pool, nil, 0)
 	syncedAt := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 
 	for _, buildID := range []int{1, 2} {
@@ -185,7 +190,7 @@ func TestPrimeReferencePositionRepositoryKeepsSameTokenUnderTwoWalletsDistinct(t
 
 	primeID := seedReferencePrime(t, ctx, pool, "grove-prp-two-wallets")
 	txm := newReferenceRepoTxm(t, pool)
-	repo := NewPrimeReferencePositionRepository(pool, nil)
+	repo := NewPrimeReferencePositionRepository(pool, nil, 0)
 	syncedAt := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 
 	proxyOne := referencePosition(primeID, syncedAt, 1)

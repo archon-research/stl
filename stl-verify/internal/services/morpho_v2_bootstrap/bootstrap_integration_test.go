@@ -15,7 +15,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -408,26 +407,22 @@ func TestRun_ResumesAfterAKilledAttemptAndFinishesTheWork(t *testing.T) {
 // cmd/cronjobs/morpho-v2-bootstrap does. Only the node is faked.
 func buildIntegrationService(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chain ChainReader, multicaller *testutil.MockMulticaller, progress ProgressStore) *Service {
 	t.Helper()
-	t.Setenv("BUILD_GIT_HASH", "test")
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	buildReg, err := buildregistry.New(ctx, pool)
-	if err != nil {
-		t.Fatalf("buildregistry.New: %v", err)
-	}
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
 	txManager, err := postgres.NewTxManager(pool, logger)
 	if err != nil {
 		t.Fatalf("NewTxManager: %v", err)
 	}
-	morphoRepo, err := postgres.NewMorphoRepository(pool, logger, buildReg.BuildID())
+	morphoRepo, err := postgres.NewMorphoRepository(pool, logger, buildID, runID)
 	if err != nil {
 		t.Fatalf("NewMorphoRepository: %v", err)
 	}
-	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildReg.BuildID(), 0)
+	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildID, runID, 0)
 	if err != nil {
 		t.Fatalf("NewProtocolRepository: %v", err)
 	}
-	eventRepo := postgres.NewEventRepository(logger, buildReg.BuildID())
+	eventRepo := postgres.NewEventRepository(logger, buildID, runID)
 
 	svcConfig := morpho_indexer.ConfigDefaults()
 	svcConfig.ChainID = 1

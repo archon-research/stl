@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -19,16 +20,18 @@ var _ outbound.PrimeCapitalStackRepository = (*PrimeCapitalStackRepository)(nil)
 type PrimeCapitalStackRepository struct {
 	pool   *pgxpool.Pool
 	logger *slog.Logger
+	runID  buildregistry.RunID
 }
 
 // NewPrimeCapitalStackRepository creates a new PrimeCapitalStackRepository.
-func NewPrimeCapitalStackRepository(pool *pgxpool.Pool, logger *slog.Logger) *PrimeCapitalStackRepository {
+func NewPrimeCapitalStackRepository(pool *pgxpool.Pool, logger *slog.Logger, runID buildregistry.RunID) *PrimeCapitalStackRepository {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &PrimeCapitalStackRepository{
 		pool:   pool,
 		logger: logger.With("component", "prime-capital-stack-repo"),
+		runID:  runID,
 	}
 }
 
@@ -67,9 +70,10 @@ func (r *PrimeCapitalStackRepository) SavePrimeCapitalSnapshots(
 			epi_utilization,
 			spj_utilization,
 			source,
-			build_id
+			build_id,
+			run_id
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
 		ON CONFLICT (prime_id, synced_at, processing_version) DO NOTHING
 	`
 
@@ -95,6 +99,7 @@ func (r *PrimeCapitalStackRepository) SavePrimeCapitalSnapshots(
 			s.SPJUtilization,
 			s.Source,
 			s.BuildID,
+			int64(r.runID),
 		)
 	}
 

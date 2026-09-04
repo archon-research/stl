@@ -45,6 +45,10 @@ type Config struct {
 	// ReferenceEffectiveAt pins which oracle_asset versions this run reads (ADR-0006 §4).
 	// NewService rejects a zero value.
 	ReferenceEffectiveAt time.Time
+
+	// Units are the oracle units the binary loaded inside its writer run's transaction
+	// (ADR-0006 §2). When nil, Run loads them itself, outside any run's snapshot.
+	Units []*oracle_pricing.OracleUnit
 }
 
 func configDefaults() Config {
@@ -206,7 +210,7 @@ func (s *Service) validateFeedDecimals(ctx context.Context, workUnits []*oracleW
 // buildOracleWorkUnits loads all enabled oracles from DB, deduplicates by oracle_id,
 // and builds the per-oracle data structures needed for price fetching.
 func (s *Service) buildOracleWorkUnits(ctx context.Context) ([]*oracleWorkUnit, error) {
-	shared, err := oracle_pricing.LoadOracleUnits(ctx, s.repo, s.config.ChainID, s.config.ReferenceEffectiveAt, s.logger)
+	shared, err := s.oracleUnits(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -233,6 +237,13 @@ func (s *Service) buildOracleWorkUnits(ctx context.Context) ([]*oracleWorkUnit, 
 	}
 
 	return workUnits, nil
+}
+
+func (s *Service) oracleUnits(ctx context.Context) ([]*oracle_pricing.OracleUnit, error) {
+	if s.config.Units != nil {
+		return s.config.Units, nil
+	}
+	return oracle_pricing.LoadOracleUnits(ctx, s.repo, s.config.ChainID, s.config.ReferenceEffectiveAt, s.logger)
 }
 
 func (s *Service) runForOracle(ctx context.Context, wu *oracleWorkUnit, fromBlock, toBlock int64) error {

@@ -39,7 +39,7 @@ func newRetiredSourceFixture(t *testing.T, ctx context.Context, oracleName, toke
 	testutil.SeedOracleAssetEffectiveFrom(t, ctx, onchainPricePool, oracleID, tokenID, enabledFrom)
 	testutil.SetOracleAssetEnabled(t, ctx, onchainPricePool, oracleID, tokenID, false, retiredFrom, "VEC-597 test: source retired")
 
-	repo, err := NewOnchainPriceRepository(onchainPricePool, nil, 0, 0)
+	repo, err := NewOnchainPriceRepository(onchainPricePool, nil, 0, 0, 0)
 	if err != nil {
 		t.Fatalf("NewOnchainPriceRepository: %v", err)
 	}

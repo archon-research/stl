@@ -150,7 +150,7 @@ func newIntegrationService(t *testing.T, pool *pgxpool.Pool, endpoint string) *S
 	if err != nil {
 		t.Fatalf("maple.NewClient: %v", err)
 	}
-	repo, err := postgres.NewMapleGraphQLRepository(pool, nil, 0, 0)
+	repo, err := postgres.NewMapleGraphQLRepository(pool, nil, 0, 0, 0)
 	if err != nil {
 		t.Fatalf("NewMapleGraphQLRepository: %v", err)
 	}

@@ -53,22 +53,27 @@ func TestPrimeCapitalStackRepositoryPreservesEighteenDecimalPrecision(t *testing
 	if err != nil {
 		t.Fatalf("tx manager: %v", err)
 	}
-	repo := NewPrimeCapitalStackRepository(pool, nil)
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	repo := NewPrimeCapitalStackRepository(pool, nil, runID)
 	syncedAt := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
 
 	if err := txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		return repo.SavePrimeCapitalSnapshots(ctx, tx, []entity.PrimeCapitalStackSnapshot{
-			capitalStackSnapshot(primeID, syncedAt, 1),
+			capitalStackSnapshot(primeID, syncedAt, int(buildID)),
 		})
 	}); err != nil {
 		t.Fatalf("SavePrimeCapitalSnapshots() = %v", err)
 	}
 
 	var exposure, junior string
+	var gotRunID *int64
 	if err := pool.QueryRow(ctx, `
-		SELECT exposure_usd::text, junior_risk_capital_usd::text
-		FROM prime_capital_stack WHERE prime_id = $1`, primeID).Scan(&exposure, &junior); err != nil {
+		SELECT exposure_usd::text, junior_risk_capital_usd::text, run_id
+		FROM prime_capital_stack WHERE prime_id = $1`, primeID).Scan(&exposure, &junior, &gotRunID); err != nil {
 		t.Fatalf("reading back: %v", err)
+	}
+	if gotRunID == nil || *gotRunID != int64(runID) {
+		t.Errorf("run_id = %v, want %d", gotRunID, runID)
 	}
 	if exposure != "2098090654.811942249063867795" {
 		t.Errorf("exposure_usd = %s, want the 18-decimal value unrounded", exposure)
@@ -96,7 +101,7 @@ func TestPrimeCapitalStackRepositoryIsIdempotentWithinABuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tx manager: %v", err)
 	}
-	repo := NewPrimeCapitalStackRepository(pool, nil)
+	repo := NewPrimeCapitalStackRepository(pool, nil, 0)
 	syncedAt := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
 	snapshot := capitalStackSnapshot(primeID, syncedAt, 1)
 
@@ -135,7 +140,7 @@ func TestPrimeCapitalStackRepositoryAppendsACorrectionForANewBuild(t *testing.T)
 	if err != nil {
 		t.Fatalf("tx manager: %v", err)
 	}
-	repo := NewPrimeCapitalStackRepository(pool, nil)
+	repo := NewPrimeCapitalStackRepository(pool, nil, 0)
 	syncedAt := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
 
 	for _, buildID := range []int{1, 2} {

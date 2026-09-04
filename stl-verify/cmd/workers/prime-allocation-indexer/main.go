@@ -12,7 +12,6 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	redisAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
@@ -28,6 +27,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	at "github.com/archon-research/stl/stl-verify/internal/services/allocation_tracker"
 )
 
@@ -261,9 +261,9 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	}
 	logger.Info("PostgreSQL connected")
 
-	buildReg, err := buildregistry.New(ctx, dbPool)
+	buildReg, runID, err := writerrun.Open(ctx, dbPool)
 	if err != nil {
-		return fmt.Errorf("registering build: %w", err)
+		return err
 	}
 
 	logger.Info("starting allocation tracker",
@@ -333,7 +333,7 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	}
 
 	// Load primes from DB to build star → prime_id lookup
-	primeRepo := postgres.NewPrimeDebtRepository(dbPool, txm, logger, buildReg.BuildID())
+	primeRepo := postgres.NewPrimeDebtRepository(dbPool, txm, logger, buildReg.BuildID(), runID)
 	primes, err := primeRepo.GetPrimes(ctx)
 	if err != nil {
 		return fmt.Errorf("load primes: %w", err)
@@ -351,8 +351,8 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	if err != nil {
 		return fmt.Errorf("token repo: %w", err)
 	}
-	allocRepo := postgres.NewAllocationRepository(dbPool, txm, tokenRepo, logger, buildReg.BuildID())
-	supplyRepo := postgres.NewTokenTotalSupplyRepository(dbPool, txm, tokenRepo, logger, buildReg.BuildID())
+	allocRepo := postgres.NewAllocationRepository(dbPool, txm, tokenRepo, logger, buildReg.BuildID(), runID)
+	supplyRepo := postgres.NewTokenTotalSupplyRepository(dbPool, txm, tokenRepo, logger, buildReg.BuildID(), runID)
 	pgHandler := at.NewPrimePositionHandler(allocRepo, supplyRepo, txm, mc, erc20ABI, primeLookup, logger, atTel)
 
 	handler := at.NewMultiHandler(at.NewLogHandler(logger), pgHandler)

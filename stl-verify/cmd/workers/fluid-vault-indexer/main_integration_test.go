@@ -47,6 +47,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	defer rpcServer.Close()
 
 	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetDevIdentity(t)
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 	t.Setenv("AWS_REGION", "us-east-1")
@@ -90,6 +91,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	testutil.EnsureBucket(t, ctx, s3Client, rawBucket)
 
 	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetDevIdentity(t)
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)

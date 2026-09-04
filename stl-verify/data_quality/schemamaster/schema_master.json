@@ -1270,6 +1270,32 @@
     "wallet_address": {
       "type": "text",
       "class": "S"
+    },
+    "run_id": {
+      "type": "int8",
+      "class": "A"
+    },
+    "service": {
+      "type": "text",
+      "class": "S"
+    },
+    "image_digest": {
+      "type": "text",
+      "class": "S"
+    },
+    "started_at": {
+      "type": "timestamptz",
+      "class": "A",
+      "semantics": "processing_time"
+    },
+    "reference_snapshot": {
+      "type": "text",
+      "class": "S"
+    },
+    "reference_effective_at": {
+      "type": "timestamptz",
+      "class": "A",
+      "semantics": "effective_time"
     }
   },
   "tables": {
@@ -1552,6 +1578,10 @@
     "user": {
       "type": "dimension",
       "owner": "lending"
+    },
+    "writer_run": {
+      "type": "infrastructure",
+      "owner": "infra"
     }
   },
   "transforms": [

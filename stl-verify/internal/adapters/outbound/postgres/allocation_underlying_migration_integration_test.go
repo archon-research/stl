@@ -14,6 +14,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const allocUnderlyingDBName = "test_alloc_underlying"
@@ -89,7 +90,8 @@ func TestSavePositions_PersistsUnderlyingValuation(t *testing.T) {
 		t.Fatalf("NewTxManager: %v", err)
 	}
 
-	repo := NewAllocationRepository(allocUnderlyingPool, txm, tokenRepo, nil, buildregistry.BuildID(1))
+	buildID, runID := testutil.OpenTestRun(t, ctx, allocUnderlyingPool)
+	repo := NewAllocationRepository(allocUnderlyingPool, txm, tokenRepo, nil, buildID, runID)
 
 	vaultAddr := common.HexToAddress("0x38464507e02c983f20428a6e8566693fe9e422a9")
 	proxyAddr := common.HexToAddress("0x1111111111111111111111111111111111111111")
@@ -162,15 +164,19 @@ func TestSavePositions_PersistsUnderlyingValuation(t *testing.T) {
 	// equals the token row for (chain_id=1, usdcAddr).
 	var underlyingValueStr string
 	var underlyingTokenID int64
+	var gotRunID *int64
 	if err := allocUnderlyingPool.QueryRow(ctx, `
-		SELECT underlying_value::text, underlying_token_id
+		SELECT underlying_value::text, underlying_token_id, run_id
 		FROM allocation_position
 		WHERE block_number = 24584100 AND log_index = 1`,
-	).Scan(&underlyingValueStr, &underlyingTokenID); err != nil {
+	).Scan(&underlyingValueStr, &underlyingTokenID, &gotRunID); err != nil {
 		t.Fatalf("query position A: %v", err)
 	}
 	if underlyingValueStr != "20102052.000000" {
 		t.Fatalf("position A underlying_value = %q, want 20102052.000000", underlyingValueStr)
+	}
+	if gotRunID == nil || *gotRunID != int64(runID) {
+		t.Fatalf("position A run_id = %v, want %d", gotRunID, runID)
 	}
 
 	// Confirm that underlying_token_id points to the USDC token row.
@@ -240,7 +246,7 @@ func TestSavePositions_ResolvesUnderlyingWhenShareTokenAlreadySeen(t *testing.T)
 		t.Fatalf("NewTxManager: %v", err)
 	}
 
-	repo := NewAllocationRepository(allocUnderlyingPool, txm, tokenRepo, nil, buildregistry.BuildID(1))
+	repo := NewAllocationRepository(allocUnderlyingPool, txm, tokenRepo, nil, buildregistry.BuildID(1), buildregistry.RunID(1))
 
 	vaultAddr := common.HexToAddress("0x38464507e02c983f20428a6e8566693fe9e422a9")
 	walletA := common.HexToAddress("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")

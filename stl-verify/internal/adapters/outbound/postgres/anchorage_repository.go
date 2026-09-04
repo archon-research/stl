@@ -36,10 +36,11 @@ type AnchorageRepository struct {
 	txm     *TxManager
 	logger  *slog.Logger
 	buildID buildregistry.BuildID
+	runID   buildregistry.RunID
 }
 
 // NewAnchorageRepository creates a new AnchorageRepository.
-func NewAnchorageRepository(pool *pgxpool.Pool, txm *TxManager, logger *slog.Logger, buildID buildregistry.BuildID) *AnchorageRepository {
+func NewAnchorageRepository(pool *pgxpool.Pool, txm *TxManager, logger *slog.Logger, buildID buildregistry.BuildID, runID buildregistry.RunID) *AnchorageRepository {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -48,6 +49,7 @@ func NewAnchorageRepository(pool *pgxpool.Pool, txm *TxManager, logger *slog.Log
 		txm:     txm,
 		logger:  logger.With("component", "anchorage-repo"),
 		buildID: buildID,
+		runID:   runID,
 	}
 }
 
@@ -80,7 +82,7 @@ func (r *AnchorageRepository) SaveSnapshots(ctx context.Context, snapshots []ent
 	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		for i := 0; i < len(snapshots); i += snapshotBatchSize {
 			end := min(i+snapshotBatchSize, len(snapshots))
-			if err := insertSnapshotBatch(ctx, tx, snapshots[i:end], int(r.buildID)); err != nil {
+			if err := insertSnapshotBatch(ctx, tx, snapshots[i:end], int(r.buildID), int64(r.runID)); err != nil {
 				return err
 			}
 		}
@@ -88,17 +90,17 @@ func (r *AnchorageRepository) SaveSnapshots(ctx context.Context, snapshots []ent
 	})
 }
 
-func insertSnapshotBatch(ctx context.Context, tx pgx.Tx, batch []entity.AnchoragePackageSnapshot, buildID int) error {
-	const cols = 20
+func insertSnapshotBatch(ctx context.Context, tx pgx.Tx, batch []entity.AnchoragePackageSnapshot, buildID int, runID int64) error {
+	const cols = 21
 	valueStrings := make([]string, 0, len(batch))
 	valueArgs := make([]any, 0, len(batch)*cols)
 
 	for i, snap := range batch {
 		base := i * cols
 		valueStrings = append(valueStrings, fmt.Sprintf(
-			"($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
+			"($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
 			base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8,
-			base+9, base+10, base+11, base+12, base+13, base+14, base+15, base+16, base+17, base+18, base+19, base+20,
+			base+9, base+10, base+11, base+12, base+13, base+14, base+15, base+16, base+17, base+18, base+19, base+20, base+21,
 		))
 		valueArgs = append(valueArgs,
 			snap.PrimeID,
@@ -121,6 +123,7 @@ func insertSnapshotBatch(ctx context.Context, tx pgx.Tx, batch []entity.Anchorag
 			snap.LTVTimestamp,
 			snap.SnapshotTime,
 			buildID,
+			runID,
 		)
 	}
 
@@ -130,7 +133,7 @@ func insertSnapshotBatch(ctx context.Context, tx pgx.Tx, batch []entity.Anchorag
 			current_ltv, exposure_value, package_value,
 			margin_call_ltv, critical_ltv, margin_return_ltv,
 			asset_type, custody_type, asset_price, asset_quantity, asset_weighted_value,
-			ltv_timestamp, snapshot_time, build_id
+			ltv_timestamp, snapshot_time, build_id, run_id
 		) VALUES %s
 		ON CONFLICT (prime_id, package_id, asset_type, custody_type, processing_version, snapshot_time) DO NOTHING`, strings.Join(valueStrings, ","))
 
@@ -165,7 +168,7 @@ func (r *AnchorageRepository) SaveOperations(ctx context.Context, operations []e
 	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		for i := 0; i < len(operations); i += operationBatchSize {
 			end := min(i+operationBatchSize, len(operations))
-			if err := insertOperationBatch(ctx, tx, operations[i:end], int(r.buildID)); err != nil {
+			if err := insertOperationBatch(ctx, tx, operations[i:end], int(r.buildID), int64(r.runID)); err != nil {
 				return err
 			}
 		}
@@ -173,17 +176,17 @@ func (r *AnchorageRepository) SaveOperations(ctx context.Context, operations []e
 	})
 }
 
-func insertOperationBatch(ctx context.Context, tx pgx.Tx, batch []entity.AnchorageOperation, buildID int) error {
-	const cols = 11
+func insertOperationBatch(ctx context.Context, tx pgx.Tx, batch []entity.AnchorageOperation, buildID int, runID int64) error {
+	const cols = 12
 	valueStrings := make([]string, 0, len(batch))
 	valueArgs := make([]any, 0, len(batch)*cols)
 
 	for i, op := range batch {
 		base := i * cols
 		valueStrings = append(valueStrings, fmt.Sprintf(
-			"($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
+			"($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
 			base+1, base+2, base+3, base+4, base+5, base+6,
-			base+7, base+8, base+9, base+10, base+11,
+			base+7, base+8, base+9, base+10, base+11, base+12,
 		))
 		valueArgs = append(valueArgs,
 			op.PrimeID,
@@ -197,6 +200,7 @@ func insertOperationBatch(ctx context.Context, tx pgx.Tx, batch []entity.Anchora
 			op.Notes,
 			op.CreatedAt,
 			buildID,
+			runID,
 		)
 	}
 
@@ -204,7 +208,7 @@ func insertOperationBatch(ctx context.Context, tx pgx.Tx, batch []entity.Anchora
 		INSERT INTO anchorage_operation (
 			prime_id, operation_id, action, operation_type, type_id,
 			asset_type, custody_type, quantity, notes,
-			created_at, build_id
+			created_at, build_id, run_id
 		) VALUES %s
 		ON CONFLICT (operation_id, processing_version, created_at) DO NOTHING`, strings.Join(valueStrings, ","))
 

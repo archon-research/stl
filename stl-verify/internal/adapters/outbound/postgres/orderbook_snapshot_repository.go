@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -20,7 +21,7 @@ var _ outbound.OrderbookSnapshotRepository = (*OrderbookSnapshotRepository)(nil)
 // per-row placeholder count is derived from this slice (len), so the VALUES
 // tuples and the bound args cannot drift apart.
 var orderbookSnapshotColumns = []string{
-	"exchange", "symbol", "event_time", "ingested_at", "persisted_at", "bids", "asks",
+	"exchange", "symbol", "event_time", "ingested_at", "persisted_at", "bids", "asks", "run_id",
 }
 
 // OrderbookSnapshotRepository is the PostgreSQL/TimescaleDB implementation of the
@@ -30,16 +31,17 @@ var orderbookSnapshotColumns = []string{
 type OrderbookSnapshotRepository struct {
 	pool   *pgxpool.Pool
 	logger *slog.Logger
+	runID  buildregistry.RunID
 }
 
-func NewOrderbookSnapshotRepository(pool *pgxpool.Pool, logger *slog.Logger) (*OrderbookSnapshotRepository, error) {
+func NewOrderbookSnapshotRepository(pool *pgxpool.Pool, logger *slog.Logger, runID buildregistry.RunID) (*OrderbookSnapshotRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &OrderbookSnapshotRepository{pool: pool, logger: logger}, nil
+	return &OrderbookSnapshotRepository{pool: pool, logger: logger, runID: runID}, nil
 }
 
 // Save writes every snapshot as one row in a single multi-row INSERT, which is
@@ -49,7 +51,7 @@ func (r *OrderbookSnapshotRepository) Save(ctx context.Context, snapshots []enti
 	if len(snapshots) == 0 {
 		return nil
 	}
-	sql, args, err := buildOrderbookSnapshotInsert(snapshots)
+	sql, args, err := buildOrderbookSnapshotInsert(snapshots, int64(r.runID))
 	if err != nil {
 		return err
 	}
@@ -63,7 +65,7 @@ func (r *OrderbookSnapshotRepository) Save(ctx context.Context, snapshots []enti
 // event_time is a nullable *time.Time so a snapshot with no venue time stores SQL
 // NULL; bids/asks are JSONB ["price","size"] tuple arrays. It is split out from
 // Save so the placeholder-vs-arg count is unit-testable without a database.
-func buildOrderbookSnapshotInsert(snapshots []entity.OrderbookSnapshot) (string, []any, error) {
+func buildOrderbookSnapshotInsert(snapshots []entity.OrderbookSnapshot, runID int64) (string, []any, error) {
 	cols := len(orderbookSnapshotColumns)
 	var sb strings.Builder
 	sb.WriteString("INSERT INTO cex_orderbook_snapshots (")
@@ -83,7 +85,7 @@ func buildOrderbookSnapshotInsert(snapshots []entity.OrderbookSnapshot) (string,
 			return "", nil, fmt.Errorf("encoding asks for %s %s: %w", snap.Exchange, snap.Symbol, err)
 		}
 		// Order must match orderbookSnapshotColumns.
-		args = append(args, snap.Exchange, snap.Symbol, snap.EventTime, snap.IngestedAt, snap.PersistedAt, bids, asks)
+		args = append(args, snap.Exchange, snap.Symbol, snap.EventTime, snap.IngestedAt, snap.PersistedAt, bids, asks, runID)
 	}
 	return sb.String(), args, nil
 }

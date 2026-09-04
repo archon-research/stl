@@ -396,7 +396,7 @@ func TestMigrations_AuditabilityOnSelfHosted(t *testing.T) {
 
 	// Verify the trigger works: insert a row and check processing_version was assigned.
 	_, err = pool.Exec(ctx, `
-		INSERT INTO build_registry (git_hash) VALUES ('test-hash-abc123')
+		INSERT INTO build_registry (git_hash, service, image_digest) VALUES ('test-hash-abc123', 'test', 'dev')
 	`)
 	if err != nil {
 		t.Fatalf("inserting test build: %v", err)
@@ -455,11 +455,11 @@ func TestProcessingVersion_ConcurrentBuilds(t *testing.T) {
 
 	// Register two builds.
 	var build1, build2 int
-	err := pool.QueryRow(ctx, `INSERT INTO build_registry (git_hash) VALUES ('build-race-1') RETURNING id`).Scan(&build1)
+	err := pool.QueryRow(ctx, `INSERT INTO build_registry (git_hash, service, image_digest) VALUES ('build-race-1', 'test', 'dev') RETURNING id`).Scan(&build1)
 	if err != nil {
 		t.Fatalf("inserting build 1: %v", err)
 	}
-	err = pool.QueryRow(ctx, `INSERT INTO build_registry (git_hash) VALUES ('build-race-2') RETURNING id`).Scan(&build2)
+	err = pool.QueryRow(ctx, `INSERT INTO build_registry (git_hash, service, image_digest) VALUES ('build-race-2', 'test', 'dev') RETURNING id`).Scan(&build2)
 	if err != nil {
 		t.Fatalf("inserting build 2: %v", err)
 	}
@@ -594,7 +594,7 @@ func TestProcessingVersion_RetryDedup(t *testing.T) {
 	}
 
 	var buildID int
-	if err := pool.QueryRow(ctx, `INSERT INTO build_registry (git_hash) VALUES ('retry-test') RETURNING id`).Scan(&buildID); err != nil {
+	if err := pool.QueryRow(ctx, `INSERT INTO build_registry (git_hash, service, image_digest) VALUES ('retry-test', 'test', 'dev') RETURNING id`).Scan(&buildID); err != nil {
 		t.Fatalf("inserting build: %v", err)
 	}
 
@@ -656,7 +656,7 @@ func TestProcessingVersion_NonZeroBuildID(t *testing.T) {
 	}
 
 	var buildID int
-	if err := pool.QueryRow(ctx, `INSERT INTO build_registry (git_hash) VALUES ('nonzero-bid') RETURNING id`).Scan(&buildID); err != nil {
+	if err := pool.QueryRow(ctx, `INSERT INTO build_registry (git_hash, service, image_digest) VALUES ('nonzero-bid', 'test', 'dev') RETURNING id`).Scan(&buildID); err != nil {
 		t.Fatalf("inserting build: %v", err)
 	}
 	if buildID == 0 {
@@ -705,7 +705,7 @@ func BenchmarkProcessingVersionTrigger_WithLock(b *testing.B) {
 	}
 
 	var buildID int
-	err := pool.QueryRow(ctx, `INSERT INTO build_registry (git_hash) VALUES ('bench-build') RETURNING id`).Scan(&buildID)
+	err := pool.QueryRow(ctx, `INSERT INTO build_registry (git_hash, service, image_digest) VALUES ('bench-build', 'test', 'dev') RETURNING id`).Scan(&buildID)
 	if err != nil {
 		b.Fatalf("inserting build: %v", err)
 	}

@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const fluidDBName = "test_fluid"
@@ -53,7 +54,7 @@ func setupFluidTest(t *testing.T) *fluidTestFixture {
 
 	truncateFluid(t, ctx)
 
-	repo, err := NewFluidVaultRepository(fluidPool, nil, 0, 0)
+	repo, err := NewFluidVaultRepository(fluidPool, nil, 0, 0, 0)
 	if err != nil {
 		t.Fatalf("failed to create repository: %v", err)
 	}
@@ -322,6 +323,11 @@ func TestFluidSaveVaultStates_BasicWithOptionalFields(t *testing.T) {
 	f := setupFluidTest(t)
 	ctx := context.Background()
 	vaultID := f.createVault(t, ctx, f.newTestVault(0xd1))
+	buildID, runID := testutil.OpenTestRun(t, ctx, f.pool)
+	repo, err := NewFluidVaultRepository(f.pool, nil, buildID, runID, 0)
+	if err != nil {
+		t.Fatalf("NewFluidVaultRepository: %v", err)
+	}
 
 	ts := time.Unix(1700000000, 0).UTC()
 	s := newFluidState(vaultID, 19600000, 0, ts)
@@ -332,7 +338,7 @@ func TestFluidSaveVaultStates_BasicWithOptionalFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin tx: %v", err)
 	}
-	if err := f.repo.SaveVaultStates(ctx, tx, []*entity.FluidVaultState{s}); err != nil {
+	if err := repo.SaveVaultStates(ctx, tx, []*entity.FluidVaultState{s}); err != nil {
 		t.Fatalf("SaveVaultStates: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -341,13 +347,17 @@ func TestFluidSaveVaultStates_BasicWithOptionalFields(t *testing.T) {
 
 	var totalCollateral, totalDebt, supplyExchangePrice, borrowRate string
 	var borrowExchangePrice, supplyRate *string
+	var gotRunID *int64
 	err = f.pool.QueryRow(ctx,
-		`SELECT total_collateral, total_debt, supply_exchange_price, borrow_exchange_price, supply_rate, borrow_rate
+		`SELECT total_collateral, total_debt, supply_exchange_price, borrow_exchange_price, supply_rate, borrow_rate, run_id
 		 FROM fluid_vault_state WHERE fluid_vault_id = $1 AND block_number = $2`,
 		vaultID, int64(19600000),
-	).Scan(&totalCollateral, &totalDebt, &supplyExchangePrice, &borrowExchangePrice, &supplyRate, &borrowRate)
+	).Scan(&totalCollateral, &totalDebt, &supplyExchangePrice, &borrowExchangePrice, &supplyRate, &borrowRate, &gotRunID)
 	if err != nil {
 		t.Fatalf("query state: %v", err)
+	}
+	if gotRunID == nil || *gotRunID != int64(runID) {
+		t.Errorf("run_id = %v, want %d", gotRunID, runID)
 	}
 	if totalCollateral != "1000000" || totalDebt != "400000" {
 		t.Errorf("totals = (%s,%s), want (1000000,400000)", totalCollateral, totalDebt)
@@ -416,11 +426,11 @@ func TestFluidSaveVaultStates_NewBuildBumpsProcessingVersion(t *testing.T) {
 	vaultID := f.createVault(t, ctx, f.newTestVault(0xd3))
 	ts := time.Unix(1700002000, 0).UTC()
 
-	repo0, err := NewFluidVaultRepository(f.pool, nil, 0, 0)
+	repo0, err := NewFluidVaultRepository(f.pool, nil, 0, 0, 0)
 	if err != nil {
 		t.Fatalf("new repo0: %v", err)
 	}
-	repo1, err := NewFluidVaultRepository(f.pool, nil, 1, 0)
+	repo1, err := NewFluidVaultRepository(f.pool, nil, 1, 0, 0)
 	if err != nil {
 		t.Fatalf("new repo1: %v", err)
 	}
@@ -550,7 +560,7 @@ func TestFluidSaveVaultStates_CrossChunkPartialDedupFails(t *testing.T) {
 	vaultID := f.createVault(t, ctx, f.newTestVault(0xe6))
 	ts := time.Unix(1700008000, 0).UTC()
 
-	repo1, err := NewFluidVaultRepository(f.pool, nil, 0, 1) // batchSize=1
+	repo1, err := NewFluidVaultRepository(f.pool, nil, 0, 0, 1) // batchSize=1
 	if err != nil {
 		t.Fatalf("new repo: %v", err)
 	}

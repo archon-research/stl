@@ -31,6 +31,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/services/backfill_gaps"
 	"github.com/archon-research/stl/stl-verify/internal/services/live_data"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -192,6 +193,10 @@ func run(ctx context.Context, opts cliOptions) (err error) {
 	}
 	defer pool.Close()
 	logger.Info("PostgreSQL connected, block state tracking enabled")
+
+	if _, _, err := writerrun.Open(ctx, pool); err != nil {
+		return err
+	}
 
 	cache, err := openRedisCache(ctx, cfg, logger)
 	if err != nil {

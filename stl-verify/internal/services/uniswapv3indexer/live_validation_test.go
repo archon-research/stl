@@ -81,6 +81,7 @@ func TestLiveValidation(t *testing.T) {
 	defer cleanupDB()
 
 	buildID := buildregistry.BuildID(1)
+	runID := buildregistry.RunID(1)
 	repo := postgres.NewUniswapV3Repository(pool, buildID)
 
 	poolRows, err := repo.LoadPools(ctx, 1)
@@ -129,7 +130,7 @@ func TestLiveValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewTxManager: %v", err)
 	}
-	eventWriter := newLiveEventWriter(t, ctx, pool, buildID)
+	eventWriter := newLiveEventWriter(t, ctx, pool, buildID, runID)
 
 	var stateRows int64
 	err = txMgr.WithTransaction(ctx, func(tx pgx.Tx) error {
@@ -480,7 +481,7 @@ func fetchBlockReceipts(ctx context.Context, rpcClient *rpc.Client, blockHash co
 // postgres.EventRepository and the UniswapV3 protocol row's real id (read
 // back from the DB, not assumed), so captured logs persist to the same
 // protocol_event mirror the live worker uses.
-func newLiveEventWriter(t *testing.T, ctx context.Context, pool *pgxpool.Pool, buildID buildregistry.BuildID) *dexconsumer.ProtocolEventWriter {
+func newLiveEventWriter(t *testing.T, ctx context.Context, pool *pgxpool.Pool, buildID buildregistry.BuildID, runID buildregistry.RunID) *dexconsumer.ProtocolEventWriter {
 	t.Helper()
 
 	var protocolID int64
@@ -489,7 +490,7 @@ func newLiveEventWriter(t *testing.T, ctx context.Context, pool *pgxpool.Pool, b
 		t.Fatalf("reading UniswapV3 protocol id (seed migration missing?): %v", err)
 	}
 
-	eventRepo := postgres.NewEventRepository(nil, buildID)
+	eventRepo := postgres.NewEventRepository(nil, buildID, runID)
 	return dexconsumer.NewProtocolEventWriter(protocolID, eventRepo)
 }
 

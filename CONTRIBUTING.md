@@ -371,7 +371,10 @@ func run(ctx context.Context, args []string) error {
     ...
     consumer, err := sqsadapter.NewConsumer(awsCfg, sqsadapter.Config{...}, logger)
     pool, err   := postgres.OpenPool(ctx, postgres.DefaultDBConfig(cfg.dbURL))
-    repo, err   := postgres.NewOnchainPriceRepository(pool, logger, buildID, 0)
+    buildReg, err := buildregistry.New(ctx, pool)                       // artefact identity; hard error if incomplete
+    referenceEffectiveAt, err := env.ReferenceEffectiveAt(time.Now().UTC())
+    runID, err  := buildReg.OpenRun(ctx, referenceEffectiveAt, nil)     // one writer_run per process start
+    repo, err   := postgres.NewOnchainPriceRepository(pool, logger, buildReg.BuildID(), runID, 0)
     service, err := oracle_price_worker.NewService(shared.SQSConsumerConfig{...}, consumer, repo, ...)
 
     return lifecycle.Run(ctx, logger, service) // runs the consume loop; handles SIGINT/SIGTERM graceful stop
@@ -382,7 +385,12 @@ func run(ctx context.Context, args []string) error {
 
 1. **Create `cmd/workers/<my-worker>/main.go`.** Copy an existing worker
    as a template. Keep `main()` small — it parses flags, wires adapters,
-   and calls `lifecycle.Run`.
+   and calls `lifecycle.Run`. Every binary that connects to Postgres
+   registers its artefact and opens a writer run at startup
+   (`buildregistry.New` + `OpenRun`, ADR-0006 §2) and passes the `RunID`
+   into its repositories next to the `BuildID`; startup reads of an
+   append-on-change reference table go inside `OpenRun`'s load callback
+   (`internal/pkg/oraclewire` is the reference).
 2. **Create a service in `internal/services/<my_worker>/`.** The service
    owns the business logic, depends only on ports, and exposes a public
    API tested in isolation (mock the repo + consumer + any contract

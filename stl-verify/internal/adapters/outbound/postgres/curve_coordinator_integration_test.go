@@ -327,7 +327,7 @@ func newCurveCurveService(t *testing.T, ctx context.Context) (*curveindexer.Curv
 	).Scan(&protocolID); err != nil {
 		t.Fatalf("resolve protocol id: %v", err)
 	}
-	eventWriter := dexconsumer.NewProtocolEventWriter(protocolID, NewEventRepository(logger, buildregistry.BuildID(1)))
+	eventWriter := dexconsumer.NewProtocolEventWriter(protocolID, NewEventRepository(logger, buildregistry.BuildID(1), buildregistry.RunID(1)))
 
 	mc := &stableswapCallCountResults{t: t, pre: coordPreNGResults(), ng: coordNGResults(t)}
 

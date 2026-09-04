@@ -154,19 +154,19 @@ run-morpho-indexer:
 # buildregistry (falls back to "dev" outside a git checkout).
 run-allocation-tracker:
 	@echo "==> Running allocation tracker..."
-	@set -a && . cmd/workers/prime-allocation-indexer/.env && [ -f cmd/workers/prime-allocation-indexer/.env.local ] && . cmd/workers/prime-allocation-indexer/.env.local; set +a && unset AWS_PROFILE AWS_DEFAULT_PROFILE && BUILD_GIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo dev) go run ./cmd/workers/prime-allocation-indexer
+	@set -a && . cmd/workers/prime-allocation-indexer/.env && [ -f cmd/workers/prime-allocation-indexer/.env.local ] && . cmd/workers/prime-allocation-indexer/.env.local; set +a && unset AWS_PROFILE AWS_DEFAULT_PROFILE && STL_DEV_IDENTITY=1 BUILD_GIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo dev) go run ./cmd/workers/prime-allocation-indexer
 
 # Run the Avalanche allocation tracker (requires dev-up first). See run-allocation-tracker
 # for why AWS_PROFILE is unset and BUILD_GIT_HASH is passed.
 run-allocation-tracker-avax:
 	@echo "==> Running Avalanche allocation tracker (chain_id=43114)..."
-	@set -a && . cmd/workers/prime-allocation-indexer/.env.avax && [ -f cmd/workers/prime-allocation-indexer/.env.avax.local ] && . cmd/workers/prime-allocation-indexer/.env.avax.local; set +a && unset AWS_PROFILE AWS_DEFAULT_PROFILE && BUILD_GIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo dev) go run ./cmd/workers/prime-allocation-indexer
+	@set -a && . cmd/workers/prime-allocation-indexer/.env.avax && [ -f cmd/workers/prime-allocation-indexer/.env.avax.local ] && . cmd/workers/prime-allocation-indexer/.env.avax.local; set +a && unset AWS_PROFILE AWS_DEFAULT_PROFILE && STL_DEV_IDENTITY=1 BUILD_GIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo dev) go run ./cmd/workers/prime-allocation-indexer
 
 # Run the Robinhood allocation tracker (requires dev-up first). See run-allocation-tracker
 # for why AWS_PROFILE is unset and BUILD_GIT_HASH is passed.
 run-allocation-tracker-robinhood:
 	@echo "==> Running Robinhood allocation tracker (chain_id=4663)..."
-	@set -a && . cmd/workers/prime-allocation-indexer/.env.robinhood && [ -f cmd/workers/prime-allocation-indexer/.env.robinhood.local ] && . cmd/workers/prime-allocation-indexer/.env.robinhood.local; set +a && unset AWS_PROFILE AWS_DEFAULT_PROFILE && BUILD_GIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo dev) go run ./cmd/workers/prime-allocation-indexer
+	@set -a && . cmd/workers/prime-allocation-indexer/.env.robinhood && [ -f cmd/workers/prime-allocation-indexer/.env.robinhood.local ] && . cmd/workers/prime-allocation-indexer/.env.robinhood.local; set +a && unset AWS_PROFILE AWS_DEFAULT_PROFILE && STL_DEV_IDENTITY=1 BUILD_GIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo dev) go run ./cmd/workers/prime-allocation-indexer
 
 # Run the SparkLend position tracker (requires dev-up first)
 run-sparklend-position-tracker:
@@ -611,6 +611,7 @@ dev-env-files:
 		"JAEGER_ENDPOINT=127.0.0.1:$(KIND_HOST_OTLP_PORT)" \
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"ENABLE_BACKFILL=false" \
+		"STL_DEV_IDENTITY=1" \
 		> cmd/base/watcher/.env && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
@@ -629,6 +630,7 @@ dev-env-files:
 		"JAEGER_ENDPOINT=127.0.0.1:$(KIND_HOST_OTLP_PORT)" \
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"ENABLE_BACKFILL=false" \
+		"STL_DEV_IDENTITY=1" \
 		> cmd/base/watcher/.env.avax && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
@@ -647,6 +649,7 @@ dev-env-files:
 		"JAEGER_ENDPOINT=127.0.0.1:$(KIND_HOST_OTLP_PORT)" \
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"ENABLE_BACKFILL=false" \
+		"STL_DEV_IDENTITY=1" \
 		> cmd/base/watcher/.env.robinhood && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
@@ -661,6 +664,7 @@ dev-env-files:
 		"JAEGER_ENDPOINT=127.0.0.1:$(KIND_HOST_OTLP_PORT)" \
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"LOG_LEVEL=debug" \
+		"STL_DEV_IDENTITY=1" \
 		> cmd/workers/oracle-price-indexer/.env && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
@@ -676,6 +680,7 @@ dev-env-files:
 		"JAEGER_ENDPOINT=127.0.0.1:$(KIND_HOST_OTLP_PORT)" \
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"LOG_LEVEL=debug" \
+		"STL_DEV_IDENTITY=1" \
 		> cmd/workers/oracle-price-indexer/.env.avax && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
@@ -694,6 +699,7 @@ dev-env-files:
 		"S3_BUCKET=stl-sentineldevelopment-ethereum-raw" \
 		"DEPLOY_ENV=development" \
 		"LOG_LEVEL=debug" \
+		"STL_DEV_IDENTITY=1" \
 		> cmd/workers/sparklend-indexer/.env && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
@@ -712,6 +718,7 @@ dev-env-files:
 		"S3_BUCKET=stl-sentineldevelopment-avalanche-raw" \
 		"DEPLOY_ENV=development" \
 		"LOG_LEVEL=debug" \
+		"STL_DEV_IDENTITY=1" \
 		> cmd/workers/sparklend-indexer/.env.avax && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
@@ -730,6 +737,7 @@ dev-env-files:
 		"S3_BUCKET=stl-sentineldevelopment-ethereum-raw" \
 		"DEPLOY_ENV=development" \
 		"LOG_LEVEL=debug" \
+		"STL_DEV_IDENTITY=1" \
 		> cmd/workers/prime-allocation-indexer/.env && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
@@ -748,6 +756,7 @@ dev-env-files:
 		"S3_BUCKET=stl-sentineldevelopment-avalanche-raw" \
 		"DEPLOY_ENV=development" \
 		"LOG_LEVEL=debug" \
+		"STL_DEV_IDENTITY=1" \
 		> cmd/workers/prime-allocation-indexer/.env.avax && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
@@ -766,6 +775,7 @@ dev-env-files:
 		"S3_BUCKET=stl-sentineldevelopment-robinhood-raw" \
 		"DEPLOY_ENV=development" \
 		"LOG_LEVEL=debug" \
+		"STL_DEV_IDENTITY=1" \
 		> cmd/workers/prime-allocation-indexer/.env.robinhood && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
@@ -785,10 +795,12 @@ dev-env-files:
 		"SQS_WAIT_TIME=1" \
 		"SQS_VISIBILITY_TIMEOUT=180" \
 		"LOG_LEVEL=debug" \
+		"STL_DEV_IDENTITY=1" \
 		> cmd/workers/morpho-indexer/.env
 	@printf '%s\n' \
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
 		"LOG_LEVEL=debug" \
+		"STL_DEV_IDENTITY=1" \
 		> cmd/backfillers/oracle-pricing-backfill/.env
 	@set -a; . ../.env.secrets; set +a; \
 	printf '%s\n' \
@@ -799,6 +811,7 @@ dev-env-files:
 		"COINGECKO_API_KEY=$$COINGECKO_API_KEY" \
 		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
+		"STL_DEV_IDENTITY=1" \
 		> cmd/cronjobs/offchain-price-indexer/.env; \
 	printf '%s\n' \
 		"CHAIN_ID=1" \
@@ -808,6 +821,7 @@ dev-env-files:
 		"COINGECKO_API_KEY=$$COINGECKO_API_KEY" \
 		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
+		"STL_DEV_IDENTITY=1" \
 		> cmd/backfillers/offchain-price-backfill/.env; \
 	printf '%s\n' \
 		"CHAIN_ID=1" \
@@ -817,6 +831,7 @@ dev-env-files:
 		"ETHERSCAN_API_KEY=$$ETHERSCAN_API_KEY" \
 		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
+		"STL_DEV_IDENTITY=1" \
 		> cmd/cronjobs/watcher-data-validator/.env; \
 	printf '%s\n' \
 		"CHAIN_ID=1" \
@@ -828,6 +843,7 @@ dev-env-files:
 		"ANCHORAGE_PRIME=" \
 		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
+		"STL_DEV_IDENTITY=1" \
 		> cmd/cronjobs/anchorage-indexer/.env
 	@printf '%s\n' \
 		"CHAIN_ID=1" \
@@ -840,6 +856,7 @@ dev-env-files:
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
+		"STL_DEV_IDENTITY=1" \
 		> cmd/cronjobs/maple-graphql-indexer/.env
 	@printf '%s\n' \
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
@@ -848,6 +865,7 @@ dev-env-files:
 		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
 		"TEMPORAL_NAMESPACE=vector" \
 		"LOG_LEVEL=debug" \
+		"STL_DEV_IDENTITY=1" \
 		> cmd/cronjobs/reference-capital-indexer/.env
 # The two Morpho history jobs sweep ~2.4M blocks and log one line per replayed
 # event, so they run at info: debug buries the run in per-call noise. Both need
@@ -865,6 +883,7 @@ dev-env-files:
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=info" \
+		"STL_DEV_IDENTITY=1" \
 		> cmd/cronjobs/morpho-v2-bootstrap/.env; \
 	printf '%s\n' \
 		"CHAIN_ID=1" \
@@ -879,6 +898,7 @@ dev-env-files:
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=info" \
+		"STL_DEV_IDENTITY=1" \
 		> cmd/backfillers/morpho-vault-backfill/.env
 	@echo "Environment files generated from ../.env.secrets."; \
 	MISSING=""; \
@@ -2077,10 +2097,12 @@ build-cronjob-%:
 # BUILD_GIT_HASH is stamped from HEAD rather than left at the .env's "dev": build_registry
 # keys rows by git hash, so "dev" collapses every local build into one build_id and the rows
 # a run wrote stop being attributable to the commit that wrote them. See run-allocation-tracker.
+# STL_DEV_IDENTITY lets a local process register without the IMAGE_DIGEST the deploy
+# pipeline injects; a deployed binary without one refuses to start (buildregistry).
 run-cronjob-%:
 	@test -f cmd/cronjobs/$*/.env || { echo "ERROR: cmd/cronjobs/$*/.env is missing. 'make dev-env' writes only the jobs dev-env-files names; if $* is not one of them, copy a covered job's .env and edit the job-specific keys."; exit 1; }
 	@echo "==> Running $*..."
-	@set -a && . cmd/cronjobs/$*/.env && [ -f cmd/cronjobs/$*/.env.local ] && . cmd/cronjobs/$*/.env.local; set +a && BUILD_GIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo dev) go run ./cmd/cronjobs/$*
+	@set -a && . cmd/cronjobs/$*/.env && [ -f cmd/cronjobs/$*/.env.local ] && . cmd/cronjobs/$*/.env.local; set +a && STL_DEV_IDENTITY=1 BUILD_GIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo dev) go run ./cmd/cronjobs/$*
 
 # Run a cronjob's worker locally as the ONLY worker on its Temporal task queue.
 #
@@ -2123,7 +2145,7 @@ build-backfiller-%:
 run-backfiller-%:
 	@test -f cmd/backfillers/$*/.env || { echo "ERROR: cmd/backfillers/$*/.env is missing. 'make dev-env' writes only the jobs dev-env-files names; if $* is not one of them, copy a covered job's .env and edit the job-specific keys."; exit 1; }
 	@echo "==> Running $*..."
-	@set -a && . cmd/backfillers/$*/.env && [ -f cmd/backfillers/$*/.env.local ] && . cmd/backfillers/$*/.env.local; set +a && BUILD_GIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo dev) go run ./cmd/backfillers/$*
+	@set -a && . cmd/backfillers/$*/.env && [ -f cmd/backfillers/$*/.env.local ] && . cmd/backfillers/$*/.env.local; set +a && STL_DEV_IDENTITY=1 BUILD_GIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo dev) go run ./cmd/backfillers/$*
 
 # Build oracle-pricing-backfill binary for ARM64 Linux (to run on Erigon node)
 build-oracle-pricing-backfill-arm64:

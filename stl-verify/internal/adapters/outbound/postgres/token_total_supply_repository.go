@@ -27,6 +27,7 @@ type TokenTotalSupplyRepository struct {
 	tokenRepo outbound.TokenRepository
 	logger    *slog.Logger
 	buildID   buildregistry.BuildID
+	runID     buildregistry.RunID
 }
 
 func NewTokenTotalSupplyRepository(
@@ -35,6 +36,7 @@ func NewTokenTotalSupplyRepository(
 	tokenRepo outbound.TokenRepository,
 	logger *slog.Logger,
 	buildID buildregistry.BuildID,
+	runID buildregistry.RunID,
 ) *TokenTotalSupplyRepository {
 	if logger == nil {
 		logger = slog.Default()
@@ -45,6 +47,7 @@ func NewTokenTotalSupplyRepository(
 		tokenRepo: tokenRepo,
 		logger:    logger,
 		buildID:   buildID,
+		runID:     runID,
 	}
 }
 
@@ -135,8 +138,8 @@ func (r *TokenTotalSupplyRepository) buildInsertArgs(
 			chain_id, token_id,
 			total_supply, scaled_total_supply,
 			block_number, block_version, block_timestamp,
-			source, build_id
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			source, build_id, run_id
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (chain_id, token_id, block_number, block_version, processing_version, block_timestamp) DO NOTHING
 	`
 
@@ -150,6 +153,7 @@ func (r *TokenTotalSupplyRepository) buildInsertArgs(
 		s.BlockTimestamp,
 		s.Source,
 		int(r.buildID),
+		int64(r.runID),
 	}
 	return query, args
 }

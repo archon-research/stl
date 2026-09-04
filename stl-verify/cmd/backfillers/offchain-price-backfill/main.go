@@ -21,11 +21,11 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/coingecko"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/services/offchain_price_fetcher"
 )
 
@@ -95,9 +95,9 @@ func newPriceFetcher(ctx context.Context, deps temporal.Dependencies) (*offchain
 		return nil, err
 	}
 
-	buildReg, err := buildregistry.New(ctx, deps.Pool)
+	buildReg, runID, err := writerrun.Open(ctx, deps.Pool)
 	if err != nil {
-		return nil, fmt.Errorf("registering build: %w", err)
+		return nil, err
 	}
 
 	provider, err := coingecko.NewClient(coingecko.ClientConfig{
@@ -109,7 +109,7 @@ func newPriceFetcher(ctx context.Context, deps temporal.Dependencies) (*offchain
 		return nil, fmt.Errorf("creating coingecko provider: %w", err)
 	}
 
-	priceRepo, err := postgres.NewPriceRepository(deps.Pool, deps.Logger, buildReg.BuildID(), 0)
+	priceRepo, err := postgres.NewPriceRepository(deps.Pool, deps.Logger, buildReg.BuildID(), runID, 0)
 	if err != nil {
 		return nil, fmt.Errorf("creating price repository: %w", err)
 	}

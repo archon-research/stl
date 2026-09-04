@@ -58,6 +58,7 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	defer rpcServer.Close()
 
 	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetDevIdentity(t)
 
 	args := []string{
 		"-rpc-url", rpcServer.URL,
@@ -98,6 +99,7 @@ func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 	defer rpcServer.Close()
 
 	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetDevIdentity(t)
 
 	err := run([]string{
 		"-rpc-url", rpcServer.URL,

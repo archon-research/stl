@@ -100,7 +100,7 @@ func TestSavePositions_PersistsTransferParties(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewTxManager: %v", err)
 	}
-	repo := NewAllocationRepository(allocTransferPartiesPool, txm, tokenRepo, nil, buildregistry.BuildID(1))
+	repo := NewAllocationRepository(allocTransferPartiesPool, txm, tokenRepo, nil, buildregistry.BuildID(1), buildregistry.RunID(1))
 
 	usdcAddr := common.HexToAddress("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
 	proxyAddr := common.HexToAddress("0x2222222222222222222222222222222222222222")
