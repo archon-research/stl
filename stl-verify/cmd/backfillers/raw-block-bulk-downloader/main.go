@@ -165,6 +165,14 @@ func main() {
 func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	logStartupInfo(cfg, logger)
 
+	// Before the node and the archive are touched: a report path that cannot be
+	// created is the whole output of an audit, and finding that out an hour in
+	// is an audit not run.
+	report, err := newDecisionReport(cfg.ReportPath)
+	if err != nil {
+		return err
+	}
+
 	rpcClient, err := createRPCClient(cfg, logger)
 	if err != nil {
 		return err
@@ -183,10 +191,6 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	}
 
 	types, err := chainDataTypes(cfg.ChainID)
-	if err != nil {
-		return err
-	}
-	report, err := newDecisionReport(cfg.ReportPath)
 	if err != nil {
 		return err
 	}

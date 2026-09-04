@@ -2213,7 +2213,7 @@ erigon-bulk-download:
 		--start-block=$(START) \
 		--end-block=$(END) \
 		--bucket=$(BUCKET) \
-		$(if $(REPORT),--report=$(REPORT),) \
+		$(if $(REPORT),--report $(REPORT),) \
 		$(if $(filter true,$(DRY_RUN)),--dry-run,)'
 
 # Build sparklend-backfill binary for ARM64 Linux (to run on Erigon node)

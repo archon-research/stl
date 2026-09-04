@@ -210,6 +210,26 @@ func TestRunIntegration_RefusesABucketItCannotReach(t *testing.T) {
 	}
 }
 
+// A report path the run cannot write is the operator's whole answer, so it must
+// stop the run before it spends an hour of RPC and S3 reads reaching it.
+func TestRunIntegration_RefusesAnUnwritableReportBeforeAnyWork(t *testing.T) {
+	ctx := context.Background()
+	_, bucket := archiveBucket(t, ctx)
+	unwritable := filepath.Join(t.TempDir(), "no-such-directory", "holes.jsonl")
+
+	node, err := runDownloader(t, ctx, bucket, downloaderRun{dryRun: true, reportPath: unwritable})
+
+	if err == nil {
+		t.Fatal("run() succeeded with a report path it cannot create")
+	}
+	if !strings.Contains(err.Error(), unwritable) {
+		t.Errorf("error = %v, want it to name the report path %q", err, unwritable)
+	}
+	if served := node.served(); served != 0 {
+		t.Errorf("the node answered %d calls before the report failed, want none", served)
+	}
+}
+
 func archiveBucket(t *testing.T, ctx context.Context) (*awss3.Client, string) {
 	t.Helper()
 
@@ -278,6 +298,7 @@ type fakeErigon struct {
 	finalizedHead int64
 
 	mu         sync.Mutex
+	requests   int
 	headers    int
 	fullBlocks int
 }
@@ -302,6 +323,14 @@ func (f *fakeErigon) reads() (headers, fullBlocks int) {
 	return f.headers, f.fullBlocks
 }
 
+// served counts every request the node answered, whatever it asked for, so a
+// test can assert a run stopped before it reached the node at all.
+func (f *fakeErigon) served() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.requests
+}
+
 // rpcRequest is as much of a JSON-RPC call as the fake node needs to answer it.
 type rpcRequest struct {
 	ID     int               `json:"id"`
@@ -312,6 +341,10 @@ type rpcRequest struct {
 // serve answers a batch with an array and a single call with an object, the way
 // a node does.
 func (f *fakeErigon) serve(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	f.requests++
+	f.mu.Unlock()
+
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
