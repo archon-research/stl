@@ -51,11 +51,20 @@ func (ps *PriceSource) Validate() error {
 }
 
 // PriceAsset represents a tracked asset for a specific source.
+//
+// Exactly one of two identities is valid: TokenID set (prices go to
+// offchain_token_price), or OffchainOnly true (no token exists by design —
+// XRP, HYPE, native BTC/SOL — prices go to offchain_asset_price). TokenID nil
+// with OffchainOnly false is a configuration defect: the original catalog seed
+// resolved token ids by symbol match, so a mismatch leaves TokenID nil by
+// accident, and treating that as "offchain asset" would bury its prices in a
+// table nothing reads.
 type PriceAsset struct {
 	ID            int64
 	SourceID      int64
 	SourceAssetID string
 	TokenID       *int64
+	OffchainOnly  bool
 	Name          string
 	Symbol        string
 	Enabled       bool
@@ -97,6 +106,50 @@ func (pa *PriceAsset) Validate() error {
 	}
 	if pa.Symbol == "" {
 		return fmt.Errorf("symbol must not be empty")
+	}
+	return nil
+}
+
+// AssetPrice stores price data for assets with no token row (XRP, HYPE, native
+// BTC/SOL): keyed by the offchain_price_asset catalog row instead of a token_id,
+// because these assets have no on-chain address to make a token from.
+type AssetPrice struct {
+	AssetID      int64
+	SourceID     int16
+	PriceUSD     float64
+	MarketCapUSD *float64
+	VolumeUSD    *float64
+	Timestamp    time.Time
+}
+
+// NewAssetPrice creates a new AssetPrice entity with validation.
+func NewAssetPrice(assetID int64, sourceID int16, priceUSD float64, marketCapUSD *float64, volumeUSD *float64, timestamp time.Time) (*AssetPrice, error) {
+	ap := &AssetPrice{
+		AssetID:      assetID,
+		SourceID:     sourceID,
+		PriceUSD:     priceUSD,
+		MarketCapUSD: marketCapUSD,
+		VolumeUSD:    volumeUSD,
+		Timestamp:    timestamp,
+	}
+	if err := ap.Validate(); err != nil {
+		return nil, fmt.Errorf("NewAssetPrice: %w", err)
+	}
+	return ap, nil
+}
+
+func (ap *AssetPrice) Validate() error {
+	if ap.AssetID <= 0 {
+		return fmt.Errorf("assetID must be positive, got %d", ap.AssetID)
+	}
+	if ap.SourceID <= 0 {
+		return fmt.Errorf("sourceID must be positive, got %d", ap.SourceID)
+	}
+	if ap.PriceUSD < 0 {
+		return fmt.Errorf("priceUSD must be non-negative, got %f", ap.PriceUSD)
+	}
+	if ap.Timestamp.IsZero() {
+		return fmt.Errorf("timestamp must not be zero")
 	}
 	return nil
 }

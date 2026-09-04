@@ -1,5 +1,6 @@
 // Package main implements an on-demand Temporal worker that backfills historical
-// off-chain prices from CoinGecko into offchain_token_price.
+// off-chain prices from CoinGecko — into offchain_token_price for token-keyed
+// assets, or offchain_asset_price for assets with no token row (XRP, HYPE).
 //
 // It carries no schedule. The worker idles on its task queue until someone starts
 // a run and supplies the range, either from the Temporal UI ("Start Workflow",

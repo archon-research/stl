@@ -102,19 +102,21 @@ func (m *mockPriceProvider) GetHistoricalCalls() []string {
 // =============================================================================
 
 type mockPriceRepository struct {
-	source                *entity.PriceSource
-	enabledAssets         []*entity.PriceAsset
-	assetsByIDs           []*entity.PriceAsset
-	getSourceErr          error
-	getEnabledAssetsErr   error
-	getAssetsByIDsErr     error
-	upsertPricesErr       error
-	upsertPricesCalls     [][]*entity.TokenPrice
-	getSourceCallCount    atomic.Int32
-	getEnabledAssetsCount atomic.Int32
-	getAssetsByIDsCount   atomic.Int32
-	upsertPricesCount     atomic.Int32
-	mu                    sync.Mutex
+	source                 *entity.PriceSource
+	enabledAssets          []*entity.PriceAsset
+	assetsByIDs            []*entity.PriceAsset
+	getSourceErr           error
+	getEnabledAssetsErr    error
+	getAssetsByIDsErr      error
+	upsertPricesErr        error
+	upsertPricesCalls      [][]*entity.TokenPrice
+	upsertAssetPricesErr   error
+	upsertAssetPricesCalls [][]*entity.AssetPrice
+	getSourceCallCount     atomic.Int32
+	getEnabledAssetsCount  atomic.Int32
+	getAssetsByIDsCount    atomic.Int32
+	upsertPricesCount      atomic.Int32
+	mu                     sync.Mutex
 }
 
 func newMockRepository() *mockPriceRepository {
@@ -161,6 +163,28 @@ func (m *mockPriceRepository) UpsertPrices(ctx context.Context, prices []*entity
 	return nil
 }
 
+func (m *mockPriceRepository) UpsertAssetPrices(ctx context.Context, prices []*entity.AssetPrice) error {
+	m.mu.Lock()
+	m.upsertAssetPricesCalls = append(m.upsertAssetPricesCalls, prices)
+	m.mu.Unlock()
+	if m.upsertAssetPricesErr != nil {
+		return m.upsertAssetPricesErr
+	}
+	return nil
+}
+
+// GetUpsertedAssetPrices flattens every UpsertAssetPrices call, because callers
+// assert on what landed, not on call boundaries.
+func (m *mockPriceRepository) GetUpsertedAssetPrices() []*entity.AssetPrice {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var all []*entity.AssetPrice
+	for _, call := range m.upsertAssetPricesCalls {
+		all = append(all, call...)
+	}
+	return all
+}
+
 func (m *mockPriceRepository) GetUpsertPricesCalls() [][]*entity.TokenPrice {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -180,12 +204,16 @@ func pastHour() (from, to time.Time) {
 	return now.Add(-time.Hour), now
 }
 
+// createAsset builds a well-configured catalog row: token-linked, or declared
+// offchain-only when there is no token. The misconfigured third state (neither)
+// is built by clearing OffchainOnly at the test site.
 func createAsset(id int64, sourceAssetID, symbol string, tokenID *int64) *entity.PriceAsset {
 	return &entity.PriceAsset{
 		ID:            id,
 		SourceID:      1,
 		SourceAssetID: sourceAssetID,
 		TokenID:       tokenID,
+		OffchainOnly:  tokenID == nil,
 		Name:          symbol,
 		Symbol:        symbol,
 		Enabled:       true,
@@ -498,13 +526,21 @@ func TestFetchCurrentPrices_AssetWithoutTokenID(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Only the mapped asset should be stored
+	// Each asset routes to its own store: the mapped one to the token table,
+	// the token-less one to the asset table.
 	calls := repo.GetUpsertPricesCalls()
 	if len(calls) != 1 || len(calls[0]) != 1 {
-		t.Fatalf("expected 1 price (only mapped asset)")
+		t.Fatalf("expected 1 token-keyed price")
 	}
 	if calls[0][0].TokenID != 100 {
-		t.Error("expected only the mapped token to be stored")
+		t.Error("expected the mapped token in the token store")
+	}
+	assetPrices := repo.GetUpsertedAssetPrices()
+	if len(assetPrices) != 1 {
+		t.Fatalf("expected 1 asset-keyed price, got %d", len(assetPrices))
+	}
+	if assetPrices[0].AssetID != 2 {
+		t.Errorf("expected asset_id 2 in the asset store, got %d", assetPrices[0].AssetID)
 	}
 }
 
@@ -525,12 +561,63 @@ func TestFetchCurrentPrices_AllAssetsUnmapped(t *testing.T) {
 
 	err := svc.FetchCurrentPrices(context.Background(), nil)
 
-	// Should succeed but with warning (no prices to store)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if repo.upsertPricesCount.Load() != 0 {
-		t.Error("should not call upsert when no prices to store")
+	assetPrices := repo.GetUpsertedAssetPrices()
+	if len(assetPrices) != 1 {
+		t.Fatalf("expected the token-less asset's price in the asset store, got %d", len(assetPrices))
+	}
+	for _, call := range repo.GetUpsertPricesCalls() {
+		if len(call) != 0 {
+			t.Error("expected no token-keyed prices for a token-less asset")
+		}
+	}
+}
+
+func TestFetchCurrentPrices_MisconfiguredAssetIsRefused(t *testing.T) {
+	provider := newMockProvider("coingecko", true)
+	repo := newMockRepository()
+
+	asset := createAsset(1, "mystery", "MYS", nil)
+	asset.OffchainOnly = false // token_id NULL by accident, not by declaration
+	repo.enabledAssets = []*entity.PriceAsset{asset}
+
+	ts := time.Now().Truncate(time.Second)
+	provider.currentPrices = []outbound.PriceData{createPriceData("mystery", 1.0, ts)}
+
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
+
+	err := svc.FetchCurrentPrices(context.Background(), nil)
+
+	if err == nil || !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected the misconfigured catalog row to be refused with ErrInvalidRequest, got: %v", err)
+	}
+}
+
+func TestFetchCurrentPrices_AssetUpsertFails(t *testing.T) {
+	provider := newMockProvider("coingecko", true)
+	repo := newMockRepository()
+
+	repo.enabledAssets = []*entity.PriceAsset{
+		createAsset(1, "ripple", "XRP", nil), // token-less: routes to the asset store
+	}
+	repo.upsertAssetPricesErr = errors.New("database write error")
+
+	ts := time.Now().Truncate(time.Second)
+	provider.currentPrices = []outbound.PriceData{
+		createPriceData("ripple", 2.5, ts),
+	}
+
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
+
+	err := svc.FetchCurrentPrices(context.Background(), nil)
+
+	if err == nil {
+		t.Fatal("expected the asset-store failure to surface")
+	}
+	if !errors.Is(err, repo.upsertAssetPricesErr) {
+		t.Errorf("expected the repository error in the chain, got: %v", err)
 	}
 }
 
@@ -745,21 +832,28 @@ func TestFetchHistoricalData_AssetWithoutTokenID(t *testing.T) {
 	provider := newMockProvider("coingecko", true)
 	repo := newMockRepository()
 
+	from := time.Now().AddDate(0, 0, -1)
 	repo.enabledAssets = []*entity.PriceAsset{
-		createAsset(1, "unmapped", "UNM", nil), // No token mapping
+		createAsset(9, "ripple", "XRP", nil), // No token mapping
 	}
+	provider.historicalData["ripple"] = singlePricePoint("ripple", from)
 
 	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
-	err := svc.FetchHistoricalData(context.Background(), nil, time.Now().AddDate(0, 0, -1), time.Now())
+	err := svc.FetchHistoricalData(context.Background(), nil, from, time.Now())
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Provider should not be called for unmapped assets
-	calls := provider.GetHistoricalCalls()
-	if len(calls) != 0 {
-		t.Error("should skip assets without token_id")
+	if calls := provider.GetHistoricalCalls(); len(calls) == 0 {
+		t.Fatal("expected the token-less asset to be fetched, not skipped")
+	}
+	assetPrices := repo.GetUpsertedAssetPrices()
+	if len(assetPrices) != 1 {
+		t.Fatalf("expected 1 asset-keyed price, got %d", len(assetPrices))
+	}
+	if assetPrices[0].AssetID != 9 {
+		t.Errorf("expected asset_id 9, got %d", assetPrices[0].AssetID)
 	}
 }
 
@@ -939,9 +1033,20 @@ func TestBackfillChunk_RejectsRequestsThatCannotSucceed(t *testing.T) {
 		supportsHistorical bool
 		asset              string
 		tokenID            *int64
+		misconfigured      bool // token_id NULL without offchain_only: an accidental catalog state
 		from, to           time.Time
 		wantErrContains    string
 	}{
+		{
+			name:               "asset has neither a token link nor an offchain_only declaration",
+			supportsHistorical: true,
+			asset:              "weth",
+			tokenID:            nil,
+			misconfigured:      true,
+			from:               from,
+			to:                 from.Add(24 * time.Hour),
+			wantErrContains:    "not declared offchain_only",
+		},
 		{
 			name:               "provider cannot serve history at all",
 			supportsHistorical: false,
@@ -987,15 +1092,6 @@ func TestBackfillChunk_RejectsRequestsThatCannotSucceed(t *testing.T) {
 			to:                 from.Add(24 * time.Hour),
 			wantErrContains:    "unknown source asset IDs",
 		},
-		{
-			name:               "asset has no token_id to store against",
-			supportsHistorical: true,
-			asset:              "weth",
-			tokenID:            nil,
-			from:               from,
-			to:                 from.Add(24 * time.Hour),
-			wantErrContains:    "no token_id",
-		},
 	}
 
 	for _, tc := range tests {
@@ -1005,7 +1101,11 @@ func TestBackfillChunk_RejectsRequestsThatCannotSucceed(t *testing.T) {
 				return singlePricePoint(id, f), nil
 			}
 			repo := newMockRepository()
-			repo.assetsByIDs = []*entity.PriceAsset{createAsset(1, "weth", "WETH", tc.tokenID)}
+			asset := createAsset(1, "weth", "WETH", tc.tokenID)
+			if tc.misconfigured {
+				asset.OffchainOnly = false
+			}
+			repo.assetsByIDs = []*entity.PriceAsset{asset}
 
 			svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
@@ -1052,6 +1152,31 @@ func TestBackfillChunk_AcceptsAWindowExactlyAtTheHourlyCeiling(t *testing.T) {
 	}
 	if stored != 1 {
 		t.Errorf("stored = %d, want 1", stored)
+	}
+}
+
+func TestBackfillChunk_TokenlessAssetStoresToAssetPrices(t *testing.T) {
+	from := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	provider := newMockProvider("coingecko", true)
+	provider.historicalDataFunc = func(_ context.Context, id string, f, _ time.Time) (*outbound.HistoricalData, error) {
+		return singlePricePoint(id, f), nil
+	}
+	repo := newMockRepository()
+	repo.assetsByIDs = []*entity.PriceAsset{createAsset(3, "ripple", "XRP", nil)}
+
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
+
+	stored, err := svc.BackfillChunk(context.Background(), "ripple", from, from.Add(24*time.Hour))
+
+	if err != nil {
+		t.Fatalf("a token-less asset must be backfillable: %v", err)
+	}
+	if stored != 1 {
+		t.Errorf("stored = %d, want 1", stored)
+	}
+	assetPrices := repo.GetUpsertedAssetPrices()
+	if len(assetPrices) != 1 || assetPrices[0].AssetID != 3 {
+		t.Fatalf("expected 1 asset-keyed price for asset_id 3, got %v", assetPrices)
 	}
 }
 
@@ -1511,28 +1636,49 @@ func TestBuildAssetMap_Empty(t *testing.T) {
 // Tests: Conversion Functions (Direct)
 // =============================================================================
 
-func TestConvertHistoricalPrices_NilTokenID(t *testing.T) {
+func TestConvertHistoricalPrices_TokenlessAssetRoutesToAssetPrices(t *testing.T) {
 	provider := newMockProvider("coingecko", true)
 	repo := newMockRepository()
 
 	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
-	// Asset without token_id
-	asset := createAsset(1, "unmapped", "UNM", nil)
-	assetMap := map[string]*entity.PriceAsset{"unmapped": asset}
+	// Asset without token_id routes to the asset-keyed slice
+	asset := createAsset(7, "ripple", "XRP", nil)
+	assetMap := map[string]*entity.PriceAsset{"ripple": asset}
 
-	data := &outbound.HistoricalData{
-		SourceAssetID: "unmapped",
-		Prices:        []outbound.PricePoint{{Timestamp: time.Now(), PriceUSD: 100.0}},
-	}
+	ts := time.Now().Truncate(time.Second)
+	data := createHistoricalData("ripple",
+		[]outbound.PricePoint{{Timestamp: ts, PriceUSD: 100.0}},
+		[]outbound.VolumePoint{{Timestamp: ts, VolumeUSD: 285000.0}},
+		[]outbound.MarketCapPoint{{Timestamp: ts, MarketCapUSD: 19000000.0}},
+	)
 
-	prices, err := svc.convertHistoricalPrices(data, assetMap)
+	tokenPrices, assetPrices, err := svc.convertHistoricalPrices(data, assetMap)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if prices != nil {
-		t.Error("expected nil prices for asset without token_id")
+	if tokenPrices != nil {
+		t.Errorf("expected no token-keyed prices for asset without token_id, got %d", len(tokenPrices))
+	}
+	if len(assetPrices) != 1 {
+		t.Fatalf("expected 1 asset-keyed price, got %d", len(assetPrices))
+	}
+	got := assetPrices[0]
+	if got.AssetID != 7 || got.SourceID != 1 {
+		t.Errorf("expected asset_id 7 / source_id 1, got %d / %d", got.AssetID, got.SourceID)
+	}
+	if got.PriceUSD != 100.0 {
+		t.Errorf("expected price 100.0, got %v", got.PriceUSD)
+	}
+	if !got.Timestamp.Equal(data.Prices[0].Timestamp) {
+		t.Errorf("expected the point's timestamp %v, got %v", data.Prices[0].Timestamp, got.Timestamp)
+	}
+	if got.MarketCapUSD == nil || *got.MarketCapUSD != 19000000.0 {
+		t.Errorf("expected market cap 19000000.0, got %v", got.MarketCapUSD)
+	}
+	if got.VolumeUSD == nil || *got.VolumeUSD != 285000.0 {
+		t.Errorf("expected volume 285000.0, got %v", got.VolumeUSD)
 	}
 }
 

@@ -14,7 +14,8 @@ related_docs:
 
 # Backfilling Off-Chain Prices
 
-How to load historical CoinGecko prices into `offchain_token_price` for a date range
+How to load historical CoinGecko prices into `offchain_token_price` (token-keyed
+assets) or `offchain_asset_price` (assets with no token row) for a date range
 you choose. This is the operator's view — for how the job is built, or how to add
 another on-demand job, see [temporal_guide.md](temporal_guide.md).
 
@@ -78,7 +79,7 @@ temporal workflow start --address 127.0.0.1:7233 --namespace vector \
 
 **CoinGecko IDs, not token symbols.** `weth` works; `WETH` fails immediately with
 `unknown source asset IDs`. Valid values are the `source_asset_id` values registered
-in `offchain_price_asset` — currently these 18:
+in `offchain_price_asset` — currently these 20:
 
 | CoinGecko ID | Symbol | | CoinGecko ID | Symbol |
 |---|---|---|---|---|
@@ -91,20 +92,24 @@ in `offchain_price_asset` — currently these 18:
 | `wrapped-steth` | wstETH | | `gnosis` | GNO |
 | `wrapped-eeth` | weETH | | `rocket-pool-eth` | rETH |
 | `renzo-restaked-eth` | ezETH | | `kelp-dao-restaked-eth` | rsETH |
+| `ripple` | XRP | | `hyperliquid` | HYPE |
 
 To confirm the current set:
 
 ```sql
-SELECT a.source_asset_id, t.symbol
+SELECT a.source_asset_id, a.symbol, a.token_id
 FROM offchain_price_asset a
 JOIN offchain_price_source s ON s.id = a.source_id
-LEFT JOIN token t ON t.id = a.token_id
-WHERE s.name = 'coingecko' AND a.token_id IS NOT NULL
+WHERE s.name = 'coingecko'
 ORDER BY 1;
 ```
 
-Assets with no `token_id` cannot be backfilled — there is nowhere to store them. That
-is why native BTC and ETH are absent (see VEC-539).
+Where the rows land depends on the asset's identity. Assets with a `token_id`
+(mainnet ERC-20s) write to `offchain_token_price`. Assets with `token_id` NULL —
+natives of ecosystems we do not index, like XRP and HYPE — write to
+`offchain_asset_price`, keyed by the `offchain_price_asset.id` catalog row.
+The workflow input is the same either way. Native BTC and ETH are still absent
+only because nobody has registered them yet (VEC-539 tracks that).
 
 ## Watching a run
 
@@ -152,6 +157,17 @@ JOIN offchain_price_source s ON s.id = p.source_id
 WHERE t.chain_id = 1 AND s.name = 'coingecko'
   AND t.symbol IN ('WETH','WBTC')
 GROUP BY t.symbol;
+```
+
+For a token-less asset the rows are in `offchain_asset_price` instead:
+
+```sql
+SELECT a.symbol, COUNT(*) AS rows,
+       MIN(p.timestamp) AS earliest, MAX(p.timestamp) AS latest
+FROM offchain_asset_price p
+JOIN offchain_price_asset a ON a.id = p.asset_id
+WHERE a.source_asset_id IN ('ripple','hyperliquid')
+GROUP BY a.symbol;
 ```
 
 Roughly **8,760 rows per asset per year** (hourly). Spot-check a known value — WETH
@@ -211,3 +227,9 @@ deactivated; if requests come back HTTP 401, put a working key in
 | Per-chunk timeout | 10 min, with a 30-min envelope including retries |
 | Re-running a filled range | Safe and additive — `ON CONFLICT DO NOTHING` |
 | Rows are never deleted | Corrections append a new `processing_version` |
+
+One caveat on "additive": it holds fully for `offchain_asset_price` (the INSERT
+decides the version, so corrections land even in compressed chunks). For
+`offchain_token_price`, filling a gap works, but re-writing an already-present
+timestamp from a **new build** is silently dropped once the chunk is compressed
+(2-day policy, so effectively any historical range) — tracked as VEC-615.

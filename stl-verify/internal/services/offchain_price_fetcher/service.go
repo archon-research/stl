@@ -13,12 +13,23 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// ErrInvalidRequest marks a request that will fail identically no matter how many
-// times it is retried: a mistyped asset ID, an asset with no token_id, an inverted
-// or over-wide window. A caller with a retry budget (a Temporal activity) matches
-// on it to fail fast, so an operator sees "you typed the ID wrong" immediately
-// rather than after a retry budget has been spent on a fixed answer.
+// ErrInvalidRequest marks a request that will fail identically no matter how
+// many times it is retried: a mistyped asset ID, a misconfigured catalog row,
+// an inverted or over-wide window. A caller with a retry budget (a Temporal
+// activity) matches on it to fail fast, so an operator sees "you typed the ID
+// wrong" immediately rather than after a retry budget has been spent on a
+// fixed answer.
 var ErrInvalidRequest = errors.New("invalid request")
+
+// errMisconfiguredAsset flags a catalog row that is neither token-linked nor
+// declared offchain-only. That state is token_id NULL by ACCIDENT (the catalog
+// seed resolves token ids by symbol match, which can miss), not by design;
+// routing it to offchain_asset_price would silently bury the asset's prices in
+// a table its consumers never read, so the run refuses instead.
+func errMisconfiguredAsset(sourceAssetID string) error {
+	return fmt.Errorf("asset %s has no token_id and is not declared offchain_only in offchain_price_asset; "+
+		"link its token row or set offchain_only before fetching it: %w", sourceAssetID, ErrInvalidRequest)
+}
 
 // MaxHourlyWindow is the widest range CoinGecko still answers at hourly
 // resolution. Past it the API silently drops to daily and gives no signal.
@@ -117,20 +128,40 @@ func (s *Service) FetchCurrentPrices(ctx context.Context, assetIDs []string) err
 		return fmt.Errorf("fetching current prices: %w", err)
 	}
 
-	tokenPrices, err := s.convertToTokenPrices(prices, assets)
+	tokenPrices, assetPrices, err := s.convertCurrentPrices(prices, assets)
 	if err != nil {
 		return fmt.Errorf("converting prices: %w", err)
 	}
-	if len(tokenPrices) == 0 {
+	if len(tokenPrices)+len(assetPrices) == 0 {
 		s.logger.Warn("no prices to store")
 		return nil
 	}
 
-	if err := s.repo.UpsertPrices(ctx, tokenPrices); err != nil {
-		return fmt.Errorf("storing prices: %w", err)
+	if err := s.storePrices(ctx, tokenPrices, assetPrices); err != nil {
+		return err
 	}
 
-	s.logger.Info("stored current prices", "count", len(tokenPrices))
+	s.logger.Info("stored current prices", "tokenKeyed", len(tokenPrices), "assetKeyed", len(assetPrices))
+	return nil
+}
+
+// storePrices writes each kind to its own table, sequentially. A failure between
+// the two writes propagates and fails the whole run. A retry under the SAME
+// build_id re-covers the half that already landed without duplicating it (the
+// build-aware version rule reuses that build's version and ON CONFLICT drops the
+// row); a retry from a NEW build instead appends a full processing_version+1
+// copy — additive by design, never corrupt (see FetchChunk in the backfiller).
+//
+// Deliberate coupling: once token-less assets are enabled, every sweep writes
+// both tables, so an asset-store failure fails the whole (idempotent) run rather
+// than letting the token series look healthy while the new store silently rots.
+func (s *Service) storePrices(ctx context.Context, tokenPrices []*entity.TokenPrice, assetPrices []*entity.AssetPrice) error {
+	if err := s.repo.UpsertPrices(ctx, tokenPrices); err != nil {
+		return fmt.Errorf("storing token prices: %w", err)
+	}
+	if err := s.repo.UpsertAssetPrices(ctx, assetPrices); err != nil {
+		return fmt.Errorf("storing asset prices: %w", err)
+	}
 	return nil
 }
 
@@ -246,27 +277,10 @@ func (s *Service) BackfillChunk(ctx context.Context, assetID string, from, to ti
 		return 0, err
 	}
 
-	asset := assets[0]
-	// A caller naming one asset explicitly gets an error rather than the silent
-	// skip FetchHistoricalData uses when sweeping every enabled asset: an
-	// unmapped token_id here means the request cannot be satisfied at all.
-	if asset.TokenID == nil {
-		return 0, fmt.Errorf("asset %s has no token_id, so its prices have nowhere to go in offchain_token_price: %w", assetID, ErrInvalidRequest)
-	}
-
-	return s.fetchAndStoreChunk(ctx, asset, buildAssetMap(assets), from, to)
+	return s.fetchAndStoreChunk(ctx, assets[0], buildAssetMap(assets), from, to)
 }
 
 func (s *Service) fetchHistoricalDataForAsset(ctx context.Context, asset *entity.PriceAsset, assetMap map[string]*entity.PriceAsset, from, to time.Time) error {
-	if asset.TokenID == nil {
-		// Warn, not Debug: deployed pods run at LOG_LEVEL=info, and an enabled
-		// offchain_price_asset row with no token_id means this asset is silently
-		// never backfilled. That is a data-config defect worth seeing.
-		s.logger.Warn("skipping asset with no token_id; it cannot be stored in offchain_token_price",
-			"asset", asset.SourceAssetID)
-		return nil
-	}
-
 	s.logger.Info("fetching historical data for asset",
 		"asset", asset.SourceAssetID,
 		"symbol", asset.Symbol,
@@ -325,11 +339,12 @@ func (s *Service) fetchAndStoreChunk(ctx context.Context, asset *entity.PriceAss
 		return 0, fmt.Errorf("fetching historical data: %w", classifyProviderError(err))
 	}
 
-	prices, err := s.convertHistoricalPrices(data, assetMap)
+	tokenPrices, assetPrices, err := s.convertHistoricalPrices(data, assetMap)
 	if err != nil {
 		return 0, fmt.Errorf("converting historical prices: %w", err)
 	}
-	if len(prices) == 0 {
+	total := len(tokenPrices) + len(assetPrices)
+	if total == 0 {
 		s.logger.Warn("provider returned no price points for chunk",
 			"asset", asset.SourceAssetID,
 			"from", from.Format(time.DateOnly),
@@ -338,12 +353,12 @@ func (s *Service) fetchAndStoreChunk(ctx context.Context, asset *entity.PriceAss
 		return 0, nil
 	}
 
-	if err := s.repo.UpsertPrices(ctx, prices); err != nil {
-		return 0, fmt.Errorf("storing prices: %w", err)
+	if err := s.storePrices(ctx, tokenPrices, assetPrices); err != nil {
+		return 0, err
 	}
-	s.logger.Debug("stored prices", "count", len(prices))
+	s.logger.Debug("stored prices", "count", total)
 
-	return len(prices), nil
+	return total, nil
 }
 
 // classifyProviderError re-labels a request the provider refused outright as
@@ -399,44 +414,52 @@ func (s *Service) resolveAssets(ctx context.Context, assetIDs []string) ([]*enti
 	return s.repo.GetAssetsBySourceAssetIDs(ctx, source.ID, assetIDs)
 }
 
-func (s *Service) convertToTokenPrices(prices []outbound.PriceData, assets []*entity.PriceAsset) ([]*entity.TokenPrice, error) {
+// convertCurrentPrices routes each point by the asset's identity: token-keyed
+// assets to TokenPrice (offchain_token_price), assets with no token row to
+// AssetPrice (offchain_asset_price).
+func (s *Service) convertCurrentPrices(prices []outbound.PriceData, assets []*entity.PriceAsset) ([]*entity.TokenPrice, []*entity.AssetPrice, error) {
 	assetMap := buildAssetMap(assets)
-	result := make([]*entity.TokenPrice, 0, len(prices))
+	tokenPrices := make([]*entity.TokenPrice, 0, len(prices))
+	var assetPrices []*entity.AssetPrice
 
 	for _, p := range prices {
 		asset, ok := assetMap[p.SourceAssetID]
 		if !ok {
-			return nil, fmt.Errorf("price for unknown asset: %s", p.SourceAssetID)
+			return nil, nil, fmt.Errorf("price for unknown asset: %s", p.SourceAssetID)
 		}
+
 		if asset.TokenID == nil {
-			s.logger.Debug("skipping asset without token_id", "asset", p.SourceAssetID)
+			if !asset.OffchainOnly {
+				return nil, nil, errMisconfiguredAsset(p.SourceAssetID)
+			}
+			ap, err := entity.NewAssetPrice(asset.ID, int16(asset.SourceID), p.PriceUSD, p.MarketCapUSD, nil, p.Timestamp)
+			if err != nil {
+				return nil, nil, fmt.Errorf("invalid price data for asset %s: %w", p.SourceAssetID, err)
+			}
+			assetPrices = append(assetPrices, ap)
 			continue
 		}
 
-		tp, err := entity.NewTokenPrice(
-			*asset.TokenID,
-			int16(asset.SourceID),
-			p.PriceUSD,
-			p.MarketCapUSD,
-			nil,
-			p.Timestamp,
-		)
+		tp, err := entity.NewTokenPrice(*asset.TokenID, int16(asset.SourceID), p.PriceUSD, p.MarketCapUSD, nil, p.Timestamp)
 		if err != nil {
-			return nil, fmt.Errorf("invalid price data for asset %s: %w", p.SourceAssetID, err)
+			return nil, nil, fmt.Errorf("invalid price data for asset %s: %w", p.SourceAssetID, err)
 		}
-		result = append(result, tp)
+		tokenPrices = append(tokenPrices, tp)
 	}
 
-	return result, nil
+	return tokenPrices, assetPrices, nil
 }
 
-func (s *Service) convertHistoricalPrices(data *outbound.HistoricalData, assetMap map[string]*entity.PriceAsset) ([]*entity.TokenPrice, error) {
+// convertHistoricalPrices routes one asset's points by its identity — see
+// convertCurrentPrices. One chunk covers one asset, so exactly one of the two
+// returned slices is populated.
+func (s *Service) convertHistoricalPrices(data *outbound.HistoricalData, assetMap map[string]*entity.PriceAsset) ([]*entity.TokenPrice, []*entity.AssetPrice, error) {
 	asset, ok := assetMap[data.SourceAssetID]
 	if !ok {
-		return nil, fmt.Errorf("historical data for unknown asset: %s", data.SourceAssetID)
+		return nil, nil, fmt.Errorf("historical data for unknown asset: %s", data.SourceAssetID)
 	}
-	if asset.TokenID == nil {
-		return nil, nil
+	if asset.TokenID == nil && !asset.OffchainOnly {
+		return nil, nil, errMisconfiguredAsset(data.SourceAssetID)
 	}
 
 	// Build maps of timestamps to market caps and volumes for efficient lookup
@@ -450,7 +473,8 @@ func (s *Service) convertHistoricalPrices(data *outbound.HistoricalData, assetMa
 		volumeMap[v.Timestamp.Unix()] = v.VolumeUSD
 	}
 
-	result := make([]*entity.TokenPrice, 0, len(data.Prices))
+	var tokenPrices []*entity.TokenPrice
+	var assetPrices []*entity.AssetPrice
 	for _, p := range data.Prices {
 		var marketCap *float64
 		if mc, ok := marketCapMap[p.Timestamp.Unix()]; ok {
@@ -462,21 +486,23 @@ func (s *Service) convertHistoricalPrices(data *outbound.HistoricalData, assetMa
 			volume = &v
 		}
 
-		tp, err := entity.NewTokenPrice(
-			*asset.TokenID,
-			int16(asset.SourceID),
-			p.PriceUSD,
-			marketCap,
-			volume,
-			p.Timestamp,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("invalid historical price data for asset %s: %w", data.SourceAssetID, err)
+		if asset.TokenID == nil {
+			ap, err := entity.NewAssetPrice(asset.ID, int16(asset.SourceID), p.PriceUSD, marketCap, volume, p.Timestamp)
+			if err != nil {
+				return nil, nil, fmt.Errorf("invalid historical price data for asset %s: %w", data.SourceAssetID, err)
+			}
+			assetPrices = append(assetPrices, ap)
+			continue
 		}
-		result = append(result, tp)
+
+		tp, err := entity.NewTokenPrice(*asset.TokenID, int16(asset.SourceID), p.PriceUSD, marketCap, volume, p.Timestamp)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid historical price data for asset %s: %w", data.SourceAssetID, err)
+		}
+		tokenPrices = append(tokenPrices, tp)
 	}
 
-	return result, nil
+	return tokenPrices, assetPrices, nil
 }
 
 func extractSourceAssetIDs(assets []*entity.PriceAsset) []string {

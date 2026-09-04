@@ -332,13 +332,18 @@ type backfillActivities struct {
 // emptiness judgement to the workflow (see assertCoverage).
 //
 // Idempotent *within one build*, which is what makes Temporal's activity retries
-// safe. The write is ON CONFLICT DO NOTHING on the primary key
-// (token_id, source_id, processing_version, timestamp), and the
-// assign_processing_version_offchain_token_price trigger reuses the existing
-// version only when a row with the same natural key AND the same build_id exists.
-// Re-running a range from a *different* build therefore lands a second copy at
-// processing_version+1 rather than doing nothing — additive by design, and read
-// paths order by processing_version DESC. See ADR-0002 §3.
+// safe: both destination tables write ON CONFLICT DO NOTHING on their primary
+// key, and the build-aware version rule reuses the existing version only when a
+// row with the same natural key AND the same build_id exists.
+//
+// Cross-build replays differ per table. offchain_asset_price decides the version
+// in the INSERT's VALUES list (next_processing_version_offchain_asset_price), so
+// a new build's replay lands an additive processing_version+1 copy even into a
+// compressed chunk. offchain_token_price is still trigger-only: filling a gap
+// works, but re-writing an already-present timestamp from a new build is
+// silently dropped on a compressed chunk (2-day policy, so effectively any
+// historical range) — the arbiter resolves against DEFAULT 0 before the trigger
+// fires. Pending VEC-615. See ADR-0002 §3.
 func (a *backfillActivities) FetchChunk(ctx context.Context, w chunkWindow) (int, error) {
 	stored, err := a.service.BackfillChunk(ctx, w.Asset, w.From, w.To)
 	if err != nil {
