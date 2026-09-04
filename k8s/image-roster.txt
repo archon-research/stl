@@ -59,3 +59,4 @@ cronjob transform-worker           transform-worker
 cronjob transform-bootstrap        -                          # one-off Job; pinned by hand in k8s/overlays/*/bootstrap/
 cronjob morpho-v2-bootstrap        morpho-v2-bootstrap
 cronjob morpho-vault-backfill      morpho-vault-backfill
+cronjob block-republisher          block-republisher

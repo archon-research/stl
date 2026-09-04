@@ -1,13 +1,10 @@
 package main
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"maps"
 	"slices"
@@ -16,15 +13,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/aws/smithy-go"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/archiveblock"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/retry"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
-
-// archiveHashPrefixBytes is how much of an archived object is fetched to read
-// its block hash: the hash sits in the first JSON fields, so a prefix is enough.
-const archiveHashPrefixBytes = 8 << 10
 
 // noArchive is the version of a height the archive holds nothing for.
 const noArchive = -1
@@ -88,7 +84,11 @@ func planBlock(state archiveState, archivedHash, canonicalHash string) blockPlan
 		return blockPlan{Action: actionFresh, Version: 0, DataTypes: slices.Clone(archivedTypes)}
 	}
 	if archivedHash == "" || !strings.EqualFold(archivedHash, canonicalHash) {
-		return blockPlan{Action: actionRepublish, Version: state.Version + 1, DataTypes: slices.Clone(archivedTypes)}
+		return blockPlan{
+			Action:    actionRepublish,
+			Version:   s3key.NextVersion(state.Version, true),
+			DataTypes: slices.Clone(archivedTypes),
+		}
 	}
 
 	missing := missingTypes(state.Present)
@@ -108,173 +108,21 @@ func missingTypes(present map[s3key.DataType]bool) []s3key.DataType {
 	return missing
 }
 
-// indexPartition folds a partition listing into the highest version present at
-// each height, with the data types stored under it.
-func indexPartition(keys []string) map[int64]archiveState {
-	index := make(map[int64]archiveState)
-	for _, key := range keys {
-		parsed, ok := s3key.Parse(key)
-		if !ok {
-			continue
-		}
-
-		state, seen := index[parsed.BlockNumber]
-		switch {
-		case !seen || parsed.Version > state.Version:
-			index[parsed.BlockNumber] = archiveState{
-				Version: parsed.Version,
-				Present: map[s3key.DataType]bool{parsed.DataType: true},
-			}
-		case parsed.Version == state.Version:
-			state.Present[parsed.DataType] = true
-		}
-	}
-	return index
-}
-
-// hashSource is where an archived object carries the block hash.
-type hashSource struct {
-	DataType s3key.DataType
-	Depth    int
-	Field    string
-}
-
-var hashSources = []hashSource{
-	{s3key.Block, 1, "hash"},
-	{s3key.Receipts, 2, "blockHash"},
-}
-
-// archivedBlockHash reads the block hash the archive holds at the height's top
-// version, from the block object or else the receipts. It returns "" when
-// neither is there to answer.
-func archivedBlockHash(ctx context.Context, reader outbound.S3RangeReader, bucket string, blockNum int64, state archiveState) (string, error) {
-	part := partition.GetPartition(blockNum)
-
-	for _, source := range hashSources {
-		if !state.Present[source.DataType] {
-			continue
-		}
-
-		key := s3key.BuildWithPartition(part, blockNum, state.Version, source.DataType)
-		hash, err := hashFromArchivedObject(ctx, reader, bucket, key, source.Depth, source.Field)
-		if err != nil {
-			return "", err
-		}
-		if hash != "" {
-			return hash, nil
-		}
-	}
-	return "", nil
-}
-
-// hashFromArchivedObject returns the hash an object carries, or "" for one that
-// reads fine and carries none: a zero-tx block's empty receipt list and a null
-// payload identify no block, and neither may fail the height on every run.
-func hashFromArchivedObject(ctx context.Context, reader outbound.S3RangeReader, bucket, key string, depth int, field string) (string, error) {
-	stored, err := reader.ReadRange(ctx, bucket, key, 0, archiveHashPrefixBytes-1)
-	if err != nil {
-		return "", fmt.Errorf("reading %s: %w", key, err)
-	}
-
-	plain, err := gunzipPrefix(stored)
-	if err != nil {
-		return "", fmt.Errorf("decompressing %s: %w", key, err)
-	}
-
-	hash, outcome := scanJSONStringField(plain, depth, field)
-	if outcome == fieldTruncated {
-		return "", fmt.Errorf("no %s in the first %d bytes of %s", field, archiveHashPrefixBytes, key)
-	}
-	return hash, nil
-}
-
-// gunzipPrefix decompresses what it can of a truncated gzip stream: the
-// unexpected EOF that ends a ranged read is the expected outcome here.
-func gunzipPrefix(stored []byte) ([]byte, error) {
-	gz, err := gzip.NewReader(bytes.NewReader(stored))
+// indexPartition folds a partition listing into what the archive holds at each
+// height. The fold is shared with the block republisher, which reads the same
+// objects to decide the version it corrects a height at, and it refuses a key it
+// cannot read rather than plan around a slot it cannot see.
+func indexPartition(keys []string) (map[int64]archiveState, error) {
+	occupied, err := s3key.Occupancies(keys)
 	if err != nil {
 		return nil, err
 	}
-	defer gz.Close()
 
-	plain, err := io.ReadAll(gz)
-	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
-		return nil, err
+	index := make(map[int64]archiveState, len(occupied))
+	for blockNum, top := range occupied {
+		index[blockNum] = archiveState{Version: top.Version, Present: top.DataTypes}
 	}
-	return plain, nil
-}
-
-// fieldOutcome tells a document that carries no such field from a prefix that
-// ended before the field could appear.
-type fieldOutcome int
-
-const (
-	fieldFound fieldOutcome = iota
-	fieldAbsent
-	fieldTruncated
-)
-
-// jsonStringField returns the first string value of the named field at the given
-// object depth, tolerating a document truncated mid-object.
-func jsonStringField(doc []byte, depth int, field string) (string, bool) {
-	value, outcome := scanJSONStringField(doc, depth, field)
-	return value, outcome == fieldFound
-}
-
-// scanJSONStringField looks for the first string value of the named field at the
-// given object depth. A complete document that closed without the field is
-// fieldAbsent; one whose last token ran into the end of a truncated prefix is
-// fieldTruncated.
-func scanJSONStringField(doc []byte, depth int, field string) (string, fieldOutcome) {
-	dec := json.NewDecoder(bytes.NewReader(doc))
-	var objectFrames []bool
-	expectKey, wanted, seen := false, false, false
-
-	for {
-		token, err := dec.Token()
-		if err != nil {
-			if seen && len(objectFrames) == 0 && errors.Is(err, io.EOF) {
-				return "", fieldAbsent
-			}
-			return "", fieldTruncated
-		}
-		seen = true
-
-		if delim, ok := token.(json.Delim); ok {
-			switch delim {
-			case '{':
-				objectFrames = append(objectFrames, true)
-				expectKey = true
-			case '[':
-				objectFrames = append(objectFrames, false)
-				expectKey = false
-			default:
-				objectFrames = objectFrames[:len(objectFrames)-1]
-				expectKey = len(objectFrames) > 0 && objectFrames[len(objectFrames)-1]
-			}
-			wanted = false
-			continue
-		}
-
-		if len(objectFrames) == 0 || !objectFrames[len(objectFrames)-1] {
-			continue
-		}
-		if expectKey {
-			key, _ := token.(string)
-			wanted = len(objectFrames) == depth && key == field
-			expectKey = false
-			continue
-		}
-
-		expectKey = true
-		if wanted {
-			value, ok := token.(string)
-			if !ok {
-				return "", fieldAbsent
-			}
-			return value, fieldFound
-		}
-	}
+	return index, nil
 }
 
 // PartitionCache caches what the archive holds, one listing per S3 partition.
@@ -357,7 +205,10 @@ func (pc *PartitionCache) listPartition(ctx context.Context, part string) error 
 	if err != nil {
 		return fmt.Errorf("failed to list partition %s: %w", part, err)
 	}
-	index := indexPartition(keyList)
+	index, err := indexPartition(keyList)
+	if err != nil {
+		return fmt.Errorf("reading partition %s: %w", part, err)
+	}
 
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
@@ -368,13 +219,49 @@ func (pc *PartitionCache) listPartition(ctx context.Context, part string) error 
 }
 
 func (pc *PartitionCache) listPrefixWithRetry(ctx context.Context, part string) ([]string, error) {
-	alwaysRetry := func(error) bool { return true }
 	logAttempt := func(attempt int, err error, backoff time.Duration) {
 		pc.logger.Warn("retrying a partition listing", "partition", part, "attempt", attempt, "backoff", backoff, "error", err)
 	}
-	return retry.Do(ctx, pc.listRetry, alwaysRetry, logAttempt, func() ([]string, error) {
-		return pc.s3Reader.ListPrefix(ctx, pc.bucket, part+"/")
+	return retry.Do(ctx, pc.listRetry, retryableListing, logAttempt, func() ([]string, error) {
+		return pc.s3Reader.ListPrefix(ctx, pc.bucket, s3key.PartitionPrefix(part))
 	})
+}
+
+// retryableAPICodes are the S3 error codes worth another attempt: throttling,
+// and the server-side faults that do not always carry a server fault flag.
+var retryableAPICodes = map[string]bool{
+	"SlowDown":             true,
+	"Throttling":           true,
+	"ThrottlingException":  true,
+	"RequestThrottled":     true,
+	"RequestLimitExceeded": true,
+	"RequestTimeout":       true,
+	"InternalError":        true,
+	"ServiceUnavailable":   true,
+}
+
+// retryableListing decides whether a failed partition listing is worth another
+// attempt. Retrying a permanent API error — a missing grant, a bucket that is
+// not there, credentials that have expired — costs five attempts per partition
+// on top of the SDK's own retries and walks the whole range before failing,
+// which is why anything the service answers as a client fault stops the run.
+func retryableListing(err error) bool {
+	// A run being shut down is not a fault to ride out: retrying logs a warning
+	// per partition on a SIGTERM and delays the exit for nothing.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+
+	var apiErr smithy.APIError
+	if !errors.As(err, &apiErr) {
+		return true
+	}
+	if retryableAPICodes[apiErr.ErrorCode()] || apiErr.ErrorFault() == smithy.FaultServer {
+		return true
+	}
+
+	var statusErr interface{ HTTPStatusCode() int }
+	return errors.As(err, &statusErr) && statusErr.HTTPStatusCode() >= 500
 }
 
 // TopVersion returns what the archive holds at a height, loading that partition's
@@ -423,13 +310,13 @@ func (p *blockPlanner) topVersion(ctx context.Context, blockNum int64) (archiveS
 // reports for it. Only the hash is read from the payload, so a header answers
 // as well as a full block.
 func (p *blockPlanner) decide(ctx context.Context, blockNum int64, state archiveState, payload json.RawMessage) (blockDecision, error) {
-	canonicalHash, ok := jsonStringField(payload, 1, "hash")
+	canonicalHash, ok := archiveblock.HashFromPayload(payload)
 	if !ok {
 		return blockDecision{}, fmt.Errorf("block %d: RPC payload carries no hash", blockNum)
 	}
 
 	s3Start := time.Now()
-	archivedHash, err := archivedBlockHash(ctx, p.reader, p.bucket, blockNum, state)
+	archivedHash, _, err := archiveblock.Hash(ctx, p.reader, p.bucket, blockNum, state.Version)
 	p.stats.s3CheckTime.Add(time.Since(s3Start).Nanoseconds())
 	p.stats.s3CheckCalls.Add(1)
 	if err != nil {
