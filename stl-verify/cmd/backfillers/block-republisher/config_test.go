@@ -208,6 +208,7 @@ func TestTaskQueueName(t *testing.T) {
 		{name: "base", chainID: "8453", want: "base-block-republisher"},
 		{name: "optimism", chainID: "10", want: "optimism-block-republisher"},
 		{name: "unichain", chainID: "130", want: "unichain-block-republisher"},
+		{name: "robinhood", chainID: "4663", want: "robinhood-block-republisher"},
 		{name: "a chain with no name would poll a queue no operator can find", chainID: "999999", wantErrContains: "999999"},
 		{name: "an absent chain id", chainID: "", wantErrContains: "CHAIN_ID"},
 	}

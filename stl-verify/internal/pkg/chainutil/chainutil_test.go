@@ -288,6 +288,7 @@ func TestChainSlug(t *testing.T) {
 		{name: "optimism", chainID: 10, want: "optimism"},
 		{name: "unichain", chainID: 130, want: "unichain"},
 		{name: "arbitrum", chainID: 42161, want: "arbitrum"},
+		{name: "robinhood", chainID: 4663, want: "robinhood"},
 		{name: "a chain the repo does not watch", chainID: 999999, wantErrContains: "unknown chain ID 999999"},
 	}
 

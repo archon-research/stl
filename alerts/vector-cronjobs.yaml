@@ -45,7 +45,9 @@
 # own task queue and therefore its own service_name and Deployment name:
 # `block-republisher` (ethereum) and `<chain>-block-republisher` for arbitrum,
 # avalanche, base, optimism and unichain. The rules below match the family with
-# one regex so a chain is never left uncovered by a forgotten copy.
+# one prefix-agnostic regex, `([a-z0-9-]+-)?block-republisher`, so a chain added
+# later is covered the day its Deployment lands rather than the day someone
+# remembers to extend a list — chainutil.ChainSlug already names robinhood.
 #
 # Severity → routing (per the alerting routing spec):
 #   critical       → pages, prod #at_stl_prod_alerts / staging
@@ -133,7 +135,7 @@ groups:
                 service_name!="reference-capital-backfill",
                 service_name!="morpho-v2-bootstrap",
                 service_name!="morpho-vault-backfill",
-                service_name!~"((arbitrum|avalanche|base|optimism|unichain)-)?block-republisher",
+                service_name!~"([a-z0-9-]+-)?block-republisher",
                 service_name!="core-model-runner",
                 k8s_namespace_name="vector"
               }[1h])
@@ -149,7 +151,7 @@ groups:
                 service_name!="reference-capital-backfill",
                 service_name!="morpho-v2-bootstrap",
                 service_name!="morpho-vault-backfill",
-                service_name!~"((arbitrum|avalanche|base|optimism|unichain)-)?block-republisher",
+                service_name!~"([a-z0-9-]+-)?block-republisher",
                 service_name!="core-model-runner",
                 k8s_namespace_name="vector"
               }[1h])
@@ -247,7 +249,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_status_replicas_available{
                 namespace="vector",
-                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill|((arbitrum|avalanche|base|optimism|unichain)-)?block-republisher"
+                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill|([a-z0-9-]+-)?block-republisher"
               }
             ) < 1
           )
@@ -255,7 +257,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_spec_replicas{
                 namespace="vector",
-                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill|((arbitrum|avalanche|base|optimism|unichain)-)?block-republisher"
+                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill|([a-z0-9-]+-)?block-republisher"
               }
             ) > 0
           )
