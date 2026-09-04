@@ -57,6 +57,41 @@ func TestMain(m *testing.M) {
 // Integration tests for run()
 // ---------------------------------------------------------------------------
 
+func TestRunIntegration_RejectsNonPositiveSweepBlocks(t *testing.T) {
+	tests := []struct {
+		name        string
+		sweepBlocks string
+		args        []string
+	}{
+		{
+			name:        "environment variable",
+			sweepBlocks: "0",
+			args:        []string{"-queue", "http://localhost/test-queue", "-db", "postgres://localhost/test", "-redis", "localhost:6379"},
+		},
+		{
+			name: "flag",
+			args: []string{
+				"-queue", "http://localhost/test-queue",
+				"-db", "postgres://localhost/test",
+				"-redis", "localhost:6379",
+				"-sweep-blocks", "-1",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("ALCHEMY_API_KEY", "test-api-key")
+			t.Setenv("SWEEP_BLOCKS", tt.sweepBlocks)
+
+			err := run(context.Background(), tt.args, nil)
+			if err == nil || !strings.Contains(err.Error(), "sweep blocks must be at least 1") {
+				t.Fatalf("run error = %v, want non-positive sweep-blocks rejection", err)
+			}
+		})
+	}
+}
+
 func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer rpcServer.Close()
