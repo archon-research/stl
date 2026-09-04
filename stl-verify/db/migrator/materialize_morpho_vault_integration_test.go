@@ -7,34 +7,45 @@ import (
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // vaultInstrument is the native instrument_key the seed produces: the vault contract address (abcd),
 // lowercase hex, no 0x. A vault is a single native instrument, so there is no composite key.
 const vaultInstrument = "abcd"
 
-// TestMaterializeMorphoVault is the VEC-403 contract test: after migrations, materialize_morpho_vault()
-// projects raw morpho_vault_position rows into position_state on the native per-instrument grain
-// (VEC-400) — one position per vault deposit, keyed by the vault contract address — and writes the
-// observations into position_state. No classification is written (VEC-402 spine is observations only).
+// VEC-403 contract: materialize_morpho_vault() projects raw morpho_vault_position rows into
+// position_state on the native per-instrument grain (VEC-400). Observations only: the spine writes no
+// classification, so nothing here asserts one.
 //
-// A vault is a single native instrument (no loan/collateral split, no netting), so this pins the
-// behaviours that remain: an event-time source observing one block twice collapses to a single logical
-// key (the view picks the latest timestamp); closure
-// (VEC-409) — an exit (positive->0) emits one closing zero-row, a deposit never entered emits nothing;
-// many observations per position with one current classification (from the last non-zero row); 32-byte
-// ids, no PK collisions, and idempotency.
-func TestMaterializeMorphoVault(t *testing.T) {
+// A vault is a single native instrument (no loan/collateral split, no netting), so what remains is: an
+// event-time source observing one block twice collapsing to a single logical key (the view picks the
+// latest timestamp), closure (VEC-409) -- an exit (positive->0) emits one closing zero-row and a deposit
+// never entered emits nothing -- many observations per position, 32-byte ids, no PK collisions, and
+// idempotency. One behaviour per function, each seeding its own database.
+
+// The vault's holders, as the projection emits them.
+const (
+	vaultHolderA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	vaultHolderB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	vaultHolderC = "cccccccccccccccccccccccccccccccccccccccc"
+	vaultHolderD = "dddddddddddddddddddddddddddddddddddddddd"
+)
+
+// seedMorphoVault gives a test its own migrated database, seeds the fixture and runs the projection
+// once, returning what it reported written.
+//
+// One vault (address abcd) and four holders: A deposits (two observations), B has one block observed
+// twice at different wall-clock timestamps, C never entered (single assets 0 row, nothing emitted), D
+// deposits then exits (open + one closing zero-row).
+func seedMorphoVault(t *testing.T) (context.Context, *pgxpool.Pool, int64) {
+	t.Helper()
 	ctx := context.Background()
 	pool, cleanup := setupPostgres(ctx, t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
 		t.Fatalf("migrations: %v", err)
 	}
-
-	// Seed one vault (address abcd) and four holders: A deposits (two observations), B is a reprocessing
-	// case (one block observation restamped to a new processing_version), C never entered (single assets
-	// 0 row, no row emitted), D deposits then exits (open + one closing zero-row).
 	seed := `
 DO $$
 DECLARE pid bigint; atid bigint; uaid bigint; ubid bigint; ucid bigint; udid bigint; vid bigint;
@@ -72,14 +83,23 @@ END $$;`
 	if _, err := pool.Exec(ctx, seed); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-
 	var written int64
 	if err := pool.QueryRow(ctx, `SELECT materialize_morpho_vault()`).Scan(&written); err != nil {
 		t.Fatalf("materialize_morpho_vault: %v", err)
 	}
+	return ctx, pool, written
+}
 
-	// A (2 obs) + B (2 pv: reprocessed) + D (open + close = 2) = 6 rows; C never entered, skipped.
-	// Distinct positions: A, B, D = 3.
+// A (2 obs) + B (1: its two same-block rows collapse to one logical key) + D (open + close = 2) = 5
+// rows; C never entered, skipped. Distinct positions: A, B, D = 3.
+//
+// B is the case worth stating: assign_processing_version_morpho_vault_position keys its dedup on
+// (user, vault, block, block_version, TIMESTAMP), so B's two rows are separate groups and BOTH get
+// pv=0 -- not pv=0 and pv=1. The projection's DISTINCT ON then collapses them to one row at the latest
+// timestamp, which is what the spine requires: block_timestamp is invariant per logical key, so an
+// event-time source has to pick one stably.
+func TestMaterializeMorphoVaultProjectionShape(t *testing.T) {
+	ctx, pool, written := seedMorphoVault(t)
 	var rows, distinctPositions, collisions, badLen int
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*),
@@ -104,19 +124,21 @@ END $$;`
 	if badLen != 0 {
 		t.Errorf("%d position_id(s) not 32 bytes", badLen)
 	}
+}
 
+func TestMaterializeMorphoVaultPerPosition(t *testing.T) {
+	ctx, pool, _ := seedMorphoVault(t)
 	for _, c := range []struct {
 		name     string
 		holder   string
 		wantQty  string
 		wantRows int
 	}{
-		{"A deposit, latest of two observations", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "150", 2},
-		{"B observed twice at one block: one logical key, latest timestamp wins", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "20", 1},
-		{"C never entered (assets 0) emits nothing", "cccccccccccccccccccccccccccccccccccccccc", "", 0},
-		{"D exit: deposit + one closing zero-row", "dddddddddddddddddddddddddddddddddddddddd", "0", 2},
+		{"A deposit, latest of two observations", vaultHolderA, "150", 2},
+		{"B observed twice at one block: one logical key, latest timestamp wins", vaultHolderB, "20", 1},
+		{"C never entered (assets 0) emits nothing", vaultHolderC, "", 0},
+		{"D exit: deposit + one closing zero-row", vaultHolderD, "0", 2},
 	} {
-		c := c
 		t.Run(c.name, func(t *testing.T) {
 			var n int
 			var latestQty *string
@@ -132,23 +154,28 @@ END $$;`
 			if n != c.wantRows {
 				t.Errorf("rows = %d, want %d", n, c.wantRows)
 			}
-			if c.wantRows > 0 {
-				if latestQty == nil || *latestQty != c.wantQty {
-					t.Errorf("latest quantity = %v, want %s", latestQty, c.wantQty)
-				}
+			if c.wantRows > 0 && (latestQty == nil || *latestQty != c.wantQty) {
+				t.Errorf("latest quantity = %v, want %s", latestQty, c.wantQty)
 			}
 		})
 	}
+}
 
-	// Idempotent: a second run re-derives the same observations and appends nothing.
-	if _, err := pool.Exec(ctx, `SELECT materialize_morpho_vault()`); err != nil {
+// A second run re-derives the same observations and appends nothing.
+func TestMaterializeMorphoVaultIsIdempotent(t *testing.T) {
+	ctx, pool, _ := seedMorphoVault(t)
+	var second int64
+	if err := pool.QueryRow(ctx, `SELECT materialize_morpho_vault()`).Scan(&second); err != nil {
 		t.Fatalf("second materialize: %v", err)
 	}
-	var rows2 int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state`).Scan(&rows2); err != nil {
+	if second != 0 {
+		t.Errorf("the second run reported %d rows appended, want 0", second)
+	}
+	var rows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state`).Scan(&rows); err != nil {
 		t.Fatalf("re-count: %v", err)
 	}
-	if rows2 != 5 {
-		t.Errorf("after re-run: position_state=%d, want 5 (the rerun must append nothing)", rows2)
+	if rows != 5 {
+		t.Errorf("after re-run: position_state=%d, want 5 (the rerun must append nothing)", rows)
 	}
 }
