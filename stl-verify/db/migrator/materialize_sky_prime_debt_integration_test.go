@@ -7,28 +7,38 @@ import (
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// TestMaterializeSkyPrimeDebt is the VEC-406 contract test: after migrations,
-// materialize_sky_prime_debt() projects raw prime_debt rows into position_state on the native
-// per-instrument grain (VEC-400) — one position per (prime, ilk), keyed by the native ilk_name, held by
-// the prime's vault address. Observations only: the spine writes no classification.
+// VEC-406 contract: materialize_sky_prime_debt() projects raw prime_debt rows into position_state on the
+// native per-instrument grain (VEC-400) — one position per (prime, ilk), keyed by the native ilk_name,
+// held by the prime's vault address. Observations only: the spine writes no classification, so nothing
+// here asserts one.
 //
-// Pins: native ilk_name key, prime vault address as holder, debt_wad as quantity, chain_id constant 1 /
-// protocol_id NULL, prime_debt's own processing_version flowing into the spine, closure (VEC-409) — a
-// repayment (positive->0) emits one closing zero-row, a prime x ilk never in debt emits nothing —
-// multiple observations with one current classification, 32-byte ids, no collisions, idempotency.
-func TestMaterializeSkyPrimeDebt(t *testing.T) {
+// One behaviour per function, each seeding its own database, so a projection failure cannot cascade into
+// unrelated assertions.
+
+// skyPrimeDebtHolders are the vault addresses the seed creates, as the projection emits them.
+const (
+	skyPrimeA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	skyPrimeB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	skyPrimeC = "cccccccccccccccccccccccccccccccccccccccc"
+)
+
+// seedSkyPrimeDebt gives a test its own migrated database, seeds the fixture and runs the projection
+// once, returning what it reported written.
+//
+// Prime A (vault aa) borrows in ILK-A (two observations) and ILK-B; Prime B (vault bb) never carried
+// debt in ILK-A (single debt 0 row -> nothing emitted); Prime C (vault cc) borrows ILK-A then repays to
+// 0 (open + one closing zero-row).
+func seedSkyPrimeDebt(t *testing.T) (context.Context, *pgxpool.Pool, int64) {
+	t.Helper()
 	ctx := context.Background()
 	pool, cleanup := setupPostgres(ctx, t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
 		t.Fatalf("migrations: %v", err)
 	}
-
-	// Prime A (vault aa) borrows in ILK-A (two observations) and ILK-B; Prime B (vault bb) never carried
-	// debt in ILK-A (single debt 0 row -> nothing emitted); Prime C (vault cc) borrows ILK-A then repays
-	// to 0 (open + one closing zero-row).
 	seed := `
 DO $$
 DECLARE paid bigint; pbid bigint; pcid bigint;
@@ -54,14 +64,17 @@ END $$;`
 	if _, err := pool.Exec(ctx, seed); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-
 	var written int64
 	if err := pool.QueryRow(ctx, `SELECT materialize_sky_prime_debt()`).Scan(&written); err != nil {
 		t.Fatalf("materialize_sky_prime_debt: %v", err)
 	}
+	return ctx, pool, written
+}
 
-	// A/ILK-A (2 obs) + A/ILK-B (1) + C/ILK-A (open + close = 2) = 5 rows; B/ILK-A never entered, skipped.
-	// Distinct positions: A/ILK-A, A/ILK-B, C/ILK-A = 3.
+// A/ILK-A (2 obs) + A/ILK-B (1) + C/ILK-A (open + close = 2) = 5 rows; B/ILK-A never entered, skipped.
+// Distinct positions: A/ILK-A, A/ILK-B, C/ILK-A = 3.
+func TestMaterializeSkyPrimeDebtProjectionShape(t *testing.T) {
+	ctx, pool, written := seedSkyPrimeDebt(t)
 	var rows, distinctPositions, collisions, badLen int
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*),
@@ -86,7 +99,11 @@ END $$;`
 	if badLen != 0 {
 		t.Errorf("%d position_id(s) not 32 bytes", badLen)
 	}
+}
 
+// One case per seeded (prime, ilk): the native key, the holder, the latest quantity and the row count.
+func TestMaterializeSkyPrimeDebtPerPosition(t *testing.T) {
+	ctx, pool, _ := seedSkyPrimeDebt(t)
 	for _, c := range []struct {
 		name       string
 		instrument string
@@ -94,12 +111,11 @@ END $$;`
 		wantQty    string
 		wantRows   int
 	}{
-		{"A ILK-A latest of two observations", "ILK-A", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "1500", 2},
-		{"A ILK-B", "ILK-B", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "500", 1},
-		{"B ILK-A never entered (debt 0) emits nothing", "ILK-A", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "", 0},
-		{"C ILK-A repaid: borrow + one closing zero-row", "ILK-A", "cccccccccccccccccccccccccccccccccccccccc", "0", 2},
+		{"A ILK-A latest of two observations", "ILK-A", skyPrimeA, "1500", 2},
+		{"A ILK-B", "ILK-B", skyPrimeA, "500", 1},
+		{"B ILK-A never entered (debt 0) emits nothing", "ILK-A", skyPrimeB, "", 0},
+		{"C ILK-A repaid: borrow + one closing zero-row", "ILK-A", skyPrimeC, "0", 2},
 	} {
-		c := c
 		t.Run(c.name, func(t *testing.T) {
 			var n int
 			var latestQty *string
@@ -120,16 +136,23 @@ END $$;`
 			}
 		})
 	}
+}
 
-	// Idempotent: a second run re-derives the same observations and appends nothing.
-	if _, err := pool.Exec(ctx, `SELECT materialize_sky_prime_debt()`); err != nil {
+// A second run re-derives the same observations and appends nothing.
+func TestMaterializeSkyPrimeDebtIsIdempotent(t *testing.T) {
+	ctx, pool, _ := seedSkyPrimeDebt(t)
+	var second int64
+	if err := pool.QueryRow(ctx, `SELECT materialize_sky_prime_debt()`).Scan(&second); err != nil {
 		t.Fatalf("second materialize: %v", err)
 	}
-	var rows2 int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state`).Scan(&rows2); err != nil {
+	if second != 0 {
+		t.Errorf("the second run reported %d rows appended, want 0", second)
+	}
+	var rows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state`).Scan(&rows); err != nil {
 		t.Fatalf("re-count: %v", err)
 	}
-	if rows2 != 5 {
-		t.Errorf("after re-run: position_state=%d, want 5 (the rerun must append nothing)", rows2)
+	if rows != 5 {
+		t.Errorf("after re-run: position_state=%d, want 5 (the rerun must append nothing)", rows)
 	}
 }
