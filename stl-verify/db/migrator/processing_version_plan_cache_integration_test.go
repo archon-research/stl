@@ -18,7 +18,7 @@ const (
 
 // Every versioned table contributes one trigger function. The floor turns a silently-broken
 // enumeration (a renamed prefix, a wrong schema filter) into a failure instead of a vacuous pass.
-const minProcessingVersionTriggerFunctions = 36
+const minProcessingVersionTriggerFunctions = 37
 
 // The next_processing_version_* family — the rule shared by a table's INSERT and its
 // trigger — starts at morpho_adapter_state (20260821_120000).
