@@ -11,6 +11,8 @@ resources:
   - ../../../base/oracle-price-worker
   - ../../../base/avalanche-oracle-price-worker
   - ../../../base/morpho-indexer
+  # Same morpho-indexer image on Base (ARCT-414); chain selected via env below.
+  - ../../../base/base-morpho-indexer
   - ../../../base/sparklend-position-tracker
   - ../../../base/prime-debt-indexer
   # Dev covers one representative chain (base); PSM3 does not exist on the mainnet chain dev runs.
@@ -32,6 +34,10 @@ images:
     newName: localhost/stl-oracle-price-worker
     newTag: local
   - name: morpho-indexer
+    newName: localhost/stl-morpho-indexer
+    newTag: local
+  # Shares the morpho-indexer image — chain selected via CHAIN_ID env.
+  - name: base-morpho-indexer
     newName: localhost/stl-morpho-indexer
     newTag: local
   - name: sparklend-position-tracker
@@ -93,6 +99,28 @@ patches:
                 env:
                   - name: AWS_SQS_QUEUE_URL
                     value: http://localstack:4566/000000000000/stl-ethereum-morpho-indexing.fifo
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: base-morpho-indexer
+      spec:
+        template:
+          spec:
+            containers:
+              - name: base-morpho-indexer
+                env:
+                  - name: CHAIN_ID
+                    value: "8453"
+                  - name: ALCHEMY_HTTP_URL
+                    value: https://base-mainnet.g.alchemy.com/v2
+                  - name: AWS_SQS_QUEUE_URL
+                    value: http://localstack:4566/000000000000/stl-base-morpho-indexing.fifo
+                  # stl-config's S3_BUCKET is Ethereum's; the worker rejects a
+                  # bucket whose chain does not match CHAIN_ID (see the
+                  # avalanche-oracle-price-worker patch above).
+                  - name: S3_BUCKET
+                    value: stl-sentineldevelopment-base-raw
   - patch: |
       apiVersion: apps/v1
       kind: Deployment

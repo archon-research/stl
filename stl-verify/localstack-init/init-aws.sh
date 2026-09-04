@@ -106,13 +106,15 @@ create_chain_resources "arbitrum"
 create_chain_resources "robinhood"
 
 # Ethereum-only consumers
-for queue in oracle-price morpho-indexing; do
-  create_consumer_queue "ethereum" "$queue"
-done
+create_consumer_queue "ethereum" "oracle-price"
 
 # Multi-chain consumers
 for chain in ethereum avalanche; do
   create_consumer_queue "$chain" "sparklend-position"
+done
+# Morpho indexer runs on Ethereum and Base (ARCT-414)
+for chain in ethereum base; do
+  create_consumer_queue "$chain" "morpho-indexing"
 done
 for chain in ethereum avalanche robinhood; do
   create_consumer_queue "$chain" "allocation-tracker"

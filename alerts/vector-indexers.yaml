@@ -13,7 +13,7 @@
 # these can collapse into a single rule per signal.
 #
 # Metric source: OTel SDK in each indexer. Series carry:
-#   - service_name="morpho-indexer" | "oracle-price-worker" | "fluid-vault-indexer"
+#   - service_name="morpho-indexer" | "base-morpho-indexer" | "oracle-price-worker" | "fluid-vault-indexer"
 #   - k8s_namespace_name="vector"
 #   - cluster="archon-prod" | "archon-staging"  (OTel gateway resource processor)
 #   - chain (for multi-chain indexers)
@@ -794,25 +794,38 @@ groups:
         # to 1,025/h and held this firing for 7h against ~1/h of real activity.
         # Replayed history is not a liquidity run; the replay workers' series stay
         # on the dashboard as backfill progress.
+        #
+        # "Live indexer" is one Deployment per chain (morpho-indexer on mainnet,
+        # base-morpho-indexer on Base since ARCT-414) running the same binary;
+        # each emits its own service_name (SERVICE_NAME env from the pod's `app`
+        # label; binary support lands with ARCT-413 — until then the Base pod
+        # still reports service_name="morpho-indexer" with chain="base", and the
+        # regex covers both states), so the match lists every per-chain name
+        # explicitly rather than a prefix glob that could one day admit a replay
+        # worker. The 20/h
+        # threshold is per chain and was sized on the whole mainnet V2 population;
+        # Base has one V2 vault (steakUSDC), so >20/h there is a stronger signal,
+        # not a weaker one, and the threshold is deliberately not loosened for
+        # it. Add the new name here when a chain is added.
         expr: |
           sum by (chain, cluster) (
             increase(morpho_events_processed_total{
-              event_type="ForceDeallocate", service_name="morpho-indexer", k8s_namespace_name="vector"
+              event_type="ForceDeallocate", service_name=~"morpho-indexer|base-morpho-indexer", k8s_namespace_name="vector"
             }[1h])
           ) > 20
           unless on (chain, cluster)
           (
             sum by (chain, cluster) (
-              rate(morpho_blocks_processed_total{status="error", service_name="morpho-indexer", k8s_namespace_name="vector"}[1h])
+              rate(morpho_blocks_processed_total{status="error", service_name=~"morpho-indexer|base-morpho-indexer", k8s_namespace_name="vector"}[1h])
             ) > 0
             and on (chain, cluster)
             (
               sum by (chain, cluster) (
-                rate(morpho_blocks_processed_total{status="success", service_name="morpho-indexer", k8s_namespace_name="vector"}[1h])
+                rate(morpho_blocks_processed_total{status="success", service_name=~"morpho-indexer|base-morpho-indexer", k8s_namespace_name="vector"}[1h])
               )
               or
               sum by (chain, cluster) (
-                rate(morpho_blocks_processed_total{service_name="morpho-indexer", k8s_namespace_name="vector"}[1h])
+                rate(morpho_blocks_processed_total{service_name=~"morpho-indexer|base-morpho-indexer", k8s_namespace_name="vector"}[1h])
               ) * 0
             ) == 0
           )
@@ -931,16 +944,30 @@ groups:
         # 6h window, matching its twin (see its comment for why 6h is the floor).
         # Mainnet prod runs ~25k Allocate/Deallocate per 7d (~150/h), so 6h with
         # zero V2 events is orders of magnitude outside anything observed.
-        # morpho-indexer is a single mainnet deployment, so there is no chain here
-        # whose VaultV2 population is legitimately empty; adding a chain that has
-        # no V2 vaults means gating this rule on that chain, not silencing it.
+        #
+        # GATED per chain: `chain!="base"`. The rule's premise is a V2 population
+        # busy enough that 6h of silence cannot be a lull. Base (base-morpho-
+        # indexer, ARCT-414) has exactly ONE V2 vault (steakUSDC), so a 6h stretch
+        # with no allocation / cap / fee event is an ordinary quiet vault, not a
+        # decoder fault — the rule would fire there with nothing to act on, which
+        # alerts/AGENTS.md treats as a bug in the alert. This extends what the
+        # comment above prescribed for an EMPTY V2 population to one too small to
+        # sustain the 150/h premise. It is a deliberate scope reduction, not a
+        # silence: mainnet stays covered, and Base keeps half one
+        # (VectorMorphoV2NoSnapshotsWritten) for the WRITE path. What Base loses
+        # is exactly this rule's class — a V2 topic dropped from the extractor,
+        # a signature change, a registry with no V2 vault — none of which any
+        # other rule can see on Base; until a Base-sized window exists the
+        # runbook's manual audit-log query is the only check. Re-include Base by
+        # dropping the matcher once a week of Base data shows its V2 event
+        # cadence and a window can be sized from it rather than guessed.
         #
         # `unless`, not `and … == 0`: under the bug the V2 event series is never
         # created at all, and `and … == 0` finds no match on an empty right side —
         # blind in exactly the case this exists for. Do not revert to `and`.
         expr: |
           sum by (chain, cluster) (
-            rate(morpho_blocks_processed_total{status="success", k8s_namespace_name="vector"}[6h])
+            rate(morpho_blocks_processed_total{status="success", chain!="base", k8s_namespace_name="vector"}[6h])
           ) > 0
           unless
           sum by (chain, cluster) (

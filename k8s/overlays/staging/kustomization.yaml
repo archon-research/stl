@@ -9,6 +9,9 @@ resources:
   - ../../base/oracle-price-worker
   - ../../base/sparklend-position-tracker
   - ../../base/morpho-indexer
+  # base-morpho-indexer runs the shared morpho-indexer image — same binary,
+  # different chain config via env vars (ARCT-414).
+  - ../../base/base-morpho-indexer
   # curve-indexer + uniswap-v3-indexer run the shared dex-indexer image, one
   # Deployment per DEX (DEX env selects the factory). Staging-only for now
   # (VEC-329); prod/dev remain deferred.
@@ -125,6 +128,9 @@ images:
     newTag: "3b7d3cbd9d530be7aad0e08c2ddd378baa4eeae9"
   - name: base-backup-worker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
+    newTag: "3b7d3cbd9d530be7aad0e08c2ddd378baa4eeae9"
+  - name: base-morpho-indexer
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-morpho-indexer
     newTag: "3b7d3cbd9d530be7aad0e08c2ddd378baa4eeae9"
   - name: base-oracle-price-worker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-oracle-price-worker

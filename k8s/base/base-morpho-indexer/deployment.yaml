@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: base-morpho-indexer
+spec:
+  replicas: 1
+  # Explicit, matching the API-server default — ArgoCD must own spec.strategy or
+  # a later change to it cannot prune rollingUpdate. k8s/AGENTS.md, "Rollout strategy".
+  # RollingUpdate rather than Recreate to match the mainnet morpho-indexer twin:
+  # the queue is FIFO with MessageGroupId=chainId, so the brief two-pod overlap
+  # is serialised by SQS and the surge pod mostly idles.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+  selector:
+    matchLabels:
+      app: base-morpho-indexer
+  template:
+    metadata:
+      labels:
+        app: base-morpho-indexer
+    spec:
+      serviceAccountName: base-morpho-indexer
+      containers:
+        - name: base-morpho-indexer
+          # Image name used as the Kustomize images transformer key. Same binary
+          # as morpho-indexer (k8s/image-roster.txt lists this as an alias of
+          # it); the overlay kustomization.yaml overrides newName + newTag.
+          image: base-morpho-indexer
+          env:
+            # Inject the deployment name so each per-chain indexer emits a
+            # distinct OTEL service.name (e.g. "morpho-indexer",
+            # "base-morpho-indexer"). Same shape as k8s/base/base-watcher.
+            - name: SERVICE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['app']
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: base-morpho-indexer-config
+            - secretRef:
+                # Populated by ExternalSecret — secret name mirrors the service.
+                name: base-morpho-indexer
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f morpho"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

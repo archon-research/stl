@@ -7,6 +7,13 @@ hop in the pipeline before customer-facing data lands in TimescaleDB. They
 consume blocks from the watcher and derive product state (positions,
 prices). A stall here directly translates to stale downstream reads.
 
+Both run **one Deployment per chain** from the same binary, each with its own
+`app` label: `morpho-indexer` (mainnet) and `base-morpho-indexer` (Base, chain
+8453, ARCT-414); `oracle-price-worker` / `avalanche-oracle-price-worker` /
+`base-oracle-price-worker`. Every morpho / oracle rule is `by (chain)`, so the
+`chain` label on a firing alert tells you which Deployment to look at, and a
+bare `app=morpho-indexer` selector matches mainnet pods only.
+
 ---
 
 ## VectorMorphoIndexerStalled / VectorOracleIndexerStalled
@@ -46,7 +53,7 @@ and `DeploymentReplicasMismatch` rules rather than by anything in this file; see
 ### First checks (≤5 min)
 
 1. **Pod status** — run the one matching the firing alert:
-   - Morpho: `kubectl -n vector get pods -l app=morpho-indexer`
+   - Morpho: `kubectl -n vector get pods -l 'app in (morpho-indexer,base-morpho-indexer)'`
    - Oracle: `kubectl -n vector get pods -l 'app in (oracle-price-worker,avalanche-oracle-price-worker,base-oracle-price-worker)'`
      — one Deployment per chain, each with its own `app` label; the bare
      `app=oracle-price-worker` selector matches mainnet pods only.
@@ -1839,7 +1846,7 @@ vault is discovered at once. Acknowledge and curate.
    CompoundV3Adapter). That selector is the fix. A one-off getter on a
    curator-written contract is not a family and buys nothing: those adapters
    stay Unknown, which is the recorded truth.
-5. **Indexer logs** — `kubectl -n vector logs -l app=morpho-indexer | grep "unknown type"`
+5. **Indexer logs** — `kubectl -n vector logs -l 'app in (morpho-indexer,base-morpho-indexer)' | grep "unknown type"`
    carries vault, adapter and block for every Unknown registration.
 
 ### Common causes
@@ -1911,7 +1918,7 @@ replayed. Current membership and classification are correct in the meantime.
    — `allocation_event` observations with **no** matching `vault_discovery`
    traffic in the same window are the suspicious case.
 2. **Identify them** — the indexer logs one WARN per inference:
-   `kubectl -n vector logs -l app=morpho-indexer | grep "membership inferred from an Allocate"`
+   `kubectl -n vector logs -l 'app in (morpho-indexer,base-morpho-indexer)' | grep "membership inferred from an Allocate"`
    (carries vault, adapter, block).
 3. **Was the vault genuinely new?** Compare the block the membership was inferred
    at against its vault's first-seen block (`db-query`):
@@ -1998,7 +2005,14 @@ The gate deliberately does **not** trip on a single error: a lone transient
 The price is that a stall's *first* hour can still fire this, because the success
 rate needs the full 1h window to fall to zero — so rule out a stall first.
 
-The rule counts only `service_name="morpho-indexer"`. The on-demand replay
+The rule counts only the live per-chain indexers,
+`service_name=~"morpho-indexer|base-morpho-indexer"` (each Deployment's
+`SERVICE_NAME` is its `app` label, so a new chain's Deployment needs adding to
+that list; the binary reads it from ARCT-413 on — until that lands the Base pod
+still reports `service_name="morpho-indexer"` with `chain="base"`, and the regex
+covers both). The threshold is per `chain` and was sized on mainnet; Base has a
+single V2 vault (steakUSDC), so >20/h there is a stronger signal, not a false
+positive. The on-demand replay
 workers (`morpho-vault-backfill`, `morpho-v2-bootstrap`) drive historical logs
 through the same handlers and increment the same counter under their own
 `service_name`, and they emit no `morpho_blocks_processed_total` for the loop
@@ -2058,7 +2072,7 @@ gate to read — the 2026-08-28 staging era backfill replayed 2,604
    silently excludes backfilled rows. Widen the interval if the drain predates it.
 
 5. **Indexer logs** — every event is WARNed with full context:
-   `kubectl -n vector logs -l app=morpho-indexer | grep forceDeallocate`.
+   `kubectl -n vector logs -l 'app in (morpho-indexer,base-morpho-indexer)' | grep forceDeallocate`.
 
 ### Common causes
 
@@ -2132,7 +2146,8 @@ sample, so **worst case ~6h15m** (6h window + 15m `for`).
    morpho-indexer image that emits `morpho_v2_snapshots_written_total` actually
    serving. Confirm the running image carries VEC-218 before investigating
    anything else:
-   `kubectl -n vector get deploy morpho-indexer -o jsonpath='{.spec.template.spec.containers[0].image}'`.
+   `kubectl -n vector get deploy morpho-indexer -o jsonpath='{.spec.template.spec.containers[0].image}'`
+   (`deploy/base-morpho-indexer` for `chain="base"`).
    If it predates the metric, this is expected and clears ~15m after the rollout.
 2. **Which side is dead** —
    `sum by (event_type) (increase(morpho_events_processed_total{event_type=~"Allocate|Deallocate|Increase.*Cap|Decrease.*Cap|Set.*Fee.*"}[6h]))`
@@ -2207,6 +2222,21 @@ and no error is ever raised.
 Mainnet prod runs ~25k `Allocate`/`Deallocate` per 7d (~150/h), so 6h of zero V2
 events is orders of magnitude outside anything observed. It is not a lull.
 
+**Base is excluded** (`chain!="base"` on the left side, ARCT-414). Base has exactly
+one V2 vault (steakUSDC), so a 6h stretch with no allocation / cap / fee event is an
+ordinary quiet vault there, not a decoder fault, and the rule would fire with
+nothing to act on. This extends the per-chain gate the rule's comment prescribed
+for an *empty* V2 population to one too small to sustain the threshold. Be clear
+about what it costs: mainnet stays covered, and
+[`VectorMorphoV2NoSnapshotsWritten`](#vectormorphov2nosnapshotswritten) (half one,
+activity-gated) still covers Base's **write path** — but the decode-fault class
+this rule exists for (a V2 topic dropped from the extractor, a signature change, a
+registry holding no V2 vault) is **uncovered on Base** until a Base-sized window
+exists. If you need to check Base V2 freshness, the manual audit-log query above
+under "morpho VaultV2 structured tracking" is the only tool. Re-include Base by
+dropping the matcher once a week of Base data shows its V2 event cadence and a
+window can be sized from it.
+
 ### First checks
 
 1. **Topic registration** — the most likely cause. Confirm the V2 topics are still
@@ -2226,8 +2256,9 @@ events is orders of magnitude outside anything observed. It is not a lull.
 3. **Genuinely no V2 activity on-chain** — confirm against the chain that the
    known V2 vaults really emitted nothing in 6h (cast, or the Morpho explorer).
    For the mainnet population this would be extraordinary; if a chain is added
-   whose V2 population is legitimately empty, gate the rule on that chain rather
-   than silencing it.
+   whose V2 population is legitimately empty or too small to sustain the
+   threshold, gate the rule on that chain rather than silencing it (as Base is,
+   above).
 4. **Audit log cross-check** (`db-query`) — metrics could be lying:
 
    ```sql

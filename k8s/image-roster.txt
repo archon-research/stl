@@ -39,7 +39,7 @@ service oracle-price-worker        oracle-price-worker avalanche-oracle-price-wo
 service sparklend-position-tracker sparklend-position-tracker avalanche-sparklend-position-tracker
 service allocation-tracker         allocation-tracker avalanche-allocation-tracker base-allocation-tracker  # arbitrum/optimism/unichain bases use `allocation-tracker` directly
 service psm3-indexer               arbitrum-psm3-indexer base-psm3-indexer optimism-psm3-indexer unichain-psm3-indexer
-service morpho-indexer             morpho-indexer
+service morpho-indexer             morpho-indexer base-morpho-indexer  # one binary, chain via env (ARCT-414)
 service prime-debt-indexer         prime-debt-indexer
 service fluid-vault-indexer        fluid-vault-indexer
 service dex-indexer                dex-indexer                # curve-indexer + uniswap-v3-indexer bases; DEX env selects the factory
