@@ -30,7 +30,9 @@ CREATE TABLE IF NOT EXISTS position_current (
     -- A 20-byte address as 40 lowercase hex characters. Unanchored, it also admits a decimal
     -- surrogate rendered as text.
     CONSTRAINT position_current_holder_hex_chk CHECK (holder_id ~ '^[0-9a-f]{40}$'),
-    -- A key longer than the bridge's PK btree can store resolves to nothing.
+    -- instrument_key feeds the position_id hash and is copied into every derived cache. No legitimate
+    -- source form approaches this: an address is 40 hex characters, a composite two of those. A
+    -- sanity bound on an unbounded text column, not a limit derived from any one consumer.
     CONSTRAINT position_current_instrument_key_len_chk CHECK (char_length(instrument_key) <= 2000),
     CONSTRAINT position_current_coord_nonneg_chk CHECK (block_number >= 0 AND block_version >= 0 AND processing_version >= 0 AND build_id >= 0),
     CONSTRAINT position_current_chain_pos_chk CHECK (chain_id IS NULL OR chain_id > 0),
