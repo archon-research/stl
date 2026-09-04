@@ -283,8 +283,13 @@ data:
   CHAIN_ID: "4663"
   ENVIRONMENT: "sentinelprod"
   SWEEP_BLOCKS: "6000"
-  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
-  # pod identity write policy granted in infrastructure#383.
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains, but the
+  # write policy is granted per pod identity and infrastructure#383 predates this
+  # role: robinhood-allocation-tracker needs s3:PutObject on the bucket before its
+  # Deployment is wired in, or every batch is dropped with an "archiving SC call
+  # batch failed" error and no retry (archiving/multicaller.go). Nothing mounts
+  # this ConfigMap yet, so that grant belongs with the deploy ticket, alongside
+  # the SQS queue and the ESO secret.
   ARCHIVE_SC_CALLS: "true"
   RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
 ---

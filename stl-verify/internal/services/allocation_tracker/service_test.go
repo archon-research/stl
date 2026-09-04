@@ -587,7 +587,13 @@ func TestProcessBlock_SweepsOnEveryNthConsumedBlock(t *testing.T) {
 
 // TestProcessBlock_SweepFailureRetriesOnTheNextBlock: a failed sweep leaves the
 // counter past N, so the retry lands on the next block consumed — the only path
-// that ever sweeps consecutive blocks.
+// that ever *attempts* a sweep on consecutive blocks. It is not a path to
+// consecutive swept blocks in the data: a failed sweep persists nothing, so the
+// failures leave no direction=sweep row and only the block that finally succeeds
+// gets one. Consecutive sweep rows are therefore unreachable; the consecutive
+// "sweep" lines an operator can see in logs come from the handler order in
+// prime-allocation-indexer (MultiHandler runs LogHandler before the Postgres
+// handler), where a batch that failed to persist has already been logged.
 func TestProcessBlock_SweepFailureRetriesOnTheNextBlock(t *testing.T) {
 	const first int64 = 50701400
 	const sweepEveryN = 75
