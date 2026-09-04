@@ -1,51 +1,12 @@
--- Initial backfill of position_current (VEC-409), and the statement an operator re-runs to converge it.
---
--- Separate from 20260819_150000, which creates the table and the trigger, because the migrator runs a
--- whole file in one transaction. Together, CREATE TRIGGER's SHARE ROW EXCLUSIVE on position_state was
--- held for the length of the full-history scan below, and that lock conflicts with the ROW EXCLUSIVE
--- every ingest INSERT takes -- so every writer queued for the duration, and `SET LOCAL lock_timeout`
--- bounds only the acquisition, never the hold. Split, the statement below holds ACCESS SHARE on
--- position_state, which conflicts with nothing ingest does.
---
--- The no-gap invariant survives the split: 20260819_150000 commits before this file starts, so the
--- trigger is live for the whole of this scan. Where the two overlap, whichever resolves second is a
--- guarded no-op, which is the same idempotency that makes re-running this statement safe.
---
--- Re-running this statement is a FORWARD-ONLY MERGE, not a full rebuild. The newer-wins guard raises a
--- cached row, and converges one sitting at coordinates EQUAL to history whose payload has drifted; it
--- never lowers one and never removes one, so it cannot repair a row that is AHEAD of history (a wrong
--- direct INSERT, or a restore whose cache backup is newer than its history backup) nor an orphan row
--- whose position has no history at all. Those two are the whole list, and they are only two because the
--- equal-coordinates case converges -- with a strict > it was a silent third, reachable in role and
--- reporting INSERT 0 0. All three were reproduced. The enumeration holds up to numeric equality:
--- 500 and 500.00 are IS DISTINCT FROM-equal, so a scale-only drift in quantity is not repaired
--- (numerically harmless, visible only through quantity::text or scale()). A true rebuild
--- is TRUNCATE then this statement, and TRUNCATE is owner-only -- stl_readwrite holds neither DELETE nor
--- TRUNCATE. The ORPHAN class therefore needs the owner; the ahead-of-history class does NOT -- a plain
--- UPDATE repairs it, because UPDATE is unguarded in both directions, so the same grant that creates that
--- drift also removes it (both verified).
---
--- Safe to re-run against live ingest, because both writers sweep this table's PK in position_id order
--- (see the trigger in 20260819_150000): measured 0 deadlocks over 120 rounds and 952 ingest batches at
--- 210,000 cached positions, against 16/20 for a matched control differing only in trigger granularity.
--- Two residuals stand. A writer splitting one batch across several statements in one transaction still
--- crosses (6/20, the REBUILD as victim), and a converged no-op run still takes an exclusive row lock on
--- every row it examines (INSERT 0 0, 1.6M buffer touches, 1.3 s) -- so a caller needs the 40P01 retry
--- the spine documents (retry.Do / isRetryableTxError, #739).
+-- Initial backfill of position_current (VEC-409), and the statement an operator re-runs to converge
+-- it. Separate from 20260819_150000 so CREATE TRIGGER's lock is not held across this full-history
+-- scan; that file commits first, so the trigger is live throughout. Limits and measurements: #644.
+
 -- REBUILD-BEGIN position_current
--- All three SETs live INSIDE the markers deliberately. The table COMMENT tells operators to re-run the
--- marked region, the integration test extracts exactly that region, and SET LOCAL dies with its
--- transaction -- so a region that omitted them would silently drop the tiered-read guarantee this
--- statement depends on (a rebuild over local chunks only computes "newest per key" across a PARTIAL
--- table) and the lock_timeout that bounds the row-lock waits above.
---
--- Tiered reads: position_state adds a 1-year tiering policy and partitions on block_timestamp (on-chain
--- time, not insert time), so a historical backfill writes chunks ALREADY older than the policy window
--- -- this reads tiered history from the first policy run, not in a year's time. Set explicitly rather
--- than relied on: the measured default is 'on' for TimescaleDB 2.25.1-pg17 (the CI pin) and 2.27.2-pg18
--- (the PostgreSQL major prod runs), so on those engines it is a no-op -- it is here so correctness does
--- not rest on a GUC default that has changed before and that a Cloud service can set per-instance.
--- cmd/backfillers/transform-bootstrap treats failing to set it as fatal for the same reason.
+
+-- All three SETs live INSIDE the markers: the region is what operators re-run and what the test
+-- extracts, and SET LOCAL dies with its transaction. enable_tiered_reads is set explicitly because a
+-- rebuild over local chunks only computes newest-per-key across a PARTIAL table.
 SET LOCAL lock_timeout = '10s';
 SET LOCAL timescaledb.enable_tiered_reads = 'on';
 -- Resolution pinned for anything added later; the two relations below are already qualified. Without
@@ -57,12 +18,9 @@ SET LOCAL search_path = public;
 -- the three measured cases, are in 20260819_150000 where the guard is defined.
 SELECT set_config('position_current.rebuild_xid', pg_current_xact_id()::text, true);
 
--- Standalone, and AGAIN inside the INSERT below. Neither placement alone is sufficient: a check in its
--- own statement is stepped over by a client running the file one statement at a time, and a check in the
--- INSERT's WHERE is dropped when TimescaleDB excludes every chunk at plan time -- a zero-chunk or fully
--- tiered position_state plans to One-Time Filter: false and reports INSERT 0 0 with the guard never
--- evaluated (measured on 2.25.1-pg17; an empty PLAIN table does still evaluate it). Together they cover
--- both, and they do not overlap wastefully: where the qual is dropped there is nothing to write.
+-- Standalone AND inside the INSERT below: neither alone suffices. A separate statement is stepped
+-- over by a client running the file one statement at a time, and the INSERT's qual is dropped when
+-- TimescaleDB excludes every chunk at plan time. Measured on 2.25.1-pg17 (#644).
 SELECT public.position_current_rebuild_guard();
 
 INSERT INTO public.position_current
@@ -93,26 +51,9 @@ ON CONFLICT (position_id) DO UPDATE SET
     block_timestamp    = EXCLUDED.block_timestamp,
     projection         = EXCLUDED.projection,
     build_id           = EXCLUDED.build_id
--- Raise on a newer observation, and CONVERGE on an equal one whose payload differs. Without the
--- second arm a cache row at the SAME coordinates as history with a drifted payload is left alone
--- and the rebuild reports INSERT 0 0 -- byte-identical to a healthy converged run. It is reachable
--- in role: stl_readwrite holds UPDATE here and the table takes direct writes by design, so the two
--- classes this file calls unrepairable (ahead-of-history, orphan) are only exactly two BECAUSE this
--- third one converges. Still forward-only: coordinates are never lowered, only equalled. IS DISTINCT
--- FROM, not <>, because chain_id and protocol_id are nullable -- <> yields NULL and skips the repair.
--- A converged re-run still updates nothing, so the no-deadlock and no-op properties are unchanged.
---
--- One consequence names the WRONG repair channel, so it is stated here: this arm makes a
--- CACHE-ONLY correction self-reverting. A plain UPDATE that changes a payload column without
--- moving the coordinates leaves the row at coordinates EQUAL to history with a drifted payload --
--- exactly what this arm converges -- so the next rebuild reinstates the value from the spine.
--- Measured: quantity 100 in history, an operator UPDATE to 999, one rebuild, back to 100. The
--- plain UPDATE this file documents repairs ONLY the ahead-of-history class, where the coordinates
--- themselves are wrong; a wrong VALUE at correct coordinates is corrected by appending a spine row
--- at a higher processing_version, never by writing this table. (The trigger reverts it too, but
--- only if a later spine row lands at exactly the coordinates the operator wrote: the spine's PK is
--- (position_id, block_number, block_version, processing_version, block_timestamp), so the same
--- coordinates cannot simply be re-appended -- measured, SQLSTATE 23505.)
+-- Raise on a newer observation; CONVERGE on an equal one whose payload drifted, which is why the two
+-- unrepairable classes above are only two. IS DISTINCT FROM, not <>, because chain_id and protocol_id
+-- are nullable. A cache-only UPDATE is therefore self-reverting -- append a spine row instead (#644).
 WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_version, EXCLUDED.block_timestamp)
     > (position_current.block_number, position_current.block_version, position_current.processing_version, position_current.block_timestamp)
    OR ((EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_version, EXCLUDED.block_timestamp)
@@ -125,18 +66,11 @@ WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_versio
 -- SET LOCAL lives until the transaction ends, not until the marker, so without this the statements below
 -- would resolve under a hardcoded `public` instead of the applying session's own search_path.
 RESET search_path;
--- Everything below is schema-qualified BECAUSE of the RESET above, not in spite of it. Once the path is
--- restored, an unqualified position_current resolves under the applying session's path: measured with a
--- shadowing schema ahead of public, CREATE INDEX IF NOT EXISTS built the holder index on the shadow table
--- and reported success, leaving the real table with the PK alone and the file's own 4,652-buffer seq scan
--- intact. RESET is also not transaction-scoped and restores the ROLE default rather than the client's
--- value, so nothing here may depend on what it leaves behind.
+-- Schema-qualified BECAUSE of the RESET above: an unqualified name would resolve under the applying
+-- session's path, and a shadowing schema ahead of public silently takes the write (measured, #644).
 
--- Holder access path, built AFTER the backfill: created first, every backfilled row would pay a random
--- btree insert with its own WAL instead of one bulk build, and no read inside this file needs it. The PK
--- serves position_id lookups; the enriched views planned on this layer filter by holder, which the PK
--- cannot serve. Measured at 200,000 positions: a holder's current positions went from 4,652 buffers and
--- 8.9 ms (seq scan) to 1 buffer and 0.046 ms, for 2.8 MB.
+-- Built AFTER the backfill: created first, every backfilled row pays a random btree insert with its
+-- own WAL instead of one bulk build. Serves the holder filter the PK cannot. Measurements in #644.
 CREATE INDEX IF NOT EXISTS position_current_holder_idx ON public.position_current (holder_id);
 
 ANALYZE public.position_current;
