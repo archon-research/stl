@@ -105,6 +105,34 @@ func TestPlanBlock(t *testing.T) {
 	}
 }
 
+// The version fold is shared with the block republisher, and it counts a key
+// whose suffix names no data type — a stray upload, a rename — as occupying its
+// version. So an object above a complete canonical pair makes the top version
+// one nothing carries a hash for, and the height is corrected above that rather
+// than skipped: the archive keeps a copy of the canonical block it already had.
+func TestPlanBlock_AStrayObjectAboveTheCanonicalPairMovesTheCorrectionUp(t *testing.T) {
+	index, err := indexPartition([]string{
+		"21000000-21000999/21000042_2_block.json.gz",
+		"21000000-21000999/21000042_2_receipts.json.gz",
+		"21000000-21000999/21000042_3_foo.json.gz",
+	})
+	if err != nil {
+		t.Fatalf("indexPartition: %v", err)
+	}
+
+	state := index[21000042]
+	if state.Version != 3 {
+		t.Fatalf("top version = %d, want the stray object's 3", state.Version)
+	}
+
+	// archiveblock.Hash finds no block or receipts object at version 3.
+	got := planBlock(state, "", canonicalHash)
+
+	if got.Action != actionRepublish || got.Version != 4 {
+		t.Errorf("planBlock() = %s at version %d, want %s at 4", got.Action, got.Version, actionRepublish)
+	}
+}
+
 func TestIndexPartition(t *testing.T) {
 	index, err := indexPartition([]string{
 		"21000000-21000999/21000042_0_block.json.gz",
@@ -286,7 +314,9 @@ func TestRetryableListing(t *testing.T) {
 		want bool
 	}{
 		{name: "a dropped connection", err: errors.New("dial tcp 52.0.0.1:443: i/o timeout"), want: true},
-		{name: "a deadline", err: context.DeadlineExceeded, want: true},
+		{name: "the run being shut down", err: context.Canceled, want: false},
+		{name: "the run's own deadline", err: context.DeadlineExceeded, want: false},
+		{name: "a cancellation the SDK wrapped", err: fmt.Errorf("listing partition 0-999: %w", context.Canceled), want: false},
 		{name: "S3 asking for less traffic", err: &smithy.GenericAPIError{Code: "SlowDown"}, want: true},
 		{name: "throttling", err: &smithy.GenericAPIError{Code: "Throttling"}, want: true},
 		{name: "the request rate ceiling", err: &smithy.GenericAPIError{Code: "RequestLimitExceeded"}, want: true},

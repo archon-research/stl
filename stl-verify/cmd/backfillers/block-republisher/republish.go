@@ -49,43 +49,63 @@ const (
 // RepublishParams is the JSON an operator supplies in the Temporal UI's Input box:
 //
 //	{"blocks":[25395651,25087888]}
+//	{"blocks":[25395651],"archiveRepaired":true}
 //
 // blocks are the heights to republish, in the order they will be processed. The
 // version is not one of them: each height lands one past whatever its raw
-// archive already holds. Version is declared only so an input written against
-// the runbook that took it is refused by name rather than silently republishing
-// somewhere else.
+// archive already holds, or — with archiveRepaired — at the version a
+// bulk-downloader repair already wrote the canonical block into. Version is
+// declared only so an input written against the runbook that took it is refused
+// by name rather than silently republishing somewhere else.
 type RepublishParams struct {
-	Blocks  []int64 `json:"blocks"`
-	Version *int    `json:"version,omitempty"`
+	Blocks          []int64 `json:"blocks"`
+	ArchiveRepaired bool    `json:"archiveRepaired,omitempty"`
+
+	// Raw, not *int: a literal null decodes a pointer to nil, which would read as
+	// an input that never named the field at all.
+	Version json.RawMessage `json:"version,omitempty"`
 }
 
-func (p RepublishParams) resolve() ([]int64, error) {
+// republishRun is one operator input, validated: the heights and the derivation
+// they are all republished under.
+type republishRun struct {
+	Blocks          []int64
+	ArchiveRepaired bool
+}
+
+func (p RepublishParams) resolve() (republishRun, error) {
 	if p.Version != nil {
-		return nil, fmt.Errorf(
+		return republishRun{}, fmt.Errorf(
 			"version is no longer an input: every height is republished one past the highest version its raw " +
-				"archive already holds. Drop it and start the run again")
+				"archive already holds, or at that version with archiveRepaired. Drop it and start the run again")
 	}
 	if len(p.Blocks) == 0 {
-		return nil, fmt.Errorf("blocks must name at least one height to republish")
+		return republishRun{}, fmt.Errorf("blocks must name at least one height to republish")
 	}
 	if len(p.Blocks) > maxBlocksPerRun {
-		return nil, fmt.Errorf(
+		return republishRun{}, fmt.Errorf(
 			"this run names %d blocks, over the %d limit: split it into smaller runs", len(p.Blocks), maxBlocksPerRun)
 	}
 	seen := make(map[int64]bool, len(p.Blocks))
 	for _, number := range p.Blocks {
 		if number <= 0 {
-			return nil, fmt.Errorf("block number must be positive, got %d", number)
+			return republishRun{}, fmt.Errorf("block number must be positive, got %d", number)
 		}
 		// A height republished twice in one run lands at two versions: the second
 		// pass reads the archive the first one has by then been written into.
 		if seen[number] {
-			return nil, fmt.Errorf("block %d is named twice; republish a height once per run", number)
+			return republishRun{}, fmt.Errorf("block %d is named twice; republish a height once per run", number)
 		}
 		seen[number] = true
 	}
-	return p.Blocks, nil
+	return republishRun{Blocks: p.Blocks, ArchiveRepaired: p.ArchiveRepaired}, nil
+}
+
+// versionRequest is what one height's version is derived from: the height, and
+// whether the archive was already repaired ahead of the indexers.
+type versionRequest struct {
+	Block           int64 `json:"block"`
+	ArchiveRepaired bool  `json:"archiveRepaired"`
 }
 
 // republishHeartbeat is what a beat carries, so a slow block shows in the
@@ -129,18 +149,18 @@ func republishWorkflow(ctx workflow.Context, input json.RawMessage) (RepublishRe
 		return RepublishResult{}, err
 	}
 
-	blocks, err := resolveBlocks(input)
+	run, err := resolveRun(input)
 	if err != nil {
 		return RepublishResult{}, err
 	}
-	state.Total = len(blocks)
+	state.Total = len(run.Blocks)
 
 	logger := workflow.GetLogger(ctx)
-	logger.Info("starting block republish", "blocks", state.Total)
+	logger.Info("starting block republish", "blocks", state.Total, "archiveRepaired", run.ArchiveRepaired)
 
 	// Temporal discards the result payload of a workflow that returns an error,
 	// so a failing run reports what it managed through the progress query above.
-	if err := republishEachBlock(ctx, blocks, &state); err != nil {
+	if err := republishEachBlock(ctx, run, &state); err != nil {
 		return RepublishResult{}, err
 	}
 
@@ -160,28 +180,28 @@ func registerProgressQuery(ctx workflow.Context, state *republishProgress) error
 	return nil
 }
 
-func resolveBlocks(input json.RawMessage) ([]int64, error) {
-	blocks, err := blocksFromInput(input)
+func resolveRun(input json.RawMessage) (republishRun, error) {
+	run, err := runFromInput(input)
 	if err != nil {
-		return nil, temporalsdk.NewNonRetryableApplicationError(
+		return republishRun{}, temporalsdk.NewNonRetryableApplicationError(
 			"invalid republish input", "InvalidParams", err)
 	}
-	return blocks, nil
+	return run, nil
 }
 
-// blocksFromInput reads the operator's JSON strictly: a field this workflow does
+// runFromInput reads the operator's JSON strictly: a field this workflow does
 // not take fails the run instead of being ignored, so an input written against
 // an older runbook cannot quietly do something else.
-func blocksFromInput(input json.RawMessage) ([]int64, error) {
+func runFromInput(input json.RawMessage) (republishRun, error) {
 	decoder := json.NewDecoder(bytes.NewReader(input))
 	decoder.DisallowUnknownFields()
 
 	var params RepublishParams
 	if err := decoder.Decode(&params); err != nil {
-		return nil, fmt.Errorf(`the input must name the blocks to republish, as {"blocks":[25395651]}: %w`, err)
+		return republishRun{}, fmt.Errorf(`the input must name the blocks to republish, as {"blocks":[25395651]}: %w`, err)
 	}
 	if decoder.More() {
-		return nil, fmt.Errorf("the input must be one object; everything after the first is ignored, so it is refused instead")
+		return republishRun{}, fmt.Errorf("the input must be one object; everything after the first is ignored, so it is refused instead")
 	}
 	return params.resolve()
 }
@@ -191,13 +211,14 @@ func blocksFromInput(input json.RawMessage) ([]int64, error) {
 // history, so a retry or a rolled pod resumes at the next one; continuing past a
 // failure would end the run reporting success over a height still holding the
 // losing fork.
-func republishEachBlock(ctx workflow.Context, blocks []int64, state *republishProgress) error {
+func republishEachBlock(ctx workflow.Context, run republishRun, state *republishProgress) error {
 	ctx = workflow.WithActivityOptions(ctx, republishActivityOptions())
 
 	var activities *republishActivities
-	for _, number := range blocks {
+	for _, number := range run.Blocks {
+		request := versionRequest{Block: number, ArchiveRepaired: run.ArchiveRepaired}
 		var version int
-		if err := workflow.ExecuteActivity(ctx, activities.DeriveVersion, number).Get(ctx, &version); err != nil {
+		if err := workflow.ExecuteActivity(ctx, activities.DeriveVersion, request).Get(ctx, &version); err != nil {
 			return err
 		}
 
@@ -254,21 +275,30 @@ type republishActivities struct {
 	newProgress func() heartbeater
 }
 
-// DeriveVersion reads the version this height's raw archive leaves free. It is
-// its own activity so the answer lands in workflow history before anything is
-// published: a RepublishBlock that fails after its publish is retried at the
-// version recorded here, not at the one the archive would report by then.
-func (a *republishActivities) DeriveVersion(ctx context.Context, blockNumber int64) (version int, err error) {
+// DeriveVersion settles the version this height is republished at. It is its own
+// activity so the answer lands in workflow history before anything is published:
+// a RepublishBlock that fails after its publish is retried at the version
+// recorded here, not at the one the archive would report by then.
+func (a *republishActivities) DeriveVersion(ctx context.Context, request versionRequest) (version int, err error) {
 	defer func() { err = nonRetryableIfStructural(err) }()
 
 	stopHeartbeat := temporal.StartHeartbeat(ctx, heartbeatInterval, nil)
 	defer stopHeartbeat()
 
-	version, err = a.service.NextFreeVersion(ctx, blockNumber)
+	version, err = a.deriveVersion(ctx, request)
 	if err != nil {
-		return 0, fmt.Errorf("deriving the version for block %d: %w", blockNumber, err)
+		return 0, fmt.Errorf("deriving the version for block %d: %w", request.Block, err)
 	}
 	return version, nil
+}
+
+// deriveVersion picks the derivation the run asked for: the slot above what the
+// archive holds, or the slot a repair already wrote the canonical block into.
+func (a *republishActivities) deriveVersion(ctx context.Context, request versionRequest) (int, error) {
+	if request.ArchiveRepaired {
+		return a.service.ArchivedVersion(ctx, request.Block)
+	}
+	return a.service.NextFreeVersion(ctx, request.Block)
 }
 
 // RepublishBlock caches the canonical block at this height under the version the

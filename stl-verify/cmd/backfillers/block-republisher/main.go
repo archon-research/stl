@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awssns "github.com/aws/aws-sdk-go-v2/service/sns"
@@ -194,11 +193,6 @@ func openBlockCache(ctx context.Context, cfg config, logger *slog.Logger) (*redi
 	return cache, nil
 }
 
-// publishTimeout bounds one SNS publish. The activity's own StartToClose is
-// minutes, sized for a slow archive read, so without this a wedged publish would
-// look like a slow block.
-const publishTimeout = 30 * time.Second
-
 func openEventSink(awsCfg aws.Config, cfg config, logger *slog.Logger) (*snsadapter.EventSink, error) {
 	// Custom endpoint so the same binary talks to LocalStack in kind and in tests.
 	snsClient := awssns.NewFromConfig(awsCfg, func(o *awssns.Options) {
@@ -208,9 +202,8 @@ func openEventSink(awsCfg aws.Config, cfg config, logger *slog.Logger) (*snsadap
 	})
 
 	sink, err := snsadapter.NewEventSink(snsClient, snsadapter.Config{
-		TopicARN:       cfg.snsTopicARN,
-		PublishTimeout: publishTimeout,
-		Logger:         logger,
+		TopicARN: cfg.snsTopicARN,
+		Logger:   logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating the SNS event sink: %w", err)

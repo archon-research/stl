@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"strings"
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
@@ -196,15 +197,19 @@ func TestHash_FallsBackToReceiptsWhenTheBlockObjectCarriesNoHash(t *testing.T) {
 }
 
 // A hash the prefix could not reach must not read as a losing fork: that would
-// republish over a height whose archive is already canonical.
+// republish over a height whose archive is already canonical. No later attempt
+// reaches it either, so the caller must be able to stop rather than retry.
 func TestHash_ErrorsWhenTheHashIsBeyondThePrefix(t *testing.T) {
 	key := s3key.Build(testBlock, 0, s3key.Block)
 	reader := newFakeObjects(map[string][]byte{key: gzipped(t, blockJSONWithLateHash(testHash))})
 
 	_, _, err := Hash(context.Background(), reader, "bucket", testBlock, 0)
 
-	if err == nil {
-		t.Fatal("Hash succeeded on a prefix that could not answer")
+	if !errors.Is(err, ErrUnreadable) {
+		t.Fatalf("error = %v, want ErrUnreadable", err)
+	}
+	if !strings.Contains(err.Error(), key) {
+		t.Errorf("error = %v, want it to name the key", err)
 	}
 }
 
@@ -238,10 +243,30 @@ func TestHash_ErrorsOnAnObjectItCannotDecompress(t *testing.T) {
 
 			_, _, err := Hash(context.Background(), reader, "bucket", testBlock, 0)
 
-			if err == nil {
-				t.Fatal("Hash succeeded on an object it could not decompress")
+			if !errors.Is(err, ErrUnreadable) {
+				t.Fatalf("error = %v, want ErrUnreadable", err)
+			}
+			if !strings.Contains(err.Error(), key) {
+				t.Errorf("error = %v, want it to name the key", err)
 			}
 		})
+	}
+}
+
+// S3 refuses a ranged read of a zero-byte object rather than answering with an
+// empty body, and that object names no block on any attempt either.
+func TestHash_MarksAZeroByteObjectUnreadable(t *testing.T) {
+	key := s3key.Build(testBlock, 0, s3key.Block)
+	reader := newFakeObjects(nil)
+	reader.err = fmt.Errorf("bucket/%s: %w", key, outbound.ErrObjectEmpty)
+
+	_, _, err := Hash(context.Background(), reader, "bucket", testBlock, 0)
+
+	if !errors.Is(err, ErrUnreadable) {
+		t.Fatalf("error = %v, want ErrUnreadable", err)
+	}
+	if !strings.Contains(err.Error(), key) {
+		t.Errorf("error = %v, want it to name the key", err)
 	}
 }
 
@@ -258,6 +283,9 @@ func TestHash_AReadFailureIsNotAnUnknownHash(t *testing.T) {
 	}
 	if found {
 		t.Error("reported a hash it never read")
+	}
+	if errors.Is(err, ErrUnreadable) {
+		t.Errorf("error = %v, want a throttled read left retryable", err)
 	}
 }
 

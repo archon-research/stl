@@ -156,11 +156,14 @@ func (r *Reader) HeadBucket(ctx context.Context, bucket string) error {
 	return nil
 }
 
-// ProbeListAccess issues the cheapest listing S3 offers, for a caller checking
-// at startup that it may list the bucket at all.
-func (r *Reader) ProbeListAccess(ctx context.Context, bucket string) error {
+// ProbeListAccess issues the cheapest listing S3 offers under prefix, for a
+// caller checking at startup that it may list what it is about to read. The
+// prefix is part of the probe: an s3:ListBucket grant conditioned on one denies
+// a listing of the bucket root.
+func (r *Reader) ProbeListAccess(ctx context.Context, bucket, prefix string) error {
 	_, err := r.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 		Bucket:  aws.String(bucket),
+		Prefix:  aws.String(prefix),
 		MaxKeys: aws.Int32(1),
 	})
 	if err != nil {
@@ -208,6 +211,9 @@ func (r *Reader) ReadRange(ctx context.Context, bucket, key string, start, end i
 	if isMissingObject(err) {
 		return nil, fmt.Errorf("%s/%s: %w: %w", bucket, key, outbound.ErrObjectNotFound, err)
 	}
+	if isEmptyObject(err) {
+		return nil, fmt.Errorf("%s/%s: %w: %w", bucket, key, outbound.ErrObjectEmpty, err)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get range of object %s/%s: %w", bucket, key, err)
 	}
@@ -241,6 +247,14 @@ func isMissingObject(err error) bool {
 	var noSuchKey *s3types.NoSuchKey
 	var notFound *s3types.NotFound
 	return errors.As(err, &noSuchKey) || errors.As(err, &notFound)
+}
+
+// isEmptyObject tells the one answer that means "this object holds no bytes":
+// S3 has no range to serve for a zero-byte object and refuses the read with
+// InvalidRange rather than answering with an empty body.
+func isEmptyObject(err error) bool {
+	var apiErr smithy.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidRange"
 }
 
 // gzipReadCloser wraps a gzip reader and the underlying body for proper cleanup.

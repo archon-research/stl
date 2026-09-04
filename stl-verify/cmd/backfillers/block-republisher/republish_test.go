@@ -44,20 +44,30 @@ func input(numbers ...int64) json.RawMessage {
 // deriveStub stands in for the archive listing, answering the version each
 // height would be given and recording how often it was asked.
 type deriveStub struct {
-	seen     []int64
+	seen     []versionRequest
 	versions map[int64]int
 	err      error
+}
+
+// blocks are the heights the stub was asked about, for a test that cares about
+// the order and not about how each was derived.
+func (d *deriveStub) blocks() []int64 {
+	numbers := make([]int64, 0, len(d.seen))
+	for _, request := range d.seen {
+		numbers = append(numbers, request.Block)
+	}
+	return numbers
 }
 
 func registerDeriveStub(env *testsuite.TestWorkflowEnvironment, versions map[int64]int) *deriveStub {
 	stub := &deriveStub{versions: versions}
 	env.RegisterActivityWithOptions(
-		func(_ context.Context, number int64) (int, error) {
-			stub.seen = append(stub.seen, number)
+		func(_ context.Context, request versionRequest) (int, error) {
+			stub.seen = append(stub.seen, request)
 			if stub.err != nil {
 				return 0, stub.err
 			}
-			if version, ok := stub.versions[number]; ok {
+			if version, ok := stub.versions[request.Block]; ok {
 				return version, nil
 			}
 			return 1, nil
@@ -139,12 +149,13 @@ func queryProgress(t *testing.T, env *testsuite.TestWorkflowEnvironment) republi
 	return progress
 }
 
-func TestBlocksFromInput(t *testing.T) {
+func TestRunFromInput(t *testing.T) {
 	tests := []struct {
-		name            string
-		in              json.RawMessage
-		want            []int64
-		wantErrContains string
+		name             string
+		in               json.RawMessage
+		want             []int64
+		wantRepairedFlag bool
+		wantErrContains  string
 	}{
 		{
 			name: "the heights, in the order they were given",
@@ -155,6 +166,22 @@ func TestBlocksFromInput(t *testing.T) {
 			name:            "an input still choosing the version",
 			in:              json.RawMessage(`{"blocks":[25395651],"version":1}`),
 			wantErrContains: "version",
+		},
+		{
+			name:            "an input still naming the version, as a JSON null",
+			in:              json.RawMessage(`{"blocks":[25395651],"version":null}`),
+			wantErrContains: "version",
+		},
+		{
+			name:             "an input opting the run into an archive already repaired",
+			in:               json.RawMessage(`{"blocks":[25395651],"archiveRepaired":true}`),
+			want:             []int64{25395651},
+			wantRepairedFlag: true,
+		},
+		{
+			name: "an input spelling the flag out as off",
+			in:   json.RawMessage(`{"blocks":[25395651],"archiveRepaired":false}`),
+			want: []int64{25395651},
 		},
 		{
 			name:            "an input naming a field this workflow does not take",
@@ -209,7 +236,7 @@ func TestBlocksFromInput(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := blocksFromInput(tc.in)
+			got, err := runFromInput(tc.in)
 
 			if tc.wantErrContains != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErrContains) {
@@ -218,10 +245,13 @@ func TestBlocksFromInput(t *testing.T) {
 				return
 			}
 			if err != nil {
-				t.Fatalf("blocksFromInput: %v", err)
+				t.Fatalf("runFromInput: %v", err)
 			}
-			if fmt.Sprint(got) != fmt.Sprint(tc.want) {
-				t.Errorf("blocks = %v, want %v", got, tc.want)
+			if fmt.Sprint(got.Blocks) != fmt.Sprint(tc.want) {
+				t.Errorf("blocks = %v, want %v", got.Blocks, tc.want)
+			}
+			if got.ArchiveRepaired != tc.wantRepairedFlag {
+				t.Errorf("archiveRepaired = %v, want %v", got.ArchiveRepaired, tc.wantRepairedFlag)
 			}
 		})
 	}
@@ -286,8 +316,8 @@ func TestRepublishWorkflow_RetriesARepublishAtTheVersionItAlreadyChose(t *testin
 	if fmt.Sprint(stub.seen) != fmt.Sprint(want) {
 		t.Errorf("republish attempts = %v, want the retry at the same version", stub.seen)
 	}
-	if fmt.Sprint(derive.seen) != fmt.Sprint([]int64{25395651}) {
-		t.Errorf("derived the version for %v, want it read once and reused", derive.seen)
+	if fmt.Sprint(derive.blocks()) != fmt.Sprint([]int64{25395651}) {
+		t.Errorf("derived the version for %v, want it read once and reused", derive.blocks())
 	}
 }
 
@@ -343,7 +373,7 @@ func TestRepublishWorkflow_RejectsAnUnusableInputWithoutTouchingTheChain(t *test
 				t.Error("an unusable input must be rejected non-retryably")
 			}
 			if len(derive.seen) != 0 || len(stub.seen) != 0 {
-				t.Errorf("touched %v / %v for an unusable input, want nothing", derive.seen, stub.seen)
+				t.Errorf("touched %v / %v for an unusable input, want nothing", derive.blocks(), stub.seen)
 			}
 		})
 	}
@@ -364,10 +394,51 @@ func TestRepublishWorkflow_PublishesNothingWhenTheVersionCannotBeDerived(t *test
 		t.Fatal("the workflow succeeded for a height it could not derive a version for")
 	}
 	if len(derive.seen) != 1 {
-		t.Errorf("derived %v, want the one height it was given", derive.seen)
+		t.Errorf("derived %v, want the one height it was given", derive.blocks())
 	}
 	if len(stub.seen) != 0 {
 		t.Errorf("republished %v after the version could not be derived", stub.seen)
+	}
+}
+
+// The flag decides where each height's event lands, so it has to reach every
+// derivation in the run rather than only the first: a run half-derived one way
+// and half the other would publish some heights at a slot the archive already
+// holds and some one past it.
+func TestRepublishWorkflow_CarriesArchiveRepairedToEveryDerivation(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	derive := registerDeriveStub(env, map[int64]int{25395651: 0, 25087888: 2})
+	registerRepublishStub(env, neverFails)
+
+	env.ExecuteWorkflow(republishWorkflow, json.RawMessage(`{"blocks":[25395651,25087888],"archiveRepaired":true}`))
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("workflow: %v", err)
+	}
+	want := []versionRequest{
+		{Block: 25395651, ArchiveRepaired: true},
+		{Block: 25087888, ArchiveRepaired: true},
+	}
+	if fmt.Sprint(derive.seen) != fmt.Sprint(want) {
+		t.Errorf("derivations = %v, want %v", derive.seen, want)
+	}
+}
+
+// A run that does not ask for it must derive exactly as it did before: the flag
+// is an opt-in into a state only a bulk-downloader repair creates.
+func TestRepublishWorkflow_DerivesTheNextFreeSlotWithoutTheFlag(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	derive := registerDeriveStub(env, nil)
+	registerRepublishStub(env, neverFails)
+
+	env.ExecuteWorkflow(republishWorkflow, input(25395651))
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("workflow: %v", err)
+	}
+	want := []versionRequest{{Block: 25395651}}
+	if fmt.Sprint(derive.seen) != fmt.Sprint(want) {
+		t.Errorf("derivations = %v, want %v", derive.seen, want)
 	}
 }
 
@@ -583,5 +654,50 @@ func TestRepublishBlock_GivesEachExecutionItsOwnProgressStore(t *testing.T) {
 				t.Errorf("execution %d's store holds %+v, from another execution", i, beat)
 			}
 		}
+	}
+}
+
+// The flag picks a different derivation, not a different argument to the same
+// one. A height the archive holds nothing at is repaired at version 1 by
+// default; with archiveRepaired there is nothing repaired to publish at, and the
+// run stops.
+func TestDeriveVersion_ChoosesTheDerivationTheFlagAsksFor(t *testing.T) {
+	tests := []struct {
+		name            string
+		request         versionRequest
+		wantVersion     int
+		wantErrContains string
+	}{
+		{
+			name:        "the next free slot above what the archive holds",
+			request:     versionRequest{Block: 25395651},
+			wantVersion: 1,
+		},
+		{
+			name:            "the version a repaired archive already holds",
+			request:         versionRequest{Block: 25395651, ArchiveRepaired: true},
+			wantErrContains: "archiveRepaired",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			activities := &republishActivities{service: newRepublishService(t)}
+
+			version, err := activities.DeriveVersion(context.Background(), tc.request)
+
+			if tc.wantErrContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrContains) {
+					t.Fatalf("error = %v, want one mentioning %q", err, tc.wantErrContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("DeriveVersion: %v", err)
+			}
+			if version != tc.wantVersion {
+				t.Errorf("version = %d, want %d", version, tc.wantVersion)
+			}
+		})
 	}
 }

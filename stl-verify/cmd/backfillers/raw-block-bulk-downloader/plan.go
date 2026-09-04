@@ -246,6 +246,12 @@ var retryableAPICodes = map[string]bool{
 // on top of the SDK's own retries and walks the whole range before failing,
 // which is why anything the service answers as a client fault stops the run.
 func retryableListing(err error) bool {
+	// A run being shut down is not a fault to ride out: retrying logs a warning
+	// per partition on a SIGTERM and delays the exit for nothing.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+
 	var apiErr smithy.APIError
 	if !errors.As(err, &apiErr) {
 		return true

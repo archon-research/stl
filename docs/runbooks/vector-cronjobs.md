@@ -210,9 +210,13 @@ Repair:
   Even then it fixes S3 only: the indexers' rows stay at `block_version` 0
   until the republisher (**ARCT-383**, #850) re-emits the block event. The
   republisher derives that version the same way, per height, from the objects in
-  the raw bucket — so run it *before* any bulk-downloader repair of the same
-  height: the `_1_` objects that repair wrote push the event to version 2, and
-  the archive ends up holding the same canonical block twice.
+  the raw bucket, so the order is a rule, not a preference: **republisher first,
+  bulk downloader after.** The other way round, the `_1_` objects the repair
+  wrote push the event to version 2 and the archive ends up holding the same
+  canonical block twice — and the republisher refuses the height outright,
+  because the archive's top version is by then already canonical. The recovery
+  for a height #849 has already repaired is `"archiveRepaired": true` (below),
+  which republishes at the version those objects occupy instead of past them.
 
 Before the prod deploy, run the pre-flight queries below against prod's
 retained window — a hole found there is repairable while it is still inside
@@ -835,12 +839,12 @@ Workflow**:
 | Input | `{"blocks":[25395651,25087888]}` |
 
 `blocks` are the heights, processed in the order given, at most **200** per run,
-each named at most once, and they are the whole input. Every height must sit at
-least 64 blocks below the chain head. The chain comes from the Deployment's
-`CHAIN_ID`, and the version from the archive (below) — neither is an input. An
-input carrying `version`, or any other field, **fails the run non-retryably**: a
-run started from the old runbook line must stop rather than quietly do something
-else. The equivalent CLI call:
+each named at most once, and with the optional `archiveRepaired` flag below they
+are the whole input. Every height must sit at least 64 blocks below the chain
+head. The chain comes from the Deployment's `CHAIN_ID`, and the version from the
+archive (below) — neither is an input. An input carrying `version`, or any other
+field, **fails the run non-retryably**: a run started from the old runbook line
+must stop rather than quietly do something else. The equivalent CLI call:
 
 ```bash
 temporal workflow start --namespace vector \
@@ -895,6 +899,22 @@ aws s3 ls s3://$RAW_BUCKET/25395000-25395999/ | grep 25395651_
 Only `_0_` present is the ARCT-379 shape, and that height will be republished at
 1; a height that also shows `_1_` goes to 2.
 
+**`archiveRepaired: true`, for a height #849 already fixed in S3.** The bulk
+downloader repairs the archive and tells no indexer, so a height it has been
+pointed at holds the canonical block in S3 while the indexers still hold the
+fork — and the derivation above, which lands one past what the archive holds,
+then refuses that height forever as already canonical. Adding the flag
+(`{"blocks":[25395651],"archiveRepaired":true}`) publishes each named height
+**at** the version the archive's top objects occupy instead of one past it, so
+the backup worker's if-not-exists write is a no-op and every indexer appends
+that version. It is not a force flag: the worker still reads the top version's
+hash, and fails the height `StructuralData` if the archive holds nothing there,
+if that version names no block, or if it is not the canonical one ("drop
+archiveRepaired") — so a healthy height cannot gain a duplicate version with it
+either. Version 0 is a legal answer here and only here: a height the archive
+never held at all is repaired by #849 at `_0_`. The flag applies to every height
+in the run, so keep such a run to the heights #849 actually repaired.
+
 The archive is written by `raw-data-backup` from the event, so it trails a
 healthy run by up to a minute — and stays behind for good if that worker
 dead-lettered the block. If a height holds fewer versions than you expect, check
@@ -923,24 +943,28 @@ hit as "some chain has this version" and confirm before acting on it.
 
 A version there that the archive does not hold means the repair would land on a
 slot the indexers already have: fix the archive gap (the backup worker's DLQ)
-first.
+first. This query is the only guard on that. A republish at a version an indexer
+already holds is silent all the way down — the consumers insert `ON CONFLICT …
+DO NOTHING`, the backup worker writes only where the object is absent, and this
+worker reads no database at all — so the run reports success and the fork stays
+the highest version anywhere it matters.
 
 **Before the first run.** The ServiceAccount's EKS Pod Identity association needs
 `sns:Publish` on the chain's blocks topic, `s3:ListBucket` on the chain's raw
 bucket (which versions are taken) and `s3:GetObject` on it (the first kilobytes of
 the top version's block object, to tell an already-canonical height from a losing
 fork). Nothing is ever written to S3. `sns:Publish` and `s3:ListBucket` come from
-archon-research/infrastructure#667 (merged); `s3:GetObject` needs its own infra
-change. The worker proves both S3 grants at startup — one `ListObjectsV2` and one
-one-byte ranged `GetObject` of `0-999/0_startup-probe`, a key that cannot exist —
-so a missing grant is a pod that will not start, logging `this pod needs
-s3:ListBucket` or `this pod needs s3:GetObject on that bucket`, rather than a run
-that dies on its first archived height. `ALCHEMY_HTTP_URL` is required too, with
-no mainnet default: a deployment without it would refuse to start rather than
-fetch another chain's blocks. The worker lists that bucket once at
-startup (and reads one byte of a key that cannot exist), so a missing grant or a
-mistyped `S3_BUCKET` shows up as a pod that will not start, not as a repair that
-dies on its first height.
+archon-research/infrastructure#667 (merged); `s3:GetObject` from
+archon-research/infrastructure#669, merged and applied on staging and prod on
+2026-09-03. The worker proves both S3 grants at startup — one `ListObjectsV2`
+under the `0-999/0_` prefix and one one-byte ranged `GetObject` of
+`0-999/0_startup-probe`, a key that cannot exist, so a grant conditioned on a
+prefix covers both — and a missing grant or a mistyped `S3_BUCKET` is therefore a
+pod that will not start, logging `this pod needs s3:ListBucket` or `this pod
+needs s3:GetObject on that bucket`, rather than a run that dies on its first
+archived height. `ALCHEMY_HTTP_URL` is required too, with no mainnet default: a
+deployment without it would refuse to start rather than fetch another chain's
+blocks.
 
 **What a run does.** Two activities per block. `DeriveVersion` lists the height's
 archive prefix and settles the version, which Temporal records in the workflow's
@@ -995,21 +1019,27 @@ per height. The example uses a height that landed at 1.
   and the "correction" could itself be orphaned. A different node does not help —
   wait until the height is deep enough (64 blocks is about 13 minutes on
   mainnet), then start a new run.
-- **`StructuralData`: the node answers null for the block's payload**
-  (non-retryable). A height this far below the head that a node cannot serve is a
-  node without the history, not a height that is not there. Point at one that has
-  it — an archive node — and start a new run. (A null on the *first* by-number
-  read is treated as a lagging replica and retried instead; it is the payload
-  reads, pinned to the hash, that fail the run.)
+- **The node answers null for the block or one of its payloads (retryable).**
+  The head read already proved a synced node knows this height, so a null is a
+  replica behind that head and the next attempt asks again. If every attempt
+  inside the 30-minute envelope answers null, the RPC has no history this deep:
+  point at one that does — an archive node — and start a new run.
 - **`StructuralData`: the archive already holds the canonical block at the
   height's top version** (non-retryable). Nothing to repair: the archived hash
   and the chain's agree. The message names the version and the hash. Drop that
   height from the list — a re-run cannot change the answer, and forcing it would
-  append an identical correction every reader then prefers.
+  append an identical correction every reader then prefers. The one exception is
+  a height #849 repaired ahead of the indexers, where `archiveRepaired: true`
+  above is the answer.
 - **`StructuralData`: an object under the height's archive prefix carries no
   version** (non-retryable). `DeriveVersion` cannot tell which slot is free while
   something it cannot read sits there. The error names the key: remove or rename
   it, then start a new run.
+- **`StructuralData`: an archived object cannot be read** (non-retryable). The
+  top version's `_block` or `_receipts` object is not a gzip stream, holds no
+  bytes at all, or keeps its hash past the first 8 KB — so the already-canonical
+  check cannot run, and no attempt reads it differently. The error names the
+  key: repair or remove that object, then start a new run.
 - **`InvalidParams` (non-retryable, nothing is republished)** — the input is not
   the object this workflow takes: an empty or oversized `blocks` list, a
   non-positive height, or a field it does not accept, `version` above all. Fix

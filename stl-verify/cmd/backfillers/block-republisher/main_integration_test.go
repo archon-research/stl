@@ -7,7 +7,6 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -142,6 +141,33 @@ func TestRepublish_RefusesAHeightTheArchiveAlreadyHoldsCanonically(t *testing.T)
 		t.Fatalf("error = %v, want the run refused for a height that needs no repair", err)
 	}
 	assertNothingCached(t, ctx, deployment.keyPrefix, orphanOnly)
+}
+
+// The same archive state as the test above, and the opposite outcome: a #849
+// repair leaves the canonical block in S3 with no indexer told, so
+// archiveRepaired republishes AT the version those objects occupy — version 0
+// here, where a repair of a height the archive never held writes.
+func TestRepublish_PublishesAtTheVersionARepairedArchiveHolds(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	deployment := newDeployment(t, ctx)
+	deployment.archive(t, ctx, orphanOnly, 0, orphanOnly.hash, s3key.Block, s3key.Receipts, s3key.Traces)
+
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	if err := register(ctx, temporal.Dependencies{Logger: discardLogger()}, env); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	env.ExecuteWorkflow(workflowTypeName,
+		json.RawMessage(fmt.Sprintf(`{"blocks":[%d],"archiveRepaired":true}`, orphanOnly.number)))
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("workflow: %v", err)
+	}
+	assertRepublishedVersions(t, env, map[int64]int{orphanOnly.number: 0})
+	assertCachedUnderVersion(t, ctx, deployment.keyPrefix, orphanOnly, 0)
+	assertEventDescribes(t, receiveBlockEvent(t, ctx, deployment.sqs, deployment.queueURL), orphanOnly, 0)
 }
 
 // TestRegister_RefusesAConfigItCannotPublishWith keeps the startup guard on the
@@ -350,11 +376,7 @@ func assertPublishedEvents(t *testing.T, ctx context.Context, sqsc *awssqs.Clien
 	t.Helper()
 	seen := make(map[int64]outbound.BlockEvent, len(want))
 	for range want {
-		body := receiveOneSQSMessage(t, ctx, sqsc, queueURL, 30*time.Second)
-		var event outbound.BlockEvent
-		if err := json.Unmarshal([]byte(body), &event); err != nil {
-			t.Fatalf("decoding the delivered BlockEvent: %v", err)
-		}
+		event := receiveBlockEvent(t, ctx, sqsc, queueURL)
 		seen[event.BlockNumber] = event
 	}
 
@@ -365,6 +387,16 @@ func assertPublishedEvents(t *testing.T, ctx context.Context, sqsc *awssqs.Clien
 		}
 		assertEventDescribes(t, event, block, want[block.number])
 	}
+}
+
+func receiveBlockEvent(t *testing.T, ctx context.Context, sqsc *awssqs.Client, queueURL string) outbound.BlockEvent {
+	t.Helper()
+	body := receiveOneSQSMessage(t, ctx, sqsc, queueURL, 30*time.Second)
+	var event outbound.BlockEvent
+	if err := json.Unmarshal([]byte(body), &event); err != nil {
+		t.Fatalf("decoding the delivered BlockEvent: %v", err)
+	}
+	return event
 }
 
 func assertEventDescribes(t *testing.T, event outbound.BlockEvent, block blockFixture, version int) {
@@ -598,13 +630,16 @@ func TestDeployedNames_MatchTheAlertsAndTheRunbook(t *testing.T) {
 // run() is the whole binary from main()'s point of view. Cancelling before it
 // reaches Temporal is the one path a test can drive without a server, and it is
 // what proves the signal context actually stops the worker.
-func TestRun_StopsWhenTheContextIsCancelled(t *testing.T) {
+// A SIGTERM during startup — a pod rolled while it was still wiring itself up —
+// is a shutdown, not a failure: surfacing the cancelled context would exit 1 and
+// make an ordinary rollout read like a crash.
+func TestRun_StopsCleanlyWhenTheContextIsCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	err := run(ctx)
 
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("run = %v, want it to surface the cancelled context", err)
+	if err != nil {
+		t.Fatalf("run = %v, want a cancelled startup reported as a clean stop", err)
 	}
 }

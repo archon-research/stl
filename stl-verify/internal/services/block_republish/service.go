@@ -127,15 +127,8 @@ func NewService(config Config, client outbound.BlockchainClient, archive outboun
 // block for — the whole check happens here, before anything is cached or
 // published.
 func (s *Service) NextFreeVersion(ctx context.Context, blockNumber int64) (int, error) {
-	if err := validateHeight(blockNumber); err != nil {
-		return 0, err
-	}
-
-	head, err := s.client.GetCurrentBlockNumber(ctx)
+	head, err := s.settledHeight(ctx, blockNumber)
 	if err != nil {
-		return 0, fmt.Errorf("reading the chain head: %w", err)
-	}
-	if err := refuseNearHead(blockNumber, head); err != nil {
 		return 0, err
 	}
 
@@ -165,6 +158,81 @@ func (s *Service) NextFreeVersion(ctx context.Context, blockNumber int64) (int, 
 	return version, nil
 }
 
+// ArchivedVersion reports the version to republish a height at when the raw
+// archive has already been repaired ahead of the indexers: the bulk downloader
+// writes the canonical objects and tells no indexer, so the event must go out AT
+// the version those objects occupy rather than one past it. It refuses anything
+// but that state, and unlike NextFreeVersion it may answer 0 — a repair of a
+// height the archive never held writes there.
+func (s *Service) ArchivedVersion(ctx context.Context, blockNumber int64) (int, error) {
+	head, err := s.settledHeight(ctx, blockNumber)
+	if err != nil {
+		return 0, err
+	}
+
+	version, archived, err := s.archivedTopVersion(ctx, blockNumber)
+	if err != nil {
+		return 0, err
+	}
+	if !archived {
+		return 0, fmt.Errorf("archiveRepaired set but the archive holds nothing at block %d: %w", blockNumber, ErrStructuralData)
+	}
+
+	hash, err := s.confirmArchiveIsCanonical(ctx, blockNumber, head, version)
+	if err != nil {
+		return 0, err
+	}
+
+	s.logger.Info("derived the republish version from the repaired archive",
+		"chainID", s.config.ChainID,
+		"block", blockNumber,
+		"archiveRepaired", true,
+		"version", version,
+		"hash", hash,
+	)
+	return version, nil
+}
+
+// confirmArchiveIsCanonical holds an archiveRepaired run to the one state it
+// exists for: publishing at a version whose archived block is not the canonical
+// one would enshrine a fork in the slot meant to correct it.
+func (s *Service) confirmArchiveIsCanonical(ctx context.Context, blockNumber, head int64, version int) (string, error) {
+	archivedHash, found, err := s.archivedHash(ctx, blockNumber, version)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", fmt.Errorf("the archive's top version %d at block %d names no block; drop archiveRepaired: %w",
+			version, blockNumber, ErrStructuralData)
+	}
+
+	block, err := s.canonicalHeader(ctx, blockNumber, head)
+	if err != nil {
+		return "", err
+	}
+	if !strings.EqualFold(archivedHash, block.Hash) {
+		return "", fmt.Errorf("the archive's top version %d at block %d is not the canonical block (%s, want %s); drop archiveRepaired: %w",
+			version, blockNumber, archivedHash, block.Hash, ErrStructuralData)
+	}
+	return archivedHash, nil
+}
+
+// settledHeight refuses a height that is not one, and one the chain is still
+// free to reorg, returning the head both derivations then compare against.
+func (s *Service) settledHeight(ctx context.Context, blockNumber int64) (int64, error) {
+	if err := validateHeight(blockNumber); err != nil {
+		return 0, err
+	}
+	head, err := s.client.GetCurrentBlockNumber(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("reading the chain head: %w", err)
+	}
+	if err := refuseNearHead(blockNumber, head); err != nil {
+		return 0, err
+	}
+	return head, nil
+}
+
 func (s *Service) archivedTopVersion(ctx context.Context, blockNumber int64) (int, bool, error) {
 	highest, archived, err := s.archive.HighestVersion(ctx, blockNumber)
 	if err != nil {
@@ -185,9 +253,9 @@ func (s *Service) archivedTopVersion(ctx context.Context, blockNumber int64) (in
 // naming no block at all is a height to repair, which is why only a hash that
 // matches refuses.
 func (s *Service) refuseIfAlreadyCanonical(ctx context.Context, blockNumber, head int64, version int) error {
-	archivedHash, found, err := s.archive.BlockHashAt(ctx, blockNumber, version)
+	archivedHash, found, err := s.archivedHash(ctx, blockNumber, version)
 	if err != nil {
-		return fmt.Errorf("reading the block the archive holds at block %d version %d: %w", blockNumber, version, err)
+		return err
 	}
 	if !found {
 		return nil
@@ -202,6 +270,21 @@ func (s *Service) refuseIfAlreadyCanonical(ctx context.Context, blockNumber, hea
 			blockNumber, version, archivedHash, ErrStructuralData)
 	}
 	return nil
+}
+
+// archivedHash reads the block the archive names at a version. An object no
+// attempt can read — not a gzip stream, empty, or a hash beyond the prefix —
+// stops the height rather than burning the retry envelope on a fixed verdict.
+func (s *Service) archivedHash(ctx context.Context, blockNumber int64, version int) (string, bool, error) {
+	hash, found, err := s.archive.BlockHashAt(ctx, blockNumber, version)
+	if errors.Is(err, archiveblock.ErrUnreadable) {
+		return "", false, fmt.Errorf("reading the block the archive holds at block %d version %d: %v: %w",
+			blockNumber, version, err, ErrStructuralData)
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("reading the block the archive holds at block %d version %d: %w", blockNumber, version, err)
+	}
+	return hash, found, nil
 }
 
 // Republish caches the canonical block at blockNumber under version, reporting
@@ -269,9 +352,10 @@ func validateTarget(blockNumber int64, version int) error {
 	if err := validateHeight(blockNumber); err != nil {
 		return err
 	}
-	if version < s3key.FirstCorrectionVersion {
-		return fmt.Errorf("version must be at least %d, got %d — version 0 is the slot being corrected: %w",
-			s3key.FirstCorrectionVersion, version, ErrStructuralData)
+	// 0 is a legal target only for the archiveRepaired derivation, which is the
+	// caller that answers it; the default one never yields a slot below 1.
+	if version < 0 {
+		return fmt.Errorf("version must not be negative, got %d: %w", version, ErrStructuralData)
 	}
 	return nil
 }
@@ -379,9 +463,10 @@ func (s *Service) publishedPayloads(fetched outbound.BlockData) []payload {
 func validatePayloads(blockNumber int64, hash string, payloads []payload) ([]string, error) {
 	names := make([]string, 0, len(payloads))
 	for _, p := range payloads {
+		// Not structural, for the same reason canonicalHeader's null is not.
 		if isUpstreamNull(p.raw, p.fetchErr) {
-			return nil, fmt.Errorf("the node has no %s for block %d at hash %s: %w",
-				p.name, blockNumber, hash, ErrStructuralData)
+			return nil, fmt.Errorf("the node has no %s for block %d at hash %s; a node this far below the head that cannot serve it is behind",
+				p.name, blockNumber, hash)
 		}
 		if p.fetchErr != nil {
 			return nil, fmt.Errorf("fetching %s for block %d at hash %s: %w", p.name, blockNumber, hash, p.fetchErr)

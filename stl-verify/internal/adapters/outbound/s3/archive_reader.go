@@ -16,7 +16,7 @@ import (
 type archiveObjects interface {
 	ListPrefix(ctx context.Context, bucket, prefix string) ([]string, error)
 	ReadRange(ctx context.Context, bucket, key string, start, end int64) ([]byte, error)
-	ProbeListAccess(ctx context.Context, bucket string) error
+	ProbeListAccess(ctx context.Context, bucket, prefix string) error
 }
 
 var _ outbound.ArchiveReader = (*ArchiveReader)(nil)
@@ -33,16 +33,19 @@ func NewArchiveReader(lister archiveObjects, bucket string) *ArchiveReader {
 	return &ArchiveReader{lister: lister, bucket: bucket}
 }
 
-// probeObjectKey is what the startup read asks for: under a real partition prefix
-// so a prefix-scoped grant covers it, and named so nothing can ever be stored
-// there — its absence is the answer the probe expects.
-var probeObjectKey = s3key.HeightPrefix(0) + "startup-probe"
+// probePrefix is what the startup probes work under: a real partition prefix, so
+// a grant conditioned on one covers them. probeObjectKey names a key nothing can
+// ever be stored at — its absence is the answer the read expects.
+var (
+	probePrefix    = s3key.HeightPrefix(0)
+	probeObjectKey = probePrefix + "startup-probe"
+)
 
 // Ping reports whether the archive can be used at all: listed, and read. A
 // missing grant or a bucket that is not there stops the worker at startup instead
 // of failing every height of the first run.
 func (r *ArchiveReader) Ping(ctx context.Context) error {
-	if err := r.lister.ProbeListAccess(ctx, r.bucket); err != nil {
+	if err := r.lister.ProbeListAccess(ctx, r.bucket, probePrefix); err != nil {
 		return fmt.Errorf("listing s3://%s: this pod needs s3:ListBucket on that bucket: %w", r.bucket, err)
 	}
 	return r.probeObjectRead(ctx)

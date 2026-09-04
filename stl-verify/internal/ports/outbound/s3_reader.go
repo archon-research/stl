@@ -34,6 +34,11 @@ type S3Reader interface {
 // from a read that failed.
 var ErrObjectNotFound = errors.New("s3 object not found")
 
+// ErrObjectEmpty is what a ranged read answers for an object holding no bytes:
+// S3 refuses the range outright rather than returning an empty body, and a
+// caller planning around the archive has to tell that from a read that failed.
+var ErrObjectEmpty = errors.New("s3 object is empty")
+
 // S3RangeReader reads part of an object. It is separate from S3Reader so only
 // the callers that need a partial read take the dependency.
 type S3RangeReader interface {

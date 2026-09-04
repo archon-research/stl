@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/memory"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/archiveblock"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -25,6 +26,7 @@ const (
 	testParentHash = "0x2222222222222222222222222222222222222222222222222222222222222222"
 	forkHash       = "0x3333333333333333333333333333333333333333333333333333333333333333"
 	testTimestamp  = int64(0x68b0c0c0)
+	archivedKey    = "25395000-25395999/25395651_1_block.json.gz"
 )
 
 // stubClient answers only the three reads Republish issues. The embedded port is
@@ -144,6 +146,13 @@ func (f fixture) archiveHolds(highest int) {
 func (f fixture) archiveHoldsFork(highest int) {
 	f.archiveHolds(highest)
 	f.archive.hash, f.archive.hashFound = forkHash, true
+}
+
+// archiveHoldsCanonical is the state a bulk-downloader repair leaves behind: the
+// archive holds the canonical block and no indexer was told.
+func (f fixture) archiveHoldsCanonical(highest int) {
+	f.archiveHolds(highest)
+	f.archive.hash, f.archive.hashFound = testHash, true
 }
 
 // testConfig is the mainnet watcher's shape: traces on, blobs off.
@@ -411,15 +420,24 @@ func TestRepublish_LeavesAFailedHeadReadRetryable(t *testing.T) {
 	}
 }
 
-func TestRepublish_IsStructuralWhenTheNodeAnswersNullForAnExpectedDataType(t *testing.T) {
+// The head read already proved a synced node knows this height, so a null data
+// type is a replica behind that head — the same verdict the by-number read gets.
+// Nothing is cached or published either way.
+func TestRepublish_LeavesANullDataTypeRetryable(t *testing.T) {
 	client := newStubClient()
 	client.data.Receipts = nil
 	f := newFixture(t, client)
 
 	_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
 
-	if !errors.Is(err, ErrStructuralData) {
-		t.Fatalf("error = %v, want ErrStructuralData", err)
+	if err == nil {
+		t.Fatal("Republish succeeded on an incomplete payload")
+	}
+	if errors.Is(err, ErrStructuralData) {
+		t.Errorf("error = %v, want it left retryable", err)
+	}
+	if got := f.cached(t, "block", 1); got != nil {
+		t.Errorf("cached %s from an incomplete payload", got)
 	}
 	if count := f.sink.GetEventCount(); count != 0 {
 		t.Errorf("published %d events for an incomplete payload", count)
@@ -454,6 +472,10 @@ func TestNextFreeVersion_DerivesTheSlotFromWhatTheArchiveHolds(t *testing.T) {
 
 			if version != tc.want {
 				t.Errorf("version = %d, want %d", version, tc.want)
+			}
+			if version < s3key.FirstCorrectionVersion {
+				t.Errorf("version = %d, want at least %d — version 0 carries the data being corrected",
+					version, s3key.FirstCorrectionVersion)
 			}
 		})
 	}
@@ -524,6 +546,24 @@ func TestNextFreeVersion_LeavesAFailedHashReadRetryable(t *testing.T) {
 	}
 	if errors.Is(err, ErrStructuralData) {
 		t.Errorf("error = %v, want it left retryable", err)
+	}
+}
+
+// An archived object that will not decompress, or whose hash sits beyond the
+// prefix, answers the same on every attempt. Retrying it burns the whole
+// envelope on a fault only a repaired object can clear, so the height stops.
+func TestNextFreeVersion_IsStructuralWhenTheArchivedObjectCannotBeRead(t *testing.T) {
+	f := newFixture(t, newStubClient())
+	f.archiveHolds(1)
+	f.archive.hashErr = fmt.Errorf("reading %s: %w", archivedKey, archiveblock.ErrUnreadable)
+
+	_, err := f.service.NextFreeVersion(context.Background(), testBlock)
+
+	if !errors.Is(err, ErrStructuralData) {
+		t.Fatalf("error = %v, want ErrStructuralData", err)
+	}
+	if !strings.Contains(err.Error(), archivedKey) {
+		t.Errorf("error = %v, want it to name the key", err)
 	}
 }
 
@@ -651,10 +691,10 @@ func TestRepublish_NeverReadsTheArchive(t *testing.T) {
 	}
 }
 
-func TestRepublish_IsStructuralWhenAskedForVersionZero(t *testing.T) {
+func TestRepublish_IsStructuralWhenAskedForANegativeVersion(t *testing.T) {
 	f := newFixture(t, newStubClient())
 
-	_, err := f.service.Republish(context.Background(), testBlock, 0, nil)
+	_, err := f.service.Republish(context.Background(), testBlock, -1, nil)
 
 	if !errors.Is(err, ErrStructuralData) {
 		t.Fatalf("error = %v, want ErrStructuralData", err)
@@ -1015,5 +1055,152 @@ func TestNextFreeVersion_DoesNotWarnWhenTheArchiveHoldsTheHeight(t *testing.T) {
 
 	if got := recorder.MessagesAt(slog.LevelWarn); len(got) != 0 {
 		t.Errorf("warn messages = %v, want none", got)
+	}
+}
+
+// A #849 repair fixes S3 alone and tells no indexer, so the event has to go out
+// AT the version the repaired objects sit in: the backup worker's if-not-exists
+// write is then a no-op and every indexer appends that version.
+func TestArchivedVersion_PublishesAtTheVersionTheRepairedArchiveHolds(t *testing.T) {
+	tests := []struct {
+		name    string
+		highest int
+	}{
+		{name: "a height the repair archived fresh, at version 0", highest: 0},
+		{name: "a correction the repair wrote above the fork", highest: 1},
+		{name: "a height repaired above earlier corrections", highest: 4},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, newStubClient())
+			f.archiveHoldsCanonical(tc.highest)
+
+			version, err := f.service.ArchivedVersion(context.Background(), testBlock)
+			if err != nil {
+				t.Fatalf("ArchivedVersion: %v", err)
+			}
+
+			if version != tc.highest {
+				t.Errorf("version = %d, want the version the archive already holds, %d", version, tc.highest)
+			}
+		})
+	}
+}
+
+// archiveRepaired is a claim about the archive, and every shape that contradicts
+// it reproduces on every attempt: publishing anyway would put a fork at the
+// version the canonical block was supposed to occupy.
+func TestArchivedVersion_RefusesAnArchiveThatDoesNotHoldTheCanonicalBlock(t *testing.T) {
+	tests := []struct {
+		name     string
+		archive  func(f fixture)
+		mentions []string
+	}{
+		{
+			name:     "a height the archive holds nothing at",
+			archive:  func(fixture) {},
+			mentions: []string{"archiveRepaired", "holds nothing", "25395651"},
+		},
+		{
+			name:     "a top version that names no block",
+			archive:  func(f fixture) { f.archiveHolds(2) },
+			mentions: []string{"version 2", "names no block"},
+		},
+		{
+			name:     "a top version that is still the losing fork",
+			archive:  func(f fixture) { f.archiveHoldsFork(2) },
+			mentions: []string{"version 2", "not the canonical block", "drop archiveRepaired"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, newStubClient())
+			tc.archive(f)
+
+			_, err := f.service.ArchivedVersion(context.Background(), testBlock)
+
+			if !errors.Is(err, ErrStructuralData) {
+				t.Fatalf("error = %v, want ErrStructuralData", err)
+			}
+			for _, want := range tc.mentions {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %v, want it to mention %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestArchivedVersion_RefusesAHeightTooCloseToTheChainHead(t *testing.T) {
+	client := newStubClient()
+	client.head = testBlock + finalityDepth - 1
+	f := newFixtureWith(t, testConfig(), client)
+
+	_, err := f.service.ArchivedVersion(context.Background(), testBlock)
+
+	if !errors.Is(err, ErrStructuralData) {
+		t.Fatalf("error = %v, want ErrStructuralData", err)
+	}
+	if f.archive.calls != 0 {
+		t.Errorf("listed the archive %d times for a refused height", f.archive.calls)
+	}
+}
+
+func TestArchivedVersion_LeavesAFailedHashReadRetryable(t *testing.T) {
+	f := newFixture(t, newStubClient())
+	f.archiveHolds(1)
+	f.archive.hashErr = errors.New("503 SlowDown")
+
+	_, err := f.service.ArchivedVersion(context.Background(), testBlock)
+
+	if err == nil {
+		t.Fatal("ArchivedVersion succeeded without reading the archived block")
+	}
+	if errors.Is(err, ErrStructuralData) {
+		t.Errorf("error = %v, want it left retryable", err)
+	}
+}
+
+// The flag is what makes this run land where it does, so the line that records
+// the decision has to name it alongside the version and the hash it matched.
+func TestArchivedVersion_LogsTheRepairedDerivation(t *testing.T) {
+	var logged strings.Builder
+	config := testConfig()
+	config.Logger = slog.New(slog.NewTextHandler(&logged, nil))
+	f := newFixtureWith(t, config, newStubClient())
+	f.archiveHoldsCanonical(2)
+
+	if _, err := f.service.ArchivedVersion(context.Background(), testBlock); err != nil {
+		t.Fatalf("ArchivedVersion: %v", err)
+	}
+
+	for _, want := range []string{"archiveRepaired=true", "version=2", "hash=" + testHash} {
+		if !strings.Contains(logged.String(), want) {
+			t.Errorf("logs = %s, want a line carrying %q", logged.String(), want)
+		}
+	}
+}
+
+// Version 0 is a real target for an archiveRepaired run at a height #849
+// archived fresh, so Republish takes the version its run derived rather than
+// re-deciding which slots are legal.
+func TestRepublish_PublishesAtVersionZeroWhenTheRunDerivedIt(t *testing.T) {
+	f := newFixture(t, newStubClient())
+
+	result, err := f.service.Republish(context.Background(), testBlock, 0, nil)
+	if err != nil {
+		t.Fatalf("Republish: %v", err)
+	}
+
+	if result.Version != 0 {
+		t.Errorf("version = %d, want 0", result.Version)
+	}
+	if got := f.publishedEvent(t).Version; got != 0 {
+		t.Errorf("published version = %d, want 0", got)
+	}
+	if got := f.cached(t, "block", 0); got == nil {
+		t.Error("cached nothing at version 0")
 	}
 }

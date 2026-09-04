@@ -219,6 +219,21 @@ func TestRunWorker_RejectsInvalidConfigBeforeAnySetup(t *testing.T) {
 	}
 }
 
+// A pod told to stop before the worker was even built has done nothing wrong:
+// surfacing the cancelled context makes the main exit 1 and the rollout look
+// like a crash. RunWorker's clean stop after w.Run returns nil, and so does this.
+func TestRunWorker_TreatsACancelledStartupAsAShutdown(t *testing.T) {
+	t.Setenv("TEMPORAL_HOST_PORT", "127.0.0.1:1")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := RunWorker(ctx, BuildMeta{Commit: "test"}, validWorkerConfig())
+
+	if err != nil {
+		t.Fatalf("RunWorker = %v, want a cancelled startup reported as a clean stop", err)
+	}
+}
+
 func TestNewBootstrap_SurfacesACancelledContextWithoutDialingTemporal(t *testing.T) {
 	t.Setenv("TEMPORAL_HOST_PORT", "127.0.0.1:1")
 	ctx, cancel := context.WithCancel(context.Background())

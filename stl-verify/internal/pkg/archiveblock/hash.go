@@ -42,6 +42,11 @@ var hashSources = []hashSource{
 	{s3key.Receipts, 2, "blockHash"},
 }
 
+// ErrUnreadable marks an archived object no attempt can read: not a gzip stream,
+// a corrupt deflate stream, no bytes at all, or a hash beyond the ranged prefix.
+// Retrying any of them burns the whole envelope on a verdict that cannot change.
+var ErrUnreadable = errors.New("archived object cannot be read")
+
 // Hash returns the block hash the archive holds at (blockNumber, version), from
 // the block object or else the receipts. found is false when neither object is
 // there and when neither carries a hash: a zero-tx block's empty receipt list
@@ -77,18 +82,21 @@ func HashFromPayload(payload []byte) (string, bool) {
 
 func hashFromObject(ctx context.Context, reader RangeReader, bucket, key string, source hashSource) (string, error) {
 	stored, err := reader.ReadRange(ctx, bucket, key, 0, PrefixBytes-1)
+	if errors.Is(err, outbound.ErrObjectEmpty) {
+		return "", fmt.Errorf("reading %s: %w: %w", key, err, ErrUnreadable)
+	}
 	if err != nil {
 		return "", fmt.Errorf("reading %s: %w", key, err)
 	}
 
 	plain, err := gunzipPrefix(stored)
 	if err != nil {
-		return "", fmt.Errorf("decompressing %s: %w", key, err)
+		return "", fmt.Errorf("decompressing %s: %w: %w", key, err, ErrUnreadable)
 	}
 
 	hash, outcome := scanStringField(plain, source.Depth, source.Field)
 	if outcome == fieldTruncated {
-		return "", fmt.Errorf("no %s in the first %d bytes of %s", source.Field, PrefixBytes, key)
+		return "", fmt.Errorf("no %s in the first %d bytes of %s: %w", source.Field, PrefixBytes, key, ErrUnreadable)
 	}
 	return hash, nil
 }

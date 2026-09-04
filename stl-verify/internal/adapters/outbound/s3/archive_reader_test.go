@@ -143,8 +143,10 @@ func TestArchiveReader_SurfacesAFailedListing(t *testing.T) {
 }
 
 // The worker probes at startup rather than discovering a missing s3:ListBucket
-// grant on the first repair, half an hour into a run.
-func TestArchiveReader_PingListsOneKeyFromTheBucket(t *testing.T) {
+// grant on the first repair, half an hour into a run. The probe lists a real
+// partition prefix, like the object probe reads one: a grant conditioned on a
+// prefix denies a listing of the bucket root.
+func TestArchiveReader_PingListsOneKeyUnderARealPartitionPrefix(t *testing.T) {
 	mock, seen := listingOf("25395000-25395999/25395651_0_block.json.gz")
 
 	if err := newArchiveReader(mock).Ping(context.Background()); err != nil {
@@ -157,8 +159,8 @@ func TestArchiveReader_PingListsOneKeyFromTheBucket(t *testing.T) {
 	if got := aws.ToInt32(seen.MaxKeys); got != 1 {
 		t.Errorf("probed with MaxKeys %d, want 1", got)
 	}
-	if seen.Prefix != nil {
-		t.Errorf("probed prefix %q, want the bucket itself", aws.ToString(seen.Prefix))
+	if got, want := aws.ToString(seen.Prefix), "0-999/0_"; got != want {
+		t.Errorf("probed prefix %q, want %q", got, want)
 	}
 }
 

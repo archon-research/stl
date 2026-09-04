@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -410,6 +411,25 @@ func TestReadRange_ReportsAMissingObjectAsNotFound(t *testing.T) {
 	}
 }
 
+// A zero-byte object is not a read failure: S3 has no range to serve and refuses
+// with InvalidRange, and a caller reading archive prefixes has to tell that from
+// a throttled or unreachable read it should try again.
+func TestReadRange_ReportsAZeroByteObjectAsEmpty(t *testing.T) {
+	mock := &mockS3API{getObjectFunc: func(context.Context, *s3.GetObjectInput, ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+		return nil, &smithy.GenericAPIError{Code: "InvalidRange", Fault: smithy.FaultClient}
+	}}
+	reader := &Reader{client: mock, logger: slog.Default()}
+
+	_, err := reader.ReadRange(context.Background(), "bucket", "0-999/1_0_block.json.gz", 0, 8191)
+
+	if !errors.Is(err, outbound.ErrObjectEmpty) {
+		t.Fatalf("error = %v, want ErrObjectEmpty", err)
+	}
+	if !strings.Contains(err.Error(), "0-999/1_0_block.json.gz") {
+		t.Errorf("error = %v, want it to name the key", err)
+	}
+}
+
 func TestReadRange_KeepsARealFailureADistinctError(t *testing.T) {
 	mock := &mockS3API{getObjectFunc: func(context.Context, *s3.GetObjectInput, ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
 		return nil, errors.New("503 SlowDown")
@@ -421,8 +441,8 @@ func TestReadRange_KeepsARealFailureADistinctError(t *testing.T) {
 	if err == nil {
 		t.Fatal("ReadRange succeeded against a failing GET")
 	}
-	if errors.Is(err, outbound.ErrObjectNotFound) {
-		t.Errorf("error = %v, want a throttled read left distinct from a missing object", err)
+	if errors.Is(err, outbound.ErrObjectNotFound) || errors.Is(err, outbound.ErrObjectEmpty) {
+		t.Errorf("error = %v, want a throttled read left distinct from an object that answered", err)
 	}
 }
 

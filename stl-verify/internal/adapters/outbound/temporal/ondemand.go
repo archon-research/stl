@@ -3,6 +3,7 @@ package temporal
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/interceptor"
@@ -136,6 +137,12 @@ func RunWorker(ctx context.Context, meta BuildMeta, cfg WorkerConfig) error {
 
 	boot, err := newBootstrap(ctx, meta, cfg.Name, cfg.OpenDatabase)
 	if err != nil {
+		// A pod told to stop before the worker was built has done nothing wrong:
+		// returning the error here would exit 1 on an ordinary rollout.
+		if ctx.Err() != nil {
+			slog.Info("shutdown requested during startup", "taskQueue", cfg.Name)
+			return nil
+		}
 		return err
 	}
 	defer boot.close()
