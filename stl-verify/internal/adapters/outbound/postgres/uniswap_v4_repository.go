@@ -415,6 +415,8 @@ func (rows v4BatchRows) sections() []v4BatchSection {
 	}
 }
 
+// processing_version comes from each table's next_processing_version_* function, not
+// its trigger: on a columnstored chunk the arbiter resolves before triggers fire (VEC-615).
 func queueUniswapV4Batch(batch *pgx.Batch, rows v4BatchRows, buildID buildregistry.BuildID) {
 	queueV4States(batch, rows.states, buildID)
 	queueV4Swaps(batch, rows.swaps, buildID)
@@ -429,8 +431,9 @@ func queueV4States(batch *pgx.Batch, states []v4StateConverted, buildID buildreg
 			`INSERT INTO uniswap_v4_pool_state
 			   (pool_id, block_number, block_version, block_timestamp,
 			    sqrt_price_x96, tick, protocol_fee, lp_fee, liquidity,
-			    fee_growth_global0_x128, fee_growth_global1_x128, build_id)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+			    fee_growth_global0_x128, fee_growth_global1_x128, processing_version, build_id)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+			         next_processing_version_uniswap_v4_pool_state($1,$2,$3,$12), $12)
 			 ON CONFLICT (pool_id, block_timestamp, block_number, block_version, processing_version) DO NOTHING`,
 			s.PoolID, s.BlockNumber, s.BlockVersion, s.BlockTimestamp,
 			c.sqrtPriceX96, s.Tick, s.ProtocolFee, s.LpFee, c.liquidity,
@@ -446,8 +449,9 @@ func queueV4Swaps(batch *pgx.Batch, swaps []v4SwapConverted, buildID buildregist
 			`INSERT INTO uniswap_v4_swap
 			   (pool_id, block_number, block_version, block_timestamp,
 			    tx_hash, log_index, sender, amount0, amount1,
-			    sqrt_price_x96, liquidity, tick, fee, build_id)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+			    sqrt_price_x96, liquidity, tick, fee, processing_version, build_id)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
+			         next_processing_version_uniswap_v4_swap($1,$2,$3,$6,$14), $14)
 			 ON CONFLICT (pool_id, block_timestamp, block_number, block_version, log_index, processing_version) DO NOTHING`,
 			s.PoolID, s.BlockNumber, s.BlockVersion, s.BlockTimestamp,
 			s.TxHash.Bytes(), s.LogIndex, s.Sender.Bytes(), c.amount0, c.amount1,
@@ -463,8 +467,9 @@ func queueV4LiquidityEvents(batch *pgx.Batch, liqs []v4LiquidityEventConverted, 
 			`INSERT INTO uniswap_v4_liquidity_event
 			   (pool_id, block_number, block_version, block_timestamp,
 			    tx_hash, log_index, sender, tick_lower, tick_upper,
-			    liquidity_delta, salt, build_id)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+			    liquidity_delta, salt, processing_version, build_id)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+			         next_processing_version_uniswap_v4_liquidity_event($1,$2,$3,$6,$12), $12)
 			 ON CONFLICT (pool_id, block_timestamp, block_number, block_version, log_index, processing_version) DO NOTHING`,
 			e.PoolID, e.BlockNumber, e.BlockVersion, e.BlockTimestamp,
 			e.TxHash.Bytes(), e.LogIndex, e.Sender.Bytes(), e.TickLower, e.TickUpper,
@@ -478,8 +483,9 @@ func queueV4PoolEvents(batch *pgx.Batch, poolEvents []*entity.UniswapV4PoolEvent
 		batch.Queue(
 			`INSERT INTO uniswap_v4_pool_event
 			   (pool_id, block_number, block_version, block_timestamp,
-			    tx_hash, log_index, event_name, params, build_id)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+			    tx_hash, log_index, event_name, params, processing_version, build_id)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,
+			         next_processing_version_uniswap_v4_pool_event($1,$2,$3,$6,$9), $9)
 			 ON CONFLICT (pool_id, block_timestamp, block_number, block_version, log_index, processing_version) DO NOTHING`,
 			e.PoolID, e.BlockNumber, e.BlockVersion, e.BlockTimestamp,
 			e.TxHash.Bytes(), e.LogIndex, string(e.EventName), []byte(e.Params), int(buildID),
