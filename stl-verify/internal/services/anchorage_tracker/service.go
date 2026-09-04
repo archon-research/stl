@@ -23,6 +23,7 @@ type Service struct {
 	operationRepo outbound.AnchorageOperationRepository
 	primeID       int64
 	logger        *slog.Logger
+	telemetry     *Telemetry
 }
 
 // NewService creates a new anchorage tracker service.
@@ -32,6 +33,7 @@ func NewService(
 	operationRepo outbound.AnchorageOperationRepository,
 	primeID int64,
 	logger *slog.Logger,
+	telemetry *Telemetry,
 ) *Service {
 	if logger == nil {
 		logger = slog.Default()
@@ -42,6 +44,7 @@ func NewService(
 		operationRepo: operationRepo,
 		primeID:       primeID,
 		logger:        logger,
+		telemetry:     telemetry,
 	}
 }
 
@@ -125,6 +128,7 @@ func (s *Service) poll(ctx context.Context) (int, error) {
 	}
 
 	if len(snapshots) == 0 {
+		s.telemetry.RecordSnapshotsStored(ctx, 0)
 		s.logger.Info("no snapshots to store")
 		return 0, nil
 	}
@@ -133,6 +137,7 @@ func (s *Service) poll(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("save snapshots: %w", err)
 	}
 
+	s.telemetry.RecordSnapshotsStored(ctx, len(snapshots))
 	s.logger.Info("stored snapshots", "count", len(snapshots))
 	return len(snapshots), nil
 }

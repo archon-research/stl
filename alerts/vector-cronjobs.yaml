@@ -337,6 +337,69 @@ groups:
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorcoremodelrunnerstale
 
       # =======================================================================
+      # anchorage-indexer (ARCT-229): silent-empty rule
+      # =======================================================================
+      # The generic rules above key on run OUTCOME, and a poll that fetches zero
+      # packages is a successful run. Between 2026-06-16 and 2026-08-19 the
+      # Anchorage API answered 200 with an empty package list on every tick;
+      # anchorage_package_snapshot stopped growing while $250M of live BTC
+      # collateral stayed on the venue, and no rule here moved. Signal (OTel
+      # counter, once per poll, 0 included):
+      #   anchorage_snapshots_stored_total  (rows written to anchorage_package_snapshot)
+      #
+      # Anchorage-specific by design: generalising this to every poll-and-store
+      # cronjob would mean threading a row count through the shared Runner
+      # interface and every cronjob that implements it.
+
+      # -----------------------------------------------------------------------
+      # CRITICAL — runs succeed but nothing is being recorded
+      # -----------------------------------------------------------------------
+      - alert: VectorAnchorageNoSnapshotsStored
+        # Gated on "succeeding AND zero" (the VectorMaplePoolWritesZero shape) so
+        # it does not restate VectorCronjobAllRunsFailing or
+        # VectorCronjobWorkerDown — those cover the cases where the runs
+        # themselves stop. 2h spans 8 ticks of the 15m schedule; the venue holds
+        # standing collateral, so 8 consecutive empty polls is never legitimate.
+        #
+        # A genuinely wound-down venue would also hold this firing. That is a
+        # decommission decision, not a tuning problem — see the runbook.
+        expr: |
+          (
+            sum by (cluster) (
+              increase(cronjob_runs_total{
+                service_name="anchorage-indexer",
+                status="success",
+                k8s_namespace_name="vector"
+              }[2h])
+            ) > 0
+          )
+          and
+          (
+            sum by (cluster) (
+              increase(anchorage_snapshots_stored_total{
+                service_name="anchorage-indexer",
+                k8s_namespace_name="vector"
+              }[2h])
+            ) == 0
+          )
+        for: 30m
+        labels:
+          team: vector
+          severity: critical
+          component: anchorage-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector anchorage-indexer stored 0 collateral snapshots"
+          description: |
+            `anchorage-indexer` completed runs over the last 2h but wrote 0 rows
+            to `anchorage_package_snapshot`. The Anchorage API is answering 200
+            with an empty package list (or every package went inactive), so the
+            recorded Spark collateral position is frozen at whatever it last
+            saw while the real position keeps moving. Check the pod's
+            `fetched packages count=` log line, then the API credential.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectoranchoragenosnapshotsstored
+
+      # =======================================================================
       # transform-worker (VEC-484): queue-drain and parity rules
       # =======================================================================
       # These live here, not in a vector-transform-worker.yaml, because the

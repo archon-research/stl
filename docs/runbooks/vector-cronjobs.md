@@ -1554,6 +1554,76 @@ exposure.
 
 ---
 
+## VectorAnchorageNoSnapshotsStored
+
+**Severity:** critical (pages) · **For:** 30m
+
+### What it means
+
+`anchorage-indexer` ran successfully over the last 2h (8 ticks of its 15m
+schedule) but wrote **0 rows** to `anchorage_package_snapshot`. The table is the
+only record of Spark's custodied collateral at Anchorage, so it is now frozen at
+whatever it last saw while the real position keeps moving — the risk models keep
+reading the stale value with no indication it is stale.
+
+This is the gap the run-outcome rules cannot see. Fetching zero packages is not
+an error: `FetchPackages` gets a 200, `Run` returns nil, the Temporal run is
+`status="success"`, and `VectorCronjobRunFailing` / `VectorCronjobAllRunsFailing`
+/ `VectorCronjobWorkerDown` all stay green. That is exactly what happened between
+2026-06-16 and 2026-08-19, undetected.
+
+### First checks (≤5 min)
+
+1. **Is the API returning packages at all?**
+
+   ```bash
+   kubectl -n vector logs deploy/spark-anchorage-indexer --tail=100 | grep "fetched packages"
+   ```
+
+   - `count=0` → upstream. The API is answering 200 with an empty list.
+   - `count>0` → the packages are being fetched but dropped by
+     `filterActivePackages`; look for `skipping inactive anchorage package`
+     warnings in the same logs. Every package went `active=false`.
+
+2. **Credential.** An Anchorage key that has been rotated, revoked, or rescoped
+   to a different prime returns an empty collection rather than a 401, so it
+   fails exactly like this. Compare against
+   `stl-<env>-anchorage-api-key` in Secrets Manager and confirm
+   `ANCHORAGE_PRIME` still matches the key's prime — a mismatched pair is
+   silently accepted (see the note in `cmd/cronjobs/anchorage-indexer/main.go`).
+
+3. **Last good data.**
+
+   ```sql
+   SELECT max(snapshot_time), count(*) FROM anchorage_package_snapshot;
+   ```
+
+   Gives the date the feed went quiet, which dates the credential/contract change.
+
+4. **Cross-check the live position** against Block Analitica's Spark dashboard.
+   If the venue still shows exposure, the data is missing, not gone.
+
+### Common causes
+
+- API key rotated or rescoped upstream → empty list, no 401.
+- Anchorage moved the packages to a different prime or endpoint.
+- Every package legitimately closed (`active=false`) → the alert is correct and
+  the venue is wound down.
+
+### Verify recovery
+
+`increase(anchorage_snapshots_stored_total[2h]) > 0`, and a fresh
+`stored snapshots count=` log line. Confirm in the DB that `max(snapshot_time)`
+is now current.
+
+### If the venue is genuinely wound down
+
+The alert will hold indefinitely — that is intended, not a tuning problem. Zero
+collateral at Anchorage means the indexer has no job left, so the fix is to
+retire it (drop the Deployment and this rule), not to widen the window.
+
+---
+
 ## Adding a new cronjob
 
 Failure + all-failing alerts are automatic (they group by `service_name`).
