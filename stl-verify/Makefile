@@ -933,6 +933,22 @@ dev-up-new:
 	echo "Follow-up commands need the cluster only — the offset is derived from it:"; \
 	echo "    export KIND_CLUSTER=$$name"
 
+# Seeds the position_id stack into a DEV database: source rows for the three protocol
+# materializers, then position_state and position_current. Idempotent -- a re-run appends
+# nothing. Warns per materializer whose migration is not applied rather than seeding silently.
+dev-seed-positions:
+	@DB="$${DATABASE_URL:-postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable}"; \
+	case "$$DB" in \
+	  *127.0.0.1*|*localhost*) ;; \
+	  *) if [ "$$SEED_REMOTE" != "1" ]; then \
+	       echo "refusing to seed a non-local database ($$DB)."; \
+	       echo "This writes fake positions. Set SEED_REMOTE=1 if that is really what you want."; \
+	       exit 1; \
+	     fi ;; \
+	esac; \
+	echo "==> Seeding the position stack into $$DB"; \
+	psql "$$DB" -v ON_ERROR_STOP=1 -f db/seeds/position_stack.sql
+
 dev-down: kind-delete
 
 # Suspend local kind nodes without deleting cluster state.
