@@ -424,10 +424,10 @@ is nonzero over the last 10m: a header arrived at or below the canonical head
 and did NOT link cleanly onto our chain, so it was routed to reorg handling
 rather than classified as a clean gap fill. The rule is scoped to an explicit
 allow-list of the single-sequencer rollup watchers (arbitrum, optimism, base,
-unichain, avalanche), where a real reorg is essentially impossible, so this is
-the over-orphaning trigger from the 2026-06-02 incident. Ethereum (the bare
-`watcher`) reorgs normally (depth 1, a few times a day) and is deliberately not
-listed. New single-sequencer chains must be added to the allow-list when
+unichain, avalanche, robinhood), where a real reorg is essentially impossible, so
+this is the over-orphaning trigger from the 2026-06-02 incident. Ethereum (the
+bare `watcher`) reorgs normally (depth 1, a few times a day) and is deliberately
+not listed. New single-sequencer chains must be added to the allow-list when
 onboarded. Scoping by service name is interim; the proper fix is a chain-behavior
 label so alerts stop hardcoding chain names (see VEC-295). Unlike
 VectorWatcherOutOfOrderBlocksHigh (a sustained-rate warning across all outcomes),
@@ -449,6 +449,27 @@ verification before any state mutation, and the backfill self-heals any
 over-orphaning, so a single occurrence is a signal rather than confirmed damage.
 Sustained occurrences mean upstream is degraded and the watcher is doing
 defensive work it should not need to.
+
+Known detection gap: `increase()` cannot see a series' first sample, so the very
+first `outcome="reorg"` classification on a newly onboarded chain does not fire —
+only the second one does. If you are investigating a chain's first weeks, query
+`live_block_out_of_order_total{outcome="reorg"}` directly rather than trusting
+the alert's silence.
+
+**`robinhood-watcher` (ARCT-397).** robinhood is a single-sequencer chain, so it
+joined the allow-list on the same grounds as the other rollups. Its manifests
+live in `k8s/base` only and are not yet referenced from a cluster overlay, so
+`service_name="robinhood-watcher"` emits nothing today — this applies from the
+moment it is deployed.
+
+Do NOT discount a robinhood firing as "upstream is dropping heads again". A head
+Alchemy omits and then delivers late still links cleanly onto our chain, so it is
+recorded as `outcome="late_arrival"` (see `OutOfOrderOutcomeLateArrival` in
+`stl-verify/internal/ports/outbound/metrics.go`) — the bucket this rule
+deliberately excludes. Omitted heads surface in
+VectorWatcherOutOfOrderBlocksHigh, not here. Reaching `outcome="reorg"` means the
+block did not link, which on a single-sequencer chain is the dangerous case on
+robinhood exactly as on the other five. Triage it as the first checks describe.
 
 ### Verify recovery
 
