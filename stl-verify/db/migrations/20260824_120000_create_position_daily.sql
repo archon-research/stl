@@ -35,7 +35,9 @@ CREATE TABLE IF NOT EXISTS position_daily (
     -- form also admits a decimal surrogate rendered as text ('12345' is all hex digits), and a cache that
     -- accepted a holder the spine rejects could never be reproduced from the spine.
     CONSTRAINT position_daily_holder_hex_chk CHECK (holder_id ~ '^[0-9a-f]{40}$'),
-    -- Mirrors position_state: a key longer than the bridge's PK btree can store resolves to nothing.
+    -- instrument_key feeds the position_id hash and is copied into every derived cache. A sanity
+    -- bound on an unbounded text column: no legitimate source form approaches it. position_state
+    -- carries the same cap, justified there by the now-decommissioned bridge (ADR-0005).
     CONSTRAINT position_daily_instrument_key_len_chk CHECK (char_length(instrument_key) <= 2000),
     CONSTRAINT position_daily_coord_nonneg_chk CHECK (block_number >= 0 AND block_version >= 0 AND processing_version >= 0 AND build_id >= 0),
     CONSTRAINT position_daily_chain_pos_chk CHECK (chain_id IS NULL OR chain_id > 0),
