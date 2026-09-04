@@ -1,7 +1,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: uniswap-v3-indexer
+  name: uniswap-v4-indexer
 spec:
   replicas: 1
   # Explicit, matching the API-server default — ArgoCD must own spec.strategy or
@@ -13,15 +13,15 @@ spec:
       maxUnavailable: 25%
   selector:
     matchLabels:
-      app: uniswap-v3-indexer
+      app: uniswap-v4-indexer
   template:
     metadata:
       labels:
-        app: uniswap-v3-indexer
+        app: uniswap-v4-indexer
     spec:
-      serviceAccountName: uniswap-v3-indexer
+      serviceAccountName: uniswap-v4-indexer
       containers:
-        - name: uniswap-v3-indexer
+        - name: uniswap-v4-indexer
           # Image name used as the Kustomize images transformer key.
           # The overlay kustomization.yaml overrides newName + newTag.
           image: dex-indexer
@@ -29,10 +29,10 @@ spec:
             - configMapRef:
                 name: otel-config
             - configMapRef:
-                name: uniswap-v3-indexer-config
+                name: uniswap-v4-indexer-config
             - secretRef:
                 # Populated by ExternalSecret — secret name mirrors the service.
-                name: uniswap-v3-indexer
+                name: uniswap-v4-indexer
           resources:
             requests:
               cpu: "50m"

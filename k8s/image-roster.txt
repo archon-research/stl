@@ -42,7 +42,7 @@ service psm3-indexer               arbitrum-psm3-indexer base-psm3-indexer optim
 service morpho-indexer             morpho-indexer
 service prime-debt-indexer         prime-debt-indexer
 service fluid-vault-indexer        fluid-vault-indexer
-service dex-indexer                dex-indexer                # curve-indexer + uniswap-v3-indexer bases; DEX env selects the factory
+service dex-indexer                dex-indexer                # curve-indexer + uniswap-v3-indexer + uniswap-v4-indexer bases; DEX env selects the factory
 service cex-orderbook-indexer      cex-orderbook-indexer      # one image for every per-exchange order book pod; EXCHANGE env selects
 service migrate                    migrate
 service python-api                 python-api core-model-runner  # core-model-runner is a Python entry point shipped inside the python-api image
