@@ -22,10 +22,14 @@ type WorkerConfig struct {
 	// Name is the task queue and the OTel service name.
 	Name string
 
-	// OpenDatabase opens the app database pool. Optional: a job that touches no
-	// Postgres leaves it nil and gets a nil Dependencies.Pool, so its deployment
-	// needs no database credential.
+	// OpenDatabase opens the app database pool. Required unless NoDatabase says
+	// this job wants none, so a job that loses its opener to a wiring mistake
+	// fails at startup rather than running pool-less.
 	OpenDatabase func(ctx context.Context) (*pgxpool.Pool, error)
+
+	// NoDatabase declares that this job touches no Postgres: it gets a nil
+	// Dependencies.Pool and its deployment needs no database credential.
+	NoDatabase bool
 
 	// Register attaches the job's workflows and activities. It runs after the
 	// database pool is open so activity structs can capture their dependencies.
@@ -52,6 +56,12 @@ func (c WorkerConfig) validate() error {
 	}
 	if c.Register == nil {
 		return fmt.Errorf("WorkerConfig.Register is required")
+	}
+	if c.OpenDatabase == nil && !c.NoDatabase {
+		return fmt.Errorf("WorkerConfig.OpenDatabase is required (or set NoDatabase)")
+	}
+	if c.OpenDatabase != nil && c.NoDatabase {
+		return fmt.Errorf("WorkerConfig.OpenDatabase and NoDatabase are mutually exclusive")
 	}
 	return nil
 }

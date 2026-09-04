@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/archiveblock"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
@@ -146,6 +147,11 @@ func (s *Service) NextFreeVersion(ctx context.Context, blockNumber int64) (int, 
 		if err := s.refuseIfAlreadyCanonical(ctx, blockNumber, head, highest); err != nil {
 			return 0, err
 		}
+	} else {
+		s.logger.Warn("repairing a height the archive holds nothing for; no archived object to compare with the canonical chain",
+			"chainID", s.config.ChainID,
+			"block", blockNumber,
+		)
 	}
 
 	version := s3key.NextVersion(highest, archived)
@@ -294,6 +300,7 @@ func refuseNearHead(blockNumber, head int64) error {
 
 // blockHeader is the part of an eth_getBlockByNumber answer the event carries.
 type blockHeader struct {
+	Number     string `json:"number"`
 	Hash       string `json:"hash"`
 	ParentHash string `json:"parentHash"`
 	Timestamp  string `json:"timestamp"`
@@ -327,6 +334,9 @@ func (s *Service) fetchPinnedToHash(ctx context.Context, blockNumber int64, hash
 
 	dataTypes, err := validatePayloads(blockNumber, hash, s.publishedPayloads(fetched))
 	if err != nil {
+		return outbound.BlockDataInput{}, nil, err
+	}
+	if err := confirmPayloadHash(blockNumber, hash, fetched.Block); err != nil {
 		return outbound.BlockDataInput{}, nil, err
 	}
 
@@ -379,6 +389,22 @@ func validatePayloads(blockNumber int64, hash string, payloads []payload) ([]str
 		names = append(names, p.name)
 	}
 	return names, nil
+}
+
+// confirmPayloadHash holds the by-hash answer to the hash it was pinned to:
+// pinning keeps the data types consistent with each other, not with the header
+// the event carries beside them.
+func confirmPayloadHash(blockNumber int64, hash string, block json.RawMessage) error {
+	got, found := archiveblock.HashFromPayload(block)
+	if !found {
+		return fmt.Errorf("the payload fetched for block %d at hash %s carries no hash: %w",
+			blockNumber, hash, ErrStructuralData)
+	}
+	if !strings.EqualFold(got, hash) {
+		return fmt.Errorf("the payload fetched for block %d at hash %s names block %s instead: %w",
+			blockNumber, hash, got, ErrStructuralData)
+	}
+	return nil
 }
 
 // confirmStillCanonical re-reads the height once the payload is in hand. Pinning
@@ -434,6 +460,9 @@ func decodeHeader(blockNumber int64, raw json.RawMessage) (blockHeader, error) {
 	if block.Hash == "" {
 		return blockHeader{}, fmt.Errorf("block %d came back without a hash: %w", blockNumber, ErrStructuralData)
 	}
+	if err := confirmHeight(blockNumber, block.Number); err != nil {
+		return blockHeader{}, err
+	}
 	timestamp, err := hexutil.ParseInt64(block.Timestamp)
 	if err != nil {
 		return blockHeader{}, fmt.Errorf("decoding block %d timestamp %q: %v: %w",
@@ -441,6 +470,23 @@ func decodeHeader(blockNumber int64, raw json.RawMessage) (blockHeader, error) {
 	}
 	block.timestamp = timestamp
 	return block, nil
+}
+
+// confirmHeight holds the answer to the height that was asked for. A replica
+// serving a neighbouring block by number would otherwise have it cached and
+// published under the requested one, as that height's correction.
+func confirmHeight(blockNumber int64, number string) error {
+	if number == "" {
+		return fmt.Errorf("block %d came back without a number: %w", blockNumber, ErrStructuralData)
+	}
+	got, err := hexutil.ParseInt64(number)
+	if err != nil {
+		return fmt.Errorf("decoding block %d number %q: %v: %w", blockNumber, number, err, ErrStructuralData)
+	}
+	if got != blockNumber {
+		return fmt.Errorf("asked for block %d and got block %d: %w", blockNumber, got, ErrStructuralData)
+	}
+	return nil
 }
 
 // isUpstreamNull reports the one RPC answer that means "no such block or

@@ -854,10 +854,13 @@ version the worker reads the block hash out of the first 8 KB of the top archive
 version's `_block` object (falling back to its `_receipts`) and compares it with
 the canonical hash the node reports. If they match, that height fails
 `StructuralData` — "already canonical in the archive at version N" — before
-anything is cached or published, so a healthy height listed by mistake cannot
+anything is cached or published, so a healthy height **the archive holds** cannot
 gain a permanent identical extra version. A version that names no block at all
 (no `_block`, no `_receipts`, or only a data type this binary does not know) is
-treated as a height to repair, and the run proceeds at the next slot.
+treated as a height to repair, and the run proceeds at the next slot. A height the
+archive holds nothing for has no object to compare against at all: it is repaired
+at version 1 on your word alone, and logs a warning saying so — list such a height
+only once the dry run below or the indexers have proved the fork.
 
 That makes the bulk downloader's dry run (#849) a cheap pre-check rather than a
 safety net — useful for sizing a run before you start it:

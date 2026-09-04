@@ -347,9 +347,8 @@ data:
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector-opentelemetry-collector.observability.svc.cluster.local:4317"
 ---
 # On-demand block republisher (ARCT-383) — see docs/runbooks/vector-cronjobs.md.
-# ALCHEMY_HTTP_URL is omitted: the binary defaults to eth-mainnet, matching
-# CHAIN_ID below. AWS_SNS_TOPIC_ARN and REDIS_ADDR arrive via the ExternalSecret,
-# the same infra-config values the ethereum watcher publishes with.
+# AWS_SNS_TOPIC_ARN and REDIS_ADDR arrive via the ExternalSecret, the same
+# infra-config values the ethereum watcher publishes with.
 # DEPLOY_ENV is what the startup guard validates that topic's chain against.
 apiVersion: v1
 kind: ConfigMap

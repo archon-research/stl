@@ -36,8 +36,18 @@ func TestWorkerConfig_Validate(t *testing.T) {
 			wantErr: "Name is required",
 		},
 		{
-			name:   "no database opener",
-			mutate: func(c *WorkerConfig) { c.OpenDatabase = nil },
+			name:    "no database opener and no declaration that none is wanted",
+			mutate:  func(c *WorkerConfig) { c.OpenDatabase = nil },
+			wantErr: "OpenDatabase is required (or set NoDatabase)",
+		},
+		{
+			name:   "a job that declares it wants no database",
+			mutate: func(c *WorkerConfig) { c.OpenDatabase, c.NoDatabase = nil, true },
+		},
+		{
+			name:    "an opener alongside the declaration that none is wanted",
+			mutate:  func(c *WorkerConfig) { c.NoDatabase = true },
+			wantErr: "mutually exclusive",
 		},
 		{
 			name:    "missing register hook",

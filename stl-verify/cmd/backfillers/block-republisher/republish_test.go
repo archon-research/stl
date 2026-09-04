@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,8 @@ import (
 	temporalsdk "go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/memory"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/block_republish"
 )
 
@@ -461,9 +465,8 @@ func (h *heartbeatStub) Reset() { h.saved, h.beats = nil, 0 }
 // caching or publishing, rather than only that its worker is alive.
 func TestRecordPhase_CarriesTheHeightItsVersionAndThePhase(t *testing.T) {
 	store := &heartbeatStub{}
-	activities := &republishActivities{progress: store}
 
-	report := activities.recordPhase(blockWork{Number: 25395651, Version: 2})
+	report := recordPhase(store, blockWork{Number: 25395651, Version: 2})
 	report(context.Background(), block_republish.PhaseFetching)
 	report(context.Background(), block_republish.PhaseCaching)
 
@@ -495,5 +498,90 @@ func TestRepublishActivityOptions_NoticeADeadWorkerInsideTheDedupWindow(t *testi
 	if options.HeartbeatTimeout+options.RetryPolicy.InitialInterval >= snsDeduplicationWindow {
 		t.Errorf("a dead worker costs %s before the retry, past the %s deduplication window",
 			options.HeartbeatTimeout+options.RetryPolicy.InitialInterval, snsDeduplicationWindow)
+	}
+}
+
+// stubHead sits far enough above every height these tests republish to clear the
+// finality guard.
+const stubHead = int64(26_000_000)
+
+func stubHash(blockNumber int64) string { return fmt.Sprintf("0x%064x", blockNumber) }
+
+// chainStub serves the canonical block at every height it is asked for. The
+// embedded port is nil, so a read the republish does not issue panics rather
+// than answering zero.
+type chainStub struct {
+	outbound.BlockchainClient
+}
+
+func (chainStub) GetCurrentBlockNumber(context.Context) (int64, error) { return stubHead, nil }
+
+func (chainStub) GetBlockByNumber(_ context.Context, blockNumber int64, _ bool) (json.RawMessage, error) {
+	return json.RawMessage(fmt.Sprintf(`{"number":"0x%x","hash":%q,"parentHash":"0x02","timestamp":"0x68b0c0c0"}`,
+		blockNumber, stubHash(blockNumber))), nil
+}
+
+func (chainStub) GetBlockDataByHash(_ context.Context, blockNumber int64, hash string, _ bool) (outbound.BlockData, error) {
+	return outbound.BlockData{
+		BlockNumber: blockNumber,
+		Block:       json.RawMessage(fmt.Sprintf(`{"number":"0x%x","hash":%q}`, blockNumber, hash)),
+		Receipts:    json.RawMessage(`[]`),
+	}, nil
+}
+
+// archiveStub is a raw archive holding nothing, which is all RepublishBlock
+// needs: it is handed its version rather than deriving one.
+type archiveStub struct{}
+
+func (archiveStub) HighestVersion(context.Context, int64) (int, bool, error) { return 0, false, nil }
+
+func (archiveStub) BlockHashAt(context.Context, int64, int) (string, bool, error) {
+	return "", false, nil
+}
+
+func newRepublishService(t *testing.T) *block_republish.Service {
+	t.Helper()
+	service, err := block_republish.NewService(
+		block_republish.Config{ChainID: 1, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		chainStub{}, archiveStub{}, memory.NewBlockCache(), memory.NewEventSink())
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	return service
+}
+
+// The worker caps no activity concurrency, so two operator-started runs can
+// execute RepublishBlock on one pod at the same time. A progress store shared
+// between them interleaves their phases into one set of heartbeat details, and
+// each execution's Reset erases the other's.
+func TestRepublishBlock_GivesEachExecutionItsOwnProgressStore(t *testing.T) {
+	var handed []*heartbeatStub
+	activities := &republishActivities{
+		service: newRepublishService(t),
+		newProgress: func() heartbeater {
+			store := &heartbeatStub{}
+			handed = append(handed, store)
+			return store
+		},
+	}
+
+	for _, work := range []blockWork{{Number: 25395651, Version: 1}, {Number: 25087888, Version: 3}} {
+		if _, err := activities.RepublishBlock(context.Background(), work); err != nil {
+			t.Fatalf("RepublishBlock(%d): %v", work.Number, err)
+		}
+	}
+
+	if len(handed) != 2 {
+		t.Fatalf("progress stores created = %d, want one per execution", len(handed))
+	}
+	if handed[0] == handed[1] {
+		t.Fatal("both executions recorded into the same progress store")
+	}
+	for i, want := range []blockWork{{Number: 25395651, Version: 1}, {Number: 25087888, Version: 3}} {
+		for _, beat := range handed[i].saved {
+			if beat.Block != want.Number || beat.Version != want.Version {
+				t.Errorf("execution %d's store holds %+v, from another execution", i, beat)
+			}
+		}
 	}
 }

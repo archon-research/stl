@@ -133,9 +133,12 @@ func (r *Reader) ListPrefix(ctx context.Context, bucket, prefix string) ([]strin
 		}
 
 		for _, obj := range page.Contents {
-			if obj.Key != nil {
-				keys = append(keys, *obj.Key)
+			// A folder marker occupies no version, and a caller folding the
+			// listing into archive occupancy refuses a key with no stem.
+			if obj.Key == nil || strings.HasSuffix(*obj.Key, "/") {
+				continue
 			}
+			keys = append(keys, *obj.Key)
 		}
 	}
 
@@ -203,7 +206,7 @@ func (r *Reader) ReadRange(ctx context.Context, bucket, key string, start, end i
 		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", start, end)),
 	})
 	if isMissingObject(err) {
-		return nil, fmt.Errorf("%s/%s: %w", bucket, key, outbound.ErrObjectNotFound)
+		return nil, fmt.Errorf("%s/%s: %w: %w", bucket, key, outbound.ErrObjectNotFound, err)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get range of object %s/%s: %w", bucket, key, err)

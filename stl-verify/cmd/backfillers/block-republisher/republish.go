@@ -247,8 +247,11 @@ type heartbeater interface {
 }
 
 type republishActivities struct {
-	service  *block_republish.Service
-	progress heartbeater
+	service *block_republish.Service
+
+	// A factory, not an instance: the worker caps no activity concurrency, so two
+	// runs on one pod would otherwise interleave their phases into one set of details.
+	newProgress func() heartbeater
 }
 
 // DeriveVersion reads the version this height's raw archive leaves free. It is
@@ -273,11 +276,11 @@ func (a *republishActivities) DeriveVersion(ctx context.Context, blockNumber int
 func (a *republishActivities) RepublishBlock(ctx context.Context, work blockWork) (result block_republish.Result, err error) {
 	defer func() { err = nonRetryableIfStructural(err) }()
 
-	a.progress.Reset()
-	stopHeartbeat := temporal.StartHeartbeat(ctx, heartbeatInterval, a.progress)
+	progress := a.newProgress()
+	stopHeartbeat := temporal.StartHeartbeat(ctx, heartbeatInterval, progress)
 	defer stopHeartbeat()
 
-	result, err = a.service.Republish(ctx, work.Number, work.Version, a.recordPhase(work))
+	result, err = a.service.Republish(ctx, work.Number, work.Version, recordPhase(progress, work))
 	if err != nil {
 		return block_republish.Result{}, fmt.Errorf("republishing block %d at version %d: %w", work.Number, work.Version, err)
 	}
@@ -286,11 +289,11 @@ func (a *republishActivities) RepublishBlock(ctx context.Context, work blockWork
 
 // recordPhase puts the step a block is in into the heartbeat details, which the
 // liveness ticker then re-sends until the next phase replaces it.
-func (a *republishActivities) recordPhase(work blockWork) block_republish.PhaseReporter {
+func recordPhase(progress heartbeater, work blockWork) block_republish.PhaseReporter {
 	return func(ctx context.Context, phase block_republish.Phase) {
 		// SaveProgress cannot fail: a heartbeat the server rejects surfaces as a
 		// cancelled activity context on the next read, not as an error here.
-		_ = a.progress.SaveProgress(ctx, republishHeartbeat{
+		_ = progress.SaveProgress(ctx, republishHeartbeat{
 			Block:   work.Number,
 			Version: work.Version,
 			Phase:   string(phase),

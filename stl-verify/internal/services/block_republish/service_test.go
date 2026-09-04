@@ -15,6 +15,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const (
@@ -64,9 +65,17 @@ func (c *stubClient) GetCurrentBlockNumber(context.Context) (int64, error) {
 }
 
 func headerJSON(hash string) json.RawMessage {
+	return headerJSONAt(testBlock, hash)
+}
+
+func headerJSONAt(number int64, hash string) json.RawMessage {
 	return json.RawMessage(fmt.Sprintf(
-		`{"number":"0x1836b83","hash":%q,"parentHash":%q,"timestamp":"0x%x"}`,
-		hash, testParentHash, testTimestamp))
+		`{"number":"0x%x","hash":%q,"parentHash":%q,"timestamp":"0x%x"}`,
+		number, hash, testParentHash, testTimestamp))
+}
+
+func blockPayload(hash string) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(`{"number":"0x%x","hash":%q,"transactions":[]}`, testBlock, hash))
 }
 
 func newStubClient() *stubClient {
@@ -74,7 +83,7 @@ func newStubClient() *stubClient {
 		headers: []headerReply{{raw: headerJSON(testHash)}, {raw: headerJSON(testHash)}},
 		data: outbound.BlockData{
 			BlockNumber: testBlock,
-			Block:       json.RawMessage(`{"hash":"0x11"}`),
+			Block:       blockPayload(testHash),
 			Receipts:    json.RawMessage(`[{"status":"0x1"}]`),
 			Traces:      json.RawMessage(`[{"type":"call"}]`),
 			Blobs:       json.RawMessage(`[{"index":"0x0"}]`),
@@ -885,5 +894,126 @@ func TestNewService_RunsWithoutALogger(t *testing.T) {
 
 	if _, err := service.Republish(context.Background(), testBlock, 1, nil); err != nil {
 		t.Fatalf("Republish: %v", err)
+	}
+}
+
+// A replica answering by number with a neighbouring height would have its block
+// cached and published under the requested one, so the header has to say which
+// height it describes.
+func TestRepublish_RefusesAHeaderDescribingADifferentHeight(t *testing.T) {
+	client := newStubClient()
+	client.headers[0] = headerReply{raw: headerJSONAt(testBlock-1, testHash)}
+	f := newFixtureWith(t, testConfig(), client)
+
+	_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
+
+	if !errors.Is(err, ErrStructuralData) {
+		t.Fatalf("error = %v, want ErrStructuralData", err)
+	}
+	for _, want := range []string{fmt.Sprint(testBlock), fmt.Sprint(testBlock - 1)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to name %q", err, want)
+		}
+	}
+	if got := f.cached(t, "block", 1); got != nil {
+		t.Errorf("cached %s from a header describing another height", got)
+	}
+	if count := f.sink.GetEventCount(); count != 0 {
+		t.Errorf("published %d events from a header describing another height", count)
+	}
+}
+
+func TestNextFreeVersion_RefusesAHeaderDescribingADifferentHeight(t *testing.T) {
+	client := newStubClient()
+	client.headers[0] = headerReply{raw: headerJSONAt(testBlock-1, testHash)}
+	f := newFixtureWith(t, testConfig(), client)
+	f.archiveHoldsFork(1)
+
+	_, err := f.service.NextFreeVersion(context.Background(), testBlock)
+
+	if !errors.Is(err, ErrStructuralData) {
+		t.Fatalf("error = %v, want ErrStructuralData", err)
+	}
+}
+
+// The by-hash read is what pins every data type to one block. A node that
+// answered it with something else would have that block cached under this height
+// while the event published the canonical header beside it.
+func TestRepublish_RefusesABlockPayloadThatIsNotTheHashItWasFetchedAt(t *testing.T) {
+	tests := []struct {
+		name     string
+		payload  json.RawMessage
+		mentions []string
+	}{
+		{name: "a payload naming another block", payload: blockPayload(forkHash), mentions: []string{forkHash, testHash}},
+		{name: "a payload naming no block", payload: json.RawMessage(`{"number":"0x1"}`), mentions: []string{testHash}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newStubClient()
+			client.data.Block = tc.payload
+			f := newFixtureWith(t, testConfig(), client)
+
+			_, err := f.service.Republish(context.Background(), testBlock, 1, nil)
+
+			if !errors.Is(err, ErrStructuralData) {
+				t.Fatalf("error = %v, want ErrStructuralData", err)
+			}
+			for _, want := range tc.mentions {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %v, want it to name %q", err, want)
+				}
+			}
+			if got := f.cached(t, "block", 1); got != nil {
+				t.Errorf("cached %s from a payload naming another block", got)
+			}
+			if count := f.sink.GetEventCount(); count != 0 {
+				t.Errorf("published %d events from a payload naming another block", count)
+			}
+		})
+	}
+}
+
+// A height the archive holds nothing for skips the already-canonical comparison
+// — there is no archived object to compare against — so version 1 is taken on
+// the operator's word alone, and the run has to say so.
+func TestNextFreeVersion_WarnsWhenTheArchiveHoldsNothingToCompareAgainst(t *testing.T) {
+	recorder := &testutil.SlogRecorder{}
+	config := testConfig()
+	config.Logger = slog.New(recorder)
+	f := newFixtureWith(t, config, newStubClient())
+
+	version, err := f.service.NextFreeVersion(context.Background(), testBlock)
+	if err != nil {
+		t.Fatalf("NextFreeVersion: %v", err)
+	}
+
+	if version != s3key.FirstCorrectionVersion {
+		t.Errorf("version = %d, want %d", version, s3key.FirstCorrectionVersion)
+	}
+	if got := recorder.CountWarn("no archived"); got != 1 {
+		t.Errorf("warnings = %d, want 1; warn messages: %v", got, recorder.MessagesAt(slog.LevelWarn))
+	}
+	if !recorder.ContainsAttr(fmt.Sprint(testBlock)) {
+		t.Error("the warning names no height, so an operator cannot tell which block it covers")
+	}
+}
+
+// A height whose archive does hold an object is compared against the chain, so
+// there is nothing to warn about.
+func TestNextFreeVersion_DoesNotWarnWhenTheArchiveHoldsTheHeight(t *testing.T) {
+	recorder := &testutil.SlogRecorder{}
+	config := testConfig()
+	config.Logger = slog.New(recorder)
+	f := newFixtureWith(t, config, newStubClient())
+	f.archiveHoldsFork(1)
+
+	if _, err := f.service.NextFreeVersion(context.Background(), testBlock); err != nil {
+		t.Fatalf("NextFreeVersion: %v", err)
+	}
+
+	if got := recorder.MessagesAt(slog.LevelWarn); len(got) != 0 {
+		t.Errorf("warn messages = %v, want none", got)
 	}
 }

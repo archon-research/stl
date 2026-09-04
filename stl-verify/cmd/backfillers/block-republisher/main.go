@@ -63,13 +63,13 @@ const (
 	workflowTypeName = "BlockRepublish"
 )
 
-// run declares no OpenDatabase: this worker touches no Postgres.
 func run(ctx context.Context) error {
 	return temporal.RunWorker(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporal.WorkerConfig{
-		Name:     taskQueueName,
-		Register: register,
+		Name:       taskQueueName,
+		NoDatabase: true,
+		Register:   register,
 	})
 }
 
@@ -133,8 +133,8 @@ func newRepublishActivities(ctx context.Context, logger *slog.Logger, cfg config
 		"enableTraces", cfg.enableTraces, "enableBlobs", cfg.enableBlobs)
 
 	return &republishActivities{
-		service:  service,
-		progress: temporal.NewActivityProgress[republishHeartbeat](),
+		service:     service,
+		newProgress: func() heartbeater { return temporal.NewActivityProgress[republishHeartbeat]() },
 	}, nil
 }
 

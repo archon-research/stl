@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -422,5 +423,47 @@ func TestReadRange_KeepsARealFailureADistinctError(t *testing.T) {
 	}
 	if errors.Is(err, outbound.ErrObjectNotFound) {
 		t.Errorf("error = %v, want a throttled read left distinct from a missing object", err)
+	}
+}
+
+// A console-created "folder" is a zero-byte key ending in a slash. It occupies
+// no version, and a caller folding the listing into archive occupancy refuses a
+// key carrying no {blockNumber}_{version}_ stem — failing the whole partition.
+func TestListPrefix_SkipsFolderMarkers(t *testing.T) {
+	mock := &mockS3API{listObjectsV2Func: func(context.Context, *s3.ListObjectsV2Input, ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
+		return &s3.ListObjectsV2Output{Contents: []types.Object{
+			{Key: aws.String("0-999/")},
+			{Key: aws.String("0-999/42_0_block.json.gz")},
+			{Key: aws.String("0-999/42_0_receipts.json.gz")},
+		}}, nil
+	}}
+	reader := &Reader{client: mock, logger: slog.Default()}
+
+	keys, err := reader.ListPrefix(context.Background(), "bucket", "0-999/")
+
+	if err != nil {
+		t.Fatalf("ListPrefix() error = %v", err)
+	}
+	want := []string{"0-999/42_0_block.json.gz", "0-999/42_0_receipts.json.gz"}
+	if fmt.Sprint(keys) != fmt.Sprint(want) {
+		t.Errorf("ListPrefix() = %v, want %v", keys, want)
+	}
+}
+
+// The sentinel is what a caller plans around, but the AWS error underneath it is
+// what a support ticket needs: which request id S3 refused, and how.
+func TestReadRange_KeepsTheAWSErrorUnderTheNotFoundSentinel(t *testing.T) {
+	mock := &mockS3API{getObjectFunc: func(context.Context, *s3.GetObjectInput, ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+		return nil, &types.NoSuchKey{Message: aws.String("The specified key does not exist.")}
+	}}
+	reader := &Reader{client: mock, logger: slog.Default()}
+
+	_, err := reader.ReadRange(context.Background(), "bucket", "0-999/1_0_block.json.gz", 0, 10)
+
+	if !errors.Is(err, outbound.ErrObjectNotFound) {
+		t.Fatalf("error = %v, want ErrObjectNotFound", err)
+	}
+	if !errors.As(err, new(*types.NoSuchKey)) {
+		t.Errorf("error = %v, want the *types.NoSuchKey it came from still reachable", err)
 	}
 }
