@@ -7,6 +7,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -286,7 +287,11 @@ func runDownloader(t *testing.T, ctx context.Context, bucket string, opts downlo
 		BlockBatchSize:      1,
 		TraceBatchSize:      1,
 	}
-	return node, run(ctx, cfg, testutil.DiscardLogger())
+	report, err := run(ctx, cfg, testutil.DiscardLogger())
+	if closeErr := report.close(); err == nil {
+		err = closeErr
+	}
+	return node, err
 }
 
 // fakeErigon answers the block, receipt and trace calls with a canonical block
@@ -536,4 +541,44 @@ func headerJSON(hash string, blockNum int64) []byte {
 
 func tracesJSON(blockHash string) []byte {
 	return fmt.Appendf(nil, `[{"blockHash":%q,"type":"call","action":{"input":%q}}]`, blockHash, randomHex(64))
+}
+
+// The report is what an operator acts on, so one that did not flush fails the
+// run on every path — including the clean shutdown that otherwise exits 0 and
+// would have reported a truncated file as a finished audit.
+func TestFinish_AReportThatDidNotFlushFailsTheRun(t *testing.T) {
+	tests := []struct {
+		name         string
+		reportFails  bool
+		runErr       error
+		shuttingDown bool
+		want         int
+	}{
+		{name: "a run that archived everything", want: 0},
+		{name: "a run that left holes", runErr: errors.New("archive incomplete"), want: 1},
+		{name: "a signal during a run", runErr: context.Canceled, shuttingDown: true, want: 0},
+		{name: "a report that would not flush", reportFails: true, want: 1},
+		{
+			name:         "a report that would not flush during a shutdown",
+			reportFails:  true,
+			runErr:       context.Canceled,
+			shuttingDown: true,
+			want:         1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var report *decisionReport
+			if tc.reportFails {
+				report = unbufferedReport("holes.jsonl", failingSink{err: errors.New("no space left on device")})
+			}
+
+			got := finish(report, tc.runErr, tc.shuttingDown, testutil.DiscardLogger())
+
+			if got != tc.want {
+				t.Errorf("finish() = %d, want %d", got, tc.want)
+			}
+		})
+	}
 }

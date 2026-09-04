@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -215,4 +217,19 @@ func newTestPlanner(t *testing.T, chainID int64, keys []string, objects map[stri
 		types:  types,
 		stats:  stats,
 	}, stats
+}
+
+// failingSink refuses every write and every close, the way a full disk does
+// halfway through a run.
+type failingSink struct{ err error }
+
+func (f failingSink) Write([]byte) (int, error) { return 0, f.err }
+func (f failingSink) Close() error              { return f.err }
+
+// unbufferedReport writes each line straight through — a one-byte buffer is
+// smaller than any line — so a sink that refuses a write fails the record that
+// reaches it rather than a flush much later.
+func unbufferedReport(path string, sink io.WriteCloser) *decisionReport {
+	writer := bufio.NewWriterSize(sink, 1)
+	return &decisionReport{path: path, sink: sink, writer: writer, enc: json.NewEncoder(writer)}
 }

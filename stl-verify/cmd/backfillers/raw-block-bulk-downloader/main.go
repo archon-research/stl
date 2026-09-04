@@ -147,22 +147,39 @@ func main() {
 		cancel()
 	}()
 
-	err := run(ctx, cfg, logger)
+	report, err := run(ctx, cfg, logger)
 	shuttingDown := ctx.Err() != nil
 	cancel()
-	if err != nil {
-		if shuttingDown {
-			logger.Info("shutdown complete")
-			os.Exit(0)
-		}
-		logger.Error("download failed", "error", err)
-		os.Exit(1)
-	}
 
-	logger.Info("download complete")
+	os.Exit(finish(report, err, shuttingDown, logger))
 }
 
-func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
+// finish flushes the report the run opened and turns the outcome into an exit
+// code. A report that did not flush fails the run on every path, a signalled
+// shutdown included: a truncated file still reads as the run's whole hole list.
+func finish(report *decisionReport, runErr error, shuttingDown bool, logger *slog.Logger) int {
+	code := 0
+	if err := report.close(); err != nil {
+		logger.Error("the report is incomplete", "error", err)
+		code = 1
+	}
+
+	switch {
+	case runErr == nil:
+		logger.Info("download complete")
+	case shuttingDown:
+		logger.Info("shutdown complete")
+	default:
+		logger.Error("download failed", "error", runErr)
+		code = 1
+	}
+	return code
+}
+
+// run archives the range and hands back the report it opened; main closes that,
+// so a report the run could not flush is the exit code rather than a line in a
+// log nobody reads.
+func run(ctx context.Context, cfg Config, logger *slog.Logger) (*decisionReport, error) {
 	logStartupInfo(cfg, logger)
 
 	// Before the node and the archive are touched: a report path that cannot be
@@ -170,36 +187,40 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	// is an audit not run.
 	report, err := newDecisionReport(cfg.ReportPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	rpcClient, err := createRPCClient(cfg, logger)
 	if err != nil {
-		return err
+		return report, err
 	}
 
 	if err := guardFinality(ctx, rpcClient, cfg, logger); err != nil {
-		return err
+		return report, err
 	}
 
 	s3Writer, s3Reader, err := createS3Clients(ctx, cfg, logger)
 	if err != nil {
-		return err
+		return report, err
 	}
 	if err := checkArchiveReachable(ctx, s3Reader, cfg.Bucket); err != nil {
-		return err
+		return report, err
 	}
 
 	types, err := chainDataTypes(cfg.ChainID)
 	if err != nil {
-		return err
+		return report, err
 	}
 
 	partitionCache := NewPartitionCache(s3Reader, cfg.Bucket, logger)
 	stats := &Stats{startTime: time.Now()}
 	planner := &blockPlanner{cache: partitionCache, reader: s3Reader, bucket: cfg.Bucket, types: types, stats: stats}
 
-	stopProgressReporter := startProgressReporter(ctx, stats, cfg.EndBlock-cfg.StartBlock+1, partitionCache, logger)
+	// A report the run cannot write stops every worker at once: see applyDecision.
+	runCtx, abort := context.WithCancelCause(ctx)
+	defer abort(nil)
+
+	stopProgressReporter := startProgressReporter(runCtx, stats, cfg.EndBlock-cfg.StartBlock+1, partitionCache, logger)
 	defer stopProgressReporter()
 
 	pipeline := newPipeline(cfg)
@@ -212,17 +233,32 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 		traceCh:  pipeline.traceCollectorCh,
 		stats:    stats,
 		logger:   logger,
+		abort:    abort,
 	}
-	pipeline.startUploadWorkers(ctx, s3Writer, stats, logger)
-	pipeline.startTraceCollector(ctx, cfg)
-	pipeline.startBlockReceiptWorkers(ctx, archiver)
-	pipeline.startTraceWorkers(ctx, rpcClient, cfg.Bucket, stats, logger)
-	pipeline.feedBlockWork(ctx, cfg.StartBlock, cfg.EndBlock, cfg.BlockBatchSize)
+	pipeline.startUploadWorkers(runCtx, s3Writer, stats, logger)
+	pipeline.startTraceCollector(runCtx, cfg)
+	pipeline.startBlockReceiptWorkers(runCtx, archiver)
+	pipeline.startTraceWorkers(runCtx, rpcClient, cfg.Bucket, stats, logger)
+	pipeline.feedBlockWork(runCtx, cfg.StartBlock, cfg.EndBlock, cfg.BlockBatchSize)
 
 	pipeline.waitForCompletion()
 
 	logFinalStats(stats, partitionCache, logger)
-	return errors.Join(failureError(stats), report.close())
+	if aborted := abortCause(runCtx); aborted != nil {
+		return report, aborted
+	}
+	return report, failureError(stats)
+}
+
+// abortCause is the failure a worker stopped the run with, if one did: an
+// ordinary cancellation — a signal, or the deferred abort — carries
+// context.Canceled instead.
+func abortCause(ctx context.Context) error {
+	cause := context.Cause(ctx)
+	if cause == nil || errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
+		return nil
+	}
+	return cause
 }
 
 // failureError reports the holes a run left behind: an operator reading only the
@@ -487,7 +523,8 @@ func (p *pipeline) waitForCompletion() {
 	p.uploadWg.Wait()
 }
 
-// blockArchiver archives the batches one block worker is handed.
+// blockArchiver archives the batches one block worker is handed. abort stops
+// the whole run, for the failures no single height owns.
 type blockArchiver struct {
 	client   *alchemy.Client
 	planner  *blockPlanner
@@ -497,6 +534,7 @@ type blockArchiver struct {
 	traceCh  chan<- traceRequest
 	stats    *Stats
 	logger   *slog.Logger
+	abort    context.CancelCauseFunc
 }
 
 func (a blockArchiver) archiveBatches(ctx context.Context, workCh <-chan int64) {

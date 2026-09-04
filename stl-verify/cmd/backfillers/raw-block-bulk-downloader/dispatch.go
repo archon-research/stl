@@ -27,6 +27,9 @@ func (a blockArchiver) applyDecision(ctx context.Context, d blockDecision, paylo
 	logDecision(a.logger, a.cfg.DryRun, d)
 	a.stats.recordPlan(d.Plan.Action)
 	if err := a.report.record(d); err != nil {
+		// The report is the run's whole output; failing per height would cost a
+		// warning and a blocksFailed for every height left, naming no cause.
+		a.abort(err)
 		return err
 	}
 

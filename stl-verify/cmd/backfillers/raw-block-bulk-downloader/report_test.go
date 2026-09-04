@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"maps"
 	"os"
 	"path/filepath"
@@ -177,4 +178,50 @@ func decodedFields(t *testing.T, path string) map[string]any {
 		t.Fatalf("decoding report line %q: %v", first, err)
 	}
 	return fields
+}
+
+// --report is not a dry-run flag: a run that writes the archive records the same
+// rows, so the file is the action list whichever way the run was started.
+func TestDecisionReport_ARealRunRecordsTheSameRowAsADryRun(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "holes.jsonl")
+
+	got := dispatch(t,
+		Config{Bucket: "bucket", ChainID: ethereumChainID, ReportPath: path},
+		archivedAt(0, s3key.Block, s3key.Receipts, s3key.Traces),
+		archivedObjects(t, planTestBlock, 0, forkHash),
+		canonicalBlockData())
+
+	if got.err != nil {
+		t.Fatalf("applyDecision() error = %v", got.err)
+	}
+	lines := reportLines(t, path)
+	if len(lines) != 1 {
+		t.Fatalf("report lines = %+v, want the one forked height", lines)
+	}
+	if lines[0].Block != planTestBlock || lines[0].Action != actionRepublish || lines[0].Version != 1 {
+		t.Errorf("report line = %+v, want block %d republished at version 1", lines[0], planTestBlock)
+	}
+	if !slices.Equal(lines[0].DataTypes, ethereumTypes()) {
+		t.Errorf("report line dataTypes = %v, want %v", lines[0].DataTypes, ethereumTypes())
+	}
+}
+
+// A line the report could not write is a height an operator never sees, so it
+// surfaces as an error naming the file rather than as a dropped row.
+func TestDecisionReport_AWriteFailureNamesTheReportAndTheCause(t *testing.T) {
+	report := unbufferedReport("holes.jsonl", failingSink{err: errors.New("no space left on device")})
+
+	err := report.record(blockDecision{
+		BlockNumber: planTestBlock,
+		Plan:        blockPlan{Action: actionRepublish, Version: 1, DataTypes: ethereumTypes()},
+	})
+
+	if err == nil {
+		t.Fatal("record() succeeded against a sink that refuses every write")
+	}
+	for _, want := range []string{"holes.jsonl", "no space left on device"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to mention %q", err, want)
+		}
+	}
 }

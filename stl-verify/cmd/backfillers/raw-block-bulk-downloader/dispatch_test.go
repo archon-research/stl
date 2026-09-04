@@ -33,6 +33,9 @@ func dispatch(t *testing.T, cfg Config, keys []string, objects map[string][]byte
 	uploadCh := make(chan UploadJob, 8)
 	traceCh := make(chan traceRequest, 8)
 
+	ctx, abort := context.WithCancelCause(context.Background())
+	defer abort(nil)
+
 	archiver := blockArchiver{
 		planner:  planner,
 		report:   report,
@@ -41,8 +44,9 @@ func dispatch(t *testing.T, cfg Config, keys []string, objects map[string][]byte
 		traceCh:  traceCh,
 		stats:    stats,
 		logger:   testutil.DiscardLogger(),
+		abort:    abort,
 	}
-	err = planAndApply(context.Background(), archiver, r)
+	err = planAndApply(ctx, archiver, r)
 	close(uploadCh)
 	close(traceCh)
 	if closeErr := report.close(); closeErr != nil {
@@ -323,5 +327,35 @@ func TestApplyDecision_AChainWithoutTracesRequestsNone(t *testing.T) {
 	}
 	if len(got.traces) != 0 {
 		t.Errorf("trace requests = %v, want none: this chain's watcher fetches no traces", got.traces)
+	}
+}
+
+// A report that cannot be written stops the whole run. Failing only the height
+// that hit it would cost a warning and a blocksFailed for every remaining
+// height of a million-block range, and never name the report as the cause.
+func TestApplyDecision_AReportWriteFailureAbortsTheRun(t *testing.T) {
+	planner, stats := newTestPlanner(t, ethereumChainID, nil, nil)
+	ctx, abort := context.WithCancelCause(context.Background())
+	defer abort(nil)
+
+	archiver := blockArchiver{
+		planner: planner,
+		report:  unbufferedReport("holes.jsonl", failingSink{err: errors.New("no space left on device")}),
+		cfg:     Config{Bucket: "bucket", ChainID: ethereumChainID, DryRun: true},
+		stats:   stats,
+		logger:  testutil.DiscardLogger(),
+		abort:   abort,
+	}
+
+	err := archiver.applyDecision(ctx, planner.fresh(planTestBlock), canonicalBlockData())
+
+	if err == nil {
+		t.Fatal("applyDecision() succeeded with a report it could not write")
+	}
+	if ctx.Err() == nil {
+		t.Fatal("the run context is still live: every remaining height would fail one at a time")
+	}
+	if cause := context.Cause(ctx); cause == nil || !strings.Contains(cause.Error(), "holes.jsonl") {
+		t.Errorf("cause = %v, want the report failure that stopped the run", context.Cause(ctx))
 	}
 }

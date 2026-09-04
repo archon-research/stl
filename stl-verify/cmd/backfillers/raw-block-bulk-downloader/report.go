@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 
@@ -30,7 +31,8 @@ type reportLine struct {
 // default — no --report, nothing written.
 type decisionReport struct {
 	mu     sync.Mutex
-	file   *os.File
+	path   string
+	sink   io.WriteCloser
 	writer *bufio.Writer
 	enc    *json.Encoder
 }
@@ -46,8 +48,14 @@ func newDecisionReport(path string) (*decisionReport, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating the report %s: %w", path, err)
 	}
-	writer := bufio.NewWriter(file)
-	return &decisionReport{file: file, writer: writer, enc: json.NewEncoder(writer)}, nil
+	return reportTo(path, file), nil
+}
+
+// reportTo buffers the lines: a first pass over a million untouched heights
+// records every one of them, and a write syscall each would outweigh the work.
+func reportTo(path string, sink io.WriteCloser) *decisionReport {
+	writer := bufio.NewWriter(sink)
+	return &decisionReport{path: path, sink: sink, writer: writer, enc: json.NewEncoder(writer)}
 }
 
 // record writes one decision. Skips are left out: they are the overwhelming
@@ -58,19 +66,22 @@ func (r *decisionReport) record(d blockDecision) error {
 		return nil
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	line := reportLine{
+	return r.write(reportLine{
 		Block:         d.BlockNumber,
 		Action:        d.Plan.Action,
 		Version:       d.Plan.Version,
 		ArchivedHash:  d.ArchivedHash,
 		CanonicalHash: d.CanonicalHash,
 		DataTypes:     d.Plan.DataTypes,
-	}
+	})
+}
+
+func (r *decisionReport) write(line reportLine) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	if err := r.enc.Encode(line); err != nil {
-		return fmt.Errorf("writing block %d to the report: %w", d.BlockNumber, err)
+		return fmt.Errorf("writing block %d to the report %s: %w", line.Block, r.path, err)
 	}
 	return nil
 }
@@ -85,5 +96,5 @@ func (r *decisionReport) close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	return errors.Join(r.writer.Flush(), r.file.Close())
+	return errors.Join(r.writer.Flush(), r.sink.Close())
 }
