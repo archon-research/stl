@@ -64,8 +64,8 @@ design. Not the name, not the ilk, not the vault address.
 
 This ADR records the decisions that are architecturally significant — hard to reverse,
 structural, or certain to be questioned later. The conventions that follow from them
-(parameter names, point encoding, decimal serialization, cache policy, empty-result semantics,
-the `/latest`–`/asof` split) are real decisions but do not shape the structure; they belong in
+(parameter names, point encoding, decimal serialization, cache policy, empty-result semantics)
+are real decisions but do not shape the structure; they belong in
 the endpoint reference circulated alongside this document.
 
 ## Decision
@@ -180,11 +180,16 @@ Every series the API serves is served on event time wherever the event time exis
 recovered from the upstream payload. A feed without one is a gap to close at ingest, not a
 permanent second class.
 
-Observation time is not a supported second axis we design around. It survives only where the
-upstream publishes no event time in any form, is explicitly labelled as such in the catalogue,
-and carries a tracked gap. For such a series, declared cadence is required rather than optional,
-because cadence is what bounds the staleness of a polled value; without it the caller cannot
-size the error.
+Observation time is not a supported second axis we design around. It survives in two cases
+only, both explicitly labelled as such in the catalogue. The first is a feed whose upstream
+publishes no event time in any form; it carries a tracked gap. The second is a value STL samples
+itself on chain — a `balanceOf` read at a sweep block — where the timestamp is the block sampled
+rather than the block the value changed: every point is exactly true at its own timestamp, so
+what is lost is resolution rather than accuracy, and the loss is bounded in chain time. A polled
+off-chain clock — `time.Now()`, a cron cycle — over an upstream that does timestamp its events
+qualifies under neither; that is a gap to close at ingest. For any observation-time series,
+declared cadence is required rather than optional, because cadence is what bounds the staleness
+or the resolution of the value; without it the caller cannot size the error.
 
 Event time and observation time are never silently interleaved. Every series declares its axis,
 and a single response never mixes the two. This is the correctness rule the whole axis policy
@@ -195,8 +200,8 @@ happened to see. Divide one by the other and the error is unbounded and invisibl
 The strictness is deliberate. A tolerated fallback becomes the default, and a surface with two
 first-class time axes cannot honestly promise that its series are comparable.
 
-**One first-release series invokes the exception, and it is worth being precise about why.** The
-feed the audit identified as the only one publishing no event time in any form is not served as a
+**Two first-release series are on observation time, and it is worth being precise about why
+each is.** The feed the audit identified as the only one publishing no event time in any form is not served as a
 series at all, once the reference provenance comes off this surface. The exception is claimed
 instead by a series the audit misread: the on-chain treasury balance behind Total risk capital is
 written by sampling `balanceOf` at a fixed block interval, so its timestamp is the block we looked
@@ -213,6 +218,11 @@ series is not comparable with an event-time one in a single response. The event-
 the token's transfer events for the wallets in question, keeping the periodic sample as a
 reconciliation guardrail — is being costed in parallel, and if it lands it lands before the
 endpoint is built rather than as a migration after it.
+
+Exposure reads the same sampled table and is declared `observation` on the same cadence — but
+permanently rather than pending that path, because it is a valuation rather than a balance and
+most of what it measures changes with no event touching the holder. The reasoning is in the
+Consequences.
 
 ### 4. The latest version only; the version axis is not exposed
 
@@ -278,7 +288,7 @@ entity key, and its first and last observation timestamps.
 The entity key is the part the rest of the descriptor does not cover. Kind, axis and unit say what
 a point *means*; the entity key says what it is *of* — the response fields that identify the thing
 a series is about, which is `prime_key` for a prime-scoped series, chain, token address and feed
-for a price series, and empty for the datasets that have no single entity. Without it a client keying
+for a price series, and empty for protocol events, the one dataset with no entity. Without it a client keying
 rows into a store infers identity per dataset from prose, which is the guessing this endpoint
 exists to remove.
 
@@ -421,14 +431,16 @@ whether the alias set is a column or a history table does not reach it.
 **Decision 3 obliges ingest changes, not API changes.** A block timestamp must be resolved for
 `prime_debt` at ingest — the block number is already on the row, and many other tables already
 persist a `block_timestamp`, so this is established practice. The backfill cost for historical
-rows is unmeasured. Two column comments must be corrected in the same pass, since taking them at
-face value mislabels the flagship dataset. And `allocation_position.created_at` should lose its
-`DEFAULT NOW()` and become `NOT NULL` without a default: the column is correct today only
-because every writer supplies the block timestamp, and a future writer that omits it would
-silently insert ingest time into an event-time series with nothing failing.
+rows is unmeasured. Two column comments must be corrected in the same pass:
+`offchain_token_price.timestamp`, because taking it at face value mislabels the flagship dataset,
+and `allocation_position.created_at`, because it reads as an insert timestamp when it is the
+sampled block's. And `allocation_position.created_at` should lose its `DEFAULT NOW()` and become
+`NOT NULL` without a default: the column is correct today only because every writer supplies the
+block timestamp, and a future writer that omits it would silently insert wall-clock ingest time
+into a series whose axis is chain time, with nothing failing.
 
-**Exactly one first-release series is an observation-time exception, and the audit that was
-supposed to find it looked at the wrong thing.** The candidate everyone expected — the
+**Two first-release series are on observation time, and the audit that was supposed to find
+them looked at the wrong thing.** The candidate everyone expected — the
 untimestamped third-party payload behind `prime_capital_stack` — is not served as a series at all,
 since it is a reference feed and reference provenance stays on the snapshot routes. The exception
 is claimed instead by the dataset the PRD called "capital held": the USDS balance in the prime's
@@ -451,8 +463,9 @@ permanent rather than pending.
 And the audit's method needs the correction on record: reading a column comment established what
 the value *is* and not where it *comes from*, and only the write path answers the second question.
 
-**One series outside that audit fails decision 3 without qualifying for its exception, and it is
-now the only observation-time series on the surface.** The audit covered the six feeds behind the
+**One series outside that audit fails decision 3 without qualifying for either of its cases, and
+it is the only observation-time series on the surface that is a defect rather than a declared
+sampling axis.** The audit covered the six feeds behind the
 three first-release datasets, so it did not reach `protocol_event`, which backs
 `/v1/protocol-events`. That route windows and buckets on
 `created_at`, a `DEFAULT NOW()` ingest column, so it is on observation time as built. The
