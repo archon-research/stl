@@ -25,7 +25,9 @@ from app.services.reference_risk_capital_service import ReferenceRiskCapitalServ
 logger = get_logger(__name__)
 
 # One event name for every authorization outcome, so a single Loki stream
-# selector finds the lot: {app="python-api"} | json | event="authz.decision".
+# selector finds the lot:
+#   {k8s_namespace_name="vector", k8s_container_name="python-api"}
+#     | json | event="authz.decision"
 AUTHZ_EVENT = "authz.decision"
 
 
