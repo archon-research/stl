@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/retry"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
@@ -55,31 +56,13 @@ const (
 // ChainExpectation defines what data is expected for a specific chain.
 // If a data type is expected but missing from cache, the message will error
 // and go to DLQ rather than retry infinitely.
-type ChainExpectation struct {
-	// ExpectReceipts indicates receipts data is required for this chain.
-	ExpectReceipts bool
-	// ExpectTraces indicates traces data is required for this chain.
-	ExpectTraces bool
-	// ExpectBlobs indicates blobs data is required for this chain.
-	ExpectBlobs bool
-}
+type ChainExpectation = chainutil.BlockDataExpectation
 
-// DefaultChainExpectations returns the default expectations for known chains. These
-// MUST mirror what each chain's watcher actually caches, since the backup reads from
-// that cache: receipts are always fetched, but traces only when the watcher runs
-// without --enable-traces=false. Today only the ethereum watcher fetches traces; every
-// other chain's watcher sets --enable-traces=false (avalanche and arbitrum have no
-// trace_block on Alchemy at all; base/optimism/unichain support it but the watcher
-// still does not fetch it). Blobs are not fetched anywhere (--enable-blobs is false).
+// DefaultChainExpectations returns the default expectations for known chains.
+// The declaration is shared: it is what each chain's watcher caches, so the
+// block-republisher produces the same set this worker reads.
 func DefaultChainExpectations() map[int64]ChainExpectation {
-	return map[int64]ChainExpectation{
-		1:     {ExpectReceipts: true, ExpectTraces: true, ExpectBlobs: false},  // Ethereum Mainnet
-		43114: {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Avalanche C-Chain
-		8453:  {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Base
-		10:    {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Optimism
-		130:   {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Unichain
-		42161: {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Arbitrum
-	}
+	return chainutil.DefaultChainExpectations()
 }
 
 // Config holds configuration for the backup service.

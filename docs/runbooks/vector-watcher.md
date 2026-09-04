@@ -170,6 +170,16 @@ Follow [docs/incidents/2026-06-02-arbitrum-backfill-loop.md](../incidents/2026-0
 With the VEC-277 fix deployed the backfill loop self-heals within one poll
 interval; confirm the counter returns to zero and `totalMissing` drains.
 
+That self-heal only reaches heights whose `block_states` rows still exist:
+retention drops them after 30 days, and `retryBlockPublish` only ever looks at
+`NOT is_orphaned` rows. An orphan-only height older than that is repaired by the
+**`block-republisher`** on-demand worker instead, which re-publishes the
+canonical block under a new `block_version` so every indexer appends the
+correction — see
+[vector-cronjobs.md](vector-cronjobs.md#special-case-block-republisher-on-demand-no-schedule).
+Confirm the shape first with the query above; the rows may already be gone, in
+which case the S3 archive holding only `<number>_0_*` objects is the evidence.
+
 ### Verify recovery
 
 `rate(backfill_gap_fill_no_canonical_total[10m])` returns to zero sustained.
@@ -223,6 +233,9 @@ once the fix is deployed. If it is the ARCT-379 shape, use the repair in
 [vector-cronjobs.md → `watcher-data-validator` "Orphan-only heights"](vector-cronjobs.md#special-case-watcher-data-validator-orphan-only-heights);
 otherwise follow
 [docs/incidents/2026-06-02-arbitrum-backfill-loop.md](../incidents/2026-06-02-arbitrum-backfill-loop.md).
+A height whose `block_states` rows have aged out of the 30-day retention is past
+the self-heal and needs the `block-republisher` (see
+`VectorWatcherSilentBackfillNoCanonical` above).
 
 ### Verify recovery
 

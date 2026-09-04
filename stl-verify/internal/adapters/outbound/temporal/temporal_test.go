@@ -276,3 +276,27 @@ func TestEnsureSchedule_ReconcileFailureIsNonFatal(t *testing.T) {
 		t.Fatalf("ensureSchedule returned %v, want nil (reconcile failure must be non-fatal)", err)
 	}
 }
+
+// (*pgxpool.Pool).Close on the nil pool would panic during the unwind.
+func TestOpenPool_IsANoOpWhenNoOpenerIsDeclared(t *testing.T) {
+	pool, closePool, err := openPool(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("openPool: %v", err)
+	}
+	if pool != nil {
+		t.Errorf("pool = %v, want nil", pool)
+	}
+	closePool()
+}
+
+func TestOpenPool_SurfacesAFailedOpen(t *testing.T) {
+	sentinel := errors.New("dial postgres: connection refused")
+
+	_, _, err := openPool(context.Background(), func(context.Context) (*pgxpool.Pool, error) {
+		return nil, sentinel
+	})
+
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("error = %v, want the opener's own error", err)
+	}
+}

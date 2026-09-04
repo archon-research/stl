@@ -15,7 +15,7 @@ import (
 
 const planTestBlock = int64(25395651)
 
-// dispatched is what one applyBlockPlan call handed the pipeline.
+// dispatched is what one applyDecision call handed the pipeline.
 type dispatched struct {
 	uploads []UploadJob
 	traces  []traceRequest
@@ -103,7 +103,7 @@ func TestApplyDecision_RepublishesALosingForkAtTheNextVersion(t *testing.T) {
 		canonicalBlockData())
 
 	if got.err != nil {
-		t.Fatalf("applyBlockPlan() error = %v", got.err)
+		t.Fatalf("applyDecision() error = %v", got.err)
 	}
 
 	wantKeys := []string{
@@ -132,7 +132,7 @@ func TestApplyDecision_FillsOnlyWhatTheCanonicalVersionLacks(t *testing.T) {
 		canonicalBlockData())
 
 	if got.err != nil {
-		t.Fatalf("applyBlockPlan() error = %v", got.err)
+		t.Fatalf("applyDecision() error = %v", got.err)
 	}
 	if len(got.uploads) != 0 {
 		t.Errorf("queued uploads = %v, want none: block and receipts are already archived", uploadKeys(got.uploads))
@@ -152,7 +152,7 @@ func TestApplyDecision_ArchivesAnUntouchedHeightAtVersionZero(t *testing.T) {
 	got := dispatch(t, Config{Bucket: "bucket"}, nil, nil, canonicalBlockData())
 
 	if got.err != nil {
-		t.Fatalf("applyBlockPlan() error = %v", got.err)
+		t.Fatalf("applyDecision() error = %v", got.err)
 	}
 
 	wantKeys := []string{
@@ -178,7 +178,7 @@ func TestApplyDecision_RepublishesAZeroTxHeightNoArchivedObjectCanIdentify(t *te
 		canonicalBlockData())
 
 	if got.err != nil {
-		t.Fatalf("applyBlockPlan() error = %v, want the height repaired rather than failed on every run", got.err)
+		t.Fatalf("applyDecision() error = %v, want the height repaired rather than failed on every run", got.err)
 	}
 
 	wantKeys := []string{
@@ -201,7 +201,7 @@ func TestApplyDecision_SkipsACompleteCanonicalHeight(t *testing.T) {
 		canonicalBlockData())
 
 	if got.err != nil {
-		t.Fatalf("applyBlockPlan() error = %v", got.err)
+		t.Fatalf("applyDecision() error = %v", got.err)
 	}
 	if len(got.uploads) != 0 || len(got.traces) != 0 {
 		t.Errorf("queued uploads = %v and traces = %v, want neither", uploadKeys(got.uploads), got.traces)
@@ -219,7 +219,7 @@ func TestApplyDecision_DryRunQueuesNothing(t *testing.T) {
 		canonicalBlockData())
 
 	if got.err != nil {
-		t.Fatalf("applyBlockPlan() error = %v", got.err)
+		t.Fatalf("applyDecision() error = %v", got.err)
 	}
 	if len(got.uploads) != 0 || len(got.traces) != 0 {
 		t.Errorf("a dry run queued uploads = %v and traces = %v, want neither", uploadKeys(got.uploads), got.traces)
@@ -233,7 +233,7 @@ func TestApplyDecision_DryRunCountsTheHeightAsSkipped(t *testing.T) {
 	got := dispatch(t, Config{Bucket: "bucket", DryRun: true}, nil, nil, canonicalBlockData())
 
 	if got.err != nil {
-		t.Fatalf("applyBlockPlan() error = %v", got.err)
+		t.Fatalf("applyDecision() error = %v", got.err)
 	}
 	if got.stats.blocksSkipped.Load() != 1 || got.stats.tracesSkipped.Load() != 1 {
 		t.Errorf("blocksSkipped = %d, tracesSkipped = %d, want 1 and 1 so a dry run reports progress",
