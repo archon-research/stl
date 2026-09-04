@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"slices"
 	"strings"
 	"testing"
@@ -26,13 +25,33 @@ type dispatched struct {
 func dispatch(t *testing.T, cfg Config, keys []string, objects map[string][]byte, r outbound.BlockData) dispatched {
 	t.Helper()
 
-	planner, stats := newTestPlanner(keys, objects)
+	planner, stats := newTestPlanner(t, cfg.ChainID, keys, objects)
+	report, err := newDecisionReport(cfg.ReportPath)
+	if err != nil {
+		t.Fatalf("newDecisionReport: %v", err)
+	}
 	uploadCh := make(chan UploadJob, 8)
 	traceCh := make(chan traceRequest, 8)
 
-	err := planAndApply(context.Background(), r, planner, cfg, uploadCh, traceCh, stats, testutil.DiscardLogger())
+	ctx, abort := context.WithCancelCause(context.Background())
+	defer abort(nil)
+
+	archiver := blockArchiver{
+		planner:  planner,
+		report:   report,
+		cfg:      cfg,
+		uploadCh: uploadCh,
+		traceCh:  traceCh,
+		stats:    stats,
+		logger:   testutil.DiscardLogger(),
+		abort:    abort,
+	}
+	err = planAndApply(ctx, archiver, r)
 	close(uploadCh)
 	close(traceCh)
+	if closeErr := report.close(); closeErr != nil {
+		t.Fatalf("closing the report: %v", closeErr)
+	}
 
 	out := dispatched{stats: stats, err: err}
 	for job := range uploadCh {
@@ -46,29 +65,20 @@ func dispatch(t *testing.T, cfg Config, keys []string, objects map[string][]byte
 
 // planAndApply drives one height through the two steps a block worker takes it
 // through: the plan, then what the plan writes.
-func planAndApply(
-	ctx context.Context,
-	r outbound.BlockData,
-	planner *blockPlanner,
-	cfg Config,
-	uploadCh chan<- UploadJob,
-	traceCh chan<- traceRequest,
-	stats *Stats,
-	logger *slog.Logger,
-) error {
-	state, err := planner.topVersion(ctx, r.BlockNumber)
+func planAndApply(ctx context.Context, a blockArchiver, r outbound.BlockData) error {
+	state, err := a.planner.topVersion(ctx, r.BlockNumber)
 	if err != nil {
 		return err
 	}
 	if state.Version == noArchive {
-		return applyDecision(ctx, freshDecision(r.BlockNumber), r, cfg, uploadCh, traceCh, stats, logger)
+		return a.applyDecision(ctx, a.planner.fresh(r.BlockNumber), r)
 	}
 
-	decision, err := planner.decide(ctx, r.BlockNumber, state, r.Block)
+	decision, err := a.planner.decide(ctx, r.BlockNumber, state, r.Block)
 	if err != nil {
 		return err
 	}
-	return applyDecision(ctx, decision, r, cfg, uploadCh, traceCh, stats, logger)
+	return a.applyDecision(ctx, decision, r)
 }
 
 func canonicalBlockData() outbound.BlockData {
@@ -97,7 +107,7 @@ func uploadKeys(jobs []UploadJob) []string {
 
 func TestApplyDecision_RepublishesALosingForkAtTheNextVersion(t *testing.T) {
 	got := dispatch(t,
-		Config{Bucket: "bucket"},
+		Config{Bucket: "bucket", ChainID: ethereumChainID},
 		archivedAt(0, s3key.Block, s3key.Receipts, s3key.Traces),
 		archivedObjects(t, planTestBlock, 0, forkHash),
 		canonicalBlockData())
@@ -126,7 +136,7 @@ func TestApplyDecision_RepublishesALosingForkAtTheNextVersion(t *testing.T) {
 
 func TestApplyDecision_FillsOnlyWhatTheCanonicalVersionLacks(t *testing.T) {
 	got := dispatch(t,
-		Config{Bucket: "bucket"},
+		Config{Bucket: "bucket", ChainID: ethereumChainID},
 		archivedAt(0, s3key.Block, s3key.Receipts),
 		archivedObjects(t, planTestBlock, 0, canonicalHash),
 		canonicalBlockData())
@@ -149,7 +159,7 @@ func TestApplyDecision_FillsOnlyWhatTheCanonicalVersionLacks(t *testing.T) {
 }
 
 func TestApplyDecision_ArchivesAnUntouchedHeightAtVersionZero(t *testing.T) {
-	got := dispatch(t, Config{Bucket: "bucket"}, nil, nil, canonicalBlockData())
+	got := dispatch(t, Config{Bucket: "bucket", ChainID: ethereumChainID}, nil, nil, canonicalBlockData())
 
 	if got.err != nil {
 		t.Fatalf("applyDecision() error = %v", got.err)
@@ -172,7 +182,7 @@ func TestApplyDecision_ArchivesAnUntouchedHeightAtVersionZero(t *testing.T) {
 
 func TestApplyDecision_RepublishesAZeroTxHeightNoArchivedObjectCanIdentify(t *testing.T) {
 	got := dispatch(t,
-		Config{Bucket: "bucket"},
+		Config{Bucket: "bucket", ChainID: ethereumChainID},
 		archivedAt(0, s3key.Receipts, s3key.Traces),
 		map[string][]byte{s3key.Build(planTestBlock, 0, s3key.Receipts): gzipped(t, []byte(`[]`))},
 		canonicalBlockData())
@@ -195,7 +205,7 @@ func TestApplyDecision_RepublishesAZeroTxHeightNoArchivedObjectCanIdentify(t *te
 
 func TestApplyDecision_SkipsACompleteCanonicalHeight(t *testing.T) {
 	got := dispatch(t,
-		Config{Bucket: "bucket"},
+		Config{Bucket: "bucket", ChainID: ethereumChainID},
 		archivedAt(0, s3key.Block, s3key.Receipts, s3key.Traces),
 		archivedObjects(t, planTestBlock, 0, canonicalHash),
 		canonicalBlockData())
@@ -213,7 +223,7 @@ func TestApplyDecision_SkipsACompleteCanonicalHeight(t *testing.T) {
 
 func TestApplyDecision_DryRunQueuesNothing(t *testing.T) {
 	got := dispatch(t,
-		Config{Bucket: "bucket", DryRun: true},
+		Config{Bucket: "bucket", ChainID: ethereumChainID, DryRun: true},
 		archivedAt(0, s3key.Block, s3key.Receipts, s3key.Traces),
 		archivedObjects(t, planTestBlock, 0, forkHash),
 		canonicalBlockData())
@@ -230,7 +240,7 @@ func TestApplyDecision_DryRunQueuesNothing(t *testing.T) {
 }
 
 func TestApplyDecision_DryRunCountsTheHeightAsSkipped(t *testing.T) {
-	got := dispatch(t, Config{Bucket: "bucket", DryRun: true}, nil, nil, canonicalBlockData())
+	got := dispatch(t, Config{Bucket: "bucket", ChainID: ethereumChainID, DryRun: true}, nil, nil, canonicalBlockData())
 
 	if got.err != nil {
 		t.Fatalf("applyDecision() error = %v", got.err)
@@ -245,7 +255,7 @@ func TestApplyDecision_AMissingPayloadQueuesNothingAtAll(t *testing.T) {
 	r := canonicalBlockData()
 	r.Receipts = nil
 
-	got := dispatch(t, Config{Bucket: "bucket"}, nil, nil, r)
+	got := dispatch(t, Config{Bucket: "bucket", ChainID: ethereumChainID}, nil, nil, r)
 
 	if got.err == nil {
 		t.Fatal("expected an error for a plan the RPC payload cannot satisfy")
@@ -259,7 +269,7 @@ func TestApplyDecision_FetchFailureStopsTheHeight(t *testing.T) {
 	r := canonicalBlockData()
 	r.ReceiptsErr = errors.New("eth_getBlockReceipts: upstream null result")
 
-	got := dispatch(t, Config{Bucket: "bucket"}, nil, nil, r)
+	got := dispatch(t, Config{Bucket: "bucket", ChainID: ethereumChainID}, nil, nil, r)
 
 	if got.err == nil {
 		t.Fatal("expected the fetch failure to surface rather than a partial archive")
@@ -292,5 +302,60 @@ func TestLogDecision_AFreshHeightStaysOutOfTheInfoLogOfARealRun(t *testing.T) {
 				t.Errorf("logged %q, want it at %s: a multi-million-block run must not narrate every fresh height", logs.String(), tt.want)
 			}
 		})
+	}
+}
+
+// The same forked height on a chain whose watcher fetches no traces: the
+// correction is block and receipts, and no trace fetch is scheduled at all.
+func TestApplyDecision_AChainWithoutTracesRequestsNone(t *testing.T) {
+	got := dispatch(t,
+		Config{Bucket: "bucket", ChainID: baseChainID},
+		archivedAt(0, s3key.Block, s3key.Receipts),
+		archivedObjects(t, planTestBlock, 0, forkHash),
+		canonicalBlockData())
+
+	if got.err != nil {
+		t.Fatalf("applyDecision() error = %v", got.err)
+	}
+
+	wantKeys := []string{
+		s3key.Build(planTestBlock, 1, s3key.Block),
+		s3key.Build(planTestBlock, 1, s3key.Receipts),
+	}
+	if keys := uploadKeys(got.uploads); !slices.Equal(keys, wantKeys) {
+		t.Errorf("queued uploads = %v, want %v", keys, wantKeys)
+	}
+	if len(got.traces) != 0 {
+		t.Errorf("trace requests = %v, want none: this chain's watcher fetches no traces", got.traces)
+	}
+}
+
+// A report that cannot be written stops the whole run. Failing only the height
+// that hit it would cost a warning and a blocksFailed for every remaining
+// height of a million-block range, and never name the report as the cause.
+func TestApplyDecision_AReportWriteFailureAbortsTheRun(t *testing.T) {
+	planner, stats := newTestPlanner(t, ethereumChainID, nil, nil)
+	ctx, abort := context.WithCancelCause(context.Background())
+	defer abort(nil)
+
+	archiver := blockArchiver{
+		planner: planner,
+		report:  unbufferedReport("holes.jsonl", failingSink{err: errors.New("no space left on device")}),
+		cfg:     Config{Bucket: "bucket", ChainID: ethereumChainID, DryRun: true},
+		stats:   stats,
+		logger:  testutil.DiscardLogger(),
+		abort:   abort,
+	}
+
+	err := archiver.applyDecision(ctx, planner.fresh(planTestBlock), canonicalBlockData())
+
+	if err == nil {
+		t.Fatal("applyDecision() succeeded with a report it could not write")
+	}
+	if ctx.Err() == nil {
+		t.Fatal("the run context is still live: every remaining height would fail one at a time")
+	}
+	if cause := context.Cause(ctx); cause == nil || !strings.Contains(cause.Error(), "holes.jsonl") {
+		t.Errorf("cause = %v, want the report failure that stopped the run", context.Cause(ctx))
 	}
 }

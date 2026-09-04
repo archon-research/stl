@@ -20,25 +20,22 @@ type traceRequest struct {
 	Version  int
 }
 
-// applyDecision acts on one height's decision: it queues the uploads, hands the
-// trace collector the heights whose traces are still missing, and writes nothing
-// at all in a dry run.
-func applyDecision(
-	ctx context.Context,
-	d blockDecision,
-	payload outbound.BlockData,
-	cfg Config,
-	uploadCh chan<- UploadJob,
-	traceCh chan<- traceRequest,
-	stats *Stats,
-	logger *slog.Logger,
-) error {
-	logDecision(logger, cfg.DryRun, d)
-	stats.recordPlan(d.Plan.Action)
+// applyDecision acts on one height's decision: it records it in the report,
+// queues the uploads, hands the trace collector the heights whose traces are
+// still missing, and writes nothing at all in a dry run.
+func (a blockArchiver) applyDecision(ctx context.Context, d blockDecision, payload outbound.BlockData) error {
+	logDecision(a.logger, a.cfg.DryRun, d)
+	a.stats.recordPlan(d.Plan.Action)
+	if err := a.report.record(d); err != nil {
+		// The report is the run's whole output; failing per height would cost a
+		// warning and a blocksFailed for every height left, naming no cause.
+		a.abort(err)
+		return err
+	}
 
-	if cfg.DryRun {
-		stats.blocksSkipped.Add(1)
-		stats.tracesSkipped.Add(1)
+	if a.cfg.DryRun {
+		a.stats.blocksSkipped.Add(1)
+		a.stats.tracesSkipped.Add(1)
 		return nil
 	}
 
@@ -47,7 +44,7 @@ func applyDecision(
 			return fmt.Errorf("fetching block %d: %w", d.BlockNumber, err)
 		}
 	}
-	return queuePlan(ctx, d.Plan, payload, cfg.Bucket, uploadCh, traceCh, stats)
+	return queuePlan(ctx, d.Plan, payload, a.cfg.Bucket, a.uploadCh, a.traceCh, a.stats)
 }
 
 // needsPayloads reports whether a plan writes anything the block and receipts

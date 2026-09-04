@@ -1,0 +1,43 @@
+# On-demand block republisher for Unichain (ARCT-383).
+#
+# The Ethereum deployment in k8s/base/block-republisher is the same workload with
+# the same image; only the chain differs, so this one polls the Temporal task
+# queue "unichain-block-republisher" and reads Unichain's ConfigMap, Secret and raw
+# archive. Why it is an always-on Deployment with no schedule, why replicas is 1
+# with a Recreate strategy, which Pod Identity grants the ServiceAccount needs
+# before the first run, and why the worker does not drain are documented there.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unichain-block-republisher
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: unichain-block-republisher
+  template:
+    metadata:
+      labels:
+        app: unichain-block-republisher
+    spec:
+      serviceAccountName: unichain-block-republisher
+      containers:
+        - name: unichain-block-republisher
+          image: block-republisher
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: unichain-block-republisher
+            - secretRef:
+                name: unichain-block-republisher
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      terminationGracePeriodSeconds: 60

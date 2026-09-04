@@ -1,10 +1,10 @@
 // Package main is the block-republisher: an on-demand Temporal worker that
 // re-publishes a mined height under the next archive version so every consumer
-// appends the canonical block. Every payload is read by number and held to the
-// canonical hash the run derived — an archive node serves trace_block by hash
-// only near the head, and every hole this repairs is far older than that.
-// Operation and the version rule are in docs/runbooks/vector-cronjobs.md,
-// section "block-republisher".
+// appends the canonical block. One deployment serves one chain, on that chain's
+// task queue. Every payload is read by number and held to the canonical hash the
+// run derived — an archive node serves trace_block by hash only near the head,
+// and every hole this repairs is far older than that. Operation and the version
+// rule are in docs/runbooks/vector-cronjobs.md, section "block-republisher".
 package main
 
 import (
@@ -54,22 +54,21 @@ func init() {
 	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
 }
 
-const (
-	// taskQueueName is the Temporal task queue an operator starts a run on, and
-	// also the OTel service name the vector-cronjobs alerts select by.
-	taskQueueName = "block-republisher"
-
-	// workflowTypeName is what an operator types into the Temporal UI's "Workflow
-	// Type" field, so it is registered explicitly rather than derived from the Go
-	// function name — a rename must not invalidate the runbook or muscle memory.
-	workflowTypeName = "BlockRepublish"
-)
+// workflowTypeName is what an operator types into the Temporal UI's "Workflow
+// Type" field, so it is registered explicitly rather than derived from the Go
+// function name — a rename must not invalidate the runbook or muscle memory.
+const workflowTypeName = "BlockRepublish"
 
 func run(ctx context.Context) error {
+	taskQueue, err := taskQueueName()
+	if err != nil {
+		return fmt.Errorf("resolving the task queue: %w", err)
+	}
+
 	return temporal.RunWorker(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporal.WorkerConfig{
-		Name:       taskQueueName,
+		Name:       taskQueue,
 		NoDatabase: true,
 		Register:   register,
 	})
@@ -98,7 +97,7 @@ func newRepublishActivities(ctx context.Context, logger *slog.Logger, cfg config
 		return nil, fmt.Errorf("resolving the chain name for telemetry: %w", err)
 	}
 
-	client, err := newChainClient(chainName, cfg, logger)
+	client, err := newChainClient(ctx, chainName, cfg, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +154,7 @@ func openArchiveReader(ctx context.Context, awsCfg aws.Config, cfg config, logge
 
 // newChainClient builds the same RPC client the watcher fetches a block with, so
 // a republished payload is byte-for-byte the shape a live one has.
-func newChainClient(chainName string, cfg config, logger *slog.Logger) (*alchemy.Client, error) {
+func newChainClient(ctx context.Context, chainName string, cfg config, logger *slog.Logger) (*alchemy.Client, error) {
 	telemetry, err := alchemy.NewTelemetry(chainName)
 	if err != nil {
 		return nil, fmt.Errorf("creating alchemy telemetry: %w", err)
@@ -173,7 +172,25 @@ func newChainClient(chainName string, cfg config, logger *slog.Logger) (*alchemy
 	if err != nil {
 		return nil, fmt.Errorf("creating the RPC client: %w", err)
 	}
+	if err := guardNodeChain(ctx, client, cfg.chainID); err != nil {
+		return nil, err
+	}
 	return client, nil
+}
+
+// guardNodeChain refuses a node serving another chain. The chain and the node
+// URL arrive as independent variables, and neither the topic nor the bucket
+// guard can see between them: every height would be read from the wrong chain
+// and published, correctly named, onto this one's topic.
+func guardNodeChain(ctx context.Context, client *alchemy.Client, chainID int64) error {
+	served, err := client.ChainID(ctx)
+	if err != nil {
+		return fmt.Errorf("asking the node which chain it serves: %w", err)
+	}
+	if served != chainID {
+		return fmt.Errorf("ALCHEMY_HTTP_URL / CHAIN_ID mismatch: the node serves chain %d, CHAIN_ID says %d", served, chainID)
+	}
+	return nil
 }
 
 // openBlockCache dials Redis at startup rather than on the first run, so an

@@ -383,6 +383,86 @@ data:
   AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
   DEPLOY_ENV: "prod"
 ---
+# On-demand block republisher for Arbitrum — see the ethereum one above.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arbitrum-block-republisher
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "42161"
+  # Required, not defaulted: a deployment without it would fetch another chain's
+  # blocks for its heights. The value is the arbitrum watcher's own.
+  ALCHEMY_HTTP_URL: "https://arb-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  DEPLOY_ENV: "prod"
+---
+# On-demand block republisher for Avalanche — see the ethereum one above.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: avalanche-block-republisher
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "43114"
+  # Required, not defaulted: a deployment without it would fetch another chain's
+  # blocks for its heights. The value is the avalanche watcher's own.
+  ALCHEMY_HTTP_URL: "https://avax-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  DEPLOY_ENV: "prod"
+---
+# On-demand block republisher for Base — see the ethereum one above.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: base-block-republisher
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "8453"
+  # Required, not defaulted: a deployment without it would fetch another chain's
+  # blocks for its heights. The value is the base watcher's own.
+  ALCHEMY_HTTP_URL: "https://base-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  DEPLOY_ENV: "prod"
+---
+# On-demand block republisher for Optimism — see the ethereum one above.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: optimism-block-republisher
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "10"
+  # Required, not defaulted: a deployment without it would fetch another chain's
+  # blocks for its heights. The value is the optimism watcher's own.
+  ALCHEMY_HTTP_URL: "https://opt-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  DEPLOY_ENV: "prod"
+---
+# On-demand block republisher for Unichain — see the ethereum one above.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unichain-block-republisher
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "130"
+  # Required, not defaulted: a deployment without it would fetch another chain's
+  # blocks for its heights. The value is the unichain watcher's own.
+  ALCHEMY_HTTP_URL: "https://unichain-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  DEPLOY_ENV: "prod"
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:

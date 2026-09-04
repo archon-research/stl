@@ -274,3 +274,40 @@ func TestDefaultChainExpectations_CoversEveryKnownChain(t *testing.T) {
 		}
 	}
 }
+
+func TestChainSlug(t *testing.T) {
+	tests := []struct {
+		name            string
+		chainID         int64
+		want            string
+		wantErrContains string
+	}{
+		{name: "ethereum", chainID: 1, want: "ethereum"},
+		{name: "avalanche is the archive's name, not the chain's own avalanche-c", chainID: 43114, want: "avalanche"},
+		{name: "base", chainID: 8453, want: "base"},
+		{name: "optimism", chainID: 10, want: "optimism"},
+		{name: "unichain", chainID: 130, want: "unichain"},
+		{name: "arbitrum", chainID: 42161, want: "arbitrum"},
+		{name: "robinhood", chainID: 4663, want: "robinhood"},
+		{name: "a chain the repo does not watch", chainID: 999999, wantErrContains: "unknown chain ID 999999"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ChainSlug(tc.chainID)
+
+			if tc.wantErrContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrContains) {
+					t.Fatalf("error = %v, want one mentioning %q", err, tc.wantErrContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ChainSlug(%d) error = %v", tc.chainID, err)
+			}
+			if got != tc.want {
+				t.Errorf("ChainSlug(%d) = %q, want %q", tc.chainID, got, tc.want)
+			}
+		})
+	}
+}

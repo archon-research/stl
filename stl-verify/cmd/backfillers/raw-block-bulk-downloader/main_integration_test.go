@@ -7,11 +7,13 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -47,7 +49,7 @@ func TestRunIntegration_RepublishesALosingForkAtTheNextVersion(t *testing.T) {
 
 	mustRunDownloader(t, ctx, bucket, downloaderRun{})
 
-	for _, dataType := range archivedTypes {
+	for _, dataType := range ethereumTypes() {
 		if got := storedBlockHash(t, ctx, client, bucket, 1, dataType); got != canonicalHash {
 			t.Errorf("%s at version 1 carries hash %q, want the canonical %q", dataType, got, canonicalHash)
 		}
@@ -97,7 +99,7 @@ func TestRunIntegration_CorrectsATwiceForkedHeightAtVersionTwo(t *testing.T) {
 	if versions := archivedVersions(t, ctx, client, bucket); !slices.Equal(versions, []int{0, 1, 2}) {
 		t.Errorf("archived versions = %v, want %v: a second correction goes above the losing top version", versions, []int{0, 1, 2})
 	}
-	for _, dataType := range archivedTypes {
+	for _, dataType := range ethereumTypes() {
 		if got := storedBlockHash(t, ctx, client, bucket, 2, dataType); got != canonicalHash {
 			t.Errorf("%s at version 2 carries hash %q, want the canonical %q", dataType, got, canonicalHash)
 		}
@@ -113,6 +115,28 @@ func TestRunIntegration_LeavesACanonicalArchiveUntouched(t *testing.T) {
 
 	if versions := archivedVersions(t, ctx, client, bucket); !slices.Equal(versions, []int{0}) {
 		t.Errorf("archived versions = %v, want only the canonical %v: a re-run must not duplicate it", versions, []int{0})
+	}
+}
+
+// The audit an operator runs on a chain: a dry run over the archive leaves the
+// holes it found in a file, and touches nothing.
+func TestRunIntegration_ADryRunReportsTheHoleItLeftInPlace(t *testing.T) {
+	ctx := context.Background()
+	client, bucket := archiveBucket(t, ctx)
+	seedArchivedVersion(t, ctx, client, bucket, 0, forkHash)
+	reportPath := filepath.Join(t.TempDir(), "holes.jsonl")
+
+	mustRunDownloader(t, ctx, bucket, downloaderRun{dryRun: true, reportPath: reportPath})
+
+	lines := reportLines(t, reportPath)
+	if len(lines) != 1 {
+		t.Fatalf("report lines = %+v, want the one forked height", lines)
+	}
+	if lines[0].Block != forkedBlock || lines[0].Action != actionRepublish || lines[0].Version != 1 {
+		t.Errorf("report line = %+v, want block %d republished at version 1", lines[0], forkedBlock)
+	}
+	if versions := archivedVersions(t, ctx, client, bucket); !slices.Equal(versions, []int{0}) {
+		t.Errorf("archived versions after the audit = %v, want only the seeded %v", versions, []int{0})
 	}
 }
 
@@ -187,6 +211,51 @@ func TestRunIntegration_RefusesABucketItCannotReach(t *testing.T) {
 	}
 }
 
+// --report is the run's complete action list, so a height the run failed on has
+// to be in it: without a row it is indistinguishable from one that needed
+// nothing, and the next operator repairs everything but it.
+func TestRunIntegration_AFailedHeightIsInTheReport(t *testing.T) {
+	ctx := context.Background()
+	client, bucket := archiveBucket(t, ctx)
+	seedArchivedVersion(t, ctx, client, bucket, 0, forkHash)
+	reportPath := filepath.Join(t.TempDir(), "holes.jsonl")
+
+	if _, err := runDownloader(t, ctx, bucket, downloaderRun{rpcFailure: true, reportPath: reportPath}); err == nil {
+		t.Fatal("expected run() to fail: an exit code of 0 would hide the hole left in the archive")
+	}
+
+	lines := reportLines(t, reportPath)
+	if len(lines) != 1 {
+		t.Fatalf("report lines = %+v, want the one height the run could not archive", lines)
+	}
+	if lines[0].Block != forkedBlock || lines[0].Action != actionError {
+		t.Errorf("report line = %+v, want block %d recorded as an error", lines[0], forkedBlock)
+	}
+	if lines[0].Error == "" {
+		t.Error("the error row carries no error: the report has to say why the height was left alone")
+	}
+}
+
+// A report path the run cannot write is the operator's whole answer, so it must
+// stop the run before it spends an hour of RPC and S3 reads reaching it.
+func TestRunIntegration_RefusesAnUnwritableReportBeforeAnyWork(t *testing.T) {
+	ctx := context.Background()
+	_, bucket := archiveBucket(t, ctx)
+	unwritable := filepath.Join(t.TempDir(), "no-such-directory", "holes.jsonl")
+
+	node, err := runDownloader(t, ctx, bucket, downloaderRun{dryRun: true, reportPath: unwritable})
+
+	if err == nil {
+		t.Fatal("run() succeeded with a report path it cannot create")
+	}
+	if !strings.Contains(err.Error(), unwritable) {
+		t.Errorf("error = %v, want it to name the report path %q", err, unwritable)
+	}
+	if served := node.served(); served != 0 {
+		t.Errorf("the node answered %d calls before the report failed, want none", served)
+	}
+}
+
 func archiveBucket(t *testing.T, ctx context.Context) (*awss3.Client, string) {
 	t.Helper()
 
@@ -203,6 +272,8 @@ type downloaderRun struct {
 	allowUnfinalized bool
 	// finalizedHead defaults to the height the tests archive.
 	finalizedHead int64
+	// reportPath is where the run writes its decisions; empty means no report.
+	reportPath string
 }
 
 func mustRunDownloader(t *testing.T, ctx context.Context, bucket string, opts downloaderRun) *fakeErigon {
@@ -226,12 +297,14 @@ func runDownloader(t *testing.T, ctx context.Context, bucket string, opts downlo
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 
 	cfg := Config{
+		ChainID:             ethereumChainID,
 		RPCURL:              node.url,
 		StartBlock:          forkedBlock,
 		EndBlock:            forkedBlock,
 		Bucket:              bucket,
 		Region:              sharedLocalStackCfg.Region,
 		DryRun:              opts.dryRun,
+		ReportPath:          opts.reportPath,
 		AllowUnfinalized:    opts.allowUnfinalized,
 		BlockReceiptWorkers: 1,
 		TraceWorkers:        1,
@@ -239,7 +312,11 @@ func runDownloader(t *testing.T, ctx context.Context, bucket string, opts downlo
 		BlockBatchSize:      1,
 		TraceBatchSize:      1,
 	}
-	return node, run(ctx, cfg, testutil.DiscardLogger())
+	report, err := run(ctx, cfg, testutil.DiscardLogger())
+	if closeErr := report.close(); err == nil {
+		err = closeErr
+	}
+	return node, err
 }
 
 // fakeErigon answers the block, receipt and trace calls with a canonical block
@@ -251,6 +328,7 @@ type fakeErigon struct {
 	finalizedHead int64
 
 	mu         sync.Mutex
+	requests   int
 	headers    int
 	fullBlocks int
 }
@@ -275,6 +353,14 @@ func (f *fakeErigon) reads() (headers, fullBlocks int) {
 	return f.headers, f.fullBlocks
 }
 
+// served counts every request the node answered, whatever it asked for, so a
+// test can assert a run stopped before it reached the node at all.
+func (f *fakeErigon) served() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.requests
+}
+
 // rpcRequest is as much of a JSON-RPC call as the fake node needs to answer it.
 type rpcRequest struct {
 	ID     int               `json:"id"`
@@ -285,6 +371,10 @@ type rpcRequest struct {
 // serve answers a batch with an array and a single call with an object, the way
 // a node does.
 func (f *fakeErigon) serve(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	f.requests++
+	f.mu.Unlock()
+
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -476,4 +566,44 @@ func headerJSON(hash string, blockNum int64) []byte {
 
 func tracesJSON(blockHash string) []byte {
 	return fmt.Appendf(nil, `[{"blockHash":%q,"type":"call","action":{"input":%q}}]`, blockHash, randomHex(64))
+}
+
+// The report is what an operator acts on, so one that did not flush fails the
+// run on every path — including the clean shutdown that otherwise exits 0 and
+// would have reported a truncated file as a finished audit.
+func TestFinish_AReportThatDidNotFlushFailsTheRun(t *testing.T) {
+	tests := []struct {
+		name         string
+		reportFails  bool
+		runErr       error
+		shuttingDown bool
+		want         int
+	}{
+		{name: "a run that archived everything", want: 0},
+		{name: "a run that left holes", runErr: errors.New("archive incomplete"), want: 1},
+		{name: "a signal during a run", runErr: context.Canceled, shuttingDown: true, want: 0},
+		{name: "a report that would not flush", reportFails: true, want: 1},
+		{
+			name:         "a report that would not flush during a shutdown",
+			reportFails:  true,
+			runErr:       context.Canceled,
+			shuttingDown: true,
+			want:         1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var report *decisionReport
+			if tc.reportFails {
+				report = unbufferedReport("holes.jsonl", failingSink{err: errors.New("no space left on device")})
+			}
+
+			got := finish(report, tc.runErr, tc.shuttingDown, testutil.DiscardLogger())
+
+			if got != tc.want {
+				t.Errorf("finish() = %d, want %d", got, tc.want)
+			}
+		})
+	}
 }
