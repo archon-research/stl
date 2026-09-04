@@ -127,6 +127,18 @@ func TestParseConfig_RequiredEnvVars(t *testing.T) {
 	}
 }
 
+func TestParseConfig_ReportsMissingAlchemyKeyBeforeLaterConfiguration(t *testing.T) {
+	vars := happyEnv()
+	delete(vars, "ALCHEMY_API_KEY")
+	delete(vars, "REDIS_ADDR")
+	envSet(t, vars)
+
+	_, err := ParseConfig("test", nil)
+	if err == nil || !strings.Contains(err.Error(), "ALCHEMY_API_KEY") {
+		t.Fatalf("err = %v, want the earlier Alchemy key error", err)
+	}
+}
+
 func TestParseConfig_RejectsNonNumericChainID(t *testing.T) {
 	vars := happyEnv()
 	vars["CHAIN_ID"] = "mainnet"
@@ -270,8 +282,8 @@ func TestParseConfig_RequiresAlchemyURLForNonMainnet(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error: a non-mainnet chain must set ALCHEMY_HTTP_URL (default is mainnet-only)")
 	}
-	if !strings.Contains(err.Error(), "ALCHEMY_HTTP_URL") {
-		t.Errorf("error %q should name ALCHEMY_HTTP_URL, not fall through to a later check", err)
+	if !strings.Contains(err.Error(), "resolving Alchemy RPC URL: ALCHEMY_HTTP_URL") {
+		t.Errorf("error %q should identify the Alchemy RPC URL configuration step", err)
 	}
 }
 

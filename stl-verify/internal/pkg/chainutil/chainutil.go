@@ -1,10 +1,17 @@
-// Package chainutil provides utilities for working with blockchain chain IDs and names.
+// Package chainutil provides utilities for working with blockchain chain IDs and
+// names, and for cross-checking a deployment's configured chain against its wiring.
 package chainutil
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"math/big"
+	"net"
+	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -137,4 +144,67 @@ func RequireChainID() (int, error) {
 		return 0, fmt.Errorf("CHAIN_ID must be a valid integer: %w", err)
 	}
 	return id, nil
+}
+
+const (
+	ethereumMainnetChainID int64 = 1
+	defaultAlchemyHTTPURL        = "https://eth-mainnet.g.alchemy.com/v2"
+)
+
+// AlchemyRPCURL builds a credentialed node URL; its endpoint default is
+// mainnet-only, and remote endpoints must use HTTPS.
+func AlchemyRPCURL(chainID int64) (string, error) {
+	apiKey, err := env.Require("ALCHEMY_API_KEY")
+	if err != nil {
+		return "", fmt.Errorf("requiring ALCHEMY_API_KEY: %w", err)
+	}
+	baseURL := env.Get("ALCHEMY_HTTP_URL", "")
+	if baseURL == "" && chainID != ethereumMainnetChainID {
+		return "", fmt.Errorf("ALCHEMY_HTTP_URL is required for chain %d (the default endpoint is mainnet-only)", chainID)
+	}
+	if baseURL == "" {
+		baseURL = defaultAlchemyHTTPURL
+	}
+	parsedURL, err := url.Parse(baseURL)
+	if err != nil {
+		return "", fmt.Errorf("parsing ALCHEMY_HTTP_URL: %w", err)
+	}
+	if parsedURL.Hostname() == "" {
+		return "", errors.New("ALCHEMY_HTTP_URL must be an absolute URL")
+	}
+	if parsedURL.User != nil || parsedURL.RawQuery != "" || parsedURL.ForceQuery || strings.Contains(baseURL, "#") {
+		return "", errors.New("ALCHEMY_HTTP_URL must not contain user info, a query, or a fragment")
+	}
+	hostIP := net.ParseIP(parsedURL.Hostname())
+	isLoopback := strings.EqualFold(parsedURL.Hostname(), "localhost") || hostIP.IsLoopback()
+	if parsedURL.Scheme != "https" && !(parsedURL.Scheme == "http" && isLoopback) {
+		return "", errors.New("ALCHEMY_HTTP_URL must use HTTPS unless it targets loopback")
+	}
+	return strings.TrimRight(baseURL, "/") + "/" + apiKey, nil
+}
+
+// ChainIDReader is the one node method AssertChainID needs, so the check is
+// testable without an *ethclient.Client.
+type ChainIDReader interface {
+	ChainID(ctx context.Context) (*big.Int, error)
+}
+
+// chainIDProbeTimeout bounds the startup probe on its own: the dialers' budgets
+// (60s to 5m, with retries) are sized for heavy calls, not for failing a sick node fast.
+const chainIDProbeTimeout = 15 * time.Second
+
+// AssertChainID refuses a node on another chain before its chain-scoped data can
+// be read or written under the configured chain ID.
+func AssertChainID(ctx context.Context, node ChainIDReader, want int64) error {
+	ctx, cancel := context.WithTimeout(ctx, chainIDProbeTimeout)
+	defer cancel()
+
+	got, err := node.ChainID(ctx)
+	if err != nil {
+		return fmt.Errorf("fetching RPC chain ID: %w", err)
+	}
+	if got == nil || !got.IsInt64() || got.Int64() != want {
+		return fmt.Errorf("RPC chain ID mismatch: RPC reports %s, config says %d", got, want)
+	}
+	return nil
 }

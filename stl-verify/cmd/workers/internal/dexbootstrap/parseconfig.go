@@ -10,15 +10,10 @@ import (
 	"flag"
 	"fmt"
 	"strconv"
-	"strings"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 )
-
-// ethereumMainnetChainID is the only chain the built-in ALCHEMY_HTTP_URL default
-// (eth-mainnet) is valid for; any other chain must set the endpoint explicitly.
-const ethereumMainnetChainID int64 = 1
 
 // Config is the resolved runtime configuration common to every DEX worker.
 // Worker-specific config (e.g. UV3's NFPM address) is read separately from
@@ -110,15 +105,9 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 	if cfg.DBURL == "" {
 		return Config{}, fmt.Errorf("database URL not provided (use -db flag or DATABASE_URL env var)")
 	}
-
-	alchemyAPIKey := env.Get("ALCHEMY_API_KEY", "")
-	if alchemyAPIKey == "" {
-		return Config{}, fmt.Errorf("ALCHEMY_API_KEY environment variable is required")
+	if _, err := env.Require("ALCHEMY_API_KEY"); err != nil {
+		return Config{}, fmt.Errorf("resolving Alchemy RPC URL: %w", err)
 	}
-	// Trim a trailing slash so a configured ALCHEMY_HTTP_URL ending in "/" does
-	// not produce a "//" before the API key.
-	alchemyHTTPURL := strings.TrimRight(env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2"), "/")
-	cfg.AlchemyURL = fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey)
 
 	if cfg.RedisAddr == "" {
 		cfg.RedisAddr = env.Get("REDIS_ADDR", "")
@@ -200,11 +189,9 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 		return Config{}, fmt.Errorf("S3 bucket / chain / env mismatch: %w", err)
 	}
 
-	// The built-in ALCHEMY_HTTP_URL default points at mainnet; any other chain
-	// must set it explicitly or the worker would silently talk to mainnet (same
-	// fail-fast spirit as the S3 bucket/chain cross-check above).
-	if cfg.ChainID != ethereumMainnetChainID && env.Get("ALCHEMY_HTTP_URL", "") == "" {
-		return Config{}, fmt.Errorf("ALCHEMY_HTTP_URL is required for chain %d (the default endpoint is mainnet-only)", cfg.ChainID)
+	cfg.AlchemyURL, err = chainutil.AlchemyRPCURL(cfg.ChainID)
+	if err != nil {
+		return Config{}, fmt.Errorf("resolving Alchemy RPC URL: %w", err)
 	}
 
 	return cfg, nil

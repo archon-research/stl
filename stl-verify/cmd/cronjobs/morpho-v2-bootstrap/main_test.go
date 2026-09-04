@@ -45,12 +45,15 @@ func TestSetupRunner_RequiresChainID(t *testing.T) {
 	t.Setenv("CHAIN_ID", "")
 	t.Setenv("ALCHEMY_API_KEY", "key")
 
-	_, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
+	_, _, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
 	if err == nil {
 		t.Fatal("missing CHAIN_ID should error, got nil")
 	}
 	if !strings.Contains(err.Error(), "CHAIN_ID") {
 		t.Errorf("error %q should mention CHAIN_ID", err.Error())
+	}
+	if !strings.Contains(err.Error(), "requiring chain ID") {
+		t.Errorf("error %q should identify the failed operation", err.Error())
 	}
 }
 
@@ -58,54 +61,34 @@ func TestSetupRunner_RequiresAlchemyKey(t *testing.T) {
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("ALCHEMY_API_KEY", "")
 
-	_, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
+	_, _, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
 	if err == nil {
 		t.Fatal("missing ALCHEMY_API_KEY should error, got nil")
 	}
 	if !strings.Contains(err.Error(), "ALCHEMY_API_KEY") {
 		t.Errorf("error %q should mention ALCHEMY_API_KEY", err.Error())
 	}
+	if !strings.Contains(err.Error(), "resolving RPC URL") {
+		t.Errorf("error %q should identify the failed operation", err.Error())
+	}
 }
 
-func TestResolveRPCURL(t *testing.T) {
-	tests := []struct {
-		name    string
-		env     map[string]string
-		want    string
-		wantErr string
-	}{
-		{
-			name: "defaults to eth mainnet",
-			env:  map[string]string{"ALCHEMY_API_KEY": "secret"},
-			want: "https://eth-mainnet.g.alchemy.com/v2/secret",
-		},
-		{
-			name: "honours an explicit base url",
-			env:  map[string]string{"ALCHEMY_API_KEY": "secret", "ALCHEMY_HTTP_URL": "https://base-mainnet.g.alchemy.com/v2"},
-			want: "https://base-mainnet.g.alchemy.com/v2/secret",
-		},
-		{
-			name:    "an absent key is a hard error, never an unauthenticated URL",
-			env:     map[string]string{},
-			wantErr: "ALCHEMY_API_KEY",
-		},
+func TestSetupRunner_IdentifiesSweepConfigFailure(t *testing.T) {
+	t.Setenv("CHAIN_ID", "1")
+	t.Setenv("BOOTSTRAP_BLOCK_CHUNK_SIZE", "lots")
+
+	_, _, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
+	if err == nil || !strings.Contains(err.Error(), "parsing sweep config") {
+		t.Fatalf("err = %v, want sweep-config operation context", err)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := resolveRPCURL(func(k string) string { return tc.env[k] })
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("err = %v, want one mentioning %q", err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("resolveRPCURL: %v", err)
-			}
-			if got != tc.want {
-				t.Fatalf("url = %q, want %q", got, tc.want)
-			}
-		})
+}
+
+func TestRegister_IdentifiesRunnerSetupFailure(t *testing.T) {
+	t.Setenv("CHAIN_ID", "")
+
+	err := (&bootstrapWorker{}).register(context.Background(), discardDeps(), nil)
+	if err == nil || !strings.Contains(err.Error(), "setting up bootstrap runner") {
+		t.Fatalf("err = %v, want runner-setup operation context", err)
 	}
 }
 

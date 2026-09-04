@@ -23,6 +23,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
@@ -105,13 +106,6 @@ func parseConfig(args []string) (cliConfig, error) {
 		return cliConfig{}, fmt.Errorf("database URL not provided (use -db flag or DATABASE_URL env var)")
 	}
 
-	alchemyAPIKey := os.Getenv("ALCHEMY_API_KEY")
-	if alchemyAPIKey == "" {
-		return cliConfig{}, fmt.Errorf("ALCHEMY_API_KEY environment variable is required")
-	}
-	alchemyHTTPURL := env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
-	cfg.alchemyURL = fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey)
-
 	if cfg.redisAddr == "" {
 		cfg.redisAddr = env.Get("REDIS_ADDR", "")
 	}
@@ -134,15 +128,18 @@ func parseConfig(args []string) (cliConfig, error) {
 		cfg.visibilityTimeout = v
 	}
 
-	chainIDStr := env.Get("CHAIN_ID", "1")
-	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
+	chainID, err := chainutil.RequireChainID()
 	if err != nil {
-		return cliConfig{}, fmt.Errorf("parsing CHAIN_ID %q: %w", chainIDStr, err)
+		return cliConfig{}, err
 	}
-	cfg.chainID = chainID
-	cfg.chainName, err = entity.ChainName(chainID)
+	cfg.chainID = int64(chainID)
+	cfg.chainName, err = entity.ChainName(cfg.chainID)
 	if err != nil {
 		return cliConfig{}, fmt.Errorf("resolving chain name: %w", err)
+	}
+	cfg.alchemyURL, err = chainutil.AlchemyRPCURL(cfg.chainID)
+	if err != nil {
+		return cliConfig{}, err
 	}
 
 	cfg.s3Bucket = env.Get("S3_BUCKET", "")
@@ -170,7 +167,7 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	slog.SetDefault(logger)
 
 	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    "morpho-indexer",
+		ServiceName:    env.Get("SERVICE_NAME", "morpho-indexer"),
 		ServiceVersion: buildinfo.GitHash(),
 		BuildTime:      BuildTime,
 		Logger:         logger,
@@ -230,7 +227,10 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 		return fmt.Errorf("connecting to Ethereum node: %w", err)
 	}
 	defer ethClient.Close()
-	logger.Info("Ethereum node connected")
+	if err := chainutil.AssertChainID(ctx, ethClient, cfg.chainID); err != nil {
+		return fmt.Errorf("verifying the RPC node's chain: %w", err)
+	}
+	logger.Info("Ethereum node connected", "chainID", cfg.chainID)
 
 	// PostgreSQL
 	pool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(cfg.dbURL))
