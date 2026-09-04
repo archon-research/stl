@@ -4,16 +4,9 @@ metadata:
   name: robinhood-backup-worker
 spec:
   replicas: 1
-  # Recreate, per k8s/AGENTS.md "Rollout strategy" — this is the single-consumer
-  # SQS workload that section names. The six older backup workers carry
-  # RollingUpdate 25%/25%, but that came from #759 spelling out the API-server
-  # default fleet-wide to give ArgoCD ownership of the field ("the point is
-  # ownership, not values"), so a new Deployment is the first place the value is
-  # actually chosen. A surge buys nothing here: sns.EventSink keys the FIFO
-  # MessageGroupId on the chain id, so one chain is one message group and the
-  # surged pod can only poll alongside the incumbent, never drain in parallel with
-  # it. The restart gap costs queue depth, not blocks — the queue buffers through
-  # it and the successor drains it.
+  # Recreate, per k8s/AGENTS.md "Rollout strategy": sns.EventSink keys the FIFO
+  # MessageGroupId on the chain id, so one chain is one message group and a surged
+  # pod could only poll alongside the incumbent, never drain in parallel with it.
   strategy:
     type: Recreate
   selector:
@@ -37,19 +30,13 @@ spec:
                 name: robinhood-backup-worker-config
             - secretRef:
                 name: robinhood-backup-worker
-          # Sized for WORKERS=10 (see the overlay ConfigMap) against the six older
-          # backup workers' WORKERS=2 — Robinhood runs ~10 blk/s where the rest of
-          # the fleet spans ~0.1 blk/s (mainnet) to ~4 blk/s (arbitrum). Ten
-          # concurrent handlers each gzip a block and its receipts, so 5x the
-          # concurrency on the siblings' 200m/256Mi limits would CPU-throttle
-          # exactly during a backlog drain.
-          #
-          # 512Mi is ~10x the expected working set, not a guess at 51Mi per
-          # handler: each holds one payload plus its gzip buffer, and Robinhood's
-          # 100ms blocks are small, so 10 in flight is single-digit MB over the Go
-          # runtime baseline. Payload size is unmeasured, hence the margin — an
-          # OOMKill here hides 10 messages for the full 180s visibility timeout
-          # (~1800 blocks) and no alert covers that.
+          # Raised over the sibling backup workers' 50m/64Mi + 200m/256Mi because
+          # this chain runs WORKERS=10 rather than 2 (see the overlay ConfigMap).
+          # CPU is 2.5x, not 5x: per message only the gzip of the block and its
+          # receipts is CPU-bound, the rest is one HeadObject, two Redis reads and
+          # two PUTs. 512Mi is margin over an unmeasured payload size, not a
+          # measurement — an OOMKill hides a whole batch for the 180s visibility
+          # timeout and no alert covers that. Revisit both once staging has data.
           resources:
             requests:
               cpu: "100m"
