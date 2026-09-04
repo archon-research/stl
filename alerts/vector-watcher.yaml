@@ -74,23 +74,35 @@ groups:
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatchernoblocks
 
       - alert: VectorWatcherNoHeadersReceived
-        # The WebSocket subscriber stopped forwarding newHeads while the process
-        # is otherwise alive. VectorWatcherNoBlocks above does NOT catch this:
-        # its `alchemy_client_requests_total` series is fed by the HTTP client
-        # that live AND backfill share, and backfill re-verifies its boundary
-        # blocks with eth_getBlockByNumber every poll interval (5s in both
-        # overlays), so a watcher whose socket has gone silent still keeps that
-        # counter well above zero. This rule reads the subscriber directly.
-        #
-        # Window is 5m so the slowest chain (Ethereum, ~12s blocks) still has
-        # ~25 headers in it; anything shorter risks firing on a normal L1 lull.
+        # Process alive, subscriber forwarding nothing. VectorWatcherNoBlocks
+        # cannot see this: backfill's boundary re-verification keeps the shared
+        # HTTP request counter busy while the socket is silent.
+        # `unless`, not `== 0`, because a socket dead since boot emits no
+        # received series and `== 0` cannot match a series that does not exist.
+        # `and on ()` keeps this silent rather than paging every watcher should
+        # these not-yet-emitted series turn out to be named differently.
         expr: |
-          sum by (service_name, cluster) (
-            rate(alchemy_subscriber_blocks_received_total{
-              k8s_namespace_name="vector",
-              service_name=~".*watcher"
-            }[5m])
-          ) == 0
+          (
+            sum by (service_name, cluster) (
+              rate(alchemy_client_requests_total{
+                k8s_namespace_name="vector",
+                service_name=~".*watcher"
+              }[5m])
+            ) > 0
+            unless
+            sum by (service_name, cluster) (
+              rate(alchemy_subscriber_blocks_received_total{
+                k8s_namespace_name="vector",
+                service_name=~".*watcher"
+              }[5m])
+            ) > 0
+          )
+          and on ()
+          (
+            count(alchemy_subscriber_blocks_received_total{
+              k8s_namespace_name="vector"
+            }) > 0
+          )
         for: 5m
         labels:
           team: vector
@@ -101,13 +113,14 @@ groups:
           summary: "Vector watcher receiving no block headers on {{ $labels.service_name }}"
           description: |
             `alchemy_subscriber_blocks_received_total` on
-            `{{ $labels.service_name }}` has been flat for >5m: the Alchemy
-            WebSocket subscriber is delivering nothing even though the process
-            is still issuing RPC calls. Live ingestion for that chain is
-            stopped and only backfill is keeping the chain whole.
+            `{{ $labels.service_name }}` has been flat for >5m (a 5m rate
+            window plus `for: 5m`, so up to ~10m from onset) even though the
+            process is still issuing RPC calls. Live ingestion for that chain
+            is stopped and only backfill is keeping the chain whole.
 
-            Check the subscriber's reconnect/stall counters and the pod logs
-            before restarting.
+            Check `alchemy_subscriber_blocks_dropped_total` FIRST: if it is
+            climbing, the socket is fine and the live consumer is wedged —
+            triage as VectorWatcherBlocksDropped instead.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatchernoheadersreceived
 
       - alert: VectorWatcherAlchemyErrorsHigh
@@ -222,17 +235,16 @@ groups:
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatcheralchemyretrieshigh
 
       - alert: VectorWatcherBlocksDropped
-        # The subscriber's newHeads channel is a 100-slot buffer and a header is
-        # only dropped once it is full, i.e. the live consumer fell ~100 blocks
-        # behind the socket. Zero in steady state, so any occurrence is
-        # actionable: a dropped header reaches Postgres only via backfill.
-        # It is also the cheap in-prod way to tell "our channel dropped it" from
-        # "Alchemy never delivered it" when a gap appears (ARCT-374) — drops here
-        # mean us, silence here means upstream.
+        # A header is dropped only once the 100-slot newHeads buffer is full,
+        # i.e. the live consumer fell ~100 blocks behind the socket. Zero in
+        # steady state, so any drop is actionable, and it is what tells "our
+        # channel dropped it" from "Alchemy never delivered it" (ARCT-374).
+        # Grouping follows the rest of this file (service_name identifies the
+        # chain) even though these series carry their own `chain` label.
         #
-        # These subscriber metrics carry a `chain` label of their own, but the
-        # grouping follows the rest of this file (service_name identifies the
-        # chain) so the Slack template renders the same header everywhere.
+        # Second arm: the counter series is born at 1 on the first drop, and
+        # increase() is last-minus-first, so a first-ever drop alone yields 0.
+        # It fires when the series exists now but did not one window ago.
         expr: |
           sum by (service_name, cluster) (
             increase(alchemy_subscriber_blocks_dropped_total{
@@ -240,6 +252,22 @@ groups:
               service_name=~".*watcher"
             }[10m])
           ) > 0
+          or
+          (
+            sum by (service_name, cluster) (
+              last_over_time(alchemy_subscriber_blocks_dropped_total{
+                k8s_namespace_name="vector",
+                service_name=~".*watcher"
+              }[10m])
+            ) > 0
+            unless
+            sum by (service_name, cluster) (
+              count_over_time(alchemy_subscriber_blocks_dropped_total{
+                k8s_namespace_name="vector",
+                service_name=~".*watcher"
+              }[10m] offset 10m)
+            )
+          )
         for: 1m
         labels:
           team: vector

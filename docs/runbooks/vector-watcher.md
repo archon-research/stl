@@ -49,39 +49,57 @@ for the chain. Cross-check downstream lag in the Vector dashboard.
 
 ## VectorWatcherNoHeadersReceived
 
-**Severity:** critical · **For:** 5m
+**Severity:** critical · **For:** 5m (a 5m rate window plus `for: 5m`, so up to
+~10 minutes from onset to page)
 
 ### What it means
 
 `alchemy_subscriber_blocks_received_total` on the labelled `service_name` has been
-flat for over 5 minutes: the Alchemy WebSocket subscriber is forwarding no
-`newHeads` at all. Live ingestion for that chain has stopped. Blocks will still
-land eventually, but only through the backfill loop, minutes to hours late and
-without the live SNS fan-out that the indexers consume.
+flat for over 5 minutes while the process is still issuing RPC calls: no
+`newHeads` are reaching the live path. Live ingestion for that chain has stopped.
+Blocks will still land eventually, but only through the backfill loop, minutes to
+hours late and without the live SNS fan-out that the indexers consume.
+
+**Two different faults produce this signal**, and step 1 tells them apart. The
+counter is incremented only on a *successful* hand-off into the subscriber's
+buffered channel, so a wedged live consumer — socket perfectly healthy, buffer
+full, every header discarded — also drives it to zero. In that case
+`alchemy_subscriber_blocks_dropped_total` is climbing and the fault is
+downstream of the socket, not in it.
 
 This is the counterpart to `VectorWatcherNoBlocks`, and the two are not
 interchangeable. `VectorWatcherNoBlocks` watches
 `alchemy_client_requests_total{rpc_method="eth_getBlockByNumber"}`, which the live
 path and the backfill loop both feed through one shared HTTP client. Backfill
-re-verifies its boundary blocks on every poll (5s), so that counter stays busy
-even when the socket has gone completely silent — a dead subscriber does not fire
-it. This rule reads the subscriber itself.
+re-verifies its boundary blocks on every poll (30s by default; 5s on the
+avalanche and arbitrum watchers), so that counter stays busy even when the socket
+has gone completely silent — a dead subscriber does not fire it. This rule reads
+the subscriber itself, and pairs it with the shared request counter so that a
+subscriber which never delivered a single header — and therefore has no series to
+go flat — still alerts.
 
 ### First checks (≤5 min)
 
-1. **Is the socket flapping or just silent?** Compare
+1. **Is this a dead socket or a wedged consumer?** Check
+   `increase(alchemy_subscriber_blocks_dropped_total[10m])` for the same
+   `service_name` first. **Nonzero means headers are arriving and being thrown
+   away**: the socket is fine, the live consumer is stalled, and
+   `VectorWatcherBlocksDropped` will be firing alongside this one — triage from
+   that runbook section instead and ignore the rest of this one. Zero means the
+   subscriber really is delivering nothing; continue below.
+2. **Is the socket flapping or just silent?** Compare
    `rate(alchemy_subscriber_reconnections_total[10m])` and
    `increase(alchemy_subscriber_stalls_total[10m])` for the same
    `service_name`. Stalls climbing means the data-freshness watchdog is firing
    and forcing reconnects that do not recover; both flat means the connection
    looks healthy to us but is delivering nothing.
-2. **Pod logs** — `kubectl -n vector logs <watcher pod> --tail=200`. Look for
+3. **Pod logs** — `kubectl -n vector logs <watcher pod> --tail=200`. Look for
    `no newHeads within HealthTimeout`, repeated
    `WebSocket connection lost, reconnecting...`, or `failed to connect`.
-3. **Alchemy status page** — https://status.alchemy.com/ — confirm WebSocket
+4. **Alchemy status page** — https://status.alchemy.com/ — confirm WebSocket
    availability for that chain specifically; the HTTP endpoint can be healthy
    while the subscription endpoint is not.
-4. **Did the chain itself halt?** Check an explorer for the chain's head. A
+5. **Did the chain itself halt?** Check an explorer for the chain's head. A
    genuinely halted chain produces this alert legitimately, and there is nothing
    to fix on our side.
 
@@ -95,10 +113,11 @@ it. This rule reads the subscriber itself.
 
 ### Recovery
 
-Restart the watcher pod (`kubectl -n vector delete pod <pod>`); the Deployment
-recreates it and the subscription is re-established from scratch. If the alert
-returns after a restart, the problem is upstream — check the Alchemy status page
-and the API key's WebSocket quota. Backfill will close the gap once headers flow
+Only once step 1 has ruled out a wedged consumer: restart the watcher pod
+(`kubectl -n vector delete pod <pod>`); the Deployment recreates it and the
+subscription is re-established from scratch. If the alert returns after a
+restart, the problem is upstream — check the Alchemy status page and the API
+key's WebSocket quota. Backfill will close the gap once headers flow
 again; track it with `backfill_watermark_lag`.
 
 ### Verify recovery
@@ -248,16 +267,18 @@ never delivered it.**
 
 Fix the consumer stall identified in step 2 — that is the action this alert asks
 for. Then confirm the heights from the log line exist as canonical rows. Backfill
-normally heals them on its own (every overlay watcher runs `ENABLE_BACKFILL=true`;
-check the chain's configmap if in doubt), so manual repair is rarely needed. If
-backfill is not catching them, follow `VectorWatcherBackfillWatermarkLagHigh`.
+normally heals them on its own (every staging and prod watcher runs
+`ENABLE_BACKFILL=true`; the dev overlay does not), so manual repair is rarely
+needed. If backfill is not catching them, follow
+`VectorWatcherBackfillWatermarkLagHigh`.
 
 ### Verify recovery
 
 `increase(alchemy_subscriber_blocks_dropped_total[10m])` returns to zero while
-`rate(alchemy_subscriber_blocks_received_total[5m])` still tracks the chain's
-block rate — received at zero means the subscriber stopped delivering entirely,
-which is `VectorWatcherNoHeadersReceived`, not this alert.
+`rate(alchemy_subscriber_blocks_received_total[5m])` recovers to the chain's block
+rate. If dropped goes to zero but received stays at zero, the consumer stall was
+not the whole story and the socket is down too — continue from
+`VectorWatcherNoHeadersReceived`.
 
 ---
 
