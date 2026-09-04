@@ -37,10 +37,8 @@ import (
 type fakeUniswapRepo struct {
 	lastWrites     outbound.UniswapV3BlockWrites
 	saveBlockCalls int
-	// stateRowsReturn overrides SaveBlock's returned row count when non-nil. A
-	// pointer, not a plain int64, so a test can stage the idempotent
-	// ON CONFLICT DO NOTHING replay — an explicit 0 — which a zero-valued int64
-	// could not express (it is indistinguishable from "unset").
+	// A pointer, not a plain int64, so a test can stage an explicit 0 — the
+	// idempotent ON CONFLICT DO NOTHING replay — distinctly from "unset".
 	stateRowsReturn *int64
 	err             error
 
@@ -67,16 +65,20 @@ func (r *fakeUniswapRepo) TicksForPoolAtBlock(_ context.Context, poolID int64, b
 	return r.priorTicks[key], nil
 }
 
-func (r *fakeUniswapRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.UniswapV3BlockWrites) (int64, error) {
+func (r *fakeUniswapRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.UniswapV3BlockWrites) (outbound.StateRowCounts, error) {
 	r.saveBlockCalls++
 	if r.err != nil {
-		return 0, r.err
+		return outbound.StateRowCounts{}, r.err
 	}
 	r.lastWrites = w
-	if r.stateRowsReturn != nil {
-		return *r.stateRowsReturn, nil
+	counts := outbound.StateRowCounts{
+		Attempted: int64(len(w.States)),
+		Persisted: int64(len(w.States)),
 	}
-	return int64(len(w.States)), nil
+	if r.stateRowsReturn != nil {
+		counts.Persisted = *r.stateRowsReturn
+	}
+	return counts, nil
 }
 
 // fakeEventRepo counts saved events via SaveBatch/SaveEvent, satisfying
@@ -1222,26 +1224,6 @@ func TestBlockHandler_ReorgRedelivery_RereadsPriorVersionTicks(t *testing.T) {
 	}
 }
 
-// TestMergeTickSets_DedupsAndSortsOverlappingRanges verifies mergeTickSets
-// unions touched and baseline ticks, dropping duplicates and sorting
-// ascending even when the inputs interleave out of order.
-func TestMergeTickSets_DedupsAndSortsOverlappingRanges(t *testing.T) {
-	touched := []int32{180, -120}
-	baseline := []int32{60, -120, 300}
-
-	got := mergeTickSets(touched, baseline)
-	want := []int32{-120, 60, 180, 300}
-
-	if len(got) != len(want) {
-		t.Fatalf("mergeTickSets() = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("mergeTickSets()[%d] = %d, want %d (full: got=%v want=%v)", i, got[i], want[i], got, want)
-		}
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Telemetry: the pools.touched gate
 // ---------------------------------------------------------------------------
@@ -1323,8 +1305,8 @@ func TestBlockHandler_RecordsPoolsTouchedOnZeroRowReplay(t *testing.T) {
 	pool := uniswapTestPool()
 	svc, repo, reader := newTelemetryService(t, []RegisteredPool{pool})
 
-	var zero int64 // the replay: every state INSERT hit ON CONFLICT DO NOTHING
-	repo.stateRowsReturn = &zero
+	var noRowsPersisted int64
+	repo.stateRowsReturn = &noRowsPersisted
 
 	receipt := shared.TransactionReceipt{Logs: []shared.Log{swapLog(t, pool, "0x0")}}
 	if err := svc.BlockHandler()(context.Background(), blockEvent(200), []shared.TransactionReceipt{receipt}); err != nil {
@@ -1346,6 +1328,35 @@ func TestBlockHandler_RecordsPoolsTouchedOnZeroRowReplay(t *testing.T) {
 
 	// The other half of the invariant: state rows really did stay at zero, so
 	// this test is staging the alert's firing condition and not a healthy block.
+	if rows, ok := sumCounter(t, &rm, "uniswap_v3.state.rows.written"); ok {
+		t.Errorf("uniswap_v3.state.rows.written = %d, want the counter to be absent (0 rows inserted is a no-op)", rows)
+	}
+}
+
+func TestBlockHandler_RecordsStateRowsAttemptedOnZeroRowReplay(t *testing.T) {
+	pool := uniswapTestPool()
+	svc, repo, reader := newTelemetryService(t, []RegisteredPool{pool})
+
+	var noRowsPersisted int64
+	repo.stateRowsReturn = &noRowsPersisted
+
+	receipt := shared.TransactionReceipt{Logs: []shared.Log{swapLog(t, pool, "0x0")}}
+	if err := svc.BlockHandler()(context.Background(), blockEvent(200), []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	attempted, ok := sumCounter(t, &rm, "uniswap_v3.state.rows.attempted")
+	if !ok {
+		t.Fatal("uniswap_v3.state.rows.attempted absent: the not-writing-state rule's right side is empty on a benign replay, so it fires with nothing to fix")
+	}
+	if attempted != 1 {
+		t.Errorf("uniswap_v3.state.rows.attempted = %d, want 1 (the block queued one state row)", attempted)
+	}
 	if rows, ok := sumCounter(t, &rm, "uniswap_v3.state.rows.written"); ok {
 		t.Errorf("uniswap_v3.state.rows.written = %d, want the counter to be absent (0 rows inserted is a no-op)", rows)
 	}

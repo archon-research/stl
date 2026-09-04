@@ -10,12 +10,10 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
-
-// Pure helpers for ABI-log decoding and multicall-result unpacking shared by
-// the per-DEX worker packages (Curve, Uniswap V3, Balancer).
 
 // LogBelongsTo reports whether a log emitted by addr should be routed to a
 // pool/pair watched under any of addrs. A pool may be watched under more than
@@ -25,42 +23,86 @@ func LogBelongsTo(addr common.Address, addrs ...common.Address) bool {
 	return slices.Contains(addrs, addr)
 }
 
-// DecodeLog extracts both indexed (from topics) and non-indexed (from data)
-// fields of an ABI event log into a flat map, following the morpho_indexer
-// parseTopics/parseData pattern.
+// DecodeLog flattens an event log's indexed (topics) and non-indexed (data) fields
+// into one map. A log that cannot fill every argument is an error, never a partial
+// map: a half-filled params blob reads as a healthy row once persisted.
 func DecodeLog(ev abi.Event, log Log) (map[string]any, error) {
 	out := make(map[string]any)
+	if err := parseIndexedArgs(ev, log, out); err != nil {
+		return nil, err
+	}
+	if err := parseNonIndexedArgs(ev, log, out); err != nil {
+		return nil, err
+	}
+	if err := assertEveryArgumentDecoded(ev, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
 
-	var indexed abi.Arguments
+func parseIndexedArgs(ev abi.Event, log Log, out map[string]any) error {
+	indexed := indexedArgs(ev)
+	if len(indexed) == 0 {
+		return nil
+	}
+	if len(log.Topics) == 0 {
+		return fmt.Errorf("%s log carries no topics but declares indexed arguments %s", ev.Name, argNames(indexed))
+	}
+	hashes := make([]common.Hash, 0, len(log.Topics)-1)
+	for _, topic := range log.Topics[1:] {
+		hashes = append(hashes, common.HexToHash(topic))
+	}
+	if err := abi.ParseTopicsIntoMap(out, indexed, hashes); err != nil {
+		return fmt.Errorf("parsing indexed params: %w", err)
+	}
+	return nil
+}
+
+func parseNonIndexedArgs(ev abi.Event, log Log, out map[string]any) error {
+	nonIndexed := ev.Inputs.NonIndexed()
+	if len(nonIndexed) == 0 {
+		return nil
+	}
+	// common.FromHex left-pads odd-length input and swallows the error, so a
+	// dropped digit silently shifts every argument; hexutil.Decode rejects it.
+	raw, err := hexutil.Decode(log.Data)
+	if err != nil {
+		return fmt.Errorf("%s log data %q is not valid hex: %w", ev.Name, log.Data, err)
+	}
+	if len(raw) == 0 {
+		return fmt.Errorf("%s log carries no data for non-indexed arguments %s", ev.Name, argNames(nonIndexed))
+	}
+	if err := nonIndexed.UnpackIntoMap(out, raw); err != nil {
+		return fmt.Errorf("parsing non-indexed params: %w", err)
+	}
+	return nil
+}
+
+func assertEveryArgumentDecoded(ev abi.Event, out map[string]any) error {
+	for _, arg := range ev.Inputs {
+		if _, ok := out[arg.Name]; !ok {
+			return fmt.Errorf("%s log left argument %s undecoded", ev.Name, arg.Name)
+		}
+	}
+	return nil
+}
+
+func indexedArgs(ev abi.Event) abi.Arguments {
+	var out abi.Arguments
 	for _, arg := range ev.Inputs {
 		if arg.Indexed {
-			indexed = append(indexed, arg)
+			out = append(out, arg)
 		}
 	}
-	if len(indexed) > 0 {
-		hashes := make([]common.Hash, 0, len(log.Topics)-1)
-		for i := 1; i < len(log.Topics); i++ {
-			hashes = append(hashes, common.HexToHash(log.Topics[i]))
-		}
-		if err := abi.ParseTopicsIntoMap(out, indexed, hashes); err != nil {
-			return nil, fmt.Errorf("parsing indexed params: %w", err)
-		}
-	}
+	return out
+}
 
-	var nonIndexed abi.Arguments
-	for _, arg := range ev.Inputs {
-		if !arg.Indexed {
-			nonIndexed = append(nonIndexed, arg)
-		}
+func argNames(args abi.Arguments) string {
+	names := make([]string, len(args))
+	for i, arg := range args {
+		names[i] = arg.Name
 	}
-	if len(nonIndexed) > 0 && len(log.Data) > 2 {
-		raw := common.FromHex(log.Data)
-		if err := nonIndexed.UnpackIntoMap(out, raw); err != nil {
-			return nil, fmt.Errorf("parsing non-indexed params: %w", err)
-		}
-	}
-
-	return out, nil
+	return strings.Join(names, ", ")
 }
 
 // GetAddrField reads key from a DecodeLog result map as a common.Address.
@@ -87,6 +129,20 @@ func GetBigIntField(data map[string]any, key string) (*big.Int, error) {
 		return nil, fmt.Errorf("field %s: unexpected type %T", key, v)
 	}
 	return b, nil
+}
+
+// GetHashField reads key as a common.Hash: go-ethereum decodes a bytes32
+// argument, indexed or not, into [32]byte rather than any named type.
+func GetHashField(data map[string]any, key string) (common.Hash, error) {
+	v, ok := data[key]
+	if !ok {
+		return common.Hash{}, fmt.Errorf("missing field: %s", key)
+	}
+	b, ok := v.([32]byte)
+	if !ok {
+		return common.Hash{}, fmt.Errorf("field %s: unexpected type %T", key, v)
+	}
+	return common.Hash(b), nil
 }
 
 // GetBigIntSliceField reads key from a DecodeLog result map as a []*big.Int.

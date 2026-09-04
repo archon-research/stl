@@ -3,6 +3,7 @@ package outbound
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -68,6 +69,57 @@ func TestBlockEvent_ParsedBlockHash(t *testing.T) {
 			}
 			if got != tc.wantHash {
 				t.Fatalf("hash = %s, want %s", got, tc.wantHash)
+			}
+		})
+	}
+}
+
+func TestBlockEvent_BlockTime(t *testing.T) {
+	tests := []struct {
+		name            string
+		event           BlockEvent
+		wantErr         bool
+		wantErrContains string
+		wantUnix        int64
+	}{
+		{
+			name:     "valid timestamp becomes a UTC instant",
+			event:    BlockEvent{BlockNumber: 100, Version: 0, BlockTimestamp: 1740000000},
+			wantUnix: 1740000000,
+		},
+		{
+			name:            "absent timestamp fails hard rather than becoming 1970",
+			event:           BlockEvent{BlockNumber: 100, Version: 0, BlockTimestamp: 0},
+			wantErr:         true,
+			wantErrContains: "block timestamp",
+		},
+		{
+			name:            "negative timestamp fails hard",
+			event:           BlockEvent{BlockNumber: 100, Version: 1, BlockTimestamp: -1},
+			wantErr:         true,
+			wantErrContains: "block timestamp",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.event.BlockTime()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for block timestamp %d, got %s", tc.event.BlockTimestamp, got)
+				}
+				if !strings.Contains(err.Error(), tc.wantErrContains) {
+					t.Fatalf("error = %q, want it to contain %q", err, tc.wantErrContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.Unix() != tc.wantUnix {
+				t.Fatalf("time = %s, want unix %d", got, tc.wantUnix)
+			}
+			if got.Location() != time.UTC {
+				t.Fatalf("location = %s, want UTC", got.Location())
 			}
 		})
 	}

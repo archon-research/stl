@@ -1,6 +1,7 @@
 package shared
 
 import (
+	"fmt"
 	"math/big"
 	"strings"
 	"testing"
@@ -65,19 +66,31 @@ func TestLogBelongsTo(t *testing.T) {
 // DecodeLog
 // ============================================================================
 
-func transferEvent(t *testing.T) abi.Event {
+func eventFixture(t *testing.T, name, inputsJSON string) abi.Event {
 	t.Helper()
-	a, err := abi.JSON(strings.NewReader(`[
-		{"type":"event","name":"Transfer","inputs":[
-			{"name":"from","type":"address","indexed":true},
-			{"name":"to","type":"address","indexed":true},
-			{"name":"value","type":"uint256","indexed":false}
-		]}
-	]`))
+	a, err := abi.JSON(strings.NewReader(fmt.Sprintf(`[{"type":"event","name":%q,"inputs":%s}]`, name, inputsJSON)))
 	if err != nil {
 		t.Fatalf("abi.JSON: %v", err)
 	}
-	return a.Events["Transfer"]
+	return a.Events[name]
+}
+
+func transferEvent(t *testing.T) abi.Event {
+	t.Helper()
+	return eventFixture(t, "Transfer", `[
+		{"name":"from","type":"address","indexed":true},
+		{"name":"to","type":"address","indexed":true},
+		{"name":"value","type":"uint256","indexed":false}
+	]`)
+}
+
+func packedData(t *testing.T, ev abi.Event, values ...any) string {
+	t.Helper()
+	raw, err := ev.Inputs.NonIndexed().Pack(values...)
+	if err != nil {
+		t.Fatalf("packing %s data: %v", ev.Name, err)
+	}
+	return "0x" + common.Bytes2Hex(raw)
 }
 
 func TestDecodeLog(t *testing.T) {
@@ -125,7 +138,7 @@ func TestDecodeLog(t *testing.T) {
 		}
 	})
 
-	t.Run("no data for non-indexed args is not decoded", func(t *testing.T) {
+	t.Run("empty data for non-indexed args errors", func(t *testing.T) {
 		log := Log{
 			Topics: []string{
 				ev.ID.Hex(),
@@ -134,12 +147,121 @@ func TestDecodeLog(t *testing.T) {
 			},
 			Data: "0x",
 		}
-		got, err := DecodeLog(ev, log)
+		_, err := DecodeLog(ev, log)
+		if err == nil {
+			t.Fatal("expected error: an empty data block leaves every non-indexed argument unset")
+		}
+		if !strings.Contains(err.Error(), "value") {
+			t.Errorf("error %q does not name the undecoded argument", err)
+		}
+	})
+
+	t.Run("log with no topics errors", func(t *testing.T) {
+		if _, err := DecodeLog(ev, Log{Data: "0x"}); err == nil {
+			t.Fatal("expected error when a log carrying no topics is decoded against an event with indexed args")
+		}
+	})
+
+	t.Run("truncated data errors", func(t *testing.T) {
+		log := Log{
+			Topics: []string{
+				ev.ID.Hex(),
+				common.BytesToHash(from.Bytes()).Hex(),
+				common.BytesToHash(to.Bytes()).Hex(),
+			},
+			Data: "0xdead",
+		}
+		if _, err := DecodeLog(ev, log); err == nil {
+			t.Fatal("expected error for a data block too short to hold the non-indexed args")
+		}
+	})
+
+	t.Run("odd-length data errors", func(t *testing.T) {
+		nonIndexed := abi.Arguments{ev.Inputs[2]}
+		data, err := nonIndexed.Pack(big.NewInt(0x123456))
+		if err != nil {
+			t.Fatalf("packing data: %v", err)
+		}
+		hex := common.Bytes2Hex(data)
+		log := Log{
+			Topics: []string{
+				ev.ID.Hex(),
+				common.BytesToHash(from.Bytes()).Hex(),
+				common.BytesToHash(to.Bytes()).Hex(),
+			},
+			Data: "0x" + hex[:len(hex)-2] + hex[len(hex)-1:],
+		}
+		if _, err := DecodeLog(ev, log); err == nil {
+			t.Fatal("expected error for an odd-length data block: left-padding it decodes a silently wrong value")
+		}
+	})
+
+	t.Run("event with no indexed args decodes from data alone", func(t *testing.T) {
+		initialize := eventFixture(t, "Initialize", `[
+			{"name":"sqrtPriceX96","type":"uint160","indexed":false},
+			{"name":"tick","type":"int24","indexed":false}
+		]`)
+		log := Log{
+			Topics: []string{initialize.ID.Hex()},
+			Data:   packedData(t, initialize, big.NewInt(999), big.NewInt(-7)),
+		}
+
+		got, err := DecodeLog(initialize, log)
 		if err != nil {
 			t.Fatalf("DecodeLog: %v", err)
 		}
-		if _, ok := got["value"]; ok {
-			t.Errorf("value should be absent when Data is empty, got %v", got["value"])
+		if got["sqrtPriceX96"].(*big.Int).Cmp(big.NewInt(999)) != 0 {
+			t.Errorf("sqrtPriceX96 = %v, want 999", got["sqrtPriceX96"])
+		}
+		if got["tick"].(*big.Int).Cmp(big.NewInt(-7)) != 0 {
+			t.Errorf("tick = %v, want -7", got["tick"])
+		}
+	})
+
+	t.Run("event with only indexed args decodes from an empty data block", func(t *testing.T) {
+		transferred := eventFixture(t, "OwnershipTransferred", `[
+			{"name":"user","type":"address","indexed":true},
+			{"name":"newOwner","type":"address","indexed":true}
+		]`)
+		log := Log{
+			Topics: []string{
+				transferred.ID.Hex(),
+				common.BytesToHash(from.Bytes()).Hex(),
+				common.BytesToHash(to.Bytes()).Hex(),
+			},
+			Data: "0x",
+		}
+
+		got, err := DecodeLog(transferred, log)
+		if err != nil {
+			t.Fatalf("DecodeLog: %v", err)
+		}
+		if got["user"].(common.Address) != from || got["newOwner"].(common.Address) != to {
+			t.Errorf("got user=%v newOwner=%v, want %v and %v", got["user"], got["newOwner"], from, to)
+		}
+	})
+}
+
+// Unreachable through DecodeLog — go-ethereum fills every argument or errors —
+// so the backstop invariant is pinned directly.
+func TestAssertEveryArgumentDecoded(t *testing.T) {
+	ev := transferEvent(t)
+
+	t.Run("every argument present", func(t *testing.T) {
+		data := map[string]any{"from": nil, "to": nil, "value": nil}
+		if err := assertEveryArgumentDecoded(ev, data); err != nil {
+			t.Fatalf("assertEveryArgumentDecoded: %v", err)
+		}
+	})
+
+	t.Run("missing argument errors", func(t *testing.T) {
+		data := map[string]any{"from": nil, "to": nil}
+		err := assertEveryArgumentDecoded(ev, data)
+		if err == nil {
+			t.Fatal("expected error for a decode result missing an ABI argument")
+		}
+		if !strings.Contains(err.Error(), "value") {
+			t.Errorf("error %q does not name the missing argument", err)
 		}
 	})
 }
@@ -196,6 +318,32 @@ func TestGetBigIntField(t *testing.T) {
 	t.Run("wrong type errors", func(t *testing.T) {
 		if _, err := GetBigIntField(map[string]any{"v": "42"}, "v"); err == nil {
 			t.Fatal("expected error for wrong type")
+		}
+	})
+}
+
+func TestGetHashField(t *testing.T) {
+	h := common.HexToHash("0x00000000000000000000000000000000000000000000000000000000000000ff")
+
+	t.Run("present and correct type", func(t *testing.T) {
+		got, err := GetHashField(map[string]any{"h": [32]byte(h)}, "h")
+		if err != nil {
+			t.Fatalf("GetHashField: %v", err)
+		}
+		if got != h {
+			t.Errorf("got %s, want %s", got, h)
+		}
+	})
+
+	t.Run("missing field errors", func(t *testing.T) {
+		if _, err := GetHashField(map[string]any{}, "h"); err == nil {
+			t.Fatal("expected error for missing field")
+		}
+	})
+
+	t.Run("wrong type errors", func(t *testing.T) {
+		if _, err := GetHashField(map[string]any{"h": h}, "h"); err == nil {
+			t.Fatal("expected error for a common.Hash rather than the [32]byte go-ethereum decodes into")
 		}
 	})
 }

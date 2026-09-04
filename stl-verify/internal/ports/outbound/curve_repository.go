@@ -81,8 +81,5 @@ type BlockWrites struct {
 // CurveRepository defines the interface for Curve DEX data persistence.
 type CurveRepository interface {
 	LoadPools(ctx context.Context, chainID int64) ([]CurvePoolRow, error)
-	// SaveBlock persists all of a block's curve rows in one pgx.Batch within tx and
-	// returns the number of state rows actually inserted (ON CONFLICT DO NOTHING means
-	// a redelivery returns 0), for the curve_state_rows_written_total metric.
-	SaveBlock(ctx context.Context, tx pgx.Tx, w BlockWrites) (stateRows int64, err error)
+	SaveBlock(ctx context.Context, tx pgx.Tx, w BlockWrites) (stateRows StateRowCounts, err error)
 }

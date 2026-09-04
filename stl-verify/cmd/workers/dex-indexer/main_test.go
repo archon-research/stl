@@ -90,7 +90,7 @@ func TestRun_UnknownDex(t *testing.T) {
 	if !strings.Contains(err.Error(), "sushiswap") {
 		t.Errorf("expected error to mention the unknown value 'sushiswap', got: %v", err)
 	}
-	for _, want := range []string{"curve", "uniswap-v3"} {
+	for _, want := range []string{"curve", "uniswap-v3", "uniswap-v4"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("expected error to list valid DEX %q, got: %v", want, err)
 		}
@@ -108,6 +108,7 @@ func TestRegistry_SelectsFactoryByKind(t *testing.T) {
 	}{
 		{dex: "curve", wantService: "curve-indexer", wantMetric: "curve"},
 		{dex: "uniswap-v3", wantService: "uniswap-v3-indexer", wantMetric: "uniswap_v3"},
+		{dex: "uniswap-v4", wantService: "uniswap-v4-indexer", wantMetric: "uniswap_v4"},
 	}
 	registry := newRegistry()
 	for _, tt := range tests {

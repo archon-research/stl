@@ -27,9 +27,8 @@ import (
 // Fakes
 // ---------------------------------------------------------------------------
 
-// fakeCurveRepo counts saves via SaveBlock; it ignores the pgx.Tx (nil is fine).
-// stateRowsReturn controls whether SaveBlock returns 0 (simulate ON CONFLICT DO NOTHING
-// no-op) or the actual count; a zero value means newTestCurveService must set it to 1.
+// fakeCurveRepo ignores the pgx.Tx (nil is fine). Attempted always follows the
+// write set, as the real repository's does; stateRowsReturn decides if it persists.
 type fakeCurveRepo struct {
 	lastWrites      outbound.BlockWrites
 	snapshotPoolIDs []int64
@@ -45,7 +44,7 @@ func (r *fakeCurveRepo) LoadPools(_ context.Context, _ int64) ([]outbound.CurveP
 	return nil, nil
 }
 
-func (r *fakeCurveRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.BlockWrites) (int64, error) {
+func (r *fakeCurveRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.BlockWrites) (outbound.StateRowCounts, error) {
 	r.lastWrites = w
 	r.swapSaves += len(w.Swaps)
 	r.liquiditySaves += len(w.Liquidity)
@@ -57,10 +56,11 @@ func (r *fakeCurveRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.BlockW
 	for _, s := range w.CryptoStates {
 		r.snapshotPoolIDs = append(r.snapshotPoolIDs, s.CurvePoolID)
 	}
-	if r.stateRowsReturn == 0 {
-		return 0, nil
+	counts := outbound.StateRowCounts{Attempted: int64(len(w.StableStates) + len(w.CryptoStates))}
+	if r.stateRowsReturn != 0 {
+		counts.Persisted = counts.Attempted
 	}
-	return int64(len(w.StableStates) + len(w.CryptoStates)), nil
+	return counts, nil
 }
 
 // fakeTxManager calls fn with a nil pgx.Tx; sufficient since fakeCurveRepo
@@ -675,10 +675,9 @@ func TestCurveService_MissingBlockHash_ReturnsError(t *testing.T) {
 	}
 }
 
-// TestCurveService_RecordsActualStateRowsNotSnapshotCount: a redelivery where the
-// state insert is a no-op (ON CONFLICT DO NOTHING -> 0 rows) must record 0 state
-// rows, not the snapshot-set size.
-func TestCurveService_RecordsActualStateRowsNotSnapshotCount(t *testing.T) {
+func newZeroRowReplayService(t *testing.T) (*CurveService, *metricsdk.ManualReader) {
+	t.Helper()
+
 	reader := metricsdk.NewManualReader()
 	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
 	prev := otel.GetMeterProvider()
@@ -703,17 +702,14 @@ func TestCurveService_RecordsActualStateRowsNotSnapshotCount(t *testing.T) {
 		KindStableswapNG:    stable,
 	}
 
-	// stateRowsReturn=0 simulates the idempotent ON CONFLICT DO NOTHING no-op.
 	repo := &fakeCurveRepo{stateRowsReturn: 0}
-	eventRepo := &fakeEventRepo{}
-	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
-	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
+	writer := dexconsumer.NewProtocolEventWriter(1, &fakeEventRepo{})
 
 	c, err := NewCurveService(CurveServiceDeps{
 		Pools:         []RegisteredPool{newTestPool()},
 		Handlers:      handlers,
 		StableHandler: stable,
-		Multicaller:   mc,
+		Multicaller:   &fakeMulticaller{results: stableswapPreNGResults(t, a)},
 		Repo:          repo,
 		EventWriter:   writer,
 		TxManager:     &fakeTxManager{},
@@ -725,26 +721,44 @@ func TestCurveService_RecordsActualStateRowsNotSnapshotCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)
 	}
+	return c, reader
+}
 
-	bh := c.BlockHandler()
-	if err := bh(context.Background(), blockEvent(100), nil); err != nil {
+func TestCurveService_RecordsActualStateRowsNotSnapshotCount(t *testing.T) {
+	c, reader := newZeroRowReplayService(t)
+
+	if err := c.BlockHandler()(context.Background(), blockEvent(100), nil); err != nil {
 		t.Fatalf("BlockHandler: %v", err)
 	}
 
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("Collect: %v", err)
-	}
-	if got := stateRowsWritten(t, &rm); got != 0 {
+	rm := collectCurveMetrics(t, reader)
+	if got, _ := curveCounter(t, rm, "curve.state.rows.written"); got != 0 {
 		t.Errorf("state_rows_written = %d, want 0 (must reflect actual rows affected, not snapshot-set size)", got)
 	}
 }
 
-// TestCurveService_HandlerError_RecordsErrorMetric: an error on a handler path
-// that is not one of the individually-instrumented stages (here an invalid log
-// address surfaced by poolsTouchedByReceipt) must still increment
-// curve_errors_total, so VectorCurveIndexerErrorsHigh observes every
-// poison-stall path, not only the decode/snapshot/persist ones.
+func TestCurveService_RecordsStateRowsAttemptedOnZeroRowReplay(t *testing.T) {
+	c, reader := newZeroRowReplayService(t)
+
+	if err := c.BlockHandler()(context.Background(), blockEvent(100), nil); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	rm := collectCurveMetrics(t, reader)
+	attempted, ok := curveCounter(t, rm, "curve.state.rows.attempted")
+	if !ok {
+		t.Fatal("curve.state.rows.attempted absent: the no-state-written rule's right side is empty on a benign replay, so it fires with nothing to fix")
+	}
+	if attempted != 1 {
+		t.Errorf("curve.state.rows.attempted = %d, want 1 (the block queued one state row)", attempted)
+	}
+	if rows, ok := curveCounter(t, rm, "curve.state.rows.written"); ok {
+		t.Errorf("curve.state.rows.written = %d, want the counter to be absent (0 rows inserted is a no-op)", rows)
+	}
+}
+
+// Errors outside the individually-instrumented stages must still increment
+// curve_errors_total, or its `operation` breakdown misses poison-stall paths.
 func TestCurveService_HandlerError_RecordsErrorMetric(t *testing.T) {
 	reader := metricsdk.NewManualReader()
 	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
@@ -812,7 +826,7 @@ func TestCurveService_HandlerError_RecordsErrorMetric(t *testing.T) {
 	if err := reader.Collect(context.Background(), &rm); err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
-	if got := curveErrorsTotal(t, &rm); got != 1 {
+	if got, _ := curveCounter(t, &rm, "curve.errors.total"); got != 1 {
 		t.Errorf("curve.errors.total = %d, want 1 (every handler error path must record the metric)", got)
 	}
 }
@@ -1057,50 +1071,34 @@ func TestCurveService_RoutesStableswapConfigIntoBlockWrites(t *testing.T) {
 	}
 }
 
-// curveErrorsTotal reads the curve.errors.total counter total across all
-// operation labels, returning 0 if the metric was never recorded.
-func curveErrorsTotal(t *testing.T, rm *metricdata.ResourceMetrics) int64 {
+func collectCurveMetrics(t *testing.T, reader *metricsdk.ManualReader) *metricdata.ResourceMetrics {
 	t.Helper()
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name != "curve.errors.total" {
-				continue
-			}
-			sum, ok := m.Data.(metricdata.Sum[int64])
-			if !ok {
-				t.Fatalf("curve.errors.total: unexpected metric type %T", m.Data)
-			}
-			var total int64
-			for _, dp := range sum.DataPoints {
-				total += dp.Value
-			}
-			return total
-		}
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
 	}
-	return 0
+	return &rm
 }
 
-// stateRowsWritten reads the curve.state.rows.written counter total, returning 0
-// if the metric was never recorded.
-func stateRowsWritten(t *testing.T, rm *metricdata.ResourceMetrics) int64 {
+func curveCounter(t *testing.T, rm *metricdata.ResourceMetrics, name string) (int64, bool) {
 	t.Helper()
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
-			if m.Name != "curve.state.rows.written" {
+			if m.Name != name {
 				continue
 			}
 			sum, ok := m.Data.(metricdata.Sum[int64])
 			if !ok {
-				t.Fatalf("curve.state.rows.written: unexpected metric type %T", m.Data)
+				t.Fatalf("%s: unexpected metric type %T", name, m.Data)
 			}
 			var total int64
 			for _, dp := range sum.DataPoints {
 				total += dp.Value
 			}
-			return total
+			return total, true
 		}
 	}
-	return 0
+	return 0, false
 }
 
 // TestNewCurveService_WarmsHandlersForRegisteredPoolCoinCounts verifies the
@@ -1375,7 +1373,7 @@ func TestCurveService_PoolsTouchedExcludesSweptPools(t *testing.T) {
 	}
 	// Guard the premise: the sweep really did snapshot, so this block exercised
 	// the divergence rather than trivially doing nothing.
-	if got := stateRowsWritten(t, &rm); got == 0 {
+	if got, _ := curveCounter(t, &rm, "curve.state.rows.written"); got == 0 {
 		t.Fatal("state_rows_written = 0: the sweep did not snapshot, so this test never exercised the touched-vs-swept divergence")
 	}
 }
