@@ -47,6 +47,86 @@ for the chain. Cross-check downstream lag in the Vector dashboard.
 
 ---
 
+## VectorWatcherNoHeadersReceived
+
+**Severity:** critical · **For:** 5m (a 5m rate window plus `for: 5m`, so up to
+~10 minutes from onset to page)
+
+### What it means
+
+`alchemy_subscriber_blocks_received_total` on the labelled `service_name` has been
+flat for over 5 minutes while the process is still issuing RPC calls: no
+`newHeads` are reaching the live path. Live ingestion for that chain has stopped.
+Blocks will still land eventually, but only through the backfill loop, minutes to
+hours late and without the live SNS fan-out that the indexers consume.
+
+**Two different faults produce this signal**, and step 1 tells them apart. The
+counter is incremented only on a *successful* hand-off into the subscriber's
+buffered channel, so a wedged live consumer — socket perfectly healthy, buffer
+full, every header discarded — also drives it to zero. In that case
+`alchemy_subscriber_blocks_dropped_total` is climbing and the fault is
+downstream of the socket, not in it.
+
+This is the counterpart to `VectorWatcherNoBlocks`, and the two are not
+interchangeable. `VectorWatcherNoBlocks` watches
+`alchemy_client_requests_total{rpc_method="eth_getBlockByNumber"}`, which the live
+path and the backfill loop both feed through one shared HTTP client. Backfill
+re-verifies its boundary blocks on every poll (30s by default; 5s on the
+avalanche and arbitrum watchers), so that counter stays busy even when the socket
+has gone completely silent — a dead subscriber does not fire it. This rule reads
+the subscriber itself, and pairs it with the shared request counter so that a
+subscriber which never delivered a single header — and therefore has no series to
+go flat — still alerts.
+
+### First checks (≤5 min)
+
+1. **Is this a dead socket or a wedged consumer?** Check
+   `increase(alchemy_subscriber_blocks_dropped_total[10m])` for the same
+   `service_name` first. **Nonzero means headers are arriving and being thrown
+   away**: the socket is fine, the live consumer is stalled, and
+   `VectorWatcherBlocksDropped` will be firing alongside this one — triage from
+   that runbook section instead and ignore the rest of this one. Zero means the
+   subscriber really is delivering nothing; continue below.
+2. **Is the socket flapping or just silent?** Compare
+   `rate(alchemy_subscriber_reconnections_total[10m])` and
+   `increase(alchemy_subscriber_stalls_total[10m])` for the same
+   `service_name`. Stalls climbing means the data-freshness watchdog is firing
+   and forcing reconnects that do not recover; both flat means the connection
+   looks healthy to us but is delivering nothing.
+3. **Pod logs** — `kubectl -n vector logs <watcher pod> --tail=200`. Look for
+   `no newHeads within HealthTimeout`, repeated
+   `WebSocket connection lost, reconnecting...`, or `failed to connect`.
+4. **Alchemy status page** — https://status.alchemy.com/ — confirm WebSocket
+   availability for that chain specifically; the HTTP endpoint can be healthy
+   while the subscription endpoint is not.
+5. **Did the chain itself halt?** Check an explorer for the chain's head. A
+   genuinely halted chain produces this alert legitimately, and there is nothing
+   to fix on our side.
+
+### Common causes
+
+- Alchemy WebSocket subscription silently dropped without closing the socket —
+  the watchdog should force a reconnect, so if this persists the reconnect is
+  failing too.
+- Alchemy WebSocket outage or subscription quota exhaustion for that chain.
+- Network path to the WebSocket endpoint blocked while HTTP still works.
+
+### Recovery
+
+Only once step 1 has ruled out a wedged consumer: restart the watcher pod
+(`kubectl -n vector delete pod <pod>`); the Deployment recreates it and the
+subscription is re-established from scratch. If the alert returns after a
+restart, the problem is upstream — check the Alchemy status page and the API
+key's WebSocket quota. Backfill will close the gap once headers flow
+again; track it with `backfill_watermark_lag`.
+
+### Verify recovery
+
+`rate(alchemy_subscriber_blocks_received_total[5m])` returns to roughly the
+chain's block rate, and `backfill_watermark_lag` drains back toward zero.
+
+---
+
 ## VectorWatcherAlchemyErrorsHigh
 
 **Severity:** critical · **For:** 10m
@@ -139,6 +219,66 @@ to `VectorWatcherAlchemyErrorsHigh` (retries exhausted).
 
 The retry ratio (`alchemy_client_retries_total / alchemy_client_requests_total`)
 returns below 0.2 sustained.
+
+---
+
+## VectorWatcherBlocksDropped
+
+**Severity:** warning · **For:** 1m
+
+### What it means
+
+`alchemy_subscriber_blocks_dropped_total` on the labelled `service_name` is
+nonzero over the last 10m. The Alchemy WebSocket subscriber forwards each
+`newHeads` header into a 100-slot buffered channel with a non-blocking send, so a
+header is only discarded once that buffer is full — i.e. the live consumer fell
+~100 blocks behind the socket. How long that took depends on the chain: ~20
+minutes on Ethereum (~12s blocks), ~3 minutes on an L2 at ~2s, and seconds on a
+chain producing several blocks a second.
+
+A dropped header never reaches the live path, so the block lands in Postgres only
+when backfill picks the gap up.
+
+This counter is also the cheap way to answer the ARCT-374 question when a gap
+appears: **drops here mean our channel dropped it; silence here means Alchemy
+never delivered it.**
+
+### First checks (≤5 min)
+
+1. **Watcher logs** — the drop path logs `channel full, dropping block` with the
+   block number. `kubectl -n vector logs <watcher pod> | grep 'dropping block'`
+   gives the exact heights lost.
+2. **What stalled the consumer** — the live path fetches the block body, receipts
+   (and traces on Ethereum) from Alchemy, writes Redis, then publishes to SNS.
+   Check `VectorWatcherAlchemyLatencyHigh` / `VectorWatcherAlchemyRetriesHigh`
+   for a slow RPC leg, then Redis and SNS publish errors in the same logs.
+3. **Confirm the gap is being healed** — check `backfill_watermark_lag` and the
+   backfill logs for the heights from step 1.
+
+### Common causes
+
+- Alchemy RPC latency spike or a 429 storm slowing the per-block fetch below the
+  chain's block rate.
+- Redis or SNS backpressure / errors blocking the persist step.
+- Watcher pod CPU-throttled or a noisy-neighbour node, so the consumer goroutine
+  cannot keep up.
+
+### Recovery
+
+Fix the consumer stall identified in step 2 — that is the action this alert asks
+for. Then confirm the heights from the log line exist as canonical rows. Backfill
+normally heals them on its own (every staging and prod watcher runs
+`ENABLE_BACKFILL=true`; the dev overlay does not), so manual repair is rarely
+needed. If backfill is not catching them, follow
+`VectorWatcherBackfillWatermarkLagHigh`.
+
+### Verify recovery
+
+`increase(alchemy_subscriber_blocks_dropped_total[10m])` returns to zero while
+`rate(alchemy_subscriber_blocks_received_total[5m])` recovers to the chain's block
+rate. If dropped goes to zero but received stays at zero, the consumer stall was
+not the whole story and the socket is down too — continue from
+`VectorWatcherNoHeadersReceived`.
 
 ---
 
@@ -284,10 +424,10 @@ is nonzero over the last 10m: a header arrived at or below the canonical head
 and did NOT link cleanly onto our chain, so it was routed to reorg handling
 rather than classified as a clean gap fill. The rule is scoped to an explicit
 allow-list of the single-sequencer rollup watchers (arbitrum, optimism, base,
-unichain, avalanche), where a real reorg is essentially impossible, so this is
-the over-orphaning trigger from the 2026-06-02 incident. Ethereum (the bare
-`watcher`) reorgs normally (depth 1, a few times a day) and is deliberately not
-listed. New single-sequencer chains must be added to the allow-list when
+unichain, avalanche, robinhood), where a real reorg is essentially impossible, so
+this is the over-orphaning trigger from the 2026-06-02 incident. Ethereum (the
+bare `watcher`) reorgs normally (depth 1, a few times a day) and is deliberately
+not listed. New single-sequencer chains must be added to the allow-list when
 onboarded. Scoping by service name is interim; the proper fix is a chain-behavior
 label so alerts stop hardcoding chain names (see VEC-295). Unlike
 VectorWatcherOutOfOrderBlocksHigh (a sustained-rate warning across all outcomes),
@@ -309,6 +449,27 @@ verification before any state mutation, and the backfill self-heals any
 over-orphaning, so a single occurrence is a signal rather than confirmed damage.
 Sustained occurrences mean upstream is degraded and the watcher is doing
 defensive work it should not need to.
+
+Known detection gap: `increase()` cannot see a series' first sample, so the very
+first `outcome="reorg"` classification on a newly onboarded chain does not fire —
+only the second one does. If you are investigating a chain's first weeks, query
+`live_block_out_of_order_total{outcome="reorg"}` directly rather than trusting
+the alert's silence.
+
+**`robinhood-watcher` (ARCT-397).** robinhood is a single-sequencer chain, so it
+joined the allow-list on the same grounds as the other rollups. Its manifests
+live in `k8s/base` only and are not yet referenced from a cluster overlay, so
+`service_name="robinhood-watcher"` emits nothing today — this applies from the
+moment it is deployed.
+
+Do NOT discount a robinhood firing as "upstream is dropping heads again". A head
+Alchemy omits and then delivers late still links cleanly onto our chain, so it is
+recorded as `outcome="late_arrival"` (see `OutOfOrderOutcomeLateArrival` in
+`stl-verify/internal/ports/outbound/metrics.go`) — the bucket this rule
+deliberately excludes. Omitted heads surface in
+VectorWatcherOutOfOrderBlocksHigh, not here. Reaching `outcome="reorg"` means the
+block did not link, which on a single-sequencer chain is the dangerous case on
+robinhood exactly as on the other five. Triage it as the first checks describe.
 
 ### Verify recovery
 

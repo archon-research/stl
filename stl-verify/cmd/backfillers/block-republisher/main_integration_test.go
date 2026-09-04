@@ -440,17 +440,17 @@ func awsClients(t *testing.T, ctx context.Context) (*awssns.Client, *awssqs.Clie
 	return snsc, sqsc
 }
 
-// startMockRPCServer answers the reads Republish issues for every fixture, with
-// the same canonical hash on both by-number reads so no reorg is detected.
+// startMockRPCServer answers the by-number reads Republish issues for every
+// fixture, with the same canonical hash on every one so no reorg is detected.
 func startMockRPCServer(t *testing.T, fixtures ...blockFixture) *httptest.Server {
 	t.Helper()
 	headers := make(map[int64]json.RawMessage, len(fixtures))
-	fullBlocks := make(map[string]json.RawMessage, len(fixtures))
+	fullBlocks := make(map[int64]json.RawMessage, len(fixtures))
 	var head int64
 	for _, block := range fixtures {
 		headers[block.number] = json.RawMessage(fmt.Sprintf(`{"number":"0x%x","hash":%q,"parentHash":%q,"timestamp":"0x%x"}`,
 			block.number, block.hash, block.parent, block.timestamp))
-		fullBlocks[strings.ToLower(block.hash)] = json.RawMessage(fmt.Sprintf(
+		fullBlocks[block.number] = json.RawMessage(fmt.Sprintf(
 			`{"number":"0x%x","hash":%q,"parentHash":%q,"timestamp":"0x%x","transactions":[]}`,
 			block.number, block.hash, block.parent, block.timestamp))
 		head = max(head, block.number+integrationHeadDepth)
@@ -468,9 +468,11 @@ func startMockRPCServer(t *testing.T, fixtures ...blockFixture) *httptest.Server
 			case "eth_blockNumber":
 				out.Result = json.RawMessage(fmt.Sprintf(`"0x%x"`, head))
 			case "eth_getBlockByNumber":
+				if fullTxParam(req) {
+					out.Result = fullBlocks[hexParam(t, req)]
+					break
+				}
 				out.Result = headers[hexParam(t, req)]
-			case "eth_getBlockByHash":
-				out.Result = fullBlocks[strings.ToLower(stringParam(req))]
 			case "eth_getBlockReceipts":
 				out.Result = json.RawMessage(`[]`)
 			case "trace_block":
@@ -505,6 +507,16 @@ func stringParam(req rpcReq) string {
 	}
 	param, _ := req.Params[0].(string)
 	return param
+}
+
+// fullTxParam is eth_getBlockByNumber's second argument: the payload read asks
+// for full transactions, the header reads do not.
+func fullTxParam(req rpcReq) bool {
+	if len(req.Params) < 2 {
+		return false
+	}
+	full, _ := req.Params[1].(bool)
+	return full
 }
 
 func hexParam(t *testing.T, req rpcReq) int64 {

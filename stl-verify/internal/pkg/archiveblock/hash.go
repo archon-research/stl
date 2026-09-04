@@ -1,8 +1,9 @@
-// Package archiveblock reads the block hash an archived block payload carries.
-// Both the bulk downloader and the block republisher compare it against the
-// canonical chain to decide whether a height needs repairing at all, so the fold
-// — which object answers, in what order, and what "no hash" means — lives here
-// rather than in either tool.
+// Package archiveblock reads which block a block payload describes without
+// decoding it: the hash an archived object carries, and — for a payload just
+// fetched — the block its receipt or trace list names and whether it held any
+// transactions. The bulk downloader and the block republisher both compare
+// those against the canonical chain, so the fold — which object answers, in
+// what order, and what "no hash" means — lives here rather than in either tool.
 package archiveblock
 
 import (
@@ -37,9 +38,19 @@ type hashSource struct {
 	Field    string
 }
 
+// The depth and field name each source names its block by, shared with the
+// payload helpers so an archived object and a freshly fetched one are read the
+// same way.
+const (
+	blockHashDepth     = 1
+	blockHashField     = "hash"
+	listBlockHashDepth = 2
+	listBlockHashField = "blockHash"
+)
+
 var hashSources = []hashSource{
-	{s3key.Block, 1, "hash"},
-	{s3key.Receipts, 2, "blockHash"},
+	{s3key.Block, blockHashDepth, blockHashField},
+	{s3key.Receipts, listBlockHashDepth, listBlockHashField},
 }
 
 // ErrUnreadable marks an archived object no attempt can read: not a gzip stream,
@@ -71,13 +82,6 @@ func Hash(ctx context.Context, reader RangeReader, bucket string, blockNumber in
 		}
 	}
 	return "", false, nil
-}
-
-// HashFromPayload returns the hash a block payload carries, for a document
-// already in hand rather than in the archive.
-func HashFromPayload(payload []byte) (string, bool) {
-	hash, outcome := scanStringField(payload, 1, "hash")
-	return hash, outcome == fieldFound
 }
 
 func hashFromObject(ctx context.Context, reader RangeReader, bucket, key string, source hashSource) (string, error) {

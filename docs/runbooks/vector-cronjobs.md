@@ -1036,18 +1036,31 @@ archived height. `ALCHEMY_HTTP_URL` is required too, with no mainnet default: a
 deployment without it would refuse to start rather than fetch another chain's
 blocks.
 
-**What a run does.** Two activities per block. `DeriveVersion` lists the height's
-archive prefix and settles the version, which Temporal records in the workflow's
+**What a run does.** Two activities per block. `DeriveVersion` reads the chain
+head and refuses any height inside the 64-block reorg window, reads the canonical
+block by number, lists the height's archive prefix and settles the version.
+Temporal records the version **and that canonical hash** in the workflow's
 history — that is what makes a retried republish reuse the slot instead of
-stepping past the objects its own first attempt caused. `RepublishBlock` then
-reads the chain head and refuses any height inside the 64-block reorg window,
-reads the block by number (the canonical block at fetch time), fetches block +
-receipts + traces pinned to that hash, re-reads the number and **refuses if the
-canonical hash moved between the two reads**, writes the payload to
-`stl:{chainId}:{number}:{version}:{dataType}` in Redis, and publishes a
-`BlockEvent` at that version on the chain's SNS topic. A block takes seconds; a
-200-block run takes minutes. The first failing block stops the run — the blocks
-before it are already durable, so the retry is the remaining list.
+stepping past the objects its own first attempt caused, and hold its payloads to
+the same block. `RepublishBlock` then fetches block + receipts + traces **by
+number** — three RPC reads, no by-hash call — checks every payload against the
+derived hash, writes the payload to `stl:{chainId}:{number}:{version}:{dataType}`
+in Redis, and publishes a `BlockEvent` at that version on the chain's SNS topic. A
+block takes seconds; a 200-block run takes minutes. The first failing block stops
+the run — the blocks before it are already durable, so the retry is the remaining
+list.
+
+**Why by number, and what is checked.** Alchemy serves `trace_block` by hash only
+near the head: at head−5,000 it answers, at head−50,000 it fails with `state at
+block #N is pruned`, and older than that with `invalid argument 0: hex number >
+64 bits`. Every hole this worker exists to repair is hundreds of thousands of
+blocks old, so the payloads are read by number and each is held to the hash
+`DeriveVersion` derived instead: the block payload's own `hash`, and the
+`blockHash` the receipt and trace lists carry in every element. An empty receipt
+or trace list is accepted only for a block whose payload carries no transactions
+— otherwise it is a replica answering from another state, and the attempt is
+retried rather than cached. Nothing is written to Redis or SNS until every check
+passes.
 
 **It does not write `block_states`.** The `assign_block_version` trigger
 overwrites the supplied version with `MAX(version)+1` over the rows surviving at
@@ -1085,8 +1098,9 @@ per height. The example uses a height that landed at 1.
 
 - **`StructuralData`: the height is above the chain head or within 64 blocks of
   it** (non-retryable, run goes red immediately). The worker refuses to repair
-  inside the reorg window: two reads seconds apart would both see the same fork,
-  and the "correction" could itself be orphaned. A different node does not help —
+  inside the reorg window: the hash it derives and the payload it fetches moments
+  later would both come from the same fork, and the "correction" could itself be
+  orphaned. A different node does not help —
   wait until the height is deep enough (64 blocks is about 13 minutes on
   mainnet), then start a new run.
 - **The node answers null for the block or one of its payloads (retryable).**
@@ -1114,9 +1128,14 @@ per height. The example uses a height that landed at 1.
   the object this workflow takes: an empty or oversized `blocks` list, a
   non-positive height, or a field it does not accept, `version` above all. Fix
   the input and start a new run; nothing was published, so the list is unchanged.
-- **Canonical hash moved mid-republish (retryable)** — a reorg deeper than the
-  64-block guard. The activity retries inside a 30-minute envelope, which is
-  normally long enough for the chain to settle.
+- **The node answers with another block (retryable)** — `block N came back as
+  0x…, not the 0x… this run derived`, `the receipts fetched for block N name
+  block 0x…`, or `the node has no traces for block N, which has transactions`.
+  Either the height reorged after `DeriveVersion` read it — a reorg deeper than
+  the 64-block guard — or the replica answered from a state behind the head. The
+  activity retries inside a 30-minute envelope, which is normally long enough for
+  either to clear. If every attempt says the same thing, the height genuinely
+  moved: start a new run so `DeriveVersion` reads the canonical block again.
 - **The archive listing fails (retryable)** — a throttled `ListObjectsV2` on the
   raw bucket leaves the height with no version to publish under, so
   `DeriveVersion` retries rather than guessing, and settles inside the 30-minute
