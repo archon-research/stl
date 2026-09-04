@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Native instrument keys the seed produces (composite market_id ':' token_address, lowercase hex, no 0x):
@@ -17,33 +18,33 @@ const (
 	m2LoanInstrument = "5678:dead" // degenerate market M2 (loan == collateral == dead) : loan-token
 )
 
-// TestMaterializeMorphoMarket is the VEC-402 contract test: after migrations,
-// materialize_morpho_market() projects raw morpho_market_position rows into position_state on the
-// native per-instrument grain (VEC-400). Observations only: the spine writes no classification.
+// VEC-402 contract: materialize_morpho_market() projects raw morpho_market_position rows into
+// position_state on the native per-instrument grain (VEC-400). Observations only: the spine writes no
+// classification, so nothing here asserts one.
 //
-// It pins the behaviours the live data forced (verified over 866,833 rows, 2026-07-24):
+// The behaviours the live data forced (verified over 866,833 rows, 2026-07-24):
 //   - native per-instrument fan-out: one raw row -> its loan-token position and its collateral-token
 //     position, keyed by the composite market_id:token native key (never a deal_type classifier);
 //   - supply/borrow netting into one loan-token position (a single native instrument holds one position);
 //   - latest-timestamp dedup of same-(user,market,block,version) rows;
-//   - many observations per position_id, one CURRENT classification per position_id;
-//   - closure (VEC-409): a leg observed going from a positive quantity to 0 emits ONE closing
-//     zero-row (so position_current shows it closed); a leg never entered emits nothing; leading and
-//     repeated zeros are dropped; a re-open (positive after a close) survives; the classification keeps
-//     the last NON-ZERO deal_type;
-//   - the same-token guard: a market whose collateral token IS its loan token would key both legs on
-//     one position_id; the collateral leg is dropped so the run cannot hit a duplicate-PK abort;
+//   - closure (VEC-409): a leg going from a positive quantity to 0 emits ONE closing zero-row; a leg
+//     never entered emits nothing; leading and repeated zeros are dropped; a re-open survives;
+//   - the same-token guard: a market whose collateral token IS its loan token would key both legs on one
+//     position_id, so the collateral leg is dropped and the run cannot hit a duplicate-PK abort;
 //   - 32-byte ids, no PK collisions, and idempotency.
-func TestMaterializeMorphoMarket(t *testing.T) {
+//
+// One behaviour per function, each seeding its own database.
+
+// seedMorphoMarket gives a test its own migrated database, seeds the fixture and runs the projection
+// once, returning what it reported written.
+func seedMorphoMarket(t *testing.T) (context.Context, *pgxpool.Pool, int64) {
+	t.Helper()
 	ctx := context.Background()
 	pool, cleanup := setupPostgres(ctx, t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
 		t.Fatalf("migrations: %v", err)
 	}
-
-	// Seed one market (loan token dead, collateral token beef) and four holders, each exercising a
-	// behaviour. All ids are resolved by natural key inside the DO block so no serial plumbing leaks out.
 	seed := `
 DO $$
 DECLARE pid bigint; ltid bigint; ctid bigint;
@@ -122,19 +123,27 @@ END $$;`
 	if _, err := pool.Exec(ctx, seed); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-
-	// Run the materializer.
 	var written int64
 	if err := pool.QueryRow(ctx, `SELECT materialize_morpho_market()`).Scan(&written); err != nil {
 		t.Fatalf("materialize_morpho_market: %v", err)
 	}
+	return ctx, pool, written
+}
 
-	// position_state row shape:
-	//   A loan (2 obs) + B loan (1) + B coll (1) + C loan (1) + D loan (2 pv: reprocessed) = 7
-	//   E coll (open + close = 2) + F loan (open + close = 2) + G coll (open + close = 2) = 6
-	//   I coll (open + close + reopen = 3) + H loan in M2 (1; collateral leg guarded out) = 4
-	// Total 17. Distinct positions: A, B-loan, B-coll, C, D, E-coll, F-loan, G-coll, I-coll, H-loan-M2 = 10
-	// (D is one position with two observations at the same block, different processing_version).
+// Row shape:
+//
+//	A loan (2 obs) + B loan (1) + B coll (1) + C loan (1) + D loan (1) = 6
+//	E coll (open + close = 2) + F loan (open + close = 2) + G coll (open + close = 2) = 6
+//	I coll (open + close + reopen = 3) + H loan in M2 (1; collateral leg guarded out) = 4
+//
+// Total 16. Distinct positions: A, B-loan, B-coll, C, D, E-coll, F-loan, G-coll, I-coll, H-loan-M2 = 10.
+//
+// D contributes ONE row, not two: its two rows share (user, market, block, block_version) and differ
+// only in wall-clock timestamp, so both take pv=0 and the projection's DISTINCT ON collapses them to the
+// latest timestamp. That is what the spine requires -- block_timestamp is invariant per logical key --
+// and it is what the D case below asserts (wantRows 1).
+func TestMaterializeMorphoMarketProjectionShape(t *testing.T) {
+	ctx, pool, written := seedMorphoMarket(t)
 	var rows, distinctPositions, collisions, badLen int
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*),
@@ -159,8 +168,11 @@ END $$;`
 	if badLen != 0 {
 		t.Errorf("%d position_id(s) not 32 bytes", badLen)
 	}
+}
 
-	// Per-holder quantity assertions, located by the native instrument_key + holder_id.
+// Per-holder results, located by the native instrument_key + holder_id.
+func TestMaterializeMorphoMarketPerPosition(t *testing.T) {
+	ctx, pool, _ := seedMorphoMarket(t)
 	for _, c := range []struct {
 		name       string
 		instrument string
@@ -179,7 +191,6 @@ END $$;`
 		{"I re-open: open + close + reopen, latest is the reopen", collInstrument, "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1", "7", 3},
 		{"H same-token market: loan leg only, collateral guarded out", m2LoanInstrument, "f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2", "100", 1},
 	} {
-		c := c
 		t.Run(c.name, func(t *testing.T) {
 			var n int
 			var latestQty string
@@ -200,16 +211,23 @@ END $$;`
 			}
 		})
 	}
+}
 
-	// Idempotent: a second run re-derives the same observations and appends nothing.
-	if _, err := pool.Exec(ctx, `SELECT materialize_morpho_market()`); err != nil {
+// A second run re-derives the same observations and appends nothing.
+func TestMaterializeMorphoMarketIsIdempotent(t *testing.T) {
+	ctx, pool, _ := seedMorphoMarket(t)
+	var second int64
+	if err := pool.QueryRow(ctx, `SELECT materialize_morpho_market()`).Scan(&second); err != nil {
 		t.Fatalf("second materialize: %v", err)
 	}
-	var rows2 int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state`).Scan(&rows2); err != nil {
+	if second != 0 {
+		t.Errorf("the second run reported %d rows appended, want 0", second)
+	}
+	var rows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state`).Scan(&rows); err != nil {
 		t.Fatalf("re-count: %v", err)
 	}
-	if rows2 != 16 {
-		t.Errorf("after re-run: position_state=%d, want 16 (the rerun must append nothing)", rows2)
+	if rows != 16 {
+		t.Errorf("after re-run: position_state=%d, want 16 (the rerun must append nothing)", rows)
 	}
 }
