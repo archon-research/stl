@@ -102,11 +102,7 @@ no-canonical-row invariant.
    Alchemy key** or strict concurrency so it cannot 429-starve the live watcher.
 5. Check downstream: blocks orphaned during the incident emitted reorg events at
    that time; spot-check the S3 backups / indexers for the affected numbers, since
-   the heal intentionally does **not** republish. A height the archive holds only
-   `<number>_0_*` objects for — and whose `block_states` rows retention has since
-   dropped — is repaired by the `block-republisher` on-demand worker, which
-   re-publishes the canonical block under a new `block_version` so the indexers
-   append the correction (docs/runbooks/vector-cronjobs.md).
+   the heal intentionally does **not** republish.
 
 ## Prevention / follow-ups
 
