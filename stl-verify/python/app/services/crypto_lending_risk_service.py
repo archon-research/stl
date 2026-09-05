@@ -194,17 +194,31 @@ class CryptoLendingRiskService:
         _, items = await self._load_enriched_items_for_info(info, prime_id=prime_id)
         return items
 
+    async def resolve_pool_prime(self, receipt_token_id: int) -> EthAddress | None:
+        """The prime a no-``prime_id`` read actually reports, or ``None``.
+
+        Aave-like legacy share is the largest holder's balance over supply, so
+        those responses carry one real prime's exposure and must be gated on it.
+        ``None`` where the share is genuinely pool-wide, or the asset is unknown.
+        """
+        info = await self._reader.get_receipt_token(receipt_token_id)
+        if info is None:
+            return None
+        return await self._reader.resolve_legacy_wallet(info)
+
     async def get_risk_breakdown(
         self,
         receipt_token_id: int,
         prime_id: EthAddress | None,
+        pool_wallet: EthAddress | None = None,
     ) -> RiskBreakdown | None:
         """Return the risk breakdown for a receipt token, or ``None`` if unknown.
 
         With a ``prime_id`` the breakdown is scaled to that prime's position (per-prime,
-        pro-rata by pool share); with ``prime_id=None`` it is the pool-level breakdown.
+        pro-rata by pool share); with ``prime_id=None`` it is scaled to ``pool_wallet``,
+        the holder ``resolve_pool_prime`` named and the caller was authorized for.
         """
-        resolved = await self._load_enriched_items_or_none(receipt_token_id, prime_id=prime_id)
+        resolved = await self._load_enriched_items_or_none(receipt_token_id, prime_id=prime_id, pool_wallet=pool_wallet)
         if resolved is None:
             return None
         backed_asset_id, items = resolved
@@ -214,8 +228,17 @@ class CryptoLendingRiskService:
     # Legacy public API — used by old endpoints, will be removed in VEC-183.
     # ------------------------------------------------------------------
 
-    async def get_bad_debt_legacy(self, receipt_token_id: int, gap_pct: Decimal) -> Decimal | None:
-        """Return legacy bad debt for a receipt token, or ``None`` if unknown."""
+    async def get_bad_debt_legacy(
+        self,
+        receipt_token_id: int,
+        gap_pct: Decimal,
+        pool_wallet: EthAddress | None = None,
+    ) -> Decimal | None:
+        """Return legacy bad debt for a receipt token, or ``None`` if unknown.
+
+        ``pool_wallet`` is the holder ``resolve_pool_prime`` named and the caller
+        was authorized for; the figures describe that holder's position.
+        """
         info = await self._reader.get_receipt_token(receipt_token_id)
         if info is None or not self._reader.requires_liquidation_enrichment(info):
             # No quantitative risk model for this protocol (e.g. Maple has no
@@ -223,10 +246,9 @@ class CryptoLendingRiskService:
             # None (→ 404) rather than a gap-sweep sum of 0, which would read as a
             # genuinely fully-covered position instead of "no model for this asset".
             return None
-        resolved = await self._load_enriched_items_or_none(receipt_token_id, prime_id=None)
-        if resolved is None:
-            return None
-        _, items = resolved
+        # ``info`` in hand, so pass it rather than making _load_enriched_items_or_none
+        # fetch the same row again.
+        _, items = await self._load_enriched_items_for_info(info, prime_id=None, pool_wallet=pool_wallet)
         raw = gap_sweep.total_bad_debt(items, gap_pct)
         return abs(raw)
 
@@ -234,11 +256,12 @@ class CryptoLendingRiskService:
         self,
         receipt_token_id: int,
         prime_id: EthAddress | None,
+        pool_wallet: EthAddress | None = None,
     ) -> tuple[int, list[RiskEnrichedCollateral]] | None:
         info = await self._reader.get_receipt_token(receipt_token_id)
         if info is None:
             return None
-        return await self._load_enriched_items_for_info(info, prime_id=prime_id)
+        return await self._load_enriched_items_for_info(info, prime_id=prime_id, pool_wallet=pool_wallet)
 
     async def _load_enriched_items_for_info(
         self,
@@ -246,6 +269,7 @@ class CryptoLendingRiskService:
         prime_id: EthAddress | None,
         share_override: Decimal | Exception | None = None,
         breakdown_override: BackedBreakdown | None = None,
+        pool_wallet: EthAddress | None = None,
     ) -> tuple[int, list[RiskEnrichedCollateral]]:
         if not self._reader.requires_liquidation_enrichment(info):
             # Pool-level, USD-valued, symbol-keyed breakdown (e.g. Maple Syrup): no
@@ -270,7 +294,7 @@ class CryptoLendingRiskService:
         # empty breakdown so warm-up windows still surface as
         # ``503 share_data_missing`` instead of ``200``.
         if prime_id is None:
-            share = await self._reader.get_legacy_share(info)
+            share = await self._reader.get_legacy_share(info, pool_wallet)
 
         breakdown = breakdown_override if breakdown_override is not None else await self._reader.get_breakdown(info)
         if not breakdown.items:

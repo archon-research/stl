@@ -15,7 +15,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.adapters.postgres.reference_as_of import ReferenceEffectiveAtProvider
-from app.api.deps import get_engine, get_reference_as_of, get_reference_risk_capital_service_factory
+from app.api.deps import (
+    allowed_prime_vaults,
+    get_engine,
+    get_reference_as_of,
+    get_reference_risk_capital_service_factory,
+    vault_filter,
+)
 from app.domain.provenance import Provenance
 from app.services.allocation_service import AllocationService
 from app.services.reference_risk_capital_service import ReferenceRiskCapitalService
@@ -74,8 +80,11 @@ async def _get_service(
 async def get_provenance_availability(
     service: AllocationService = Depends(_get_service),
     reference_services: Callable[[], ReferenceRiskCapitalService] = Depends(get_reference_risk_capital_service_factory),
+    allowed: frozenset[str] | None = Depends(allowed_prime_vaults),
 ) -> ProvenanceAvailabilityResponse:
-    primes = await service.list_primes()
+    # Same filter as /v1/primes: this route enumerates primes by NAME, which
+    # discloses the same set. None = auth off; [] = caller may view none.
+    primes = await service.list_primes(allowed_vaults=vault_filter(allowed))
     names = sorted({prime.name for prime in primes})
 
     # Lowercased here too: the port promises it, but a provider added later

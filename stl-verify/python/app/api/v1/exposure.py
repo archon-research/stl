@@ -11,7 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.adapters.postgres.reference_as_of import ReferenceEffectiveAtProvider
 from app.api._validators import ProxyAddressPathParam
-from app.api.deps import get_engine, get_reference_as_of, get_reference_capital_repository_factory
+from app.api.deps import (
+    get_engine,
+    get_reference_as_of,
+    get_reference_capital_repository_factory,
+    require_prime_view,
+)
 from app.api.provenance import (
     get_requested_provenance,
     resolve_or_422,
@@ -130,6 +135,7 @@ async def list_prime_exposure(
     reference_repositories: Callable[[], ReferenceCapitalRepository] = Depends(
         get_reference_capital_repository_factory
     ),
+    _authz: None = Depends(require_prime_view),
 ) -> ExposureEnvelope:
     prime_address = EthAddress(prime_id)
     if not await service.prime_exists(prime_address):

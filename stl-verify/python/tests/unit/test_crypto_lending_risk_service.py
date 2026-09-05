@@ -428,7 +428,7 @@ class TestLegacyMethods:
         assert isinstance(result, Decimal)
         assert result >= Decimal("0")
         reader.get_breakdown.assert_awaited_once_with(info)
-        reader.get_legacy_share.assert_awaited_once_with(info)
+        reader.get_legacy_share.assert_awaited_once_with(info, None)
         reader.get_share.assert_not_awaited()
 
     @pytest.mark.asyncio

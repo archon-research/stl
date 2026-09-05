@@ -10,7 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.adapters.postgres.reference_as_of import ReferenceEffectiveAtProvider
 from app.api._validators import ProxyAddressPathParam
-from app.api.deps import get_engine, get_model_registry, get_reference_as_of, get_reference_risk_capital_service_factory
+from app.api.deps import (
+    get_engine,
+    get_model_registry,
+    get_reference_as_of,
+    get_reference_risk_capital_service_factory,
+    require_prime_view,
+)
 from app.api.provenance import (
     get_requested_provenance,
     resolve_or_422,
@@ -451,6 +457,7 @@ async def get_prime_risk_capital(
     requested_provenance: Provenance | None = Depends(get_requested_provenance),
     service: PrimeRiskCapitalService = Depends(_get_service),
     reference_services: Callable[[], ReferenceRiskCapitalService] = Depends(get_reference_risk_capital_service_factory),
+    _authz: None = Depends(require_prime_view),
 ) -> PrimeRiskCapitalResponse:
     # A SubProxy holds the prime's treasury, not its allocations, so it is not a
     # member of the prime's ALM fan-out set. Answering for one folds the treasury
