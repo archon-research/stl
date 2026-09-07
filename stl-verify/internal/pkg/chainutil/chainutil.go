@@ -42,6 +42,18 @@ func DefaultChainExpectations() map[int64]BlockDataExpectation {
 	}
 }
 
+// ChainSlug returns the name a chain's deployed resources are built from: its
+// raw bucket and blocks topic, and the Kubernetes and Temporal names derived
+// from them. It errors on a chain the repo does not watch, so a caller naming a
+// resource fails hard rather than building one nothing serves.
+func ChainSlug(chainID int64) (string, error) {
+	chainName, ok := entity.ChainIDToS3Bucket[chainID]
+	if !ok {
+		return "", fmt.Errorf("unknown chain ID %d", chainID)
+	}
+	return chainName, nil
+}
+
 // ValidateS3BucketForChain checks that the S3 bucket name has the expected prefix
 // for the given chain ID and deployment environment. This prevents accidentally
 // reading from or writing to the wrong chain's bucket.
@@ -60,9 +72,9 @@ func ValidateS3BucketForChain(chainID int64, bucket string, environment string) 
 		return fmt.Errorf("environment must not be empty")
 	}
 
-	chainName, ok := entity.ChainIDToS3Bucket[chainID]
-	if !ok {
-		return fmt.Errorf("unknown chain ID %d: cannot validate bucket name", chainID)
+	chainName, err := ChainSlug(chainID)
+	if err != nil {
+		return fmt.Errorf("%w: cannot validate bucket name", err)
 	}
 
 	expectedPrefix := fmt.Sprintf("stl-sentinel%s-%s-raw", environment, chainName)
@@ -90,9 +102,9 @@ func ValidateSNSTopicForChain(chainID int64, topicARN string, environment string
 		return fmt.Errorf("environment must not be empty")
 	}
 
-	chainName, ok := entity.ChainIDToS3Bucket[chainID]
-	if !ok {
-		return fmt.Errorf("unknown chain ID %d: cannot validate sns topic", chainID)
+	chainName, err := ChainSlug(chainID)
+	if err != nil {
+		return fmt.Errorf("%w: cannot validate sns topic", err)
 	}
 
 	expectedSuffix := fmt.Sprintf(":stl-sentinel%s-%s-blocks.fifo", environment, chainName)

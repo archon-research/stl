@@ -482,13 +482,12 @@ jobs:
           for attempt in $(seq 1 "$MAX_RETRIES"); do
             echo "Attempt ${attempt}/${MAX_RETRIES}"
 
-            # The overlay, the roster and the renderer all come from the exact
-            # main commit the bump is parented on, so a roster or renderer merge
-            # racing this job cannot leave the block out of step with the tree
-            # deploy-prod validates.
+            # The whole tree comes from the exact main commit the bump is
+            # parented on: the guards below diff against it, so a retry after
+            # main moved under attempt 1 must not carry this run's older tree.
             git fetch -q origin main
             MAIN_SHA=$(git rev-parse FETCH_HEAD)
-            git checkout -q FETCH_HEAD -- "$KUSTOMIZATION" "$ROSTER" scripts/deploy/render-overlay-images.sh
+            git reset -q --hard FETCH_HEAD
 
             # Render the whole images block from the roster (ORB-362). ci.yml
             # deploy-base reads this file's newTag off origin/main as the
