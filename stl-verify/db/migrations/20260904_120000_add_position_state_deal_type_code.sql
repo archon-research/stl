@@ -11,14 +11,9 @@
 -- UPDATE on the PARENT, which 20260714_160000 restored.
 ALTER TABLE position_state ADD COLUMN IF NOT EXISTS deal_type_code text;
 
--- stl_readwrite can INSERT here directly, not only through the materializer, so the materializer's
--- ref_deal_type check does not bind every writer. Shape only -- the vocabulary stays in ref_deal_type
--- rather than being duplicated into a CHECK that would drift from it.
--- ref_deal_type is the vocabulary. An FK, not a CHECK plus a check inside the materializer: those
--- bound different writers -- the materializer's did not bind a direct INSERT, and the CHECK did not
--- know the vocabulary. Measured on pg18.6/ts2.29.2: enforced from stl_readwrite, and after
--- compress_chunk. The insert-side RI probe runs as the PARENT's owner, which 20260714_160000 restored
--- UPDATE to, so this table's own revoked UPDATE is irrelevant to it.
+-- Guarded because ADD CONSTRAINT has no IF NOT EXISTS and the rest of this file is re-runnable.
+-- Measured on pg18.6/ts2.29.2: enforced from stl_readwrite and after compress_chunk, and drop_chunks
+-- still works.
 DO $fk$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint
@@ -41,7 +36,7 @@ CREATE OR REPLACE FUNCTION materialize_position_projection(p_view regclass, p_bu
     SET search_path FROM CURRENT
     SET timescaledb.enable_tiered_reads = 'on'
     AS $fn$
-DECLARE n bigint; bad text; bad_qty text; v_qualname text; v_deal_type text; v_dt_type text; v_dt_cat "char";
+DECLARE n bigint; bad text; bad_qty text; v_qualname text; v_deal_type text;
 BEGIN
     IF p_view IS NULL THEN
         RAISE EXCEPTION 'materialize_position_projection: p_view must not be NULL';
@@ -84,28 +79,24 @@ BEGIN
     FROM (VALUES ('quantity'), ('block_timestamp'), ('deal_type_code')) AS e(col)
     JOIN pg_catalog.pg_attribute a ON a.attrelid = p_view AND a.attname = e.col
          AND a.attnum > 0 AND NOT a.attisdropped
+    JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
     WHERE a.atttypmod <> -1
       AND ((e.col = 'quantity'        AND ((a.atttypmod - 4) & 65535) < 18)
         OR (e.col = 'block_timestamp' AND a.atttypmod < 6)
-        -- A narrower declared type truncates on cast, and the truncation can land on ANOTHER valid
-        -- code: CUSTODY_COLLATERAL cast to varchar(7) is CUSTODY, which the FK then accepts.
-        OR (e.col = 'deal_type_code'  AND (a.atttypmod - 4) < 63));
+        -- The FK cannot catch this one: a narrow declared type truncates on cast and the truncation
+        -- can land on ANOTHER valid code, so CUSTODY_COLLATERAL as varchar(7) stores CUSTODY.
+        OR (e.col = 'deal_type_code'  AND t.typcategory = 'S' AND (a.atttypmod - 4) < 63));
     IF bad IS NOT NULL THEN
         RAISE EXCEPTION 'projection % declares a lossy type for a value column (it would silently round or truncate; widen the view''s cast): %', p_view, bad;
     END IF;
 
-    -- deal_type_code is OPTIONAL, so absent is fine -- but present-and-not-a-string is a view bug, and
-    -- silently storing NULL for it would lose the one fact this column exists to carry.
-    SELECT format_type(a.atttypid, a.atttypmod), t.typcategory INTO v_dt_type, v_dt_cat
-      FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
-     WHERE a.attrelid = p_view AND a.attname = 'deal_type_code' AND a.attnum > 0 AND NOT a.attisdropped;
-    IF v_dt_type IS NULL THEN
-        v_deal_type := 'NULL::text';
-    ELSIF v_dt_cat <> 'S' THEN
-        RAISE EXCEPTION 'projection % emits deal_type_code as %, which is not a string type (cast the view''s column to text)', p_view, v_dt_type;
-    ELSE
-        v_deal_type := 'deal_type_code::text';
-    END IF;
+    -- OPTIONAL: absent stores NULL, present is cast and copied. No type branch -- whatever a wrong
+    -- type casts to is not a ref_deal_type code, so the FK rejects it.
+    v_deal_type := CASE WHEN EXISTS (
+                       SELECT 1 FROM pg_catalog.pg_attribute a
+                        WHERE a.attrelid = p_view AND a.attname = 'deal_type_code'
+                          AND a.attnum > 0 AND NOT a.attisdropped)
+                   THEN 'deal_type_code::text' ELSE 'NULL::text' END;
 
     DROP TABLE IF EXISTS pg_temp._mpp_src;
     EXECUTE format($q$
@@ -220,6 +211,6 @@ BEGIN
     RETURN n;
 END $fn$;
 
-COMMENT ON FUNCTION materialize_position_projection(regclass, integer) IS '[Operational] VEC-402..407 shared materializer: validate a per-protocol projection view against the position_state column contract, fail hard on contract/type drift, double-emitted keys, or cross-view ownership violations; keep-stored-and-warn on a re-emitted key whose block_timestamp or quantity drifted, then -- evaluating the projection ONCE into a temp table every check reads -- APPEND the new observations. deal_type_code is OPTIONAL, not part of the required contract, so a projection omitting it still works and stores NULL; a projection emitting it as any string type has the value copied, and one emitting a non-string type, a lossily-narrow one, or a value that changes a STORED observation''s deal type is REJECTED. Membership of ref_deal_type is the table''s FK, not this function''s job. position_id is recomputed via position_id(); serialized per view by an advisory lock on the view''s canonical name. Idempotent; run out of band. Returns rows INSERTED.';
+COMMENT ON FUNCTION materialize_position_projection(regclass, integer) IS '[Operational] VEC-402..407 shared materializer: validate a per-protocol projection view against the position_state column contract, fail hard on contract/type drift, double-emitted keys, or cross-view ownership violations; keep-stored-and-warn on a re-emitted key whose block_timestamp or quantity drifted, then -- evaluating the projection ONCE into a temp table every check reads -- APPEND the new observations. deal_type_code is OPTIONAL, not part of the required contract, so a projection omitting it still works and stores NULL; a projection emitting it as any string type has the value copied, and one emitting a lossily-narrow string type, or a value that changes a STORED observation''s deal type, is REJECTED. Everything else about the value is the table''s FK to ref_deal_type, not this function''s job. position_id is recomputed via position_id(); serialized per view by an advisory lock on the view''s canonical name. Idempotent; run out of band. Returns rows INSERTED.';
 
 INSERT INTO migrations (filename) VALUES ('20260904_120000_add_position_state_deal_type_code.sql') ON CONFLICT (filename) DO NOTHING;

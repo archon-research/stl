@@ -2149,11 +2149,12 @@ func psTestDealTypeCode(t *testing.T, f *psFixture) {
 		}
 	})
 
-	// A non-string deal_type_code is a view bug and must fail hard, not store NULL. Pre-fix an integer
-	// column fell through to the NULL branch and the run reported success.
-	t.Run("non-string type fails hard", func(t *testing.T) {
+	// A non-string deal_type_code is a view bug. It needs no gate of its own: whatever it casts to is
+	// not a ref_deal_type code, so the FK refuses it. Pre-fix it fell through to a NULL branch and the
+	// run reported success.
+	t.Run("non-string type is refused by the FK", func(t *testing.T) {
 		body := dtRow("dt-int", "7::int")
-		f.mppErr(t, "pv_dt_int", body, "type gate", "is not a string type")
+		f.mppErr(t, "pv_dt_int", body, "wrong type", "position_state_deal_type_fkey")
 	})
 
 	// A string type narrower than the column's own 63-char cap truncates on cast, and the truncation
