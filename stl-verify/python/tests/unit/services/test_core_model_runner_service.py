@@ -59,7 +59,9 @@ async def test_an_unconverged_market_is_written_and_its_diagnostics_logged(monke
 
     assert [r.market_key for r in writer.inserted] == ["sparklend_usdc"]
     assert "crr_el_se_pct=0.0042 crr_el_rel_se=0.94" in caplog.text
-    assert caplog.text.count("crr_el not converged market_key=sparklend_usdc") == 2
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 2
+    assert all(w.startswith("crr_el not converged market_key=sparklend_usdc") for w in warnings)
 
 
 def _cfg(market_key: str):

@@ -490,7 +490,7 @@ class Simulator:
                 )
                 return {"prices": forecasted_prices.values}
 
-            # n_jobs=1 on purpose: the heaviest market already peaks at ~8.0 GiB
+            # n_jobs=1 on purpose: the heaviest market already peaks at ~7.5 GiB
             # single-process; loky workers would multiply that past any pod limit.
             sim_results = Parallel(n_jobs=1)(delayed(run_simulation)(i) for i in tqdm(range(n_sims)))
 

@@ -40,10 +40,8 @@ async def _run_market(
         diagnostics.crr_el_rel_se,
         diagnostics.n_catastrophic_scenarios,
     )
-    # Info, not warning: every overlay pins N_MC=100, where no market can pass,
-    # so a warning would fire on every run. The row carries the durable signal.
     for reason in convergence_warnings(diagnostics):
-        logger.info("crr_el not converged market_key=%s n_mc=%s: %s", result.market_key, result.n_mc, reason)
+        logger.warning("crr_el not converged market_key=%s n_mc=%s: %s", result.market_key, result.n_mc, reason)
     await writer.insert(result)
     logger.info("result written to core_model_results market_key=%s", result.market_key)
     return result
