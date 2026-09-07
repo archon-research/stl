@@ -158,7 +158,9 @@ data:
       --attributes RawMessageDelivery=true \
       --region $REGION
 
-    # Morpho indexer is Ethereum-only
+    # Morpho indexer runs on Ethereum (below) and Base (ARCT-414)
+    create_consumer_queue "base" "morpho-indexing"
+
     echo "Creating Ethereum morpho indexing queues..."
     $AWS sqs create-queue \
       --queue-name stl-ethereum-morpho-indexing-dlq.fifo \
