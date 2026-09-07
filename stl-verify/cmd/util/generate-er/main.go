@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 )
 
 func main() {
@@ -25,7 +27,10 @@ func main() {
 }
 
 func generate(outputPath string) error {
-	connStr := requireEnv("DATABASE_URL")
+	connStr, err := env.Require("DATABASE_URL")
+	if err != nil {
+		return err
+	}
 	ctx := context.Background()
 
 	pool, err := pgxpool.New(ctx, connStr)
@@ -38,14 +43,6 @@ func generate(outputPath string) error {
 		return fmt.Errorf("generating ER diagram: %w", err)
 	}
 	return nil
-}
-
-func requireEnv(key string) string {
-	value := os.Getenv(key)
-	if value == "" {
-		log.Fatalf("required environment variable not set: %s", key)
-	}
-	return value
 }
 
 func run(ctx context.Context, pool *pgxpool.Pool, outputPath string) error {

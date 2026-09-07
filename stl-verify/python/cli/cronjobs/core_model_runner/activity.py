@@ -10,12 +10,18 @@ import asyncio
 import os
 from pathlib import Path
 
+from sqlalchemy.ext.asyncio import AsyncEngine
 from temporalio import activity
 
+from app.adapters.composite import CompositeCoreModelDataReader
 from app.adapters.parquet.core_model_data_reader import ParquetCoreModelDataReader
+from app.adapters.postgres.core_model_orderbook_reader import PostgresOrderbookReader
+from app.adapters.postgres.core_model_positions_reader import PostgresPositionsReader
+from app.adapters.postgres.core_model_price_reader import PostgresPriceReader
 from app.adapters.postgres.core_model_results_writer import PostgresCoreModelResultsWriter
 from app.adapters.postgres.engine import create_db_engine
 from app.config import async_database_url
+from app.ports.core_model_data_reader import CoreModelDataReader
 from app.risk_engine.core_model.config import INPUTS_DIR
 from app.services.core_model_runner.config import RunnerConfig
 from app.services.core_model_runner.service import run_markets
@@ -24,6 +30,19 @@ from app.services.core_model_runner.workflow import ACTIVITY_NAME
 # The parquet snapshots ship at a fixed path inside the image — a packaging
 # constant, so it lives here in the wiring rather than on RunnerConfig.
 _PARQUET_INPUTS = Path(INPUTS_DIR)
+
+
+def _make_data_reader(engine: AsyncEngine, cfg: RunnerConfig) -> CoreModelDataReader:
+    """Compose each market's reader from its per-market source flags."""
+    parquet = ParquetCoreModelDataReader(_PARQUET_INPUTS)
+    return CompositeCoreModelDataReader(
+        parquet=parquet,
+        orderbooks=PostgresOrderbookReader(engine) if cfg.orderbook_source == "postgres" else None,
+        prices=PostgresPriceReader(engine, min_days=int(cfg.params["TRAIN_SIZE"]))
+        if cfg.price_source == "postgres"
+        else None,
+        positions=PostgresPositionsReader(engine) if cfg.position_source == "postgres" else None,
+    )
 
 
 async def run_tick(market_key: str) -> None:
@@ -42,7 +61,7 @@ async def run_tick(market_key: str) -> None:
         await run_markets(
             configs,
             PostgresCoreModelResultsWriter(engine),
-            lambda _cfg: ParquetCoreModelDataReader(_PARQUET_INPUTS),
+            lambda cfg: _make_data_reader(engine, cfg),
         )
     finally:
         await engine.dispose()

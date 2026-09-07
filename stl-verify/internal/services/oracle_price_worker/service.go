@@ -85,6 +85,9 @@ type Service struct {
 
 	telemetry *Telemetry
 
+	// Pins which oracle_asset versions the units are built from (ADR-0006 §4).
+	referenceEffectiveAt time.Time
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup // tracks the SQS run loop so Stop can drain it
@@ -105,6 +108,7 @@ func NewService(
 	cacheReader outbound.BlockCacheReader,
 	repo outbound.OnchainPriceRepository,
 	newMulticaller MulticallerFactory,
+	referenceEffectiveAt time.Time,
 ) (*Service, error) {
 	if consumer == nil {
 		return nil, fmt.Errorf("consumer cannot be nil")
@@ -117,6 +121,9 @@ func NewService(
 	}
 	if newMulticaller == nil {
 		return nil, fmt.Errorf("newMulticaller cannot be nil")
+	}
+	if referenceEffectiveAt.IsZero() {
+		return nil, fmt.Errorf("referenceEffectiveAt cannot be zero")
 	}
 
 	config.ApplyDefaults()
@@ -145,21 +152,40 @@ func NewService(
 	}
 
 	return &Service{
-		config:         config,
-		consumer:       consumer,
-		cacheReader:    cacheReader,
-		repo:           repo,
-		newMulticaller: newMulticaller,
-		oracleABI:      oracleABI,
-		feedABI:        feedABI,
-		shareABI:       shareABI,
-		curvePoolABI:   curvePoolABI,
-		logger:         config.Logger.With("component", "oracle-price-worker"),
+		config:               config,
+		consumer:             consumer,
+		cacheReader:          cacheReader,
+		repo:                 repo,
+		newMulticaller:       newMulticaller,
+		oracleABI:            oracleABI,
+		feedABI:              feedABI,
+		shareABI:             shareABI,
+		curvePoolABI:         curvePoolABI,
+		referenceEffectiveAt: referenceEffectiveAt,
+		logger:               config.Logger.With("component", "oracle-price-worker"),
 	}, nil
+}
+
+// The visibility-timeout guard is fatal, so it runs before any startup I/O: a
+// misconfigured pod would otherwise re-run the whole sweep on every
+// CrashLoopBackOff cycle before refusing.
+func (s *Service) consumeLoop() sqsutil.Config {
+	return sqsutil.Config{
+		Consumer:     s.consumer,
+		MaxMessages:  s.config.MaxMessages,
+		PollInterval: s.config.PollInterval,
+		Logger:       s.logger,
+		ChainID:      s.config.ChainID,
+	}
 }
 
 // Start initializes the service and begins processing SQS messages.
 func (s *Service) Start(ctx context.Context) error {
+	loop := s.consumeLoop()
+	if err := loop.Validate(); err != nil {
+		return err
+	}
+
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
 	if err := s.initialize(s.ctx); err != nil {
@@ -167,13 +193,7 @@ func (s *Service) Start(ctx context.Context) error {
 	}
 
 	s.wg.Go(func() {
-		sqsutil.RunLoop(s.ctx, sqsutil.Config{
-			Consumer:     s.consumer,
-			MaxMessages:  s.config.MaxMessages,
-			PollInterval: s.config.PollInterval,
-			Logger:       s.logger,
-			ChainID:      s.config.ChainID,
-		}, s.processBlock)
+		sqsutil.RunLoop(s.ctx, loop, s.processBlock)
 	})
 
 	s.logger.Info("oracle price worker started",
@@ -181,9 +201,9 @@ func (s *Service) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop cancels the SQS processing loop and waits for the goroutine to exit, so
-// no in-flight handler outlives shutdown (and no archive write is scheduled
-// after the archiving drain begins).
+// Stop cancels the SQS processing loop and waits for the loop goroutine to
+// exit. A handler the drain abandoned can outlive it; archiving's drain gate is
+// what refuses that handler's late archive write.
 func (s *Service) Stop() error {
 	if s.cancel != nil {
 		s.cancel()
@@ -194,7 +214,7 @@ func (s *Service) Stop() error {
 }
 
 func (s *Service) initialize(ctx context.Context) error {
-	shared, err := oracle_pricing.LoadOracleUnits(ctx, s.repo, s.config.ChainID, s.logger)
+	shared, err := oracle_pricing.LoadOracleUnits(ctx, s.repo, s.config.ChainID, s.referenceEffectiveAt, s.logger)
 	if err != nil {
 		return err
 	}

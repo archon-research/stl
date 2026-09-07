@@ -36,8 +36,8 @@ def test_prime_match_clause_keeps_vault_or_proxy_resolution() -> None:
     clause = PrimeDebtRepository._prime_match_clause()
 
     assert "p.vault_address" in clause
-    assert "allocation_position ap" in clause
-    assert "ap.proxy_address" in clause
+    assert "prime_proxy pp" in clause
+    assert "pp.proxy_address" in clause
 
 
 @pytest.mark.asyncio

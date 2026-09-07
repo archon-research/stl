@@ -39,6 +39,7 @@ _BORROWER = bytes.fromhex("4444444444444444444444444444444444444444")
 _PENDING_LOAN = bytes.fromhex("5555555555555555555555555555555555555555")
 _STALE_LOAN = bytes.fromhex("6666666666666666666666666666666666666666")
 _REPAID_LOAN = bytes.fromhex("7777777777777777777777777777777777777777")
+_UNIDENTIFIED_LOAN = bytes.fromhex("8888888888888888888888888888888888888888")
 _SYNCED = dt.datetime(2026, 6, 18, 12, 0, tzinfo=dt.timezone.utc)
 _SYNCED_OLD = dt.datetime(2026, 6, 17, 12, 0, tzinfo=dt.timezone.utc)
 
@@ -131,6 +132,20 @@ async def _seed_data(db_url: str) -> None:
             amount=1000000000000000000,
             decimals=18,
             value_usd=99900000000,
+        )
+
+        # Priced collateral whose asset symbol Maple reported as null — must be
+        # excluded, since symbol is the grouping key and a blank one would merge
+        # unrelated assets into one meaningless item.
+        unidentified = await seed_loan(_UNIDENTIFIED_LOAN, None, "Active", 60000000000, 1656007)
+        await insert_maple_loan_collateral(
+            conn,
+            loan_id=unidentified,
+            synced_at=_SYNCED,
+            symbol="",
+            amount=3000000000000000,
+            decimals=18,
+            value_usd=279637223441,
         )
 
         # DepositPending collateral with NULL amount/value — must be excluded
@@ -322,6 +337,12 @@ async def test_items_ordered_by_value_desc(repository: MapleBackedBreakdownRepos
 async def test_null_valued_collateral_is_excluded(repository: MapleBackedBreakdownRepository) -> None:
     result = await repository.get_backed_breakdown(SYRUP_USDC, chain_id=1)
     assert "PENDINGBTC" not in {i.symbol for i in result.items}
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_unidentified_collateral_is_excluded(repository: MapleBackedBreakdownRepository) -> None:
+    result = await repository.get_backed_breakdown(SYRUP_USDC, chain_id=1)
+    assert "" not in {i.symbol for i in result.items}
 
 
 @pytest.mark.asyncio(loop_scope="module")

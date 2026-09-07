@@ -27,7 +27,7 @@ from app.logging import get_logger
 
 logger = get_logger(__name__)
 
-_AAVE_LIKE = frozenset({"sparklend", "aave_v2", "aave_v3", "aave_v3_lido", "aave_v3_rwa"})
+_AAVE_LIKE = frozenset({"sparklend", "aave_v2", "aave_v3", "aave_v3_lido", "aave_v3_rwa", "aave_v3_avalanche"})
 _MORPHO = frozenset({"morpho_blue"})
 _MAPLE = frozenset({"maple"})
 # Protocols eligible for the gap-sweep RRC model (feeds ``list_supported_asset_ids`` →
@@ -37,31 +37,37 @@ _MAPLE = frozenset({"maple"})
 _SUPPORTED_PROTOCOLS = _AAVE_LIKE | _MORPHO
 _NORMALIZE_RE = re.compile(r"[\s\-_]+")
 
+# Reads allocation_position_current, one row per (proxy_address, chain_id, token_id).
+# Both CTEs pin token_id — latest_receipt by t.address, latest_underlying by the
+# receipt_token row's underlying_token_id, each unique within a chain — so that PK
+# admits at most one row per proxy per CTE and no latest-row dedup is needed. Chain
+# predicates: rationale on allocation_position_repository._RECEIPT_TOKEN_POSITIONS_SQL.
 _WALLET_LOOKUP_SQL = """
 WITH latest_receipt AS (
     -- Most-recent balance snapshot per wallet for the receipt token itself.
-    -- DISTINCT ON ensures we read the current state, not a historical peak.
-    SELECT DISTINCT ON (ap.proxy_address)
+    SELECT
         ap.proxy_address,
         ap.balance
-    FROM allocation_position ap
-    JOIN token t ON t.id = ap.token_id AND t.address = :receipt_token_address
+    FROM allocation_position_current ap
+    JOIN token t ON t.id = ap.token_id AND t.chain_id = ap.chain_id
+                AND t.address = :receipt_token_address
     WHERE ap.chain_id = :chain_id
-    ORDER BY ap.proxy_address, ap.block_number DESC, ap.block_version DESC,
-             ap.processing_version DESC, ap.log_index DESC
 ),
 latest_underlying AS (
     -- Most-recent balance snapshot per wallet for the underlying token.
-    SELECT DISTINCT ON (ap.proxy_address)
+    -- rt.chain_id = ap.chain_id scopes the registry to the chain asked about:
+    -- receipt_token.underlying_token_id carries no chain constraint, so another
+    -- chain's registration of the same address otherwise answers with ITS
+    -- underlying's holders.
+    SELECT
         ap.proxy_address,
         ap.balance
-    FROM allocation_position ap
-    JOIN token t ON t.id = ap.token_id
+    FROM allocation_position_current ap
+    JOIN token t ON t.id = ap.token_id AND t.chain_id = ap.chain_id
     JOIN receipt_token rt ON rt.underlying_token_id = t.id
                          AND rt.receipt_token_address = :receipt_token_address
+                         AND rt.chain_id = ap.chain_id
     WHERE ap.chain_id = :chain_id
-    ORDER BY ap.proxy_address, ap.block_number DESC, ap.block_version DESC,
-             ap.processing_version DESC, ap.log_index DESC
 ),
 candidates AS (
     -- Prefer wallets that explicitly hold the receipt token. Fall back to a
@@ -112,6 +118,20 @@ class PostgresCryptoLendingReader:
         return {
             row.receipt_token_id for row in rows if _normalize_protocol_name(row.protocol_name) in _SUPPORTED_PROTOCOLS
         }
+
+    async def list_morpho_asset_ids(self, chain_id: int) -> frozenset[int]:
+        """Return the receipt_token_ids of Morpho vault shares on ``chain_id``.
+
+        Serves the CORE model's vault aggregation, which is chain-gated (its
+        market keys are mainnet-only); classification lives here so the
+        protocol-name normalization has one home.
+        """
+        rows = await self._receipt_token_repo.list_protocol_pairs()
+        return frozenset(
+            row.receipt_token_id
+            for row in rows
+            if row.chain_id == chain_id and _normalize_protocol_name(row.protocol_name) in _MORPHO
+        )
 
     async def get_receipt_token(self, receipt_token_id: int) -> ReceiptTokenInfo | None:
         return await self._receipt_token_repo.get(receipt_token_id)
@@ -284,7 +304,25 @@ class PostgresCryptoLendingReader:
 
         return results
 
-    async def get_legacy_share(self, info: ReceiptTokenInfo) -> Decimal:
+    async def resolve_legacy_wallet(self, info: ReceiptTokenInfo) -> EthAddress | None:
+        """The wallet a no-``prime_id`` read is really answering about, or None.
+
+        Aave-like legacy share is ONE holder's balance over supply, so those
+        responses are that holder's position, not a pool aggregate; the caller
+        has to be authorized for it. None where no wallet is involved and the
+        share is genuinely pool-wide (Morpho's flat 1, and every protocol with
+        no legacy share at all).
+        """
+        if _normalize_protocol_name(info.protocol_name) not in _AAVE_LIKE:
+            return None
+        self._require_receipt_token_token_id(info)
+        try:
+            wallet_address = await self._lookup_wallet(info.receipt_token_address, info.chain_id)
+        except ValueError as exc:
+            raise MissingShareError(str(exc)) from exc
+        return EthAddress("0x" + wallet_address.hex())
+
+    async def get_legacy_share(self, info: ReceiptTokenInfo, wallet: EthAddress | None = None) -> Decimal:
         normalized = _normalize_protocol_name(info.protocol_name)
 
         if normalized in _MORPHO:
@@ -296,10 +334,16 @@ class PostgresCryptoLendingReader:
             raise ValueError(f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})")
 
         token_id = self._require_receipt_token_token_id(info)
-        try:
-            wallet_address = await self._lookup_wallet(info.receipt_token_address, info.chain_id)
-        except ValueError as exc:
-            raise MissingShareError(str(exc)) from exc
+        if wallet is not None:
+            # The caller resolved it already and had it authorized; computing
+            # from a second lookup would be checking one wallet and reporting
+            # another.
+            wallet_address = wallet.to_bytes()
+        else:
+            try:
+                wallet_address = await self._lookup_wallet(info.receipt_token_address, info.chain_id)
+            except ValueError as exc:
+                raise MissingShareError(str(exc)) from exc
         return await self._load_share(
             chain_id=info.chain_id,
             token_id=token_id,
@@ -328,7 +372,9 @@ class PostgresCryptoLendingReader:
         Legacy endpoints do not provide a ``prime_id``, so for Aave-like
         assets we infer a wallet by preferring the largest current holder of
         the receipt token itself and falling back to the underlying token only
-        if no receipt-token holder exists.
+        if no receipt-token holder exists. The winner is one real prime's
+        proxy, which is why ``resolve_legacy_wallet`` exists: the route gates
+        on it before any figures are computed.
         """
         token_hex = receipt_token_address.hex()
         try:

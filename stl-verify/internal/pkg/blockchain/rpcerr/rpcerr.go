@@ -19,6 +19,7 @@ package rpcerr
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -56,6 +57,38 @@ func IsEVMRevert(err error) bool {
 		return true
 	}
 	return strings.Contains(strings.ToLower(rpcErr.Error()), "execution reverted")
+}
+
+// IsGasExhausted reports whether err is the node's answer that an eth_call ran
+// past its gas cap. The verdict is read from the JSON-RPC error's message and,
+// for nodes that put the detail in the error's data instead (Nethermind's -32015
+// "VM execution error." carries "Out of gas" there), from that data. No error
+// code is specific to it: -32000 and -32015 carry reverts too, so the text is
+// the discriminator.
+//
+// This is a verdict on the whole batch: what one sub-call of an aggregate3 would
+// answer is established only by issuing it alone.
+func IsGasExhausted(err error) bool {
+	if err == nil {
+		return false
+	}
+	var rpcErr rpc.Error
+	if !errors.As(err, &rpcErr) {
+		return false
+	}
+	text := strings.ToLower(rpcErr.Error())
+	var dataErr rpc.DataError
+	if errors.As(err, &dataErr) && dataErr.ErrorData() != nil {
+		text += " " + strings.ToLower(fmt.Sprint(dataErr.ErrorData()))
+	}
+	return strings.Contains(text, "out of gas") || strings.Contains(text, "gas required exceeds")
+}
+
+// IsRequestTooLarge reports whether the provider refused the request for its
+// size (HTTP 413) before any call ran.
+func IsRequestTooLarge(err error) bool {
+	var httpErr rpc.HTTPError
+	return errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusRequestEntityTooLarge
 }
 
 // RequireAllSucceeded returns a non-nil error if any result in results has

@@ -221,7 +221,7 @@ Ordinal order is `primary → secondary → tertiary → quaternary → quinary`
 
 **Name the token, never the custom property.** `@archon-research/charting` types every colour-accepting prop as `ChartColor`, so `'chart.series.primary'` is a checked literal and `'chart.series.primry'` is a compile error — which is the validation a `var(--colors-chart-series-primary)` string could never have. That type check replaces the old local rule about withholding a `var()` fallback: the package's own resolved strings *do* carry hex fallbacks (they are what a chart renders with no design system present), and a wrong name can no longer reach them. In dev it also warns once, on the console, for an unknown `--colors-chart-*` / `--colors-identity-*` read.
 
-Two forms, and the distinction matters: props the package owns (`buildChartTheme`'s config, its own axes and marks) resolve a token name themselves, while the raw visx components it re-exports (`LineSeries`, `AreaSeries`) and any `style` object take a CSS value — for those, resolve once with `chartColorToken('chart.series.primary')`. `App.tsx` carries the token name per metric card; `AllocationGrid` resolves it where visx needs a string.
+Two forms, and the distinction matters: props the package owns (`buildChartTheme`'s config, its own axes and marks) resolve a token name themselves, while the raw visx components it re-exports (`LineSeries`, `AreaSeries`) and any `style` object take a CSS value — for those, resolve once with `chartColorToken('chart.series.primary')`. `metric-charts.ts` carries the token name per metric card; `AllocationGrid` resolves it where visx needs a string.
 
 ### Overlays and layering
 `overlay.backdrop` (scrims) and `overlay.tooltip` (always-dark floating fills, paired with `text.inverse`) come from the preset, as does `shadows.overlay` for floating-overlay elevation. Layer with the preset's `zIndex` scale — `dropdown`/`sticky`/`overlay`/`modal`/`popover`/`toast`/`tooltip` — never a hand-picked number.
@@ -231,9 +231,9 @@ Two forms, and the distinction matters: props the package owns (`buildChartTheme
 
 ## Typography
 
-**Display Font:** IBM Plex Sans, SF Pro Text, Segoe UI, sans-serif  
-**Body Font:** IBM Plex Sans, SF Pro Text, Segoe UI, sans-serif  
-**Label Font:** IBM Plex Sans, SF Pro Text, Segoe UI, sans-serif  
+**Display Font:** IBM Plex Sans, SF Pro Text, Segoe UI, sans-serif
+**Body Font:** IBM Plex Sans, SF Pro Text, Segoe UI, sans-serif
+**Label Font:** IBM Plex Sans, SF Pro Text, Segoe UI, sans-serif
 **Mono Font** (`fonts.mono`, used for every on-chain address and hash): `ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace`
 
 **Character:** Utility-first and technically neutral. Typography supports quick parsing with minimal personality overhead.
@@ -293,12 +293,12 @@ Never hand-write a shadow literal: a `rgba(0, 0, 0, 0.2)` drop shadow disappears
 
 ### Tooltips
 - **Surface:** the upstream `tooltip` recipe — `rounded.md`, `overlay.tooltip` fill with `text.inverse` text, a `border.subtle` stroke, `shadows.overlay`, and `zIndex.tooltip`. Do not re-derive any of those locally; the recipe is the whole bubble.
-- **What stays local:** the trigger shape (a `cursor: help` inline button, or the truncated-label variant) and the shared positioning (`placement="top"`, 8px main-axis offset). The design system re-exports Ark's `Tooltip` headless, so an unwrapped `Tooltip.Content` renders as unstyled, unpositioned text over the page — always go through the app wrapper in `shared/Tooltip.tsx`.
+- **What stays local:** the trigger shape (a `cursor: help` inline button, or the truncated-label variant) and the shared positioning (`placement="top"`, 8px main-axis offset). The design system re-exports Ark's `Tooltip` headless, so an unwrapped `Tooltip.Content` renders as unstyled, unpositioned text over the page — always go through the app wrapper in `shared/ui/Tooltip.tsx`.
 
 ### Tables
 - **Component:** `DataTable` for every tabular surface, including the activity feed and its drawer-mode twin. The `dataTable` slot recipe owns the frame, header, rows, and the inline magnitude bar; the app supplies columns and a shared header style, not table chrome.
 - **Expandable rows:** row expansion is upstream too — `renderDetailPanel` plus the `expanderCell` / `expander` / `detailCell` slots. Two of the slots the component emits, `dataTable__rowGroup` and `dataTable__detailRow`, are declared with empty style objects upstream and therefore have no CSS in any build: they are structural hooks, so do not read a missing rule there as dropped CSS.
-- **Header typography:** the recipe's `density="compact"` header is an 11px muted micro-label, too quiet for these grids, so one shared `& thead th` override (`shared/tableStyles.ts`) lifts it to 0.875rem semibold uppercase in `text.default`. It is one definition for all three tables — do not re-declare it per table.
+- **Header typography:** the recipe's `density="compact"` header is an 11px muted micro-label, too quiet for these grids, so one shared `& thead th` override (`shared/ui/tableStyles.ts`) lifts it to 0.875rem semibold uppercase in `text.default`. It is one definition for all three tables — do not re-declare it per table.
 - **Row identity:** pass `getRowId`; without it the component logs a dev warning and expansion state keys off row index.
 
 ### Cards / Containers

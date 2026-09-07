@@ -23,6 +23,13 @@ spec:
       containers:
         - name: morpho-indexer
           image: morpho-indexer
+          env:
+            # Each per-chain deployment of this image reports its own OTEL
+            # service.name (e.g. "morpho-indexer", "base-morpho-indexer").
+            - name: SERVICE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['app']
           envFrom:
             - configMapRef:
                 name: otel-config

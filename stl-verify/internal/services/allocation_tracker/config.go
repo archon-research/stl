@@ -40,7 +40,7 @@ type Config struct {
 
 func ConfigDefaults() Config {
 	return Config{
-		MaxMessages:       10,
+		MaxMessages:       1,
 		PollInterval:      100 * time.Millisecond,
 		SweepEveryNBlocks: 75,
 		Logger:            slog.Default(),

@@ -35,7 +35,14 @@
     "uniswap_v3_pool_event",
     "uniswap_v3_pool_state",
     "uniswap_v3_swap",
-    "uniswap_v3_tick"
+    "uniswap_v3_tick",
+    "uniswap_v4_liquidity_event",
+    "uniswap_v4_pool",
+    "uniswap_v4_pool_event",
+    "uniswap_v4_pool_manager",
+    "uniswap_v4_pool_state",
+    "uniswap_v4_swap",
+    "uniswap_v4_tick"
   ],
   "canonical": {
     "absolute_cap": {
@@ -226,6 +233,10 @@
       "type": "numeric",
       "class": "S"
     },
+    "change_reason": {
+      "type": "text",
+      "class": "A"
+    },
     "checksum": {
       "type": "text",
       "class": "S"
@@ -293,6 +304,10 @@
       "class": "S"
     },
     "critical_ltv": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "crr": {
       "type": "numeric",
       "class": "S"
     },
@@ -444,6 +459,10 @@
     },
     "feed_decimals": {
       "type": "int2",
+      "class": "S"
+    },
+    "feed_key": {
+      "type": "bytea",
       "class": "S"
     },
     "filename": {
@@ -647,9 +666,17 @@
       "type": "text",
       "class": "S"
     },
+    "loan_token_address": {
+      "type": "text",
+      "class": "S"
+    },
     "loan_token_id": {
       "type": "int8",
       "class": "R"
+    },
+    "loan_token_symbol": {
+      "type": "text",
+      "class": "S"
     },
     "loan_type": {
       "type": "text",
@@ -746,6 +773,10 @@
       "class": "S"
     },
     "name": {
+      "type": "text",
+      "class": "S"
+    },
+    "network": {
       "type": "text",
       "class": "S"
     },
@@ -890,6 +921,10 @@
       "type": "int8",
       "class": "R"
     },
+    "protocol_name": {
+      "type": "text",
+      "class": "S"
+    },
     "protocol_type": {
       "type": "text",
       "class": "S"
@@ -938,6 +973,11 @@
     "reserve_factor": {
       "type": "numeric",
       "class": "S"
+    },
+    "rewind_count": {
+      "type": "int8",
+      "class": "S",
+      "not_null": true
     },
     "scaled_balance": {
       "type": "numeric",
@@ -1052,9 +1092,21 @@
       "type": "bytea",
       "class": "S"
     },
+    "token_address": {
+      "type": "text",
+      "class": "S"
+    },
     "token_id": {
       "type": "int8",
       "class": "R"
+    },
+    "token_name": {
+      "type": "text",
+      "class": "S"
+    },
+    "token_symbol": {
+      "type": "text",
+      "class": "S"
     },
     "tokenized_junior_risk_capital_usd": {
       "type": "numeric",
@@ -1173,6 +1225,11 @@
       "type": "numeric",
       "class": "S"
     },
+    "valid_from": {
+      "type": "timestamptz",
+      "class": "A",
+      "semantics": "effective_time"
+    },
     "variable_borrow_index": {
       "type": "numeric",
       "class": "S"
@@ -1216,6 +1273,10 @@
     "withdrawn_assets": {
       "type": "numeric",
       "class": "S"
+    },
+    "wallet_address": {
+      "type": "text",
+      "class": "S"
     }
   },
   "tables": {
@@ -1223,6 +1284,10 @@
       "type": "raw_pipeline",
       "owner": "prime",
       "transform_defer": "VEC-491: bucket 2 (block_timestamp via block_meta dimension, block headers sourced from S3)"
+    },
+    "allocation_position_current": {
+      "type": "derived",
+      "owner": "prime"
     },
     "anchorage_operation": {
       "type": "raw_pipeline",
@@ -1415,15 +1480,29 @@
       "owner": "prime",
       "transform_defer": "native PK (prime_id, synced_at); transform deferred pending the reference-data rollout"
     },
+    "prime_capital_stack_allocation": {
+      "type": "raw_pipeline",
+      "owner": "prime",
+      "transform_defer": "native PK (prime_id, synced_at, network, token_address); transform deferred pending the reference-data rollout"
+    },
     "prime_debt": {
       "type": "raw_pipeline",
       "owner": "prime",
       "transform_defer": "VEC-494: bucket 3 (no natural PK, keyed via transform_config)"
     },
+    "prime_proxy": {
+      "type": "dimension",
+      "owner": "prime"
+    },
     "prime_reference_balance_sheet": {
       "type": "raw_pipeline",
       "owner": "prime",
       "transform_defer": "native PK (prime_id, observed_at); transform deferred pending the reference-data rollout"
+    },
+    "prime_reference_position": {
+      "type": "raw_pipeline",
+      "owner": "prime",
+      "transform_defer": "native PK (prime_id, synced_at, network, token_address, wallet_address); transform deferred pending the reference-data rollout"
     },
     "protocol": {
       "type": "dimension",
@@ -1644,6 +1723,18 @@
     },
     {
       "table": "prime_capital_stack",
+      "column": "synced_at",
+      "canonical": "snapshot_time",
+      "action": "rename"
+    },
+    {
+      "table": "prime_capital_stack_allocation",
+      "column": "synced_at",
+      "canonical": "snapshot_time",
+      "action": "rename"
+    },
+    {
+      "table": "prime_reference_position",
       "column": "synced_at",
       "canonical": "snapshot_time",
       "action": "rename"
@@ -2042,8 +2133,10 @@
         "offchain_token_price",
         "onchain_token_price",
         "prime_capital_stack",
+        "prime_capital_stack_allocation",
         "prime_debt",
         "prime_reference_balance_sheet",
+        "prime_reference_position",
         "psm3_alm_shares",
         "psm3_reserves",
         "token_total_supply"

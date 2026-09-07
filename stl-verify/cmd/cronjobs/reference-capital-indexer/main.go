@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -92,18 +93,28 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 		return nil, fmt.Errorf("creating telemetry: %w", err)
 	}
 
-	service := reference_capital_indexer.NewService(
-		postgres.NewPrimeRepository(deps.Pool),
-		postgres.NewPrimeCapitalStackRepository(deps.Pool, txm, deps.Logger),
-		skyClient,
-		postgres.NewPrimeBalanceSheetRepository(deps.Pool, txm, deps.Logger),
-		sheetClient,
+	service, err := reference_capital_indexer.NewService(
+		reference_capital_indexer.Deps{
+			PrimeRepo:          postgres.NewPrimeRepository(deps.Pool),
+			CapitalRepo:        postgres.NewPrimeCapitalStackRepository(deps.Pool, deps.Logger),
+			RiskProvider:       skyClient,
+			AllocationProvider: skyClient,
+			AllocationRepo:     postgres.NewPrimeCapitalStackAllocationRepository(deps.Pool, deps.Logger),
+			SheetRepo:          postgres.NewPrimeBalanceSheetRepository(deps.Pool, txm, deps.Logger),
+			SheetProvider:      sheetClient,
+			PositionProvider:   sheetClient,
+			PositionRepo:       postgres.NewPrimeReferencePositionRepository(deps.Pool, deps.Logger),
+			TxManager:          txm,
+		},
 		trackedStars,
 		int(buildReg.BuildID()),
 		time.Now,
 		syncTelemetry,
 		deps.Logger,
 	)
+	if err != nil {
+		return nil, fmt.Errorf("creating indexer service: %w", err)
+	}
 
 	return temporal.RunnerFunc(func(ctx context.Context) error {
 		return service.Run(ctx)
@@ -120,7 +131,15 @@ func trackedStarsFromContract() ([]string, error) {
 
 	almProxies := contract.GetAlmProxies()
 	stars := make([]string, 0, len(almProxies))
+	// A case-duplicate would fetch the same star twice; the second response's
+	// rows would then silently conflict away while telemetry still counts them.
+	seen := make(map[string]string, len(almProxies))
 	for star := range almProxies {
+		normalized := strings.ToLower(strings.TrimSpace(star))
+		if other, ok := seen[normalized]; ok {
+			return nil, fmt.Errorf("axis-synome contract names both %q and %q for the same prime", other, star)
+		}
+		seen[normalized] = star
 		stars = append(stars, star)
 	}
 	if len(stars) == 0 {

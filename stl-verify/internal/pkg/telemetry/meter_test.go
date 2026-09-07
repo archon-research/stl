@@ -155,3 +155,47 @@ func TestSecondsDurationBuckets(t *testing.T) {
 		t.Errorf("boundaries %v need a value > 30s so the >30s backup-worker alert can fire", b)
 	}
 }
+
+// resetStartupSeeds isolates a test from the process-wide seed registry.
+func resetStartupSeeds(t *testing.T) {
+	t.Helper()
+
+	startupSeeds.mu.Lock()
+	installed, started, pending := startupSeeds.installed, startupSeeds.started, startupSeeds.pending
+	startupSeeds.installed, startupSeeds.started, startupSeeds.pending = false, false, nil
+	startupSeeds.mu.Unlock()
+
+	t.Cleanup(func() {
+		startupSeeds.mu.Lock()
+		startupSeeds.installed, startupSeeds.started, startupSeeds.pending = installed, started, pending
+		startupSeeds.mu.Unlock()
+	})
+}
+
+func TestOnMeterProviderReady_DefersSeedsUntilTheProviderIsInstalled(t *testing.T) {
+	resetStartupSeeds(t)
+
+	var seeded int
+	OnMeterProviderReady("test", func() { seeded++ })
+	if seeded != 0 {
+		t.Fatalf("seed ran %d times before the provider was installed, want 0", seeded)
+	}
+
+	runStartupSeeds()
+
+	if seeded != 1 {
+		t.Errorf("seed ran %d times after the provider was installed, want 1", seeded)
+	}
+}
+
+func TestOnMeterProviderReady_RunsSeedsRegisteredAfterTheProviderIsInstalled(t *testing.T) {
+	resetStartupSeeds(t)
+	runStartupSeeds()
+
+	var seeded int
+	OnMeterProviderReady("test", func() { seeded++ })
+
+	if seeded != 1 {
+		t.Errorf("seed ran %d times, want 1", seeded)
+	}
+}

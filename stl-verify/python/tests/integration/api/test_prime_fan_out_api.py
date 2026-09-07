@@ -24,6 +24,7 @@ from tests.integration.seed import (
     GROVE_MAINNET_ALM_HEX,
     SPARK_AVALANCHE_ALM_HEX,
     SPARK_MAINNET_ALM_HEX,
+    SPARK_SUB_PROXY_HEX,
     seed_prime_fan_out,
 )
 
@@ -31,6 +32,7 @@ _SPARK_MAINNET_ALM = f"0x{SPARK_MAINNET_ALM_HEX}"
 _SPARK_AVALANCHE_ALM = f"0x{SPARK_AVALANCHE_ALM_HEX}"
 _GROVE_MAINNET_ALM = f"0x{GROVE_MAINNET_ALM_HEX}"
 _SPARK_VAULT = "0x691a6c29e9e96dd897718305427ad5d534db16ba"
+_SPARK_SUB_PROXY = f"0x{SPARK_SUB_PROXY_HEX}"
 
 
 @pytest.fixture(scope="module")
@@ -64,42 +66,14 @@ def _grove_rows(client: TestClient) -> list[dict]:
     return [row for row in client.get("/v1/primes").json() if row["name"] == "grove"]
 
 
-def _stub_star_payload(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stand in for the third-party Star risk-capital fetch with a fixed spark row.
+def test_primes_lists_every_declared_spark_alm_proxy(client: TestClient) -> None:
+    """The listing follows prime_proxy, which is the declared proxy universe.
 
-    ``/v1/capital-metrics`` awaits a real ``httpx`` call to Blockanalitica
-    (``_fetch_star_risk_capital_payload``); AGENTS.md only allows integration
-    tests to mock data sources we do not control, and a third party is exactly
-    that. Stubbing only this half keeps the rest of the request (list_primes,
-    the real seeded database) exercising the genuine path.
+    Six of spark's declared proxies are ALM; the SubProxy treasury wallet is
+    filtered out. Only two of the six have positions seeded here — the rest are
+    listed with an empty series behind them, which is the intended behaviour.
     """
-    from app.api.v1 import allocations
-
-    async def _fake_payload() -> allocations.StarRiskCapitalResponse:
-        return allocations.StarRiskCapitalResponse.model_validate(
-            {
-                "status": 200,
-                "success": True,
-                "data": {
-                    "results": [
-                        {
-                            "star": "spark",
-                            "exposure": "100.00",
-                            "total_rc": "50.00",
-                            "financial_rrc": "20.00",
-                            "exposure_share": "10.00%",
-                            "risk_tolerance_ratio": "2.00",
-                        }
-                    ]
-                },
-            }
-        )
-
-    monkeypatch.setattr(allocations, "_fetch_star_risk_capital_payload", _fake_payload)
-
-
-def test_primes_lists_both_of_sparks_alm_proxies(client: TestClient) -> None:
-    assert len(_spark_rows(client)) == 2
+    assert len(_spark_rows(client)) == 6
 
 
 def test_primes_returns_one_row_per_proxy_and_chain(client: TestClient) -> None:
@@ -115,7 +89,7 @@ def test_primes_returns_one_row_per_proxy_and_chain(client: TestClient) -> None:
 
 
 def test_primes_labels_each_proxy_with_its_chain_id(client: TestClient) -> None:
-    assert {row["chain_id"] for row in _spark_rows(client)} == {1, 43114}
+    assert {row["chain_id"] for row in _spark_rows(client)} == {1, 10, 130, 8453, 42161, 43114}
 
 
 def test_primes_derives_the_chain_name_from_the_chain_id(client: TestClient) -> None:
@@ -132,25 +106,8 @@ def test_primes_shares_one_vault_address_across_a_primes_proxies(client: TestCli
 def test_primes_excludes_the_subproxy_treasury_wallet(client: TestClient) -> None:
     addresses = {row["address"] for row in _spark_rows(client)}
 
-    assert addresses == {_SPARK_MAINNET_ALM, _SPARK_AVALANCHE_ALM}
-
-
-def test_backwards_compat_capital_metrics_still_returns_one_row_per_proxy(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _stub_star_payload(monkeypatch)
-
-    rows = [row for row in client.get("/v1/capital-metrics").json() if row["prime_name"] == "spark"]
-
-    assert len(rows) == 2
-
-
-def test_capital_metrics_rows_carry_a_shared_dedupe_key(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub_star_payload(monkeypatch)
-
-    rows = [row for row in client.get("/v1/capital-metrics").json() if row["prime_name"] == "spark"]
-
-    assert {row["prime_vault_address"] for row in rows} == {_SPARK_VAULT}
+    assert _SPARK_SUB_PROXY not in addresses
+    assert {_SPARK_MAINNET_ALM, _SPARK_AVALANCHE_ALM} <= addresses
 
 
 def test_backwards_compat_risk_capital_exposure_stays_proxy_scoped(client: TestClient) -> None:

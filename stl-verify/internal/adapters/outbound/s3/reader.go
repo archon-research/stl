@@ -13,6 +13,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -22,10 +24,14 @@ import (
 type s3API interface {
 	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
 	ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
+	HeadBucket(ctx context.Context, params *s3.HeadBucketInput, optFns ...func(*s3.Options)) (*s3.HeadBucketOutput, error)
 }
 
-// Compile-time check that Reader implements outbound.S3Reader
-var _ outbound.S3Reader = (*Reader)(nil)
+// Compile-time checks that Reader implements the read ports.
+var (
+	_ outbound.S3Reader      = (*Reader)(nil)
+	_ outbound.S3RangeReader = (*Reader)(nil)
+)
 
 // Reader implements the S3Reader interface using the AWS SDK.
 type Reader struct {
@@ -72,20 +78,6 @@ func EndpointOptionsFromEnv() []func(*s3.Options) {
 		o.BaseEndpoint = aws.String(endpoint)
 		o.UsePathStyle = true
 	}}
-}
-
-// NewReaderWithHTTPClient creates a new S3 Reader with a custom HTTP client.
-// This is useful for controlling connection pooling and timeouts.
-func NewReaderWithHTTPClient(cfg aws.Config, httpClient *http.Client, logger *slog.Logger) *Reader {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	return &Reader{
-		client: s3.NewFromConfig(cfg, func(o *s3.Options) {
-			o.HTTPClient = httpClient
-		}),
-		logger: logger,
-	}
 }
 
 // ListFiles lists all files in the bucket with the given prefix.
@@ -141,13 +133,43 @@ func (r *Reader) ListPrefix(ctx context.Context, bucket, prefix string) ([]strin
 		}
 
 		for _, obj := range page.Contents {
-			if obj.Key != nil {
-				keys = append(keys, *obj.Key)
+			// A folder marker occupies no version, and a caller folding the
+			// listing into archive occupancy refuses a key with no stem.
+			if obj.Key == nil || strings.HasSuffix(*obj.Key, "/") {
+				continue
 			}
+			keys = append(keys, *obj.Key)
 		}
 	}
 
 	return keys, nil
+}
+
+// HeadBucket reports whether the bucket exists and this caller may list it: the
+// single call a long job makes before starting, rather than discovering the
+// answer once per partition.
+func (r *Reader) HeadBucket(ctx context.Context, bucket string) error {
+	_, err := r.client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(bucket)})
+	if err != nil {
+		return fmt.Errorf("failed to head bucket %s: %w", bucket, err)
+	}
+	return nil
+}
+
+// ProbeListAccess issues the cheapest listing S3 offers under prefix, for a
+// caller checking at startup that it may list what it is about to read. The
+// prefix is part of the probe: an s3:ListBucket grant conditioned on one denies
+// a listing of the bucket root.
+func (r *Reader) ProbeListAccess(ctx context.Context, bucket, prefix string) error {
+	_, err := r.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+		Bucket:  aws.String(bucket),
+		Prefix:  aws.String(prefix),
+		MaxKeys: aws.Int32(1),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list bucket %s: %w", bucket, err)
+	}
+	return nil
 }
 
 // StreamFile returns a reader for the file content.
@@ -176,6 +198,63 @@ func (r *Reader) StreamFile(ctx context.Context, bucket, key string) (io.ReadClo
 	}
 
 	return result.Body, nil
+}
+
+// ReadRange returns the requested byte range of an object as stored. Unlike
+// StreamFile it never decompresses: a slice of a gzip stream is not one.
+func (r *Reader) ReadRange(ctx context.Context, bucket, key string, start, end int64) ([]byte, error) {
+	result, err := r.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", start, end)),
+	})
+	if isMissingObject(err) {
+		return nil, fmt.Errorf("%s/%s: %w: %w", bucket, key, outbound.ErrObjectNotFound, err)
+	}
+	if isEmptyObject(err) {
+		return nil, fmt.Errorf("%s/%s: %w: %w", bucket, key, outbound.ErrObjectEmpty, err)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get range of object %s/%s: %w", bucket, key, err)
+	}
+	defer result.Body.Close()
+
+	data, err := io.ReadAll(result.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read range of object %s/%s: %w", bucket, key, err)
+	}
+	return data, nil
+}
+
+// isAccessDenied tells a refusal from any other failure: S3 answers AccessDenied
+// for a missing grant, and a proxy in front of it may refuse with a bare 403.
+func isAccessDenied(err error) bool {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "AccessDenied", "AllAccessDisabled", "Forbidden":
+			return true
+		}
+	}
+
+	var statusErr interface{ HTTPStatusCode() int }
+	return errors.As(err, &statusErr) && statusErr.HTTPStatusCode() == http.StatusForbidden
+}
+
+// isMissingObject tells the one answer that means "nothing at this key" from a
+// read that failed: S3 models it as NoSuchKey, and a HEAD-shaped 404 as NotFound.
+func isMissingObject(err error) bool {
+	var noSuchKey *s3types.NoSuchKey
+	var notFound *s3types.NotFound
+	return errors.As(err, &noSuchKey) || errors.As(err, &notFound)
+}
+
+// isEmptyObject tells the one answer that means "this object holds no bytes":
+// S3 has no range to serve for a zero-byte object and refuses the read with
+// InvalidRange rather than answering with an empty body.
+func isEmptyObject(err error) bool {
+	var apiErr smithy.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidRange"
 }
 
 // gzipReadCloser wraps a gzip reader and the underlying body for proper cleanup.

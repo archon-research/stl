@@ -73,11 +73,11 @@ patches:
       metadata:
         name: python-api
       $patch: delete
-  # Local kind runs the model on stale parquet snapshots, so the daily tick has
-  # no statistical value -- the N_MC=10000 default would grind for hours (and
-  # peak ~8 GiB) to produce numbers nobody reads. 100 scenarios keep the tick
-  # minutes-long and still exercise the whole pipeline. Staging pins the same
-  # cap in its ConfigMap until the live readers land (VEC-272 PR 3).
+  # Local kind indexes no positions, oracle prices or CEX books, so the
+  # CORE_MODEL_*_SOURCE vars (the documented global override) force the model
+  # back to its parquet snapshots. On stale snapshots the daily tick has no
+  # statistical value, so N_MC=100 instead of the 10000 default (hours, ~8 GiB)
+  # keeps the tick minutes-long while still exercising the whole pipeline.
   - patch: |
       apiVersion: apps/v1
       kind: Deployment
@@ -89,5 +89,11 @@ patches:
             containers:
               - name: core-model-runner
                 env:
+                  - name: CORE_MODEL_POSITION_SOURCE
+                    value: parquet
+                  - name: CORE_MODEL_PRICE_SOURCE
+                    value: parquet
+                  - name: CORE_MODEL_ORDERBOOK_SOURCE
+                    value: parquet
                   - name: CORE_MODEL_N_MC
                     value: "100"

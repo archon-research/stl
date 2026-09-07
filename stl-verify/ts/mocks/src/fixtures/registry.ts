@@ -52,7 +52,7 @@ export const PROTOCOLS: readonly Protocol[] = PROTOCOL_ROWS.map(
 );
 
 export const SPARK_VAULT = '0x691a6c29e9e96dd897718305427ad5d534db16ba';
-export const GROVE_VAULT = '0x26512a41c8406800f21094a7a7a0f980f6e25d43';
+const GROVE_VAULT = '0x26512a41c8406800f21094a7a7a0f980f6e25d43';
 
 /** The proxy the dashboard lands on: the one carrying every non-empty fixture. */
 export const SPARK_MAINNET_PROXY = '0x1601843c5e9bc251a3272907010afa41fa18347e';
@@ -119,20 +119,20 @@ export const PRIMES: readonly SeededPrime[] = PRIME_ROWS.map(
 );
 
 export const USDS = '0xdc035d45d973e3ec169d2276ddab16f1e407384f';
-export const USDT = '0xdac17f958d2ee523a2206206994597c13d831ec7';
-export const DAI = '0x6b175474e89094c44da98b954eedeac495271d0f';
-export const USDC = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48';
-export const PYUSD = '0x6c3ea9036406852006290770bedfcaba0e23a0e8';
-export const WETH = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2';
-export const SUSDS = '0xa3931d71877c0e7a3148cb7eb4463524fec27fbd';
+const USDT = '0xdac17f958d2ee523a2206206994597c13d831ec7';
+const DAI = '0x6b175474e89094c44da98b954eedeac495271d0f';
+const USDC = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48';
+const PYUSD = '0x6c3ea9036406852006290770bedfcaba0e23a0e8';
+const WETH = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2';
+const SUSDS = '0xa3931d71877c0e7a3148cb7eb4463524fec27fbd';
 export const SPUSDS = '0xc02ab1a5eaa8d1b114ef786d9bde108cd4364359';
-export const USDC_AVALANCHE = '0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e';
-export const AAVAUSDC = '0x625e7708f30ca75bfd92586e17077590c60eb4cd';
+const USDC_AVALANCHE = '0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e';
+const AAVAUSDC = '0x625e7708f30ca75bfd92586e17077590c60eb4cd';
 
 /**
  * 500 staging rows trimmed to 24: every id the allocation, activity, risk and
  * price fixtures reference, plus the zero-address row below.
- * `check-mock-api.mjs` asserts that "every id resolves" half, across all
+ * `check-mock-api.ts` asserts that "every id resolves" half, across all
  * proxies.
  *
  * `updated_at` is the only timestamp in the fixture set that is deliberately

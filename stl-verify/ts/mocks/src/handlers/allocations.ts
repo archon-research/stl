@@ -7,8 +7,9 @@
  * case-insensitive equality, matching the `LIKE`/`LOWER()` the repository uses.
  *
  * The `aggregate=true` envelope is a different row shape, not a variant of the
- * same one, and `ui/src/lib/api.ts` throws when it gets the wrong `mode` — so
- * the mock has to get the mode right or the app fails loudly, which is the point.
+ * same one, and `ui/src/shared/lib/queries.ts` throws from its `select` when it gets
+ * the wrong `mode` — so the mock has to get the mode right or the app fails
+ * loudly, which is the point.
  */
 import { mockDelay } from '@archon-research/http-client-msw';
 import type { MockHandler } from '@archon-research/http-client-msw';

@@ -4,13 +4,14 @@ metadata:
   name: core-model-runner
 spec:
   replicas: 1
-  # Explicit, matching the API-server default — ArgoCD must own spec.strategy or
-  # a later change to it cannot prune rollingUpdate. k8s/AGENTS.md, "Rollout strategy".
+  # Recreate, not RollingUpdate (k8s/AGENTS.md: a single Temporal consumer wants
+  # Recreate): the 25% surge rounds up to a second worker on one task queue, and
+  # its short-lived extra pod is what hands Karpenter an underutilized node to
+  # consolidate ~10 min after every deploy — which killed a tick mid-run on
+  # 2026-08-27 (VEC-681) and left a surge pod Pending on a full staging cluster
+  # on 2026-08-31. Overlap-SKIP on the schedule already guarantees one tick.
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 25%
-      maxUnavailable: 25%
+    type: Recreate
   selector:
     matchLabels:
       app: core-model-runner
@@ -18,6 +19,12 @@ spec:
     metadata:
       labels:
         app: core-model-runner
+      annotations:
+        # A tick is unretryable Monte Carlo (maximum_attempts=1), so a voluntary
+        # eviction loses the day's run rather than costing a restart (VEC-681).
+        # Stopgap: it pins the node through the ~23.5h the pod idles, and does
+        # nothing on staging's spot nodes. Remove once the tick resumes per market.
+        karpenter.sh/do-not-disrupt: "true"
     spec:
       serviceAccountName: core-model-runner
       containers:
@@ -26,10 +33,9 @@ spec:
           # the runner entry point all ship inside stl-verify/python.
           image: core-model-runner
           command: ["python", "-m", "cli.cronjobs.core_model_runner.main"]
-          # No otel-config mount, unlike the sibling cronjobs: the Python
-          # cronjob harness emits no telemetry yet. This is the line that
-          # changes when run metrics (cronjob_runs_total) land.
           envFrom:
+            - configMapRef:
+                name: otel-config
             - configMapRef:
                 name: core-model-runner
             - secretRef:
@@ -46,9 +52,9 @@ spec:
           # markets of one "all" tick -- measured at N_MC=100: ~0.97 GiB for
           # the full pass (~0.4 GiB heaviest single market); the 10000 default
           # peaks at ~8.0 GiB on one market alone. Sized for the capped runs
-          # (dev and staging both pin N_MC=100 in their overlays); raising the
-          # cap must raise this limit with it, from a fresh full-pass
-          # measurement.
+          # (every overlay pins N_MC=100; the design-point rollout is parked in
+          # #804); raising the cap must raise this limit with it, from a fresh
+          # full-pass measurement.
           resources:
             requests:
               cpu: "1"

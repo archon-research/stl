@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
+	ethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
 
@@ -74,6 +78,13 @@ func knownV2VaultCount(ctx context.Context, logger *slog.Logger, multicaller out
 	return len(svc.V2VaultAddresses()), nil
 }
 
+// chainReader is the node surface the replay needs: the by-hash read that dates every
+// log, plus the by-number read that separates an orphan from a replica behind head.
+type chainReader interface {
+	blocktime.HeaderFetcher
+	HeaderByNumber(ctx context.Context, number *big.Int) (*ethtypes.Header, error)
+}
+
 // replayPartition collects, orders, and replays every structured V2 log in one
 // S3 partition, in strict (blockNumber, logIndex) order.
 //
@@ -91,7 +102,7 @@ func replayPartition(
 	logger *slog.Logger,
 	s3Reader outbound.S3Reader,
 	svc *morpho_indexer.Service,
-	tsCache *blocktime.Cache,
+	chain chainReader,
 	cfg config,
 	rng blockRange,
 	part string,
@@ -107,10 +118,15 @@ func replayPartition(
 	}
 	sortV2LogEntries(entries)
 
+	tsCache := blocktime.New(chain)
 	for _, e := range entries {
 		blockTimestamp, err := tsCache.TimestampAt(ctx, e.blockHash)
 		if err != nil {
-			return 0, err
+			key := s3key.BuildWithPartition(part, e.blockNumber, e.blockVersion, s3key.Receipts)
+			if errors.Is(err, ethereum.NotFound) {
+				return 0, classifyUnknownBlockHash(ctx, chain, e, key, err)
+			}
+			return 0, fmt.Errorf("block %d (%s): %w", e.blockNumber, key, err)
 		}
 		if err := svc.ReplayMetaMorphoLog(ctx, e.log, e.blockNumber, e.blockHash, e.blockVersion, blockTimestamp); err != nil {
 			return 0, fmt.Errorf("replaying log tx=%s index=%d block=%d: %w", e.log.TransactionHash, e.logIndex, e.blockNumber, err)
@@ -119,6 +135,21 @@ func replayPartition(
 
 	logger.Debug("replayed partition", "partition", part, "events", len(entries))
 	return len(entries), nil
+}
+
+// Only a canonical header at the same height with a different hash makes an
+// unresolvable archived hash structural; anything else is a node that is behind.
+func classifyUnknownBlockHash(ctx context.Context, chain chainReader, e v2LogEntry, key string, notFound error) error {
+	canonical, err := chain.HeaderByNumber(ctx, big.NewInt(e.blockNumber))
+	if err != nil {
+		return fmt.Errorf("block %d (%s): %w: reading the canonical header at that height: %w", e.blockNumber, key, notFound, err)
+	}
+	canonicalHash := canonical.Hash()
+	if canonicalHash == e.blockHash {
+		return fmt.Errorf("block %d (%s): %w, yet it is the canonical hash at that height", e.blockNumber, key, notFound)
+	}
+	return fmt.Errorf("block %d (%s): archived hash %s is an orphaned fork, canonical hash at that height is %s: %w: %w",
+		e.blockNumber, key, e.blockHash.Hex(), canonicalHash.Hex(), notFound, errStructuralData)
 }
 
 // receiptFile is one block's highest-version receipt object in a partition.
@@ -130,8 +161,8 @@ type receiptFile struct {
 
 // collectPartitionV2Logs downloads the highest-version receipt file per block in
 // the partition and returns the structured V2 log entries in them in ascending
-// block order, each stamped with the block's S3 version. On bulk-downloaded
-// history that version is 1 with no reorg behind it — see
+// block order, each stamped with the block's S3 version. On the history the
+// one-off bulk download wrote that version is 1 with no reorg behind it — see
 // listHighestVersionReceipts for the rule and why that is benign.
 func collectPartitionV2Logs(
 	ctx context.Context,

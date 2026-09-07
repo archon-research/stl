@@ -1,0 +1,31 @@
+{
+  "$schema": "https://unpkg.com/knip@6.32.2/schema.json",
+  "ignoreBinaries": ["make"],
+  "ignoreDependencies": [
+    "oxlint-tsgolint",
+    "@pandacss/preset-base",
+    "@pandacss/preset-panda"
+  ],
+  "tags": ["-knipignore"],
+  "workspaces": {
+    ".": {
+      "entry": [],
+      "project": []
+    },
+    "ui": {
+      "entry": [
+        "index.html",
+        "scripts/*.ts",
+        "env.ts",
+        "oxlint.config.ts",
+        ".oxfmtrc.ts",
+        "src/features/allocations/MetricsFootnote.tsx"
+      ],
+      "project": ["**/*.{ts,tsx,js}", "!src/generated/**"]
+    },
+    "mocks": {
+      "entry": ["scripts/*.ts", "oxlint.config.ts", ".oxfmtrc.ts"],
+      "project": ["**/*.ts"]
+    }
+  }
+}

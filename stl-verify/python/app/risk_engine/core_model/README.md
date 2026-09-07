@@ -10,7 +10,7 @@ Note that CRR is an expected loss, not a tail loss by construction. However, the
 
 This directory contains the CORE model as integrated into the STL service. The original standalone version lives in [`core_model_copy/`](https://github.com/TWave-code/core_model_copy). The integration wires CORE as a first-class `RiskModel` backed by a pre-compute cronjob and a thin API service that reads the results.
 
-The model reads static parquet snapshots in this PR; the parquet-to-live-table swaps land in the next PR of the stack (see the PR description).
+Each market picks its data sources per input via the `*_SOURCE` flags in `inputs/market_configs.json` — `postgres` reads the live tables, `parquet` the static snapshots (that file is the list of which markets run live; `CORE_MODEL_*_SOURCE` env vars override globally, e.g. the dev overlay pins local kind back to parquet). [`DATA_GAPS.md`](DATA_GAPS.md) tracks what keeps the rest on parquet, and what brings each one back.
 
 ---
 
@@ -146,6 +146,8 @@ Models tested (in order of preference):
 
 If no model passes both backtests, a **soft fallback** selects the candidate whose rolling exceedance rate is closest to `backtest_alpha`, rather than discarding GARCH entirely.
 
+Both backtest gates are currently defective — see Known Issues #7 and #8. Boundary exceedance rates pass Kupiec unconditionally, and long samples collapse the Christoffersen statistic to `p=1`. Until those are fixed, treat selection as BIC plus residual diagnostics, with the VaR backtests contributing little.
+
 ### Volatility Floor
 
 To prevent capital requirements from collapsing during low-volatility regimes, the GARCH conditional volatility forecast is floored at the `VOL_FLOOR_PCT` percentile of the 21-day rolling realised volatility computed over the **full historical series** (not just the training window).
@@ -241,16 +243,11 @@ The full params dict is stored as JSONB in `core_model_results.params` for audit
 
 ### Step 3 — Query via the risk API
 
-```
-GET /v1/risk/1/{receipt_token_address}/core-model
-```
-
-Returns the latest pre-computed CRR result for the receipt token (no `prime_id` required — this is raw model output, not exposure-weighted RRC).
-
-The existing RRC endpoint also includes core model results when the asset is mapped:
+There is no standalone core-model endpoint. `/v1/risk/rrc` includes the core model's result
+in `results[]` (scaled to the given prime's exposure) whenever the asset is mapped:
 
 ```
-GET /v1/risk/rrc?chain_id=1&token_address={address}&prime_id={address}
+GET /v1/risk/rrc?chain_id=1&token_address={receipt_token_address}&prime_id={address}
 ```
 
 ### asset_id → market_key mapping
@@ -324,15 +321,31 @@ cli/cronjobs/core_model_runner/
 
 ## Known Issues
 
-These bugs exist in the original model code and have not been fixed during integration. They are tracked as `# TODO` comments in the source files.
+Bugs and structural defects in the model code that have not been fixed during integration. Some carry a
+matching `# TODO` comment in the source. Parenthesised IDs are the corresponding finding in the
+September 2026 Python risk-model audit.
 
 | ID | File | Line | Severity | Description |
 |---|---|---|---|---|
 | #2 | `liquidator.py` | ~510 | Cosmetic | `final_collat_totals` is never populated — always zero. However `final_total_collateral` is excluded from the `summary_df` subset before any CRR computation and is never read downstream. No metric stored in `core_model_results` is affected. |
 | #3 | `backtester.py` | ~111 | High | `hit_backtest` defaults `use_log_returns=False` but production uses `USE_LOG_RETURNS=True`. Kupiec/Christoffersen model selection runs on the wrong return type — the "winning" GARCH model may not be the best for simulation. |
 | #4 | `aggregator.py` | ~203 | High | t-Copula `nu` is hardcoded to 3. MLE estimation exists but is disabled. `nu=3` produces very fat tails and is a material assumption that ignores the data. |
-| #5 | `runner.py` | | Medium | Jump parameters are calibrated from one token and applied uniformly to all tokens. Per-token override path exists in `forecaster.py` but is never populated. |
-| #6 | `forecaster.py` | ~192 | High | Student-t distribution check uses `.startswith("student")` but the arch library names the distribution `"Standardized Student's t"`, which starts with `"Standardized"`. The check silently falls through to the Normal branch, causing t-distributed innovations to be treated as Gaussian and **underestimating tail risk**. Fix: replace `startswith("student")` with `"student" in name`, consistent with `_get_garch_distribution` at line 126. |
+| #5 (C-08) | `runner.py` | ~151 | Medium | Jump parameters are calibrated from one token and applied uniformly to all tokens. `JUMP_PARAMS` is reassigned on each collateral iteration and the per-token result entry omits `jump_params`, so `simulate_prices` receives only the last token's calibrated jumps. The per-token override path in `forecaster.py` reads `result_per_token[token].get("jump_params", …)` and is therefore never populated. Triggers whenever `JUMPS=True` with two or more collateral tokens. |
+| #6 (C-05) | `forecaster.py` | ~192 | Critical | Student-t distribution check uses `.startswith("student")` but the arch library names the distribution `"Standardized Student's t"`, which starts with `"Standardized"`. The check silently falls through to the Normal branch (`norm.ppf` at ~202), so calibrated heavy tails are replaced by Gaussian innovations and tail risk is **underestimated** in the CRR that `core_model_results` persists. `Backtester.identify_dist` (~86-90) recognises the same names correctly, which is why calibration and simulation disagree. Fix: draw from the *fitted* distribution's `ppf` with its fitted shape parameters — broadening the string match to `"student" in name` is **not sufficient**, because it still ignores the standardized variance and the skew parameter. |
+| #7 (C-06) | `backtester.py` | ~38 | High | Kupiec returns `LR=0, p=1` whenever the observed exceedance rate is exactly 0 or 1, so an all-hit or no-hit window passes unconditional coverage unconditionally. For `n=100` all-hit at `alpha=0.05` the likelihood ratio should be `-2 × 100 × log(0.05)`, not zero. `Calibrator.total_fitter` accepts candidates on `p_value_k >= 0.05` and conditional coverage reuses the same LR, so a severely miscalibrated model can win selection. |
+| #8 (C-07) | `backtester.py` | ~75 | High | Christoffersen independence multiplies hundreds of sub-unit probabilities into `L0` and `L1` (~72-73), then clips each to the same `1e-10` epsilon. Once both underflow past that floor the ratio is 1, so `LR_ind=0, p=1` regardless of the true likelihood ratio and clustered violations pass. Calibration evaluates once per rolling observation, so a long series hits this routinely. Fix: accumulate the log-likelihoods in log space, handling zero-count terms explicitly. |
+| #9 (C-09) | `forecaster.py` | ~270 | High | `brownian_bridge_hourly` detects non-finite `r_cont_hourly`, prints, and substitutes zeros. Degenerate or non-finite daily returns/volatility therefore produce flat price paths instead of aborting, and the pipeline persists the result as an apparently valid CRR. Fix: raise a contextual model-input error before the result reaches the writer. |
+| #10 (T-01) | `config.py` | ~102 | Medium | CORE parameters stay an unvalidated `dict[str, Any]` from the loader through `RunnerConfig` and `CoreModelConfig`, so a JSON override of the wrong type reaches simulation unchecked — `"WORST_CASE": "false"` is a non-empty string and activates the truthy branch at `runner.py:107`. Env-var coercion only guards env values, not `market_configs.json` or hand-passed params. Fix: validate parameter types, leaving the deliberately advisory min/max/choices alone. |
+
+### Structural debt
+
+Not wrong numbers — these violate conventions the rest of the tree follows and make the numerics hard to
+review. IDs are the audit's.
+
+| ID | File | Description |
+|---|---|---|
+| D-05 | `runner.py` (~97) | `_run_pipeline` mixes I/O with numerics: three `data_reader` calls, `_load_protection_usd` opening `protocol_defense.json`, then roughly 160 lines of inlined collateral fitting, jump fitting, simulation, time-grid mutation and liquidation. `python/AGENTS.md` requires `risk_engine/` to be pure math with no I/O — inputs belong in the service or adapter, with the numerical stages composed explicitly. `suraf/scoring.py` loads CSVs inside the scoring class the same way. |
+| M-01 | `liquidator.py` (~300) | `simulate_liquidations` is one ~448-line function spanning input shaping, margin-call configuration and application, liquidation/default state mutation, recovery accounting and diagnostic printing. This is the comment-delimited, deeply nested orchestration the repo's function-composition rule prohibits. Extract named numerical stages with explicit scenario state so accounting changes can be reviewed on their own. Distinct from D-05, which is about the pipeline entry point. |
 
 ---
 
@@ -352,7 +365,7 @@ The current `asset_to_market_key.json` mapping assumes a 1:1 relationship betwee
 2. **Virtual receipt tokens**: introduce a synthetic receipt token in the DB (not backed by a real on-chain address) to represent the aggregate Morpho cbBTC/USDC or WETH/USDC market. Requires a schema decision.
 3. **Separate query path**: add a market-key-based endpoint that bypasses receipt token resolution entirely — useful if the Morpho core model result is consumed without a specific prime's exposure context.
 
-Until this is resolved, `morpho_cbbtc-usdc` and `morpho_weth-usdc` remain configured in `market_configs.json` and can be run by the cronjob, but cannot be served through the `asset_to_market_key.json` mapping or the `/core-model` API endpoint.
+Until this is resolved, `morpho_cbbtc-usdc` and `morpho_weth-usdc` remain configured in `market_configs.json` and can be run by the cronjob, but cannot be served through the `asset_to_market_key.json` mapping or `/v1/risk/rrc`.
 
 ### Syrup, Anchorage, Galaxy — no receipt tokens in the DB
 

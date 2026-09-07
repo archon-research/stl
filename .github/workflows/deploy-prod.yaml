@@ -111,7 +111,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-          # Full history: the tag-bump contract diffs against the parent commit.
+          # Full history: the revision contract diffs against the parent commit.
           fetch-depth: 0
           persist-credentials: false
 
@@ -133,10 +133,10 @@ jobs:
 
           if [ "$REVIEWED" -gt 0 ]; then
             echo "reviewed=true" >> "$GITHUB_OUTPUT"
-            echo "${DEPLOY_SHA} arrived via a merged PR: CODEOWNERS-reviewed, tag-only contract not applicable."
+            echo "${DEPLOY_SHA} arrived via a merged PR: CODEOWNERS-reviewed, generated-block contract not applicable."
           else
             echo "reviewed=false" >> "$GITHUB_OUTPUT"
-            echo "${DEPLOY_SHA} has no merged PR: unreviewed App write, enforcing the image-tags-only contract."
+            echo "${DEPLOY_SHA} has no merged PR: unreviewed App write, enforcing the generated-block contract."
 
             PARENT=$(git rev-parse "${DEPLOY_SHA}^")
 
@@ -147,14 +147,18 @@ jobs:
               exit 1
             fi
 
-            OFFENDING=$(git diff -U0 "${PARENT}" "${DEPLOY_SHA}" -- "$KUSTOMIZATION" \
-              | grep -E '^[+-]' \
-              | grep -Ev '^(\+\+\+|---)' \
-              | grep -Ev '^[+-][[:space:]]*newTag:' \
-              || true)
-            if [ -n "$OFFENDING" ]; then
-              echo "::error::Unreviewed revision ${DEPLOY_SHA} changes non-newTag lines:"
-              echo "$OFFENDING"
+            # ORB-362: an App write may only replace the generated images block,
+            # and the result must be exactly what the roster at this revision
+            # renders (the roster itself is covered by the files check above).
+            git show "${PARENT}:${KUSTOMIZATION}" > "${RUNNER_TEMP}/kustomization.parent.yaml"
+            if ! diff -u \
+                <(scripts/deploy/render-overlay-images.sh --strip "${RUNNER_TEMP}/kustomization.parent.yaml") \
+                <(scripts/deploy/render-overlay-images.sh --strip "$KUSTOMIZATION"); then
+              echo "::error::Unreviewed revision ${DEPLOY_SHA} changes ${KUSTOMIZATION} outside the generated images block."
+              exit 1
+            fi
+            if ! scripts/deploy/render-overlay-images.sh --env prod --check "$KUSTOMIZATION"; then
+              echo "::error::Unreviewed revision ${DEPLOY_SHA}: the prod images block is not what k8s/image-roster.txt renders."
               exit 1
             fi
           fi
@@ -467,7 +471,7 @@ jobs:
             --jq '[.[] | select(.merged_at != null and .base.ref == "main")] | length')
 
           if [ "$REVIEWED" -gt 0 ]; then
-            echo "${DEPLOY_SHA} cleared CODEOWNERS review via a merged PR; skipping the tag-only contract."
+            echo "${DEPLOY_SHA} cleared CODEOWNERS review via a merged PR; skipping the generated-block contract."
           else
             # Unreviewed App write: it may only ever be an image-tag bump.
             PARENT=$(git rev-parse "${DEPLOY_SHA}^")
@@ -479,12 +483,18 @@ jobs:
               exit 1
             fi
 
-            OFFENDING=$(git diff -U0 "${PARENT}" "${DEPLOY_SHA}" -- "$KUSTOMIZATION" \
-              | grep -E '^[+-]' | grep -Ev '^(\+\+\+|---)' \
-              | grep -Ev '^[+-][[:space:]]*newTag:' || true)
-            if [ -n "$OFFENDING" ]; then
-              echo "::error::Unreviewed revision ${DEPLOY_SHA} changes non-newTag lines:"
-              echo "$OFFENDING"
+            # ORB-362: an App write may only replace the generated images block,
+            # and the result must be exactly what the roster at this revision
+            # renders (the roster itself is covered by the files check above).
+            git show "${PARENT}:${KUSTOMIZATION}" > "${RUNNER_TEMP}/kustomization.parent.yaml"
+            if ! diff -u \
+                <(scripts/deploy/render-overlay-images.sh --strip "${RUNNER_TEMP}/kustomization.parent.yaml") \
+                <(scripts/deploy/render-overlay-images.sh --strip "$KUSTOMIZATION"); then
+              echo "::error::Unreviewed revision ${DEPLOY_SHA} changes ${KUSTOMIZATION} outside the generated images block."
+              exit 1
+            fi
+            if ! scripts/deploy/render-overlay-images.sh --env prod --check "$KUSTOMIZATION"; then
+              echo "::error::Unreviewed revision ${DEPLOY_SHA}: the prod images block is not what k8s/image-roster.txt renders."
               exit 1
             fi
           fi

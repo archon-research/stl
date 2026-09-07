@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.adapters.postgres.reference_as_of import utc_now
 from app.adapters.postgres.token_catalog_repository import (
     TokenCatalogRepository,
     _escape_like_pattern,
@@ -72,7 +73,7 @@ async def test_list_tokens_tolerates_blank_symbol_rows() -> None:
         metadata=None,
     )
     engine, _ = _engine_with_fetchall([blank])
-    repo = TokenCatalogRepository(engine)
+    repo = TokenCatalogRepository(engine, utc_now)
 
     result = await repo.list_tokens(limit=10)
 
@@ -92,7 +93,7 @@ async def test_list_tokens_escapes_symbol_and_clamps_limit() -> None:
         metadata={"kind": "stable"},
     )
     engine, conn = _engine_with_fetchall([row])
-    repo = TokenCatalogRepository(engine)
+    repo = TokenCatalogRepository(engine, utc_now)
 
     result = await repo.list_tokens(symbol="USD%", limit=1000)
 
@@ -116,7 +117,7 @@ async def test_get_latest_price_maps_non_negative_staleness() -> None:
         staleness_seconds=-5,
     )
     engine, _ = _engine_with_fetchone(row)
-    repo = TokenCatalogRepository(engine)
+    repo = TokenCatalogRepository(engine, utc_now)
 
     quote = await repo.get_latest_price(1)
 
@@ -138,7 +139,7 @@ async def test_get_latest_price_raises_on_invalid_decimal() -> None:
         staleness_seconds=12,
     )
     engine, _ = _engine_with_fetchone(row)
-    repo = TokenCatalogRepository(engine)
+    repo = TokenCatalogRepository(engine, utc_now)
 
     with pytest.raises(ValueError, match="fetching price for token"):
         await repo.get_latest_price(1)

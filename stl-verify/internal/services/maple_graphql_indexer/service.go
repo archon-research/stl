@@ -415,6 +415,9 @@ func (s *Service) syncLoans(ctx context.Context, syncedAt time.Time, poolIDs map
 			s.telemetry.RecordNullDowngrade(ctx, "loan_acm_ratio")
 		}
 		if l.Collateral != nil {
+			if l.Collateral.Asset == "" {
+				s.telemetry.RecordNullDowngrade(ctx, "collateral_asset_symbol")
+			}
 			if l.Collateral.AssetAmount == nil {
 				s.telemetry.RecordNullDowngrade(ctx, "collateral_asset_amount")
 			}

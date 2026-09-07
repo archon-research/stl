@@ -49,7 +49,7 @@ func init() {
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 
-	err := run(ctx, os.Args[1:])
+	err := run(ctx, os.Args[1:], lifecycle.ForceExitAfter(lifecycle.ShutdownTailBudget))
 	cancel()
 	if err != nil {
 		slog.Error("fatal error", "error", err)
@@ -75,7 +75,7 @@ func parseConfig(args []string) (cliConfig, error) {
 	queueURL := fs.String("queue", "", "SQS Queue URL")
 	redisAddr := fs.String("redis", "", "Redis address")
 	dbURL := fs.String("db", "", "PostgreSQL connection URL")
-	maxMessages := fs.Int("max", 10, "Max messages per poll")
+	maxMessages := fs.Int("max", 1, "Max messages per receive; more raises the visibility timeout the queue must carry")
 	waitTime := fs.Int("wait", 20, "Wait time in seconds (long polling)")
 	visibilityTimeout := fs.Int("visibility-timeout", 300, "SQS visibility timeout in seconds")
 	if err := fs.Parse(args); err != nil {
@@ -158,7 +158,7 @@ func parseConfig(args []string) (cliConfig, error) {
 	return cfg, nil
 }
 
-func run(ctx context.Context, args []string) error {
+func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	cfg, err := parseConfig(args)
 	if err != nil {
 		return err
@@ -168,6 +168,17 @@ func run(ctx context.Context, args []string) error {
 		Level: env.ParseLogLevel(slog.LevelInfo),
 	}))
 	slog.SetDefault(logger)
+
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    "sparklend-indexer",
+		ServiceVersion: buildinfo.GitHash(),
+		BuildTime:      BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("initializing telemetry: %w", err)
+	}
+	defer shutdownOTEL(context.Background())
 
 	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{
 		StaticCredentialsFromEnv: true,
@@ -275,19 +286,6 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating debt token repository: %w", err)
 	}
 
-	// Initialize OpenTelemetry before constructing any telemetry instruments, so
-	// they bind to the configured meter provider rather than the global no-op one.
-	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    "sparklend-indexer",
-		ServiceVersion: buildReg.GitHash(),
-		BuildTime:      BuildTime,
-		Logger:         logger,
-	})
-	if err != nil {
-		return fmt.Errorf("initializing telemetry: %w", err)
-	}
-	defer shutdownOTEL(context.Background())
-
 	// Multicall client with batch-size telemetry, optionally wrapped for raw SC
 	// call archiving (VEC-81). Archiving is off unless ARCHIVE_SC_CALLS=true.
 	chainName, err := entity.ChainName(cfg.chainID)
@@ -302,7 +300,7 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("creating multicall client: %w", err)
 	}
-	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "sparklend")
+	archiveWrap, _, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "sparklend")
 	if err != nil {
 		return err
 	}
@@ -335,5 +333,5 @@ func run(ctx context.Context, args []string) error {
 
 	logger.Info("sparklend position tracker started, waiting for messages...")
 
-	return lifecycle.Run(ctx, logger, service)
+	return lifecycle.RunWithTimeoutGuard(ctx, logger, onShutdownTimeout, service)
 }

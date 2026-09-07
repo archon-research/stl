@@ -99,7 +99,10 @@ func TestRecordAdapterMembershipObservation_LabelsTypeAndProvenance(t *testing.T
 		{"unclassifiable adapter inferred from an Allocate", adapterTypeFor(entity.MorphoAdapterTypeUnknown), entity.MembershipFromAllocation, "unknown"},
 		{"a removal carries no classification at all", nil, entity.MembershipFromRemoveAdapter, "unprobed"},
 		{"adapter seeded by the bootstrap", adapterTypeFor(entity.MorphoAdapterTypeMarketV1), entity.MembershipFromBootstrapSeed, "market_v1"},
-		{"adapter type added to the enum but not the label map", adapterTypeFor(entity.MorphoAdapterType(3)), entity.MembershipFromAddAdapter, "type_3"},
+		{"external ERC-4626 vault adapter", adapterTypeFor(entity.MorphoAdapterTypeERC4626Merkl), entity.MembershipFromAddAdapter, "erc4626_merkl"},
+		{"box adapter", adapterTypeFor(entity.MorphoAdapterTypeBox), entity.MembershipFromAddAdapter, "box"},
+		{"compound v3 adapter", adapterTypeFor(entity.MorphoAdapterTypeCompoundV3), entity.MembershipFromAddAdapter, "compound_v3"},
+		{"adapter type added to the enum but not the label map", adapterTypeFor(entity.MorphoAdapterType(42)), entity.MembershipFromAddAdapter, "type_42"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

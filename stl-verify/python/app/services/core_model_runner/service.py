@@ -56,10 +56,13 @@ async def run_markets(
         # N_MC is logged so a mistyped override (which falls back to the
         # per-market config silently) is visible in the run output.
         logger.info(
-            "running market_key=%s protocol=%s n_mc=%s",
+            "running market_key=%s protocol=%s n_mc=%s orderbook_source=%s price_source=%s position_source=%s",
             cfg.market_key,
             cfg.params["PROTOCOL"],
             cfg.params["N_MC"],
+            cfg.orderbook_source,
+            cfg.price_source,
+            cfg.position_source,
         )
         try:
             await _run_market(cfg, writer, make_data_reader(cfg))

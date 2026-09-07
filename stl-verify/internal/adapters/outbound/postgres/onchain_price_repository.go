@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
@@ -72,14 +73,17 @@ func (r *OnchainPriceRepository) GetOracle(ctx context.Context, name string) (*e
 	return &o, nil
 }
 
-// GetEnabledAssets retrieves all enabled assets for a given oracle.
-func (r *OnchainPriceRepository) GetEnabledAssets(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error) {
-	rows, err := r.pool.Query(ctx, `
-		SELECT id, oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, created_at
-		FROM oracle_asset
-		WHERE oracle_id = $1 AND enabled = true
-		ORDER BY id
-	`, oracleID)
+// Ordered by the natural key, not by id: a re-versioned row gets a fresh id, so id order would
+// reshuffle the list on every mapping change.
+var enabledAssetsSQL = fmt.Sprintf(`
+	SELECT id, oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, created_at
+	FROM %s oa
+	WHERE oracle_id = $1 AND enabled = true
+	ORDER BY oracle_id, token_id, feed_key
+`, OracleAssetAsOf("$2::timestamptz"))
+
+func (r *OnchainPriceRepository) GetEnabledAssets(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) ([]*entity.OracleAsset, error) {
+	rows, err := r.pool.Query(ctx, enabledAssetsSQL, oracleID, referenceEffectiveAt)
 	if err != nil {
 		return nil, fmt.Errorf("querying enabled oracle assets: %w", err)
 	}
@@ -155,15 +159,18 @@ func (r *OnchainPriceRepository) GetLatestBlock(ctx context.Context, oracleID in
 	return *blockNumber, nil
 }
 
-// GetTokenInfos returns a map of token_id → TokenInfo (address + decimals) for enabled oracle assets.
-func (r *OnchainPriceRepository) GetTokenInfos(ctx context.Context, oracleID int64) (map[int64]outbound.TokenInfo, error) {
-	rows, err := r.pool.Query(ctx, `
-		SELECT oa.token_id, t.address, t.decimals
-		FROM oracle_asset oa
-		JOIN token t ON t.id = oa.token_id
-		WHERE oa.oracle_id = $1 AND oa.enabled = true
-		ORDER BY oa.id
-	`, oracleID)
+// Same effective_at as GetEnabledAssets, or a unit would carry an asset it never resolved an
+// address for.
+var tokenInfosSQL = fmt.Sprintf(`
+	SELECT oa.token_id, t.address, t.decimals
+	FROM %s oa
+	JOIN token t ON t.id = oa.token_id
+	WHERE oa.oracle_id = $1 AND oa.enabled = true
+	ORDER BY oa.oracle_id, oa.token_id, oa.feed_key
+`, OracleAssetAsOf("$2::timestamptz"))
+
+func (r *OnchainPriceRepository) GetTokenInfos(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) (map[int64]outbound.TokenInfo, error) {
+	rows, err := r.pool.Query(ctx, tokenInfosSQL, oracleID, referenceEffectiveAt)
 	if err != nil {
 		return nil, fmt.Errorf("querying token infos: %w", err)
 	}
@@ -369,17 +376,80 @@ func (r *OnchainPriceRepository) GetAllProtocolOracleBindings(ctx context.Contex
 	return bindings, nil
 }
 
-// CopyOracleAssets copies all enabled oracle_asset rows from one oracle to another.
-func (r *OnchainPriceRepository) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64) error {
-	_, err := r.pool.Exec(ctx, `
-		INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
-		SELECT $2, token_id, enabled, feed_address, feed_decimals, quote_currency
-		FROM oracle_asset
-		WHERE oracle_id = $1 AND enabled = true
-		ON CONFLICT DO NOTHING
-	`, fromOracleID, toOracleID)
+// valid_from is the run's recorded instant, not the wall clock, so a replay produces identically
+// dated rows; change_reason renders it in UTC so the text never depends on the session TimeZone.
+// Zero rows copied is legitimate but logged, because the target is then registered with no assets
+// and the symptom surfaces much later in a different process.
+// change_reason is rendered in Go and bound as a parameter: the text is a description for a human
+// reader, not a value SQL needs to compute, and formatting it here keeps the query free of a
+// session-TimeZone-dependent to_char.
+var copyOracleAssetsSQL = fmt.Sprintf(`
+	INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, valid_from, change_reason)
+	SELECT $2, token_id, enabled, feed_address, feed_decimals, quote_currency, $3::timestamptz, $4
+	FROM %s oa
+	WHERE oracle_id = $1 AND enabled = true
+	ON CONFLICT DO NOTHING
+`, OracleAssetAsOf("$3::timestamptz"))
+
+// The arbiter skips a source key the target already holds at processing_version 0, which is benign
+// only while that existing row carries the same mapping. A differing one leaves the target
+// partially mapped, and reporting success would hide it.
+var unmappedSourceAssetsSQL = fmt.Sprintf(`
+	SELECT count(*)
+	FROM %[1]s src
+	WHERE src.oracle_id = $1 AND src.enabled
+	  AND NOT EXISTS (
+		SELECT 1
+		FROM %[1]s tgt
+		WHERE tgt.oracle_id = $2
+		  AND tgt.token_id = src.token_id
+		  AND tgt.feed_key = src.feed_key
+		  AND tgt.enabled
+		  AND tgt.feed_decimals IS NOT DISTINCT FROM src.feed_decimals
+		  AND tgt.quote_currency IS NOT DISTINCT FROM src.quote_currency
+	  )
+`, OracleAssetAsOf("$3::timestamptz"))
+
+// The INSERT and its verification share one transaction. The arbiter skips only the conflicting
+// keys, so a target holding a conflicting version still takes every other source mapping: on
+// autocommit the caller got an error while that subset stayed behind, registering the target as
+// partially mapped. Appending cannot undo it either — the table forbids DELETE, so the residue
+// could only be superseded by a further disabling version. Rolling back leaves the target as it
+// was, which is the only outcome the error message honestly describes.
+func (r *OnchainPriceRepository) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64, referenceEffectiveAt time.Time) error {
+	changeReason := fmt.Sprintf("copied from oracle %d as of %s",
+		fromOracleID, referenceEffectiveAt.UTC().Format(time.RFC3339))
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer rollback(ctx, tx, r.logger)
+
+	tag, err := tx.Exec(ctx, copyOracleAssetsSQL, fromOracleID, toOracleID, referenceEffectiveAt, changeReason)
 	if err != nil {
 		return fmt.Errorf("copying oracle assets from %d to %d: %w", fromOracleID, toOracleID, err)
 	}
+
+	// Reads the rows the INSERT just wrote: the count is what the commit would make visible.
+	var unmapped int
+	if err := tx.QueryRow(ctx, unmappedSourceAssetsSQL,
+		fromOracleID, toOracleID, referenceEffectiveAt).Scan(&unmapped); err != nil {
+		return fmt.Errorf("verifying copied oracle assets from %d to %d: %w", fromOracleID, toOracleID, err)
+	}
+	if unmapped > 0 {
+		return fmt.Errorf("copying oracle assets from %d to %d: %d of the source's enabled mappings are absent or differ on the target; it already carries conflicting versions",
+			fromOracleID, toOracleID, unmapped)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing the oracle asset copy from %d to %d: %w", fromOracleID, toOracleID, err)
+	}
+
+	r.logger.Info("copied oracle assets",
+		"from_oracle_id", fromOracleID,
+		"to_oracle_id", toOracleID,
+		"rows", tag.RowsAffected(),
+		"reference_effective_at", referenceEffectiveAt.UTC().Format(time.RFC3339Nano))
 	return nil
 }

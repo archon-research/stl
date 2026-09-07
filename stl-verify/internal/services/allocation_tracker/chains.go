@@ -53,6 +53,7 @@ var servedTrackerChains = map[string]bool{
 	"optimism":    true, // optimism-allocation-tracker (CHAIN_ID 10, ARCT-216)
 	"unichain":    true, // unichain-allocation-tracker (CHAIN_ID 130, ARCT-216)
 	"arbitrum":    true, // arbitrum-allocation-tracker (CHAIN_ID 42161, ARCT-216)
+	"robinhood":   true, // robinhood-allocation-tracker (CHAIN_ID 4663, grove scope)
 }
 
 // acknowledgedUnservedByTrackerChains lists vocabulary-known contract chains (in
@@ -60,8 +61,7 @@ var servedTrackerChains = map[string]bool{
 // are knowingly dropped by entriesForChainID. A chain moves from here into servedTrackerChains
 // in the same PR that deploys its tracker; the staleness rule in validateContractChainsServed
 // fails CI if a chain ends up both served and acknowledged. Vocabulary-UNKNOWN unserved chains
-// live in acknowledgedUnservedChains, not here (see the partition note above). Empty since
-// ARCT-216 deployed the last three: every vocabulary-known contract chain now has a tracker.
+// live in acknowledgedUnservedChains, not here (see the partition note above).
 var acknowledgedUnservedByTrackerChains = map[string]bool{}
 
 // allAcknowledgedUnservedChains is the set of chains it is acceptable for no tracker to serve:

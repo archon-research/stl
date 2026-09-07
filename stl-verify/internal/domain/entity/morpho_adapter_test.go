@@ -62,6 +62,34 @@ func TestNewMorphoAdapterIdentity(t *testing.T) {
 	}
 }
 
+// TestMorphoAdapterType_IsValid pins the closed set of modelled adapter families,
+// which the probe's marker table and the metric label vocabulary both mirror.
+func TestMorphoAdapterType_IsValid(t *testing.T) {
+	tests := []struct {
+		name string
+		typ  MorphoAdapterType
+		want bool
+	}{
+		{"MarketV1", MorphoAdapterTypeMarketV1, true},
+		{"VaultV1", MorphoAdapterTypeVaultV1, true},
+		{"ERC4626Merkl", MorphoAdapterTypeERC4626Merkl, true},
+		{"Box", MorphoAdapterTypeBox, true},
+		{"CompoundV3", MorphoAdapterTypeCompoundV3, true},
+		{"Unknown", MorphoAdapterTypeUnknown, true},
+		{"zero", MorphoAdapterType(0), false},
+		{"one past the last family", MorphoAdapterType(6), false},
+		{"just below Unknown", MorphoAdapterType(98), false},
+		{"just above Unknown", MorphoAdapterType(100), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.typ.IsValid(); got != tt.want {
+				t.Errorf("MorphoAdapterType(%d).IsValid() = %v, want %v", tt.typ, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestMorphoAdapterMembership_Validate pins what an observation must carry. Note what
 // is deliberately NOT rejected: an assertion of membership with no classification. The
 // caller that already knows the adapter is a member probes nothing, and nothing will be
@@ -69,7 +97,7 @@ func TestNewMorphoAdapterIdentity(t *testing.T) {
 // and in the table's CHECK.
 func TestMorphoAdapterMembership_Validate(t *testing.T) {
 	marketV1 := MorphoAdapterTypeMarketV1
-	bogus := MorphoAdapterType(3)
+	bogus := MorphoAdapterType(42)
 	ts := time.Unix(1_700_000_000, 0).UTC()
 
 	base := func() MorphoAdapterMembership {
@@ -130,7 +158,7 @@ func TestMorphoAdapterMembership_Validate(t *testing.T) {
 		{
 			name:    "invalid adapter type",
 			mutate:  func(m *MorphoAdapterMembership) { m.AdapterType = &bogus },
-			wantErr: true, errContains: "adapterType must be 1, 2, or 99",
+			wantErr: true, errContains: "adapterType must be one of",
 		},
 	}
 

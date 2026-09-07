@@ -21,13 +21,37 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/httpclient"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/skyenvelope"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
 const defaultBaseURL = "https://info-sky.blockanalitica.com/star-monitoring/risk-capital"
 
-// Compile-time check that Client implements outbound.RiskCapitalProvider.
-var _ outbound.RiskCapitalProvider = (*Client)(nil)
+// Upstream paginates at 20 by default. Asked for explicitly, and the reported
+// total is checked against what arrives, so a set outgrowing the page fails
+// rather than silently losing rows.
+const allocationsPageLimit = 500
+
+// The monitor spells networks its own way — "ethereum" where the axis-synome
+// contract and the allocation trackers say "mainnet". Translated here with the
+// other upstream encodings so no consumer has to know the vendor's vocabulary.
+// The skydata client repeats this map rather than sharing it: they are two
+// vendors' vocabularies that happen to agree today, and a change to one must
+// not silently move the other.
+var networkToChainID = map[string]int64{
+	"ethereum":  1,
+	"optimism":  10,
+	"unichain":  130,
+	"base":      8453,
+	"arbitrum":  42161,
+	"avalanche": 43114,
+}
+
+// Compile-time checks that Client implements both monitor ports.
+var (
+	_ outbound.RiskCapitalProvider           = (*Client)(nil)
+	_ outbound.RiskCapitalAllocationProvider = (*Client)(nil)
+)
 
 // ClientConfig holds configuration for the Sky risk-capital client.
 type ClientConfig struct {
@@ -182,7 +206,7 @@ func (c *Client) fetchPrimeDetail(ctx context.Context, star string) (outbound.Ri
 		TokenizedJuniorRiskCapital: detail.TokenizedJRC.String(),
 		InternalSeniorRiskCapital:  detail.InternalSRC.String(),
 		ExternalSeniorRiskCapital:  detail.ExternalSRC.String(),
-		EncumbranceRatio:           optionalNumber(detail.EncumbranceRatio),
+		EncumbranceRatio:           skyenvelope.OptionalNumber(detail.EncumbranceRatio),
 		ExposureShare:              detail.TotalExposureShare.String(),
 		EPIUtilization:             detail.EPIUtilization.String(),
 		SPJUtilization:             detail.SPJUtilization.String(),
@@ -223,12 +247,109 @@ func requireAmounts(star string, s outbound.RiskCapitalPrimeSnapshot) error {
 	return nil
 }
 
-func optionalNumber(value json.Number) *string {
-	raw := strings.TrimSpace(value.String())
-	if raw == "" {
+// FetchPrimeAllocations returns the per-allocation breakdown for each star.
+// Callers pass only stars the monitor covers (from the same cycle's
+// snapshots): the route answers an unknown star with a 500 indistinguishable
+// from a fault.
+func (c *Client) FetchPrimeAllocations(
+	ctx context.Context,
+	stars []string,
+) ([]outbound.RiskCapitalAllocationRow, error) {
+	rows := make([]outbound.RiskCapitalAllocationRow, 0, len(stars)*16)
+	for _, star := range stars {
+		starRows, err := c.fetchStarAllocations(ctx, star)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, starRows...)
+	}
+	return rows, nil
+}
+
+func (c *Client) fetchStarAllocations(ctx context.Context, star string) ([]outbound.RiskCapitalAllocationRow, error) {
+	var payload allocationsResponse
+	requestURL := fmt.Sprintf("%s/primes/%s/allocations/?limit=%d", c.baseURL, url.PathEscape(star), allocationsPageLimit)
+	if err := c.httpClient.DoRequest(ctx, httpclient.RequestConfig{URL: requestURL}, &payload); err != nil {
+		return nil, fmt.Errorf("fetching sky risk-capital allocations for prime %q: %w", star, err)
+	}
+
+	results := payload.Data.Results
+	if err := skyenvelope.RequireFullPage(payload.Data.Pagination, len(results), allocationsPageLimit, requestURL); err != nil {
+		return nil, err
+	}
+
+	// Row identity is (network, token_address) — the table's key. Case-folded
+	// here because the two are otherwise stored verbatim: a casing change on
+	// either would silently mint a second identity for the same position. A
+	// duplicate in one fetch would silently conflict away at insert, so it
+	// fails here instead.
+	seen := make(map[string]bool, len(results))
+	rows := make([]outbound.RiskCapitalAllocationRow, 0, len(results))
+	for i, row := range results {
+		parsed, err := toAllocationRow(star, row, i)
+		if err != nil {
+			return nil, err
+		}
+		key := strings.ToLower(parsed.Network) + "|" + strings.ToLower(parsed.TokenAddress)
+		if seen[key] {
+			return nil, fmt.Errorf(
+				"sky risk-capital allocations for prime %q repeat identity %s on %s; the row identity assumption no longer holds",
+				star, parsed.TokenAddress, parsed.Network)
+		}
+		seen[key] = true
+		rows = append(rows, parsed)
+	}
+	return rows, nil
+}
+
+// toAllocationRow rejects a row missing any identifying or numeric field the
+// monitor is expected to report; persisting a blank in their place would read
+// as a real answer. name and the loan-token pair are the fields the monitor
+// may omit.
+func toAllocationRow(star string, row allocationPayloadRow, index int) (outbound.RiskCapitalAllocationRow, error) {
+	// Ordered, not a map: which field a broken payload is blamed on must be
+	// reproducible across runs, or the same fault reads as a different bug.
+	required := []struct{ field, value string }{
+		{"protocol", row.Protocol},
+		{"network", row.Network},
+		{"symbol", row.Symbol},
+		{"token_address", row.TokenAddress},
+		{"exposure", row.Exposure.String()},
+		{"rrc", row.RRC.String()},
+		{"crr", row.CRR.String()},
+	}
+	for _, r := range required {
+		if strings.TrimSpace(r.value) == "" {
+			return outbound.RiskCapitalAllocationRow{}, fmt.Errorf(
+				"sky risk-capital allocation row %d for prime %q is missing field %q", index, star, r.field)
+		}
+	}
+
+	network := strings.TrimSpace(row.Network)
+	return outbound.RiskCapitalAllocationRow{
+		Star:                star,
+		Protocol:            strings.TrimSpace(row.Protocol),
+		Network:             network,
+		ChainID:             chainIDFor(network),
+		Symbol:              strings.TrimSpace(row.Symbol),
+		Name:                skyenvelope.OptionalText(row.Name),
+		TokenAddress:        strings.TrimSpace(row.TokenAddress),
+		LoanTokenAddress:    skyenvelope.OptionalText(row.LoanTokenAddress),
+		LoanTokenSymbol:     skyenvelope.OptionalText(row.LoanTokenSymbol),
+		Exposure:            row.Exposure.String(),
+		RequiredRiskCapital: row.RRC.String(),
+		CRR:                 row.CRR.String(),
+	}, nil
+}
+
+// chainIDFor looks up by a case-folded network, since the vendor vocabulary
+// this map encodes is lowercase and upstream's own casing is not trustworthy.
+func chainIDFor(network string) *int64 {
+	id, ok := networkToChainID[strings.ToLower(network)]
+	if !ok {
 		return nil
 	}
-	return &raw
+	return &id
 }
 
 type primesResponse struct {
@@ -243,6 +364,26 @@ type primeRow struct {
 
 type primeDetailResponse struct {
 	Data primeDetail `json:"data"`
+}
+
+type allocationsResponse struct {
+	Data struct {
+		Results    []allocationPayloadRow  `json:"results"`
+		Pagination *skyenvelope.Pagination `json:"pagination"`
+	} `json:"data"`
+}
+
+type allocationPayloadRow struct {
+	Protocol         string      `json:"protocol"`
+	Network          string      `json:"network"`
+	Symbol           string      `json:"symbol"`
+	Name             string      `json:"name"`
+	TokenAddress     string      `json:"token_address"`
+	LoanTokenAddress string      `json:"loan_token_address"`
+	LoanTokenSymbol  string      `json:"loan_token_symbol"`
+	Exposure         json.Number `json:"exposure"`
+	RRC              json.Number `json:"rrc"`
+	CRR              json.Number `json:"crr"`
 }
 
 type primeDetail struct {

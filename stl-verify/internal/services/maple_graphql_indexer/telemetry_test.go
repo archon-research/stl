@@ -147,6 +147,7 @@ func TestSync_NullDowngradesRecorded(t *testing.T) {
 	}
 	client.GetActiveLoansFn = func(context.Context) ([]outbound.MapleActiveLoan, error) {
 		loans := fixtureLoans()
+		loans[0].Collateral.Asset = "" // API reported a null asset symbol
 		loans[0].Collateral.AssetAmount = nil
 		loans[0].Collateral.AssetValueUSD = nil
 		loans[2].Collateral.AssetAmount = nil
@@ -200,6 +201,7 @@ func TestSync_NullDowngradesRecorded(t *testing.T) {
 		"pool_collateral_value_usd":     1,
 		"pool_monthly_apy":              1, // fixture pool 2 has no APYs
 		"pool_spot_apy":                 1,
+		"collateral_asset_symbol":       1,
 		"collateral_asset_amount":       2,
 		"collateral_asset_value_usd":    1,
 		"loan_acm_ratio":                1, // fixture loan 2 is uncollateralized

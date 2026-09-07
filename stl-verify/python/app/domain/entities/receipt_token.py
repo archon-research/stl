@@ -7,6 +7,7 @@ class ReceiptTokenProtocolPair:
 
     receipt_token_id: int
     protocol_name: str
+    chain_id: int
 
 
 @dataclass(frozen=True)

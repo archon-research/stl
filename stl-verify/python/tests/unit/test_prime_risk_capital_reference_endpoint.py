@@ -1,24 +1,31 @@
-"""The ``reference=true`` branch of ``/v1/primes/{id}/risk-capital``.
+"""The reference branch of ``/v1/primes/{id}/risk-capital``.
 
 Kept apart from the self-mode suite because the two share only the route: this
 branch runs no model and touches no allocation data, so its fixtures and its
 failure modes have nothing in common with those.
 """
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.api.deps import get_reference_risk_capital_service_factory
 from app.api.v1 import prime_risk_capital
 from app.domain.entities.reference_risk_capital import ReferenceAllocation, ReferencePrimeRiskCapital
-from app.domain.exceptions import ReferenceDataUnavailableError
 from app.main import app
 from app.services.prime_risk_capital_service import PrimeRiskCapitalService
 
 _VALID_ADDR = "0x" + "ab" * 20
+_SYNCED_AT = datetime(2026, 8, 26, 9, 15, tzinfo=UTC)
+
+
+def _failing_read() -> Exception:
+    """What the reader raises when the query fails."""
+    return ValueError("Database query failed while reading the snapshot: boom")
 
 
 def _reference_allocation(
@@ -47,6 +54,7 @@ def _snapshot(*, per_allocation: tuple[ReferenceAllocation, ...] | None = None) 
     zero = Decimal("0")
     return ReferencePrimeRiskCapital(
         star="spark",
+        synced_at=_SYNCED_AT,
         exposure_usd=Decimal("2098090654.81"),
         required_risk_capital_usd=Decimal("17837860.43"),
         total_risk_capital_usd=Decimal("48142491.08"),
@@ -67,17 +75,16 @@ def _snapshot(*, per_allocation: tuple[ReferenceAllocation, ...] | None = None) 
 
 @pytest.fixture
 def reference_client(request):
-    """A TestClient whose reference service returns ``request.param``.
+    """A TestClient whose reference reader answers ``request.param``.
 
-    ``param`` is either a snapshot (or ``None``) to return, or an exception
-    instance to raise.
+    ``param`` is a snapshot, ``None`` for a prime no cycle has reported on, or
+    an exception the reader raises.
     """
-    outcome = request.param
     reference_service = AsyncMock()
-    if isinstance(outcome, Exception):
-        reference_service.get.side_effect = outcome
+    if isinstance(request.param, Exception):
+        reference_service.get.side_effect = request.param
     else:
-        reference_service.get.return_value = outcome
+        reference_service.get.return_value = request.param
 
     self_service = AsyncMock(spec=PrimeRiskCapitalService)
     self_service.prime_exists.return_value = True
@@ -114,6 +121,17 @@ def test_reference_mode_serves_the_upstream_totals_in_the_existing_fields(refere
 
 
 @pytest.mark.parametrize("reference_client", [_snapshot()], indirect=True)
+def test_reference_mode_stamps_the_cycle_the_figures_were_observed_at(reference_client):
+    # The figures are STL's record of the monitor rather than a live read, so
+    # serving them without a stamp would imply they are current.
+    client, _ = reference_client
+
+    body = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?reference=true").json()
+
+    assert body["reference_synced_at"] == "2026-08-26T09:15:00Z"
+
+
+@pytest.mark.parametrize("reference_client", [_snapshot()], indirect=True)
 def test_reference_mode_populates_the_junior_senior_split_self_mode_cannot(reference_client):
     client, _ = reference_client
 
@@ -136,6 +154,18 @@ def test_reference_mode_serves_the_upstream_breakdown_as_per_allocation(referenc
     assert row["crr_pct"] == "0.28764051"
     assert row["applied"] is True
     assert row["model"] is None
+
+
+@pytest.mark.parametrize("reference_client", [_snapshot()], indirect=True)
+def test_reference_mode_stamps_reference_provenance_on_each_row(reference_client):
+    # The row's own source, not just the response-level one: a consumer reading
+    # per_allocation in isolation must still see who reported the position.
+    client, _ = reference_client
+
+    body = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?reference=true").json()
+
+    (row,) = body["per_allocation"]
+    assert row["source"] == "reference"
 
 
 @pytest.mark.parametrize(
@@ -176,24 +206,13 @@ def test_reference_mode_never_runs_the_self_model(reference_client):
 
 
 @pytest.mark.parametrize("reference_client", [None], indirect=True)
-def test_reference_mode_returns_404_when_the_monitor_does_not_track_the_prime(reference_client):
+def test_reference_mode_returns_404_when_no_cycle_has_reported_on_the_prime(reference_client):
     client, _ = reference_client
 
     response = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?reference=true")
 
     assert response.status_code == 404
-    assert "does not track" in response.json()["detail"]
-
-
-@pytest.mark.parametrize("reference_client", [ReferenceDataUnavailableError("boom")], indirect=True)
-def test_reference_mode_returns_502_when_the_monitor_cannot_be_read(reference_client):
-    # Held apart from the 404 above so an upstream outage is never served as an
-    # absence of exposure, which reads as a real answer.
-    client, _ = reference_client
-
-    response = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?reference=true")
-
-    assert response.status_code == 502
+    assert "No reference risk capital" in response.json()["detail"]
 
 
 @pytest.mark.parametrize("reference_client", [_snapshot()], indirect=True)
@@ -273,6 +292,7 @@ def test_both_keeps_each_provenance_in_its_own_fields(reference_client):
     assert body["reference_total_risk_capital_usd"] == "48142491.08"
     # Sky reports these and STL models none of them.
     assert body["junior_risk_capital_usd"] is not None
+    assert body["reference_synced_at"] == "2026-08-26T09:15:00Z"
 
 
 @pytest.mark.parametrize(
@@ -325,8 +345,8 @@ def test_both_carries_skys_own_ratio_rather_than_deriving_one(reference_client):
     assert row["reference_crr_pct"] == "0.28764051"
 
 
-@pytest.mark.parametrize("reference_client", [ReferenceDataUnavailableError("boom")], indirect=True)
-def test_both_serves_stl_own_model_when_sky_cannot_be_read(reference_client):
+@pytest.mark.parametrize("reference_client", [None], indirect=True)
+def test_both_serves_stl_own_model_for_a_prime_with_no_reference_data(reference_client):
     client, self_service = reference_client
     self_service.compute.return_value = _self_result()
 
@@ -334,6 +354,38 @@ def test_both_serves_stl_own_model_when_sky_cannot_be_read(reference_client):
 
     assert body["source"] == "indexed"
     assert body["reference_prime_exposure_usd"] is None
+    assert body["reference_synced_at"] is None
+
+
+@pytest.mark.parametrize("reference_client", [_failing_read()], indirect=True)
+def test_a_read_failure_is_not_rewritten_into_an_absence_of_reference_data(reference_client):
+    # A read that failed says nothing about coverage, so it must not be served
+    # as "this prime has none" -- which reads identically to a real answer.
+    client, _ = reference_client
+
+    with pytest.raises(ValueError, match="boom"):
+        client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?source=reference")
+
+
+@pytest.mark.parametrize("reference_client", [_failing_read()], indirect=True)
+def test_both_propagates_a_read_failure_rather_than_degrading_to_indexed(reference_client):
+    # The merged view swallows a 404 by design. A failure is not a 404, and
+    # degrading on one would publish STL's half as the whole answer.
+    client, self_service = reference_client
+    self_service.compute.return_value = _self_result()
+
+    with pytest.raises(ValueError, match="boom"):
+        client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?source=both")
+
+
+@pytest.mark.parametrize("reference_client", [HTTPException(status_code=503, detail="warming up")], indirect=True)
+def test_both_does_not_degrade_on_a_non_404_http_error(reference_client):
+    # The guard that re-raises anything but a 404 exists for this; without a
+    # test it is unreachable code that a refactor could widen unnoticed.
+    client, self_service = reference_client
+    self_service.compute.return_value = _self_result()
+
+    assert client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?source=both").status_code == 503
 
 
 @pytest.mark.parametrize(
@@ -375,3 +427,18 @@ def test_no_contribution_is_attributed_without_a_total_to_divide_by(reference_cl
     body = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?source=indexed").json()
 
     assert all(row["encumbrance_contribution"] is None for row in body["per_allocation"])
+
+
+@pytest.mark.parametrize("reference_client", [_snapshot()], indirect=True)
+def test_both_attributes_no_contribution_to_a_sky_only_row(reference_client):
+    # Under `both` the denominator is STL's own total; a row Sky alone reports
+    # is not comparable to it, so it stays excluded even though its own
+    # `source` is `reference` — unlike a pure `source=reference` response,
+    # where that same field value means every row is fair game.
+    client, self_service = reference_client
+    self_service.compute.return_value = _self_result(total_risk_capital_usd=Decimal("100"))
+
+    body = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?source=both").json()
+
+    (row,) = [row for row in body["per_allocation"] if row["source"] == "reference"]
+    assert row["encumbrance_contribution"] is None
