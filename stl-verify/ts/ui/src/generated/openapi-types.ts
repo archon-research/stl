@@ -334,12 +334,12 @@ export interface paths {
     };
     /**
      * Estimate bad debt at a collateral gap (by chain id and receipt-token address)
-     * @description Estimate USD bad debt for the receipt-token position at `(chain_id, token_address)` when collateral prices fall by `gap_pct` (a fraction in `[0, 1]`).
+     * @description Estimate USD bad debt for the receipt-token position at `(chain_id, token_address)` when collateral prices fall by `gap_pct` (a fraction in `[0, 1]`). The position resolves to the receipt token's largest current holder, so the estimate is that prime's and the caller needs access to it.
      *
      *     `token_address` is the **receipt-token** address (e.g. `aUSDC`, `spWETH`), not the underlying ERC-20 address. Passing an underlying address yields a `404` whose body suggests matching receipt tokens.
      *
      *     Errors:
-     *     - `404` if the receipt token is not found.
+     *     - `404` if the receipt token is not found, or the caller may not view the prime the position resolves to.
      *     - `422` if `chain_id` < 1, `token_address` is malformed, or `gap_pct` is outside `[0, 1]`.
      *     - `503` (`share_data_*`) if the allocation-share lookup fails.
      */
@@ -365,10 +365,10 @@ export interface paths {
      *
      *     `token_address` is the **receipt-token** address (e.g. `aUSDC`, `spWETH`), not the underlying ERC-20 address. Passing an underlying address yields a `404` whose body suggests matching receipt tokens.
      *
-     *     Pass an optional `prime_id` to scale the breakdown to that prime's position (per-prime, pro-rata by pool share); omit it for the pool-level breakdown.
+     *     Pass an optional `prime_id` to scale the breakdown to that prime's position (per-prime, pro-rata by pool share). Omitted, the position resolves to the receipt token's largest current holder, so the response is that prime's breakdown and the caller needs access to it.
      *
      *     Errors:
-     *     - `404` if the receipt token is not found.
+     *     - `404` if the receipt token is not found, or the caller may not view the prime the position resolves to.
      *     - `422` if `chain_id` < 1, `token_address` is malformed, or `prime_id` is malformed.
      *     - `503` (`share_data_*`) if the allocation-share lookup fails.
      */
@@ -391,12 +391,12 @@ export interface paths {
     /**
      * Estimate bad debt at a collateral gap (deprecated)
      * @deprecated
-     * @description Estimate USD bad debt for a receipt-token position when collateral prices fall by `gap_pct` (a fraction in `[0, 1]`).
+     * @description Estimate USD bad debt for a receipt-token position when collateral prices fall by `gap_pct` (a fraction in `[0, 1]`). The position resolves to the receipt token's largest current holder, so the estimate is that prime's and the caller needs access to it.
      *
      *     **Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/bad-debt`.
      *
      *     Errors:
-     *     - `404` if the receipt token is not found.
+     *     - `404` if the receipt token is not found, or the caller may not view the prime the position resolves to.
      *     - `422` if `gap_pct` is outside `[0, 1]`.
      *     - `503` (`share_data_*`) if the allocation-share lookup fails.
      */
@@ -421,12 +421,12 @@ export interface paths {
      * @deprecated
      * @description Return the full risk-enriched collateral breakdown for a receipt-token position: one row per backing token with amount, USD value, price, liquidation threshold, and bonus.
      *
-     *     Pass an optional `prime_id` to scale the breakdown to that prime's position (per-prime, pro-rata by pool share); omit it for the pool-level breakdown.
+     *     Pass an optional `prime_id` to scale the breakdown to that prime's position (per-prime, pro-rata by pool share). Omitted, the position resolves to the receipt token's largest current holder, so the response is that prime's breakdown and the caller needs access to it.
      *
      *     **Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/breakdown`.
      *
      *     Errors:
-     *     - `404` if the receipt token is not found.
+     *     - `404` if the receipt token is not found, or the caller may not view the prime the position resolves to.
      *     - `422` if `prime_id` is malformed.
      *     - `503` (`share_data_*`) if the allocation-share lookup fails.
      */
