@@ -58,6 +58,8 @@ const DynamicFeeFlag = 0x800000
 
 // Logs route by PoolId, so a pool whose stored id disagrees with its key would
 // silently never match a log; refusing to boot is the only way that surfaces.
+// pools is one chain's registry (LoadPools(chainID)), so the duplicate check is
+// per chain: the same PoolKey on another chain is another worker's row.
 func ValidatePoolKeys(pools []RegisteredPool) error {
 	seen := make(map[common.Hash]int64, len(pools))
 	for _, pool := range pools {

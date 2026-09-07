@@ -34,9 +34,6 @@ func DecodeLog(ev abi.Event, log Log) (map[string]any, error) {
 	if err := parseNonIndexedArgs(ev, log, out); err != nil {
 		return nil, err
 	}
-	if err := assertEveryArgumentDecoded(ev, out); err != nil {
-		return nil, err
-	}
 	return out, nil
 }
 
@@ -74,15 +71,6 @@ func parseNonIndexedArgs(ev abi.Event, log Log, out map[string]any) error {
 	}
 	if err := nonIndexed.UnpackIntoMap(out, raw); err != nil {
 		return fmt.Errorf("parsing non-indexed params: %w", err)
-	}
-	return nil
-}
-
-func assertEveryArgumentDecoded(ev abi.Event, out map[string]any) error {
-	for _, arg := range ev.Inputs {
-		if _, ok := out[arg.Name]; !ok {
-			return fmt.Errorf("%s log left argument %s undecoded", ev.Name, arg.Name)
-		}
 	}
 	return nil
 }

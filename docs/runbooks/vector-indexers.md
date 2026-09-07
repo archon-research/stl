@@ -1043,6 +1043,48 @@ or liquidity events are being recorded.
 
 ---
 
+## VectorCurveIndexerStateRowsNotLanding
+
+**Severity:** warning · **For:** 30m
+
+### What it means
+
+`curve_state_rows_attempted_total` has advanced for over an hour while
+`curve_state_rows_written_total` has not moved at all: every state row the
+worker queued was discarded by `ON CONFLICT DO NOTHING`. Two things produce that
+signature, and only one of them is a fault.
+
+- **A same-build replay.** Redelivering an already-indexed range under the same
+  `build_id` makes the version function reuse the existing `processing_version`,
+  so every row lands on a primary key that is already there. Benign; it ends when
+  the replay does. Longer than an hour is rare (a large DLQ redrive, a deliberate
+  re-index) but legitimate.
+- **A silent drop.** A correction row that should have appended but did not. The
+  known mechanism is VEC-615: on a columnstored chunk the arbiter resolves before
+  row triggers fire, so a version left to the trigger reaches it as `DEFAULT 0`.
+  Every `curve_*` hypertable now takes its version from a
+  `next_processing_version_*` call in the INSERT, so this rule firing outside a
+  replay means that shape regressed, or something new drops rows the same way.
+
+### First checks
+
+1. **Is it a replay?** `kubectl -n vector logs -l app=curve-indexer --tail=500 | grep -E "block=[0-9]+"`
+   — block numbers well below the chain head, arriving in order, is a replay.
+   Confirm with `SELECT max(block_number) FROM curve_pool_state` against the head.
+2. **Is it a drop?** Pick one queued block from the logs and check the table:
+   a block the worker processed under the current `build_id` with no row at
+   `(pool, block, block_version)` for that build is a dropped row.
+3. **Which chunk?** `SELECT is_compressed FROM timescaledb_information.chunks WHERE hypertable_name = 'curve_pool_state' AND range_start <= <ts> AND range_end > <ts>`
+   — a compressed chunk points at VEC-615's mechanism; a rowstore chunk at
+   something new in `SaveBlock`.
+
+### Verify recovery
+
+`sum by (chain, cluster) (rate(curve_state_rows_written_total[1h])) > 0` for
+the alert's chain, or the replay's end.
+
+---
+
 ## VectorCurveIndexerErrorRatioHigh
 
 **Severity:** warning · **For:** 15m
@@ -1482,6 +1524,48 @@ cover the class the old rule had covered by accident.
 
 ---
 
+## VectorUniswapV3IndexerStateRowsNotLanding
+
+**Severity:** warning · **For:** 30m
+
+### What it means
+
+`uniswap_v3_state_rows_attempted_total` has advanced for over an hour while
+`uniswap_v3_state_rows_written_total` has not moved at all: every state row the
+worker queued was discarded by `ON CONFLICT DO NOTHING`. Two things produce that
+signature, and only one of them is a fault.
+
+- **A same-build replay.** Redelivering an already-indexed range under the same
+  `build_id` makes the version function reuse the existing `processing_version`,
+  so every row lands on a primary key that is already there. Benign; it ends when
+  the replay does. Longer than an hour is rare (a large DLQ redrive, a deliberate
+  re-index) but legitimate.
+- **A silent drop.** A correction row that should have appended but did not. The
+  known mechanism is VEC-615: on a columnstored chunk the arbiter resolves before
+  row triggers fire, so a version left to the trigger reaches it as `DEFAULT 0`.
+  Every `uniswap_v3_*` hypertable now takes its version from a
+  `next_processing_version_*` call in the INSERT, so this rule firing outside a
+  replay means that shape regressed, or something new drops rows the same way.
+
+### First checks
+
+1. **Is it a replay?** `kubectl -n vector logs -l app=uniswap-v3-indexer --tail=500 | grep -E "block=[0-9]+"`
+   — block numbers well below the chain head, arriving in order, is a replay.
+   Confirm with `SELECT max(block_number) FROM uniswap_v3_pool_state` against the head.
+2. **Is it a drop?** Pick one queued block from the logs and check the table:
+   a block the worker processed under the current `build_id` with no row at
+   `(pool, block, block_version)` for that build is a dropped row.
+3. **Which chunk?** `SELECT is_compressed FROM timescaledb_information.chunks WHERE hypertable_name = 'uniswap_v3_pool_state' AND range_start <= <ts> AND range_end > <ts>`
+   — a compressed chunk points at VEC-615's mechanism; a rowstore chunk at
+   something new in `SaveBlock`.
+
+### Verify recovery
+
+`sum by (chain, cluster) (rate(uniswap_v3_state_rows_written_total[1h])) > 0` for
+the alert's chain, or the replay's end.
+
+---
+
 ## VectorUniswapV3IndexerNoPoolsTouched
 
 **Severity:** warning · **For:** 10m
@@ -1561,6 +1645,12 @@ by `dexbootstrap.Bootstrap`
 `uniswap-v3-indexer`, with one structural difference that changes every triage
 step below.
 
+**An empty registry is a boot failure**, not a quiet start: `LoadPools` returning
+zero rows for the chain is fatal in the dex-indexer factory, for V4 exactly as for
+V3 and Curve. There is no pre-seed deploy to validate wiring and alarms against;
+the seed ships in the same migration as the tables, so the first deploy that can
+boot is one that already has pools.
+
 **V4 is a singleton.** There is no per-pool contract: every pool lives inside one
 `PoolManager` (mainnet `0x000000000004444c5dc75cB358380D2e3dE08A90`, deployed at
 block 21688329) and is identified by a 32-byte **PoolId**,
@@ -1585,7 +1675,10 @@ those pools before the transaction commit.
 decides whether a pool's state and ticks are read at all; a `false` pool is still
 decoded, and its swaps, liquidity events and pool events are still indexed —
 only the `uniswap_v4_pool_state` / `uniswap_v4_tick` half is dropped, and the
-worker issues no chain read for it. The gate exists for the dynamic LP fee
+worker issues no chain read for it. The one exception is a reorg redelivery at a height
+where the pool already holds a state row from before its gate was flipped: that
+row is re-read at the new block version so the orphaned fork's row does not stay
+latest. The gate exists for the dynamic LP fee
 (`PoolKey.fee == 0x800000`): `updateDynamicLPFee` rewrites `slot0.lpFee` and
 emits nothing, so with no sweep to fall back on the snapshotted `lp_fee` would
 silently go stale between touches. Such a pool is **not** refused at boot — the
@@ -2194,6 +2287,48 @@ A quiet market no longer needs ruling out — if no pools are being touched the
 alert cannot fire. To sanity-check overall liveness during a lull, confirm
 `rate(uniswap_v4_blocks_processed_total{status="success"}[5m]) > 0` for that
 chain (`VectorUniswapV4IndexerStalled` covers this).
+
+---
+
+## VectorUniswapV4IndexerStateRowsNotLanding
+
+**Severity:** warning · **For:** 30m
+
+### What it means
+
+`uniswap_v4_state_rows_attempted_total` has advanced for over an hour while
+`uniswap_v4_state_rows_written_total` has not moved at all: every state row the
+worker queued was discarded by `ON CONFLICT DO NOTHING`. Two things produce that
+signature, and only one of them is a fault.
+
+- **A same-build replay.** Redelivering an already-indexed range under the same
+  `build_id` makes the version function reuse the existing `processing_version`,
+  so every row lands on a primary key that is already there. Benign; it ends when
+  the replay does. Longer than an hour is rare (a large DLQ redrive, a deliberate
+  re-index) but legitimate.
+- **A silent drop.** A correction row that should have appended but did not. The
+  known mechanism is VEC-615: on a columnstored chunk the arbiter resolves before
+  row triggers fire, so a version left to the trigger reaches it as `DEFAULT 0`.
+  Every `uniswap_v4_*` hypertable now takes its version from a
+  `next_processing_version_*` call in the INSERT, so this rule firing outside a
+  replay means that shape regressed, or something new drops rows the same way.
+
+### First checks
+
+1. **Is it a replay?** `kubectl -n vector logs -l app=uniswap-v4-indexer --tail=500 | grep -E "block=[0-9]+"`
+   — block numbers well below the chain head, arriving in order, is a replay.
+   Confirm with `SELECT max(block_number) FROM uniswap_v4_pool_state` against the head.
+2. **Is it a drop?** Pick one queued block from the logs and check the table:
+   a block the worker processed under the current `build_id` with no row at
+   `(pool, block, block_version)` for that build is a dropped row.
+3. **Which chunk?** `SELECT is_compressed FROM timescaledb_information.chunks WHERE hypertable_name = 'uniswap_v4_pool_state' AND range_start <= <ts> AND range_end > <ts>`
+   — a compressed chunk points at VEC-615's mechanism; a rowstore chunk at
+   something new in `SaveBlock`.
+
+### Verify recovery
+
+`sum by (chain, cluster) (rate(uniswap_v4_state_rows_written_total[1h])) > 0` for
+the alert's chain, or the replay's end.
 
 ---
 

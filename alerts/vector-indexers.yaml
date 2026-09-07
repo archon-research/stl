@@ -1959,6 +1959,44 @@ groups:
             stale.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3indexerstalled
 
+      - alert: VectorCurveIndexerStateRowsNotLanding
+        # The stall rule above keys on state rows ATTEMPTED so a same-build replay,
+        # which conflicts every row away, does not page. That leaves one signature
+        # nobody watched: attempted keeps advancing while WRITTEN stays flat for an
+        # hour. It is exactly what a correction dropped by a columnstored chunk's
+        # arbiter looks like (VEC-615: the INSERT's version reached the arbiter as
+        # DEFAULT 0, RowsAffected 0, no error), and what any future silent drop in
+        # SaveBlock would look like. A replay longer than an hour under one
+        # build_id fires it too — that is the documented false positive, and the
+        # runbook says how to tell the two apart. `unless` for the absent-series
+        # reason spelt out on the stall rule.
+        expr: |
+          sum by (chain, cluster) (
+            rate(curve_state_rows_attempted_total{k8s_namespace_name="vector"}[1h])
+          ) > 0
+          unless
+          sum by (chain, cluster) (
+            rate(curve_state_rows_written_total{k8s_namespace_name="vector"}[1h])
+          ) > 0
+        for: 30m
+        labels:
+          team: vector
+          severity: warning
+          component: curve-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector curve-indexer state rows not landing on {{ $labels.chain }}"
+          description: |
+            `curve-indexer` on chain `{{ $labels.chain }}` has queued state
+            rows for over an hour and none of them was inserted. Either every
+            row is conflicting away — a same-build replay of an already-indexed
+            range, which is benign and ends when the replay does — or rows are
+            being dropped silently, which is the VEC-615 compressed-chunk drop
+            or a regression in the same place. Check the pod logs for a replay
+            (redelivered block numbers below the head) before treating it as a
+            drop.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorcurveindexerstaterowsnotlanding
+
       # ---------------------------------------------------------------------
       # WARNING
       # ---------------------------------------------------------------------
@@ -2125,6 +2163,44 @@ groups:
             produced at all: the due set (DueSet) is likely silently empty, or
             every snapshotDueSet call is no-opping.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3indexernotwritingstate
+
+      - alert: VectorUniswapV3IndexerStateRowsNotLanding
+        # The stall rule above keys on state rows ATTEMPTED so a same-build replay,
+        # which conflicts every row away, does not page. That leaves one signature
+        # nobody watched: attempted keeps advancing while WRITTEN stays flat for an
+        # hour. It is exactly what a correction dropped by a columnstored chunk's
+        # arbiter looks like (VEC-615: the INSERT's version reached the arbiter as
+        # DEFAULT 0, RowsAffected 0, no error), and what any future silent drop in
+        # SaveBlock would look like. A replay longer than an hour under one
+        # build_id fires it too — that is the documented false positive, and the
+        # runbook says how to tell the two apart. `unless` for the absent-series
+        # reason spelt out on the stall rule.
+        expr: |
+          sum by (chain, cluster) (
+            rate(uniswap_v3_state_rows_attempted_total{k8s_namespace_name="vector"}[1h])
+          ) > 0
+          unless
+          sum by (chain, cluster) (
+            rate(uniswap_v3_state_rows_written_total{k8s_namespace_name="vector"}[1h])
+          ) > 0
+        for: 30m
+        labels:
+          team: vector
+          severity: warning
+          component: uniswap-v3-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector uniswap-v3-indexer state rows not landing on {{ $labels.chain }}"
+          description: |
+            `uniswap-v3-indexer` on chain `{{ $labels.chain }}` has queued state
+            rows for over an hour and none of them was inserted. Either every
+            row is conflicting away — a same-build replay of an already-indexed
+            range, which is benign and ends when the replay does — or rows are
+            being dropped silently, which is the VEC-615 compressed-chunk drop
+            or a regression in the same place. Check the pod logs for a replay
+            (redelivered block numbers below the head) before treating it as a
+            drop.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3indexerstaterowsnotlanding
 
       - alert: VectorUniswapV3IndexerNoPoolsTouched
         # Silent-empty guard, HALF TWO: blocks are advancing but NOT ONE
@@ -2522,6 +2598,44 @@ groups:
             all: suspect snapshotDueSet no-opping or buildBlockWrites dropping
             the states.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexernotwritingstate
+
+      - alert: VectorUniswapV4IndexerStateRowsNotLanding
+        # The stall rule above keys on state rows ATTEMPTED so a same-build replay,
+        # which conflicts every row away, does not page. That leaves one signature
+        # nobody watched: attempted keeps advancing while WRITTEN stays flat for an
+        # hour. It is exactly what a correction dropped by a columnstored chunk's
+        # arbiter looks like (VEC-615: the INSERT's version reached the arbiter as
+        # DEFAULT 0, RowsAffected 0, no error), and what any future silent drop in
+        # SaveBlock would look like. A replay longer than an hour under one
+        # build_id fires it too — that is the documented false positive, and the
+        # runbook says how to tell the two apart. `unless` for the absent-series
+        # reason spelt out on the stall rule.
+        expr: |
+          sum by (chain, cluster) (
+            rate(uniswap_v4_state_rows_attempted_total{k8s_namespace_name="vector"}[1h])
+          ) > 0
+          unless
+          sum by (chain, cluster) (
+            rate(uniswap_v4_state_rows_written_total{k8s_namespace_name="vector"}[1h])
+          ) > 0
+        for: 30m
+        labels:
+          team: vector
+          severity: warning
+          component: uniswap-v4-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector uniswap-v4-indexer state rows not landing on {{ $labels.chain }}"
+          description: |
+            `uniswap-v4-indexer` on chain `{{ $labels.chain }}` has queued state
+            rows for over an hour and none of them was inserted. Either every
+            row is conflicting away — a same-build replay of an already-indexed
+            range, which is benign and ends when the replay does — or rows are
+            being dropped silently, which is the VEC-615 compressed-chunk drop
+            or a regression in the same place. Check the pod logs for a replay
+            (redelivered block numbers below the head) before treating it as a
+            drop.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerstaterowsnotlanding
 
       - alert: VectorUniswapV4IndexerNoPoolsTouched
         # Silent-empty guard, HALF TWO: blocks are advancing but NOT ONE

@@ -242,30 +242,6 @@ func TestDecodeLog(t *testing.T) {
 	})
 }
 
-// Unreachable through DecodeLog — go-ethereum fills every argument or errors —
-// so the backstop invariant is pinned directly.
-func TestAssertEveryArgumentDecoded(t *testing.T) {
-	ev := transferEvent(t)
-
-	t.Run("every argument present", func(t *testing.T) {
-		data := map[string]any{"from": nil, "to": nil, "value": nil}
-		if err := assertEveryArgumentDecoded(ev, data); err != nil {
-			t.Fatalf("assertEveryArgumentDecoded: %v", err)
-		}
-	})
-
-	t.Run("missing argument errors", func(t *testing.T) {
-		data := map[string]any{"from": nil, "to": nil}
-		err := assertEveryArgumentDecoded(ev, data)
-		if err == nil {
-			t.Fatal("expected error for a decode result missing an ABI argument")
-		}
-		if !strings.Contains(err.Error(), "value") {
-			t.Errorf("error %q does not name the missing argument", err)
-		}
-	})
-}
-
 // ============================================================================
 // GetAddrField / GetBigIntField / GetBigIntSliceField
 // ============================================================================
