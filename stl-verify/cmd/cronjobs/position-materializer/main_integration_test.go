@@ -41,7 +41,7 @@ func TestPositionMaterializer_RunOnce(t *testing.T) {
 
 	if _, err := pool.Exec(ctx, `CREATE VIEW position_itest AS SELECT
 		1::int AS chain_id, 10::bigint AS protocol_id, 'itest-instrument'::text AS instrument_key,
-		'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text AS holder_id, 5::numeric AS quantity, 'LOAN'::text AS deal_type_code,
+		'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text AS holder_id, 5::numeric AS quantity, 'LOAN'::text AS deal_type,
 		100::bigint AS block_number, 0::int AS block_version, 0::int AS processing_version,
 		'2026-01-01 00:00+00'::timestamptz AS block_timestamp`); err != nil {
 		t.Fatalf("create projection view: %v", err)
