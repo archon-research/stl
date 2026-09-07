@@ -39,8 +39,8 @@ async def test_aggregates_the_latest_snapshot_of_every_venue(engine):
 
     books = await PostgresOrderbookReader(engine).get_orderbooks(["WETH"])
     df = books["WETH"]
-    assert list(df["price"]) == [1999.0, 2000.0, 2001.0]
-    assert list(df["liquidity"]) == [5997.0, 2000.0, 4002.0]
+    assert list(df["price"]) == [2001.0, 2000.0, 1999.0]  # best price first
+    assert list(df["liquidity"]) == [4002.0, 2000.0, 5997.0]
 
 
 async def test_only_the_newest_snapshot_per_venue_is_used(engine):
