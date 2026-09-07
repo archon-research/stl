@@ -32,6 +32,7 @@ var knownCreatedAtBlocks = map[createdAtBlockKey]int64{
 	{Chain: "mainnet", Contract: common.HexToAddress("0x68215b6533c47ff9f7125ac95adf00fe4a62f79e")}:     23132230,
 	{Chain: "mainnet", Contract: common.HexToAddress("0x51c2d74017390cbbd30550179a16a1c28f7210fc")}:     24041058,
 	{Chain: "mainnet", Contract: common.HexToAddress("0xbeef2b5fd3d94469b7782aebe6364e6e6fb1b709")}:     24148141,
+	{Chain: "mainnet", Contract: common.HexToAddress("0x8292bb45bf1ee4d140127049757c2e0ff06317ed")}:     20492031,
 	{Chain: "avalanche-c", Contract: common.HexToAddress("0x28b3a8fb53b741a8fd78c0fb9a6b2393d896a43d")}: 69983672,
 	{Chain: "avalanche-c", Contract: common.HexToAddress("0x2c0adff8e114f3ca106051144353ac703d24b901")}: 72633046,
 	{Chain: "plume", Contract: common.HexToAddress("0xa5d465251fbcc907f5dd6bb2145488dfc6a2627b")}:       41311106,
