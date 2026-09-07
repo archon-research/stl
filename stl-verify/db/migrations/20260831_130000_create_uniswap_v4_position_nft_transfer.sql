@@ -90,14 +90,15 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_position_nft_transfer
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'block_timestamp',
-    tsdb.chunk_interval = '1 day',
+    -- 30 days: VEC-663's rule, as for the parent's four hypertables (a few MB/day, so the cap decides).
+    tsdb.chunk_interval = '30 days',
     tsdb.columnstore = false
 );
 
 ALTER TABLE uniswap_v4_position_nft_transfer SET (
     timescaledb.compress,
     timescaledb.compress_segmentby = 'position_manager_id',
-    timescaledb.compress_orderby = 'block_timestamp DESC'
+    timescaledb.compress_orderby = 'block_number DESC, block_version DESC, log_index DESC, processing_version DESC'
 );
 
 SELECT add_compression_policy('uniswap_v4_position_nft_transfer', INTERVAL '2 days', if_not_exists => TRUE);
@@ -182,7 +183,7 @@ CREATE TRIGGER trigger_assign_processing_version
 EXECUTE FUNCTION assign_processing_version_uniswap_v4_position_nft_transfer();
 
 COMMENT ON TABLE uniswap_v4_position_nft_transfer IS
-  '[Hypertable] One row per ERC-721 Transfer log emitted by the Uniswap V4 PositionManager: a posm position NFT being minted, moved or burned. The holder of token_id at block N is the newest row at or below it -- WHERE position_manager_id = M AND token_id = T AND block_number <= N ORDER BY block_number DESC, block_version DESC, log_index DESC, processing_version DESC LIMIT 1 -- and its to_address is the answer; log_index is part of that order because a token can change hands twice in one block. Every field is carried by the log itself, so a reorg redelivery re-decodes the new fork''s logs and appends them at the new block_version; nothing is ever re-read from chain state. Partitioned on block_timestamp (1-day chunks) rather than left plain: mainnet mints alone run to hundreds of thousands of tokens, transfers grow without bound, and no write path here reads an earlier row. Append-only via the processing_version trigger.';
+  '[Hypertable] One row per ERC-721 Transfer log emitted by the Uniswap V4 PositionManager: a posm position NFT being minted, moved or burned. The holder of token_id at block N is the newest row at or below it -- WHERE position_manager_id = M AND token_id = T AND block_number <= N ORDER BY block_number DESC, block_version DESC, log_index DESC, processing_version DESC LIMIT 1 -- and its to_address is the answer; log_index is part of that order because a token can change hands twice in one block. Every field is carried by the log itself, so a reorg redelivery re-decodes the new fork''s logs and appends them at the new block_version; nothing is ever re-read from chain state. Partitioned on block_timestamp (30-day chunks) rather than left plain: mainnet mints alone run to hundreds of thousands of tokens, transfers grow without bound, and no write path here reads an earlier row. Append-only via the processing_version trigger.';
 COMMENT ON COLUMN uniswap_v4_position_nft_transfer.position_manager_id IS
   'PK, FK->uniswap_v4_position_manager.id. Surrogate id of the PositionManager version that emitted the log. There is no chain_id column: the chain comes from this FK, exactly as it does for uniswap_v4_swap through uniswap_v4_pool.';
 COMMENT ON COLUMN uniswap_v4_position_nft_transfer.token_id IS
