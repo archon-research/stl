@@ -6,11 +6,17 @@
 -- instrument and the collateral leg is implied by instrument_key, so only the market loan leg has
 -- anything to say. Added now because a later backfill would need a superuser.
 
--- No FK to deal_type_ref: nothing FKs position_state, and an FK would hit the RI-probe privilege trap
+-- No FK to ref_deal_type: nothing FKs position_state, and an FK would hit the RI-probe privilege trap
 -- 20260714_160000 fixed for the reference tables, since the owner's UPDATE is revoked here.
 ALTER TABLE position_state ADD COLUMN IF NOT EXISTS deal_type_code text;
 
-COMMENT ON COLUMN position_state.deal_type_code IS 'Derived, nullable. Deal type of THIS observation (LOAN / BORROW / COLLATERAL), stamped by the projection because it is not recoverable from the stored row: the Morpho market loan leg nets supply against borrow, so quantity carries the magnitude and this column carries the direction. NULL where the projection emits none -- the vault and Sky legs are constant per instrument and the collateral leg is implied by instrument_key, so a reader derives those. Not FK-constrained to deal_type_ref: nothing FKs position_state, and an FK there would need the owner UPDATE this table revokes.';
+-- stl_readwrite can INSERT here directly, not only through the materializer, so the materializer's
+-- ref_deal_type check does not bind every writer. Shape only -- the vocabulary stays in ref_deal_type
+-- rather than being duplicated into a CHECK that would drift from it.
+ALTER TABLE position_state ADD CONSTRAINT position_state_deal_type_code_shape_chk
+    CHECK (deal_type_code IS NULL OR deal_type_code ~ '^[A-Z][A-Z0-9_]{0,62}$');
+
+COMMENT ON COLUMN position_state.deal_type_code IS 'Derived, nullable. Deal type of THIS observation (LOAN / BORROW / COLLATERAL), stamped by the projection because it is not recoverable from the stored row: the Morpho market loan leg nets supply against borrow, so quantity carries the magnitude and this column carries the direction. NULL where the projection emits none -- the vault and Sky legs are constant per instrument and the collateral leg is implied by instrument_key, so a reader derives those. Gated in two layers, because stl_readwrite can INSERT here directly: a CHECK on this table for shape, and membership of ref_deal_type in the materializer. No FK -- nothing FKs position_state, and an FK there would need the owner UPDATE this table revokes.';
 
 -- Body copied from 20260818_130000 with one change: deal_type_code is resolved per view and carried
 -- into the snapshot and the append. Comments are not duplicated -- that migration is immutable, so it

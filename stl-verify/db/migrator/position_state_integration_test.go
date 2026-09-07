@@ -151,6 +151,8 @@ func TestPositionState(t *testing.T) {
 	psTestGuardsADataAssertion(t, f)
 	// --- deal_type_code: carry, type gate, vocabulary gate (VEC-401) ---
 	psTestDealTypeCode(t, f)
+	// --- deal_type_code: the direct-INSERT path the materializer gates cannot reach ---
+	psTestDealTypeCodeDirectInsert(t, f)
 }
 
 // psTestRecencyGuard covers: recency guard
@@ -2236,4 +2238,119 @@ func psTestDealTypeCode(t *testing.T, f *psFixture) {
 			t.Errorf("seeded code: deal_type_code = %v, want %q", got, code)
 		}
 	})
+}
+
+// psTestDealTypeCodeDirectInsert covers the writer the materializer's gates do not bind: stl_readwrite
+// holds INSERT on position_state directly. Measured as stl_readwrite -- as the owning test role every
+// case is accepted regardless, so a superuser connection would prove nothing.
+//
+// Fails on the pre-CHECK code, which accepted 'loan', ”, '   ', a newline and a 1MB string through
+// this path, none of which UPDATE or DELETE can then repair.
+func psTestDealTypeCodeDirectInsert(t *testing.T, f *psFixture) {
+	rw := f.asReadWrite(t)
+
+	ins := func(t *testing.T, code any, bn int) error {
+		t.Helper()
+		_, err := rw.Exec(f.ctx,
+			`INSERT INTO position_state
+			   (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
+			    block_number, block_version, processing_version, block_timestamp, projection,
+			    build_id, deal_type_code)
+			 VALUES (decode(repeat('cd',32),'hex'), 1, 10, 'dt-direct', repeat('a',40), 5,
+			         $1, 0, 0, '2026-01-01'::timestamptz, 'dt.direct.view', 0, $2)`, bn, code)
+		return err
+	}
+
+	t.Run("direct INSERT rejects malformed codes", func(t *testing.T) {
+		for i, c := range []struct{ name, code string }{
+			{"wrong_case", "loan"},
+			{"empty", ""},
+			{"whitespace", "   "},
+			{"leading_space", " LOAN"},
+			{"trailing_newline", "LOAN\n"},
+			{"embedded_newline", "LOAN\n-- rubbish"},
+			{"lowercase_tail", "LOAn"},
+			{"leading_digit", "1LOAN"},
+			{"too_long", strings.Repeat("A", 64)},
+			{"one_megabyte", strings.Repeat("X", 1<<20)},
+		} {
+			if err := ins(t, c.code, 500+i); err == nil {
+				t.Errorf("%s: direct INSERT accepted %.40q, want rejection", c.name, c.code)
+			} else if !strings.Contains(err.Error(), "position_state_deal_type_code_shape_chk") {
+				t.Errorf("%s: rejected by %v, want the shape CHECK", c.name, firstLineOf(err.Error()))
+			}
+		}
+	})
+
+	// Negative controls: the CHECK must not have made the column unusable or effectively NOT NULL.
+	t.Run("direct INSERT accepts a real code and NULL", func(t *testing.T) {
+		if err := ins(t, "LOAN", 600); err != nil {
+			t.Errorf("direct INSERT of 'LOAN': %v", err)
+		}
+		if err := ins(t, nil, 601); err != nil {
+			t.Errorf("direct INSERT of NULL: %v", err)
+		}
+		if err := ins(t, strings.Repeat("A", 63), 602); err != nil {
+			t.Errorf("direct INSERT of a 63-char code (the cap): %v", err)
+		}
+	})
+
+	// The shape CHECK and ref_deal_type must stay compatible. Without this, adding a code to
+	// ref_deal_type that the CHECK rejects would pass the materializer's membership test and then be
+	// refused by the table -- a vocabulary entry nothing can ever store.
+	t.Run("every ref_deal_type code satisfies the shape CHECK", func(t *testing.T) {
+		rows, err := f.pool.Query(f.ctx, `SELECT deal_type FROM ref_deal_type ORDER BY deal_type`)
+		if err != nil {
+			t.Fatalf("list ref_deal_type: %v", err)
+		}
+		var codes []string
+		for rows.Next() {
+			var c string
+			if err := rows.Scan(&c); err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			codes = append(codes, c)
+		}
+		rows.Close()
+		if len(codes) < 5 {
+			t.Fatalf("ref_deal_type has %d codes, expected the seeded vocabulary", len(codes))
+		}
+		for i, code := range codes {
+			if err := ins(t, code, 700+i); err != nil {
+				t.Errorf("ref_deal_type code %q is not storable: %v", code, firstLineOf(err.Error()))
+			}
+		}
+	})
+}
+
+// asReadWrite returns a pool connected as stl_readwrite. The fixture's own pool owns the schema, and
+// an owner bypasses the ACLs these subtests are about.
+func (f *psFixture) asReadWrite(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	if _, err := f.pool.Exec(f.ctx, `ALTER ROLE stl_readwrite WITH LOGIN PASSWORD 'psfixture'`); err != nil {
+		t.Fatalf("give stl_readwrite a login: %v", err)
+	}
+	cfg := f.pool.Config().Copy()
+	cfg.ConnConfig.User = "stl_readwrite"
+	cfg.ConnConfig.Password = "psfixture"
+	pool, err := pgxpool.NewWithConfig(f.ctx, cfg)
+	if err != nil {
+		t.Fatalf("connect as stl_readwrite: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	var who string
+	if err := pool.QueryRow(f.ctx, `SELECT current_user`).Scan(&who); err != nil {
+		t.Fatalf("confirm role: %v", err)
+	}
+	if who != "stl_readwrite" {
+		t.Fatalf("connected as %q, want stl_readwrite", who)
+	}
+	return pool
+}
+
+func firstLineOf(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
