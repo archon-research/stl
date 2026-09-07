@@ -11,6 +11,8 @@
 import numpy as np
 import pandas as pd
 
+from app.risk_engine.core_model.convergence import monte_carlo_diagnostics
+
 
 class Liquidator:
     def __init__(
@@ -744,4 +746,5 @@ class Liquidator:
             "crr_es": round(es * 100, 6),  # % units
             "crr_var": round(crr * 100, 6),  # % units
             "hhi": round(_hhi * 100, 6) if _hhi is not None else None,
+            "mc_diagnostics": monte_carlo_diagnostics(summary_df["net_bad_debt_total"].to_numpy(), TOT_DEBT),
         }

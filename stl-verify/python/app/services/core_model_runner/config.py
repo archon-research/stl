@@ -79,8 +79,8 @@ class RunnerConfig:
         }
         market_config = market_configs[market_key]
         # load_params layers defaults -> overrides AND drops unknown keys, so a
-        # stray key in market_configs.json cannot leak into the audit trail
-        # (params is recorded verbatim in the results table).
+        # stray key in market_configs.json cannot leak into the audit trail (the
+        # results table stores params plus the writer's own mc_diagnostics key).
         params = load_params(overrides={**market_config, **env_overrides})
 
         orderbook_source = _resolve_source("ORDERBOOK_SOURCE", market_config)

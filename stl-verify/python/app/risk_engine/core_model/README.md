@@ -237,7 +237,13 @@ Params are resolved in three layers (lowest wins):
 2. `inputs/market_configs.json[market_key]` — per-market overrides
 3. `CORE_MODEL_*` env vars — runtime overrides
 
-The full params dict is stored as JSONB in `core_model_results.params` for auditability.
+The full params dict is stored as JSONB in `core_model_results.params` for auditability. The same
+JSONB carries one extra lower-case key, `mc_diagnostics` (`convergence.py`): the Monte Carlo standard
+error of the EL (`crr_el_se_pct`, and `crr_el_rel_se` = SE / EL) plus the scenario counts behind it
+(`n_scenarios`, `n_loss_scenarios`, `n_catastrophic_scenarios` = scenarios losing more than
+`catastrophic_loss_pct` of total debt). The service logs `crr_el not converged` with the reason when
+`crr_el_rel_se` exceeds `MAX_REL_SE` or fewer than `MIN_CATASTROPHIC_SCENARIOS` catastrophic scenarios
+were drawn. At the `N_MC=100` every overlay pins today, no market can pass, so the line is info level.
 
 ### Step 3 — Query via the risk API
 

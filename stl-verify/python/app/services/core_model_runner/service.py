@@ -13,6 +13,7 @@ from pathlib import Path
 from app.ports.core_model_data_reader import CoreModelDataReader
 from app.ports.core_model_results_writer import CoreModelResultsWriter
 from app.risk_engine.core_model.config import INPUTS_DIR
+from app.risk_engine.core_model.convergence import convergence_warnings
 from app.risk_engine.core_model.runner import CoreModelConfig, CoreModelPipelineResult, run
 from app.services.core_model_runner.config import RunnerConfig
 
@@ -30,7 +31,19 @@ async def _run_market(
 ) -> CoreModelPipelineResult:
     config = CoreModelConfig(market_key=cfg.market_key, params=cfg.params)
     result = await run(config, data_reader, _INPUTS)
-    logger.info("pipeline complete market_key=%s crr_el_pct=%s", result.market_key, result.crr_el_pct)
+    diagnostics = result.mc_diagnostics
+    logger.info(
+        "pipeline complete market_key=%s crr_el_pct=%s crr_el_se_pct=%s crr_el_rel_se=%s n_catastrophic_scenarios=%s",
+        result.market_key,
+        result.crr_el_pct,
+        diagnostics.crr_el_se_pct,
+        diagnostics.crr_el_rel_se,
+        diagnostics.n_catastrophic_scenarios,
+    )
+    # Info, not warning: every overlay pins N_MC=100, where no market can pass,
+    # so a warning would fire on every run. The row carries the durable signal.
+    for reason in convergence_warnings(diagnostics):
+        logger.info("crr_el not converged market_key=%s n_mc=%s: %s", result.market_key, result.n_mc, reason)
     await writer.insert(result)
     logger.info("result written to core_model_results market_key=%s", result.market_key)
     return result
