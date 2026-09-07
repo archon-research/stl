@@ -198,6 +198,7 @@ class AllocationRepository:
             raise ValueError(f"Database query failed while fetching protocols: {exc}") from exc
 
     async def list_primes(self, allowed_vaults: Sequence[EthAddress] | None = None) -> list[Prime]:
+        params = {"allowed_vaults": (None if allowed_vaults is None else [v.to_bytes() for v in allowed_vaults])}
         try:
             async with self._engine.connect() as conn:
                 result = await conn.execute(
@@ -217,7 +218,7 @@ class AllocationRepository:
                         ORDER BY pp.proxy_address, pp.chain_id
                         """
                     ),
-                    {"allowed_vaults": (None if allowed_vaults is None else [v.to_bytes() for v in allowed_vaults])},
+                    params,
                 )
                 primes: list[Prime] = []
                 for row in result:
@@ -245,7 +246,13 @@ class AllocationRepository:
         except Exception as exc:
             logger.error(
                 "Failed to fetch primes from database",
-                extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+                # The engine hides bind parameters from the error text, so the
+                # allow-list size comes from here or not at all.
+                extra={
+                    "params": _loggable_params(params),
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
                 exc_info=True,
             )
             raise ValueError(f"Database query failed while fetching primes: {exc}") from exc
