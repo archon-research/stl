@@ -30,7 +30,7 @@ export function useProvenanceRedirect(
       search: (previous: Record<string, unknown>) => ({
         ...previous,
         reference: undefined,
-        source: fallback === 'both' ? undefined : fallback,
+        source: fallback === 'reference' ? undefined : fallback,
       }),
     });
     globalThis.location.assign(href);
