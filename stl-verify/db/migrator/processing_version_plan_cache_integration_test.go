@@ -22,7 +22,7 @@ const minProcessingVersionTriggerFunctions = 43
 
 // The next_processing_version_* family — the rule shared by a table's INSERT and its
 // trigger — starts at morpho_adapter_state (20260821_120000).
-const minProcessingVersionHelperFunctions = 5 // morpho_adapter_state + the four uniswap_v4 fact tables
+const minProcessingVersionHelperFunctions = 6 // morpho_adapter_state, the four uniswap_v4 fact tables, uniswap_v4_position_nft_transfer
 
 type processingVersionTriggerFunction struct {
 	name       string
