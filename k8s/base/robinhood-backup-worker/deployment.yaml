@@ -23,6 +23,13 @@ spec:
           # Distinct image key — the overlay maps this to the shared backup-worker
           # ECR repo. Same binary as backup-worker; chain is selected via CHAIN_ID.
           image: robinhood-backup-worker
+          env:
+            - name: IMAGE_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-verify-image-digests
+                  key: robinhood-backup-worker
+                  optional: true
           envFrom:
             - configMapRef:
                 name: otel-config
