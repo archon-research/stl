@@ -55,3 +55,5 @@
 ./internal/services/morpho_v2_bootstrap
 ./internal/pkg/blockchain/blocktime
 ./cmd/backfillers/block-republisher
+./internal/services/uniswapv4indexer
+./internal/pkg/tickbitmap

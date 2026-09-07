@@ -106,6 +106,15 @@ func (e BlockEvent) ParsedBlockHash() (common.Hash, error) {
 	return common.BytesToHash(raw), nil
 }
 
+// BlockTime rejects a non-positive timestamp: time.Unix(0, 0) is not the zero
+// Time, so it survives IsZero() guards and files the block in a 1970 chunk.
+func (e BlockEvent) BlockTime() (time.Time, error) {
+	if e.BlockTimestamp <= 0 {
+		return time.Time{}, fmt.Errorf("block %d v%d: missing or non-positive block timestamp %d on event", e.BlockNumber, e.Version, e.BlockTimestamp)
+	}
+	return time.Unix(e.BlockTimestamp, 0).UTC(), nil
+}
+
 // EventSink defines the interface for publishing block data events.
 // Events contain only metadata; actual data is in the cache.
 type EventSink interface {
