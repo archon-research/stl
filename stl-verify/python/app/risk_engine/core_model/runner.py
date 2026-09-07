@@ -19,7 +19,7 @@ import pandas as pd
 from app.risk_engine.core_model.calibrator import Calibrator
 from app.risk_engine.core_model.convergence import MonteCarloDiagnostics
 from app.risk_engine.core_model.forecaster import Simulator
-from app.risk_engine.core_model.importer import change_user_ltvs
+from app.risk_engine.core_model.importer import change_user_ltvs, drop_small_borrowers
 from app.risk_engine.core_model.liquidator import Liquidator
 
 if TYPE_CHECKING:
@@ -105,6 +105,7 @@ async def _run_pipeline(
         galaxy_type=p["GALAXY_TYPE"],
     )
 
+    users_df = drop_small_borrowers(users_df, p["MIN_BORROW_USD"])
     if p["WORST_CASE"]:
         users_df = change_user_ltvs(users_df, market_df)
 

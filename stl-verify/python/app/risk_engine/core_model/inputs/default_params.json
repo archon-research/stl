@@ -93,6 +93,13 @@
     "value": false,
     "description": "Replace observed borrower LTVs with the market's worst-case (liquidation-threshold) LTVs"
   },
+  "MIN_BORROW_USD": {
+    "value": 100.0,
+    "description": "Borrowers with total debt below this USD amount are dropped before the liquidation simulation. Liquidator memory and time scale with the borrower count; live markets carry many supply-only and dust rows. On live SparkLend (Sep 2026) 100 USD keeps 100.00% of debt (to 4 decimals) with 2-6x fewer rows. 0 keeps every row.",
+    "type": "float",
+    "min": 0.0,
+    "max": 100000.0
+  },
   "VOL_FLOOR_PCT": {
     "value": 0.75,
     "description": "GARCH conditional vol forecast is floored at this percentile of the full-history 21-day rolling realised vol; prevents capital requirements collapsing in low-vol regimes",

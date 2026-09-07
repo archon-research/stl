@@ -868,6 +868,6 @@ data:
   # interval into it on startup, so a redeploy is enough (stl-verify/AGENTS.md).
   CORE_MODEL_RUN_INTERVAL_HOURS: "24"
   # The model's design point. The deployment's memory limit is sized from a
-  # full-pass measurement at this value (7.5 GiB peak on live staging data,
+  # full-pass measurement at this value (1.6 GiB peak on live staging data,
   # k8s/base/core-model-runner/deployment.yaml); raise both together.
   CORE_MODEL_N_MC: "10000"

@@ -51,16 +51,16 @@ spec:
           # limit). Memory is 2 * borrowers * N_MC * 15 * 8 bytes (the
           # liquidator's two USD tensors) and the markets run one after another
           # in one process, so the pod peak is the heaviest market. Measured on
-          # live staging data at N_MC=10000 (2026-09-07): full 9-market pass
-          # 7.5 GiB peak RSS, 25 min wall on a laptop; sparklend_dai (2,204
-          # borrowers) sets the peak, every other market is under 2.3 GiB.
-          # Re-measure before raising N_MC or when a market's borrower count
-          # grows; VEC-662 tracks removing the tensors so this stops scaling.
+          # live staging data at N_MC=10000 with MIN_BORROW_USD=100
+          # (2026-09-07): full 9-market pass 1.56 GiB peak RSS, 24 min wall on
+          # a laptop (7.5 GiB without the filter: sparklend_dai has 2,204 rows,
+          # 1,580 of them with zero debt). Re-measure before raising N_MC or
+          # lowering MIN_BORROW_USD; VEC-662 tracks removing the tensors.
           resources:
             requests:
               cpu: "1"
-              memory: "8Gi"
+              memory: "2Gi"
             limits:
               cpu: "4"
-              memory: "10Gi"
+              memory: "4Gi"
       terminationGracePeriodSeconds: 60

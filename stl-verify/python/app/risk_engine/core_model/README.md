@@ -121,6 +121,7 @@ runner.py             Service entry point — orchestrates the full pipeline
 | `FOCUS_ON_NEGATIVE` | `False` | Restrict jump simulation to downside only |
 | `VOL_FLOOR_PCT` | `0.75` | Floor GARCH forecast vol at this percentile of the full historical rolling vol |
 | `WORST_CASE` | `False` | Use worst-case LTVs instead of observed LTVs |
+| `MIN_BORROW_USD` | `100` | Drop borrowers with less total debt before the liquidation simulation (memory and time scale with borrower count; `0` keeps every row) |
 | `LOAN_TOKEN` | `USDC` | Filter positions by loan token (`ALL` = no filter) |
 | `SEED` | `0` | Global random seed |
 
