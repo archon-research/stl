@@ -13,7 +13,6 @@
     "entity_master",
     "entity_ref_codes",
     "migrations",
-    "position_classification",
     "position_entity_link",
     "ref_asset_class_l1",
     "ref_corporate_action_type",

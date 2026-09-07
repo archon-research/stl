@@ -215,19 +215,10 @@ END $fn$;
 
 COMMENT ON FUNCTION materialize_position_projection(regclass, integer) IS '[Operational] VEC-402..407 shared materializer: validate a per-protocol projection view against the position_state column contract, fail hard on contract/type drift, double-emitted keys, or cross-view ownership violations; keep-stored-and-warn on a re-emitted key whose block_timestamp or quantity drifted, then -- evaluating the projection ONCE into a temp table every check reads -- APPEND the new observations. deal_type is OPTIONAL, not part of the required contract, so a projection omitting it still works and stores NULL; a projection emitting it as any string type has the value copied, and one emitting a lossily-narrow string type, or a value that changes a STORED observation''s deal type, is REJECTED. Everything else about the value is the table''s FK to ref_deal_type, not this function''s job. position_id is recomputed via position_id(); serialized per view by an advisory lock on the view''s canonical name. Idempotent; run out of band. Returns rows INSERTED.';
 
--- position_classification keeps its row-per-position role (VEC-401); only the column name changes, so
--- one concept carries one name here and on the observation. Its own migration is applied and
--- immutable, so the rename lands here; a rename is metadata-only and its FK follows it.
-DO $rn$
-BEGIN
-    IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
-                WHERE attrelid = 'public.position_classification'::regclass
-                  AND attname = 'deal_type_code' AND attnum > 0 AND NOT attisdropped) THEN
-        ALTER TABLE position_classification RENAME COLUMN deal_type_code TO deal_type;
-    END IF;
-END
-$rn$;
-
-COMMENT ON COLUMN position_classification.deal_type IS 'Roles: FK->ref_deal_type.deal_type. Renamed from deal_type_code so one concept carries one name here and on position_state. One row per position: this is the position''s standing classification, where position_state.deal_type is the deal type OF AN OBSERVATION, which differs when a Morpho market holder flips between net supplier and net borrower.';
+-- position_classification is retired. It was a classification engine over the spine, but the engine
+-- is the projection's CASE expression and its result now lands on the observation, where a position
+-- that flips LOAN/BORROW can be represented; a second, MUTABLE copy per position cannot, and nothing
+-- ever wrote it. direction derives from ref_deal_type; collateral_status was unused. Project lead decision.
+DROP TABLE IF EXISTS position_classification;
 
 INSERT INTO migrations (filename) VALUES ('20260904_120200_add_position_state_deal_type.sql') ON CONFLICT (filename) DO NOTHING;
