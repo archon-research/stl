@@ -150,11 +150,14 @@ func TestUniswapV4MigrationRegistersHypertables(t *testing.T) {
 // order-by, and a chunk interval typed in the CREATE is only real if the dimension
 // carries it. 30 days is VEC-663's cap; the version tuple leads the order-by so a
 // compressed batch is in the order of the latest-per-key read.
-var uniswapV4HypertableCompressionOrder = map[string]string{
-	"uniswap_v4_pool_state":      "block_number DESC,block_version DESC,processing_version DESC,block_timestamp DESC",
-	"uniswap_v4_swap":            "block_number DESC,block_version DESC,log_index DESC,processing_version DESC,block_timestamp DESC",
-	"uniswap_v4_liquidity_event": "block_number DESC,block_version DESC,log_index DESC,processing_version DESC,block_timestamp DESC",
-	"uniswap_v4_pool_event":      "block_number DESC,block_version DESC,log_index DESC,processing_version DESC,block_timestamp DESC",
+type uniswapV4CompressionSettings struct{ segmentby, orderby string }
+
+var uniswapV4HypertableCompressionOrder = map[string]uniswapV4CompressionSettings{
+	"uniswap_v4_pool_state":            {"pool_id", "block_number DESC,block_version DESC,processing_version DESC,block_timestamp DESC"},
+	"uniswap_v4_swap":                  {"pool_id", "block_number DESC,block_version DESC,log_index DESC,processing_version DESC,block_timestamp DESC"},
+	"uniswap_v4_liquidity_event":       {"pool_id", "block_number DESC,block_version DESC,log_index DESC,processing_version DESC,block_timestamp DESC"},
+	"uniswap_v4_pool_event":            {"pool_id", "block_number DESC,block_version DESC,log_index DESC,processing_version DESC,block_timestamp DESC"},
+	"uniswap_v4_position_nft_transfer": {"position_manager_id", "block_number DESC,block_version DESC,log_index DESC,processing_version DESC,block_timestamp DESC"},
 }
 
 func TestUniswapV4HypertablesChunkIntervalAndCompressionOrder(t *testing.T) {
@@ -162,7 +165,7 @@ func TestUniswapV4HypertablesChunkIntervalAndCompressionOrder(t *testing.T) {
 
 	for _, table := range uniswapV4Hypertables {
 		t.Run(table, func(t *testing.T) {
-			wantOrder, known := uniswapV4HypertableCompressionOrder[table]
+			want, known := uniswapV4HypertableCompressionOrder[table]
 			if !known {
 				t.Fatalf("%s has no expected compression order: add it to uniswapV4HypertableCompressionOrder", table)
 			}
@@ -182,11 +185,11 @@ func TestUniswapV4HypertablesChunkIntervalAndCompressionOrder(t *testing.T) {
 				WHERE hypertable::text = $1`, table).Scan(&segmentby, &orderby); err != nil {
 				t.Fatalf("reading %s's compression settings: %v", table, err)
 			}
-			if segmentby != "pool_id" {
-				t.Errorf("%s segmentby = %q, want pool_id", table, segmentby)
+			if segmentby != want.segmentby {
+				t.Errorf("%s segmentby = %q, want %q", table, segmentby, want.segmentby)
 			}
-			if orderby != wantOrder {
-				t.Errorf("%s orderby = %q, want %q", table, orderby, wantOrder)
+			if orderby != want.orderby {
+				t.Errorf("%s orderby = %q, want %q", table, orderby, want.orderby)
 			}
 		})
 	}
