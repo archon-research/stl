@@ -18,6 +18,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -39,6 +40,11 @@ ALLOW_LIST = [EthAddress("0x" + pair * 20) for pair in ("a1", "b2", "c3")]
 
 # What SQLAlchemy writes in place of the parameters when they are hidden.
 _HIDDEN_MARKER = "[SQL parameters hidden due to hide_parameters=True]"
+
+# The bucketed query takes a mandatory window; any instant does, since the
+# statement fails on the missing table before the window is applied.
+_WINDOW_END = datetime(2026, 1, 1, tzinfo=UTC)
+_WINDOW_START = _WINDOW_END - timedelta(days=1)
 
 
 def _renderings(vault: EthAddress) -> tuple[str, ...]:
@@ -88,8 +94,8 @@ def _flatten(line: str) -> str:
 async def broken_engine(async_db_url: str) -> Any:
     """An engine over a schema whose ``prime`` table is gone.
 
-    Both queries under test join it, so every read fails with a real 42P01 from
-    the driver rather than a hand-built exception. The module owns its own
+    All three queries under test join it, so every read fails with a real 42P01
+    from the driver rather than a hand-built exception. The module owns its own
     database, so the rename is not visible to anything else.
     """
     engine = create_db_engine(async_db_url)
@@ -108,6 +114,16 @@ async def broken_engine(async_db_url: str) -> Any:
         pytest.param(
             lambda repo: repo.list_allocation_activity(allowed_vaults=ALLOW_LIST, limit=10),
             id="list_allocation_activity",
+        ),
+        pytest.param(
+            lambda repo: repo.list_activity_buckets(
+                allowed_vaults=ALLOW_LIST,
+                from_timestamp=_WINDOW_START,
+                to_timestamp=_WINDOW_END,
+                bucket_seconds=3600.0,
+                limit=10,
+            ),
+            id="list_activity_buckets",
         ),
     ],
 )
@@ -128,7 +144,9 @@ async def test_a_failed_prime_filtered_query_logs_no_vault_address(
         for vault in ALLOW_LIST:
             for rendering in _renderings(vault):
                 assert rendering not in haystack, f"allow-list entry {vault} reached a log line as {rendering!r}"
-    assert any(_HIDDEN_MARKER in haystack for haystack in haystacks), (
-        f"no rendered bind parameters in {haystacks}; the query failed before binding, "
+    # Asserted against the record, not haystacks: the re-raised string carries the
+    # marker too, and matching on that would leave the loop above unguarded.
+    assert any(_HIDDEN_MARKER in _flatten(line) for line in lines), (
+        f"no rendered bind parameters in {lines}; the query failed before binding, "
         "so the assertions above passed vacuously"
     )
