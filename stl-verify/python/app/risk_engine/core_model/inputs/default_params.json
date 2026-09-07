@@ -95,7 +95,7 @@
   },
   "MIN_BORROW_USD": {
     "value": 100.0,
-    "description": "Borrowers with total debt below this USD amount are dropped before the liquidation simulation. Liquidator memory and time scale with the borrower count; live markets carry many supply-only and dust rows. On live SparkLend (Sep 2026) 100 USD keeps 100.00% of debt (to 4 decimals) with 2-6x fewer rows. 0 keeps every row.",
+    "description": "Borrowers with total debt below this USD amount are dropped before the liquidation simulation. Liquidator memory and time scale with the borrower count times N_MC. 100 USD reproduces the population of the reference parquet snapshots (their 5th percentile of debt is ~110 USD on every SparkLend market and they hold 99.9999% of debt above it); the live positions feed adds ~1,600 sub-dollar dust rows on sparklend_dai alone. 0 keeps every row.",
     "type": "float",
     "min": 0.0,
     "max": 100000.0

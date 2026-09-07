@@ -61,7 +61,9 @@ def merge_asks(asks_per_venue: list[list[list[str]]]) -> pd.DataFrame:
     """Merge per-venue ask levels into one book: price, sz, liquidity.
 
     Levels stay separate rows (depth at the same price on two venues is twice
-    the depth), sorted by price ascending as the liquidator consumes them.
+    the depth), sorted best price first (descending) like the parquet books:
+    ``Liquidator.slippage_calculator_cum`` walks the array in stored order, so
+    an ascending book would consume the worst levels first.
     """
     rows: list[tuple[float, float]] = []
     for levels in asks_per_venue:
@@ -71,7 +73,7 @@ def merge_asks(asks_per_venue: list[list[list[str]]]) -> pd.DataFrame:
                 rows.append((price, sz))
     if not rows:
         raise ValueError("no ask levels after merging venues")
-    df = pd.DataFrame(rows, columns=["price", "sz"]).sort_values("price", ignore_index=True)
+    df = pd.DataFrame(rows, columns=["price", "sz"]).sort_values("price", ascending=False, ignore_index=True)
     df["liquidity"] = df["price"] * df["sz"]
     return df
 

@@ -38,14 +38,14 @@ def test_routing_matches_the_model_readme_table(token, book):
     assert book_for(token) == book
 
 
-def test_merge_sorts_across_venues_by_price():
+def test_merge_sorts_across_venues_best_price_first():
     df = merge_asks(
         [
             [["100.0", "1.0"], ["102.0", "2.0"]],  # venue A
             [["101.0", "3.0"]],  # venue B
         ]
     )
-    assert list(df["price"]) == [100.0, 101.0, 102.0]
+    assert list(df["price"]) == [102.0, 101.0, 100.0]
 
 
 def test_merge_keeps_same_price_levels_from_different_venues():
