@@ -22,10 +22,10 @@ The financial model logic (ARMA-GARCH calibration, copula simulation, liquidatio
 |---|---|
 | `main.py` replaced by `runner.py` | Original `main.py` printed results to stdout. `runner.py` is a pure function that accepts typed inputs and returns a typed `CoreModelPipelineResult` dataclass, making it testable and composable. |
 | Import paths updated (`from app.risk_engine.core_model.X import Y`) | Required for Python package structure; original used bare module imports only valid when run from the same directory. |
-| `Parallel(n_jobs=-1)` changed: `n_jobs=4` in the calibrator backtest, `n_jobs=1` in the Monte Carlo | `-1` consumed all available CPUs and caused OOM in constrained environments. Note the MC has **always run sequentially**: the earlier `Parallel(jobs=4)` was a typo joblib silently swallowed (`Parallel.__init__` forwards unknown kwargs to the backend), leaving `n_jobs` at its default of 1. The explicit `n_jobs=1` changes nothing at runtime — it turns the accident into a decision. Do not "restore" parallelism: per-scenario tensors peak at ~8.0 GiB for the heaviest market (measured at N_MC=10000), and loky workers would multiply that past any pod memory limit. The backtest parallelises fine — its per-window state is small. |
+| `Parallel(n_jobs=-1)` changed: `n_jobs=4` in the calibrator backtest, `n_jobs=1` in the Monte Carlo | `-1` consumed all available CPUs and caused OOM in constrained environments. Note the MC has **always run sequentially**: the earlier `Parallel(jobs=4)` was a typo joblib silently swallowed (`Parallel.__init__` forwards unknown kwargs to the backend), leaving `n_jobs` at its default of 1. The explicit `n_jobs=1` changes nothing at runtime — it turns the accident into a decision. Do not "restore" parallelism: per-scenario tensors peak at ~7.5 GiB for the heaviest live market before the `MIN_BORROW_USD` filter (~1.4 GiB after; measured at N_MC=10000), and loky workers would multiply that past any pod memory limit. The backtest parallelises fine — its per-window state is small. |
 | `orderbook_data` lookup lowercased (`symbol.lower()`) | Original assumed the working directory was case-insensitive (macOS). Lowercase normalisation is required for Linux where the service runs. |
 | Bare `except:` changed to `except Exception:` | Required by the project linter (ruff). |
-| `importer.py` reduced to `change_user_ltvs` only | `load_protocol_data` and `load_price_data` were dead code replaced by the `CoreModelDataReader` port. `load_orderbook_data` moved to `ParquetCoreModelDataReader.get_orderbooks()` (also added to the port), so all I/O goes through the same abstraction. `Liquidator` now accepts pre-loaded orderbooks instead of loading them internally
+| `importer.py` reduced to `change_user_ltvs` (later joined by `drop_small_borrowers`, the `MIN_BORROW_USD` filter) | `load_protocol_data` and `load_price_data` were dead code replaced by the `CoreModelDataReader` port. `load_orderbook_data` moved to `ParquetCoreModelDataReader.get_orderbooks()` (also added to the port), so all I/O goes through the same abstraction. `Liquidator` now accepts pre-loaded orderbooks instead of loading them internally
 | Dead variable assignments removed (`slippage`, `P`, `new_supply_qty_df`) | Three variables were initialized then immediately overwritten before first use, producing no-op assignments. Removed to reduce noise. |
 | `JUMPS + HOURLY_CONV` raises `NotImplementedError` | The original code called `importer.load_data_yahoo()` which never existed in this codebase (yfinance is not a service dependency). The dead call is replaced with an explicit error so the combination is rejected at runtime rather than crashing with `AttributeError`. |
 | Three `# TODO` comments added | Document known bugs in the original code that were not fixed during integration (see **Known Issues** section). |
@@ -170,8 +170,8 @@ slightly smaller exposure. Measured on live staging data (Sep 2026) at the 100 U
 | sparklend_usdc | 208 / 343 | 0.0004 % | 1.4 → 0.9 GiB |
 | sparklend_usds | 336 / 578 | 0.0001 % | 2.2 → 1.4 GiB |
 | sparklend_usdt | 331 / 389 | 0.0001 % | 1.6 → 1.3 GiB |
-| morpho_cbbtc-usdc | 322 / 360 | 0.0001 % | 1.5 GiB |
-| morpho_weth-usdc | 65 / 114 | 0.014 % | 0.7 GiB |
+| morpho_cbbtc-usdc | 322 / 360 | 0.0001 % | 1.5 GiB unfiltered (not re-measured) |
+| morpho_weth-usdc | 65 / 114 | 0.014 % | 0.7 GiB unfiltered (not re-measured) |
 
 On the parquet snapshot of sparklend_dai the same filter drops 0.0001 % of debt and moves the EL from
 0.017458 % to 0.017452 %. The runner logs the dropped count and share on every run. A one-cent
@@ -270,8 +270,8 @@ error of the EL (`crr_el_se_pct`, and `crr_el_rel_se` = SE / EL) plus the scenar
 (`n_scenarios`, `n_loss_scenarios`, `n_catastrophic_scenarios` = scenarios losing more than
 `catastrophic_loss_pct` of total debt). The service logs a `crr_el not converged` warning with the
 reason when `crr_el_rel_se` exceeds `MAX_REL_SE` or fewer than `MIN_CATASTROPHIC_SCENARIOS`
-catastrophic scenarios were drawn. At the overlays' `N_MC=10000` most markets pass; a smoke-test run
-at `N_MC=100` warns on every market, which is expected.
+catastrophic scenarios were drawn. At the overlays' `N_MC=10000` eight of nine markets pass; a smoke-test
+run at `N_MC=100` warns on most markets (too few catastrophic draws), which is expected.
 
 ### Step 3 — Query via the risk API
 
@@ -315,7 +315,8 @@ app/risk_engine/core_model/
 ├── forecaster.py                 Monte Carlo price simulation
 ├── aggregator.py                 Cross-asset copula construction
 ├── liquidator.py                 Liquidation mechanics and CRR calculation
-├── importer.py                   Data loading utilities (change_user_ltvs etc.)
+├── convergence.py                Monte Carlo standard error of the EL and the convergence verdict
+├── importer.py                   Position preprocessing (MIN_BORROW_USD filter, worst-case LTVs)
 ├── config.py                     Parameter defaults (inputs/default_params.json)
 ├── core_model_mapping.py         asset_id -> market_key mapping loader
 ├── mappings/

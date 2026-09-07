@@ -76,8 +76,9 @@ patches:
   # Local kind indexes no positions, oracle prices or CEX books, so the
   # CORE_MODEL_*_SOURCE vars (the documented global override) force the model
   # back to its parquet snapshots. On stale snapshots the daily tick has no
-  # statistical value, so N_MC=100 instead of the 10000 default (~25 min,
-  # 7.5 GiB) keeps the tick minutes-long while still exercising the pipeline.
+  # statistical value, so N_MC=100 instead of the 10000 default (tens of GiB
+  # on the parquet Morpho snapshots) keeps the tick minutes-long while still
+  # exercising the pipeline.
   - patch: |
       apiVersion: apps/v1
       kind: Deployment

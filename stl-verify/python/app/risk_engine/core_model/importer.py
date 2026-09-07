@@ -9,9 +9,10 @@ def drop_small_borrowers(users_df: pd.DataFrame, min_borrow_usd: float) -> pd.Da
     """Keep only borrowers whose total debt is at least ``min_borrow_usd``.
 
     The liquidator's memory and loop time grow with the borrower count, and a
-    live market carries many supply-only or dust rows that cannot produce bad
-    debt. Logs what was dropped so the exposure the CRR is quoted against is
-    visible; ``min_borrow_usd <= 0`` keeps every row, including zero-debt ones.
+    live market carries many sub-dollar dust rows whose losses are noise (README
+    Known Issue #11 makes them default whenever unsafe). Logs what was dropped
+    so the exposure the CRR is quoted against is visible; ``min_borrow_usd <= 0``
+    keeps every row.
     """
     if min_borrow_usd <= 0:
         return users_df
