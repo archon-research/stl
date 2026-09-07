@@ -40,9 +40,10 @@ MORPHO_VAULT_USERS_SQL = """
 
 A MetaMorpho V1/V1.1 vault (vault_version 1, 2) supplies to Morpho Blue markets itself.
 A VaultV2 (vault_version 3) holds nothing directly: its current member adapters of type 1
-(Morpho Blue market adapters) do. Adapters of type 2 (nested MetaMorpho V1 vault) and 99
-(unclassified) are not walked, so their value shows up as idle loan token
-(total_assets minus the walked positions), not as the collateral behind them.
+(Morpho Blue market adapters) do. Every other adapter type (2 nested MetaMorpho V1 vault,
+3-5 external ERC-4626 / Box / Compound V3, 99 unclassified) is not walked, so its value
+shows up as idle loan token (total_assets minus the walked positions), not as the
+collateral behind it.
 """
 
 _MORPHO_BACKED_BREAKDOWN_SQL = f"""

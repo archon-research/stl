@@ -211,7 +211,7 @@ async def _insert_morpho_market_position(
     supply_assets: str,
     block_number: int,
 ) -> None:
-    """Insert a market position for the vault user (supply only, no borrowing)."""
+    """Insert a market position (supply only, no borrowing)."""
     await conn.execute(
         """
         INSERT INTO morpho_market_position

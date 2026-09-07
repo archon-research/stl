@@ -232,8 +232,17 @@ async def test_v2_vault_resolves_markets_through_member_adapters(repository, tes
         token_ids=[test_ids["weth_id"], test_ids["cbbtc_id"]],
     )
 
-    assert set(result) == {test_ids["weth_id"]}
     assert result[test_ids["weth_id"]].liquidation_threshold == Decimal("0.86")
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_v2_vault_ignores_removed_adapter_markets(repository, test_ids: dict[str, int]) -> None:
+    result = await repository.get_params(
+        backed_asset_id=test_ids["v2_vault_id"],
+        token_ids=[test_ids["weth_id"], test_ids["cbbtc_id"]],
+    )
+
+    assert test_ids["cbbtc_id"] not in result
 
 
 @pytest.mark.asyncio(loop_scope="module")

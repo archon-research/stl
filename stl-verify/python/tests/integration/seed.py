@@ -61,8 +61,7 @@ async def insert_morpho_adapter(
 ) -> None:
     """Insert a VaultV2 Morpho Blue market adapter (type 1) added to its vault at ``block``.
 
-    ``removed_at_block`` appends a later RemoveAdapter observation, so the adapter
-    drops out of ``morpho_adapter_current``.
+    ``removed_at_block`` appends a RemoveAdapter row so the adapter leaves ``morpho_adapter_current``.
     """
     adapter_id = await conn.fetchval(
         """
