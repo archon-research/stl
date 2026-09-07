@@ -7,7 +7,7 @@ include lint.mk
 .PHONY: all test test-race test-integration test-integration-shard integration-shard-check ci-service-check test-templates-clean lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-watcher-robinhood run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax run-allocation-tracker-robinhood help ci ci-checks install-hooks format \
 	dev-up dev-up-rebuild dev-up-workers dev-up-or-resume dev-preflight dev-env dev-secrets dev-env-files dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
-		_docker-release-image _docker-release-go-service \
+		_docker-release-image _docker-release-go-service _docker-build-go-service _docker-push-go-service \
 		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-fluid-vault-indexer-internal _docker-release-dex-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-psm3-indexer-internal _docker-release-cex-orderbook-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-transform-bootstrap-internal _docker-release-cronjob-%-internal \
 		docker-build-offchain-price-backfill docker-release-offchain-price-backfill _docker-release-offchain-price-backfill-internal \
 		docker-build-reference-capital-backfill docker-release-reference-capital-backfill _docker-release-reference-capital-backfill-internal \
@@ -1168,6 +1168,77 @@ _docker-release-go-service:
 		$(if $(GO_TAG),IMG_TAG="$(GO_TAG)") \
 		$(if $(GO_LATEST_TAG),IMG_LATEST_TAG="$(GO_LATEST_TAG)")
 
+_docker-build-go-service:
+ifdef GO_LOCAL_TAG
+ifdef LOCAL
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=$(GO_CMD_PATH) --build-arg BIN=$(GO_BIN) -t $(GO_LOCAL_TAG) -f Dockerfile.common .
+else
+	@echo "==> Building $(GO_NAME) Docker image for ARM64..."
+	@echo "    Repository: $(GO_REPO)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		--build-arg CMD_PATH=$(GO_CMD_PATH) \
+		--build-arg BIN=$(GO_BIN) \
+		-f Dockerfile.common \
+		-t $(GO_REPO):$(IMAGE_TAG) \
+		-t $(GO_REPO):latest \
+		--load .
+endif
+else
+	@echo "==> Building $(GO_NAME) Docker image for ARM64..."
+	@echo "    Repository: $(GO_REPO)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		--build-arg CMD_PATH=$(GO_CMD_PATH) \
+		--build-arg BIN=$(GO_BIN) \
+		-f Dockerfile.common \
+		-t $(GO_REPO):$(IMAGE_TAG) \
+		-t $(GO_REPO):latest \
+		--load .
+endif
+
+_docker-push-go-service:
+	@echo "==> Pushing $(GO_NAME) Docker image to ECR..."
+	docker push $(GO_REPO):$(IMAGE_TAG)
+	docker push $(GO_REPO):latest
+
+define GO_SERVICE_TARGETS
+docker-build-$(1):
+	@$$(MAKE) _docker-build-go-service GO_NAME="$(2)" GO_REPO="$$(ECR_REPO_$(3))" GO_CMD_PATH=$(4) GO_BIN=$(5)$(6)
+
+docker-push-$(1): ecr-login
+	@$$(MAKE) _docker-push-go-service GO_NAME="$(2)" GO_REPO="$$(ECR_REPO_$(3))"
+
+docker-build-$(1)-staging:
+	@$$(MAKE) docker-build-$(1) ENV=sentinelstaging
+
+docker-push-$(1)-staging:
+	@$$(MAKE) docker-push-$(1) ENV=sentinelstaging
+endef
+
+$(eval $(call GO_SERVICE_TARGETS,backup,Backup Worker,BACKUP,cmd/workers/raw-data-backup,raw-data-backup,))
+$(eval $(call GO_SERVICE_TARGETS,oracle-price-worker,Oracle Price Worker,ORACLE_PRICE_WORKER,cmd/workers/oracle-price-indexer,oracle_price_worker, GO_LOCAL_TAG=stl-oracle-price-worker:$(LOCAL_TAG)))
+$(eval $(call GO_SERVICE_TARGETS,sparklend-position-tracker,SparkLend Position Tracker,SPARKLEND_POSITION_TRACKER,cmd/workers/sparklend-indexer,sparklend_position_tracker, GO_LOCAL_TAG=stl-sparklend-position-tracker:$(LOCAL_TAG)))
+$(eval $(call GO_SERVICE_TARGETS,morpho-indexer,Morpho Indexer,MORPHO_INDEXER,cmd/workers/morpho-indexer,morpho-indexer, GO_LOCAL_TAG=stl-morpho-indexer:$(LOCAL_TAG)))
+$(eval $(call GO_SERVICE_TARGETS,fluid-vault-indexer,Fluid Vault Indexer,FLUID_VAULT_INDEXER,cmd/workers/fluid-vault-indexer,fluid-vault-indexer, GO_LOCAL_TAG=stl-fluid-vault-indexer:$(LOCAL_TAG)))
+$(eval $(call GO_SERVICE_TARGETS,dex-indexer,DEX Indexer,DEX_INDEXER,cmd/workers/dex-indexer,dex-indexer, GO_LOCAL_TAG=stl-dex-indexer:$(LOCAL_TAG)))
+$(eval $(call GO_SERVICE_TARGETS,prime-debt-indexer,Prime Debt Indexer,PRIME_DEBT_INDEXER,cmd/workers/prime-debt-indexer,prime-debt-indexer, GO_LOCAL_TAG=stl-prime-debt-indexer:$(LOCAL_TAG)))
+$(eval $(call GO_SERVICE_TARGETS,psm3-indexer,PSM3 Indexer,PSM3_INDEXER,cmd/workers/psm3-indexer,psm3-indexer, GO_LOCAL_TAG=stl-psm3-indexer:$(LOCAL_TAG)))
+$(eval $(call GO_SERVICE_TARGETS,cex-orderbook-indexer,CEX Order Book Indexer,CEX_ORDERBOOK_INDEXER,cmd/workers/cex-orderbook-indexer,cex-orderbook-indexer, GO_LOCAL_TAG=stl-cex-orderbook-indexer:$(LOCAL_TAG)))
+$(eval $(call GO_SERVICE_TARGETS,allocation-tracker,Allocation Tracker,ALLOCATION_TRACKER,cmd/workers/prime-allocation-indexer,allocation-tracker,))
+
 # Build and push in one step (single recipe to ensure consistent IMAGE_TAG)
 docker-release: ecr-login _docker-release-internal
 
@@ -1440,31 +1511,6 @@ db-test-app-user:
 # ECR repository URL for backup worker
 ECR_REPO_BACKUP = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-backup-worker
 
-# Build Docker image for backup worker (ARM64 for Fargate Graviton)
-docker-build-backup:
-	@echo "==> Building Backup Worker Docker image for ARM64..."
-	@echo "    Repository: $(ECR_REPO_BACKUP)"
-	@echo "    Tag: $(IMAGE_TAG)"
-	@echo "    Commit: $(GIT_COMMIT_FULL)"
-	@echo "    Branch: $(GIT_BRANCH)"
-	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
-		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
-		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
-		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		--build-arg CMD_PATH=cmd/workers/raw-data-backup \
-		--build-arg BIN=raw-data-backup \
-		-f Dockerfile.common \
-		-t $(ECR_REPO_BACKUP):$(IMAGE_TAG) \
-		-t $(ECR_REPO_BACKUP):latest \
-		--load .
-
-# Push backup worker Docker image to ECR
-docker-push-backup: ecr-login
-	@echo "==> Pushing Backup Worker Docker image to ECR..."
-	docker push $(ECR_REPO_BACKUP):$(IMAGE_TAG)
-	docker push $(ECR_REPO_BACKUP):latest
-
 # Build and push backup worker in one step (captures tag at start to ensure consistency)
 docker-release-backup: ecr-login _docker-release-backup-internal
 
@@ -1474,12 +1520,6 @@ _docker-release-backup-internal:
 # =============================================================================
 # Sentinelstaging Backup Worker Docker Shortcuts
 # =============================================================================
-
-docker-build-backup-staging:
-	@$(MAKE) docker-build-backup ENV=sentinelstaging
-
-docker-push-backup-staging:
-	@$(MAKE) docker-push-backup ENV=sentinelstaging
 
 docker-release-backup-staging:
 	@$(MAKE) docker-release-backup ENV=sentinelstaging
@@ -1491,35 +1531,6 @@ docker-release-backup-staging:
 # ECR repository URL for oracle price worker
 ECR_REPO_ORACLE_PRICE_WORKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-oracle-price-worker
 
-# Build Docker image for oracle price worker (ARM64 for Fargate Graviton)
-docker-build-oracle-price-worker:
-ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/workers/oracle-price-indexer --build-arg BIN=oracle_price_worker -t stl-oracle-price-worker:$(LOCAL_TAG) -f Dockerfile.common .
-else
-	@echo "==> Building Oracle Price Worker Docker image for ARM64..."
-	@echo "    Repository: $(ECR_REPO_ORACLE_PRICE_WORKER)"
-	@echo "    Tag: $(IMAGE_TAG)"
-	@echo "    Commit: $(GIT_COMMIT_FULL)"
-	@echo "    Branch: $(GIT_BRANCH)"
-	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
-		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
-		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
-		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		--build-arg CMD_PATH=cmd/workers/oracle-price-indexer \
-		--build-arg BIN=oracle_price_worker \
-		-f Dockerfile.common \
-		-t $(ECR_REPO_ORACLE_PRICE_WORKER):$(IMAGE_TAG) \
-		-t $(ECR_REPO_ORACLE_PRICE_WORKER):latest \
-		--load .
-endif
-
-# Push oracle price worker Docker image to ECR
-docker-push-oracle-price-worker: ecr-login
-	@echo "==> Pushing Oracle Price Worker Docker image to ECR..."
-	docker push $(ECR_REPO_ORACLE_PRICE_WORKER):$(IMAGE_TAG)
-	docker push $(ECR_REPO_ORACLE_PRICE_WORKER):latest
-
 # Build and push oracle price worker in one step (captures tag at start to ensure consistency)
 docker-release-oracle-price-worker: ecr-login _docker-release-oracle-price-worker-internal
 
@@ -1529,12 +1540,6 @@ _docker-release-oracle-price-worker-internal:
 # =============================================================================
 # Sentinelstaging Oracle Price Worker Docker Shortcuts
 # =============================================================================
-
-docker-build-oracle-price-worker-staging:
-	@$(MAKE) docker-build-oracle-price-worker ENV=sentinelstaging
-
-docker-push-oracle-price-worker-staging:
-	@$(MAKE) docker-push-oracle-price-worker ENV=sentinelstaging
 
 docker-release-oracle-price-worker-staging:
 	@$(MAKE) docker-release-oracle-price-worker ENV=sentinelstaging
@@ -1556,35 +1561,6 @@ ecs-deploy-oracle-price-worker-staging:
 # ECR repository URL for sparklend position tracker
 ECR_REPO_SPARKLEND_POSITION_TRACKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-sparklend-position-tracker
 
-# Build Docker image for sparklend position tracker (ARM64 for Fargate Graviton)
-docker-build-sparklend-position-tracker:
-ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/workers/sparklend-indexer --build-arg BIN=sparklend_position_tracker -t stl-sparklend-position-tracker:$(LOCAL_TAG) -f Dockerfile.common .
-else
-	@echo "==> Building SparkLend Position Tracker Docker image for ARM64..."
-	@echo "    Repository: $(ECR_REPO_SPARKLEND_POSITION_TRACKER)"
-	@echo "    Tag: $(IMAGE_TAG)"
-	@echo "    Commit: $(GIT_COMMIT_FULL)"
-	@echo "    Branch: $(GIT_BRANCH)"
-	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
-		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
-		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
-		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		--build-arg CMD_PATH=cmd/workers/sparklend-indexer \
-		--build-arg BIN=sparklend_position_tracker \
-		-f Dockerfile.common \
-		-t $(ECR_REPO_SPARKLEND_POSITION_TRACKER):$(IMAGE_TAG) \
-		-t $(ECR_REPO_SPARKLEND_POSITION_TRACKER):latest \
-		--load .
-endif
-
-# Push sparklend position tracker Docker image to ECR
-docker-push-sparklend-position-tracker: ecr-login
-	@echo "==> Pushing SparkLend Position Tracker Docker image to ECR..."
-	docker push $(ECR_REPO_SPARKLEND_POSITION_TRACKER):$(IMAGE_TAG)
-	docker push $(ECR_REPO_SPARKLEND_POSITION_TRACKER):latest
-
 # Build and push sparklend position tracker in one step (captures tag at start to ensure consistency)
 docker-release-sparklend-position-tracker: ecr-login _docker-release-sparklend-position-tracker-internal
 
@@ -1594,12 +1570,6 @@ _docker-release-sparklend-position-tracker-internal:
 # =============================================================================
 # Sentinelstaging SparkLend Position Tracker Docker Shortcuts
 # =============================================================================
-
-docker-build-sparklend-position-tracker-staging:
-	@$(MAKE) docker-build-sparklend-position-tracker ENV=sentinelstaging
-
-docker-push-sparklend-position-tracker-staging:
-	@$(MAKE) docker-push-sparklend-position-tracker ENV=sentinelstaging
 
 docker-release-sparklend-position-tracker-staging:
 	@$(MAKE) docker-release-sparklend-position-tracker ENV=sentinelstaging
@@ -1612,35 +1582,6 @@ docker-release-sparklend-position-tracker-staging:
 # ECR repository URL for morpho indexer
 ECR_REPO_MORPHO_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-morpho-indexer
 
-# Build Docker image for morpho indexer (ARM64 for Fargate Graviton)
-docker-build-morpho-indexer:
-ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/workers/morpho-indexer --build-arg BIN=morpho-indexer -t stl-morpho-indexer:$(LOCAL_TAG) -f Dockerfile.common .
-else
-	@echo "==> Building Morpho Indexer Docker image for ARM64..."
-	@echo "    Repository: $(ECR_REPO_MORPHO_INDEXER)"
-	@echo "    Tag: $(IMAGE_TAG)"
-	@echo "    Commit: $(GIT_COMMIT_FULL)"
-	@echo "    Branch: $(GIT_BRANCH)"
-	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
-		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
-		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
-		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		--build-arg CMD_PATH=cmd/workers/morpho-indexer \
-		--build-arg BIN=morpho-indexer \
-		-f Dockerfile.common \
-		-t $(ECR_REPO_MORPHO_INDEXER):$(IMAGE_TAG) \
-		-t $(ECR_REPO_MORPHO_INDEXER):latest \
-		--load .
-endif
-
-# Push morpho indexer Docker image to ECR
-docker-push-morpho-indexer: ecr-login
-	@echo "==> Pushing Morpho Indexer Docker image to ECR..."
-	docker push $(ECR_REPO_MORPHO_INDEXER):$(IMAGE_TAG)
-	docker push $(ECR_REPO_MORPHO_INDEXER):latest
-
 # Build and push morpho indexer in one step (captures tag at start to ensure consistency)
 docker-release-morpho-indexer: ecr-login _docker-release-morpho-indexer-internal
 
@@ -1651,12 +1592,6 @@ _docker-release-morpho-indexer-internal:
 # Sentinelstaging Morpho Indexer Docker Shortcuts
 # =============================================================================
 
-docker-build-morpho-indexer-staging:
-	@$(MAKE) docker-build-morpho-indexer ENV=sentinelstaging
-
-docker-push-morpho-indexer-staging:
-	@$(MAKE) docker-push-morpho-indexer ENV=sentinelstaging
-
 docker-release-morpho-indexer-staging:
 	@$(MAKE) docker-release-morpho-indexer ENV=sentinelstaging
 
@@ -1665,35 +1600,6 @@ docker-release-morpho-indexer-staging:
 # =============================================================================
 
 ECR_REPO_FLUID_VAULT_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-fluid-vault-indexer
-
-# Build Docker image for fluid vault indexer (ARM64 for Fargate Graviton)
-docker-build-fluid-vault-indexer:
-ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/workers/fluid-vault-indexer --build-arg BIN=fluid-vault-indexer -t stl-fluid-vault-indexer:$(LOCAL_TAG) -f Dockerfile.common .
-else
-	@echo "==> Building Fluid Vault Indexer Docker image for ARM64..."
-	@echo "    Repository: $(ECR_REPO_FLUID_VAULT_INDEXER)"
-	@echo "    Tag: $(IMAGE_TAG)"
-	@echo "    Commit: $(GIT_COMMIT_FULL)"
-	@echo "    Branch: $(GIT_BRANCH)"
-	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
-		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
-		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
-		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		--build-arg CMD_PATH=cmd/workers/fluid-vault-indexer \
-		--build-arg BIN=fluid-vault-indexer \
-		-f Dockerfile.common \
-		-t $(ECR_REPO_FLUID_VAULT_INDEXER):$(IMAGE_TAG) \
-		-t $(ECR_REPO_FLUID_VAULT_INDEXER):latest \
-		--load .
-endif
-
-# Push fluid vault indexer Docker image to ECR
-docker-push-fluid-vault-indexer: ecr-login
-	@echo "==> Pushing Fluid Vault Indexer Docker image to ECR..."
-	docker push $(ECR_REPO_FLUID_VAULT_INDEXER):$(IMAGE_TAG)
-	docker push $(ECR_REPO_FLUID_VAULT_INDEXER):latest
 
 # Build and push fluid vault indexer in one step (captures tag at start to ensure consistency)
 docker-release-fluid-vault-indexer: ecr-login _docker-release-fluid-vault-indexer-internal
@@ -1704,12 +1610,6 @@ _docker-release-fluid-vault-indexer-internal:
 # =============================================================================
 # Sentinelstaging Fluid Vault Indexer Docker Shortcuts
 # =============================================================================
-
-docker-build-fluid-vault-indexer-staging:
-	@$(MAKE) docker-build-fluid-vault-indexer ENV=sentinelstaging
-
-docker-push-fluid-vault-indexer-staging:
-	@$(MAKE) docker-push-fluid-vault-indexer ENV=sentinelstaging
 
 docker-release-fluid-vault-indexer-staging:
 	@$(MAKE) docker-release-fluid-vault-indexer ENV=sentinelstaging
@@ -1722,35 +1622,6 @@ docker-release-fluid-vault-indexer-staging:
 
 ECR_REPO_DEX_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-dex-indexer
 
-# Build Docker image for dex indexer (ARM64 for Fargate Graviton)
-docker-build-dex-indexer:
-ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/workers/dex-indexer --build-arg BIN=dex-indexer -t stl-dex-indexer:$(LOCAL_TAG) -f Dockerfile.common .
-else
-	@echo "==> Building DEX Indexer Docker image for ARM64..."
-	@echo "    Repository: $(ECR_REPO_DEX_INDEXER)"
-	@echo "    Tag: $(IMAGE_TAG)"
-	@echo "    Commit: $(GIT_COMMIT_FULL)"
-	@echo "    Branch: $(GIT_BRANCH)"
-	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
-		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
-		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
-		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		--build-arg CMD_PATH=cmd/workers/dex-indexer \
-		--build-arg BIN=dex-indexer \
-		-f Dockerfile.common \
-		-t $(ECR_REPO_DEX_INDEXER):$(IMAGE_TAG) \
-		-t $(ECR_REPO_DEX_INDEXER):latest \
-		--load .
-endif
-
-# Push dex indexer Docker image to ECR
-docker-push-dex-indexer: ecr-login
-	@echo "==> Pushing DEX Indexer Docker image to ECR..."
-	docker push $(ECR_REPO_DEX_INDEXER):$(IMAGE_TAG)
-	docker push $(ECR_REPO_DEX_INDEXER):latest
-
 # Build and push dex indexer in one step (captures tag at start to ensure consistency)
 docker-release-dex-indexer: ecr-login _docker-release-dex-indexer-internal
 
@@ -1761,12 +1632,6 @@ _docker-release-dex-indexer-internal:
 # Sentinelstaging DEX Indexer Docker Shortcuts
 # =============================================================================
 
-docker-build-dex-indexer-staging:
-	@$(MAKE) docker-build-dex-indexer ENV=sentinelstaging
-
-docker-push-dex-indexer-staging:
-	@$(MAKE) docker-push-dex-indexer ENV=sentinelstaging
-
 docker-release-dex-indexer-staging:
 	@$(MAKE) docker-release-dex-indexer ENV=sentinelstaging
 
@@ -1776,46 +1641,11 @@ docker-release-dex-indexer-staging:
 
 ECR_REPO_PRIME_DEBT_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-prime-debt-indexer
 
-# Build Docker image for prime debt indexer (ARM64 for EKS Graviton)
-docker-build-prime-debt-indexer:
-ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/workers/prime-debt-indexer --build-arg BIN=prime-debt-indexer -t stl-prime-debt-indexer:$(LOCAL_TAG) -f Dockerfile.common .
-else
-	@echo "==> Building Prime Debt Indexer Docker image for ARM64..."
-	@echo "    Repository: $(ECR_REPO_PRIME_DEBT_INDEXER)"
-	@echo "    Tag: $(IMAGE_TAG)"
-	@echo "    Commit: $(GIT_COMMIT_FULL)"
-	@echo "    Branch: $(GIT_BRANCH)"
-	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
-		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
-		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
-		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		--build-arg CMD_PATH=cmd/workers/prime-debt-indexer \
-		--build-arg BIN=prime-debt-indexer \
-		-f Dockerfile.common \
-		-t $(ECR_REPO_PRIME_DEBT_INDEXER):$(IMAGE_TAG) \
-		-t $(ECR_REPO_PRIME_DEBT_INDEXER):latest \
-		--load .
-endif
-
-# Push prime debt indexer Docker image to ECR
-docker-push-prime-debt-indexer: ecr-login
-	@echo "==> Pushing Prime Debt Indexer Docker image to ECR..."
-	docker push $(ECR_REPO_PRIME_DEBT_INDEXER):$(IMAGE_TAG)
-	docker push $(ECR_REPO_PRIME_DEBT_INDEXER):latest
-
 # Build and push prime debt indexer in one step (captures tag at start to ensure consistency)
 docker-release-prime-debt-indexer: ecr-login _docker-release-prime-debt-indexer-internal
 
 _docker-release-prime-debt-indexer-internal:
 	@$(MAKE) _docker-release-go-service GO_NAME="Prime Debt Indexer" GO_REPO="$(ECR_REPO_PRIME_DEBT_INDEXER)" GO_CMD_PATH=cmd/workers/prime-debt-indexer GO_BIN=prime-debt-indexer GO_CACHE_KEY=prime-debt-indexer
-
-docker-build-prime-debt-indexer-staging:
-	@$(MAKE) docker-build-prime-debt-indexer ENV=sentinelstaging
-
-docker-push-prime-debt-indexer-staging:
-	@$(MAKE) docker-push-prime-debt-indexer ENV=sentinelstaging
 
 docker-release-prime-debt-indexer-staging:
 	@$(MAKE) docker-release-prime-debt-indexer ENV=sentinelstaging
@@ -1826,46 +1656,11 @@ docker-release-prime-debt-indexer-staging:
 
 ECR_REPO_CEX_ORDERBOOK_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cex-orderbook-indexer
 
-# Build Docker image for cex orderbook indexer (ARM64 for EKS Graviton)
-docker-build-cex-orderbook-indexer:
-ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/workers/cex-orderbook-indexer --build-arg BIN=cex-orderbook-indexer -t stl-cex-orderbook-indexer:$(LOCAL_TAG) -f Dockerfile.common .
-else
-	@echo "==> Building CEX Order Book Indexer Docker image for ARM64..."
-	@echo "    Repository: $(ECR_REPO_CEX_ORDERBOOK_INDEXER)"
-	@echo "    Tag: $(IMAGE_TAG)"
-	@echo "    Commit: $(GIT_COMMIT_FULL)"
-	@echo "    Branch: $(GIT_BRANCH)"
-	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
-		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
-		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
-		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		--build-arg CMD_PATH=cmd/workers/cex-orderbook-indexer \
-		--build-arg BIN=cex-orderbook-indexer \
-		-f Dockerfile.common \
-		-t $(ECR_REPO_CEX_ORDERBOOK_INDEXER):$(IMAGE_TAG) \
-		-t $(ECR_REPO_CEX_ORDERBOOK_INDEXER):latest \
-		--load .
-endif
-
-# Push cex orderbook indexer Docker image to ECR
-docker-push-cex-orderbook-indexer: ecr-login
-	@echo "==> Pushing CEX Order Book Indexer Docker image to ECR..."
-	docker push $(ECR_REPO_CEX_ORDERBOOK_INDEXER):$(IMAGE_TAG)
-	docker push $(ECR_REPO_CEX_ORDERBOOK_INDEXER):latest
-
 # Build and push cex orderbook indexer in one step (captures tag at start to ensure consistency)
 docker-release-cex-orderbook-indexer: ecr-login _docker-release-cex-orderbook-indexer-internal
 
 _docker-release-cex-orderbook-indexer-internal:
 	@$(MAKE) _docker-release-go-service GO_NAME="CEX Order Book Indexer" GO_REPO="$(ECR_REPO_CEX_ORDERBOOK_INDEXER)" GO_CMD_PATH=cmd/workers/cex-orderbook-indexer GO_BIN=cex-orderbook-indexer GO_CACHE_KEY=cex-orderbook-indexer
-
-docker-build-cex-orderbook-indexer-staging:
-	@$(MAKE) docker-build-cex-orderbook-indexer ENV=sentinelstaging
-
-docker-push-cex-orderbook-indexer-staging:
-	@$(MAKE) docker-push-cex-orderbook-indexer ENV=sentinelstaging
 
 docker-release-cex-orderbook-indexer-staging:
 	@$(MAKE) docker-release-cex-orderbook-indexer ENV=sentinelstaging
@@ -1876,46 +1671,11 @@ docker-release-cex-orderbook-indexer-staging:
 
 ECR_REPO_PSM3_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-psm3-indexer
 
-# Build Docker image for psm3 indexer (ARM64 for EKS Graviton)
-docker-build-psm3-indexer:
-ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/workers/psm3-indexer --build-arg BIN=psm3-indexer -t stl-psm3-indexer:$(LOCAL_TAG) -f Dockerfile.common .
-else
-	@echo "==> Building PSM3 Indexer Docker image for ARM64..."
-	@echo "    Repository: $(ECR_REPO_PSM3_INDEXER)"
-	@echo "    Tag: $(IMAGE_TAG)"
-	@echo "    Commit: $(GIT_COMMIT_FULL)"
-	@echo "    Branch: $(GIT_BRANCH)"
-	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
-		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
-		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
-		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		--build-arg CMD_PATH=cmd/workers/psm3-indexer \
-		--build-arg BIN=psm3-indexer \
-		-f Dockerfile.common \
-		-t $(ECR_REPO_PSM3_INDEXER):$(IMAGE_TAG) \
-		-t $(ECR_REPO_PSM3_INDEXER):latest \
-		--load .
-endif
-
-# Push psm3 indexer Docker image to ECR
-docker-push-psm3-indexer: ecr-login
-	@echo "==> Pushing PSM3 Indexer Docker image to ECR..."
-	docker push $(ECR_REPO_PSM3_INDEXER):$(IMAGE_TAG)
-	docker push $(ECR_REPO_PSM3_INDEXER):latest
-
 # Build and push psm3 indexer in one step (captures tag at start to ensure consistency)
 docker-release-psm3-indexer: ecr-login _docker-release-psm3-indexer-internal
 
 _docker-release-psm3-indexer-internal:
 	@$(MAKE) _docker-release-go-service GO_NAME="PSM3 Indexer" GO_REPO="$(ECR_REPO_PSM3_INDEXER)" GO_CMD_PATH=cmd/workers/psm3-indexer GO_BIN=psm3-indexer GO_CACHE_KEY=psm3-indexer
-
-docker-build-psm3-indexer-staging:
-	@$(MAKE) docker-build-psm3-indexer ENV=sentinelstaging
-
-docker-push-psm3-indexer-staging:
-	@$(MAKE) docker-push-psm3-indexer ENV=sentinelstaging
 
 docker-release-psm3-indexer-staging:
 	@$(MAKE) docker-release-psm3-indexer ENV=sentinelstaging
@@ -1927,31 +1687,6 @@ docker-release-psm3-indexer-staging:
 # ECR repository URL for allocation tracker
 ECR_REPO_ALLOCATION_TRACKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-allocation-tracker
 
-# Build Docker image for allocation tracker (ARM64 for Fargate Graviton)
-docker-build-allocation-tracker:
-	@echo "==> Building Allocation Tracker Docker image for ARM64..."
-	@echo "    Repository: $(ECR_REPO_ALLOCATION_TRACKER)"
-	@echo "    Tag: $(IMAGE_TAG)"
-	@echo "    Commit: $(GIT_COMMIT_FULL)"
-	@echo "    Branch: $(GIT_BRANCH)"
-	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
-		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
-		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
-		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		--build-arg CMD_PATH=cmd/workers/prime-allocation-indexer \
-		--build-arg BIN=allocation-tracker \
-		-f Dockerfile.common \
-		-t $(ECR_REPO_ALLOCATION_TRACKER):$(IMAGE_TAG) \
-		-t $(ECR_REPO_ALLOCATION_TRACKER):latest \
-		--load .
-
-# Push allocation tracker Docker image to ECR
-docker-push-allocation-tracker: ecr-login
-	@echo "==> Pushing Allocation Tracker Docker image to ECR..."
-	docker push $(ECR_REPO_ALLOCATION_TRACKER):$(IMAGE_TAG)
-	docker push $(ECR_REPO_ALLOCATION_TRACKER):latest
-
 # Build and push allocation tracker in one step (captures tag at start to ensure consistency)
 docker-release-allocation-tracker: ecr-login _docker-release-allocation-tracker-internal
 
@@ -1961,12 +1696,6 @@ _docker-release-allocation-tracker-internal:
 # =============================================================================
 # Sentinelstaging Allocation Tracker Docker Shortcuts
 # =============================================================================
-
-docker-build-allocation-tracker-staging:
-	@$(MAKE) docker-build-allocation-tracker ENV=sentinelstaging
-
-docker-push-allocation-tracker-staging:
-	@$(MAKE) docker-push-allocation-tracker ENV=sentinelstaging
 
 docker-release-allocation-tracker-staging:
 	@$(MAKE) docker-release-allocation-tracker ENV=sentinelstaging
