@@ -24,6 +24,27 @@ _VAULT_ID_SQL = """
 SELECT id FROM morpho_vault WHERE address = :addr AND chain_id = :chain_id
 """
 
+MORPHO_VAULT_USERS_SQL = """
+      SELECT v.id as vault_id, u.id as user_id
+      FROM morpho_vault v
+      JOIN "user" u ON u.address = v.address AND u.chain_id = v.chain_id
+      WHERE v.id = :backed_asset_id AND v.vault_version IN (1, 2)
+      UNION ALL
+      SELECT v.id, u.id
+      FROM morpho_vault v
+      JOIN morpho_adapter_current a ON a.morpho_vault_id = v.id AND a.adapter_type = 1
+      JOIN "user" u ON u.address = a.address AND u.chain_id = v.chain_id
+      WHERE v.id = :backed_asset_id AND v.vault_version = 3
+"""
+"""The (vault_id, user_id) rows whose morpho_market_position entries are the vault's allocations.
+
+A MetaMorpho V1/V1.1 vault (vault_version 1, 2) supplies to Morpho Blue markets itself.
+A VaultV2 (vault_version 3) holds nothing directly: its current member adapters of type 1
+(Morpho Blue market adapters) do. Adapters of type 2 (nested MetaMorpho V1 vault) and 99
+(unclassified) are not walked, so their value shows up as idle loan token
+(total_assets minus the walked positions), not as the collateral behind them.
+"""
+
 _MORPHO_BACKED_BREAKDOWN_SQL = f"""
 WITH morpho_vaults AS (
       SELECT mv.id as vault_id
@@ -31,10 +52,7 @@ WITH morpho_vaults AS (
       WHERE mv.id = :backed_asset_id
   ),
   vault_users AS (
-      SELECT mv.vault_id, u.id as user_id
-      FROM morpho_vaults mv
-      JOIN morpho_vault v ON v.id = mv.vault_id
-      JOIN "user" u ON u.address = v.address AND u.chain_id = v.chain_id
+      {MORPHO_VAULT_USERS_SQL}
   ),
   vault_states AS (
       SELECT DISTINCT ON (vs.morpho_vault_id)
@@ -49,7 +67,7 @@ WITH morpho_vaults AS (
       ORDER BY vs.morpho_vault_id, vs.block_number DESC, vs.block_version DESC, vs.processing_version DESC
   ),
   vault_market_ids AS (
-      SELECT DISTINCT vu.vault_id, mp.morpho_market_id
+      SELECT DISTINCT vu.vault_id, vu.user_id, mp.morpho_market_id
       FROM vault_users vu
       JOIN LATERAL (
           SELECT DISTINCT morpho_market_id
@@ -57,17 +75,19 @@ WITH morpho_vaults AS (
           WHERE user_id = vu.user_id
       ) mp ON true
   ),
+  -- One row per (vault, market): the latest position of every walked user, summed,
+  -- since several VaultV2 adapters may supply the same market.
   market_allocs AS (
       SELECT vmi.vault_id,
              vmi.morpho_market_id,
              ct.id as collateral_token_id,
              ct.symbol as collateral,
-             pos.supply_assets / power(10, lt.decimals) as vault_supply
+             sum(pos.supply_assets) / power(10, lt.decimals) as vault_supply
       FROM vault_market_ids vmi
       JOIN LATERAL (
-          SELECT supply_assets, morpho_market_id
+          SELECT supply_assets
           FROM morpho_market_position
-          WHERE user_id = (SELECT user_id FROM vault_users WHERE vault_id = vmi.vault_id LIMIT 1)
+          WHERE user_id = vmi.user_id
             AND morpho_market_id = vmi.morpho_market_id
           ORDER BY block_number DESC, block_version DESC, processing_version DESC
           LIMIT 1
@@ -75,6 +95,7 @@ WITH morpho_vaults AS (
       JOIN morpho_market mm ON mm.id = vmi.morpho_market_id
       JOIN token ct ON ct.id = mm.collateral_token_id
       JOIN token lt ON lt.id = mm.loan_token_id
+      GROUP BY vmi.vault_id, vmi.morpho_market_id, ct.id, ct.symbol, lt.decimals
   ),
   market_states AS (
       SELECT ms.*
