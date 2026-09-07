@@ -9,8 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -55,33 +53,6 @@ func TestMain(m *testing.M) {
 	cleanupDB()
 	code = testutil.CheckGoroutineLeaks(code)
 	os.Exit(code)
-}
-
-// chainFixtureServer answers the one JSON-RPC call the composition root makes at
-// startup: the chain-ID check against CHAIN_ID.
-func chainFixtureServer(t *testing.T, chainIDHex string) *httptest.Server {
-	t.Helper()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			ID     json.RawMessage `json:"id"`
-			Method string          `json:"method"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Errorf("decoding the RPC request: %v", err)
-			return
-		}
-		if req.Method != "eth_chainId" {
-			t.Errorf("unexpected RPC method %q; this fixture only serves eth_chainId", req.Method)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		if _, err := fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":%q}`, req.ID, chainIDHex); err != nil {
-			t.Errorf("writing the RPC response: %v", err)
-		}
-	}))
-	t.Cleanup(server.Close)
-	return server
 }
 
 // seedBucket creates a bucket of this test's own and returns its name. Sibling
@@ -184,7 +155,7 @@ func TestIntegration_Register_ExposesTheDocumentedWorkflowType(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
-	server := chainFixtureServer(t, "0x1")
+	server := testutil.StartChainIDRPC(t, 1)
 	setWorkerEnv(t, seedBucket(t, ctx), server.URL)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
@@ -214,8 +185,12 @@ func TestIntegration_Register_RefusesAChainIDMismatch(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
-	server := chainFixtureServer(t, "0xa4b1")
+	server := testutil.StartChainIDRPC(t, 42161)
 	setWorkerEnv(t, seedBucket(t, ctx), server.URL)
+	var buildsBefore int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM build_registry`).Scan(&buildsBefore); err != nil {
+		t.Fatalf("counting builds before registration: %v", err)
+	}
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
 	err := newBackfillWorker(t).register(ctx, newDeps(t, pool), env)
@@ -225,6 +200,13 @@ func TestIntegration_Register_RefusesAChainIDMismatch(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "chain ID mismatch") {
 		t.Errorf("error = %v, want it to name the chain ID mismatch", err)
+	}
+	var buildsAfter int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM build_registry`).Scan(&buildsAfter); err != nil {
+		t.Fatalf("counting builds after registration: %v", err)
+	}
+	if buildsAfter != buildsBefore {
+		t.Errorf("build rows = %d after mismatch, want unchanged at %d", buildsAfter, buildsBefore)
 	}
 }
 
@@ -266,7 +248,7 @@ func TestIntegration_DiscoverVaults_FindsNoCandidatesInAnUnrelatedRange(t *testi
 		}})
 	}
 
-	setWorkerEnv(t, bucket, chainFixtureServer(t, "0x1").URL)
+	setWorkerEnv(t, bucket, testutil.StartChainIDRPC(t, 1).URL)
 	env := newActivityEnv(t, ctx, pool)
 
 	got := runDiscovery(t, env, blockRange{From: 0, To: lastBlock})
@@ -315,7 +297,7 @@ func TestIntegration_DiscoverVaults_FailsOnAnUndecodableMorphoBlueLog(t *testing
 		}})
 	}
 
-	setWorkerEnv(t, bucket, chainFixtureServer(t, "0x1").URL)
+	setWorkerEnv(t, bucket, testutil.StartChainIDRPC(t, 1).URL)
 	env := newActivityEnv(t, ctx, pool)
 
 	var activities *backfillActivities
@@ -336,7 +318,7 @@ func TestIntegration_Backfill_FailsOnAnArchiveGapWhenNoV2VaultIsKnown(t *testing
 	ctx := context.Background()
 	const missingBlock = int64(3)
 	bucket := seedQuietBlocks(t, ctx, 1, 6, missingBlock)
-	setWorkerEnv(t, bucket, chainFixtureServer(t, "0x1").URL)
+	setWorkerEnv(t, bucket, testutil.StartChainIDRPC(t, 1).URL)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
 	if err := newBackfillWorker(t).register(ctx, newDeps(t, pool), env); err != nil {
@@ -362,7 +344,7 @@ func TestIntegration_Backfill_SucceedsWithNothingToReplayOverACompleteArchive(t 
 	ctx := context.Background()
 	deleteSeededV2Vaults(t, ctx, pool)
 	bucket := seedQuietBlocks(t, ctx, 1, 6, -1)
-	setWorkerEnv(t, bucket, chainFixtureServer(t, "0x1").URL)
+	setWorkerEnv(t, bucket, testutil.StartChainIDRPC(t, 1).URL)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
 	if err := newBackfillWorker(t).register(ctx, newDeps(t, pool), env); err != nil {
@@ -401,7 +383,7 @@ func TestIntegration_DiscoverVaults_ASplitRunPersistsWhatAWholeRunDoes(t *testin
 	)
 	vault := common.HexToAddress("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 	bucket := seedVaultActivity(t, ctx, vault, firstBlock, lastBlock, partitionEdge-2, partitionEdge+3)
-	setWorkerEnv(t, bucket, chainFixtureServer(t, "0x1").URL)
+	setWorkerEnv(t, bucket, testutil.StartChainIDRPC(t, 1).URL)
 
 	var whole, split persistedVault
 	t.Run("over the whole range", func(t *testing.T) {
@@ -597,7 +579,7 @@ func TestIntegration_ReplayPartition_ReplaysNothingWhenNoV2VaultIsKnown(t *testi
 	ctx := context.Background()
 	deleteSeededV2Vaults(t, ctx, pool)
 	// Deliberately an empty bucket: reaching S3 at all here would be the bug.
-	setWorkerEnv(t, seedBucket(t, ctx), chainFixtureServer(t, "0x1").URL)
+	setWorkerEnv(t, seedBucket(t, ctx), testutil.StartChainIDRPC(t, 1).URL)
 	env := newActivityEnv(t, ctx, pool)
 
 	replayed := replayOnePartition(t, env, partitionWork{

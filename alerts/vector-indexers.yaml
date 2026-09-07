@@ -1423,7 +1423,9 @@ groups:
   # allocation-tracker (VEC-499) — prime-allocation-indexer: consumes BlockEvents,
   # tracks ALM-proxy token positions (allocation_position) and total supplies into
   # TimescaleDB. One instance per chain: mainnet, avalanche, base (VEC-499),
-  # optimism, unichain, arbitrum (ARCT-216).
+  # optimism, unichain, arbitrum (ARCT-216), robinhood (ARCT-397 — manifests in
+  # k8s/base only, not yet referenced from a cluster overlay, so its series do
+  # not exist yet).
   - name: vector-allocation-tracker
     interval: 1m
     rules:
@@ -1441,11 +1443,12 @@ groups:
       #   - deployment / pod `app` label = `allocation-tracker`  (kube-state-metrics)
       #   - OTel service_name           = `prime-allocation-indexer`  (InitOTEL resource)
       # The Down rule keys on the deployment name; the metric rules key on
-      # service_name. Per-chain instances (avalanche/base/optimism/unichain/arbitrum) run the same binary and
-      # so reuse ONE service_name, differing only by the `chain` label — the metric
-      # rules therefore cover every chain via `by (chain, ...)` with no per-instance
-      # edits. Only the Down regex is keyed on deployment names, so it is the one
-      # place a new per-chain instance has to be listed.
+      # service_name. Per-chain instances (avalanche, base, optimism, unichain,
+      # arbitrum, robinhood) run the same binary and so reuse ONE service_name,
+      # differing only by the `chain` label — the metric rules therefore cover
+      # every chain via `by (chain, ...)` with no per-instance edits. Only the
+      # Down regex is keyed on deployment names, so it is the one place a new
+      # per-chain instance has to be listed.
       #
       # Metric source (VEC-499): the shared telemetry.Metrics recorder emits one
       # sample per consumed block —
@@ -1476,7 +1479,7 @@ groups:
         expr: |
           max by (deployment, cluster) (
             kube_deployment_status_replicas_available{
-              deployment=~"(avalanche-|base-|optimism-|unichain-|arbitrum-)?allocation-tracker", namespace="vector"
+              deployment=~"(avalanche-|base-|optimism-|unichain-|arbitrum-|robinhood-)?allocation-tracker", namespace="vector"
             }
           ) < 1
         for: 10m
