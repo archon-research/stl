@@ -1948,7 +1948,12 @@ natural key is `(chain_id, pool_id)` and never `pool_id` alone).
    and decimals — only chain 1 has one today, and without it the pool seed's
    token join inserts nothing); the pools' `token` rows; the pools themselves,
    each from its own `Initialize` log. Extend the expectation list in
-   `uniswap_v4_migration_integration_test.go`.
+   `uniswap_v4_migration_integration_test.go`. Re-derive the five hypertables'
+   `chunk_interval` for the combined ingest (VEC-663's rule: the active chunk plus
+   its indexes within a quarter of `shared_buffers`, capped at 30 days; 30 days
+   today at mainnet's few MB/day): `set_chunk_time_interval` affects new chunks
+   only, and `TestUniswapV4HypertablesChunkIntervalAndCompressionOrder` pins the
+   value.
 3. **Kubernetes** — copy `k8s/base/uniswap-v4-indexer/` to
    `k8s/base/<chain>-uniswap-v4-indexer/`, changing only the names, where
    `<chain>` is the `entity.ChainName` value verbatim (`base`, `avalanche-c`):
@@ -3070,7 +3075,7 @@ decide whether anything changed, and that read can only be bounded by
 `block_number <= N`: there is no lower bound the planner could use, because the
 previous observation of a position may be arbitrarily old. On a plain table that
 is one bounded index descent. On a hypertable it becomes a descent *per chunk* —
-with 1-day chunks and a year of retention, ~365 probes per key per block, and
+with 30-day chunks and a year of retention, ~12 probes per key per block, and
 worse once chunks compress (locate a segment, then decompress it). That is the
 fan-out profile VEC-541 measured for the `processing_version` triggers (4,410 ms
 vs 148 ms for one 721-row batch at ~2,000 chunks). Every other `uniswap_v4_*`
