@@ -145,6 +145,11 @@ func parseConfig(args []string) (cliConfig, error) {
 		}
 		cfg.sweepBlocks = v
 	}
+	// The tracker has no "sweep disabled" mode: 0 would silently become the 75
+	// default, and a negative value sweeps every block (~10/s on Robinhood).
+	if cfg.sweepBlocks < 1 {
+		return cliConfig{}, fmt.Errorf("sweep blocks must be at least 1, got %d (-sweep-blocks flag or SWEEP_BLOCKS env var)", cfg.sweepBlocks)
+	}
 
 	chainIDStr := env.Get("CHAIN_ID", "1")
 	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)

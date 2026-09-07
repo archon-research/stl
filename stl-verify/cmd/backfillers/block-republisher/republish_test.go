@@ -41,8 +41,8 @@ func input(numbers ...int64) json.RawMessage {
 	return encoded
 }
 
-// deriveStub stands in for the archive listing, answering the version each
-// height would be given and recording how often it was asked.
+// deriveStub stands in for the archive listing and the canonical read, answering
+// the derivation each height would be given and recording how often it was asked.
 type deriveStub struct {
 	seen     []versionRequest
 	versions map[int64]int
@@ -62,15 +62,16 @@ func (d *deriveStub) blocks() []int64 {
 func registerDeriveStub(env *testsuite.TestWorkflowEnvironment, versions map[int64]int) *deriveStub {
 	stub := &deriveStub{versions: versions}
 	env.RegisterActivityWithOptions(
-		func(_ context.Context, request versionRequest) (int, error) {
+		func(_ context.Context, request versionRequest) (derivedVersionHash, error) {
 			stub.seen = append(stub.seen, request)
 			if stub.err != nil {
-				return 0, stub.err
+				return derivedVersionHash{}, stub.err
 			}
+			derived := derivedVersionHash{Version: 1, Hash: stubHash(request.Block)}
 			if version, ok := stub.versions[request.Block]; ok {
-				return version, nil
+				derived.Version = version
 			}
-			return 1, nil
+			return derived, nil
 		},
 		activity.RegisterOptions{Name: deriveVersionActivityName},
 	)
@@ -267,7 +268,10 @@ func TestRepublishWorkflow_ReportsThePerHeightVersionEachBlockLandedAt(t *testin
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("workflow: %v", err)
 	}
-	want := []blockWork{{Number: 25395651, Version: 1}, {Number: 25087888, Version: 2}}
+	want := []blockWork{
+		{Number: 25395651, Version: 1, Hash: stubHash(25395651)},
+		{Number: 25087888, Version: 2, Hash: stubHash(25087888)},
+	}
 	if fmt.Sprint(stub.seen) != fmt.Sprint(want) {
 		t.Errorf("activity calls = %v, want %v", stub.seen, want)
 	}
@@ -312,7 +316,10 @@ func TestRepublishWorkflow_RetriesARepublishAtTheVersionItAlreadyChose(t *testin
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("workflow: %v", err)
 	}
-	want := []blockWork{{Number: 25395651, Version: 2}, {Number: 25395651, Version: 2}}
+	want := []blockWork{
+		{Number: 25395651, Version: 2, Hash: stubHash(25395651)},
+		{Number: 25395651, Version: 2, Hash: stubHash(25395651)},
+	}
 	if fmt.Sprint(stub.seen) != fmt.Sprint(want) {
 		t.Errorf("republish attempts = %v, want the retry at the same version", stub.seen)
 	}
@@ -587,17 +594,17 @@ type chainStub struct {
 
 func (chainStub) GetCurrentBlockNumber(context.Context) (int64, error) { return stubHead, nil }
 
-func (chainStub) GetBlockByNumber(_ context.Context, blockNumber int64, _ bool) (json.RawMessage, error) {
-	return json.RawMessage(fmt.Sprintf(`{"number":"0x%x","hash":%q,"parentHash":"0x02","timestamp":"0x68b0c0c0"}`,
-		blockNumber, stubHash(blockNumber))), nil
+func (chainStub) GetBlockByNumber(_ context.Context, blockNumber int64, fullTx bool) (json.RawMessage, error) {
+	transactions := ""
+	if fullTx {
+		transactions = `,"transactions":[]`
+	}
+	return json.RawMessage(fmt.Sprintf(`{"number":"0x%x","hash":%q,"parentHash":"0x02","timestamp":"0x68b0c0c0"%s}`,
+		blockNumber, stubHash(blockNumber), transactions)), nil
 }
 
-func (chainStub) GetBlockDataByHash(_ context.Context, blockNumber int64, hash string, _ bool) (outbound.BlockData, error) {
-	return outbound.BlockData{
-		BlockNumber: blockNumber,
-		Block:       json.RawMessage(fmt.Sprintf(`{"number":"0x%x","hash":%q}`, blockNumber, hash)),
-		Receipts:    json.RawMessage(`[]`),
-	}, nil
+func (chainStub) GetBlockReceipts(context.Context, int64) (json.RawMessage, error) {
+	return json.RawMessage(`[]`), nil
 }
 
 // archiveStub is a raw archive holding nothing, which is all RepublishBlock
@@ -636,7 +643,10 @@ func TestRepublishBlock_GivesEachExecutionItsOwnProgressStore(t *testing.T) {
 		},
 	}
 
-	for _, work := range []blockWork{{Number: 25395651, Version: 1}, {Number: 25087888, Version: 3}} {
+	for _, work := range []blockWork{
+		{Number: 25395651, Version: 1, Hash: stubHash(25395651)},
+		{Number: 25087888, Version: 3, Hash: stubHash(25087888)},
+	} {
 		if _, err := activities.RepublishBlock(context.Background(), work); err != nil {
 			t.Fatalf("RepublishBlock(%d): %v", work.Number, err)
 		}
@@ -648,7 +658,10 @@ func TestRepublishBlock_GivesEachExecutionItsOwnProgressStore(t *testing.T) {
 	if handed[0] == handed[1] {
 		t.Fatal("both executions recorded into the same progress store")
 	}
-	for i, want := range []blockWork{{Number: 25395651, Version: 1}, {Number: 25087888, Version: 3}} {
+	for i, want := range []blockWork{
+		{Number: 25395651, Version: 1, Hash: stubHash(25395651)},
+		{Number: 25087888, Version: 3, Hash: stubHash(25087888)},
+	} {
 		for _, beat := range handed[i].saved {
 			if beat.Block != want.Number || beat.Version != want.Version {
 				t.Errorf("execution %d's store holds %+v, from another execution", i, beat)
@@ -684,7 +697,7 @@ func TestDeriveVersion_ChoosesTheDerivationTheFlagAsksFor(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			activities := &republishActivities{service: newRepublishService(t)}
 
-			version, err := activities.DeriveVersion(context.Background(), tc.request)
+			derived, err := activities.DeriveVersion(context.Background(), tc.request)
 
 			if tc.wantErrContains != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErrContains) {
@@ -695,8 +708,12 @@ func TestDeriveVersion_ChoosesTheDerivationTheFlagAsksFor(t *testing.T) {
 			if err != nil {
 				t.Fatalf("DeriveVersion: %v", err)
 			}
-			if version != tc.wantVersion {
-				t.Errorf("version = %d, want %d", version, tc.wantVersion)
+			if derived.Version != tc.wantVersion {
+				t.Errorf("version = %d, want %d", derived.Version, tc.wantVersion)
+			}
+			if derived.Hash != stubHash(tc.request.Block) {
+				t.Errorf("hash = %q, want the canonical %q the republish verifies against",
+					derived.Hash, stubHash(tc.request.Block))
 			}
 		})
 	}
