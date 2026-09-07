@@ -251,14 +251,9 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 		"chainID", cfg.chainID,
 		"commit", buildReg.GitHash())
 
-	// Service telemetry
-	mcTel, err := multicall.NewTelemetry(cfg.chainName)
+	mc, err := multicall.NewNarrowingClient(ethClient, blockchain.Multicall3, cfg.chainName, logger)
 	if err != nil {
-		return fmt.Errorf("multicall telemetry: %w", err)
-	}
-	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3, multicall.WithTelemetry(mcTel))
-	if err != nil {
-		return fmt.Errorf("creating multicall client: %w", err)
+		return err
 	}
 
 	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
@@ -267,6 +262,8 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 		return err
 	}
 	defer archiveDrain()
+	// Narrowing sits inside archiving so the archive records the batch the
+	// service asked for, with every call's own answer.
 	mc = archiveWrap(mc)
 
 	morphoTelemetry, err := morpho_indexer.NewTelemetry(cfg.chainName)

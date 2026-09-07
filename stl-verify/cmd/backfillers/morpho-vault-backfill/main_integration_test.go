@@ -22,8 +22,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/mock"
-	"go.opentelemetry.io/otel"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
@@ -455,7 +453,7 @@ func discoverInto(t *testing.T, ctx context.Context, bucket string, vault common
 	if err != nil {
 		t.Fatalf("NewEventExtractor: %v", err)
 	}
-	prober, err := newVaultProber(logger, blockStampedVaultProbe(t), cfg.chainID)
+	prober, err := newVaultProber(logger, blockStampedVaultProbe(t))
 	if err != nil {
 		t.Fatalf("newVaultProber: %v", err)
 	}
@@ -621,14 +619,14 @@ func TestIntegration_ReplayPartition_ReplaysNothingWhenNoV2VaultIsKnown(t *testi
 // composition root builds is what proves the wiring, rather than reading a field
 // back.
 func TestIntegration_BuildReplayService_MetersTheReplayPath(t *testing.T) {
-	reader := installTestMeterProvider(t)
+	reader := testutil.InstallMeterProvider(t)
 	replayOneAddAdapter(t)
 
 	// The chain label is asserted too: the counter is per-chain, so a service
 	// handed a raw chain id instead of a chain NAME would meter every replay under
 	// a series the per-chain alerts never select.
 	want := map[string]string{"chain": "mainnet", "observed_via": "add_adapter_event"}
-	if got := counterValue(t, reader, "morpho.v2.adapter.registrations", want); got != 1 {
+	if got := testutil.CounterValue(t, reader, "morpho.v2.adapter.registrations", want); got != 1 {
 		t.Errorf("morpho.v2.adapter.registrations%v = %d, want 1: a replay service with no Telemetry records nothing", want, got)
 	}
 }
@@ -680,24 +678,6 @@ func replayOneAddAdapter(t *testing.T) *countingMorphoRepository {
 		t.Fatalf("ReplayMetaMorphoLog: %v", err)
 	}
 	return counted
-}
-
-// installTestMeterProvider points the global meter provider — the one
-// morpho_indexer.NewTelemetry reads — at an in-memory reader for one test, and
-// restores whatever was there.
-func installTestMeterProvider(t *testing.T) sdkmetric.Reader {
-	t.Helper()
-	reader := sdkmetric.NewManualReader()
-	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	previous := otel.GetMeterProvider()
-	otel.SetMeterProvider(provider)
-	t.Cleanup(func() {
-		otel.SetMeterProvider(previous)
-		if err := provider.Shutdown(context.Background()); err != nil {
-			t.Errorf("shutting down the test meter provider: %v", err)
-		}
-	})
-	return reader
 }
 
 // seedV2VaultRow inserts the protocol, asset token and VaultV2 row a replay

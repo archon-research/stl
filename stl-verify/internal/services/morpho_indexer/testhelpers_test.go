@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"math/big"
 	"testing"
 
@@ -17,6 +19,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/testutils"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -37,6 +40,8 @@ type serviceTestHarness struct {
 	eventRepo        *testutil.MockEventRepository
 	consumer         *testutil.MockSQSConsumer
 	cache            *testutil.MockBlockCache
+	// logs captures every line the service and its narrowing multicaller emit.
+	logs *capturingHandler
 
 	// ABIs for building multicall return data.
 	morphoBlueReadABI *abi.ABI
@@ -74,11 +79,17 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 
 	sqsCfg := shared.SQSConsumerConfigDefaults()
 	sqsCfg.ChainID = 1
+	logs := &capturingHandler{}
+	logger := slog.New(logs)
+	sqsCfg.Logger = logger
 	config := Config{
 		SQSConsumerConfig: sqsCfg,
 	}
 
-	svc, err := NewService(config, consumer, cache, multicaller, txManager, userRepo, protocolRepo, tokenRepo, morphoRepo, eventRepo, receiptTokenRepo)
+	// Production wraps the multicall client the same way (see the morpho binaries'
+	// main.go), so a batched probe that exhausts gas is narrowed here too.
+	narrowed := multicall.NewNarrowing(multicaller, multicall.WithNarrowingLogger(logger))
+	svc, err := NewService(config, consumer, cache, narrowed, txManager, userRepo, protocolRepo, tokenRepo, morphoRepo, eventRepo, receiptTokenRepo)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -147,6 +158,7 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 		eventRepo:        eventRepo,
 		consumer:         consumer,
 		cache:            cache,
+		logs:             logs,
 
 		morphoBlueReadABI:     morphoBlueReadABI,
 		metaMorphoReadABI:     metaMorphoReadABI,
@@ -296,7 +308,7 @@ func (h *serviceTestHarness) packUint256(v *big.Int) []byte {
 	return data
 }
 
-func (h *serviceTestHarness) packAddress(addr common.Address) []byte {
+func packAddress(addr common.Address) []byte {
 	data, err := abi.Arguments{{Type: mustABIType("address")}}.Pack(addr)
 	if err != nil {
 		panic(fmt.Sprintf("packAddress: %v", err))
@@ -378,8 +390,8 @@ func (h *serviceTestHarness) tokenMetadataResults(symbol string, decimals uint8)
 // probes, use vaultV2ProbeResults instead.
 func (h *serviceTestHarness) vaultProbeResults(morphoAddr, asset common.Address) []outbound.Result {
 	return []outbound.Result{
-		{Success: true, ReturnData: h.packAddress(morphoAddr)},
-		{Success: true, ReturnData: h.packAddress(asset)},
+		{Success: true, ReturnData: packAddress(morphoAddr)},
+		{Success: true, ReturnData: packAddress(asset)},
 		{Success: false, ReturnData: nil}, // curator reverts on MetaMorpho
 		{Success: false, ReturnData: nil}, // liquidityAdapter reverts on MetaMorpho
 	}
@@ -438,9 +450,9 @@ func (h *serviceTestHarness) isVaultStateAndTwoBalancesMulticall(calls []outboun
 func (h *serviceTestHarness) vaultV2ProbeResults(asset, curator, liquidityAdapter common.Address) []outbound.Result {
 	return []outbound.Result{
 		{Success: false, ReturnData: nil}, // MORPHO reverts on VaultV2
-		{Success: true, ReturnData: h.packAddress(asset)},
-		{Success: true, ReturnData: h.packAddress(curator)},
-		{Success: true, ReturnData: h.packAddress(liquidityAdapter)},
+		{Success: true, ReturnData: packAddress(asset)},
+		{Success: true, ReturnData: packAddress(curator)},
+		{Success: true, ReturnData: packAddress(liquidityAdapter)},
 	}
 }
 
@@ -461,7 +473,7 @@ func (h *serviceTestHarness) notAVaultProbeResults() []outbound.Result {
 func (h *serviceTestHarness) vaultDetailResults(name, symbol string, decimals uint8, isV1_1 bool) []outbound.Result {
 	skimResult := outbound.Result{Success: false, ReturnData: nil}
 	if isV1_1 {
-		skimResult = outbound.Result{Success: true, ReturnData: h.packAddress(common.HexToAddress("0x1"))}
+		skimResult = outbound.Result{Success: true, ReturnData: packAddress(common.HexToAddress("0x1"))}
 	}
 	return []outbound.Result{
 		{Success: true, ReturnData: h.packString(name)},
@@ -1050,15 +1062,11 @@ func (h *serviceTestHarness) setupMarketNotInDB() {
 // probe selector (VEC-698).
 var trappingCandidate = common.HexToAddress("0x4ECeF7bd1eD0c9f64a3a5c1a785A3Bb39DC5dF6A")
 
-type gasExhaustedRPCError struct{}
+type executeFn = func(context.Context, []outbound.Call, *big.Int) ([]outbound.Result, error)
 
-func (gasExhaustedRPCError) Error() string  { return "out of gas: gas required exceeds: 550000000" }
-func (gasExhaustedRPCError) ErrorCode() int { return -32000 }
-
-type throttledRPCError struct{}
-
-func (throttledRPCError) Error() string  { return "429 Too Many Requests" }
-func (throttledRPCError) ErrorCode() int { return 429 }
+// quietNarrowingLogger keeps a prober-level test's narrowing WARNs out of the
+// test output; service-level tests capture them through the harness instead.
+var quietNarrowingLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 // isolatedAnswer is what one eth_call for a single probe selector returns.
 type isolatedAnswer struct {
@@ -1067,33 +1075,47 @@ type isolatedAnswer struct {
 }
 
 func answers(addr common.Address) isolatedAnswer {
-	data, err := abi.Arguments{{Type: mustABIType("address")}}.Pack(addr)
-	if err != nil {
-		panic(fmt.Sprintf("packing address: %v", err))
-	}
-	return isolatedAnswer{result: outbound.Result{Success: true, ReturnData: data}}
+	return isolatedAnswer{result: outbound.Result{Success: true, ReturnData: packAddress(addr)}}
 }
 
 func reverts() isolatedAnswer   { return isolatedAnswer{} }
-func exhausts() isolatedAnswer  { return isolatedAnswer{err: gasExhaustedRPCError{}} }
-func throttled() isolatedAnswer { return isolatedAnswer{err: throttledRPCError{}} }
+func exhausts() isolatedAnswer  { return isolatedAnswer{err: testutil.GasExhaustedRPCError()} }
+func throttled() isolatedAnswer { return isolatedAnswer{err: testutil.ThrottledRPCError()} }
 
-// trappingResponder answers the batched probe with gas exhaustion and each
-// isolated probe call from perSelector, given in ProbeCalls order
-// (MORPHO, asset, curator, liquidityAdapter).
-func trappingResponder(p *VaultProber, addr common.Address, perSelector [vaultProbeCallsPerAddress]isolatedAnswer) func(context.Context, []outbound.Call, *big.Int) ([]outbound.Result, error) {
+// trappingResponder answers a probe of addr like a node in front of a trapping
+// contract: two or more probe selectors in one batch exhaust gas, a selector
+// alone answers from perSelector (ProbeCalls order: MORPHO, asset, curator,
+// liquidityAdapter). Every other call goes to fallback, which may be nil when
+// the test expects none.
+func trappingResponder(t testing.TB, addr common.Address, perSelector [vaultProbeCallsPerAddress]isolatedAnswer, fallback executeFn) executeFn {
+	t.Helper()
+	prober, err := NewVaultProber()
+	if err != nil {
+		t.Fatalf("NewVaultProber: %v", err)
+	}
 	bySelector := make(map[string]isolatedAnswer, vaultProbeCallsPerAddress)
-	for i, call := range p.ProbeCalls(addr) {
+	for i, call := range prober.ProbeCalls(addr) {
 		bySelector[string(call.CallData)] = perSelector[i]
 	}
-	return func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) != 1 {
-			return nil, gasExhaustedRPCError{}
+	isProbeOf := func(calls []outbound.Call) bool {
+		for _, c := range calls {
+			if _, ok := bySelector[string(c.CallData)]; !ok || c.Target != addr {
+				return false
+			}
 		}
-		a, ok := bySelector[string(calls[0].CallData)]
-		if !ok || calls[0].Target != addr {
-			return nil, fmt.Errorf("unexpected isolated call to %s with selector %x", calls[0].Target.Hex(), calls[0].CallData[:4])
+		return len(calls) > 0
+	}
+	return func(ctx context.Context, calls []outbound.Call, block *big.Int) ([]outbound.Result, error) {
+		if !isProbeOf(calls) {
+			if fallback == nil {
+				return nil, fmt.Errorf("unexpected %d-call multicall to %s", len(calls), calls[0].Target.Hex())
+			}
+			return fallback(ctx, calls, block)
 		}
+		if len(calls) > 1 {
+			return nil, testutil.GasExhaustedRPCError()
+		}
+		a := bySelector[string(calls[0].CallData)]
 		if a.err != nil {
 			return nil, a.err
 		}

@@ -364,6 +364,13 @@ e2e:
 	@echo "    This uses testcontainers to spin up PostgreSQL, Redis, and LocalStack."
 	go test -tags=e2e -v -timeout=5m ./cmd/base/watcher/...
 
+# Drive the morpho-indexer over real mainnet blocks against the real RPC.
+# Needs ALCHEMY_API_KEY in ../.env.secrets; BLOCKS=a,b,c overrides the block list.
+e2e-real-blocks:
+	@set -a; . ../.env.secrets 2>/dev/null; set +a; \
+	[ -n "$$ALCHEMY_API_KEY" ] || { echo "ERROR: ALCHEMY_API_KEY is empty; put it in ../.env.secrets"; exit 1; }; \
+	E2E_BLOCKS="$(BLOCKS)" go test -tags=integration,e2e -run TestE2E_RealBlocks -v -timeout=25m ./cmd/workers/morpho-indexer/
+
 # Install development tools
 tools:
 	@echo "==> Installing development tools..."

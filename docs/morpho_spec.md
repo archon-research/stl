@@ -1904,7 +1904,7 @@ for each log in block:
 
 **V1 vaults wrapped by V2 are auto-discovered:** When a V2 vault allocates to a V1 vault via an adapter, the V1 vault emits a `Deposit` event with `owner = V2_vault_address`. The V1 vault's address appears in `log.Address`. If not yet known, `tryDiscoverVault` is called for it — it passes the `MORPHO()` check and is registered as a V1 vault.
 
-**Important: `not-vault` caching:** Addresses that are definitively rejected (event decode failure, or `MORPHO()` returning the wrong address) are cached in-memory as "not a vault" so discovery is never attempted again for them within the process lifetime. Transient failures (network errors, DB errors) are intentionally not cached, so discovery will be retried on the next event from that address.
+**Important: `not-vault` caching:** Addresses that are definitively rejected (event decode failure, `MORPHO()` returning the wrong address, or no probe selector answering) are cached in-memory as "not a vault" so discovery is never attempted again for them within the process lifetime. A contract that traps on every selector reaches the same verdict: its batched probe exhausts the node's gas budget, and the narrowing multicaller re-issues the batch in halves until every call's own answer is known, which for such a contract is a failed call per selector. Transient failures (network errors, DB errors, and an `eth_call` that exhausts gas on its own, which only a node's cap can cause) are intentionally not cached, so discovery will be retried on the next event from that address.
 
 **Alternative approach — factory event tracking:**
 

@@ -96,23 +96,17 @@ const (
 )
 
 // discardIfNotVault caches a probe's definitive rejection of addr and reports
-// whether err was one. A trapping contract is discarded at WARN with the
-// unprobeable counter; a vault-shaped one at WARN; any other at DEBUG.
-func (s *Service) discardIfNotVault(ctx context.Context, addr common.Address, err error, path discoveryPath) bool {
+// whether err was one. A vault-shaped rejection is WARNed, any other DEBUGged.
+func (s *Service) discardIfNotVault(addr common.Address, err error, path discoveryPath) bool {
 	var nv *ErrNotVault
 	if !errors.As(err, &nv) {
 		return false
 	}
 	s.vaultRegistry.MarkNotVault(addr)
-	switch {
-	case nv.ProbedSelectorwise:
-		s.logger.Warn("discarding unprobeable candidate — its probe exhausts the eth_call gas budget",
-			"address", addr.Hex(), "discoveryPath", path, "vaultShaped", nv.VaultShaped, "reason", err)
-		s.telemetry.RecordUnprobeableCandidate(ctx, UnprobeableGasExhausted)
-	case nv.VaultShaped:
+	if nv.VaultShaped {
 		s.logger.Warn("vault-shaped address rejected by probe — possible new vault flavour",
 			"address", addr.Hex(), "discoveryPath", path, "reason", err)
-	default:
+	} else {
 		s.logger.Debug("not a Morpho-family vault",
 			"address", addr.Hex(), "discoveryPath", path, "reason", err)
 	}
@@ -162,10 +156,6 @@ func (s *Service) readVaultForDiscovery(ctx context.Context, vaultAddress common
 	metadata, err := s.blockchainSvc.getVaultMetadata(ctx, vaultAddress, blockNumber)
 	if err != nil {
 		return nil, fmt.Errorf("fetching vault metadata: %w", err)
-	}
-	if metadata.ProbedSelectorwise {
-		s.logger.Warn("vault confirmed one selector at a time — its batched probe exhausts the eth_call gas budget",
-			"vault", vaultAddress.Hex(), "block", blockNumber)
 	}
 
 	assetMetadata, err := s.blockchainSvc.getTokenMetadata(ctx, metadata.Asset, blockNumber)
@@ -456,7 +446,7 @@ func (s *Service) discoverV1V11VaultsInReceipt(ctx context.Context, receipt shar
 			if probeErr == nil {
 				continue
 			}
-			if s.discardIfNotVault(ctx, addr, probeErr, discoveryPathMorphoBlue) {
+			if s.discardIfNotVault(addr, probeErr, discoveryPathMorphoBlue) {
 				continue
 			}
 			s.logger.Warn("V1/V1.1 vault discovery via Morpho Blue path failed (will retry)",

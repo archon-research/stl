@@ -561,9 +561,9 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 			// terminate unrecognised selector calls with `INVALID` (0xfe)
 			// instead of `REVERT`. `INVALID` consumes all available gas
 			// and Multicall3's `aggregate3` doesn't bound per-sub-call gas,
-			// so such a probe blows past the node's `eth_call` cap and
-			// ProbeVault recovers selector-wise at four extra calls: keep
-			// the gate narrow.
+			// so such a probe blows past the node's `eth_call` cap and the
+			// narrowing multicaller re-issues it in halves: keep the gate
+			// narrow so that stays rare.
 			//
 			// Same predicate is used by the morpho-vault-backfill
 			// (see cmd/backfillers/morpho-vault-backfill/discovery.go), so the
@@ -571,22 +571,7 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 			if !s.eventExtractor.IsVaultActivityEvent(log) {
 				continue
 			}
-			s.logger.Debug("attempting vault discovery", "address", logAddress.Hex(), "tx", receipt.TransactionHash)
-			if err := s.tryDiscoverVault(ctx, log, logAddress, chainID, blockNumber, blockHash, blockVersion, blockTimestamp); err != nil {
-				if s.discardIfNotVault(ctx, logAddress, err, discoveryPathVaultActivity) {
-					continue
-				}
-				s.logger.Warn("vault discovery failed (will retry)", "address", logAddress.Hex(), "error", err)
-				// VEC-188: keep the first failure. A later success for the
-				// same vault address does NOT retroactively process the
-				// earlier log — that log's event was never saved. Surfacing
-				// the error forces SQS to redeliver so BOTH logs are retried.
-				if _, seen := discoveryErrs[logAddress]; !seen {
-					discoveryErrs[logAddress] = fmt.Errorf("vault discovery for %s in tx %s: %w", logAddress.Hex(), receipt.TransactionHash, err)
-				}
-			}
-			// Intentionally no delete(discoveryErrs, logAddress) on success:
-			// a later success doesn't undo the earlier log's loss.
+			s.discoverFromVaultActivity(ctx, receipt, log, logAddress, chainID, blockNumber, blockHash, blockVersion, blockTimestamp, discoveryErrs)
 		}
 	}
 
@@ -597,6 +582,24 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 		return errors.Join(errs...)
 	}
 	return nil
+}
+
+// discoverFromVaultActivity probes logAddress for a vault and processes the log
+// that triggered it. A definitive rejection is cached; any other failure is
+// kept in discoveryErrs under VEC-188's rule that the first failure for an
+// address is the one that fails the block: a later success for the same address
+// does not retroactively process the earlier log, whose event was never saved,
+// so the block must be redelivered for both.
+func (s *Service) discoverFromVaultActivity(ctx context.Context, receipt shared.TransactionReceipt, log shared.Log, logAddress common.Address, chainID, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time, discoveryErrs map[common.Address]error) {
+	s.logger.Debug("attempting vault discovery", "address", logAddress.Hex(), "tx", receipt.TransactionHash)
+	err := s.tryDiscoverVault(ctx, log, logAddress, chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
+	if err == nil || s.discardIfNotVault(logAddress, err, discoveryPathVaultActivity) {
+		return
+	}
+	s.logger.Warn("vault discovery failed (will retry)", "address", logAddress.Hex(), "error", err)
+	if _, seen := discoveryErrs[logAddress]; !seen {
+		discoveryErrs[logAddress] = fmt.Errorf("vault discovery for %s in tx %s: %w", logAddress.Hex(), receipt.TransactionHash, err)
+	}
 }
 
 // processMorphoBlueLog handles a Morpho Blue event log.
