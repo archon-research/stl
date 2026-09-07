@@ -96,6 +96,26 @@ data:
   ARCHIVE_SC_CALLS: "true"
   RAW_SC_BUCKET: "stl-sentinelstaging-raw-sc-calls"
 ---
+# base-morpho-indexer: the morpho-indexer binary on Base (chain 8453), ARCT-414.
+# The Base-specific SQS queue, Redis and raw bucket come from the matching
+# ExternalSecret; the Base raw bucket is mandatory (the worker rejects an
+# S3_BUCKET whose chain does not match CHAIN_ID).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: base-morpho-indexer-config
+data:
+  CHAIN_ID: "8453"
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://base-mainnet.g.alchemy.com/v2"
+  ENVIRONMENT: "sentinelstaging"
+  DEPLOY_ENV: "staging"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains, like the
+  # other Base workers (base-oracle-price-worker, base-allocation-tracker); the
+  # base-morpho-indexer pod identity's write policy is granted in ARCT-412.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelstaging-raw-sc-calls"
+---
 # curve-indexer + uniswap-v3-indexer run the shared dex-indexer binary; the DEX
 # key selects the factory. No SC-call archiving (dexbootstrap does not wire the
 # archiving decorator), so no ARCHIVE_SC_CALLS / RAW_SC_BUCKET here. The SQS
