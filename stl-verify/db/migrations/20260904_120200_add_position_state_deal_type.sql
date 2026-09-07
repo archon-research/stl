@@ -1,4 +1,6 @@
 -- VEC-401: record the deal type on the observation, since it cannot be derived from position_state.
+-- Named deal_type, matching ref_deal_type.deal_type and its unsuffixed sibling `direction`. No
+-- canonical column in the register carries a _code suffix, so this does not introduce the first.
 -- The Morpho market loan leg nets supply against borrow as abs(supply - borrow), so the sign -- and
 -- with it LOAN vs BORROW -- is destroyed at projection time and no query recovers it.
 
@@ -6,10 +8,10 @@
 -- instrument and the collateral leg is implied by instrument_key, so only the market loan leg has
 -- anything to say. Added now because a later backfill would need a superuser.
 
--- FK'd to ref_deal_type, like position_classification.deal_type_code already is. An earlier revision
+-- FK'd to ref_deal_type, like position_classification.deal_type already is. An earlier revision
 -- argued the RI probe would trip on this table's revoked UPDATE; that was wrong -- the probe needs
 -- UPDATE on the PARENT, which 20260714_160000 restored.
-ALTER TABLE position_state ADD COLUMN IF NOT EXISTS deal_type_code text;
+ALTER TABLE position_state ADD COLUMN IF NOT EXISTS deal_type text;
 
 -- Guarded because ADD CONSTRAINT has no IF NOT EXISTS and the rest of this file is re-runnable.
 -- Measured on pg18.6/ts2.29.2: enforced from stl_readwrite and after compress_chunk, and drop_chunks
@@ -20,14 +22,14 @@ BEGIN
                     WHERE conrelid = 'public.position_state'::regclass
                       AND conname = 'position_state_deal_type_fkey') THEN
         ALTER TABLE position_state ADD CONSTRAINT position_state_deal_type_fkey
-            FOREIGN KEY (deal_type_code) REFERENCES ref_deal_type (deal_type);
+            FOREIGN KEY (deal_type) REFERENCES ref_deal_type (deal_type);
     END IF;
 END
 $fk$;
 
-COMMENT ON COLUMN position_state.deal_type_code IS 'Derived, nullable. Deal type of THIS observation (LOAN / BORROW / COLLATERAL), stamped by the projection because it is not recoverable from the stored row: the Morpho market loan leg nets supply against borrow, so quantity carries the magnitude and this column carries the direction. NULL where the projection emits none -- the vault and Sky legs are constant per instrument and the collateral leg is implied by instrument_key, so a reader derives those. Roles: FK->ref_deal_type.deal_type, which is what constrains the value for EVERY writer, including a direct INSERT the materializer never sees.';
+COMMENT ON COLUMN position_state.deal_type IS 'Derived, nullable. Deal type of THIS observation (LOAN / BORROW / COLLATERAL), stamped by the projection because it is not recoverable from the stored row: the Morpho market loan leg nets supply against borrow, so quantity carries the magnitude and this column carries the direction. NULL where the projection emits none -- the vault and Sky legs are constant per instrument and the collateral leg is implied by instrument_key, so a reader derives those. Roles: FK->ref_deal_type.deal_type, which is what constrains the value for EVERY writer, including a direct INSERT the materializer never sees.';
 
--- Body copied from 20260818_130000 with one change: deal_type_code is resolved per view and carried
+-- Body copied from 20260818_130000 with one change: deal_type is resolved per view and carried
 -- into the snapshot and the append. Comments are not duplicated -- that migration is immutable, so it
 -- stays the reference for why each check exists, and a copy here would drift from it.
 CREATE OR REPLACE FUNCTION materialize_position_projection(p_view regclass, p_build_id integer DEFAULT 0)
@@ -76,7 +78,7 @@ BEGIN
 
     SELECT string_agg(format('%s is %s', e.col, format_type(a.atttypid, a.atttypmod)), ', ')
       INTO bad
-    FROM (VALUES ('quantity'), ('block_timestamp'), ('deal_type_code')) AS e(col)
+    FROM (VALUES ('quantity'), ('block_timestamp'), ('deal_type')) AS e(col)
     JOIN pg_catalog.pg_attribute a ON a.attrelid = p_view AND a.attname = e.col
          AND a.attnum > 0 AND NOT a.attisdropped
     JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
@@ -85,7 +87,7 @@ BEGIN
         OR (e.col = 'block_timestamp' AND a.atttypmod < 6)
         -- The FK cannot catch this one: a narrow declared type truncates on cast and the truncation
         -- can land on ANOTHER valid code, so CUSTODY_COLLATERAL as varchar(7) stores CUSTODY.
-        OR (e.col = 'deal_type_code'  AND t.typcategory = 'S' AND (a.atttypmod - 4) < 63));
+        OR (e.col = 'deal_type'  AND t.typcategory = 'S' AND (a.atttypmod - 4) < 63));
     IF bad IS NOT NULL THEN
         RAISE EXCEPTION 'projection % declares a lossy type for a value column (it would silently round or truncate; widen the view''s cast): %', p_view, bad;
     END IF;
@@ -94,9 +96,9 @@ BEGIN
     -- type casts to is not a ref_deal_type code, so the FK rejects it.
     v_deal_type := CASE WHEN EXISTS (
                        SELECT 1 FROM pg_catalog.pg_attribute a
-                        WHERE a.attrelid = p_view AND a.attname = 'deal_type_code'
+                        WHERE a.attrelid = p_view AND a.attname = 'deal_type'
                           AND a.attnum > 0 AND NOT a.attisdropped)
-                   THEN 'deal_type_code::text' ELSE 'NULL::text' END;
+                   THEN 'deal_type::text' ELSE 'NULL::text' END;
 
     DROP TABLE IF EXISTS pg_temp._mpp_src;
     EXECUTE format($q$
@@ -104,7 +106,7 @@ BEGIN
         SELECT public.position_id(chain_id, protocol_id, instrument_key, holder_id) AS position_id,
                chain_id, protocol_id, instrument_key, holder_id, quantity,
                block_number, block_version, processing_version, block_timestamp,
-               %2$s AS deal_type_code
+               %2$s AS deal_type
         FROM %1$s
     $q$, p_view, v_deal_type);
     ANALYZE pg_temp._mpp_src;
@@ -166,15 +168,15 @@ BEGIN
     SELECT string_agg(msg, '; ') INTO bad FROM (
         SELECT format('pos=%s bn=%s bv=%s pv=%s stored=%s emitted=%s', encode(s.position_id, 'hex'),
                       s.block_number, s.block_version, s.processing_version,
-                      coalesce(p.deal_type_code, 'NULL'), coalesce(s.deal_type_code, 'NULL')) AS msg
+                      coalesce(p.deal_type, 'NULL'), coalesce(s.deal_type, 'NULL')) AS msg
         FROM pg_temp._mpp_src s
         JOIN public.position_state p ON p.position_id = s.position_id AND p.block_number = s.block_number
              AND p.block_version = s.block_version AND p.processing_version = s.processing_version
-        WHERE p.deal_type_code IS DISTINCT FROM s.deal_type_code
+        WHERE p.deal_type IS DISTINCT FROM s.deal_type
         ORDER BY s.position_id, s.block_number, s.block_version, s.processing_version
         LIMIT 5) z;
     IF bad IS NOT NULL THEN
-        RAISE EXCEPTION 'projection % re-emits stored observations with a different deal_type_code, which this function CANNOT apply: the insert is suppressed on the stored key and UPDATE is revoked, so a silent no-op would leave the direction wrong forever. Append a higher processing_version instead: %', p_view, bad;
+        RAISE EXCEPTION 'projection % re-emits stored observations with a different deal_type, which this function CANNOT apply: the insert is suppressed on the stored key and UPDATE is revoked, so a silent no-op would leave the direction wrong forever. Append a higher processing_version instead: %', p_view, bad;
     END IF;
 
     IF bad_qty IS NOT NULL THEN
@@ -193,10 +195,10 @@ BEGIN
     INSERT INTO public.position_state
         (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
          block_number, block_version, processing_version, block_timestamp, projection, build_id,
-         deal_type_code)
+         deal_type)
     SELECT s.position_id, s.chain_id, s.protocol_id, s.instrument_key, s.holder_id, s.quantity,
            s.block_number, s.block_version, s.processing_version, s.block_timestamp, v_qualname,
-           p_build_id, s.deal_type_code
+           p_build_id, s.deal_type
     FROM pg_temp._mpp_src s
     WHERE NOT EXISTS (
         SELECT 1 FROM public.position_state p
@@ -211,6 +213,12 @@ BEGIN
     RETURN n;
 END $fn$;
 
-COMMENT ON FUNCTION materialize_position_projection(regclass, integer) IS '[Operational] VEC-402..407 shared materializer: validate a per-protocol projection view against the position_state column contract, fail hard on contract/type drift, double-emitted keys, or cross-view ownership violations; keep-stored-and-warn on a re-emitted key whose block_timestamp or quantity drifted, then -- evaluating the projection ONCE into a temp table every check reads -- APPEND the new observations. deal_type_code is OPTIONAL, not part of the required contract, so a projection omitting it still works and stores NULL; a projection emitting it as any string type has the value copied, and one emitting a lossily-narrow string type, or a value that changes a STORED observation''s deal type, is REJECTED. Everything else about the value is the table''s FK to ref_deal_type, not this function''s job. position_id is recomputed via position_id(); serialized per view by an advisory lock on the view''s canonical name. Idempotent; run out of band. Returns rows INSERTED.';
+COMMENT ON FUNCTION materialize_position_projection(regclass, integer) IS '[Operational] VEC-402..407 shared materializer: validate a per-protocol projection view against the position_state column contract, fail hard on contract/type drift, double-emitted keys, or cross-view ownership violations; keep-stored-and-warn on a re-emitted key whose block_timestamp or quantity drifted, then -- evaluating the projection ONCE into a temp table every check reads -- APPEND the new observations. deal_type is OPTIONAL, not part of the required contract, so a projection omitting it still works and stores NULL; a projection emitting it as any string type has the value copied, and one emitting a lossily-narrow string type, or a value that changes a STORED observation''s deal type, is REJECTED. Everything else about the value is the table''s FK to ref_deal_type, not this function''s job. position_id is recomputed via position_id(); serialized per view by an advisory lock on the view''s canonical name. Idempotent; run out of band. Returns rows INSERTED.';
 
-INSERT INTO migrations (filename) VALUES ('20260904_120000_add_position_state_deal_type_code.sql') ON CONFLICT (filename) DO NOTHING;
+-- position_classification is dropped, not renamed. Its only substantive column was the deal type,
+-- which now lives on the observation where a position that flips LOAN/BORROW can be represented; it
+-- held one MUTABLE row per position, which AGENTS.md prohibits for a classification, and nothing ever
+-- wrote it. direction is derivable from ref_deal_type.deal_type; collateral_status was unused.
+DROP TABLE IF EXISTS position_classification;
+
+INSERT INTO migrations (filename) VALUES ('20260904_120200_add_position_state_deal_type.sql') ON CONFLICT (filename) DO NOTHING;

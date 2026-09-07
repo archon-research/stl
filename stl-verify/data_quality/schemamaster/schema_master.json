@@ -13,7 +13,6 @@
     "ref_entity_type",
     "ref_industry_group_l2",
     "ref_origination_type",
-    "position_classification",
     "position_entity_link",
     "ref_sector_l1",
     "ref_security_subtype_l3",
@@ -332,6 +331,10 @@
       "type": "text",
       "class": "S"
     },
+    "deal_type": {
+      "type": "text",
+      "class": "S"
+    },
     "debt_token_id": {
       "type": "int8",
       "class": "R"
@@ -343,10 +346,6 @@
     "debt_wad": {
       "type": "numeric",
       "class": "D"
-    },
-    "deal_type_code": {
-      "type": "text",
-      "class": "S"
     },
     "decimals": {
       "type": "int2",
@@ -1263,16 +1262,16 @@
       "type": "numeric",
       "class": "S"
     },
+    "wallet_address": {
+      "type": "text",
+      "class": "S"
+    },
     "watermark": {
       "type": "int8",
       "class": "S"
     },
     "withdrawn_assets": {
       "type": "numeric",
-      "class": "S"
-    },
-    "wallet_address": {
-      "type": "text",
       "class": "S"
     }
   },

@@ -19,7 +19,7 @@ import (
 )
 
 // mppCols is the aliased column list the projection-view contract requires.
-const mppCols = `v(chain_id,protocol_id,instrument_key,holder_id,quantity,deal_type_code,block_number,block_version,processing_version,block_timestamp)`
+const mppCols = `v(chain_id,protocol_id,instrument_key,holder_id,quantity,deal_type,block_number,block_version,processing_version,block_timestamp)`
 
 var (
 	lineCommentRE         = regexp.MustCompile(`(?m)--.*$`)
@@ -149,9 +149,9 @@ func TestPositionState(t *testing.T) {
 	psTestModelbasedFuzz(t, f)
 	// --- guards a data assertion cannot see: asserted on the mechanism ---
 	psTestGuardsADataAssertion(t, f)
-	// --- deal_type_code: carry, type gate, vocabulary gate (VEC-401) ---
+	// --- deal_type: carry, type gate, vocabulary gate (VEC-401) ---
 	psTestDealTypeCode(t, f)
-	// --- deal_type_code: the direct-INSERT path the materializer gates cannot reach ---
+	// --- deal_type: the direct-INSERT path the materializer gates cannot reach ---
 	psTestDealTypeCodeDirectInsert(t, f)
 	// --- this migration must survive a re-apply (restore, partial-apply recovery) ---
 	psTestDealTypeCodeMigrationIsReRunnable(t, f)
@@ -211,13 +211,13 @@ func psTestInputRobustness(t *testing.T, f *psFixture) {
 
 	t.Run("numeric(30,18) quantity passes the contract (finding :197)", func(t *testing.T) {
 		mpp(t, "vtm", `SELECT 1::int chain_id,10::bigint protocol_id,'itm'::text instrument_key,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text holder_id,`+
-			`5::numeric(30,18) quantity,'LOAN'::text deal_type_code,100::bigint block_number,0::int block_version,`+
+			`5::numeric(30,18) quantity,'LOAN'::text deal_type,100::bigint block_number,0::int block_version,`+
 			`0::int processing_version,'2026-01-01'::timestamptz block_timestamp`, "typmod")
 	})
 
 	t.Run("float8 quantity fails the contract", func(t *testing.T) {
 		mppErr(t, "vfl", `SELECT 1::int chain_id,10::bigint protocol_id,'ifl'::text instrument_key,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text holder_id,`+
-			`1.5::float8 quantity,'LOAN'::text deal_type_code,1::bigint block_number,0::int block_version,`+
+			`1.5::float8 quantity,'LOAN'::text deal_type,1::bigint block_number,0::int block_version,`+
 			`0::int processing_version,'2026-01-01'::timestamptz block_timestamp`, "flt", "column contract")
 	})
 
@@ -405,7 +405,7 @@ func psTestIdentityIntegrityPositionkeyContract(t *testing.T, f *psFixture) {
 	mpp, mppErr := f.mpp, f.mppErr
 
 	t.Run("blank holder_id rejected even on a zero-quantity row", func(t *testing.T) {
-		// Identity fields feed position_id() for EVERY row, unlike deal_type_code (pre-flight (4) checks
+		// Identity fields feed position_id() for EVERY row, unlike deal_type (pre-flight (4) checks
 		// only non-zero rows). A blank holder must fail regardless of quantity — here on a zero row.
 		body := `SELECT * FROM (VALUES (1::int,10::bigint,'ihb'::text,''::text,0::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) ` + mppCols
 		mppErr(t, "vhb", body, "blankholder", "holder_id is required")
@@ -449,7 +449,7 @@ func psTestContractEdgesMissingExtra(t *testing.T, f *psFixture) {
 
 	t.Run("view missing a contract column is rejected as MISSING", func(t *testing.T) {
 		// Drop block_number, a still-required column; the contract check must name it MISSING before any
-		// write. (This used to drop deal_type_code, which is no longer part of the required contract --
+		// write. (This used to drop deal_type, which is no longer part of the required contract --
 		// so the case silently stopped testing anything the moment that column left.)
 		body := `SELECT * FROM (VALUES (1::int,10::bigint,'imz'::text,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text,5::numeric,0::int,0::int,'2026-01-01'::timestamptz)) v(chain_id,protocol_id,instrument_key,holder_id,quantity,block_version,processing_version,block_timestamp)`
 		mppErr(t, "vmz", body, "missing", "block_number (MISSING)")
@@ -457,7 +457,7 @@ func psTestContractEdgesMissingExtra(t *testing.T, f *psFixture) {
 
 	t.Run("extra column in the view is tolerated", func(t *testing.T) {
 		// The temp projection selects contract columns by name, so an unrelated extra column is ignored.
-		body := `SELECT * FROM (VALUES (1::int,10::bigint,'ix'::text,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text,5::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz,'ignored'::text)) v(chain_id,protocol_id,instrument_key,holder_id,quantity,deal_type_code,block_number,block_version,processing_version,block_timestamp,extra)`
+		body := `SELECT * FROM (VALUES (1::int,10::bigint,'ix'::text,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text,5::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz,'ignored'::text)) v(chain_id,protocol_id,instrument_key,holder_id,quantity,deal_type,block_number,block_version,processing_version,block_timestamp,extra)`
 		mpp(t, "vx", body, "extra")
 	})
 }
@@ -807,7 +807,7 @@ func psTestEmptyProjectionReturnCount(t *testing.T, f *psFixture) {
 		// genesis is a legal block time. Tightening it to a strict `>` survived, because nothing stored
 		// exactly that instant.
 		mpp(t, "vgen", `SELECT 1::int chain_id,10::bigint protocol_id,'igen'::text instrument_key,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text holder_id,`+
-			`5::numeric quantity,'LOAN'::text deal_type_code,0::bigint block_number,0::int block_version,`+
+			`5::numeric quantity,'LOAN'::text deal_type,0::bigint block_number,0::int block_version,`+
 			`0::int processing_version,'2009-01-03 00:00:00+00'::timestamptz block_timestamp`, "genesis")
 		var ts string
 		if err := pool.QueryRow(ctx,
@@ -846,7 +846,7 @@ func psTestEmptyProjectionReturnCount(t *testing.T, f *psFixture) {
 		// failure the '< Infinity' leg exists for, and a NULL build_id makes ADR-0002 provenance blank
 		// for a whole run. Neither is repairable: UPDATE and DELETE are revoked.
 		nullQty := `SELECT 1::int chain_id,10::bigint protocol_id,'inq'::text instrument_key,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text holder_id,` +
-			`NULL::numeric quantity,'LOAN'::text deal_type_code,100::bigint block_number,0::int block_version,` +
+			`NULL::numeric quantity,'LOAN'::text deal_type,100::bigint block_number,0::int block_version,` +
 			`0::int processing_version,'2026-01-01'::timestamptz block_timestamp`
 		mppErr(t, "vnq", nullQty, "null quantity", "quantity=NULL")
 
@@ -1693,13 +1693,13 @@ func psTestGuardsADataAssertion(t *testing.T, f *psFixture) {
 				vals := map[string]string{
 					"chain_id": "1::int", "protocol_id": "10::bigint",
 					"instrument_key": "'inull'::text", "holder_id": "'" + strings.Repeat("a", 40) + "'::text",
-					"quantity": "5::numeric", "deal_type_code": "'LOAN'::text",
+					"quantity": "5::numeric", "deal_type": "'LOAN'::text",
 					"block_number": "900::bigint", "block_version": "0::int",
 					"processing_version": "0::int", "block_timestamp": "'2026-01-01'::timestamptz",
 				}
 				vals[col] = "NULL::" + typed[col]
 				order := []string{"chain_id", "protocol_id", "instrument_key", "holder_id", "quantity",
-					"deal_type_code", "block_number", "block_version", "processing_version", "block_timestamp"}
+					"deal_type", "block_number", "block_version", "processing_version", "block_timestamp"}
 				parts := make([]string, 0, len(order))
 				for _, k := range order {
 					parts = append(parts, vals[k])
@@ -1834,7 +1834,7 @@ func psTestGuardsADataAssertion(t *testing.T, f *psFixture) {
 		// trip cross-view disjointness instead of exercising the type contract.
 		body := func(ik, qtyType, tsType string) string {
 			return `SELECT 1::int chain_id,10::bigint protocol_id,'` + ik + `'::text instrument_key,'` + holder +
-				`'::text holder_id,0.5::` + qtyType + ` quantity,'LOAN'::text deal_type_code,` +
+				`'::text holder_id,0.5::` + qtyType + ` quantity,'LOAN'::text deal_type,` +
 				`600::bigint block_number,0::int block_version,0::int processing_version,` +
 				`'2026-01-01 00:00:00.123456+00'::` + tsType + ` block_timestamp`
 		}
@@ -2096,11 +2096,11 @@ func psTestGuardsADataAssertion(t *testing.T, f *psFixture) {
 	})
 }
 
-// psTestDealTypeCode covers: deal_type_code carry, type gate, vocabulary gate (VEC-401).
+// psTestDealTypeCode covers: deal_type carry, type gate, vocabulary gate (VEC-401).
 // Every case fails on the pre-fix code it names -- the pre-fix materializer read the view's column
 // only when it was exactly `text`, stored whatever string it found, and validated nothing.
 func psTestDealTypeCode(t *testing.T, f *psFixture) {
-	// dtRow is row() with the deal_type_code slot under the caller's control: an arbitrary SQL
+	// dtRow is row() with the deal_type slot under the caller's control: an arbitrary SQL
 	// expression, or "" to omit the column entirely (the optional-contract case).
 	dtRow := func(ik, expr string) string {
 		body := "(1::int,10::bigint,'" + ik + "'::text,'" + strings.Repeat("a", 40) + "'::text,5::numeric,"
@@ -2118,7 +2118,7 @@ func psTestDealTypeCode(t *testing.T, f *psFixture) {
 		t.Helper()
 		var got *string
 		if err := f.pool.QueryRow(f.ctx,
-			`SELECT deal_type_code FROM position_state WHERE instrument_key = $1`, ik).Scan(&got); err != nil {
+			`SELECT deal_type FROM position_state WHERE instrument_key = $1`, ik).Scan(&got); err != nil {
 			t.Fatalf("read back %s: %v", ik, err)
 		}
 		return got
@@ -2142,14 +2142,14 @@ func psTestDealTypeCode(t *testing.T, f *psFixture) {
 			}
 			got, want := stored(t, ik), c.want
 			if got == nil {
-				t.Errorf("%s: deal_type_code stored NULL, want %q", c.name, want)
+				t.Errorf("%s: deal_type stored NULL, want %q", c.name, want)
 			} else if *got != want {
-				t.Errorf("%s: deal_type_code = %q, want %q", c.name, *got, want)
+				t.Errorf("%s: deal_type = %q, want %q", c.name, *got, want)
 			}
 		}
 	})
 
-	// A non-string deal_type_code is a view bug. It needs no gate of its own: whatever it casts to is
+	// A non-string deal_type is a view bug. It needs no gate of its own: whatever it casts to is
 	// not a ref_deal_type code, so the FK refuses it. Pre-fix it fell through to a NULL branch and the
 	// run reported success.
 	t.Run("non-string type is refused by the FK", func(t *testing.T) {
@@ -2173,7 +2173,7 @@ func psTestDealTypeCode(t *testing.T, f *psFixture) {
 		}
 	})
 
-	// The materializer CANNOT apply a changed deal_type_code to a stored observation: the insert is
+	// The materializer CANNOT apply a changed deal_type to a stored observation: the insert is
 	// suppressed on the 4-column key and UPDATE is revoked. Before this raised, the run returned a row
 	// count with no warning and the direction stayed wrong forever.
 	t.Run("re-emitting a stored key with a different deal type raises", func(t *testing.T) {
@@ -2226,7 +2226,7 @@ func psTestDealTypeCode(t *testing.T, f *psFixture) {
 				continue
 			}
 			if got := stored(t, ik); got != nil {
-				t.Errorf("%s: deal_type_code = %q, want NULL", c.name, *got)
+				t.Errorf("%s: deal_type = %q, want NULL", c.name, *got)
 			}
 		}
 	})
@@ -2241,7 +2241,7 @@ func psTestDealTypeCode(t *testing.T, f *psFixture) {
 				t.Fatalf("%s: inserted %d rows, want 1", code, n)
 			}
 			if got := stored(t, ik); got == nil || *got != code {
-				t.Errorf("%s: deal_type_code = %v, want %q", code, got, code)
+				t.Errorf("%s: deal_type = %v, want %q", code, got, code)
 			}
 		}
 	})
@@ -2267,7 +2267,7 @@ func psTestDealTypeCode(t *testing.T, f *psFixture) {
 			t.Fatalf("seeded code: inserted %d rows, want 1", n)
 		}
 		if got := stored(t, ik); got == nil || *got != code {
-			t.Errorf("seeded code: deal_type_code = %v, want %q", got, code)
+			t.Errorf("seeded code: deal_type = %v, want %q", got, code)
 		}
 	})
 }
@@ -2288,7 +2288,7 @@ func psTestDealTypeCodeDirectInsert(t *testing.T, f *psFixture) {
 			`INSERT INTO position_state
 			   (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
 			    block_number, block_version, processing_version, block_timestamp, projection,
-			    build_id, deal_type_code)
+			    build_id, deal_type)
 			 VALUES (decode(repeat('cd',32),'hex'), 1, 10, 'dt-direct', repeat('a',40), 5,
 			         $1, 0, 0, '2026-01-01'::timestamptz, 'dt.direct.view', 0, $2)`, bn, code)
 		return err
@@ -2332,11 +2332,11 @@ func psTestDealTypeCodeDirectInsert(t *testing.T, f *psFixture) {
 	t.Run("the app role can store every ref_deal_type code", func(t *testing.T) {
 		var ok bool
 		if err := f.pool.QueryRow(f.ctx,
-			`SELECT has_column_privilege('stl_readwrite','position_state','deal_type_code','INSERT')`).Scan(&ok); err != nil {
+			`SELECT has_column_privilege('stl_readwrite','position_state','deal_type','INSERT')`).Scan(&ok); err != nil {
 			t.Fatalf("check column privilege: %v", err)
 		}
 		if !ok {
-			t.Error("stl_readwrite has no INSERT privilege on position_state.deal_type_code")
+			t.Error("stl_readwrite has no INSERT privilege on position_state.deal_type")
 		}
 		codes := f.refDealTypeCodes(t)
 		for i, code := range codes {
@@ -2423,7 +2423,7 @@ func (f *psFixture) refDealTypeCodes(t *testing.T) []string {
 func psTestDealTypeCodeMigrationIsReRunnable(t *testing.T, f *psFixture) {
 	t.Run("the migration re-applies cleanly", func(t *testing.T) {
 		raw, err := os.ReadFile(filepath.Join(getMigrationsPath(),
-			"20260904_120000_add_position_state_deal_type_code.sql"))
+			"20260904_120200_add_position_state_deal_type.sql"))
 		if err != nil {
 			t.Fatalf("read migration: %v", err)
 		}

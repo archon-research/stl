@@ -30,8 +30,7 @@ var convertedAppendOnlyTables = []string{
 	"morpho_vault_cap",
 	"morpho_vault_fee",
 	"psm3_alm_shares",
-	// VEC-402 (#625): SELECT+INSERT only, with the owner-side REVOKE too. position_classification
-	// is NOT here — #625 no longer touches it, and its own migration still grants full DML.
+	// VEC-402: SELECT+INSERT only, with the owner-side REVOKE too.
 	"position_state",
 	"oracle_asset",
 }
