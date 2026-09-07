@@ -39,7 +39,7 @@ BTC_GROUP = frozenset({"BTC", "WBTC", "LBTC", "TBTC", "CBBTC"})
 # One snapshot per venue, not per (venue, symbol), so a venue listing two book
 # symbols never counts its depth twice; the list order breaks the tie, not recency.
 _LATEST_FRESH_PER_VENUE = text("""
-    SELECT DISTINCT ON (exchange) exchange, symbol, persisted_at, asks
+    SELECT DISTINCT ON (exchange) exchange, symbol, persisted_at, bids
     FROM cex_orderbook_snapshots
     WHERE symbol = ANY(:symbols)
       AND persisted_at > now() - CAST(:max_age AS interval)
@@ -57,22 +57,24 @@ def book_for(token: str) -> str:
     return upper
 
 
-def merge_asks(asks_per_venue: list[list[list[str]]]) -> pd.DataFrame:
-    """Merge per-venue ask levels into one book: price, sz, liquidity.
+def merge_bids(bids_per_venue: list[list[list[str]]]) -> pd.DataFrame:
+    """Merge per-venue bid levels into one book: price, sz, liquidity.
 
-    Levels stay separate rows (depth at the same price on two venues is twice
-    the depth), sorted best price first (descending) like the parquet books:
-    ``Liquidator.slippage_calculator_cum`` walks the array in stored order, so
-    an ascending book would consume the worst levels first.
+    Bids, because the liquidator sells seized collateral into resting buy
+    orders, and the parquet ``*_sell_orderbook`` files are that side: a ladder
+    from the best price downwards. Levels stay separate rows (depth at the same
+    price on two venues is twice the depth), sorted best price first like the
+    parquet books: ``Liquidator.slippage_calculator_cum`` keeps ``price <=
+    sim_price`` and walks the array in stored order.
     """
     rows: list[tuple[float, float]] = []
-    for levels in asks_per_venue:
+    for levels in bids_per_venue:
         for price_str, size_str in levels:
             price, sz = float(price_str), float(size_str)
             if price > 0 and sz > 0:
                 rows.append((price, sz))
     if not rows:
-        raise ValueError("no ask levels after merging venues")
+        raise ValueError("no bid levels after merging venues")
     df = pd.DataFrame(rows, columns=["price", "sz"]).sort_values("price", ascending=False, ignore_index=True)
     df["liquidity"] = df["price"] * df["sz"]
     return df
@@ -114,18 +116,18 @@ class PostgresOrderbookReader:
                 f"no fresh {book_symbol} order book: no snapshot newer than {self._max_age} "
                 f"for any of {venue_symbols} — is cex-orderbook-indexer running?"
             )
-        asks_per_venue = [_as_levels(row.asks) for row in rows]
+        bids_per_venue = [_as_levels(row.bids) for row in rows]
         logger.info(
             "order book %s aggregated from %d venue snapshot(s): %s",
             book_symbol,
             len(rows),
             ", ".join(f"{r.exchange}:{r.symbol}@{r.persisted_at:%H:%M:%S}" for r in rows),
         )
-        return merge_asks(asks_per_venue)
+        return merge_bids(bids_per_venue)
 
 
-def _as_levels(asks: object) -> list[list[str]]:
+def _as_levels(levels: object) -> list[list[str]]:
     """JSONB arrives as a decoded list or a JSON string depending on the driver path."""
-    if isinstance(asks, str):
-        return json.loads(asks)
-    return cast(list[list[str]], asks)
+    if isinstance(levels, str):
+        return json.loads(levels)
+    return cast(list[list[str]], levels)

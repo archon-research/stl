@@ -20,15 +20,17 @@ async def engine(async_db_url: str):
     await eng.dispose()
 
 
-async def _seed(engine, exchange: str, symbol: str, asks: list[list[str]], age: timedelta = timedelta(seconds=5)):
+async def _seed(engine, exchange: str, symbol: str, bids: list[list[str]], age: timedelta = timedelta(seconds=5)):
     ts = dt.datetime.now(dt.UTC) - age
+    # Asks carry a decoy level: the reader must read the bid side only.
+    decoy_asks = '[["999999.0", "1.0"]]'
     async with engine.begin() as conn:
         await conn.execute(
             text("""
                 INSERT INTO cex_orderbook_snapshots (exchange, symbol, ingested_at, persisted_at, bids, asks)
                 VALUES (:exchange, :symbol, :ts, :ts, :bids, :asks)
             """),
-            {"exchange": exchange, "symbol": symbol, "ts": ts, "bids": "[]", "asks": json.dumps(asks)},
+            {"exchange": exchange, "symbol": symbol, "ts": ts, "bids": json.dumps(bids), "asks": decoy_asks},
         )
 
 
