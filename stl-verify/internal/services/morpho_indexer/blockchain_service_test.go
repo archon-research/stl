@@ -360,10 +360,10 @@ func TestGetVaultMetadata_MorphoReverts_WithoutV2Markers(t *testing.T) {
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		if h.isProbeMulticall(calls) {
 			return []outbound.Result{
-				{Success: false, ReturnData: nil},                         // MORPHO reverts
-				{Success: true, ReturnData: h.packAddress(testLoanToken)}, // asset succeeds
-				{Success: false, ReturnData: nil},                         // curator reverts
-				{Success: false, ReturnData: nil},                         // liquidityAdapter reverts
+				{Success: false, ReturnData: nil},                       // MORPHO reverts
+				{Success: true, ReturnData: packAddress(testLoanToken)}, // asset succeeds
+				{Success: false, ReturnData: nil},                       // curator reverts
+				{Success: false, ReturnData: nil},                       // liquidityAdapter reverts
 			}, nil
 		}
 		t.Fatal("detail multicall should not be called when MORPHO() reverts and V2 markers also fail")
@@ -478,10 +478,10 @@ func TestGetVaultMetadata_AssetCallFailed(t *testing.T) {
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		if h.isProbeMulticall(calls) {
 			return []outbound.Result{
-				{Success: true, ReturnData: h.packAddress(MorphoBlueAddress)}, // MORPHO() succeeds
-				{Success: false, ReturnData: nil},                             // asset() reverts
-				{Success: false, ReturnData: nil},                             // curator reverts (MetaMorpho)
-				{Success: false, ReturnData: nil},                             // liquidityAdapter reverts (MetaMorpho)
+				{Success: true, ReturnData: packAddress(MorphoBlueAddress)}, // MORPHO() succeeds
+				{Success: false, ReturnData: nil},                           // asset() reverts
+				{Success: false, ReturnData: nil},                           // curator reverts (MetaMorpho)
+				{Success: false, ReturnData: nil},                           // liquidityAdapter reverts (MetaMorpho)
 			}, nil
 		}
 		t.Fatal("detail multicall should not be called when asset() fails")
@@ -504,7 +504,7 @@ func TestGetVaultMetadata_AssetUnpackError(t *testing.T) {
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		if h.isProbeMulticall(calls) {
 			return []outbound.Result{
-				{Success: true, ReturnData: h.packAddress(MorphoBlueAddress)},
+				{Success: true, ReturnData: packAddress(MorphoBlueAddress)},
 				{Success: true, ReturnData: []byte{0x01, 0x02}}, // garbage data that won't unpack
 				{Success: false, ReturnData: nil},               // curator reverts (MetaMorpho)
 				{Success: false, ReturnData: nil},               // liquidityAdapter reverts (MetaMorpho)
@@ -1960,7 +1960,7 @@ func enumerateVaultAdaptersHarness(t *testing.T, vault common.Address, wantLengt
 				t.Errorf("adapters(i) targeted %s, want %s", c.Target.Hex(), vault.Hex())
 			}
 			index := new(big.Int).SetBytes(c.CallData[4:])
-			results[i] = outbound.Result{Success: true, ReturnData: h.packAddress(adapterAddressForIndex(index))}
+			results[i] = outbound.Result{Success: true, ReturnData: packAddress(adapterAddressForIndex(index))}
 		}
 		return results, nil
 	}

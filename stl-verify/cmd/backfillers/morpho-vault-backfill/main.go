@@ -170,9 +170,13 @@ func newBackfillActivities(ctx context.Context, deps temporal.Dependencies, cfg 
 		return nil, nil, err
 	}
 
-	multicaller, err := multicall.NewClient(ethClient, blockchain.Multicall3)
+	chainName, err := entity.ChainName(cfg.chainID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("creating multicall client: %w", err)
+		return nil, nil, fmt.Errorf("resolving the chain name for telemetry: %w", err)
+	}
+	multicaller, err := multicall.NewNarrowingClient(ethClient, blockchain.Multicall3, chainName, deps.Logger)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	archiveWrap, archiveWait, archiveDrain, err := archivingwire.Bootstrap(ctx, deps.Logger, cfg.chainID, int64(buildReg.BuildID()), "morpho-vault")
@@ -183,9 +187,11 @@ func newBackfillActivities(ctx context.Context, deps temporal.Dependencies, cfg 
 		archiveDrain()
 		ethClient.Close()
 	}
+	// Narrowing sits inside archiving so the archive records the batch the
+	// prober asked for, with every call's own answer.
 	multicaller = archiveWrap(multicaller)
 
-	prober, err := newVaultProber(deps.Logger, multicaller, cfg.chainID)
+	prober, err := newVaultProber(deps.Logger, multicaller)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -258,7 +264,7 @@ func dialChain(ctx context.Context, cfg config) (*ethclient.Client, error) {
 	return ethClient, nil
 }
 
-func newVaultProber(logger *slog.Logger, multicaller outbound.Multicaller, chainID int64) (*vaultProber, error) {
+func newVaultProber(logger *slog.Logger, multicaller outbound.Multicaller) (*vaultProber, error) {
 	sharedProber, err := morpho_indexer.NewVaultProber()
 	if err != nil {
 		return nil, fmt.Errorf("creating vault prober: %w", err)
@@ -267,19 +273,10 @@ func newVaultProber(logger *slog.Logger, multicaller outbound.Multicaller, chain
 	if err != nil {
 		return nil, fmt.Errorf("loading ERC20 ABI: %w", err)
 	}
-	chainName, err := entity.ChainName(chainID)
-	if err != nil {
-		return nil, fmt.Errorf("resolving the chain name for telemetry: %w", err)
-	}
-	probeTelemetry, err := morpho_indexer.NewTelemetry(chainName)
-	if err != nil {
-		return nil, fmt.Errorf("creating morpho telemetry: %w", err)
-	}
 	return &vaultProber{
 		multicaller:  multicaller,
 		sharedProber: sharedProber,
 		erc20ABI:     erc20ABI,
 		logger:       logger,
-		telemetry:    probeTelemetry,
 	}, nil
 }

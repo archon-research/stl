@@ -182,6 +182,9 @@ func NewVaultProber() (*VaultProber, error) {
 // ProbeVault calls MORPHO(), asset(), curator(), and liquidityAdapter() on a
 // single address to determine if it is a Morpho-family vault. Returns
 // ErrNotVault if neither the MetaMorpho nor the VaultV2 path can be confirmed.
+//
+// A contract that traps on every selector exhausts the batch's gas; see
+// multicall.Narrowing for how the batch still reaches each call's own answer.
 func (p *VaultProber) ProbeVault(ctx context.Context, mc outbound.Multicaller, addr common.Address, blockNum *big.Int) (*VaultProbeResult, error) {
 	results, err := mc.Execute(ctx, p.ProbeCalls(addr), blockNum)
 	if err != nil {

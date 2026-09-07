@@ -1,9 +1,5 @@
-// Package dexbootstrap consolidates the shared CLI/env parsing + wiring used
-// by the three DEX SQS workers (curve, uniswap-v3, balancer). Without this
-// helper, each worker's main.go duplicates ~300 LOC of identical setup; the
-// reviews for VEC-79 (N7-3 + S3) flagged the duplication, and the new
-// internal/pkg/chainutil package gave us the validation surface to consolidate
-// against.
+// Package dexbootstrap consolidates the CLI/env parsing and infrastructure
+// wiring shared by the DEX SQS workers, leaving factories only what differs.
 package dexbootstrap
 
 import (

@@ -266,13 +266,9 @@ func (t *Telemetry) RecordUnitReads(ctx context.Context, oracleName string, fetc
 	t.unitPricesFetched.Add(ctx, int64(fetched), attrs)
 	failed := expected - fetched
 	if failed < 0 {
-		// fetched > expected is by definition a caller bug, not a feed
-		// outcome (every fetcher yields exactly one outcome per read). Clamp
-		// rather than forward: the OTel sum aggregator adds negative values
-		// unconditionally, which would corrupt the cumulative counter and
-		// make rate() misread the decrease as a counter reset. Loud, not
-		// silent: the bug lands on the errors counter, where a persistent
-		// occurrence trips VectorOracleIndexerErrorsHigh.
+		// fetched > expected is a caller bug, not a feed outcome. Clamp rather
+		// than forward: the OTel sum aggregator adds negatives unconditionally,
+		// so rate() would misread the decrease as a counter reset.
 		t.errorsTotal.Add(ctx, 1, metric.WithAttributes(
 			t.chainAttr,
 			attribute.String("operation", "unit_reads_accounting"),
