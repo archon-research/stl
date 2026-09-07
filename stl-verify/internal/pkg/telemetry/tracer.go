@@ -30,7 +30,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -84,7 +84,7 @@ func InitTracer(ctx context.Context, config TracerConfig) (shutdown func(context
 	attrs := []attribute.KeyValue{
 		semconv.ServiceName(config.ServiceName),
 		semconv.ServiceVersion(config.ServiceVersion),
-		semconv.DeploymentEnvironmentName(config.Environment),
+		semconv.DeploymentEnvironmentNameKey.String(config.Environment),
 	}
 	if config.BuildTime != "" {
 		attrs = append(attrs, attribute.String("service.build_time", config.BuildTime))
@@ -124,11 +124,12 @@ func InitTracer(ctx context.Context, config TracerConfig) (shutdown func(context
 
 	// Create sampler
 	var sampler trace.Sampler
-	if config.SampleRate >= 1.0 {
+	switch {
+	case config.SampleRate >= 1.0:
 		sampler = trace.AlwaysSample()
-	} else if config.SampleRate <= 0 {
+	case config.SampleRate <= 0:
 		sampler = trace.NeverSample()
-	} else {
+	default:
 		sampler = trace.TraceIDRatioBased(config.SampleRate)
 	}
 

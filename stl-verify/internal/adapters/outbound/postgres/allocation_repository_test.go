@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"bytes"
 	"math/big"
 	"testing"
 
@@ -42,7 +43,7 @@ func TestBuildInsertArgs_TxAmountPlainERC20(t *testing.T) {
 		Direction:     "in",
 	}
 
-	_, args, err := r.buildInsertArgs(pos, 3)
+	_, args, err := r.buildInsertArgs(pos, 3, nil)
 	if err != nil {
 		t.Fatalf("buildInsertArgs: %v", err)
 	}
@@ -79,7 +80,7 @@ func TestBuildInsertArgs_VaultPositionUsesTokenDecimals(t *testing.T) {
 		Direction:     "out",
 	}
 
-	_, args, err := r.buildInsertArgs(pos, 609)
+	_, args, err := r.buildInsertArgs(pos, 609, nil)
 	if err != nil {
 		t.Fatalf("buildInsertArgs: %v", err)
 	}
@@ -103,6 +104,70 @@ func TestBuildInsertArgs_VaultPositionUsesTokenDecimals(t *testing.T) {
 	assertNumeric(t, "txAmount", txAmount, rawShares, -18)
 }
 
+func TestEncodeTxHash_SweepUsesZeroSentinel(t *testing.T) {
+	// Sweep (reconciliation) positions have no originating transaction. Rather
+	// than fabricating a realistic-looking hash that masquerades as an on-chain
+	// transaction (VEC-340), encodeTxHash stores the zero hash as an explicit
+	// "no transaction" sentinel — a value no real transaction hash takes in
+	// practice (a collision is cryptographically negligible).
+	pos := &entity.AllocationPosition{
+		ChainID:      1,
+		TokenAddress: common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
+		ProxyAddress: common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		BlockNumber:  24584100,
+		Direction:    "sweep",
+		// TxHash intentionally empty: sweeps are not transaction-driven.
+	}
+
+	got, err := encodeTxHash(pos)
+	if err != nil {
+		t.Fatalf("encodeTxHash: %v", err)
+	}
+
+	want := make([]byte, common.HashLength)
+	if !bytes.Equal(got, want) {
+		t.Errorf("sweep tx_hash = %x, want all-zero %d-byte sentinel", got, common.HashLength)
+	}
+}
+
+func TestEncodeTxHash_NonSweepMissingHashErrors(t *testing.T) {
+	// Only sweeps may omit a transaction hash. A transaction-driven position
+	// without one signals an upstream bug and must be rejected, not silently
+	// stored as the "no transaction" sentinel.
+	pos := &entity.AllocationPosition{Direction: "in"}
+
+	if _, err := encodeTxHash(pos); err == nil {
+		t.Fatal("expected error for non-sweep position with empty tx_hash")
+	}
+}
+
+func TestEncodeTxHash_TruncatedHashErrors(t *testing.T) {
+	// common.FromHex decodes short/truncated hex without complaint; encodeTxHash
+	// must reject anything that isn't a full 32-byte transaction hash.
+	pos := &entity.AllocationPosition{Direction: "in", TxHash: "0xabc"}
+
+	if _, err := encodeTxHash(pos); err == nil {
+		t.Fatal("expected error for truncated tx_hash")
+	}
+}
+
+func TestEncodeTxHash_RealTransactionDecoded(t *testing.T) {
+	// Transaction-driven positions keep their on-chain hash verbatim.
+	pos := &entity.AllocationPosition{
+		TxHash: "0xda50e73f9d4722402ae4ec6e506c3726a78fc5f6146b4957bfadc2c1fffc8f8c",
+	}
+
+	got, err := encodeTxHash(pos)
+	if err != nil {
+		t.Fatalf("encodeTxHash: %v", err)
+	}
+
+	want := common.FromHex(pos.TxHash)
+	if !bytes.Equal(got, want) {
+		t.Errorf("tx_hash = %x, want %x", got, want)
+	}
+}
+
 func TestBuildInsertArgs_NilScaledBalanceIsNull(t *testing.T) {
 	// ScaledBalance is optional — nil should produce a NULL numeric.
 	r := &AllocationRepository{}
@@ -116,13 +181,13 @@ func TestBuildInsertArgs_NilScaledBalanceIsNull(t *testing.T) {
 		ProxyAddress:  common.HexToAddress("0x1111111111111111111111111111111111111111"),
 		Balance:       big.NewInt(1000000),
 		BlockNumber:   24584100,
-		TxHash:        "0xabc",
+		TxHash:        "0xda50e73f9d4722402ae4ec6e506c3726a78fc5f6146b4957bfadc2c1fffc8f8c",
 		LogIndex:      1,
 		TxAmount:      big.NewInt(1000000),
 		Direction:     "in",
 	}
 
-	_, args, err := r.buildInsertArgs(pos, 3)
+	_, args, err := r.buildInsertArgs(pos, 3, nil)
 	if err != nil {
 		t.Fatalf("buildInsertArgs: %v", err)
 	}
@@ -131,5 +196,142 @@ func TestBuildInsertArgs_NilScaledBalanceIsNull(t *testing.T) {
 	scaled := args[5].(pgtype.Numeric)
 	if scaled.Valid {
 		t.Fatal("expected scaled_balance to be NULL (invalid)")
+	}
+}
+
+func TestBuildInsertArgs_UnderlyingValueUsesAssetDecimals(t *testing.T) {
+	r := &AllocationRepository{}
+	underlyingID := int64(77)
+	pos := &entity.AllocationPosition{
+		ChainID:       1,
+		TokenAddress:  common.HexToAddress("0x38464507e02c983f20428a6e8566693fe9e422a9"),
+		TokenDecimals: 18, // share token decimals — must NOT drive the value
+		Balance:       big.NewInt(1),
+		TxAmount:      big.NewInt(0),
+		Direction:     "sweep", // minimal valid direction for encodeTxHash
+		Underlying: &entity.UnderlyingValuation{
+			Value:         big.NewInt(20_102_052_000_000), // 20,102,052 USDC raw
+			AssetAddress:  common.HexToAddress("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"),
+			AssetSymbol:   "USDC",
+			AssetDecimals: 6, // regression guard for the grove-bbqUSDC-V2 decimals class
+		},
+	}
+	_, args, err := r.buildInsertArgs(pos, 1, &underlyingID)
+	if err != nil {
+		t.Fatalf("buildInsertArgs: %v", err)
+	}
+	underlying := args[14].(pgtype.Numeric) // $15
+	if !underlying.Valid {
+		t.Fatal("underlying_value must be non-NULL")
+	}
+	if underlying.Exp != -6 {
+		t.Fatalf("underlying_value Exp = %d, want -6 (asset decimals, not share decimals)", underlying.Exp)
+	}
+	if got := args[15].(*int64); got == nil || *got != 77 { // $16
+		t.Fatalf("underlying_token_id = %v, want 77", got)
+	}
+}
+
+func TestBuildInsertArgs_TransferParties(t *testing.T) {
+	proxy := common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
+	counterparty := common.HexToAddress("0x9999999999999999999999999999999999999999")
+	zero := common.Address{}
+	txHash := "0xda50e73f9d4722402ae4ec6e506c3726a78fc5f6146b4957bfadc2c1fffc8f8c"
+
+	newPos := func(direction string, from, to *common.Address, tx string) *entity.AllocationPosition {
+		return &entity.AllocationPosition{
+			ChainID:       1,
+			TokenAddress:  common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
+			TokenDecimals: 6,
+			ProxyAddress:  proxy,
+			Balance:       big.NewInt(1),
+			TxHash:        tx,
+			TxAmount:      big.NewInt(1),
+			Direction:     direction,
+			FromAddress:   from,
+			ToAddress:     to,
+		}
+	}
+
+	tests := []struct {
+		name             string
+		pos              *entity.AllocationPosition
+		wantFrom, wantTo []byte
+	}{
+		{
+			name:     "inbound transfer stores both sides as decoded",
+			pos:      newPos("in", &counterparty, &proxy, txHash),
+			wantFrom: counterparty.Bytes(),
+			wantTo:   proxy.Bytes(),
+		},
+		{
+			name:     "outbound transfer stores both sides as decoded",
+			pos:      newPos("out", &proxy, &counterparty, txHash),
+			wantFrom: proxy.Bytes(),
+			wantTo:   counterparty.Bytes(),
+		},
+		{
+			name:     "mint stores 20 zero bytes, not NULL",
+			pos:      newPos("in", &zero, &proxy, txHash),
+			wantFrom: make([]byte, common.AddressLength),
+			wantTo:   proxy.Bytes(),
+		},
+		{
+			name:     "burn stores 20 zero bytes, not NULL",
+			pos:      newPos("out", &proxy, &zero, txHash),
+			wantFrom: proxy.Bytes(),
+			wantTo:   make([]byte, common.AddressLength),
+		},
+		{
+			name:     "sweep row stores NULL on both",
+			pos:      newPos("sweep", nil, nil, ""),
+			wantFrom: nil,
+			wantTo:   nil,
+		},
+	}
+
+	r := &AllocationRepository{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, args, err := r.buildInsertArgs(tt.pos, 1, nil)
+			if err != nil {
+				t.Fatalf("buildInsertArgs: %v", err)
+			}
+			gotFrom, ok := args[16].([]byte) // $17
+			if !ok {
+				t.Fatalf("expected args[16] to be []byte, got %T", args[16])
+			}
+			gotTo, ok := args[17].([]byte) // $18
+			if !ok {
+				t.Fatalf("expected args[17] to be []byte, got %T", args[17])
+			}
+			if !bytes.Equal(gotFrom, tt.wantFrom) {
+				t.Errorf("from_address = %x, want %x", gotFrom, tt.wantFrom)
+			}
+			if !bytes.Equal(gotTo, tt.wantTo) {
+				t.Errorf("to_address = %x, want %x", gotTo, tt.wantTo)
+			}
+		})
+	}
+}
+
+func TestBuildInsertArgs_NilUnderlyingWritesBothNull(t *testing.T) {
+	r := &AllocationRepository{}
+	pos := &entity.AllocationPosition{
+		ChainID:      1,
+		TokenAddress: common.HexToAddress("0x38464507e02c983f20428a6e8566693fe9e422a9"),
+		Balance:      big.NewInt(1),
+		TxAmount:     big.NewInt(0),
+		Direction:    "sweep", // minimal valid direction for encodeTxHash
+	}
+	_, args, err := r.buildInsertArgs(pos, 1, nil)
+	if err != nil {
+		t.Fatalf("buildInsertArgs: %v", err)
+	}
+	if args[14].(pgtype.Numeric).Valid {
+		t.Fatal("underlying_value must be NULL when no valuation")
+	}
+	if args[15].(*int64) != nil {
+		t.Fatal("underlying_token_id must be NULL when no valuation")
 	}
 }

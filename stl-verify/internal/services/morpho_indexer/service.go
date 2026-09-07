@@ -1,15 +1,13 @@
 package morpho_indexer
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/big"
-	"slices"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -19,17 +17,19 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
-// morphoBlueDeployBlocks maps chain IDs to the block at which Morpho Blue
-// was deployed on that chain. Morpho Blue is deployed via CREATE2 at the
-// same address on all chains, but each deployment occurred at a different block.
+// morphoBlueDeployBlocks maps chain IDs to the block at which Morpho Blue was
+// deployed at MorphoBlueAddress. Only chains where the singleton lives at that
+// CREATE2 address belong here; Arbitrum's deployment is at a different address
+// (0x6c247b1F6182318877311737BaC0844bAa518F5e) and is deliberately absent.
 var morphoBlueDeployBlocks = map[int64]int64{
-	1:     18883124,  // Ethereum mainnet
-	8453:  18925795,  // Base
-	42161: 226833208, // Arbitrum
+	1:    18883124, // Ethereum mainnet
+	8453: 13977148, // Base
 }
 
 // MorphoBlueDeployBlock returns the deploy block for the given chain ID.
@@ -37,6 +37,27 @@ func MorphoBlueDeployBlock(chainID int64) (int64, error) {
 	block, ok := morphoBlueDeployBlocks[chainID]
 	if !ok {
 		return 0, fmt.Errorf("unsupported chain ID %d for Morpho Blue: no known deploy block", chainID)
+	}
+	return block, nil
+}
+
+// vaultV2FactoryDeployBlocks maps chain IDs to the block at which the Morpho
+// VaultV2 factory (0xA1D94F746dEfa1928926b84fB2596c06926C0405) was deployed.
+// Verified on-chain: the factory has no code at 23375072 and code at 23375073.
+// Used by the morpho-vault-backfill's fromV2Deploy parameter to default `from`
+// to the earliest block any VaultV2 could exist. That bounds the whole backfill
+// pipeline — phase-1 discovery included — not just the V2 replay, so a V1/V1.1
+// vault whose only activity predates the factory is not discovered.
+var vaultV2FactoryDeployBlocks = map[int64]int64{
+	1: 23_375_073, // Ethereum mainnet
+}
+
+// VaultV2FactoryDeployBlock returns the VaultV2 factory deploy block for the
+// given chain ID.
+func VaultV2FactoryDeployBlock(chainID int64) (int64, error) {
+	block, ok := vaultV2FactoryDeployBlocks[chainID]
+	if !ok {
+		return 0, fmt.Errorf("unsupported chain ID %d for Morpho VaultV2: no known factory deploy block", chainID)
 	}
 	return block, nil
 }
@@ -52,6 +73,34 @@ func ConfigDefaults() Config {
 	return Config{
 		SQSConsumerConfig: shared.SQSConsumerConfigDefaults(),
 	}
+}
+
+// NewReplayConfig builds the Config every replay composition root
+// (morpho-vault-backfill, morpho-v2-bootstrap) hands NewReplayService, telemetry
+// included. It exists so the wiring lives once: Config.Telemetry is nil-safe, so a
+// root that forgets it silently mutes every event and snapshot a run replays.
+//
+// Not among those signals, ordinarily, is
+// morpho_v2_adapter_registrations_total{observed_via="bootstrap_seed"}: the seed
+// only asserts what the replay already recorded, so a healthy run appends nothing
+// under that label and its absence is the expected reading.
+//
+// Nothing here dials: the chain name is a table lookup and the instruments come
+// from the global meter provider, which no-ops when no exporter is configured.
+func NewReplayConfig(chainID int64, logger *slog.Logger) (Config, error) {
+	chainName, err := entity.ChainName(chainID)
+	if err != nil {
+		return Config{}, fmt.Errorf("resolving the chain name for telemetry: %w", err)
+	}
+	replayTelemetry, err := NewTelemetry(chainName)
+	if err != nil {
+		return Config{}, fmt.Errorf("creating morpho telemetry: %w", err)
+	}
+	config := ConfigDefaults()
+	config.ChainID = chainID
+	config.Logger = logger
+	config.Telemetry = replayTelemetry
+	return config, nil
 }
 
 // Service is the Morpho indexer SQS consumer service.
@@ -73,8 +122,16 @@ type Service struct {
 	vaultRegistry  *VaultRegistry
 	telemetry      *Telemetry
 
+	// v2StructuredTopics gates ReplayMetaMorphoLog: the replay constructor nils
+	// the user/token/cache/consumer/receipt-token ports, so only the VaultV2
+	// structured governance/allocation/cap/fee events (which never touch them)
+	// are safe to replay. Any other MetaMorpho topic (e.g. a V1 Deposit) is
+	// rejected before it can nil-deref the share-accounting path.
+	v2StructuredTopics map[common.Hash]struct{}
+
 	ctx    context.Context
 	cancel context.CancelFunc
+	wg     sync.WaitGroup // tracks the SQS run loop so Stop can drain it
 	logger *slog.Logger
 }
 
@@ -95,7 +152,48 @@ func NewService(
 	if err := validateDependencies(consumer, cache, multicallClient, txManager, userRepo, protocolRepo, tokenRepo, morphoRepo, eventRepo, receiptTokenRepo); err != nil {
 		return nil, fmt.Errorf("validating dependencies: %w", err)
 	}
+	return newService(config, consumer, cache, multicallClient, txManager, userRepo, protocolRepo, tokenRepo, morphoRepo, eventRepo, receiptTokenRepo)
+}
 
+// NewReplayService builds a Service wired only for offline replay of
+// already-persisted VaultV2 vaults' structured events — the morpho-vault-backfill
+// backfiller's V2 replay phase. It shares NewService's internals but omits the
+// SQS consumer and block cache: replay reads receipts from S3 and drives logs
+// through ReplayMetaMorphoLog directly, never through the live SQS loop, so Start
+// must not be called on the result. userRepo / tokenRepo / receiptTokenRepo are
+// likewise absent because the replayed adapter / cap / fee events never touch
+// them (share-accounting Deposit/Withdraw/Transfer writes are out of the replay's
+// scope).
+func NewReplayService(
+	config Config,
+	multicallClient outbound.Multicaller,
+	txManager outbound.TxManager,
+	protocolRepo outbound.ProtocolRepository,
+	morphoRepo outbound.MorphoRepository,
+	eventRepo outbound.EventRepository,
+) (*Service, error) {
+	if err := validateReplayDependencies(multicallClient, txManager, protocolRepo, morphoRepo, eventRepo); err != nil {
+		return nil, fmt.Errorf("validating replay dependencies: %w", err)
+	}
+	return newService(config, nil, nil, multicallClient, txManager, nil, protocolRepo, nil, morphoRepo, eventRepo, nil)
+}
+
+// newService assembles the Service from dependencies already validated by the
+// live (NewService) or replay (NewReplayService) constructor. Ports the replay
+// path doesn't use may be nil; the replay entry point never dereferences them.
+func newService(
+	config Config,
+	consumer outbound.SQSConsumer,
+	cache outbound.BlockCacheReader,
+	multicallClient outbound.Multicaller,
+	txManager outbound.TxManager,
+	userRepo outbound.UserRepository,
+	protocolRepo outbound.ProtocolRepository,
+	tokenRepo outbound.TokenRepository,
+	morphoRepo outbound.MorphoRepository,
+	eventRepo outbound.EventRepository,
+	receiptTokenRepo outbound.ReceiptTokenRepository,
+) (*Service, error) {
 	config.SQSConsumerConfig.ApplyDefaults()
 	if err := config.SQSConsumerConfig.Validate(); err != nil {
 		return nil, fmt.Errorf("validating config: %w", err)
@@ -121,42 +219,61 @@ func NewService(
 		return nil, fmt.Errorf("failed to create blockchain service: %w", err)
 	}
 
+	v2StructuredTopics, err := VaultV2StructuredEventTopics()
+	if err != nil {
+		return nil, fmt.Errorf("deriving VaultV2 structured event topics: %w", err)
+	}
+
 	return &Service{
-		config:           config,
-		deployBlock:      deployBlock,
-		consumer:         consumer,
-		cache:            cache,
-		txManager:        txManager,
-		userRepo:         userRepo,
-		protocolRepo:     protocolRepo,
-		tokenRepo:        tokenRepo,
-		morphoRepo:       morphoRepo,
-		eventRepo:        eventRepo,
-		receiptTokenRepo: receiptTokenRepo,
-		blockchainSvc:    blockchainSvc,
-		eventExtractor:   eventExtractor,
-		vaultRegistry:    NewVaultRegistry(config.Logger),
-		telemetry:        config.Telemetry,
-		logger:           config.Logger.With("component", "morpho-indexer"),
+		config:             config,
+		deployBlock:        deployBlock,
+		consumer:           consumer,
+		cache:              cache,
+		txManager:          txManager,
+		userRepo:           userRepo,
+		protocolRepo:       protocolRepo,
+		tokenRepo:          tokenRepo,
+		morphoRepo:         morphoRepo,
+		eventRepo:          eventRepo,
+		receiptTokenRepo:   receiptTokenRepo,
+		blockchainSvc:      blockchainSvc,
+		eventExtractor:     eventExtractor,
+		vaultRegistry:      NewVaultRegistry(config.Logger),
+		telemetry:          config.Telemetry,
+		v2StructuredTopics: v2StructuredTopics,
+		logger:             config.Logger.With("component", "morpho-indexer"),
 	}, nil
 }
 
-// Start begins the SQS message processing loop.
-func (s *Service) Start(ctx context.Context) error {
-	s.ctx, s.cancel = context.WithCancel(ctx)
-
-	// Load known vaults from database
-	if err := s.vaultRegistry.LoadFromDB(ctx, s.morphoRepo, s.config.ChainID); err != nil {
-		return fmt.Errorf("loading vault registry: %w", err)
-	}
-
-	go sqsutil.RunLoop(s.ctx, sqsutil.Config{
+// The visibility-timeout guard is fatal, so it runs before any startup I/O: a
+// misconfigured pod would otherwise re-run the whole sweep on every
+// CrashLoopBackOff cycle before refusing.
+func (s *Service) consumeLoop() sqsutil.Config {
+	return sqsutil.Config{
 		Consumer:     s.consumer,
 		MaxMessages:  s.config.MaxMessages,
 		PollInterval: s.config.PollInterval,
 		Logger:       s.logger,
 		ChainID:      s.config.ChainID,
-	}, s.processBlockEvent)
+	}
+}
+
+// Start begins the SQS message processing loop.
+func (s *Service) Start(ctx context.Context) error {
+	loop := s.consumeLoop()
+	if err := loop.Validate(); err != nil {
+		return err
+	}
+
+	s.ctx, s.cancel = context.WithCancel(ctx)
+
+	if err := s.LoadVaultRegistry(ctx); err != nil {
+		return err
+	}
+
+	s.wg.Go(func() {
+		sqsutil.RunLoop(s.ctx, loop, s.processBlockEvent)
+	})
 
 	s.logger.Info("morpho indexer started",
 		"maxMessages", s.config.MaxMessages,
@@ -164,16 +281,25 @@ func (s *Service) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop stops the service.
+// Stop cancels the SQS processing loop and waits for the loop goroutine to
+// exit. A handler the drain abandoned can outlive it; archiving's drain gate is
+// what refuses that handler's late archive write.
 func (s *Service) Stop() error {
 	if s.cancel != nil {
 		s.cancel()
 	}
+	s.wg.Wait()
 	s.logger.Info("morpho indexer stopped")
 	return nil
 }
 
 func (s *Service) processBlockEvent(ctx context.Context, event outbound.BlockEvent) error {
+	// Stamp the reorg-aware block version once, here, so both receipt processing
+	// and the symbol-reconciliation sweep below archive raw SC calls under the
+	// block's actual version. Setting it only inside fetchAndProcessReceipts would
+	// leave reconcilePendingSymbols' multicalls keyed as version 0.
+	ctx = archiving.WithBlockVersion(ctx, event.Version)
+	ctx = archiving.WithBlockNumber(ctx, event.BlockNumber)
 	if err := s.fetchAndProcessReceipts(ctx, event); err != nil {
 		return err
 	}
@@ -238,6 +364,8 @@ func (s *Service) reconcilePendingSymbols(ctx context.Context, chainID, blockNum
 }
 
 func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.BlockEvent) (retErr error) {
+	// Block version is stamped by the caller (processBlockEvent) so the symbol
+	// sweep shares it; see the comment there.
 	ctx, span := s.telemetry.StartBlockSpan(ctx, event.BlockNumber)
 	defer span.End()
 
@@ -246,7 +374,7 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 		duration := time.Since(start)
 		s.telemetry.RecordBlockProcessed(ctx, duration, retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "block processing failed")
+			telemetry.SetSpanError(span, retErr, "block processing failed")
 			s.telemetry.RecordError(ctx, "fetchAndProcessReceipts", retErr)
 		}
 		s.logger.Debug("fetchAndProcessReceipts completed",
@@ -260,6 +388,11 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 	}
 	if receiptsJSON == nil {
 		return fmt.Errorf("receipts not found in cache for block %d (chain=%d, version=%d)", event.BlockNumber, event.ChainID, event.Version)
+	}
+
+	blockHash, err := event.ParsedBlockHash()
+	if err != nil {
+		return fmt.Errorf("parse block hash: %w", err)
 	}
 
 	var receipts []shared.TransactionReceipt
@@ -284,7 +417,7 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 
 	var errs []error
 	for _, receipt := range receipts {
-		if err := s.processReceipt(ctx, receipt, event.ChainID, event.BlockNumber, event.Version, blockTimestamp); err != nil {
+		if err := s.processReceipt(ctx, receipt, event.ChainID, event.BlockNumber, blockHash, event.Version, blockTimestamp); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -341,7 +474,7 @@ func (s *Service) hasRelevantEvents(receipt shared.TransactionReceipt) bool {
 // entity within one block produce identical on-chain snapshots. The ON CONFLICT
 // clause means only the last-written event_type/tx_hash is retained, but the
 // on-chain state (shares, assets, collateral) is always correct.
-func (s *Service) processReceipt(ctx context.Context, receipt shared.TransactionReceipt, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) (retErr error) {
+func (s *Service) processReceipt(ctx context.Context, receipt shared.TransactionReceipt, chainID, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) (retErr error) {
 	if !s.hasRelevantEvents(receipt) {
 		return nil
 	}
@@ -350,14 +483,14 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 		attribute.String("tx.hash", receipt.TransactionHash))
 	defer func() {
 		if retErr != nil {
-			SetSpanError(span, retErr, "receipt processing failed")
+			telemetry.SetSpanError(span, retErr, "receipt processing failed")
 		}
 		span.End()
 	}()
 
 	// Pre-walk: probe Morpho Blue events' caller / onBehalf (or borrower
 	// for Liquidate) for V1/V1.1 vault discovery BEFORE the main loop
-	// processes any log. This mirrors the morpho-vault-indexer backfiller's
+	// processes any log. This mirrors the morpho-vault-backfill's
 	// V1/V1.1 path; it has to live in the live indexer because the
 	// backfiller is recovery-only and IsVaultActivityEvent is narrowed to
 	// the V2 4-field AccrueInterest topic, so V1/V1.1 vaults emitting their
@@ -374,7 +507,7 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 	// The V2 IsVaultActivityEvent path stays inline in the default case
 	// below — V2 emits its 4-field AccrueInterest first in every
 	// state-changing transaction, so single-pass discovery there is correct.
-	if err := s.discoverV1V11VaultsInReceipt(ctx, receipt, chainID, blockNumber); err != nil {
+	if err := s.discoverV1V11VaultsInReceipt(ctx, receipt, chainID, blockNumber, blockHash, blockVersion, blockTimestamp); err != nil {
 		return err
 	}
 
@@ -401,7 +534,7 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 		switch {
 		case logAddress == morphoBlueAddr && isMorphoBlue:
 			s.logger.Debug("processing Morpho Blue event", "tx", receipt.TransactionHash, "topic", log.Topics[0])
-			if err := s.processMorphoBlueLog(ctx, log, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
+			if err := s.processMorphoBlueLog(ctx, log, chainID, blockNumber, blockHash, blockVersion, blockTimestamp); err != nil {
 				s.logger.Error("failed to process Morpho Blue event", "error", err, "tx", receipt.TransactionHash)
 				errs = append(errs, err)
 			}
@@ -411,7 +544,7 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 
 		case s.vaultRegistry.IsKnownVault(logAddress) && isMetaMorpho:
 			s.logger.Debug("processing MetaMorpho event", "tx", receipt.TransactionHash, "vault", logAddress.Hex(), "topic", log.Topics[0])
-			if err := s.processMetaMorphoLog(ctx, log, logAddress, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
+			if err := s.processMetaMorphoLog(ctx, log, logAddress, chainID, blockNumber, blockHash, blockVersion, blockTimestamp); err != nil {
 				s.logger.Error("failed to process MetaMorpho event", "error", err, "tx", receipt.TransactionHash)
 				errs = append(errs, err)
 			}
@@ -433,14 +566,14 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 			// transport error — never reaches `ErrNotVault`, never enters
 			// the negative cache, retries forever.
 			//
-			// Same predicate is used by the morpho-vault-indexer backfiller
-			// (see cmd/backfillers/morpho-vault-indexer/main.go), so the
+			// Same predicate is used by the morpho-vault-backfill
+			// (see cmd/backfillers/morpho-vault-backfill/discovery.go), so the
 			// live and offline discovery contracts stay aligned.
 			if !s.eventExtractor.IsVaultActivityEvent(log) {
 				continue
 			}
 			s.logger.Debug("attempting vault discovery", "address", logAddress.Hex(), "tx", receipt.TransactionHash)
-			if err := s.tryDiscoverVault(ctx, log, logAddress, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
+			if err := s.tryDiscoverVault(ctx, log, logAddress, chainID, blockNumber, blockHash, blockVersion, blockTimestamp); err != nil {
 				var nv *ErrNotVault
 				if errors.As(err, &nv) {
 					s.vaultRegistry.MarkNotVault(logAddress)
@@ -480,7 +613,7 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 }
 
 // processMorphoBlueLog handles a Morpho Blue event log.
-func (s *Service) processMorphoBlueLog(ctx context.Context, log shared.Log, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+func (s *Service) processMorphoBlueLog(ctx context.Context, log shared.Log, chainID, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	event, err := s.eventExtractor.ExtractMorphoBlueEvent(log)
 	if err != nil {
 		return fmt.Errorf("extracting Morpho Blue event: %w", err)
@@ -500,9 +633,9 @@ func (s *Service) processMorphoBlueLog(ctx context.Context, log shared.Log, chai
 		"block", blockNumber)
 
 	// Save raw protocol event
-	logIndex, err := strconv.ParseInt(log.LogIndex, 0, 64)
+	logIndex, err := parseLogIndex(log)
 	if err != nil {
-		return fmt.Errorf("parsing log index %q: %w", log.LogIndex, err)
+		return err
 	}
 	if err := s.saveProtocolEvent(ctx, event, chainID, blockNumber, blockVersion, int(logIndex), blockTimestamp); err != nil {
 		return fmt.Errorf("saving protocol event: %w", err)
@@ -510,23 +643,23 @@ func (s *Service) processMorphoBlueLog(ctx context.Context, log shared.Log, chai
 
 	switch e := event.(type) {
 	case *CreateMarketEvent:
-		return s.handleCreateMarket(ctx, e, chainID, blockNumber, blockVersion, blockTimestamp)
+		return s.handleCreateMarket(ctx, e, chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *SupplyEvent:
-		return s.handlePositionEvent(ctx, e.MarketID(), e.OnBehalf, e.Type(), e.TxHash(), chainID, blockNumber, blockVersion, blockTimestamp)
+		return s.handlePositionEvent(ctx, e.MarketID(), e.OnBehalf, e.Type(), e.TxHash(), chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *WithdrawEvent:
-		return s.handlePositionEvent(ctx, e.MarketID(), e.OnBehalf, e.Type(), e.TxHash(), chainID, blockNumber, blockVersion, blockTimestamp)
+		return s.handlePositionEvent(ctx, e.MarketID(), e.OnBehalf, e.Type(), e.TxHash(), chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *BorrowEvent:
-		return s.handlePositionEvent(ctx, e.MarketID(), e.OnBehalf, e.Type(), e.TxHash(), chainID, blockNumber, blockVersion, blockTimestamp)
+		return s.handlePositionEvent(ctx, e.MarketID(), e.OnBehalf, e.Type(), e.TxHash(), chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *RepayEvent:
-		return s.handlePositionEvent(ctx, e.MarketID(), e.OnBehalf, e.Type(), e.TxHash(), chainID, blockNumber, blockVersion, blockTimestamp)
+		return s.handlePositionEvent(ctx, e.MarketID(), e.OnBehalf, e.Type(), e.TxHash(), chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *SupplyCollateralEvent:
-		return s.handlePositionEvent(ctx, e.MarketID(), e.OnBehalf, e.Type(), e.TxHash(), chainID, blockNumber, blockVersion, blockTimestamp)
+		return s.handlePositionEvent(ctx, e.MarketID(), e.OnBehalf, e.Type(), e.TxHash(), chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *WithdrawCollateralEvent:
-		return s.handlePositionEvent(ctx, e.MarketID(), e.OnBehalf, e.Type(), e.TxHash(), chainID, blockNumber, blockVersion, blockTimestamp)
+		return s.handlePositionEvent(ctx, e.MarketID(), e.OnBehalf, e.Type(), e.TxHash(), chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *LiquidateEvent:
-		return s.handleLiquidateEvent(ctx, e, chainID, blockNumber, blockVersion, blockTimestamp)
+		return s.handleLiquidateEvent(ctx, e, chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *AccrueInterestEvent:
-		return s.handleAccrueInterest(ctx, e, chainID, blockNumber, blockVersion, blockTimestamp)
+		return s.handleAccrueInterest(ctx, e, chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *SetFeeEvent:
 		// Already saved as protocol_event above
 		return nil
@@ -538,20 +671,33 @@ func (s *Service) processMorphoBlueLog(ctx context.Context, log shared.Log, chai
 // processMetaMorphoLog handles a MetaMorpho vault event log.
 //
 // Every recognised vault event lands in protocol_event as an audit-log row,
-// keyed by (tx_hash, log_index). The four events with state-affecting typed
-// handlers — Deposit, Withdraw, Transfer, AccrueInterest — also produce
-// structured snapshot rows in morpho_vault_state / morpho_vault_position via
-// the dispatch below. The full V2 governance / allocation / cap / fee / role
-// / timelock surface (Allocate, Deallocate, AddAdapter, IncreaseAbsoluteCap,
-// SetPerformanceFee, SetCurator, Submit, …) is registered in the event
-// extractor so it lands in the audit log; structured tables for those events
-// are deferred per docs/vec-198-morpho-v2-followup-plan.md.
-func (s *Service) processMetaMorphoLog(ctx context.Context, log shared.Log, vaultAddress common.Address, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+// keyed by (tx_hash, log_index). Events with state-affecting typed handlers
+// additionally produce structured rows via the dispatch below:
+//   - Deposit / Withdraw / Transfer / AccrueInterest → vault state + position.
+//   - AddAdapter / RemoveAdapter → the adapter registry.
+//   - Allocate / Deallocate → an adapter realAssets() state snapshot.
+//   - Increase/DecreaseAbsoluteCap, Increase/DecreaseRelativeCap → vault caps.
+//   - SetPerformanceFee / SetManagementFee (+ their recipients) → a full
+//     fee-config snapshot (morpho_vault_fee).
+//   - ForceDeallocate → a WARN only (its companion Deallocate log snapshots).
+//
+// The remaining registered V2 surface (SetCurator, Submit, timelock / gate /
+// metadata setters, …) has no typed handler: it lands in the audit log only.
+func (s *Service) processMetaMorphoLog(ctx context.Context, log shared.Log, vaultAddress common.Address, chainID, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	eventName, ok := s.eventExtractor.MetaMorphoEventName(log)
 	if !ok {
 		// Caller already filtered via IsMetaMorphoEvent; this shouldn't
 		// happen unless the topic registration drifted.
 		return fmt.Errorf("MetaMorpho event has unrecognised topic: %v", log.Topics)
+	}
+
+	// Parsed once here and passed down: the VaultV2 handlers record the position of
+	// the observation WITHIN its block, which is what lets an add, a remove and a
+	// re-add in one block be three distinct observations of the adapter set rather
+	// than one collapsed row.
+	logIndex, err := parseLogIndex(log)
+	if err != nil {
+		return err
 	}
 
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.processMetaMorphoEvent",
@@ -566,7 +712,7 @@ func (s *Service) processMetaMorphoLog(ctx context.Context, log shared.Log, vaul
 		"tx", log.TransactionHash,
 		"block", blockNumber)
 
-	if err := s.saveMetaMorphoProtocolEvent(ctx, log, vaultAddress, eventName, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
+	if err := s.saveMetaMorphoProtocolEvent(ctx, log, vaultAddress, eventName, chainID, blockNumber, blockVersion, blockTimestamp, logIndex); err != nil {
 		return fmt.Errorf("saving MetaMorpho protocol_event: %w", err)
 	}
 
@@ -582,13 +728,37 @@ func (s *Service) processMetaMorphoLog(ctx context.Context, log shared.Log, vaul
 
 	switch e := event.(type) {
 	case *VaultDepositEvent:
-		return s.saveVaultEventSnapshot(ctx, e.Owner, vaultAddress, chainID, blockNumber, blockVersion, blockTimestamp, e.Type(), e.TxHash())
+		return s.saveVaultEventSnapshot(ctx, e.Owner, vaultAddress, chainID, blockNumber, blockHash, blockVersion, blockTimestamp, e.Type(), e.TxHash())
 	case *VaultWithdrawEvent:
-		return s.saveVaultEventSnapshot(ctx, e.Owner, vaultAddress, chainID, blockNumber, blockVersion, blockTimestamp, e.Type(), e.TxHash())
+		return s.saveVaultEventSnapshot(ctx, e.Owner, vaultAddress, chainID, blockNumber, blockHash, blockVersion, blockTimestamp, e.Type(), e.TxHash())
 	case *VaultTransferEvent:
-		return s.handleVaultTransfer(ctx, e, vaultAddress, chainID, blockNumber, blockVersion, blockTimestamp)
+		return s.handleVaultTransfer(ctx, e, vaultAddress, chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *VaultAccrueInterestEvent:
-		return s.handleVaultAccrueInterest(ctx, e, vaultAddress, chainID, blockNumber, blockVersion, blockTimestamp)
+		return s.handleVaultAccrueInterest(ctx, e, vaultAddress, chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
+	case *AddAdapterEvent:
+		return s.handleAddAdapter(ctx, e, vaultAddress, blockNumber, blockHash, blockVersion, blockTimestamp, logIndex)
+	case *RemoveAdapterEvent:
+		return s.handleRemoveAdapter(ctx, e, vaultAddress, blockNumber, blockVersion, blockTimestamp, logIndex)
+	case *AllocateEvent:
+		return s.handleAllocation(ctx, e.Adapter, vaultAddress, blockNumber, blockHash, blockVersion, blockTimestamp, logIndex)
+	case *DeallocateEvent:
+		return s.handleAllocation(ctx, e.Adapter, vaultAddress, blockNumber, blockHash, blockVersion, blockTimestamp, logIndex)
+	case *ForceDeallocateEvent:
+		return s.handleForceDeallocate(ctx, e, vaultAddress, blockNumber)
+	case *IncreaseAbsoluteCapEvent:
+		return s.handleCapChange(ctx, vaultAddress, e.ID, e.IDData, blockNumber, blockHash, blockVersion, blockTimestamp)
+	case *DecreaseAbsoluteCapEvent:
+		return s.handleCapChange(ctx, vaultAddress, e.ID, e.IDData, blockNumber, blockHash, blockVersion, blockTimestamp)
+	case *IncreaseRelativeCapEvent:
+		return s.handleCapChange(ctx, vaultAddress, e.ID, e.IDData, blockNumber, blockHash, blockVersion, blockTimestamp)
+	case *DecreaseRelativeCapEvent:
+		return s.handleCapChange(ctx, vaultAddress, e.ID, e.IDData, blockNumber, blockHash, blockVersion, blockTimestamp)
+	case *SetPerformanceFeeEvent, *SetManagementFeeEvent,
+		*SetPerformanceFeeRecipientEvent, *SetManagementFeeRecipientEvent:
+		// Every Set* fee event snapshots the vault's FULL on-chain fee config; the
+		// specific field the event changed is irrelevant to what is persisted (the
+		// authoritative full state is the hash-pinned read), mirroring the cap events.
+		return s.handleFeeChange(ctx, vaultAddress, blockNumber, blockHash, blockVersion, blockTimestamp)
 	default:
 		return nil
 	}
@@ -606,12 +776,18 @@ func (s *Service) processMetaMorphoLog(ctx context.Context, log shared.Log, vaul
 // stl-verify/internal/pkg/blockchain/abis/vault_v2_events_abi.go if needed.
 // This keeps the writer cheap and avoids encoding-bug failure modes for
 // event shapes the indexer doesn't yet structurally consume.
-func (s *Service) saveMetaMorphoProtocolEvent(ctx context.Context, log shared.Log, vaultAddress common.Address, eventName string, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
-	logIndex, err := strconv.ParseInt(log.LogIndex, 0, 64)
+// parseLogIndex reads a log's position within its block. The wire format is hex- or
+// decimal-encoded (hence strconv base 0), and the result is int32 because that is the
+// width both protocol_event.log_index and morpho_adapter_membership.log_index store.
+func parseLogIndex(log shared.Log) (int32, error) {
+	logIndex, err := strconv.ParseInt(log.LogIndex, 0, 32)
 	if err != nil {
-		return fmt.Errorf("parsing log index %q: %w", log.LogIndex, err)
+		return 0, fmt.Errorf("parsing log index %q: %w", log.LogIndex, err)
 	}
+	return int32(logIndex), nil
+}
 
+func (s *Service) saveMetaMorphoProtocolEvent(ctx context.Context, log shared.Log, vaultAddress common.Address, eventName string, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time, logIndex int32) error {
 	payload, err := json.Marshal(map[string]any{
 		"eventType": eventName,
 		"vault":     vaultAddress.Hex(),
@@ -645,654 +821,6 @@ func (s *Service) saveMetaMorphoProtocolEvent(ctx context.Context, log shared.Lo
 		}
 		return s.eventRepo.SaveEvent(ctx, tx, protocolEvent)
 	})
-}
-
-// MorphoBlueVaultCandidates returns the addresses from a Morpho Blue event
-// that could be MetaMorpho V1/V1.1 vaults — caller and onBehalf for the
-// position-changing events, caller and borrower for Liquidate. Used by both
-// the live indexer (this package) and the morpho-vault-indexer backfiller
-// for V1/V1.1 vault discovery, since those vaults are characterised by
-// their interaction with Morpho Blue rather than by emitting a uniquely
-// shaped event of their own.
-//
-// V2 vaults can also appear here when they use a Morpho Blue market adapter,
-// but the V2 4-field AccrueInterest topic catches them earlier via
-// IsVaultActivityEvent — most candidates surfaced through this function are
-// V1/V1.1.
-//
-// Borrower is included for Liquidate symmetry with the backfiller. In
-// practice MetaMorpho V1/V1.1 vaults don't borrow on Morpho Blue, so the
-// borrower slot almost always resolves to known-not-vault on first probe;
-// it's retained so the same selector contract holds for both code paths
-// even if a future vault flavour borrows.
-//
-// Caller-side filtering (zero address, MorphoBlueAddress, already-known)
-// happens at the call site.
-func MorphoBlueVaultCandidates(event MorphoBlueEvent) []common.Address {
-	switch e := event.(type) {
-	case *SupplyEvent:
-		return []common.Address{e.Caller, e.OnBehalf}
-	case *WithdrawEvent:
-		return []common.Address{e.Caller, e.OnBehalf}
-	case *BorrowEvent:
-		return []common.Address{e.Caller, e.OnBehalf}
-	case *RepayEvent:
-		return []common.Address{e.Caller, e.OnBehalf}
-	case *SupplyCollateralEvent:
-		return []common.Address{e.Caller, e.OnBehalf}
-	case *WithdrawCollateralEvent:
-		return []common.Address{e.Caller, e.OnBehalf}
-	case *LiquidateEvent:
-		return []common.Address{e.Caller, e.Borrower}
-	default:
-		return nil
-	}
-}
-
-// discoverAndRegisterVault probes vaultAddress on-chain, persists the vault
-// and its asset token, and registers the vault in the in-memory registry.
-// Returns *ErrNotVault if the address is definitively not a Morpho-family
-// vault; transient errors (RPC, DB) propagate as plain errors so the caller
-// can decide whether to retry.
-//
-// Used by both the IsVaultActivityEvent path (V2) via tryDiscoverVault and
-// the Morpho Blue caller/onBehalf path (V1/V1.1) via
-// discoverV1V11VaultsInReceipt.
-func (s *Service) discoverAndRegisterVault(ctx context.Context, vaultAddress common.Address, chainID, blockNumber int64) error {
-	metadata, err := s.blockchainSvc.getVaultMetadata(ctx, vaultAddress, blockNumber)
-	if err != nil {
-		return fmt.Errorf("fetching vault metadata: %w", err)
-	}
-
-	var vault *entity.MorphoVault
-	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		assetMetadata, err := s.blockchainSvc.getTokenMetadata(ctx, metadata.Asset, blockNumber)
-		if err != nil {
-			return fmt.Errorf("fetching asset token metadata: %w", err)
-		}
-
-		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, metadata.Asset, assetMetadata.Symbol, assetMetadata.Decimals, blockNumber)
-		if err != nil {
-			return fmt.Errorf("getting asset token: %w", err)
-		}
-
-		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, MorphoBlueAddress, "Morpho Blue", "lending", s.deployBlock)
-		if err != nil {
-			return fmt.Errorf("getting protocol: %w", err)
-		}
-
-		vault, err = entity.NewMorphoVault(chainID, protocolID, vaultAddress.Bytes(), metadata.Name, metadata.Symbol, tokenID, metadata.Version, blockNumber)
-		if err != nil {
-			return fmt.Errorf("creating vault entity: %w", err)
-		}
-
-		vaultID, err := s.morphoRepo.GetOrCreateVault(ctx, tx, vault)
-		if err != nil {
-			return fmt.Errorf("persisting vault: %w", err)
-		}
-
-		receiptToken, err := entity.NewReceiptToken(chainID, protocolID, tokenID, blockNumber, vaultAddress, metadata.Symbol)
-		if err != nil {
-			return fmt.Errorf("creating receipt token entity: %w", err)
-		}
-		if _, err := s.receiptTokenRepo.GetOrCreateReceiptToken(ctx, tx, *receiptToken); err != nil {
-			return fmt.Errorf("upserting receipt token: %w", err)
-		}
-
-		vault.ID = vaultID
-		return nil
-	}); err != nil {
-		return fmt.Errorf("persisting vault: %w", err)
-	}
-
-	s.vaultRegistry.RegisterVault(vaultAddress, vault)
-	return nil
-}
-
-// tryDiscoverVault attempts to discover a new MetaMorpho/VaultV2 vault from
-// a vault-emitted log (currently only the V2 4-field AccrueInterest topic
-// per IsVaultActivityEvent). Validates the log decodes, then probes and
-// registers via discoverAndRegisterVault, then processes the triggering log
-// against the now-known vault.
-func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAddress common.Address, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
-	ctx, span := s.telemetry.StartSpan(ctx, "morpho.discoverVault",
-		attribute.String("vault.address", vaultAddress.Hex()),
-		attribute.String("discovery.path", "vaultActivity"))
-	defer span.End()
-
-	// Validate this is a decodable MetaMorpho event before making on-chain calls.
-	if _, err := s.eventExtractor.ExtractMetaMorphoEvent(log); err != nil {
-		return &ErrNotVault{Err: fmt.Errorf("event decode failed: %w", err)}
-	}
-
-	if err := s.discoverAndRegisterVault(ctx, vaultAddress, chainID, blockNumber); err != nil {
-		return err
-	}
-
-	return s.processMetaMorphoLog(ctx, log, vaultAddress, chainID, blockNumber, blockVersion, blockTimestamp)
-}
-
-// discoverV1V11VaultsInReceipt is the pre-walk for V1/V1.1 vault discovery
-// via the Morpho Blue caller/onBehalf path. It iterates the receipt's
-// Morpho Blue logs once, extracts candidate addresses (caller, onBehalf —
-// or caller, borrower for Liquidate), and probes each unknown address.
-// Successful probes register the vault in the in-memory registry so the
-// caller's main loop sees it as a known vault when it reaches the vault's
-// own Deposit / Transfer / V1 AccrueInterest logs in the same receipt.
-//
-// Mirrors the morpho-vault-indexer backfiller's emitMorphoBlueCandidates,
-// keeping the live and offline V1/V1.1 discovery contracts uniform — the
-// backfiller is recovery-only, so the live indexer must cover V1/V1.1
-// discovery itself.
-//
-// ErrNotVault outcomes mark the address as known-not-vault (cached) so
-// repeat appearances of the same EOA / non-vault contract short-circuit.
-// Transient errors propagate so the receipt fails and SQS redelivers —
-// they must NOT mark the address as not-vault, or a real V1/V1.1 vault
-// that was momentarily unreachable would be permanently black-holed.
-//
-// The seen map dedupes within the receipt: if the same address appears
-// as caller AND onBehalf in one Supply, OR as caller in two Morpho Blue
-// logs in the same receipt, only one probe fires per receipt. After the
-// first probe the registry cache (IsKnownVault / IsKnownNotVault) handles
-// further short-circuiting.
-func (s *Service) discoverV1V11VaultsInReceipt(ctx context.Context, receipt shared.TransactionReceipt, chainID, blockNumber int64) error {
-	morphoBlueAddr := MorphoBlueAddress
-	var errs []error
-	seen := make(map[common.Address]bool)
-
-	for _, log := range receipt.Logs {
-		if common.HexToAddress(log.Address) != morphoBlueAddr {
-			continue
-		}
-		if !s.eventExtractor.IsMorphoBlueEvent(log) {
-			continue
-		}
-
-		event, parseErr := s.eventExtractor.ExtractMorphoBlueEvent(log)
-		if parseErr != nil {
-			// Re-parse failure here is structurally impossible today —
-			// the same log will be extracted again in processMorphoBlueLog
-			// from the same extractor. If a future change introduces
-			// non-determinism (e.g. ABI fallback, caching), this branch
-			// becomes a silent discovery hole, so log a Warn rather than
-			// swallow.
-			s.logger.Warn("re-parse of Morpho Blue event failed in discovery pre-walk (should not happen — investigate)",
-				"tx", log.TransactionHash,
-				"topic", log.Topics[0],
-				"error", parseErr)
-			continue
-		}
-
-		for _, addr := range MorphoBlueVaultCandidates(event) {
-			if seen[addr] {
-				continue
-			}
-			seen[addr] = true
-			if addr == (common.Address{}) || addr == morphoBlueAddr {
-				continue
-			}
-			if s.vaultRegistry.IsKnownVault(addr) || s.vaultRegistry.IsKnownNotVault(addr) {
-				continue
-			}
-
-			probeCtx, probeSpan := s.telemetry.StartSpan(ctx, "morpho.discoverVault",
-				attribute.String("vault.address", addr.Hex()),
-				attribute.String("discovery.path", "morphoBlue"))
-			probeErr := s.discoverAndRegisterVault(probeCtx, addr, chainID, blockNumber)
-			probeSpan.End()
-			if probeErr == nil {
-				continue
-			}
-			var nv *ErrNotVault
-			if errors.As(probeErr, &nv) {
-				s.vaultRegistry.MarkNotVault(addr)
-				if nv.VaultShaped {
-					s.logger.Warn("vault-shaped address rejected by probe (Morpho Blue path) — possible new vault flavour",
-						"address", addr.Hex(),
-						"reason", probeErr)
-				} else {
-					s.logger.Debug("not a Morpho-family vault (Morpho Blue path)",
-						"address", addr.Hex(),
-						"reason", probeErr)
-				}
-				continue
-			}
-			s.logger.Warn("V1/V1.1 vault discovery via Morpho Blue path failed (will retry)",
-				"address", addr.Hex(),
-				"error", probeErr)
-			errs = append(errs, fmt.Errorf("V1/V1.1 discovery for %s in tx %s: %w", addr.Hex(), receipt.TransactionHash, probeErr))
-		}
-	}
-
-	if len(errs) > 0 {
-		return errors.Join(errs...)
-	}
-	return nil
-}
-
-// handleCreateMarket handles a CreateMarket event.
-func (s *Service) handleCreateMarket(ctx context.Context, e *CreateMarketEvent, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
-	mp := e.Params
-	if mp == nil {
-		return fmt.Errorf("CreateMarket event missing marketParams")
-	}
-
-	// Fetch token metadata and initial market state.
-	loanMetadata, collMetadata, err := s.blockchainSvc.getTokenPairMetadata(ctx, mp.LoanToken, mp.CollateralToken, blockNumber)
-	if err != nil {
-		return fmt.Errorf("getting token pair metadata: %w", err)
-	}
-
-	ms, err := s.blockchainSvc.getMarketState(ctx, e.MarketID(), blockNumber)
-	if err != nil {
-		return fmt.Errorf("fetching initial market state: %w", err)
-	}
-
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, MorphoBlueAddress, "Morpho Blue", "lending", s.deployBlock)
-		if err != nil {
-			return fmt.Errorf("getting protocol: %w", err)
-		}
-
-		loanTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, mp.LoanToken, loanMetadata.Symbol, loanMetadata.Decimals, blockNumber)
-		if err != nil {
-			return fmt.Errorf("getting loan token: %w", err)
-		}
-
-		collTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, mp.CollateralToken, collMetadata.Symbol, collMetadata.Decimals, blockNumber)
-		if err != nil {
-			return fmt.Errorf("getting collateral token: %w", err)
-		}
-
-		market, err := entity.NewMorphoMarket(chainID, protocolID, common.Hash(e.MarketID()), loanTokenID, collTokenID, mp.Oracle, mp.Irm, mp.LLTV, blockNumber)
-		if err != nil {
-			return fmt.Errorf("creating market entity: %w", err)
-		}
-
-		marketID, err := s.morphoRepo.GetOrCreateMarket(ctx, tx, market)
-		if err != nil {
-			return fmt.Errorf("creating market: %w", err)
-		}
-
-		return s.saveMarketStateSnapshot(ctx, tx, marketID, blockNumber, blockVersion, blockTimestamp, ms, nil)
-	})
-}
-
-// handlePositionEvent handles Supply, Withdraw, Borrow, Repay, SupplyCollateral, WithdrawCollateral events.
-func (s *Service) handlePositionEvent(ctx context.Context, mktID [32]byte, user common.Address, eventType entity.MorphoEventType, txHash string, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
-	ms, ps, err := s.blockchainSvc.getMarketAndPositionState(ctx, mktID, user, blockNumber)
-	if err != nil {
-		return fmt.Errorf("fetching on-chain state: %w", err)
-	}
-
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		marketID, err := s.ensureMarket(ctx, tx, mktID, chainID, blockNumber)
-		if err != nil {
-			return fmt.Errorf("ensuring market: %w", err)
-		}
-
-		// Save market state snapshot
-		if err := s.saveMarketStateSnapshot(ctx, tx, marketID, blockNumber, blockVersion, blockTimestamp, ms, nil); err != nil {
-			return fmt.Errorf("saving market state: %w", err)
-		}
-
-		// Save user position snapshot
-		return s.savePositionSnapshot(ctx, tx, user, marketID, blockNumber, blockVersion, blockTimestamp, ps, ms, eventType, txHash, chainID)
-	})
-}
-
-// handleLiquidateEvent handles Liquidate events by snapshotting both borrower and liquidator.
-func (s *Service) handleLiquidateEvent(ctx context.Context, e *LiquidateEvent, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
-	borrower := e.Borrower
-	liquidator := e.Caller
-
-	// Fetch market state + both positions in a single RPC call.
-	ms, borrowerPos, liquidatorPos, err := s.blockchainSvc.getMarketAndTwoPositionStates(ctx, e.MarketID(), borrower, liquidator, blockNumber)
-	if err != nil {
-		return fmt.Errorf("fetching on-chain state: %w", err)
-	}
-
-	// Save the borrower and liquidator positions in user-address order so the
-	// per-row mmp advisory locks are acquired in a transaction-stable order.
-	// Today the mss lock taken inside saveMarketStateSnapshot serializes all
-	// concurrent transactions on this market, which means mmp ordering between
-	// the two positions can't actually deadlock — but this defensive sort
-	// closes the door on a future refactor that batches events into a shared
-	// transaction or otherwise re-orders the per-event tx scope. See ADR-0002 §3.
-	positions := []userPosition{
-		{borrower, borrowerPos, "borrower"},
-		{liquidator, liquidatorPos, "liquidator"},
-	}
-	slices.SortFunc(positions, func(a, b userPosition) int {
-		return bytes.Compare(a.user.Bytes(), b.user.Bytes())
-	})
-
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		marketID, err := s.ensureMarket(ctx, tx, e.MarketID(), chainID, blockNumber)
-		if err != nil {
-			return fmt.Errorf("ensuring market: %w", err)
-		}
-
-		if err := s.saveMarketStateSnapshot(ctx, tx, marketID, blockNumber, blockVersion, blockTimestamp, ms, nil); err != nil {
-			return fmt.Errorf("saving market state: %w", err)
-		}
-
-		for _, p := range positions {
-			if err := s.savePositionSnapshot(ctx, tx, p.user, marketID, blockNumber, blockVersion, blockTimestamp, p.pos, ms, e.Type(), e.TxHash(), chainID); err != nil {
-				return fmt.Errorf("saving %s position: %w", p.role, err)
-			}
-		}
-		return nil
-	})
-}
-
-// userPosition pairs a user address with their position state and a role
-// label, for ordered per-user mmp/mvp lock acquisition (see
-// handleLiquidateEvent / handleVaultTransfer). The role survives the sort so
-// failures still surface as "saving <borrower|liquidator|sender|receiver>
-// position: ..." regardless of which user got sorted first.
-type userPosition struct {
-	user common.Address
-	pos  *PositionState
-	role string
-}
-
-// userVaultBalance is the vault analogue of userPosition.
-type userVaultBalance struct {
-	user    common.Address
-	balance *big.Int
-	role    string
-}
-
-// handleAccrueInterest handles AccrueInterest events.
-func (s *Service) handleAccrueInterest(ctx context.Context, e *AccrueInterestEvent, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
-	ms, err := s.blockchainSvc.getMarketState(ctx, e.MarketID(), blockNumber)
-	if err != nil {
-		return fmt.Errorf("fetching market state: %w", err)
-	}
-
-	accrueData := &accrueInterestData{
-		PrevBorrowRate: e.PrevBorrowRate,
-		Interest:       e.Interest,
-		FeeShares:      e.FeeShares,
-	}
-
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		marketID, err := s.ensureMarket(ctx, tx, e.MarketID(), chainID, blockNumber)
-		if err != nil {
-			return fmt.Errorf("ensuring market: %w", err)
-		}
-		return s.saveMarketStateSnapshot(ctx, tx, marketID, blockNumber, blockVersion, blockTimestamp, ms, accrueData)
-	})
-}
-
-// handleVaultTransfer handles vault Transfer events.
-func (s *Service) handleVaultTransfer(ctx context.Context, e *VaultTransferEvent, vaultAddress common.Address, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
-	vault := s.vaultRegistry.GetVault(vaultAddress)
-	if vault == nil {
-		return fmt.Errorf("vault not found in registry: %s", vaultAddress.Hex())
-	}
-
-	// Filter out mint/burn (zero address) and internal vault accounting (vault address).
-	// Mints and burns are already covered by Deposit/Withdraw handlers.
-	hasFrom := e.From != (common.Address{}) && e.From != vaultAddress
-	hasTo := e.To != (common.Address{}) && e.To != vaultAddress
-
-	// Fetch vault state + both balances in a single RPC call when both addresses are present.
-	var vs *VaultState
-	var senderBalance, receiverBalance *big.Int
-	var err error
-
-	switch {
-	case hasFrom && hasTo:
-		vs, senderBalance, receiverBalance, err = s.blockchainSvc.getVaultStateAndTwoBalances(ctx, vaultAddress, e.From, e.To, blockNumber)
-	case hasFrom:
-		vs, senderBalance, err = s.blockchainSvc.getVaultStateAndBalance(ctx, vaultAddress, e.From, blockNumber)
-	case hasTo:
-		vs, receiverBalance, err = s.blockchainSvc.getVaultStateAndBalance(ctx, vaultAddress, e.To, blockNumber)
-	default:
-		vs, err = s.blockchainSvc.getVaultState(ctx, vaultAddress, blockNumber)
-	}
-	if err != nil {
-		return fmt.Errorf("fetching vault state and balances for vault=%s from=%s to=%s block=%d: %w",
-			vaultAddress.Hex(), e.From.Hex(), e.To.Hex(), blockNumber, err)
-	}
-
-	// Save sender and receiver vault positions in user-address order so the
-	// per-row mvp advisory locks are acquired in a transaction-stable order;
-	// same defense-in-depth rationale as handleLiquidateEvent. See ADR-0002 §3.
-	balances := make([]userVaultBalance, 0, 2)
-	if hasFrom {
-		balances = append(balances, userVaultBalance{e.From, senderBalance, "sender"})
-	}
-	if hasTo {
-		balances = append(balances, userVaultBalance{e.To, receiverBalance, "receiver"})
-	}
-	slices.SortFunc(balances, func(a, b userVaultBalance) int {
-		return bytes.Compare(a.user.Bytes(), b.user.Bytes())
-	})
-
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		if err := s.saveVaultStateSnapshotInTx(ctx, tx, vault.ID, blockNumber, blockVersion, blockTimestamp, vs, nil); err != nil {
-			return fmt.Errorf("saving vault state: %w", err)
-		}
-
-		for _, b := range balances {
-			if err := s.saveVaultPositionInTx(ctx, tx, b.user, vault.ID, blockNumber, blockVersion, blockTimestamp, b.balance, vs, e.Type(), e.TxHash(), chainID); err != nil {
-				return fmt.Errorf("saving %s position: %w", b.role, err)
-			}
-		}
-
-		return nil
-	})
-}
-
-// handleVaultAccrueInterest handles vault AccrueInterest events.
-func (s *Service) handleVaultAccrueInterest(ctx context.Context, e *VaultAccrueInterestEvent, vaultAddress common.Address, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
-	vault := s.vaultRegistry.GetVault(vaultAddress)
-	if vault == nil {
-		return fmt.Errorf("vault not found in registry: %s", vaultAddress.Hex())
-	}
-
-	vs, err := s.blockchainSvc.getVaultState(ctx, vaultAddress, blockNumber)
-	if err != nil {
-		return fmt.Errorf("fetching vault state: %w", err)
-	}
-
-	accrueData := &vaultAccrueData{
-		FeeShares:           e.FeeShares,
-		NewTotalAssets:      e.NewTotalAssets,
-		PreviousTotalAssets: e.PreviousTotalAssets,
-		ManagementFeeShares: e.ManagementFeeShares,
-	}
-
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		return s.saveVaultStateSnapshotInTx(ctx, tx, vault.ID, blockNumber, blockVersion, blockTimestamp, vs, accrueData)
-	})
-}
-
-// saveVaultEventSnapshot handles deposit/withdraw by saving vault state + user position.
-func (s *Service) saveVaultEventSnapshot(ctx context.Context, user common.Address, vaultAddress common.Address, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time, eventType entity.MorphoEventType, txHash string) error {
-	vault := s.vaultRegistry.GetVault(vaultAddress)
-	if vault == nil {
-		return fmt.Errorf("vault not found in registry: %s", vaultAddress.Hex())
-	}
-
-	// Fetch vault state + user balance in a single RPC call.
-	vs, balance, err := s.blockchainSvc.getVaultStateAndBalance(ctx, vaultAddress, user, blockNumber)
-	if err != nil {
-		return fmt.Errorf("fetching vault state and balance: %w", err)
-	}
-
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		if err := s.saveVaultStateSnapshotInTx(ctx, tx, vault.ID, blockNumber, blockVersion, blockTimestamp, vs, nil); err != nil {
-			return fmt.Errorf("saving vault state: %w", err)
-		}
-		return s.saveVaultPositionInTx(ctx, tx, user, vault.ID, blockNumber, blockVersion, blockTimestamp, balance, vs, eventType, txHash, chainID)
-	})
-}
-
-// Helper methods
-
-type accrueInterestData struct {
-	PrevBorrowRate *big.Int
-	Interest       *big.Int
-	FeeShares      *big.Int
-}
-
-type vaultAccrueData struct {
-	FeeShares           *big.Int // V1: single fee, V2: performanceFeeShares
-	NewTotalAssets      *big.Int
-	PreviousTotalAssets *big.Int // V2 only
-	ManagementFeeShares *big.Int // V2 only
-}
-
-// ensureMarket ensures the market exists in the database and returns its ID.
-func (s *Service) ensureMarket(ctx context.Context, tx pgx.Tx, marketID [32]byte, chainID, blockNumber int64) (int64, error) {
-	// Check if market already exists
-	existing, err := s.morphoRepo.GetMarketByMarketID(ctx, chainID, common.Hash(marketID))
-	if err != nil {
-		return 0, fmt.Errorf("checking market existence: %w", err)
-	}
-	if existing != nil {
-		return existing.ID, nil
-	}
-
-	// Market doesn't exist yet, fetch params from chain and create it
-	params, err := s.blockchainSvc.getMarketParams(ctx, marketID, blockNumber)
-	if err != nil {
-		return 0, fmt.Errorf("fetching market params: %w", err)
-	}
-
-	// Fetch both token metadata in a single RPC call.
-	loanMd, collMd, err := s.blockchainSvc.getTokenPairMetadata(ctx, params.LoanToken, params.CollateralToken, blockNumber)
-	if err != nil {
-		return 0, fmt.Errorf("getting token pair metadata: %w", err)
-	}
-
-	protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, MorphoBlueAddress, "Morpho Blue", "lending", s.deployBlock)
-	if err != nil {
-		return 0, fmt.Errorf("getting protocol: %w", err)
-	}
-
-	loanTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, params.LoanToken, loanMd.Symbol, loanMd.Decimals, blockNumber)
-	if err != nil {
-		return 0, fmt.Errorf("getting loan token: %w", err)
-	}
-
-	collTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, params.CollateralToken, collMd.Symbol, collMd.Decimals, blockNumber)
-	if err != nil {
-		return 0, fmt.Errorf("getting collateral token: %w", err)
-	}
-
-	market, err := entity.NewMorphoMarket(chainID, protocolID, common.Hash(marketID), loanTokenID, collTokenID, params.Oracle, params.Irm, params.LLTV, blockNumber)
-	if err != nil {
-		return 0, fmt.Errorf("creating market entity: %w", err)
-	}
-
-	return s.morphoRepo.GetOrCreateMarket(ctx, tx, market)
-}
-
-// Contract for the Save* helpers below — read this before adding a new event
-// handler or batching existing ones into a shared transaction.
-//
-// Each event handler today opens its own WithTransaction scope and touches at
-// most one market/vault. That bounds per-tx lock acquisition to:
-//   - 0 or 1 mss + 0..N mmp at a single market_id (handlePositionEvent,
-//     handleLiquidateEvent), or
-//   - 0 or 1 mvs + 0..N mvp at a single vault_id (handleVaultTransfer,
-//     saveVaultEventSnapshot).
-//
-// Two invariants prevent deadlocks under cross-build contention:
-//
-//  1. STATE-FIRST: every handler that writes mmp MUST first write mss for
-//     the same (market_id, block_number, block_version, timestamp), and
-//     likewise mvs before mvp. The state lock then serialises every other
-//     concurrent tx on the same market/vault, so the trailing per-user mmp
-//     /mvp locks can never be held by two txs at once for that (market, …)
-//     tuple.
-//
-//  2. SORTED-USERS: handlers that write more than one mmp/mvp in a single tx
-//     (handleLiquidateEvent: borrower + liquidator; handleVaultTransfer:
-//     sender + receiver) sort their per-user saves by user address before
-//     iterating. That's defence-in-depth: invariant 1 already prevents
-//     deadlock today, but the sort survives a future refactor that loosens
-//     it (e.g. event batching across markets in one tx, or removal of the
-//     state save).
-//
-// If you add a handler that writes mmp/mvp without first writing mss/mvs for
-// the same key, OR that batches multiple markets/vaults into a shared tx,
-// you MUST extend the sort to cover the per-tx lock acquisition order across
-// all keys.
-//
-// See ADR-0002 §3 and VEC-194 PR.
-
-func (s *Service) saveMarketStateSnapshot(ctx context.Context, tx pgx.Tx, morphoMarketID, blockNumber int64, blockVersion int, blockTimestamp time.Time, ms *MarketState, accrueData *accrueInterestData) error {
-	state, err := entity.NewMorphoMarketState(morphoMarketID, blockNumber, blockVersion, blockTimestamp, ms.TotalSupplyAssets, ms.TotalSupplyShares, ms.TotalBorrowAssets, ms.TotalBorrowShares, ms.LastUpdate.Int64(), ms.Fee)
-	if err != nil {
-		return fmt.Errorf("creating market state entity: %w", err)
-	}
-
-	if accrueData != nil {
-		state.WithAccrueInterest(accrueData.PrevBorrowRate, accrueData.Interest, accrueData.FeeShares)
-	}
-
-	return s.morphoRepo.SaveMarketState(ctx, tx, state)
-}
-
-func (s *Service) savePositionSnapshot(ctx context.Context, tx pgx.Tx, user common.Address, morphoMarketID, blockNumber int64, blockVersion int, blockTimestamp time.Time, ps *PositionState, ms *MarketState, eventType entity.MorphoEventType, txHash string, chainID int64) error {
-	userID, err := s.userRepo.GetOrCreateUser(ctx, tx, entity.User{
-		ChainID:        chainID,
-		Address:        user,
-		FirstSeenBlock: blockNumber,
-	})
-	if err != nil {
-		return fmt.Errorf("ensuring user: %w", err)
-	}
-
-	supplyAssets := entity.ComputeSupplyAssets(ps.SupplyShares, ms.TotalSupplyAssets, ms.TotalSupplyShares)
-	borrowAssets := entity.ComputeBorrowAssets(ps.BorrowShares, ms.TotalBorrowAssets, ms.TotalBorrowShares)
-
-	position, err := entity.NewMorphoMarketPosition(userID, morphoMarketID, blockNumber, blockVersion, blockTimestamp, ps.SupplyShares, ps.BorrowShares, ps.Collateral, supplyAssets, borrowAssets)
-	if err != nil {
-		return fmt.Errorf("creating position entity: %w", err)
-	}
-
-	return s.morphoRepo.SaveMarketPosition(ctx, tx, position)
-}
-
-func (s *Service) saveVaultStateSnapshotInTx(ctx context.Context, tx pgx.Tx, vaultID, blockNumber int64, blockVersion int, blockTimestamp time.Time, vs *VaultState, accrueData *vaultAccrueData) error {
-	state, err := entity.NewMorphoVaultState(vaultID, blockNumber, blockVersion, blockTimestamp, vs.TotalAssets, vs.TotalSupply)
-	if err != nil {
-		return fmt.Errorf("creating vault state entity: %w", err)
-	}
-
-	if accrueData != nil {
-		state.WithAccrueInterest(accrueData.FeeShares, accrueData.NewTotalAssets, accrueData.PreviousTotalAssets, accrueData.ManagementFeeShares)
-	}
-
-	return s.morphoRepo.SaveVaultState(ctx, tx, state)
-}
-
-func (s *Service) saveVaultPositionInTx(ctx context.Context, tx pgx.Tx, user common.Address, vaultID, blockNumber int64, blockVersion int, blockTimestamp time.Time, shares *big.Int, vs *VaultState, eventType entity.MorphoEventType, txHash string, chainID int64) error {
-	userID, err := s.userRepo.GetOrCreateUser(ctx, tx, entity.User{
-		ChainID:        chainID,
-		Address:        user,
-		FirstSeenBlock: blockNumber,
-	})
-	if err != nil {
-		return fmt.Errorf("ensuring user: %w", err)
-	}
-
-	assets := entity.ComputeVaultAssets(shares, vs.TotalAssets, vs.TotalSupply)
-
-	position, err := entity.NewMorphoVaultPosition(userID, vaultID, blockNumber, blockVersion, blockTimestamp, shares, assets)
-	if err != nil {
-		return fmt.Errorf("creating vault position entity: %w", err)
-	}
-
-	return s.morphoRepo.SaveVaultPosition(ctx, tx, position)
 }
 
 func (s *Service) saveProtocolEvent(ctx context.Context, event MorphoBlueEvent, chainID, blockNumber int64, blockVersion, logIndex int, blockTimestamp time.Time) error {
@@ -1368,6 +896,31 @@ func validateDependencies(
 	}
 	if receiptTokenRepo == nil {
 		return fmt.Errorf("receiptTokenRepo is required")
+	}
+	return nil
+}
+
+func validateReplayDependencies(
+	multicallClient outbound.Multicaller,
+	txManager outbound.TxManager,
+	protocolRepo outbound.ProtocolRepository,
+	morphoRepo outbound.MorphoRepository,
+	eventRepo outbound.EventRepository,
+) error {
+	if multicallClient == nil {
+		return fmt.Errorf("multicallClient is required")
+	}
+	if txManager == nil {
+		return fmt.Errorf("txManager is required")
+	}
+	if protocolRepo == nil {
+		return fmt.Errorf("protocolRepo is required")
+	}
+	if morphoRepo == nil {
+		return fmt.Errorf("morphoRepo is required")
+	}
+	if eventRepo == nil {
+		return fmt.Errorf("eventRepo is required")
 	}
 	return nil
 }

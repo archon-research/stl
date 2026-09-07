@@ -18,6 +18,8 @@ func init() {
 
 type TransferEvent struct {
 	TokenAddress common.Address
+	// From and To are both sides of the Transfer log as decoded, whichever one is
+	// the proxy. The zero address is a genuine value (mint/burn), not "unknown".
 	From         common.Address
 	To           common.Address
 	Amount       *big.Int

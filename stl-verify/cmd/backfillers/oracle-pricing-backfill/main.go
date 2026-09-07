@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -18,6 +19,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
@@ -121,13 +123,6 @@ func run(args []string) error {
 	ethClient := ethclient.NewClient(rpcClient)
 	logger.Info("Ethereum RPC connected", "url", cfg.rpcURL)
 
-	newMulticaller := func(oracleType entity.OracleType) (outbound.Multicaller, error) {
-		if oracleType == entity.OracleTypeChronicle {
-			return multicall.NewDirectCaller(rpcClient)
-		}
-		return multicall.NewClient(ethClient, blockchain.Multicall3)
-	}
-
 	// Connect to PostgreSQL
 	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(cfg.dbURL))
 	if err != nil {
@@ -141,17 +136,44 @@ func run(args []string) error {
 		return fmt.Errorf("registering build: %w", err)
 	}
 
+	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
+	archiveWrap, _, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "oracle-price")
+	if err != nil {
+		return err
+	}
+	defer archiveDrain()
+
+	newMulticaller := func(oracleType entity.OracleType) (outbound.Multicaller, error) {
+		var mc outbound.Multicaller
+		var err error
+		if oracleType.RequiresDirectCall() {
+			mc, err = multicall.NewDirectCaller(rpcClient)
+		} else {
+			mc, err = multicall.NewClient(ethClient, blockchain.Multicall3)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return archiveWrap(mc), nil
+	}
+
 	repo, err := postgres.NewOnchainPriceRepository(pool, logger, buildReg.BuildID(), cfg.batchSize)
 	if err != nil {
 		return fmt.Errorf("creating repository: %w", err)
 	}
 
+	referenceEffectiveAt, err := env.ReferenceEffectiveAt(time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("resolving reference effective time: %w", err)
+	}
+
 	service, err := oracle_backfill.NewService(
 		oracle_backfill.Config{
-			ChainID:     cfg.chainID,
-			Concurrency: cfg.concurrency,
-			BatchSize:   cfg.batchSize,
-			Logger:      logger,
+			ChainID:              cfg.chainID,
+			Concurrency:          cfg.concurrency,
+			BatchSize:            cfg.batchSize,
+			Logger:               logger,
+			ReferenceEffectiveAt: referenceEffectiveAt,
 		},
 		ethClient,
 		newMulticaller,

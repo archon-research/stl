@@ -2,15 +2,24 @@ package testutil
 
 import (
 	"context"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
 // MockSQSConsumer implements outbound.SQSConsumer for testing.
 type MockSQSConsumer struct {
-	ReceiveMessagesFn func(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error)
-	DeleteMessageFn   func(ctx context.Context, receiptHandle string) error
-	CloseFn           func() error
+	ReceiveMessagesFn   func(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error)
+	DeleteMessageFn     func(ctx context.Context, receiptHandle string) error
+	CloseFn             func() error
+	VisibilityTimeoutFn func() time.Duration
+}
+
+func (m *MockSQSConsumer) VisibilityTimeout() time.Duration {
+	if m.VisibilityTimeoutFn != nil {
+		return m.VisibilityTimeoutFn()
+	}
+	return 300 * time.Second
 }
 
 func (m *MockSQSConsumer) ReceiveMessages(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error) {
@@ -25,6 +34,10 @@ func (m *MockSQSConsumer) DeleteMessage(ctx context.Context, receiptHandle strin
 		return m.DeleteMessageFn(ctx, receiptHandle)
 	}
 	return nil
+}
+
+func (m *MockSQSConsumer) ChangeMessageVisibilityBatch(context.Context, []string, time.Duration) (map[string]error, error) {
+	return nil, nil
 }
 
 func (m *MockSQSConsumer) Close() error {

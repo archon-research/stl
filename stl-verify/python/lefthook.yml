@@ -1,24 +1,29 @@
 # Lefthook configuration for Python code
 # This file is extended by the root lefthook.yml
+#
+# `root` and `glob` are both repo-root-relative, and `glob` is applied to the
+# staged path BEFORE `root` rewrites it -- so the globs have to carry the
+# stl-verify/python/ prefix too. `run` and the substituted {staged_files} are
+# relative to `root`.
 
-_python_root: &python_root 'python/'
+_python_root: &python_root 'stl-verify/python/'
 
 pre-commit:
   parallel: true
   commands:
     python-ruff-lint:
       root: *python_root
-      glob: '**/*.{py,pyi}'
+      glob: 'stl-verify/python/**.{py,pyi}'
       run: env -u VIRTUAL_ENV uv run ruff check --fix {staged_files}
       stage_fixed: true
 
     python-ruff-format:
       root: *python_root
-      glob: '**/*.{py,pyi}'
+      glob: 'stl-verify/python/**.{py,pyi}'
       run: env -u VIRTUAL_ENV uv run ruff format {staged_files}
       stage_fixed: true
 
     python-ty:
       root: *python_root
-      glob: '**/*.{py,pyi}'
+      glob: 'stl-verify/python/**.{py,pyi}'
       run: env -u VIRTUAL_ENV uv run --extra dev ty check {staged_files}

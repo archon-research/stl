@@ -139,7 +139,7 @@ spec:
             }
           },
           "targets": [{
-            "expr": "sum(rate(morpho_blocks_processed_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", chain=~\"$chain\"}[5m]))",
+            "expr": "sum(rate(morpho_blocks_processed_total{status=\"success\", cluster=\"$cluster\", k8s_namespace_name=\"vector\", chain=~\"$chain\"}[5m]))",
             "refId": "A",
             "legendFormat": "all chains"
           }]
@@ -352,7 +352,7 @@ spec:
           },
           "targets": [
             {
-              "expr": "sum by (chain) (rate(morpho_blocks_processed_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", chain=~\"$chain\"}[5m]))",
+              "expr": "sum by (chain) (rate(morpho_blocks_processed_total{status=\"success\", cluster=\"$cluster\", k8s_namespace_name=\"vector\", chain=~\"$chain\"}[5m]))",
               "refId": "A",
               "legendFormat": "morpho · {{chain}}"
             },
@@ -540,7 +540,7 @@ spec:
             }
           },
           "targets": [{
-            "expr": "sum(rate(morpho_blocks_processed_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", chain=~\"$chain\"}[5m]))",
+            "expr": "sum(rate(morpho_blocks_processed_total{status=\"success\", cluster=\"$cluster\", k8s_namespace_name=\"vector\", chain=~\"$chain\"}[5m]))",
             "refId": "A",
             "legendFormat": "all chains"
           }]
@@ -753,7 +753,7 @@ spec:
           },
           "targets": [
             {
-              "expr": "sum by (chain) (rate(morpho_blocks_processed_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", chain=~\"$chain\"}[5m]))",
+              "expr": "sum by (chain) (rate(morpho_blocks_processed_total{status=\"success\", cluster=\"$cluster\", k8s_namespace_name=\"vector\", chain=~\"$chain\"}[5m]))",
               "refId": "A",
               "legendFormat": "morpho · {{chain}}"
             },

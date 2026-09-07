@@ -10,19 +10,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const receiptTokenSchemaName = "test_receipt_token"
+const receiptTokenDBName = "test_receipt_token"
 
 var receiptTokenPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(receiptTokenSchemaName, func() {
-		receiptTokenPool = testutil.SetupSchemaForMain(sharedDSN, receiptTokenSchemaName)
-	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, receiptTokenPool, receiptTokenSchemaName)
-	})
+	useFileDatabase(receiptTokenDBName, &receiptTokenPool)
 }
 
 // truncateReceiptToken clears the receipt_token table and its dependencies for test isolation.
@@ -61,7 +56,7 @@ func seedReceiptTokenDeps(t *testing.T, ctx context.Context, chainID int64) (int
 	}
 
 	tokenAddr := common.HexToAddress("0x6B175474E89094C44Da98b954EedeAC495271d0F")
-	tokenID, err := tokenRepo.GetOrCreateToken(ctx, tx, chainID, tokenAddr, "DAI", 18, 100)
+	tokenID, err := tokenRepo.GetOrCreateToken(ctx, tx, chainID, tokenAddr, "DAI", 18, i64(100))
 	if err != nil {
 		t.Fatalf("GetOrCreateToken: %v", err)
 	}

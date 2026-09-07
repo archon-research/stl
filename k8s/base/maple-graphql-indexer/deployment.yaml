@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: maple-graphql-indexer
+spec:
+  replicas: 1
+  # Explicit, matching the API-server default — ArgoCD must own spec.strategy or
+  # a later change to it cannot prune rollingUpdate. k8s/AGENTS.md, "Rollout strategy".
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+  selector:
+    matchLabels:
+      app: maple-graphql-indexer
+  template:
+    metadata:
+      labels:
+        app: maple-graphql-indexer
+    spec:
+      serviceAccountName: maple-graphql-indexer
+      containers:
+        - name: maple-graphql-indexer
+          image: maple-graphql-indexer
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: maple-graphql-indexer
+            - secretRef:
+                name: maple-graphql-indexer
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+      terminationGracePeriodSeconds: 60

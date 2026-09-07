@@ -51,12 +51,12 @@ func TestCurveSource_FetchBalances_StoresLPBalance(t *testing.T) {
 
 	mc := testutil.NewMockMulticaller()
 	src := NewCurveSource(mc, curveABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 		if len(calls) != 1 {
 			t.Fatalf("expected 1 call, got %d", len(calls))
 		}
-		if blockNumber == nil || blockNumber.Cmp(big.NewInt(24584100)) != 0 {
-			t.Fatalf("blockNumber = %v, want 24584100", blockNumber)
+		if blockHash != testBlockHash {
+			t.Fatalf("blockHash = %v, want %v (state read must be pinned to the block hash, not the number, so a reorg can't return the wrong fork's state)", blockHash, testBlockHash)
 		}
 
 		returnData, err := src.poolABI.Methods["balanceOf"].Outputs.Pack(expectedShares)
@@ -75,7 +75,7 @@ func TestCurveSource_FetchBalances_StoresLPBalance(t *testing.T) {
 		TokenType:       "curve",
 	}}
 
-	results, err := src.FetchBalances(context.Background(), entries, 24584100)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances failed: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestCurveSource_FetchBalances_FailedCallReturnsError(t *testing.T) {
 	}
 
 	mc := testutil.NewMockMulticaller()
-	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{{Success: false, ReturnData: nil}}, nil
 	}
 
@@ -113,7 +113,7 @@ func TestCurveSource_FetchBalances_FailedCallReturnsError(t *testing.T) {
 		TokenType:       "curve",
 	}}
 
-	results, err := src.FetchBalances(context.Background(), entries, 100)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for failed balanceOf call")
 	}

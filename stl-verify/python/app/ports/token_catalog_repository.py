@@ -4,7 +4,7 @@ from app.domain.entities.allocation import EthAddress
 from app.domain.entities.token_catalog import TokenMetadata, TokenPriceQuote
 
 
-class TokenCatalogRepository(Protocol):
+class TokenCatalogRepositoryPort(Protocol):
     async def list_tokens(
         self,
         *,

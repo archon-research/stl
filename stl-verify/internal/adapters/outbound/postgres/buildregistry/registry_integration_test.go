@@ -13,7 +13,7 @@ import (
 
 func setupDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 	return pool
 }

@@ -5,9 +5,10 @@ import pytest
 
 from app.domain.entities.allocation import ChainMetadata, EthAddress, Prime, ProtocolMetadata
 from app.services.allocation_service import AllocationService
-from tests.conftest import make_direct_asset_holding, make_receipt_token_position
+from tests.factories import make_direct_asset_holding, make_receipt_token_position
 
 _VALID_ADDR = EthAddress("0x" + "ab" * 20)
+_SIBLING_ADDR = EthAddress("0x" + "cd" * 20)
 
 
 @pytest.mark.asyncio
@@ -50,16 +51,16 @@ async def test_list_protocols_returns_all_protocols():
 async def test_list_primes_returns_all_primes():
     repo = AsyncMock()
     repo.list_primes.return_value = [
-        Prime(id="0xaaa", name="grove", address="0xaaa"),
-        Prime(id="0xbbb", name="spark", address="0xbbb"),
+        Prime(id="0xaaa", name="grove", address="0xaaa", chain_id=1, chain=None, role="alm"),
+        Prime(id="0xbbb", name="spark", address="0xbbb", chain_id=1, chain=None, role="alm"),
     ]
     service = AllocationService(repo)
 
     result = await service.list_primes()
 
     assert result == [
-        Prime(id="0xaaa", name="grove", address="0xaaa"),
-        Prime(id="0xbbb", name="spark", address="0xbbb"),
+        Prime(id="0xaaa", name="grove", address="0xaaa", chain_id=1, chain=None, role="alm"),
+        Prime(id="0xbbb", name="spark", address="0xbbb", chain_id=1, chain=None, role="alm"),
     ]
     repo.list_primes.assert_awaited_once()
 
@@ -118,6 +119,7 @@ async def test_prime_exists_delegates_to_repository():
 async def test_list_allocation_activity_delegates_filters_to_repository():
     repo = AsyncMock()
     repo.list_allocation_activity.return_value = []
+    repo.list_prime_proxy_addresses.return_value = [_VALID_ADDR, _SIBLING_ADDR]
     service = AllocationService(repo)
 
     from_timestamp = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
@@ -136,8 +138,10 @@ async def test_list_allocation_activity_delegates_filters_to_repository():
     )
 
     assert result == []
+    # Scoped to the prime's whole proxy set, resolved from the same rows
+    # /v1/primes is built from.
     repo.list_allocation_activity.assert_awaited_once_with(
-        prime_id=_VALID_ADDR,
+        proxy_addresses=[_VALID_ADDR, _SIBLING_ADDR],
         chain_id=1,
         protocol_name="aave",
         action_type="in",
@@ -145,5 +149,32 @@ async def test_list_allocation_activity_delegates_filters_to_repository():
         tx_hash="0x" + "ab" * 32,
         from_timestamp=from_timestamp,
         to_timestamp=to_timestamp,
+        limit=50,
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_total_capital_buckets_delegates_to_repository():
+    repo = AsyncMock()
+    repo.list_total_capital_buckets.return_value = []
+    service = AllocationService(repo)
+
+    from_timestamp = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    to_timestamp = datetime(2026, 1, 2, 0, 0, tzinfo=UTC)
+
+    result = await service.list_total_capital_buckets(
+        _VALID_ADDR,
+        from_timestamp=from_timestamp,
+        to_timestamp=to_timestamp,
+        bucket_seconds=3600.0,
+        limit=50,
+    )
+
+    assert result == []
+    repo.list_total_capital_buckets.assert_awaited_once_with(
+        _VALID_ADDR,
+        from_timestamp=from_timestamp,
+        to_timestamp=to_timestamp,
+        bucket_seconds=3600.0,
         limit=50,
     )

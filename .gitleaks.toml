@@ -1,8 +1,41 @@
 # Gitleaks config for stl.
-# Generated OpenAPI files contain Ethereum contract addresses (public on-chain
-# data, 0x-prefixed 40-char hex) that the generic-api-key rule false-positives
-# on. Skipping generated output avoids a growing .gitleaksignore file.
-[allowlist]
+#
+# IMPORTANT: a gitleaks config REPLACES the built-in ruleset rather than adding
+# to it. Omitting `[extend] useDefault = true` therefore loads zero detection
+# rules, and the scan exits 0 having matched nothing. That is what happened
+# between 2026-05-29 and 2026-08-19 (ORB-303): this file carried only an
+# allowlist, so full-history scanning ran against an empty ruleset the whole
+# time. Do not remove the extend block.
+
+[extend]
+useDefault = true
+
+# --- False positives -------------------------------------------------------
+#
+# All known false positives here are the same thing: EVM addresses and ABI hex,
+# which are public on-chain data, matched by the default `generic-api-key` rule.
+#
+# These are scoped by VALUE SHAPE and LINE CONTEXT rather than by path. A
+# path-scoped allowlist was tried and rejected: gitleaks applies a `paths`
+# condition on its own even alongside `matchCondition = "AND"`, so allowlisting
+# a directory suppresses every rule in it. A planted test credential inside
+# such a path went undetected, which would have reintroduced the original bug.
+
+[[allowlists]]
+description = "0x-prefixed EVM addresses are public chain data, never credentials"
+regexes = [
+  '''0x[a-fA-F0-9]{40}''',
+]
+
+[[allowlists]]
+description = "un-prefixed EVM hex assigned to a *_HEX constant (chain fixture data)"
+regexTarget = "line"
+regexes = [
+  '''_HEX\s*=\s*["'][a-fA-F0-9]{40}["']''',
+]
+
+[[allowlists]]
+description = "generated OpenAPI output embeds contract addresses"
 paths = [
   '''stl-verify/ts/ui/src/generated/''',
 ]

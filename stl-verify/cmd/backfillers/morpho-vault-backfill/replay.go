@@ -1,0 +1,391 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"math/big"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/common"
+	ethtypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/sync/errgroup"
+
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/blocktime"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
+)
+
+// buildReplayService constructs the morpho-indexer Service wired for replay
+// (no SQS consumer, no block cache) plus the repositories it needs.
+//
+// Every failure here is structural, which is why each one is tagged: the pool
+// arrives already built, so all of it does is reject a nil port, resolve the
+// chain's name and telemetry instruments, validate the config and read the
+// embedded ABIs and the chain's deploy-block table. None of that dials anything,
+// so no attempt can reach a different verdict. Add a step that DOES touch the
+// network or the database and it must stay untagged — the retry envelope is what
+// carries a blip.
+func buildReplayService(logger *slog.Logger, multicaller outbound.Multicaller, pool *pgxpool.Pool, buildID buildregistry.BuildID, chainID int64) (*morpho_indexer.Service, *countingMorphoRepository, error) {
+	txManager, err := postgres.NewTxManager(pool, logger)
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating tx manager: %w: %w", err, errStructuralData)
+	}
+	morphoRepo, err := postgres.NewMorphoRepository(pool, logger, buildID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating morpho repository: %w: %w", err, errStructuralData)
+	}
+	countingRepo := newCountingMorphoRepository(morphoRepo)
+	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildID, 0)
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating protocol repository: %w: %w", err, errStructuralData)
+	}
+	eventRepo := postgres.NewEventRepository(logger, buildID)
+
+	svcConfig, err := morpho_indexer.NewReplayConfig(chainID, logger)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %w", err, errStructuralData)
+	}
+
+	svc, err := morpho_indexer.NewReplayService(svcConfig, multicaller, txManager, protocolRepo, countingRepo, eventRepo)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %w", err, errStructuralData)
+	}
+	return svc, countingRepo, nil
+}
+
+// knownV2VaultCount reports how many VaultV2 vaults the database holds, read
+// through the same registry load every replay activity performs — so a zero here
+// is exactly the answer each of them would reach on its own.
+func knownV2VaultCount(ctx context.Context, logger *slog.Logger, multicaller outbound.Multicaller, pool *pgxpool.Pool, buildID buildregistry.BuildID, chainID int64) (int, error) {
+	svc, _, err := buildReplayService(logger, multicaller, pool, buildID, chainID)
+	if err != nil {
+		return 0, fmt.Errorf("building replay service: %w", err)
+	}
+	if err := svc.LoadVaultRegistry(ctx); err != nil {
+		return 0, err
+	}
+	return len(svc.V2VaultAddresses()), nil
+}
+
+// chainReader is the node surface the replay needs: the by-hash read that dates every
+// log, plus the by-number read that separates an orphan from a replica behind head.
+type chainReader interface {
+	blocktime.HeaderFetcher
+	HeaderByNumber(ctx context.Context, number *big.Int) (*ethtypes.Header, error)
+}
+
+// replayPartition collects, orders, and replays every structured V2 log in one
+// S3 partition, in strict (blockNumber, logIndex) order.
+//
+// Ordering is desirable, not correctness-critical. Adapter membership is an
+// append-only log keyed on each observation's own block position, so an out-of-order
+// replay reaches the same final state: an Allocate replayed before its AddAdapter
+// records an allocation_event assertion at its own block, the AddAdapter later records
+// its transition at its own (lower) block, and both "is it a member now" (the latest
+// observation) and "which block was it added at" (a MIN over add_adapter_event rows)
+// land on the same answers either way. What mis-ordering still costs is one redundant
+// assertion row and one WARN per adapter — the ops signal that distinguishes a real
+// mid-life discovery from a replay artefact — which is reason enough to keep the sort.
+func replayPartition(
+	ctx context.Context,
+	logger *slog.Logger,
+	s3Reader outbound.S3Reader,
+	svc *morpho_indexer.Service,
+	chain chainReader,
+	cfg config,
+	rng blockRange,
+	part string,
+	v2Vaults map[common.Address]struct{},
+	topics map[common.Hash]struct{},
+) (int, error) {
+	entries, err := collectPartitionV2Logs(ctx, s3Reader, cfg.bucket, part, rng.From, rng.To, cfg.goroutines, v2Vaults, topics)
+	if err != nil {
+		return 0, err
+	}
+	if len(entries) == 0 {
+		return 0, nil
+	}
+	sortV2LogEntries(entries)
+
+	tsCache := blocktime.New(chain)
+	for _, e := range entries {
+		blockTimestamp, err := tsCache.TimestampAt(ctx, e.blockHash)
+		if err != nil {
+			key := s3key.BuildWithPartition(part, e.blockNumber, e.blockVersion, s3key.Receipts)
+			if errors.Is(err, ethereum.NotFound) {
+				return 0, classifyUnknownBlockHash(ctx, chain, e, key, err)
+			}
+			return 0, fmt.Errorf("block %d (%s): %w", e.blockNumber, key, err)
+		}
+		if err := svc.ReplayMetaMorphoLog(ctx, e.log, e.blockNumber, e.blockHash, e.blockVersion, blockTimestamp); err != nil {
+			return 0, fmt.Errorf("replaying log tx=%s index=%d block=%d: %w", e.log.TransactionHash, e.logIndex, e.blockNumber, err)
+		}
+	}
+
+	logger.Debug("replayed partition", "partition", part, "events", len(entries))
+	return len(entries), nil
+}
+
+// Only a canonical header at the same height with a different hash makes an
+// unresolvable archived hash structural; anything else is a node that is behind.
+func classifyUnknownBlockHash(ctx context.Context, chain chainReader, e v2LogEntry, key string, notFound error) error {
+	canonical, err := chain.HeaderByNumber(ctx, big.NewInt(e.blockNumber))
+	if err != nil {
+		return fmt.Errorf("block %d (%s): %w: reading the canonical header at that height: %w", e.blockNumber, key, notFound, err)
+	}
+	canonicalHash := canonical.Hash()
+	if canonicalHash == e.blockHash {
+		return fmt.Errorf("block %d (%s): %w, yet it is the canonical hash at that height", e.blockNumber, key, notFound)
+	}
+	return fmt.Errorf("block %d (%s): archived hash %s is an orphaned fork, canonical hash at that height is %s: %w: %w",
+		e.blockNumber, key, e.blockHash.Hex(), canonicalHash.Hex(), notFound, errStructuralData)
+}
+
+// receiptFile is one block's highest-version receipt object in a partition.
+type receiptFile struct {
+	key         string
+	blockNumber int64
+	version     int
+}
+
+// collectPartitionV2Logs downloads the highest-version receipt file per block in
+// the partition and returns the structured V2 log entries in them in ascending
+// block order, each stamped with the block's S3 version. On the history the
+// one-off bulk download wrote that version is 1 with no reorg behind it — see
+// listHighestVersionReceipts for the rule and why that is benign.
+func collectPartitionV2Logs(
+	ctx context.Context,
+	s3Reader outbound.S3Reader,
+	bucket, part string,
+	from, to int64,
+	workers int,
+	v2Vaults map[common.Address]struct{},
+	topics map[common.Hash]struct{},
+) ([]v2LogEntry, error) {
+	receiptKeys, err := listHighestVersionReceipts(ctx, s3Reader, bucket, part)
+	if err != nil {
+		return nil, fmt.Errorf("listing receipts for partition %s: %w", part, err)
+	}
+
+	presentBlocks := make([]int64, 0, len(receiptKeys))
+	inRange := make([]receiptFile, 0, len(receiptKeys))
+	for _, key := range receiptKeys {
+		parsed, ok := s3key.Parse(key)
+		if !ok || parsed.BlockNumber < from || parsed.BlockNumber > to {
+			continue
+		}
+		presentBlocks = append(presentBlocks, parsed.BlockNumber)
+		inRange = append(inRange, receiptFile{key: key, blockNumber: parsed.BlockNumber, version: parsed.Version})
+	}
+
+	// A block in the partition's [from,to] intersection with no receipt key
+	// contributes nothing, leaving a hole no downstream check can see. The
+	// discovery scan only WARNs on such gaps; replay must hard-stop so the run
+	// fails and a repaired-S3 re-run is what fills them.
+	if err := requireCompletePartition(part, presentBlocks, from, to); err != nil {
+		return nil, err
+	}
+
+	return downloadV2LogsConcurrently(ctx, s3Reader, bucket, inRange, workers, v2Vaults, topics)
+}
+
+// downloadV2LogsConcurrently fetches the partition's receipt files across a
+// worker pool of the configured size and concatenates their V2 log entries in
+// listing (ascending block) order. Concurrency belongs here rather than around
+// whole partitions: partitions must replay strictly in block order so an
+// AddAdapter lands before a later Allocate, but the downloads feeding one
+// partition are order-free — each result is parked at its own index, so
+// completion order never reaches the caller.
+func downloadV2LogsConcurrently(
+	ctx context.Context,
+	s3Reader outbound.S3Reader,
+	bucket string,
+	files []receiptFile,
+	workers int,
+	v2Vaults map[common.Address]struct{},
+	topics map[common.Hash]struct{},
+) ([]v2LogEntry, error) {
+	perFile := make([][]v2LogEntry, len(files))
+
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(max(workers, 1))
+	for i, file := range files {
+		group.Go(func() error {
+			receipts, err := downloadReceipts(groupCtx, s3Reader, bucket, file.key)
+			if err != nil {
+				return fmt.Errorf("downloading %s: %w", file.key, err)
+			}
+			entries, err := filterV2Logs(receipts, file.blockNumber, v2Vaults, topics)
+			if err != nil {
+				return fmt.Errorf("filtering %s: %w", file.key, err)
+			}
+			for j := range entries {
+				entries[j].blockVersion = file.version
+			}
+			perFile[i] = entries
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+
+	var entries []v2LogEntry
+	for _, fileEntries := range perFile {
+		entries = append(entries, fileEntries...)
+	}
+	return entries, nil
+}
+
+// requireCompletePartition errors if any block in the partition's [from,to]
+// intersection is absent from presentBlocks. The expected range comes from the
+// partition prefix (not from the present blocks), so an entirely empty partition
+// — the maximal hole — is caught too.
+func requireCompletePartition(part string, presentBlocks []int64, from, to int64) error {
+	partStart, partEnd, ok := partitionBlockRange(part)
+	if !ok {
+		return fmt.Errorf("cannot parse partition range from prefix %q: %w", part, errStructuralData)
+	}
+	if partStart < from {
+		partStart = from
+	}
+	if partEnd > to {
+		partEnd = to
+	}
+	if partStart > partEnd {
+		return nil // partition does not intersect [from,to]
+	}
+
+	present := make(map[int64]bool, len(presentBlocks))
+	for _, bn := range presentBlocks {
+		present[bn] = true
+	}
+	var missing []int64
+	for bn := partStart; bn <= partEnd; bn++ {
+		if !present[bn] {
+			missing = append(missing, bn)
+			if len(missing) >= 8 {
+				break // bound the reported list; one missing block already fails the run
+			}
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("partition %s is missing receipt block(s) %v in [%d,%d] (S3 gap): %w", part, missing, partStart, partEnd, errStructuralData)
+	}
+	return nil
+}
+
+// partitionBlockRange parses the "start-end" partition prefix into its inclusive
+// block bounds.
+func partitionBlockRange(part string) (start, end int64, ok bool) {
+	before, after, found := strings.Cut(part, "-")
+	if !found {
+		return 0, 0, false
+	}
+	start, err1 := strconv.ParseInt(before, 10, 64)
+	end, err2 := strconv.ParseInt(after, 10, 64)
+	if err1 != nil || err2 != nil || start > end {
+		return 0, 0, false
+	}
+	return start, end, true
+}
+
+// replayPartitionPrefixes returns the S3 partition prefixes covering [from,to]
+// in ascending start-block order, so an AddAdapter in an earlier partition lands
+// before a later partition's Allocate (desirable rather than required — see
+// replayPartition). Pure and deterministic, so the workflow can call it to build
+// its activity list. partitionsForRange sorts lexicographically ("10000-10999" before
+// "2000-2999"), which is fine for the order-agnostic discovery scan but wrong
+// here; building the list from aligned block starts keeps it numeric-ascending.
+//
+// The loop starts partition-aligned and steps by a whole partition, so every
+// iteration yields a distinct prefix and the last one is always to's own
+// partition — no trailing catch-up entry and no de-duplication needed. This is
+// what makes it differ from partitionsForRange, which starts unaligned.
+func replayPartitionPrefixes(from, to int64) []string {
+	var parts []string
+	for block := from - (from % partition.BlockRangeSize); block <= to; block += partition.BlockRangeSize {
+		parts = append(parts, partition.GetPartition(block))
+	}
+	return parts
+}
+
+// replayPartitionCount reports how many prefixes replayPartitionPrefixes would
+// return, without building any of them. The count is what the run's ceiling is
+// checked against, and `to` is operator-supplied: walking the range to measure it
+// allocates a string per 1000 blocks, so a pasted millisecond timestamp exhausts
+// the worker before the ceiling can reject it, and math.MaxInt64 overflows the
+// walk's cursor and never terminates at all. This measures width only;
+// maxPlausibleBlock is the companion guard on where the range sits.
+func replayPartitionCount(from, to int64) int64 {
+	return to/partition.BlockRangeSize - from/partition.BlockRangeSize + 1
+}
+
+// v2LogEntry is a single VaultV2 structured-event log queued for replay, carrying
+// the block coordinates processMetaMorphoLog needs.
+type v2LogEntry struct {
+	log          shared.Log
+	blockNumber  int64
+	logIndex     int64
+	blockVersion int
+	blockHash    common.Hash
+}
+
+// filterV2Logs collects the logs in receipts emitted by a known VaultV2 vault
+// (address in v2Vaults) whose topic0 is a structured V2 event (in topics). A
+// malformed log index or a matching receipt with no block hash is a structural
+// data defect that stops the run rather than being silently skipped.
+func filterV2Logs(receipts []shared.TransactionReceipt, blockNumber int64, v2Vaults map[common.Address]struct{}, topics map[common.Hash]struct{}) ([]v2LogEntry, error) {
+	var entries []v2LogEntry
+	for _, receipt := range receipts {
+		for _, log := range receipt.Logs {
+			if len(log.Topics) == 0 {
+				continue
+			}
+			if _, ok := v2Vaults[common.HexToAddress(log.Address)]; !ok {
+				continue
+			}
+			if _, ok := topics[common.HexToHash(log.Topics[0])]; !ok {
+				continue
+			}
+			if receipt.BlockHash == "" {
+				return nil, fmt.Errorf("receipt %s at block %d carries a V2 structured log with no block hash: %w", receipt.TransactionHash, blockNumber, errStructuralData)
+			}
+			logIndex, err := strconv.ParseInt(log.LogIndex, 0, 64)
+			if err != nil {
+				return nil, fmt.Errorf("parsing log index %q (tx %s): %w: %w", log.LogIndex, receipt.TransactionHash, err, errStructuralData)
+			}
+			entries = append(entries, v2LogEntry{
+				log:         log,
+				blockNumber: blockNumber,
+				logIndex:    logIndex,
+				blockHash:   common.HexToHash(receipt.BlockHash),
+			})
+		}
+	}
+	return entries, nil
+}
+
+// sortV2LogEntries sorts entries in strict (blockNumber, logIndex) ascending
+// order so AddAdapter lands before that adapter's first Allocate — which keeps the
+// lazy-registration WARN meaningful and avoids a redundant assertion row, not
+// correctness (see replayPartition).
+func sortV2LogEntries(entries []v2LogEntry) {
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].blockNumber != entries[j].blockNumber {
+			return entries[i].blockNumber < entries[j].blockNumber
+		}
+		return entries[i].logIndex < entries[j].logIndex
+	})
+}

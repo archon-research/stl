@@ -12,11 +12,9 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
-
+	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
@@ -27,6 +25,7 @@ import (
 	sqsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -48,9 +47,10 @@ func init() {
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
-	if err := run(ctx, os.Args[1:]); err != nil {
+	err := run(ctx, os.Args[1:], lifecycle.ForceExitAfter(lifecycle.ShutdownTailBudget))
+	cancel()
+	if err != nil {
 		slog.Error("fatal", "error", err)
 		os.Exit(1)
 	}
@@ -130,7 +130,7 @@ func parseConfig(args []string) (cliConfig, error) {
 	return cfg, nil
 }
 
-func run(ctx context.Context, args []string) error {
+func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	cfg, err := parseConfig(args)
 	if err != nil {
 		return err
@@ -143,9 +143,20 @@ func run(ctx context.Context, args []string) error {
 
 	logger.Info("starting oracle price worker", "queue", cfg.queueURL, "chainID", cfg.chainID)
 
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
-		awsconfig.WithRegion(env.Get("AWS_REGION", "eu-west-1")),
-	)
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    "oracle-price-worker",
+		ServiceVersion: buildinfo.GitHash(),
+		BuildTime:      BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("initializing telemetry: %w", err)
+	}
+	defer shutdownOTEL(context.Background())
+
+	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{
+		StaticCredentialsFromEnv: true,
+	})
 	if err != nil {
 		return fmt.Errorf("loading AWS config: %w", err)
 	}
@@ -157,10 +168,14 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("creating SQS consumer: %w", err)
 	}
+	defer consumer.Close()
 
 	cacheCfg := redisadapter.ConfigDefaults()
 	cacheCfg.Addr = cfg.redisAddr
 	cacheCfg.Password = env.Get("REDIS_PASSWORD", "")
+	// KeyPrefix is configurable for the tests that drive this binary: they cannot
+	// namespace a key the binary builds for itself, and they share one Redis.
+	cacheCfg.KeyPrefix = env.Get("REDIS_KEY_PREFIX", "stl")
 	blockCache, err := redisadapter.NewBlockCache(cacheCfg, logger)
 	if err != nil {
 		return fmt.Errorf("creating block cache: %w", err)
@@ -171,14 +186,7 @@ func run(ctx context.Context, args []string) error {
 	}
 	logger.Info("Redis connected", "addr", cfg.redisAddr)
 
-	s3Opts := []func(*awss3.Options){}
-	if s3Endpoint := env.Get("AWS_S3_ENDPOINT", ""); s3Endpoint != "" {
-		s3Opts = append(s3Opts, func(o *awss3.Options) {
-			o.BaseEndpoint = aws.String(s3Endpoint)
-			o.UsePathStyle = true
-		})
-	}
-	s3Reader := s3adapter.NewReaderWithOptions(awsCfg, logger, s3Opts...)
+	s3Reader := s3adapter.NewReaderFromEnv(awsCfg, logger)
 	cacheReader, err := cache.NewReaderWithFallback(blockCache, s3Reader, cfg.chainID, cfg.deployEnv, cfg.s3Bucket, logger)
 	if err != nil {
 		return fmt.Errorf("creating cache reader: %w", err)
@@ -191,7 +199,7 @@ func run(ctx context.Context, args []string) error {
 	defer ethClient.Close()
 	logger.Info("Ethereum node connected")
 
-	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(cfg.dbURL))
+	pool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(cfg.dbURL))
 	if err != nil {
 		return fmt.Errorf("connecting to database: %w", err)
 	}
@@ -202,18 +210,6 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("registering build: %w", err)
 	}
-
-	// Initialize OpenTelemetry tracing and metrics
-	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    "oracle-price-worker",
-		ServiceVersion: buildReg.GitHash(),
-		BuildTime:      BuildTime,
-		Logger:         logger,
-	})
-	if err != nil {
-		return fmt.Errorf("initializing telemetry: %w", err)
-	}
-	defer shutdownOTEL(context.Background())
 
 	// Service telemetry
 	chainName, err := entity.ChainName(cfg.chainID)
@@ -233,9 +229,21 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating oracle telemetry: %w", err)
 	}
 
+	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
+	archiveWrap, _, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "oracle-price")
+	if err != nil {
+		return err
+	}
+	defer archiveDrain()
+
 	repo, err := postgres.NewOnchainPriceRepository(pool, logger, buildReg.BuildID(), 0)
 	if err != nil {
 		return fmt.Errorf("creating repository: %w", err)
+	}
+
+	referenceEffectiveAt, err := env.ReferenceEffectiveAt(time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("resolving reference effective time: %w", err)
 	}
 
 	service, err := oracle_price_worker.NewService(
@@ -247,17 +255,23 @@ func run(ctx context.Context, args []string) error {
 		cacheReader,
 		repo,
 		func(oracleType entity.OracleType) (outbound.Multicaller, error) {
-			if oracleType == entity.OracleTypeChronicle {
-				// Direct single eth_call path, not a multicall batch, so it intentionally carries no multicall.batch.size telemetry.
-				return multicall.NewDirectCaller(ethClient.Client())
+			if oracleType.RequiresDirectCall() {
+				// Direct path carries no multicall.batch.size telemetry by design.
+				direct, err := multicall.NewDirectCaller(ethClient.Client())
+				if err != nil {
+					return nil, err
+				}
+				return archiveWrap(direct), nil
 			}
-			return mc, nil
+			// mc is the telemetry-instrumented client built once at startup.
+			return archiveWrap(mc), nil
 		},
+		referenceEffectiveAt,
 	)
 	if err != nil {
 		return fmt.Errorf("creating service: %w", err)
 	}
 	service.WithTelemetry(oracleTelemetry)
 
-	return lifecycle.Run(ctx, logger, service)
+	return lifecycle.RunWithTimeoutGuard(ctx, logger, onShutdownTimeout, service)
 }

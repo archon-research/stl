@@ -11,13 +11,20 @@ dependencies = [
     "pydantic-settings",
     "python-dotenv",
     "httpx>=0.28.1",
-    "axis-synome==0.1.0.dev76",
+    "eth-hash[pycryptodome]>=0.8.0",
     "opentelemetry-sdk>=1.41.0,<2",
     "opentelemetry-instrumentation-fastapi>=0.62b0,<1",
     "opentelemetry-instrumentation-sqlalchemy>=0.62b0,<1",
     "opentelemetry-exporter-otlp>=1.41.0,<2",
     "pandas>=2.2.0",
+    "pyarrow>=18.0.0",
     "numpy",
+    "arch>=8.0.0",
+    "statsmodels>=0.14.6",
+    "scipy>=1.17.1",
+    "joblib>=1.5.3",
+    "tqdm>=4.67.3",
+    "temporalio>=1.31.0",
 ]
 
 [project.optional-dependencies]
@@ -35,18 +42,18 @@ asyncio_mode = "auto"
 
 [tool.ty.src]
 include = ["app", "tests", "scripts"]
-exclude = [".venv", "**/__pycache__", "app/static"]
+# app/risk_engine/core_model is BA's CORE model, kept as close as possible to
+# their upstream (github.com/TWave-code/core_model_copy; every deviation is
+# documented in the model README's "Changes from the original" table) so diffs
+# stay reviewable and upstream fixes port cleanly. It predates typing and is
+# deliberately excluded rather than annotated or ty:ignore'd in-file.
+# Integration code around it (adapters, services, cli) is fully checked.
+exclude = [".venv", "**/__pycache__", "app/static", "app/risk_engine/core_model"]
 
 [tool.uv]
 # Guard against supply chain attacks from fresh dependencies: ignore any release
 # uploaded within the last 7 days (rolling window).
 exclude-newer = "7 days"
-
-# First-party Archon packages are exempt from the freshness window so a freshly
-# published release can be consumed immediately. uv matches by exact package name
-# (no org/glob support), so list each first-party package here.
-[tool.uv.exclude-newer-package]
-axis-synome = "2100-01-01"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]

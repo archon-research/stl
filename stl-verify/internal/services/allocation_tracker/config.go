@@ -9,6 +9,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/axis_synome_contract"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
 type ProxyConfig struct {
@@ -26,11 +27,20 @@ type Config struct {
 	SweepEveryNBlocks int
 	ChainID           int64
 	Logger            *slog.Logger
+
+	// Metrics records one blocks_processed_total sample and one
+	// processing_duration_seconds observation per consumed block, so per-block
+	// liveness and latency stay observable through periods where no in-scope
+	// position is touched (the underlying-value-failures counter only moves on a
+	// data-quality hole, and the sweep only fires every SweepEveryNBlocks). This
+	// is the signal the VectorAllocationTracker{Stalled,ErrorRatioHigh,BlockLatencyHigh}
+	// alerts key on. Optional; nil disables it.
+	Metrics outbound.BackupMetricsRecorder
 }
 
 func ConfigDefaults() Config {
 	return Config{
-		MaxMessages:       10,
+		MaxMessages:       1,
 		PollInterval:      100 * time.Millisecond,
 		SweepEveryNBlocks: 75,
 		Logger:            slog.Default(),

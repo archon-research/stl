@@ -8,10 +8,10 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -24,6 +24,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -46,7 +47,6 @@ func init() {
 
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -55,25 +55,26 @@ func main() {
 		cancel()
 	}()
 
-	if err := run(ctx, os.Args[1:]); err != nil {
+	err := run(ctx, os.Args[1:], lifecycle.ForceExitAfter(lifecycle.ShutdownTailBudget))
+	cancel()
+	if err != nil {
 		slog.Error("prime-debt-indexer exited with error", "error", err)
 		os.Exit(1)
 	}
 }
 
-// maskRPCURL redacts the path (which typically contains API keys) from an RPC URL.
-// Example: "https://eth-mainnet.g.alchemy.com/v2/abc123" → "https://eth-mainnet.g.alchemy.com/***"
-func maskRPCURL(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return "***"
-	}
-	return fmt.Sprintf("%s://%s/***", u.Scheme, u.Host)
+type cliConfig struct {
+	dbURL             string
+	vatAddr           string
+	rpcURL            string
+	queueURL          string
+	sweepBlocks       int
+	visibilityTimeout int
+	waitTime          int
+	chainID           int64
 }
 
-// run is the entry point for the prime-debt-indexer.
-// It is extracted from main() to allow integration testing.
-func run(ctx context.Context, args []string) error {
+func parseConfig(args []string) (cliConfig, error) {
 	fs := flag.NewFlagSet("prime-debt-indexer", flag.ContinueOnError)
 	dbURL := fs.String("db", env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"), "PostgreSQL connection string")
 	vatAddr := fs.String("vat", env.Get("VAT_ADDRESS", "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"), "MCD Vat contract address")
@@ -83,45 +84,96 @@ func run(ctx context.Context, args []string) error {
 	visibilityTimeout := fs.Int("visibility-timeout", 300, "SQS visibility timeout in seconds")
 	waitTime := fs.Int("wait", 20, "SQS wait time in seconds (long polling)")
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("parse flags: %w", err)
+		return cliConfig{}, fmt.Errorf("parse flags: %w", err)
 	}
 
-	if *rpcURL == "" {
+	// Env vars are fallbacks only; an explicitly-set flag wins over its env var.
+	setFlags := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+
+	cfg := cliConfig{
+		dbURL:             *dbURL,
+		vatAddr:           *vatAddr,
+		rpcURL:            *rpcURL,
+		queueURL:          *queueURL,
+		sweepBlocks:       *sweepBlocks,
+		visibilityTimeout: *visibilityTimeout,
+		waitTime:          *waitTime,
+	}
+
+	if cfg.rpcURL == "" {
 		// Fallback: compose from legacy ALCHEMY_HTTP_URL + ALCHEMY_API_KEY env vars.
-		alchemyHTTPURL := env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
+		// Requiring the key mirrors psm3-indexer's guard on the same fallback; an
+		// empty key yields a URL ending in "/" that dials fine and then 401s on
+		// every call, which is indistinguishable from an RPC outage.
 		alchemyAPIKey := env.Get("ALCHEMY_API_KEY", "")
-		*rpcURL = fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey)
+		if alchemyAPIKey == "" {
+			return cliConfig{}, fmt.Errorf("no RPC endpoint (use -rpc flag or ETH_RPC_URL env var, or set ALCHEMY_API_KEY)")
+		}
+		// Trim a trailing slash so a configured ALCHEMY_HTTP_URL ending in "/" does
+		// not produce a "//" before the API key.
+		alchemyHTTPURL := strings.TrimRight(env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2"), "/")
+		cfg.rpcURL = fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey)
 	}
 
-	if *queueURL == "" {
-		return fmt.Errorf("queue URL not provided (use -queue flag or AWS_SQS_QUEUE_URL env var)")
+	if cfg.queueURL == "" {
+		return cliConfig{}, fmt.Errorf("queue URL not provided (use -queue flag or AWS_SQS_QUEUE_URL env var)")
+	}
+
+	// Validated here rather than at the call site so a typo fails before any
+	// AWS/Postgres/OTEL/RPC dial rather than after.
+	if !common.IsHexAddress(cfg.vatAddr) {
+		return cliConfig{}, fmt.Errorf("invalid vat address: %q", cfg.vatAddr)
 	}
 
 	chainIDStr := env.Get("CHAIN_ID", "1")
 	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
 	if err != nil {
-		return fmt.Errorf("parsing CHAIN_ID %q: %w", chainIDStr, err)
+		return cliConfig{}, fmt.Errorf("parsing CHAIN_ID %q: %w", chainIDStr, err)
 	}
+	cfg.chainID = chainID
 
-	if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" {
+	if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" && !setFlags["wait"] {
 		v, err := strconv.Atoi(waitTimeStr)
 		if err != nil {
-			return fmt.Errorf("parsing SQS_WAIT_TIME %q: %w", waitTimeStr, err)
+			return cliConfig{}, fmt.Errorf("parsing SQS_WAIT_TIME %q: %w", waitTimeStr, err)
 		}
-		*waitTime = v
+		cfg.waitTime = v
 	}
-	if visTimeStr := env.Get("SQS_VISIBILITY_TIMEOUT", ""); visTimeStr != "" {
+	if visTimeStr := env.Get("SQS_VISIBILITY_TIMEOUT", ""); visTimeStr != "" && !setFlags["visibility-timeout"] {
 		v, err := strconv.Atoi(visTimeStr)
 		if err != nil {
-			return fmt.Errorf("parsing SQS_VISIBILITY_TIMEOUT %q: %w", visTimeStr, err)
+			return cliConfig{}, fmt.Errorf("parsing SQS_VISIBILITY_TIMEOUT %q: %w", visTimeStr, err)
 		}
-		*visibilityTimeout = v
+		cfg.visibilityTimeout = v
+	}
+
+	return cfg, nil
+}
+
+// run is the entry point for the prime-debt-indexer.
+// It is extracted from main() to allow integration testing.
+func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
+	cfg, err := parseConfig(args)
+	if err != nil {
+		return err
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: env.ParseLogLevel(slog.LevelInfo),
 	}))
 	slog.SetDefault(logger)
+
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    "prime-debt-indexer",
+		ServiceVersion: buildinfo.GitHash(),
+		BuildTime:      BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("init telemetry: %w", err)
+	}
+	defer shutdownOTEL(context.Background())
 
 	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{
 		StaticCredentialsFromEnv: true,
@@ -132,9 +184,9 @@ func run(ctx context.Context, args []string) error {
 
 	// SQS
 	sqsConsumer, err := sqsAdapter.NewConsumer(awsCfg, sqsAdapter.Config{
-		QueueURL:          *queueURL,
-		WaitTimeSeconds:   int32(*waitTime),
-		VisibilityTimeout: int32(*visibilityTimeout),
+		QueueURL:          cfg.queueURL,
+		WaitTimeSeconds:   int32(cfg.waitTime),
+		VisibilityTimeout: int32(cfg.visibilityTimeout),
 		BaseEndpoint:      env.Get("AWS_SQS_ENDPOINT", ""),
 	}, logger)
 	if err != nil {
@@ -143,7 +195,7 @@ func run(ctx context.Context, args []string) error {
 	defer sqsConsumer.Close()
 
 	// PostgreSQL
-	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(*dbURL))
+	pool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(cfg.dbURL))
 	if err != nil {
 		return fmt.Errorf("database: %w", err)
 	}
@@ -159,31 +211,19 @@ func run(ctx context.Context, args []string) error {
 		"commit", buildReg.GitHash(),
 		"branch", GitBranch,
 		"buildTime", BuildTime,
-		"chainID", chainID,
+		"chainID", cfg.chainID,
 	)
 
-	// OpenTelemetry
-	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    "prime-debt-indexer",
-		ServiceVersion: buildReg.GitHash(),
-		BuildTime:      BuildTime,
-		Logger:         logger,
-	})
-	if err != nil {
-		return fmt.Errorf("init telemetry: %w", err)
-	}
-	defer shutdownOTEL(context.Background())
-
 	// Ethereum JSON-RPC client
-	ethClient, err := rpchttp.DialEthereum(ctx, *rpcURL)
+	ethClient, err := rpchttp.DialEthereum(ctx, cfg.rpcURL)
 	if err != nil {
 		return fmt.Errorf("eth rpc dial: %w", err)
 	}
 	defer ethClient.Close()
-	logger.Info("eth rpc client connected", "rpc", maskRPCURL(*rpcURL))
+	logger.Info("eth rpc client connected", "rpc", rpchttp.MaskURL(cfg.rpcURL))
 
 	// Multicaller
-	chainName, err := entity.ChainName(chainID)
+	chainName, err := entity.ChainName(cfg.chainID)
 	if err != nil {
 		return fmt.Errorf("resolving chain name: %w", err)
 	}
@@ -196,15 +236,20 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("multicall client: %w", err)
 	}
 
-	// Vat caller (backed by multicall)
-	if !common.IsHexAddress(*vatAddr) {
-		return fmt.Errorf("invalid vat address: %q", *vatAddr)
+	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
+	archiveWrap, _, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "prime-debt")
+	if err != nil {
+		return err
 	}
-	vatCaller, err := vatAdapter.NewVatCaller(mc, common.HexToAddress(*vatAddr))
+	defer archiveDrain()
+	mc = archiveWrap(mc)
+
+	// Vat caller (backed by multicall)
+	vatCaller, err := vatAdapter.NewVatCaller(mc, common.HexToAddress(cfg.vatAddr))
 	if err != nil {
 		return fmt.Errorf("vat caller: %w", err)
 	}
-	logger.Info("vat caller configured", "vatAddress", *vatAddr)
+	logger.Info("vat caller configured", "vatAddress", cfg.vatAddr)
 
 	// Prime debt repository
 	txm, err := postgres.NewTxManager(pool, logger)
@@ -216,9 +261,9 @@ func run(ctx context.Context, args []string) error {
 	// Vault debt service
 	svc, err := prime_debt.NewVaultDebtService(
 		prime_debt.Config{
-			SweepEveryNBlocks: *sweepBlocks,
-			ChainID:           chainID,
-			MaxMessages:       10,
+			SweepEveryNBlocks: cfg.sweepBlocks,
+			ChainID:           cfg.chainID,
+			MaxMessages:       1,
 			PollInterval:      100 * time.Millisecond,
 			Logger:            logger,
 		},
@@ -232,9 +277,9 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	logger.Info("starting prime debt indexer...",
-		"sweepEveryNBlocks", *sweepBlocks,
-		"chainID", chainID,
+		"sweepEveryNBlocks", cfg.sweepBlocks,
+		"chainID", cfg.chainID,
 	)
 
-	return lifecycle.Run(ctx, logger, svc)
+	return lifecycle.RunWithTimeoutGuard(ctx, logger, onShutdownTimeout, svc)
 }

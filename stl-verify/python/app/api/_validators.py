@@ -23,8 +23,8 @@ All endpoints follow these semantics for identifier handling:
   result is a valid answer to a filter query.
 
 Use :data:`EthAddressParam` and :data:`TxHashParam` for required fields
-and :data:`OptionalEthAddressParam` for optional query filters so
-malformed-ID rejection is uniform across the API.
+and :data:`OptionalEthAddressParam` / :data:`OptionalTxHashParam` for
+optional query filters so malformed-ID rejection is uniform across the API.
 """
 
 import re
@@ -77,14 +77,60 @@ def _validate_tx_hash(value: str) -> str:
     return value
 
 
+def _validate_optional_tx_hash(value: str | None) -> str | None:
+    """Validate an optional transaction hash; ``None`` passes through unchanged."""
+    if value is None:
+        return None
+    return _validate_tx_hash(value)
+
+
 EthAddressParam = Annotated[str, AfterValidator(_validate_eth_address)]
 """Use as the type for any path/query/body field that holds an EVM address."""
+
+ProxyAddressPathParam = Annotated[
+    str,
+    AfterValidator(_validate_eth_address),
+    Path(
+        description=(
+            "A prime's 0x-prefixed ALM **proxy** address on one chain — not a prime "
+            "identifier. A prime allocates through one proxy per chain; list them via "
+            "`GET /v1/primes` and group by `prime_vault_address`."
+        )
+    ),
+]
+"""Path-param type for the ``{prime_id}`` segment, which accepts a proxy address.
+
+The segment cannot be renamed without breaking every generated client, so the
+description carries the correction instead. Endpoints that resolve the prime and
+so accept either identity use ``PrimeOrProxyAddressPathParam``.
+"""
+
+PrimeOrProxyAddressPathParam = Annotated[
+    str,
+    AfterValidator(_validate_eth_address),
+    Path(
+        description=(
+            "Either a prime's 0x-prefixed vault address or any of its ALM **proxy** addresses — "
+            "this endpoint resolves both to the same prime. List the proxies via `GET /v1/primes`; "
+            "the vault address is their shared `prime_vault_address`."
+        )
+    ),
+]
+"""Path-param type for a ``{prime_id}`` segment that resolves either identity.
+
+Validation is identical to ``ProxyAddressPathParam``; only the published
+description differs, so an endpoint matching on the prime rather than the proxy
+does not advertise the narrower contract.
+"""
 
 OptionalEthAddressParam = Annotated[str | None, AfterValidator(_validate_optional_eth_address)]
 """Use as the type for optional query filters that hold an EVM address."""
 
 TxHashParam = Annotated[str, AfterValidator(_validate_tx_hash)]
 """Use as the type for any path/query/body field that holds a transaction hash."""
+
+OptionalTxHashParam = Annotated[str | None, AfterValidator(_validate_optional_tx_hash)]
+"""Use as the type for optional query filters that hold a transaction hash."""
 
 
 ChainIdPath = Annotated[

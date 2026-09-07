@@ -4,6 +4,7 @@ from app.api._validators import (
     TX_HASH_PATTERN,
     _validate_eth_address,
     _validate_optional_eth_address,
+    _validate_optional_tx_hash,
     _validate_tx_hash,
 )
 
@@ -78,3 +79,22 @@ def test_validate_optional_eth_address_accepts_valid_address():
 def test_validate_optional_eth_address_rejects_malformed_address():
     with pytest.raises(ValueError, match="Invalid Ethereum address"):
         _validate_optional_eth_address("0xdeadbeef")
+
+
+def test_validate_optional_tx_hash_passes_through_none():
+    assert _validate_optional_tx_hash(None) is None
+
+
+def test_validate_optional_tx_hash_accepts_valid_hash():
+    value = "0x" + "ab" * 32
+
+    assert _validate_optional_tx_hash(value) == value
+
+
+def test_validate_optional_tx_hash_canonicalizes_uppercase_prefix():
+    assert _validate_optional_tx_hash("0X" + "AB" * 32) == "0x" + "AB" * 32
+
+
+def test_validate_optional_tx_hash_rejects_malformed_value():
+    with pytest.raises(ValueError, match="Invalid transaction hash format"):
+        _validate_optional_tx_hash("0xdeadbeef")

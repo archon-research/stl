@@ -69,7 +69,7 @@ make cover
 ### Run CI Checks
 
 ```bash
-# Run full CI suite (tests, vet, format check, staticcheck, vulncheck, golangci-lint)
+# Run full CI suite (tests, fmt/imports/tidy checks, golangci-lint incl. vet/staticcheck/modernize, vulncheck)
 make ci
 ```
 

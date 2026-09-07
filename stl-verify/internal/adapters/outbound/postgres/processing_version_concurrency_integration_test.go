@@ -3,8 +3,8 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -27,7 +27,7 @@ import (
 // function, this race silently drops the loser via ON CONFLICT DO NOTHING.
 // Regression test for VEC-194 (ADR-0002 §3 gap).
 
-const concurrencySchemaName = "test_pv_concurrency"
+const concurrencyDBName = "test_pv_concurrency"
 
 // concurrencyPool is opened per-test (not at package setup) so it doesn't
 // hold idle connections that would starve the rest of the integration suite —
@@ -37,28 +37,30 @@ const concurrencySchemaName = "test_pv_concurrency"
 var concurrencyPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(concurrencySchemaName, func() {
-		// SetupSchemaForMain creates the schema and runs migrations. We
-		// throw away the pool it returns — we'll mint a small short-lived
-		// pool inside each test. Schema and migrations persist across pools.
-		testutil.SetupSchemaForMain(sharedDSN, concurrencySchemaName).Close()
+	registerTestFileSetup(func() {
+		// The pool it returns is thrown away: each test mints its own small
+		// short-lived one. The database outlives them all.
+		testutil.SetupDBForMain(sharedDSN, concurrencyDBName).Close()
 	}, func() {
-		// Reopen a tiny pool just for the cleanup so CleanupSchemaForMain
-		// has something to close.
+		// Reopen a tiny pool just for the cleanup so CleanupDBForMain has
+		// something to close.
 		concurrencyPool = openConcurrencyPool()
-		testutil.CleanupSchemaForMain(sharedDSN, concurrencyPool, concurrencySchemaName)
+		testutil.CleanupDBForMain(sharedDSN, concurrencyPool, concurrencyDBName)
 	})
 }
 
 // openConcurrencyPool mints a small, short-lived pool against the
-// concurrency-test schema. Caller is responsible for closing it.
+// concurrency-test database. Caller is responsible for closing it.
 func openConcurrencyPool() *pgxpool.Pool {
-	separator := "?"
-	if strings.Contains(sharedDSN, "?") {
-		separator = "&"
+	// Through the config, not a "&pool_max_conns=2" on the DSN: that assumes the
+	// base DSN already carries a query string, and appends to the path when it does not.
+	cfg, err := pgxpool.ParseConfig(testutil.DatabaseDSN(sharedDSN, concurrencyDBName))
+	if err != nil {
+		panic(fmt.Sprintf("parse concurrency DSN: %v", err))
 	}
-	dsn := fmt.Sprintf("%s%ssearch_path=%s,public&pool_max_conns=2", sharedDSN, separator, concurrencySchemaName)
-	pool, err := pgxpool.New(context.Background(), dsn)
+	cfg.MaxConns = 2
+
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
 		panic(fmt.Sprintf("connect concurrency pool: %v", err))
 	}
@@ -78,21 +80,22 @@ func withConcurrencyPool(t *testing.T) {
 
 func truncateForConcurrency(t *testing.T, ctx context.Context) {
 	t.Helper()
-	tables := []string{
-		`morpho_market_state`,
-		`morpho_market_position`,
-		`morpho_market`,
-	}
+	truncateRegistries(t, ctx, `morpho_market_state`, `morpho_market_position`, `morpho_market`)
+}
+
+// truncateRegistries empties the named tables in order and then the protocol/token
+// registries every seeder in this file resolves its FKs against.
+func truncateRegistries(t *testing.T, ctx context.Context, tables ...string) {
+	t.Helper()
 	for _, table := range tables {
 		if _, err := concurrencyPool.Exec(ctx, `DELETE FROM `+table); err != nil {
 			t.Fatalf("truncate %s: %v", table, err)
 		}
 	}
-	if _, err := concurrencyPool.Exec(ctx, `TRUNCATE protocol CASCADE`); err != nil {
-		t.Fatalf("truncate protocol: %v", err)
-	}
-	if _, err := concurrencyPool.Exec(ctx, `TRUNCATE token CASCADE`); err != nil {
-		t.Fatalf("truncate token: %v", err)
+	for _, registry := range []string{`protocol`, `token`} {
+		if _, err := concurrencyPool.Exec(ctx, `TRUNCATE `+registry+` CASCADE`); err != nil {
+			t.Fatalf("truncate %s: %v", registry, err)
+		}
 	}
 }
 
@@ -485,6 +488,221 @@ func TestProcessingVersionTrigger_CrossBuildRace_PrimeDebt(t *testing.T) {
 	}
 }
 
+// TestProcessingVersionTrigger_CrossBuildRace_MorphoAdapterStateCompressed exercises the
+// shape the other three cannot: the INSERT decides the version (through
+// next_processing_version_morpho_adapter_state, see 20260821_120000), which moves the read
+// the advisory lock protects and so needs the race proven again at the new call site —
+// against an already-compressed chunk, where a mis-timed read costs either a lost
+// correction or a duplicate no unique index reaches.
+func TestProcessingVersionTrigger_CrossBuildRace_MorphoAdapterStateCompressed(t *testing.T) {
+	withConcurrencyPool(t)
+	ctx := context.Background()
+	truncateAdapterStateForConcurrency(t, ctx)
+	key := seedMorphoAdapterKey(t, ctx)
+
+	insertAdapterState(t, ctx, key, 0)
+	compressChunks(t, ctx, concurrencyPool, "morpho_adapter_state")
+
+	errs := raceAdapterStateBuilds(t, ctx, key)
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("worker %d: %v", i, err)
+		}
+	}
+
+	versions := collectAdapterStateVersions(t, ctx, key)
+	if want := []int{0, 1, 2}; !slices.Equal(versions, want) {
+		t.Fatalf("processing_version assignment incorrect: got %v, want %v — both builds must append their own version alongside the compressed one", versions, want)
+	}
+}
+
+// morphoAdapterKey is the natural key the adapter-state race inserts under.
+type morphoAdapterKey struct {
+	adapterID    int64
+	blockNumber  int64
+	blockVersion int
+	timestamp    time.Time
+}
+
+// seedMorphoAdapterKey seeds the protocol/token/vault/adapter rows morpho_adapter_state
+// FKs and returns the position the race writes to.
+func seedMorphoAdapterKey(t *testing.T, ctx context.Context) morphoAdapterKey {
+	t.Helper()
+
+	var protocolID int64
+	if err := concurrencyPool.QueryRow(ctx,
+		`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at, metadata)
+		 VALUES (1, '\xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb'::bytea, 'Morpho Blue', 'lending', 18883124, NOW(), '{}'::jsonb)
+		 RETURNING id`).Scan(&protocolID); err != nil {
+		t.Fatalf("seed protocol: %v", err)
+	}
+
+	var tokenID int64
+	if err := concurrencyPool.QueryRow(ctx,
+		`INSERT INTO token (chain_id, address, symbol, decimals) VALUES (1, $1, 'USDC', 6) RETURNING id`,
+		bytes.Repeat([]byte{0xc1}, 20)).Scan(&tokenID); err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+
+	var vaultID int64
+	if err := concurrencyPool.QueryRow(ctx,
+		`INSERT INTO morpho_vault (chain_id, protocol_id, address, asset_token_id, vault_version, created_at_block)
+		 VALUES (1, $1, $2, $3, 2, 18883124) RETURNING id`,
+		protocolID, bytes.Repeat([]byte{0xc2}, 20), tokenID).Scan(&vaultID); err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+
+	var adapterID int64
+	if err := concurrencyPool.QueryRow(ctx,
+		`INSERT INTO morpho_adapter (morpho_vault_id, address, asset_token_id) VALUES ($1, $2, $3) RETURNING id`,
+		vaultID, bytes.Repeat([]byte{0xc3}, 20), tokenID).Scan(&adapterID); err != nil {
+		t.Fatalf("seed adapter: %v", err)
+	}
+
+	return morphoAdapterKey{
+		adapterID:    adapterID,
+		blockNumber:  24_500_000,
+		blockVersion: 0,
+		timestamp:    time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
+	}
+}
+
+// insertAdapterState writes the position's row for one build, the way the repository does.
+func insertAdapterState(t *testing.T, ctx context.Context, key morphoAdapterKey, buildID int) {
+	t.Helper()
+	if _, err := concurrencyPool.Exec(ctx,
+		`INSERT INTO morpho_adapter_state (morpho_adapter_id, block_number, block_version, timestamp, real_assets, processing_version, build_id)
+		 VALUES ($1, $2, $3, $4, 0, next_processing_version_morpho_adapter_state($1, $2, $3, $4, $5), $5)
+		 ON CONFLICT (morpho_adapter_id, block_number, block_version, timestamp, processing_version) DO NOTHING`,
+		key.adapterID, key.blockNumber, key.blockVersion, key.timestamp, buildID); err != nil {
+		t.Fatalf("seed the position's first row: %v", err)
+	}
+}
+
+// raceAdapterStateBuilds fires the repository's adapter-state INSERT from two builds at
+// once against the same position.
+func raceAdapterStateBuilds(t *testing.T, ctx context.Context, key morphoAdapterKey) [2]error {
+	t.Helper()
+	return runRace(t, ctx, func(ctx context.Context, tx pgx.Tx, buildID int) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO morpho_adapter_state (morpho_adapter_id, block_number, block_version, timestamp, real_assets, processing_version, build_id)
+			 VALUES ($1, $2, $3, $4, 0, next_processing_version_morpho_adapter_state($1, $2, $3, $4, $5), $5)
+			 ON CONFLICT (morpho_adapter_id, block_number, block_version, timestamp, processing_version) DO NOTHING`,
+			key.adapterID, key.blockNumber, key.blockVersion, key.timestamp, buildID)
+		return err
+	})
+}
+
+func collectAdapterStateVersions(t *testing.T, ctx context.Context, key morphoAdapterKey) []int {
+	t.Helper()
+	rows, err := concurrencyPool.Query(ctx,
+		`SELECT processing_version FROM morpho_adapter_state
+		 WHERE morpho_adapter_id = $1 AND block_number = $2 AND block_version = $3 AND timestamp = $4
+		 ORDER BY processing_version`,
+		key.adapterID, key.blockNumber, key.blockVersion, key.timestamp)
+	if err != nil {
+		t.Fatalf("query versions: %v", err)
+	}
+	defer rows.Close()
+	var versions []int
+	for rows.Next() {
+		var v int
+		if err := rows.Scan(&v); err != nil {
+			t.Fatalf("scan version: %v", err)
+		}
+		versions = append(versions, v)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iter versions: %v", err)
+	}
+	return versions
+}
+
+// The state chunks are dropped, not emptied: a DELETE would leave a columnstored chunk
+// behind for whichever test runs next.
+func truncateAdapterStateForConcurrency(t *testing.T, ctx context.Context) {
+	t.Helper()
+	if _, err := concurrencyPool.Exec(ctx,
+		`SELECT drop_chunks('morpho_adapter_state', older_than => now() + interval '1000 years')`); err != nil {
+		t.Fatalf("drop morpho_adapter_state chunks: %v", err)
+	}
+	truncateRegistries(t, ctx, `morpho_adapter`, `morpho_vault`)
+}
+
+// The adapter-state race has its own negative control, because its lock has moved: the
+// trigger-body swap below cannot reach it, the helper the INSERT calls holds it. Stripped
+// of that lock, both builds compute the same version, one insert is swallowed by
+// ON CONFLICT DO NOTHING, and the compressed row is left with a single correction instead
+// of two — the same lost row the sibling control observes, one call site along.
+func TestProcessingVersionTrigger_NegativeControl_LocklessAdapterStateHelper(t *testing.T) {
+	withConcurrencyPool(t)
+	ctx := context.Background()
+
+	swapInLocklessAdapterStateHelper(t, ctx)
+
+	const attempts = 5
+	for attempt := range attempts {
+		truncateAdapterStateForConcurrency(t, ctx)
+		key := seedMorphoAdapterKey(t, ctx)
+		insertAdapterState(t, ctx, key, 0)
+		compressChunks(t, ctx, concurrencyPool, "morpho_adapter_state")
+
+		errs := raceAdapterStateBuilds(t, ctx, key)
+		for i, err := range errs {
+			if err != nil && !testutil.IsUniqueViolation(err) {
+				t.Fatalf("attempt %d, worker %d: unexpected error: %v", attempt, i, err)
+			}
+		}
+		if len(collectAdapterStateVersions(t, ctx, key)) < 3 {
+			return // race observed: a correction was lost without the lock
+		}
+	}
+
+	t.Fatalf("negative control failed to observe a lost row in %d attempts — the race test is not actually exercising the helper's lock", attempts)
+}
+
+// swapInLocklessAdapterStateHelper replaces next_processing_version_morpho_adapter_state
+// with a variant that keeps the rule but drops the advisory lock, and sleeps between the
+// read and the caller's insert to widen the window. Restore failure is fatal: leaking the
+// lockless variant into a sibling test would silently invalidate it.
+func swapInLocklessAdapterStateHelper(t *testing.T, ctx context.Context) {
+	t.Helper()
+
+	var originalDDL string
+	if err := concurrencyPool.QueryRow(ctx,
+		`SELECT pg_get_functiondef(oid) FROM pg_proc
+		 WHERE proname = 'next_processing_version_morpho_adapter_state'`).Scan(&originalDDL); err != nil {
+		t.Fatalf("capture the version helper's ddl: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := concurrencyPool.Exec(context.Background(), originalDDL); err != nil {
+			t.Fatalf("restore the version helper: %v — sibling tests would otherwise see the lockless variant", err)
+		}
+	})
+
+	if _, err := concurrencyPool.Exec(ctx, `
+		CREATE OR REPLACE FUNCTION next_processing_version_morpho_adapter_state(
+		    p_adapter_id BIGINT, p_block_number BIGINT, p_block_version INT,
+		    p_timestamp TIMESTAMPTZ, p_build_id INT)
+		RETURNS INT VOLATILE SET plan_cache_mode = 'force_custom_plan' AS $lockless$
+		DECLARE existing_ver INT; max_ver INT;
+		BEGIN
+		    SELECT processing_version INTO existing_ver FROM morpho_adapter_state
+		     WHERE morpho_adapter_id = p_adapter_id AND block_number = p_block_number
+		       AND block_version = p_block_version AND timestamp = p_timestamp
+		       AND build_id = p_build_id LIMIT 1;
+		    IF FOUND THEN RETURN existing_ver; END IF;
+		    SELECT COALESCE(MAX(processing_version), -1) INTO max_ver FROM morpho_adapter_state
+		     WHERE morpho_adapter_id = p_adapter_id AND block_number = p_block_number
+		       AND block_version = p_block_version AND timestamp = p_timestamp;
+		    PERFORM pg_sleep(0.1);
+		    RETURN max_ver + 1;
+		END;
+		$lockless$ LANGUAGE plpgsql`); err != nil {
+		t.Fatalf("install the lockless version helper: %v", err)
+	}
+}
+
 // TestProcessingVersionTrigger_NegativeControl_LocklessFunction verifies the
 // race test above is genuinely exercising the lock by re-running it after
 // stripping the advisory lock from the trigger function. Without the lock,
@@ -512,7 +730,7 @@ func TestProcessingVersionTrigger_NegativeControl_LocklessFunction(t *testing.T)
 
 		versions, errs := runMorphoMarketStateRace(t, ctx, key)
 		for i, err := range errs {
-			if err != nil && !isUniqueViolation(err) {
+			if err != nil && !testutil.IsUniqueViolation(err) {
 				t.Fatalf("attempt %d, worker %d: unexpected error: %v", attempt, i, err)
 			}
 		}
@@ -538,10 +756,15 @@ func TestProcessingVersionTrigger_NegativeControl_LocklessFunction(t *testing.T)
 func swapInLocklessTrigger(t *testing.T, ctx context.Context, table string) {
 	t.Helper()
 
+	// Target the processing_version trigger explicitly. These raw tables also
+	// carry the transformation layer's AFTER INSERT enqueue trigger
+	// (transformed._enqueue_<t>), so an unfiltered LIMIT 1 could swap the wrong
+	// trigger and leave the lock under test in place.
 	var originalDDL string
 	if err := concurrencyPool.QueryRow(ctx, `
 		SELECT pg_get_functiondef(tgfoid) FROM pg_trigger
 		WHERE tgrelid = $1::regclass AND NOT tgisinternal
+		  AND tgname = 'trigger_assign_processing_version'
 		LIMIT 1`, table).Scan(&originalDDL); err != nil {
 		t.Fatalf("capture original trigger function ddl for %s: %v", table, err)
 	}
@@ -564,6 +787,7 @@ func swapInLocklessTrigger(t *testing.T, ctx context.Context, table string) {
 		SELECT prosrc FROM pg_proc
 		WHERE oid = (SELECT tgfoid FROM pg_trigger
 		             WHERE tgrelid = $1::regclass AND NOT tgisinternal
+		               AND tgname = 'trigger_assign_processing_version'
 		             LIMIT 1)`, table).Scan(&src); err != nil {
 		t.Fatalf("read trigger function source for %s: %v", table, err)
 	}
@@ -630,19 +854,133 @@ func naturalKeyWhere(table string) string {
 	}
 }
 
-// isUniqueViolation reports whether err is a Postgres unique constraint
-// violation. Avoids importing pgconn just to type-assert one error code.
-func isUniqueViolation(err error) bool {
-	if err == nil {
-		return false
+// mapleLoanStateKey identifies a single (maple_loan_id, synced_at) tuple that
+// the maple_loan_state race test inserts under.
+type mapleLoanStateKey struct {
+	mapleLoanID int64
+	syncedAt    time.Time
+}
+
+func truncateMapleForConcurrency(t *testing.T, ctx context.Context) {
+	t.Helper()
+	for _, table := range []string{"maple_loan_state", "maple_loan", "maple_pool"} {
+		if _, err := concurrencyPool.Exec(ctx, `DELETE FROM `+table); err != nil {
+			t.Fatalf("truncate %s: %v", table, err)
+		}
 	}
-	type sqlStateProvider interface {
-		SQLState() string
+}
+
+func seedMapleLoanStateKey(t *testing.T, ctx context.Context) mapleLoanStateKey {
+	t.Helper()
+
+	// Upsert rather than rely on the migration-seeded row: the morpho race
+	// tests in this file TRUNCATE protocol CASCADE, so the seed row may be
+	// gone by the time this test runs. Values mirror
+	// 20260610_120000_create_maple_graphql_tables.sql.
+	var protocolID int64
+	if err := concurrencyPool.QueryRow(ctx,
+		`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at, metadata)
+		 VALUES (1, '\x804a6F5F667170F545Bf14e5DDB48C70B788390C'::bytea, 'maple', 'lending', 11964925, NOW(), '{}'::jsonb)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET name = EXCLUDED.name
+		 RETURNING id`).Scan(&protocolID); err != nil {
+		t.Fatalf("seed maple protocol: %v", err)
 	}
-	var p sqlStateProvider
-	if errors.As(err, &p) {
-		return p.SQLState() == "23505"
+
+	var userID int64
+	if err := concurrencyPool.QueryRow(ctx,
+		`INSERT INTO "user" (chain_id, address, created_at, updated_at, metadata)
+		 VALUES (1, '\x5511111111111111111111111111111111111155'::bytea, NOW(), NOW(), '{}'::jsonb)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET id = "user".id
+		 RETURNING id`).Scan(&userID); err != nil {
+		t.Fatalf("seed borrower user: %v", err)
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "23505") || strings.Contains(msg, "unique constraint")
+
+	var assetTokenID int64
+	if err := concurrencyPool.QueryRow(ctx,
+		`INSERT INTO token (chain_id, address, symbol, decimals, metadata, updated_at)
+		 VALUES (1, '\x8844444444444444444444444444444444444488'::bytea, 'USDC', 6, '{}'::jsonb, NOW())
+		 ON CONFLICT (chain_id, address) DO UPDATE SET id = token.id
+		 RETURNING id`).Scan(&assetTokenID); err != nil {
+		t.Fatalf("seed asset token: %v", err)
+	}
+
+	var poolID int64
+	if err := concurrencyPool.QueryRow(ctx,
+		`INSERT INTO maple_pool (chain_id, protocol_id, address, asset_token_id)
+		 VALUES (1, $1, '\x6622222222222222222222222222222222222266'::bytea, $2)
+		 RETURNING id`, protocolID, assetTokenID).Scan(&poolID); err != nil {
+		t.Fatalf("seed maple pool: %v", err)
+	}
+
+	var loanID int64
+	if err := concurrencyPool.QueryRow(ctx,
+		`INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id)
+		 VALUES (1, $1, '\x7733333333333333333333333333333333333377'::bytea, $2, $3)
+		 RETURNING id`, protocolID, poolID, userID).Scan(&loanID); err != nil {
+		t.Fatalf("seed maple loan: %v", err)
+	}
+
+	return mapleLoanStateKey{
+		mapleLoanID: loanID,
+		syncedAt:    time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC),
+	}
+}
+
+func runMapleLoanStateRace(t *testing.T, ctx context.Context, key mapleLoanStateKey) (versions []int, errs [2]error) {
+	t.Helper()
+	errs = runRace(t, ctx, func(ctx context.Context, tx pgx.Tx, buildID int) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO maple_loan_state (maple_loan_id, synced_at, state, principal_owed, acm_ratio, build_id)
+			 VALUES ($1, $2, 'Active', 100, 1000000, $3)
+			 ON CONFLICT (maple_loan_id, synced_at, processing_version) DO NOTHING`,
+			key.mapleLoanID, key.syncedAt, buildID,
+		)
+		return err
+	})
+
+	rows, err := concurrencyPool.Query(ctx,
+		`SELECT processing_version FROM maple_loan_state
+		 WHERE maple_loan_id = $1 AND synced_at = $2
+		 ORDER BY processing_version`,
+		key.mapleLoanID, key.syncedAt,
+	)
+	if err != nil {
+		t.Fatalf("query versions: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var v int
+		if err := rows.Scan(&v); err != nil {
+			t.Fatalf("scan version: %v", err)
+		}
+		versions = append(versions, v)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iter versions: %v", err)
+	}
+	return versions, errs
+}
+
+// TestProcessingVersionTrigger_CrossBuildRace_MapleLoanState exercises the
+// maple snapshot trigger shape: natural key (maple_loan_id, synced_at) with
+// the lock key timestamp normalised via EXTRACT(epoch FROM ...). Same race
+// semantics as the morpho test; covers the 5 maple triggers added in
+// 20260610_120000_create_maple_graphql_tables.sql (they share one template;
+// maple_loan_state is the highest-volume representative).
+func TestProcessingVersionTrigger_CrossBuildRace_MapleLoanState(t *testing.T) {
+	withConcurrencyPool(t)
+	ctx := context.Background()
+	truncateMapleForConcurrency(t, ctx)
+	key := seedMapleLoanStateKey(t, ctx)
+
+	versions, errs := runMapleLoanStateRace(t, ctx, key)
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("worker %d: %v", i, err)
+		}
+	}
+	if want := []int{0, 1}; !slices.Equal(versions, want) {
+		t.Fatalf("processing_version assignment incorrect: got %v, want %v — both rows must survive with distinct versions", versions, want)
+	}
 }

@@ -95,6 +95,11 @@ Non-USD feeds are converted to USD using reference feeds:
 
 ### CoinGecko
 
+To load **historical** prices for any of these assets, see
+[backfilling-offchain-prices.md](backfilling-offchain-prices.md) — a hand-triggered
+Temporal job takes the date range as input. The 5-minute `offchain-price-indexer`
+cronjob covers current prices.
+
 - **Base URL**: `https://pro-api.coingecko.com/api/v3`
 - **Rate Limit**: 450 req/min (of 500 max)
 - **Timeout**: 30s, exponential backoff (max 3 retries)

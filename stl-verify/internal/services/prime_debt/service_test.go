@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -40,10 +41,11 @@ func (f *fakeBlockQuerier) BlockNumber(_ context.Context) (uint64, error) {
 
 // fakeSQSConsumer is a controllable in-memory SQS consumer for unit tests.
 type fakeSQSConsumer struct {
-	mu       sync.Mutex
-	messages []outbound.SQSMessage
-	served   int
-	deleted  []string
+	mu                sync.Mutex
+	messages          []outbound.SQSMessage
+	served            int
+	deleted           []string
+	visibilityTimeout time.Duration
 }
 
 func newFakeSQSConsumer(events []outbound.BlockEvent) *fakeSQSConsumer {
@@ -81,6 +83,17 @@ func (f *fakeSQSConsumer) DeleteMessage(_ context.Context, receiptHandle string)
 	return nil
 }
 
+func (f *fakeSQSConsumer) ChangeMessageVisibilityBatch(context.Context, []string, time.Duration) (map[string]error, error) {
+	return nil, nil
+}
+
+func (f *fakeSQSConsumer) VisibilityTimeout() time.Duration {
+	if f.visibilityTimeout > 0 {
+		return f.visibilityTimeout
+	}
+	return 300 * time.Second
+}
+
 func (f *fakeSQSConsumer) Close() error {
 	return nil
 }
@@ -109,6 +122,10 @@ type fakeVatCaller struct {
 	debtRevertedByVault map[common.Address]bool // if true, ReadDebts marks Reverted on this vault
 	readDebtsErr        error                   // if set, ReadDebts returns this error (whole batch fails)
 	truncateResults     int                     // if > 0, return only this many results (to test short result handling)
+
+	// readHashes records the block hash ReadDebts was pinned to on each call,
+	// so tests can assert the service threads event.BlockHash through (VEC-471).
+	readHashes []common.Hash
 }
 
 func newFakeVatCaller() *fakeVatCaller {
@@ -169,9 +186,11 @@ func (f *fakeVatCaller) ResolveIlks(_ context.Context, vaults []common.Address, 
 	return result, nil
 }
 
-func (f *fakeVatCaller) ReadDebts(_ context.Context, queries []entity.DebtQuery, _ *big.Int) ([]entity.DebtResult, error) {
+func (f *fakeVatCaller) ReadDebts(_ context.Context, queries []entity.DebtQuery, blockHash common.Hash) ([]entity.DebtResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	f.readHashes = append(f.readHashes, blockHash)
 
 	if f.readDebtsErr != nil {
 		return nil, f.readDebtsErr
@@ -199,6 +218,17 @@ func (f *fakeVatCaller) ReadDebts(_ context.Context, queries []entity.DebtQuery,
 	}
 
 	return results, nil
+}
+
+// lastReadHash returns the block hash of the most recent ReadDebts call, or the
+// zero hash if none has happened yet.
+func (f *fakeVatCaller) lastReadHash() common.Hash {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.readHashes) == 0 {
+		return common.Hash{}
+	}
+	return f.readHashes[len(f.readHashes)-1]
 }
 
 // fakePrimeDebtRepository is a controllable in-memory repository.
@@ -291,7 +321,7 @@ func defaultConfig(sweepEveryN int) prime_debt.Config {
 	return prime_debt.Config{
 		SweepEveryNBlocks: sweepEveryN,
 		ChainID:           testChainID,
-		MaxMessages:       10,
+		MaxMessages:       1,
 		PollInterval:      10 * time.Millisecond,
 	}
 }
@@ -370,6 +400,30 @@ func TestStart_NoPrimes(t *testing.T) {
 	}
 	if !containsAny(err.Error(), "no primes", "primes") {
 		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestStart_RefusesAVisibilityTimeoutAReceiveCanOutrun(t *testing.T) {
+	caller := newFakeVatCaller()
+	caller.setIlk(sparkPrime().VaultAddress, ilkFrom("ALLOCATOR-SPARK-A"))
+
+	consumer := newFakeSQSConsumer(nil)
+	consumer.visibilityTimeout = 30 * time.Second
+	repo := &fakePrimeDebtRepository{primes: []entity.Prime{sparkPrime()}}
+	svc, err := prime_debt.NewVaultDebtService(defaultConfig(75), caller, repo, consumer, newFakeBlockQuerier(testBlockNum))
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+
+	err = svc.Start(context.Background())
+	if err == nil {
+		_ = svc.Stop()
+		t.Fatal("Start accepted a 30s visibility timeout; a booted worker never crashloops on it, because " +
+			"ProcessMessages revalidates on every poll and RunLoop only logs what it returns, so the pod reports " +
+			"Ready and spins logging forever while the queue never drains")
+	}
+	if !strings.Contains(err.Error(), "visibility timeout") {
+		t.Errorf("Start error = %q, want it to name the visibility timeout", err)
 	}
 }
 
@@ -505,6 +559,55 @@ func TestSync_WritesSnapshotPerPrime(t *testing.T) {
 
 	cancel()
 	_ = svc.Stop()
+}
+
+// TestSync_ReadDebtsPinnedToBlockHash asserts the sweep threads the event's
+// block hash into ReadDebts, not the block number: after a reorg an archive
+// node answers eth_call-by-number with the new fork's debt, which can silently
+// disagree with the reorged block being processed (VEC-471). makeBlockEvents
+// encodes the block number into BlockHash as 0x%064x, so the expected hash is
+// derived from the swept block number.
+func TestSync_ReadDebtsPinnedToBlockHash(t *testing.T) {
+	prime := entity.Prime{ID: 1, Name: "spark", VaultAddress: common.HexToAddress("0x691A6c29e9e96Dd897718305427Ad5D534db16BA")}
+
+	caller := newFakeVatCaller()
+	caller.setIlk(prime.VaultAddress, ilkFrom("ALLOCATOR-spark-A"))
+
+	events := makeBlockEvents(testBlockNum, 1)
+	consumer := newFakeSQSConsumer(events)
+
+	repo := &fakePrimeDebtRepository{primes: []entity.Prime{prime}}
+	svc, err := prime_debt.NewVaultDebtService(defaultConfig(1), caller, repo, consumer, newFakeBlockQuerier(testBlockNum))
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		if repo.savedCount() >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for snapshot")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+
+	cancel()
+	_ = svc.Stop()
+
+	wantHash := common.HexToHash(fmt.Sprintf("0x%064x", testBlockNum))
+	if got := caller.lastReadHash(); got != wantHash {
+		t.Errorf("ReadDebts block hash = %s, want %s (must pin to the event's block hash)", got, wantHash)
+	}
 }
 
 // TestSync_PartialRevert_OtherPrimesStillSaved verifies the
@@ -801,6 +904,54 @@ func TestSync_ReadDebtsBatchError(t *testing.T) {
 
 	cancel()
 	_ = svc.Stop()
+}
+
+// TestProcessBlock_MissingBlockHash_ReturnsError: an event with an empty
+// BlockHash must fail loud before ever reaching the vat caller, instead of
+// silently defaulting to the zero hash (common.HexToHash never errors).
+func TestProcessBlock_MissingBlockHash_ReturnsError(t *testing.T) {
+	caller := newFakeVatCaller()
+	caller.setIlk(sparkPrime().VaultAddress, ilkFrom("ALLOCATOR-SPARK-A"))
+
+	events := []outbound.BlockEvent{{
+		ChainID:        testChainID,
+		BlockNumber:    testBlockNum,
+		Version:        0,
+		BlockHash:      "",
+		ParentHash:     fmt.Sprintf("0x%064x", testBlockNum-1),
+		BlockTimestamp: time.Now().Unix(),
+		ReceivedAt:     time.Now(),
+	}}
+	consumer := newFakeSQSConsumer(events)
+
+	repo := &fakePrimeDebtRepository{primes: []entity.Prime{sparkPrime()}}
+	svc, err := prime_debt.NewVaultDebtService(defaultConfig(1), caller, repo, consumer, newFakeBlockQuerier(testBlockNum))
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	_ = svc.Stop()
+
+	if len(caller.readHashes) != 0 {
+		t.Errorf("ReadDebts invoked %d times, want 0 (guard must fire before the caller)", len(caller.readHashes))
+	}
+	if repo.savedCount() != 0 {
+		t.Errorf("expected 0 saved snapshots on missing block hash, got %d", repo.savedCount())
+	}
+	// The message must not be ACKed: a malformed event must be retried like any
+	// other transient processing failure, not silently dropped.
+	if consumer.deleteCount() != 0 {
+		t.Errorf("expected message to not be ACKed on missing block hash, deleteCount = %d", consumer.deleteCount())
+	}
 }
 
 // ---------------------------------------------------------------------------

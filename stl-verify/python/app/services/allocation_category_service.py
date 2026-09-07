@@ -16,7 +16,7 @@ class AllocationCategoryService:
         self._rules = rules if rules is not None else default_allocation_category_rules()
 
     def classify(self, protocol_name: str | None, token_symbol: str) -> AllocationCategory:
-        """Classify allocation as one of: ALLOCATION, POL, PSM3, ASSET.
+        """Classify allocation as one of: ALLOCATION, POL, PSM3, ASSET, CUSTODY.
 
         Returns ASSET when ``protocol_name`` is None — direct asset holdings
         with no registered protocol wrapper are treasury/non-strategy positions
@@ -46,6 +46,7 @@ class AllocationCategoryService:
             AllocationCategory.POL: "Protocol-Owned Liquidity",
             AllocationCategory.PSM3: "Peg Stability Mechanism",
             AllocationCategory.ASSET: "Asset",
+            AllocationCategory.CUSTODY: "Custody",
         }
         return labels.get(category, category.value)
 
@@ -56,5 +57,6 @@ class AllocationCategoryService:
             AllocationCategory.POL: "Protocol-owned liquidity or governance assets",
             AllocationCategory.PSM3: "Peg stability mechanism reserves (Spark PSM3 variant)",
             AllocationCategory.ASSET: "Non-strategy asset holdings or treasury positions",
+            AllocationCategory.CUSTODY: "Off-chain custodied collateral (e.g. Anchorage BTC) securing a prime loan",
         }
         return descriptions.get(category, "")

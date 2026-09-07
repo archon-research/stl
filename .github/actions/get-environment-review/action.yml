@@ -1,0 +1,75 @@
+name: Get Environment Review
+description: |
+  Fetches the most recent environment review (approval or rejection) for the
+  current workflow run and exposes the reviewer's GitHub login and review
+  comment. Use this on jobs that depend on a GitHub Environment gate so that
+  Slack/other notifications can attribute the approve/reject action.
+
+inputs:
+  environment:
+    description: GitHub Environment name (e.g. "production").
+    required: true
+  state:
+    description: 'Review state to find: "approved" or "rejected".'
+    required: true
+    default: approved
+  github-token:
+    description: "GitHub token with `actions: read` permission."
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  reviewer:
+    description: GitHub login of the user who approved/rejected the deployment.
+    value: ${{ steps.fetch.outputs.reviewer }}
+  comment:
+    description: Free-text review comment, if the reviewer left one.
+    value: ${{ steps.fetch.outputs.comment }}
+  found:
+    description: '"true" if a matching review was found, otherwise "false".'
+    value: ${{ steps.fetch.outputs.found }}
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch environment review
+      id: fetch
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+      env:
+        TARGET_ENV: ${{ inputs.environment }}
+        TARGET_STATE: ${{ inputs.state }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const targetEnv = process.env.TARGET_ENV;
+          const targetState = process.env.TARGET_STATE;
+
+          const { data: reviews } = await github.rest.actions.getReviewsForRun({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            run_id: context.runId,
+          });
+
+          // Filter to the requested environment + state, then take the most recent.
+          // The approvals payload exposes an `environments` array (not a scalar
+          // `environment`), so match against that.
+          const matches = reviews.filter(r =>
+            r.state === targetState &&
+            (r.environments || []).some(e => e.name === targetEnv)
+          );
+
+          if (matches.length === 0) {
+            core.setOutput('found', 'false');
+            core.setOutput('reviewer', '');
+            core.setOutput('comment', '');
+            core.info(`No ${targetState} review found for environment '${targetEnv}'.`);
+            return;
+          }
+
+          const latest = matches[matches.length - 1];
+          const reviewer = latest.user && latest.user.login ? latest.user.login : '';
+          const comment = latest.comment || '';
+          core.setOutput('found', 'true');
+          core.setOutput('reviewer', reviewer);
+          core.setOutput('comment', comment);
+          core.info(`Found ${targetState} review by ${reviewer}${comment ? ` with comment: ${comment}` : ''}`);

@@ -1,0 +1,18 @@
+# Friendlier tailnet name for python-api. MagicDNS has no CNAMEs and the
+# Tailscale operator runs one proxy per annotated Service, so the alias is a
+# second Service over the same pods. Overlays patch the hostname (verify /
+# verify-staging) exactly as they do for the primary python-api Service, which
+# stays exposed so existing links keep working.
+apiVersion: v1
+kind: Service
+metadata:
+  name: python-api-verify
+  annotations:
+    tailscale.com/expose: "true"
+spec:
+  selector:
+    app: python-api
+  ports:
+    - port: 80
+      targetPort: 8000
+      protocol: TCP

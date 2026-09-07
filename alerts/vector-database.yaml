@@ -1,0 +1,216 @@
+# =============================================================================
+# Vector — database error alerts
+# =============================================================================
+# Every Vector **Go** service reaches Postgres through one pool builder
+# (`stl-verify/internal/adapters/outbound/postgres/db.go`), which attaches a pgx
+# tracer emitting these counters for every query, batch, copy and connection in
+# the fleet:
+#
+#   db_query_total                                            all traced operations
+#   db_query_errors_total{error_class}                        resources|retryable|other|unknown
+#   db_query_errors_by_sqlstate_total{sqlstate, error_class}  breakdown only
+#
+# `python-api` reaches the same database through SQLAlchemy/asyncpg and emits
+# none of these; it took 174 of the 202 `out of memory` lines in the 08:00 hour
+# on 2026-08-25, so these rules are a Go-fleet view, not a whole-namespace one.
+#
+# Rules key on `error_class`, never on `sqlstate`. The four classes are seeded
+# at 0 when a pool is built, so a class's first error is a 0->1 transition
+# `increase()` can see and the ratio rule's numerator has a series to divide.
+# SQLSTATE is open-ended: its series first appears with the error that created
+# it, and `increase()` cannot tell that first sample from no error at all —
+# which is exactly how a class-53 storm stayed invisible. Use the by_sqlstate
+# counter for triage, not for alert conditions.
+#
+# `db_query_total` counts what pgx traces, which includes the implicit
+# BEGIN/COMMIT/ROLLBACK of every transaction and the `SET` an AfterConnect hook
+# issues. On a transaction-heavy repository that is roughly 3x the statements
+# the caller wrote, so read the ratio as "share of traced operations", not
+# "share of my queries".
+#
+# Background and triage: docs/runbooks/vector-database.md.
+#
+# Series carry (OTel SDK + gateway resource processor):
+#   - service_name                         (OTel service.name)
+#   - k8s_namespace_name="vector"          (k8sattributes processor)
+#   - cluster="archon-prod" | "archon-staging"
+#
+# `namespace` is a static rule label since every rule filters to
+# `k8s_namespace_name="vector"`; the mimir-rules-sync lint forbids `cluster` and
+# `env` as static rule labels but allows `namespace`. `cluster` is preserved
+# through `sum by` so the Alertmanager Slack template's `Cluster:` header fills.
+#
+# Severity → routing (per the alerting routing spec): every rule here is a
+# `warning` — no page, prod #at_stl_alerts / staging #at_stl_staging_alerts,
+# [WARNING], 4h repeat. The infrastructure repo's TigerData rules watch the
+# instance and page on memory (>85%); nothing there watches connection count or
+# disk, so for every class-53 code except 53200 these counters are the only
+# signal. See docs/runbooks/vector-database.md.
+# =============================================================================
+groups:
+  - name: vector-database
+    interval: 1m
+    rules:
+      # ---------------------------------------------------------------------
+      # WARNING
+      # ---------------------------------------------------------------------
+
+      - alert: VectorDatabaseResourceErrors
+        # SQLSTATE class 53 means the database refused work for want of a
+        # resource. It is never routine, so the condition is "at all" rather
+        # than a rate: the seeded series makes the first error a visible 0->1,
+        # and the 15m window holds the alert open across the quiet gaps of a
+        # bursty incident instead of flapping resolved/firing.
+        #
+        # Fleet-level (`by (cluster)`, no `service_name`) on purpose: one
+        # notification per cluster per incident for a fault in the one
+        # dependency every service shares. What it adds over the instance rules
+        # is *which services were refused*, and the description carries the
+        # breakdown query rather than fanning out one alert per service.
+        #
+        # It is a warning, not a page: for 53200 TigerDataMemoryPressureCritical
+        # in the infrastructure repo pages on the instance-level cause, and a
+        # second critical paged twice for one incident. That companion covers
+        # 53200 only, and covers it unreliably — the 2026-08-27 errors arrived
+        # at a memory peak of 76.7%, where only the >75% warning fired. For
+        # 53300 and 53100 there is no instance rule at all, which is why the
+        # annotation branches on the SQLSTATE instead of naming one cause.
+        expr: |
+          sum by (cluster) (
+            increase(db_query_errors_total{
+              k8s_namespace_name="vector",
+              error_class="resources"
+            }[15m])
+          ) > 0
+        labels:
+          team: vector
+          severity: warning
+          component: database
+          namespace: vector
+        annotations:
+          summary: "Vector services refused by the database on {{ $labels.cluster }}"
+          description: |
+            Postgres returned `{{ $value | printf "%.0f" }}` SQLSTATE class-53
+            (`insufficient_resources`) errors to the Vector Go fleet in the last
+            15m — the instance refused work for want of a resource, and writes
+            are failing and being re-driven.
+
+            Get the code first; it decides where to look, and the three codes
+            have nothing in common but their class:
+            `sum by (service_name, sqlstate) (db_query_errors_by_sqlstate_total{k8s_namespace_name="vector", error_class="resources"})`
+
+            `53200` out_of_memory → instance memory. TigerDataMemoryPressure
+            (>75%) is the companion; …Critical (>85%) frequently does not fire
+            for these, so do not wait for it or treat its silence as health.
+            `53300` too_many_connections → pool sizing, not memory: MinConns per
+            service times replicas against the instance limit.
+            `53100` disk_full → disk headroom, retention and tiering policies.
+            No instance alert covers connections or disk, so for those two this
+            is the only signal.
+
+            The cause is the instance, not the query in the error message.
+            python-api does not emit these counters, so its share of the
+            incident is invisible here.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-database.md#vectordatabaseresourceerrors
+
+      - alert: VectorDatabaseErrorRatioHigh
+        # A service failing a large share of everything it asks the database:
+        # schema drift after a bad deploy, a revoked grant on an append-only
+        # table, an adapter issuing invalid SQL. A resource storm is a different
+        # shape — a small share of a healthy fleet — and is covered above.
+        #
+        # A ratio, not an absolute rate: query volume across the fleet spans
+        # orders of magnitude, from a watcher querying continuously to a cronjob
+        # issuing a handful an hour, and one threshold in queries/sec cannot be
+        # meaningful for both.
+        #
+        # The guard is on the DENOMINATOR, matching
+        # VectorAllocationTrackerErrorRatioHigh (vector-indexers.yaml). The old
+        # numerator guard (`errors > 0.01/s`) re-imposed a queries/sec floor on
+        # exactly the low-volume services the ratio form exists to include: a
+        # cronjob issuing a handful of queries an hour cannot reach 0.01
+        # errors/s even while failing every one of them.
+        #
+        # Covers everything except `retryable`, so it never double-fires with
+        # VectorDatabaseSerializationErrorsUnretried.
+        expr: |
+          (
+            sum by (service_name, cluster) (
+              rate(db_query_errors_total{
+                k8s_namespace_name="vector",
+                error_class=~"resources|other|unknown"
+              }[10m])
+            )
+            /
+            sum by (service_name, cluster) (
+              rate(db_query_total{k8s_namespace_name="vector"}[10m])
+            )
+          ) > 0.05
+          and
+          sum by (service_name, cluster) (
+            rate(db_query_total{k8s_namespace_name="vector"}[10m])
+          ) > 0.02
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: database
+          namespace: vector
+        annotations:
+          summary: "Vector database error ratio high on {{ $labels.service_name }}"
+          description: |
+            `{{ $labels.service_name }}` is failing
+            `{{ $value | humanizePercentage }}` of its database operations,
+            sustained over 15m, excluding the serialization/deadlock codes
+            covered by VectorDatabaseSerializationErrorsUnretried.
+
+            Break `db_query_errors_by_sqlstate_total` down by `sqlstate` to
+            classify: 42501 is an append-only grant violation, 42P01/42703 a
+            schema drift, 55P03 a lock_timeout, 57014 a cancelled statement,
+            "unknown" an error that never reached the server (connection reset,
+            context cancellation).
+
+            If `sqlstate` is a class-53 code the instance itself is out of a
+            resource, and which resource depends on the code: see
+            VectorDatabaseResourceErrors, whose description branches on it.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-database.md#vectordatabaseerrorratiohigh
+
+      - alert: VectorDatabaseSerializationErrorsUnretried
+        # 40001 (serialization_failure) and 40P01 (deadlock_detected) are retried
+        # only by BlockStateRepository.SaveBlock/HandleReorgAtomic, i.e. only in
+        # the watchers. Excluding the codes fleet-wide would silence genuine
+        # un-retried aborts in the ~30 repositories that have no retry at all, so
+        # the exclusion is scoped to the services that actually retry.
+        #
+        # Elsewhere an abort rolls back the whole unit of work and the SQS
+        # redrive re-runs it, so a one-off is handled and not actionable; only a
+        # sustained rate means contention that will eventually DLQ. `>= 6`, not
+        # `> 5`: increase() extrapolates, so a genuine five-in-an-hour lands at
+        # ~5.02 and would trip `> 5` while the intent is "a sixth". No `for`,
+        # because a 1h window is already the dwell.
+        expr: |
+          sum by (service_name, cluster) (
+            increase(db_query_errors_total{
+              k8s_namespace_name="vector",
+              error_class="retryable",
+              service_name!~".*watcher"
+            }[1h])
+          ) >= 6
+        labels:
+          team: vector
+          severity: warning
+          component: database
+          namespace: vector
+        annotations:
+          summary: "Vector database serialization/deadlock aborts on {{ $labels.service_name }}"
+          description: |
+            `{{ $labels.service_name }}` hit
+            `{{ $value | printf "%.0f" }}` serialization failures or deadlocks
+            (SQLSTATE 40001 / 40P01) in the last hour. Only the watchers retry
+            these; everywhere else the whole unit of work aborts and comes back
+            through the SQS redrive, so a sustained rate means two writers are
+            contending and messages are heading for the DLQ.
+
+            Break `db_query_errors_by_sqlstate_total` down by `sqlstate` to
+            separate serialization failures from deadlocks.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-database.md#vectordatabaseserializationerrorsunretried

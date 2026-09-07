@@ -23,17 +23,20 @@ import (
 // ---------------------------------------------------------------------------
 
 // mockRepo implements outbound.OnchainPriceRepository for testing.
+// Deliberately after the fixtures: the seed helpers stamp valid_from with time.Now(), and
+// the pinned read resolves only versions with valid_from <= effective_at.
+var testReferenceEffectiveAt = time.Now().UTC().Add(24 * time.Hour)
+
 type mockRepo struct {
 	getOracleFn                    func(ctx context.Context, name string) (*entity.Oracle, error)
 	getEnabledAssetsFn             func(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error)
 	getLatestPricesFn              func(ctx context.Context, oracleID int64) (map[int64]float64, error)
 	getLatestBlockFn               func(ctx context.Context, oracleID int64) (int64, error)
-	getTokenAddressesFn            func(ctx context.Context, oracleID int64) (map[int64][]byte, error)
+	getTokenInfosFn                func(ctx context.Context, oracleID int64) (map[int64]outbound.TokenInfo, error)
 	upsertPricesFn                 func(ctx context.Context, prices []*entity.OnchainTokenPrice) error
 	getEnabledOraclesByChainFn     func(ctx context.Context, chainID int64) ([]*entity.Oracle, error)
 	getOracleByAddressFn           func(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error)
 	insertOracleFn                 func(ctx context.Context, oracle *entity.Oracle) (*entity.Oracle, error)
-	getAllActiveProtocolOraclesFn  func(ctx context.Context) ([]*entity.ProtocolOracle, error)
 	insertProtocolOracleBindingFn  func(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error)
 	copyOracleAssetsFn             func(ctx context.Context, fromOracleID, toOracleID int64) error
 	getAllProtocolOracleBindingsFn func(ctx context.Context) ([]*entity.ProtocolOracle, error)
@@ -41,6 +44,8 @@ type mockRepo struct {
 	// mu guards upserted for concurrent access from the batch writer goroutine.
 	mu       sync.Mutex
 	upserted []*entity.OnchainTokenPrice
+
+	referenceEffectiveAt time.Time
 }
 
 func (m *mockRepo) GetOracle(ctx context.Context, name string) (*entity.Oracle, error) {
@@ -50,7 +55,8 @@ func (m *mockRepo) GetOracle(ctx context.Context, name string) (*entity.Oracle, 
 	return nil, errors.New("GetOracle not mocked")
 }
 
-func (m *mockRepo) GetEnabledAssets(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error) {
+func (m *mockRepo) GetEnabledAssets(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) ([]*entity.OracleAsset, error) {
+	m.referenceEffectiveAt = referenceEffectiveAt
 	if m.getEnabledAssetsFn != nil {
 		return m.getEnabledAssetsFn(ctx, oracleID)
 	}
@@ -71,11 +77,12 @@ func (m *mockRepo) GetLatestBlock(ctx context.Context, oracleID int64) (int64, e
 	return 0, nil
 }
 
-func (m *mockRepo) GetTokenAddresses(ctx context.Context, oracleID int64) (map[int64][]byte, error) {
-	if m.getTokenAddressesFn != nil {
-		return m.getTokenAddressesFn(ctx, oracleID)
+func (m *mockRepo) GetTokenInfos(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) (map[int64]outbound.TokenInfo, error) {
+	m.referenceEffectiveAt = referenceEffectiveAt
+	if m.getTokenInfosFn != nil {
+		return m.getTokenInfosFn(ctx, oracleID)
 	}
-	return nil, errors.New("GetTokenAddresses not mocked")
+	return nil, errors.New("GetTokenInfos not mocked")
 }
 
 func (m *mockRepo) UpsertPrices(ctx context.Context, prices []*entity.OnchainTokenPrice) error {
@@ -109,13 +116,6 @@ func (m *mockRepo) InsertOracle(ctx context.Context, oracle *entity.Oracle) (*en
 	return nil, errors.New("InsertOracle not mocked")
 }
 
-func (m *mockRepo) GetAllActiveProtocolOracles(ctx context.Context) ([]*entity.ProtocolOracle, error) {
-	if m.getAllActiveProtocolOraclesFn != nil {
-		return m.getAllActiveProtocolOraclesFn(ctx)
-	}
-	return nil, errors.New("GetAllActiveProtocolOracles not mocked")
-}
-
 func (m *mockRepo) InsertProtocolOracleBinding(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error) {
 	if m.insertProtocolOracleBindingFn != nil {
 		return m.insertProtocolOracleBindingFn(ctx, binding)
@@ -123,7 +123,7 @@ func (m *mockRepo) InsertProtocolOracleBinding(ctx context.Context, binding *ent
 	return nil, errors.New("InsertProtocolOracleBinding not mocked")
 }
 
-func (m *mockRepo) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64) error {
+func (m *mockRepo) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64, referenceEffectiveAt time.Time) error {
 	if m.copyOracleAssetsFn != nil {
 		return m.copyOracleAssetsFn(ctx, fromOracleID, toOracleID)
 	}
@@ -184,11 +184,11 @@ func defaultAssets() []*entity.OracleAsset {
 	}
 }
 
-// defaultTokenAddressBytes returns a token ID -> address bytes map matching defaultAssets.
-func defaultTokenAddressBytes() map[int64][]byte {
-	return map[int64][]byte{
-		10: common.HexToAddress("0x0000000000000000000000000000000000000010").Bytes(),
-		20: common.HexToAddress("0x0000000000000000000000000000000000000020").Bytes(),
+// defaultTokenInfos returns a token ID -> TokenInfo map matching defaultAssets.
+func defaultTokenInfos() map[int64]outbound.TokenInfo {
+	return map[int64]outbound.TokenInfo{
+		10: {Address: common.HexToAddress("0x0000000000000000000000000000000000000010").Bytes()},
+		20: {Address: common.HexToAddress("0x0000000000000000000000000000000000000020").Bytes()},
 	}
 }
 
@@ -240,7 +240,7 @@ func blockDependentPrices(t *testing.T) func(ctx context.Context, calls []outbou
 }
 
 // defaultRepoSetup returns a mockRepo preconfigured for common test scenarios.
-// It mocks GetEnabledOraclesByChain, GetEnabledAssets, and GetTokenAddresses.
+// It mocks GetEnabledOraclesByChain, GetEnabledAssets, and GetTokenInfos.
 func defaultRepoSetup() *mockRepo {
 	return &mockRepo{
 		getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
@@ -249,8 +249,33 @@ func defaultRepoSetup() *mockRepo {
 		getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 			return defaultAssets(), nil
 		},
-		getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-			return defaultTokenAddressBytes(), nil
+		getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+			return defaultTokenInfos(), nil
+		},
+	}
+}
+
+// erc4626RepoSetup returns a mockRepo preconfigured for a single erc4626_share oracle
+// (fluid_fsusds, oracle ID 5) with token 10 (fsUSDS vault, 18 decimals) and the
+// sUSDS/USD feed at 8 decimals.
+func erc4626RepoSetup() *mockRepo {
+	fsusds := common.HexToAddress("0x2BBE31d63E6813E3AC858C04dae43FB2a72B0D11")
+	usdsFeed := common.HexToAddress("0xfF30586cD0F29eD462364C7e81375FC0C71219b1")
+	return &mockRepo{
+		getEnabledOraclesByChainFn: func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
+			return []*entity.Oracle{{
+				ID: 5, Name: "fluid_fsusds", Enabled: true,
+				OracleType: entity.OracleTypeERC4626Share,
+			}}, nil
+		},
+		getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+			return []*entity.OracleAsset{{
+				ID: 1, OracleID: 5, TokenID: 10, Enabled: true,
+				FeedAddress: usdsFeed, FeedDecimals: 8, QuoteCurrency: "USD",
+			}}, nil
+		},
+		getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+			return map[int64]outbound.TokenInfo{10: {Address: fsusds.Bytes(), Decimals: 18}}, nil
 		},
 	}
 }
@@ -271,8 +296,8 @@ func feedOracleRepoSetup() *mockRepo {
 				FeedAddress: feedAddr, FeedDecimals: 8, QuoteCurrency: "USD",
 			}}, nil
 		},
-		getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-			return map[int64][]byte{10: wethAddr.Bytes()}, nil
+		getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+			return map[int64]outbound.TokenInfo{10: {Address: wethAddr.Bytes()}}, nil
 		},
 	}
 }
@@ -395,10 +420,11 @@ func TestNewService(t *testing.T) {
 		{
 			name: "success with all valid params",
 			config: Config{
-				ChainID:     1,
-				Concurrency: 2,
-				BatchSize:   50,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          2,
+				BatchSize:            50,
+				Logger:               testutil.DiscardLogger(),
 			},
 			headerFetcher:  validFetcher,
 			newMulticaller: validFactory,
@@ -418,8 +444,9 @@ func TestNewService(t *testing.T) {
 			},
 		},
 		{
-			name:           "success with default config values",
-			config:         Config{ChainID: 1}, // all zero values except ChainID
+			name: "success with default config values",
+			// ChainID and ReferenceEffectiveAt are required, not defaultable.
+			config:         Config{ChainID: 1, ReferenceEffectiveAt: testReferenceEffectiveAt},
 			headerFetcher:  validFetcher,
 			newMulticaller: validFactory,
 			repo:           validRepo,
@@ -441,9 +468,10 @@ func TestNewService(t *testing.T) {
 		{
 			name: "success with negative concurrency uses default",
 			config: Config{
-				ChainID:     1,
-				Concurrency: -5,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          -5,
+				Logger:               testutil.DiscardLogger(),
 			},
 			headerFetcher:  validFetcher,
 			newMulticaller: validFactory,
@@ -459,9 +487,10 @@ func TestNewService(t *testing.T) {
 		{
 			name: "success with negative batch size uses default",
 			config: Config{
-				ChainID:   1,
-				BatchSize: -1,
-				Logger:    testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				BatchSize:            -1,
+				Logger:               testutil.DiscardLogger(),
 			},
 			headerFetcher:  validFetcher,
 			newMulticaller: validFactory,
@@ -578,14 +607,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -613,14 +641,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   101,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 10,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          10,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -648,14 +675,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -690,10 +716,11 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -703,8 +730,8 @@ func TestRun(t *testing.T) {
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 						return []*entity.OracleAsset{}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return defaultTokenAddressBytes(), nil
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return defaultTokenInfos(), nil
 					},
 				}
 			},
@@ -720,10 +747,11 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -744,10 +772,11 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -771,10 +800,11 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -786,8 +816,8 @@ func TestRun(t *testing.T) {
 							{ID: 1, OracleID: 1, TokenID: 999, Enabled: true},
 						}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return map[int64][]byte{}, nil // no addresses
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return map[int64]outbound.TokenInfo{}, nil // no addresses
 					},
 				}
 			},
@@ -803,14 +833,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   3, // small batch size forces flush during for loop
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            3, // small batch size forces flush during for loop
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -838,10 +867,11 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   3, // small batch triggers mid-loop flush
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            3, // small batch triggers mid-loop flush
+				Logger:               testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				repo := defaultRepoSetup()
@@ -870,10 +900,11 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				repo := defaultRepoSetup()
@@ -902,14 +933,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo:   defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher { return &mockHeaderFetcher{} },
 			setupMC: func(t *testing.T) MulticallFactory {
 				return func(_ entity.OracleType) (outbound.Multicaller, error) {
@@ -929,14 +959,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -982,14 +1011,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -1026,14 +1054,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   102,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -1084,14 +1111,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   102,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -1141,14 +1167,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 0,
 			toBlock:   0,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, _ *big.Int) (*ethtypes.Header, error) {
@@ -1179,14 +1204,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   10099,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -1206,10 +1230,11 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   101,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				oracle := defaultOracle()
@@ -1221,8 +1246,8 @@ func TestRun(t *testing.T) {
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 						return defaultAssets(), nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return defaultTokenAddressBytes(), nil
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return defaultTokenInfos(), nil
 					},
 				}
 			},
@@ -1253,14 +1278,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return feedOracleRepoSetup()
-			},
+			setupRepo: feedOracleRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -1286,14 +1310,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return feedOracleRepoSetup()
-			},
+			setupRepo: feedOracleRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -1325,10 +1348,11 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   100,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				feedAddr1 := common.HexToAddress("0x0000000000000000000000000000000000000F01")
@@ -1354,10 +1378,10 @@ func TestRun(t *testing.T) {
 							},
 						}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return map[int64][]byte{
-							10: wethAddr.Bytes(),
-							20: weETHAddr.Bytes(),
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return map[int64]outbound.TokenInfo{
+							10: {Address: wethAddr.Bytes()},
+							20: {Address: weETHAddr.Bytes()},
 						}, nil
 					},
 				}
@@ -1408,14 +1432,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   102,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return feedOracleRepoSetup()
-			},
+			setupRepo: feedOracleRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -1450,10 +1473,11 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   100,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				feedAddr := common.HexToAddress("0x0000000000000000000000000000000000000F01")
@@ -1471,8 +1495,8 @@ func TestRun(t *testing.T) {
 							FeedAddress: feedAddr, FeedDecimals: 8, QuoteCurrency: "USD",
 						}}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return map[int64][]byte{10: tokenAddr.Bytes()}, nil
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return map[int64]outbound.TokenInfo{10: {Address: tokenAddr.Bytes()}}, nil
 					},
 				}
 			},
@@ -1503,10 +1527,11 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   100,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				oracle1 := defaultOracle()
@@ -1532,12 +1557,12 @@ func TestRun(t *testing.T) {
 							{ID: 3, OracleID: 2, TokenID: 30, Enabled: true},
 						}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, oracleID int64) (map[int64][]byte, error) {
+					getTokenInfosFn: func(_ context.Context, oracleID int64) (map[int64]outbound.TokenInfo, error) {
 						if oracleID == 1 {
-							return defaultTokenAddressBytes(), nil
+							return defaultTokenInfos(), nil
 						}
-						return map[int64][]byte{
-							30: common.HexToAddress("0x0000000000000000000000000000000000000030").Bytes(),
+						return map[int64]outbound.TokenInfo{
+							30: {Address: common.HexToAddress("0x0000000000000000000000000000000000000030").Bytes()},
 						}, nil
 					},
 				}
@@ -1654,10 +1679,11 @@ func TestRun_ChangeDetection_MultiplePriceChanges(t *testing.T) {
 	}
 
 	svc, err := NewService(Config{
-		ChainID:     1,
-		Concurrency: 1,
-		BatchSize:   100,
-		Logger:      testutil.DiscardLogger(),
+		ChainID:              1,
+		ReferenceEffectiveAt: testReferenceEffectiveAt,
+		Concurrency:          1,
+		BatchSize:            100,
+		Logger:               testutil.DiscardLogger(),
 	}, header, mcFactory, repo)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -1733,10 +1759,11 @@ func TestRun_VerifiesUpsertedPriceFields(t *testing.T) {
 	}
 
 	svc, err := NewService(Config{
-		ChainID:     1,
-		Concurrency: 1,
-		BatchSize:   100,
-		Logger:      testutil.DiscardLogger(),
+		ChainID:              1,
+		ReferenceEffectiveAt: testReferenceEffectiveAt,
+		Concurrency:          1,
+		BatchSize:            100,
+		Logger:               testutil.DiscardLogger(),
 	}, header, mcFactory, repo)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -1806,10 +1833,11 @@ func TestRun_DuplicateBlocksSafeWithIdempotentUpsert(t *testing.T) {
 	}
 
 	svc, err := NewService(Config{
-		ChainID:     1,
-		Concurrency: 1,
-		BatchSize:   100,
-		Logger:      testutil.DiscardLogger(),
+		ChainID:              1,
+		ReferenceEffectiveAt: testReferenceEffectiveAt,
+		Concurrency:          1,
+		BatchSize:            100,
+		Logger:               testutil.DiscardLogger(),
 	}, header, mcFactory, repo)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -1844,111 +1872,161 @@ func TestRun_DuplicateBlocksSafeWithIdempotentUpsert(t *testing.T) {
 // TestComputeOracleBlockRanges
 // ---------------------------------------------------------------------------
 
-func TestComputeOracleBlockRanges(t *testing.T) {
+func TestComputeOracleValidFromBlocks(t *testing.T) {
 	tests := []struct {
 		name     string
 		bindings []*entity.ProtocolOracle
-		want     map[int64]*oracleBlockRange
+		want     map[int64]int64
 	}{
 		{
 			name:     "empty bindings",
 			bindings: nil,
-			want:     map[int64]*oracleBlockRange{},
+			want:     map[int64]int64{},
 		},
 		{
-			name: "single oracle active in one protocol",
+			name: "single binding",
 			bindings: []*entity.ProtocolOracle{
 				{ProtocolID: 1, OracleID: 10, FromBlock: 1000},
 			},
-			want: map[int64]*oracleBlockRange{
-				10: {validFrom: 1000, validTo: 0},
-			},
+			want: map[int64]int64{10: 1000},
 		},
 		{
-			name: "oracle superseded by another in same protocol",
+			name: "second oracle added later in the same protocol leaves both open",
 			bindings: []*entity.ProtocolOracle{
 				{ProtocolID: 1, OracleID: 10, FromBlock: 1000},
 				{ProtocolID: 1, OracleID: 20, FromBlock: 2000},
 			},
-			want: map[int64]*oracleBlockRange{
-				10: {validFrom: 1000, validTo: 1999},
-				20: {validFrom: 2000, validTo: 0},
-			},
+			want: map[int64]int64{10: 1000, 20: 2000},
 		},
 		{
-			name: "oracle active in multiple protocols",
+			name: "oracle bound by multiple protocols takes the earliest from_block",
 			bindings: []*entity.ProtocolOracle{
 				{ProtocolID: 1, OracleID: 10, FromBlock: 1000},
 				{ProtocolID: 2, OracleID: 10, FromBlock: 500},
 			},
-			want: map[int64]*oracleBlockRange{
-				10: {validFrom: 500, validTo: 0},
-			},
+			want: map[int64]int64{10: 500},
 		},
 		{
-			name: "oracle superseded in one protocol but active in another",
+			name: "mixed protocols and oracles",
 			bindings: []*entity.ProtocolOracle{
-				// Protocol 1: oracle 10 superseded by oracle 20 at block 2000
 				{ProtocolID: 1, OracleID: 10, FromBlock: 1000},
 				{ProtocolID: 1, OracleID: 20, FromBlock: 2000},
-				// Protocol 2: oracle 10 still active
 				{ProtocolID: 2, OracleID: 10, FromBlock: 1500},
 			},
-			want: map[int64]*oracleBlockRange{
-				10: {validFrom: 1000, validTo: 0}, // still active in protocol 2
-				20: {validFrom: 2000, validTo: 0},
-			},
+			want: map[int64]int64{10: 1000, 20: 2000},
 		},
 		{
-			name: "oracle superseded in all protocols",
-			bindings: []*entity.ProtocolOracle{
-				// Protocol 1: oracle 10 → oracle 20 at block 2000
-				{ProtocolID: 1, OracleID: 10, FromBlock: 1000},
-				{ProtocolID: 1, OracleID: 20, FromBlock: 2000},
-				// Protocol 2: oracle 10 → oracle 30 at block 3000
-				{ProtocolID: 2, OracleID: 10, FromBlock: 500},
-				{ProtocolID: 2, OracleID: 30, FromBlock: 3000},
-			},
-			want: map[int64]*oracleBlockRange{
-				10: {validFrom: 500, validTo: 2999}, // max superseded block
-				20: {validFrom: 2000, validTo: 0},
-				30: {validFrom: 3000, validTo: 0},
-			},
-		},
-		{
-			name: "oracle re-used after supersession",
+			name: "duplicate bindings for one oracle keep the earliest from_block",
 			bindings: []*entity.ProtocolOracle{
 				{ProtocolID: 1, OracleID: 10, FromBlock: 1000},
 				{ProtocolID: 1, OracleID: 20, FromBlock: 2000},
-				{ProtocolID: 1, OracleID: 10, FromBlock: 3000}, // oracle 10 re-used
+				{ProtocolID: 1, OracleID: 10, FromBlock: 3000},
 			},
-			want: map[int64]*oracleBlockRange{
-				10: {validFrom: 1000, validTo: 0}, // active again
-				20: {validFrom: 2000, validTo: 2999},
+			want: map[int64]int64{10: 1000, 20: 2000},
+		},
+		{
+			// Regression: a protocol ADDING a second oracle (concurrent
+			// binding, e.g. SparkLend -> chainlink next to the original
+			// SparkLend -> sparklend) must not cap the first oracle's range:
+			// the pricing API resolves bindings as a union, not a temporal
+			// sequence, so both oracles stay live.
+			name: "concurrent second binding does not cap the first oracle",
+			bindings: []*entity.ProtocolOracle{
+				{ProtocolID: 1, OracleID: 10, FromBlock: 16664447},
+				{ProtocolID: 1, OracleID: 20, FromBlock: 16776401},
 			},
+			want: map[int64]int64{10: 16664447, 20: 16776401},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := computeOracleBlockRanges(tt.bindings)
+			got := computeOracleValidFromBlocks(tt.bindings)
 			if len(got) != len(tt.want) {
-				t.Fatalf("got %d ranges, want %d", len(got), len(tt.want))
+				t.Fatalf("got %d entries, want %d", len(got), len(tt.want))
 			}
-			for oracleID, wantRange := range tt.want {
-				gotRange, ok := got[oracleID]
+			for oracleID, wantFrom := range tt.want {
+				gotFrom, ok := got[oracleID]
 				if !ok {
-					t.Errorf("missing range for oracle %d", oracleID)
+					t.Errorf("missing entry for oracle %d", oracleID)
 					continue
 				}
-				if gotRange.validFrom != wantRange.validFrom {
-					t.Errorf("oracle %d: validFrom = %d, want %d", oracleID, gotRange.validFrom, wantRange.validFrom)
-				}
-				if gotRange.validTo != wantRange.validTo {
-					t.Errorf("oracle %d: validTo = %d, want %d", oracleID, gotRange.validTo, wantRange.validTo)
+				if gotFrom != wantFrom {
+					t.Errorf("oracle %d: validFrom = %d, want %d", oracleID, gotFrom, wantFrom)
 				}
 			}
 		})
+	}
+}
+
+// TestComputeOracleValidFromBlocks_MigrationSeededBindings pins the union
+// resolution over the ACTUAL protocol_oracle binding sets: one fixture row per
+// INSERT INTO protocol_oracle across db/migrations/ (20260206_100000,
+// 20260305_100000, 20260318_100000, 20260505_135100, 20260702_120000,
+// 20260709_120000, 20260713_150000 — keep this in sync when a migration adds
+// a binding). Two of these shapes would break under a supersession reading
+// (latest from_block per protocol wins): SparkLend's chainlink binding
+// would silently retire the sparklend oracle, and Aave V3's two bindings TIE
+// at from_block 16291127, making a DISTINCT ON pick nondeterministic. The
+// union keeps every binding live: each oracle's validFrom is the MIN
+// from_block across every protocol binding it.
+func TestComputeOracleValidFromBlocks_MigrationSeededBindings(t *testing.T) {
+	// Stand-in ids (real ids are assigned per-environment); what matters is
+	// which bindings share a protocol or an oracle.
+	const (
+		protoSparkLend int64 = 1
+		protoAaveV3    int64 = 2
+		protoAaveAvax  int64 = 3
+		protoAaveLido  int64 = 4
+		protoAaveRWA   int64 = 5
+		protoMaple     int64 = 6
+		protoMorpho    int64 = 7
+
+		oracleSparkLend int64 = 10
+		oracleAaveV3    int64 = 20
+		oracleAaveAvax  int64 = 30
+		oracleAaveLido  int64 = 40
+		oracleAaveRWA   int64 = 50
+		oracleChainlink int64 = 60
+	)
+
+	bindings := []*entity.ProtocolOracle{
+		// 20260206_100000_create_onchain_prices.sql
+		{ProtocolID: protoSparkLend, OracleID: oracleSparkLend, FromBlock: 16664447},
+		// 20260305_100000_add_aave_v3_oracle_feeds.sql
+		{ProtocolID: protoAaveV3, OracleID: oracleAaveV3, FromBlock: 16291127},
+		// 20260318_100000_add_aave_avalanche_oracle.sql
+		{ProtocolID: protoAaveAvax, OracleID: oracleAaveAvax, FromBlock: 11970506},
+		// 20260505_135100_add_aave_lido_horizon_oracles.sql
+		{ProtocolID: protoAaveLido, OracleID: oracleAaveLido, FromBlock: 20262414},
+		{ProtocolID: protoAaveRWA, OracleID: oracleAaveRWA, FromBlock: 23125535},
+		// 20260702_120000_maple_syrup_allocation_exposure.sql
+		{ProtocolID: protoMaple, OracleID: oracleAaveV3, FromBlock: 16291127},
+		// 20260709_120000_add_er_missing_price_feeds.sql
+		{ProtocolID: protoMorpho, OracleID: oracleChainlink, FromBlock: 18883124},
+		{ProtocolID: protoMaple, OracleID: oracleChainlink, FromBlock: 11964925},
+		// 20260713_150000_price_dust_allocation_rows.sql
+		{ProtocolID: protoAaveV3, OracleID: oracleChainlink, FromBlock: 16291127},
+		{ProtocolID: protoSparkLend, OracleID: oracleChainlink, FromBlock: 16776401},
+	}
+
+	want := map[int64]int64{
+		oracleSparkLend: 16664447, // must survive SparkLend's later chainlink binding
+		oracleAaveV3:    16291127,
+		oracleAaveAvax:  11970506,
+		oracleAaveLido:  20262414,
+		oracleAaveRWA:   23125535,
+		oracleChainlink: 11964925, // MIN across maple/Morpho/Aave V3/SparkLend bindings
+	}
+
+	got := computeOracleValidFromBlocks(bindings)
+	if len(got) != len(want) {
+		t.Fatalf("got %d entries, want %d", len(got), len(want))
+	}
+	for oracleID, wantFrom := range want {
+		if got[oracleID] != wantFrom {
+			t.Errorf("oracle %d: validFrom = %d, want %d", oracleID, got[oracleID], wantFrom)
+		}
 	}
 }
 
@@ -1961,7 +2039,6 @@ func TestClampBlockRange(t *testing.T) {
 		name      string
 		from, to  int64
 		validFrom int64
-		validTo   int64
 		wantFrom  int64
 		wantTo    int64
 		wantOK    bool
@@ -1969,62 +2046,44 @@ func TestClampBlockRange(t *testing.T) {
 		{
 			name: "no clamping needed",
 			from: 100, to: 200,
-			validFrom: 50, validTo: 300,
-			wantFrom: 100, wantTo: 200, wantOK: true,
+			validFrom: 50,
+			wantFrom:  100, wantTo: 200, wantOK: true,
 		},
 		{
 			name: "clamp from",
 			from: 100, to: 200,
-			validFrom: 150, validTo: 0,
-			wantFrom: 150, wantTo: 200, wantOK: true,
-		},
-		{
-			name: "clamp to",
-			from: 100, to: 200,
-			validFrom: 0, validTo: 150,
-			wantFrom: 100, wantTo: 150, wantOK: true,
-		},
-		{
-			name: "clamp both",
-			from: 100, to: 200,
-			validFrom: 120, validTo: 180,
-			wantFrom: 120, wantTo: 180, wantOK: true,
+			validFrom: 150,
+			wantFrom:  150, wantTo: 200, wantOK: true,
 		},
 		{
 			name: "from > to after clamping",
 			from: 100, to: 200,
-			validFrom: 300, validTo: 0,
-			wantFrom: 300, wantTo: 200, wantOK: false,
+			validFrom: 300,
+			wantFrom:  300, wantTo: 200, wantOK: false,
 		},
 		{
 			name: "no lower bound (validFrom=0)",
 			from: 100, to: 200,
-			validFrom: 0, validTo: 0,
-			wantFrom: 100, wantTo: 200, wantOK: true,
+			validFrom: 0,
+			wantFrom:  100, wantTo: 200, wantOK: true,
 		},
 		{
-			name: "no upper bound (validTo=0)",
+			name: "exact boundary",
 			from: 100, to: 200,
-			validFrom: 50, validTo: 0,
-			wantFrom: 100, wantTo: 200, wantOK: true,
-		},
-		{
-			name: "exact boundaries",
-			from: 100, to: 200,
-			validFrom: 100, validTo: 200,
-			wantFrom: 100, wantTo: 200, wantOK: true,
+			validFrom: 100,
+			wantFrom:  100, wantTo: 200, wantOK: true,
 		},
 		{
 			name: "entire range before deployment",
 			from: 10, to: 50,
-			validFrom: 100, validTo: 0,
-			wantFrom: 100, wantTo: 50, wantOK: false,
+			validFrom: 100,
+			wantFrom:  100, wantTo: 50, wantOK: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotFrom, gotTo, gotOK := clampBlockRange(tt.from, tt.to, tt.validFrom, tt.validTo)
+			gotFrom, gotTo, gotOK := clampBlockRange(tt.from, tt.to, tt.validFrom)
 			if gotFrom != tt.wantFrom {
 				t.Errorf("from = %d, want %d", gotFrom, tt.wantFrom)
 			}
@@ -2105,7 +2164,10 @@ func TestRun_BlockRangeClamping(t *testing.T) {
 			},
 		},
 		{
-			name:      "clamps to supersession block",
+			// A protocol adding a second oracle binding must not cap the
+			// first oracle's range: bindings are a union, not a temporal
+			// sequence (see computeOracleValidFromBlocks).
+			name:      "concurrent second binding does not cap the range",
 			fromBlock: 100,
 			toBlock:   300,
 			oracle: &entity.Oracle{
@@ -2120,19 +2182,14 @@ func TestRun_BlockRangeClamping(t *testing.T) {
 			},
 			bindings: []*entity.ProtocolOracle{
 				{ProtocolID: 1, OracleID: 1, FromBlock: 80},
-				{ProtocolID: 1, OracleID: 2, FromBlock: 201}, // oracle 1 superseded at 200
+				{ProtocolID: 1, OracleID: 2, FromBlock: 201},
 			},
 			checkResult: func(t *testing.T, repo *mockRepo) {
 				t.Helper()
 				upserted := repo.getUpserted()
-				// Blocks 100-200 = 101 blocks x 2 tokens = 202 prices
-				if len(upserted) != 202 {
-					t.Errorf("upserted count = %d, want 202", len(upserted))
-				}
-				for _, p := range upserted {
-					if p.BlockNumber > 200 {
-						t.Errorf("found price for block %d which is after supersession block 200", p.BlockNumber)
-					}
+				// Blocks 100-300 = 201 blocks x 2 tokens = 402 prices
+				if len(upserted) != 402 {
+					t.Errorf("upserted count = %d, want 402", len(upserted))
 				}
 			},
 		},
@@ -2171,8 +2228,8 @@ func TestRun_BlockRangeClamping(t *testing.T) {
 				getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 					return defaultAssets(), nil
 				},
-				getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-					return defaultTokenAddressBytes(), nil
+				getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+					return defaultTokenInfos(), nil
 				},
 				getAllProtocolOracleBindingsFn: func(_ context.Context) ([]*entity.ProtocolOracle, error) {
 					return tt.bindings, nil
@@ -2186,10 +2243,11 @@ func TestRun_BlockRangeClamping(t *testing.T) {
 			}
 
 			svc, err := NewService(Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   1000,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            1000,
+				Logger:               testutil.DiscardLogger(),
 			}, header, func(_ entity.OracleType) (outbound.Multicaller, error) {
 				return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
 			}, repo)
@@ -2252,8 +2310,8 @@ func TestRun_FeedOracle_ChangeDetection(t *testing.T) {
 				FeedAddress: feedAddr, FeedDecimals: 8, QuoteCurrency: "USD",
 			}}, nil
 		},
-		getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-			return map[int64][]byte{10: wethAddr.Bytes()}, nil
+		getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+			return map[int64]outbound.TokenInfo{10: {Address: wethAddr.Bytes()}}, nil
 		},
 	}
 
@@ -2283,10 +2341,11 @@ func TestRun_FeedOracle_ChangeDetection(t *testing.T) {
 	mcFactory := decimalsPassFactory(t, []uint8{8}, innerFactory)
 
 	svc, err := NewService(Config{
-		ChainID:     1,
-		Concurrency: 1,
-		BatchSize:   100,
-		Logger:      testutil.DiscardLogger(),
+		ChainID:              1,
+		ReferenceEffectiveAt: testReferenceEffectiveAt,
+		Concurrency:          1,
+		BatchSize:            100,
+		Logger:               testutil.DiscardLogger(),
 	}, header, mcFactory, repo)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -2360,7 +2419,7 @@ func TestRun_FeedDecimalsValidation(t *testing.T) {
 		}
 
 		svc, err := NewService(
-			Config{ChainID: 1, Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger()},
+			Config{ChainID: 1, Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger(), ReferenceEffectiveAt: testReferenceEffectiveAt},
 			&mockHeaderFetcher{},
 			mcFactory,
 			repo,
@@ -2419,7 +2478,7 @@ func TestRun_FeedDecimalsValidation(t *testing.T) {
 		}
 
 		svc, err := NewService(
-			Config{ChainID: 1, Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger()},
+			Config{ChainID: 1, Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger(), ReferenceEffectiveAt: testReferenceEffectiveAt},
 			&mockHeaderFetcher{},
 			mcFactory,
 			repo,
@@ -2439,4 +2498,223 @@ func TestRun_FeedDecimalsValidation(t *testing.T) {
 			t.Error("expected prices to be stored after successful decimals validation")
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// TestRun_ERC4626Oracle — backfill stores fsUSDS share prices
+// ---------------------------------------------------------------------------
+
+func TestRun_ERC4626Oracle(t *testing.T) {
+	oneE18 := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	// Block 100: assets 1.05e18, USDS 1.0 -> $1.05 (stored)
+	// Block 101: same -> NOT stored
+	// Block 102: assets 1.06e18, USDS 1.0 -> $1.06 (stored)
+	assetsByBlock := map[int64]*big.Int{
+		100: new(big.Int).Add(oneE18, new(big.Int).Div(oneE18, big.NewInt(20))),
+		101: new(big.Int).Add(oneE18, new(big.Int).Div(oneE18, big.NewInt(20))),
+		102: new(big.Int).Add(oneE18, new(big.Int).Mul(big.NewInt(6), new(big.Int).Div(oneE18, big.NewInt(100)))),
+	}
+
+	repo := erc4626RepoSetup()
+
+	header := &mockHeaderFetcher{
+		headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
+			return &ethtypes.Header{Time: uint64(1700000000 + number.Int64())}, nil
+		},
+	}
+
+	// Stable underlying address returned by the asset() validation call.
+	underlyingAddr := common.HexToAddress("0xdC035D45d973E3EC169d2276DDab16f1e407384F")
+	assetData := testutil.PackAsset(t, underlyingAddr)
+
+	callCount := 0
+	mcFactory := func(_ entity.OracleType) (outbound.Multicaller, error) {
+		callCount++
+		switch callCount {
+		case 1:
+			// First multicaller: feed decimals validation (returns 8, matches config).
+			return &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					return []outbound.Result{
+						{Success: true, ReturnData: testutil.PackDecimals(t, 8)},
+					}, nil
+				},
+			}, nil
+		case 2:
+			// Second multicaller: used for both asset() and underlying decimals() calls
+			// inside ValidateERC4626UnderlyingDecimals (two Execute calls on the same instance).
+			var execCount int
+			return &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					execCount++
+					if execCount == 1 {
+						return []outbound.Result{{Success: true, ReturnData: assetData}}, nil
+					}
+					return []outbound.Result{{Success: true, ReturnData: testutil.PackDecimals(t, 18)}}, nil
+				},
+			}, nil
+		default:
+			// Worker multiCallers: return per-block price data.
+			return &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+					if len(calls) != 2 {
+						return nil, fmt.Errorf("expected 2 calls, got %d", len(calls))
+					}
+					assets := assetsByBlock[blockNumber.Int64()]
+					return []outbound.Result{
+						{Success: true, ReturnData: testutil.PackConvertToAssets(t, assets)},
+						{Success: true, ReturnData: testutil.PackLatestRoundData(t,
+							big.NewInt(1), big.NewInt(100_000_000), big.NewInt(1000), big.NewInt(1000), big.NewInt(1))},
+					}, nil
+				},
+			}, nil
+		}
+	}
+
+	svc, err := NewService(Config{
+		ChainID:              1,
+		ReferenceEffectiveAt: testReferenceEffectiveAt,
+		Concurrency:          1,
+		BatchSize:            100,
+		Logger:               testutil.DiscardLogger(),
+	}, header, mcFactory, repo)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	if err := svc.Run(context.Background(), 100, 102); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	upserted := repo.getUpserted()
+	if len(upserted) != 2 {
+		t.Fatalf("upserted count = %d, want 2 (blocks 100 and 102)", len(upserted))
+	}
+
+	byBlock := make(map[int64]float64)
+	for _, p := range upserted {
+		if p.TokenID != 10 {
+			t.Errorf("TokenID = %d, want 10", p.TokenID)
+		}
+		byBlock[p.BlockNumber] = p.PriceUSD
+	}
+	if byBlock[100] != 1.05 {
+		t.Errorf("block 100 price = %f, want 1.05", byBlock[100])
+	}
+	if byBlock[102] != 1.06 {
+		t.Errorf("block 102 price = %f, want 1.06", byBlock[102])
+	}
+	if _, ok := byBlock[101]; ok {
+		t.Errorf("block 101 should be skipped (unchanged price)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestRun_ERC4626FeedDecimalsValidation — the underlying feed's on-chain decimals
+// contradict the seeded feed_decimals, so backfill halts before writing any
+// mis-scaled historical prices.
+// ---------------------------------------------------------------------------
+
+func TestRun_ERC4626FeedDecimalsValidation(t *testing.T) {
+	repo := erc4626RepoSetup()
+
+	// decimals() returns 18 on-chain, contradicting the seeded 8.
+	mcFactory := func(_ entity.OracleType) (outbound.Multicaller, error) {
+		return &testutil.MockMulticaller{
+			ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+				return []outbound.Result{
+					{Success: true, ReturnData: testutil.PackDecimals(t, 18)},
+				}, nil
+			},
+		}, nil
+	}
+
+	svc, err := NewService(
+		Config{ChainID: 1, Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger(), ReferenceEffectiveAt: testReferenceEffectiveAt},
+		&mockHeaderFetcher{},
+		mcFactory,
+		repo,
+	)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	err = svc.Run(context.Background(), 100, 105)
+	if err == nil {
+		t.Fatal("expected decimals mismatch error, got nil")
+	}
+	if !strings.Contains(err.Error(), "feed decimals") {
+		t.Errorf("error = %q, expected it to contain 'feed decimals'", err)
+	}
+
+	if upserted := repo.getUpserted(); len(upserted) != 0 {
+		t.Errorf("upserted = %d, want 0 (backfill should have halted)", len(upserted))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestRun_ERC4626UnderlyingDecimalsMismatch — on-chain underlying token decimals
+// (6) contradict the configured UnderlyingDecimals (18), so Run halts before
+// writing any mis-scaled historical prices.
+// ---------------------------------------------------------------------------
+
+func TestRun_ERC4626UnderlyingDecimalsMismatch(t *testing.T) {
+	underlyingAddr := common.HexToAddress("0xdC035D45d973E3EC169d2276DDab16f1e407384F")
+
+	repo := erc4626RepoSetup()
+
+	// Validation multicaller sequence (two multicaller instances from the factory):
+	//  callCount 1: feed decimals() returns 8 (matches FeedDecimals=8, passes)
+	//  callCount 2: ValidateERC4626UnderlyingDecimals uses this single instance for
+	//               both its Execute calls: first asset(), then underlying decimals().
+	assetData := testutil.PackAsset(t, underlyingAddr)
+	callCount := 0
+	mcFactory := func(_ entity.OracleType) (outbound.Multicaller, error) {
+		callCount++
+		switch callCount {
+		case 1:
+			return &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					return []outbound.Result{
+						{Success: true, ReturnData: testutil.PackDecimals(t, 8)},
+					}, nil
+				},
+			}, nil
+		default:
+			// Handles both Execute calls inside ValidateERC4626UnderlyingDecimals:
+			// first returns asset address, second returns decimals=6 (mismatch).
+			var execCount int
+			return &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					execCount++
+					if execCount == 1 {
+						return []outbound.Result{{Success: true, ReturnData: assetData}}, nil
+					}
+					return []outbound.Result{{Success: true, ReturnData: testutil.PackDecimals(t, 6)}}, nil
+				},
+			}, nil
+		}
+	}
+
+	svc, err := NewService(
+		Config{ChainID: 1, Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger(), ReferenceEffectiveAt: testReferenceEffectiveAt},
+		&mockHeaderFetcher{},
+		mcFactory,
+		repo,
+	)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	err = svc.Run(context.Background(), 100, 105)
+	if err == nil {
+		t.Fatal("expected underlying decimals mismatch error, got nil")
+	}
+	if !strings.Contains(err.Error(), "underlying decimals mismatch") {
+		t.Errorf("error = %q, expected it to contain 'underlying decimals mismatch'", err)
+	}
+
+	if upserted := repo.getUpserted(); len(upserted) != 0 {
+		t.Errorf("upserted = %d, want 0 (backfill should have halted)", len(upserted))
+	}
 }

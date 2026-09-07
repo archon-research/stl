@@ -13,6 +13,7 @@
 //   - alchemy.subscriber.blocks.received.total: Counter of blocks received
 //   - alchemy.subscriber.blocks.dropped.total: Counter of dropped blocks (buffer full)
 //   - alchemy.subscriber.connection.state: Gauge of connection state (1=connected, 0=disconnected)
+//   - alchemy.subscriber.stalls.total: Counter of data-freshness stalls (no newHeads within HealthTimeout) that forced a reconnect
 package alchemy
 
 import (
@@ -47,6 +48,7 @@ type Telemetry struct {
 	blocksReceivedTotal metric.Int64Counter
 	blocksDroppedTotal  metric.Int64Counter
 	connectionState     metric.Int64UpDownCounter
+	stallsTotal         metric.Int64Counter
 
 	// chainAttr is the constant per-chain attribute attached to every metric.
 	// One watcher process serves one chain, so the value is fixed at
@@ -148,6 +150,14 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider,
 		return nil, err
 	}
 
+	t.stallsTotal, err = meter.Int64Counter(
+		"alchemy.subscriber.stalls.total",
+		metric.WithDescription("Total number of data-freshness stalls (no newHeads within HealthTimeout) that forced a reconnect"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	return t, nil
 }
 
@@ -222,4 +232,10 @@ func (t *Telemetry) RecordConnectionUp(ctx context.Context) {
 // RecordConnectionDown records the connection being lost.
 func (t *Telemetry) RecordConnectionDown(ctx context.Context) {
 	t.connectionState.Add(ctx, -1, metric.WithAttributes(t.chainAttr))
+}
+
+// RecordStall records a data-freshness stall: no newHeads arrived within
+// HealthTimeout, so the subscriber forced a reconnect.
+func (t *Telemetry) RecordStall(ctx context.Context) {
+	t.stallsTotal.Add(ctx, 1, metric.WithAttributes(t.chainAttr))
 }

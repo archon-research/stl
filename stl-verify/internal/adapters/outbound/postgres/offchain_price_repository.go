@@ -192,24 +192,3 @@ func (r *PriceRepository) upsertPriceBatch(ctx context.Context, tx pgx.Tx, price
 	}
 	return nil
 }
-
-// GetLatestPrice retrieves the most recent price for a given token.
-func (r *PriceRepository) GetLatestPrice(ctx context.Context, tokenID int64) (*entity.TokenPrice, error) {
-	var tp entity.TokenPrice
-	err := r.pool.QueryRow(ctx, `
-		SELECT token_id, source_id, timestamp, price_usd, market_cap_usd, volume_usd
-		FROM offchain_token_price
-		WHERE token_id = $1
-		ORDER BY timestamp DESC, processing_version DESC
-		LIMIT 1
-	`, tokenID).Scan(
-		&tp.TokenID, &tp.SourceID, &tp.Timestamp, &tp.PriceUSD, &tp.MarketCapUSD, &tp.VolumeUSD,
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("querying latest price: %w", err)
-	}
-	return &tp, nil
-}

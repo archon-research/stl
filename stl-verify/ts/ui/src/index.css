@@ -1,65 +1,61 @@
-:root {
-  font-family: 'IBM Plex Sans', 'SF Pro Text', 'Segoe UI', sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
-  font-synthesis: none;
-  text-rendering: optimizelegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  color-scheme: light;
-}
-
-.dark {
-  color-scheme: dark;
-}
-
 @layer reset, base, tokens, recipes, utilities;
 
-html,
-body,
-#root {
-  min-width: 320px;
-  min-height: 100vh;
-}
+/* Everything below is inside `@layer base` on purpose. Unlayered CSS outranks
+   every layered rule regardless of specificity, so an unlayered
+   `button { font: inherit }` here would beat `@layer recipes` and strip the
+   font-size/font-family step from every design-system control. */
+@layer base {
+  :root {
+    font-family: 'IBM Plex Sans', 'SF Pro Text', 'Segoe UI', sans-serif;
+    line-height: 1.5;
+    font-weight: 400;
+    font-synthesis: none;
+    text-rendering: optimizelegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
 
-body {
-  margin: 0;
-  overflow: hidden;
-  color: var(--colors-text-default);
-  background: var(--colors-surface-subtle);
-}
+  html,
+  body,
+  #root {
+    min-width: 320px;
+    min-height: 100vh;
+  }
 
-button,
-input,
-select,
-textarea {
-  font: inherit;
-}
+  body {
+    margin: 0;
+    overflow: hidden;
+    color: var(--colors-text-default);
+    background: var(--colors-surface-canvas);
+  }
 
-* {
-  box-sizing: border-box;
-  scrollbar-width: thin;
-  scrollbar-color: var(--colors-gray-300) transparent;
-}
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
 
-.dark * {
-  scrollbar-color: var(--colors-gray-700) transparent;
-}
+  * {
+    box-sizing: border-box;
+    scrollbar-width: thin;
+    scrollbar-color: var(--colors-scrollbar-thumb) transparent;
+  }
 
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
 
-::-webkit-scrollbar-track {
-  background: transparent;
-}
+  /* Thumb comes from the preset's dark-aware `scrollbar.thumb`. The track stays
+     transparent on purpose -- these are thin overlay scrollbars over dense
+     data; `scrollbar.track` exists if a visible gutter is ever wanted. */
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
 
-::-webkit-scrollbar-thumb {
-  background: var(--colors-gray-300);
-  border-radius: 9999px;
-}
-
-.dark ::-webkit-scrollbar-thumb {
-  background: var(--colors-gray-700);
+  ::-webkit-scrollbar-thumb {
+    background: var(--colors-scrollbar-thumb);
+    border-radius: 9999px;
+  }
 }

@@ -32,7 +32,13 @@ async def test_list_events_delegates_filters_and_limit() -> None:
     result = await service.list_events(tx_hash=event.tx_hash, protocol_name="spark", limit=10)
 
     assert result == [event]
-    repo.list_events.assert_awaited_once_with(tx_hash=event.tx_hash, protocol_name="spark", limit=10)
+    repo.list_events.assert_awaited_once_with(
+        tx_hash=event.tx_hash,
+        protocol_name="spark",
+        from_timestamp=None,
+        to_timestamp=None,
+        limit=10,
+    )
 
 
 @pytest.mark.asyncio
@@ -57,6 +63,34 @@ async def test_list_events_returns_empty_list() -> None:
     result = await service.list_events(protocol_name="missing")
 
     assert result == []
+
+
+@pytest.mark.asyncio
+async def test_list_event_buckets_delegates_to_repository() -> None:
+    repo = AsyncMock()
+    repo.list_event_buckets.return_value = []
+    service = ProtocolEventService(repo)
+    from_ts = datetime(2026, 1, 1, tzinfo=UTC)
+    to_ts = datetime(2026, 1, 2, tzinfo=UTC)
+
+    result = await service.list_event_buckets(
+        tx_hash=None,
+        protocol_name="spark",
+        from_timestamp=from_ts,
+        to_timestamp=to_ts,
+        bucket_seconds=300.0,
+        limit=10,
+    )
+
+    assert result == []
+    repo.list_event_buckets.assert_awaited_once_with(
+        tx_hash=None,
+        protocol_name="spark",
+        from_timestamp=from_ts,
+        to_timestamp=to_ts,
+        bucket_seconds=300.0,
+        limit=10,
+    )
 
 
 @pytest.mark.asyncio

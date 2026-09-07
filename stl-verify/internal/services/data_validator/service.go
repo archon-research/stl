@@ -1,12 +1,16 @@
 // Package data_validator provides validation of block chain data stored by the watcher.
-// It verifies reorg events against Etherscan's canonical chain and validates chain integrity.
+// It verifies reorg events against a canonical chain source (provided via the
+// BlockVerifier port) and validates chain integrity. The source is chain-specific
+// and selected by the caller; the service itself is chain-agnostic.
 package data_validator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,10 +25,10 @@ type ServiceConfig struct {
 	// ToBlock is the end of the block range to validate (0 = max block in DB).
 	ToBlock int64
 
-	// SpotCheckCount is the number of random blocks to verify against Etherscan.
+	// SpotCheckCount is the number of random blocks to verify against the canonical chain source.
 	SpotCheckCount int
 
-	// ValidateReorgs enables reorg event validation against Etherscan.
+	// ValidateReorgs enables reorg event validation against the canonical chain source.
 	ValidateReorgs bool
 
 	// ValidateChainIntegrity enables parent-hash chain validation.
@@ -81,10 +85,16 @@ func NewService(
 
 // Validate runs all configured validations and returns a report.
 func (s *Service) Validate(ctx context.Context) (*Report, error) {
-	fromBlock, toBlock, err := s.resolveBlockRange(ctx)
+	watermark, err := s.readWatermarkBeforeResolvingRange(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	rng, err := s.resolveBlockRange(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("resolving block range: %w", err)
 	}
+	fromBlock, toBlock := rng.from, rng.to
 
 	s.logger.Info("starting validation",
 		"from_block", fromBlock,
@@ -94,10 +104,10 @@ func (s *Service) Validate(ctx context.Context) (*Report, error) {
 
 	report := NewReport(fromBlock, toBlock)
 
-	// Run chain integrity check
+	// Run chain integrity checks
 	if s.config.ValidateChainIntegrity {
-		result := s.validateChainIntegrity(ctx, fromBlock, toBlock)
-		report.AddCheck(result)
+		report.AddCheck(s.validateChainIntegrity(ctx, rng, watermark))
+		report.AddCheck(s.validateNoOrphanOnlyHeights(ctx, fromBlock, toBlock))
 	}
 
 	// Run reorg validation
@@ -125,71 +135,283 @@ func (s *Service) Validate(ctx context.Context) (*Report, error) {
 	}
 
 	report.Finalize()
+	s.reportCheckOutcomes(report)
 
 	s.logger.Info("validation complete",
 		"passed", report.Passed,
 		"failed", report.Failed,
 		"errors", report.Errors,
+		"skipped", report.Skipped,
 		"duration", report.Duration,
 	)
 
 	return report, nil
 }
 
+// reportCheckOutcomes logs every check: what it cost, and — where it did not
+// pass — what it found. The report object never leaves the process (the runner
+// keeps counts, the alert fires on the exit code), so the log is the only route
+// by which a check's duration, message and details (the heights the runbook
+// tells the operator to read) reach anyone.
+func (s *Service) reportCheckOutcomes(report *Report) {
+	for _, check := range report.Checks {
+		s.logger.Info("validation check finished",
+			"check", check.Name,
+			"status", check.Status,
+			"duration_ms", float64(check.Duration.Microseconds())/1000)
+
+		attrs := []any{"check", check.Name, "message", check.Message}
+		if len(check.Details) > 0 {
+			attrs = append(attrs, "details", check.Details)
+		}
+		switch check.Status {
+		case StatusError:
+			s.logger.Error("validation check errored", attrs...)
+		case StatusFailed:
+			s.logger.Warn("validation check failed", attrs...)
+		case StatusSkipped:
+			s.logger.Info("validation check skipped", attrs...)
+		}
+	}
+}
+
+// readWatermarkBeforeResolvingRange reads the backfill cursor, and is called
+// ahead of resolveBlockRange so the last canonical block is the later of the
+// two reads: the gap filler polls every few seconds, and a watermark read after
+// the range could outrun it with nothing wrong.
+func (s *Service) readWatermarkBeforeResolvingRange(ctx context.Context) (int64, error) {
+	cursor, err := s.blockStateRepo.GetBackfillCursor(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("reading backfill cursor: %w", err)
+	}
+	return cursor.Watermark, nil
+}
+
+// validationRange is the range to validate plus the last canonical block it was
+// resolved against. A caller-supplied ToBlock narrows the bounds but says
+// nothing about where the data ends, which is what the watermark is judged by.
+type validationRange struct {
+	from, to      int64
+	lastCanonical int64
+}
+
 // resolveBlockRange determines the actual block range to validate.
-func (s *Service) resolveBlockRange(ctx context.Context) (int64, int64, error) {
+func (s *Service) resolveBlockRange(ctx context.Context) (validationRange, error) {
+	// GetMin/MaxBlockNumber return 0 for both an empty table and a genesis-only
+	// table, so emptiness can't be inferred from them. Check existence directly:
+	// a nil last block means nothing has been ingested yet, which is a hard
+	// failure for a validation run.
+	lastBlock, err := s.blockStateRepo.GetLastBlock(ctx)
+	if err != nil {
+		return validationRange{}, fmt.Errorf("getting last block: %w", err)
+	}
+	if lastBlock == nil {
+		return validationRange{}, fmt.Errorf("no blocks found in database to validate (chain may not be ingested yet)")
+	}
+
+	maxBlock, err := s.blockStateRepo.GetMaxBlockNumber(ctx)
+	if err != nil {
+		return validationRange{}, fmt.Errorf("getting max block: %w", err)
+	}
+
 	fromBlock := s.config.FromBlock
 	toBlock := s.config.ToBlock
 
 	if fromBlock == 0 {
 		minBlock, err := s.blockStateRepo.GetMinBlockNumber(ctx)
 		if err != nil {
-			return 0, 0, fmt.Errorf("getting min block: %w", err)
+			return validationRange{}, fmt.Errorf("getting min block: %w", err)
 		}
 		fromBlock = minBlock
 	}
 
 	if toBlock == 0 {
-		maxBlock, err := s.blockStateRepo.GetMaxBlockNumber(ctx)
-		if err != nil {
-			return 0, 0, fmt.Errorf("getting max block: %w", err)
-		}
 		toBlock = maxBlock
 	}
 
 	if fromBlock > toBlock {
-		return 0, 0, fmt.Errorf("from_block (%d) > to_block (%d)", fromBlock, toBlock)
+		return validationRange{}, fmt.Errorf("from_block (%d) > to_block (%d)", fromBlock, toBlock)
 	}
 
-	return fromBlock, toBlock, nil
+	return validationRange{from: fromBlock, to: toBlock, lastCanonical: maxBlock}, nil
 }
 
-// validateChainIntegrity verifies parent-hash linkage using the repository method.
-func (s *Service) validateChainIntegrity(ctx context.Context, fromBlock, toBlock int64) CheckResult {
+// validateChainIntegrity verifies the stored chain under two bounds. Up to the
+// backfill watermark every height must be present and linked. Above it a
+// missing height is the gap filler's live work — an out-of-order arrival is a
+// hole for seconds, and backfill_watermark_lag covers it — but a broken link or
+// a duplicated height never repairs itself: it pins the watermark, so the
+// bounded check would never reach it and detection would fall back to the lag
+// alert 1000 blocks later (ARCT-379).
+//
+// Watermark 0 means no gap filler has ever advanced — a deployment with
+// ENABLE_BACKFILL=false, or a chain before its first pass — so the strict check
+// covers the whole range on purpose: with no filler, every hole is permanent.
+func (s *Service) validateChainIntegrity(ctx context.Context, rng validationRange, watermark int64) CheckResult {
+	const name = "Chain Integrity"
 	start := time.Now()
-	s.logger.Info("validating chain integrity", "from", fromBlock, "to", toBlock)
 
-	err := s.blockStateRepo.VerifyChainIntegrity(ctx, fromBlock, toBlock)
+	fromBlock, toBlock := rng.from, rng.to
+	if watermark > rng.lastCanonical {
+		return watermarkAboveDataFailure(name, start, watermark, rng.lastCanonical)
+	}
+
+	verifyTo := toBlock
+	if watermark > 0 {
+		verifyTo = min(toBlock, watermark)
+	}
+	if verifyTo < fromBlock {
+		return s.verifyParentLinksOnly(ctx, name, start, fromBlock, toBlock, watermark)
+	}
+
+	s.logger.Info("validating chain integrity",
+		"from", fromBlock, "to", verifyTo, "parent_links_to", toBlock, "watermark", watermark)
+
+	if err := s.verifyChainOver(ctx, fromBlock, verifyTo, toBlock); err != nil {
+		return CheckResult{
+			Name:     name,
+			Status:   StatusFailed,
+			Message:  err.Error(),
+			Duration: time.Since(start),
+		}
+	}
+
+	return CheckResult{
+		Name:     name,
+		Status:   StatusPassed,
+		Message:  chainValidMessage(watermark, verifyTo, toBlock),
+		Duration: time.Since(start),
+	}
+}
+
+// watermarkAboveDataFailure reports the state the min(toBlock, watermark) clamp
+// hid: FindGaps scans only above the watermark, so heights between the last
+// canonical block and a watermark above it are never scanned, and never filled.
+func watermarkAboveDataFailure(name string, start time.Time, watermark, lastCanonical int64) CheckResult {
+	return CheckResult{
+		Name:   name,
+		Status: StatusFailed,
+		Message: fmt.Sprintf(
+			"Backfill watermark %d is above the last canonical block %d: heights %d..%d hold no row and the gap filler will never scan them",
+			watermark, lastCanonical, lastCanonical+1, watermark),
+		Duration: time.Since(start),
+	}
+}
+
+// verifyParentLinksOnly is the check that survives a watermark below the range
+// start. The break that pins the watermark there is the one a Skipped result
+// would hide until 30-day retention drops the rows and hides it for good.
+func (s *Service) verifyParentLinksOnly(ctx context.Context, name string, start time.Time, fromBlock, toBlock, watermark int64) CheckResult {
+	skipped := fmt.Sprintf("the strict missing-height check was skipped because backfill watermark %d is below the range start %d", watermark, fromBlock)
+
+	if err := s.blockStateRepo.VerifyParentLinks(ctx, fromBlock, toBlock); err != nil {
+		return CheckResult{
+			Name:     name,
+			Status:   StatusFailed,
+			Message:  fmt.Sprintf("%s (%s)", err.Error(), skipped),
+			Duration: time.Since(start),
+		}
+	}
+	return CheckResult{
+		Name:     name,
+		Status:   StatusPassed,
+		Message:  fmt.Sprintf("Parent links valid through block %d; %s", toBlock, skipped),
+		Duration: time.Since(start),
+	}
+}
+
+// verifyChainOver runs the strict check up to verifyTo and the parent-link
+// check above it. verifyTo is the lower bound of the second range, not the
+// height after it: a late arrival at verifyTo+1 is saved on its successor's
+// word alone, without checking its own predecessor
+// (live_data's classifyOutOfOrderArrival), so that pair is exactly the one a
+// break hides in.
+func (s *Service) verifyChainOver(ctx context.Context, fromBlock, verifyTo, toBlock int64) error {
+	if err := s.blockStateRepo.VerifyChainIntegrity(ctx, fromBlock, verifyTo); err != nil {
+		return err
+	}
+	if toBlock <= verifyTo {
+		return nil
+	}
+	return s.blockStateRepo.VerifyParentLinks(ctx, verifyTo, toBlock)
+}
+
+// chainValidMessage states what was verified under which bound, so a passed
+// check cannot be read as "the whole range is whole".
+func chainValidMessage(watermark, verifyTo, toBlock int64) string {
+	through := fmt.Sprintf("block %d", verifyTo)
+	if verifyTo == watermark {
+		through = fmt.Sprintf("backfill watermark %d", watermark)
+	}
+	if toBlock <= verifyTo {
+		return fmt.Sprintf("Parent-hash chain valid through %s", through)
+	}
+	return fmt.Sprintf("Parent-hash chain valid through %s; parent links valid through block %d", through, toBlock)
+}
+
+// orphanOnlyHeightsListed caps how many heights both the message and Details
+// name — reportCheckOutcomes puts Details in one slog record, and Loki drops a
+// line over 256 KB. The reported count stays exact.
+const orphanOnlyHeightsListed = 100
+
+// validateNoOrphanOnlyHeights reports heights whose only stored block is
+// orphaned. It scans the full range and names every one, where chain integrity
+// stops at the watermark and at the first hole — and a fresh occurrence sits
+// above the watermark, since the reorg that caused it rewound the watermark.
+func (s *Service) validateNoOrphanOnlyHeights(ctx context.Context, fromBlock, toBlock int64) CheckResult {
+	const name = "Orphan-only heights"
+	start := time.Now()
+	s.logger.Info("checking for orphan-only heights", "from", fromBlock, "to", toBlock)
+
+	heights, err := s.blockStateRepo.FindOrphanOnlyHeights(ctx, fromBlock, toBlock)
 	duration := time.Since(start)
 
 	if err != nil {
 		return CheckResult{
-			Name:     "Chain Integrity",
-			Status:   StatusFailed,
-			Message:  err.Error(),
+			Name:     name,
+			Status:   StatusError,
+			Message:  fmt.Sprintf("Failed to query orphan-only heights: %v", err),
+			Duration: duration,
+		}
+	}
+
+	if len(heights) == 0 {
+		return CheckResult{
+			Name:     name,
+			Status:   StatusPassed,
+			Message:  "Every height has a canonical block",
 			Duration: duration,
 		}
 	}
 
 	return CheckResult{
-		Name:     "Chain Integrity",
-		Status:   StatusPassed,
-		Message:  "Parent-hash chain valid",
+		Name:     name,
+		Status:   StatusFailed,
+		Message:  fmt.Sprintf("%d height(s) have only an orphaned block: %s", len(heights), formatHeights(heights, orphanOnlyHeightsListed)),
 		Duration: duration,
+		Details: map[string]any{
+			"orphan_only_heights":      heights[:min(len(heights), orphanOnlyHeightsListed)],
+			"orphan_only_height_count": len(heights),
+		},
 	}
 }
 
-// validateReorgs validates each reorg event against Etherscan.
+// formatHeights renders block numbers as a comma-separated list, naming at most
+// limit of them and summarising the remainder.
+func formatHeights(heights []int64, limit int) string {
+	listed, suffix := heights, ""
+	if len(heights) > limit {
+		listed, suffix = heights[:limit], fmt.Sprintf(" (+%d more)", len(heights)-limit)
+	}
+
+	parts := make([]string, len(listed))
+	for i, height := range listed {
+		parts[i] = strconv.FormatInt(height, 10)
+	}
+	return strings.Join(parts, ", ") + suffix
+}
+
+// validateReorgs validates each reorg event against the canonical chain source.
 func (s *Service) validateReorgs(ctx context.Context, fromBlock, toBlock int64) ([]CheckResult, error) {
 	s.logger.Info("fetching reorg events", "from", fromBlock, "to", toBlock)
 
@@ -221,7 +443,7 @@ func (s *Service) validateReorgs(ctx context.Context, fromBlock, toBlock int64) 
 	return results, nil
 }
 
-// validateSingleReorg validates a single reorg event against Etherscan.
+// validateSingleReorg validates a single reorg event against the canonical chain source.
 func (s *Service) validateSingleReorg(ctx context.Context, event outbound.ReorgEvent) CheckResult {
 	start := time.Now()
 	name := fmt.Sprintf("Reorg %d at block %d", event.ID, event.BlockNumber)
@@ -233,14 +455,14 @@ func (s *Service) validateSingleReorg(ctx context.Context, event outbound.ReorgE
 		"new_hash", event.NewHash,
 	)
 
-	// Fetch the canonical block from Etherscan
+	// Fetch the canonical block from the verifier source
 	canonicalBlock, err := s.blockVerifier.GetBlockByNumber(ctx, event.BlockNumber)
 	duration := time.Since(start)
 
 	if err != nil {
 		return CheckResult{
 			Name:     name,
-			Status:   StatusError,
+			Status:   canonicalCheckStatus(err),
 			Message:  fmt.Sprintf("Failed to fetch block: %v", err),
 			Duration: duration,
 			Details: map[string]any{
@@ -254,7 +476,7 @@ func (s *Service) validateSingleReorg(ctx context.Context, event outbound.ReorgE
 		return CheckResult{
 			Name:     name,
 			Status:   StatusError,
-			Message:  "Block not found on Etherscan",
+			Message:  fmt.Sprintf("Block not found on %s", s.blockVerifier.Name()),
 			Duration: duration,
 			Details: map[string]any{
 				"reorg_id":     event.ID,
@@ -263,7 +485,7 @@ func (s *Service) validateSingleReorg(ctx context.Context, event outbound.ReorgE
 		}
 	}
 
-	// The new_hash from our reorg event should match Etherscan's canonical hash
+	// The new_hash from our reorg event should match the canonical chain source's hash
 	if !hashesMatch(event.NewHash, canonicalBlock.Hash) {
 		return CheckResult{
 			Name:   name,
@@ -318,7 +540,7 @@ func (s *Service) runSpotChecks(ctx context.Context, fromBlock, toBlock int64) [
 	return results
 }
 
-// spotCheckBlock verifies a single block's hash against Etherscan.
+// spotCheckBlock verifies a single block's hash against the canonical chain source.
 func (s *Service) spotCheckBlock(ctx context.Context, blockNum int64) CheckResult {
 	start := time.Now()
 	name := fmt.Sprintf("Spot check block %d", blockNum)
@@ -343,14 +565,14 @@ func (s *Service) spotCheckBlock(ctx context.Context, blockNum int64) CheckResul
 		}
 	}
 
-	// Get canonical block from Etherscan
+	// Get canonical block from the verifier source
 	canonicalBlock, err := s.blockVerifier.GetBlockByNumber(ctx, blockNum)
 	duration := time.Since(start)
 
 	if err != nil {
 		return CheckResult{
 			Name:     name,
-			Status:   StatusError,
+			Status:   canonicalCheckStatus(err),
 			Message:  fmt.Sprintf("Failed to fetch from %s: %v", s.blockVerifier.Name(), err),
 			Duration: duration,
 		}
@@ -414,6 +636,17 @@ func selectRandomBlocks(fromBlock, toBlock int64, n int) []int64 {
 		blocks = append(blocks, block)
 	}
 	return blocks
+}
+
+// canonicalCheckStatus chooses the status for a failed canonical-source fetch.
+// A transient outage (rate-limit, timeout, 5xx) is inconclusive, not a data
+// discrepancy, so it is skipped rather than failing the whole run. A permanent
+// error (bad key, parse failure) stays a hard error.
+func canonicalCheckStatus(err error) string {
+	if errors.Is(err, outbound.ErrCanonicalSourceUnavailable) {
+		return StatusSkipped
+	}
+	return StatusError
 }
 
 // hashesMatch compares two block hashes (case-insensitive, handles 0x prefix).

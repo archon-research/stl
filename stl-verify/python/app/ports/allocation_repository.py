@@ -1,8 +1,10 @@
+from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
 
 from app.domain.entities.allocation import (
+    AnchorageCustodyHolding,
     ChainMetadata,
     DirectAssetHolding,
     EthAddress,
@@ -11,9 +13,14 @@ from app.domain.entities.allocation import (
     ReceiptTokenPosition,
 )
 from app.domain.entities.allocation_activity import AllocationActivityEvent
+from app.domain.entities.time_series_bucket import (
+    AllocationActivityBucket,
+    ExposureBucket,
+    TotalCapitalBucket,
+)
 
 
-class AllocationRepository(Protocol):
+class AllocationRepositoryPort(Protocol):
     async def list_chains(self) -> list[ChainMetadata]:
         """Return chain metadata used by the UI."""
         ...
@@ -40,28 +47,62 @@ class AllocationRepository(Protocol):
         ...
 
     async def list_receipt_token_positions(self, prime_id: EthAddress) -> list[ReceiptTokenPosition]:
-        """Return current receipt-token holdings for the given prime."""
+        """Return current receipt-token holdings for the given prime.
+
+        A position whose latest balance is zero (a closed or swept position)
+        is excluded, even when older non-zero balance records exist in its
+        history.
+        """
         ...
 
     async def list_direct_asset_holdings(self, prime_id: EthAddress) -> list[DirectAssetHolding]:
-        """Return tokens held directly by the prime that are not registered as receipt-token wrappers."""
+        """Return tokens held directly by the prime that are not registered as receipt-token wrappers.
+
+        A holding whose latest balance is zero (closed or swept) is excluded,
+        even when older non-zero balance records exist in its history.
+        """
+        ...
+
+    async def list_anchorage_custody_holdings(self, prime_id: EthAddress) -> list[AnchorageCustodyHolding]:
+        """Return off-chain Anchorage custody collateral for the prime.
+
+        One row per ``(asset_type, custody_type)``, collapsed across every
+        package in the prime's *latest snapshot cohort* — the packages sharing
+        the most recent ``snapshot_time`` for that prime. Closed packages that
+        froze at an earlier poll (``exposure_value = 0`` but still
+        ``active = true``) are outside the cohort and never inflate the totals.
+        Returns an empty list when the prime has no custody snapshots.
+        """
         ...
 
     async def get_usd_exposure(self, receipt_token_id: int, prime_id: EthAddress) -> Decimal:
-        """Return ``balance × price_usd`` for the prime's holding of a receipt token.
+        """Return the redeemable-value USD exposure of the prime's receipt-token holding.
 
-        Raises ``ValueError`` if the position or price cannot be resolved.
+        Valued as ``COALESCE(underlying_value, balance) × underlying price``:
+        ``underlying_value`` is the on-chain redeemable value (convertToAssets)
+        in underlying units; NULL (rows written before the column existed)
+        falls back to the share balance.
+
+        Raises ``ValueError`` if the position or price cannot be resolved. A
+        position whose latest balance is zero (closed or swept) is treated as
+        unresolved and raises, rather than resurfacing a stale non-zero
+        balance; so does a position whose own underlying diverges from the
+        registry's, which cannot be priced in registry units.
         """
         ...
 
     async def get_total_usd_exposure(self, prime_id: EthAddress) -> Decimal:
-        """Return total priced USD exposure for all current positions of a prime."""
+        """Return total priced USD exposure for all current receipt-token positions of a prime.
+
+        Positions whose latest balance is zero (closed or swept) are excluded
+        from the total.
+        """
         ...
 
     async def list_allocation_activity(
         self,
         *,
-        prime_id: EthAddress | None = None,
+        proxy_addresses: Sequence[EthAddress] | None = None,
         chain_id: int | None = None,
         protocol_name: str | None = None,
         action_type: str | None = None,
@@ -71,5 +112,71 @@ class AllocationRepository(Protocol):
         to_timestamp: datetime | None = None,
         limit: int = 100,
     ) -> list[AllocationActivityEvent]:
-        """Return allocation activity events with optional filters."""
+        """Return allocation activity events with optional filters.
+
+        ``proxy_addresses`` is ``None`` for unscoped; an empty list matches
+        nothing and must never be read as unscoped.
+        """
+        ...
+
+    async def list_activity_buckets(
+        self,
+        *,
+        proxy_addresses: Sequence[EthAddress] | None = None,
+        chain_id: int | None = None,
+        protocol_name: str | None = None,
+        action_type: str | None = None,
+        token_symbol: str | None = None,
+        tx_hash: str | None = None,
+        from_timestamp: datetime,
+        to_timestamp: datetime,
+        bucket_seconds: float,
+        limit: int = 100,
+    ) -> list[AllocationActivityBucket]:
+        """Return allocation activity aggregated into time buckets.
+
+        ``proxy_addresses`` follows ``list_allocation_activity``'s contract.
+        """
+        ...
+
+    async def list_total_capital_buckets(
+        self,
+        prime_address: EthAddress,
+        *,
+        from_timestamp: datetime,
+        to_timestamp: datetime,
+        bucket_seconds: float,
+        limit: int = 100,
+    ) -> list[TotalCapitalBucket]:
+        """Return the prime's treasury USDS balance aggregated into time buckets."""
+        ...
+
+    async def get_latest_total_capital_usd(self, prime_address: EthAddress) -> Decimal | None:
+        """Return the prime's latest treasury USDS balance (Total Risk Capital), or None."""
+        ...
+
+    async def list_prime_proxy_addresses(self, prime_address: EthAddress) -> list[EthAddress]:
+        """Return every allocation proxy of the prime that owns ``prime_address``.
+
+        Never empty: an address with no rows resolves to itself.
+        """
+        ...
+
+    async def primary_proxy_address(self, prime_address: EthAddress) -> str | None:
+        """Return the one proxy of this prime that carries its prime-scoped rows."""
+        ...
+
+    async def list_exposure_buckets(
+        self,
+        proxy_addresses: Sequence[EthAddress],
+        *,
+        from_timestamp: datetime,
+        to_timestamp: datetime,
+        bucket_seconds: float,
+        limit: int = 100,
+    ) -> list[ExposureBucket]:
+        """Return priced receipt-token exposure aggregated into time buckets.
+
+        Scoped to the given proxies, which the service resolves prime-wide.
+        """
         ...

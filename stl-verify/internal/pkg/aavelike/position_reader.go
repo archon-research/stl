@@ -86,19 +86,23 @@ func (r *PositionReader) GetOrCreateBlockchainService(chainID int64, protocolAdd
 }
 
 // GetUserPositionData fetches current collateral and debt positions for a user
-// from on-chain data using multicall batching.
+// from on-chain data using multicall batching, pinned to blockHash so a reorg
+// (or a load-balanced RPC pool momentarily on another fork) can't answer with a
+// different fork's state than the (blockNumber, version) this read is for. Pass
+// the zero common.Hash{} for callers with no live block-hash source (backfill,
+// CLI snapshot tools) to fall back to number-pinned reads — see VEC-471.
 //
 // NOTE: The UIPoolDataProvider's ScaledVariableDebt field is unreliable on
 // upgraded Aave V3 deployments (returns 0 even for users with debt). To work
 // around this, we query the PoolDataProvider for ALL reserves and derive debt
 // from the actual CurrentVariableDebt values.
-func (r *PositionReader) GetUserPositionData(ctx context.Context, user common.Address, protocolAddress common.Address, chainID, blockNumber int64) ([]CollateralData, []DebtData, error) {
+func (r *PositionReader) GetUserPositionData(ctx context.Context, user common.Address, protocolAddress common.Address, chainID, blockNumber int64, blockHash common.Hash) ([]CollateralData, []DebtData, error) {
 	blockchainSvc, err := r.GetOrCreateBlockchainService(chainID, protocolAddress)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get blockchain service: %w", err)
 	}
 
-	reserves, err := blockchainSvc.getUserReservesData(ctx, user, blockNumber)
+	reserves, err := blockchainSvc.getUserReservesData(ctx, user, blockNumber, blockHash)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get user reserves data: %w", err)
 	}
@@ -126,7 +130,7 @@ func (r *PositionReader) GetUserPositionData(ctx context.Context, user common.Ad
 		return nil, nil, fmt.Errorf("failed to get token metadata: %w", err)
 	}
 
-	actualDataMap, err := blockchainSvc.batchGetUserReserveData(ctx, allReserveAssets, user, blockNumber)
+	actualDataMap, err := blockchainSvc.batchGetUserReserveData(ctx, allReserveAssets, user, blockNumber, blockHash)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get user reserve data: %w", err)
 	}
@@ -155,7 +159,10 @@ type UserPositionResult struct {
 
 // GetBatchUserPositionData fetches position data for multiple users in batch,
 // using 2 multicalls instead of 2N. Results are functionally identical to
-// calling GetUserPositionData for each user individually.
+// calling GetUserPositionData for each user individually. blockHash follows
+// the same contract as GetUserPositionData: pass common.Hash{} when there is
+// no live block-hash source (VEC-471). Currently only called from the
+// snapshot-indexer backfill CLI, which always passes the zero hash.
 //
 // NOTE: See GetUserPositionData comment — the UIPoolDataProvider's
 // ScaledVariableDebt is unreliable on upgraded Aave V3 deployments, so we
@@ -166,6 +173,7 @@ func (r *PositionReader) GetBatchUserPositionData(
 	users []common.Address,
 	protocolAddress common.Address,
 	chainID, blockNumber int64,
+	blockHash common.Hash,
 ) (map[common.Address]UserPositionResult, error) {
 	if len(users) == 0 {
 		return make(map[common.Address]UserPositionResult), nil
@@ -177,7 +185,7 @@ func (r *PositionReader) GetBatchUserPositionData(
 	}
 
 	// Multicall 1: getUserReservesData for all users in one call.
-	reservesMap, reserveErrors, err := blockchainSvc.getUserReservesDataBatch(ctx, users, blockNumber)
+	reservesMap, reserveErrors, err := blockchainSvc.getUserReservesDataBatch(ctx, users, blockNumber, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("batch getUserReservesData failed: %w", err)
 	}
@@ -226,7 +234,7 @@ func (r *PositionReader) GetBatchUserPositionData(
 	// Multicall 2: getUserReserveData for all user×reserve pairs in one call.
 	var allActualData map[common.Address]map[common.Address]ActualUserReserveData
 	if len(userAssetsForData) > 0 {
-		allActualData, err = blockchainSvc.batchGetUserReserveDataMultiUser(ctx, userAssetsForData, blockNumber)
+		allActualData, err = blockchainSvc.batchGetUserReserveDataMultiUser(ctx, userAssetsForData, blockNumber, blockHash)
 		if err != nil {
 			return nil, fmt.Errorf("batch getUserReserveData failed: %w", err)
 		}

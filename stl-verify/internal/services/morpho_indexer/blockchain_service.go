@@ -2,9 +2,12 @@ package morpho_indexer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -14,6 +17,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/erc20meta"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -76,8 +80,11 @@ type blockchainService struct {
 	multicallClient outbound.Multicaller
 	morphoBlueABI   *abi.ABI
 	metaMorphoABI   *abi.ABI
+	adapterABI      *abi.ABI
+	vaultV2ABI      *abi.ABI
 	erc20ABI        *abi.ABI
 	vaultProber     *VaultProber
+	adapterProber   *AdapterProber
 	metadataCache   map[common.Address]TokenMetadata
 	telemetry       *Telemetry
 	logger          *slog.Logger
@@ -99,17 +106,35 @@ func newBlockchainService(
 		return nil, fmt.Errorf("failed to load MetaMorpho read ABI: %w", err)
 	}
 
+	adapterABI, err := abis.GetVaultV2AdapterReadABI()
+	if err != nil {
+		return nil, fmt.Errorf("loading VaultV2 adapter read ABI: %w", err)
+	}
+
+	vaultV2ABI, err := abis.GetVaultV2ReadABI()
+	if err != nil {
+		return nil, fmt.Errorf("loading VaultV2 read ABI: %w", err)
+	}
+
 	vaultProber, err := NewVaultProber()
 	if err != nil {
 		return nil, fmt.Errorf("creating vault prober: %w", err)
+	}
+
+	adapterProber, err := NewAdapterProber()
+	if err != nil {
+		return nil, fmt.Errorf("creating adapter prober: %w", err)
 	}
 
 	return &blockchainService{
 		multicallClient: multicallClient,
 		morphoBlueABI:   morphoABI,
 		metaMorphoABI:   metaMorphoABI,
+		adapterABI:      adapterABI,
+		vaultV2ABI:      vaultV2ABI,
 		erc20ABI:        erc20ABI,
 		vaultProber:     vaultProber,
+		adapterProber:   adapterProber,
 		metadataCache:   make(map[common.Address]TokenMetadata),
 		telemetry:       telemetry,
 		logger:          logger.With("component", "morpho-blockchain-service"),
@@ -202,8 +227,12 @@ func (s *blockchainService) unpackBalance(result outbound.Result, label string, 
 	return bigIntFromAny(unpacked[0]), nil
 }
 
-// getMarketState fetches the market state from Morpho Blue at a specific block.
-func (s *blockchainService) getMarketState(ctx context.Context, marketID [32]byte, blockNumber int64) (retState *MarketState, retErr error) {
+// getMarketState fetches the market state from Morpho Blue, pinned to
+// blockHash: market() is versioned per-block state (totalSupplyAssets etc.
+// change every accrual), so after a reorg an archive node answering
+// eth_call-by-number would silently return the new canonical fork's state
+// instead of the state for the (blockNumber, version) this event belongs to.
+func (s *blockchainService) getMarketState(ctx context.Context, marketID [32]byte, blockHash common.Hash) (retState *MarketState, retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getMarketState",
 		attribute.String("market.id", fmt.Sprintf("%x", marketID[:8])))
 	defer span.End()
@@ -211,7 +240,7 @@ func (s *blockchainService) getMarketState(ctx context.Context, marketID [32]byt
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getMarketState", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getMarketState failed")
+			telemetry.SetSpanError(span, retErr, "getMarketState failed")
 		}
 	}()
 
@@ -220,11 +249,11 @@ func (s *blockchainService) getMarketState(ctx context.Context, marketID [32]byt
 		return nil, fmt.Errorf("packing market call: %w", err)
 	}
 
-	results, err := s.multicallClient.Execute(ctx, []outbound.Call{{
+	results, err := s.multicallClient.ExecuteAtHash(ctx, []outbound.Call{{
 		Target:       MorphoBlueAddress,
 		AllowFailure: false,
 		CallData:     callData,
-	}}, big.NewInt(blockNumber))
+	}}, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("multicall market(): %w", err)
 	}
@@ -236,7 +265,11 @@ func (s *blockchainService) getMarketState(ctx context.Context, marketID [32]byt
 	return s.unpackMarketState(results[0])
 }
 
-// getMarketParams fetches market parameters from Morpho Blue.
+// getMarketParams fetches market parameters from Morpho Blue. Number-pinned
+// intentionally: a market's params (loanToken, collateralToken, oracle, irm,
+// LLTV) are immutable once CreateMarket runs, so this is structurally static
+// identity data, not versioned state — the reorg-correctness concern behind
+// ExecuteAtHash (VEC-471) doesn't apply here.
 func (s *blockchainService) getMarketParams(ctx context.Context, marketID [32]byte, blockNumber int64) (retState *MarketParamsState, retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getMarketParams",
 		attribute.String("market.id", fmt.Sprintf("%x", marketID[:8])))
@@ -245,7 +278,7 @@ func (s *blockchainService) getMarketParams(ctx context.Context, marketID [32]by
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getMarketParams", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getMarketParams failed")
+			telemetry.SetSpanError(span, retErr, "getMarketParams failed")
 		}
 	}()
 
@@ -302,8 +335,9 @@ func (s *blockchainService) getMarketParams(ctx context.Context, marketID [32]by
 	}, nil
 }
 
-// getMarketAndPositionState fetches both market and position state in a single Multicall3 batch.
-func (s *blockchainService) getMarketAndPositionState(ctx context.Context, marketID [32]byte, user common.Address, blockNumber int64) (retMS *MarketState, retPS *PositionState, retErr error) {
+// getMarketAndPositionState fetches both market and position state in a
+// single Multicall3 batch, pinned to blockHash (see getMarketState for why).
+func (s *blockchainService) getMarketAndPositionState(ctx context.Context, marketID [32]byte, user common.Address, blockHash common.Hash) (retMS *MarketState, retPS *PositionState, retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getMarketAndPositionState",
 		attribute.String("market.id", fmt.Sprintf("%x", marketID[:8])))
 	defer span.End()
@@ -311,7 +345,7 @@ func (s *blockchainService) getMarketAndPositionState(ctx context.Context, marke
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getMarketAndPositionState", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getMarketAndPositionState failed")
+			telemetry.SetSpanError(span, retErr, "getMarketAndPositionState failed")
 		}
 	}()
 
@@ -325,10 +359,10 @@ func (s *blockchainService) getMarketAndPositionState(ctx context.Context, marke
 		return nil, nil, fmt.Errorf("packing position call: %w", err)
 	}
 
-	results, err := s.multicallClient.Execute(ctx, []outbound.Call{
+	results, err := s.multicallClient.ExecuteAtHash(ctx, []outbound.Call{
 		{Target: MorphoBlueAddress, AllowFailure: false, CallData: marketCallData},
 		{Target: MorphoBlueAddress, AllowFailure: false, CallData: positionCallData},
-	}, big.NewInt(blockNumber))
+	}, blockHash)
 	if err != nil {
 		return nil, nil, fmt.Errorf("multicall market+position: %w", err)
 	}
@@ -350,9 +384,10 @@ func (s *blockchainService) getMarketAndPositionState(ctx context.Context, marke
 	return ms, ps, nil
 }
 
-// getMarketAndTwoPositionStates fetches market state and two user positions in a single Multicall3 batch.
+// getMarketAndTwoPositionStates fetches market state and two user positions in
+// a single Multicall3 batch, pinned to blockHash (see getMarketState for why).
 // Used by liquidation events where we need the borrower and liquidator positions.
-func (s *blockchainService) getMarketAndTwoPositionStates(ctx context.Context, marketID [32]byte, userA, userB common.Address, blockNumber int64) (retMS *MarketState, retPSA *PositionState, retPSB *PositionState, retErr error) {
+func (s *blockchainService) getMarketAndTwoPositionStates(ctx context.Context, marketID [32]byte, userA, userB common.Address, blockHash common.Hash) (retMS *MarketState, retPSA *PositionState, retPSB *PositionState, retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getMarketAndTwoPositionStates",
 		attribute.String("market.id", fmt.Sprintf("%x", marketID[:8])))
 	defer span.End()
@@ -360,7 +395,7 @@ func (s *blockchainService) getMarketAndTwoPositionStates(ctx context.Context, m
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getMarketAndTwoPositionStates", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getMarketAndTwoPositionStates failed")
+			telemetry.SetSpanError(span, retErr, "getMarketAndTwoPositionStates failed")
 		}
 	}()
 
@@ -379,11 +414,11 @@ func (s *blockchainService) getMarketAndTwoPositionStates(ctx context.Context, m
 		return nil, nil, nil, fmt.Errorf("packing position(B) call: %w", err)
 	}
 
-	results, err := s.multicallClient.Execute(ctx, []outbound.Call{
+	results, err := s.multicallClient.ExecuteAtHash(ctx, []outbound.Call{
 		{Target: MorphoBlueAddress, AllowFailure: false, CallData: marketCallData},
 		{Target: MorphoBlueAddress, AllowFailure: false, CallData: posACallData},
 		{Target: MorphoBlueAddress, AllowFailure: false, CallData: posBCallData},
-	}, big.NewInt(blockNumber))
+	}, blockHash)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("multicall market+position(A)+position(B): %w", err)
 	}
@@ -410,8 +445,9 @@ func (s *blockchainService) getMarketAndTwoPositionStates(ctx context.Context, m
 	return ms, psA, psB, nil
 }
 
-// getVaultState fetches vault total assets and total supply in a single Multicall3 batch.
-func (s *blockchainService) getVaultState(ctx context.Context, vaultAddress common.Address, blockNumber int64) (retState *VaultState, retErr error) {
+// getVaultState fetches vault total assets and total supply in a single
+// Multicall3 batch, pinned to blockHash (see getMarketState for why).
+func (s *blockchainService) getVaultState(ctx context.Context, vaultAddress common.Address, blockHash common.Hash) (retState *VaultState, retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getVaultState",
 		attribute.String("vault.address", vaultAddress.Hex()))
 	defer span.End()
@@ -419,7 +455,7 @@ func (s *blockchainService) getVaultState(ctx context.Context, vaultAddress comm
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getVaultState", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getVaultState failed")
+			telemetry.SetSpanError(span, retErr, "getVaultState failed")
 		}
 	}()
 
@@ -433,10 +469,10 @@ func (s *blockchainService) getVaultState(ctx context.Context, vaultAddress comm
 		return nil, fmt.Errorf("packing totalSupply call: %w", err)
 	}
 
-	results, err := s.multicallClient.Execute(ctx, []outbound.Call{
+	results, err := s.multicallClient.ExecuteAtHash(ctx, []outbound.Call{
 		{Target: vaultAddress, AllowFailure: false, CallData: totalAssetsData},
 		{Target: vaultAddress, AllowFailure: false, CallData: totalSupplyData},
-	}, big.NewInt(blockNumber))
+	}, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("multicall vault state: %w", err)
 	}
@@ -448,8 +484,9 @@ func (s *blockchainService) getVaultState(ctx context.Context, vaultAddress comm
 	return s.unpackVaultState(results[0], results[1], vaultAddress)
 }
 
-// getVaultStateAndBalance fetches vault state and a user's balance in a single Multicall3 batch.
-func (s *blockchainService) getVaultStateAndBalance(ctx context.Context, vaultAddress common.Address, user common.Address, blockNumber int64) (retVS *VaultState, retBalance *big.Int, retErr error) {
+// getVaultStateAndBalance fetches vault state and a user's balance in a
+// single Multicall3 batch, pinned to blockHash (see getMarketState for why).
+func (s *blockchainService) getVaultStateAndBalance(ctx context.Context, vaultAddress common.Address, user common.Address, blockHash common.Hash) (retVS *VaultState, retBalance *big.Int, retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getVaultStateAndBalance",
 		attribute.String("vault.address", vaultAddress.Hex()))
 	defer span.End()
@@ -457,7 +494,7 @@ func (s *blockchainService) getVaultStateAndBalance(ctx context.Context, vaultAd
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getVaultStateAndBalance", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getVaultStateAndBalance failed")
+			telemetry.SetSpanError(span, retErr, "getVaultStateAndBalance failed")
 		}
 	}()
 
@@ -474,11 +511,11 @@ func (s *blockchainService) getVaultStateAndBalance(ctx context.Context, vaultAd
 		return nil, nil, fmt.Errorf("packing balanceOf call: %w", err)
 	}
 
-	results, err := s.multicallClient.Execute(ctx, []outbound.Call{
+	results, err := s.multicallClient.ExecuteAtHash(ctx, []outbound.Call{
 		{Target: vaultAddress, AllowFailure: false, CallData: totalAssetsData},
 		{Target: vaultAddress, AllowFailure: false, CallData: totalSupplyData},
 		{Target: vaultAddress, AllowFailure: false, CallData: balanceData},
-	}, big.NewInt(blockNumber))
+	}, blockHash)
 	if err != nil {
 		return nil, nil, fmt.Errorf("multicall vault state+balance: %w", err)
 	}
@@ -500,9 +537,10 @@ func (s *blockchainService) getVaultStateAndBalance(ctx context.Context, vaultAd
 	return vs, balance, nil
 }
 
-// getVaultStateAndTwoBalances fetches vault state and two user balances in a single Multicall3 batch.
+// getVaultStateAndTwoBalances fetches vault state and two user balances in a
+// single Multicall3 batch, pinned to blockHash (see getMarketState for why).
 // Used by vault Transfer events where we need both sender and receiver balances.
-func (s *blockchainService) getVaultStateAndTwoBalances(ctx context.Context, vaultAddress common.Address, userA, userB common.Address, blockNumber int64) (retVS *VaultState, retBalA *big.Int, retBalB *big.Int, retErr error) {
+func (s *blockchainService) getVaultStateAndTwoBalances(ctx context.Context, vaultAddress common.Address, userA, userB common.Address, blockHash common.Hash) (retVS *VaultState, retBalA *big.Int, retBalB *big.Int, retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getVaultStateAndTwoBalances",
 		attribute.String("vault.address", vaultAddress.Hex()))
 	defer span.End()
@@ -510,7 +548,7 @@ func (s *blockchainService) getVaultStateAndTwoBalances(ctx context.Context, vau
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getVaultStateAndTwoBalances", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getVaultStateAndTwoBalances failed")
+			telemetry.SetSpanError(span, retErr, "getVaultStateAndTwoBalances failed")
 		}
 	}()
 
@@ -531,12 +569,12 @@ func (s *blockchainService) getVaultStateAndTwoBalances(ctx context.Context, vau
 		return nil, nil, nil, fmt.Errorf("packing balanceOf(B) call: %w", err)
 	}
 
-	results, err := s.multicallClient.Execute(ctx, []outbound.Call{
+	results, err := s.multicallClient.ExecuteAtHash(ctx, []outbound.Call{
 		{Target: vaultAddress, AllowFailure: false, CallData: totalAssetsData},
 		{Target: vaultAddress, AllowFailure: false, CallData: totalSupplyData},
 		{Target: vaultAddress, AllowFailure: false, CallData: balanceAData},
 		{Target: vaultAddress, AllowFailure: false, CallData: balanceBData},
-	}, big.NewInt(blockNumber))
+	}, blockHash)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("multicall vault state+2 balances: %w", err)
 	}
@@ -563,6 +601,438 @@ func (s *blockchainService) getVaultStateAndTwoBalances(ctx context.Context, vau
 	return vs, balA, balB, nil
 }
 
+// getAdapterType classifies a VaultV2 liquidity adapter (MarketV1 / VaultV1 /
+// Unknown). Number-pinned intentionally: adapter identity is immutable, same
+// rationale as getMarketParams (see VEC-471). A both-fail / both-succeed probe
+// yields MorphoAdapterTypeUnknown with a nil error (the caller WARNs and still
+// records it); only a transport error propagates.
+func (s *blockchainService) getAdapterType(ctx context.Context, adapter common.Address, blockNumber int64) (retType entity.MorphoAdapterType, retErr error) {
+	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getAdapterType",
+		attribute.String("adapter.address", adapter.Hex()))
+	defer span.End()
+	start := time.Now()
+	defer func() {
+		s.telemetry.RecordRPCCall(ctx, "getAdapterType", time.Since(start), retErr)
+		if retErr != nil {
+			telemetry.SetSpanError(span, retErr, "getAdapterType failed")
+		}
+	}()
+
+	return s.adapterProber.ProbeAdapterType(ctx, s.multicallClient, adapter, big.NewInt(blockNumber))
+}
+
+// errAdapterRealAssetsReverted reports that the adapter's realAssets() call itself
+// reverted, as opposed to the multicall failing to reach the node. Only the
+// registration seed for an adapter the type probe could not classify treats it as
+// "no reading to record"; every other caller treats it as an error. See
+// Service.readSeedRealAssets for why the distinction is structural rather than
+// best-effort.
+var errAdapterRealAssetsReverted = errors.New("realAssets() reverted")
+
+// getAdapterRealAssets reads an adapter's realAssets() — the assets it reports
+// holding in its downstream venue — pinned to blockHash. This is versioned
+// per-block state (it changes every allocation / accrual), so it uses
+// ExecuteAtHash for reorg-correctness (see getMarketState / VEC-471), not
+// number-pinning.
+//
+// The call is AllowFailure purely so a revert is reportable as
+// errAdapterRealAssetsReverted rather than reverting the whole batch; it is still an
+// error here, and only one caller is allowed to tolerate that specific error.
+func (s *blockchainService) getAdapterRealAssets(ctx context.Context, adapter common.Address, blockHash common.Hash) (retAssets *big.Int, retErr error) {
+	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getAdapterRealAssets",
+		attribute.String("adapter.address", adapter.Hex()))
+	defer span.End()
+	start := time.Now()
+	defer func() {
+		s.telemetry.RecordRPCCall(ctx, "getAdapterRealAssets", time.Since(start), retErr)
+		if retErr != nil {
+			telemetry.SetSpanError(span, retErr, "getAdapterRealAssets failed")
+		}
+	}()
+
+	callData, err := s.adapterABI.Pack("realAssets")
+	if err != nil {
+		return nil, fmt.Errorf("packing realAssets call: %w", err)
+	}
+
+	results, err := s.multicallClient.ExecuteAtHash(ctx, []outbound.Call{{
+		Target:       adapter,
+		AllowFailure: true,
+		CallData:     callData,
+	}}, blockHash)
+	if err != nil {
+		return nil, fmt.Errorf("multicall realAssets(): %w", err)
+	}
+	if len(results) == 0 {
+		return nil, fmt.Errorf("realAssets() returned no result for adapter %s", adapter.Hex())
+	}
+	if !results[0].Success || len(results[0].ReturnData) == 0 {
+		return nil, fmt.Errorf("adapter %s: %w", adapter.Hex(), errAdapterRealAssetsReverted)
+	}
+
+	unpacked, err := s.adapterABI.Unpack("realAssets", results[0].ReturnData)
+	if err != nil {
+		return nil, fmt.Errorf("unpacking realAssets() for adapter %s: %w", adapter.Hex(), err)
+	}
+	if len(unpacked) == 0 {
+		return nil, fmt.Errorf("realAssets() returned no values for adapter %s", adapter.Hex())
+	}
+	return bigIntFromAny(unpacked[0]), nil
+}
+
+// enumerateVaultAdapters reads a VaultV2's registered adapter set via
+// adaptersLength() then adapters(i), pinned to blockHash. The adapter SET is
+// versioned per-block state — AddAdapter/RemoveAdapter mutate it — NOT immutable
+// identity, so it is hash-pinned (ExecuteAtHash) for reorg-correctness (VEC-471),
+// matching the per-adapter realAssets() seeds the caller reads at the same hash;
+// a number-pinned read could straddle a reorg relative to those seeds. Used by
+// discovery-time enumeration to seed the registry for a V2 vault found mid-life,
+// whose historical AddAdapter events never replay on the live stream.
+func (s *blockchainService) enumerateVaultAdapters(ctx context.Context, vaultAddress common.Address, blockHash common.Hash) (retAdapters []common.Address, retErr error) {
+	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.enumerateVaultAdapters",
+		attribute.String("vault.address", vaultAddress.Hex()))
+	defer span.End()
+	start := time.Now()
+	defer func() {
+		s.telemetry.RecordRPCCall(ctx, "enumerateVaultAdapters", time.Since(start), retErr)
+		if retErr != nil {
+			telemetry.SetSpanError(span, retErr, "enumerateVaultAdapters failed")
+		}
+	}()
+
+	n, err := s.readAdaptersLength(ctx, vaultAddress, blockHash)
+	if err != nil {
+		return nil, err
+	}
+	if n == 0 {
+		return nil, nil
+	}
+	return s.readAdapterAddresses(ctx, vaultAddress, blockHash, n)
+}
+
+// maxVaultAdapters bounds adaptersLength() before the value sizes any allocation.
+// It is hostile-input protection, not a chain fact: a VaultV2's adapter set is
+// governance-curated and real vaults hold dozens, but any contract that classifies
+// as a VaultV2 can return an arbitrary uint256 here, and feeding that straight to
+// make() panics in makeslice (or OOMs). The SQS consume path has no recover(), so a
+// panic crashloops the worker and stalls all Morpho indexing; an error above the
+// bound poison-pills just the offending message instead.
+const maxVaultAdapters = 1000
+
+// adaptersPerCall bounds how many adapters(i) sub-calls one multicall aggregate
+// carries, so a vault near maxVaultAdapters cannot build a request that exceeds an
+// RPC provider's request/response/gas caps (same rationale as uniswapv3's
+// ticksPerCall).
+const adaptersPerCall = 500
+
+// readAdaptersLength reads adaptersLength() at blockHash and validates it against
+// maxVaultAdapters before it is used as a length.
+func (s *blockchainService) readAdaptersLength(ctx context.Context, vaultAddress common.Address, blockHash common.Hash) (int, error) {
+	lengthData, err := s.vaultV2ABI.Pack("adaptersLength")
+	if err != nil {
+		return 0, fmt.Errorf("packing adaptersLength call: %w", err)
+	}
+	lengthResults, err := s.multicallClient.ExecuteAtHash(ctx, []outbound.Call{
+		{Target: vaultAddress, AllowFailure: false, CallData: lengthData},
+	}, blockHash)
+	if err != nil {
+		return 0, fmt.Errorf("multicall adaptersLength(): %w", err)
+	}
+	if len(lengthResults) == 0 || !lengthResults[0].Success || len(lengthResults[0].ReturnData) == 0 {
+		return 0, fmt.Errorf("adaptersLength() call failed for vault %s", vaultAddress.Hex())
+	}
+	lengthUnpacked, err := s.vaultV2ABI.Unpack("adaptersLength", lengthResults[0].ReturnData)
+	if err != nil {
+		return 0, fmt.Errorf("unpacking adaptersLength() for vault %s: %w", vaultAddress.Hex(), err)
+	}
+	if len(lengthUnpacked) == 0 {
+		return 0, fmt.Errorf("adaptersLength() returned no values for vault %s", vaultAddress.Hex())
+	}
+	length := bigIntFromAny(lengthUnpacked[0])
+	if !length.IsInt64() || length.Sign() < 0 || length.Int64() > maxVaultAdapters {
+		return 0, fmt.Errorf("adaptersLength() returned implausible length %s for vault %s (bound %d)",
+			length.String(), vaultAddress.Hex(), maxVaultAdapters)
+	}
+	return int(length.Int64()), nil
+}
+
+// readAdapterAddresses reads adapters(0..n-1) at blockHash in bounded multicall
+// batches (adaptersPerCall), decoding every result positionally so the returned
+// slice keeps the vault's own registry order.
+func (s *blockchainService) readAdapterAddresses(ctx context.Context, vaultAddress common.Address, blockHash common.Hash, n int) ([]common.Address, error) {
+	indices := make([]int, n)
+	for i := range n {
+		indices[i] = i
+	}
+
+	adapters := make([]common.Address, 0, n)
+	for chunk := range slices.Chunk(indices, adaptersPerCall) {
+		chunkAdapters, err := s.readAdapterAddressChunk(ctx, vaultAddress, blockHash, chunk)
+		if err != nil {
+			return nil, err
+		}
+		adapters = append(adapters, chunkAdapters...)
+	}
+	return adapters, nil
+}
+
+// readAdapterAddressChunk issues one adapters(i) multicall for a bounded batch of
+// registry indices and decodes every result.
+func (s *blockchainService) readAdapterAddressChunk(ctx context.Context, vaultAddress common.Address, blockHash common.Hash, indices []int) ([]common.Address, error) {
+	calls := make([]outbound.Call, len(indices))
+	for i, index := range indices {
+		callData, err := s.vaultV2ABI.Pack("adapters", big.NewInt(int64(index)))
+		if err != nil {
+			return nil, fmt.Errorf("packing adapters(%d) call: %w", index, err)
+		}
+		calls[i] = outbound.Call{Target: vaultAddress, AllowFailure: false, CallData: callData}
+	}
+	results, err := s.multicallClient.ExecuteAtHash(ctx, calls, blockHash)
+	if err != nil {
+		return nil, fmt.Errorf("multicall adapters(i): %w", err)
+	}
+	if len(results) != len(indices) {
+		return nil, fmt.Errorf("adapters(i) returned %d results, want %d for vault %s", len(results), len(indices), vaultAddress.Hex())
+	}
+
+	adapters := make([]common.Address, len(indices))
+	for i, r := range results {
+		addr, err := s.unpackAdapterAddress(r, indices[i], vaultAddress)
+		if err != nil {
+			return nil, err
+		}
+		adapters[i] = addr
+	}
+	return adapters, nil
+}
+
+// unpackAdapterAddress validates and decodes one adapters(i) result.
+func (s *blockchainService) unpackAdapterAddress(result outbound.Result, index int, vaultAddress common.Address) (common.Address, error) {
+	if !result.Success || len(result.ReturnData) == 0 {
+		return common.Address{}, fmt.Errorf("adapters(%d) call failed for vault %s", index, vaultAddress.Hex())
+	}
+	unpacked, err := s.vaultV2ABI.Unpack("adapters", result.ReturnData)
+	if err != nil {
+		return common.Address{}, fmt.Errorf("unpacking adapters(%d) for vault %s: %w", index, vaultAddress.Hex(), err)
+	}
+	if len(unpacked) == 0 {
+		return common.Address{}, fmt.Errorf("adapters(%d) returned no values for vault %s", index, vaultAddress.Hex())
+	}
+	addr, ok := unpacked[0].(common.Address)
+	if !ok {
+		return common.Address{}, fmt.Errorf("adapters(%d) returned unexpected type %T for vault %s", index, unpacked[0], vaultAddress.Hex())
+	}
+	return addr, nil
+}
+
+// getVaultCaps reads the two current allocation limits for a cap id off the
+// VaultV2, pinned to blockHash. absoluteCap/relativeCap are per-block state (a
+// cap event mutates them), so like getAdapterRealAssets this is a hash-pinned
+// ExecuteAtHash read for reorg-correctness (VEC-471), not number-pinning. Both
+// getters exist on every VaultV2 and cannot fail for a real cap id, so neither
+// call is AllowFailure: a revert is a real error that must stop the event.
+func (s *blockchainService) getVaultCaps(ctx context.Context, vault common.Address, capID [32]byte, blockHash common.Hash) (retAbsolute, retRelative *big.Int, retErr error) {
+	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getVaultCaps",
+		attribute.String("vault.address", vault.Hex()))
+	defer span.End()
+	start := time.Now()
+	defer func() {
+		s.telemetry.RecordRPCCall(ctx, "getVaultCaps", time.Since(start), retErr)
+		if retErr != nil {
+			telemetry.SetSpanError(span, retErr, "getVaultCaps failed")
+		}
+	}()
+
+	absoluteCallData, err := s.vaultV2ABI.Pack("absoluteCap", capID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("packing absoluteCap call: %w", err)
+	}
+	relativeCallData, err := s.vaultV2ABI.Pack("relativeCap", capID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("packing relativeCap call: %w", err)
+	}
+
+	results, err := s.multicallClient.ExecuteAtHash(ctx, []outbound.Call{
+		{Target: vault, AllowFailure: false, CallData: absoluteCallData},
+		{Target: vault, AllowFailure: false, CallData: relativeCallData},
+	}, blockHash)
+	if err != nil {
+		return nil, nil, fmt.Errorf("multicall absoluteCap()/relativeCap(): %w", err)
+	}
+	if len(results) != 2 {
+		return nil, nil, fmt.Errorf("cap getters returned %d results, want 2", len(results))
+	}
+
+	absolute, err := s.unpackVaultCap("absoluteCap", results[0], vault, capID)
+	if err != nil {
+		return nil, nil, err
+	}
+	relative, err := s.unpackVaultCap("relativeCap", results[1], vault, capID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return absolute, relative, nil
+}
+
+// unpackVaultCap validates and decodes one absoluteCap()/relativeCap() result.
+func (s *blockchainService) unpackVaultCap(method string, result outbound.Result, vault common.Address, capID [32]byte) (*big.Int, error) {
+	if !result.Success || len(result.ReturnData) == 0 {
+		return nil, fmt.Errorf("%s() call failed for vault %s cap %x", method, vault.Hex(), capID)
+	}
+	unpacked, err := s.vaultV2ABI.Unpack(method, result.ReturnData)
+	if err != nil {
+		return nil, fmt.Errorf("unpacking %s() for vault %s: %w", method, vault.Hex(), err)
+	}
+	if len(unpacked) == 0 {
+		return nil, fmt.Errorf("%s() returned no values for vault %s cap %x", method, vault.Hex(), capID)
+	}
+	return bigIntFromAny(unpacked[0]), nil
+}
+
+// vaultFeeConfig is the full on-chain fee configuration of a VaultV2 at a block:
+// both fees (raw uint96 WAD, unscaled) and both recipient addresses.
+type vaultFeeConfig struct {
+	performanceFee          *big.Int
+	managementFee           *big.Int
+	performanceFeeRecipient common.Address
+	managementFeeRecipient  common.Address
+}
+
+// errNoVaultFeeSurface reports that a contract serves NONE of the four VaultV2 fee
+// getters. The vault probe only proves curator() and liquidityAdapter() answer, so a
+// vault-shaped address that is not a factory-deployed VaultV2 can pass it and still
+// have no fee surface at all; the discovery seed treats that as "no fee config to
+// record" rather than a failure, because hard-requiring the getters poisoned such an
+// address's discovery forever. Callers reacting to a Set* fee EVENT must still treat
+// it as an error: the event proves the surface exists.
+var errNoVaultFeeSurface = errors.New("contract serves none of the VaultV2 fee getters")
+
+// getVaultFees reads the vault's full fee configuration off the VaultV2, pinned
+// to blockHash. The fee config is per-block state (a Set* fee event mutates it),
+// so like getVaultCaps this is a hash-pinned ExecuteAtHash read for
+// reorg-correctness (VEC-471), not number-pinning.
+//
+// The four getters are AllowFailure so that "this contract has no fee surface at
+// all" is distinguishable from "one getter reverted", which is drift on a contract
+// that does have it. All-or-nothing is the only sane split: a real VaultV2 answers
+// all four, so a partial answer is never a valid shape and errors (see
+// assertFeeSurfaceComplete), while none-of-four returns errNoVaultFeeSurface for the
+// caller to decide on.
+func (s *blockchainService) getVaultFees(ctx context.Context, vault common.Address, blockHash common.Hash) (retFees *vaultFeeConfig, retErr error) {
+	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getVaultFees",
+		attribute.String("vault.address", vault.Hex()))
+	defer span.End()
+	start := time.Now()
+	defer func() {
+		s.telemetry.RecordRPCCall(ctx, "getVaultFees", time.Since(start), retErr)
+		if retErr != nil {
+			telemetry.SetSpanError(span, retErr, "getVaultFees failed")
+		}
+	}()
+
+	// Order matches the unpack below: performanceFee, managementFee,
+	// performanceFeeRecipient, managementFeeRecipient.
+	methods := []string{"performanceFee", "managementFee", "performanceFeeRecipient", "managementFeeRecipient"}
+	calls := make([]outbound.Call, len(methods))
+	for i, m := range methods {
+		callData, err := s.vaultV2ABI.Pack(m)
+		if err != nil {
+			return nil, fmt.Errorf("packing %s() call: %w", m, err)
+		}
+		calls[i] = outbound.Call{Target: vault, AllowFailure: true, CallData: callData}
+	}
+
+	results, err := s.multicallClient.ExecuteAtHash(ctx, calls, blockHash)
+	if err != nil {
+		return nil, fmt.Errorf("multicall vault fee getters: %w", err)
+	}
+	if len(results) != len(methods) {
+		return nil, fmt.Errorf("vault fee getters returned %d results, want %d", len(results), len(methods))
+	}
+	if err := assertFeeSurfaceComplete(methods, results, vault); err != nil {
+		return nil, err
+	}
+
+	performanceFee, err := s.unpackVaultFeeUint("performanceFee", results[0], vault)
+	if err != nil {
+		return nil, err
+	}
+	managementFee, err := s.unpackVaultFeeUint("managementFee", results[1], vault)
+	if err != nil {
+		return nil, err
+	}
+	performanceFeeRecipient, err := s.unpackVaultFeeAddress("performanceFeeRecipient", results[2], vault)
+	if err != nil {
+		return nil, err
+	}
+	managementFeeRecipient, err := s.unpackVaultFeeAddress("managementFeeRecipient", results[3], vault)
+	if err != nil {
+		return nil, err
+	}
+	return &vaultFeeConfig{
+		performanceFee:          performanceFee,
+		managementFee:           managementFee,
+		performanceFeeRecipient: performanceFeeRecipient,
+		managementFeeRecipient:  managementFeeRecipient,
+	}, nil
+}
+
+// assertFeeSurfaceComplete classifies a fee-getter batch: all four served is the
+// only shape a real VaultV2 produces, none served means the contract has no fee
+// surface (errNoVaultFeeSurface), and anything in between is drift the caller must
+// stop on — the message names which getters reverted so the vault can be inspected.
+func assertFeeSurfaceComplete(methods []string, results []outbound.Result, vault common.Address) error {
+	var reverted []string
+	for i, m := range methods {
+		if !results[i].Success || len(results[i].ReturnData) == 0 {
+			reverted = append(reverted, m)
+		}
+	}
+	switch len(reverted) {
+	case 0:
+		return nil
+	case len(methods):
+		return fmt.Errorf("vault %s: %w", vault.Hex(), errNoVaultFeeSurface)
+	default:
+		return fmt.Errorf("vault %s served %d of %d VaultV2 fee getters (%s reverted): a VaultV2 serves all four, so this is contract drift, not a missing fee surface",
+			vault.Hex(), len(methods)-len(reverted), len(methods), strings.Join(reverted, ", "))
+	}
+}
+
+// unpackVaultFeeUint validates and decodes one uint fee getter result.
+func (s *blockchainService) unpackVaultFeeUint(method string, result outbound.Result, vault common.Address) (*big.Int, error) {
+	if !result.Success || len(result.ReturnData) == 0 {
+		return nil, fmt.Errorf("%s() call failed for vault %s", method, vault.Hex())
+	}
+	unpacked, err := s.vaultV2ABI.Unpack(method, result.ReturnData)
+	if err != nil {
+		return nil, fmt.Errorf("unpacking %s() for vault %s: %w", method, vault.Hex(), err)
+	}
+	if len(unpacked) == 0 {
+		return nil, fmt.Errorf("%s() returned no values for vault %s", method, vault.Hex())
+	}
+	return bigIntFromAny(unpacked[0]), nil
+}
+
+// unpackVaultFeeAddress validates and decodes one address fee-recipient getter result.
+func (s *blockchainService) unpackVaultFeeAddress(method string, result outbound.Result, vault common.Address) (common.Address, error) {
+	if !result.Success || len(result.ReturnData) == 0 {
+		return common.Address{}, fmt.Errorf("%s() call failed for vault %s", method, vault.Hex())
+	}
+	unpacked, err := s.vaultV2ABI.Unpack(method, result.ReturnData)
+	if err != nil {
+		return common.Address{}, fmt.Errorf("unpacking %s() for vault %s: %w", method, vault.Hex(), err)
+	}
+	if len(unpacked) == 0 {
+		return common.Address{}, fmt.Errorf("%s() returned no values for vault %s", method, vault.Hex())
+	}
+	addr, ok := unpacked[0].(common.Address)
+	if !ok {
+		return common.Address{}, fmt.Errorf("%s() returned unexpected type %T for vault %s", method, unpacked[0], vault.Hex())
+	}
+	return addr, nil
+}
+
 // getVaultMetadata identifies whether a contract is a Morpho-family vault
 // (MetaMorpho V1 / V1.1 or VaultV2), then fetches its metadata.
 //
@@ -576,6 +1046,10 @@ func (s *blockchainService) getVaultStateAndTwoBalances(ctx context.Context, vau
 // singleton; we reject any MetaMorpho probe whose MORPHO() points elsewhere.
 // VaultV2 has no MORPHO() function and is identified by curator() and
 // liquidityAdapter() in vault_probe.go.
+//
+// Number-pinned intentionally (delegates to vault_probe.go's Execute calls):
+// vault identity (MORPHO/asset/curator/liquidityAdapter, name/symbol/decimals)
+// is structurally static, not versioned state — see VEC-471.
 func (s *blockchainService) getVaultMetadata(ctx context.Context, vaultAddress common.Address, blockNumber int64) (retMD *VaultMetadata, retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getVaultMetadata",
 		attribute.String("vault.address", vaultAddress.Hex()))
@@ -584,7 +1058,7 @@ func (s *blockchainService) getVaultMetadata(ctx context.Context, vaultAddress c
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getVaultMetadata", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getVaultMetadata failed")
+			telemetry.SetSpanError(span, retErr, "getVaultMetadata failed")
 		}
 	}()
 
@@ -642,6 +1116,9 @@ func (s *blockchainService) fetchVaultDetails(ctx context.Context, vaultAddress 
 var zeroAddressTokenMetadata = TokenMetadata{Symbol: "", Decimals: 0}
 
 // getTokenMetadata fetches token symbol and decimals via ERC20 calls.
+// Number-pinned intentionally: symbol/decimals are structurally static
+// identity data (immutable per token contract), not versioned state — the
+// reorg-correctness concern behind ExecuteAtHash (VEC-471) doesn't apply here.
 //
 // symbol() is best-effort: a reverted or undecodable symbol() yields
 // Symbol="" with no error; the per-block sweep retries it later.
@@ -664,7 +1141,7 @@ func (s *blockchainService) getTokenMetadata(ctx context.Context, tokenAddress c
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getTokenMetadata", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getTokenMetadata failed")
+			telemetry.SetSpanError(span, retErr, "getTokenMetadata failed")
 		}
 	}()
 
@@ -749,6 +1226,8 @@ func (s *blockchainService) unpackTokenMetadataResults(symbolResult, decimalsRes
 // getTokenPairMetadata fetches metadata for two tokens in a single Multicall3 batch.
 // Respects the metadata cache — if both are cached, no RPC call is made; if one is cached,
 // only the uncached token's calls are included in the batch.
+// Number-pinned intentionally, same rationale as getTokenMetadata: symbol/
+// decimals are static identity data, not versioned state.
 //
 // Either token may be the zero address (Morpho Blue idle markets use
 // collateralToken = 0x0); the zero side is short-circuited to
@@ -784,7 +1263,7 @@ func (s *blockchainService) getTokenPairMetadata(ctx context.Context, tokenA, to
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getTokenPairMetadata", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getTokenPairMetadata failed")
+			telemetry.SetSpanError(span, retErr, "getTokenPairMetadata failed")
 		}
 	}()
 
@@ -857,7 +1336,10 @@ func (s *blockchainService) getTokenPairMetadata(ctx context.Context, tokenA, to
 // block currently being processed, never head). It returns only the tokens
 // whose symbol() succeeded and decoded; tokens still reverting are omitted so
 // the caller leaves them pending. The in-process metadata cache is refreshed for
-// resolved tokens that are already cached.
+// resolved tokens that are already cached. Number-pinned intentionally, same
+// rationale as getTokenMetadata: symbol() is static identity data, not
+// versioned state; the sweep also has no BlockEvent in scope to source a hash
+// from (reconcilePendingSymbols runs off chainID+blockNumber alone).
 func (s *blockchainService) resolveSymbolsAt(ctx context.Context, tokens []common.Address, blockNumber int64) (map[common.Address]string, error) {
 	resolved := make(map[common.Address]string, len(tokens))
 	if len(tokens) == 0 {

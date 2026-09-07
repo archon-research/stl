@@ -10,6 +10,50 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 )
 
+// BlockDataExpectation declares which block data types a chain's watcher fetches
+// and caches for every block. It is a chain fact with two readers: a tool that
+// re-publishes a block must produce exactly this set, and a consumer of the
+// block feed may expect to find exactly this set.
+type BlockDataExpectation struct {
+	// ExpectReceipts indicates receipts data is required for this chain.
+	ExpectReceipts bool
+	// ExpectTraces indicates traces data is required for this chain.
+	ExpectTraces bool
+	// ExpectBlobs indicates blob sidecars are required for this chain.
+	ExpectBlobs bool
+}
+
+// DefaultChainExpectations returns the expectations for known chains. These MUST
+// mirror what each chain's watcher actually caches: receipts are always fetched,
+// but traces only when the watcher runs without --enable-traces=false. Today only
+// the ethereum watcher fetches traces; every other chain's watcher sets
+// --enable-traces=false (avalanche and arbitrum have no trace_block on Alchemy at
+// all; base/optimism/unichain support it but the watcher still does not fetch
+// it). Blobs are not fetched anywhere (--enable-blobs is false).
+func DefaultChainExpectations() map[int64]BlockDataExpectation {
+	return map[int64]BlockDataExpectation{
+		1:     {ExpectReceipts: true, ExpectTraces: true, ExpectBlobs: false},  // Ethereum Mainnet
+		43114: {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Avalanche C-Chain
+		8453:  {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Base
+		10:    {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Optimism
+		130:   {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Unichain
+		42161: {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Arbitrum
+		4663:  {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Robinhood Chain
+	}
+}
+
+// ChainSlug returns the name a chain's deployed resources are built from: its
+// raw bucket and blocks topic, and the Kubernetes and Temporal names derived
+// from them. It errors on a chain the repo does not watch, so a caller naming a
+// resource fails hard rather than building one nothing serves.
+func ChainSlug(chainID int64) (string, error) {
+	chainName, ok := entity.ChainIDToS3Bucket[chainID]
+	if !ok {
+		return "", fmt.Errorf("unknown chain ID %d", chainID)
+	}
+	return chainName, nil
+}
+
 // ValidateS3BucketForChain checks that the S3 bucket name has the expected prefix
 // for the given chain ID and deployment environment. This prevents accidentally
 // reading from or writing to the wrong chain's bucket.
@@ -28,9 +72,9 @@ func ValidateS3BucketForChain(chainID int64, bucket string, environment string) 
 		return fmt.Errorf("environment must not be empty")
 	}
 
-	chainName, ok := entity.ChainIDToS3Bucket[chainID]
-	if !ok {
-		return fmt.Errorf("unknown chain ID %d: cannot validate bucket name", chainID)
+	chainName, err := ChainSlug(chainID)
+	if err != nil {
+		return fmt.Errorf("%w: cannot validate bucket name", err)
 	}
 
 	expectedPrefix := fmt.Sprintf("stl-sentinel%s-%s-raw", environment, chainName)
@@ -58,9 +102,9 @@ func ValidateSNSTopicForChain(chainID int64, topicARN string, environment string
 		return fmt.Errorf("environment must not be empty")
 	}
 
-	chainName, ok := entity.ChainIDToS3Bucket[chainID]
-	if !ok {
-		return fmt.Errorf("unknown chain ID %d: cannot validate sns topic", chainID)
+	chainName, err := ChainSlug(chainID)
+	if err != nil {
+		return fmt.Errorf("%w: cannot validate sns topic", err)
 	}
 
 	expectedSuffix := fmt.Sprintf(":stl-sentinel%s-%s-blocks.fifo", environment, chainName)

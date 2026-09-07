@@ -1,9 +1,21 @@
 # ADR-0001: Local k8s with kind
 
-**Status**: Accepted  
-**Proposed**: @angelostheodosiadis  
-**Date**: 2026-03-03  
+**Status**: Accepted
+**Proposed**: @angelostheodosiadis
+**Date**: 2026-03-03
 **Deciders**: @vector
+
+> **Update (2026-06, VEC-339):** The decision below still stands (kind for local),
+> but the implementation has evolved since this ADR was proposed. Current reality:
+> - **Commands** are `make dev-up` (cold/warm auto-detected), `make dev-up-rebuild`
+>   (force cold), and `make dev-down` — not the `kind-up`/`kind-cold`/`kind-warm`/`kind-down`
+>   names sketched below.
+> - **Secrets** are loaded locally from `.env.secrets` at the repo root into a `stl-secrets`
+>   Secret (see `make kind-secrets`), not fetched from AWS Secrets Manager at pod startup.
+> - **Manifests** live under `k8s/overlays/dev` (a Kustomize overlay reusing the shared
+>   `k8s/base`, alongside prod/staging) plus local-only infra in `k8s/dev-infra/`.
+>
+> See [k8s/README.md](../../k8s/README.md) for the authoritative current layout and workflow.
 
 ## Context
 
