@@ -153,6 +153,8 @@ func TestPositionState(t *testing.T) {
 	psTestDealTypeCode(t, f)
 	// --- deal_type_code: the direct-INSERT path the materializer gates cannot reach ---
 	psTestDealTypeCodeDirectInsert(t, f)
+	// --- this migration must survive a re-apply (restore, partial-apply recovery) ---
+	psTestDealTypeCodeMigrationIsReRunnable(t, f)
 }
 
 // psTestRecencyGuard covers: recency guard
@@ -2100,7 +2102,7 @@ func psTestGuardsADataAssertion(t *testing.T, f *psFixture) {
 func psTestDealTypeCode(t *testing.T, f *psFixture) {
 	// dtRow is row() with the deal_type_code slot under the caller's control: an arbitrary SQL
 	// expression, or "" to omit the column entirely (the optional-contract case).
-	dtRow := func(ik, expr string) (string, string) {
+	dtRow := func(ik, expr string) string {
 		body := "(1::int,10::bigint,'" + ik + "'::text,'" + strings.Repeat("a", 40) + "'::text,5::numeric,"
 		cols := mppCols
 		if expr == "" {
@@ -2110,7 +2112,7 @@ func psTestDealTypeCode(t *testing.T, f *psFixture) {
 			body += expr + ","
 		}
 		body += "100::bigint,0::int,0::int,'2026-01-01'::timestamptz)"
-		return `SELECT * FROM (VALUES ` + body + `) ` + cols, cols
+		return `SELECT * FROM (VALUES ` + body + `) ` + cols
 	}
 	stored := func(t *testing.T, ik string) *string {
 		t.Helper()
@@ -2128,14 +2130,15 @@ func psTestDealTypeCode(t *testing.T, f *psFixture) {
 	t.Run("carried for every string type", func(t *testing.T) {
 		for _, c := range []struct{ name, expr, want string }{
 			{"text", "'LOAN'::text", "LOAN"},
-			{"varchar_bounded", "'BORROW'::varchar(16)", "BORROW"},
+			{"varchar_at_cap", "'BORROW'::varchar(63)", "BORROW"},
 			{"varchar_unbounded", "'COLLATERAL'::varchar", "COLLATERAL"},
-			{"bpchar_padded", "'LOAN'::char(8)", "LOAN"},
+			{"bpchar_padded", "'LOAN'::char(63)", "LOAN"},
 		} {
 			ik := "dt-carry-" + c.name
-			body, _ := dtRow(ik, c.expr)
+			body := dtRow(ik, c.expr)
 			if n := f.mppN(t, "pv_dt_carry_"+c.name, body, "carry"); n != 1 {
-				t.Fatalf("%s: inserted %d rows, want 1", c.name, n)
+				t.Errorf("%s: inserted %d rows, want 1", c.name, n)
+				continue
 			}
 			got, want := stored(t, ik), c.want
 			if got == nil {
@@ -2149,8 +2152,50 @@ func psTestDealTypeCode(t *testing.T, f *psFixture) {
 	// A non-string deal_type_code is a view bug and must fail hard, not store NULL. Pre-fix an integer
 	// column fell through to the NULL branch and the run reported success.
 	t.Run("non-string type fails hard", func(t *testing.T) {
-		body, _ := dtRow("dt-int", "7::int")
+		body := dtRow("dt-int", "7::int")
 		f.mppErr(t, "pv_dt_int", body, "type gate", "is not a string type")
+	})
+
+	// A string type narrower than the column's own 63-char cap truncates on cast, and the truncation
+	// can land on ANOTHER valid code: 'CUSTODY_COLLATERAL'::varchar(7) is 'CUSTODY', which passes both
+	// the category gate and the ref_deal_type membership gate and records a pledged asset as
+	// unencumbered. Refused as lossy, like a narrowed numeric or timestamptz.
+	t.Run("narrow string type refused as lossy", func(t *testing.T) {
+		for _, c := range []struct{ name, expr string }{
+			{"varchar_7_truncates_to_another_code", "'CUSTODY_COLLATERAL'::varchar(7)"},
+			{"varchar_16", "'LOAN'::varchar(16)"},
+			{"char_8", "'LOAN'::char(8)"},
+			{"varchar_62", "'LOAN'::varchar(62)"},
+		} {
+			body := dtRow("dt-lossy-"+c.name, c.expr)
+			f.mppErr(t, "pv_dt_lossy_"+c.name, body, "lossy gate", "lossy type for a value column")
+		}
+	})
+
+	// The materializer CANNOT apply a changed deal_type_code to a stored observation: the insert is
+	// suppressed on the 4-column key and UPDATE is revoked. Before this raised, the run returned a row
+	// count with no warning and the direction stayed wrong forever.
+	t.Run("re-emitting a stored key with a different deal type raises", func(t *testing.T) {
+		const ik = "dt-reemit"
+		body := dtRow(ik, "'LOAN'::text")
+		if n := f.mppN(t, "pv_dt_reemit", body, "first insert"); n != 1 {
+			t.Fatalf("first insert put %d rows, want 1", n)
+		}
+		f.mppErr(t, "pv_dt_reemit", dtRow(ik, "'BORROW'::text"), "drift", "CANNOT apply")
+
+		// NULL -> a value is the migration case: the column was added after the rows were stored, and
+		// it is just as unrepairable, so it must raise too rather than silently returning 0.
+		const ik2 = "dt-reemit-null"
+		if n := f.mppN(t, "pv_dt_reemit_null", dtRow(ik2, "NULL::text"), "first insert, silent"); n != 1 {
+			t.Fatalf("first insert put %d rows, want 1", n)
+		}
+		f.mppErr(t, "pv_dt_reemit_null", dtRow(ik2, "'LOAN'::text"), "drift", "CANNOT apply")
+
+		// Negative control: re-emitting the SAME deal type must stay a clean no-op, or the arm above
+		// would make every idempotent re-run fail.
+		if n := f.mppN(t, "pv_dt_reemit", dtRow(ik, "'LOAN'::text"), "idempotent re-run"); n != 0 {
+			t.Errorf("idempotent re-run inserted %d rows, want 0", n)
+		}
 	})
 
 	// Off-vocabulary codes must fail hard: UPDATE is revoked on position_state, so a bad code written
@@ -2161,8 +2206,8 @@ func psTestDealTypeCode(t *testing.T, f *psFixture) {
 			{"unknown_code", "'NOT_A_DEAL_TYPE'::text"},
 			{"empty_string", "''::text"},
 		} {
-			body, _ := dtRow("dt-bad-"+c.name, c.expr)
-			f.mppErr(t, "pv_dt_bad_"+c.name, body, "vocabulary gate", "absent from ref_deal_type")
+			body := dtRow("dt-bad-"+c.name, c.expr)
+			f.mppErr(t, "pv_dt_bad_"+c.name, body, "vocabulary gate", "position_state_deal_type_fkey")
 		}
 	})
 
@@ -2174,9 +2219,10 @@ func psTestDealTypeCode(t *testing.T, f *psFixture) {
 			{"column_omitted", ""},
 		} {
 			ik := "dt-silent-" + c.name
-			body, _ := dtRow(ik, c.expr)
+			body := dtRow(ik, c.expr)
 			if n := f.mppN(t, "pv_dt_silent_"+c.name, body, "optional"); n != 1 {
-				t.Fatalf("%s: inserted %d rows, want 1", c.name, n)
+				t.Errorf("%s: inserted %d rows, want 1", c.name, n)
+				continue
 			}
 			if got := stored(t, ik); got != nil {
 				t.Errorf("%s: deal_type_code = %q, want NULL", c.name, *got)
@@ -2186,25 +2232,10 @@ func psTestDealTypeCode(t *testing.T, f *psFixture) {
 
 	// Every seeded code must round-trip, or the gate is too strict for the vocabulary it enforces.
 	t.Run("every seeded code round-trips", func(t *testing.T) {
-		rows, err := f.pool.Query(f.ctx, `SELECT deal_type FROM ref_deal_type ORDER BY deal_type`)
-		if err != nil {
-			t.Fatalf("list ref_deal_type: %v", err)
-		}
-		var codes []string
-		for rows.Next() {
-			var c string
-			if err := rows.Scan(&c); err != nil {
-				t.Fatalf("scan: %v", err)
-			}
-			codes = append(codes, c)
-		}
-		rows.Close()
-		if len(codes) < 5 {
-			t.Fatalf("ref_deal_type has %d codes, expected the seeded vocabulary", len(codes))
-		}
+		codes := f.refDealTypeCodes(t)
 		for i, code := range codes {
 			ik := "dt-rt-" + strconv.Itoa(i)
-			body, _ := dtRow(ik, "'"+code+"'::text")
+			body := dtRow(ik, "'"+code+"'::text")
 			if n := f.mppN(t, "pv_dt_rt_"+strconv.Itoa(i), body, "round-trip"); n != 1 {
 				t.Fatalf("%s: inserted %d rows, want 1", code, n)
 			}
@@ -2220,8 +2251,8 @@ func psTestDealTypeCode(t *testing.T, f *psFixture) {
 	t.Run("vocabulary comes from ref_deal_type", func(t *testing.T) {
 		const code = "ZZ_TEST_ONLY_DEAL_TYPE"
 
-		body, _ := dtRow("dt-refdriven-before", "'"+code+"'::text")
-		f.mppErr(t, "pv_dt_refdriven_before", body, "ref-driven", "absent from ref_deal_type")
+		body := dtRow("dt-refdriven-before", "'"+code+"'::text")
+		f.mppErr(t, "pv_dt_refdriven_before", body, "ref-driven", "position_state_deal_type_fkey")
 
 		if _, err := f.pool.Exec(f.ctx,
 			`INSERT INTO ref_deal_type (deal_type, direction, description)
@@ -2230,7 +2261,7 @@ func psTestDealTypeCode(t *testing.T, f *psFixture) {
 		}
 
 		ik := "dt-refdriven-after"
-		body2, _ := dtRow(ik, "'"+code+"'::text")
+		body2 := dtRow(ik, "'"+code+"'::text")
 		if n := f.mppN(t, "pv_dt_refdriven_after", body2, "ref-driven"); n != 1 {
 			t.Fatalf("seeded code: inserted %d rows, want 1", n)
 		}
@@ -2247,7 +2278,8 @@ func psTestDealTypeCode(t *testing.T, f *psFixture) {
 // Fails on the pre-CHECK code, which accepted 'loan', ”, '   ', a newline and a 1MB string through
 // this path, none of which UPDATE or DELETE can then repair.
 func psTestDealTypeCodeDirectInsert(t *testing.T, f *psFixture) {
-	rw := f.asReadWrite(t)
+	rw, doneRW := f.asReadWrite(t)
+	defer doneRW()
 
 	ins := func(t *testing.T, code any, bn int) error {
 		t.Helper()
@@ -2271,13 +2303,12 @@ func psTestDealTypeCodeDirectInsert(t *testing.T, f *psFixture) {
 			{"embedded_newline", "LOAN\n-- rubbish"},
 			{"lowercase_tail", "LOAn"},
 			{"leading_digit", "1LOAN"},
-			{"too_long", strings.Repeat("A", 64)},
 			{"one_megabyte", strings.Repeat("X", 1<<20)},
 		} {
 			if err := ins(t, c.code, 500+i); err == nil {
 				t.Errorf("%s: direct INSERT accepted %.40q, want rejection", c.name, c.code)
-			} else if !strings.Contains(err.Error(), "position_state_deal_type_code_shape_chk") {
-				t.Errorf("%s: rejected by %v, want the shape CHECK", c.name, firstLineOf(err.Error()))
+			} else if !strings.Contains(err.Error(), "position_state_deal_type_fkey") {
+				t.Errorf("%s: rejected by %v, want the ref_deal_type FK", c.name, firstLineOf(err.Error()))
 			}
 		}
 	})
@@ -2290,31 +2321,23 @@ func psTestDealTypeCodeDirectInsert(t *testing.T, f *psFixture) {
 		if err := ins(t, nil, 601); err != nil {
 			t.Errorf("direct INSERT of NULL: %v", err)
 		}
-		if err := ins(t, strings.Repeat("A", 63), 602); err != nil {
-			t.Errorf("direct INSERT of a 63-char code (the cap): %v", err)
+		if err := ins(t, "COLLATERAL", 602); err != nil {
+			t.Errorf("direct INSERT of 'COLLATERAL': %v", err)
 		}
 	})
 
-	// The shape CHECK and ref_deal_type must stay compatible. Without this, adding a code to
-	// ref_deal_type that the CHECK rejects would pass the materializer's membership test and then be
-	// refused by the table -- a vocabulary entry nothing can ever store.
-	t.Run("every ref_deal_type code satisfies the shape CHECK", func(t *testing.T) {
-		rows, err := f.pool.Query(f.ctx, `SELECT deal_type FROM ref_deal_type ORDER BY deal_type`)
-		if err != nil {
-			t.Fatalf("list ref_deal_type: %v", err)
+	// stl_readwrite's table-level GRANT INSERT must reach the new column, and every code in the
+	// vocabulary must be storable through the role that writes it.
+	t.Run("the app role can store every ref_deal_type code", func(t *testing.T) {
+		var ok bool
+		if err := f.pool.QueryRow(f.ctx,
+			`SELECT has_column_privilege('stl_readwrite','position_state','deal_type_code','INSERT')`).Scan(&ok); err != nil {
+			t.Fatalf("check column privilege: %v", err)
 		}
-		var codes []string
-		for rows.Next() {
-			var c string
-			if err := rows.Scan(&c); err != nil {
-				t.Fatalf("scan: %v", err)
-			}
-			codes = append(codes, c)
+		if !ok {
+			t.Error("stl_readwrite has no INSERT privilege on position_state.deal_type_code")
 		}
-		rows.Close()
-		if len(codes) < 5 {
-			t.Fatalf("ref_deal_type has %d codes, expected the seeded vocabulary", len(codes))
-		}
+		codes := f.refDealTypeCodes(t)
 		for i, code := range codes {
 			if err := ins(t, code, 700+i); err != nil {
 				t.Errorf("ref_deal_type code %q is not storable: %v", code, firstLineOf(err.Error()))
@@ -2325,11 +2348,15 @@ func psTestDealTypeCodeDirectInsert(t *testing.T, f *psFixture) {
 
 // asReadWrite returns a pool connected as stl_readwrite. The fixture's own pool owns the schema, and
 // an owner bypasses the ACLs these subtests are about.
-func (f *psFixture) asReadWrite(t *testing.T) *pgxpool.Pool {
+func (f *psFixture) asReadWrite(t *testing.T) (*pgxpool.Pool, func()) {
 	t.Helper()
+	// Roles are cluster-scoped, not per-database, and this fixture's container is shared across the
+	// whole package -- so the LOGIN has to come back off, or every later test in this container runs
+	// against a stl_readwrite that can connect.
 	if _, err := f.pool.Exec(f.ctx, `ALTER ROLE stl_readwrite WITH LOGIN PASSWORD 'psfixture'`); err != nil {
 		t.Fatalf("give stl_readwrite a login: %v", err)
 	}
+
 	cfg := f.pool.Config().Copy()
 	cfg.ConnConfig.User = "stl_readwrite"
 	cfg.ConnConfig.Password = "psfixture"
@@ -2337,7 +2364,14 @@ func (f *psFixture) asReadWrite(t *testing.T) *pgxpool.Pool {
 	if err != nil {
 		t.Fatalf("connect as stl_readwrite: %v", err)
 	}
-	t.Cleanup(pool.Close)
+	// Returned rather than registered with t.Cleanup: the fixture closes its own pool with a plain
+	// defer, and defer runs BEFORE t.Cleanup, so a t.Cleanup revoke reaches a closed pool.
+	done := func() {
+		pool.Close()
+		if _, err := f.pool.Exec(f.ctx, `ALTER ROLE stl_readwrite WITH NOLOGIN PASSWORD NULL`); err != nil {
+			t.Errorf("revoke the stl_readwrite login: %v", err)
+		}
+	}
 	var who string
 	if err := pool.QueryRow(f.ctx, `SELECT current_user`).Scan(&who); err != nil {
 		t.Fatalf("confirm role: %v", err)
@@ -2345,7 +2379,7 @@ func (f *psFixture) asReadWrite(t *testing.T) *pgxpool.Pool {
 	if who != "stl_readwrite" {
 		t.Fatalf("connected as %q, want stl_readwrite", who)
 	}
-	return pool
+	return pool, done
 }
 
 func firstLineOf(s string) string {
@@ -2353,4 +2387,47 @@ func firstLineOf(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// refDealTypeCodes lists the seeded vocabulary. One helper because two subtests need it and the loop
+// is easy to write without checking rows.Err(), which would silently truncate the list and let an
+// "every code" assertion pass over part of it.
+func (f *psFixture) refDealTypeCodes(t *testing.T) []string {
+	t.Helper()
+	rows, err := f.pool.Query(f.ctx, `SELECT deal_type FROM ref_deal_type ORDER BY deal_type`)
+	if err != nil {
+		t.Fatalf("list ref_deal_type: %v", err)
+	}
+	defer rows.Close()
+	var codes []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			t.Fatalf("scan ref_deal_type: %v", err)
+		}
+		codes = append(codes, c)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate ref_deal_type: %v", err)
+	}
+	if len(codes) < 5 {
+		t.Fatalf("ref_deal_type has %d codes, expected the seeded vocabulary", len(codes))
+	}
+	return codes
+}
+
+// A restore, a manual apply, or a partial-apply recovery re-runs the file. Every statement in it is
+// guarded except ADD CONSTRAINT, which Postgres offers no IF NOT EXISTS for -- so it failed with
+// SQLSTATE 42710 until the DO block went in. #752 carries the same test for the same reason.
+func psTestDealTypeCodeMigrationIsReRunnable(t *testing.T, f *psFixture) {
+	t.Run("the migration re-applies cleanly", func(t *testing.T) {
+		raw, err := os.ReadFile(filepath.Join(getMigrationsPath(),
+			"20260904_120000_add_position_state_deal_type_code.sql"))
+		if err != nil {
+			t.Fatalf("read migration: %v", err)
+		}
+		if _, err := f.pool.Exec(f.ctx, string(raw)); err != nil {
+			t.Errorf("re-applying the migration failed: %v", err)
+		}
+	})
 }
