@@ -1463,6 +1463,10 @@
       "type": "config",
       "owner": "pricing"
     },
+    "position_projection_run": {
+      "type": "infrastructure",
+      "owner": "prime"
+    },
     "position_state": {
       "type": "derived",
       "owner": "prime"

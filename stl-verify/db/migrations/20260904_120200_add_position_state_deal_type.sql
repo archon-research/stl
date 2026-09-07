@@ -29,6 +29,30 @@ $fk$;
 
 COMMENT ON COLUMN position_state.deal_type IS 'Derived, nullable. Deal type of THIS observation (LOAN / BORROW / COLLATERAL), stamped by the projection because it is not recoverable from the stored row: the Morpho market loan leg nets supply against borrow, so quantity carries the magnitude and this column carries the direction. NULL where the projection emits none -- the vault and Sky legs are constant per instrument and the collateral leg is implied by instrument_key, so a reader derives those. Roles: FK->ref_deal_type.deal_type, which is what constrains the value for EVERY writer, including a direct INSERT the materializer never sees.';
 
+-- One row per completed materializer run per projection. Turns "this row is old" into a checkable
+-- fact: a state-reading projection re-observes every position it can see on each run, so a position
+-- whose latest observation trails the projection's latest completed run was swept and not seen.
+-- Plain table: one row per run per projection is rows-per-hour, not time-series volume.
+CREATE TABLE IF NOT EXISTS position_projection_run (
+    projection    text        NOT NULL,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    build_id      integer     NOT NULL,
+    block_number  bigint,
+    CONSTRAINT position_projection_run_pkey PRIMARY KEY (projection, created_at),
+    CONSTRAINT position_projection_run_build_nonneg_chk CHECK (build_id >= 0),
+    CONSTRAINT position_projection_run_block_nonneg_chk CHECK (block_number IS NULL OR block_number >= 0)
+);
+
+COMMENT ON TABLE position_projection_run IS '[Operational] One row per COMPLETED materialize_position_projection() run, written in the same transaction as the run''s inserts, so a failed run leaves no row. Freshness of a position: its projection''s latest row here is the point up to which it was swept; a position whose position_current.block_number trails that row''s block_number was re-swept and not re-observed. Append-only; no compression or tiering because volume is one row per run per projection.';
+COMMENT ON COLUMN position_projection_run.projection IS 'Roles: PK. The projection view''s canonical name, as stamped on position_state.projection.';
+COMMENT ON COLUMN position_projection_run.created_at IS 'Roles: PK. When the run completed. UTC.';
+COMMENT ON COLUMN position_projection_run.build_id IS 'Roles: Audit. build_registry.id of the run (0 = pre-tracking).';
+COMMENT ON COLUMN position_projection_run.block_number IS 'Derived. Highest block_number the projection emitted in this run; NULL when it emitted nothing, which is still a completed sweep.';
+
+GRANT SELECT ON position_projection_run TO stl_readonly;
+GRANT SELECT, INSERT ON position_projection_run TO stl_readwrite;
+REVOKE UPDATE, DELETE ON position_projection_run FROM stl_readwrite;
+
 -- Body copied from 20260818_130000 with one change: deal_type is resolved per view and carried
 -- into the snapshot and the append. Comments are not duplicated -- that migration is immutable, so it
 -- stays the reference for why each check exists, and a copy here would drift from it.
@@ -235,13 +259,16 @@ BEGIN
     ON CONFLICT (position_id, block_number, block_version, processing_version, block_timestamp) DO NOTHING;
     GET DIAGNOSTICS n = ROW_COUNT;
 
+    INSERT INTO public.position_projection_run (projection, build_id, block_number)
+    SELECT v_qualname, p_build_id, max(block_number) FROM pg_temp._mpp_src;
+
     DROP TABLE pg_temp._mpp_src;
     DROP TABLE pg_temp._mpp_new;
 
     RETURN n;
 END $fn$;
 
-COMMENT ON FUNCTION materialize_position_projection(regclass, integer) IS '[Operational] VEC-402..407 shared materializer: validate a per-protocol projection view against the position_state column contract, fail hard on contract/type drift, double-emitted keys, a higher block carrying an earlier block_timestamp within one position, or cross-view ownership violations; keep-stored-and-warn on a re-emitted key whose block_timestamp or quantity drifted, then -- evaluating the projection ONCE into a temp table every check reads -- APPEND the new observations. deal_type is OPTIONAL, not part of the required contract, so a projection omitting it still works and stores NULL; a projection emitting it as any string type has the value copied, and one emitting a lossily-narrow string type, or a value that changes a STORED observation''s deal type, is REJECTED. Everything else about the value is the table''s FK to ref_deal_type, not this function''s job. position_id is recomputed via position_id(); serialized per view by an advisory lock on the view''s canonical name. Idempotent; run out of band. Returns rows INSERTED.';
+COMMENT ON FUNCTION materialize_position_projection(regclass, integer) IS '[Operational] VEC-402..407 shared materializer: validate a per-protocol projection view against the position_state column contract, fail hard on contract/type drift, double-emitted keys, a higher block carrying an earlier block_timestamp within one position, or cross-view ownership violations; keep-stored-and-warn on a re-emitted key whose block_timestamp or quantity drifted, then -- evaluating the projection ONCE into a temp table every check reads -- APPEND the new observations. deal_type is OPTIONAL, not part of the required contract, so a projection omitting it still works and stores NULL; a projection emitting it as any string type has the value copied, and one emitting a lossily-narrow string type, or a value that changes a STORED observation''s deal type, is REJECTED. Everything else about the value is the table''s FK to ref_deal_type, not this function''s job. position_id is recomputed via position_id(); serialized per view by an advisory lock on the view''s canonical name. Records the completed run in position_projection_run, in the same transaction. Idempotent; run out of band. Returns rows INSERTED.';
 
 -- position_classification is retired. It was a classification engine over the spine, but the engine
 -- is the projection's CASE expression and its result now lands on the observation, where a position

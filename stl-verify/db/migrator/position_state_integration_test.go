@@ -157,6 +157,8 @@ func TestPositionState(t *testing.T) {
 	psTestDealTypeCodeMigrationIsReRunnable(t, f)
 	// --- a higher block cannot carry an earlier instant, or the two caches disagree about now ---
 	psTestBlockTimeMonotonicPerPosition(t, f)
+	// --- every completed run is recorded, so a stale position is detectable ---
+	psTestCompletedRunIsRecorded(t, f)
 }
 
 // psTestRecencyGuard covers: recency guard
@@ -2471,6 +2473,77 @@ func psTestBlockTimeMonotonicPerPosition(t *testing.T, f *psFixture) {
 			one("mono-b", 200, "2026-03-04T00:00:00Z") + `) ` + mppCols
 		if n := f.mppN(t, "pv_mono_two", body2, "two positions"); n != 2 {
 			t.Errorf("two independent positions inserted %d, want 2", n)
+		}
+	})
+}
+
+// psTestCompletedRunIsRecorded: a position that stops being observed keeps its last quantity forever,
+// and only block_timestamp age hinted at it. A run record per projection makes it a fact: swept up to
+// block N and not seen. Written inside the materializer's transaction, so a failed run leaves nothing.
+func psTestCompletedRunIsRecorded(t *testing.T, f *psFixture) {
+	runs := func(t *testing.T, view string) (n int, maxBlock *int64) {
+		t.Helper()
+		if err := f.pool.QueryRow(f.ctx,
+			`SELECT count(*), max(block_number) FROM position_projection_run WHERE projection = 'public.'||$1`,
+			view).Scan(&n, &maxBlock); err != nil {
+			t.Fatalf("read runs for %s: %v", view, err)
+		}
+		return
+	}
+	row := func(ik string, bn int) string {
+		return "(1::int,10::bigint,'" + ik + "'::text,'" + strings.Repeat("a", 40) + "'::text,5::numeric,'LOAN'::text," +
+			strconv.Itoa(bn) + "::bigint,0::int,0::int,'2026-03-0" + strconv.Itoa(1+bn%9) + "T00:00:00Z'::timestamptz)"
+	}
+
+	t.Run("one row per completed run, carrying the run's highest block", func(t *testing.T) {
+		if n := f.mppN(t, "pv_run_a", `SELECT * FROM (VALUES `+row("run-a", 100)+","+row("run-a", 250)+`) `+mppCols, "first"); n != 2 {
+			t.Fatalf("first run inserted %d, want 2", n)
+		}
+		n, mb := runs(t, "pv_run_a")
+		if n != 1 || mb == nil || *mb != 250 {
+			t.Errorf("after one run: %d rows, max block %v; want 1 row at block 250", n, mb)
+		}
+		// an idempotent re-run inserts nothing but is still a completed sweep
+		if k := f.mppN(t, "pv_run_a", `SELECT * FROM (VALUES `+row("run-a", 100)+","+row("run-a", 250)+`) `+mppCols, "rerun"); k != 0 {
+			t.Fatalf("re-run inserted %d, want 0", k)
+		}
+		if n, _ := runs(t, "pv_run_a"); n != 2 {
+			t.Errorf("after a no-op re-run: %d run rows, want 2 -- a sweep that saw nothing new still completed", n)
+		}
+	})
+
+	t.Run("a failed run records nothing", func(t *testing.T) {
+		// A double-emitted key fails the run before its inserts; the run row must roll back with it.
+		body := `SELECT * FROM (VALUES ` + row("run-fail", 100) + "," + row("run-fail", 100) + `) ` + mppCols
+		f.mppErr(t, "pv_run_fail", body, "must fail", "double-emits")
+		if n, _ := runs(t, "pv_run_fail"); n != 0 {
+			t.Errorf("a failed run left %d run rows, want 0", n)
+		}
+	})
+
+	t.Run("an empty projection still records a completed sweep, with no block", func(t *testing.T) {
+		body := `SELECT * FROM (VALUES ` + row("run-empty", 1) + `) ` + mppCols + ` WHERE false`
+		if n := f.mppN(t, "pv_run_empty", body, "empty"); n != 0 {
+			t.Fatalf("empty projection inserted %d, want 0", n)
+		}
+		n, mb := runs(t, "pv_run_empty")
+		if n != 1 || mb != nil {
+			t.Errorf("empty sweep: %d rows, max block %v; want 1 row with NULL block", n, mb)
+		}
+	})
+
+	t.Run("the record is append-only for the app role", func(t *testing.T) {
+		rw, done := f.asReadWrite(t)
+		defer done()
+		for _, q := range []string{
+			`UPDATE position_projection_run SET block_number = 0`,
+			`DELETE FROM position_projection_run`,
+		} {
+			if _, err := rw.Exec(f.ctx, q); err == nil {
+				t.Errorf("stl_readwrite was allowed: %s", q)
+			} else if !strings.Contains(err.Error(), "permission denied") {
+				t.Errorf("%s refused for the wrong reason: %v", q, err)
+			}
 		}
 	})
 }
