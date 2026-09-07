@@ -15,7 +15,14 @@ from app.api._validators import (
     OptionalTxHashParam,
     ProxyAddressPathParam,
 )
-from app.api.deps import get_engine, get_reference_as_of, get_reference_positions_service_factory
+from app.api.deps import (
+    allowed_prime_vaults,
+    get_engine,
+    get_reference_as_of,
+    get_reference_positions_service_factory,
+    require_prime_view,
+    vault_filter,
+)
 from app.api.provenance import (
     get_requested_provenance,
     resolve_or_422,
@@ -406,8 +413,13 @@ async def _get_service(
         "`prime_vault_address` instead. Use `/v1/primes/{address}/risk-capital` for prime-level figures."
     ),
 )
-async def list_primes(service: AllocationService = Depends(_get_service)):
-    primes = await service.list_primes()
+async def list_primes(
+    service: AllocationService = Depends(_get_service),
+    allowed: frozenset[str] | None = Depends(allowed_prime_vaults),
+):
+    # ListObjects pushed into the QUERY (ADR-015): unauthorized primes never
+    # leave PostgreSQL. None = auth off; [] = caller may view none (no rows).
+    primes = await service.list_primes(allowed_vaults=vault_filter(allowed))
     return [
         PrimeResponse(
             id=p.id,
@@ -489,6 +501,7 @@ async def list_allocations(
     requested_provenance: Provenance | None = Depends(get_requested_provenance),
     service: AllocationService = Depends(_get_service),
     reference_services: Callable[[], ReferencePositionsService] = Depends(get_reference_positions_service_factory),
+    _authz: None = Depends(require_prime_view),
 ):
     """Return current allocations for ``prime_id``.
 
@@ -948,15 +961,25 @@ async def list_allocation_activity(
     time_series: TimeSeriesQuery = Depends(get_time_series_query_params),
     limit: int = Query(100, ge=1, le=1000, description="Max results (default 100, max 1000)."),
     service: AllocationService = Depends(_get_service),
+    allowed: frozenset[str] | None = Depends(allowed_prime_vaults),
 ) -> AllocationActivityEnvelope:
     """Errors:
 
-    - 422 if ``prime_id`` is malformed (or ``limit`` is out of range).
+    - 422 if ``prime_id`` is malformed (or ``limit`` is out of range), or if
+      ``aggregate=true`` without a ``prime_id`` while authorization is on.
     - 200 with an empty ``data`` list if filters match no rows — including when
-      ``prime_id`` is well-formed but unknown. ``prime_id`` is treated as
-      a filter here, not a path resource.
+      ``prime_id`` is well-formed but unknown, and when the caller may not view
+      it. ``prime_id`` is treated as a filter here, not a path resource, so
+      neither answer discloses which primes exist.
     """
     parsed_prime_id = EthAddress(prime_id) if prime_id is not None else None
+    # Per-resource authz (ADR-015) is the allow-list in the SQL WHERE, on both
+    # the raw and the aggregated path: an unknown or unpermitted prime_id
+    # matches no rows. `allowed` is None when auth is off.
+    if allowed is not None and parsed_prime_id is None and time_series.aggregate:
+        # A bucket is one number over many primes; scope it to a named prime
+        # rather than serving the caller's whole permitted set as a total.
+        raise HTTPException(status_code=422, detail="prime_id is required for aggregated activity")
     # Selective = an index-seekable exact filter. Substring filters
     # (protocol_name/token_symbol) and low-cardinality filters (chain_id,
     # action_type) do not qualify because they cannot prune chunks.
@@ -972,6 +995,7 @@ async def list_allocation_activity(
     try:
         if time_series.aggregate:
             buckets = await service.list_activity_buckets(
+                allowed_vaults=vault_filter(allowed),
                 prime_id=parsed_prime_id,
                 chain_id=chain_id,
                 protocol_name=protocol_name,
@@ -990,6 +1014,7 @@ async def list_allocation_activity(
             )
 
         events = await service.list_allocation_activity(
+            allowed_vaults=vault_filter(allowed),
             prime_id=parsed_prime_id,
             chain_id=chain_id,
             protocol_name=protocol_name,

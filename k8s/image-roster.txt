@@ -34,7 +34,7 @@
 
 # ---- services: dedicated ECR repo stl-sentinel<env>-<name>, tag <sha> -----------
 service watcher                    watcher arbitrum-watcher avalanche-watcher base-watcher optimism-watcher unichain-watcher  # one binary, chain via env
-service backup-worker              backup-worker arbitrum-backup-worker avalanche-backup-worker base-backup-worker optimism-backup-worker unichain-backup-worker
+service backup-worker              backup-worker arbitrum-backup-worker avalanche-backup-worker base-backup-worker optimism-backup-worker robinhood-backup-worker unichain-backup-worker
 service oracle-price-worker        oracle-price-worker avalanche-oracle-price-worker base-oracle-price-worker
 service sparklend-position-tracker sparklend-position-tracker avalanche-sparklend-position-tracker
 service allocation-tracker         allocation-tracker avalanche-allocation-tracker base-allocation-tracker  # arbitrum/optimism/unichain bases use `allocation-tracker` directly
