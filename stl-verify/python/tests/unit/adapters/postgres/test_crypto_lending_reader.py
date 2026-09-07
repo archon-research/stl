@@ -360,6 +360,72 @@ async def test_get_share_raises_when_receipt_token_token_id_missing(
         await reader.get_share(info, DUMMY_PRIME)
 
 
+# --- resolve_legacy_wallet --------------------------------------------------
+#
+# The no-prime endpoints answer about whichever wallet this names, so the route
+# gates on it. Getting None wrong in either direction is a live bug: None on an
+# Aave-like asset leaks a prime's position, an address on Morpho denies a read
+# that is genuinely pool-wide.
+
+
+@pytest.mark.asyncio
+async def test_resolve_legacy_wallet_names_the_holder_the_share_is_taken_from(
+    reader: PostgresCryptoLendingReader,
+) -> None:
+    with patch.object(reader, "_lookup_wallet", AsyncMock(return_value=bytes.fromhex("cd" * 20))) as mock_lookup:
+        wallet = await reader.resolve_legacy_wallet(_aave_like_info())
+
+    assert wallet == EthAddress("0x" + "cd" * 20)
+    mock_lookup.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("info", [_morpho_info(), _maple_info()], ids=["morpho", "maple"])
+async def test_resolve_legacy_wallet_is_none_where_the_share_names_no_wallet(
+    reader: PostgresCryptoLendingReader,
+    info: ReceiptTokenInfo,
+) -> None:
+    with patch.object(reader, "_lookup_wallet", AsyncMock()) as mock_lookup:
+        assert await reader.resolve_legacy_wallet(info) is None
+
+    mock_lookup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resolve_legacy_wallet_reports_no_holder_as_a_missing_share(
+    reader: PostgresCryptoLendingReader,
+) -> None:
+    with patch.object(reader, "_lookup_wallet", AsyncMock(side_effect=ValueError("no active allocation position"))):
+        with pytest.raises(MissingShareError, match="no active allocation position"):
+            await reader.resolve_legacy_wallet(_aave_like_info())
+
+
+@pytest.mark.asyncio
+async def test_get_legacy_share_uses_the_wallet_it_was_given(
+    reader: PostgresCryptoLendingReader,
+) -> None:
+    """The route authorized that wallet; a second lookup here could resolve a
+    different holder and report a prime nobody checked."""
+    with (
+        patch.object(reader, "_lookup_wallet", AsyncMock()) as mock_lookup,
+        patch(
+            "app.adapters.postgres.crypto_lending_reader.fetch_share",
+            AsyncMock(return_value=Decimal("0.25")),
+        ) as mock_fetch,
+    ):
+        result = await reader.get_legacy_share(_aave_like_info(), EthAddress("0x" + "cd" * 20))
+
+    mock_lookup.assert_not_awaited()
+    mock_fetch.assert_awaited_once_with(
+        engine=reader._engine,
+        chain_id=1,
+        token_id=777,
+        wallet_address=bytes.fromhex("cd" * 20),
+        max_stale_seconds=600,
+    )
+    assert result == Decimal("0.25")
+
+
 @pytest.mark.asyncio
 async def test_get_legacy_share_returns_one_for_morpho(reader: PostgresCryptoLendingReader) -> None:
     with (

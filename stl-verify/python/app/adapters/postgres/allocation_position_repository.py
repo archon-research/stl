@@ -97,6 +97,19 @@ def _strip_hex_prefix(tx_hash: str | None) -> str | None:
     return tx_hash
 
 
+def _loggable_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Bind parameters reduced to something safe to put on one log line.
+
+    List values become their LENGTH: ``allowed_vaults`` is the caller's whole
+    authorization set, runs to the OpenFGA ListObjects ceiling, and deps.py
+    deliberately logs it as a count and never as a list.
+    """
+    return {
+        key: (f"[{len(value)} values]" if isinstance(value, list | tuple) else None if value is None else str(value))
+        for key, value in params.items()
+    }
+
+
 def _safe_decimal(value: Any, field_name: str, row_identifier: Any = None) -> Decimal:
     """Convert value to Decimal with error context for debugging.
 
@@ -184,7 +197,7 @@ class AllocationRepository:
             )
             raise ValueError(f"Database query failed while fetching protocols: {exc}") from exc
 
-    async def list_primes(self) -> list[Prime]:
+    async def list_primes(self, allowed_vaults: Sequence[EthAddress] | None = None) -> list[Prime]:
         try:
             async with self._engine.connect() as conn:
                 result = await conn.execute(
@@ -197,9 +210,14 @@ class AllocationRepository:
                             encode(p.vault_address, 'hex') AS vault_address
                         FROM prime_proxy pp
                         JOIN prime p ON p.id = pp.prime_id
+                        WHERE (
+                            CAST(:allowed_vaults AS BYTEA[]) IS NULL
+                            OR p.vault_address = ANY(CAST(:allowed_vaults AS BYTEA[]))
+                        )
                         ORDER BY pp.proxy_address, pp.chain_id
                         """
-                    )
+                    ),
+                    {"allowed_vaults": (None if allowed_vaults is None else [v.to_bytes() for v in allowed_vaults])},
                 )
                 primes: list[Prime] = []
                 for row in result:
@@ -621,6 +639,34 @@ class AllocationRepository:
             )
             raise ValueError(f"Database query failed while fetching total USD exposure: {exc}") from exc
 
+    async def get_prime_vault_address(self, address: EthAddress) -> str | None:
+        """Resolve a vault-or-proxy address to its prime's vault address.
+
+        The authorization object id for a prime is its vault address, and
+        callers may present any of the prime's proxies. Lowercase 0x-prefixed.
+        """
+        sql = text(
+            """
+            SELECT encode(p.vault_address, 'hex') AS vault
+            FROM prime p
+            WHERE p.vault_address = :addr
+            UNION ALL
+            SELECT encode(p.vault_address, 'hex') AS vault
+            FROM prime_proxy pp
+            JOIN prime p ON p.id = pp.prime_id
+            WHERE pp.proxy_address = :addr
+            LIMIT 1
+            """
+        )
+        try:
+            async with self._engine.connect() as conn:
+                row = (await conn.execute(sql, {"addr": address.to_bytes()})).first()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise ValueError(f"Database query failed while resolving prime vault: {exc}") from exc
+        return ("0x" + row.vault) if row and row.vault else None
+
     async def list_allocation_activity(
         self,
         *,
@@ -633,10 +679,12 @@ class AllocationRepository:
         from_timestamp: datetime | None = None,
         to_timestamp: datetime | None = None,
         limit: int = 100,
+        allowed_vaults: Sequence[EthAddress] | None = None,
     ) -> list[AllocationActivityEvent]:
         # Escape LIKE metacharacters to prevent pattern injection
         params = {
             "proxy_addrs": (None if proxy_addresses is None else [a.to_bytes() for a in proxy_addresses]),
+            "allowed_vaults": (None if allowed_vaults is None else [v.to_bytes() for v in allowed_vaults]),
             "chain_id": chain_id,
             "protocol_name": _escape_like_pattern(protocol_name) if protocol_name else None,
             "action_type": action_type,
@@ -667,7 +715,7 @@ class AllocationRepository:
             logger.error(
                 "Allocation activity query failed",
                 extra={
-                    "params": {k: str(v) if v is not None else None for k, v in params.items()},
+                    "params": _loggable_params(params),
                     "error_type": type(exc).__name__,
                 },
                 exc_info=True,
@@ -707,10 +755,12 @@ class AllocationRepository:
         to_timestamp: datetime,
         bucket_seconds: float,
         limit: int = 100,
+        allowed_vaults: Sequence[EthAddress] | None = None,
     ) -> list[AllocationActivityBucket]:
         """Return allocation activity counts and tx-amount sums per time bucket."""
         params = {
             "proxy_addrs": (None if proxy_addresses is None else [a.to_bytes() for a in proxy_addresses]),
+            "allowed_vaults": (None if allowed_vaults is None else [v.to_bytes() for v in allowed_vaults]),
             "chain_id": chain_id,
             "protocol_name": _escape_like_pattern(protocol_name) if protocol_name else None,
             "action_type": action_type,
@@ -732,7 +782,7 @@ class AllocationRepository:
             logger.error(
                 "Allocation activity bucket query failed",
                 extra={
-                    "params": {k: str(v) if v is not None else None for k, v in params.items()},
+                    "params": _loggable_params(params),
                     "error_type": type(exc).__name__,
                 },
                 exc_info=True,
@@ -1617,6 +1667,9 @@ LEFT JOIN LATERAL (
     LIMIT 1
 ) AS protocol_match ON TRUE
 WHERE (CAST(:proxy_addrs AS BYTEA[]) IS NULL OR ap.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[])))
+    -- authorization filter: NULL = auth off (no filter); [] = caller may view
+    -- no primes (no rows). Applied before ORDER BY/LIMIT with the other filters.
+    AND (CAST(:allowed_vaults AS BYTEA[]) IS NULL OR p.vault_address = ANY(CAST(:allowed_vaults AS BYTEA[])))
     AND ap.direction IS NOT NULL
     AND ap.tx_amount IS NOT NULL
     AND ap.balance IS NOT NULL
@@ -1865,6 +1918,9 @@ LEFT JOIN nearest_share_ratio nearest_ratio
     AND nearest_ratio.chain_id = ap.chain_id
     AND nearest_ratio.block_number = ap.block_number
 WHERE (CAST(:proxy_addrs AS BYTEA[]) IS NULL OR ap.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[])))
+    -- authorization filter, same contract as _ALLOCATION_ACTIVITY_SQL: an
+    -- aggregate spans primes, so the allow-list has to bound the rows it sums.
+    AND (CAST(:allowed_vaults AS BYTEA[]) IS NULL OR p.vault_address = ANY(CAST(:allowed_vaults AS BYTEA[])))
     AND ap.direction IS NOT NULL
     AND ap.tx_amount IS NOT NULL
     AND ap.created_at IS NOT NULL

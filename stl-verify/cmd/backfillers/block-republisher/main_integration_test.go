@@ -188,6 +188,27 @@ func TestRegister_RefusesAConfigItCannotPublishWith(t *testing.T) {
 	}
 }
 
+// TestRegister_RefusesANodeOnAnotherChain: CHAIN_ID and ALCHEMY_HTTP_URL arrive
+// as independent variables, and neither the topic nor the bucket guard can see
+// a mismatch between them — every height would be read from the wrong chain and
+// published, correctly named, onto this chain's topic.
+func TestRegister_RefusesANodeOnAnotherChain(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	newDeployment(t, ctx)
+	elsewhere := startMockRPCServerOnChain(t, 8453, orphanOnly, alreadyCorrected)
+	t.Cleanup(elsewhere.Close)
+	t.Setenv("ALCHEMY_HTTP_URL", elsewhere.URL)
+
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	err := register(ctx, temporal.Dependencies{Logger: discardLogger()}, env)
+
+	if err == nil || !strings.Contains(err.Error(), "8453") {
+		t.Fatalf("error = %v, want one naming the chain the node reports", err)
+	}
+}
+
 // TestRegister_RefusesAnArchiveItCannotList keeps the startup probe on the path a
 // deployment reaches: a bucket this pod may not list — a missing Pod Identity
 // grant, or a name that is not there — must stop the worker rather than fail
@@ -440,17 +461,26 @@ func awsClients(t *testing.T, ctx context.Context) (*awssns.Client, *awssqs.Clie
 	return snsc, sqsc
 }
 
-// startMockRPCServer answers the reads Republish issues for every fixture, with
-// the same canonical hash on both by-number reads so no reorg is detected.
+// startMockRPCServer answers the by-number reads Republish issues for every
+// fixture, with the same canonical hash on every one so no reorg is detected,
+// and reports the chain the deployment is configured for.
 func startMockRPCServer(t *testing.T, fixtures ...blockFixture) *httptest.Server {
 	t.Helper()
+
+	return startMockRPCServerOnChain(t, integrationChainID, fixtures...)
+}
+
+// startMockRPCServerOnChain is the same node reporting a chain of its own, which
+// is what the worker's startup guard weighs CHAIN_ID against.
+func startMockRPCServerOnChain(t *testing.T, chainID int64, fixtures ...blockFixture) *httptest.Server {
+	t.Helper()
 	headers := make(map[int64]json.RawMessage, len(fixtures))
-	fullBlocks := make(map[string]json.RawMessage, len(fixtures))
+	fullBlocks := make(map[int64]json.RawMessage, len(fixtures))
 	var head int64
 	for _, block := range fixtures {
 		headers[block.number] = json.RawMessage(fmt.Sprintf(`{"number":"0x%x","hash":%q,"parentHash":%q,"timestamp":"0x%x"}`,
 			block.number, block.hash, block.parent, block.timestamp))
-		fullBlocks[strings.ToLower(block.hash)] = json.RawMessage(fmt.Sprintf(
+		fullBlocks[block.number] = json.RawMessage(fmt.Sprintf(
 			`{"number":"0x%x","hash":%q,"parentHash":%q,"timestamp":"0x%x","transactions":[]}`,
 			block.number, block.hash, block.parent, block.timestamp))
 		head = max(head, block.number+integrationHeadDepth)
@@ -465,12 +495,16 @@ func startMockRPCServer(t *testing.T, fixtures ...blockFixture) *httptest.Server
 		answer := func(req rpcReq) rpcResp {
 			out := rpcResp{JSONRPC: "2.0", ID: req.ID}
 			switch req.Method {
+			case "eth_chainId":
+				out.Result = json.RawMessage(fmt.Sprintf(`"0x%x"`, chainID))
 			case "eth_blockNumber":
 				out.Result = json.RawMessage(fmt.Sprintf(`"0x%x"`, head))
 			case "eth_getBlockByNumber":
+				if fullTxParam(req) {
+					out.Result = fullBlocks[hexParam(t, req)]
+					break
+				}
 				out.Result = headers[hexParam(t, req)]
-			case "eth_getBlockByHash":
-				out.Result = fullBlocks[strings.ToLower(stringParam(req))]
 			case "eth_getBlockReceipts":
 				out.Result = json.RawMessage(`[]`)
 			case "trace_block":
@@ -505,6 +539,16 @@ func stringParam(req rpcReq) string {
 	}
 	param, _ := req.Params[0].(string)
 	return param
+}
+
+// fullTxParam is eth_getBlockByNumber's second argument: the payload read asks
+// for full transactions, the header reads do not.
+func fullTxParam(req rpcReq) bool {
+	if len(req.Params) < 2 {
+		return false
+	}
+	full, _ := req.Params[1].(bool)
+	return full
 }
 
 func hexParam(t *testing.T, req rpcReq) int64 {
@@ -618,9 +662,17 @@ func receiveOneSQSMessage(t *testing.T, ctx context.Context, sqsc *awssqs.Client
 // Both names are spelled out rather than compared to their constants, which
 // would rename together and pin nothing. The alert regex in
 // alerts/vector-cronjobs.yaml and the runbook carry the same two strings.
+// Every chain's queue name is pinned in config_test.go.
 func TestDeployedNames_MatchTheAlertsAndTheRunbook(t *testing.T) {
-	if taskQueueName != "block-republisher" {
-		t.Errorf("taskQueueName = %q, want %q", taskQueueName, "block-republisher")
+	t.Setenv("CHAIN_ID", "1")
+
+	queue, err := taskQueueName()
+	if err != nil {
+		t.Fatalf("taskQueueName() error = %v", err)
+	}
+
+	if queue != "block-republisher" {
+		t.Errorf("taskQueueName() = %q, want %q", queue, "block-republisher")
 	}
 	if workflowTypeName != "BlockRepublish" {
 		t.Errorf("workflowTypeName = %q, want %q", workflowTypeName, "BlockRepublish")
@@ -634,6 +686,7 @@ func TestDeployedNames_MatchTheAlertsAndTheRunbook(t *testing.T) {
 // is a shutdown, not a failure: surfacing the cancelled context would exit 1 and
 // make an ordinary rollout read like a crash.
 func TestRun_StopsCleanlyWhenTheContextIsCancelled(t *testing.T) {
+	t.Setenv("CHAIN_ID", "1")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
