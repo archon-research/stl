@@ -49,6 +49,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -112,18 +113,17 @@ func run(ctx context.Context) error {
 	})
 }
 
-// backfillWorker carries the process-scoped teardown register produces:
-// temporal.WorkerConfig gives it nowhere to return one, and the archive drain
-// still has to run once, when the worker exits.
+// backfillWorker owns process-scoped resources because WorkerConfig cannot
+// return cleanup from registration.
 type backfillWorker struct {
-	drainArchive func()
+	cleanup func()
 }
 
-// drain closes archiving for good. The activities only ever wait out their own
-// writes, so without this a stopping worker abandons whatever is still running.
+// drain closes archiving and RPC connections after Temporal stops accepting
+// work.
 func (b *backfillWorker) drain() {
-	if b.drainArchive != nil {
-		b.drainArchive()
+	if b.cleanup != nil {
+		b.cleanup()
 	}
 }
 
@@ -133,11 +133,11 @@ func (b *backfillWorker) register(ctx context.Context, deps temporal.Dependencie
 		return fmt.Errorf("loading configuration: %w", err)
 	}
 
-	activities, drainArchive, err := newBackfillActivities(ctx, deps, cfg)
+	activities, cleanup, err := newBackfillActivities(ctx, deps, cfg)
 	if err != nil {
 		return fmt.Errorf("wiring the backfill activities: %w", err)
 	}
-	b.drainArchive = drainArchive
+	b.cleanup = cleanup
 
 	workflows := &backfillWorkflows{chainID: cfg.chainID}
 	r.RegisterWorkflowWithOptions(workflows.Backfill, workflow.RegisterOptions{Name: workflowTypeName})
@@ -145,21 +145,27 @@ func (b *backfillWorker) register(ctx context.Context, deps temporal.Dependencie
 	return nil
 }
 
-// newBackfillActivities returns the activities plus the archive drain the
-// worker owes at exit: the activities themselves only wait, so that the worker
-// keeps archiving across runs.
+// newBackfillActivities returns process-scoped cleanup separately because the
+// activities keep the RPC and archiver open across runs.
 func newBackfillActivities(ctx context.Context, deps temporal.Dependencies, cfg config) (*backfillActivities, func(), error) {
+	ethClient, err := dialChain(ctx, cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	cleanup := ethClient.Close
+	completed := false
+	defer func() {
+		if !completed {
+			cleanup()
+		}
+	}()
+
 	buildReg, err := buildregistry.New(ctx, deps.Pool)
 	if err != nil {
 		return nil, nil, fmt.Errorf("registering build: %w", err)
 	}
 
 	s3Reader, err := newS3Reader(ctx, deps.Logger, cfg)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	ethClient, err := dialChain(ctx, cfg)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -173,6 +179,10 @@ func newBackfillActivities(ctx context.Context, deps temporal.Dependencies, cfg 
 	if err != nil {
 		return nil, nil, err
 	}
+	cleanup = func() {
+		archiveDrain()
+		ethClient.Close()
+	}
 	multicaller = archiveWrap(multicaller)
 
 	prober, err := newVaultProber(deps.Logger, multicaller, cfg.chainID)
@@ -185,7 +195,7 @@ func newBackfillActivities(ctx context.Context, deps temporal.Dependencies, cfg 
 		return nil, nil, fmt.Errorf("creating event extractor: %w", err)
 	}
 
-	return &backfillActivities{
+	activities := &backfillActivities{
 		cfg:         cfg,
 		logger:      deps.Logger,
 		pool:        deps.Pool,
@@ -196,7 +206,9 @@ func newBackfillActivities(ctx context.Context, deps temporal.Dependencies, cfg 
 		ethClient:   ethClient,
 		multicaller: multicaller,
 		archiveWait: archiveWait,
-	}, archiveDrain, nil
+	}
+	completed = true
+	return activities, cleanup, nil
 }
 
 // newS3Reader sizes its connection pool off the scan's worker count, which is
@@ -230,9 +242,6 @@ func newS3Reader(ctx context.Context, logger *slog.Logger, cfg config) (*s3adapt
 	return s3adapter.NewReaderWithOptions(awsCfg, logger, options...), nil
 }
 
-// dialChain connects to the node and refuses a chain that disagrees with
-// CHAIN_ID: every block number in a run's range is meaningless on another chain,
-// and the mismatch would surface as missing S3 keys rather than as itself.
 func dialChain(ctx context.Context, cfg config) (*ethclient.Client, error) {
 	// Retry 429/5xx/network errors via rpchttp so transient RPC failures don't
 	// fail a partition that would have succeeded.
@@ -242,12 +251,9 @@ func dialChain(ctx context.Context, cfg config) (*ethclient.Client, error) {
 	}
 
 	ethClient := ethclient.NewClient(rpcClient)
-	rpcChainID, err := ethClient.ChainID(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("fetching RPC chain ID: %w", err)
-	}
-	if rpcChainID.Int64() != cfg.chainID {
-		return nil, fmt.Errorf("RPC chain ID mismatch: RPC reports %d, config says %d", rpcChainID.Int64(), cfg.chainID)
+	if err := chainutil.AssertChainID(ctx, ethClient, cfg.chainID); err != nil {
+		ethClient.Close()
+		return nil, fmt.Errorf("verifying the RPC node's chain: %w", err)
 	}
 	return ethClient, nil
 }
