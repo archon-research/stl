@@ -34,17 +34,20 @@ Follow [Effective Go](https://go.dev/doc/effective_go).
 - `cmd/cronjobs/` — **Temporal**-scheduled (not k8s CronJobs): anchorage, maple-graphql, offchain-price, watcher-data-validator. Schedules live in Temporal state; workers reconcile a changed interval env var into the existing schedule at startup (Go `reconcileScheduleSpec`, Python `ensure_schedule`), so a redeploy is enough. Ticks must be idempotent (Temporal retries). `morpho-v2-bootstrap` sits here by neighbourhood only: it carries no schedule and is started by hand like a backfiller.
 - `cmd/backfillers/` — historical gap fillers. Mostly one-shot CLI binaries (sparklend,
   oracle-pricing, aave-like-user-snapshot, raw-block-bulk-downloader), plus
-  `offchain-price-backfill` and `morpho-vault-backfill`, which are long-running **on-demand
-  Temporal workers**: they poll a task queue and idle until a run is started by hand from the
-  Temporal UI, with the range as workflow input. Grouped here by purpose (backfilling), not by
-  lifecycle.
+  `offchain-price-backfill`, `morpho-vault-backfill` and `block-republisher`, which are
+  long-running **on-demand Temporal workers**: they poll a task queue and idle until a run is
+  started by hand from the Temporal UI, with the range (or the block list) as workflow input.
+  Grouped here by purpose (backfilling), not by lifecycle.
 - `cmd/util/` — `migrate`, `generate-er`, `null-payload-refill`, `stress-test`.
 
 Every binary extracts a `run(ctx, args) error` from `main()` and runs under one of three
-entry points for graceful SIGINT/SIGTERM shutdown (~25s): `lifecycle.Run` (workers),
-`temporal.RunCronjob` (scheduled cronjobs), or `temporal.RunWorker` (on-demand Temporal
-jobs — no schedule; parameters, where the job takes any, supplied at start time; see
-`docs/temporal_guide.md`).
+entry points for graceful SIGINT/SIGTERM shutdown, all inside the pods' 60s
+`terminationGracePeriodSeconds`: `lifecycle.Run` (workers — bounded by
+`lifecycle.ShutdownTimeout`, 40s, plus a 15s `lifecycle.ShutdownTailBudget` for the
+deferred archive drain and OTEL flush), `temporal.RunCronjob` (scheduled cronjobs), or
+`temporal.RunWorker` (on-demand Temporal jobs — no schedule; parameters, where the job
+takes any, supplied at start time; see `docs/temporal_guide.md`). The two Temporal entry
+points hand shutdown to the Temporal SDK and read neither `lifecycle` constant.
 
 ### Data flow
 
@@ -77,6 +80,7 @@ All commands run from `stl-verify/`:
 ```bash
 # Development
 make dev-up              # Start kind cluster with full pipeline (mock blockchain server by default)
+make dev-up-new          # A whole cluster of your own next to the running ones: free port offset, derived name
 KIND_CLUSTER=<name> KIND_PORT_OFFSET=<n> make dev-up   # Isolated second cluster: own name, host ports +n, image tags, data dir
 make dev-suspend         # Suspend local kind nodes (local dev only; do not use in CI/prod)
 make dev-resume          # Resume suspended local kind nodes (local dev only; do not use in CI/prod)
@@ -113,7 +117,9 @@ make deploy-bulk-download ERIGON_USER=<user> ERIGON_IP=<ip>
 
 See [Makefile](Makefile) for the complete list of targets. Every `run-*`, `dev-*` and
 `kind-*` target honours `KIND_CLUSTER` / `KIND_PORT_OFFSET`, so two agents can each run
-a full cluster on one machine without colliding on ports, image tags or data dirs.
+a full cluster on one machine without colliding on ports, image tags or data dirs. Once a
+cluster exists, `export KIND_CLUSTER=<name>` is enough — the offset is derived from the
+host port its control plane publishes.
 
 ### Go linting
 

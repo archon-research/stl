@@ -27,7 +27,7 @@ from app.logging import get_logger
 
 logger = get_logger(__name__)
 
-_AAVE_LIKE = frozenset({"sparklend", "aave_v2", "aave_v3", "aave_v3_lido", "aave_v3_rwa"})
+_AAVE_LIKE = frozenset({"sparklend", "aave_v2", "aave_v3", "aave_v3_lido", "aave_v3_rwa", "aave_v3_avalanche"})
 _MORPHO = frozenset({"morpho_blue"})
 _MAPLE = frozenset({"maple"})
 # Protocols eligible for the gap-sweep RRC model (feeds ``list_supported_asset_ids`` →
@@ -118,6 +118,20 @@ class PostgresCryptoLendingReader:
         return {
             row.receipt_token_id for row in rows if _normalize_protocol_name(row.protocol_name) in _SUPPORTED_PROTOCOLS
         }
+
+    async def list_morpho_asset_ids(self, chain_id: int) -> frozenset[int]:
+        """Return the receipt_token_ids of Morpho vault shares on ``chain_id``.
+
+        Serves the CORE model's vault aggregation, which is chain-gated (its
+        market keys are mainnet-only); classification lives here so the
+        protocol-name normalization has one home.
+        """
+        rows = await self._receipt_token_repo.list_protocol_pairs()
+        return frozenset(
+            row.receipt_token_id
+            for row in rows
+            if row.chain_id == chain_id and _normalize_protocol_name(row.protocol_name) in _MORPHO
+        )
 
     async def get_receipt_token(self, receipt_token_id: int) -> ReceiptTokenInfo | None:
         return await self._receipt_token_repo.get(receipt_token_id)

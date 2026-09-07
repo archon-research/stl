@@ -23,13 +23,13 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
-// morphoBlueDeployBlocks maps chain IDs to the block at which Morpho Blue
-// was deployed on that chain. Morpho Blue is deployed via CREATE2 at the
-// same address on all chains, but each deployment occurred at a different block.
+// morphoBlueDeployBlocks maps chain IDs to the block at which Morpho Blue was
+// deployed at MorphoBlueAddress. Only chains where the singleton lives at that
+// CREATE2 address belong here; Arbitrum's deployment is at a different address
+// (0x6c247b1F6182318877311737BaC0844bAa518F5e) and is deliberately absent.
 var morphoBlueDeployBlocks = map[int64]int64{
-	1:     18883124,  // Ethereum mainnet
-	8453:  18925795,  // Base
-	42161: 226833208, // Arbitrum
+	1:    18883124, // Ethereum mainnet
+	8453: 13977148, // Base
 }
 
 // MorphoBlueDeployBlock returns the deploy block for the given chain ID.
@@ -245,8 +245,26 @@ func newService(
 	}, nil
 }
 
+// The visibility-timeout guard is fatal, so it runs before any startup I/O: a
+// misconfigured pod would otherwise re-run the whole sweep on every
+// CrashLoopBackOff cycle before refusing.
+func (s *Service) consumeLoop() sqsutil.Config {
+	return sqsutil.Config{
+		Consumer:     s.consumer,
+		MaxMessages:  s.config.MaxMessages,
+		PollInterval: s.config.PollInterval,
+		Logger:       s.logger,
+		ChainID:      s.config.ChainID,
+	}
+}
+
 // Start begins the SQS message processing loop.
 func (s *Service) Start(ctx context.Context) error {
+	loop := s.consumeLoop()
+	if err := loop.Validate(); err != nil {
+		return err
+	}
+
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
 	if err := s.LoadVaultRegistry(ctx); err != nil {
@@ -254,13 +272,7 @@ func (s *Service) Start(ctx context.Context) error {
 	}
 
 	s.wg.Go(func() {
-		sqsutil.RunLoop(s.ctx, sqsutil.Config{
-			Consumer:     s.consumer,
-			MaxMessages:  s.config.MaxMessages,
-			PollInterval: s.config.PollInterval,
-			Logger:       s.logger,
-			ChainID:      s.config.ChainID,
-		}, s.processBlockEvent)
+		sqsutil.RunLoop(s.ctx, loop, s.processBlockEvent)
 	})
 
 	s.logger.Info("morpho indexer started",
@@ -269,9 +281,9 @@ func (s *Service) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop cancels the SQS processing loop and waits for the goroutine to exit, so
-// no in-flight handler outlives shutdown (and no archive write is scheduled
-// after the archiving drain begins).
+// Stop cancels the SQS processing loop and waits for the loop goroutine to
+// exit. A handler the drain abandoned can outlive it; archiving's drain gate is
+// what refuses that handler's late archive write.
 func (s *Service) Stop() error {
 	if s.cancel != nil {
 		s.cancel()

@@ -1121,10 +1121,22 @@ export interface components {
      *     ``hhi`` is the Herfindahl-Hirschman Index of borrower concentration
      *     expressed as a percentage; ``None`` when liquidation analysis was
      *     not run or the market had fewer than two borrowers.
+     *
+     *     A direct 1:1 market result (SparkLend) leaves ``coverage_pct`` and
+     *     ``markets`` as ``None``. A Morpho vault share aggregates over the vault's
+     *     Blue markets instead: ``crr_*_pct`` are allocation-weighted averages over
+     *     the covered markets plus idle liquidity at zero risk — exact for expected
+     *     loss (linear in allocations), indicative for ES/VaR (quantiles are not
+     *     additive, and cross-market dependence is not modeled). ``coverage_pct`` is
+     *     the share of vault assets whose market has a computed result (idle counts
+     *     as covered), ``markets`` carries the per-market slices, ``hhi`` is
+     *     ``None``, and ``forecast_step``/``n_mc`` are the minimum across slices.
      */
     CoreModelDetails: {
       /** Copula Type */
       copula_type: string;
+      /** Coverage Pct */
+      coverage_pct?: string | null;
       /** Crr El Pct */
       crr_el_pct: string;
       /** Crr Es Pct */
@@ -1135,6 +1147,8 @@ export interface components {
       forecast_step: number;
       /** Hhi */
       hhi: string | null;
+      /** Markets */
+      markets?: components['schemas']['CoreModelMarketAllocation'][] | null;
       /** N Mc */
       n_mc: number;
       /** Protocol */
@@ -1144,6 +1158,33 @@ export interface components {
        * @enum {string}
        */
       risk_model: 'core_model';
+    };
+    /**
+     * CoreModelMarketAllocation
+     * @description One Blue market slice behind an aggregated Morpho vault-share result.
+     *
+     *     ``allocation_pct`` is this market's share of the vault's total assets on a
+     *     0-100 scale. ``computed_at`` is when this market's CORE result was
+     *     computed — slices of one aggregate can have different staleness.
+     */
+    CoreModelMarketAllocation: {
+      /** Allocation Pct */
+      allocation_pct: string;
+      /**
+       * Computed At
+       * Format: date-time
+       */
+      computed_at: string;
+      /** Crr El Pct */
+      crr_el_pct: string;
+      /** Crr Es Pct */
+      crr_es_pct: string;
+      /** Crr Var Pct */
+      crr_var_pct: string;
+      /** Market Key */
+      market_key: string;
+      /** N Mc */
+      n_mc: number;
     };
     /**
      * DataSourceResponse

@@ -11,9 +11,9 @@ From `stl-verify/ts/ui`:
 If styles look stale, re-run `npm run prepare`.
 
 ## Screens and high-signal states
-There is one primary screen (the allocation dashboard, `src/App.tsx`), composed of:
+There is one primary screen (the allocation dashboard, `src/routes/AllocationRoute.tsx`), composed of:
 - Prime sidebar (`PrimeSidebar`): prime selection, including the selected and active state.
-- Top bar (`TopBar`): network and protocol filters plus allocation search; state is URL-synced (see `src/lib/url-params.ts`).
+- Top bar (`TopBar`): network and protocol filters plus allocation search; state is URL-synced (see `src/shared/lib/search-params.ts`).
 - Summary metric row (`SummaryMetric`): the 4-up metric tiles above the grid.
 - Allocation grid (`AllocationGrid`): the dense data table, including the selected-row state and the `Badge` category chips (`categorical.1..5` fills).
 - Bottom panel (`BottomPanel`): segmented tabs for Risk breakdown, Required risk capital, and Activity.
@@ -32,12 +32,12 @@ For any UI change, confirm:
 6. Overlays: drawer and tooltip use tokenized overlay colors and handle focus correctly. Tooltip bubbles come from the upstream `tooltip` recipe — a bubble rendering as bare unpositioned text means the recipe is missing, not mis-styled.
 7. Empty, loading, and error: each data region degrades gracefully.
 8. Loading placeholders: every region uses `SkeletonStack`/`SkeletonRows`, which now pulse by default. Check the pulse runs, that no skeleton is brighter than its resting state, and that it goes static under `prefers-reduced-motion`.
-9. Row expansion (`ActivityFeed`): the expander column is discoverable, the detail panel loads per transaction, and expanding a second row leaves the first correct. Re-expanding refetches — there is no per-hash cache at HEAD.
+9. Row expansion (`ActivityFeed`): the expander column is discoverable, the detail panel loads per transaction, and expanding a second row leaves the first correct. Re-expanding a row already seen issues no request — the events are cached per tx hash for an hour, since a settled transaction's events do not change. A second request on re-expand means the cache key moved, or `staleTime`/`gcTime` on `CACHE.settledTx` dropped below the gap between expansions — the panel unmounts on collapse, so `gcTime` is what carries the entry across.
 10. Styling coverage: `panda.config.ts` narrows `staticCss` to the recipes this app renders, so a newly imported design-system component renders **completely unstyled** until its recipe key is added. Any component that suddenly looks like unstyled HTML is this, not a token bug.
 
 ## Known visual-risk areas
 - Segmented control active highlight (`BottomPanel`): repeatedly adjusted; verify the active tab fill and border after any change.
-- Data table header typography and selected-row inset (`AllocationGrid`). The header voice is one shared override (`shared/tableStyles.ts`) across all three tables — check them together.
+- Data table header typography and selected-row inset (`AllocationGrid`). The header voice is one shared override (`shared/ui/tableStyles.ts`) across all three tables — check them together.
 - Activity feed as a table: column widths in the narrow drawer container, expander discoverability, the detail panel's fit inside a row, and the compact two-line time cell.
 - Category chips: `Badge` padding around short labels, and the neutral fallback an unknown category renders as.
 - Metric-card trend chart (`MetricCardChart` in `AllocationGrid`) first paint: width comes from `useContainerWidth`, so verify the pre-measure frame does not flash a wrong-width chart or jump the layout.
@@ -54,6 +54,6 @@ Add a dedicated preview route or fixture state when:
 If automated visual regression becomes worthwhile, adopt the uikit preview and Ladle setup rather than reinventing it.
 
 ## Last refreshed from
-- `ui/src/App.tsx`, `ui/src/components/` (`allocations/`, `allocations/tabs/`, `shared/`), `ui/src/data-table/`
+- `ui/src/routes/`, `ui/src/features/` (`allocations/`, `activity/`), `ui/src/shared/` (`ui/`, `hooks/`, `lib/`)
 - `ui/package.json` scripts, `ui/panda.config.ts`, and `DESIGN.md` — all three revised for design-system `0.9.0` (narrowed `staticCss`, upstream `tooltip` recipe, `DataTable` activity feed), so re-read them rather than trusting this list.
 - `npx panda cssgen` output, for the resolved token values the checkpoints above refer to.

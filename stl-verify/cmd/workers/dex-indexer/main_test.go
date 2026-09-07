@@ -4,6 +4,10 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	sqsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
+	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 )
 
 // envSet clears every relevant env var and then sets only what the test
@@ -60,7 +64,7 @@ func TestRun_MissingRequiredEnv(t *testing.T) {
 			delete(vars, tt.omit)
 			envSet(t, vars)
 
-			err := run(context.Background(), nil)
+			err := run(context.Background(), nil, nil)
 			if err == nil {
 				t.Fatalf("expected error when %s is absent, got nil", tt.omit)
 			}
@@ -79,7 +83,7 @@ func TestRun_UnknownDex(t *testing.T) {
 	vars["DEX"] = "sushiswap"
 	envSet(t, vars)
 
-	err := run(context.Background(), nil)
+	err := run(context.Background(), nil, nil)
 	if err == nil {
 		t.Fatal("expected error for unknown DEX, got nil")
 	}
@@ -122,5 +126,21 @@ func TestRegistry_SelectsFactoryByKind(t *testing.T) {
 				t.Errorf("MetricPrefix() = %q, want %q", f.MetricPrefix(), tt.wantMetric)
 			}
 		})
+	}
+}
+
+// This binary runs RunLoop directly rather than under lifecycle.Run, so the pod
+// grace period is the only ceiling its shutdown chain has to fit.
+func TestShutdownChainFitsThePodGracePeriod(t *testing.T) {
+	loopShutdown := max(
+		sqsadapter.PollBudget(sqsadapter.ConfigDefaults().WaitTimeSeconds),
+		sqsutil.DefaultDrainTimeout+2*sqsutil.SettleTimeout,
+	)
+	chain := loopShutdown + lifecycle.ShutdownTailBudget
+
+	if chain >= lifecycle.PodTerminationGracePeriod {
+		t.Errorf("the dex worker's shutdown chain needs %s (loop %s + teardown guard %s), "+
+			"which does not fit the pod grace period (%s)",
+			chain, loopShutdown, lifecycle.ShutdownTailBudget, lifecycle.PodTerminationGracePeriod)
 	}
 }

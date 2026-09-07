@@ -13,6 +13,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/cmd/workers/internal/dexbootstrap"
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 )
 
@@ -29,7 +30,7 @@ func init() {
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 
-	err := run(ctx, os.Args[1:])
+	err := run(ctx, os.Args[1:], lifecycle.ForceExitAfter(lifecycle.ShutdownTailBudget))
 	cancel()
 	if err != nil {
 		slog.Error("fatal error", "error", err)
@@ -49,7 +50,11 @@ func newRegistry() map[string]Factory {
 	return registry
 }
 
-func run(ctx context.Context, args []string) error {
+// This worker has no lifecycle.Service to stop: RunLoop bounds its own shutdown,
+// leaving deps.Close() as an unbounded tail — pgxpool.Close waits on an abandoned
+// handler's connection past the pod grace period, in silence. onTeardownTimeout
+// bounds that tail; tests pass nil, which ForceExitAfter would take down with them.
+func run(ctx context.Context, args []string, onTeardownTimeout func()) error {
 	cfg, err := dexbootstrap.ParseConfig("dex-indexer", args)
 	if err != nil {
 		return err
@@ -76,8 +81,24 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 	defer deps.Close()
+	// Registered after Close so it runs first, arming the guard that bounds it.
+	defer armTeardownGuard(onTeardownTimeout)
 	if err := deps.CommonDeps().Validate(); err != nil {
 		return fmt.Errorf("validating deps: %w", err)
+	}
+
+	// The visibility-timeout guard is fatal, so it runs before BuildHandler loads
+	// the pool registry: a misconfigured pod would otherwise re-run that load on
+	// every CrashLoopBackOff cycle before refusing.
+	loop := sqsutil.Config{
+		Consumer:     deps.SQSConsumer,
+		MaxMessages:  cfg.MaxMessages,
+		PollInterval: 1 * time.Second,
+		Logger:       deps.Logger,
+		ChainID:      cfg.ChainID,
+	}
+	if err := loop.Validate(); err != nil {
+		return err
 	}
 
 	handler, err := f.BuildHandler(ctx, deps, cfg)
@@ -86,12 +107,12 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	bp := dexconsumer.NewBlockProcessor(deps.CacheReader, deps.DexTelemetry, handler)
-	sqsutil.RunLoop(ctx, sqsutil.Config{
-		Consumer:     deps.SQSConsumer,
-		MaxMessages:  cfg.MaxMessages,
-		PollInterval: 1 * time.Second,
-		Logger:       deps.Logger,
-		ChainID:      cfg.ChainID,
-	}, bp.ProcessBlockEvent)
+	sqsutil.RunLoop(ctx, loop, bp.ProcessBlockEvent)
 	return nil
+}
+
+func armTeardownGuard(onTeardownTimeout func()) {
+	if onTeardownTimeout != nil {
+		onTeardownTimeout()
+	}
 }

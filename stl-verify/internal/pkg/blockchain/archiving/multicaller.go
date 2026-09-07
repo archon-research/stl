@@ -5,14 +5,11 @@ import (
 	"log/slog"
 	"math/big"
 	"runtime/debug"
-	"sync"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rawsckey"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/ethereum/go-ethereum/common"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
 
@@ -25,11 +22,10 @@ type Config struct {
 	BuildID int64
 	// Chain is the chain name (e.g. "mainnet") used as the `chain` metric label.
 	Chain string
-	// Wait tracks in-flight background archive writes; shared across decorators
-	// and drained on shutdown. It is safe to drain with a plain sync.WaitGroup
-	// because every service stops its message loop (joining the goroutine that
-	// calls Execute) before the drain runs, so no Add races the Wait.
-	Wait *sync.WaitGroup
+	// Gate tracks in-flight archive writes, shared across decorators. A handler
+	// the SQS drain abandoned outlives its message loop, so Execute can still
+	// run while the deferred drain waits; the gate refuses those writes.
+	Gate *DrainGate
 	// MeterProvider builds the archive.writes.total counter. nil uses the global
 	// provider; tests inject a manual reader.
 	MeterProvider metric.MeterProvider
@@ -46,35 +42,23 @@ type Multicaller struct {
 	inner    outbound.Multicaller
 	archiver outbound.CallArchiver
 	cfg      Config
-	writes   metric.Int64Counter
+	writes   *WriteCounter
 }
 
 var _ outbound.Multicaller = (*Multicaller)(nil)
 
 // NewMulticaller wraps inner so its calls are archived via arch.
 func NewMulticaller(inner outbound.Multicaller, arch outbound.CallArchiver, cfg Config) *Multicaller {
-	if cfg.Wait == nil {
-		cfg.Wait = &sync.WaitGroup{}
-	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
+	}
+	if cfg.Gate == nil {
+		cfg.Gate = NewDrainGate(cfg.Logger)
 	}
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
 	}
-	if cfg.MeterProvider == nil {
-		cfg.MeterProvider = otel.GetMeterProvider()
-	}
-	writes, err := cfg.MeterProvider.
-		Meter("github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving").
-		Int64Counter("archive.writes.total", metric.WithDescription("Raw SC call archive write attempts by status"))
-	if err != nil {
-		// Metrics must never break the archiving hot path, so a counter that
-		// fails to construct is logged and left nil (recordWrite no-ops on nil)
-		// rather than failing NewMulticaller. This intentionally differs from the
-		// fail-hard rule used for core dependencies.
-		cfg.Logger.Error("building archive.writes.total counter; archive metrics disabled", "error", err)
-	}
+	writes := NewWriteCounter(cfg.MeterProvider, cfg.Chain, cfg.Source, cfg.Logger)
 	return &Multicaller{inner: inner, archiver: arch, cfg: cfg, writes: writes}
 }
 
@@ -159,29 +143,20 @@ func (m *Multicaller) archiveBatch(ctx context.Context, calls []outbound.Call, r
 // Address forwards to the inner multicaller.
 func (m *Multicaller) Address() common.Address { return m.inner.Address() }
 
-// Close blocks until all in-flight archive writes complete. Call during
-// graceful shutdown before the process exits. Production binaries drain via the
-// shared sync.WaitGroup returned by archivingwire; this is the drain handle for
-// a directly-constructed decorator (tests).
-func (m *Multicaller) Close() { m.cfg.Wait.Wait() }
+// Close blocks until all in-flight archive writes complete. Production binaries
+// drain via the budgeted drain archivingwire returns; this is the drain handle
+// for a directly-constructed decorator (tests).
+func (m *Multicaller) Close() { m.cfg.Gate.Wait() }
 
-// recordWrite increments archive.writes.total with the outcome status. A nil
-// counter (construction failed) is a no-op. It records against a background
-// context because the counter increment is independent of the archive
-// operation's timeout.
+// recordWrite increments archive.writes.total with the outcome status. Only a
+// write that still owns its batch's status calls it; a drain that expired
+// already counted the rest as lost.
 func (m *Multicaller) recordWrite(err error) {
-	if m.writes == nil {
-		return
-	}
-	status := "success"
+	status := writeStatusSuccess
 	if err != nil {
-		status = "error"
+		status = writeStatusError
 	}
-	m.writes.Add(context.Background(), 1, metric.WithAttributes(
-		attribute.String("chain", m.cfg.Chain),
-		attribute.String("source", m.cfg.Source),
-		attribute.String("status", status),
-	))
+	m.writes.Record(status, 1)
 }
 
 func (m *Multicaller) buildBatchRecord(calls []outbound.Call, results []outbound.Result, blockNumber *big.Int, blockVersion int, mcAddr string) outbound.CallBatchRecord {
@@ -212,40 +187,49 @@ func (m *Multicaller) buildBatchRecord(calls []outbound.Call, results []outbound
 }
 
 func (m *Multicaller) scheduleArchive(ctx context.Context, record outbound.CallBatchRecord) {
-	// Tracked by the shared WaitGroup so graceful shutdown drains this write. No
-	// Add-after-Wait race: each service stops its message loop before draining,
-	// so Execute (hence this Go) can never run concurrently with the drain.
-	m.cfg.Wait.Go(func() {
-		// Archiving is fire-and-forget: a panic here must never escape and crash
-		// the worker, since archiving must not affect the hot path.
-		defer func() {
-			if r := recover(); r != nil {
-				m.cfg.Logger.Error("panic while archiving SC call batch",
-					"panic", r,
-					"source", record.Source,
-					"block", record.BlockNumber,
-					"block_version", record.BlockVersion,
-					"calls", len(record.Calls),
-					"stack", string(debug.Stack()),
-				)
-			}
-		}()
+	if m.cfg.Gate.Go(func() { m.archiveRecord(ctx, record) }) {
+		return
+	}
+	m.writes.Record(writeStatusAbandoned, 1)
+	m.cfg.Logger.Warn("archive drain already began; dropping this SC call batch",
+		"source", record.Source,
+		"block", record.BlockNumber,
+		"block_version", record.BlockVersion,
+		"calls", len(record.Calls),
+	)
+}
 
-		archiveCtx, cancel := context.WithTimeout(ctx, archiveTimeout)
-		defer cancel()
-		err := m.archiver.Archive(archiveCtx, record)
-		m.recordWrite(err)
-		if err != nil {
-			// A failed write is a permanent, unretried loss of an archived
-			// batch, so surface it at error level rather than burying it in
-			// warnings.
-			m.cfg.Logger.Error("archiving SC call batch failed",
-				"error", err,
+func (m *Multicaller) archiveRecord(ctx context.Context, record outbound.CallBatchRecord) {
+	// Archiving is fire-and-forget: a panic here must never escape and crash
+	// the worker, since archiving must not affect the hot path.
+	defer func() {
+		if r := recover(); r != nil {
+			m.cfg.Logger.Error("panic while archiving SC call batch",
+				"panic", r,
 				"source", record.Source,
 				"block", record.BlockNumber,
 				"block_version", record.BlockVersion,
 				"calls", len(record.Calls),
+				"stack", string(debug.Stack()),
 			)
 		}
-	})
+	}()
+
+	archiveCtx, cancel := context.WithTimeout(ctx, archiveTimeout)
+	defer cancel()
+	err := m.archiver.Archive(archiveCtx, record)
+	if m.cfg.Gate.ClaimOutcome() {
+		m.recordWrite(err)
+	}
+	if err != nil {
+		// A failed write is a permanent, unretried loss of an archived batch, so
+		// surface it at error level rather than burying it in warnings.
+		m.cfg.Logger.Error("archiving SC call batch failed",
+			"error", err,
+			"source", record.Source,
+			"block", record.BlockNumber,
+			"block_version", record.BlockVersion,
+			"calls", len(record.Calls),
+		)
+	}
 }

@@ -157,14 +157,19 @@ func (s *Service) Start(ctx context.Context) error {
 
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
+	loop := sqsutil.Config{
+		Consumer:     s.consumer,
+		MaxMessages:  s.config.MaxMessages,
+		PollInterval: s.config.PollInterval,
+		Logger:       s.logger,
+		ChainID:      s.config.ChainID,
+	}
+	if err := loop.Validate(); err != nil {
+		return err
+	}
+
 	s.wg.Go(func() {
-		sqsutil.RunLoop(s.ctx, sqsutil.Config{
-			Consumer:     s.consumer,
-			MaxMessages:  s.config.MaxMessages,
-			PollInterval: s.config.PollInterval,
-			Logger:       s.logger,
-			ChainID:      s.config.ChainID,
-		}, s.processBlockEvent)
+		sqsutil.RunLoop(s.ctx, loop, s.processBlockEvent)
 	})
 
 	s.logger.Info("aavelike position tracker started",
@@ -172,9 +177,9 @@ func (s *Service) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop cancels the SQS processing loop and waits for the goroutine to exit, so
-// no in-flight handler outlives shutdown (and no archive write is scheduled
-// after the archiving drain begins).
+// Stop cancels the SQS processing loop and waits for the loop goroutine to
+// exit. A handler the drain abandoned can outlive it; archiving's drain gate is
+// what refuses that handler's late archive write.
 func (s *Service) Stop() error {
 	if s.cancel != nil {
 		s.cancel()

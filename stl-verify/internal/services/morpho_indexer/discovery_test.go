@@ -282,7 +282,7 @@ func TestProcessBlockEvent_VaultDiscovery_V2_UnclassifiedAdapterWithoutRealAsset
 			return h.vaultDetailResults("Spark Blue Chip USDT Vault", "sparkUSDTbc", 6, false), nil
 		case len(calls) == 2 && calls[0].Target == testLoanToken:
 			return h.tokenMetadataResults("USDT", 6), nil
-		case len(calls) == 2 && calls[0].Target == adapter:
+		case len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == adapter:
 			return h.adapterProbeResults(entity.MorphoAdapterTypeUnknown), nil
 		default:
 			return nil, fmt.Errorf("unexpected Execute shape (%d calls)", len(calls))
@@ -485,9 +485,9 @@ func (h *serviceTestHarness) setupV2DiscoveryWithTwoAdapters() v2DiscoveryFixtur
 			return h.vaultDetailResults("Spark Blue Chip USDT Vault", "sparkUSDTbc", 6, false), nil
 		case len(calls) == 2 && calls[0].Target == testLoanToken:
 			return h.tokenMetadataResults("USDT", 6), nil
-		case len(calls) == 2 && calls[0].Target == fx.adapterA:
+		case len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == fx.adapterA:
 			return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
-		case len(calls) == 2 && calls[0].Target == fx.adapterB:
+		case len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == fx.adapterB:
 			return h.adapterProbeResults(entity.MorphoAdapterTypeVaultV1), nil
 		default:
 			return nil, fmt.Errorf("unexpected Execute shape (%d calls)", len(calls))
@@ -943,7 +943,7 @@ func TestProcessBlockEvent_VaultDiscovery_V2_EnumerationFailureCommitsNothingAnd
 			return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(1))}}, nil
 		case len(calls) == 1 && calls[0].Target == unknownVault && hasSameSelector(calls[0].CallData, adaptersSelector):
 			return []outbound.Result{{Success: true, ReturnData: h.packAddress(adapterA)}}, nil
-		case len(calls) == 2 && calls[0].Target == adapterA:
+		case len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == adapterA:
 			return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
 		case len(calls) == 1 && calls[0].Target == adapterA:
 			return []outbound.Result{{Success: true, ReturnData: h.packUint256(realAssetsA)}}, nil
@@ -1026,7 +1026,7 @@ func TestProcessBlockEvent_VaultDiscovery_V2_SeedRealAssetsErrorRetries(t *testi
 			return h.vaultDetailResults("Spark Blue Chip USDT Vault", "sparkUSDTbc", 6, false), nil
 		case len(calls) == 2 && calls[0].Target == testLoanToken:
 			return h.tokenMetadataResults("USDT", 6), nil
-		case len(calls) == 2 && calls[0].Target == adapterA:
+		case len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == adapterA:
 			return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
 		default:
 			return nil, fmt.Errorf("unexpected Execute shape (%d calls)", len(calls))

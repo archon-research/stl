@@ -36,9 +36,18 @@ func TestWorkerConfig_Validate(t *testing.T) {
 			wantErr: "Name is required",
 		},
 		{
-			name:    "missing database opener",
+			name:    "no database opener and no declaration that none is wanted",
 			mutate:  func(c *WorkerConfig) { c.OpenDatabase = nil },
-			wantErr: "OpenDatabase is required",
+			wantErr: "OpenDatabase is required (or set NoDatabase)",
+		},
+		{
+			name:   "a job that declares it wants no database",
+			mutate: func(c *WorkerConfig) { c.OpenDatabase, c.NoDatabase = nil, true },
+		},
+		{
+			name:    "an opener alongside the declaration that none is wanted",
+			mutate:  func(c *WorkerConfig) { c.NoDatabase = true },
+			wantErr: "mutually exclusive",
 		},
 		{
 			name:    "missing register hook",
@@ -207,5 +216,32 @@ func TestRunWorker_RejectsInvalidConfigBeforeAnySetup(t *testing.T) {
 	}
 	if opened {
 		t.Error("database was opened despite an invalid config")
+	}
+}
+
+// A pod told to stop before the worker was even built has done nothing wrong:
+// surfacing the cancelled context makes the main exit 1 and the rollout look
+// like a crash. RunWorker's clean stop after w.Run returns nil, and so does this.
+func TestRunWorker_TreatsACancelledStartupAsAShutdown(t *testing.T) {
+	t.Setenv("TEMPORAL_HOST_PORT", "127.0.0.1:1")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := RunWorker(ctx, BuildMeta{Commit: "test"}, validWorkerConfig())
+
+	if err != nil {
+		t.Fatalf("RunWorker = %v, want a cancelled startup reported as a clean stop", err)
+	}
+}
+
+func TestNewBootstrap_SurfacesACancelledContextWithoutDialingTemporal(t *testing.T) {
+	t.Setenv("TEMPORAL_HOST_PORT", "127.0.0.1:1")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := newBootstrap(ctx, BuildMeta{Commit: "test"}, "cancelled", nil)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("newBootstrap = %v, want the cancelled context, not a dial error", err)
 	}
 }

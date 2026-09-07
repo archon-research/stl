@@ -55,7 +55,7 @@ func main() {
 		cancel()
 	}()
 
-	err := run(ctx, os.Args[1:])
+	err := run(ctx, os.Args[1:], lifecycle.ForceExitAfter(lifecycle.ShutdownTailBudget))
 	cancel()
 	if err != nil {
 		slog.Error("prime-debt-indexer exited with error", "error", err)
@@ -153,7 +153,7 @@ func parseConfig(args []string) (cliConfig, error) {
 
 // run is the entry point for the prime-debt-indexer.
 // It is extracted from main() to allow integration testing.
-func run(ctx context.Context, args []string) error {
+func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	cfg, err := parseConfig(args)
 	if err != nil {
 		return err
@@ -237,7 +237,7 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
-	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "prime-debt")
+	archiveWrap, _, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "prime-debt")
 	if err != nil {
 		return err
 	}
@@ -263,7 +263,7 @@ func run(ctx context.Context, args []string) error {
 		prime_debt.Config{
 			SweepEveryNBlocks: cfg.sweepBlocks,
 			ChainID:           cfg.chainID,
-			MaxMessages:       10,
+			MaxMessages:       1,
 			PollInterval:      100 * time.Millisecond,
 			Logger:            logger,
 		},
@@ -281,5 +281,5 @@ func run(ctx context.Context, args []string) error {
 		"chainID", cfg.chainID,
 	)
 
-	return lifecycle.Run(ctx, logger, svc)
+	return lifecycle.RunWithTimeoutGuard(ctx, logger, onShutdownTimeout, svc)
 }

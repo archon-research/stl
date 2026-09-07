@@ -9,8 +9,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
+from app.adapters.postgres.reference_as_of import ReferenceEffectiveAtProvider
 from app.api._validators import ProxyAddressPathParam
-from app.api.deps import get_engine, get_reference_capital_repository_factory
+from app.api.deps import get_engine, get_reference_as_of, get_reference_capital_repository_factory
 from app.api.provenance import (
     get_requested_provenance,
     resolve_or_422,
@@ -119,8 +120,11 @@ class TotalCapitalEnvelope(BaseModel):
     )
 
 
-async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationService:
-    return AllocationService(AllocationRepository(engine))
+async def _get_service(
+    engine: AsyncEngine = Depends(get_engine),
+    reference_as_of: ReferenceEffectiveAtProvider = Depends(get_reference_as_of),
+) -> AllocationService:
+    return AllocationService(AllocationRepository(engine, reference_as_of))
 
 
 def _merged_bucket_starts(*grids: dict) -> list:

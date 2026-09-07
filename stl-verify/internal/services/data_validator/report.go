@@ -1,6 +1,8 @@
 package data_validator
 
 import (
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -78,6 +80,20 @@ func (r *Report) AddCheck(result CheckResult) {
 func (r *Report) Finalize() {
 	r.EndTime = time.Now()
 	r.Duration = r.EndTime.Sub(r.StartTime)
+}
+
+// FailureSummary names every check that failed or errored, with its message.
+// The report object never leaves the process: the runner turns it into one
+// error string, and counts alone name nothing an operator can act on.
+func (r *Report) FailureSummary() string {
+	var parts []string
+	for _, check := range r.Checks {
+		if check.Status != StatusFailed && check.Status != StatusError {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s: %s", check.Name, check.Message))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // Success returns true if all checks passed.

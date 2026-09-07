@@ -296,7 +296,7 @@ func buildReplayServiceForTest(t *testing.T, ctx context.Context, pool *pgxpool.
 // chain read shapes the replay issues, all from recorded fixture data:
 //
 //   - the number-pinned adapter identity probe (morpho() succeeds returning the
-//     Morpho Blue singleton, morphoVaultV1() reverts ⇒ MarketV1);
+//     Morpho Blue singleton, every other marker reverts ⇒ MarketV1);
 //   - the 1-call hash-pinned realAssets() read;
 //   - the 2-call hash-pinned (absoluteCap, relativeCap) read;
 //   - the 4-call hash-pinned fee-config read (both fees + both recipients).
@@ -361,13 +361,26 @@ func newFixtureMulticaller(t *testing.T, fx *replayFixture) *testutil.MockMultic
 		}
 	}
 
+	isAdapterProbe := func(calls []outbound.Call) bool {
+		if len(calls) != adapterProbeCallsPerAdapter {
+			return false
+		}
+		for _, call := range calls {
+			if call.Target != adapter || !call.AllowFailure {
+				return false
+			}
+		}
+		return true
+	}
+
 	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) == 2 && calls[0].Target == adapter && calls[1].Target == adapter &&
-			calls[0].AllowFailure && calls[1].AllowFailure {
-			return []outbound.Result{
-				{Success: true, ReturnData: common.LeftPadBytes(morphoSingleton.Bytes(), 32)},
-				{Success: false, ReturnData: nil},
-			}, nil
+		if isAdapterProbe(calls) {
+			results := make([]outbound.Result, adapterProbeCallsPerAdapter)
+			for i := range results {
+				results[i] = outbound.Result{Success: false, ReturnData: nil}
+			}
+			results[0] = outbound.Result{Success: true, ReturnData: common.LeftPadBytes(morphoSingleton.Bytes(), 32)}
+			return results, nil
 		}
 		return nil, fmt.Errorf("fake multicaller: unexpected Execute shape (%d calls)", len(calls))
 	}

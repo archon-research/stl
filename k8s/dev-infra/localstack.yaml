@@ -102,6 +102,7 @@ data:
     create_chain_resources "optimism"
     create_chain_resources "unichain"
     create_chain_resources "arbitrum"
+    create_chain_resources "robinhood"
 
     echo "Creating oracle price queues..."
     $AWS sqs create-queue \
@@ -195,7 +196,9 @@ data:
       --attributes RawMessageDelivery=true \
       --region $REGION
 
-    # Allocation tracker is Ethereum-only
+    # Allocation tracker runs on Ethereum and Robinhood
+    create_consumer_queue "robinhood" "allocation-tracker"
+
     echo "Creating Ethereum allocation-tracker queues..."
     $AWS sqs create-queue \
       --queue-name stl-ethereum-allocation-tracker-dlq.fifo \

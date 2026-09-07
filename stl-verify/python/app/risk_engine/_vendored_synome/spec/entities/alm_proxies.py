@@ -185,6 +185,20 @@ stl-verify config.go and should be backfilled in the Atlas.
 """
 
 
+GROVE_ROBINHOOD_ALM_PROXY: Final[AlmProxyDeployment] = AlmProxyDeployment(
+    prime=PrimeAgent.GROVE,
+    network=Network.ROBINHOOD,
+    address=EvmAddress("0x29626c2d8Ca49A51E4dECEEc5499e52983c42BD5"),
+)
+"""ALM Proxy contract deployment for Grove on Robinhood Chain.
+
+Discrepancy: no Atlas ALM Proxy Contract document exists for Grove on
+Robinhood yet, so ``:source_uuid:`` is omitted. The address was verified
+on-chain (ARCT-374): the contract holds the Grove USDG position (~14.9M USDG)
+and ~99.9% of the groveUSDG vault supply.
+"""
+
+
 class AlmProxy(Enum):
     """Closed-world set of all known ALM Proxy deployments.
 
@@ -207,6 +221,7 @@ class AlmProxy(Enum):
     GROVE_PLASMA = GROVE_PLASMA_ALM_PROXY
     GROVE_PLUME = GROVE_PLUME_ALM_PROXY
     GROVE_MONAD = GROVE_MONAD_ALM_PROXY
+    GROVE_ROBINHOOD = GROVE_ROBINHOOD_ALM_PROXY
 
 
 STL_ADDITIONAL_PROXIES: Final[dict[tuple[PrimeAgent, Network], list[EvmAddress]]] = {

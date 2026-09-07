@@ -3,6 +3,7 @@ package temporal
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/interceptor"
@@ -22,7 +23,14 @@ type WorkerConfig struct {
 	// Name is the task queue and the OTel service name.
 	Name string
 
+	// OpenDatabase opens the app database pool. Required unless NoDatabase says
+	// this job wants none, so a job that loses its opener to a wiring mistake
+	// fails at startup rather than running pool-less.
 	OpenDatabase func(ctx context.Context) (*pgxpool.Pool, error)
+
+	// NoDatabase declares that this job touches no Postgres: it gets a nil
+	// Dependencies.Pool and its deployment needs no database credential.
+	NoDatabase bool
 
 	// Register attaches the job's workflows and activities. It runs after the
 	// database pool is open so activity structs can capture their dependencies.
@@ -47,11 +55,14 @@ func (c WorkerConfig) validate() error {
 	if c.Name == "" {
 		return fmt.Errorf("WorkerConfig.Name is required")
 	}
-	if c.OpenDatabase == nil {
-		return fmt.Errorf("WorkerConfig.OpenDatabase is required")
-	}
 	if c.Register == nil {
 		return fmt.Errorf("WorkerConfig.Register is required")
+	}
+	if c.OpenDatabase == nil && !c.NoDatabase {
+		return fmt.Errorf("WorkerConfig.OpenDatabase is required (or set NoDatabase)")
+	}
+	if c.OpenDatabase != nil && c.NoDatabase {
+		return fmt.Errorf("WorkerConfig.OpenDatabase and NoDatabase are mutually exclusive")
 	}
 	return nil
 }
@@ -126,6 +137,12 @@ func RunWorker(ctx context.Context, meta BuildMeta, cfg WorkerConfig) error {
 
 	boot, err := newBootstrap(ctx, meta, cfg.Name, cfg.OpenDatabase)
 	if err != nil {
+		// A pod told to stop before the worker was built has done nothing wrong:
+		// returning the error here would exit 1 on an ordinary rollout.
+		if ctx.Err() != nil {
+			slog.Info("shutdown requested during startup", "taskQueue", cfg.Name)
+			return nil
+		}
 		return err
 	}
 	defer boot.close()

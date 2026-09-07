@@ -1,0 +1,59 @@
+import { useMemo } from 'react';
+
+import { buildProtocolLogoUrl, buildTokenLogoUrl } from '../lib/logo-cdn';
+import { LogoAvatar } from './LogoAvatar';
+
+type TokenLogoProps = {
+  address: string | null | undefined;
+  chainId: number | null;
+  isSelected?: boolean;
+  size?: '6' | '7' | '8' | '9' | '10';
+  symbol: string;
+  /**
+   * Issuing protocol, tried when the token itself has no CDN icon: a receipt
+   * token (spUSDT, sparkUSDCbc) rarely has one, but its protocol does.
+   */
+  protocolName?: string | null;
+};
+
+const TOKEN_LOGO_SIZE_PX: Record<
+  NonNullable<TokenLogoProps['size']>,
+  number
+> = {
+  6: 16,
+  7: 18,
+  8: 20,
+  9: 24,
+  10: 28,
+};
+
+export function TokenLogo({
+  address,
+  chainId,
+  isSelected = false,
+  size = '10',
+  symbol,
+  protocolName = null,
+}: TokenLogoProps) {
+  const resolvedSize = TOKEN_LOGO_SIZE_PX[size];
+  const logoUrl = useMemo(
+    () => buildTokenLogoUrl(chainId, address),
+    [address, chainId],
+  );
+  const protocolLogoUrl = useMemo(
+    () => (protocolName ? buildProtocolLogoUrl(protocolName) : null),
+    [protocolName],
+  );
+
+  return (
+    <LogoAvatar
+      alt={`${symbol} logo`}
+      fallbackColor="text.strong"
+      fallbackImageUrl={protocolLogoUrl}
+      fallbackText={symbol.slice(0, 2).toUpperCase()}
+      imageUrl={logoUrl}
+      isSelected={isSelected}
+      sizePx={resolvedSize}
+    />
+  );
+}

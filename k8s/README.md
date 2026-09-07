@@ -35,11 +35,14 @@ the same base manifests (no generated manifests).
 
 ## How overlays work
 
-Each overlay sets the target namespace and pins image names. For EKS, CI bumps
-`newTag` per service: staging on merge to main, prod via the env-gated promotion
-(auto-committed to main, then synced only after the `production` GitHub
-Environment review is approved — see CONTRIBUTING.md §14). Do not hand-edit prod
-`newTag`s or sync `stl-prod` manually.
+Each overlay sets the target namespace and pins image names. For EKS the whole
+`images:` block is generated from `k8s/image-roster.txt` by
+`scripts/deploy/render-overlay-images.sh` and rewritten by CI on every deploy:
+staging on merge to main, prod via the env-gated promotion (auto-committed to
+main, then synced only after the `production` GitHub Environment review is
+approved — see CONTRIBUTING.md §14). Entries are sorted by alias; the roster is
+the inventory. Do not hand-edit the block or sync `stl-prod` manually (ORB-362);
+`make check-overlay-images` (in `stl-verify/`) is the local guard.
 
 ```bash
 # Preview what gets applied
@@ -252,10 +255,13 @@ kubectl --context=kind-vector rollout restart deployment -n vector
 Add a `base/<name>/` directory (deployment + serviceaccount + kustomization) like
 the existing services, then reference it (with a local `images:` entry) from
 `overlays/dev/kustomization.yaml` (or `overlays/dev/workers/`, or `overlays/dev/data-validator/`
-for opt-in crons) and the prod/staging overlays. Cronjobs follow the same pattern — there is
-no manifest generator. If a dev cron is added to the core overlay, also add its Deployment
-name to `CRONJOB_DEPLOYMENTS` in `stl-verify/Makefile` (the `check-dev-overlay-sync` guard
-enforces this).
+for opt-in crons). For prod/staging add the base dir under `resources:` and one line to
+`k8s/image-roster.txt` (kind, image name, the `image:` alias the base uses) — those overlays'
+`images:` blocks are generated from the roster, never edited (ORB-362); removing a service means
+deleting its roster line and its stale images entry in the same PR. Cronjobs follow the
+same pattern — there is no manifest generator. If a dev cron is added to the core overlay, also
+add its Deployment name to `CRONJOB_DEPLOYMENTS` in `stl-verify/Makefile` (the
+`check-dev-overlay-sync` guard enforces this).
 
 ## Updating Secrets
 

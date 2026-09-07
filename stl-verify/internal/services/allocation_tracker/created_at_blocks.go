@@ -37,6 +37,8 @@ var knownCreatedAtBlocks = map[createdAtBlockKey]int64{
 	{Chain: "plume", Contract: common.HexToAddress("0xa5d465251fbcc907f5dd6bb2145488dfc6a2627b")}:       41311106,
 	{Chain: "monad", Contract: common.HexToAddress("0x00000000efe302beaa2b3e6e1b18d08d69a9012a")}:       36870131,
 	{Chain: "monad", Contract: common.HexToAddress("0x6b405dca74897c9442d369dcf6c0ec230f7e1c7c")}:       39598901,
+	{Chain: "robinhood", Contract: common.HexToAddress("0x5fc5360d0400a0fd4f2af552add042d716f1d168")}:   57,
+	{Chain: "robinhood", Contract: common.HexToAddress("0xbeeff039907422219fb367e525954ddc092854d9")}:   47860,
 }
 
 // lookupCreatedAtBlock returns the known on-chain creation block for a position

@@ -636,35 +636,34 @@ const MORPHO_BREAKDOWN_ITEMS: readonly RiskBreakdownItem[] = [
  * `aEthUSDT` and `syrupUSDC` are deliberately absent: the real API has nothing
  * to decompose for them, and the UI's not-available state needs a fixture too.
  */
-export const RISK_BREAKDOWN_BY_TOKEN: Readonly<Record<string, RiskBreakdown>> =
-  {
-    [SPUSDS]: sharedPoolBreakdown(736, 1),
-    // Exposure relative to spUSDS, from the allocation fixture's amount_usd.
-    ['0xe7df13b8e3d6740fe17cbe928c7334243d86c92f']: sharedPoolBreakdown(
-      338,
-      0.41181,
-    ),
-    ['0x4dedf26112b3ec8ec46e7e31ea5e123490b05b8b']: sharedPoolBreakdown(
-      723,
-      0.35169,
-    ),
-    ['0x779224df1c756b4edd899854f32a53e8c2b2ce5d']: sharedPoolBreakdown(
-      735,
-      0.11879,
-    ),
-    ['0x59cd1c87501baa753d0b5b5ab5d8416a45cd71db']: sharedPoolBreakdown(
-      269,
-      0.07228,
-    ),
-    ['0x56a76b428244a50513ec81e225a293d128fd581d']: {
-      receipt_token_id: 885660,
-      items: [...MORPHO_BREAKDOWN_ITEMS],
-    },
-    ['0x73e65dbd630f90604062f6e02fab9138e713edd9']: {
-      receipt_token_id: 892750,
-      items: [...MORPHO_BREAKDOWN_ITEMS],
-    },
-  };
+const RISK_BREAKDOWN_BY_TOKEN: Readonly<Record<string, RiskBreakdown>> = {
+  [SPUSDS]: sharedPoolBreakdown(736, 1),
+  // Exposure relative to spUSDS, from the allocation fixture's amount_usd.
+  ['0xe7df13b8e3d6740fe17cbe928c7334243d86c92f']: sharedPoolBreakdown(
+    338,
+    0.41181,
+  ),
+  ['0x4dedf26112b3ec8ec46e7e31ea5e123490b05b8b']: sharedPoolBreakdown(
+    723,
+    0.35169,
+  ),
+  ['0x779224df1c756b4edd899854f32a53e8c2b2ce5d']: sharedPoolBreakdown(
+    735,
+    0.11879,
+  ),
+  ['0x59cd1c87501baa753d0b5b5ab5d8416a45cd71db']: sharedPoolBreakdown(
+    269,
+    0.07228,
+  ),
+  ['0x56a76b428244a50513ec81e225a293d128fd581d']: {
+    receipt_token_id: 885660,
+    items: [...MORPHO_BREAKDOWN_ITEMS],
+  },
+  ['0x73e65dbd630f90604062f6e02fab9138e713edd9']: {
+    receipt_token_id: 892750,
+    items: [...MORPHO_BREAKDOWN_ITEMS],
+  },
+};
 
 function sharedPoolBreakdown(
   receiptTokenId: number,

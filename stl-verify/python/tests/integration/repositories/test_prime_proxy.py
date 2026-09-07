@@ -16,6 +16,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
+from app.adapters.postgres.reference_as_of import utc_now
 from app.domain.entities.allocation import EthAddress
 
 # Declared in the migration. The ALM/SubProxy split matters: the reads classify by
@@ -42,14 +43,14 @@ async def repository(async_db_url: str) -> AsyncIterator[AllocationRepository]:
     """The repository whose reads resolve a proxy to its prime."""
     engine = create_async_engine(async_db_url)
     try:
-        yield AllocationRepository(engine)
+        yield AllocationRepository(engine, utc_now)
     finally:
         await engine.dispose()
 
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_the_migration_declares_the_full_proxy_list(conn: asyncpg.Connection) -> None:
-    """Eleven rows, and every one resolves to a real prime.
+    """Twelve rows, and every one resolves to a real prime.
 
     A prime name in the migration that does not match ``prime.name`` would drop its
     proxies silently, and every endpoint for them would return empty rather than fail.
@@ -59,7 +60,7 @@ async def test_the_migration_declares_the_full_proxy_list(conn: asyncpg.Connecti
         "FROM prime_proxy pp JOIN prime p ON p.id = pp.prime_id"
     )
 
-    assert len(rows) == 11
+    assert len(rows) == 12
     assert {row["name"] for row in rows} == {"spark", "grove"}
 
 

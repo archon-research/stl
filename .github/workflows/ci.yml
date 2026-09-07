@@ -52,6 +52,9 @@ jobs:
       go: ${{ steps.changed-files.outputs.go_any_changed }}
       python: ${{ steps.changed-files.outputs.python_any_changed }}
       ts: ${{ steps.changed-files.outputs.ts_any_changed }}
+      # ORB-362: a roster/renderer change must run the deploy even with no code
+      # change — that is how a new image entry reaches the overlays.
+      deploy: ${{ steps.changed-files.outputs.deploy_any_changed }}
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -81,8 +84,8 @@ jobs:
         run: |
           set -euo pipefail
           # Tag shape: optional `<name>-` prefix (cronjobs) + 40-hex SHA.
-          # KEEP IN SYNC with the update-prod stamp sed and GUARD 4 in
-          # deploy.yaml -- the stamp format is now also a CI input.
+          # KEEP IN SYNC with scripts/deploy/render-overlay-images.sh, which
+          # writes this file's images block from k8s/image-roster.txt (ORB-362).
           marker=$(git show "origin/main:${OVERLAY}" \
             | sed -nE 's/^[[:space:]]*newTag:[[:space:]]*"?([a-z0-9]+-)*([a-f0-9]{40})"?[[:space:]]*(#.*)?$/\2/p' \
             | sort -u) || marker=""
@@ -164,6 +167,16 @@ jobs:
       - name: Image tags are CI-owned and internally consistent
         run: scripts/deploy/check-overlay-tag-consistency.sh
 
+      # ORB-362: the block is generated from k8s/image-roster.txt. Every entry
+      # present must be one the roster renders (name, repo, tag prefix); roster
+      # lines the bot has not written yet are reported as pending, so a
+      # new-service PR never has to touch the block.
+      - name: Overlay images blocks match the deploy roster
+        run: |
+          for env in staging prod; do
+            scripts/deploy/render-overlay-images.sh --env "$env" --check "k8s/overlays/$env/kustomization.yaml" --allow-missing
+          done
+
   ci-passed:
     name: Success
     needs:
@@ -211,7 +224,8 @@ jobs:
       (
         needs.detect-changes.outputs.go == 'true' ||
         needs.detect-changes.outputs.python == 'true' ||
-        needs.detect-changes.outputs.ts == 'true'
+        needs.detect-changes.outputs.ts == 'true' ||
+        needs.detect-changes.outputs.deploy == 'true'
       )
     uses: ./.github/workflows/deploy.yaml
     secrets: inherit

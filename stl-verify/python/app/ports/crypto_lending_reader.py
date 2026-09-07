@@ -15,6 +15,10 @@ class CryptoLendingReader(Protocol):
         """Return every receipt_token_id supported by the crypto-lending model."""
         ...
 
+    async def list_morpho_asset_ids(self, chain_id: int) -> frozenset[int]:
+        """Return the receipt_token_ids of Morpho vault shares on ``chain_id``."""
+        ...
+
     async def get_receipt_token(self, receipt_token_id: int) -> ReceiptTokenInfo | None:
         """Return receipt-token routing metadata, or ``None`` if unknown."""
         ...

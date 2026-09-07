@@ -141,14 +141,50 @@ async def test_list_supported_asset_ids_filters_supported_protocols(
 ) -> None:
     receipt_token_repo.list_protocol_pairs = AsyncMock(
         return_value=[
-            ReceiptTokenProtocolPair(receipt_token_id=1, protocol_name="Aave V3"),
-            ReceiptTokenProtocolPair(receipt_token_id=2, protocol_name="morpho-blue"),
-            ReceiptTokenProtocolPair(receipt_token_id=3, protocol_name="Unsupported"),
+            ReceiptTokenProtocolPair(receipt_token_id=1, protocol_name="Aave V3", chain_id=1),
+            ReceiptTokenProtocolPair(receipt_token_id=2, protocol_name="morpho-blue", chain_id=1),
+            ReceiptTokenProtocolPair(receipt_token_id=3, protocol_name="Unsupported", chain_id=1),
+            ReceiptTokenProtocolPair(receipt_token_id=4, protocol_name="Aave V3 Avalanche", chain_id=43114),
         ]
     )
 
-    assert await reader.list_supported_asset_ids() == {1, 2}
+    assert await reader.list_supported_asset_ids() == {1, 2, 4}
     receipt_token_repo.list_protocol_pairs.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_list_morpho_asset_ids_filters_by_protocol_and_chain(
+    reader: PostgresCryptoLendingReader,
+    receipt_token_repo: MagicMock,
+) -> None:
+    # Every spelling the normalization must fold, plus a Base vault and a
+    # non-Morpho protocol that must both be excluded.
+    receipt_token_repo.list_protocol_pairs = AsyncMock(
+        return_value=[
+            ReceiptTokenProtocolPair(receipt_token_id=1, protocol_name="Morpho Blue", chain_id=1),
+            ReceiptTokenProtocolPair(receipt_token_id=2, protocol_name="morpho-blue", chain_id=1),
+            ReceiptTokenProtocolPair(receipt_token_id=3, protocol_name="MORPHO_BLUE", chain_id=1),
+            ReceiptTokenProtocolPair(receipt_token_id=4, protocol_name="Morpho Blue", chain_id=8453),
+            ReceiptTokenProtocolPair(receipt_token_id=5, protocol_name="SparkLend", chain_id=1),
+        ]
+    )
+
+    assert await reader.list_morpho_asset_ids(chain_id=1) == frozenset({1, 2, 3})
+
+
+@pytest.mark.asyncio
+async def test_list_morpho_asset_ids_scopes_to_the_requested_chain(
+    reader: PostgresCryptoLendingReader,
+    receipt_token_repo: MagicMock,
+) -> None:
+    receipt_token_repo.list_protocol_pairs = AsyncMock(
+        return_value=[
+            ReceiptTokenProtocolPair(receipt_token_id=1, protocol_name="Morpho Blue", chain_id=1),
+            ReceiptTokenProtocolPair(receipt_token_id=4, protocol_name="Morpho Blue", chain_id=8453),
+        ]
+    )
+
+    assert await reader.list_morpho_asset_ids(chain_id=8453) == frozenset({4})
 
 
 @pytest.mark.asyncio
@@ -163,11 +199,13 @@ async def test_get_receipt_token_delegates_to_repo(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("protocol_name", ["Aave V3", "Aave V3 Avalanche"])
 async def test_get_breakdown_uses_aave_like_repository(
     reader: PostgresCryptoLendingReader,
     aave_breakdown_repo: MagicMock,
+    protocol_name: str,
 ) -> None:
-    info = _aave_like_info()
+    info = _aave_like_info(protocol_name)
 
     result = await reader.get_breakdown(info)
 
@@ -208,11 +246,13 @@ async def test_get_breakdown_raises_on_unknown_protocol(reader: PostgresCryptoLe
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("protocol_name", ["Aave V3", "Aave V3 Avalanche"])
 async def test_get_liquidation_params_uses_aave_like_repository(
     reader: PostgresCryptoLendingReader,
     aave_liq_repo: MagicMock,
+    protocol_name: str,
 ) -> None:
-    info = _aave_like_info()
+    info = _aave_like_info(protocol_name)
 
     result = await reader.get_liquidation_params(info, backed_asset_id=42, token_ids=[1, 2])
 
@@ -481,8 +521,9 @@ def test_requires_liquidation_enrichment_false_for_maple(reader: PostgresCryptoL
     assert reader.requires_liquidation_enrichment(_maple_info()) is False
 
 
-def test_requires_liquidation_enrichment_true_for_aave(reader: PostgresCryptoLendingReader) -> None:
-    assert reader.requires_liquidation_enrichment(_aave_like_info()) is True
+@pytest.mark.parametrize("protocol_name", ["Aave V3", "Aave V3 Avalanche"])
+def test_requires_liquidation_enrichment_true_for_aave(reader: PostgresCryptoLendingReader, protocol_name: str) -> None:
+    assert reader.requires_liquidation_enrichment(_aave_like_info(protocol_name)) is True
 
 
 @pytest.mark.asyncio
@@ -511,8 +552,8 @@ async def test_list_supported_asset_ids_excludes_maple(
 ) -> None:
     receipt_token_repo.list_protocol_pairs = AsyncMock(
         return_value=[
-            ReceiptTokenProtocolPair(receipt_token_id=1, protocol_name="Aave V3"),
-            ReceiptTokenProtocolPair(receipt_token_id=2, protocol_name="maple"),
+            ReceiptTokenProtocolPair(receipt_token_id=1, protocol_name="Aave V3", chain_id=1),
+            ReceiptTokenProtocolPair(receipt_token_id=2, protocol_name="maple", chain_id=1),
         ]
     )
 

@@ -38,6 +38,12 @@ type IsExactly<Actual, Expected> =
 
 type Assert<T extends true> = T;
 
+/**
+ * Exported only because `noUnusedLocals` would delete the assertion as dead; the
+ * type is the check, so nothing consumes it and knip must not offer to remove it.
+ *
+ * @knipignore
+ */
 export type DocumentDeclaresOnly200And422 = Assert<
   IsExactly<DeclaredStatus, 200 | 422>
 >;

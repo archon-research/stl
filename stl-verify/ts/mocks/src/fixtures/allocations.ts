@@ -12,7 +12,7 @@
  * `underlying_token_id` resolves in `TOKENS` on its own chain, every priced
  * allocation has a `per_allocation` entry in the risk-capital fixture, and three
  * activity rows carry transactions whose events the tx endpoint answers for.
- * `check-mock-api.mjs` asserts each of those; break one and it fails rather than
+ * `check-mock-api.ts` asserts each of those; break one and it fails rather than
  * the dashboard quietly rendering holes. The first of them is structural here:
  * the addresses, symbols and chain a row would otherwise repeat beside its ids
  * are read off `TOKENS` by id, so a row cannot name one token and label itself
