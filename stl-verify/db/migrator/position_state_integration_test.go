@@ -155,6 +155,8 @@ func TestPositionState(t *testing.T) {
 	psTestDealTypeCodeDirectInsert(t, f)
 	// --- this migration must survive a re-apply (restore, partial-apply recovery) ---
 	psTestDealTypeCodeMigrationIsReRunnable(t, f)
+	// --- a higher block cannot carry an earlier instant, or the two caches disagree about now ---
+	psTestBlockTimeMonotonicPerPosition(t, f)
 }
 
 // psTestRecencyGuard covers: recency guard
@@ -2429,6 +2431,46 @@ func psTestDealTypeCodeMigrationIsReRunnable(t *testing.T, f *psFixture) {
 		}
 		if _, err := f.pool.Exec(f.ctx, string(raw)); err != nil {
 			t.Errorf("re-applying the migration failed: %v", err)
+		}
+	})
+}
+
+// psTestBlockTimeMonotonicPerPosition: the caches order by block_number and date by block_timestamp, so a
+// higher block with an earlier instant makes position_current and position_daily disagree about the
+// newest observation. On-chain that pairing is impossible; as input it is an error, and the design
+// harness produced the disagreement on 24/24 seeds before this check existed.
+func psTestBlockTimeMonotonicPerPosition(t *testing.T, f *psFixture) {
+	one := func(ik string, bn int, ts string) string {
+		return "(1::int,10::bigint,'" + ik + "'::text,'" + strings.Repeat("a", 40) + "'::text,5::numeric,'LOAN'::text," +
+			strconv.Itoa(bn) + "::bigint,0::int,0::int,'" + ts + "'::timestamptz)"
+	}
+	t.Run("within one batch", func(t *testing.T) {
+		body := `SELECT * FROM (VALUES ` + one("mono-batch", 100, "2026-03-02T00:00:00Z") + "," +
+			one("mono-batch", 200, "2026-03-01T00:00:00Z") + `) ` + mppCols
+		f.mppErr(t, "pv_mono_batch", body, "monotonic", "earlier block_timestamp")
+	})
+	t.Run("against stored history, in either direction", func(t *testing.T) {
+		if n := f.mppN(t, "pv_mono_hist", `SELECT * FROM (VALUES `+one("mono-hist", 200, "2026-03-02T00:00:00Z")+`) `+mppCols, "seed"); n != 1 {
+			t.Fatalf("seed inserted %d, want 1", n)
+		}
+		f.mppErr(t, "pv_mono_hist", `SELECT * FROM (VALUES `+one("mono-hist", 100, "2026-03-03T00:00:00Z")+`) `+mppCols,
+			"lower block, later instant", "earlier block_timestamp")
+		f.mppErr(t, "pv_mono_hist", `SELECT * FROM (VALUES `+one("mono-hist", 300, "2026-03-01T00:00:00Z")+`) `+mppCols,
+			"higher block, earlier instant", "earlier block_timestamp")
+	})
+	// Negative controls: equal instants across blocks and same-block corrections must still insert, and
+	// two positions are independent -- or the check would reject legitimate input.
+	t.Run("monotonic, same-instant and cross-position cases still insert", func(t *testing.T) {
+		body := `SELECT * FROM (VALUES ` + one("mono-ok", 100, "2026-03-01T00:00:00Z") + "," +
+			one("mono-ok", 200, "2026-03-01T00:00:00Z") + "," +
+			one("mono-ok", 300, "2026-03-02T00:00:00Z") + `) ` + mppCols
+		if n := f.mppN(t, "pv_mono_ok", body, "monotonic ok"); n != 3 {
+			t.Errorf("monotonic history inserted %d, want 3", n)
+		}
+		body2 := `SELECT * FROM (VALUES ` + one("mono-a", 100, "2026-03-05T00:00:00Z") + "," +
+			one("mono-b", 200, "2026-03-04T00:00:00Z") + `) ` + mppCols
+		if n := f.mppN(t, "pv_mono_two", body2, "two positions"); n != 2 {
+			t.Errorf("two independent positions inserted %d, want 2", n)
 		}
 	})
 }

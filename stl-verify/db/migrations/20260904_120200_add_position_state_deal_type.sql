@@ -101,6 +101,7 @@ BEGIN
                    THEN 'deal_type::text' ELSE 'NULL::text' END;
 
     DROP TABLE IF EXISTS pg_temp._mpp_src;
+    DROP TABLE IF EXISTS pg_temp._mpp_new;
     EXECUTE format($q$
         CREATE TEMP TABLE _mpp_src ON COMMIT DROP AS
         SELECT public.position_id(chain_id, protocol_id, instrument_key, holder_id) AS position_id,
@@ -183,6 +184,32 @@ BEGIN
         RAISE WARNING 'projection % re-emits stored observations with a changed quantity; stored rows kept (append-only: a real correction must bump block_version/processing_version): %', p_view, bad_qty;
     END IF;
 
+    -- Within one position a higher block cannot carry an EARLIER instant. The caches order by block_number
+    -- and read the date from block_timestamp, so a violation makes position_current and position_daily
+    -- disagree about the newest observation. Governs rows that will be INSERTED, checked against each
+    -- other and the stored history; a re-emit of a stored key is the drift path above, not this one.
+    CREATE TEMP TABLE _mpp_new ON COMMIT DROP AS
+        SELECT s.position_id, s.block_number, s.block_timestamp FROM pg_temp._mpp_src s
+        WHERE NOT EXISTS (SELECT 1 FROM public.position_state p
+                           WHERE p.position_id = s.position_id AND p.block_number = s.block_number
+                             AND p.block_version = s.block_version AND p.processing_version = s.processing_version);
+    SELECT string_agg(msg, '; ') INTO bad FROM (
+        SELECT format('pos=%s bn=%s@%s vs bn=%s@%s', encode(b.position_id, 'hex'),
+                      b.block_number, b.block_timestamp, a.block_number, a.block_timestamp) AS msg
+        FROM pg_temp._mpp_new b
+        JOIN (SELECT position_id, block_number, block_timestamp FROM pg_temp._mpp_new
+              UNION ALL
+              SELECT p.position_id, p.block_number, p.block_timestamp FROM public.position_state p
+               WHERE p.position_id IN (SELECT DISTINCT position_id FROM pg_temp._mpp_new)) a
+          ON a.position_id = b.position_id
+         AND ((b.block_number > a.block_number AND b.block_timestamp < a.block_timestamp)
+           OR (b.block_number < a.block_number AND b.block_timestamp > a.block_timestamp))
+        ORDER BY b.position_id, b.block_number
+        LIMIT 5) z;
+    IF bad IS NOT NULL THEN
+        RAISE EXCEPTION 'projection % emits a higher block with an earlier block_timestamp for one position; the caches order by block and date by timestamp, so they would disagree about the newest observation: %', p_view, bad;
+    END IF;
+
     SELECT format('position %s owned by %s', encode(p.position_id, 'hex'), p.projection) INTO bad
     FROM (SELECT DISTINCT position_id FROM pg_temp._mpp_src) s
     JOIN public.position_state p
@@ -209,11 +236,12 @@ BEGIN
     GET DIAGNOSTICS n = ROW_COUNT;
 
     DROP TABLE pg_temp._mpp_src;
+    DROP TABLE pg_temp._mpp_new;
 
     RETURN n;
 END $fn$;
 
-COMMENT ON FUNCTION materialize_position_projection(regclass, integer) IS '[Operational] VEC-402..407 shared materializer: validate a per-protocol projection view against the position_state column contract, fail hard on contract/type drift, double-emitted keys, or cross-view ownership violations; keep-stored-and-warn on a re-emitted key whose block_timestamp or quantity drifted, then -- evaluating the projection ONCE into a temp table every check reads -- APPEND the new observations. deal_type is OPTIONAL, not part of the required contract, so a projection omitting it still works and stores NULL; a projection emitting it as any string type has the value copied, and one emitting a lossily-narrow string type, or a value that changes a STORED observation''s deal type, is REJECTED. Everything else about the value is the table''s FK to ref_deal_type, not this function''s job. position_id is recomputed via position_id(); serialized per view by an advisory lock on the view''s canonical name. Idempotent; run out of band. Returns rows INSERTED.';
+COMMENT ON FUNCTION materialize_position_projection(regclass, integer) IS '[Operational] VEC-402..407 shared materializer: validate a per-protocol projection view against the position_state column contract, fail hard on contract/type drift, double-emitted keys, a higher block carrying an earlier block_timestamp within one position, or cross-view ownership violations; keep-stored-and-warn on a re-emitted key whose block_timestamp or quantity drifted, then -- evaluating the projection ONCE into a temp table every check reads -- APPEND the new observations. deal_type is OPTIONAL, not part of the required contract, so a projection omitting it still works and stores NULL; a projection emitting it as any string type has the value copied, and one emitting a lossily-narrow string type, or a value that changes a STORED observation''s deal type, is REJECTED. Everything else about the value is the table''s FK to ref_deal_type, not this function''s job. position_id is recomputed via position_id(); serialized per view by an advisory lock on the view''s canonical name. Idempotent; run out of band. Returns rows INSERTED.';
 
 -- position_classification is retired. It was a classification engine over the spine, but the engine
 -- is the projection's CASE expression and its result now lands on the observation, where a position

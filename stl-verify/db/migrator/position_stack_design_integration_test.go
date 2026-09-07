@@ -189,6 +189,30 @@ func TestPositionStackDesignInvariants(t *testing.T) {
 				if snapshotCaches(ctx, t, pool, presentCaches) != before {
 					report(seed, "I6 rebuild is idempotent", "cache digest changed after a rebuild")
 				}
+				// I6b: the rebuild must CONVERGE a diverged cache, checked against the oracle. Idempotence alone
+				// cannot see a wrong SET expression: on a converged cache the convergence WHERE never lets the
+				// SET run. Drift one row per present cache, rebuild, re-run the oracle compare.
+				for _, c := range presentCaches {
+					if _, err := pool.Exec(ctx, fmt.Sprintf(
+						`UPDATE %s SET quantity = quantity + 12345 WHERE position_id = (SELECT min(position_id) FROM %s)`, c, c)); err != nil {
+						t.Fatalf("I6b drift %s: %v", c, err)
+					}
+				}
+				for _, region := range regions {
+					if _, err := pool.Exec(ctx, region); err != nil {
+						report(seed, "I6b rebuild runs on a diverged cache", err.Error())
+					}
+				}
+				if has("position_current") {
+					if d := diffAgainstOracle(ctx, t, pool, "position_current", ""); d != "" {
+						report(seed, "I6b rebuild converges a drifted position_current", d)
+					}
+				}
+				if has("position_daily") {
+					if d := diffAgainstOracle(ctx, t, pool, "position_daily", ", (block_timestamp AT TIME ZONE 'utc')::date"); d != "" {
+						report(seed, "I6b rebuild converges a drifted position_daily", d)
+					}
+				}
 			}
 
 			// I7: nothing anywhere still carries the pre-rename column name.
@@ -202,6 +226,29 @@ func TestPositionStackDesignInvariants(t *testing.T) {
 			}
 			if stale != 0 {
 				report(seed, "I7 no relation still uses deal_type_code", fmt.Sprintf("%d columns remain", stale))
+			}
+
+			// I9: a higher block with an earlier instant is refused -- within a batch, and against what is
+			// already stored. This is what makes I4b hold by construction rather than by luck.
+			bad := fmt.Sprintf("pv_design_bad_%d", seed)
+			nonmono := `SELECT * FROM (VALUES (1::int, 10::bigint, 'design-inst'::text, '%s'::text, 5::numeric, ` +
+				`%d::bigint, 0::int, 0::int, '%s'::timestamptz, 'LOAN'::text)) ` +
+				`v(chain_id,protocol_id,instrument_key,holder_id,quantity,block_number,block_version,processing_version,block_timestamp,deal_type)`
+			h := fmt.Sprintf("%040x", 99)
+			for _, c := range []struct {
+				bn int
+				ts string
+			}{{900, "2026-04-20T00:00:00Z"}, {950, "2026-04-10T00:00:00Z"}} {
+				if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW `+bad+` AS `+fmt.Sprintf(nonmono, h, c.bn, c.ts)); err != nil {
+					t.Fatalf("I9 view: %v", err)
+				}
+				_, err := pool.Exec(ctx, `SELECT materialize_position_projection($1::regclass)`, bad)
+				if c.bn == 900 && err != nil {
+					report(seed, "I9 a monotonic first row is accepted", err.Error())
+				}
+				if c.bn == 950 && (err == nil || !strings.Contains(err.Error(), "earlier block_timestamp")) {
+					report(seed, "I9 a higher block with an earlier instant is refused", fmt.Sprintf("err=%v", err))
+				}
 			}
 
 			// I8: one position_id may span more than one deal type over time. Recorded, not a defect:
@@ -316,10 +363,9 @@ type obsRow struct {
 	dealType          string // "" means emit NULL
 }
 
-// generateHistory produces a legal but adversarial history: block_timestamp drawn independently of
-// block_number (so a higher block can carry an earlier instant, as an event-time source stamping
-// synced_at does), several block_versions at one block, corrections, deal-type flips, zero
-// quantities, and dates spanning position_daily's 7-day chunk boundary.
+// generateHistory produces a legal but adversarial history: several block_versions at one block,
+// corrections, deal-type flips, zero quantities, dates spanning position_daily's 7-day chunk boundary,
+// and block_timestamp monotonic in block_number per position -- which the materializer now enforces.
 func generateHistory(rng *rand.Rand) []obsRow {
 	base := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	var rows []obsRow
@@ -327,13 +373,17 @@ func generateHistory(rng *rand.Rand) []obsRow {
 	for h := 0; h < 1+rng.Intn(3); h++ {
 		holder := fmt.Sprintf("%040x", h+10)
 		for i := 0; i < 2+rng.Intn(6); i++ {
+			block := 100 + rng.Intn(400)
 			r := obsRow{
 				holder: holder,
 				qty:    []int{0, 1, 30, 150, 999}[rng.Intn(5)],
-				block:  100 + rng.Intn(400),
+				block:  block,
 				bver:   rng.Intn(2),
 				pver:   rng.Intn(2),
-				ts: base.Add(time.Duration(rng.Intn(30*24)) * time.Hour).
+				// Monotonic in block_number, as on-chain time is: one hour per block plus sub-hour
+				// jitter that cannot reorder distinct blocks. The non-monotonic case is now an
+				// input the materializer refuses, tested separately below.
+				ts: base.Add(time.Duration(block) * time.Hour).
 					Add(time.Duration(rng.Intn(60)) * time.Minute),
 			}
 			switch rng.Intn(4) {
