@@ -1,6 +1,6 @@
 # ADR-0005: Time-Series Data API Surface
 
-**Status**: Proposed
+**Status**: Accepted
 **Proposed**: @andrius-senulis
 **Date**: 2026-08-28
 **Deciders**: @vector
