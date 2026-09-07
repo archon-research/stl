@@ -21,7 +21,7 @@ CREATE OR REPLACE FUNCTION materialize_position_projection(p_view regclass, p_bu
     SET search_path FROM CURRENT
     SET timescaledb.enable_tiered_reads = 'on'
     AS $fn$
-DECLARE n bigint; bad text; bad_qty text; v_qualname text; v_deal_type text;
+DECLARE n bigint; bad text; bad_qty text; v_qualname text; v_deal_type text; v_dt_type text; v_dt_cat "char";
 BEGIN
     IF p_view IS NULL THEN
         RAISE EXCEPTION 'materialize_position_projection: p_view must not be NULL';
@@ -71,13 +71,18 @@ BEGIN
         RAISE EXCEPTION 'projection % declares a lossy type for a value column (it would silently round or truncate; widen the view''s cast): %', p_view, bad;
     END IF;
 
-    SELECT CASE WHEN EXISTS (
-               SELECT 1 FROM pg_catalog.pg_attribute a
-                WHERE a.attrelid = p_view AND a.attname = 'deal_type_code'
-                  AND a.attnum > 0 AND NOT a.attisdropped
-                  AND format_type(a.atttypid, NULL::integer) = 'text')
-           THEN 'deal_type_code' ELSE 'NULL::text' END
-      INTO v_deal_type;
+    -- deal_type_code is OPTIONAL, so absent is fine -- but present-and-not-a-string is a view bug, and
+    -- silently storing NULL for it would lose the one fact this column exists to carry.
+    SELECT format_type(a.atttypid, a.atttypmod), t.typcategory INTO v_dt_type, v_dt_cat
+      FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+     WHERE a.attrelid = p_view AND a.attname = 'deal_type_code' AND a.attnum > 0 AND NOT a.attisdropped;
+    IF v_dt_type IS NULL THEN
+        v_deal_type := 'NULL::text';
+    ELSIF v_dt_cat <> 'S' THEN
+        RAISE EXCEPTION 'projection % emits deal_type_code as %, which is not a string type (cast the view''s column to text)', p_view, v_dt_type;
+    ELSE
+        v_deal_type := 'deal_type_code::text';
+    END IF;
 
     DROP TABLE IF EXISTS pg_temp._mpp_src;
     EXECUTE format($q$
@@ -112,6 +117,16 @@ BEGIN
         LIMIT 5) z;
     IF bad IS NOT NULL THEN
         RAISE EXCEPTION 'projection % emits NULL in a NOT NULL position_state column (a nullable source must COALESCE): %', p_view, bad;
+    END IF;
+
+    -- ref_deal_type is the vocabulary's single source of truth. No FK (see the column comment), so the
+    -- check lives here -- and it must fail hard: UPDATE is revoked, so a bad code is unfixable in place.
+    SELECT string_agg(DISTINCT quote_literal(s.deal_type_code), ', ') INTO bad
+      FROM pg_temp._mpp_src s
+     WHERE s.deal_type_code IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM public.ref_deal_type r WHERE r.deal_type = s.deal_type_code);
+    IF bad IS NOT NULL THEN
+        RAISE EXCEPTION 'projection % emits deal_type_code absent from ref_deal_type: %', p_view, bad;
     END IF;
 
     SELECT string_agg(msg, '; ') INTO bad FROM (

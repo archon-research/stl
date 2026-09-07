@@ -149,6 +149,8 @@ func TestPositionState(t *testing.T) {
 	psTestModelbasedFuzz(t, f)
 	// --- guards a data assertion cannot see: asserted on the mechanism ---
 	psTestGuardsADataAssertion(t, f)
+	// --- deal_type_code: carry, type gate, vocabulary gate (VEC-401) ---
+	psTestDealTypeCode(t, f)
 }
 
 // psTestRecencyGuard covers: recency guard
@@ -2086,6 +2088,152 @@ func psTestGuardsADataAssertion(t *testing.T, f *psFixture) {
 			if !pinned {
 				t.Errorf("%s: proconfig = %v; want a pinned search_path", fn, settings)
 			}
+		}
+	})
+}
+
+// psTestDealTypeCode covers: deal_type_code carry, type gate, vocabulary gate (VEC-401).
+// Every case fails on the pre-fix code it names -- the pre-fix materializer read the view's column
+// only when it was exactly `text`, stored whatever string it found, and validated nothing.
+func psTestDealTypeCode(t *testing.T, f *psFixture) {
+	// dtRow is row() with the deal_type_code slot under the caller's control: an arbitrary SQL
+	// expression, or "" to omit the column entirely (the optional-contract case).
+	dtRow := func(ik, expr string) (string, string) {
+		body := "(1::int,10::bigint,'" + ik + "'::text,'" + strings.Repeat("a", 40) + "'::text,5::numeric,"
+		cols := mppCols
+		if expr == "" {
+			cols = `v(chain_id,protocol_id,instrument_key,holder_id,quantity,block_number,` +
+				`block_version,processing_version,block_timestamp)`
+		} else {
+			body += expr + ","
+		}
+		body += "100::bigint,0::int,0::int,'2026-01-01'::timestamptz)"
+		return `SELECT * FROM (VALUES ` + body + `) ` + cols, cols
+	}
+	stored := func(t *testing.T, ik string) *string {
+		t.Helper()
+		var got *string
+		if err := f.pool.QueryRow(f.ctx,
+			`SELECT deal_type_code FROM position_state WHERE instrument_key = $1`, ik).Scan(&got); err != nil {
+			t.Fatalf("read back %s: %v", ik, err)
+		}
+		return got
+	}
+
+	// The value must survive the projection, for every string type a view can plausibly emit. Pre-fix
+	// this passed ONLY for `text`: varchar and bpchar matched no branch and stored NULL, silently
+	// dropping the one fact the column carries. bpchar also asserts the cast strips its blank padding.
+	t.Run("carried for every string type", func(t *testing.T) {
+		for _, c := range []struct{ name, expr, want string }{
+			{"text", "'LOAN'::text", "LOAN"},
+			{"varchar_bounded", "'BORROW'::varchar(16)", "BORROW"},
+			{"varchar_unbounded", "'COLLATERAL'::varchar", "COLLATERAL"},
+			{"bpchar_padded", "'LOAN'::char(8)", "LOAN"},
+		} {
+			ik := "dt-carry-" + c.name
+			body, _ := dtRow(ik, c.expr)
+			if n := f.mppN(t, "pv_dt_carry_"+c.name, body, "carry"); n != 1 {
+				t.Fatalf("%s: inserted %d rows, want 1", c.name, n)
+			}
+			got, want := stored(t, ik), c.want
+			if got == nil {
+				t.Errorf("%s: deal_type_code stored NULL, want %q", c.name, want)
+			} else if *got != want {
+				t.Errorf("%s: deal_type_code = %q, want %q", c.name, *got, want)
+			}
+		}
+	})
+
+	// A non-string deal_type_code is a view bug and must fail hard, not store NULL. Pre-fix an integer
+	// column fell through to the NULL branch and the run reported success.
+	t.Run("non-string type fails hard", func(t *testing.T) {
+		body, _ := dtRow("dt-int", "7::int")
+		f.mppErr(t, "pv_dt_int", body, "type gate", "is not a string type")
+	})
+
+	// Off-vocabulary codes must fail hard: UPDATE is revoked on position_state, so a bad code written
+	// once is unfixable without a superuser. Pre-fix all three of these were stored verbatim.
+	t.Run("off-vocabulary fails hard", func(t *testing.T) {
+		for _, c := range []struct{ name, expr string }{
+			{"wrong_case", "'loan'::text"},
+			{"unknown_code", "'NOT_A_DEAL_TYPE'::text"},
+			{"empty_string", "''::text"},
+		} {
+			body, _ := dtRow("dt-bad-"+c.name, c.expr)
+			f.mppErr(t, "pv_dt_bad_"+c.name, body, "vocabulary gate", "absent from ref_deal_type")
+		}
+	})
+
+	// Negative controls: the two ways a projection legitimately says nothing must still insert, or the
+	// gates above would have made an OPTIONAL column required.
+	t.Run("silent projections still insert", func(t *testing.T) {
+		for _, c := range []struct{ name, expr string }{
+			{"explicit_null", "NULL::text"},
+			{"column_omitted", ""},
+		} {
+			ik := "dt-silent-" + c.name
+			body, _ := dtRow(ik, c.expr)
+			if n := f.mppN(t, "pv_dt_silent_"+c.name, body, "optional"); n != 1 {
+				t.Fatalf("%s: inserted %d rows, want 1", c.name, n)
+			}
+			if got := stored(t, ik); got != nil {
+				t.Errorf("%s: deal_type_code = %q, want NULL", c.name, *got)
+			}
+		}
+	})
+
+	// Every seeded code must round-trip, or the gate is too strict for the vocabulary it enforces.
+	t.Run("every seeded code round-trips", func(t *testing.T) {
+		rows, err := f.pool.Query(f.ctx, `SELECT deal_type FROM ref_deal_type ORDER BY deal_type`)
+		if err != nil {
+			t.Fatalf("list ref_deal_type: %v", err)
+		}
+		var codes []string
+		for rows.Next() {
+			var c string
+			if err := rows.Scan(&c); err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			codes = append(codes, c)
+		}
+		rows.Close()
+		if len(codes) < 5 {
+			t.Fatalf("ref_deal_type has %d codes, expected the seeded vocabulary", len(codes))
+		}
+		for i, code := range codes {
+			ik := "dt-rt-" + strconv.Itoa(i)
+			body, _ := dtRow(ik, "'"+code+"'::text")
+			if n := f.mppN(t, "pv_dt_rt_"+strconv.Itoa(i), body, "round-trip"); n != 1 {
+				t.Fatalf("%s: inserted %d rows, want 1", code, n)
+			}
+			if got := stored(t, ik); got == nil || *got != code {
+				t.Errorf("%s: deal_type_code = %v, want %q", code, got, code)
+			}
+		}
+	})
+
+	// The gate must read ref_deal_type rather than a copied IN-list, or the vocabulary drifts the moment
+	// a code is added. Asserted on the mechanism, and ordered reject-then-seed because the reference
+	// tables are append-only (DELETE is trigger-blocked), so the code cannot be withdrawn afterwards.
+	t.Run("vocabulary comes from ref_deal_type", func(t *testing.T) {
+		const code = "ZZ_TEST_ONLY_DEAL_TYPE"
+
+		body, _ := dtRow("dt-refdriven-before", "'"+code+"'::text")
+		f.mppErr(t, "pv_dt_refdriven_before", body, "ref-driven", "absent from ref_deal_type")
+
+		if _, err := f.pool.Exec(f.ctx,
+			`INSERT INTO ref_deal_type (deal_type, direction, description)
+			 VALUES ($1, 'LONG', 'test-only; added by psTestDealTypeCode')`, code); err != nil {
+			t.Fatalf("seed %s: %v", code, err)
+		}
+
+		ik := "dt-refdriven-after"
+		body2, _ := dtRow(ik, "'"+code+"'::text")
+		if n := f.mppN(t, "pv_dt_refdriven_after", body2, "ref-driven"); n != 1 {
+			t.Fatalf("seeded code: inserted %d rows, want 1", n)
+		}
+		if got := stored(t, ik); got == nil || *got != code {
+			t.Errorf("seeded code: deal_type_code = %v, want %q", got, code)
 		}
 	})
 }
