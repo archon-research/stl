@@ -77,7 +77,7 @@ export const TOP_METRIC_CARD_LABELS: Record<TopMetricCard, string> = {
   'total-risk-capital': 'Total risk capital',
   'prime-collateral': 'Prime collateral',
   encumbrance: 'Encumbrance',
-  'prime-debt': 'Prime debt exposure',
+  'prime-debt': 'Prime debt',
 };
 
 // The cards actually placed in the grid. Its length drives both the loading

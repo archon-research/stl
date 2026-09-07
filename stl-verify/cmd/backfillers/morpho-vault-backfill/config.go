@@ -20,10 +20,6 @@ type config struct {
 const (
 	defaultGoroutines = 16
 	defaultProbeBatch = 50
-
-	// defaultAlchemyHTTPURL matches the other indexers' default, so a deployment
-	// only has to supply ALCHEMY_HTTP_URL when it is not on mainnet.
-	defaultAlchemyHTTPURL = "https://eth-mainnet.g.alchemy.com/v2"
 )
 
 func loadConfig() (config, error) {
@@ -42,7 +38,7 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 
-	rpcURL, err := resolveRPCURL()
+	rpcURL, err := chainutil.AlchemyRPCURL(int64(chainID))
 	if err != nil {
 		return config{}, err
 	}
@@ -63,17 +59,6 @@ func loadConfig() (config, error) {
 		goroutines: goroutines,
 		probeBatch: probeBatch,
 	}, nil
-}
-
-// resolveRPCURL builds the node URL from the same ALCHEMY_HTTP_URL +
-// ALCHEMY_API_KEY pair every other indexer uses, so this worker's secret wiring
-// matches theirs.
-func resolveRPCURL() (string, error) {
-	apiKey, err := env.Require("ALCHEMY_API_KEY")
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%s/%s", env.Get("ALCHEMY_HTTP_URL", defaultAlchemyHTTPURL), apiKey), nil
 }
 
 // positiveIntEnv rejects a non-positive override rather than letting it through:

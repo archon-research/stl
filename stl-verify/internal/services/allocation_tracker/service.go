@@ -61,6 +61,9 @@ func NewService(
 	if config.PollInterval == 0 {
 		config.PollInterval = defaults.PollInterval
 	}
+	if config.SweepEveryNBlocks < 0 {
+		return nil, fmt.Errorf("sweep every n blocks must not be negative, got %d", config.SweepEveryNBlocks)
+	}
 	if config.SweepEveryNBlocks == 0 {
 		config.SweepEveryNBlocks = defaults.SweepEveryNBlocks
 	}

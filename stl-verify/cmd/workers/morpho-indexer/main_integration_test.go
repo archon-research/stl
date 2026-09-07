@@ -52,15 +52,36 @@ func TestMain(m *testing.M) {
 	}))
 }
 
+func TestParseConfig_RequiresChainID(t *testing.T) {
+	t.Setenv("CHAIN_ID", "")
+	t.Setenv("ALCHEMY_API_KEY", "test-key")
+
+	_, err := parseConfig([]string{"-queue", "queue", "-db", "database", "-redis", "redis"})
+	if err == nil || !strings.Contains(err.Error(), "CHAIN_ID") {
+		t.Fatalf("err = %v, want missing CHAIN_ID", err)
+	}
+}
+
+func TestParseConfig_RequiresAlchemyHTTPURLOffMainnet(t *testing.T) {
+	t.Setenv("CHAIN_ID", "8453")
+	t.Setenv("ALCHEMY_API_KEY", "test-key")
+	t.Setenv("ALCHEMY_HTTP_URL", "")
+
+	_, err := parseConfig([]string{"-queue", "queue", "-db", "database", "-redis", "redis"})
+	if err == nil || !strings.Contains(err.Error(), "ALCHEMY_HTTP_URL is required for chain 8453") {
+		t.Fatalf("err = %v, want the non-mainnet endpoint requirement", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Integration tests for run()
 // ---------------------------------------------------------------------------
 
 func TestRunIntegration_BadConnectionConfig(t *testing.T) {
-	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	defer rpcServer.Close()
+	rpcServer := testutil.StartChainIDRPC(t, 1)
 
 	t.Setenv("BUILD_GIT_HASH", "test")
+	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 	t.Setenv("S3_BUCKET", testutil.S3TestBucketName(t, rawBucketPrefix))
@@ -101,6 +122,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 
 	t.Setenv("BUILD_GIT_HASH", "test")
+	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
@@ -457,6 +479,10 @@ func buildMorphoAccrueInterestMockRPC(t *testing.T) *httptest.Server {
 			testutil.WriteRPCError(w, json.RawMessage(`1`), -32700, "parse error")
 			return
 		}
+		if req.Method == "eth_chainId" {
+			testutil.WriteRPCResult(w, req.ID, json.RawMessage(`"0x1"`))
+			return
+		}
 		if req.Method != "eth_call" {
 			testutil.WriteRPCError(w, req.ID, -32601, "method not found: "+req.Method)
 			return
@@ -517,4 +543,24 @@ func hasSelector(callData, selector []byte) bool {
 		}
 	}
 	return true
+}
+
+// TestRunIntegration_RefusesAChainIDMismatch stops a Base pod handed a mainnet
+// URL before it can read mainnet state and write it under Base.
+func TestRunIntegration_RefusesAChainIDMismatch(t *testing.T) {
+	t.Setenv("BUILD_GIT_HASH", "test")
+	t.Setenv("CHAIN_ID", "8453")
+	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
+	t.Setenv("ALCHEMY_HTTP_URL", testutil.StartChainIDRPC(t, 1).URL)
+	t.Setenv("S3_BUCKET", testutil.S3TestBucketName(t, "stl-sentineltest-base-raw-"))
+	t.Setenv("DEPLOY_ENV", testDeployEnv)
+
+	err := run(context.Background(), []string{
+		"-queue", "http://localhost/test-queue",
+		"-db", "postgres://unreached:unreached@localhost:1/unreached",
+		"-redis", sharedRedisAddr,
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "RPC chain ID mismatch: RPC reports 1, config says 8453") {
+		t.Fatalf("err = %v, want the chain-id mismatch", err)
+	}
 }
