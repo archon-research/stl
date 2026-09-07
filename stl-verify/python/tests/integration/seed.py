@@ -50,6 +50,51 @@ async def insert_user(conn: asyncpg.Connection, address: bytes) -> int:
     )
 
 
+async def insert_morpho_adapter(
+    conn: asyncpg.Connection,
+    *,
+    vault_id: int,
+    address: bytes,
+    asset_token_id: int,
+    block: int,
+    removed_at_block: int | None = None,
+) -> None:
+    """Insert a VaultV2 Morpho Blue market adapter (type 1) added to its vault at ``block``.
+
+    ``removed_at_block`` appends a later RemoveAdapter observation, so the adapter
+    drops out of ``morpho_adapter_current``.
+    """
+    adapter_id = await conn.fetchval(
+        """
+        INSERT INTO morpho_adapter (morpho_vault_id, address, asset_token_id)
+        VALUES ($1, $2, $3)
+        RETURNING id
+        """,
+        vault_id,
+        address,
+        asset_token_id,
+    )
+    await conn.execute(
+        """
+        INSERT INTO morpho_adapter_membership
+            (morpho_adapter_id, block_number, log_index, timestamp, is_member, adapter_type, observed_via)
+        VALUES ($1, $2, 0, NOW(), true, 1, 'add_adapter_event')
+        """,
+        adapter_id,
+        block,
+    )
+    if removed_at_block is not None:
+        await conn.execute(
+            """
+            INSERT INTO morpho_adapter_membership
+                (morpho_adapter_id, block_number, log_index, timestamp, is_member, adapter_type, observed_via)
+            VALUES ($1, $2, 0, NOW(), false, NULL, 'remove_adapter_event')
+            """,
+            adapter_id,
+            removed_at_block,
+        )
+
+
 async def insert_protocol(
     conn: asyncpg.Connection,
     name: str,
