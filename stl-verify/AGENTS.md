@@ -95,6 +95,7 @@ make test               # Unit tests only
 make test-race          # Unit tests with race detector (CI default)
 make test-integration   # Integration tests (requires Docker, 5m timeout)
 make e2e                # End-to-end tests with testcontainers
+make e2e-real-blocks BLOCKS=25827558   # morpho-indexer over real mainnet blocks (needs ALCHEMY_API_KEY in ../.env.secrets)
 make cover              # Generate coverage report
 go test -race -run 'TestName' ./internal/services/<pkg>/   # single test
 
