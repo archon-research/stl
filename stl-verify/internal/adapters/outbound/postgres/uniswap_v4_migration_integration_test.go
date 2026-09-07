@@ -127,6 +127,52 @@ func TestUniswapV4MigrationRegistersHypertables(t *testing.T) {
 	}
 }
 
+// The catalogue, not the DDL text: TimescaleDB appends the partition column to the
+// order-by, and a chunk interval typed in the CREATE is only real if the dimension
+// carries it. 30 days is VEC-663's cap; the version tuple leads the order-by so a
+// compressed batch is in the order of the latest-per-key read.
+var uniswapV4HypertableCompressionOrder = map[string]string{
+	"uniswap_v4_pool_state":      "block_number DESC,block_version DESC,processing_version DESC,block_timestamp DESC",
+	"uniswap_v4_swap":            "block_number DESC,block_version DESC,log_index DESC,processing_version DESC,block_timestamp DESC",
+	"uniswap_v4_liquidity_event": "block_number DESC,block_version DESC,log_index DESC,processing_version DESC,block_timestamp DESC",
+	"uniswap_v4_pool_event":      "block_number DESC,block_version DESC,log_index DESC,processing_version DESC,block_timestamp DESC",
+}
+
+func TestUniswapV4HypertablesChunkIntervalAndCompressionOrder(t *testing.T) {
+	ctx := context.Background()
+
+	for _, table := range uniswapV4Hypertables {
+		t.Run(table, func(t *testing.T) {
+			wantOrder, known := uniswapV4HypertableCompressionOrder[table]
+			if !known {
+				t.Fatalf("%s has no expected compression order: add it to uniswapV4HypertableCompressionOrder", table)
+			}
+			var interval string
+			if err := uniswapV4TestPool.QueryRow(ctx, `
+				SELECT time_interval::text FROM timescaledb_information.dimensions
+				WHERE hypertable_name = $1 AND column_name = 'block_timestamp'`, table).Scan(&interval); err != nil {
+				t.Fatalf("reading %s's chunk interval: %v", table, err)
+			}
+			if interval != "30 days" {
+				t.Errorf("%s chunk interval = %q, want 30 days (VEC-663: a few MB/day, so the 30-day cap decides)", table, interval)
+			}
+			var segmentby, orderby string
+			if err := uniswapV4TestPool.QueryRow(ctx, `
+				SELECT COALESCE(segmentby, ''), COALESCE(orderby, '')
+				FROM timescaledb_information.hypertable_compression_settings
+				WHERE hypertable::text = $1`, table).Scan(&segmentby, &orderby); err != nil {
+				t.Fatalf("reading %s's compression settings: %v", table, err)
+			}
+			if segmentby != "pool_id" {
+				t.Errorf("%s segmentby = %q, want pool_id", table, segmentby)
+			}
+			if orderby != wantOrder {
+				t.Errorf("%s orderby = %q, want %q", table, orderby, wantOrder)
+			}
+		})
+	}
+}
+
 func TestUniswapV4TickIsNotAHypertable(t *testing.T) {
 	ctx := context.Background()
 

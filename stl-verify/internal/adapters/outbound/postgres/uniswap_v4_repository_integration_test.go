@@ -936,15 +936,16 @@ func TestUniswapV4Repository_SaveBlock_NewBuildAppendsIntoACompressedChunk(t *te
 	}
 }
 
-// compressUniswapV4ChunkHolding columnstores only the chunk that holds rows at ts, so
-// the rest of the file's fixtures stay on rowstore and this test cannot mask theirs.
+// compressUniswapV4ChunkHolding columnstores only the chunk that holds rows at ts (the
+// window is one 30-day chunk either side), so the rest of the file's fixtures, which
+// sit in other months, stay on rowstore and this test cannot mask theirs.
 func compressUniswapV4ChunkHolding(t *testing.T, ctx context.Context, table string, ts time.Time) {
 	t.Helper()
 	var chunks int
 	if err := uniswapV4TestPool.QueryRow(ctx, `
 		SELECT count(*)::int FROM (
 			SELECT compress_chunk(c, if_not_compressed => true)
-			FROM show_chunks($1::regclass, newer_than => $2::timestamptz - INTERVAL '2 days', older_than => $2::timestamptz + INTERVAL '2 days') c
+			FROM show_chunks($1::regclass, newer_than => $2::timestamptz - INTERVAL '31 days', older_than => $2::timestamptz + INTERVAL '31 days') c
 		) s`, table, ts).Scan(&chunks); err != nil {
 		t.Fatalf("compress the %s chunk around %s: %v", table, ts, err)
 	}

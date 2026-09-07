@@ -194,16 +194,25 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_pool_state
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'block_timestamp',
-    tsdb.chunk_interval = '1 day',
+    -- 30 days by VEC-663's rule (active chunk + indexes within 512 MB, a quarter of
+    -- shared_buffers, divided by MB/day, capped at 30): at 21 mainnet pools this family
+    -- writes a few MB/day, so the cap decides. Re-derive when a chain is added;
+    -- set_chunk_time_interval affects new chunks only.
+    tsdb.chunk_interval = '30 days',
     -- Without columnstore = false, tsdb.hypertable installs its own 1-day policy
     -- and add_compression_policy below returns -1 rather than replacing it.
     tsdb.columnstore = false
 );
 
+-- The version tuple leads the order-by so a compressed batch is already in the order
+-- of the latest-per-key read (block_number DESC, block_version DESC, processing_version
+-- DESC); TimescaleDB appends the partition column, so the catalogue reads
+-- "..., processing_version DESC, block_timestamp DESC". The event tables below add
+-- log_index before processing_version, their key's order. Same shape as position_state.
 ALTER TABLE uniswap_v4_pool_state SET (
     timescaledb.compress,
     timescaledb.compress_segmentby = 'pool_id',
-    timescaledb.compress_orderby = 'block_timestamp DESC'
+    timescaledb.compress_orderby = 'block_number DESC, block_version DESC, processing_version DESC'
 );
 
 SELECT add_compression_policy('uniswap_v4_pool_state', INTERVAL '2 days', if_not_exists => TRUE);
@@ -285,7 +294,7 @@ CREATE TRIGGER trigger_assign_processing_version
 EXECUTE FUNCTION assign_processing_version_uniswap_v4_pool_state();
 
 COMMENT ON TABLE uniswap_v4_pool_state IS
-  '[Hypertable] Per-touched-block snapshot of a pool''s slot0 / liquidity / fee-growth state read through StateView, taken only on blocks that touch the pool (V4 state is piecewise-constant; no periodic heartbeat). No balance columns: the singleton PoolManager holds every pool''s currencies in one pot, so a per-pool ERC-20 balance does not exist. No TWAP columns: V4 core has no oracle (a hook may provide one). Partitioned on block_timestamp (1-day chunks); append-only via the processing_version trigger.';
+  '[Hypertable] Per-touched-block snapshot of a pool''s slot0 / liquidity / fee-growth state read through StateView, taken only on blocks that touch the pool (V4 state is piecewise-constant; no periodic heartbeat). No balance columns: the singleton PoolManager holds every pool''s currencies in one pot, so a per-pool ERC-20 balance does not exist. No TWAP columns: V4 core has no oracle (a hook may provide one). Partitioned on block_timestamp (30-day chunks); append-only via the processing_version trigger.';
 COMMENT ON COLUMN uniswap_v4_pool_state.pool_id IS
   'PK, FK->uniswap_v4_pool.id. Surrogate pool ID the snapshot is for (not the 32-byte on-chain PoolId). To aggregate a pool''s history across registry corrections, join uniswap_v4_pool and group by (chain_id, pool_id) -- never by uniswap_v4_pool.id, which changes on every correction.';
 COMMENT ON COLUMN uniswap_v4_pool_state.block_number IS
@@ -337,14 +346,14 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_swap
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'block_timestamp',
-    tsdb.chunk_interval = '1 day',
+    tsdb.chunk_interval = '30 days',
     tsdb.columnstore = false
 );
 
 ALTER TABLE uniswap_v4_swap SET (
     timescaledb.compress,
     timescaledb.compress_segmentby = 'pool_id',
-    timescaledb.compress_orderby = 'block_timestamp DESC'
+    timescaledb.compress_orderby = 'block_number DESC, block_version DESC, log_index DESC, processing_version DESC'
 );
 
 SELECT add_compression_policy('uniswap_v4_swap', INTERVAL '2 days', if_not_exists => TRUE);
@@ -420,7 +429,7 @@ CREATE TRIGGER trigger_assign_processing_version
 EXECUTE FUNCTION assign_processing_version_uniswap_v4_swap();
 
 COMMENT ON TABLE uniswap_v4_swap IS
-  '[Hypertable] One row per on-chain PoolManager Swap event. Partitioned on block_timestamp (1-day chunks); append-only via the processing_version trigger.';
+  '[Hypertable] One row per on-chain PoolManager Swap event. Partitioned on block_timestamp (30-day chunks); append-only via the processing_version trigger.';
 COMMENT ON COLUMN uniswap_v4_swap.pool_id IS
   'PK, FK->uniswap_v4_pool.id. Surrogate pool ID the swap belongs to (resolved from the event''s topics[1] PoolId). To aggregate a pool''s history across registry corrections, join uniswap_v4_pool and group by (chain_id, pool_id) -- never by uniswap_v4_pool.id, which changes on every correction.';
 COMMENT ON COLUMN uniswap_v4_swap.block_number IS
@@ -475,14 +484,14 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_liquidity_event
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'block_timestamp',
-    tsdb.chunk_interval = '1 day',
+    tsdb.chunk_interval = '30 days',
     tsdb.columnstore = false
 );
 
 ALTER TABLE uniswap_v4_liquidity_event SET (
     timescaledb.compress,
     timescaledb.compress_segmentby = 'pool_id',
-    timescaledb.compress_orderby = 'block_timestamp DESC'
+    timescaledb.compress_orderby = 'block_number DESC, block_version DESC, log_index DESC, processing_version DESC'
 );
 
 SELECT add_compression_policy('uniswap_v4_liquidity_event', INTERVAL '2 days', if_not_exists => TRUE);
@@ -558,7 +567,7 @@ CREATE TRIGGER trigger_assign_processing_version
 EXECUTE FUNCTION assign_processing_version_uniswap_v4_liquidity_event();
 
 COMMENT ON TABLE uniswap_v4_liquidity_event IS
-  '[Hypertable] One row per PoolManager ModifyLiquidity event (V4''s single add/remove/poke primitive; there is no Mint/Burn/Collect split). Carries no token amounts: V4 settles through flash accounting, so the moved amounts are not in the event. Partitioned on block_timestamp (1-day chunks); append-only via the processing_version trigger.';
+  '[Hypertable] One row per PoolManager ModifyLiquidity event (V4''s single add/remove/poke primitive; there is no Mint/Burn/Collect split). Carries no token amounts: V4 settles through flash accounting, so the moved amounts are not in the event. Partitioned on block_timestamp (30-day chunks); append-only via the processing_version trigger.';
 COMMENT ON COLUMN uniswap_v4_liquidity_event.pool_id IS
   'PK, FK->uniswap_v4_pool.id. Surrogate pool ID the event belongs to (resolved from the event''s topics[1] PoolId). To aggregate a pool''s history across registry corrections, join uniswap_v4_pool and group by (chain_id, pool_id) -- never by uniswap_v4_pool.id, which changes on every correction.';
 COMMENT ON COLUMN uniswap_v4_liquidity_event.block_number IS
@@ -699,14 +708,14 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_pool_event
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'block_timestamp',
-    tsdb.chunk_interval = '1 day',
+    tsdb.chunk_interval = '30 days',
     tsdb.columnstore = false
 );
 
 ALTER TABLE uniswap_v4_pool_event SET (
     timescaledb.compress,
     timescaledb.compress_segmentby = 'pool_id',
-    timescaledb.compress_orderby = 'block_timestamp DESC'
+    timescaledb.compress_orderby = 'block_number DESC, block_version DESC, log_index DESC, processing_version DESC'
 );
 
 SELECT add_compression_policy('uniswap_v4_pool_event', INTERVAL '2 days', if_not_exists => TRUE);
@@ -782,7 +791,7 @@ CREATE TRIGGER trigger_assign_processing_version
 EXECUTE FUNCTION assign_processing_version_uniswap_v4_pool_event();
 
 COMMENT ON TABLE uniswap_v4_pool_event IS
-  '[Hypertable] Decoded low-frequency pool-keyed PoolManager events (Initialize, Donate, ProtocolFeeUpdated); typed counterpart to the raw protocol_event mirror. Singleton-wide governance events (OwnershipTransferred, ProtocolFeeControllerUpdated) are not pool-keyed and live only in protocol_event. Partitioned on block_timestamp (1-day chunks); append-only via the processing_version trigger.';
+  '[Hypertable] Decoded low-frequency pool-keyed PoolManager events (Initialize, Donate, ProtocolFeeUpdated); typed counterpart to the raw protocol_event mirror. Singleton-wide governance events (OwnershipTransferred, ProtocolFeeControllerUpdated) are not pool-keyed and live only in protocol_event. Partitioned on block_timestamp (30-day chunks); append-only via the processing_version trigger.';
 COMMENT ON COLUMN uniswap_v4_pool_event.pool_id IS
   'PK, FK->uniswap_v4_pool.id. Surrogate pool ID the event belongs to (resolved from the event''s topics[1] PoolId). To aggregate a pool''s history across registry corrections, join uniswap_v4_pool and group by (chain_id, pool_id) -- never by uniswap_v4_pool.id, which changes on every correction.';
 COMMENT ON COLUMN uniswap_v4_pool_event.block_number IS
