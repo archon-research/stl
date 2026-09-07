@@ -2239,6 +2239,10 @@ CRONJOB_DEPLOYMENTS := spark-anchorage-indexer offchain-price-indexer reference-
 # anchorage-indexer mismatch above. Targets that take NAME= take the package name.
 deployment_of = $(if $(filter anchorage-indexer,$(1)),spark-anchorage-indexer,$(1))
 
+# Deployments sharing a sibling image — build/load the image owner (dev overlay
+# maps both names to one localhost image).
+build_of = $(if $(filter avalanche-oracle-price-worker,$(1)),oracle-price-worker,$(if $(filter base-morpho-indexer,$(1)),morpho-indexer,$(if $(filter base-psm3-indexer,$(1)),psm3-indexer,$(1))))
+
 # Pattern rule: docker-build-cronjob-<name> builds any cronjob image.
 docker-build-cronjob-%:
 	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/cronjobs/$* --build-arg BIN=cronjob -t stl-$*:$(LOCAL_TAG) -f Dockerfile.common .
@@ -2321,9 +2325,9 @@ kind-redeploy-worker:
 	@if echo " $(CRONJOBS) " | grep -q " $(NAME) "; then \
 	  $(MAKE) docker-build-cronjob-$(NAME); \
 	else \
-	  $(MAKE) docker-build-$(NAME) LOCAL=1; \
+	  $(MAKE) docker-build-$(call build_of,$(NAME)) LOCAL=1; \
 	fi
-	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-$(NAME):$(LOCAL_TAG)"
+	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-$(call build_of,$(NAME)):$(LOCAL_TAG)"
 	@kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/$(call deployment_of,$(NAME)) -n $(KUBE_NS)
 
 kind-redeploy-watcher:
