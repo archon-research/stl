@@ -22,9 +22,8 @@ spec:
       serviceAccountName: robinhood-allocation-tracker
       containers:
         - name: robinhood-allocation-tracker
-          # Distinct image key — overlay maps this to the allocation-tracker ECR repo.
           # Same binary as allocation-tracker; chain is selected via CHAIN_ID env var.
-          image: robinhood-allocation-tracker
+          image: allocation-tracker
           envFrom:
             - configMapRef:
                 name: otel-config
