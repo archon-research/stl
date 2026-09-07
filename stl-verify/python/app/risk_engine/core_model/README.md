@@ -121,7 +121,7 @@ runner.py             Service entry point — orchestrates the full pipeline
 | `FOCUS_ON_NEGATIVE` | `False` | Restrict jump simulation to downside only |
 | `VOL_FLOOR_PCT` | `0.75` | Floor GARCH forecast vol at this percentile of the full historical rolling vol |
 | `WORST_CASE` | `False` | Use worst-case LTVs instead of observed LTVs |
-| `MIN_BORROW_USD` | `100` | Drop borrowers with less total debt before the liquidation simulation (memory and time scale with borrower count; `0` keeps every row) |
+| `MIN_BORROW_USD` | `100` | Drop borrowers with less total debt before the liquidation simulation (see **Borrower filter** below; `0` keeps every row) |
 | `LOAN_TOKEN` | `USDC` | Filter positions by loan token (`ALL` = no filter) |
 | `SEED` | `0` | Global random seed |
 
@@ -154,6 +154,30 @@ Both backtest gates are currently defective — see Known Issues #7 and #8. Boun
 To prevent capital requirements from collapsing during low-volatility regimes, the GARCH conditional volatility forecast is floored at the `VOL_FLOOR_PCT` percentile of the 21-day rolling realised volatility computed over the **full historical series** (not just the training window).
 
 ---
+
+### Borrower filter
+
+`MIN_BORROW_USD` drops borrowers below that total debt before the liquidation simulation. The
+liquidator holds two `(borrowers, N_MC, 15)` float64 tensors, so memory and loop time scale with the
+borrower count, and the live positions feed carries many sub-dollar interest-dust rows the reference
+parquet snapshots never had (their debt distribution starts at about 110 USD, the 5th percentile).
+The trade-off is explicit: dropped debt can no longer become bad debt, so the CRR is quoted against a
+slightly smaller exposure. Measured on live staging data (Sep 2026) at the 100 USD default:
+
+| Market | Rows kept | Dropped debt (share of exposure) | Peak RSS at N_MC=10,000 |
+|---|---|---|---|
+| sparklend_dai | 378 / 2,204 | 0.0014 % | 7.5 GiB → 1.3 GiB |
+| sparklend_usdc | 208 / 343 | 0.0004 % | 1.4 → 0.9 GiB |
+| sparklend_usds | 336 / 578 | 0.0001 % | 2.2 → 1.4 GiB |
+| sparklend_usdt | 331 / 389 | 0.0001 % | 1.6 → 1.3 GiB |
+| morpho_cbbtc-usdc | 322 / 360 | 0.0001 % | 1.5 GiB |
+| morpho_weth-usdc | 65 / 114 | 0.014 % | 0.7 GiB |
+
+On the parquet snapshot of sparklend_dai the same filter drops 0.0001 % of debt and moves the EL from
+0.017458 % to 0.017452 %. The runner logs the dropped count and share on every run. A one-cent
+threshold does not help memory (sparklend_dai still peaks at 6.6 GiB) because the extra live rows are
+dust, not zero-debt. Known Issue #11 makes every dust row default whenever it is unsafe, so the
+filter also removes that artifact; it does not fix it.
 
 ## Liquidation Mechanics
 
