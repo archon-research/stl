@@ -87,7 +87,7 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	defer rpcServer.Close()
 
 	t.Setenv("BUILD_GIT_HASH", "test")
-	testutil.SetDevIdentity(t)
+	testutil.SetBuildGitHash(t)
 	t.Setenv("AWS_ENDPOINT_URL", s3Cfg.Endpoint)
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
@@ -191,7 +191,7 @@ func TestRunIntegration_BorrowEvent(t *testing.T) {
 	defer rpcServer.Close()
 
 	t.Setenv("BUILD_GIT_HASH", "test")
-	testutil.SetDevIdentity(t)
+	testutil.SetBuildGitHash(t)
 	t.Setenv("AWS_ENDPOINT_URL", s3Cfg.Endpoint)
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
@@ -230,7 +230,7 @@ func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 	defer rpcServer.Close()
 
 	t.Setenv("BUILD_GIT_HASH", "test")
-	testutil.SetDevIdentity(t)
+	testutil.SetBuildGitHash(t)
 	t.Setenv("AWS_ENDPOINT_URL", s3Cfg.Endpoint)
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
@@ -314,7 +314,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	defer rpcServer.Close()
 
 	t.Setenv("BUILD_GIT_HASH", "test")
-	testutil.SetDevIdentity(t)
+	testutil.SetBuildGitHash(t)
 	t.Setenv("AWS_ENDPOINT_URL", s3Cfg.Endpoint)
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
@@ -508,7 +508,7 @@ func TestRunIntegration_BorrowEvent_WithCollateral(t *testing.T) {
 	defer rpcServer.Close()
 
 	t.Setenv("BUILD_GIT_HASH", "test")
-	testutil.SetDevIdentity(t)
+	testutil.SetBuildGitHash(t)
 	t.Setenv("AWS_ENDPOINT_URL", s3Cfg.Endpoint)
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")

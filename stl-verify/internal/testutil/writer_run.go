@@ -10,14 +10,14 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 )
 
-// TestIdentity is the artefact a test registers as: the dev image digest, which no
-// deployed environment can carry.
+// TestIdentity is the artefact a test registers as: the "test" service, which no
+// deployed environment builds.
 func TestIdentity(gitHash string) buildregistry.Identity {
-	return buildregistry.Identity{GitHash: gitHash, Service: "test", ImageDigest: buildregistry.DevImageDigest}
+	return buildregistry.Identity{GitHash: gitHash, Service: "test"}
 }
 
-// OpenTestRun registers the test as a dev-identity artefact and opens a writer run on
-// pool, returning the ids repository constructors take. Reference data is loaded by
+// OpenTestRun registers the test's artefact and opens a writer run on pool,
+// returning the ids repository constructors take. Reference data is loaded by
 // nothing, so the run pins the instant it was opened.
 func OpenTestRun(t *testing.T, ctx context.Context, pool *pgxpool.Pool) (buildregistry.BuildID, buildregistry.RunID) {
 	t.Helper()
@@ -32,14 +32,12 @@ func OpenTestRun(t *testing.T, ctx context.Context, pool *pgxpool.Pool) (buildre
 	return reg.BuildID(), runID
 }
 
-// SetDevIdentity lets a binary driven by this test resolve its artefact the way
-// `make run-*` and the kind overlay do: a stand-in git hash for a `go run` build that
-// embeds no VCS info, and the dev image digest in place of IMAGE_DIGEST.
-func SetDevIdentity(t *testing.T) {
+// SetBuildGitHash lets a binary driven by this test resolve its artefact the way
+// `make run-*` does: a stand-in git hash, because a `go run` or `go test` build embeds
+// no VCS info and buildregistry refuses to register without one.
+func SetBuildGitHash(t *testing.T) {
 	t.Helper()
 	t.Setenv("BUILD_GIT_HASH", "test")
-	t.Setenv(buildregistry.DevIdentityEnv, "1")
-	t.Setenv(buildregistry.ImageDigestEnv, "")
 }
 
 // RequireRunID fails the test unless a row's run_id (scanned as *int64, the column is

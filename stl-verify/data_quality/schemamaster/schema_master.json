@@ -1279,10 +1279,6 @@
       "type": "text",
       "class": "S"
     },
-    "image_digest": {
-      "type": "text",
-      "class": "S"
-    },
     "started_at": {
       "type": "timestamptz",
       "class": "A",

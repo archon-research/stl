@@ -1,7 +1,7 @@
 -- VEC-598: governed rows name the writer run that wrote them (ADR-0006 §2).
 --
 -- run_id -> writer_run.id on every governed table — schemamaster type raw_pipeline, dimension or
--- config — so a row resolves to its artefact (git hash, service, image digest) and to the
+-- config — so a row resolves to its artefact (git hash, service) and to the
 -- reference data its writer ran with. NULL means the row predates tracking; build_id stays and
 -- keeps being written alongside. Nullable with no default, so on a compressed hypertable this is
 -- a catalogue-only change (no chunk rewrite), and no FK, matching build_id: an FK probe on every

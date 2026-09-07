@@ -142,7 +142,7 @@ func setWorkerEnv(t *testing.T, bucket, rpcURL string) {
 	// The build registry refuses to register a build it cannot identify, and a
 	// `go test` binary carries no VCS stamp.
 	t.Setenv("BUILD_GIT_HASH", "integration-test")
-	testutil.SetDevIdentity(t)
+	testutil.SetBuildGitHash(t)
 }
 
 func newDeps(t *testing.T, pool *pgxpool.Pool) temporal.Dependencies {

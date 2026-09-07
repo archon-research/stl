@@ -13,8 +13,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const testDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-
 func setupDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
@@ -25,7 +23,6 @@ func setupDB(t *testing.T) *pgxpool.Pool {
 func TestNew_RegistersTheProcessIdentity(t *testing.T) {
 	pool := setupDB(t)
 	t.Setenv("BUILD_GIT_HASH", "abc123def456")
-	t.Setenv(buildregistry.ImageDigestEnv, testDigest)
 
 	reg, err := buildregistry.New(context.Background(), pool)
 	if err != nil {
@@ -41,50 +38,30 @@ func TestNew_RegistersTheProcessIdentity(t *testing.T) {
 	if reg.Service() == "" {
 		t.Error("Service() is empty, want the test binary's name")
 	}
-	if reg.ImageDigest() != testDigest {
-		t.Errorf("ImageDigest() = %q, want %q", reg.ImageDigest(), testDigest)
-	}
 
-	var service, digest string
+	var gitHash, service string
 	if err := pool.QueryRow(context.Background(),
-		`SELECT service, image_digest FROM build_registry WHERE id = $1`, int(reg.BuildID())).Scan(&service, &digest); err != nil {
+		`SELECT git_hash, service FROM build_registry WHERE id = $1`, int(reg.BuildID())).Scan(&gitHash, &service); err != nil {
 		t.Fatalf("read registered row: %v", err)
 	}
-	if service != reg.Service() || digest != testDigest {
-		t.Errorf("registered (%q, %q), want (%q, %q)", service, digest, reg.Service(), testDigest)
+	if gitHash != reg.GitHash() || service != reg.Service() {
+		t.Errorf("registered (%q, %q), want (%q, %q)", gitHash, service, reg.GitHash(), reg.Service())
 	}
 }
 
-func TestNew_DevIdentityRegistersTheDevDigest(t *testing.T) {
+func TestNew_MissingGitHashIsAHardError(t *testing.T) {
 	pool := setupDB(t)
-	t.Setenv("BUILD_GIT_HASH", "dev")
-	testutil.SetDevIdentity(t)
-
-	reg, err := buildregistry.New(context.Background(), pool)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	if reg.ImageDigest() != buildregistry.DevImageDigest {
-		t.Errorf("ImageDigest() = %q, want %q", reg.ImageDigest(), buildregistry.DevImageDigest)
-	}
-}
-
-func TestNew_MissingDigestIsAHardError(t *testing.T) {
-	pool := setupDB(t)
-	t.Setenv("BUILD_GIT_HASH", "abc123def456")
-	t.Setenv(buildregistry.ImageDigestEnv, "")
-	t.Setenv(buildregistry.DevIdentityEnv, "")
+	t.Setenv("BUILD_GIT_HASH", "")
 
 	_, err := buildregistry.New(context.Background(), pool)
-	if err == nil || !strings.Contains(err.Error(), buildregistry.ImageDigestEnv) {
-		t.Fatalf("New() error = %v, want one naming %s", err, buildregistry.ImageDigestEnv)
+	if err == nil || !strings.Contains(err.Error(), "git hash not available") {
+		t.Fatalf("New() error = %v, want one naming the missing git hash", err)
 	}
 }
 
 func TestNew_IdempotentReregistration(t *testing.T) {
 	pool := setupDB(t)
 	t.Setenv("BUILD_GIT_HASH", "idempotent-hash")
-	t.Setenv(buildregistry.ImageDigestEnv, testDigest)
 
 	reg1, err := buildregistry.New(context.Background(), pool)
 	if err != nil {
@@ -101,14 +78,13 @@ func TestNew_IdempotentReregistration(t *testing.T) {
 
 func TestNew_DistinctArtefactsGetDistinctIDs(t *testing.T) {
 	ctx := context.Background()
-	base := buildregistry.Identity{GitHash: "hash-aaa", Service: "svc", ImageDigest: testDigest}
+	base := buildregistry.Identity{GitHash: "hash-aaa", Service: "svc"}
 	tests := []struct {
 		name  string
 		other buildregistry.Identity
 	}{
-		{"different git hash", buildregistry.Identity{GitHash: "hash-bbb", Service: "svc", ImageDigest: testDigest}},
-		{"different service", buildregistry.Identity{GitHash: "hash-aaa", Service: "other-svc", ImageDigest: testDigest}},
-		{"different image digest", buildregistry.Identity{GitHash: "hash-aaa", Service: "svc", ImageDigest: buildregistry.DevImageDigest}},
+		{"different git hash", buildregistry.Identity{GitHash: "hash-bbb", Service: "svc"}},
+		{"different service", buildregistry.Identity{GitHash: "hash-aaa", Service: "other-svc"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -130,7 +106,7 @@ func TestNew_DistinctArtefactsGetDistinctIDs(t *testing.T) {
 
 func TestNewWithIdentity_RejectsAnIncompleteIdentity(t *testing.T) {
 	pool := setupDB(t)
-	_, err := buildregistry.NewWithIdentity(context.Background(), pool, buildregistry.Identity{GitHash: "abc", Service: "svc"})
+	_, err := buildregistry.NewWithIdentity(context.Background(), pool, buildregistry.Identity{GitHash: "abc"})
 	if err == nil || !strings.Contains(err.Error(), "incomplete") {
 		t.Fatalf("NewWithIdentity() error = %v, want an incomplete-identity error", err)
 	}

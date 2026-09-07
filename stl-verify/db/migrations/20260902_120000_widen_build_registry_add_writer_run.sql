@@ -1,10 +1,11 @@
 -- VEC-598: row provenance names the exact artefact and process run that wrote it (ADR-0006 §2).
 --
 -- build_registry keyed by git_hash alone names a commit, not an artefact: one commit builds one
--- image per service, and the same service rebuilt from the same commit gets a new digest. The
--- key becomes (git_hash, service, image_digest). Rows registered before this migration carry
--- the sentinel 'unknown' in the two new columns; every git_hash was unique, so the triple stays
--- unique. Pre-tracking on a data row is signalled by run_id IS NULL, never by that sentinel.
+-- image per service. The key becomes (git_hash, service); ECR tag immutability (VEC-701) makes
+-- the <git-sha> tag resolve to one image forever, so the pair names the image too. Rows
+-- registered before this migration carry the sentinel 'unknown' in service; every git_hash was
+-- unique, so the pair stays unique. Pre-tracking on a data row is signalled by run_id IS NULL,
+-- never by that sentinel.
 --
 -- writer_run records one process start of a writer: which artefact, when, and the reference
 -- data it ran with — the MVCC snapshot taken in the transaction that loaded it, and the
@@ -20,24 +21,19 @@
 SET LOCAL lock_timeout = '10s';
 
 ALTER TABLE build_registry ADD COLUMN IF NOT EXISTS service TEXT;
-ALTER TABLE build_registry ADD COLUMN IF NOT EXISTS image_digest TEXT;
 
 UPDATE build_registry
-SET service = COALESCE(service, 'unknown'),
-    image_digest = COALESCE(image_digest, 'unknown')
-WHERE service IS NULL OR image_digest IS NULL;
+SET service = 'unknown'
+WHERE service IS NULL;
 
 ALTER TABLE build_registry ALTER COLUMN service SET NOT NULL;
-ALTER TABLE build_registry ALTER COLUMN image_digest SET NOT NULL;
 
 ALTER TABLE build_registry DROP CONSTRAINT IF EXISTS build_registry_service_chk;
 ALTER TABLE build_registry ADD CONSTRAINT build_registry_service_chk CHECK (btrim(service) <> '');
-ALTER TABLE build_registry DROP CONSTRAINT IF EXISTS build_registry_image_digest_chk;
-ALTER TABLE build_registry ADD CONSTRAINT build_registry_image_digest_chk CHECK (btrim(image_digest) <> '');
 
 ALTER TABLE build_registry DROP CONSTRAINT IF EXISTS build_registry_git_hash_key;
 ALTER TABLE build_registry DROP CONSTRAINT IF EXISTS build_registry_artefact_key;
-ALTER TABLE build_registry ADD CONSTRAINT build_registry_artefact_key UNIQUE (git_hash, service, image_digest);
+ALTER TABLE build_registry ADD CONSTRAINT build_registry_artefact_key UNIQUE (git_hash, service);
 
 CREATE TABLE IF NOT EXISTS writer_run (
     id                     BIGSERIAL PRIMARY KEY,
@@ -50,13 +46,11 @@ CREATE TABLE IF NOT EXISTS writer_run (
 CREATE INDEX IF NOT EXISTS writer_run_build_id_idx ON writer_run (build_id);
 
 COMMENT ON TABLE build_registry IS
-'[Operational] Provenance: the deploy artefacts that have written governed rows. One row per (git_hash, service, image_digest); a process registers its own at startup (buildregistry.New) and every governed row reaches it through writer_run.run_id -> build_id (or, for pre-VEC-598 rows, build_id directly). Insert-only: UPDATE/DELETE/TRUNCATE raise, because a mutable artefact row would silently change what a recipe resolves to (ADR-0006 §1, §2).';
+'[Operational] Provenance: the deploy artefacts that have written governed rows. One row per (git_hash, service), which names one image because ECR tag immutability (VEC-701) pins the <git-sha> tag to a single image forever; a process registers its own at startup (buildregistry.New) and every governed row reaches it through writer_run.run_id -> build_id (or, for pre-VEC-598 rows, build_id directly). Insert-only: UPDATE/DELETE/TRUNCATE raise, because a mutable artefact row would silently change what a recipe resolves to (ADR-0006 §1, §2).';
 COMMENT ON COLUMN build_registry.git_hash IS
-'Audit. Commit the binary was built from. Not unique on its own since VEC-598: one commit yields one image per service, and a rebuild yields a new digest.';
+'Audit. Commit the binary was built from. Not unique on its own since VEC-598: one commit yields one image per service.';
 COMMENT ON COLUMN build_registry.service IS
 'Audit. Binary name of the writer (os.Args[0] basename), e.g. sparklend-indexer. ''unknown'' on rows registered before VEC-598.';
-COMMENT ON COLUMN build_registry.image_digest IS
-'Audit. Digest of the container image that ran (sha256:<64 hex>), the artefact retained indefinitely for bit-for-bit reproduction. ''unknown'' on rows registered before VEC-598; ''dev'' for a local or test process (STL_DEV_IDENTITY=1), which is never a deployed environment.';
 
 COMMENT ON TABLE writer_run IS
 '[Operational] Provenance: one row per process start of a governed-row writer (ADR-0006 §2). Governed rows carry run_id -> writer_run.id (NULL = written before tracking). Pins the writer''s reference data on both temporal axes: reference_snapshot (which reference rows existed) and reference_effective_at (which of them applied). A process that reloads its reference data opens a new run. Insert-only: UPDATE/DELETE/TRUNCATE raise. A plain table: one row per process start.';

@@ -42,22 +42,22 @@ func New(ctx context.Context, db *pgxpool.Pool) (*Registry, error) {
 // NewWithIdentity is New for an identity the caller resolved itself — the test
 // suite, where the process is the test binary.
 func NewWithIdentity(ctx context.Context, db *pgxpool.Pool, identity Identity) (*Registry, error) {
-	if identity.GitHash == "" || identity.Service == "" || identity.ImageDigest == "" {
-		return nil, fmt.Errorf("incomplete artefact identity %+v: git hash, service and image digest are all required", identity)
+	if identity.GitHash == "" || identity.Service == "" {
+		return nil, fmt.Errorf("incomplete artefact identity %+v: git hash and service are both required", identity)
 	}
 
 	var id int
 	err := db.QueryRow(ctx, `
-		INSERT INTO build_registry (git_hash, service, image_digest) VALUES ($1, $2, $3)
-		ON CONFLICT (git_hash, service, image_digest) DO NOTHING
-		RETURNING id`, identity.GitHash, identity.Service, identity.ImageDigest).Scan(&id)
+		INSERT INTO build_registry (git_hash, service) VALUES ($1, $2)
+		ON CONFLICT (git_hash, service) DO NOTHING
+		RETURNING id`, identity.GitHash, identity.Service).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = db.QueryRow(ctx, `
-			SELECT id FROM build_registry WHERE git_hash = $1 AND service = $2 AND image_digest = $3`,
-			identity.GitHash, identity.Service, identity.ImageDigest).Scan(&id)
+			SELECT id FROM build_registry WHERE git_hash = $1 AND service = $2`,
+			identity.GitHash, identity.Service).Scan(&id)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("resolving build_id for %s/%s@%s: %w", identity.Service, identity.GitHash, identity.ImageDigest, err)
+		return nil, fmt.Errorf("resolving build_id for %s/%s: %w", identity.Service, identity.GitHash, err)
 	}
 
 	return &Registry{db: db, buildID: BuildID(id), identity: identity}, nil
@@ -71,9 +71,6 @@ func (r *Registry) GitHash() string { return r.identity.GitHash }
 
 // Service returns the service name that was registered.
 func (r *Registry) Service() string { return r.identity.Service }
-
-// ImageDigest returns the image digest that was registered.
-func (r *Registry) ImageDigest() string { return r.identity.ImageDigest }
 
 // BuildTime returns the build timestamp.
 func (r *Registry) BuildTime() string { return r.identity.BuildTime }

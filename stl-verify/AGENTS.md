@@ -213,7 +213,7 @@ Before modifying anything under `internal/adapters/outbound/postgres/`, read and
 3. Add HTTP handler in `internal/adapters/inbound/`
 
 ### New binary that connects to Postgres
-1. Call `buildregistry.New(ctx, pool)` — it hard-errors unless the git hash, the binary name and `IMAGE_DIGEST` all resolve; the deploy pipeline injects the digest, and `STL_DEV_IDENTITY=1` (dev overlay, `make run-*`, `testutil.SetDevIdentity`) stands in for it locally.
+1. Call `buildregistry.New(ctx, pool)` — it hard-errors unless the git hash and the binary name both resolve. The artefact key is `(git_hash, service)`; ECR tag immutability (VEC-701) makes the `<git-sha>` image tag resolve to one image forever. A deployed image is stamped by `Dockerfile.common`; a `go run` or `go test` build embeds no VCS info, so `make run-*` and `testutil.SetBuildGitHash` pass `BUILD_GIT_HASH` instead.
 2. Resolve `env.ReferenceEffectiveAt(time.Now().UTC())` once and open the run: `buildReg.OpenRun(ctx, referenceEffectiveAt, load)`. `load` runs inside the run's `REPEATABLE READ` transaction and is where startup reads of an append-on-change reference table belong (see `internal/pkg/oraclewire`); pass `nil` when the binary reads none.
 3. Pass the `RunID` into every repository constructor alongside the `BuildID`. A binary with no Postgres connection opens no run.
 
