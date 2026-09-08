@@ -40,6 +40,7 @@ func collectSeedDataPoints(t *testing.T, reader sdkmetric.Reader) []metricdata.D
 			return sum.DataPoints
 		}
 	}
+	t.Fatalf("metric %q not found; a nil return here would make every assertion below vacuous", "test.counter")
 	return nil
 }
 
@@ -81,6 +82,57 @@ func TestSeedStatusCounter_ExportsBothStatusSeriesAtZeroWithBaseAttrs(t *testing
 		}
 		if v != 0 {
 			t.Errorf("status=%q = %d, want 0", status, v)
+		}
+	}
+}
+
+// The seeded series and the series a recorder writes must be ONE series. If the
+// recorder attaches an attribute the seed did not, both exist: the seeded one
+// stays flat at 0 while real counts accumulate on a second, unseeded series,
+// and increase() is back to missing the first increment — the bug seeding
+// exists to prevent, now wearing a healthy-looking series. Every collector in
+// this repo sums across data points, so the value alone cannot see that; the
+// data-point count is the load-bearing assertion.
+func TestSeedCounter_RecordLandsOnTheSeededSeriesNotAParallelOne(t *testing.T) {
+	c, reader := newSeedTestCounter(t)
+	base := attribute.String("chain", "base")
+	ctx := context.Background()
+
+	SeedCounter(ctx, c, base)
+	c.Add(ctx, 1, metric.WithAttributes(base))
+
+	dps := collectSeedDataPoints(t, reader)
+	if len(dps) != 1 {
+		t.Fatalf("got %d data points, want 1 — the record orphaned the seeded series", len(dps))
+	}
+	if dps[0].Value != 1 {
+		t.Errorf("value = %d, want 1 (0 seeded then 1 recorded)", dps[0].Value)
+	}
+}
+
+// Same invariant for the status-labelled helper: a recorder deriving its status
+// from StatusAttr must land on exactly the series SeedStatusCounter created,
+// leaving two series and not four.
+func TestSeedStatusCounter_RecordLandsOnTheSeededStatusSeries(t *testing.T) {
+	c, reader := newSeedTestCounter(t)
+	base := attribute.String("chain", "base")
+	ctx := context.Background()
+
+	SeedStatusCounter(ctx, c, base)
+	c.Add(ctx, 1, metric.WithAttributes(base, StatusAttr(nil)))
+
+	dps := collectSeedDataPoints(t, reader)
+	if len(dps) != 2 {
+		t.Fatalf("got %d data points, want 2 — the record orphaned a seeded status series", len(dps))
+	}
+	for _, dp := range dps {
+		status, _ := dp.Attributes.Value("status")
+		want := int64(0)
+		if status.AsString() == SuccessStatusAttr().Value.AsString() {
+			want = 1
+		}
+		if dp.Value != want {
+			t.Errorf("status=%q = %d, want %d", status.AsString(), dp.Value, want)
 		}
 	}
 }
