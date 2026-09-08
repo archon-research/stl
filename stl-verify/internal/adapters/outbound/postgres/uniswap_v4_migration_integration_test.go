@@ -1034,10 +1034,10 @@ var uniswapV4SeedTokens = []uniswapV4SeedToken{
 	{"\\xdAC17F958D2ee523a2206206994597C13D831ec7", "USDT", 6},
 	{"\\x56072C95FAA701256059aa122697B133aDEd9279", "SKY", 18},
 	{"\\x68749665FF8D2d112Fa859AA293F07A622782F38", "XAUt", 6},
+	{"\\x8292Bb45bf1Ee4d140127049757C2E0fF06317eD", "RLUSD", 18},
 }
 
-// Transcribed from the same verified Initialize-log scan
-// 20260819_120000_create_uniswap_v4_tables.sql seeds from.
+// Transcribed from each seed migration's verified Initialize-log scan.
 type uniswapV4ExpectedPool struct {
 	name         string
 	poolIDHex    string
@@ -1071,6 +1071,7 @@ var uniswapV4ExpectedPools = []uniswapV4ExpectedPool{
 	{"sky_usds_500", "\\x2d04d518afae8b57a702a6f679edf49f39593d818f9342cc57b457ea738a7460", "\\x56072C95FAA701256059aa122697B133aDEd9279", "\\xdC035D45d973E3EC169d2276DDab16f1e407384F", 500, 10, uniswapV4NoHooksHex, 25036987},
 	{"eth_susds_3000", "\\x51ccd46db78d6988ab156c9b0d023e14b2e848240bc719718e63c4cc5c258bcf", uniswapV4NativeCurrencyHex, "\\xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD", 3000, 60, uniswapV4NoHooksHex, 22989795},
 	{"xaut_susds_10000", "\\x2f5dff74b96e2df0fa8a5695318d59839c3ce5d058b19024fbfe276100b676ff", "\\x68749665FF8D2d112Fa859AA293F07A622782F38", "\\xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD", 10000, 200, uniswapV4NoHooksHex, 24363921},
+	{"rlusd_usds_5", "\\x9035721b23481db3888fd201b9c2b26dbc3af60258bca65e669f2ed98dc8eb4f", "\\x8292Bb45bf1Ee4d140127049757C2E0fF06317eD", "\\xdC035D45d973E3EC169d2276DDab16f1e407384F", 5, 1, uniswapV4NoHooksHex, 25653372},
 }
 
 // Deliberately does not seed the pools: a test that wrote its own expectations
@@ -1348,6 +1349,74 @@ func TestUniswapV4PoolSeedPoolIDMatchesKeccakOfPoolKey(t *testing.T) {
 			t.Errorf("pool %x: keccak256(abi.encode(PoolKey)) = %x", k.poolID, got)
 		}
 	}
+}
+
+// Read nowhere else for a seeded row: one version at (0, 0), the gate open, and
+// the currencies' symbol/decimals as uniswapV4SeedTokens pins them.
+func TestUniswapV4PoolSeedRowsAreFirstVersionsWithTheGateOpen(t *testing.T) {
+	ctx := context.Background()
+
+	for _, want := range uniswapV4ExpectedPools {
+		t.Run(want.name, func(t *testing.T) {
+			var versions int
+			if err := uniswapV4TestPool.QueryRow(ctx, `
+				SELECT count(*) FROM uniswap_v4_pool
+				WHERE chain_id = 1 AND pool_id = $1::bytea`,
+				want.poolIDHex,
+			).Scan(&versions); err != nil {
+				t.Fatalf("counting registry versions: %v", err)
+			}
+			if versions != 1 {
+				t.Fatalf("%d registry versions, want 1 (a seed is a new key, not a correction)", versions)
+			}
+
+			var (
+				processingVersion, buildID int
+				snapshotSupported          bool
+				symbol0, symbol1           string
+				decimals0, decimals1       int
+			)
+			if err := uniswapV4TestPool.QueryRow(ctx, `
+				SELECT p.processing_version, p.build_id, p.snapshot_supported,
+				       t0.symbol, t0.decimals, t1.symbol, t1.decimals
+				FROM uniswap_v4_pool p
+				JOIN token t0 ON t0.id = p.currency0_token_id
+				JOIN token t1 ON t1.id = p.currency1_token_id
+				WHERE p.chain_id = 1 AND p.pool_id = $1::bytea`,
+				want.poolIDHex,
+			).Scan(&processingVersion, &buildID, &snapshotSupported, &symbol0, &decimals0, &symbol1, &decimals1); err != nil {
+				t.Fatalf("reading the seeded row: %v", err)
+			}
+
+			if processingVersion != 0 || buildID != 0 {
+				t.Errorf("(processing_version, build_id) = (%d, %d), want (0, 0)", processingVersion, buildID)
+			}
+			if !snapshotSupported {
+				t.Error("snapshot_supported = false; every seeded pool has a static fee StateView reads")
+			}
+			tok0 := uniswapV4SeedTokenFor(t, want.currency0Hex)
+			if symbol0 != tok0.symbol || decimals0 != tok0.decimals {
+				t.Errorf("currency0 token = (%s, %d), want (%s, %d)", symbol0, decimals0, tok0.symbol, tok0.decimals)
+			}
+			tok1 := uniswapV4SeedTokenFor(t, want.currency1Hex)
+			if symbol1 != tok1.symbol || decimals1 != tok1.decimals {
+				t.Errorf("currency1 token = (%s, %d), want (%s, %d)", symbol1, decimals1, tok1.symbol, tok1.decimals)
+			}
+		})
+	}
+}
+
+func uniswapV4SeedTokenFor(t *testing.T, currencyHex string) uniswapV4SeedToken {
+	t.Helper()
+
+	addrHex := uniswapV4TokenAddrFor(currencyHex)
+	for _, tok := range uniswapV4SeedTokens {
+		if strings.EqualFold(tok.addrHex, addrHex) {
+			return tok
+		}
+	}
+	t.Fatalf("no uniswapV4SeedTokens entry for %s", addrHex)
+	return uniswapV4SeedToken{}
 }
 
 // PoolId as v4-core derives it: keccak256(abi.encode(PoolKey)).

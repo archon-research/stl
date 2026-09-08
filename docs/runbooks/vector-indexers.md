@@ -2126,6 +2126,17 @@ and `UPDATE`/`DELETE` on the bad row is never the answer, because it would
 rewrite the history the fact tables reference. Deploying the migration is the
 whole fix — restart the worker so `LoadPools` re-reads the registry.
 
+Adding a pool is the same path with nothing to supersede. A new migration
+`INSERT`s the row for the new `(chain_id, pool_id)`, its PoolKey and
+`deploy_block` copied from the pool's one `Initialize` log and the token rows
+asserted rather than re-seeded (`20260908_120000_seed_uniswap_v4_rlusd_usds.sql`
+is the template). The seed is transcribed in four test lists that must all grow
+with it: `uniswapV4ExpectedPools` and `uniswapV4SeedTokens` (postgres migration
+test), `seededDeployBlocks` (V4 service integration test) and `wantSeededPools`
+(live validation), and `TestSeedProvenance` (livevalidation) then checks every
+row against mainnet. Then restart the worker; the first block that touches the
+new pool pays its tick-baseline scan once.
+
 ### Verify recovery
 
 The rule's own expression back below its threshold for the affected chain:
