@@ -14,6 +14,7 @@ import {
   formatFreshnessLabel,
 } from '../../shared/lib/dashboard';
 import { preferReference } from '../../shared/lib/provenance';
+import { Placeholder } from '../../shared/ui/Placeholder';
 
 export type ChartDatum = {
   label: string;
@@ -294,27 +295,6 @@ export const CHART_HEIGHT = 236;
  * the label is known up front, so the page reads as itself while it loads and
  * nothing moves when the figures land.
  */
-// Not `SkeletonStack`: it fills its items with `surface.subtle`, which is this
-// card's own fill, and takes no tone — so its placeholders are invisible here
-// and neither a composed class nor a descendant override outranks the kit's own
-// layer.
-const placeholderClassName = css({
-  bg: 'border.subtle',
-  borderRadius: 'sm',
-  animation: 'pulse',
-});
-
-function Placeholder({ width, height }: { width: string; height: number }) {
-  return (
-    <div
-      className={placeholderClassName}
-      // Sizes vary per slot, so they ride the style attribute: Panda generates
-      // its classes at build time and cannot see a value passed in.
-      style={{ width, height: `${height}px` }}
-    />
-  );
-}
-
 export function MetricCardSkeleton({ label }: { label: string }) {
   return (
     <MetricCard
