@@ -1621,6 +1621,9 @@ async def _ruv_seed_morpho_like_position(conn: asyncpg.Connection, *, prime_id: 
 #   * FR_PROXY_DISTANCE         donors on both sides at different distances ->
 #                               the closer one wins regardless of side
 #   * FR_PROXY_TIE              donors equidistant -> the at-or-before one wins
+#   * FR_PROXY_SAME_BLOCK       two donors in the flow's own block -> the higher
+#                               log_index wins (it carries the LOWER ratio, so a
+#                               "pick the max ratio" shortcut would fail)
 #   * FR_PROXY_MIXED            ratio in + ratio out + legacy in + sweep, one
 #                               bucket; the legacy row borrows the out row's
 #                               ratio (nearest at-or-before)
@@ -1639,6 +1642,7 @@ FR_PROXY_ATOKEN = "8e" * 20
 FR_PROXY_DONOR_DIVERGENT = "9e" * 20
 FR_PROXY_DISTANCE = "ae" * 20
 FR_PROXY_TIE = "be" * 20
+FR_PROXY_SAME_BLOCK = "ce" * 20
 _FR_PROXY_DONOR = "fe" * 20
 
 _FR_VAULT_HEX = "97" * 20
@@ -1718,6 +1722,13 @@ FR_TIE_BEFORE_DONOR_BALANCE = Decimal("100")
 FR_TIE_BEFORE_DONOR_UNDERLYING_VALUE = Decimal("110")
 FR_TIE_AFTER_DONOR_BALANCE = Decimal("100")
 FR_TIE_AFTER_DONOR_UNDERLYING_VALUE = Decimal("130")
+FR_SAME_BLOCK_TX_AMOUNT = Decimal("80")
+FR_SAME_BLOCK_BALANCE = Decimal("600")
+FR_SAME_BLOCK = 9950
+FR_SAME_BLOCK_LOW_LOG_DONOR_BALANCE = Decimal("100")
+FR_SAME_BLOCK_LOW_LOG_DONOR_UNDERLYING_VALUE = Decimal("150")
+FR_SAME_BLOCK_HIGH_LOG_DONOR_BALANCE = Decimal("100")
+FR_SAME_BLOCK_HIGH_LOG_DONOR_UNDERLYING_VALUE = Decimal("120")
 
 # Mixed bucket: both own-ratio rows sit at the same 1.17 share ratio; the
 # legacy row borrows the out row's ratio (nearest at-or-before, one block).
@@ -1783,6 +1794,7 @@ async def seed_flow_share_ratio_activity(db_url: str) -> None:
             donor_div_token = await receipt("d9" * 20, "frVaultDonorDiv")
             distance_token = await receipt("da" * 20, "frVaultDistance")
             tie_token = await receipt("db" * 20, "frVaultTie")
+            same_block_token = await receipt("dd" * 20, "frVaultSameBlock")
             mixed_token = await receipt("dc" * 20, "frVaultMixed")
 
             donor = _FR_PROXY_DONOR
@@ -1917,6 +1929,16 @@ async def seed_flow_share_ratio_activity(db_url: str) -> None:
                 ),
                 (tie_token, FR_PROXY_TIE, "in", FR_TIE_TX_AMOUNT, FR_TIE_BALANCE, None, None, 9900),
                 (
+                    same_block_token,
+                    FR_PROXY_SAME_BLOCK,
+                    "in",
+                    FR_SAME_BLOCK_TX_AMOUNT,
+                    FR_SAME_BLOCK_BALANCE,
+                    None,
+                    None,
+                    FR_SAME_BLOCK,
+                ),
+                (
                     tie_token,
                     donor,
                     "sweep",
@@ -2001,6 +2023,27 @@ async def seed_flow_share_ratio_activity(db_url: str) -> None:
                     underlying_token_id=underlying_token_id,
                     created_at=FR_BUCKET_TS,
                     tx_amount=tx_amount,
+                )
+            # Same-block donors for FR_PROXY_SAME_BLOCK: identical block, differing
+            # log_index, so only the log_index tiebreak separates them.
+            for log_index, balance, underlying_value in (
+                (3, FR_SAME_BLOCK_LOW_LOG_DONOR_BALANCE, FR_SAME_BLOCK_LOW_LOG_DONOR_UNDERLYING_VALUE),
+                (7, FR_SAME_BLOCK_HIGH_LOG_DONOR_BALANCE, FR_SAME_BLOCK_HIGH_LOG_DONOR_UNDERLYING_VALUE),
+            ):
+                await insert_allocation_position(
+                    conn,
+                    token_id=same_block_token,
+                    prime_id=prime_id,
+                    proxy_hex=donor,
+                    balance=balance,
+                    block=FR_SAME_BLOCK,
+                    tx=f"{0x70 + log_index:02x}" * 32,
+                    direction="sweep",
+                    log_index=log_index,
+                    underlying_value=underlying_value,
+                    underlying_token_id=underlying_id,
+                    created_at=FR_BUCKET_TS,
+                    tx_amount=Decimal(0),
                 )
     finally:
         await conn.close()
