@@ -2,8 +2,10 @@ package s3
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -177,6 +179,22 @@ func TestArchiveReader_PingSurfacesADeniedListing(t *testing.T) {
 	if !strings.Contains(err.Error(), archiveBucket) {
 		t.Errorf("error = %v, want it to name the bucket", err)
 	}
+}
+
+// gzippedBlock is a stored block payload: the adapter reads only its first
+// kilobytes, so it must decompress a prefix rather than the whole object.
+func gzippedBlock(t *testing.T, hash string) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := fmt.Fprintf(gz, `{"hash":%q,"number":"0x1836b83"}`, hash); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	return buf.Bytes()
 }
 
 // objectServer answers a ranged GET from stored bodies, recording the ranges and

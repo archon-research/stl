@@ -172,9 +172,9 @@ func TestRun_StampsTheBlockVersionTheArchiveHolds(t *testing.T) {
 			t.Errorf("adapter_state at block %d has block_version %d, want the archived 4", state.BlockNumber, state.BlockVersion)
 		}
 	}
-	want := []blockRef{{number: int64(addAdapterBlock), hash: logBlockHash}, {number: headBlock, hash: head.Hash()}}
+	want := []blockRef{{number: headBlock, hash: head.Hash()}, {number: int64(addAdapterBlock), hash: logBlockHash}}
 	if !slices.Equal(h.versions.asked, want) {
-		t.Errorf("resolved %v, want the replayed log's block and the pinned head %v", h.versions.asked, want)
+		t.Errorf("resolved %v, want the pinned head and then the replayed log's block %v", h.versions.asked, want)
 	}
 }
 
@@ -200,6 +200,38 @@ func TestRun_StopsWhenTheArchiveCannotResolveABlockVersion(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "holds another block") {
 		t.Errorf("error = %v, want it to carry the archive's own verdict", err)
+	}
+	if len(h.adapters) != 0 || len(h.adapterStates) != 0 {
+		t.Errorf("wrote %d observations and %d snapshots, want nothing", len(h.adapters), len(h.adapterStates))
+	}
+}
+
+// TestRun_StopsWhenAReplayedBlockHasNoResolvableVersion: the head resolving says nothing
+// about the two million blocks below it, so a hole anywhere in the swept range stops the
+// replay at that log rather than stamping a guess for the block it belongs to.
+func TestRun_StopsWhenAReplayedBlockHasNoResolvableVersion(t *testing.T) {
+	h := newBootstrapHarness(t)
+
+	const headBlock = int64(24_000_000)
+	const addAdapterBlock = uint64(23_400_000)
+	h.versions.errAt = map[int64]error{
+		int64(addAdapterBlock): errors.New("the raw archive identifies no block at that height"),
+	}
+
+	head := h.chain.setFinalizedHead(headBlock, 1_770_000_000)
+	logBlockHash := h.chain.addBlock(addAdapterBlock, 1_760_000_000)
+	h.chain.logs = []ethtypes.Log{h.addAdapterLog(addAdapterBlock, logBlockHash, 7)}
+	h.wireAdapterReads(head.Hash(), big.NewInt(4242))
+
+	err := h.service.Run(context.Background())
+
+	if err == nil {
+		t.Fatal("a log whose block has no archived version must fail the run")
+	}
+	for _, want := range []string{"identifies no block", "block=23400000"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to name %q", err, want)
+		}
 	}
 	if len(h.adapters) != 0 || len(h.adapterStates) != 0 {
 		t.Errorf("wrote %d observations and %d snapshots, want nothing", len(h.adapters), len(h.adapterStates))
@@ -1067,8 +1099,14 @@ func (r *recordingReplayer) ReplayMetaMorphoLog(_ context.Context, log shared.Lo
 // every height and recording the blocks it was asked about.
 type fakeBlockVersionResolver struct {
 	version int
-	err     error
-	asked   []blockRef
+	// err fails every height; errAt fails only the heights it names.
+	err   error
+	errAt map[int64]error
+	asked []blockRef
+}
+
+func (f *fakeBlockVersionResolver) Summary() outbound.ResolvedVersions {
+	return outbound.ResolvedVersions{Heights: len(f.asked)}
 }
 
 type blockRef struct {
@@ -1078,6 +1116,9 @@ type blockRef struct {
 
 func (f *fakeBlockVersionResolver) ResolveBlockVersion(_ context.Context, blockNumber int64, blockHash common.Hash) (int, error) {
 	f.asked = append(f.asked, blockRef{number: blockNumber, hash: blockHash})
+	if err := f.errAt[blockNumber]; err != nil {
+		return 0, err
+	}
 	if f.err != nil {
 		return 0, f.err
 	}

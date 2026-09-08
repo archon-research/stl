@@ -166,9 +166,17 @@ func NewService(config Config, chain ChainReader, replay V2Replayer, progress Pr
 // Run performs one complete bootstrap pass. It is the body of the Temporal
 // activity, and is safe to invoke repeatedly.
 func (s *Service) Run(ctx context.Context) error {
+	defer s.logResolvedBlockVersions()
+
 	head, err := s.pinFinalizedHead(ctx)
 	if err != nil {
 		return err
+	}
+	// Resolved here rather than where the seed uses it: an archive that cannot answer
+	// for the head fails the run in seconds instead of after the whole replay.
+	head.version, err = s.versions.ResolveBlockVersion(ctx, head.number, head.hash)
+	if err != nil {
+		return fmt.Errorf("resolving the block version of the pinned head %d: %w", head.number, err)
 	}
 	scope, err := s.loadV2Vaults(ctx, head)
 	if err != nil {
@@ -198,6 +206,25 @@ func (s *Service) Run(ctx context.Context) error {
 	return nil
 }
 
+// loggedCorrectedHeights bounds the list a run closes with: an era-wide replay can
+// correct more heights than one log line should carry, and the count still names them all.
+const loggedCorrectedHeights = 20
+
+// logResolvedBlockVersions closes the run with what the archive answered, deferred so a
+// failed run reports it too. A replay that stamped corrected versions is otherwise
+// indistinguishable from one that stamped 0 everywhere, on any run.
+func (s *Service) logResolvedBlockVersions() {
+	summary := s.versions.Summary()
+	s.logger.Info("block versions resolved from the raw archive",
+		"heights", summary.Heights,
+		"correctedHeights", len(summary.Corrected),
+		"corrected", firstHeights(summary.Corrected))
+}
+
+func firstHeights(heights []int64) []int64 {
+	return heights[:min(len(heights), loggedCorrectedHeights)]
+}
+
 // emptyScopeError explains a run with nothing in scope. A repair job that heals
 // nothing must not report success — it is only ever triggered because V2 vaults
 // are known to be missing rows, so it is the one outcome nobody would notice if
@@ -223,6 +250,7 @@ type pinnedBlock struct {
 	number    int64
 	hash      common.Hash
 	timestamp time.Time
+	version   int
 }
 
 // pinFinalizedHead resolves the run's anchor block. Finalized rather than
@@ -315,14 +343,9 @@ func (s *Service) loadV2Vaults(ctx context.Context, head pinnedBlock) (v2VaultSc
 // pill in a repair job. The run still fails, naming every vault it could not
 // seed: healing as much as possible is the point, hiding a hole is not.
 func (s *Service) seedAdapterState(ctx context.Context, vaults []common.Address, head pinnedBlock) error {
-	headVersion, err := s.versions.ResolveBlockVersion(ctx, head.number, head.hash)
-	if err != nil {
-		return fmt.Errorf("resolving the block version of the pinned head %d: %w", head.number, err)
-	}
-
 	var failures []error
 	for i, vault := range vaults {
-		if err := s.replay.SeedV2VaultAdapters(ctx, vault, head.number, head.hash, headVersion, head.timestamp); err != nil {
+		if err := s.replay.SeedV2VaultAdapters(ctx, vault, head.number, head.hash, head.version, head.timestamp); err != nil {
 			wrapped := fmt.Errorf("seeding adapters for vault %s at block %d: %w", vault.Hex(), head.number, err)
 			// A cancelled run fails every remaining vault identically, so
 			// collecting those would bury the cause under one error per vault. The

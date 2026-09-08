@@ -94,6 +94,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
+	"github.com/archon-research/stl/stl-verify/internal/services/blockversion"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_v2_bootstrap"
 )
@@ -267,7 +268,7 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies, progress morph
 // worker writes and the morpho-vault-backfill replays from, under the same variable
 // name — for the block_version each replayed row is stamped with. Read only; S3 access
 // comes from this Deployment's EKS Pod Identity association, granted in the infra repo.
-func newBlockVersionResolver(ctx context.Context, logger *slog.Logger) (*s3adapter.BlockVersionResolver, error) {
+func newBlockVersionResolver(ctx context.Context, logger *slog.Logger) (*blockversion.Resolver, error) {
 	bucket, err := env.Require("S3_BUCKET")
 	if err != nil {
 		return nil, err
@@ -276,7 +277,8 @@ func newBlockVersionResolver(ctx context.Context, logger *slog.Logger) (*s3adapt
 	if err != nil {
 		return nil, fmt.Errorf("loading AWS config: %w", err)
 	}
-	return s3adapter.NewBlockVersionResolver(s3adapter.NewReaderFromEnv(awsCfg, logger), bucket), nil
+	archive := s3adapter.NewArchiveReader(s3adapter.NewReaderFromEnv(awsCfg, logger), bucket)
+	return blockversion.NewResolver(archive, "s3://"+bucket), nil
 }
 
 // buildReplayService wires the morpho-indexer service in its replay

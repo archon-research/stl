@@ -1,0 +1,120 @@
+// Package blockversion answers which block_version a height was indexed under, for a
+// replay that reads its events from a node and so carries no version of its own.
+//
+// The rule is the maintainer-set highest-version-wins one every read of the raw buckets
+// uses — stated in full on the morpho-vault-backfill's listHighestVersionReceipts, which
+// resolves the same version from the key it replays. The archive is asked, rather than
+// block_states, because it is the same source a replay of the stored payload would use,
+// and because it can also prove the version it names speaks for the block being replayed.
+package blockversion
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+
+	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+)
+
+var _ outbound.BlockVersionResolver = (*Resolver)(nil)
+
+// ErrHeightNotArchived marks a height the archive cannot answer for: it holds no object
+// there, or none of the objects it holds identifies a block. Either way the archive is
+// what has to be repaired — by the republisher or the bulk downloader — before a replay
+// of that height can carry the version live indexing used.
+var ErrHeightNotArchived = errors.New("the raw archive identifies no block at that height")
+
+// ErrArchivedBlockMismatch marks an archive that holds a DIFFERENT block at the height
+// being replayed: an orphaned fork kept past its reorg, the ARCT-379 hole shape. Its
+// version speaks for that block, not for the canonical one, so a run stops here rather
+// than stamp rows with a version no canonical block was archived under.
+var ErrArchivedBlockMismatch = errors.New("the raw archive holds another block at that height")
+
+// Resolver answers from the raw archive, and proves the archive holds the block being
+// asked about before it answers.
+type Resolver struct {
+	archive     outbound.ArchiveReader
+	archiveName string
+
+	mu        sync.Mutex
+	resolved  map[int64]archivedBlock
+	corrected []int64
+}
+
+// archivedBlock is what the archive holds at one height: its top version, and the block
+// that version turned out to identify.
+type archivedBlock struct {
+	version int
+	hash    common.Hash
+}
+
+// NewResolver takes the archive to ask and the name to call it in errors and logs — the
+// bucket URL for the S3 one, so an operator is told what to repair.
+func NewResolver(archive outbound.ArchiveReader, archiveName string) *Resolver {
+	return &Resolver{
+		archive:     archive,
+		archiveName: archiveName,
+		resolved:    map[int64]archivedBlock{},
+	}
+}
+
+func (r *Resolver) ResolveBlockVersion(ctx context.Context, blockNumber int64, blockHash common.Hash) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	archived, err := r.archivedBlock(ctx, blockNumber)
+	if err != nil {
+		return 0, err
+	}
+	if archived.hash != blockHash {
+		return 0, fmt.Errorf("block %d version %d in %s holds %s, replaying %s: %w",
+			blockNumber, archived.version, r.archiveName, archived.hash.Hex(), blockHash.Hex(), ErrArchivedBlockMismatch)
+	}
+	return archived.version, nil
+}
+
+func (r *Resolver) Summary() outbound.ResolvedVersions {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return outbound.ResolvedVersions{Heights: len(r.resolved), Corrected: append([]int64(nil), r.corrected...)}
+}
+
+// archivedBlock reads the archive once per height: every log of one block asks the same
+// question, and the run asks again for the head it seeds at.
+func (r *Resolver) archivedBlock(ctx context.Context, blockNumber int64) (archivedBlock, error) {
+	if known, memoized := r.resolved[blockNumber]; memoized {
+		return known, nil
+	}
+
+	version, found, err := r.archive.HighestVersion(ctx, blockNumber)
+	if err != nil {
+		return archivedBlock{}, fmt.Errorf("reading the archived versions of block %d: %w", blockNumber, err)
+	}
+	if !found {
+		return archivedBlock{}, fmt.Errorf("block %d in %s: %w", blockNumber, r.archiveName, ErrHeightNotArchived)
+	}
+
+	hash, found, err := r.archive.BlockHashAt(ctx, blockNumber, version)
+	if err != nil {
+		return archivedBlock{}, fmt.Errorf("reading block %d at version %d: %w", blockNumber, version, err)
+	}
+	if !found {
+		return archivedBlock{}, fmt.Errorf("block %d version %d in %s carries no block hash: %w",
+			blockNumber, version, r.archiveName, ErrHeightNotArchived)
+	}
+
+	block := archivedBlock{version: version, hash: common.HexToHash(hash)}
+	r.remember(blockNumber, block)
+	return block, nil
+}
+
+func (r *Resolver) remember(blockNumber int64, block archivedBlock) {
+	r.resolved[blockNumber] = block
+	if block.version > 0 {
+		r.corrected = append(r.corrected, blockNumber)
+	}
+}
