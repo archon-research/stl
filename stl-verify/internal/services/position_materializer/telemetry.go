@@ -51,11 +51,11 @@ func (t *Telemetry) RecordRun(ctx context.Context, view, status string, changed 
 		return
 	}
 	attrs := metric.WithAttributes(
-		attribute.String("view", view),
+		attribute.String("materializer", view),
 		attribute.String("status", status),
 	)
 	t.projectionRuns.Add(ctx, 1, attrs)
 	if changed > 0 {
-		t.rowsChanged.Add(ctx, changed, metric.WithAttributes(attribute.String("view", view)))
+		t.rowsChanged.Add(ctx, changed, metric.WithAttributes(attribute.String("materializer", view)))
 	}
 }

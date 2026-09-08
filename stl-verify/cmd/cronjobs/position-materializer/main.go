@@ -1,7 +1,7 @@
 // Package main implements a Temporal cronjob worker that materializes the
 // position projections (VEC-402). On each scheduled run it calls the shared
 // materialize_position_projection() database function once per configured
-// projection view; contract validation, the recency guard, and the
+// projection through its materialize_<projection>() wrapper; contract validation, the recency guard, and the
 // classification upsert live in that function.
 //
 // The write path is the full-projection upsert, so the first scheduled run is
@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"syscall"
 
@@ -46,16 +47,20 @@ func run() int {
 		slog.Error("position-materializer startup failed: missing configuration", "error", err)
 		return 1
 	}
-	// The projection list is explicit configuration, never discovery: a view is
-	// materialized because an operator listed it, so a stray contract-shaped view
-	// can never be picked up by accident (the per-view disjointness contract makes
+	// The projection list is explicit configuration, never discovery: a projection is
+	// materialized because an operator listed its wrapper, so a stray contract-shaped
+	// view can never be picked up by accident (the per-view disjointness contract makes
 	// an accidental extra writer a correctness hazard, not just noise).
 	projectionsRaw, err := env.Require("POSITION_PROJECTIONS")
 	if err != nil {
 		slog.Error("position-materializer startup failed: missing configuration", "error", err)
 		return 1
 	}
-	views := splitProjections(projectionsRaw)
+	materializers, err := parseProjections(projectionsRaw)
+	if err != nil {
+		slog.Error("position-materializer startup failed: bad configuration", "env", "POSITION_PROJECTIONS", "error", err)
+		return 1
+	}
 
 	serviceName := env.Get("SERVICE_NAME", "position-materializer")
 
@@ -68,7 +73,7 @@ func run() int {
 		IntervalOffsetEnv: "MATERIALIZE_SCHEDULE_OFFSET",
 		OpenDatabase:      postgres.PoolOpener(postgres.DefaultDBConfig(dbURL)),
 		Setup: func(ctx context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
-			return setupRunner(ctx, deps, views)
+			return setupRunner(ctx, deps, materializers)
 		},
 	}); err != nil {
 		slog.Error("position-materializer cronjob exited with error", "error", err)
@@ -88,21 +93,34 @@ func init() {
 	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
 }
 
-// splitProjections parses the comma-separated POSITION_PROJECTIONS value,
-// trimming whitespace and dropping empty segments (a trailing comma is not a
-// blank view). Duplicate or genuinely blank entries are rejected downstream by
-// the service constructor, which fails startup loudly.
-func splitProjections(raw string) []string {
-	var views []string
+// parseProjections parses the comma-separated POSITION_PROJECTIONS value into
+// materializer function names: one `materialize_<projection>()` wrapper per entry,
+// so each projection's own pre-flight refusals run under the scheduler. Entries
+// are validated as plain identifiers with the materialize_ prefix; anything else
+// is a configuration error, never a value handed to SQL.
+func parseProjections(raw string) ([]string, error) {
+	var materializers []string
 	for part := range strings.SplitSeq(raw, ",") {
-		if v := strings.TrimSpace(part); v != "" {
-			views = append(views, v)
+		v := strings.TrimSpace(part)
+		if v == "" {
+			continue
 		}
+		if !materializerName.MatchString(v) {
+			return nil, fmt.Errorf("entry %q is not a materialize_<projection> function name", v)
+		}
+		if v == sharedMaterializer {
+			return nil, fmt.Errorf("entry %q is the shared function; list the per-projection wrappers", v)
+		}
+		materializers = append(materializers, v)
 	}
-	return views
+	return materializers, nil
 }
 
-func setupRunner(ctx context.Context, deps temporal.Dependencies, views []string) (temporal.Runner, error) {
+var materializerName = regexp.MustCompile(`^materialize_[a-z][a-z0-9_]*$`)
+
+const sharedMaterializer = "materialize_position_projection"
+
+func setupRunner(ctx context.Context, deps temporal.Dependencies, materializers []string) (temporal.Runner, error) {
 	telemetry, err := position_materializer.NewTelemetry()
 	if err != nil {
 		return nil, fmt.Errorf("creating position materializer telemetry: %w", err)
@@ -118,7 +136,7 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies, views []string
 
 	repo := postgres.NewPositionMaterializerRepository(deps.Pool, deps.Logger)
 
-	service, err := position_materializer.NewService(views, repo, int(buildReg.BuildID()), deps.Logger, telemetry)
+	service, err := position_materializer.NewService(materializers, repo, int(buildReg.BuildID()), deps.Logger, telemetry)
 	if err != nil {
 		return nil, fmt.Errorf("creating position materializer service: %w", err)
 	}

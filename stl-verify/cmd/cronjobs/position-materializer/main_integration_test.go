@@ -30,7 +30,8 @@ func TestMain(m *testing.M) {
 // position_state and the shared materialize_position_projection function),
 // registers a contract-conforming projection view, then wires the worker exactly
 // as main() does via setupRunner and runs it end to end: the run appends the
-// observation stamped with the resolved build_id, and a second run is a clean
+// observation stamped with the resolved build_id, a wrapper's refusal surfaces without starving the
+// others, and a second run is a clean
 // no-op. Depends on the position_state spine migration (#625) being on main; red
 // until it lands.
 func TestPositionMaterializer_RunOnce(t *testing.T) {
@@ -46,6 +47,18 @@ func TestPositionMaterializer_RunOnce(t *testing.T) {
 		'2026-01-01 00:00+00'::timestamptz AS block_timestamp`); err != nil {
 		t.Fatalf("create projection view: %v", err)
 	}
+	// The wrappers the runner calls: one delegates to the shared function like every real projection;
+	// the other refuses, the way materialize_aave_lending refuses an unmapped reserve. The refusal must
+	// surface through the runner and must not stop the other projection from materializing.
+	if _, err := pool.Exec(ctx, `
+		CREATE FUNCTION materialize_itest(p_build_id integer DEFAULT 0) RETURNS bigint LANGUAGE sql AS $fn$
+			SELECT materialize_position_projection('position_itest'::regclass, p_build_id);
+		$fn$;
+		CREATE FUNCTION materialize_itest_refusing(p_build_id integer DEFAULT 0) RETURNS bigint LANGUAGE plpgsql AS $fn$
+			BEGIN RAISE EXCEPTION 'materialize_itest_refusing: unresolved inputs, refusing to run: reserve 7'; END
+		$fn$;`); err != nil {
+		t.Fatalf("create materializer wrappers: %v", err)
+	}
 
 	// setupRunner registers a build, which needs a git hash. `go test` does not stamp VCS info, so
 	// without this the test fails before it reaches anything it asserts -- in CI as well as locally.
@@ -53,13 +66,17 @@ func TestPositionMaterializer_RunOnce(t *testing.T) {
 	t.Setenv("BUILD_GIT_HASH", "integration-test")
 
 	runner, err := setupRunner(ctx, temporal.Dependencies{Pool: pool, Logger: slog.Default()},
-		[]string{"position_itest"})
+		[]string{"materialize_itest_refusing", "materialize_itest"})
 	if err != nil {
 		t.Fatalf("setupRunner: %v", err)
 	}
 
-	if err := runner.Run(ctx); err != nil {
-		t.Fatalf("first run: %v", err)
+	err = runner.Run(ctx)
+	if err == nil {
+		t.Fatal("first run: the refusing wrapper's error did not surface")
+	}
+	if !strings.Contains(err.Error(), "refusing to run: reserve 7") {
+		t.Errorf("first run error %q does not carry the wrapper's refusal", err.Error())
 	}
 	// The observation is appended, stamped with the build the registry resolved for
 	// this binary (non-zero: buildregistry inserts the git hash on first sight, and
@@ -81,9 +98,11 @@ func TestPositionMaterializer_RunOnce(t *testing.T) {
 		t.Errorf("projection = %q; want public.position_itest", projection)
 	}
 
-	// The rerun re-derives the same observation, so it must append nothing.
-	if err := runner.Run(ctx); err != nil {
-		t.Fatalf("second run (idempotent rerun): %v", err)
+	// The rerun re-derives the same observation, so it must append nothing; the refusing wrapper
+	// refuses again, and again without starving the other projection.
+	err = runner.Run(ctx)
+	if err == nil || !strings.Contains(err.Error(), "refusing to run: reserve 7") {
+		t.Fatalf("second run: got %v; want the wrapper's refusal again", err)
 	}
 	var rows int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state
@@ -94,14 +113,14 @@ func TestPositionMaterializer_RunOnce(t *testing.T) {
 		t.Errorf("observations after an idempotent rerun = %d; want 1", rows)
 	}
 
-	// A misconfigured view name must fail the run loudly (regclass), not skip.
+	// A misconfigured entry must fail the run loudly as an unknown function, not skip.
 	badRunner, err := setupRunner(ctx, temporal.Dependencies{Pool: pool, Logger: slog.Default()},
-		[]string{"position_itest", "no_such_view"})
+		[]string{"materialize_itest", "materialize_no_such"})
 	if err != nil {
 		t.Fatalf("setupRunner(bad): %v", err)
 	}
 	err = badRunner.Run(ctx)
-	if err == nil || !strings.Contains(err.Error(), "no_such_view") {
-		t.Errorf("bad view: got %v; want a loud failure naming no_such_view", err)
+	if err == nil || !strings.Contains(err.Error(), "materialize_no_such") {
+		t.Errorf("bad entry: got %v; want a loud failure naming materialize_no_such", err)
 	}
 }

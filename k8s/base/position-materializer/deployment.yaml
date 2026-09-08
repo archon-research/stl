@@ -6,7 +6,7 @@ spec:
   # Ships at 0 on purpose: the write path is the full-projection upsert, so the
   # FIRST scheduled tick re-projects and upserts every configured view's whole
   # history (it IS the bootstrap). Rollout is: apply (worker at 0) -> confirm
-  # POSITION_PROJECTIONS lists exactly the intended views -> bump to 1 in a
+  # POSITION_PROJECTIONS lists exactly the intended materializers -> bump to 1 in a
   # separate change. VectorCronjobWorkerDown is guarded on desired replicas > 0,
   # so it does not page while this is intentionally 0.
   replicas: 0
@@ -33,7 +33,7 @@ spec:
           envFrom:
             - configMapRef:
                 name: otel-config
-            # Carries POSITION_PROJECTIONS (the explicit view list) and
+            # Carries POSITION_PROJECTIONS (the explicit materialize_<projection> list) and
             # MATERIALIZE_INTERVAL; the secret carries DATABASE_URL — interim
             # credentials until the dedicated stl_materialize role (VEC-562).
             - configMapRef:

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/retry"
@@ -16,9 +17,9 @@ import (
 // outbound.PositionMaterializer.
 var _ outbound.PositionMaterializer = (*PositionMaterializerRepository)(nil)
 
-// PositionMaterializerRepository invokes the shared materializer function
-// (materialize_position_projection, VEC-402) for a projection view. The function
-// owns all correctness logic; this adapter is the call site.
+// PositionMaterializerRepository calls one per-projection materializer function
+// (materialize_<projection>, VEC-402). The function owns all correctness logic,
+// including its projection's own pre-flight refusals; this adapter is the call site.
 type PositionMaterializerRepository struct {
 	pool   *pgxpool.Pool
 	logger *slog.Logger
@@ -32,8 +33,8 @@ func NewPositionMaterializerRepository(pool *pgxpool.Pool, logger *slog.Logger) 
 	return &PositionMaterializerRepository{pool: pool, logger: logger}
 }
 
-// Materialize runs materialize_position_projection for one view, retrying
-// transient transaction errors.
+// Materialize calls one materializer function, retrying transient transaction
+// errors.
 //
 // position_state carries compression and S3 tiering policies, and both are
 // chunk-level actors taking AccessExclusiveLock per chunk. A policy job running
@@ -52,7 +53,7 @@ func NewPositionMaterializerRepository(pool *pgxpool.Pool, logger *slog.Logger) 
 // chunk lock for longer than that (~900ms observed for one run_job over 100
 // chunks). If that proves too short in practice the values want raising, but not
 // by guesswork ahead of a measurement from a real runner.
-func (r *PositionMaterializerRepository) Materialize(ctx context.Context, view string, buildID int) (int64, error) {
+func (r *PositionMaterializerRepository) Materialize(ctx context.Context, materializer string, buildID int) (int64, error) {
 	cfg := retry.Config{
 		MaxRetries:     10,
 		InitialBackoff: 1 * time.Millisecond,
@@ -64,27 +65,26 @@ func (r *PositionMaterializerRepository) Materialize(ctx context.Context, view s
 	onRetry := func(attempt int, err error, backoff time.Duration) {
 		r.logger.Debug("retryable tx error, retrying materialization",
 			"attempt", attempt,
-			"view", view,
+			"materializer", materializer,
 			"build_id", buildID,
 			"backoff", backoff)
 	}
 
 	return retry.Do(ctx, cfg, isRetryableTxError, onRetry, func() (int64, error) {
-		return r.materializeOnce(ctx, view, buildID)
+		return r.materializeOnce(ctx, materializer, buildID)
 	})
 }
 
 // materializeOnce is a single materialization attempt. The SELECT is its own
-// transaction, honoring the one-view-per-transaction contract documented on the
-// function (per-view advisory xact lock). The regclass cast fails loudly on a
-// view name that does not resolve to a relation, so a misconfigured projection
-// list cannot be silently skipped.
-func (r *PositionMaterializerRepository) materializeOnce(ctx context.Context, view string, buildID int) (int64, error) {
+// transaction, honoring the one-projection-per-transaction contract documented on
+// the shared function (per-view advisory xact lock). The function name is quoted as
+// an identifier, so a misconfigured entry fails loudly as an unknown function and
+// cannot be silently skipped or read as SQL.
+func (r *PositionMaterializerRepository) materializeOnce(ctx context.Context, materializer string, buildID int) (int64, error) {
 	var changed int64
-	if err := r.pool.QueryRow(ctx,
-		`SELECT materialize_position_projection($1::regclass, $2)`, view, buildID,
-	).Scan(&changed); err != nil {
-		return 0, fmt.Errorf("materializing projection %s: %w", view, err)
+	q := fmt.Sprintf(`SELECT %s($1)`, pgx.Identifier{materializer}.Sanitize())
+	if err := r.pool.QueryRow(ctx, q, buildID).Scan(&changed); err != nil {
+		return 0, fmt.Errorf("running %s: %w", materializer, err)
 	}
 	return changed, nil
 }

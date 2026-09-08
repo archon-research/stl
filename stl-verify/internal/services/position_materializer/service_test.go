@@ -28,7 +28,7 @@ func TestNewService_Validation(t *testing.T) {
 		want    string
 	}{
 		{"nil materializer", []string{"v"}, nil, 1, "materializer is required"},
-		{"empty views", nil, ok, 1, "no projection views configured"},
+		{"empty views", nil, ok, 1, "no projection materializers configured"},
 		{"blank view entry", []string{"a", "  "}, ok, 1, "blank entry"},
 		{"duplicate view", []string{"a", "b", "a"}, ok, 1, "configured twice"},
 		{"negative buildID", []string{"a"}, ok, -1, "must not be negative"},
@@ -91,8 +91,8 @@ func TestRunOnce_OneFailureDoesNotStarveTheRest(t *testing.T) {
 	if runErr == nil {
 		t.Fatal("RunOnce = nil; want the vb failure surfaced")
 	}
-	if !errors.Is(runErr, boom) || !strings.Contains(runErr.Error(), "view vb") {
-		t.Errorf("RunOnce error = %v; want it to wrap the vb failure and name the view", runErr)
+	if !errors.Is(runErr, boom) || !strings.Contains(runErr.Error(), "materializer vb") {
+		t.Errorf("RunOnce error = %v; want it to wrap the vb failure and name the materializer", runErr)
 	}
 	if got := strings.Join(mat.calls, ","); got != "va,vb,vc" {
 		t.Errorf("calls = %s; want all three views attempted despite vb failing", got)

@@ -1,12 +1,13 @@
 # Runbook — position-materializer (VEC-402)
 
-The cronjob calls `materialize_position_projection(view, build_id)` once per configured projection
-view. Each call validates the view against the `position_state` column contract, evaluates it once
-into a temp table, runs four checks, and appends the observations it has not already stored. It writes
-no classification.
+The cronjob calls one per-projection materializer function (`materialize_morpho_market(build_id)`,
+`materialize_aave_lending(build_id)`, ...) per configured entry. Each wrapper runs its projection's own
+pre-flight checks, then the shared `materialize_position_projection` validates the view against the
+`position_state` column contract, evaluates it once into a temp table, runs its checks, and appends the
+observations it has not already stored.
 
-Configuration: `MATERIALIZE_PROJECTIONS` (comma-separated view names — explicit, never discovery),
-`MATERIALIZE_INTERVAL` (default `1h`), `DATABASE_URL`.
+Configuration: `POSITION_PROJECTIONS` (comma-separated `materialize_<projection>` function names —
+explicit, never discovery), `MATERIALIZE_INTERVAL` (default `1h`), `DATABASE_URL`.
 
 Two properties make almost every incident low-risk:
 
@@ -49,15 +50,15 @@ whole history every time.
 
 3. If the sources are current but nothing lands, run one projection by hand and read the count:
    ```sql
-   SELECT materialize_position_projection('position_morpho_vault'::regclass, 0);
+   SELECT materialize_morpho_vault(0);
    ```
    A return of `0` with fresh sources means the view is filtering everything out — inspect the view's
    joins. A raise names the exact problem; see the failure table below.
 
-4. Check the projection list is what you expect. An operator setting `MATERIALIZE_PROJECTIONS` to a
-   single view, or to a view that legitimately has no new rows, produces exactly this signal:
+4. Check the projection list is what you expect. An operator setting `POSITION_PROJECTIONS` to a
+   single entry, or to a view that legitimately has no new rows, produces exactly this signal:
    ```bash
-   kubectl -n vector get cronjob position-materializer -o yaml | grep -A2 MATERIALIZE_PROJECTIONS
+   kubectl -n vector get cronjob position-materializer -o yaml | grep -A2 POSITION_PROJECTIONS
    ```
 
 **Resolution.** Fix the upstream indexer or the view, then let the next scheduled run catch up. No
@@ -78,7 +79,7 @@ view so you do not have to find it in logs.
 | `violates the position_state column contract: X (is Y / MISSING)` | the view lost a column or changed its type | fix the view; the contract is the ten columns in the migration header |
 | `double-emits a logical observation key` | the view produces two rows for one `(position, block, block_version, processing_version)` | dedupe the view; usually a join fanning out |
 | `emits position_ids owned by another projection` | two views claim the same position — their `instrument_key` forms disagree, or the fan-out overlaps | decide which view owns it; do **not** work around it, this is the guard doing its job |
-| `p_view (oid N) does not name an existing relation` | a configured view was dropped, or the list names something that is not a relation | fix `MATERIALIZE_PROJECTIONS`, or restore the view |
+| `p_view (oid N) does not name an existing relation` | a configured view was dropped, or the list names something that is not a relation | fix `POSITION_PROJECTIONS`, or restore the view |
 
 **A warning rather than an error** — `re-emits stored observations with a changed block_timestamp` or
 `changed quantity` — is not a failure. The stored row is kept and nothing is rewritten. It means the

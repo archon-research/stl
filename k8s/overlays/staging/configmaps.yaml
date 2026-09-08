@@ -734,3 +734,18 @@ data:
   # full 9-market tick; the N_MC=10000 default peaks at ~8.0 GiB on one
   # market alone). Raise only together with the deployment's memory limit.
   CORE_MODEL_N_MC: "100"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: position-materializer
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  # The schedule lives in Temporal state; the worker reconciles a changed
+  # interval into it on startup, so a redeploy is enough (stl-verify/AGENTS.md).
+  MATERIALIZE_INTERVAL: "1h"
+  # Explicit list of materialize_<projection>() wrappers, never discovery. Each
+  # wrapper runs its projection's own pre-flight refusals before the shared
+  # materializer appends to position_state (docs/runbooks/vector-position-materializer.md).
+  POSITION_PROJECTIONS: "materialize_morpho_market,materialize_morpho_vault,materialize_sky_prime_debt,materialize_aave_lending"
