@@ -29,6 +29,21 @@ Governed tables, with optional per-table governance (`type`, `owner`, `transform
 
 `transform_defer` (optional, on a `raw_pipeline` table) is a reason string marking a transform target that is intentionally not built yet (a later bucket), e.g. `"VEC-494: bucket 3 (no natural PK)"`. `CheckTransformCoverage` enforces that every `raw_pipeline` table is either **built** (has a `transformed._sources` row) or **deferred** (`transform_defer` set), never neither and never both; and that every `_sources` row maps back to a governed `raw_pipeline` table; it also flags a `transform_defer` left on a non-`raw_pipeline` table (so a defer reason cannot linger after a table's `type` changes). So a new `raw_pipeline` table cannot be added and left silently un-transformed. The integration test reads the live `_sources` rows.
 
+The combined master (VEC-617, ADR-0005) is **governed, not ignored**, unlike the frozen
+standalone masters above: `sec_node` and `sec_edge` are `dimension`, the five governed
+vocabularies (`rel_type_vocabulary`, `weight_basis_vocabulary`, `change_reason_vocabulary`,
+`concept_class_vocabulary`, `node_status_vocabulary`) are `config`. ADR-0005 §10 requires it —
+its tables are classified here from birth so ADR-0006 §1's governance and conformance tests
+apply to them like every other governed table. Three consequences worth knowing before editing
+those entries: the store's audit spine adds canonical columns the ingest vocabulary had no name
+for (`record_id`, `ingest_xid`, `actor`, `change_reason_code`, `supersedes_record_id`,
+`content_hash`, `input_lineage`, …); `src_kinds` / `dst_kinds` are canonically `ARRAY`, which is
+what `information_schema.data_type` reports for a `text[]` column; and three entries in
+`overrides` carry the deliberate type divergences — `sec_node.id` is opaque `text` against
+canonical `id`=`int8`, and both stores' `valid_from` is a UTC `date` against canonical
+`timestamptz`, because graph validity is calendar-dated (ADR-0005 §3) and joins the block-time
+dimension at the block's UTC date.
+
 A few `maple_*` entries (`maple_ftl_loan`, `maple_ftl_loan_state`, `maple_loan_meta`, `maple_pool_meta`, `maple_sky_strategy_meta`) are intentionally left untyped for now, so the required-key pass (gated on `type`) skips them, and because `CheckTransformCoverage` only walks `raw_pipeline` tables they are outside transform coverage too until typed (the gap stays visible until then); they still get the per-column, table-coverage, and nullability checks. Typing them is pending per-table classification.
 
 ### `transforms`

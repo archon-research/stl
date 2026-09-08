@@ -65,6 +65,11 @@
       "type": "bool",
       "class": "S"
     },
+    "actor": {
+      "type": "text",
+      "class": "A",
+      "not_null": true
+    },
     "adapter_type": {
       "type": "int2",
       "class": "S"
@@ -93,6 +98,10 @@
       "type": "timestamptz",
       "class": "A",
       "semantics": "processing_time"
+    },
+    "approved_by": {
+      "type": "text",
+      "class": "A"
     },
     "apy": {
       "type": "numeric",
@@ -154,6 +163,11 @@
       "type": "numeric",
       "class": "S"
     },
+    "attrs": {
+      "type": "jsonb",
+      "class": "S",
+      "not_null": true
+    },
     "average_stable_borrow_rate": {
       "type": "numeric",
       "class": "S"
@@ -169,6 +183,11 @@
     "base_url": {
       "type": "text",
       "class": "S"
+    },
+    "basis": {
+      "type": "text",
+      "class": "R",
+      "not_null": true
     },
     "bids": {
       "type": "jsonb",
@@ -229,6 +248,11 @@
       "type": "bytea",
       "class": "R"
     },
+    "cardinality": {
+      "type": "text",
+      "class": "R",
+      "not_null": true
+    },
     "chain_id": {
       "type": "int4",
       "class": "R"
@@ -241,6 +265,11 @@
       "type": "text",
       "class": "A"
     },
+    "change_reason_code": {
+      "type": "text",
+      "class": "A",
+      "not_null": true
+    },
     "checksum": {
       "type": "text",
       "class": "S"
@@ -248,6 +277,11 @@
     "claimable_amount": {
       "type": "numeric",
       "class": "A"
+    },
+    "code": {
+      "type": "text",
+      "class": "R",
+      "not_null": true
     },
     "collateral": {
       "type": "numeric",
@@ -285,6 +319,15 @@
       "type": "timestamptz",
       "class": "A",
       "semantics": "processing_time"
+    },
+    "concept_class": {
+      "type": "text",
+      "class": "R",
+      "not_null": true
+    },
+    "content_hash": {
+      "type": "bytea",
+      "class": "A"
     },
     "contract_address": {
       "type": "bytea",
@@ -371,6 +414,16 @@
       "type": "int4",
       "class": "S"
     },
+    "derived_only": {
+      "type": "bool",
+      "class": "R",
+      "not_null": true
+    },
+    "description": {
+      "type": "text",
+      "class": "R",
+      "not_null": true
+    },
     "detected_at": {
       "type": "timestamptz",
       "class": "A",
@@ -395,6 +448,30 @@
     "drips_yield_boost": {
       "type": "numeric",
       "class": "S"
+    },
+    "dst_id": {
+      "type": "text",
+      "class": "R",
+      "not_null": true
+    },
+    "dst_kind": {
+      "type": "text",
+      "class": "R",
+      "not_null": true
+    },
+    "dst_kinds": {
+      "type": "ARRAY",
+      "class": "R",
+      "not_null": true
+    },
+    "edge_id": {
+      "type": "text",
+      "class": "D"
+    },
+    "edge_seq": {
+      "type": "int4",
+      "class": "R",
+      "not_null": true
     },
     "enabled": {
       "type": "bool",
@@ -448,6 +525,11 @@
     "external_senior_risk_capital_usd": {
       "type": "numeric",
       "class": "S"
+    },
+    "family": {
+      "type": "text",
+      "class": "R",
+      "not_null": true
     },
     "fee": {
       "type": "numeric",
@@ -539,10 +621,20 @@
       "type": "text",
       "class": "S"
     },
+    "ingest_xid": {
+      "type": "xid8",
+      "class": "A",
+      "semantics": "processing_time",
+      "not_null": true
+    },
     "ingested_at": {
       "type": "timestamptz",
       "class": "A",
       "semantics": "processing_time"
+    },
+    "input_lineage": {
+      "type": "jsonb",
+      "class": "A"
     },
     "instrument_key": {
       "type": "text",
@@ -604,6 +696,11 @@
     "is_syrup": {
       "type": "bool",
       "class": "S"
+    },
+    "is_terminal": {
+      "type": "bool",
+      "class": "R",
+      "not_null": true
     },
     "junior_risk_capital_usd": {
       "type": "numeric",
@@ -747,6 +844,11 @@
       "type": "text",
       "class": "S"
     },
+    "maturity": {
+      "type": "text",
+      "class": "R",
+      "not_null": true
+    },
     "maturity_date": {
       "type": "timestamptz",
       "class": "R",
@@ -837,6 +939,10 @@
       "type": "numeric",
       "class": "S"
     },
+    "pairs_with": {
+      "type": "text",
+      "class": "R"
+    },
     "params": {
       "type": "jsonb",
       "class": "S"
@@ -844,6 +950,11 @@
     "parent_hash": {
       "type": "text",
       "class": "S"
+    },
+    "payload": {
+      "type": "jsonb",
+      "class": "S",
+      "not_null": true
     },
     "payment_interval_days": {
       "type": "int8",
@@ -962,6 +1073,25 @@
       "class": "S",
       "semantics": "processing_time"
     },
+    "record_id": {
+      "type": "int8",
+      "class": "A",
+      "not_null": true
+    },
+    "record_type": {
+      "type": "text",
+      "class": "R",
+      "not_null": true
+    },
+    "rel_type": {
+      "type": "text",
+      "class": "R",
+      "not_null": true
+    },
+    "rel_weight": {
+      "type": "numeric",
+      "class": "S"
+    },
     "relative_cap": {
       "type": "numeric",
       "class": "S"
@@ -974,6 +1104,11 @@
       "type": "numeric",
       "class": "S"
     },
+    "requires_approval": {
+      "type": "bool",
+      "class": "R",
+      "not_null": true
+    },
     "reserve_factor": {
       "type": "numeric",
       "class": "S"
@@ -982,6 +1117,10 @@
       "type": "int8",
       "class": "S",
       "not_null": true
+    },
+    "run_id": {
+      "type": "int8",
+      "class": "A"
     },
     "scaled_balance": {
       "type": "numeric",
@@ -992,6 +1131,10 @@
       "class": "D"
     },
     "secured_party_id": {
+      "type": "text",
+      "class": "R"
+    },
+    "seed_source": {
       "type": "text",
       "class": "R"
     },
@@ -1020,6 +1163,11 @@
       "type": "int8",
       "class": "R"
     },
+    "source_system": {
+      "type": "text",
+      "class": "A",
+      "not_null": true
+    },
     "spj_utilization": {
       "type": "numeric",
       "class": "S"
@@ -1027,6 +1175,21 @@
     "spot_apy": {
       "type": "numeric",
       "class": "S"
+    },
+    "src_id": {
+      "type": "text",
+      "class": "R",
+      "not_null": true
+    },
+    "src_kind": {
+      "type": "text",
+      "class": "R",
+      "not_null": true
+    },
+    "src_kinds": {
+      "type": "ARRAY",
+      "class": "R",
+      "not_null": true
     },
     "stable_borrow_rate": {
       "type": "numeric",
@@ -1052,6 +1215,11 @@
       "type": "text",
       "class": "R"
     },
+    "status": {
+      "type": "text",
+      "class": "R",
+      "not_null": true
+    },
     "strategy_address": {
       "type": "bytea",
       "class": "S"
@@ -1059,6 +1227,10 @@
     "strategy_fee_rate": {
       "type": "numeric",
       "class": "S"
+    },
+    "supersedes_record_id": {
+      "type": "int8",
+      "class": "A"
     },
     "supply_assets": {
       "type": "numeric",
@@ -1238,6 +1410,12 @@
       "class": "A",
       "semantics": "effective_time"
     },
+    "valid_to": {
+      "type": "date",
+      "class": "A",
+      "semantics": "effective_time",
+      "not_null": true
+    },
     "variable_borrow_index": {
       "type": "numeric",
       "class": "S"
@@ -1277,6 +1455,14 @@
     "watermark": {
       "type": "int8",
       "class": "S"
+    },
+    "weight_asof_block": {
+      "type": "int8",
+      "class": "S"
+    },
+    "weight_basis": {
+      "type": "text",
+      "class": "R"
     },
     "withdrawn_assets": {
       "type": "numeric",
@@ -1354,6 +1540,14 @@
     "chain": {
       "type": "dimension",
       "owner": "infra"
+    },
+    "change_reason_vocabulary": {
+      "type": "config",
+      "owner": "refdata"
+    },
+    "concept_class_vocabulary": {
+      "type": "config",
+      "owner": "refdata"
     },
     "core_model_results": {
       "type": "model_output",
@@ -1456,6 +1650,10 @@
       "type": "raw_pipeline",
       "owner": "morpho"
     },
+    "node_status_vocabulary": {
+      "type": "config",
+      "owner": "refdata"
+    },
     "offchain_price_asset": {
       "type": "config",
       "owner": "pricing"
@@ -1544,9 +1742,21 @@
       "type": "config",
       "owner": "lending"
     },
+    "rel_type_vocabulary": {
+      "type": "config",
+      "owner": "refdata"
+    },
     "reorg_events": {
       "type": "infrastructure",
       "owner": "infra"
+    },
+    "sec_edge": {
+      "type": "dimension",
+      "owner": "refdata"
+    },
+    "sec_node": {
+      "type": "dimension",
+      "owner": "refdata"
     },
     "sparklend_reserve_data": {
       "type": "raw_pipeline",
@@ -1572,6 +1782,10 @@
     "user": {
       "type": "dimension",
       "owner": "lending"
+    },
+    "weight_basis_vocabulary": {
+      "type": "config",
+      "owner": "refdata"
     }
   },
   "transforms": [
@@ -1801,6 +2015,27 @@
       "canonical": "id",
       "accepted_type": "int4",
       "reason": "Infra surrogate key paired with build_id (int4); deliberately int4, exempt from canonical id=int8. Not flagged by the conformance check."
+    },
+    {
+      "table": "sec_node",
+      "column": "id",
+      "canonical": "id",
+      "accepted_type": "text",
+      "reason": "VEC-617: opaque kind-prefixed node id (em-/sec-/concept-/src-/acct-) per ADR-0005 §1 — house-assigned once, never derived from a public identifier, never hashed into position_id. Canonical id=int8 is the ingest layer's surrogate-key convention and does not apply to the combined master's id space."
+    },
+    {
+      "table": "sec_node",
+      "column": "valid_from",
+      "canonical": "valid_from",
+      "accepted_type": "date",
+      "reason": "VEC-617: the combined master's valid time is a UTC calendar date, half-open [valid_from, valid_to), per ADR-0005 §3 — graph validity is calendar-dated and joins the block-time dimension at the block's UTC date (§9.3). Canonical valid_from=timestamptz is the ingest layer's effective-time stamp; valid_to is canonically date, so the pair is consistent in the store."
+    },
+    {
+      "table": "sec_edge",
+      "column": "valid_from",
+      "canonical": "valid_from",
+      "accepted_type": "date",
+      "reason": "VEC-617: as sec_node.valid_from — UTC calendar date per ADR-0005 §3."
     }
   ],
   "fills": [
