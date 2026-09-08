@@ -290,6 +290,19 @@ describe('formatWadValue', () => {
     expect(formatWadValue(input)).toBe(expected);
   });
 
+  it.each([
+    ['-1500000000000000000', '-1.5'],
+    ['-1000000000000000000000000', '-1M'],
+    // Truncates to nothing, so the sign has nothing to sit on: "-0" would claim
+    // a direction the figure does not have.
+    ['-1', '0'],
+  ])(
+    'carries the sign of the negative wad %o through as %o',
+    (input, expected) => {
+      expect(formatWadValue(input)).toBe(expected);
+    },
+  );
+
   it('expands a positive exponent rather than reading only its leading digit', () => {
     expect(formatWadValue('2.5707140E+27')).toBe('2.57B');
   });
