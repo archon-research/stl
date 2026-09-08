@@ -927,13 +927,7 @@ class AllocationActivityEnvelope(
         Annotated[RawAllocationActivityEnvelope | AggregatedAllocationActivityEnvelope, Field(discriminator="mode")]
     ]
 ):
-    """Allocation activity response: raw events or aggregated time buckets.
-
-    A discriminated union on `mode` rather than one model with a union-typed
-    `data`, so the emitted schema carries the correlation the endpoint already
-    guarantees and generated clients narrow `data` from `mode` alone (VEC-686).
-    The wire format is unchanged either way.
-    """
+    """Allocation activity response: raw events or aggregated time buckets."""
 
 
 @router.get(
@@ -1078,7 +1072,7 @@ async def list_allocation_activity(
                     action_type=e.action_type,
                     tx_amount=e.tx_amount,
                     balance=e.balance,
-                    tx_hash=None if e.action_type.lower() == "sweep" else e.tx_hash,
+                    tx_hash=None if e.action_type == "sweep" else e.tx_hash,
                     log_index=e.log_index,
                     block_number=e.block_number,
                     block_version=e.block_version,

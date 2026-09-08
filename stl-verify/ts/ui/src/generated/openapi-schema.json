@@ -142,7 +142,7 @@
         "type": "object"
       },
       "AllocationActivityEnvelope": {
-        "description": "Allocation activity response: raw events or aggregated time buckets.\n\nA discriminated union on `mode` rather than one model with a union-typed\n`data`, so the emitted schema carries the correlation the endpoint already\nguarantees and generated clients narrow `data` from `mode` alone (VEC-686).\nThe wire format is unchanged either way.",
+        "description": "Allocation activity response: raw events or aggregated time buckets.",
         "discriminator": {
           "mapping": {
             "aggregated": "#/components/schemas/AggregatedAllocationActivityEnvelope",
@@ -1422,7 +1422,7 @@
         "type": "object"
       },
       "PrimeDebtEnvelope": {
-        "description": "Prime debt response: raw snapshots or aggregated time buckets.\n\nA discriminated union on `mode` rather than one model with a union-typed\n`data`, so the emitted schema carries the correlation the endpoint already\nguarantees and generated clients narrow `data` from `mode` alone (VEC-686).\nThe wire format is unchanged either way.",
+        "description": "Prime debt response: raw snapshots or aggregated time buckets.",
         "discriminator": {
           "mapping": {
             "aggregated": "#/components/schemas/AggregatedPrimeDebtEnvelope",
@@ -2201,7 +2201,7 @@
         "type": "object"
       },
       "ProtocolEventsEnvelope": {
-        "description": "Protocol events response: raw rows or aggregated time buckets.\n\nA discriminated union on `mode` rather than one model with a union-typed\n`data`, so the emitted schema carries the correlation the endpoint already\nguarantees and generated clients narrow `data` from `mode` alone (VEC-686).\nThe wire format is unchanged either way.",
+        "description": "Protocol events response: raw rows or aggregated time buckets.",
         "discriminator": {
           "mapping": {
             "aggregated": "#/components/schemas/AggregatedProtocolEventsEnvelope",

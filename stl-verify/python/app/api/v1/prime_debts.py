@@ -118,13 +118,7 @@ class AggregatedPrimeDebtEnvelope(BaseModel):
 class PrimeDebtEnvelope(
     RootModel[Annotated[RawPrimeDebtEnvelope | AggregatedPrimeDebtEnvelope, Field(discriminator="mode")]]
 ):
-    """Prime debt response: raw snapshots or aggregated time buckets.
-
-    A discriminated union on `mode` rather than one model with a union-typed
-    `data`, so the emitted schema carries the correlation the endpoint already
-    guarantees and generated clients narrow `data` from `mode` alone (VEC-686).
-    The wire format is unchanged either way.
-    """
+    """Prime debt response: raw snapshots or aggregated time buckets."""
 
 
 async def _get_prime_debt_service(engine: AsyncEngine = Depends(get_engine)) -> PrimeDebtService:

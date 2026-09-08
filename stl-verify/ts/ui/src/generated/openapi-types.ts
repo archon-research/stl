@@ -689,11 +689,6 @@ export interface components {
     /**
      * AllocationActivityEnvelope
      * @description Allocation activity response: raw events or aggregated time buckets.
-     *
-     *     A discriminated union on `mode` rather than one model with a union-typed
-     *     `data`, so the emitted schema carries the correlation the endpoint already
-     *     guarantees and generated clients narrow `data` from `mode` alone (VEC-686).
-     *     The wire format is unchanged either way.
      */
     AllocationActivityEnvelope:
       | components['schemas']['RawAllocationActivityEnvelope']
@@ -1390,11 +1385,6 @@ export interface components {
     /**
      * PrimeDebtEnvelope
      * @description Prime debt response: raw snapshots or aggregated time buckets.
-     *
-     *     A discriminated union on `mode` rather than one model with a union-typed
-     *     `data`, so the emitted schema carries the correlation the endpoint already
-     *     guarantees and generated clients narrow `data` from `mode` alone (VEC-686).
-     *     The wire format is unchanged either way.
      */
     PrimeDebtEnvelope:
       | components['schemas']['RawPrimeDebtEnvelope']
@@ -1844,11 +1834,6 @@ export interface components {
     /**
      * ProtocolEventsEnvelope
      * @description Protocol events response: raw rows or aggregated time buckets.
-     *
-     *     A discriminated union on `mode` rather than one model with a union-typed
-     *     `data`, so the emitted schema carries the correlation the endpoint already
-     *     guarantees and generated clients narrow `data` from `mode` alone (VEC-686).
-     *     The wire format is unchanged either way.
      */
     ProtocolEventsEnvelope:
       | components['schemas']['RawProtocolEventsEnvelope']

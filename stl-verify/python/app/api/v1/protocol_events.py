@@ -87,13 +87,7 @@ class AggregatedProtocolEventsEnvelope(BaseModel):
 class ProtocolEventsEnvelope(
     RootModel[Annotated[RawProtocolEventsEnvelope | AggregatedProtocolEventsEnvelope, Field(discriminator="mode")]]
 ):
-    """Protocol events response: raw rows or aggregated time buckets.
-
-    A discriminated union on `mode` rather than one model with a union-typed
-    `data`, so the emitted schema carries the correlation the endpoint already
-    guarantees and generated clients narrow `data` from `mode` alone (VEC-686).
-    The wire format is unchanged either way.
-    """
+    """Protocol events response: raw rows or aggregated time buckets."""
 
 
 async def _get_protocol_event_service(engine: AsyncEngine = Depends(get_engine)) -> ProtocolEventService:
