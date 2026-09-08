@@ -598,6 +598,65 @@ export type webhooks = Record<string, never>;
 export interface components {
   schemas: {
     /**
+     * AggregatedAllocationActivityEnvelope
+     * @description The `mode=aggregated` arm of `AllocationActivityEnvelope`: count/sum buckets.
+     */
+    AggregatedAllocationActivityEnvelope: {
+      /**
+       * Data
+       * @description Event counts and tx-amount sums per time bucket, newest first.
+       */
+      data: components['schemas']['AllocationActivityBucketResponse'][];
+      /**
+       * @description Always `aggregated` on this arm: count/sum time buckets. (enum property replaced by openapi-typescript)
+       * @enum {string}
+       */
+      mode: 'aggregated';
+      /** @description The window and resolution applied to this response. */
+      window: components['schemas']['TimeSeriesWindow'];
+    };
+    /**
+     * AggregatedPrimeDebtEnvelope
+     * @description The `mode=aggregated` arm of `PrimeDebtEnvelope`: gap-filled value buckets.
+     */
+    AggregatedPrimeDebtEnvelope: {
+      /**
+       * Data
+       * @description Last observed debt per time bucket, newest first.
+       */
+      data: components['schemas']['PrimeDebtBucketResponse'][];
+      /**
+       * @description Always `aggregated` on this arm: gap-filled time buckets. (enum property replaced by openapi-typescript)
+       * @enum {string}
+       */
+      mode: 'aggregated';
+      /**
+       * @description Provenance the series was answered from. `indexed` is the on-chain per-ilk debt; `reference` is Sky's own reported figure; `both` fills `debt_wad` and `reference_debt_wad` on every bucket, leaving either null where that provenance reported nothing. Raw snapshots are always `indexed`.
+       * @default indexed
+       */
+      source: components['schemas']['Provenance'];
+      /** @description The window and resolution applied to this response. */
+      window: components['schemas']['TimeSeriesWindow'];
+    };
+    /**
+     * AggregatedProtocolEventsEnvelope
+     * @description The `mode=aggregated` arm of `ProtocolEventsEnvelope`: per-bucket counts.
+     */
+    AggregatedProtocolEventsEnvelope: {
+      /**
+       * Data
+       * @description Event counts per time bucket, newest first.
+       */
+      data: components['schemas']['ProtocolEventBucketResponse'][];
+      /**
+       * @description Always `aggregated` on this arm: per-bucket event counts. (enum property replaced by openapi-typescript)
+       * @enum {string}
+       */
+      mode: 'aggregated';
+      /** @description The window and resolution applied to this response. */
+      window: components['schemas']['TimeSeriesWindow'];
+    };
+    /**
      * AllocationActivityBucketResponse
      * @description Allocation activity aggregated into a single time bucket.
      */
@@ -630,24 +689,15 @@ export interface components {
     /**
      * AllocationActivityEnvelope
      * @description Allocation activity response: raw events or aggregated time buckets.
+     *
+     *     A discriminated union on `mode` rather than one model with a union-typed
+     *     `data`, so the emitted schema carries the correlation the endpoint already
+     *     guarantees and generated clients narrow `data` from `mode` alone (VEC-686).
+     *     The wire format is unchanged either way.
      */
-    AllocationActivityEnvelope: {
-      /**
-       * Data
-       * @description Events when `mode=raw`, count/sum buckets when `mode=aggregated`.
-       */
-      data:
-        | components['schemas']['AllocationActivityResponse'][]
-        | components['schemas']['AllocationActivityBucketResponse'][];
-      /**
-       * Mode
-       * @description `raw` for events, `aggregated` for time buckets.
-       * @enum {string}
-       */
-      mode: 'raw' | 'aggregated';
-      /** @description The window and resolution applied to this response. */
-      window: components['schemas']['TimeSeriesWindow'];
-    };
+    AllocationActivityEnvelope:
+      | components['schemas']['RawAllocationActivityEnvelope']
+      | components['schemas']['AggregatedAllocationActivityEnvelope'];
     /**
      * AllocationActivityResponse
      * @description Allocation activity event record for timeline feeds.
@@ -1339,29 +1389,15 @@ export interface components {
     /**
      * PrimeDebtEnvelope
      * @description Prime debt response: raw snapshots or aggregated time buckets.
+     *
+     *     A discriminated union on `mode` rather than one model with a union-typed
+     *     `data`, so the emitted schema carries the correlation the endpoint already
+     *     guarantees and generated clients narrow `data` from `mode` alone (VEC-686).
+     *     The wire format is unchanged either way.
      */
-    PrimeDebtEnvelope: {
-      /**
-       * Data
-       * @description Snapshots when `mode=raw`, value buckets when `mode=aggregated`.
-       */
-      data:
-        | components['schemas']['PrimeDebtSnapshotResponse'][]
-        | components['schemas']['PrimeDebtBucketResponse'][];
-      /**
-       * Mode
-       * @description `raw` for snapshots, `aggregated` for time buckets.
-       * @enum {string}
-       */
-      mode: 'raw' | 'aggregated';
-      /**
-       * @description Provenance the series was answered from. `indexed` is the on-chain per-ilk debt; `reference` is Sky's own reported figure; `both` fills `debt_wad` and `reference_debt_wad` on every bucket, leaving either null where that provenance reported nothing. Raw snapshots are always `indexed`.
-       * @default indexed
-       */
-      source: components['schemas']['Provenance'];
-      /** @description The window and resolution applied to this response. */
-      window: components['schemas']['TimeSeriesWindow'];
-    };
+    PrimeDebtEnvelope:
+      | components['schemas']['RawPrimeDebtEnvelope']
+      | components['schemas']['AggregatedPrimeDebtEnvelope'];
     /**
      * PrimeDebtSnapshotResponse
      * @description A single observed prime-debt position at a point in time.
@@ -1807,24 +1843,15 @@ export interface components {
     /**
      * ProtocolEventsEnvelope
      * @description Protocol events response: raw rows or aggregated time buckets.
+     *
+     *     A discriminated union on `mode` rather than one model with a union-typed
+     *     `data`, so the emitted schema carries the correlation the endpoint already
+     *     guarantees and generated clients narrow `data` from `mode` alone (VEC-686).
+     *     The wire format is unchanged either way.
      */
-    ProtocolEventsEnvelope: {
-      /**
-       * Data
-       * @description Events when `mode=raw`, count buckets when `mode=aggregated`.
-       */
-      data:
-        | components['schemas']['ProtocolEventResponse'][]
-        | components['schemas']['ProtocolEventBucketResponse'][];
-      /**
-       * Mode
-       * @description `raw` for events, `aggregated` for time buckets.
-       * @enum {string}
-       */
-      mode: 'raw' | 'aggregated';
-      /** @description The window and resolution applied to this response. */
-      window: components['schemas']['TimeSeriesWindow'];
-    };
+    ProtocolEventsEnvelope:
+      | components['schemas']['RawProtocolEventsEnvelope']
+      | components['schemas']['AggregatedProtocolEventsEnvelope'];
     /**
      * ProtocolResponse
      * @description A protocol (lender, AMM, etc.) that STL classifies positions against.
@@ -1880,6 +1907,65 @@ export interface components {
        * @description DEPRECATED — always `true`. Coverage is now read from STL's own record of the reference feeds rather than by calling them, so there is no upstream to be unreachable: a read that fails is a `500` and cannot answer at all. Retained so clients that branch on it keep working. Read `available` per prime instead.
        */
       reference_upstream_reachable: boolean;
+    };
+    /**
+     * RawAllocationActivityEnvelope
+     * @description The `mode=raw` arm of `AllocationActivityEnvelope`: activity event rows.
+     */
+    RawAllocationActivityEnvelope: {
+      /**
+       * Data
+       * @description Activity events, newest first.
+       */
+      data: components['schemas']['AllocationActivityResponse'][];
+      /**
+       * @description Always `raw` on this arm: activity event rows. (enum property replaced by openapi-typescript)
+       * @enum {string}
+       */
+      mode: 'raw';
+      /** @description The window and resolution applied to this response. */
+      window: components['schemas']['TimeSeriesWindow'];
+    };
+    /**
+     * RawPrimeDebtEnvelope
+     * @description The `mode=raw` arm of `PrimeDebtEnvelope`: observed debt snapshots.
+     */
+    RawPrimeDebtEnvelope: {
+      /**
+       * Data
+       * @description Observed debt snapshots, newest first.
+       */
+      data: components['schemas']['PrimeDebtSnapshotResponse'][];
+      /**
+       * @description Always `raw` on this arm: observed debt snapshots. (enum property replaced by openapi-typescript)
+       * @enum {string}
+       */
+      mode: 'raw';
+      /**
+       * @description Provenance the series was answered from. `indexed` is the on-chain per-ilk debt; `reference` is Sky's own reported figure; `both` fills `debt_wad` and `reference_debt_wad` on every bucket, leaving either null where that provenance reported nothing. Raw snapshots are always `indexed`.
+       * @default indexed
+       */
+      source: components['schemas']['Provenance'];
+      /** @description The window and resolution applied to this response. */
+      window: components['schemas']['TimeSeriesWindow'];
+    };
+    /**
+     * RawProtocolEventsEnvelope
+     * @description The `mode=raw` arm of `ProtocolEventsEnvelope`: decoded event rows.
+     */
+    RawProtocolEventsEnvelope: {
+      /**
+       * Data
+       * @description Decoded events, newest first.
+       */
+      data: components['schemas']['ProtocolEventResponse'][];
+      /**
+       * @description Always `raw` on this arm: decoded event rows. (enum property replaced by openapi-typescript)
+       * @enum {string}
+       */
+      mode: 'raw';
+      /** @description The window and resolution applied to this response. */
+      window: components['schemas']['TimeSeriesWindow'];
     };
     /**
      * RiskBreakdownItemResponse

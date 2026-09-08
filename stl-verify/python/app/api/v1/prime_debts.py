@@ -1,9 +1,9 @@
 import asyncio
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, RootModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.prime_debt_repository import PrimeDebtRepository
@@ -89,23 +89,42 @@ class PrimeDebtBucketResponse(BaseModel):
     )
 
 
-class PrimeDebtEnvelope(BaseModel):
-    """Prime debt response: raw snapshots or aggregated time buckets."""
+_SOURCE_DESCRIPTION = (
+    "Provenance the series was answered from. `indexed` is the on-chain per-ilk debt; "
+    "`reference` is Sky's own reported figure; `both` fills `debt_wad` and `reference_debt_wad` "
+    "on every bucket, leaving either null where that provenance reported nothing. Raw "
+    "snapshots are always `indexed`."
+)
 
-    mode: Literal["raw", "aggregated"] = Field(description="`raw` for snapshots, `aggregated` for time buckets.")
-    source: Provenance = Field(
-        default=Provenance.INDEXED,
-        description=(
-            "Provenance the series was answered from. `indexed` is the on-chain per-ilk debt; "
-            "`reference` is Sky's own reported figure; `both` fills `debt_wad` and `reference_debt_wad` "
-            "on every bucket, leaving either null where that provenance reported nothing. Raw "
-            "snapshots are always `indexed`."
-        ),
-    )
+
+class RawPrimeDebtEnvelope(BaseModel):
+    """The `mode=raw` arm of `PrimeDebtEnvelope`: observed debt snapshots."""
+
+    mode: Literal["raw"] = Field(description="Always `raw` on this arm: observed debt snapshots.")
+    source: Provenance = Field(default=Provenance.INDEXED, description=_SOURCE_DESCRIPTION)
     window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
-    data: list[PrimeDebtSnapshotResponse] | list[PrimeDebtBucketResponse] = Field(
-        description="Snapshots when `mode=raw`, value buckets when `mode=aggregated`."
-    )
+    data: list[PrimeDebtSnapshotResponse] = Field(description="Observed debt snapshots, newest first.")
+
+
+class AggregatedPrimeDebtEnvelope(BaseModel):
+    """The `mode=aggregated` arm of `PrimeDebtEnvelope`: gap-filled value buckets."""
+
+    mode: Literal["aggregated"] = Field(description="Always `aggregated` on this arm: gap-filled time buckets.")
+    source: Provenance = Field(default=Provenance.INDEXED, description=_SOURCE_DESCRIPTION)
+    window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
+    data: list[PrimeDebtBucketResponse] = Field(description="Last observed debt per time bucket, newest first.")
+
+
+class PrimeDebtEnvelope(
+    RootModel[Annotated[RawPrimeDebtEnvelope | AggregatedPrimeDebtEnvelope, Field(discriminator="mode")]]
+):
+    """Prime debt response: raw snapshots or aggregated time buckets.
+
+    A discriminated union on `mode` rather than one model with a union-typed
+    `data`, so the emitted schema carries the correlation the endpoint already
+    guarantees and generated clients narrow `data` from `mode` alone (VEC-686).
+    The wire format is unchanged either way.
+    """
 
 
 async def _get_prime_debt_service(engine: AsyncEngine = Depends(get_engine)) -> PrimeDebtService:
@@ -172,17 +191,19 @@ async def list_prime_debt_snapshots(
         reference_by_bucket = {bucket.bucket_start: bucket.debt_wad for bucket in reference_buckets}
         indexed_by_bucket = {bucket.bucket_start: bucket.debt_wad for bucket in buckets}
         return PrimeDebtEnvelope(
-            mode="aggregated",
-            source=source,
-            window=window,
-            data=[
-                PrimeDebtBucketResponse(
-                    bucket_start=start,
-                    debt_wad=indexed_by_bucket.get(start),
-                    reference_debt_wad=reference_by_bucket.get(start),
-                )
-                for start in sorted(set(indexed_by_bucket) | set(reference_by_bucket), reverse=True)
-            ],
+            AggregatedPrimeDebtEnvelope(
+                mode="aggregated",
+                source=source,
+                window=window,
+                data=[
+                    PrimeDebtBucketResponse(
+                        bucket_start=start,
+                        debt_wad=indexed_by_bucket.get(start),
+                        reference_debt_wad=reference_by_bucket.get(start),
+                    )
+                    for start in sorted(set(indexed_by_bucket) | set(reference_by_bucket), reverse=True)
+                ],
+            )
         )
 
     if time_series.aggregate:
@@ -197,10 +218,12 @@ async def list_prime_debt_snapshots(
             limit=limit,
         )
         return PrimeDebtEnvelope(
-            mode="aggregated",
-            source=source,
-            window=window,
-            data=[PrimeDebtBucketResponse(**bucket.__dict__) for bucket in buckets],
+            AggregatedPrimeDebtEnvelope(
+                mode="aggregated",
+                source=source,
+                window=window,
+                data=[PrimeDebtBucketResponse(**bucket.__dict__) for bucket in buckets],
+            )
         )
 
     snapshots = await service.list_debt_snapshots(
@@ -210,8 +233,10 @@ async def list_prime_debt_snapshots(
         limit=limit,
     )
     return PrimeDebtEnvelope(
-        mode="raw",
-        source=Provenance.INDEXED,
-        window=window,
-        data=[PrimeDebtSnapshotResponse(**snapshot.__dict__) for snapshot in snapshots],
+        RawPrimeDebtEnvelope(
+            mode="raw",
+            source=Provenance.INDEXED,
+            window=window,
+            data=[PrimeDebtSnapshotResponse(**snapshot.__dict__) for snapshot in snapshots],
+        )
     )
