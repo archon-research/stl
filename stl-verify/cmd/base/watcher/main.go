@@ -92,7 +92,7 @@ func main() {
 // cleanupTimeout bounds the deferred closes that run after a shutdown timeout.
 // pgxpool.Close blocks until every acquired connection is handed back, and the
 // goroutines still holding them are the ones that just missed
-// lifecycle.ShutdownTimeout. Together the two fit inside the pod's 60s
+// lifecycle.ShutdownTimeout. Together the two fit inside the pod's 90s
 // terminationGracePeriodSeconds (k8s/base/watcher/deployment.yaml).
 const cleanupTimeout = 15 * time.Second
 

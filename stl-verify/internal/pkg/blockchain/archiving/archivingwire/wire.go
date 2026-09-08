@@ -28,10 +28,12 @@ const (
 	EnvEndpoint = "AWS_S3_ENDPOINT"
 )
 
-// DrainTimeout bounds the wait for in-flight archive writes at shutdown. The
-// drain is deferred, so it shares lifecycle.ShutdownTailBudget with the OTEL
-// flush; waiting out a stuck write (capped at 30s) gets the pod SIGKILLed.
-const DrainTimeout = 5 * time.Second
+// DrainTimeout bounds the wait for in-flight archive writes at shutdown. It
+// covers archiving.ArchiveTimeout so a write the drain kills is one that
+// outlived its own bound, never a healthy slow PUT; a write killed here is
+// unrecoverable, since its SQS message is already deleted. The drain is
+// deferred, so lifecycle.ShutdownTailBudget must hold it plus the OTEL flush.
+const DrainTimeout = 35 * time.Second
 
 // Wrap decorates a multicaller with archiving. Identity when archiving is off.
 type Wrap func(outbound.Multicaller) outbound.Multicaller
