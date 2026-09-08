@@ -3,9 +3,11 @@ package temporal
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -24,7 +26,8 @@ func TestNewCronjobMetrics_SeedsAllStatusSeriesAtZero(t *testing.T) {
 	}
 
 	got := testutil.CollectCounterByAttr(t, reader, "cronjob.runs.total", "status")
-	for _, status := range []string{"success", "error", "canceled"} {
+	for _, statusAttr := range runStatusValues {
+		status := statusAttr.Value.AsString()
 		v, ok := got[status]
 		if !ok {
 			t.Errorf("cronjob.runs.total is missing the status=%q series before any run", status)
@@ -120,8 +123,18 @@ func TestRecordRun_ClassifiesRunStatus(t *testing.T) {
 
 			m.RecordRun(tt.ctx, time.Second, tt.runErr)
 
+			// A status the recorder can emit but seedStatusSeries does not seed
+			// is bug #529 reintroduced for that status: increase() would miss
+			// its first 0->1 after every rollover.
+			if !slices.ContainsFunc(runStatusValues, func(a attribute.KeyValue) bool {
+				return a.Value.AsString() == tt.wantStatus
+			}) {
+				t.Fatalf("runStatusAttr can emit status=%q but seedStatusSeries does not seed it", tt.wantStatus)
+			}
+
 			got := testutil.CollectCounterByAttr(t, reader, "cronjob.runs.total", "status")
-			for _, status := range []string{"success", "error", "canceled"} {
+			for _, statusAttr := range runStatusValues {
+				status := statusAttr.Value.AsString()
 				want := int64(0)
 				if status == tt.wantStatus {
 					want = 1

@@ -59,9 +59,22 @@ func newCronjobMetricsWithProvider(mp metric.MeterProvider) (*cronjobMetrics, er
 	return m, nil
 }
 
-// runStatusValues are the terminal statuses a run can land on; must stay in
-// sync with runStatusAttr and the counter description above.
-var runStatusValues = []string{"success", "error", "canceled"}
+// canceledStatusAttr is this counter's third terminal status, alongside
+// telemetry's success and error. Both the seed and the recording path go
+// through it so neither can spell it differently.
+func canceledStatusAttr() attribute.KeyValue {
+	return attribute.String("status", "canceled")
+}
+
+// runStatusValues are the terminal statuses a run can land on, held as the
+// exact attributes runStatusAttr returns rather than as strings: a seed whose
+// spelling the recorder never uses exports a phantom series at 0 forever while
+// real runs land on an unseeded one, which reads as fixed and is not.
+var runStatusValues = []attribute.KeyValue{
+	telemetry.SuccessStatusAttr(),
+	telemetry.ErrorStatusAttr(),
+	canceledStatusAttr(),
+}
 
 // seedStatusSeries exports every terminal-status series of cronjob.runs.total
 // at 0 at worker startup, so increase() can observe the first real increment
@@ -72,7 +85,7 @@ var runStatusValues = []string{"success", "error", "canceled"}
 func (m *cronjobMetrics) seedStatusSeries() {
 	ctx := context.Background()
 	for _, status := range runStatusValues {
-		telemetry.SeedCounter(ctx, m.runsTotal, attribute.String("status", status))
+		telemetry.SeedCounter(ctx, m.runsTotal, status)
 	}
 }
 
@@ -85,7 +98,7 @@ func (m *cronjobMetrics) seedStatusSeries() {
 // deadline (context.DeadlineExceeded) still counts as an error.
 func runStatusAttr(ctx context.Context, err error) attribute.KeyValue {
 	if err != nil && errors.Is(ctx.Err(), context.Canceled) {
-		return attribute.String("status", "canceled")
+		return canceledStatusAttr()
 	}
 	return telemetry.StatusAttr(err)
 }
