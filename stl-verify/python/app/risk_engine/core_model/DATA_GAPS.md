@@ -78,6 +78,15 @@ assets. Prod is byte-identical to staging.
   `token_id` NULL. CoinGecko ids: `bitcoin`, `hyperliquid`, `ripple`.
   Then backfill 180+ days.
 
+  **UPDATE (8 Sep 2026):** DONE for HYPE and XRP **in staging**: PR #858
+  created `asset_price` + the `ripple`/`hyperliquid` catalog rows, workflow
+  `backfill-xrp-hype-2026` backfilled 2026-01-01 → 2026-09-08 hourly (6,001
+  points each, `coveredFrom` = requested `from`, zero missing days — 251 days,
+  comfortably above TRAIN_SIZE), and the 5-minute sweep keeps the series
+  current. Prod still needs the #858 deploy plus the same workflow run. BTC
+  (`bitcoin`) remains unregistered — only Anchorage needs it. Note the CORE
+  price reader has no `asset_price` path yet; see §3.
+
 ---
 
 ## 2. Order books — `cex_orderbook_snapshots` (staging)
@@ -104,8 +113,8 @@ JITOSOL snapshots flowing from all three venues, latest under a minute old.
 before flipping any of these markets live in prod.
 
 So order books now cover **all 9 enabled markets in staging**. The 2 Syrup
-markets remain on parquet only because of positions + prices (see §1 and §3),
-no longer because of books.
+markets remain on parquet only because of the price-reader path (see §1 and
+§3) — positions (reader written 8 Sep) and books are solved in staging.
 
 Note: prod has all six venue books flowing (verified on the replica,
 14 Aug 2026) even though [VEC-455](https://linear.app/archontech/issue/VEC-455)
@@ -186,11 +195,54 @@ into the order books than slices of a $275M one, raising the *percentage*
 loss too. Same-code parquet reruns reproduce the stored parquet CRRs, so the
 gap is entirely the borrower universe, not the code.
 
+**Syrup (2 markets): positions reader written (8 Sep 2026)**, behind the same
+per-market flags — **not flipped yet**, see below. One row per external Active
+loan of the pool's current sync cycle (the pool-cycle anchor and the
+same-`(synced_at, processing_version)` collateral join are lifted from the
+Maple backed-breakdown repository; the indexer emits no tombstones, so a
+repaid loan's last Active state lingers in older cycles forever). LT is the
+inverse of Maple's margin-call coverage trigger
+(`maple_loan_collateral.liquidation_level`, ×1e6): level 1204800 → LT
+0.830013, the parquet's own 0.83001. Collateral is valued with Maple's
+attested per-unit prices (`asset_value_usd`, ×1e8) — the protocol's own
+valuation, and exactly what BA's parquet used (HYPE 16,305,615 / 400,000.058
+= 40.764 = its market-frame price). `liquidation_incentive` is BA's flat
+1.02. Unit pinning: a synthetic replay of the parquet's 0x198aec… row
+reproduces lltv/ltv/HF to 1e-5 (unit test); against staging, per-loan
+computed coverage matches Maple's own `acm_ratio` to rounding (505 ×
+78,276.425 / 25M = 1.58118 vs acm 1.581184), with a >1% disagreement logged.
+Validated live against staging (8 Sep): 27 USDC + 8 USDT loans, all modeled
+collaterals priced (BTC, WBTC, ETH, HYPE, XRP), every HF > 1.
+
+Known deviations (also in the reader's module docstring):
+
+- **Stable-on-stable loans are excluded** (trigger at/above par coverage,
+  `liquidation_level` ≤ 1e6 → LT ≥ 1): the protocol margin-calls them at/above
+  full coverage, so collateral price is not what protects them — no
+  simulatable price-liquidation mechanism, and LT ≥ 1 would break the
+  liquidator's `-1 + LT×(1+bonus) < 0` guard. BA's frames contain no such
+  rows (they post-date the snapshot). Their debt would add exposure with
+  ~zero simulated loss, so exclusion biases CRR up. Staging, 8 Sep: $17.5M
+  (3 loans) in syrup_usdc, $52.4M (5 loans) in syrup_usdt.
+- **No pool-level debt reconciliation**: `maple_pool_state.principal_out`
+  includes the internal (amm/strategy) loans the model excludes (~700M of the
+  USDC pool's 958M), so the external-loan sum cannot be reconciled against
+  it. The per-loan `acm_ratio` cross-check above is the reconciliation.
+- BA's `interest_rate` / `loan_token_symbol` / `collateral_token_symbol`
+  parquet columns are skipped — nothing in the model reads them.
+
+**Why the syrup flags are still parquet:** the CORE **price reader** has no
+path for the syrup collaterals yet — XRP/HYPE live in the new `asset_price`
+table (token-less assets; backfilled in staging, see §1), and BTC/ETH need
+the WBTC/WETH proxy series (approved in the 17 Aug #at_stl thread). Flip
+`POSITION_SOURCE`/`PRICE_SOURCE`/`ORDERBOOK_SOURCE` together once that
+reader path exists, then compute a fully-live CRR against staging.
+
 Still parquet:
 
 | Market group | Live source | Notes |
 |---|---|---|
-| Syrup (2) | maple-graphql-indexer tables | indexed, reader not written; also blocked on XRP/HYPE offchain prices (books solved in staging, 25 Aug 2026 — see §2) |
+| Syrup (2) | maple tables | **positions reader done (8 Sep 2026)**; blocked on the price-reader path for XRP/HYPE (`asset_price`) and BTC/ETH (WBTC/WETH proxies) |
 | Anchorage | anchorage-indexer tables | indexed; blocked on native-BTC price (no on-chain oracle) |
 
 ---
