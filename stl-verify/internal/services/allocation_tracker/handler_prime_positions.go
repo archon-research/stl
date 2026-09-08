@@ -97,7 +97,7 @@ func (h *PrimePositionHandler) HandleBatch(
 		}
 		tokenAddr, err := positionTokenAddress(s)
 		if err != nil {
-			return err
+			return fmt.Errorf("position token for metadata: %w", err)
 		}
 		addrs = append(addrs, tokenAddr)
 		if s.Entry.AssetAddress != nil {
@@ -165,7 +165,7 @@ func (h *PrimePositionHandler) buildPositions(
 	for _, s := range snapshots {
 		tokenAddr, err := positionTokenAddress(s)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("position token: %w", err)
 		}
 
 		var meta tokenMeta

@@ -106,7 +106,7 @@ func TestCentrifugeRoutesToERC7540(t *testing.T) {
 
 // TestCentrifugeRoutesToAShareResolver: the alias path locates the source by type
 // assertion through the real registry, so a source that stopped satisfying
-// shareResolver would leave every share transfer unmatched with nothing failing.
+// shareResolver would fail every block on the chain; this pins it at build time.
 func TestCentrifugeRoutesToAShareResolver(t *testing.T) {
 	registry, err := BuildSourceRegistry(nil, quietLogger())
 	if err != nil {

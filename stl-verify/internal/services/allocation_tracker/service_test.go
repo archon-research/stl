@@ -3,6 +3,7 @@ package allocation_tracker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -924,6 +925,13 @@ func (f *centrifugeFixture) consume(t *testing.T, logs ...gethtypes.Log) error {
 	})
 }
 
+// redeliver drives the block consume last processed again, as SQS does after a NACK.
+func (f *centrifugeFixture) redeliver(t *testing.T, logs ...gethtypes.Log) error {
+	t.Helper()
+	f.block--
+	return f.consume(t, logs...)
+}
+
 // seedRoute names an entry's emitter up front, the state a block that re-points a
 // share starts from.
 func (f *centrifugeFixture) seedRoute(t *testing.T, emitter common.Address, entry *TokenEntry) {
@@ -1263,15 +1271,88 @@ func TestSweep_CentrifugeBalanceWithoutAShare_ReturnsError(t *testing.T) {
 	}
 }
 
-func TestEntryKeyFor_KeysOnTheEmitterWhenItHasNoAlias(t *testing.T) {
-	token := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+// TestProcessBlock_HandlerFailureKeepsTheRoutesForTheRedelivery: the fetch of a
+// block that re-points a share yields new routes, but they take effect only once
+// the block has been persisted — SQS redelivers the same block, and it must match
+// the same transfers it matched the first time.
+func TestProcessBlock_HandlerFailureKeepsTheRoutesForTheRedelivery(t *testing.T) {
 	f := newCentrifugeTracker(t, []centrifugeShape{groveVaultShape(groveJAAAVault, groveJAAAShare)}, 1000)
+	stale := common.HexToAddress("0x0000000000000000000000000000000000005747")
+	f.seedRoute(t, stale, f.svc.entries[0])
+	staleTransfer := transferLog(stale, groveProxy, big.NewInt(250), 7)
 
-	got := f.svc.entryKeyFor(&TransferEvent{TokenAddress: token, ProxyAddress: groveProxy})
+	f.handler.err = errors.New("db down")
+	if err := f.consume(t, staleTransfer); err == nil {
+		t.Fatal("a failing handler must fail the block")
+	}
+	f.handler.batches = nil
+	f.handler.err = nil
 
-	want := EntryKey{ContractAddress: token, WalletAddress: groveProxy}
-	if got != want {
-		t.Errorf("entryKeyFor = %v, want the identity key %v", got, want)
+	if err := f.redeliver(t, staleTransfer); err != nil {
+		t.Fatalf("redelivery: %v", err)
+	}
+	snap := f.snapshotFor(groveJAAAVault, groveProxy)
+	if snap == nil {
+		t.Fatal("the redelivered block matched nothing: the routes advanced past a block that never persisted")
+	}
+	if snap.TxHash != centrifugeTxHash.Hex() || snap.TxAmount == nil || snap.TxAmount.Cmp(big.NewInt(250)) != 0 {
+		t.Errorf("snapshot = (%q, %v), want the event row (%s, 250)", snap.TxHash, snap.TxAmount, centrifugeTxHash.Hex())
+	}
+
+	// Persisted now, so the re-point applies: the new share's transfers match next.
+	f.handler.batches = nil
+	if err := f.consume(t, transferLog(groveJAAAShare, groveProxy, big.NewInt(9), 1)); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+	if snap := f.snapshotFor(groveJAAAVault, groveProxy); snap == nil || snap.TxAmount == nil || snap.TxAmount.Cmp(big.NewInt(9)) != 0 {
+		t.Errorf("snapshot after the persisted re-point = %v, want the new share's transfer of 9", snap)
+	}
+}
+
+// TestProcessBlock_EventPath_CentrifugeBalanceWithoutAShare_ReturnsError is the
+// event-path twin of the sweep test: the guard sits on the fetch every path shares,
+// and the block's own transfer must not be persisted past it.
+func TestProcessBlock_EventPath_CentrifugeBalanceWithoutAShare_ReturnsError(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{groveVaultShape(groveJAAAVault, groveJAAAShare)}, 1000)
+	if err := f.consume(t, transferLog(groveJAAAShare, groveProxy, big.NewInt(1), 0)); err != nil {
+		t.Fatalf("first block: %v", err)
+	}
+	batchesBefore := len(f.handler.batches)
+	for _, bal := range f.source.result.Balances {
+		bal.ShareToken = nil
+	}
+
+	err := f.consume(t, transferLog(groveJAAAShare, groveProxy, big.NewInt(250), 7))
+	if err == nil {
+		t.Fatal("expected a centrifuge balance with no share token to fail the block")
+	}
+	if !strings.Contains(err.Error(), "read the share tokens of block") {
+		t.Errorf("error = %q, want the event path's wrapper", err)
+	}
+	if len(f.handler.batches) != batchesBefore {
+		t.Errorf("HandleBatch ran %d more times, want 0", len(f.handler.batches)-batchesBefore)
+	}
+}
+
+// TestProcessBlock_EventPath_ShareDowngradedToTheEntryItself_ReturnsError is the
+// event-path twin of the sweep test for the ratchet.
+func TestProcessBlock_EventPath_ShareDowngradedToTheEntryItself_ReturnsError(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{groveVaultShape(groveJAAAVault, groveJAAAShare)}, 1000)
+	if err := f.consume(t, transferLog(groveJAAAShare, groveProxy, big.NewInt(1), 0)); err != nil {
+		t.Fatalf("first block: %v", err)
+	}
+	batchesBefore := len(f.handler.batches)
+	f.repointShare(t, groveJAAAVault, groveJAAAVault)
+
+	err := f.consume(t, transferLog(groveJAAAShare, groveProxy, big.NewInt(250), 7))
+	if err == nil {
+		t.Fatal("a vault reporting itself as its own share must fail the block")
+	}
+	if !strings.Contains(err.Error(), "route transfers for block") || !strings.Contains(err.Error(), "cannot become its own share") {
+		t.Errorf("error = %q, want the event path's wrapper around the downgrade", err)
+	}
+	if len(f.handler.batches) != batchesBefore {
+		t.Errorf("HandleBatch ran %d more times, want 0", len(f.handler.batches)-batchesBefore)
 	}
 }
 

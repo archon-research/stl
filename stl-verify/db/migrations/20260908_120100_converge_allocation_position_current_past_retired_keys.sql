@@ -22,10 +22,11 @@
 -- allocation_position, queryable exactly as before. What goes is a cached answer to a
 -- question no longer asked. It runs as the owner; no login role holds DELETE here.
 --
--- Applying it here is not only the migration: allocation_position is small (tens of
--- thousands of rows), so running it at apply time costs little and is the live proof
--- that the exclusion holds on real data, immediately after 20260908_120000 emptied the
--- retired keys out of the cache.
+-- Applying it here is not only the migration: the scan is the one 20260825_120100
+-- already ran once at apply time over the whole allocation_position history (~1.6M
+-- rows on staging, 2026-09-08), so its cost is known and bounded, and running it now is
+-- the live proof that the exclusion holds on real data, immediately after
+-- 20260908_120000 emptied the retired keys out of the cache.
 --
 -- Separate from 20260908_120000 for the reason 20260825_120100 records: that file holds
 -- locks a full-history scan must not be queued behind, and the split keeps the trigger
@@ -89,6 +90,9 @@ WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.block_timestamp,
        allocation_position_current.block_timestamp, allocation_position_current.log_index,
        allocation_position_current.direction, allocation_position_current.tx_hash,
        allocation_position_current.processing_version);
+
+-- A purge plus a merge can shift the cache's distribution; the table is small.
+ANALYZE allocation_position_current;
 
 INSERT INTO migrations (filename)
 VALUES ('20260908_120100_converge_allocation_position_current_past_retired_keys.sql')

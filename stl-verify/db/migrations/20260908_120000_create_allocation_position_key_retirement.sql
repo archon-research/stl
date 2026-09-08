@@ -70,6 +70,11 @@ CREATE TABLE IF NOT EXISTS allocation_position_key_retirement (
     CONSTRAINT allocation_position_key_retirement_ticket_chk CHECK (btrim(ticket) <> '')
 );
 
+-- No PK prefix serves token_id alone; the FK's RI probe on a token row and a
+-- "retired anywhere for this token" read both want it.
+CREATE INDEX IF NOT EXISTS allocation_position_key_retirement_token_id_idx
+    ON allocation_position_key_retirement (token_id);
+
 COMMENT ON TABLE allocation_position_key_retirement IS '[Configuration] Register of the (chain_id, token_id) keys the allocation tracker no longer writes positions on, and which allocation_position_current must therefore not cache. Append-on-change: putting a key back in service is a new row with retired = false and a later valid_from, never an UPDATE — UPDATE/DELETE/TRUNCATE are revoked, the owner included. Read it through allocation_position_key_retirement_current, never raw: the raw table matches a superseded version as readily as the live one. A plain table, not a hypertable: a row lands only when a tracker keying decision changes, on the order of rows per month, so chunking, compression and tiering buy nothing (db/migrations/AGENTS.md sparse-table exception). build_id is absent because no build writes this table — it is seeded by migrations and by an operator, never by an indexer.';
 COMMENT ON COLUMN allocation_position_key_retirement.chain_id IS 'PK. FK→chain.chain_id. Chain of the retired key.';
 COMMENT ON COLUMN allocation_position_key_retirement.token_id IS 'PK. FK→token.id. The token row the tracker no longer writes positions on.';
@@ -89,9 +94,14 @@ GRANT SELECT, INSERT ON allocation_position_key_retirement TO stl_readwrite;
 -- Guarded by role existence, mirroring position_state (20260818_130000). The guard is
 -- load-bearing for stl_migrator only: the infra bootstrap creates that role and no
 -- migration does, so it is absent under the test harness, which migrates as its own
--- bootstrap superuser. Revoking the OWNER's UPDATE/DELETE is safe because nothing FKs
--- this table, so no RI probe needs FOR KEY SHARE on it (the trap 20260714_160000 fixed);
--- a deliberate history fix costs a visible re-GRANT in a migration.
+-- bootstrap superuser. Revoking the OWNER's UPDATE has one accepted cost: this table is
+-- an FK CHILD of chain and token, and the RI probe Postgres runs when a referenced
+-- chain/token row is deleted or re-keyed is a FOR KEY SHARE on THIS table as its owner,
+-- which needs UPDATE — the mirror image of the parent-side trap 20260714_160000 fixed.
+-- chain and token rows are never deleted or re-keyed (the standing no-delete rule), so
+-- that probe never runs; should it ever have to, re-GRANT UPDATE to the owner in a
+-- migration first. Nothing FKs this table, so the parent-side probe does not apply. A
+-- deliberate history fix likewise costs a visible re-GRANT in a migration.
 DO $$
 DECLARE role_name text;
 BEGIN

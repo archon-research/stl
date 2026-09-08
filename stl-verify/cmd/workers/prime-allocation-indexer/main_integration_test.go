@@ -381,12 +381,15 @@ func seedUsdsTransferReceipt(t *testing.T, ctx context.Context, keyPrefix string
 
 var shareSelector = crypto.Keccak256([]byte("share()"))[:4]
 
-// buildErc20MulticallMockRPC serves a JSON-RPC endpoint that answers the two
-// Multicall3 aggregate3 batches the worker issues for a plain erc20 entry:
-// balanceOf(proxy) (from BalanceOfSource) and decimals()/symbol() (from the
-// position handler's metadata cache). Each inner sub-call is dispatched by
-// selector and answered with a packed ERC-20 return; unknown selectors fail the
-// test loudly so a silent zero-substitution cannot mask a routing bug.
+// buildErc20MulticallMockRPC serves a JSON-RPC endpoint that answers every
+// Multicall3 aggregate3 batch the real registry issues: balanceOf(proxy) (from
+// BalanceOfSource), decimals()/symbol() (from the position handler's metadata
+// cache) and, because the registry carries the centrifuge entries too, share()
+// from ERC7540Source — answered as a revert so every entry takes the direct-share
+// branch, whose decimals() confirmation the same handler serves. Each inner
+// sub-call is dispatched by selector and answered with a packed ERC-20 return;
+// unknown selectors fail the test loudly so a silent zero-substitution cannot
+// mask a routing bug.
 func buildErc20MulticallMockRPC(t *testing.T) *httptest.Server {
 	t.Helper()
 
@@ -437,8 +440,8 @@ func buildErc20MulticallMockRPC(t *testing.T) *httptest.Server {
 		case bytes.Equal(sel, symbolMethod.ID):
 			return mcResult{Success: true, ReturnData: symbolData}
 		case bytes.Equal(sel, shareSelector):
-			// Answered as a clean revert for every address, vaults included: this test
-			// asserts archiving, so every entry takes the direct-share branch.
+			// A clean revert for every address: this test asserts archiving, so every
+			// entry takes the direct-share branch (confirmed by the decimals() case above).
 			return mcResult{Success: false}
 		default:
 			t.Errorf("unexpected selector %x in aggregate3 sub-call", sel)

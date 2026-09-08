@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -222,6 +223,64 @@ func TestHandleBatch_Centrifuge_RowKeysOnShareToken(t *testing.T) {
 	}
 	if pos.TokenSymbol != "JAAA" || pos.TokenDecimals != 6 {
 		t.Errorf("metadata = (%q, %d), want (JAAA, 6) from the share token", pos.TokenSymbol, pos.TokenDecimals)
+	}
+}
+
+// TestCentrifugeSnapshotWithoutShareToken_IsRefused: keying the row on the vault
+// would land it on a retired cache key, so both places that name the row token
+// fail the batch instead — the metadata preflight and buildPositions itself.
+func TestCentrifugeSnapshotWithoutShareToken_IsRefused(t *testing.T) {
+	vault := common.HexToAddress("0x4880799ee5200fc58da299e965df644fbf46780b")
+	wallet := common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
+	snapshot := func() *PositionSnapshot {
+		return &PositionSnapshot{
+			Entry: &TokenEntry{
+				ContractAddress: vault,
+				WalletAddress:   wallet,
+				Star:            "grove",
+				Chain:           "mainnet",
+				Protocol:        "centrifuge",
+				TokenType:       TokenTypeCentrifuge,
+			},
+			Balance:     big.NewInt(500),
+			ChainID:     1,
+			BlockNumber: 100,
+			Direction:   DirectionSweep,
+		}
+	}
+
+	tests := []struct {
+		name string
+		run  func(t *testing.T) error
+	}{
+		{"HandleBatch preflight", func(t *testing.T) error {
+			repo := &fakeAllocRepo{}
+			handler := newTestHandler(repo, &fakeSupplyRepo{},
+				map[string]int64{"grove": 2},
+				map[common.Address]tokenMeta{vault: {symbol: "VAULT", decimals: 6}},
+			)
+			err := handler.HandleBatch(context.Background(), &SnapshotBatch{Snapshots: []*PositionSnapshot{snapshot()}})
+			if len(repo.saved) != 0 {
+				t.Errorf("saved %d positions, want none", len(repo.saved))
+			}
+			return err
+		}},
+		{"buildPositions", func(t *testing.T) error {
+			h := newPolicyTestHandler(t, nil)
+			_, err := h.buildPositions(context.Background(), []*PositionSnapshot{snapshot()}, map[string]bool{})
+			return err
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.run(t)
+			if err == nil {
+				t.Fatal("expected a centrifuge snapshot without a share token to be refused")
+			}
+			if !strings.Contains(err.Error(), "carries no share token") {
+				t.Errorf("error = %q, want it to name the missing share token", err)
+			}
+		})
 	}
 }
 

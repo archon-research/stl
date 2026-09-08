@@ -337,7 +337,7 @@ func (s *Service) resolveMissingTransferAliases(ctx context.Context, blockHash c
 	}
 	grouped, err := s.registry.shareResolvers(pending)
 	if err != nil {
-		return err
+		return fmt.Errorf("group %d entries by share resolver: %w", len(pending), err)
 	}
 
 	var named []namedEmitter
@@ -348,14 +348,14 @@ func (s *Service) resolveMissingTransferAliases(ctx context.Context, blockHash c
 		}
 		batch, err := namedEmittersFromShares(sourceEntries, shares)
 		if err != nil {
-			return err
+			return fmt.Errorf("%s answered for its entries: %w", source.Name(), err)
 		}
 		named = append(named, batch...)
 	}
 
 	next, err := s.nextTransferRoutes(named, blockNumber)
 	if err != nil {
-		return err
+		return fmt.Errorf("route the newly named entries: %w", err)
 	}
 	s.transferAliases = next
 	return nil
@@ -425,46 +425,70 @@ func namedEmittersFromBalances(entries []*TokenEntry, balances map[EntryKey]*Pos
 // entries swapping shares in one batch release before either claims — mutating
 // in place makes that swap fail or succeed on entry order.
 func (s *Service) nextTransferRoutes(named []namedEmitter, blockNumber int64) (map[transferRouteKey]common.Address, error) {
-	for _, n := range named {
-		if err := s.checkShareRatchet(n, blockNumber); err != nil {
-			return nil, err
-		}
+	if err := s.checkShareRatchets(named, blockNumber); err != nil {
+		return nil, err
 	}
-
 	next := maps.Clone(s.transferAliases)
 	if next == nil {
 		next = make(map[transferRouteKey]common.Address, len(named))
 	}
-	for _, n := range named {
-		maps.DeleteFunc(next, func(route transferRouteKey, contract common.Address) bool {
-			if route.Wallet != n.entry.WalletAddress || contract != n.entry.ContractAddress || route.Emitter == n.emitter {
-				return false
-			}
-			s.logger.Warn("share token re-pointed; event rows for this position stop until the next sweep",
-				"entry", n.entry.ContractAddress.Hex(),
-				"wallet", n.entry.WalletAddress.Hex(),
-				"previousEmitter", route.Emitter.Hex(),
-				"emitter", n.emitter.Hex(),
-				"block", blockNumber)
-			return true
-		})
-	}
-
-	for _, n := range named {
-		route := transferRouteKey{Emitter: n.emitter, Wallet: n.entry.WalletAddress}
-		if prev, ok := next[route]; ok && prev != n.entry.ContractAddress {
-			return nil, fmt.Errorf("%s and %s both claim transfers of %s into %s; tracking both would double count",
-				prev.Hex(), n.entry.ContractAddress.Hex(), n.emitter.Hex(), n.entry.WalletAddress.Hex())
-		}
-		next[route] = n.entry.ContractAddress
+	s.pruneDisplacedRoutes(next, named, blockNumber)
+	if err := claimRoutes(next, named); err != nil {
+		return nil, err
 	}
 	return next, nil
 }
 
+func (s *Service) checkShareRatchets(named []namedEmitter, blockNumber int64) error {
+	for _, n := range named {
+		if err := s.checkShareRatchet(n, blockNumber); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// pruneDisplacedRoutes drops every route that still points an entry at an emitter
+// it no longer names, so a transfer of the retired token stops counting as this
+// position's activity.
+func (s *Service) pruneDisplacedRoutes(next map[transferRouteKey]common.Address, named []namedEmitter, blockNumber int64) {
+	for _, n := range named {
+		maps.DeleteFunc(next, func(route transferRouteKey, contract common.Address) bool {
+			displaced := route.Wallet == n.entry.WalletAddress &&
+				contract == n.entry.ContractAddress &&
+				route.Emitter != n.emitter
+			if displaced {
+				s.logger.Warn("share token re-pointed; event rows for this position stop until the next sweep",
+					"entry", n.entry.ContractAddress.Hex(),
+					"wallet", n.entry.WalletAddress.Hex(),
+					"previousEmitter", route.Emitter.Hex(),
+					"emitter", n.emitter.Hex(),
+					"block", blockNumber)
+			}
+			return displaced
+		})
+	}
+}
+
+// claimRoutes points each named emitter at its entry, refusing a second entry
+// that claims the same emitter for the same wallet.
+func claimRoutes(next map[transferRouteKey]common.Address, named []namedEmitter) error {
+	for _, n := range named {
+		route := transferRouteKey{Emitter: n.emitter, Wallet: n.entry.WalletAddress}
+		if prev, ok := next[route]; ok && prev != n.entry.ContractAddress {
+			return fmt.Errorf("%s and %s both claim transfers of %s into %s; tracking both would double count",
+				prev.Hex(), n.entry.ContractAddress.Hex(), n.emitter.Hex(), n.entry.WalletAddress.Hex())
+		}
+		next[route] = n.entry.ContractAddress
+	}
+	return nil
+}
+
 // checkShareRatchet refuses to downgrade an entry that already named a share to
-// holding itself: share() reverting is how a direct share is detected, so a
-// transient failure would otherwise re-key the position onto the retired vault,
-// where the cache trigger drops it and every health signal stays green.
+// holding itself. ERC7540Source admits a share() revert as the direct-share shape
+// only once decimals() answers; this is the belt behind that: a node wrong twice
+// would otherwise re-key the position onto the retired vault, where the cache
+// trigger drops it and every health signal stays green.
 func (s *Service) checkShareRatchet(n namedEmitter, blockNumber int64) error {
 	if n.emitter != n.entry.ContractAddress {
 		return nil
@@ -622,13 +646,10 @@ func (s *Service) sweep(ctx context.Context, blockNumber int64, blockHash common
 
 	supplies := buildSupplySnapshots(fetch.Supplies, s.config.ChainID, blockNumber, blockVersion, blockTimestamp, "sweep")
 
-	if len(snapshots) == 0 && len(supplies) == 0 {
-		s.transferAliases = routes
-		return nil
-	}
-
-	if err := s.handler.HandleBatch(ctx, &SnapshotBatch{Snapshots: snapshots, Supplies: supplies}); err != nil {
-		return fmt.Errorf("sweep handler: %w", err)
+	if len(snapshots) > 0 || len(supplies) > 0 {
+		if err := s.handler.HandleBatch(ctx, &SnapshotBatch{Snapshots: snapshots, Supplies: supplies}); err != nil {
+			return fmt.Errorf("sweep handler: %w", err)
+		}
 	}
 	s.transferAliases = routes
 

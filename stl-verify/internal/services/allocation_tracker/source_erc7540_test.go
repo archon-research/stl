@@ -33,6 +33,15 @@ func packShareOutput(t *testing.T, src *ERC7540Source, share common.Address) []b
 	return data
 }
 
+func packDecimalsOutput(t *testing.T, src *ERC7540Source, decimals uint8) []byte {
+	t.Helper()
+	data, err := src.vaultABI.Methods["decimals"].Outputs.Pack(decimals)
+	if err != nil {
+		t.Fatalf("pack decimals output: %v", err)
+	}
+	return data
+}
+
 func packBalanceOutput(t *testing.T, src *ERC7540Source, balance *big.Int) []byte {
 	t.Helper()
 	data, err := src.vaultABI.Methods["balanceOf"].Outputs.Pack(balance)
@@ -355,6 +364,52 @@ func TestERC7540Source_FetchBalances_FailureModes(t *testing.T) {
 			expectedRounds: 1,
 		},
 		{
+			name: "transport error in decimals confirmation round",
+			rounds: func(src *ERC7540Source) []func() ([]outbound.Result, error) {
+				return []func() ([]outbound.Result, error){
+					func() ([]outbound.Result, error) { return []outbound.Result{{Success: false}}, nil },
+					func() ([]outbound.Result, error) { return nil, errors.New("rpc down") },
+				}
+			},
+			expectedRounds: 2,
+		},
+		{
+			name: "short result slice in decimals confirmation round",
+			rounds: func(src *ERC7540Source) []func() ([]outbound.Result, error) {
+				return []func() ([]outbound.Result, error){
+					func() ([]outbound.Result, error) { return []outbound.Result{{Success: false}}, nil },
+					func() ([]outbound.Result, error) { return []outbound.Result{}, nil },
+				}
+			},
+			expectedRounds: 2,
+		},
+		{
+			// A codeless address answers decimals() with Success and no data: still
+			// not a token.
+			name: "empty decimals return data",
+			rounds: func(src *ERC7540Source) []func() ([]outbound.Result, error) {
+				return []func() ([]outbound.Result, error){
+					func() ([]outbound.Result, error) { return []outbound.Result{{Success: false}}, nil },
+					func() ([]outbound.Result, error) {
+						return []outbound.Result{{Success: true, ReturnData: []byte{}}}, nil
+					},
+				}
+			},
+			expectedRounds: 2,
+		},
+		{
+			name: "undecodable decimals return data",
+			rounds: func(src *ERC7540Source) []func() ([]outbound.Result, error) {
+				return []func() ([]outbound.Result, error){
+					func() ([]outbound.Result, error) { return []outbound.Result{{Success: false}}, nil },
+					func() ([]outbound.Result, error) {
+						return []outbound.Result{{Success: true, ReturnData: []byte{0x01, 0x02}}}, nil
+					},
+				}
+			},
+			expectedRounds: 2,
+		},
+		{
 			name: "balanceOf call reverted",
 			rounds: func(src *ERC7540Source) []func() ([]outbound.Result, error) {
 				return []func() ([]outbound.Result, error){
@@ -440,10 +495,9 @@ func TestERC7540Source_FetchBalances_FailureModes(t *testing.T) {
 }
 
 // TestERC7540Source_FetchBalances_DirectShareTokenFallback covers the mixed
-// axis-synome 0.2.0 centrifuge migration: an entry whose contract has no share()
-// (a clean revert) is a direct ERC-20 share token (e.g. Spark's JTRSY), not an
-// ERC-7540 vault. The source must fall back to reading balanceOf on the address
-// itself rather than hard-failing — otherwise it poison-stalls that block.
+// axis-synome centrifuge entries: a contract with no share() (a clean revert) that
+// does answer decimals() is a direct ERC-20 share token (Spark's JTRSY), not an
+// ERC-7540 vault, and balanceOf is read on the address itself.
 func TestERC7540Source_FetchBalances_DirectShareTokenFallback(t *testing.T) {
 	directShare := common.HexToAddress("0x8c213ee79581ff4984583c6a801e5263418c4b86") // JTRSY
 	wallet := common.HexToAddress("0xbbbb")
@@ -456,7 +510,12 @@ func TestERC7540Source_FetchBalances_DirectShareTokenFallback(t *testing.T) {
 		switch mc.CallCount {
 		case 1: // share() reverts: not a vault
 			return []outbound.Result{{Success: false}}, nil
-		case 2: // balanceOf must target the address itself, not a resolved vault share
+		case 2: // decimals() on the same address confirms it is a token
+			if calls[0].Target != directShare {
+				t.Fatalf("decimals target = %s, want the entry address itself %s", calls[0].Target.Hex(), directShare.Hex())
+			}
+			return []outbound.Result{{Success: true, ReturnData: packDecimalsOutput(t, src, 6)}}, nil
+		case 3: // balanceOf must target the address itself, not a resolved vault share
 			if calls[0].Target != directShare {
 				t.Fatalf("balanceOf target = %s, want the entry address itself %s", calls[0].Target.Hex(), directShare.Hex())
 			}
@@ -482,16 +541,17 @@ func TestERC7540Source_FetchBalances_DirectShareTokenFallback(t *testing.T) {
 	}
 }
 
-// TestERC7540Source_FetchBalances_DeadAddressFailsAtBalanceOf confirms the
-// direct-share fallback does not mask a genuinely dead address: when share() AND
-// balanceOf both revert, the block still fails hard rather than silently dropping
-// the position.
-func TestERC7540Source_FetchBalances_DeadAddressFailsAtBalanceOf(t *testing.T) {
+// TestERC7540Source_FetchBalances_RevertingShareNeedsDecimalsToAnswer: a revert
+// on share() alone is not the direct-share shape — a vault whose share() failed
+// once would otherwise be keyed onto itself, a retired cache key. When decimals()
+// reverts too the address is neither a vault nor a token and the block fails
+// before any balance is read.
+func TestERC7540Source_FetchBalances_RevertingShareNeedsDecimalsToAnswer(t *testing.T) {
 	mc := testutil.NewMockMulticaller()
 	src := newTestERC7540Source(t, mc)
 
 	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
-		return []outbound.Result{{Success: false}}, nil // share() reverts, then balanceOf reverts
+		return []outbound.Result{{Success: false}}, nil // share() reverts, then decimals() reverts
 	}
 
 	entries := []*TokenEntry{{
@@ -502,13 +562,16 @@ func TestERC7540Source_FetchBalances_DeadAddressFailsAtBalanceOf(t *testing.T) {
 
 	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err == nil {
-		t.Fatal("expected hard error for a dead address, got nil")
+		t.Fatal("expected hard error when neither share() nor decimals() answers, got nil")
+	}
+	if !strings.Contains(err.Error(), "neither a vault nor a token") {
+		t.Fatalf("error = %v, want it to name the unconfirmed direct share", err)
 	}
 	if results != nil {
 		t.Fatal("expected nil results on failure")
 	}
 	if mc.CallCount != 2 {
-		t.Fatalf("multicall rounds = %d, want 2 (share then balanceOf)", mc.CallCount)
+		t.Fatalf("multicall rounds = %d, want 2 (share then decimals, no balanceOf)", mc.CallCount)
 	}
 }
 

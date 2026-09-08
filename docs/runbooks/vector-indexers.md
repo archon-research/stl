@@ -2872,19 +2872,29 @@ of bug the ticket fixed. So the block NACKs, SQS redelivers it, and it fails
 again — **every block on that chain stops, not just blocks touching the entry**,
 because the resolution runs on any block carrying a tracked transfer.
 
-Log lines, all wrapped in `resolve transfer aliases for block <N>`:
+Log lines. grep for the inner text, not the wrapper: an entry's first resolution
+wraps them in `resolve transfer aliases for block <N>`, every later fetch in
+`route transfers for block <N>` / `route transfers for sweep block <N>`, and the
+last line below in `read the [sweep] share tokens of block <N>`.
 
 - `erc7540 naming the share tokens of <n> entries: ...` — the `share()` multicall
-  failed or returned something undecodable.
+  failed or returned something undecodable. One variant is deliberate:
+  `share() reverted and decimals() did not answer, neither a vault nor a token: <A>`
+  — a reverting `share()` is only accepted as a direct share when `decimals()`
+  answers on the same address; a node answering wrongly self-clears on redelivery,
+  a genuinely dead address does not.
 - `... needs a share alias but its source cannot name one` — an entry routes to a
   source that cannot resolve shares; a registry/entry misconfiguration.
 - `no share token named for entry <contract>/<wallet>` — the resolver answered
   but omitted an entry.
 - `entry <contract>/<wallet> named share <S> before and now reports itself` — the
-  ratchet: a transient `share()` failure reads as the direct-share shape and
-  would re-key the position onto its vault, whose cache key is retired.
+  ratchet: a `share()` revert on an entry that already named a share would re-key
+  the position onto its vault, whose cache key is retired.
 - `<A> and <B> both claim transfers of <S> into <W>` — two vaults front one share
   for one wallet; tracking both would double count.
+- `centrifuge entry <contract>/<wallet> came back with no share token` — the
+  source returned a balance without naming the share; the routes would otherwise
+  freeze at their last good value.
 
 **There is no per-entry discard.** The only sanctioned remedy today is to fix the
 underlying entry: correct or remove it in the axis-synome contract, regenerate,
@@ -2892,6 +2902,16 @@ and redeploy. Do not "unblock" the chain by deleting the SQS message — that
 drops a block for every other position on it. If the cause is a transient RPC
 failure the worker recovers on its own once the node answers; the ratchet line
 specifically should not self-clear, and means the read is wrong rather than slow.
+
+### Converging `allocation_position_current` afterwards
+
+If the cache needs converging with history (a restore, a window with the trigger
+disabled, a newly retired key), re-run the statement in
+`stl-verify/db/migrations/20260908_120100_converge_allocation_position_current_past_retired_keys.sql`
+as the migrator (the cache's owner). It purges cache rows on keys
+`allocation_position_key_retirement_current` marks retired, then merges the rest
+forward-only. **Do not re-run `20260825_120100`**: it predates the retirement
+register and would put the retired vault keys straight back into the cache.
 
 ### Verify recovery
 
