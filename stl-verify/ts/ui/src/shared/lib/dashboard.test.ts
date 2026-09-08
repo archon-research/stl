@@ -292,16 +292,25 @@ describe('formatWadValue', () => {
 
   it.each([
     ['-1500000000000000000', '-1.5'],
-    ['-1000000000000000000000000', '-1M'],
-    // Truncates to nothing, so the sign has nothing to sit on: "-0" would claim
-    // a direction the figure does not have.
-    ['-1', '0'],
+    // Below one wad, so the whole part is `0n` and stringifies unsigned: the
+    // sign survives only in the prefix. An implementation that negates the
+    // remainder instead passes every other case here and renders this `0.5`.
+    ['-500000000000000000', '-0.5'],
+    ['-1234500000000', '-0.000001'],
+    ['-1000000500000000000000000', '-1M'],
+    ['-1.5E+18', '-1.5'],
   ])(
     'carries the sign of the negative wad %o through as %o',
     (input, expected) => {
       expect(formatWadValue(input)).toBe(expected);
     },
   );
+
+  it('drops the sign of a magnitude that truncates away entirely', () => {
+    // "-0" would claim a direction the figure does not have. The guard is
+    // `formatTokenAmount`'s zero branch, not the sign handling above it.
+    expect(formatWadValue('-1')).toBe('0');
+  });
 
   it('expands a positive exponent rather than reading only its leading digit', () => {
     expect(formatWadValue('2.5707140E+27')).toBe('2.57B');

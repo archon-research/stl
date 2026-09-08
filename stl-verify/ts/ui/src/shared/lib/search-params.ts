@@ -131,11 +131,11 @@ function legacyReferenceParam() {
  * `reference=false` asked for STL's own figures by name, so it becomes
  * `indexed` rather than falling through to the default. An explicit `source`
  * wins: it is the current spelling.
+ *
+ * The `| undefined` on the constraint is load-bearing: zod infers it, a bare
+ * `source?: Provenance` rejects it, and that failure is not local — the
+ * transform fails and the schema's whole output type degrades with it.
  */
-// The `| undefined` is load-bearing: zod infers it, a bare
-// `source?: Provenance` rejects it, and that failure is not local — the
-// transform fails, so the schema's output degrades to `unknown` and every
-// route reading `search` loses its shape.
 function adoptLegacyReferenceFlag<
   T extends {
     source?: Provenance | undefined;

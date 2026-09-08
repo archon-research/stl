@@ -86,8 +86,12 @@ export type SeriesWindow = {
 // every bucket rather than being truncated to the default page.
 function bucketQuery(range: SeriesWindow) {
   return {
-    from_timestamp: range.fromTimestamp ?? null,
-    to_timestamp: range.toTimestamp ?? null,
+    // Omitted, not `null`: the key sanitizer strips an absent param and keeps
+    // a null one, so coalescing would split the cache entry for one window.
+    ...(range.fromTimestamp !== undefined && {
+      from_timestamp: range.fromTimestamp,
+    }),
+    ...(range.toTimestamp !== undefined && { to_timestamp: range.toTimestamp }),
     resolution: range.resolution,
     aggregate: true,
     limit: 500,
@@ -490,7 +494,7 @@ export const riskBreakdownQuery = (
     {
       params: {
         path: { chain_id: chainId, token_address: tokenAddress },
-        ...(primeId !== null && { query: { prime_id: primeId } }),
+        ...(primeId && { query: { prime_id: primeId } }),
       },
     },
     {
@@ -576,16 +580,26 @@ export const activityQuery = (
     {
       params: {
         query: {
-          // openapi-fetch's serializer drops `null` and `undefined`
-          // alike, so coalescing here is type-only.
-          prime_id: filters.prime_id ?? null,
-          chain_id: filters.chain_id ?? null,
-          protocol_name: filters.protocol_name ?? null,
-          action_type: filters.action_type ?? null,
-          token_symbol: filters.token_symbol ?? null,
-          from_timestamp: filters.from_timestamp ?? null,
-          to_timestamp: filters.to_timestamp ?? null,
-          // `limit` alone has no `null` in its wire type.
+          // Every field is omitted rather than nulled when unset: the key
+          // sanitizer strips an absent param and keeps a null one, so
+          // coalescing would give an unscoped read a different cache entry.
+          ...(filters.prime_id !== undefined && { prime_id: filters.prime_id }),
+          ...(filters.chain_id !== undefined && { chain_id: filters.chain_id }),
+          ...(filters.protocol_name !== undefined && {
+            protocol_name: filters.protocol_name,
+          }),
+          ...(filters.action_type !== undefined && {
+            action_type: filters.action_type,
+          }),
+          ...(filters.token_symbol !== undefined && {
+            token_symbol: filters.token_symbol,
+          }),
+          ...(filters.from_timestamp !== undefined && {
+            from_timestamp: filters.from_timestamp,
+          }),
+          ...(filters.to_timestamp !== undefined && {
+            to_timestamp: filters.to_timestamp,
+          }),
           ...(filters.limit !== undefined && { limit: filters.limit }),
         },
       },
@@ -650,8 +664,8 @@ export const tokensQuery = (filters: TokenFilters) =>
     {
       params: {
         query: {
-          chain_id: filters.chain_id ?? null,
-          symbol: filters.symbol ?? null,
+          ...(filters.chain_id !== undefined && { chain_id: filters.chain_id }),
+          ...(filters.symbol !== undefined && { symbol: filters.symbol }),
           ...(filters.limit !== undefined && { limit: filters.limit }),
         },
       },

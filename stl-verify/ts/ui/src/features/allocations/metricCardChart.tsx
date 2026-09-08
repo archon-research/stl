@@ -237,7 +237,7 @@ export function MetricCardTrend({
   if (isLoading) {
     // A single block at the chart's own footprint, so the placeholder fills the
     // same space and there's no jump (or floating box) when the real chart loads
-    // in. Not `SkeletonStack`: see `Placeholder` in metricCards.tsx.
+    // in.
     return (
       <div className={css({ mt: '2' })}>
         <Placeholder width="100%" height={CHART_HEIGHT} />

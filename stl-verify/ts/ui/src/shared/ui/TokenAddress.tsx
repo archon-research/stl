@@ -187,7 +187,6 @@ export function TokenAddress({
                 fontWeight: 'medium',
                 color: explorerUrl ? 'text.strong' : 'text.muted',
                 cursor: explorerUrl ? 'pointer' : 'not-allowed',
-                // panda's `css()` rejects an explicit undefined condition.
                 ...(explorerUrl && { _hover: { bg: 'surface.subtle' } }),
               })}
             >

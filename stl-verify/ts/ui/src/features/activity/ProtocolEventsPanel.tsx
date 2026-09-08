@@ -188,8 +188,6 @@ export function TxProtocolEventsPanel({ txHash }: { txHash: string }) {
         isLoading={events === null && error === null}
         error={error}
         isEmpty={events !== null && events.length === 0}
-        // Not `SkeletonStack`: this panel is a data-table detail cell, whose
-        // recipe grounds it in `surface.subtle` — the kit's own placeholder fill.
         loadingView={
           <div className={css({ display: 'grid', gap: '2' })}>
             <Placeholder width="100%" height={40} />

@@ -143,6 +143,8 @@ const AAVAUSDC = '0x625e7708f30ca75bfd92586e17077590c60eb4cd';
  * Normalised here to 736, the id the allocation rows point at, because a fixture
  * exists to be coherent rather than to reproduce an upstream duplicate.
  */
+// Narrowed, not widened: the wire types are optional for a case no fixture
+// row is, and the compiler rejects any row that disagrees.
 type TokenRow = readonly [
   id: Token['id'],
   chain_id: Token['chain_id'],

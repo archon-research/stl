@@ -810,9 +810,9 @@ export function formatWadValue(
   try {
     const wei = BigInt(plain.split('.')[0] || '0');
     const wad = 10n ** 18n;
-    // Sign is split off before the divide because BigInt truncates toward zero,
-    // so a negative wei leaves a negative remainder too: composing the two gave
-    // "-1.-500000", which parses as NaN and rendered as an em dash.
+    // Sign is split off before the divide: BigInt truncates toward zero, so a
+    // negative wei leaves a negative remainder and composing the two gave
+    // "-1.-500000".
     const negative = wei < 0n;
     const magnitude = negative ? -wei : wei;
     const whole = magnitude / wad;
