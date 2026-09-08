@@ -62,6 +62,7 @@ func TestSetupRunner_RequiresChainID(t *testing.T) {
 
 func TestSetupRunner_RequiresAlchemyKey(t *testing.T) {
 	t.Setenv("CHAIN_ID", "1")
+	t.Setenv("DEPLOY_ENV", "staging")
 	t.Setenv("S3_BUCKET", rawArchiveBucket)
 	t.Setenv("ALCHEMY_API_KEY", "")
 
@@ -77,17 +78,48 @@ func TestSetupRunner_RequiresAlchemyKey(t *testing.T) {
 	}
 }
 
-// The archive is where every replayed row's block_version comes from, so a run without
-// it would stamp a guess. It is required before the RPC is dialled: a missing variable
-// must not surface as a worker that came up and then failed its first run.
-func TestSetupRunner_RequiresS3Bucket(t *testing.T) {
-	t.Setenv("CHAIN_ID", "1")
-	t.Setenv("ALCHEMY_API_KEY", "key")
-	t.Setenv("S3_BUCKET", "")
+// The archive is where every replayed row's block_version comes from, so a run without a
+// usable one would stamp a guess, and another chain's would resolve versions for heights
+// this chain never published. All of it is settled before the RPC is dialled: a
+// misconfigured archive must not surface as a worker that came up and then failed its
+// first run.
+func TestSetupRunner_RefusesAnUnusableArchiveConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     map[string]string
+		wantErr string
+	}{
+		{
+			name:    "no bucket at all",
+			env:     map[string]string{"S3_BUCKET": ""},
+			wantErr: "S3_BUCKET",
+		},
+		{
+			name:    "no environment to check the bucket against",
+			env:     map[string]string{"DEPLOY_ENV": ""},
+			wantErr: "DEPLOY_ENV",
+		},
+		{
+			name:    "another chain's raw bucket",
+			env:     map[string]string{"S3_BUCKET": "stl-sentinelstaging-base-raw-89d540d0"},
+			wantErr: "S3_BUCKET / CHAIN_ID mismatch",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CHAIN_ID", "1")
+			t.Setenv("DEPLOY_ENV", "staging")
+			t.Setenv("ALCHEMY_API_KEY", "key")
+			t.Setenv("S3_BUCKET", rawArchiveBucket)
+			for name, value := range tc.env {
+				t.Setenv(name, value)
+			}
 
-	_, _, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
-	if err == nil || !strings.Contains(err.Error(), "S3_BUCKET") {
-		t.Fatalf("err = %v, want the raw-archive bucket requirement", err)
+			_, _, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want one mentioning %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 

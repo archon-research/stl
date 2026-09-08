@@ -9,15 +9,15 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-var sharedDSN string
+var (
+	sharedDSN           string
+	sharedLocalStackCfg testutil.LocalStackConfig
+)
 
 func TestMain(m *testing.M) {
-	dsn, cleanup := testutil.StartTimescaleDBForMain()
-	sharedDSN = dsn
-
-	code := m.Run()
-
-	cleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.RunShared(m, testutil.Shared{
+		TimescaleDSN:       &sharedDSN,
+		LocalStack:         &sharedLocalStackCfg,
+		LocalStackServices: "s3",
+	}))
 }

@@ -845,7 +845,12 @@ highest version archived there, the same rule `morpho-vault-backfill` reads off
 the S3 key it replays. That is what makes a replayed row dedupe with live
 indexing's row for the same block instead of ranking against it. The bucket
 arrives as `S3_BUCKET` from the ExternalSecret and the pod reads it through its
-EKS Pod Identity association; a run without that access fails on its first log.
+EKS Pod Identity association. Both are settled at startup: the name is checked
+against `CHAIN_ID` (through `DEPLOY_ENV`), and the pod lists and reads the bucket
+once — so another chain's bucket or a missing grant is a worker that will not
+start, rather than a run that dies on its first height, three attempts over.
+Every run closes with one `block versions resolved from the raw archive` line:
+how many heights it resolved, and which of them carried a version above 0.
 A height the archive cannot answer for **stops the run**, naming the height: it
 holds no object there, or the version it holds names a different block (an
 orphaned fork kept past its reorg — the ARCT-379 shape). Repair the archive
@@ -1638,7 +1643,9 @@ which names the archived hash beside the one being replayed. Both name the heigh
 and the bucket. The run stamps every row with the version the archive holds (see
 "Block versions come from the raw archive" above), so it stops rather than guess,
 and it does not clear on retry: repair the archive with `block-republisher` (one
-height) or `raw-block-bulk-downloader` (a range), then start a new run.
+height) or `raw-block-bulk-downloader` (a range), then start a new run. The
+pinned head is resolved before the sweep starts, so a run that cannot resolve
+that one fails in seconds instead of after the whole replay.
 
 **Not failures:**
 

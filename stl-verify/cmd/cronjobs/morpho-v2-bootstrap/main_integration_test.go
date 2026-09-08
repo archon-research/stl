@@ -13,6 +13,7 @@ import (
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_v2_bootstrap"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
@@ -24,7 +25,33 @@ func setWorkerEnv(t *testing.T, configuredChain, nodeChain int64) {
 	t.Setenv("CHAIN_ID", strconv.FormatInt(configuredChain, 10))
 	t.Setenv("ALCHEMY_API_KEY", "test-key")
 	t.Setenv("ALCHEMY_HTTP_URL", testutil.StartChainIDRPC(t, nodeChain).URL)
-	t.Setenv("S3_BUCKET", rawArchiveBucket)
+	setArchiveEnv(t, configuredChain)
+}
+
+// deployEnv is what chainutil's bucket guard checks the name against, so the environment
+// the test declares and the bucket it creates have to agree.
+const deployEnv = "mv2test"
+
+// setArchiveEnv gives the worker the chain's raw archive the way the ConfigMap and the
+// ExternalSecret do — a bucket that exists and is readable, since the startup probe reads
+// it before the runner is built.
+func setArchiveEnv(t *testing.T, chainID int64) {
+	t.Helper()
+	ctx := context.Background()
+
+	slug, err := chainutil.ChainSlug(chainID)
+	if err != nil {
+		t.Fatalf("resolving the chain slug for %d: %v", chainID, err)
+	}
+	bucket := testutil.S3TestBucketName(t, "stl-sentinel"+deployEnv+"-"+slug+"-raw-")
+	testutil.EnsureBucket(t, ctx, testutil.NewS3Client(t, ctx, sharedLocalStackCfg), bucket)
+
+	t.Setenv("DEPLOY_ENV", deployEnv)
+	t.Setenv("S3_BUCKET", bucket)
+	t.Setenv("AWS_S3_ENDPOINT", sharedLocalStackCfg.Endpoint)
+	t.Setenv("AWS_REGION", sharedLocalStackCfg.Region)
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 }
 
 func TestBootstrapWorkerClosesRegisteredResources(t *testing.T) {
@@ -41,7 +68,7 @@ func TestBootstrapWorkerClosesRegisteredResources(t *testing.T) {
 func TestSetupRunner_RequiresAlchemyHTTPURLOffMainnet(t *testing.T) {
 	t.Setenv("CHAIN_ID", "8453")
 	t.Setenv("ALCHEMY_API_KEY", "key")
-	t.Setenv("S3_BUCKET", rawArchiveBucket)
+	setArchiveEnv(t, 8453)
 	t.Setenv("ALCHEMY_HTTP_URL", "")
 
 	_, _, err := setupRunner(context.Background(), temporal.Dependencies{}, temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
@@ -96,6 +123,20 @@ func TestSetupRunner_WiresAgainstAMigratedDatabase(t *testing.T) {
 	t.Cleanup(cleanup)
 	if runner == nil {
 		t.Fatal("setupRunner returned a nil runner")
+	}
+}
+
+// TestSetupRunner_RefusesAnArchiveItCannotList keeps the startup probe on the path a
+// deployment reaches: a bucket this pod may not list — a missing Pod Identity grant, or a
+// name that is not there — must stop the worker rather than fail every height of a run,
+// three attempts over.
+func TestSetupRunner_RefusesAnArchiveItCannotList(t *testing.T) {
+	setWorkerEnv(t, 1, 1)
+	t.Setenv("S3_BUCKET", "stl-sentinel"+deployEnv+"-ethereum-raw-never-created")
+
+	_, _, err := setupRunner(context.Background(), temporal.Dependencies{Logger: slog.Default()}, temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
+	if err == nil || !strings.Contains(err.Error(), "s3:ListBucket") {
+		t.Fatalf("err = %v, want one naming the listing grant it needs", err)
 	}
 }
 

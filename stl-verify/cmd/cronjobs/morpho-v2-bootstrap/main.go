@@ -34,8 +34,9 @@
 // The run's events come from a node, which carries no block_version, so each one is
 // stamped with the version the chain's raw archive holds at that height — the same
 // highest-version rule the morpho-vault-backfill reads off the S3 key it replays. The
-// run therefore needs S3_BUCKET and read access to it, and stops on a height the archive
-// cannot answer for or answers with another block; repair the archive first (see
+// run therefore needs S3_BUCKET (cross-checked against CHAIN_ID, so DEPLOY_ENV too) and
+// read access to it, both settled at startup, and stops on a height the archive cannot
+// answer for or answers with another block; repair the archive first (see
 // docs/runbooks/vector-cronjobs.md).
 //
 // # Idempotency
@@ -226,7 +227,7 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies, progress morph
 	sweepConfig.ChainID = int64(chainID)
 	sweepConfig.Logger = deps.Logger
 
-	versions, err := newBlockVersionResolver(ctx, deps.Logger)
+	bucket, err := archiveBucket(int64(chainID))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -251,6 +252,11 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies, progress morph
 		return nil, nil, fmt.Errorf("verifying the RPC node's chain: %w", err)
 	}
 
+	versions, err := newBlockVersionResolver(ctx, bucket, deps.Logger)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	replayService, err := buildReplayService(ctx, deps, int64(chainID), ethClient)
 	if err != nil {
 		return nil, nil, err
@@ -264,20 +270,39 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies, progress morph
 	return temporal.RunnerFunc(service.Run), ethClient.Close, nil
 }
 
-// newBlockVersionResolver reads the chain's raw archive — the same bucket the backup
-// worker writes and the morpho-vault-backfill replays from, under the same variable
-// name — for the block_version each replayed row is stamped with. Read only; S3 access
-// comes from this Deployment's EKS Pod Identity association, granted in the infra repo.
-func newBlockVersionResolver(ctx context.Context, logger *slog.Logger) (*blockversion.Resolver, error) {
+// archiveBucket names the chain's raw archive — the same bucket the backup worker writes
+// and the morpho-vault-backfill replays from, under the same variable name — which every
+// replayed row's block_version is read from. Another chain's bucket answers for heights
+// this chain never published, and the two arrive as independent variables, so they are
+// cross-checked here the way the block-republisher cross-checks them.
+func archiveBucket(chainID int64) (string, error) {
 	bucket, err := env.Require("S3_BUCKET")
 	if err != nil {
-		return nil, err
+		return "", err
 	}
+	deployEnv, err := env.Require("DEPLOY_ENV")
+	if err != nil {
+		return "", err
+	}
+	if err := chainutil.ValidateS3BucketForChain(chainID, bucket, deployEnv); err != nil {
+		return "", fmt.Errorf("S3_BUCKET / CHAIN_ID mismatch: %w", err)
+	}
+	return bucket, nil
+}
+
+// newBlockVersionResolver opens the archive read-only — S3 access comes from this
+// Deployment's EKS Pod Identity association, granted in the infra repo — and probes it
+// the way the block-republisher does, so a missing grant is a worker that will not start
+// rather than three attempts of a run that dies on its first height.
+func newBlockVersionResolver(ctx context.Context, bucket string, logger *slog.Logger) (*blockversion.Resolver, error) {
 	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{StaticCredentialsFromEnv: true})
 	if err != nil {
 		return nil, fmt.Errorf("loading AWS config: %w", err)
 	}
 	archive := s3adapter.NewArchiveReader(s3adapter.NewReaderFromEnv(awsCfg, logger), bucket)
+	if err := archive.Ping(ctx); err != nil {
+		return nil, fmt.Errorf("the raw archive %s is unusable: %w", bucket, err)
+	}
 	return blockversion.NewResolver(archive, "s3://"+bucket), nil
 }
 

@@ -368,6 +368,7 @@ data:
 # defaults to eth-mainnet, matching CHAIN_ID below. The raw bucket every replayed
 # row's block_version is read from is not here — it carries a random suffix and so
 # arrives via the ExternalSecret, the same way the morpho-vault-backfill gets it.
+# DEPLOY_ENV is what the startup guard checks that bucket's name against.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -377,6 +378,7 @@ data:
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "1"
   AWS_REGION: "eu-west-1"
+  DEPLOY_ENV: "staging"
 ---
 # On-demand Morpho vault backfill worker (VEC-218). ALCHEMY_HTTP_URL is omitted:
 # the binary defaults to eth-mainnet, matching CHAIN_ID below. The bucket is not
