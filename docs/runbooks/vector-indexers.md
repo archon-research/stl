@@ -1270,6 +1270,21 @@ volume check alongside it, and legitimately stays at zero while the worker is
 replaying an already-indexed range. Failing both, confirm on-chain that no Curve
 activity occurred (legitimate quiet window).
 
+### History
+
+Fired on 2026-09-07 (13:57 UTC onwards, staging) against a **healthy** indexer,
+together with `VectorUniswapV3IndexerNotWritingState`. #711 (VEC-475) had just
+rewritten this rule to key on `curve_state_rows_attempted_total`, and the Alerts
+workflow synced the new rule within minutes of the merge while the pods still ran
+the previous image, which never emits that counter — so the right side was absent
+and the `unless` fired by design. The next rollout would have closed the gap, but
+that rollout stayed blocked for hours: the same PR's migration failed in the
+PreSync hook on staging (a CHECK constraint shape Tiger's tiering rejects; see
+the tiering round-trip trap in `stl-verify/db/migrations/AGENTS.md`), which left
+every staging deploy stuck and the alert firing until the fix rolled. If this
+rule fires right after a deploy that touched it, compare the running image's
+commit with the rule's before reading the indexer as broken.
+
 ---
 
 ## uniswap-v3-indexer (VEC-261)
@@ -1521,6 +1536,13 @@ half-hour tripped it. The `pools_touched` gate replaced the blocks-processed
 gate to close that false positive. Because that gate is blind to an always-empty
 touched set, `VectorUniswapV3IndexerNoPoolsTouched` was added at the same time to
 cover the class the old rule had covered by accident.
+
+Fired again on 2026-09-07 (13:57 UTC onwards, staging) against a **healthy**
+indexer, alongside `VectorCurveIndexerNoStateWritten`, for the reason recorded in
+that rule's History: #711 rewrote both rules to key on
+`*_state_rows_attempted_total`, the rule reached Mimir before the image that
+emits the counter did, and the rollout was then held up by the same PR's
+migration failing on staging.
 
 ---
 

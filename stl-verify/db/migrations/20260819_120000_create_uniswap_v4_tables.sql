@@ -178,7 +178,13 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_pool_state
     block_timestamp         TIMESTAMPTZ NOT NULL,
     sqrt_price_x96          NUMERIC     NOT NULL,
     tick                    INT         NOT NULL CHECK (tick BETWEEN -887272 AND 887272),
-    protocol_fee            INT         NOT NULL CHECK (protocol_fee BETWEEN 0 AND 16777215
+    -- Flat comparisons, not BETWEEN: a BETWEEN nested inside a compound AND keeps a
+    -- nested AND in the stored tree but flattens on re-parse, and Tiger's tiering
+    -- re-parses every CHECK when it attaches the OSM chunk, so add_tiering_policy
+    -- below fails with "child table has different definition for check constraint"
+    -- (42804). See the tiering round-trip trap in AGENTS.md.
+    protocol_fee            INT         NOT NULL CHECK (protocol_fee >= 0
+                                                    AND protocol_fee <= 16777215
                                                     AND (protocol_fee & 4095) <= 1000
                                                     AND (protocol_fee >> 12) <= 1000),
     lp_fee                  INT         NOT NULL CHECK (lp_fee BETWEEN 0 AND 1000000),
