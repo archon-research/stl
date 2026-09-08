@@ -14,6 +14,28 @@ import pandas as pd
 from app.risk_engine.core_model.convergence import monte_carlo_diagnostics
 
 
+def _book_value_of_fill(
+    prices: np.ndarray, cum_liq: np.ndarray, cum_value: np.ndarray, start: float, fill: np.ndarray
+) -> np.ndarray:
+    """USD-weighted value of filling ``fill`` USD from consumed position ``start``.
+
+    Counts the partial tick at both ends. A fill inside one tick is priced as
+    ``fill * price`` rather than as a difference of cumulative sums, which lose
+    the digits of a small fill deep into a large book.
+    """
+    last = len(cum_liq) - 1
+    end = start + fill
+    # Tick holding the first unit after ``start`` and the last unit before ``end``.
+    i = min(int(np.searchsorted(cum_liq, start, side="right")), last)
+    j = np.minimum(np.searchsorted(cum_liq, end, side="left"), last)
+    prev_liq = np.concatenate(([0.0], cum_liq[:-1]))
+    prev_value = np.concatenate(([0.0], cum_value[:-1]))
+
+    same_tick = fill * prices[i]
+    across = (cum_liq[i] - start) * prices[i] + (prev_value[j] - cum_value[i]) + (end - prev_liq[j]) * prices[j]
+    return np.where(j <= i, same_tick, across)
+
+
 class Liquidator:
     def __init__(
         self,
@@ -85,12 +107,24 @@ class Liquidator:
     def slippage_calculator_cum(
         ticks_df: pd.DataFrame, amount_liq_usd: np.ndarray, sim_price: float, already_consumed: float = 0.0
     ) -> np.ndarray:
+        """Slippage of selling ``amount_liq_usd`` into the book after ``already_consumed`` USD of it is gone.
 
+        Deviates from upstream core_model_copy (VEC-739): the consumed slice is
+        priced through ``_book_value_of_fill`` instead of differencing cumulative
+        sums at tick boundaries, which gave 0.9999 to any fill inside one tick.
+        Registered in the README's "Changes from the original standalone version".
+        """
         N = amount_liq_usd.shape[0]
         add_slippage = np.zeros(N)
 
         prices = ticks_df["price"].to_numpy(dtype=np.float64)
         liquidity = ticks_df["liquidity"].to_numpy(dtype=np.float64)
+
+        # A NaN level would otherwise read as unlimited free liquidity; a negative one breaks the cumsum walk.
+        if not (np.all(np.isfinite(prices)) and np.all(np.isfinite(liquidity)) and np.all(liquidity >= 0)):
+            raise ValueError("order book has non-finite or negative levels")
+        if not np.isfinite(already_consumed):
+            raise ValueError(f"already_consumed is not finite: {already_consumed!r}")
 
         mask = prices <= sim_price
         prices = prices[mask]
@@ -103,26 +137,21 @@ class Liquidator:
         cum_value = np.cumsum(liquidity * prices)
 
         total_available = cum_liq[-1]
-        effective_avail = max(total_available - already_consumed, 0.0)
+        start = min(max(already_consumed, 0.0), total_available)
+        effective_avail = total_available - start
 
         # Overflow: amount exceeds what remains in the book after prior consumption
         overflow = amount_liq_usd > effective_avail
         add_slippage[overflow] = (amount_liq_usd[overflow] - effective_avail) / amount_liq_usd[overflow]
 
-        liq_eff = np.minimum(amount_liq_usd, effective_avail)
-        total_needed = already_consumed + liq_eff  # absolute position in book
+        liq_used = np.minimum(amount_liq_usd, effective_avail)
+        value_used = _book_value_of_fill(prices, cum_liq, cum_value, start, liq_used)
 
-        idx_end = np.minimum(np.searchsorted(cum_liq, total_needed, side="left"), len(cum_liq) - 1)
-        idx_base = np.minimum(np.searchsorted(cum_liq, np.full(N, already_consumed), side="left"), len(cum_liq) - 1)
-
-        value_used = cum_value[idx_end] - cum_value[idx_base]
-        liq_used = cum_liq[idx_end] - cum_liq[idx_base]
-
-        safe_liq = np.where(liq_used > 0, liq_used, 1e-12)
-        avg_price = value_used / safe_liq
+        # Nothing filled means no price to compare: the overflow term alone carries the slippage.
+        avg_price = np.where(liq_used > 0, value_used / np.where(liq_used > 0, liq_used, 1.0), sim_price)
 
         price_impact = (sim_price - avg_price) / sim_price
-        slippage = np.minimum(price_impact + add_slippage, 0.9999)
+        slippage = np.clip(price_impact + add_slippage, 0.0, 0.9999)
         slippage[amount_liq_usd == 0.0] = 0.0
 
         return slippage
