@@ -720,15 +720,38 @@ groups:
   #     already recorded, so a healthy run appends ~nothing under that label —
   #     apart from an adapter its probe now classifies differently from the log,
   #     which is a correction and is meant to be recorded.
-  #     The two V2 registration rules below match the LIVE indexers by
-  #     service_name: the on-demand replay workers count on this instrument too,
-  #     and re-recording history is not an incident.
   #   morpho_v2_snapshots_written_total{snapshot_type}
   #     one sample per COMMITTED event-driven snapshot
   #     (adapter_state | vault_cap | vault_fee).
   #   morpho_events_processed_total{event_type}
   #     already existed; the V2 event names are registered topics on it, so the
   #     ForceDeallocate and "events seen" signals below need no new instrument.
+  #
+  # SCOPED TO THE LIVE INDEXERS. Three rules in this group count work an
+  # on-demand replay can redo — VectorMorphoV2UnknownAdapters,
+  # VectorMorphoV2LazyAdapterRegistrations and
+  # VectorMorphoV2ForceDeallocateSurge — and all three carry
+  # service_name=~"morpho-indexer|base-morpho-indexer" in their expr. WHEN A
+  # CHAIN IS ADDED, ADD ITS DEPLOYMENT NAME TO ALL THREE; that list lives only in
+  # those three expressions.
+  #
+  # Why: morpho-vault-backfill and morpho-v2-bootstrap replay history through the
+  # same handlers and count on these same instruments under their own
+  # service_name, so an on-demand replay drives all three counters by design.
+  # Re-recording history is not an incident and there is nothing to act on —
+  # measured, the 2026-08-28 staging era backfill replayed 2,604 ForceDeallocate
+  # at up to 1,025/h and held VectorMorphoV2ForceDeallocateSurge firing for 7h
+  # against ~1/h of real activity. Each rule's own note says why a replay run
+  # would fire that rule. Nothing is lost by excluding them: the replay workers'
+  # series stay on the dashboard as backfill progress.
+  #
+  # "Live indexer" is one Deployment per chain (morpho-indexer on mainnet,
+  # base-morpho-indexer on Base since ARCT-414) running the same binary; each
+  # emits its own service_name (SERVICE_NAME env from the pod's `app` label;
+  # binary support lands with ARCT-413 — until then the Base pod still reports
+  # service_name="morpho-indexer" with chain="base", and the regex covers both
+  # states), so the match lists every per-chain name explicitly rather than a
+  # prefix glob that could one day admit a replay worker.
   #
   # NO staleness rule here, deliberately. V2 vault state is event-driven: a
   # dormant vault legitimately writes nothing for days. Chain-verified in the
@@ -777,13 +800,10 @@ groups:
         # adapter_type="unknown" excludes "unprobed" by construction, so removals
         # cannot inflate this.
         #
-        # SCOPED to the live indexers, the same match and for the same reason as
-        # VectorMorphoV2ForceDeallocateSurge below (read its scoping note; add a
-        # new chain's name in both places). morpho-vault-backfill and
-        # morpho-v2-bootstrap replay history through the same handlers and count
-        # on this same instrument under their own service_name, so an on-demand
-        # replay re-recording a known Unknown population would fire this by
-        # design — nothing has changed on chain, and there is nothing to act on.
+        # SCOPED to the live indexers — the group note above has the matcher, the
+        # reason all three scoped rules carry it, and the chain-onboarding rule.
+        # For this rule specifically: a replay re-recording a known Unknown
+        # population would fire it by design, and nothing has changed on chain.
         # The live indexer is still the source this is asking about, and a real
         # new adapter family reaches it within a day of shipping.
         #
@@ -840,16 +860,14 @@ groups:
         # changed between two reads. Deliberately not >0: those appends are by
         # design not an incident.
         #
-        # SCOPED to the live indexers, the same match and for the same reason as
-        # VectorMorphoV2ForceDeallocateSurge below (read its scoping note; add a
-        # new chain's name in both places). morpho-vault-backfill and
-        # morpho-v2-bootstrap replay history through the same handlers and count
-        # on this same instrument under their own service_name. Replaying an
-        # Allocate whose vault was discovered mid-life is precisely how the missing
-        # add_adapter_event history gets filled in, so a replay run drives this
-        # counter by design and firing on it would page for the fix. What the
-        # alert is asking about — is the LIVE enumeration missing adapters — is
-        # only answerable from the live indexer's own series.
+        # SCOPED to the live indexers — the group note above has the matcher, the
+        # reason all three scoped rules carry it, and the chain-onboarding rule.
+        # For this rule specifically: replaying an Allocate whose vault was
+        # discovered mid-life is precisely how the missing add_adapter_event
+        # history gets filled in, so a replay run drives this counter by design
+        # and firing on it would page for the fix. What the alert is asking
+        # about — is the LIVE enumeration missing adapters — is only answerable
+        # from the live indexer's own series.
         expr: |
           sum by (chain, cluster) (
             increase(morpho_v2_adapter_registrations_total{
@@ -923,27 +941,18 @@ groups:
         # the runbook's first check is to rule out a loop, which is a better trade
         # than going blind on a real liquidity run every time one block errors.
         #
-        # SCOPED to the live indexer. morpho-vault-backfill and morpho-v2-bootstrap
-        # replay history through the same handlers and count on this same
-        # instrument under their own service_name, and neither emits
-        # morpho_blocks_processed_total, so the loop gate cannot suppress them.
-        # The 2026-08-28 staging era backfill replayed 2,604 ForceDeallocate at up
-        # to 1,025/h and held this firing for 7h against ~1/h of real activity.
-        # Replayed history is not a liquidity run; the replay workers' series stay
-        # on the dashboard as backfill progress.
+        # SCOPED to the live indexers — the group note above has the matcher, the
+        # reason all three scoped rules carry it, and the chain-onboarding rule.
+        # For this rule specifically: the redelivery loop gate above cannot stand
+        # in for that matcher, because neither replay worker emits
+        # morpho_blocks_processed_total — the gate has nothing to read for them,
+        # which is how the replayed ForceDeallocate flood in the group note held
+        # this firing for 7h. Replayed history is not a liquidity run.
         #
-        # "Live indexer" is one Deployment per chain (morpho-indexer on mainnet,
-        # base-morpho-indexer on Base since ARCT-414) running the same binary;
-        # each emits its own service_name (SERVICE_NAME env from the pod's `app`
-        # label; binary support lands with ARCT-413 — until then the Base pod
-        # still reports service_name="morpho-indexer" with chain="base", and the
-        # regex covers both states), so the match lists every per-chain name
-        # explicitly rather than a prefix glob that could one day admit a replay
-        # worker. The 20/h
-        # threshold is per chain and was sized on the whole mainnet V2 population;
-        # Base has one V2 vault (steakUSDC), so >20/h there is a stronger signal,
-        # not a weaker one, and the threshold is deliberately not loosened for
-        # it. Add the new name here when a chain is added.
+        # The 20/h threshold is per chain and was sized on the whole mainnet V2
+        # population; Base has one V2 vault (steakUSDC), so >20/h there is a
+        # stronger signal, not a weaker one, and the threshold is deliberately
+        # not loosened for it.
         expr: |
           sum by (chain, cluster) (
             increase(morpho_events_processed_total{

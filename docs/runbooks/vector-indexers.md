@@ -3083,9 +3083,11 @@ each one seeds its whole adapter set in a single transaction. Acknowledge and
 curate.
 
 **Replays are excluded.** The rule counts only the live per-chain indexers,
-`service_name=~"morpho-indexer|base-morpho-indexer"` — the same match and the same
-reasoning as [`VectorMorphoV2ForceDeallocateSurge`](#vectormorphov2forcedeallocatesurge),
-so a new chain's Deployment name goes into both. The on-demand replay workers
+`service_name=~"morpho-indexer|base-morpho-indexer"`. All three scoped rules in the
+`vector-morpho-v2` group carry that same match for the same reason — this one,
+[`VectorMorphoV2LazyAdapterRegistrations`](#vectormorphov2lazyadapterregistrations)
+and [`VectorMorphoV2ForceDeallocateSurge`](#vectormorphov2forcedeallocatesurge) — so
+a new chain's Deployment name goes into all three. The on-demand replay workers
 (`morpho-vault-backfill`, `morpho-v2-bootstrap`) drive historical logs through the
 same handlers and increment the same counter under their own `service_name`, so a
 run re-recording an already-known Unknown population would fire this by design —
@@ -3206,9 +3208,11 @@ approximated: an adapter known only from an `Allocate` simply has **no**
 replayed. Current membership and classification are correct in the meantime.
 
 **Replays are excluded.** The rule counts only the live per-chain indexers,
-`service_name=~"morpho-indexer|base-morpho-indexer"` — the same match and the same
-reasoning as [`VectorMorphoV2ForceDeallocateSurge`](#vectormorphov2forcedeallocatesurge),
-so a new chain's Deployment name goes into both. The on-demand replay workers
+`service_name=~"morpho-indexer|base-morpho-indexer"`. All three scoped rules in the
+`vector-morpho-v2` group carry that same match for the same reason — this one,
+[`VectorMorphoV2UnknownAdapters`](#vectormorphov2unknownadapters) and
+[`VectorMorphoV2ForceDeallocateSurge`](#vectormorphov2forcedeallocatesurge) — so a
+new chain's Deployment name goes into all three. The on-demand replay workers
 (`morpho-vault-backfill`, `morpho-v2-bootstrap`) run historical `Allocate` logs
 through the same handlers under their own `service_name`, and replaying a mid-life
 discovery is exactly how the missing `add_adapter_event` history gets filled in —
@@ -3315,12 +3319,15 @@ rate needs the full 1h window to fall to zero — so rule out a stall first.
 
 The rule counts only the live per-chain indexers,
 `service_name=~"morpho-indexer|base-morpho-indexer"` (each Deployment's
-`SERVICE_NAME` is its `app` label, so a new chain's Deployment needs adding to
-that list; the binary reads it from ARCT-413 on — until that lands the Base pod
-still reports `service_name="morpho-indexer"` with `chain="base"`, and the regex
-covers both). The threshold is per `chain` and was sized on mainnet; Base has a
-single V2 vault (steakUSDC), so >20/h there is a stronger signal, not a false
-positive. The on-demand replay
+`SERVICE_NAME` is its `app` label; the binary reads it from ARCT-413 on — until
+that lands the Base pod still reports `service_name="morpho-indexer"` with
+`chain="base"`, and the regex covers both). All three scoped rules in the
+`vector-morpho-v2` group carry that same match — this one,
+[`VectorMorphoV2UnknownAdapters`](#vectormorphov2unknownadapters) and
+[`VectorMorphoV2LazyAdapterRegistrations`](#vectormorphov2lazyadapterregistrations)
+— so a new chain's Deployment name needs adding to all three. The threshold is per
+`chain` and was sized on mainnet; Base has a single V2 vault (steakUSDC), so >20/h
+there is a stronger signal, not a false positive. The on-demand replay
 workers (`morpho-vault-backfill`, `morpho-v2-bootstrap`) drive historical logs
 through the same handlers and increment the same counter under their own
 `service_name`, and they emit no `morpho_blocks_processed_total` for the loop
