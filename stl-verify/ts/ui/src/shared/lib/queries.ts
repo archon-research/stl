@@ -192,7 +192,16 @@ const selectActivityBuckets = (
   envelope: AllocationActivityEnvelope,
 ): AllocationActivityBucket[] => {
   if (envelope.mode === 'aggregated') {
-    return sortByBucketStart(envelope.data);
+    // Still through the guard, like the three sibling series: `mode` narrowing
+    // cannot rule out a `data` that is not an array, and that is as loud a
+    // contract violation here as anywhere.
+    return sortByBucketStart(
+      requireEnvelopeRows(
+        envelope,
+        'aggregated',
+        'GET /v1/allocations/activity',
+      ),
+    );
   }
 
   // Both series ask for `aggregate=true`, so this is the same violation the

@@ -5,6 +5,7 @@ import type {
   AllocationActivityBucket,
   AllocationActivityEnvelope,
   ExposureEnvelope,
+  PrimeDebtBucket,
   PrimeDebtEnvelope,
   TokensResponse,
 } from '../types/allocation';
@@ -85,6 +86,15 @@ const rawDebtEnvelope = (
   window: ENVELOPE_WINDOW,
 });
 
+const aggregatedDebtEnvelope = (
+  data: Arm<PrimeDebtEnvelope, 'aggregated'>['data'],
+): PrimeDebtEnvelope => ({
+  mode: 'aggregated',
+  data,
+  source: 'indexed',
+  window: ENVELOPE_WINDOW,
+});
+
 const rawActivityEnvelope = (
   data: Arm<AllocationActivityEnvelope, 'raw'>['data'],
 ): AllocationActivityEnvelope => ({
@@ -99,6 +109,11 @@ const aggregatedActivityEnvelope = (
   mode: 'aggregated',
   data,
   window: ENVELOPE_WINDOW,
+});
+
+const debtBucket = (bucketStart: string, debtWad: string): PrimeDebtBucket => ({
+  bucket_start: bucketStart,
+  debt_wad: debtWad,
 });
 
 const activityBucket = (bucketStart: string): AllocationActivityBucket => ({
@@ -198,6 +213,22 @@ describe('envelope payload policy', () => {
     expect(error).toHaveBeenCalledOnce();
   });
 
+  // The aggregated activity branch narrows on `mode` before unwrapping, which
+  // is exactly where it is tempting to trust the type and drop the guard.
+  it('rejects it on the aggregated activity series too', () => {
+    const error = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+    const select = wireSelectOf<AllocationActivityEnvelope, unknown>(
+      activitySeriesQuery(PRIME, WINDOW),
+    );
+
+    expect(() => select({ mode: 'aggregated', data: null })).toThrow(
+      /GET \/v1\/allocations\/activity returned a non-array `data`/,
+    );
+    expect(error).toHaveBeenCalledOnce();
+  });
+
   it('rejects it on a single-mode series too', () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const select = wireSelectOf<ExposureEnvelope, unknown>(
@@ -232,6 +263,24 @@ describe('envelope mode policy', () => {
     expect(select(rawActivityEnvelope([]))).toStrictEqual([]);
     // Coerced, but never silently: this is still a contract violation.
     expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it('sorts aggregated debt buckets oldest first', () => {
+    const select = selectOf<PrimeDebtEnvelope, { bucket_start: string }[]>(
+      debtSeriesQuery(PRIME, WINDOW),
+    );
+
+    const sorted = select(
+      aggregatedDebtEnvelope([
+        debtBucket('2026-08-28T00:00:00Z', '2'),
+        debtBucket('2026-08-27T00:00:00Z', '1'),
+      ]),
+    );
+
+    expect(sorted.map((bucket) => bucket.bucket_start)).toStrictEqual([
+      '2026-08-27T00:00:00Z',
+      '2026-08-28T00:00:00Z',
+    ]);
   });
 
   it('sorts aggregated activity buckets oldest first', () => {
