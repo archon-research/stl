@@ -37,10 +37,9 @@ type Service struct {
 	registry    *SourceRegistry
 	entryLookup map[EntryKey]*TokenEntry
 	entries     []*TokenEntry
-	// transferAliases maps an emitting token plus the holding wallet to the entry
-	// keyed on it. Written and read only from processBlock, which the SQS loop runs
-	// one block at a time; a drain-abandoned handler can still write it (see Stop).
-	transferAliases  map[EntryKey]common.Address
+	// transferAliases routes a Transfer log to the entry it belongs to. Written and
+	// read only from processBlock, which the SQS loop runs one block at a time.
+	transferAliases  map[transferRouteKey]common.Address
 	handler          AllocationHandler
 	metrics          outbound.BackupMetricsRecorder
 	ctx              context.Context
@@ -96,7 +95,7 @@ func NewService(
 		registry:        registry,
 		entryLookup:     BuildEntryLookup(entries),
 		entries:         entries,
-		transferAliases: make(map[EntryKey]common.Address),
+		transferAliases: make(map[transferRouteKey]common.Address),
 		handler:         handler,
 		metrics:         config.Metrics,
 		logger:          config.Logger.With("component", "allocation-tracker"),
@@ -270,7 +269,7 @@ func (s *Service) processTransfers(
 	if err != nil {
 		return fmt.Errorf("parse block hash: %w", err)
 	}
-	if err := s.resolveMissingTransferAliases(ctx, blockHash); err != nil {
+	if err := s.resolveMissingTransferAliases(ctx, blockHash, event.BlockNumber); err != nil {
 		return fmt.Errorf("resolve transfer aliases for block %d: %w", event.BlockNumber, err)
 	}
 
@@ -283,8 +282,13 @@ func (s *Service) processTransfers(
 	if err != nil {
 		return fmt.Errorf("fetch observations for block %d: %w", event.BlockNumber, err)
 	}
-	if err := s.refreshTransferAliases(affected, fetch.Balances); err != nil {
-		return fmt.Errorf("refresh transfer aliases for block %d: %w", event.BlockNumber, err)
+	named, err := namedEmittersFromBalances(affected, fetch.Balances)
+	if err != nil {
+		return fmt.Errorf("read the share tokens of block %d: %w", event.BlockNumber, err)
+	}
+	routes, err := s.nextTransferRoutes(named, event.BlockNumber)
+	if err != nil {
+		return fmt.Errorf("route transfers for block %d: %w", event.BlockNumber, err)
 	}
 
 	snapshots := s.buildSnapshots(affected, fetch.Balances, transfers, event, blockTimestamp)
@@ -294,6 +298,9 @@ func (s *Service) processTransfers(
 			return fmt.Errorf("handler: %w", err)
 		}
 	}
+	// Swapped only now: buildSnapshots keys its transfer lookup the same way
+	// matchTransfers did, and a redelivery must repeat this block, not a later one.
+	s.transferAliases = routes
 
 	s.logger.Debug("block processed",
 		"block", event.BlockNumber,
@@ -305,46 +312,61 @@ func (s *Service) processTransfers(
 	return nil
 }
 
-// entryKeyFor is the ONE place a transfer becomes an entry key, so an alias can
+// entryKeyFor is the ONE place a transfer becomes an entry key, so a route can
 // never be applied by one caller and forgotten by the other.
 func (s *Service) entryKeyFor(t *TransferEvent) EntryKey {
-	emitted := EntryKey{ContractAddress: t.TokenAddress, WalletAddress: t.ProxyAddress}
-	if contract, ok := s.transferAliases[emitted]; ok {
+	route := transferRouteKey{Emitter: t.TokenAddress, Wallet: t.ProxyAddress}
+	if contract, ok := s.transferAliases[route]; ok {
 		return EntryKey{ContractAddress: contract, WalletAddress: t.ProxyAddress}
 	}
-	return emitted
+	return EntryKey{ContractAddress: t.TokenAddress, WalletAddress: t.ProxyAddress}
+}
+
+// namedEmitter pairs an entry with the token that emits its Transfer logs.
+type namedEmitter struct {
+	entry   *TokenEntry
+	emitter common.Address
 }
 
 // resolveMissingTransferAliases names the emitting token of every entry that has
-// no alias yet, so its transfers stop going unmatched.
-func (s *Service) resolveMissingTransferAliases(ctx context.Context, blockHash common.Hash) error {
+// no route yet, so its transfers stop going unmatched.
+func (s *Service) resolveMissingTransferAliases(ctx context.Context, blockHash common.Hash, blockNumber int64) error {
 	pending := s.entriesAwaitingTransferAlias()
 	if len(pending) == 0 {
 		return nil
 	}
-
 	grouped, err := s.registry.shareResolvers(pending)
 	if err != nil {
 		return err
 	}
+
+	var named []namedEmitter
 	for source, sourceEntries := range grouped {
 		shares, err := source.shareTokens(ctx, sourceEntries, blockHash)
 		if err != nil {
-			return fmt.Errorf("resolve the share tokens of %d entries: %w", len(sourceEntries), err)
+			return fmt.Errorf("%s naming the share tokens of %d entries: %w", source.Name(), len(sourceEntries), err)
 		}
-		if err := s.rememberResolvedShares(sourceEntries, shares); err != nil {
+		batch, err := namedEmittersFromShares(sourceEntries, shares)
+		if err != nil {
 			return err
 		}
+		named = append(named, batch...)
 	}
+
+	next, err := s.nextTransferRoutes(named, blockNumber)
+	if err != nil {
+		return err
+	}
+	s.transferAliases = next
 	return nil
 }
 
 // entriesAwaitingTransferAlias reverse-scans transferAliases: an entry is named
-// once some emitter aliases to its own (contract, wallet), identity included.
+// once some emitter routes to its own (contract, wallet), identity included.
 func (s *Service) entriesAwaitingTransferAlias() []*TokenEntry {
 	named := make(map[EntryKey]struct{}, len(s.transferAliases))
-	for emitted, contract := range s.transferAliases {
-		named[EntryKey{ContractAddress: contract, WalletAddress: emitted.WalletAddress}] = struct{}{}
+	for route, contract := range s.transferAliases {
+		named[EntryKey{ContractAddress: contract, WalletAddress: route.Wallet}] = struct{}{}
 	}
 
 	var pending []*TokenEntry
@@ -360,65 +382,100 @@ func (s *Service) entriesAwaitingTransferAlias() []*TokenEntry {
 	return pending
 }
 
-// rememberResolvedShares aliases every entry to the token emitting its transfers.
-// An entry the resolver left out is a hard error: unaliased, it would be resolved
-// again on every block and its transfers would never match.
-func (s *Service) rememberResolvedShares(entries []*TokenEntry, shares map[common.Address]common.Address) error {
+// namedEmittersFromShares reads a resolver's answer. An entry it left out is a
+// hard error: unnamed, it would be resolved again on every block and its
+// transfers would never match.
+func namedEmittersFromShares(entries []*TokenEntry, shares map[common.Address]common.Address) ([]namedEmitter, error) {
+	named := make([]namedEmitter, 0, len(entries))
 	for _, entry := range entries {
 		share, ok := shares[entry.ContractAddress]
 		if !ok {
-			return fmt.Errorf("no share token resolved for entry %s/%s",
+			return nil, fmt.Errorf("no share token named for entry %s/%s",
 				entry.ContractAddress.Hex(), entry.WalletAddress.Hex())
 		}
-		if err := s.rememberTransferAlias(share, entry); err != nil {
-			return err
-		}
+		named = append(named, namedEmitter{entry: entry, emitter: share})
 	}
-	return nil
+	return named, nil
 }
 
-// refreshTransferAliases re-reads the aliases from a fetch that already resolved
-// them, so a re-pointed share is current within one sweep at no extra RPC cost.
-func (s *Service) refreshTransferAliases(entries []*TokenEntry, balances map[EntryKey]*PositionBalance) error {
+// namedEmittersFromBalances reads the shares a fetch already resolved, so a
+// re-pointed share is current at no extra RPC cost.
+func namedEmittersFromBalances(entries []*TokenEntry, balances map[EntryKey]*PositionBalance) ([]namedEmitter, error) {
+	var named []namedEmitter
 	for _, entry := range entries {
 		bal, ok := balances[entry.Key()]
-		if !ok || bal == nil {
-			continue
-		}
-		if bal.ShareToken == nil {
+		if !ok || bal == nil || bal.ShareToken == nil {
 			// Structural for every other type — they hold the token they are keyed
-			// on — but a centrifuge source that stops naming it freezes the aliases.
+			// on — but a centrifuge entry with no share leaves its routes frozen at
+			// whatever the last good fetch said, which is how a stale route persists.
 			if entry.TokenType == TokenTypeCentrifuge {
-				return fmt.Errorf("centrifuge entry %s/%s came back with no share token",
+				return nil, fmt.Errorf("centrifuge entry %s/%s came back with no share token",
 					entry.ContractAddress.Hex(), entry.WalletAddress.Hex())
 			}
 			continue
 		}
-		if err := s.rememberTransferAlias(*bal.ShareToken, entry); err != nil {
-			return err
-		}
+		named = append(named, namedEmitter{entry: entry, emitter: *bal.ShareToken})
 	}
-	return nil
+	return named, nil
 }
 
-// rememberTransferAlias records that emitter's transfers into this entry's wallet
-// belong to it. Keyed per wallet because distinct ERC-7540 vaults legitimately
-// front one share for different wallets (see checkDuplicateShares).
-func (s *Service) rememberTransferAlias(emitter common.Address, entry *TokenEntry) error {
-	key := EntryKey{ContractAddress: emitter, WalletAddress: entry.WalletAddress}
-	if prev, ok := s.transferAliases[key]; ok && prev != entry.ContractAddress {
-		return fmt.Errorf("%s and %s both claim transfers of %s into %s; tracking both would double count",
-			prev.Hex(), entry.ContractAddress.Hex(), emitter.Hex(), entry.WalletAddress.Hex())
+// nextTransferRoutes returns the route set that replaces transferAliases once
+// these entries have named their emitter. Built fresh rather than mutated so a
+// reader mid-block keeps one consistent view (see processTransfers), and so two
+// entries swapping shares in one batch release before either claims — mutating
+// in place makes that swap fail or succeed on entry order.
+func (s *Service) nextTransferRoutes(named []namedEmitter, blockNumber int64) (map[transferRouteKey]common.Address, error) {
+	for _, n := range named {
+		if err := s.checkShareRatchet(n, blockNumber); err != nil {
+			return nil, err
+		}
 	}
-	// A re-pointed share must stop attributing the old token's movements here,
-	// so the entry's aliases are replaced rather than unioned.
-	maps.DeleteFunc(s.transferAliases, func(k EntryKey, contract common.Address) bool {
-		return k != key && k.WalletAddress == entry.WalletAddress && contract == entry.ContractAddress
-	})
-	if s.transferAliases == nil {
-		s.transferAliases = make(map[EntryKey]common.Address)
+
+	next := maps.Clone(s.transferAliases)
+	if next == nil {
+		next = make(map[transferRouteKey]common.Address, len(named))
 	}
-	s.transferAliases[key] = entry.ContractAddress
+	for _, n := range named {
+		maps.DeleteFunc(next, func(route transferRouteKey, contract common.Address) bool {
+			if route.Wallet != n.entry.WalletAddress || contract != n.entry.ContractAddress || route.Emitter == n.emitter {
+				return false
+			}
+			s.logger.Warn("share token re-pointed; event rows for this position stop until the next sweep",
+				"entry", n.entry.ContractAddress.Hex(),
+				"wallet", n.entry.WalletAddress.Hex(),
+				"previousEmitter", route.Emitter.Hex(),
+				"emitter", n.emitter.Hex(),
+				"block", blockNumber)
+			return true
+		})
+	}
+
+	for _, n := range named {
+		route := transferRouteKey{Emitter: n.emitter, Wallet: n.entry.WalletAddress}
+		if prev, ok := next[route]; ok && prev != n.entry.ContractAddress {
+			return nil, fmt.Errorf("%s and %s both claim transfers of %s into %s; tracking both would double count",
+				prev.Hex(), n.entry.ContractAddress.Hex(), n.emitter.Hex(), n.entry.WalletAddress.Hex())
+		}
+		next[route] = n.entry.ContractAddress
+	}
+	return next, nil
+}
+
+// checkShareRatchet refuses to downgrade an entry that already named a share to
+// holding itself: share() reverting is how a direct share is detected, so a
+// transient failure would otherwise re-key the position onto the retired vault,
+// where the cache trigger drops it and every health signal stays green.
+func (s *Service) checkShareRatchet(n namedEmitter, blockNumber int64) error {
+	if n.emitter != n.entry.ContractAddress {
+		return nil
+	}
+	for route, contract := range s.transferAliases {
+		if route.Wallet == n.entry.WalletAddress && contract == n.entry.ContractAddress && route.Emitter != n.emitter {
+			return fmt.Errorf(
+				"entry %s/%s named share %s before and now reports itself at block %d; a vault cannot become its own share",
+				n.entry.ContractAddress.Hex(), n.entry.WalletAddress.Hex(), route.Emitter.Hex(), blockNumber)
+		}
+	}
 	return nil
 }
 
@@ -531,8 +588,13 @@ func (s *Service) sweep(ctx context.Context, blockNumber int64, blockHash common
 	if err != nil {
 		return fmt.Errorf("fetch sweep observations for block %d: %w", blockNumber, err)
 	}
-	if err := s.refreshTransferAliases(s.entries, fetch.Balances); err != nil {
-		return fmt.Errorf("refresh sweep transfer aliases for block %d: %w", blockNumber, err)
+	named, err := namedEmittersFromBalances(s.entries, fetch.Balances)
+	if err != nil {
+		return fmt.Errorf("read the sweep share tokens of block %d: %w", blockNumber, err)
+	}
+	routes, err := s.nextTransferRoutes(named, blockNumber)
+	if err != nil {
+		return fmt.Errorf("route transfers for sweep block %d: %w", blockNumber, err)
 	}
 
 	var snapshots []*PositionSnapshot
@@ -561,12 +623,14 @@ func (s *Service) sweep(ctx context.Context, blockNumber int64, blockHash common
 	supplies := buildSupplySnapshots(fetch.Supplies, s.config.ChainID, blockNumber, blockVersion, blockTimestamp, "sweep")
 
 	if len(snapshots) == 0 && len(supplies) == 0 {
+		s.transferAliases = routes
 		return nil
 	}
 
 	if err := s.handler.HandleBatch(ctx, &SnapshotBatch{Snapshots: snapshots, Supplies: supplies}); err != nil {
 		return fmt.Errorf("sweep handler: %w", err)
 	}
+	s.transferAliases = routes
 
 	s.logger.Info("sweep complete",
 		"block", blockNumber,

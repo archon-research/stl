@@ -2860,6 +2860,38 @@ fire, but its error ratio is 100% and trips this alert.
   sustained.
 - DB write error (constraint, pool exhaustion) -> inspect the failing block.
 - Per-chain queue outage — the chain's SQS/SNS wiring broke; check upstream.
+- **Wedged on share-token resolution** — see below.
+
+### Wedged on share-token resolution (100% error ratio, one chain)
+
+A `centrifuge` entry is keyed on an ERC-7540 vault, and the tracker must learn
+which token emits that entry's `Transfer` logs before it can match them. That
+resolution is a hard failure by design (VEC-535): skipping it would leave the
+position silently moving only on the 75-block sweep, which is exactly the class
+of bug the ticket fixed. So the block NACKs, SQS redelivers it, and it fails
+again — **every block on that chain stops, not just blocks touching the entry**,
+because the resolution runs on any block carrying a tracked transfer.
+
+Log lines, all wrapped in `resolve transfer aliases for block <N>`:
+
+- `erc7540 naming the share tokens of <n> entries: ...` — the `share()` multicall
+  failed or returned something undecodable.
+- `... needs a share alias but its source cannot name one` — an entry routes to a
+  source that cannot resolve shares; a registry/entry misconfiguration.
+- `no share token named for entry <contract>/<wallet>` — the resolver answered
+  but omitted an entry.
+- `entry <contract>/<wallet> named share <S> before and now reports itself` — the
+  ratchet: a transient `share()` failure reads as the direct-share shape and
+  would re-key the position onto its vault, whose cache key is retired.
+- `<A> and <B> both claim transfers of <S> into <W>` — two vaults front one share
+  for one wallet; tracking both would double count.
+
+**There is no per-entry discard.** The only sanctioned remedy today is to fix the
+underlying entry: correct or remove it in the axis-synome contract, regenerate,
+and redeploy. Do not "unblock" the chain by deleting the SQS message — that
+drops a block for every other position on it. If the cause is a transient RPC
+failure the worker recovers on its own once the node answers; the ratchet line
+specifically should not self-clear, and means the read is wrong rather than slow.
 
 ### Verify recovery
 

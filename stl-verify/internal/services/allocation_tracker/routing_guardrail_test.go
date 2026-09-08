@@ -94,7 +94,7 @@ func TestCentrifugeRoutesToERC7540(t *testing.T) {
 		Chain:           "mainnet",
 		Star:            "grove",
 		Protocol:        "centrifuge",
-		TokenType:       "centrifuge",
+		TokenType:       TokenTypeCentrifuge,
 	})
 	if source == nil {
 		t.Fatal("centrifuge entry routes to no source")

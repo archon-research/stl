@@ -17,8 +17,8 @@ const (
 	DirectionSweep Direction = "sweep"
 )
 
-// TokenTypeCentrifuge entries point at an ERC-7540 vault, which is not a token:
-// the wallet holds the vault's share(), and so the row and the prices key on it.
+// TokenTypeCentrifuge is the only token type asked to name the token it holds
+// (see shareResolver). centrifuge_feeder is a different mechanism, outside this.
 const TokenTypeCentrifuge = "centrifuge"
 
 // TokenEntry represents a single known position from the TOKENS_DATA registry.
@@ -158,10 +158,19 @@ type PositionSource interface {
 	FetchBalances(ctx context.Context, entries []*TokenEntry, blockHash common.Hash) (*FetchResult, error)
 }
 
+// transferRouteKey identifies a Transfer log by the token that emitted it and
+// the proxy it moved into. Deliberately not an EntryKey: that names a position,
+// this names a log, and for an ERC-7540 vault the two carry different addresses.
+type transferRouteKey struct {
+	Emitter common.Address
+	Wallet  common.Address
+}
+
 // shareResolver is the optional half of a PositionSource whose entries are keyed
 // on something other than the token they hold, and which can name that token
 // before any balance is read. Only TokenTypeCentrifuge entries are ever asked.
 type shareResolver interface {
+	PositionSource
 	shareTokens(ctx context.Context, entries []*TokenEntry, blockHash common.Hash) (map[common.Address]common.Address, error)
 }
 

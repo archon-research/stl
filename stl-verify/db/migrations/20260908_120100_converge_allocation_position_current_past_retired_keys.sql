@@ -10,6 +10,18 @@
 -- is not a candidate at all. Everything else is term for term the same, deliberately,
 -- so the row this picks stays the row the trigger would have left.
 --
+-- It converges in BOTH directions, which is why the purge lives here and not in the
+-- one-shot 20260908_120000: the DELETE first removes every cache row whose key is now
+-- retired, then the merge fills in everything else. Retiring a NEW key later therefore
+-- costs a re-run of this statement, not another migration.
+--
+-- WHY A DELETE ON A DERIVED CACHE IS CORRECT. allocation_position_current is a function
+-- of allocation_position, never a source of truth: 20260825_120000's header already
+-- contemplates TRUNCATE plus a rebuild as its repair, and this is the same move scoped
+-- to the retired keys. History is untouched — every vault-keyed observation stays in
+-- allocation_position, queryable exactly as before. What goes is a cached answer to a
+-- question no longer asked. It runs as the owner; no login role holds DELETE here.
+--
 -- Applying it here is not only the migration: allocation_position is small (tens of
 -- thousands of rows), so running it at apply time costs little and is the live proof
 -- that the exclusion holds on real data, immediately after 20260908_120000 emptied the
@@ -26,6 +38,18 @@ SET LOCAL lock_timeout = '10s';
 -- silently gets a stale row or none at all. Set explicitly in either direction rather
 -- than inherited; see 20260825_120100 for the measurement.
 SET LOCAL timescaledb.enable_tiered_reads = 'on';
+
+DO $$
+DECLARE purged int;
+BEGIN
+    DELETE FROM allocation_position_current c
+    USING allocation_position_key_retirement_current r
+    WHERE r.chain_id = c.chain_id
+      AND r.token_id = c.token_id
+      AND r.retired;
+    GET DIAGNOSTICS purged = ROW_COUNT;
+    RAISE NOTICE 'VEC-535 purged % cache rows on retired keys', purged;
+END $$;
 
 INSERT INTO allocation_position_current
     (proxy_address, chain_id, token_id, balance, underlying_value, underlying_token_id,

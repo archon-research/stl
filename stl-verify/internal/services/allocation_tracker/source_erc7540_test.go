@@ -320,6 +320,19 @@ func TestERC7540Source_FetchBalances_FailureModes(t *testing.T) {
 			expectedRounds: 1,
 		},
 		{
+			// An address with no code: the call succeeds and returns nothing. Not a
+			// revert, so it must not be read as the direct-share shape.
+			name: "empty share return data",
+			rounds: func(src *ERC7540Source) []func() ([]outbound.Result, error) {
+				return []func() ([]outbound.Result, error){
+					func() ([]outbound.Result, error) {
+						return []outbound.Result{{Success: true, ReturnData: []byte{}}}, nil
+					},
+				}
+			},
+			expectedRounds: 1,
+		},
+		{
 			name: "undecodable share return data",
 			rounds: func(src *ERC7540Source) []func() ([]outbound.Result, error) {
 				return []func() ([]outbound.Result, error){

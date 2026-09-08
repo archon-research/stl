@@ -22,8 +22,14 @@
 --      for the SAME holding, so every consumer summing the cache counts the position
 --      twice — once at its real price and once at whatever the vault row carries.
 --
--- The retirement is therefore DATA, read by the trigger below and by 20260908_120100,
--- and the cache delete at the end of this file is a consequence of it, not the fix.
+-- The retirement is therefore DATA, read by the trigger below and by 20260908_120100.
+-- Purging the cache rows it retires is that file's job, not this one's: it is the
+-- re-runnable statement, so retiring a NEW key later converges the cache by re-running
+-- it rather than by writing another one-shot migration.
+--
+-- Between this file (PreSync) and the new image's first sweep the four keys are simply
+-- ABSENT from the cache — the rollout plus up to 75 blocks. Absent, not $0: a consumer
+-- summing the cache under-reports for that window rather than reporting a wrong number.
 --
 -- The four retired keys are grove's ERC-7540 vaults: JAAA on mainnet and on Avalanche,
 -- and JTRSY, which shares one address across both chains. Spark's mainnet JTRSY entry
@@ -43,28 +49,33 @@
 -- splitting this one table out of it would buy less than the consistency costs.
 
 -- Fail fast rather than convoy ingestion: CREATE OR REPLACE FUNCTION below waits behind
--- every in-flight execution of the trigger function, and the DELETE at the end takes
--- ROW EXCLUSIVE on the cache every ingest INSERT also writes. Same value as the sibling
+-- every in-flight execution of the trigger function. Same value as the sibling
 -- migrations; re-run in a quieter window. Outside a transaction block SET LOCAL only
 -- warns, so this file must never be marked `-- migrate: no-transaction`.
 SET LOCAL lock_timeout = '10s';
 
 CREATE TABLE IF NOT EXISTS allocation_position_key_retirement (
-    chain_id   INT         NOT NULL REFERENCES chain (chain_id),
-    token_id   BIGINT      NOT NULL REFERENCES token (id),
-    retired    BOOLEAN     NOT NULL,
-    valid_from TIMESTAMPTZ NOT NULL DEFAULT now(),
-    reason     TEXT        NOT NULL,
-    ticket     TEXT        NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (chain_id, token_id, valid_from)
+    chain_id           INT         NOT NULL REFERENCES chain (chain_id),
+    token_id           BIGINT      NOT NULL REFERENCES token (id),
+    retired            BOOLEAN     NOT NULL,
+    valid_from         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    processing_version INT         NOT NULL DEFAULT 0,
+    reason             TEXT        NOT NULL,
+    ticket             TEXT        NOT NULL,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (chain_id, token_id, valid_from, processing_version),
+    CONSTRAINT allocation_position_key_retirement_pv_chk CHECK (processing_version >= 0),
+    -- An empty string is not a reason, and an empty ticket traces to nothing.
+    CONSTRAINT allocation_position_key_retirement_reason_chk CHECK (btrim(reason) <> ''),
+    CONSTRAINT allocation_position_key_retirement_ticket_chk CHECK (btrim(ticket) <> '')
 );
 
-COMMENT ON TABLE allocation_position_key_retirement IS '[Configuration] Register of the (chain_id, token_id) keys the allocation tracker no longer writes positions on, and which allocation_position_current must therefore not cache. Append-on-change: putting a key back in service is a new row with retired = false and a later valid_from, never an UPDATE — UPDATE/DELETE/TRUNCATE are revoked, the owner included. Read it through allocation_position_key_retirement_current, never raw: the raw table matches a superseded version as readily as the live one. A plain table, not a hypertable: a row lands only when a tracker keying decision changes, on the order of rows per month, so chunking, compression and tiering buy nothing (db/migrations/AGENTS.md sparse-table exception). That exception''s companion requirements — processing_version, build_id, an advisory-locked trigger — do not apply: this is a config register with no block height and no ingest writer, not an on-chain observation table.';
+COMMENT ON TABLE allocation_position_key_retirement IS '[Configuration] Register of the (chain_id, token_id) keys the allocation tracker no longer writes positions on, and which allocation_position_current must therefore not cache. Append-on-change: putting a key back in service is a new row with retired = false and a later valid_from, never an UPDATE — UPDATE/DELETE/TRUNCATE are revoked, the owner included. Read it through allocation_position_key_retirement_current, never raw: the raw table matches a superseded version as readily as the live one. A plain table, not a hypertable: a row lands only when a tracker keying decision changes, on the order of rows per month, so chunking, compression and tiering buy nothing (db/migrations/AGENTS.md sparse-table exception). build_id is absent because no build writes this table — it is seeded by migrations and by an operator, never by an indexer.';
 COMMENT ON COLUMN allocation_position_key_retirement.chain_id IS 'PK. FK→chain.chain_id. Chain of the retired key.';
 COMMENT ON COLUMN allocation_position_key_retirement.token_id IS 'PK. FK→token.id. The token row the tracker no longer writes positions on.';
 COMMENT ON COLUMN allocation_position_key_retirement.retired IS 'true retires the key, false puts it back in service. The latest version per (chain_id, token_id) is the one in force; resolve it through allocation_position_key_retirement_current rather than reading this column raw.';
-COMMENT ON COLUMN allocation_position_key_retirement.valid_from IS 'PK. Instant this version became effective (timestamptz, so it cannot shift with a session TimeZone). There is no valid_to: a version runs until the next valid_from for the same key.';
+COMMENT ON COLUMN allocation_position_key_retirement.valid_from IS 'PK. Instant this version became effective (timestamptz, so it cannot shift with a session TimeZone). There is no valid_to: a version runs until the next valid_from for the same key. A future-dated row is stored but not yet in force — allocation_position_key_retirement_current bounds on now().';
+COMMENT ON COLUMN allocation_position_key_retirement.processing_version IS 'PK. Correction version of this (chain_id, token_id, valid_from); monotonic from 0. Load-bearing because valid_from DEFAULTs to now(), which is transaction time: two changes to one key in one transaction share it, and only this column separates them. An appending writer reads the current maximum and adds one, so concurrent appenders on one key must serialize (pg_advisory_xact_lock, ADR-0002).';
 COMMENT ON COLUMN allocation_position_key_retirement.reason IS 'Audit. Mandatory: why this version exists. erc7540_vault = the address is an ERC-7540 vault rather than a token, and the position now keys on the share the wallet holds.';
 COMMENT ON COLUMN allocation_position_key_retirement.ticket IS 'Audit. Mandatory: the ticket that decided this version, so a retirement can be traced to the change that made it true.';
 COMMENT ON COLUMN allocation_position_key_retirement.created_at IS 'Audit. When the row was written. Not the instant the version took effect (valid_from), which a backdated correction can set earlier.';
@@ -96,7 +107,8 @@ END $$;
 CREATE OR REPLACE VIEW allocation_position_key_retirement_current AS
 SELECT DISTINCT ON (chain_id, token_id) *
 FROM allocation_position_key_retirement
-ORDER BY chain_id, token_id, valid_from DESC;
+WHERE valid_from <= now()
+ORDER BY chain_id, token_id, valid_from DESC, processing_version DESC;
 
 COMMENT ON VIEW allocation_position_key_retirement_current IS '[Configuration] The retirement version in force per (chain_id, token_id): the newest valid_from. The read every writer of allocation_position_current consults — the trigger below and 20260908_120100.';
 
@@ -172,43 +184,23 @@ WHERE (t.chain_id, t.address) IN (
     (43114, '\xfe6920eb6c421f1179ca8c8d4170530cdbdfd77a'::bytea)
 );
 
--- A zero-row seed is correct on a fresh database and a silent no-op everywhere else:
--- a typo'd address or a wrong chain_id would retire nothing, the DELETE below would
--- remove nothing, and the double count the header describes would survive with this
--- migration logged as applied. So assert the seed matched every token row that exists
--- for those four keys — which tolerates the fresh-database zero and catches the typo.
+-- An ABSOLUTE count, not a comparison against the same literal list: deriving both
+-- sides from one list in one transaction proves only that the list equals itself, so a
+-- typo'd address would pass. Four keys exist, so any database the tracker ever wrote
+-- them on holds four token rows; 0 is the fresh database that never did. Anything
+-- between means an address or a chain_id here disagrees with what token holds.
 DO $$
-DECLARE matching int; seeded int;
+DECLARE seeded int;
 BEGIN
-    SELECT count(*) INTO matching
-    FROM token t
-    WHERE (t.chain_id, t.address) IN (
-        (1, '\x4880799ee5200fc58da299e965df644fbf46780b'::bytea),
-        (43114, '\x1121f4e21ed8b9bc1bb9a2952cdd8639ac897784'::bytea),
-        (1, '\xfe6920eb6c421f1179ca8c8d4170530cdbdfd77a'::bytea),
-        (43114, '\xfe6920eb6c421f1179ca8c8d4170530cdbdfd77a'::bytea)
-    );
     SELECT count(*) INTO seeded
     FROM allocation_position_key_retirement WHERE ticket = 'VEC-535';
-    IF seeded <> matching THEN
-        RAISE EXCEPTION 'VEC-535 retired % of the % matching token rows', seeded, matching;
+    IF seeded NOT IN (0, 4) THEN
+        RAISE EXCEPTION 'VEC-535 expected to retire 4 keys (or 0 on a fresh database), retired %', seeded;
     END IF;
+    RAISE NOTICE 'VEC-535 retired % ERC-7540 vault keys', seeded;
 END $$;
 
--- WHY THIS ONE DELETE ON A DERIVED CACHE IS CORRECT. allocation_position_current is a
--- function of allocation_position, never a source of truth: 20260825_120000's header
--- already contemplates TRUNCATE plus a rebuild as its repair, and this is the same move
--- scoped to four keys. History is untouched — every vault-keyed observation stays in
--- allocation_position, queryable exactly as before. What goes is a cached answer to a
--- question no longer asked, and the register above is what stops both writers of the
--- cache from deriving it again. It runs as the owner; no login role holds DELETE here.
-DELETE FROM allocation_position_current c
-USING allocation_position_key_retirement_current r
-WHERE r.chain_id = c.chain_id
-  AND r.token_id = c.token_id
-  AND r.retired;
-
-COMMENT ON TABLE allocation_position_current IS '[Operational] Newest allocation_position row per (ALM proxy, chain, token). Derived cache of the allocation_position history; rebuildable from it at any time by re-running 20260908_120100, which excludes the keys allocation_position_key_retirement_current marks retired. 20260825_120100 is superseded and must NOT be re-run: it merges every key the history holds, so it puts the retired ones straight back. Never read this table as a history — it holds no "as of block N" answer. Keyed without prime_id, which is a function of proxy_address, so a proxy that changed prime holds one row: its newest.';
+COMMENT ON TABLE allocation_position_current IS '[Operational] Newest allocation_position row per (ALM proxy, chain, token). Derived cache of the allocation_position history; converged at any time by re-running 20260908_120100, which purges the keys allocation_position_key_retirement_current marks retired and then merges the rest — both directions, so retiring a new key needs no migration. 20260825_120100 is superseded and must NOT be re-run: it merges every key the history holds, so it puts the retired ones straight back. Never read this table as a history — it holds no "as of block N" answer. Keyed without prime_id, which is a function of proxy_address, so a proxy that changed prime holds one row: its newest.';
 
 INSERT INTO migrations (filename)
 VALUES ('20260908_120000_create_allocation_position_key_retirement.sql')

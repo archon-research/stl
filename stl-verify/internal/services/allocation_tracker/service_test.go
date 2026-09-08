@@ -924,6 +924,35 @@ func (f *centrifugeFixture) consume(t *testing.T, logs ...gethtypes.Log) error {
 	})
 }
 
+// seedRoute names an entry's emitter up front, the state a block that re-points a
+// share starts from.
+func (f *centrifugeFixture) seedRoute(t *testing.T, emitter common.Address, entry *TokenEntry) {
+	t.Helper()
+	routes, err := f.svc.nextTransferRoutes([]namedEmitter{{entry: entry, emitter: emitter}}, centrifugeFirstBlock)
+	if err != nil {
+		t.Fatalf("seed the route for %s: %v", entry.ContractAddress.Hex(), err)
+	}
+	f.svc.transferAliases = routes
+}
+
+// repointShare makes the next fetch report a different share for one entry, the
+// shape a re-pointed vault (or a reverting share()) takes on the read path.
+func (f *centrifugeFixture) repointShare(t *testing.T, contract, share common.Address) {
+	t.Helper()
+	for _, entry := range f.svc.entries {
+		if entry.ContractAddress != contract {
+			continue
+		}
+		bal, ok := f.source.result.Balances[entry.Key()]
+		if !ok {
+			t.Fatalf("no seeded balance for %s", contract.Hex())
+		}
+		bal.ShareToken = &share
+		return
+	}
+	t.Fatalf("no entry keyed on %s", contract.Hex())
+}
+
 // snapshotFor returns the snapshot the handler received for one entry key.
 func (f *centrifugeFixture) snapshotFor(contract, wallet common.Address) *PositionSnapshot {
 	for _, batch := range f.handler.batches {
@@ -1106,7 +1135,7 @@ func TestProcessBlock_ShareResolvedForOnlySomeEntries_ReturnsError(t *testing.T)
 	if err == nil {
 		t.Fatal("expected a partially answered resolution to fail the block")
 	}
-	if !strings.Contains(err.Error(), "no share token resolved") {
+	if !strings.Contains(err.Error(), "no share token named") {
 		t.Errorf("error = %q, want it to name the unresolved entry", err)
 	}
 }
@@ -1117,9 +1146,7 @@ func TestProcessBlock_ShareResolvedForOnlySomeEntries_ReturnsError(t *testing.T)
 func TestSweep_ReplacesTheAliasOfARepointedShare(t *testing.T) {
 	f := newCentrifugeTracker(t, []centrifugeShape{groveVaultShape(groveJAAAVault, groveJAAAShare)}, 1)
 	stale := common.HexToAddress("0x0000000000000000000000000000000000005747")
-	if err := f.svc.rememberTransferAlias(stale, f.svc.entries[0]); err != nil {
-		t.Fatalf("seed the stale alias: %v", err)
-	}
+	f.seedRoute(t, stale, f.svc.entries[0])
 
 	if err := f.consume(t); err != nil {
 		t.Fatalf("processBlock: %v", err)
@@ -1140,17 +1167,81 @@ func TestSweep_ReplacesTheAliasOfARepointedShare(t *testing.T) {
 func TestProcessBlock_EventPathAdoptsARepointedShare(t *testing.T) {
 	f := newCentrifugeTracker(t, []centrifugeShape{groveVaultShape(groveJAAAVault, groveJAAAShare)}, 1000)
 	stale := common.HexToAddress("0x0000000000000000000000000000000000005747")
-	if err := f.svc.rememberTransferAlias(stale, f.svc.entries[0]); err != nil {
-		t.Fatalf("seed the stale alias: %v", err)
-	}
+	f.seedRoute(t, stale, f.svc.entries[0])
 
 	if err := f.consume(t, transferLog(stale, groveProxy, big.NewInt(250), 7)); err != nil {
 		t.Fatalf("processBlock: %v", err)
 	}
 
+	snap := f.snapshotFor(groveJAAAVault, groveProxy)
+	if snap == nil {
+		t.Fatal("no snapshot for the vault entry; the re-point dropped the block's own transfer")
+	}
+	if snap.Direction != DirectionIn || snap.TxHash != centrifugeTxHash.Hex() ||
+		snap.TxAmount == nil || snap.TxAmount.Cmp(big.NewInt(250)) != 0 {
+		t.Errorf("snapshot = (%q, %q, %v), want the event row (in, %s, 250) — the route swapped before buildSnapshots read it",
+			snap.Direction, snap.TxHash, snap.TxAmount, centrifugeTxHash.Hex())
+	}
+
 	vaultKey := EntryKey{ContractAddress: groveJAAAVault, WalletAddress: groveProxy}
 	if got := f.svc.entryKeyFor(&TransferEvent{TokenAddress: groveJAAAShare, ProxyAddress: groveProxy}); got != vaultKey {
 		t.Errorf("entryKeyFor(new share) = %v, want %v — the event path did not adopt the alias", got, vaultKey)
+	}
+}
+
+// TestSweep_TwoEntriesSwappingSharesKeepBothRoutes: both entries must release
+// before either claims, or the batch fails or passes on entry order — and a
+// failing sweep never resets the counter, so the worker wedges.
+func TestSweep_TwoEntriesSwappingSharesKeepBothRoutes(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{
+		groveVaultShape(groveJAAAVault, groveJAAAShare),
+		groveVaultShape(groveJTRSYVault, sparkJTRSYShare),
+	}, 1)
+	if err := f.consume(t); err != nil {
+		t.Fatalf("first sweep: %v", err)
+	}
+
+	f.repointShare(t, groveJAAAVault, sparkJTRSYShare)
+	f.repointShare(t, groveJTRSYVault, groveJAAAShare)
+
+	if err := f.consume(t); err != nil {
+		t.Fatalf("a swap between two entries must not fail: %v", err)
+	}
+	for _, tc := range []struct {
+		emitter  common.Address
+		contract common.Address
+	}{
+		{sparkJTRSYShare, groveJAAAVault},
+		{groveJAAAShare, groveJTRSYVault},
+	} {
+		want := EntryKey{ContractAddress: tc.contract, WalletAddress: groveProxy}
+		if got := f.svc.entryKeyFor(&TransferEvent{TokenAddress: tc.emitter, ProxyAddress: groveProxy}); got != want {
+			t.Errorf("entryKeyFor(%s) = %v, want %v", tc.emitter.Hex(), got, want)
+		}
+	}
+}
+
+// TestSweep_ShareDowngradedToTheEntryItself_ReturnsError: share() reverting is how
+// a direct share is detected, so a transient failure reads as one and would re-key
+// the position onto the retired vault, where the cache trigger drops it silently.
+func TestSweep_ShareDowngradedToTheEntryItself_ReturnsError(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{groveVaultShape(groveJAAAVault, groveJAAAShare)}, 1)
+	if err := f.consume(t); err != nil {
+		t.Fatalf("first sweep: %v", err)
+	}
+	batchesBefore := len(f.handler.batches)
+
+	f.repointShare(t, groveJAAAVault, groveJAAAVault)
+
+	err := f.consume(t)
+	if err == nil {
+		t.Fatal("a vault reporting itself as its own share must fail the block")
+	}
+	if !strings.Contains(err.Error(), "cannot become its own share") {
+		t.Errorf("error = %q, want it to name the downgrade", err)
+	}
+	if len(f.handler.batches) != batchesBefore {
+		t.Errorf("HandleBatch ran %d more times, want 0", len(f.handler.batches)-batchesBefore)
 	}
 }
 
@@ -1184,7 +1275,7 @@ func TestEntryKeyFor_KeysOnTheEmitterWhenItHasNoAlias(t *testing.T) {
 	}
 }
 
-func TestRememberTransferAlias_RejectsTwoEntriesClaimingOneShare(t *testing.T) {
+func TestProcessBlock_RejectsTwoEntriesClaimingOneShare(t *testing.T) {
 	f := newCentrifugeTracker(t, []centrifugeShape{
 		groveVaultShape(groveJAAAVault, groveJAAAShare),
 		groveVaultShape(groveJTRSYVault, groveJAAAShare),

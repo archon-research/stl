@@ -62,11 +62,11 @@ var _ shareResolver = (*ERC7540Source)(nil)
 
 func (s *ERC7540Source) Name() string { return "erc7540" }
 
-// Supports claims token_type=centrifuge: as of axis-synome 0.2.0 those entries
-// point at ERC-7540 vault addresses, which this source resolves to their share()
-// token. BalanceOfSource no longer claims centrifuge (VEC-337 part 2).
+// Supports claims token_type=centrifuge, whose entries point at ERC-7540 vault
+// addresses this source resolves to their share() token. BalanceOfSource does
+// not claim it: balanceOf/decimals revert on a vault and poison-stall the block.
 func (s *ERC7540Source) Supports(tokenType string, protocol string) bool {
-	return tokenType == "centrifuge"
+	return tokenType == TokenTypeCentrifuge
 }
 
 func (s *ERC7540Source) FetchBalances(ctx context.Context, entries []*TokenEntry, blockHash common.Hash) (*FetchResult, error) {
@@ -86,8 +86,14 @@ func (s *ERC7540Source) FetchBalances(ctx context.Context, entries []*TokenEntry
 	}
 
 	for _, e := range entries {
-		bal := balances[e.Key()]
-		share := shares[e.ContractAddress]
+		bal, ok := balances[e.Key()]
+		if !ok {
+			return nil, fmt.Errorf("no balance read for entry %s/%s", e.ContractAddress.Hex(), e.WalletAddress.Hex())
+		}
+		share, ok := shares[e.ContractAddress]
+		if !ok {
+			return nil, fmt.Errorf("no share token resolved for vault %s", e.ContractAddress.Hex())
+		}
 		s.logger.Debug("erc7540 position",
 			"vault", e.ContractAddress.Hex(),
 			"share", share.Hex(),
@@ -157,10 +163,10 @@ func (s *ERC7540Source) resolveShares(ctx context.Context, entries []*TokenEntry
 		// ERC-7540 vault. The axis-synome 0.2.0 centrifuge migration is mixed —
 		// grove's entries are vaults, Spark's JTRSY stayed a direct share — and
 		// the entries are otherwise indistinguishable, so we detect the shape here
-		// rather than route on it. A genuinely dead address still fails hard at the
-		// balanceOf step below. Transport errors and malformed responses (short
-		// slice, empty/undecodable data, zero address) are NOT this case and stay
-		// hard failures.
+		// rather than route on it. An address with no code is NOT this case: it
+		// returns Success with empty returndata and fails at the branch below, as do
+		// transport errors and malformed responses (short slice, undecodable data,
+		// zero address).
 		if !mc[i].Success {
 			shares[vault] = vault
 			continue
@@ -195,7 +201,10 @@ func (s *ERC7540Source) resolveShares(ctx context.Context, entries []*TokenEntry
 func (s *ERC7540Source) checkDuplicateShares(entries []*TokenEntry, shareTokens map[common.Address]common.Address) error {
 	firstVault := make(map[string]common.Address, len(entries))
 	for _, e := range entries {
-		share := shareTokens[e.ContractAddress]
+		share, ok := shareTokens[e.ContractAddress]
+		if !ok {
+			return fmt.Errorf("no share token resolved for vault %s", e.ContractAddress.Hex())
+		}
 		key := fmt.Sprintf("%s/%s", share.Hex(), e.WalletAddress.Hex())
 		if prev, ok := firstVault[key]; ok && prev != e.ContractAddress {
 			return fmt.Errorf("vaults %s and %s both resolve to share %s for wallet %s; tracking both would double count",
@@ -215,7 +224,11 @@ func (s *ERC7540Source) fetchShareBalances(ctx context.Context, entries []*Token
 		if err != nil {
 			return nil, fmt.Errorf("pack balanceOf for %s: %w", e.WalletAddress.Hex(), err)
 		}
-		calls[i] = outbound.Call{Target: shareTokens[e.ContractAddress], AllowFailure: true, CallData: data}
+		share, ok := shareTokens[e.ContractAddress]
+		if !ok {
+			return nil, fmt.Errorf("no share token resolved for vault %s", e.ContractAddress.Hex())
+		}
+		calls[i] = outbound.Call{Target: share, AllowFailure: true, CallData: data}
 	}
 
 	mc, err := s.multicaller.ExecuteAtHash(ctx, calls, blockHash)
