@@ -38,9 +38,9 @@ REVOKE UPDATE, DELETE ON position_projection_run FROM stl_readwrite;
 
 COMMENT ON COLUMN position_state.block_number IS 'Roles: PK. Block height of the observation for an on-chain projection (chain_id set). For an OFF-CHAIN observation (chain_id NULL, a custody snapshot) it is floor(epoch seconds of block_timestamp), enforced by the materializer, and not a block on any chain.';
 
--- Body from 20260818_130000, extended: deal_type is a required contract column, the run is recorded,
--- off-chain rows carry their instant as block_number, and block_timestamp must be monotonic in
--- block_number per position. Each RAISE names its own check.
+-- Body from 20260818_130000, extended: deal_type is a required contract column, closure is applied
+-- here for every projection, the run is recorded, off-chain rows carry their instant as block_number,
+-- and block_timestamp must be monotonic in block_number per position. Each RAISE names its own check.
 CREATE OR REPLACE FUNCTION materialize_position_projection(p_view regclass, p_build_id integer DEFAULT 0)
     RETURNS bigint
     LANGUAGE plpgsql
@@ -144,6 +144,32 @@ BEGIN
     IF bad IS NOT NULL THEN
         RAISE EXCEPTION 'projection % double-emits a logical observation key (position_id,block_number,block_version,processing_version): %', p_view, bad;
     END IF;
+
+    -- A negative or non-finite quantity is a view bug, named here before closure could drop it as a
+    -- non-observation and before the table CHECK could reject it with only a constraint name.
+    SELECT string_agg(format('qty=%s at bn=%s bv=%s pv=%s ik=%s', s.quantity, s.block_number, s.block_version, s.processing_version, s.instrument_key), '; ')
+      INTO bad
+    FROM (SELECT * FROM pg_temp._mpp_src
+           WHERE quantity < 0 OR quantity = 'NaN'::numeric OR quantity >= 'Infinity'::numeric
+           ORDER BY block_number, block_version, processing_version, instrument_key LIMIT 5) s;
+    IF bad IS NOT NULL THEN
+        RAISE EXCEPTION 'projection % emits a negative or non-finite quantity: %', p_view, bad;
+    END IF;
+
+    -- Closure, applied once here rather than per view: keep every positive row, the first zero after a
+    -- positive (the close) and a zero whose predecessor is a sibling version of the same block (a reorg
+    -- or reprocess of the close). Leading zeros and repeated zeros at later blocks are not observations.
+    DELETE FROM pg_temp._mpp_src s USING (
+        SELECT ctid AS rid, quantity,
+               lag(quantity)     OVER w AS prev_qty,
+               lag(block_number) OVER w AS prev_bn,
+               coalesce(bool_or(quantity > 0) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), false) AS opened_before
+        FROM pg_temp._mpp_src
+        WINDOW w AS (PARTITION BY position_id ORDER BY block_number, block_version, processing_version)) k
+    WHERE s.ctid = k.rid
+      -- coalesce: on a position's first row prev_qty is NULL and a NULL predicate would spare the row
+      AND NOT coalesce(k.quantity > 0 OR k.prev_qty > 0 OR (k.opened_before AND k.prev_bn = s.block_number), false);
+    ANALYZE pg_temp._mpp_src;
 
     -- One pass over the stored keys this batch re-emits. Timestamp and quantity drift are kept-stored
     -- and warned; deal_type drift cannot be applied (no UPDATE channel), so it raises after both warnings.
@@ -260,7 +286,7 @@ BEGIN
     RETURN n;
 END $fn$;
 
-COMMENT ON FUNCTION materialize_position_projection(regclass, integer) IS '[Operational] VEC-402..407 shared materializer: evaluate a per-protocol projection view ONCE into a temp table, validate it against the position_state column contract (each RAISE in the body names its own check), then APPEND the new observations and record the completed run in position_projection_run, all in one transaction. deal_type is copied through; the FK to ref_deal_type constrains the value. position_id is recomputed via position_id(); serialized per view by an advisory lock on the view''s canonical name. Idempotent; run out of band. Returns rows INSERTED.';
+COMMENT ON FUNCTION materialize_position_projection(regclass, integer) IS '[Operational] VEC-402..407 shared materializer: evaluate a per-protocol projection view ONCE into a temp table, validate it against the position_state column contract (each RAISE in the body names its own check), then apply closure (a position''s leading zeros and repeated zeros are not observations; the first zero after a positive and its same-block siblings are), APPEND the new observations and record the completed run in position_projection_run, all in one transaction. deal_type is copied through; the FK to ref_deal_type constrains the value. position_id is recomputed via position_id(); serialized per view by an advisory lock on the view''s canonical name. Idempotent; run out of band. Returns rows INSERTED.';
 
 -- position_classification is retired: the classification lands on the observation, where a position
 -- that flips LOAN/BORROW can be represented; a mutable per-position copy cannot, and nothing wrote it.

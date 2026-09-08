@@ -161,6 +161,7 @@ func TestPositionState(t *testing.T) {
 	// --- every completed run is recorded, so a stale position is detectable ---
 	psTestCompletedRunIsRecorded(t, f)
 	// --- off-chain observations: chain NULL, block_number = epoch of the instant, never mixed ---
+	psTestClosure(t, f)
 	psTestOffChainObservations(t, f)
 }
 
@@ -251,8 +252,8 @@ func psTestInputRobustness(t *testing.T, f *psFixture) {
 		mppErr(t, "vuh", `SELECT * FROM (VALUES (1::int,10::bigint,'iuh'::text,'0xAB'::text,5::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) `+mppCols, "uh", "position_state_holder_hex_chk")
 	})
 
-	t.Run("Infinity quantity rejected by the CHECK", func(t *testing.T) {
-		mppErr(t, "vinf", `SELECT * FROM (VALUES (1::int,10::bigint,'iinf'::text,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text,'Infinity'::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) `+mppCols, "inf", "qty_nonneg")
+	t.Run("Infinity quantity is refused by name before the write", func(t *testing.T) {
+		mppErr(t, "vinf", `SELECT * FROM (VALUES (1::int,10::bigint,'iinf'::text,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text,'Infinity'::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) `+mppCols, "inf", "negative or non-finite quantity")
 	})
 }
 
@@ -475,15 +476,15 @@ func psTestContractEdgesMissingExtra(t *testing.T, f *psFixture) {
 func psTestQuantityCheckNegativeNan(t *testing.T, f *psFixture) {
 	mppErr := f.mppErr
 
-	t.Run("negative quantity rejected by the CHECK", func(t *testing.T) {
-		mppErr(t, "vneg", valuesOf(row("ineg", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", -5, "LOAN", 100, 0, 0)), "neg", "qty_nonneg")
+	t.Run("negative quantity is refused by name before the write", func(t *testing.T) {
+		mppErr(t, "vneg", valuesOf(row("ineg", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", -5, "LOAN", 100, 0, 0)), "neg", "negative or non-finite quantity")
 	})
 
-	t.Run("NaN quantity rejected by the CHECK", func(t *testing.T) {
-		// NaN sorts above every finite numeric, so it clears the quantity > 0 filter (the pre-flight sees a
-		// non-null code and passes); the CHECK must still reject it before it poisons downstream SUMs.
+	t.Run("NaN quantity is refused by name before the write", func(t *testing.T) {
+		// NaN sorts above every finite numeric, so it would clear closure's quantity > 0; the pre-write
+		// check names it, and the table CHECK still guards a direct INSERT.
 		body := `SELECT * FROM (VALUES (1::int,10::bigint,'inan'::text,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text,'NaN'::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) ` + mppCols
-		mppErr(t, "vnan", body, "nan", "qty_nonneg")
+		mppErr(t, "vnan", body, "nan", "negative or non-finite quantity")
 	})
 }
 
@@ -758,19 +759,18 @@ func psTestEmptyProjectionReturnCount(t *testing.T, f *psFixture) {
 		}
 	})
 
-	t.Run("a zero quantity and block zero are both legal and stored", func(t *testing.T) {
-		// Both bounds are documented as inclusive -- genesis is block 0, and a zero quantity is the
-		// closing observation exposure queries filter with quantity <> 0. Tightening either CHECK to a
-		// strict inequality survived the suite because nothing ever stored one.
-		mpp(t, "vzero", valuesOf(row("izero", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 0, "LOAN", 0, 0, 0)), "zero qty at block 0")
-		var qty, block int
+	t.Run("block zero is legal, and a zero quantity is stored as the close of a position", func(t *testing.T) {
+		// Both bounds are inclusive: genesis is block 0, and a zero quantity is the closing observation.
+		// A lone zero is a leading zero and is not an observation, so the close follows a positive.
+		mpp(t, "vzero", valuesOf(row("izero", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 5, "LOAN", 0, 0, 0), row("izero", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 0, "LOAN", 1, 0, 0)), "block 0 then a close")
+		var stored []string
 		if err := pool.QueryRow(ctx,
-			`SELECT quantity, block_number FROM position_state WHERE position_id = position_id(1,10,'izero','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')`,
-		).Scan(&qty, &block); err != nil {
-			t.Fatalf("the zero-quantity block-zero row was not stored: %v", err)
+			`SELECT array_agg(block_number::text || '=' || quantity::text ORDER BY block_number) FROM position_state WHERE position_id = position_id(1,10,'izero','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')`,
+		).Scan(&stored); err != nil {
+			t.Fatalf("read: %v", err)
 		}
-		if qty != 0 || block != 0 {
-			t.Errorf("stored quantity=%d block_number=%d; want 0 and 0", qty, block)
+		if strings.Join(stored, ",") != "0=5,1=0" {
+			t.Errorf("stored %v; want the block-0 open and the zero close", stored)
 		}
 	})
 
@@ -1065,15 +1065,15 @@ func psTestAtomicityNotnullObservationColumns(t *testing.T, f *psFixture) {
 
 	t.Run("a within-write failure leaves existing rows untouched (atomicity)", func(t *testing.T) {
 		// Seed a position, then run a view emitting a new observation for it AND a second position whose
-		// quantity violates the CHECK. The failure must roll back the WHOLE statement: the seeded row is
+		// holder violates the hex CHECK at write time (the pre-write checks do not look at holder format). The failure must roll back the WHOLE statement: the seeded row is
 		// untouched and the poison position wrote nothing.
 		mpp(t, "vat", valuesOf(row("iat", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 5, "LOAN", 100, 0, 0)), "seed")
-		poison := valuesOf(row("iat", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 50, "LOAN", 200, 0, 0), row("iat2", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", -7, "LOAN", 100, 0, 0))
+		poison := valuesOf(row("iat", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 50, "LOAN", 200, 0, 0), row("iat2", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 7, "LOAN", 100, 0, 0))
 		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW vat AS `+poison); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := pool.Exec(ctx, `SELECT materialize_position_projection('vat'::regclass)`); err == nil || !strings.Contains(err.Error(), "position_state_qty_nonneg_chk") {
-			t.Fatalf("poison run: got %v; want the quantity CHECK failure (proves the failure happened mid-write)", err)
+		if _, err := pool.Exec(ctx, `SELECT materialize_position_projection('vat'::regclass)`); err == nil || !strings.Contains(err.Error(), "position_state_holder_hex_chk") {
+			t.Fatalf("poison run: got %v; want the holder hex CHECK failure (proves the failure happened mid-write)", err)
 		}
 		var unchanged bool
 		if err := pool.QueryRow(ctx, `SELECT quantity = 5 FROM position_state WHERE position_id = position_id(1,10,'iat','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')`).Scan(&unchanged); err != nil {
@@ -2543,6 +2543,60 @@ func psTestCompletedRunIsRecorded(t *testing.T, f *psFixture) {
 		_, latest := runs(t, "pv_run_mixed")
 		if latest == nil || !latest.Equal(day(2)) {
 			t.Errorf("mixed sweep latest = %v, want 2026-03-02 (the later of the two instants)", latest)
+		}
+	})
+}
+
+// psTestClosure: the materializer decides which emitted rows are observations. Leading zeros and
+// repeated zeros are not; the first zero after a positive is the close, and a zero at the same block as
+// its predecessor (a reorg or reprocess of the close) is kept so the canonical version survives.
+func psTestClosure(t *testing.T, f *psFixture) {
+	row := func(ik string, qty, bn, bv, pv int, ts string) string {
+		return "(1::int,10::bigint,'" + ik + "'::text,'" + strings.Repeat("c", 40) + "'::text," + strconv.Itoa(qty) + "::numeric,'LOAN'::text," +
+			strconv.Itoa(bn) + "::bigint," + strconv.Itoa(bv) + "::int," + strconv.Itoa(pv) + "::int,'" + ts + "'::timestamptz)"
+	}
+	stored := func(t *testing.T, ik string) []string {
+		t.Helper()
+		var got []string
+		if err := f.pool.QueryRow(f.ctx, `
+			SELECT coalesce(array_agg(block_number::text || 'v' || block_version::text || 'p' || processing_version::text || '=' || quantity::text
+			                          ORDER BY block_number, block_version, processing_version), '{}')
+			FROM position_state WHERE instrument_key = $1`, ik).Scan(&got); err != nil {
+			t.Fatalf("read %s: %v", ik, err)
+		}
+		return got
+	}
+	for _, c := range []struct {
+		name string
+		rows string
+		want []string
+	}{
+		{"leading zeros are dropped, the first positive opens", row("cl-lead", 0, 100, 0, 0, "2026-05-01") + "," + row("cl-lead", 0, 200, 0, 0, "2026-05-02") + "," + row("cl-lead", 7, 300, 0, 0, "2026-05-03"), []string{"300v0p0=7"}},
+		{"the first zero after a positive is the close, repeated zeros are dropped", row("cl-close", 5, 100, 0, 0, "2026-05-01") + "," + row("cl-close", 0, 200, 0, 0, "2026-05-02") + "," + row("cl-close", 0, 300, 0, 0, "2026-05-03"), []string{"100v0p0=5", "200v0p0=0"}},
+		{"a reorg sibling of the closing block is kept", row("cl-reorg", 5, 100, 0, 0, "2026-05-01") + "," + row("cl-reorg", 0, 200, 0, 0, "2026-05-02") + "," + row("cl-reorg", 0, 200, 1, 0, "2026-05-02T00:00:12Z"), []string{"100v0p0=5", "200v0p0=0", "200v1p0=0"}},
+		{"a reprocess sibling of the closing block is kept", row("cl-repro", 5, 100, 0, 0, "2026-05-01") + "," + row("cl-repro", 0, 200, 0, 0, "2026-05-02") + "," + row("cl-repro", 0, 200, 0, 1, "2026-05-02"), []string{"100v0p0=5", "200v0p0=0", "200v0p1=0"}},
+		{"a never-open position with a reorged leading zero emits nothing", row("cl-never", 0, 100, 0, 0, "2026-05-01") + "," + row("cl-never", 0, 100, 1, 0, "2026-05-01T00:00:12Z"), []string{}},
+		{"a re-open after a close survives", row("cl-reopen", 5, 100, 0, 0, "2026-05-01") + "," + row("cl-reopen", 0, 200, 0, 0, "2026-05-02") + "," + row("cl-reopen", 7, 300, 0, 0, "2026-05-03"), []string{"100v0p0=5", "200v0p0=0", "300v0p0=7"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f.mppN(t, "pv_"+strings.ReplaceAll(strings.Fields(c.name)[0]+strings.Fields(c.name)[1], "-", ""), `SELECT * FROM (VALUES `+c.rows+`) `+mppCols, c.name)
+			ik := strings.SplitN(strings.TrimPrefix(c.rows, "(1::int,10::bigint,'"), "'", 2)[0]
+			if got := stored(t, ik); strings.Join(got, ",") != strings.Join(c.want, ",") {
+				t.Errorf("stored %v, want %v", got, c.want)
+			}
+		})
+	}
+
+	t.Run("an out-of-order arrival: a zero seen first is a leading zero, and becomes the close once the positive lands", func(t *testing.T) {
+		const ik = "cl-ooo"
+		if n := f.mppN(t, "pv_clooo", `SELECT * FROM (VALUES `+row(ik, 0, 200, 0, 0, "2026-05-02")+`) `+mppCols, "zero first"); n != 0 {
+			t.Fatalf("a lone zero inserted %d rows, want 0", n)
+		}
+		if n := f.mppN(t, "pv_clooo", `SELECT * FROM (VALUES `+row(ik, 5, 100, 0, 0, "2026-05-01")+","+row(ik, 0, 200, 0, 0, "2026-05-02")+`) `+mppCols, "history complete"); n != 2 {
+			t.Fatalf("the completed history inserted %d rows, want 2 (the open and the close)", n)
+		}
+		if got := stored(t, ik); strings.Join(got, ",") != "100v0p0=5,200v0p0=0" {
+			t.Errorf("stored %v, want the open and the close", got)
 		}
 	})
 }

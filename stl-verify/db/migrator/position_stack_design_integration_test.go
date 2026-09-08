@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -27,25 +28,47 @@ func TestPositionStackDesignInvariants(t *testing.T) {
 			rows := generateHistory(rng)
 			view := fmt.Sprintf("pv_design_%d", seed)
 
-			// The whole history as one view, for the per-row deal_type comparison in I5b.
+			// The whole history and its closure as views, for the oracle comparisons in I0 and I5b.
 			if _, err := pool.Exec(ctx, `CREATE VIEW `+view+`_all AS `+valuesBody(rows)); err != nil {
 				t.Fatalf("create history view: %v", err)
 			}
+			if _, err := pool.Exec(ctx, `CREATE VIEW `+view+`_want AS `+valuesBody(closure(rows))); err != nil {
+				t.Fatalf("create closure view: %v", err)
+			}
 
-			var inserted int64
+			// Each run re-projects everything that has arrived so far, as the runner does; arrival order is
+			// random, so a later run carries observations older than ones already stored.
+			var arrived []obsRow
 			for bi, batch := range splitBatches(rng, rows) {
-				if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW `+view+` AS `+valuesBody(batch)); err != nil {
+				arrived = append(arrived, batch...)
+				if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW `+view+` AS `+valuesBody(arrived)); err != nil {
 					t.Fatalf("create view (batch %d): %v", bi, err)
 				}
-				var n int64
-				if err := pool.QueryRow(ctx,
-					`SELECT materialize_position_projection($1::regclass)`, view).Scan(&n); err != nil {
+				if _, err := pool.Exec(ctx, `SELECT materialize_position_projection($1::regclass)`, view); err != nil {
 					t.Fatalf("I0: the materializer refused a legal history at batch %d: %v", bi, err)
 				}
-				inserted += n
 			}
-			if int(inserted) != len(rows) {
-				t.Errorf("I0 spine took every emitted observation: emitted %d, inserted %d", len(rows), inserted)
+			// I0: the spine holds every observation the closure of the FULL history keeps, nothing that is not
+			// in the history, and no position starts with a zero. Batches arrive out of order, so a zero that
+			// was a close when it arrived may be a repeated zero in the final history; those may remain.
+			want := closure(rows)
+			var missing, foreign, leadingZero int
+			if err := pool.QueryRow(ctx, `
+				WITH hist AS (SELECT * FROM `+view+`_all),
+				     want AS (SELECT * FROM `+view+`_want),
+				     spine AS (SELECT holder_id, chain_id, instrument_key, block_number, block_version, processing_version, quantity FROM position_state)
+				SELECT (SELECT count(*) FROM (SELECT holder_id, chain_id, instrument_key, block_number, block_version, processing_version, quantity FROM want
+				                              EXCEPT SELECT * FROM spine) x),
+				       (SELECT count(*) FROM (SELECT * FROM spine
+				                              EXCEPT SELECT holder_id, chain_id, instrument_key, block_number, block_version, processing_version, quantity FROM hist) y),
+				       (SELECT count(*) FROM (SELECT DISTINCT ON (position_id) quantity FROM position_state
+				                              ORDER BY position_id, block_number, block_version, processing_version) z WHERE quantity = 0)`).
+				Scan(&missing, &foreign, &leadingZero); err != nil {
+				t.Fatalf("I0: %v", err)
+			}
+			if missing != 0 || foreign != 0 || leadingZero != 0 {
+				t.Errorf("I0 closure: %d closure rows missing from the spine, %d spine rows not in the history, %d positions opening with a zero (history %d rows, closure %d)",
+					missing, foreign, leadingZero, len(rows), len(want))
 			}
 
 			// I5: deal_type reaches the spine for exactly the observations that emitted one.
@@ -55,13 +78,13 @@ func TestPositionStackDesignInvariants(t *testing.T) {
 				t.Fatalf("I5: %v", err)
 			}
 			wantNull := 0
-			for _, r := range rows {
+			for _, r := range want {
 				if r.dealType == "" {
 					wantNull++
 				}
 			}
-			if nullInSpine != wantNull || total != len(rows) {
-				t.Errorf("I5 deal_type round-trips: %d NULL stored of %d rows, want %d NULL of %d", nullInSpine, total, wantNull, len(rows))
+			if nullInSpine < wantNull || total < len(want) {
+				t.Errorf("I5 deal_type round-trips: %d NULL stored of %d rows, want at least %d NULL of %d", nullInSpine, total, wantNull, len(want))
 			}
 
 			// I5b: every stored deal_type is the one its observation emitted (not just the NULL count).
@@ -190,8 +213,52 @@ func generateHistory(rng *rand.Rand) []obsRow {
 	return rows
 }
 
-// splitBatches cuts the history into 2-5 arrival batches in random order, so a later batch can carry
-// an OLDER observation than one already cached.
+// closure is the oracle for the materializer's closure rule, written over the sorted history rather
+// than as a window: keep a positive row, a zero directly after a positive, and a zero at the same block
+// as its predecessor once the position has ever been positive.
+func closure(rows []obsRow) []obsRow {
+	byPos := map[string][]obsRow{}
+	var order []string
+	for _, r := range rows {
+		k := fmt.Sprintf("%v|%s", r.offChain, r.holder) // one on-chain and one off-chain instrument per holder
+		if _, ok := byPos[k]; !ok {
+			order = append(order, k)
+		}
+		byPos[k] = append(byPos[k], r)
+	}
+	var out []obsRow
+	for _, k := range order {
+		seq := byPos[k]
+		sort.Slice(seq, func(i, j int) bool {
+			a, b := seq[i], seq[j]
+			if a.block != b.block {
+				return a.block < b.block
+			}
+			if a.bver != b.bver {
+				return a.bver < b.bver
+			}
+			return a.pver < b.pver
+		})
+		opened := false
+		for i, r := range seq {
+			keep := r.qty > 0
+			if i > 0 {
+				prev := seq[i-1]
+				keep = keep || prev.qty > 0 || (opened && prev.block == r.block)
+			}
+			if keep {
+				out = append(out, r)
+			}
+			if r.qty > 0 {
+				opened = true
+			}
+		}
+	}
+	return out
+}
+
+// splitBatches cuts the history into 2-5 arrival batches in random order, so a later run can carry
+// an OLDER observation than one already stored.
 func splitBatches(rng *rand.Rand, rows []obsRow) [][]obsRow {
 	s := make([]obsRow, len(rows))
 	copy(s, rows)
