@@ -1,0 +1,482 @@
+//go:build integration
+
+package migrator_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// The VEC-617 acceptance tests for combined-master wave 1 (ADR-0005, #652): the four
+// behaviours the migrations claim and that nothing else in CI would catch if they broke.
+//
+// They live in db/migrator, alongside append_only_grants_integration_test.go, because they
+// need a database whose migration order this package controls, and because the append-only
+// assertions read the catalogue the same way that file does. The package is already listed
+// in ci/integration-shards/1.txt, so no shard manifest changes.
+//
+// A note that applies to all four: the harness migrates as the container's BOOTSTRAP
+// SUPERUSER (testutil.StartTimescaleDBForMain sets POSTGRES_USER=test), and a superuser
+// bypasses privilege checks entirely. That is the #574 trap these migrations were reviewed
+// against, and it means has_table_privilege() on the table OWNER reports true here no
+// matter what the migration revoked. Owner-side assertions therefore read the ACL itself
+// through aclexplode(), which records what production will enforce; role-side assertions
+// use the NOLOGIN group role and the real login user, where the checks do apply.
+
+const secstoreSpine = `actor, change_reason_code, change_reason, source_system`
+
+// insertNode appends one sec_node row. valid_to is passed as SQL rather than a parameter so a
+// test can write 'infinity' (the open-window sentinel) without pgx date-infinity handling.
+func insertNode(ctx context.Context, t *testing.T, pool *pgxpool.Pool, id, status, validFrom, validToSQL, reason string) {
+	t.Helper()
+	_, err := pool.Exec(ctx, `
+		INSERT INTO sec_node (id, record_type, status, valid_from, valid_to, `+secstoreSpine+`)
+		VALUES ($1, 'ENTITY', $2, $3::date, `+validToSQL+`, 'test', 'SEED_LOAD', $4, 'test')`,
+		id, status, validFrom, reason)
+	if err != nil {
+		t.Fatalf("insert %s (%s .. %s): %v", id, validFrom, validToSQL, err)
+	}
+}
+
+// TestSecStoreClosingRowSupersedesRatherThanResurrects is acceptance item 1.
+//
+// Close-and-open appends a row with the SAME (id, valid_from) as the row it closes, differing
+// only in valid_to. Two things have to hold for that to be a data change rather than a
+// correction: it must LAND at processing_version 0 (valid_to is in the primary key precisely so
+// it does not collide — ADR-0006 §3 reserves processing_version > 0 for correction runs, one
+// allocation per ticket, which an issuer re-point is not), and the resolved reads must return
+// the CLOSED row for a date inside that window, not the superseded open one.
+//
+// The second half is the ordering the ticket asks to be pinned: resolve the latest append per
+// (id, valid_from) FIRST, then filter the valid-time window. The test also runs the inverted
+// order inline and asserts the two disagree — filtering the window first leaves the superseded
+// open row a live candidate, so a read written that way silently resurrects it.
+//
+// The tombstone subtest covers the other half of supersession: a zero-length window
+// (valid_to = valid_from) withdraws a record from every resolved read while its history stays
+// in the base table, which is how ADR-0005 §3's retraction and a valid-time amendment work.
+func TestSecStoreClosingRowSupersedesRatherThanResurrects(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	const id = "em-t-supersede"
+	insertNode(ctx, t, pool, id, "ACTIVE", "2026-01-01", "'infinity'", "open the first window")
+	insertNode(ctx, t, pool, id, "ACTIVE", "2026-01-01", "'2026-06-01'", "close it")
+	insertNode(ctx, t, pool, id, "INACTIVE", "2026-06-01", "'infinity'", "open the next window")
+
+	t.Run("close_and_open_lands_at_processing_version_0", func(t *testing.T) {
+		var rows, versions int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*), count(DISTINCT processing_version) FROM sec_node WHERE id = $1`, id,
+		).Scan(&rows, &versions); err != nil {
+			t.Fatalf("count rows: %v", err)
+		}
+		if rows != 3 {
+			t.Errorf("got %d rows, want 3 — a closing row that collides on the PK is the failure this guards", rows)
+		}
+		if versions != 1 {
+			t.Errorf("rows span %d processing_versions, want 1: a close is a valid-time change and must not burn a correction version (ADR-0006 §3)", versions)
+		}
+	})
+
+	t.Run("as_of_inside_the_closed_window_resolves_the_closed_row", func(t *testing.T) {
+		var validTo, status string
+		if err := pool.QueryRow(ctx, `
+			SELECT valid_to::text, status FROM sec_node_as_of('2026-03-01') WHERE id = $1`, id,
+		).Scan(&validTo, &status); err != nil {
+			t.Fatalf("sec_node_as_of(2026-03-01): %v", err)
+		}
+		if validTo != "2026-06-01" {
+			t.Errorf("as_of resolved valid_to=%s, want 2026-06-01 — the open row it superseded was returned instead", validTo)
+		}
+		if status != "ACTIVE" {
+			t.Errorf("as_of resolved status=%s, want ACTIVE", status)
+		}
+	})
+
+	t.Run("window_first_ordering_would_resurrect_the_superseded_row", func(t *testing.T) {
+		// The inverted read: filter the valid-time window before resolving supersession. Both
+		// the closed row and the open row it superseded satisfy the window, so the superseded
+		// row is still a candidate and which one comes back is left to the planner. The shipped
+		// read returns exactly one row, and it is the closed one (asserted above).
+		var candidates, resurrected int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*), count(*) FILTER (WHERE valid_to = 'infinity')
+			FROM sec_node
+			WHERE id = $1 AND valid_from <= '2026-03-01'::date AND '2026-03-01'::date < valid_to`, id,
+		).Scan(&candidates, &resurrected); err != nil {
+			t.Fatalf("window-first candidates: %v", err)
+		}
+		if candidates != 2 || resurrected != 1 {
+			t.Errorf("window-first left %d candidates (%d of them the superseded open row), want 2 and 1: the two orderings must demonstrably differ, which is why the views resolve the version first",
+				candidates, resurrected)
+		}
+
+		var viaView int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM sec_node_as_of('2026-03-01') WHERE id = $1`, id).Scan(&viaView); err != nil {
+			t.Fatalf("count via as_of: %v", err)
+		}
+		if viaView != 1 {
+			t.Errorf("sec_node_as_of returned %d rows for one logical record, want 1", viaView)
+		}
+	})
+
+	t.Run("current_returns_the_open_second_window", func(t *testing.T) {
+		var validFrom, status string
+		if err := pool.QueryRow(ctx, `
+			SELECT valid_from::text, status FROM sec_node_current WHERE id = $1`, id,
+		).Scan(&validFrom, &status); err != nil {
+			t.Fatalf("sec_node_current: %v", err)
+		}
+		if validFrom != "2026-06-01" || status != "INACTIVE" {
+			t.Errorf("_current resolved (%s, %s), want (2026-06-01, INACTIVE)", validFrom, status)
+		}
+	})
+
+	t.Run("tombstone_withdraws_the_record_from_every_resolved_read", func(t *testing.T) {
+		const victim = "em-t-tombstone"
+		insertNode(ctx, t, pool, victim, "ACTIVE", "2026-01-01", "'infinity'", "should never have existed")
+		// A zero-length window, carrying the reason code and the record it supersedes.
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO sec_node (id, record_type, status, valid_from, valid_to, actor,
+			                      change_reason_code, change_reason, approved_by,
+			                      supersedes_record_id, source_system)
+			SELECT $1, 'ENTITY', 'ACTIVE', '2026-01-01', '2026-01-01', 'test',
+			       'RETRACTION', 'tombstone', 'approver', record_id, 'test'
+			FROM sec_node WHERE id = $1 AND change_reason_code = 'SEED_LOAD'`, victim); err != nil {
+			t.Fatalf("append tombstone: %v", err)
+		}
+
+		var live int
+		if err := pool.QueryRow(ctx, `
+			SELECT (SELECT count(*) FROM sec_node_current WHERE id = $1)
+			     + (SELECT count(*) FROM sec_node_as_of('2026-01-01') WHERE id = $1)
+			     + (SELECT count(*) FROM sec_node_as_of('2027-01-01') WHERE id = $1)`, victim,
+		).Scan(&live); err != nil {
+			t.Fatalf("resolved reads after tombstone: %v", err)
+		}
+		if live != 0 {
+			t.Errorf("tombstoned record still visible in %d resolved read(s), want 0", live)
+		}
+
+		var history, chained int
+		if err := pool.QueryRow(ctx, `
+			SELECT (SELECT count(*) FROM sec_node WHERE id = $1),
+			       (SELECT count(*) FROM sec_node t JOIN sec_node r ON r.record_id = t.supersedes_record_id
+			          WHERE t.id = $1)`, victim,
+		).Scan(&history, &chained); err != nil {
+			t.Fatalf("history after tombstone: %v", err)
+		}
+		if history != 2 || chained != 1 {
+			t.Errorf("after tombstone: %d rows in the base table and %d resolvable supersession link(s), want 2 and 1 — a retraction hides the record, it never deletes it (AR-1.4)",
+				history, chained)
+		}
+	})
+}
+
+// TestSecStoreRejectsAnIllegalRelTypeTriple is acceptance item 2, as far as wave 1 can carry it.
+//
+// The engine half is real and asserted: an endpoint kind outside the closed record_type set and
+// a rel_type outside the governed vocabulary are both refused at the write boundary.
+//
+// The triple itself — (rel_type, src_kind, dst_kind) against rel_type_vocabulary.src_kinds /
+// dst_kinds — is NOT refused, and cannot be with wave 1's schema: legality lives in two array
+// columns, which no FK or CHECK on sec_edge can consult, so ADR-0005 §3 assigns the rule to the
+// loader/validator (GQ-11) and that validator is VEC-622's. The last subtest asserts the gap
+// rather than pretending it away: the vocabulary already holds everything needed to decide the
+// triple, and the write is nonetheless accepted today.
+//
+// When VEC-622 lands the validator — or when the vocabulary grows the legal-pairs table that
+// would turn this into a composite FK, which is also what SAME_AS and SUPERSEDES need before
+// they ratify — invert that subtest. It is deliberately written so it fails the moment the gap
+// closes, because a skipped test would go quiet instead.
+func TestSecStoreRejectsAnIllegalRelTypeTriple(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	insertEdge := func(relType, srcKind, dstKind string) error {
+		_, err := pool.Exec(ctx, `
+			INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, `+secstoreSpine+`)
+			VALUES ('sec-t-triple', $2, 'em-t-triple', $3, $1, '2026-01-01', 'test', 'SEED_LOAD', 'triple', 'test')`,
+			relType, srcKind, dstKind)
+		return err
+	}
+
+	t.Run("endpoint_kind_outside_the_record_type_set_is_rejected", func(t *testing.T) {
+		err := insertEdge("ISSUED_BY", "NOT_A_KIND", "ENTITY")
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+			t.Fatalf("insert with src_kind NOT_A_KIND failed with %v, want SQLSTATE 23514 (check_violation)", err)
+		}
+	})
+
+	t.Run("rel_type_outside_the_governed_vocabulary_is_rejected", func(t *testing.T) {
+		err := insertEdge("INVENTED_BY", "SECURITY", "ENTITY")
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "23503" {
+			t.Fatalf("insert with rel_type INVENTED_BY failed with %v, want SQLSTATE 23503 (foreign_key_violation) — GQ-01", err)
+		}
+	})
+
+	t.Run("the_vocabulary_can_decide_the_triple", func(t *testing.T) {
+		// ISSUED_BY is SECURITY -> ENTITY. A SECURITY -> CONCEPT edge of that type is illegal,
+		// and this is the query that says so — the one a validator resolves per write.
+		var legal bool
+		if err := pool.QueryRow(ctx, `
+			SELECT 'CONCEPT' = ANY (dst_kinds) FROM rel_type_vocabulary WHERE rel_type = 'ISSUED_BY'`,
+		).Scan(&legal); err != nil {
+			t.Fatalf("read endpoint rule for ISSUED_BY: %v", err)
+		}
+		if legal {
+			t.Error("rel_type_vocabulary says ISSUED_BY may point at a CONCEPT; the seeded rule is SECURITY -> ENTITY (ADR-0005 §5)")
+		}
+	})
+
+	t.Run("illegal_triple_is_not_yet_rejected_at_the_write_boundary", func(t *testing.T) {
+		// The documented gap, asserted so it cannot be forgotten. INVERT THIS SUBTEST when
+		// VEC-622's validator or a legal-pairs FK starts refusing the write.
+		if err := insertEdge("ISSUED_BY", "SECURITY", "CONCEPT"); err != nil {
+			t.Fatalf("SECURITY -> CONCEPT ISSUED_BY was refused with %v — if that is deliberate, this subtest is now inverted: assert the rejection and delete this comment (GQ-11, VEC-622)", err)
+		}
+		t.Log("known gap: an illegal (rel_type, src_kind, dst_kind) triple lands. Legality is two array columns on the vocabulary, which no CHECK or FK on sec_edge can read, so ADR-0005 §3 assigns GQ-11 to the validator (VEC-622)")
+	})
+}
+
+// TestSecStoreSingleValuedRepointPassesTheWriteAndIsCaughtByTheDQRule is acceptance item 3.
+//
+// ISSUED_BY is single-valued per ADR-0005 §5, and that is deliberately NOT a write-time rule: a
+// re-point always time-overlaps the edge it supersedes, so a write-time cardinality check would
+// reject every legitimate one. The rule runs over RESOLVED CURRENT STATE instead (GQ-20), which
+// means a badly executed re-point — open the new issuer without closing the old — has to pass
+// the write and then show up in the check.
+//
+// Both halves are asserted here. The check itself is GQ-20's query against sec_edge_current;
+// VEC-619 will surface it as a DQ view over the pivot, and when it does this test should read
+// that view instead of spelling the query out. What must not change is the shape: two current
+// edges for one security is a data-quality finding, not a rejected write.
+func TestSecStoreSingleValuedRepointPassesTheWriteAndIsCaughtByTheDQRule(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	insertIssuer := func(t *testing.T, src, dst, validFrom, validToSQL, reason string) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, valid_to,
+			                      actor, change_reason_code, change_reason, approved_by, source_system)
+			VALUES ($1, 'SECURITY', $2, 'ENTITY', 'ISSUED_BY', $3::date, `+validToSQL+`,
+			        'test', 'REPOINT', $4, 'approver', 'test')`, src, dst, validFrom, reason); err != nil {
+			t.Fatalf("insert ISSUED_BY %s -> %s: %v", src, dst, err)
+		}
+	}
+
+	// GQ-20 over resolved current state: securities carrying more than one current issuer.
+	const gq20 = `
+		SELECT count(*) FROM (
+			SELECT src_id FROM sec_edge_current
+			WHERE rel_type = 'ISSUED_BY' AND src_id = $1
+			GROUP BY src_id HAVING count(*) > 1
+		) offenders`
+
+	t.Run("a_botched_repoint_passes_the_write", func(t *testing.T) {
+		const sec = "sec-t-botched"
+		insertIssuer(t, sec, "em-t-issuer-old", "2026-01-01", "'infinity'", "original issuer")
+		// The mistake: a second open issuer, without closing the first.
+		insertIssuer(t, sec, "em-t-issuer-new", "2026-06-01", "'infinity'", "re-point without closing")
+
+		var current int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM sec_edge_current WHERE rel_type = 'ISSUED_BY' AND src_id = $1`, sec).Scan(&current); err != nil {
+			t.Fatalf("count current issuers: %v", err)
+		}
+		if current != 2 {
+			t.Fatalf("resolved %d current issuers, want 2 — cardinality must not be enforced at write time (a re-point always overlaps the edge it supersedes)", current)
+		}
+
+		var offenders int
+		if err := pool.QueryRow(ctx, gq20, sec).Scan(&offenders); err != nil {
+			t.Fatalf("GQ-20 query: %v", err)
+		}
+		if offenders != 1 {
+			t.Errorf("GQ-20 flagged %d offenders, want 1: a single-valued type with two current edges is exactly what the DQ rule exists to catch", offenders)
+		}
+	})
+
+	t.Run("a_correct_repoint_is_not_flagged", func(t *testing.T) {
+		const sec = "sec-t-correct"
+		insertIssuer(t, sec, "em-t-issuer-old", "2026-01-01", "'infinity'", "original issuer")
+		insertIssuer(t, sec, "em-t-issuer-old", "2026-01-01", "'2026-06-01'", "close the old edge")
+		insertIssuer(t, sec, "em-t-issuer-new", "2026-06-01", "'infinity'", "open the new one")
+
+		var current int
+		var dst string
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*), min(dst_id) FROM sec_edge_current WHERE rel_type = 'ISSUED_BY' AND src_id = $1`, sec,
+		).Scan(&current, &dst); err != nil {
+			t.Fatalf("count current issuers: %v", err)
+		}
+		if current != 1 || dst != "em-t-issuer-new" {
+			t.Errorf("after a correct re-point: %d current issuer(s) (%s), want 1 (em-t-issuer-new)", current, dst)
+		}
+
+		var offenders int
+		if err := pool.QueryRow(ctx, gq20, sec).Scan(&offenders); err != nil {
+			t.Fatalf("GQ-20 query: %v", err)
+		}
+		if offenders != 0 {
+			t.Errorf("GQ-20 flagged a correctly re-pointed security; the rule would false-positive on every close-and-open")
+		}
+	})
+}
+
+// TestSecStoreWave1IsAppendOnlyUnderTheRealRoles is acceptance item 4.
+//
+// Wave 1 enforces append-only by table class, and the two classes differ on purpose:
+//
+//   - sec_node / sec_edge: every mutation privilege revoked INCLUDING the owner's, the
+//     position_state pattern. Nothing FKs these tables, so the owner-side revoke cannot break
+//     an integrity probe.
+//   - the vocabularies: FK parents, so the owner KEEPS UPDATE — the FK integrity probe
+//     (SELECT ... FOR KEY SHARE) executes as the parent's owner and requires it. That is the
+//     #574 finding (20260714_160000), invisible under a superuser, and the reason append-only
+//     there is the reference_table_immutable() trigger instead of an ACL.
+//
+// So this test asserts four different things, and the last one is the regression guard that
+// matters most: an INSERT into sec_edge as the real login role must still pass the FK probes
+// against the revoked vocabulary tables. Get the revoke wrong and every append fails in
+// production while CI stays green.
+func TestSecStoreWave1IsAppendOnlyUnderTheRealRoles(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	stores := []string{"sec_node", "sec_edge"}
+	vocabularies := []string{
+		"rel_type_vocabulary", "weight_basis_vocabulary", "change_reason_vocabulary",
+		"concept_class_vocabulary", "node_status_vocabulary",
+	}
+
+	t.Run("app_role_keeps_select_insert_and_holds_no_update_delete", func(t *testing.T) {
+		for _, table := range append(append([]string{}, stores...), vocabularies...) {
+			var canSelect, canInsert, canUpdate, canDelete bool
+			if err := pool.QueryRow(ctx, `
+				SELECT has_table_privilege('stl_readwrite', $1, 'SELECT'),
+				       has_table_privilege('stl_readwrite', $1, 'INSERT'),
+				       has_table_privilege('stl_readwrite', $1, 'UPDATE'),
+				       has_table_privilege('stl_readwrite', $1, 'DELETE')`, table,
+			).Scan(&canSelect, &canInsert, &canUpdate, &canDelete); err != nil {
+				t.Fatalf("read grants for %s: %v", table, err)
+			}
+			if !canSelect {
+				t.Errorf("%s: stl_readwrite must keep SELECT", table)
+			}
+			if canUpdate || canDelete {
+				t.Errorf("%s: stl_readwrite holds update=%v delete=%v, want neither — ALTER DEFAULT PRIVILEGES grants full DML on every migrator-owned table, so the REVOKE is load-bearing",
+					table, canUpdate, canDelete)
+			}
+			if isStore := table == "sec_node" || table == "sec_edge"; isStore && !canInsert {
+				t.Errorf("%s: stl_readwrite must keep INSERT — the stores are append-only, not read-only", table)
+			}
+		}
+	})
+
+	// The owner-side assertions read the ACL rather than has_table_privilege(), because the
+	// owner here is the harness superuser and privilege checks report true for a superuser
+	// whatever the ACL says. aclexplode() is what the migration actually changed, and it is
+	// what production (a non-superuser stl_migrator) will enforce.
+	//
+	// coalesce(relacl, acldefault(...)) is load-bearing: relacl is NULL on a table whose
+	// privileges were never touched, the owner implicitly holds everything, and
+	// aclexplode(NULL) returns no rows — so reading relacl directly would report "the owner
+	// holds nothing" for a table where the REVOKE never ran, which is precisely the failure
+	// these subtests exist to catch. acldefault('r', relowner) materialises the implicit
+	// default so a missing revoke reads as the privilege still being held.
+	ownerHas := func(t *testing.T, table, priv string) bool {
+		t.Helper()
+		var held bool
+		if err := pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_class c,
+				     aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
+				WHERE c.oid = $1::regclass
+				  AND a.grantee = c.relowner
+				  AND a.privilege_type = $2
+			)`, table, priv).Scan(&held); err != nil {
+			t.Fatalf("read %s ACL for %s: %v", table, priv, err)
+		}
+		return held
+	}
+
+	t.Run("owner_holds_no_update_on_the_stores", func(t *testing.T) {
+		for _, table := range stores {
+			if ownerHas(t, table, "UPDATE") {
+				t.Errorf("%s: the owner still holds UPDATE in the ACL — the full revoke (position_state pattern) did not land", table)
+			}
+			if ownerHas(t, table, "DELETE") {
+				t.Errorf("%s: the owner still holds DELETE in the ACL", table)
+			}
+		}
+	})
+
+	t.Run("owner_keeps_update_on_the_vocabularies_for_the_fk_probe", func(t *testing.T) {
+		for _, table := range vocabularies {
+			if !ownerHas(t, table, "UPDATE") {
+				t.Errorf("%s: the owner lost UPDATE — the FK integrity probe runs as the parent's owner and needs it, so every INSERT into sec_node/sec_edge would fail under the prod roles (20260714_160000, #574)", table)
+			}
+			if ownerHas(t, table, "DELETE") {
+				t.Errorf("%s: the owner still holds DELETE; append-only leaves no delete channel", table)
+			}
+		}
+	})
+
+	t.Run("vocabulary_update_raises_the_immutability_trigger", func(t *testing.T) {
+		// Not an ACL refusal: the owner holds UPDATE by design here, and the trigger is what
+		// makes the table append-only. Row locks do not fire row triggers, so this does not
+		// affect the FK probe asserted below.
+		_, err := pool.Exec(ctx, `UPDATE rel_type_vocabulary SET description = description WHERE rel_type = 'ISSUED_BY'`)
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "P0001" {
+			t.Fatalf("UPDATE on rel_type_vocabulary failed with %v, want SQLSTATE P0001 from reference_table_immutable()", err)
+		}
+	})
+
+	t.Run("the_login_role_cannot_update_but_can_still_append", func(t *testing.T) {
+		appPool, err := pgxpool.New(ctx, loginRoleDSN(t, pool))
+		if err != nil {
+			t.Fatalf("connect as stl_read_write: %v", err)
+		}
+		defer appPool.Close()
+
+		// A WHERE that matches nothing: privileges are checked at executor start, so the
+		// refusal cannot be confused with a row-level effect.
+		_, err = appPool.Exec(ctx, `UPDATE sec_node SET status = status WHERE id = 'nothing-matches'`)
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+			t.Fatalf("UPDATE on sec_node as stl_read_write failed with %v, want SQLSTATE 42501 (insufficient_privilege)", err)
+		}
+
+		// The regression guard: this INSERT probes change_reason_vocabulary and
+		// rel_type_vocabulary, both of which just had privileges revoked. Under the #574
+		// pattern it fails with "permission denied for table change_reason_vocabulary".
+		if _, err := appPool.Exec(ctx, `
+			INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, `+secstoreSpine+`)
+			VALUES ('sec-t-acl', 'SECURITY', 'em-t-acl', 'ENTITY', 'ISSUED_BY', '2026-01-01',
+			        'test', 'SEED_LOAD', 'fk probe under the app role', 'test')`); err != nil {
+			t.Fatalf("INSERT into sec_edge as stl_read_write: %v — the FK integrity probe against the revoked vocabulary tables is failing, which is the #574 regression", err)
+		}
+
+		var appended int
+		if err := appPool.QueryRow(ctx, `SELECT count(*) FROM sec_edge WHERE src_id = 'sec-t-acl'`).Scan(&appended); err != nil {
+			t.Fatalf("read back the appended edge: %v", err)
+		}
+		if appended != 1 {
+			t.Errorf("appended %d rows, want 1", appended)
+		}
+	})
+}
