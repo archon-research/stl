@@ -1,5 +1,4 @@
 import {
-  type ColumnDef,
   type DataTableConfig,
   type DataTableProps,
   type SkeletonColumnHint,
@@ -97,7 +96,7 @@ function buildGridRows(
 // read off the same column defs rather than restated: only the leading Asset
 // cell needs a shape `meta` cannot express (a symbol over its protocol line).
 function buildSkeletonColumnHints(
-  columns: ColumnDef<AllocationGridRow>[],
+  columns: ReturnType<typeof createAllocationColumns>,
 ): SkeletonColumnHint[] {
   return columns.map((column, index) => {
     if (index === 0) return { kind: 'identity' };
@@ -162,7 +161,7 @@ export function useAllocationGridTable(
     [visibleAllocations, riskByPositionKey, riskFetchState, selectedPrime],
   );
 
-  const columns = useMemo<ColumnDef<AllocationGridRow>[]>(
+  const columns = useMemo(
     () => createAllocationColumns(chainLabels, localProtocols),
     [chainLabels, localProtocols],
   );
