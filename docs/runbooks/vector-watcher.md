@@ -230,11 +230,17 @@ returns below 0.2 sustained.
 
 `alchemy_subscriber_blocks_dropped_total` on the labelled `service_name` is
 nonzero over the last 10m. The Alchemy WebSocket subscriber forwards each
-`newHeads` header into a 100-slot buffered channel with a non-blocking send, so a
-header is only discarded once that buffer is full — i.e. the live consumer fell
-~100 blocks behind the socket. How long that took depends on the chain: ~20
-minutes on Ethereum (~12s blocks), ~3 minutes on an L2 at ~2s, and seconds on a
-chain producing several blocks a second.
+`newHeads` header into a buffered channel with a non-blocking send, so a header
+is only discarded once that buffer is full — i.e. the live consumer fell a whole
+buffer behind the socket. The buffer holds `SUBSCRIBER_BUFFER_SIZE` headers
+(default 100; every non-Ethereum watcher sets more in its configmap) and the
+live consumer processes one header at a time, so the longest stall it survives
+is `SUBSCRIBER_BUFFER_SIZE ÷ blocks-per-second`: 100 slots is ~20 minutes on
+Ethereum (~12s blocks) but only ~25s on Arbitrum (~4 blocks/s). The consumer's
+worst-case stall is the live Alchemy fetch: `LIVE_RPC_TIMEOUT` per attempt
+(default 30s; 10s on every non-Ethereum watcher) for up to four attempts, so
+~41s at 10s. Backfill has its own client at the 30s default because its
+100-block batches are a far larger request.
 
 A dropped header never reaches the live path, so the block lands in Postgres only
 when backfill picks the gap up.
@@ -247,16 +253,39 @@ never delivered it.**
 
 1. **Watcher logs** — the drop path logs `channel full, dropping block` with the
    block number. `kubectl -n vector logs <watcher pod> | grep 'dropping block'`
-   gives the exact heights lost.
-2. **What stalled the consumer** — the live path fetches the block body, receipts
-   (and traces on Ethereum) from Alchemy, writes Redis, then publishes to SNS.
-   Check `VectorWatcherAlchemyLatencyHigh` / `VectorWatcherAlchemyRetriesHigh`
-   for a slow RPC leg, then Redis and SNS publish errors in the same logs.
-3. **Confirm the gap is being healed** — check `backfill_watermark_lag` and the
-   backfill logs for the heights from step 1.
+   gives the exact heights lost. Drops that come in bursts of a few seconds,
+   each ending at a `request failed, retrying` line whose error says
+   `Client.Timeout` or `deadline exceeded`, are one hung Alchemy request per
+   burst: the line is logged when the hang ends, the drops are its last
+   seconds, and the buffer overflowed by at least
+   `blocks-per-second × LIVE_RPC_TIMEOUT − SUBSCRIBER_BUFFER_SIZE` headers
+   (up to ~4.1× the timeout if every retry hung too).
+2. **Is it Alchemy or this pod?** — grep the other `*-watcher` pods, and the
+   other cluster, for the same timeout lines
+   (`kubectl -n vector logs <pod> | grep 'request failed, retrying' | grep -E 'Client.Timeout|deadline exceeded'`)
+   and compare hang **start** times: log time minus that pod's own
+   `LIVE_RPC_TIMEOUT`, since the Ethereum watcher runs 30s and the others 10s.
+   Hits on several chains mean the hang was upstream and this pod is fine (two
+   of the four 2026-09-08 arbitrum bursts had companions on avalanche, base,
+   unichain and prod at the same second). A hang on only this chain is
+   inconclusive — each chain has its own Alchemy endpoint — so suspect the pod
+   or its node only with corroboration: CPU throttling, swap-in on the node,
+   other pods on it slowing at the same time.
+3. **What else can stall the consumer** — the live path fetches the block body,
+   receipts (and traces on Ethereum) from Alchemy, writes Redis, then publishes
+   to SNS. Check `VectorWatcherAlchemyLatencyHigh` /
+   `VectorWatcherAlchemyRetriesHigh` for a slow RPC leg, then Redis and SNS
+   publish errors in the same logs.
+4. **Confirm the gap is being healed** — check `backfill_watermark_lag` and the
+   backfill logs (`starting gap backfill` / `gap backfill complete`) for the
+   heights from step 1.
 
 ### Common causes
 
+- A chain whose buffer holds fewer seconds of headers than one Alchemy attempt
+  can take: any single hung request then drops. That is a sizing bug, not a pod
+  problem — raise `SUBSCRIBER_BUFFER_SIZE` or lower `LIVE_RPC_TIMEOUT` in the
+  chain's configmap; the merge rolls the pod through Reloader, no restart needed.
 - Alchemy RPC latency spike or a 429 storm slowing the per-block fetch below the
   chain's block rate.
 - Redis or SNS backpressure / errors blocking the persist step.
@@ -265,11 +294,13 @@ never delivered it.**
 
 ### Recovery
 
-Fix the consumer stall identified in step 2 — that is the action this alert asks
-for. Then confirm the heights from the log line exist as canonical rows. Backfill
-normally heals them on its own (every staging and prod watcher runs
-`ENABLE_BACKFILL=true`; the dev overlay does not), so manual repair is rarely
-needed. If backfill is not catching them, follow
+Fix the consumer stall identified in steps 2–3 — that is the action this alert
+asks for. If step 2 showed an upstream hang, the action is step 4 plus
+re-checking the sizing rule above: a drop on a hang means the buffer no longer
+covers the timeout at this chain's block rate. Then confirm the heights from the
+log line exist as canonical rows. Backfill normally heals them on its own (every
+staging and prod watcher runs `ENABLE_BACKFILL=true`; the dev overlay does not),
+so manual repair is rarely needed. If backfill is not catching them, follow
 `VectorWatcherBackfillWatermarkLagHigh`.
 
 ### Verify recovery
@@ -363,7 +394,10 @@ post-restart catch-up drains within minutes.
    wedge is this counter at zero with the lag gauge climbing**; a busy chain is
    this counter ticking with the lag still draining.
 4. **Upstream RPC** — check the Alchemy 429 / error rate; degraded RPC beyond
-   the catch-up rate also grows lag.
+   the catch-up rate also grows lag. Repeated `batch failed` lines with
+   `method=batch` and `Client.Timeout` / `deadline exceeded` mean a
+   `BACKFILL_BATCH_SIZE` batch no longer fits the backfill client's 30s
+   attempt; lower the batch size (backfill does not use `LIVE_RPC_TIMEOUT`).
 5. **Watcher logs** for repeated gap-fill of the same numbers.
 
 ### Recovery

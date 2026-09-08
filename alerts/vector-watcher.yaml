@@ -239,10 +239,11 @@ groups:
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatcheralchemyretrieshigh
 
       - alert: VectorWatcherBlocksDropped
-        # A header is dropped only once the 100-slot newHeads buffer is full,
-        # i.e. the live consumer fell ~100 blocks behind the socket. Zero in
-        # steady state, so any drop is actionable, and it is what tells "our
-        # channel dropped it" from "Alchemy never delivered it" (ARCT-374).
+        # A header is dropped only once the newHeads buffer is full
+        # (SUBSCRIBER_BUFFER_SIZE, default 100 slots), i.e. the live consumer
+        # fell a whole buffer behind the socket. Zero in steady state, so any
+        # drop is actionable, and it is what tells "our channel dropped it"
+        # from "Alchemy never delivered it" (ARCT-374).
         # Grouping follows the rest of this file (service_name identifies the
         # chain) even though these series carry their own `chain` label.
         #
@@ -283,10 +284,10 @@ groups:
           description: |
             `{{ $labels.service_name }}` discarded
             `{{ $value | printf "%.0f" }}` block headers in the last 10m: the
-            subscriber's 100-slot buffer filled and the headers never reached
-            the live path. The consumer is stalled (slow RPC fetch, Redis/SNS
-            backpressure, or a blocked persist). Expect gaps that only backfill
-            will heal.
+            subscriber's newHeads buffer filled and the headers never reached
+            the live path. The consumer is stalled (a hung Alchemy request,
+            Redis/SNS backpressure, or a blocked persist). Expect gaps that only
+            backfill will heal.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatcherblocksdropped
 
       # ---------------------------------------------------------------------

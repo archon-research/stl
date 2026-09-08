@@ -53,3 +53,39 @@ func GetDuration(key string, defaultValue time.Duration) (time.Duration, error) 
 	}
 	return v, nil
 }
+
+// GetPositiveInt is GetInt for a knob where zero and negatives are
+// misconfiguration. A set value must parse and be > 0, so an empty string is
+// rejected rather than read as unset.
+func GetPositiveInt(key string, defaultValue int) (int, error) {
+	raw, ok := os.LookupEnv(key)
+	if !ok {
+		return defaultValue, nil
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("parsing %s %q as int: %w", key, raw, err)
+	}
+	if v <= 0 {
+		return 0, fmt.Errorf("%s must be > 0, got %d", key, v)
+	}
+	return v, nil
+}
+
+// GetPositiveDuration is GetDuration for a knob where zero and negatives are
+// misconfiguration. A set value must parse and be > 0, so an empty string is
+// rejected rather than read as unset.
+func GetPositiveDuration(key string, defaultValue time.Duration) (time.Duration, error) {
+	raw, ok := os.LookupEnv(key)
+	if !ok {
+		return defaultValue, nil
+	}
+	v, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("parsing %s %q as duration: %w", key, raw, err)
+	}
+	if v <= 0 {
+		return 0, fmt.Errorf("%s must be > 0, got %s", key, v)
+	}
+	return v, nil
+}
