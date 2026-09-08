@@ -24,6 +24,37 @@
 --     Revoking owner UPDATE here would make every INSERT into sec_node/sec_edge fail with
 --     "permission denied" under the prod roles while passing superuser CI.
 --
+-- Valid time is TOTAL and stored, not derived: valid_to is NOT NULL with an 'infinity' sentinel
+-- for an open window, and it sits IN THE PRIMARY KEY. Three things follow, and they are the
+-- reason for the shape (review of the first draft, which had a nullable valid_to outside the PK):
+--   * Close-and-open is an ordinary append at processing_version 0. Closing a window means
+--     appending the same (id, valid_from) with a real valid_to; without valid_to in the key that
+--     row collides with the open one, which would force every curated edit to allocate a
+--     correction version through processing_version_log (ADR-0006 §3 reserves those for
+--     correction RUNS, one per ticket) — an issuer re-point is not a correction run.
+--   * A retraction is expressible: a TOMBSTONE is an append with a ZERO-LENGTH window
+--     (valid_to = valid_from), which is why the window CHECK is <= and not <. It matches no
+--     as-of date, so the logical record drops out of the resolved reads while every version of
+--     it stays readable — ADR-0005 §3's "tombstone append that supersedes the retracted row",
+--     with supersedes_record_id naming the retracted record (UNIQUE (record_id) makes that
+--     pointer resolvable). Un-retracting is a correction run at N, not a re-append at 0: the
+--     re-asserted row would otherwise collide with the original and be dropped by
+--     ON CONFLICT DO NOTHING, leaving the tombstone winning forever.
+--   * Resolution is by knowledge time within a window: latest append per (logical record,
+--     valid_from) is processing_version DESC, then ingest_xid DESC (ADR-0006 §5's ordering key —
+--     never writer-supplied, so a writer cannot reorder its own supersession), then record_id
+--     DESC to break a same-transaction tie. Only then does the valid-time window filter run.
+--     Filtering on the window first resurrects superseded rows; ordering on ingested_at would
+--     rest supersession on a wall clock.
+-- What this does NOT do: it makes the retraction and the amendment REPRESENTABLE, it does not
+-- make them mandatory. A valid-time amendment that appends the corrected window and neglects to
+-- tombstone the wrong one leaves both standing; catching that is the validator's (VEC-622) and
+-- GQ-2x's job, not the schema's.
+--
+-- The frozen masters (entity_master/security_master, VEC-410/411) stored valid_from only and
+-- derived valid_to_exclusive with lead(); that pattern cannot express an ended edge, which has no
+-- status column to retire it, and ADR-0005 §3 stores the pair. Divergence is deliberate.
+--
 -- Plain tables, not hypertables: every table here writes at governance rate (rows per day
 -- at most), the sparse-table exception in db/migrations AGENTS.md. Each table COMMENT
 -- restates the decision. The one type that would break that premise — a block-stamped
@@ -117,7 +148,7 @@ CREATE TABLE sec_node (
     status              text NOT NULL DEFAULT 'ACTIVE',
     attrs               jsonb NOT NULL DEFAULT '{}'::jsonb,
     valid_from          date NOT NULL,
-    valid_to            date,
+    valid_to            date NOT NULL DEFAULT 'infinity',
     record_id           bigint GENERATED ALWAYS AS IDENTITY,
     processing_version  integer NOT NULL DEFAULT 0 CHECK (processing_version >= 0),
     ingest_xid          xid8 NOT NULL DEFAULT pg_current_xact_id(),
@@ -130,7 +161,8 @@ CREATE TABLE sec_node (
     supersedes_record_id bigint,
     source_system       text NOT NULL,
     content_hash        bytea,
-    PRIMARY KEY (id, processing_version, valid_from),
+    PRIMARY KEY (id, processing_version, valid_from, valid_to),
+    CONSTRAINT sec_node_record_id_key UNIQUE (record_id),
     CONSTRAINT sec_node_id_prefix_chk CHECK (
         (record_type = 'ENTITY'   AND id LIKE 'em-%')      OR
         (record_type = 'SECURITY' AND id LIKE 'sec-%')     OR
@@ -138,18 +170,18 @@ CREATE TABLE sec_node (
         (record_type = 'SOURCE'   AND id LIKE 'src-%')     OR
         (record_type = 'ACCOUNT'  AND id LIKE 'acct-%')
     ),
-    CONSTRAINT sec_node_valid_chk CHECK (valid_to IS NULL OR valid_from < valid_to)
+    CONSTRAINT sec_node_valid_chk CHECK (valid_from <= valid_to)
 );
-COMMENT ON TABLE sec_node IS '[Dimension] Combined SECs master (ADR-0005 §2): one node per real-world thing, discriminated by record_type. Append-only (full ACL revoke incl. owner — nothing FKs this table), bitemporal (valid window + ingest_xid). The instrument is NOT a node kind: native keys resolve via the instrument register (VEC-616). Individuals carry a pseudonymous surrogate only; PII lives in a separate store (DP-1). Plain table: governance-rate writes, per the sparse-table exception.';
+COMMENT ON TABLE sec_node IS '[Dimension] Combined SECs master (ADR-0005 §2): one node per real-world thing, discriminated by record_type. Append-only (full ACL revoke incl. owner — nothing FKs this table), bitemporal (valid window + ingest_xid). valid_to is NOT NULL (''infinity'' when open) and in the PK, so close-and-open is an append at processing_version 0; a zero-length window is a retraction tombstone. The instrument is NOT a node kind: native keys resolve via the instrument register (VEC-616). Individuals carry a pseudonymous surrogate only; PII lives in a separate store (DP-1). Plain table: governance-rate writes, per the sparse-table exception.';
 COMMENT ON COLUMN sec_node.id IS 'Roles: PK (with processing_version, valid_from). Opaque, kind-prefixed (em-/sec-/concept-/src-/acct-), house-assigned once, never derived from a public identifier or symbol, and never hashed into position_id. Seeded em-* ids stand unchanged.';
 COMMENT ON COLUMN sec_node.record_type IS 'Node kind. ENTITY / SECURITY / CONCEPT / SOURCE live; ACCOUNT staged (ADR-0005 §2).';
 COMMENT ON COLUMN sec_node.chain_id IS 'Roles: FK→chain.chain_id (soft). NULL for off-chain things.';
 COMMENT ON COLUMN sec_node.status IS 'Roles: FK→node_status_vocabulary (composite with record_type). A status change is a new version.';
 COMMENT ON COLUMN sec_node.attrs IS 'Kind-specific attributes as jsonb; the shape system (VEC-622) decides required-ness per type. Hot attributes promote to typed columns only on VEC-633 evidence.';
-COMMENT ON COLUMN sec_node.valid_from IS 'Valid-time window start, UTC date, half-open [valid_from, valid_to).';
-COMMENT ON COLUMN sec_node.valid_to IS 'Valid-time window end; NULL = open/current. Close-and-open on change.';
-COMMENT ON COLUMN sec_node.record_id IS 'Roles: Audit. Per-append surrogate; what supersedes_record_id and lineage point at.';
-COMMENT ON COLUMN sec_node.processing_version IS 'Roles: Audit. Correction version, caller-assigned per ADR-0006: 0 live, N per correction run via processing_version_log. Never a valid-time change.';
+COMMENT ON COLUMN sec_node.valid_from IS 'Roles: PK (with id, processing_version, valid_to). Valid-time window start, UTC date, half-open [valid_from, valid_to).';
+COMMENT ON COLUMN sec_node.valid_to IS 'Roles: PK (with id, processing_version, valid_from). Valid-time window end, exclusive; ''infinity'' = open/current, never NULL. In the key so close-and-open is an ordinary append at processing_version 0. A ZERO-LENGTH window (valid_to = valid_from) is a TOMBSTONE: it matches no as-of date, so the record drops out of the resolved reads with its history intact (ADR-0005 §3 retraction; pair it with change_reason_code RETRACTION and supersedes_record_id).';
+COMMENT ON COLUMN sec_node.record_id IS 'Roles: Audit, UNIQUE. Per-append surrogate; what supersedes_record_id, a retraction and a reproduction manifest point at (PR-2.1). Unique per store, not globally: a manifest cites (table, record_id).';
+COMMENT ON COLUMN sec_node.processing_version IS 'Roles: Audit, PK component. Correction version, caller-assigned per ADR-0006 §3: 0 live, N per correction run via processing_version_log. A valid-time change (close-and-open, an ended window, a tombstone) is NOT a correction and stays at 0 — valid_to carries it. Un-retracting a tombstoned record IS a correction run at N.';
 COMMENT ON COLUMN sec_node.ingest_xid IS 'Roles: Audit. Knowledge-time visibility key (ADR-0006 §5, pg_visible_in_snapshot). Never writer-supplied.';
 COMMENT ON COLUMN sec_node.ingested_at IS 'Roles: Audit. Wall-clock label only; never the audit key (a row stamps at transaction start but becomes visible at commit).';
 COMMENT ON COLUMN sec_node.run_id IS 'Roles: Audit. Writer run; FK to writer_run lands with ADR-0006 §2 (VEC-598).';
@@ -157,9 +189,13 @@ COMMENT ON COLUMN sec_node.actor IS 'Roles: Audit. Real, non-shared principal (h
 COMMENT ON COLUMN sec_node.change_reason_code IS 'Roles: FK→change_reason_vocabulary.code, Audit. Structured reason for the append.';
 COMMENT ON COLUMN sec_node.change_reason IS 'Roles: Audit. Free-text reason; cites the source where change_reason_code = CURATED_SOURCE.';
 COMMENT ON COLUMN sec_node.approved_by IS 'Roles: Audit. Approver, distinct from actor, where the reason code requires approval.';
-COMMENT ON COLUMN sec_node.supersedes_record_id IS 'Roles: Audit. record_id this append corrects or retracts; the correction chain is walkable through it.';
+COMMENT ON COLUMN sec_node.supersedes_record_id IS 'Roles: FK-shaped→sec_node.record_id (soft; unenforced so a correction can precede its target in a batch), Audit. record_id this append corrects or retracts; the correction chain is walkable through it. The resolved reads do not consult it — supersession within a window is decided by processing_version then ingest_xid, and withdrawal by the zero-length tombstone window.';
 COMMENT ON COLUMN sec_node.source_system IS 'Roles: Audit. Where the fact came from (registry, worksheet, port, loader).';
 COMMENT ON COLUMN sec_node.content_hash IS 'Roles: Audit. Per-record content hash over the canonical stored form (AR-1.2); population is wired with the validator work (VEC-622), the column exists from row one so no migration is needed then.';
+-- Resolution index: the reads below sort (id, valid_from) ASC then processing_version DESC,
+-- ingest_xid DESC, record_id DESC. Columns AND directions have to match the whole key or the
+-- DISTINCT ON degrades to a full scan plus sort on every current read (VEC-633 measures this).
+CREATE INDEX sec_node_resolve_idx ON sec_node (id, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC);
 CREATE INDEX sec_node_type_idx ON sec_node (record_type, id, valid_from DESC, processing_version DESC);
 
 -- ---------------------------------------------------------------------------
@@ -180,7 +216,7 @@ CREATE TABLE sec_edge (
     weight_asof_block   bigint,
     payload             jsonb NOT NULL DEFAULT '{}'::jsonb,
     valid_from          date NOT NULL,
-    valid_to            date,
+    valid_to            date NOT NULL DEFAULT 'infinity',
     record_id           bigint GENERATED ALWAYS AS IDENTITY,
     processing_version  integer NOT NULL DEFAULT 0 CHECK (processing_version >= 0),
     ingest_xid          xid8 NOT NULL DEFAULT pg_current_xact_id(),
@@ -194,11 +230,12 @@ CREATE TABLE sec_edge (
     source_system       text NOT NULL,
     content_hash        bytea,
     input_lineage       jsonb,
-    PRIMARY KEY (rel_type, src_id, dst_id, edge_seq, processing_version, valid_from),
+    PRIMARY KEY (rel_type, src_id, dst_id, edge_seq, processing_version, valid_from, valid_to),
+    CONSTRAINT sec_edge_record_id_key UNIQUE (record_id),
     CONSTRAINT sec_edge_weight_basis_chk CHECK (rel_weight IS NULL OR weight_basis IS NOT NULL),
-    CONSTRAINT sec_edge_valid_chk CHECK (valid_to IS NULL OR valid_from < valid_to)
+    CONSTRAINT sec_edge_valid_chk CHECK (valid_from <= valid_to)
 );
-COMMENT ON TABLE sec_edge IS '[Dimension] Directed, typed, weighted relationship store (ADR-0005 §3/§5). Append-only (full ACL revoke incl. owner — nothing FKs this table); close-and-open; retraction is a tombstone append. Endpoint-kind legality vs rel_type_vocabulary is loader/validator-enforced (cross-row); single-valued cardinality is a DQ check over current state, never a write trigger. Inverses and closures are derived, never stored. Plain table: governance-rate writes — block-stamped projection types (ALLOCATES) are excluded by design and would need their own hypertable store if ratified.';
+COMMENT ON TABLE sec_edge IS '[Dimension] Directed, typed, weighted relationship store (ADR-0005 §3/§5). Append-only (full ACL revoke incl. owner — nothing FKs this table); close-and-open at processing_version 0 (valid_to is NOT NULL, ''infinity'' when open, and in the PK); retraction is a tombstone append with a zero-length window. Endpoint-kind legality vs rel_type_vocabulary is loader/validator-enforced (cross-row); single-valued cardinality is a DQ check over current state, never a write trigger. Inverses and closures are derived, never stored. Plain table: governance-rate writes — block-stamped projection types (ALLOCATES) are excluded by design and would need their own hypertable store if ratified.';
 COMMENT ON COLUMN sec_edge.edge_id IS 'Roles: Derived. Generated human-readable identity; the PK is the (rel_type, src, dst, edge_seq, processing_version, valid_from) tuple.';
 COMMENT ON COLUMN sec_edge.edge_seq IS 'Roles: PK component. DM-6 discriminator: deliberately duplicated edges (multi-typing, per-edge attribute clusters) coexist instead of superseding their twin.';
 COMMENT ON COLUMN sec_edge.src_id IS 'Roles: FK→sec_node.id (soft; SCD2 ids non-unique — resolve via the current view). Edge source.';
@@ -210,10 +247,10 @@ COMMENT ON COLUMN sec_edge.rel_weight IS 'Exact decimal numeric(30,18), never fl
 COMMENT ON COLUMN sec_edge.weight_basis IS 'Roles: FK→weight_basis_vocabulary.basis. Mandatory when rel_weight is present (CHECK).';
 COMMENT ON COLUMN sec_edge.weight_asof_block IS 'Block number a market-derived weight was computed at. Raw chain block height. NULL for curated weights.';
 COMMENT ON COLUMN sec_edge.payload IS 'Type-specific attribute cluster (ratio+event_date, agency+rating+outlook, lien seniority, role).';
-COMMENT ON COLUMN sec_edge.valid_from IS 'Valid-time window start, UTC date, half-open.';
-COMMENT ON COLUMN sec_edge.valid_to IS 'Valid-time window end; NULL = open. A re-point closes the current row and opens a new one in one write.';
-COMMENT ON COLUMN sec_edge.record_id IS 'Roles: Audit. Per-append surrogate.';
-COMMENT ON COLUMN sec_edge.processing_version IS 'Roles: Audit. Correction version, caller-assigned (ADR-0006); 0 live.';
+COMMENT ON COLUMN sec_edge.valid_from IS 'Roles: PK component. Valid-time window start, UTC date, half-open.';
+COMMENT ON COLUMN sec_edge.valid_to IS 'Roles: PK component. Valid-time window end, exclusive; ''infinity'' = open, never NULL. In the key so a re-point closes the current row and opens the new one in one write, both at processing_version 0. A ZERO-LENGTH window (valid_to = valid_from) is a TOMBSTONE — the only way to retract an edge, since an edge has no status to retire it.';
+COMMENT ON COLUMN sec_edge.record_id IS 'Roles: Audit, UNIQUE. Per-append surrogate; the target of supersedes_record_id, retractions and manifests (PR-2.1).';
+COMMENT ON COLUMN sec_edge.processing_version IS 'Roles: Audit, PK component. Correction version, caller-assigned (ADR-0006 §3); 0 live. Close-and-open, an ended link and a tombstone all stay at 0.';
 COMMENT ON COLUMN sec_edge.ingest_xid IS 'Roles: Audit. Knowledge-time visibility key (ADR-0006 §5). Never writer-supplied.';
 COMMENT ON COLUMN sec_edge.ingested_at IS 'Roles: Audit. Wall-clock label only.';
 COMMENT ON COLUMN sec_edge.run_id IS 'Roles: Audit. Writer run; FK lands with ADR-0006 §2 (VEC-598).';
@@ -221,44 +258,51 @@ COMMENT ON COLUMN sec_edge.actor IS 'Roles: Audit. Appending principal. Required
 COMMENT ON COLUMN sec_edge.change_reason_code IS 'Roles: FK→change_reason_vocabulary.code, Audit.';
 COMMENT ON COLUMN sec_edge.change_reason IS 'Roles: Audit. Free-text reason.';
 COMMENT ON COLUMN sec_edge.approved_by IS 'Roles: Audit. Approver where the reason code requires one.';
-COMMENT ON COLUMN sec_edge.supersedes_record_id IS 'Roles: Audit. record_id this append corrects, re-points or retracts.';
+COMMENT ON COLUMN sec_edge.supersedes_record_id IS 'Roles: FK-shaped→sec_edge.record_id (soft), Audit. record_id this append corrects, re-points or retracts. Not consulted by the resolved reads (see sec_node.supersedes_record_id).';
 COMMENT ON COLUMN sec_edge.source_system IS 'Roles: Audit. Where the edge came from.';
 COMMENT ON COLUMN sec_edge.content_hash IS 'Roles: Audit. Content hash over canonical form; population wired with VEC-622.';
 COMMENT ON COLUMN sec_edge.input_lineage IS 'Roles: Audit. For derived edges: source record ids (PR-2.3). NULL on curated edges.';
+-- Resolution index (see sec_node_resolve_idx); sec_edge_src_idx stays for src traversal.
+CREATE INDEX sec_edge_resolve_idx ON sec_edge (rel_type, src_id, dst_id, edge_seq, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC);
 CREATE INDEX sec_edge_src_idx ON sec_edge (src_id, rel_type, valid_from DESC, processing_version DESC);
 CREATE INDEX sec_edge_dst_idx ON sec_edge (dst_id, rel_type);
 
 -- ---------------------------------------------------------------------------
--- Current views and as-of reads: two-step, always — latest version per logical
--- record FIRST, then the valid window (the other order resurrects superseded
--- rows). _current is for operational reads only; anything feeding a calculation
--- uses _as_of(effective_at) with an explicit recorded parameter (ADR-0006 §4).
+-- Current views and as-of reads: two-step, always — latest APPEND per (logical
+-- record, valid_from) FIRST, then the valid window (the other order resurrects
+-- superseded rows). Within a window the winner is processing_version DESC, then
+-- ingest_xid DESC (ADR-0006 §5's ordering key; never a wall clock, never
+-- writer-supplied), then record_id DESC for a same-transaction tie — so a close
+-- beats the open row it closes, and a tombstone (zero-length window) beats the
+-- fact it withdraws and then matches no date, dropping the record from the read.
+-- _current is for operational reads only; anything feeding a calculation uses
+-- _as_of(effective_at) with an explicit recorded parameter (ADR-0006 §4).
 -- ---------------------------------------------------------------------------
 
 CREATE VIEW sec_node_current AS
 WITH latest AS (
     SELECT DISTINCT ON (id, valid_from) *
     FROM sec_node
-    ORDER BY id, valid_from, processing_version DESC
+    ORDER BY id, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC
 )
 SELECT DISTINCT ON (id) *
 FROM latest
 WHERE valid_from <= (now() AT TIME ZONE 'utc')::date
-  AND (valid_to IS NULL OR (now() AT TIME ZONE 'utc')::date < valid_to)
+  AND (now() AT TIME ZONE 'utc')::date < valid_to
 ORDER BY id, valid_from DESC;
-COMMENT ON VIEW sec_node_current IS 'Operational reads only (two-step: latest processing_version first, valid window second). Calculations use sec_node_as_of(effective_at).';
+COMMENT ON VIEW sec_node_current IS 'Operational reads only (two-step: latest append per (id, valid_from) first — processing_version, then ingest_xid — valid window second). A tombstoned record is absent here and in sec_node_as_of; its history stays in the base table. Calculations use sec_node_as_of(effective_at).';
 
 CREATE FUNCTION sec_node_as_of(effective_at date)
 RETURNS SETOF sec_node LANGUAGE sql STABLE AS $$
     WITH latest AS (
         SELECT DISTINCT ON (id, valid_from) *
         FROM sec_node
-        ORDER BY id, valid_from, processing_version DESC
+        ORDER BY id, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC
     )
     SELECT DISTINCT ON (id) *
     FROM latest
     WHERE valid_from <= effective_at
-      AND (valid_to IS NULL OR effective_at < valid_to)
+      AND effective_at < valid_to
     ORDER BY id, valid_from DESC
 $$;
 COMMENT ON FUNCTION sec_node_as_of(date) IS 'As-of node read; effective_at is an explicit recorded parameter, never now() (ADR-0006 §4).';
@@ -267,26 +311,26 @@ CREATE VIEW sec_edge_current AS
 WITH latest AS (
     SELECT DISTINCT ON (rel_type, src_id, dst_id, edge_seq, valid_from) *
     FROM sec_edge
-    ORDER BY rel_type, src_id, dst_id, edge_seq, valid_from, processing_version DESC
+    ORDER BY rel_type, src_id, dst_id, edge_seq, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC
 )
 SELECT DISTINCT ON (rel_type, src_id, dst_id, edge_seq) *
 FROM latest
 WHERE valid_from <= (now() AT TIME ZONE 'utc')::date
-  AND (valid_to IS NULL OR (now() AT TIME ZONE 'utc')::date < valid_to)
+  AND (now() AT TIME ZONE 'utc')::date < valid_to
 ORDER BY rel_type, src_id, dst_id, edge_seq, valid_from DESC;
-COMMENT ON VIEW sec_edge_current IS 'Operational reads only. Calculations use sec_edge_as_of(effective_at).';
+COMMENT ON VIEW sec_edge_current IS 'Operational reads only (two-step, as sec_node_current). A closed or tombstoned edge is absent here. Calculations use sec_edge_as_of(effective_at).';
 
 CREATE FUNCTION sec_edge_as_of(effective_at date)
 RETURNS SETOF sec_edge LANGUAGE sql STABLE AS $$
     WITH latest AS (
         SELECT DISTINCT ON (rel_type, src_id, dst_id, edge_seq, valid_from) *
         FROM sec_edge
-        ORDER BY rel_type, src_id, dst_id, edge_seq, valid_from, processing_version DESC
+        ORDER BY rel_type, src_id, dst_id, edge_seq, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC
     )
     SELECT DISTINCT ON (rel_type, src_id, dst_id, edge_seq) *
     FROM latest
     WHERE valid_from <= effective_at
-      AND (valid_to IS NULL OR effective_at < valid_to)
+      AND effective_at < valid_to
     ORDER BY rel_type, src_id, dst_id, edge_seq, valid_from DESC
 $$;
 COMMENT ON FUNCTION sec_edge_as_of(date) IS 'As-of edge read; effective_at is an explicit recorded parameter, never now() (ADR-0006 §4).';
