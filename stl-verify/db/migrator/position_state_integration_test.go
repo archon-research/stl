@@ -2110,7 +2110,7 @@ func psTestGuardsADataAssertion(t *testing.T, f *psFixture) {
 // only when it was exactly `text`, stored whatever string it found, and validated nothing.
 func psTestDealTypeCode(t *testing.T, f *psFixture) {
 	// dtRow is row() with the deal_type slot under the caller's control: an arbitrary SQL
-	// expression, or "" to omit the column entirely (the optional-contract case).
+	// expression, or "" to omit the column entirely (the MISSING-contract case).
 	dtRow := func(ik, expr string) string {
 		body := "(1::int,10::bigint,'" + ik + "'::text,'" + strings.Repeat("a", 40) + "'::text,5::numeric,"
 		cols := mppCols
@@ -2133,53 +2133,30 @@ func psTestDealTypeCode(t *testing.T, f *psFixture) {
 		return got
 	}
 
-	// The value must survive the projection, for every string type a view can plausibly emit. Pre-fix
-	// this passed ONLY for `text`: varchar and bpchar matched no branch and stored NULL, silently
-	// dropping the one fact the column carries. bpchar also asserts the cast strips its blank padding.
-	t.Run("carried for every string type", func(t *testing.T) {
+	// deal_type is a required contract column typed exactly text. A narrower string type would truncate
+	// on cast, and the truncation can land on ANOTHER valid code ('CUSTODY_COLLATERAL'::varchar(7) is
+	// 'CUSTODY'), so the exact-type match refuses every non-text declaration up front.
+	t.Run("declared text is carried; any other string type is a contract violation", func(t *testing.T) {
+		ik := "dt-carry-text"
+		if n := f.mppN(t, "pv_dt_carry_text", dtRow(ik, "'LOAN'::text"), "carry"); n != 1 {
+			t.Fatalf("text: inserted %d rows, want 1", n)
+		}
+		if got := stored(t, ik); got == nil || *got != "LOAN" {
+			t.Errorf("text: deal_type = %v, want LOAN", got)
+		}
 		for _, c := range []struct{ name, expr, want string }{
-			{"text", "'LOAN'::text", "LOAN"},
-			{"varchar_at_cap", "'BORROW'::varchar(63)", "BORROW"},
-			{"varchar_unbounded", "'COLLATERAL'::varchar", "COLLATERAL"},
-			{"bpchar_padded", "'LOAN'::char(63)", "LOAN"},
+			{"varchar_63", "'BORROW'::varchar(63)", "deal_type (is character varying(63))"},
+			{"varchar_unbounded", "'COLLATERAL'::varchar", "deal_type (is character varying)"},
+			{"varchar_7_would_truncate_to_another_code", "'CUSTODY_COLLATERAL'::varchar(7)", "deal_type (is character varying(7))"},
+			{"bpchar_63", "'LOAN'::char(63)", "deal_type (is character(63))"},
 		} {
-			ik := "dt-carry-" + c.name
-			body := dtRow(ik, c.expr)
-			if n := f.mppN(t, "pv_dt_carry_"+c.name, body, "carry"); n != 1 {
-				t.Errorf("%s: inserted %d rows, want 1", c.name, n)
-				continue
-			}
-			got, want := stored(t, ik), c.want
-			if got == nil {
-				t.Errorf("%s: deal_type stored NULL, want %q", c.name, want)
-			} else if *got != want {
-				t.Errorf("%s: deal_type = %q, want %q", c.name, *got, want)
-			}
+			f.mppErr(t, "pv_dt_type_"+c.name, dtRow("dt-type-"+c.name, c.expr), "contract", c.want)
 		}
 	})
 
-	// A non-string deal_type is a view bug. It needs no gate of its own: whatever it casts to is
-	// not a ref_deal_type code, so the FK refuses it. Pre-fix it fell through to a NULL branch and the
-	// run reported success.
-	t.Run("non-string type is refused by the FK", func(t *testing.T) {
-		body := dtRow("dt-int", "7::int")
-		f.mppErr(t, "pv_dt_int", body, "wrong type", "position_state_deal_type_fkey")
-	})
-
-	// A string type narrower than the column's own 63-char cap truncates on cast, and the truncation
-	// can land on ANOTHER valid code: 'CUSTODY_COLLATERAL'::varchar(7) is 'CUSTODY', which passes both
-	// the category gate and the ref_deal_type membership gate and records a pledged asset as
-	// unencumbered. Refused as lossy, like a narrowed numeric or timestamptz.
-	t.Run("narrow string type refused as lossy", func(t *testing.T) {
-		for _, c := range []struct{ name, expr string }{
-			{"varchar_7_truncates_to_another_code", "'CUSTODY_COLLATERAL'::varchar(7)"},
-			{"varchar_16", "'LOAN'::varchar(16)"},
-			{"char_8", "'LOAN'::char(8)"},
-			{"varchar_62", "'LOAN'::varchar(62)"},
-		} {
-			body := dtRow("dt-lossy-"+c.name, c.expr)
-			f.mppErr(t, "pv_dt_lossy_"+c.name, body, "lossy gate", "lossy type for a value column")
-		}
+	// A non-string deal_type is refused by the same exact-type contract match.
+	t.Run("non-string type is a contract violation", func(t *testing.T) {
+		f.mppErr(t, "pv_dt_int", dtRow("dt-int", "7::int"), "wrong type", "deal_type (is integer)")
 	})
 
 	// The materializer CANNOT apply a changed deal_type to a stored observation: the insert is
@@ -2221,23 +2198,17 @@ func psTestDealTypeCode(t *testing.T, f *psFixture) {
 		}
 	})
 
-	// Negative controls: the two ways a projection legitimately says nothing must still insert, or the
-	// gates above would have made an OPTIONAL column required.
-	t.Run("silent projections still insert", func(t *testing.T) {
-		for _, c := range []struct{ name, expr string }{
-			{"explicit_null", "NULL::text"},
-			{"column_omitted", ""},
-		} {
-			ik := "dt-silent-" + c.name
-			body := dtRow(ik, c.expr)
-			if n := f.mppN(t, "pv_dt_silent_"+c.name, body, "optional"); n != 1 {
-				t.Errorf("%s: inserted %d rows, want 1", c.name, n)
-				continue
-			}
-			if got := stored(t, ik); got != nil {
-				t.Errorf("%s: deal_type = %q, want NULL", c.name, *got)
-			}
+	// A projection with nothing to say emits NULL::text; it may not omit the column, or a silently
+	// stored NULL would be indistinguishable from a projection that forgot the direction.
+	t.Run("an explicit NULL inserts, an omitted column is refused as MISSING", func(t *testing.T) {
+		ik := "dt-silent-null"
+		if n := f.mppN(t, "pv_dt_silent_null", dtRow(ik, "NULL::text"), "explicit null"); n != 1 {
+			t.Fatalf("explicit NULL: inserted %d rows, want 1", n)
 		}
+		if got := stored(t, ik); got != nil {
+			t.Errorf("explicit NULL: deal_type = %q, want NULL", *got)
+		}
+		f.mppErr(t, "pv_dt_silent_omitted", dtRow("dt-silent-omitted", ""), "omitted", "deal_type (MISSING)")
 	})
 
 	// Every seeded code must round-trip, or the gate is too strict for the vocabulary it enforces.
@@ -2486,11 +2457,11 @@ func psTestBlockTimeMonotonicPerPosition(t *testing.T, f *psFixture) {
 // and only block_timestamp age hinted at it. A run record per projection makes it a fact: swept up to
 // block N and not seen. Written inside the materializer's transaction, so a failed run leaves nothing.
 func psTestCompletedRunIsRecorded(t *testing.T, f *psFixture) {
-	runs := func(t *testing.T, view string) (n int, maxBlock *int64) {
+	runs := func(t *testing.T, view string) (n int, latest *time.Time) {
 		t.Helper()
 		if err := f.pool.QueryRow(f.ctx,
-			`SELECT count(*), max(block_number) FROM position_projection_run WHERE projection = 'public.'||$1`,
-			view).Scan(&n, &maxBlock); err != nil {
+			`SELECT count(*), max(block_timestamp) FROM position_projection_run WHERE projection = 'public.'||$1`,
+			view).Scan(&n, &latest); err != nil {
 			t.Fatalf("read runs for %s: %v", view, err)
 		}
 		return
@@ -2499,14 +2470,15 @@ func psTestCompletedRunIsRecorded(t *testing.T, f *psFixture) {
 		return "(1::int,10::bigint,'" + ik + "'::text,'" + strings.Repeat("a", 40) + "'::text,5::numeric,'LOAN'::text," +
 			strconv.Itoa(bn) + "::bigint,0::int,0::int,'2026-03-0" + strconv.Itoa(1+bn%9) + "T00:00:00Z'::timestamptz)"
 	}
+	day := func(d int) time.Time { return time.Date(2026, 3, d, 0, 0, 0, 0, time.UTC) }
 
-	t.Run("one row per completed run, carrying the run's highest block", func(t *testing.T) {
+	t.Run("one row per completed run, carrying the run's latest block_timestamp", func(t *testing.T) {
 		if n := f.mppN(t, "pv_run_a", `SELECT * FROM (VALUES `+row("run-a", 100)+","+row("run-a", 250)+`) `+mppCols, "first"); n != 2 {
 			t.Fatalf("first run inserted %d, want 2", n)
 		}
-		n, mb := runs(t, "pv_run_a")
-		if n != 1 || mb == nil || *mb != 250 {
-			t.Errorf("after one run: %d rows, max block %v; want 1 row at block 250", n, mb)
+		n, latest := runs(t, "pv_run_a")
+		if n != 1 || latest == nil || !latest.Equal(day(8)) {
+			t.Errorf("after one run: %d rows, latest %v; want 1 row at 2026-03-08 (block 250's instant)", n, latest)
 		}
 		// an idempotent re-run inserts nothing but is still a completed sweep
 		if k := f.mppN(t, "pv_run_a", `SELECT * FROM (VALUES `+row("run-a", 100)+","+row("run-a", 250)+`) `+mppCols, "rerun"); k != 0 {
@@ -2514,6 +2486,28 @@ func psTestCompletedRunIsRecorded(t *testing.T, f *psFixture) {
 		}
 		if n, _ := runs(t, "pv_run_a"); n != 2 {
 			t.Errorf("after a no-op re-run: %d run rows, want 2 -- a sweep that saw nothing new still completed", n)
+		}
+	})
+
+	t.Run("two runs of one view inside one transaction are two rows", func(t *testing.T) {
+		if _, err := f.pool.Exec(f.ctx, `CREATE OR REPLACE VIEW pv_run_tx AS SELECT * FROM (VALUES `+row("run-tx", 100)+`) `+mppCols); err != nil {
+			t.Fatal(err)
+		}
+		tx, err := f.pool.Begin(f.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback(f.ctx) }()
+		for i := 0; i < 2; i++ {
+			if _, err := tx.Exec(f.ctx, `SELECT materialize_position_projection('pv_run_tx'::regclass)`); err != nil {
+				t.Fatalf("run %d in one transaction: %v (created_at must be clock time, not the transaction time)", i+1, err)
+			}
+		}
+		if err := tx.Commit(f.ctx); err != nil {
+			t.Fatal(err)
+		}
+		if n, _ := runs(t, "pv_run_tx"); n != 2 {
+			t.Errorf("two runs in one transaction recorded %d rows, want 2", n)
 		}
 	})
 
@@ -2526,29 +2520,29 @@ func psTestCompletedRunIsRecorded(t *testing.T, f *psFixture) {
 		}
 	})
 
-	t.Run("an empty projection still records a completed sweep, with no block", func(t *testing.T) {
+	t.Run("an empty projection still records a completed sweep, with no instant", func(t *testing.T) {
 		body := `SELECT * FROM (VALUES ` + row("run-empty", 1) + `) ` + mppCols + ` WHERE false`
 		if n := f.mppN(t, "pv_run_empty", body, "empty"); n != 0 {
 			t.Fatalf("empty projection inserted %d, want 0", n)
 		}
-		n, mb := runs(t, "pv_run_empty")
-		if n != 1 || mb != nil {
-			t.Errorf("empty sweep: %d rows, max block %v; want 1 row with NULL block", n, mb)
+		n, latest := runs(t, "pv_run_empty")
+		if n != 1 || latest != nil {
+			t.Errorf("empty sweep: %d rows, latest %v; want 1 row with NULL block_timestamp", n, latest)
 		}
 	})
 
-	t.Run("the record is append-only for the app role", func(t *testing.T) {
-		rw, done := f.asReadWrite(t)
-		defer done()
-		for _, q := range []string{
-			`UPDATE position_projection_run SET block_number = 0`,
-			`DELETE FROM position_projection_run`,
-		} {
-			if _, err := rw.Exec(f.ctx, q); err == nil {
-				t.Errorf("stl_readwrite was allowed: %s", q)
-			} else if !strings.Contains(err.Error(), "permission denied") {
-				t.Errorf("%s refused for the wrong reason: %v", q, err)
-			}
+	t.Run("a mixed on-chain and off-chain projection records a comparable instant", func(t *testing.T) {
+		// An off-chain row's block_number is epoch seconds (~1.7e9); max(block_number) would have made
+		// every on-chain position in the projection look stale forever. The instant is comparable.
+		body := `SELECT * FROM (VALUES ` + row("run-mixed-on", 100) + `,` +
+			`(NULL::int,NULL::bigint,'run-mixed-off'::text,'` + strings.Repeat("b", 40) + `'::text,5::numeric,'CUSTODY'::text,` +
+			`1772409600::bigint,0::int,0::int,'2026-03-02T00:00:00Z'::timestamptz)) ` + mppCols
+		if n := f.mppN(t, "pv_run_mixed", body, "mixed"); n != 2 {
+			t.Fatalf("mixed projection inserted %d, want 2", n)
+		}
+		_, latest := runs(t, "pv_run_mixed")
+		if latest == nil || !latest.Equal(day(2)) {
+			t.Errorf("mixed sweep latest = %v, want 2026-03-02 (the later of the two instants)", latest)
 		}
 	})
 }

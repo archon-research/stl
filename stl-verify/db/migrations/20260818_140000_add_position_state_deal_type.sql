@@ -1,23 +1,10 @@
--- VEC-401: record the deal type on the observation, since it cannot be derived from position_state.
--- Sorts directly after the spine (20260818_130000) and before every projection and cache, which is what
--- lets those files reference deal_type without each declaring the column.
--- Named deal_type, matching ref_deal_type.deal_type and its unsuffixed sibling `direction`. No
--- canonical column in the register carries a _code suffix, so this does not introduce the first.
--- The Morpho market loan leg nets supply against borrow as abs(supply - borrow), so the sign -- and
--- with it LOAN vs BORROW -- is destroyed at projection time and no query recovers it.
-
--- Nullable, and NOT in the materializer's required contract: the vault and Sky legs are constant per
--- instrument and the collateral leg is implied by instrument_key, so only the market loan leg has
--- anything to say. Added now because a later backfill would need a superuser.
-
--- FK'd to ref_deal_type, like position_classification.deal_type already is. An earlier revision
--- argued the RI probe would trip on this table's revoked UPDATE; that was wrong -- the probe needs
--- UPDATE on the PARENT, which 20260714_160000 restored.
+-- VEC-401: record the deal type on the observation; it cannot be derived from position_state. The
+-- Morpho market loan leg nets supply against borrow as abs(supply - borrow), so the sign, and with it
+-- LOAN vs BORROW, is destroyed at projection time and no query recovers it.
+-- Sorts before every projection and cache so they can reference the column without declaring it.
 ALTER TABLE position_state ADD COLUMN IF NOT EXISTS deal_type text;
 
 -- Guarded because ADD CONSTRAINT has no IF NOT EXISTS and the rest of this file is re-runnable.
--- Measured on pg18.6/ts2.29.2: enforced from stl_readwrite and after compress_chunk, and drop_chunks
--- still works.
 DO $fk$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint
@@ -29,47 +16,38 @@ BEGIN
 END
 $fk$;
 
-COMMENT ON COLUMN position_state.deal_type IS 'Derived, nullable. Deal type of THIS observation (LOAN / BORROW / COLLATERAL), stamped by the projection because it is not recoverable from the stored row: the Morpho market loan leg nets supply against borrow, so quantity carries the magnitude and this column carries the direction. NULL where the projection emits none -- the vault and Sky legs are constant per instrument and the collateral leg is implied by instrument_key, so a reader derives those. Roles: FK->ref_deal_type.deal_type, which is what constrains the value for EVERY writer, including a direct INSERT the materializer never sees.';
+COMMENT ON COLUMN position_state.deal_type IS 'Derived, nullable. Deal type of THIS observation (LOAN / BORROW / COLLATERAL), stamped by the projection: the Morpho market loan leg nets supply against borrow, so quantity carries the magnitude and this column carries the direction. NULL where the projection emits none. Roles: FK->ref_deal_type.deal_type.';
 
--- One row per completed materializer run per projection. Turns "this row is old" into a checkable
--- fact: a state-reading projection re-observes every position it can see on each run, so a position
--- whose latest observation trails the projection's latest completed run was swept and not seen.
--- Plain table: one row per run per projection is rows-per-hour, not time-series volume.
 CREATE TABLE IF NOT EXISTS position_projection_run (
-    projection    text        NOT NULL,
-    created_at    timestamptz NOT NULL DEFAULT now(),
-    build_id      integer     NOT NULL,
-    block_number  bigint,
-    CONSTRAINT position_projection_run_pkey PRIMARY KEY (projection, created_at),
-    CONSTRAINT position_projection_run_build_nonneg_chk CHECK (build_id >= 0),
-    CONSTRAINT position_projection_run_block_nonneg_chk CHECK (block_number IS NULL OR block_number >= 0)
+    projection      text        NOT NULL,
+    created_at      timestamptz NOT NULL DEFAULT clock_timestamp(),
+    build_id        integer     NOT NULL,
+    block_timestamp timestamptz,
+    CONSTRAINT position_projection_run_pkey PRIMARY KEY (projection, created_at)
 );
 
-COMMENT ON TABLE position_projection_run IS '[Operational] One row per COMPLETED materialize_position_projection() run, written in the same transaction as the run''s inserts, so a failed run leaves no row. Freshness of a position: its projection''s latest row here is the point up to which it was swept; a position whose position_current.block_number trails that row''s block_number was re-swept and not re-observed. Append-only; no compression or tiering because volume is one row per run per projection.';
+COMMENT ON TABLE position_projection_run IS '[Operational] One row per COMPLETED materialize_position_projection() run, written in the run''s own transaction. A position whose latest observation trails its projection''s latest row here was swept and not re-observed. Plain table: volume is one row per run per projection, so no compression or tiering.';
 COMMENT ON COLUMN position_projection_run.projection IS 'Roles: PK. The projection view''s canonical name, as stamped on position_state.projection.';
-COMMENT ON COLUMN position_projection_run.created_at IS 'Roles: PK. When the run completed. UTC.';
+COMMENT ON COLUMN position_projection_run.created_at IS 'Roles: PK. When the run completed (clock time, so two runs in one transaction are two rows). UTC.';
 COMMENT ON COLUMN position_projection_run.build_id IS 'Roles: Audit. build_registry.id of the run (0 = pre-tracking).';
-COMMENT ON COLUMN position_projection_run.block_number IS 'Derived. Highest block_number the projection emitted in this run; NULL when it emitted nothing, which is still a completed sweep.';
+COMMENT ON COLUMN position_projection_run.block_timestamp IS 'Roles: Derived. Latest block_timestamp the projection emitted in this run; NULL when it emitted nothing, which is still a completed sweep. Comparable across on-chain and off-chain observations, unlike block_number.';
 
 GRANT SELECT ON position_projection_run TO stl_readonly;
 GRANT SELECT, INSERT ON position_projection_run TO stl_readwrite;
 REVOKE UPDATE, DELETE ON position_projection_run FROM stl_readwrite;
 
--- Off-chain observations (custody snapshots) have no block. They carry chain_id NULL, protocol_id NULL
--- (a protocol row needs a chain address), and block_number = the snapshot instant in epoch seconds --
--- derived, so the materializer can check it, and distinct per snapshot, which the observation key needs.
-COMMENT ON COLUMN position_state.block_number IS 'Block of the observation for an on-chain projection (chain_id set). For an OFF-CHAIN observation (chain_id NULL, a custody snapshot) it is floor(epoch seconds of block_timestamp): derived, distinct per snapshot, enforced by the materializer, and not a block on any chain. A reader asking "as of block N" reads chain_id-NULL rows by block_timestamp. chain_id is hashed into position_id, so one position is off-chain or on-chain for life.';
+COMMENT ON COLUMN position_state.block_number IS 'Roles: PK. Block height of the observation for an on-chain projection (chain_id set). For an OFF-CHAIN observation (chain_id NULL, a custody snapshot) it is floor(epoch seconds of block_timestamp), enforced by the materializer, and not a block on any chain.';
 
--- Body copied from 20260818_130000 with one change: deal_type is resolved per view and carried
--- into the snapshot and the append. Comments are not duplicated -- that migration is immutable, so it
--- stays the reference for why each check exists, and a copy here would drift from it.
+-- Body from 20260818_130000, extended: deal_type is a required contract column, the run is recorded,
+-- off-chain rows carry their instant as block_number, and block_timestamp must be monotonic in
+-- block_number per position. Each RAISE names its own check.
 CREATE OR REPLACE FUNCTION materialize_position_projection(p_view regclass, p_build_id integer DEFAULT 0)
     RETURNS bigint
     LANGUAGE plpgsql
     SET search_path FROM CURRENT
     SET timescaledb.enable_tiered_reads = 'on'
     AS $fn$
-DECLARE n bigint; bad text; bad_qty text; v_qualname text; v_deal_type text;
+DECLARE n bigint; bad text; bad_qty text; bad_dt text; v_qualname text;
 BEGIN
     IF p_view IS NULL THEN
         RAISE EXCEPTION 'materialize_position_projection: p_view must not be NULL';
@@ -99,7 +77,8 @@ BEGIN
       INTO bad
     FROM (VALUES ('chain_id','integer'),('protocol_id','bigint'),('instrument_key','text'),('holder_id','text'),
                  ('quantity','numeric'),('block_number','bigint'),
-                 ('block_version','integer'),('processing_version','integer'),('block_timestamp','timestamp with time zone')
+                 ('block_version','integer'),('processing_version','integer'),('block_timestamp','timestamp with time zone'),
+                 ('deal_type','text')
          ) AS e(col, typ)
     LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid = p_view AND a.attname = e.col AND a.attnum > 0 AND NOT a.attisdropped
     WHERE a.attname IS NULL OR format_type(a.atttypid, NULL::integer) <> e.typ;
@@ -109,27 +88,15 @@ BEGIN
 
     SELECT string_agg(format('%s is %s', e.col, format_type(a.atttypid, a.atttypmod)), ', ')
       INTO bad
-    FROM (VALUES ('quantity'), ('block_timestamp'), ('deal_type')) AS e(col)
+    FROM (VALUES ('quantity'), ('block_timestamp')) AS e(col)
     JOIN pg_catalog.pg_attribute a ON a.attrelid = p_view AND a.attname = e.col
          AND a.attnum > 0 AND NOT a.attisdropped
-    JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
     WHERE a.atttypmod <> -1
       AND ((e.col = 'quantity'        AND ((a.atttypmod - 4) & 65535) < 18)
-        OR (e.col = 'block_timestamp' AND a.atttypmod < 6)
-        -- The FK cannot catch this one: a narrow declared type truncates on cast and the truncation
-        -- can land on ANOTHER valid code, so CUSTODY_COLLATERAL as varchar(7) stores CUSTODY.
-        OR (e.col = 'deal_type'  AND t.typcategory = 'S' AND (a.atttypmod - 4) < 63));
+        OR (e.col = 'block_timestamp' AND a.atttypmod < 6));
     IF bad IS NOT NULL THEN
         RAISE EXCEPTION 'projection % declares a lossy type for a value column (it would silently round or truncate; widen the view''s cast): %', p_view, bad;
     END IF;
-
-    -- OPTIONAL: absent stores NULL, present is cast and copied. No type branch -- whatever a wrong
-    -- type casts to is not a ref_deal_type code, so the FK rejects it.
-    v_deal_type := CASE WHEN EXISTS (
-                       SELECT 1 FROM pg_catalog.pg_attribute a
-                        WHERE a.attrelid = p_view AND a.attname = 'deal_type'
-                          AND a.attnum > 0 AND NOT a.attisdropped)
-                   THEN 'deal_type::text' ELSE 'NULL::text' END;
 
     DROP TABLE IF EXISTS pg_temp._mpp_src;
     DROP TABLE IF EXISTS pg_temp._mpp_new;
@@ -137,10 +104,9 @@ BEGIN
         CREATE TEMP TABLE _mpp_src ON COMMIT DROP AS
         SELECT public.position_id(chain_id, protocol_id, instrument_key, holder_id) AS position_id,
                chain_id, protocol_id, instrument_key, holder_id, quantity,
-               block_number, block_version, processing_version, block_timestamp,
-               %2$s AS deal_type
-        FROM %1$s
-    $q$, p_view, v_deal_type);
+               block_number, block_version, processing_version, block_timestamp, deal_type
+        FROM %s
+    $q$, p_view);
     ANALYZE pg_temp._mpp_src;
 
     SELECT string_agg(msg, ', ') INTO bad FROM (
@@ -179,45 +145,40 @@ BEGIN
         RAISE EXCEPTION 'projection % double-emits a logical observation key (position_id,block_number,block_version,processing_version): %', p_view, bad;
     END IF;
 
+    -- One pass over the stored keys this batch re-emits. Timestamp and quantity drift are kept-stored
+    -- and warned; deal_type drift cannot be applied (no UPDATE channel), so it raises after both warnings.
     SELECT string_agg(msg, '; ') FILTER (WHERE ts_drift),
-           string_agg(msg, '; ') FILTER (WHERE qty_drift)
-      INTO bad, bad_qty
+           string_agg(msg, '; ') FILTER (WHERE qty_drift),
+           string_agg(msg || format(' stored=%s emitted=%s', coalesce(stored_dt, 'NULL'), coalesce(emitted_dt, 'NULL')), '; ')
+               FILTER (WHERE dt_drift)
+      INTO bad, bad_qty, bad_dt
     FROM (
         SELECT format('pos=%s bn=%s bv=%s pv=%s', encode(s.position_id, 'hex'),
                       s.block_number, s.block_version, s.processing_version) AS msg,
                p.block_timestamp <> s.block_timestamp        AS ts_drift,
-               p.quantity IS DISTINCT FROM s.quantity        AS qty_drift
+               p.quantity IS DISTINCT FROM s.quantity        AS qty_drift,
+               p.deal_type IS DISTINCT FROM s.deal_type      AS dt_drift,
+               p.deal_type AS stored_dt, s.deal_type AS emitted_dt
         FROM pg_temp._mpp_src s
         JOIN public.position_state p ON p.position_id = s.position_id AND p.block_number = s.block_number
              AND p.block_version = s.block_version AND p.processing_version = s.processing_version
         WHERE p.block_timestamp <> s.block_timestamp
            OR p.quantity IS DISTINCT FROM s.quantity
+           OR p.deal_type IS DISTINCT FROM s.deal_type
         ORDER BY s.position_id, s.block_number, s.block_version, s.processing_version
         LIMIT 5) z;
     IF bad IS NOT NULL THEN
         RAISE WARNING 'projection % re-emits stored observations with a changed block_timestamp; stored rows kept (a real correction must bump block_version/processing_version): %', p_view, bad;
     END IF;
-    SELECT string_agg(msg, '; ') INTO bad FROM (
-        SELECT format('pos=%s bn=%s bv=%s pv=%s stored=%s emitted=%s', encode(s.position_id, 'hex'),
-                      s.block_number, s.block_version, s.processing_version,
-                      coalesce(p.deal_type, 'NULL'), coalesce(s.deal_type, 'NULL')) AS msg
-        FROM pg_temp._mpp_src s
-        JOIN public.position_state p ON p.position_id = s.position_id AND p.block_number = s.block_number
-             AND p.block_version = s.block_version AND p.processing_version = s.processing_version
-        WHERE p.deal_type IS DISTINCT FROM s.deal_type
-        ORDER BY s.position_id, s.block_number, s.block_version, s.processing_version
-        LIMIT 5) z;
-    IF bad IS NOT NULL THEN
-        RAISE EXCEPTION 'projection % re-emits stored observations with a different deal_type, which this function CANNOT apply: the insert is suppressed on the stored key and UPDATE is revoked, so a silent no-op would leave the direction wrong forever. Append a higher processing_version instead: %', p_view, bad;
-    END IF;
-
     IF bad_qty IS NOT NULL THEN
         RAISE WARNING 'projection % re-emits stored observations with a changed quantity; stored rows kept (append-only: a real correction must bump block_version/processing_version): %', p_view, bad_qty;
     END IF;
+    IF bad_dt IS NOT NULL THEN
+        RAISE EXCEPTION 'projection % re-emits stored observations with a different deal_type, which this function CANNOT apply: the insert is suppressed on the stored key and UPDATE is revoked; a real correction must bump block_version/processing_version: %', p_view, bad_dt;
+    END IF;
 
-    -- Off-chain rows (chain_id NULL) must carry block_number = floor(epoch of block_timestamp). The
-    -- observation key is (position, block, versions), so snapshots need distinct blocks; deriving the
-    -- value from the instant makes it deterministic and checkable rather than a convention.
+    -- Off-chain rows (chain_id NULL) carry block_number = floor(epoch of block_timestamp): the
+    -- observation key needs distinct blocks per snapshot, and deriving it makes the value checkable.
     SELECT string_agg(format('bn=%s ts=%s', s.block_number, s.block_timestamp), '; ') INTO bad FROM (
         SELECT block_number, block_timestamp FROM pg_temp._mpp_src
          WHERE chain_id IS NULL
@@ -227,30 +188,42 @@ BEGIN
         RAISE EXCEPTION 'projection % emits off-chain rows (chain_id NULL) whose block_number is not floor(epoch seconds of block_timestamp): %', p_view, bad;
     END IF;
 
-    -- Within one position a higher block cannot carry an EARLIER instant. The caches order by block_number
-    -- and read the date from block_timestamp, so a violation makes position_current and position_daily
-    -- disagree about the newest observation. Governs rows that will be INSERTED, checked against each
-    -- other and the stored history; a re-emit of a stored key is the drift path above, not this one.
+    -- Within one position a higher block cannot carry an earlier instant, or the caches (ordered by
+    -- block, dated by timestamp) disagree. Adjacent pairs suffice: within the batch by window, against
+    -- history by one indexed probe below and above each new row, so cost is bounded by the batch.
     CREATE TEMP TABLE _mpp_new ON COMMIT DROP AS
         SELECT s.position_id, s.block_number, s.block_timestamp FROM pg_temp._mpp_src s
         WHERE NOT EXISTS (SELECT 1 FROM public.position_state p
                            WHERE p.position_id = s.position_id AND p.block_number = s.block_number
                              AND p.block_version = s.block_version AND p.processing_version = s.processing_version);
+    ANALYZE pg_temp._mpp_new;
     SELECT string_agg(msg, '; ') INTO bad FROM (
-        SELECT format('pos=%s bn=%s@%s vs bn=%s@%s', encode(b.position_id, 'hex'),
-                      b.block_number, b.block_timestamp, a.block_number, a.block_timestamp) AS msg
-        FROM pg_temp._mpp_new b
-        JOIN (SELECT position_id, block_number, block_timestamp FROM pg_temp._mpp_new
-              UNION ALL
-              SELECT p.position_id, p.block_number, p.block_timestamp FROM public.position_state p
-               WHERE p.position_id IN (SELECT DISTINCT position_id FROM pg_temp._mpp_new)) a
-          ON a.position_id = b.position_id
-         AND ((b.block_number > a.block_number AND b.block_timestamp < a.block_timestamp)
-           OR (b.block_number < a.block_number AND b.block_timestamp > a.block_timestamp))
-        ORDER BY b.position_id, b.block_number
+        SELECT format('pos=%s bn=%s@%s vs bn=%s@%s', encode(w.position_id, 'hex'),
+                      w.block_number, w.block_timestamp, o.block_number, o.block_timestamp) AS msg
+        FROM (SELECT position_id, block_number, block_timestamp,
+                     lag(block_number)  OVER win AS prev_bn, lag(block_timestamp)  OVER win AS prev_ts,
+                     lead(block_number) OVER win AS next_bn, lead(block_timestamp) OVER win AS next_ts
+              FROM pg_temp._mpp_new
+              WINDOW win AS (PARTITION BY position_id ORDER BY block_number, block_timestamp)) w
+        CROSS JOIN LATERAL (
+            SELECT w.prev_bn AS block_number, w.prev_ts AS block_timestamp WHERE w.prev_bn IS NOT NULL
+            UNION ALL
+            SELECT w.next_bn, w.next_ts WHERE w.next_bn IS NOT NULL
+            UNION ALL
+            (SELECT p.block_number, p.block_timestamp FROM public.position_state p
+              WHERE p.position_id = w.position_id AND p.block_number < w.block_number
+              ORDER BY p.block_number DESC, p.block_timestamp DESC LIMIT 1)
+            UNION ALL
+            (SELECT p.block_number, p.block_timestamp FROM public.position_state p
+              WHERE p.position_id = w.position_id AND p.block_number > w.block_number
+              ORDER BY p.block_number ASC, p.block_timestamp ASC LIMIT 1)
+        ) o
+        WHERE (w.block_number > o.block_number AND w.block_timestamp < o.block_timestamp)
+           OR (w.block_number < o.block_number AND w.block_timestamp > o.block_timestamp)
+        ORDER BY w.position_id, w.block_number
         LIMIT 5) z;
     IF bad IS NOT NULL THEN
-        RAISE EXCEPTION 'projection % emits a higher block with an earlier block_timestamp for one position; the caches order by block and date by timestamp, so they would disagree about the newest observation: %', p_view, bad;
+        RAISE EXCEPTION 'projection % emits a higher block with an earlier block_timestamp for one position; the caches order by block and date by timestamp, so they would disagree: %', p_view, bad;
     END IF;
 
     SELECT format('position %s owned by %s', encode(p.position_id, 'hex'), p.projection) INTO bad
@@ -278,8 +251,8 @@ BEGIN
     ON CONFLICT (position_id, block_number, block_version, processing_version, block_timestamp) DO NOTHING;
     GET DIAGNOSTICS n = ROW_COUNT;
 
-    INSERT INTO public.position_projection_run (projection, build_id, block_number)
-    SELECT v_qualname, p_build_id, max(block_number) FROM pg_temp._mpp_src;
+    INSERT INTO public.position_projection_run (projection, build_id, block_timestamp)
+    SELECT v_qualname, p_build_id, max(block_timestamp) FROM pg_temp._mpp_src;
 
     DROP TABLE pg_temp._mpp_src;
     DROP TABLE pg_temp._mpp_new;
@@ -287,12 +260,10 @@ BEGIN
     RETURN n;
 END $fn$;
 
-COMMENT ON FUNCTION materialize_position_projection(regclass, integer) IS '[Operational] VEC-402..407 shared materializer: validate a per-protocol projection view against the position_state column contract, fail hard on contract/type drift, double-emitted keys, a higher block carrying an earlier block_timestamp within one position, an off-chain row (chain_id NULL) whose block_number is not its instant in epoch seconds, or cross-view ownership violations; keep-stored-and-warn on a re-emitted key whose block_timestamp or quantity drifted, then -- evaluating the projection ONCE into a temp table every check reads -- APPEND the new observations. deal_type is OPTIONAL, not part of the required contract, so a projection omitting it still works and stores NULL; a projection emitting it as any string type has the value copied, and one emitting a lossily-narrow string type, or a value that changes a STORED observation''s deal type, is REJECTED. Everything else about the value is the table''s FK to ref_deal_type, not this function''s job. position_id is recomputed via position_id(); serialized per view by an advisory lock on the view''s canonical name. Records the completed run in position_projection_run, in the same transaction. Idempotent; run out of band. Returns rows INSERTED.';
+COMMENT ON FUNCTION materialize_position_projection(regclass, integer) IS '[Operational] VEC-402..407 shared materializer: evaluate a per-protocol projection view ONCE into a temp table, validate it against the position_state column contract (each RAISE in the body names its own check), then APPEND the new observations and record the completed run in position_projection_run, all in one transaction. deal_type is copied through; the FK to ref_deal_type constrains the value. position_id is recomputed via position_id(); serialized per view by an advisory lock on the view''s canonical name. Idempotent; run out of band. Returns rows INSERTED.';
 
--- position_classification is retired. It was a classification engine over the spine, but the engine
--- is the projection's CASE expression and its result now lands on the observation, where a position
--- that flips LOAN/BORROW can be represented; a second, MUTABLE copy per position cannot, and nothing
--- ever wrote it. direction derives from ref_deal_type; collateral_status was unused. Project lead decision.
+-- position_classification is retired: the classification lands on the observation, where a position
+-- that flips LOAN/BORROW can be represented; a mutable per-position copy cannot, and nothing wrote it.
 DROP TABLE IF EXISTS position_classification;
 
 INSERT INTO migrations (filename) VALUES ('20260818_140000_add_position_state_deal_type.sql') ON CONFLICT (filename) DO NOTHING;

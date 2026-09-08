@@ -33,6 +33,8 @@ var convertedAppendOnlyTables = []string{
 	// VEC-402: SELECT+INSERT only, with the owner-side REVOKE too.
 	"position_state",
 	"oracle_asset",
+	// VEC-401: run records are append-only; SELECT+INSERT only for the app role.
+	"position_projection_run",
 }
 
 // TestConvertedTablesAreAppendOnly asserts the DB-level half of the append-only rule:

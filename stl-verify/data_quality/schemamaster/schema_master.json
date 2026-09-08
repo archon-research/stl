@@ -1,5 +1,24 @@
 {
   "ignore_tables": [
+    "migrations",
+    "ref_asset_class_l1",
+    "ref_corporate_action_type",
+    "ref_counterparty_role",
+    "ref_country",
+    "ref_credit_rating",
+    "ref_currency",
+    "ref_deal_type",
+    "entity_master",
+    "entity_ref_codes",
+    "ref_entity_type",
+    "ref_industry_group_l2",
+    "ref_origination_type",
+    "position_entity_link",
+    "ref_sector_l1",
+    "ref_security_subtype_l3",
+    "ref_security_type_l2",
+    "security_instrument_bridge",
+    "security_master",
     "curve_cryptoswap_config",
     "curve_cryptoswap_state",
     "curve_liquidity_event",
@@ -10,31 +29,19 @@
     "curve_stableswap_config",
     "curve_stableswap_state",
     "curve_swap",
-    "entity_master",
-    "entity_ref_codes",
-    "migrations",
-    "position_entity_link",
-    "ref_asset_class_l1",
-    "ref_corporate_action_type",
-    "ref_counterparty_role",
-    "ref_country",
-    "ref_credit_rating",
-    "ref_currency",
-    "ref_deal_type",
-    "ref_entity_type",
-    "ref_industry_group_l2",
-    "ref_origination_type",
-    "ref_sector_l1",
-    "ref_security_subtype_l3",
-    "ref_security_type_l2",
-    "security_instrument_bridge",
-    "security_master",
     "uniswap_v3_liquidity_event",
     "uniswap_v3_pool",
     "uniswap_v3_pool_event",
     "uniswap_v3_pool_state",
     "uniswap_v3_swap",
-    "uniswap_v3_tick"
+    "uniswap_v3_tick",
+    "uniswap_v4_liquidity_event",
+    "uniswap_v4_pool",
+    "uniswap_v4_pool_event",
+    "uniswap_v4_pool_manager",
+    "uniswap_v4_pool_state",
+    "uniswap_v4_swap",
+    "uniswap_v4_tick"
   ],
   "canonical": {
     "absolute_cap": {
@@ -97,6 +104,10 @@
     "asset_amount": {
       "type": "numeric",
       "class": "S"
+    },
+    "asset_id": {
+      "type": "int8",
+      "class": "R"
     },
     "asset_decimals": {
       "type": "int2",
@@ -1108,6 +1119,10 @@
       "type": "numeric",
       "class": "S"
     },
+    "tokenless": {
+      "type": "bool",
+      "class": "S"
+    },
     "total_a_token": {
       "type": "numeric",
       "class": "S"
@@ -1262,16 +1277,16 @@
       "type": "numeric",
       "class": "S"
     },
-    "wallet_address": {
-      "type": "text",
-      "class": "S"
-    },
     "watermark": {
       "type": "int8",
       "class": "S"
     },
     "withdrawn_assets": {
       "type": "numeric",
+      "class": "S"
+    },
+    "wallet_address": {
+      "type": "text",
       "class": "S"
     }
   },
@@ -1294,6 +1309,11 @@
       "type": "raw_pipeline",
       "owner": "prime",
       "transform_defer": "VEC-494: bucket 3 (no natural PK, keyed via transform_config)"
+    },
+    "asset_price": {
+      "type": "raw_pipeline",
+      "owner": "pricing",
+      "transform_defer": "VEC-652: consumed directly by the CORE model price reader; no transformed-layer target yet"
     },
     "backfill_watermark": {
       "type": "infrastructure",
@@ -1686,6 +1706,19 @@
       "table": "morpho_vault_state",
       "column": "timestamp",
       "canonical": "block_timestamp",
+      "action": "rename"
+    },
+    {
+      "table": "asset_price",
+      "column": "source_id",
+      "canonical": "source_id",
+      "action": "cast",
+      "from": "int2"
+    },
+    {
+      "table": "asset_price",
+      "column": "timestamp",
+      "canonical": "snapshot_time",
       "action": "rename"
     },
     {
@@ -2105,6 +2138,7 @@
       "exempt": [
         "anchorage_operation",
         "anchorage_package_snapshot",
+        "asset_price",
         "cex_orderbook_snapshots",
         "offchain_token_price",
         "prime_capital_stack",
@@ -2123,6 +2157,7 @@
         "allocation_position",
         "anchorage_operation",
         "anchorage_package_snapshot",
+        "asset_price",
         "cex_orderbook_snapshots",
         "maple_syrup_global_state",
         "offchain_token_price",
