@@ -9,38 +9,25 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// TestHypertableCheckConstraintsSurviveTheTieringRoundTrip asserts that every CHECK
-// constraint on every hypertable comes back identical after a deparse-and-reparse round
-// trip through an inheritance child.
-//
-// That round trip is what Tiger Cloud's tiering performs the moment add_tiering_policy
-// runs: it creates the OSM chunk as a foreign table carrying the hypertable's CHECK
-// constraints re-parsed from their text form, then attaches it with
-// ALTER TABLE ... INHERIT, and PostgreSQL refuses the attach unless each same-named
-// constraint's parse tree is equal to the parent's. A BETWEEN nested inside a compound
-// AND does not survive that: BETWEEN expands to its own AND node, so the parent keeps a
-// nested tree while the re-parsed text flattens into a single AND, and the migration
-// dies with
-//
-//	child table "osm_chunk_N" has different definition for check constraint ... (42804)
-//
-// which is how 20260819_120000_create_uniswap_v4_tables.sql blocked every staging
-// deploy on 2026-09-07 (VEC-475). The local harness has no tiering (add_tiering_policy is
-// skipped with a NOTICE), so the migration passed CI while failing on staging. This test
-// runs the same attach against plain-table clones, which is sufficient because the
-// comparison is PostgreSQL's, not the extension's. It covers every hypertable, not just
-// the tiered ones: tiering is a policy added after the fact, and the shape is wrong on
-// its own.
+// TestHypertableCheckConstraintsSurviveTheTieringRoundTrip performs, for every
+// hypertable, the attach Tiger Cloud's tiering performs when it adds the OSM chunk: a
+// child carrying the parent's CHECK constraints re-created from their deparsed text,
+// joined with ALTER TABLE ... INHERIT, which PostgreSQL refuses unless each constraint
+// deparses to the same text as the parent's. The local harness has no tiering
+// (add_tiering_policy is skipped with a NOTICE), so a shape that fails only there passed
+// CI until it reached staging; plain-table clones reproduce the check because the
+// comparison is PostgreSQL's, not the extension's. Every hypertable is covered, not only
+// the tiered ones, because tiering is a policy added after the fact. The failing shapes
+// are recorded under "Tiering round-trip trap" in db/migrations/AGENTS.md.
 func TestHypertableCheckConstraintsSurviveTheTieringRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
 
 	rows, err := pool.Query(ctx, `
-		SELECT hypertable_name
+		SELECT format('%I.%I', hypertable_schema, hypertable_name)
 		FROM timescaledb_information.hypertables
-		WHERE hypertable_schema = 'public'
-		ORDER BY hypertable_name`)
+		ORDER BY 1`)
 	if err != nil {
 		t.Fatalf("list hypertables: %v", err)
 	}
@@ -49,7 +36,7 @@ func TestHypertableCheckConstraintsSurviveTheTieringRoundTrip(t *testing.T) {
 		t.Fatalf("collect hypertables: %v", err)
 	}
 	if len(tables) == 0 {
-		t.Fatal("no hypertables found in public; the enumeration is broken")
+		t.Fatal("no hypertables found; the enumeration is broken")
 	}
 
 	for _, table := range tables {
@@ -60,18 +47,16 @@ func TestHypertableCheckConstraintsSurviveTheTieringRoundTrip(t *testing.T) {
 			}
 			defer func() { _ = tx.Rollback(ctx) }()
 
-			// The parent clone copies the stored constraint trees verbatim.
+			// The parent clone keeps the stored constraint trees verbatim; the child gets
+			// the same constraints, by name, re-parsed from their deparsed text.
 			if _, err := tx.Exec(ctx,
-				`CREATE TABLE round_trip_parent (LIKE `+pgx.Identifier{table}.Sanitize()+` INCLUDING CONSTRAINTS)`,
+				`CREATE TABLE round_trip_parent (LIKE `+table+` INCLUDING CONSTRAINTS)`,
 			); err != nil {
 				t.Fatalf("clone parent of %s: %v", table, err)
 			}
-
-			// The child gets the same constraints, by name, re-parsed from their deparsed
-			// text, exactly as the OSM chunk does.
 			var childDDL string
 			if err := tx.QueryRow(ctx, `
-				SELECT format('CREATE TABLE round_trip_child (LIKE %I%s)', $1::text,
+				SELECT format('CREATE TABLE round_trip_child (LIKE round_trip_parent%s)',
 					coalesce(', ' || string_agg(
 						format('CONSTRAINT %I CHECK (%s)', conname, pg_get_expr(conbin, conrelid)),
 						', ' ORDER BY conname), ''))
@@ -86,8 +71,8 @@ func TestHypertableCheckConstraintsSurviveTheTieringRoundTrip(t *testing.T) {
 
 			if _, err := tx.Exec(ctx, `ALTER TABLE round_trip_child INHERIT round_trip_parent`); err != nil {
 				t.Fatalf("a CHECK constraint on %s does not survive the deparse/reparse round trip "+
-					"that tiering performs when it attaches the OSM chunk; rewrite it without a "+
-					"BETWEEN nested inside AND/OR: %v", table, err)
+					"tiering performs when it attaches the OSM chunk (see the tiering round-trip "+
+					"trap in db/migrations/AGENTS.md): %v", table, err)
 			}
 		})
 	}

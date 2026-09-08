@@ -1275,15 +1275,19 @@ activity occurred (legitimate quiet window).
 Fired on 2026-09-07 (13:57 UTC onwards, staging) against a **healthy** indexer,
 together with `VectorUniswapV3IndexerNotWritingState`. #711 (VEC-475) had just
 rewritten this rule to key on `curve_state_rows_attempted_total`, and the Alerts
-workflow synced the new rule within minutes of the merge while the pods still ran
-the previous image, which never emits that counter — so the right side was absent
-and the `unless` fired by design. The next rollout would have closed the gap, but
-that rollout stayed blocked for hours: the same PR's migration failed in the
-PreSync hook on staging (a CHECK constraint shape Tiger's tiering rejects; see
-the tiering round-trip trap in `stl-verify/db/migrations/AGENTS.md`), which left
-every staging deploy stuck and the alert firing until the fix rolled. If this
-rule fires right after a deploy that touched it, compare the running image's
-commit with the rule's before reading the indexer as broken.
+workflow synced the new rule to Grafana Cloud Mimir within minutes of the merge
+while the pods still ran the previous image, which never emits that counter — so
+the right side was absent and the `unless` fired by design. The rollout that
+would have closed the gap was blocked: the same PR's migration failed in the
+PreSync hook on staging (PostgreSQL rejected a CHECK constraint shape during the
+tiering attach; see the tiering round-trip trap in
+`stl-verify/db/migrations/AGENTS.md`), so the deploys of 14:02 and 14:51 UTC
+each timed out at their 30-minute health wait and the alert kept firing until
+`20260819_120000` was rewritten. The rule stays as it is: `unless` is what lets
+it fire on an absent series (its comment forbids reverting to `and`), and the
+exposure is confined to the window between a merge that changes the rule and
+the matching image rolling. If this rule fires right after such a merge, compare
+the running image's commit with the rule's before reading the indexer as broken.
 
 ---
 
@@ -1539,10 +1543,10 @@ cover the class the old rule had covered by accident.
 
 Fired again on 2026-09-07 (13:57 UTC onwards, staging) against a **healthy**
 indexer, alongside `VectorCurveIndexerNoStateWritten`, for the reason recorded in
-that rule's History: #711 rewrote both rules to key on
-`*_state_rows_attempted_total`, the rule reached Mimir before the image that
-emits the counter did, and the rollout was then held up by the same PR's
-migration failing on staging.
+[that rule's History](#vectorcurveindexernostatewritten): #711 (VEC-475) rewrote
+both rules to key on `*_state_rows_attempted_total`, the rule reached Grafana
+Cloud Mimir before the image that emits the counter did, and the rollout was then
+held up by the same PR's migration failing on staging.
 
 ---
 
