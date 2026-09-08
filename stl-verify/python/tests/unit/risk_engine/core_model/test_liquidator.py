@@ -140,6 +140,24 @@ def test_already_consumed_is_an_offset_into_the_masked_book():
     assert _slippage(book, [50.0], already_consumed=100.0) == pytest.approx([0.01], abs=1e-12)
 
 
+@pytest.mark.parametrize(
+    "book",
+    [
+        pytest.param(_book((100.0, 100.0), (99.0, float("nan")), (98.0, 100.0)), id="nan-liquidity"),
+        pytest.param(_book((100.0, 100.0), (float("nan"), 50.0)), id="nan-price"),
+        pytest.param(_book((100.0, 100.0), (99.0, -50.0), (98.0, 100.0)), id="negative-liquidity"),
+    ],
+)
+def test_corrupt_book_level_raises_instead_of_pricing_it(book: pd.DataFrame):
+    with pytest.raises(ValueError, match="non-finite or negative"):
+        _slippage(book, [50.0])
+
+
+def test_non_finite_already_consumed_raises():
+    with pytest.raises(ValueError, match="already_consumed"):
+        _slippage(_FOUR_TICKS, [50.0], already_consumed=float("nan"))
+
+
 def test_amounts_are_evaluated_independently_from_the_same_offset():
     amounts = [50.0, 100.0, 600.0, 1200.0, 0.0]
     expected = [_walk_book(_FOUR_TICKS, _SIM_PRICE, a, 70.0) for a in amounts]

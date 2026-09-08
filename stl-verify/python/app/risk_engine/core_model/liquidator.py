@@ -120,6 +120,12 @@ class Liquidator:
         prices = ticks_df["price"].to_numpy(dtype=np.float64)
         liquidity = ticks_df["liquidity"].to_numpy(dtype=np.float64)
 
+        # A NaN level would otherwise read as unlimited free liquidity; a negative one breaks the cumsum walk.
+        if not (np.all(np.isfinite(prices)) and np.all(np.isfinite(liquidity)) and np.all(liquidity >= 0)):
+            raise ValueError("order book has non-finite or negative levels")
+        if not np.isfinite(already_consumed):
+            raise ValueError(f"already_consumed is not finite: {already_consumed!r}")
+
         mask = prices <= sim_price
         prices = prices[mask]
         liquidity = liquidity[mask]
@@ -145,7 +151,7 @@ class Liquidator:
         avg_price = np.where(liq_used > 0, value_used / np.where(liq_used > 0, liq_used, 1.0), sim_price)
 
         price_impact = (sim_price - avg_price) / sim_price
-        slippage = np.minimum(price_impact + add_slippage, 0.9999)
+        slippage = np.clip(price_impact + add_slippage, 0.0, 0.9999)
         slippage[amount_liq_usd == 0.0] = 0.0
 
         return slippage
