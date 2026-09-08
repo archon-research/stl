@@ -134,6 +134,41 @@ jobs:
           role-to-assume: arn:aws:iam::579039992622:role/stl-sentinelstaging-github-actions-ecr
           aws-region: eu-west-1
 
+      # ORB-366: measure, alongside the file-list logic in ci.yml, which images
+      # this deploy is about to roll for no reason. Every tag below is rewritten
+      # to the deploy SHA regardless of what this says — the step is a shadow
+      # run whose verdicts are collected and reconciled before any deploy
+      # behaviour changes.
+      #
+      # It must read the overlay before the render step below rewrites it:
+      # afterwards both sides name the same tag and every verdict is trivially
+      # unchanged (the script rejects that case rather than reporting it).
+      #
+      # continue-on-error because a measurement must never fail a deploy. A
+      # broken comparison still shows as a failed step, which is the point of
+      # its exit code — it reports whether it could compare, never what the
+      # deploy should do.
+      - name: Compare built layers against the running images (log only)
+        continue-on-error: true
+        env:
+          SHA: ${{ inputs.sha || github.sha }}
+        run: |
+          scripts/deploy/compare-image-layers.sh \
+            --kustomization k8s/overlays/staging/kustomization.yaml \
+            --tag "$SHA" \
+            --json "${RUNNER_TEMP}/layer-verdicts.json"
+
+      # A week of verdicts is what the reconciliation before any cutover reads,
+      # and the run's log is not a place to accumulate them from.
+      - name: Upload layer verdicts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: layer-verdicts-${{ inputs.sha || github.sha }}
+          path: ${{ runner.temp }}/layer-verdicts.json
+          if-no-files-found: ignore
+          retention-days: 30
+
       # ORB-362: the images block is rendered wholesale from the roster at the
       # exact main commit the bump is parented on (FETCH_HEAD), so the committed
       # block is always "what the roster at this revision renders" — the same
