@@ -809,10 +809,6 @@
       "type": "text",
       "class": "S"
     },
-    "offchain_only": {
-      "type": "bool",
-      "class": "S"
-    },
     "operation_id": {
       "type": "text",
       "class": "R"
@@ -1120,6 +1116,10 @@
       "type": "numeric",
       "class": "S"
     },
+    "tokenless": {
+      "type": "bool",
+      "class": "S"
+    },
     "total_a_token": {
       "type": "numeric",
       "class": "S"
@@ -1307,6 +1307,11 @@
       "owner": "prime",
       "transform_defer": "VEC-494: bucket 3 (no natural PK, keyed via transform_config)"
     },
+    "asset_price": {
+      "type": "raw_pipeline",
+      "owner": "pricing",
+      "transform_defer": "VEC-652: consumed directly by the CORE model price reader; no transformed-layer target yet"
+    },
     "backfill_watermark": {
       "type": "infrastructure",
       "owner": "infra"
@@ -1450,11 +1455,6 @@
     "morpho_vault_state": {
       "type": "raw_pipeline",
       "owner": "morpho"
-    },
-    "offchain_asset_price": {
-      "type": "raw_pipeline",
-      "owner": "pricing",
-      "transform_defer": "VEC-652: consumed directly by the CORE model price reader; no transformed-layer target yet"
     },
     "offchain_price_asset": {
       "type": "config",
@@ -1702,14 +1702,14 @@
       "action": "rename"
     },
     {
-      "table": "offchain_asset_price",
+      "table": "asset_price",
       "column": "source_id",
       "canonical": "source_id",
       "action": "cast",
       "from": "int2"
     },
     {
-      "table": "offchain_asset_price",
+      "table": "asset_price",
       "column": "timestamp",
       "canonical": "snapshot_time",
       "action": "rename"
@@ -2131,8 +2131,8 @@
       "exempt": [
         "anchorage_operation",
         "anchorage_package_snapshot",
+        "asset_price",
         "cex_orderbook_snapshots",
-        "offchain_asset_price",
         "offchain_token_price",
         "prime_capital_stack",
         "prime_reference_balance_sheet"
@@ -2150,9 +2150,9 @@
         "allocation_position",
         "anchorage_operation",
         "anchorage_package_snapshot",
+        "asset_price",
         "cex_orderbook_snapshots",
         "maple_syrup_global_state",
-        "offchain_asset_price",
         "offchain_token_price",
         "onchain_token_price",
         "prime_capital_stack",

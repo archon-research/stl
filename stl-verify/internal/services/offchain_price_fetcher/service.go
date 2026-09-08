@@ -24,11 +24,11 @@ var ErrInvalidRequest = errors.New("invalid request")
 // errMisconfiguredAsset flags a catalog row that is neither token-linked nor
 // declared offchain-only. That state is token_id NULL by ACCIDENT (the catalog
 // seed resolves token ids by symbol match, which can miss), not by design;
-// routing it to offchain_asset_price would silently bury the asset's prices in
+// routing it to asset_price would silently bury the asset's prices in
 // a table its consumers never read, so the run refuses instead.
 func errMisconfiguredAsset(sourceAssetID string) error {
-	return fmt.Errorf("asset %s has no token_id and is not declared offchain_only in offchain_price_asset; "+
-		"link its token row or set offchain_only before fetching it: %w", sourceAssetID, ErrInvalidRequest)
+	return fmt.Errorf("asset %s has no token_id and is not declared tokenless in offchain_price_asset; "+
+		"link its token row or set tokenless before fetching it: %w", sourceAssetID, ErrInvalidRequest)
 }
 
 // MaxHourlyWindow is the widest range CoinGecko still answers at hourly
@@ -416,7 +416,7 @@ func (s *Service) resolveAssets(ctx context.Context, assetIDs []string) ([]*enti
 
 // convertCurrentPrices routes each point by the asset's identity: token-keyed
 // assets to TokenPrice (offchain_token_price), assets with no token row to
-// AssetPrice (offchain_asset_price).
+// AssetPrice (asset_price).
 func (s *Service) convertCurrentPrices(prices []outbound.PriceData, assets []*entity.PriceAsset) ([]*entity.TokenPrice, []*entity.AssetPrice, error) {
 	assetMap := buildAssetMap(assets)
 	tokenPrices := make([]*entity.TokenPrice, 0, len(prices))
@@ -429,7 +429,7 @@ func (s *Service) convertCurrentPrices(prices []outbound.PriceData, assets []*en
 		}
 
 		if asset.TokenID == nil {
-			if !asset.OffchainOnly {
+			if !asset.Tokenless {
 				return nil, nil, errMisconfiguredAsset(p.SourceAssetID)
 			}
 			ap, err := entity.NewAssetPrice(asset.ID, int16(asset.SourceID), p.PriceUSD, p.MarketCapUSD, nil, p.Timestamp)
@@ -458,7 +458,7 @@ func (s *Service) convertHistoricalPrices(data *outbound.HistoricalData, assetMa
 	if !ok {
 		return nil, nil, fmt.Errorf("historical data for unknown asset: %s", data.SourceAssetID)
 	}
-	if asset.TokenID == nil && !asset.OffchainOnly {
+	if asset.TokenID == nil && !asset.Tokenless {
 		return nil, nil, errMisconfiguredAsset(data.SourceAssetID)
 	}
 

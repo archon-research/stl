@@ -278,8 +278,8 @@ func processingVersionIndexCases() []processingVersionIndexCase {
 			},
 		},
 		{
-			tableName:     "offchain_asset_price",
-			indexName:     "idx_offchain_asset_price_pv_lookup",
+			tableName:     "asset_price",
+			indexName:     "idx_asset_price_pv_lookup",
 			indexFragment: `(asset_id, source_id, "timestamp", processing_version DESC)`,
 			segmentby:     "asset_id",
 			orderby:       `"timestamp" DESC,processing_version DESC`,
@@ -925,11 +925,11 @@ func processingVersionSeedStatements() []string {
 			INSERT INTO offchain_token_price (token_id, source_id, timestamp, price_usd, processing_version, build_id)
 			SELECT 1, 1, %s, 1, 0, 0
 			FROM generate_series(1, $1) AS g`, tsExpr),
-		// offchain_asset_price chunks by 30 days, not 1 day, so the shared 5-day
+		// asset_price chunks by 30 days, not 1 day, so the shared 5-day
 		// spread would land in one chunk. Stride one chunk interval every fifth
 		// row instead; the probe timestamp (2035-01-03) sits inside the first.
 		`
-			INSERT INTO offchain_asset_price (asset_id, source_id, timestamp, price_usd, processing_version, build_id)
+			INSERT INTO asset_price (asset_id, source_id, timestamp, price_usd, processing_version, build_id)
 			SELECT 1, 1, timestamptz '2035-01-01 00:00:00+00' + ((g % 5) * interval '30 days') + (g * interval '1 second'), 1, 0, 0
 			FROM generate_series(1, $1) AS g`,
 	}

@@ -129,7 +129,7 @@ cronjob covers current prices.
 | HYPE   | `hyperliquid`          |
 
 XRP and HYPE have no mainnet token row, so their prices are stored in
-`offchain_asset_price` (keyed by the `offchain_price_asset` catalog row) instead
+`asset_price` (keyed by the `offchain_price_asset` catalog row) instead
 of `offchain_token_price`.
 
 ---

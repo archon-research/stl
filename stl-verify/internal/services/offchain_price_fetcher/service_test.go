@@ -206,14 +206,14 @@ func pastHour() (from, to time.Time) {
 
 // createAsset builds a well-configured catalog row: token-linked, or declared
 // offchain-only when there is no token. The misconfigured third state (neither)
-// is built by clearing OffchainOnly at the test site.
+// is built by clearing Tokenless at the test site.
 func createAsset(id int64, sourceAssetID, symbol string, tokenID *int64) *entity.PriceAsset {
 	return &entity.PriceAsset{
 		ID:            id,
 		SourceID:      1,
 		SourceAssetID: sourceAssetID,
 		TokenID:       tokenID,
-		OffchainOnly:  tokenID == nil,
+		Tokenless:     tokenID == nil,
 		Name:          symbol,
 		Symbol:        symbol,
 		Enabled:       true,
@@ -580,7 +580,7 @@ func TestFetchCurrentPrices_MisconfiguredAssetIsRefused(t *testing.T) {
 	repo := newMockRepository()
 
 	asset := createAsset(1, "mystery", "MYS", nil)
-	asset.OffchainOnly = false // token_id NULL by accident, not by declaration
+	asset.Tokenless = false // token_id NULL by accident, not by declaration
 	repo.enabledAssets = []*entity.PriceAsset{asset}
 
 	ts := time.Now().Truncate(time.Second)
@@ -1033,19 +1033,19 @@ func TestBackfillChunk_RejectsRequestsThatCannotSucceed(t *testing.T) {
 		supportsHistorical bool
 		asset              string
 		tokenID            *int64
-		misconfigured      bool // token_id NULL without offchain_only: an accidental catalog state
+		misconfigured      bool // token_id NULL without tokenless: an accidental catalog state
 		from, to           time.Time
 		wantErrContains    string
 	}{
 		{
-			name:               "asset has neither a token link nor an offchain_only declaration",
+			name:               "asset has neither a token link nor an tokenless declaration",
 			supportsHistorical: true,
 			asset:              "weth",
 			tokenID:            nil,
 			misconfigured:      true,
 			from:               from,
 			to:                 from.Add(24 * time.Hour),
-			wantErrContains:    "not declared offchain_only",
+			wantErrContains:    "not declared tokenless",
 		},
 		{
 			name:               "provider cannot serve history at all",
@@ -1103,7 +1103,7 @@ func TestBackfillChunk_RejectsRequestsThatCannotSucceed(t *testing.T) {
 			repo := newMockRepository()
 			asset := createAsset(1, "weth", "WETH", tc.tokenID)
 			if tc.misconfigured {
-				asset.OffchainOnly = false
+				asset.Tokenless = false
 			}
 			repo.assetsByIDs = []*entity.PriceAsset{asset}
 

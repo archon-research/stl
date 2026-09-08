@@ -15,7 +15,7 @@ related_docs:
 # Backfilling Off-Chain Prices
 
 How to load historical CoinGecko prices into `offchain_token_price` (token-keyed
-assets) or `offchain_asset_price` (assets with no token row) for a date range
+assets) or `asset_price` (assets with no token row) for a date range
 you choose. This is the operator's view — for how the job is built, or how to add
 another on-demand job, see [temporal_guide.md](temporal_guide.md).
 
@@ -107,7 +107,7 @@ ORDER BY 1;
 Where the rows land depends on the asset's identity. Assets with a `token_id`
 (mainnet ERC-20s) write to `offchain_token_price`. Assets with `token_id` NULL —
 natives of ecosystems we do not index, like XRP and HYPE — write to
-`offchain_asset_price`, keyed by the `offchain_price_asset.id` catalog row.
+`asset_price`, keyed by the `offchain_price_asset.id` catalog row.
 The workflow input is the same either way. Native BTC and ETH are still absent
 only because nobody has registered them yet (VEC-539 tracks that).
 
@@ -159,12 +159,12 @@ WHERE t.chain_id = 1 AND s.name = 'coingecko'
 GROUP BY t.symbol;
 ```
 
-For a token-less asset the rows are in `offchain_asset_price` instead:
+For a token-less asset the rows are in `asset_price` instead:
 
 ```sql
 SELECT a.symbol, COUNT(*) AS rows,
        MIN(p.timestamp) AS earliest, MAX(p.timestamp) AS latest
-FROM offchain_asset_price p
+FROM asset_price p
 JOIN offchain_price_asset a ON a.id = p.asset_id
 WHERE a.source_asset_id IN ('ripple','hyperliquid')
 GROUP BY a.symbol;
@@ -228,7 +228,7 @@ deactivated; if requests come back HTTP 401, put a working key in
 | Re-running a filled range | Safe and additive — `ON CONFLICT DO NOTHING` |
 | Rows are never deleted | Corrections append a new `processing_version` |
 
-One caveat on "additive": it holds fully for `offchain_asset_price` (the INSERT
+One caveat on "additive": it holds fully for `asset_price` (the INSERT
 decides the version, so corrections land even in compressed chunks). For
 `offchain_token_price`, filling a gap works, but re-writing an already-present
 timestamp from a **new build** is silently dropped once the chunk is compressed

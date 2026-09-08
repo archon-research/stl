@@ -336,8 +336,8 @@ type backfillActivities struct {
 // key, and the build-aware version rule reuses the existing version only when a
 // row with the same natural key AND the same build_id exists.
 //
-// Cross-build replays differ per table. offchain_asset_price decides the version
-// in the INSERT's VALUES list (next_processing_version_offchain_asset_price), so
+// Cross-build replays differ per table. asset_price decides the version
+// in the INSERT's VALUES list (next_processing_version_asset_price), so
 // a new build's replay lands an additive processing_version+1 copy even into a
 // compressed chunk. offchain_token_price is still trigger-only: filling a gap
 // works, but re-writing an already-present timestamp from a new build is

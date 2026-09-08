@@ -298,7 +298,7 @@ func TestIntegration_FetchCurrentPrices_AllEnabledAssets(t *testing.T) {
 	// The migration also seeds two token-less assets (ripple, hyperliquid);
 	// the same sweep must land their prices in the asset-keyed store.
 	var assetPriceCount int
-	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_asset_price`).Scan(&assetPriceCount)
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM asset_price`).Scan(&assetPriceCount)
 	if err != nil {
 		t.Fatalf("failed to query asset_price count: %v", err)
 	}
@@ -531,7 +531,7 @@ func TestIntegration_UpsertIdempotency(t *testing.T) {
 func insertTestTokenlessPriceAsset(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sourceID int64, sourceAssetID, symbol, name string) int64 {
 	t.Helper()
 	_, err := pool.Exec(ctx, `
-		INSERT INTO offchain_price_asset (source_id, source_asset_id, token_id, offchain_only, symbol, name, enabled, created_at, updated_at)
+		INSERT INTO offchain_price_asset (source_id, source_asset_id, token_id, tokenless, symbol, name, enabled, created_at, updated_at)
 		VALUES ($1, $2, NULL, true, $3, $4, true, NOW(), NOW())
 		ON CONFLICT (source_id, source_asset_id) DO NOTHING
 	`, sourceID, sourceAssetID, symbol, name)
@@ -598,10 +598,10 @@ func TestIntegration_FetchCurrentPrices_TokenlessAsset(t *testing.T) {
 	var storedTS time.Time
 	if err := pool.QueryRow(ctx, `
 		SELECT COUNT(*) OVER (), price_usd, market_cap_usd, source_id, timestamp
-		FROM offchain_asset_price WHERE asset_id = $1
+		FROM asset_price WHERE asset_id = $1
 		ORDER BY timestamp DESC LIMIT 1`, assetID,
 	).Scan(&count, &priceUSD, &marketCapUSD, &storedSourceID, &storedTS); err != nil {
-		t.Fatalf("failed to query offchain_asset_price: %v", err)
+		t.Fatalf("failed to query asset_price: %v", err)
 	}
 	if count != 1 {
 		t.Errorf("expected 1 asset price record, got %d", count)
@@ -643,8 +643,8 @@ func TestIntegration_AssetPriceUpsertIdempotency(t *testing.T) {
 		t.Fatalf("FetchHistoricalData (first) failed: %v", err)
 	}
 	var countAfterFirst int
-	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_asset_price WHERE asset_id = $1`, assetID).Scan(&countAfterFirst); err != nil {
-		t.Fatalf("failed to query offchain_asset_price count: %v", err)
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM asset_price WHERE asset_id = $1`, assetID).Scan(&countAfterFirst); err != nil {
+		t.Fatalf("failed to query asset_price count: %v", err)
 	}
 	if countAfterFirst == 0 {
 		t.Fatal("expected historical asset prices to be stored")
@@ -654,8 +654,8 @@ func TestIntegration_AssetPriceUpsertIdempotency(t *testing.T) {
 		t.Fatalf("FetchHistoricalData (second) failed: %v", err)
 	}
 	var countAfterSecond int
-	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_asset_price WHERE asset_id = $1`, assetID).Scan(&countAfterSecond); err != nil {
-		t.Fatalf("failed to query offchain_asset_price count: %v", err)
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM asset_price WHERE asset_id = $1`, assetID).Scan(&countAfterSecond); err != nil {
+		t.Fatalf("failed to query asset_price count: %v", err)
 	}
 	if countAfterFirst != countAfterSecond {
 		t.Errorf("expected idempotent upsert: first=%d, second=%d", countAfterFirst, countAfterSecond)
@@ -664,7 +664,7 @@ func TestIntegration_AssetPriceUpsertIdempotency(t *testing.T) {
 
 // A replay from a different build must land correction rows at
 // processing_version+1, not vanish into ON CONFLICT DO NOTHING — the contract
-// next_processing_version_offchain_asset_price exists to keep (ADR-0002 §3).
+// next_processing_version_asset_price exists to keep (ADR-0002 §3).
 func TestIntegration_AssetPriceCrossBuildReplayAppendsNewVersions(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
@@ -708,7 +708,7 @@ func TestIntegration_AssetPriceCrossBuildReplayAppendsNewVersions(t *testing.T) 
 
 	runWithBuild(0)
 	var v0Count int
-	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM offchain_asset_price WHERE asset_id = $1`, assetID).Scan(&v0Count); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM asset_price WHERE asset_id = $1`, assetID).Scan(&v0Count); err != nil {
 		t.Fatalf("failed to count rows: %v", err)
 	}
 	if v0Count == 0 {
@@ -723,7 +723,7 @@ func TestIntegration_AssetPriceCrossBuildReplayAppendsNewVersions(t *testing.T) 
 	runWithBuild(1)
 	rows, err := pool.Query(ctx, `
 		SELECT processing_version, build_id, COUNT(*)
-		FROM offchain_asset_price WHERE asset_id = $1
+		FROM asset_price WHERE asset_id = $1
 		GROUP BY processing_version, build_id ORDER BY processing_version`, assetID)
 	if err != nil {
 		t.Fatalf("failed to read version sets after replay: %v", err)
@@ -744,19 +744,19 @@ func TestIntegration_AssetPriceCrossBuildReplayAppendsNewVersions(t *testing.T) 
 	}
 }
 
-// compressAssetPriceChunks columnstores every chunk of offchain_asset_price —
+// compressAssetPriceChunks columnstores every chunk of asset_price —
 // the state the 60-day compression policy puts any chunk in before a historical
 // replay touches it.
 func compressAssetPriceChunks(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
 	var chunks int
 	if err := pool.QueryRow(ctx,
-		`SELECT count(*)::int FROM (SELECT compress_chunk(c) FROM show_chunks('offchain_asset_price') c) s`,
+		`SELECT count(*)::int FROM (SELECT compress_chunk(c) FROM show_chunks('asset_price') c) s`,
 	).Scan(&chunks); err != nil {
-		t.Fatalf("compress offchain_asset_price chunks: %v", err)
+		t.Fatalf("compress asset_price chunks: %v", err)
 	}
 	if chunks == 0 {
-		t.Fatal("offchain_asset_price has no chunk to compress; the seed write did not land")
+		t.Fatal("asset_price has no chunk to compress; the seed write did not land")
 	}
 }
 
@@ -764,7 +764,7 @@ func assetPriceVersions(t *testing.T, ctx context.Context, pool *pgxpool.Pool, a
 	t.Helper()
 	rows, err := pool.Query(ctx, `
 		SELECT processing_version, build_id, price_usd
-		FROM offchain_asset_price WHERE asset_id = $1 AND timestamp = $2
+		FROM asset_price WHERE asset_id = $1 AND timestamp = $2
 		ORDER BY processing_version`, assetID, ts)
 	if err != nil {
 		t.Fatalf("read asset price versions: %v", err)
@@ -799,7 +799,7 @@ func upsertOneAssetPrice(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 
 // A reprocess under a new build must append its correction row even when the
 // chunk it lands in is already columnstored. That works only because the INSERT
-// itself calls next_processing_version_offchain_asset_price: on a columnstored
+// itself calls next_processing_version_asset_price: on a columnstored
 // chunk the ON CONFLICT arbiter resolves before row triggers fire, so a
 // trigger-assigned version would reach it as DEFAULT 0 and the correction row
 // would be silently discarded (20260821_120000, ADR-0002 §3).
