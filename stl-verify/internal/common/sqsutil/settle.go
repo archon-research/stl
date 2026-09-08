@@ -17,14 +17,12 @@ import (
 // unbounded settle against a silent connection parks the poll loop for good.
 const SettleTimeout = 5 * time.Second
 
-// CleanupContext returns the context for the queue call that settles a message,
-// bounded by SettleTimeout. Once shutdown cancelled the parent, that call must
-// still go out, so it runs detached from it.
+// CleanupContext returns the context for a queue call that settles a message
+// (delete, release, dead-letter publish): bounded by SettleTimeout, detached from
+// the caller's cancellation so a shutdown landing mid-call cannot kill a call SQS
+// may already have applied and leave it released against a vanished handle.
 func CleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	if ctx.Err() != nil {
-		ctx = context.WithoutCancel(ctx)
-	}
-	return context.WithTimeout(ctx, SettleTimeout)
+	return context.WithTimeout(context.WithoutCancel(ctx), SettleTimeout)
 }
 
 const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
