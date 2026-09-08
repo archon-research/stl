@@ -39,11 +39,12 @@ import (
 
 var (
 	GitCommit string
+	GitBranch string
 	BuildTime string
 )
 
 func init() {
-	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
+	buildinfo.Populate(&GitCommit, &GitBranch, &BuildTime)
 }
 
 func main() {
