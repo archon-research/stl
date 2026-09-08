@@ -90,6 +90,9 @@ make run-watcher         # Run one service on the host against the cluster
 make run-<worker>        # grep '^run-' in the Makefile for the full list (incl. per-chain *-avax)
 make kind-use-alchemy    # Switch watcher from the mock chain to real Alchemy (key in .env.secrets)
 
+# dev-up also deploys mock-coingecko-server, and offchain-price-indexer runs against it
+# by default (no real key needed). To use the real Pro API: set COINGECKO_API_KEY in
+# .env.secrets, then `make kind-secrets kind-use-coingecko`.
 # With ALCHEMY_API_KEY in .env.secrets, dev-up also runs the Alchemy workers in-cluster —
 # including the DEX indexers (curve-indexer, uniswap-v3-indexer, uniswap-v4-indexer, all one
 # stl-dex-indexer image) — consuming the in-cluster watcher's blocks over LocalStack SNS→SQS.
