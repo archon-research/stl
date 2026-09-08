@@ -864,7 +864,7 @@ func TestCurrentTables_AllocationTriggerFiresOnInsertIntoCompressedChunk(t *test
 }
 
 // TestCurrentTables_AllocationBackfillAgreesWithTheTrigger covers the half of the
-// design nothing else reaches. 20260825_120100 is a separate migration so that
+// design nothing else reaches. The recovery statement is a separate migration so that
 // CREATE TRIGGER's lock is not held for a full-history scan, and the cost of the
 // split is that the backfill applies against an empty allocation_position and is
 // never exercised again — while its DISTINCT ON has to stay the trigger's
@@ -905,9 +905,10 @@ func TestCurrentTables_AllocationBackfillAgreesWithTheTrigger(t *testing.T) {
 	assertCachesMatchHistory(t, ctx)
 }
 
-// runAllocationBackfillMigration applies 20260825_120100 the way the migrator
+// runAllocationBackfillMigration applies the operator re-run the way the migrator
 // does — the whole file, one Exec, one transaction, since SET LOCAL only warns
-// outside a transaction block.
+// outside a transaction block. 20260908_120100 rather than the 20260825_120100 it
+// supersedes: the copied newer-wins terms are what this test holds to the trigger.
 func runAllocationBackfillMigration(t *testing.T, ctx context.Context) {
 	t.Helper()
 	_, thisFile, _, ok := runtime.Caller(0)
@@ -915,7 +916,7 @@ func runAllocationBackfillMigration(t *testing.T, ctx context.Context) {
 		t.Fatal("cannot resolve this file's path")
 	}
 	sql, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "../../../../db/migrations",
-		"20260825_120100_backfill_allocation_position_current.sql"))
+		"20260908_120100_converge_allocation_position_current_past_retired_keys.sql"))
 	if err != nil {
 		t.Fatalf("read the backfill migration: %v", err)
 	}

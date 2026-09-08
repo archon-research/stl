@@ -44,6 +44,8 @@ var convertedAppendOnlyTables = []string{
 	"uniswap_v4_liquidity_event",
 	"uniswap_v4_tick",
 	"uniswap_v4_pool_event",
+	// VEC-535: append-only from birth; an un-retirement is a new row, not an UPDATE.
+	"allocation_position_key_retirement",
 }
 
 // TestConvertedTablesAreAppendOnly asserts the DB-level half of the append-only rule:
