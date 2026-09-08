@@ -10,6 +10,10 @@ const placeholderClassName = css({
   bg: 'border.subtle',
   borderRadius: 'sm',
   animation: 'pulse',
+  // Inline-block so it can stand in for a word mid-sentence as well as fill a
+  // slot of its own; a block element inside a `<span>` breaks the line.
+  display: 'inline-block',
+  verticalAlign: 'middle',
 });
 
 /**

@@ -17,6 +17,7 @@ import {
   formatWadValue,
 } from '../../shared/lib/dashboard';
 import type { PrimeRiskCapital } from '../../shared/types/allocation';
+import { Placeholder } from '../../shared/ui/Placeholder';
 import { ExposureCard, PrimeCollateralCard } from './HiddenMetricCards';
 import { MetricCardLegend, MetricCardTrend } from './metricCardChart';
 import {
@@ -394,23 +395,35 @@ function PrimeDebtCard({
           errorMessage={chartsErrorMessage}
         />
       }
-      value={isLoading ? 'Loading...' : formatWadValue(wad)}
-      detail={
+      // A placeholder rather than the word "Loading...": its three siblings hold
+      // their shape while they wait, so spelling it out read as the figure
+      // itself — and swapping the whole detail slot for a sentence left this the
+      // only card in the row with no chart box reserved.
+      value={
         isLoading ? (
-          'Fetching latest debt snapshot'
+          <Placeholder width="8rem" height={28} />
         ) : (
-          <div className={metricDetailClassName}>
-            {/* The ilk alone. The raw WAD that used to sit beside it — with a
-                tooltip and an explorer link — was read as the prime's address
-                when it is the unrounded debt the headline already states. */}
-            <div className={metricCaptionClassName}>{ilkLabel ?? '\u00A0'}</div>
-            <MetricCardTrend
-              chart={chart}
-              isLoading={isChartsLoading}
-              errorMessage={chartsErrorMessage}
-            />
-          </div>
+          formatWadValue(wad)
         )
+      }
+      detail={
+        <div className={metricDetailClassName}>
+          {/* The ilk alone. The raw WAD that used to sit beside it — with a
+              tooltip and an explorer link — was read as the prime's address
+              when it is the unrounded debt the headline already states. */}
+          <div className={metricCaptionClassName}>
+            {isLoading ? (
+              <Placeholder width="12rem" height={16} />
+            ) : (
+              (ilkLabel ?? '\u00A0')
+            )}
+          </div>
+          <MetricCardTrend
+            chart={chart}
+            isLoading={isChartsLoading}
+            errorMessage={chartsErrorMessage}
+          />
+        </div>
       }
     />
   );

@@ -1,5 +1,3 @@
-import { SkeletonStack } from '@archon-research/design-system';
-
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
@@ -9,6 +7,7 @@ import {
 } from '../../shared/lib/dashboard';
 import type { Prime } from '../../shared/types/allocation';
 import { ProtocolLogo, TokenAddress } from '../../shared/ui';
+import { Placeholder } from '../../shared/ui/Placeholder';
 
 type AllocationGridHeaderProps = {
   selectedPrime: Prime | null;
@@ -68,11 +67,7 @@ export function AllocationGridHeader({
             // only time this is empty is before that has happened, and
             // naming an action the reader does not have to take reads as a
             // page that has given up.
-            <SkeletonStack
-              count={1}
-              itemHeight={40}
-              style={{ width: '12rem' }}
-            />
+            <Placeholder width="12rem" height={40} />
           )}
         </div>
         {/* The label ships with the address, never on its own: this is the
@@ -169,13 +164,19 @@ export function AllocationGridHeader({
                 })}
               >
                 {debtTimestampLabel}{' '}
-                {isPrimeDebtLoading
-                  ? 'Loading...'
-                  : primeDebtErrorMessage
-                    ? 'Error'
-                    : debtObservedAt
-                      ? formatFreshnessLabel(debtObservedAt)
-                      : '—'}
+                {/* A placeholder, not the word "Loading...": the label reads
+                    "Debt as of <value>", so a word in the value slot composed
+                    "Debt as of Loading..." — a sentence claiming that is the
+                    timestamp. */}
+                {isPrimeDebtLoading ? (
+                  <Placeholder width="5rem" height={14} />
+                ) : primeDebtErrorMessage ? (
+                  'Error'
+                ) : debtObservedAt ? (
+                  formatFreshnessLabel(debtObservedAt)
+                ) : (
+                  '—'
+                )}
               </span>
               <span
                 className={css({
