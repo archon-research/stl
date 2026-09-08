@@ -212,8 +212,7 @@ func (s *Service) Run(ctx context.Context) error {
 const loggedCorrectedHeights = 20
 
 // logResolvedBlockVersions closes the run with what the archive answered, deferred so a
-// failed run reports it too. A replay that stamped corrected versions is otherwise
-// indistinguishable from one that stamped 0 everywhere, on any run.
+// failed run reports it too.
 func (s *Service) logResolvedBlockVersions() {
 	summary := s.versions.Summary()
 	s.logger.Info("block versions resolved from the raw archive",
