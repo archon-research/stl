@@ -187,11 +187,8 @@ export function TokenAddress({
                 fontWeight: 'medium',
                 color: explorerUrl ? 'text.strong' : 'text.muted',
                 cursor: explorerUrl ? 'pointer' : 'not-allowed',
-                _hover: explorerUrl
-                  ? {
-                      bg: 'surface.subtle',
-                    }
-                  : undefined,
+                // panda's `css()` rejects an explicit undefined condition.
+                ...(explorerUrl && { _hover: { bg: 'surface.subtle' } }),
               })}
             >
               <ExternalLink size={16} />

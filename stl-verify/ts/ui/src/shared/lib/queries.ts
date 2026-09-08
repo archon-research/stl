@@ -15,6 +15,7 @@ import type {
   TotalCapitalBucket,
   TotalCapitalEnvelope,
 } from '../types/allocation';
+import type { Undefinable } from '../types/optional';
 import { api } from './api-client';
 import { sortByBucketStart } from './dashboard';
 import { logging } from './logging';
@@ -85,8 +86,8 @@ export type SeriesWindow = {
 // every bucket rather than being truncated to the default page.
 function bucketQuery(range: SeriesWindow) {
   return {
-    from_timestamp: range.fromTimestamp,
-    to_timestamp: range.toTimestamp,
+    from_timestamp: range.fromTimestamp ?? null,
+    to_timestamp: range.toTimestamp ?? null,
     resolution: range.resolution,
     aggregate: true,
     limit: 500,
@@ -489,7 +490,7 @@ export const riskBreakdownQuery = (
     {
       params: {
         path: { chain_id: chainId, token_address: tokenAddress },
-        query: primeId ? { prime_id: primeId } : undefined,
+        ...(primeId !== null && { query: { prime_id: primeId } }),
       },
     },
     {
@@ -557,20 +558,38 @@ export const tokenPriceQuery = (chainId: number, tokenAddress: string) =>
  * endpoint the metric band reads with `aggregate=true`, so the two share no
  * cache entry and neither can serve the other's shape.
  */
-export const activityQuery = (filters: {
-  prime_id?: string;
-  chain_id?: number;
-  protocol_name?: string;
-  action_type?: string;
-  token_symbol?: string;
-  from_timestamp?: string;
-  to_timestamp?: string;
-  limit?: number;
-}) =>
+export const activityQuery = (
+  filters: Undefinable<{
+    prime_id?: string;
+    chain_id?: number;
+    protocol_name?: string;
+    action_type?: string;
+    token_symbol?: string;
+    from_timestamp?: string;
+    to_timestamp?: string;
+    limit?: number;
+  }>,
+) =>
   api.queryOptions(
     'get',
     '/v1/allocations/activity',
-    { params: { query: filters } },
+    {
+      params: {
+        query: {
+          // openapi-fetch's serializer drops `null` and `undefined`
+          // alike, so coalescing here is type-only.
+          prime_id: filters.prime_id ?? null,
+          chain_id: filters.chain_id ?? null,
+          protocol_name: filters.protocol_name ?? null,
+          action_type: filters.action_type ?? null,
+          token_symbol: filters.token_symbol ?? null,
+          from_timestamp: filters.from_timestamp ?? null,
+          to_timestamp: filters.to_timestamp ?? null,
+          // `limit` alone has no `null` in its wire type.
+          ...(filters.limit !== undefined && { limit: filters.limit }),
+        },
+      },
+    },
     {
       ...CACHE.position,
       select: selectRawActivity,
@@ -619,8 +638,8 @@ export const txProtocolEventsFallbackQuery = (txHash: string) =>
   );
 
 export type TokenFilters = {
-  chain_id?: number;
-  symbol?: string;
+  chain_id?: number | undefined;
+  symbol?: string | undefined;
   limit?: number;
 };
 
@@ -628,7 +647,15 @@ export const tokensQuery = (filters: TokenFilters) =>
   api.queryOptions(
     'get',
     '/v1/tokens',
-    { params: { query: filters } },
+    {
+      params: {
+        query: {
+          chain_id: filters.chain_id ?? null,
+          symbol: filters.symbol ?? null,
+          ...(filters.limit !== undefined && { limit: filters.limit }),
+        },
+      },
+    },
     {
       ...CACHE.tokenList,
       meta: { logLevel: 'warn', logMessage: 'Token catalogue unavailable' },

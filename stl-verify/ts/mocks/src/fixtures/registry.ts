@@ -86,7 +86,7 @@ type PrimeRow = readonly [
   address: SeededPrime['address'],
   name: PrimeName,
   chain_id: SeededPrime['chain_id'],
-  chain: SeededPrime['chain'],
+  chain: Exclude<SeededPrime['chain'], undefined>,
 ];
 
 /**
@@ -147,9 +147,9 @@ type TokenRow = readonly [
   id: Token['id'],
   chain_id: Token['chain_id'],
   address: Token['address'],
-  symbol: Token['symbol'],
-  decimals: Token['decimals'],
-  metadata: Token['metadata'],
+  symbol: Exclude<Token['symbol'], undefined>,
+  decimals: Exclude<Token['decimals'], undefined>,
+  metadata: Exclude<Token['metadata'], undefined>,
 ];
 
 const TOKEN_ROWS: readonly TokenRow[] = [

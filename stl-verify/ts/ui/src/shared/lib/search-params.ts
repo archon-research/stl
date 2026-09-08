@@ -132,8 +132,15 @@ function legacyReferenceParam() {
  * `indexed` rather than falling through to the default. An explicit `source`
  * wins: it is the current spelling.
  */
+// The `| undefined` is load-bearing: zod infers it, a bare
+// `source?: Provenance` rejects it, and that failure is not local — the
+// transform fails, so the schema's output degrades to `unknown` and every
+// route reading `search` loses its shape.
 function adoptLegacyReferenceFlag<
-  T extends { source?: Provenance; reference?: boolean },
+  T extends {
+    source?: Provenance | undefined;
+    reference?: boolean | undefined;
+  },
 >({ reference, ...rest }: T): Omit<T, 'reference'> {
   if (rest.source !== undefined || reference === undefined) {
     return rest;

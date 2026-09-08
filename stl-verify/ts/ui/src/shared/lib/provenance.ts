@@ -185,8 +185,10 @@ export function narrowRiskCapital(
   }
 
   const sky = view === 'reference';
-  const drop = <T>(value: T, isSkys: boolean): T | null =>
-    isSkys === sky ? value : null;
+  // Always present in practice, but `?: string | null` on the wire types
+  // every read as possibly-undefined; fold it rather than leak it.
+  const drop = <T>(value: T | null | undefined, isSkys: boolean): T | null =>
+    isSkys === sky ? (value ?? null) : null;
 
   return {
     ...response,

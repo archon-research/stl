@@ -45,16 +45,14 @@ export type MetricChartSpec = {
   // Why the card has nothing to draw, for a card that cannot stand itself up
   // from a current value: without it a failed read plots as the empty state.
   errorMessage?: string | null;
-  // Ordered ascending. Each draws a dashed limit line with a labelled edge.
-  // `showInTooltip` also reports it at the cursor, in its own stroke — for a
-  // limit the series is read directly against. Off by default: a limit the
-  // reader is not comparing against only crowds the readout.
-  thresholds?: {
-    value: number;
-    label?: string;
-    showInTooltip?: boolean;
-    stroke?: ChartColor;
-  }[];
+  thresholds?:
+    | {
+        value: number;
+        label?: string;
+        showInTooltip?: boolean;
+        stroke?: ChartColor;
+      }[]
+    | undefined;
 };
 
 // Every card the metrics band knows how to build. Not what it shows: see
@@ -363,7 +361,7 @@ export function MetricCardError({
             size="inline"
             title={title}
             description={description}
-            errorMessage={errorMessage ?? undefined}
+            {...(errorMessage !== null && { errorMessage })}
           />
         </div>
       }
