@@ -164,7 +164,12 @@
         "description": "Allocation activity event record for timeline feeds.",
         "properties": {
           "action_type": {
-            "description": "One of `in`, `out`, `sweep`.",
+            "description": "Direction of the event.",
+            "enum": [
+              "in",
+              "out",
+              "sweep"
+            ],
             "examples": [
               "in"
             ],
@@ -413,13 +418,18 @@
           "latest_activity_action": {
             "anyOf": [
               {
+                "enum": [
+                  "in",
+                  "out",
+                  "sweep"
+                ],
                 "type": "string"
               },
               {
                 "type": "null"
               }
             ],
-            "description": "Direction of the most recent activity (`in`, `out`, `sweep`), or `null`.",
+            "description": "Direction of the most recent activity, or `null`.",
             "examples": [
               "out"
             ],
@@ -725,6 +735,11 @@
           "model": {
             "anyOf": [
               {
+                "enum": [
+                  "suraf",
+                  "gap_sweep",
+                  "core_model"
+                ],
                 "type": "string"
               },
               {
@@ -1742,6 +1757,11 @@
           "model": {
             "anyOf": [
               {
+                "enum": [
+                  "suraf",
+                  "gap_sweep",
+                  "core_model"
+                ],
                 "type": "string"
               },
               {

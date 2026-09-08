@@ -29,6 +29,7 @@ from app.api.provenance import (
 )
 from app.api.time_series import TimeSeriesWindow, apply_cache_control, build_window, get_time_series_query_params
 from app.domain.entities.allocation import (
+    ActivityDirection,
     AnchorageCustodyHolding,
     DirectAssetHolding,
     EthAddress,
@@ -292,9 +293,9 @@ class AllocationResponse(BaseModel):
         description="ISO-8601 timestamp of the most recent on-chain activity for this position, or `null`.",
         examples=["2026-05-07T12:00:00Z"],
     )
-    latest_activity_action: str | None = Field(
+    latest_activity_action: ActivityDirection | None = Field(
         default=None,
-        description="Direction of the most recent activity (`in`, `out`, `sweep`), or `null`.",
+        description="Direction of the most recent activity, or `null`.",
         examples=["out"],
     )
     latest_activity_amount: PlainDecimal | None = Field(
@@ -374,7 +375,7 @@ class AllocationActivityResponse(BaseModel):
     )
     token_id: int = Field(description="Surrogate id of the receipt token involved.", examples=[42])
     token_symbol: str | None = Field(default=None, description="Receipt-token symbol, when known.", examples=["aUSDC"])
-    action_type: str = Field(description="One of `in`, `out`, `sweep`.", examples=["in"])
+    action_type: ActivityDirection = Field(description="Direction of the event.", examples=["in"])
     tx_amount: PlainDecimal = Field(
         description="Token-unit amount moved by this event. Decimal serialized as a JSON string.",
         examples=["1000.5"],

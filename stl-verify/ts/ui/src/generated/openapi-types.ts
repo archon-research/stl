@@ -705,10 +705,11 @@ export interface components {
     AllocationActivityResponse: {
       /**
        * Action Type
-       * @description One of `in`, `out`, `sweep`.
+       * @description Direction of the event.
        * @example in
+       * @enum {string}
        */
-      action_type: string;
+      action_type: 'in' | 'out' | 'sweep';
       /**
        * Balance
        * @description Resulting balance after the event, in token units.
@@ -866,10 +867,10 @@ export interface components {
       held_token_address?: string | null;
       /**
        * Latest Activity Action
-       * @description Direction of the most recent activity (`in`, `out`, `sweep`), or `null`.
+       * @description Direction of the most recent activity, or `null`.
        * @example out
        */
-      latest_activity_action?: string | null;
+      latest_activity_action?: ('in' | 'out' | 'sweep') | null;
       /**
        * Latest Activity Amount
        * @description Token-unit magnitude of the most recent activity (unsigned). Decimal serialized as a JSON string. `null` when there is no activity.
@@ -1012,7 +1013,7 @@ export interface components {
        * Model
        * @description Model that produced the figure. `null` when unpriced, and always `null` for a Sky-reported row, which runs no model.
        */
-      model?: string | null;
+      model?: ('suraf' | 'gap_sweep' | 'core_model') | null;
       /**
        * Position Keys
        * @description Keys this position answers to, strongest first, computed the same way as the allocations endpoint's. Two rows describe the same position when they share any one of them, which is how a client attaches this row's figures to an allocation: a position Sky reports and STL does not index has no `receipt_token_id` to join by. Opaque — the spelling is not a contract, only the equality is.
@@ -1598,7 +1599,7 @@ export interface components {
        * @description The default RRC model this view prefers (`core_model`). `null` under `source=reference`, which runs no model; under `source=both` it is STL's preference, since the unprefixed figures are STL's. A given `per_allocation` row can still carry a different model: `indexed` falls back to `gap_sweep` for a position `core_model` has no data for.
        * @example core_model
        */
-      model: string | null;
+      model: ('suraf' | 'gap_sweep' | 'core_model') | null;
       /**
        * Modeled Exposure Usd
        * @description Exposure the default model could price (USD). Under `source=reference` it equals `exposure_usd`: the monitor publishes only positions it has already priced.
