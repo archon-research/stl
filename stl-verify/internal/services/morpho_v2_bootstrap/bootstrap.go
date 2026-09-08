@@ -206,8 +206,8 @@ func (s *Service) Run(ctx context.Context) error {
 	return nil
 }
 
-// loggedCorrectedHeights bounds the list a run closes with: an era-wide replay can
-// correct more heights than one log line should carry, and the count still names them all.
+// loggedCorrectedHeights bounds the list a run closes with: an era-wide replay can carry
+// more corrected heights than one log line should, and the count beside it stays exact.
 const loggedCorrectedHeights = 20
 
 // logResolvedBlockVersions closes the run with what the archive answered, deferred so a

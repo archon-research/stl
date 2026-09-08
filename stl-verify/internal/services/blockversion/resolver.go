@@ -44,8 +44,8 @@ type Resolver struct {
 	corrected []int64
 }
 
-// archivedBlock is what the archive holds at one height: its top version, and the block
-// that version turned out to identify.
+// archivedBlock is what the archive holds at one height: its TOP version, and the block
+// that version identifies.
 type archivedBlock struct {
 	version int
 	hash    common.Hash
@@ -65,7 +65,7 @@ func (r *Resolver) ResolveBlockVersion(ctx context.Context, blockNumber int64, b
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	archived, err := r.archivedBlock(ctx, blockNumber)
+	archived, err := r.archivedAt(ctx, blockNumber)
 	if err != nil {
 		return 0, err
 	}
@@ -83,9 +83,9 @@ func (r *Resolver) Summary() outbound.ResolvedVersions {
 	return outbound.ResolvedVersions{Heights: len(r.resolved), Corrected: append([]int64(nil), r.corrected...)}
 }
 
-// archivedBlock reads the archive once per height: every log of one block asks the same
+// archivedAt reads the archive once per height: every log of one block asks the same
 // question, and the run asks again for the head it seeds at.
-func (r *Resolver) archivedBlock(ctx context.Context, blockNumber int64) (archivedBlock, error) {
+func (r *Resolver) archivedAt(ctx context.Context, blockNumber int64) (archivedBlock, error) {
 	if known, memoized := r.resolved[blockNumber]; memoized {
 		return known, nil
 	}
