@@ -41,8 +41,8 @@ function wireSelectOf<TData, TSelected>(options: {
   select?: (data: TData) => TSelected;
 }): (data: unknown) => TSelected {
   const select = selectOf(options);
-  // The guard under test defends against arbitrary input; only the response
-  // type claims otherwise. Removed when VEC-686 lands.
+  // The guard under test defends against arbitrary input, and no envelope type
+  // can express a `data` that is not an array — so reaching it needs the cast.
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion
   return select as (data: unknown) => TSelected;
 }
@@ -70,20 +70,36 @@ const ENVELOPE_WINDOW: PrimeDebtEnvelope['window'] = {
   resolution: 'PT15M',
 };
 
-const debtEnvelope = (
-  mode: PrimeDebtEnvelope['mode'],
-  data: PrimeDebtEnvelope['data'],
+/** The arm of `TEnvelope` that answers to `TMode`, as the fixtures name them. */
+type Arm<TEnvelope extends { mode: string }, TMode> = Extract<
+  TEnvelope,
+  { mode: TMode }
+>;
+
+const rawDebtEnvelope = (
+  data: Arm<PrimeDebtEnvelope, 'raw'>['data'],
 ): PrimeDebtEnvelope => ({
-  mode,
+  mode: 'raw',
   data,
   source: 'indexed',
   window: ENVELOPE_WINDOW,
 });
 
-const activityEnvelope = (
-  mode: AllocationActivityEnvelope['mode'],
-  data: AllocationActivityEnvelope['data'],
-): AllocationActivityEnvelope => ({ mode, data, window: ENVELOPE_WINDOW });
+const rawActivityEnvelope = (
+  data: Arm<AllocationActivityEnvelope, 'raw'>['data'],
+): AllocationActivityEnvelope => ({
+  mode: 'raw',
+  data,
+  window: ENVELOPE_WINDOW,
+});
+
+const aggregatedActivityEnvelope = (
+  data: Arm<AllocationActivityEnvelope, 'aggregated'>['data'],
+): AllocationActivityEnvelope => ({
+  mode: 'aggregated',
+  data,
+  window: ENVELOPE_WINDOW,
+});
 
 const activityBucket = (bucketStart: string): AllocationActivityBucket => ({
   bucket_start: bucketStart,
@@ -202,7 +218,7 @@ describe('envelope mode policy', () => {
       debtSeriesQuery(PRIME, WINDOW),
     );
 
-    expect(() => select(debtEnvelope('raw', []))).toThrow(
+    expect(() => select(rawDebtEnvelope([]))).toThrow(
       /returned "raw" for an aggregated request/,
     );
   });
@@ -213,7 +229,7 @@ describe('envelope mode policy', () => {
       activitySeriesQuery(PRIME, WINDOW),
     );
 
-    expect(select(activityEnvelope('raw', []))).toStrictEqual([]);
+    expect(select(rawActivityEnvelope([]))).toStrictEqual([]);
     // Coerced, but never silently: this is still a contract violation.
     expect(warn).toHaveBeenCalledOnce();
   });
@@ -225,7 +241,7 @@ describe('envelope mode policy', () => {
     >(activitySeriesQuery(PRIME, WINDOW));
 
     const sorted = select(
-      activityEnvelope('aggregated', [
+      aggregatedActivityEnvelope([
         activityBucket('2026-08-28T00:00:00Z'),
         activityBucket('2026-08-27T00:00:00Z'),
       ]),
