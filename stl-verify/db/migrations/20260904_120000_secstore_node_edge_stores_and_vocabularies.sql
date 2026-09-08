@@ -71,6 +71,15 @@
 -- decided in ADR-0005, nothing debatable, seed-once)
 -- ---------------------------------------------------------------------------
 
+CREATE TABLE weight_basis_vocabulary (
+    basis        text PRIMARY KEY,
+    description  text NOT NULL
+);
+COMMENT ON TABLE weight_basis_vocabulary IS '[Configuration] Legal weight bases (ADR-0005 §3). Weights of unlike bases must never be summed; conversion ratios are edge payload, not weights. Plain table: seed-once.';
+COMMENT ON COLUMN weight_basis_vocabulary.basis IS 'Roles: PK. Basis code (VALUE / NOTIONAL / UNITS / OWNERSHIP_PCT).';
+COMMENT ON COLUMN weight_basis_vocabulary.description IS 'What the basis measures and where it is used.';
+
+-- Declared before rel_type_vocabulary so its weight_basis is a real FK, not a soft one.
 CREATE TABLE rel_type_vocabulary (
     rel_type            text PRIMARY KEY,
     family              text NOT NULL CHECK (family IN
@@ -79,7 +88,7 @@ CREATE TABLE rel_type_vocabulary (
     src_kinds           text[] NOT NULL,
     dst_kinds           text[] NOT NULL,
     cardinality         text NOT NULL CHECK (cardinality IN ('1','n','1_per_class','1_per_parent')),
-    weight_basis        text,
+    weight_basis        text REFERENCES weight_basis_vocabulary(basis),
     derived_only        boolean NOT NULL DEFAULT false,
     maturity            text NOT NULL CHECK (maturity IN ('ratified','draft')),
     description         text NOT NULL,
@@ -91,19 +100,11 @@ COMMENT ON COLUMN rel_type_vocabulary.family IS 'One of the six ADR-0005 §5 fam
 COMMENT ON COLUMN rel_type_vocabulary.src_kinds IS 'Legal source node kinds (sec_node.record_type values).';
 COMMENT ON COLUMN rel_type_vocabulary.dst_kinds IS 'Legal destination node kinds.';
 COMMENT ON COLUMN rel_type_vocabulary.cardinality IS 'Expected current-state cardinality; a DQ check over current state, never a write trigger (an open edge always time-overlaps its re-point).';
-COMMENT ON COLUMN rel_type_vocabulary.weight_basis IS 'Roles: FK→weight_basis_vocabulary.basis (soft; declared basis for weighted types). NULL = unweighted type.';
+COMMENT ON COLUMN rel_type_vocabulary.weight_basis IS 'Roles: FK→weight_basis_vocabulary.basis. The declared basis for weighted types; NULL = unweighted type.';
 COMMENT ON COLUMN rel_type_vocabulary.derived_only IS 'true: rows of this type are projections written by a loader with lineage, never curated by hand.';
 COMMENT ON COLUMN rel_type_vocabulary.maturity IS 'ratified: decided and stable. draft types are not seeded; they land by migration when ratified.';
 COMMENT ON COLUMN rel_type_vocabulary.description IS 'What the type means; the reviewed definition.';
 COMMENT ON COLUMN rel_type_vocabulary.change_reason IS 'Roles: Audit. Why the row exists (vocabulary rows carry the slim spine; full provenance lives on nodes/edges).';
-
-CREATE TABLE weight_basis_vocabulary (
-    basis        text PRIMARY KEY,
-    description  text NOT NULL
-);
-COMMENT ON TABLE weight_basis_vocabulary IS '[Configuration] Legal weight bases (ADR-0005 §3). Weights of unlike bases must never be summed; conversion ratios are edge payload, not weights. Plain table: seed-once.';
-COMMENT ON COLUMN weight_basis_vocabulary.basis IS 'Roles: PK. Basis code (VALUE / NOTIONAL / UNITS / OWNERSHIP_PCT).';
-COMMENT ON COLUMN weight_basis_vocabulary.description IS 'What the basis measures and where it is used.';
 
 CREATE TABLE change_reason_vocabulary (
     code               text PRIMARY KEY,
@@ -210,7 +211,7 @@ CREATE INDEX sec_node_type_idx ON sec_node (record_type, id, valid_from DESC, pr
 CREATE TABLE sec_edge (
     edge_id             text GENERATED ALWAYS AS
                           ('rel:' || rel_type || ':' || src_id || ':' || dst_id || ':' || edge_seq::text) STORED,
-    edge_seq            integer NOT NULL DEFAULT 0 CHECK (edge_seq >= 0),
+    edge_seq            integer NOT NULL DEFAULT 1 CHECK (edge_seq >= 1),
     src_id              text NOT NULL,
     src_kind            text NOT NULL,
     dst_id              text NOT NULL,
@@ -238,15 +239,20 @@ CREATE TABLE sec_edge (
     PRIMARY KEY (rel_type, src_id, dst_id, edge_seq, processing_version, valid_from, valid_to),
     CONSTRAINT sec_edge_record_id_key UNIQUE (record_id),
     CONSTRAINT sec_edge_weight_basis_chk CHECK (rel_weight IS NULL OR weight_basis IS NOT NULL),
+    -- The cheap half of GQ-11 at the engine boundary: endpoint EXISTENCE and agreement with the
+    -- node's record_type are cross-row and stay with the validator, but the kind DOMAIN is not.
+    -- This list is the same closed set as sec_node.record_type and moves with it.
+    CONSTRAINT sec_edge_src_kind_chk CHECK (src_kind IN ('ENTITY','SECURITY','CONCEPT','SOURCE','ACCOUNT')),
+    CONSTRAINT sec_edge_dst_kind_chk CHECK (dst_kind IN ('ENTITY','SECURITY','CONCEPT','SOURCE','ACCOUNT')),
     CONSTRAINT sec_edge_valid_chk CHECK (valid_from <= valid_to)
 );
 COMMENT ON TABLE sec_edge IS '[Dimension] Directed, typed, weighted relationship store (ADR-0005 §3/§5). Append-only (full ACL revoke incl. owner — nothing FKs this table); close-and-open at processing_version 0 (valid_to is NOT NULL, ''infinity'' when open, and in the PK); retraction is a tombstone append with a zero-length window. Endpoint-kind legality vs rel_type_vocabulary is loader/validator-enforced (cross-row); single-valued cardinality is a DQ check over current state, never a write trigger. Inverses and closures are derived, never stored. Plain table: governance-rate writes — block-stamped projection types (ALLOCATES) are excluded by design and would need their own hypertable store if ratified.';
 COMMENT ON COLUMN sec_edge.edge_id IS 'Roles: Derived. Generated human-readable identity; the PK is the (rel_type, src, dst, edge_seq, processing_version, valid_from) tuple.';
-COMMENT ON COLUMN sec_edge.edge_seq IS 'Roles: PK component. DM-6 discriminator: deliberately duplicated edges (multi-typing, per-edge attribute clusters) coexist instead of superseding their twin.';
+COMMENT ON COLUMN sec_edge.edge_seq IS 'Roles: PK component. DM-6 discriminator: deliberately duplicated edges (multi-typing, per-edge attribute clusters) coexist instead of superseding their twin. Base is 1 per ADR-0005 §3, so a twin is 2; 0 is rejected rather than left as a second spelling of the base edge, since edge_seq is rendered into the stored edge_id.';
 COMMENT ON COLUMN sec_edge.src_id IS 'Roles: FK→sec_node.id (soft; SCD2 ids non-unique — resolve via the current view). Edge source.';
-COMMENT ON COLUMN sec_edge.src_kind IS 'Denormalised source kind; must agree with the source node''s record_type (validator check GQ-11).';
+COMMENT ON COLUMN sec_edge.src_kind IS 'Denormalised source kind, CHECKed against the closed record_type set; that it AGREES with the source node''s record_type is cross-row and stays validator-enforced (GQ-11).';
 COMMENT ON COLUMN sec_edge.dst_id IS 'Roles: FK→sec_node.id (soft). Edge destination.';
-COMMENT ON COLUMN sec_edge.dst_kind IS 'Denormalised destination kind; must agree with the destination node''s record_type.';
+COMMENT ON COLUMN sec_edge.dst_kind IS 'Denormalised destination kind, CHECKed against the closed record_type set; agreement with the destination node''s record_type is validator-enforced (GQ-11).';
 COMMENT ON COLUMN sec_edge.rel_type IS 'Roles: FK→rel_type_vocabulary.rel_type, PK component. The governed type.';
 COMMENT ON COLUMN sec_edge.rel_weight IS 'Exact decimal numeric(30,18), never float (RP-4.4). Look-through = sum over paths of weight products within one basis. NULL on unweighted types; a NULL weight on a weighted walk is an error, never treated as 1.0.';
 COMMENT ON COLUMN sec_edge.weight_basis IS 'Roles: FK→weight_basis_vocabulary.basis. Mandatory when rel_weight is present (CHECK).';
@@ -511,36 +517,52 @@ CREATE TRIGGER sec_edge_append_guard BEFORE INSERT ON sec_edge
 -- reference_table_immutable() trigger enforces append-only instead.
 -- ---------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION reference_table_immutable() RETURNS trigger
-  LANGUAGE plpgsql AS $$
-BEGIN
-    RAISE EXCEPTION 'reference table %.% is append-only; % is not allowed (add rows via a migration)',
-        TG_TABLE_SCHEMA, TG_TABLE_NAME, TG_OP;
-END $$;
-COMMENT ON FUNCTION reference_table_immutable() IS 'Raises on UPDATE/DELETE of a controlled-vocabulary reference table. Paired with owner UPDATE restored so the FK RI row-lock probe still works (see 20260714_160000_fix_reference_table_fk_inserts.sql).';
+-- reference_table_immutable() is NOT redeclared here: it is owned by
+-- 20260714_160000_fix_reference_table_fk_inserts.sql and already carries every ref_* trigger.
+-- Re-CREATE OR REPLACEing it from a second migration would let either file silently redefine the
+-- other's behaviour (and would reset any function-level SET, per db/migrations AGENTS.md). The
+-- triggers below just point at it.
 
+-- The owner-side revoke is derived from pg_class.relowner, not from a hardcoded role name. The
+-- first draft looped over ARRAY['stl_readwrite','stl_migrator'] under IF EXISTS, so in any
+-- environment whose tables are owned by a differently named role the store-side revoke — the
+-- whole append-only guarantee here — silently did nothing. Deriving the owner means the REVOKE
+-- always executes and the ACL is always recorded, whatever the role is called.
+--
+-- Where the owner is a SUPERUSER (the test harness migrates as its own bootstrap role) the ACL is
+-- recorded but not enforced, because superusers bypass privilege checks. That is the documented
+-- position_state gap and it is not fixable from SQL; the assertion below therefore checks the
+-- privilege only for a non-superuser owner, which is the prod shape, and raises rather than
+-- trusting that the revoke landed.
 DO $$
-DECLARE r text; t text;
+DECLARE
+    t text;
+    owner_role text;
+    owner_is_super boolean;
 BEGIN
-    -- Stores: full revoke, owner included.
-    FOREACH r IN ARRAY ARRAY['stl_readwrite','stl_migrator'] LOOP
-        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
-            FOREACH t IN ARRAY ARRAY['sec_node','sec_edge'] LOOP
-                EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON %I FROM %I', t, r);
-            END LOOP;
-        END IF;
-    END LOOP;
-    -- Vocabulary tables: app role fully revoked; owner keeps UPDATE for the RI probe,
-    -- DELETE/TRUNCATE revoked; the trigger below blocks real mutation.
-    FOREACH t IN ARRAY ARRAY['rel_type_vocabulary','weight_basis_vocabulary',
-                             'change_reason_vocabulary','concept_class_vocabulary',
-                             'node_status_vocabulary'] LOOP
+    -- Stores: full revoke, owner included (nothing FKs them, so no RI probe needs UPDATE).
+    FOREACH t IN ARRAY ARRAY['sec_node','sec_edge'] LOOP
+        SELECT pg_get_userbyid(c.relowner) INTO owner_role FROM pg_class c WHERE c.oid = t::regclass;
+        SELECT rolsuper INTO owner_is_super FROM pg_roles WHERE rolname = owner_role;
+        EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON %I FROM %I', t, owner_role);
         IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'stl_readwrite') THEN
             EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON %I FROM stl_readwrite', t);
         END IF;
-        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'stl_migrator') THEN
-            EXECUTE format('REVOKE DELETE, TRUNCATE ON %I FROM stl_migrator', t);
+        IF NOT owner_is_super AND has_table_privilege(owner_role, t, 'UPDATE') THEN
+            RAISE EXCEPTION 'append-only not enforced: owner %I still holds UPDATE on %I after the revoke', owner_role, t;
         END IF;
+    END LOOP;
+    -- Vocabulary tables: app role fully revoked; the OWNER KEEPS UPDATE because the FK integrity
+    -- probe (SELECT ... FOR KEY SHARE) runs as the parent's owner and needs it (20260714_160000,
+    -- #574); DELETE/TRUNCATE revoked, and reference_table_immutable() blocks real mutation.
+    FOREACH t IN ARRAY ARRAY['rel_type_vocabulary','weight_basis_vocabulary',
+                             'change_reason_vocabulary','concept_class_vocabulary',
+                             'node_status_vocabulary'] LOOP
+        SELECT pg_get_userbyid(c.relowner) INTO owner_role FROM pg_class c WHERE c.oid = t::regclass;
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'stl_readwrite') THEN
+            EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON %I FROM stl_readwrite', t);
+        END IF;
+        EXECUTE format('REVOKE DELETE, TRUNCATE ON %I FROM %I', t, owner_role);
         EXECUTE format('CREATE TRIGGER %I BEFORE UPDATE OR DELETE ON %I FOR EACH ROW EXECUTE FUNCTION reference_table_immutable()',
                        t || '_immutable', t);
     END LOOP;
