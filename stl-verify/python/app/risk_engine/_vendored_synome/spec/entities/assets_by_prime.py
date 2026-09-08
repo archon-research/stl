@@ -42,6 +42,7 @@ from app.risk_engine._vendored_synome.spec.entities.assets import (
     SPARK_FS_USDS_BASE,
     SPARK_FS_USDS_ETHEREUM_MAINNET,
     SPARK_JTRSY,
+    SPARK_RLUSD,
     SPARK_S_USDE,
     SPARK_S_USDS_USDT,
     SPARK_SP_DAI_MORPHO,
@@ -159,6 +160,7 @@ ASSETS_BY_PRIME: dict[PrimeName, list[Asset]] = {
         SPARK_SP_PYUSD,
         SPARK_SP_USDC_ETHEREUM_MAINNET_SPARK_SAVINGS,
         SPARK_SP_USDT_SPARK_SAVINGS,
+        SPARK_RLUSD,
         SPARK_USTB,
     ],
 }

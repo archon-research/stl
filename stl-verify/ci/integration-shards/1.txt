@@ -57,3 +57,5 @@
 ./internal/pkg/oraclewire
 ./internal/pkg/writerrun
 ./cmd/backfillers/block-republisher
+./internal/services/uniswapv4indexer
+./internal/pkg/tickbitmap

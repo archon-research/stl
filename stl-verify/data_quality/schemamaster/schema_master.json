@@ -35,7 +35,14 @@
     "uniswap_v3_pool_event",
     "uniswap_v3_pool_state",
     "uniswap_v3_swap",
-    "uniswap_v3_tick"
+    "uniswap_v3_tick",
+    "uniswap_v4_liquidity_event",
+    "uniswap_v4_pool",
+    "uniswap_v4_pool_event",
+    "uniswap_v4_pool_manager",
+    "uniswap_v4_pool_state",
+    "uniswap_v4_swap",
+    "uniswap_v4_tick"
   ],
   "canonical": {
     "absolute_cap": {

@@ -75,6 +75,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
@@ -255,9 +256,13 @@ func buildReplayService(ctx context.Context, deps temporal.Dependencies, chainID
 		return nil, err
 	}
 
-	multicaller, err := multicall.NewClient(ethClient, blockchain.Multicall3)
+	chainName, err := entity.ChainName(chainID)
 	if err != nil {
-		return nil, fmt.Errorf("creating multicall client: %w", err)
+		return nil, fmt.Errorf("resolving the chain name for telemetry: %w", err)
+	}
+	multicaller, err := multicall.NewNarrowingClient(ethClient, blockchain.Multicall3, chainName, deps.Logger)
+	if err != nil {
+		return nil, err
 	}
 	txManager, err := postgres.NewTxManager(deps.Pool, deps.Logger)
 	if err != nil {

@@ -132,7 +132,7 @@ func TestLiveValidation(t *testing.T) {
 	}
 	eventWriter := newLiveEventWriter(t, ctx, pool, buildID, runID)
 
-	var stateRows int64
+	var stateRows outbound.StateRowCounts
 	err = txMgr.WithTransaction(ctx, func(tx pgx.Tx) error {
 		var txErr error
 		stateRows, txErr = repo.SaveBlock(ctx, tx, outbound.UniswapV3BlockWrites{States: states})
@@ -141,7 +141,7 @@ func TestLiveValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SaveBlock (state snapshot batch): %v", err)
 	}
-	rep.stateRowsWritten = stateRows
+	rep.stateRowsWritten = stateRows.Persisted
 
 	// --- Step 4: find + decode a real Swap on the busy pool -------------------
 	busyPool, ok := findPoolByAddress(regPools, busyPoolAddress)

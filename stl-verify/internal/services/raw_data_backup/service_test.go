@@ -1999,26 +1999,46 @@ func releasedHandles(consumer *mockSQSConsumer) []string {
 	return slices.Sorted(slices.Values(handles))
 }
 
-// The work is done and nothing will retry it; only the release keeps the FIFO
-// group moving once the shutdown has killed the delete.
-func TestRun_ReleasesAProcessedMessageWhenShutdownKillsItsDelete(t *testing.T) {
+func shutdownLandingMidDelete(t *testing.T) (*mockSQSConsumer, *Service, context.Context) {
+	t.Helper()
 	consumer := newMockSQSConsumer()
 	cache := newMockBlockCache()
-	writer := newMockS3Writer()
-	svc, _ := shutdownTestService(t, Config{Workers: 1, BatchSize: 1}, consumer, cache, writer)
+	svc, _ := shutdownTestService(t, Config{Workers: 1, BatchSize: 1}, consumer, cache, newMockS3Writer())
 
 	_ = cache.SetBlock(context.Background(), 1, 100, 0, json.RawMessage(`{"number":100}`))
 	consumer.receiveCallback = deliverOnceThenIdle(createSQSMessage("msg1", createBlockEvent(1, 100, 0)))
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Cleanup(cancel)
 	consumer.beforeDelete = cancel
+	return consumer, svc, ctx
+}
+
+func TestRun_SettlesAProcessedMessageWhenShutdownLandsMidDelete(t *testing.T) {
+	consumer, svc, ctx := shutdownLandingMidDelete(t)
+
+	if err := svc.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	if got := consumer.GetDeletedHandles(); !slices.Equal(got, []string{"receipt-msg1"}) {
+		t.Errorf("expected the interrupted delete to reach the queue, got deletes %v", got)
+	}
+	if got := consumer.GetVisibilityChanges(); len(got) != 0 {
+		t.Errorf("expected nothing released for a settled message, got %v", got)
+	}
+}
+
+// Nothing will retry the finished work, so only the release keeps the FIFO
+// group moving once SQS has refused the delete.
+func TestRun_ReleasesAProcessedMessageWhoseDeleteSQSRefusedAtShutdown(t *testing.T) {
+	consumer, svc, ctx := shutdownLandingMidDelete(t)
+	consumer.deleteErr = errors.New("ServiceUnavailable")
 
 	if err := svc.Run(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got: %v", err)
 	}
 	if got := consumer.GetDeletedHandles(); len(got) != 0 {
-		t.Errorf("expected the cancelled delete to fail, got deletes %v", got)
+		t.Errorf("expected the refused delete to leave nothing deleted, got %v", got)
 	}
 	want := []visibilityChange{{handle: "receipt-msg1", visibility: 0}}
 	if got := consumer.GetVisibilityChanges(); !slices.Equal(got, want) {

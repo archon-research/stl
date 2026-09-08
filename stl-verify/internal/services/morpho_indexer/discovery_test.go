@@ -18,6 +18,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // --- Vault discovery ---
@@ -293,7 +294,7 @@ func TestProcessBlockEvent_VaultDiscovery_V2_UnclassifiedAdapterWithoutRealAsset
 		case len(calls) == 1 && hasSameSelector(calls[0].CallData, adaptersLengthSelector):
 			return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(1))}}, nil
 		case len(calls) == 1 && hasSameSelector(calls[0].CallData, adaptersSelector):
-			return []outbound.Result{{Success: true, ReturnData: h.packAddress(adapter)}}, nil
+			return []outbound.Result{{Success: true, ReturnData: packAddress(adapter)}}, nil
 		case len(calls) == 1 && calls[0].Target == adapter:
 			return []outbound.Result{{Success: false, ReturnData: nil}}, nil // realAssets() reverts
 		case len(calls) == 4 && calls[0].Target == unknownVault:
@@ -503,8 +504,8 @@ func (h *serviceTestHarness) setupV2DiscoveryWithTwoAdapters() v2DiscoveryFixtur
 			return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(2))}}, nil
 		case len(calls) == 2 && calls[0].Target == fx.vault && hasSameSelector(calls[0].CallData, adaptersSelector):
 			return []outbound.Result{
-				{Success: true, ReturnData: h.packAddress(fx.adapterA)},
-				{Success: true, ReturnData: h.packAddress(fx.adapterB)},
+				{Success: true, ReturnData: packAddress(fx.adapterA)},
+				{Success: true, ReturnData: packAddress(fx.adapterB)},
 			}, nil
 		case len(calls) == 1 && calls[0].Target == fx.adapterA:
 			return []outbound.Result{{Success: true, ReturnData: h.packUint256(fx.realAssetsA)}}, nil
@@ -942,7 +943,7 @@ func TestProcessBlockEvent_VaultDiscovery_V2_EnumerationFailureCommitsNothingAnd
 			}
 			return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(1))}}, nil
 		case len(calls) == 1 && calls[0].Target == unknownVault && hasSameSelector(calls[0].CallData, adaptersSelector):
-			return []outbound.Result{{Success: true, ReturnData: h.packAddress(adapterA)}}, nil
+			return []outbound.Result{{Success: true, ReturnData: packAddress(adapterA)}}, nil
 		case len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == adapterA:
 			return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
 		case len(calls) == 1 && calls[0].Target == adapterA:
@@ -1038,7 +1039,7 @@ func TestProcessBlockEvent_VaultDiscovery_V2_SeedRealAssetsErrorRetries(t *testi
 		case len(calls) == 1 && calls[0].Target == unknownVault && hasSameSelector(calls[0].CallData, adaptersLengthSelector):
 			return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(1))}}, nil
 		case len(calls) == 1 && calls[0].Target == unknownVault && hasSameSelector(calls[0].CallData, adaptersSelector):
-			return []outbound.Result{{Success: true, ReturnData: h.packAddress(adapterA)}}, nil
+			return []outbound.Result{{Success: true, ReturnData: packAddress(adapterA)}}, nil
 		case len(calls) == 1 && calls[0].Target == adapterA:
 			return nil, errors.New("realAssets rpc down")
 		default:
@@ -2109,5 +2110,132 @@ func TestVaultDiscovery_AssetSymbolRevert_StoresEmptySymbol(t *testing.T) {
 	}
 	if assetCall.symbol != "" {
 		t.Errorf("asset token symbol = %q, want empty (pending marker for sweep)", assetCall.symbol)
+	}
+}
+
+// A trapping candidate's batched probe exhausts gas; the narrowing multicaller
+// re-issues it one selector at a time, so the probe reaches a verdict and the
+// block commits instead of retrying into the DLQ.
+func TestProcessBlockEvent_VaultDiscovery_TrappingCandidateIsDiscarded(t *testing.T) {
+	tests := []struct {
+		name            string
+		perSelector     [vaultProbeCallsPerAddress]isolatedAnswer
+		morphoBlue      bool
+		wantVaultShaped bool
+	}{
+		{
+			name:        "vault activity path, no selector answers alone",
+			perSelector: [vaultProbeCallsPerAddress]isolatedAnswer{reverts(), reverts(), reverts(), reverts()},
+		},
+		{
+			name:            "vault activity path, MORPHO answers alone",
+			perSelector:     [vaultProbeCallsPerAddress]isolatedAnswer{answers(MorphoBlueAddress), reverts(), reverts(), reverts()},
+			wantVaultShaped: true,
+		},
+		{
+			name:        "Morpho Blue path, no selector answers alone",
+			perSelector: [vaultProbeCallsPerAddress]isolatedAnswer{reverts(), reverts(), reverts(), reverts()},
+			morphoBlue:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newTestHarness(t)
+			logs := h.captureLogs()
+			log := h.makeDiscoveryTriggerLog(trappingCandidate)
+			var fallback executeFn
+			if tt.morphoBlue {
+				h.setupMarketExistsInDB(testMarketID, 42)
+				log = h.makeSupplyLog(testMarketID, trappingCandidate, trappingCandidate, big.NewInt(1000), big.NewInt(900))
+				fallback = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
+				}
+			}
+			h.multicaller.ExecuteFn = trappingResponder(t, trappingCandidate, tt.perSelector, fallback)
+
+			if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+				t.Fatalf("a trapping candidate must not fail the block: %v", err)
+			}
+			if !h.svc.vaultRegistry.IsKnownNotVault(trappingCandidate) {
+				t.Error("a trapping candidate must enter the negative cache so it is never re-probed")
+			}
+			if !logs.hasWarnContaining("multicall batch narrowed") {
+				t.Error("the narrowed probe must be visible at WARN")
+			}
+			if got := logs.hasWarnContaining("vault-shaped address rejected"); got != tt.wantVaultShaped {
+				t.Errorf("vault-shaped WARN logged = %v, want %v", got, tt.wantVaultShaped)
+			}
+		})
+	}
+}
+
+func TestProcessBlockEvent_VaultDiscovery_ThrottledNarrowedProbeRetriesViaSQS(t *testing.T) {
+	h := newTestHarness(t)
+	h.multicaller.ExecuteFn = trappingResponder(t, trappingCandidate,
+		[vaultProbeCallsPerAddress]isolatedAnswer{answers(MorphoBlueAddress), throttled(), reverts(), reverts()}, nil)
+
+	log := h.makeDiscoveryTriggerLog(trappingCandidate)
+	err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)})
+	if !errors.Is(err, testutil.ThrottledRPCError()) {
+		t.Fatalf("a throttled isolated probe call must fail the block for redelivery, got %v", err)
+	}
+	if h.svc.vaultRegistry.IsKnownNotVault(trappingCandidate) {
+		t.Error("a throttled probe must not enter the negative cache — that would black-hole a real vault")
+	}
+}
+
+// A lone call cannot exhaust the outer frame (EIP-150 keeps it 1/64 of the
+// cap), so an isolated "out of gas" is the node's cap, not the contract's.
+func TestProcessBlockEvent_VaultDiscovery_IsolatedGasExhaustionRetriesViaSQS(t *testing.T) {
+	h := newTestHarness(t)
+	h.multicaller.ExecuteFn = trappingResponder(t, trappingCandidate,
+		[vaultProbeCallsPerAddress]isolatedAnswer{exhausts(), exhausts(), exhausts(), exhausts()}, nil)
+
+	log := h.makeDiscoveryTriggerLog(trappingCandidate)
+	err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)})
+	if !errors.Is(err, testutil.GasExhaustedRPCError()) {
+		t.Fatalf("an isolated gas exhaustion must fail the block for redelivery, got %v", err)
+	}
+	if h.svc.vaultRegistry.IsKnownNotVault(trappingCandidate) {
+		t.Error("an isolated gas exhaustion must not enter the negative cache — it is the node's fault, not a verdict")
+	}
+}
+
+// Discarding on the batched verdict would silently drop a vault that answers
+// alone.
+func TestProcessBlockEvent_VaultDiscovery_VaultAnsweringOneSelectorAtATimeIsRegistered(t *testing.T) {
+	h := newTestHarness(t)
+	vault := trappingCandidate
+	afterDiscovery := func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 2:
+			if calls[0].Target == vault {
+				return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
+			}
+			return h.tokenMetadataResults("WETH", 18), nil
+		case 3:
+			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil
+		case 4:
+			return h.vaultDetailResults("Vault", "VLT", 18, false), nil
+		}
+		return nil, fmt.Errorf("unexpected %d calls", len(calls))
+	}
+	h.multicaller.ExecuteFn = trappingResponder(t, vault,
+		[vaultProbeCallsPerAddress]isolatedAnswer{answers(MorphoBlueAddress), answers(testLoanToken), reverts(), reverts()}, afterDiscovery)
+	var vaultCreated bool
+	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVault) (int64, error) {
+		vaultCreated = true
+		return 99, nil
+	}
+
+	log := h.makeDiscoveryTriggerLog(vault)
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+	if !vaultCreated {
+		t.Error("a vault confirmed one selector at a time must be registered")
+	}
+	if h.svc.vaultRegistry.IsKnownNotVault(vault) {
+		t.Error("a confirmed vault must not enter the negative cache")
 	}
 }

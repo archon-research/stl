@@ -90,11 +90,18 @@ make run-watcher         # Run one service on the host against the cluster
 make run-<worker>        # grep '^run-' in the Makefile for the full list (incl. per-chain *-avax)
 make kind-use-alchemy    # Switch watcher from the mock chain to real Alchemy (key in .env.secrets)
 
+# With ALCHEMY_API_KEY in .env.secrets, dev-up also runs the Alchemy workers in-cluster —
+# including the DEX indexers (curve-indexer, uniswap-v3-indexer, uniswap-v4-indexer, all one
+# stl-dex-indexer image) — consuming the in-cluster watcher's blocks over LocalStack SNS→SQS.
+# Nothing runs on the host; the workers that have a `run-*` target (grep '^run-') can still be
+# run on the host for debugging.
+
 # Testing
 make test               # Unit tests only
 make test-race          # Unit tests with race detector (CI default)
 make test-integration   # Integration tests (requires Docker, 5m timeout)
 make e2e                # End-to-end tests with testcontainers
+make e2e-real-blocks BLOCKS=25827558   # morpho-indexer over real mainnet blocks (needs ALCHEMY_API_KEY in ../.env.secrets)
 make cover              # Generate coverage report
 go test -race -run 'TestName' ./internal/services/<pkg>/   # single test
 

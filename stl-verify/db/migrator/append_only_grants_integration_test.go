@@ -34,6 +34,14 @@ var convertedAppendOnlyTables = []string{
 	// is NOT here — #625 no longer touches it, and its own migration still grants full DML.
 	"position_state",
 	"oracle_asset",
+	// VEC-475 (#711): append-only from birth; the creating migration REVOKEs all seven.
+	"uniswap_v4_pool_manager",
+	"uniswap_v4_pool",
+	"uniswap_v4_pool_state",
+	"uniswap_v4_swap",
+	"uniswap_v4_liquidity_event",
+	"uniswap_v4_tick",
+	"uniswap_v4_pool_event",
 	// VEC-598: provenance tables. The owner keeps UPDATE for the FK integrity probe
 	// (20260714_160000); a statement-level trigger raises on any real mutation.
 	"build_registry",
