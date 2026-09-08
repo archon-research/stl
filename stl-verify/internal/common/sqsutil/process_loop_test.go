@@ -99,6 +99,10 @@ func TestProcessMessages_InvalidJSON(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
+	want := []visibilityChange{{handle: "h1", visibility: DefaultFailureBackoffBase}}
+	if got := consumer.released(); !slices.Equal(got, want) {
+		t.Errorf("expected the unparseable message hidden for its retry backoff, got %v", got)
+	}
 }
 
 func TestProcessMessages_PartialFailure(t *testing.T) {
@@ -618,27 +622,110 @@ func TestProcessMessages_ReleasesWholeBatchInOneQueueCall(t *testing.T) {
 	}
 }
 
-func TestProcessMessages_HandlerFailureLeavesVisibilityUntouched(t *testing.T) {
+func TestProcessMessages_HidesAFailedMessageByItsReceiveCount(t *testing.T) {
+	tests := []struct {
+		name         string
+		backoff      FailureBackoff
+		receiveCount int
+		want         time.Duration
+	}{
+		{"a first receive waits the default base", FailureBackoff{}, 1, 15 * time.Second},
+		{"a second receive waits double", FailureBackoff{}, 2, 30 * time.Second},
+		{"the configured schedule replaces the default", FailureBackoff{Base: 2 * time.Second, Cap: 3 * time.Second}, 2, 3 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			consumer := &mockConsumer{
+				batches: [][]outbound.SQSMessage{{redeliveredMsg("1", "h1", blockEvent(100), tt.receiveCount)}},
+			}
+			cfg := testConfig(consumer)
+			cfg.FailureBackoff = tt.backoff
+
+			if _, err := ProcessMessages(context.Background(), cfg, failingHandler); err == nil {
+				t.Fatal("expected the handler failure to be returned")
+			}
+
+			want := []visibilityChange{{handle: "h1", visibility: tt.want}}
+			if got := consumer.released(); !slices.Equal(got, want) {
+				t.Errorf("expected the message hidden for %s, got %v", tt.want, got)
+			}
+		})
+	}
+}
+
+// The line an operator greps for a stalled group must say which retry this was.
+func TestProcessMessages_LogsTheReceiveCountWithTheFailure(t *testing.T) {
 	consumer := &mockConsumer{
-		batches: [][]outbound.SQSMessage{{makeMsg("1", "h1", blockEvent(100))}},
+		batches: [][]outbound.SQSMessage{{redeliveredMsg("1", "h1", blockEvent(100), 2)}},
 	}
 	cfg, recorder := recordingConfig(consumer)
 
-	handler := func(context.Context, outbound.BlockEvent) error {
-		return errors.New("persisting block: connection reset")
+	_, _ = ProcessMessages(context.Background(), cfg, failingHandler)
+
+	got, ok := recorder.Attr("failed to process message", "receiveCount")
+	if !ok {
+		t.Fatal("expected the failure logged with its receive count")
+	}
+	if got.String() != "2" {
+		t.Errorf("expected receiveCount=2 on the failure line, got %s", got)
+	}
+}
+
+func TestProcessMessages_ReleasesABackedOffMessageWhenShutdownLandsLaterInTheBatch(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	consumer := &mockConsumer{
+		batches: [][]outbound.SQSMessage{{
+			makeMsg("1", "h1", blockEvent(100)),
+			makeMsg("2", "h2", blockEvent(101)),
+		}},
+	}
+	cfg, _ := recordingConfig(consumer)
+
+	handler := func(_ context.Context, event outbound.BlockEvent) error {
+		if event.BlockNumber == 100 {
+			return errors.New("persisting block: connection reset")
+		}
+		cancel()
+		return nil
 	}
 
-	if _, err := ProcessMessages(context.Background(), cfg, handler); err == nil {
+	if _, err := ProcessMessages(ctx, cfg, handler); err == nil {
 		t.Fatal("expected the handler failure to be returned")
 	}
-	if got := consumer.deleted(); len(got) != 0 {
-		t.Errorf("expected no delete on handler failure, got deletes %v", got)
+	want := []visibilityChange{
+		{handle: "h1", visibility: DefaultFailureBackoffBase},
+		{handle: "h1", visibility: 0},
 	}
-	if got := consumer.released(); len(got) != 0 {
-		t.Errorf("expected the retry backoff left intact, got visibility changes %v", got)
+	if got := consumer.released(); !slices.Equal(got, want) {
+		t.Errorf("expected the backed-off message handed to the successor at once, got %v", got)
 	}
-	if logged := recorder.MessagesAt(slog.LevelError); !slices.Contains(logged, "failed to process message") {
-		t.Errorf("expected a genuine handler failure at ERROR, got %v", logged)
+}
+
+func TestConfig_Validate_BoundsTheFailureBackoffByTheVisibilityTimeout(t *testing.T) {
+	const visibility = 180 * time.Second
+	tests := []struct {
+		name    string
+		backoff FailureBackoff
+		wantErr bool
+	}{
+		{"unset takes the default", FailureBackoff{}, false},
+		{"a cap the visibility timeout undercuts", FailureBackoff{Base: 15 * time.Second, Cap: visibility}, true},
+		{"a cap just under the visibility timeout", FailureBackoff{Base: 15 * time.Second, Cap: visibility - time.Second}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{
+				Consumer:       &mockConsumer{visibilityTimeout: visibility},
+				MaxMessages:    1,
+				ChainID:        1,
+				FailureBackoff: tt.backoff,
+			}
+			err := cfg.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -750,9 +837,12 @@ func TestProcessMessages_ReleasesAnUnsettledMessageWhenShutdownLandsLaterInTheBa
 	if got := consumer.deleted(); !slices.Equal(got, []string{"h2"}) {
 		t.Errorf("expected only the parsed message deleted, got %v", got)
 	}
-	want := []visibilityChange{{handle: "h1", visibility: 0}}
+	want := []visibilityChange{
+		{handle: "h1", visibility: DefaultFailureBackoffBase},
+		{handle: "h1", visibility: 0},
+	}
 	if got := consumer.released(); !slices.Equal(got, want) {
-		t.Errorf("expected the unparseable message released for the successor, got %v", got)
+		t.Errorf("expected the unparseable message backed off, then released for the successor, got %v", got)
 	}
 }
 

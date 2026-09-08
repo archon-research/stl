@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"slices"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -15,40 +16,68 @@ func ReleaseMessages(ctx context.Context, consumer outbound.SQSConsumer, logger 
 	if len(messages) == 0 {
 		return
 	}
+	for _, msg := range messages {
+		logger.Info("releasing in-flight message for successor", "messageID", msg.MessageID)
+	}
+	visibilityRequest{
+		consumer:   consumer,
+		logger:     logger,
+		chainID:    chainID,
+		visibility: 0,
+		op:         visibilityOpRelease,
+	}.apply(ctx, messages)
+}
 
-	recorder := newSettleRecorder(logger, chainID)
+type visibilityOp struct {
+	settleOp string
+	refused  string
+}
 
+var (
+	visibilityOpRelease = visibilityOp{
+		settleOp: settleOpRelease,
+		refused:  "failed to release in-flight message; it stays hidden until the visibility timeout expires",
+	}
+	visibilityOpBackoff = visibilityOp{
+		settleOp: settleOpBackoff,
+		refused:  "failed to apply the retry backoff; the failed message stays hidden until the visibility timeout expires",
+	}
+)
+
+type visibilityRequest struct {
+	consumer   outbound.SQSConsumer
+	logger     *slog.Logger
+	chainID    int64
+	visibility time.Duration
+	op         visibilityOp
+}
+
+func (r visibilityRequest) apply(ctx context.Context, messages []outbound.SQSMessage) {
+	recorder := newSettleRecorder(r.logger, r.chainID)
 	for chunk := range slices.Chunk(messages, outbound.MaxVisibilityBatchSize) {
-		releaseChunk(ctx, consumer, logger, recorder, chunk)
+		r.applyChunk(ctx, recorder, chunk)
 	}
 }
 
 // One queue call per chunk under its own cleanup budget: one call per message,
 // or one budget shared across chunks, lets the first throttled call burn the
 // whole budget in the SDK's retry chain and strand everything after it.
-func releaseChunk(
-	parent context.Context,
-	consumer outbound.SQSConsumer,
-	logger *slog.Logger,
-	recorder settleRecorder,
-	messages []outbound.SQSMessage,
-) {
+func (r visibilityRequest) applyChunk(parent context.Context, recorder settleRecorder, messages []outbound.SQSMessage) {
 	ctx, cancel := CleanupContext(parent)
 	defer cancel()
 
 	handles := make([]string, 0, len(messages))
 	for _, msg := range messages {
-		logger.Info("releasing in-flight message for successor", "messageID", msg.MessageID)
 		handles = append(handles, msg.ReceiptHandle)
 	}
 
-	refusals, err := consumer.ChangeMessageVisibilityBatch(ctx, handles, 0)
+	refusals, err := r.consumer.ChangeMessageVisibilityBatch(ctx, handles, r.visibility)
 	if err != nil {
-		refusals = refusalsForCallFailure(logger, handles, refusals, err)
+		refusals = refusalsForCallFailure(r.logger, handles, refusals, err)
 	}
 
 	for _, msg := range messages {
-		recorder.record(ctx, settleOpRelease, releaseOutcome(logger, msg, refusals[msg.ReceiptHandle]))
+		recorder.record(ctx, r.op.settleOp, r.outcome(msg, refusals[msg.ReceiptHandle]))
 	}
 }
 
@@ -56,7 +85,7 @@ func releaseChunk(
 // it names stayed hidden; a nil map means the call itself never landed.
 func refusalsForCallFailure(logger *slog.Logger, handles []string, refusals map[string]error, err error) map[string]error {
 	if refusals != nil {
-		logger.Error("releasing in-flight messages reported a refusal it could not attribute", "error", err)
+		logger.Error("changing message visibility reported a refusal it could not attribute", "error", err)
 		return refusals
 	}
 	failed := make(map[string]error, len(handles))
@@ -66,9 +95,9 @@ func refusalsForCallFailure(logger *slog.Logger, handles []string, refusals map[
 	return failed
 }
 
-func releaseOutcome(logger *slog.Logger, msg outbound.SQSMessage, err error) string {
+func (r visibilityRequest) outcome(msg outbound.SQSMessage, err error) string {
 	if err != nil {
-		logger.Warn("failed to release in-flight message; it stays hidden until the visibility timeout expires",
+		r.logger.Warn(r.op.refused,
 			"messageID", msg.MessageID,
 			"error", err)
 	}

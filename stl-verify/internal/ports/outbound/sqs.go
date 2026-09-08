@@ -18,6 +18,11 @@ type SQSMessage struct {
 
 	// Body is the raw message body (JSON).
 	Body string
+
+	// ReceiveCount is how many times SQS has delivered the message, this
+	// delivery included (ApproximateReceiveCount). Zero when the consumer does
+	// not report it.
+	ReceiveCount int
 }
 
 // DeadLetterPublisher sends failed message bodies to a dead-letter queue so

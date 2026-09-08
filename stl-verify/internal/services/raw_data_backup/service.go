@@ -324,7 +324,8 @@ func (s *Service) takeHeldMessages() []outbound.SQSMessage {
 	return held
 }
 
-// Outside shutdown a message stays hidden on purpose: that is the retry pacing.
+// Outside shutdown a failed message keeps the queue's visibility timeout as its
+// retry pacing: this loop does not take sqsutil's failure backoff yet.
 func (s *Service) releaseIfShuttingDown(ctx context.Context, logger *slog.Logger, msg outbound.SQSMessage) {
 	if ctx.Err() == nil {
 		return

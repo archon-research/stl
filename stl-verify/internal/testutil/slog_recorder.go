@@ -68,6 +68,34 @@ func (h *SlogRecorder) ContainsAttr(substr string) bool {
 	return false
 }
 
+// Attr returns key's value on the first captured record whose message is
+// message.
+func (h *SlogRecorder) Attr(message, key string) (slog.Value, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.Records {
+		if r.Message != message {
+			continue
+		}
+		if value, ok := recordAttr(r, key); ok {
+			return value, true
+		}
+	}
+	return slog.Value{}, false
+}
+
+func recordAttr(r slog.Record, key string) (slog.Value, bool) {
+	var value slog.Value
+	found := false
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == key {
+			value, found = a.Value, true
+		}
+		return !found
+	})
+	return value, found
+}
+
 func (h *SlogRecorder) count(level slog.Level, substr string) int {
 	h.mu.Lock()
 	defer h.mu.Unlock()

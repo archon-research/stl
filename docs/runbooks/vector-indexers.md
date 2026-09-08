@@ -4117,3 +4117,69 @@ back to `0` or absent for the affected source, with
 block height moving again.
 
 ---
+
+## VectorSQSBackoffFailed
+
+**Severity:** warning · **For:** 5m · **Window:** 30m
+
+### What it means
+
+A message whose handler failed is not left hidden for the queue's whole
+visibility timeout: the consume loop hides it for a retry backoff instead —
+`sqsutil.DefaultFailureBackoffBase` (15s) doubled per receive and capped at
+`sqsutil.DefaultFailureBackoffCap` (60s) — with the same
+`ChangeMessageVisibilityBatch` call the shutdown release uses, counted as
+`sqs_message_settles_total{op="backoff"}`. `status="failed"` counts the
+backoffs SQS refused. A refused backoff loses no data, but the message then
+waits out the full visibility timeout (300s on the DEX queues) and the chain's
+FIFO group stalls behind it: the four-minute stall per transient error that the
+backoff exists to end. Gated on recurrence (`> 1` in 30m) like
+`VectorSQSDeleteFailed`; one refusal heals itself.
+
+A *high* backoff rate is not this alert. `op="backoff", status="ok"` climbing
+means handlers are failing — an RPC provider or database outage — and the
+worker's own `*ErrorRatioHigh` rule covers that. To see both at once:
+
+```promql
+sum by (service_name, op, status) (
+  rate(sqs_message_settles_total{k8s_namespace_name="vector"}[5m])
+)
+```
+
+### First checks (≤5 min)
+
+1. **Find the refusals in the logs** — each one is a WARN on the live pod:
+
+   ```logql
+   {k8s_namespace_name="vector", service_name="<svc>"} |= "failed to apply the retry backoff"
+   ```
+
+   The `error` field carries the SQS error verbatim. The ERROR line just before
+   it, `failed to process message`, names the block and its `receiveCount`.
+2. **`AccessDenied` / `is not authorized to perform: sqs:ChangeMessageVisibility`**
+   → the pod's IAM role lost that action on the queue. It never self-heals; fix
+   the policy (the queue's IRSA role lives in the infrastructure repo). The
+   shutdown release uses the same permission, so `VectorSQSReleaseFailed` will
+   follow on the next rollout.
+3. **`ReceiptHandleIsInvalid` / `MessageNotInflight`** → the handle had expired
+   or the message was already visible again: the handler outran the visibility
+   timeout, or a queue was recreated under the pod. Check handler duration
+   against `HandlerTimeout` and the queue's visibility timeout.
+4. **`context deadline exceeded`** → the call outlived `SettleTimeout` (5s).
+   Check SQS latency on the AWS dashboard; throttling under a backfill or a mass
+   rollout is the usual cause.
+
+### Verify recovery
+
+```promql
+sum by (service_name, chain, cluster) (
+  increase(sqs_message_settles_total{op="backoff", status="failed", k8s_namespace_name="vector"}[30m])
+)
+```
+
+back to `0` or absent for the affected source, with
+`sqs_message_settles_total{op="backoff", status="ok"}` advancing on the next
+handler failure and that chain's block height moving again within seconds of
+it rather than minutes.
+
+---

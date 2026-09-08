@@ -48,6 +48,10 @@ type Config struct {
 	// finish; past it its message is released to the successor. Zero uses
 	// DefaultDrainTimeout.
 	DrainTimeout time.Duration
+
+	// FailureBackoff paces the redelivery of a message whose handler failed.
+	// Zero uses DefaultFailureBackoffBase and DefaultFailureBackoffCap.
+	FailureBackoff FailureBackoff
 }
 
 // Validate checks the config at boot: a worker whose visibility timeout cannot
@@ -57,10 +61,28 @@ func (c Config) Validate() error {
 	if c.ChainID == 0 {
 		return fmt.Errorf("sqsutil.Config: ChainID must be set")
 	}
+	backoff := c.failureBackoff()
+	if err := backoff.Validate(); err != nil {
+		return err
+	}
 	if c.Consumer == nil {
 		return nil
 	}
-	return ValidateVisibilityTimeout(c.Consumer.VisibilityTimeout(), c.HandlerTimeout, c.MaxMessages)
+	visibility := c.Consumer.VisibilityTimeout()
+	if err := ValidateVisibilityTimeout(visibility, c.HandlerTimeout, c.MaxMessages); err != nil {
+		return err
+	}
+	return validateBackoffUnderVisibility(backoff, visibility)
+}
+
+// A backoff the visibility timeout undercuts hides a failed message longer
+// than leaving it alone would.
+func validateBackoffUnderVisibility(backoff FailureBackoff, visibilityTimeout time.Duration) error {
+	if backoff.Cap >= visibilityTimeout {
+		return fmt.Errorf("sqsutil: failure backoff cap %s must stay below the SQS visibility timeout %s",
+			backoff.Cap, visibilityTimeout)
+	}
+	return nil
 }
 
 // DefaultHandlerTimeout bounds a message handler when Config.HandlerTimeout is
@@ -87,6 +109,13 @@ func (c Config) drainTimeout() time.Duration {
 		return c.DrainTimeout
 	}
 	return DefaultDrainTimeout
+}
+
+func (c Config) failureBackoff() FailureBackoff {
+	if c.FailureBackoff == (FailureBackoff{}) {
+		return FailureBackoff{Base: DefaultFailureBackoffBase, Cap: DefaultFailureBackoffCap}
+	}
+	return c.FailureBackoff
 }
 
 // ValidateVisibilityTimeout returns an error unless the SQS visibility timeout
@@ -216,10 +245,7 @@ func releaseUnsettledOnShutdown(ctx context.Context, cfg Config, messages []outb
 func processMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, handler BlockEventHandler) error {
 	var event outbound.BlockEvent
 	if err := json.Unmarshal([]byte(msg.Body), &event); err != nil {
-		cfg.Logger.Error("failed to parse block event",
-			"messageID", msg.MessageID,
-			"error", err)
-		return fmt.Errorf("parsing message %s: %w", msg.MessageID, err)
+		return keepUnparseableMessageForRedelivery(ctx, cfg, msg, err)
 	}
 
 	if event.ChainID != cfg.ChainID {
@@ -228,6 +254,17 @@ func processMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, ha
 
 	outcome := runHandler(ctx, cfg, event, handler)
 	return settleMessage(ctx, cfg, msg, event, outcome)
+}
+
+// The body will never parse, so the backoff only walks the message to the DLQ
+// sooner; deleting it here would lose the body the redrive preserves.
+func keepUnparseableMessageForRedelivery(ctx context.Context, cfg Config, msg outbound.SQSMessage, parseErr error) error {
+	cfg.Logger.Error("failed to parse block event",
+		"messageID", msg.MessageID,
+		"receiveCount", msg.ReceiveCount,
+		"error", parseErr)
+	backOffFailedMessageUnlessShuttingDown(ctx, cfg, msg)
+	return fmt.Errorf("parsing message %s: %w", msg.MessageID, parseErr)
 }
 
 // Chain ID is immutable in the message, so redelivery would never succeed.
@@ -250,22 +287,25 @@ func runHandler(ctx context.Context, cfg Config, event outbound.BlockEvent, hand
 
 func settleMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, event outbound.BlockEvent, outcome DrainOutcome) error {
 	if outcome.Err != nil {
-		return keepMessageForRedelivery(cfg, msg, event, outcome)
+		return keepMessageForRedelivery(ctx, cfg, msg, event, outcome)
 	}
 	return deleteProcessedMessage(ctx, cfg, msg, outcome)
 }
 
-func keepMessageForRedelivery(cfg Config, msg outbound.SQSMessage, event outbound.BlockEvent, outcome DrainOutcome) error {
+func keepMessageForRedelivery(ctx context.Context, cfg Config, msg outbound.SQSMessage, event outbound.BlockEvent, outcome DrainOutcome) error {
 	if outcome.Abandoned {
 		cfg.Logger.Warn("shutdown drain expired with the handler still running; releasing its message",
 			"messageID", msg.MessageID,
 			"block", event.BlockNumber,
 			"drainBudget", cfg.drainTimeout())
-	} else {
-		cfg.Logger.Error("failed to process message",
-			"messageID", msg.MessageID,
-			"error", outcome.Err)
+		return outcome.Err
 	}
+	cfg.Logger.Error("failed to process message",
+		"messageID", msg.MessageID,
+		"block", event.BlockNumber,
+		"receiveCount", msg.ReceiveCount,
+		"error", outcome.Err)
+	backOffFailedMessageUnlessShuttingDown(ctx, cfg, msg)
 	return outcome.Err
 }
 

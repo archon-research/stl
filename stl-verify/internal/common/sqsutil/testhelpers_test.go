@@ -3,6 +3,7 @@ package sqsutil
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"slices"
 	"sync"
@@ -138,9 +139,16 @@ func (m *mockConsumer) releaseCalls() []visibilityRelease {
 	return slices.Clone(m.visibilityReleases)
 }
 
+// A first delivery, the way the SQS adapter reports one.
 func makeMsg(id, handle string, event outbound.BlockEvent) outbound.SQSMessage {
 	body, _ := json.Marshal(event)
-	return outbound.SQSMessage{MessageID: id, ReceiptHandle: handle, Body: string(body)}
+	return outbound.SQSMessage{MessageID: id, ReceiptHandle: handle, Body: string(body), ReceiveCount: 1}
+}
+
+func redeliveredMsg(id, handle string, event outbound.BlockEvent, receiveCount int) outbound.SQSMessage {
+	msg := makeMsg(id, handle, event)
+	msg.ReceiveCount = receiveCount
+	return msg
 }
 
 func testConfig(consumer *mockConsumer) Config {
@@ -177,6 +185,10 @@ func startLoop(cfg Config, handler BlockEventHandler) (context.CancelFunc, <-cha
 }
 
 func noopHandler(context.Context, outbound.BlockEvent) error { return nil }
+
+func failingHandler(context.Context, outbound.BlockEvent) error {
+	return errors.New("persisting block: connection reset")
+}
 
 func awaitLoopExit(t *testing.T, done <-chan struct{}) {
 	t.Helper()

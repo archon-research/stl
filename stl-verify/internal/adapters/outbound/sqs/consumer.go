@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -74,6 +75,10 @@ type Consumer struct {
 	queueURL string
 	config   Config
 	logger   *slog.Logger
+
+	// SQS always reports the receive count it was asked for; one WARN is enough
+	// to show the retry backoff has stopped escalating.
+	warnMissingReceiveCount sync.Once
 }
 
 // NewConsumer creates a new SQS consumer.
@@ -146,12 +151,15 @@ func (c *Consumer) ReceiveMessages(ctx context.Context, maxMessages int) ([]outb
 		VisibilityTimeout:   c.config.VisibilityTimeout,
 		// Request all message attributes
 		MessageAttributeNames: []string{"All"},
+		MessageSystemAttributeNames: []sqstypes.MessageSystemAttributeName{
+			sqstypes.MessageSystemAttributeNameApproximateReceiveCount,
+		},
 	}, noRetryForPoll)
 	if err != nil {
 		return c.classifyPollFailure(started, err)
 	}
 
-	messages := toSQSMessages(result.Messages)
+	messages := c.toSQSMessages(result.Messages)
 	if len(messages) > 0 {
 		c.logger.Debug("received messages", "count", len(messages))
 	}
@@ -205,7 +213,7 @@ func clampBatchSize(maxMessages int) int32 {
 	return int32(min(max(maxMessages, 1), 10)) // SQS accepts 1..10
 }
 
-func toSQSMessages(received []sqstypes.Message) []outbound.SQSMessage {
+func (c *Consumer) toSQSMessages(received []sqstypes.Message) []outbound.SQSMessage {
 	messages := make([]outbound.SQSMessage, 0, len(received))
 	for _, msg := range received {
 		if msg.MessageId == nil || msg.ReceiptHandle == nil || msg.Body == nil {
@@ -215,9 +223,31 @@ func toSQSMessages(received []sqstypes.Message) []outbound.SQSMessage {
 			MessageID:     *msg.MessageId,
 			ReceiptHandle: *msg.ReceiptHandle,
 			Body:          *msg.Body,
+			ReceiveCount:  c.receiveCount(msg),
 		})
 	}
 	return messages
+}
+
+// An unreadable count is reported as unknown rather than failing the receive:
+// it only paces a retry, and the message itself is intact.
+func (c *Consumer) receiveCount(msg sqstypes.Message) int {
+	raw, ok := msg.Attributes[string(sqstypes.MessageSystemAttributeNameApproximateReceiveCount)]
+	if !ok {
+		c.warnMissingReceiveCount.Do(func() {
+			c.logger.Warn("SQS did not report the receive count; the retry backoff will not escalate")
+		})
+		return 0
+	}
+	count, err := strconv.Atoi(raw)
+	if err != nil || count < 1 {
+		c.logger.Warn("SQS reported an unreadable receive count; treating it as unknown",
+			"messageID", aws.ToString(msg.MessageId),
+			"receiveCount", raw,
+			"error", err)
+		return 0
+	}
+	return count
 }
 
 // DeleteMessage removes a successfully processed message from the queue.

@@ -3,6 +3,7 @@ package sqsutil
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"maps"
 	"testing"
 	"time"
@@ -43,6 +44,49 @@ func TestProcessMessages_CountsASettledDelete(t *testing.T) {
 	want := map[settleKey]int64{{op: "delete", status: "ok"}: 1}
 	if got := collectSettleCounter(t, reader); !maps.Equal(got, want) {
 		t.Errorf("settles = %v, want %v", got, want)
+	}
+}
+
+// The backoff runs on the live path for every failed message, so a refused
+// one must be countable the way a refused delete is.
+func TestProcessMessages_CountsABackoffByOutcome(t *testing.T) {
+	tests := []struct {
+		name      string
+		refusals  map[string]error
+		want      map[settleKey]int64
+		wantWarns int
+	}{
+		{
+			name: "an accepted backoff",
+			want: map[settleKey]int64{{op: "backoff", status: "ok"}: 1},
+		},
+		{
+			name:      "a refused backoff",
+			refusals:  map[string]error{"h1": errors.New("ReceiptHandleIsInvalid")},
+			want:      map[settleKey]int64{{op: "backoff", status: "failed"}: 1},
+			wantWarns: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := installManualMeterProvider(t)
+			consumer := &mockConsumer{
+				batches:            [][]outbound.SQSMessage{{makeMsg("1", "h1", blockEvent(100))}},
+				visibilityRefusals: tt.refusals,
+			}
+			cfg, recorder := recordingConfig(consumer)
+
+			if _, err := ProcessMessages(context.Background(), cfg, failingHandler); err == nil {
+				t.Fatal("expected the handler failure to be returned")
+			}
+
+			if got := collectSettleCounter(t, reader); !maps.Equal(got, tt.want) {
+				t.Errorf("settles = %v, want %v", got, tt.want)
+			}
+			if got := recorder.CountWarn("retry backoff"); got != tt.wantWarns {
+				t.Errorf("refusal warnings = %d, want %d (records: %v)", got, tt.wantWarns, recorder.MessagesAt(slog.LevelWarn))
+			}
+		})
 	}
 }
 

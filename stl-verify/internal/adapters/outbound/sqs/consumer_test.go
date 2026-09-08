@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
@@ -24,14 +25,18 @@ type mockSQSAPI struct {
 	batchFailed          []sqstypes.BatchResultErrorEntry
 	err                  error
 
-	receiveInput *sqs.ReceiveMessageInput
-	receiveErr   error
+	receiveInput  *sqs.ReceiveMessageInput
+	receiveOutput *sqs.ReceiveMessageOutput
+	receiveErr    error
 }
 
 func (m *mockSQSAPI) ReceiveMessage(_ context.Context, params *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
 	m.receiveInput = params
 	if m.receiveErr != nil {
 		return nil, m.receiveErr
+	}
+	if m.receiveOutput != nil {
+		return m.receiveOutput, nil
 	}
 	return &sqs.ReceiveMessageOutput{}, nil
 }
@@ -477,6 +482,76 @@ func TestConsumer_ReceiveMessages_ClampsTheBatchSizeToWhatSQSAccepts(t *testing.
 			}
 			if got := client.receiveInput.MaxNumberOfMessages; got != tt.want {
 				t.Errorf("maxMessages %d asked SQS for %d, want %d", tt.maxMessages, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConsumer_ReceiveMessages_AsksSQSForTheReceiveCount(t *testing.T) {
+	client := &mockSQSAPI{}
+	consumer := newTestConsumer(client)
+
+	if _, err := consumer.ReceiveMessages(context.Background(), 1); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := []sqstypes.MessageSystemAttributeName{sqstypes.MessageSystemAttributeNameApproximateReceiveCount}
+	if got := client.receiveInput.MessageSystemAttributeNames; !slices.Equal(got, want) {
+		t.Errorf("expected the receive to ask for %v, got %v", want, got)
+	}
+}
+
+func TestConsumer_ReceiveMessages_CarriesTheReceiveCount(t *testing.T) {
+	tests := []struct {
+		name       string
+		attributes map[string]string
+		want       int
+		wantWarns  int
+	}{
+		{
+			name:       "the count SQS reports",
+			attributes: map[string]string{string(sqstypes.MessageSystemAttributeNameApproximateReceiveCount): "3"},
+			want:       3,
+		},
+		{
+			name:      "a response without it leaves the count unknown and logged",
+			wantWarns: 1,
+		},
+		{
+			name:       "a count that is not a number is unknown and logged",
+			attributes: map[string]string{string(sqstypes.MessageSystemAttributeNameApproximateReceiveCount): "many"},
+			wantWarns:  1,
+		},
+		{
+			name:       "a count below one is unknown and logged",
+			attributes: map[string]string{string(sqstypes.MessageSystemAttributeNameApproximateReceiveCount): "0"},
+			wantWarns:  1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &mockSQSAPI{receiveOutput: &sqs.ReceiveMessageOutput{Messages: []sqstypes.Message{{
+				MessageId:     aws.String("m1"),
+				ReceiptHandle: aws.String("h1"),
+				Body:          aws.String(`{"chainId":1,"blockNumber":100}`),
+				Attributes:    tt.attributes,
+			}}}}
+			recorder := &testutil.SlogRecorder{}
+			consumer := newTestConsumer(client)
+			consumer.logger = slog.New(recorder)
+
+			messages, err := consumer.ReceiveMessages(context.Background(), 1)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(messages) != 1 {
+				t.Fatalf("expected the message delivered, got %+v", messages)
+			}
+			if got := messages[0].ReceiveCount; got != tt.want {
+				t.Errorf("ReceiveCount = %d, want %d", got, tt.want)
+			}
+			if got := recorder.CountWarn("receive count"); got != tt.wantWarns {
+				t.Errorf("warnings = %d, want %d (records: %v)", got, tt.wantWarns, recorder.MessagesAt(slog.LevelWarn))
 			}
 		})
 	}

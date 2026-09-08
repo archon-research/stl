@@ -12,13 +12,13 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
 
-// SettleTimeout bounds one delete/release call that settles a message. It
+// SettleTimeout bounds one delete, release or backoff call that settles a message. It
 // applies on the live path too: the SQS client carries no read timeout, so an
 // unbounded settle against a silent connection parks the poll loop for good.
 const SettleTimeout = 5 * time.Second
 
 // CleanupContext returns the context for a queue call that settles a message
-// (delete, release, dead-letter publish): bounded by SettleTimeout, detached from
+// (delete, release, backoff, dead-letter publish): bounded by SettleTimeout, detached from
 // the caller's cancellation so a shutdown landing mid-call cannot kill a call SQS
 // may already have applied and leave it released against a vanished handle.
 func CleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -33,6 +33,7 @@ const settleCounterName = "sqs.message.settles.total"
 const (
 	settleOpDelete  = "delete"
 	settleOpRelease = "release"
+	settleOpBackoff = "backoff"
 
 	settleStatusOK     = "ok"
 	settleStatusFailed = "failed"
