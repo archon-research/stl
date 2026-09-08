@@ -770,12 +770,14 @@ func TestStartAndProcessMessages(t *testing.T) {
 			t.Fatalf("Start: %v", err)
 		}
 
-		// Wait for processing
+		// Wait on the delete, not the upsert: the poll loop deletes only after
+		// the handler returns, so waiting on UpsertPrices can observe the gap
+		// before the delete and read a count of 0.
 		testutil.WaitForCondition(t, 2*time.Second, func() bool {
-			repo.mu.Lock()
-			defer repo.mu.Unlock()
-			return repo.upsertPricesCalls >= 1
-		}, "UpsertPrices to be called")
+			consumer.mu.Lock()
+			defer consumer.mu.Unlock()
+			return consumer.deleteMessageCalls >= 1
+		}, "DeleteMessage to be called")
 
 		// Verify UpsertPrices was called with 2 prices (both new)
 		repo.mu.Lock()
@@ -783,13 +785,6 @@ func TestStartAndProcessMessages(t *testing.T) {
 			t.Errorf("lastUpserted length = %d, want 2", len(repo.lastUpserted))
 		}
 		repo.mu.Unlock()
-
-		// Verify delete was called
-		consumer.mu.Lock()
-		if consumer.deleteMessageCalls < 1 {
-			t.Errorf("DeleteMessage call count = %d, want >= 1", consumer.deleteMessageCalls)
-		}
-		consumer.mu.Unlock()
 
 		// Now verify change detection: second block with same prices should not upsert.
 		// Reset repo call count and deliver a second message.
@@ -1171,19 +1166,14 @@ func TestStartAndProcessMessages(t *testing.T) {
 			t.Fatalf("Start: %v", err)
 		}
 
-		// Wait for processing
+		// DeleteMessage is attempted even though it fails. Wait on it rather
+		// than on UpsertPrices, which returns before the loop reaches the
+		// delete.
 		testutil.WaitForCondition(t, 2*time.Second, func() bool {
-			repo.mu.Lock()
-			defer repo.mu.Unlock()
-			return repo.upsertPricesCalls >= 1
-		}, "UpsertPrices to be called")
-
-		// DeleteMessage was attempted (even though it failed)
-		consumer.mu.Lock()
-		if consumer.deleteMessageCalls < 1 {
-			t.Errorf("DeleteMessage call count = %d, want >= 1", consumer.deleteMessageCalls)
-		}
-		consumer.mu.Unlock()
+			consumer.mu.Lock()
+			defer consumer.mu.Unlock()
+			return consumer.deleteMessageCalls >= 1
+		}, "DeleteMessage to be attempted")
 
 		if stopErr := svc.Stop(); stopErr != nil {
 			t.Errorf("Stop: %v", stopErr)
