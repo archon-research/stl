@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
@@ -14,18 +15,19 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// fakeChain is a Multicaller that routes each sub-call by its 4-byte selector:
-// getAllVaultsAddresses, getVaultEntireData (per-vault fixture), and ERC-20
-// symbol()/decimals(). It lets a service test exercise the full
-// receipt → resolver-read → persist path without a real RPC.
+// fakeChain routes each sub-call by its 4-byte selector: getAllVaultsAddresses,
+// getVaultEntireData (per-vault fixture), and ERC-20 symbol()/decimals(). It backs
+// a testutil.MockMulticaller via multicaller(), letting a service test exercise the
+// full receipt → resolver-read → persist path without a real RPC.
 type fakeChain struct {
 	// t.Fatalf must only be called from the goroutine that runs the test, so
-	// Execute (which calls it on packing errors) must only run on the test
+	// execute (which calls it on packing errors) must only run on the test
 	// goroutine. Drive processBlockEvent/ReconcileVaults directly; never feed
-	// messages through Start's consumer goroutine, which would call Execute — and
-	// thus t.Fatalf — off-goroutine.
+	// messages through Start's consumer goroutine, which would call execute (and
+	// thus t.Fatalf) off-goroutine.
 	t *testing.T
 
 	resolverABI *abi.ABI
@@ -36,8 +38,8 @@ type fakeChain struct {
 	tokenSymbol map[common.Address]string
 	tokenDec    map[common.Address]uint8
 
-	// executeErr fails every Execute call. executeErrAfterGetAll fails only
-	// Execute batches that are not the getAllVaultsAddresses enumeration (i.e.
+	// executeErr fails every execute call. executeErrAfterGetAll fails only
+	// execute batches that are not the getAllVaultsAddresses enumeration (i.e.
 	// the getVaultEntireData read), so a test can drive the enumerate-succeeds /
 	// read-fails path.
 	executeErr            error
@@ -68,9 +70,15 @@ func newFakeChain(t *testing.T) *fakeChain {
 	return fc
 }
 
-func (f *fakeChain) Address() common.Address { return common.Address{} }
+// multicaller returns a MockMulticaller backed by this chain's selector routing,
+// so fakeChain feeds the shared double instead of implementing the port itself.
+func (f *fakeChain) multicaller() *testutil.MockMulticaller {
+	mc := testutil.NewMockMulticaller()
+	mc.ExecuteFn = f.execute
+	return mc
+}
 
-func (f *fakeChain) Execute(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+func (f *fakeChain) execute(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 	if f.executeErr != nil {
 		return nil, f.executeErr
 	}
@@ -137,9 +145,15 @@ type serviceFixture struct {
 	cache     *stubCache
 	txm       *stubTxManager
 	querier   *stubBlockQuerier
+	metrics   *mockMetrics
 }
 
 func newServiceForTest(t *testing.T) *serviceFixture {
+	t.Helper()
+	return newServiceForTestWithConsumer(t, stubConsumer{})
+}
+
+func newServiceForTestWithConsumer(t *testing.T, consumer outbound.SQSConsumer) *serviceFixture {
 	t.Helper()
 	chain := newFakeChain(t)
 	repo := newStubFluidRepo()
@@ -147,15 +161,16 @@ func newServiceForTest(t *testing.T) *serviceFixture {
 	cache := &stubCache{receipts: map[int64]json.RawMessage{}}
 	txm := &stubTxManager{}
 	querier := &stubBlockQuerier{head: 19_000_000}
+	metrics := &mockMetrics{}
 
 	svc, err := NewService(
-		Config{SQSConsumerConfig: shared.SQSConsumerConfig{ChainID: 1, Logger: testLogger()}},
-		stubConsumer{}, cache, querier, chain, txm, repo, tokenRepo, &stubProtocolRepo{},
+		Config{SQSConsumerConfig: shared.SQSConsumerConfig{ChainID: 1, Logger: testLogger()}, Metrics: metrics},
+		consumer, cache, querier, chain.multicaller(), txm, repo, tokenRepo, &stubProtocolRepo{},
 	)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	return &serviceFixture{svc: svc, chain: chain, repo: repo, tokenRepo: tokenRepo, cache: cache, txm: txm, querier: querier}
+	return &serviceFixture{svc: svc, chain: chain, repo: repo, tokenRepo: tokenRepo, cache: cache, txm: txm, querier: querier, metrics: metrics}
 }
 
 // logOperateTopic returns the topic0 the service treats as a position-change
@@ -217,7 +232,7 @@ func validDeps(t *testing.T) deps {
 	t.Helper()
 	return deps{
 		consumer: stubConsumer{}, cache: &stubCache{}, querier: stubBlockQuerier{},
-		multicaller: newFakeChain(t), txManager: &stubTxManager{}, vaultRepo: newStubFluidRepo(),
+		multicaller: testutil.NewMockMulticaller(), txManager: &stubTxManager{}, vaultRepo: newStubFluidRepo(),
 		tokenRepo: newStubTokenRepo(), protocolRepo: &stubProtocolRepo{},
 	}
 }
@@ -291,6 +306,36 @@ func TestProcessBlockEvent_KnownVaultLogWritesSnapshot(t *testing.T) {
 	}
 	if got.BlockNumber != 10 {
 		t.Errorf("blockNumber = %d, want 10", got.BlockNumber)
+	}
+}
+
+// TestProcessBlockEvent_RecordsSuccess: a block that processes cleanly (even one
+// touching no in-scope vault) records exactly one success sample, so the counter
+// is an honest per-block liveness signal through quiet periods.
+func TestProcessBlockEvent_RecordsSuccess(t *testing.T) {
+	f := newServiceForTest(t)
+	f.cache.receipts[10] = receiptsWithLog(t,
+		common.HexToAddress("0x9999999999999999999999999999999999999999"),
+		common.HexToHash("0xabc"))
+
+	if err := f.svc.processBlockEvent(context.Background(), blockEvent(10)); err != nil {
+		t.Fatalf("processBlockEvent: %v", err)
+	}
+	if got := f.metrics.ProcessedStatuses(); len(got) != 1 || got[0] != "success" {
+		t.Errorf("processed statuses = %v, want [success]", got)
+	}
+}
+
+// TestProcessBlockEvent_RecordsError: a block whose processing fails records one
+// error sample and still propagates the error.
+func TestProcessBlockEvent_RecordsError(t *testing.T) {
+	f := newServiceForTest(t) // no receipts cached for block 10 → fetchReceipts errors
+
+	if err := f.svc.processBlockEvent(context.Background(), blockEvent(10)); err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if got := f.metrics.ProcessedStatuses(); len(got) != 1 || got[0] != "error" {
+		t.Errorf("processed statuses = %v, want [error]", got)
 	}
 }
 
@@ -601,6 +646,21 @@ func TestStartStop_Lifecycle(t *testing.T) {
 	}
 	if err := f.svc.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
+	}
+}
+
+func TestStart_RefusesAVisibilityTimeoutAReceiveCanOutrun(t *testing.T) {
+	f := newServiceForTestWithConsumer(t, stubConsumer{visibilityTimeout: 30 * time.Second})
+
+	err := f.svc.Start(context.Background())
+	if err == nil {
+		_ = f.svc.Stop()
+		t.Fatal("Start accepted a 30s visibility timeout; a booted worker never crashloops on it, because " +
+			"ProcessMessages revalidates on every poll and RunLoop only logs what it returns, so the pod reports " +
+			"Ready and spins logging forever while the queue never drains")
+	}
+	if !strings.Contains(err.Error(), "visibility timeout") {
+		t.Errorf("Start error = %q, want it to name the visibility timeout", err)
 	}
 }
 

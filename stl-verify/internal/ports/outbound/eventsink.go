@@ -2,8 +2,12 @@ package outbound
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // EventType represents the type of event.
@@ -76,6 +80,39 @@ func (e BlockEvent) GetChainID() int64     { return e.ChainID }
 // only one message is delivered to consumers.
 func (e BlockEvent) DeduplicationID() string {
 	return fmt.Sprintf("%d:%s:%d", e.ChainID, e.BlockHash, e.Version)
+}
+
+// ParsedBlockHash returns the block hash as a common.Hash, validating it
+// strictly (0x plus 64 hex chars) rather than letting common.HexToHash
+// silently coerce an empty or malformed value. State-read callers treat the
+// zero hash as "no live hash, pin by block number" (the backfill/CLI
+// fallback), so an empty hash on a live event would silently downgrade a
+// hash-pinned read to number-pinning; a malformed hash would coerce into a
+// zero-padded, plausible-looking hash that pins the read to a block that does
+// not exist. This is the single guard that keeps VEC-471's reorg-correctness
+// honest across every indexer.
+func (e BlockEvent) ParsedBlockHash() (common.Hash, error) {
+	if e.BlockHash == "" {
+		return common.Hash{}, fmt.Errorf("block %d v%d: missing block hash on event", e.BlockNumber, e.Version)
+	}
+	hexDigits, hasPrefix := strings.CutPrefix(e.BlockHash, "0x")
+	if !hasPrefix || len(hexDigits) != 64 {
+		return common.Hash{}, fmt.Errorf("block %d v%d: malformed block hash %q on event (want 0x followed by 64 hex chars)", e.BlockNumber, e.Version, e.BlockHash)
+	}
+	raw, err := hex.DecodeString(hexDigits)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("block %d v%d: malformed block hash %q on event: %w", e.BlockNumber, e.Version, e.BlockHash, err)
+	}
+	return common.BytesToHash(raw), nil
+}
+
+// BlockTime rejects a non-positive timestamp: time.Unix(0, 0) is not the zero
+// Time, so it survives IsZero() guards and files the block in a 1970 chunk.
+func (e BlockEvent) BlockTime() (time.Time, error) {
+	if e.BlockTimestamp <= 0 {
+		return time.Time{}, fmt.Errorf("block %d v%d: missing or non-positive block timestamp %d on event", e.BlockNumber, e.Version, e.BlockTimestamp)
+	}
+	return time.Unix(e.BlockTimestamp, 0).UTC(), nil
 }
 
 // EventSink defines the interface for publishing block data events.

@@ -1,16 +1,18 @@
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Literal, Union, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.domain.entities.allocation import EthAddress
+from app.domain.serialization import PlainDecimal
 
 # ---------------------------------------------------------------------------
 # Discriminated details for RrcResult
 # ---------------------------------------------------------------------------
 
-ModelName = Literal["suraf", "gap_sweep"]
+ModelName = Literal["suraf", "gap_sweep", "core_model"]
 
 
 class SurafDetails(BaseModel):
@@ -30,9 +32,9 @@ class SurafDetails(BaseModel):
     risk_model: Literal["suraf"]
     rating_id: str
     rating_version: str
-    crr_pct: Decimal
-    unadjusted_crr_pct: Decimal
-    penalty_pp: Decimal
+    crr_pct: PlainDecimal
+    unadjusted_crr_pct: PlainDecimal
+    penalty_pp: PlainDecimal
     source_commit_sha: str
 
 
@@ -52,16 +54,71 @@ class GapSweepDetails(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     risk_model: Literal["gap_sweep"]
-    gap_pct: Decimal
-    loss_usd: Decimal
+    gap_pct: PlainDecimal
+    loss_usd: PlainDecimal
 
 
-RrcDetails = Annotated[Union[SurafDetails, GapSweepDetails], Field(discriminator="risk_model")]
+class CoreModelMarketAllocation(BaseModel):
+    """One Blue market slice behind an aggregated Morpho vault-share result.
+
+    ``allocation_pct`` is this market's share of the vault's total assets on a
+    0-100 scale. ``computed_at`` is when this market's CORE result was
+    computed — slices of one aggregate can have different staleness.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    market_key: str
+    allocation_pct: PlainDecimal
+    crr_el_pct: PlainDecimal
+    crr_es_pct: PlainDecimal
+    crr_var_pct: PlainDecimal
+    n_mc: int
+    computed_at: datetime
+
+
+class CoreModelDetails(BaseModel):
+    """CORE model-specific output embedded in an RrcResult.
+
+    ``crr_el_pct`` is the expected-loss CRR used as the primary capital
+    charge (0-100 scale, e.g. ``Decimal("12.5")`` means 12.5%).
+    ``hhi`` is the Herfindahl-Hirschman Index of borrower concentration
+    expressed as a percentage; ``None`` when liquidation analysis was
+    not run or the market had fewer than two borrowers.
+
+    A direct 1:1 market result (SparkLend) leaves ``coverage_pct`` and
+    ``markets`` as ``None``. A Morpho vault share aggregates over the vault's
+    Blue markets instead: ``crr_*_pct`` are allocation-weighted averages over
+    the covered markets plus idle liquidity at zero risk — exact for expected
+    loss (linear in allocations), indicative for ES/VaR (quantiles are not
+    additive, and cross-market dependence is not modeled). ``coverage_pct`` is
+    the share of vault assets whose market has a computed result (idle counts
+    as covered), ``markets`` carries the per-market slices, ``hhi`` is
+    ``None``, and ``forecast_step``/``n_mc`` are the minimum across slices.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    risk_model: Literal["core_model"]
+    crr_el_pct: Decimal
+    crr_es_pct: Decimal
+    crr_var_pct: Decimal
+    hhi: Decimal | None
+    protocol: str
+    forecast_step: int
+    n_mc: int
+    copula_type: str
+    coverage_pct: PlainDecimal | None = None
+    markets: tuple[CoreModelMarketAllocation, ...] | None = None
+
+
+RrcDetails = Annotated[Union[SurafDetails, GapSweepDetails, CoreModelDetails], Field(discriminator="risk_model")]
 """Discriminated union of model-specific detail payloads keyed on ``risk_model``."""
 
 _RISK_MODEL_TO_DETAILS: dict[str, type] = {
     "suraf": SurafDetails,
     "gap_sweep": GapSweepDetails,
+    "core_model": CoreModelDetails,
 }
 
 # Catch drift at import time: adding a literal to ``ModelName`` without
@@ -93,8 +150,8 @@ class RrcResult(BaseModel):
 
     asset_id: int
     prime_id: EthAddress
-    rrc_usd: Decimal
-    comparable_crr_pct: Decimal
+    rrc_usd: PlainDecimal
+    comparable_crr_pct: PlainDecimal
     risk_model: ModelName
     details: RrcDetails
 
@@ -138,16 +195,24 @@ class LiquidationParams:
 
 @dataclass(frozen=True)
 class RiskEnrichedCollateral:
-    """A single collateral contribution enriched with USD value and liquidation params."""
+    """A single collateral contribution enriched with USD value and liquidation params.
 
-    token_id: int
+    token_id and the liquidation params are None for symbol-keyed collateral whose
+    protocol has no per-asset risk parameters (e.g. Maple custody assets).
+
+    price_usd is None when the price is unavailable (e.g. a Maple custody asset whose
+    attested price is missing); in that case amount is 0 while amount_usd still carries
+    the attested USD value, so amount × price_usd does not reconstruct amount_usd.
+    """
+
+    token_id: int | None
     symbol: str
     amount: Decimal  # human-readable token units
     backing_pct: Decimal  # 0..100
-    amount_usd: Decimal  # amount × price_usd
-    price_usd: Decimal  # USD spot price used
-    liquidation_threshold: Decimal
-    liquidation_bonus: Decimal
+    amount_usd: Decimal  # amount × price_usd (except when price_usd is None; see above)
+    price_usd: Decimal | None  # USD spot price used; None when unavailable
+    liquidation_threshold: Decimal | None
+    liquidation_bonus: Decimal | None
 
 
 @dataclass(frozen=True)

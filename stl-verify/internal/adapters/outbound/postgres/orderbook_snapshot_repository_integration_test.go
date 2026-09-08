@@ -12,19 +12,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const orderbookSnapshotSchemaName = "test_cex_orderbook"
+const orderbookSnapshotDBName = "test_cex_orderbook"
 
 var orderbookSnapshotPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(orderbookSnapshotSchemaName, func() {
-		orderbookSnapshotPool = testutil.SetupSchemaForMain(sharedDSN, orderbookSnapshotSchemaName)
-	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, orderbookSnapshotPool, orderbookSnapshotSchemaName)
-	})
+	useFileDatabase(orderbookSnapshotDBName, &orderbookSnapshotPool)
 }
 
 func truncateOrderbookSnapshots(t *testing.T, ctx context.Context) {

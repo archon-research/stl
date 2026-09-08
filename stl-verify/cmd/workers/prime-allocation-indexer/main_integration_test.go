@@ -39,28 +39,58 @@ var (
 const (
 	archiveBucket = "test-prime-allocation-worker-raw-sc-calls"
 	archivePrefix = "raw-sc-calls/chain_id=1/"
+	// rawBucketPrefix satisfies chainutil.ValidateS3BucketForChain, a prefix check
+	// rather than an equality one, so a per-test suffix is allowed.
+	rawBucketPrefix = "stl-sentineltest-ethereum-raw-"
 )
 
 func TestMain(m *testing.M) {
-	dsn, dbCleanup := testutil.StartTimescaleDBForMain()
-	sharedDSN = dsn
-	redisAddr, redisCleanup := testutil.StartRedisForMain()
-	sharedRedisAddr = redisAddr
-	lsCfg, lsCleanup := testutil.StartLocalStackForMain("s3")
-	sharedLocalStackCfg = lsCfg
-
-	code := m.Run()
-
-	lsCleanup()
-	redisCleanup()
-	dbCleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.RunShared(m, testutil.Shared{
+		TimescaleDSN:       &sharedDSN,
+		RedisAddr:          &sharedRedisAddr,
+		LocalStack:         &sharedLocalStackCfg,
+		LocalStackServices: "s3",
+	}))
 }
 
 // ---------------------------------------------------------------------------
 // Integration tests for run()
 // ---------------------------------------------------------------------------
+
+func TestRunIntegration_RejectsNonPositiveSweepBlocks(t *testing.T) {
+	tests := []struct {
+		name        string
+		sweepBlocks string
+		args        []string
+	}{
+		{
+			name:        "environment variable",
+			sweepBlocks: "0",
+			args:        []string{"-queue", "http://localhost/test-queue", "-db", "postgres://localhost/test", "-redis", "localhost:6379"},
+		},
+		{
+			name: "flag",
+			args: []string{
+				"-queue", "http://localhost/test-queue",
+				"-db", "postgres://localhost/test",
+				"-redis", "localhost:6379",
+				"-sweep-blocks", "-1",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("ALCHEMY_API_KEY", "test-api-key")
+			t.Setenv("SWEEP_BLOCKS", tt.sweepBlocks)
+
+			err := run(context.Background(), tt.args, nil)
+			if err == nil || !strings.Contains(err.Error(), "sweep blocks must be at least 1") {
+				t.Fatalf("run error = %v, want non-positive sweep-blocks rejection", err)
+			}
+		})
+	}
+}
 
 func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
@@ -69,7 +99,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
-	t.Setenv("S3_BUCKET", "stl-sentineltest-ethereum-raw")
+	t.Setenv("S3_BUCKET", testutil.S3TestBucketName(t, rawBucketPrefix))
 	t.Setenv("DEPLOY_ENV", "test")
 	t.Setenv("CHAIN_ID", "1")
 
@@ -77,7 +107,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 		"-queue", "http://localhost/test-queue",
 		"-redis", "localhost:6379",
 		"-db", "postgres://invalid:invalid@localhost:1/nonexistent?connect_timeout=1",
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error for bad connection config")
 	}
@@ -90,7 +120,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	ctx := context.Background()
 
-	_, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	_, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -104,15 +134,9 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 
 	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
 
-	// Bucket name must satisfy the stl-sentinel{env}-{chain}-raw prefix convention.
-	const (
-		bucket    = "stl-sentineltest-ethereum-raw"
-		deployEnv = "test"
-	)
-
-	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatalf("create S3 bucket: %v", err)
-	}
+	const deployEnv = "test"
+	bucket := testutil.S3TestBucketName(t, rawBucketPrefix)
+	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 
 	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
@@ -135,15 +159,10 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 			"-queue", "http://localhost/test-queue",
 			"-db", dbURL,
 			"-redis", sharedRedisAddr,
-		})
+		}, nil)
 	}()
 
-	// Wait for the service to start (SQS ReceiveMessage call indicates it's polling)
-	select {
-	case <-sqsState.FirstCallReceived:
-	case <-time.After(30 * time.Second):
-		t.Fatal("timed out waiting for service to start")
-	}
+	testutil.WaitForFirstPoll(t, errCh, sqsState.FirstCallReceived)
 
 	// Service is running and polling SQS. Trigger graceful shutdown.
 	cancel()
@@ -184,23 +203,27 @@ const (
 func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	bgCtx := context.Background()
 
-	pool, dbURL, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
-	const blockNum = int64(19_000_000)
+	// Any height works here: the mock RPC answers whatever block the event carries.
+	const blockNum int64 = 19_100_000
 	const version = 1
+
+	// One prefix for both the seeder and the binary: the binary builds its own cache
+	// key, so a test sharing Redis with another package can only separate them here.
+	keyPrefix := testutil.SanitizeTestName(t.Name())
+	t.Setenv("REDIS_KEY_PREFIX", keyPrefix)
 
 	// Seed Redis with a USDS Transfer into the Grove proxy so the worker's cache
 	// read returns it directly (no S3 fallback needed) and the entry matches a
 	// tracked (token, proxy) pair.
-	seedUsdsTransferReceipt(t, bgCtx, blockNum, version)
+	seedUsdsTransferReceipt(t, bgCtx, keyPrefix, blockNum, version)
 
 	s3Client := testutil.NewS3Client(t, bgCtx, sharedLocalStackCfg)
-	const testBucket = "stl-sentineltest-ethereum-raw"
-	for _, b := range []string{testBucket, archiveBucket} {
-		if _, err := s3Client.CreateBucket(bgCtx, &s3.CreateBucketInput{Bucket: aws.String(b)}); err != nil {
-			t.Fatalf("create bucket %s: %v", b, err)
-		}
+	rawBucket := testutil.S3TestBucketName(t, rawBucketPrefix)
+	for _, b := range []string{rawBucket, archiveBucket} {
+		testutil.EnsureBucket(t, bgCtx, s3Client, b)
 	}
 
 	rpcServer := buildErc20MulticallMockRPC(t)
@@ -209,8 +232,8 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	sqsServer, sqsState := testutil.StartMockSQS(t)
 	t.Cleanup(sqsServer.Close)
 	sqsState.AddMessage(fmt.Sprintf(
-		`{"chainId":1,"blockNumber":%d,"version":%d,"blockHash":"0xabc","blockTimestamp":1700000000}`,
-		blockNum, version,
+		`{"chainId":1,"blockNumber":%d,"version":%d,"blockHash":"0x%064x","blockTimestamp":1700000000}`,
+		blockNum, version, blockNum,
 	))
 
 	t.Setenv("BUILD_GIT_HASH", "test")
@@ -221,7 +244,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	t.Setenv("AWS_REGION", "us-east-1")
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
-	t.Setenv("S3_BUCKET", testBucket)
+	t.Setenv("S3_BUCKET", rawBucket)
 	t.Setenv("DEPLOY_ENV", "test")
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("ARCHIVE_SC_CALLS", "true")
@@ -236,14 +259,10 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 			"-queue", "http://localhost/test-queue",
 			"-db", dbURL,
 			"-redis", sharedRedisAddr,
-		})
+		}, nil)
 	}()
 
-	select {
-	case <-sqsState.FirstCallReceived:
-	case <-time.After(30 * time.Second):
-		t.Fatal("timed out waiting for worker to start polling SQS")
-	}
+	testutil.WaitForFirstPoll(t, errCh, sqsState.FirstCallReceived)
 
 	// Wait until the transfer is fully processed (allocation_position row written)
 	// so the run loop is idle before we shut down, avoiding a context-cancelled
@@ -287,13 +306,33 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("run() did not return after context cancellation")
 	}
+
+	// run() has returned, so every fire-and-forget archive write has drained. The
+	// positive check above can be satisfied by an unrelated number-pinned Execute
+	// batch at the same block, so assert directly that nothing was archived at
+	// block 0: a hash-pinned state read reaching the archiver without
+	// WithBlockNumber would key its batch there (VEC-471). A real archive's
+	// filename starts with the block number, never "0_".
+	listOut, listErr := s3Client.ListObjectsV2(bgCtx, &s3.ListObjectsV2Input{
+		Bucket: aws.String(archiveBucket),
+		Prefix: aws.String(archivePrefix),
+	})
+	if listErr != nil {
+		t.Fatalf("listing archive bucket: %v", listErr)
+	}
+	for _, obj := range listOut.Contents {
+		key := aws.ToString(obj.Key)
+		if base := key[strings.LastIndex(key, "/")+1:]; strings.HasPrefix(base, "0_") {
+			t.Fatalf("raw SC call archive keyed at block 0 (%s): a hash-pinned state read was archived without WithBlockNumber", key)
+		}
+	}
 }
 
 // seedUsdsTransferReceipt writes a receipt with a single USDS Transfer log (from
 // an external sender into the Grove proxy) into the Redis block cache at the
 // given block/version, so the worker's cache read returns it and the
 // TransferExtractor emits a matching event.
-func seedUsdsTransferReceipt(t *testing.T, ctx context.Context, blockNum int64, version int) {
+func seedUsdsTransferReceipt(t *testing.T, ctx context.Context, keyPrefix string, blockNum int64, version int) {
 	t.Helper()
 
 	token := common.HexToAddress(usdsTokenAddr)
@@ -327,6 +366,7 @@ func seedUsdsTransferReceipt(t *testing.T, ctx context.Context, blockNum int64, 
 
 	cacheCfg := redisAdapter.ConfigDefaults()
 	cacheCfg.Addr = sharedRedisAddr
+	cacheCfg.KeyPrefix = keyPrefix
 	blockCache, err := redisAdapter.NewBlockCache(cacheCfg, nil)
 	if err != nil {
 		t.Fatalf("create block cache: %v", err)

@@ -10,7 +10,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	os.Exit(testutil.RunTestsWithLeakCheck(m))
+	os.Exit(testutil.RunShared(m, testutil.Shared{}))
 }
 
 func TestLeakGoroutine(t *testing.T) {

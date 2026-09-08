@@ -1,9 +1,6 @@
 package testutil
 
-import (
-	"strings"
-	"testing"
-)
+import "strings"
 
 // IsContainerRuntimeUnavailable reports whether testcontainers failed because
 // no local Docker-compatible runtime is available in this environment.
@@ -29,18 +26,4 @@ func IsContainerRuntimeUnavailable(err error) bool {
 	}
 
 	return false
-}
-
-// HandleContainerRuntimeError is a no-op when err is nil; otherwise it fails
-// the current test via tb.Fatalf. When IsContainerRuntimeUnavailable reports
-// true, the fatal message is prefixed to make the root cause clear.
-func HandleContainerRuntimeError(tb testing.TB, err error, subject string) {
-	tb.Helper()
-	if err == nil {
-		return
-	}
-	if IsContainerRuntimeUnavailable(err) {
-		tb.Fatalf("%s: container runtime unavailable: %v", subject, err)
-	}
-	tb.Fatalf("%s: %v", subject, err)
 }

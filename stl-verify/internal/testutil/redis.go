@@ -4,52 +4,30 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"testing"
 	"time"
 
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// StartRedis starts a Redis container and returns the host:port address and a
-// cleanup function that terminates the container.
+// StartRedisForMain starts a Redis container for use in TestMain.
+// On error it calls log.Fatal instead of t.Fatal.
 //
-// The caller is responsible for invoking cleanup when done, typically via:
-//
-//	addr, cleanup := testutil.StartRedis(t, ctx)
-//	defer cleanup()
-func StartRedis(t *testing.T, ctx context.Context) (addr string, cleanup func()) {
-	t.Helper()
-
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        ImageRedis,
-			ExposedPorts: []string{"6379/tcp"},
-			WaitingFor:   wait.ForListeningPort("6379/tcp").WithStartupTimeout(30 * time.Second),
-		},
-		Started: true,
-	})
-	if err != nil {
-		HandleContainerRuntimeError(t, err, "start Redis container")
+// When STL_TEST_REDIS_ADDR is set it returns that server instead, so CI can own
+// one Redis per shard rather than one per package.
+func StartRedisForMain() (addr string, cleanup func()) {
+	if shared, ok := sharedService(EnvRedisAddr); ok {
+		return shared, noopCleanup
 	}
 
-	host, err := container.Host(ctx)
+	addr, cleanup, err := startRedisContainer()
 	if err != nil {
-		t.Fatalf("get Redis host: %v", err)
+		log.Fatalf("%v", err)
 	}
-	port, err := container.MappedPort(ctx, "6379")
-	if err != nil {
-		t.Fatalf("get Redis port: %v", err)
-	}
-
-	addr = fmt.Sprintf("%s:%s", host, port.Port())
-	cleanup = func() { _ = container.Terminate(context.Background()) }
 	return addr, cleanup
 }
 
-// StartRedisForMain starts a Redis container for use in TestMain.
-// On error it calls log.Fatal instead of t.Fatal.
-func StartRedisForMain() (addr string, cleanup func()) {
+func startRedisContainer() (addr string, cleanup func(), err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -63,21 +41,25 @@ func StartRedisForMain() (addr string, cleanup func()) {
 	})
 	if err != nil {
 		if IsContainerRuntimeUnavailable(err) {
-			log.Fatalf("container runtime unavailable: %v", err)
+			return "", nil, fmt.Errorf("container runtime unavailable: %w", err)
 		}
-		log.Fatalf("start Redis container: %v", err)
+		return "", nil, fmt.Errorf("start Redis container: %w", err)
 	}
+
+	// The container is running by now, so every later failure has to take it
+	// down: the caller gets no cleanup callback to do it with.
+	terminate := func() { _ = container.Terminate(context.Background()) }
 
 	host, err := container.Host(ctx)
 	if err != nil {
-		log.Fatalf("get Redis host: %v", err)
+		terminate()
+		return "", nil, fmt.Errorf("get Redis host: %w", err)
 	}
 	port, err := container.MappedPort(ctx, "6379")
 	if err != nil {
-		log.Fatalf("get Redis port: %v", err)
+		terminate()
+		return "", nil, fmt.Errorf("get Redis port: %w", err)
 	}
 
-	addr = fmt.Sprintf("%s:%s", host, port.Port())
-	cleanup = func() { _ = container.Terminate(context.Background()) }
-	return addr, cleanup
+	return fmt.Sprintf("%s:%s", host, port.Port()), terminate, nil
 }

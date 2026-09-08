@@ -41,6 +41,10 @@ type Config struct {
 	Concurrency int
 	BatchSize   int
 	Logger      *slog.Logger
+
+	// ReferenceEffectiveAt pins which oracle_asset versions this run reads (ADR-0006 §4).
+	// NewService rejects a zero value.
+	ReferenceEffectiveAt time.Time
 }
 
 func configDefaults() Config {
@@ -56,13 +60,6 @@ func configDefaults() Config {
 type oracleWorkUnit struct {
 	*oracle_pricing.OracleUnit
 	validFrom int64 // earliest block to query (0 = no lower bound)
-	validTo   int64 // latest block to query (0 = no upper bound)
-}
-
-// oracleBlockRange represents the valid block range for an oracle across all protocols.
-type oracleBlockRange struct {
-	validFrom int64
-	validTo   int64 // 0 = no upper bound (still active)
 }
 
 // Service orchestrates parallel oracle price backfilling.
@@ -72,9 +69,10 @@ type Service struct {
 	newMulticaller MulticallFactory
 	repo           outbound.OnchainPriceRepository
 
-	oracleABI *abi.ABI
-	feedABI   *abi.ABI
-	shareABI  *abi.ABI
+	oracleABI    *abi.ABI
+	feedABI      *abi.ABI
+	shareABI     *abi.ABI
+	curvePoolABI *abi.ABI
 
 	logger *slog.Logger
 }
@@ -97,6 +95,10 @@ func NewService(
 	}
 	if config.ChainID <= 0 {
 		return nil, fmt.Errorf("config.ChainID must be > 0")
+	}
+	// Not defaulted at load time, because a run that silently read "now" would look normal.
+	if config.ReferenceEffectiveAt.IsZero() {
+		return nil, fmt.Errorf("config.ReferenceEffectiveAt must be set")
 	}
 
 	defaults := configDefaults()
@@ -125,6 +127,11 @@ func NewService(
 		return nil, fmt.Errorf("loading ERC4626 ABI: %w", err)
 	}
 
+	curvePoolABI, err := abis.GetCurveNGPoolABI()
+	if err != nil {
+		return nil, fmt.Errorf("loading Curve NG pool ABI: %w", err)
+	}
+
 	return &Service{
 		config:         config,
 		headerFetcher:  headerFetcher,
@@ -133,6 +140,7 @@ func NewService(
 		oracleABI:      oracleABI,
 		feedABI:        feedABI,
 		shareABI:       shareABI,
+		curvePoolABI:   curvePoolABI,
 		logger:         config.Logger.With("component", "oracle-backfill"),
 	}, nil
 }
@@ -165,10 +173,8 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 
 func (s *Service) validateFeedDecimals(ctx context.Context, workUnits []*oracleWorkUnit, blockNum int64) error {
 	for _, wu := range workUnits {
-		feeds := wu.Feeds
-		if wu.Oracle.OracleType.IsERC4626Oracle() {
-			feeds = blockchain.ERC4626UnderlyingFeeds(wu.ERC4626Vaults)
-		} else if !wu.Oracle.OracleType.IsFeedOracle() {
+		feeds, ok := oracle_pricing.ValidationFeeds(wu.OracleUnit)
+		if !ok {
 			continue
 		}
 		mc, err := s.newMulticaller(wu.Oracle.OracleType)
@@ -200,7 +206,7 @@ func (s *Service) validateFeedDecimals(ctx context.Context, workUnits []*oracleW
 // buildOracleWorkUnits loads all enabled oracles from DB, deduplicates by oracle_id,
 // and builds the per-oracle data structures needed for price fetching.
 func (s *Service) buildOracleWorkUnits(ctx context.Context) ([]*oracleWorkUnit, error) {
-	shared, err := oracle_pricing.LoadOracleUnits(ctx, s.repo, s.config.ChainID, s.logger)
+	shared, err := oracle_pricing.LoadOracleUnits(ctx, s.repo, s.config.ChainID, s.config.ReferenceEffectiveAt, s.logger)
 	if err != nil {
 		return nil, err
 	}
@@ -210,7 +216,7 @@ func (s *Service) buildOracleWorkUnits(ctx context.Context) ([]*oracleWorkUnit, 
 	if err != nil {
 		return nil, fmt.Errorf("getting protocol oracle bindings: %w", err)
 	}
-	blockRanges := computeOracleBlockRanges(bindings)
+	validFromBlocks := computeOracleValidFromBlocks(bindings)
 
 	var workUnits []*oracleWorkUnit
 	for _, su := range shared {
@@ -219,11 +225,8 @@ func (s *Service) buildOracleWorkUnits(ctx context.Context) ([]*oracleWorkUnit, 
 			validFrom:  su.Oracle.DeploymentBlock,
 		}
 
-		if br, ok := blockRanges[su.Oracle.ID]; ok {
-			if br.validFrom > wu.validFrom {
-				wu.validFrom = br.validFrom
-			}
-			wu.validTo = br.validTo
+		if vf, ok := validFromBlocks[su.Oracle.ID]; ok && vf > wu.validFrom {
+			wu.validFrom = vf
 		}
 
 		workUnits = append(workUnits, wu)
@@ -234,12 +237,11 @@ func (s *Service) buildOracleWorkUnits(ctx context.Context) ([]*oracleWorkUnit, 
 
 func (s *Service) runForOracle(ctx context.Context, wu *oracleWorkUnit, fromBlock, toBlock int64) error {
 	var ok bool
-	fromBlock, toBlock, ok = clampBlockRange(fromBlock, toBlock, wu.validFrom, wu.validTo)
+	fromBlock, toBlock, ok = clampBlockRange(fromBlock, toBlock, wu.validFrom)
 	if !ok {
 		s.logger.Info("no blocks to process after clamping to oracle valid range",
 			"oracle", wu.Oracle.Name,
-			"validFrom", wu.validFrom,
-			"validTo", wu.validTo)
+			"validFrom", wu.validFrom)
 		return nil
 	}
 
@@ -323,66 +325,29 @@ func (s *Service) runForOracle(ctx context.Context, wu *oracleWorkUnit, fromBloc
 	return nil
 }
 
-// computeOracleBlockRanges groups protocol-oracle bindings by protocol, then
-// determines each oracle's valid block range as the union across all protocols.
-// Assumes bindings are ordered by (protocol_id, from_block) as returned by
-// GetAllProtocolOracleBindings.
-func computeOracleBlockRanges(bindings []*entity.ProtocolOracle) map[int64]*oracleBlockRange {
-	byProtocol := make(map[int64][]*entity.ProtocolOracle)
+// computeOracleValidFromBlocks determines each oracle's earliest valid block
+// as the minimum from_block across every binding that references it. A
+// protocol's bindings are a union, not a temporal sequence: the pricing API
+// resolves a protocol's price as the latest row across ALL of its bound
+// oracles (see the allocations receipt join), so a protocol adding a second
+// oracle must not cap the first one's backfill range.
+func computeOracleValidFromBlocks(bindings []*entity.ProtocolOracle) map[int64]int64 {
+	result := make(map[int64]int64)
 	for _, b := range bindings {
-		byProtocol[b.ProtocolID] = append(byProtocol[b.ProtocolID], b)
-	}
-
-	type rangeAccum struct {
-		minFrom     int64
-		maxTo       int64
-		stillActive bool
-	}
-	accum := make(map[int64]*rangeAccum)
-
-	for _, protocolBindings := range byProtocol {
-		for i, b := range protocolBindings {
-			a, ok := accum[b.OracleID]
-			if !ok {
-				a = &rangeAccum{minFrom: b.FromBlock}
-				accum[b.OracleID] = a
-			}
-			if b.FromBlock < a.minFrom {
-				a.minFrom = b.FromBlock
-			}
-
-			isLast := i == len(protocolBindings)-1
-			if isLast {
-				a.stillActive = true
-			} else {
-				supersededAt := protocolBindings[i+1].FromBlock - 1
-				if supersededAt > a.maxTo {
-					a.maxTo = supersededAt
-				}
-			}
+		vf, ok := result[b.OracleID]
+		if !ok || b.FromBlock < vf {
+			result[b.OracleID] = b.FromBlock
 		}
-	}
-
-	result := make(map[int64]*oracleBlockRange, len(accum))
-	for oracleID, a := range accum {
-		r := &oracleBlockRange{validFrom: a.minFrom}
-		if !a.stillActive {
-			r.validTo = a.maxTo
-		}
-		result[oracleID] = r
 	}
 	return result
 }
 
-// clampBlockRange restricts the requested [from, to] range to the oracle's valid
-// [validFrom, validTo] range. Returns the clamped from/to and whether any blocks
-// remain (ok=true means from <= to after clamping).
-func clampBlockRange(from, to, validFrom, validTo int64) (int64, int64, bool) {
+// clampBlockRange restricts the requested [from, to] range to start no earlier
+// than validFrom. Returns the clamped from/to and whether any blocks remain
+// (ok=true means from <= to after clamping).
+func clampBlockRange(from, to, validFrom int64) (int64, int64, bool) {
 	if validFrom > 0 {
 		from = max(from, validFrom)
-	}
-	if validTo > 0 {
-		to = min(to, validTo)
 	}
 	return from, to, from <= to
 }
@@ -437,6 +402,8 @@ func (s *Service) worker(
 			prices, blockErr = s.processBlockAave(ctx, mc, wu.OracleAddr, wu.TokenAddrs, wu.TokenIDs, oracleID, priceDecimals, blockNum)
 		case entity.OracleTypeERC4626Share:
 			prices, blockErr = s.processBlockERC4626(ctx, mc, wu, oracleID, blockNum)
+		case entity.OracleTypeCurveLPNG:
+			prices, blockErr = s.processBlockCurveLPNG(ctx, mc, wu, oracleID, blockNum)
 		default:
 			blockErr = fmt.Errorf("unsupported oracle type: %s", wu.Oracle.OracleType)
 		}
@@ -541,9 +508,12 @@ func (s *Service) processBlockFeed(
 	oracleID int16,
 	blockNum int64,
 ) ([]*entity.OnchainTokenPrice, error) {
+	// Zero block hash: backfill replays settled historical blocks with no live
+	// fork ambiguity and no BlockEvent to source a hash from, so FetchFeedPrices
+	// falls back to number-pinned reads (VEC-471).
 	results, err := blockchain.FetchFeedPrices(
 		ctx, mc, s.feedABI,
-		wu.Feeds, blockNum,
+		wu.Feeds, blockNum, common.Hash{},
 		s.logger,
 	)
 	if err != nil {
@@ -562,9 +532,12 @@ func (s *Service) processBlockERC4626(
 	oracleID int16,
 	blockNum int64,
 ) ([]*entity.OnchainTokenPrice, error) {
+	// Zero block hash: backfill replays settled historical blocks with no live
+	// fork ambiguity and no BlockEvent to source a hash from, so
+	// FetchERC4626SharePrices falls back to number-pinned reads (VEC-471).
 	results, err := blockchain.FetchERC4626SharePrices(
 		ctx, mc, s.shareABI, s.feedABI,
-		wu.ERC4626Vaults, blockNum,
+		wu.ERC4626Vaults, blockNum, common.Hash{},
 		s.logger,
 	)
 	if err != nil {
@@ -572,6 +545,35 @@ func (s *Service) processBlockERC4626(
 	}
 
 	return s.feedResultsToPrices(ctx, results, oracleID, blockNum)
+}
+
+// processBlockCurveLPNG prices the unit's LP token at one historic block.
+// Unlike the feed/erc4626 paths there is no number-pinned fallback:
+// FetchCurveLPNGPrices rejects a zero hash by design, so the block's
+// canonical header is fetched first and the multicall pinned to its hash. A
+// failed header fetch fails the block rather than downgrading the read.
+func (s *Service) processBlockCurveLPNG(
+	ctx context.Context,
+	mc outbound.Multicaller,
+	wu *oracleWorkUnit,
+	oracleID int16,
+	blockNum int64,
+) ([]*entity.OnchainTokenPrice, error) {
+	header, err := s.headerFetcher.HeaderByNumber(ctx, new(big.Int).SetInt64(blockNum))
+	if err != nil {
+		return nil, fmt.Errorf("getting block header: %w", err)
+	}
+
+	results, err := blockchain.FetchCurveLPNGPrices(
+		ctx, mc, s.curvePoolABI, s.feedABI,
+		*wu.CurveLPNGPool, blockNum, header.Hash(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("fetching curve lp prices: %w", err)
+	}
+
+	blockTimestamp := time.Unix(int64(header.Time), 0).UTC()
+	return resultsToPrices(results, oracleID, blockNum, blockTimestamp)
 }
 
 // feedResultsToPrices converts successful price results into OnchainTokenPrice
@@ -597,10 +599,20 @@ func (s *Service) feedResultsToPrices(
 	if err != nil {
 		return nil, fmt.Errorf("getting block header: %w", err)
 	}
-	blockTimestamp := time.Unix(int64(header.Time), 0).UTC()
 
-	prices := make([]*entity.OnchainTokenPrice, 0, len(successResults))
-	for _, result := range successResults {
+	return resultsToPrices(successResults, oracleID, blockNum, time.Unix(int64(header.Time), 0).UTC())
+}
+
+// resultsToPrices converts already-successful price results into
+// OnchainTokenPrice entities at the block.
+func resultsToPrices(
+	results []blockchain.FeedPriceResult,
+	oracleID int16,
+	blockNum int64,
+	blockTimestamp time.Time,
+) ([]*entity.OnchainTokenPrice, error) {
+	prices := make([]*entity.OnchainTokenPrice, 0, len(results))
+	for _, result := range results {
 		p, err := entity.NewOnchainTokenPrice(
 			result.TokenID,
 			oracleID,

@@ -73,6 +73,28 @@ class TestJsonFormatter:
 
         assert "request_id" not in parsed
 
+    def test_extra_fields_become_top_level_json_fields(self) -> None:
+        """Structured events (authorization decisions, ADR-015 gate 3) are only
+        a Loki query surface if `extra` survives the formatter."""
+        record = _make_record()
+        record.event = "authz.decision"
+        record.decision = "deny"
+        parsed = json.loads(JsonFormatter().format(record))
+
+        assert parsed["event"] == "authz.decision"
+        assert parsed["decision"] == "deny"
+
+    def test_extra_fields_cannot_overwrite_the_envelope(self) -> None:
+        """Every line is parsed by these keys; an `extra` must not shadow one."""
+        record = _make_record(msg="the real message")
+        record.level = "SPOOFED"
+        record.logger = "spoofed.logger"
+        parsed = json.loads(JsonFormatter().format(record))
+
+        assert parsed["level"] == "INFO"
+        assert parsed["logger"] == "test.logger"
+        assert parsed["message"] == "the real message"
+
 
 class TestTextFormatter:
     def test_text_formatter_output(self) -> None:
@@ -95,6 +117,15 @@ class TestTextFormatter:
             assert "[request_id=req-456]" in output
         finally:
             request_id_var.reset(token)
+
+    def test_text_formatter_appends_extra_fields(self) -> None:
+        record = _make_record()
+        record.event = "authz.decision"
+        record.decision = "deny"
+        output = TextFormatter().format(record)
+
+        assert "event=authz.decision" in output
+        assert "decision=deny" in output
 
 
 class TestSetupLogging:
@@ -129,6 +160,19 @@ class TestSetupLogging:
         setup_logging(log_level="DEBUG", log_format="text")
 
         assert root.handlers == original_handlers
+
+    def test_setup_logging_configures_every_requested_tree_identically(self) -> None:
+        # A worker process logs under app.* (harness/service/model) and cli.*
+        # (its entry point); both trees must share one format or the pod emits
+        # two shapes into one stdout stream.
+        setup_logging(log_level="DEBUG", log_format="json", logger_names=("app", "cli"))
+
+        for name in ("app", "cli"):
+            tree_logger = logging.getLogger(name)
+            assert tree_logger.level == logging.DEBUG
+            assert len(tree_logger.handlers) == 1
+            assert isinstance(tree_logger.handlers[0].formatter, JsonFormatter)
+            assert tree_logger.propagate is False
 
 
 class TestGetLogger:

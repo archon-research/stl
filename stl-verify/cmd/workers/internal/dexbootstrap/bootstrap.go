@@ -4,12 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math/big"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
@@ -22,6 +21,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/dextelemetry"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
@@ -44,6 +44,9 @@ type BootstrapOptions struct {
 	// BuildTime is the compile-time-baked build timestamp the worker exposes
 	// via the buildinfo package.
 	BuildTime string
+	// GitBranch is the ldflags-injected build branch, logged at startup so an
+	// image built from a stray branch is spottable (mirrors the other indexers).
+	GitBranch string
 }
 
 // Deps is the bundle of long-lived clients + repositories created by
@@ -58,10 +61,6 @@ type Deps struct {
 	PostgresPool  *pgxpool.Pool
 	BuildRegistry *buildregistry.Registry
 
-	// blockNumberer is the chain client used by LatestBlock; kept unexported so
-	// callers reach it via the accessor rather than the concrete eth client.
-	blockNumberer blockNumberer
-
 	TxManager    outbound.TxManager
 	ProtocolRepo outbound.ProtocolRepository
 	TokenRepo    outbound.TokenRepository
@@ -73,29 +72,11 @@ type Deps struct {
 	cleanups []func()
 }
 
-// blockNumberer is the subset of the eth client used to read chain head.
-type blockNumberer interface {
-	BlockNumber(ctx context.Context) (uint64, error)
-}
-
-// LatestBlock returns the current chain head as a *big.Int, for callers (e.g. a
-// startup capability probe) that need a concrete block for a Multicaller call.
-func (d *Deps) LatestBlock(ctx context.Context) (*big.Int, error) {
-	if d.blockNumberer == nil {
-		return nil, fmt.Errorf("block numberer not initialised")
-	}
-	bn, err := d.blockNumberer.BlockNumber(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("fetching latest block: %w", err)
-	}
-	return new(big.Int).SetUint64(bn), nil
-}
-
 // Close releases every resource in reverse-registration order. Safe to call
 // on a partially-initialised Deps from a Bootstrap error path.
 func (d *Deps) Close() {
-	for i := len(d.cleanups) - 1; i >= 0; i-- {
-		d.cleanups[i]()
+	for _, v := range slices.Backward(d.cleanups) {
+		v()
 	}
 }
 
@@ -116,10 +97,10 @@ func (d *Deps) CommonDeps() dexconsumer.CommonDeps {
 	}
 }
 
-// Bootstrap performs the wire-up shared by every DEX worker: logger, AWS
-// config, SQS consumer, Redis cache, S3 reader, multicall client, Postgres
-// pool, build registry, OTEL init, dex telemetry, and the four shared
-// repositories (txManager, protocolRepo, tokenRepo, eventRepo).
+// Bootstrap performs the wire-up shared by every DEX worker: logger, OTEL init,
+// AWS config, SQS consumer, Redis cache, S3 reader, multicall client, Postgres
+// pool, build registry, dex telemetry, and the four shared repositories
+// (txManager, protocolRepo, tokenRepo, eventRepo).
 //
 // The returned *Deps owns the lifecycle of everything it returns; on
 // success the caller defers Close. On any error mid-setup the partially-
@@ -138,6 +119,20 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 	slog.SetDefault(logger)
 
 	d := &Deps{Logger: logger}
+
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    opts.ServiceName,
+		ServiceVersion: buildinfo.GitHash(),
+		BuildTime:      opts.BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		d.Close()
+		return nil, fmt.Errorf("initializing telemetry: %w", err)
+	}
+	// OTEL shutdown takes a context; use background so a cancelled ctx during
+	// signal-driven teardown doesn't truncate the final metric flush.
+	d.cleanups = append(d.cleanups, func() { shutdownOTEL(context.Background()) })
 
 	awsCfg, err := loadAWSConfig(ctx)
 	if err != nil {
@@ -184,14 +179,7 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 	}
 	logger.Info("Redis connected", "addr", cfg.RedisAddr)
 
-	s3Opts := []func(*awss3.Options){}
-	if s3Endpoint := env.Get("AWS_S3_ENDPOINT", ""); s3Endpoint != "" {
-		s3Opts = append(s3Opts, func(o *awss3.Options) {
-			o.BaseEndpoint = aws.String(s3Endpoint)
-			o.UsePathStyle = true
-		})
-	}
-	s3Reader := s3adapter.NewReaderWithOptions(awsCfg, logger, s3Opts...)
+	s3Reader := s3adapter.NewReaderFromEnv(awsCfg, logger)
 	d.CacheReader, err = cache.NewReaderWithFallback(blockCache, s3Reader, cfg.ChainID, cfg.DeployEnv, cfg.S3Bucket, logger)
 	if err != nil {
 		d.Close()
@@ -204,7 +192,6 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 		return nil, fmt.Errorf("connecting to Ethereum node: %w", err)
 	}
 	d.cleanups = append(d.cleanups, func() { ethClient.Close() })
-	d.blockNumberer = ethClient
 	logger.Info("Ethereum node connected")
 
 	pool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(cfg.DBURL))
@@ -224,24 +211,12 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 	d.BuildRegistry = buildReg
 
 	logger.Info("starting "+opts.ServiceName,
+		"dex", cfg.Dex,
 		"queue", cfg.QueueURL,
 		"redis", cfg.RedisAddr,
 		"chainID", cfg.ChainID,
-		"commit", buildReg.GitHash())
-
-	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    opts.ServiceName,
-		ServiceVersion: buildReg.GitHash(),
-		BuildTime:      opts.BuildTime,
-		Logger:         logger,
-	})
-	if err != nil {
-		d.Close()
-		return nil, fmt.Errorf("initializing telemetry: %w", err)
-	}
-	// OTEL shutdown takes a context; use background so a cancelled ctx during
-	// signal-driven teardown doesn't truncate the final metric flush.
-	d.cleanups = append(d.cleanups, func() { shutdownOTEL(context.Background()) })
+		"commit", buildReg.GitHash(),
+		"branch", opts.GitBranch)
 
 	dexTel, err := dextelemetry.NewTelemetry(opts.MetricPrefix, cfg.ChainID)
 	if err != nil {
@@ -250,9 +225,8 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 	}
 	d.DexTelemetry = dexTel
 
-	// Multicaller is built after InitOTEL so its telemetry binds to the real
-	// meter provider (emits multicall_batch_size{chain}); resolving the chain
-	// name fails hard rather than emitting an empty chain label.
+	// Resolving the chain name fails hard rather than emitting an empty chain
+	// label on multicall_batch_size{chain}.
 	chainName, err := entity.ChainName(cfg.ChainID)
 	if err != nil {
 		d.Close()

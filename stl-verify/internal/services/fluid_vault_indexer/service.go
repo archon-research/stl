@@ -57,6 +57,11 @@ type Config struct {
 	// TargetDebtToken is the debt token a vault must use to be in scope. Zero
 	// value defaults to sUSDS.
 	TargetDebtToken common.Address
+
+	// Metrics records one blocks_processed_total sample per consumed block so
+	// liveness is observable even through periods where no in-scope vault is
+	// touched (the multicall metric stays flat then). Optional; nil disables it.
+	Metrics outbound.BackupMetricsRecorder
 }
 
 // Service is the Fluid vault indexer SQS consumer.
@@ -69,6 +74,8 @@ type Service struct {
 	vaultRepo    outbound.FluidVaultRepository
 	tokenRepo    outbound.TokenRepository
 	protocolRepo outbound.ProtocolRepository
+
+	metrics outbound.BackupMetricsRecorder
 
 	blockchain    *blockchainService
 	registry      *VaultRegistry
@@ -137,6 +144,7 @@ func NewService(
 		vaultRepo:     vaultRepo,
 		tokenRepo:     tokenRepo,
 		protocolRepo:  protocolRepo,
+		metrics:       config.Metrics,
 		blockchain:    blockchain,
 		registry:      NewVaultRegistry(logger),
 		deployedTopic: deployed.ID,
@@ -179,8 +187,26 @@ func validateDependencies(
 // Start loads the registry, reconciles all existing vaults against the resolver
 // at the latest block (so vaults that predate the indexer are picked up — not
 // just ones whose VaultDeployed event arrives later), then runs the SQS
+// The visibility-timeout guard is fatal, so it runs before any startup I/O: a
+// misconfigured pod would otherwise re-run the whole sweep on every
+// CrashLoopBackOff cycle before refusing.
+func (s *Service) consumeLoop() sqsutil.Config {
+	return sqsutil.Config{
+		Consumer:     s.consumer,
+		MaxMessages:  s.config.MaxMessages,
+		PollInterval: s.config.PollInterval,
+		Logger:       s.logger,
+		ChainID:      s.config.ChainID,
+	}
+}
+
 // processing loop until ctx is cancelled.
 func (s *Service) Start(ctx context.Context) error {
+	loop := s.consumeLoop()
+	if err := loop.Validate(); err != nil {
+		return err
+	}
+
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
 	if err := s.registry.LoadFromDB(ctx, s.vaultRepo, s.config.ChainID); err != nil {
@@ -196,13 +222,7 @@ func (s *Service) Start(ctx context.Context) error {
 	}
 
 	s.wg.Go(func() {
-		sqsutil.RunLoop(s.ctx, sqsutil.Config{
-			Consumer:     s.consumer,
-			MaxMessages:  s.config.MaxMessages,
-			PollInterval: s.config.PollInterval,
-			Logger:       s.logger,
-			ChainID:      s.config.ChainID,
-		}, s.processBlockEvent)
+		sqsutil.RunLoop(s.ctx, loop, s.processBlockEvent)
 	})
 
 	s.logger.Info("fluid vault indexer started",
@@ -272,7 +292,13 @@ func (s *Service) ReconcileVaults(ctx context.Context, blockNumber int64) error 
 	return nil
 }
 
-func (s *Service) processBlockEvent(ctx context.Context, event outbound.BlockEvent) error {
+// processBlockEvent handles one consumed block. It records a blocks_processed_total
+// sample for every block — including blocks that touch no in-scope vault — so the
+// counter is the honest per-block liveness signal (the multicall metric only moves
+// when a tracked vault is touched, which can be quiet for days).
+func (s *Service) processBlockEvent(ctx context.Context, event outbound.BlockEvent) (retErr error) {
+	defer func() { s.recordBlockProcessed(ctx, retErr) }()
+
 	ctx = archiving.WithBlockVersion(ctx, event.Version)
 
 	receipts, err := s.fetchReceipts(ctx, event)
@@ -289,6 +315,17 @@ func (s *Service) processBlockEvent(ctx context.Context, event outbound.BlockEve
 	}
 
 	return s.snapshotVaults(ctx, touched, event)
+}
+
+func (s *Service) recordBlockProcessed(ctx context.Context, err error) {
+	if s.metrics == nil {
+		return
+	}
+	status := outbound.StatusSuccess
+	if err != nil {
+		status = outbound.StatusError
+	}
+	s.metrics.RecordBlockProcessed(ctx, status)
 }
 
 func (s *Service) fetchReceipts(ctx context.Context, event outbound.BlockEvent) ([]shared.TransactionReceipt, error) {

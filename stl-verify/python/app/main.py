@@ -3,21 +3,27 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+import httpx
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.openapi.docs import get_swagger_ui_html, get_swagger_ui_oauth2_redirect_html
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
 from app.adapters.postgres.aave_like_liquidation_params_repository import AaveLikeLiquidationParamsRepository
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
+from app.adapters.postgres.backed_breakdown_repository_maple import MapleBackedBreakdownRepository
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
+from app.adapters.postgres.core_model_results_reader import PostgresCoreModelResultsReader
 from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingReader
+from app.adapters.postgres.engine import create_db_engine
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
+from app.adapters.postgres.morpho_vault_allocations_reader import PostgresMorphoVaultAllocationsReader
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository, resolve_receipt_token_mapping
+from app.adapters.postgres.reference_as_of import pinned_to
+from app.api.deps import require_analyst, require_viewer
 from app.api.v1 import (
     allocations,
     data_sources,
@@ -25,17 +31,23 @@ from app.api.v1 import (
     prime_debts,
     prime_risk_capital,
     protocol_events,
+    provenance_availability,
     risk,
     status,
     tokens,
     total_capital,
 )
+from app.auth.fga import FgaClient
+from app.auth.jwt import TokenVerifier
+from app.auth.settings import check_auth_settings
 from app.config import Settings, get_settings
 from app.logging import get_logger, setup_logging
 from app.middleware.request_id import RequestIdMiddleware
+from app.risk_engine.core_model.config import load_commented_json
 from app.risk_engine.mapping import MappingError, load_asset_mapping
 from app.risk_engine.suraf.loader import load_all_ratings
 from app.risk_engine.suraf.result import SurafResult
+from app.services.core_model_risk_service import MAINNET_CHAIN_ID, CoreModelRiskService, morpho_market_key_index
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 from app.services.model_registry import ModelRegistry
 from app.services.suraf_rrc_service import SurafRrcService
@@ -135,7 +147,23 @@ def _is_asset_path(requested_path: str) -> bool:
     return requested_path.split("/", 1)[0] == "assets"
 
 
-def configure_docs(application: FastAPI) -> None:
+def configure_docs(application: FastAPI, settings: Settings) -> None:
+    # With auth on, Swagger gets an Authorize button (authorization-code +
+    # PKCE against Keycloak) and the redirect page it needs. The redirect
+    # route is NOT auto-registered because docs_url=None — without it the
+    # OAuth flow dead-ends silently after login (ADR-015, app-code notes).
+    init_oauth = None
+    if settings.auth_enabled and settings.oidc_issuer:
+        init_oauth = {
+            "clientId": "swagger-ui",
+            "usePkceWithAuthorizationCodeGrant": True,
+            "scopes": "openid profile",
+        }
+
+        @application.get("/docs/oauth2-redirect", include_in_schema=False)
+        async def swagger_ui_redirect():
+            return get_swagger_ui_oauth2_redirect_html()
+
     @application.get("/docs", include_in_schema=False)
     async def swagger_ui_html():
         openapi_url = application.openapi_url or "/openapi.json"
@@ -143,11 +171,14 @@ def configure_docs(application: FastAPI) -> None:
             openapi_url=openapi_url,
             title=f"{application.title} - Swagger UI",
             swagger_favicon_url=DOCS_FAVICON_URL,
+            oauth2_redirect_url="/docs/oauth2-redirect" if init_oauth else None,
+            init_oauth=init_oauth,
         )
 
 
 def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
     setup_logging(log_level=settings.log_level, log_format=settings.log_format)
+    check_auth_settings(settings)
 
     # Validate risk-engine config before acquiring any resources so a bad
     # configuration fails startup without leaking a telemetry provider or
@@ -168,22 +199,43 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
     _check_mapping_refs(raw_mapping, suraf_ratings)
     logger.info("asset->rating mapping loaded entries=%d", len(raw_mapping))
 
+    core_raw_mapping = load_asset_mapping(settings.core_model_mappings_file)
+    logger.info("core model asset->market_key mapping loaded entries=%d", len(core_raw_mapping))
+
+    core_morpho_market_keys = morpho_market_key_index(load_commented_json(settings.core_model_market_configs_file))
+    logger.info("core model morpho market keys loaded entries=%d", len(core_morpho_market_keys))
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        engine = create_async_engine(settings.async_database_url, pool_pre_ping=True)
+        # Before the try: the finally closes it, and a startup error raised
+        # before the auth block would otherwise become an UnboundLocalError.
+        auth_http: httpx.AsyncClient | None = None
+        engine = create_db_engine(
+            settings.async_database_url,
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_timeout=settings.db_pool_timeout,
+            pool_recycle=settings.db_pool_recycle_seconds,
+            statement_cache_size=settings.db_statement_cache_size,
+        )
         try:
             async with engine.connect() as conn:
                 await conn.execute(text("SELECT 1"))
 
             asset_to_rating = await resolve_receipt_token_mapping(raw_mapping, engine)
-            allocation_repo = AllocationRepository(engine)
+            # Published on app.state so every route resolves the same provider via
+            # deps.get_reference_as_of; a per-route default would leave most unpinned.
+            reference_effective_at = pinned_to(settings.resolved_reference_effective_at())
+            app.state.reference_effective_at = reference_effective_at
+            allocation_repo = AllocationRepository(engine, reference_effective_at)
             suraf_rrc_service = SurafRrcService(asset_to_rating, suraf_ratings, allocation_repo)
 
             receipt_token_repo = ReceiptTokenRepository(engine)
             crypto_lending_reader = PostgresCryptoLendingReader(
                 receipt_token_repo=receipt_token_repo,
-                aave_breakdown_repo=AaveLikeBackedBreakdownRepository(engine),
-                morpho_breakdown_repo=MorphoBackedBreakdownRepository(engine),
+                aave_breakdown_repo=AaveLikeBackedBreakdownRepository(engine, reference_effective_at),
+                morpho_breakdown_repo=MorphoBackedBreakdownRepository(engine, reference_effective_at),
+                maple_breakdown_repo=MapleBackedBreakdownRepository(engine),
                 aave_liq_repo=AaveLikeLiquidationParamsRepository(engine),
                 morpho_liq_repo=MorphoLiquidationParamsRepository(engine),
                 engine=engine,
@@ -199,7 +251,24 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
                 default_gap_pct=settings.risk_default_gap_pct,
                 supported_asset_ids=supported_crypto_lending_asset_ids,
             )
-            model_registry = ModelRegistry([suraf_rrc_service, crypto_lending_risk_service])
+            asset_to_market_key = await resolve_receipt_token_mapping(core_raw_mapping, engine)
+            core_model_results_reader = PostgresCoreModelResultsReader(engine)
+            # Same startup-snapshot rule as the crypto-lending set above: a
+            # Morpho receipt token registered after boot needs a restart.
+            # Mainnet only — CORE market keys are Ethereum-only, and symbol-pair
+            # matching would hand another chain's vault mainnet results.
+            morpho_asset_ids = await crypto_lending_reader.list_morpho_asset_ids(chain_id=MAINNET_CHAIN_ID)
+            core_model_risk_service = CoreModelRiskService(
+                asset_to_market_key=asset_to_market_key,
+                results_reader=core_model_results_reader,
+                allocation_repo=allocation_repo,
+                receipt_tokens=receipt_token_repo,
+                morpho_allocations=PostgresMorphoVaultAllocationsReader(engine),
+                morpho_market_keys=core_morpho_market_keys,
+                morpho_asset_ids=morpho_asset_ids,
+                min_coverage_pct=settings.core_model_min_coverage_pct,
+            )
+            model_registry = ModelRegistry([suraf_rrc_service, crypto_lending_risk_service, core_model_risk_service])
 
             app.state.engine = engine
             app.state.suraf_ratings = suraf_ratings
@@ -208,13 +277,33 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             app.state.model_registry = model_registry
             app.state.receipt_token_lookup = receipt_token_repo
 
+            # Beside the engine so it is disposed in the same finally. Absent
+            # from app.state when auth is off, which the gates read as anonymous.
+            if settings.auth_enabled:
+                auth_http = httpx.AsyncClient()
+                app.state.verifier = TokenVerifier(
+                    issuer=settings.oidc_issuer,
+                    audience=settings.oidc_audience,
+                    http=auth_http,
+                    jwks_url=settings.oidc_jwks_url or None,
+                )
+                app.state.fga = FgaClient(
+                    base_url=settings.openfga_url,
+                    api_key=settings.openfga_api_key.get_secret_value(),
+                    store_name=settings.openfga_store_name,
+                    http=auth_http,
+                    list_ceiling=settings.openfga_list_ceiling,
+                )
+
             instrument_sqlalchemy_engine(engine)
             yield
         finally:
             try:
+                if auth_http is not None:
+                    await auth_http.aclose()
                 await engine.dispose()
             finally:
-                shutdown_telemetry(app.state.tracer_provider)
+                shutdown_telemetry(app.state.telemetry_providers)
 
     application = FastAPI(
         title="stl-verify",
@@ -229,7 +318,10 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
         openapi_tags=OPENAPI_TAGS,
     )
     application.add_middleware(RequestIdMiddleware)
-    application.state.tracer_provider = setup_telemetry(application, settings)
+    # The gates read THIS object, not a fresh get_settings(): an app built with
+    # auth on must enforce it whatever the process environment says.
+    application.state.settings = settings
+    application.state.telemetry_providers = setup_telemetry(application, settings)
 
     @application.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -270,16 +362,21 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
 
         return JSONResponse(status_code=422, content={"detail": serializable_errors})
 
+    # Per ROUTER, never global middleware — see require_role. status.router is
+    # deliberately ungated: kubelet reaches its probes directly.
+    viewer = [Depends(require_viewer)]
+    analyst = [Depends(require_analyst)]
     application.include_router(status.router, prefix="/v1")
-    application.include_router(allocations.router, prefix="/v1")
-    application.include_router(tokens.router, prefix="/v1")
-    application.include_router(protocol_events.router, prefix="/v1")
-    application.include_router(prime_debts.router, prefix="/v1")
-    application.include_router(total_capital.router, prefix="/v1")
-    application.include_router(prime_risk_capital.router, prefix="/v1")
-    application.include_router(exposure.router, prefix="/v1")
-    application.include_router(data_sources.router, prefix="/v1")
-    application.include_router(risk.router, prefix="/v1")
+    application.include_router(allocations.router, prefix="/v1", dependencies=viewer)
+    application.include_router(tokens.router, prefix="/v1", dependencies=viewer)
+    application.include_router(protocol_events.router, prefix="/v1", dependencies=viewer)
+    application.include_router(prime_debts.router, prefix="/v1", dependencies=viewer)
+    application.include_router(total_capital.router, prefix="/v1", dependencies=viewer)
+    application.include_router(prime_risk_capital.router, prefix="/v1", dependencies=viewer)
+    application.include_router(exposure.router, prefix="/v1", dependencies=viewer)
+    application.include_router(data_sources.router, prefix="/v1", dependencies=viewer)
+    application.include_router(provenance_availability.router, prefix="/v1", dependencies=viewer)
+    application.include_router(risk.router, prefix="/v1", dependencies=analyst)
 
     def public_openapi() -> dict[str, Any]:
         if application.openapi_schema is not None:
@@ -291,13 +388,34 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             routes=application.routes,
             tags=application.openapi_tags,
         )
-        application.openapi_schema = strip_internal_operations(full)
+        full = strip_internal_operations(full)
+        # Swagger's Authorize button exists only if the schema declares a
+        # security scheme. Emitted only when auth is on, so the published
+        # /openapi.json is unchanged while the app ships dark.
+        if settings.auth_enabled and settings.oidc_issuer:
+            full.setdefault("components", {})["securitySchemes"] = {
+                "oidc": {
+                    "type": "oauth2",
+                    "flows": {
+                        "authorizationCode": {
+                            "authorizationUrl": f"{settings.oidc_issuer}/protocol/openid-connect/auth",
+                            "tokenUrl": f"{settings.oidc_issuer}/protocol/openid-connect/token",
+                            "scopes": {"openid": "", "profile": ""},
+                        }
+                    },
+                }
+            }
+            # Swagger attaches the token only to operations carrying a security
+            # REQUIREMENT, not merely a declared scheme. Root-level, so the
+            # ungated probes gain a cosmetic padlock.
+            full["security"] = [{"oidc": []}]
+        application.openapi_schema = full
         return application.openapi_schema
 
     # FastAPI's documented openapi override pattern
     application.openapi = public_openapi  # ty: ignore[invalid-assignment]
 
-    configure_docs(application)
+    configure_docs(application, settings)
     configure_static_hosting(application, static_dir or DEFAULT_STATIC_DIR)
     return application
 

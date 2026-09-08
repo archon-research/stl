@@ -35,11 +35,14 @@ the same base manifests (no generated manifests).
 
 ## How overlays work
 
-Each overlay sets the target namespace and pins image names. For EKS, CI bumps
-`newTag` per service: staging on merge to main, prod via the env-gated promotion
-(auto-committed to main, then synced only after the `production` GitHub
-Environment review is approved — see CONTRIBUTING.md §14). Do not hand-edit prod
-`newTag`s or sync `stl-prod` manually.
+Each overlay sets the target namespace and pins image names. For EKS the whole
+`images:` block is generated from `k8s/image-roster.txt` by
+`scripts/deploy/render-overlay-images.sh` and rewritten by CI on every deploy:
+staging on merge to main, prod via the env-gated promotion (auto-committed to
+main, then synced only after the `production` GitHub Environment review is
+approved — see CONTRIBUTING.md §14). Entries are sorted by alias; the roster is
+the inventory. Do not hand-edit the block or sync `stl-prod` manually (ORB-362);
+`make check-overlay-images` (in `stl-verify/`) is the local guard.
 
 ```bash
 # Preview what gets applied
@@ -48,6 +51,41 @@ kubectl kustomize k8s/overlays/dev                 # local core apps
 kubectl kustomize k8s/overlays/dev/workers         # local workers
 kubectl kustomize k8s/overlays/dev/data-validator  # opt-in: watcher-data-validator
 ```
+
+## Config and secret changes on EKS (staging + prod)
+
+Every Deployment in the staging and prod overlays carries
+`reloader.stakater.com/auto: "true"` (applied by one `kind: Deployment` patch in
+each overlay's `patches:` block, so new services are covered automatically).
+
+A merged change to a service's ConfigMap therefore **rolls that service on its
+own**, with no image bump and no manual restart. The same applies to Secrets that
+External Secrets Operator refreshes after an AWS Secrets Manager rotation — that
+path has no commit at all, so nothing in Git could have detected it.
+
+Only workloads that actually reference the changed object roll; Reloader resolves
+references from the pod spec. Metadata-only edits do not trigger a rollout.
+
+Rollouts use each Deployment's normal strategy, so services with
+`strategy: type: Recreate` (most watchers) briefly stop during the swap — exactly
+as they already do on an image deploy.
+
+Before this (ORB-188) a ConfigMap edit merged after the last deploy did nothing:
+`arbitrum-watcher` ran for weeks on superseded `BACKFILL_*` values because its pod
+template had not changed. Break-glass if the controller is ever down:
+
+```bash
+kubectl -n vector rollout restart deployment/<name>
+```
+
+Platform side, opt-out, and troubleshooting live in the infra repo:
+[ADR-013](https://github.com/archon-research/infrastructure/blob/main/docs/adr/ADR-013-AUTOMATIC-CONFIG-SECRET-ROLLOUTS.md)
+and [the Reloader runbook](https://github.com/archon-research/infrastructure/blob/main/docs/runbook/reloader-config-rollouts.md).
+Verify the overlays locally with `make check-reloader-opt-in` (in `stl-verify/`).
+
+> The local kind overlay is deliberately **not** annotated — no Reloader runs
+> there. Local config changes still need an explicit `rollout restart`, as
+> documented under [Configuration](#configuration) below.
 
 ## IAM / AWS credentials (EKS)
 
@@ -217,10 +255,13 @@ kubectl --context=kind-vector rollout restart deployment -n vector
 Add a `base/<name>/` directory (deployment + serviceaccount + kustomization) like
 the existing services, then reference it (with a local `images:` entry) from
 `overlays/dev/kustomization.yaml` (or `overlays/dev/workers/`, or `overlays/dev/data-validator/`
-for opt-in crons) and the prod/staging overlays. Cronjobs follow the same pattern — there is
-no manifest generator. If a dev cron is added to the core overlay, also add its Deployment
-name to `CRONJOB_DEPLOYMENTS` in `stl-verify/Makefile` (the `check-dev-overlay-sync` guard
-enforces this).
+for opt-in crons). For prod/staging add the base dir under `resources:` and one line to
+`k8s/image-roster.txt` (kind, image name, the `image:` alias the base uses) — those overlays'
+`images:` blocks are generated from the roster, never edited (ORB-362); removing a service means
+deleting its roster line and its stale images entry in the same PR. Cronjobs follow the
+same pattern — there is no manifest generator. If a dev cron is added to the core overlay, also
+add its Deployment name to `CRONJOB_DEPLOYMENTS` in `stl-verify/Makefile` (the
+`check-dev-overlay-sync` guard enforces this).
 
 ## Updating Secrets
 

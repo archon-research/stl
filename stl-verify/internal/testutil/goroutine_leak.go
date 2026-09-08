@@ -6,7 +6,6 @@ import (
 	"os"
 	"runtime"
 	"runtime/pprof"
-	"testing"
 )
 
 // CheckGoroutineLeaks triggers garbage collection and inspects the
@@ -47,12 +46,4 @@ func CheckGoroutineLeaks(exitCode int) int {
 	}
 
 	return exitCode
-}
-
-// RunTestsWithLeakCheck is a convenience wrapper for packages that need no
-// custom TestMain setup. It runs all tests via m.Run() and then checks for
-// goroutine leaks. Returns the exit code suitable for os.Exit.
-func RunTestsWithLeakCheck(m *testing.M) int {
-	code := m.Run()
-	return CheckGoroutineLeaks(code)
 }

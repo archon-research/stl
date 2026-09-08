@@ -1,16 +1,13 @@
 package curveindexer
 
 import (
-	"context"
 	"encoding/json"
-	"fmt"
 	"math/big"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 
-	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
@@ -23,10 +20,15 @@ const (
 )
 
 type RegisteredPool struct {
-	ID           int64 // curve_pool.id
-	Address      common.Address
-	Kind         PoolKind
-	NCoins       int
+	ID      int64 // curve_pool.id
+	Address common.Address
+	Kind    PoolKind
+	NCoins  int
+	// DeployBlock is the pool's on-chain deployment block (0 when not yet
+	// backfilled); gates snapshot sweeps via dexconsumer's deploy-gate tracker
+	// (see DeployBlockNum) so a newly-registered pool isn't multicalled before
+	// it exists on chain.
+	DeployBlock  int64
 	CoinDecimals []int
 	// LpTokenAddress is the separate LP token for pre-NG pools (where totalSupply
 	// lives), nil when the pool is its own LP token.
@@ -37,6 +39,12 @@ type RegisteredPool struct {
 	// LoadPools; irrelevant (and false) for cryptoswap pools, which never call A_precise.
 	HasAPrecise bool
 }
+
+// PoolID and DeployBlockNum implement dexconsumer.SnapshotPool, letting
+// RegisteredPool feed the shared sweep/deploy-gate tracker without
+// dexconsumer depending on curveindexer.
+func (p RegisteredPool) PoolID() int64         { return p.ID }
+func (p RegisteredPool) DeployBlockNum() int64 { return p.DeployBlock }
 
 type SwapRecord struct {
 	Pool         RegisteredPool
@@ -98,69 +106,16 @@ type LiquidityRecord struct {
 	TokenSupply  *big.Int   // nil when absent
 }
 
-type CapturedEvent struct { // -> protocol_event capture net
-	// Address is the log's emitting contract: the pool itself for most logs, but
-	// the separate LP-token contract for pre-NG pools' Transfer/Approval. A captured
-	// event carries only its emitting address, not pool identity; protocol_event
-	// records this address verbatim.
-	Address   common.Address
-	LogIndex  uint
-	TxHash    common.Hash
-	EventName string
-	Payload   json.RawMessage
-}
-
 type DecodedEvents struct {
 	Swaps           []SwapRecord
 	Liquidity       []LiquidityRecord
 	ParameterEvents []ParameterEventRecord
 	LpTokenEvents   []LpTokenEventRecord
-	Captured        []CapturedEvent
-}
-
-// StateSnapshot is a pool-class-tagged state row plus its close-to-static
-// governance config. Exactly one of the two state pointers is non-nil, matching
-// Pool.Kind; the matching config pointer carries the per-block config reads (the
-// repo decides via append-on-change whether to persist a new config row).
-type StateSnapshot struct {
-	Pool             RegisteredPool
-	BlockNumber      int64
-	BlockVersion     int
-	Timestamp        time.Time
-	Stableswap       *entity.CurveStableswapState
-	Cryptoswap       *entity.CurveCryptoswapState
-	StableswapConfig *entity.CurveStableswapConfig
-	CryptoswapConfig *entity.CurveCryptoswapConfig
-}
-
-// Validate enforces that exactly one state pointer is set matching Pool.Kind,
-// and that any attached config pointer also matches Kind (a cross-class config
-// is a handler bug and must fail at the boundary, not become a mismatched row).
-func (s StateSnapshot) Validate() error {
-	switch s.Pool.Kind {
-	case KindStableswapPreNG, KindStableswapNG:
-		if s.Stableswap == nil || s.Cryptoswap != nil {
-			return fmt.Errorf("pool %s (kind %s): expected stableswap snapshot only", s.Pool.Address, s.Pool.Kind)
-		}
-		if s.CryptoswapConfig != nil {
-			return fmt.Errorf("pool %s (kind %s): stableswap snapshot carries a cryptoswap config", s.Pool.Address, s.Pool.Kind)
-		}
-	case KindCryptoswap:
-		if s.Cryptoswap == nil || s.Stableswap != nil {
-			return fmt.Errorf("pool %s (kind %s): expected cryptoswap snapshot only", s.Pool.Address, s.Pool.Kind)
-		}
-		if s.StableswapConfig != nil {
-			return fmt.Errorf("pool %s (kind %s): cryptoswap snapshot carries a stableswap config", s.Pool.Address, s.Pool.Kind)
-		}
-	default:
-		return fmt.Errorf("pool %s: unknown kind %s", s.Pool.Address, s.Pool.Kind)
-	}
-	return nil
+	Captured        []dexconsumer.CapturedLog
 }
 
 type PoolClassHandler interface {
 	DecodeEvents(receipt shared.TransactionReceipt, pool RegisteredPool, chainID, blockNumber int64, version int, ts time.Time) (DecodedEvents, error)
-	SnapshotState(ctx context.Context, mc outbound.Multicaller, pool RegisteredPool, blockNumber int64, version int, ts time.Time) (StateSnapshot, error)
 	// Warm precomputes any per-coin-count state (e.g. event-signature hashes) for
 	// pools with nCoins coins. The coordinator calls it once per registered pool at
 	// construction so the per-block decode path is a pure cache read, keeping the

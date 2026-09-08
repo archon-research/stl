@@ -414,3 +414,34 @@ func TestParseUnixMillisOrZero(t *testing.T) {
 		t.Errorf("parseUnixMillisOrZero(bad) = %v, want zero", got)
 	}
 }
+
+func TestOKXInstrumentsKeepsOnlyLiveSpotPairs(t *testing.T) {
+	base := newRESTTestServer(t, map[string]restResponse{okxInstrumentsPath: {body: `{"code":"0","data":[
+		{"instId":"BTC-USDT","state":"live"},
+		{"instId":"OLD-USDT","state":"suspend"},
+		{"instId":"REB-USDT","state":"rebase"}
+	]}`}})
+
+	got, err := (&okxExchange{restBase: base}).instruments(t.Context())
+	if err != nil {
+		t.Fatalf("instruments: %v", err)
+	}
+	assertTradeable(t, got, map[string]bool{
+		"BTC-USDT":  true,
+		"OLD-USDT":  false,
+		"REB-USDT":  false,
+		"NOPE-USDT": false,
+	})
+}
+
+// TestOKXInstrumentsFailsOnAPIErrorCode: OKX answers a rejected request with
+// HTTP 200 and a non-zero code, so the body decides success, not the status.
+func TestOKXInstrumentsFailsOnAPIErrorCode(t *testing.T) {
+	base := newRESTTestServer(t, map[string]restResponse{
+		okxInstrumentsPath: {body: `{"code":"51001","msg":"instrument type does not exist","data":[]}`},
+	})
+
+	if _, err := (&okxExchange{restBase: base}).instruments(t.Context()); err == nil {
+		t.Fatal("expected an error for a non-zero OKX response code")
+	}
+}

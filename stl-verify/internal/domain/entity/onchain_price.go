@@ -16,6 +16,7 @@ const (
 	OracleTypeChronicle     OracleType = "chronicle"
 	OracleTypeRedstone      OracleType = "redstone"
 	OracleTypeERC4626Share  OracleType = "erc4626_share"
+	OracleTypeCurveLPNG     OracleType = "curve_lp_ng"
 )
 
 // QuoteCurrency identifies the denomination of a feed price.
@@ -41,6 +42,12 @@ func (t OracleType) IsFeedOracle() bool {
 // IsERC4626Oracle reports whether t prices ERC-4626 vault shares.
 func (t OracleType) IsERC4626Oracle() bool {
 	return t == OracleTypeERC4626Share
+}
+
+// IsCurveLPNGOracle reports whether t prices Curve StableSwap-NG pool LP
+// tokens (virtual price times the cheapest coin's USD feed).
+func (t OracleType) IsCurveLPNGOracle() bool {
+	return t == OracleTypeCurveLPNG
 }
 
 // RequiresDirectCall reports whether t must be called via a direct eth_call rather

@@ -3,16 +3,23 @@ package morpho_indexer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"math/big"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/testutils"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -33,6 +40,8 @@ type serviceTestHarness struct {
 	eventRepo        *testutil.MockEventRepository
 	consumer         *testutil.MockSQSConsumer
 	cache            *testutil.MockBlockCache
+	// logs captures every line the service and its narrowing multicaller emit.
+	logs *capturingHandler
 
 	// ABIs for building multicall return data.
 	morphoBlueReadABI *abi.ABI
@@ -43,6 +52,7 @@ type serviceTestHarness struct {
 	morphoBlueEventsABI   *abi.ABI
 	metaMorphoEventsABI   *abi.ABI
 	metaMorphoV2AccrueABI *abi.ABI
+	vaultV2EventsABI      *abi.ABI
 }
 
 func newTestHarness(t *testing.T) *serviceTestHarness {
@@ -69,15 +79,30 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 
 	sqsCfg := shared.SQSConsumerConfigDefaults()
 	sqsCfg.ChainID = 1
+	logs := &capturingHandler{}
+	logger := slog.New(logs)
+	sqsCfg.Logger = logger
 	config := Config{
 		SQSConsumerConfig: sqsCfg,
 	}
 
-	svc, err := NewService(config, consumer, cache, multicaller, txManager, userRepo, protocolRepo, tokenRepo, morphoRepo, eventRepo, receiptTokenRepo)
+	// Production wraps the multicall client the same way (see the morpho binaries'
+	// main.go), so a batched probe that exhausts gas is narrowed here too.
+	narrowed := multicall.NewNarrowing(multicaller, multicall.WithNarrowingLogger(logger))
+	svc, err := NewService(config, consumer, cache, narrowed, txManager, userRepo, protocolRepo, tokenRepo, morphoRepo, eventRepo, receiptTokenRepo)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
 	svc.ctx, svc.cancel = context.WithCancel(context.Background())
+
+	// VEC-471 moved the ~6 dynamic-state getters (market/position/vault state)
+	// from Execute to ExecuteAtHash, while static-identity getters (market
+	// params, token/vault metadata, symbol sweep) stay on Execute. Existing
+	// tests configure only ExecuteFn with a shape-based dispatcher keyed on
+	// `calls` alone; testutil.MockMulticaller forwards an unset ExecuteAtHashFn
+	// to ExecuteFn, so those dispatchers stay correct for both entry points.
+	// Tests that assert the hash-pinned path was actually used (e.g.
+	// TestGetMarketState_PinsToBlockHash) set ExecuteAtHashFn explicitly.
 
 	// Pre-seed the not-vault cache with the canonical "user" addresses so the
 	// V1/V1.1 Morpho Blue caller/onBehalf discovery probe (added to close the
@@ -115,6 +140,10 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 	if err != nil {
 		t.Fatalf("GetMetaMorphoV2AccrueInterestABI: %v", err)
 	}
+	vaultV2EventsABI, err := abis.GetVaultV2EventsABI()
+	if err != nil {
+		t.Fatalf("GetVaultV2EventsABI: %v", err)
+	}
 
 	return &serviceTestHarness{
 		t:                t,
@@ -129,6 +158,7 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 		eventRepo:        eventRepo,
 		consumer:         consumer,
 		cache:            cache,
+		logs:             logs,
 
 		morphoBlueReadABI:     morphoBlueReadABI,
 		metaMorphoReadABI:     metaMorphoReadABI,
@@ -136,6 +166,111 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 		morphoBlueEventsABI:   morphoBlueEventsABI,
 		metaMorphoEventsABI:   metaMorphoEventsABI,
 		metaMorphoV2AccrueABI: v2AccrueABI,
+		vaultV2EventsABI:      vaultV2EventsABI,
+	}
+}
+
+// recordMetrics swaps the service's telemetry for one backed by an in-memory
+// reader, so a test can assert the instrument increments a handler emits. The
+// harness leaves telemetry nil by default (the recorders are nil-safe), which
+// hides those increments.
+func (h *serviceTestHarness) recordMetrics(t *testing.T) sdkmetric.Reader {
+	t.Helper()
+	tel, reader := newRecordingTelemetry(t)
+	h.svc.telemetry = tel
+	return reader
+}
+
+// failCommitAfterMembershipAppend serves every membership append and then fails
+// the commit of the transaction that made one, so a test can prove what the
+// counters claim about rows that never landed. Transactions that appended nothing
+// (the audit-log save) still commit.
+func (h *serviceTestHarness) failCommitAfterMembershipAppend() {
+	appended := false
+	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
+		appended = true
+		return 42, true, nil
+	}
+	h.txManager.WithTransactionFn = func(_ context.Context, fn func(tx pgx.Tx) error) error {
+		appended = false
+		if err := fn(nil); err != nil {
+			return err
+		}
+		if appended {
+			return errors.New("commit failed")
+		}
+		return nil
+	}
+}
+
+// counterPoints collects the named int64 counter's data points. An instrument
+// that was never recorded yields no points instead of failing, so callers can
+// assert absence as well as presence.
+func counterPoints(t *testing.T, reader sdkmetric.Reader, name string) []metricdata.DataPoint[int64] {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collecting metrics: %v", err)
+	}
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != name {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric %q is %T, want metricdata.Sum[int64]", name, m.Data)
+			}
+			return sum.DataPoints
+		}
+	}
+	return nil
+}
+
+// counterValue sums the named counter's points whose attributes include every
+// entry of want. Attributes outside want are ignored, so a test asserts only the
+// labels it cares about.
+func counterValue(t *testing.T, reader sdkmetric.Reader, name string, want map[string]string) int64 {
+	t.Helper()
+	var total int64
+	for _, dp := range counterPoints(t, reader, name) {
+		if hasAttributes(dp.Attributes, want) {
+			total += dp.Value
+		}
+	}
+	return total
+}
+
+func hasAttributes(set attribute.Set, want map[string]string) bool {
+	for k, v := range want {
+		got, ok := set.Value(attribute.Key(k))
+		if !ok || got.AsString() != v {
+			return false
+		}
+	}
+	return true
+}
+
+// makeV2VaultLog builds a VaultV2 event log emitted by vaultAddr: event.ID plus
+// already-encoded indexed topics, with the non-indexed args ABI-packed into
+// data. Mirrors the extractor test's makeV2Log but stamps the vault address and
+// a log index so it flows through processReceipt as a known-vault event.
+func (h *serviceTestHarness) makeV2VaultLog(event abi.Event, vaultAddr common.Address, indexed []common.Hash, nonIndexed ...any) shared.Log {
+	data, err := event.Inputs.NonIndexed().Pack(nonIndexed...)
+	if err != nil {
+		panic(fmt.Sprintf("makeV2VaultLog(%s): %v", event.Name, err))
+	}
+	topics := make([]string, 0, len(indexed)+1)
+	topics = append(topics, event.ID.Hex())
+	for _, hsh := range indexed {
+		topics = append(topics, hsh.Hex())
+	}
+	return shared.Log{
+		Address:         vaultAddr.Hex(),
+		Topics:          topics,
+		Data:            common.Bytes2Hex(data),
+		TransactionHash: testTxHash,
+		LogIndex:        "0x0",
 	}
 }
 
@@ -173,7 +308,7 @@ func (h *serviceTestHarness) packUint256(v *big.Int) []byte {
 	return data
 }
 
-func (h *serviceTestHarness) packAddress(addr common.Address) []byte {
+func packAddress(addr common.Address) []byte {
 	data, err := abi.Arguments{{Type: mustABIType("address")}}.Pack(addr)
 	if err != nil {
 		panic(fmt.Sprintf("packAddress: %v", err))
@@ -255,8 +390,8 @@ func (h *serviceTestHarness) tokenMetadataResults(symbol string, decimals uint8)
 // probes, use vaultV2ProbeResults instead.
 func (h *serviceTestHarness) vaultProbeResults(morphoAddr, asset common.Address) []outbound.Result {
 	return []outbound.Result{
-		{Success: true, ReturnData: h.packAddress(morphoAddr)},
-		{Success: true, ReturnData: h.packAddress(asset)},
+		{Success: true, ReturnData: packAddress(morphoAddr)},
+		{Success: true, ReturnData: packAddress(asset)},
 		{Success: false, ReturnData: nil}, // curator reverts on MetaMorpho
 		{Success: false, ReturnData: nil}, // liquidityAdapter reverts on MetaMorpho
 	}
@@ -315,9 +450,9 @@ func (h *serviceTestHarness) isVaultStateAndTwoBalancesMulticall(calls []outboun
 func (h *serviceTestHarness) vaultV2ProbeResults(asset, curator, liquidityAdapter common.Address) []outbound.Result {
 	return []outbound.Result{
 		{Success: false, ReturnData: nil}, // MORPHO reverts on VaultV2
-		{Success: true, ReturnData: h.packAddress(asset)},
-		{Success: true, ReturnData: h.packAddress(curator)},
-		{Success: true, ReturnData: h.packAddress(liquidityAdapter)},
+		{Success: true, ReturnData: packAddress(asset)},
+		{Success: true, ReturnData: packAddress(curator)},
+		{Success: true, ReturnData: packAddress(liquidityAdapter)},
 	}
 }
 
@@ -338,7 +473,7 @@ func (h *serviceTestHarness) notAVaultProbeResults() []outbound.Result {
 func (h *serviceTestHarness) vaultDetailResults(name, symbol string, decimals uint8, isV1_1 bool) []outbound.Result {
 	skimResult := outbound.Result{Success: false, ReturnData: nil}
 	if isV1_1 {
-		skimResult = outbound.Result{Success: true, ReturnData: h.packAddress(common.HexToAddress("0x1"))}
+		skimResult = outbound.Result{Success: true, ReturnData: packAddress(common.HexToAddress("0x1"))}
 	}
 	return []outbound.Result{
 		{Success: true, ReturnData: h.packString(name)},
@@ -371,6 +506,28 @@ func (h *serviceTestHarness) vaultMetadataExecuteFn(name, symbol string, asset c
 	}
 }
 
+// assertMulticallPinnedViaHash asserts the multicaller recorded at least one
+// invocation whose first call matches pred, that it arrived through ExecuteAtHash
+// (not the number-pinned Execute), and that it was pinned to wantHash. Used to
+// prove reorg-sensitive reads (e.g. the versioned adapter-set enumeration) are
+// hash-pinned.
+func (h *serviceTestHarness) assertMulticallPinnedViaHash(t *testing.T, wantHash common.Hash, name string, pred func(outbound.Call) bool) {
+	t.Helper()
+	for _, inv := range h.multicaller.Invocations {
+		if len(inv.Calls) == 0 || !pred(inv.Calls[0]) {
+			continue
+		}
+		if !inv.ViaHash {
+			t.Errorf("%s must be hash-pinned (ExecuteAtHash), but it went through Execute", name)
+		}
+		if inv.BlockHash != wantHash {
+			t.Errorf("%s pinned to %s, want %s", name, inv.BlockHash.Hex(), wantHash.Hex())
+		}
+		return
+	}
+	t.Errorf("%s: no matching multicall invocation was recorded", name)
+}
+
 // hasSameSelector returns true if a and b share the same first 4 bytes (the
 // ABI function selector).
 func hasSameSelector(a, b []byte) bool {
@@ -385,9 +542,22 @@ func hasSameSelector(a, b []byte) bool {
 	return true
 }
 
+// adaptersLengthSelector / adaptersSelector are the enumerable-adapter read
+// selectors on VaultV2 (chain-verified against sparkUSDTbc: adaptersLength()
+// 0x5aa22bc8, adapters(uint256) 0x4ef501ac).
+var (
+	adaptersLengthSelector = []byte{0x5a, 0xa2, 0x2b, 0xc8}
+	adaptersSelector       = []byte{0x4e, 0xf5, 0x01, 0xac}
+)
+
 // --- Event log construction helpers ---
 
 var (
+	// testBlockHash is the block hash used by processBlock (via the BlockEvent
+	// fixture) for every test that exercises state reads: with VEC-471 those
+	// reads are pinned via ExecuteAtHash, which needs a non-empty hash.
+	testBlockHash = common.HexToHash("0xabc123abc123abc123abc123abc123abc123abc123abc123abc123abc123ab")
+
 	testMarketID  = common.HexToHash("0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc")
 	testCaller    = common.HexToAddress("0x1111111111111111111111111111111111111111")
 	testOnBehalf  = common.HexToAddress("0x2222222222222222222222222222222222222222")
@@ -743,6 +913,7 @@ func (h *serviceTestHarness) processBlock(t *testing.T, chainID, blockNumber int
 		ChainID:     chainID,
 		BlockNumber: blockNumber,
 		Version:     version,
+		BlockHash:   testBlockHash.Hex(),
 	})
 }
 
@@ -764,12 +935,21 @@ func (h *serviceTestHarness) registerTestVault(vaultAddr common.Address, vaultID
 
 // setupPositionEventMulticall sets up the multicaller to return market+position state
 // for position events (Supply, Withdraw, Borrow, Repay, SupplyCollateral, WithdrawCollateral).
+// Position/market state is read via ExecuteAtHash (VEC-471); wiring both entry
+// points to the same dispatcher keeps the mock correct regardless of which
+// path a given getter uses.
 func (h *serviceTestHarness) setupPositionEventMulticall() {
-	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	dispatch := func(calls []outbound.Call) ([]outbound.Result, error) {
 		if len(calls) == 2 {
 			return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
 		}
 		return nil, fmt.Errorf("unexpected call count: %d", len(calls))
+	}
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return dispatch(calls)
+	}
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		return dispatch(calls)
 	}
 }
 
@@ -785,36 +965,42 @@ func (h *serviceTestHarness) setupMarketExistsInDB(marketID [32]byte, dbID int64
 
 // setupMarketNotInDB configures the multicaller with getMarketParams + getTokenPairMetadata responses
 // for the ensureMarket flow when the market doesn't exist in DB yet.
+//
+// Dispatch is shape-based (call count + selector), not entry-point-based,
+// because market/vault state now reads via ExecuteAtHash while market
+// params/token/vault metadata stay on Execute (VEC-471) — both entry points
+// share this dispatcher so the mock is correct regardless of which path a
+// given getter uses.
 func (h *serviceTestHarness) setupMarketNotInDB() {
-	// Override multicaller to handle both position calls and market params/token metadata calls.
-	origFn := h.multicaller.ExecuteFn
-	h.multicaller.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	origExecuteFn := h.multicaller.ExecuteFn
+	origExecuteAtHashFn := h.multicaller.ExecuteAtHashFn
+	dispatch := func(calls []outbound.Call) ([]outbound.Result, error, bool) {
 		switch len(calls) {
 		case 1:
 			// getMarketParams or getMarketState
 			return []outbound.Result{
 				{Success: true, ReturnData: h.packMarketParams(testLoanToken, testCollToken, testOracle, testIrm, testutils.BigFromStr(h.t, "800000000000000000"))},
-			}, nil
+			}, nil, true
 		case 2:
 			// Could be market+position or token metadata.
 			if calls[0].Target == MorphoBlueAddress {
-				return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
+				return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil, true
 			}
 			if calls[0].Target == testLoanToken || calls[0].Target == testCollToken {
 				// Token metadata (symbol + decimals)
 				return []outbound.Result{
 					{Success: true, ReturnData: h.packString("TKN")},
 					{Success: true, ReturnData: h.packUint8(18)},
-				}, nil
+				}, nil, true
 			}
-			return nil, fmt.Errorf("unexpected 2-call multicall to %s", calls[0].Target.Hex())
+			return nil, fmt.Errorf("unexpected 2-call multicall to %s", calls[0].Target.Hex()), true
 		case 3:
 			// market + 2 positions (Liquidate) OR vault state + balance
 			if calls[0].Target == MorphoBlueAddress {
-				return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult(), h.defaultPositionStateResult()}, nil
+				return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult(), h.defaultPositionStateResult()}, nil, true
 			}
 			// vault state + balance
-			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil
+			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil, true
 		case 4:
 			// Four-call multicalls fall into one of four shapes:
 			//  - vault probe              (MORPHO/asset/curator/liquidityAdapter)
@@ -826,10 +1012,10 @@ func (h *serviceTestHarness) setupMarketNotInDB() {
 			// target equality cannot distinguish them. Discriminate by the
 			// first call's 4-byte selector instead.
 			if h.isProbeMulticall(calls) {
-				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil, true
 			}
 			if h.isVaultDetailsMulticall(calls) {
-				return h.vaultDetailResults("Test Vault", "tVLT", 18, false), nil
+				return h.vaultDetailResults("Test Vault", "tVLT", 18, false), nil, true
 			}
 			if h.isVaultStateAndTwoBalancesMulticall(calls) {
 				return []outbound.Result{
@@ -837,7 +1023,7 @@ func (h *serviceTestHarness) setupMarketNotInDB() {
 					h.defaultVaultTotalSupplyResult(),
 					h.defaultBalanceOfResult(big.NewInt(100000)),
 					h.defaultBalanceOfResult(big.NewInt(200000)),
-				}, nil
+				}, nil, true
 			}
 			// Default: token pair metadata (symbolA, decimalsA, symbolB, decimalsB).
 			return []outbound.Result{
@@ -845,12 +1031,94 @@ func (h *serviceTestHarness) setupMarketNotInDB() {
 				{Success: true, ReturnData: h.packUint8(18)},
 				{Success: true, ReturnData: h.packString("COLL")},
 				{Success: true, ReturnData: h.packUint8(18)},
-			}, nil
+			}, nil, true
 		default:
-			if origFn != nil {
-				return origFn(ctx, calls, blockNumber)
-			}
-			return nil, fmt.Errorf("unexpected call count: %d", len(calls))
+			return nil, nil, false
 		}
+	}
+	h.multicaller.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+		if results, err, handled := dispatch(calls); handled {
+			return results, err
+		}
+		if origExecuteFn != nil {
+			return origExecuteFn(ctx, calls, blockNumber)
+		}
+		return nil, fmt.Errorf("unexpected call count: %d", len(calls))
+	}
+	h.multicaller.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+		if results, err, handled := dispatch(calls); handled {
+			return results, err
+		}
+		if origExecuteAtHashFn != nil {
+			return origExecuteAtHashFn(ctx, calls, blockHash)
+		}
+		return nil, fmt.Errorf("unexpected call count: %d", len(calls))
+	}
+}
+
+// --- Trapping-candidate probe fixtures ---
+
+// A real mainnet contract whose dispatcher jumps into invalid bytecode on every
+// probe selector (VEC-698).
+var trappingCandidate = common.HexToAddress("0x4ECeF7bd1eD0c9f64a3a5c1a785A3Bb39DC5dF6A")
+
+type executeFn = func(context.Context, []outbound.Call, *big.Int) ([]outbound.Result, error)
+
+// quietNarrowingLogger keeps a prober-level test's narrowing WARNs out of the
+// test output; service-level tests capture them through the harness instead.
+var quietNarrowingLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+// isolatedAnswer is what one eth_call for a single probe selector returns.
+type isolatedAnswer struct {
+	result outbound.Result
+	err    error
+}
+
+func answers(addr common.Address) isolatedAnswer {
+	return isolatedAnswer{result: outbound.Result{Success: true, ReturnData: packAddress(addr)}}
+}
+
+func reverts() isolatedAnswer   { return isolatedAnswer{} }
+func exhausts() isolatedAnswer  { return isolatedAnswer{err: testutil.GasExhaustedRPCError()} }
+func throttled() isolatedAnswer { return isolatedAnswer{err: testutil.ThrottledRPCError()} }
+
+// trappingResponder answers a probe of addr like a node in front of a trapping
+// contract: two or more probe selectors in one batch exhaust gas, a selector
+// alone answers from perSelector (ProbeCalls order: MORPHO, asset, curator,
+// liquidityAdapter). Every other call goes to fallback, which may be nil when
+// the test expects none.
+func trappingResponder(t testing.TB, addr common.Address, perSelector [vaultProbeCallsPerAddress]isolatedAnswer, fallback executeFn) executeFn {
+	t.Helper()
+	prober, err := NewVaultProber()
+	if err != nil {
+		t.Fatalf("NewVaultProber: %v", err)
+	}
+	bySelector := make(map[string]isolatedAnswer, vaultProbeCallsPerAddress)
+	for i, call := range prober.ProbeCalls(addr) {
+		bySelector[string(call.CallData)] = perSelector[i]
+	}
+	isProbeOf := func(calls []outbound.Call) bool {
+		for _, c := range calls {
+			if _, ok := bySelector[string(c.CallData)]; !ok || c.Target != addr {
+				return false
+			}
+		}
+		return len(calls) > 0
+	}
+	return func(ctx context.Context, calls []outbound.Call, block *big.Int) ([]outbound.Result, error) {
+		if !isProbeOf(calls) {
+			if fallback == nil {
+				return nil, fmt.Errorf("unexpected %d-call multicall to %s", len(calls), calls[0].Target.Hex())
+			}
+			return fallback(ctx, calls, block)
+		}
+		if len(calls) > 1 {
+			return nil, testutil.GasExhaustedRPCError()
+		}
+		a := bySelector[string(calls[0].CallData)]
+		if a.err != nil {
+			return nil, a.err
+		}
+		return []outbound.Result{a.result}, nil
 	}
 }

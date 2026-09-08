@@ -27,9 +27,8 @@ import (
 // Fakes
 // ---------------------------------------------------------------------------
 
-// fakeCurveRepo counts saves via SaveBlock; it ignores the pgx.Tx (nil is fine).
-// stateRowsReturn controls whether SaveBlock returns 0 (simulate ON CONFLICT DO NOTHING
-// no-op) or the actual count; a zero value means newTestCurveService must set it to 1.
+// fakeCurveRepo ignores the pgx.Tx (nil is fine). Attempted always follows the
+// write set, as the real repository's does; stateRowsReturn decides if it persists.
 type fakeCurveRepo struct {
 	lastWrites      outbound.BlockWrites
 	snapshotPoolIDs []int64
@@ -45,7 +44,7 @@ func (r *fakeCurveRepo) LoadPools(_ context.Context, _ int64) ([]outbound.CurveP
 	return nil, nil
 }
 
-func (r *fakeCurveRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.BlockWrites) (int64, error) {
+func (r *fakeCurveRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.BlockWrites) (outbound.StateRowCounts, error) {
 	r.lastWrites = w
 	r.swapSaves += len(w.Swaps)
 	r.liquiditySaves += len(w.Liquidity)
@@ -57,10 +56,11 @@ func (r *fakeCurveRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.BlockW
 	for _, s := range w.CryptoStates {
 		r.snapshotPoolIDs = append(r.snapshotPoolIDs, s.CurvePoolID)
 	}
-	if r.stateRowsReturn == 0 {
-		return 0, nil
+	counts := outbound.StateRowCounts{Attempted: int64(len(w.StableStates) + len(w.CryptoStates))}
+	if r.stateRowsReturn != 0 {
+		counts.Persisted = counts.Attempted
 	}
-	return int64(len(w.StableStates) + len(w.CryptoStates)), nil
+	return counts, nil
 }
 
 // fakeTxManager calls fn with a nil pgx.Tx; sufficient since fakeCurveRepo
@@ -83,21 +83,62 @@ func (m *inTxTrackingTxManager) WithTransaction(_ context.Context, fn func(pgx.T
 	return fn(nil)
 }
 
-// txCheckingMulticaller fails if Execute runs while the tracked tx manager is
-// inside a transaction, proving snapshot reads happen before the tx opens.
+// txCheckingMulticaller fails if a multicall runs while the tracked tx manager
+// is inside a transaction, proving snapshot reads happen before the tx opens.
+// Curve's snapshot path calls ExecuteAtHash (hash-pinned reads); Execute is kept
+// for other Multicaller consumers that only have a block number.
 type txCheckingMulticaller struct {
 	tracker *inTxTrackingTxManager
 	results []outbound.Result
 }
 
-func (m *txCheckingMulticaller) Execute(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+func (m *txCheckingMulticaller) checkNotInTx() error {
 	if m.tracker.inTx {
-		return nil, fmt.Errorf("multicall executed inside the transaction (archive-RPC latency would pin a pgx connection)")
+		return fmt.Errorf("multicall executed inside the transaction (archive-RPC latency would pin a pgx connection)")
+	}
+	return nil
+}
+
+func (m *txCheckingMulticaller) Execute(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	if err := m.checkNotInTx(); err != nil {
+		return nil, err
+	}
+	return m.results, nil
+}
+
+func (m *txCheckingMulticaller) ExecuteAtHash(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+	if err := m.checkNotInTx(); err != nil {
+		return nil, err
 	}
 	return m.results, nil
 }
 
 func (m *txCheckingMulticaller) Address() common.Address {
+	return common.Address{}
+}
+
+// hashRecordingMulticaller is a test double for outbound.Multicaller that
+// records the block hash it was called with via ExecuteAtHash, so tests can
+// assert the coordinator pins state reads to the block hash (reorg-correctness)
+// rather than the block number alone.
+type hashRecordingMulticaller struct {
+	results     []outbound.Result
+	gotHash     common.Hash
+	executedVia string // "hash" or "number", whichever method was actually called
+}
+
+func (m *hashRecordingMulticaller) Execute(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	m.executedVia = "number"
+	return m.results, nil
+}
+
+func (m *hashRecordingMulticaller) ExecuteAtHash(_ context.Context, _ []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+	m.executedVia = "hash"
+	m.gotHash = blockHash
+	return m.results, nil
+}
+
+func (m *hashRecordingMulticaller) Address() common.Address {
 	return common.Address{}
 }
 
@@ -203,15 +244,16 @@ func newTestCurveService(t *testing.T, sweepBlocks int64) (*CurveService, *fakeC
 	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
 
 	c, err := NewCurveService(CurveServiceDeps{
-		Pools:       []RegisteredPool{newTestPool()},
-		Handlers:    handlers,
-		Multicaller: mc,
-		Repo:        repo,
-		EventWriter: writer,
-		TxManager:   &fakeTxManager{},
-		SweepBlocks: sweepBlocks,
-		ChainID:     testChainID,
-		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Pools:         []RegisteredPool{newTestPool()},
+		Handlers:      handlers,
+		StableHandler: stable,
+		Multicaller:   mc,
+		Repo:          repo,
+		EventWriter:   writer,
+		TxManager:     &fakeTxManager{},
+		SweepBlocks:   sweepBlocks,
+		ChainID:       testChainID,
+		Logger:        slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)
@@ -220,12 +262,15 @@ func newTestCurveService(t *testing.T, sweepBlocks int64) (*CurveService, *fakeC
 }
 
 // blockEvent builds a minimal outbound.BlockEvent for the given block number.
+// BlockHash defaults to a non-zero test hash so the suite exercises the real
+// hash-pinned snapshot path rather than the zero hash by accident.
 func blockEvent(bn int64) outbound.BlockEvent {
 	return outbound.BlockEvent{
 		ChainID:        testChainID,
 		BlockNumber:    bn,
 		Version:        0,
 		BlockTimestamp: bn,
+		BlockHash:      common.HexToHash("0x01").Hex(),
 	}
 }
 
@@ -352,27 +397,40 @@ func TestCurveService_RedeliveryDoesNotDouble(t *testing.T) {
 	}
 }
 
-// TestCurveService_NilNilSnapshotErrors: when SnapshotState returns both
-// Stableswap and Cryptoswap as nil, BlockHandler should return an error.
-func TestCurveService_NilNilSnapshotErrors(t *testing.T) {
-	handlers := map[PoolKind]PoolClassHandler{
-		KindStableswapPreNG: &nilNilHandler{},
+// TestCurveService_SnapshotError_DoesNotPersistOrMarkSnapshotted: when the
+// class-specific SnapshotState call fails (e.g. a reverted required read),
+// BlockHandler must return an error, and the failed pool must not be marked
+// snapshotted or have any row persisted.
+func TestCurveService_SnapshotError_DoesNotPersistOrMarkSnapshotted(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
 	}
+	stable := NewStableswapHandler(a)
+	handlers := map[PoolKind]PoolClassHandler{
+		KindStableswapPreNG: stable,
+		KindStableswapNG:    stable,
+	}
+
+	// The first balances() call is required (AllowFailure=false); a revert there
+	// fails SnapshotState outright.
+	revertResults := []outbound.Result{{Success: false, ReturnData: nil}}
 
 	repo := &fakeCurveRepo{stateRowsReturn: 1}
 	eventRepo := &fakeEventRepo{}
 	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
 
 	c, err := NewCurveService(CurveServiceDeps{
-		Pools:       []RegisteredPool{newTestPool()},
-		Handlers:    handlers,
-		Multicaller: &fakeMulticaller{},
-		Repo:        repo,
-		EventWriter: writer,
-		TxManager:   &fakeTxManager{},
-		SweepBlocks: 1, // triggers sweep snapshot
-		ChainID:     testChainID,
-		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Pools:         []RegisteredPool{newTestPool()},
+		Handlers:      handlers,
+		StableHandler: stable,
+		Multicaller:   &fakeMulticaller{results: revertResults},
+		Repo:          repo,
+		EventWriter:   writer,
+		TxManager:     &fakeTxManager{},
+		SweepBlocks:   1, // triggers sweep snapshot
+		ChainID:       testChainID,
+		Logger:        slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)
@@ -380,14 +438,20 @@ func TestCurveService_NilNilSnapshotErrors(t *testing.T) {
 
 	bh := c.BlockHandler()
 
-	// BlockHandler should error because the handler returns StateSnapshot with both nil.
+	// BlockHandler should error because SnapshotState failed on the reverted read.
 	if err := bh(context.Background(), blockEvent(100), nil); err == nil {
 		t.Fatal("expected error from BlockHandler, got nil")
 	}
 
-	// lastSnapshot should NOT be advanced (no DB write occurred).
-	if _, ok := c.lastSnapshot[newTestPool().ID]; ok {
-		t.Errorf("lastSnapshot[%d] should not be set after error", newTestPool().ID)
+	// The tracker should NOT have recorded a snapshot for this pool (no DB write
+	// occurred): calling DueSet again for the same block must still find it
+	// unseen (due), rather than already-snapshotted (not due).
+	stillDue, err := dexconsumer.DueSet(c.tracker, c.pools, map[int64]bool{}, 100, 0)
+	if err != nil {
+		t.Fatalf("DueSet: %v", err)
+	}
+	if len(stillDue) != 1 || stillDue[0].ID != newTestPool().ID {
+		t.Errorf("pool %d should still be due (unseen) after a failed BlockHandler call, got due set %v", newTestPool().ID, stillDue)
 	}
 
 	// No snapshot should be persisted.
@@ -420,15 +484,16 @@ func TestCurveService_CaptureNetReachesEventWriter(t *testing.T) {
 	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
 
 	c, err := NewCurveService(CurveServiceDeps{
-		Pools:       []RegisteredPool{pool},
-		Handlers:    handlers,
-		Multicaller: mc,
-		Repo:        repo,
-		EventWriter: writer,
-		TxManager:   &fakeTxManager{},
-		SweepBlocks: 0,
-		ChainID:     testChainID,
-		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Pools:         []RegisteredPool{pool},
+		Handlers:      handlers,
+		StableHandler: stable,
+		Multicaller:   mc,
+		Repo:          repo,
+		EventWriter:   writer,
+		TxManager:     &fakeTxManager{},
+		SweepBlocks:   0,
+		ChainID:       testChainID,
+		Logger:        slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)
@@ -478,15 +543,16 @@ func TestCurveService_SnapshotMulticallRunsOutsideTransaction(t *testing.T) {
 	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
 
 	c, err := NewCurveService(CurveServiceDeps{
-		Pools:       []RegisteredPool{newTestPool()},
-		Handlers:    handlers,
-		Multicaller: mc,
-		Repo:        repo,
-		EventWriter: writer,
-		TxManager:   tracker,
-		SweepBlocks: 1, // force a snapshot even with no events
-		ChainID:     testChainID,
-		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Pools:         []RegisteredPool{newTestPool()},
+		Handlers:      handlers,
+		StableHandler: stable,
+		Multicaller:   mc,
+		Repo:          repo,
+		EventWriter:   writer,
+		TxManager:     tracker,
+		SweepBlocks:   1, // force a snapshot even with no events
+		ChainID:       testChainID,
+		Logger:        slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)
@@ -501,10 +567,117 @@ func TestCurveService_SnapshotMulticallRunsOutsideTransaction(t *testing.T) {
 	}
 }
 
-// TestCurveService_RecordsActualStateRowsNotSnapshotCount: a redelivery where the
-// state insert is a no-op (ON CONFLICT DO NOTHING -> 0 rows) must record 0 state
-// rows, not the snapshot-set size.
-func TestCurveService_RecordsActualStateRowsNotSnapshotCount(t *testing.T) {
+// TestCurveService_SnapshotPinsToBlockHash: the state snapshot multicall must be
+// pinned to the block hash of the (blockNumber, version) being processed, not the
+// block number alone. After a reorg an archive node answers eth_call-by-number
+// with the new canonical state, which can silently disagree with the reorged
+// receipts being processed in this event; pinning by hash makes the read
+// unambiguous. See VEC-261 task A1 (fix A2).
+func TestCurveService_SnapshotPinsToBlockHash(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	stable := NewStableswapHandler(a)
+	handlers := map[PoolKind]PoolClassHandler{
+		KindStableswapPreNG: stable,
+		KindStableswapNG:    stable,
+	}
+
+	mc := &hashRecordingMulticaller{results: stableswapPreNGResults(t, a)}
+
+	repo := &fakeCurveRepo{stateRowsReturn: 1}
+	eventRepo := &fakeEventRepo{}
+	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
+
+	c, err := NewCurveService(CurveServiceDeps{
+		Pools:         []RegisteredPool{newTestPool()},
+		Handlers:      handlers,
+		StableHandler: stable,
+		Multicaller:   mc,
+		Repo:          repo,
+		EventWriter:   writer,
+		TxManager:     &fakeTxManager{},
+		SweepBlocks:   1, // force a snapshot even with no events
+		ChainID:       testChainID,
+		Logger:        slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	})
+	if err != nil {
+		t.Fatalf("NewCurveService: %v", err)
+	}
+
+	wantHash := common.HexToHash("0xabc123abc123abc123abc123abc123abc123abc123abc123abc123abc123ab")
+	event := blockEvent(100)
+	event.BlockHash = wantHash.Hex()
+
+	bh := c.BlockHandler()
+	if err := bh(context.Background(), event, nil); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	if mc.executedVia != "hash" {
+		t.Fatalf("multicaller invoked via %q, want the hash-pinned path", mc.executedVia)
+	}
+	if mc.gotHash != wantHash {
+		t.Errorf("multicall block hash = %s, want %s", mc.gotHash, wantHash)
+	}
+}
+
+// TestCurveService_MissingBlockHash_ReturnsError: an event with an empty
+// BlockHash must fail loud before ever reaching the multicaller, instead of
+// silently defaulting to the zero hash (common.HexToHash never errors).
+func TestCurveService_MissingBlockHash_ReturnsError(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	stable := NewStableswapHandler(a)
+	handlers := map[PoolKind]PoolClassHandler{
+		KindStableswapPreNG: stable,
+		KindStableswapNG:    stable,
+	}
+
+	mc := &hashRecordingMulticaller{results: stableswapPreNGResults(t, a)}
+
+	repo := &fakeCurveRepo{stateRowsReturn: 1}
+	eventRepo := &fakeEventRepo{}
+	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
+
+	c, err := NewCurveService(CurveServiceDeps{
+		Pools:         []RegisteredPool{newTestPool()},
+		Handlers:      handlers,
+		StableHandler: stable,
+		Multicaller:   mc,
+		Repo:          repo,
+		EventWriter:   writer,
+		TxManager:     &fakeTxManager{},
+		SweepBlocks:   1, // force a snapshot even with no events
+		ChainID:       testChainID,
+		Logger:        slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	})
+	if err != nil {
+		t.Fatalf("NewCurveService: %v", err)
+	}
+
+	event := blockEvent(100)
+	event.BlockHash = ""
+
+	bh := c.BlockHandler()
+	if err := bh(context.Background(), event, nil); err == nil {
+		t.Fatal("expected non-nil error from BlockHandler when event.BlockHash is empty")
+	}
+
+	if mc.executedVia != "" {
+		t.Errorf("multicaller invoked via %q, want it never called", mc.executedVia)
+	}
+	if repo.stableswapSaves != 0 {
+		t.Errorf("stableswapSaves = %d, want 0 (block must not be persisted)", repo.stableswapSaves)
+	}
+}
+
+func newZeroRowReplayService(t *testing.T) (*CurveService, *metricsdk.ManualReader) {
+	t.Helper()
+
 	reader := metricsdk.NewManualReader()
 	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
 	prev := otel.GetMeterProvider()
@@ -529,47 +702,63 @@ func TestCurveService_RecordsActualStateRowsNotSnapshotCount(t *testing.T) {
 		KindStableswapNG:    stable,
 	}
 
-	// stateRowsReturn=0 simulates the idempotent ON CONFLICT DO NOTHING no-op.
 	repo := &fakeCurveRepo{stateRowsReturn: 0}
-	eventRepo := &fakeEventRepo{}
-	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
-	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
+	writer := dexconsumer.NewProtocolEventWriter(1, &fakeEventRepo{})
 
 	c, err := NewCurveService(CurveServiceDeps{
-		Pools:       []RegisteredPool{newTestPool()},
-		Handlers:    handlers,
-		Multicaller: mc,
-		Repo:        repo,
-		EventWriter: writer,
-		TxManager:   &fakeTxManager{},
-		SweepBlocks: 1, // force a snapshot
-		ChainID:     testChainID,
-		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
-		Telemetry:   tel,
+		Pools:         []RegisteredPool{newTestPool()},
+		Handlers:      handlers,
+		StableHandler: stable,
+		Multicaller:   &fakeMulticaller{results: stableswapPreNGResults(t, a)},
+		Repo:          repo,
+		EventWriter:   writer,
+		TxManager:     &fakeTxManager{},
+		SweepBlocks:   1, // force a snapshot
+		ChainID:       testChainID,
+		Logger:        slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Telemetry:     tel,
 	})
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)
 	}
+	return c, reader
+}
 
-	bh := c.BlockHandler()
-	if err := bh(context.Background(), blockEvent(100), nil); err != nil {
+func TestCurveService_RecordsActualStateRowsNotSnapshotCount(t *testing.T) {
+	c, reader := newZeroRowReplayService(t)
+
+	if err := c.BlockHandler()(context.Background(), blockEvent(100), nil); err != nil {
 		t.Fatalf("BlockHandler: %v", err)
 	}
 
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("Collect: %v", err)
-	}
-	if got := stateRowsWritten(t, &rm); got != 0 {
+	rm := collectCurveMetrics(t, reader)
+	if got, _ := curveCounter(t, rm, "curve.state.rows.written"); got != 0 {
 		t.Errorf("state_rows_written = %d, want 0 (must reflect actual rows affected, not snapshot-set size)", got)
 	}
 }
 
-// TestCurveService_HandlerError_RecordsErrorMetric: an error on a handler path
-// that is not one of the individually-instrumented stages (here an invalid log
-// address surfaced by poolsTouchedByReceipt) must still increment
-// curve_errors_total, so VectorCurveIndexerErrorsHigh observes every
-// poison-stall path, not only the decode/snapshot/persist ones.
+func TestCurveService_RecordsStateRowsAttemptedOnZeroRowReplay(t *testing.T) {
+	c, reader := newZeroRowReplayService(t)
+
+	if err := c.BlockHandler()(context.Background(), blockEvent(100), nil); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	rm := collectCurveMetrics(t, reader)
+	attempted, ok := curveCounter(t, rm, "curve.state.rows.attempted")
+	if !ok {
+		t.Fatal("curve.state.rows.attempted absent: the no-state-written rule's right side is empty on a benign replay, so it fires with nothing to fix")
+	}
+	if attempted != 1 {
+		t.Errorf("curve.state.rows.attempted = %d, want 1 (the block queued one state row)", attempted)
+	}
+	if rows, ok := curveCounter(t, rm, "curve.state.rows.written"); ok {
+		t.Errorf("curve.state.rows.written = %d, want the counter to be absent (0 rows inserted is a no-op)", rows)
+	}
+}
+
+// Errors outside the individually-instrumented stages must still increment
+// curve_errors_total, or its `operation` breakdown misses poison-stall paths.
 func TestCurveService_HandlerError_RecordsErrorMetric(t *testing.T) {
 	reader := metricsdk.NewManualReader()
 	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
@@ -600,15 +789,16 @@ func TestCurveService_HandlerError_RecordsErrorMetric(t *testing.T) {
 	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
 
 	c, err := NewCurveService(CurveServiceDeps{
-		Pools:       []RegisteredPool{newTestPool()},
-		Handlers:    handlers,
-		Multicaller: mc,
-		Repo:        repo,
-		EventWriter: writer,
-		TxManager:   &fakeTxManager{},
-		ChainID:     testChainID,
-		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
-		Telemetry:   tel,
+		Pools:         []RegisteredPool{newTestPool()},
+		Handlers:      handlers,
+		StableHandler: stable,
+		Multicaller:   mc,
+		Repo:          repo,
+		EventWriter:   writer,
+		TxManager:     &fakeTxManager{},
+		ChainID:       testChainID,
+		Logger:        slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Telemetry:     tel,
 	})
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)
@@ -636,7 +826,7 @@ func TestCurveService_HandlerError_RecordsErrorMetric(t *testing.T) {
 	if err := reader.Collect(context.Background(), &rm); err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
-	if got := curveErrorsTotal(t, &rm); got != 1 {
+	if got, _ := curveCounter(t, &rm, "curve.errors.total"); got != 1 {
 		t.Errorf("curve.errors.total = %d, want 1 (every handler error path must record the metric)", got)
 	}
 }
@@ -660,15 +850,16 @@ func TestCurveService_DecodeError_ReturnsNonNil(t *testing.T) {
 	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
 
 	c, err := NewCurveService(CurveServiceDeps{
-		Pools:       []RegisteredPool{newTestPool()},
-		Handlers:    handlers,
-		Multicaller: mc,
-		Repo:        repo,
-		EventWriter: writer,
-		TxManager:   &fakeTxManager{},
-		SweepBlocks: 0,
-		ChainID:     testChainID,
-		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Pools:         []RegisteredPool{newTestPool()},
+		Handlers:      handlers,
+		StableHandler: stable,
+		Multicaller:   mc,
+		Repo:          repo,
+		EventWriter:   writer,
+		TxManager:     &fakeTxManager{},
+		SweepBlocks:   0,
+		ChainID:       testChainID,
+		Logger:        slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)
@@ -707,14 +898,15 @@ func TestCurveService_ReorgBlock_Resnapshots(t *testing.T) {
 	bh := c.BlockHandler()
 
 	// Block 100 version 0: initial snapshot.
-	ev0 := outbound.BlockEvent{ChainID: testChainID, BlockNumber: 100, Version: 0, BlockTimestamp: 100}
+	ev0 := blockEvent(100)
 	if err := bh(context.Background(), ev0, nil); err != nil {
 		t.Fatalf("BlockHandler v0: %v", err)
 	}
 	after0 := repo.stableswapSaves
 
 	// Block 100 version 1 (reorg): same bn, new version -> must re-snapshot.
-	ev1 := outbound.BlockEvent{ChainID: testChainID, BlockNumber: 100, Version: 1, BlockTimestamp: 100}
+	ev1 := blockEvent(100)
+	ev1.Version = 1
 	if err := bh(context.Background(), ev1, nil); err != nil {
 		t.Fatalf("BlockHandler v1: %v", err)
 	}
@@ -743,15 +935,16 @@ func TestCurveService_RoutesParameterAndLpEventsIntoBlockWrites(t *testing.T) {
 	pool := newTestPool()
 
 	c, err := NewCurveService(CurveServiceDeps{
-		Pools:       []RegisteredPool{pool},
-		Handlers:    handlers,
-		Multicaller: mc,
-		Repo:        repo,
-		EventWriter: writer,
-		TxManager:   &fakeTxManager{},
-		SweepBlocks: 0,
-		ChainID:     testChainID,
-		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Pools:         []RegisteredPool{pool},
+		Handlers:      handlers,
+		StableHandler: stable,
+		Multicaller:   mc,
+		Repo:          repo,
+		EventWriter:   writer,
+		TxManager:     &fakeTxManager{},
+		SweepBlocks:   0,
+		ChainID:       testChainID,
+		Logger:        slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)
@@ -809,15 +1002,16 @@ func TestCurveService_RoutesLpTokenLogOnSeparateAddressToPool(t *testing.T) {
 	pool := newTestPoolWithLpToken()
 
 	c, err := NewCurveService(CurveServiceDeps{
-		Pools:       []RegisteredPool{pool},
-		Handlers:    handlers,
-		Multicaller: mc,
-		Repo:        repo,
-		EventWriter: writer,
-		TxManager:   &fakeTxManager{},
-		SweepBlocks: 0, // only a touched pool should snapshot
-		ChainID:     testChainID,
-		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Pools:         []RegisteredPool{pool},
+		Handlers:      handlers,
+		StableHandler: stable,
+		Multicaller:   mc,
+		Repo:          repo,
+		EventWriter:   writer,
+		TxManager:     &fakeTxManager{},
+		SweepBlocks:   0, // only a touched pool should snapshot
+		ChainID:       testChainID,
+		Logger:        slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)
@@ -877,56 +1071,45 @@ func TestCurveService_RoutesStableswapConfigIntoBlockWrites(t *testing.T) {
 	}
 }
 
-// curveErrorsTotal reads the curve.errors.total counter total across all
-// operation labels, returning 0 if the metric was never recorded.
-func curveErrorsTotal(t *testing.T, rm *metricdata.ResourceMetrics) int64 {
+func collectCurveMetrics(t *testing.T, reader *metricsdk.ManualReader) *metricdata.ResourceMetrics {
 	t.Helper()
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name != "curve.errors.total" {
-				continue
-			}
-			sum, ok := m.Data.(metricdata.Sum[int64])
-			if !ok {
-				t.Fatalf("curve.errors.total: unexpected metric type %T", m.Data)
-			}
-			var total int64
-			for _, dp := range sum.DataPoints {
-				total += dp.Value
-			}
-			return total
-		}
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
 	}
-	return 0
+	return &rm
 }
 
-// stateRowsWritten reads the curve.state.rows.written counter total, returning 0
-// if the metric was never recorded.
-func stateRowsWritten(t *testing.T, rm *metricdata.ResourceMetrics) int64 {
+func curveCounter(t *testing.T, rm *metricdata.ResourceMetrics, name string) (int64, bool) {
 	t.Helper()
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
-			if m.Name != "curve.state.rows.written" {
+			if m.Name != name {
 				continue
 			}
 			sum, ok := m.Data.(metricdata.Sum[int64])
 			if !ok {
-				t.Fatalf("curve.state.rows.written: unexpected metric type %T", m.Data)
+				t.Fatalf("%s: unexpected metric type %T", name, m.Data)
 			}
 			var total int64
 			for _, dp := range sum.DataPoints {
 				total += dp.Value
 			}
-			return total
+			return total, true
 		}
 	}
-	return 0
+	return 0, false
 }
 
 // TestNewCurveService_WarmsHandlersForRegisteredPoolCoinCounts verifies the
 // constructor primes each handler's per-coin-count cache for every registered
 // pool, so the per-block decode path performs no lazy cache writes.
 func TestNewCurveService_WarmsHandlersForRegisteredPoolCoinCounts(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+
 	h := &nilNilHandler{}
 	pool2 := newTestPool() // 2-coin pre-NG
 	pool3 := newTestPool()
@@ -934,14 +1117,15 @@ func TestNewCurveService_WarmsHandlersForRegisteredPoolCoinCounts(t *testing.T) 
 	pool3.NCoins = 3
 	pool3.Address = common.HexToAddress("0x0000000000000000000000000000000000000003")
 
-	_, err := NewCurveService(CurveServiceDeps{
-		Pools:       []RegisteredPool{pool2, pool3},
-		Handlers:    map[PoolKind]PoolClassHandler{KindStableswapPreNG: h},
-		Multicaller: &fakeMulticaller{},
-		Repo:        &fakeCurveRepo{},
-		EventWriter: dexconsumer.NewProtocolEventWriter(1, &fakeEventRepo{}),
-		TxManager:   &fakeTxManager{},
-		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	_, err = NewCurveService(CurveServiceDeps{
+		Pools:         []RegisteredPool{pool2, pool3},
+		Handlers:      map[PoolKind]PoolClassHandler{KindStableswapPreNG: h},
+		StableHandler: NewStableswapHandler(a),
+		Multicaller:   &fakeMulticaller{},
+		Repo:          &fakeCurveRepo{},
+		EventWriter:   dexconsumer.NewProtocolEventWriter(1, &fakeEventRepo{}),
+		TxManager:     &fakeTxManager{},
+		Logger:        slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)
@@ -958,26 +1142,14 @@ func TestNewCurveService_WarmsHandlersForRegisteredPoolCoinCounts(t *testing.T) 
 	}
 }
 
-// nilNilHandler is a PoolClassHandler stub that returns StateSnapshot with both
-// Stableswap and Cryptoswap as nil, to test the default case error handling.
+// nilNilHandler is a PoolClassHandler stub used to track Warm calls without
+// decoding anything.
 type nilNilHandler struct{ warmed []int }
 
 func (h *nilNilHandler) Warm(nCoins int) { h.warmed = append(h.warmed, nCoins) }
 
 func (h *nilNilHandler) DecodeEvents(receipt shared.TransactionReceipt, pool RegisteredPool, chainID, blockNumber int64, version int, ts time.Time) (DecodedEvents, error) {
 	return DecodedEvents{}, nil
-}
-
-func (h *nilNilHandler) SnapshotState(ctx context.Context, mc outbound.Multicaller, pool RegisteredPool, blockNumber int64, version int, ts time.Time) (StateSnapshot, error) {
-	// Return StateSnapshot with both pointers nil.
-	return StateSnapshot{
-		Pool:         pool,
-		BlockNumber:  blockNumber,
-		BlockVersion: version,
-		Timestamp:    ts,
-		Stableswap:   nil,
-		Cryptoswap:   nil,
-	}, nil
 }
 
 // countingTxManager delegates to a real fakeTxManager but increments a counter
@@ -1022,15 +1194,16 @@ func TestCurveService_QuietBlock_NoTransaction(t *testing.T) {
 	txMgr := &countingTxManager{}
 
 	c, err := NewCurveService(CurveServiceDeps{
-		Pools:       []RegisteredPool{newTestPool()},
-		Handlers:    handlers,
-		Multicaller: mc,
-		Repo:        repo,
-		EventWriter: writer,
-		TxManager:   txMgr,
-		SweepBlocks: 0, // no sweep -> no snapshot on quiet block
-		ChainID:     testChainID,
-		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Pools:         []RegisteredPool{newTestPool()},
+		Handlers:      handlers,
+		StableHandler: stable,
+		Multicaller:   mc,
+		Repo:          repo,
+		EventWriter:   writer,
+		TxManager:     txMgr,
+		SweepBlocks:   0, // no sweep -> no snapshot on quiet block
+		ChainID:       testChainID,
+		Logger:        slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)
@@ -1097,5 +1270,133 @@ func TestCurveService_TxErrorThenRetry_PersistsOnce(t *testing.T) {
 	}
 	if repo.swapSaves != 1 {
 		t.Errorf("swapSaves after retry = %d, want 1 (no doubling from the failed first attempt)", repo.swapSaves)
+	}
+}
+
+// newTelemetryCurveService builds a curve service wired to a REAL
+// dextelemetry.Telemetry plus the ManualReader that collects it, so the
+// pools.touched assertions below observe an actual counter rather than the
+// nil-telemetry no-op the rest of the suite runs with.
+func newTelemetryCurveService(t *testing.T, sweepBlocks int64) (*CurveService, *metricsdk.ManualReader) {
+	t.Helper()
+
+	reader := metricsdk.NewManualReader()
+	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
+
+	// NewTelemetry resolves the global meter at construction, so it must run
+	// after SetMeterProvider above.
+	tel, err := dextelemetry.NewTelemetry("curve", testChainID)
+	if err != nil {
+		t.Fatalf("NewTelemetry: %v", err)
+	}
+
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	stable := NewStableswapHandler(a)
+
+	c, err := NewCurveService(CurveServiceDeps{
+		Pools: []RegisteredPool{newTestPool()},
+		Handlers: map[PoolKind]PoolClassHandler{
+			KindStableswapPreNG: stable,
+			KindStableswapNG:    stable,
+		},
+		StableHandler: stable,
+		Multicaller:   &fakeMulticaller{results: stableswapPreNGResults(t, a)},
+		Repo:          &fakeCurveRepo{stateRowsReturn: 1},
+		EventWriter:   dexconsumer.NewProtocolEventWriter(1, &fakeEventRepo{}),
+		TxManager:     &fakeTxManager{},
+		SweepBlocks:   sweepBlocks,
+		ChainID:       testChainID,
+		Logger:        slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Telemetry:     tel,
+	})
+	if err != nil {
+		t.Fatalf("NewCurveService: %v", err)
+	}
+	return c, reader
+}
+
+// poolsTouched returns curve.pools.touched, or 0 when the counter was never
+// created (RecordPoolsTouched no-ops for n<=0, so "never touched" leaves the
+// series absent rather than zero).
+func poolsTouched(t *testing.T, rm *metricdata.ResourceMetrics) int64 {
+	t.Helper()
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "curve.pools.touched" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("curve.pools.touched: unexpected metric type %T", m.Data)
+			}
+			var total int64
+			for _, dp := range sum.DataPoints {
+				total += dp.Value
+			}
+			return total
+		}
+	}
+	return 0
+}
+
+// TestCurveService_PoolsTouchedExcludesSweptPools: pools.touched must count the
+// pools a block's events actually touched, NOT the sweep-inclusive snapshot set.
+// Curve sweeps, so a quiet block still snapshots every due pool — sourcing the
+// counter from the snapshot set would report activity on a chain where nothing
+// happened, which is precisely the false signal the uniswap-v3 alert re-gate
+// exists to eliminate. This is the discriminating case: touched=0, snapshot=1.
+func TestCurveService_PoolsTouchedExcludesSweptPools(t *testing.T) {
+	c, reader := newTelemetryCurveService(t, 1) // sweep every block
+	ctx := context.Background()
+
+	// No receipts: nothing is touched, but the sweep still makes the pool due.
+	if err := c.BlockHandler()(ctx, blockEvent(100), nil); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	if got := poolsTouched(t, &rm); got != 0 {
+		t.Errorf("curve.pools.touched = %d, want 0: no receipt touched a pool, so the sweep-snapshotted pool must not count as activity (got %d => the counter is sourced from the snapshot/due set)", got, got)
+	}
+	// Guard the premise: the sweep really did snapshot, so this block exercised
+	// the divergence rather than trivially doing nothing.
+	if got, _ := curveCounter(t, &rm, "curve.state.rows.written"); got == 0 {
+		t.Fatal("state_rows_written = 0: the sweep did not snapshot, so this test never exercised the touched-vs-swept divergence")
+	}
+}
+
+// TestCurveService_PoolsTouchedCountsTouchedPool: the positive half — a receipt
+// that touches a registered pool advances pools.touched, so the counter is a
+// real activity signal and not merely always-zero.
+func TestCurveService_PoolsTouchedCountsTouchedPool(t *testing.T) {
+	c, reader := newTelemetryCurveService(t, 0) // sweep off: only touched pools count
+	ctx := context.Background()
+
+	event := blockEvent(200)
+	event.BlockTimestamp = 200
+	if err := c.BlockHandler()(ctx, event, []shared.TransactionReceipt{swapReceipt(t)}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	if got := poolsTouched(t, &rm); got != 1 {
+		t.Errorf("curve.pools.touched = %d, want 1 (one registered pool was swapped)", got)
 	}
 }

@@ -1,9 +1,15 @@
 # ruff: noqa: E501
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.adapters.postgres.reference_as_of import (
+    ORACLE_ASSET_AS_OF,
+    ReferenceAsOf,
+    ReferenceEffectiveAtProvider,
+)
 from app.domain.entities.backed_breakdown import (
     BackedBreakdown,
     CollateralContribution,
@@ -18,6 +24,28 @@ _VAULT_ID_SQL = """
 SELECT id FROM morpho_vault WHERE address = :addr AND chain_id = :chain_id
 """
 
+MORPHO_VAULT_USERS_SQL = """
+      SELECT v.id as vault_id, u.id as user_id
+      FROM morpho_vault v
+      JOIN "user" u ON u.address = v.address AND u.chain_id = v.chain_id
+      WHERE v.id = :backed_asset_id AND v.vault_version IN (1, 2)
+      UNION ALL
+      SELECT v.id, u.id
+      FROM morpho_vault v
+      JOIN morpho_adapter_current a ON a.morpho_vault_id = v.id AND a.adapter_type = 1
+      JOIN "user" u ON u.address = a.address AND u.chain_id = v.chain_id
+      WHERE v.id = :backed_asset_id AND v.vault_version = 3
+"""
+"""The (vault_id, user_id) rows whose morpho_market_position entries are the vault's allocations.
+
+A MetaMorpho V1/V1.1 vault (vault_version 1, 2) supplies to Morpho Blue markets itself.
+A VaultV2 (vault_version 3) holds nothing directly: its current member adapters of type 1
+(Morpho Blue market adapters) do. Every other adapter type (2 nested MetaMorpho V1 vault,
+3-5 external ERC-4626 / Box / Compound V3, 99 unclassified) is not walked, so its value
+shows up as idle loan token (total_assets minus the walked positions), not as the
+collateral behind it.
+"""
+
 _MORPHO_BACKED_BREAKDOWN_SQL = f"""
 WITH morpho_vaults AS (
       SELECT mv.id as vault_id
@@ -25,10 +53,7 @@ WITH morpho_vaults AS (
       WHERE mv.id = :backed_asset_id
   ),
   vault_users AS (
-      SELECT mv.vault_id, u.id as user_id
-      FROM morpho_vaults mv
-      JOIN morpho_vault v ON v.id = mv.vault_id
-      JOIN "user" u ON u.address = v.address AND u.chain_id = v.chain_id
+      {MORPHO_VAULT_USERS_SQL}
   ),
   vault_states AS (
       SELECT DISTINCT ON (vs.morpho_vault_id)
@@ -43,7 +68,7 @@ WITH morpho_vaults AS (
       ORDER BY vs.morpho_vault_id, vs.block_number DESC, vs.block_version DESC, vs.processing_version DESC
   ),
   vault_market_ids AS (
-      SELECT DISTINCT vu.vault_id, mp.morpho_market_id
+      SELECT DISTINCT vu.vault_id, vu.user_id, mp.morpho_market_id
       FROM vault_users vu
       JOIN LATERAL (
           SELECT DISTINCT morpho_market_id
@@ -51,17 +76,19 @@ WITH morpho_vaults AS (
           WHERE user_id = vu.user_id
       ) mp ON true
   ),
+  -- One row per (vault, market): the latest position of every walked user, summed,
+  -- since several VaultV2 adapters may supply the same market.
   market_allocs AS (
       SELECT vmi.vault_id,
              vmi.morpho_market_id,
              ct.id as collateral_token_id,
              ct.symbol as collateral,
-             pos.supply_assets / power(10, lt.decimals) as vault_supply
+             sum(pos.supply_assets) / power(10, lt.decimals) as vault_supply
       FROM vault_market_ids vmi
       JOIN LATERAL (
-          SELECT supply_assets, morpho_market_id
+          SELECT supply_assets
           FROM morpho_market_position
-          WHERE user_id = (SELECT user_id FROM vault_users WHERE vault_id = vmi.vault_id LIMIT 1)
+          WHERE user_id = vmi.user_id
             AND morpho_market_id = vmi.morpho_market_id
           ORDER BY block_number DESC, block_version DESC, processing_version DESC
           LIMIT 1
@@ -69,6 +96,7 @@ WITH morpho_vaults AS (
       JOIN morpho_market mm ON mm.id = vmi.morpho_market_id
       JOIN token ct ON ct.id = mm.collateral_token_id
       JOIN token lt ON lt.id = mm.loan_token_id
+      GROUP BY vmi.vault_id, vmi.morpho_market_id, ct.id, ct.symbol, lt.decimals
   ),
   market_states AS (
       SELECT ms.*
@@ -114,13 +142,42 @@ WITH morpho_vaults AS (
   ),
   total AS (
       SELECT sum(amount) as total_amount FROM all_backing
+  ),
+  -- Latest USD price per token from the vault's Morpho Blue protocol_oracle
+  -- binding, mirroring the Aave repo's token_prices CTE (same enabled-oracle_asset
+  -- gate + snapshot order). Each row exposes its OWN token's price so amount/price
+  -- stay denominated in the row's symbol, as Aave does.
+  token_prices AS (
+      SELECT DISTINCT ON (otp.token_id)
+          otp.token_id,
+          otp.price_usd
+      FROM onchain_token_price otp
+      JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
+      JOIN morpho_vault v ON v.id = :backed_asset_id AND po.protocol_id = v.protocol_id
+      WHERE EXISTS (
+          SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
+          WHERE oa.oracle_id = otp.oracle_id AND oa.token_id = otp.token_id AND oa.enabled
+      )
+      ORDER BY otp.token_id, otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC, otp.oracle_id DESC
+  ),
+  -- The vault's loan token converts every (loan-token-denominated) backing amount
+  -- to USD, so it is pulled out separately as the scaling factor for backed_amount.
+  loan_token_price AS (
+      SELECT tp.price_usd
+      FROM token_prices tp
+      JOIN morpho_vault v ON v.id = :backed_asset_id AND tp.token_id = v.asset_token_id
   )
   SELECT a.token_id,
          a.symbol,
          round(sum(a.amount)::numeric, 2) as backed_amount,
-         round((sum(a.amount) / NULLIF(t.total_amount, 0) * 100)::numeric, 2) as backing_pct
-  FROM all_backing a, total t
-  GROUP BY a.token_id, a.symbol, t.total_amount
+         round((sum(a.amount) / NULLIF(t.total_amount, 0) * 100)::numeric, 2) as backing_pct,
+         ltp.price_usd as loan_token_price,
+         tp.price_usd as token_price_usd
+  FROM all_backing a
+  CROSS JOIN total t
+  LEFT JOIN loan_token_price ltp ON true
+  LEFT JOIN token_prices tp ON tp.token_id = a.token_id
+  GROUP BY a.token_id, a.symbol, t.total_amount, ltp.price_usd, tp.price_usd
   HAVING sum(a.amount) > {_MIN_COLLATERAL_AMOUNT}
   ORDER BY backed_amount DESC
 """
@@ -129,8 +186,9 @@ WITH morpho_vaults AS (
 class MorphoBackedBreakdownRepository:
     """Postgres implementation of the backed breakdown repository for Morpho vaults."""
 
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(self, engine: AsyncEngine, reference_effective_at: ReferenceEffectiveAtProvider) -> None:
         self._engine = engine
+        self._reference = ReferenceAsOf(reference_effective_at)
 
     async def resolve_vault_id(self, address: bytes, chain_id: int) -> int | None:
         """Resolve a Morpho vault's internal ID from its onchain address."""
@@ -144,22 +202,40 @@ class MorphoBackedBreakdownRepository:
         async with self._engine.connect() as connection:
             result = await connection.execute(
                 text(_MORPHO_BACKED_BREAKDOWN_SQL),
-                {"backed_asset_id": backed_asset_id},
+                self._reference.params(backed_asset_id=backed_asset_id),
             )
             rows = result.fetchall()
 
-        items = tuple(
-            CollateralContribution(
+        items = [self._to_contribution(row) for row in rows]
+        return BackedBreakdown(backed_asset_id=backed_asset_id, items=tuple(items))
+
+    @staticmethod
+    def _to_contribution(row: Any) -> CollateralContribution:
+        backed_amount = Decimal(str(row.backed_amount))
+        loan_token_price = Decimal(str(row.loan_token_price)) if row.loan_token_price is not None else None
+        if loan_token_price is None:
+            # The vault's loan token has no USD price, so no backing amount can be
+            # converted to USD: the whole vault is unpriced. Keep raw loan-token units
+            # and force price_usd None on every row. The risk service treats an
+            # all-unpriced breakdown as price_data_missing and never reads the raw
+            # value as USD.
+            return CollateralContribution(
                 token_id=row.token_id,
                 symbol=row.symbol,
-                backing_value=Decimal(str(row.backed_amount)),
+                backing_value=backed_amount,
                 backing_pct=Decimal(str(row.backing_pct)),
                 price_usd=None,
             )
-            for row in rows
-        )
-
-        return BackedBreakdown(
-            backed_asset_id=backed_asset_id,
-            items=items,
+        # backed_amount is in loan-token units; scale by the loan-token price so
+        # backing_value is USD (what enrichment reads as amount_usd), correct even when
+        # the loan token is not ~$1. price_usd is each row token's own price so amount
+        # and price stay denominated in the row's symbol (as Aave does); it is None for
+        # a collateral token the oracle does not price, and that row drops at enrichment.
+        token_price_usd = Decimal(str(row.token_price_usd)) if row.token_price_usd is not None else None
+        return CollateralContribution(
+            token_id=row.token_id,
+            symbol=row.symbol,
+            backing_value=backed_amount * loan_token_price,
+            backing_pct=Decimal(str(row.backing_pct)),
+            price_usd=token_price_usd,
         )

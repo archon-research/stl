@@ -29,7 +29,7 @@ type fluidIntegrationFixture struct {
 func setupFluidIntegration(t *testing.T) *fluidIntegrationFixture {
 	t.Helper()
 
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	tokenRepo, err := postgres.NewTokenRepository(pool, nil, 0)
@@ -54,7 +54,7 @@ func setupFluidIntegration(t *testing.T) *fluidIntegrationFixture {
 
 	svc, err := NewService(
 		Config{SQSConsumerConfig: shared.SQSConsumerConfig{ChainID: 1, Logger: testLogger()}},
-		stubConsumer{}, cache, stubBlockQuerier{head: 19_500_000}, chain, txManager, vaultRepo, tokenRepo, protocolRepo,
+		stubConsumer{}, cache, stubBlockQuerier{head: 19_500_000}, chain.multicaller(), txManager, vaultRepo, tokenRepo, protocolRepo,
 	)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)

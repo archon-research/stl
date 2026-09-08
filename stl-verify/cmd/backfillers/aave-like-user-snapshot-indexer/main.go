@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -178,12 +179,7 @@ func parseCSVUsers(r io.Reader, protocolSlug string) ([]common.Address, error) {
 }
 
 func containsSlug(protocols, slug string) bool {
-	for _, p := range strings.Fields(protocols) {
-		if p == slug {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(strings.Fields(protocols), slug)
 }
 
 func run(args []string) error {
@@ -285,6 +281,11 @@ func run(args []string) error {
 		return fmt.Errorf("creating receipt token repository: %w", err)
 	}
 
+	debtTokenRepo, err := postgres.NewDebtTokenRepository(pool, logger)
+	if err != nil {
+		return fmt.Errorf("creating debt token repository: %w", err)
+	}
+
 	// Create PositionReader directly for batch RPC reads
 	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
 	if err != nil {
@@ -292,7 +293,7 @@ func run(args []string) error {
 	}
 
 	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
-	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "aave-like-snapshot")
+	archiveWrap, _, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "aave-like-snapshot")
 	if err != nil {
 		return err
 	}
@@ -322,6 +323,7 @@ func run(args []string) error {
 		positionRepo,
 		eventRepo,
 		receiptTokenRepo,
+		debtTokenRepo,
 	)
 	if err != nil {
 		return fmt.Errorf("creating position tracker service: %w", err)
@@ -381,7 +383,7 @@ func run(args []string) error {
 			logger.Info("batch starting", "batch", batchIdx+1, "of", len(batches), "users", len(batch))
 
 			rpcStart := time.Now()
-			results, err := reader.GetBatchUserPositionData(gCtx, batch, cfg.protocolAddress, cfg.chainID, int64(blockNumber))
+			results, err := reader.GetBatchUserPositionData(gCtx, batch, cfg.protocolAddress, cfg.chainID, int64(blockNumber), common.Hash{})
 			if err != nil {
 				return fmt.Errorf("batch %d RPC failed after %s: %w", batchIdx+1, time.Since(rpcStart), err)
 			}
@@ -452,10 +454,7 @@ func run(args []string) error {
 func splitIntoBatches(users []common.Address, batchSize int) [][]common.Address {
 	var batches [][]common.Address
 	for i := 0; i < len(users); i += batchSize {
-		end := i + batchSize
-		if end > len(users) {
-			end = len(users)
-		}
+		end := min(i+batchSize, len(users))
 		batches = append(batches, users[i:end])
 	}
 	return batches

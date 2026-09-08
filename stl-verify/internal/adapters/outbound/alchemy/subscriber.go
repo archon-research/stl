@@ -11,9 +11,11 @@
 //   - Thread-safe: All public methods are safe for concurrent use
 //
 // Channel buffer sizing:
-//   - Default ChannelBufferSize is 100 blocks
-//   - If your consumer processes blocks slower than ~12 seconds/block (Ethereum
-//     block time), increase the buffer or optimize consumption to avoid drops
+//   - Default ChannelBufferSize is 100 headers
+//   - The buffer must hold every header that arrives while the consumer is
+//     blocked, so size it to block rate × the consumer's longest stall: 100
+//     slots is ~20 minutes on Ethereum (~12s blocks) but ~25s on Arbitrum
+//     (~4 blocks/s), where a single 30s RPC timeout already overflows it
 package alchemy
 
 import (
@@ -116,9 +118,6 @@ type Subscriber struct {
 
 	// wg tracks active goroutines for graceful shutdown
 	wg sync.WaitGroup
-
-	// Reconnect callback - called when connection is re-established
-	onReconnect func()
 }
 
 // NewSubscriber creates a new Alchemy WebSocket subscriber.
@@ -166,12 +165,6 @@ func NewSubscriber(config SubscriberConfig) (*Subscriber, error) {
 		headers:   make(chan outbound.BlockHeader, config.ChannelBufferSize),
 		telemetry: config.Telemetry,
 	}, nil
-}
-
-// SetOnReconnect sets a callback that will be called when the connection is re-established.
-// This allows the application layer to trigger backfill.
-func (s *Subscriber) SetOnReconnect(callback func()) {
-	s.onReconnect = callback
 }
 
 // Subscribe starts listening for new block headers.
@@ -234,13 +227,10 @@ func (s *Subscriber) connectionManager() {
 			s.telemetry.RecordConnectionUp(s.ctx)
 		}
 
-		// Notify caller of reconnection and record metric
+		// Record reconnection metric
 		if !isFirstConnect {
 			if s.telemetry != nil {
 				s.telemetry.RecordReconnection(s.ctx)
-			}
-			if s.onReconnect != nil {
-				s.onReconnect()
 			}
 		}
 		isFirstConnect = false

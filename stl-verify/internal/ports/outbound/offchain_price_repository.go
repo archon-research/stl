@@ -15,7 +15,8 @@ type PriceRepository interface {
 	GetEnabledAssets(ctx context.Context, sourceID int64) ([]*entity.PriceAsset, error)
 	GetAssetsBySourceAssetIDs(ctx context.Context, sourceID int64, sourceAssetIDs []string) ([]*entity.PriceAsset, error)
 
-	// Price operations
+	// Price operations. Token-keyed prices go to offchain_token_price;
+	// prices of assets with no token row go to asset_price.
 	UpsertPrices(ctx context.Context, prices []*entity.TokenPrice) error
-	GetLatestPrice(ctx context.Context, tokenID int64) (*entity.TokenPrice, error)
+	UpsertAssetPrices(ctx context.Context, prices []*entity.AssetPrice) error
 }

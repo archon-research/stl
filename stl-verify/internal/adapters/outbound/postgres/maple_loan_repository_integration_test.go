@@ -19,16 +19,12 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const mapleSchemaName = "test_maple_graphql"
+const mapleDBName = "test_maple_graphql"
 
 var maplePool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(mapleSchemaName, func() {
-		maplePool = testutil.SetupSchemaForMain(sharedDSN, mapleSchemaName)
-	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, maplePool, mapleSchemaName)
-	})
+	useFileDatabase(mapleDBName, &maplePool)
 }
 
 // truncateMaple clears maple-related tables for test isolation. The protocol

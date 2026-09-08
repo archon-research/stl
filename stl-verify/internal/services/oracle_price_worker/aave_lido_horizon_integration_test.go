@@ -61,6 +61,7 @@ func TestIntegration_AaveV3RWAOracle_AssetBindingsAreCanonical(t *testing.T) {
 	assertOracleAssetsExactlyMatchAddresses(t, "aave_v3_rwa", []string{
 		"0x40D16FC0246aD3160Ccc09B8D0D3A2cD28aE6C2f", // GHO
 		"0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", // USDC
+		"0x8292Bb45bf1Ee4d140127049757C2E0fF06317eD", // RLUSD (added by 20260709_120000_add_er_missing_price_feeds.sql)
 	})
 }
 
@@ -71,7 +72,7 @@ func TestIntegration_AaveV3RWAOracle_AssetBindingsAreCanonical(t *testing.T) {
 func assertOracleEmitsPricesForSymbols(t *testing.T, oracleName string, symbols []string) {
 	t.Helper()
 
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -136,7 +137,7 @@ func assertOracleEmitsPricesForSymbols(t *testing.T, oracleName string, symbols 
 		ChainID:      1,
 	}
 
-	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -184,7 +185,7 @@ func assertOracleEmitsPricesForSymbols(t *testing.T, oracleName string, symbols 
 func assertOracleAssetsExactlyMatchAddresses(t *testing.T, oracleName string, expectedAddrs []string) {
 	t.Helper()
 
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()

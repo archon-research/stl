@@ -1,24 +1,15 @@
-// Package dexbootstrap consolidates the shared CLI/env parsing + wiring used
-// by the three DEX SQS workers (curve, uniswap-v3, balancer). Without this
-// helper, each worker's main.go duplicates ~300 LOC of identical setup; the
-// reviews for VEC-79 (N7-3 + S3) flagged the duplication, and the new
-// internal/pkg/chainutil package gave us the validation surface to consolidate
-// against.
+// Package dexbootstrap consolidates the CLI/env parsing and infrastructure
+// wiring shared by the DEX SQS workers, leaving factories only what differs.
 package dexbootstrap
 
 import (
 	"flag"
 	"fmt"
 	"strconv"
-	"strings"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 )
-
-// ethereumMainnetChainID is the only chain the built-in ALCHEMY_HTTP_URL default
-// (eth-mainnet) is valid for; any other chain must set the endpoint explicitly.
-const ethereumMainnetChainID int64 = 1
 
 // Config is the resolved runtime configuration common to every DEX worker.
 // Worker-specific config (e.g. UV3's NFPM address) is read separately from
@@ -38,6 +29,15 @@ type Config struct {
 	// snapshots even on blocks with no pool event. 0 disables the sweep
 	// (event-driven snapshots only).
 	SweepBlocks int64
+	// SweepBlocksSet reports whether SweepBlocks came from an explicit
+	// -sweep-blocks flag or SWEEP_BLOCKS env var rather than the default. A DEX
+	// factory that does not support sweeping uses this to warn only when an
+	// operator actually set the knob, not on every default boot.
+	SweepBlocksSet bool
+	// Dex selects which DEX factory dex-indexer runs (e.g. "curve",
+	// "uniswap-v3"). Validating the value against the registry's known keys
+	// is the caller's job; ParseConfig only requires it be present.
+	Dex string
 }
 
 // ParseConfig reads the canonical DEX-worker flag + env set and validates
@@ -54,10 +54,11 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 	queueURL := fs.String("queue", "", "SQS Queue URL")
 	redisAddr := fs.String("redis", "", "Redis address")
 	dbURL := fs.String("db", "", "PostgreSQL connection URL")
-	maxMessages := fs.Int("max", 10, "Max messages per poll")
+	maxMessages := fs.Int("max", 1, "Max messages per receive; more raises the visibility timeout the queue must carry")
 	waitTime := fs.Int("wait", 20, "Wait time in seconds (long polling)")
 	visibilityTimeout := fs.Int("visibility-timeout", 300, "SQS visibility timeout in seconds")
 	sweepBlocks := fs.Int64("sweep-blocks", 50, "Blocks between guaranteed state snapshots (0 disables)")
+	dex := fs.String("dex", "", "DEX to run (e.g. curve, uniswap-v3)")
 	if err := fs.Parse(args); err != nil {
 		// %w preserves flag.ErrHelp so callers can still distinguish -help.
 		return Config{}, fmt.Errorf("parsing %s flags: %w", flagSetName, err)
@@ -77,6 +78,7 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 		WaitTime:          *waitTime,
 		VisibilityTimeout: *visibilityTimeout,
 		SweepBlocks:       *sweepBlocks,
+		Dex:               *dex,
 	}
 
 	if cfg.QueueURL == "" {
@@ -86,21 +88,22 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 		return Config{}, fmt.Errorf("queue URL not provided (use -queue flag or AWS_SQS_QUEUE_URL env var)")
 	}
 
+	if cfg.Dex == "" {
+		cfg.Dex = env.Get("DEX", "")
+	}
+	if cfg.Dex == "" {
+		return Config{}, fmt.Errorf("DEX not provided (use -dex flag or DEX env var)")
+	}
+
 	if cfg.DBURL == "" {
 		cfg.DBURL = env.Get("DATABASE_URL", "")
 	}
 	if cfg.DBURL == "" {
 		return Config{}, fmt.Errorf("database URL not provided (use -db flag or DATABASE_URL env var)")
 	}
-
-	alchemyAPIKey := env.Get("ALCHEMY_API_KEY", "")
-	if alchemyAPIKey == "" {
-		return Config{}, fmt.Errorf("ALCHEMY_API_KEY environment variable is required")
+	if _, err := env.Require("ALCHEMY_API_KEY"); err != nil {
+		return Config{}, fmt.Errorf("resolving Alchemy RPC URL: %w", err)
 	}
-	// Trim a trailing slash so a configured ALCHEMY_HTTP_URL ending in "/" does
-	// not produce a "//" before the API key.
-	alchemyHTTPURL := strings.TrimRight(env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2"), "/")
-	cfg.AlchemyURL = fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey)
 
 	if cfg.RedisAddr == "" {
 		cfg.RedisAddr = env.Get("REDIS_ADDR", "")
@@ -128,6 +131,7 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 		}
 	}
 
+	cfg.SweepBlocksSet = explicit["sweep-blocks"]
 	if !explicit["sweep-blocks"] {
 		if sweepStr := env.Get("SWEEP_BLOCKS", ""); sweepStr != "" {
 			v, err := strconv.ParseInt(sweepStr, 10, 64)
@@ -135,19 +139,15 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 				return Config{}, fmt.Errorf("parsing SWEEP_BLOCKS %q: %w", sweepStr, err)
 			}
 			cfg.SweepBlocks = v
+			cfg.SweepBlocksSet = true
 		}
 	}
 	if cfg.SweepBlocks < 0 {
 		return Config{}, fmt.Errorf("sweep blocks %d must be >= 0", cfg.SweepBlocks)
 	}
 
-	// Range-validate the SQS timings (from flag OR env). AWS rejects these at
-	// call time, but a bad value should fail fast at boot with a clear message
-	// rather than surfacing as opaque ReceiveMessage errors on the hot path.
-	// WaitTimeSeconds: 0–20 (long-poll max). VisibilityTimeout: 0–43200 (12h).
-	if cfg.WaitTime < 0 || cfg.WaitTime > 20 {
-		return Config{}, fmt.Errorf("SQS wait time %d out of range [0,20]", cfg.WaitTime)
-	}
+	// AWS rejects an out-of-range visibility timeout only at call time, as an
+	// opaque ReceiveMessage error. The wait time is checked in sqs.NewConsumer.
 	if cfg.VisibilityTimeout < 0 || cfg.VisibilityTimeout > 43200 {
 		return Config{}, fmt.Errorf("SQS visibility timeout %d out of range [0,43200]", cfg.VisibilityTimeout)
 	}
@@ -185,11 +185,9 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 		return Config{}, fmt.Errorf("S3 bucket / chain / env mismatch: %w", err)
 	}
 
-	// The built-in ALCHEMY_HTTP_URL default points at mainnet; any other chain
-	// must set it explicitly or the worker would silently talk to mainnet (same
-	// fail-fast spirit as the S3 bucket/chain cross-check above).
-	if cfg.ChainID != ethereumMainnetChainID && env.Get("ALCHEMY_HTTP_URL", "") == "" {
-		return Config{}, fmt.Errorf("ALCHEMY_HTTP_URL is required for chain %d (the default endpoint is mainnet-only)", cfg.ChainID)
+	cfg.AlchemyURL, err = chainutil.AlchemyRPCURL(cfg.ChainID)
+	if err != nil {
+		return Config{}, fmt.Errorf("resolving Alchemy RPC URL: %w", err)
 	}
 
 	return cfg, nil

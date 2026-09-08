@@ -1,9 +1,18 @@
 """Domain-entity factories for the unit test suite."""
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from app.domain.entities.allocation import DirectAssetHolding, ReceiptTokenPosition
+from app.domain.entities.allocation import (
+    AnchorageCustodyHolding,
+    DirectAssetHolding,
+    ReceiptTokenPosition,
+)
+
+# The live feed is frozen at this snapshot_time (upstream outage since
+# 2026-06-16). The staleness test asserts it surfaces verbatim.
+ANCHORAGE_FROZEN_AS_OF = datetime(2026, 6, 16, 19, 45, 17, tzinfo=UTC)
 
 
 def make_receipt_token_position(**overrides: Any) -> ReceiptTokenPosition:
@@ -32,3 +41,19 @@ def make_direct_asset_holding(**overrides: Any) -> DirectAssetHolding:
     )
     defaults.update(overrides)
     return DirectAssetHolding(**defaults)
+
+
+def make_anchorage_custody_holding(**overrides: Any) -> AnchorageCustodyHolding:
+    """Defaults mirror the last-poll BTC/AnchorageCustody cohort: $250M loan
+    (exposure), $309.67M collateral (package value), 4722.61 BTC.
+    """
+    defaults: dict[str, Any] = dict(
+        symbol="BTC",
+        custody_type="AnchorageCustody",
+        balance=Decimal("4722.61"),
+        amount_usd=Decimal("250000000"),
+        collateral_usd=Decimal("309672229"),
+        as_of=ANCHORAGE_FROZEN_AS_OF,
+    )
+    defaults.update(overrides)
+    return AnchorageCustodyHolding(**defaults)

@@ -43,6 +43,12 @@ func TestDefaultDBConfig_NoTimeouts(t *testing.T) {
 	}
 }
 
+func TestDefaultDBConfig_MinConns(t *testing.T) {
+	if got := DefaultDBConfig("postgres://x").MinConns; got != 1 {
+		t.Errorf("DefaultDBConfig MinConns = %d, want 1", got)
+	}
+}
+
 func TestWorkerDBConfig_SetsLockTimeout(t *testing.T) {
 	cfg := WorkerDBConfig("postgres://x")
 	if cfg.LockTimeout != 10*time.Second {

@@ -360,10 +360,10 @@ func TestGetVaultMetadata_MorphoReverts_WithoutV2Markers(t *testing.T) {
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		if h.isProbeMulticall(calls) {
 			return []outbound.Result{
-				{Success: false, ReturnData: nil},                         // MORPHO reverts
-				{Success: true, ReturnData: h.packAddress(testLoanToken)}, // asset succeeds
-				{Success: false, ReturnData: nil},                         // curator reverts
-				{Success: false, ReturnData: nil},                         // liquidityAdapter reverts
+				{Success: false, ReturnData: nil},                       // MORPHO reverts
+				{Success: true, ReturnData: packAddress(testLoanToken)}, // asset succeeds
+				{Success: false, ReturnData: nil},                       // curator reverts
+				{Success: false, ReturnData: nil},                       // liquidityAdapter reverts
 			}, nil
 		}
 		t.Fatal("detail multicall should not be called when MORPHO() reverts and V2 markers also fail")
@@ -478,10 +478,10 @@ func TestGetVaultMetadata_AssetCallFailed(t *testing.T) {
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		if h.isProbeMulticall(calls) {
 			return []outbound.Result{
-				{Success: true, ReturnData: h.packAddress(MorphoBlueAddress)}, // MORPHO() succeeds
-				{Success: false, ReturnData: nil},                             // asset() reverts
-				{Success: false, ReturnData: nil},                             // curator reverts (MetaMorpho)
-				{Success: false, ReturnData: nil},                             // liquidityAdapter reverts (MetaMorpho)
+				{Success: true, ReturnData: packAddress(MorphoBlueAddress)}, // MORPHO() succeeds
+				{Success: false, ReturnData: nil},                           // asset() reverts
+				{Success: false, ReturnData: nil},                           // curator reverts (MetaMorpho)
+				{Success: false, ReturnData: nil},                           // liquidityAdapter reverts (MetaMorpho)
 			}, nil
 		}
 		t.Fatal("detail multicall should not be called when asset() fails")
@@ -504,7 +504,7 @@ func TestGetVaultMetadata_AssetUnpackError(t *testing.T) {
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		if h.isProbeMulticall(calls) {
 			return []outbound.Result{
-				{Success: true, ReturnData: h.packAddress(MorphoBlueAddress)},
+				{Success: true, ReturnData: packAddress(MorphoBlueAddress)},
 				{Success: true, ReturnData: []byte{0x01, 0x02}}, // garbage data that won't unpack
 				{Success: false, ReturnData: nil},               // curator reverts (MetaMorpho)
 				{Success: false, ReturnData: nil},               // liquidityAdapter reverts (MetaMorpho)
@@ -824,11 +824,11 @@ func TestGetMarketParams_Failure(t *testing.T) {
 func TestGetMarketState_Success(t *testing.T) {
 	h := newTestHarness(t)
 
-	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{h.defaultMarketStateResult()}, nil
 	}
 
-	ms, err := h.svc.blockchainSvc.getMarketState(context.Background(), testMarketID, 20000000)
+	ms, err := h.svc.blockchainSvc.getMarketState(context.Background(), testMarketID, testBlockHash)
 	if err != nil {
 		t.Fatalf("getMarketState: %v", err)
 	}
@@ -837,14 +837,44 @@ func TestGetMarketState_Success(t *testing.T) {
 	}
 }
 
+// TestGetMarketState_PinsToBlockHash asserts market() is read via
+// ExecuteAtHash pinned to the exact blockHash passed in, not Execute-by-number:
+// after a reorg an archive node answers eth_call-by-number with the new
+// canonical state, which can silently disagree with the reorged
+// (older-version) data this read is being made for. See VEC-471.
+func TestGetMarketState_PinsToBlockHash(t *testing.T) {
+	h := newTestHarness(t)
+
+	var gotHash common.Hash
+	executedViaHash := false
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return nil, fmt.Errorf("getMarketState must call ExecuteAtHash, not Execute")
+	}
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+		executedViaHash = true
+		gotHash = blockHash
+		return []outbound.Result{h.defaultMarketStateResult()}, nil
+	}
+
+	if _, err := h.svc.blockchainSvc.getMarketState(context.Background(), testMarketID, testBlockHash); err != nil {
+		t.Fatalf("getMarketState: %v", err)
+	}
+	if !executedViaHash {
+		t.Fatal("getMarketState did not call ExecuteAtHash")
+	}
+	if gotHash != testBlockHash {
+		t.Errorf("multicall block hash = %s, want %s", gotHash, testBlockHash)
+	}
+}
+
 func TestGetMarketState_MulticallError(t *testing.T) {
 	h := newTestHarness(t)
 
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return nil, errors.New("rpc failure")
 	}
 
-	_, err := h.svc.blockchainSvc.getMarketState(context.Background(), testMarketID, 20000000)
+	_, err := h.svc.blockchainSvc.getMarketState(context.Background(), testMarketID, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -853,11 +883,11 @@ func TestGetMarketState_MulticallError(t *testing.T) {
 func TestGetMarketState_EmptyResults(t *testing.T) {
 	h := newTestHarness(t)
 
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{}, nil
 	}
 
-	_, err := h.svc.blockchainSvc.getMarketState(context.Background(), testMarketID, 20000000)
+	_, err := h.svc.blockchainSvc.getMarketState(context.Background(), testMarketID, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for empty results")
 	}
@@ -871,14 +901,14 @@ func TestGetMarketState_EmptyResults(t *testing.T) {
 func TestGetMarketAndPositionState_Success(t *testing.T) {
 	h := newTestHarness(t)
 
-	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		if len(calls) != 2 {
 			return nil, fmt.Errorf("expected 2 calls, got %d", len(calls))
 		}
 		return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
 	}
 
-	ms, ps, err := h.svc.blockchainSvc.getMarketAndPositionState(context.Background(), testMarketID, testOnBehalf, 20000000)
+	ms, ps, err := h.svc.blockchainSvc.getMarketAndPositionState(context.Background(), testMarketID, testOnBehalf, testBlockHash)
 	if err != nil {
 		t.Fatalf("getMarketAndPositionState: %v", err)
 	}
@@ -893,11 +923,11 @@ func TestGetMarketAndPositionState_Success(t *testing.T) {
 func TestGetMarketAndPositionState_InsufficientResults(t *testing.T) {
 	h := newTestHarness(t)
 
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{h.defaultMarketStateResult()}, nil
 	}
 
-	_, _, err := h.svc.blockchainSvc.getMarketAndPositionState(context.Background(), testMarketID, testOnBehalf, 20000000)
+	_, _, err := h.svc.blockchainSvc.getMarketAndPositionState(context.Background(), testMarketID, testOnBehalf, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for insufficient results")
 	}
@@ -908,14 +938,14 @@ func TestGetMarketAndPositionState_InsufficientResults(t *testing.T) {
 func TestGetMarketAndTwoPositionStates_Success(t *testing.T) {
 	h := newTestHarness(t)
 
-	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		if len(calls) != 3 {
 			return nil, fmt.Errorf("expected 3 calls, got %d", len(calls))
 		}
 		return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult(), h.defaultPositionStateResult()}, nil
 	}
 
-	ms, psA, psB, err := h.svc.blockchainSvc.getMarketAndTwoPositionStates(context.Background(), testMarketID, testOnBehalf, testCaller, 20000000)
+	ms, psA, psB, err := h.svc.blockchainSvc.getMarketAndTwoPositionStates(context.Background(), testMarketID, testOnBehalf, testCaller, testBlockHash)
 	if err != nil {
 		t.Fatalf("getMarketAndTwoPositionStates: %v", err)
 	}
@@ -929,14 +959,14 @@ func TestGetMarketAndTwoPositionStates_Success(t *testing.T) {
 func TestGetVaultState_Success(t *testing.T) {
 	h := newTestHarness(t)
 
-	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		if len(calls) != 2 {
 			return nil, fmt.Errorf("expected 2 calls, got %d", len(calls))
 		}
 		return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
 	}
 
-	vs, err := h.svc.blockchainSvc.getVaultState(context.Background(), testVaultAddr, 20000000)
+	vs, err := h.svc.blockchainSvc.getVaultState(context.Background(), testVaultAddr, testBlockHash)
 	if err != nil {
 		t.Fatalf("getVaultState: %v", err)
 	}
@@ -945,14 +975,44 @@ func TestGetVaultState_Success(t *testing.T) {
 	}
 }
 
+// TestGetVaultState_PinsToBlockHash asserts vault state (totalAssets/
+// totalSupply) is read via ExecuteAtHash pinned to the exact blockHash passed
+// in, not Execute-by-number — same reorg-correctness rationale as
+// TestGetMarketState_PinsToBlockHash (VEC-471), covering the vault-state
+// family of getters distinctly from the market-state family.
+func TestGetVaultState_PinsToBlockHash(t *testing.T) {
+	h := newTestHarness(t)
+
+	var gotHash common.Hash
+	executedViaHash := false
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return nil, fmt.Errorf("getVaultState must call ExecuteAtHash, not Execute")
+	}
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+		executedViaHash = true
+		gotHash = blockHash
+		return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
+	}
+
+	if _, err := h.svc.blockchainSvc.getVaultState(context.Background(), testVaultAddr, testBlockHash); err != nil {
+		t.Fatalf("getVaultState: %v", err)
+	}
+	if !executedViaHash {
+		t.Fatal("getVaultState did not call ExecuteAtHash")
+	}
+	if gotHash != testBlockHash {
+		t.Errorf("multicall block hash = %s, want %s", gotHash, testBlockHash)
+	}
+}
+
 func TestGetVaultState_InsufficientResults(t *testing.T) {
 	h := newTestHarness(t)
 
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{h.defaultVaultTotalAssetsResult()}, nil
 	}
 
-	_, err := h.svc.blockchainSvc.getVaultState(context.Background(), testVaultAddr, 20000000)
+	_, err := h.svc.blockchainSvc.getVaultState(context.Background(), testVaultAddr, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -963,14 +1023,14 @@ func TestGetVaultState_InsufficientResults(t *testing.T) {
 func TestGetVaultStateAndBalance_Success(t *testing.T) {
 	h := newTestHarness(t)
 
-	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		if len(calls) != 3 {
 			return nil, fmt.Errorf("expected 3 calls, got %d", len(calls))
 		}
 		return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(77777))}, nil
 	}
 
-	vs, bal, err := h.svc.blockchainSvc.getVaultStateAndBalance(context.Background(), testVaultAddr, testOnBehalf, 20000000)
+	vs, bal, err := h.svc.blockchainSvc.getVaultStateAndBalance(context.Background(), testVaultAddr, testOnBehalf, testBlockHash)
 	if err != nil {
 		t.Fatalf("getVaultStateAndBalance: %v", err)
 	}
@@ -987,7 +1047,7 @@ func TestGetVaultStateAndBalance_Success(t *testing.T) {
 func TestGetVaultStateAndTwoBalances_Success(t *testing.T) {
 	h := newTestHarness(t)
 
-	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		if len(calls) != 4 {
 			return nil, fmt.Errorf("expected 4 calls, got %d", len(calls))
 		}
@@ -999,7 +1059,7 @@ func TestGetVaultStateAndTwoBalances_Success(t *testing.T) {
 		}, nil
 	}
 
-	vs, balA, balB, err := h.svc.blockchainSvc.getVaultStateAndTwoBalances(context.Background(), testVaultAddr, testOnBehalf, testCaller, 20000000)
+	vs, balA, balB, err := h.svc.blockchainSvc.getVaultStateAndTwoBalances(context.Background(), testVaultAddr, testOnBehalf, testCaller, testBlockHash)
 	if err != nil {
 		t.Fatalf("getVaultStateAndTwoBalances: %v", err)
 	}
@@ -1072,10 +1132,10 @@ func TestUnpackBalance_GarbageData(t *testing.T) {
 
 func TestGetMarketAndTwoPositionStates_MulticallError(t *testing.T) {
 	h := newTestHarness(t)
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return nil, errors.New("rpc error")
 	}
-	_, _, _, err := h.svc.blockchainSvc.getMarketAndTwoPositionStates(context.Background(), testMarketID, testCaller, testBorrower, 20000000)
+	_, _, _, err := h.svc.blockchainSvc.getMarketAndTwoPositionStates(context.Background(), testMarketID, testCaller, testBorrower, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -1083,10 +1143,10 @@ func TestGetMarketAndTwoPositionStates_MulticallError(t *testing.T) {
 
 func TestGetMarketAndTwoPositionStates_InsufficientResults(t *testing.T) {
 	h := newTestHarness(t)
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{h.defaultMarketStateResult()}, nil
 	}
-	_, _, _, err := h.svc.blockchainSvc.getMarketAndTwoPositionStates(context.Background(), testMarketID, testCaller, testBorrower, 20000000)
+	_, _, _, err := h.svc.blockchainSvc.getMarketAndTwoPositionStates(context.Background(), testMarketID, testCaller, testBorrower, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for insufficient results")
 	}
@@ -1097,14 +1157,14 @@ func TestGetMarketAndTwoPositionStates_InsufficientResults(t *testing.T) {
 
 func TestGetMarketAndTwoPositionStates_MarketStateFailed(t *testing.T) {
 	h := newTestHarness(t)
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{
 			{Success: false, ReturnData: nil},
 			h.defaultPositionStateResult(),
 			h.defaultPositionStateResult(),
 		}, nil
 	}
-	_, _, _, err := h.svc.blockchainSvc.getMarketAndTwoPositionStates(context.Background(), testMarketID, testCaller, testBorrower, 20000000)
+	_, _, _, err := h.svc.blockchainSvc.getMarketAndTwoPositionStates(context.Background(), testMarketID, testCaller, testBorrower, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for failed market state")
 	}
@@ -1112,14 +1172,14 @@ func TestGetMarketAndTwoPositionStates_MarketStateFailed(t *testing.T) {
 
 func TestGetMarketAndTwoPositionStates_FirstPositionFailed(t *testing.T) {
 	h := newTestHarness(t)
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{
 			h.defaultMarketStateResult(),
 			{Success: false, ReturnData: nil},
 			h.defaultPositionStateResult(),
 		}, nil
 	}
-	_, _, _, err := h.svc.blockchainSvc.getMarketAndTwoPositionStates(context.Background(), testMarketID, testCaller, testBorrower, 20000000)
+	_, _, _, err := h.svc.blockchainSvc.getMarketAndTwoPositionStates(context.Background(), testMarketID, testCaller, testBorrower, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for failed first position")
 	}
@@ -1127,14 +1187,14 @@ func TestGetMarketAndTwoPositionStates_FirstPositionFailed(t *testing.T) {
 
 func TestGetMarketAndTwoPositionStates_SecondPositionFailed(t *testing.T) {
 	h := newTestHarness(t)
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{
 			h.defaultMarketStateResult(),
 			h.defaultPositionStateResult(),
 			{Success: false, ReturnData: nil},
 		}, nil
 	}
-	_, _, _, err := h.svc.blockchainSvc.getMarketAndTwoPositionStates(context.Background(), testMarketID, testCaller, testBorrower, 20000000)
+	_, _, _, err := h.svc.blockchainSvc.getMarketAndTwoPositionStates(context.Background(), testMarketID, testCaller, testBorrower, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for failed second position")
 	}
@@ -1144,10 +1204,10 @@ func TestGetMarketAndTwoPositionStates_SecondPositionFailed(t *testing.T) {
 
 func TestGetVaultStateAndBalance_MulticallError(t *testing.T) {
 	h := newTestHarness(t)
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return nil, errors.New("rpc error")
 	}
-	_, _, err := h.svc.blockchainSvc.getVaultStateAndBalance(context.Background(), testVaultAddr, testOnBehalf, 20000000)
+	_, _, err := h.svc.blockchainSvc.getVaultStateAndBalance(context.Background(), testVaultAddr, testOnBehalf, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -1155,10 +1215,10 @@ func TestGetVaultStateAndBalance_MulticallError(t *testing.T) {
 
 func TestGetVaultStateAndBalance_InsufficientResults(t *testing.T) {
 	h := newTestHarness(t)
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{h.defaultVaultTotalAssetsResult()}, nil
 	}
-	_, _, err := h.svc.blockchainSvc.getVaultStateAndBalance(context.Background(), testVaultAddr, testOnBehalf, 20000000)
+	_, _, err := h.svc.blockchainSvc.getVaultStateAndBalance(context.Background(), testVaultAddr, testOnBehalf, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for insufficient results")
 	}
@@ -1166,14 +1226,14 @@ func TestGetVaultStateAndBalance_InsufficientResults(t *testing.T) {
 
 func TestGetVaultStateAndBalance_VaultStateFailed(t *testing.T) {
 	h := newTestHarness(t)
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{
 			{Success: false, ReturnData: nil},
 			h.defaultVaultTotalSupplyResult(),
 			h.defaultBalanceOfResult(big.NewInt(100)),
 		}, nil
 	}
-	_, _, err := h.svc.blockchainSvc.getVaultStateAndBalance(context.Background(), testVaultAddr, testOnBehalf, 20000000)
+	_, _, err := h.svc.blockchainSvc.getVaultStateAndBalance(context.Background(), testVaultAddr, testOnBehalf, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for failed vault state")
 	}
@@ -1181,14 +1241,14 @@ func TestGetVaultStateAndBalance_VaultStateFailed(t *testing.T) {
 
 func TestGetVaultStateAndBalance_BalanceFailed(t *testing.T) {
 	h := newTestHarness(t)
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{
 			h.defaultVaultTotalAssetsResult(),
 			h.defaultVaultTotalSupplyResult(),
 			{Success: false, ReturnData: nil},
 		}, nil
 	}
-	_, _, err := h.svc.blockchainSvc.getVaultStateAndBalance(context.Background(), testVaultAddr, testOnBehalf, 20000000)
+	_, _, err := h.svc.blockchainSvc.getVaultStateAndBalance(context.Background(), testVaultAddr, testOnBehalf, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for failed balance")
 	}
@@ -1198,10 +1258,10 @@ func TestGetVaultStateAndBalance_BalanceFailed(t *testing.T) {
 
 func TestGetVaultStateAndTwoBalances_MulticallError(t *testing.T) {
 	h := newTestHarness(t)
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return nil, errors.New("rpc error")
 	}
-	_, _, _, err := h.svc.blockchainSvc.getVaultStateAndTwoBalances(context.Background(), testVaultAddr, testOnBehalf, testCaller, 20000000)
+	_, _, _, err := h.svc.blockchainSvc.getVaultStateAndTwoBalances(context.Background(), testVaultAddr, testOnBehalf, testCaller, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -1209,10 +1269,10 @@ func TestGetVaultStateAndTwoBalances_MulticallError(t *testing.T) {
 
 func TestGetVaultStateAndTwoBalances_InsufficientResults(t *testing.T) {
 	h := newTestHarness(t)
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
 	}
-	_, _, _, err := h.svc.blockchainSvc.getVaultStateAndTwoBalances(context.Background(), testVaultAddr, testOnBehalf, testCaller, 20000000)
+	_, _, _, err := h.svc.blockchainSvc.getVaultStateAndTwoBalances(context.Background(), testVaultAddr, testOnBehalf, testCaller, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for insufficient results")
 	}
@@ -1220,7 +1280,7 @@ func TestGetVaultStateAndTwoBalances_InsufficientResults(t *testing.T) {
 
 func TestGetVaultStateAndTwoBalances_VaultStateFailed(t *testing.T) {
 	h := newTestHarness(t)
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{
 			{Success: false, ReturnData: nil},
 			h.defaultVaultTotalSupplyResult(),
@@ -1228,7 +1288,7 @@ func TestGetVaultStateAndTwoBalances_VaultStateFailed(t *testing.T) {
 			h.defaultBalanceOfResult(big.NewInt(200)),
 		}, nil
 	}
-	_, _, _, err := h.svc.blockchainSvc.getVaultStateAndTwoBalances(context.Background(), testVaultAddr, testOnBehalf, testCaller, 20000000)
+	_, _, _, err := h.svc.blockchainSvc.getVaultStateAndTwoBalances(context.Background(), testVaultAddr, testOnBehalf, testCaller, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for failed vault state")
 	}
@@ -1236,7 +1296,7 @@ func TestGetVaultStateAndTwoBalances_VaultStateFailed(t *testing.T) {
 
 func TestGetVaultStateAndTwoBalances_FirstBalanceFailed(t *testing.T) {
 	h := newTestHarness(t)
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{
 			h.defaultVaultTotalAssetsResult(),
 			h.defaultVaultTotalSupplyResult(),
@@ -1244,7 +1304,7 @@ func TestGetVaultStateAndTwoBalances_FirstBalanceFailed(t *testing.T) {
 			h.defaultBalanceOfResult(big.NewInt(200)),
 		}, nil
 	}
-	_, _, _, err := h.svc.blockchainSvc.getVaultStateAndTwoBalances(context.Background(), testVaultAddr, testOnBehalf, testCaller, 20000000)
+	_, _, _, err := h.svc.blockchainSvc.getVaultStateAndTwoBalances(context.Background(), testVaultAddr, testOnBehalf, testCaller, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for failed first balance")
 	}
@@ -1252,7 +1312,7 @@ func TestGetVaultStateAndTwoBalances_FirstBalanceFailed(t *testing.T) {
 
 func TestGetVaultStateAndTwoBalances_SecondBalanceFailed(t *testing.T) {
 	h := newTestHarness(t)
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{
 			h.defaultVaultTotalAssetsResult(),
 			h.defaultVaultTotalSupplyResult(),
@@ -1260,7 +1320,7 @@ func TestGetVaultStateAndTwoBalances_SecondBalanceFailed(t *testing.T) {
 			{Success: false, ReturnData: nil},
 		}, nil
 	}
-	_, _, _, err := h.svc.blockchainSvc.getVaultStateAndTwoBalances(context.Background(), testVaultAddr, testOnBehalf, testCaller, 20000000)
+	_, _, _, err := h.svc.blockchainSvc.getVaultStateAndTwoBalances(context.Background(), testVaultAddr, testOnBehalf, testCaller, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for failed second balance")
 	}
@@ -1270,13 +1330,13 @@ func TestGetVaultStateAndTwoBalances_SecondBalanceFailed(t *testing.T) {
 
 func TestGetMarketAndPositionState_MarketStateFailed(t *testing.T) {
 	h := newTestHarness(t)
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{
 			{Success: false, ReturnData: nil},
 			h.defaultPositionStateResult(),
 		}, nil
 	}
-	_, _, err := h.svc.blockchainSvc.getMarketAndPositionState(context.Background(), testMarketID, testOnBehalf, 20000000)
+	_, _, err := h.svc.blockchainSvc.getMarketAndPositionState(context.Background(), testMarketID, testOnBehalf, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for failed market state")
 	}
@@ -1284,13 +1344,13 @@ func TestGetMarketAndPositionState_MarketStateFailed(t *testing.T) {
 
 func TestGetMarketAndPositionState_PositionStateFailed(t *testing.T) {
 	h := newTestHarness(t)
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{
 			h.defaultMarketStateResult(),
 			{Success: false, ReturnData: nil},
 		}, nil
 	}
-	_, _, err := h.svc.blockchainSvc.getMarketAndPositionState(context.Background(), testMarketID, testOnBehalf, 20000000)
+	_, _, err := h.svc.blockchainSvc.getMarketAndPositionState(context.Background(), testMarketID, testOnBehalf, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for failed position state")
 	}
@@ -1300,10 +1360,10 @@ func TestGetMarketAndPositionState_PositionStateFailed(t *testing.T) {
 
 func TestGetVaultState_MulticallError(t *testing.T) {
 	h := newTestHarness(t)
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return nil, errors.New("rpc error")
 	}
-	_, err := h.svc.blockchainSvc.getVaultState(context.Background(), testVaultAddr, 20000000)
+	_, err := h.svc.blockchainSvc.getVaultState(context.Background(), testVaultAddr, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -1311,10 +1371,10 @@ func TestGetVaultState_MulticallError(t *testing.T) {
 
 func TestGetVaultState_InsufficientResults2(t *testing.T) {
 	h := newTestHarness(t)
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{h.defaultVaultTotalAssetsResult()}, nil
 	}
-	_, err := h.svc.blockchainSvc.getVaultState(context.Background(), testVaultAddr, 20000000)
+	_, err := h.svc.blockchainSvc.getVaultState(context.Background(), testVaultAddr, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for insufficient results")
 	}
@@ -1322,13 +1382,13 @@ func TestGetVaultState_InsufficientResults2(t *testing.T) {
 
 func TestGetVaultState_TotalAssetsFailed(t *testing.T) {
 	h := newTestHarness(t)
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{
 			{Success: false, ReturnData: nil},
 			h.defaultVaultTotalSupplyResult(),
 		}, nil
 	}
-	_, err := h.svc.blockchainSvc.getVaultState(context.Background(), testVaultAddr, 20000000)
+	_, err := h.svc.blockchainSvc.getVaultState(context.Background(), testVaultAddr, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for failed totalAssets")
 	}
@@ -1338,10 +1398,10 @@ func TestGetVaultState_TotalAssetsFailed(t *testing.T) {
 
 func TestGetMarketState_MarketCallFailed(t *testing.T) {
 	h := newTestHarness(t)
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{{Success: false, ReturnData: nil}}, nil
 	}
-	_, err := h.svc.blockchainSvc.getMarketState(context.Background(), testMarketID, 20000000)
+	_, err := h.svc.blockchainSvc.getMarketState(context.Background(), testMarketID, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for failed market call")
 	}
@@ -1695,5 +1755,282 @@ func TestGetTokenPairMetadata_BothZero(t *testing.T) {
 	}
 	if mdA.Symbol != "" || mdA.Decimals != 0 || mdB.Symbol != "" || mdB.Decimals != 0 {
 		t.Errorf("expected empty metadata on both sides, got mdA=%+v mdB=%+v", mdA, mdB)
+	}
+}
+
+// --- VaultV2 adapter reads ---
+
+// TestGetAdapterRealAssets_PinsToBlockHash asserts realAssets() is a state read
+// pinned via ExecuteAtHash (reorg-correctness, VEC-471), not by block number.
+func TestGetAdapterRealAssets_PinsToBlockHash(t *testing.T) {
+	h := newTestHarness(t)
+	adapter := common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2")
+
+	var gotHash common.Hash
+	viaHash := false
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return nil, fmt.Errorf("getAdapterRealAssets must call ExecuteAtHash, not Execute")
+	}
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+		viaHash = true
+		gotHash = blockHash
+		// AllowFailure is required so a revert comes back as a failed Result the
+		// caller can classify (errAdapterRealAssetsReverted) instead of reverting
+		// the whole batch; it is still an error unless the caller is the seed for an
+		// unclassified adapter.
+		if len(calls) != 1 || calls[0].Target != adapter || !calls[0].AllowFailure {
+			t.Errorf("unexpected calls: %+v", calls)
+		}
+		return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(987654321))}}, nil
+	}
+
+	got, err := h.svc.blockchainSvc.getAdapterRealAssets(context.Background(), adapter, testBlockHash)
+	if err != nil {
+		t.Fatalf("getAdapterRealAssets: %v", err)
+	}
+	if !viaHash {
+		t.Fatal("did not call ExecuteAtHash")
+	}
+	if gotHash != testBlockHash {
+		t.Errorf("pinned to %s, want %s", gotHash, testBlockHash)
+	}
+	if got.Int64() != 987654321 {
+		t.Errorf("realAssets = %s, want 987654321", got)
+	}
+}
+
+func TestGetAdapterRealAssets_RevertIsError(t *testing.T) {
+	h := newTestHarness(t)
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		return []outbound.Result{{Success: false, ReturnData: nil}}, nil
+	}
+	if _, err := h.svc.blockchainSvc.getAdapterRealAssets(context.Background(), common.HexToAddress("0x1"), testBlockHash); err == nil {
+		t.Fatal("expected error when realAssets() reverts")
+	}
+}
+
+func TestGetAdapterRealAssets_MalformedReturnDataIsError(t *testing.T) {
+	h := newTestHarness(t)
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		// Success but a return payload too short to decode a uint256.
+		return []outbound.Result{{Success: true, ReturnData: []byte{0x01}}}, nil
+	}
+	if _, err := h.svc.blockchainSvc.getAdapterRealAssets(context.Background(), common.HexToAddress("0x1"), testBlockHash); err == nil {
+		t.Fatal("expected error decoding malformed realAssets() return data")
+	}
+}
+
+func TestGetAdapterRealAssets_MulticallError(t *testing.T) {
+	h := newTestHarness(t)
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		return nil, errors.New("rpc failure")
+	}
+	if _, err := h.svc.blockchainSvc.getAdapterRealAssets(context.Background(), common.HexToAddress("0x1"), testBlockHash); err == nil {
+		t.Fatal("expected error on multicall failure")
+	}
+}
+
+// TestGetVaultCaps_PinsToBlockHash asserts absoluteCap()/relativeCap() are read
+// together off the vault as one hash-pinned state read (VEC-471), and both values
+// round-trip — including a max-uint128 absolute cap.
+func TestGetVaultCaps_PinsToBlockHash(t *testing.T) {
+	h := newTestHarness(t)
+	vault := common.HexToAddress("0xc7CDcFDEfC64631ED6799C95e3b110cd42F2bD22")
+	capID := [32]byte{0x01, 0x02, 0x03}
+	wantAbs := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 128), big.NewInt(1))
+	wantRel := big.NewInt(1_000_000_000_000_000_000)
+
+	var gotHash common.Hash
+	viaHash := false
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return nil, fmt.Errorf("getVaultCaps must call ExecuteAtHash, not Execute")
+	}
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+		viaHash = true
+		gotHash = blockHash
+		if len(calls) != 2 || calls[0].Target != vault || calls[1].Target != vault || calls[0].AllowFailure || calls[1].AllowFailure {
+			t.Errorf("unexpected calls: %+v", calls)
+		}
+		return []outbound.Result{
+			{Success: true, ReturnData: h.packUint256(wantAbs)},
+			{Success: true, ReturnData: h.packUint256(wantRel)},
+		}, nil
+	}
+
+	gotAbs, gotRel, err := h.svc.blockchainSvc.getVaultCaps(context.Background(), vault, capID, testBlockHash)
+	if err != nil {
+		t.Fatalf("getVaultCaps: %v", err)
+	}
+	if !viaHash {
+		t.Fatal("did not call ExecuteAtHash")
+	}
+	if gotHash != testBlockHash {
+		t.Errorf("pinned to %s, want %s", gotHash, testBlockHash)
+	}
+	if gotAbs.Cmp(wantAbs) != 0 {
+		t.Errorf("absoluteCap = %s, want %s", gotAbs, wantAbs)
+	}
+	if gotRel.Cmp(wantRel) != 0 {
+		t.Errorf("relativeCap = %s, want %s", gotRel, wantRel)
+	}
+}
+
+func TestGetVaultCaps_SubResultFailureIsError(t *testing.T) {
+	h := newTestHarness(t)
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		return []outbound.Result{
+			{Success: true, ReturnData: h.packUint256(big.NewInt(1))},
+			{Success: false, ReturnData: nil}, // relativeCap reverted
+		}, nil
+	}
+	if _, _, err := h.svc.blockchainSvc.getVaultCaps(context.Background(), common.HexToAddress("0x1"), [32]byte{0x01}, testBlockHash); err == nil {
+		t.Fatal("expected error when a cap getter reverts")
+	}
+}
+
+func TestGetVaultCaps_MulticallError(t *testing.T) {
+	h := newTestHarness(t)
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		return nil, errors.New("rpc failure")
+	}
+	if _, _, err := h.svc.blockchainSvc.getVaultCaps(context.Background(), common.HexToAddress("0x1"), [32]byte{0x01}, testBlockHash); err == nil {
+		t.Fatal("expected error on multicall failure")
+	}
+}
+
+// TestGetAdapterType_NumberPinned asserts adapter classification is a plain
+// (number-pinned) Execute — adapter identity is immutable, same rationale as
+// getMarketParams (VEC-471).
+func TestGetAdapterType_NumberPinned(t *testing.T) {
+	h := newTestHarness(t)
+	adapter := common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2")
+
+	viaNumber := false
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+		viaNumber = true
+		if len(calls) != adapterProbeCallsPerAdapter || blockNumber == nil || blockNumber.Int64() != 20000000 {
+			t.Errorf("unexpected calls=%d blockNumber=%v", len(calls), blockNumber)
+		}
+		return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
+	}
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		t.Fatal("getAdapterType must use Execute (number-pinned), not ExecuteAtHash")
+		return nil, nil
+	}
+
+	got, err := h.svc.blockchainSvc.getAdapterType(context.Background(), adapter, 20000000)
+	if err != nil {
+		t.Fatalf("getAdapterType: %v", err)
+	}
+	if !viaNumber {
+		t.Fatal("did not call Execute")
+	}
+	if got != entity.MorphoAdapterTypeMarketV1 {
+		t.Errorf("adapterType = %d, want MarketV1(1)", got)
+	}
+}
+
+// enumerateVaultAdaptersHarness wires a mock that answers adaptersLength() with
+// wantLength and every adapters(i) sub-call with the address derived from the
+// DECODED index argument (adapterAddressForIndex), recording the per-batch call
+// counts so a test can assert the bound, the chunking, and — via the derived
+// addresses — that each batch requested the right global indices rather than
+// re-reading a prefix.
+func enumerateVaultAdaptersHarness(t *testing.T, vault common.Address, wantLength *big.Int) (*serviceTestHarness, *[]int) {
+	t.Helper()
+	h := newTestHarness(t)
+	batchSizes := &[]int{}
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return nil, fmt.Errorf("enumerateVaultAdapters must call ExecuteAtHash, not Execute")
+	}
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		if len(calls) == 1 && hasSameSelector(calls[0].CallData, adaptersLengthSelector) {
+			if calls[0].Target != vault {
+				t.Errorf("adaptersLength() targeted %s, want %s", calls[0].Target.Hex(), vault.Hex())
+			}
+			return []outbound.Result{{Success: true, ReturnData: h.packUint256(wantLength)}}, nil
+		}
+		*batchSizes = append(*batchSizes, len(calls))
+		results := make([]outbound.Result, len(calls))
+		for i, c := range calls {
+			if !hasSameSelector(c.CallData, adaptersSelector) {
+				t.Errorf("unexpected call in adapters(i) batch: %x", c.CallData)
+			}
+			if c.Target != vault {
+				t.Errorf("adapters(i) targeted %s, want %s", c.Target.Hex(), vault.Hex())
+			}
+			index := new(big.Int).SetBytes(c.CallData[4:])
+			results[i] = outbound.Result{Success: true, ReturnData: packAddress(adapterAddressForIndex(index))}
+		}
+		return results, nil
+	}
+	return h, batchSizes
+}
+
+// adapterAddressForIndex maps a global adapters(i) index to the address the
+// harness answers for it, so tests can assert position k of the enumeration
+// result came from requesting index k on-chain.
+func adapterAddressForIndex(index *big.Int) common.Address {
+	return common.BigToAddress(new(big.Int).Add(index, big.NewInt(1)))
+}
+
+// TestEnumerateVaultAdapters_ImplausibleLengthIsError pins the hostile-contract
+// guard. adaptersLength() is attacker-controlled for any address that classifies
+// as a VaultV2, and the returned value used to size a slice directly: 1<<62 made
+// make([]outbound.Call, n) panic in makeslice, and the SQS consume path has no
+// recover(), so one hostile vault crashloops the worker and stalls all Morpho
+// indexing. Anything above the sanity bound must be a plain error so the message
+// poison-pills instead.
+func TestEnumerateVaultAdapters_ImplausibleLengthIsError(t *testing.T) {
+	vault := common.HexToAddress("0xc7CDcFDEfC64631ED6799C95e3b110cd42F2bD22")
+	tests := []struct {
+		name   string
+		length *big.Int
+	}{
+		{"makeslice-panic length", new(big.Int).Lsh(big.NewInt(1), 62)},
+		{"oom-sized length", big.NewInt(100_000_000)},
+		{"one above the bound", big.NewInt(maxVaultAdapters + 1)},
+		{"beyond int64", new(big.Int).Lsh(big.NewInt(1), 100)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, _ := enumerateVaultAdaptersHarness(t, vault, tt.length)
+			got, err := h.svc.blockchainSvc.enumerateVaultAdapters(context.Background(), vault, testBlockHash)
+			if err == nil {
+				t.Fatalf("expected an error for adaptersLength() = %s, got %d adapters", tt.length, len(got))
+			}
+			if !strings.Contains(err.Error(), "implausible") {
+				t.Errorf("error should name the implausible length, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestEnumerateVaultAdapters_AtBoundEnumeratesInChunks asserts the bound is
+// inclusive and that the adapters(i) reads are split into bounded multicall
+// batches (adaptersPerCall) rather than one oversized aggregate call.
+func TestEnumerateVaultAdapters_AtBoundEnumeratesInChunks(t *testing.T) {
+	vault := common.HexToAddress("0xc7CDcFDEfC64631ED6799C95e3b110cd42F2bD22")
+	h, batchSizes := enumerateVaultAdaptersHarness(t, vault, big.NewInt(maxVaultAdapters))
+
+	got, err := h.svc.blockchainSvc.enumerateVaultAdapters(context.Background(), vault, testBlockHash)
+	if err != nil {
+		t.Fatalf("enumerateVaultAdapters at the bound: %v", err)
+	}
+	if len(got) != maxVaultAdapters {
+		t.Fatalf("got %d adapters, want %d", len(got), maxVaultAdapters)
+	}
+	for k, addr := range got {
+		if want := adapterAddressForIndex(big.NewInt(int64(k))); addr != want {
+			t.Fatalf("got[%d] = %s, want %s (batch requested the wrong global index)", k, addr.Hex(), want.Hex())
+		}
+	}
+	for _, size := range *batchSizes {
+		if size > adaptersPerCall {
+			t.Errorf("adapters(i) batch of %d calls exceeds adaptersPerCall=%d", size, adaptersPerCall)
+		}
+	}
+	if len(*batchSizes) < 2 {
+		t.Errorf("expected the at-bound enumeration to span several batches, got %v", *batchSizes)
 	}
 }

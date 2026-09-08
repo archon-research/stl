@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -276,12 +277,56 @@ func TestCryptoswapHandler_CorruptKnownEventErrors(t *testing.T) {
 	}
 }
 
+// AddLiquidity has no extractor and reaches only the capture net, so this guard
+// is all that stops an empty data block persisting as a params payload.
+func TestCryptoswapHandler_EmptyDataOnKnownEventErrors(t *testing.T) {
+	a, err := abis.CurveCryptoswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewCryptoswapHandler(a)
+	pool := RegisteredPool{
+		ID:      10,
+		Address: common.HexToAddress("0xD51a44d3FaE010294C616388b506AcdA1bfAAE46"),
+		Kind:    KindCryptoswap,
+		NCoins:  3,
+	}
+
+	ev, ok := a.Events["AddLiquidity"]
+	if !ok {
+		t.Fatal("AddLiquidity event not in ABI")
+	}
+	txHash := common.HexToHash("0xdeadbeef01020304050607080900010203040506070809000102030405060708")
+	provider := common.HexToAddress("0xabc")
+
+	log := shared.Log{
+		Address:         pool.Address.Hex(),
+		Topics:          []string{ev.ID.Hex(), common.BytesToHash(provider.Bytes()).Hex()},
+		Data:            "0x",
+		TransactionHash: txHash.Hex(),
+		LogIndex:        "0x0",
+	}
+	receipt := shared.TransactionReceipt{
+		Logs:            []shared.Log{log},
+		TransactionHash: txHash.Hex(),
+	}
+
+	got, err := h.DecodeEvents(receipt, pool, 1, 100, 0, time.Unix(1, 0).UTC())
+	if err == nil {
+		t.Fatalf("expected error for an AddLiquidity log with no data, got success: %+v", got)
+	}
+	if !strings.Contains(err.Error(), "carries no data for non-indexed arguments") {
+		t.Errorf("error %q does not report the empty data block", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // SnapshotState tests
 // ---------------------------------------------------------------------------
 
 // cryptoswapResults builds canned multicall results for a 3-coin cryptoswap pool.
-// Order must match buildSnapshotCalls for NCoins=3:
+// Order must match the snapshot reads issued by SnapshotState (via
+// shared.RunSnapshotReads) for NCoins=3:
 //
 //	0: balances(0)
 //	1: balances(1)
@@ -403,80 +448,76 @@ func TestCryptoswapHandler_Snapshot(t *testing.T) {
 		CoinDecimals: []int{18, 18, 6},
 	}
 	mc := &fakeMulticaller{results: cryptoswapResults(t, a)}
-	ss, err := h.SnapshotState(context.Background(), mc, pool, 200, 0, time.Unix(2, 0).UTC())
+	st, cfg, err := h.SnapshotState(context.Background(), mc, pool, 200, 0, common.Hash{}, time.Unix(2, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
-	if ss.Cryptoswap == nil {
-		t.Fatal("want cryptoswap snapshot, Cryptoswap must be non-nil")
+	if st == nil {
+		t.Fatal("want cryptoswap state")
 	}
-	if ss.Stableswap != nil {
-		t.Fatal("Stableswap must be nil for cryptoswap handler")
-	}
-	if len(ss.Cryptoswap.Balances) != 3 {
-		t.Fatalf("balances len = %d, want 3", len(ss.Cryptoswap.Balances))
+	if len(st.Balances) != 3 {
+		t.Fatalf("balances len = %d, want 3", len(st.Balances))
 	}
 	// n-1 price array entries for n=3 means 2 entries each.
-	if len(ss.Cryptoswap.PriceScale) != 2 {
-		t.Fatalf("PriceScale len = %d, want 2", len(ss.Cryptoswap.PriceScale))
+	if len(st.PriceScale) != 2 {
+		t.Fatalf("PriceScale len = %d, want 2", len(st.PriceScale))
 	}
-	if len(ss.Cryptoswap.PriceOracle) != 2 {
-		t.Fatalf("PriceOracle len = %d, want 2", len(ss.Cryptoswap.PriceOracle))
+	if len(st.PriceOracle) != 2 {
+		t.Fatalf("PriceOracle len = %d, want 2", len(st.PriceOracle))
 	}
-	if len(ss.Cryptoswap.LastPrices) != 2 {
-		t.Fatalf("LastPrices len = %d, want 2", len(ss.Cryptoswap.LastPrices))
+	if len(st.LastPrices) != 2 {
+		t.Fatalf("LastPrices len = %d, want 2", len(st.LastPrices))
 	}
 	// n*(n-1) = 6 ordered pairs for n=3.
-	if len(ss.Cryptoswap.SpotDy) != 6 {
-		t.Fatalf("SpotDy len = %d, want 6", len(ss.Cryptoswap.SpotDy))
+	if len(st.SpotDy) != 6 {
+		t.Fatalf("SpotDy len = %d, want 6", len(st.SpotDy))
 	}
-	if ss.Cryptoswap.Gamma == nil {
+	if st.Gamma == nil {
 		t.Error("Gamma must be non-nil")
 	}
 	// D and xcp_profit were successful so must be non-nil.
-	if ss.Cryptoswap.D == nil {
+	if st.D == nil {
 		t.Error("D must be non-nil when result succeeded")
 	}
-	if ss.Cryptoswap.XcpProfit == nil {
+	if st.XcpProfit == nil {
 		t.Error("XcpProfit must be non-nil when result succeeded")
 	}
-	if ss.BlockNumber != 200 {
-		t.Errorf("BlockNumber = %d, want 200", ss.BlockNumber)
+	if st.BlockNumber != 200 {
+		t.Errorf("BlockNumber = %d, want 200", st.BlockNumber)
 	}
 
 	// admin_balances is not issued for cryptoswap pools (gated: Tricrypto-NG has
 	// no admin_balances getter), so the column is NULL by structural design.
-	if ss.Cryptoswap.AdminBalances != nil {
-		t.Errorf("AdminBalances must be nil (call gated out), got %v", ss.Cryptoswap.AdminBalances)
+	if st.AdminBalances != nil {
+		t.Errorf("AdminBalances must be nil (call gated out), got %v", st.AdminBalances)
 	}
-	if ss.Cryptoswap.LpPrice == nil {
+	if st.LpPrice == nil {
 		t.Error("LpPrice must be non-nil")
 	}
-	if ss.Cryptoswap.XcpProfitA == nil {
+	if st.XcpProfitA == nil {
 		t.Error("XcpProfitA must be non-nil")
 	}
-	if ss.Cryptoswap.LastPricesTimestamp == nil {
+	if st.LastPricesTimestamp == nil {
 		t.Error("LastPricesTimestamp must be non-nil")
-	} else if *ss.Cryptoswap.LastPricesTimestamp != 1782820487 {
-		t.Errorf("LastPricesTimestamp = %d, want 1782820487", *ss.Cryptoswap.LastPricesTimestamp)
+	} else if *st.LastPricesTimestamp != 1782820487 {
+		t.Errorf("LastPricesTimestamp = %d, want 1782820487", *st.LastPricesTimestamp)
 	}
-	if len(ss.Cryptoswap.GetDx) != 6 {
-		t.Errorf("GetDx len = %d, want 6", len(ss.Cryptoswap.GetDx))
+	if len(st.GetDx) != 6 {
+		t.Errorf("GetDx len = %d, want 6", len(st.GetDx))
 	}
-	if ss.Cryptoswap.CalcTokenAmount == nil {
+	if st.CalcTokenAmount == nil {
 		t.Error("CalcTokenAmount must be non-nil")
 	}
-	if len(ss.Cryptoswap.CalcWithdrawOneCoin) != 3 {
-		t.Errorf("CalcWithdrawOneCoin len = %d, want 3", len(ss.Cryptoswap.CalcWithdrawOneCoin))
+	if len(st.CalcWithdrawOneCoin) != 3 {
+		t.Errorf("CalcWithdrawOneCoin len = %d, want 3", len(st.CalcWithdrawOneCoin))
 	}
 
 	// Config is built from the (all-successful) config getters. Assert every
 	// field so an off-by-one in the dst<->cryptoswapConfigGetters index mapping
 	// (decodeCryptoswapConfigReads) is caught, not just a representative subset.
-	if ss.CryptoswapConfig == nil {
+	if cfg == nil {
 		t.Fatal("CryptoswapConfig must be non-nil when config getters succeed")
 	}
-	cfg := ss.CryptoswapConfig
 	bigEq := func(name string, got *big.Int, want int64) {
 		t.Helper()
 		if got == nil || got.Cmp(big.NewInt(want)) != 0 {
@@ -512,7 +553,7 @@ func TestCryptoswapHandler_SnapshotDRevertErrors(t *testing.T) {
 	h := NewCryptoswapHandler(a)
 	pool := cryptoswapPool()
 	mc := &fakeMulticaller{results: cryptoswapResultsDRevert(t, a)}
-	_, err = h.SnapshotState(context.Background(), mc, pool, 200, 0, time.Unix(2, 0).UTC())
+	_, _, err = h.SnapshotState(context.Background(), mc, pool, 200, 0, common.Hash{}, time.Unix(2, 0).UTC())
 	if err == nil {
 		t.Error("reverted D() read must error, got nil")
 	}
@@ -544,7 +585,7 @@ func TestCryptoswapHandler_SnapshotTotalSupplyTargetsLpToken(t *testing.T) {
 	}
 
 	mc := &capturingMulticaller{results: cryptoswapResults(t, a)}
-	_, err = h.SnapshotState(context.Background(), mc, pool, 200, 0, time.Unix(2, 0).UTC())
+	_, _, err = h.SnapshotState(context.Background(), mc, pool, 200, 0, common.Hash{}, time.Unix(2, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
@@ -589,7 +630,7 @@ func TestCryptoswapHandler_SnapshotTotalSupplyTargetsPoolWhenNoLpToken(t *testin
 	}
 
 	mc := &capturingMulticaller{results: cryptoswapResults(t, a)}
-	_, err = h.SnapshotState(context.Background(), mc, pool, 200, 0, time.Unix(2, 0).UTC())
+	_, _, err = h.SnapshotState(context.Background(), mc, pool, 200, 0, common.Hash{}, time.Unix(2, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
@@ -625,7 +666,7 @@ func TestCryptoswapHandler_SnapshotRevertErrors(t *testing.T) {
 	revertResults[0] = outbound.Result{Success: false, ReturnData: nil}
 
 	mc := &fakeMulticaller{results: revertResults}
-	_, err = h.SnapshotState(context.Background(), mc, pool, 200, 0, time.Unix(2, 0).UTC())
+	_, _, err = h.SnapshotState(context.Background(), mc, pool, 200, 0, common.Hash{}, time.Unix(2, 0).UTC())
 	if err == nil {
 		t.Errorf("snapshot with required call revert should error, got nil")
 	}
@@ -653,27 +694,13 @@ func TestCryptoswapHandler_SnapshotAdminBalancesNotIssued(t *testing.T) {
 	h := NewCryptoswapHandler(a)
 	pool := cryptoswapPool()
 
-	calls, err := h.buildSnapshotCalls(pool)
-	if err != nil {
-		t.Fatalf("building snapshot calls: %v", err)
-	}
-	adminBalancesData, err := a.Pack("admin_balances", big.NewInt(0))
-	if err != nil {
-		t.Fatalf("packing admin_balances: %v", err)
-	}
-	for i, c := range calls {
-		if string(c.CallData) == string(adminBalancesData) {
-			t.Errorf("call[%d] is admin_balances; it must not be issued for cryptoswap pools", i)
-		}
-	}
-
 	mc := &fakeMulticaller{results: cryptoswapResults(t, a)}
-	ss, err := h.SnapshotState(context.Background(), mc, pool, 200, 0, time.Unix(2, 0).UTC())
+	st, _, err := h.SnapshotState(context.Background(), mc, pool, 200, 0, common.Hash{}, time.Unix(2, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
-	if ss.Cryptoswap.AdminBalances != nil {
-		t.Errorf("AdminBalances must be nil (call gated out), got %v", ss.Cryptoswap.AdminBalances)
+	if st.AdminBalances != nil {
+		t.Errorf("AdminBalances must be nil (call gated out), got %v", st.AdminBalances)
 	}
 }
 
@@ -693,7 +720,7 @@ func TestCryptoswapHandler_SnapshotGetDxRevertErrors(t *testing.T) {
 	const firstGetDxIdx = 25
 	results[firstGetDxIdx] = outbound.Result{Success: false, ReturnData: nil}
 
-	_, err = h.SnapshotState(context.Background(), &fakeMulticaller{results: results}, pool, 200, 0, time.Unix(2, 0).UTC())
+	_, _, err = h.SnapshotState(context.Background(), &fakeMulticaller{results: results}, pool, 200, 0, common.Hash{}, time.Unix(2, 0).UTC())
 	if err == nil {
 		t.Error("reverted get_dx element must error, got nil")
 	}
@@ -713,7 +740,7 @@ func TestCryptoswapHandler_SnapshotConfigGetterRevertErrors(t *testing.T) {
 	results := cryptoswapResults(t, a)
 	results[cryptoswapConfigFirstIdx] = outbound.Result{Success: false, ReturnData: nil}
 
-	_, err = h.SnapshotState(context.Background(), &fakeMulticaller{results: results}, pool, 200, 0, time.Unix(2, 0).UTC())
+	_, _, err = h.SnapshotState(context.Background(), &fakeMulticaller{results: results}, pool, 200, 0, common.Hash{}, time.Unix(2, 0).UTC())
 	if err == nil {
 		t.Error("reverted required config getter must error, got nil")
 	}

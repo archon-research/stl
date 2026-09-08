@@ -100,6 +100,12 @@ func TestTransferExtractor_Extract_TransferToProxy(t *testing.T) {
 	if ev.LogIndex != 5 {
 		t.Errorf("expected logIndex 5, got %d", ev.LogIndex)
 	}
+	if ev.From != sender {
+		t.Errorf("expected from %s, got %s", sender.Hex(), ev.From.Hex())
+	}
+	if ev.To != sparkProxy {
+		t.Errorf("expected to %s (the proxy), got %s", sparkProxy.Hex(), ev.To.Hex())
+	}
 }
 
 func TestTransferExtractor_Extract_TransferFromProxy(t *testing.T) {
@@ -123,6 +129,12 @@ func TestTransferExtractor_Extract_TransferFromProxy(t *testing.T) {
 	}
 	if events[0].Direction != DirectionOut {
 		t.Errorf("expected direction OUT, got %s", events[0].Direction)
+	}
+	if events[0].From != sparkProxy {
+		t.Errorf("expected from %s (the proxy), got %s", sparkProxy.Hex(), events[0].From.Hex())
+	}
+	if events[0].To != receiver {
+		t.Errorf("expected to %s, got %s", receiver.Hex(), events[0].To.Hex())
 	}
 }
 
@@ -151,6 +163,17 @@ func TestTransferExtractor_Extract_ProxyToProxy(t *testing.T) {
 	}
 	if events[1].Direction != DirectionIn || events[1].Star != "grove" {
 		t.Errorf("second event should be IN/grove, got %s/%s", events[1].Direction, events[1].Star)
+	}
+
+	// Both events carry the same transfer sides; only the direction differs, so
+	// which side is the proxy and which the counterparty is a read-side question.
+	for i, ev := range events {
+		if ev.From != sparkProxy {
+			t.Errorf("event %d from = %s, want %s", i, ev.From.Hex(), sparkProxy.Hex())
+		}
+		if ev.To != groveProxy {
+			t.Errorf("event %d to = %s, want %s", i, ev.To.Hex(), groveProxy.Hex())
+		}
 	}
 }
 

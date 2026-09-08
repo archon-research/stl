@@ -2,9 +2,12 @@ package testutil
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +16,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
@@ -23,62 +27,7 @@ type LocalStackConfig struct {
 	Region   string
 }
 
-// StartLocalStack creates a LocalStack container with the given AWS services
-// and returns the container and connection config.
-// Services is a comma-separated list (e.g. "sns,sqs" or "sns,sqs,s3").
-//
-// It also ensures the container host is added to NO_PROXY / no_proxy so that
-// HTTP proxy settings present in CI environments do not intercept requests to
-// the LocalStack endpoint.
-func StartLocalStack(t *testing.T, ctx context.Context, services string) (testcontainers.Container, LocalStackConfig) {
-	t.Helper()
-
-	config := LocalStackConfig{
-		Region: "us-east-1",
-	}
-
-	req := testcontainers.ContainerRequest{
-		Image:        ImageLocalStack,
-		ExposedPorts: []string{"4566/tcp"},
-		Env: map[string]string{
-			"SERVICES":               services,
-			"DEBUG":                  "0",
-			"DISABLE_EVENTS":         "1",
-			"SKIP_SSL_CERT_DOWNLOAD": "1",
-		},
-		WaitingFor: wait.ForLog("Ready."),
-	}
-
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
-	if err != nil {
-		HandleContainerRuntimeError(t, err, "failed to start localstack")
-	}
-
-	host, err := container.Host(ctx)
-	if err != nil {
-		t.Fatalf("failed to get localstack host: %v", err)
-	}
-	port, err := container.MappedPort(ctx, "4566")
-	if err != nil {
-		t.Fatalf("failed to get localstack port: %v", err)
-	}
-	config.Endpoint = fmt.Sprintf("http://%s:%s", host, port.Port())
-
-	// Ensure the container host bypasses the HTTP proxy. In containerised CI
-	// environments testcontainers resolves the Docker bridge gateway IP (e.g.
-	// 172.17.0.1) which is typically NOT in NO_PROXY.
-	if noProxy := os.Getenv("NO_PROXY"); !strings.Contains(noProxy, host) {
-		t.Setenv("NO_PROXY", noProxy+","+host)
-	}
-	if noProxy := os.Getenv("no_proxy"); !strings.Contains(noProxy, host) {
-		t.Setenv("no_proxy", noProxy+","+host)
-	}
-
-	return container, config
-}
+const localStackRegion = "us-east-1"
 
 // NewS3Client constructs an S3 client pointed at the given LocalStack endpoint.
 // UsePathStyle is enabled as required by LocalStack.
@@ -101,11 +50,30 @@ func NewS3Client(t *testing.T, ctx context.Context, cfg LocalStackConfig) *s3.Cl
 
 // StartLocalStackForMain starts a LocalStack container for use in TestMain.
 // On error it calls log.Fatal instead of t.Fatal.
+//
+// When STL_TEST_LOCALSTACK_ENDPOINT is set it returns that endpoint instead, so
+// CI can own one LocalStack per shard rather than one per package. That instance
+// has to enable the union of every services string passed here, which
+// ci/check-ci-services.sh checks against the workflow.
 func StartLocalStackForMain(services string) (cfg LocalStackConfig, cleanup func()) {
+	if endpoint, ok := sharedService(EnvLocalStackEndpoint); ok {
+		cfg = LocalStackConfig{Endpoint: endpoint, Region: localStackRegion}
+		allowDirectConnection(endpointHost(endpoint))
+		return cfg, noopCleanup
+	}
+
+	cfg, cleanup, err := startLocalStackContainer(services)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	return cfg, cleanup
+}
+
+func startLocalStackContainer(services string) (cfg LocalStackConfig, cleanup func(), err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	cfg.Region = "us-east-1"
+	cfg.Region = localStackRegion
 
 	req := testcontainers.ContainerRequest{
 		Image:        ImageLocalStack,
@@ -125,37 +93,81 @@ func StartLocalStackForMain(services string) (cfg LocalStackConfig, cleanup func
 	})
 	if err != nil {
 		if IsContainerRuntimeUnavailable(err) {
-			log.Fatalf("container runtime unavailable: %v", err)
+			return cfg, nil, fmt.Errorf("container runtime unavailable: %w", err)
 		}
-		log.Fatalf("start LocalStack container: %v", err)
+		return cfg, nil, fmt.Errorf("start LocalStack container: %w", err)
 	}
+
+	// The container is running by now, so every later failure has to take it
+	// down: the caller gets no cleanup callback to do it with.
+	terminate := func() { _ = container.Terminate(context.Background()) }
 
 	host, err := container.Host(ctx)
 	if err != nil {
-		log.Fatalf("get LocalStack host: %v", err)
+		terminate()
+		return cfg, nil, fmt.Errorf("get LocalStack host: %w", err)
 	}
 	port, err := container.MappedPort(ctx, "4566")
 	if err != nil {
-		log.Fatalf("get LocalStack port: %v", err)
+		terminate()
+		return cfg, nil, fmt.Errorf("get LocalStack port: %w", err)
 	}
 	cfg.Endpoint = fmt.Sprintf("http://%s:%s", host, port.Port())
+	allowDirectConnection(host)
 
-	// Ensure the container host bypasses the HTTP proxy.
-	if noProxy := os.Getenv("NO_PROXY"); !strings.Contains(noProxy, host) {
-		if noProxy == "" {
-			os.Setenv("NO_PROXY", host)
-		} else {
-			os.Setenv("NO_PROXY", noProxy+","+host)
-		}
+	return cfg, terminate, nil
+}
+
+// allowDirectConnection adds host to both spellings of the no-proxy list, so an
+// ambient HTTP proxy does not swallow requests to a local LocalStack.
+func allowDirectConnection(host string) {
+	if host == "" {
+		return
 	}
-	if noProxy := os.Getenv("no_proxy"); !strings.Contains(noProxy, host) {
+	for _, envVar := range []string{"NO_PROXY", "no_proxy"} {
+		noProxy := os.Getenv(envVar)
 		if noProxy == "" {
-			os.Setenv("no_proxy", host)
-		} else {
-			os.Setenv("no_proxy", noProxy+","+host)
+			os.Setenv(envVar, host)
+			continue
 		}
+		// Split, not strings.Contains: "127.0.0.1" is a substring of "127.0.0.10".
+		if slices.Contains(strings.Split(noProxy, ","), host) {
+			continue
+		}
+		os.Setenv(envVar, noProxy+","+host)
+	}
+}
+
+// endpointHost extracts the hostname from a LocalStack endpoint URL, returning
+// "" when it cannot be parsed — the no-proxy entry is an optimization, not a
+// precondition, so an unparseable endpoint must not fail the suite.
+func endpointHost(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
+// EnsureBucket creates bucket unless it is already there, for a name shared by
+// more than one test in a package.
+//
+// Existing is tolerated because it is expected: an archive bucket is named for the
+// worker, not the test, so every test in the package asks for the same one. A name
+// that has to be unique per test comes from S3TestBucketName, which needs no
+// tolerance and so can be counted against.
+func EnsureBucket(t *testing.T, ctx context.Context, client *s3.Client, bucket string) {
+	t.Helper()
+
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+	if err == nil {
+		return
 	}
 
-	cleanup = func() { _ = container.Terminate(context.Background()) }
-	return cfg, cleanup
+	var owned *s3types.BucketAlreadyOwnedByYou
+	var exists *s3types.BucketAlreadyExists
+	if errors.As(err, &owned) || errors.As(err, &exists) {
+		return
+	}
+	t.Fatalf("create bucket %s: %v", bucket, err)
 }

@@ -2,8 +2,11 @@ package testutil
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -94,26 +97,80 @@ func SeedFeedOracleAsset(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 		t.Fatalf("failed to parse feed address %s: %v", feedAddress, err)
 	}
 	_, err = pool.Exec(ctx, `
-		INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
-		VALUES ($1, $2, true, $3, $4, $5)
-		ON CONFLICT (oracle_id, token_id, feed_address) WHERE feed_address IS NOT NULL DO NOTHING
-	`, oracleID, tokenID, feedAddrBytes, feedDecimals, quoteCurrency)
+		INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, valid_from, change_reason)
+		VALUES ($1, $2, true, $3, $4, $5, $6, 'test seed')
+		ON CONFLICT ON CONSTRAINT oracle_asset_pkey DO NOTHING
+	`, oracleID, tokenID, feedAddrBytes, feedDecimals, quoteCurrency, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("failed to insert feed oracle asset (oracle=%d, token=%d): %v", oracleID, tokenID, err)
 	}
 }
 
-// SeedOracleAsset inserts an oracle asset link.
+// SeedOracleAsset inserts an oracle asset link, effective from now (UTC).
 func SeedOracleAsset(t *testing.T, ctx context.Context, pool *pgxpool.Pool, oracleID, tokenID int64) {
 	t.Helper()
+	SeedOracleAssetEffectiveFrom(t, ctx, pool, oracleID, tokenID, time.Now().UTC().Format(time.DateOnly))
+}
+
+// SeedOracleAssetEffectiveFrom inserts an oracle asset link effective from validFrom
+// (YYYY-MM-DD, meaning that day's midnight UTC). Parsed here rather than cast in SQL, so
+// the instant never depends on the session TimeZone.
+func SeedOracleAssetEffectiveFrom(t *testing.T, ctx context.Context, pool *pgxpool.Pool, oracleID, tokenID int64, validFrom string) {
+	t.Helper()
 	_, err := pool.Exec(ctx, `
-		INSERT INTO oracle_asset (oracle_id, token_id, enabled)
-		VALUES ($1, $2, true)
-		ON CONFLICT (oracle_id, token_id) WHERE feed_address IS NULL DO NOTHING
-	`, oracleID, tokenID)
+		INSERT INTO oracle_asset (oracle_id, token_id, enabled, valid_from, change_reason)
+		VALUES ($1, $2, true, $3, 'test seed')
+		ON CONFLICT ON CONSTRAINT oracle_asset_pkey DO NOTHING
+	`, oracleID, tokenID, MustUTCInstant(t, validFrom))
 	if err != nil {
 		t.Fatalf("failed to insert oracle asset (oracle=%d, token=%d): %v", oracleID, tokenID, err)
 	}
+}
+
+// SetOracleAssetEnabled appends an oracle_asset version toggling enabled, effective from
+// effectiveAt (YYYY-MM-DD, midnight UTC). There is no writer function, so the version is the
+// key's current maximum plus one. No row appended means the value was already that, so the
+// fixture did not establish the state it claims and the seed fails.
+func SetOracleAssetEnabled(t *testing.T, ctx context.Context, pool *pgxpool.Pool, oracleID, tokenID int64, enabled bool, effectiveAt, reason string) {
+	t.Helper()
+	var processingVersion *int
+	err := pool.QueryRow(ctx, `
+		INSERT INTO oracle_asset (
+			oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency,
+			processing_version, valid_from, change_reason)
+		SELECT prev.oracle_id, prev.token_id, $3, prev.feed_address, prev.feed_decimals,
+		       prev.quote_currency,
+		       (SELECT max(processing_version) + 1 FROM oracle_asset
+		        WHERE oracle_id = $1 AND token_id = $2 AND feed_key = '\x'::bytea),
+		       $4, $5
+		FROM (
+			SELECT * FROM oracle_asset
+			WHERE oracle_id = $1 AND token_id = $2 AND feed_key = '\x'::bytea
+			  AND valid_from <= $4
+			ORDER BY valid_from DESC, processing_version DESC
+			LIMIT 1
+		) prev
+		WHERE prev.enabled <> $3
+		RETURNING processing_version
+	`, oracleID, tokenID, enabled, MustUTCInstant(t, effectiveAt), reason).Scan(&processingVersion)
+	if errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("oracle asset (oracle=%d, token=%d) was already enabled=%v at %s, so no version was appended",
+			oracleID, tokenID, enabled, effectiveAt)
+	}
+	if err != nil {
+		t.Fatalf("failed to set oracle asset enabled=%v (oracle=%d, token=%d): %v", enabled, oracleID, tokenID, err)
+	}
+}
+
+// MustUTCInstant parses a YYYY-MM-DD date as that day's midnight UTC, so the bound value
+// cannot shift with the database session TimeZone.
+func MustUTCInstant(t *testing.T, value string) time.Time {
+	t.Helper()
+	parsed, err := time.Parse(time.DateOnly, value)
+	if err != nil {
+		t.Fatalf("parse date %q: %v", value, err)
+	}
+	return parsed.UTC()
 }
 
 // SeedProtocol inserts a protocol and returns its auto-generated ID.

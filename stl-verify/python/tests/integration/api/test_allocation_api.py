@@ -18,13 +18,18 @@ from pydantic import SecretStr
 from app.config import Settings
 from app.main import create_app
 from tests.integration.seed import (
+    ANCHORAGE_CUSTODY_PROXY_HEX,
+    ANCHORAGE_LATEST_SNAPSHOT,
     GHOST_CLOSED_PROXY_HEX,
     GHOST_MIXED_PROXY_HEX,
     GHOST_OPEN_PROXY_HEX,
     GHOST_SWEEP_PROXY_HEX,
     GHOST_TIEBREAK_PROXY_HEX,
+    declare_prime_proxy,
     insert_allocation_position,
+    insert_oracle_asset,
     insert_token,
+    seed_anchorage_custody,
     seed_ghost_balance,
 )
 
@@ -34,7 +39,8 @@ _GROVE_PROXY_HEX = "abcdef1234567890abcdef1234567890abcdef12"
 _OBEX_PROXY_HEX = "fedcba9876543210fedcba9876543210fedcba98"
 _UNKNOWN_PROXY_HEX = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 # Real Spark SubProxy address — used to exercise the ALM-only filter in
-# /v1/primes. Must match app.domain.proxy_kind._SUB_PROXY_HEX.
+# /v1/primes. Must match the subproxy entries in the axis-synome contract
+# (see app.domain.prime_registry.subproxy_addresses).
 _SPARK_SUB_PROXY_HEX = "3300f198988e4c9c63f75df86de36421f06af8c4"
 
 # Underlying tokens seeded by the sparklend migration (all chain_id=1).
@@ -126,6 +132,15 @@ async def _seed(db_url: str) -> None:
                 bytes.fromhex(_AWETH_HEX),
             )
 
+            # prime_proxy is static reference data, so these scenario proxies are
+            # declared explicitly; positions alone do not make an address resolve.
+            for _prime_id, _proxy_hex in (
+                (spark_id, _SPARK_PROXY_HEX),
+                (grove_id, _GROVE_PROXY_HEX),
+                (obex_id, _OBEX_PROXY_HEX),
+            ):
+                await declare_prime_proxy(conn, prime_id=_prime_id, proxy_hex=_proxy_hex)
+
             # spark holds aUSDC: an earlier balance (block 1000) and the latest
             # (block 2000). A block_version=1 row at block 1000 simulates a
             # reorg correction — superseded by block 2000 which wins.
@@ -213,6 +228,9 @@ async def _seed(db_url: str) -> None:
                 oracle_id,
                 Decimal(1),
             )
+            # Enabled oracle_asset mapping keeps this price eligible for the
+            # latest-price reads, which exclude sources with no enabled mapping.
+            await insert_oracle_asset(conn, oracle_id, usdc_id)
 
             # net_flow_usd flow-reconstruction fixture: three aUSDC events in one
             # bucket — +100 in, -40 out, and a 1000 sweep that must net to zero.
@@ -307,6 +325,7 @@ def async_db_url(module_db):
     """
     asyncio.run(_seed(module_db["db_url"]))
     asyncio.run(seed_ghost_balance(module_db["db_url"]))
+    asyncio.run(seed_anchorage_custody(module_db["db_url"]))
     return module_db["async_url"]
 
 
@@ -316,7 +335,13 @@ def client(async_db_url: str, tmp_path: Path):
     empty_mapping = tmp_path / "empty_mapping.json"
     empty_mapping.write_text("{}")
     test_app = create_app(
-        Settings.model_validate({"database_url": SecretStr(async_db_url), "suraf_mappings_file": empty_mapping})
+        Settings.model_validate(
+            {
+                "database_url": SecretStr(async_db_url),
+                "suraf_mappings_file": empty_mapping,
+                "core_model_mappings_file": empty_mapping,
+            }
+        )
     )
     with TestClient(test_app) as c:
         yield c
@@ -327,17 +352,18 @@ def test_list_primes_returns_seeded_primes(client: TestClient) -> None:
 
     assert response.status_code == 200
     data = response.json()
-    # Assert presence of the primes this test seeds rather than an exact global
-    # count: other scenarios in this module (ghost-balance) add their own ALM
-    # proxies to the same database, and a "list everything" endpoint returns
-    # them all.
-    by_name = {item["name"]: item for item in data}
-    assert by_name["spark"]["id"] == f"0x{_SPARK_PROXY_HEX}"
-    assert by_name["spark"]["address"] == f"0x{_SPARK_PROXY_HEX}"
-    assert by_name["grove"]["id"] == f"0x{_GROVE_PROXY_HEX}"
-    assert by_name["grove"]["address"] == f"0x{_GROVE_PROXY_HEX}"
-    assert by_name["obex"]["id"] == f"0x{_OBEX_PROXY_HEX}"
-    assert by_name["obex"]["address"] == f"0x{_OBEX_PROXY_HEX}"
+    # Keyed by address, not by name: the endpoint lists the whole declared proxy
+    # universe, so a prime legitimately appears once per proxy — the migration's
+    # real spark and grove proxies alongside this module's seeded ones.
+    by_address = {item["address"]: item for item in data}
+    for proxy_hex, name in (
+        (_SPARK_PROXY_HEX, "spark"),
+        (_GROVE_PROXY_HEX, "grove"),
+        (_OBEX_PROXY_HEX, "obex"),
+    ):
+        row = by_address[f"0x{proxy_hex}"]
+        assert row["name"] == name
+        assert row["id"] == f"0x{proxy_hex}"
     # SubProxy rows (e.g. _SPARK_SUB_PROXY_HEX) share spark_id and must be
     # filtered out — only the ALM proxy per prime should appear.
     addresses = {item["address"] for item in data}
@@ -364,6 +390,10 @@ def test_list_allocations_returns_multiple_holdings_for_prime(client: TestClient
     assert ausdc["protocol_name"] == "Aave V3"
     assert isinstance(ausdc["receipt_token_id"], int)
     assert isinstance(ausdc["underlying_token_id"], int)
+    # End-to-end receipt-token pricing: the latest aUSDC balance is 750, the
+    # fixture rows carry no underlying_value, and USDC is priced at 1 USD, so
+    # COALESCE(NULL, 750) * 1 = 750 must surface through the API.
+    assert Decimal(ausdc["amount_usd"]) == Decimal("750")
 
     aweth = by_symbol["aWETH"]
     assert aweth["chain_id"] == 1
@@ -372,6 +402,37 @@ def test_list_allocations_returns_multiple_holdings_for_prime(client: TestClient
     assert aweth["underlying_token_address"] == f"0x{_WETH_HEX}"
     assert aweth["underlying_symbol"] == "WETH"
     assert aweth["protocol_name"] == "Aave V3"
+
+
+def test_list_allocations_surfaces_latest_activity_action_and_amount(
+    client: TestClient,
+) -> None:
+    """The latest event's direction and token-unit magnitude come from the same
+    row that wins the DISTINCT ON. For aUSDC that is the block 2000 ``in`` of 750
+    (the seed sets tx_amount = balance), not the superseded block 1000 rows.
+    """
+    response = client.get(f"/v1/primes/0x{_SPARK_PROXY_HEX}/allocations")
+
+    assert response.status_code == 200
+    ausdc = {item["symbol"]: item for item in response.json()}["aUSDC"]
+    assert ausdc["latest_activity_action"] == "in"
+    assert Decimal(ausdc["latest_activity_amount"]) == Decimal("750")
+
+
+def test_direct_holding_surfaces_latest_activity_action_and_amount(
+    client: TestClient,
+) -> None:
+    """The direct-holding query carries the same latest-activity fields as the
+    receipt-token query. obex's raw USDC was last touched by an ``in`` of 250
+    (the seed sets tx_amount = balance).
+    """
+    response = client.get(f"/v1/primes/0x{_OBEX_PROXY_HEX}/allocations")
+
+    assert response.status_code == 200
+    row = response.json()[0]
+    assert row["symbol"] == "USDC"
+    assert row["latest_activity_action"] == "in"
+    assert Decimal(row["latest_activity_amount"]) == Decimal("250")
 
 
 def test_direct_underlying_holdings_surface_as_their_own_rows(
@@ -419,6 +480,29 @@ def test_list_allocations_returns_only_direct_row_when_no_receipt_tokens(
     assert row["protocol_name"] is None
     assert row["amount_usd"] is None
     assert row["category"] == "asset"
+
+
+def test_list_allocations_surfaces_anchorage_btc_custody(client: TestClient) -> None:
+    """End-to-end: the anchorage_custody prime's /allocations response includes a
+    BTC custody row — chain_id 0, `anchorage` protocol, CUSTODY category, the
+    cohort's $250M loan as amount_usd, and the frozen snapshot_time verbatim.
+    The stale closed packages ($521M trap) must not inflate the totals.
+    """
+    response = client.get(f"/v1/primes/0x{ANCHORAGE_CUSTODY_PROXY_HEX}/allocations")
+
+    assert response.status_code == 200
+    by_symbol = {row["symbol"]: row for row in response.json()}
+    btc = by_symbol["BTC"]
+    assert btc["chain_id"] == 0
+    assert btc["protocol_name"] == "anchorage"
+    assert btc["category"] == "custody"
+    assert btc["receipt_token_id"] is None
+    assert btc["underlying_token_id"] is None
+    assert btc["underlying_token_address"] is None
+    assert Decimal(btc["amount_usd"]) == Decimal("250000000")
+    assert Decimal(btc["balance"]) == Decimal("4722.61")
+    assert btc["latest_activity_at"] == ANCHORAGE_LATEST_SNAPSHOT.isoformat()
+    assert btc["latest_activity_action"] is None
 
 
 def test_list_allocations_returns_404_for_unknown_prime(client: TestClient) -> None:
@@ -635,7 +719,8 @@ def test_total_capital_returns_all_null_when_prime_has_no_treasury(client: TestC
 def test_risk_capital_self_computed_total_is_latest_treasury(client: TestClient) -> None:
     """The self-computed risk-capital endpoint reports Total Risk Capital from the
     latest on-chain SubProxy USDS balance (the 2.1M observation wins over 2.0M),
-    independent of the Star feed. The default model (gap_sweep) is reported and a
+    independent of the Star feed. ``model`` reports the top of the indexed view's
+    preference order (core_model) regardless of what actually priced, and a
     per-allocation breakdown is present; required RRC depends on model coverage
     which the fixture does not seed, so it is not asserted here.
     """
@@ -643,7 +728,7 @@ def test_risk_capital_self_computed_total_is_latest_treasury(client: TestClient)
 
     assert response.status_code == 200
     body = response.json()
-    assert body["model"] == "gap_sweep"
+    assert body["model"] == "core_model"
     assert Decimal(body["total_risk_capital_usd"]) == Decimal("2100000")
     assert isinstance(body["per_allocation"], list)
 

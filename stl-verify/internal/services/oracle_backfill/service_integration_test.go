@@ -76,7 +76,7 @@ func integrationMockMulticallFactoryConstant(t *testing.T, prices []*big.Int) Mu
 // ---------------------------------------------------------------------------
 
 func TestIntegration_BackfillRun_HappyPath(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -121,10 +121,11 @@ func TestIntegration_BackfillRun_HappyPath(t *testing.T) {
 	// Create service — no tokenAddresses needed, service loads from DB
 	svc, err := NewService(
 		Config{
-			ChainID:     1,
-			Concurrency: 2,
-			BatchSize:   50,
-			Logger:      logger,
+			ChainID:              1,
+			ReferenceEffectiveAt: testReferenceEffectiveAt,
+			Concurrency:          2,
+			BatchSize:            50,
+			Logger:               logger,
 		},
 		integrationMockHeaderFetcher(),
 		integrationMockMulticallFactory(t, enabledAssetCount),
@@ -185,7 +186,7 @@ func TestIntegration_BackfillRun_HappyPath(t *testing.T) {
 }
 
 func TestIntegration_BackfillRun_ChangeDetection(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -211,10 +212,11 @@ func TestIntegration_BackfillRun_ChangeDetection(t *testing.T) {
 
 	svc, err := NewService(
 		Config{
-			ChainID:     1,
-			Concurrency: 1,
-			BatchSize:   100,
-			Logger:      logger,
+			ChainID:              1,
+			ReferenceEffectiveAt: testReferenceEffectiveAt,
+			Concurrency:          1,
+			BatchSize:            100,
+			Logger:               logger,
 		},
 		integrationMockHeaderFetcher(),
 		integrationMockMulticallFactoryConstant(t, constantPrices),
@@ -272,7 +274,7 @@ func TestIntegration_BackfillRun_ChangeDetection(t *testing.T) {
 }
 
 func TestIntegration_BackfillRun_UpsertIdempotency(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -292,10 +294,11 @@ func TestIntegration_BackfillRun_UpsertIdempotency(t *testing.T) {
 	// First run: insert prices for blocks 100-102
 	svc, err := NewService(
 		Config{
-			ChainID:     1,
-			Concurrency: 1,
-			BatchSize:   100,
-			Logger:      logger,
+			ChainID:              1,
+			ReferenceEffectiveAt: testReferenceEffectiveAt,
+			Concurrency:          1,
+			BatchSize:            100,
+			Logger:               logger,
 		},
 		integrationMockHeaderFetcher(),
 		integrationMockMulticallFactory(t, 1),
@@ -343,7 +346,7 @@ func TestIntegration_BackfillRun_UpsertIdempotency(t *testing.T) {
 }
 
 func TestIntegration_BackfillRun_GetLatestBlock(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -372,10 +375,11 @@ func TestIntegration_BackfillRun_GetLatestBlock(t *testing.T) {
 	// Run backfill
 	svc, err := NewService(
 		Config{
-			ChainID:     1,
-			Concurrency: 1,
-			BatchSize:   100,
-			Logger:      logger,
+			ChainID:              1,
+			ReferenceEffectiveAt: testReferenceEffectiveAt,
+			Concurrency:          1,
+			BatchSize:            100,
+			Logger:               logger,
 		},
 		integrationMockHeaderFetcher(),
 		integrationMockMulticallFactory(t, 1),
@@ -401,7 +405,7 @@ func TestIntegration_BackfillRun_GetLatestBlock(t *testing.T) {
 }
 
 func TestIntegration_BackfillRun_RespectsDeploymentBlock(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -421,10 +425,11 @@ func TestIntegration_BackfillRun_RespectsDeploymentBlock(t *testing.T) {
 
 	svc, err := NewService(
 		Config{
-			ChainID:     1,
-			Concurrency: 1,
-			BatchSize:   100,
-			Logger:      logger,
+			ChainID:              1,
+			ReferenceEffectiveAt: testReferenceEffectiveAt,
+			Concurrency:          1,
+			BatchSize:            100,
+			Logger:               logger,
 		},
 		integrationMockHeaderFetcher(),
 		integrationMockMulticallFactory(t, 1),
@@ -461,8 +466,12 @@ func TestIntegration_BackfillRun_RespectsDeploymentBlock(t *testing.T) {
 	}
 }
 
-func TestIntegration_BackfillRun_RespectsSupersession(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+// TestIntegration_BackfillRun_ConcurrentBindingsDoNotCapRange verifies that a
+// protocol binding a second oracle at a later from_block leaves the first
+// oracle's backfill range open-ended: bindings are a union, not a temporal
+// sequence (see computeOracleValidFromBlocks).
+func TestIntegration_BackfillRun_ConcurrentBindingsDoNotCapRange(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -478,7 +487,8 @@ func TestIntegration_BackfillRun_RespectsSupersession(t *testing.T) {
 	testutil.SeedOracleAsset(t, ctx, pool, oracle1ID, tokenID1)
 	testutil.SeedOracleAsset(t, ctx, pool, oracle2ID, tokenID1)
 
-	// Create protocol and bind oracle1 from block 100, then oracle2 from block 160
+	// Create protocol and bind oracle1 from block 100, then a second concurrent
+	// binding to oracle2 from block 160
 	protocolID := testutil.SeedProtocol(t, ctx, pool, 1, "0x0000000000000000000000000000000000000FFF", "test-protocol", "lending", 100, "")
 	testutil.SeedProtocolOracle(t, ctx, pool, protocolID, oracle1ID, 100)
 	testutil.SeedProtocolOracle(t, ctx, pool, protocolID, oracle2ID, 160)
@@ -490,10 +500,11 @@ func TestIntegration_BackfillRun_RespectsSupersession(t *testing.T) {
 
 	svc, err := NewService(
 		Config{
-			ChainID:     1,
-			Concurrency: 1,
-			BatchSize:   100,
-			Logger:      logger,
+			ChainID:              1,
+			ReferenceEffectiveAt: testReferenceEffectiveAt,
+			Concurrency:          1,
+			BatchSize:            100,
+			Logger:               logger,
 		},
 		integrationMockHeaderFetcher(),
 		integrationMockMulticallFactory(t, 1),
@@ -509,21 +520,20 @@ func TestIntegration_BackfillRun_RespectsSupersession(t *testing.T) {
 		t.Fatalf("Run failed: %v", err)
 	}
 
-	// Oracle1: validFrom = max(deploymentBlock=100, bindingFrom=100) = 100
-	//          validTo = 159 (superseded at block 160)
-	//          Clamped range: 100-159 = 60 blocks
+	// Oracle1: validFrom = max(deploymentBlock=100, bindingFrom=100) = 100,
+	// no upper bound despite the later oracle2 binding.
+	// Clamped range: 100-180 = 81 blocks
 	var oracle1Count int
 	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracle1ID).Scan(&oracle1Count)
 	if err != nil {
 		t.Fatalf("failed to query oracle1 count: %v", err)
 	}
-	if oracle1Count != 60 {
-		t.Errorf("expected 60 price records for oracle1 (blocks 100-159), got %d", oracle1Count)
+	if oracle1Count != 81 {
+		t.Errorf("expected 81 price records for oracle1 (blocks 100-180), got %d", oracle1Count)
 	}
 
-	// Oracle2: validFrom = max(deploymentBlock=150, bindingFrom=160) = 160
-	//          validTo = 0 (still active)
-	//          Clamped range: 160-180 = 21 blocks
+	// Oracle2: validFrom = max(deploymentBlock=150, bindingFrom=160) = 160.
+	// Clamped range: 160-180 = 21 blocks
 	var oracle2Count int
 	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracle2ID).Scan(&oracle2Count)
 	if err != nil {
@@ -533,19 +543,19 @@ func TestIntegration_BackfillRun_RespectsSupersession(t *testing.T) {
 		t.Errorf("expected 21 price records for oracle2 (blocks 160-180), got %d", oracle2Count)
 	}
 
-	// Verify oracle1 has no prices beyond block 159
+	// Verify oracle1 kept processing through the requested end of range
 	var oracle1MaxBlock int64
 	err = pool.QueryRow(ctx, `SELECT MAX(block_number) FROM onchain_token_price WHERE oracle_id = $1`, oracle1ID).Scan(&oracle1MaxBlock)
 	if err != nil {
 		t.Fatalf("failed to query oracle1 max block: %v", err)
 	}
-	if oracle1MaxBlock > 159 {
-		t.Errorf("expected oracle1 max block <= 159, got %d", oracle1MaxBlock)
+	if oracle1MaxBlock != 180 {
+		t.Errorf("expected oracle1 max block 180, got %d", oracle1MaxBlock)
 	}
 }
 
 func TestIntegration_BackfillRun_PartialTokenFailure(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -598,10 +608,11 @@ func TestIntegration_BackfillRun_PartialTokenFailure(t *testing.T) {
 
 	svc, err := NewService(
 		Config{
-			ChainID:     1,
-			Concurrency: 1,
-			BatchSize:   100,
-			Logger:      logger,
+			ChainID:              1,
+			ReferenceEffectiveAt: testReferenceEffectiveAt,
+			Concurrency:          1,
+			BatchSize:            100,
+			Logger:               logger,
 		},
 		integrationMockHeaderFetcher(),
 		mcFactory,
@@ -654,7 +665,7 @@ func TestIntegration_BackfillRun_PartialTokenFailure(t *testing.T) {
 // or errors. This exercises the ON CONFLICT DO NOTHING clause in UpsertPrices
 // through the full service path.
 func TestIntegration_BackfillRun_DuplicateBlocksSafeWithOnConflict(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -675,7 +686,7 @@ func TestIntegration_BackfillRun_DuplicateBlocksSafeWithOnConflict(t *testing.T)
 
 	newService := func() *Service {
 		svc, err := NewService(
-			Config{ChainID: 1, Concurrency: 1, BatchSize: 100, Logger: logger},
+			Config{ChainID: 1, Concurrency: 1, BatchSize: 100, Logger: logger, ReferenceEffectiveAt: testReferenceEffectiveAt},
 			integrationMockHeaderFetcher(),
 			integrationMockMulticallFactory(t, 2),
 			repo,
@@ -720,7 +731,7 @@ func TestIntegration_BackfillRun_DuplicateBlocksSafeWithOnConflict(t *testing.T)
 }
 
 func TestIntegration_BackfillRun_MultipleSelectiveChanges(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -763,10 +774,11 @@ func TestIntegration_BackfillRun_MultipleSelectiveChanges(t *testing.T) {
 
 	svc, err := NewService(
 		Config{
-			ChainID:     1,
-			Concurrency: 1,
-			BatchSize:   100,
-			Logger:      logger,
+			ChainID:              1,
+			ReferenceEffectiveAt: testReferenceEffectiveAt,
+			Concurrency:          1,
+			BatchSize:            100,
+			Logger:               logger,
 		},
 		integrationMockHeaderFetcher(),
 		mcFactory,

@@ -1,9 +1,11 @@
+import logging
 from decimal import Decimal
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from app.api._share_errors import share_error_503
 from app.api._validators import (
     ChainIdPath,
     EthAddressParam,
@@ -11,9 +13,13 @@ from app.api._validators import (
     TokenAddressPath,
 )
 from app.api.deps import (
+    check_prime_view,
     get_crypto_lending_risk_service,
     get_model_registry,
+    get_principal,
     get_receipt_token_lookup,
+    require_prime_view_body,
+    require_prime_view_query,
 )
 from app.api.v1._resolvers import (
     AssetById,
@@ -21,18 +27,21 @@ from app.api.v1._resolvers import (
     parse_asset_identity,
     resolve_receipt_token,
 )
+from app.auth.jwt import Principal
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.risk import RrcResult
 from app.domain.exceptions import (
-    AllocationShareError,
+    AllocationUnpricedError,
     InvalidOverrideError,
-    MissingShareError,
-    StaleShareError,
+    ModelDataUnavailableError,
 )
+from app.domain.serialization import PlainDecimal
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 from app.services.model_registry import ModelRegistry
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["risk"])
 
@@ -40,15 +49,20 @@ _ZERO = Decimal("0")
 _ONE = Decimal("1")
 
 
+def _parse_optional_prime(prime_id: str | None) -> EthAddress | None:
+    """Build an ``EthAddress`` from a validated optional prime query param."""
+    return EthAddress(prime_id) if prime_id is not None else None
+
+
 class BadDebtResponse(BaseModel):
     """Estimated bad debt for a receipt-token position at a given collateral gap."""
 
     receipt_token_id: int = Field(description="Surrogate id of the receipt token.", examples=[42])
-    gap_pct: Decimal = Field(
+    gap_pct: PlainDecimal = Field(
         description="Collateral price gap as a fraction in `[0, 1]`. Decimal serialized as a JSON string.",
         examples=["0.10"],
     )
-    bad_debt_usd: Decimal = Field(
+    bad_debt_usd: PlainDecimal = Field(
         description="Estimated USD bad debt at the given gap. Decimal serialized as a JSON string.",
         examples=["1234567.89"],
     )
@@ -63,29 +77,49 @@ class BadDebtResponse(BaseModel):
 class RiskBreakdownItemResponse(BaseModel):
     """One backing-token row in a receipt-token's risk-enriched breakdown."""
 
-    token_id: int = Field(description="Surrogate token id of the backing token.", examples=[101])
+    token_id: int | None = Field(
+        default=None,
+        description=(
+            "Surrogate token id of the backing token. Null for symbol-keyed collateral (e.g. Maple custody assets)."
+        ),
+        examples=[101],
+    )
     symbol: str = Field(description="Backing-token symbol.", examples=["WETH"])
-    amount: Decimal = Field(
+    amount: PlainDecimal = Field(
         description="Backing-token amount, expressed in token units. Decimal serialized as a JSON string.",
         examples=["12.345678"],
     )
-    backing_pct: Decimal = Field(
+    backing_pct: PlainDecimal = Field(
         description="Share of the receipt token backed by this row, as a 0–100 percentage.",
         examples=["42.0"],
     )
-    amount_usd: Decimal = Field(
+    amount_usd: PlainDecimal = Field(
         description="USD value of the backing-token row.",
         examples=["41234.56"],
     )
-    price_usd: Decimal = Field(description="Latest USD price for the backing token.", examples=["3340.55"])
-    liquidation_threshold: Decimal = Field(
-        description="Lender's liquidation threshold (LTV ratio) for the backing token, in `[0, 1]`.",
+    price_usd: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "Latest USD price for the backing token. Null when the price is unavailable "
+            "(e.g. a Maple custody asset whose attested price is missing); in that case "
+            "`amount` is 0 while `amount_usd` is still the attested USD value."
+        ),
+        examples=["3340.55"],
+    )
+    liquidation_threshold: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "Lender's liquidation threshold (LTV ratio) for the backing token, in `[0, 1]`. "
+            "Null when the protocol has no per-asset threshold (e.g. Maple)."
+        ),
         examples=["0.83"],
     )
-    liquidation_bonus: Decimal = Field(
+    liquidation_bonus: PlainDecimal | None = Field(
+        default=None,
         description=(
             "Liquidation bonus expressed as a multiplier (e.g. `1.05` for a 5% bonus). "
-            "Stored as basis points upstream and normalised by dividing by 10000."
+            "Stored as basis points upstream and normalised by dividing by 10000. "
+            "Null when the protocol has no per-asset bonus (e.g. Maple)."
         ),
         examples=["1.05"],
     )
@@ -118,18 +152,28 @@ class RiskBreakdownResponse(BaseModel):
     }
 
 
-def _share_error_503(exc: AllocationShareError) -> HTTPException:
-    """Translate an AllocationShareError subtype into a 503 with a distinct code."""
-    if isinstance(exc, StaleShareError):
-        code = "share_data_stale"
-    elif isinstance(exc, MissingShareError):
-        code = "share_data_missing"
-    else:
-        code = "share_data_unavailable"
-    return HTTPException(status_code=503, detail={"code": code, "message": str(exc)})
+async def _authorized_pool_prime(
+    request: Request,
+    principal: Principal | None,
+    receipt_token_id: int,
+    service: CryptoLendingRiskService,
+) -> EthAddress | None:
+    """Gate a no-``prime_id`` read on the prime it actually reports.
+
+    These routes look pool-level but the Aave-like legacy share is the largest
+    holder's balance over supply, so the answer is one real prime's exposure.
+    Resolve that holder once, run the same per-resource check every other
+    prime-scoped route runs, and hand the SAME address to the computation.
+    """
+    pool_prime = await service.resolve_pool_prime(receipt_token_id)
+    if pool_prime is not None:
+        await check_prime_view(request, principal, str(pool_prime))
+    return pool_prime
 
 
 async def _compute_bad_debt(
+    request: Request,
+    principal: Principal | None,
     receipt_token_id: int,
     gap_pct: Decimal,
     service: CryptoLendingRiskService,
@@ -138,9 +182,10 @@ async def _compute_bad_debt(
         raise HTTPException(status_code=422, detail="gap_pct must be between 0 and 1")
 
     try:
-        bad_debt = await service.get_bad_debt_legacy(receipt_token_id, gap_pct)
-    except AllocationShareError as exc:
-        raise _share_error_503(exc) from exc
+        pool_wallet = await _authorized_pool_prime(request, principal, receipt_token_id, service)
+        bad_debt = await service.get_bad_debt_legacy(receipt_token_id, gap_pct, pool_wallet)
+    except AllocationUnpricedError as exc:
+        raise share_error_503(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if bad_debt is None:
@@ -153,13 +198,20 @@ async def _compute_bad_debt(
 
 
 async def _compute_risk_breakdown(
+    request: Request,
+    principal: Principal | None,
     receipt_token_id: int,
     service: CryptoLendingRiskService,
+    prime_id: EthAddress | None = None,
 ) -> RiskBreakdownResponse:
     try:
-        breakdown = await service.get_risk_breakdown_legacy(receipt_token_id)
-    except AllocationShareError as exc:
-        raise _share_error_503(exc) from exc
+        # With a prime_id the query-param dependency has already checked it.
+        pool_wallet = None
+        if prime_id is None:
+            pool_wallet = await _authorized_pool_prime(request, principal, receipt_token_id, service)
+        breakdown = await service.get_risk_breakdown(receipt_token_id, prime_id, pool_wallet)
+    except AllocationUnpricedError as exc:
+        raise share_error_503(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if breakdown is None:
@@ -190,20 +242,25 @@ async def _compute_risk_breakdown(
     deprecated=True,
     description=(
         "Estimate USD bad debt for a receipt-token position when collateral prices "
-        "fall by `gap_pct` (a fraction in `[0, 1]`).\n\n"
+        "fall by `gap_pct` (a fraction in `[0, 1]`). The position resolves to the "
+        "receipt token's largest current holder, so the estimate is that prime's and "
+        "the caller needs access to it.\n\n"
         "**Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/bad-debt`.\n\n"
         "Errors:\n"
-        "- `404` if the receipt token is not found.\n"
+        "- `404` if the receipt token is not found, or the caller may not view the "
+        "prime the position resolves to.\n"
         "- `422` if `gap_pct` is outside `[0, 1]`.\n"
         "- `503` (`share_data_*`) if the allocation-share lookup fails."
     ),
 )
 async def get_bad_debt(
+    request: Request,
     receipt_token_id: int,
     gap_pct: Decimal = Query(description="Collateral gap fraction in [0, 1].", examples=["0.10"]),
     service: CryptoLendingRiskService = Depends(get_crypto_lending_risk_service),
+    principal: Principal | None = Depends(get_principal),
 ) -> BadDebtResponse:
-    return await _compute_bad_debt(receipt_token_id, gap_pct, service)
+    return await _compute_bad_debt(request, principal, receipt_token_id, gap_pct, service)
 
 
 @router.get(
@@ -211,20 +268,36 @@ async def get_bad_debt(
     response_model=RiskBreakdownResponse,
     summary="Risk-enriched collateral breakdown (deprecated)",
     deprecated=True,
+    dependencies=[Depends(require_prime_view_query)],
     description=(
         "Return the full risk-enriched collateral breakdown for a receipt-token position: "
         "one row per backing token with amount, USD value, price, liquidation threshold, and bonus.\n\n"
+        "Pass an optional `prime_id` to scale the breakdown to that prime's position "
+        "(per-prime, pro-rata by pool share). Omitted, the position resolves to the "
+        "receipt token's largest current holder, so the response is that prime's "
+        "breakdown and the caller needs access to it.\n\n"
         "**Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/breakdown`.\n\n"
         "Errors:\n"
-        "- `404` if the receipt token is not found.\n"
+        "- `404` if the receipt token is not found, or the caller may not view the "
+        "prime the position resolves to.\n"
+        "- `422` if `prime_id` is malformed.\n"
         "- `503` (`share_data_*`) if the allocation-share lookup fails."
     ),
 )
 async def get_risk_breakdown(
+    request: Request,
     receipt_token_id: int,
+    prime_id: Annotated[
+        OptionalEthAddressParam,
+        Query(
+            description="Optional prime address; scales the breakdown to that prime's pro-rata pool share.",
+            examples=["0x1234567890abcdef1234567890abcdef12345678"],
+        ),
+    ] = None,
     service: CryptoLendingRiskService = Depends(get_crypto_lending_risk_service),
+    principal: Principal | None = Depends(get_principal),
 ) -> RiskBreakdownResponse:
-    return await _compute_risk_breakdown(receipt_token_id, service)
+    return await _compute_risk_breakdown(request, principal, receipt_token_id, service, _parse_optional_prime(prime_id))
 
 
 @router.get(
@@ -234,52 +307,74 @@ async def get_risk_breakdown(
     description=(
         "Estimate USD bad debt for the receipt-token position at "
         "`(chain_id, token_address)` when collateral prices fall by `gap_pct` "
-        "(a fraction in `[0, 1]`).\n\n"
+        "(a fraction in `[0, 1]`). The position resolves to the receipt token's "
+        "largest current holder, so the estimate is that prime's and the caller "
+        "needs access to it.\n\n"
         "`token_address` is the **receipt-token** address (e.g. `aUSDC`, `spWETH`), "
         "not the underlying ERC-20 address. Passing an underlying address yields a "
         "`404` whose body suggests matching receipt tokens.\n\n"
         "Errors:\n"
-        "- `404` if the receipt token is not found.\n"
+        "- `404` if the receipt token is not found, or the caller may not view the "
+        "prime the position resolves to.\n"
         "- `422` if `chain_id` < 1, `token_address` is malformed, or `gap_pct` is "
         "outside `[0, 1]`.\n"
         "- `503` (`share_data_*`) if the allocation-share lookup fails."
     ),
 )
 async def get_bad_debt_by_address(
+    request: Request,
     chain_id: ChainIdPath,
     token_address: TokenAddressPath,
     gap_pct: Decimal = Query(description="Collateral gap fraction in [0, 1].", examples=["0.10"]),
     service: CryptoLendingRiskService = Depends(get_crypto_lending_risk_service),
     lookup: ReceiptTokenLookup = Depends(get_receipt_token_lookup),
+    principal: Principal | None = Depends(get_principal),
 ) -> BadDebtResponse:
     info = await resolve_receipt_token(chain_id, token_address, lookup)
-    return await _compute_bad_debt(info.receipt_token_id, gap_pct, service)
+    return await _compute_bad_debt(request, principal, info.receipt_token_id, gap_pct, service)
 
 
 @router.get(
     "/risk/{chain_id}/{token_address}/breakdown",
     response_model=RiskBreakdownResponse,
     summary="Risk-enriched collateral breakdown (by chain id and receipt-token address)",
+    dependencies=[Depends(require_prime_view_query)],
     description=(
         "Return the full risk-enriched collateral breakdown for the receipt-token "
         "position at `(chain_id, token_address)`.\n\n"
         "`token_address` is the **receipt-token** address (e.g. `aUSDC`, `spWETH`), "
         "not the underlying ERC-20 address. Passing an underlying address yields a "
         "`404` whose body suggests matching receipt tokens.\n\n"
+        "Pass an optional `prime_id` to scale the breakdown to that prime's position "
+        "(per-prime, pro-rata by pool share). Omitted, the position resolves to the "
+        "receipt token's largest current holder, so the response is that prime's "
+        "breakdown and the caller needs access to it.\n\n"
         "Errors:\n"
-        "- `404` if the receipt token is not found.\n"
-        "- `422` if `chain_id` < 1 or `token_address` is malformed.\n"
+        "- `404` if the receipt token is not found, or the caller may not view the "
+        "prime the position resolves to.\n"
+        "- `422` if `chain_id` < 1, `token_address` is malformed, or `prime_id` is malformed.\n"
         "- `503` (`share_data_*`) if the allocation-share lookup fails."
     ),
 )
 async def get_risk_breakdown_by_address(
+    request: Request,
     chain_id: ChainIdPath,
     token_address: TokenAddressPath,
+    prime_id: Annotated[
+        OptionalEthAddressParam,
+        Query(
+            description="Optional prime address; scales the breakdown to that prime's pro-rata pool share.",
+            examples=["0x1234567890abcdef1234567890abcdef12345678"],
+        ),
+    ] = None,
     service: CryptoLendingRiskService = Depends(get_crypto_lending_risk_service),
     lookup: ReceiptTokenLookup = Depends(get_receipt_token_lookup),
+    principal: Principal | None = Depends(get_principal),
 ) -> RiskBreakdownResponse:
     info = await resolve_receipt_token(chain_id, token_address, lookup)
-    return await _compute_risk_breakdown(info.receipt_token_id, service)
+    return await _compute_risk_breakdown(
+        request, principal, info.receipt_token_id, service, _parse_optional_prime(prime_id)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -324,9 +419,10 @@ class RrcRequest(BaseModel):
         default_factory=dict,
         description=(
             "Per-model scenario overrides. Outer keys are registered risk-model names "
-            "(`suraf`, `gap_sweep`); inner objects are model-specific. For example, "
-            "`gap_sweep` accepts `gap_pct` (a price-drop fraction in `[0, 1]`) and "
-            "`suraf` accepts `usd_exposure`. Unknown outer keys are rejected with `422`."
+            "(`suraf`, `gap_sweep`, `core_model`); inner objects are model-specific. "
+            "For example, `gap_sweep` accepts `gap_pct` (a price-drop fraction in `[0, 1]`); "
+            "`suraf` and `core_model` accept `usd_exposure`. "
+            "Unknown outer keys are rejected with `422`."
         ),
     )
 
@@ -373,11 +469,11 @@ class RrcEnvelope(BaseModel):
         examples=["0x1234567890abcdef1234567890abcdef12345678"],
     )
     results: list[RrcResult] = Field(description="One entry per applicable risk model.")
-    max_rrc_usd: Decimal = Field(
+    max_rrc_usd: PlainDecimal = Field(
         description="Largest `rrc_usd` across `results`. Decimal serialized as a JSON string.",
         examples=["12300"],
     )
-    max_crr_pct: Decimal = Field(
+    max_crr_pct: PlainDecimal = Field(
         description="Largest `comparable_crr_pct` across `results`, as a 0–100 percentage.",
         examples=["33.7"],
     )
@@ -387,6 +483,7 @@ class RrcEnvelope(BaseModel):
     "/risk/rrc",
     response_model=RrcEnvelope,
     summary="Risk capital (RRC) at default stress",
+    dependencies=[Depends(require_prime_view_query)],
     description=(
         "Compute RRC at default stress for every model that applies to the asset. "
         "Identify the asset by **exactly one** of:\n\n"
@@ -441,6 +538,7 @@ async def get_rrc(
     "/risk/rrc/scenario",
     response_model=RrcEnvelope,
     summary="Risk capital (RRC) with scenario overrides",
+    dependencies=[Depends(require_prime_view_body)],
     description=(
         "Compute RRC with per-model scenario overrides for every applicable model. "
         "Identify the asset by **exactly one** of `asset_id` (deprecated) or "
@@ -474,6 +572,7 @@ async def post_rrc_scenario(
     response_model=RrcEnvelope,
     include_in_schema=False,
     deprecated=True,
+    dependencies=[Depends(require_prime_view_body)],
 )
 async def post_rrc(
     body: RrcRequest,
@@ -522,11 +621,23 @@ async def _compute_envelope(
     for m in applicable:
         try:
             result = await m.compute(asset_id, prime_id, overrides.get(m.risk_model, {}))
-        except AllocationShareError as exc:
-            raise _share_error_503(exc) from exc
+        except AllocationUnpricedError as exc:
+            raise share_error_503(exc) from exc
         except InvalidOverrideError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ModelDataUnavailableError as exc:
+            # A model with no data yet degrades the envelope, not the endpoint.
+            logger.warning("skipping model without data model=%s asset_id=%s: %s", m.risk_model, asset_id, exc)
+            continue
         results.append(result)
+
+    if not results:
+        # Matches the pre-CORE behavior for assets whose only model has no
+        # data yet: the endpoint 404s rather than serving an empty envelope.
+        raise HTTPException(
+            status_code=404,
+            detail=f"no risk model has a result for asset_id={asset_id}",
+        )
 
     return RrcEnvelope(
         asset_id=asset_id,

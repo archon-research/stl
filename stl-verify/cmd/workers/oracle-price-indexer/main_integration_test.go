@@ -28,32 +28,27 @@ var (
 	sharedLocalStackCfg testutil.LocalStackConfig
 )
 
-// testBucket / testDeployEnv match the chainutil.ValidateS3BucketForChain
-// rule: stl-sentinel{env}-{chain}-raw. chainID=1 → "ethereum".
+// rawBucketPrefix / testDeployEnv satisfy chainutil.ValidateS3BucketForChain, a
+// prefix check rather than an equality one, so a per-test suffix is allowed.
 const (
-	testBucket    = "stl-sentineltest-ethereum-raw"
-	testDeployEnv = "test"
+	rawBucketPrefix = "stl-sentineltest-ethereum-raw-"
+	testDeployEnv   = "test"
 	// archiveBucket receives raw SC call archives when ARCHIVE_SC_CALLS=true.
 	archiveBucket = "stl-raw-sc-calls-test"
 	// archivePrefix is the chain_id partition rawsckey.Build writes under for chainID=1.
 	archivePrefix = "raw-sc-calls/chain_id=1/"
+	// Any height works — the mock RPC answers whatever the event carries — but the
+	// archiving test asserts on it, so setup and assertion read the one const.
+	seedBlockNum int64 = 18_000_000
 )
 
 func TestMain(m *testing.M) {
-	dsn, dbCleanup := testutil.StartTimescaleDBForMain()
-	sharedDSN = dsn
-	redisAddr, redisCleanup := testutil.StartRedisForMain()
-	sharedRedisAddr = redisAddr
-	lsCfg, lsCleanup := testutil.StartLocalStackForMain("s3")
-	sharedLocalStackCfg = lsCfg
-
-	code := m.Run()
-
-	lsCleanup()
-	redisCleanup()
-	dbCleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.RunShared(m, testutil.Shared{
+		TimescaleDSN:       &sharedDSN,
+		RedisAddr:          &sharedRedisAddr,
+		LocalStack:         &sharedLocalStackCfg,
+		LocalStackServices: "s3",
+	}))
 }
 
 // ---------------------------------------------------------------------------
@@ -95,7 +90,7 @@ func setupIntegrationTest(t *testing.T, opts ...setupOption) *integrationEnv {
 		opt(&cfg)
 	}
 
-	pool, dbURL, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	bgCtx := context.Background()
@@ -122,21 +117,20 @@ func setupIntegrationTest(t *testing.T, opts ...setupOption) *integrationEnv {
 	sqsServer, sqsState := testutil.StartMockSQS(t)
 	t.Cleanup(sqsServer.Close)
 
-	// Pre-seed S3 with the block JSON for block 18000000 so resolveBlockTimestamp
-	// can recover a timestamp via the cache→S3 fallback path.
+	// Pre-seed S3 with the block JSON so resolveBlockTimestamp can recover a
+	// timestamp via the cache→S3 fallback path.
 	s3Client := testutil.NewS3Client(t, bgCtx, sharedLocalStackCfg)
-	if _, err := s3Client.CreateBucket(bgCtx, &s3.CreateBucketInput{Bucket: aws.String(testBucket)}); err != nil {
-		t.Fatalf("create S3 bucket: %v", err)
-	}
+	rawBucket := testutil.S3TestBucketName(t, rawBucketPrefix)
+	testutil.EnsureBucket(t, bgCtx, s3Client, rawBucket)
 	if cfg.archiving {
-		if _, err := s3Client.CreateBucket(bgCtx, &s3.CreateBucketInput{Bucket: aws.String(archiveBucket)}); err != nil {
-			t.Fatalf("create archive S3 bucket: %v", err)
-		}
+		testutil.EnsureBucket(t, bgCtx, s3Client, archiveBucket)
 	}
-	seedBlockToS3(t, bgCtx, s3Client, testBucket, 18_000_000, 1, 1_700_000_000)
+	seedBlockToS3(t, bgCtx, s3Client, rawBucket, seedBlockNum, 1, 1_700_000_000)
 
 	// Enqueue one block event message for the service to process.
-	sqsState.AddMessage(`{"chainId":1,"blockNumber":18000000,"version":1,"blockHash":"0xabc","blockTimestamp":1700000000}`)
+	sqsState.AddMessage(fmt.Sprintf(
+		`{"chainId":1,"blockNumber":%d,"version":1,"blockHash":"0x%064x","blockTimestamp":1700000000}`,
+		seedBlockNum, seedBlockNum))
 
 	// Configure environment for run()
 	t.Setenv("BUILD_GIT_HASH", "test")
@@ -147,8 +141,11 @@ func setupIntegrationTest(t *testing.T, opts ...setupOption) *integrationEnv {
 	t.Setenv("AWS_REGION", "us-east-1")
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
-	t.Setenv("S3_BUCKET", testBucket)
+	t.Setenv("S3_BUCKET", rawBucket)
 	t.Setenv("DEPLOY_ENV", testDeployEnv)
+	// This worker only ever reads Redis, falling back to S3 on a miss. The prefix
+	// keeps that miss guaranteed on a Redis shared with other packages.
+	t.Setenv("REDIS_KEY_PREFIX", testutil.SanitizeTestName(t.Name()))
 	if cfg.archiving {
 		t.Setenv("ARCHIVE_SC_CALLS", "true")
 		t.Setenv("RAW_SC_BUCKET", archiveBucket)
@@ -164,15 +161,10 @@ func setupIntegrationTest(t *testing.T, opts ...setupOption) *integrationEnv {
 			"-queue", "http://localhost/test-queue",
 			"-db", dbURL,
 			"-redis", sharedRedisAddr,
-		})
+		}, nil)
 	}()
 
-	// Wait for the service to start (SQS ReceiveMessage call indicates it's polling)
-	select {
-	case <-sqsState.FirstCallReceived:
-	case <-time.After(30 * time.Second):
-		t.Fatal("timed out waiting for service to start")
-	}
+	testutil.WaitForFirstPoll(t, errCh, sqsState.FirstCallReceived)
 
 	return &integrationEnv{
 		pool:       pool,
@@ -195,6 +187,18 @@ func (e *integrationEnv) waitForPrices(t *testing.T) {
 	}, "prices to be stored in DB")
 }
 
+// waitForDelete blocks until the processed message has been deleted from SQS.
+// DeleteMessage is the final step of the poll loop, after the DB write that
+// waitForPrices observes; without gating shutdown on it, cancelling the context
+// can abort the in-flight DeleteMessage (context canceled) and the delete never
+// registers.
+func (e *integrationEnv) waitForDelete(t *testing.T) {
+	t.Helper()
+	testutil.WaitForCondition(t, 30*time.Second, func() bool {
+		return e.sqsState.Deletes() >= 1
+	}, "message to be deleted from SQS")
+}
+
 // waitForShutdown cancels run()'s context and asserts it returns cleanly.
 func (e *integrationEnv) waitForShutdown(t *testing.T) {
 	t.Helper()
@@ -213,6 +217,7 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	env := setupIntegrationTest(t)
 
 	env.waitForPrices(t)
+	env.waitForDelete(t)
 	env.waitForShutdown(t)
 
 	// Verify prices
@@ -220,11 +225,6 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	env.pool.QueryRow(env.bgCtx, `SELECT COUNT(*) FROM onchain_token_price`).Scan(&priceCount)
 	if priceCount < env.tokenCount {
 		t.Errorf("expected at least %d prices, got %d", env.tokenCount, priceCount)
-	}
-
-	// Verify DeleteMessage was called
-	if deletes := env.sqsState.Deletes(); deletes < 1 {
-		t.Errorf("expected at least 1 DeleteMessage call, got %d", deletes)
 	}
 }
 
@@ -241,7 +241,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	// whose key carries the expected block version and source. rawsckey.Build
 	// formats the filename as {block}_{blockVersion}_{source}_{batchHash}, so the
 	// segment also pins that the message's version 1 (not the default 0) is keyed.
-	const wantSegment = "18000000_1_oracle-price_"
+	wantSegment := fmt.Sprintf("%d_1_oracle-price_", seedBlockNum)
 	testutil.WaitForCondition(t, 30*time.Second, func() bool {
 		out, err := env.s3Client.ListObjectsV2(env.bgCtx, &s3.ListObjectsV2Input{
 			Bucket: aws.String(archiveBucket),
@@ -259,6 +259,25 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	}, "a raw SC call archive whose key contains "+wantSegment)
 
 	env.waitForShutdown(t)
+
+	// Shutdown drained every fire-and-forget archive write. The positive check
+	// above only proves an archive at the real block exists; assert directly that
+	// nothing was archived at block 0, the signature of a hash-pinned read
+	// reaching the archiver without WithBlockNumber (VEC-471). A real archive's
+	// filename starts with the block number, never "0_".
+	listOut, listErr := env.s3Client.ListObjectsV2(env.bgCtx, &s3.ListObjectsV2Input{
+		Bucket: aws.String(archiveBucket),
+		Prefix: aws.String(archivePrefix),
+	})
+	if listErr != nil {
+		t.Fatalf("listing archive bucket: %v", listErr)
+	}
+	for _, obj := range listOut.Contents {
+		key := aws.ToString(obj.Key)
+		if base := key[strings.LastIndex(key, "/")+1:]; strings.HasPrefix(base, "0_") {
+			t.Fatalf("raw SC call archive keyed at block 0 (%s): a hash-pinned state read was archived without WithBlockNumber", key)
+		}
+	}
 }
 
 func TestRunIntegration_BadDatabaseURL(t *testing.T) {
@@ -268,14 +287,14 @@ func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
-	t.Setenv("S3_BUCKET", testBucket)
+	t.Setenv("S3_BUCKET", testutil.S3TestBucketName(t, rawBucketPrefix))
 	t.Setenv("DEPLOY_ENV", testDeployEnv)
 
 	err := run(context.Background(), []string{
 		"-queue", "http://localhost/test-queue",
 		"-redis", sharedRedisAddr,
 		"-db", "postgres://invalid:invalid@localhost:1/nonexistent?connect_timeout=1",
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error for bad database URL")
 	}

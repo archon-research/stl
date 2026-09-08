@@ -79,9 +79,9 @@ func TestERC7540Source_FetchBalances_ResolvesShareAndStoresBalance(t *testing.T)
 	mc := testutil.NewMockMulticaller()
 	src := newTestERC7540Source(t, mc)
 
-	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
-		if blockNumber == nil || blockNumber.Cmp(big.NewInt(24584100)) != 0 {
-			t.Fatalf("blockNumber = %v, want 24584100", blockNumber)
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+		if blockHash != testBlockHash {
+			t.Fatalf("blockHash = %v, want %v (state read must be pinned to the block hash, not the number, so a reorg can't return the wrong fork's state)", blockHash, testBlockHash)
 		}
 		switch mc.CallCount {
 		case 1: // share() resolution round
@@ -115,7 +115,7 @@ func TestERC7540Source_FetchBalances_ResolvesShareAndStoresBalance(t *testing.T)
 		TokenType:       "centrifuge",
 	}}
 
-	results, err := src.FetchBalances(context.Background(), entries, 24584100)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances failed: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestERC7540Source_FetchBalances_ZeroBalance(t *testing.T) {
 	mc := testutil.NewMockMulticaller()
 	src := newTestERC7540Source(t, mc)
 
-	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 		if mc.CallCount == 1 {
 			return []outbound.Result{{Success: true, ReturnData: packShareOutput(t, src, share)}}, nil
 		}
@@ -158,7 +158,7 @@ func TestERC7540Source_FetchBalances_ZeroBalance(t *testing.T) {
 		TokenType:       "centrifuge",
 	}}
 
-	results, err := src.FetchBalances(context.Background(), entries, 100)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances failed: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestERC7540Source_FetchBalances_SharedVaultResolvedOnce(t *testing.T) {
 	mc := testutil.NewMockMulticaller()
 	src := newTestERC7540Source(t, mc)
 
-	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 		if mc.CallCount == 1 {
 			if len(calls) != 1 {
 				t.Fatalf("expected 1 share call for shared vault, got %d", len(calls))
@@ -201,7 +201,7 @@ func TestERC7540Source_FetchBalances_SharedVaultResolvedOnce(t *testing.T) {
 		{ContractAddress: vault, WalletAddress: walletB, TokenType: "centrifuge"},
 	}
 
-	results, err := src.FetchBalances(context.Background(), entries, 100)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances failed: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestERC7540Source_FetchBalances_DuplicateShareForWalletFails(t *testing.T) 
 	mc := testutil.NewMockMulticaller()
 	src := newTestERC7540Source(t, mc)
 
-	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 		shareData := packShareOutput(t, src, share)
 		return []outbound.Result{
 			{Success: true, ReturnData: shareData},
@@ -235,7 +235,7 @@ func TestERC7540Source_FetchBalances_DuplicateShareForWalletFails(t *testing.T) 
 		{ContractAddress: vaultB, WalletAddress: wallet, TokenType: "centrifuge"},
 	}
 
-	results, err := src.FetchBalances(context.Background(), entries, 100)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err == nil {
 		t.Fatal("expected double-count error for two vaults resolving to the same share")
 	}
@@ -260,7 +260,7 @@ func TestERC7540Source_FetchBalances_SameShareDifferentWalletsSucceeds(t *testin
 	mc := testutil.NewMockMulticaller()
 	src := newTestERC7540Source(t, mc)
 
-	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 		if mc.CallCount == 1 {
 			shareData := packShareOutput(t, src, share)
 			return []outbound.Result{
@@ -279,7 +279,7 @@ func TestERC7540Source_FetchBalances_SameShareDifferentWalletsSucceeds(t *testin
 		{ContractAddress: vaultB, WalletAddress: walletB, TokenType: "centrifuge"},
 	}
 
-	results, err := src.FetchBalances(context.Background(), entries, 100)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("same share for different wallets must not be a double count: %v", err)
 	}
@@ -301,15 +301,6 @@ func TestERC7540Source_FetchBalances_FailureModes(t *testing.T) {
 		rounds         func(src *ERC7540Source) []func() ([]outbound.Result, error)
 		expectedRounds int
 	}{
-		{
-			name: "share call reverted",
-			rounds: func(src *ERC7540Source) []func() ([]outbound.Result, error) {
-				return []func() ([]outbound.Result, error){
-					func() ([]outbound.Result, error) { return []outbound.Result{{Success: false}}, nil },
-				}
-			},
-			expectedRounds: 1,
-		},
 		{
 			name: "transport error in share round",
 			rounds: func(src *ERC7540Source) []func() ([]outbound.Result, error) {
@@ -408,7 +399,7 @@ func TestERC7540Source_FetchBalances_FailureModes(t *testing.T) {
 			src := newTestERC7540Source(t, mc)
 			rounds := tc.rounds(src)
 
-			mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+			mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 				if mc.CallCount > len(rounds) {
 					t.Fatalf("unexpected multicall round %d", mc.CallCount)
 				}
@@ -421,7 +412,7 @@ func TestERC7540Source_FetchBalances_FailureModes(t *testing.T) {
 				TokenType:       "centrifuge",
 			}}
 
-			results, err := src.FetchBalances(context.Background(), entries, 100)
+			results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 			if err == nil {
 				t.Fatal("expected error")
 			}
@@ -435,15 +426,90 @@ func TestERC7540Source_FetchBalances_FailureModes(t *testing.T) {
 	}
 }
 
-func TestERC7540Source_FetchBalances_ZeroBlockPassesNilBlock(t *testing.T) {
+// TestERC7540Source_FetchBalances_DirectShareTokenFallback covers the mixed
+// axis-synome 0.2.0 centrifuge migration: an entry whose contract has no share()
+// (a clean revert) is a direct ERC-20 share token (e.g. Spark's JTRSY), not an
+// ERC-7540 vault. The source must fall back to reading balanceOf on the address
+// itself rather than hard-failing — otherwise it poison-stalls that block.
+func TestERC7540Source_FetchBalances_DirectShareTokenFallback(t *testing.T) {
+	directShare := common.HexToAddress("0x8c213ee79581ff4984583c6a801e5263418c4b86") // JTRSY
+	wallet := common.HexToAddress("0xbbbb")
+	expected := big.NewInt(4242)
+
+	mc := testutil.NewMockMulticaller()
+	src := newTestERC7540Source(t, mc)
+
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+		switch mc.CallCount {
+		case 1: // share() reverts: not a vault
+			return []outbound.Result{{Success: false}}, nil
+		case 2: // balanceOf must target the address itself, not a resolved vault share
+			if calls[0].Target != directShare {
+				t.Fatalf("balanceOf target = %s, want the entry address itself %s", calls[0].Target.Hex(), directShare.Hex())
+			}
+			return []outbound.Result{{Success: true, ReturnData: packBalanceOutput(t, src, expected)}}, nil
+		default:
+			t.Fatalf("unexpected multicall round %d", mc.CallCount)
+			return nil, nil
+		}
+	}
+
+	entries := []*TokenEntry{{
+		ContractAddress: directShare,
+		WalletAddress:   wallet,
+		TokenType:       "centrifuge",
+	}}
+
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
+	if err != nil {
+		t.Fatalf("FetchBalances failed: %v", err)
+	}
+	if got := results.Balances[entries[0].Key()]; got == nil || got.Balance.Cmp(expected) != 0 {
+		t.Fatalf("balance = %v, want %s", got, expected)
+	}
+}
+
+// TestERC7540Source_FetchBalances_DeadAddressFailsAtBalanceOf confirms the
+// direct-share fallback does not mask a genuinely dead address: when share() AND
+// balanceOf both revert, the block still fails hard rather than silently dropping
+// the position.
+func TestERC7540Source_FetchBalances_DeadAddressFailsAtBalanceOf(t *testing.T) {
+	mc := testutil.NewMockMulticaller()
+	src := newTestERC7540Source(t, mc)
+
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+		return []outbound.Result{{Success: false}}, nil // share() reverts, then balanceOf reverts
+	}
+
+	entries := []*TokenEntry{{
+		ContractAddress: common.HexToAddress("0xdead"),
+		WalletAddress:   common.HexToAddress("0xbbbb"),
+		TokenType:       "centrifuge",
+	}}
+
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
+	if err == nil {
+		t.Fatal("expected hard error for a dead address, got nil")
+	}
+	if results != nil {
+		t.Fatal("expected nil results on failure")
+	}
+	if mc.CallCount != 2 {
+		t.Fatalf("multicall rounds = %d, want 2 (share then balanceOf)", mc.CallCount)
+	}
+}
+
+// TestERC7540Source_FetchBalances_PinsToBlockHash asserts the share-resolution
+// and balance reads are pinned to blockHash (VEC-471).
+func TestERC7540Source_FetchBalances_PinsToBlockHash(t *testing.T) {
 	share := common.HexToAddress("0xcccc")
 
 	mc := testutil.NewMockMulticaller()
 	src := newTestERC7540Source(t, mc)
 
-	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
-		if blockNumber != nil {
-			t.Fatalf("blockNumber = %v, want nil for latest", blockNumber)
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+		if blockHash != testBlockHash {
+			t.Fatalf("blockHash = %v, want %v", blockHash, testBlockHash)
 		}
 		if mc.CallCount == 1 {
 			return []outbound.Result{{Success: true, ReturnData: packShareOutput(t, src, share)}}, nil
@@ -457,7 +523,7 @@ func TestERC7540Source_FetchBalances_ZeroBlockPassesNilBlock(t *testing.T) {
 		TokenType:       "centrifuge",
 	}}
 
-	results, err := src.FetchBalances(context.Background(), entries, 0)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances failed: %v", err)
 	}
@@ -470,7 +536,7 @@ func TestERC7540Source_FetchBalances_EmptyEntries(t *testing.T) {
 	mc := testutil.NewMockMulticaller()
 	src := newTestERC7540Source(t, mc)
 
-	results, err := src.FetchBalances(context.Background(), nil, 100)
+	results, err := src.FetchBalances(context.Background(), nil, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances failed: %v", err)
 	}

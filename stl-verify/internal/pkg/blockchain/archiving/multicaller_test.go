@@ -1,13 +1,16 @@
 package archiving
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"math/big"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/ethereum/go-ethereum/common"
@@ -22,6 +25,10 @@ type stubInner struct {
 }
 
 func (s *stubInner) Execute(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	return s.results, s.err
+}
+
+func (s *stubInner) ExecuteAtHash(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 	return s.results, s.err
 }
 func (s *stubInner) Address() common.Address { return s.addr }
@@ -50,12 +57,12 @@ func (panicArchiver) Archive(context.Context, outbound.CallBatchRecord) error {
 	panic("archiver boom")
 }
 
-func newTestDecorator(inner outbound.Multicaller, arch outbound.CallArchiver, wg *sync.WaitGroup) *Multicaller {
+func newTestDecorator(inner outbound.Multicaller, arch outbound.CallArchiver, gate *DrainGate) *Multicaller {
 	return NewMulticaller(inner, arch, Config{
 		Source:  "oracle-price",
 		ChainID: 1,
 		BuildID: 47,
-		Wait:    wg,
+		Gate:    gate,
 	})
 }
 
@@ -200,8 +207,8 @@ func TestExecute(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := &recordingArchiver{}
-			var wg sync.WaitGroup
-			d := newTestDecorator(&stubInner{results: tt.innerResults, err: tt.innerErr}, rec, &wg)
+			gate := NewDrainGate(nil)
+			d := newTestDecorator(&stubInner{results: tt.innerResults, err: tt.innerErr}, rec, gate)
 
 			ctx := WithBlockVersion(context.Background(), tt.blockVersion)
 			res, err := d.Execute(ctx, tt.calls, tt.blockNumber)
@@ -235,13 +242,132 @@ func TestExecute(t *testing.T) {
 	}
 }
 
+// TestExecuteAtHash covers the same forwarding/archiving/error-suppression
+// contract as TestExecute, exercised through the hash-pinned entry point.
+func TestExecuteAtHash(t *testing.T) {
+	errBoom := errors.New("boom")
+
+	t.Run("forwards results and inner error without archiving", func(t *testing.T) {
+		rec := &recordingArchiver{}
+		gate := NewDrainGate(nil)
+		d := newTestDecorator(&stubInner{results: []outbound.Result{{Success: true}}, err: errBoom}, rec, gate)
+
+		res, err := d.ExecuteAtHash(context.Background(), []outbound.Call{{CallData: []byte{0x01}}}, common.HexToHash("0xabc"))
+		if !errors.Is(err, errBoom) {
+			t.Fatalf("err = %v, want %v", err, errBoom)
+		}
+		if len(res) != 1 || !res[0].Success {
+			t.Fatalf("results not forwarded: %+v", res)
+		}
+		d.Close()
+		if len(rec.batches) != 0 {
+			t.Fatalf("archived %d batches on inner error, want 0", len(rec.batches))
+		}
+	})
+
+	t.Run("stamps BlockNumber from the context on the hash-pinned path", func(t *testing.T) {
+		rec := &recordingArchiver{}
+		gate := NewDrainGate(nil)
+		d := newTestDecorator(&stubInner{results: []outbound.Result{
+			{Success: true, ReturnData: []byte{0xaa}},
+			{Success: false, ReturnData: []byte{0xbb}},
+		}}, rec, gate)
+
+		calls := []outbound.Call{
+			{Target: common.HexToAddress("0x01"), CallData: []byte{0xfe, 0xaf, 0x96, 0x8c}},
+			{Target: common.HexToAddress("0x02"), CallData: []byte{0x18, 0x16, 0x0d, 0xdd}},
+		}
+		// A live block event carries both the number and the hash, so the worker
+		// stamps both on the context. ExecuteAtHash has no blockNumber argument;
+		// the archive record must still key to the real block, not block 0
+		// (VEC-471: block 0 would collide every hash-pinned archive under one key).
+		ctx := WithBlockNumber(WithBlockVersion(context.Background(), 3), 21500042)
+		res, err := d.ExecuteAtHash(ctx, calls, common.HexToHash("0xabc"))
+		if err != nil {
+			t.Fatalf("ExecuteAtHash: %v", err)
+		}
+		if len(res) != 2 {
+			t.Fatalf("results = %d, want 2", len(res))
+		}
+		d.Close()
+
+		if len(rec.batches) != 1 {
+			t.Fatalf("archived %d batches, want 1", len(rec.batches))
+		}
+		b := rec.batches[0]
+		if b.BlockNumber != 21500042 || b.BlockVersion != 3 || b.ChainID != 1 || b.BuildID != 47 {
+			t.Fatalf("batch metadata wrong: %+v", b)
+		}
+		if len(b.Calls) != 2 {
+			t.Fatalf("archived %d calls, want 2", len(b.Calls))
+		}
+	})
+
+	t.Run("stamps BlockNumber 0 and warns when the context carries no number", func(t *testing.T) {
+		var logBuf bytes.Buffer
+		rec := &recordingArchiver{}
+		gate := NewDrainGate(nil)
+		d := NewMulticaller(&stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}, rec, Config{
+			Source:  "oracle-price",
+			ChainID: 1,
+			BuildID: 47,
+			Gate:    gate,
+			Logger:  slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})),
+		})
+
+		res, err := d.ExecuteAtHash(context.Background(), []outbound.Call{{CallData: []byte{0x01}}}, common.HexToHash("0xabc"))
+		if err != nil {
+			t.Fatalf("ExecuteAtHash: %v", err)
+		}
+		if len(res) != 1 {
+			t.Fatalf("results = %d, want 1", len(res))
+		}
+		d.Close()
+
+		if len(rec.batches) != 1 {
+			t.Fatalf("archived %d batches, want 1", len(rec.batches))
+		}
+		if got := rec.batches[0].BlockNumber; got != 0 {
+			t.Fatalf("BlockNumber = %d, want 0 when no block number on context", got)
+		}
+		// A block-0 archive is always a bug (genesis holds no indexer read), so it
+		// must not pass silently; the warning is what surfaces a future regression.
+		if !strings.Contains(logBuf.String(), "no resolvable block number") {
+			t.Fatalf("expected a warning about the unresolvable block number, got logs: %q", logBuf.String())
+		}
+	})
+}
+
+// TestExecutePositionalBlockNumberWinsOverContext pins that the number-pinned
+// Execute path uses its positional argument even when the context also carries
+// a different block number: the context is only a fallback for the
+// argument-less ExecuteAtHash path, never an override of an explicit number.
+func TestExecutePositionalBlockNumberWinsOverContext(t *testing.T) {
+	rec := &recordingArchiver{}
+	gate := NewDrainGate(nil)
+	d := newTestDecorator(&stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}, rec, gate)
+
+	ctx := WithBlockNumber(context.Background(), 999)
+	if _, err := d.Execute(ctx, []outbound.Call{{CallData: []byte{0x01}}}, big.NewInt(10)); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	d.Close()
+
+	if len(rec.batches) != 1 {
+		t.Fatalf("archived %d batches, want 1", len(rec.batches))
+	}
+	if got := rec.batches[0].BlockNumber; got != 10 {
+		t.Fatalf("BlockNumber = %d, want 10 (positional arg must win over context)", got)
+	}
+}
+
 // TestExecuteSucceedsWhenArchiveErrors asserts the fire-and-forget guarantee:
 // a failing archiver never affects the results or error the caller sees, and
 // Close still drains cleanly.
 func TestExecuteSucceedsWhenArchiveErrors(t *testing.T) {
 	inner := &stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}
-	var wg sync.WaitGroup
-	d := newTestDecorator(inner, errArchiver{err: errors.New("s3 down")}, &wg)
+	gate := NewDrainGate(nil)
+	d := newTestDecorator(inner, errArchiver{err: errors.New("s3 down")}, gate)
 
 	res, err := d.Execute(context.Background(), []outbound.Call{{CallData: []byte{0x01}}}, big.NewInt(1))
 	if err != nil {
@@ -257,8 +383,8 @@ func TestExecuteSucceedsWhenArchiveErrors(t *testing.T) {
 // recovered rather than propagated (which would crash the process).
 func TestExecuteSurvivesArchivePanic(t *testing.T) {
 	inner := &stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}
-	var wg sync.WaitGroup
-	d := newTestDecorator(inner, panicArchiver{}, &wg)
+	gate := NewDrainGate(nil)
+	d := newTestDecorator(inner, panicArchiver{}, gate)
 
 	res, err := d.Execute(context.Background(), []outbound.Call{{CallData: []byte{0x01}}}, big.NewInt(1))
 	if err != nil {
@@ -291,12 +417,12 @@ func TestExecuteRecordsArchiveWriteStatus(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			inner := &stubInner{results: []outbound.Result{{Success: true}}}
 			arch := errArchiver{err: tc.archiveErr}
-			var wg sync.WaitGroup
+			gate := NewDrainGate(nil)
 			m := NewMulticaller(inner, arch, Config{
 				Source:        "test-source",
 				ChainID:       1,
 				Chain:         "mainnet",
-				Wait:          &wg,
+				Gate:          gate,
 				MeterProvider: mp,
 				Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 			})
@@ -323,12 +449,12 @@ func TestExecuteEmptyBatchSkipsMetric(t *testing.T) {
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
 
 	rec := &recordingArchiver{}
-	var wg sync.WaitGroup
+	gate := NewDrainGate(nil)
 	m := NewMulticaller(&stubInner{results: []outbound.Result{}}, rec, Config{
 		Source:        "test-source",
 		ChainID:       1,
 		Chain:         "mainnet",
-		Wait:          &wg,
+		Gate:          gate,
 		MeterProvider: mp,
 		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -357,12 +483,12 @@ func TestExecuteCountsOneBatchOnTruncation(t *testing.T) {
 
 	inner := &stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}
 	rec := &recordingArchiver{}
-	var wg sync.WaitGroup
+	gate := NewDrainGate(nil)
 	m := NewMulticaller(inner, rec, Config{
 		Source:        "test-source",
 		ChainID:       1,
 		Chain:         "mainnet",
-		Wait:          &wg,
+		Gate:          gate,
 		MeterProvider: mp,
 		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -411,8 +537,8 @@ func TestExecuteCompletesArchiveAfterCallerCancels(t *testing.T) {
 	}
 
 	inner := &stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}
-	var wg sync.WaitGroup
-	d := newTestDecorator(inner, arch, &wg)
+	gate := NewDrainGate(nil)
+	d := newTestDecorator(inner, arch, gate)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	if _, err := d.Execute(ctx, []outbound.Call{{CallData: []byte{0x01}}}, big.NewInt(1)); err != nil {
@@ -470,4 +596,41 @@ func counterValueForStatus(t *testing.T, reader sdkmetric.Reader, name, want str
 		}
 	}
 	return 0
+}
+
+// A handler its SQS loop abandoned still reaches Execute while the deferred
+// archive drain runs; the batch is dropped, so the drop must be visible.
+func TestExecuteRefusesAndCountsAWriteScheduledAfterTheDrainBegan(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+
+	rec := &recordingArchiver{}
+	gate := NewDrainGate(nil)
+	var logs bytes.Buffer
+	m := NewMulticaller(&stubInner{results: []outbound.Result{{Success: true}}}, rec, Config{
+		Source:        "test-source",
+		ChainID:       1,
+		Chain:         "mainnet",
+		Gate:          gate,
+		MeterProvider: mp,
+		Logger:        slog.New(slog.NewTextHandler(&logs, nil)),
+	})
+	gate.Drain(time.Minute)
+
+	calls := []outbound.Call{{Target: common.HexToAddress("0x01"), CallData: []byte{0xfe, 0xaf, 0x96, 0x8c}}}
+	if _, err := m.Execute(context.Background(), calls, big.NewInt(100)); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	gate.Wait()
+
+	if n := len(rec.batches); n != 0 {
+		t.Fatalf("archived %d batches after the drain began, want 0", n)
+	}
+	if got := counterValueForStatus(t, reader, "archive.writes.total", writeStatusAbandoned); got != 1 {
+		t.Errorf("archive.writes.total{status=%s} = %d, want 1", writeStatusAbandoned, got)
+	}
+	if !strings.Contains(logs.String(), "archive drain already began") {
+		t.Errorf("expected the dropped batch logged, got %q", logs.String())
+	}
 }

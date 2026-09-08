@@ -13,11 +13,15 @@ import (
 
 // CurvePoolRow is the data returned by LoadPools for each pool in the registry.
 type CurvePoolRow struct {
-	ID           int64
-	ProtocolID   int64
-	Address      common.Address
-	Kind         string // matches curve_pool.pool_kind
-	NCoins       int
+	ID         int64
+	ProtocolID int64
+	Address    common.Address
+	Kind       string // matches curve_pool.pool_kind
+	NCoins     int
+	// DeployBlock is the pool's on-chain deployment block (curve_pool.deploy_block,
+	// 0 when not yet backfilled), used to gate snapshot sweeps so a newly-registered
+	// pool isn't multicalled before it exists on chain.
+	DeployBlock  int64
 	CoinDecimals []int // index-aligned (ordered by coin_index)
 	// LpTokenAddress is the pool's LP/share token. For pre-NG pools this is a
 	// separate contract (totalSupply lives there, not on the pool); nil when the
@@ -77,8 +81,5 @@ type BlockWrites struct {
 // CurveRepository defines the interface for Curve DEX data persistence.
 type CurveRepository interface {
 	LoadPools(ctx context.Context, chainID int64) ([]CurvePoolRow, error)
-	// SaveBlock persists all of a block's curve rows in one pgx.Batch within tx and
-	// returns the number of state rows actually inserted (ON CONFLICT DO NOTHING means
-	// a redelivery returns 0), for the curve_state_rows_written_total metric.
-	SaveBlock(ctx context.Context, tx pgx.Tx, w BlockWrites) (stateRows int64, err error)
+	SaveBlock(ctx context.Context, tx pgx.Tx, w BlockWrites) (stateRows StateRowCounts, err error)
 }

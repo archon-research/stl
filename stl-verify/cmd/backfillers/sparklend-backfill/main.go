@@ -206,13 +206,18 @@ func run(args []string) error {
 		return fmt.Errorf("creating receipt token repository: %w", err)
 	}
 
+	debtTokenRepo, err := postgres.NewDebtTokenRepository(pool, logger)
+	if err != nil {
+		return fmt.Errorf("creating debt token repository: %w", err)
+	}
+
 	// Multicall client, optionally wrapped for raw SC call archiving (VEC-81).
 	// Off unless ARCHIVE_SC_CALLS=true.
 	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
 	if err != nil {
 		return fmt.Errorf("creating multicall client: %w", err)
 	}
-	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "sparklend-backfill")
+	archiveWrap, _, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "sparklend-backfill")
 	if err != nil {
 		return err
 	}
@@ -236,6 +241,7 @@ func run(args []string) error {
 		positionRepo,
 		eventRepo,
 		receiptTokenRepo,
+		debtTokenRepo,
 	)
 	if err != nil {
 		return fmt.Errorf("creating position tracker service: %w", err)

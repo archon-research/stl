@@ -99,7 +99,7 @@ func TestStart_ERC4626Oracle(t *testing.T) {
 	}
 
 	mc := newERC4626Multicaller(t, testutil.E18(1), big.NewInt(100_000_000))
-	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestProcessBlock_ERC4626Oracle(t *testing.T) {
 	cfg := validConfig()
 	cfg.PollInterval = 1 * time.Millisecond
 
-	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestProcessBlock_ERC4626Oracle(t *testing.T) {
 
 	event := outbound.BlockEvent{
 		ChainID: 1, BlockNumber: 22000000, Version: 1,
-		BlockHash: "0xfsusds1", BlockTimestamp: blockTimestamp,
+		BlockHash: "0x00000000000000000000000000000000000000000000000000c0ffee00000021", BlockTimestamp: blockTimestamp,
 	}
 	if err := svc.processBlock(context.Background(), event); err != nil {
 		t.Fatalf("processBlock: %v", err)
@@ -233,7 +233,7 @@ func TestProcessBlock_ERC4626Oracle_UnderlyingFeedDecimalsMismatch(t *testing.T)
 		},
 	}
 
-	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestProcessBlock_ERC4626Oracle_UnderlyingFeedDecimalsMismatch(t *testing.T)
 
 	event := outbound.BlockEvent{
 		ChainID: 1, BlockNumber: 22000000, Version: 1,
-		BlockHash: "0xfsusdsdecmismatch", BlockTimestamp: blockTimestamp,
+		BlockHash: "0x00000000000000000000000000000000000000000000000000c0ffee00000022", BlockTimestamp: blockTimestamp,
 	}
 	err = svc.processBlock(context.Background(), event)
 	if err == nil {
@@ -298,7 +298,7 @@ func TestProcessBlock_ERC4626Oracle_UnderlyingDecimalsMismatch(t *testing.T) {
 		},
 	}
 
-	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -313,7 +313,7 @@ func TestProcessBlock_ERC4626Oracle_UnderlyingDecimalsMismatch(t *testing.T) {
 
 	event := outbound.BlockEvent{
 		ChainID: 1, BlockNumber: 22000000, Version: 1,
-		BlockHash: "0xfsusdsulyingdec", BlockTimestamp: blockTimestamp,
+		BlockHash: "0x00000000000000000000000000000000000000000000000000c0ffee00000023", BlockTimestamp: blockTimestamp,
 	}
 	err = svc.processBlock(context.Background(), event)
 	if err == nil {
@@ -361,7 +361,7 @@ func TestProcessBlock_ERC4626Oracle_VaultFails(t *testing.T) {
 	cfg := validConfig()
 	cfg.PollInterval = 1 * time.Millisecond
 
-	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -377,7 +377,7 @@ func TestProcessBlock_ERC4626Oracle_VaultFails(t *testing.T) {
 
 	event := outbound.BlockEvent{
 		ChainID: 1, BlockNumber: 22000000, Version: 1,
-		BlockHash: "0xfsusdsfail", BlockTimestamp: blockTimestamp,
+		BlockHash: "0x00000000000000000000000000000000000000000000000000c0ffee00000024", BlockTimestamp: blockTimestamp,
 	}
 	err = svc.processBlock(context.Background(), event)
 	if err == nil {

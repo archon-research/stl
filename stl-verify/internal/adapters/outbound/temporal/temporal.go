@@ -1,4 +1,11 @@
-// Package temporal provides shared infrastructure for Temporal cronjob workers.
+// Package temporal provides shared infrastructure for Temporal workers.
+//
+// Two lifecycles are supported. Schedule-driven jobs use RunCronjob, which
+// creates a Temporal schedule and runs the generic cronjobWorkflow on it.
+// Hand-started jobs use RunWorker (see ondemand.go), which creates no schedule
+// and registers the caller's own workflow — with parameters, the shape a
+// backfill needs because its range comes from whoever starts the run, or without
+// any, via RegisterRunner, for a one-shot job that derives its own scope.
 //
 // To create a new cronjob, define a CronjobConfig and call RunCronjob.
 // Only Name, IntervalDefault, and Setup are required:
@@ -24,6 +31,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -47,6 +55,7 @@ type BuildMeta struct {
 
 // Dependencies are the shared resources available to every cronjob's Setup function.
 type Dependencies struct {
+	// Pool is nil for an on-demand worker that declared no WorkerConfig.OpenDatabase.
 	Pool   *pgxpool.Pool
 	Logger *slog.Logger
 }
@@ -68,12 +77,22 @@ type CronjobConfig struct {
 	// external rate limit do not all fire at the same wall-clock instant.
 	IntervalOffsetEnv string
 
+	// ActivityTimeouts overrides how long one tick may run (see the type). The
+	// zero value keeps the defaults every existing cronjob uses.
+	ActivityTimeouts ActivityTimeouts
+
 	// OpenDatabase opens a database connection pool. Required.
 	OpenDatabase func(ctx context.Context) (*pgxpool.Pool, error)
 
 	// Setup returns a Runner (or RunnerFunc) for the cronjob's business logic.
 	// It will be wrapped in Temporal activities automatically.
 	Setup func(ctx context.Context, deps Dependencies) (Runner, error)
+
+	// Progress, when set, is the heartbeat-details store the runner records
+	// through — the SAME instance Setup hands the runner, because the liveness
+	// heartbeat re-sends what it holds rather than erasing it with a bare ping.
+	// Leave nil for a cronjob with no resumable progress.
+	Progress ProgressHeartbeater
 }
 
 func (c CronjobConfig) validate() error {
@@ -99,53 +118,14 @@ func RunCronjob(ctx context.Context, meta BuildMeta, cfg CronjobConfig) error {
 	if err := cfg.validate(); err != nil {
 		return fmt.Errorf("validating cronjob config: %w", err)
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: env.ParseLogLevel(slog.LevelInfo),
-	}))
-	slog.SetDefault(logger)
 
-	logger.Info("starting "+cfg.Name+" worker",
-		"commit", meta.Commit,
-		"branch", meta.Branch,
-		"buildTime", meta.BuildTime,
-	)
-
-	// Without this, OTel instruments created from the global providers (e.g.
-	// the maple-graphql-indexer service telemetry) would silently be no-ops.
-	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    cfg.Name,
-		ServiceVersion: meta.Commit,
-		BuildTime:      meta.BuildTime,
-		Logger:         logger,
-	})
+	boot, err := newBootstrap(ctx, meta, cfg.Name, cfg.OpenDatabase)
 	if err != nil {
-		return fmt.Errorf("initializing telemetry: %w", err)
+		return err
 	}
-	defer shutdownOTEL(context.Background())
-	if env.Get("OTEL_EXPORTER_OTLP_ENDPOINT", "") == "" {
-		logger.Warn("OTEL_EXPORTER_OTLP_ENDPOINT is not set; metrics are NOT exported anywhere")
-	}
+	defer boot.close()
 
-	pool, err := cfg.OpenDatabase(ctx)
-	if err != nil {
-		return fmt.Errorf("connecting to database: %w", err)
-	}
-	defer pool.Close()
-
-	temporalClient, err := createClient()
-	if err != nil {
-		return fmt.Errorf("creating temporal client: %w", err)
-	}
-	defer temporalClient.Close()
-
-	if err := waitForServer(ctx, temporalClient, logger); err != nil {
-		return fmt.Errorf("waiting for Temporal: %w", err)
-	}
-
-	runner, err := cfg.Setup(ctx, Dependencies{
-		Pool:   pool,
-		Logger: logger,
-	})
+	runner, err := cfg.Setup(ctx, boot.dependencies())
 	if err != nil {
 		return fmt.Errorf("setting up %s: %w", cfg.Name, err)
 	}
@@ -155,28 +135,149 @@ func RunCronjob(ctx context.Context, meta BuildMeta, cfg CronjobConfig) error {
 		return fmt.Errorf("creating cronjob metrics: %w", err)
 	}
 
-	activities, err := newCronjobActivities(runner, metrics)
+	activities, err := newCronjobActivities(runner, metrics, cfg.ActivityTimeouts.Heartbeat, cfg.Progress)
 	if err != nil {
 		return fmt.Errorf("creating cronjob activities: %w", err)
 	}
 
 	taskQueue := cfg.Name
-	w := worker.New(temporalClient, taskQueue, worker.Options{})
+	w := worker.New(boot.client, taskQueue, worker.Options{})
 	w.RegisterWorkflow(cronjobWorkflow)
 	w.RegisterActivity(activities)
 
-	if err := ensureSchedule(ctx, temporalClient, logger, taskQueue, cfg); err != nil {
+	if err := ensureSchedule(ctx, boot.client, boot.logger, taskQueue, cfg); err != nil {
 		return fmt.Errorf("ensuring schedule: %w", err)
 	}
 
-	logger.Info("starting worker", "taskQueue", taskQueue)
+	boot.logger.Info("starting worker", "taskQueue", taskQueue)
 
 	if err := w.Run(interruptFromContext(ctx)); err != nil {
 		return fmt.Errorf("running worker: %w", err)
 	}
 
-	logger.Info("worker stopped")
+	boot.logger.Info("worker stopped")
 	return nil
+}
+
+// bootstrap is the infrastructure every Temporal worker in this package needs,
+// whether it is schedule-driven (RunCronjob) or on-demand (RunWorker).
+type bootstrap struct {
+	logger *slog.Logger
+	pool   *pgxpool.Pool
+	client client.Client
+
+	// opened holds one closer per acquired resource, in acquisition order. Both
+	// the failure path inside newBootstrap and close() unwind this same list, so
+	// a resource added later cannot be released in one path and leaked in the
+	// other.
+	opened []func()
+}
+
+// newBootstrap wires logging, global OTel providers, the app database and a live
+// Temporal client, in that order.
+//
+// The ordering is load-bearing: OTel providers must be installed BEFORE anything
+// else is constructed, because service telemetry creates its instruments from the
+// global providers at construction time and would otherwise bind to no-ops for
+// the process lifetime.
+func newBootstrap(
+	ctx context.Context,
+	meta BuildMeta,
+	name string,
+	openDatabase func(context.Context) (*pgxpool.Pool, error),
+) (*bootstrap, error) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: env.ParseLogLevel(slog.LevelInfo),
+	}))
+	slog.SetDefault(logger)
+
+	logger.Info("starting "+name+" worker",
+		"commit", meta.Commit,
+		"branch", meta.Branch,
+		"buildTime", meta.BuildTime,
+	)
+
+	// Unwinds whatever has been opened so far when a later step fails; without
+	// it an early failure would leak the pool or the OTel exporter goroutines.
+	var opened []func()
+	unwind := func() {
+		for _, v := range slices.Backward(opened) {
+			v()
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    name,
+		ServiceVersion: meta.Commit,
+		BuildTime:      meta.BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("initializing telemetry: %w", err)
+	}
+	// A fresh context, not ctx: by shutdown time the caller's ctx is normally
+	// already cancelled, which would abort the final metric flush.
+	opened = append(opened, func() { shutdownOTEL(context.Background()) })
+	if env.Get("OTEL_EXPORTER_OTLP_ENDPOINT", "") == "" {
+		logger.Warn("OTEL_EXPORTER_OTLP_ENDPOINT is not set; metrics are NOT exported anywhere")
+	}
+
+	pool, closePool, err := openPool(ctx, openDatabase)
+	if err != nil {
+		unwind()
+		return nil, fmt.Errorf("connecting to database: %w", err)
+	}
+	opened = append(opened, closePool)
+
+	temporalClient, err := createClient()
+	if err != nil {
+		unwind()
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, fmt.Errorf("creating temporal client: %w", err)
+	}
+	opened = append(opened, temporalClient.Close)
+
+	if err := waitForServer(ctx, temporalClient, logger); err != nil {
+		unwind()
+		return nil, fmt.Errorf("waiting for Temporal: %w", err)
+	}
+
+	return &bootstrap{
+		logger: logger,
+		pool:   pool,
+		client: temporalClient,
+		opened: opened,
+	}, nil
+}
+
+// openPool returns a no-op closer when no opener was declared, so the unwind
+// cannot dereference the nil pool it gets back.
+func openPool(ctx context.Context, openDatabase func(context.Context) (*pgxpool.Pool, error)) (*pgxpool.Pool, func(), error) {
+	if openDatabase == nil {
+		return nil, func() {}, nil
+	}
+	pool, err := openDatabase(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return pool, pool.Close, nil
+}
+
+func (b *bootstrap) dependencies() Dependencies {
+	return Dependencies{Pool: b.pool, Logger: b.logger}
+}
+
+// close releases everything newBootstrap opened, in reverse order.
+func (b *bootstrap) close() {
+	for _, v := range slices.Backward(b.opened) {
+		v()
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -221,11 +322,11 @@ func waitForServer(ctx context.Context, c client.Client, logger *slog.Logger) er
 	}
 }
 
-// buildScheduleSpec resolves the interval and optional offset for a cronjob into
-// a Temporal schedule spec. getenv is injected so the resolution is unit-testable.
-// A non-empty interval env overrides IntervalDefault; an empty or unset offset env
-// leaves the offset at zero (fire on the interval boundary).
-func buildScheduleSpec(cfg CronjobConfig, getenv func(string) string) (client.ScheduleSpec, error) {
+// buildScheduleInterval resolves the interval and optional offset for a cronjob.
+// getenv is injected so the resolution is unit-testable. A non-empty interval env
+// overrides IntervalDefault; an empty or unset offset env leaves the offset at
+// zero (fire on the interval boundary).
+func buildScheduleInterval(cfg CronjobConfig, getenv func(string) string) (client.ScheduleIntervalSpec, error) {
 	interval := cfg.IntervalDefault
 	intervalSource := "IntervalDefault"
 	if cfg.IntervalEnv != "" {
@@ -236,7 +337,7 @@ func buildScheduleSpec(cfg CronjobConfig, getenv func(string) string) (client.Sc
 	}
 	every, err := time.ParseDuration(interval)
 	if err != nil {
-		return client.ScheduleSpec{}, fmt.Errorf("parsing interval from %s (%q): %w", intervalSource, interval, err)
+		return client.ScheduleIntervalSpec{}, fmt.Errorf("parsing interval from %s (%q): %w", intervalSource, interval, err)
 	}
 
 	var offset time.Duration
@@ -244,21 +345,20 @@ func buildScheduleSpec(cfg CronjobConfig, getenv func(string) string) (client.Sc
 		if v := getenv(cfg.IntervalOffsetEnv); v != "" {
 			offset, err = time.ParseDuration(v)
 			if err != nil {
-				return client.ScheduleSpec{}, fmt.Errorf("parsing %s %q: %w", cfg.IntervalOffsetEnv, v, err)
+				return client.ScheduleIntervalSpec{}, fmt.Errorf("parsing %s %q: %w", cfg.IntervalOffsetEnv, v, err)
 			}
 		}
 	}
 
-	return client.ScheduleSpec{
-		Intervals: []client.ScheduleIntervalSpec{{Every: every, Offset: offset}},
-	}, nil
+	return client.ScheduleIntervalSpec{Every: every, Offset: offset}, nil
 }
 
 func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, taskQueue string, cfg CronjobConfig) error {
-	spec, err := buildScheduleSpec(cfg, os.Getenv)
+	interval, err := buildScheduleInterval(cfg, os.Getenv)
 	if err != nil {
 		return fmt.Errorf("building schedule spec for %q: %w", cfg.Name, err)
 	}
+	spec := client.ScheduleSpec{Intervals: []client.ScheduleIntervalSpec{interval}}
 
 	scheduleID := cfg.Name
 	workflowID := "scheduled-" + cfg.Name
@@ -274,10 +374,11 @@ func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, t
 			Workflow:  cronjobWorkflow,
 			ID:        workflowID,
 			TaskQueue: taskQueue,
+			Args:      []any{cfg.ActivityTimeouts},
 		},
 	})
 	if err == nil {
-		logger.Info("schedule created", "scheduleID", scheduleID, "spec", spec.Intervals[0])
+		logger.Info("schedule created", "scheduleID", scheduleID, "interval", interval.Every, "offset", interval.Offset)
 		return nil
 	}
 
@@ -291,7 +392,7 @@ func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, t
 		// worker: log it and start against the existing schedule. The offset is
 		// best-effort defence in depth; the semantic skip fix is what actually
 		// stops the alert noise, and the next successful startup reconciles again.
-		if reconcileErr := reconcileScheduleSpec(ctx, c, logger, scheduleID, spec); reconcileErr != nil {
+		if reconcileErr := reconcileScheduleSpec(ctx, c, logger, scheduleID, interval); reconcileErr != nil {
 			logger.Warn("schedule reconcile failed; starting with the existing schedule",
 				"scheduleID", scheduleID, "error", reconcileErr)
 		}
@@ -302,17 +403,18 @@ func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, t
 
 // reconcileScheduleSpec updates an existing schedule's spec in place. The action
 // (workflow + task queue) is left untouched; only the timing spec is reconciled.
-func reconcileScheduleSpec(ctx context.Context, c client.Client, logger *slog.Logger, scheduleID string, want client.ScheduleSpec) error {
+func reconcileScheduleSpec(ctx context.Context, c client.Client, logger *slog.Logger, scheduleID string, want client.ScheduleIntervalSpec) error {
 	handle := c.ScheduleClient().GetHandle(ctx, scheduleID)
+	spec := client.ScheduleSpec{Intervals: []client.ScheduleIntervalSpec{want}}
 	err := handle.Update(ctx, client.ScheduleUpdateOptions{
 		DoUpdate: func(in client.ScheduleUpdateInput) (*client.ScheduleUpdate, error) {
-			return applyScheduleSpecUpdate(in, want), nil
+			return applyScheduleSpecUpdate(in, spec), nil
 		},
 	})
 	if err != nil {
 		return fmt.Errorf("reconciling schedule %q: %w", scheduleID, err)
 	}
-	logger.Info("schedule reconciled", "scheduleID", scheduleID, "spec", want.Intervals[0])
+	logger.Info("schedule reconciled", "scheduleID", scheduleID, "interval", want.Every, "offset", want.Offset)
 	return nil
 }
 

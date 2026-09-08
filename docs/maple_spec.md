@@ -305,6 +305,30 @@ There are two ways to query collateral data:
 
 ---
 
+#### Collateral Data Provenance & Trust Boundary
+
+**⚠️ Collateral data is Maple-attested, not independently verifiable on-chain.** When consuming collateral for backing analysis, treat the Maple GraphQL API as the source of truth. This is a deliberate, accepted trust boundary — understand why before relying on the numbers.
+
+**The GraphQL API returns no collateral contract address.** `collateral` exposes only `asset` (a bare symbol string, e.g. `"BTC"`, `"cbBTC"`), `assetAmount`, `assetValueUsd`, `decimals`, `state`, `custodian`, `liquidationLevel` — see the [Individual Loans query](#individual-loans). There is no token/contract address to resolve the collateral to an on-chain asset, and no `assetId`.
+
+**Observed collateral `asset` symbols (live, Syrup pools, 2026-06):** `BTC`, `ETH`, `PYUSD`, `USDC`, `USDT`, `USTB`, `XRP`, `cbBTC`. This is a **mix** of native off-chain assets (`BTC`, `XRP`) and assets that happen to have an Ethereum token (`USDC`, `USDT`, `PYUSD`, `cbBTC`, `USTB`, `ETH`/`WETH`) — but **all** arrive as bare symbols, none with an address.
+
+**Why on-chain verification is not possible:**
+1. **Off-chain custodial collateral.** Much collateral is held off-chain by custodians (`custodian` field, e.g. `FORDEFI`, `ANCHORAGE`; see [Collateral Types](#yield-sources) — `BTC`, `SOL`, `XRP` via custody arrangements). Native BTC/XRP have no Ethereum representation, so there is no on-chain state to read. Unverifiable by nature.
+2. **No address to verify against.** Even for collateral that *is* an EVM token, the API returns no contract address, and Maple tracks the collateral position off-chain by custodian rather than as a readable on-chain balance in the loan contract. Inferring a contract from the symbol would mean inventing data (symbols are not unique or authoritative).
+3. **Valuation is Maple-attested too.** `assetValueUsd` is Maple's own per-unit USD price (8 decimals; multiply by `assetAmount`), **not** sourced from an independent oracle. So both the **amount** and the **USD valuation** of collateral are Maple-supplied.
+
+**This is not a new trust boundary.** The entire Maple integration already trusts the GraphQL API — `principalOwed`, `acmRatio`, pool `tvl`/`assets`/`principalOut`/`collateralValue`, and APYs are all Maple-sourced (the indexer reads GraphQL, never the chain, for these). Collateral provenance is consistent with that. Note that "verify against the live API during development" (top-of-doc note) refers to **schema/encoding** drift, not value attestation.
+
+**Integrity cross-checks available without on-chain reads:**
+- **`poolV2.collateralValue`** is Maple's own aggregate of external-loan collateral USD ([Pool Collateral](#pool-collateral), [PoolData query](#tvl-total-value-locked)). Comparing a per-loan sum of `collateral.assetValueUsd × assetAmount` (external loans only) against `collateralValue` catches aggregation bugs and internal inconsistencies in Maple's own figures.
+- **`acmRatio`** per loan (Collateral Value / Principal Owed) is a per-loan collateralization sanity signal.
+- The real integrity trap is the internal-loan **placeholder collateral** (see the [`loanMeta` warning](#individual-loans)) — neutralised by excluding `is_internal` loans from any backing aggregation, not by on-chain verification.
+
+**Downstream consumers** (e.g. backed-breakdown surfaced in the API/UI) should label collateral provenance explicitly, e.g. "Source: Maple Finance GraphQL API — collateral amounts and USD values attested by Maple/custodians; not independently verified on-chain."
+
+---
+
 #### Pool Collateral
 
 **⚠️ LIMITATION:**

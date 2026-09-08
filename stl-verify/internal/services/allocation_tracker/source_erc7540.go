@@ -58,27 +58,20 @@ func NewERC7540Source(multicaller outbound.Multicaller, logger *slog.Logger) (*E
 
 func (s *ERC7540Source) Name() string { return "erc7540" }
 
-// Supports claims token_type=centrifuge: those entries point at ERC-7540
-// vaults. NOTE: BalanceOfSource currently also claims this type — this source
-// stays unregistered until the axis-synome data moves the centrifuge entries
-// from share-token to vault addresses; the registration and the BalanceOfSource
-// removal must land together with that bump (VEC-337 part 2).
+// Supports claims token_type=centrifuge: as of axis-synome 0.2.0 those entries
+// point at ERC-7540 vault addresses, which this source resolves to their share()
+// token. BalanceOfSource no longer claims centrifuge (VEC-337 part 2).
 func (s *ERC7540Source) Supports(tokenType string, protocol string) bool {
 	return tokenType == "centrifuge"
 }
 
-func (s *ERC7540Source) FetchBalances(ctx context.Context, entries []*TokenEntry, blockNumber int64) (*FetchResult, error) {
+func (s *ERC7540Source) FetchBalances(ctx context.Context, entries []*TokenEntry, blockHash common.Hash) (*FetchResult, error) {
 	result := NewFetchResult()
 	if len(entries) == 0 {
 		return result, nil
 	}
 
-	var block *big.Int
-	if blockNumber > 0 {
-		block = big.NewInt(blockNumber)
-	}
-
-	shareTokens, err := s.resolveShares(ctx, entries, block)
+	shareTokens, err := s.resolveShares(ctx, entries, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("resolve vault shares: %w", err)
 	}
@@ -87,20 +80,22 @@ func (s *ERC7540Source) FetchBalances(ctx context.Context, entries []*TokenEntry
 		return nil, err
 	}
 
-	balances, err := s.fetchShareBalances(ctx, entries, shareTokens, block)
+	balances, err := s.fetchShareBalances(ctx, entries, shareTokens, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("fetch share balances: %w", err)
 	}
 
 	for _, e := range entries {
 		bal := balances[e.Key()]
+		share := shareTokens[e.ContractAddress]
 		s.logger.Debug("erc7540 position",
 			"vault", e.ContractAddress.Hex(),
-			"share", shareTokens[e.ContractAddress].Hex(),
+			"share", share.Hex(),
 			"shares", bal.String())
 		result.Balances[e.Key()] = &PositionBalance{
 			Balance:       new(big.Int).Set(bal),
 			ScaledBalance: new(big.Int).Set(bal),
+			ShareToken:    &share,
 		}
 	}
 
@@ -110,7 +105,7 @@ func (s *ERC7540Source) FetchBalances(ctx context.Context, entries []*TokenEntry
 // resolveShares calls share() once per unique vault address and returns the
 // vault → share token mapping. Any failed or undecodable call is a hard error:
 // an entry routed here whose contract has no share() is misconfigured.
-func (s *ERC7540Source) resolveShares(ctx context.Context, entries []*TokenEntry, block *big.Int) (map[common.Address]common.Address, error) {
+func (s *ERC7540Source) resolveShares(ctx context.Context, entries []*TokenEntry, blockHash common.Hash) (map[common.Address]common.Address, error) {
 	data, err := s.vaultABI.Pack("share")
 	if err != nil {
 		return nil, fmt.Errorf("pack share: %w", err)
@@ -131,7 +126,7 @@ func (s *ERC7540Source) resolveShares(ctx context.Context, entries []*TokenEntry
 		calls[i] = outbound.Call{Target: vault, AllowFailure: true, CallData: data}
 	}
 
-	mc, err := s.multicaller.Execute(ctx, calls, block)
+	mc, err := s.multicaller.ExecuteAtHash(ctx, calls, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("share multicall: %w", err)
 	}
@@ -139,7 +134,24 @@ func (s *ERC7540Source) resolveShares(ctx context.Context, entries []*TokenEntry
 	shares := make(map[common.Address]common.Address, len(vaults))
 	var failures []string
 	for i, vault := range vaults {
-		if i >= len(mc) || !mc[i].Success || len(mc[i].ReturnData) == 0 {
+		if i >= len(mc) {
+			failures = append(failures, vault.Hex())
+			continue
+		}
+		// A clean revert (the call executed and reverted) means the contract has
+		// no share() method: the address is itself the ERC-20 share token, not an
+		// ERC-7540 vault. The axis-synome 0.2.0 centrifuge migration is mixed —
+		// grove's entries are vaults, Spark's JTRSY stayed a direct share — and
+		// the entries are otherwise indistinguishable, so we detect the shape here
+		// rather than route on it. A genuinely dead address still fails hard at the
+		// balanceOf step below. Transport errors and malformed responses (short
+		// slice, empty/undecodable data, zero address) are NOT this case and stay
+		// hard failures.
+		if !mc[i].Success {
+			shares[vault] = vault
+			continue
+		}
+		if len(mc[i].ReturnData) == 0 {
 			failures = append(failures, vault.Hex())
 			continue
 		}
@@ -156,7 +168,7 @@ func (s *ERC7540Source) resolveShares(ctx context.Context, entries []*TokenEntry
 		shares[vault] = addr
 	}
 	if len(failures) > 0 {
-		return nil, fmt.Errorf("erc7540 share() call failures (not ERC-7540 vaults?): %s", strings.Join(failures, ", "))
+		return nil, fmt.Errorf("erc7540 share() resolution failures: %s", strings.Join(failures, ", "))
 	}
 
 	return shares, nil
@@ -182,7 +194,7 @@ func (s *ERC7540Source) checkDuplicateShares(entries []*TokenEntry, shareTokens 
 
 // fetchShareBalances reads share.balanceOf(wallet) for every entry, keyed by
 // the entry's own key (vault + wallet).
-func (s *ERC7540Source) fetchShareBalances(ctx context.Context, entries []*TokenEntry, shareTokens map[common.Address]common.Address, block *big.Int) (map[EntryKey]*big.Int, error) {
+func (s *ERC7540Source) fetchShareBalances(ctx context.Context, entries []*TokenEntry, shareTokens map[common.Address]common.Address, blockHash common.Hash) (map[EntryKey]*big.Int, error) {
 	calls := make([]outbound.Call, len(entries))
 	for i, e := range entries {
 		data, err := s.vaultABI.Pack("balanceOf", e.WalletAddress)
@@ -192,7 +204,7 @@ func (s *ERC7540Source) fetchShareBalances(ctx context.Context, entries []*Token
 		calls[i] = outbound.Call{Target: shareTokens[e.ContractAddress], AllowFailure: true, CallData: data}
 	}
 
-	mc, err := s.multicaller.Execute(ctx, calls, block)
+	mc, err := s.multicaller.ExecuteAtHash(ctx, calls, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("balanceOf multicall: %w", err)
 	}

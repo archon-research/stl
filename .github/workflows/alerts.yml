@@ -37,21 +37,21 @@ jobs:
       id-token: write       # AWS OIDC assume
       pull-requests: write  # diff comment upsert
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
       - name: Check out internal actions
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: archon-research/github-actions
-          ref: 532cad6ab3c982201364fa4526103b54696fb1eb  # github-actions PR #17 merge SHA
+          ref: e95614e79659587be249fbbc9fd22d5dabe884ed  # github-actions PR #43 merge SHA
           ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
           path: .github-actions
           persist-credentials: false
 
       - name: Configure AWS credentials (staging)
-        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b  # v6.2.1
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c  # v6.2.4
         with:
           role-to-assume: arn:aws:iam::579039992622:role/archonstaging-github-actions-mimir-rules
           aws-region: eu-west-1
@@ -67,7 +67,7 @@ jobs:
         uses: ./.github-actions/mimir-rules-sync
         with:
           team: vector
-          namespaces-regex: '^vector-(watcher|backup-worker|indexers|psm3|postgres|cronjobs)$'
+          namespaces-regex: '^vector-(watcher|backup-worker|indexers|psm3|cronjobs|database)$'
           rules-dir: alerts
           mimir-address: ${{ env.GC_MIMIR_ADDRESS }}
           mimir-tenant-id: ${{ env.GC_MIMIR_TENANT_ID }}
@@ -106,21 +106,21 @@ jobs:
       id-token: write       # AWS OIDC assume
       pull-requests: write  # diff comment upsert
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
       - name: Check out internal actions
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: archon-research/github-actions
-          ref: 532cad6ab3c982201364fa4526103b54696fb1eb  # github-actions PR #17 merge SHA
+          ref: e95614e79659587be249fbbc9fd22d5dabe884ed  # github-actions PR #43 merge SHA
           ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
           path: .github-actions
           persist-credentials: false
 
       - name: Configure AWS credentials (prod)
-        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b  # v6.2.1
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c  # v6.2.4
         with:
           role-to-assume: arn:aws:iam::030797368798:role/archonprod-github-actions-mimir-rules
           aws-region: eu-west-1
@@ -136,7 +136,7 @@ jobs:
         uses: ./.github-actions/mimir-rules-sync
         with:
           team: vector
-          namespaces-regex: '^vector-(watcher|backup-worker|indexers|psm3|postgres|cronjobs)$'
+          namespaces-regex: '^vector-(watcher|backup-worker|indexers|psm3|cronjobs|database)$'
           rules-dir: alerts
           mimir-address: ${{ env.GC_MIMIR_ADDRESS }}
           mimir-tenant-id: ${{ env.GC_MIMIR_TENANT_ID }}

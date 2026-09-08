@@ -1,0 +1,9 @@
+{
+  "extends": "@archon-research/tsconfig/node",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM"],
+    "types": ["node"],
+    "preserveSymlinks": true
+  },
+  "include": ["src", "scripts", "oxlint.config.ts", ".oxfmtrc.ts"]
+}

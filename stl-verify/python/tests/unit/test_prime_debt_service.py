@@ -7,6 +7,7 @@ from app.domain.entities.prime_debt import PrimeDebtSnapshot
 from app.services.prime_debt_service import PrimeDebtService
 
 _VALID_ADDR = EthAddress("0x" + "ab" * 20)
+_PRIME_ID = 7
 
 
 def _snapshot() -> PrimeDebtSnapshot:
@@ -25,15 +26,15 @@ def _snapshot() -> PrimeDebtSnapshot:
 
 
 @pytest.mark.asyncio
-async def test_prime_exists_delegates_to_repository() -> None:
+async def test_resolve_prime_id_delegates_to_repository() -> None:
     repo = AsyncMock()
-    repo.prime_exists.return_value = True
+    repo.resolve_prime_id.return_value = _PRIME_ID
     service = PrimeDebtService(repo)
 
-    result = await service.prime_exists(_VALID_ADDR)
+    result = await service.resolve_prime_id(_VALID_ADDR)
 
-    assert result is True
-    repo.prime_exists.assert_awaited_once_with(_VALID_ADDR)
+    assert result == _PRIME_ID
+    repo.resolve_prime_id.assert_awaited_once_with(_VALID_ADDR)
 
 
 @pytest.mark.asyncio
@@ -43,11 +44,11 @@ async def test_list_debt_snapshots_delegates_with_limit() -> None:
     repo.list_debt_snapshots.return_value = [snap]
     service = PrimeDebtService(repo)
 
-    result = await service.list_debt_snapshots(_VALID_ADDR, limit=25)
+    result = await service.list_debt_snapshots(_PRIME_ID, limit=25)
 
     assert result == [snap]
     repo.list_debt_snapshots.assert_awaited_once_with(
-        _VALID_ADDR,
+        _PRIME_ID,
         from_timestamp=None,
         to_timestamp=None,
         limit=25,
@@ -60,7 +61,7 @@ async def test_list_debt_snapshots_returns_empty_list() -> None:
     repo.list_debt_snapshots.return_value = []
     service = PrimeDebtService(repo)
 
-    result = await service.list_debt_snapshots(_VALID_ADDR)
+    result = await service.list_debt_snapshots(_PRIME_ID)
 
     assert result == []
 
@@ -76,7 +77,7 @@ async def test_list_debt_buckets_delegates_to_repository() -> None:
     to_ts = datetime(2026, 1, 2, tzinfo=UTC)
 
     result = await service.list_debt_buckets(
-        _VALID_ADDR,
+        _PRIME_ID,
         from_timestamp=from_ts,
         to_timestamp=to_ts,
         bucket_seconds=300.0,
@@ -85,7 +86,7 @@ async def test_list_debt_buckets_delegates_to_repository() -> None:
 
     assert result == []
     repo.list_debt_buckets.assert_awaited_once_with(
-        _VALID_ADDR,
+        _PRIME_ID,
         from_timestamp=from_ts,
         to_timestamp=to_ts,
         bucket_seconds=300.0,
@@ -94,10 +95,38 @@ async def test_list_debt_buckets_delegates_to_repository() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prime_exists_propagates_repository_error() -> None:
+async def test_list_reference_debt_buckets_delegates_to_repository() -> None:
+    from datetime import UTC, datetime
+
     repo = AsyncMock()
-    repo.prime_exists.side_effect = ValueError("db failure")
+    repo.list_reference_debt_buckets.return_value = []
+    service = PrimeDebtService(repo)
+    from_ts = datetime(2026, 1, 1, tzinfo=UTC)
+    to_ts = datetime(2026, 1, 2, tzinfo=UTC)
+
+    result = await service.list_reference_debt_buckets(
+        _PRIME_ID,
+        from_timestamp=from_ts,
+        to_timestamp=to_ts,
+        bucket_seconds=300.0,
+        limit=10,
+    )
+
+    assert result == []
+    repo.list_reference_debt_buckets.assert_awaited_once_with(
+        _PRIME_ID,
+        from_timestamp=from_ts,
+        to_timestamp=to_ts,
+        bucket_seconds=300.0,
+        limit=10,
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_prime_id_propagates_repository_error() -> None:
+    repo = AsyncMock()
+    repo.resolve_prime_id.side_effect = ValueError("db failure")
     service = PrimeDebtService(repo)
 
     with pytest.raises(ValueError, match="db failure"):
-        await service.prime_exists(_VALID_ADDR)
+        await service.resolve_prime_id(_VALID_ADDR)

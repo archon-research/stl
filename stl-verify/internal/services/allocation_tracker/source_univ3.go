@@ -21,7 +21,7 @@ type UniV3Source struct {
 
 // NewUniV3Source creates a new UniV3Source backed by a uniswapv3.Reader.
 func NewUniV3Source(multicaller outbound.Multicaller, logger *slog.Logger) (*UniV3Source, error) {
-	mgr, err := uniswapv3.NewReader(multicaller, logger)
+	mgr, err := uniswapv3.NewReader(multicaller)
 	if err != nil {
 		return nil, fmt.Errorf("create uniswapv3 reader: %w", err)
 	}
@@ -40,19 +40,21 @@ func (s *UniV3Source) Supports(tokenType, protocol string) bool {
 	return tokenType == "uni_v3_pool" || tokenType == "uni_v3_lp"
 }
 
-// FetchBalances reads Uniswap V3 NFT positions for all entries and computes
-// underlying token amounts.
+// FetchBalances reads Uniswap V3 NFT positions for all entries and values
+// each position fully (both sides) in the entry's hint asset.
 func (s *UniV3Source) FetchBalances(
 	ctx context.Context,
 	entries []*TokenEntry,
-	blockNumber int64,
+	blockHash common.Hash,
 ) (*FetchResult, error) {
 	result := NewFetchResult()
 	if len(entries) == 0 {
 		return result, nil
 	}
 
-	block := big.NewInt(blockNumber)
+	if err := validateUniV3Entries(entries); err != nil {
+		return nil, err
+	}
 
 	// Group entries by chain to use the correct NonfungiblePositionManager.
 	byChain := make(map[string][]*TokenEntry)
@@ -63,11 +65,15 @@ func (s *UniV3Source) FetchBalances(
 	for chain, chainEntries := range byChain {
 		nftManager, ok := uniswapv3.PositionManagers[chain]
 		if !ok {
-			s.logger.Warn("no NonfungiblePositionManager address for chain", "chain", chain)
-			continue
+			// Config error of the same class as a missing hint asset: skipping
+			// would silently drop the chain's positions on every block.
+			return nil, fmt.Errorf(
+				"no NonfungiblePositionManager registered for chain %s (%d uni_v3 entries)",
+				chain, len(chainEntries),
+			)
 		}
 
-		if err := s.fetchChainBalances(ctx, chainEntries, nftManager, block, result.Balances); err != nil {
+		if err := s.fetchChainBalances(ctx, chainEntries, nftManager, blockHash, result.Balances); err != nil {
 			return nil, fmt.Errorf("fetch V3 balances for chain %s: %w", chain, err)
 		}
 	}
@@ -75,122 +81,201 @@ func (s *UniV3Source) FetchBalances(
 	return result, nil
 }
 
+// validateUniV3Entries rejects entries with no hint asset up front: without
+// one the position value has no denomination, and adding raw amount0 and
+// amount1 across different tokens would be meaningless. A misconfigured entry
+// fails the fetch immediately rather than only once a position appears.
+func validateUniV3Entries(entries []*TokenEntry) error {
+	for _, e := range entries {
+		if e.AssetAddress == nil {
+			return fmt.Errorf(
+				"uni_v3 entry %s/%s has no asset address to denominate the position value in",
+				e.ContractAddress.Hex(), e.WalletAddress.Hex(),
+			)
+		}
+	}
+	return nil
+}
+
 // fetchChainBalances handles all entries for a single chain.
 func (s *UniV3Source) fetchChainBalances(
 	ctx context.Context,
 	entries []*TokenEntry,
 	nftManager common.Address,
-	block *big.Int,
+	blockHash common.Hash,
 	result map[EntryKey]*PositionBalance,
 ) error {
-	// Deduplicate wallets — multiple entries may share the same proxy.
-	walletSet := make(map[common.Address]bool)
-	for _, e := range entries {
-		walletSet[e.WalletAddress] = true
-	}
-
-	wallets := make([]common.Address, 0, len(walletSet))
-	for w := range walletSet {
-		wallets = append(wallets, w)
-	}
-
 	// Get all NFT positions for these wallets via the reader.
-	walletPositions, err := s.reader.GetPositions(ctx, wallets, nftManager, block)
+	walletPositions, err := s.reader.GetPositions(ctx, uniqueWallets(entries), nftManager, blockHash)
 	if err != nil {
 		return fmt.Errorf("get positions: %w", err)
 	}
 
-	// Collect unique pools and get their current state.
-	poolSet := make(map[common.Address]bool)
-	for _, e := range entries {
-		poolSet[e.ContractAddress] = true
-	}
-
-	pools := make([]common.Address, 0, len(poolSet))
-	for p := range poolSet {
-		pools = append(pools, p)
-	}
-
-	poolStates, err := s.reader.GetPoolStates(ctx, pools, block)
+	poolStates, err := s.reader.GetPoolStates(ctx, uniquePools(entries), blockHash)
 	if err != nil {
 		return fmt.Errorf("get pool states: %w", err)
 	}
 
-	// Compute balances for each entry.
 	for _, entry := range entries {
-		positions, ok := walletPositions[entry.WalletAddress]
-		if !ok || len(positions) == 0 {
-			continue
+		balance, err := s.computeEntryBalance(entry, walletPositions, poolStates)
+		if err != nil {
+			return err
 		}
-
-		state, ok := poolStates[entry.ContractAddress]
-		if !ok {
-			s.logger.Warn("missing pool state", "pool", entry.ContractAddress.Hex())
-			continue
-		}
-
-		var totalAmount0, totalAmount1 big.Int
-		matched := false
-
-		for _, pos := range positions {
-			// Match position to this pool by token0/token1 pair.
-			if pos.Token0 != state.Token0 || pos.Token1 != state.Token1 {
-				continue
-			}
-
-			if pos.Liquidity.Sign() == 0 {
-				continue
-			}
-
-			matched = true
-			amounts := uniswapv3.ComputePositionAmounts(
-				state.SqrtPriceX96,
-				pos.TickLower,
-				pos.TickUpper,
-				pos.Liquidity,
-			)
-
-			totalAmount0.Add(&totalAmount0, amounts.Amount0)
-			totalAmount1.Add(&totalAmount1, amounts.Amount1)
-
-			s.logger.Debug("computed V3 position amounts",
-				"tokenId", pos.TokenID,
-				"wallet", entry.WalletAddress.Hex(),
-				"pool", entry.ContractAddress.Hex(),
-				"liquidity", pos.Liquidity,
-				"amount0", amounts.Amount0,
-				"amount1", amounts.Amount1,
-			)
-		}
-
-		if !matched {
-			continue
-		}
-
-		// Determine balance in terms of the asset address.
-		// If asset matches token0, use amount0. If token1, use amount1.
-		// If no asset specified or neither matches, sum both (valid for stablecoin pairs).
-		var balance *big.Int
-		if entry.AssetAddress != nil {
-			if *entry.AssetAddress == state.Token0 {
-				balance = new(big.Int).Set(&totalAmount0)
-			} else if *entry.AssetAddress == state.Token1 {
-				balance = new(big.Int).Set(&totalAmount1)
-			} else {
-				balance = new(big.Int).Add(&totalAmount0, &totalAmount1)
-			}
-		} else {
-			balance = new(big.Int).Add(&totalAmount0, &totalAmount1)
-		}
-
-		// ScaledBalance holds the total of both tokens (full position value).
-		scaled := new(big.Int).Add(new(big.Int).Set(&totalAmount0), new(big.Int).Set(&totalAmount1))
-
-		result[entry.Key()] = &PositionBalance{
-			Balance:       balance,
-			ScaledBalance: scaled,
-		}
+		result[entry.Key()] = balance
 	}
 
 	return nil
+}
+
+// uniqueWallets deduplicates entry wallets — multiple entries may share the
+// same proxy.
+func uniqueWallets(entries []*TokenEntry) []common.Address {
+	seen := make(map[common.Address]bool, len(entries))
+	wallets := make([]common.Address, 0, len(entries))
+	for _, e := range entries {
+		if !seen[e.WalletAddress] {
+			seen[e.WalletAddress] = true
+			wallets = append(wallets, e.WalletAddress)
+		}
+	}
+	return wallets
+}
+
+// uniquePools deduplicates entry pool contracts.
+func uniquePools(entries []*TokenEntry) []common.Address {
+	seen := make(map[common.Address]bool, len(entries))
+	pools := make([]common.Address, 0, len(entries))
+	for _, e := range entries {
+		if !seen[e.ContractAddress] {
+			seen[e.ContractAddress] = true
+			pools = append(pools, e.ContractAddress)
+		}
+	}
+	return pools
+}
+
+// computeEntryBalance values one entry's matched V3 positions fully in the
+// entry's hint asset. An empty match (no live matching position: exited,
+// burned, transferred, never opened, or only other pairs/fee tiers) still
+// yields an explicit zero row, like the curve/erc4626 sources: the API's
+// latest-row read has no freshness cutoff, so skipping the entry would freeze
+// the last positive row as current exposure forever. Only a genuinely
+// unreadable pool state is an error (block retried).
+func (s *UniV3Source) computeEntryBalance(
+	entry *TokenEntry,
+	walletPositions map[common.Address][]uniswapv3.Position,
+	poolStates map[common.Address]*uniswapv3.PoolState,
+) (*PositionBalance, error) {
+	// The reader fails loudly on any pool sub-call failure, so an absent state
+	// here is an internal invariant break, never a structural absence.
+	state, ok := poolStates[entry.ContractAddress]
+	if !ok {
+		return nil, fmt.Errorf(
+			"pool state missing for %s despite a successful pool state read (entry wallet %s)",
+			entry.ContractAddress.Hex(), entry.WalletAddress.Hex(),
+		)
+	}
+
+	total := s.sumMatchedPositionAmounts(entry, walletPositions[entry.WalletAddress], state)
+	value, err := valueInHintAsset(entry, state, total)
+	if err != nil {
+		return nil, err
+	}
+
+	token0, token1 := state.Token0, state.Token1
+	return &PositionBalance{
+		Balance: value,
+		// ScaledBalance stays nil: a V3 position has no share count in the
+		// hint asset's decimals, and a raw amount0+amount1 sum mixes units.
+		UnderlyingValue: new(big.Int).Set(value),
+		PoolToken0:      &token0,
+		PoolToken1:      &token1,
+	}, nil
+}
+
+// sumMatchedPositionAmounts totals (amount0, amount1) over the wallet's live
+// positions in the entry's pool; no matching position leaves the total at
+// zero, which flows through valuation as the explicit zero row.
+func (s *UniV3Source) sumMatchedPositionAmounts(
+	entry *TokenEntry,
+	positions []uniswapv3.Position,
+	state *uniswapv3.PoolState,
+) uniswapv3.PositionAmounts {
+	total := uniswapv3.PositionAmounts{Amount0: new(big.Int), Amount1: new(big.Int)}
+
+	for _, pos := range positions {
+		// Match position to this pool by its full identity (token0, token1,
+		// fee): several live pools share a pair across fee tiers (e.g.
+		// AUSD/USDC at 0.01% and 0.05%), so a pair-only match would sum the
+		// other tiers' NFTs into this entry and double-count exposure.
+		if pos.Token0 != state.Token0 || pos.Token1 != state.Token1 || pos.Fee.Cmp(state.Fee) != 0 {
+			continue
+		}
+
+		if pos.Liquidity.Sign() == 0 {
+			continue
+		}
+
+		amounts := uniswapv3.ComputePositionAmounts(
+			state.SqrtPriceX96,
+			pos.TickLower,
+			pos.TickUpper,
+			pos.Liquidity,
+		)
+
+		total.Amount0.Add(total.Amount0, amounts.Amount0)
+		total.Amount1.Add(total.Amount1, amounts.Amount1)
+
+		s.logger.Debug("computed V3 position amounts",
+			"tokenId", pos.TokenID,
+			"wallet", entry.WalletAddress.Hex(),
+			"pool", entry.ContractAddress.Hex(),
+			"liquidity", pos.Liquidity,
+			"amount0", amounts.Amount0,
+			"amount1", amounts.Amount1,
+		)
+	}
+
+	return total
+}
+
+// valueInHintAsset converts the summed position amounts into the entry's hint
+// asset at the pool's own spot price (the sqrtPriceX96 read in the same
+// hash-pinned multicall that produced the amounts).
+//
+// Pool spot, not an oracle price, is deliberate: the ingest layer records
+// what happened on-chain and has no price-table access; the USD conversion
+// happens in the API as underlying_value x the hint asset's oracle price. The
+// position amounts themselves are already derived from the same sqrtPriceX96,
+// so valuing with it adds no new trust assumption.
+//
+// The value covers principal (liquidity) only: uncollected fees are excluded
+// because tokensOwed0/1 only reflect fees at the last poke, and computing
+// live accruals needs feeGrowthInside state the reader does not fetch.
+func valueInHintAsset(
+	entry *TokenEntry,
+	state *uniswapv3.PoolState,
+	total uniswapv3.PositionAmounts,
+) (*big.Int, error) {
+	var value *big.Int
+	var err error
+	switch *entry.AssetAddress {
+	case state.Token0:
+		value, err = total.ValueInToken0(state.SqrtPriceX96)
+	case state.Token1:
+		value, err = total.ValueInToken1(state.SqrtPriceX96)
+	default:
+		return nil, fmt.Errorf(
+			"uni_v3 hint asset %s matches neither side of pool %s (token0=%s, token1=%s); cannot denominate the position value",
+			entry.AssetAddress.Hex(), entry.ContractAddress.Hex(),
+			state.Token0.Hex(), state.Token1.Hex(),
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf(
+			"value uni_v3 position %s/%s in hint asset %s: %w",
+			entry.ContractAddress.Hex(), entry.WalletAddress.Hex(), entry.AssetAddress.Hex(), err,
+		)
+	}
+	return value, nil
 }

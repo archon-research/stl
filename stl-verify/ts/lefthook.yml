@@ -1,19 +1,79 @@
 # Lefthook configuration for TypeScript code
 # This file is extended by the root lefthook.yml
+#
+# oxlint and oxfmt each take one config, and the two workspaces have their own
+# (ui carries the design-system boundaries preset, mocks does not).
+#
+# Both run through `uikit-cli`, not the oxlint/oxfmt binaries directly: those are
+# transitive dependencies of uikit-cli rather than declared ones, so naming them
+# here would depend on npm hoisting them into
+# stl-verify/ts/node_modules/.bin. `uikit-cli` is the declared entry point, and
+# it is what the npm scripts CI runs use, so hook and CI resolve the same tool at
+# the same pinned version.
+#
+# `-c` is passed explicitly because `uikit-cli` only injects it when the cwd
+# holds an oxlint.config.ts, and the hook's cwd is stl-verify/ts, where neither
+# config lives -- without it the hook lints against oxlint's defaults and passes.
+# `--max-warnings=0` matches the npm scripts: oxlint exits 0 on warnings, and the
+# shared presets set `correctness` and `suspicious` to `warn`.
+#
+# `--report-unused-disable-directives` is deliberately NOT passed here, unlike in
+# the npm scripts. This pass omits `--type-aware`, so every type-aware rule is
+# inert -- and a disable directive for one (see `no-unsafe-type-assertion` in
+# both configs) therefore reports nothing and looks unused. CI runs both flags
+# together, which is the only combination that can judge such a directive.
+#
+# `root`, `glob` and `exclude` are all repo-root-relative, and `glob`/`exclude`
+# are applied to the staged path BEFORE `root` rewrites it -- so they have to
+# carry the stl-verify/ts/ prefix too. `run` and the substituted {staged_files}
+# are relative to `root`.
 
-_ts_root: &ts_root 'ts/'
+_ts_root: &ts_root 'stl-verify/ts/'
+
+# oxfmt has sortPackageJson on by default, so a staged package.json would come
+# back with its keys reordered and stage_fixed would fold that into whatever
+# commit happened to touch it. Neither `format` nor `format:check` covers these
+# manifests, so keep the hook off them too.
+_oxfmt_exclude: &oxfmt_exclude ['stl-verify/ts/*/package.json']
+
+# `src/generated` belongs to its generators, not to the hooks. oxlint's own
+# config already ignores it, so handing it a commit whose only UI files are
+# generated leaves it nothing to lint and it exits non-zero -- which is every
+# commit that just re-runs `generate:openapi`. oxfmt is worse than useless
+# there: it reflows `openapi-schema.json`, and python CI regenerates that file
+# and diffs it byte-for-byte, so a reformat fails the build.
+_generated_exclude: &generated_exclude ['stl-verify/ts/*/src/generated/**']
 
 pre-commit:
   parallel: true
   commands:
-    ts-oxlint:
+    ui-oxlint:
       root: *ts_root
-      glob: 'ui/**/*.{ts,tsx}'
-      run: npx --no-install oxlint -c ui/.oxlintrc.ts --fix {staged_files}
+      glob: 'stl-verify/ts/ui/**.{ts,tsx}'
+      exclude: *generated_exclude
+      run: >-
+        npx --no-install uikit-cli lint -c ui/oxlint.config.ts
+        --max-warnings=0 --fix {staged_files}
       stage_fixed: true
 
-    ts-oxfmt:
+    ui-oxfmt:
       root: *ts_root
-      glob: 'ui/**/*.{ts,tsx,css,html,json}'
-      run: npx --no-install oxfmt -c ui/.oxfmtrc.ts --write {staged_files}
+      glob: 'stl-verify/ts/ui/**.{ts,tsx,css,html,json}'
+      exclude: ['stl-verify/ts/*/package.json', 'stl-verify/ts/*/src/generated/**']
+      run: npx --no-install uikit-cli format -c ui/.oxfmtrc.ts --write {staged_files}
+      stage_fixed: true
+
+    mocks-oxlint:
+      root: *ts_root
+      glob: 'stl-verify/ts/mocks/**.ts'
+      run: >-
+        npx --no-install uikit-cli lint -c mocks/oxlint.config.ts
+        --max-warnings=0 --fix {staged_files}
+      stage_fixed: true
+
+    mocks-oxfmt:
+      root: *ts_root
+      glob: 'stl-verify/ts/mocks/**.{ts,json}'
+      exclude: *oxfmt_exclude
+      run: npx --no-install uikit-cli format -c mocks/.oxfmtrc.ts --write {staged_files}
       stage_fixed: true

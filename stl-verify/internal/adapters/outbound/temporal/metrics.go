@@ -2,10 +2,12 @@ package temporal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
@@ -36,7 +38,7 @@ func newCronjobMetricsWithProvider(mp metric.MeterProvider) (*cronjobMetrics, er
 
 	runsTotal, err := meter.Int64Counter(
 		"cronjob.runs.total",
-		metric.WithDescription("Total cronjob runs, labelled by terminal status (success|error)"),
+		metric.WithDescription("Total cronjob runs, labelled by terminal status (success|error|canceled)"),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating cronjob.runs.total counter: %w", err)
@@ -53,11 +55,39 @@ func newCronjobMetricsWithProvider(mp metric.MeterProvider) (*cronjobMetrics, er
 	}
 
 	m := &cronjobMetrics{runsTotal: runsTotal, runDuration: runDuration}
-	// Both terminal-status series must exist at 0 from startup or
-	// VectorCronjobAllRunsFailing false-fires on every pod rollover
-	// (see telemetry.SeedCounter for the mechanism).
-	telemetry.SeedStatusCounter(context.Background(), m.runsTotal)
+	m.seedStatusSeries()
 	return m, nil
+}
+
+// runStatusValues are the terminal statuses a run can land on; must stay in
+// sync with runStatusAttr and the counter description above.
+var runStatusValues = []string{"success", "error", "canceled"}
+
+// seedStatusSeries exports every terminal-status series of cronjob.runs.total
+// at 0 at worker startup, so increase() can observe the first real increment
+// (telemetry.SeedCounter carries the mechanism and the rollover it fixes).
+// telemetry.SeedStatusCounter is the usual way to do this and is deliberately
+// not used here: it seeds success and error, and this counter has a third
+// terminal status, which would leave {status="canceled"} unseeded.
+func (m *cronjobMetrics) seedStatusSeries() {
+	ctx := context.Background()
+	for _, status := range runStatusValues {
+		telemetry.SeedCounter(ctx, m.runsTotal, attribute.String("status", status))
+	}
+}
+
+// runStatusAttr classifies one run outcome for the runs/duration series. A
+// failure that arrives with the activity context canceled is "canceled", not
+// "error": the run was interrupted (worker shutdown during a deploy rollout,
+// or a schedule cancel), not broken, and Temporal retries it on the next
+// worker. Counting it as an error made VectorCronjobRunFailing fire on every
+// deploy that landed while a run was in flight. A run that exceeds its own
+// deadline (context.DeadlineExceeded) still counts as an error.
+func runStatusAttr(ctx context.Context, err error) attribute.KeyValue {
+	if err != nil && errors.Is(ctx.Err(), context.Canceled) {
+		return attribute.String("status", "canceled")
+	}
+	return telemetry.StatusAttr(err)
 }
 
 // RecordRun records the outcome and duration of one cronjob run. nil-safe.
@@ -65,7 +95,7 @@ func (m *cronjobMetrics) RecordRun(ctx context.Context, duration time.Duration, 
 	if m == nil {
 		return
 	}
-	attrs := metric.WithAttributes(telemetry.StatusAttr(err))
+	attrs := metric.WithAttributes(runStatusAttr(ctx, err))
 	m.runsTotal.Add(ctx, 1, attrs)
 	m.runDuration.Record(ctx, duration.Seconds(), attrs)
 }

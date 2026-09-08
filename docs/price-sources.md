@@ -95,6 +95,11 @@ Non-USD feeds are converted to USD using reference feeds:
 
 ### CoinGecko
 
+To load **historical** prices for any of these assets, see
+[backfilling-offchain-prices.md](backfilling-offchain-prices.md) — a hand-triggered
+Temporal job takes the date range as input. The 5-minute `offchain-price-indexer`
+cronjob covers current prices.
+
 - **Base URL**: `https://pro-api.coingecko.com/api/v3`
 - **Rate Limit**: 450 req/min (of 500 max)
 - **Timeout**: 30s, exponential backoff (max 3 retries)
@@ -120,6 +125,12 @@ Non-USD feeds are converted to USD using reference feeds:
 | ezETH  | `renzo-restaked-eth`   |
 | rsETH  | `kelp-dao-restaked-eth`|
 | PYUSD  | `paypal-usd`           |
+| XRP    | `ripple`               |
+| HYPE   | `hyperliquid`          |
+
+XRP and HYPE have no mainnet token row, so their prices are stored in
+`asset_price` (keyed by the `offchain_price_asset` catalog row) instead
+of `offchain_token_price`.
 
 ---
 

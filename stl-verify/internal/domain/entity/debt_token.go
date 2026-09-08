@@ -11,16 +11,18 @@ type DebtToken struct {
 	UnderlyingTokenID   int64
 	VariableDebtAddress []byte // 20 bytes, may be nil
 	StableDebtAddress   []byte // 20 bytes, may be nil (not all protocols have stable debt)
-	VariableSymbol      string
-	StableSymbol        string
-	CreatedAtBlock      int64
-	Metadata            map[string]any
+	// VariableSymbol and StableSymbol are optional: a debt token's symbol may be
+	// absent from on-chain metadata, and a missing symbol must not fail ingestion.
+	VariableSymbol string
+	StableSymbol   string
+	CreatedAtBlock int64
+	Metadata       map[string]any
 }
 
 // NewDebtToken creates a new DebtToken entity with validation.
-func NewDebtToken(id, protocolID, underlyingTokenID, createdAtBlock int64, variableDebtAddress, stableDebtAddress []byte, variableSymbol, stableSymbol string) (*DebtToken, error) {
+// The ID is assigned by the database (BIGSERIAL) and is therefore not a parameter.
+func NewDebtToken(protocolID, underlyingTokenID, createdAtBlock int64, variableDebtAddress, stableDebtAddress []byte, variableSymbol, stableSymbol string) (*DebtToken, error) {
 	dt := &DebtToken{
-		ID:                  id,
 		ProtocolID:          protocolID,
 		UnderlyingTokenID:   underlyingTokenID,
 		VariableDebtAddress: variableDebtAddress,
@@ -38,9 +40,6 @@ func NewDebtToken(id, protocolID, underlyingTokenID, createdAtBlock int64, varia
 
 // validate checks that all fields have valid values.
 func (dt *DebtToken) Validate() error {
-	if dt.ID <= 0 {
-		return fmt.Errorf("id must be positive, got %d", dt.ID)
-	}
 	if dt.ProtocolID <= 0 {
 		return fmt.Errorf("protocolID must be positive, got %d", dt.ProtocolID)
 	}
@@ -59,9 +58,9 @@ func (dt *DebtToken) Validate() error {
 	if dt.VariableDebtAddress == nil && dt.StableDebtAddress == nil {
 		return fmt.Errorf("at least one debt address must be provided")
 	}
-	if dt.VariableSymbol == "" && dt.StableSymbol == "" {
-		return fmt.Errorf("at least one symbol must be provided")
-	}
+	// Deliberately no "both symbols empty" check: DecodeStringOrBytes32 can
+	// legitimately return "" for an all-null bytes32 symbol, and a missing
+	// symbol must not fail ingestion.
 	return nil
 }
 

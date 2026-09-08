@@ -16,7 +16,8 @@ Welcome!
 >   to the data store, and model pipelines to ingest the data needed from
 >   that store.
 > - Every timeseries table must be a hypertable + compressed + S3-tiered,
->   in the same migration that creates it.
+>   in the same migration that creates it (one narrow carve-out for
+>   sparse governance-event tables — see §11 rule 4).
 > - **Never modify an applied migration** — write a new one.
 > - PR title: `TICKET-1234: <description>`. GitHub squash-merges; don't
 >   squash locally.
@@ -55,6 +56,34 @@ pull request.
 You do **not** need AWS credentials to develop locally — the kind cluster
 runs LocalStack to emulate SNS/SQS/S3.
 
+### AI coding assistants (optional)
+
+`AGENTS.md` is the canonical source of repository instructions. The sibling
+`CLAUDE.md` files import it for Claude Code; Codex and other `AGENTS.md`-aware
+tools read it directly. Before an assistant modifies a subtree, it must read
+every `AGENTS.md` from the repository root through that subtree. In particular,
+Codex builds its automatic instruction chain from the repository root through
+its startup directory and does not add nested or sibling guidance later in the
+session.
+
+Repository skills have canonical sources in `skills/` and are deployed to each
+supported tool through the root `Skillfile`. After a fresh clone, run this once
+from the repository root to make the same skills available to Codex, Claude
+Code, and Copilot:
+
+```bash
+make skills-install
+make skills-list
+```
+
+The generated deploy directories (`.claude/skills/`, `.codex/skills/`, and
+`.github/skills/`) are all git-ignored; rerun `make skills-install` after cloning
+or pulling a skill change, then start a new assistant session so its skill
+catalogue is refreshed. When adding or editing a skill, change its source under
+`skills/` (local skills) or the `Skillfile` (remote skills), redeploy with
+`make skills-install`, and commit the canonical source plus the
+`Skillfile`/`Skillfile.lock` — never the generated deploy copies.
+
 ---
 
 ## 2. Five-minute quick start
@@ -85,6 +114,20 @@ Everything should be `Running`. For local-only pause/resume use
 `make dev-suspend` and `make dev-resume` (do not use these in CI/prod).
 Use `make dev-down` to delete the cluster; nuke persistent volumes too
 with `make dev-wipe`.
+
+Need a second cluster next to someone else's (two agents, one machine)?
+
+```bash
+make dev-up-new                                  # free offset, name derived from it
+KIND_CLUSTER=mine KIND_PORT_OFFSET=100 make dev-up   # or name and offset yourself
+```
+
+It gets its own cluster name, host ports (every mapped port +100), image
+tags (`stl-*:local-mine`) and data dir (`~/.mine`), so it cannot disturb
+the default `vector` cluster. `dev-up-new` prints the host endpoints when
+it is done; afterwards only `export KIND_CLUSTER=<name>` is needed, since
+every `run-*`, `dev-*` and `kind-*` target derives the offset from the
+cluster's own control plane.
 
 > **⚠️ You need an Alchemy key for anything to actually work.** By
 > default `make dev-up` points the watcher at a **mock blockchain
@@ -288,7 +331,7 @@ lifecycle:
 |---|---|---|
 | `cmd/base/` | The chain watcher — the **source of block events** | `watcher` |
 | `cmd/workers/` | Long-running SQS consumers — **one message per block** | `oracle-price-indexer`, `morpho-indexer`, `sparklend-indexer`, `raw-data-backup` |
-| `cmd/cronjobs/` | Long-running Temporal workers triggered on a **schedule** | `offchain-price-indexer`, `anchorage-indexer`, `watcher-data-validator` |
+| `cmd/cronjobs/` | Long-running Temporal workers run on a **schedule** (plus `morpho-v2-bootstrap`, which has none and is started by hand) | `offchain-price-indexer`, `anchorage-indexer`, `watcher-data-validator` |
 | `cmd/backfillers/` | **One-shot** jobs that fill historical gaps | `oracle-pricing-backfill`, `sparklend-backfill`, `raw-block-bulk-downloader` |
 | `cmd/util/` | Dev tooling (`migrate`, `generate-er`, stress-test helpers) | — |
 
@@ -354,17 +397,41 @@ func run(ctx context.Context, args []string) error {
 5. **Add k8s manifests** under `k8s/base/<my-worker>/`:
    `deployment.yaml`, `serviceaccount.yaml`, `kustomization.yaml`. Copy
    `k8s/base/oracle-price-worker/` as the template. Wire the new service
-   into `k8s/overlays/{staging,prod}/kustomization.yaml` and, for local
-   kind, `k8s/overlays/dev/workers/kustomization.yaml` (add the base dir
-   under `resources:` and a `localhost/stl-<name>:local` `images:` entry).
-6. **Add build/deploy targets to the Makefile** (`docker-build-<name>`,
+   into `k8s/overlays/{staging,prod}/kustomization.yaml` by adding the base
+   dir under `resources:` only — the `images:` block there is generated from
+   `k8s/image-roster.txt`, so add one roster line instead (kind, image name,
+   the `image:` alias your manifests use; ORB-362). For local kind,
+   `k8s/overlays/dev/workers/kustomization.yaml` still takes both the base
+   dir under `resources:` and a `localhost/stl-<name>:local` `images:` entry,
+   plus a patch setting `AWS_SQS_QUEUE_URL` to the LocalStack queue. The dev
+   runtime Component replaces the base's `envFrom` with the shared
+   `stl-config` + `stl-secrets`, so anything your base reads from a
+   per-service ConfigMap (e.g. the DEX indexers' `DEX`) must be set
+   explicitly in that patch.
+6. **Create the local SQS queue** in the LocalStack init script,
+   `stl-verify/localstack-init/init-aws.sh` — the single source of truth —
+   via `create_consumer_queue <chain> <name>`, which creates the FIFO
+   queue + DLQ and subscribes it to the chain's blocks topic with raw
+   delivery. `make kind-infra` generates the `localstack-init` ConfigMap
+   from that file and stamps a hash of it into the LocalStack pod
+   template, so the pod restarts and your queue exists after the next
+   `make dev-up`. Nothing is inlined in `k8s/dev-infra/localstack.yaml`.
+7. **Add build/deploy targets to the Makefile** (`docker-build-<name>`,
    `docker-release-<name>`, and register the worker in the `run-*` /
-   `kind-load-workers` / `kind-deploy-workers` groupings). Grep for an
+   `kind-load-workers` / `kind-deploy-workers` groupings, plus the
+   rollout lists in `_dev-up-alchemy-workers` and `dev-up`). Grep for an
    existing worker name in the Makefile to see every site you need to
    touch.
-7. **Coordinate with infra.** Open a PR in the Infrastructure repo for
+8. **Coordinate with infra.** Open a PR in the Infrastructure repo for
    the SQS queue, SNS subscription, IAM policy, and any secrets — your
    code PR depends on those resources existing.
+
+Once steps 5–7 are in place, `make dev-up` runs the worker in kind (when
+`ALCHEMY_API_KEY` is set in `.env.secrets`), consuming the in-cluster
+watcher's blocks through LocalStack SNS→SQS — no host-run binary, no
+ad-hoc queue script. The DEX indexers (`curve-indexer`,
+`uniswap-v3-indexer`, `uniswap-v4-indexer`, all one `stl-dex-indexer`
+image) are wired this way.
 
 > **Tip:** It's welcome (often preferred) to split the k8s-manifest and
 > Infrastructure-repo changes into a follow-up PR. The code PR stays
@@ -444,8 +511,9 @@ Run it locally with `uv run python -m cli.workers.<my_worker>.main` (from `stl-v
 - Long-poll SQS receive; process one message at a time in FIFO order;
   delete on success; let it redrive on failure.
 - Handle `SIGINT` / `SIGTERM` — finish the in-flight message, close
-  the DB pool, exit within ~25s (the Python equivalent of Go's
-  `lifecycle.Run`).
+  the DB pool, exit within Go's `lifecycle.ShutdownTimeout` (40s) plus
+  `lifecycle.ShutdownTailBudget` (45s), the Python equivalent of
+  `lifecycle.Run`.
 - Read block data from Redis using the exact cache-key convention
   above; do not refetch from Alchemy unless cache-miss rate indicates
   a real bug.
@@ -549,9 +617,12 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
    `k8s/base/offchain-price-indexer/` as the template — cronjob
    Deployments are small (50m/64Mi requests) because the work happens
    inside Temporal activities. Register the service in
-   `k8s/overlays/{staging,prod}/kustomization.yaml` and, for local kind
-   runs, in `k8s/overlays/dev/kustomization.yaml` (add the base dir to
-   `resources:` and a `localhost/stl-<name>:local` entry under `images:`).
+   `k8s/overlays/{staging,prod}/kustomization.yaml` (base dir under
+   `resources:` only — the `images:` block is generated from
+   `k8s/image-roster.txt`, so add a `cronjob <name> <alias>` roster line
+   instead; ORB-362) and, for local kind runs, in
+   `k8s/overlays/dev/kustomization.yaml` (add the base dir to `resources:`
+   and a `localhost/stl-<name>:local` entry under `images:`).
 4. **Wire the Makefile.** Image builds auto-discover via the
    `CRONJOBS := ...` glob, so a `docker-build-cronjob-<name>` target is
    already covered. Add the k8s Deployment name to `CRONJOB_DEPLOYMENTS`
@@ -567,7 +638,10 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 
 Cronjobs are **idempotent by design** — a tick may be retried by
 Temporal. Your service must tolerate running twice on the same window
-without producing duplicates.
+without producing duplicates. Model-output cronjobs are the deliberate
+exception: `core-model-runner` disables retries (`maximum_attempts=1`)
+because its rows are keyed by wall-clock `computed_at`, so a mid-run
+retry would append duplicates instead of colliding on them.
 
 ### If you're writing the cronjob in Python
 
@@ -576,10 +650,20 @@ scheduler, the worker registers a schedule on startup, and each tick
 runs one activity. Only the language changes. Same `uv` tooling rules
 as the worker section above.
 
-> **No Python Temporal worker exists in the repo yet.** If you're the
-> first, factor the boilerplate (client connect, schedule ensure,
-> worker run) into a shared harness at `app/adapters/temporal/` so the
-> second one is copy-paste.
+> **The shared harness is `app/adapters/temporal/`** (client connect,
+> schedule ensure, worker run), built with `core-model-runner`, the first
+> Python cronjob. Reuse it rather than repeating the skeleton below — the
+> skeleton is kept as an explanation of what the harness does for you.
+
+Two things that only fail once deployed, both handled by the harness:
+
+- **The workflow module is re-imported in a sandbox**, and numpy cannot load
+  twice in one process. Keep the workflow free of the model stack: reference
+  the activity by name and keep it in its own module, and re-export nothing
+  from the package `__init__`.
+- **A CPU-bound tick must be a sync activity** run on the worker's
+  `activity_executor`. An async activity doing the work blocks the event loop;
+  a sync one without an executor is rejected at worker startup.
 
 **Code skeleton** — entry point at `stl-verify/python/cli/cronjobs/<my_cronjob>/main.py`.
 Uses the [`temporalio`](https://pypi.org/project/temporalio/) SDK:
@@ -587,17 +671,21 @@ Uses the [`temporalio`](https://pypi.org/project/temporalio/) SDK:
 ```python
 import asyncio
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
 from temporalio.client import (
     Client, Schedule, ScheduleActionStartWorkflow,
-    ScheduleIntervalSpec, ScheduleSpec,
+    ScheduleAlreadyRunningError, ScheduleIntervalSpec, ScheduleSpec,
 )
-from temporalio.service import RPCError
 from temporalio.worker import Worker
 
 from app.config import load_config
-from app.services.my_cronjob import MyCronjobService, tick_workflow
+from app.services.my_cronjob.service import MyCronjobService
+# The workflow comes from its own module, never the package __init__ — the
+# sandbox re-imports the workflow module, and anything the __init__ drags in
+# (the service, numpy) comes with it.
+from app.services.my_cronjob.workflow import TickWorkflow
 
 NAME     = "my-cronjob"
 INTERVAL = timedelta(minutes=int(os.getenv("MY_CRONJOB_INTERVAL_MIN", "15")))
@@ -607,30 +695,36 @@ async def run() -> None:
     client  = await Client.connect(cfg.temporal_host, namespace=cfg.temporal_namespace)
     service = MyCronjobService(cfg)                 # wires DB + HTTP clients
 
-    # Idempotent schedule creation — swallow AlreadyExists on restarts.
+    # Idempotent schedule creation — AlreadyExists is the normal path on every
+    # restart after the first; the harness reconciles the interval into the
+    # existing schedule there, so an interval change only needs a redeploy.
     try:
         await client.create_schedule(
             NAME,
             Schedule(
                 action=ScheduleActionStartWorkflow(
-                    tick_workflow,
+                    TickWorkflow.run,
                     id=f"scheduled-{NAME}",
                     task_queue=NAME,
                 ),
                 spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=INTERVAL)]),
             ),
         )
-    except RPCError as e:
-        if "AlreadyExists" not in str(e):
-            raise
+    except ScheduleAlreadyRunningError:
+        pass  # see the harness's ensure_schedule for the reconcile
 
-    worker = Worker(
-        client,
-        task_queue=NAME,
-        workflows=[tick_workflow],
-        activities=[service.tick],
-    )
-    await worker.run()
+    # A sync (CPU-bound) activity needs an executor — Worker rejects it at
+    # startup otherwise. One slot: one tick at a time.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        worker = Worker(
+            client,
+            task_queue=NAME,
+            workflows=[TickWorkflow],
+            activities=[service.tick],
+            activity_executor=executor,
+            max_concurrent_activities=1,
+        )
+        await worker.run()
 
 if __name__ == "__main__":
     asyncio.run(run())
@@ -643,8 +737,8 @@ Run it locally with `uv run python -m cli.cronjobs.<my_cronjob>.main` (from `stl
 - `stl-verify/python/cli/cronjobs/<my_cronjob>/main.py` — entry point
   (above). No business logic.
 - `stl-verify/python/app/services/<my_cronjob>/` — business logic,
-  the body of one tick, plus the `tick_workflow` wrapper. Full unit
-  tests; mock external HTTP clients.
+  the body of one tick, plus the `TickWorkflow` wrapper in its own
+  `workflow.py`. Full unit tests; mock external HTTP clients.
 - `stl-verify/python/app/domain/entities/` — pure entities.
 - `stl-verify/python/app/ports/` — interfaces.
 - `stl-verify/python/app/adapters/{postgres,onchain,temporal,…}/` —
@@ -656,9 +750,9 @@ Run it locally with `uv run python -m cli.cronjobs.<my_cronjob>.main` (from `stl
   name (lowercase, hyphenated).
 - Interval read from `<NAME>_INTERVAL` env var with a sensible default
   — prefer longer, and always overrideable.
-- Create the schedule on startup; swallow `AlreadyExists`; changing
-  the interval still requires deleting the schedule in Temporal and
-  restarting the worker.
+- Create the schedule on startup; on `AlreadyExists`, reconcile the
+  interval into the existing schedule (both harnesses do this), so an
+  interval change only needs a redeploy.
 - The activity must be **idempotent** — Temporal retries. Guard every
   write against duplicates.
 
@@ -778,8 +872,8 @@ ArgoCD PreSync hook in staging/prod.
    file; a changed checksum fails the deploy. To fix a mistake, write a
    new migration.
 4. **Every timeseries table is a hypertable, tiered to S3, and
-   compressed.** Without exception. All three are set up in the same
-   migration that creates the table — don't ship a naked table and
+   compressed.** One narrow exception, below. All three are set up in the
+   same migration that creates the table — don't ship a naked table and
    "add the policies later". Specifically:
    - **Hypertable** via `SELECT create_hypertable(...)` (or the
      distributed-hypertable equivalent). Pick a chunk interval that
@@ -795,7 +889,26 @@ ArgoCD PreSync hook in staging/prod.
    Also: primitives must be compatible with **distributed** hypertables.
    When in doubt, read `docs/data_entities.md` and ADR-0002, or copy
    the most recent timeseries migration as a template.
-5. Use `CREATE INDEX CONCURRENTLY` on big tables. Test on staging first.
+
+   **The exception:** sparse governance/config-event tables — those
+   writing on the order of rows per day or less (e.g.
+   `morpho_adapter_membership`, `morpho_vault_cap`, `morpho_vault_fee`)
+   — may be plain tables at maintainer discretion, because chunking,
+   compression and tiering buy nothing at that rate. State the decision
+   and its rationale in the table's `COMMENT`; the append-only +
+   `processing_version`/`build_id` + advisory-locked trigger requirements
+   still apply in full. If you are not sure your table qualifies, it
+   doesn't — make it a hypertable.
+5. **Append-only, and enforced by the database.** No `UPDATE`, no `DELETE`, no
+   `INSERT … ON CONFLICT … DO UPDATE` (a no-op `SET` still needs UPDATE privilege
+   and still fails) on a converted table. Identity rows are written once;
+   everything time-varying, lifecycle included, is a new row with the version
+   tuple, and "the current value" is a query. A converted table's creating
+   migration ends with `REVOKE UPDATE, DELETE ON <table> FROM stl_readwrite;`.
+   The converted set is listed in `stl-verify/db/migrations/AGENTS.md`; the rest
+   of the schema is being converted table by table, so the absence of a REVOKE on
+   an old table is debt, not permission.
+6. Use `CREATE INDEX CONCURRENTLY` on big tables. Test on staging first.
 
 ---
 
@@ -894,7 +1007,8 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
    message on `main` and your intermediate commits are discarded
    automatically.
 5. **Merge to `main`** — CI then triggers `.github/workflows/deploy.yaml`,
-   which bumps image tags in `k8s/overlays/staging/kustomization.yaml`
+   which regenerates the `images:` block of
+   `k8s/overlays/staging/kustomization.yaml` from `k8s/image-roster.txt`
    and ArgoCD rolls the change into the `vector` namespace on the
    staging EKS cluster. Once staging is healthy, the same run promotes
    the images to the prod ECR, auto-commits the prod tag bump to `main`,
@@ -903,6 +1017,37 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
    review on that run; on approval the run syncs `stl-prod` in ArgoCD to
    the approved commit. Rejecting leaves the bump on `main` (it batches
    into the next approved deploy).
+   The deploy runs whenever `main` holds code that has not been promoted
+   yet — CI diffs each main push against the prod overlay's image tag,
+   not just against the push itself — so a docs-only merge can carry an
+   earlier merge's deploy, or retry a promotion that failed (ORB-361).
+6. **Adding a brand-new service image? Split it across two PRs.** If one PR
+   both introduces a new image (a new `make docker-*` target plus its
+   `k8s/image-roster.txt` line) *and* the Deployment/CronJob that runs it,
+   ArgoCD syncs the new manifest on merge *before* the image exists in ECR
+   and before the deploy bot has rendered its `images:` entry: the pods sit
+   in `ImagePullBackOff` until that run's stamp lands (see ORB-313). Instead:
+   - **PR 1** adds the build (Makefile target) and the roster line. The next
+     deploy builds and pushes the image and writes its overlay entries.
+   - **PR 2** adds the `k8s/base/...` Deployment plus the `resources:` entry
+     that references it — it renders against the entry PR 1's deploy wrote.
+
+   This split is a recommendation, not an enforced rule. A combined PR still
+   works: `build-push-staging` builds the new image in the same run before
+   `update-staging` renders the block, and the staging health gate tolerates
+   the brief first-rollout `ImagePullBackOff`. Splitting simply avoids that
+   race. Never hand-add an `images:` entry (the old "copy a sibling's tag"
+   placeholder): the Manifests check rejects anything the roster does not
+   render, and the bot rewrites the block wholesale on every deploy (ORB-362).
+   The one sanctioned hand edit is removal: dropping or re-homing an image
+   means deleting its stale entry in the same PR as the roster change. (A
+   re-home leaves the alias unpinned in the merge commit until the post-merge
+   rewrite — the same brief `ImagePullBackOff` window as a first rollout.)
+   `scripts/deploy/verify-ecr-images.sh` (run before each stamp) remains the
+   backstop for an image that was never built — e.g. a roster line without a
+   matching Makefile release target. It fails the deploy with an explicit
+   missing-image list instead of letting a silent prod `ImagePullBackOff`
+   through.
 
 ---
 

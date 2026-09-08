@@ -1,25 +1,35 @@
 """Test-data seeding helpers for the integration suite."""
 
+import datetime as dt
 from decimal import Decimal
 from typing import cast
 
 import asyncpg
 
+from app.domain.prime_registry import subproxy_addresses
 
-async def insert_token(conn: asyncpg.Connection, symbol: str, decimals: int, address: bytes) -> int:
-    """Insert a chain_id=1 token or return the existing ID."""
+
+async def insert_token(
+    conn: asyncpg.Connection, symbol: str, decimals: int, address: bytes, *, chain_id: int = 1
+) -> int:
+    """Insert a token (mainnet by default) or return the existing ID.
+
+    ``token`` is unique on (chain_id, address), so the same address can be
+    registered on two chains; pass ``chain_id`` to seed the non-mainnet twin.
+    """
     return cast(
         int,
         await conn.fetchval(
             """
         INSERT INTO token (chain_id, address, symbol, decimals)
-        VALUES (1, $1, $2, $3)
+        VALUES ($4, $1, $2, $3)
         ON CONFLICT (chain_id, address) DO UPDATE SET symbol = EXCLUDED.symbol
         RETURNING id
         """,
             address,
             symbol,
             decimals,
+            chain_id,
         ),
     )
 
@@ -37,6 +47,200 @@ async def insert_user(conn: asyncpg.Connection, address: bytes) -> int:
         """,
             address,
         ),
+    )
+
+
+async def insert_morpho_adapter(
+    conn: asyncpg.Connection,
+    *,
+    vault_id: int,
+    address: bytes,
+    asset_token_id: int,
+    block: int,
+    removed_at_block: int | None = None,
+) -> None:
+    """Insert a VaultV2 Morpho Blue market adapter (type 1) added to its vault at ``block``.
+
+    ``removed_at_block`` appends a RemoveAdapter row so the adapter leaves ``morpho_adapter_current``.
+    """
+    adapter_id = await conn.fetchval(
+        """
+        INSERT INTO morpho_adapter (morpho_vault_id, address, asset_token_id)
+        VALUES ($1, $2, $3)
+        RETURNING id
+        """,
+        vault_id,
+        address,
+        asset_token_id,
+    )
+    await conn.execute(
+        """
+        INSERT INTO morpho_adapter_membership
+            (morpho_adapter_id, block_number, log_index, timestamp, is_member, adapter_type, observed_via)
+        VALUES ($1, $2, 0, NOW(), true, 1, 'add_adapter_event')
+        """,
+        adapter_id,
+        block,
+    )
+    if removed_at_block is not None:
+        await conn.execute(
+            """
+            INSERT INTO morpho_adapter_membership
+                (morpho_adapter_id, block_number, log_index, timestamp, is_member, adapter_type, observed_via)
+            VALUES ($1, $2, 0, NOW(), false, NULL, 'remove_adapter_event')
+            """,
+            adapter_id,
+            removed_at_block,
+        )
+
+
+async def insert_protocol(
+    conn: asyncpg.Connection,
+    name: str,
+    address: bytes,
+    *,
+    protocol_type: str = "lending",
+    chain_id: int = 1,
+) -> int:
+    """Insert a protocol (mainnet by default)."""
+    return cast(
+        int,
+        await conn.fetchval(
+            "INSERT INTO protocol (chain_id, address, name, protocol_type) VALUES ($4, $1, $2, $3) RETURNING id",
+            address,
+            name,
+            protocol_type,
+            chain_id,
+        ),
+    )
+
+
+async def insert_oracle(conn: asyncpg.Connection, name: str, address: bytes) -> int:
+    """Insert a chain_id=1 oracle."""
+    return cast(
+        int,
+        await conn.fetchval(
+            "INSERT INTO oracle (name, display_name, chain_id, address) VALUES ($1, $1, 1, $2) RETURNING id",
+            name,
+            address,
+        ),
+    )
+
+
+async def bind_protocol_oracle(
+    conn: asyncpg.Connection, protocol_id: int, oracle_id: int, *, from_block: int = 1
+) -> None:
+    """Bind a protocol to an oracle (idempotent), so the protocol's reads see its prices."""
+    await conn.execute(
+        """
+        INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (protocol_id, oracle_id, from_block) DO NOTHING
+        """,
+        protocol_id,
+        oracle_id,
+        from_block,
+    )
+
+
+async def insert_onchain_price(
+    conn: asyncpg.Connection,
+    *,
+    token_id: int,
+    oracle_id: int,
+    price: str | Decimal,
+    block: int,
+    time_offset: str = "0 seconds",
+) -> None:
+    """Insert an onchain_token_price row (no oracle_asset mapping — seed that separately).
+
+    ``time_offset`` is a Postgres interval added to the row's timestamp, for
+    scenarios that need to order rows by observation time rather than block.
+    """
+    await conn.execute(
+        """
+        INSERT INTO onchain_token_price
+            (token_id, oracle_id, block_number, block_version, timestamp, price_usd)
+        VALUES ($1, $2, $3, 0, NOW() + $4::text::interval, $5::numeric(30,18))
+        """,
+        token_id,
+        oracle_id,
+        block,
+        time_offset,
+        str(price),
+    )
+
+
+async def insert_borrower_debt(
+    conn: asyncpg.Connection, *, protocol_id: int, user_id: int, token_id: int, amount: int | str, block: int
+) -> None:
+    """Insert a borrower debt snapshot (raw on-chain amount, native decimals)."""
+    await conn.execute(
+        """
+        INSERT INTO borrower
+            (user_id, protocol_id, token_id, block_number, block_version,
+             amount, change, event_type, tx_hash)
+        VALUES ($1, $2, $3, $4, 0, $5, $5, 'borrow', $6)
+        """,
+        user_id,
+        protocol_id,
+        token_id,
+        block,
+        Decimal(amount),
+        b"\x00" * 32,
+    )
+
+
+async def insert_borrower_collateral(
+    conn: asyncpg.Connection,
+    *,
+    protocol_id: int,
+    user_id: int,
+    token_id: int,
+    amount: int | str,
+    block: int,
+    collateral_enabled: bool = True,
+) -> None:
+    """Insert a borrower_collateral snapshot (raw on-chain amount, native decimals)."""
+    await conn.execute(
+        """
+        INSERT INTO borrower_collateral
+            (user_id, protocol_id, token_id, block_number, block_version,
+             amount, change, event_type, tx_hash, collateral_enabled)
+        VALUES ($1, $2, $3, $4, 0, $5, $5, 'deposit', $6, $7)
+        """,
+        user_id,
+        protocol_id,
+        token_id,
+        block,
+        Decimal(amount),
+        b"\x00" * 32,
+        collateral_enabled,
+    )
+
+
+async def insert_reserve_data(
+    conn: asyncpg.Connection,
+    *,
+    protocol_id: int,
+    token_id: int,
+    block: int,
+    collateral_enabled: bool,
+    ltv: Decimal | None = None,
+) -> None:
+    """Insert a sparklend_reserve_data snapshot carrying the protocol-level collateral flag."""
+    await conn.execute(
+        """
+        INSERT INTO sparklend_reserve_data
+            (protocol_id, token_id, block_number, block_version,
+             usage_as_collateral_enabled, ltv)
+        VALUES ($1, $2, $3, 0, $4, $5)
+        """,
+        protocol_id,
+        token_id,
+        block,
+        collateral_enabled,
+        ltv,
     )
 
 
@@ -92,6 +296,230 @@ async def insert_receipt_token(
         await conn.close()
 
 
+async def insert_receipt_token_row(
+    conn: asyncpg.Connection,
+    *,
+    protocol_id: int,
+    underlying_token_id: int,
+    address: bytes,
+    symbol: str,
+    chain_id: int = 1,
+) -> None:
+    """Insert a receipt_token row (mainnet by default) with an explicit protocol/underlying binding.
+
+    ``receipt_token`` is unique on (chain_id, receipt_token_address), so one
+    address can be registered on two chains; pass ``chain_id`` to seed the twin.
+    """
+    await conn.execute(
+        "INSERT INTO receipt_token "
+        "(chain_id, protocol_id, underlying_token_id, receipt_token_address, symbol) "
+        "VALUES ($5, $1, $2, $3, $4)",
+        protocol_id,
+        underlying_token_id,
+        address,
+        symbol,
+        chain_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Maple Syrup vault seed
+#
+# Shared by the Maple backed-breakdown repository tests and the Maple risk-API
+# tests. The ``maple`` protocol, the ``USDC`` token and the ``syrupUSDC``
+# receipt_token are migration-seeded; these helpers insert the pool / loan /
+# collateral / state snapshot rows a scenario needs. ``synced_at`` is passed
+# explicitly so all snapshot rows can be pinned to one processing cycle — the
+# breakdown query joins collateral to loan_state on (synced_at, processing_version).
+#
+# maple_pool / maple_loan are Data-Vault hubs: editorial attributes (name,
+# is_syrup, loan_meta_type) live in the maple_pool_meta / maple_loan_meta SCD2
+# satellites and are exposed through the maple_pool_current / maple_loan_current
+# views. So insert_maple_pool / insert_maple_loan write a hub row AND its latest
+# satellite row — without a live satellite row the entity never appears in the
+# *_current view the breakdown query reads.
+# ---------------------------------------------------------------------------
+
+
+async def maple_seed_ids(conn: asyncpg.Connection) -> tuple[int, int]:
+    """Return the migration-seeded (maple protocol_id, USDC token_id) for chain_id=1."""
+    protocol_id = await conn.fetchval("SELECT id FROM protocol WHERE chain_id = 1 AND name = 'maple'")
+    usdc_id = await conn.fetchval("SELECT id FROM token WHERE chain_id = 1 AND symbol = 'USDC'")
+    if protocol_id is None or usdc_id is None:
+        raise RuntimeError("maple protocol / USDC token not seeded by migrations")
+    return cast(int, protocol_id), cast(int, usdc_id)
+
+
+async def insert_maple_pool(
+    conn: asyncpg.Connection,
+    *,
+    protocol_id: int,
+    address: bytes,
+    asset_token_id: int,
+    synced_at: dt.datetime,
+    name: str = "Syrup USDC",
+    is_syrup: bool = True,
+) -> int:
+    """Insert a maple_pool hub row plus its current maple_pool_meta satellite row."""
+    pool_id = cast(
+        int,
+        await conn.fetchval(
+            """
+            INSERT INTO maple_pool (chain_id, protocol_id, address, asset_token_id)
+            VALUES (1, $1, $2, $3)
+            RETURNING id
+            """,
+            protocol_id,
+            address,
+            asset_token_id,
+        ),
+    )
+    await conn.execute(
+        """
+        INSERT INTO maple_pool_meta (maple_pool_id, synced_at, name, is_syrup, hashdiff)
+        VALUES (
+            $1, $2, $3::text, $4,
+            decode(md5($3::text || E'\\x1f' || CASE WHEN $4 THEN 'true' ELSE 'false' END), 'hex')
+        )
+        """,
+        pool_id,
+        synced_at,
+        name,
+        is_syrup,
+    )
+    return pool_id
+
+
+async def insert_maple_pool_state(
+    conn: asyncpg.Connection,
+    *,
+    pool_id: int,
+    synced_at: dt.datetime,
+    liquid_assets: int,
+    principal_out: int = 0,
+) -> None:
+    """Insert a maple_pool_state snapshot (nullable metrics left NULL/zero)."""
+    await conn.execute(
+        """
+        INSERT INTO maple_pool_state
+            (maple_pool_id, synced_at, liquid_assets, principal_out, utilization, monthly_apy, spot_apy)
+        VALUES ($1, $2, $3, $4, 0, 0, 0)
+        """,
+        pool_id,
+        synced_at,
+        Decimal(liquid_assets),
+        Decimal(principal_out),
+    )
+
+
+async def insert_maple_loan(
+    conn: asyncpg.Connection,
+    *,
+    protocol_id: int,
+    pool_id: int,
+    borrower_user_id: int,
+    address: bytes,
+    synced_at: dt.datetime,
+    loan_meta_type: str | None = None,
+) -> int:
+    """Insert a maple_loan hub row plus its current maple_loan_meta satellite row.
+
+    ``loan_meta_type`` drives ``maple_loan_current.is_internal`` (True for
+    'amm'/'strategy'), which the breakdown query filters on.
+    """
+    loan_id = cast(
+        int,
+        await conn.fetchval(
+            """
+            INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id)
+            VALUES (1, $1, $2, $3, $4)
+            RETURNING id
+            """,
+            protocol_id,
+            address,
+            pool_id,
+            borrower_user_id,
+        ),
+    )
+    await conn.execute(
+        """
+        INSERT INTO maple_loan_meta (maple_loan_id, synced_at, loan_type, loan_meta_type, hashdiff)
+        VALUES ($1, $2, 'OTL', $3::text, decode(md5('OTL' || E'\\x1f' || COALESCE($3::text, E'\\x1e')), 'hex'))
+        """,
+        loan_id,
+        synced_at,
+        loan_meta_type,
+    )
+    return loan_id
+
+
+async def insert_maple_loan_state(
+    conn: asyncpg.Connection,
+    *,
+    loan_id: int,
+    synced_at: dt.datetime,
+    state: str,
+    principal_owed: int,
+    acm_ratio: int | None = None,
+    build_id: int = 0,
+) -> None:
+    """Insert a maple_loan_state snapshot.
+
+    ``processing_version`` is trigger-assigned per (loan, synced_at): a distinct
+    ``build_id`` for the same key gets ``MAX(processing_version) + 1``, so pass
+    successive build_ids to model a reprocess (pv 0, then pv 1) of one cycle.
+    """
+    await conn.execute(
+        """
+        INSERT INTO maple_loan_state (maple_loan_id, synced_at, state, principal_owed, acm_ratio, build_id)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        """,
+        loan_id,
+        synced_at,
+        state,
+        Decimal(principal_owed),
+        Decimal(acm_ratio) if acm_ratio is not None else None,
+        build_id,
+    )
+
+
+async def insert_maple_loan_collateral(
+    conn: asyncpg.Connection,
+    *,
+    loan_id: int,
+    synced_at: dt.datetime,
+    symbol: str,
+    amount: int | None,
+    decimals: int,
+    value_usd: int | None,
+    state: str = "Deposited",
+    build_id: int = 0,
+) -> None:
+    """Insert a maple_loan_collateral snapshot row.
+
+    ``amount`` / ``value_usd`` accept ``None`` to model the API reporting null
+    (e.g. a DepositPending asset), which the breakdown query filters out.
+    ``build_id`` drives trigger-assigned ``processing_version`` as in
+    ``insert_maple_loan_state``; pin a collateral row to the same build as its
+    loan_state so they share a processing_version.
+    """
+    await conn.execute(
+        """
+        INSERT INTO maple_loan_collateral
+            (maple_loan_id, synced_at, asset_symbol, asset_amount, asset_decimals, asset_value_usd, state, build_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        """,
+        loan_id,
+        synced_at,
+        symbol,
+        Decimal(amount) if amount is not None else None,
+        decimals,
+        Decimal(value_usd) if value_usd is not None else None,
+        state,
+        build_id,
+    )
+
+
 async def store_test_ids(conn: asyncpg.Connection, ids: dict[str, int]) -> None:
     """Persist seed IDs into a helper table so test fixtures can retrieve them."""
     await conn.execute(
@@ -114,25 +542,68 @@ async def store_test_ids(conn: asyncpg.Connection, ids: dict[str, int]) -> None:
         )
 
 
+async def declare_prime_proxy(
+    conn: asyncpg.Connection,
+    *,
+    prime_id: int,
+    proxy_hex: str,
+    chain_id: int = 1,
+) -> None:
+    """Declare a proxy as belonging to ``prime_id``, as the migration's list does.
+
+    ``prime_proxy`` is static reference data, so a scenario using a proxy address
+    the migration does not list has to declare it here. Positions alone do not
+    make a proxy resolvable — that is the point of the table.
+    """
+    await conn.execute(
+        "INSERT INTO prime_proxy (chain_id, proxy_address, prime_id) VALUES ($1, $2, $3) "
+        "ON CONFLICT (chain_id, proxy_address) DO NOTHING",
+        chain_id,
+        bytes.fromhex(proxy_hex),
+        prime_id,
+    )
+
+
 async def insert_allocation_position(
     conn: asyncpg.Connection,
     *,
     token_id: int,
     prime_id: int,
     proxy_hex: str,
-    balance: int,
+    balance: int | Decimal,
     block: int,
     tx: str,
     direction: str,
     log_index: int = 0,
     block_version: int = 0,
+    underlying_value: Decimal | None = None,
+    underlying_token_id: int | None = None,
+    created_at: dt.datetime | None = None,
+    tx_amount: int | Decimal | None = None,
+    chain_id: int = 1,
+    build_id: int = 0,
 ) -> None:
-    """Insert one allocation_position row (chain_id=1, tx_amount=balance)."""
+    """Insert one allocation_position row (chain_id defaults to mainnet; tx_amount defaults to balance).
+
+    ``underlying_value``/``underlying_token_id`` default to NULL (both-or-neither,
+    matching the tracker's domain invariant) so existing callers are unaffected.
+    ``created_at`` defaults to the column's NOW(); pass it to place rows in
+    specific buckets for the time-bucketed reads. Pass ``tx_amount`` when a flow
+    scenario needs the tx magnitude decoupled from the post-tx balance. Pass
+    ``chain_id`` to seed a position on a non-mainnet ALM proxy (e.g. avalanche).
+
+    A reprocessing (``processing_version`` 1) is seeded by repeating a row with a
+    fresh ``build_id`` and the SAME explicit ``created_at``: the assign trigger
+    keys its "already written" lookup on the full row identity INCLUDING
+    ``build_id`` and ``created_at``, so a differing build_id makes it bump the
+    version, and a defaulted NOW() would make it a distinct row at version 0.
+    """
     await conn.execute(
         "INSERT INTO allocation_position "
         "(chain_id, token_id, prime_id, proxy_address, balance, "
-        "block_number, block_version, tx_hash, log_index, tx_amount, direction) "
-        "VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $4, $9)",
+        "block_number, block_version, tx_hash, log_index, tx_amount, direction, "
+        "underlying_value, underlying_token_id, created_at, build_id) "
+        "VALUES ($14, $1, $2, $3, $4, $5, $6, $7, $8, $13, $9, $10, $11, COALESCE($12, NOW()), $15)",
         token_id,
         prime_id,
         bytes.fromhex(proxy_hex),
@@ -142,6 +613,12 @@ async def insert_allocation_position(
         bytes.fromhex(tx),
         log_index,
         direction,
+        underlying_value,
+        underlying_token_id,
+        created_at,
+        Decimal(tx_amount) if tx_amount is not None else Decimal(balance),
+        chain_id,
+        build_id,
     )
 
 
@@ -156,8 +633,8 @@ async def insert_allocation_position(
 # migration-seeded primes (spark/grove/obex) in ``/v1/primes``.
 # ---------------------------------------------------------------------------
 
-# The proxy_kind classifier marks an address as ALM unless it matches a known
-# sub-proxy.  Any address that is NOT the Spark sub-proxy will do.
+# app.domain.prime_registry.classify_proxy marks an address as ALM unless it
+# matches a known sub-proxy.  Any address that is NOT the Spark sub-proxy will do.
 GHOST_CLOSED_PROXY_HEX = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"  # all positions closed to zero
 GHOST_SWEEP_PROXY_HEX = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"  # zero sweep rows newer than the non-zero row
 GHOST_OPEN_PROXY_HEX = "cccccccccccccccccccccccccccccccccccccccc"  # open position with older zero rows
@@ -198,13 +675,12 @@ async def _ghost_seed_reference_rows(conn: asyncpg.Connection) -> tuple[int, int
     usds_id = await insert_token(conn, "USDS", 18, bytes.fromhex(_GHOST_USDS_HEX))
     asyrup_id = await insert_token(conn, "aSyrupUSDT", 6, bytes.fromhex(GHOST_RECEIPT_SYRUP_HEX))
 
-    await conn.execute(
-        "INSERT INTO receipt_token "
-        "(chain_id, protocol_id, underlying_token_id, receipt_token_address, symbol) "
-        "VALUES (1, $1, $2, $3, 'aSyrupUSDT')",
-        protocol_id,
-        syrup_id,
-        bytes.fromhex(GHOST_RECEIPT_SYRUP_HEX),
+    await insert_receipt_token_row(
+        conn,
+        protocol_id=protocol_id,
+        underlying_token_id=syrup_id,
+        address=bytes.fromhex(GHOST_RECEIPT_SYRUP_HEX),
+        symbol="aSyrupUSDT",
     )
     await conn.execute(
         "INSERT INTO onchain_token_price "
@@ -214,6 +690,7 @@ async def _ghost_seed_reference_rows(conn: asyncpg.Connection) -> tuple[int, int
         oracle_id,
         Decimal(2),
     )
+    await insert_oracle_asset(conn, oracle_id, syrup_id)
     return prime_id, asyrup_id, usds_id
 
 
@@ -227,6 +704,7 @@ async def _ghost_seed_closed_proxy(conn: asyncpg.Connection, prime_id: int, asyr
         (usds_id, [(1000, 75894, _GHOST_TXC, "in"), (2000, 0, _GHOST_TXD, "out")]),
     ]:
         for block, bal, tx, direction in rows:
+            await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=GHOST_CLOSED_PROXY_HEX)
             await insert_allocation_position(
                 conn,
                 token_id=token_id,
@@ -241,6 +719,7 @@ async def _ghost_seed_closed_proxy(conn: asyncpg.Connection, prime_id: int, asyr
 
 async def _ghost_seed_sweep_proxy(conn: asyncpg.Connection, prime_id: int, asyrup_id: int) -> None:
     """The production sweep shape: five zero-balance sweep rows newer than the non-zero row."""
+    await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=GHOST_SWEEP_PROXY_HEX)
     await insert_allocation_position(
         conn,
         token_id=asyrup_id,
@@ -267,6 +746,7 @@ async def _ghost_seed_sweep_proxy(conn: asyncpg.Connection, prime_id: int, asyru
 async def _ghost_seed_open_proxy(conn: asyncpg.Connection, prime_id: int, asyrup_id: int) -> None:
     """Open position with an older zero row; must still appear with balance=500."""
     for block, bal, tx, direction in [(999, 0, _GHOST_TXA, "out"), (1000, 500, _GHOST_TXB, "in")]:
+        await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=GHOST_OPEN_PROXY_HEX)
         await insert_allocation_position(
             conn,
             token_id=asyrup_id,
@@ -282,6 +762,7 @@ async def _ghost_seed_open_proxy(conn: asyncpg.Connection, prime_id: int, asyrup
 async def _ghost_seed_mixed_proxy(conn: asyncpg.Connection, prime_id: int, asyrup_id: int, usds_id: int) -> None:
     """One swept receipt token (250 then 0) and one open USDS holding (1000); only USDS may appear."""
     for block, bal, tx, direction in [(3000, 250, _GHOST_TXA, "in"), (3001, 0, _GHOST_TXB, "out")]:
+        await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=GHOST_MIXED_PROXY_HEX)
         await insert_allocation_position(
             conn,
             token_id=asyrup_id,
@@ -311,6 +792,7 @@ async def _ghost_seed_tiebreak_proxy(conn: asyncpg.Connection, prime_id: int, as
     appear; USDS is the mirror shape and ends the block at 400.
     """
     for log_index, bal, direction in [(0, 300, "in"), (1, 0, "out")]:
+        await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=GHOST_TIEBREAK_PROXY_HEX)
         await insert_allocation_position(
             conn,
             token_id=asyrup_id,
@@ -336,6 +818,573 @@ async def _ghost_seed_tiebreak_proxy(conn: asyncpg.Connection, prime_id: int, as
         )
 
 
+# ---------------------------------------------------------------------------
+# Underlying-value direct-holdings seed (VEC-450 / B4)
+#
+# One prime holding the same allowlisted vault (sparkPrimeUSDC1) plus control
+# tokens across several proxies, one proxy per pricing branch of
+# ``_DIRECT_ASSET_HOLDINGS_SQL``. sparkPrimeUSDC1 is given its OWN oracle price
+# here (it has none on mainnet) so the tests can prove allowlisted tokens ignore
+# it — the underlying-value path must win, never the legacy balance x own-price.
+#   * UV_PROXY_PRICED           allowlisted, underlying_value + USDC price   -> underlying_value x USDC price
+#   * UV_PROXY_UNDERLYING_UNPRICED allowlisted, underlying has no oracle     -> NULL (surfaced, not legacy)
+#   * UV_PROXY_NULL_VALUE       allowlisted, underlying_value NULL           -> NULL (surfaced, not legacy)
+#   * UV_PROXY_NON_ALLOWLISTED  unlisted vault, same shape but not allowlisted -> legacy path (no own oracle -> NULL)
+#   * UV_PROXY_PLAIN            plain USDC with own oracle                    -> legacy balance x own price
+# ---------------------------------------------------------------------------
+
+UV_PROXY_PRICED = "17" * 20
+UV_PROXY_UNDERLYING_UNPRICED = "27" * 20
+UV_PROXY_NULL_VALUE = "37" * 20
+UV_PROXY_NON_ALLOWLISTED = "47" * 20
+UV_PROXY_PLAIN = "57" * 20
+UV_PROXY_UNIV3_POOL = "77" * 20
+UV_PROXY_SYMBOLLESS_UNDERLYING = "87" * 20
+
+# Real mainnet address: must match the pricing allowlist in the repository.
+_UV_SPARK_PRIME_USDC1_HEX = "38464507e02c983f20428a6e8566693fe9e422a9"
+# Synthetic vault, deliberately NOT in the allowlist. A synthetic (not real)
+# address is used on purpose: a real non-allowlisted vault (e.g. syrupUSDC) can
+# be registered as a receipt_token by a migration, which would route it through
+# the receipt-token path instead of direct holdings and break this control.
+_UV_UNLISTED_VAULT_HEX = "67" * 20
+_UV_USDC_HEX = "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+# Synthetic underlying with no oracle row, to exercise the missing-price branch.
+_UV_UNPRICED_UNDERLYING_HEX = "0e" * 20
+# Synthetic underlying with a NULL symbol (token.symbol is nullable), to prove
+# the underlying-identity projection is atomic rather than per-field.
+_UV_SYMBOLLESS_UNDERLYING_HEX = "1e" * 20
+_UV_VAULT_HEX = "88" * 20
+# Real mainnet AUSD/USDC Uniswap V3 pool contract (grove position): not an
+# ERC20 and never has its own oracle, so it must match the pricing allowlist.
+_UV_UNIV3_POOL_HEX = "bafead7c60ea473758ed6c6021505e8bbd7e8e5d"
+
+UV_USDC_PRICE = Decimal("1.00")
+# sparkPrimeUSDC1's own (share) price. Distinct from the USDC price so that
+# "balance x own price" is a different number than "underlying_value x USDC
+# price": the double-count guard test asserts the code never uses this.
+UV_SPARK_OWN_PRICE = Decimal("0.90")
+UV_SPARKPRIME_BALANCE = Decimal("19647500.616754")
+UV_SPARKPRIME_UNDERLYING_VALUE = Decimal("20138132.383754")
+UV_UNLISTED_UNDERLYING_VALUE = Decimal("105303042.633792")
+UV_UNLISTED_BALANCE = Decimal("89822198.110408")
+UV_USDC_BALANCE = Decimal("1000")
+# Uni V3 rows carry the tracker-computed full position value in both columns
+# (balance == underlying_value by construction).
+UV_UNIV3_UNDERLYING_VALUE = Decimal("26927207.299715")
+
+
+# Both are well in the past, so a read pinned to "now" sees the retirement and a read
+# pinned between the two instants sees the source as it was while live.
+ORACLE_ASSET_REGISTERED_FROM = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+ORACLE_ASSET_RETIRED_FROM = dt.datetime(2026, 4, 1, tzinfo=dt.UTC)
+ORACLE_ASSET_WHILE_LIVE = dt.datetime(2026, 3, 1, tzinfo=dt.UTC)
+
+
+async def insert_oracle_asset(
+    conn: asyncpg.Connection,
+    oracle_id: int,
+    token_id: int,
+    *,
+    enabled: bool = True,
+    registered_from: dt.datetime = ORACLE_ASSET_REGISTERED_FROM,
+    retired_from: dt.datetime = ORACLE_ASSET_RETIRED_FROM,
+) -> None:
+    """Register a non-feed oracle_asset mapping (idempotent).
+
+    Every seeded onchain price needs an enabled oracle_asset mapping to stay
+    eligible for the latest-price reads, which exclude rows whose
+    ``(oracle_id, token_id)`` has no enabled mapping (rationale on
+    ``_DIRECT_ASSET_HOLDINGS_SQL``). Production never writes a price without one
+    (the worker fetches only enabled assets), so the seeds mirror that.
+
+    ``enabled=False`` models a source that was live from ``registered_from`` and
+    RETIRED on ``retired_from``, appended as a second version (VEC-597) — not a
+    mapping that was never enabled. A read pinned before ``retired_from`` therefore
+    still sees the source, which is what makes the retirement's history testable.
+    """
+    await conn.execute(
+        """
+        INSERT INTO oracle_asset (oracle_id, token_id, enabled, valid_from, change_reason)
+        VALUES ($1, $2, true, $3, 'test seed: registered')
+        ON CONFLICT ON CONSTRAINT oracle_asset_pkey DO NOTHING
+        """,
+        oracle_id,
+        token_id,
+        registered_from,
+    )
+    if not enabled:
+        await retire_oracle_asset(conn, oracle_id, token_id, retired_from, "test seed: source retired")
+
+
+async def retire_oracle_asset(
+    conn: asyncpg.Connection,
+    oracle_id: int,
+    token_id: int,
+    retired_from: dt.datetime,
+    reason: str,
+) -> None:
+    """Append a disabled version of a non-feed mapping, effective from ``retired_from``.
+
+    There is no writer function, so the caller supplies the version itself: one past the
+    key's current maximum. Raises when the key is already disabled at that instant, because
+    a fixture that appends nothing has not established the state it claims.
+    """
+    appended = await conn.fetchval(
+        """
+        INSERT INTO oracle_asset (
+            oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency,
+            processing_version, valid_from, change_reason)
+        SELECT prev.oracle_id, prev.token_id, false, prev.feed_address, prev.feed_decimals,
+               prev.quote_currency,
+               -- Monotonic over ALL versions of the key, not just the effective one, so a
+               -- backdated retirement still lands on a free primary key.
+               (SELECT max(processing_version) + 1 FROM oracle_asset
+                WHERE oracle_id = $1 AND token_id = $2 AND feed_key = '\\x'::bytea),
+               $3, $4
+        FROM (
+            SELECT * FROM oracle_asset
+            WHERE oracle_id = $1 AND token_id = $2 AND feed_key = '\\x'::bytea
+              AND valid_from <= $3
+            ORDER BY valid_from DESC, processing_version DESC
+            LIMIT 1
+        ) prev
+        WHERE prev.enabled
+        RETURNING processing_version
+        """,
+        oracle_id,
+        token_id,
+        retired_from,
+        reason,
+    )
+    if appended is None:
+        raise AssertionError(
+            f"oracle_asset (oracle_id={oracle_id}, token_id={token_id}) was already "
+            f"retired as of {retired_from.isoformat()}; no version was appended"
+        )
+
+
+async def _insert_price(conn: asyncpg.Connection, token_id: int, oracle_id: int, price: Decimal) -> None:
+    """Insert a price row AND its enabled oracle_asset mapping (see insert_oracle_asset).
+
+    Retired-source scenarios that need a price without an enabled mapping must
+    insert the price row directly instead of calling this.
+    """
+    await conn.execute(
+        "INSERT INTO onchain_token_price "
+        "(token_id, oracle_id, block_number, block_version, timestamp, price_usd) "
+        "VALUES ($1, $2, 1000, 0, NOW(), $3)",
+        token_id,
+        oracle_id,
+        price,
+    )
+    await insert_oracle_asset(conn, oracle_id, token_id)
+
+
+async def seed_underlying_value_direct_holdings(db_url: str) -> None:
+    """Seed the underlying-value direct-holdings scenarios into the given database."""
+    conn = await asyncpg.connect(db_url)
+    try:
+        async with conn.transaction():
+            prime_id = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('uv_direct_holdings', $1) RETURNING id",
+                bytes.fromhex(_UV_VAULT_HEX),
+            )
+            # A dedicated oracle whose mappings this seed enables freshly: reusing
+            # a migration oracle (e.g. sparklend) would inherit its enabled state,
+            # and the dust migration disables sparklend -> USDC, which the
+            # enabled-mapping price filter would then exclude. The oracle never
+            # drives an assertion (one price row per token, tie-break inert).
+            oracle_id = await conn.fetchval(
+                "INSERT INTO oracle (name, display_name, chain_id, address) "
+                "VALUES ('uv_direct_test', 'Underlying-value direct-holdings test oracle', 1, $1) RETURNING id",
+                bytes.fromhex("77" * 20),
+            )
+
+            usdc_id = await insert_token(conn, "USDC", 6, bytes.fromhex(_UV_USDC_HEX))
+            spark_id = await insert_token(conn, "sparkPrimeUSDC1", 6, bytes.fromhex(_UV_SPARK_PRIME_USDC1_HEX))
+            unlisted_id = await insert_token(conn, "unlistedVault", 6, bytes.fromhex(_UV_UNLISTED_VAULT_HEX))
+            unpriced_id = await insert_token(conn, "NOPRICEUND", 18, bytes.fromhex(_UV_UNPRICED_UNDERLYING_HEX))
+
+            await _insert_price(conn, usdc_id, oracle_id, UV_USDC_PRICE)
+            await _insert_price(conn, spark_id, oracle_id, UV_SPARK_OWN_PRICE)
+
+            # Allowlisted + underlying_value + priced underlying -> underlying_value x USDC price.
+            # (spark also has its own price above: the result must ignore it.)
+            for _proxy in (
+                UV_PROXY_PRICED,
+                UV_PROXY_UNDERLYING_UNPRICED,
+                UV_PROXY_NULL_VALUE,
+                UV_PROXY_NON_ALLOWLISTED,
+                UV_PROXY_PLAIN,
+                UV_PROXY_SYMBOLLESS_UNDERLYING,
+                UV_PROXY_UNIV3_POOL,
+            ):
+                await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=_proxy)
+            await insert_allocation_position(
+                conn,
+                token_id=spark_id,
+                prime_id=prime_id,
+                proxy_hex=UV_PROXY_PRICED,
+                balance=UV_SPARKPRIME_BALANCE,
+                block=1000,
+                tx="a1" * 32,
+                direction="sweep",
+                underlying_value=UV_SPARKPRIME_UNDERLYING_VALUE,
+                underlying_token_id=usdc_id,
+            )
+            # Allowlisted + underlying_value present but underlying has no oracle -> NULL.
+            await insert_allocation_position(
+                conn,
+                token_id=spark_id,
+                prime_id=prime_id,
+                proxy_hex=UV_PROXY_UNDERLYING_UNPRICED,
+                balance=UV_SPARKPRIME_BALANCE,
+                block=1000,
+                tx="b1" * 32,
+                direction="sweep",
+                underlying_value=UV_SPARKPRIME_UNDERLYING_VALUE,
+                underlying_token_id=unpriced_id,
+            )
+            # Allowlisted + underlying_value NULL (both-NULL) -> NULL, not balance x own price.
+            await insert_allocation_position(
+                conn,
+                token_id=spark_id,
+                prime_id=prime_id,
+                proxy_hex=UV_PROXY_NULL_VALUE,
+                balance=UV_SPARKPRIME_BALANCE,
+                block=1000,
+                tx="c1" * 32,
+                direction="sweep",
+            )
+            # Not allowlisted, same shape as the priced case -> legacy path (no own oracle -> NULL).
+            await insert_allocation_position(
+                conn,
+                token_id=unlisted_id,
+                prime_id=prime_id,
+                proxy_hex=UV_PROXY_NON_ALLOWLISTED,
+                balance=UV_UNLISTED_BALANCE,
+                block=1000,
+                tx="d1" * 32,
+                direction="sweep",
+                underlying_value=UV_UNLISTED_UNDERLYING_VALUE,
+                underlying_token_id=usdc_id,
+            )
+            # Plain USDC held directly, own oracle -> legacy balance x own price.
+            await insert_allocation_position(
+                conn,
+                token_id=usdc_id,
+                prime_id=prime_id,
+                proxy_hex=UV_PROXY_PLAIN,
+                balance=UV_USDC_BALANCE,
+                block=1000,
+                tx="e1" * 32,
+                direction="sweep",
+            )
+
+            # Allowlisted + underlying whose token row has a NULL symbol: the
+            # identity projection must emit all-or-nothing, never a hybrid of
+            # underlying id/address with the held token's symbol.
+            symbolless_id = await conn.fetchval(
+                """
+                INSERT INTO token (chain_id, address, symbol, decimals)
+                VALUES (1, $1, NULL, 18)
+                ON CONFLICT (chain_id, address) DO UPDATE SET symbol = NULL
+                RETURNING id
+                """,
+                bytes.fromhex(_UV_SYMBOLLESS_UNDERLYING_HEX),
+            )
+            await insert_allocation_position(
+                conn,
+                token_id=spark_id,
+                prime_id=prime_id,
+                proxy_hex=UV_PROXY_SYMBOLLESS_UNDERLYING,
+                balance=UV_SPARKPRIME_BALANCE,
+                block=1000,
+                tx="e2" * 32,
+                direction="sweep",
+                underlying_value=UV_SPARKPRIME_UNDERLYING_VALUE,
+                underlying_token_id=symbolless_id,
+            )
+
+            # Allowlisted Uni V3 pool position: no own oracle possible (the
+            # address is the pool contract), priced ONLY by the tracker-computed
+            # underlying_value x the USDC price.
+            univ3_id = await insert_token(conn, "UNIV3-LP-AUSD-USDC", 6, bytes.fromhex(_UV_UNIV3_POOL_HEX))
+            await insert_allocation_position(
+                conn,
+                token_id=univ3_id,
+                prime_id=prime_id,
+                proxy_hex=UV_PROXY_UNIV3_POOL,
+                balance=UV_UNIV3_UNDERLYING_VALUE,
+                block=1000,
+                tx="f1" * 32,
+                direction="sweep",
+                underlying_value=UV_UNIV3_UNDERLYING_VALUE,
+                underlying_token_id=usdc_id,
+            )
+    finally:
+        await conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Oracle price tie seed (frozen-source replant shape)
+#
+# Production shape this reproduces: a protocol bound to TWO oracles where a
+# retired source re-emits rows on republished (reorged) blocks, so both
+# oracles carry a price row for the same underlying at IDENTICAL
+# (block_number, block_version, processing_version) — warehouse-verified at
+# block 25524078/1/0 for the frozen sparklend stables next to chainlink.
+# Ordering by those three keys alone leaves the winner to the executor, so a
+# position's USD value flips between identical API calls. The reads break the
+# tie on oracle_id DESC; these seeds insert the LOWER-oracle_id (stale) row
+# first so an un-tiebroken top-1 sort is biased toward returning it.
+# ---------------------------------------------------------------------------
+
+TIE_PROXY_HEX = "f1" * 20
+_TIE_VAULT_HEX = "f2" * 20
+_TIE_PROTOCOL_HEX = "f3" * 20
+_TIE_STALE_ORACLE_HEX = "f4" * 20
+_TIE_FRESH_ORACLE_HEX = "f5" * 20
+_TIE_UNDERLYING_HEX = "f6" * 20
+_TIE_RECEIPT_HEX = "f7" * 20
+
+# Distinct prices so the winning oracle is observable in every USD figure.
+TIE_STALE_PRICE = Decimal("1.00")
+TIE_FRESH_PRICE = Decimal("1.25")
+TIE_BALANCE = Decimal("100")
+TIE_UNDERLYING_VALUE = Decimal("117.5")
+_TIE_PRICE_BLOCK = 5000
+
+
+async def seed_price_tiebreak_positions(db_url: str) -> None:
+    """Seed one receipt position whose underlying has two tied price rows.
+
+    Everything is seeded locally (protocol, two oracles, both bindings,
+    registry row, position) so the scenario does not lean on migration-seeded
+    registry rows. The stale oracle is created first, so it has the LOWER id;
+    its price row is also inserted first.
+    """
+    conn = await asyncpg.connect(db_url)
+    try:
+        async with conn.transaction():
+            prime_id = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('price_tiebreak', $1) RETURNING id",
+                bytes.fromhex(_TIE_VAULT_HEX),
+            )
+            protocol_id = await conn.fetchval(
+                "INSERT INTO protocol (chain_id, address, name, protocol_type) "
+                "VALUES (1, $1, 'tieLending', 'lending') RETURNING id",
+                bytes.fromhex(_TIE_PROTOCOL_HEX),
+            )
+            stale_oracle_id = await conn.fetchval(
+                "INSERT INTO oracle (name, display_name, chain_id, address) "
+                "VALUES ('tie_stale', 'Tie stale test oracle', 1, $1) RETURNING id",
+                bytes.fromhex(_TIE_STALE_ORACLE_HEX),
+            )
+            fresh_oracle_id = await conn.fetchval(
+                "INSERT INTO oracle (name, display_name, chain_id, address) "
+                "VALUES ('tie_fresh', 'Tie fresh test oracle', 1, $1) RETURNING id",
+                bytes.fromhex(_TIE_FRESH_ORACLE_HEX),
+            )
+            if not stale_oracle_id < fresh_oracle_id:
+                raise RuntimeError("seed premise broken: stale oracle must have the lower id")
+            for oracle_id in (stale_oracle_id, fresh_oracle_id):
+                await conn.execute(
+                    "INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block) VALUES ($1, $2, 1)",
+                    protocol_id,
+                    oracle_id,
+                )
+
+            underlying_id = await insert_token(conn, "tieUSD", 6, bytes.fromhex(_TIE_UNDERLYING_HEX))
+            receipt_token_id = await insert_token(conn, "tieReceipt", 6, bytes.fromhex(_TIE_RECEIPT_HEX))
+            await insert_receipt_token_row(
+                conn,
+                protocol_id=protocol_id,
+                underlying_token_id=underlying_id,
+                address=bytes.fromhex(_TIE_RECEIPT_HEX),
+                symbol="tieReceipt",
+            )
+
+            # Two price rows at IDENTICAL (block_number, block_version,
+            # processing_version); only oracle_id (and price) differ. Both
+            # sources stay enabled so the tie is genuine (only oracle_id breaks
+            # it), not resolved by the disabled-mapping filter.
+            for oracle_id, price in ((stale_oracle_id, TIE_STALE_PRICE), (fresh_oracle_id, TIE_FRESH_PRICE)):
+                await conn.execute(
+                    "INSERT INTO onchain_token_price "
+                    "(token_id, oracle_id, block_number, block_version, timestamp, price_usd) "
+                    "VALUES ($1, $2, $3, 1, NOW(), $4)",
+                    underlying_id,
+                    oracle_id,
+                    _TIE_PRICE_BLOCK,
+                    price,
+                )
+                await insert_oracle_asset(conn, oracle_id, underlying_id)
+
+            await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=TIE_PROXY_HEX)
+            await insert_allocation_position(
+                conn,
+                token_id=receipt_token_id,
+                prime_id=prime_id,
+                proxy_hex=TIE_PROXY_HEX,
+                balance=TIE_BALANCE,
+                block=_TIE_PRICE_BLOCK,
+                tx="f9" * 32,
+                direction="in",
+                underlying_value=TIE_UNDERLYING_VALUE,
+                underlying_token_id=underlying_id,
+            )
+    finally:
+        await conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Retired-source seed (disabled oracle_asset, higher-block replant shape)
+#
+# A protocol bound to TWO oracles where the RETIRED source holds the HIGHER
+# block (and later timestamp, and higher oracle_id) — the exact shape a reorg
+# leaves when it republishes a frozen sparklend row at a fresh height next to a
+# live chainlink row that change-suppression has not refreshed. Disabling the
+# oracle_asset mapping must retire the source from every latest-price read
+# immediately at read time, not merely from future collection: the enabled
+# source's LOWER-block price must win. Every ordering signal (recency, then
+# oracle_id) favours the disabled source here, so only the enabled-mapping
+# filter can produce the correct answer.
+# ---------------------------------------------------------------------------
+
+DIS_RECEIPT_PROXY_HEX = "e1" * 20
+DIS_DIRECT_PROXY_HEX = "e2" * 20
+_DIS_VAULT_HEX = "e3" * 20
+_DIS_PROTOCOL_HEX = "e4" * 20
+_DIS_ENABLED_ORACLE_HEX = "e5" * 20
+_DIS_DISABLED_ORACLE_HEX = "e6" * 20
+_DIS_UNDERLYING_HEX = "e7" * 20
+_DIS_RECEIPT_HEX = "e8" * 20
+_DIS_DIRECT_HEX = "e9" * 20
+
+DIS_ENABLED_PRICE = Decimal("1.25")  # live source, LOWER block: must win
+DIS_DISABLED_PRICE = Decimal("1.00")  # retired source, HIGHER block: must lose
+DIS_RECEIPT_BALANCE = Decimal("100")
+DIS_RECEIPT_UNDERLYING_VALUE = Decimal("117.5")
+DIS_DIRECT_BALANCE = Decimal("200")
+_DIS_ENABLED_BLOCK = 6000
+_DIS_DISABLED_BLOCK = 6001
+_DIS_BASE_TS = dt.datetime(2026, 3, 1, tzinfo=dt.UTC)
+
+
+async def _insert_disabled_source_prices(
+    conn: asyncpg.Connection, *, token_id: int, enabled_oracle_id: int, disabled_oracle_id: int
+) -> None:
+    """Price one token from both sources; the higher-block source's mapping is disabled."""
+    for oracle_id, block, offset, price, enabled in (
+        (enabled_oracle_id, _DIS_ENABLED_BLOCK, dt.timedelta(0), DIS_ENABLED_PRICE, True),
+        (disabled_oracle_id, _DIS_DISABLED_BLOCK, dt.timedelta(minutes=1), DIS_DISABLED_PRICE, False),
+    ):
+        await conn.execute(
+            "INSERT INTO onchain_token_price "
+            "(token_id, oracle_id, block_number, block_version, timestamp, price_usd) "
+            "VALUES ($1, $2, $3, 0, $4, $5)",
+            token_id,
+            oracle_id,
+            block,
+            _DIS_BASE_TS + offset,
+            price,
+        )
+        await insert_oracle_asset(conn, oracle_id, token_id, enabled=enabled)
+
+
+async def seed_disabled_source_positions(db_url: str) -> None:
+    """Seed a receipt position and a bare direct holding whose retired source holds the higher block.
+
+    One protocol bound to two oracles: the enabled source prices at the LOWER
+    block, the disabled (retired) source at the HIGHER block, later timestamp
+    and higher oracle_id. The receipt-token underlying and a bare directly-held
+    token each get that two-source shape, so the receipt, direct-holding and
+    token-catalog latest-price reads can all be checked against the same seed.
+    Only excluding the disabled mapping yields the enabled source's price.
+    """
+    conn = await asyncpg.connect(db_url)
+    try:
+        async with conn.transaction():
+            prime_id = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('disabled_source', $1) RETURNING id",
+                bytes.fromhex(_DIS_VAULT_HEX),
+            )
+            protocol_id = await conn.fetchval(
+                "INSERT INTO protocol (chain_id, address, name, protocol_type) "
+                "VALUES (1, $1, 'disLending', 'lending') RETURNING id",
+                bytes.fromhex(_DIS_PROTOCOL_HEX),
+            )
+            # Enabled oracle created first -> lower id; the disabled source is
+            # created second so it also holds the higher oracle_id, making the
+            # tiebreak favour it too.
+            enabled_oracle_id = await conn.fetchval(
+                "INSERT INTO oracle (name, display_name, chain_id, address) "
+                "VALUES ('dis_enabled', 'Disabled-source test: live oracle', 1, $1) RETURNING id",
+                bytes.fromhex(_DIS_ENABLED_ORACLE_HEX),
+            )
+            disabled_oracle_id = await conn.fetchval(
+                "INSERT INTO oracle (name, display_name, chain_id, address) "
+                "VALUES ('dis_disabled', 'Disabled-source test: retired oracle', 1, $1) RETURNING id",
+                bytes.fromhex(_DIS_DISABLED_ORACLE_HEX),
+            )
+            if not enabled_oracle_id < disabled_oracle_id:
+                raise RuntimeError("seed premise broken: disabled oracle must have the higher id")
+            for oracle_id in (enabled_oracle_id, disabled_oracle_id):
+                await conn.execute(
+                    "INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block) VALUES ($1, $2, 1)",
+                    protocol_id,
+                    oracle_id,
+                )
+
+            underlying_id = await insert_token(conn, "disUnderlying", 6, bytes.fromhex(_DIS_UNDERLYING_HEX))
+            direct_id = await insert_token(conn, "disDirect", 6, bytes.fromhex(_DIS_DIRECT_HEX))
+            receipt_token_id = await insert_token(conn, "disReceipt", 6, bytes.fromhex(_DIS_RECEIPT_HEX))
+            await insert_receipt_token_row(
+                conn,
+                protocol_id=protocol_id,
+                underlying_token_id=underlying_id,
+                address=bytes.fromhex(_DIS_RECEIPT_HEX),
+                symbol="disReceipt",
+            )
+
+            for token_id in (underlying_id, direct_id):
+                await _insert_disabled_source_prices(
+                    conn,
+                    token_id=token_id,
+                    enabled_oracle_id=enabled_oracle_id,
+                    disabled_oracle_id=disabled_oracle_id,
+                )
+
+            for _proxy in (DIS_DIRECT_PROXY_HEX, DIS_RECEIPT_PROXY_HEX):
+                await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=_proxy)
+            await insert_allocation_position(
+                conn,
+                token_id=receipt_token_id,
+                prime_id=prime_id,
+                proxy_hex=DIS_RECEIPT_PROXY_HEX,
+                balance=DIS_RECEIPT_BALANCE,
+                block=_DIS_DISABLED_BLOCK,
+                tx="ea" * 32,
+                direction="in",
+                underlying_value=DIS_RECEIPT_UNDERLYING_VALUE,
+                underlying_token_id=underlying_id,
+            )
+            await insert_allocation_position(
+                conn,
+                token_id=direct_id,
+                prime_id=prime_id,
+                proxy_hex=DIS_DIRECT_PROXY_HEX,
+                balance=DIS_DIRECT_BALANCE,
+                block=_DIS_DISABLED_BLOCK,
+                tx="eb" * 32,
+                direction="in",
+            )
+    finally:
+        await conn.close()
+
+
 async def seed_ghost_balance(db_url: str) -> None:
     """Seed all ghost-balance proxy scenarios into the given database."""
     conn = await asyncpg.connect(db_url)
@@ -347,5 +1396,1768 @@ async def seed_ghost_balance(db_url: str) -> None:
             await _ghost_seed_open_proxy(conn, prime_id, asyrup_id)
             await _ghost_seed_mixed_proxy(conn, prime_id, asyrup_id, usds_id)
             await _ghost_seed_tiebreak_proxy(conn, prime_id, asyrup_id, usds_id)
+    finally:
+        await conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Receipt-token redeemable-value seed (ER missing prices)
+#
+# One prime, three proxies:
+#
+# ``RUV_PROXY_HEX`` holds five receipt-token positions, one per valuation basis
+# of the receipt-token reads (positions list, per-token and total USD exposure,
+# exposure buckets):
+#   * syrupLike        underlying_value at a non-1:1 share ratio -> priced by it
+#   * legacyReceipt    NULL underlying_value (pre-2026-07-02 row) -> balance-based
+#   * aOneToOne        aToken shape, underlying_value == balance -> unchanged
+#   * fullyRedeemed    underlying_value = 0 with balance > 0 -> worth exactly 0
+#                      (COALESCE falls back on NULL only, never on 0)
+#   * divergentReceipt position's own underlying_token_id differs from the
+#                      receipt_token registry's -> refused a price (NULL, surfaced)
+# These wrap underlyings priced through the migration-seeded 'Aave V3' protocol +
+# 'aave_v3' oracle protocol_oracle binding, which the receipt reads resolve
+# prices through.
+#
+# ``RUV_LOCF_PROXY_HEX`` holds one receipt position observed at three explicit
+# ``created_at`` timestamps (two in the first hourly bucket, one two buckets
+# later) so exposure-bucket last()-within-bucket and LOCF carry are observable
+# mid-series.
+#
+# ``RUV_MORPHO_PROXY_HEX`` holds a Morpho-vault share (sparkUSDCbc semantics)
+# registered against a Morpho-Blue-like protocol/oracle binding seeded here,
+# deliberately independent of migration-seeded registry rows.
+# ---------------------------------------------------------------------------
+
+RUV_PROXY_HEX = "a7" * 20
+RUV_MORPHO_PROXY_HEX = "a8" * 20
+RUV_LOCF_PROXY_HEX = "a9" * 20
+
+_RUV_VAULT_HEX = "98" * 20
+_RUV_UNDERLYING_HEX = "b7" * 20
+_RUV_ALT_UNDERLYING_HEX = "b8" * 20
+_RUV_MORPHO_UNDERLYING_HEX = "b9" * 20
+_RUV_SYRUP_LIKE_RECEIPT_HEX = "c1" * 20
+_RUV_LEGACY_RECEIPT_HEX = "c2" * 20
+_RUV_ATOKEN_RECEIPT_HEX = "c3" * 20
+_RUV_DIVERGENT_RECEIPT_HEX = "c4" * 20
+_RUV_ZERO_RECEIPT_HEX = "c5" * 20
+_RUV_LOCF_RECEIPT_HEX = "c6" * 20
+_RUV_MORPHO_RECEIPT_HEX = "c7" * 20
+_RUV_MORPHO_PROTOCOL_HEX = "d0" * 20
+_RUV_MORPHO_ORACLE_HEX = "d1" * 20
+
+# Not 1.00 on purpose: at a 1:1 price a dropped price multiplication is
+# invisible, so every expected value folds in the 1.03 factor.
+RUV_UNDERLYING_PRICE = Decimal("1.03")
+# Priced but must never be used: the divergent position is refused a price, so
+# neither the registry price nor this one may surface for it.
+RUV_ALT_UNDERLYING_PRICE = Decimal("5.00")
+
+RUV_SYRUP_LIKE_BALANCE = Decimal("100")
+RUV_SYRUP_LIKE_UNDERLYING_VALUE = Decimal("117.23")
+RUV_LEGACY_BALANCE = Decimal("250")
+RUV_ATOKEN_BALANCE = Decimal("300")
+RUV_DIVERGENT_BALANCE = Decimal("4")
+RUV_DIVERGENT_UNDERLYING_VALUE = Decimal("10")
+RUV_ZERO_REDEEMED_BALANCE = Decimal("40")
+# Fully-redeemed vault: shares still outstanding, redeemable value exactly 0.
+RUV_ZERO_REDEEMED_UNDERLYING_VALUE = Decimal("0")
+
+# LOCF series: constant share balance, distinct from every underlying_value so
+# a balance-based bucket value can never masquerade as a redeemable one.
+RUV_LOCF_BASE_TS = dt.datetime(2026, 3, 1, tzinfo=dt.UTC)
+RUV_LOCF_BALANCE = Decimal("90")
+RUV_LOCF_STALE_VALUE = Decimal("100")  # bucket 0, backdated 10 min in
+RUV_LOCF_NEWER_VALUE = Decimal("140")  # bucket 0, 20 min in; must win within the bucket
+RUV_LOCF_LATER_VALUE = Decimal("180")  # bucket 2; ends the carried value
+
+RUV_MORPHO_SHARE_BALANCE = Decimal("1000")
+RUV_MORPHO_UNDERLYING_VALUE = Decimal("1023.917201")
+# Distinct from RUV_UNDERLYING_PRICE so a cross-binding price mixup is visible.
+RUV_MORPHO_UNDERLYING_PRICE = Decimal("1.04")
+
+
+async def seed_receipt_underlying_value_positions(db_url: str) -> None:
+    """Seed the receipt-token redeemable-value scenarios into the given database."""
+    conn = await asyncpg.connect(db_url)
+    try:
+        async with conn.transaction():
+            prime_id = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('receipt_uv', $1) RETURNING id",
+                bytes.fromhex(_RUV_VAULT_HEX),
+            )
+            protocol_id = await conn.fetchval("SELECT id FROM protocol WHERE name = 'Aave V3' AND chain_id = 1")
+            oracle_id = await conn.fetchval("SELECT id FROM oracle WHERE name = 'aave_v3'")
+            if protocol_id is None or oracle_id is None:
+                raise RuntimeError("Aave V3 protocol / aave_v3 oracle not seeded by migrations")
+
+            underlying_id = await insert_token(conn, "rUSDC", 6, bytes.fromhex(_RUV_UNDERLYING_HEX))
+            alt_underlying_id = await insert_token(conn, "rALT", 6, bytes.fromhex(_RUV_ALT_UNDERLYING_HEX))
+            await _insert_price(conn, underlying_id, oracle_id, RUV_UNDERLYING_PRICE)
+            await _insert_price(conn, alt_underlying_id, oracle_id, RUV_ALT_UNDERLYING_PRICE)
+
+            receipts = [
+                ("syrupLike", _RUV_SYRUP_LIKE_RECEIPT_HEX),
+                ("legacyReceipt", _RUV_LEGACY_RECEIPT_HEX),
+                ("aOneToOne", _RUV_ATOKEN_RECEIPT_HEX),
+                ("divergentReceipt", _RUV_DIVERGENT_RECEIPT_HEX),
+                ("fullyRedeemed", _RUV_ZERO_RECEIPT_HEX),
+            ]
+            receipt_token_ids: dict[str, int] = {}
+            for symbol, receipt_hex in receipts:
+                receipt_token_ids[symbol] = await insert_token(conn, symbol, 6, bytes.fromhex(receipt_hex))
+                await insert_receipt_token_row(
+                    conn,
+                    protocol_id=protocol_id,
+                    underlying_token_id=underlying_id,
+                    address=bytes.fromhex(receipt_hex),
+                    symbol=symbol,
+                )
+
+            positions = [
+                # Non-1:1 share ratio: priced by underlying_value, not balance.
+                ("syrupLike", RUV_SYRUP_LIKE_BALANCE, RUV_SYRUP_LIKE_UNDERLYING_VALUE, underlying_id),
+                # Row written before underlying_value existed: balance-based fallback.
+                ("legacyReceipt", RUV_LEGACY_BALANCE, None, None),
+                # aToken: underlying_value == balance by construction, value unchanged.
+                ("aOneToOne", RUV_ATOKEN_BALANCE, RUV_ATOKEN_BALANCE, underlying_id),
+                # Position's own underlying_token_id diverges from the registry's:
+                # pricing must refuse the row (NULL amount_usd, surfaced).
+                ("divergentReceipt", RUV_DIVERGENT_BALANCE, RUV_DIVERGENT_UNDERLYING_VALUE, alt_underlying_id),
+                # Fully-redeemed vault: shares outstanding, redeemable value 0.
+                ("fullyRedeemed", RUV_ZERO_REDEEMED_BALANCE, RUV_ZERO_REDEEMED_UNDERLYING_VALUE, underlying_id),
+            ]
+            for index, (symbol, balance, underlying_value, underlying_token_id) in enumerate(positions):
+                await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=RUV_PROXY_HEX)
+                await insert_allocation_position(
+                    conn,
+                    token_id=receipt_token_ids[symbol],
+                    prime_id=prime_id,
+                    proxy_hex=RUV_PROXY_HEX,
+                    balance=balance,
+                    block=1000,
+                    tx=f"{index:02x}" * 32,
+                    direction="in",
+                    underlying_value=underlying_value,
+                    underlying_token_id=underlying_token_id,
+                )
+
+            await _ruv_seed_locf_series(conn, prime_id=prime_id, protocol_id=protocol_id, underlying_id=underlying_id)
+            await _ruv_seed_morpho_like_position(conn, prime_id=prime_id)
+    finally:
+        await conn.close()
+
+
+async def _ruv_seed_locf_series(
+    conn: asyncpg.Connection, *, prime_id: int, protocol_id: int, underlying_id: int
+) -> None:
+    """Seed one receipt position observed at three explicit created_at timestamps.
+
+    Two observations land in the first hourly bucket (the backdated stale
+    value, then the newer one that must win) and one lands two buckets later,
+    so the exposure-bucket tests can observe last()-within-bucket and the LOCF
+    carry across the empty middle bucket.
+    """
+    locf_token_id = await insert_token(conn, "locfReceipt", 6, bytes.fromhex(_RUV_LOCF_RECEIPT_HEX))
+    await insert_receipt_token_row(
+        conn,
+        protocol_id=protocol_id,
+        underlying_token_id=underlying_id,
+        address=bytes.fromhex(_RUV_LOCF_RECEIPT_HEX),
+        symbol="locfReceipt",
+    )
+    observations = [
+        (RUV_LOCF_STALE_VALUE, dt.timedelta(minutes=10), 1100),
+        (RUV_LOCF_NEWER_VALUE, dt.timedelta(minutes=20), 1101),
+        (RUV_LOCF_LATER_VALUE, dt.timedelta(hours=2, minutes=10), 1102),
+    ]
+    for index, (underlying_value, offset, block) in enumerate(observations):
+        await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=RUV_LOCF_PROXY_HEX)
+        await insert_allocation_position(
+            conn,
+            token_id=locf_token_id,
+            prime_id=prime_id,
+            proxy_hex=RUV_LOCF_PROXY_HEX,
+            balance=RUV_LOCF_BALANCE,
+            block=block,
+            tx=f"1{index}" * 32,
+            direction="in",
+            underlying_value=underlying_value,
+            underlying_token_id=underlying_id,
+            created_at=RUV_LOCF_BASE_TS + offset,
+        )
+
+
+async def _ruv_seed_morpho_like_position(conn: asyncpg.Connection, *, prime_id: int) -> None:
+    """Seed a Morpho-vault-share receipt position (sparkUSDCbc semantics) with its own binding.
+
+    Everything the receipt reads price through (protocol, oracle,
+    protocol_oracle binding, registry row, underlying token and its price) is
+    seeded here, so the scenario does not lean on migration-seeded registry
+    rows (which own the real sparkUSDCbc registration).
+    """
+    morpho_protocol_id = await conn.fetchval(
+        "INSERT INTO protocol (chain_id, address, name, protocol_type) "
+        "VALUES (1, $1, 'morphoBlueLike', 'lending') RETURNING id",
+        bytes.fromhex(_RUV_MORPHO_PROTOCOL_HEX),
+    )
+    morpho_oracle_id = await conn.fetchval(
+        "INSERT INTO oracle (name, display_name, chain_id, address) "
+        "VALUES ('ruv_morpho_like', 'Morpho-Blue-like test oracle', 1, $1) RETURNING id",
+        bytes.fromhex(_RUV_MORPHO_ORACLE_HEX),
+    )
+    await conn.execute(
+        "INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block) VALUES ($1, $2, 1)",
+        morpho_protocol_id,
+        morpho_oracle_id,
+    )
+    underlying_id = await insert_token(conn, "mbUSDC", 6, bytes.fromhex(_RUV_MORPHO_UNDERLYING_HEX))
+    await _insert_price(conn, underlying_id, morpho_oracle_id, RUV_MORPHO_UNDERLYING_PRICE)
+    share_token_id = await insert_token(conn, "sparkUSDCbcLike", 18, bytes.fromhex(_RUV_MORPHO_RECEIPT_HEX))
+    await insert_receipt_token_row(
+        conn,
+        protocol_id=morpho_protocol_id,
+        underlying_token_id=underlying_id,
+        address=bytes.fromhex(_RUV_MORPHO_RECEIPT_HEX),
+        symbol="sparkUSDCbcLike",
+    )
+    await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=RUV_MORPHO_PROXY_HEX)
+    await insert_allocation_position(
+        conn,
+        token_id=share_token_id,
+        prime_id=prime_id,
+        proxy_hex=RUV_MORPHO_PROXY_HEX,
+        balance=RUV_MORPHO_SHARE_BALANCE,
+        block=1000,
+        tx="20" * 32,
+        direction="in",
+        underlying_value=RUV_MORPHO_UNDERLYING_VALUE,
+        underlying_token_id=underlying_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Flow share-ratio seed (net_flow_usd valued at the share ratio)
+#
+# One prime; one receipt token PER SCENARIO (the nearest-ratio lookup is
+# token-global, so sharing a token would let one scenario's rows become
+# another's nearest candidates). All wrap frUSDC, priced at 1.03 (not 1.00,
+# so a dropped price multiplication is visible). Donor rows, the nearest-ratio
+# candidates, sit on ``_FR_PROXY_DONOR``, outside every tested proxy's
+# buckets: the lookup must find them across proxies because the share ratio is
+# a property of the token, not of any position.
+#
+#   * FR_PROXY_RATIO            deposit with a usable own ratio -> own ratio
+#   * FR_PROXY_LEGACY           NULL underlying_value -> nearest donor's ratio
+#   * FR_PROXY_FULL_EXIT        balance = 0 after a full exit; the token's only
+#                               valued row sits AFTER the exit (the warehouse
+#                               shape of the syrupUSDC exit at block 24869871)
+#   * FR_PROXY_NEVER_VALUED     no usable row anywhere (0/0 rows like
+#                               syrupUSDT's don't count) -> raw tx_amount
+#   * FR_PROXY_ATOKEN           legacy row on a 1:1 token: the nearest ratio is
+#                               exactly 1, so the value equals the raw fallback
+#   * FR_PROXY_DRAINED          underlying_value = 0, balance > 0 -> own ratio 0
+#   * FR_PROXY_DIVERGENT        row's own underlying_token_id diverges from the
+#                               registry's -> refused, contributes nothing
+#   * FR_PROXY_DONOR_DIVERGENT  the only valued same-token row is divergent ->
+#                               not a candidate -> raw tx_amount
+#   * FR_PROXY_DISTANCE         donors on both sides at different distances ->
+#                               the closer one wins regardless of side
+#   * FR_PROXY_TIE              donors equidistant -> the at-or-before one wins
+#   * FR_PROXY_SAME_BLOCK       two donors in the flow's own block -> the higher
+#                               log_index wins (it carries the LOWER ratio, so a
+#                               "pick the max ratio" shortcut would fail)
+#   * FR_PROXY_MIXED            ratio in + ratio out + legacy in + sweep, one
+#                               bucket; the legacy row borrows the out row's
+#                               ratio (nearest at-or-before)
+# Every row carries the same explicit created_at so each proxy's events land
+# in a single hourly bucket.
+# ---------------------------------------------------------------------------
+
+FR_PROXY_RATIO = "1e" * 20
+FR_PROXY_LEGACY = "2e" * 20
+FR_PROXY_FULL_EXIT = "3e" * 20
+FR_PROXY_DRAINED = "4e" * 20
+FR_PROXY_MIXED = "5e" * 20
+FR_PROXY_DIVERGENT = "6e" * 20
+FR_PROXY_NEVER_VALUED = "7e" * 20
+FR_PROXY_ATOKEN = "8e" * 20
+FR_PROXY_DONOR_DIVERGENT = "9e" * 20
+FR_PROXY_DISTANCE = "ae" * 20
+FR_PROXY_TIE = "be" * 20
+FR_PROXY_SAME_BLOCK = "ce" * 20
+_FR_PROXY_DONOR = "fe" * 20
+
+_FR_VAULT_HEX = "97" * 20
+_FR_UNDERLYING_HEX = "e5" * 20
+# Priced like the RUV divergent scenario so the refusal is what keeps the
+# wrong-unit value out, not a missing price.
+_FR_ALT_UNDERLYING_HEX = "e7" * 20
+# Synthetic protocol/oracle registration (like _ruv_seed_morpho_like_position):
+# the scenarios must not lean on migration-seeded registry rows, and protocol
+# display names are not natural keys.
+_FR_PROTOCOL_HEX = "e8" * 20
+_FR_ORACLE_HEX = "e9" * 20
+
+FR_UNDERLYING_PRICE = Decimal("1.03")
+FR_BUCKET_TS = dt.datetime(2026, 3, 5, 0, 30, tzinfo=dt.UTC)
+
+# Ratio deposit: 100 shares in while the row's own balance/underlying_value pin
+# the share ratio at 234 / 200 = 1.17.
+FR_RATIO_TX_AMOUNT = Decimal("100")
+FR_RATIO_BALANCE = Decimal("200")
+FR_RATIO_UNDERLYING_VALUE = Decimal("234")
+
+# Legacy row written before underlying_value existed (both columns NULL), plus
+# a valued donor sweep one block earlier pinning the token's ratio at 1.17.
+FR_LEGACY_TX_AMOUNT = Decimal("100")
+FR_LEGACY_BALANCE = Decimal("500")
+FR_LEGACY_DONOR_BALANCE = Decimal("200")
+FR_LEGACY_DONOR_UNDERLYING_VALUE = Decimal("234")
+
+# Full exit: the withdrawal leaves balance = 0 on its own row; the donor sweep
+# AFTER it carries the warehouse-observed syrupUSDC ratio of 1.172241.
+FR_FULL_EXIT_TX_AMOUNT = Decimal("150")
+FR_FULL_EXIT_DONOR_BALANCE = Decimal("1000000")
+FR_FULL_EXIT_DONOR_UNDERLYING_VALUE = Decimal("1172241")
+
+# Never valued: a legacy flow plus a 0/0 sweep (syrupUSDT's shape:
+# underlying_value present but balance = 0 is not a usable ratio).
+FR_NEVER_VALUED_TX_AMOUNT = Decimal("100")
+FR_NEVER_VALUED_BALANCE = Decimal("500")
+
+# 1:1 aToken: the donor's underlying_value equals its balance, so the borrowed
+# ratio is exactly 1 and the flow's value must equal the raw fallback.
+FR_ATOKEN_TX_AMOUNT = Decimal("100")
+FR_ATOKEN_BALANCE = Decimal("300")
+FR_ATOKEN_DONOR_BALANCE = Decimal("300")
+
+# Drained vault: shares outstanding but redeemable value exactly 0.
+FR_DRAINED_TX_AMOUNT = Decimal("80")
+FR_DRAINED_BALANCE = Decimal("400")
+
+# Divergent row: its 2.5 ratio would price to a plausible wrong number if the
+# refusal were dropped.
+FR_DIVERGENT_TX_AMOUNT = Decimal("8")
+FR_DIVERGENT_BALANCE = Decimal("4")
+FR_DIVERGENT_UNDERLYING_VALUE = Decimal("10")
+FR_ALT_UNDERLYING_PRICE = Decimal("5.00")
+
+# Donor-divergent: the only valued same-token row is divergent (wrong-unit
+# underlying_value), so the legacy flow must fall back raw.
+FR_DONOR_DIVERGENT_TX_AMOUNT = Decimal("50")
+FR_DONOR_DIVERGENT_BALANCE = Decimal("500")
+
+# Distance: the far donor (two blocks before, ratio 1.10) must lose to the
+# near donor (one block after, ratio 1.20).
+FR_DISTANCE_TX_AMOUNT = Decimal("60")
+FR_DISTANCE_BALANCE = Decimal("500")
+FR_DISTANCE_FAR_DONOR_BALANCE = Decimal("100")
+FR_DISTANCE_FAR_DONOR_UNDERLYING_VALUE = Decimal("110")
+FR_DISTANCE_NEAR_DONOR_BALANCE = Decimal("100")
+FR_DISTANCE_NEAR_DONOR_UNDERLYING_VALUE = Decimal("120")
+
+# Tie: donors one block before (ratio 1.10) and one block after (ratio 1.30);
+# the at-or-before donor must win.
+FR_TIE_TX_AMOUNT = Decimal("70")
+FR_TIE_BALANCE = Decimal("500")
+FR_TIE_BEFORE_DONOR_BALANCE = Decimal("100")
+FR_TIE_BEFORE_DONOR_UNDERLYING_VALUE = Decimal("110")
+FR_TIE_AFTER_DONOR_BALANCE = Decimal("100")
+FR_TIE_AFTER_DONOR_UNDERLYING_VALUE = Decimal("130")
+FR_SAME_BLOCK_TX_AMOUNT = Decimal("80")
+FR_SAME_BLOCK_BALANCE = Decimal("600")
+FR_SAME_BLOCK = 9950
+FR_SAME_BLOCK_LOW_LOG_DONOR_BALANCE = Decimal("100")
+FR_SAME_BLOCK_LOW_LOG_DONOR_UNDERLYING_VALUE = Decimal("150")
+FR_SAME_BLOCK_HIGH_LOG_DONOR_BALANCE = Decimal("100")
+FR_SAME_BLOCK_HIGH_LOG_DONOR_UNDERLYING_VALUE = Decimal("120")
+
+# Mixed bucket: both own-ratio rows sit at the same 1.17 share ratio; the
+# legacy row borrows the out row's ratio (nearest at-or-before, one block).
+FR_MIXED_IN_TX_AMOUNT = Decimal("100")
+FR_MIXED_IN_BALANCE = Decimal("200")
+FR_MIXED_IN_UNDERLYING_VALUE = Decimal("234")
+FR_MIXED_OUT_TX_AMOUNT = Decimal("40")
+FR_MIXED_OUT_BALANCE = Decimal("160")
+FR_MIXED_OUT_UNDERLYING_VALUE = Decimal("187.2")
+FR_MIXED_LEGACY_TX_AMOUNT = Decimal("10")
+FR_MIXED_LEGACY_BALANCE = Decimal("300")
+FR_MIXED_SWEEP_TX_AMOUNT = Decimal("1000")
+
+
+async def seed_flow_share_ratio_activity(db_url: str) -> None:
+    """Seed the flow share-ratio activity scenarios into the given database."""
+    conn = await asyncpg.connect(db_url)
+    try:
+        async with conn.transaction():
+            prime_id = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('flow_ratio', $1) RETURNING id",
+                bytes.fromhex(_FR_VAULT_HEX),
+            )
+            protocol_id = await conn.fetchval(
+                "INSERT INTO protocol (chain_id, address, name, protocol_type) "
+                "VALUES (1, $1, 'flowRatioLike', 'lending') RETURNING id",
+                bytes.fromhex(_FR_PROTOCOL_HEX),
+            )
+            oracle_id = await conn.fetchval(
+                "INSERT INTO oracle (name, display_name, chain_id, address) "
+                "VALUES ('fr_flow_ratio', 'Flow share-ratio test oracle', 1, $1) RETURNING id",
+                bytes.fromhex(_FR_ORACLE_HEX),
+            )
+            await conn.execute(
+                "INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block) VALUES ($1, $2, 1)",
+                protocol_id,
+                oracle_id,
+            )
+
+            underlying_id = await insert_token(conn, "frUSDC", 6, bytes.fromhex(_FR_UNDERLYING_HEX))
+            await _insert_price(conn, underlying_id, oracle_id, FR_UNDERLYING_PRICE)
+            alt_underlying_id = await insert_token(conn, "frALT", 6, bytes.fromhex(_FR_ALT_UNDERLYING_HEX))
+            await _insert_price(conn, alt_underlying_id, oracle_id, FR_ALT_UNDERLYING_PRICE)
+
+            async def receipt(address_hex: str, symbol: str) -> int:
+                token_id = await insert_token(conn, symbol, 6, bytes.fromhex(address_hex))
+                await insert_receipt_token_row(
+                    conn,
+                    protocol_id=protocol_id,
+                    underlying_token_id=underlying_id,
+                    address=bytes.fromhex(address_hex),
+                    symbol=symbol,
+                )
+                return token_id
+
+            ratio_token = await receipt("d2" * 20, "frVaultRatio")
+            legacy_token = await receipt("d3" * 20, "frVaultLegacy")
+            exit_token = await receipt("d4" * 20, "frVaultExit")
+            never_token = await receipt("d5" * 20, "frVaultNever")
+            atoken_token = await receipt("d6" * 20, "frAToken")
+            drained_token = await receipt("d7" * 20, "frVaultDrained")
+            divergent_token = await receipt("d8" * 20, "frVaultDivergent")
+            donor_div_token = await receipt("d9" * 20, "frVaultDonorDiv")
+            distance_token = await receipt("da" * 20, "frVaultDistance")
+            tie_token = await receipt("db" * 20, "frVaultTie")
+            same_block_token = await receipt("dd" * 20, "frVaultSameBlock")
+            mixed_token = await receipt("dc" * 20, "frVaultMixed")
+
+            donor = _FR_PROXY_DONOR
+            # (token, proxy, direction, tx_amount, balance, underlying_value,
+            # underlying_token_id, block); underlying_value/underlying_token_id
+            # follow the both-or-neither invariant, with the divergent rows
+            # deliberately carrying the wrong-unit alt underlying.
+            rows = [
+                (
+                    ratio_token,
+                    FR_PROXY_RATIO,
+                    "in",
+                    FR_RATIO_TX_AMOUNT,
+                    FR_RATIO_BALANCE,
+                    FR_RATIO_UNDERLYING_VALUE,
+                    underlying_id,
+                    9000,
+                ),
+                (legacy_token, FR_PROXY_LEGACY, "in", FR_LEGACY_TX_AMOUNT, FR_LEGACY_BALANCE, None, None, 9101),
+                (
+                    legacy_token,
+                    donor,
+                    "sweep",
+                    Decimal(0),
+                    FR_LEGACY_DONOR_BALANCE,
+                    FR_LEGACY_DONOR_UNDERLYING_VALUE,
+                    underlying_id,
+                    9100,
+                ),
+                (
+                    exit_token,
+                    FR_PROXY_FULL_EXIT,
+                    "out",
+                    FR_FULL_EXIT_TX_AMOUNT,
+                    Decimal(0),
+                    Decimal(0),
+                    underlying_id,
+                    9200,
+                ),
+                (
+                    exit_token,
+                    donor,
+                    "sweep",
+                    Decimal(0),
+                    FR_FULL_EXIT_DONOR_BALANCE,
+                    FR_FULL_EXIT_DONOR_UNDERLYING_VALUE,
+                    underlying_id,
+                    9201,
+                ),
+                (
+                    never_token,
+                    FR_PROXY_NEVER_VALUED,
+                    "in",
+                    FR_NEVER_VALUED_TX_AMOUNT,
+                    FR_NEVER_VALUED_BALANCE,
+                    None,
+                    None,
+                    9300,
+                ),
+                (never_token, FR_PROXY_NEVER_VALUED, "sweep", Decimal(0), Decimal(0), Decimal(0), underlying_id, 9301),
+                (atoken_token, FR_PROXY_ATOKEN, "in", FR_ATOKEN_TX_AMOUNT, FR_ATOKEN_BALANCE, None, None, 9400),
+                (
+                    atoken_token,
+                    donor,
+                    "sweep",
+                    Decimal(0),
+                    FR_ATOKEN_DONOR_BALANCE,
+                    FR_ATOKEN_DONOR_BALANCE,
+                    underlying_id,
+                    9399,
+                ),
+                (
+                    drained_token,
+                    FR_PROXY_DRAINED,
+                    "in",
+                    FR_DRAINED_TX_AMOUNT,
+                    FR_DRAINED_BALANCE,
+                    Decimal(0),
+                    underlying_id,
+                    9500,
+                ),
+                (
+                    divergent_token,
+                    FR_PROXY_DIVERGENT,
+                    "in",
+                    FR_DIVERGENT_TX_AMOUNT,
+                    FR_DIVERGENT_BALANCE,
+                    FR_DIVERGENT_UNDERLYING_VALUE,
+                    alt_underlying_id,
+                    9600,
+                ),
+                (
+                    donor_div_token,
+                    FR_PROXY_DONOR_DIVERGENT,
+                    "in",
+                    FR_DONOR_DIVERGENT_TX_AMOUNT,
+                    FR_DONOR_DIVERGENT_BALANCE,
+                    None,
+                    None,
+                    9700,
+                ),
+                (
+                    donor_div_token,
+                    donor,
+                    "sweep",
+                    Decimal(0),
+                    FR_DIVERGENT_BALANCE,
+                    FR_DIVERGENT_UNDERLYING_VALUE,
+                    alt_underlying_id,
+                    9699,
+                ),
+                (distance_token, FR_PROXY_DISTANCE, "in", FR_DISTANCE_TX_AMOUNT, FR_DISTANCE_BALANCE, None, None, 9800),
+                (
+                    distance_token,
+                    donor,
+                    "sweep",
+                    Decimal(0),
+                    FR_DISTANCE_FAR_DONOR_BALANCE,
+                    FR_DISTANCE_FAR_DONOR_UNDERLYING_VALUE,
+                    underlying_id,
+                    9798,
+                ),
+                (
+                    distance_token,
+                    donor,
+                    "sweep",
+                    Decimal(0),
+                    FR_DISTANCE_NEAR_DONOR_BALANCE,
+                    FR_DISTANCE_NEAR_DONOR_UNDERLYING_VALUE,
+                    underlying_id,
+                    9801,
+                ),
+                (tie_token, FR_PROXY_TIE, "in", FR_TIE_TX_AMOUNT, FR_TIE_BALANCE, None, None, 9900),
+                (
+                    same_block_token,
+                    FR_PROXY_SAME_BLOCK,
+                    "in",
+                    FR_SAME_BLOCK_TX_AMOUNT,
+                    FR_SAME_BLOCK_BALANCE,
+                    None,
+                    None,
+                    FR_SAME_BLOCK,
+                ),
+                (
+                    tie_token,
+                    donor,
+                    "sweep",
+                    Decimal(0),
+                    FR_TIE_BEFORE_DONOR_BALANCE,
+                    FR_TIE_BEFORE_DONOR_UNDERLYING_VALUE,
+                    underlying_id,
+                    9899,
+                ),
+                (
+                    tie_token,
+                    donor,
+                    "sweep",
+                    Decimal(0),
+                    FR_TIE_AFTER_DONOR_BALANCE,
+                    FR_TIE_AFTER_DONOR_UNDERLYING_VALUE,
+                    underlying_id,
+                    9901,
+                ),
+                (
+                    mixed_token,
+                    FR_PROXY_MIXED,
+                    "in",
+                    FR_MIXED_IN_TX_AMOUNT,
+                    FR_MIXED_IN_BALANCE,
+                    FR_MIXED_IN_UNDERLYING_VALUE,
+                    underlying_id,
+                    9010,
+                ),
+                (
+                    mixed_token,
+                    FR_PROXY_MIXED,
+                    "out",
+                    FR_MIXED_OUT_TX_AMOUNT,
+                    FR_MIXED_OUT_BALANCE,
+                    FR_MIXED_OUT_UNDERLYING_VALUE,
+                    underlying_id,
+                    9011,
+                ),
+                (
+                    mixed_token,
+                    FR_PROXY_MIXED,
+                    "in",
+                    FR_MIXED_LEGACY_TX_AMOUNT,
+                    FR_MIXED_LEGACY_BALANCE,
+                    None,
+                    None,
+                    9012,
+                ),
+                (
+                    mixed_token,
+                    FR_PROXY_MIXED,
+                    "sweep",
+                    FR_MIXED_SWEEP_TX_AMOUNT,
+                    FR_MIXED_IN_BALANCE,
+                    FR_MIXED_IN_UNDERLYING_VALUE,
+                    underlying_id,
+                    9013,
+                ),
+            ]
+            for index, (
+                token_id,
+                proxy_hex,
+                direction,
+                tx_amount,
+                balance,
+                underlying_value,
+                underlying_token_id,
+                block,
+            ) in enumerate(rows):
+                await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=proxy_hex)
+                await insert_allocation_position(
+                    conn,
+                    token_id=token_id,
+                    prime_id=prime_id,
+                    proxy_hex=proxy_hex,
+                    balance=balance,
+                    block=block,
+                    tx=f"{0x30 + index:02x}" * 32,
+                    direction=direction,
+                    underlying_value=underlying_value,
+                    underlying_token_id=underlying_token_id,
+                    created_at=FR_BUCKET_TS,
+                    tx_amount=tx_amount,
+                )
+            # Same-block donors for FR_PROXY_SAME_BLOCK: identical block, differing
+            # log_index, so only the log_index tiebreak separates them.
+            for log_index, balance, underlying_value in (
+                (3, FR_SAME_BLOCK_LOW_LOG_DONOR_BALANCE, FR_SAME_BLOCK_LOW_LOG_DONOR_UNDERLYING_VALUE),
+                (7, FR_SAME_BLOCK_HIGH_LOG_DONOR_BALANCE, FR_SAME_BLOCK_HIGH_LOG_DONOR_UNDERLYING_VALUE),
+            ):
+                await insert_allocation_position(
+                    conn,
+                    token_id=same_block_token,
+                    prime_id=prime_id,
+                    proxy_hex=donor,
+                    balance=balance,
+                    block=FR_SAME_BLOCK,
+                    tx=f"{0x70 + log_index:02x}" * 32,
+                    direction="sweep",
+                    log_index=log_index,
+                    underlying_value=underlying_value,
+                    underlying_token_id=underlying_id,
+                    created_at=FR_BUCKET_TS,
+                    tx_amount=Decimal(0),
+                )
+    finally:
+        await conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Anchorage BTC custody seed
+#
+# Encodes the $521M trap: an unbounded DISTINCT ON over every package picks
+# each package's latest row regardless of poll cohort, so three closed packages
+# that stopped being polled at an earlier snapshot_time (2026-06-13) leak their
+# residual collateral into the totals. The correct read scopes to the prime's
+# latest snapshot_time cohort (2026-06-16) FIRST, then DISTINCT ON with
+# processing_version DESC, then GROUP BY (asset_type, custody_type).
+#
+# Current cohort (2026-06-16, three BTC/AnchorageCustody packages):
+#   exposure SUM = 250,000,000 ; package_value SUM = 309,672,229 ; BTC = 4722.61
+# One current package (PKG-C) carries a superseded processing_version: a wrong
+# original (pv 0, build_id 0) and a correction (pv 1, build_id 1). pv DESC must
+# pick the correction, else exposure balloons to 1,199,000,000.
+# Closed cohort (2026-06-13, exposure_value = 0 but active = true): residual
+# collateral that pushes an unscoped package_value SUM to 521,000,000 and BTC to
+# 7222.61.
+# ---------------------------------------------------------------------------
+
+ANCHORAGE_CUSTODY_PROXY_HEX = "ac" * 20  # the ALM proxy the API keys on
+ANCHORAGE_EMPTY_PROXY_HEX = "ad" * 20  # a prime with no anchorage snapshots
+ANCHORAGE_MULTI_PROXY_HEX = "ae" * 20  # multi-asset-type + multi-group fixtures
+ANCHORAGE_OTHER_PROXY_HEX = "af" * 20  # a second prime with its own later cohort
+_ANCHORAGE_VAULT_HEX = "ca" * 20
+_ANCHORAGE_EMPTY_VAULT_HEX = "cb" * 20
+_ANCHORAGE_MULTI_VAULT_HEX = "cd" * 20
+_ANCHORAGE_OTHER_VAULT_HEX = "ce" * 20
+_ANCHORAGE_DUMMY_TOKEN_HEX = "c1" * 20
+_ANCHORAGE_TX = "c2" * 32
+_ANCHORAGE_EMPTY_TX = "c3" * 32
+_ANCHORAGE_MULTI_TX = "c4" * 32
+_ANCHORAGE_OTHER_TX = "c5" * 32
+
+# The live feed is frozen here (upstream outage since 2026-06-16); this is the
+# latest-poll cohort. Closed packages last polled three days earlier.
+ANCHORAGE_LATEST_SNAPSHOT = dt.datetime(2026, 6, 16, 19, 45, 17, tzinfo=dt.timezone.utc)
+_ANCHORAGE_CLOSED_SNAPSHOT = dt.datetime(2026, 6, 13, 12, 0, 0, tzinfo=dt.timezone.utc)
+# A second prime polled LATER than the main prime. If the per-prime scope on
+# MAX(snapshot_time) is dropped, this later cohort becomes the global max and
+# starves the main prime — the prime-isolation test's red signal.
+_ANCHORAGE_OTHER_SNAPSHOT = dt.datetime(2026, 6, 20, 12, 0, 0, tzinfo=dt.timezone.utc)
+
+
+async def _insert_anchorage_snapshot(
+    conn: asyncpg.Connection,
+    *,
+    prime_id: int,
+    package_id: str,
+    active: bool,
+    exposure_value: Decimal,
+    package_value: Decimal,
+    asset_quantity: Decimal,
+    snapshot_time: dt.datetime,
+    build_id: int = 0,
+    asset_type: str = "BTC",
+    custody_type: str = "AnchorageCustody",
+    asset_weighted_value: Decimal | None = None,
+) -> None:
+    """Insert one anchorage_package_snapshot row.
+
+    ``exposure_value``/``package_value`` are package-level (repeated across a
+    package's per-collateral-asset rows); ``asset_quantity`` and
+    ``asset_weighted_value`` are per asset type. ``asset_weighted_value`` defaults
+    to ``package_value`` (correct for a single-asset package). For a multi-asset
+    package, insert one row per ``asset_type`` sharing ``package_id`` /
+    ``snapshot_time`` and the same package-level values, with per-asset
+    ``asset_quantity`` / ``asset_weighted_value``.
+
+    processing_version is trigger-assigned; pass a distinct ``build_id`` to force
+    a new version at the same natural key (the trigger reuses the version for a
+    matching build_id and increments only for a new one).
+    """
+    weighted = asset_weighted_value if asset_weighted_value is not None else package_value
+    await conn.execute(
+        """
+        INSERT INTO anchorage_package_snapshot (
+            prime_id, package_id, pledgor_id, secured_party_id, active, state,
+            current_ltv, exposure_value, package_value,
+            margin_call_ltv, critical_ltv, margin_return_ltv,
+            asset_type, custody_type, asset_price, asset_quantity, asset_weighted_value,
+            ltv_timestamp, snapshot_time, build_id
+        ) VALUES (
+            $1, $2, 'pledgor', 'secured', $3, 'HEALTHY',
+            $4, $5, $6,
+            0.7, 0.85, 0.65,
+            $10, $11, 60000, $7, $12,
+            $8, $8, $9
+        )
+        """,
+        prime_id,
+        package_id,
+        active,
+        (exposure_value / package_value) if package_value else Decimal("0"),
+        exposure_value,
+        package_value,
+        asset_quantity,
+        snapshot_time,
+        build_id,
+        asset_type,
+        custody_type,
+        weighted,
+    )
+
+
+async def seed_anchorage_custody(db_url: str) -> None:
+    """Seed the Anchorage BTC custody cohort + trap rows into the given database."""
+    conn = await asyncpg.connect(db_url)
+    try:
+        async with conn.transaction():
+            prime_id = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('anchorage_custody', $1) RETURNING id",
+                bytes.fromhex(_ANCHORAGE_VAULT_HEX),
+            )
+            token_id = await insert_token(conn, "ACUSTODY", 18, bytes.fromhex(_ANCHORAGE_DUMMY_TOKEN_HEX))
+            # The API resolves proxy_address -> prime_id through prime_proxy, so the
+            # scenario declares its proxies there as well as seeding a position.
+            await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=ANCHORAGE_CUSTODY_PROXY_HEX)
+            await insert_allocation_position(
+                conn,
+                token_id=token_id,
+                prime_id=prime_id,
+                proxy_hex=ANCHORAGE_CUSTODY_PROXY_HEX,
+                balance=1,
+                block=1000,
+                tx=_ANCHORAGE_TX,
+                direction="in",
+            )
+
+            # Current cohort: PKG-A and PKG-B are single rows; PKG-C carries a
+            # superseded processing_version whose correction (pv 1) must win.
+            await _insert_anchorage_snapshot(
+                conn,
+                prime_id=prime_id,
+                package_id="PKG-A",
+                active=True,
+                exposure_value=Decimal("100000000"),
+                package_value=Decimal("120000000"),
+                asset_quantity=Decimal("2000"),
+                snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
+            )
+            await _insert_anchorage_snapshot(
+                conn,
+                prime_id=prime_id,
+                package_id="PKG-B",
+                active=True,
+                exposure_value=Decimal("100000000"),
+                package_value=Decimal("120000000"),
+                asset_quantity=Decimal("2000"),
+                snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
+            )
+            # PKG-C original (pv 0, build_id 0): wrong values that must be superseded.
+            await _insert_anchorage_snapshot(
+                conn,
+                prime_id=prime_id,
+                package_id="PKG-C",
+                active=True,
+                exposure_value=Decimal("999000000"),
+                package_value=Decimal("999000000"),
+                asset_quantity=Decimal("9999"),
+                snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
+                build_id=0,
+            )
+            # PKG-C correction (pv 1, build_id 1): the values that make the cohort sums.
+            await _insert_anchorage_snapshot(
+                conn,
+                prime_id=prime_id,
+                package_id="PKG-C",
+                active=True,
+                exposure_value=Decimal("50000000"),
+                package_value=Decimal("69672229"),
+                asset_quantity=Decimal("722.61"),
+                snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
+                build_id=1,
+            )
+
+            # Inactive package IN the latest cohort: same snapshot_time as the
+            # active packages but active=false. Only the `active` predicate
+            # excludes it (the cohort filter does not, since it shares the max
+            # snapshot_time). Non-zero values so its leak would move every sum.
+            await _insert_anchorage_snapshot(
+                conn,
+                prime_id=prime_id,
+                package_id="PKG-INACTIVE",
+                active=False,
+                exposure_value=Decimal("88000000"),
+                package_value=Decimal("88000000"),
+                asset_quantity=Decimal("800"),
+                snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
+            )
+
+            # Closed cohort: exposure 0 but active=true, polled three days earlier.
+            # Residual collateral/BTC that an unscoped read would leak in.
+            for package_id, package_value, asset_quantity in [
+                ("PKG-X", Decimal("70000000"), Decimal("1000")),
+                ("PKG-Y", Decimal("70000000"), Decimal("1000")),
+                ("PKG-Z", Decimal("71327771"), Decimal("500")),
+            ]:
+                await _insert_anchorage_snapshot(
+                    conn,
+                    prime_id=prime_id,
+                    package_id=package_id,
+                    active=True,
+                    exposure_value=Decimal("0"),
+                    package_value=package_value,
+                    asset_quantity=asset_quantity,
+                    snapshot_time=_ANCHORAGE_CLOSED_SNAPSHOT,
+                )
+
+            # A second prime with an allocation_position but NO anchorage rows.
+            empty_prime_id = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('anchorage_empty', $1) RETURNING id",
+                bytes.fromhex(_ANCHORAGE_EMPTY_VAULT_HEX),
+            )
+            await declare_prime_proxy(conn, prime_id=empty_prime_id, proxy_hex=ANCHORAGE_EMPTY_PROXY_HEX)
+            await insert_allocation_position(
+                conn,
+                token_id=token_id,
+                prime_id=empty_prime_id,
+                proxy_hex=ANCHORAGE_EMPTY_PROXY_HEX,
+                balance=1,
+                block=1000,
+                tx=_ANCHORAGE_EMPTY_TX,
+                direction="in",
+            )
+
+            await _seed_anchorage_multi_asset_prime(conn, token_id)
+            await _seed_anchorage_other_prime(conn, token_id)
+    finally:
+        await conn.close()
+
+
+async def _seed_anchorage_multi_asset_prime(conn: asyncpg.Connection, token_id: int) -> None:
+    """A prime whose latest cohort spans two asset-type groups, one of them a
+    multi-asset package — exercises multi-group output/ordering and the
+    package-level double-count guard.
+
+    Packages (all active, one snapshot_time):
+      * PKG-B1  BTC only   — exposure 130, collateral 150, 10 BTC
+      * PKG-E1  ETH only   — exposure  40, collateral  50,  5 ETH
+      * PKG-MX  BTC + ETH  — one loan (exposure 30 / collateral 45) repeated on
+                             both asset rows; BTC weighted 40 > ETH weighted 15,
+                             so BTC is the package's dominant collateral.
+
+    Correct (deduped) per-group sums:
+      BTC → amount 160 (130 + 30), collateral 195, balance 13 (10 + 3)
+      ETH → amount  40 (40 +  0), collateral  50, balance  7 ( 5 + 2)
+    The package-level 30/45 of PKG-MX is attributed once (to BTC, its dominant
+    asset); an unguarded GROUP BY would add it to ETH too (amount 70 / collateral 95).
+    """
+    prime_id = await conn.fetchval(
+        "INSERT INTO prime (name, vault_address) VALUES ('anchorage_multi', $1) RETURNING id",
+        bytes.fromhex(_ANCHORAGE_MULTI_VAULT_HEX),
+    )
+    await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=ANCHORAGE_MULTI_PROXY_HEX)
+    await insert_allocation_position(
+        conn,
+        token_id=token_id,
+        prime_id=prime_id,
+        proxy_hex=ANCHORAGE_MULTI_PROXY_HEX,
+        balance=1,
+        block=1000,
+        tx=_ANCHORAGE_MULTI_TX,
+        direction="in",
+    )
+    await _insert_anchorage_snapshot(
+        conn,
+        prime_id=prime_id,
+        package_id="PKG-B1",
+        active=True,
+        exposure_value=Decimal("130"),
+        package_value=Decimal("150"),
+        asset_quantity=Decimal("10"),
+        snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
+        asset_type="BTC",
+    )
+    await _insert_anchorage_snapshot(
+        conn,
+        prime_id=prime_id,
+        package_id="PKG-E1",
+        active=True,
+        exposure_value=Decimal("40"),
+        package_value=Decimal("50"),
+        asset_quantity=Decimal("5"),
+        snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
+        asset_type="ETH",
+    )
+    # PKG-MX: two rows, same package_id / package-level loan, different asset types.
+    await _insert_anchorage_snapshot(
+        conn,
+        prime_id=prime_id,
+        package_id="PKG-MX",
+        active=True,
+        exposure_value=Decimal("30"),
+        package_value=Decimal("45"),
+        asset_quantity=Decimal("3"),
+        snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
+        asset_type="BTC",
+        asset_weighted_value=Decimal("40"),
+    )
+    await _insert_anchorage_snapshot(
+        conn,
+        prime_id=prime_id,
+        package_id="PKG-MX",
+        active=True,
+        exposure_value=Decimal("30"),
+        package_value=Decimal("45"),
+        asset_quantity=Decimal("2"),
+        snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
+        asset_type="ETH",
+        asset_weighted_value=Decimal("15"),
+    )
+
+
+async def _seed_anchorage_other_prime(conn: asyncpg.Connection, token_id: int) -> None:
+    """A second prime with its own, later-polled BTC cohort (exposure 99).
+
+    Later than the main prime's cohort on purpose: the per-prime scope on
+    ``MAX(snapshot_time)`` must keep this prime's later poll from becoming the
+    main prime's cohort.
+    """
+    prime_id = await conn.fetchval(
+        "INSERT INTO prime (name, vault_address) VALUES ('anchorage_other', $1) RETURNING id",
+        bytes.fromhex(_ANCHORAGE_OTHER_VAULT_HEX),
+    )
+    await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=ANCHORAGE_OTHER_PROXY_HEX)
+    await insert_allocation_position(
+        conn,
+        token_id=token_id,
+        prime_id=prime_id,
+        proxy_hex=ANCHORAGE_OTHER_PROXY_HEX,
+        balance=1,
+        block=1000,
+        tx=_ANCHORAGE_OTHER_TX,
+        direction="in",
+    )
+    await _insert_anchorage_snapshot(
+        conn,
+        prime_id=prime_id,
+        package_id="PKG-O1",
+        active=True,
+        exposure_value=Decimal("99"),
+        package_value=Decimal("111"),
+        asset_quantity=Decimal("9"),
+        snapshot_time=_ANCHORAGE_OTHER_SNAPSHOT,
+        asset_type="BTC",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Prime fan-out seed
+#
+# The REAL axis-synome spark proxies, so app.domain.prime_registry recognises them
+# and the API's prime-level aggregation is actually exercised. Spark holds a priced
+# receipt-token position on mainnet and a bare holding on avalanche, so the
+# avalanche proxy's own exposure is zero while the prime-wide figure is not — the
+# difference the fan-out tests assert on.
+# ---------------------------------------------------------------------------
+
+SPARK_MAINNET_ALM_HEX = "1601843c5e9bc251a3272907010afa41fa18347e"
+SPARK_AVALANCHE_ALM_HEX = "ece6b0e8a54c2f44e066fbb9234e7157b15b7fec"
+SPARK_SUB_PROXY_HEX = "3300f198988e4c9c63f75df86de36421f06af8c4"
+# Absent from the pinned contract, and lower than SPARK_MAINNET_ALM_HEX.
+SPARK_OFF_CONTRACT_ALM_HEX = "0a11ce0000000000000000000000000000000001"
+
+_FAN_OUT_USDC_HEX = "b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0"
+_FAN_OUT_AUSDC_HEX = "c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1"
+_FAN_OUT_AVAX_TOKEN_HEX = "d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2"
+# Grove's real proxies. Spark holds a tracker on every chain it has a proxy on, so
+# only grove still reaches the unserved-chain path (monad/plasma/plume).
+GROVE_MAINNET_ALM_HEX = "491edfb0b8b608044e227225c715981a30f3a44e"
+GROVE_AVALANCHE_ALM_HEX = "7107dd8f56642327945294a18a4280c78e153644"
+GROVE_SUB_PROXY_HEX = "1369f7b2b38c76b6478c0f0e66d94923421891ba"
+
+_FAN_OUT_TX = "1a" * 32
+_FAN_OUT_TX_AVAX = "1b" * 32
+_FAN_OUT_TX_TREASURY = "1c" * 32
+_FAN_OUT_TX_OFF_CONTRACT = "1d" * 32
+_FAN_OUT_TX_GROVE = "1e" * 32
+_FAN_OUT_TX_GROVE_AVAX = "1f" * 32
+_FAN_OUT_TX_GROVE_TREASURY = "2a" * 32
+
+# Must match allocation_position_repository._USDS_ADDRESS_HEX: get_latest_total_capital_usd
+# filters the treasury read on this exact address, and migration 20260204_110000 already
+# seeds a USDS token row here, so its id is resolved by SELECT rather than inserted.
+_FAN_OUT_USDS_HEX = "dc035d45d973e3ec169d2276ddab16f1e407384f"
+
+# aUSDC balance 1000 against a USDC price of 1 USD.
+_FAN_OUT_BALANCE = Decimal("1000")
+_FAN_OUT_TREASURY = Decimal("4000")
+FAN_OUT_PROXY_EXPOSURE_USD = "0"
+FAN_OUT_PRIME_EXPOSURE_USD = "1000.000000"
+
+
+async def seed_prime_fan_out(db_url: str, *, with_off_contract_proxy: bool = False) -> None:
+    """Seed spark's and grove's real ALM proxies plus their SubProxy treasuries.
+
+    Grove is seeded alongside spark because its contract proxies on monad, plasma
+    and plume are absent from ``entity.ChainIDToName``, so they are the only ones
+    left that exercise the unserved-chain (null, not zero) per-chain path.
+
+    ``with_off_contract_proxy`` adds a third proxy holding rows under spark's
+    ``prime_id`` at an address the pinned axis-synome contract does not list — the
+    state while a newly deployed tracker runs ahead of the contract pin. Its
+    address sorts *below* the mainnet proxy's, so a primary picked by address
+    alone would attribute spark's prime-scoped rows to it.
+    """
+    conn = await asyncpg.connect(db_url)
+    try:
+        async with conn.transaction():
+            spark_id = await conn.fetchval("SELECT id FROM prime WHERE name = 'spark'")
+            protocol_id = await conn.fetchval("SELECT id FROM protocol WHERE name = 'Aave V3' AND chain_id = 1")
+            oracle_id = await conn.fetchval("SELECT id FROM oracle WHERE name = 'aave_v3'")
+
+            usdc_id = await insert_token(conn, "USDC", 6, bytes.fromhex(_FAN_OUT_USDC_HEX))
+            ausdc_id = await insert_token(conn, "aUSDC", 6, bytes.fromhex(_FAN_OUT_AUSDC_HEX))
+            await insert_receipt_token_row(
+                conn,
+                protocol_id=protocol_id,
+                underlying_token_id=usdc_id,
+                address=bytes.fromhex(_FAN_OUT_AUSDC_HEX),
+                symbol="aUSDC",
+            )
+            await conn.execute(
+                "INSERT INTO onchain_token_price "
+                "(token_id, oracle_id, block_number, block_version, timestamp, price_usd) "
+                "VALUES ($1, $2, 1000, 0, NOW(), $3)",
+                usdc_id,
+                oracle_id,
+                Decimal(1),
+            )
+            await insert_oracle_asset(conn, oracle_id, usdc_id)
+
+            await insert_allocation_position(
+                conn,
+                token_id=ausdc_id,
+                prime_id=spark_id,
+                proxy_hex=SPARK_MAINNET_ALM_HEX,
+                balance=_FAN_OUT_BALANCE,
+                block=1000,
+                tx=_FAN_OUT_TX,
+                direction="in",
+            )
+
+            avax_token_id = await insert_token(conn, "JAAA", 18, bytes.fromhex(_FAN_OUT_AVAX_TOKEN_HEX))
+            await insert_allocation_position(
+                conn,
+                token_id=avax_token_id,
+                prime_id=spark_id,
+                proxy_hex=SPARK_AVALANCHE_ALM_HEX,
+                balance=Decimal("5"),
+                block=1001,
+                tx=_FAN_OUT_TX_AVAX,
+                direction="in",
+                chain_id=43114,
+            )
+
+            # SubProxy treasury: the prime-wide Total Risk Capital denominator.
+            # Without it, get_latest_total_capital_usd returns None and
+            # total_risk_capital_usd / prime_encumbrance_ratio go null, so this
+            # keeps the fixture shaped like a real prime even though no test
+            # here asserts on those fields directly.
+            usds_id = await conn.fetchval(
+                "SELECT id FROM token WHERE chain_id = 1 AND address = $1",
+                bytes.fromhex(_FAN_OUT_USDS_HEX),
+            )
+            if usds_id is None:
+                raise RuntimeError("USDS token not seeded by migrations")
+            await insert_allocation_position(
+                conn,
+                token_id=usds_id,
+                prime_id=spark_id,
+                proxy_hex=SPARK_SUB_PROXY_HEX,
+                balance=_FAN_OUT_TREASURY,
+                block=1002,
+                tx=_FAN_OUT_TX_TREASURY,
+                direction="in",
+            )
+
+            await _insert_anchorage_snapshot(
+                conn,
+                prime_id=spark_id,
+                package_id="FAN-OUT-PKG",
+                active=True,
+                exposure_value=Decimal("250000000"),
+                package_value=Decimal("309672229"),
+                asset_quantity=Decimal("4722.61"),
+                snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
+            )
+
+            grove_id = await conn.fetchval("SELECT id FROM prime WHERE name = 'grove'")
+            await insert_allocation_position(
+                conn,
+                token_id=ausdc_id,
+                prime_id=grove_id,
+                proxy_hex=GROVE_MAINNET_ALM_HEX,
+                balance=_FAN_OUT_BALANCE,
+                block=1010,
+                tx=_FAN_OUT_TX_GROVE,
+                direction="in",
+            )
+            await insert_allocation_position(
+                conn,
+                token_id=avax_token_id,
+                prime_id=grove_id,
+                proxy_hex=GROVE_AVALANCHE_ALM_HEX,
+                balance=Decimal("5"),
+                block=1011,
+                tx=_FAN_OUT_TX_GROVE_AVAX,
+                direction="in",
+                chain_id=43114,
+            )
+            await insert_allocation_position(
+                conn,
+                token_id=usds_id,
+                prime_id=grove_id,
+                proxy_hex=GROVE_SUB_PROXY_HEX,
+                balance=_FAN_OUT_TREASURY,
+                block=1012,
+                tx=_FAN_OUT_TX_GROVE_TREASURY,
+                direction="in",
+            )
+
+            if with_off_contract_proxy:
+                await insert_allocation_position(
+                    conn,
+                    token_id=avax_token_id,
+                    prime_id=spark_id,
+                    proxy_hex=SPARK_OFF_CONTRACT_ALM_HEX,
+                    balance=Decimal("7"),
+                    block=1003,
+                    tx=_FAN_OUT_TX_OFF_CONTRACT,
+                    direction="in",
+                    chain_id=8453,
+                )
+    finally:
+        await conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Allocation latest-row seed
+#
+# Exercises every case that distinguishes a correct latest-row read of
+# ``allocation_position_current`` from a wrong one: several versions of one
+# token, a reorg (higher block_version at a LOWER log_index), a reprocessed row
+# (processing_version > 0) both winning its own identity and losing to a later
+# original log, a same-block log_index tie, a sweep colliding with an event row
+# at log_index 0 in either arrival order, a swept-to-zero token, a token with no
+# receipt_token, two receipt tokens over one underlying, a receipt_token bound to
+# a protocol on another chain, two token rows sharing one address across chains
+# so that two cache rows reach a single receipt_token, one address carrying a
+# registered position on each of two chains, and the wallet-lookup registry
+# scenarios.
+#
+# Each ordering key is seeded so that dropping it changes the answer rather than
+# merely tying: a wrong query must FAIL these tests, not coin-flip them.
+# ---------------------------------------------------------------------------
+
+RTL_PROXY_HEX = "5a" * 20
+
+_RTL_PROTOCOL_HEX = "5b" * 20
+_RTL_FOREIGN_PROTOCOL_HEX = "5c" * 20
+_RTL_ORACLE_HEX = "5d" * 20
+_RTL_UNDERLYING_HEX = "5e" * 20
+_RTL_ALT_UNDERLYING_HEX = "5f" * 20
+
+RTL_UNDERLYING_PRICE = Decimal("1.02")
+_RTL_ALT_UNDERLYING_PRICE = Decimal("4.00")
+
+# History blocks sit below every decisive block, so history never wins. Enough
+# rows that the latest-row selection is a real choice rather than a single row.
+_RTL_HISTORY_FIRST_BLOCK = 1_000
+_RTL_HISTORY_ROWS_PER_TOKEN = 30
+_RTL_DECISIVE_BLOCK = 9_000
+
+# One block time per block_number, which is what the tracker writes: rows sharing
+# a block tie on block_timestamp, so direction and tx_hash decide the collisions
+# below rather than the seeding clock.
+_RTL_BLOCK_EPOCH = dt.datetime(2026, 5, 4, 12, 0, tzinfo=dt.UTC)
+
+# Token rows registered on avalanche; their positions are seeded per scenario
+# rather than given the mainnet pre-history every other token gets.
+_RTL_NON_MAINNET_TOKENS = frozenset({"rtlMultiChainAvax"})
+
+# The balance each surviving receipt position must report, per receipt symbol.
+RTL_LATEST_BALANCES = {
+    "rtlVersions": Decimal("300"),
+    "rtlReorg": Decimal("440"),
+    "rtlReprocessed": Decimal("770"),
+    "rtlReprocessOutranked": Decimal("7"),
+    "rtlLogIndex": Decimal("550"),
+    "rtlSharedA": Decimal("110"),
+    "rtlSharedB": Decimal("120"),
+    "rtlAliased": Decimal("900"),
+    "rtlMultiChain": Decimal("111"),
+    "rtlMultiChainAvax": Decimal("222"),
+    "rtlSelfTransfer": Decimal("10"),
+    "rtlSweepTie": Decimal("66"),
+    "rtlSweepFirst": Decimal("76"),
+}
+
+# Rows tied on (block_number, block_version, block_timestamp, log_index) are
+# legal, so the ordering ends on direction then tx_hash to stay total. A tied pair
+# carries the same balance (each path reads balanceOf at one block hash), so the
+# tiebreak settles only the surfaced activity metadata: the sweep wins its
+# collision with an event row at the same log_index, and an out-row wins over the
+# in-row its self-transfer emitted alongside it.
+# Which of a tied pair an untiebroken sort returns is plan-dependent, so these
+# cases pin the resolution rather than relying on seed order to expose its
+# absence.
+RTL_LATEST_ACTIONS = {
+    "rtlSelfTransfer": "out",
+    "rtlSweepTie": "sweep",
+    "rtlSweepFirst": "sweep",
+}
+
+# The direct-holdings read dedups on token_id alone, so it gets its own bare-held
+# tokens: one versioned across blocks, one whose sweep ties an event row.
+RTL_TREASURY_BALANCE = Decimal("5678")
+
+RTL_DIRECT_BALANCES = {
+    "RTLPLAIN": Decimal("700"),
+    "RTLPLAINVER": Decimal("330"),
+    "RTLPLAINTIE": Decimal("88"),
+    "RTLPLAINXCHAIN": Decimal("44"),
+}
+
+# Seeded with positions, absent from the positions list: swept to zero, held
+# bare (no receipt_token), or registered against another chain's protocol.
+RTL_EXCLUDED_SYMBOLS = (
+    "rtlSwept",
+    "RTLPLAIN",
+    "RTLPLAINVER",
+    "RTLPLAINTIE",
+    "RTLPLAINXCHAIN",
+    "rtlForeign",
+)
+
+# Wallet-lookup registry. One receipt-token address registered on two chains,
+# each binding its own underlying; `receipt_token.underlying_token_id` is a bare
+# FK to token.id carrying no chain constraint, so the avalanche registration can
+# and here does point at a mainnet token row. Without rt.chain_id = ap.chain_id
+# the mainnet lookup reaches it and answers with that token's larger holder.
+RTL_WALLET_FALLBACK_RECEIPT_HEX = "a0" * 20
+RTL_WALLET_HELD_RECEIPT_HEX = "a3" * 20
+RTL_WALLET_UNDERLYING_HOLDER_HEX = "b1" * 20
+RTL_WALLET_CROSS_CHAIN_HOLDER_HEX = "b2" * 20
+RTL_WALLET_RECEIPT_HOLDER_HEX = "b3" * 20
+RTL_WALLET_UNDERLYING_BALANCE = Decimal("10")
+RTL_WALLET_CROSS_CHAIN_BALANCE = Decimal("999")
+RTL_WALLET_RECEIPT_BALANCE = Decimal("50")
+# The receipt-token holder also holds the underlying, and more of it, so the
+# fallback branch would outrank it on balance if source_rank stopped working.
+_RTL_WALLET_RECEIPT_HOLDER_UNDERLYING = Decimal("4321")
+
+
+def _rtl_tx(nonce: int) -> str:
+    return f"{nonce:064x}"
+
+
+def rtl_block_time(block: int) -> dt.datetime:
+    return _RTL_BLOCK_EPOCH + dt.timedelta(seconds=block - _RTL_DECISIVE_BLOCK)
+
+
+async def _rtl_insert_history(conn: asyncpg.Connection, *, token_id: int, prime_id: int) -> None:
+    """Bulk-insert one token's pre-history; per-row round trips are too slow at this volume."""
+    await conn.execute(
+        """
+        INSERT INTO allocation_position
+            (chain_id, token_id, prime_id, proxy_address, balance, block_number,
+             block_version, tx_hash, log_index, tx_amount, direction, created_at)
+        SELECT 1, $1, $2, $3, g, $4 + g, 0,
+               decode(lpad(to_hex($1::BIGINT * 1000000 + g), 64, '0'), 'hex'), 0, 1, 'in',
+               $6::timestamptz + make_interval(secs => (($4 + g) - $7)::double precision)
+        FROM generate_series(1, $5) g
+        """,
+        token_id,
+        prime_id,
+        bytes.fromhex(RTL_PROXY_HEX),
+        _RTL_HISTORY_FIRST_BLOCK,
+        _RTL_HISTORY_ROWS_PER_TOKEN,
+        _RTL_BLOCK_EPOCH,
+        _RTL_DECISIVE_BLOCK,
+    )
+
+
+async def _rtl_register_receipt_token(
+    conn: asyncpg.Connection,
+    *,
+    symbol: str,
+    address_byte: int,
+    protocol_id: int,
+    underlying_token_id: int,
+) -> int:
+    """Register a receipt token plus the ERC20 the proxy holds, and return that token's id."""
+    address = bytes([address_byte]) * 20
+    token_id = await insert_token(conn, symbol, 18, address)
+    await insert_receipt_token_row(
+        conn,
+        protocol_id=protocol_id,
+        underlying_token_id=underlying_token_id,
+        address=address,
+        symbol=symbol,
+    )
+    return token_id
+
+
+async def _rtl_seed_registry(conn: asyncpg.Connection) -> dict[str, int]:
+    """Seed protocols, oracle, underlyings and receipt tokens; return token ids by symbol."""
+    protocol_id = await insert_protocol(conn, "rtl_lending", bytes.fromhex(_RTL_PROTOCOL_HEX))
+    foreign_protocol_id = await insert_protocol(
+        conn, "rtl_foreign", bytes.fromhex(_RTL_FOREIGN_PROTOCOL_HEX), chain_id=43114
+    )
+    oracle_id = await insert_oracle(conn, "rtl_oracle", bytes.fromhex(_RTL_ORACLE_HEX))
+    await bind_protocol_oracle(conn, protocol_id, oracle_id)
+    await bind_protocol_oracle(conn, foreign_protocol_id, oracle_id)
+
+    underlying_id = await insert_token(conn, "RTLUND", 18, bytes.fromhex(_RTL_UNDERLYING_HEX))
+    alt_underlying_id = await insert_token(conn, "RTLUND2", 18, bytes.fromhex(_RTL_ALT_UNDERLYING_HEX))
+    for token_id, price in (
+        (underlying_id, RTL_UNDERLYING_PRICE),
+        (alt_underlying_id, _RTL_ALT_UNDERLYING_PRICE),
+    ):
+        await insert_onchain_price(conn, token_id=token_id, oracle_id=oracle_id, price=price, block=1)
+        await insert_oracle_asset(conn, oracle_id, token_id)
+
+    tokens: dict[str, int] = {}
+    receipts = (
+        ("rtlVersions", underlying_id),
+        ("rtlReorg", alt_underlying_id),
+        ("rtlReprocessed", alt_underlying_id),
+        ("rtlReprocessOutranked", alt_underlying_id),
+        ("rtlLogIndex", alt_underlying_id),
+        ("rtlSharedA", underlying_id),
+        ("rtlSharedB", underlying_id),
+        ("rtlSwept", alt_underlying_id),
+        ("rtlSelfTransfer", underlying_id),
+        ("rtlSweepTie", underlying_id),
+        ("rtlSweepFirst", underlying_id),
+    )
+    for offset, (symbol, underlying) in enumerate(receipts):
+        tokens[symbol] = await _rtl_register_receipt_token(
+            conn,
+            symbol=symbol,
+            address_byte=0x60 + offset,
+            protocol_id=protocol_id,
+            underlying_token_id=underlying,
+        )
+
+    # Registered against a protocol on another chain: the positions query joins
+    # protocol on pr.chain_id = ap.chain_id, so a mainnet position in this
+    # receipt token resolves to no protocol and drops out.
+    tokens["rtlForeign"] = await _rtl_register_receipt_token(
+        conn,
+        symbol="rtlForeign",
+        address_byte=0x70,
+        protocol_id=foreign_protocol_id,
+        underlying_token_id=underlying_id,
+    )
+
+    # One address, two token rows (mainnet + avalanche), one mainnet
+    # receipt_token, and MAINNET positions against both token rows. Nothing ties
+    # allocation_position.chain_id to token.chain_id, so both cache rows reach
+    # the single receipt_token unless the token join is chain-qualified — and
+    # then the read emits the position twice.
+    tokens["rtlAliased"] = await _rtl_register_receipt_token(
+        conn,
+        symbol="rtlAliased",
+        address_byte=0x71,
+        protocol_id=protocol_id,
+        underlying_token_id=underlying_id,
+    )
+    tokens["rtlAliasedTwin"] = await insert_token(conn, "rtlAliased", 18, bytes([0x71]) * 20, chain_id=43114)
+
+    # One address registered and held on two chains, each side keeping its own
+    # token row and receipt_token: the chain-qualified join must keep both, not
+    # collapse them.
+    multi_chain_address = bytes([0x73]) * 20
+    tokens["rtlMultiChain"] = await insert_token(conn, "rtlMultiChain", 18, multi_chain_address)
+    tokens["rtlMultiChainAvax"] = await insert_token(conn, "rtlMultiChainAvax", 18, multi_chain_address, chain_id=43114)
+    await insert_receipt_token_row(
+        conn,
+        protocol_id=protocol_id,
+        underlying_token_id=underlying_id,
+        address=multi_chain_address,
+        symbol="rtlMultiChain",
+    )
+    await insert_receipt_token_row(
+        conn,
+        protocol_id=foreign_protocol_id,
+        underlying_token_id=underlying_id,
+        address=multi_chain_address,
+        symbol="rtlMultiChainAvax",
+        chain_id=43114,
+    )
+
+    # Held bare, so these belong to the direct-holdings query, not the receipt
+    # one: its dedup keys on token_id alone, so it needs its own versioned and
+    # tied tokens rather than borrowing the receipt tokens above.
+    for offset, symbol in enumerate(("RTLPLAIN", "RTLPLAINVER", "RTLPLAINTIE", "RTLPLAINXCHAIN")):
+        tokens[symbol] = await insert_token(conn, symbol, 18, bytes([0x90 + offset]) * 20)
+    return tokens
+
+
+async def _rtl_seed_positions(conn: asyncpg.Connection, *, prime_id: int, tokens: dict[str, int]) -> None:
+    """Seed each token's decisive latest rows on top of its pre-history."""
+    for symbol, token_id in tokens.items():
+        if symbol not in _RTL_NON_MAINNET_TOKENS:
+            await _rtl_insert_history(conn, token_id=token_id, prime_id=prime_id)
+
+    async def position(token_id: int, *, block: int = _RTL_DECISIVE_BLOCK, **kwargs) -> None:
+        kwargs.setdefault("direction", "in")
+        kwargs.setdefault("created_at", rtl_block_time(block))
+        await insert_allocation_position(
+            conn, token_id=token_id, prime_id=prime_id, proxy_hex=RTL_PROXY_HEX, block=block, **kwargs
+        )
+
+    later_balances = (Decimal("100"), Decimal("200"), RTL_LATEST_BALANCES["rtlVersions"])
+    for index, balance in enumerate(later_balances):
+        await position(tokens["rtlVersions"], balance=balance, block=_RTL_DECISIVE_BLOCK + index, tx=_rtl_tx(1 + index))
+
+    # Reorg: the republished block carries block_version 1 and must win. Its
+    # log_index is LOWER than the superseded row's, so an ordering that drops
+    # block_version picks the stale 44 rather than merely tying.
+    await position(tokens["rtlReorg"], balance=Decimal("44"), tx=_rtl_tx(10), log_index=5)
+    await position(
+        tokens["rtlReorg"],
+        balance=RTL_LATEST_BALANCES["rtlReorg"],
+        tx=_rtl_tx(10),
+        block_version=1,
+        log_index=1,
+    )
+
+    # Reprocessing: same row identity, fresh build_id, so the trigger assigns
+    # processing_version 1 and the corrected balance must win over version 0.
+    for build_id, balance in ((0, Decimal("77")), (1, RTL_LATEST_BALANCES["rtlReprocessed"])):
+        await position(tokens["rtlReprocessed"], balance=balance, tx=_rtl_tx(20), build_id=build_id)
+
+    # The same correction beside a LATER original log in the same block:
+    # processing_version ranks below log_index, so the untouched log_index 9 row
+    # wins. Ranked above it, a correction to one log would beat a different log.
+    for build_id, balance in ((0, Decimal("77")), (1, Decimal("770"))):
+        await position(tokens["rtlReprocessOutranked"], balance=balance, tx=_rtl_tx(21), build_id=build_id)
+    await position(
+        tokens["rtlReprocessOutranked"],
+        balance=RTL_LATEST_BALANCES["rtlReprocessOutranked"],
+        tx=_rtl_tx(22),
+        log_index=9,
+    )
+
+    # Two events in one block: the higher log_index is the later one.
+    await position(tokens["rtlLogIndex"], balance=Decimal("55"), tx=_rtl_tx(30), log_index=3)
+    await position(
+        tokens["rtlLogIndex"],
+        balance=RTL_LATEST_BALANCES["rtlLogIndex"],
+        tx=_rtl_tx(31),
+        log_index=9,
+    )
+
+    for symbol, nonce in (("rtlSharedA", 40), ("rtlSharedB", 41)):
+        await position(tokens[symbol], balance=RTL_LATEST_BALANCES[symbol], tx=_rtl_tx(nonce))
+
+    # Swept to zero after a non-zero balance, in the SAME block: an open-position
+    # filter applied before the latest-row pick — at either stage — resurrects
+    # the stale 500 instead of dropping the token.
+    await position(tokens["rtlSwept"], balance=Decimal("500"), tx=_rtl_tx(50))
+    await position(tokens["rtlSwept"], balance=Decimal("0"), tx=_rtl_tx(51), log_index=4, direction="sweep")
+
+    await position(tokens["rtlForeign"], balance=Decimal("600"), tx=_rtl_tx(60))
+
+    await position(tokens["RTLPLAIN"], balance=RTL_DIRECT_BALANCES["RTLPLAIN"], tx=_rtl_tx(70))
+    for index, balance in enumerate((Decimal("11"), Decimal("22"), RTL_DIRECT_BALANCES["RTLPLAINVER"])):
+        await position(
+            tokens["RTLPLAINVER"], balance=balance, block=_RTL_DECISIVE_BLOCK + index, tx=_rtl_tx(71 + index)
+        )
+    await position(tokens["RTLPLAINTIE"], balance=RTL_DIRECT_BALANCES["RTLPLAINTIE"], tx=_rtl_tx(0), direction="sweep")
+    await position(tokens["RTLPLAINTIE"], balance=Decimal("80"), tx=_rtl_tx(75))
+
+    # One token row, a position on each of two chains at the same block number —
+    # chains number their blocks independently, and nothing forces a position's
+    # chain onto its token row's. So the direct-holdings dedup still has two cache
+    # rows to choose between for one token_id, and only direction separates them:
+    # dropping it leaves tx_hash to hand the event row the sweep should win.
+    await position(tokens["RTLPLAINXCHAIN"], balance=Decimal("41"), tx=_rtl_tx(76))
+    await position(
+        tokens["RTLPLAINXCHAIN"],
+        balance=RTL_DIRECT_BALANCES["RTLPLAINXCHAIN"],
+        tx=_rtl_tx(0),
+        direction="sweep",
+        chain_id=43114,
+    )
+
+    # A proxy transferring to itself: one log, one tx_hash, one log_index, an
+    # out-row and an in-row. Same balance either way, so only the reported action
+    # moves — and it must not move between deploys.
+    for direction in ("in", "out"):
+        await position(
+            tokens["rtlSelfTransfer"],
+            balance=RTL_LATEST_BALANCES["rtlSelfTransfer"],
+            tx=_rtl_tx(100),
+            log_index=2,
+            direction=direction,
+        )
+
+    # A sweep reconciles the on-chain balance and carries no tx_hash or log_index,
+    # so it collides with any event row at log_index 0 in the same block. Seeded
+    # in both arrival orders, because the cache resolves the collision as it is
+    # written and only the ordering makes that independent of arrival.
+    await position(tokens["rtlSweepTie"], balance=Decimal("60"), tx=_rtl_tx(101))
+    await position(tokens["rtlSweepTie"], balance=RTL_LATEST_BALANCES["rtlSweepTie"], tx=_rtl_tx(0), direction="sweep")
+    await position(
+        tokens["rtlSweepFirst"], balance=RTL_LATEST_BALANCES["rtlSweepFirst"], tx=_rtl_tx(0), direction="sweep"
+    )
+    await position(tokens["rtlSweepFirst"], balance=Decimal("70"), tx=_rtl_tx(102))
+
+    # Each chain's own token row and receipt_token, held on its own chain.
+    await position(tokens["rtlMultiChain"], balance=RTL_LATEST_BALANCES["rtlMultiChain"], tx=_rtl_tx(90))
+    await position(
+        tokens["rtlMultiChainAvax"],
+        balance=RTL_LATEST_BALANCES["rtlMultiChainAvax"],
+        block=_RTL_DECISIVE_BLOCK + 100,
+        tx=_rtl_tx(91),
+        chain_id=43114,
+    )
+
+    # Both rows are MAINNET positions; only the token row they point at differs,
+    # and the twin's block is the lower one so the alias resolves to rtlAliased
+    # whether or not the token join is chain-qualified — the duplicate, not the
+    # winner, is what the qualification removes.
+    await position(tokens["rtlAliasedTwin"], balance=Decimal("800"), tx=_rtl_tx(80))
+    await position(
+        tokens["rtlAliased"],
+        balance=RTL_LATEST_BALANCES["rtlAliased"],
+        block=_RTL_DECISIVE_BLOCK + 1,
+        tx=_rtl_tx(81),
+    )
+
+    await _rtl_seed_treasury_tie(conn, prime_id=prime_id)
+    await _rtl_seed_wallet_lookup(conn, prime_id=prime_id)
+
+
+async def _rtl_seed_treasury_tie(conn: asyncpg.Connection, *, prime_id: int) -> None:
+    """Tie the prime's SubProxy treasury the same way, for the total-capital read.
+
+    That read scopes to the SubProxy wallets rather than the ALM proxy, so it
+    needs its own rows; USDS is dollar-pegged, so the balance IS the USD figure.
+    """
+    usds_id = await conn.fetchval(
+        "SELECT id FROM token WHERE chain_id = 1 AND address = $1", bytes.fromhex(_FAN_OUT_USDS_HEX)
+    )
+    if usds_id is None:
+        raise RuntimeError("USDS token not seeded by migrations")
+    subproxy_hex = sorted(subproxy_addresses())[0][2:]
+    for balance, tx, direction in (
+        (Decimal("1234"), _rtl_tx(110), "in"),
+        (RTL_TREASURY_BALANCE, _rtl_tx(0), "sweep"),
+    ):
+        await insert_allocation_position(
+            conn,
+            token_id=usds_id,
+            prime_id=prime_id,
+            proxy_hex=subproxy_hex,
+            balance=balance,
+            block=_RTL_DECISIVE_BLOCK,
+            created_at=rtl_block_time(_RTL_DECISIVE_BLOCK),
+            tx=tx,
+            direction=direction,
+        )
+
+
+async def _rtl_seed_wallet_lookup(conn: asyncpg.Connection, *, prime_id: int) -> None:
+    """Seed the crypto-lending wallet lookup's two branches and its cross-chain trap."""
+    protocol_id = await conn.fetchval("SELECT id FROM protocol WHERE chain_id = 1 AND name = 'rtl_lending'")
+    foreign_protocol_id = await conn.fetchval("SELECT id FROM protocol WHERE chain_id = 43114 AND name = 'rtl_foreign'")
+
+    underlying_id = await insert_token(conn, "RTLWUND", 18, bytes([0xA1]) * 20)
+    cross_chain_underlying_id = await insert_token(conn, "RTLWUNDX", 18, bytes([0xA2]) * 20)
+    # Its own underlying, so the receipt-token holder's larger underlying balance
+    # is a candidate in the held scenario only and cannot answer the fallback one.
+    held_underlying_id = await insert_token(conn, "RTLWUNDH", 18, bytes([0xA4]) * 20)
+
+    fallback_address = bytes.fromhex(RTL_WALLET_FALLBACK_RECEIPT_HEX)
+    await insert_token(conn, "rtlWalletFallback", 18, fallback_address)
+    await insert_receipt_token_row(
+        conn,
+        protocol_id=protocol_id,
+        underlying_token_id=underlying_id,
+        address=fallback_address,
+        symbol="rtlWalletFallback",
+    )
+    await insert_receipt_token_row(
+        conn,
+        protocol_id=foreign_protocol_id,
+        underlying_token_id=cross_chain_underlying_id,
+        address=fallback_address,
+        symbol="rtlWalletFallbackAvax",
+        chain_id=43114,
+    )
+
+    held_address = bytes.fromhex(RTL_WALLET_HELD_RECEIPT_HEX)
+    held_token_id = await insert_token(conn, "rtlWalletHeld", 18, held_address)
+    await insert_receipt_token_row(
+        conn,
+        protocol_id=protocol_id,
+        underlying_token_id=held_underlying_id,
+        address=held_address,
+        symbol="rtlWalletHeld",
+    )
+
+    async def wallet_position(*, token_id: int, proxy_hex: str, balance: Decimal, block: int, nonce: int) -> None:
+        await insert_allocation_position(
+            conn,
+            token_id=token_id,
+            prime_id=prime_id,
+            proxy_hex=proxy_hex,
+            balance=balance,
+            block=block,
+            created_at=rtl_block_time(block),
+            tx=_rtl_tx(nonce),
+            direction="in",
+        )
+
+    await wallet_position(
+        token_id=underlying_id,
+        proxy_hex=RTL_WALLET_UNDERLYING_HOLDER_HEX,
+        balance=RTL_WALLET_UNDERLYING_BALANCE,
+        block=_RTL_DECISIVE_BLOCK,
+        nonce=120,
+    )
+    await wallet_position(
+        token_id=cross_chain_underlying_id,
+        proxy_hex=RTL_WALLET_CROSS_CHAIN_HOLDER_HEX,
+        balance=RTL_WALLET_CROSS_CHAIN_BALANCE,
+        block=_RTL_DECISIVE_BLOCK,
+        nonce=121,
+    )
+    for block, balance in ((_RTL_DECISIVE_BLOCK, Decimal("5")), (_RTL_DECISIVE_BLOCK + 1, RTL_WALLET_RECEIPT_BALANCE)):
+        await wallet_position(
+            token_id=held_token_id,
+            proxy_hex=RTL_WALLET_RECEIPT_HOLDER_HEX,
+            balance=balance,
+            block=block,
+            nonce=122 + block - _RTL_DECISIVE_BLOCK,
+        )
+    await wallet_position(
+        token_id=held_underlying_id,
+        proxy_hex=RTL_WALLET_RECEIPT_HOLDER_HEX,
+        balance=_RTL_WALLET_RECEIPT_HOLDER_UNDERLYING,
+        block=_RTL_DECISIVE_BLOCK,
+        nonce=125,
+    )
+
+
+async def seed_receipt_position_latest_rows(db_url: str) -> None:
+    """Seed the allocation latest-row scenarios into the given database."""
+    conn = await asyncpg.connect(db_url)
+    try:
+        async with conn.transaction():
+            prime_id = await conn.fetchval("SELECT id FROM prime ORDER BY id LIMIT 1")
+            if prime_id is None:
+                raise RuntimeError("no prime seeded by migrations")
+            # prime_proxy is reference data (VEC-651): the treasury read resolves the
+            # prime through it, so positions alone do not make _PROXY resolvable.
+            await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=RTL_PROXY_HEX)
+            tokens = await _rtl_seed_registry(conn)
+            await _rtl_seed_positions(conn, prime_id=prime_id, tokens=tokens)
     finally:
         await conn.close()

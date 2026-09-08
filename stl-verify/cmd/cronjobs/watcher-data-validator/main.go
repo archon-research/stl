@@ -32,9 +32,8 @@ func init() {
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
-	if err := temporal.RunCronjob(ctx, temporal.BuildMeta{
+	err := temporal.RunCronjob(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporal.CronjobConfig{
 		// SERVICE_NAME is injected per deployment from the pod's app label so each
@@ -48,7 +47,9 @@ func main() {
 		IntervalOffsetEnv: "DATA_VALIDATION_SCHEDULE_OFFSET",
 		OpenDatabase:      postgres.PoolOpener(postgres.DefaultDBConfig(env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"))),
 		Setup:             setupRunner,
-	}); err != nil {
+	})
+	cancel()
+	if err != nil {
 		slog.Error("fatal", "error", err)
 		os.Exit(1)
 	}
@@ -91,9 +92,17 @@ func setupRunner(_ context.Context, deps temporal.Dependencies) (temporal.Runner
 			return fmt.Errorf("running validation: %w", err)
 		}
 		report.Finalize()
-		if !report.Success() {
-			return fmt.Errorf("validation failed: %d failures, %d errors", report.Failed, report.Errors)
-		}
-		return nil
+		return validationError(report)
 	}), nil
+}
+
+// validationError turns a report into the runner's error. That error is what
+// the Temporal UI shows and what the alert quotes, so it carries the messages
+// the runbook tells the operator to read, not just how many there were.
+func validationError(report *data_validator.Report) error {
+	if report.Success() {
+		return nil
+	}
+	return fmt.Errorf("validation failed: %d failures, %d errors — %s",
+		report.Failed, report.Errors, report.FailureSummary())
 }

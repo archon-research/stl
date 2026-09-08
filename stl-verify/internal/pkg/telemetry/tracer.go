@@ -124,11 +124,12 @@ func InitTracer(ctx context.Context, config TracerConfig) (shutdown func(context
 
 	// Create sampler
 	var sampler trace.Sampler
-	if config.SampleRate >= 1.0 {
+	switch {
+	case config.SampleRate >= 1.0:
 		sampler = trace.AlwaysSample()
-	} else if config.SampleRate <= 0 {
+	case config.SampleRate <= 0:
 		sampler = trace.NeverSample()
-	} else {
+	default:
 		sampler = trace.TraceIDRatioBased(config.SampleRate)
 	}
 
