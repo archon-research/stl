@@ -120,16 +120,19 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 		poolsTouched:       touched,
 		poolsNeverIndexed:  neverIndexed,
 	}
-	// The Stalled rules read blocks.processed as rate(status="success")==0,
-	// which cannot match an absent series. Seeding written is weaker but real:
-	// `unless rate(written) > 0` can go true on the first write rather than the
-	// second (see telemetry.SeedCounter). Nothing else needs a seed — the
-	// attempted/touched rules are `A > 0 unless B > 0`, which already fires on
-	// an absent series, errors.total's `operation` label is open-ended, and
-	// pools.never_indexed is a gauge its recorder reports as 0.
-	ctx := context.Background()
-	telemetry.SeedStatusCounter(ctx, t.blocksProcessed, t.chainAttr)
-	telemetry.SeedCounter(ctx, t.stateRowsWritten, t.chainAttr)
+	// Only blocks.processed: the Stalled rules read it as
+	// rate(status="success")==0, which cannot match an absent series.
+	//
+	// state.rows.written is deliberately NOT seeded even though it is read by
+	// an alert. Its absence is load-bearing — RecordStateRows is a no-op at
+	// zero rows so that "attempted but nothing written" is distinguishable from
+	// "wrote zero", which is the firing condition StateRowsNotLanding stages
+	// and its tests assert. Seeding would make the counter permanently present
+	// and erase that. The `A > 0 unless B > 0` shape needs no seed anyway, and
+	// it covers attempted/touched for the same reason. errors.total's
+	// `operation` label is open-ended; pools.never_indexed is a gauge its
+	// recorder already reports as 0.
+	telemetry.SeedStatusCounter(context.Background(), t.blocksProcessed, t.chainAttr)
 	return t, nil
 }
 

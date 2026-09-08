@@ -553,10 +553,9 @@ func newTestTelemetry(t *testing.T, prefix string, chainID int64) (*Telemetry, *
 	return tel, reader
 }
 
-// Guards the startup seeds: VectorCurveIndexerStalled reads blocks.processed
-// as rate(success)==0, and VectorCurveIndexerStateRowsNotLanding reads
-// state.rows.written as `unless rate(...) > 0`; both need the series to exist
-// from process start. See telemetry.SeedCounter.
+// Guards the startup seed: VectorCurveIndexerStalled reads blocks.processed as
+// rate(success)==0, which cannot match an absent series. state.rows.written is
+// deliberately absent here — see NewTelemetry. See telemetry.SeedCounter.
 func TestNewTelemetry_SeedsAlertedSeriesAtZero(t *testing.T) {
 	_, reader := newTestTelemetry(t, "curve", 8453)
 
@@ -577,17 +576,6 @@ func TestNewTelemetry_SeedsAlertedSeriesAtZero(t *testing.T) {
 		if v != 0 {
 			t.Errorf("curve.blocks.processed{status=%q} = %d, want 0", status, v)
 		}
-	}
-
-	stateRowsDPs := testutil.CollectSumDataPoints(t, reader, "curve.state.rows.written")
-	if len(stateRowsDPs) != 1 {
-		t.Fatalf("curve.state.rows.written has %d data points, want 1", len(stateRowsDPs))
-	}
-	if chain := testutil.AttrValue(stateRowsDPs[0], "chain"); chain != "base" {
-		t.Errorf("curve.state.rows.written chain attr = %q, want %q", chain, "base")
-	}
-	if v := stateRowsDPs[0].Value; v != 0 {
-		t.Errorf("curve.state.rows.written = %d, want 0", v)
 	}
 }
 
