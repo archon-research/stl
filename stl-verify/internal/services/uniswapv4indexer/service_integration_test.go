@@ -62,6 +62,7 @@ var seededDeployBlocks = map[common.Hash]int64{
 	common.HexToHash("0x2d04d518afae8b57a702a6f679edf49f39593d818f9342cc57b457ea738a7460"): 25036987,
 	common.HexToHash("0x51ccd46db78d6988ab156c9b0d023e14b2e848240bc719718e63c4cc5c258bcf"): 22989795,
 	common.HexToHash("0x2f5dff74b96e2df0fa8a5695318d59839c3ce5d058b19024fbfe276100b676ff"): 24363921,
+	common.HexToHash("0x9035721b23481db3888fd201b9c2b26dbc3af60258bca65e669f2ed98dc8eb4f"): 25653372,
 }
 
 func assertSeededDeployBlocks(t *testing.T, pools []RegisteredPool) {

@@ -1,6 +1,7 @@
 """Postgres implementation of CoreModelResultsWriter."""
 
 import json
+from dataclasses import asdict
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -42,6 +43,10 @@ class PostgresCoreModelResultsWriter:
                     "n_mc": result.n_mc,
                     "copula_type": result.copula_type,
                     "computed_at": result.computed_at,
-                    "params": json.dumps(result.params),
+                    # One lower-case key, so the diagnostics cannot be mistaken for
+                    # a model param; allow_nan=False fails here, not as a DB syntax error.
+                    "params": json.dumps(
+                        {**result.params, "mc_diagnostics": asdict(result.mc_diagnostics)}, allow_nan=False
+                    ),
                 },
             )

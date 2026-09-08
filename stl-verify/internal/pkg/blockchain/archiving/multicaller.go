@@ -13,7 +13,10 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-const archiveTimeout = 30 * time.Second
+// ArchiveTimeout bounds one archive write's S3 PUT. The shutdown drain that
+// waits for those writes is sized against it, so it is exported rather than
+// package-private; lifecycle/shutdown_budget_test.go derives the chain from it.
+const ArchiveTimeout = 30 * time.Second
 
 // Config holds the static metadata stamped onto every archived call.
 type Config struct {
@@ -215,7 +218,7 @@ func (m *Multicaller) archiveRecord(ctx context.Context, record outbound.CallBat
 		}
 	}()
 
-	archiveCtx, cancel := context.WithTimeout(ctx, archiveTimeout)
+	archiveCtx, cancel := context.WithTimeout(ctx, ArchiveTimeout)
 	defer cancel()
 	err := m.archiver.Archive(archiveCtx, record)
 	if m.cfg.Gate.ClaimOutcome() {

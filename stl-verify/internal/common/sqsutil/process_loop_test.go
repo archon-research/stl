@@ -156,30 +156,6 @@ func TestProcessMessages_ChainIDMismatch_SkipsHandler(t *testing.T) {
 	}
 }
 
-func TestProcessMessages_ReleasesMismatchedMessageWhenShutdownKillsItsDelete(t *testing.T) {
-	foreign := outbound.BlockEvent{ChainID: 42, BlockNumber: 200, Version: 0, BlockHash: "0xfoo"}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	consumer := &mockConsumer{
-		receive: func(context.Context, int) ([]outbound.SQSMessage, error) {
-			return []outbound.SQSMessage{makeMsg("1", "h1", foreign)}, nil
-		},
-		beforeDelete: cancel,
-	}
-	cfg, _ := recordingConfig(consumer)
-
-	if _, err := ProcessMessages(ctx, cfg, noopHandler); err == nil {
-		t.Fatal("expected the cancelled delete returned")
-	}
-	if got := consumer.deleted(); len(got) != 0 {
-		t.Errorf("expected the cancelled delete to fail, got deletes %v", got)
-	}
-	want := []visibilityChange{{handle: "h1", visibility: 0}}
-	if got := consumer.released(); !slices.Equal(got, want) {
-		t.Errorf("expected the undeletable message released for the successor, got %v", got)
-	}
-}
-
 func TestProcessMessages_ChainIDMatch_Proceeds(t *testing.T) {
 	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 200, Version: 0, BlockHash: "0xfoo"}
 	consumer := &mockConsumer{
@@ -813,28 +789,34 @@ func TestProcessMessages_ReleasesAMessageWhoseDeleteFailedBeforeTheShutdown(t *t
 	}
 }
 
-// The handler finished, so nothing will retry the work; only the release keeps
-// the FIFO group moving once the shutdown has killed the delete.
-func TestProcessMessages_ReleasesAProcessedMessageWhenShutdownKillsItsDelete(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	consumer := &mockConsumer{
-		receive: func(context.Context, int) ([]outbound.SQSMessage, error) {
-			return []outbound.SQSMessage{makeMsg("1", "h1", blockEvent(100))}, nil
-		},
-		beforeDelete: cancel,
+func TestProcessMessages_SettlesTheMessageWhenShutdownLandsMidDelete(t *testing.T) {
+	tests := []struct {
+		name  string
+		event outbound.BlockEvent
+	}{
+		{name: "a processed message", event: blockEvent(100)},
+		{name: "a mismatched-chain message", event: outbound.BlockEvent{ChainID: 42, BlockNumber: 200, Version: 0, BlockHash: "0xfoo"}},
 	}
-	cfg, _ := recordingConfig(consumer)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			consumer := &mockConsumer{
+				batches:      [][]outbound.SQSMessage{{makeMsg("1", "h1", tt.event)}},
+				beforeDelete: cancel,
+			}
+			cfg, _ := recordingConfig(consumer)
 
-	if _, err := ProcessMessages(ctx, cfg, noopHandler); err == nil {
-		t.Fatal("expected the cancelled delete returned")
-	}
-	if got := consumer.deleted(); len(got) != 0 {
-		t.Errorf("expected the cancelled delete to fail, got deletes %v", got)
-	}
-	want := []visibilityChange{{handle: "h1", visibility: 0}}
-	if got := consumer.released(); !slices.Equal(got, want) {
-		t.Errorf("expected the undeletable message released for the successor, got %v", got)
+			if _, err := ProcessMessages(ctx, cfg, noopHandler); err != nil {
+				t.Fatalf("expected the interrupted delete to complete, got %v", err)
+			}
+			if got := consumer.deleted(); !slices.Equal(got, []string{"h1"}) {
+				t.Errorf("expected the interrupted delete to reach the queue, got deletes %v", got)
+			}
+			if got := consumer.released(); len(got) != 0 {
+				t.Errorf("expected nothing released for a settled message, got %v", got)
+			}
+		})
 	}
 }
 

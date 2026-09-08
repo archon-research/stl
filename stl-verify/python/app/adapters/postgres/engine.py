@@ -54,7 +54,10 @@ def create_db_engine(
             "statement_cache_size": statement_cache_size,
             "prepared_statement_cache_size": statement_cache_size,
         }
-    engine = create_async_engine(url, pool_pre_ping=True, **pool_kwargs)
+    # hide_parameters: a StatementError renders its bind parameters into its own
+    # string, and on a prime-filtered query those are the caller's whole vault
+    # allow-list, which the error path then logs. Use _loggable_params instead.
+    engine = create_async_engine(url, pool_pre_ping=True, hide_parameters=True, **pool_kwargs)
     event.listen(engine.sync_engine, "handle_error", mark_stale_transaction_state_as_disconnect)
     return engine
 

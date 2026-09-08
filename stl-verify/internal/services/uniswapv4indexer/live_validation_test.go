@@ -57,7 +57,7 @@ var slot0CrossCheckPools = []common.Hash{
 	fallbackSwapPoolID,
 }
 
-const wantSeededPools = 21
+const wantSeededPools = 22
 
 const swapLogsScanDepth = 2000
 

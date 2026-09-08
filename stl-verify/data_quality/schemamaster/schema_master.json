@@ -106,6 +106,10 @@
       "type": "numeric",
       "class": "S"
     },
+    "asset_id": {
+      "type": "int8",
+      "class": "R"
+    },
     "asset_decimals": {
       "type": "int2",
       "class": "S"
@@ -1112,6 +1116,10 @@
       "type": "numeric",
       "class": "S"
     },
+    "tokenless": {
+      "type": "bool",
+      "class": "S"
+    },
     "total_a_token": {
       "type": "numeric",
       "class": "S"
@@ -1298,6 +1306,11 @@
       "type": "raw_pipeline",
       "owner": "prime",
       "transform_defer": "VEC-494: bucket 3 (no natural PK, keyed via transform_config)"
+    },
+    "asset_price": {
+      "type": "raw_pipeline",
+      "owner": "pricing",
+      "transform_defer": "VEC-652: consumed directly by the CORE model price reader; no transformed-layer target yet"
     },
     "backfill_watermark": {
       "type": "infrastructure",
@@ -1686,6 +1699,19 @@
       "table": "morpho_vault_state",
       "column": "timestamp",
       "canonical": "block_timestamp",
+      "action": "rename"
+    },
+    {
+      "table": "asset_price",
+      "column": "source_id",
+      "canonical": "source_id",
+      "action": "cast",
+      "from": "int2"
+    },
+    {
+      "table": "asset_price",
+      "column": "timestamp",
+      "canonical": "snapshot_time",
       "action": "rename"
     },
     {
@@ -2110,6 +2136,7 @@
       "exempt": [
         "anchorage_operation",
         "anchorage_package_snapshot",
+        "asset_price",
         "cex_orderbook_snapshots",
         "offchain_token_price",
         "prime_capital_stack",
@@ -2128,6 +2155,7 @@
         "allocation_position",
         "anchorage_operation",
         "anchorage_package_snapshot",
+        "asset_price",
         "cex_orderbook_snapshots",
         "maple_syrup_global_state",
         "offchain_token_price",
