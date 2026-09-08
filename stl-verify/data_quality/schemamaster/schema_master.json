@@ -327,7 +327,8 @@
     },
     "content_hash": {
       "type": "bytea",
-      "class": "A"
+      "class": "A",
+      "not_null": true
     },
     "contract_address": {
       "type": "bytea",

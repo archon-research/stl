@@ -13,6 +13,11 @@
 -- no other table at apply time, so it cannot drift with the ref_* content after the fact —
 -- later ref changes promote via new migrations.
 --
+-- Content hashes are NOT literals here: sec_store_append_guard (20260904_120000) computes one
+-- for every row on insert, so these 501 rows are inside the hash chain from the first append
+-- (AR-1.2) rather than being the permanent gap a deferred population would have left. Same
+-- reason no row supplies ingest_xid: the guard rejects a writer-supplied one.
+--
 -- Requires 20260904_120000 (stores + vocabularies).
 
 INSERT INTO sec_node (id, record_type, status, attrs, valid_from, actor, change_reason_code, change_reason, source_system) VALUES

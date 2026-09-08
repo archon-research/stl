@@ -14,6 +14,11 @@
 -- writer-supplied, ingested_at is a label only. run_id stays a bare bigint until the
 -- writer_run FK lands with ADR-0006 §2 (#689 / VEC-598).
 --
+-- Two engine-enforced write-boundary guarantees on the stores, both by BEFORE INSERT trigger
+-- (sec_store_append_guard, defined below with its full rationale): ingest_xid can only be the
+-- current transaction id, and content_hash is computed by the engine from the first append —
+-- neither is writer-trusted.
+--
 -- Append-only enforcement follows the two house patterns deliberately, per table class:
 --   * sec_node / sec_edge: full ACL revoke including the owner (position_state pattern).
 --     Nothing FKs these tables, so the owner-side revoke cannot break an RI probe.
@@ -160,7 +165,7 @@ CREATE TABLE sec_node (
     approved_by         text,
     supersedes_record_id bigint,
     source_system       text NOT NULL,
-    content_hash        bytea,
+    content_hash        bytea NOT NULL,
     PRIMARY KEY (id, processing_version, valid_from, valid_to),
     CONSTRAINT sec_node_record_id_key UNIQUE (record_id),
     CONSTRAINT sec_node_id_prefix_chk CHECK (
@@ -182,7 +187,7 @@ COMMENT ON COLUMN sec_node.valid_from IS 'Roles: PK (with id, processing_version
 COMMENT ON COLUMN sec_node.valid_to IS 'Roles: PK (with id, processing_version, valid_from). Valid-time window end, exclusive; ''infinity'' = open/current, never NULL. In the key so close-and-open is an ordinary append at processing_version 0. A ZERO-LENGTH window (valid_to = valid_from) is a TOMBSTONE: it matches no as-of date, so the record drops out of the resolved reads with its history intact (ADR-0005 §3 retraction; pair it with change_reason_code RETRACTION and supersedes_record_id).';
 COMMENT ON COLUMN sec_node.record_id IS 'Roles: Audit, UNIQUE. Per-append surrogate; what supersedes_record_id, a retraction and a reproduction manifest point at (PR-2.1). Unique per store, not globally: a manifest cites (table, record_id).';
 COMMENT ON COLUMN sec_node.processing_version IS 'Roles: Audit, PK component. Correction version, caller-assigned per ADR-0006 §3: 0 live, N per correction run via processing_version_log. A valid-time change (close-and-open, an ended window, a tombstone) is NOT a correction and stays at 0 — valid_to carries it. Un-retracting a tombstoned record IS a correction run at N.';
-COMMENT ON COLUMN sec_node.ingest_xid IS 'Roles: Audit. Knowledge-time visibility key (ADR-0006 §5, pg_visible_in_snapshot). Never writer-supplied.';
+COMMENT ON COLUMN sec_node.ingest_xid IS 'Roles: Audit. Knowledge-time visibility key (ADR-0006 §5, pg_visible_in_snapshot) and the supersession tiebreak inside a valid window. Never writer-supplied: the sec_node_append_guard trigger rejects an insert that sets it to anything but the current transaction id.';
 COMMENT ON COLUMN sec_node.ingested_at IS 'Roles: Audit. Wall-clock label only; never the audit key (a row stamps at transaction start but becomes visible at commit).';
 COMMENT ON COLUMN sec_node.run_id IS 'Roles: Audit. Writer run; FK to writer_run lands with ADR-0006 §2 (VEC-598).';
 COMMENT ON COLUMN sec_node.actor IS 'Roles: Audit. Real, non-shared principal (human or service) that appended the row. Required.';
@@ -191,7 +196,7 @@ COMMENT ON COLUMN sec_node.change_reason IS 'Roles: Audit. Free-text reason; cit
 COMMENT ON COLUMN sec_node.approved_by IS 'Roles: Audit. Approver, distinct from actor, where the reason code requires approval.';
 COMMENT ON COLUMN sec_node.supersedes_record_id IS 'Roles: FK-shaped→sec_node.record_id (soft; unenforced so a correction can precede its target in a batch), Audit. record_id this append corrects or retracts; the correction chain is walkable through it. The resolved reads do not consult it — supersession within a window is decided by processing_version then ingest_xid, and withdrawal by the zero-length tombstone window.';
 COMMENT ON COLUMN sec_node.source_system IS 'Roles: Audit. Where the fact came from (registry, worksheet, port, loader).';
-COMMENT ON COLUMN sec_node.content_hash IS 'Roles: Audit. Per-record content hash over the canonical stored form (AR-1.2); population is wired with the validator work (VEC-622), the column exists from row one so no migration is needed then.';
+COMMENT ON COLUMN sec_node.content_hash IS 'Roles: Audit, Derived. sha256 over the canonical stored form — to_jsonb(row) minus record_id, ingest_xid, ingested_at and content_hash — computed by the sec_node_append_guard trigger on every insert, so the chain runs from the first append (AR-1.2, NFR-5). Reproducible from an export and stable across a re-realization that reassigns record_ids. A supplied value is verified against the computed one and rejected if it differs.';
 -- Resolution index: the reads below sort (id, valid_from) ASC then processing_version DESC,
 -- ingest_xid DESC, record_id DESC. Columns AND directions have to match the whole key or the
 -- DISTINCT ON degrades to a full scan plus sort on every current read (VEC-633 measures this).
@@ -228,7 +233,7 @@ CREATE TABLE sec_edge (
     approved_by         text,
     supersedes_record_id bigint,
     source_system       text NOT NULL,
-    content_hash        bytea,
+    content_hash        bytea NOT NULL,
     input_lineage       jsonb,
     PRIMARY KEY (rel_type, src_id, dst_id, edge_seq, processing_version, valid_from, valid_to),
     CONSTRAINT sec_edge_record_id_key UNIQUE (record_id),
@@ -251,7 +256,7 @@ COMMENT ON COLUMN sec_edge.valid_from IS 'Roles: PK component. Valid-time window
 COMMENT ON COLUMN sec_edge.valid_to IS 'Roles: PK component. Valid-time window end, exclusive; ''infinity'' = open, never NULL. In the key so a re-point closes the current row and opens the new one in one write, both at processing_version 0. A ZERO-LENGTH window (valid_to = valid_from) is a TOMBSTONE — the only way to retract an edge, since an edge has no status to retire it.';
 COMMENT ON COLUMN sec_edge.record_id IS 'Roles: Audit, UNIQUE. Per-append surrogate; the target of supersedes_record_id, retractions and manifests (PR-2.1).';
 COMMENT ON COLUMN sec_edge.processing_version IS 'Roles: Audit, PK component. Correction version, caller-assigned (ADR-0006 §3); 0 live. Close-and-open, an ended link and a tombstone all stay at 0.';
-COMMENT ON COLUMN sec_edge.ingest_xid IS 'Roles: Audit. Knowledge-time visibility key (ADR-0006 §5). Never writer-supplied.';
+COMMENT ON COLUMN sec_edge.ingest_xid IS 'Roles: Audit. Knowledge-time visibility key (ADR-0006 §5) and the supersession tiebreak inside a valid window. Never writer-supplied; enforced by sec_edge_append_guard.';
 COMMENT ON COLUMN sec_edge.ingested_at IS 'Roles: Audit. Wall-clock label only.';
 COMMENT ON COLUMN sec_edge.run_id IS 'Roles: Audit. Writer run; FK lands with ADR-0006 §2 (VEC-598).';
 COMMENT ON COLUMN sec_edge.actor IS 'Roles: Audit. Appending principal. Required.';
@@ -260,7 +265,7 @@ COMMENT ON COLUMN sec_edge.change_reason IS 'Roles: Audit. Free-text reason.';
 COMMENT ON COLUMN sec_edge.approved_by IS 'Roles: Audit. Approver where the reason code requires one.';
 COMMENT ON COLUMN sec_edge.supersedes_record_id IS 'Roles: FK-shaped→sec_edge.record_id (soft), Audit. record_id this append corrects, re-points or retracts. Not consulted by the resolved reads (see sec_node.supersedes_record_id).';
 COMMENT ON COLUMN sec_edge.source_system IS 'Roles: Audit. Where the edge came from.';
-COMMENT ON COLUMN sec_edge.content_hash IS 'Roles: Audit. Content hash over canonical form; population wired with VEC-622.';
+COMMENT ON COLUMN sec_edge.content_hash IS 'Roles: Audit, Derived. sha256 over the canonical stored form — to_jsonb(row) minus record_id, ingest_xid, ingested_at, content_hash and the generated edge_id — computed by sec_edge_append_guard on every insert (AR-1.2). A supplied value is verified, never trusted.';
 COMMENT ON COLUMN sec_edge.input_lineage IS 'Roles: Audit. For derived edges: source record ids (PR-2.3). NULL on curated edges.';
 -- Resolution index (see sec_node_resolve_idx); sec_edge_src_idx stays for src traversal.
 CREATE INDEX sec_edge_resolve_idx ON sec_edge (rel_type, src_id, dst_id, edge_seq, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC);
@@ -427,6 +432,76 @@ ON CONFLICT (record_type, status) DO NOTHING;
 
 ALTER TABLE sec_node ADD CONSTRAINT sec_node_status_fkey
     FOREIGN KEY (record_type, status) REFERENCES node_status_vocabulary (record_type, status);
+
+-- ---------------------------------------------------------------------------
+-- Write-boundary guard on the two stores: ingest_xid is platform-assigned, and
+-- content_hash is computed by the engine from the first append (AR-1.2, NFR-5).
+--
+-- Both were writer-trusted in the first draft and neither survives review that way:
+--   * ingest_xid had only a DEFAULT, so a writer could supply any xid8. It is the
+--     knowledge-time visibility and ordering key (ADR-0006 §5,
+--     pg_visible_in_snapshot) and now also decides supersession inside a valid
+--     window, so a forged value silently corrupts replay and lets a writer reorder
+--     its own corrections. ADR-0005 §4 says never writer-supplied; this enforces it.
+--     The guard RAISES rather than overwriting: a writer that sets it has a bug, and
+--     a bug that repairs itself is a bug you ship. Omitting the column (the normal
+--     path) leaves the DEFAULT, which equals pg_current_xact_id() in the same
+--     transaction, so the check is a no-op there.
+--   * content_hash was left NULL "to be wired with the validator" (VEC-622). AR-1.2
+--     requires the chain to run from the FIRST append, and ADR-0005 §4 banks on the
+--     store being empty as the reason that is free — deferring it spends exactly that,
+--     and the 501 rows of 20260904_120100 would have been permanently outside the
+--     chain. Computing it here costs nothing and covers every writer, not just the
+--     seed.
+--
+-- The hashed canonical form is to_jsonb(NEW) minus the platform-assigned and derived
+-- fields: record_id (an identity sequence), ingest_xid / ingested_at (assigned here),
+-- content_hash (the output), and edge_id (generated from columns already hashed). What
+-- remains is exactly what the writer determined — identity, attributes, valid window,
+-- and the provenance block — so the hash is reproducible from an export and survives a
+-- re-realization that assigns new record_ids (Realization §2's round-trip requirement).
+-- jsonb gives the canonicalisation for free: keys sorted, whitespace normalised, dates
+-- and timestamps rendered ISO 8601 independent of DateStyle, numerics at their stored
+-- scale. Adding a column later changes the hash of rows appended after it, not of
+-- existing rows — state it in the ADR when it happens rather than rehashing history.
+--
+-- Supplying content_hash is allowed only if it MATCHES what the engine computes: that
+-- makes re-importing an exported row a verification rather than a leap of faith, and a
+-- mismatch fails the insert. content_hash is declared NOT NULL on both stores: NOT NULL is
+-- checked after BEFORE triggers, so the guard always satisfies it, and the declaration turns a
+-- disabled trigger into a failed insert instead of a silently unhashed row.
+-- No table is read, so the plan_cache_mode rule for
+-- BEFORE INSERT triggers (db/migrations AGENTS.md) does not apply.
+-- ---------------------------------------------------------------------------
+
+CREATE FUNCTION sec_store_append_guard() RETURNS trigger
+  LANGUAGE plpgsql AS $$
+DECLARE
+    computed bytea;
+BEGIN
+    IF NEW.ingest_xid IS DISTINCT FROM pg_current_xact_id() THEN
+        RAISE EXCEPTION 'ingest_xid is platform-assigned on %.% and must never be writer-supplied (ADR-0005 §4, ADR-0006 §5); omit the column and let the default stand',
+            TG_TABLE_SCHEMA, TG_TABLE_NAME;
+    END IF;
+
+    computed := sha256(convert_to(
+        (to_jsonb(NEW) - 'record_id' - 'ingest_xid' - 'ingested_at' - 'content_hash' - 'edge_id')::text,
+        'UTF8'));
+
+    IF NEW.content_hash IS NOT NULL AND NEW.content_hash <> computed THEN
+        RAISE EXCEPTION 'content_hash mismatch on %.%: supplied %, computed % — a supplied hash is verified, never trusted (AR-1.2)',
+            TG_TABLE_SCHEMA, TG_TABLE_NAME, encode(NEW.content_hash,'hex'), encode(computed,'hex');
+    END IF;
+
+    NEW.content_hash := computed;
+    RETURN NEW;
+END $$;
+COMMENT ON FUNCTION sec_store_append_guard() IS 'BEFORE INSERT guard for sec_node / sec_edge: rejects a writer-supplied ingest_xid, computes content_hash over to_jsonb(row) minus the platform-assigned and derived fields, and verifies rather than trusts a supplied hash (AR-1.2, NFR-5). Reads no table.';
+
+CREATE TRIGGER sec_node_append_guard BEFORE INSERT ON sec_node
+    FOR EACH ROW EXECUTE FUNCTION sec_store_append_guard();
+CREATE TRIGGER sec_edge_append_guard BEFORE INSERT ON sec_edge
+    FOR EACH ROW EXECUTE FUNCTION sec_store_append_guard();
 
 -- ---------------------------------------------------------------------------
 -- Append-only enforcement, by table class (see header).
