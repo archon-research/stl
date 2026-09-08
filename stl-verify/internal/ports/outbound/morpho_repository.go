@@ -73,8 +73,9 @@ type MorphoRepository interface {
 	// "The same answer" covers the CLASSIFICATION as well as the membership. An adapter
 	// first seen through an Allocate is probed once, so a probe answering Unknown would
 	// otherwise be its type forever — no later observation of the same membership could
-	// correct it, and UPDATE is revoked on the table. An assertion that carries no type
-	// asserts nothing about one and never retracts the log's.
+	// correct it, and UPDATE is revoked on the table. It runs in that direction only: an
+	// assertion carrying no type, or an Unknown one, asserts nothing about the
+	// classification and never retracts the log's.
 	//
 	// That conditional is a read-then-write decision, so the assertion path — and only it —
 	// serializes on a per-(morpho_vault_id, address) advisory lock taken BEFORE the decisive

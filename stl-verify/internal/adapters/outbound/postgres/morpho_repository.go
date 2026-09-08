@@ -441,15 +441,18 @@ func (r *MorphoRepository) assertionAppends(ctx context.Context, tx pgx.Tx, adap
 }
 
 // reclassifies reports whether an assertion's probe answers the classification question
-// differently from the log. An assertion that carries no type makes no claim about one —
-// a replayed Allocate skips the probe when the adapter is already a member — so it can
-// never retract the classification the log holds.
+// differently from the log. Neither a missing type — a replayed Allocate skips the probe
+// when the adapter is already a member — nor an Unknown one retracts what the log holds:
+// classifyAdapter answers Unknown for anything but exactly one marker, so a marker added
+// for a future family would otherwise flip a classified adapter to 99, and UPDATE is
+// revoked on the table, so that row would be its classification forever.
 func reclassifies(known, asserted *entity.MorphoAdapterType) bool {
-	return asserted != nil && (known == nil || *known != *asserted)
+	if asserted == nil || (known != nil && *asserted == entity.MorphoAdapterTypeUnknown) {
+		return false
+	}
+	return known == nil || *known != *asserted
 }
 
-// knownMembership is the answer the log already gives about an adapter: whether it is a
-// member, and what the observation that says so classified it as.
 type knownMembership struct {
 	isMember    bool
 	adapterType *entity.MorphoAdapterType
