@@ -31,7 +31,7 @@ const maxBatchSize = 5000
 type Config struct {
 	ChainID   int64  // the chain whose block_meta rows this run fills
 	Bucket    string // that chain's raw-block S3 bucket (validate with chainutil.ValidateS3BucketForChain in main)
-	BatchSize int    // blocks fetched+upserted per iteration; defaults to 500 if 0, clamped to maxBatchSize
+	BatchSize int    // blocks fetched+upserted per iteration, one transaction each; defaults to 500 if 0, clamped to maxBatchSize
 }
 
 // Service reads block headers from S3 and upserts block_meta for one chain.

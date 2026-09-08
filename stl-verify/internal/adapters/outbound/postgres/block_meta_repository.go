@@ -106,20 +106,9 @@ var blockMetaStageColumns = []string{"chain_id", "block_number", "block_version"
 // INSERTs at the millions-of-blocks scale of a full-history backfill, and folding the whole batch
 // into one INSERT keeps the conflict check server-side.
 //
-// The arbiter must name block_meta's FULL primary key, processing_version included. It is not a column
-// this loader supplies -- assign_processing_version_block_meta sets it in a BEFORE INSERT trigger, which
-// runs before conflict detection, so the arbiter sees the assigned value. Naming only the three natural-key
-// columns matches no unique constraint and fails at runtime with 42P10, "there is no unique or exclusion
-// constraint matching the ON CONFLICT specification". That is what this did until the block_meta review:
-// the integration test below built its own block_meta with a three-column PK, so CI never exercised the
-// real shape and the two PRs were individually green and jointly broken.
-//
-// Known gap, not fixed here: the loader never sets build_id, so every row carries the pre-tracking
-// sentinel 0. The trigger's retry branch keys reuse on build_id, so a re-run of the same block reuses
-// processing_version 0 and ON CONFLICT drops it -- correct for an idempotent retry, but it also means a
-// genuine correction (same block, different timestamp) is discarded with the loader reporting success.
-// The MAX+1 reprocess arm is therefore unreachable from this writer. Reaching it needs the loader to
-// register a build and pass its id.
+// The arbiter is block_meta's primary key, the natural key (chain_id, block_number, block_version):
+// a header time is immutable, so a re-run is a no-op and a mis-parse is corrected by an operator
+// deleting and reloading the affected coordinates, not by a second row.
 func (r *BlockMetaRepository) Upsert(ctx context.Context, rows []outbound.BlockMetaRow) (int64, error) {
 	if len(rows) == 0 {
 		return 0, nil
@@ -156,7 +145,7 @@ func (r *BlockMetaRepository) Upsert(ctx context.Context, rows []outbound.BlockM
 	ct, err := tx.Exec(ctx, `
 INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp)
 SELECT chain_id, block_number, block_version, block_timestamp FROM block_meta_stage
-ON CONFLICT (chain_id, block_number, block_version, processing_version) DO NOTHING`)
+ON CONFLICT (chain_id, block_number, block_version) DO NOTHING`)
 	if err != nil {
 		return 0, fmt.Errorf("insert from stage: %w", err)
 	}

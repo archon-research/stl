@@ -25,15 +25,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// No block_meta fixture here, deliberately. This branch is stacked on the schema PR, so
-// the migration is in db/migrations and testutil.SetupTestDB's template already carries
-// the real table, its four-column PK, the processing_version trigger and the CHECKs.
-//
-// Do not reintroduce one. The previous version of this file defined block_meta inline with
-// a three-column PK, chosen to match the upsert's ON CONFLICT target -- so the test agreed
-// with the code under test and passed, while the real table has a four-column PK and the
-// upsert failed 42P10 against it. Both PRs were green and jointly broken. A fixture shaped
-// like the query it tests cannot detect a disagreement with production.
+// No block_meta fixture here, deliberately: the schema PR's migration is in db/migrations, so
+// testutil.SetupTestDB's template carries the real table, its natural-key PK and the CHECKs. A
+// fixture shaped like the query it tests cannot detect a disagreement with production.
 
 // newLocalStackReader builds the real S3 reader adapter pointed at the shared
 // LocalStack, so the test exercises the adapter's .gz auto-decompression path.
