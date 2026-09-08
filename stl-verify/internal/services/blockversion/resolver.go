@@ -65,15 +65,39 @@ func (r *Resolver) ResolveBlockVersion(ctx context.Context, blockNumber int64, b
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	archived, err := r.archivedAt(ctx, blockNumber)
-	if err != nil {
+	archived, memoized := r.resolved[blockNumber]
+	if !memoized {
+		read, err := r.readArchivedBlock(ctx, blockNumber)
+		if err != nil {
+			return 0, err
+		}
+		archived = read
+	}
+	if err := r.speaksForTheReplayedBlock(blockNumber, archived, blockHash); err != nil {
 		return 0, err
 	}
-	if archived.hash != blockHash {
-		return 0, fmt.Errorf("block %d version %d in %s holds %s, replaying %s: %w",
-			blockNumber, archived.version, r.archiveName, archived.hash.Hex(), blockHash.Hex(), ErrArchivedBlockMismatch)
+	if !memoized {
+		r.remember(blockNumber, archived)
 	}
 	return archived.version, nil
+}
+
+// Reset drops what an earlier run resolved, so a repaired height is read again rather
+// than answered from the memo of the orphan, and the summary belongs to one run.
+func (r *Resolver) Reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.resolved = map[int64]archivedBlock{}
+	r.corrected = nil
+}
+
+func (r *Resolver) speaksForTheReplayedBlock(blockNumber int64, archived archivedBlock, blockHash common.Hash) error {
+	if archived.hash == blockHash {
+		return nil
+	}
+	return fmt.Errorf("block %d version %d in %s holds %s, replaying %s: %w",
+		blockNumber, archived.version, r.archiveName, archived.hash.Hex(), blockHash.Hex(), ErrArchivedBlockMismatch)
 }
 
 func (r *Resolver) Summary() outbound.ResolvedVersions {
@@ -83,13 +107,8 @@ func (r *Resolver) Summary() outbound.ResolvedVersions {
 	return outbound.ResolvedVersions{Heights: len(r.resolved), Corrected: append([]int64(nil), r.corrected...)}
 }
 
-// archivedAt reads the archive once per height: every log of one block asks the same
-// question, and the run asks again for the head it seeds at.
-func (r *Resolver) archivedAt(ctx context.Context, blockNumber int64) (archivedBlock, error) {
-	if known, memoized := r.resolved[blockNumber]; memoized {
-		return known, nil
-	}
-
+// readArchivedBlock asks the archive what it holds at a height.
+func (r *Resolver) readArchivedBlock(ctx context.Context, blockNumber int64) (archivedBlock, error) {
 	version, found, err := r.archive.HighestVersion(ctx, blockNumber)
 	if err != nil {
 		return archivedBlock{}, fmt.Errorf("reading the archived versions of block %d: %w", blockNumber, err)
@@ -107,11 +126,12 @@ func (r *Resolver) archivedAt(ctx context.Context, blockNumber int64) (archivedB
 			blockNumber, version, r.archiveName, ErrHeightNotArchived)
 	}
 
-	block := archivedBlock{version: version, hash: common.HexToHash(hash)}
-	r.remember(blockNumber, block)
-	return block, nil
+	return archivedBlock{version: version, hash: common.HexToHash(hash)}, nil
 }
 
+// remember answers every later call about a height from the first read: every log of one
+// block asks the same question, and the run asks again for the head it seeds at. Only a
+// proven height is remembered, so a mismatch the archive is then repaired for is re-read.
 func (r *Resolver) remember(blockNumber int64, block archivedBlock) {
 	r.resolved[blockNumber] = block
 	if block.version > 0 {

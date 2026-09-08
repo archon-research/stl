@@ -22,6 +22,12 @@ type BlockVersionResolver interface {
 	// end of it. Without it a replay that stamped corrected versions is indistinguishable
 	// from one that stamped 0 everywhere.
 	Summary() ResolvedVersions
+
+	// Reset drops what an earlier run resolved. A resolver outlives one run — the
+	// on-demand worker builds it once per pod — so a run that does not start from
+	// nothing answers a repaired height from the memo of the orphan it stopped on, and
+	// closes with the earlier run's Summary.
+	Reset()
 }
 
 // ResolvedVersions is what a run asked the archive for: how many heights it answered,

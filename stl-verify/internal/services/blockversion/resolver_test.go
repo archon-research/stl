@@ -191,3 +191,73 @@ func TestResolver_SummaryNamesTheCorrectedHeights(t *testing.T) {
 		t.Errorf("corrected = %v, want [%d]", summary.Corrected, corrected)
 	}
 }
+
+// A mismatch is the one failure an operator clears by repairing the archive and starting
+// a new run, so the height it failed at must not stay answered from the memo: the
+// repaired archive is what the next call has to read.
+func TestResolver_ReadsARepairedHeightAgainAfterAMismatch(t *testing.T) {
+	archive := archiveHolding(map[int64]archivedHeight{
+		archiveHeight: {version: 0, hash: orphanedHash},
+	})
+	resolver := NewResolver(archive, archiveName)
+	if _, err := resolver.ResolveBlockVersion(context.Background(), archiveHeight, canonicalHash); !errors.Is(err, ErrArchivedBlockMismatch) {
+		t.Fatalf("error = %v, want ErrArchivedBlockMismatch", err)
+	}
+	archive.heights[archiveHeight] = archivedHeight{version: 1, hash: canonicalHash}
+
+	version, err := resolver.ResolveBlockVersion(context.Background(), archiveHeight, canonicalHash)
+
+	if err != nil {
+		t.Fatalf("ResolveBlockVersion once the archive holds the canonical block: %v", err)
+	}
+	if version != 1 {
+		t.Errorf("version = %d, want the republished 1", version)
+	}
+	if want := []int64{archiveHeight, archiveHeight}; !slices.Equal(archive.asked, want) {
+		t.Errorf("archive asked about %v, want the repaired height read again %v", archive.asked, want)
+	}
+}
+
+// The resolver outlives one run — the on-demand worker builds it once per pod — so
+// without a reset the second run answers from the first's memo, of an archive it was
+// started to re-read.
+func TestResolver_ResetForgetsWhatAnEarlierRunResolved(t *testing.T) {
+	archive := archiveHolding(map[int64]archivedHeight{
+		archiveHeight: {version: 0, hash: canonicalHash},
+	})
+	resolver := NewResolver(archive, archiveName)
+	if _, err := resolver.ResolveBlockVersion(context.Background(), archiveHeight, canonicalHash); err != nil {
+		t.Fatalf("ResolveBlockVersion: %v", err)
+	}
+
+	resolver.Reset()
+
+	if _, err := resolver.ResolveBlockVersion(context.Background(), archiveHeight, canonicalHash); err != nil {
+		t.Fatalf("ResolveBlockVersion after the reset: %v", err)
+	}
+	if want := []int64{archiveHeight, archiveHeight}; !slices.Equal(archive.asked, want) {
+		t.Errorf("archive asked about %v, want the height read again for the second run %v", archive.asked, want)
+	}
+}
+
+// The summary is the one line a run closes with, so carrying an earlier run's heights
+// into it reports work this run never did.
+func TestResolver_ResetEmptiesTheSummary(t *testing.T) {
+	archive := archiveHolding(map[int64]archivedHeight{
+		archiveHeight: {version: 3, hash: canonicalHash},
+	})
+	resolver := NewResolver(archive, archiveName)
+	if _, err := resolver.ResolveBlockVersion(context.Background(), archiveHeight, canonicalHash); err != nil {
+		t.Fatalf("ResolveBlockVersion: %v", err)
+	}
+
+	resolver.Reset()
+
+	summary := resolver.Summary()
+	if summary.Heights != 0 {
+		t.Errorf("heights = %d, want 0", summary.Heights)
+	}
+	if len(summary.Corrected) != 0 {
+		t.Errorf("corrected = %v, want none", summary.Corrected)
+	}
+}

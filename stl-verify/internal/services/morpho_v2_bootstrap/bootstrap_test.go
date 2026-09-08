@@ -178,6 +178,34 @@ func TestRun_StampsTheBlockVersionTheArchiveHolds(t *testing.T) {
 	}
 }
 
+// TestRun_ClosesWithOnlyTheHeightsItResolvedItself: the resolver is built once per pod
+// and outlives a run, so a second run on an idle worker would otherwise close with the
+// heights the first one asked about — and answer them from its memo.
+func TestRun_ClosesWithOnlyTheHeightsItResolvedItself(t *testing.T) {
+	h := newBootstrapHarness(t)
+	logger, logs := capturingLogger()
+	h.config.Logger = logger
+	replayer := &recordingReplayer{v2Vaults: map[common.Address]int64{testVaultAddr: 23_400_000}}
+	service, err := NewService(h.config, h.chain, replayer, h.progress, h.versions)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	h.chain.setFinalizedHead(24_000_000, 1_770_000_000)
+
+	if err := service.Run(context.Background()); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	firstRun := len(logs())
+	if err := service.Run(context.Background()); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+
+	secondRun := logs()[firstRun:]
+	if !strings.Contains(secondRun, "heights=1") {
+		t.Errorf("the second run reported heights it did not resolve:\n%s", secondRun)
+	}
+}
+
 // TestRun_StopsWhenTheArchiveCannotResolveABlockVersion: an archive that cannot say
 // which version speaks for a block is the ARCT-379 hole shape. Continuing would stamp a
 // guess, so the run stops with nothing written and the archive is what gets repaired.
@@ -1107,6 +1135,10 @@ type fakeBlockVersionResolver struct {
 
 func (f *fakeBlockVersionResolver) Summary() outbound.ResolvedVersions {
 	return outbound.ResolvedVersions{Heights: len(f.asked)}
+}
+
+func (f *fakeBlockVersionResolver) Reset() {
+	f.asked = nil
 }
 
 type blockRef struct {

@@ -166,6 +166,7 @@ func NewService(config Config, chain ChainReader, replay V2Replayer, progress Pr
 // Run performs one complete bootstrap pass. It is the body of the Temporal
 // activity, and is safe to invoke repeatedly.
 func (s *Service) Run(ctx context.Context) error {
+	s.versions.Reset()
 	defer s.logResolvedBlockVersions()
 
 	head, err := s.pinFinalizedHead(ctx)
