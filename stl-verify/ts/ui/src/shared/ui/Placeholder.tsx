@@ -16,6 +16,11 @@ const placeholderClassName = css({
   verticalAlign: 'middle',
 });
 
+// A `<span>`, not a `<div>`: one call site stands this in for the timestamp
+// inside the header's label span, and only phrasing content is valid there.
+// `inline-block` makes it behave identically to the div everywhere else,
+// including as a grid item, where the display is blockified anyway.
+
 /**
  * A loading block that stays visible on a recessed surface, not just on the page.
  *
@@ -31,7 +36,7 @@ export function Placeholder({
   height: number;
 }) {
   return (
-    <div
+    <span
       className={placeholderClassName}
       // Sizes vary per slot, so they ride the style attribute: Panda generates
       // its classes at build time and cannot see a value passed in.
