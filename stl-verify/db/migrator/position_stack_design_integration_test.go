@@ -356,6 +356,7 @@ func TestRealProjectionsCarryDealType(t *testing.T) {
 }
 
 type obsRow struct {
+	offChain          bool
 	holder            string
 	qty               int
 	block, bver, pver int
@@ -372,6 +373,9 @@ func generateHistory(rng *rand.Rand) []obsRow {
 	seen := map[string]bool{}
 	for h := 0; h < 1+rng.Intn(3); h++ {
 		holder := fmt.Sprintf("%040x", h+10)
+		// Roughly one holder in three is OFF-CHAIN: chain_id NULL, one snapshot a day, and block_number is
+		// the instant in epoch seconds, as the materializer requires.
+		offChain := rng.Intn(3) == 0
 		for i := 0; i < 2+rng.Intn(6); i++ {
 			block := 100 + rng.Intn(400)
 			r := obsRow{
@@ -386,6 +390,13 @@ func generateHistory(rng *rand.Rand) []obsRow {
 				ts: base.Add(time.Duration(block) * time.Hour).
 					Add(time.Duration(rng.Intn(60)) * time.Minute),
 			}
+			if offChain {
+				r.ts = base.Add(time.Duration(i) * 24 * time.Hour).Add(time.Duration(rng.Intn(60)) * time.Minute)
+				r.block = int(r.ts.Unix())
+				r.bver, r.pver = 0, 0
+				r.dealType = "CUSTODY"
+				r.offChain = true
+			}
 			switch rng.Intn(4) {
 			case 0:
 				r.dealType = ""
@@ -394,7 +405,7 @@ func generateHistory(rng *rand.Rand) []obsRow {
 			default:
 				r.dealType = "BORROW"
 			}
-			k := fmt.Sprintf("%s|%d|%d|%d|%s", holder, r.block, r.bver, r.pver, r.ts.Format(time.RFC3339))
+			k := fmt.Sprintf("%v|%s|%d|%d|%d|%s", r.offChain, holder, r.block, r.bver, r.pver, r.ts.Format(time.RFC3339))
 			if seen[k] {
 				continue // the spine PK forbids a duplicate coordinate
 			}
@@ -435,9 +446,13 @@ func valuesBody(rows []obsRow) string {
 		if r.dealType != "" {
 			dt = "'" + r.dealType + "'::text"
 		}
+		chain, proto, inst := "1::int", "10::bigint", "design-inst"
+		if r.offChain {
+			chain, proto, inst = "NULL::int", "NULL::bigint", "design-custody"
+		}
 		parts = append(parts, fmt.Sprintf(
-			"(1::int, 10::bigint, 'design-inst'::text, '%s'::text, %d::numeric, %d::bigint, %d::int, %d::int, '%s'::timestamptz, %s)",
-			r.holder, r.qty, r.block, r.bver, r.pver, r.ts.Format(time.RFC3339), dt))
+			"(%s, %s, '%s'::text, '%s'::text, %d::numeric, %d::bigint, %d::int, %d::int, '%s'::timestamptz, %s)",
+			chain, proto, inst, r.holder, r.qty, r.block, r.bver, r.pver, r.ts.Format(time.RFC3339), dt))
 	}
 	return `SELECT * FROM (VALUES ` + strings.Join(parts, ",") +
 		`) v(chain_id,protocol_id,instrument_key,holder_id,quantity,block_number,block_version,` +

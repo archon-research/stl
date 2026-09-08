@@ -1,4 +1,6 @@
 -- VEC-401: record the deal type on the observation, since it cannot be derived from position_state.
+-- Sorts directly after the spine (20260818_130000) and before every projection and cache, which is what
+-- lets those files reference deal_type without each declaring the column.
 -- Named deal_type, matching ref_deal_type.deal_type and its unsuffixed sibling `direction`. No
 -- canonical column in the register carries a _code suffix, so this does not introduce the first.
 -- The Morpho market loan leg nets supply against borrow as abs(supply - borrow), so the sign -- and
@@ -52,6 +54,11 @@ COMMENT ON COLUMN position_projection_run.block_number IS 'Derived. Highest bloc
 GRANT SELECT ON position_projection_run TO stl_readonly;
 GRANT SELECT, INSERT ON position_projection_run TO stl_readwrite;
 REVOKE UPDATE, DELETE ON position_projection_run FROM stl_readwrite;
+
+-- Off-chain observations (custody snapshots) have no block. They carry chain_id NULL, protocol_id NULL
+-- (a protocol row needs a chain address), and block_number = the snapshot instant in epoch seconds --
+-- derived, so the materializer can check it, and distinct per snapshot, which the observation key needs.
+COMMENT ON COLUMN position_state.block_number IS 'Block of the observation for an on-chain projection (chain_id set). For an OFF-CHAIN observation (chain_id NULL, a custody snapshot) it is floor(epoch seconds of block_timestamp): derived, distinct per snapshot, enforced by the materializer, and not a block on any chain. A reader asking "as of block N" reads chain_id-NULL rows by block_timestamp. chain_id is hashed into position_id, so one position is off-chain or on-chain for life.';
 
 -- Body copied from 20260818_130000 with one change: deal_type is resolved per view and carried
 -- into the snapshot and the append. Comments are not duplicated -- that migration is immutable, so it
@@ -208,6 +215,18 @@ BEGIN
         RAISE WARNING 'projection % re-emits stored observations with a changed quantity; stored rows kept (append-only: a real correction must bump block_version/processing_version): %', p_view, bad_qty;
     END IF;
 
+    -- Off-chain rows (chain_id NULL) must carry block_number = floor(epoch of block_timestamp). The
+    -- observation key is (position, block, versions), so snapshots need distinct blocks; deriving the
+    -- value from the instant makes it deterministic and checkable rather than a convention.
+    SELECT string_agg(format('bn=%s ts=%s', s.block_number, s.block_timestamp), '; ') INTO bad FROM (
+        SELECT block_number, block_timestamp FROM pg_temp._mpp_src
+         WHERE chain_id IS NULL
+           AND block_number <> floor(extract(epoch FROM block_timestamp))::bigint
+         ORDER BY block_timestamp LIMIT 5) s;
+    IF bad IS NOT NULL THEN
+        RAISE EXCEPTION 'projection % emits off-chain rows (chain_id NULL) whose block_number is not floor(epoch seconds of block_timestamp): %', p_view, bad;
+    END IF;
+
     -- Within one position a higher block cannot carry an EARLIER instant. The caches order by block_number
     -- and read the date from block_timestamp, so a violation makes position_current and position_daily
     -- disagree about the newest observation. Governs rows that will be INSERTED, checked against each
@@ -268,7 +287,7 @@ BEGIN
     RETURN n;
 END $fn$;
 
-COMMENT ON FUNCTION materialize_position_projection(regclass, integer) IS '[Operational] VEC-402..407 shared materializer: validate a per-protocol projection view against the position_state column contract, fail hard on contract/type drift, double-emitted keys, a higher block carrying an earlier block_timestamp within one position, or cross-view ownership violations; keep-stored-and-warn on a re-emitted key whose block_timestamp or quantity drifted, then -- evaluating the projection ONCE into a temp table every check reads -- APPEND the new observations. deal_type is OPTIONAL, not part of the required contract, so a projection omitting it still works and stores NULL; a projection emitting it as any string type has the value copied, and one emitting a lossily-narrow string type, or a value that changes a STORED observation''s deal type, is REJECTED. Everything else about the value is the table''s FK to ref_deal_type, not this function''s job. position_id is recomputed via position_id(); serialized per view by an advisory lock on the view''s canonical name. Records the completed run in position_projection_run, in the same transaction. Idempotent; run out of band. Returns rows INSERTED.';
+COMMENT ON FUNCTION materialize_position_projection(regclass, integer) IS '[Operational] VEC-402..407 shared materializer: validate a per-protocol projection view against the position_state column contract, fail hard on contract/type drift, double-emitted keys, a higher block carrying an earlier block_timestamp within one position, an off-chain row (chain_id NULL) whose block_number is not its instant in epoch seconds, or cross-view ownership violations; keep-stored-and-warn on a re-emitted key whose block_timestamp or quantity drifted, then -- evaluating the projection ONCE into a temp table every check reads -- APPEND the new observations. deal_type is OPTIONAL, not part of the required contract, so a projection omitting it still works and stores NULL; a projection emitting it as any string type has the value copied, and one emitting a lossily-narrow string type, or a value that changes a STORED observation''s deal type, is REJECTED. Everything else about the value is the table''s FK to ref_deal_type, not this function''s job. position_id is recomputed via position_id(); serialized per view by an advisory lock on the view''s canonical name. Records the completed run in position_projection_run, in the same transaction. Idempotent; run out of band. Returns rows INSERTED.';
 
 -- position_classification is retired. It was a classification engine over the spine, but the engine
 -- is the projection's CASE expression and its result now lands on the observation, where a position
@@ -276,4 +295,4 @@ COMMENT ON FUNCTION materialize_position_projection(regclass, integer) IS '[Oper
 -- ever wrote it. direction derives from ref_deal_type; collateral_status was unused. Project lead decision.
 DROP TABLE IF EXISTS position_classification;
 
-INSERT INTO migrations (filename) VALUES ('20260904_120200_add_position_state_deal_type.sql') ON CONFLICT (filename) DO NOTHING;
+INSERT INTO migrations (filename) VALUES ('20260818_140000_add_position_state_deal_type.sql') ON CONFLICT (filename) DO NOTHING;

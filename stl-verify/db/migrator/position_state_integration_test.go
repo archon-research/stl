@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -159,6 +160,8 @@ func TestPositionState(t *testing.T) {
 	psTestBlockTimeMonotonicPerPosition(t, f)
 	// --- every completed run is recorded, so a stale position is detectable ---
 	psTestCompletedRunIsRecorded(t, f)
+	// --- off-chain observations: chain NULL, block_number = epoch of the instant, never mixed ---
+	psTestOffChainObservations(t, f)
 }
 
 // psTestRecencyGuard covers: recency guard
@@ -429,9 +432,11 @@ func psTestIdentityIntegrityPositionkeyContract(t *testing.T, f *psFixture) {
 
 	t.Run("null chain_id is legal and does not collide with a set chain_id", func(t *testing.T) {
 		// chain_id/protocol_id are nullable structural fields (render empty in position_key). A NULL-chain
-		// position must materialize AND hash distinctly from the same instrument/holder at chain 1.
+		// position is OFF-CHAIN, so its block_number is its instant in epoch seconds (1767225600 =
+		// 2026-01-01T00:00:00Z); it must materialize AND hash distinctly from the same instrument/holder
+		// at chain 1.
 		body := `SELECT * FROM (VALUES ` +
-			`(NULL::int,10::bigint,'inc'::text,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text,5::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz),` +
+			`(NULL::int,10::bigint,'inc'::text,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text,5::numeric,'LOAN'::text,1767225600::bigint,0::int,0::int,'2026-01-01'::timestamptz),` +
 			`(1::int,10::bigint,'inc'::text,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text,9::numeric,'BORROW'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) ` + mppCols
 		mpp(t, "vnc", body, "nullchain")
 		var nullRows, setRows int
@@ -2427,7 +2432,7 @@ func (f *psFixture) refDealTypeCodes(t *testing.T) []string {
 func psTestDealTypeCodeMigrationIsReRunnable(t *testing.T, f *psFixture) {
 	t.Run("the migration re-applies cleanly", func(t *testing.T) {
 		raw, err := os.ReadFile(filepath.Join(getMigrationsPath(),
-			"20260904_120200_add_position_state_deal_type.sql"))
+			"20260818_140000_add_position_state_deal_type.sql"))
 		if err != nil {
 			t.Fatalf("read migration: %v", err)
 		}
@@ -2544,6 +2549,58 @@ func psTestCompletedRunIsRecorded(t *testing.T, f *psFixture) {
 			} else if !strings.Contains(err.Error(), "permission denied") {
 				t.Errorf("%s refused for the wrong reason: %v", q, err)
 			}
+		}
+	})
+}
+
+// psTestOffChainObservations: a custody snapshot has no block. The observation key is (position, block,
+// versions), so distinct snapshots need distinct blocks; off-chain rows carry chain_id NULL and
+// block_number = floor(epoch seconds of block_timestamp), which the materializer enforces.
+func psTestOffChainObservations(t *testing.T, f *psFixture) {
+	epoch := func(ts string) int64 {
+		tm, err := time.Parse(time.RFC3339, ts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tm.Unix()
+	}
+	snap := func(ik string, qty int, ts string, bn int64) string {
+		return "(NULL::int,NULL::bigint,'" + ik + "'::text,'" + strings.Repeat("c", 40) + "'::text," + strconv.Itoa(qty) +
+			"::numeric,'CUSTODY'::text," + strconv.FormatInt(bn, 10) + "::bigint,0::int,0::int,'" + ts + "'::timestamptz)"
+	}
+	onchain := func(ik string, bn int, ts string) string {
+		return "(1::int,10::bigint,'" + ik + "'::text,'" + strings.Repeat("c", 40) + "'::text,5::numeric,'LOAN'::text," +
+			strconv.Itoa(bn) + "::bigint,0::int,0::int,'" + ts + "'::timestamptz)"
+	}
+	t1, t2, t3 := "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", "2026-05-03T00:00:00Z"
+
+	t.Run("snapshots are distinct observations and newer-wins follows the instant", func(t *testing.T) {
+		body := `SELECT * FROM (VALUES ` + snap("cust-a", 10, t1, epoch(t1)) + "," + snap("cust-a", 20, t2, epoch(t2)) + "," +
+			snap("cust-a", 15, t3, epoch(t3)) + `) ` + mppCols
+		if n := f.mppN(t, "pv_cust_a", body, "snapshots"); n != 3 {
+			t.Fatalf("three snapshots inserted %d rows, want 3", n)
+		}
+		var newest int
+		if err := f.pool.QueryRow(f.ctx, `SELECT quantity FROM position_state WHERE instrument_key = 'cust-a'
+			 ORDER BY block_number DESC, block_version DESC, processing_version DESC, block_timestamp DESC LIMIT 1`).Scan(&newest); err != nil {
+			t.Fatal(err)
+		}
+		if newest != 15 {
+			t.Errorf("newest off-chain observation has quantity %d, want 15", newest)
+		}
+	})
+
+	t.Run("an off-chain row whose block_number is not its instant is refused", func(t *testing.T) {
+		f.mppErr(t, "pv_cust_bad", `SELECT * FROM (VALUES `+snap("cust-bad", 10, t1, 0)+`) `+mppCols, "block 0", "not floor(epoch")
+		f.mppErr(t, "pv_cust_bad2", `SELECT * FROM (VALUES `+snap("cust-bad2", 10, t1, epoch(t1)+1)+`) `+mppCols, "off by one", "not floor(epoch")
+	})
+
+	// Negative controls: the epoch rule does not touch on-chain rows, and one projection may carry
+	// off-chain and on-chain POSITIONS side by side.
+	t.Run("on-chain rows are untouched and the two kinds may share a projection", func(t *testing.T) {
+		body := `SELECT * FROM (VALUES ` + snap("cust-b", 10, t1, epoch(t1)) + "," + onchain("chain-b", 100, t1) + `) ` + mppCols
+		if n := f.mppN(t, "pv_cust_both", body, "two positions"); n != 2 {
+			t.Errorf("two positions inserted %d, want 2", n)
 		}
 	})
 }
