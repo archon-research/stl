@@ -46,7 +46,7 @@ Infrastructure code (Terraform/OpenTofu) lives in a separate repository for secu
 - **[stl-verify/python/AGENTS.md](stl-verify/python/AGENTS.md)** and **[stl-verify/ts/AGENTS.md](stl-verify/ts/AGENTS.md)** — per-language tooling/CI.
 - **[k8s/AGENTS.md](k8s/AGENTS.md)** — Kustomize base/overlays/dev-infra conventions.
 - **[alerts/AGENTS.md](alerts/AGENTS.md)** and **[docs/runbooks/AGENTS.md](docs/runbooks/AGENTS.md)** — alerts + runbooks definition-of-done for new indexers.
-- **`stl-review-phase` skill** — run the standard review pass after a substantive change, before declaring work done.
+- **`stl-review-phase` skill** — the repo-specific lenses to check alongside `/code-review` after a substantive change, before declaring work done.
 
 Some guidance deliberately applies outside its directory. Before modifying a PostgreSQL
 repository adapter, also read `stl-verify/db/migrations/AGENTS.md`. Before modifying either
