@@ -19,6 +19,8 @@
 ./internal/adapters/outbound/coingecko
 ./internal/adapters/outbound/s3
 ./internal/testutil/mockchain
+./internal/testutil/mockgecko
+./cmd/util/mock-coingecko-server
 ./internal/adapters/outbound/redis
 ./internal/services/prime_debt
 ./internal/adapters/outbound/orderbook

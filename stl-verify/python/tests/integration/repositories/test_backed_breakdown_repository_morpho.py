@@ -10,7 +10,13 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
 from app.adapters.postgres.reference_as_of import utc_now
 from app.domain.entities.backed_breakdown import BackedBreakdown
-from tests.integration.seed import insert_oracle_asset, insert_token, insert_user, store_test_ids
+from tests.integration.seed import (
+    insert_morpho_adapter,
+    insert_oracle_asset,
+    insert_token,
+    insert_user,
+    store_test_ids,
+)
 
 
 class ProtocolScopedBackedBreakdownRepository(Protocol):
@@ -154,6 +160,7 @@ async def _insert_morpho_vault(
     asset_token_id: int,
     name: str = "Test Vault",
     symbol: str = "TV",
+    vault_version: int = 1,
 ) -> int:
     """Insert a Morpho vault and return its ID."""
     return cast(
@@ -163,7 +170,7 @@ async def _insert_morpho_vault(
         INSERT INTO morpho_vault
             (chain_id, protocol_id, address, name, symbol,
              asset_token_id, vault_version, created_at_block)
-        VALUES (1, $1, $2, $3, $4, $5, 1, $6)
+        VALUES (1, $1, $2, $3, $4, $5, $7, $6)
         RETURNING id
         """,
             protocol_id,
@@ -172,6 +179,7 @@ async def _insert_morpho_vault(
             symbol,
             asset_token_id,
             _SEED_BLOCK_NUMBER,
+            vault_version,
         ),
     )
 
@@ -203,7 +211,7 @@ async def _insert_morpho_market_position(
     supply_assets: str,
     block_number: int,
 ) -> None:
-    """Insert a market position for the vault user (supply only, no borrowing)."""
+    """Insert a market position (supply only, no borrowing)."""
     await conn.execute(
         """
         INSERT INTO morpho_market_position
@@ -332,6 +340,10 @@ _LATE_ADDRESS = b"\x3c" * 20  # loan token priced twice at different blocks
 _DISABLED_VAULT_ADDRESS = b"\x4a" * 20  # idle-only vault whose loan-token price is via a disabled oracle
 _MDISI_ADDRESS = b"\x4b" * 20  # vault share token for mDISi
 _DIS_ADDRESS = b"\x4c" * 20  # loan token priced only through a disabled oracle_asset mapping
+_V2_VAULT_ADDRESS = b"\x5a" * 20  # VaultV2 (vault_version 3): positions sit on its adapters, not on it
+_V2_ADAPTER_A_ADDRESS = b"\x5b" * 20  # member market adapter supplying to market A
+_V2_ADAPTER_B_ADDRESS = b"\x5c" * 20  # second member market adapter, also supplying to market A
+_V2_REMOVED_ADAPTER_ADDRESS = b"\x5d" * 20  # adapter removed from the set; its market B position must not count
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
@@ -490,11 +502,39 @@ async def _seed_data(db_url: str) -> None:
             name="Morpho Disabled-Oracle Vault",
         )
 
+        # VaultV2: 500K USDC total_assets, held through adapters. Two member adapters
+        # supply 200K + 100K to market A (80% util); a removed adapter's 100K in market
+        # B must be ignored. Idle = 500K - 300K = 200K.
+        v2_vault_id = await _insert_morpho_vault(
+            conn, protocol_id, _V2_VAULT_ADDRESS, usdc_id, name="Morpho USDC VaultV2", symbol="mUSDCv2", vault_version=3
+        )
+        await _insert_morpho_vault_state(conn, v2_vault_id, "500000000000", block)
+        for adapter_address, supply_raw in (
+            (_V2_ADAPTER_A_ADDRESS, "200000000000"),
+            (_V2_ADAPTER_B_ADDRESS, "100000000000"),
+        ):
+            await insert_morpho_adapter(
+                conn, vault_id=v2_vault_id, address=adapter_address, asset_token_id=usdc_id, block=block
+            )
+            adapter_user_id = await insert_user(conn, adapter_address)
+            await _insert_morpho_market_position(conn, adapter_user_id, market_a_id, supply_raw, block)
+        await insert_morpho_adapter(
+            conn,
+            vault_id=v2_vault_id,
+            address=_V2_REMOVED_ADAPTER_ADDRESS,
+            asset_token_id=usdc_id,
+            block=block,
+            removed_at_block=block + 1,
+        )
+        removed_adapter_user_id = await insert_user(conn, _V2_REMOVED_ADAPTER_ADDRESS)
+        await _insert_morpho_market_position(conn, removed_adapter_user_id, market_b_id, "100000000000", block)
+
         await store_test_ids(
             conn,
             {
                 "protocol_id": protocol_id,
                 "vault_id": vault_id,
+                "v2_vault_id": v2_vault_id,
                 "idle_vault_id": idle_vault_id,
                 "weth_idle_vault_id": weth_vault_id,
                 "unpriced_vault_id": unpriced_vault_id,
@@ -578,6 +618,40 @@ async def test_vault_backed_breakdown(
 
     assert by_symbol["WBTC"].backing_value == Decimal("150015.00")
     assert by_symbol["WBTC"].backing_pct == Decimal("15.00")
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_v2_vault_walks_member_adapter_positions(
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    """A VaultV2's breakdown comes from its member adapters' positions, summed per market.
+
+    500K USDC total_assets; adapters A (200K) and B (100K) both supply market A at
+    80% utilization, so market A counts as one 300K allocation:
+      WETH: 300K * 0.80 = 240,000 * 1.0001 = 240,024.00 (48%)
+      USDC: 300K * 0.20 + 200K idle = 260,000 * 1.0001 = 260,026.00 (52%)
+    """
+    result = await repository.get_backed_breakdown(test_ids["v2_vault_id"])
+
+    by_symbol = {item.symbol: item for item in result.items}
+    assert by_symbol["WETH"].backing_value == Decimal("240024.00")
+    assert by_symbol["WETH"].backing_pct == Decimal("48.00")
+    assert by_symbol["USDC"].backing_value == Decimal("260026.00")
+    assert by_symbol["USDC"].backing_pct == Decimal("52.00")
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_v2_vault_excludes_removed_adapter(
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    """An adapter whose latest membership observation is a removal is not walked.
+
+    The removed adapter's 100K position in market B (WBTC collateral) must not
+    surface: the only collateral row is WETH from the member adapters.
+    """
+    result = await repository.get_backed_breakdown(test_ids["v2_vault_id"])
+
+    assert {item.symbol for item in result.items} == {"WETH", "USDC"}
 
 
 @pytest.mark.asyncio(loop_scope="module")

@@ -29,10 +29,20 @@ var convertedAppendOnlyTables = []string{
 	"morpho_adapter_state",
 	"morpho_vault_cap",
 	"morpho_vault_fee",
+	// VEC-652: append-only from birth, REVOKE in the creating migration.
+	"asset_price",
 	"psm3_alm_shares",
 	// VEC-402: SELECT+INSERT only, with the owner-side REVOKE too.
 	"position_state",
 	"oracle_asset",
+	// VEC-475 (#711): append-only from birth; the creating migration REVOKEs all seven.
+	"uniswap_v4_pool_manager",
+	"uniswap_v4_pool",
+	"uniswap_v4_pool_state",
+	"uniswap_v4_swap",
+	"uniswap_v4_liquidity_event",
+	"uniswap_v4_tick",
+	"uniswap_v4_pool_event",
 	// VEC-401: run records are append-only; SELECT+INSERT only for the app role.
 	"position_projection_run",
 }

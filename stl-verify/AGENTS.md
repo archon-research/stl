@@ -41,9 +41,9 @@ Follow [Effective Go](https://go.dev/doc/effective_go).
 - `cmd/util/` — `migrate`, `generate-er`, `null-payload-refill`, `stress-test`.
 
 Every binary extracts a `run(ctx, args) error` from `main()` and runs under one of three
-entry points for graceful SIGINT/SIGTERM shutdown, all inside the pods' 60s
+entry points for graceful SIGINT/SIGTERM shutdown, all inside the pods' 90s
 `terminationGracePeriodSeconds`: `lifecycle.Run` (workers — bounded by
-`lifecycle.ShutdownTimeout`, 40s, plus a 15s `lifecycle.ShutdownTailBudget` for the
+`lifecycle.ShutdownTimeout`, 40s, plus a 45s `lifecycle.ShutdownTailBudget` for the
 deferred archive drain and OTEL flush), `temporal.RunCronjob` (scheduled cronjobs), or
 `temporal.RunWorker` (on-demand Temporal jobs — no schedule; parameters, where the job
 takes any, supplied at start time; see `docs/temporal_guide.md`). The two Temporal entry
@@ -90,11 +90,21 @@ make run-watcher         # Run one service on the host against the cluster
 make run-<worker>        # grep '^run-' in the Makefile for the full list (incl. per-chain *-avax)
 make kind-use-alchemy    # Switch watcher from the mock chain to real Alchemy (key in .env.secrets)
 
+# dev-up also deploys mock-coingecko-server, and offchain-price-indexer runs against it
+# by default (no real key needed). To use the real Pro API: set COINGECKO_API_KEY in
+# .env.secrets, then `make kind-secrets kind-use-coingecko`.
+# With ALCHEMY_API_KEY in .env.secrets, dev-up also runs the Alchemy workers in-cluster —
+# including the DEX indexers (curve-indexer, uniswap-v3-indexer, uniswap-v4-indexer, all one
+# stl-dex-indexer image) — consuming the in-cluster watcher's blocks over LocalStack SNS→SQS.
+# Nothing runs on the host; the workers that have a `run-*` target (grep '^run-') can still be
+# run on the host for debugging.
+
 # Testing
 make test               # Unit tests only
 make test-race          # Unit tests with race detector (CI default)
 make test-integration   # Integration tests (requires Docker, 5m timeout)
 make e2e                # End-to-end tests with testcontainers
+make e2e-real-blocks BLOCKS=25827558   # morpho-indexer over real mainnet blocks (needs ALCHEMY_API_KEY in ../.env.secrets)
 make cover              # Generate coverage report
 go test -race -run 'TestName' ./internal/services/<pkg>/   # single test
 

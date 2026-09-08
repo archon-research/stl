@@ -58,10 +58,14 @@ from tests.integration.seed import (
     FR_PROXY_MIXED,
     FR_PROXY_NEVER_VALUED,
     FR_PROXY_RATIO,
+    FR_PROXY_SAME_BLOCK,
     FR_PROXY_TIE,
     FR_RATIO_BALANCE,
     FR_RATIO_TX_AMOUNT,
     FR_RATIO_UNDERLYING_VALUE,
+    FR_SAME_BLOCK_HIGH_LOG_DONOR_BALANCE,
+    FR_SAME_BLOCK_HIGH_LOG_DONOR_UNDERLYING_VALUE,
+    FR_SAME_BLOCK_TX_AMOUNT,
     FR_TIE_BEFORE_DONOR_BALANCE,
     FR_TIE_BEFORE_DONOR_UNDERLYING_VALUE,
     FR_TIE_TX_AMOUNT,
@@ -212,6 +216,14 @@ async def test_equidistant_ratio_candidates_prefer_the_at_or_before_row(repo) ->
     bucket = await _single_bucket(repo, FR_PROXY_TIE)
     ratio = FR_TIE_BEFORE_DONOR_UNDERLYING_VALUE / FR_TIE_BEFORE_DONOR_BALANCE
     assert bucket.net_flow_usd == FR_TIE_TX_AMOUNT * ratio * FR_UNDERLYING_PRICE
+
+
+@pytest.mark.asyncio
+async def test_same_block_donors_resolve_by_log_index(repo) -> None:
+    """Two donors in the flow's own block: the higher log_index wins, not the higher ratio."""
+    bucket = await _single_bucket(repo, FR_PROXY_SAME_BLOCK)
+    ratio = FR_SAME_BLOCK_HIGH_LOG_DONOR_UNDERLYING_VALUE / FR_SAME_BLOCK_HIGH_LOG_DONOR_BALANCE
+    assert bucket.net_flow_usd == FR_SAME_BLOCK_TX_AMOUNT * ratio * FR_UNDERLYING_PRICE
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -273,6 +274,49 @@ func TestCryptoswapHandler_CorruptKnownEventErrors(t *testing.T) {
 	got, err := h.DecodeEvents(receipt, pool, 1, 100, 0, time.Unix(1, 0).UTC())
 	if err == nil {
 		t.Errorf("expected error for corrupt TokenExchange data, got success: %+v", got)
+	}
+}
+
+// AddLiquidity has no extractor and reaches only the capture net, so this guard
+// is all that stops an empty data block persisting as a params payload.
+func TestCryptoswapHandler_EmptyDataOnKnownEventErrors(t *testing.T) {
+	a, err := abis.CurveCryptoswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewCryptoswapHandler(a)
+	pool := RegisteredPool{
+		ID:      10,
+		Address: common.HexToAddress("0xD51a44d3FaE010294C616388b506AcdA1bfAAE46"),
+		Kind:    KindCryptoswap,
+		NCoins:  3,
+	}
+
+	ev, ok := a.Events["AddLiquidity"]
+	if !ok {
+		t.Fatal("AddLiquidity event not in ABI")
+	}
+	txHash := common.HexToHash("0xdeadbeef01020304050607080900010203040506070809000102030405060708")
+	provider := common.HexToAddress("0xabc")
+
+	log := shared.Log{
+		Address:         pool.Address.Hex(),
+		Topics:          []string{ev.ID.Hex(), common.BytesToHash(provider.Bytes()).Hex()},
+		Data:            "0x",
+		TransactionHash: txHash.Hex(),
+		LogIndex:        "0x0",
+	}
+	receipt := shared.TransactionReceipt{
+		Logs:            []shared.Log{log},
+		TransactionHash: txHash.Hex(),
+	}
+
+	got, err := h.DecodeEvents(receipt, pool, 1, 100, 0, time.Unix(1, 0).UTC())
+	if err == nil {
+		t.Fatalf("expected error for an AddLiquidity log with no data, got success: %+v", got)
+	}
+	if !strings.Contains(err.Error(), "carries no data for non-indexed arguments") {
+		t.Errorf("error %q does not report the empty data block", err)
 	}
 }
 

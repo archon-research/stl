@@ -116,12 +116,21 @@ type republishHeartbeat struct {
 	Phase   string `json:"phase"`
 }
 
-// blockWork is one height and the version settled for it. The version travels
-// through workflow history, so a retried republish reuses the slot rather than
-// deriving a later one from the archive its own first attempt filled.
+// derivedVersionHash is what DeriveVersion settled for one height: the version
+// the repair lands in, and the canonical block it must carry.
+type derivedVersionHash struct {
+	Version int    `json:"version"`
+	Hash    string `json:"hash"`
+}
+
+// blockWork is one height and the derivation settled for it. Both travel through
+// workflow history, so a retried republish reuses the slot rather than deriving a
+// later one from the archive its own first attempt filled, and verifies against
+// the block the derivation read rather than whatever the height holds by then.
 type blockWork struct {
-	Number  int64 `json:"number"`
-	Version int   `json:"version"`
+	Number  int64  `json:"number"`
+	Version int    `json:"version"`
+	Hash    string `json:"hash"`
 }
 
 // RepublishResult is the workflow's return value, shown in the UI's Result
@@ -217,13 +226,13 @@ func republishEachBlock(ctx workflow.Context, run republishRun, state *republish
 	var activities *republishActivities
 	for _, number := range run.Blocks {
 		request := versionRequest{Block: number, ArchiveRepaired: run.ArchiveRepaired}
-		var version int
-		if err := workflow.ExecuteActivity(ctx, activities.DeriveVersion, request).Get(ctx, &version); err != nil {
+		var derived derivedVersionHash
+		if err := workflow.ExecuteActivity(ctx, activities.DeriveVersion, request).Get(ctx, &derived); err != nil {
 			return err
 		}
 
 		var republished block_republish.Result
-		work := blockWork{Number: number, Version: version}
+		work := blockWork{Number: number, Version: derived.Version, Hash: derived.Hash}
 		if err := workflow.ExecuteActivity(ctx, activities.RepublishBlock, work).Get(ctx, &republished); err != nil {
 			return err
 		}
@@ -236,9 +245,9 @@ func republishEachBlock(ctx workflow.Context, run republishRun, state *republish
 
 func republishActivityOptions() workflow.ActivityOptions {
 	return workflow.ActivityOptions{
-		// One block is three RPC reads, a Redis pipeline write and one SNS
-		// publish — seconds on a healthy node. The ceiling is minutes because an
-		// archive node serving a months-old block by hash can be slow.
+		// One block is three RPC reads, a Redis pipeline write and one SNS publish
+		// — seconds on a healthy node. The ceiling is minutes because an archive
+		// node serving a months-old block can be slow.
 		StartToCloseTimeout: 5 * time.Minute,
 
 		// Total time for ONE block INCLUDING retries. This, not an attempt cap,
@@ -275,26 +284,27 @@ type republishActivities struct {
 	newProgress func() heartbeater
 }
 
-// DeriveVersion settles the version this height is republished at. It is its own
-// activity so the answer lands in workflow history before anything is published:
-// a RepublishBlock that fails after its publish is retried at the version
-// recorded here, not at the one the archive would report by then.
-func (a *republishActivities) DeriveVersion(ctx context.Context, request versionRequest) (version int, err error) {
+// DeriveVersion settles the version this height is republished at and the
+// canonical block it is repaired to. It is its own activity so both land in
+// workflow history before anything is published: a RepublishBlock that fails
+// after its publish is retried at the version recorded here, not at the one the
+// archive would report by then, and against the block this read saw.
+func (a *republishActivities) DeriveVersion(ctx context.Context, request versionRequest) (derived derivedVersionHash, err error) {
 	defer func() { err = nonRetryableIfStructural(err) }()
 
 	stopHeartbeat := temporal.StartHeartbeat(ctx, heartbeatInterval, nil)
 	defer stopHeartbeat()
 
-	version, err = a.deriveVersion(ctx, request)
+	derived.Version, derived.Hash, err = a.deriveVersion(ctx, request)
 	if err != nil {
-		return 0, fmt.Errorf("deriving the version for block %d: %w", request.Block, err)
+		return derivedVersionHash{}, fmt.Errorf("deriving the version for block %d: %w", request.Block, err)
 	}
-	return version, nil
+	return derived, nil
 }
 
 // deriveVersion picks the derivation the run asked for: the slot above what the
 // archive holds, or the slot a repair already wrote the canonical block into.
-func (a *republishActivities) deriveVersion(ctx context.Context, request versionRequest) (int, error) {
+func (a *republishActivities) deriveVersion(ctx context.Context, request versionRequest) (int, string, error) {
 	if request.ArchiveRepaired {
 		return a.service.ArchivedVersion(ctx, request.Block)
 	}
@@ -310,7 +320,7 @@ func (a *republishActivities) RepublishBlock(ctx context.Context, work blockWork
 	stopHeartbeat := temporal.StartHeartbeat(ctx, heartbeatInterval, progress)
 	defer stopHeartbeat()
 
-	result, err = a.service.Republish(ctx, work.Number, work.Version, recordPhase(progress, work))
+	result, err = a.service.Republish(ctx, work.Number, work.Version, work.Hash, recordPhase(progress, work))
 	if err != nil {
 		return block_republish.Result{}, fmt.Errorf("republishing block %d at version %d: %w", work.Number, work.Version, err)
 	}

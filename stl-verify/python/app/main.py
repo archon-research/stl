@@ -3,7 +3,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+import httpx
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.docs import get_swagger_ui_html, get_swagger_ui_oauth2_redirect_html
 from fastapi.openapi.utils import get_openapi
@@ -22,6 +23,7 @@ from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiq
 from app.adapters.postgres.morpho_vault_allocations_reader import PostgresMorphoVaultAllocationsReader
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository, resolve_receipt_token_mapping
 from app.adapters.postgres.reference_as_of import pinned_to
+from app.api.deps import require_analyst, require_viewer
 from app.api.v1 import (
     allocations,
     data_sources,
@@ -35,6 +37,9 @@ from app.api.v1 import (
     tokens,
     total_capital,
 )
+from app.auth.fga import FgaClient
+from app.auth.jwt import TokenVerifier
+from app.auth.settings import check_auth_settings
 from app.config import Settings, get_settings
 from app.logging import get_logger, setup_logging
 from app.middleware.request_id import RequestIdMiddleware
@@ -173,6 +178,7 @@ def configure_docs(application: FastAPI, settings: Settings) -> None:
 
 def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
     setup_logging(log_level=settings.log_level, log_format=settings.log_format)
+    check_auth_settings(settings)
 
     # Validate risk-engine config before acquiring any resources so a bad
     # configuration fails startup without leaking a telemetry provider or
@@ -201,6 +207,9 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # Before the try: the finally closes it, and a startup error raised
+        # before the auth block would otherwise become an UnboundLocalError.
+        auth_http: httpx.AsyncClient | None = None
         engine = create_db_engine(
             settings.async_database_url,
             pool_size=settings.db_pool_size,
@@ -268,10 +277,30 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             app.state.model_registry = model_registry
             app.state.receipt_token_lookup = receipt_token_repo
 
+            # Beside the engine so it is disposed in the same finally. Absent
+            # from app.state when auth is off, which the gates read as anonymous.
+            if settings.auth_enabled:
+                auth_http = httpx.AsyncClient()
+                app.state.verifier = TokenVerifier(
+                    issuer=settings.oidc_issuer,
+                    audience=settings.oidc_audience,
+                    http=auth_http,
+                    jwks_url=settings.oidc_jwks_url or None,
+                )
+                app.state.fga = FgaClient(
+                    base_url=settings.openfga_url,
+                    api_key=settings.openfga_api_key.get_secret_value(),
+                    store_name=settings.openfga_store_name,
+                    http=auth_http,
+                    list_ceiling=settings.openfga_list_ceiling,
+                )
+
             instrument_sqlalchemy_engine(engine)
             yield
         finally:
             try:
+                if auth_http is not None:
+                    await auth_http.aclose()
                 await engine.dispose()
             finally:
                 shutdown_telemetry(app.state.telemetry_providers)
@@ -289,6 +318,9 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
         openapi_tags=OPENAPI_TAGS,
     )
     application.add_middleware(RequestIdMiddleware)
+    # The gates read THIS object, not a fresh get_settings(): an app built with
+    # auth on must enforce it whatever the process environment says.
+    application.state.settings = settings
     application.state.telemetry_providers = setup_telemetry(application, settings)
 
     @application.exception_handler(RequestValidationError)
@@ -330,17 +362,21 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
 
         return JSONResponse(status_code=422, content={"detail": serializable_errors})
 
+    # Per ROUTER, never global middleware — see require_role. status.router is
+    # deliberately ungated: kubelet reaches its probes directly.
+    viewer = [Depends(require_viewer)]
+    analyst = [Depends(require_analyst)]
     application.include_router(status.router, prefix="/v1")
-    application.include_router(allocations.router, prefix="/v1")
-    application.include_router(tokens.router, prefix="/v1")
-    application.include_router(protocol_events.router, prefix="/v1")
-    application.include_router(prime_debts.router, prefix="/v1")
-    application.include_router(total_capital.router, prefix="/v1")
-    application.include_router(prime_risk_capital.router, prefix="/v1")
-    application.include_router(exposure.router, prefix="/v1")
-    application.include_router(data_sources.router, prefix="/v1")
-    application.include_router(provenance_availability.router, prefix="/v1")
-    application.include_router(risk.router, prefix="/v1")
+    application.include_router(allocations.router, prefix="/v1", dependencies=viewer)
+    application.include_router(tokens.router, prefix="/v1", dependencies=viewer)
+    application.include_router(protocol_events.router, prefix="/v1", dependencies=viewer)
+    application.include_router(prime_debts.router, prefix="/v1", dependencies=viewer)
+    application.include_router(total_capital.router, prefix="/v1", dependencies=viewer)
+    application.include_router(prime_risk_capital.router, prefix="/v1", dependencies=viewer)
+    application.include_router(exposure.router, prefix="/v1", dependencies=viewer)
+    application.include_router(data_sources.router, prefix="/v1", dependencies=viewer)
+    application.include_router(provenance_availability.router, prefix="/v1", dependencies=viewer)
+    application.include_router(risk.router, prefix="/v1", dependencies=analyst)
 
     def public_openapi() -> dict[str, Any]:
         if application.openapi_schema is not None:
@@ -369,6 +405,10 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
                     },
                 }
             }
+            # Swagger attaches the token only to operations carrying a security
+            # REQUIREMENT, not merely a declared scheme. Root-level, so the
+            # ungated probes gain a cosmetic padlock.
+            full["security"] = [{"oidc": []}]
         application.openapi_schema = full
         return application.openapi_schema
 

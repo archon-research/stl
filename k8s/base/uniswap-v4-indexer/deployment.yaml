@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: uniswap-v4-indexer
+spec:
+  replicas: 1
+  # Explicit, matching the API-server default — ArgoCD must own spec.strategy or
+  # a later change to it cannot prune rollingUpdate. k8s/AGENTS.md, "Rollout strategy".
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+  selector:
+    matchLabels:
+      app: uniswap-v4-indexer
+  template:
+    metadata:
+      labels:
+        app: uniswap-v4-indexer
+    spec:
+      serviceAccountName: uniswap-v4-indexer
+      containers:
+        - name: uniswap-v4-indexer
+          # Image name used as the Kustomize images transformer key.
+          # The overlay kustomization.yaml overrides newName + newTag.
+          image: dex-indexer
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: uniswap-v4-indexer-config
+            - secretRef:
+                # Populated by ExternalSecret — secret name mirrors the service.
+                name: uniswap-v4-indexer
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f dex-indexer"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

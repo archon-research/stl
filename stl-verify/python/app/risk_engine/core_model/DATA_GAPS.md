@@ -171,7 +171,9 @@ pool). Live CRRs will not reconcile with parquet-era CRRs for these keys:
 different borrower universe, not a data bug. Modelling Base needs Base Morpho
 market indexing (we index Base Morpho *vault receipts*, not market positions).
 
-Measured (25 Aug 2026, N_MC=100, SEED=0, live vs parquet on identical code):
+Measured (25 Aug 2026, N_MC=100, SEED=0, live vs parquet on identical code; predates the
+live order-book side and sort fix in #891, so later live runs are not comparable to these
+figures, and live books are top-100 levels only, see README Known Issue #12 / VEC-740):
 cbBTC/USDC 0.398% → 0.010%, WETH/USDC 3.548% → 0.362%. The live CRRs are
 *lower* despite Base being the bigger market, and that is expected: CRR is
 expected loss **per borrowed dollar**, so market size alone does not raise it.
