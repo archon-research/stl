@@ -8,9 +8,12 @@ handler).
 
 ## Tooling & commands
 
-- Hooks (lefthook): oxlint, oxfmt — both invoked through `uikit-cli`, never the
-  oxlint/oxfmt binaries by name (they are transitive deps of `uikit-cli`, not
-  declared ones).
+- Hooks (lefthook): pre-commit runs oxlint and oxfmt — both invoked through
+  `uikit-cli`, never the oxlint/oxfmt binaries by name (they are transitive deps
+  of `uikit-cli`, not declared ones). Pre-push runs `type:check`, but only when
+  the push actually carries TypeScript. A clone that predates a new hook may not
+  pick it up on its own — lefthook's sync is not reliable across hook types — so
+  run `make install-hooks` after pulling one.
 - CI (`ts-ci.yml`): `lint` + `format:check`, then panda codegen, `doctor`, the
   `test:*` regression scripts (incl. `test:mocks`), the openapi-types sync check,
   `type:check`, `build` — **source of truth**.
