@@ -1,0 +1,106 @@
+# Actions are pinned to commit SHAs for supply-chain security.
+# To update: git ls-remote --tags https://github.com/<org>/<action>.git | grep <tag>
+#
+# Weekly cache-free rebuild of every image, so OS security updates keep landing
+# after ORB-366 (see the note above `apt-get upgrade` in stl-verify/python/Dockerfile).
+#
+# The images used to pick up patches by accident: a per-commit value sat above
+# the OS-update layer in each Dockerfile, so every release rebuilt it. That is
+# also what made an unchanged service produce a new image on every commit and
+# roll its pods for nothing, so it had to go. Patching is now explicit and
+# scheduled instead of an incidental effect of deploying.
+#
+# This run pushes no image. It rebuilds with the layer cache disabled and
+# re-exports the shared build cache, so the next real deploy of any commit
+# inherits the patched layers. It cannot push a patched image itself: the SHA
+# tag for an already-built commit exists, and re-pushing it fails under ECR tag
+# immutability (ARCT-420). The consequence is that patches reach the cluster on
+# the first deploy after this run, not on this run.
+name: Image Security Refresh
+
+on:
+  schedule:
+    # Mondays 04:00 UTC — before the working day, so the refreshed cache is in
+    # place for the week's first deploys.
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+jobs:
+  refresh-build-cache:
+    name: Rebuild Images Without Cache
+    runs-on: ubuntu-latest
+    # A cache-free build recompiles every Go service instead of reusing a layer,
+    # so this is far slower than a deploy build. It runs weekly, off the
+    # critical path, and nothing waits on it.
+    timeout-minutes: 180
+    # Deliberately its own group rather than sharing the deploy's: a refresh must
+    # never make a deploy queue behind it. The two can then export the same cache
+    # tags concurrently and one result wins, which costs a week's patch latency
+    # at worst and cannot produce a wrong image — the cache only ever supplies
+    # layers a build would otherwise recompute.
+    concurrency:
+      group: image-security-refresh
+      cancel-in-progress: false
+    env:
+      AWS_REGION: eu-west-1
+      # Set explicitly so image names can be formed with no AWS STS call. This
+      # job holds no AWS credentials and pushes nothing; the account only shapes
+      # the image names the build tags locally.
+      AWS_ACCOUNT_ID: "579039992622"
+    permissions:
+      contents: read
+      packages: write # push BuildKit layer cache to GHCR
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+        with:
+          platforms: arm64
+
+      # The docker-container driver is what makes --cache-to work at all; the
+      # default driver rejects it.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Login to GHCR (build cache)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+
+      - name: Resolve build-cache repo
+        run: echo "DOCKER_CACHE_REPO=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/buildcache" >> "$GITHUB_ENV"
+
+      # DOCKER_PUSH=0 builds without loading or pushing any image, and normally
+      # also skips the cache export; DOCKER_CACHE_EXPORT=1 restores the export,
+      # which is the entire point of this run.
+      - name: Rebuild all images with no cache and re-export the build cache
+        working-directory: stl-verify
+        run: |
+          make docker-release-all \
+            ENV=sentinelstaging \
+            IMAGE_TAG=${{ github.sha }} \
+            DOCKER_CACHE=1 \
+            DOCKER_CACHE_REPO="$DOCKER_CACHE_REPO" \
+            DOCKER_PUSH=0 \
+            DOCKER_NO_CACHE=1 \
+            DOCKER_CACHE_EXPORT=1
+
+  notify-refresh-failure:
+    name: Notify Image Security Refresh Failure
+    if: ${{ always() && needs.refresh-build-cache.result == 'failure' }}
+    needs: [refresh-build-cache]
+    uses: ./.github/workflows/slack-notify.yaml
+    with:
+      status: failure
+      context: Image Security Refresh
+      body: |
+        The weekly cache-free image rebuild failed, so the shared build cache
+        still holds last week's OS package layers and deploys will keep shipping
+        them. Nothing is broken in the cluster and no deploy is blocked.
+
+        Recovery: re-run this workflow. If it keeps failing, deploys are still
+        safe — they are simply not receiving OS security updates until it passes.
+    secrets:
+      slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_STAGING }}
+      gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
