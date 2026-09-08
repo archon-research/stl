@@ -172,14 +172,11 @@ func TestHandleBatch_ThreadsTransferPartiesOntoPosition(t *testing.T) {
 	}
 }
 
-// TestHandleBatch_Centrifuge_MetadataFromShareToken proves the VEC-337-part-2
-// row-metadata fix: an ERC-7540 centrifuge position takes its decimals/symbol
-// from the resolved share token (surfaced as ShareToken), not from its vault
-// contract_address, which reverts on decimals(). The vault address is left out
-// of the seeded metadata cache, so any attempt to read metadata from it would
-// fail the batch (nil multicaller) — the test passes only if the share token is
-// used. The persisted row still keys on the vault address.
-func TestHandleBatch_Centrifuge_MetadataFromShareToken(t *testing.T) {
+// TestHandleBatch_Centrifuge_RowKeysOnShareToken: the row lands wholly on the
+// share (surfaced as ShareToken) — token_address as well as decimals/symbol. The
+// vault is left out of the seeded metadata cache, so a read from it would fail
+// the batch on the nil multicaller.
+func TestHandleBatch_Centrifuge_RowKeysOnShareToken(t *testing.T) {
 	vault := common.HexToAddress("0x4880799ee5200fc58da299e965df644fbf46780b")
 	share := common.HexToAddress("0x1234000000000000000000000000000000005678")
 	wallet := common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
@@ -220,8 +217,8 @@ func TestHandleBatch_Centrifuge_MetadataFromShareToken(t *testing.T) {
 		t.Fatalf("expected 1 saved position, got %d", len(repo.saved))
 	}
 	pos := repo.saved[0]
-	if pos.TokenAddress != vault {
-		t.Errorf("token_address = %s, want the vault %s", pos.TokenAddress.Hex(), vault.Hex())
+	if pos.TokenAddress != share {
+		t.Errorf("token_address = %s, want the share %s", pos.TokenAddress.Hex(), share.Hex())
 	}
 	if pos.TokenSymbol != "JAAA" || pos.TokenDecimals != 6 {
 		t.Errorf("metadata = (%q, %d), want (JAAA, 6) from the share token", pos.TokenSymbol, pos.TokenDecimals)
@@ -1200,6 +1197,11 @@ func TestBuildPositions_UnderlyingValuationPolicy(t *testing.T) {
 				BlockNumber:     100,
 				Direction:       DirectionSweep,
 				BlockTimestamp:  time.Unix(1750000000, 0).UTC(),
+			}
+			if tc.tokenType == TokenTypeCentrifuge {
+				// The direct-share shape: a centrifuge row always names the token it
+				// keys on, and buildPositions refuses one that does not.
+				snap.ShareToken = &policyVault
 			}
 			positions, err := h.buildPositions(context.Background(), []*PositionSnapshot{snap}, map[string]bool{})
 			if err != nil {

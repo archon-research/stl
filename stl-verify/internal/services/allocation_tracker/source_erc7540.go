@@ -56,6 +56,10 @@ func NewERC7540Source(multicaller outbound.Multicaller, logger *slog.Logger) (*E
 	}, nil
 }
 
+// The alias path finds this source by type assertion, so a signature change here
+// would silently stop every share transfer from matching (TestCentrifugeRoutesToAShareResolver).
+var _ shareResolver = (*ERC7540Source)(nil)
+
 func (s *ERC7540Source) Name() string { return "erc7540" }
 
 // Supports claims token_type=centrifuge: as of axis-synome 0.2.0 those entries
@@ -71,23 +75,19 @@ func (s *ERC7540Source) FetchBalances(ctx context.Context, entries []*TokenEntry
 		return result, nil
 	}
 
-	shareTokens, err := s.resolveShares(ctx, entries, blockHash)
+	shares, err := s.shareTokens(ctx, entries, blockHash)
 	if err != nil {
-		return nil, fmt.Errorf("resolve vault shares: %w", err)
-	}
-
-	if err := s.checkDuplicateShares(entries, shareTokens); err != nil {
 		return nil, err
 	}
 
-	balances, err := s.fetchShareBalances(ctx, entries, shareTokens, blockHash)
+	balances, err := s.fetchShareBalances(ctx, entries, shares, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("fetch share balances: %w", err)
 	}
 
 	for _, e := range entries {
 		bal := balances[e.Key()]
-		share := shareTokens[e.ContractAddress]
+		share := shares[e.ContractAddress]
 		s.logger.Debug("erc7540 position",
 			"vault", e.ContractAddress.Hex(),
 			"share", share.Hex(),
@@ -102,9 +102,23 @@ func (s *ERC7540Source) FetchBalances(ctx context.Context, entries []*TokenEntry
 	return result, nil
 }
 
+// shareTokens is the single way in to the vault → share mapping — this source's
+// own read and the alias path's — so the double-count guard cannot be bypassed
+// by taking one and not the other.
+func (s *ERC7540Source) shareTokens(ctx context.Context, entries []*TokenEntry, blockHash common.Hash) (map[common.Address]common.Address, error) {
+	shares, err := s.resolveShares(ctx, entries, blockHash)
+	if err != nil {
+		return nil, fmt.Errorf("resolve vault shares: %w", err)
+	}
+	if err := s.checkDuplicateShares(entries, shares); err != nil {
+		return nil, err
+	}
+	return shares, nil
+}
+
 // resolveShares calls share() once per unique vault address and returns the
-// vault → share token mapping. Any failed or undecodable call is a hard error:
-// an entry routed here whose contract has no share() is misconfigured.
+// vault → share token mapping. A transport error or an undecodable response is a
+// hard error; a clean revert is the direct-share shape (see the branch below).
 func (s *ERC7540Source) resolveShares(ctx context.Context, entries []*TokenEntry, blockHash common.Hash) (map[common.Address]common.Address, error) {
 	data, err := s.vaultABI.Pack("share")
 	if err != nil {

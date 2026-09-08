@@ -20,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/ethereum/go-ethereum/common"
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 
 	redisAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
@@ -378,6 +379,8 @@ func seedUsdsTransferReceipt(t *testing.T, ctx context.Context, keyPrefix string
 	}
 }
 
+var shareSelector = crypto.Keccak256([]byte("share()"))[:4]
+
 // buildErc20MulticallMockRPC serves a JSON-RPC endpoint that answers the two
 // Multicall3 aggregate3 batches the worker issues for a plain erc20 entry:
 // balanceOf(proxy) (from BalanceOfSource) and decimals()/symbol() (from the
@@ -433,6 +436,10 @@ func buildErc20MulticallMockRPC(t *testing.T) *httptest.Server {
 			return mcResult{Success: true, ReturnData: decimalsData}
 		case bytes.Equal(sel, symbolMethod.ID):
 			return mcResult{Success: true, ReturnData: symbolData}
+		case bytes.Equal(sel, shareSelector):
+			// Answered as a clean revert for every address, vaults included: this test
+			// asserts archiving, so every entry takes the direct-share branch.
+			return mcResult{Success: false}
 		default:
 			t.Errorf("unexpected selector %x in aggregate3 sub-call", sel)
 			return mcResult{Success: false}
