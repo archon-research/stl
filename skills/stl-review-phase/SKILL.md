@@ -5,7 +5,10 @@ description: Repo-specific review lenses for stl. Use with /code-review after a 
 
 # Review phase
 
-Run `/code-review high` (add `--fix` to apply findings to the working tree).
+Run `/code-review` (add `--fix` to apply findings to the working tree). Ask for
+`xhigh` or `max` when you want the multi-agent fan-out and the verify pass —
+on some models `high` and below are a single inline pass.
+
 Then verify these repo lenses were actually covered — add them to the review
 target prompt if not:
 
