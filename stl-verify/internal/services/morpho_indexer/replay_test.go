@@ -590,7 +590,7 @@ func TestReplayMetaMorphoLog_RoutesToHandler(t *testing.T) {
 	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
 
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+		if len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == testAdapterAddr {
 			return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
 		}
 		return nil, errTestUnexpectedCall(calls)
@@ -650,7 +650,7 @@ func TestReplayMetaMorphoLog_StampsArchivingBlockContext(t *testing.T) {
 	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
 
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+		if len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == testAdapterAddr {
 			return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
 		}
 		return nil, errTestUnexpectedCall(calls)

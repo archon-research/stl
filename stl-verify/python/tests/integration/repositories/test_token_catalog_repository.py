@@ -13,6 +13,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from app.adapters.postgres.reference_as_of import utc_now
 from app.adapters.postgres.token_catalog_repository import TokenCatalogRepository
 from app.domain.entities.allocation import EthAddress
 from tests.integration.seed import insert_oracle_asset, insert_token
@@ -22,7 +23,7 @@ from tests.integration.seed import insert_oracle_asset, insert_token
 async def repository(async_db_url: str):
     engine = create_async_engine(async_db_url)
     try:
-        yield TokenCatalogRepository(engine)
+        yield TokenCatalogRepository(engine, utc_now)
     finally:
         await engine.dispose()
 

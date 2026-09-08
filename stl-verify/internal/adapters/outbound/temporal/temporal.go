@@ -55,6 +55,7 @@ type BuildMeta struct {
 
 // Dependencies are the shared resources available to every cronjob's Setup function.
 type Dependencies struct {
+	// Pool is nil for an on-demand worker that declared no WorkerConfig.OpenDatabase.
 	Pool   *pgxpool.Pool
 	Logger *slog.Logger
 }
@@ -205,6 +206,10 @@ func newBootstrap(
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
 		ServiceName:    name,
 		ServiceVersion: meta.Commit,
@@ -221,16 +226,19 @@ func newBootstrap(
 		logger.Warn("OTEL_EXPORTER_OTLP_ENDPOINT is not set; metrics are NOT exported anywhere")
 	}
 
-	pool, err := openDatabase(ctx)
+	pool, closePool, err := openPool(ctx, openDatabase)
 	if err != nil {
 		unwind()
 		return nil, fmt.Errorf("connecting to database: %w", err)
 	}
-	opened = append(opened, pool.Close)
+	opened = append(opened, closePool)
 
 	temporalClient, err := createClient()
 	if err != nil {
 		unwind()
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, fmt.Errorf("creating temporal client: %w", err)
 	}
 	opened = append(opened, temporalClient.Close)
@@ -246,6 +254,19 @@ func newBootstrap(
 		client: temporalClient,
 		opened: opened,
 	}, nil
+}
+
+// openPool returns a no-op closer when no opener was declared, so the unwind
+// cannot dereference the nil pool it gets back.
+func openPool(ctx context.Context, openDatabase func(context.Context) (*pgxpool.Pool, error)) (*pgxpool.Pool, func(), error) {
+	if openDatabase == nil {
+		return nil, func() {}, nil
+	}
+	pool, err := openDatabase(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return pool, pool.Close, nil
 }
 
 func (b *bootstrap) dependencies() Dependencies {

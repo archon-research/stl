@@ -1,23 +1,85 @@
 """CoreModelRiskService — reads pre-computed CORE results from the DB.
 
 Implements the RiskModel protocol. CRR computation is delegated to the
-core-model-runner cronjob. This service only reads the latest result and
-multiplies it by the prime's USD exposure.
+core-model-runner cronjob. This service only reads the latest results and
+multiplies them by the prime's USD exposure.
+
+Two serving shapes:
+
+- A SparkLend receipt token maps 1:1 to a market (``asset_to_market_key.json``),
+  so the latest result for that market is the answer.
+- A Morpho receipt token is a MetaMorpho vault share spread across many Blue
+  markets at once (n:m), so the vault's live per-market allocations weight the
+  per-market results into one figure, with an explicit ``coverage_pct``.
 """
 
+import asyncio
+import logging
 from collections.abc import Mapping
+from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Any
 
 from app.domain.entities.allocation import EthAddress
-from app.domain.entities.risk import CoreModelDetails, ModelName, RrcResult
+from app.domain.entities.risk import CoreModelDetails, CoreModelMarketAllocation, ModelName, RrcResult
 from app.domain.exceptions import ModelDataUnavailableError
 from app.ports.allocation_repository import AllocationRepositoryPort
 from app.ports.core_model_results_reader import CoreModelResult, CoreModelResultsReader
+from app.ports.morpho_vault_allocations_reader import MorphoVaultAllocations, MorphoVaultAllocationsReader
+from app.ports.receipt_token_lookup import ReceiptTokenLookup
+from app.risk_engine.core_model.config import load_params
 from app.services._overrides import parse_usd_exposure_override
+
+logger = logging.getLogger(__name__)
 
 _HUNDRED = Decimal("100")
 _USD_CENT = Decimal("0.01")
+_PCT = Decimal("0.01")
+_CRR_PCT = Decimal("0.0001")
+_MORPHO_PROTOCOL = "MORPHO"
+
+# CORE market keys are Ethereum-only (the positions reader refuses any other
+# network), so vault aggregation must never match another chain's allocations
+# to them. Both the boot snapshot and the service gate on this.
+MAINNET_CHAIN_ID = 1
+
+
+def morpho_market_key_index(market_configs: Mapping[str, Mapping[str, Any]]) -> dict[tuple[str, str], str]:
+    """Index MORPHO market keys by uppercased ``(collateral symbol, loan symbol)``.
+
+    A Blue market key spans the token pair, not one LLTV tranche, and the pair
+    is matched by display symbol — the same identity the runner's positions
+    reader uses to select the markets it computes (``MORPHO_MARKET`` is the
+    collateral symbol). Each entry resolves through ``load_params`` so an
+    omitted key takes the same default the runner would use. Call at startup:
+    a malformed config must fail the boot, not the first Morpho request.
+    """
+    index: dict[tuple[str, str], str] = {}
+    for market_key, config in market_configs.items():
+        if str(config.get("PROTOCOL", "")).upper() != _MORPHO_PROTOCOL:
+            continue
+        params = load_params(overrides=dict(config))
+        pair = (str(params["MORPHO_MARKET"]).upper(), str(params["LOAN_TOKEN"]).upper())
+        if pair in index:
+            raise ValueError(f"duplicate MORPHO market pair {pair}: {index[pair]!r} and {market_key!r}")
+        index[pair] = market_key
+    return index
+
+
+@dataclass(frozen=True)
+class _CoveredMarket:
+    """One CORE-computed market with the vault supply allocated to it."""
+
+    supply: Decimal
+    result: CoreModelResult
+
+
+@dataclass(frozen=True)
+class _WeightBase:
+    """The weight partition of a vault: covered supply + idle over ``total``."""
+
+    total: Decimal
+    covered_weight: Decimal
 
 
 class CoreModelRiskService:
@@ -31,22 +93,27 @@ class CoreModelRiskService:
 
     def __init__(
         self,
-        asset_to_market_key: dict[int, str],
+        asset_to_market_key: Mapping[int, str],
         results_reader: CoreModelResultsReader,
         allocation_repo: AllocationRepositoryPort,
+        *,
+        receipt_tokens: ReceiptTokenLookup,
+        morpho_allocations: MorphoVaultAllocationsReader,
+        morpho_market_keys: Mapping[tuple[str, str], str],
+        morpho_asset_ids: frozenset[int],
+        min_coverage_pct: Decimal,
     ) -> None:
         self._asset_to_market_key = asset_to_market_key
         self._results_reader = results_reader
         self._allocation_repo = allocation_repo
+        self._receipt_tokens = receipt_tokens
+        self._morpho_allocations = morpho_allocations
+        self._morpho_market_keys = morpho_market_keys
+        self._morpho_asset_ids = morpho_asset_ids
+        self._min_coverage_pct = min_coverage_pct
 
     def applies_to(self, asset_id: int, prime_id: EthAddress) -> bool:  # noqa: ARG002
-        return asset_id in self._asset_to_market_key
-
-    async def get_latest_result(self, asset_id: int) -> CoreModelResult | None:
-        market_key = self._asset_to_market_key.get(asset_id)
-        if market_key is None:
-            return None
-        return await self._results_reader.get_latest(market_key)
+        return asset_id in self._asset_to_market_key or asset_id in self._morpho_asset_ids
 
     async def compute(
         self,
@@ -54,21 +121,32 @@ class CoreModelRiskService:
         prime_id: EthAddress,
         overrides: Mapping[str, Any],
     ) -> RrcResult:
+        market_key = self._asset_to_market_key.get(asset_id)
+        if market_key is None and asset_id not in self._morpho_asset_ids:
+            raise ValueError(f"unsupported asset_id={asset_id}")
         usd_exposure = await self._resolve_usd_exposure(asset_id, prime_id, overrides)
-        market_key = self._asset_to_market_key[asset_id]
+        if market_key is not None:
+            return await self._compute_direct(asset_id, prime_id, usd_exposure, market_key)
+        return await self._compute_morpho_vault(asset_id, prime_id, usd_exposure)
+
+    async def _compute_direct(
+        self,
+        asset_id: int,
+        prime_id: EthAddress,
+        usd_exposure: Decimal,
+        market_key: str,
+    ) -> RrcResult:
         result = await self._results_reader.get_latest(market_key)
         if result is None:
             raise ModelDataUnavailableError(
                 f"no pre-computed result for market_key={market_key!r} (asset_id={asset_id}); "
                 "run the core-model-runner cronjob first"
             )
-        rrc_usd = (usd_exposure * result.crr_el_pct / _HUNDRED).quantize(_USD_CENT, rounding=ROUND_HALF_EVEN)
-        return RrcResult(
-            asset_id=asset_id,
-            prime_id=prime_id,
-            rrc_usd=rrc_usd,
-            comparable_crr_pct=result.crr_el_pct,
-            risk_model=self.risk_model,
+        return self._build_result(
+            asset_id,
+            prime_id,
+            usd_exposure,
+            crr_el_pct=result.crr_el_pct,
             details=CoreModelDetails(
                 risk_model="core_model",
                 crr_el_pct=result.crr_el_pct,
@@ -81,6 +159,153 @@ class CoreModelRiskService:
                 copula_type=result.copula_type,
             ),
         )
+
+    async def _compute_morpho_vault(
+        self,
+        asset_id: int,
+        prime_id: EthAddress,
+        usd_exposure: Decimal,
+    ) -> RrcResult:
+        """Aggregate per-market results into one figure for a vault share.
+
+        Weights are the vault's live per-market supply amounts (a Morpho
+        supplier's bad-debt exposure is its whole supply in a market, socialized
+        pro rata) plus idle liquidity at zero risk. The uncovered slice — markets
+        without a computed CORE result — is excluded from the weighted average
+        and reported through ``coverage_pct``; below the configured minimum the
+        aggregate is not served at all, so the caller's preference chain falls
+        back instead of extrapolating from a thin covered slice. At least one
+        computed market is required: idle liquidity alone carries none of the
+        model params an aggregate must report.
+        """
+        vault = await self._resolve_vault(asset_id)
+        covered = await self._covered_markets(vault)
+        if not covered:
+            raise ModelDataUnavailableError(
+                f"no CORE-computed market behind any allocation of asset_id={asset_id} "
+                f"(vault_id={vault.vault_id}); idle liquidity alone is not served"
+            )
+        base = self._weight_base(vault, covered)
+        # Exact comparison: quantizing first would round true 49.995% coverage
+        # up to a 50% minimum and serve it.
+        if base.covered_weight * _HUNDRED < self._min_coverage_pct * base.total:
+            exact_pct = (base.covered_weight / base.total * _HUNDRED).quantize(_CRR_PCT, rounding=ROUND_HALF_EVEN)
+            raise ModelDataUnavailableError(
+                f"CORE coverage for asset_id={asset_id} is {exact_pct}% of vault assets, "
+                f"below the {self._min_coverage_pct}% minimum (vault_id={vault.vault_id})"
+            )
+        details = self._aggregate_details(covered, base)
+        return self._build_result(asset_id, prime_id, usd_exposure, crr_el_pct=details.crr_el_pct, details=details)
+
+    async def _covered_markets(self, vault: MorphoVaultAllocations) -> list[_CoveredMarket]:
+        """Latest result per distinct covered market, weighted by summed supply.
+
+        Several LLTV tranches of one token pair share one CORE market key, so
+        allocations are grouped by resolved key before the result lookup: one
+        slice and one read per market, weights added.
+        """
+        supply_by_key: dict[str, Decimal] = {}
+        for alloc in vault.allocations:
+            key = self._morpho_market_keys.get((alloc.collateral_symbol.upper(), alloc.loan_symbol.upper()))
+            if key is not None:
+                supply_by_key[key] = supply_by_key.get(key, Decimal("0")) + alloc.supply_assets
+        results = await asyncio.gather(*(self._results_reader.get_latest(key) for key in supply_by_key))
+        covered = [
+            _CoveredMarket(supply=supply, result=result)
+            for (_key, supply), result in zip(supply_by_key.items(), results, strict=True)
+            if result is not None
+        ]
+        return sorted(covered, key=lambda market: market.supply, reverse=True)
+
+    @staticmethod
+    def _weight_base(vault: MorphoVaultAllocations, covered: list[_CoveredMarket]) -> _WeightBase:
+        allocated = sum((alloc.supply_assets for alloc in vault.allocations), Decimal("0"))
+        # State and position snapshots are written at different blocks, so the
+        # allocation sum can transiently exceed total_assets; the larger of the
+        # two keeps the weights a partition (idle >= 0, coverage <= 100). A
+        # covered market implies allocated > 0, so total is never zero here.
+        total = max(vault.total_assets, allocated)
+        idle = total - allocated
+        covered_weight = sum((market.supply for market in covered), Decimal("0")) + idle
+        return _WeightBase(total=total, covered_weight=covered_weight)
+
+    @staticmethod
+    def _aggregate_details(covered: list[_CoveredMarket], base: _WeightBase) -> CoreModelDetails:
+        def weighted(values: list[tuple[Decimal, Decimal]]) -> Decimal:
+            total_value = sum((weight * value for weight, value in values), Decimal("0"))
+            return (total_value / base.covered_weight).quantize(_CRR_PCT, rounding=ROUND_HALF_EVEN)
+
+        forecast_steps = {market.result.forecast_step for market in covered}
+        copula_types = {market.result.copula_type for market in covered}
+        if len(forecast_steps) > 1 or len(copula_types) > 1:
+            # Config-driven params are expected to agree across markets; a
+            # divergence makes the aggregate's reported params approximate.
+            logger.warning(
+                "morpho vault slices disagree on model params (forecast_steps=%s, copula_types=%s); "
+                "the aggregate reports the minimum horizon and the largest slice's copula",
+                sorted(forecast_steps),
+                sorted(copula_types),
+            )
+        return CoreModelDetails(
+            risk_model="core_model",
+            crr_el_pct=weighted([(market.supply, market.result.crr_el_pct) for market in covered]),
+            crr_es_pct=weighted([(market.supply, market.result.crr_es_pct) for market in covered]),
+            crr_var_pct=weighted([(market.supply, market.result.crr_var_pct) for market in covered]),
+            hhi=None,
+            protocol=_MORPHO_PROTOCOL,
+            forecast_step=min(forecast_steps),
+            n_mc=min(market.result.n_mc for market in covered),
+            copula_type=covered[0].result.copula_type,
+            coverage_pct=(base.covered_weight / base.total * _HUNDRED).quantize(_PCT, rounding=ROUND_HALF_EVEN),
+            markets=tuple(
+                CoreModelMarketAllocation(
+                    market_key=market.result.market_key,
+                    allocation_pct=(market.supply / base.total * _HUNDRED).quantize(_PCT, rounding=ROUND_HALF_EVEN),
+                    crr_el_pct=market.result.crr_el_pct,
+                    crr_es_pct=market.result.crr_es_pct,
+                    crr_var_pct=market.result.crr_var_pct,
+                    n_mc=market.result.n_mc,
+                    computed_at=market.result.computed_at,
+                )
+                for market in covered
+            ),
+        )
+
+    def _build_result(
+        self,
+        asset_id: int,
+        prime_id: EthAddress,
+        usd_exposure: Decimal,
+        *,
+        crr_el_pct: Decimal,
+        details: CoreModelDetails,
+    ) -> RrcResult:
+        rrc_usd = (usd_exposure * crr_el_pct / _HUNDRED).quantize(_USD_CENT, rounding=ROUND_HALF_EVEN)
+        return RrcResult(
+            asset_id=asset_id,
+            prime_id=prime_id,
+            rrc_usd=rrc_usd,
+            comparable_crr_pct=crr_el_pct,
+            risk_model=self.risk_model,
+            details=details,
+        )
+
+    async def _resolve_vault(self, asset_id: int) -> MorphoVaultAllocations:
+        info = await self._receipt_tokens.get(asset_id)
+        if info is None:
+            raise ModelDataUnavailableError(f"no receipt-token record for asset_id={asset_id}")
+        if info.chain_id != MAINNET_CHAIN_ID:
+            # Second layer behind the boot snapshot's chain filter: symbol-pair
+            # matching would otherwise hand another chain's vault mainnet results.
+            raise ModelDataUnavailableError(
+                f"CORE markets are mainnet-only; asset_id={asset_id} is on chain {info.chain_id}"
+            )
+        vault = await self._morpho_allocations.get_vault_allocations(info.receipt_token_address, info.chain_id)
+        if vault is None:
+            raise ModelDataUnavailableError(
+                f"no indexed morpho vault at the receipt-token address of asset_id={asset_id}"
+            )
+        return vault
 
     async def _resolve_usd_exposure(
         self,

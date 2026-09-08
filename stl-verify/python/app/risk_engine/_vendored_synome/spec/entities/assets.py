@@ -878,6 +878,22 @@ SPARK_USDC_BC: Final[Asset] = Asset(
 """
 
 
+SPARK_USDT_BC: Final[Asset] = Asset(
+    token=Token.SPARK_USDT_BC,
+    network=Network.ETHEREUM_MAINNET,
+    protocol=Protocol.MORPHO,
+    address=EvmAddress("0xb0c424116172B55CbB6dD3136F5989F7959e5B91"),
+    underlying_assets=(Token.USDT,),
+    underlying_asset_address=EvmAddress("0xdAC17F958D2ee523a2206206994597C13D831ec7"),
+    categories={AssetCategory.LENDING_MARKET},
+)
+"""SPARK_USDT_BC via Morpho on Ethereum Mainnet.
+
+:source_uuid: 0830d4af-65df-489c-9402-99696215f667
+:source_uuid: 65ac69fd-913a-44cd-bb38-c93ef3726dbe
+"""
+
+
 SPARK_USDS: Final[Asset] = Asset(
     token=Token.SPARK_USDS,
     network=Network.ETHEREUM_MAINNET,
@@ -1068,6 +1084,26 @@ SPARK_SP_USDT_SPARK_SAVINGS: Final[Asset] = Asset(
 :source_uuid: 224538f9-fde7-43f3-aa9b-1c3cf6036663
 :source_uuid: 2959cf7c-9026-45d9-83d4-2ef755613d33
 """
+
+
+SPARK_RLUSD: Final[Asset] = Asset(
+    token=Token.RLUSD,
+    network=Network.ETHEREUM_MAINNET,
+    protocol=Protocol.RIPPLE,
+    address=EvmAddress("0x8292Bb45bf1Ee4d140127049757C2E0fF06317eD"),
+    underlying_assets=(Token.RLUSD,),
+    underlying_asset_address=EvmAddress("0x8292Bb45bf1Ee4d140127049757C2E0fF06317eD"),
+    categories={AssetCategory.CASH_STABLECOIN},
+)
+"""RLUSD held directly by the Spark ALM proxy on Ethereum Mainnet; first
+transfer into the proxy in block 25845641 (2026-08-27).
+
+The underlying is the held token itself, the Spark direct-holding convention
+(SPARK_MAINNET_ETHENA_USDE), not the USDC-funding convention GROVE_RLUSD takes
+from its Atlas Underlying Asset Address document.
+
+:ambiguity: Atlas provenance pending — no Spark RLUSD Instance Configuration
+Document is referenced in this spec, so no ``:source_uuid:`` is recorded."""
 
 
 SPARK_USTB: Final[Asset] = Asset(

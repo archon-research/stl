@@ -19,6 +19,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
+from app.adapters.postgres.reference_as_of import utc_now
 from app.domain.entities.allocation import EthAddress
 from tests.integration.seed import (
     ANCHORAGE_CUSTODY_PROXY_HEX,
@@ -41,7 +42,7 @@ def async_db_url(module_db):
 async def repo(async_db_url: str):
     engine = create_async_engine(async_db_url)
     try:
-        yield AllocationRepository(engine)
+        yield AllocationRepository(engine, utc_now)
     finally:
         await engine.dispose()
 

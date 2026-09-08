@@ -9,7 +9,6 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
-	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
@@ -26,6 +25,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	at "github.com/archon-research/stl/stl-verify/internal/services/allocation_tracker"
@@ -44,7 +44,7 @@ func init() {
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 
-	err := run(ctx, os.Args[1:])
+	err := run(ctx, os.Args[1:], lifecycle.ForceExitAfter(lifecycle.ShutdownTailBudget))
 	cancel()
 	if err != nil {
 		slog.Error("fatal error", "error", err)
@@ -71,7 +71,7 @@ func parseConfig(args []string) (cliConfig, error) {
 	queueURL := fs.String("queue", "", "SQS Queue URL")
 	redisAddr := fs.String("redis", "", "Redis address")
 	dbURL := fs.String("db", "", "PostgreSQL connection URL")
-	maxMessages := fs.Int("max", 10, "Max messages per poll")
+	maxMessages := fs.Int("max", 1, "Max messages per receive; more raises the visibility timeout the queue must carry")
 	waitTime := fs.Int("wait", 20, "Wait time in seconds (long polling)")
 	visibilityTimeout := fs.Int("visibility-timeout", 300, "SQS visibility timeout in seconds")
 	sweepBlocks := fs.Int("sweep-blocks", 75, "Sweep every N blocks")
@@ -145,6 +145,11 @@ func parseConfig(args []string) (cliConfig, error) {
 		}
 		cfg.sweepBlocks = v
 	}
+	// The tracker has no "sweep disabled" mode: 0 would silently become the 75
+	// default, and a negative value sweeps every block (~10/s on Robinhood).
+	if cfg.sweepBlocks < 1 {
+		return cliConfig{}, fmt.Errorf("sweep blocks must be at least 1, got %d (-sweep-blocks flag or SWEEP_BLOCKS env var)", cfg.sweepBlocks)
+	}
 
 	chainIDStr := env.Get("CHAIN_ID", "1")
 	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
@@ -166,7 +171,7 @@ func parseConfig(args []string) (cliConfig, error) {
 	return cfg, nil
 }
 
-func run(ctx context.Context, args []string) error {
+func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	cfg, err := parseConfig(args)
 	if err != nil {
 		return err
@@ -187,6 +192,17 @@ func run(ctx context.Context, args []string) error {
 		Level: env.ParseLogLevel(slog.LevelInfo),
 	}))
 	slog.SetDefault(logger)
+
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    "prime-allocation-indexer",
+		ServiceVersion: buildinfo.GitHash(),
+		BuildTime:      BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("initializing telemetry: %w", err)
+	}
+	defer shutdownOTEL(context.Background())
 
 	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{
 		StaticCredentialsFromEnv: true,
@@ -261,18 +277,6 @@ func run(ctx context.Context, args []string) error {
 		"chainID", cfg.chainID,
 		"commit", buildReg.GitHash())
 
-	// OpenTelemetry
-	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    "prime-allocation-indexer",
-		ServiceVersion: buildReg.GitHash(),
-		BuildTime:      BuildTime,
-		Logger:         logger,
-	})
-	if err != nil {
-		return fmt.Errorf("initializing telemetry: %w", err)
-	}
-	defer shutdownOTEL(context.Background())
-
 	mcTel, err := multicall.NewTelemetry(chainName)
 	if err != nil {
 		return fmt.Errorf("multicall telemetry: %w", err)
@@ -297,7 +301,7 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
-	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "prime-allocation")
+	archiveWrap, _, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "prime-allocation")
 	if err != nil {
 		return err
 	}
@@ -377,49 +381,10 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("create service: %w", err)
 	}
 
-	// Start
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	if err := svc.Start(runCtx); err != nil {
-		return fmt.Errorf("start: %w", err)
-	}
-
-	logger.Info("running",
+	logger.Info("starting prime allocation indexer",
 		"chainID", cfg.chainID,
 		"entries", len(entries),
 		"sweepEveryNBlocks", cfg.sweepBlocks)
 
-	select {
-	case sig := <-sigChan:
-		logger.Info("shutting down", "signal", sig)
-	case <-ctx.Done():
-		logger.Info("shutting down", "reason", "context cancelled")
-	}
-	cancel()
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 25*time.Second)
-	defer shutdownCancel()
-
-	done := make(chan struct{})
-	var stopErr error
-	go func() {
-		defer close(done)
-		stopErr = svc.Stop()
-	}()
-
-	select {
-	case <-done:
-		if stopErr != nil {
-			return fmt.Errorf("stop: %w", stopErr)
-		}
-		logger.Info("shutdown complete")
-	case <-shutdownCtx.Done():
-		return fmt.Errorf("shutdown timeout")
-	}
-
-	return nil
+	return lifecycle.RunWithTimeoutGuard(ctx, logger, onShutdownTimeout, svc)
 }

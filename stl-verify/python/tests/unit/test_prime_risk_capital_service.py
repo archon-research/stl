@@ -93,6 +93,7 @@ _SPARK_BASE_ALM = "0x2917956eff0b5eaf030abdb4ef4296df775009ca"
 _GROVE_MAINNET_ALM = "0x491edfb0b8b608044e227225c715981a30f3a44e"
 _GROVE_AVALANCHE_ALM = "0x7107dd8f56642327945294a18a4280c78e153644"
 _GROVE_BASE_ALM = "0x9b746dbc5269e1df6e4193bcb441c0fbbf1cecee"
+_GROVE_ROBINHOOD_ALM = "0x29626c2d8ca49a51e4deceec5499e52983c42bd5"
 _GROVE_PLUME_ALM = "0x1db91ad50446a671e2231f77e00948e68876f812"
 
 
@@ -348,7 +349,7 @@ async def test_compute_does_not_query_a_proxy_on_an_unserved_chain():
     await service.compute(EthAddress(_GROVE_MAINNET_ALM))
 
     queried = {str(call.args[0]).lower() for call in repo.list_receipt_token_positions.await_args_list}
-    assert queried == {_GROVE_MAINNET_ALM, _GROVE_AVALANCHE_ALM, _GROVE_BASE_ALM}
+    assert queried == {_GROVE_MAINNET_ALM, _GROVE_AVALANCHE_ALM, _GROVE_BASE_ALM, _GROVE_ROBINHOOD_ALM}
 
 
 @pytest.mark.asyncio

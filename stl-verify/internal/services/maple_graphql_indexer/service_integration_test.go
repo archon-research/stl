@@ -498,6 +498,96 @@ func TestSyncIntegration_UnpriceableCollateralPersistsNullPrice(t *testing.T) {
 	}
 }
 
+func TestSyncIntegration_NullCollateralAssetSymbolPersists(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+
+	poolsJSON := `[{"id": "` + itPoolSyrup + `", "name": "Syrup USDC", "monthlyApy": "0", "spotApy": "0",
+		"assets": "400", "collateralValue": "500", "principalOut": "600", "tvl": "1000",
+		"asset": {"id": "` + itUSDC + `", "symbol": "USDC", "decimals": 6},
+		"syrupRouter": null}]`
+
+	// itLoanExternal carries the null symbol; itLoanInternal is a healthy
+	// sibling, so a regression that reintroduces the hard failure shows up as
+	// both loans vanishing, not just one.
+	loansJSON := `[
+		{"id": "` + itLoanInternal + `", "borrower": {"id": "` + itBorrowerA + `"}, "state": "Active",
+		 "principalOwed": "10000000000000", "acmRatio": "1000000",
+		 "collateral": {"asset": "USDC", "assetAmount": "10000000000000", "assetValueUsd": "100000000",
+		                "decimals": 6, "state": "Deposited", "custodian": null, "liquidationLevel": 900000},
+		 "loanMeta": null, "fundingPool": {"id": "` + itPoolSyrup + `"}},
+		{"id": "` + itLoanExternal + `", "borrower": {"id": "` + itBorrowerB + `"}, "state": "Active",
+		 "principalOwed": "5000000", "acmRatio": "1677823",
+		 "collateral": {"asset": null, "assetAmount": "3000000000000000", "assetValueUsd": "279637223441",
+		                "decimals": 18, "state": "Deposited", "custodian": null, "liquidationLevel": 1250000},
+		 "loanMeta": null, "fundingPool": {"id": "` + itPoolSyrup + `"}}
+	]`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decoding request: %v", err)
+		}
+		skip := 0
+		if v, ok := req.Variables["skip"].(float64); ok {
+			skip = int(v)
+		}
+		page := func(field, payload string) string {
+			if skip > 0 {
+				payload = "[]"
+			}
+			return `{"data": {"` + field + `": ` + payload + `}}`
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(req.Query, "poolV2S"):
+			_, _ = w.Write([]byte(page("poolV2S", poolsJSON)))
+		case strings.Contains(req.Query, "openTermLoans"):
+			_, _ = w.Write([]byte(page("openTermLoans", loansJSON)))
+		case strings.Contains(req.Query, "GetFixedTermLoans"):
+			_, _ = w.Write([]byte(`{"data": {"loans": []}}`))
+		case strings.Contains(req.Query, "skyStrategies"):
+			_, _ = w.Write([]byte(`{"data": {"skyStrategies": []}}`))
+		case strings.Contains(req.Query, "syrupGlobals"):
+			_, _ = w.Write([]byte(`{"data": {"syrupGlobals": {"apy": "1", "collateralApy": "2", "poolApy": "3", "dripsYieldBoost": "0", "tvl": "100"}}}`))
+		default:
+			t.Errorf("unexpected query: %s", req.Query)
+		}
+	}))
+	defer server.Close()
+
+	service := newIntegrationService(t, pool, server.URL)
+	if err := service.Sync(ctx); err != nil {
+		t.Fatalf("Sync must commit despite the null collateral asset symbol: %v", err)
+	}
+
+	if got := countRows(t, ctx, pool, "maple_loan_state"); got != 2 {
+		t.Errorf("maple_loan_state rows = %d, want 2", got)
+	}
+	if got := countRows(t, ctx, pool, "maple_loan_collateral"); got != 2 {
+		t.Errorf("maple_loan_collateral rows = %d, want 2", got)
+	}
+
+	var symbol, amount, valueUSD string
+	if err := pool.QueryRow(ctx, `
+		SELECT c.asset_symbol, c.asset_amount::text, c.asset_value_usd::text
+		FROM maple_loan_collateral c JOIN maple_loan l ON l.id = c.maple_loan_id
+		WHERE l.loan_address = decode($1, 'hex')`,
+		strings.TrimPrefix(itLoanExternal, "0x")).Scan(&symbol, &amount, &valueUSD); err != nil {
+		t.Fatalf("querying symbol-less collateral: %v", err)
+	}
+	if symbol != "" {
+		t.Errorf("asset_symbol = %q, want the empty string", symbol)
+	}
+	if amount != "3000000000000000" || valueUSD != "279637223441" {
+		t.Errorf("amount/price = %s/%s, want 3000000000000000/279637223441", amount, valueUSD)
+	}
+}
+
 func TestSyncIntegration_PoolsPhaseFailsOthersIsolated(t *testing.T) {
 	// Only the pools query breaks (null top-level collection). Phases run in
 	// their own transactions, so the run must fail yet the independent globals

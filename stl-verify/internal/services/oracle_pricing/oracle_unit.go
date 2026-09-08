@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math"
 	"sort"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 
@@ -45,7 +46,9 @@ type OracleUnit struct {
 
 // LoadOracleUnits loads all enabled oracles from DB, deduplicates by oracle ID,
 // and builds OracleUnit structs for each.
-func LoadOracleUnits(ctx context.Context, repo outbound.OnchainPriceRepository, chainID int64, logger *slog.Logger) ([]*OracleUnit, error) {
+// referenceEffectiveAt is captured once by the caller, so every unit in a run resolves
+// against one consistent oracle_asset view (ADR-0006 §4).
+func LoadOracleUnits(ctx context.Context, repo outbound.OnchainPriceRepository, chainID int64, referenceEffectiveAt time.Time, logger *slog.Logger) ([]*OracleUnit, error) {
 	allOracles, err := repo.GetEnabledOraclesByChain(ctx, chainID)
 	if err != nil {
 		return nil, fmt.Errorf("getting enabled oracles: %w", err)
@@ -60,7 +63,7 @@ func LoadOracleUnits(ctx context.Context, repo outbound.OnchainPriceRepository, 
 		}
 		seen[oracle.ID] = true
 
-		unit, err := buildOracleUnit(ctx, repo, oracle)
+		unit, err := buildOracleUnit(ctx, repo, oracle, referenceEffectiveAt)
 		if err != nil {
 			return nil, fmt.Errorf("building oracle unit %q: %w", oracle.Name, err)
 		}
@@ -72,7 +75,8 @@ func LoadOracleUnits(ctx context.Context, repo outbound.OnchainPriceRepository, 
 
 	logger.Info("loaded oracle units",
 		"loaded", len(units),
-		"total", len(seen))
+		"total", len(seen),
+		"reference_effective_at", referenceEffectiveAt.UTC().Format(time.RFC3339Nano))
 
 	return units, nil
 }
@@ -124,20 +128,20 @@ func ConvertNonUSDPrices(results []blockchain.FeedPriceResult, unit *OracleUnit,
 	return out
 }
 
-func buildOracleUnit(ctx context.Context, repo outbound.OnchainPriceRepository, oracle *entity.Oracle) (*OracleUnit, error) {
+func buildOracleUnit(ctx context.Context, repo outbound.OnchainPriceRepository, oracle *entity.Oracle, referenceEffectiveAt time.Time) (*OracleUnit, error) {
 	var (
 		unit *OracleUnit
 		err  error
 	)
 	switch {
 	case oracle.OracleType.IsFeedOracle():
-		unit, err = buildFeedUnit(ctx, repo, oracle)
+		unit, err = buildFeedUnit(ctx, repo, oracle, referenceEffectiveAt)
 	case oracle.OracleType.IsERC4626Oracle():
-		unit, err = buildERC4626Unit(ctx, repo, oracle)
+		unit, err = buildERC4626Unit(ctx, repo, oracle, referenceEffectiveAt)
 	case oracle.OracleType.IsCurveLPNGOracle():
-		unit, err = buildCurveLPNGUnit(ctx, repo, oracle)
+		unit, err = buildCurveLPNGUnit(ctx, repo, oracle, referenceEffectiveAt)
 	default:
-		unit, err = buildAaveUnit(ctx, repo, oracle)
+		unit, err = buildAaveUnit(ctx, repo, oracle, referenceEffectiveAt)
 	}
 	if err != nil {
 		return nil, err
@@ -151,8 +155,8 @@ func buildOracleUnit(ctx context.Context, repo outbound.OnchainPriceRepository, 
 	return unit, nil
 }
 
-func buildAaveUnit(ctx context.Context, repo outbound.OnchainPriceRepository, oracle *entity.Oracle) (*OracleUnit, error) {
-	assets, err := repo.GetEnabledAssets(ctx, oracle.ID)
+func buildAaveUnit(ctx context.Context, repo outbound.OnchainPriceRepository, oracle *entity.Oracle, referenceEffectiveAt time.Time) (*OracleUnit, error) {
+	assets, err := repo.GetEnabledAssets(ctx, oracle.ID, referenceEffectiveAt)
 	if err != nil {
 		return nil, fmt.Errorf("getting enabled assets: %w", err)
 	}
@@ -160,7 +164,7 @@ func buildAaveUnit(ctx context.Context, repo outbound.OnchainPriceRepository, or
 		return nil, nil
 	}
 
-	tokenInfos, err := repo.GetTokenInfos(ctx, oracle.ID)
+	tokenInfos, err := repo.GetTokenInfos(ctx, oracle.ID, referenceEffectiveAt)
 	if err != nil {
 		return nil, fmt.Errorf("getting token infos: %w", err)
 	}
@@ -188,8 +192,8 @@ func buildAaveUnit(ctx context.Context, repo outbound.OnchainPriceRepository, or
 	}, nil
 }
 
-func buildFeedUnit(ctx context.Context, repo outbound.OnchainPriceRepository, oracle *entity.Oracle) (*OracleUnit, error) {
-	assets, err := repo.GetEnabledAssets(ctx, oracle.ID)
+func buildFeedUnit(ctx context.Context, repo outbound.OnchainPriceRepository, oracle *entity.Oracle, referenceEffectiveAt time.Time) (*OracleUnit, error) {
+	assets, err := repo.GetEnabledAssets(ctx, oracle.ID, referenceEffectiveAt)
 	if err != nil {
 		return nil, fmt.Errorf("getting enabled assets: %w", err)
 	}
@@ -197,7 +201,7 @@ func buildFeedUnit(ctx context.Context, repo outbound.OnchainPriceRepository, or
 		return nil, nil
 	}
 
-	tokenInfos, err := repo.GetTokenInfos(ctx, oracle.ID)
+	tokenInfos, err := repo.GetTokenInfos(ctx, oracle.ID, referenceEffectiveAt)
 	if err != nil {
 		return nil, fmt.Errorf("getting token infos: %w", err)
 	}
@@ -246,8 +250,8 @@ func buildFeedUnit(ctx context.Context, repo outbound.OnchainPriceRepository, or
 // Underlying decimals equal the vault's share decimals for the peg vaults this
 // oracle type covers (e.g. fsUSDS 18 ⇄ USDS 18), so the single token-decimals value
 // scales both the convertToAssets input and its output.
-func buildERC4626Unit(ctx context.Context, repo outbound.OnchainPriceRepository, oracle *entity.Oracle) (*OracleUnit, error) {
-	assets, err := repo.GetEnabledAssets(ctx, oracle.ID)
+func buildERC4626Unit(ctx context.Context, repo outbound.OnchainPriceRepository, oracle *entity.Oracle, referenceEffectiveAt time.Time) (*OracleUnit, error) {
+	assets, err := repo.GetEnabledAssets(ctx, oracle.ID, referenceEffectiveAt)
 	if err != nil {
 		return nil, fmt.Errorf("getting enabled assets: %w", err)
 	}
@@ -255,7 +259,7 @@ func buildERC4626Unit(ctx context.Context, repo outbound.OnchainPriceRepository,
 		return nil, nil
 	}
 
-	tokenInfos, err := repo.GetTokenInfos(ctx, oracle.ID)
+	tokenInfos, err := repo.GetTokenInfos(ctx, oracle.ID, referenceEffectiveAt)
 	if err != nil {
 		return nil, fmt.Errorf("getting token infos: %w", err)
 	}
@@ -306,8 +310,8 @@ func buildERC4626Unit(ctx context.Context, repo outbound.OnchainPriceRepository,
 // feed_address/feed_decimals. Every shape violation is an error here rather
 // than at fetch time, so a malformed registry fails the worker at startup
 // instead of poison-stalling block processing.
-func buildCurveLPNGUnit(ctx context.Context, repo outbound.OnchainPriceRepository, oracle *entity.Oracle) (*OracleUnit, error) {
-	assets, err := repo.GetEnabledAssets(ctx, oracle.ID)
+func buildCurveLPNGUnit(ctx context.Context, repo outbound.OnchainPriceRepository, oracle *entity.Oracle, referenceEffectiveAt time.Time) (*OracleUnit, error) {
+	assets, err := repo.GetEnabledAssets(ctx, oracle.ID, referenceEffectiveAt)
 	if err != nil {
 		return nil, fmt.Errorf("getting enabled assets: %w", err)
 	}
@@ -345,7 +349,7 @@ func buildCurveLPNGUnit(ctx context.Context, repo outbound.OnchainPriceRepositor
 		}
 	}
 
-	tokenInfos, err := repo.GetTokenInfos(ctx, oracle.ID)
+	tokenInfos, err := repo.GetTokenInfos(ctx, oracle.ID, referenceEffectiveAt)
 	if err != nil {
 		return nil, fmt.Errorf("getting token infos: %w", err)
 	}

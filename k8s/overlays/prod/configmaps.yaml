@@ -96,10 +96,28 @@ data:
   ARCHIVE_SC_CALLS: "true"
   RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
 ---
-# curve-indexer + uniswap-v3-indexer run the shared dex-indexer binary; the DEX
-# key selects the factory. No SC-call archiving (dexbootstrap does not wire the
-# archiving decorator). SQS queue URL, DB, Redis, Alchemy key come from the
-# matching ExternalSecret.
+# base-morpho-indexer: the morpho-indexer binary on Base (chain 8453), ARCT-414.
+# The Base-specific SQS queue, Redis and raw bucket come from the matching
+# ExternalSecret; the Base raw bucket is mandatory (the worker rejects an
+# S3_BUCKET whose chain does not match CHAIN_ID).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: base-morpho-indexer-config
+data:
+  CHAIN_ID: "8453"
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://base-mainnet.g.alchemy.com/v2"
+  ENVIRONMENT: "sentinelprod"
+  DEPLOY_ENV: "prod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains, like the
+  # other Base workers (base-oracle-price-worker, base-allocation-tracker); the
+  # base-morpho-indexer pod identity's write policy is granted in ARCT-412.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+# No SC-call archiving on any DEX indexer: dexbootstrap does not wire the
+# archiving decorator, so ARCHIVE_SC_CALLS / RAW_SC_BUCKET would do nothing.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -118,6 +136,18 @@ metadata:
   name: uniswap-v3-indexer-config
 data:
   DEX: "uniswap-v3"
+  CHAIN_ID: "1"
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  ENVIRONMENT: "sentinelprod"
+  DEPLOY_ENV: "prod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: uniswap-v4-indexer-config
+data:
+  DEX: "uniswap-v4"
   CHAIN_ID: "1"
   AWS_REGION: "eu-west-1"
   ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
@@ -217,9 +247,9 @@ data:
   ARCHIVE_SC_CALLS: "true"
   RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
 ---
-# The three L2 trackers below (ARCT-216) set SWEEP_BLOCKS because the 75-block
+# The three L2 trackers immediately below (ARCT-216) set SWEEP_BLOCKS because the 75-block
 # default is block-count based: at these chains' cadences it would re-read and
-# append every tracked position every ~19s (arbitrum) to ~75s (unichain). The
+# append every tracked position every ~19s (arbitrum) to ~150s (optimism). The
 # values normalise the sweep to ~10 minutes, matching the psm3-indexer configmaps
 # for the same chains.
 apiVersion: v1
@@ -265,6 +295,24 @@ data:
   CHAIN_ID: "42161"
   ENVIRONMENT: "sentinelprod"
   SWEEP_BLOCKS: "2400"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#383.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+# Robinhood's ~100ms blocks make the 75-block default a sweep every ~7.5s;
+# 6000 holds it to the ~10 minutes the ARCT-216 chains use (ARCT-400).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: robinhood-allocation-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://robinhood-mainnet.g.alchemy.com/v2"
+  DEPLOY_ENV: "prod"
+  CHAIN_ID: "4663"
+  ENVIRONMENT: "sentinelprod"
+  SWEEP_BLOCKS: "6000"
   # Raw SC call archiving (VEC-81). Single bucket shared across chains;
   # pod identity write policy granted in infrastructure#383.
   ARCHIVE_SC_CALLS: "true"
@@ -345,6 +393,105 @@ data:
   CHAIN_ID: "1"
   AWS_REGION: "eu-west-1"
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector-opentelemetry-collector.observability.svc.cluster.local:4317"
+---
+# On-demand block republisher (ARCT-383) — see docs/runbooks/vector-cronjobs.md.
+# AWS_SNS_TOPIC_ARN and REDIS_ADDR arrive via the ExternalSecret, the same
+# infra-config values the ethereum watcher publishes with.
+# DEPLOY_ENV is what the startup guard validates that topic's chain against.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: block-republisher
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "1"
+  # Required, not defaulted: a deployment without it would fetch another chain's
+  # blocks for its heights. The value is the ethereum watcher's own.
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  DEPLOY_ENV: "prod"
+---
+# On-demand block republisher for Arbitrum — see the ethereum one above.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arbitrum-block-republisher
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "42161"
+  # Required, not defaulted: a deployment without it would fetch another chain's
+  # blocks for its heights. The value is the arbitrum watcher's own.
+  ALCHEMY_HTTP_URL: "https://arb-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  DEPLOY_ENV: "prod"
+---
+# On-demand block republisher for Avalanche — see the ethereum one above.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: avalanche-block-republisher
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "43114"
+  # Required, not defaulted: a deployment without it would fetch another chain's
+  # blocks for its heights. The value is the avalanche watcher's own.
+  ALCHEMY_HTTP_URL: "https://avax-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  DEPLOY_ENV: "prod"
+---
+# On-demand block republisher for Base — see the ethereum one above.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: base-block-republisher
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "8453"
+  # Required, not defaulted: a deployment without it would fetch another chain's
+  # blocks for its heights. The value is the base watcher's own.
+  ALCHEMY_HTTP_URL: "https://base-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  DEPLOY_ENV: "prod"
+---
+# On-demand block republisher for Optimism — see the ethereum one above.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: optimism-block-republisher
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "10"
+  # Required, not defaulted: a deployment without it would fetch another chain's
+  # blocks for its heights. The value is the optimism watcher's own.
+  ALCHEMY_HTTP_URL: "https://opt-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  DEPLOY_ENV: "prod"
+---
+# On-demand block republisher for Unichain — see the ethereum one above.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unichain-block-republisher
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "130"
+  # Required, not defaulted: a deployment without it would fetch another chain's
+  # blocks for its heights. The value is the unichain watcher's own.
+  ALCHEMY_HTTP_URL: "https://unichain-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  DEPLOY_ENV: "prod"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -686,6 +833,23 @@ data:
   REFERENCE_CAPITAL_SYNC_INTERVAL: "15m"
   # Risk-capital root, without the /primes route the client appends itself.
   SKY_RISK_CAPITAL_URL: "https://info-sky.blockanalitica.com/star-monitoring/risk-capital"
-  # Balance-sheet feed, read only by the one-off reference-capital-backfill Job.
+  # Balance-sheet feed. Read every cycle by the indexer -- for the per-prime
+  # daily aggregates and the per-position rows the API now serves reference
+  # allocations from -- and by the reference-capital-backfill Deployment, which
+  # seeds the history the indexer cannot reach.
   SKY_DATA_URL: "https://sky.data.blockanalitica.com/internal"
   ENVIRONMENT: "sentinelprod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: core-model-runner
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  # The schedule lives in Temporal state; the worker reconciles a changed
+  # interval into it on startup, so a redeploy is enough (stl-verify/AGENTS.md).
+  CORE_MODEL_RUN_INTERVAL_HOURS: "24"
+  # Same cap as staging; the deployment's memory limit is sized for it — raise
+  # both together (k8s/base/core-model-runner/deployment.yaml).
+  CORE_MODEL_N_MC: "100"

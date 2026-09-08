@@ -45,13 +45,14 @@ func listPayload(stars ...string) map[string]any {
 }
 
 // newTestClient serves `routes` keyed by exact request path, recording the order
-// paths were requested so a test can assert a route was never reached.
+// full request targets (path+query) were requested so a test can assert a route
+// was never reached, or assert the query string a route was reached with.
 func newTestClient(t *testing.T, routes map[string]any) (*Client, *[]string) {
 	t.Helper()
 	var requested []string
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requested = append(requested, r.URL.Path)
+		requested = append(requested, r.URL.String())
 		payload, ok := routes[r.URL.Path]
 		if !ok {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -208,5 +209,200 @@ func TestNewClientRejectsABaseURLThatAlreadyNamesThePrimesRoute(t *testing.T) {
 func TestNewClientRejectsARelativeBaseURL(t *testing.T) {
 	if _, err := NewClient(ClientConfig{BaseURL: "star-monitoring/risk-capital"}); err == nil {
 		t.Fatal("NewClient() = nil, want an error")
+	}
+}
+
+func allocationsPayload(rows ...map[string]any) map[string]any {
+	results := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		merged := map[string]any{
+			"protocol":           "sparklend",
+			"network":            "ethereum",
+			"star":               "spark",
+			"token_address":      "0xc02ab1a5eaa8d1b114ef786d9bde108cd4364359",
+			"symbol":             "spUSDS",
+			"name":               "Spark USDS",
+			"loan_token_address": "0xdc035d45d973e3ec169d2276ddab16f1e407384f",
+			"loan_token_symbol":  "USDS",
+			"exposure":           "782710914.129541047405509005",
+			"rrc":                "23308466.81",
+			"crr":                "0.0447",
+		}
+		for key, value := range row {
+			if value == nil {
+				delete(merged, key)
+				continue
+			}
+			merged[key] = value
+		}
+		results = append(results, merged)
+	}
+	return map[string]any{
+		"data":    map[string]any{"results": results, "pagination": map[string]any{"total": len(results)}},
+		"status":  200,
+		"success": true,
+	}
+}
+
+func TestFetchPrimeAllocationsCarriesEveryFieldUnrounded(t *testing.T) {
+	client, requested := newTestClient(t, map[string]any{
+		"/primes/spark/allocations/": allocationsPayload(map[string]any{}),
+	})
+
+	rows, err := client.FetchPrimeAllocations(context.Background(), []string{"spark"})
+	if err != nil {
+		t.Fatalf("FetchPrimeAllocations() = %v", err)
+	}
+
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if len(*requested) != 1 || !strings.Contains((*requested)[0], "limit=500") {
+		t.Errorf("requested = %v, want the page fetched with limit=500", *requested)
+	}
+	got := rows[0]
+	if got.Exposure != "782710914.129541047405509005" {
+		t.Errorf("Exposure = %q, want the 18-decimal value unrounded", got.Exposure)
+	}
+	if got.CRR != "0.0447" {
+		t.Errorf("CRR = %q, want the raw 0-1 fraction", got.CRR)
+	}
+	if got.ChainID == nil || *got.ChainID != 1 {
+		t.Errorf("ChainID = %v, want 1 for network ethereum", got.ChainID)
+	}
+	if got.Star != "spark" {
+		t.Errorf("Star = %q, want spark", got.Star)
+	}
+}
+
+func TestFetchPrimeAllocationsKeepsAnUnmappableNetworkWithANilChainID(t *testing.T) {
+	client, _ := newTestClient(t, map[string]any{
+		"/primes/spark/allocations/": allocationsPayload(map[string]any{"network": "solana"}),
+	})
+
+	rows, err := client.FetchPrimeAllocations(context.Background(), []string{"spark"})
+	if err != nil {
+		t.Fatalf("FetchPrimeAllocations() = %v — an unmapped network is a fact, not a fault", err)
+	}
+
+	if rows[0].ChainID != nil {
+		t.Errorf("ChainID = %v, want nil", *rows[0].ChainID)
+	}
+	if rows[0].Network != "solana" {
+		t.Errorf("Network = %q, want the vendor label kept verbatim", rows[0].Network)
+	}
+}
+
+func TestFetchPrimeAllocationsKeepsOmittedOptionalFieldsNil(t *testing.T) {
+	client, _ := newTestClient(t, map[string]any{
+		"/primes/spark/allocations/": allocationsPayload(map[string]any{
+			"name": nil, "loan_token_address": nil, "loan_token_symbol": nil,
+		}),
+	})
+
+	rows, err := client.FetchPrimeAllocations(context.Background(), []string{"spark"})
+	if err != nil {
+		t.Fatalf("FetchPrimeAllocations() = %v", err)
+	}
+
+	got := rows[0]
+	if got.Name != nil || got.LoanTokenAddress != nil || got.LoanTokenSymbol != nil {
+		t.Errorf("optional fields = (%v, %v, %v), want all nil", got.Name, got.LoanTokenAddress, got.LoanTokenSymbol)
+	}
+}
+
+func TestFetchPrimeAllocationsRejectsAnyAbsentRequiredField(t *testing.T) {
+	for _, field := range []string{
+		"protocol", "network", "symbol", "token_address", "exposure", "rrc", "crr",
+	} {
+		t.Run(field, func(t *testing.T) {
+			client, _ := newTestClient(t, map[string]any{
+				"/primes/spark/allocations/": allocationsPayload(map[string]any{field: nil}),
+			})
+
+			_, err := client.FetchPrimeAllocations(context.Background(), []string{"spark"})
+
+			if err == nil {
+				t.Fatalf("FetchPrimeAllocations() = nil, want an error naming %q", field)
+			}
+			if !strings.Contains(err.Error(), field) {
+				t.Errorf("error = %v, want it to name %q", err, field)
+			}
+		})
+	}
+}
+
+func TestFetchPrimeAllocationsRejectsADuplicateRowIdentity(t *testing.T) {
+	client, _ := newTestClient(t, map[string]any{
+		"/primes/spark/allocations/": allocationsPayload(map[string]any{}, map[string]any{}),
+	})
+
+	_, err := client.FetchPrimeAllocations(context.Background(), []string{"spark"})
+
+	if err == nil {
+		t.Fatal("FetchPrimeAllocations() = nil, want an error — a duplicate identity would silently conflict away at insert")
+	}
+}
+
+// A casing difference must not hide a duplicate identity: (network,
+// token_address) is the table's key, and upstream's casing is not
+// trustworthy (see chainIDFor).
+func TestFetchPrimeAllocationsRejectsADuplicateRowIdentityAcrossCasing(t *testing.T) {
+	client, _ := newTestClient(t, map[string]any{
+		"/primes/spark/allocations/": allocationsPayload(
+			map[string]any{"network": "ethereum"},
+			map[string]any{"network": "Ethereum"},
+		),
+	})
+
+	_, err := client.FetchPrimeAllocations(context.Background(), []string{"spark"})
+
+	if err == nil {
+		t.Fatal("FetchPrimeAllocations() = nil, want an error — a casing-only difference is still the same identity")
+	}
+}
+
+// The monitor's own vocabulary is lowercase; a casing difference upstream
+// must still resolve rather than silently reading as an unmapped network.
+func TestFetchPrimeAllocationsMapsChainIDCaseInsensitively(t *testing.T) {
+	client, _ := newTestClient(t, map[string]any{
+		"/primes/spark/allocations/": allocationsPayload(map[string]any{"network": "Ethereum"}),
+	})
+
+	rows, err := client.FetchPrimeAllocations(context.Background(), []string{"spark"})
+	if err != nil {
+		t.Fatalf("FetchPrimeAllocations() = %v", err)
+	}
+
+	if rows[0].ChainID == nil || *rows[0].ChainID != 1 {
+		t.Errorf("ChainID = %v, want 1 for network \"Ethereum\"", rows[0].ChainID)
+	}
+}
+
+func TestFetchPrimeAllocationsRejectsATruncatedPage(t *testing.T) {
+	payload := allocationsPayload(map[string]any{})
+	payload["data"].(map[string]any)["pagination"] = map[string]any{"total": 40}
+	client, _ := newTestClient(t, map[string]any{"/primes/spark/allocations/": payload})
+
+	_, err := client.FetchPrimeAllocations(context.Background(), []string{"spark"})
+
+	if err == nil {
+		t.Fatal("FetchPrimeAllocations() = nil, want an error — a short page reads as rows that do not exist")
+	}
+}
+
+func TestFetchPrimeAllocationsAllowsAnEmptyBreakdown(t *testing.T) {
+	// A zero-exposure star legitimately has nothing to break down; the exposure
+	// cross-check lives with the caller, which holds the snapshot.
+	client, _ := newTestClient(t, map[string]any{
+		"/primes/spark/allocations/": allocationsPayload(),
+	})
+
+	rows, err := client.FetchPrimeAllocations(context.Background(), []string{"spark"})
+	if err != nil {
+		t.Fatalf("FetchPrimeAllocations() = %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("rows = %d, want 0", len(rows))
 	}
 }

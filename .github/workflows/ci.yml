@@ -12,8 +12,22 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Keyed on the event too: a manual dispatch of CI on main must not sit in
+  # the push queue, where it would supersede a pending merge's run without
+  # ever deploying (call-deploy is push-only). PR and merge-queue refs each
+  # carry a single event type, so nothing changes there.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  # Latest-wins is only safe where killing a run loses nothing. That holds on
+  # PR and merge-queue refs, but not on main: the push run IS the deploy
+  # trigger (call-deploy). Main runs therefore queue. Queueing alone is not
+  # the fix, though: GitHub still replaces a *pending* main run with the
+  # newest push, and a run that only diffs its own push range deploys none of
+  # the merges it superseded. That is what bit on 2026-08-25 (ORB-361): #756's
+  # run was still pending when docs-only #778 landed, #778's run skipped
+  # Deploy, and #756 sat unbuilt for ~90 min until an unrelated code merge.
+  # Hence the deploy-base step below: main pushes diff against the last
+  # *promoted* SHA, so whichever run survives picks up everything since it.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 # Minimal default ceiling for every job: detect-changes and the go/python/ts
 # reusable callers only need read access. The elevated id-token: write (AWS
@@ -38,6 +52,9 @@ jobs:
       go: ${{ steps.changed-files.outputs.go_any_changed }}
       python: ${{ steps.changed-files.outputs.python_any_changed }}
       ts: ${{ steps.changed-files.outputs.ts_any_changed }}
+      # ORB-362: a roster/renderer change must run the deploy even with no code
+      # change — that is how a new image entry reaches the overlays.
+      deploy: ${{ steps.changed-files.outputs.deploy_any_changed }}
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,11 +62,70 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # ORB-361: main pushes diff against the last *promoted* SHA, not this
+      # push's parent -- see the concurrency block for why the push range is
+      # not enough. The marker is the prod overlay's newTag: only the automated
+      # main deploy writes it (deploy.yaml update-prod, after the staging
+      # health gate), the writing run holds this concurrency slot until it is
+      # stamped, so it is on origin/main before this run can start, and it is
+      # always a main commit. Reading prod rather than staging means a deploy
+      # that stamped staging but never promoted (failed gate, manual cancel)
+      # is retried by the next push of any kind, and a staging-only
+      # deploy.yaml dispatch -- the sanctioned staging rollback -- neither
+      # moves the marker nor gets rolled forward. A reverted prod bump does
+      # get rolled forward by the next push; prod sync still waits for
+      # approval.
+      - name: Resolve diff base -- last promoted SHA (main pushes)
+        id: deploy-base
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          HEAD_SHA: ${{ github.sha }}
+          OVERLAY: k8s/overlays/prod/kustomization.yaml
+        run: |
+          set -euo pipefail
+          # Tag shape: optional `<name>-` prefix (cronjobs) + 40-hex SHA.
+          # KEEP IN SYNC with scripts/deploy/render-overlay-images.sh, which
+          # writes this file's images block from k8s/image-roster.txt (ORB-362).
+          marker=$(git show "origin/main:${OVERLAY}" \
+            | sed -nE 's/^[[:space:]]*newTag:[[:space:]]*"?([a-z0-9]+-)*([a-f0-9]{40})"?[[:space:]]*(#.*)?$/\2/p' \
+            | sort -u) || marker=""
+          if ! [[ "$marker" =~ ^[a-f0-9]{40}$ ]] || ! git cat-file -e "${marker}^{commit}" 2>/dev/null; then
+            # Fail closed: GUARD 4 stamps every tag to one SHA and the Manifests
+            # job blocks hand edits, so this is a broken invariant, not a state
+            # to deploy through.
+            echo "::error::ORB-361: ${OVERLAY} on origin/main does not name exactly one known commit (got '${marker:-nothing}'). Fix the overlay before deploying."
+            exit 1
+          fi
+          base=""
+          if [ "$marker" = "$HEAD_SHA" ]; then
+            # This push already completed a deploy through the prod stamp: a
+            # re-run of a finished run. changed-files would quietly fall back to
+            # the push range itself when base equals head; do it explicitly so
+            # the log says why. The re-run then redeploys its own push, which
+            # is harmless (identical tags, nothing new to stamp).
+            echo "Prod overlay already at HEAD (${HEAD_SHA}); using the default push-range base."
+          elif git merge-base --is-ancestor "$marker" "$HEAD_SHA"; then
+            base="$marker"
+            echo "Diff base: last promoted SHA ${base}"
+          elif git merge-base --is-ancestor "$HEAD_SHA" "$marker"; then
+            # Stale re-run: a newer main commit has been promoted since this
+            # push. Redeploying HEAD would roll staging and the prod overlay
+            # back to it.
+            echo "::error::ORB-361: prod is already at ${marker}, which is newer than this run's ${HEAD_SHA}. Refusing to roll back via a stale re-run; re-run CI on the current main head instead."
+            exit 1
+          else
+            echo "::error::ORB-361: last promoted SHA ${marker} is unrelated to ${HEAD_SHA}; main history is not what the deploy pipeline expects."
+            exit 1
+          fi
+          echo "base_sha=${base}" >> "$GITHUB_OUTPUT"
+
       - name: Detect changed files
         id: changed-files
         uses: tj-actions/changed-files@24d32ffd492484c1d75e0c0b894501ddb9d30d62 # v47.0.0
         with:
           files_yaml_from_source_file: .github/changed-files.yml
+          # Empty on PRs (step skipped) = the action's default base; on main pushes the last promoted SHA (ORB-361).
+          base_sha: ${{ steps.deploy-base.outputs.base_sha }}
 
   go-ci:
     needs: detect-changes
@@ -90,6 +166,16 @@ jobs:
 
       - name: Image tags are CI-owned and internally consistent
         run: scripts/deploy/check-overlay-tag-consistency.sh
+
+      # ORB-362: the block is generated from k8s/image-roster.txt. Every entry
+      # present must be one the roster renders (name, repo, tag prefix); roster
+      # lines the bot has not written yet are reported as pending, so a
+      # new-service PR never has to touch the block.
+      - name: Overlay images blocks match the deploy roster
+        run: |
+          for env in staging prod; do
+            scripts/deploy/render-overlay-images.sh --env "$env" --check "k8s/overlays/$env/kustomization.yaml" --allow-missing
+          done
 
   ci-passed:
     name: Success
@@ -138,7 +224,8 @@ jobs:
       (
         needs.detect-changes.outputs.go == 'true' ||
         needs.detect-changes.outputs.python == 'true' ||
-        needs.detect-changes.outputs.ts == 'true'
+        needs.detect-changes.outputs.ts == 'true' ||
+        needs.detect-changes.outputs.deploy == 'true'
       )
     uses: ./.github/workflows/deploy.yaml
     secrets: inherit

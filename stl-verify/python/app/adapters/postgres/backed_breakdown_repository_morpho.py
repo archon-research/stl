@@ -5,6 +5,11 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.adapters.postgres.reference_as_of import (
+    ORACLE_ASSET_AS_OF,
+    ReferenceAsOf,
+    ReferenceEffectiveAtProvider,
+)
 from app.domain.entities.backed_breakdown import (
     BackedBreakdown,
     CollateralContribution,
@@ -128,7 +133,7 @@ WITH morpho_vaults AS (
       JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
       JOIN morpho_vault v ON v.id = :backed_asset_id AND po.protocol_id = v.protocol_id
       WHERE EXISTS (
-          SELECT 1 FROM oracle_asset oa
+          SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
           WHERE oa.oracle_id = otp.oracle_id AND oa.token_id = otp.token_id AND oa.enabled
       )
       ORDER BY otp.token_id, otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC, otp.oracle_id DESC
@@ -159,8 +164,9 @@ WITH morpho_vaults AS (
 class MorphoBackedBreakdownRepository:
     """Postgres implementation of the backed breakdown repository for Morpho vaults."""
 
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(self, engine: AsyncEngine, reference_effective_at: ReferenceEffectiveAtProvider) -> None:
         self._engine = engine
+        self._reference = ReferenceAsOf(reference_effective_at)
 
     async def resolve_vault_id(self, address: bytes, chain_id: int) -> int | None:
         """Resolve a Morpho vault's internal ID from its onchain address."""
@@ -174,7 +180,7 @@ class MorphoBackedBreakdownRepository:
         async with self._engine.connect() as connection:
             result = await connection.execute(
                 text(_MORPHO_BACKED_BREAKDOWN_SQL),
-                {"backed_asset_id": backed_asset_id},
+                self._reference.params(backed_asset_id=backed_asset_id),
             )
             rows = result.fetchall()
 

@@ -1,6 +1,15 @@
+import logging
+
 import numpy as np
 import pandas as pd
 from scipy.stats import norm, t
+
+logger = logging.getLogger(__name__)
+
+# Floor for the smallest eigenvalue Cholesky is asked to factor. Collaterals priced
+# off one oracle feed (SparkLend's cbBTC/LBTC/tBTC) give identical residual columns
+# and an exactly singular matrix, which is PSD yet fails `cholesky` on rounding.
+_MIN_EIGENVALUE = 1e-8
 
 
 class Aggregator:
@@ -24,10 +33,14 @@ class Aggregator:
         np.fill_diagonal(values, 1.0)
         p_corr_matrix = pd.DataFrame(values, index=p_corr_matrix.index, columns=p_corr_matrix.columns)
 
-        # insert PSD check with regularization algo
-        if not self.is_psd(p_corr_matrix):
-            print("\nNon PSD matrix: applying Rebonato-Jackel...\n")
-            p_corr_matrix = self.rebonato_jackel(p_corr_matrix)
+        min_eigenvalue = float(np.min(np.linalg.eigvalsh(p_corr_matrix)))
+        if not self.is_positive_definite(p_corr_matrix):
+            logger.warning(
+                "copula correlation matrix is not positive definite (min eigenvalue %.3e); "
+                "applying Rebonato-Jaeckel regularization",
+                min_eigenvalue,
+            )
+            p_corr_matrix = self.rebonato_jackel(p_corr_matrix, eps=_MIN_EIGENVALUE)
 
         self.corr_matrix = p_corr_matrix
         self.residuals_df = residuals_df
@@ -37,6 +50,12 @@ class Aggregator:
     def is_psd(matrix: pd.DataFrame, tol: float = 1e-10) -> bool:
         eigvals = np.linalg.eigvalsh(matrix)
         return np.min(eigvals) >= -tol
+
+    @staticmethod
+    def is_positive_definite(matrix: pd.DataFrame, eps: float = _MIN_EIGENVALUE) -> bool:
+        """Strictly positive definite with margin: what `np.linalg.cholesky` needs, unlike `is_psd`."""
+        eigvals = np.linalg.eigvalsh(matrix)
+        return bool(np.min(eigvals) >= eps)
 
     @staticmethod
     def rebonato_jackel(corr_matrix: pd.DataFrame, *, eps: float = 1e-8) -> pd.DataFrame:
@@ -197,7 +216,7 @@ class Aggregator:
         }
         return U_dict
 
-    def copula_aggregator(self, copula_type: str, n_sims: int, forecasted_step: int) -> np.ndarray:
+    def copula_aggregator(self, copula_type: str, n_sims: int, forecasted_step: int) -> dict:
 
         copula_type = copula_type.upper()
 

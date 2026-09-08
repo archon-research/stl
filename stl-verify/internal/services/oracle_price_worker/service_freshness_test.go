@@ -44,7 +44,7 @@ func newFreshnessService(t *testing.T, repo *mockRepo, factory MulticallerFactor
 		},
 	}
 
-	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, factory)
+	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, factory, testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

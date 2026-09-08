@@ -15,7 +15,7 @@ def test_get_sources_returns_copy_not_internal_list() -> None:
 def test_get_source_by_host_is_case_insensitive() -> None:
     service = DataProvenanceService()
 
-    source = service.get_source_by_host("HTTPS://INFO.SKYECO.COM/REQUIRED-RISK-CAPITAL")
+    source = service.get_source_by_host("HTTPS://INFO-SKY.BLOCKANALITICA.COM/STAR-MONITORING/RISK-CAPITAL")
 
     assert source is not None
     assert source.name == "Star Agents Risk Capital & Requirements Monitor"
@@ -37,11 +37,26 @@ def test_required_sources_exist() -> None:
     assert any(s.name == "STL Allocation Index" and s.host == "Same app (internal API)" for s in sources)
     assert any(
         s.name == "Star Agents Risk Capital & Requirements Monitor"
-        and s.host == "https://info.skyeco.com/required-risk-capital"
+        and s.host == "https://info-sky.blockanalitica.com/star-monitoring/risk-capital"
         for s in sources
     )
     # The dashboard's risk-capital figures are self-computed on-chain.
     assert any(s.name == "Self-computed Risk Capital (gap_sweep)" for s in sources)
+
+
+def test_both_reference_hosts_are_registered_as_indexed_not_live() -> None:
+    # Two hosts, two questions, and neither is read per request any more. The
+    # registry publishing one of them as a live read is what a reader checks to
+    # know how fresh a reference figure can be.
+    service = DataProvenanceService()
+    by_name = {s.name: s for s in service.get_sources()}
+
+    for name in ("Star Agents Risk Capital & Requirements Monitor", "Sky Internal Balance-Sheet Feed"):
+        source = by_name.get(name)
+        assert source is not None, name
+        assert source.caveat is not None
+        assert "15 minutes" in source.caveat
+        assert "per request" in source.caveat
 
 
 def test_anchorage_custody_source_registered_as_closed_offchain() -> None:

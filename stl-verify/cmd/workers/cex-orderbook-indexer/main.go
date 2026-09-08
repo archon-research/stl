@@ -38,7 +38,7 @@ func init() {
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 
-	err := run(ctx, newProvider)
+	err := run(ctx, newProvider, lifecycle.ForceExitAfter(lifecycle.ShutdownTailBudget))
 	cancel()
 	if err != nil {
 		slog.Error("fatal", "error", err)
@@ -124,7 +124,7 @@ func newProvider(exchange string, cfg orderbook.Config) (outbound.OrderbookProvi
 	}
 }
 
-func run(ctx context.Context, makeProvider providerFactory) error {
+func run(ctx context.Context, makeProvider providerFactory, onShutdownTimeout func()) error {
 	cfg, err := parseConfig()
 	if err != nil {
 		return fmt.Errorf("parsing config: %w", err)
@@ -188,5 +188,5 @@ func run(ctx context.Context, makeProvider providerFactory) error {
 		return fmt.Errorf("creating service: %w", err)
 	}
 
-	return lifecycle.Run(ctx, logger, service)
+	return lifecycle.RunWithTimeoutGuard(ctx, logger, onShutdownTimeout, service)
 }

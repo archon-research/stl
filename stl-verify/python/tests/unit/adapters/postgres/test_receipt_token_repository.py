@@ -16,9 +16,7 @@ def _engine_returning(row) -> MagicMock:
 
 
 @pytest.mark.asyncio
-async def test_get_by_chain_and_address_includes_the_underlying_identity() -> None:
-    # The receipt-token lookup joins the underlying `token` row in the same
-    # query, so the reference-allocation enrichment costs no second round trip.
+async def test_get_by_chain_and_address_includes_the_underlying_token_id() -> None:
     row = MagicMock(
         id=41,
         protocol_id=1,
@@ -27,8 +25,6 @@ async def test_get_by_chain_and_address_includes_the_underlying_identity() -> No
         chain_id=1,
         protocol_name="SparkLend",
         receipt_token_token_id=None,
-        underlying_token_address=b"\x77" * 20,
-        underlying_symbol="USDT",
     )
     repository = ReceiptTokenRepository(_engine_returning(row))
 
@@ -36,8 +32,6 @@ async def test_get_by_chain_and_address_includes_the_underlying_identity() -> No
 
     assert result is not None
     assert result.underlying_token_id == 7
-    assert result.underlying_symbol == "USDT"
-    assert result.underlying_token_address_hex == "0x" + "77" * 20
 
 
 @pytest.mark.asyncio

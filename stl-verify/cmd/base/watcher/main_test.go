@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
@@ -220,5 +221,21 @@ func TestLoadBackfillConfig_WiresMetricsRecorder(t *testing.T) {
 	// The concrete type passed in should round-trip unchanged.
 	if cfg.Metrics != recorder {
 		t.Fatalf("BackfillConfig.Metrics != recorder (got %T, want *shared.ServiceTelemetry)", cfg.Metrics)
+	}
+}
+
+// TestNewSubscriberConfig_WiresTelemetry guards the ARCT-398 blocker: Telemetry
+// is optional on SubscriberConfig, so omitting it silences the subscriber's
+// blocks received/dropped counters without failing anything.
+func TestNewSubscriberConfig_WiresTelemetry(t *testing.T) {
+	telemetry, err := alchemy.NewTelemetry("base")
+	if err != nil {
+		t.Fatalf("NewTelemetry: %v", err)
+	}
+
+	cfg := newSubscriberConfig(watcherConfig{}, slog.Default(), telemetry)
+
+	if cfg.Telemetry != telemetry {
+		t.Fatalf("SubscriberConfig.Telemetry = %v, want the telemetry passed in", cfg.Telemetry)
 	}
 }

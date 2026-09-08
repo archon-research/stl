@@ -1496,9 +1496,7 @@ func TestWatermarkAlreadyPastUnpublished_RetryFixesThem(t *testing.T) {
 
 	// Set watermark to 10 — it already advanced past the unpublished blocks.
 	// This is the state we'd find in production before deploying the fix.
-	if err := stateRepo.SetBackfillWatermark(ctx, 10); err != nil {
-		t.Fatalf("failed to set watermark: %v", err)
-	}
+	stateRepo.SeedBackfillCursor(10, 0)
 
 	config := BackfillConfig{
 		ChainID:            1,
@@ -2257,11 +2255,13 @@ func TestCacheAndPublishBlockData_RejectsLiteralNullBytes(t *testing.T) {
 // tests can assert the invariant fired. Keep it tiny: this is observability
 // glue, not a full mock.
 type fakeBackfillRecorder struct {
-	mu          sync.Mutex
-	calls       int
-	lastChain   int64
-	lastLag     int64
-	lagRecorded bool
+	mu               sync.Mutex
+	calls            int
+	lastChain        int64
+	lastLag          int64
+	lagRecorded      bool
+	skipped          int
+	lastSkippedChain int64
 }
 
 func (f *fakeBackfillRecorder) RecordBackfillGapNoCanonical(_ context.Context, chainID int64) {
@@ -2276,6 +2276,25 @@ func (f *fakeBackfillRecorder) RecordWatermarkLag(_ context.Context, lag int64) 
 	defer f.mu.Unlock()
 	f.lastLag = lag
 	f.lagRecorded = true
+}
+
+func (f *fakeBackfillRecorder) RecordWatermarkAdvanceSkipped(_ context.Context, chainID int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.skipped++
+	f.lastSkippedChain = chainID
+}
+
+func (f *fakeBackfillRecorder) SkippedAdvances() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.skipped
+}
+
+func (f *fakeBackfillRecorder) LastSkippedChain() int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastSkippedChain
 }
 
 func (f *fakeBackfillRecorder) Calls() int {
@@ -2302,7 +2321,7 @@ func (f *fakeBackfillRecorder) LastLag() int64 {
 	return f.lastLag
 }
 
-// stuckOrphanRepo wraps the in-memory state repo and makes ClearBlockOrphaned
+// stuckOrphanRepo wraps the in-memory state repo and makes ClearBlocksOrphaned
 // a silent no-op. This simulates a hypothetical future code path that
 // reports success but leaves the canonical row orphaned — exactly the
 // silent-failure mode the Piece 2 invariant check is meant to catch.
@@ -2310,7 +2329,7 @@ type stuckOrphanRepo struct {
 	outbound.BlockStateRepository
 }
 
-func (s *stuckOrphanRepo) ClearBlockOrphaned(_ context.Context, _ string) error {
+func (s *stuckOrphanRepo) ClearBlocksOrphaned(_ context.Context, _ string, _ []string) error {
 	// Pretend to succeed without actually clearing the flag.
 	return nil
 }
@@ -2355,18 +2374,23 @@ func TestProcessBlockData_NoCanonicalRow_FiresInvariant(t *testing.T) {
 
 	client := newMockClient()
 	client.AddBlock(42, "")
+	client.AddBlock(43, "")
 	header := client.GetHeader(42)
 
 	mem := memory.NewBlockStateRepository()
-	// Seed the orphan-only row.
-	if _, err := mem.SaveBlock(ctx, outbound.BlockState{
-		Number:         42,
-		Hash:           header.Hash,
-		ParentHash:     header.ParentHash,
-		ReceivedAt:     time.Now().Unix(),
-		BlockTimestamp: time.Now().Unix(),
-	}); err != nil {
-		t.Fatalf("failed to seed block: %v", err)
+	// Seed the orphan-only row, plus the canonical successor the un-orphan
+	// walk anchors on.
+	for _, number := range []int64{42, 43} {
+		h := client.GetHeader(number)
+		if _, err := mem.SaveBlock(ctx, outbound.BlockState{
+			Number:         number,
+			Hash:           h.Hash,
+			ParentHash:     h.ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
+		}); err != nil {
+			t.Fatalf("failed to seed block %d: %v", number, err)
+		}
 	}
 	if err := mem.MarkBlockOrphaned(ctx, header.Hash); err != nil {
 		t.Fatalf("failed to orphan seeded block: %v", err)
@@ -2584,5 +2608,343 @@ func TestBackfillService_RecordsWatermarkLag(t *testing.T) {
 	// Lag is recorded at cycle start: head=10, watermark=0 → 10.
 	if got := rec.LastLag(); got != 10 {
 		t.Errorf("expected recorded lag 10 (head 10 - watermark 0), got %d", got)
+	}
+}
+
+// refusedAdvanceRepo answers every compare-and-set with "the stored cursor
+// moved on", the state a reorg committing between a pass's scan and its write
+// leaves behind.
+type refusedAdvanceRepo struct {
+	outbound.BlockStateRepository
+}
+
+func (r *refusedAdvanceRepo) AdvanceBackfillWatermark(context.Context, outbound.BackfillCursor, int64) (bool, error) {
+	return false, nil
+}
+
+// TestAdvanceWatermark_SkippedAdvanceIsCounted: a refused advance is the only
+// evidence a pass threw its conclusion away, and a chain whose every pass is
+// refused looks exactly like one with nothing to do until it is counted.
+func TestAdvanceWatermark_SkippedAdvanceIsCounted(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := newMockClient()
+	stateRepo := memory.NewBlockStateRepository()
+	for i := int64(1); i <= 3; i++ {
+		client.AddBlock(i, "")
+		header := client.GetHeader(i)
+		if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+			Number:         i,
+			Hash:           header.Hash,
+			ParentHash:     header.ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
+		}); err != nil {
+			t.Fatalf("save block %d: %v", i, err)
+		}
+		if err := stateRepo.MarkPublishComplete(ctx, header.Hash); err != nil {
+			t.Fatalf("mark published %d: %v", i, err)
+		}
+	}
+
+	rec := &fakeBackfillRecorder{}
+	svc, err := NewBackfillService(BackfillConfig{
+		ChainID:            42161,
+		BoundaryCheckDepth: -1,
+		Logger:             slog.Default(),
+		Metrics:            rec,
+	}, client, &refusedAdvanceRepo{BlockStateRepository: stateRepo}, memory.NewBlockCache(), memory.NewEventSink())
+	if err != nil {
+		t.Fatalf("NewBackfillService: %v", err)
+	}
+
+	if err := svc.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	if got := rec.SkippedAdvances(); got != 1 {
+		t.Fatalf("skipped advances = %d, want 1", got)
+	}
+	if got := rec.LastSkippedChain(); got != 42161 {
+		t.Errorf("skipped advance chain = %d, want 42161", got)
+	}
+}
+
+// seedStoredChain stores the mock client's canonical blocks over [from, to].
+func seedStoredChain(t *testing.T, ctx context.Context, client *testutil.MockBlockchainClient, repo *memory.BlockStateRepository, from, to int64) {
+	t.Helper()
+	for number := from; number <= to; number++ {
+		header := client.GetHeader(number)
+		saveBlockState(t, ctx, repo, number, header.Hash, header.ParentHash)
+	}
+}
+
+// orphanStoredRange orphans the stored rows carrying the client's canonical
+// hashes over [from, to].
+func orphanStoredRange(t *testing.T, ctx context.Context, client *testutil.MockBlockchainClient, repo *memory.BlockStateRepository, from, to int64) {
+	t.Helper()
+	for number := from; number <= to; number++ {
+		if err := repo.MarkBlockOrphaned(ctx, client.GetHeader(number).Hash); err != nil {
+			t.Fatalf("orphan block %d: %v", number, err)
+		}
+	}
+}
+
+// TestUnorphanWalk_RefusesWithTheReasonThatApplies pins unorphanAnchorDepth and
+// the reason behind each refusal. Every rejection shares one "refusing to
+// un-orphan" wrapper, so asserting on the wrapper leaves the guards themselves
+// — the only thing between a losing fork and promotion to canonical — free to
+// be deleted, and the depth free to be any number at all.
+func TestUnorphanWalk_RefusesWithTheReasonThatApplies(t *testing.T) {
+	// anchorDepth restates unorphanAnchorDepth as a literal on purpose: a test
+	// that reads the constant moves with it and pins nothing.
+	const (
+		target          int64 = 100
+		anchorDepth     int64 = 64
+		unstoredParent        = "0xnoparent"
+		misplacedParent       = "0xmisplaced"
+		forkA                 = "0xfork_a"
+		forkB                 = "0xfork_b"
+	)
+
+	tests := []struct {
+		name            string
+		seed            func(t *testing.T, ctx context.Context, client *testutil.MockBlockchainClient, repo *memory.BlockStateRepository)
+		wantErrContains string
+		wantHealed      bool
+	}{
+		{
+			name: "an anchor exactly at the depth limit heals the run below it",
+			seed: func(t *testing.T, ctx context.Context, client *testutil.MockBlockchainClient, repo *memory.BlockStateRepository) {
+				seedStoredChain(t, ctx, client, repo, target, target+anchorDepth)
+				orphanStoredRange(t, ctx, client, repo, target, target+anchorDepth-1)
+			},
+			wantHealed: true,
+		},
+		{
+			name: "an anchor one height beyond the depth limit is out of reach",
+			seed: func(t *testing.T, ctx context.Context, client *testutil.MockBlockchainClient, repo *memory.BlockStateRepository) {
+				seedStoredChain(t, ctx, client, repo, target, target+anchorDepth+1)
+				orphanStoredRange(t, ctx, client, repo, target, target+anchorDepth)
+			},
+			wantErrContains: fmt.Sprintf("no canonical block within %d heights above it", anchorDepth),
+		},
+		{
+			name: "the anchor's parent is not stored",
+			seed: func(t *testing.T, ctx context.Context, client *testutil.MockBlockchainClient, repo *memory.BlockStateRepository) {
+				seedStoredChain(t, ctx, client, repo, target, target)
+				orphanStoredRange(t, ctx, client, repo, target, target)
+				saveBlockState(t, ctx, repo, target+2, "0xanchor2", unstoredParent)
+			},
+			wantErrContains: fmt.Sprintf("block %d's parent %s is not stored", target+2, unstoredParent),
+		},
+		{
+			name: "the anchor's parent is stored at another height",
+			seed: func(t *testing.T, ctx context.Context, client *testutil.MockBlockchainClient, repo *memory.BlockStateRepository) {
+				seedStoredChain(t, ctx, client, repo, target, target)
+				orphanStoredRange(t, ctx, client, repo, target, target)
+				saveBlockState(t, ctx, repo, target+3, misplacedParent, client.GetHeader(target+2).Hash)
+				saveBlockState(t, ctx, repo, target+2, "0xanchor2", misplacedParent)
+			},
+			wantErrContains: fmt.Sprintf("block %d's parent %s is stored at height %d", target+2, misplacedParent, target+3),
+		},
+		{
+			name: "the walk ends on the other fork stored at the height",
+			seed: func(t *testing.T, ctx context.Context, client *testutil.MockBlockchainClient, repo *memory.BlockStateRepository) {
+				sharedParent := client.GetHeader(target - 1).Hash
+				saveBlockState(t, ctx, repo, target, forkA, sharedParent)
+				saveBlockState(t, ctx, repo, target, forkB, sharedParent)
+				for _, hash := range []string{forkA, forkB} {
+					if err := repo.MarkBlockOrphaned(ctx, hash); err != nil {
+						t.Fatalf("orphan %s: %v", hash, err)
+					}
+				}
+				saveBlockState(t, ctx, repo, target+1, "0xanchor1", forkB)
+				client.SetBlockHeader(target, forkA, sharedParent)
+			},
+			wantErrContains: fmt.Sprintf("the chain below canonical block %d reaches %s at height %d, not %s",
+				target+1, forkB, target, forkA),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			client := newMockClient()
+			for number := target - 1; number <= target+anchorDepth+2; number++ {
+				client.AddBlock(number, "")
+			}
+			repo := memory.NewBlockStateRepository()
+			tt.seed(t, ctx, client, repo)
+
+			service, err := NewBackfillService(BackfillConfig{
+				ChainID:            1,
+				BatchSize:          10,
+				BoundaryCheckDepth: -1,
+				Logger:             slog.New(&testutil.SlogRecorder{}),
+			}, client, repo, memory.NewBlockCache(), memory.NewEventSink())
+			if err != nil {
+				t.Fatalf("NewBackfillService: %v", err)
+			}
+
+			batch, err := client.GetBlocksBatch(ctx, []int64{target}, true)
+			if err != nil {
+				t.Fatalf("GetBlocksBatch: %v", err)
+			}
+
+			err = service.processBlockData(ctx, batch[0])
+			switch {
+			case tt.wantErrContains == "":
+				if err != nil {
+					t.Fatalf("processBlockData = %v, want nil", err)
+				}
+			case err == nil:
+				t.Fatalf("processBlockData = nil, want an error containing %q", tt.wantErrContains)
+			case !strings.Contains(err.Error(), tt.wantErrContains):
+				t.Errorf("processBlockData = %v, want an error containing %q", err, tt.wantErrContains)
+			}
+
+			canonical, err := repo.GetBlockByNumber(ctx, target)
+			if err != nil {
+				t.Fatalf("GetBlockByNumber(%d): %v", target, err)
+			}
+			if (canonical != nil) != tt.wantHealed {
+				t.Errorf("canonical row at %d = %+v, want healed = %v", target, canonical, tt.wantHealed)
+			}
+		})
+	}
+}
+
+// TestBackfillService_RetryOrphanRewindsTheWatermark: the retry loop orphans a
+// block the chain reorged away, emptying its height. FindGaps scans only above
+// the watermark, so without a rewind that height leaves the gap filler's reach
+// for good — the ARCT-379 hole, reached here through the second of the two
+// paths that orphan outside a reorg commit.
+func TestBackfillService_RetryOrphanRewindsTheWatermark(t *testing.T) {
+	ctx := t.Context()
+
+	client := newMockClient()
+	client.AddBlock(1, "")
+	anchor := client.GetHeader(1)
+	client.SetBlockHeader(2, "0x"+strings.Repeat("c", 64), anchor.Hash)
+
+	stateRepo := memory.NewBlockStateRepository()
+	saveBlockState(t, ctx, stateRepo, 1, anchor.Hash, anchor.ParentHash)
+	if err := stateRepo.MarkPublishComplete(ctx, anchor.Hash); err != nil {
+		t.Fatalf("mark block 1 published: %v", err)
+	}
+	reorgedAway := "0x" + strings.Repeat("a", 64)
+	saveBlockState(t, ctx, stateRepo, 2, reorgedAway, anchor.Hash)
+	stateRepo.SeedBackfillCursor(2, 0)
+
+	service, err := NewBackfillService(BackfillConfig{
+		ChainID:            1,
+		BatchSize:          10,
+		BoundaryCheckDepth: -1,
+		Logger:             slog.New(&testutil.SlogRecorder{}),
+	}, client, stateRepo, memory.NewBlockCache(), memory.NewEventSink())
+	if err != nil {
+		t.Fatalf("NewBackfillService: %v", err)
+	}
+	if err := service.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	block, err := stateRepo.GetBlockByHash(ctx, reorgedAway)
+	if err != nil {
+		t.Fatalf("GetBlockByHash: %v", err)
+	}
+	if block == nil || !block.IsOrphaned {
+		t.Fatalf("block = %+v, want it orphaned by the retry reconcile", block)
+	}
+
+	cursor, err := stateRepo.GetBackfillCursor(ctx)
+	if err != nil {
+		t.Fatalf("GetBackfillCursor: %v", err)
+	}
+	if want := (outbound.BackfillCursor{Watermark: 1, RewindCount: 1}); cursor != want {
+		t.Errorf("cursor = %+v, want %+v (below the emptied height)", cursor, want)
+	}
+}
+
+// linkageBreaksAfterSaveRepo makes the post-save linkage re-check fail the way
+// a live writer landing mid-save does: the successor row appears between the
+// two validateBlockLinkage calls.
+type linkageBreaksAfterSaveRepo struct {
+	outbound.BlockStateRepository
+	saved     bool
+	successor outbound.BlockState
+}
+
+func (r *linkageBreaksAfterSaveRepo) SaveBlock(ctx context.Context, state outbound.BlockState) (int, error) {
+	version, err := r.BlockStateRepository.SaveBlock(ctx, state)
+	r.saved = true
+	return version, err
+}
+
+func (r *linkageBreaksAfterSaveRepo) GetBlockByNumber(ctx context.Context, number int64) (*outbound.BlockState, error) {
+	if r.saved && number == r.successor.Number {
+		successor := r.successor
+		return &successor, nil
+	}
+	return r.BlockStateRepository.GetBlockByNumber(ctx, number)
+}
+
+// TestBackfillService_PostSaveRaceOrphanRewindsTheWatermark is the same hole on
+// the gap-fill path: the block is saved, the re-check finds a successor that
+// does not name it, and orphaning the row it just wrote empties the height.
+func TestBackfillService_PostSaveRaceOrphanRewindsTheWatermark(t *testing.T) {
+	ctx := t.Context()
+	const target int64 = 5
+
+	client := newMockClient()
+	for number := int64(1); number <= target; number++ {
+		client.AddBlock(number, "")
+	}
+
+	stateRepo := memory.NewBlockStateRepository()
+	stateRepo.SeedBackfillCursor(target, 0)
+	repo := &linkageBreaksAfterSaveRepo{
+		BlockStateRepository: stateRepo,
+		successor: outbound.BlockState{
+			Number:     target + 1,
+			Hash:       "0xsuccessor",
+			ParentHash: "0xanother_fork",
+		},
+	}
+
+	service, err := NewBackfillService(BackfillConfig{
+		ChainID:            1,
+		BatchSize:          10,
+		BoundaryCheckDepth: -1,
+		Logger:             slog.New(&testutil.SlogRecorder{}),
+	}, client, repo, memory.NewBlockCache(), memory.NewEventSink())
+	if err != nil {
+		t.Fatalf("NewBackfillService: %v", err)
+	}
+
+	batch, err := client.GetBlocksBatch(ctx, []int64{target}, true)
+	if err != nil {
+		t.Fatalf("GetBlocksBatch: %v", err)
+	}
+	if err := service.processBlockData(ctx, batch[0]); err == nil {
+		t.Fatal("processBlockData = nil, want the post-save linkage failure")
+	}
+
+	block, err := stateRepo.GetBlockByHash(ctx, client.GetHeader(target).Hash)
+	if err != nil {
+		t.Fatalf("GetBlockByHash: %v", err)
+	}
+	if block == nil || !block.IsOrphaned {
+		t.Fatalf("block = %+v, want it orphaned after the race was detected", block)
+	}
+
+	cursor, err := stateRepo.GetBackfillCursor(ctx)
+	if err != nil {
+		t.Fatalf("GetBackfillCursor: %v", err)
+	}
+	if want := (outbound.BackfillCursor{Watermark: target - 1, RewindCount: 1}); cursor != want {
+		t.Errorf("cursor = %+v, want %+v (below the emptied height)", cursor, want)
 	}
 }

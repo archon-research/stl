@@ -98,7 +98,7 @@ func TestRun_ReturnsErrShutdownTimedOutWhenStopHangs(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := run(ctx, discardLogger(), time.Millisecond, []Service{hanging})
+	err := run(ctx, discardLogger(), time.Millisecond, nil, []Service{hanging})
 
 	if !errors.Is(err, ErrShutdownTimedOut) {
 		t.Fatalf("error = %v, want %v", err, ErrShutdownTimedOut)
@@ -142,5 +142,43 @@ func TestSignalContext_ParentCancellationPropagates(t *testing.T) {
 	case <-ctx.Done():
 	case <-time.After(time.Second):
 		t.Fatal("context was not cancelled by its parent")
+	}
+}
+
+func TestRunWithTimeoutGuard_ArmsTheGuardWhenStopHangs(t *testing.T) {
+	var calls []string
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	hanging := &fakeService{name: "hanging", calls: &calls, blockOn: release}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	armed := make(chan struct{})
+	err := run(ctx, discardLogger(), time.Millisecond, func() { close(armed) }, []Service{hanging})
+
+	if !errors.Is(err, ErrShutdownTimedOut) {
+		t.Fatalf("error = %v, want %v", err, ErrShutdownTimedOut)
+	}
+	select {
+	case <-armed:
+	default:
+		t.Fatal("the guard was not armed on a shutdown timeout")
+	}
+}
+
+func TestRunWithTimeoutGuard_LeavesTheGuardUnarmedOnCleanShutdown(t *testing.T) {
+	var calls []string
+	quick := &fakeService{name: "quick", calls: &calls}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	armed := false
+	if err := RunWithTimeoutGuard(ctx, discardLogger(), func() { armed = true }, quick); err != nil {
+		t.Fatalf("RunWithTimeoutGuard returned an error: %v", err)
+	}
+	if armed {
+		t.Fatal("the guard was armed on a clean shutdown")
 	}
 }
