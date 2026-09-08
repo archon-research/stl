@@ -717,7 +717,12 @@ groups:
   #     (add_adapter_event | remove_adapter_event | allocation_event |
   #     vault_discovery | bootstrap_seed). bootstrap_seed is the morpho-v2-bootstrap
   #     job's closing enumeration, which only ASSERTS what the same run's replay
-  #     already recorded, so a healthy run appends ~nothing under that label.
+  #     already recorded, so a healthy run appends ~nothing under that label —
+  #     apart from an adapter its probe now classifies differently from the log,
+  #     which is a correction and is meant to be recorded.
+  #     The two V2 registration rules below match the LIVE indexers by
+  #     service_name: the on-demand replay workers count on this instrument too,
+  #     and re-recording history is not an incident.
   #   morpho_v2_snapshots_written_total{snapshot_type}
   #     one sample per COMMITTED event-driven snapshot
   #     (adapter_state | vault_cap | vault_fee).
@@ -763,24 +768,31 @@ groups:
         # AddAdapter fired 5 times and RemoveAdapter 0 times across ALL adapter
         # types, so the live registration path cannot produce more than ~1/day
         # even if every single adapter were unclassifiable. The only bursty source
-        # is observed_via="vault_discovery" (its bootstrap_seed twin appends only
-        # what the bootstrap's own replay did not already record, ~nothing on a
-        # healthy run), which seeds a newly found vault's whole set in one
-        # transaction (the
-        # 7+/8min above). 25 per 24h sits ~3x above that observed burst and ~25x
-        # above the live path, so it can only mean Morpho shipped an adapter
-        # family the probe cannot classify. Every provenance is counted: an
-        # unclassifiable family that only ever arrives via discovery must not be
-        # invisible here. adapter_type="unknown" excludes "unprobed" by
-        # construction, so removals cannot inflate this.
+        # is observed_via="vault_discovery", which seeds a newly found vault's
+        # whole set in one transaction (the 7+/8min above). 25 per 24h sits ~3x
+        # above that observed burst and ~25x above the live path, so it can only
+        # mean Morpho shipped an adapter family the probe cannot classify. Every
+        # provenance the live indexer writes is counted: an unclassifiable family
+        # that only ever arrives via discovery must not be invisible here.
+        # adapter_type="unknown" excludes "unprobed" by construction, so removals
+        # cannot inflate this.
         #
-        # Expect one firing during the initial VaultV2 backfill/bootstrap, when
-        # every existing V2 vault is discovered at once. Acknowledge it, then
-        # curate from the DB query in the runbook.
+        # SCOPED to the live indexers, the same match and for the same reason as
+        # VectorMorphoV2ForceDeallocateSurge below (read its scoping note; add a
+        # new chain's name in both places). morpho-vault-backfill and
+        # morpho-v2-bootstrap replay history through the same handlers and count
+        # on this same instrument under their own service_name, so an on-demand
+        # replay re-recording a known Unknown population would fire this by
+        # design — nothing has changed on chain, and there is nothing to act on.
+        # The live indexer is still the source this is asking about, and a real
+        # new adapter family reaches it within a day of shipping.
+        #
+        # Expect one firing when the live indexer first discovers a wave of V2
+        # vaults. Acknowledge it, then curate from the DB query in the runbook.
         expr: |
           sum by (chain, cluster) (
             increase(morpho_v2_adapter_registrations_total{
-              adapter_type="unknown", k8s_namespace_name="vector"
+              adapter_type="unknown", service_name=~"morpho-indexer|base-morpho-indexer", k8s_namespace_name="vector"
             }[24h])
           ) > 25
         for: 30m
@@ -827,10 +839,21 @@ groups:
         # adapter allocated in the discovery block, every time; nothing has to have
         # changed between two reads. Deliberately not >0: those appends are by
         # design not an incident.
+        #
+        # SCOPED to the live indexers, the same match and for the same reason as
+        # VectorMorphoV2ForceDeallocateSurge below (read its scoping note; add a
+        # new chain's name in both places). morpho-vault-backfill and
+        # morpho-v2-bootstrap replay history through the same handlers and count
+        # on this same instrument under their own service_name. Replaying an
+        # Allocate whose vault was discovered mid-life is precisely how the missing
+        # add_adapter_event history gets filled in, so a replay run drives this
+        # counter by design and firing on it would page for the fix. What the
+        # alert is asking about — is the LIVE enumeration missing adapters — is
+        # only answerable from the live indexer's own series.
         expr: |
           sum by (chain, cluster) (
             increase(morpho_v2_adapter_registrations_total{
-              observed_via="allocation_event", k8s_namespace_name="vector"
+              observed_via="allocation_event", service_name=~"morpho-indexer|base-morpho-indexer", k8s_namespace_name="vector"
             }[6h])
           ) > 3
         for: 30m

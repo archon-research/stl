@@ -792,9 +792,14 @@ version to its trigger.
 Both history jobs emit the same `morpho_v2_*` metrics as the live indexer (the
 replay path is metered since VEC-218), so the V2 volume alerts in
 `vector-indexers.yaml` can fire during a deliberate replay or bootstrap run —
-expected, not an incident; the run is operator-initiated and visible here.
-`VectorMorphoV2ForceDeallocateSurge` is the exception: it is scoped to the live
-indexer's `service_name`, because replayed history is not a liquidity run.
+expected, not an incident; the run is operator-initiated and visible here. The
+three rules a replay would otherwise fire by design are scoped to the live
+indexers' `service_name` instead: `VectorMorphoV2ForceDeallocateSurge`,
+`VectorMorphoV2UnknownAdapters` and `VectorMorphoV2LazyAdapterRegistrations`.
+Replayed history is not a liquidity run, a wave of new unclassifiable adapters, or
+an enumeration gap — it is the same population being re-recorded, or the very
+repair those alerts would send you to make. Each replay worker's own series stays
+on the dashboard as run progress.
 
 A third **on-demand** Temporal worker (`temporal.RunWorker`). Everything said
 about `offchain-price-backfill` above applies — nothing is missed while it is
@@ -1626,12 +1631,13 @@ individually; re-running unchanged produces the same set. The run stays red unti
 each one is fixed or explicitly written off, which is the point: a hole is
 reported, never hidden.
 
-**4. A height the raw archive cannot answer for.** `the raw archive identifies no
-block at that height` or `the raw archive holds another block at that height`,
-naming the block, the version, and both hashes. The run stamps every row with the
-version the archive holds (see "Block versions come from the raw archive" above),
-so it stops rather than guess.
-It does not clear on retry: repair the archive with `block-republisher` (one
+**4. A height the raw archive cannot answer for.** Either `the raw archive
+identifies no block at that height` — nothing is archived there, or the version
+that is names no block — or `the raw archive holds another block at that height`,
+which names the archived hash beside the one being replayed. Both name the height
+and the bucket. The run stamps every row with the version the archive holds (see
+"Block versions come from the raw archive" above), so it stops rather than guess,
+and it does not clear on retry: repair the archive with `block-republisher` (one
 height) or `raw-block-bulk-downloader` (a range), then start a new run.
 
 **Not failures:**

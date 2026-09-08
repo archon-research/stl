@@ -3078,17 +3078,30 @@ actionable, which is what the threshold encodes: the live registration path
 so >25/day can only come from a mass discovery burst or a genuinely new adapter
 family.
 
-**Expect one firing during the initial VaultV2 bootstrap**, when every existing V2
-vault is discovered at once. Acknowledge and curate.
+**Expect one firing when the live indexer first discovers a wave of V2 vaults** —
+each one seeds its whole adapter set in a single transaction. Acknowledge and
+curate.
+
+**Replays are excluded.** The rule counts only the live per-chain indexers,
+`service_name=~"morpho-indexer|base-morpho-indexer"` — the same match and the same
+reasoning as [`VectorMorphoV2ForceDeallocateSurge`](#vectormorphov2forcedeallocatesurge),
+so a new chain's Deployment name goes into both. The on-demand replay workers
+(`morpho-vault-backfill`, `morpho-v2-bootstrap`) drive historical logs through the
+same handlers and increment the same counter under their own `service_name`, so a
+run re-recording an already-known Unknown population would fire this by design —
+nothing changed on chain, and there is nothing to act on. A genuinely new adapter
+family reaches the live indexer within a day of shipping, which is what this rule
+asks about. Triaging a replay instead? Read that `service_name`'s own series on the
+dashboard: it is backfill progress, not an incident.
 
 ### First checks
 
-1. **Which provenance** — `sum by (observed_via) (increase(morpho_v2_adapter_registrations_total{adapter_type="unknown"}[24h]))`.
-   All `vault_discovery` (or `bootstrap_seed`) means a bootstrap/backfill burst
-   (benign, but still curate). Any meaningful `add_adapter_event` share means a
-   new family is shipping live. `bootstrap_seed` stays ~0 even while the bootstrap
-   runs — its enumeration only asserts what that run's own replay recorded — so
-   read a burst's provenance off `vault_discovery`, not off its absence.
+1. **Which provenance** — `sum by (observed_via) (increase(morpho_v2_adapter_registrations_total{adapter_type="unknown", service_name=~"morpho-indexer|base-morpho-indexer"}[24h]))`.
+   All `vault_discovery` means a wave of newly discovered vaults (benign, but still
+   curate). Any meaningful `add_adapter_event` share means a new family is shipping
+   live. Drop the `service_name` matcher to see what a replay run recorded — the
+   same population re-recorded, plus `bootstrap_seed` rows for any adapter whose
+   probe now classifies differently from the log, which is a correction landing.
 2. **Identify the adapters** (`db-query`):
 
    ```sql
@@ -3143,12 +3156,12 @@ vault is discovered at once. Acknowledge and curate.
   in-place fix available — UPDATE is revoked on `morpho_adapter_membership`. See
   the replay note under Verify recovery for
   [`VectorMorphoV2LazyAdapterRegistrations`](#vectormorphov2lazyadapterregistrations).
-- A mass discovery burst (bootstrap, or a wave of new V2 vaults) surfacing the
-  known long tail of unclassifiable adapters all at once → curate, no code change.
+- A mass discovery burst (a wave of new V2 vaults) surfacing the known long tail
+  of unclassifiable adapters all at once → curate, no code change.
 
 ### Verify recovery
 
-`increase(morpho_v2_adapter_registrations_total{adapter_type="unknown"}[24h]) <= 25`
+`increase(morpho_v2_adapter_registrations_total{adapter_type="unknown", service_name=~"morpho-indexer|base-morpho-indexer"}[24h]) <= 25`
 for the affected chain, and the type-99 query above returns only adapters you
 have consciously accepted.
 
@@ -3192,13 +3205,24 @@ approximated: an adapter known only from an `Allocate` simply has **no**
 `add_adapter_event` observation, so its add block is NULL until its history is
 replayed. Current membership and classification are correct in the meantime.
 
+**Replays are excluded.** The rule counts only the live per-chain indexers,
+`service_name=~"morpho-indexer|base-morpho-indexer"` — the same match and the same
+reasoning as [`VectorMorphoV2ForceDeallocateSurge`](#vectormorphov2forcedeallocatesurge),
+so a new chain's Deployment name goes into both. The on-demand replay workers
+(`morpho-vault-backfill`, `morpho-v2-bootstrap`) run historical `Allocate` logs
+through the same handlers under their own `service_name`, and replaying a mid-life
+discovery is exactly how the missing `add_adapter_event` history gets filled in —
+so a run drives this counter by design, and firing on it would page for the fix.
+The question the alert asks — is the LIVE enumeration missing adapters — is only
+answerable from the live indexer's own series.
+
 ### First checks
 
 1. **Is it one new vault or many?** A mid-life discovery produces one append per
    adapter the vault allocates to in the discovery block — deterministically, per
    the mechanism above — so a wave of new vaults produces a small, one-off burst.
    Correlate with the discovery path:
-   `sum by (observed_via) (increase(morpho_v2_adapter_registrations_total[6h]))`
+   `sum by (observed_via) (increase(morpho_v2_adapter_registrations_total{service_name=~"morpho-indexer|base-morpho-indexer"}[6h]))`
    — `allocation_event` observations with **no** matching `vault_discovery`
    traffic in the same window are the suspicious case.
 2. **Identify them** — the indexer logs one WARN per inference:
@@ -3239,9 +3263,9 @@ replayed. Current membership and classification are correct in the meantime.
 
 ### Common causes
 
-- A wave of newly discovered V2 vaults (or the initial bootstrap) → benign and
-  expected: each contributes one append per adapter allocated in its discovery
-  block. Confirm via `blocks_after_discovery = 0` and let it clear.
+- A wave of newly discovered V2 vaults → benign and expected: each contributes one
+  append per adapter allocated in its discovery block. Confirm via
+  `blocks_after_discovery = 0` and let it clear.
 - `readV2Adapters` enumeration regression (truncated list, wrong selector, a
   failed sub-read defaulting to empty) → adapters are missing from every newly
   discovered vault; this is the bug the alert exists to catch.
@@ -3250,7 +3274,7 @@ replayed. Current membership and classification are correct in the meantime.
 
 ### Verify recovery
 
-`increase(morpho_v2_adapter_registrations_total{observed_via="allocation_event"}[6h]) <= 3`
+`increase(morpho_v2_adapter_registrations_total{observed_via="allocation_event", service_name=~"morpho-indexer|base-morpho-indexer"}[6h]) <= 3`
 for the affected chain. If the cause was an enumeration bug, also replay the
 affected vaults: the replay appends each adapter's real `AddAdapter` observation
 at its own block, which is what turns a NULL add block into the true one.
