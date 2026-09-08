@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -37,65 +38,120 @@ func NewBlockMetaRepository(pool *pgxpool.Pool, logger *slog.Logger) (*BlockMeta
 //   - allocation_position, protocol_event carry chain_id natively.
 //   - prime_debt (Sky) has no chain column and is Ethereum mainnet, so its chain is the constant 1.
 //
-// The (block_number, block_version) > (afterNumber, afterVersion) predicate is a keyset cursor: it
-// pages the OUTPUT without re-returning rows already handled this run. The NOT EXISTS anti-join
-// keeps the loader resumable across runs (a fresh run restarts the cursor at -1 and the anti-join
-// skips blocks a prior run already loaded). A block newly referenced BELOW the cursor mid-run is
-// picked up on the next run, which is acceptable for a historical backfill.
-//
-// Cost note: the cursor pages the output, but the INPUT — the 6-table referenced UNION — is still
-// recomputed on every batch, and only protocol_event has an index leading with
-// (block_number, block_version); the other arms lead with user_id/protocol_id/chain_id, so their
-// contribution is a scan. For a millions-of-blocks full-history backfill this is roughly
-// O(N^2/batch). It is correct and fine at moderate scale, but before running against prod-sized
-// history this should be reworked to materialize the referenced set once per run into an indexed
-// temp table and page from that. Tracked as a follow-up (see PR).
-const pendingBlocksQuery = `
-WITH referenced AS (
-    SELECT p.chain_id, b.block_number, b.block_version
-      FROM borrower b JOIN protocol p ON p.id = b.protocol_id
-    UNION
-    SELECT p.chain_id, bc.block_number, bc.block_version
-      FROM borrower_collateral bc JOIN protocol p ON p.id = bc.protocol_id
-    UNION
-    SELECT ap.chain_id, ap.block_number, ap.block_version FROM allocation_position ap
-    UNION
-    SELECT pe.chain_id, pe.block_number, pe.block_version FROM protocol_event pe
-    UNION
-    SELECT p.chain_id, sr.block_number, sr.block_version
-      FROM sparklend_reserve_data sr JOIN protocol p ON p.id = sr.protocol_id
-    UNION
-    SELECT 1::int AS chain_id, pd.block_number, pd.block_version FROM prime_debt pd
-)
-SELECT r.block_number, r.block_version
-  FROM referenced r
- WHERE r.chain_id = $1
-   AND (r.block_number > $3 OR (r.block_number = $3 AND r.block_version > $4))
-   AND NOT EXISTS (
-       SELECT 1 FROM block_meta m
-        WHERE m.chain_id = r.chain_id
-          AND m.block_number = r.block_number
-          AND m.block_version = r.block_version)
- ORDER BY r.block_number, r.block_version
- LIMIT $2`
+// referencedBlocksQuery is the set of blocks a chain's observation tables reference. It is evaluated
+// ONCE per run into a temp table: the six arms scan (only protocol_event has an index leading with
+// block_number), so re-running it per batch made enumeration cost O(batches x full scan) -- measured
+// at ~7s per batch against staging's 1.4M referenced blocks, independent of how far the cursor had
+// advanced, which is ~4h for chain 1 alone before a single header is read.
+// workListStatements build the run's work list. Separate statements because the INSERT takes a
+// parameter, and a multi-statement string cannot be sent as one prepared statement.
+var workListStatements = []string{
+	`CREATE TEMP TABLE block_meta_worklist (block_number bigint NOT NULL, block_version integer NOT NULL) ON COMMIT DROP`,
+	`INSERT INTO block_meta_worklist (block_number, block_version)
+	 WITH referenced AS (
+	     SELECT p.chain_id, b.block_number, b.block_version
+	       FROM borrower b JOIN protocol p ON p.id = b.protocol_id
+	     UNION
+	     SELECT p.chain_id, bc.block_number, bc.block_version
+	       FROM borrower_collateral bc JOIN protocol p ON p.id = bc.protocol_id
+	     UNION
+	     SELECT ap.chain_id, ap.block_number, ap.block_version FROM allocation_position ap
+	     UNION
+	     SELECT pe.chain_id, pe.block_number, pe.block_version FROM protocol_event pe
+	     UNION
+	     SELECT p.chain_id, sr.block_number, sr.block_version
+	       FROM sparklend_reserve_data sr JOIN protocol p ON p.id = sr.protocol_id
+	     UNION
+	     SELECT 1::int AS chain_id, pd.block_number, pd.block_version FROM prime_debt pd
+	 )
+	 SELECT r.block_number, r.block_version
+	   FROM referenced r
+	  WHERE r.chain_id = $1
+	    AND NOT EXISTS (
+	        SELECT 1 FROM block_meta m
+	         WHERE m.chain_id = r.chain_id
+	           AND m.block_number = r.block_number
+	           AND m.block_version = r.block_version)`,
+	`CREATE INDEX ON block_meta_worklist (block_number, block_version)`,
+	`ANALYZE block_meta_worklist`,
+}
 
-// PendingBlocks returns the next batch of blocks missing from block_meta for chainID.
-func (r *BlockMetaRepository) PendingBlocks(ctx context.Context, chainID int64, limit int, afterNumber int64, afterVersion int) ([]outbound.BlockRef, error) {
-	rows, err := r.pool.Query(ctx, pendingBlocksQuery, chainID, limit, afterNumber, afterVersion)
+// blockWorkList pages the run's temp work-list. It holds one pooled connection for the run, because a
+// temp table belongs to the session that created it; the transaction is open for the same reason
+// (ON COMMIT DROP), so nothing survives a crash and a fresh run recomputes the set.
+type blockWorkList struct {
+	conn   *pgxpool.Conn
+	tx     pgx.Tx
+	logger *slog.Logger
+	after  outbound.BlockRef
+}
+
+// OpenWorkList evaluates the referenced set for chainID once and returns a cursor over it.
+func (r *BlockMetaRepository) OpenWorkList(ctx context.Context, chainID int64) (outbound.BlockWorkList, error) {
+	conn, err := r.pool.Acquire(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("querying pending blocks: %w", err)
+		return nil, fmt.Errorf("acquire a connection for the work list: %w", err)
+	}
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		conn.Release()
+		return nil, fmt.Errorf("begin the work-list transaction: %w", err)
+	}
+	for _, stmt := range workListStatements {
+		var args []any
+		if strings.Contains(stmt, "$1") {
+			args = []any{chainID}
+		}
+		if _, err := tx.Exec(ctx, stmt, args...); err != nil {
+			_ = tx.Rollback(ctx)
+			conn.Release()
+			return nil, fmt.Errorf("materialize the work list: %w", err)
+		}
+	}
+	return &blockWorkList{conn: conn, tx: tx, logger: r.logger,
+		after: outbound.BlockRef{Number: -1, Version: -1}}, nil
+}
+
+// Next pages the work-list with a keyset cursor, so the ordered read is not restarted per batch.
+func (w *blockWorkList) Next(ctx context.Context, limit int) ([]outbound.BlockRef, error) {
+	if w.tx == nil {
+		return nil, fmt.Errorf("work list is closed")
+	}
+	rows, err := w.tx.Query(ctx, `
+		SELECT block_number, block_version FROM block_meta_worklist
+		 WHERE (block_number, block_version) > ($1, $2)
+		 ORDER BY block_number, block_version
+		 LIMIT $3`, w.after.Number, w.after.Version, limit)
+	if err != nil {
+		return nil, fmt.Errorf("reading the work list: %w", err)
 	}
 	defer rows.Close()
-
 	var out []outbound.BlockRef
 	for rows.Next() {
 		var b outbound.BlockRef
 		if err := rows.Scan(&b.Number, &b.Version); err != nil {
-			return nil, fmt.Errorf("scanning pending block: %w", err)
+			return nil, fmt.Errorf("scanning a work-list row: %w", err)
 		}
 		out = append(out, b)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating the work list: %w", err)
+	}
+	if len(out) > 0 {
+		w.after = out[len(out)-1]
+	}
+	return out, nil
+}
+
+func (w *blockWorkList) Close(ctx context.Context) {
+	if w.tx == nil {
+		return
+	}
+	if err := w.tx.Rollback(ctx); err != nil && err != pgx.ErrTxClosed {
+		w.logger.Error("closing the block_meta work list", "error", err)
+	}
+	w.conn.Release()
+	w.tx, w.conn = nil, nil
 }
 
 // blockMetaStageColumns are the block_meta columns the loader fills, in COPY/INSERT order.

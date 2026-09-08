@@ -42,35 +42,67 @@ func streamTimestampByBlock(_ context.Context, _ string, key string) (io.ReadClo
 }
 
 // mockBlockMetaRepo implements outbound.BlockMetaRepository over an in-memory universe of pending
-// blocks, honouring the keyset cursor + limit exactly as the SQL adapter would.
+// blocks. Like the SQL adapter, the universe is snapshotted when the work list is opened and paged
+// with a keyset cursor, so a block that appears mid-run is not picked up until the next run.
 type mockBlockMetaRepo struct {
 	universe  []outbound.BlockRef // sorted by (Number, Version)
 	upserted  []outbound.BlockMetaRow
 	upsertErr error
+	openErr   error
+	nextErr   error
 	calls     int
+	opened    int
+	closed    int
 }
 
-func (m *mockBlockMetaRepo) PendingBlocks(_ context.Context, _ int64, limit int, afterNumber int64, afterVersion int) ([]outbound.BlockRef, error) {
-	m.calls++
+type mockWorkList struct {
+	repo  *mockBlockMetaRepo
+	snap  []outbound.BlockRef
+	after outbound.BlockRef
+}
+
+func (m *mockBlockMetaRepo) OpenWorkList(_ context.Context, _ int64) (outbound.BlockWorkList, error) {
+	if m.openErr != nil {
+		return nil, m.openErr
+	}
+	m.opened++
+	snap := make([]outbound.BlockRef, len(m.universe))
+	copy(snap, m.universe)
+	return &mockWorkList{repo: m, snap: snap, after: outbound.BlockRef{Number: -1, Version: -1}}, nil
+}
+
+func (w *mockWorkList) Next(_ context.Context, limit int) ([]outbound.BlockRef, error) {
+	if w.repo.nextErr != nil {
+		return nil, w.repo.nextErr
+	}
+	w.repo.calls++
 	var out []outbound.BlockRef
-	for _, b := range m.universe {
-		if b.Number > afterNumber || (b.Number == afterNumber && b.Version > afterVersion) {
+	for _, b := range w.snap {
+		if b.Number > w.after.Number || (b.Number == w.after.Number && b.Version > w.after.Version) {
 			out = append(out, b)
 			if len(out) == limit {
 				break
 			}
 		}
 	}
+	if len(out) > 0 {
+		w.after = out[len(out)-1]
+	}
 	return out, nil
 }
+
+func (w *mockWorkList) Close(context.Context) { w.repo.closed++ }
 
 func (m *mockBlockMetaRepo) Upsert(_ context.Context, rows []outbound.BlockMetaRow) (int64, error) {
 	if m.upsertErr != nil {
 		return 0, m.upsertErr
 	}
 	m.upserted = append(m.upserted, rows...)
-	// Consume from the universe so the keyset loop terminates as the real anti-join would.
-	m.universe = m.universe[len(rows):]
+	// Consume from the universe, as the real anti-join against block_meta does, so a service that
+	// re-opened the work list per batch terminates with a wrong open count instead of spinning.
+	if len(rows) <= len(m.universe) {
+		m.universe = m.universe[len(rows):]
+	}
 	return int64(len(rows)), nil
 }
 
@@ -228,5 +260,52 @@ func TestNew_DefaultsBatchSize(t *testing.T) {
 	}
 	if svc.cfg.BatchSize != 500 {
 		t.Errorf("BatchSize default = %d, want 500", svc.cfg.BatchSize)
+	}
+}
+
+// The work list is opened once per run and closed, even when the run fails: the referenced set is
+// expensive to compute (measured ~7s per evaluation against staging's 1.4M referenced blocks), so
+// re-evaluating it per batch is what this shape exists to avoid.
+func TestRunOpensTheWorkListOnceAndAlwaysClosesIt(t *testing.T) {
+	universe := []outbound.BlockRef{{Number: 1}, {Number: 2}, {Number: 3}, {Number: 4}, {Number: 5}}
+	for _, c := range []struct {
+		name    string
+		repo    *mockBlockMetaRepo
+		wantErr bool
+	}{
+		{name: "a clean run", repo: &mockBlockMetaRepo{universe: universe}},
+		{name: "a run whose upsert fails",
+			repo:    &mockBlockMetaRepo{universe: universe, upsertErr: errors.New("boom")},
+			wantErr: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			svc := newTestService(t, c.repo, &mockS3Reader{streamFn: streamTimestampByBlock}, 2)
+			_, err := svc.Run(context.Background())
+			if (err != nil) != c.wantErr {
+				t.Fatalf("Run error = %v, wantErr %v", err, c.wantErr)
+			}
+			if c.repo.opened != 1 {
+				t.Errorf("work list opened %d times, want exactly 1 -- the referenced set must not be re-evaluated per batch", c.repo.opened)
+			}
+			if c.repo.closed != 1 {
+				t.Errorf("work list closed %d times, want 1 -- it holds a pooled connection and an open transaction", c.repo.closed)
+			}
+		})
+	}
+}
+
+// A failure opening the work list is reported, not silently treated as an empty run.
+func TestRunReportsAWorkListOpenFailure(t *testing.T) {
+	repo := &mockBlockMetaRepo{openErr: errors.New("no connection")}
+	svc := newTestService(t, repo, &mockS3Reader{streamFn: streamTimestampByBlock}, 2)
+	n, err := svc.Run(context.Background())
+	if err == nil {
+		t.Fatalf("Run succeeded with %d rows; want the open failure surfaced", n)
+	}
+	if !strings.Contains(err.Error(), "opening the work list") {
+		t.Errorf("error = %v; want it to name the work-list open", err)
+	}
+	if repo.closed != 0 {
+		t.Errorf("closed %d work lists after a failed open, want 0", repo.closed)
 	}
 }

@@ -78,24 +78,27 @@ func New(cfg Config, repo outbound.BlockMetaRepository, reader outbound.S3Reader
 }
 
 // Run fills block_meta for cfg.ChainID until no referenced block is missing. Returns rows upserted.
-// It walks the pending blocks with a keyset cursor so the ordered scan is not restarted each batch,
-// and checks for cancellation between batches so a SIGTERM stops it promptly.
+// The pending set is enumerated once into a work list and paged with a keyset cursor, so the six-table
+// union is not re-run per batch; cancellation is checked between batches so a SIGTERM stops it promptly.
+// A block newly referenced mid-run is picked up by the next run, which is what a backfill needs.
 func (s *Service) Run(ctx context.Context) (int64, error) {
 	var total int64
-	afterNumber, afterVersion := int64(-1), -1
+	work, err := s.repo.OpenWorkList(ctx, s.cfg.ChainID)
+	if err != nil {
+		return total, fmt.Errorf("opening the work list: %w", err)
+	}
+	defer work.Close(ctx)
 	for {
 		if err := ctx.Err(); err != nil {
 			return total, err
 		}
-
-		refs, err := s.repo.PendingBlocks(ctx, s.cfg.ChainID, s.cfg.BatchSize, afterNumber, afterVersion)
+		refs, err := work.Next(ctx, s.cfg.BatchSize)
 		if err != nil {
 			return total, fmt.Errorf("loading pending blocks: %w", err)
 		}
 		if len(refs) == 0 {
 			return total, nil
 		}
-
 		rows := make([]outbound.BlockMetaRow, 0, len(refs))
 		for _, r := range refs {
 			ts, err := blockheader.ReadTimestampFromS3(ctx, s.reader, s.cfg.Bucket, r.Number, r.Version)
@@ -117,10 +120,6 @@ func (s *Service) Run(ctx context.Context) (int64, error) {
 			return total, fmt.Errorf("upserting block_meta: %w", err)
 		}
 		total += n
-
-		// Advance the cursor past this batch; refs are ordered by (number, version).
-		last := refs[len(refs)-1]
-		afterNumber, afterVersion = last.Number, last.Version
 
 		s.logger.Info("block_meta batch", "chain", s.cfg.ChainID, "upserted", n, "total", total)
 	}
