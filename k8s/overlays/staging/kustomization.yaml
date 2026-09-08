@@ -35,11 +35,12 @@ resources:
   - ../../base/arbitrum-watcher
   - ../../base/arbitrum-backup-worker
   - ../../base/arbitrum-allocation-tracker
-  # Robinhood Chain (4663). Deliberately ahead of the watcher and allocation tracker
-  # (#825, ARCT-377): a consumer that arrives first idles on an already-provisioned
-  # empty queue (infrastructure#658), while a watcher that arrives first fills a
-  # queue nothing drains until SQS retention ages the messages out.
+  # Robinhood Chain (4663). The backup worker landed ahead of the watcher
+  # (#825, ARCT-377) so the consumer was already draining when blocks arrived
+  # (infrastructure#658).
+  - ../../base/robinhood-watcher
   - ../../base/robinhood-backup-worker
+  - ../../base/robinhood-allocation-tracker
   - ../../base/prime-debt-indexer
   - ../../base/base-psm3-indexer
   - ../../base/optimism-psm3-indexer
@@ -64,8 +65,9 @@ resources:
   - ../../base/morpho-vault-backfill
   # On-demand block republisher (ARCT-383). No Temporal schedule: idles on its
   # task queue until an operator starts a run with the heights to repair. One
-  # per chain with a raw archive, each on its own task queue; Robinhood has no
-  # backup worker, so it has no archive to repair against and no worker here.
+  # per chain with a raw archive, each on its own task queue. Robinhood has an
+  # archive (backup worker, #870) but no republisher yet: its ServiceAccount
+  # needs a Pod Identity grant in the infra repo first — follow-up, not here.
   - ../../base/block-republisher
   - ../../base/arbitrum-block-republisher
   - ../../base/avalanche-block-republisher
