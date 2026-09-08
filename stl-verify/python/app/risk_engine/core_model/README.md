@@ -16,20 +16,21 @@ Each market picks its data sources per input via the `*_SOURCE` flags in `inputs
 
 ## Changes from the original standalone version
 
-The financial model logic (ARMA-GARCH calibration, copula simulation, liquidation mechanics) is **mathematically unchanged**. The following modifications were made for service integration:
+The financial model logic (ARMA-GARCH calibration, copula simulation, liquidation mechanics) is **mathematically unchanged** with one exception, the `slippage_calculator_cum` partial-tick fix (its own row below), which corrects a defect rather than changing the model's design. The other modifications were made for service integration:
 
 | Change | Reason |
 |---|---|
 | `main.py` replaced by `runner.py` | Original `main.py` printed results to stdout. `runner.py` is a pure function that accepts typed inputs and returns a typed `CoreModelPipelineResult` dataclass, making it testable and composable. |
 | Import paths updated (`from app.risk_engine.core_model.X import Y`) | Required for Python package structure; original used bare module imports only valid when run from the same directory. |
-| `Parallel(n_jobs=-1)` changed: `n_jobs=4` in the calibrator backtest, `n_jobs=1` in the Monte Carlo | `-1` consumed all available CPUs and caused OOM in constrained environments. Note the MC has **always run sequentially**: the earlier `Parallel(jobs=4)` was a typo joblib silently swallowed (`Parallel.__init__` forwards unknown kwargs to the backend), leaving `n_jobs` at its default of 1. The explicit `n_jobs=1` changes nothing at runtime — it turns the accident into a decision. Do not "restore" parallelism: per-scenario tensors peak at ~8.0 GiB for the heaviest market (measured at N_MC=10000), and loky workers would multiply that past any pod memory limit. The backtest parallelises fine — its per-window state is small. |
+| `Parallel(n_jobs=-1)` changed: `n_jobs=4` in the calibrator backtest, `n_jobs=1` in the Monte Carlo | `-1` consumed all available CPUs and caused OOM in constrained environments. Note the MC has **always run sequentially**: the earlier `Parallel(jobs=4)` was a typo joblib silently swallowed (`Parallel.__init__` forwards unknown kwargs to the backend), leaving `n_jobs` at its default of 1. The explicit `n_jobs=1` changes nothing at runtime — it turns the accident into a decision. Do not "restore" parallelism: per-scenario tensors peak at ~7.5 GiB for the heaviest live market before the `MIN_BORROW_USD` filter (~1.4 GiB after; measured at N_MC=10000), and loky workers would multiply that past any pod memory limit. The backtest parallelises fine — its per-window state is small. |
 | `orderbook_data` lookup lowercased (`symbol.lower()`) | Original assumed the working directory was case-insensitive (macOS). Lowercase normalisation is required for Linux where the service runs. |
 | Bare `except:` changed to `except Exception:` | Required by the project linter (ruff). |
-| `importer.py` reduced to `change_user_ltvs` only | `load_protocol_data` and `load_price_data` were dead code replaced by the `CoreModelDataReader` port. `load_orderbook_data` moved to `ParquetCoreModelDataReader.get_orderbooks()` (also added to the port), so all I/O goes through the same abstraction. `Liquidator` now accepts pre-loaded orderbooks instead of loading them internally
+| `importer.py` reduced to `change_user_ltvs` (later joined by `drop_small_borrowers`, the `MIN_BORROW_USD` filter) | `load_protocol_data` and `load_price_data` were dead code replaced by the `CoreModelDataReader` port. `load_orderbook_data` moved to `ParquetCoreModelDataReader.get_orderbooks()` (also added to the port), so all I/O goes through the same abstraction. `Liquidator` now accepts pre-loaded orderbooks instead of loading them internally
 | Dead variable assignments removed (`slippage`, `P`, `new_supply_qty_df`) | Three variables were initialized then immediately overwritten before first use, producing no-op assignments. Removed to reduce noise. |
 | `JUMPS + HOURLY_CONV` raises `NotImplementedError` | The original code called `importer.load_data_yahoo()` which never existed in this codebase (yfinance is not a service dependency). The dead call is replaced with an explicit error so the combination is rejected at runtime rather than crashing with `AttributeError`. |
 | Three `# TODO` comments added | Document known bugs in the original code that were not fixed during integration (see **Known Issues** section). |
 | `default_params.json` `_comment` extended | States that the schema's min/max/choices are advisory and enforced nowhere — upstream's convention (a human editing overrides in `main.py` with the schema open), kept deliberately. |
+| `Liquidator.slippage_calculator_cum` prices the partial tick at both ends of the consumed slice | Upstream measured the slice a liquidation consumes as `cum[idx_end] - cum[idx_base]` between whole-tick boundaries. Whenever `already_consumed` and `already_consumed + amount` fell inside the same tick the slice was empty, the average price came out as 0 and the slippage as 0.9999, so the liquidation was never profitable and the position defaulted. On the parquet BTC book that covered every amount below the first tick ($664) from a fresh book and, once about $1M had been consumed, every amount up to $10,000. The fix walks the book exactly: the unfilled part of the start tick, the full ticks in between, and the filled part of the end tick, with a fill inside one tick priced directly as `fill × price`. Everything else (the `price <= sim_price` mask, stored book order, USD-weighted average price, the unfilled-share term, the 0.9999 cap) is unchanged; a book with a non-finite or negative level now raises instead of being priced. This moves CRRs down on markets with many small positions; see [VEC-739](https://linear.app/archontech/issue/VEC-739) and its PR for the before/after runs. |
 
 ---
 
@@ -121,6 +122,7 @@ runner.py             Service entry point — orchestrates the full pipeline
 | `FOCUS_ON_NEGATIVE` | `False` | Restrict jump simulation to downside only |
 | `VOL_FLOOR_PCT` | `0.75` | Floor GARCH forecast vol at this percentile of the full historical rolling vol |
 | `WORST_CASE` | `False` | Use worst-case LTVs instead of observed LTVs |
+| `MIN_BORROW_USD` | `100` | Drop borrowers with less total debt before the liquidation simulation (see **Borrower filter** below; `0` keeps every row) |
 | `LOAN_TOKEN` | `USDC` | Filter positions by loan token (`ALL` = no filter) |
 | `SEED` | `0` | Global random seed |
 
@@ -153,6 +155,33 @@ Both backtest gates are currently defective — see Known Issues #7 and #8. Boun
 To prevent capital requirements from collapsing during low-volatility regimes, the GARCH conditional volatility forecast is floored at the `VOL_FLOOR_PCT` percentile of the 21-day rolling realised volatility computed over the **full historical series** (not just the training window).
 
 ---
+
+### Borrower filter
+
+`MIN_BORROW_USD` drops borrowers below that total debt before the liquidation simulation. The
+liquidator holds two `(borrowers, N_MC, 15)` float64 tensors, so memory and loop time scale with the
+borrower count, and the live positions feed carries many sub-dollar interest-dust rows the reference
+parquet snapshots mostly never had (the 5th percentile of debt is about 110 USD on three of the four
+SparkLend snapshots; `sparklend_usds` has 10 of 106 rows under 100 USD, holding 0.00004 % of its debt).
+The trade-off is explicit: dropped debt can no longer become bad debt, so the CRR is quoted against a
+slightly smaller exposure. Measured on live staging data (Sep 2026) at the 100 USD default:
+
+| Market | Rows kept | Dropped debt (share of exposure) | Peak RSS at N_MC=10,000 |
+|---|---|---|---|
+| sparklend_dai | 378 / 2,204 | 0.0014 % | 7.5 GiB → 1.3 GiB |
+| sparklend_usdc | 208 / 343 | 0.0004 % | 1.4 → 0.9 GiB |
+| sparklend_usds | 336 / 578 | 0.0001 % | 2.2 → 1.4 GiB |
+| sparklend_usdt | 331 / 389 | 0.0001 % | 1.6 → 1.3 GiB |
+| morpho_cbbtc-usdc | 322 / 360 | 0.0001 % | 1.5 GiB unfiltered (not re-measured) |
+| morpho_weth-usdc | 65 / 114 | 0.014 % | 0.7 GiB unfiltered (not re-measured) |
+
+On the parquet snapshot of sparklend_dai (seed 0, N_MC=1000) the filter drops 0.0001 % of debt at the
+100 USD default and moves the EL from 0.013477 % (no filter) to 0.013472 %; a 1,000 USD threshold gives
+0.013468 %. The runner logs the dropped count and share on every run. A one-cent threshold does not help
+memory (sparklend_dai still peaks at 6.6 GiB) because the extra live rows are dust, not zero-debt.
+Before the `slippage_calculator_cum` fix (see **Changes from the original standalone version**) every
+dust row defaulted whenever it was unsafe, so the same three runs read 0.017458 %, 0.017452 % and
+0.018946 %: dropping debt moved the EL *up*, which was the symptom that exposed the defect.
 
 ## Liquidation Mechanics
 
@@ -239,7 +268,14 @@ Params are resolved in three layers (lowest wins):
 2. `inputs/market_configs.json[market_key]` — per-market overrides
 3. `CORE_MODEL_*` env vars — runtime overrides
 
-The full params dict is stored as JSONB in `core_model_results.params` for auditability.
+The full params dict is stored as JSONB in `core_model_results.params` for auditability. The same
+JSONB carries one extra lower-case key, `mc_diagnostics` (`convergence.py`): the Monte Carlo standard
+error of the EL (`crr_el_se_pct`, and `crr_el_rel_se` = SE / EL) plus the scenario counts behind it
+(`n_scenarios`, `n_loss_scenarios`, `n_catastrophic_scenarios` = scenarios losing more than
+`catastrophic_loss_pct` of total debt). The service logs a `crr_el not converged` warning with the
+reason when `crr_el_rel_se` exceeds `MAX_REL_SE` or fewer than `MIN_CATASTROPHIC_SCENARIOS`
+catastrophic scenarios were drawn. At the overlays' `N_MC=10000` eight of nine markets pass; a smoke-test
+run at `N_MC=100` warns on most markets (too few catastrophic draws), which is expected.
 
 ### Step 3 — Query via the risk API
 
@@ -283,7 +319,8 @@ app/risk_engine/core_model/
 ├── forecaster.py                 Monte Carlo price simulation
 ├── aggregator.py                 Cross-asset copula construction
 ├── liquidator.py                 Liquidation mechanics and CRR calculation
-├── importer.py                   Data loading utilities (change_user_ltvs etc.)
+├── convergence.py                Monte Carlo standard error of the EL and the convergence verdict
+├── importer.py                   Position preprocessing (MIN_BORROW_USD filter, worst-case LTVs)
 ├── config.py                     Parameter defaults (inputs/default_params.json)
 ├── core_model_mapping.py         asset_id -> market_key mapping loader
 ├── mappings/
@@ -336,6 +373,7 @@ September 2026 Python risk-model audit.
 | #8 (C-07) | `backtester.py` | ~75 | High | Christoffersen independence multiplies hundreds of sub-unit probabilities into `L0` and `L1` (~72-73), then clips each to the same `1e-10` epsilon. Once both underflow past that floor the ratio is 1, so `LR_ind=0, p=1` regardless of the true likelihood ratio and clustered violations pass. Calibration evaluates once per rolling observation, so a long series hits this routinely. Fix: accumulate the log-likelihoods in log space, handling zero-count terms explicitly. |
 | #9 (C-09) | `forecaster.py` | ~270 | High | `brownian_bridge_hourly` detects non-finite `r_cont_hourly`, prints, and substitutes zeros. Degenerate or non-finite daily returns/volatility therefore produce flat price paths instead of aborting, and the pipeline persists the result as an apparently valid CRR. Fix: raise a contextual model-input error before the result reaches the writer. |
 | #10 (T-01) | `config.py` | ~102 | Medium | CORE parameters stay an unvalidated `dict[str, Any]` from the loader through `RunnerConfig` and `CoreModelConfig`, so a JSON override of the wrong type reaches simulation unchecked — `"WORST_CASE": "false"` is a non-empty string and activates the truthy branch at `runner.py:107`. Env-var coercion only guards env values, not `market_configs.json` or hand-passed params. Fix: validate parameter types, leaving the deliberately advisory min/max/choices alone. |
+| #12 | `core_model_orderbook_reader.py` / `cex_orderbook_snapshots` | | High | The live books hold the top 100 levels per side per venue: measured 7 Sep 2026, the merged ETH bid book is ~$6.2M reaching 0.18 % below mid and BTC ~$10.5M reaching 0.12 %, against parquet sell books of $20.7M / $65.8M within 0.5 % of the top that run down to $0.01. `slippage_calculator_cum` treats the book as the whole market (`add_slippage = (amount - available) / amount` once depth runs out), so on live data any liquidation above a few million USD is unprofitable and defaults, and live CRRs are set by the indexer's level count rather than market liquidity. Live and parquet CRRs are not comparable until the indexer stores deeper books. Tracked in [VEC-740](https://linear.app/archontech/issue/VEC-740). |
 
 ### Structural debt
 

@@ -1,10 +1,42 @@
-"""Unit tests for change_user_ltvs (worst-case HF=1 collateral rescaling)."""
+"""Unit tests for the position preprocessing: the min-debt filter and the worst-case HF=1 rescaling."""
 
+import logging
 from unittest.mock import patch
 
 import pandas as pd
+import pytest
 
-from app.risk_engine.core_model.importer import change_user_ltvs
+from app.risk_engine.core_model.importer import change_user_ltvs, drop_small_borrowers
+
+
+def _borrowers(debts: list[float | None]) -> pd.DataFrame:
+    return pd.DataFrame({"wallet_address": [f"0x{i}" for i in range(len(debts))], "total_borrow_usd": debts})
+
+
+def test_borrowers_below_the_minimum_debt_are_dropped():
+    result = drop_small_borrowers(_borrowers([0.0, 999.99, 1000.0, 50_000.0]), 1000.0)
+
+    assert list(result["wallet_address"]) == ["0x2", "0x3"]
+
+
+def test_missing_debt_counts_as_zero_and_is_dropped():
+    result = drop_small_borrowers(_borrowers([None, 5_000.0]), 1.0)
+
+    assert list(result["wallet_address"]) == ["0x1"]
+
+
+@pytest.mark.parametrize("min_borrow_usd", [0.0, -1.0])
+def test_a_non_positive_minimum_keeps_every_row(min_borrow_usd):
+    users = _borrowers([0.0, None, 10.0])
+
+    assert drop_small_borrowers(users, min_borrow_usd) is users
+
+
+def test_the_dropped_share_of_debt_is_logged(caplog):
+    with caplog.at_level(logging.INFO, logger="app.risk_engine.core_model.importer"):
+        drop_small_borrowers(_borrowers([100.0, 900.0, 99_000.0]), 500.0)
+
+    assert "dropped 1 of 3 borrowers below min_borrow_usd=500.0, 0.1000% of total debt" in caplog.text
 
 
 def _users_df(**overrides) -> pd.DataFrame:
