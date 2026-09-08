@@ -73,6 +73,28 @@ class TestJsonFormatter:
 
         assert "request_id" not in parsed
 
+    def test_extra_fields_become_top_level_json_fields(self) -> None:
+        """Structured events (authorization decisions, ADR-015 gate 3) are only
+        a Loki query surface if `extra` survives the formatter."""
+        record = _make_record()
+        record.event = "authz.decision"
+        record.decision = "deny"
+        parsed = json.loads(JsonFormatter().format(record))
+
+        assert parsed["event"] == "authz.decision"
+        assert parsed["decision"] == "deny"
+
+    def test_extra_fields_cannot_overwrite_the_envelope(self) -> None:
+        """Every line is parsed by these keys; an `extra` must not shadow one."""
+        record = _make_record(msg="the real message")
+        record.level = "SPOOFED"
+        record.logger = "spoofed.logger"
+        parsed = json.loads(JsonFormatter().format(record))
+
+        assert parsed["level"] == "INFO"
+        assert parsed["logger"] == "test.logger"
+        assert parsed["message"] == "the real message"
+
 
 class TestTextFormatter:
     def test_text_formatter_output(self) -> None:
@@ -95,6 +117,15 @@ class TestTextFormatter:
             assert "[request_id=req-456]" in output
         finally:
             request_id_var.reset(token)
+
+    def test_text_formatter_appends_extra_fields(self) -> None:
+        record = _make_record()
+        record.event = "authz.decision"
+        record.decision = "deny"
+        output = TextFormatter().format(record)
+
+        assert "event=authz.decision" in output
+        assert "decision=deny" in output
 
 
 class TestSetupLogging:

@@ -1,0 +1,73 @@
+# On-demand block republisher (ARCT-383).
+#
+# A long-running Deployment, not a k8s Job or CronJob: it polls the Temporal task
+# queue "block-republisher" and stays idle until someone starts a run from the
+# Temporal UI with the heights to repair. It registers NO schedule, so an
+# always-on pod costs nothing but a poller.
+#
+# It carries no DATABASE_URL: the run reads the chain and lists the raw archive,
+# writes the Redis block cache and publishes to the chain's SNS topic, and
+# deliberately never touches block_states (see the binary's package doc).
+#
+# sns:Publish on the chain's blocks topic, and s3:ListBucket plus s3:GetObject on
+# the chain's raw bucket, come from an EKS Pod Identity association on this
+# ServiceAccount, granted in the infra repo (k8s/README.md). All three must exist
+# before the first run: without the listing no block gets as far as a version to
+# publish under, without the object read it cannot tell an already-canonical
+# height from a losing fork, and without sns:Publish every block fails on
+# AccessDenied at the publish step — after the cache write has already landed.
+# Startup proves both S3 grants (one listing, one one-byte ranged read of a key
+# that cannot exist), so a missing one is a pod that will not start. Nothing is
+# ever written to S3.
+#
+# replicas: 1 — one pod on one task queue. A run's blocks are republished
+# sequentially by the workflow, so a second replica would buy nothing and double
+# the request rate against the same Alchemy key.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: block-republisher
+spec:
+  replicas: 1
+  # Recreate, because replicas: 1 above is a correctness bound, not a cost
+  # choice. The default RollingUpdate rounds maxSurge up to 1, so every rollout —
+  # including the Reloader-triggered ones a ConfigMap or rotated secret causes —
+  # would run two pods polling the same task queue until the new one is Ready.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: block-republisher
+  template:
+    metadata:
+      labels:
+        app: block-republisher
+    spec:
+      serviceAccountName: block-republisher
+      containers:
+        - name: block-republisher
+          image: block-republisher
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: block-republisher
+            - secretRef:
+                name: block-republisher
+          # Small, like the other short-activity Temporal workers: one block at a
+          # time, and the largest thing it holds is that block's receipts.
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      # The worker does NOT drain: an in-flight activity is cancelled on shutdown
+      # and Temporal retries it on the next worker. The version is settled in
+      # workflow history before anything is published and the activity heartbeats
+      # every 10s against a 30s timeout, so a killed pod is noticed within 30s and
+      # the retry republishes the same event into the same slot — usually inside
+      # SNS FIFO's five-minute deduplication window, and harmless outside it
+      # because every consumer is append-only and re-derives identical rows.
+      terminationGracePeriodSeconds: 60

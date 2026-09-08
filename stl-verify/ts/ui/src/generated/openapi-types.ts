@@ -334,12 +334,12 @@ export interface paths {
     };
     /**
      * Estimate bad debt at a collateral gap (by chain id and receipt-token address)
-     * @description Estimate USD bad debt for the receipt-token position at `(chain_id, token_address)` when collateral prices fall by `gap_pct` (a fraction in `[0, 1]`).
+     * @description Estimate USD bad debt for the receipt-token position at `(chain_id, token_address)` when collateral prices fall by `gap_pct` (a fraction in `[0, 1]`). The position resolves to the receipt token's largest current holder, so the estimate is that prime's and the caller needs access to it.
      *
      *     `token_address` is the **receipt-token** address (e.g. `aUSDC`, `spWETH`), not the underlying ERC-20 address. Passing an underlying address yields a `404` whose body suggests matching receipt tokens.
      *
      *     Errors:
-     *     - `404` if the receipt token is not found.
+     *     - `404` if the receipt token is not found, or the caller may not view the prime the position resolves to.
      *     - `422` if `chain_id` < 1, `token_address` is malformed, or `gap_pct` is outside `[0, 1]`.
      *     - `503` (`share_data_*`) if the allocation-share lookup fails.
      */
@@ -365,10 +365,10 @@ export interface paths {
      *
      *     `token_address` is the **receipt-token** address (e.g. `aUSDC`, `spWETH`), not the underlying ERC-20 address. Passing an underlying address yields a `404` whose body suggests matching receipt tokens.
      *
-     *     Pass an optional `prime_id` to scale the breakdown to that prime's position (per-prime, pro-rata by pool share); omit it for the pool-level breakdown.
+     *     Pass an optional `prime_id` to scale the breakdown to that prime's position (per-prime, pro-rata by pool share). Omitted, the position resolves to the receipt token's largest current holder, so the response is that prime's breakdown and the caller needs access to it.
      *
      *     Errors:
-     *     - `404` if the receipt token is not found.
+     *     - `404` if the receipt token is not found, or the caller may not view the prime the position resolves to.
      *     - `422` if `chain_id` < 1, `token_address` is malformed, or `prime_id` is malformed.
      *     - `503` (`share_data_*`) if the allocation-share lookup fails.
      */
@@ -391,12 +391,12 @@ export interface paths {
     /**
      * Estimate bad debt at a collateral gap (deprecated)
      * @deprecated
-     * @description Estimate USD bad debt for a receipt-token position when collateral prices fall by `gap_pct` (a fraction in `[0, 1]`).
+     * @description Estimate USD bad debt for a receipt-token position when collateral prices fall by `gap_pct` (a fraction in `[0, 1]`). The position resolves to the receipt token's largest current holder, so the estimate is that prime's and the caller needs access to it.
      *
      *     **Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/bad-debt`.
      *
      *     Errors:
-     *     - `404` if the receipt token is not found.
+     *     - `404` if the receipt token is not found, or the caller may not view the prime the position resolves to.
      *     - `422` if `gap_pct` is outside `[0, 1]`.
      *     - `503` (`share_data_*`) if the allocation-share lookup fails.
      */
@@ -421,12 +421,12 @@ export interface paths {
      * @deprecated
      * @description Return the full risk-enriched collateral breakdown for a receipt-token position: one row per backing token with amount, USD value, price, liquidation threshold, and bonus.
      *
-     *     Pass an optional `prime_id` to scale the breakdown to that prime's position (per-prime, pro-rata by pool share); omit it for the pool-level breakdown.
+     *     Pass an optional `prime_id` to scale the breakdown to that prime's position (per-prime, pro-rata by pool share). Omitted, the position resolves to the receipt token's largest current holder, so the response is that prime's breakdown and the caller needs access to it.
      *
      *     **Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/breakdown`.
      *
      *     Errors:
-     *     - `404` if the receipt token is not found.
+     *     - `404` if the receipt token is not found, or the caller may not view the prime the position resolves to.
      *     - `422` if `prime_id` is malformed.
      *     - `503` (`share_data_*`) if the allocation-share lookup fails.
      */
@@ -1121,10 +1121,22 @@ export interface components {
      *     ``hhi`` is the Herfindahl-Hirschman Index of borrower concentration
      *     expressed as a percentage; ``None`` when liquidation analysis was
      *     not run or the market had fewer than two borrowers.
+     *
+     *     A direct 1:1 market result (SparkLend) leaves ``coverage_pct`` and
+     *     ``markets`` as ``None``. A Morpho vault share aggregates over the vault's
+     *     Blue markets instead: ``crr_*_pct`` are allocation-weighted averages over
+     *     the covered markets plus idle liquidity at zero risk — exact for expected
+     *     loss (linear in allocations), indicative for ES/VaR (quantiles are not
+     *     additive, and cross-market dependence is not modeled). ``coverage_pct`` is
+     *     the share of vault assets whose market has a computed result (idle counts
+     *     as covered), ``markets`` carries the per-market slices, ``hhi`` is
+     *     ``None``, and ``forecast_step``/``n_mc`` are the minimum across slices.
      */
     CoreModelDetails: {
       /** Copula Type */
       copula_type: string;
+      /** Coverage Pct */
+      coverage_pct?: string | null;
       /** Crr El Pct */
       crr_el_pct: string;
       /** Crr Es Pct */
@@ -1135,6 +1147,8 @@ export interface components {
       forecast_step: number;
       /** Hhi */
       hhi: string | null;
+      /** Markets */
+      markets?: components['schemas']['CoreModelMarketAllocation'][] | null;
       /** N Mc */
       n_mc: number;
       /** Protocol */
@@ -1144,6 +1158,33 @@ export interface components {
        * @enum {string}
        */
       risk_model: 'core_model';
+    };
+    /**
+     * CoreModelMarketAllocation
+     * @description One Blue market slice behind an aggregated Morpho vault-share result.
+     *
+     *     ``allocation_pct`` is this market's share of the vault's total assets on a
+     *     0-100 scale. ``computed_at`` is when this market's CORE result was
+     *     computed — slices of one aggregate can have different staleness.
+     */
+    CoreModelMarketAllocation: {
+      /** Allocation Pct */
+      allocation_pct: string;
+      /**
+       * Computed At
+       * Format: date-time
+       */
+      computed_at: string;
+      /** Crr El Pct */
+      crr_el_pct: string;
+      /** Crr Es Pct */
+      crr_es_pct: string;
+      /** Crr Var Pct */
+      crr_var_pct: string;
+      /** Market Key */
+      market_key: string;
+      /** N Mc */
+      n_mc: number;
     };
     /**
      * DataSourceResponse

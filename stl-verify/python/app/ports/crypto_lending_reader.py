@@ -15,6 +15,10 @@ class CryptoLendingReader(Protocol):
         """Return every receipt_token_id supported by the crypto-lending model."""
         ...
 
+    async def list_morpho_asset_ids(self, chain_id: int) -> frozenset[int]:
+        """Return the receipt_token_ids of Morpho vault shares on ``chain_id``."""
+        ...
+
     async def get_receipt_token(self, receipt_token_id: int) -> ReceiptTokenInfo | None:
         """Return receipt-token routing metadata, or ``None`` if unknown."""
         ...
@@ -72,10 +76,21 @@ class CryptoLendingReader(Protocol):
         """
         ...
 
-    async def get_legacy_share(self, info: ReceiptTokenInfo) -> Decimal:
+    async def resolve_legacy_wallet(self, info: ReceiptTokenInfo) -> EthAddress | None:
+        """Return the wallet the legacy share is attributed to, or ``None``.
+
+        ``None`` means no wallet is involved and the legacy share is genuinely
+        pool-wide. Otherwise the legacy figures describe THAT wallet's position,
+        so a caller must be authorized for the prime that owns it.
+        """
+        ...
+
+    async def get_legacy_share(self, info: ReceiptTokenInfo, wallet: EthAddress | None = None) -> Decimal:
         """Return the legacy share used by old endpoints.
 
         Temporary compatibility method for endpoints that do not provide a
-        ``prime_id``. Remove in VEC-183.
+        ``prime_id``. ``wallet`` is the already-resolved (and already
+        authorized) holder from ``resolve_legacy_wallet``; omitting it repeats
+        the lookup. Remove in VEC-183.
         """
         ...

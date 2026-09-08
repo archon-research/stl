@@ -59,19 +59,23 @@ func TestReleaseMessages_CountsEveryReleaseByOutcome(t *testing.T) {
 // burn a whole cleanup budget in its own retry chain.
 func TestReleaseMessages_OneSlowReleaseCannotStrandTheRest(t *testing.T) {
 	const held = 14
-	messages := heldMessages(held)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
+	const stall = 80 * time.Millisecond
 	var slowOnce sync.Once
 	consumer := &mockConsumer{onRelease: func() {
-		slowOnce.Do(func() { time.Sleep(80 * time.Millisecond) })
+		slowOnce.Do(func() { time.Sleep(stall) })
 	}}
 
-	ReleaseMessages(ctx, consumer, slog.Default(), 1, messages)
+	ReleaseMessages(context.Background(), consumer, slog.Default(), 1, heldMessages(held))
 
 	if got := len(consumer.released()); got != held {
 		t.Fatalf("expected all %d held messages released, got %d", held, got)
+	}
+	calls := consumer.releaseCalls()
+	if len(calls) != 2 {
+		t.Fatalf("expected the held set released in two chunks, got %d calls", len(calls))
+	}
+	if gap := calls[1].deadline.Sub(calls[0].deadline); gap < stall {
+		t.Errorf("expected the second chunk budgeted after the first chunk's %s stall, got a deadline only %s later", stall, gap)
 	}
 }
 

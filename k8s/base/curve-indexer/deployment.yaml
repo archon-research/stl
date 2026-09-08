@@ -24,9 +24,6 @@ spec:
         - name: curve-indexer
           # Image name used as the Kustomize images transformer key.
           # The overlay kustomization.yaml overrides newName + newTag.
-          # Runs the shared dex-indexer binary (cmd/workers/dex-indexer) with
-          # DEX=curve from curve-indexer-config, defined per overlay (VEC-329).
-          # Not defined in this base, so this base is not overlay-wired until then.
           image: dex-indexer
           envFrom:
             - configMapRef:

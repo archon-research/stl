@@ -317,7 +317,7 @@ function EncumbranceCard({
   const chip = ENCUMBRANCE_BAND_CHIP[severity];
   return (
     <MetricCard
-      label="Encumbrance ratio"
+      label={TOP_METRIC_CARD_LABELS['encumbrance']}
       info="Required risk capital as a share of total risk capital. The Sky Atlas defines at or above 100% as a Low Severity Breach and above 103% as a High Severity Breach; 80–100% is flagged At risk here as an early warning."
       infoHref="https://sky-atlas.io/#5435f680-aaaa-461a-bcae-4056bb8964d9"
       infoLinkText="Sky Atlas A.3.2.2.7.2.1.1.1 →"
@@ -382,7 +382,7 @@ function PrimeDebtCard({
 }) {
   return (
     <MetricCard
-      label="Prime debt exposure"
+      label={TOP_METRIC_CARD_LABELS['prime-debt']}
       info="What the prime has drawn against its allocator vault: the minted debt for its ilk, in USDS terms. The indexed figure is read from chain state; the reference figure is the legacy feed's own reported debt."
       infoHref="https://sky-atlas.io/#1c09308d-b7cd-495c-b547-baf628a6e323"
       infoLinkText="Sky Atlas A.3.7.1.2 →"

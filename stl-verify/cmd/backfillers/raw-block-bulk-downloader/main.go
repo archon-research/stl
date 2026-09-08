@@ -1,11 +1,16 @@
-// Package main provides a CLI tool for bulk downloading Ethereum block data.
-// It fetches blocks, receipts, and traces from a local Erigon node and writes to S3.
+// Package main provides a CLI tool for bulk downloading block data from any
+// chain the repo archives. It fetches blocks, receipts, and traces from a node
+// and writes to that chain's raw bucket.
 //
 // Architecture:
-//   - RPC workers fetch block+receipt data from Erigon
+//   - RPC workers fetch block+receipt data from the node
 //   - As blocks complete, they're immediately queued for trace fetching (pipelined)
 //   - S3 uploads happen asynchronously in a separate upload pool
 //   - This decouples RPC fetching from S3 I/O for maximum throughput
+//
+// --chain-id decides which data types the archive holds (only Ethereum's carries
+// traces) and is checked against the bucket's own chain, so an L2 run reports
+// neither missing traces nor another chain's heights.
 //
 // The archive's contract is highest-version-wins, so every height is weighed
 // against what is already there: a first archive lands at version 0, an archived
@@ -14,9 +19,15 @@
 // reaching past the node's finalized head, where a height that loses its fork
 // could never be corrected; --allow-unfinalized overrides that.
 //
+// With --dry-run it writes nothing and is the audit for ARCT-379 holes; --report
+// leaves every height needing action in a file, one JSON object per line: every
+// non-skip decision, plus an "error" row for every height that reached none. A
+// "republish" row is a height whose only archived version is a losing fork.
+//
 // Usage:
 //
 //	./bulk-download \
+//	  --chain-id=1 \
 //	  --rpc-url=http://localhost:8545 \
 //	  --start-block=16000000 \
 //	  --end-block=21000000 \
@@ -26,7 +37,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"flag"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -56,24 +67,6 @@ const (
 	DefaultTimeout             = 120 * time.Second
 	DefaultMaxRetries          = 3
 )
-
-// Config holds the CLI configuration.
-type Config struct {
-	RPCURL     string
-	StartBlock int64
-	EndBlock   int64
-	Bucket     string
-	Region     string
-	DryRun     bool
-
-	AllowUnfinalized bool
-
-	BlockReceiptWorkers int
-	TraceWorkers        int
-	UploadWorkers       int
-	BlockBatchSize      int
-	TraceBatchSize      int
-}
 
 // Stats tracks download progress and timing metrics.
 type Stats struct {
@@ -155,101 +148,118 @@ func main() {
 		cancel()
 	}()
 
-	err := run(ctx, cfg, logger)
+	report, err := run(ctx, cfg, logger)
 	shuttingDown := ctx.Err() != nil
 	cancel()
-	if err != nil {
-		if shuttingDown {
-			logger.Info("shutdown complete")
-			os.Exit(0)
-		}
-		logger.Error("download failed", "error", err)
-		os.Exit(1)
-	}
 
-	logger.Info("download complete")
+	os.Exit(finish(report, err, shuttingDown, logger))
 }
 
-func parseFlags() Config {
-	var cfg Config
+// finish flushes the report the run opened and turns the outcome into an exit
+// code. A report that did not flush fails the run on every path, a signalled
+// shutdown included: a truncated file still reads as the run's whole hole list.
+func finish(report *decisionReport, runErr error, shuttingDown bool, logger *slog.Logger) int {
+	code := 0
+	if err := report.close(); err != nil {
+		logger.Error("the report is incomplete", "error", err)
+		code = 1
+	}
 
-	flag.StringVar(&cfg.RPCURL, "rpc-url", "http://localhost:8545", "RPC endpoint URL")
-	flag.Int64Var(&cfg.StartBlock, "start-block", 0, "Starting block number (required)")
-	flag.Int64Var(&cfg.EndBlock, "end-block", 0, "Ending block number (required)")
-	flag.StringVar(&cfg.Bucket, "bucket", "", "S3 bucket name (required)")
-	flag.StringVar(&cfg.Region, "region", "", "AWS region (e.g., eu-west-1)")
-	flag.BoolVar(&cfg.DryRun, "dry-run", false, "Log every block's decision and upload nothing")
-	flag.BoolVar(&cfg.AllowUnfinalized, "allow-unfinalized", false, "Archive past the node's finalized head, accepting that a height that loses its fork stays wrong")
-	flag.IntVar(&cfg.BlockReceiptWorkers, "block-workers", DefaultBlockReceiptWorkers, "Block+receipt worker count")
-	flag.IntVar(&cfg.TraceWorkers, "trace-workers", DefaultTraceWorkers, "Trace worker count")
-	flag.IntVar(&cfg.UploadWorkers, "upload-workers", DefaultUploadWorkers, "S3 upload worker count")
-	flag.IntVar(&cfg.BlockBatchSize, "block-batch-size", DefaultBlockBatchSize, "Blocks per batch for block+receipt fetching")
-	flag.IntVar(&cfg.TraceBatchSize, "trace-batch-size", DefaultTraceBatchSize, "Blocks per batch for trace fetching")
-	flag.Parse()
-
-	return cfg
+	switch {
+	case runErr == nil:
+		logger.Info("download complete")
+	case shuttingDown:
+		logger.Info("shutdown complete")
+	default:
+		logger.Error("download failed", "error", runErr)
+		code = 1
+	}
+	return code
 }
 
-func validateConfig(cfg Config) error {
-	if cfg.StartBlock == 0 {
-		return fmt.Errorf("--start-block is required")
-	}
-	if cfg.EndBlock == 0 {
-		return fmt.Errorf("--end-block is required")
-	}
-	if cfg.EndBlock < cfg.StartBlock {
-		return fmt.Errorf("--end-block must be >= --start-block")
-	}
-	if cfg.Bucket == "" {
-		return fmt.Errorf("--bucket is required")
-	}
-	return nil
-}
-
-func run(ctx context.Context, cfg Config, logger *slog.Logger) error {
+// run archives the range and hands back the report it opened; main closes that,
+// so a report the run could not flush is the exit code rather than a line in a
+// log nobody reads.
+func run(ctx context.Context, cfg Config, logger *slog.Logger) (*decisionReport, error) {
 	logStartupInfo(cfg, logger)
+
+	// Before the node and the archive are touched: a report path that cannot be
+	// created is the whole output of an audit, and finding that out an hour in
+	// is an audit not run.
+	report, err := newDecisionReport(cfg.ReportPath)
+	if err != nil {
+		return nil, err
+	}
 
 	rpcClient, err := createRPCClient(cfg, logger)
 	if err != nil {
-		return err
+		return report, err
 	}
 
 	if err := guardFinality(ctx, rpcClient, cfg, logger); err != nil {
-		return err
+		return report, err
 	}
 
 	s3Writer, s3Reader, err := createS3Clients(ctx, cfg, logger)
 	if err != nil {
-		return err
+		return report, err
+	}
+	if err := checkArchiveReachable(ctx, s3Reader, cfg.Bucket); err != nil {
+		return report, err
+	}
+
+	types, err := chainDataTypes(cfg.ChainID)
+	if err != nil {
+		return report, err
 	}
 
 	partitionCache := NewPartitionCache(s3Reader, cfg.Bucket, logger)
 	stats := &Stats{startTime: time.Now()}
-	planner := &blockPlanner{cache: partitionCache, reader: s3Reader, bucket: cfg.Bucket, stats: stats}
+	planner := &blockPlanner{cache: partitionCache, reader: s3Reader, bucket: cfg.Bucket, types: types, stats: stats}
 
-	stopProgressReporter := startProgressReporter(ctx, stats, cfg.EndBlock-cfg.StartBlock+1, partitionCache, logger)
+	// A report the run cannot write stops every worker at once: see applyDecision.
+	runCtx, abort := context.WithCancelCause(ctx)
+	defer abort(nil)
+
+	stopProgressReporter := startProgressReporter(runCtx, stats, cfg.EndBlock-cfg.StartBlock+1, partitionCache, logger)
 	defer stopProgressReporter()
 
 	pipeline := newPipeline(cfg)
 	archiver := blockArchiver{
 		client:   rpcClient,
 		planner:  planner,
+		report:   report,
 		cfg:      cfg,
 		uploadCh: pipeline.uploadCh,
 		traceCh:  pipeline.traceCollectorCh,
 		stats:    stats,
 		logger:   logger,
+		abort:    abort,
 	}
-	pipeline.startUploadWorkers(ctx, s3Writer, stats, logger)
-	pipeline.startTraceCollector(ctx, cfg)
-	pipeline.startBlockReceiptWorkers(ctx, archiver)
-	pipeline.startTraceWorkers(ctx, rpcClient, cfg.Bucket, stats, logger)
-	pipeline.feedBlockWork(ctx, cfg.StartBlock, cfg.EndBlock, cfg.BlockBatchSize)
+	pipeline.startUploadWorkers(runCtx, s3Writer, stats, logger)
+	pipeline.startTraceCollector(runCtx, cfg)
+	pipeline.startBlockReceiptWorkers(runCtx, archiver)
+	pipeline.startTraceWorkers(runCtx, rpcClient, cfg.Bucket, stats, logger)
+	pipeline.feedBlockWork(runCtx, cfg.StartBlock, cfg.EndBlock, cfg.BlockBatchSize)
 
 	pipeline.waitForCompletion()
 
 	logFinalStats(stats, partitionCache, logger)
-	return failureError(stats)
+	if aborted := abortCause(runCtx); aborted != nil {
+		return report, aborted
+	}
+	return report, failureError(stats)
+}
+
+// abortCause is the failure a worker stopped the run with, if one did: an
+// ordinary cancellation — a signal, or the deferred abort — carries
+// context.Canceled instead.
+func abortCause(ctx context.Context) error {
+	cause := context.Cause(ctx)
+	if cause == nil || errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
+		return nil
+	}
+	return cause
 }
 
 // failureError reports the holes a run left behind: an operator reading only the
@@ -335,8 +345,20 @@ func createS3Clients(ctx context.Context, cfg Config, logger *slog.Logger) (*s3.
 	return s3.NewWriterWithOptions(awsCfg, logger, options...), s3.NewReaderWithOptions(awsCfg, logger, options...), nil
 }
 
+// checkArchiveReachable fails the run before any worker starts. Without it a
+// bucket that is not there, or one this run may not list, is discovered once per
+// partition — and the run walks the whole range before saying so.
+func checkArchiveReachable(ctx context.Context, reader *s3.Reader, bucket string) error {
+	if err := reader.HeadBucket(ctx, bucket); err != nil {
+		return fmt.Errorf("cannot reach the archive bucket %s; it must exist and this run needs s3:ListBucket on it: %w",
+			bucket, err)
+	}
+	return nil
+}
+
 func logStartupInfo(cfg Config, logger *slog.Logger) {
 	logger.Info("starting pipelined bulk download",
+		"chainID", cfg.ChainID,
 		"rpcURL", cfg.RPCURL,
 		"startBlock", cfg.StartBlock,
 		"endBlock", cfg.EndBlock,
@@ -348,6 +370,7 @@ func logStartupInfo(cfg Config, logger *slog.Logger) {
 		"traceBatchSize", cfg.TraceBatchSize,
 		"bucket", cfg.Bucket,
 		"dryRun", cfg.DryRun,
+		"report", cfg.ReportPath,
 		"allowUnfinalized", cfg.AllowUnfinalized,
 	)
 }
@@ -501,15 +524,18 @@ func (p *pipeline) waitForCompletion() {
 	p.uploadWg.Wait()
 }
 
-// blockArchiver archives the batches one block worker is handed.
+// blockArchiver archives the batches one block worker is handed. abort stops
+// the whole run, for the failures no single height owns.
 type blockArchiver struct {
 	client   *alchemy.Client
 	planner  *blockPlanner
+	report   *decisionReport
 	cfg      Config
 	uploadCh chan<- UploadJob
 	traceCh  chan<- traceRequest
 	stats    *Stats
 	logger   *slog.Logger
+	abort    context.CancelCauseFunc
 }
 
 func (a blockArchiver) archiveBatches(ctx context.Context, workCh <-chan int64) {
@@ -541,15 +567,32 @@ func (a blockArchiver) archiveBatch(ctx context.Context, from, to int64) {
 			if ctx.Err() != nil {
 				return
 			}
-			a.logger.Warn("block left unarchived", "block", height.BlockNumber, "error", err)
-			a.stats.blocksFailed.Add(1)
+			a.failHeight(height.BlockNumber, err)
 		}
 	}
 }
 
-func (a blockArchiver) failBatch(from, to int64, msg string, err error) {
-	a.logger.Warn(msg, "from", from, "to", to, "error", err)
+func (a blockArchiver) failHeight(blockNum int64, cause error) {
+	a.logger.Warn("block left unarchived", "block", blockNum, "error", cause)
+	a.stats.blocksFailed.Add(1)
+	a.recordFailure(blockNum, cause)
+}
+
+func (a blockArchiver) failBatch(from, to int64, msg string, cause error) {
+	a.logger.Warn(msg, "from", from, "to", to, "error", cause)
 	a.stats.blocksFailed.Add(to - from + 1)
+	for blockNum := from; blockNum <= to; blockNum++ {
+		a.recordFailure(blockNum, cause)
+	}
+}
+
+// recordFailure leaves the height in the report as well as the log, so --report
+// is the whole list of what needs acting on and not only the heights that
+// reached a plan.
+func (a blockArchiver) recordFailure(blockNum int64, cause error) {
+	if err := a.report.recordError(blockNum, cause); err != nil {
+		a.abort(err)
+	}
 }
 
 // plannedHeight is one height's decision, or the failure that stopped it before
@@ -564,40 +607,34 @@ type plannedHeight struct {
 // version of is planned from its header, not the megabyte its block and receipts
 // weigh; an untouched one is fresh whatever the chain says, so it costs no read.
 func (a blockArchiver) planBatch(ctx context.Context, from, to int64) ([]plannedHeight, error) {
-	planned := make(map[int64]plannedHeight, to-from+1)
+	planned := make([]plannedHeight, to-from+1)
 	states := make(map[int64]archiveState, to-from+1)
 	var archived []int64
 
 	for blockNum := from; blockNum <= to; blockNum++ {
+		planned[blockNum-from] = plannedHeight{BlockNumber: blockNum}
 		state, err := a.planner.topVersion(ctx, blockNum)
 		switch {
 		case err != nil:
-			planned[blockNum] = plannedHeight{BlockNumber: blockNum, Err: err}
+			planned[blockNum-from].Err = err
 		case state.Version == noArchive:
-			planned[blockNum] = plannedHeight{BlockNumber: blockNum, Decision: freshDecision(blockNum)}
+			planned[blockNum-from].Decision = a.planner.fresh(blockNum)
 		default:
 			states[blockNum] = state
 			archived = append(archived, blockNum)
 		}
 	}
 
+	// GetBlockHeadersBatch answers one entry per requested height, in order, with
+	// BlockErr set where a response is missing, so every archived height lands.
 	headers, err := a.fetchHeaders(ctx, archived)
 	if err != nil {
 		return nil, err
 	}
 	for _, header := range headers {
-		planned[header.BlockNumber] = a.planArchived(ctx, header, states[header.BlockNumber])
+		planned[header.BlockNumber-from] = a.planArchived(ctx, header, states[header.BlockNumber])
 	}
-
-	ordered := make([]plannedHeight, 0, len(planned))
-	for blockNum := from; blockNum <= to; blockNum++ {
-		height, ok := planned[blockNum]
-		if !ok {
-			return nil, fmt.Errorf("block %d: the node answered the batch without it", blockNum)
-		}
-		ordered = append(ordered, height)
-	}
-	return ordered, nil
+	return planned, nil
 }
 
 func (a blockArchiver) planArchived(ctx context.Context, header outbound.BlockData, state archiveState) plannedHeight {
@@ -621,7 +658,7 @@ func (a blockArchiver) archiveHeight(ctx context.Context, height plannedHeight, 
 	if height.Err != nil {
 		return height.Err
 	}
-	return applyDecision(ctx, height.Decision, payload, a.cfg, a.uploadCh, a.traceCh, a.stats, a.logger)
+	return a.applyDecision(ctx, height.Decision, payload)
 }
 
 // fetchHeaders fetches the headers the archived heights are planned from.

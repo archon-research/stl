@@ -141,15 +141,50 @@ async def test_list_supported_asset_ids_filters_supported_protocols(
 ) -> None:
     receipt_token_repo.list_protocol_pairs = AsyncMock(
         return_value=[
-            ReceiptTokenProtocolPair(receipt_token_id=1, protocol_name="Aave V3"),
-            ReceiptTokenProtocolPair(receipt_token_id=2, protocol_name="morpho-blue"),
-            ReceiptTokenProtocolPair(receipt_token_id=3, protocol_name="Unsupported"),
-            ReceiptTokenProtocolPair(receipt_token_id=4, protocol_name="Aave V3 Avalanche"),
+            ReceiptTokenProtocolPair(receipt_token_id=1, protocol_name="Aave V3", chain_id=1),
+            ReceiptTokenProtocolPair(receipt_token_id=2, protocol_name="morpho-blue", chain_id=1),
+            ReceiptTokenProtocolPair(receipt_token_id=3, protocol_name="Unsupported", chain_id=1),
+            ReceiptTokenProtocolPair(receipt_token_id=4, protocol_name="Aave V3 Avalanche", chain_id=43114),
         ]
     )
 
     assert await reader.list_supported_asset_ids() == {1, 2, 4}
     receipt_token_repo.list_protocol_pairs.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_list_morpho_asset_ids_filters_by_protocol_and_chain(
+    reader: PostgresCryptoLendingReader,
+    receipt_token_repo: MagicMock,
+) -> None:
+    # Every spelling the normalization must fold, plus a Base vault and a
+    # non-Morpho protocol that must both be excluded.
+    receipt_token_repo.list_protocol_pairs = AsyncMock(
+        return_value=[
+            ReceiptTokenProtocolPair(receipt_token_id=1, protocol_name="Morpho Blue", chain_id=1),
+            ReceiptTokenProtocolPair(receipt_token_id=2, protocol_name="morpho-blue", chain_id=1),
+            ReceiptTokenProtocolPair(receipt_token_id=3, protocol_name="MORPHO_BLUE", chain_id=1),
+            ReceiptTokenProtocolPair(receipt_token_id=4, protocol_name="Morpho Blue", chain_id=8453),
+            ReceiptTokenProtocolPair(receipt_token_id=5, protocol_name="SparkLend", chain_id=1),
+        ]
+    )
+
+    assert await reader.list_morpho_asset_ids(chain_id=1) == frozenset({1, 2, 3})
+
+
+@pytest.mark.asyncio
+async def test_list_morpho_asset_ids_scopes_to_the_requested_chain(
+    reader: PostgresCryptoLendingReader,
+    receipt_token_repo: MagicMock,
+) -> None:
+    receipt_token_repo.list_protocol_pairs = AsyncMock(
+        return_value=[
+            ReceiptTokenProtocolPair(receipt_token_id=1, protocol_name="Morpho Blue", chain_id=1),
+            ReceiptTokenProtocolPair(receipt_token_id=4, protocol_name="Morpho Blue", chain_id=8453),
+        ]
+    )
+
+    assert await reader.list_morpho_asset_ids(chain_id=8453) == frozenset({4})
 
 
 @pytest.mark.asyncio
@@ -323,6 +358,72 @@ async def test_get_share_raises_when_receipt_token_token_id_missing(
 ) -> None:
     with pytest.raises(MissingShareError, match="not indexed yet"):
         await reader.get_share(info, DUMMY_PRIME)
+
+
+# --- resolve_legacy_wallet --------------------------------------------------
+#
+# The no-prime endpoints answer about whichever wallet this names, so the route
+# gates on it. Getting None wrong in either direction is a live bug: None on an
+# Aave-like asset leaks a prime's position, an address on Morpho denies a read
+# that is genuinely pool-wide.
+
+
+@pytest.mark.asyncio
+async def test_resolve_legacy_wallet_names_the_holder_the_share_is_taken_from(
+    reader: PostgresCryptoLendingReader,
+) -> None:
+    with patch.object(reader, "_lookup_wallet", AsyncMock(return_value=bytes.fromhex("cd" * 20))) as mock_lookup:
+        wallet = await reader.resolve_legacy_wallet(_aave_like_info())
+
+    assert wallet == EthAddress("0x" + "cd" * 20)
+    mock_lookup.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("info", [_morpho_info(), _maple_info()], ids=["morpho", "maple"])
+async def test_resolve_legacy_wallet_is_none_where_the_share_names_no_wallet(
+    reader: PostgresCryptoLendingReader,
+    info: ReceiptTokenInfo,
+) -> None:
+    with patch.object(reader, "_lookup_wallet", AsyncMock()) as mock_lookup:
+        assert await reader.resolve_legacy_wallet(info) is None
+
+    mock_lookup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resolve_legacy_wallet_reports_no_holder_as_a_missing_share(
+    reader: PostgresCryptoLendingReader,
+) -> None:
+    with patch.object(reader, "_lookup_wallet", AsyncMock(side_effect=ValueError("no active allocation position"))):
+        with pytest.raises(MissingShareError, match="no active allocation position"):
+            await reader.resolve_legacy_wallet(_aave_like_info())
+
+
+@pytest.mark.asyncio
+async def test_get_legacy_share_uses_the_wallet_it_was_given(
+    reader: PostgresCryptoLendingReader,
+) -> None:
+    """The route authorized that wallet; a second lookup here could resolve a
+    different holder and report a prime nobody checked."""
+    with (
+        patch.object(reader, "_lookup_wallet", AsyncMock()) as mock_lookup,
+        patch(
+            "app.adapters.postgres.crypto_lending_reader.fetch_share",
+            AsyncMock(return_value=Decimal("0.25")),
+        ) as mock_fetch,
+    ):
+        result = await reader.get_legacy_share(_aave_like_info(), EthAddress("0x" + "cd" * 20))
+
+    mock_lookup.assert_not_awaited()
+    mock_fetch.assert_awaited_once_with(
+        engine=reader._engine,
+        chain_id=1,
+        token_id=777,
+        wallet_address=bytes.fromhex("cd" * 20),
+        max_stale_seconds=600,
+    )
+    assert result == Decimal("0.25")
 
 
 @pytest.mark.asyncio
@@ -517,8 +618,8 @@ async def test_list_supported_asset_ids_excludes_maple(
 ) -> None:
     receipt_token_repo.list_protocol_pairs = AsyncMock(
         return_value=[
-            ReceiptTokenProtocolPair(receipt_token_id=1, protocol_name="Aave V3"),
-            ReceiptTokenProtocolPair(receipt_token_id=2, protocol_name="maple"),
+            ReceiptTokenProtocolPair(receipt_token_id=1, protocol_name="Aave V3", chain_id=1),
+            ReceiptTokenProtocolPair(receipt_token_id=2, protocol_name="maple", chain_id=1),
         ]
     )
 
