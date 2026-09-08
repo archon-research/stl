@@ -91,11 +91,11 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockversion"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
-	"github.com/archon-research/stl/stl-verify/internal/services/blockversion"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_v2_bootstrap"
 )

@@ -57,4 +57,4 @@
 ./cmd/backfillers/block-republisher
 ./internal/services/uniswapv4indexer
 ./internal/pkg/tickbitmap
-./internal/services/blockversion
+./internal/pkg/blockversion
