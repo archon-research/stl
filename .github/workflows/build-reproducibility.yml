@@ -1,0 +1,73 @@
+# Actions are pinned to commit SHAs for supply-chain security.
+# To update: git ls-remote --tags https://github.com/<org>/<action>.git | grep <tag>
+#
+# Guards the property ORB-366's deploy comparison depends on: an image's layers
+# are a function of its source and nothing else. See
+# scripts/deploy/check-build-reproducible.sh for what is asserted and why the
+# "must differ" control case is not optional.
+#
+# Scoped to the build inputs rather than run on every PR. Only these files can
+# put a per-build value back into a layer, they change rarely, and the check
+# costs four image builds — two of which run the arm64 runtime stage under
+# QEMU. A code change cannot break the property; a Dockerfile or Makefile
+# change is the only thing that can.
+name: Build Reproducibility
+
+on:
+  pull_request:
+    paths:
+      - "stl-verify/Dockerfile.common"
+      - "stl-verify/python/Dockerfile"
+      - "stl-verify/.dockerignore"
+      - "stl-verify/Makefile"
+      - "stl-verify/internal/pkg/buildinfo/**"
+      - "scripts/deploy/check-build-reproducible.sh"
+      - ".github/workflows/build-reproducibility.yml"
+  push:
+    branches: [main]
+    paths:
+      - "stl-verify/Dockerfile.common"
+      - "stl-verify/python/Dockerfile"
+      - "stl-verify/.dockerignore"
+      - "stl-verify/Makefile"
+      - "stl-verify/internal/pkg/buildinfo/**"
+      - "scripts/deploy/check-build-reproducible.sh"
+      - ".github/workflows/build-reproducibility.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: build-reproducibility-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  reproducible:
+    name: Layers Depend Only On Source (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false # each image's verdict is independent and both are wanted
+      matrix:
+        image: [go, python]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+        with:
+          platforms: arm64
+
+      # BuildKit is a hard requirement, not a convenience: layer identity across
+      # two builds comes from BuildKit reusing a cached layer when the content
+      # feeding it is unchanged.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # No --cache-from: the check must prove the builds agree with each other
+      # within this run, and a shared cache could supply a layer that hides a
+      # disagreement between them.
+      - name: Check that layers depend only on source
+        run: scripts/deploy/check-build-reproducible.sh --image ${{ matrix.image }}
