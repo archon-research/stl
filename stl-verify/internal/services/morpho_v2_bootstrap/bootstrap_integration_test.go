@@ -440,7 +440,7 @@ func buildIntegrationService(t *testing.T, ctx context.Context, pool *pgxpool.Po
 	cfg := ConfigDefaults()
 	cfg.ChainID = 1
 	cfg.Logger = logger
-	service, err := NewService(cfg, chain, replay, progress)
+	service, err := NewService(cfg, chain, replay, progress, &fakeBlockVersionResolver{})
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

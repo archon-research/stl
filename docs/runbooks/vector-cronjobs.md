@@ -833,6 +833,22 @@ still going after an hour is a stall signal, not normal.
 Unlike the backfill, progress lives in the activity's heartbeat details rather
 than in workflow history; see the resume note at the top of this runbook.
 
+**Block versions come from the raw archive.** The run's events come from a node,
+which carries no `block_version`, so each replayed row — and the head seed — is
+stamped with the version the chain's raw S3 archive holds at that height: the
+highest version archived there, the same rule `morpho-vault-backfill` reads off
+the S3 key it replays. That is what makes a replayed row dedupe with live
+indexing's row for the same block instead of ranking against it. The bucket
+arrives as `S3_BUCKET` from the ExternalSecret and the pod reads it through its
+EKS Pod Identity association; a run without that access fails on its first log.
+A height the archive cannot answer for **stops the run**, naming the height: it
+holds no object there, or the version it holds names a different block (an
+orphaned fork kept past its reorg — the ARCT-379 shape). Repair the archive
+first, then start a new run: `block-republisher` for a single height whose object
+is missing or wrong, `raw-block-bulk-downloader` for a range. Do not work around
+it by stamping a version — the whole point is that no row is written under a
+version no canonical block was archived under.
+
 ---
 
 ### Special case: `block-republisher` (on-demand, no schedule)
@@ -1585,7 +1601,7 @@ first firing as a real stall.
 
 **Nothing here needs rows reconciling by hand.** Adapter membership is an
 append-only observation log, so a failed pass writes no lifecycle a later run has
-to walk back, and re-running is always safe. Three things can stop a run:
+to walk back, and re-running is always safe. Four things can stop a run:
 
 **1. A chain or DB error.** `eth_getLogs` 401/429/5xx, an RPC timeout, a DB
 outage. Temporal retries the activity (3 attempts) and each retry resumes from the
@@ -1609,6 +1625,14 @@ and the joined error names each vault that was not. Work through those
 individually; re-running unchanged produces the same set. The run stays red until
 each one is fixed or explicitly written off, which is the point: a hole is
 reported, never hidden.
+
+**4. A height the raw archive cannot answer for.** `the raw archive identifies no
+block at that height` or `the raw archive holds another block at that height`,
+naming the block, the version, and both hashes. The run stamps every row with the
+version the archive holds (see "Block versions come from the raw archive" above),
+so it stops rather than guess.
+It does not clear on retry: repair the archive with `block-republisher` (one
+height) or `raw-block-bulk-downloader` (a range), then start a new run.
 
 **Not failures:**
 

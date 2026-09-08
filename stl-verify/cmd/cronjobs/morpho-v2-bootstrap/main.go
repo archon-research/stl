@@ -29,6 +29,15 @@
 // today's V2 era (~15m end to end, 2026-08); the activity timeouts below are
 // sized as headroom for era growth and provider slowness, not as an estimate.
 //
+// # Block versions
+//
+// The run's events come from a node, which carries no block_version, so each one is
+// stamped with the version the chain's raw archive holds at that height — the same
+// highest-version rule the morpho-vault-backfill reads off the S3 key it replays. The
+// run therefore needs S3_BUCKET and read access to it, and stops on a height the archive
+// cannot answer for or answers with another block; repair the archive first (see
+// docs/runbooks/vector-cronjobs.md).
+//
 // # Idempotency
 //
 // Every write goes through the same idempotent repository methods live indexing
@@ -75,8 +84,10 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
+	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
@@ -214,6 +225,11 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies, progress morph
 	sweepConfig.ChainID = int64(chainID)
 	sweepConfig.Logger = deps.Logger
 
+	versions, err := newBlockVersionResolver(ctx, deps.Logger)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	rpcURL, err := chainutil.AlchemyRPCURL(int64(chainID))
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolving RPC URL: %w", err)
@@ -239,12 +255,28 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies, progress morph
 		return nil, nil, err
 	}
 
-	service, err := morpho_v2_bootstrap.NewService(sweepConfig, ethClient, replayService, progress)
+	service, err := morpho_v2_bootstrap.NewService(sweepConfig, ethClient, replayService, progress, versions)
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating morpho v2 bootstrap service: %w", err)
 	}
 	completed = true
 	return temporal.RunnerFunc(service.Run), ethClient.Close, nil
+}
+
+// newBlockVersionResolver reads the chain's raw archive — the same bucket the backup
+// worker writes and the morpho-vault-backfill replays from, under the same variable
+// name — for the block_version each replayed row is stamped with. Read only; S3 access
+// comes from this Deployment's EKS Pod Identity association, granted in the infra repo.
+func newBlockVersionResolver(ctx context.Context, logger *slog.Logger) (*s3adapter.BlockVersionResolver, error) {
+	bucket, err := env.Require("S3_BUCKET")
+	if err != nil {
+		return nil, err
+	}
+	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{StaticCredentialsFromEnv: true})
+	if err != nil {
+		return nil, fmt.Errorf("loading AWS config: %w", err)
+	}
+	return s3adapter.NewBlockVersionResolver(s3adapter.NewReaderFromEnv(awsCfg, logger), bucket), nil
 }
 
 // buildReplayService wires the morpho-indexer service in its replay

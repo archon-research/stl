@@ -49,24 +49,10 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/blocktime"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
-
-// canonicalBlockVersion is the block_version stamped on every row this job
-// writes. The sweep reads the canonical chain below a finalized head, so the
-// blocks it replays are final and 0 is the version the watcher assigns a block
-// it never had to re-emit.
-//
-// Known gap (VEC-218 follow-up): a block the watcher DID re-emit before it
-// finalized carries version >= 1 in block_states, and block_version is part of
-// the primary key of morpho_vault_cap / morpho_vault_fee. For such a block this
-// job would write a version-0 row beside live indexing's version-1 row rather
-// than deduping against it. Resolving the version from block_states by
-// (chain_id, number, hash) — as the morpho-vault-backfill does from
-// the S3 key — needs a repository the service does not currently hold, so it is
-// deferred rather than half-solved here.
-const canonicalBlockVersion = 0
 
 // progressLogEvery bounds the run's log volume: with ~313 vaults and thousands
 // of chunks, one line per unit would bury the failures that matter.
@@ -135,12 +121,13 @@ type Service struct {
 	chain        ChainReader
 	replay       V2Replayer
 	progress     ProgressStore
+	versions     outbound.BlockVersionResolver
 	deployBlock  int64
 	configTopics []common.Hash
 	logger       *slog.Logger
 }
 
-func NewService(config Config, chain ChainReader, replay V2Replayer, progress ProgressStore) (*Service, error) {
+func NewService(config Config, chain ChainReader, replay V2Replayer, progress ProgressStore, versions outbound.BlockVersionResolver) (*Service, error) {
 	if err := config.validate(); err != nil {
 		return nil, fmt.Errorf("validating config: %w", err)
 	}
@@ -152,6 +139,9 @@ func NewService(config Config, chain ChainReader, replay V2Replayer, progress Pr
 	}
 	if progress == nil {
 		return nil, fmt.Errorf("progress store is required")
+	}
+	if versions == nil {
+		return nil, fmt.Errorf("block version resolver is required")
 	}
 	deployBlock, err := morpho_indexer.VaultV2FactoryDeployBlock(config.ChainID)
 	if err != nil {
@@ -166,6 +156,7 @@ func NewService(config Config, chain ChainReader, replay V2Replayer, progress Pr
 		chain:        chain,
 		replay:       replay,
 		progress:     progress,
+		versions:     versions,
 		deployBlock:  deployBlock,
 		configTopics: topics,
 		logger:       config.Logger.With("component", "morpho-v2-bootstrap"),
@@ -324,9 +315,14 @@ func (s *Service) loadV2Vaults(ctx context.Context, head pinnedBlock) (v2VaultSc
 // pill in a repair job. The run still fails, naming every vault it could not
 // seed: healing as much as possible is the point, hiding a hole is not.
 func (s *Service) seedAdapterState(ctx context.Context, vaults []common.Address, head pinnedBlock) error {
+	headVersion, err := s.versions.ResolveBlockVersion(ctx, head.number, head.hash)
+	if err != nil {
+		return fmt.Errorf("resolving the block version of the pinned head %d: %w", head.number, err)
+	}
+
 	var failures []error
 	for i, vault := range vaults {
-		if err := s.replay.SeedV2VaultAdapters(ctx, vault, head.number, head.hash, canonicalBlockVersion, head.timestamp); err != nil {
+		if err := s.replay.SeedV2VaultAdapters(ctx, vault, head.number, head.hash, headVersion, head.timestamp); err != nil {
 			wrapped := fmt.Errorf("seeding adapters for vault %s at block %d: %w", vault.Hex(), head.number, err)
 			// A cancelled run fails every remaining vault identically, so
 			// collecting those would bury the cause under one error per vault. The
@@ -488,25 +484,37 @@ func (s *Service) fetchChunkLogs(ctx context.Context, batches [][]common.Address
 	return logs, nil
 }
 
-// replayLogs drives already-ordered logs through the live handler path, dating
-// each from its own block header.
+// replayLogs drives already-ordered logs through the live handler path.
 func (s *Service) replayLogs(ctx context.Context, logs []ethtypes.Log, timestamps *blocktime.Cache) error {
 	for _, l := range logs {
-		// The sweep's upper bound is a finalized block, so a reorged-out log
-		// cannot legitimately appear. Replaying one would write state from a
-		// block that is not on the canonical chain, so treat it as the data
-		// anomaly it is rather than filtering it away silently.
-		if l.Removed {
-			return fmt.Errorf("node returned a removed log at block %d index %d (tx %s) within the finalized range",
-				l.BlockNumber, l.Index, l.TxHash.Hex())
-		}
-		blockTimestamp, err := timestamps.TimestampAt(ctx, l.BlockHash)
-		if err != nil {
+		if err := s.replayLog(ctx, l, timestamps); err != nil {
 			return err
 		}
-		if err := s.replay.ReplayMetaMorphoLog(ctx, toSharedLog(l), int64(l.BlockNumber), l.BlockHash, canonicalBlockVersion, blockTimestamp); err != nil {
-			return fmt.Errorf("replaying log tx=%s index=%d block=%d: %w", l.TxHash.Hex(), l.Index, l.BlockNumber, err)
-		}
+	}
+	return nil
+}
+
+// replayLog dates one log from its own block header, resolves the version that block
+// was indexed under, and feeds it through the live handler path.
+func (s *Service) replayLog(ctx context.Context, l ethtypes.Log, timestamps *blocktime.Cache) error {
+	// The sweep's upper bound is a finalized block, so a reorged-out log cannot
+	// legitimately appear. Replaying one would write state from a block that is not on
+	// the canonical chain, so treat it as the data anomaly it is rather than filtering
+	// it away silently.
+	if l.Removed {
+		return fmt.Errorf("node returned a removed log at block %d index %d (tx %s) within the finalized range",
+			l.BlockNumber, l.Index, l.TxHash.Hex())
+	}
+	blockTimestamp, err := timestamps.TimestampAt(ctx, l.BlockHash)
+	if err != nil {
+		return err
+	}
+	blockVersion, err := s.versions.ResolveBlockVersion(ctx, int64(l.BlockNumber), l.BlockHash)
+	if err != nil {
+		return fmt.Errorf("replaying log tx=%s index=%d block=%d: %w", l.TxHash.Hex(), l.Index, l.BlockNumber, err)
+	}
+	if err := s.replay.ReplayMetaMorphoLog(ctx, toSharedLog(l), int64(l.BlockNumber), l.BlockHash, blockVersion, blockTimestamp); err != nil {
+		return fmt.Errorf("replaying log tx=%s index=%d block=%d: %w", l.TxHash.Hex(), l.Index, l.BlockNumber, err)
 	}
 	return nil
 }

@@ -24,6 +24,7 @@ func setWorkerEnv(t *testing.T, configuredChain, nodeChain int64) {
 	t.Setenv("CHAIN_ID", strconv.FormatInt(configuredChain, 10))
 	t.Setenv("ALCHEMY_API_KEY", "test-key")
 	t.Setenv("ALCHEMY_HTTP_URL", testutil.StartChainIDRPC(t, nodeChain).URL)
+	t.Setenv("S3_BUCKET", rawArchiveBucket)
 }
 
 func TestBootstrapWorkerClosesRegisteredResources(t *testing.T) {
@@ -40,6 +41,7 @@ func TestBootstrapWorkerClosesRegisteredResources(t *testing.T) {
 func TestSetupRunner_RequiresAlchemyHTTPURLOffMainnet(t *testing.T) {
 	t.Setenv("CHAIN_ID", "8453")
 	t.Setenv("ALCHEMY_API_KEY", "key")
+	t.Setenv("S3_BUCKET", rawArchiveBucket)
 	t.Setenv("ALCHEMY_HTTP_URL", "")
 
 	_, _, err := setupRunner(context.Background(), temporal.Dependencies{}, temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())

@@ -16,6 +16,9 @@ import (
 // plain unit tests; the service-wiring path is covered by the integration test
 // (main_integration_test.go).
 
+// rawArchiveBucket is a real per-chain raw bucket name, the shape the worker is handed.
+const rawArchiveBucket = "stl-sentinelstaging-ethereum-raw-89d540d0"
+
 func discardDeps() temporal.Dependencies {
 	return temporal.Dependencies{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 }
@@ -59,6 +62,7 @@ func TestSetupRunner_RequiresChainID(t *testing.T) {
 
 func TestSetupRunner_RequiresAlchemyKey(t *testing.T) {
 	t.Setenv("CHAIN_ID", "1")
+	t.Setenv("S3_BUCKET", rawArchiveBucket)
 	t.Setenv("ALCHEMY_API_KEY", "")
 
 	_, _, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
@@ -70,6 +74,20 @@ func TestSetupRunner_RequiresAlchemyKey(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "resolving RPC URL") {
 		t.Errorf("error %q should identify the failed operation", err.Error())
+	}
+}
+
+// The archive is where every replayed row's block_version comes from, so a run without
+// it would stamp a guess. It is required before the RPC is dialled: a missing variable
+// must not surface as a worker that came up and then failed its first run.
+func TestSetupRunner_RequiresS3Bucket(t *testing.T) {
+	t.Setenv("CHAIN_ID", "1")
+	t.Setenv("ALCHEMY_API_KEY", "key")
+	t.Setenv("S3_BUCKET", "")
+
+	_, _, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
+	if err == nil || !strings.Contains(err.Error(), "S3_BUCKET") {
+		t.Fatalf("err = %v, want the raw-archive bucket requirement", err)
 	}
 }
 
