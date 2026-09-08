@@ -64,8 +64,9 @@ resources:
   - ../../base/morpho-vault-backfill
   # On-demand block republisher (ARCT-383). No Temporal schedule: idles on its
   # task queue until an operator starts a run with the heights to repair. One
-  # per chain with a raw archive, each on its own task queue; Robinhood has no
-  # backup worker, so it has no archive to repair against and no worker here.
+  # per chain with a raw archive, each on its own task queue. Robinhood has an
+  # archive (backup worker, #870) but no republisher yet: its ServiceAccount
+  # needs a Pod Identity grant in the infra repo first — follow-up, not here.
   - ../../base/block-republisher
   - ../../base/arbitrum-block-republisher
   - ../../base/avalanche-block-republisher
