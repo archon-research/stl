@@ -10,7 +10,7 @@ def drop_small_borrowers(users_df: pd.DataFrame, min_borrow_usd: float) -> pd.Da
 
     The liquidator's memory and loop time grow with the borrower count, and a
     live market carries many sub-dollar dust rows the reference parquet
-    snapshots never had. Logs what was dropped so the exposure the CRR is quoted
+    snapshots mostly never had. Logs what was dropped so the exposure the CRR is quoted
     against is visible; ``min_borrow_usd <= 0`` keeps every row.
     """
     if min_borrow_usd <= 0:

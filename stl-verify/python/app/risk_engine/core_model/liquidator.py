@@ -107,7 +107,13 @@ class Liquidator:
     def slippage_calculator_cum(
         ticks_df: pd.DataFrame, amount_liq_usd: np.ndarray, sim_price: float, already_consumed: float = 0.0
     ) -> np.ndarray:
+        """Slippage of selling ``amount_liq_usd`` into the book after ``already_consumed`` USD of it is gone.
 
+        Deviates from upstream core_model_copy (VEC-739): the consumed slice is
+        priced through ``_book_value_of_fill`` instead of differencing cumulative
+        sums at tick boundaries, which gave 0.9999 to any fill inside one tick.
+        Registered in the README's "Changes from the original standalone version".
+        """
         N = amount_liq_usd.shape[0]
         add_slippage = np.zeros(N)
 

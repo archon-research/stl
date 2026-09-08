@@ -16,7 +16,7 @@ Each market picks its data sources per input via the `*_SOURCE` flags in `inputs
 
 ## Changes from the original standalone version
 
-The financial model logic (ARMA-GARCH calibration, copula simulation, liquidation mechanics) is **mathematically unchanged** with one exception, the order-book slippage fix in the last row, which corrects a defect rather than changing the model's design. The other modifications were made for service integration:
+The financial model logic (ARMA-GARCH calibration, copula simulation, liquidation mechanics) is **mathematically unchanged** with one exception, the `slippage_calculator_cum` partial-tick fix (its own row below), which corrects a defect rather than changing the model's design. The other modifications were made for service integration:
 
 | Change | Reason |
 |---|---|
@@ -175,13 +175,13 @@ slightly smaller exposure. Measured on live staging data (Sep 2026) at the 100 U
 | morpho_cbbtc-usdc | 322 / 360 | 0.0001 % | 1.5 GiB unfiltered (not re-measured) |
 | morpho_weth-usdc | 65 / 114 | 0.014 % | 0.7 GiB unfiltered (not re-measured) |
 
-On the parquet snapshot of sparklend_dai the same filter drops 0.0001 % of debt and moves the EL from
-0.017458 % to 0.017452 %. The runner logs the dropped count and share on every run. A one-cent
-threshold does not help memory (sparklend_dai still peaks at 6.6 GiB) because the extra live rows are
-dust, not zero-debt. (Before the `slippage_calculator_cum` fix, listed in **Changes from the original
-standalone version**, every dust row also defaulted whenever it was unsafe, which is why the unfiltered
-EL above sat at 0.017458 % and dropping borrowers below $1,000 moved it *up* to 0.018946 %; with the fix
-the three thresholds give 0.013477 %, 0.013472 % and 0.013468 %.)
+On the parquet snapshot of sparklend_dai (seed 0, N_MC=1000) the filter drops 0.0001 % of debt at the
+100 USD default and moves the EL from 0.013477 % (no filter) to 0.013472 %; a 1,000 USD threshold gives
+0.013468 %. The runner logs the dropped count and share on every run. A one-cent threshold does not help
+memory (sparklend_dai still peaks at 6.6 GiB) because the extra live rows are dust, not zero-debt.
+Before the `slippage_calculator_cum` fix (see **Changes from the original standalone version**) every
+dust row defaulted whenever it was unsafe, so the same three runs read 0.017458 %, 0.017452 % and
+0.018946 %: dropping debt moved the EL *up*, which was the symptom that exposed the defect.
 
 ## Liquidation Mechanics
 
