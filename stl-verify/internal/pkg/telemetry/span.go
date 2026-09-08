@@ -25,10 +25,10 @@ func NoopSpan() trace.Span {
 	return trace.SpanFromContext(context.Background())
 }
 
-// SuccessStatusAttr and ErrorStatusAttr are the canonical terminal-status
-// attribute values. New status-labelled series must derive from these
-// (directly or via StatusAttr) so seeded series (SeedStatusCounter) and
-// recorded series cannot drift into parallel series.
+// SuccessStatusAttr and ErrorStatusAttr are the status values SeedStatusCounter
+// seeds. A recorder that spells its own status labels instead of deriving from
+// these orphans the seeded series, and several still do, so this is a
+// convention to follow rather than one the code enforces.
 func SuccessStatusAttr() attribute.KeyValue {
 	return attribute.String("status", "success")
 }

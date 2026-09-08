@@ -120,11 +120,13 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 		poolsTouched:       touched,
 		poolsNeverIndexed:  neverIndexed,
 	}
-	// The DEX Stalled/NoStateWritten alerts read these with rate()==0; seed so
-	// they are computable from process start (see telemetry.SeedCounter).
-	// errorsTotal is not seeded: its `operation` label set is open-ended.
-	// stateRowsAttempted and poolsTouched are not alerted with an absence
-	// shape, and poolsNeverIndexed is a gauge, which needs no seed.
+	// The Stalled rules read blocks.processed as rate(status="success")==0,
+	// which cannot match an absent series. Seeding written is weaker but real:
+	// `unless rate(written) > 0` can go true on the first write rather than the
+	// second (see telemetry.SeedCounter). Nothing else needs a seed — the
+	// attempted/touched rules are `A > 0 unless B > 0`, which already fires on
+	// an absent series, errors.total's `operation` label is open-ended, and
+	// pools.never_indexed is a gauge its recorder reports as 0.
 	ctx := context.Background()
 	telemetry.SeedStatusCounter(ctx, t.blocksProcessed, t.chainAttr)
 	telemetry.SeedCounter(ctx, t.stateRowsWritten, t.chainAttr)

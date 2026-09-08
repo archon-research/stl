@@ -101,7 +101,8 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider)
 	// VectorMapleIndexerStalled (cycles) and VectorMaplePoolWritesZero
 	// (rows_written) read these with absence shapes; seed so they are
 	// computable from process start (see telemetry.SeedCounter). Only the
-	// pool-state table is seeded: it is the only table an alert reads, and it
+	// pool-state table is seeded: it is the only table an alert reads with an
+	// absence shape, and it
 	// always writes when healthy (loan/FTL/strategy tables legitimately write 0).
 	ctx := context.Background()
 	telemetry.SeedStatusCounter(ctx, t.cyclesTotal, t.chainAttr)

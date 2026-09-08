@@ -553,9 +553,10 @@ func newTestTelemetry(t *testing.T, prefix string, chainID int64) (*Telemetry, *
 	return tel, reader
 }
 
-// Guards the startup seeds: VectorCurveIndexerStalled (blocks.processed,
-// rate(success)==0) and VectorCurveIndexerNoStateWritten (state.rows.written,
-// rate==0) must be computable from process start. See telemetry.SeedCounter.
+// Guards the startup seeds: VectorCurveIndexerStalled reads blocks.processed
+// as rate(success)==0, and VectorCurveIndexerStateRowsNotLanding reads
+// state.rows.written as `unless rate(...) > 0`; both need the series to exist
+// from process start. See telemetry.SeedCounter.
 func TestNewTelemetry_SeedsAlertedSeriesAtZero(t *testing.T) {
 	_, reader := newTestTelemetry(t, "curve", 8453)
 
