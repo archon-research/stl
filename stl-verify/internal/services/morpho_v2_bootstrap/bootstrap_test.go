@@ -181,10 +181,12 @@ func TestRun_StampsTheBlockVersionTheArchiveHolds(t *testing.T) {
 	}
 }
 
-// TestRun_StopsWhenTheArchiveCannotResolveABlockVersion: an archive that cannot say
-// which version speaks for a block is the ARCT-379 hole shape. Continuing would stamp a
-// guess, so the run stops with nothing written and the archive is what gets repaired.
-func TestRun_StopsWhenTheArchiveCannotResolveABlockVersion(t *testing.T) {
+// TestRun_StopsBeforeTheSweepWhenTheHeadHasNoResolvableVersion: an archive that cannot
+// say which version speaks for a block is the ARCT-379 hole shape, and one that cannot
+// answer for the pinned head will not answer for the two million blocks below it either.
+// Reading the head's version before the first eth_getLogs is what makes that a run that
+// fails in seconds rather than after the whole replay.
+func TestRun_StopsBeforeTheSweepWhenTheHeadHasNoResolvableVersion(t *testing.T) {
 	h := newBootstrapHarness(t)
 	h.archive.err = errors.New("the raw archive holds another block at that height")
 
@@ -201,8 +203,13 @@ func TestRun_StopsWhenTheArchiveCannotResolveABlockVersion(t *testing.T) {
 	if err == nil {
 		t.Fatal("a run that cannot resolve a block version must fail rather than stamp one")
 	}
-	if !strings.Contains(err.Error(), "holds another block") {
-		t.Errorf("error = %v, want it to carry the archive's own verdict", err)
+	for _, want := range []string{"pinned head 24000000", "holds another block"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to name %q", err, want)
+		}
+	}
+	if len(h.chain.queries) != 0 {
+		t.Errorf("issued %d eth_getLogs requests before the head's version resolved, want 0", len(h.chain.queries))
 	}
 	if len(h.adapters) != 0 || len(h.adapterStates) != 0 {
 		t.Errorf("wrote %d observations and %d snapshots, want nothing", len(h.adapters), len(h.adapterStates))

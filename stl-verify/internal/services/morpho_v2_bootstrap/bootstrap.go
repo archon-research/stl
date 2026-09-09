@@ -178,15 +178,9 @@ func (s *Service) Run(ctx context.Context) error {
 	reads := s.newReplayReads()
 	defer s.logResolvedBlockVersions(reads.versions.Summary())
 
-	head, err := s.pinFinalizedHead(ctx)
+	head, err := s.pinFinalizedHead(ctx, reads.versions)
 	if err != nil {
 		return err
-	}
-	// Resolved here rather than where the seed uses it: an archive that cannot answer
-	// for the head fails the run in seconds instead of after the whole replay.
-	head.version, err = reads.versions.ResolveBlockVersion(ctx, head.number, head.hash)
-	if err != nil {
-		return fmt.Errorf("resolving the block version of the pinned head %d: %w", head.number, err)
 	}
 	scope, err := s.loadV2Vaults(ctx, head)
 	if err != nil {
@@ -277,11 +271,14 @@ type pinnedBlock struct {
 	version   int
 }
 
-// pinFinalizedHead resolves the run's anchor block. Finalized rather than
-// latest: the seed writes permanent snapshots, and a latest-pinned run could
-// record state from a block that is subsequently reorged out, leaving rows no
-// canonical block ever produced.
-func (s *Service) pinFinalizedHead(ctx context.Context) (pinnedBlock, error) {
+// pinFinalizedHead resolves the run's anchor block, complete with the version it was
+// indexed under. Finalized rather than latest: the seed writes permanent snapshots, and a
+// latest-pinned run could record state from a block that is subsequently reorged out,
+// leaving rows no canonical block ever produced.
+//
+// The version is read here, before the sweep issues one eth_getLogs, so an archive that
+// cannot answer for the head fails the run in seconds instead of after the whole replay.
+func (s *Service) pinFinalizedHead(ctx context.Context, versions *blockversion.Resolver) (pinnedBlock, error) {
 	header, err := s.chain.HeaderByNumber(ctx, big.NewInt(int64(rpc.FinalizedBlockNumber)))
 	if err != nil {
 		return pinnedBlock{}, fmt.Errorf("fetching finalized head: %w", err)
@@ -297,10 +294,15 @@ func (s *Service) pinFinalizedHead(ctx context.Context) (pinnedBlock, error) {
 		return pinnedBlock{}, fmt.Errorf("finalized head %d is below the chain-%d VaultV2 factory deploy block %d: the RPC endpoint is not on the configured chain",
 			number, s.config.ChainID, s.deployBlock)
 	}
+	version, err := versions.ResolveBlockVersion(ctx, header.Number.Int64(), header.Hash())
+	if err != nil {
+		return pinnedBlock{}, fmt.Errorf("resolving the block version of the pinned head %d: %w", header.Number.Int64(), err)
+	}
 	return pinnedBlock{
 		number:    header.Number.Int64(),
 		hash:      header.Hash(),
 		timestamp: time.Unix(int64(header.Time), 0).UTC(),
+		version:   version,
 	}, nil
 }
 
