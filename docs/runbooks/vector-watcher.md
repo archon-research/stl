@@ -491,10 +491,9 @@ only the second one does. If you are investigating a chain's first weeks, query
 the alert's silence.
 
 **`robinhood-watcher` (ARCT-397).** robinhood is a single-sequencer chain, so it
-joined the allow-list on the same grounds as the other rollups. Its manifests
-live in `k8s/base` only and are not yet referenced from a cluster overlay, so
-`service_name="robinhood-watcher"` emits nothing today — this applies from the
-moment it is deployed.
+joined the allow-list on the same grounds as the other rollups. It has been
+deployed to staging since #825 (ARCT-377), so `service_name="robinhood-watcher"`
+emits series and this rule applies to it like any other chain.
 
 Do NOT discount a robinhood firing as "upstream is dropping heads again". A head
 Alchemy omits and then delivers late still links cleanly onto our chain, so it is

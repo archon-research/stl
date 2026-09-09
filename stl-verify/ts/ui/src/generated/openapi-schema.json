@@ -1,6 +1,101 @@
 {
   "components": {
     "schemas": {
+      "AggregatedAllocationActivityEnvelope": {
+        "description": "The `mode=aggregated` arm of `AllocationActivityEnvelope`: count/sum buckets.",
+        "properties": {
+          "data": {
+            "description": "Event counts and tx-amount sums per time bucket, newest first.",
+            "items": {
+              "$ref": "#/components/schemas/AllocationActivityBucketResponse"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "mode": {
+            "const": "aggregated",
+            "description": "Always `aggregated` on this arm: count/sum time buckets.",
+            "title": "Mode",
+            "type": "string"
+          },
+          "window": {
+            "$ref": "#/components/schemas/TimeSeriesWindow",
+            "description": "The window and resolution applied to this response."
+          }
+        },
+        "required": [
+          "mode",
+          "window",
+          "data"
+        ],
+        "title": "AggregatedAllocationActivityEnvelope",
+        "type": "object"
+      },
+      "AggregatedPrimeDebtEnvelope": {
+        "description": "The `mode=aggregated` arm of `PrimeDebtEnvelope`: gap-filled value buckets.",
+        "properties": {
+          "data": {
+            "description": "Last observed debt per time bucket, newest first.",
+            "items": {
+              "$ref": "#/components/schemas/PrimeDebtBucketResponse"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "mode": {
+            "const": "aggregated",
+            "description": "Always `aggregated` on this arm: gap-filled time buckets.",
+            "title": "Mode",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/Provenance",
+            "default": "indexed",
+            "description": "Provenance the series was answered from. `indexed` is the on-chain per-ilk debt; `reference` is Sky's own reported figure; `both` fills `debt_wad` and `reference_debt_wad` on every bucket, leaving either null where that provenance reported nothing. Raw snapshots are always `indexed`."
+          },
+          "window": {
+            "$ref": "#/components/schemas/TimeSeriesWindow",
+            "description": "The window and resolution applied to this response."
+          }
+        },
+        "required": [
+          "mode",
+          "window",
+          "data"
+        ],
+        "title": "AggregatedPrimeDebtEnvelope",
+        "type": "object"
+      },
+      "AggregatedProtocolEventsEnvelope": {
+        "description": "The `mode=aggregated` arm of `ProtocolEventsEnvelope`: per-bucket counts.",
+        "properties": {
+          "data": {
+            "description": "Event counts per time bucket, newest first.",
+            "items": {
+              "$ref": "#/components/schemas/ProtocolEventBucketResponse"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "mode": {
+            "const": "aggregated",
+            "description": "Always `aggregated` on this arm: per-bucket event counts.",
+            "title": "Mode",
+            "type": "string"
+          },
+          "window": {
+            "$ref": "#/components/schemas/TimeSeriesWindow",
+            "description": "The window and resolution applied to this response."
+          }
+        },
+        "required": [
+          "mode",
+          "window",
+          "data"
+        ],
+        "title": "AggregatedProtocolEventsEnvelope",
+        "type": "object"
+      },
       "AllocationActivityBucketResponse": {
         "description": "Allocation activity aggregated into a single time bucket.",
         "properties": {
@@ -48,52 +143,33 @@
       },
       "AllocationActivityEnvelope": {
         "description": "Allocation activity response: raw events or aggregated time buckets.",
-        "properties": {
-          "data": {
-            "anyOf": [
-              {
-                "items": {
-                  "$ref": "#/components/schemas/AllocationActivityResponse"
-                },
-                "type": "array"
-              },
-              {
-                "items": {
-                  "$ref": "#/components/schemas/AllocationActivityBucketResponse"
-                },
-                "type": "array"
-              }
-            ],
-            "description": "Events when `mode=raw`, count/sum buckets when `mode=aggregated`.",
-            "title": "Data"
+        "discriminator": {
+          "mapping": {
+            "aggregated": "#/components/schemas/AggregatedAllocationActivityEnvelope",
+            "raw": "#/components/schemas/RawAllocationActivityEnvelope"
           },
-          "mode": {
-            "description": "`raw` for events, `aggregated` for time buckets.",
-            "enum": [
-              "raw",
-              "aggregated"
-            ],
-            "title": "Mode",
-            "type": "string"
-          },
-          "window": {
-            "$ref": "#/components/schemas/TimeSeriesWindow",
-            "description": "The window and resolution applied to this response."
-          }
+          "propertyName": "mode"
         },
-        "required": [
-          "mode",
-          "window",
-          "data"
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/RawAllocationActivityEnvelope"
+          },
+          {
+            "$ref": "#/components/schemas/AggregatedAllocationActivityEnvelope"
+          }
         ],
-        "title": "AllocationActivityEnvelope",
-        "type": "object"
+        "title": "AllocationActivityEnvelope"
       },
       "AllocationActivityResponse": {
         "description": "Allocation activity event record for timeline feeds.",
         "properties": {
           "action_type": {
-            "description": "One of `in`, `out`, `sweep`.",
+            "description": "Direction of the event.",
+            "enum": [
+              "in",
+              "out",
+              "sweep"
+            ],
             "examples": [
               "in"
             ],
@@ -342,13 +418,18 @@
           "latest_activity_action": {
             "anyOf": [
               {
+                "enum": [
+                  "in",
+                  "out",
+                  "sweep"
+                ],
                 "type": "string"
               },
               {
                 "type": "null"
               }
             ],
-            "description": "Direction of the most recent activity (`in`, `out`, `sweep`), or `null`.",
+            "description": "Direction of the most recent activity, or `null`.",
             "examples": [
               "out"
             ],
@@ -654,6 +735,11 @@
           "model": {
             "anyOf": [
               {
+                "enum": [
+                  "suraf",
+                  "gap_sweep",
+                  "core_model"
+                ],
                 "type": "string"
               },
               {
@@ -1337,51 +1423,22 @@
       },
       "PrimeDebtEnvelope": {
         "description": "Prime debt response: raw snapshots or aggregated time buckets.",
-        "properties": {
-          "data": {
-            "anyOf": [
-              {
-                "items": {
-                  "$ref": "#/components/schemas/PrimeDebtSnapshotResponse"
-                },
-                "type": "array"
-              },
-              {
-                "items": {
-                  "$ref": "#/components/schemas/PrimeDebtBucketResponse"
-                },
-                "type": "array"
-              }
-            ],
-            "description": "Snapshots when `mode=raw`, value buckets when `mode=aggregated`.",
-            "title": "Data"
+        "discriminator": {
+          "mapping": {
+            "aggregated": "#/components/schemas/AggregatedPrimeDebtEnvelope",
+            "raw": "#/components/schemas/RawPrimeDebtEnvelope"
           },
-          "mode": {
-            "description": "`raw` for snapshots, `aggregated` for time buckets.",
-            "enum": [
-              "raw",
-              "aggregated"
-            ],
-            "title": "Mode",
-            "type": "string"
-          },
-          "source": {
-            "$ref": "#/components/schemas/Provenance",
-            "default": "indexed",
-            "description": "Provenance the series was answered from. `indexed` is the on-chain per-ilk debt; `reference` is Sky's own reported figure; `both` fills `debt_wad` and `reference_debt_wad` on every bucket, leaving either null where that provenance reported nothing. Raw snapshots are always `indexed`."
-          },
-          "window": {
-            "$ref": "#/components/schemas/TimeSeriesWindow",
-            "description": "The window and resolution applied to this response."
-          }
+          "propertyName": "mode"
         },
-        "required": [
-          "mode",
-          "window",
-          "data"
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/RawPrimeDebtEnvelope"
+          },
+          {
+            "$ref": "#/components/schemas/AggregatedPrimeDebtEnvelope"
+          }
         ],
-        "title": "PrimeDebtEnvelope",
-        "type": "object"
+        "title": "PrimeDebtEnvelope"
       },
       "PrimeDebtSnapshotResponse": {
         "description": "A single observed prime-debt position at a point in time.",
@@ -1700,6 +1757,11 @@
           "model": {
             "anyOf": [
               {
+                "enum": [
+                  "suraf",
+                  "gap_sweep",
+                  "core_model"
+                ],
                 "type": "string"
               },
               {
@@ -2140,46 +2202,22 @@
       },
       "ProtocolEventsEnvelope": {
         "description": "Protocol events response: raw rows or aggregated time buckets.",
-        "properties": {
-          "data": {
-            "anyOf": [
-              {
-                "items": {
-                  "$ref": "#/components/schemas/ProtocolEventResponse"
-                },
-                "type": "array"
-              },
-              {
-                "items": {
-                  "$ref": "#/components/schemas/ProtocolEventBucketResponse"
-                },
-                "type": "array"
-              }
-            ],
-            "description": "Events when `mode=raw`, count buckets when `mode=aggregated`.",
-            "title": "Data"
+        "discriminator": {
+          "mapping": {
+            "aggregated": "#/components/schemas/AggregatedProtocolEventsEnvelope",
+            "raw": "#/components/schemas/RawProtocolEventsEnvelope"
           },
-          "mode": {
-            "description": "`raw` for events, `aggregated` for time buckets.",
-            "enum": [
-              "raw",
-              "aggregated"
-            ],
-            "title": "Mode",
-            "type": "string"
-          },
-          "window": {
-            "$ref": "#/components/schemas/TimeSeriesWindow",
-            "description": "The window and resolution applied to this response."
-          }
+          "propertyName": "mode"
         },
-        "required": [
-          "mode",
-          "window",
-          "data"
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/RawProtocolEventsEnvelope"
+          },
+          {
+            "$ref": "#/components/schemas/AggregatedProtocolEventsEnvelope"
+          }
         ],
-        "title": "ProtocolEventsEnvelope",
-        "type": "object"
+        "title": "ProtocolEventsEnvelope"
       },
       "ProtocolResponse": {
         "description": "A protocol (lender, AMM, etc.) that STL classifies positions against.",
@@ -2259,6 +2297,101 @@
           "reference_upstream_reachable"
         ],
         "title": "ProvenanceAvailabilityResponse",
+        "type": "object"
+      },
+      "RawAllocationActivityEnvelope": {
+        "description": "The `mode=raw` arm of `AllocationActivityEnvelope`: activity event rows.",
+        "properties": {
+          "data": {
+            "description": "Activity events, newest first.",
+            "items": {
+              "$ref": "#/components/schemas/AllocationActivityResponse"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "mode": {
+            "const": "raw",
+            "description": "Always `raw` on this arm: activity event rows.",
+            "title": "Mode",
+            "type": "string"
+          },
+          "window": {
+            "$ref": "#/components/schemas/TimeSeriesWindow",
+            "description": "The window and resolution applied to this response."
+          }
+        },
+        "required": [
+          "mode",
+          "window",
+          "data"
+        ],
+        "title": "RawAllocationActivityEnvelope",
+        "type": "object"
+      },
+      "RawPrimeDebtEnvelope": {
+        "description": "The `mode=raw` arm of `PrimeDebtEnvelope`: observed debt snapshots.",
+        "properties": {
+          "data": {
+            "description": "Observed debt snapshots, newest first.",
+            "items": {
+              "$ref": "#/components/schemas/PrimeDebtSnapshotResponse"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "mode": {
+            "const": "raw",
+            "description": "Always `raw` on this arm: observed debt snapshots.",
+            "title": "Mode",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/Provenance",
+            "default": "indexed",
+            "description": "Provenance the series was answered from. `indexed` is the on-chain per-ilk debt; `reference` is Sky's own reported figure; `both` fills `debt_wad` and `reference_debt_wad` on every bucket, leaving either null where that provenance reported nothing. Raw snapshots are always `indexed`."
+          },
+          "window": {
+            "$ref": "#/components/schemas/TimeSeriesWindow",
+            "description": "The window and resolution applied to this response."
+          }
+        },
+        "required": [
+          "mode",
+          "window",
+          "data"
+        ],
+        "title": "RawPrimeDebtEnvelope",
+        "type": "object"
+      },
+      "RawProtocolEventsEnvelope": {
+        "description": "The `mode=raw` arm of `ProtocolEventsEnvelope`: decoded event rows.",
+        "properties": {
+          "data": {
+            "description": "Decoded events, newest first.",
+            "items": {
+              "$ref": "#/components/schemas/ProtocolEventResponse"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "mode": {
+            "const": "raw",
+            "description": "Always `raw` on this arm: decoded event rows.",
+            "title": "Mode",
+            "type": "string"
+          },
+          "window": {
+            "$ref": "#/components/schemas/TimeSeriesWindow",
+            "description": "The window and resolution applied to this response."
+          }
+        },
+        "required": [
+          "mode",
+          "window",
+          "data"
+        ],
+        "title": "RawProtocolEventsEnvelope",
         "type": "object"
       },
       "RiskBreakdownItemResponse": {

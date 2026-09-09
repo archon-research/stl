@@ -1,4 +1,4 @@
-import { type ColumnDef } from '@archon-research/design-system';
+import { defineIdentifiedColumns } from '@archon-research/design-system/data-table';
 
 import {
   formatPercentValue,
@@ -24,8 +24,8 @@ import {
 export function createAllocationColumns(
   chainLabels: ChainLabelLookup,
   localProtocols: LocalProtocolRow[],
-): ColumnDef<AllocationGridRow>[] {
-  return [
+) {
+  return defineIdentifiedColumns<AllocationGridRow>(
     {
       id: 'symbol',
       header: 'Asset',
@@ -171,5 +171,5 @@ export function createAllocationColumns(
         align: 'right',
       },
     },
-  ];
+  );
 }
