@@ -884,6 +884,18 @@ through its EKS Pod Identity association. Both are settled at startup: the name 
 checked against `CHAIN_ID` (through `DEPLOY_ENV`), and the pod lists and reads the
 bucket once — so another chain's bucket or a missing grant is a worker that will
 not start, rather than a run that dies on its first height, three attempts over.
+
+**Before the first run.** This ServiceAccount needs its **own** EKS Pod Identity
+association (`k8s/base/morpho-v2-bootstrap/serviceaccount.yaml`); the one
+`morpho-vault-backfill` has does not reach this pod. It carries two grants on the
+chain's raw bucket: `s3:ListBucket` (which versions a height holds) and
+`s3:GetObject` (which block the top version names). Nothing is ever written to S3.
+Both come from archon-research/infrastructure#706, which has to be applied to an
+environment before the Deployment lands there — without it the pod never becomes
+Ready, logging `this pod needs s3:ListBucket on that bucket` or `this pod needs
+s3:GetObject on that bucket` from the startup probes, and
+`VectorOnDemandWorkerDown` fires 30 minutes later.
+
 Every run closes with one `block versions resolved from the raw archive` line
 carrying an `outcome` of `completed` or `aborted`, the number of heights it
 resolved, and — per version it saw — how many heights sat at that version and
