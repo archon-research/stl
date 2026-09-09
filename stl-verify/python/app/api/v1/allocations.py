@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, RootModel, model_validator
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
@@ -29,6 +29,7 @@ from app.api.provenance import (
 )
 from app.api.time_series import TimeSeriesWindow, apply_cache_control, build_window, get_time_series_query_params
 from app.domain.entities.allocation import (
+    ActivityDirection,
     AnchorageCustodyHolding,
     DirectAssetHolding,
     EthAddress,
@@ -292,9 +293,9 @@ class AllocationResponse(BaseModel):
         description="ISO-8601 timestamp of the most recent on-chain activity for this position, or `null`.",
         examples=["2026-05-07T12:00:00Z"],
     )
-    latest_activity_action: str | None = Field(
+    latest_activity_action: ActivityDirection | None = Field(
         default=None,
-        description="Direction of the most recent activity (`in`, `out`, `sweep`), or `null`.",
+        description="Direction of the most recent activity, or `null`.",
         examples=["out"],
     )
     latest_activity_amount: PlainDecimal | None = Field(
@@ -374,7 +375,7 @@ class AllocationActivityResponse(BaseModel):
     )
     token_id: int = Field(description="Surrogate id of the receipt token involved.", examples=[42])
     token_symbol: str | None = Field(default=None, description="Receipt-token symbol, when known.", examples=["aUSDC"])
-    action_type: str = Field(description="One of `in`, `out`, `sweep`.", examples=["in"])
+    action_type: ActivityDirection = Field(description="Direction of the event.", examples=["in"])
     tx_amount: PlainDecimal = Field(
         description="Token-unit amount moved by this event. Decimal serialized as a JSON string.",
         examples=["1000.5"],
@@ -903,14 +904,30 @@ class AllocationActivityBucketResponse(BaseModel):
     )
 
 
-class AllocationActivityEnvelope(BaseModel):
-    """Allocation activity response: raw events or aggregated time buckets."""
+class RawAllocationActivityEnvelope(BaseModel):
+    """The `mode=raw` arm of `AllocationActivityEnvelope`: activity event rows."""
 
-    mode: Literal["raw", "aggregated"] = Field(description="`raw` for events, `aggregated` for time buckets.")
+    mode: Literal["raw"] = Field(description="Always `raw` on this arm: activity event rows.")
     window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
-    data: list[AllocationActivityResponse] | list[AllocationActivityBucketResponse] = Field(
-        description="Events when `mode=raw`, count/sum buckets when `mode=aggregated`."
+    data: list[AllocationActivityResponse] = Field(description="Activity events, newest first.")
+
+
+class AggregatedAllocationActivityEnvelope(BaseModel):
+    """The `mode=aggregated` arm of `AllocationActivityEnvelope`: count/sum buckets."""
+
+    mode: Literal["aggregated"] = Field(description="Always `aggregated` on this arm: count/sum time buckets.")
+    window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
+    data: list[AllocationActivityBucketResponse] = Field(
+        description="Event counts and tx-amount sums per time bucket, newest first."
     )
+
+
+class AllocationActivityEnvelope(
+    RootModel[
+        Annotated[RawAllocationActivityEnvelope | AggregatedAllocationActivityEnvelope, Field(discriminator="mode")]
+    ]
+):
+    """Allocation activity response: raw events or aggregated time buckets."""
 
 
 @router.get(
@@ -1008,9 +1025,11 @@ async def list_allocation_activity(
                 limit=limit,
             )
             return AllocationActivityEnvelope(
-                mode="aggregated",
-                window=window,
-                data=[AllocationActivityBucketResponse(**bucket.__dict__) for bucket in buckets],
+                AggregatedAllocationActivityEnvelope(
+                    mode="aggregated",
+                    window=window,
+                    data=[AllocationActivityBucketResponse(**bucket.__dict__) for bucket in buckets],
+                )
             )
 
         events = await service.list_allocation_activity(
@@ -1039,25 +1058,27 @@ async def list_allocation_activity(
         raise HTTPException(status_code=500, detail="Failed to retrieve allocation activity") from exc
 
     return AllocationActivityEnvelope(
-        mode="raw",
-        window=window,
-        data=[
-            AllocationActivityResponse(
-                chain_id=e.chain_id,
-                prime_address=e.prime_address,
-                prime_name=e.prime_name,
-                protocol_name=e.protocol_name,
-                token_id=e.token_id,
-                token_symbol=e.token_symbol,
-                action_type=e.action_type,
-                tx_amount=e.tx_amount,
-                balance=e.balance,
-                tx_hash=None if e.action_type.lower() == "sweep" else e.tx_hash,
-                log_index=e.log_index,
-                block_number=e.block_number,
-                block_version=e.block_version,
-                created_at=e.created_at.isoformat(),
-            )
-            for e in events
-        ],
+        RawAllocationActivityEnvelope(
+            mode="raw",
+            window=window,
+            data=[
+                AllocationActivityResponse(
+                    chain_id=e.chain_id,
+                    prime_address=e.prime_address,
+                    prime_name=e.prime_name,
+                    protocol_name=e.protocol_name,
+                    token_id=e.token_id,
+                    token_symbol=e.token_symbol,
+                    action_type=e.action_type,
+                    tx_amount=e.tx_amount,
+                    balance=e.balance,
+                    tx_hash=None if e.action_type == "sweep" else e.tx_hash,
+                    log_index=e.log_index,
+                    block_number=e.block_number,
+                    block_version=e.block_version,
+                    created_at=e.created_at.isoformat(),
+                )
+                for e in events
+            ],
+        )
     )
