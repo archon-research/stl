@@ -189,17 +189,48 @@ processing pass for over 30 minutes. Prices for that unit's tokens in
 TimescaleDB are going stale while every whole-worker signal (Stalled,
 ErrorRatioHigh) can look healthy.
 
-The gauge `oracle_unit_last_success_timestamp_seconds` advances after every
-successful per-unit pass **whether or not any row was written** (writes are
+The counter `oracle_unit_passes_total` advances after every successful
+per-unit pass **whether or not any row was written** (writes are
 change-only), so this alert means "the worker stopped successfully
 processing this unit", not "the upstream feed stopped updating". Slow
 heartbeat feeds (daily NAV, e.g. JTRSY, JAAA, STAC, BUIDL-I) do not fire
-this when they are merely quiet. The gauge is baselined per unit at worker
-startup, so a unit that has never succeeded since the last deploy fires
-roughly 30 minutes after startup, and a pod restart re-arms the alert
-rather than resolving it. Note the alert does not cover SQS backlog lag: a
-worker grinding through a deep backlog reads fresh while DB prices lag;
-check queue depth for that.
+this when they are merely quiet. Note the alert does not cover SQS backlog
+lag: a worker grinding through a deep backlog reads fresh while DB prices
+lag; check queue depth for that.
+
+**This alert survives a restart** (VEC-750). It reads
+`oracle_unit_passes_total`, a counter incremented on every successful per-unit
+pass and seeded to 0 for each unit at load, so a unit that has completed no
+pass is visible rather than absent, and a counter reset across a restart is
+something Prometheus can see through. Silence therefore does mean the unit is
+being processed.
+
+It used to read the `oracle_unit_last_success_timestamp_seconds` gauge, which
+could not carry it: the gauge is baselined to the worker's own start, so after
+a restart its value said "this process started recently" rather than "this
+unit succeeded recently". A worker restarting more often than the 30-minute
+threshold refreshed the baseline before it was ever crossed, and the rule
+could not fire at all however broken the unit was. That gauge is still
+exported and is the right thing to read when diagnosing — it answers "when did
+this unit last succeed?" — but nothing alerts on it.
+
+Two consequences of the current shape worth knowing on call:
+
+- **A fresh deploy has a 30-minute grace period.** The rule's `offset 30m` leg
+  only matches units whose series already existed 30 minutes ago, so a newly
+  rolled-out worker cannot page before it has had a full window to complete a
+  first pass. A unit that is genuinely broken from birth pages ~35 minutes
+  after the rollout (30m window plus the 5m `for`), not immediately.
+- **A pod replacement does not reset the clock.** The rule aggregates with
+  `sum by (chain, cluster, oracle_name)`, which drops `k8s_pod_name`, so a
+  rollout, eviction or node rotation leaves the old pod's samples in the
+  window and `increase()` bridges the reset. There is no need to check pod age
+  before trusting this alert.
+
+Still not covered: a unit dropped from the oracle registry stops exporting its
+series entirely, and an absent series cannot be aged by any of this — that
+needs an expected-units signal, tracked as follow-up. A dead OTLP export also
+silences this rule along with every other one on the worker.
 
 ### First checks (≤5 min)
 
