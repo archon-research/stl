@@ -114,26 +114,55 @@ func TestPositionStackDesignInvariants(t *testing.T) {
 				t.Errorf("I7 %d relation columns still use deal_type_code", stale)
 			}
 
-			// I9: a higher block with an earlier instant is refused, within a batch and against history.
+			// I9: a higher block with an earlier instant is refused for THAT position and recorded, while
+			// the run continues and every other position lands. Aborting instead refused the whole
+			// projection on every later run, with no repair path on an append-only spine.
 			bad := fmt.Sprintf("pv_design_bad_%d", seed)
 			nonmono := `SELECT * FROM (VALUES (1::int, 10::bigint, 'design-inst'::text, '%s'::text, 5::numeric, ` +
 				`%d::bigint, 0::int, 0::int, '%s'::timestamptz, 'LOAN'::text)) ` +
 				`v(chain_id,protocol_id,instrument_key,holder_id,quantity,block_number,block_version,processing_version,block_timestamp,deal_type)`
 			h := fmt.Sprintf("%040x", 99)
-			for _, c := range []struct {
-				bn int
-				ts string
-			}{{900, "2026-04-20T00:00:00Z"}, {950, "2026-04-10T00:00:00Z"}} {
-				if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW `+bad+` AS `+fmt.Sprintf(nonmono, h, c.bn, c.ts)); err != nil {
-					t.Fatalf("I9 view: %v", err)
+			peer := fmt.Sprintf("%040x", 98)
+			if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW `+bad+` AS `+fmt.Sprintf(nonmono, h, 900, "2026-04-20T00:00:00Z")); err != nil {
+				t.Fatalf("I9 view: %v", err)
+			}
+			if _, err := pool.Exec(ctx, `SELECT materialize_position_projection($1::regclass)`, bad); err != nil {
+				t.Errorf("I9 a monotonic first row must be accepted: %v", err)
+			}
+			// The inverted row for h, and a healthy peer in the same batch.
+			if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW `+bad+` AS `+fmt.Sprintf(nonmono, h, 950, "2026-04-10T00:00:00Z")+
+				` UNION ALL `+fmt.Sprintf(nonmono, peer, 960, "2026-04-21T00:00:00Z")); err != nil {
+				t.Fatalf("I9 view: %v", err)
+			}
+			for run := 1; run <= 2; run++ {
+				var n int64
+				if err := pool.QueryRow(ctx, `SELECT materialize_position_projection($1::regclass)`, bad).Scan(&n); err != nil {
+					t.Errorf("I9 run %d must continue past one position's inverted pair, got %v", run, err)
 				}
-				_, err := pool.Exec(ctx, `SELECT materialize_position_projection($1::regclass)`, bad)
-				if c.bn == 900 && err != nil {
-					t.Errorf("I9 a monotonic first row must be accepted: %v", err)
+				if run == 1 && n != 1 {
+					t.Errorf("I9 run 1 appended %d rows; want exactly the healthy peer", n)
 				}
-				if c.bn == 950 && (err == nil || !strings.Contains(err.Error(), "earlier block_timestamp")) {
-					t.Errorf("I9 a higher block with an earlier instant must be refused, got err=%v", err)
+				if run == 2 && n != 0 {
+					t.Errorf("I9 run 2 appended %d rows; want 0", n)
 				}
+			}
+			var hRows, peerRows, refusals, runsRefusing int
+			if err := pool.QueryRow(ctx, `SELECT
+				(SELECT count(*) FROM position_state WHERE holder_id = $1),
+				(SELECT count(*) FROM position_state WHERE holder_id = $2),
+				(SELECT count(*) FROM position_projection_refusal WHERE reason = 'block_time_inverts_height' AND detail LIKE '%holder=' || $1 || '%'),
+				(SELECT count(*) FROM position_projection_run WHERE projection = 'public.' || $3 AND positions_refused = 1)`,
+				h, peer, bad).Scan(&hRows, &peerRows, &refusals, &runsRefusing); err != nil {
+				t.Fatalf("I9: %v", err)
+			}
+			if hRows != 1 || peerRows != 1 {
+				t.Errorf("I9 stored rows: offender=%d peer=%d; want the offender frozen at its first row and the peer landed", hRows, peerRows)
+			}
+			if refusals != 1 {
+				t.Errorf("I9 %d refusal rows for the offender across two runs; want exactly 1 (keyed on the observation, not the run)", refusals)
+			}
+			if runsRefusing != 2 {
+				t.Errorf("I9 %d runs recorded positions_refused=1; want both", runsRefusing)
 			}
 
 			// I8: one position_id may span more than one deal type over time. A property, not a defect:

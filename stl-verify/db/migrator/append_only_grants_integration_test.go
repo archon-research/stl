@@ -45,6 +45,7 @@ var convertedAppendOnlyTables = []string{
 	"uniswap_v4_pool_event",
 	// VEC-401: run records are append-only; SELECT+INSERT only for the app role.
 	"position_projection_run",
+	"position_projection_refusal",
 }
 
 // TestConvertedTablesAreAppendOnly asserts the DB-level half of the append-only rule:

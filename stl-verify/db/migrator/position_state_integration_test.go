@@ -2160,23 +2160,50 @@ func psTestDealTypeCode(t *testing.T, f *psFixture) {
 	})
 
 	// The materializer CANNOT apply a changed deal_type to a stored observation: the insert is
-	// suppressed on the 4-column key and UPDATE is revoked. Before this raised, the run returned a row
-	// count with no warning and the direction stayed wrong forever.
-	t.Run("re-emitting a stored key with a different deal type raises", func(t *testing.T) {
+	// suppressed on the 4-column key and UPDATE is revoked. It records the drift and continues; raising
+	// instead wedged the whole projection on every later run, since nothing could clear the stored row.
+	t.Run("re-emitting a stored key with a different deal type is recorded, kept-stored, and never a wedge", func(t *testing.T) {
 		const ik = "dt-reemit"
 		body := dtRow(ik, "'LOAN'::text")
 		if n := f.mppN(t, "pv_dt_reemit", body, "first insert"); n != 1 {
 			t.Fatalf("first insert put %d rows, want 1", n)
 		}
-		f.mppErr(t, "pv_dt_reemit", dtRow(ik, "'BORROW'::text"), "drift", "CANNOT apply")
+		for run := 1; run <= 2; run++ {
+			if n := f.mppN(t, "pv_dt_reemit", dtRow(ik, "'BORROW'::text"), "drift run"); n != 0 {
+				t.Errorf("drift run %d inserted %d rows, want 0 (stored row kept)", run, n)
+			}
+		}
+		var stored string
+		var recorded int
+		if err := f.pool.QueryRow(f.ctx, `SELECT
+			(SELECT deal_type FROM position_state WHERE instrument_key = $1),
+			(SELECT count(*) FROM position_projection_refusal WHERE reason = 'deal_type_drift' AND detail LIKE 'ik=' || $1 || ' %')`,
+			ik).Scan(&stored, &recorded); err != nil {
+			t.Fatal(err)
+		}
+		if stored != "LOAN" {
+			t.Errorf("stored deal_type=%s after a BORROW re-emit; want the original LOAN kept", stored)
+		}
+		if recorded != 1 {
+			t.Errorf("%d deal_type_drift refusal rows across two runs; want exactly 1", recorded)
+		}
 
-		// NULL -> a value is the migration case: the column was added after the rows were stored, and
-		// it is just as unrepairable, so it must raise too rather than silently returning 0.
+		// NULL -> a value is the migration case: the column was added after the rows were stored. Just
+		// as unrepairable, so it is recorded the same way rather than silently returning 0.
 		const ik2 = "dt-reemit-null"
 		if n := f.mppN(t, "pv_dt_reemit_null", dtRow(ik2, "NULL::text"), "first insert, silent"); n != 1 {
 			t.Fatalf("first insert put %d rows, want 1", n)
 		}
-		f.mppErr(t, "pv_dt_reemit_null", dtRow(ik2, "'LOAN'::text"), "drift", "CANNOT apply")
+		if n := f.mppN(t, "pv_dt_reemit_null", dtRow(ik2, "'LOAN'::text"), "NULL->value drift"); n != 0 {
+			t.Errorf("NULL->value drift inserted %d rows, want 0", n)
+		}
+		if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM position_projection_refusal
+			WHERE reason = 'deal_type_drift' AND detail LIKE 'ik=' || $1 || ' %' AND detail LIKE '%stored ts=% dt=NULL;%'`, ik2).Scan(&recorded); err != nil {
+			t.Fatal(err)
+		}
+		if recorded != 1 {
+			t.Errorf("NULL->value drift recorded %d rows naming the stored NULL; want 1", recorded)
+		}
 
 		// Negative control: re-emitting the SAME deal type must stay a clean no-op, or the arm above
 		// would make every idempotent re-run fail.
@@ -2422,19 +2449,56 @@ func psTestBlockTimeMonotonicPerPosition(t *testing.T, f *psFixture) {
 		return "(1::int,10::bigint,'" + ik + "'::text,'" + strings.Repeat("a", 40) + "'::text,5::numeric,'LOAN'::text," +
 			strconv.Itoa(bn) + "::bigint,0::int,0::int,'" + ts + "'::timestamptz)"
 	}
-	t.Run("within one batch", func(t *testing.T) {
+	refusals := func(t *testing.T, ik string) int {
+		t.Helper()
+		var n int
+		if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM position_projection_refusal
+			WHERE reason = 'block_time_inverts_height' AND detail LIKE 'ik=' || $1 || ' %'`, ik).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	stored := func(t *testing.T, ik string) int {
+		t.Helper()
+		var n int
+		if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM position_state WHERE instrument_key = $1`, ik).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	// Refused per POSITION, recorded, and the run continues: aborting instead refused the whole
+	// projection on every later run, since nothing can clear a stored row.
+	t.Run("within one batch: the position is withheld and recorded while its peer lands", func(t *testing.T) {
 		body := `SELECT * FROM (VALUES ` + one("mono-batch", 100, "2026-03-02T00:00:00Z") + "," +
-			one("mono-batch", 200, "2026-03-01T00:00:00Z") + `) ` + mppCols
-		f.mppErr(t, "pv_mono_batch", body, "monotonic", "earlier block_timestamp")
+			one("mono-batch", 200, "2026-03-01T00:00:00Z") + "," +
+			one("mono-peer", 150, "2026-03-01T12:00:00Z") + `) ` + mppCols
+		if n := f.mppN(t, "pv_mono_batch", body, "inverted pair plus a peer"); n != 1 {
+			t.Errorf("inserted %d, want 1: the peer lands and the inverted position is withheld", n)
+		}
+		if got := stored(t, "mono-batch"); got != 0 {
+			t.Errorf("the inverted position stored %d rows, want 0", got)
+		}
+		if got := refusals(t, "mono-batch"); got != 2 {
+			t.Errorf("recorded %d refusals for the inverted position, want both withheld observations", got)
+		}
 	})
-	t.Run("against stored history, in either direction", func(t *testing.T) {
+	t.Run("against stored history, in either direction: withheld, recorded once, never a wedge", func(t *testing.T) {
 		if n := f.mppN(t, "pv_mono_hist", `SELECT * FROM (VALUES `+one("mono-hist", 200, "2026-03-02T00:00:00Z")+`) `+mppCols, "seed"); n != 1 {
 			t.Fatalf("seed inserted %d, want 1", n)
 		}
-		f.mppErr(t, "pv_mono_hist", `SELECT * FROM (VALUES `+one("mono-hist", 100, "2026-03-03T00:00:00Z")+`) `+mppCols,
-			"lower block, later instant", "earlier block_timestamp")
-		f.mppErr(t, "pv_mono_hist", `SELECT * FROM (VALUES `+one("mono-hist", 300, "2026-03-01T00:00:00Z")+`) `+mppCols,
-			"higher block, earlier instant", "earlier block_timestamp")
+		lower := `SELECT * FROM (VALUES ` + one("mono-hist", 100, "2026-03-03T00:00:00Z") + `) ` + mppCols
+		higher := `SELECT * FROM (VALUES ` + one("mono-hist", 300, "2026-03-01T00:00:00Z") + `) ` + mppCols
+		for i, body := range []string{lower, higher, higher} {
+			if n := f.mppN(t, "pv_mono_hist", body, "inverted against history"); n != 0 {
+				t.Errorf("run %d inserted %d, want 0 (withheld)", i+1, n)
+			}
+		}
+		if got := stored(t, "mono-hist"); got != 1 {
+			t.Errorf("stored %d rows, want the seed alone", got)
+		}
+		if got := refusals(t, "mono-hist"); got != 2 {
+			t.Errorf("recorded %d refusals, want 2: one per withheld observation, not one per run", got)
+		}
 	})
 	// Negative controls: equal instants across blocks and same-block corrections must still insert, and
 	// two positions are independent -- or the check would reject legitimate input.
