@@ -19,11 +19,11 @@ import {
   useSyncedCursorHandlers,
   XYChart,
 } from '@archon-research/charting';
-import { SkeletonStack } from '@archon-research/design-system';
 import { useContext, useMemo } from 'react';
 
 import { css } from '#styled-system/css';
 
+import { Placeholder } from '../../shared/ui/Placeholder';
 import {
   CHART_HEIGHT,
   type ChartDatum,
@@ -237,13 +237,11 @@ export function MetricCardTrend({
   if (isLoading) {
     // A single block at the chart's own footprint, so the placeholder fills the
     // same space and there's no jump (or floating box) when the real chart loads
-    // in.
+    // in. Not `SkeletonStack`: see `Placeholder` in metricCards.tsx.
     return (
-      <SkeletonStack
-        count={1}
-        itemHeight={CHART_HEIGHT}
-        className={css({ mt: '2' })}
-      />
+      <div className={css({ mt: '2' })}>
+        <Placeholder width="100%" height={CHART_HEIGHT} />
+      </div>
     );
   }
 
