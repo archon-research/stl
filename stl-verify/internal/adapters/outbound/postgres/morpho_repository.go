@@ -518,8 +518,7 @@ func (r *MorphoRepository) appendMembership(ctx context.Context, tx pgx.Tx, adap
 // id IS the (vault, address) key — it is created before the lock is taken, and creating it
 // needs no lock of its own (ON CONFLICT DO NOTHING makes that race a no-op) — and the key
 // is deliberately block-free, so every decision about one adapter serializes regardless of
-// the block it carries. Only one key is ever held, so the sorted-order rule has nothing to
-// order.
+// the block it carries.
 func lockAdapterKey(ctx context.Context, tx pgx.Tx, adapterID int64) error {
 	lockKey := fmt.Sprintf("morpho_adapter|%d", adapterID)
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lockKey); err != nil {
