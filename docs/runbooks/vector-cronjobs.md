@@ -934,8 +934,9 @@ indexers.
 **One run repairs one chain.** Every chain with a raw archive runs its own
 worker, on its own task queue, against its own topic, Redis and bucket — the
 `blocks` you pass are that chain's heights, and there is no way to mix chains in
-one run. Robinhood has a watcher but no backup worker, so it has no raw archive
-to derive a version from and no republisher is deployed for it.
+one run. Robinhood has a raw archive (backup worker, #870) but no republisher
+yet: its ServiceAccount needs an EKS Pod Identity grant in the infra repo first,
+which is why it is absent from the table below.
 
 The three chain-bearing variables are all checked against `CHAIN_ID` at startup,
 so a cross-chain deployment is a pod that will not start rather than corrections
