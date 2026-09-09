@@ -4,7 +4,7 @@
 # Include language-agnostic linting targets
 include lint.mk
 
-.PHONY: golangci-lint-new all test test-race test-integration test-integration-shard integration-shard-check ci-service-check test-templates-clean lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-watcher-robinhood run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-sparklend-position-tracker-arbitrum run-sparklend-position-tracker-optimism run-sparklend-position-tracker-base run-allocation-tracker run-allocation-tracker-avax run-allocation-tracker-robinhood help ci ci-checks install-hooks format \
+.PHONY: golangci-lint-new all test test-race test-integration test-integration-shard integration-shard-check ci-service-check buildinfo-populate-check test-templates-clean lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-watcher-robinhood run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-sparklend-position-tracker-arbitrum run-sparklend-position-tracker-optimism run-sparklend-position-tracker-base run-allocation-tracker run-allocation-tracker-avax run-allocation-tracker-robinhood help ci ci-checks install-hooks format \
 	dev-up dev-up-rebuild dev-up-workers dev-up-or-resume dev-preflight dev-env dev-secrets dev-env-files dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-image _docker-release-go-service _docker-build-go-service _docker-push-go-service \
@@ -246,6 +246,9 @@ integration-shard-check:
 ci-service-check:
 	@bash ci/check-ci-services.sh
 
+buildinfo-populate-check:
+	@bash ci/check-buildinfo-populate.sh
+
 # Removes the template databases of migration sets you no longer test, on the server
 # STL_TEST_POSTGRES_DSN names. Hand-run, not part of the suite: see the script.
 test-templates-clean:
@@ -409,7 +412,7 @@ tools:
 # CI target for lint/format/static/security checks. go vet, staticcheck, and
 # go fix -diff are covered by golangci-lint v2 (govet, staticcheck, modernize
 # linters — see .golangci.yml); running them separately tripled analysis time.
-ci-checks: fmt-check goimports-check tidy-check shared-container-check integration-shard-check ci-service-check check-overlay-images golangci-lint golangci-lint-new vulncheck
+ci-checks: fmt-check goimports-check tidy-check shared-container-check integration-shard-check ci-service-check buildinfo-populate-check check-overlay-images golangci-lint golangci-lint-new vulncheck
 
 # CI target: everything with strict checks
 # Order: fast checks first (fail fast), then expensive checks
@@ -1198,7 +1201,11 @@ docker-push: ecr-login
 # Debian's `apt-get upgrade`, which a warm cache otherwise replays forever —
 # and DOCKER_CACHE_EXPORT=1 publishes the result, so the next real deploy of
 # any commit inherits the patched layers without pushing an image for a SHA
-# that already has one (ECR tag immutability, ARCT-420).
+# that already has one. Re-pushing is not merely redundant: the SHA tag is what
+# build_registry's (git_hash, service) identity names, so replacing its bytes
+# would silently change what a governed row points at. ARCT-420 will make ECR
+# reject it outright, but that is not yet applied -- every stl-sentinel* repo
+# still reports MUTABLE (checked 2026-09-09), so today only this flag stops it.
 DOCKER_NO_CACHE     ?= 0
 DOCKER_CACHE_EXPORT ?= $(if $(filter-out 0,$(DOCKER_PUSH)),1,0)
 # Every cache flag lives inside the DOCKER_CACHE=1 block below, so asking for an
