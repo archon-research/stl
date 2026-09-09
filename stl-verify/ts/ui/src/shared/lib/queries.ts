@@ -536,7 +536,13 @@ export const rrcQuery = (
     },
     {
       ...CACHE.drawer,
-      meta: { logMessage: 'Failed to load required risk capital (RRC)' },
+      meta: {
+        // A 404 here is expected for any asset no risk model covers, so the
+        // failure is not on its own an incident; the tab renders that case as
+        // a note.
+        logLevel: 'warn',
+        logMessage: 'Failed to load required risk capital (RRC)',
+      },
     },
   );
 
