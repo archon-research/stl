@@ -1201,6 +1201,19 @@ docker-push: ecr-login
 # that already has one (ECR tag immutability, ARCT-420).
 DOCKER_NO_CACHE     ?= 0
 DOCKER_CACHE_EXPORT ?= $(if $(filter-out 0,$(DOCKER_PUSH)),1,0)
+# Every cache flag lives inside the DOCKER_CACHE=1 block below, so asking for an
+# export without enabling the cache silently exported nothing — the same
+# outcome as the swallowed push error, by a different route.
+# Keyed on origin, not value: the default is derived from DOCKER_PUSH, which is
+# defined further down, so a value test here would depend on definition order.
+# Only an explicitly requested export can be a mistake.
+ifneq ($(filter command line environment,$(origin DOCKER_CACHE_EXPORT)),)
+ifneq ($(DOCKER_CACHE),1)
+ifneq ($(filter-out 0,$(DOCKER_CACHE_EXPORT)),)
+$(error DOCKER_CACHE_EXPORT=1 requires DOCKER_CACHE=1, or nothing is exported)
+endif
+endif
+endif
 # --pull is not redundant with --no-cache: --no-cache discards the build cache,
 # but base images still resolve from the builder's local store, so a stale
 # alpine:3.21 or node:24-alpine would be reused and the refresh would refresh
@@ -1211,7 +1224,14 @@ ifeq ($(DOCKER_CACHE),1)
 ifndef DOCKER_CACHE_REPO
 $(error DOCKER_CACHE=1 requires DOCKER_CACHE_REPO, e.g. ghcr.io/<owner>/<repo>/buildcache)
 endif
-docker_cache_to = --cache-to type=registry,ref=$(DOCKER_CACHE_REPO):$(1),mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true
+# The cache push is advisory for a deploy build — a failed cache push must not
+# fail a good image — and load-bearing for the security refresh, which builds
+# with DOCKER_PUSH=0 and so produces nothing else at all. With ignore-error=true
+# a GHCR 429/5xx there gave exit 0, published nothing, and never reached
+# notify-refresh-failure, so OS patching would silently revert to never. That
+# one case must fail loudly, so ignore-error follows which run it is.
+docker_cache_ignore_error = $(if $(and $(filter 0,$(DOCKER_PUSH)),$(filter-out 0,$(DOCKER_CACHE_EXPORT))),false,true)
+docker_cache_to = --cache-to type=registry,ref=$(DOCKER_CACHE_REPO):$(1),mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=$(docker_cache_ignore_error)
 docker_cache_flags = \
 	--cache-from type=registry,ref=$(DOCKER_CACHE_REPO):$(1) \
 	$(if $(filter-out 0,$(DOCKER_CACHE_EXPORT)),$(call docker_cache_to,$(1)))
