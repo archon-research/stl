@@ -46,7 +46,7 @@ assets. Prod is byte-identical to staging.
 |---|---|---|---|
 | WETH, WBTC | 2025-08-14 | 159 | gaps (below) |
 | CBBTC, EZETH, LBTC, RETH, RSETH, TBTC, WEETH, WSTETH | 2026-03-17 | 129 | too short + same gaps |
-| HYPE, XRP | 2026-01-01 | 180 (staging) | token-less rows in `asset_price`; backfilled in staging 8 Sep, prod not yet |
+| HYPE, XRP | 2026-01-01 | 180 | token-less rows in `asset_price`; backfilled in staging 8 Sep and prod 9 Sep |
 | BTC | — | — | no `offchain_price_asset` row at all |
 
 **Gaps** (shared by all assets — indexer downtime, not per-asset):
@@ -79,16 +79,14 @@ assets. Prod is byte-identical to staging.
   `token_id` NULL. CoinGecko ids: `bitcoin`, `hyperliquid`, `ripple`.
   Then backfill 180+ days.
 
-  **UPDATE (8 Sep 2026):** DONE for HYPE and XRP **in staging**: PR #858
-  created `asset_price` + the `ripple`/`hyperliquid` catalog rows, workflow
-  `backfill-xrp-hype-2026` backfilled 2026-01-01 → 2026-09-08 hourly (6,001
-  points each, `coveredFrom` = requested `from`, zero missing days — 251 days,
-  comfortably above TRAIN_SIZE), and the 5-minute sweep keeps the series
-  current. The #858 rollout reached prod on 9 Sep (production deployment
-  succeeded), so prod has the migration and catalog rows — it still needs the
-  same workflow run. BTC (`bitcoin`) remains unregistered — only Anchorage
-  needs it, and it could instead reuse the BTC→WBTC proxy path the CORE price
-  reader now has (see §3).
+  **UPDATE (8–9 Sep 2026):** DONE for HYPE and XRP in **both environments**:
+  PR #858 created `asset_price` + the `ripple`/`hyperliquid` catalog rows, and
+  workflow `backfill-xrp-hype-2026` backfilled hourly history from 2026-01-01
+  (staging 8 Sep: 6,001 points each; prod 9 Sep after the #858 rollout: 6,025
+  points each — `coveredFrom` = requested `from`, zero missing days, well
+  above TRAIN_SIZE). The 5-minute sweep keeps both series current. BTC
+  (`bitcoin`) remains unregistered — only Anchorage needs it, and it could
+  instead reuse the BTC→WBTC proxy path the CORE price reader now has (see §3).
 
 ---
 
@@ -247,18 +245,21 @@ same-code baselines: 6.04% / 9.77% — not expected to reconcile, the live
 borrower book and price regime differ from BA's June snapshot, same as the
 Morpho scope note above).
 
-**Prod lags this config** (no XRP/HYPE backfill in `asset_price`, order books
-BTC/ETH only), so the prod overlay pins both syrup markets back to parquet
-with per-market env vars (`CORE_MODEL_SYRUP_USDC_PRICE_SOURCE=parquet`, ×6 —
-`k8s/overlays/prod/configmaps.yaml`). To take prod live: run the
-`OffchainPriceBackfill` workflow there (§1), mirror the staging order-book
-symbol expansion in the prod configmaps (§2), then delete the six pin lines.
+**Prod data caught up on 9 Sep 2026**, so no environment pin ships: the
+XRP/HYPE backfill ran in prod (`backfill-xrp-hype-2026`, 6,025 hourly points
+each from 2026-01-01, zero holes) and the prod order-book configmaps gained
+the staging symbol set (PR #927, indexers restarted 09:06 UTC). Both
+environments go live at their first tick carrying this config. Should an
+environment ever need to lag again, the per-market env override exists for
+exactly that: `CORE_MODEL_<MARKET>_<KEY>=parquet` in that overlay's
+`core-model-runner` configmap (most specific wins; `-` in a market key maps
+to `_`).
 
 Still parquet:
 
 | Market group | Live source | Notes |
 |---|---|---|
-| Syrup (2) | maple tables + asset_price | **fully live in staging (9 Sep 2026)**; prod pinned to parquet in the overlay until its data catches up |
+| Syrup (2) | maple tables + asset_price | **fully live (9 Sep 2026)** — both environments' data ready; first live tick lands with this config's deploy |
 | Anchorage | anchorage-indexer tables | indexed; blocked on native-BTC price (no on-chain oracle — could now reuse the BTC→WBTC proxy path) |
 
 ---
