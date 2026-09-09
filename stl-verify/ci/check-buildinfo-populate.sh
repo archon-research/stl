@@ -29,8 +29,13 @@ count=$(printf '%s\n' "$files" | grep -c .)
 
 offenders=""
 while IFS= read -r f; do
-  call="$(grep -o 'buildinfo\.Populate([^)]*)' "$f")"
-  if [[ "$call" != "$expected" ]]; then
+  # || true: grep exits 1 when the call is reflowed across lines, and under
+  # `set -e` that would abort here -- failing closed, but silently, with no
+  # diagnostic. An empty match is itself a finding, so report it as one.
+  call="$(grep -o 'buildinfo\.Populate([^)]*)' "$f" || true)"
+  if [[ -z "$call" ]]; then
+    offenders+="  $f: no single-line buildinfo.Populate(...) found (reflowed across lines?)"$'\n'
+  elif [[ "$call" != "$expected" ]]; then
     offenders+="  $f: $call"$'\n'
   fi
 done <<< "$files"
