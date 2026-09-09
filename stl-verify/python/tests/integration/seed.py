@@ -2140,7 +2140,7 @@ _ANCHORAGE_CLOSED_SNAPSHOT = dt.datetime(2026, 6, 13, 12, 0, 0, tzinfo=dt.timezo
 _ANCHORAGE_OTHER_SNAPSHOT = dt.datetime(2026, 6, 20, 12, 0, 0, tzinfo=dt.timezone.utc)
 
 
-async def _insert_anchorage_snapshot(
+async def insert_anchorage_snapshot(
     conn: asyncpg.Connection,
     *,
     prime_id: int,
@@ -2227,7 +2227,7 @@ async def seed_anchorage_custody(db_url: str) -> None:
 
             # Current cohort: PKG-A and PKG-B are single rows; PKG-C carries a
             # superseded processing_version whose correction (pv 1) must win.
-            await _insert_anchorage_snapshot(
+            await insert_anchorage_snapshot(
                 conn,
                 prime_id=prime_id,
                 package_id="PKG-A",
@@ -2237,7 +2237,7 @@ async def seed_anchorage_custody(db_url: str) -> None:
                 asset_quantity=Decimal("2000"),
                 snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
             )
-            await _insert_anchorage_snapshot(
+            await insert_anchorage_snapshot(
                 conn,
                 prime_id=prime_id,
                 package_id="PKG-B",
@@ -2248,7 +2248,7 @@ async def seed_anchorage_custody(db_url: str) -> None:
                 snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
             )
             # PKG-C original (pv 0, build_id 0): wrong values that must be superseded.
-            await _insert_anchorage_snapshot(
+            await insert_anchorage_snapshot(
                 conn,
                 prime_id=prime_id,
                 package_id="PKG-C",
@@ -2260,7 +2260,7 @@ async def seed_anchorage_custody(db_url: str) -> None:
                 build_id=0,
             )
             # PKG-C correction (pv 1, build_id 1): the values that make the cohort sums.
-            await _insert_anchorage_snapshot(
+            await insert_anchorage_snapshot(
                 conn,
                 prime_id=prime_id,
                 package_id="PKG-C",
@@ -2276,7 +2276,7 @@ async def seed_anchorage_custody(db_url: str) -> None:
             # active packages but active=false. Only the `active` predicate
             # excludes it (the cohort filter does not, since it shares the max
             # snapshot_time). Non-zero values so its leak would move every sum.
-            await _insert_anchorage_snapshot(
+            await insert_anchorage_snapshot(
                 conn,
                 prime_id=prime_id,
                 package_id="PKG-INACTIVE",
@@ -2294,7 +2294,7 @@ async def seed_anchorage_custody(db_url: str) -> None:
                 ("PKG-Y", Decimal("70000000"), Decimal("1000")),
                 ("PKG-Z", Decimal("71327771"), Decimal("500")),
             ]:
-                await _insert_anchorage_snapshot(
+                await insert_anchorage_snapshot(
                     conn,
                     prime_id=prime_id,
                     package_id=package_id,
@@ -2361,7 +2361,7 @@ async def _seed_anchorage_multi_asset_prime(conn: asyncpg.Connection, token_id: 
         tx=_ANCHORAGE_MULTI_TX,
         direction="in",
     )
-    await _insert_anchorage_snapshot(
+    await insert_anchorage_snapshot(
         conn,
         prime_id=prime_id,
         package_id="PKG-B1",
@@ -2372,7 +2372,7 @@ async def _seed_anchorage_multi_asset_prime(conn: asyncpg.Connection, token_id: 
         snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
         asset_type="BTC",
     )
-    await _insert_anchorage_snapshot(
+    await insert_anchorage_snapshot(
         conn,
         prime_id=prime_id,
         package_id="PKG-E1",
@@ -2384,7 +2384,7 @@ async def _seed_anchorage_multi_asset_prime(conn: asyncpg.Connection, token_id: 
         asset_type="ETH",
     )
     # PKG-MX: two rows, same package_id / package-level loan, different asset types.
-    await _insert_anchorage_snapshot(
+    await insert_anchorage_snapshot(
         conn,
         prime_id=prime_id,
         package_id="PKG-MX",
@@ -2396,7 +2396,7 @@ async def _seed_anchorage_multi_asset_prime(conn: asyncpg.Connection, token_id: 
         asset_type="BTC",
         asset_weighted_value=Decimal("40"),
     )
-    await _insert_anchorage_snapshot(
+    await insert_anchorage_snapshot(
         conn,
         prime_id=prime_id,
         package_id="PKG-MX",
@@ -2432,7 +2432,7 @@ async def _seed_anchorage_other_prime(conn: asyncpg.Connection, token_id: int) -
         tx=_ANCHORAGE_OTHER_TX,
         direction="in",
     )
-    await _insert_anchorage_snapshot(
+    await insert_anchorage_snapshot(
         conn,
         prime_id=prime_id,
         package_id="PKG-O1",
@@ -2575,7 +2575,7 @@ async def seed_prime_fan_out(db_url: str, *, with_off_contract_proxy: bool = Fal
                 direction="in",
             )
 
-            await _insert_anchorage_snapshot(
+            await insert_anchorage_snapshot(
                 conn,
                 prime_id=spark_id,
                 package_id="FAN-OUT-PKG",

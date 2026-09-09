@@ -6,9 +6,10 @@ model consumes a wide per-user frame (per-asset ``<sym>_supply``,
 columns) and a market frame of oracle prices for the simulated collaterals;
 this adapter reproduces both shapes — SparkLend from ``borrower_current`` /
 ``borrower_collateral_current`` / ``sparklend_reserve_data`` /
-``token_price_current``, Morpho from ``morpho_market_position``, and Syrup
+``token_price_current``, Morpho from ``morpho_market_position``, Syrup
 (Maple) from ``maple_loan_current`` / ``maple_loan_state`` /
-``maple_loan_collateral`` / ``maple_pool_state``.
+``maple_loan_collateral`` / ``maple_pool_state``, and Anchorage from
+``anchorage_package_snapshot``.
 
 Positions are valued with the protocol's own oracle (``_PROTOCOL_ORACLE``,
 checked against ``protocol_oracle``), joined by token id — never by symbol.
@@ -47,6 +48,10 @@ Deliberate deviations, documented in DATA_GAPS.md:
 - Syrup skips BA's ``interest_rate`` / ``loan_token_symbol`` /
   ``collateral_token_symbol`` parquet columns — nothing in the model reads
   them.
+- Anchorage builds one row per custody package where BA's parquet aggregated
+  the whole venue into a single wallet row. Per package is the venue's real
+  structure (Anchorage margin-calls and liquidates per package), so
+  concentration metrics (HHI) drop relative to BA's single-row book.
 - Only Ethereum is implemented; other protocols keep parquet.
 """
 
@@ -563,8 +568,192 @@ def build_syrup_users_frame(rows: Sequence[Any], loan_token: str, underlying_dec
     return pd.DataFrame.from_records(records)
 
 
+# Anchorage publishes no liquidation incentive; BA's parquet carries a flat
+# 2% for the venue, reproduced here (same convention as Syrup).
+_ANCHORAGE_LIQUIDATION_INCENTIVE = 1.02
+
+# The package's loan is a plain USD exposure (exposure_value) with no token
+# identity in the feed; BA's parquet labels it USDC, and the model carries any
+# non-modeled borrow at constant USD, so the label only names the column.
+_ANCHORAGE_BORROW_COLUMN = "usdc"
+
+# Packages of one poll are re-priced at their own ltv_timestamp, so small
+# intra-poll price differences per symbol are legitimate; a wider spread means
+# the cohort mixes polls or the feed drifted mid-poll.
+_ANCHORAGE_PRICE_SPREAD_WARN = 0.005
+
+# Stored package figures are Anchorage's own arithmetic over the same columns;
+# a disagreement beyond rounding means the column semantics drifted.
+_ANCHORAGE_CONSISTENCY_WARN = 0.01
+
+# Latest poll cohort per prime FIRST, then the active filter: the snapshot is
+# append-only and a closed package keeps its last row forever, still flagged
+# active=true, so an unbounded DISTINCT ON would leak every closed package's
+# residual collateral into the frame (the $521M-vs-$310M trap documented on
+# _ANCHORAGE_CUSTODY_HOLDINGS_SQL in allocation_position_repository.py).
+# Within the cohort, processing_version DESC picks the newest correction per
+# natural key.
+_ANCHORAGE_POSITIONS = text("""
+    WITH latest_poll AS (
+        SELECT prime_id, max(snapshot_time) AS snapshot_time
+        FROM anchorage_package_snapshot
+        GROUP BY prime_id
+    )
+    SELECT DISTINCT ON (a.prime_id, a.package_id, a.asset_type, a.custody_type)
+           a.prime_id, a.package_id, a.exposure_value, a.package_value,
+           a.current_ltv, a.margin_call_ltv, a.critical_ltv, a.margin_return_ltv,
+           a.asset_type, a.asset_price, a.asset_quantity, a.asset_weighted_value,
+           a.snapshot_time, a.ltv_timestamp
+    FROM anchorage_package_snapshot a
+    JOIN latest_poll lp ON lp.prime_id = a.prime_id AND lp.snapshot_time = a.snapshot_time
+    WHERE a.active
+    ORDER BY a.prime_id, a.package_id, a.asset_type, a.custody_type, a.processing_version DESC
+""")
+
+
+def anchorage_asset_prices(rows: Sequence[Any]) -> dict[str, float]:
+    """``{SYMBOL: price}`` from Anchorage's own package valuations — the market frame's input.
+
+    The newest ``ltv_timestamp``'s price wins per symbol; an intra-poll spread
+    beyond ``_ANCHORAGE_PRICE_SPREAD_WARN`` warns instead of failing (unlike
+    Syrup's one-attestation-per-cycle contract, per-package re-pricing is how
+    the feed works).
+    """
+    newest: dict[str, tuple[Any, float]] = {}
+    spread: dict[str, tuple[float, float]] = {}
+    for r in rows:
+        symbol = r.asset_type.upper()
+        price = float(r.asset_price)
+        low, high = spread.get(symbol, (price, price))
+        spread[symbol] = (min(low, price), max(high, price))
+        if symbol not in newest or r.ltv_timestamp > newest[symbol][0]:
+            newest[symbol] = (r.ltv_timestamp, price)
+    for symbol, (low, high) in spread.items():
+        if high - low > _ANCHORAGE_PRICE_SPREAD_WARN * high:
+            logger.warning(
+                "anchorage packages disagree on the %s price by %.2f%% within one poll "
+                "(%.2f .. %.2f); expected < %.1f%% — check the cohort join",
+                symbol,
+                (high - low) / high * 100,
+                low,
+                high,
+                _ANCHORAGE_PRICE_SPREAD_WARN * 100,
+            )
+    return {symbol: price for symbol, (_, price) in newest.items()}
+
+
+def _warn_anchorage_threshold_disagreement(rows: Sequence[Any]) -> None:
+    """The model's margin-call band is one scalar per market (MC_TRIGGER), so
+    packages disagreeing on their LTV-threshold triple cannot all be simulated
+    faithfully; per-row lltv still carries each package's critical_ltv."""
+    triples = {(float(r.margin_call_ltv), float(r.critical_ltv), float(r.margin_return_ltv)) for r in rows}
+    if len(triples) > 1:
+        logger.warning(
+            "anchorage packages carry %d distinct (margin_call, critical, margin_return) LTV triples %s; "
+            "the market-level MC_TRIGGER can represent only one margin band",
+            len(triples),
+            sorted(triples),
+        )
+    else:
+        margin_call, critical, margin_return = next(iter(triples))
+        logger.info(
+            "anchorage LTV thresholds: margin_call=%s critical=%s margin_return=%s "
+            "(model band: MC_TRIGGER should equal critical - margin_call)",
+            margin_call,
+            critical,
+            margin_return,
+        )
+
+
+def build_anchorage_users_frame(rows: Sequence[Any]) -> pd.DataFrame:
+    """Assemble the Anchorage users frame: one row per active custody package.
+
+    Package-level columns (exposure_value, package_value, the LTV thresholds)
+    repeat identically on every per-collateral-asset row of a package; asset
+    rows contribute their own quantity and weighted value per symbol.
+    """
+    _warn_anchorage_threshold_disagreement(rows)
+    packages: dict[tuple[int, str], dict[str, Any]] = {}
+    for r in rows:
+        pkg = packages.setdefault(
+            (int(r.prime_id), r.package_id),
+            {
+                "package_id": r.package_id,
+                "exposure": float(r.exposure_value),
+                "package_value": float(r.package_value),
+                "current_ltv": float(r.current_ltv),
+                "critical_ltv": float(r.critical_ltv),
+                "supply_qty": {},
+                "supply_usd": {},
+            },
+        )
+        symbol = r.asset_type.upper()
+        quantity = float(r.asset_quantity)
+        weighted = float(r.asset_weighted_value)
+        pkg["supply_qty"][symbol] = pkg["supply_qty"].get(symbol, 0.0) + quantity
+        pkg["supply_usd"][symbol] = pkg["supply_usd"].get(symbol, 0.0) + weighted
+        implied = quantity * float(r.asset_price)
+        if weighted > 0 and abs(implied - weighted) > _ANCHORAGE_CONSISTENCY_WARN * weighted:
+            logger.warning(
+                "anchorage package %s: %s quantity x price (%.2f) disagrees with asset_weighted_value "
+                "(%.2f) by more than %.0f%% — check the column semantics",
+                r.package_id,
+                symbol,
+                implied,
+                weighted,
+                _ANCHORAGE_CONSISTENCY_WARN * 100,
+            )
+
+    dropped_no_collateral: list[tuple[str, float]] = []
+    records: list[dict] = []
+    for (_, package_id), pkg in packages.items():
+        if pkg["exposure"] <= 0:
+            # No loan drawn against the package — custody only, nothing to model.
+            continue
+        if pkg["package_value"] <= 0:
+            dropped_no_collateral.append((package_id, pkg["exposure"]))
+            continue
+        ltv = pkg["exposure"] / pkg["package_value"]
+        if abs(ltv - pkg["current_ltv"]) > _ANCHORAGE_CONSISTENCY_WARN * max(ltv, pkg["current_ltv"]):
+            logger.warning(
+                "anchorage package %s: computed LTV %.4f disagrees with the stored current_ltv %.4f "
+                "by more than %.0f%% — check the column semantics",
+                package_id,
+                ltv,
+                pkg["current_ltv"],
+                _ANCHORAGE_CONSISTENCY_WARN * 100,
+            )
+        lltv = pkg["critical_ltv"]
+        record: dict[str, Any] = {
+            "wallet_address": package_id,
+            "lltv": lltv,
+            "ltv": ltv,
+            "health_factor": lltv / ltv,
+            "liquidation_incentive": _ANCHORAGE_LIQUIDATION_INCENTIVE,
+            f"{_ANCHORAGE_BORROW_COLUMN}_borrow": pkg["exposure"],
+            f"{_ANCHORAGE_BORROW_COLUMN}_borrow_usd": pkg["exposure"],
+            "total_collateral_usd": pkg["package_value"],
+            "total_borrow_usd": pkg["exposure"],
+        }
+        for symbol, quantity in pkg["supply_qty"].items():
+            record[f"{symbol.lower()}_supply"] = quantity
+            record[f"{symbol.lower()}_supply_usd"] = pkg["supply_usd"][symbol]
+        records.append(record)
+
+    if dropped_no_collateral:
+        logger.warning(
+            "excluded %d anchorage package(s) with a loan but zero package value (existing "
+            "bad debt, not simulatable): $%.2f total exposure dropped",
+            len(dropped_no_collateral),
+            sum(usd for _, usd in dropped_no_collateral),
+        )
+    if not records:
+        raise ValueError("no active anchorage packages with a drawn loan and collateral")
+    return pd.DataFrame.from_records(records)
+
+
 class PostgresPositionsReader:
-    """``get_protocol_data`` from the live tables. SparkLend, Morpho and Syrup on Ethereum.
+    """``get_protocol_data`` from the live tables. SparkLend, Morpho, Syrup and Anchorage on Ethereum.
 
     ``max_feed_age`` bounds how long the protocol's oracle feed may have been
     silent as a whole; single tokens carry no age bound (see module docstring).
@@ -607,9 +796,11 @@ class PostgresPositionsReader:
             return await self._get_morpho_data(morpho_market.upper(), loan_token.upper())
         if protocol.upper() == "SYRUP":
             return await self._get_syrup_data(loan_token.upper())
+        if protocol.upper() == "ANCHORAGE":
+            return await self._get_anchorage_data(loan_token.upper())
         if protocol.upper() != "SPARKLEND":
             raise ValueError(
-                f"live positions are only implemented for SPARKLEND, MORPHO and SYRUP, got {protocol}. "
+                f"live positions are only implemented for SPARKLEND, MORPHO, SYRUP and ANCHORAGE, got {protocol}. "
                 "See app/risk_engine/core_model/DATA_GAPS.md."
             )
         protocol_name, _ = _PROTOCOL_ORACLE["SPARKLEND"]
@@ -681,6 +872,38 @@ class PostgresPositionsReader:
             "syrup positions loaded from live tables: %d loan(s) of %s, %d modeled collateral(s)",
             len(users_df),
             loan_token,
+            len(market_df),
+        )
+        return users_df, market_df
+
+    async def _get_anchorage_data(self, loan_token: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+        if loan_token != "ALL":
+            raise ValueError(
+                f"anchorage packages carry a plain USD exposure with no loan-token identity; "
+                f"only LOAN_TOKEN=ALL is meaningful, got {loan_token!r}"
+            )
+        async with self._engine.connect() as conn:
+            rows = (await conn.execute(_ANCHORAGE_POSITIONS)).fetchall()
+        if not rows:
+            raise ValueError("no active anchorage packages in the latest poll — is anchorage-indexer running?")
+        # Each prime's cohort is one poll of the feed, so freshness is per prime
+        # — the anchorage analog of a silent oracle.
+        now = pd.Timestamp.now(tz="UTC")
+        stale = sorted({int(r.prime_id) for r in rows if now - pd.Timestamp(r.snapshot_time) > self._max_feed_age})
+        if stale:
+            oldest = min(pd.Timestamp(r.snapshot_time) for r in rows)
+            raise ValueError(
+                f"the anchorage snapshot cohort for prime(s) {stale} is stale (oldest {oldest}, "
+                f"bound {self._max_feed_age}); refusing to value positions on a frozen feed — "
+                "is anchorage-indexer running, and is the upstream API returning packages? "
+                "See app/risk_engine/core_model/DATA_GAPS.md."
+            )
+        users_df = build_anchorage_users_frame(rows)
+        supplied = {c.rsplit("_", 1)[0].upper() for c in users_df.columns if c.endswith("_supply")}
+        market_df = build_market_frame(supplied, anchorage_asset_prices(rows))
+        logger.info(
+            "anchorage positions loaded from live tables: %d package(s), %d modeled collateral(s)",
+            len(users_df),
             len(market_df),
         )
         return users_df, market_df
