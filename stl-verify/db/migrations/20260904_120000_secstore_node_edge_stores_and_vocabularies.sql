@@ -39,12 +39,28 @@
 --     correction RUNS, one per ticket) — an issuer re-point is not a correction run.
 --   * A retraction is expressible: a TOMBSTONE is an append with a ZERO-LENGTH window
 --     (valid_to = valid_from), which is why the window CHECK is <= and not <. It matches no
---     as-of date, so the logical record drops out of the resolved reads while every version of
+--     as-of date, so the WINDOW it names drops out of the resolved reads while every version of
 --     it stays readable — ADR-0005 §3's "tombstone append that supersedes the retracted row",
 --     with supersedes_record_id naming the retracted record (UNIQUE (record_id) makes that
 --     pointer resolvable). Un-retracting is a correction run at N, not a re-append at 0: the
 --     re-asserted row would otherwise collide with the original and be dropped by
 --     ON CONFLICT DO NOTHING, leaving the tombstone winning forever.
+--
+--     A tombstone withdraws ONE WINDOW, not the logical record, because supersession resolves
+--     per (logical record, valid_from) and a zero-length append only wins its own group. A
+--     record that has been closed and reopened therefore takes one tombstone per window: given
+--     Jan-open, Jan-closed-to-Jun and Jun-open, a tombstone on the Jan group leaves the Jun
+--     window live and current. That is the honest scope of the mechanism, and it is asserted
+--     that way in TestSecStoreClosingRowSupersedesRatherThanResurrects rather than only in the
+--     single-window case, which passes either way (review finding: the claim above originally
+--     said "the logical record drops out", which is true only of a one-window record).
+--     Withdrawing a logical record in ONE append, and the DQ rule that flags a half-retracted
+--     record, are VEC-622's — they need the validator that would police them.
+--   * Knowledge time appears twice and the two are not the same: as the SUPERSESSION ORDER
+--     inside a valid window (next bullet), and as a READ PARAMETER — both _as_of functions
+--     take a pg_snapshot overload answering "what did we know then", which the ordering alone
+--     does not provide. The first draft shipped only the effective-date read while this header
+--     read as though resolution covered both clocks (review finding).
 --   * Resolution is by knowledge time within a window: latest append per (logical record,
 --     valid_from) is processing_version DESC, then ingest_xid DESC (ADR-0006 §5's ordering key —
 --     never writer-supplied, so a writer cannot reorder its own supersession), then record_id
@@ -185,7 +201,7 @@ COMMENT ON COLUMN sec_node.chain_id IS 'Roles: FK→chain.chain_id (soft). NULL 
 COMMENT ON COLUMN sec_node.status IS 'Roles: FK→node_status_vocabulary (composite with record_type). A status change is a new version.';
 COMMENT ON COLUMN sec_node.attrs IS 'Kind-specific attributes as jsonb; the shape system (VEC-622) decides required-ness per type. Hot attributes promote to typed columns only on VEC-633 evidence.';
 COMMENT ON COLUMN sec_node.valid_from IS 'Roles: PK (with id, processing_version, valid_to). Valid-time window start, UTC date, half-open [valid_from, valid_to).';
-COMMENT ON COLUMN sec_node.valid_to IS 'Roles: PK (with id, processing_version, valid_from). Valid-time window end, exclusive; ''infinity'' = open/current, never NULL. In the key so close-and-open is an ordinary append at processing_version 0. A ZERO-LENGTH window (valid_to = valid_from) is a TOMBSTONE: it matches no as-of date, so the record drops out of the resolved reads with its history intact (ADR-0005 §3 retraction; pair it with change_reason_code RETRACTION and supersedes_record_id).';
+COMMENT ON COLUMN sec_node.valid_to IS 'Roles: PK (with id, processing_version, valid_from). Valid-time window end, exclusive; ''infinity'' = open/current, never NULL. In the key so close-and-open is an ordinary append at processing_version 0. A ZERO-LENGTH window (valid_to = valid_from) is a TOMBSTONE: it matches no as-of date, so THAT WINDOW drops out of the resolved reads with its history intact (ADR-0005 §3 retraction; pair it with change_reason_code RETRACTION and supersedes_record_id). It withdraws one window, not the logical record — a closed-and-reopened record takes one tombstone per window, and single-append record withdrawal is VEC-622''s.';
 COMMENT ON COLUMN sec_node.record_id IS 'Roles: Audit, UNIQUE. Per-append surrogate; what supersedes_record_id, a retraction and a reproduction manifest point at (PR-2.1). Unique per store, not globally: a manifest cites (table, record_id).';
 COMMENT ON COLUMN sec_node.processing_version IS 'Roles: Audit, PK component. Correction version, caller-assigned per ADR-0006 §3: 0 live, N per correction run via processing_version_log. A valid-time change (close-and-open, an ended window, a tombstone) is NOT a correction and stays at 0 — valid_to carries it. Un-retracting a tombstoned record IS a correction run at N.';
 COMMENT ON COLUMN sec_node.ingest_xid IS 'Roles: Audit. Knowledge-time visibility key (ADR-0006 §5, pg_visible_in_snapshot) and the supersession tiebreak inside a valid window. Never writer-supplied: the sec_node_append_guard trigger rejects an insert that sets it to anything but the current transaction id.';
@@ -259,7 +275,7 @@ COMMENT ON COLUMN sec_edge.weight_basis IS 'Roles: FK→weight_basis_vocabulary.
 COMMENT ON COLUMN sec_edge.weight_asof_block IS 'Block number a market-derived weight was computed at. Raw chain block height. NULL for curated weights.';
 COMMENT ON COLUMN sec_edge.payload IS 'Type-specific attribute cluster (ratio+event_date, agency+rating+outlook, lien seniority, role).';
 COMMENT ON COLUMN sec_edge.valid_from IS 'Roles: PK component. Valid-time window start, UTC date, half-open.';
-COMMENT ON COLUMN sec_edge.valid_to IS 'Roles: PK component. Valid-time window end, exclusive; ''infinity'' = open, never NULL. In the key so a re-point closes the current row and opens the new one in one write, both at processing_version 0. A ZERO-LENGTH window (valid_to = valid_from) is a TOMBSTONE — the only way to retract an edge, since an edge has no status to retire it.';
+COMMENT ON COLUMN sec_edge.valid_to IS 'Roles: PK component. Valid-time window end, exclusive; ''infinity'' = open, never NULL. In the key so a re-point closes the current row and opens the new one in one write, both at processing_version 0. A ZERO-LENGTH window (valid_to = valid_from) is a TOMBSTONE — the only way to retract an edge, since an edge has no status to retire it — and it withdraws that WINDOW, so a re-pointed edge takes one tombstone per window (see sec_node.valid_to).';
 COMMENT ON COLUMN sec_edge.record_id IS 'Roles: Audit, UNIQUE. Per-append surrogate; the target of supersedes_record_id, retractions and manifests (PR-2.1).';
 COMMENT ON COLUMN sec_edge.processing_version IS 'Roles: Audit, PK component. Correction version, caller-assigned (ADR-0006 §3); 0 live. Close-and-open, an ended link and a tombstone all stay at 0.';
 COMMENT ON COLUMN sec_edge.ingest_xid IS 'Roles: Audit. Knowledge-time visibility key (ADR-0006 §5) and the supersession tiebreak inside a valid window. Never writer-supplied; enforced by sec_edge_append_guard.';
@@ -301,7 +317,7 @@ FROM latest
 WHERE valid_from <= (now() AT TIME ZONE 'utc')::date
   AND (now() AT TIME ZONE 'utc')::date < valid_to
 ORDER BY id, valid_from DESC;
-COMMENT ON VIEW sec_node_current IS 'Operational reads only (two-step: latest append per (id, valid_from) first — processing_version, then ingest_xid — valid window second). A tombstoned record is absent here and in sec_node_as_of; its history stays in the base table. Calculations use sec_node_as_of(effective_at).';
+COMMENT ON VIEW sec_node_current IS 'Operational reads only (two-step: latest append per (id, valid_from) first — processing_version, then ingest_xid — valid window second). A tombstoned WINDOW is absent here and in sec_node_as_of, one tombstone per window; its history stays in the base table. Calculations use sec_node_as_of(effective_at), and replays sec_node_as_of(effective_at, known_at).';
 
 CREATE FUNCTION sec_node_as_of(effective_at date)
 RETURNS SETOF sec_node LANGUAGE sql STABLE AS $$
@@ -346,6 +362,43 @@ RETURNS SETOF sec_node LANGUAGE sql STABLE AS $$
 $$;
 COMMENT ON FUNCTION sec_node_as_of(date, text) IS 'As-of node read scoped to one record_type, pushed into the version resolution instead of applied to its result (see the note above the definition). Same two-step semantics as sec_node_as_of(date).';
 
+-- Knowledge-time read: what a reader holding this snapshot would have seen as true on
+-- effective_at. The two clocks are independent parameters, which is the whole point — valid time
+-- says when a fact was true in the world, knowledge time when we had learned it, and without the
+-- second a backdated late discovery reads as though we had always known it (RP-4.1, CR-3.5/3.6).
+--
+-- The snapshot filter runs BEFORE version resolution, not after: a correction that is invisible
+-- in the snapshot must not be able to win its group, or the replay returns today's answer with
+-- yesterday's date on it. Consumers that pin a number record the snapshot alongside the
+-- effective date (ADR-0006 §5) and replay through here; an arbitrary wall-clock T is served by
+-- nearest-prior-record lookup, which is a read over ingested_at and not this function's job.
+--
+-- known_at is pg_snapshot rather than a timestamp deliberately: ingest_xid is the exact
+-- visibility key and wall clock cannot order commits (a row stamps ingested_at at transaction
+-- start and becomes visible at commit).
+--
+-- Overload trap for callers: (date, text) and (date, pg_snapshot) coexist, and an UNKNOWN
+-- literal resolves to the text one, because text is the preferred type in its category. So
+-- sec_node_as_of(d, '10:20:') is a kind-scoped read looking for a record_type named "10:20:"
+-- — zero rows, no error. Pass a snapshot as a typed value or cast it: $1::pg_snapshot.
+CREATE FUNCTION sec_node_as_of(effective_at date, known_at pg_snapshot)
+RETURNS SETOF sec_node LANGUAGE sql STABLE AS $$
+    WITH known AS (
+        SELECT * FROM sec_node
+        WHERE pg_visible_in_snapshot(ingest_xid, known_at)
+    ), latest AS (
+        SELECT DISTINCT ON (id, valid_from) *
+        FROM known
+        ORDER BY id, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC
+    )
+    SELECT DISTINCT ON (id) *
+    FROM latest
+    WHERE valid_from <= effective_at
+      AND effective_at < valid_to
+    ORDER BY id, valid_from DESC
+$$;
+COMMENT ON FUNCTION sec_node_as_of(date, pg_snapshot) IS 'Bitemporal node read: latest append VISIBLE IN known_at per (id, valid_from), then the valid window over effective_at (RP-4.1, CR-3.6). The snapshot filter precedes version resolution so an invisible correction cannot win its group. Serves the exact replay a recorded snapshot pins; an arbitrary wall-clock T is a nearest-prior-record lookup, not this function.';
+
 CREATE VIEW sec_edge_current AS
 WITH latest AS (
     SELECT DISTINCT ON (rel_type, src_id, dst_id, edge_seq, valid_from) *
@@ -357,7 +410,7 @@ FROM latest
 WHERE valid_from <= (now() AT TIME ZONE 'utc')::date
   AND (now() AT TIME ZONE 'utc')::date < valid_to
 ORDER BY rel_type, src_id, dst_id, edge_seq, valid_from DESC;
-COMMENT ON VIEW sec_edge_current IS 'Operational reads only (two-step, as sec_node_current). A closed or tombstoned edge is absent here. Calculations use sec_edge_as_of(effective_at).';
+COMMENT ON VIEW sec_edge_current IS 'Operational reads only (two-step, as sec_node_current). A closed edge, or a window carrying a tombstone, is absent here. Calculations use sec_edge_as_of(effective_at), and replays sec_edge_as_of(effective_at, known_at).';
 
 CREATE FUNCTION sec_edge_as_of(effective_at date)
 RETURNS SETOF sec_edge LANGUAGE sql STABLE AS $$
@@ -373,6 +426,26 @@ RETURNS SETOF sec_edge LANGUAGE sql STABLE AS $$
     ORDER BY rel_type, src_id, dst_id, edge_seq, valid_from DESC
 $$;
 COMMENT ON FUNCTION sec_edge_as_of(date) IS 'As-of edge read; effective_at is an explicit recorded parameter, never now() (ADR-0006 §4).';
+
+-- Knowledge-time edge read; semantics and the reason the snapshot filter precedes version
+-- resolution are on sec_node_as_of(date, pg_snapshot) above.
+CREATE FUNCTION sec_edge_as_of(effective_at date, known_at pg_snapshot)
+RETURNS SETOF sec_edge LANGUAGE sql STABLE AS $$
+    WITH known AS (
+        SELECT * FROM sec_edge
+        WHERE pg_visible_in_snapshot(ingest_xid, known_at)
+    ), latest AS (
+        SELECT DISTINCT ON (rel_type, src_id, dst_id, edge_seq, valid_from) *
+        FROM known
+        ORDER BY rel_type, src_id, dst_id, edge_seq, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC
+    )
+    SELECT DISTINCT ON (rel_type, src_id, dst_id, edge_seq) *
+    FROM latest
+    WHERE valid_from <= effective_at
+      AND effective_at < valid_to
+    ORDER BY rel_type, src_id, dst_id, edge_seq, valid_from DESC
+$$;
+COMMENT ON FUNCTION sec_edge_as_of(date, pg_snapshot) IS 'Bitemporal edge read; see sec_node_as_of(date, pg_snapshot).';
 
 -- ---------------------------------------------------------------------------
 -- Vocabulary seeds (the decided, stable content only)

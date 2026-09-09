@@ -56,9 +56,11 @@ func insertNode(ctx context.Context, t *testing.T, pool *pgxpool.Pool, id, statu
 // order inline and asserts the two disagree — filtering the window first leaves the superseded
 // open row a live candidate, so a read written that way silently resurrects it.
 //
-// The tombstone subtest covers the other half of supersession: a zero-length window
-// (valid_to = valid_from) withdraws a record from every resolved read while its history stays
-// in the base table, which is how ADR-0005 §3's retraction and a valid-time amendment work.
+// The tombstone subtests cover the other half of supersession: a zero-length window
+// (valid_to = valid_from) withdraws THAT WINDOW from every resolved read while its history
+// stays in the base table, which is how ADR-0005 §3's retraction and a valid-time amendment
+// work. Scope matters and is asserted in both directions — one tombstone clears a one-window
+// record entirely, and leaves a closed-and-reopened record's later window live and current.
 func TestSecStoreClosingRowSupersedesRatherThanResurrects(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -138,7 +140,46 @@ func TestSecStoreClosingRowSupersedesRatherThanResurrects(t *testing.T) {
 		}
 	})
 
-	t.Run("tombstone_withdraws_the_record_from_every_resolved_read", func(t *testing.T) {
+	// A tombstone withdraws ONE WINDOW, and this is where that scope gets pinned. The
+	// single-window subtest below passes under either reading, which is exactly why the
+	// multi-window case is asserted first: a record that has been closed and reopened takes one
+	// tombstone per window, and a curator who tombstones only the first leaves the second live
+	// and current. Withdrawing a logical record in one append is VEC-622's.
+	t.Run("tombstone_withdraws_one_window_not_the_whole_record", func(t *testing.T) {
+		// The same three appends as the parent test: Jan open, Jan closed to Jun, Jun open.
+		const multi = "em-t-multiwindow"
+		insertNode(ctx, t, pool, multi, "ACTIVE", "2026-01-01", "'infinity'", "open the first window")
+		insertNode(ctx, t, pool, multi, "ACTIVE", "2026-01-01", "'2026-06-01'", "close it")
+		insertNode(ctx, t, pool, multi, "INACTIVE", "2026-06-01", "'infinity'", "open the next window")
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO sec_node (id, record_type, status, valid_from, valid_to, actor,
+			                      change_reason_code, change_reason, approved_by,
+			                      supersedes_record_id, source_system)
+			SELECT $1, 'ENTITY', 'ACTIVE', '2026-01-01', '2026-01-01', 'test',
+			       'RETRACTION', 'tombstone the first window only', 'approver', record_id, 'test'
+			FROM sec_node
+			WHERE id = $1 AND valid_from = '2026-01-01' AND valid_to = '2026-06-01'`, multi); err != nil {
+			t.Fatalf("tombstone the first window: %v", err)
+		}
+
+		var insideRetracted, afterRetracted, current int
+		if err := pool.QueryRow(ctx, `
+			SELECT (SELECT count(*) FROM sec_node_as_of('2026-03-01') WHERE id = $1),
+			       (SELECT count(*) FROM sec_node_as_of('2026-08-01') WHERE id = $1),
+			       (SELECT count(*) FROM sec_node_current WHERE id = $1)`, multi,
+		).Scan(&insideRetracted, &afterRetracted, &current); err != nil {
+			t.Fatalf("resolved reads after the single tombstone: %v", err)
+		}
+		if insideRetracted != 0 {
+			t.Errorf("as_of inside the tombstoned window returned %d rows, want 0", insideRetracted)
+		}
+		if afterRetracted != 1 || current != 1 {
+			t.Errorf("as_of after the tombstoned window returned %d rows and _current %d, want 1 and 1: a tombstone must not withdraw a window it does not name",
+				afterRetracted, current)
+		}
+	})
+
+	t.Run("tombstone_withdraws_a_single_window_record_entirely", func(t *testing.T) {
 		const victim = "em-t-tombstone"
 		insertNode(ctx, t, pool, victim, "ACTIVE", "2026-01-01", "'infinity'", "should never have existed")
 		// A zero-length window, carrying the reason code and the record it supersedes.
@@ -573,6 +614,110 @@ func TestSecStoreAppendGuardChainsAndRejectsForgedProvenance(t *testing.T) {
 		}
 		if rawPointer {
 			t.Error("the stored hash still reproduces with the raw supersedes_record_id in the pre-image: the pointer is a record_id, so a re-import that reassigns the sequence would invalidate every correction and tombstone")
+		}
+	})
+}
+
+// TestSecStoreKnowledgeTimeReadReplaysWhatWasKnown covers the pg_snapshot overloads of the
+// _as_of functions: the second clock. Valid time says when a fact was true in the world,
+// knowledge time when we had learned it, and the pair is what makes a backdated late discovery
+// distinguishable from something we always knew (RP-4.1, CR-3.5/3.6).
+//
+// The property that matters is the ordering INSIDE the function: the snapshot filter has to run
+// before version resolution. Filtered afterwards, a correction that is invisible in the
+// snapshot still wins its (id, valid_from) group and the group then vanishes — the replay would
+// return no row where it should return the original. Both are asserted.
+func TestSecStoreKnowledgeTimeReadReplaysWhatWasKnown(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	const id = "em-t-knowledge"
+	insertNode(ctx, t, pool, id, "ACTIVE", "2026-01-01", "'infinity'", "what we believed first")
+
+	// The snapshot a consumer would have recorded alongside its effective date.
+	var before string
+	if err := pool.QueryRow(ctx, `SELECT pg_current_snapshot()::text`).Scan(&before); err != nil {
+		t.Fatalf("capture the snapshot: %v", err)
+	}
+
+	// A restatement: same valid window, corrected content, so it is a correction and takes a
+	// processing_version (ADR-0006 §3).
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO sec_node (id, record_type, status, valid_from, valid_to, processing_version,
+		                      actor, change_reason_code, change_reason, approved_by,
+		                      supersedes_record_id, source_system)
+		SELECT $1, 'ENTITY', 'INACTIVE', '2026-01-01', 'infinity', 1,
+		       'test', 'RESTATEMENT', 'the earlier record was wrong', 'approver', record_id, 'test'
+		FROM sec_node WHERE id = $1 AND change_reason_code = 'SEED_LOAD'`, id); err != nil {
+		t.Fatalf("append the restatement: %v", err)
+	}
+
+	t.Run("the_recorded_snapshot_replays_the_original", func(t *testing.T) {
+		var status string
+		if err := pool.QueryRow(ctx, `
+			SELECT status FROM sec_node_as_of('2026-03-01', $1::pg_snapshot) WHERE id = $2`, before, id,
+		).Scan(&status); err != nil {
+			t.Fatalf("replay through the recorded snapshot: %v — an empty result is the failure mode of filtering the snapshot after version resolution", err)
+		}
+		if status != "ACTIVE" {
+			t.Errorf("replay resolved status=%s, want ACTIVE: the snapshot predates the restatement, so it must return what was known then", status)
+		}
+	})
+
+	t.Run("the_effective_date_read_returns_the_correction", func(t *testing.T) {
+		var status string
+		if err := pool.QueryRow(ctx, `SELECT status FROM sec_node_as_of('2026-03-01') WHERE id = $1`, id).Scan(&status); err != nil {
+			t.Fatalf("sec_node_as_of: %v", err)
+		}
+		if status != "INACTIVE" {
+			t.Errorf("the one-argument read resolved status=%s, want INACTIVE (latest processing_version)", status)
+		}
+	})
+
+	t.Run("a_current_snapshot_agrees_with_the_effective_date_read", func(t *testing.T) {
+		var status string
+		if err := pool.QueryRow(ctx, `
+			SELECT status FROM sec_node_as_of('2026-03-01', pg_current_snapshot()) WHERE id = $1`, id,
+		).Scan(&status); err != nil {
+			t.Fatalf("replay through the current snapshot: %v", err)
+		}
+		if status != "INACTIVE" {
+			t.Errorf("current-snapshot replay resolved status=%s, want INACTIVE", status)
+		}
+	})
+
+	t.Run("edges_replay_the_same_way", func(t *testing.T) {
+		const src = "sec-t-knowledge"
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, `+secstoreSpine+`)
+			VALUES ($1, 'SECURITY', 'em-t-issuer-first', 'ENTITY', 'ISSUED_BY', '2026-01-01',
+			        'test', 'SEED_LOAD', 'issuer as first believed', 'test')`, src); err != nil {
+			t.Fatalf("insert the edge: %v", err)
+		}
+		var beforeEdge string
+		if err := pool.QueryRow(ctx, `SELECT pg_current_snapshot()::text`).Scan(&beforeEdge); err != nil {
+			t.Fatalf("capture the edge snapshot: %v", err)
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, valid_to,
+			                      processing_version, actor, change_reason_code, change_reason,
+			                      approved_by, supersedes_record_id, source_system)
+			SELECT $1, 'SECURITY', 'em-t-issuer-first', 'ENTITY', 'ISSUED_BY', '2026-01-01', 'infinity',
+			       1, 'test', 'RESTATEMENT', 'wrong issuer recorded', 'approver', record_id, 'test'
+			FROM sec_edge WHERE src_id = $1 AND change_reason_code = 'SEED_LOAD'`, src); err != nil {
+			t.Fatalf("append the edge restatement: %v", err)
+		}
+
+		var oldReason, newReason string
+		if err := pool.QueryRow(ctx, `
+			SELECT (SELECT change_reason_code FROM sec_edge_as_of('2026-03-01', $1::pg_snapshot) WHERE src_id = $2),
+			       (SELECT change_reason_code FROM sec_edge_as_of('2026-03-01') WHERE src_id = $2)`, beforeEdge, src,
+		).Scan(&oldReason, &newReason); err != nil {
+			t.Fatalf("replay the edge: %v", err)
+		}
+		if oldReason != "SEED_LOAD" || newReason != "RESTATEMENT" {
+			t.Errorf("edge replay resolved %s through the recorded snapshot and %s through the effective-date read, want SEED_LOAD and RESTATEMENT", oldReason, newReason)
 		}
 	})
 }
