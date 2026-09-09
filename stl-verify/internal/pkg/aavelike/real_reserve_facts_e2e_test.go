@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 
@@ -163,4 +165,99 @@ func TestRealReserveFacts_L2(t *testing.T) {
 // errors embed the full request URL.
 func redactAPIKey(err error, apiKey string) string {
 	return strings.ReplaceAll(err.Error(), apiKey, "<redacted>")
+}
+
+// Chains whose historical state predates a migration the archive RPC does not
+// serve: Arbitrum Nitro (block 22207817) and Optimism Bedrock (block 105235063).
+// Rotations below these are verifiable only from the PoolDataProviderUpdated
+// logs, which is how they were sourced.
+var rpcStateFloor = map[int64]uint64{
+	42161: 22207817,
+	10:    105235063,
+}
+
+// TestRealPoolDataProviderRotations_L2 checks every PoolDataProviderHistory entry
+// against the chain rather than against the registry: at each ActiveAtBlock the
+// market's PoolAddressesProvider must already return that entry's address, and one
+// block earlier it must not. A wrong address or a rotation block off in either
+// direction therefore fails here instead of silently serving a backfill from the
+// wrong provider. Run it with `make e2e-real-reserve-facts`.
+func TestRealPoolDataProviderRotations_L2(t *testing.T) {
+	apiKey := os.Getenv("ALCHEMY_API_KEY")
+	if apiKey == "" {
+		t.Skip("ALCHEMY_API_KEY not set")
+	}
+
+	providerABI, err := abis.ParseABI(`[{"inputs":[],"name":"getPoolDataProvider",` +
+		`"outputs":[{"name":"","type":"address"}],"stateMutability":"view","type":"function"}]`)
+	if err != nil {
+		t.Fatalf("parsing PoolAddressesProvider ABI: %v", err)
+	}
+	callData, err := providerABI.Pack("getPoolDataProvider")
+	if err != nil {
+		t.Fatalf("packing getPoolDataProvider: %v", err)
+	}
+
+	markets := []struct {
+		slug    string
+		rpcBase string
+	}{
+		{"aave_v3_arbitrum", "https://arb-mainnet.g.alchemy.com/v2"},
+		{"aave_v3_optimism", "https://opt-mainnet.g.alchemy.com/v2"},
+		{"aave_v3_base", "https://base-mainnet.g.alchemy.com/v2"},
+	}
+
+	for _, market := range markets {
+		key, config, ok := blockchain.GetProtocolBySlug(market.slug)
+		if !ok {
+			t.Fatalf("slug %q is not registered", market.slug)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), reserveFactsTimeout)
+		defer cancel()
+
+		ethClient, err := ethclient.DialContext(ctx, market.rpcBase+"/"+apiKey)
+		if err != nil {
+			t.Fatalf("dialing %s: %s", market.rpcBase, redactAPIKey(err, apiKey))
+		}
+		t.Cleanup(ethClient.Close)
+		if err := chainutil.AssertChainID(ctx, ethClient, key.ChainID); err != nil {
+			t.Fatalf("%s: %s", market.rpcBase, redactAPIKey(err, apiKey))
+		}
+
+		readProvider := func(t *testing.T, block uint64) common.Address {
+			t.Helper()
+			out, err := ethClient.CallContract(ctx, ethereum.CallMsg{
+				To:   &config.PoolAddressesProvider.Address,
+				Data: callData,
+			}, new(big.Int).SetUint64(block))
+			if err != nil {
+				t.Fatalf("getPoolDataProvider at block %d: %s", block, redactAPIKey(err, apiKey))
+			}
+			return common.BytesToAddress(out)
+		}
+
+		for i, entry := range config.PoolDataProviderHistory {
+			t.Run(fmt.Sprintf("%s/entry%d", market.slug, i), func(t *testing.T) {
+				if floor := rpcStateFloor[key.ChainID]; entry.ActiveAtBlock <= floor {
+					t.Skipf("block %d predates the archive floor %d for chain %d",
+						entry.ActiveAtBlock, floor, key.ChainID)
+				}
+
+				if got := readProvider(t, entry.ActiveAtBlock); got != entry.Address {
+					t.Errorf("provider at ActiveAtBlock %d = %s, want %s",
+						entry.ActiveAtBlock, got.Hex(), entry.Address.Hex())
+				}
+
+				// One block earlier the rotation must not have happened yet.
+				if before := entry.ActiveAtBlock - 1; before > rpcStateFloor[key.ChainID] &&
+					before >= config.PoolAddressesProvider.ActiveAtBlock {
+					if got := readProvider(t, before); got == entry.Address {
+						t.Errorf("provider at block %d is already %s, so ActiveAtBlock %d is too late",
+							before, got.Hex(), entry.ActiveAtBlock)
+					}
+				}
+			})
+		}
+	}
 }

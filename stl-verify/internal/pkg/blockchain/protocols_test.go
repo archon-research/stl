@@ -58,6 +58,38 @@ func TestIsKnownProtocol(t *testing.T) {
 			expected: false,
 		},
 		{
+			name:     "Aave V3 Arbitrum",
+			chainID:  42161,
+			address:  "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+			expected: true,
+		},
+		{
+			name:     "Aave V3 Optimism",
+			chainID:  10,
+			address:  "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+			expected: true,
+		},
+		{
+			name:     "Aave V3 Base",
+			chainID:  8453,
+			address:  "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5",
+			expected: true,
+		},
+		{
+			// Base runs its own Pool address, so the CREATE2 address the other
+			// L2s share must not resolve there.
+			name:     "shared L2 Pool address on Base",
+			chainID:  8453,
+			address:  "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+			expected: false,
+		},
+		{
+			name:     "Base Pool address on Arbitrum",
+			chainID:  42161,
+			address:  "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5",
+			expected: false,
+		},
+		{
 			name:     "unknown protocol - RedemptionIdle",
 			chainID:  1,
 			address:  "0x4c21B7577C8FE8b0B0669165ee7C8f67fa1454Cf",
@@ -120,6 +152,42 @@ func TestGetProtocolConfig(t *testing.T) {
 			expectExists: true,
 			expectName:   "Aave V3 Avalanche",
 			expectType:   "lending",
+		},
+		{
+			name:         "Aave V3 Arbitrum",
+			chainID:      42161,
+			address:      "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+			expectExists: true,
+			expectName:   "Aave V3 Arbitrum",
+			expectType:   "lending",
+		},
+		{
+			name:         "Aave V3 Optimism",
+			chainID:      10,
+			address:      "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+			expectExists: true,
+			expectName:   "Aave V3 Optimism",
+			expectType:   "lending",
+		},
+		{
+			name:         "Aave V3 Base",
+			chainID:      8453,
+			address:      "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5",
+			expectExists: true,
+			expectName:   "Aave V3 Base",
+			expectType:   "lending",
+		},
+		{
+			name:         "shared L2 Pool address on Base",
+			chainID:      8453,
+			address:      "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+			expectExists: false,
+		},
+		{
+			name:         "Base Pool address on Arbitrum",
+			chainID:      42161,
+			address:      "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5",
+			expectExists: false,
 		},
 		{
 			name:         "Aave V3 address on wrong chain",
