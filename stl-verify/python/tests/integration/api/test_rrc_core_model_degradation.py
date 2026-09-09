@@ -306,3 +306,60 @@ def test_morpho_vault_without_indexed_data_degrades_to_gap_sweep(async_db_url: s
     models = [r["risk_model"] for r in response.json()["results"]]
     assert "core_model" not in models
     assert models == ["gap_sweep"]
+
+
+# ---------------------------------------------------------------------------
+# Syrup 1:1 serving through the real app (VEC-652)
+#
+# The syrup receipt tokens are migration-seeded and the packaged mapping now
+# routes them straight to their market keys — the SparkLend direct shape, not
+# the Morpho vault aggregation. Maple is excluded from gap_sweep and has no
+# SURAF rating, so before a runner result exists the envelope has no
+# applicable model at all (404); with a result row, CORE serves alone.
+# ---------------------------------------------------------------------------
+
+_SYRUP_USDC = "0x80ac24aa929eaf5013f6436cda2a7ba190f5cc0b"
+_SYRUP_USDG = "0x87b65c4aaffa76881f9e96f3e7ed945ddfc3cd7a"
+
+
+async def _seed_syrup_result(db_url: str) -> None:
+    conn = await asyncpg.connect(db_url)
+    try:
+        await conn.execute(
+            """
+            INSERT INTO core_model_results
+                (market_key, crr_el_pct, crr_es_pct, crr_var_pct, hhi, protocol,
+                 forecast_step, n_mc, copula_type, computed_at, params)
+            VALUES ('syrup_usdc', 1.75, 27.9, 25.0, NULL, 'SYRUP', 14, 100, 'T-COPULA', NOW(), '{}')
+            ON CONFLICT DO NOTHING
+            """
+        )
+    finally:
+        await conn.close()
+
+
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
+async def _syrup_result(db_url: str) -> None:
+    await _seed_syrup_result(db_url)
+
+
+def test_syrup_receipt_token_serves_the_core_result_directly(async_db_url: str, _syrup_result: None) -> None:
+    with _client(async_db_url) as client:
+        response = client.post("/v1/risk/rrc/scenario", json=_morpho_scenario_body(_SYRUP_USDC))
+
+    assert response.status_code == 200, response.text
+    results = {r["risk_model"]: r for r in response.json()["results"]}
+    core = results["core_model"]
+    assert core["comparable_crr_pct"] == "1.75"
+    assert core["rrc_usd"] == "17.50"  # 1000 * 1.75%
+    assert core["details"]["protocol"] == "SYRUP"
+    assert core["details"]["crr_es_pct"] == "27.9"
+
+
+def test_unmapped_syrup_usdg_gets_no_core_model(async_db_url: str, _syrup_result: None) -> None:
+    # syrupUSDG has no CORE market, so the mapping deliberately omits it; with
+    # no other model applicable the endpoint answers 404, never a wrong number.
+    with _client(async_db_url) as client:
+        response = client.post("/v1/risk/rrc/scenario", json=_morpho_scenario_body(_SYRUP_USDG))
+
+    assert response.status_code == 404
