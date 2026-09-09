@@ -192,7 +192,13 @@ CREATE TABLE sec_node (
         (record_type = 'SOURCE'   AND id LIKE 'src-%')     OR
         (record_type = 'ACCOUNT'  AND id LIKE 'acct-%')
     ),
-    CONSTRAINT sec_node_valid_chk CHECK (valid_from <= valid_to)
+    CONSTRAINT sec_node_valid_chk CHECK (valid_from <= valid_to),
+    -- A row whose window STARTS at infinity satisfies valid_from <= valid_to and then matches no
+    -- read ever, because every read tests valid_from <= effective_at: it lands, takes a PK slot
+    -- and a content_hash, and is invisible forever with no error anywhere. 'infinity' is the
+    -- open-END sentinel and nothing else (review finding; '-infinity' is refused for the same
+    -- reason — a start nobody can name is not a start).
+    CONSTRAINT sec_node_valid_from_finite_chk CHECK (valid_from <> 'infinity' AND valid_from <> '-infinity')
 );
 COMMENT ON TABLE sec_node IS '[Dimension] Combined SECs master (ADR-0005 §2): one node per real-world thing, discriminated by record_type. Append-only (full ACL revoke incl. owner — nothing FKs this table), bitemporal (valid window + ingest_xid). valid_to is NOT NULL (''infinity'' when open) and in the PK, so close-and-open is an append at processing_version 0; a zero-length window is a retraction tombstone. The instrument is NOT a node kind: native keys resolve via the instrument register (VEC-616). Individuals carry a pseudonymous surrogate only; PII lives in a separate store (DP-1). Plain table: governance-rate writes, per the sparse-table exception.';
 COMMENT ON COLUMN sec_node.id IS 'Roles: PK (with processing_version, valid_from). Opaque, kind-prefixed (em-/sec-/concept-/src-/acct-), house-assigned once, never derived from a public identifier or symbol, and never hashed into position_id. Seeded em-* ids stand unchanged.';
@@ -218,7 +224,15 @@ COMMENT ON COLUMN sec_node.content_hash IS 'Roles: Audit, Derived. sha256 over t
 -- ingest_xid DESC, record_id DESC. Columns AND directions have to match the whole key or the
 -- DISTINCT ON degrades to a full scan plus sort on every current read (VEC-633 measures this).
 CREATE INDEX sec_node_resolve_idx ON sec_node (id, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC);
-CREATE INDEX sec_node_type_idx ON sec_node (record_type, id, valid_from DESC, processing_version DESC);
+-- Same rule as sec_node_resolve_idx, and it applies here too: the kind-scoped read below sorts
+-- (id, valid_from) ASC then processing_version DESC, ingest_xid DESC, record_id DESC, so this key
+-- must match through its whole length. It was (…, valid_from DESC, processing_version DESC) —
+-- wrong direction on valid_from and two columns short, so it could not supply the sort at all and
+-- the planner fell back to sec_node_resolve_idx, which has no leading record_type. Measured at
+-- 200k nodes: 102 ms with the mismatched key against 64 ms with this one, the difference being an
+-- inner sort node that disappears (review of the first draft, which shipped the mismatch under a
+-- comment stating the rule correctly).
+CREATE INDEX sec_node_type_idx ON sec_node (record_type, id, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC);
 
 -- ---------------------------------------------------------------------------
 -- The relationship store: edges
@@ -255,20 +269,37 @@ CREATE TABLE sec_edge (
     PRIMARY KEY (rel_type, src_id, dst_id, edge_seq, processing_version, valid_from, valid_to),
     CONSTRAINT sec_edge_record_id_key UNIQUE (record_id),
     CONSTRAINT sec_edge_weight_basis_chk CHECK (rel_weight IS NULL OR weight_basis IS NOT NULL),
-    -- The cheap half of GQ-11 at the engine boundary: endpoint EXISTENCE and agreement with the
-    -- node's record_type are cross-row and stay with the validator, but the kind DOMAIN is not.
-    -- This list is the same closed set as sec_node.record_type and moves with it.
-    CONSTRAINT sec_edge_src_kind_chk CHECK (src_kind IN ('ENTITY','SECURITY','CONCEPT','SOURCE','ACCOUNT')),
-    CONSTRAINT sec_edge_dst_kind_chk CHECK (dst_kind IN ('ENTITY','SECURITY','CONCEPT','SOURCE','ACCOUNT')),
-    CONSTRAINT sec_edge_valid_chk CHECK (valid_from <= valid_to)
+    -- The cheap half of GQ-11 at the engine boundary. Endpoint EXISTENCE is cross-row and stays
+    -- with the validator, but the kind is NOT only a domain question: sec_node_id_prefix_chk makes
+    -- record_type a deterministic function of the id prefix, so a declared kind that contradicts
+    -- its own endpoint id is single-row checkable — the same fact the kind-scoped read below
+    -- relies on for its pushdown. The first draft checked only that the kind was one of the five,
+    -- which accepted ('em-90001','SECURITY') and an empty dst_id (review finding). These CHECKs
+    -- are sec_node_id_prefix_chk applied to each endpoint, and they subsume the domain check.
+    CONSTRAINT sec_edge_src_kind_chk CHECK (
+        (src_kind = 'ENTITY'   AND src_id LIKE 'em-%')      OR
+        (src_kind = 'SECURITY' AND src_id LIKE 'sec-%')     OR
+        (src_kind = 'CONCEPT'  AND src_id LIKE 'concept-%') OR
+        (src_kind = 'SOURCE'   AND src_id LIKE 'src-%')     OR
+        (src_kind = 'ACCOUNT'  AND src_id LIKE 'acct-%')
+    ),
+    CONSTRAINT sec_edge_dst_kind_chk CHECK (
+        (dst_kind = 'ENTITY'   AND dst_id LIKE 'em-%')      OR
+        (dst_kind = 'SECURITY' AND dst_id LIKE 'sec-%')     OR
+        (dst_kind = 'CONCEPT'  AND dst_id LIKE 'concept-%') OR
+        (dst_kind = 'SOURCE'   AND dst_id LIKE 'src-%')     OR
+        (dst_kind = 'ACCOUNT'  AND dst_id LIKE 'acct-%')
+    ),
+    CONSTRAINT sec_edge_valid_chk CHECK (valid_from <= valid_to),
+    CONSTRAINT sec_edge_valid_from_finite_chk CHECK (valid_from <> 'infinity' AND valid_from <> '-infinity')
 );
 COMMENT ON TABLE sec_edge IS '[Dimension] Directed, typed, weighted relationship store (ADR-0005 §3/§5). Append-only (full ACL revoke incl. owner — nothing FKs this table); close-and-open at processing_version 0 (valid_to is NOT NULL, ''infinity'' when open, and in the PK); retraction is a tombstone append with a zero-length window. Endpoint-kind legality vs rel_type_vocabulary is loader/validator-enforced (cross-row); single-valued cardinality is a DQ check over current state, never a write trigger. Inverses and closures are derived, never stored. Plain table: governance-rate writes — block-stamped projection types (ALLOCATES) are excluded by design and would need their own hypertable store if ratified.';
 COMMENT ON COLUMN sec_edge.edge_id IS 'Roles: Derived. Generated human-readable identity of the LOGICAL edge; the PK is the seven-column (rel_type, src_id, dst_id, edge_seq, processing_version, valid_from, valid_to) tuple, so one edge_id spans every version and window of that edge.';
 COMMENT ON COLUMN sec_edge.edge_seq IS 'Roles: PK component. DM-6 discriminator: deliberately duplicated edges (multi-typing, per-edge attribute clusters) coexist instead of superseding their twin. Base is 1 per ADR-0005 §3, so a twin is 2; 0 is rejected rather than left as a second spelling of the base edge, since edge_seq is rendered into the stored edge_id.';
 COMMENT ON COLUMN sec_edge.src_id IS 'Roles: FK→sec_node.id (soft; SCD2 ids non-unique — resolve via the current view). Edge source.';
-COMMENT ON COLUMN sec_edge.src_kind IS 'Denormalised source kind, CHECKed against the closed record_type set; that it AGREES with the source node''s record_type is cross-row and stays validator-enforced (GQ-11).';
+COMMENT ON COLUMN sec_edge.src_kind IS 'Denormalised source kind, CHECKed to agree with src_id''s own prefix (so ''em-…'' cannot be declared SECURITY). That the endpoint EXISTS as a current node is cross-row and stays validator-enforced (GQ-11).';
 COMMENT ON COLUMN sec_edge.dst_id IS 'Roles: FK→sec_node.id (soft). Edge destination.';
-COMMENT ON COLUMN sec_edge.dst_kind IS 'Denormalised destination kind, CHECKed against the closed record_type set; agreement with the destination node''s record_type is validator-enforced (GQ-11).';
+COMMENT ON COLUMN sec_edge.dst_kind IS 'Denormalised destination kind, CHECKed to agree with dst_id''s own prefix. Endpoint existence stays validator-enforced (GQ-11).';
 COMMENT ON COLUMN sec_edge.rel_type IS 'Roles: FK→rel_type_vocabulary.rel_type, PK component. The governed type.';
 COMMENT ON COLUMN sec_edge.rel_weight IS 'Exact decimal numeric(30,18), never float (RP-4.4). Look-through = sum over paths of weight products within one basis. NULL on unweighted types; a NULL weight on a weighted walk is an error, never treated as 1.0.';
 COMMENT ON COLUMN sec_edge.weight_basis IS 'Roles: FK→weight_basis_vocabulary.basis. Mandatory when rel_weight is present (CHECK).';
@@ -332,9 +363,10 @@ RETURNS SETOF sec_node LANGUAGE sql STABLE AS $$
       AND effective_at < valid_to
     ORDER BY id, valid_from DESC
 $$;
-COMMENT ON FUNCTION sec_node_as_of(date) IS 'As-of node read; effective_at is an explicit recorded parameter, never now() (ADR-0006 §4). Filtering the RESULT of this function by record_type scans and sorts the whole store — use sec_node_as_of(effective_at, record_kind) instead.';
+COMMENT ON FUNCTION sec_node_as_of(date) IS 'As-of node read; effective_at is an explicit recorded parameter, never now() (ADR-0006 §4). Filtering the RESULT of this function by record_type scans and sorts the whole store — use sec_node_as_of_kind(effective_at, record_kind) instead.';
 
--- Kind-scoped as-of read. Not a convenience: a predicate on record_type applied to the
+-- Kind-scoped as-of read, under its own name rather than as an overload (see the pg_snapshot
+-- form below for why). Not a convenience: a predicate on record_type applied to the
 -- one-argument function's RESULT cannot be pushed through the DISTINCT ON, because
 -- record_type is not part of its key, so the whole store is scanned and sorted — measured at
 -- 65 ms with a 4.4 MB external merge over 200k rows, against 0.088 ms for the same function
@@ -344,9 +376,8 @@ COMMENT ON FUNCTION sec_node_as_of(date) IS 'As-of node read; effective_at is an
 -- Filtering INSIDE the CTE is sound rather than an approximation: record_type is fixed for
 -- the life of a node id by sec_node_id_prefix_chk, so no version of an id can carry a
 -- different kind, and restricting the input therefore cannot change which version wins.
--- sec_node_type_idx (record_type, id, valid_from DESC, processing_version DESC) is what this
--- reads.
-CREATE FUNCTION sec_node_as_of(effective_at date, record_kind text)
+-- sec_node_type_idx is what this reads, and its key matches this sort through its whole length.
+CREATE FUNCTION sec_node_as_of_kind(effective_at date, record_kind text)
 RETURNS SETOF sec_node LANGUAGE sql STABLE AS $$
     WITH latest AS (
         SELECT DISTINCT ON (id, valid_from) *
@@ -360,7 +391,7 @@ RETURNS SETOF sec_node LANGUAGE sql STABLE AS $$
       AND effective_at < valid_to
     ORDER BY id, valid_from DESC
 $$;
-COMMENT ON FUNCTION sec_node_as_of(date, text) IS 'As-of node read scoped to one record_type, pushed into the version resolution instead of applied to its result (see the note above the definition). Same two-step semantics as sec_node_as_of(date).';
+COMMENT ON FUNCTION sec_node_as_of_kind(date, text) IS 'As-of node read scoped to one record_type, pushed into the version resolution instead of applied to its result (see the note above the definition). Same two-step semantics as sec_node_as_of(date). Deliberately NOT an overload of sec_node_as_of: see the note on the pg_snapshot form.';
 
 -- Knowledge-time read: what a reader holding this snapshot would have seen as true on
 -- effective_at. The two clocks are independent parameters, which is the whole point — valid time
@@ -377,10 +408,13 @@ COMMENT ON FUNCTION sec_node_as_of(date, text) IS 'As-of node read scoped to one
 -- visibility key and wall clock cannot order commits (a row stamps ingested_at at transaction
 -- start and becomes visible at commit).
 --
--- Overload trap for callers: (date, text) and (date, pg_snapshot) coexist, and an UNKNOWN
--- literal resolves to the text one, because text is the preferred type in its category. So
--- sec_node_as_of(d, '10:20:') is a kind-scoped read looking for a record_type named "10:20:"
--- — zero rows, no error. Pass a snapshot as a typed value or cast it: $1::pg_snapshot.
+-- This is why the kind-scoped read is sec_node_as_of_KIND and not a second two-argument
+-- overload. With both present, an unknown-typed second argument resolves to text (the preferred
+-- type in its category), and most drivers have no pg_snapshot type and bind it as a string — so
+-- a knowledge-time replay would silently become a kind-scoped read for a record_type that does
+-- not exist: zero rows, no error, indistinguishable from "the record did not exist then". The
+-- first draft documented that hazard instead of removing it (review finding). A distinct name
+-- means a mis-bound snapshot is a type error at the call, which is what it should be.
 CREATE FUNCTION sec_node_as_of(effective_at date, known_at pg_snapshot)
 RETURNS SETOF sec_node LANGUAGE sql STABLE AS $$
     WITH known AS (
@@ -593,8 +627,12 @@ ALTER TABLE sec_node ADD CONSTRAINT sec_node_status_fkey
 -- mismatch fails the insert. content_hash is declared NOT NULL on both stores: NOT NULL is
 -- checked after BEFORE triggers, so the guard always satisfies it, and the declaration turns a
 -- disabled trigger into a failed insert instead of a silently unhashed row.
--- No table is read, so the plan_cache_mode rule for
--- BEFORE INSERT triggers (db/migrations AGENTS.md) does not apply.
+-- The predecessor lookup does not need the plan_cache_mode treatment that AGENTS.md requires of
+-- BEFORE INSERT triggers, and the reason is not "no table is read" — the guard reads the store it
+-- guards (an earlier draft of this comment said otherwise): that rule is scoped to per-row
+-- HYPERTABLE lookups, where a generic plan fans out over every chunk. These are plain tables, the
+-- lookup is an equality on a unique index, and it goes through EXECUTE, which plpgsql never
+-- plan-caches at all.
 -- ---------------------------------------------------------------------------
 
 CREATE FUNCTION sec_store_append_guard() RETURNS trigger
@@ -680,7 +718,10 @@ BEGIN
             EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON %I FROM stl_readwrite', t);
         END IF;
         IF NOT owner_is_super AND has_table_privilege(owner_role, t, 'UPDATE') THEN
-            RAISE EXCEPTION 'append-only not enforced: owner %I still holds UPDATE on %I after the revoke', owner_role, t;
+            -- RAISE takes % only; %I is a format() specifier and renders as the value with a
+            -- literal I glued on, which is not what you want in the one message that fires when
+            -- append-only has already failed.
+            RAISE EXCEPTION 'append-only not enforced: owner % still holds UPDATE on % after the revoke', owner_role, t;
         END IF;
     END LOOP;
     -- Vocabulary tables: app role fully revoked; the OWNER KEEPS UPDATE because the FK integrity

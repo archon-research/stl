@@ -72,17 +72,21 @@ func TestSecStoreClosingRowSupersedesRatherThanResurrects(t *testing.T) {
 	insertNode(ctx, t, pool, id, "INACTIVE", "2026-06-01", "'infinity'", "open the next window")
 
 	t.Run("close_and_open_lands_at_processing_version_0", func(t *testing.T) {
-		var rows, versions int
+		// min and max, not count(DISTINCT): a uniform-but-wrong version satisfies "they all agree"
+		// and the subtest's own name would be false — change the column default to 1 and the
+		// earlier form still passed.
+		var rows, lo, hi int
 		if err := pool.QueryRow(ctx, `
-			SELECT count(*), count(DISTINCT processing_version) FROM sec_node WHERE id = $1`, id,
-		).Scan(&rows, &versions); err != nil {
+			SELECT count(*), min(processing_version), max(processing_version)
+			FROM sec_node WHERE id = $1`, id,
+		).Scan(&rows, &lo, &hi); err != nil {
 			t.Fatalf("count rows: %v", err)
 		}
 		if rows != 3 {
 			t.Errorf("got %d rows, want 3 — a closing row that collides on the PK is the failure this guards", rows)
 		}
-		if versions != 1 {
-			t.Errorf("rows span %d processing_versions, want 1: a close is a valid-time change and must not burn a correction version (ADR-0006 §3)", versions)
+		if lo != 0 || hi != 0 {
+			t.Errorf("processing_version spans [%d, %d], want [0, 0]: a close is a valid-time change and must not burn a correction version (ADR-0006 §3)", lo, hi)
 		}
 	})
 
@@ -241,16 +245,19 @@ func TestSecStoreRejectsAnIllegalRelTypeTriple(t *testing.T) {
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
 
-	insertEdge := func(relType, srcKind, dstKind string) error {
+	// Every case gets its own src_id. Sharing one meant the cases shared a primary key, so if
+	// sec_edge_src_kind_chk were dropped the first case would land and the last would fail on a
+	// duplicate key — reported as "the GQ-11 gap has closed" when a CHECK had actually been lost.
+	insertEdge := func(caseID, relType, srcID, srcKind, dstID, dstKind string) error {
 		_, err := pool.Exec(ctx, `
 			INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, `+secstoreSpine+`)
-			VALUES ('sec-t-triple', $2, 'em-t-triple', $3, $1, '2026-01-01', 'test', 'SEED_LOAD', 'triple', 'test')`,
-			relType, srcKind, dstKind)
+			VALUES ($2, $3, $4, $5, $1, '2026-01-01', 'test', 'SEED_LOAD', $6, 'test')`,
+			relType, srcID, srcKind, dstID, dstKind, "triple case "+caseID)
 		return err
 	}
 
 	t.Run("endpoint_kind_outside_the_record_type_set_is_rejected", func(t *testing.T) {
-		err := insertEdge("ISSUED_BY", "NOT_A_KIND", "ENTITY")
+		err := insertEdge("kind", "ISSUED_BY", "sec-t-triple-a", "NOT_A_KIND", "em-t-triple-a", "ENTITY")
 		var pgErr *pgconn.PgError
 		if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
 			t.Fatalf("insert with src_kind NOT_A_KIND failed with %v, want SQLSTATE 23514 (check_violation)", err)
@@ -258,10 +265,26 @@ func TestSecStoreRejectsAnIllegalRelTypeTriple(t *testing.T) {
 	})
 
 	t.Run("rel_type_outside_the_governed_vocabulary_is_rejected", func(t *testing.T) {
-		err := insertEdge("INVENTED_BY", "SECURITY", "ENTITY")
+		err := insertEdge("reltype", "INVENTED_BY", "sec-t-triple-b", "SECURITY", "em-t-triple-b", "ENTITY")
 		var pgErr *pgconn.PgError
 		if !errors.As(err, &pgErr) || pgErr.Code != "23503" {
 			t.Fatalf("insert with rel_type INVENTED_BY failed with %v, want SQLSTATE 23503 (foreign_key_violation) — GQ-01", err)
+		}
+	})
+
+	t.Run("endpoint_kind_contradicting_its_own_id_prefix_is_rejected", func(t *testing.T) {
+		// sec_node_id_prefix_chk makes record_type a function of the prefix, so this much is
+		// single-row checkable even though endpoint EXISTENCE is not.
+		for _, c := range []struct{ name, srcID, srcKind, dstID, dstKind string }{
+			{"em- declared SECURITY", "em-90001", "SECURITY", "sec-t-x", "SECURITY"},
+			{"unprefixed src", "total-garbage", "ENTITY", "sec-t-x", "SECURITY"},
+			{"empty dst", "sec-t-y", "SECURITY", "", "SECURITY"},
+		} {
+			err := insertEdge(c.name, "HAS_UNDERLYING", c.srcID, c.srcKind, c.dstID, c.dstKind)
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+				t.Errorf("%s: failed with %v, want SQLSTATE 23514 — a declared kind must agree with its endpoint's prefix", c.name, err)
+			}
 		}
 	})
 
@@ -282,7 +305,7 @@ func TestSecStoreRejectsAnIllegalRelTypeTriple(t *testing.T) {
 	t.Run("illegal_triple_is_not_yet_rejected_at_the_write_boundary", func(t *testing.T) {
 		// The documented gap, asserted so it cannot be forgotten. INVERT THIS SUBTEST when
 		// VEC-622's validator or a legal-pairs FK starts refusing the write.
-		if err := insertEdge("ISSUED_BY", "SECURITY", "CONCEPT"); err != nil {
+		if err := insertEdge("triple", "ISSUED_BY", "sec-t-triple-c", "SECURITY", "concept-t-triple-c", "CONCEPT"); err != nil {
 			t.Fatalf("SECURITY -> CONCEPT ISSUED_BY was refused with %v — if that is deliberate, this subtest is now inverted: assert the rejection and delete this comment (GQ-11, VEC-622)", err)
 		}
 		t.Log("known gap: an illegal (rel_type, src_kind, dst_kind) triple lands. Legality is two array columns on the vocabulary, which no CHECK or FK on sec_edge can read, so ADR-0005 §3 assigns GQ-11 to the validator (VEC-622)")
@@ -420,6 +443,13 @@ func TestSecStoreWave1IsAppendOnlyUnderTheRealRoles(t *testing.T) {
 				t.Errorf("%s: stl_readwrite holds update=%v delete=%v, want neither — ALTER DEFAULT PRIVILEGES grants full DML on every migrator-owned table, so the REVOKE is load-bearing",
 					table, canUpdate, canDelete)
 			}
+			var canTruncate bool
+			if err := pool.QueryRow(ctx, `SELECT has_table_privilege('stl_readwrite', $1, 'TRUNCATE')`, table).Scan(&canTruncate); err != nil {
+				t.Fatalf("read TRUNCATE grant for %s: %v", table, err)
+			}
+			if canTruncate {
+				t.Errorf("%s: stl_readwrite holds TRUNCATE", table)
+			}
 			if isStore := table == "sec_node" || table == "sec_edge"; isStore && !canInsert {
 				t.Errorf("%s: stl_readwrite must keep INSERT — the stores are append-only, not read-only", table)
 			}
@@ -454,13 +484,20 @@ func TestSecStoreWave1IsAppendOnlyUnderTheRealRoles(t *testing.T) {
 		return held
 	}
 
-	t.Run("owner_holds_no_update_on_the_stores", func(t *testing.T) {
+	t.Run("owner_holds_no_update_delete_or_truncate_on_the_stores", func(t *testing.T) {
 		for _, table := range stores {
 			if ownerHas(t, table, "UPDATE") {
 				t.Errorf("%s: the owner still holds UPDATE in the ACL — the full revoke (position_state pattern) did not land", table)
 			}
 			if ownerHas(t, table, "DELETE") {
 				t.Errorf("%s: the owner still holds DELETE in the ACL", table)
+			}
+			// TRUNCATE is revoked by the migration and was asserted nowhere, so dropping the word
+			// from the REVOKE left the whole suite green while stl_migrator — the role that runs
+			// every migration — could erase all history in one statement. No row trigger can catch
+			// it either: TRUNCATE fires none.
+			if ownerHas(t, table, "TRUNCATE") {
+				t.Errorf("%s: the owner still holds TRUNCATE in the ACL", table)
 			}
 		}
 	})
@@ -472,6 +509,9 @@ func TestSecStoreWave1IsAppendOnlyUnderTheRealRoles(t *testing.T) {
 			}
 			if ownerHas(t, table, "DELETE") {
 				t.Errorf("%s: the owner still holds DELETE; append-only leaves no delete channel", table)
+			}
+			if ownerHas(t, table, "TRUNCATE") {
+				t.Errorf("%s: the owner still holds TRUNCATE, which no row trigger can intercept", table)
 			}
 		}
 	})
@@ -555,6 +595,53 @@ func TestSecStoreAppendGuardChainsAndRejectsForgedProvenance(t *testing.T) {
 		var pgErr *pgconn.PgError
 		if !errors.As(err, &pgErr) || pgErr.Code != "P0001" {
 			t.Fatalf("mismatched content_hash failed with %v, want P0001 from the guard", err)
+		}
+	})
+
+	t.Run("a_window_starting_at_infinity_is_rejected", func(t *testing.T) {
+		// It used to satisfy valid_from <= valid_to, land, take a PK slot and a content_hash, and
+		// then match no read ever — every read tests valid_from <= effective_at. A write that
+		// disappears without an error is worse than one that fails.
+		for _, store := range []string{"sec_node", "sec_edge"} {
+			var err error
+			if store == "sec_node" {
+				_, err = pool.Exec(ctx, `
+					INSERT INTO sec_node (id, record_type, status, valid_from, valid_to, `+secstoreSpine+`)
+					VALUES ('em-t-inf', 'ENTITY', 'ACTIVE', 'infinity', 'infinity', 'test', 'SEED_LOAD', 'never visible', 'test')`)
+			} else {
+				_, err = pool.Exec(ctx, `
+					INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, valid_to, `+secstoreSpine+`)
+					VALUES ('sec-t-inf', 'SECURITY', 'em-t-inf', 'ENTITY', 'ISSUED_BY', 'infinity', 'infinity', 'test', 'SEED_LOAD', 'never visible', 'test')`)
+			}
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+				t.Errorf("%s: valid_from 'infinity' failed with %v, want SQLSTATE 23514 — 'infinity' is the open-END sentinel only", store, err)
+			}
+		}
+	})
+
+	t.Run("a_matching_supplied_hash_is_accepted", func(t *testing.T) {
+		// Without this, a guard that rejected EVERY supplied hash would pass the mismatch subtest
+		// above and still break the re-import path the substitution exists to enable.
+		const id = "em-t-guard-verified"
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO sec_node (id, record_type, status, valid_from, valid_to, content_hash, `+secstoreSpine+`)
+			VALUES ($1::text, 'ENTITY', 'ACTIVE', '2026-01-01', 'infinity',
+			        sha256(convert_to(jsonb_build_object(
+			            'id', $1::text, 'record_type', 'ENTITY', 'chain_id', NULL, 'status', 'ACTIVE',
+			            'attrs', '{}'::jsonb, 'valid_from', '2026-01-01'::date, 'valid_to', 'infinity'::date,
+			            'processing_version', 0, 'run_id', NULL, 'actor', 'test',
+			            'change_reason_code', 'SEED_LOAD', 'change_reason', 'export re-import',
+			            'approved_by', NULL, 'source_system', 'test')::text, 'UTF8')),
+			        'test', 'SEED_LOAD', 'export re-import', 'test')`, id); err != nil {
+			t.Fatalf("a correctly computed supplied hash must be accepted: %v", err)
+		}
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM sec_node WHERE id = $1`, id).Scan(&n); err != nil {
+			t.Fatalf("read back: %v", err)
+		}
+		if n != 1 {
+			t.Errorf("row count %d, want 1", n)
 		}
 	})
 
