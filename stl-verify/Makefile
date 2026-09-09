@@ -1201,7 +1201,12 @@ docker-push: ecr-login
 # that already has one (ECR tag immutability, ARCT-420).
 DOCKER_NO_CACHE     ?= 0
 DOCKER_CACHE_EXPORT ?= $(if $(filter-out 0,$(DOCKER_PUSH)),1,0)
-docker_no_cache_flag = $(if $(filter-out 0,$(DOCKER_NO_CACHE)),--no-cache)
+# --pull is not redundant with --no-cache: --no-cache discards the build cache,
+# but base images still resolve from the builder's local store, so a stale
+# alpine:3.21 or node:24-alpine would be reused and the refresh would refresh
+# nothing. It works in CI today only because setup-buildx-action hands each run
+# a fresh builder with an empty store — incidental, not guaranteed.
+docker_no_cache_flag = $(if $(filter-out 0,$(DOCKER_NO_CACHE)),--no-cache --pull)
 ifeq ($(DOCKER_CACHE),1)
 ifndef DOCKER_CACHE_REPO
 $(error DOCKER_CACHE=1 requires DOCKER_CACHE_REPO, e.g. ghcr.io/<owner>/<repo>/buildcache)
@@ -1222,9 +1227,11 @@ endif
 #   IMG_TAG         image tag (default: $(IMAGE_TAG))
 #   IMG_LATEST_TAG  moving tag pushed alongside IMG_TAG (default: latest)
 # Set DOCKER_PUSH=0 to build only: validate the build and import the registry
-# cache, without loading or pushing the final image. Cache export is gated on
-# DOCKER_PUSH, so a build-only run reuses the cache but does not warm/overwrite
-# it. Useful for a CI build check that needs no ECR credentials.
+# cache, without loading or pushing the final image. Cache export follows
+# DOCKER_CACHE_EXPORT, which defaults to "whenever we push", so a build-only run
+# reuses the cache but does not warm/overwrite it. Useful for a CI build check
+# that needs no ECR credentials. The security refresh is the one caller that
+# sets DOCKER_CACHE_EXPORT=1 with DOCKER_PUSH=0.
 IMG_TAG        ?= $(IMAGE_TAG)
 IMG_LATEST_TAG ?= latest
 DOCKER_PUSH    ?= 1
