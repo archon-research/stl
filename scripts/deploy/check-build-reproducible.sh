@@ -203,8 +203,23 @@ require_buildkit() {
 # top of it on every invocation would make CI both slower and redundant for no
 # gain, since CI's builder is already the right driver.
 use_isolated_builder() {
-  local driver
-  driver="$(docker buildx inspect 2>/dev/null | awk -F'[[:space:]]+' '/^Driver:/ { print $2; exit }')"
+  local driver inspect_out status=0
+
+  # Capture with `|| status=$?`, never a bare assignment: this script runs under
+  # `set -euo pipefail`, so an unguarded `driver="$(docker ... | awk ...)"` aborts
+  # the whole run the moment `docker buildx inspect` returns non-zero -- silently,
+  # with only the raw exit code and no message. That is exactly how this function
+  # first failed in CI (exit 255, no output). Keep stderr too: discarding it is
+  # what made the failure undiagnosable.
+  inspect_out="$(docker buildx inspect 2>&1)" || status=$?
+  if [ "$status" -ne 0 ]; then
+    driver=""
+    printf '==> could not inspect the active buildx builder (exit %s), creating a private one\n%s\n' \
+      "$status" "$inspect_out" >&2
+  else
+    driver="$(printf '%s\n' "$inspect_out" | awk -F'[[:space:]]+' '/^Driver:/ { print $2; exit }')"
+  fi
+
   [ "$driver" = "docker-container" ] && return
   BUILDX_BUILDER="stl-repro-check-$$"
   docker buildx create --name "$BUILDX_BUILDER" --driver docker-container >/dev/null \
