@@ -5,17 +5,6 @@ import (
 	"runtime/debug"
 )
 
-// Set via ldflags at build time by local `go build` callers that pass them:
-//
-//	-X github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo.GitCommit=...
-//	-X github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo.BuildTime=...
-//
-// Released images deliberately stamp nothing (ORB-366) — see Populate.
-var (
-	GitCommit string
-	BuildTime string
-)
-
 // setIfEmpty is how every source below defers to the one before it: the first
 // source with a value wins, and a later one never overwrites it.
 func setIfEmpty(dst *string, value string) {
@@ -24,13 +13,18 @@ func setIfEmpty(dst *string, value string) {
 	}
 }
 
+// readBuildInfo is a seam over debug.ReadBuildInfo: ambient VCS embedding
+// can't be forced on or off from a test (it depends on how the test binary
+// itself was built), so tests swap this to simulate both states.
+var readBuildInfo = debug.ReadBuildInfo
+
 // populateFromVCS fills commit and buildTime from Go's embedded VCS info when
-// they haven't already been set via ldflags. It only ever fires for a binary
-// built where .git was reachable: `go build`/`go run` from a checkout. The
-// released images build from the stl-verify/ directory as their context, which
-// carries no .git, so Go embeds no VCS info there.
+// they haven't already been set. It only ever fires for a binary built where
+// .git was reachable: `go build`/`go run` from a checkout. The released images
+// build from the stl-verify/ directory as their context, which carries no
+// .git, so Go embeds no VCS info there.
 func populateFromVCS(commit, buildTime *string) {
-	info, ok := debug.ReadBuildInfo()
+	info, ok := readBuildInfo()
 	if !ok {
 		return
 	}
@@ -45,8 +39,10 @@ func populateFromVCS(commit, buildTime *string) {
 }
 
 // Populate fills commit, branch and buildTime from the first source that has a
-// value: an ldflags -X stamp, then Go's embedded VCS info, then the
-// BUILD_GIT_HASH / BUILD_GIT_BRANCH / BUILD_TIME environment variables.
+// value: Go's embedded VCS info, then the BUILD_GIT_HASH / BUILD_GIT_BRANCH /
+// BUILD_TIME environment variables. A value already set in *commit, *branch or
+// *buildTime before the call (the caller's own starting point) always wins
+// over both.
 //
 // The env vars are how a released image reports its build, and they are the
 // point of ORB-366. A build stamp compiled into the binary makes an unchanged
@@ -68,9 +64,8 @@ func Populate(commit, branch, buildTime *string) {
 }
 
 // populateFromEnv is the last resort, and the only one a released image has.
-// Split from Populate so it can be tested on its own: whether the VCS position
-// above it yields anything depends on how the calling binary was built, which a
-// test cannot control.
+// Split from Populate so it can be tested on its own, without going through the
+// VCS position above it.
 func populateFromEnv(commit, branch, buildTime *string) {
 	setIfEmpty(commit, os.Getenv("BUILD_GIT_HASH"))
 	setIfEmpty(branch, os.Getenv("BUILD_GIT_BRANCH"))
@@ -85,7 +80,6 @@ func populateFromEnv(commit, branch, buildTime *string) {
 // buildregistry resolves the same commit against build_registry, so the
 // service_version on a metric and the build_id on a row name one build.
 func Resolve() (commit, buildTime string) {
-	commit, buildTime = GitCommit, BuildTime
 	var branch string
 	Populate(&commit, &branch, &buildTime)
 	return commit, buildTime
