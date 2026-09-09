@@ -1,9 +1,11 @@
 # CORE model: parquet inputs vs what the database has
 
-Tracks every gap between the static parquet snapshots the model currently
-reads and the live data available in our own tables. Each entry says what is
-missing and what brings it back. Re-verify the staging numbers before acting;
-they are a snapshot from **14 Aug 2026**.
+Tracks every gap between the static parquet snapshots and the live data in our
+own tables — each entry says what is missing and what brings it back. Started
+as a full inventory on **14 Aug 2026**; per-section UPDATE notes carry later
+dates. As of **9 Sep 2026**, 8 of the 9 enabled markets run fully live
+(SparkLend ×4, Morpho ×2, Syrup ×2); Anchorage stays on parquet. Re-verify any
+quoted staging number before acting on it.
 
 The model needs three inputs per market: borrower positions, daily price
 history, and sell-side order book depth. Galaxy is excluded throughout — it is
@@ -33,8 +35,11 @@ Remaining price limits for CORE:
 - History depth is ~1 year vs BA's 2014+ Yahoo series. TRAIN_SIZE (180) is
   satisfied; the volatility floor sees less history than BA's, making it
   somewhat less conservative. Deepening it = extending the Erigon backfill.
-- BTC, HYPE, XRP, SOL, JITOSOL have no on-chain oracle on our chains — the
-  non-SparkLend markets that need them still need the offchain feed (below).
+- BTC, HYPE, XRP, SOL, JITOSOL have no on-chain oracle on our chains. Solved
+  per symbol (8–9 Sep 2026): HYPE and XRP read the CoinGecko series in the
+  token-less `asset_price` table (UPDATE below), and native BTC/ETH ride the
+  WBTC/WETH oracle series as proxies in the price reader. SOL/JITOSOL remain
+  open — only disabled Galaxy would need them (§4).
 
 ### The offchain feed's own gaps (still real, no longer blocking CORE)
 
@@ -90,42 +95,34 @@ assets. Prod is byte-identical to staging.
 
 ---
 
-## 2. Order books — `cex_orderbook_snapshots` (staging)
+## 2. Order books — `cex_orderbook_snapshots`: RESOLVED for all 9 markets (9 Sep 2026)
 
 Requirement per collateral: an aggregated sell-side book. Routing (confirmed
 against BA's parquet — the LST books are the raw ETH book duplicated,
 unscaled): ETH-group (WETH, WSTETH, WEETH, RETH, RSETH, EZETH) → ETH book;
 BTC-group (BTC, WBTC, LBTC, TBTC, CBBTC) → BTC book; everything else direct.
 
-| Book needed | Covers | Status in staging |
+| Book needed | Covers | Status |
 |---|---|---|
 | ETH | WETH + 5 LSTs | live in staging AND prod (Coinbase, OKX, Kraken) |
 | BTC | BTC + 4 wrappers | live in staging AND prod (Coinbase, OKX, Kraken) |
-| XRP | syrup_usdc, syrup_usdt | **live in staging** since ARCT-316/319/321 (25 Aug 2026); prod still BTC/ETH only |
-| HYPE | syrup_usdc | **live in staging** — the venues list HYPE spot now, contrary to the 14 Aug note; prod still BTC/ETH only |
+| XRP | syrup_usdc, syrup_usdt | live in staging (25 Aug, ARCT-316/319/321) AND prod (9 Sep, #927) |
+| HYPE | syrup_usdc | live in staging AND prod, same rollouts — the venues list HYPE spot now, contrary to the 14 Aug note |
 
-**UPDATE (25 Aug 2026):** the staging venue configs were expanded after the
-14 Aug snapshot — Coinbase to six products (ARCT-316, #750), OKX to six
-instruments (ARCT-319, #767), Kraken to seven pairs (ARCT-321, #769), each
-symbol verified against the live venue API first (unknown symbols are skipped
-silently; ARCT-240). Verified against staging on 25 Aug: XRP, HYPE, SOL and
-JITOSOL snapshots flowing from all three venues, latest under a minute old.
-**Prod configmaps still index only BTC/ETH** — mirror the staging expansion
-before flipping any of these markets live in prod.
-
-So order books now cover **all 9 enabled markets in staging**. The 2 Syrup
-markets remain on parquet only because of the price-reader path (see §1 and
-§3) — positions (reader written 8 Sep) and books are solved in staging.
-
-Note: prod has all six venue books flowing (verified on the replica,
-14 Aug 2026) even though [VEC-455](https://linear.app/archontech/issue/VEC-455)
-(deploy to prod) is still marked Backlog — the ticket lags reality.
+The venue configs carry six products per venue (Coinbase ARCT-316 #750, OKX
+ARCT-319 #767, Kraken ARCT-321 #769 — staging 25 Aug; prod mirrored verbatim
+in #927, 9 Sep), each symbol verified against the live venue API first; an
+entry a venue stops listing is skipped silently (ARCT-240), so drift thins a
+book rather than crashing. SOL and JITOSOL flow too, ahead of any consumer
+(future Galaxy). VEC-455 (deploy the indexer fleet to prod) closed 24 Aug;
+new-symbol prod rollouts ride each venue task.
 
 **Remaining:**
-- Prod symbol expansion (see the update above).
 - Venue depth: we aggregate 3 venues vs BA's 11 → thinner books → higher
   modelled slippage → conservative CRR bias. Acceptable to start; revisit if
-  CRR reconciliation against BA's dashboards shows material divergence.
+  CRR reconciliation against BA's dashboards shows material divergence. The
+  live books also hold only the top 100 levels per venue side — README Known
+  Issue #12 / [VEC-740](https://linear.app/archontech/issue/VEC-740).
 
 ---
 
@@ -196,8 +193,8 @@ into the order books than slices of a $275M one, raising the *percentage*
 loss too. Same-code parquet reruns reproduce the stored parquet CRRs, so the
 gap is entirely the borrower universe, not the code.
 
-**Syrup (2 markets): positions reader written (8 Sep 2026)**, behind the same
-per-market flags — **not flipped yet**, see below. One row per external Active
+**Syrup (2 markets): done (8–9 Sep 2026)**, behind the same per-market flags —
+flipped, see the go-live note below. One row per external Active
 loan of the pool's current sync cycle (the pool-cycle anchor and the
 same-`(synced_at, processing_version)` collateral join are lifted from the
 Maple backed-breakdown repository; the indexer emits no tombstones, so a
@@ -259,8 +256,7 @@ Still parquet:
 
 | Market group | Live source | Notes |
 |---|---|---|
-| Syrup (2) | maple tables + asset_price | **fully live (9 Sep 2026)** — both environments' data ready; first live tick lands with this config's deploy |
-| Anchorage | anchorage-indexer tables | indexed; blocked on native-BTC price (no on-chain oracle — could now reuse the BTC→WBTC proxy path) |
+| Anchorage | anchorage-indexer tables | indexed; reader unwritten, and it needs a BTC price series — the price reader's BTC→WBTC proxy path now covers that |
 
 ---
 
@@ -277,12 +273,12 @@ investigation is still open.
 To re-enable, Galaxy needs all of:
 - **Positions**: an ingestion pipeline (VEC-79 proper). Off-chain CLO data,
   so it needs the maintainer-approval step from CONTRIBUTING §5.
-- **Order books**: covered in staging as of 25 Aug 2026 — BTC/ETH were
-  already live, and XRP, SOL and JITOSOL now flow from all three venues
-  (see the §2 update; prod still needs the symbol expansion). BA never
-  shipped the ETH/SOL/JITOSOL parquet books, so before this there was no
-  parquet fallback either.
-- **Prices**: SOL/JITOSOL/XRP rows in `offchain_price_asset` plus backfill.
+- **Order books**: covered — BTC/ETH/XRP/SOL/JITOSOL flow from all three
+  venues in staging AND prod (see §2). BA never shipped the ETH/SOL/JITOSOL
+  parquet books, so before this there was no parquet fallback either.
+- **Prices**: SOL/JITOSOL token-less rows in `offchain_price_asset` plus an
+  `asset_price` backfill — the exact path XRP/HYPE took (§1); XRP is already
+  done.
 
 ---
 
@@ -302,18 +298,20 @@ everywhere; the daily "all" tick keeps succeeding.
 
 ## Order of re-enablement (cheapest first)
 
-1. Backfill the two price gaps + extend the 129-day assets (backfiller run, no
-   code). The price adapter is already merged behind
-   `CORE_MODEL_PRICE_SOURCE=postgres`; it validates the window per symbol and
-   fails with the exact missing days until the backfill lands, so flipping the
-   flag is also the check that the backfill worked.
-2. Add BTC/HYPE/XRP price asset rows (small migration) + backfill.
-3. Orderbook adapter switch for the 7 covered markets — **done**: set
-   `CORE_MODEL_ORDERBOOK_SOURCE=postgres` (default stays `parquet`). The
-   stored `params.ORDERBOOK_SOURCE` says which books produced each row.
-4. XRP/HYPE/SOL/JITOSOL orderbook symbols — **done in staging** (25 Aug 2026,
-   ARCT-316/319/321); prod configmaps still need the same expansion.
-5. Positions adapters per protocol (code, largest piece). SparkLend and
-   Morpho are done; Syrup (the `maple_*` tables — indexed, reader not
-   written) is the remaining one.
-6. Galaxy inputs (new sources — separate decision).
+Written when everything was parquet; kept as the ledger of how the plan
+resolved. 8 of the 9 enabled markets are live as of 9 Sep 2026.
+
+1. ~~Offchain price gap backfills~~ — superseded for CORE by the switch to
+   `onchain_token_price` (§1); the `offchain_token_price` holes remain for
+   other consumers of that table.
+2. ~~HYPE/XRP price asset rows + backfill~~ — **done 8–9 Sep** (§1, via the
+   new `asset_price` table). BTC never got a row; Anchorage can use the
+   BTC→WBTC proxy path instead.
+3. ~~Orderbook adapter switch~~ — **done**; `params.ORDERBOOK_SOURCE` on every
+   result row says which books produced it.
+4. ~~XRP/HYPE/SOL/JITOSOL orderbook symbols~~ — **done in staging 25 Aug and
+   prod 9 Sep** (§2).
+5. ~~Positions adapters per protocol~~ — **done** for SparkLend, Morpho and
+   Syrup (§3). Anchorage stays parquet (its reader is unwritten; smallest
+   remaining piece once the BTC price question is settled).
+6. Galaxy inputs (new sources — separate decision, §4). Still open.

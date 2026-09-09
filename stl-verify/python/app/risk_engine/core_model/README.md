@@ -10,7 +10,7 @@ Note that CRR is an expected loss, not a tail loss by construction. However, the
 
 This directory contains the CORE model as integrated into the STL service. The original standalone version lives in [`core_model_copy/`](https://github.com/TWave-code/core_model_copy). The integration wires CORE as a first-class `RiskModel` backed by a pre-compute cronjob and a thin API service that reads the results.
 
-Each market picks its data sources per input via the `*_SOURCE` flags in `inputs/market_configs.json` — `postgres` reads the live tables, `parquet` the static snapshots (that file is the list of which markets run live; `CORE_MODEL_*_SOURCE` env vars override globally, e.g. the dev overlay pins local kind back to parquet). [`DATA_GAPS.md`](DATA_GAPS.md) tracks what keeps the rest on parquet, and what brings each one back.
+Each market picks its data sources per input via the `*_SOURCE` flags in `inputs/market_configs.json` — `postgres` reads the live tables, `parquet` the static snapshots (that file is the list of which markets run live). Env vars override in two shapes, most specific wins: `CORE_MODEL_PRICE_SOURCE=parquet` forces every market (the dev overlay pins local kind back to parquet this way), and `CORE_MODEL_<MARKET>_<KEY>=parquet` (e.g. `CORE_MODEL_SYRUP_USDC_PRICE_SOURCE`, `-` in a market key becomes `_`) pins one market in one environment whose data lags the shared config. [`DATA_GAPS.md`](DATA_GAPS.md) tracks what keeps the rest on parquet, and what brings each one back.
 
 ---
 
@@ -36,42 +36,31 @@ The financial model logic (ARMA-GARCH calibration, copula simulation, liquidatio
 
 ## Supported Protocols
 
-| Protocol | Data Source |
-|---|---|
-| **Morpho** | Parquet snapshots (long-term: on-chain via block RPC workers) |
-| **SparkLend** | Parquet snapshots (long-term: on-chain via block RPC workers) |
-| **Maple** | Parquet snapshots |
-| **Galaxy** | Parquet snapshots (off-chain, requires maintainer approval per CONTRIBUTING.md §5) |
-| **Anchorage** | Parquet snapshots (off-chain, requires maintainer approval per CONTRIBUTING.md §5) |
+| Protocol | Markets | Data source today |
+|---|---|---|
+| **SparkLend** | 4 | Live tables (17 Aug 2026): `borrower*` positions, `onchain_token_price`, `cex_orderbook_snapshots` |
+| **Morpho** | 2 | Live tables (18 Aug 2026): `morpho_market_position` + the same price/book sources |
+| **Maple (Syrup)** | 2 | Live tables (9 Sep 2026): `maple_*` loans, `onchain_token_price` + `asset_price`, `cex_orderbook_snapshots` |
+| **Anchorage** | 1 | Parquet snapshots (off-chain feed indexed; blocked on a BTC price series — see DATA_GAPS §3) |
+| **Galaxy** | disabled | Parquet market frame only; no position ingestion exists (DATA_GAPS §4) |
 
 ---
 
 ## Data Sources
 
-The model draws from three distinct data layers. Each is fetched independently and at a different cadence.
+The model draws from three distinct data layers, each independently switchable per market between `parquet` (the static snapshots BA shipped, under `inputs/`) and `postgres` (the live adapters under `app/adapters/postgres/core_model_*`).
 
 ### 1 — Protocol position data
 
-Borrower-level positions (collateral amounts, debt, LTV, liquidation threshold, liquidation bonus) are currently loaded from static parquet snapshots in `inputs/`. The long-term target is on-chain via block RPC workers.
+Borrower-level positions (collateral amounts, debt, LTV, liquidation threshold, liquidation bonus). Live: per-protocol readers in `core_model_positions_reader.py` — SparkLend from the `borrower*` current caches, Morpho from `morpho_market_position`, Syrup one row per external Active Maple loan. Anchorage and Galaxy stay parquet.
 
 ### 2 — Price data
 
-All collateral price histories are loaded from a parquet snapshot in `inputs/prices_df.parquet`. The long-term target is the existing `offchain-price-indexer` extended to 180-day retention.
+Daily closes per modeled collateral, 180+ contiguous days (validated up front). Live: `core_model_price_reader.py` reads `onchain_token_price` pinned to one oracle (SparkLend's, the only feed with a year of gap-free history); token-less assets (XRP, HYPE) read the CoinGecko series in `asset_price`; native BTC/ETH ride the WBTC/WETH oracle series as proxies. Parquet fallback: `inputs/prices_df.parquet` (BA's Yahoo history).
 
 ### 3 — Order book / liquidity data
 
-Order book depth is loaded from per-token parquet snapshots in `inputs/`. The long-term target is a new `orderbook-indexer` cronjob. Routing depends on the collateral token:
-
-| Collateral token | Venue type | Source | Notes |
-|---|---|---|---|
-| **CBBTC** | DEX | Uniswap V3 | Pool `0xfB...43ef` (cbBTC/USDC, Base) — on-chain pool state |
-| **HYPE** (and variants) | DEX | HyperLiquid | Native HyperLiquid order book |
-| **ETH and LSTs** (WETH, WEETH, STETH, WSTETH, RETH) | CEX | Aggregated | Proxied via ETH spot book across 11 venues |
-| **BTC and wrappers** (WBTC, LBTC, TBTC) | CEX | Aggregated | Proxied via BTC spot book across 11 venues |
-| **SOL** | CEX | Aggregated | Direct SOL spot book across 11 venues |
-| **All other tokens** | CEX | Aggregated | Direct spot book across 11 venues |
-
-CEX aggregation covers: **Binance, Bybit, OKX, Kraken, Coinbase, Gate.io, KuCoin, Huobi, Bitget, Bitfinex, Crypto.com**.
+Sell-side depth per book. Live: `core_model_orderbook_reader.py` merges the freshest snapshot per venue from `cex_orderbook_snapshots` (Coinbase, OKX, Kraken; books: BTC, ETH, XRP, HYPE — ETH LSTs proxy the ETH book, BTC wrappers the BTC book). Note the live books hold the top 100 levels per venue side — Known Issue #12. The parquet books are BA's originals, aggregated across 11 venues (Binance, Bybit, OKX, Kraken, Coinbase, Gate.io, KuCoin, Huobi, Bitget, Bitfinex, Crypto.com) with DEX routing for some tokens (cbBTC via a Uniswap V3 pool, HYPE via HyperLiquid) — deeper than the live books, which is why live and parquet CRRs are not directly comparable.
 
 Liquidity is consumed **cumulatively** across liquidation events within a scenario: each successive liquidation starts from the point in the book where the previous one left off, rather than assuming a fully replenished book.
 
@@ -227,11 +216,12 @@ CORE runs as a two-step process: a cronjob pre-computes the CRR and writes resul
 
 ### Step 1 — Seed the local database
 
-Nothing to run: migrations seed the four SparkLend receipt tokens the mapping
-references (`20260604_…_seed_sparklend_spusdt_receipt_token.sql` and
-`20260814_…_seed_sparklend_core_model_receipt_tokens.sql`), so any database
-that has migrations applied — `make dev-up`, integration test containers, a
-plain migrate run — resolves the mapping at startup.
+Nothing to run: migrations seed every receipt token the mapping references —
+the four SparkLend ones (`20260604_…_seed_sparklend_spusdt_receipt_token.sql`,
+`20260814_…_seed_sparklend_core_model_receipt_tokens.sql`) and the syrup ones
+(`20260702_…_maple_syrup_allocation_exposure.sql`) — so any database that has
+migrations applied — `make dev-up`, integration test containers, a plain
+migrate run — resolves the mapping at startup.
 
 ### Step 2 — Run the pre-compute cronjob
 
@@ -298,7 +288,7 @@ To enable a market, add an entry to `mappings/asset_to_market_key.json`:
 
 The key is `chain_id:0xAddress` (same format as the SURAF mapping). The value must match a key in `inputs/market_configs.json` and a `market_key` value in `core_model_results`.
 
-**Currently mapped markets (SparkLend):**
+**Currently mapped markets** (1:1 receipt token → market):
 
 | Receipt token | Address | Market key |
 |---|---|---|
@@ -306,6 +296,19 @@ The key is `chain_id:0xAddress` (same format as the SURAF mapping). The value mu
 | spUSDC | `0x377c3bd93f2a2984e1e7be6a5c22c525ed4a4815` | `sparklend_usdc` |
 | spUSDS | `0xc02ab1a5eaa8d1b114ef786d9bde108cd4364359` | `sparklend_usds` |
 | spUSDT | `0xe7df13b8e3d6740fe17cbe928c7334243d86c92f` | `sparklend_usdt` |
+| syrupUSDC | `0x80ac24aa929eaf5013f6436cda2a7ba190f5cc0b` | `syrup_usdc` |
+| syrupUSDT | `0x356b8d89c1e1239cbbb9de4815c39a1474d5ba7d` | `syrup_usdt` |
+
+syrupUSDG is deliberately unmapped — it has no CORE market — and with no other
+model applicable `/v1/risk/rrc` answers 404 for it rather than a wrong number.
+
+**Morpho vault shares** are served without a mapping entry: a MetaMorpho vault
+spreads one deposit across many Blue markets (n:m), so `CoreModelRiskService`
+resolves the vault's live per-market allocations and weights the per-market
+results into one figure, reporting `coverage_pct` and the per-market slices in
+`details.markets`. Below the configured minimum coverage
+(`core_model_min_coverage_pct`, default 50%) the aggregate is withheld and the
+caller's model chain falls back.
 
 ---
 
@@ -322,7 +325,6 @@ app/risk_engine/core_model/
 ├── convergence.py                Monte Carlo standard error of the EL and the convergence verdict
 ├── importer.py                   Position preprocessing (MIN_BORROW_USD filter, worst-case LTVs)
 ├── config.py                     Parameter defaults (inputs/default_params.json)
-├── core_model_mapping.py         asset_id -> market_key mapping loader
 ├── mappings/
 │   └── asset_to_market_key.json  Chain/address -> market_key mapping
 ├── inputs/                       Static parquet snapshots (positions, prices, orderbooks)
@@ -334,9 +336,13 @@ app/ports/
 └── core_model_results_writer.py  Port: insert(result) — the cronjob's write side
 
 app/adapters/
-├── parquet/core_model_data_reader.py    Reads static parquet snapshots
-├── postgres/core_model_results_reader.py  Reads core_model_results table
-└── postgres/core_model_results_writer.py  Appends to core_model_results (no ON CONFLICT)
+├── composite.py                             Per-input parquet/postgres switch (the *_SOURCE flags)
+├── parquet/core_model_data_reader.py        Reads static parquet snapshots
+├── postgres/core_model_positions_reader.py  Live positions: SparkLend, Morpho, Syrup
+├── postgres/core_model_price_reader.py      Live daily closes: oracle series + asset_price + BTC/ETH proxies
+├── postgres/core_model_orderbook_reader.py  Live venue books from cex_orderbook_snapshots
+├── postgres/core_model_results_reader.py    Reads core_model_results table
+└── postgres/core_model_results_writer.py    Appends to core_model_results (no ON CONFLICT)
 
 app/services/core_model_risk_service.py  RiskModel implementation
 
@@ -387,53 +393,44 @@ review. IDs are the audit's.
 
 ---
 
+## API serving shapes (historical notes resolved)
+
+**Morpho — the n:m mismatch is solved by vault aggregation (VEC-654).** The
+`receipt_token` table stores MetaMorpho vault addresses, and one vault lends
+across many Blue markets while one market takes deposits from many vaults, so
+no 1:1 mapping entry can exist. Instead of mapping, `CoreModelRiskService`
+resolves a Morpho vault share at request time: the vault's live per-market
+supply allocations weight the per-market CORE results into one figure (idle
+liquidity at zero risk), with `coverage_pct` and per-market slices reported in
+`details.markets`, and the aggregate withheld below the minimum coverage.
+
+**Syrup — served 1:1 since 9 Sep 2026.** The syrup receipt tokens have been in
+`receipt_token` since VEC-372 (migration-seeded), and a syrup share maps to
+exactly one pool, so syrupUSDC/syrupUSDT are plain mapping entries (table
+above), the SparkLend shape.
+
+**Anchorage, Galaxy — still unmapped.** No receipt tokens exist for them; the
+cronjob can compute their markets (Anchorage from parquet today), but nothing
+serves them through `/v1/risk/rrc`.
+
 ## Next Steps
 
-### Morpho — receipt token mapping is not straightforward
+### Galaxy — disabled until it has inputs
 
-The current `asset_to_market_key.json` mapping assumes a 1:1 relationship between an on-chain receipt token and a core model market key. This works cleanly for SparkLend (one spToken per loan token), but **does not work for Morpho Blue** for the following reason:
+`market_configs.json` disables Galaxy (`_galaxy_disabled`). Its market frame
+(`market_galaxy.parquet`) uses `ETH`, `SOL`, `JITOSOL`, `XRP`, `BTC` as
+collaterals; BA never shipped ETH/SOL/JITOSOL parquet books, so there is no
+parquet fallback for those. The **live** venue books for all five collaterals
+flow in staging and prod since Sep 2026 (the SOL/JITOSOL books have no
+consumer yet), but SOL/JITOSOL price series and — above all — a position
+ingestion pipeline do not exist. See DATA_GAPS §4.
 
-- The STL `receipt_token` table stores **MetaMorpho vault** addresses (e.g. steakUSDC, bbqUSDC). A single MetaMorpho vault lends USDC across many Morpho Blue markets simultaneously — it may be exposed to cbBTC, WETH, and other collaterals at the same time.
-- The core model market keys `morpho_cbbtc-usdc` and `morpho_weth-usdc` represent **all Morpho Blue borrowers** using a given collateral/loan pair across the entire protocol, regardless of which vault is lending to them.
-- There is an **n:m mismatch**: one vault → many collateral markets, one market → many vaults. No single receipt token maps 1:1 to a core model Morpho market key.
+### Remaining parquet inputs
 
-**Options to resolve:**
-
-1. **Pick a representative vault per market key** (pragmatic, approximate): choose the largest MetaMorpho vault that primarily exposes to the target collateral and accept it as a proxy. This is imprecise but unblocks the API.
-2. **Virtual receipt tokens**: introduce a synthetic receipt token in the DB (not backed by a real on-chain address) to represent the aggregate Morpho cbBTC/USDC or WETH/USDC market. Requires a schema decision.
-3. **Separate query path**: add a market-key-based endpoint that bypasses receipt token resolution entirely — useful if the Morpho core model result is consumed without a specific prime's exposure context.
-
-Until this is resolved, `morpho_cbbtc-usdc` and `morpho_weth-usdc` remain configured in `market_configs.json` and can be run by the cronjob, but cannot be served through the `asset_to_market_key.json` mapping or `/v1/risk/rrc`.
-
-### Syrup, Anchorage, Galaxy — no receipt tokens in the DB
-
-These three protocols do not appear in the STL `receipt_token` table. They are off-chain or institutional clients without on-chain receipt tokens tracked by the watcher. Before these markets can be wired into the API, they require:
-
-- Protocol entries in the `protocol` table
-- A mechanism to track user positions (off-chain feed or watcher extension)
-- Receipt token rows for their position tokens (if any)
-
-The cronjob can still run these markets against the parquet snapshots -- only the API mapping is blocked.
-
-### Galaxy -- missing ETH, SOL, and JITOSOL order books
-
-The Galaxy market data (`market_galaxy.parquet`) uses `ETH`, `SOL`, `JITOSOL`, `XRP`, `BTC` as collateral token symbols. `XRP` and `BTC` already have matching order book files. The three remaining collaterals are blocked:
-
-- `eth_sell_orderbook.parquet` -- missing. Galaxy uses the unwrapped `ETH` symbol; the existing file is `weth_sell_orderbook.parquet` (used by SparkLend/Morpho markets which report `WETH`). These need to be treated as the same asset or a separate `eth_sell_orderbook.parquet` file needs to be provided.
-- `sol_sell_orderbook.parquet` -- missing, needed for SOL-collateralised positions
-- `jitosol_sell_orderbook.parquet` -- missing, needed for JitoSOL-collateralised positions
-
-Until these are provided, the Galaxy cronjob will fail at the liquidity loading step.
-
-Note: `importer.load_orderbook_data` now lowercases all symbol names before constructing filenames, fixing a latent case-sensitivity bug that would have caused other markets to fail on Linux (e.g. `WETH` would have looked for `WETH_sell_orderbook.parquet` on a case-sensitive filesystem).
-
-### Parquet data is temporary
-
-All position, price, and order book data is currently loaded from static snapshots in `inputs/`. These files are a temporary scaffold to enable early development and testing -- they are **not updated automatically** and will become stale. CRR results computed from them reflect a historical snapshot, not current protocol state.
-
-The long-term target for each data layer:
-- **Position data** -- live on-chain via the existing block RPC watcher workers (same pipeline used by SparkLend today)
-- **Price data** -- the existing `offchain-price-indexer`, extended to 180-day retention
-- **Order book data** -- a new `orderbook-indexer` cronjob
-
-Until that pipeline is complete, the parquet files in `inputs/` must be manually refreshed to keep results meaningful.
+Anchorage is the one enabled market still on snapshots (`users_anchorage.parquet`
+/ `market_anchorage.parquet`); its blocker is a BTC price series, which the
+price reader's BTC→WBTC proxy path could now provide (DATA_GAPS §3). The
+parquet files under `inputs/` are **not updated automatically**: for the live
+markets they remain useful only as the dev-cluster fallback and for
+before/after comparisons, and their CRRs reflect BA's June 2026 snapshot, not
+current protocol state.
