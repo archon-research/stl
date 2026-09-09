@@ -70,6 +70,9 @@ type MorphoRepository interface {
 	// unconditionally would put one row per allocation event in a table sized for
 	// governance events.
 	//
+	// "The same answer" covers the classification too: an assertion carrying no type, or
+	// an Unknown one, never retracts the log's.
+	//
 	// That conditional is a read-then-write decision, so the assertion path — and only it —
 	// serializes on a per-(morpho_vault_id, address) advisory lock taken BEFORE the decisive
 	// read (ADR-0002 §3). A transition needs none: it is an unconditional INSERT … ON
