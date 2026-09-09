@@ -109,7 +109,13 @@ jobs:
             echo "AWS_SESSION_TOKEN="
           } >> "${GITHUB_ENV}"
 
+      # Both npm steps run outside the checkout. npm takes project config from
+      # its cwd, and the default cwd is the author's tree: a root .npmrc there
+      # picks the registry this install trusts, and the substituted package's
+      # install scripts run as the runner user, unsandboxed, with the seat
+      # bundle already on disk. `prefix=` steers `npm root -g` the same way.
       - name: Install Codex CLI
+        working-directory: ${{ runner.temp }}
         run: |
           set -euo pipefail
           # Pinned: vendors change agent behaviour silently; unpinned makes
@@ -128,6 +134,7 @@ jobs:
       # failure instead of a silent no-op — without it a broken sandbox degrades
       # into a confident review of whatever the agent can still reach.
       - name: Enable and verify the sandbox the reviewer runs in
+        working-directory: ${{ runner.temp }}
         run: |
           set -euo pipefail
           mapfile -t BWRAPS < <(find "$(npm root -g)/@openai/codex" \( -type f -o -type l \) -name bwrap -exec realpath {} \; | sort -u)
