@@ -251,9 +251,6 @@ func TestRun_StopsBeforeTheSweepWhenTheHeadHasNoResolvableVersion(t *testing.T) 
 	}
 }
 
-// The archive catches up on its own: raw-data-backup archives a block when the watcher
-// broadcasts it, minutes before it finalizes. Republishing that height instead writes
-// version 1 permanently and manufactures a _0_/_1_ twin when the in-flight object lands.
 func TestRun_TellsAnArchiveBehindTheHeadFromOneHoldingAnotherBlock(t *testing.T) {
 	const headBlock = int64(24_000_000)
 	tests := []struct {

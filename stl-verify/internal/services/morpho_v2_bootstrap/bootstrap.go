@@ -307,11 +307,6 @@ func (s *Service) pinFinalizedHead(ctx context.Context, versions *blockversion.R
 	}, nil
 }
 
-// headVersionError separates the two ways the head's version fails to resolve. An archive
-// that has not reached the head clears itself — raw-data-backup archives a block when the
-// watcher broadcasts it, minutes before it finalizes — while republishing that height
-// would write version 1 permanently and manufacture a _0_/_1_ twin when the object already
-// in flight lands. Every other failure, a mismatch included, is a height to repair.
 func (s *Service) headVersionError(headBlock int64, err error) error {
 	if errors.Is(err, blockversion.ErrHeightNotArchived) {
 		return fmt.Errorf("resolving the block version of the pinned head %d: the raw archive has not caught up to the finalized head; check VectorBackupWorkerStalled and the raw-data-backup worker for chain %d, then start a new run once it has. Do not republish this height: %w",
