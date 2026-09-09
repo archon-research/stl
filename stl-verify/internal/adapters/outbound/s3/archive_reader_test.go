@@ -167,7 +167,7 @@ func TestArchiveReader_PingListsOneKeyUnderARealPartitionPrefix(t *testing.T) {
 func TestArchiveReader_PingSurfacesADeniedListing(t *testing.T) {
 	mock := &mockS3API{
 		listObjectsV2Func: func(context.Context, *s3.ListObjectsV2Input, ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
-			return nil, errors.New("AccessDenied: User is not authorized to perform: s3:ListBucket")
+			return nil, &smithy.GenericAPIError{Code: "AccessDenied", Fault: smithy.FaultClient}
 		},
 	}
 
@@ -176,8 +176,45 @@ func TestArchiveReader_PingSurfacesADeniedListing(t *testing.T) {
 	if err == nil {
 		t.Fatal("Ping succeeded against a bucket it cannot list")
 	}
-	if !strings.Contains(err.Error(), archiveBucket) {
-		t.Errorf("error = %v, want it to name the bucket", err)
+	for _, want := range []string{archiveBucket, "s3:ListBucket"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to mention %q", err, want)
+		}
+	}
+}
+
+// A bucket that is not there, a throttled listing or an unreachable endpoint all fail
+// startup too, and none of them is a grant problem: the operator sent after an IAM policy
+// that is already correct never finds the typo in the name.
+func TestArchiveReader_PingSurfacesAFailedProbeListing(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "a bucket that is not there", err: &types.NoSuchBucket{}},
+		{name: "a throttled listing", err: errors.New("503 SlowDown")},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := &mockS3API{
+				listObjectsV2Func: func(context.Context, *s3.ListObjectsV2Input, ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
+					return nil, tc.err
+				},
+			}
+
+			err := newArchiveReader(mock).Ping(context.Background())
+
+			if err == nil {
+				t.Fatal("Ping succeeded against a bucket it could not list")
+			}
+			if strings.Contains(err.Error(), "s3:ListBucket") {
+				t.Errorf("error = %v, want a listing failure left distinct from a missing grant", err)
+			}
+			if !strings.Contains(err.Error(), archiveBucket) {
+				t.Errorf("error = %v, want it to name the bucket", err)
+			}
+		})
 	}
 }
 

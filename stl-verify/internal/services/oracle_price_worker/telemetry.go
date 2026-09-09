@@ -26,6 +26,7 @@ type Telemetry struct {
 	errorsTotal       metric.Int64Counter
 	unitPricesFetched metric.Int64Counter
 	unitReadsFailed   metric.Int64Counter
+	unitPasses        metric.Int64Counter
 
 	// Histograms
 	blockDuration metric.Float64Histogram
@@ -67,6 +68,11 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider,
 	if err := t.initUnitInstruments(); err != nil {
 		return nil, err
 	}
+
+	// VectorOracleIndexerStalled reads blocks.processed with rate()==0; seed so
+	// it is computable from process start (see telemetry.SeedCounter).
+	telemetry.SeedStatusCounter(context.Background(), t.blocksProcessed, t.chainAttr)
+
 	return t, nil
 }
 
@@ -181,6 +187,14 @@ func (t *Telemetry) initUnitInstruments() error {
 		return fmt.Errorf("creating unitReadsFailed counter: %w", err)
 	}
 
+	t.unitPasses, err = t.meter.Int64Counter(
+		"oracle.unit.passes",
+		metric.WithDescription("Successful per-oracle processing passes, seeded to 0 per unit at load"),
+	)
+	if err != nil {
+		return fmt.Errorf("creating unitPasses counter: %w", err)
+	}
+
 	return nil
 }
 
@@ -218,30 +232,42 @@ func (t *Telemetry) RecordUnitSuccess(ctx context.Context, oracleName string) {
 		return
 	}
 	t.recordUnitFreshness(ctx, oracleName)
+	t.unitPasses.Add(ctx, 1, metric.WithAttributes(t.unitAttrs(oracleName)...))
 }
 
-// RecordUnitLoaded baselines the unit's freshness gauge at load time. Without
-// it, a unit that never completes a successful pass (a misconfigured feed
-// hard-erroring from the first block after a deploy) never creates the
-// series, an absent series cannot age, and a pod restart would silently
-// resolve a firing staleness alert forever. With the baseline, such a unit
-// goes stale one threshold after startup and a restart merely re-arms the
-// alert.
+// RecordUnitLoaded registers a unit's series at load time: the freshness gauge
+// is baselined to now, and the pass counter is seeded to 0.
+//
+// The seeded counter is what VectorOracleUnitStale reads, and the gauge is why
+// it has to (VEC-750). A gauge baselined to the worker's own start says "this
+// process started recently", not "this unit succeeded recently", so a worker
+// restarting more often than the alert's threshold refreshes it before the
+// threshold is ever crossed and the alert cannot fire however broken the unit
+// is. A counter reset is visible to Prometheus where a refreshed wall-clock
+// baseline is not, so seeding to 0 keeps "this unit has completed no pass"
+// observable across a restart. The gauge stays as the last-success readout a
+// human wants when diagnosing.
 func (t *Telemetry) RecordUnitLoaded(ctx context.Context, oracleName string) {
 	if t == nil {
 		return
 	}
 	t.recordUnitFreshness(ctx, oracleName)
+	telemetry.SeedCounter(ctx, t.unitPasses, t.unitAttrs(oracleName)...)
 }
 
 // recordUnitFreshness records fractional seconds (not whole) so consecutive
 // recordings within one second stay distinguishable, e.g. the startup
 // baseline versus the first pass.
 func (t *Telemetry) recordUnitFreshness(ctx context.Context, oracleName string) {
-	t.unitLastSuccess.Record(ctx, float64(time.Now().UnixNano())/1e9, metric.WithAttributes(
-		t.chainAttr,
-		attribute.String("oracle.name", oracleName),
-	))
+	t.unitLastSuccess.Record(ctx, float64(time.Now().UnixNano())/1e9,
+		metric.WithAttributes(t.unitAttrs(oracleName)...))
+}
+
+// unitAttrs is the one place the per-unit label set is built, so the seed and
+// the increment cannot disagree: a seed on a label set the recorder never uses
+// would leave a phantom series at 0 forever while real passes land elsewhere.
+func (t *Telemetry) unitAttrs(oracleName string) []attribute.KeyValue {
+	return []attribute.KeyValue{t.chainAttr, attribute.String("oracle.name", oracleName)}
 }
 
 // RecordUnitReads counts one per-oracle pass's read outcomes: fetched is the

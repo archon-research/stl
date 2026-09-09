@@ -370,7 +370,10 @@ data:
 ---
 # On-demand one-shot VaultV2 repair worker (VEC-218) — see
 # docs/runbooks/vector-cronjobs.md. ALCHEMY_HTTP_URL is omitted: the binary
-# defaults to eth-mainnet, matching CHAIN_ID below.
+# defaults to eth-mainnet, matching CHAIN_ID below. The raw bucket every replayed
+# row's block_version is read from is not here — it carries a random suffix and so
+# arrives via the ExternalSecret, the same way the morpho-vault-backfill gets it.
+# DEPLOY_ENV is what the startup guard checks that bucket's name against.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -379,6 +382,8 @@ data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "1"
+  AWS_REGION: "eu-west-1"
+  DEPLOY_ENV: "staging"
 ---
 # On-demand Morpho vault backfill worker (VEC-218). ALCHEMY_HTTP_URL is omitted:
 # the binary defaults to eth-mainnet, matching CHAIN_ID below. The bucket is not
@@ -720,6 +725,11 @@ data:
   AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
   ENVIRONMENT: "sentinelstaging"
   ENABLE_BACKFILL: "true"
+  # Live path: one Alchemy attempt is capped at 10s (~41s over its 4 attempts) and
+  # 2500 newHeads slots hold ~4 min at ~10 blocks/s, so a hung request drops
+  # nothing. Backfill keeps the client default (30s) for its batches.
+  LIVE_RPC_TIMEOUT: "10s"
+  SUBSCRIBER_BUFFER_SIZE: "2500"
 ---
 apiVersion: v1
 kind: ConfigMap

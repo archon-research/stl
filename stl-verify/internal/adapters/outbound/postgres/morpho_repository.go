@@ -434,29 +434,55 @@ func (r *MorphoRepository) assertionAppends(ctx context.Context, tx pgx.Tx, adap
 	if err != nil {
 		return false, err
 	}
-	return known == nil || *known != m.IsMember, nil
+	if known == nil || known.isMember != m.IsMember {
+		return true, nil
+	}
+	return reclassifies(known.adapterType, m.AdapterType), nil
+}
+
+// reclassifies reports whether an assertion's probe answers the classification question
+// differently from the log. Neither a missing type — a replayed Allocate skips the probe
+// when the adapter is already a member — nor an Unknown one retracts what the log holds:
+// classifyAdapter answers Unknown for anything but exactly one marker, so a marker added
+// for a future family would otherwise flip a classified adapter to 99, and UPDATE is
+// revoked on the table, so that row would be its classification forever.
+func reclassifies(known, asserted *entity.MorphoAdapterType) bool {
+	if asserted == nil || *asserted == entity.MorphoAdapterTypeUnknown {
+		return false
+	}
+	return known == nil || *known != *asserted
+}
+
+type knownMembership struct {
+	isMember    bool
+	adapterType *entity.MorphoAdapterType
 }
 
 // membershipAt returns the answer the log already gives for an adapter at a block
 // position — the latest observation at or below it — or nil when the log says nothing
 // there yet.
-func (r *MorphoRepository) membershipAt(ctx context.Context, tx pgx.Tx, adapterID int64, at entity.BlockPosition) (*bool, error) {
+func (r *MorphoRepository) membershipAt(ctx context.Context, tx pgx.Tx, adapterID int64, at entity.BlockPosition) (*knownMembership, error) {
 	var isMember bool
+	var adapterType *int16
 	err := tx.QueryRow(ctx,
-		`SELECT is_member FROM morpho_adapter_membership
+		`SELECT is_member, adapter_type FROM morpho_adapter_membership
 		 WHERE morpho_adapter_id = $1
-		   AND (block_number, block_version, log_index) <= ($2, $3, $4)
-		 ORDER BY block_number DESC, block_version DESC, log_index DESC, processing_version DESC
-		 LIMIT 1`,
+		   AND (block_number, block_version, log_index) <= ($2, $3, $4)`+latestMembershipOrder,
 		adapterID, at.BlockNumber, at.BlockVersion, at.LogIndex,
-	).Scan(&isMember)
+	).Scan(&isMember, &adapterType)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading adapter %d membership as of block %d: %w", adapterID, at.BlockNumber, err)
 	}
-	return &isMember, nil
+
+	known := knownMembership{isMember: isMember}
+	if adapterType != nil {
+		classified := entity.MorphoAdapterType(*adapterType)
+		known.adapterType = &classified
+	}
+	return &known, nil
 }
 
 // appendMembership writes one observation and reports whether a row was actually added.
@@ -492,8 +518,7 @@ func (r *MorphoRepository) appendMembership(ctx context.Context, tx pgx.Tx, adap
 // id IS the (vault, address) key — it is created before the lock is taken, and creating it
 // needs no lock of its own (ON CONFLICT DO NOTHING makes that race a no-op) — and the key
 // is deliberately block-free, so every decision about one adapter serializes regardless of
-// the block it carries. Only one key is ever held, so the sorted-order rule has nothing to
-// order.
+// the block it carries.
 func lockAdapterKey(ctx context.Context, tx pgx.Tx, adapterID int64) error {
 	lockKey := fmt.Sprintf("morpho_adapter|%d", adapterID)
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lockKey); err != nil {

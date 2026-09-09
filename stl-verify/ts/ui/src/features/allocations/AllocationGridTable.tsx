@@ -19,7 +19,7 @@ type AllocationGridTableProps = {
   areAllocationsSettled: boolean;
   allocations: Allocation[];
   visibleAllocations: Allocation[];
-  onAllocationIntent?: () => void;
+  onAllocationIntent?: (() => void) | undefined;
   table: DataTableProps<AllocationGridRow>['table'];
   onSelectAllocation: (allocationKey: string) => void;
   selectedAllocationKey: string | null;

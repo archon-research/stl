@@ -25,6 +25,10 @@ data:
   ENABLE_BACKFILL: "false"
   TEMPORAL_HOST_PORT: temporal-server.temporal:7233
   TEMPORAL_NAMESPACE: vector
+  # The mock price vendor (VEC-748), like the mock chain for the watcher. The
+  # real Pro API is the opt-in: real key in .env.secrets, then
+  # `make kind-secrets kind-use-coingecko`.
+  COINGECKO_BASE_URL: http://mock-coingecko-server:8080
   # Risk-capital root, without the /primes route the client appends itself.
   SKY_RISK_CAPITAL_URL: "https://info-sky.blockanalitica.com/star-monitoring/risk-capital"
   SKY_DATA_URL: "https://sky.data.blockanalitica.com/internal"

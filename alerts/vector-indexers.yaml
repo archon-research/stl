@@ -339,12 +339,10 @@ groups:
         # without erroring, and change-only writes mean a frozen upstream
         # produces no rows anyway.
         #
-        # Gauge `oracle.unit.last_success_timestamp_seconds` (OTel) ->
-        # Prometheus `oracle_unit_last_success_timestamp_seconds`, set by the
-        # worker after every successful per-unit pass, written rows or not, and
-        # baselined per unit at startup: a unit that never succeeds still
-        # creates the series and goes stale one threshold after a deploy, and a
-        # restart re-arms the alert instead of silencing it. Because the gauge
+        # Counter `oracle.unit.passes` (OTel) -> Prometheus
+        # `oracle_unit_passes_total`, incremented after every successful
+        # per-unit pass, written rows or not, and seeded to 0 per unit at load
+        # so a unit that never succeeds is still observable. Because it
         # advances regardless of whether the price CHANGED, the signal is "the
         # worker stopped successfully processing this unit", NOT "the upstream
         # feed stopped updating". One tight generic threshold therefore works
@@ -353,6 +351,26 @@ groups:
         # of consecutive failure (~150 mainnet blocks at ~12s) is decisively
         # wedged, in the same spirit as the 15m Stalled rule but with slack for
         # SQS redelivery/backoff bursts.
+        #
+        # A counter, and not the `oracle_unit_last_success_timestamp_seconds`
+        # gauge this rule used to read (VEC-750). That gauge is baselined to the
+        # worker's own start, so its value says "this process started recently",
+        # not "this unit succeeded recently": a worker restarting more often
+        # than the threshold refreshed it before the threshold was ever crossed,
+        # and the rule could not fire however broken the unit was. No query
+        # fixes that — a refreshed baseline is indistinguishable from a genuine
+        # success at that instant, so the information is gone before PromQL sees
+        # it. A counter reset IS visible to Prometheus, so seeding to 0 keeps
+        # "no pass yet" observable across a restart. The gauge is still exported
+        # as the last-success readout for diagnosis; nothing alerts on it.
+        #
+        # Two legs exist for that survival. `sum by` drops k8s_pod_name, so a
+        # pod REPLACEMENT is not a fresh series from the rule's point of view:
+        # the old pod's samples stay in the window and increase() bridges the
+        # reset. The `offset 30m` leg keeps a cold start quiet — a unit whose
+        # series did not exist 30m ago cannot match, so a first deploy gets a
+        # full window to complete its first pass before the rule engages. Do
+        # not drop either one.
         #
         # Gated on the worker still consuming blocks so a whole-worker STALL
         # stays VectorOracleIndexerStalled's page instead of also firing once
@@ -372,17 +390,16 @@ groups:
         # the fluid-vault Stalled zero-fill note), and a unit dropped from the
         # registry stops exporting its series entirely, which an instant
         # vector cannot age. Both need follow-up (kube-state zero-fill on
-        # Stalled / an expected-units signal). Also: startup re-baselining
-        # means a worker restarting more often than every ~30m keeps a
-        # never-succeeding unit under threshold forever (an isolated restart
-        # merely delays firing by ~35m).
+        # Stalled / an expected-units signal).
+        #
         expr: |
-          (
-            time()
-            - max by (chain, cluster, oracle_name) (
-                oracle_unit_last_success_timestamp_seconds{k8s_namespace_name="vector"}
-              )
-          ) > 1800
+          sum by (chain, cluster, oracle_name) (
+            increase(oracle_unit_passes_total{k8s_namespace_name="vector"}[30m])
+          ) == 0
+          and on (chain, cluster, oracle_name)
+          sum by (chain, cluster, oracle_name) (
+            oracle_unit_passes_total{k8s_namespace_name="vector"} offset 30m
+          )
           and on (chain, cluster)
           sum by (chain, cluster) (
             rate(oracle_blocks_processed_total{k8s_namespace_name="vector"}[5m])
@@ -759,13 +776,44 @@ groups:
   #     (add_adapter_event | remove_adapter_event | allocation_event |
   #     vault_discovery | bootstrap_seed). bootstrap_seed is the morpho-v2-bootstrap
   #     job's closing enumeration, which only ASSERTS what the same run's replay
-  #     already recorded, so a healthy run appends ~nothing under that label.
+  #     already recorded, so a healthy run appends ~nothing under that label —
+  #     apart from an adapter its probe now classifies differently from the log,
+  #     which is a correction and is meant to be recorded.
   #   morpho_v2_snapshots_written_total{snapshot_type}
   #     one sample per COMMITTED event-driven snapshot
   #     (adapter_state | vault_cap | vault_fee).
   #   morpho_events_processed_total{event_type}
   #     already existed; the V2 event names are registered topics on it, so the
   #     ForceDeallocate and "events seen" signals below need no new instrument.
+  #
+  # THE TWO REPLAY WORKERS ARE EXCLUDED, IN EVERY RULE. Every selector in this
+  # group carries service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)",
+  # both sides of the two silent-empty guards included. A chain added later needs
+  # no edit here: its indexer is covered on day one, because the match names what
+  # to leave out rather than what to count.
+  #
+  # Excluding beats allow-listing the live indexers because the two failure modes
+  # are not symmetric. A replay worker missing from the exclusion fires these
+  # rules loudly and sends whoever is on call to this note; a per-chain indexer
+  # missing from an allow-list is silently uncovered, with nothing to say it ever
+  # was. Add a new replay worker to the exclusion in every expr below.
+  #
+  # morpho-vault-backfill and morpho-v2-bootstrap replay history through the same
+  # handlers and count on these same instruments under their own service_name, so
+  # an on-demand replay drives every counter here by design. Re-recording history
+  # is not an incident and there is nothing to act on — measured, the 2026-08-28
+  # staging era backfill replayed 2,604 ForceDeallocate at up to 1,025/h and held
+  # VectorMorphoV2ForceDeallocateSurge firing for 7h against ~1/h of real
+  # activity. The two guards carry the exclusion for the mirror-image reason: a
+  # replay run's own snapshots and events satisfy their suppressing side, so an
+  # unscoped guard says nothing about a broken live write path for the length of
+  # the run plus its whole trailing 6h window. Nothing is lost either way — the
+  # workers' series stay on the dashboard as run progress.
+  #
+  # "Live indexer" is one Deployment per chain (morpho-indexer on mainnet,
+  # base-morpho-indexer on Base since ARCT-414) running the same binary. Each pod
+  # emits its own service_name: the SERVICE_NAME env taken from its `app` label,
+  # which the binary has read since ARCT-413.
   #
   # NO staleness rule here, deliberately. V2 vault state is event-driven: a
   # dormant vault legitimately writes nothing for days. Chain-verified in the
@@ -805,24 +853,28 @@ groups:
         # AddAdapter fired 5 times and RemoveAdapter 0 times across ALL adapter
         # types, so the live registration path cannot produce more than ~1/day
         # even if every single adapter were unclassifiable. The only bursty source
-        # is observed_via="vault_discovery" (its bootstrap_seed twin appends only
-        # what the bootstrap's own replay did not already record, ~nothing on a
-        # healthy run), which seeds a newly found vault's whole set in one
-        # transaction (the
-        # 7+/8min above). 25 per 24h sits ~3x above that observed burst and ~25x
-        # above the live path, so it can only mean Morpho shipped an adapter
-        # family the probe cannot classify. Every provenance is counted: an
-        # unclassifiable family that only ever arrives via discovery must not be
-        # invisible here. adapter_type="unknown" excludes "unprobed" by
-        # construction, so removals cannot inflate this.
+        # is observed_via="vault_discovery", which seeds a newly found vault's
+        # whole set in one transaction (the 7+/8min above). 25 per 24h sits ~3x
+        # above that observed burst and ~25x above the live path, so it can only
+        # mean Morpho shipped an adapter family the probe cannot classify. Every
+        # provenance the live indexer writes is counted: an unclassifiable family
+        # that only ever arrives via discovery must not be invisible here.
+        # adapter_type="unknown" excludes "unprobed" by construction, so removals
+        # cannot inflate this.
         #
-        # Expect one firing during the initial VaultV2 backfill/bootstrap, when
-        # every existing V2 vault is discovered at once. Acknowledge it, then
-        # curate from the DB query in the runbook.
+        # THE REPLAY WORKERS ARE EXCLUDED — the group note above has the matcher
+        # and why every rule here carries it.
+        # For this rule specifically: a replay re-recording a known Unknown
+        # population would fire it by design, and nothing has changed on chain.
+        # The live indexer is still the source this is asking about, and a real
+        # new adapter family reaches it within a day of shipping.
+        #
+        # Expect one firing when the live indexer first discovers a wave of V2
+        # vaults. Acknowledge it, then curate from the DB query in the runbook.
         expr: |
           sum by (chain, cluster) (
             increase(morpho_v2_adapter_registrations_total{
-              adapter_type="unknown", k8s_namespace_name="vector"
+              adapter_type="unknown", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)", k8s_namespace_name="vector"
             }[24h])
           ) > 25
         for: 30m
@@ -834,7 +886,7 @@ groups:
         annotations:
           summary: "Vector morpho VaultV2 registered {{ $value | printf \"%.0f\" }} unclassifiable adapters on {{ $labels.chain }}"
           description: |
-            `morpho-indexer` on chain `{{ $labels.chain }}` recorded
+            The live morpho indexer for chain `{{ $labels.chain }}` recorded
             `{{ $value | printf "%.0f" }}` VaultV2 adapters as type Unknown in 24h
             — no on-chain classification getter answered, or several did. Their
             realAssets are still tracked, but nothing downstream can attribute the
@@ -869,10 +921,19 @@ groups:
         # adapter allocated in the discovery block, every time; nothing has to have
         # changed between two reads. Deliberately not >0: those appends are by
         # design not an incident.
+        #
+        # THE REPLAY WORKERS ARE EXCLUDED — the group note above has the matcher
+        # and why every rule here carries it.
+        # For this rule specifically: replaying an Allocate whose vault was
+        # discovered mid-life is precisely how the missing add_adapter_event
+        # history gets filled in, so a replay run drives this counter by design
+        # and firing on it would page for the fix. What the alert is asking
+        # about — is the LIVE enumeration missing adapters — is only answerable
+        # from the live indexer's own series.
         expr: |
           sum by (chain, cluster) (
             increase(morpho_v2_adapter_registrations_total{
-              observed_via="allocation_event", k8s_namespace_name="vector"
+              observed_via="allocation_event", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)", k8s_namespace_name="vector"
             }[6h])
           ) > 3
         for: 30m
@@ -884,7 +945,7 @@ groups:
         annotations:
           summary: "Vector morpho VaultV2 lazily registering adapters on {{ $labels.chain }}"
           description: |
-            `morpho-indexer` on chain `{{ $labels.chain }}` self-healed
+            The live morpho indexer for chain `{{ $labels.chain }}` self-healed
             `{{ $value | printf "%.0f" }}` VaultV2 adapters in 6h — each one was
             named by a vault event but missing from the registry. Discovery seeds
             a vault's whole adapter set, so a sustained rate here means the
@@ -942,46 +1003,37 @@ groups:
         # the runbook's first check is to rule out a loop, which is a better trade
         # than going blind on a real liquidity run every time one block errors.
         #
-        # SCOPED to the live indexer. morpho-vault-backfill and morpho-v2-bootstrap
-        # replay history through the same handlers and count on this same
-        # instrument under their own service_name, and neither emits
-        # morpho_blocks_processed_total, so the loop gate cannot suppress them.
-        # The 2026-08-28 staging era backfill replayed 2,604 ForceDeallocate at up
-        # to 1,025/h and held this firing for 7h against ~1/h of real activity.
-        # Replayed history is not a liquidity run; the replay workers' series stay
-        # on the dashboard as backfill progress.
+        # THE REPLAY WORKERS ARE EXCLUDED — the group note above has the matcher
+        # and why every rule here carries it.
+        # For this rule specifically: the redelivery loop gate above cannot stand
+        # in for the exclusion, because neither replay worker emits
+        # morpho_blocks_processed_total — the gate has nothing to read for them,
+        # which is how the replayed ForceDeallocate flood in the group note held
+        # this firing for 7h. Replayed history is not a liquidity run.
         #
-        # "Live indexer" is one Deployment per chain (morpho-indexer on mainnet,
-        # base-morpho-indexer on Base since ARCT-414) running the same binary;
-        # each emits its own service_name (SERVICE_NAME env from the pod's `app`
-        # label; binary support lands with ARCT-413 — until then the Base pod
-        # still reports service_name="morpho-indexer" with chain="base", and the
-        # regex covers both states), so the match lists every per-chain name
-        # explicitly rather than a prefix glob that could one day admit a replay
-        # worker. The 20/h
-        # threshold is per chain and was sized on the whole mainnet V2 population;
-        # Base has one V2 vault (steakUSDC), so >20/h there is a stronger signal,
-        # not a weaker one, and the threshold is deliberately not loosened for
-        # it. Add the new name here when a chain is added.
+        # The 20/h threshold is per chain and was sized on the whole mainnet V2
+        # population; Base has one V2 vault (steakUSDC), so >20/h there is a
+        # stronger signal, not a weaker one, and the threshold is deliberately
+        # not loosened for it.
         expr: |
           sum by (chain, cluster) (
             increase(morpho_events_processed_total{
-              event_type="ForceDeallocate", service_name=~"morpho-indexer|base-morpho-indexer", k8s_namespace_name="vector"
+              event_type="ForceDeallocate", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)", k8s_namespace_name="vector"
             }[1h])
           ) > 20
           unless on (chain, cluster)
           (
             sum by (chain, cluster) (
-              rate(morpho_blocks_processed_total{status="error", service_name=~"morpho-indexer|base-morpho-indexer", k8s_namespace_name="vector"}[1h])
+              rate(morpho_blocks_processed_total{status="error", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)", k8s_namespace_name="vector"}[1h])
             ) > 0
             and on (chain, cluster)
             (
               sum by (chain, cluster) (
-                rate(morpho_blocks_processed_total{status="success", service_name=~"morpho-indexer|base-morpho-indexer", k8s_namespace_name="vector"}[1h])
+                rate(morpho_blocks_processed_total{status="success", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)", k8s_namespace_name="vector"}[1h])
               )
               or
               sum by (chain, cluster) (
-                rate(morpho_blocks_processed_total{service_name=~"morpho-indexer|base-morpho-indexer", k8s_namespace_name="vector"}[1h])
+                rate(morpho_blocks_processed_total{service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)", k8s_namespace_name="vector"}[1h])
               ) * 0
             ) == 0
           )
@@ -1060,12 +1112,14 @@ groups:
           sum by (chain, cluster) (
             rate(morpho_events_processed_total{
               event_type=~"Allocate|Deallocate|IncreaseAbsoluteCap|DecreaseAbsoluteCap|IncreaseRelativeCap|DecreaseRelativeCap|SetPerformanceFee|SetManagementFee|SetPerformanceFeeRecipient|SetManagementFeeRecipient",
-              k8s_namespace_name="vector"
+              service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)", k8s_namespace_name="vector"
             }[6h])
           ) > 0
           unless
           sum by (chain, cluster) (
-            rate(morpho_v2_snapshots_written_total{k8s_namespace_name="vector"}[6h])
+            rate(morpho_v2_snapshots_written_total{
+              service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)", k8s_namespace_name="vector"
+            }[6h])
           ) > 0
         for: 15m
         labels:
@@ -1076,12 +1130,12 @@ groups:
         annotations:
           summary: "Vector morpho VaultV2 writing no structured snapshots on {{ $labels.chain }}"
           description: |
-            `morpho-indexer` on chain `{{ $labels.chain }}` processed VaultV2
-            allocation / cap / fee events for 6h but committed zero structured
-            snapshots. The events are being audit-logged without producing
-            `morpho_adapter_state` / `morpho_vault_cap` / `morpho_vault_fee` rows,
-            and no error is raised — downstream VaultV2 composition and fee reads
-            are silently freezing.
+            The live morpho indexer for chain `{{ $labels.chain }}` processed
+            VaultV2 allocation / cap / fee events for 6h but committed zero
+            structured snapshots. The events are being audit-logged without
+            producing `morpho_adapter_state` / `morpho_vault_cap` /
+            `morpho_vault_fee` rows, and no error is raised — downstream
+            VaultV2 composition and fee reads are silently freezing.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormorphov2nosnapshotswritten
 
       - alert: VectorMorphoV2NoStructuredEvents
@@ -1123,13 +1177,16 @@ groups:
         # blind in exactly the case this exists for. Do not revert to `and`.
         expr: |
           sum by (chain, cluster) (
-            rate(morpho_blocks_processed_total{status="success", chain!="base", k8s_namespace_name="vector"}[6h])
+            rate(morpho_blocks_processed_total{
+              status="success", chain!="base",
+              service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)", k8s_namespace_name="vector"
+            }[6h])
           ) > 0
           unless
           sum by (chain, cluster) (
             rate(morpho_events_processed_total{
               event_type=~"Allocate|Deallocate|IncreaseAbsoluteCap|DecreaseAbsoluteCap|IncreaseRelativeCap|DecreaseRelativeCap|SetPerformanceFee|SetManagementFee|SetPerformanceFeeRecipient|SetManagementFeeRecipient",
-              k8s_namespace_name="vector"
+              service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)", k8s_namespace_name="vector"
             }[6h])
           ) > 0
         for: 15m
@@ -1141,12 +1198,13 @@ groups:
         annotations:
           summary: "Vector morpho decoding no VaultV2 structured events on {{ $labels.chain }}"
           description: |
-            `morpho-indexer` on chain `{{ $labels.chain }}` has processed blocks
-            successfully for 6h but decoded zero VaultV2 allocation / cap / fee
-            events. Mainnet normally sees ~150 an hour, so this is not a quiet
-            market: the V2 topics are likely no longer registered, the signatures
-            no longer match, or the vault registry holds no V2 vault — in every
-            case the structured tables stop filling with no error raised.
+            The live morpho indexer for chain `{{ $labels.chain }}` has
+            processed blocks successfully for 6h but decoded zero VaultV2
+            allocation / cap / fee events. Mainnet normally sees ~150 an hour,
+            so this is not a quiet market: the V2 topics are likely no longer
+            registered, the signatures no longer match, or the vault registry
+            holds no V2 vault — in every case the structured tables stop
+            filling with no error raised.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormorphov2nostructuredevents
 
   # Own rule GROUP but same file, so it keeps the filename-derived Mimir

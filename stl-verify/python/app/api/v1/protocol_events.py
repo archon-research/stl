@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, RootModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.protocol_event_repository import ProtocolEventRepository
@@ -68,14 +68,26 @@ class ProtocolEventBucketResponse(BaseModel):
     event_count: int = Field(description="Number of events in the bucket.", examples=[42])
 
 
-class ProtocolEventsEnvelope(BaseModel):
-    """Protocol events response: raw rows or aggregated time buckets."""
+class RawProtocolEventsEnvelope(BaseModel):
+    """The `mode=raw` arm of `ProtocolEventsEnvelope`: decoded event rows."""
 
-    mode: Literal["raw", "aggregated"] = Field(description="`raw` for events, `aggregated` for time buckets.")
+    mode: Literal["raw"] = Field(description="Always `raw` on this arm: decoded event rows.")
     window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
-    data: list[ProtocolEventResponse] | list[ProtocolEventBucketResponse] = Field(
-        description="Events when `mode=raw`, count buckets when `mode=aggregated`."
-    )
+    data: list[ProtocolEventResponse] = Field(description="Decoded events, newest first.")
+
+
+class AggregatedProtocolEventsEnvelope(BaseModel):
+    """The `mode=aggregated` arm of `ProtocolEventsEnvelope`: per-bucket counts."""
+
+    mode: Literal["aggregated"] = Field(description="Always `aggregated` on this arm: per-bucket event counts.")
+    window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
+    data: list[ProtocolEventBucketResponse] = Field(description="Event counts per time bucket, newest first.")
+
+
+class ProtocolEventsEnvelope(
+    RootModel[Annotated[RawProtocolEventsEnvelope | AggregatedProtocolEventsEnvelope, Field(discriminator="mode")]]
+):
+    """Protocol events response: raw rows or aggregated time buckets."""
 
 
 async def _get_protocol_event_service(engine: AsyncEngine = Depends(get_engine)) -> ProtocolEventService:
@@ -126,9 +138,11 @@ async def list_protocol_events(
                 limit=limit,
             )
             return ProtocolEventsEnvelope(
-                mode="aggregated",
-                window=window,
-                data=[ProtocolEventBucketResponse(**bucket.__dict__) for bucket in buckets],
+                AggregatedProtocolEventsEnvelope(
+                    mode="aggregated",
+                    window=window,
+                    data=[ProtocolEventBucketResponse(**bucket.__dict__) for bucket in buckets],
+                )
             )
 
         events = await service.list_events(
@@ -139,9 +153,11 @@ async def list_protocol_events(
             limit=limit,
         )
         return ProtocolEventsEnvelope(
-            mode="raw",
-            window=window,
-            data=[ProtocolEventResponse(**event.__dict__) for event in events],
+            RawProtocolEventsEnvelope(
+                mode="raw",
+                window=window,
+                data=[ProtocolEventResponse(**event.__dict__) for event in events],
+            )
         )
     except ValueError as exc:
         logger.error(
