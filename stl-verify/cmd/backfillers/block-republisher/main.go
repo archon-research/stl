@@ -109,7 +109,7 @@ func newRepublishActivities(ctx context.Context, logger *slog.Logger, cfg config
 	if err != nil {
 		return nil, err
 	}
-	archive, err := openArchiveReader(ctx, awsCfg, cfg, logger)
+	archive, err := s3adapter.OpenArchiveReader(ctx, awsCfg, cfg.s3Bucket, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -137,19 +137,6 @@ func newRepublishActivities(ctx context.Context, logger *slog.Logger, cfg config
 		service:     service,
 		newProgress: func() heartbeater { return temporal.NewActivityProgress[republishHeartbeat]() },
 	}, nil
-}
-
-// openArchiveReader reads the same raw bucket the backup worker writes: which
-// version slots are taken, and the block the top one holds. Like the Redis dial
-// below it probes at startup — one listing and one ranged read — so a bucket this
-// pod may not use shows up as a worker that will not start rather than as a
-// repair that dies mid-run. Nothing is ever written.
-func openArchiveReader(ctx context.Context, awsCfg aws.Config, cfg config, logger *slog.Logger) (*s3adapter.ArchiveReader, error) {
-	archive := s3adapter.NewArchiveReader(s3adapter.NewReaderFromEnv(awsCfg, logger), cfg.s3Bucket)
-	if err := archive.Ping(ctx); err != nil {
-		return nil, fmt.Errorf("the raw archive %s is unusable: %w", cfg.s3Bucket, err)
-	}
-	return archive, nil
 }
 
 // newChainClient builds the same RPC client the watcher fetches a block with, so

@@ -265,3 +265,73 @@ func TestTelemetry_NilSafe(t *testing.T) {
 		telemetry.SetSpanError(span, someErr, "test error description")
 	})
 }
+
+// VectorOracleUnitStale reads oracle.unit.passes with increase(...)==0, so a
+// unit that has completed no pass must still export the series — otherwise the
+// comparison matches nothing and the alert cannot fire for exactly the unit it
+// exists to catch (VEC-750).
+func TestRecordUnitLoaded_SeedsThePassCounterAtZero(t *testing.T) {
+	tel, reader := newRecordingTelemetry(t)
+
+	tel.RecordUnitLoaded(context.Background(), "chainlink")
+
+	dps := testutil.CollectSumDataPoints(t, reader, "oracle.unit.passes")
+	if len(dps) != 1 {
+		t.Fatalf("oracle.unit.passes has %d series after load, want 1", len(dps))
+	}
+	if dps[0].Value != 0 {
+		t.Errorf("seeded value = %d, want 0", dps[0].Value)
+	}
+	if got := testutil.AttrValue(dps[0], "oracle.name"); got != "chainlink" {
+		t.Errorf("oracle.name = %q, want %q", got, "chainlink")
+	}
+	if got := testutil.AttrValue(dps[0], "chain"); got != "mainnet" {
+		t.Errorf("chain = %q, want %q", got, "mainnet")
+	}
+}
+
+// The seeded series and the series RecordUnitSuccess writes must be one series.
+// If the two label sets ever diverge, the seeded one stays flat at 0 while real
+// passes accumulate on a second series, increase() goes back to missing the
+// first increment, and the counter looks seeded while the alert stays blind.
+// Asserted by series count, because a value assertion alone cannot see it.
+func TestRecordUnitSuccess_LandsOnTheSeededSeries(t *testing.T) {
+	tel, reader := newRecordingTelemetry(t)
+	ctx := context.Background()
+
+	tel.RecordUnitLoaded(ctx, "chainlink")
+	tel.RecordUnitSuccess(ctx, "chainlink")
+
+	dps := testutil.CollectSumDataPoints(t, reader, "oracle.unit.passes")
+	if len(dps) != 1 {
+		t.Fatalf("oracle.unit.passes has %d series after one pass, want 1 — the success orphaned the seeded series", len(dps))
+	}
+	if dps[0].Value != 1 {
+		t.Errorf("value = %d, want 1 (0 seeded then 1 pass)", dps[0].Value)
+	}
+}
+
+// Each unit is alerted independently, so loading several must produce a series
+// per unit rather than one merged series.
+func TestRecordUnitLoaded_SeedsEachUnitSeparately(t *testing.T) {
+	tel, reader := newRecordingTelemetry(t)
+	ctx := context.Background()
+
+	for _, unit := range []string{"chainlink", "chronicle", "redstone"} {
+		tel.RecordUnitLoaded(ctx, unit)
+	}
+	tel.RecordUnitSuccess(ctx, "chronicle")
+
+	got := testutil.CollectCounterByAttr(t, reader, "oracle.unit.passes", "oracle.name")
+	want := map[string]int64{"chainlink": 0, "chronicle": 1, "redstone": 0}
+	for unit, wantValue := range want {
+		value, ok := got[unit]
+		if !ok {
+			t.Errorf("oracle.unit.passes missing the %q series", unit)
+			continue
+		}
+		if value != wantValue {
+			t.Errorf("oracle.unit.passes{oracle_name=%q} = %d, want %d", unit, value, wantValue)
+		}
+	}
+}

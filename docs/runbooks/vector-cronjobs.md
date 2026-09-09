@@ -790,15 +790,44 @@ version to its trigger.
 ### Special case: `morpho-v2-bootstrap` (on-demand, no schedule)
 
 Both history jobs emit the same `morpho_v2_*` metrics as the live indexer (the
-replay path is metered since VEC-218), so the V2 volume alerts in
-`vector-indexers.yaml` can fire during a deliberate replay or bootstrap run —
-expected, not an incident; the run is operator-initiated and visible here.
-`VectorMorphoV2ForceDeallocateSurge` is the exception: it is scoped to the live
-indexer's `service_name`, because replayed history is not a liquidity run.
+replay path is metered since VEC-218), under their own `service_name`. Every rule
+in the `vector-morpho-v2` group of `vector-indexers.yaml` excludes those two
+names, so a deliberate replay or bootstrap run fires none of them. Replayed
+history is not a liquidity run, a wave of new unclassifiable adapters, or an
+enumeration gap — it is the same population being re-recorded, or the very repair
+those alerts would send you to make. Each worker's own series stays on the
+dashboard as run progress.
+
+The exclusion covers both sides of the two silent-empty guards
+(`VectorMorphoV2NoSnapshotsWritten`, `VectorMorphoV2NoStructuredEvents`) for the
+opposite reason: a run's own snapshots and events would otherwise satisfy the side
+that suppresses them, hiding a live write path that broke while the run was going
+for the run plus its whole trailing 6h window. A run no longer masks one.
 
 A third **on-demand** Temporal worker (`temporal.RunWorker`). Everything said
 about `offchain-price-backfill` above applies — nothing is missed while it is
 down, and it is excluded from `VectorCronjobAllRunsFailing` for the same reason.
+
+**Before starting a run, check what the range already holds.** Every V2 row
+carries the `block_version` the run that wrote it resolved, so an earlier run's
+stamps are visible per table:
+
+```sql
+SELECT 'morpho_vault_cap' AS tbl, block_version, count(*) AS rows, min(block_number) AS min_blk, max(block_number) AS max_blk
+FROM morpho_vault_cap GROUP BY 1, 2
+UNION ALL SELECT 'morpho_vault_fee', block_version, count(*), min(block_number), max(block_number) FROM morpho_vault_fee GROUP BY 1, 2
+UNION ALL SELECT 'morpho_adapter_state', block_version, count(*), min(block_number), max(block_number) FROM morpho_adapter_state GROUP BY 1, 2
+UNION ALL SELECT 'morpho_adapter_membership', block_version, count(*), min(block_number), max(block_number) FROM morpho_adapter_membership GROUP BY 1, 2
+ORDER BY 1, 2;
+```
+
+A version the archive does not hold for that range is an earlier run's stamp, not
+a reorg. Cross-check a few partitions across the range with
+`aws s3 ls s3://<bucket>/<partition>/`: on both envs the archive is version-1-only
+below ~24.27M, then a patchy band of identical 0/1 twins up to 24,340,697, then
+the watcher era at 0. On staging on 2026-09-08, 357 `morpho_vault_cap` identities
+carried both versions across blocks 23,419,201–24,339,378 — the constant-0
+bootstrap sitting beside the backfill's version-1 rows.
 
 **How to start a run.** Temporal UI (namespace **`vector`**) →
 **Start Workflow**:
@@ -833,6 +862,58 @@ still going after an hour is a stall signal, not normal.
 Unlike the backfill, progress lives in the activity's heartbeat details rather
 than in workflow history; see the resume note at the top of this runbook.
 
+**Block versions come from the raw archive.** The run's events come from a node,
+which carries no `block_version`, so each replayed row — and the head seed — is
+stamped with the version the chain's raw S3 archive holds at that height: the
+highest version archived there, the same rule `morpho-vault-backfill` reads off
+the S3 key it replays. That is what puts a replayed row at the same
+`block_version` as every other replay of that block, so this run's row — not the
+`morpho-vault-backfill`'s older one — is the row a current read returns.
+
+It is **not** a dedupe with live indexing's row. On the deep history the bulk
+downloader wrote, the archive holds version 1 where live indexing stamped 0, so
+the replayed row deliberately ranks above the live one; the two are the same
+block, hash-verified, so their values agree. And a run from a different build
+gets its own `processing_version` either way — see "Idempotency" in
+`cmd/cronjobs/morpho-v2-bootstrap/main.go`. `block_states` cannot serve as the
+source of the version: it keeps 30 days, and the sweep starts at the VaultV2
+factory deploy block.
+
+The bucket arrives as `S3_BUCKET` from the ExternalSecret and the pod reads it
+through its EKS Pod Identity association. Both are settled at startup: the name is
+checked against `CHAIN_ID` (through `DEPLOY_ENV`), and the pod lists and reads the
+bucket once — so another chain's bucket or a missing grant is a worker that will
+not start, rather than a run that dies on its first height, three attempts over.
+
+**Before the first run.** This ServiceAccount needs its **own** EKS Pod Identity
+association (`k8s/base/morpho-v2-bootstrap/serviceaccount.yaml`); the one
+`morpho-vault-backfill` has does not reach this pod. It carries two grants on the
+chain's raw bucket: `s3:ListBucket` (which versions a height holds) and
+`s3:GetObject` (which block the top version names). Nothing is ever written to S3.
+Both come from archon-research/infrastructure#706, which has to be applied to an
+environment before the Deployment lands there — without it the pod never becomes
+Ready, logging `this pod needs s3:ListBucket on that bucket` or `this pod needs
+s3:GetObject on that bucket` from the startup probes, and
+`VectorOnDemandWorkerDown` fires 30 minutes later.
+
+Every run closes with one `block versions resolved from the raw archive` line:
+`outcome=completed` at Info, `outcome=aborted` at **Error**, `heights=<n>` for the
+heights it resolved, and one `version_<v>` group per version the archive answered
+with, each carrying that version's own `heights`, `from` and `to`. A version above
+0 is not evidence of a reorg, just of what the archive holds. An `aborted` outcome
+means the sweep did not finish, so those extents cover only the range it reached.
+
+A height the archive cannot answer for **stops the run**, naming the height: it
+holds no object there, or the version it holds names a different block (an
+orphaned fork kept past its reorg — the ARCT-379 shape). Deep in the replay range
+that is a real hole — repair the archive, then start a new run:
+`block-republisher` for a single height whose object is missing or wrong,
+`raw-block-bulk-downloader` for a range. At the pinned head it is usually not a
+hole but an archive that has not caught up, and republishing that height makes
+things worse; see "morpho-v2-bootstrap run outcomes" below. Either way, do not
+work around it by stamping a version — the whole point is that no row is written
+under a version no canonical block was archived under.
+
 ---
 
 ### Special case: `block-republisher` (on-demand, no schedule)
@@ -853,8 +934,9 @@ indexers.
 **One run repairs one chain.** Every chain with a raw archive runs its own
 worker, on its own task queue, against its own topic, Redis and bucket — the
 `blocks` you pass are that chain's heights, and there is no way to mix chains in
-one run. Robinhood has a watcher but no backup worker, so it has no raw archive
-to derive a version from and no republisher is deployed for it.
+one run. Robinhood has a raw archive (backup worker, #870) but no republisher
+yet: its ServiceAccount needs an EKS Pod Identity grant in the infra repo first,
+which is why it is absent from the table below.
 
 The three chain-bearing variables are all checked against `CHAIN_ID` at startup,
 so a cross-chain deployment is a pod that will not start rather than corrections
@@ -1585,7 +1667,7 @@ first firing as a real stall.
 
 **Nothing here needs rows reconciling by hand.** Adapter membership is an
 append-only observation log, so a failed pass writes no lifecycle a later run has
-to walk back, and re-running is always safe. Three things can stop a run:
+to walk back, and re-running is always safe. Four things can stop a run:
 
 **1. A chain or DB error.** `eth_getLogs` 401/429/5xx, an RPC timeout, a DB
 outage. Temporal retries the activity (3 attempts) and each retry resumes from the
@@ -1609,6 +1691,33 @@ and the joined error names each vault that was not. Work through those
 individually; re-running unchanged produces the same set. The run stays red until
 each one is fixed or explicitly written off, which is the point: a hole is
 reported, never hidden.
+
+**4. A height the raw archive cannot answer for.** Either `the raw archive
+identifies no block at that height` — nothing is archived there at all, or the top
+version that is there names no usable block hash — or `the raw archive holds
+another block at that height`, which names the archived hash beside the one being
+replayed. Both name the height and the bucket. The run stamps every row with the
+version the archive holds (see "Block versions come from the raw archive" above),
+so it stops rather than guess.
+Which repair to reach for depends on which height it is, and the error says which.
+
+**The pinned head.** An error prefixed `resolving the block version of the pinned
+head <N>` and saying the archive `has not caught up to the finalized head` is an
+archive that is behind, not one with a hole. `raw-data-backup` archives a block
+when the watcher broadcasts it, minutes before it finalizes, so a head that is not
+archived points at that worker: check `VectorBackupWorkerStalled` and
+`VectorBackupWorkerLatencyHigh`
+([`vector-backup-worker.md`](vector-backup-worker.md)) and the chain's raw-backup
+SQS depth, then start a new run once the archive has reached the finalized head.
+**Do not republish that height.** `block-republisher` writes the next free version
+(1) permanently, and manufactures a `_0_`/`_1_` twin the moment the backup
+worker's in-flight object lands. The head is resolved before the sweep, and the
+activity's three attempts back off 2 s then 4 s, so a lagging head shows as a red
+run within seconds rather than after the whole replay.
+
+**Any height below the head**, deep in the replay range, is a real hole and does
+not clear on retry: repair the archive with `block-republisher` (one height) or
+`raw-block-bulk-downloader` (a range), then start a new run.
 
 **Not failures:**
 

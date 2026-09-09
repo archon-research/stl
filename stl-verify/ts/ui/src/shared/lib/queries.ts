@@ -98,10 +98,25 @@ function bucketQuery(range: SeriesWindow) {
   };
 }
 
-// `Array.isArray` is the entire check either way; carrying it in a predicate
-// keeps the arm the caller named from needing an assertion to come back.
-function isEnvelopeRows<TRows>(data: unknown): data is TRows {
-  return Array.isArray(data);
+/** The arm of a bucketed envelope that answers to `TMode`. */
+type EnvelopeArm<TEnvelope extends BucketedEnvelope, TMode> = Extract<
+  TEnvelope,
+  { mode: TMode }
+>;
+
+/** What the schema's `oneOf`/`discriminator` guarantees every envelope here has. */
+type BucketedEnvelope = { mode: string; data: readonly unknown[] };
+
+// A predicate, not an assertion: the schema discriminates on `mode`, so naming
+// the arm is all TypeScript needs to correlate `data` with it.
+function isEnvelopeMode<
+  TEnvelope extends BucketedEnvelope,
+  TMode extends TEnvelope['mode'],
+>(
+  envelope: TEnvelope,
+  expected: TMode,
+): envelope is EnvelopeArm<TEnvelope, TMode> {
+  return envelope.mode === expected;
 }
 
 /**
@@ -114,18 +129,21 @@ function isEnvelopeRows<TRows>(data: unknown): data is TRows {
  * drawing an empty view over a broken payload. Thrown from a `select`, which
  * react-query reports as the query's own error.
  *
- * `TRows` is the arm the caller asked for, stated once as a type argument and
- * constrained to one the envelope can actually carry. The schema types `data`
- * as the union of every mode's rows without discriminating on `mode`, so the
- * correlation cannot be inferred -- see VEC-686.
+ * The return type is the named arm's own `data`, so callers state the mode and
+ * nothing else; `Array.isArray` guards a shape the schema promises rather than
+ * establishing one.
  */
 function requireEnvelopeRows<
-  TEnvelope extends { mode: string; data: unknown },
-  TRows extends TEnvelope['data'],
->(envelope: TEnvelope, expected: TEnvelope['mode'], label: string): TRows {
-  const { data, mode } = envelope;
-  if (mode === expected && isEnvelopeRows<TRows>(data)) {
-    return data;
+  TEnvelope extends BucketedEnvelope,
+  TMode extends TEnvelope['mode'],
+>(
+  envelope: TEnvelope,
+  expected: TMode,
+  label: string,
+): EnvelopeArm<TEnvelope, TMode>['data'] {
+  const { mode } = envelope;
+  if (isEnvelopeMode(envelope, expected) && Array.isArray(envelope.data)) {
+    return envelope.data;
   }
 
   const fault = mode === expected ? 'a non-array `data`' : `"${mode}"`;
@@ -147,7 +165,7 @@ function requireEnvelopeRows<
 const selectLatestDebtSnapshot = (
   envelope: PrimeDebtEnvelope,
 ): PrimeDebtSnapshot | null => {
-  const snapshots = requireEnvelopeRows<PrimeDebtEnvelope, PrimeDebtSnapshot[]>(
+  const snapshots = requireEnvelopeRows(
     envelope,
     'raw',
     'GET /v1/primes/{prime_id}/debt',
@@ -158,7 +176,7 @@ const selectLatestDebtSnapshot = (
 const selectLatestDebtBucket = (
   envelope: PrimeDebtEnvelope,
 ): PrimeDebtBucket | null => {
-  const buckets = requireEnvelopeRows<PrimeDebtEnvelope, PrimeDebtBucket[]>(
+  const buckets = requireEnvelopeRows(
     envelope,
     'aggregated',
     'GET /v1/primes/{prime_id}/debt',
@@ -168,7 +186,7 @@ const selectLatestDebtBucket = (
 
 const selectDebtBuckets = (envelope: PrimeDebtEnvelope): PrimeDebtBucket[] =>
   sortByBucketStart(
-    requireEnvelopeRows<PrimeDebtEnvelope, PrimeDebtBucket[]>(
+    requireEnvelopeRows(
       envelope,
       'aggregated',
       'GET /v1/primes/{prime_id}/debt',
@@ -179,11 +197,15 @@ const selectActivityBuckets = (
   envelope: AllocationActivityEnvelope,
 ): AllocationActivityBucket[] => {
   if (envelope.mode === 'aggregated') {
+    // Still through the guard, like the three sibling series: `mode` narrowing
+    // cannot rule out a `data` that is not an array, and that is as loud a
+    // contract violation here as anywhere.
     return sortByBucketStart(
-      requireEnvelopeRows<
-        AllocationActivityEnvelope,
-        AllocationActivityBucket[]
-      >(envelope, 'aggregated', 'GET /v1/allocations/activity'),
+      requireEnvelopeRows(
+        envelope,
+        'aggregated',
+        'GET /v1/allocations/activity',
+      ),
     );
   }
 
@@ -199,7 +221,7 @@ const selectTotalCapitalBuckets = (
   envelope: TotalCapitalEnvelope,
 ): TotalCapitalBucket[] =>
   sortByBucketStart(
-    requireEnvelopeRows<TotalCapitalEnvelope, TotalCapitalBucket[]>(
+    requireEnvelopeRows(
       envelope,
       'aggregated',
       'GET /v1/primes/{prime_id}/total-capital',
@@ -208,7 +230,7 @@ const selectTotalCapitalBuckets = (
 
 const selectExposureBuckets = (envelope: ExposureEnvelope): ExposureBucket[] =>
   sortByBucketStart(
-    requireEnvelopeRows<ExposureEnvelope, ExposureBucket[]>(
+    requireEnvelopeRows(
       envelope,
       'aggregated',
       'GET /v1/primes/{prime_id}/exposure',
@@ -221,20 +243,12 @@ const selectDataSources = (response: DataSourcesResponse) =>
 const selectRawActivity = (
   envelope: AllocationActivityEnvelope,
 ): AllocationActivityResponse =>
-  requireEnvelopeRows<AllocationActivityEnvelope, AllocationActivityResponse>(
-    envelope,
-    'raw',
-    'GET /v1/allocations/activity',
-  );
+  requireEnvelopeRows(envelope, 'raw', 'GET /v1/allocations/activity');
 
 const selectProtocolEvents = (
   envelope: ProtocolEventsEnvelope,
 ): ProtocolEventsResponse =>
-  requireEnvelopeRows<ProtocolEventsEnvelope, ProtocolEventsResponse>(
-    envelope,
-    'raw',
-    'GET /v1/protocol-events',
-  );
+  requireEnvelopeRows(envelope, 'raw', 'GET /v1/protocol-events');
 
 const selectTokenSymbols = (tokens: TokensResponse): string[] =>
   Array.from(
