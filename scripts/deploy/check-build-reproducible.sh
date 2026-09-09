@@ -212,6 +212,28 @@ check_docs_reached_go_context() {
   fi
 }
 
+# check_ui_builder_rebuilt <build-log>: assert --no-cache-filter actually took
+# effect. ADR-0007 rejects --no-cache-filter for the weekly refresh precisely
+# because "a filter that stops matching a renamed stage silently refreshes
+# nothing"; the same hazard applies here, so the filter is verified rather than
+# trusted. Renaming the stage in python/Dockerfile makes the filter match
+# nothing, ui-builder goes back to being cache-hit, the only real coverage of
+# its reproducibility disappears -- and without this the leg still reports ok.
+check_ui_builder_rebuilt() {
+  local log="$1" steps cached total
+  # Every plain-progress step line for the stage, e.g. "#24 [ui-builder 6/9] RUN npm ci".
+  steps="$(grep -oE '^#[0-9]+ \[ui-builder [0-9]+/[0-9]+\]' "$log" | awk '{print $1}' | sort -u)"
+  [ -n "$steps" ] || die "no 'ui-builder' stage appears in the build log: --no-cache-filter ui-builder matched nothing. The stage was probably renamed in python/Dockerfile — update the filter and this check together (ORB-366, ADR-0007)."
+  total="$(printf '%s\n' "$steps" | grep -c .)"
+  cached=0
+  while IFS= read -r step; do
+    grep -qF "${step} CACHED" "$log" && cached=$((cached + 1))
+  done <<< "$steps"
+  if [ "$cached" -eq "$total" ]; then
+    die "every ui-builder step was CACHED despite --no-cache-filter: the stage was not recomputed, so this leg proves nothing about its reproducibility (ORB-366)."
+  fi
+}
+
 # compare <case-name> <expectation: match|differ> <layers-a> <layers-b>
 FAILED=0
 compare() {
@@ -284,8 +306,14 @@ if [ "$IMAGE" = "python" ]; then
   # independently recomputed at least once in this run, instead of only ever
   # being cache-hit (see the CACHE header note).
   BUILD_EXTRA_ARGS="--no-cache-filter ui-builder"
+  BUILD_LOG="$(mktemp)"
 fi
 LAYERS_SAME="$(build same-source "$COMMIT_B" "2021-06-15T12:34:56Z")"
+if [ "$IMAGE" = "python" ]; then
+  check_ui_builder_rebuilt "$BUILD_LOG"
+  rm -f "$BUILD_LOG"
+  BUILD_LOG=""
+fi
 BUILD_EXTRA_ARGS=""
 compare "same source, different build metadata" match "$LAYERS_A" "$LAYERS_SAME"
 
