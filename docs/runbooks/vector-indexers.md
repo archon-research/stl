@@ -3101,9 +3101,15 @@ incident.
    `sum by (observed_via) (increase(morpho_v2_adapter_registrations_total{adapter_type="unknown", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"}[24h]))`.
    All `vault_discovery` means a wave of newly discovered vaults (benign, but still
    curate). Any meaningful `add_adapter_event` share means a new family is shipping
-   live. Drop the `service_name` matcher to see what a replay run recorded — the
-   same population re-recorded, plus `bootstrap_seed` rows for any adapter whose
-   probe now classifies differently from the log, which is a correction landing.
+   live. Dropping the `service_name` matcher shows the same population re-recorded
+   by a replay run, but it will never show a correction: this query is filtered to
+   `adapter_type="unknown"` and a correction is counted under its NEW type. Ask
+   for corrections with their own query, unmatched on `service_name` because only
+   `morpho-v2-bootstrap` writes that provenance:
+   `sum by (adapter_type) (increase(morpho_v2_adapter_registrations_total{observed_via="bootstrap_seed"}[24h]))`
+   — any `adapter_type` other than `unknown` is a correction landing. A re-seed
+   whose probe still answers Unknown appends nothing, so it increments no counter
+   at all.
 2. **Identify the adapters** (`db-query`):
 
    ```sql
@@ -3152,12 +3158,16 @@ incident.
 
 - Morpho deployed a new adapter family the marker probe does not model →
   extend `adapter_probe.go` with the new marker selector and its
-  `entity.MorphoAdapterType`, then **replay / re-seed the affected vaults** so the
-  extended probe APPENDS a corrected classification. `morpho_adapter_current` is
-  latest-row-wins, so the new observation supersedes the type-99 one; there is no
-  in-place fix available — UPDATE is revoked on `morpho_adapter_membership`. See
-  the replay note under Verify recovery for
-  [`VectorMorphoV2LazyAdapterRegistrations`](#vectormorphov2lazyadapterregistrations).
+  `entity.MorphoAdapterType`, then run **`morpho-v2-bootstrap`**, whose closing
+  enumeration asserts the corrected classification at the run's pinned head.
+  `morpho_adapter_current` is the latest row per adapter by `(block_number,
+  block_version, log_index, processing_version)`, so a seed above the type-99 row
+  is what supersedes it; there is no in-place fix, since UPDATE is revoked on
+  `morpho_adapter_membership`. A `morpho-vault-backfill` replay does **not** repair
+  a type-99 read: its observations append at the adapter's historical position,
+  below the row the view picks, and its allocation assertions carry no type at all
+  once the adapter is already recorded as a member there. Confirm by re-running the
+  type-99 query above and checking `as_of_block` has moved to the seed's block.
 - A mass discovery burst (a wave of new V2 vaults) surfacing the known long tail
   of unclassifiable adapters all at once → curate, no code change.
 
