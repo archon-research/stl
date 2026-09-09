@@ -24,6 +24,7 @@ from app.api.provenance import (
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime_risk_capital import AllocationRiskCapital, PrimeRiskCapital, UnpricedReason
 from app.domain.entities.reference_risk_capital import ReferenceAllocation, ReferencePrimeRiskCapital
+from app.domain.entities.risk import ModelName
 from app.domain.position_identity import PositionFacts, position_identities
 from app.domain.prime_registry import ProxyKind, alm_proxies_for_prime, classify_proxy
 from app.domain.provenance import Provenance
@@ -112,7 +113,7 @@ class AllocationRiskCapitalResponse(BaseModel):
             "scale matches self mode."
         ),
     )
-    model: str | None = Field(
+    model: ModelName | None = Field(
         default=None,
         description=(
             "Model that produced the figure. `null` when unpriced, and always `null` for a Sky-reported "
@@ -229,7 +230,7 @@ class PrimeRiskCapitalResponse(BaseModel):
             "cycle has ever reported on."
         ),
     )
-    model: str | None = Field(
+    model: ModelName | None = Field(
         description=(
             "The default RRC model this view prefers (`core_model`). `null` under `source=reference`, "
             "which runs no model; under `source=both` it is STL's preference, since the unprefixed "

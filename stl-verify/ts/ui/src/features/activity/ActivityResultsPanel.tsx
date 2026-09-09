@@ -111,9 +111,9 @@ export function ActivityResults({
         <ErrorState
           title="Error Loading Activity"
           description="An error occurred while loading the activity feed."
-          errorMessage={error ?? undefined}
           tone="critical"
           size="inline"
+          {...(error !== null && { errorMessage: error })}
         />
       }
       emptyView={

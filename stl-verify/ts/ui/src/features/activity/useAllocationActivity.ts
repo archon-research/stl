@@ -14,6 +14,7 @@ import type {
   AllocationActivityResponse,
   Prime,
 } from '../../shared/types/allocation';
+import type { Undefinable } from '../../shared/types/optional';
 import { getRealTxHash } from './activityColumns';
 
 type ActivityFilters = {
@@ -65,9 +66,18 @@ type ActivityFeedState = {
 
 /**
  * Everything this hook reads off the feed's props.
+ *
+ * `Undefinable`: every optional prop here is threaded through from a parent
+ * that may hold it as `undefined` rather than omit it (drawer mode's `||
+ * undefined` fallbacks, page mode's URL-backed filters) -- one wrap covers
+ * the whole set rather than annotating each field. `isEnabled` and
+ * `selectedPrime` stay outside it: they are required, and the hook body reads
+ * both directly without an `undefined` check.
  */
 export type UseAllocationActivityProps = {
   isEnabled: boolean;
+  selectedPrime: Prime | null;
+} & Undefinable<{
   mode?: 'drawer' | 'page';
   actionFilter?: string;
   // Page mode: action/token filters are URL-backed and controlled by the parent
@@ -77,7 +87,6 @@ export type UseAllocationActivityProps = {
   onTokenFilterChange?: (value: string | null) => void;
   selectedNetwork?: string | null;
   selectedProtocol?: string | null;
-  selectedPrime: Prime | null;
   selectedReceiptToken?: Allocation | null;
   searchQuery?: string;
   showAllPrimes?: boolean;
@@ -86,7 +95,7 @@ export type UseAllocationActivityProps = {
   externalRangePreset?: RangePreset;
   externalTimeRange?: TimeRange;
   onRangeChange?: (preset: RangePreset, range: TimeRange) => void;
-};
+}>;
 
 /**
  * Everything the activity view needs from the server and from filter state:

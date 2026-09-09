@@ -2205,6 +2205,61 @@ func TestObserveAdapterMembership_AssertionThatChangesNothingAppendsNothing(t *t
 	}
 }
 
+func TestObserveAdapterMembership_AssertionThatReclassifiesIsRecorded(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x5c))
+	addr := adapterAddr(0x5d)
+
+	id, _ := fixture.observe(t, ctx, vaultID, addr,
+		assertedAt(1500, 0, 3, adapterTypePtr(entity.MorphoAdapterTypeUnknown), entity.MembershipFromAllocation))
+
+	_, appended := fixture.observe(t, ctx, vaultID, addr,
+		assertedAt(1600, 0, 4, adapterTypePtr(entity.MorphoAdapterTypeERC4626Merkl), entity.MembershipFromBootstrapSeed))
+	if !appended {
+		t.Errorf("a seed probing the adapter as ERC4626Merkl must be recorded over the Unknown the log holds: %s",
+			fixture.describeMembership(t, ctx, id))
+	}
+	if got := fixture.countMembership(t, ctx, id); got != 2 {
+		t.Errorf("membership rows = %d, want 2: %s", got, fixture.describeMembership(t, ctx, id))
+	}
+	member, err := fixture.activeAdapterAtHead(t, ctx, vaultID, addr)
+	if err != nil {
+		t.Fatalf("GetActiveAdapterAt: %v", err)
+	}
+	if member == nil || member.AdapterType != entity.MorphoAdapterTypeERC4626Merkl {
+		t.Errorf("current classification = %v, want ERC4626Merkl: %s", member, fixture.describeMembership(t, ctx, id))
+	}
+}
+
+func TestObserveAdapterMembership_AnAssertedUnknownNeverRetractsAKnownType(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x5e))
+	addr := adapterAddr(0x5f)
+
+	id, _ := fixture.observe(t, ctx, vaultID, addr,
+		assertedAt(1500, 0, 3, adapterTypePtr(entity.MorphoAdapterTypeERC4626Merkl), entity.MembershipFromAllocation))
+
+	_, appended := fixture.observe(t, ctx, vaultID, addr,
+		assertedAt(1600, 0, 4, adapterTypePtr(entity.MorphoAdapterTypeUnknown), entity.MembershipFromBootstrapSeed))
+
+	if appended {
+		t.Errorf("an unclassifiable probe must not retract the ERC4626Merkl the log holds: %s",
+			fixture.describeMembership(t, ctx, id))
+	}
+	if got := fixture.countMembership(t, ctx, id); got != 1 {
+		t.Errorf("membership rows = %d, want 1: %s", got, fixture.describeMembership(t, ctx, id))
+	}
+	member, err := fixture.activeAdapterAtHead(t, ctx, vaultID, addr)
+	if err != nil {
+		t.Fatalf("GetActiveAdapterAt: %v", err)
+	}
+	if member == nil || member.AdapterType != entity.MorphoAdapterTypeERC4626Merkl {
+		t.Errorf("current classification = %v, want ERC4626Merkl: %s", member, fixture.describeMembership(t, ctx, id))
+	}
+}
+
 // TestObserveAdapterMembership_UnclassifiedMembershipAssertionIsRefused pins the one
 // place ErrAdapterUnclassified survives. The caller probes the type only when its
 // pre-transaction read says the adapter is NOT a member; if the in-transaction decision
