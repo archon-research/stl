@@ -41,19 +41,26 @@ while [ $# -gt 0 ]; do
   esac
 done
 file="${STUB_RESPONSES}/${repo}__${tag}"
-[ -f "$file" ] || exit 254
+# A genuine call failure: throttle, credentials, network.
+[ -f "${file}.awsfail" ] && exit 254
+# Real batch-get-image exits 0 for a tag that does not exist and puts the miss
+# in failures[], so --query 'images[0].imageManifest' renders "None". Modelling
+# a missing tag as an error is what let PINNED_GONE and NOT_BUILT be verified
+# against behaviour ECR does not have.
+[ -f "$file" ] || { echo "None"; exit 0; }
 cat "$file"
 STUB
   chmod +x "${WORK}/bin/aws"
 }
 
-# respond <repo> <tag> <manifest-json|EMPTY|NONE>
+# respond <repo> <tag> <manifest-json|EMPTY|NONE|AWSFAIL>
 respond() {
   mkdir -p "${WORK}/responses"
   case "$3" in
-    EMPTY) printf '' > "${WORK}/responses/${1}__${2}" ;;
-    NONE)  printf 'None\n' > "${WORK}/responses/${1}__${2}" ;;
-    *)     printf '%s\n' "$3" > "${WORK}/responses/${1}__${2}" ;;
+    EMPTY)   printf '' > "${WORK}/responses/${1}__${2}" ;;
+    NONE)    printf 'None\n' > "${WORK}/responses/${1}__${2}" ;;
+    AWSFAIL) : > "${WORK}/responses/${1}__${2}.awsfail" ;;
+    *)       printf '%s\n' "$3" > "${WORK}/responses/${1}__${2}" ;;
   esac
 }
 
@@ -61,6 +68,10 @@ manifest_with_layers() {
   local digests="" d
   for d in "$@"; do digests="${digests}{\"digest\":\"${d}\"},"; done
   printf '{"mediaType":"application/vnd.docker.distribution.manifest.v2+json","layers":[%s]}' "${digests%,}"
+}
+
+manifest_no_digest() {
+  printf '%s' '{"mediaType":"application/vnd.docker.distribution.manifest.v2+json","layers":[{"size":1},{"size":2}]}'
 }
 
 manifest_list() {
@@ -217,6 +228,69 @@ if [ "$(jq -r '.results[0].verdict' "$JSON" 2>/dev/null)" = "UNCHANGED" ] &&
 else
   FAILED=$((FAILED + 1)); echo "  FAIL the JSON does not carry the verdict and the deploy SHA"
   cat "$JSON" 2>/dev/null | sed 's/^/         /'
+fi
+
+# A one-sided call failure must never become a claim about the registry. This is
+# the realistic failure — 2 calls per image, no retry config — and after the
+# cutover it is the one that inverts the required response: a throttle reading
+# as NOT_BUILT or PINNED_GONE at exit 0.
+rm -rf "${WORK}/responses"
+respond stl-sentinelstaging-watcher "$PINNED_SHA" "$(manifest_with_layers sha256:one)"
+respond stl-sentinelstaging-watcher "$DEPLOY_SHA" AWSFAIL
+check "a throttled candidate call is UNKNOWN, not NOT_BUILT" 1 "an ECR call failed" -- \
+  --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA"
+
+rm -rf "${WORK}/responses"
+respond stl-sentinelstaging-watcher "$PINNED_SHA" AWSFAIL
+respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$(manifest_with_layers sha256:one)"
+check "a throttled pinned call is UNKNOWN, not PINNED_GONE" 1 "an ECR call failed" -- \
+  --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA"
+
+# The realistic missing-tag shape: the call succeeds and renders None.
+rm -rf "${WORK}/responses"
+respond stl-sentinelstaging-watcher "$PINNED_SHA" NONE
+respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$(manifest_with_layers sha256:one)"
+check "a pinned tag ECR reports as None is PINNED_GONE" 0 "PINNED_GONE" -- \
+  --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA"
+
+# Layers present but digest-less compared equal and reported "0 layer(s)
+# identical" — a self-contradictory line at exit 0.
+rm -rf "${WORK}/responses"
+respond stl-sentinelstaging-watcher "$PINNED_SHA" "$(manifest_no_digest)"
+respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$(manifest_no_digest)"
+check "digest-less layers are UNKNOWN, not 0-layers-identical" 1 "no usable layer digests" -- \
+  --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA"
+
+# The non-ECR parse branch was reachable, correct, and completely unpinned.
+rm -rf "${WORK}/responses"
+NON_ECR_OVERLAY="${WORK}/kustomization-nonecr.yaml"
+{
+  echo "images:"
+  echo "  - name: postgres"
+  echo "    newName: docker.io/library/postgres"
+  echo "    newTag: ${PINNED_SHA}"
+} > "$NON_ECR_OVERLAY"
+check "a non-ECR newName is UNKNOWN" 1 "could not parse ECR account/region" -- \
+  --kustomization "$NON_ECR_OVERLAY" --tag "$DEPLOY_SHA"
+
+# A quote in a value used to produce invalid JSON and kill the script at exit 5.
+rm -rf "${WORK}/responses"
+respond stl-sentinelstaging-watcher "$PINNED_SHA" "$(manifest_with_layers sha256:one)"
+respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$(manifest_with_layers sha256:one)"
+QUOTE_OVERLAY="${WORK}/kustomization-quote.yaml"
+{
+  echo "images:"
+  echo "  - name: watcher"
+  echo "    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-watcher"
+  echo "    newTag: ${PINNED_SHA}"
+} > "$QUOTE_OVERLAY"
+JSON_Q="${WORK}/quote.json"
+check "the JSON survives a quote in a value" 0 "Verdicts written" -- \
+  --kustomization "$QUOTE_OVERLAY" --tag "$DEPLOY_SHA" --json "$JSON_Q"
+if jq -e . "$JSON_Q" >/dev/null 2>&1; then
+  PASSED=$((PASSED + 1)); echo "  ok   the JSON output parses"
+else
+  FAILED=$((FAILED + 1)); echo "  FAIL the JSON output does not parse"
 fi
 
 echo "${PASSED} passed, ${FAILED} failed"

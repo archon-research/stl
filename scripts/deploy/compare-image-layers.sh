@@ -106,7 +106,8 @@ command -v aws >/dev/null || die "the aws CLI is required to read ECR image mani
 # newName pairs with the newTag that follows it, and several bases can share one
 # image so the list is deduped.
 PAIRS_FILE="$(mktemp)"
-trap 'rm -f "$PAIRS_FILE"' EXIT
+ROWS_FILE="$(mktemp)"
+trap 'rm -f "$PAIRS_FILE" "$ROWS_FILE"' EXIT
 awk '
     /^images:/            { in_images = 1; next }
     in_images && /^[^[:space:]-]/ { in_images = 0 }
@@ -124,34 +125,56 @@ PAIR_COUNT="$(wc -l < "$PAIRS_FILE" | tr -d ' ')"
 [ "$PAIR_COUNT" -gt 0 ] || die "no images: entries found in ${KUSTOMIZATION}"
 
 # layers_of <account> <region> <repo> <tag>: echo the image's layer digests,
-# space-separated and newline-free, or nothing at all if it could not be read.
-# Silence here always means "could not read", never "no layers".
+# space-separated and newline-free, and report WHY it could not through the exit
+# code. The distinction is the whole safety property of this script:
+#
+#   0  read successfully; digests on stdout
+#   2  the ECR call itself failed (throttle, credentials, network) -> UNDETERMINED
+#   3  the call succeeded and the tag is genuinely absent          -> a finding
+#   4  the manifest exists but is unusable (list, unparseable, no digests)
+#
+# Collapsing 2 into 3 is the failure that matters. A throttled call on the
+# candidate would read as NOT_BUILT and one on the pinned tag as PINNED_GONE --
+# both confident claims about the registry, both counted as determined, both
+# exiting 0. This run makes 2 calls per image with no retry config, so a
+# throttle is the realistic failure, and after the cutover it is the one that
+# inverts the required response.
+#
+# `batch-get-image` exits 0 for a tag that does not exist and puts the miss in
+# failures[], so `images[0].imageManifest` renders "None". A non-zero exit is
+# therefore the call failing, never a missing tag.
 layers_of() {
-  local account="$1" region="$2" repo="$3" tag="$4" manifest media
+  local account="$1" region="$2" repo="$3" tag="$4" manifest media status
 
   manifest="$(aws ecr batch-get-image \
       --region "$region" \
       --registry-id "$account" \
       --repository-name "$repo" \
       --image-ids "imageTag=${tag}" \
-      --query 'images[0].imageManifest' --output text 2>/dev/null)" || return 1
-  [ -n "$manifest" ] && [ "$manifest" != "None" ] || return 1
+      --query 'images[0].imageManifest' --output text 2>/dev/null)"
+  status=$?
+  [ "$status" -eq 0 ] || return 2
+  [ -n "$manifest" ] && [ "$manifest" != "None" ] || return 3
 
   # A manifest list has no layers of its own. Guessing a platform out of one
   # would compare an arbitrary child image, so refuse instead.
-  media="$(printf '%s' "$manifest" | jq -r '.mediaType // ""' 2>/dev/null)" || return 1
+  media="$(printf '%s' "$manifest" | jq -r '.mediaType // ""' 2>/dev/null)" || return 4
   case "$media" in
-    *manifest.list*|*image.index*) return 1 ;;
+    *manifest.list*|*image.index*) return 4 ;;
   esac
 
+  # Every layer must carry a non-empty digest, not just the array be non-empty:
+  # [null,null] | join(" ") is " ", which is non-empty, so two digest-less
+  # layers used to compare equal and report "0 layer(s) identical".
   printf '%s' "$manifest" | jq -er '
-      if (.layers | type) == "array" and (.layers | length) > 0
+      if (.layers | type) == "array"
+         and (.layers | length) > 0
+         and ([.layers[].digest] | map(select(type == "string" and length > 0)) | length) == (.layers | length)
       then [.layers[].digest] | join(" ")
-      else error("no layers in manifest") end' 2>/dev/null || return 1
+      else error("manifest has no usable layer digests") end' 2>/dev/null || return 4
 }
 
 UNCHANGED=0; CHANGED=0; REGISTRY_PROBLEMS=0; UNDETERMINED=0; DETERMINED=0
-ROWS=""
 
 echo "Comparing ${PAIR_COUNT} image(s) pinned by ${KUSTOMIZATION} against their build at ${TAG:0:12}"
 
@@ -173,14 +196,27 @@ while IFS=$'\t' read -r newName pinnedTag; do
     verdict="UNKNOWN"
     detail="overlay already pins ${TAG:0:12}; run this before the deploy rewrites the block"
   else
-    pinnedLayers="$(layers_of "$account" "$region" "$repo" "$pinnedTag" || true)"
-    candidateLayers="$(layers_of "$account" "$region" "$repo" "$candidateTag" || true)"
+    if pinnedLayers="$(layers_of "$account" "$region" "$repo" "$pinnedTag")"; then
+      pinnedStatus=0
+    else
+      pinnedStatus=$?
+    fi
+    if candidateLayers="$(layers_of "$account" "$region" "$repo" "$candidateTag")"; then
+      candidateStatus=0
+    else
+      candidateStatus=$?
+    fi
 
-    if [ -z "$pinnedLayers" ] && [ -z "$candidateLayers" ]; then
-      verdict="UNKNOWN"; detail="neither ${pinnedTag} nor ${candidateTag} could be read from ${repo}"
-    elif [ -z "$pinnedLayers" ]; then
+    if [ "$pinnedStatus" -eq 2 ] || [ "$candidateStatus" -eq 2 ]; then
+      verdict="UNKNOWN"
+      detail="an ECR call failed for ${repo} (throttle, credentials or network); absent and unreadable are not distinguishable here, so neither is claimed"
+    elif [ "$pinnedStatus" -eq 4 ] || [ "$candidateStatus" -eq 4 ]; then
+      verdict="UNKNOWN"; detail="${repo} returned a manifest with no usable layer digests"
+    elif [ "$pinnedStatus" -eq 3 ] && [ "$candidateStatus" -eq 3 ]; then
+      verdict="UNKNOWN"; detail="neither ${pinnedTag} nor ${candidateTag} exists in ${repo}"
+    elif [ "$pinnedStatus" -eq 3 ]; then
       verdict="PINNED_GONE"; detail="${repo}:${pinnedTag} is pinned by the overlay but absent from ECR"
-    elif [ -z "$candidateLayers" ]; then
+    elif [ "$candidateStatus" -eq 3 ]; then
       verdict="NOT_BUILT"; detail="${repo}:${candidateTag} was not found; expected it to exist by this point in the deploy"
     elif [ "$pinnedLayers" = "$candidateLayers" ]; then
       verdict="UNCHANGED"; detail="$(printf '%s' "$pinnedLayers" | wc -w | tr -d ' ') layer(s) identical to ${pinnedTag}"
@@ -202,20 +238,37 @@ while IFS=$'\t' read -r newName pinnedTag; do
     *)         REGISTRY_PROBLEMS=$((REGISTRY_PROBLEMS + 1)); DETERMINED=$((DETERMINED + 1)); echo "::warning::${verdict} ${repo}: ${detail}" ;;
   esac
 
-  ROWS="${ROWS}$(printf '{"image":"%s","repository":"%s","pinnedTag":"%s","candidateTag":"%s","verdict":"%s","detail":"%s"}' \
-    "$newName" "$repo" "$pinnedTag" "$candidateTag" "$verdict" "$detail"),"
+  # Built by jq, not by interpolation: a quote anywhere in newName or detail
+  # used to produce invalid JSON, and `| jq .` then failed under pipefail with
+  # exit 5 — outside this script's documented 0/1/2 contract, with no
+  # ::error::, and swallowed by continue-on-error. The measurement simply
+  # vanished.
+  jq -nc \
+    --arg image "$newName" \
+    --arg repository "$repo" \
+    --arg pinnedTag "$pinnedTag" \
+    --arg candidateTag "$candidateTag" \
+    --arg verdict "$verdict" \
+    --arg detail "$detail" \
+    '{image: $image, repository: $repository, pinnedTag: $pinnedTag, candidateTag: $candidateTag, verdict: $verdict, detail: $detail}' \
+    >> "$ROWS_FILE"
 done < "$PAIRS_FILE"
 
 if [ -n "$JSON_OUT" ]; then
-  printf '{"deploySha":"%s","kustomization":"%s","results":[%s]}\n' \
-    "$TAG" "$KUSTOMIZATION" "${ROWS%,}" | jq . > "$JSON_OUT"
+  jq -s \
+    --arg deploySha "$TAG" \
+    --arg kustomization "$KUSTOMIZATION" \
+    '{deploySha: $deploySha, kustomization: $kustomization, results: .}' \
+    "$ROWS_FILE" > "$JSON_OUT"
   echo "Verdicts written to ${JSON_OUT}"
 fi
 
 cat <<SUMMARY
 Summary: ${UNCHANGED} unchanged, ${CHANGED} changed, ${REGISTRY_PROBLEMS} missing from ECR, ${UNDETERMINED} not compared (of ${PAIR_COUNT}).
-This run changed nothing. Today's deploy rewrites all ${PAIR_COUNT} tags regardless of
-this verdict, so any image reported unchanged above names pods that rolled for no reason.
+This run changed nothing. Today's deploy rewrites every newTag in the block regardless
+of this verdict — more entries than the ${PAIR_COUNT} images counted here, since several
+bases share one image — so any image reported unchanged above names pods that rolled
+for no reason.
 SUMMARY
 
 # The exit code reports whether the comparison worked, never what the deploy
