@@ -72,4 +72,4 @@ async def test_untracked_book_fails_loudly_and_points_at_data_gaps():
     # The engine is never touched on this path, so a null stands in for it.
     reader = PostgresOrderbookReader(engine=cast(AsyncEngine, None))
     with pytest.raises(ValueError, match="DATA_GAPS"):
-        await reader.get_orderbooks(["XRP"])
+        await reader.get_orderbooks(["SOL"])

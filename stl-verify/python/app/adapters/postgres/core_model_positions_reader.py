@@ -1,18 +1,22 @@
-"""SparkLend borrower positions for the CORE model, from the live tables.
+"""Borrower positions for the CORE model, from the live tables.
 
-Replaces ``users_sparklend_*.parquet`` / ``market_sparklend_*.parquet``. The
+Replaces the ``users_*.parquet`` / ``market_*.parquet`` snapshots. The
 model consumes a wide per-user frame (per-asset ``<sym>_supply``,
 ``<sym>_supply_usd``, ``<sym>_borrow``, ``<sym>_borrow_usd`` plus aggregate
 columns) and a market frame of oracle prices for the simulated collaterals;
-this adapter reproduces both shapes from ``borrower_current`` /
+this adapter reproduces both shapes — SparkLend from ``borrower_current`` /
 ``borrower_collateral_current`` / ``sparklend_reserve_data`` /
-``token_price_current``.
+``token_price_current``, Morpho from ``morpho_market_position``, and Syrup
+(Maple) from ``maple_loan_current`` / ``maple_loan_state`` /
+``maple_loan_collateral`` / ``maple_pool_state``.
 
 Positions are valued with the protocol's own oracle (``_PROTOCOL_ORACLE``,
 checked against ``protocol_oracle``), joined by token id — never by symbol.
 Freshness is a property of the feed, not of a token: the oracle worker writes
 a row only when a price changes, so a fixed $1 feed legitimately stays silent
-for weeks while the feed as a whole ticks every block.
+for weeks while the feed as a whole ticks every block. Syrup has no on-chain
+oracle; its positions use Maple's attested per-unit valuations instead, and
+its freshness bound is the pool's sync-cycle age.
 
 Aggregate semantics were reverse-engineered from BA's parquet rows and
 reproduce them exactly:
@@ -34,7 +38,16 @@ Deliberate deviations, documented in DATA_GAPS.md:
 - e-mode categories are not indexed, so reserve-level LT/bonus are used for
   every user and ``emode_category`` is 0. For e-mode users this understates
   LT, hence understates HF — the conservative direction.
-- Only SparkLend on Ethereum is implemented; other protocols keep parquet.
+- Syrup loans whose liquidation trigger sits at or above par coverage
+  (stable-on-stable loans, LT >= 1) are excluded: the protocol does not rely
+  on collateral price to protect them, so the model's price-shock liquidation
+  mechanism does not apply — and BA's parquet frames contain no such rows.
+  Their debt would add to exposure while contributing ~zero simulated loss,
+  so excluding them biases CRR up, not down.
+- Syrup skips BA's ``interest_rate`` / ``loan_token_symbol`` /
+  ``collateral_token_symbol`` parquet columns — nothing in the model reads
+  them.
+- Only Ethereum is implemented; other protocols keep parquet.
 """
 
 import logging
@@ -380,8 +393,189 @@ def build_morpho_users_frame(rows: Sequence[Any]) -> pd.DataFrame:
     return pd.DataFrame.from_records(records)
 
 
+# Maple publishes no per-loan liquidation incentive; BA's parquet carries a
+# flat 2% for every loan in both syrup markets, reproduced here.
+_SYRUP_LIQUIDATION_INCENTIVE = 1.02
+
+# Debt is valued at $1/unit, which is only correct for the stablecoin
+# underlyings Maple ships today (same reasoning as the backed-breakdown
+# repository's allowlist) — refuse a pool outside it rather than mis-value it.
+_SYRUP_STABLE_LOAN_TOKENS = frozenset({"USDC", "USDT", "USDG"})
+
+# maple_loan_collateral.liquidation_level is the margin-call coverage trigger
+# x1e6 (collateral/debt ratio at which the loan is called). The model's LT is
+# its inverse: level 1204800 -> LT 0.830013, the parquet's own 0.83001.
+_SYRUP_PAR_COVERAGE_LEVEL = 1_000_000
+
+_SYRUP_POOL = text("""
+    SELECT mp.id, ut.decimals AS underlying_decimals
+    FROM maple_pool_current mp
+    JOIN token ut ON ut.id = mp.asset_token_id
+    WHERE mp.chain_id = :chain_id AND mp.is_syrup AND upper(ut.symbol) = :loan
+""")
+
+# External Active loans at the pool's current sync cycle, with the collateral
+# row of the SAME (synced_at, processing_version) snapshot. Both bounds are
+# lifted from backed_breakdown_repository_maple and are load-bearing there:
+# the indexer emits no tombstones, so a repaid loan's last Active state
+# lingers in older cycles forever, and collateral must never mix with a
+# fresher principal.
+_SYRUP_POSITIONS = text("""
+    WITH pool_cycle AS (
+        SELECT max(synced_at) AS synced_at
+        FROM maple_pool_state
+        WHERE maple_pool_id = :pool_id
+    )
+    SELECT u.address AS borrower_address,
+           ls.principal_owed, ls.acm_ratio, ls.synced_at,
+           c.asset_symbol, c.asset_amount, c.asset_decimals,
+           c.asset_value_usd, c.liquidation_level
+    FROM maple_loan_current l
+    JOIN "user" u ON u.id = l.borrower_user_id
+    JOIN LATERAL (
+        SELECT synced_at, processing_version, state, principal_owed, acm_ratio
+        FROM maple_loan_state s
+        WHERE s.maple_loan_id = l.id
+        ORDER BY s.synced_at DESC, s.processing_version DESC
+        LIMIT 1
+    ) ls ON true
+    LEFT JOIN maple_loan_collateral c
+      ON c.maple_loan_id      = l.id
+     AND c.synced_at          = ls.synced_at
+     AND c.processing_version = ls.processing_version
+    WHERE l.maple_pool_id = :pool_id
+      AND NOT l.is_internal
+      AND ls.state = 'Active'
+      AND ls.principal_owed > 0
+      AND ls.synced_at = (SELECT synced_at FROM pool_cycle)
+""")
+
+# Loans of one cycle share one Maple-attested price per symbol; anything else
+# is a data defect, not a spread to average over.
+_SYRUP_PRICE_TOLERANCE = 1e-6
+
+# Computed coverage (collateral USD / principal) and Maple's own acm_ratio are
+# derived from the same attested prices, so they should agree to rounding;
+# a wider gap means the units or the snapshot join drifted.
+_SYRUP_ACM_WARN_TOLERANCE = 0.01
+
+
+def syrup_lltv(liquidation_level: float) -> float:
+    """LT from Maple's margin-call coverage trigger (x1e6): its inverse."""
+    return float(_SYRUP_PAR_COVERAGE_LEVEL) / float(liquidation_level)
+
+
+def syrup_attested_prices(rows: Sequence[Any]) -> dict[str, float]:
+    """``{SYMBOL: price}`` from Maple's attested per-unit valuations — the market frame's input.
+
+    Scoped to the loans that can enter the frame (above-par trigger): a price
+    disagreement on an excluded stable must not fail the whole market.
+    """
+    prices: dict[str, float] = {}
+    for r in rows:
+        if r.asset_symbol is None or r.asset_symbol == "" or r.asset_value_usd is None:
+            continue
+        if r.liquidation_level is None or float(r.liquidation_level) <= _SYRUP_PAR_COVERAGE_LEVEL:
+            continue
+        symbol = r.asset_symbol.upper()
+        price = float(Decimal(str(r.asset_value_usd)) / Decimal(10) ** 8)
+        known = prices.setdefault(symbol, price)
+        if abs(known - price) > _SYRUP_PRICE_TOLERANCE * max(abs(known), abs(price)):
+            raise ValueError(
+                f"Maple attested two prices for {symbol} in one cycle ({known} vs {price}); "
+                "refusing an ambiguous collateral valuation"
+            )
+    return prices
+
+
+def build_syrup_users_frame(rows: Sequence[Any], loan_token: str, underlying_decimals: int) -> pd.DataFrame:
+    """Assemble the Syrup users frame: one row per external Active loan.
+
+    BA's parquet is per-loan too (wallet_address repeats; nothing downstream
+    groups by it), each loan carrying exactly one collateral asset and its own
+    LT from the loan's margin-call trigger.
+    """
+    borrow_col = loan_token.lower()
+    prices = syrup_attested_prices(rows)
+    dropped_no_collateral: list[tuple[str, float]] = []
+    dropped_par_trigger: list[tuple[str, float]] = []
+    acm_deviations: list[float] = []
+    records: list[dict] = []
+    for r in rows:
+        address = "0x" + bytes(r.borrower_address).hex()
+        principal = float(Decimal(str(r.principal_owed)) / (Decimal(10) ** underlying_decimals))
+        unusable = (
+            r.asset_symbol is None
+            or r.asset_symbol == ""
+            or r.asset_amount is None
+            or r.asset_value_usd is None
+            or r.liquidation_level is None
+            or float(r.liquidation_level) <= 0
+        )
+        if unusable:
+            dropped_no_collateral.append((address, principal))
+            continue
+        if float(r.liquidation_level) <= _SYRUP_PAR_COVERAGE_LEVEL:
+            # LT >= 1: the protocol margin-calls at/above par coverage, so
+            # collateral price is not what protects this loan (stable-on-stable
+            # terms). No simulatable price-liquidation mechanism — and LT >= 1
+            # would also break the liquidator's -1 + LT*(1+bonus) < 0 guard.
+            dropped_par_trigger.append((address, principal))
+            continue
+        symbol = r.asset_symbol.upper()
+        qty = float(Decimal(str(r.asset_amount)) / (Decimal(10) ** int(r.asset_decimals)))
+        collateral_usd = qty * prices[symbol]
+        if collateral_usd <= 0:
+            dropped_no_collateral.append((address, principal))
+            continue
+        if r.acm_ratio is not None:
+            acm = float(Decimal(str(r.acm_ratio)) / Decimal(10) ** 6)
+            if acm > 0:
+                acm_deviations.append(abs(collateral_usd / principal - acm) / acm)
+        lltv = syrup_lltv(float(r.liquidation_level))
+        ltv = principal / collateral_usd
+        records.append(
+            {
+                "wallet_address": address,
+                "lltv": lltv,
+                "ltv": ltv,
+                "health_factor": lltv / ltv,
+                "liquidation_incentive": _SYRUP_LIQUIDATION_INCENTIVE,
+                f"{symbol.lower()}_supply": qty,
+                f"{symbol.lower()}_supply_usd": collateral_usd,
+                f"{borrow_col}_borrow": principal,
+                f"{borrow_col}_borrow_usd": principal,
+                "total_collateral_usd": collateral_usd,
+                "total_borrow_usd": principal,
+            }
+        )
+
+    for dropped, why in (
+        (dropped_no_collateral, "no usable collateral row (existing bad debt or pending deposit, not simulatable)"),
+        (dropped_par_trigger, "margin-call trigger at/above par coverage (stable-on-stable, no price risk)"),
+    ):
+        if dropped:
+            logger.warning(
+                "excluded %d syrup loan(s): %s; $%.2f total principal dropped",
+                len(dropped),
+                why,
+                sum(usd for _, usd in dropped),
+            )
+    if acm_deviations and max(acm_deviations) > _SYRUP_ACM_WARN_TOLERANCE:
+        logger.warning(
+            "syrup computed coverage disagrees with Maple's acm_ratio by up to %.2f%% across %d loan(s); "
+            "expected < %.0f%% — check collateral units and the snapshot join",
+            max(acm_deviations) * 100,
+            len(acm_deviations),
+            _SYRUP_ACM_WARN_TOLERANCE * 100,
+        )
+    if not records:
+        raise ValueError(f"no simulatable external Active syrup loans for loan_token={loan_token!r}")
+    return pd.DataFrame.from_records(records)
+
+
 class PostgresPositionsReader:
-    """``get_protocol_data`` from the live tables. SparkLend and Morpho on Ethereum.
+    """``get_protocol_data`` from the live tables. SparkLend, Morpho and Syrup on Ethereum.
 
     ``max_feed_age`` bounds how long the protocol's oracle feed may have been
     silent as a whole; single tokens carry no age bound (see module docstring).
@@ -422,9 +616,11 @@ class PostgresPositionsReader:
             raise ValueError(f"live positions are Ethereum-only, got {network}")
         if protocol.upper() == "MORPHO":
             return await self._get_morpho_data(morpho_market.upper(), loan_token.upper())
+        if protocol.upper() == "SYRUP":
+            return await self._get_syrup_data(loan_token.upper())
         if protocol.upper() != "SPARKLEND":
             raise ValueError(
-                f"live positions are only implemented for SPARKLEND and MORPHO, got {protocol}. "
+                f"live positions are only implemented for SPARKLEND, MORPHO and SYRUP, got {protocol}. "
                 "See app/risk_engine/core_model/DATA_GAPS.md."
             )
         protocol_name, _ = _PROTOCOL_ORACLE["SPARKLEND"]
@@ -458,6 +654,45 @@ class PostgresPositionsReader:
             len(users_df),
             len(market_df),
             loan_token,
+        )
+        return users_df, market_df
+
+    async def _get_syrup_data(self, loan_token: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+        if loan_token not in _SYRUP_STABLE_LOAN_TOKENS:
+            raise ValueError(
+                f"syrup loan token {loan_token!r} is outside the $1-valuation allowlist "
+                f"{sorted(_SYRUP_STABLE_LOAN_TOKENS)}; price the debt via an oracle before adding it"
+            )
+        async with self._engine.connect() as conn:
+            pools = (await conn.execute(_SYRUP_POOL, {"chain_id": self._chain_id, "loan": loan_token})).fetchall()
+            if len(pools) != 1:
+                raise ValueError(
+                    f"expected exactly one syrup pool with underlying {loan_token} on chain "
+                    f"{self._chain_id}, found {len(pools)} — is maple-graphql-indexer running?"
+                )
+            pool = pools[0]
+            rows = (await conn.execute(_SYRUP_POSITIONS, {"pool_id": pool.id})).fetchall()
+        if not rows:
+            raise ValueError(
+                f"no external Active syrup loans for {loan_token} on chain {self._chain_id} "
+                "— is maple-graphql-indexer running?"
+            )
+        # The pool cycle is Maple's feed: positions AND valuations date from it,
+        # so a stale cycle is the syrup analog of a silent oracle.
+        cycle_age = pd.Timestamp.now(tz="UTC") - pd.Timestamp(rows[0].synced_at)
+        if cycle_age > self._max_feed_age:
+            raise ValueError(
+                f"the syrup pool's newest sync cycle is {cycle_age} old (bound {self._max_feed_age}); "
+                "refusing to value positions on a stale snapshot — is maple-graphql-indexer running?"
+            )
+        users_df = build_syrup_users_frame(rows, loan_token, int(pool.underlying_decimals))
+        supplied = {c.rsplit("_", 1)[0].upper() for c in users_df.columns if c.endswith("_supply")}
+        market_df = build_market_frame(supplied, syrup_attested_prices(rows))
+        logger.info(
+            "syrup positions loaded from live tables: %d loan(s) of %s, %d modeled collateral(s)",
+            len(users_df),
+            loan_token,
+            len(market_df),
         )
         return users_df, market_df
 
