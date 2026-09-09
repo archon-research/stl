@@ -216,6 +216,28 @@ func TestRun_StopsBeforeTheSweepWhenTheHeadHasNoResolvableVersion(t *testing.T) 
 	}
 }
 
+// The summary is the one line a run closes with, so what it reports has to be taken when
+// the run ends rather than when the deferred call is set up.
+func TestRun_ClosesWithTheHeightsItResolved(t *testing.T) {
+	h := newBootstrapHarness(t)
+	logger, records := recordingLogger()
+	h.config.Logger = logger
+	replayer := &recordingReplayer{v2Vaults: map[common.Address]int64{testVaultAddr: 23_400_000}}
+	service, err := NewService(h.config, h.chain, replayer, h.progress, h.archive, archiveName)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	h.chain.setFinalizedHead(24_000_000, 1_770_000_000)
+
+	if err := service.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if got := logAttrs(versionSummary(t, *records))["heights"].Int64(); got != 1 {
+		t.Errorf("heights = %d, want the 1 height the run resolved", got)
+	}
+}
+
 // Two runs can be in flight on one pod at once: the worker sets no
 // MaxConcurrentActivityExecutionSize and the workflow-ID guard only rejects a duplicate
 // ID. A run must therefore stamp only versions it read from the archive itself — an
@@ -1024,6 +1046,63 @@ func capturingLogger() (*slog.Logger, func() string) {
 	var out bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&out, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	return logger, out.String
+}
+
+// recordingHandler keeps every record written to it, for the assertions that are about
+// one line's attributes rather than its rendering.
+type recordingHandler struct {
+	records *[]slog.Record
+}
+
+func recordingLogger() (*slog.Logger, *[]slog.Record) {
+	records := &[]slog.Record{}
+	return slog.New(recordingHandler{records: records}), records
+}
+
+func (h recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	*h.records = append(*h.records, r.Clone())
+	return nil
+}
+
+func (h recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+
+func (h recordingHandler) WithGroup(string) slog.Handler { return h }
+
+// versionSummary is the one line a run closes with about the archive.
+func versionSummary(t *testing.T, records []slog.Record) slog.Record {
+	t.Helper()
+	for _, r := range records {
+		if r.Message == "block versions resolved from the raw archive" {
+			return r
+		}
+	}
+	t.Fatal("the run logged no block-version summary")
+	return slog.Record{}
+}
+
+// logAttrs flattens a record's attributes into dotted keys, so a group's members read as
+// "version_1.heights".
+func logAttrs(r slog.Record) map[string]slog.Value {
+	flat := map[string]slog.Value{}
+	var walk func(prefix string, attrs []slog.Attr)
+	walk = func(prefix string, attrs []slog.Attr) {
+		for _, a := range attrs {
+			if a.Value.Kind() == slog.KindGroup {
+				walk(prefix+a.Key+".", a.Value.Group())
+				continue
+			}
+			flat[prefix+a.Key] = a.Value
+		}
+	}
+	var top []slog.Attr
+	r.Attrs(func(a slog.Attr) bool {
+		top = append(top, a)
+		return true
+	})
+	walk("", top)
+	return flat
 }
 
 // --- fakes -------------------------------------------------------------------

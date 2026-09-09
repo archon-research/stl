@@ -176,7 +176,7 @@ func NewService(config Config, chain ChainReader, replay V2Replayer, progress Pr
 // activity, and is safe to invoke repeatedly.
 func (s *Service) Run(ctx context.Context) error {
 	reads := s.newReplayReads()
-	defer s.logResolvedBlockVersions(reads.versions.Summary())
+	defer func() { s.logResolvedBlockVersions(reads.versions.Summary()) }()
 
 	head, err := s.pinFinalizedHead(ctx, reads.versions)
 	if err != nil {
