@@ -5,7 +5,7 @@ import { LogoAvatar } from './LogoAvatar';
 
 type ChainLogoProps = {
   chainId: number | null;
-  label?: string;
+  label?: string | undefined;
   size?: '4' | '5' | '6' | '7' | '8' | '9' | '10';
 };
 

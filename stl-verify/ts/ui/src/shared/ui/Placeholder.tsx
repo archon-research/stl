@@ -10,16 +10,14 @@ const placeholderClassName = css({
   bg: 'border.subtle',
   borderRadius: 'sm',
   animation: 'pulse',
+  // `SkeletonStack` suppressed its own pulse under reduced motion; this stands
+  // in for it at those call sites, so it has to do the same.
+  _motionReduce: { animation: '[none]' },
   // Inline-block so it can stand in for a word mid-sentence as well as fill a
   // slot of its own; a block element inside a `<span>` breaks the line.
   display: 'inline-block',
   verticalAlign: 'middle',
 });
-
-// A `<span>`, not a `<div>`: one call site stands this in for the timestamp
-// inside the header's label span, and only phrasing content is valid there.
-// `inline-block` makes it behave identically to the div everywhere else,
-// including as a grid item, where the display is blockified anyway.
 
 /**
  * A loading block that stays visible on a recessed surface, not just on the page.
@@ -27,6 +25,9 @@ const placeholderClassName = css({
  * Sized by the caller because it stands in for something whose footprint is
  * known — a figure, a caption, a chart — and a placeholder the full width of its
  * container reads as a filled element rather than a loading one.
+ *
+ * A `<span>`: one caller stands it in for a word inside a label span, where
+ * only phrasing content is valid.
  */
 export function Placeholder({
   width,

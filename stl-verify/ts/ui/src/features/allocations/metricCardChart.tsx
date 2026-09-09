@@ -237,7 +237,7 @@ export function MetricCardTrend({
   if (isLoading) {
     // A single block at the chart's own footprint, so the placeholder fills the
     // same space and there's no jump (or floating box) when the real chart loads
-    // in. Not `SkeletonStack`: see `Placeholder` in metricCards.tsx.
+    // in.
     return (
       <div className={css({ mt: '2' })}>
         <Placeholder width="100%" height={CHART_HEIGHT} />
@@ -389,10 +389,10 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
         // compares against NaN, every comparison is false, and it returns the
         // upper stop rather than clearing — so hovering a card with no history
         // jumped every other card's crosshair to an arbitrary bucket.
-        onPointerMove={
-          stops === null ? undefined : cursorHandlers.onPointerMove
-        }
-        onPointerOut={stops === null ? undefined : cursorHandlers.onPointerOut}
+        {...(stops !== null && {
+          onPointerMove: cursorHandlers.onPointerMove,
+          onPointerOut: cursorHandlers.onPointerOut,
+        })}
       >
         <Grid columns={false} numTicks={3} />
         <Axis
@@ -435,7 +435,7 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
             mode="threshold"
             value={entry.value}
             breach="above"
-            stroke={entry.stroke}
+            {...(entry.stroke !== undefined && { stroke: entry.stroke })}
             // No breach fill: shading everything past the limit made a small
             // card read as mostly-in-breach even at a healthy ratio.
             fill="transparent"

@@ -48,6 +48,15 @@ handler).
     `@knipignore` (see `mocks/src/problem.ts`) rather than a config line.
 - `@types/node` tracks the major in `.node-version`; bumping one without the
   other type-checks the node-side code against a runtime nobody runs.
+- `exactOptionalPropertyTypes` is **on** in both workspaces, so a new optional
+  property has to say whether it accepts an explicit `undefined`
+  (`foo?: string | undefined`) or only absence (`foo?: string`). Three or more
+  such members on one type take `Undefinable<T>`
+  (`ui/src/shared/types/optional.ts`), wrapping the optional members only.
+- `skipLibCheck` stays **on** deliberately: off, it reports 30 errors and none
+  is ours (`ts-evaluator`, `@pandacss/types`, `@ark-ui/react`, `pkg-types`,
+  `@tanstack/router-core`), so it would only ever fail on a dependency bump.
+  Noted here because the tsconfigs are strict JSON — a `check-json` hook.
 - On a fresh `npm ci`, run `npm run prepare -w ui` (panda codegen) before `npm run type:check`/`build`, else `#styled-system/*` imports fail.
 - Node ships with an older npm than `engines.npm` requires; run `corepack enable npm` once so npm resolves to the pinned version (`packageManager`).
 

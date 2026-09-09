@@ -15,6 +15,7 @@ import type {
   TotalCapitalBucket,
   TotalCapitalEnvelope,
 } from '../types/allocation';
+import type { Undefinable } from '../types/optional';
 import { api } from './api-client';
 import { sortByBucketStart } from './dashboard';
 import { logging } from './logging';
@@ -85,8 +86,12 @@ export type SeriesWindow = {
 // every bucket rather than being truncated to the default page.
 function bucketQuery(range: SeriesWindow) {
   return {
-    from_timestamp: range.fromTimestamp,
-    to_timestamp: range.toTimestamp,
+    // Omitted, not `null`: the key sanitizer strips an absent param and keeps
+    // a null one, so coalescing would split the cache entry for one window.
+    ...(range.fromTimestamp !== undefined && {
+      from_timestamp: range.fromTimestamp,
+    }),
+    ...(range.toTimestamp !== undefined && { to_timestamp: range.toTimestamp }),
     resolution: range.resolution,
     aggregate: true,
     limit: 500,
@@ -489,7 +494,7 @@ export const riskBreakdownQuery = (
     {
       params: {
         path: { chain_id: chainId, token_address: tokenAddress },
-        query: primeId ? { prime_id: primeId } : undefined,
+        ...(primeId && { query: { prime_id: primeId } }),
       },
     },
     {
@@ -557,20 +562,48 @@ export const tokenPriceQuery = (chainId: number, tokenAddress: string) =>
  * endpoint the metric band reads with `aggregate=true`, so the two share no
  * cache entry and neither can serve the other's shape.
  */
-export const activityQuery = (filters: {
-  prime_id?: string;
-  chain_id?: number;
-  protocol_name?: string;
-  action_type?: string;
-  token_symbol?: string;
-  from_timestamp?: string;
-  to_timestamp?: string;
-  limit?: number;
-}) =>
+export const activityQuery = (
+  filters: Undefinable<{
+    prime_id?: string;
+    chain_id?: number;
+    protocol_name?: string;
+    action_type?: string;
+    token_symbol?: string;
+    from_timestamp?: string;
+    to_timestamp?: string;
+    limit?: number;
+  }>,
+) =>
   api.queryOptions(
     'get',
     '/v1/allocations/activity',
-    { params: { query: filters } },
+    {
+      params: {
+        query: {
+          // Every field is omitted rather than nulled when unset: the key
+          // sanitizer strips an absent param and keeps a null one, so
+          // coalescing would give an unscoped read a different cache entry.
+          ...(filters.prime_id !== undefined && { prime_id: filters.prime_id }),
+          ...(filters.chain_id !== undefined && { chain_id: filters.chain_id }),
+          ...(filters.protocol_name !== undefined && {
+            protocol_name: filters.protocol_name,
+          }),
+          ...(filters.action_type !== undefined && {
+            action_type: filters.action_type,
+          }),
+          ...(filters.token_symbol !== undefined && {
+            token_symbol: filters.token_symbol,
+          }),
+          ...(filters.from_timestamp !== undefined && {
+            from_timestamp: filters.from_timestamp,
+          }),
+          ...(filters.to_timestamp !== undefined && {
+            to_timestamp: filters.to_timestamp,
+          }),
+          ...(filters.limit !== undefined && { limit: filters.limit }),
+        },
+      },
+    },
     {
       ...CACHE.position,
       select: selectRawActivity,
@@ -619,8 +652,8 @@ export const txProtocolEventsFallbackQuery = (txHash: string) =>
   );
 
 export type TokenFilters = {
-  chain_id?: number;
-  symbol?: string;
+  chain_id?: number | undefined;
+  symbol?: string | undefined;
   limit?: number;
 };
 
@@ -628,7 +661,15 @@ export const tokensQuery = (filters: TokenFilters) =>
   api.queryOptions(
     'get',
     '/v1/tokens',
-    { params: { query: filters } },
+    {
+      params: {
+        query: {
+          ...(filters.chain_id !== undefined && { chain_id: filters.chain_id }),
+          ...(filters.symbol !== undefined && { symbol: filters.symbol }),
+          ...(filters.limit !== undefined && { limit: filters.limit }),
+        },
+      },
+    },
     {
       ...CACHE.tokenList,
       meta: { logLevel: 'warn', logMessage: 'Token catalogue unavailable' },
