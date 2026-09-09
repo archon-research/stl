@@ -790,16 +790,19 @@ version to its trigger.
 ### Special case: `morpho-v2-bootstrap` (on-demand, no schedule)
 
 Both history jobs emit the same `morpho_v2_*` metrics as the live indexer (the
-replay path is metered since VEC-218), so the V2 volume alerts in
-`vector-indexers.yaml` can fire during a deliberate replay or bootstrap run —
-expected, not an incident; the run is operator-initiated and visible here. The
-three rules a replay would otherwise fire by design are scoped to the live
-indexers' `service_name` instead: `VectorMorphoV2ForceDeallocateSurge`,
-`VectorMorphoV2UnknownAdapters` and `VectorMorphoV2LazyAdapterRegistrations`.
-Replayed history is not a liquidity run, a wave of new unclassifiable adapters, or
-an enumeration gap — it is the same population being re-recorded, or the very
-repair those alerts would send you to make. Each replay worker's own series stays
-on the dashboard as run progress.
+replay path is metered since VEC-218), under their own `service_name`. Every rule
+in the `vector-morpho-v2` group of `vector-indexers.yaml` excludes those two
+names, so a deliberate replay or bootstrap run fires none of them. Replayed
+history is not a liquidity run, a wave of new unclassifiable adapters, or an
+enumeration gap — it is the same population being re-recorded, or the very repair
+those alerts would send you to make. Each worker's own series stays on the
+dashboard as run progress.
+
+The exclusion covers both sides of the two silent-empty guards
+(`VectorMorphoV2NoSnapshotsWritten`, `VectorMorphoV2NoStructuredEvents`) for the
+opposite reason: a run's own snapshots and events would otherwise satisfy the side
+that suppresses them, hiding a live write path that broke while the run was going
+for the run plus its whole trailing 6h window. A run no longer masks one.
 
 A third **on-demand** Temporal worker (`temporal.RunWorker`). Everything said
 about `offchain-price-backfill` above applies — nothing is missed while it is
