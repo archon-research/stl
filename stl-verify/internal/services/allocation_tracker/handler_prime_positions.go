@@ -95,11 +95,11 @@ func (h *PrimePositionHandler) HandleBatch(
 			}
 			continue
 		}
-		// Metadata comes from the share, but the key must still be nameable.
-		if _, err := positionTokenAddress(s); err != nil {
+		tokenAddr, err := positionTokenAddress(s)
+		if err != nil {
 			return fmt.Errorf("position token for metadata: %w", err)
 		}
-		addrs = append(addrs, metadataAddress(s))
+		addrs = append(addrs, tokenAddr)
 		if s.Entry.AssetAddress != nil {
 			addrs = append(addrs, *s.Entry.AssetAddress)
 		}
@@ -140,39 +140,19 @@ func (h *PrimePositionHandler) HandleBatch(
 	})
 }
 
-// positionTokenAddress is the token the row keys on: the share for a live ERC-7540
-// position — the wallet holds it, and prices sit there — else the entry's address.
+// positionTokenAddress is the token the row keys on and reads metadata from: an
+// ERC-7540 vault is not a token — the wallet holds the share, and so do prices.
 func positionTokenAddress(s *PositionSnapshot) (common.Address, error) {
-	if s.ClosesEntryKey {
-		if s.ShareToken == nil {
-			// Without the share the row has no metadata (see metadataAddress).
-			return common.Address{}, noShareTokenErr(s)
-		}
-		return s.Entry.ContractAddress, nil
-	}
 	if s.ShareToken != nil {
 		return *s.ShareToken, nil
 	}
 	if s.Entry.TokenType == TokenTypeCentrifuge {
-		// Keying it on the vault would re-key the position onto the key
-		// closingSnapshots zeroes.
-		return common.Address{}, noShareTokenErr(s)
+		// Keying the vault would write an unpriceable key and hide the failed
+		// share resolution.
+		return common.Address{}, fmt.Errorf("centrifuge snapshot %s/%s carries no share token",
+			s.Entry.ContractAddress.Hex(), s.Entry.WalletAddress.Hex())
 	}
 	return s.Entry.ContractAddress, nil
-}
-
-func noShareTokenErr(s *PositionSnapshot) error {
-	return fmt.Errorf("snapshot %s/%s carries no share token",
-		s.Entry.ContractAddress.Hex(), s.Entry.WalletAddress.Hex())
-}
-
-// metadataAddress is where a row's decimals/symbol come from. An ERC-7540 vault
-// has neither, so it reads the share even when the row keys on the vault itself.
-func metadataAddress(s *PositionSnapshot) common.Address {
-	if s.ShareToken != nil {
-		return *s.ShareToken
-	}
-	return s.Entry.ContractAddress
 }
 
 func (h *PrimePositionHandler) buildPositions(
@@ -195,12 +175,11 @@ func (h *PrimePositionHandler) buildPositions(
 			}
 			meta = m
 		} else {
-			metaAddr := metadataAddress(s)
-			m, ok := h.metadata.get(metaAddr)
+			m, ok := h.metadata.get(tokenAddr)
 			if !ok {
 				return nil, fmt.Errorf(
 					"metadata missing for token %s",
-					metaAddr.Hex(),
+					tokenAddr.Hex(),
 				)
 			}
 			meta = m

@@ -48,9 +48,6 @@ type Service struct {
 	wg               sync.WaitGroup // tracks the SQS run loop so Stop can drain it
 	logger           *slog.Logger
 	blocksSinceSweep int
-	// entryKeysClosed records that the closing rows of this process have been
-	// persisted; they are written once, on the first sweep that HandleBatch accepts.
-	entryKeysClosed bool
 }
 
 func NewService(
@@ -490,10 +487,8 @@ func claimRoutes(next map[transferRouteKey]common.Address, named []namedEmitter)
 	return nil
 }
 
-// checkShareRatchet refuses to downgrade an entry that already named a share to
-// holding itself. ERC7540Source admits a share() revert as the direct-share shape
-// only once decimals() answers; this is the belt behind that: a node wrong twice
-// would re-key the position onto the vault key closingSnapshots zeroes.
+// checkShareRatchet refuses an entry that named a share and now reports itself: a node
+// wrong twice re-keys it onto its vault, where no price attaches and all looks well.
 func (s *Service) checkShareRatchet(n namedEmitter, blockNumber int64) error {
 	if n.emitter != n.entry.ContractAddress {
 		return nil
@@ -615,7 +610,6 @@ func (s *Service) sweep(ctx context.Context, blockNumber int64, blockHash common
 	}
 
 	snapshots := s.sweepSnapshots(fetch.Balances, blockNumber, blockVersion, blockTimestamp)
-	snapshots = append(snapshots, s.closingSnapshots(named, blockNumber, blockVersion, blockTimestamp)...)
 	supplies := buildSupplySnapshots(fetch.Supplies, s.config.ChainID, blockNumber, blockVersion, blockTimestamp, "sweep")
 
 	if len(snapshots) > 0 || len(supplies) > 0 {
@@ -623,10 +617,7 @@ func (s *Service) sweep(ctx context.Context, blockNumber int64, blockHash common
 			return fmt.Errorf("sweep handler: %w", err)
 		}
 	}
-	// Both committed only now: a NACKed sweep is redelivered, and it must repeat
-	// the closing rows and match the same transfers it matched the first time.
 	s.transferAliases = routes
-	s.entryKeysClosed = true
 
 	s.logger.Info("sweep complete",
 		"block", blockNumber,
@@ -678,48 +669,5 @@ func snapshotOf(
 		BlockNumber:     blockNumber,
 		BlockVersion:    blockVersion,
 		BlockTimestamp:  blockTimestamp,
-	}
-}
-
-// closingSnapshots zeroes, once per process, the entry's own address — the key an
-// older tracker kept a vault-fronted position on, where a surviving row flips the
-// cache between vault and share. Sweep-only, and repeated until a batch persists.
-func (s *Service) closingSnapshots(
-	named []namedEmitter,
-	blockNumber int64,
-	blockVersion int,
-	blockTimestamp time.Time,
-) []*PositionSnapshot {
-	if s.entryKeysClosed {
-		return nil
-	}
-	var closing []*PositionSnapshot
-	for _, n := range named {
-		if n.emitter == n.entry.ContractAddress {
-			continue
-		}
-		closing = append(closing, closingSnapshot(n, s.config.ChainID, blockNumber, blockVersion, blockTimestamp))
-	}
-	return closing
-}
-
-func closingSnapshot(
-	n namedEmitter,
-	chainID, blockNumber int64,
-	blockVersion int,
-	blockTimestamp time.Time,
-) *PositionSnapshot {
-	return &PositionSnapshot{
-		Entry:          n.entry,
-		Balance:        big.NewInt(0),
-		ScaledBalance:  big.NewInt(0),
-		ShareToken:     &n.emitter,
-		ChainID:        chainID,
-		BlockNumber:    blockNumber,
-		BlockVersion:   blockVersion,
-		TxAmount:       big.NewInt(0),
-		Direction:      DirectionSweep,
-		ClosesEntryKey: true,
-		BlockTimestamp: blockTimestamp,
 	}
 }

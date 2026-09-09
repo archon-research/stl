@@ -2920,8 +2920,8 @@ last line below in `read the [sweep] share tokens of block <N>`.
   but omitted an entry.
 - `entry <contract>/<wallet> named share <S> before and now reports itself` — the
   ratchet: a `share()` revert on an entry that already named a share would re-key
-  the position onto its vault, putting a non-zero row back on the key the
-  tracker's closing row zeroed, so the cache flips between vault and share.
+  the position onto its vault, where no price ever attaches, while every health
+  signal stays green.
 - `<A> and <B> both claim transfers of <S> into <W>` — two vaults front one share
   for one wallet; tracking both would double count.
 - `centrifuge entry <contract>/<wallet> came back with no share token` — the
@@ -2939,16 +2939,6 @@ and redeploy. Do not "unblock" the chain by deleting the SQS message — that
 drops a block for every other position on it. If the cause is a transient RPC
 failure the worker recovers on its own once the node answers; the ratchet line
 specifically should not self-clear, and means the read is wrong rather than slow.
-
-### Converging `allocation_position_current` afterwards
-
-If the cache needs converging with history (a restore, a window with the trigger
-disabled), re-run the statement in
-`stl-verify/db/migrations/20260825_120100_backfill_allocation_position_current.sql`
-as the migrator (the cache's owner). It is a forward-only merge over
-`allocation_position`: the tracker's zero-balance closing rows on the old vault
-keys are ordinary history rows to it, merged like any other. Nothing is
-superseded.
 
 ### Verify recovery
 
