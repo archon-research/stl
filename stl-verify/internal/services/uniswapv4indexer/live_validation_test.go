@@ -92,6 +92,7 @@ func TestLiveValidation(t *testing.T) {
 	defer cleanupDB()
 
 	buildID := buildregistry.BuildID(1)
+	runID := buildregistry.RunID(1)
 	repo := postgres.NewUniswapV4Repository(dbPool, buildID)
 
 	regPools := loadRegistry(t, ctx, repo, rep)
@@ -125,7 +126,7 @@ func TestLiveValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewTxManager: %v", err)
 	}
-	eventWriter := newLiveEventWriter(t, ctx, dbPool, buildID)
+	eventWriter := newLiveEventWriter(t, ctx, dbPool, buildID, runID)
 
 	states := snapshotAllPools(t, ctx, mc, regPools, target, rep)
 	rep.stateRowsWritten = persistStates(t, ctx, txMgr, repo, states)
@@ -869,14 +870,14 @@ func sampleTicks(ticks []*entity.UniswapV4Tick, n int) []*entity.UniswapV4Tick {
 	return out
 }
 
-func newLiveEventWriter(t *testing.T, ctx context.Context, dbPool *pgxpool.Pool, buildID buildregistry.BuildID) *dexconsumer.ProtocolEventWriter {
+func newLiveEventWriter(t *testing.T, ctx context.Context, dbPool *pgxpool.Pool, buildID buildregistry.BuildID, runID buildregistry.RunID) *dexconsumer.ProtocolEventWriter {
 	t.Helper()
 
 	var protocolID int64
 	if err := dbPool.QueryRow(ctx, `SELECT id FROM protocol WHERE chain_id = 1 AND name = 'UniswapV4'`).Scan(&protocolID); err != nil {
 		t.Fatalf("reading UniswapV4 protocol id (seed migration missing?): %v", err)
 	}
-	return dexconsumer.NewProtocolEventWriter(protocolID, postgres.NewEventRepository(nil, buildID))
+	return dexconsumer.NewProtocolEventWriter(protocolID, postgres.NewEventRepository(nil, buildID, runID))
 }
 
 var uniswapV4ReportTables = []string{

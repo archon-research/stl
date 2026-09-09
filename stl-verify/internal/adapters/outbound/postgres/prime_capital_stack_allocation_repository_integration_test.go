@@ -59,22 +59,24 @@ func TestPrimeCapitalStackAllocationRepositoryPreservesEighteenDecimalPrecision(
 
 	primeID := seedReferencePrime(t, ctx, pool, "spark-pcsa-precision")
 	txm := newReferenceRepoTxm(t, pool)
-	repo := NewPrimeCapitalStackAllocationRepository(pool, nil)
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	repo := NewPrimeCapitalStackAllocationRepository(pool, nil, runID)
 	syncedAt := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 
 	if err := saveAllocations(t, ctx, txm, repo, []entity.PrimeCapitalStackAllocation{
-		capitalStackAllocation(primeID, syncedAt, 1),
+		capitalStackAllocation(primeID, syncedAt, int(buildID)),
 	}); err != nil {
 		t.Fatalf("SaveCapitalStackAllocations() = %v", err)
 	}
 
 	var exposure, crr string
-	var chainID *int64
+	var chainID, gotRunID *int64
 	if err := pool.QueryRow(ctx, `
-		SELECT exposure_usd::text, crr::text, chain_id
-		FROM prime_capital_stack_allocation WHERE prime_id = $1`, primeID).Scan(&exposure, &crr, &chainID); err != nil {
+		SELECT exposure_usd::text, crr::text, chain_id, run_id
+		FROM prime_capital_stack_allocation WHERE prime_id = $1`, primeID).Scan(&exposure, &crr, &chainID, &gotRunID); err != nil {
 		t.Fatalf("reading back: %v", err)
 	}
+	testutil.RequireRunID(t, gotRunID, runID)
 	if exposure != "782710914.129541047405509005" {
 		t.Errorf("exposure_usd = %s, want the 18-decimal value unrounded", exposure)
 	}
@@ -93,7 +95,7 @@ func TestPrimeCapitalStackAllocationRepositoryKeepsOptionalFieldsNull(t *testing
 
 	primeID := seedReferencePrime(t, ctx, pool, "spark-pcsa-null")
 	txm := newReferenceRepoTxm(t, pool)
-	repo := NewPrimeCapitalStackAllocationRepository(pool, nil)
+	repo := NewPrimeCapitalStackAllocationRepository(pool, nil, 0)
 	allocation := capitalStackAllocation(primeID, time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC), 1)
 	allocation.ChainID = nil
 	allocation.Name = nil
@@ -125,7 +127,7 @@ func TestPrimeCapitalStackAllocationRepositoryIsIdempotentWithinABuild(t *testin
 
 	primeID := seedReferencePrime(t, ctx, pool, "spark-pcsa-idem")
 	txm := newReferenceRepoTxm(t, pool)
-	repo := NewPrimeCapitalStackAllocationRepository(pool, nil)
+	repo := NewPrimeCapitalStackAllocationRepository(pool, nil, 0)
 	allocation := capitalStackAllocation(primeID, time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC), 1)
 
 	for range 2 {
@@ -152,7 +154,7 @@ func TestPrimeCapitalStackAllocationRepositoryAppendsACorrectionForANewBuild(t *
 
 	primeID := seedReferencePrime(t, ctx, pool, "spark-pcsa-correction")
 	txm := newReferenceRepoTxm(t, pool)
-	repo := NewPrimeCapitalStackAllocationRepository(pool, nil)
+	repo := NewPrimeCapitalStackAllocationRepository(pool, nil, 0)
 	syncedAt := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 
 	for _, buildID := range []int{1, 2} {
@@ -193,7 +195,7 @@ func TestPrimeCapitalStackAllocationRepositoryKeepsSameTokenOnTwoNetworksDistinc
 
 	primeID := seedReferencePrime(t, ctx, pool, "spark-pcsa-two-networks")
 	txm := newReferenceRepoTxm(t, pool)
-	repo := NewPrimeCapitalStackAllocationRepository(pool, nil)
+	repo := NewPrimeCapitalStackAllocationRepository(pool, nil, 0)
 	syncedAt := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 
 	ethereum := capitalStackAllocation(primeID, syncedAt, 1)

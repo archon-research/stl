@@ -17,7 +17,6 @@ import (
 
 	psm3Adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
@@ -29,6 +28,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/services/psm3"
 )
 
@@ -195,9 +195,9 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	defer pool.Close()
 	logger.Info("PostgreSQL connected")
 
-	buildReg, err := buildregistry.New(ctx, pool)
+	buildReg, runID, err := writerrun.Open(ctx, pool)
 	if err != nil {
-		return fmt.Errorf("registering build: %w", err)
+		return err
 	}
 
 	logger.Info("starting psm3-indexer",
@@ -237,7 +237,7 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	if err != nil {
 		return fmt.Errorf("tx manager: %w", err)
 	}
-	reservesRepo := postgres.NewPSM3ReservesRepository(txm, logger, buildReg.BuildID())
+	reservesRepo := postgres.NewPSM3ReservesRepository(txm, logger, buildReg.BuildID(), runID)
 
 	// PSM3 service telemetry (emits psm3_* metrics labelled by chain)
 	svcTelemetry, err := psm3.NewTelemetry(chainName)

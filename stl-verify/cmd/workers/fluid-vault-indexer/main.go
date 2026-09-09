@@ -18,7 +18,6 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	redisAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
@@ -32,6 +31,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/services/fluid_vault_indexer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
@@ -250,9 +250,9 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	defer pool.Close()
 	logger.Info("PostgreSQL connected")
 
-	buildReg, err := buildregistry.New(ctx, pool)
+	buildReg, runID, err := writerrun.Open(ctx, pool)
 	if err != nil {
-		return fmt.Errorf("registering build: %w", err)
+		return err
 	}
 
 	logger.Info("starting fluid vault indexer",
@@ -290,17 +290,17 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 		return fmt.Errorf("creating transaction manager: %w", err)
 	}
 
-	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildReg.BuildID(), 0)
+	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildReg.BuildID(), runID, 0)
 	if err != nil {
 		return fmt.Errorf("creating protocol repository: %w", err)
 	}
 
-	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 0)
+	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 0, runID)
 	if err != nil {
 		return fmt.Errorf("creating token repository: %w", err)
 	}
 
-	vaultRepo, err := postgres.NewFluidVaultRepository(pool, logger, buildReg.BuildID(), 0)
+	vaultRepo, err := postgres.NewFluidVaultRepository(pool, logger, buildReg.BuildID(), runID, 0)
 	if err != nil {
 		return fmt.Errorf("creating fluid vault repository: %w", err)
 	}

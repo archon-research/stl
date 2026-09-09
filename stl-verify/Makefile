@@ -1857,8 +1857,9 @@ build-cronjob-%:
 	@echo "==> Built: dist/$*"
 
 # BUILD_GIT_HASH is stamped from HEAD rather than left at the .env's "dev": build_registry
-# keys rows by git hash, so "dev" collapses every local build into one build_id and the rows
-# a run wrote stop being attributable to the commit that wrote them. See run-allocation-tracker.
+# keys artefacts by (git_hash, service), so "dev" collapses every local build into one
+# build_id and the rows a run wrote stop being attributable to the commit that wrote them.
+# See run-allocation-tracker.
 run-cronjob-%:
 	@test -f cmd/cronjobs/$*/.env || { echo "ERROR: cmd/cronjobs/$*/.env is missing. 'make dev-env' writes only the jobs dev-env-files names; if $* is not one of them, copy a covered job's .env and edit the job-specific keys."; exit 1; }
 	@echo "==> Running $*..."

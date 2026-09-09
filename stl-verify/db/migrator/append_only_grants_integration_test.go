@@ -44,6 +44,10 @@ var convertedAppendOnlyTables = []string{
 	"uniswap_v4_liquidity_event",
 	"uniswap_v4_tick",
 	"uniswap_v4_pool_event",
+	// VEC-598: provenance tables. The owner keeps UPDATE for the FK integrity probe
+	// (20260714_160000); a statement-level trigger raises on any real mutation.
+	"build_registry",
+	"writer_run",
 }
 
 // TestConvertedTablesAreAppendOnly asserts the DB-level half of the append-only rule:

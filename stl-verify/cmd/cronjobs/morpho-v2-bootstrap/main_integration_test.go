@@ -35,7 +35,7 @@ func TestMain(m *testing.M) {
 func setWorkerEnv(t *testing.T, configuredChain, nodeChain int64) {
 	t.Helper()
 
-	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 	t.Setenv("CHAIN_ID", strconv.FormatInt(configuredChain, 10))
 	t.Setenv("ALCHEMY_API_KEY", "test-key")
 	t.Setenv("ALCHEMY_HTTP_URL", testutil.StartChainIDRPC(t, nodeChain).URL)
