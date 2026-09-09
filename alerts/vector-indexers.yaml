@@ -727,31 +727,36 @@ groups:
   #     already existed; the V2 event names are registered topics on it, so the
   #     ForceDeallocate and "events seen" signals below need no new instrument.
   #
-  # SCOPED TO THE LIVE INDEXERS. Three rules in this group count work an
-  # on-demand replay can redo — VectorMorphoV2UnknownAdapters,
-  # VectorMorphoV2LazyAdapterRegistrations and
-  # VectorMorphoV2ForceDeallocateSurge — and all three carry
-  # service_name=~"morpho-indexer|base-morpho-indexer" in their expr. WHEN A
-  # CHAIN IS ADDED, ADD ITS DEPLOYMENT NAME TO ALL THREE; that list lives only in
-  # those three expressions.
+  # THE TWO REPLAY WORKERS ARE EXCLUDED, IN EVERY RULE. Every selector in this
+  # group carries service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)",
+  # both sides of the two silent-empty guards included. A chain added later needs
+  # no edit here: its indexer is covered on day one, because the match names what
+  # to leave out rather than what to count.
   #
-  # Why: morpho-vault-backfill and morpho-v2-bootstrap replay history through the
-  # same handlers and count on these same instruments under their own
-  # service_name, so an on-demand replay drives all three counters by design.
-  # Re-recording history is not an incident and there is nothing to act on —
-  # measured, the 2026-08-28 staging era backfill replayed 2,604 ForceDeallocate
-  # at up to 1,025/h and held VectorMorphoV2ForceDeallocateSurge firing for 7h
-  # against ~1/h of real activity. Each rule's own note says why a replay run
-  # would fire that rule. Nothing is lost by excluding them: the replay workers'
-  # series stay on the dashboard as backfill progress.
+  # Excluding beats allow-listing the live indexers because the two failure modes
+  # are not symmetric. A replay worker missing from the exclusion fires these
+  # rules loudly and sends whoever is on call to this note; a per-chain indexer
+  # missing from an allow-list is silently uncovered, with nothing to say it ever
+  # was. Add a new replay worker to the exclusion in every expr below.
+  #
+  # morpho-vault-backfill and morpho-v2-bootstrap replay history through the same
+  # handlers and count on these same instruments under their own service_name, so
+  # an on-demand replay drives every counter here by design. Re-recording history
+  # is not an incident and there is nothing to act on — measured, the 2026-08-28
+  # staging era backfill replayed 2,604 ForceDeallocate at up to 1,025/h and held
+  # VectorMorphoV2ForceDeallocateSurge firing for 7h against ~1/h of real
+  # activity. The two guards carry the exclusion for the mirror-image reason: a
+  # replay run's own snapshots and events satisfy their suppressing side, so an
+  # unscoped guard says nothing about a broken live write path for the length of
+  # the run plus its whole trailing 6h window. Nothing is lost either way — the
+  # workers' series stay on the dashboard as run progress.
   #
   # "Live indexer" is one Deployment per chain (morpho-indexer on mainnet,
   # base-morpho-indexer on Base since ARCT-414) running the same binary; each
   # emits its own service_name (SERVICE_NAME env from the pod's `app` label;
   # binary support lands with ARCT-413 — until then the Base pod still reports
   # service_name="morpho-indexer" with chain="base", and the regex covers both
-  # states), so the match lists every per-chain name explicitly rather than a
-  # prefix glob that could one day admit a replay worker.
+  # states).
   #
   # NO staleness rule here, deliberately. V2 vault state is event-driven: a
   # dormant vault legitimately writes nothing for days. Chain-verified in the
@@ -800,8 +805,8 @@ groups:
         # adapter_type="unknown" excludes "unprobed" by construction, so removals
         # cannot inflate this.
         #
-        # SCOPED to the live indexers — the group note above has the matcher, the
-        # reason all three scoped rules carry it, and the chain-onboarding rule.
+        # THE REPLAY WORKERS ARE EXCLUDED — the group note above has the matcher
+        # and why every rule here carries it.
         # For this rule specifically: a replay re-recording a known Unknown
         # population would fire it by design, and nothing has changed on chain.
         # The live indexer is still the source this is asking about, and a real
@@ -812,7 +817,7 @@ groups:
         expr: |
           sum by (chain, cluster) (
             increase(morpho_v2_adapter_registrations_total{
-              adapter_type="unknown", service_name=~"morpho-indexer|base-morpho-indexer", k8s_namespace_name="vector"
+              adapter_type="unknown", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)", k8s_namespace_name="vector"
             }[24h])
           ) > 25
         for: 30m
@@ -860,8 +865,8 @@ groups:
         # changed between two reads. Deliberately not >0: those appends are by
         # design not an incident.
         #
-        # SCOPED to the live indexers — the group note above has the matcher, the
-        # reason all three scoped rules carry it, and the chain-onboarding rule.
+        # THE REPLAY WORKERS ARE EXCLUDED — the group note above has the matcher
+        # and why every rule here carries it.
         # For this rule specifically: replaying an Allocate whose vault was
         # discovered mid-life is precisely how the missing add_adapter_event
         # history gets filled in, so a replay run drives this counter by design
@@ -871,7 +876,7 @@ groups:
         expr: |
           sum by (chain, cluster) (
             increase(morpho_v2_adapter_registrations_total{
-              observed_via="allocation_event", service_name=~"morpho-indexer|base-morpho-indexer", k8s_namespace_name="vector"
+              observed_via="allocation_event", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)", k8s_namespace_name="vector"
             }[6h])
           ) > 3
         for: 30m
@@ -941,10 +946,10 @@ groups:
         # the runbook's first check is to rule out a loop, which is a better trade
         # than going blind on a real liquidity run every time one block errors.
         #
-        # SCOPED to the live indexers — the group note above has the matcher, the
-        # reason all three scoped rules carry it, and the chain-onboarding rule.
+        # THE REPLAY WORKERS ARE EXCLUDED — the group note above has the matcher
+        # and why every rule here carries it.
         # For this rule specifically: the redelivery loop gate above cannot stand
-        # in for that matcher, because neither replay worker emits
+        # in for the exclusion, because neither replay worker emits
         # morpho_blocks_processed_total — the gate has nothing to read for them,
         # which is how the replayed ForceDeallocate flood in the group note held
         # this firing for 7h. Replayed history is not a liquidity run.
@@ -956,22 +961,22 @@ groups:
         expr: |
           sum by (chain, cluster) (
             increase(morpho_events_processed_total{
-              event_type="ForceDeallocate", service_name=~"morpho-indexer|base-morpho-indexer", k8s_namespace_name="vector"
+              event_type="ForceDeallocate", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)", k8s_namespace_name="vector"
             }[1h])
           ) > 20
           unless on (chain, cluster)
           (
             sum by (chain, cluster) (
-              rate(morpho_blocks_processed_total{status="error", service_name=~"morpho-indexer|base-morpho-indexer", k8s_namespace_name="vector"}[1h])
+              rate(morpho_blocks_processed_total{status="error", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)", k8s_namespace_name="vector"}[1h])
             ) > 0
             and on (chain, cluster)
             (
               sum by (chain, cluster) (
-                rate(morpho_blocks_processed_total{status="success", service_name=~"morpho-indexer|base-morpho-indexer", k8s_namespace_name="vector"}[1h])
+                rate(morpho_blocks_processed_total{status="success", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)", k8s_namespace_name="vector"}[1h])
               )
               or
               sum by (chain, cluster) (
-                rate(morpho_blocks_processed_total{service_name=~"morpho-indexer|base-morpho-indexer", k8s_namespace_name="vector"}[1h])
+                rate(morpho_blocks_processed_total{service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)", k8s_namespace_name="vector"}[1h])
               ) * 0
             ) == 0
           )
@@ -1050,12 +1055,14 @@ groups:
           sum by (chain, cluster) (
             rate(morpho_events_processed_total{
               event_type=~"Allocate|Deallocate|IncreaseAbsoluteCap|DecreaseAbsoluteCap|IncreaseRelativeCap|DecreaseRelativeCap|SetPerformanceFee|SetManagementFee|SetPerformanceFeeRecipient|SetManagementFeeRecipient",
-              k8s_namespace_name="vector"
+              service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)", k8s_namespace_name="vector"
             }[6h])
           ) > 0
           unless
           sum by (chain, cluster) (
-            rate(morpho_v2_snapshots_written_total{k8s_namespace_name="vector"}[6h])
+            rate(morpho_v2_snapshots_written_total{
+              service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)", k8s_namespace_name="vector"
+            }[6h])
           ) > 0
         for: 15m
         labels:
@@ -1113,13 +1120,16 @@ groups:
         # blind in exactly the case this exists for. Do not revert to `and`.
         expr: |
           sum by (chain, cluster) (
-            rate(morpho_blocks_processed_total{status="success", chain!="base", k8s_namespace_name="vector"}[6h])
+            rate(morpho_blocks_processed_total{
+              status="success", chain!="base",
+              service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)", k8s_namespace_name="vector"
+            }[6h])
           ) > 0
           unless
           sum by (chain, cluster) (
             rate(morpho_events_processed_total{
               event_type=~"Allocate|Deallocate|IncreaseAbsoluteCap|DecreaseAbsoluteCap|IncreaseRelativeCap|DecreaseRelativeCap|SetPerformanceFee|SetManagementFee|SetPerformanceFeeRecipient|SetManagementFeeRecipient",
-              k8s_namespace_name="vector"
+              service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)", k8s_namespace_name="vector"
             }[6h])
           ) > 0
         for: 15m

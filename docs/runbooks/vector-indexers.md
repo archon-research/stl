@@ -3082,23 +3082,23 @@ family.
 each one seeds its whole adapter set in a single transaction. Acknowledge and
 curate.
 
-**Replays are excluded.** The rule counts only the live per-chain indexers,
-`service_name=~"morpho-indexer|base-morpho-indexer"`. All three scoped rules in the
-`vector-morpho-v2` group carry that same match for the same reason — this one,
-[`VectorMorphoV2LazyAdapterRegistrations`](#vectormorphov2lazyadapterregistrations)
-and [`VectorMorphoV2ForceDeallocateSurge`](#vectormorphov2forcedeallocatesurge) — so
-a new chain's Deployment name goes into all three. The on-demand replay workers
-(`morpho-vault-backfill`, `morpho-v2-bootstrap`) drive historical logs through the
-same handlers and increment the same counter under their own `service_name`, so a
-run re-recording an already-known Unknown population would fire this by design —
-nothing changed on chain, and there is nothing to act on. A genuinely new adapter
-family reaches the live indexer within a day of shipping, which is what this rule
-asks about. Triaging a replay instead? Read that `service_name`'s own series on the
-dashboard: it is backfill progress, not an incident.
+**Replays are excluded.** The rule counts every `service_name` except the two
+on-demand replay workers, `service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"`, so a
+chain added later is covered on day one with no edit to the rule. Every rule in the
+`vector-morpho-v2` group carries the same exclusion; a new replay worker has to be
+added to all of them. `morpho-vault-backfill` and `morpho-v2-bootstrap` drive
+historical logs through the same handlers and increment the same counter under
+their own `service_name`, so a run re-recording an already-known Unknown population
+would fire this by design — nothing changed on chain, and there is nothing to act
+on. A genuinely new adapter family reaches the live indexer within a day of
+shipping, which is what this rule asks about. To read what a replay recorded, use
+that `service_name`'s own series on the dashboard: it is run progress, not an
+incident.
 
 ### First checks
 
-1. **Which provenance** — `sum by (observed_via) (increase(morpho_v2_adapter_registrations_total{adapter_type="unknown", service_name=~"morpho-indexer|base-morpho-indexer"}[24h]))`.
+1. **Which provenance** —
+   `sum by (observed_via) (increase(morpho_v2_adapter_registrations_total{adapter_type="unknown", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"}[24h]))`.
    All `vault_discovery` means a wave of newly discovered vaults (benign, but still
    curate). Any meaningful `add_adapter_event` share means a new family is shipping
    live. Drop the `service_name` matcher to see what a replay run recorded — the
@@ -3163,7 +3163,7 @@ dashboard: it is backfill progress, not an incident.
 
 ### Verify recovery
 
-`increase(morpho_v2_adapter_registrations_total{adapter_type="unknown", service_name=~"morpho-indexer|base-morpho-indexer"}[24h]) <= 25`
+`increase(morpho_v2_adapter_registrations_total{adapter_type="unknown", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"}[24h]) <= 25`
 for the affected chain, and the type-99 query above returns only adapters you
 have consciously accepted.
 
@@ -3207,18 +3207,16 @@ approximated: an adapter known only from an `Allocate` simply has **no**
 `add_adapter_event` observation, so its add block is NULL until its history is
 replayed. Current membership and classification are correct in the meantime.
 
-**Replays are excluded.** The rule counts only the live per-chain indexers,
-`service_name=~"morpho-indexer|base-morpho-indexer"`. All three scoped rules in the
-`vector-morpho-v2` group carry that same match for the same reason — this one,
-[`VectorMorphoV2UnknownAdapters`](#vectormorphov2unknownadapters) and
-[`VectorMorphoV2ForceDeallocateSurge`](#vectormorphov2forcedeallocatesurge) — so a
-new chain's Deployment name goes into all three. The on-demand replay workers
-(`morpho-vault-backfill`, `morpho-v2-bootstrap`) run historical `Allocate` logs
-through the same handlers under their own `service_name`, and replaying a mid-life
-discovery is exactly how the missing `add_adapter_event` history gets filled in —
-so a run drives this counter by design, and firing on it would page for the fix.
-The question the alert asks — is the LIVE enumeration missing adapters — is only
-answerable from the live indexer's own series.
+**Replays are excluded.** The rule counts every `service_name` except the two
+on-demand replay workers, `service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"`, so a
+chain added later needs no edit here. Every rule in the `vector-morpho-v2` group
+carries the same exclusion. `morpho-vault-backfill` and `morpho-v2-bootstrap` run
+historical `Allocate` logs through the same handlers under their own
+`service_name`, and replaying a mid-life discovery is exactly how the missing
+`add_adapter_event` history gets filled in — so a run drives this counter by
+design, and firing on it would page for the fix. The question the alert asks — is
+the LIVE enumeration missing adapters — is only answerable from the live indexer's
+own series.
 
 ### First checks
 
@@ -3226,7 +3224,7 @@ answerable from the live indexer's own series.
    adapter the vault allocates to in the discovery block — deterministically, per
    the mechanism above — so a wave of new vaults produces a small, one-off burst.
    Correlate with the discovery path:
-   `sum by (observed_via) (increase(morpho_v2_adapter_registrations_total{service_name=~"morpho-indexer|base-morpho-indexer"}[6h]))`
+   `sum by (observed_via) (increase(morpho_v2_adapter_registrations_total{service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"}[6h]))`
    — `allocation_event` observations with **no** matching `vault_discovery`
    traffic in the same window are the suspicious case.
 2. **Identify them** — the indexer logs one WARN per inference:
@@ -3278,7 +3276,7 @@ answerable from the live indexer's own series.
 
 ### Verify recovery
 
-`increase(morpho_v2_adapter_registrations_total{observed_via="allocation_event", service_name=~"morpho-indexer|base-morpho-indexer"}[6h]) <= 3`
+`increase(morpho_v2_adapter_registrations_total{observed_via="allocation_event", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"}[6h]) <= 3`
 for the affected chain. If the cause was an enumeration bug, also replay the
 affected vaults: the replay appends each adapter's real `AddAdapter` observation
 at its own block, which is what turns a NULL add block into the true one.
@@ -3317,30 +3315,27 @@ The gate deliberately does **not** trip on a single error: a lone transient
 The price is that a stall's *first* hour can still fire this, because the success
 rate needs the full 1h window to fall to zero — so rule out a stall first.
 
-The rule counts only the live per-chain indexers,
-`service_name=~"morpho-indexer|base-morpho-indexer"` (each Deployment's
+The rule counts every `service_name` except the two on-demand replay workers,
+`service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"` (each Deployment's
 `SERVICE_NAME` is its `app` label; the binary reads it from ARCT-413 on — until
 that lands the Base pod still reports `service_name="morpho-indexer"` with
-`chain="base"`, and the regex covers both). All three scoped rules in the
-`vector-morpho-v2` group carry that same match — this one,
-[`VectorMorphoV2UnknownAdapters`](#vectormorphov2unknownadapters) and
-[`VectorMorphoV2LazyAdapterRegistrations`](#vectormorphov2lazyadapterregistrations)
-— so a new chain's Deployment name needs adding to all three. The threshold is per
-`chain` and was sized on mainnet; Base has a single V2 vault (steakUSDC), so >20/h
-there is a stronger signal, not a false positive. The on-demand replay
-workers (`morpho-vault-backfill`, `morpho-v2-bootstrap`) drive historical logs
+`chain="base"`). Every rule in the `vector-morpho-v2` group carries the same
+exclusion, so a chain added later is covered on day one and only a new replay
+worker needs adding. The threshold is per `chain` and was sized on mainnet; Base
+has a single V2 vault (steakUSDC), so >20/h there is a stronger signal, not a false
+positive. `morpho-vault-backfill` and `morpho-v2-bootstrap` drive historical logs
 through the same handlers and increment the same counter under their own
-`service_name`, and they emit no `morpho_blocks_processed_total` for the loop
-gate to read — the 2026-08-28 staging era backfill replayed 2,604
-`ForceDeallocate` at up to 1,025/h and held this firing for seven hours against
-~1/h of real activity. A backfill's own series is progress, not an incident.
+`service_name`, and they emit no `morpho_blocks_processed_total` for the loop gate
+to read — the 2026-08-28 staging era backfill replayed 2,604 `ForceDeallocate` at
+up to 1,025/h and held this firing for seven hours against ~1/h of real activity.
+A replay's own series is progress, not an incident.
 
 ### First checks
 
 1. **Confirm the indexer is not stalled or redelivering.** Expect this alert
    *alongside* a stall, not instead of one — and if it is firing during an error
    loop, treat the count as unreliable and fix the stall first:
-   `rate(morpho_blocks_processed_total{status="error"}[1h])` and
+   `rate(morpho_blocks_processed_total{status="error", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"}[1h])` and
    `VectorMorphoIndexerStalled`. The gate suppresses a chain that is erroring and
    committing nothing, but a loop's first hour — and the tail of one that has just
    cleared — can still leave inflated counts inside the 1h window.
@@ -3409,7 +3404,7 @@ without a new baseline measurement.
 
 ### Verify recovery
 
-`increase(morpho_events_processed_total{event_type="ForceDeallocate"}[1h]) <= 20`
+`increase(morpho_events_processed_total{event_type="ForceDeallocate", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"}[1h]) <= 20`
 for the affected chain.
 
 ---
@@ -3447,6 +3442,12 @@ traffic on mainnet is continuous (~25k events/7d), so this catches a **total**
 write-path failure. The loss of one snapshot type alone (e.g. caps only, ~104
 events/7d) will not fire it.
 
+Both sides exclude the two replay workers (`service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"`),
+so a deliberate `morpho-vault-backfill` or `morpho-v2-bootstrap` run neither
+supplies the event side nor satisfies the snapshot side. A live write path that
+breaks while a run is going is still caught; before the exclusion, the run and its
+whole trailing 6h window masked it.
+
 Both sides use the same 6h window, deliberately. Cap (~104/7d) and fee (~15/7d)
 sparsity is what forces 6h on the left; a narrower right side would false-fire on
 every ordinary stall, since a 30m-quiet indexer trivially has zero snapshots
@@ -3466,9 +3467,9 @@ sample, so **worst case ~6h15m** (6h window + 15m `for`).
    (`deploy/base-morpho-indexer` for `chain="base"`).
    If it predates the metric, this is expected and clears ~15m after the rollout.
 2. **Which side is dead** —
-   `sum by (event_type) (increase(morpho_events_processed_total{event_type=~"Allocate|Deallocate|Increase.*Cap|Decrease.*Cap|Set.*Fee.*"}[6h]))`
+   `sum by (event_type) (increase(morpho_events_processed_total{event_type=~"Allocate|Deallocate|Increase.*Cap|Decrease.*Cap|Set.*Fee.*", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"}[6h]))`
    versus
-   `sum by (snapshot_type) (increase(morpho_v2_snapshots_written_total[6h]))`.
+   `sum by (snapshot_type) (increase(morpho_v2_snapshots_written_total{service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"}[6h]))`.
    Events non-zero with snapshots absent confirms the write path, not the feed.
 3. **Confirm against the DB** (`db-query`) — metrics could be lying:
 
@@ -3512,7 +3513,8 @@ sample, so **worst case ~6h15m** (6h window + 15m `for`).
 
 ### Verify recovery
 
-`rate(morpho_v2_snapshots_written_total[6h]) > 0` for the affected chain, and the
+`rate(morpho_v2_snapshots_written_total{service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"}[6h]) > 0`
+for the affected chain, and the
 three `max(block_number)` queries above tracking the chain head.
 
 ---
@@ -3537,6 +3539,10 @@ and no error is ever raised.
 
 Mainnet prod runs ~25k `Allocate`/`Deallocate` per 7d (~150/h), so 6h of zero V2
 events is orders of magnitude outside anything observed. It is not a lull.
+
+Both sides exclude the two replay workers (`service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"`),
+so a `morpho-vault-backfill` or `morpho-v2-bootstrap` run cannot stand in for the
+live decode path and hide a broken one for the run plus the trailing 6h.
 
 **Base is excluded** (`chain!="base"` on the left side, ARCT-414). Base has exactly
 one V2 vault (steakUSDC), so a 6h stretch with no allocation / cap / fee event is an
@@ -3601,7 +3607,7 @@ window can be sized from it.
 
 ### Verify recovery
 
-`rate(morpho_events_processed_total{event_type=~"Allocate|Deallocate|Increase.*Cap|Decrease.*Cap|Set.*Fee.*"}[6h]) > 0`
+`rate(morpho_events_processed_total{event_type=~"Allocate|Deallocate|Increase.*Cap|Decrease.*Cap|Set.*Fee.*", service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"}[6h]) > 0`
 for the affected chain.
 
 ---
