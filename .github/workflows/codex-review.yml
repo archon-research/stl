@@ -9,8 +9,9 @@
 # The seat bundle lives in Secrets Manager, fetched over OIDC. This repo is
 # public: as an Actions secret the bundle is readable by anyone who can push a
 # workflow, and refreshing it needs a second secret that can rewrite repo
-# secrets. In AWS, reads land in CloudTrail and revocation is IAM. The role is
-# trusted for `environment:codex-review` alone, which is why the job declares it.
+# secrets. In AWS, reads land in CloudTrail and revocation is IAM. The role's
+# trust policy pins job_workflow_ref to this file and qualifies the subject with
+# `environment:codex-review`, which is why the job declares that environment.
 # Terraform: infrastructure/infra/39_codex_review_oidc.tf
 # Actions are pinned to commit SHAs for supply-chain security.
 name: Codex Review
@@ -46,8 +47,11 @@ jobs:
       cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Qualifies the OIDC subject: the seat role trusts this environment and
-    # nothing else, so no other workflow in this repo can mint the credential.
+    # Qualifies the OIDC subject, and gates each run behind the environment's
+    # required reviewers. What keeps another workflow here from minting the
+    # credential is the job_workflow_ref pin in the role's trust policy: any
+    # workflow in this repo can declare this environment and present the same
+    # subject.
     environment: codex-review
     permissions:
       contents: read
