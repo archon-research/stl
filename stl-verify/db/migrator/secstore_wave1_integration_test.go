@@ -480,3 +480,99 @@ func TestSecStoreWave1IsAppendOnlyUnderTheRealRoles(t *testing.T) {
 		}
 	})
 }
+
+// TestSecStoreAppendGuardChainsAndRejectsForgedProvenance covers sec_store_append_guard(),
+// which is not one of the four acceptance items but is the other thing wave 1 enforces at the
+// write boundary — and the part that a review caught getting the round-trip wrong.
+//
+// The pre-image excludes record_id so a hash survives a re-import that reassigns the identity
+// sequence, and it must exclude supersedes_record_id for the same reason: that column IS a
+// record_id, so leaving it in defeated the exclusion for every correction and tombstone. The
+// guard now substitutes the predecessor's content_hash, which both fixes the round-trip and
+// makes the digest an actual chain. The last two subtests pin exactly that: the stored hash
+// reproduces when the pointer is replaced by the predecessor's hash, and does NOT reproduce
+// when the raw record_id is left in place — the pre-fix behaviour.
+func TestSecStoreAppendGuardChainsAndRejectsForgedProvenance(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	t.Run("forged_ingest_xid_is_rejected", func(t *testing.T) {
+		_, err := pool.Exec(ctx, `
+			INSERT INTO sec_node (id, record_type, status, valid_from, ingest_xid, `+secstoreSpine+`)
+			VALUES ('em-t-guard-xid', 'ENTITY', 'ACTIVE', '2026-01-01', '12345'::xid8, 'test', 'SEED_LOAD', 'forged', 'test')`)
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "P0001" {
+			t.Fatalf("forged ingest_xid failed with %v, want P0001 from the guard", err)
+		}
+	})
+
+	t.Run("supplied_hash_that_does_not_match_is_rejected", func(t *testing.T) {
+		_, err := pool.Exec(ctx, `
+			INSERT INTO sec_node (id, record_type, status, valid_from, content_hash, `+secstoreSpine+`)
+			VALUES ('em-t-guard-hash', 'ENTITY', 'ACTIVE', '2026-01-01', '\xdeadbeef'::bytea, 'test', 'SEED_LOAD', 'bad hash', 'test')`)
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "P0001" {
+			t.Fatalf("mismatched content_hash failed with %v, want P0001 from the guard", err)
+		}
+	})
+
+	t.Run("supersedes_record_id_naming_no_stored_row_is_rejected", func(t *testing.T) {
+		_, err := pool.Exec(ctx, `
+			INSERT INTO sec_node (id, record_type, status, valid_from, supersedes_record_id, `+secstoreSpine+`)
+			VALUES ('em-t-guard-orphan', 'ENTITY', 'ACTIVE', '2026-01-01', 999999999, 'test', 'RESTATEMENT', 'orphan pointer', 'test')`)
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "P0001" {
+			t.Fatalf("unresolvable supersedes_record_id failed with %v, want P0001 — the chain cannot be computed without the predecessor", err)
+		}
+	})
+
+	t.Run("hash_chains_on_the_predecessors_content_not_its_record_id", func(t *testing.T) {
+		const id = "em-t-guard-chain"
+		insertNode(ctx, t, pool, id, "ACTIVE", "2026-01-01", "'infinity'", "the original")
+		// processing_version 1, not 0: a restatement keeps the valid window it corrects, so at 0
+		// it collides with the row it supersedes — which is the definition ADR-0006 §3 gives a
+		// correction, and the one case that does allocate a version. A valid-time change stays
+		// at 0 because valid_to differs; see the close-and-open test.
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO sec_node (id, record_type, status, valid_from, valid_to, processing_version,
+			                      actor, change_reason_code, change_reason, approved_by,
+			                      supersedes_record_id, source_system)
+			SELECT $1, 'ENTITY', 'INACTIVE', '2026-01-01', 'infinity', 1,
+			       'test', 'RESTATEMENT', 'the correction', 'approver', record_id, 'test'
+			FROM sec_node WHERE id = $1 AND change_reason_code = 'SEED_LOAD'`, id); err != nil {
+			t.Fatalf("append the correction: %v", err)
+		}
+
+		// Recompute the correction's hash two ways: substituting the predecessor's hash (what
+		// the guard does, and what re-import can reproduce) and leaving the raw record_id in
+		// (the pre-fix pre-image, which a re-import cannot reproduce).
+		var chained, rawPointer bool
+		if err := pool.QueryRow(ctx, `
+			WITH correction AS (
+				SELECT * FROM sec_node WHERE id = $1 AND change_reason_code = 'RESTATEMENT'
+			), parent AS (
+				SELECT content_hash FROM sec_node
+				WHERE record_id = (SELECT supersedes_record_id FROM correction)
+			)
+			SELECT c.content_hash = sha256(convert_to((
+			           to_jsonb(c) - 'record_id' - 'ingest_xid' - 'ingested_at' - 'content_hash'
+			                       - 'supersedes_record_id'
+			           || jsonb_build_object('supersedes_content_hash',
+			                                 encode((SELECT content_hash FROM parent), 'hex'))
+			       )::text, 'UTF8')),
+			       c.content_hash = sha256(convert_to((
+			           to_jsonb(c) - 'record_id' - 'ingest_xid' - 'ingested_at' - 'content_hash'
+			       )::text, 'UTF8'))
+			FROM correction c`, id,
+		).Scan(&chained, &rawPointer); err != nil {
+			t.Fatalf("recompute the correction hash: %v", err)
+		}
+		if !chained {
+			t.Error("the stored hash does not reproduce with supersedes_record_id replaced by the predecessor's content_hash — the chain is not what the guard computes")
+		}
+		if rawPointer {
+			t.Error("the stored hash still reproduces with the raw supersedes_record_id in the pre-image: the pointer is a record_id, so a re-import that reassigns the sequence would invalidate every correction and tombstone")
+		}
+	})
+}

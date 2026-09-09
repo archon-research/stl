@@ -195,9 +195,9 @@ COMMENT ON COLUMN sec_node.actor IS 'Roles: Audit. Real, non-shared principal (h
 COMMENT ON COLUMN sec_node.change_reason_code IS 'Roles: FK→change_reason_vocabulary.code, Audit. Structured reason for the append.';
 COMMENT ON COLUMN sec_node.change_reason IS 'Roles: Audit. Free-text reason; cites the source where change_reason_code = CURATED_SOURCE.';
 COMMENT ON COLUMN sec_node.approved_by IS 'Roles: Audit. Approver, distinct from actor, where the reason code requires approval.';
-COMMENT ON COLUMN sec_node.supersedes_record_id IS 'Roles: FK-shaped→sec_node.record_id (soft; unenforced so a correction can precede its target in a batch), Audit. record_id this append corrects or retracts; the correction chain is walkable through it. The resolved reads do not consult it — supersession within a window is decided by processing_version then ingest_xid, and withdrawal by the zero-length tombstone window.';
+COMMENT ON COLUMN sec_node.supersedes_record_id IS 'Roles: FK-shaped→sec_node.record_id (enforced by sec_node_append_guard, which needs the predecessor''s content_hash to chain this row''s hash; an unresolvable pointer is rejected), Audit. record_id this append corrects or retracts; the correction chain is walkable through it, and content_hash binds this row to the exact content it supersedes. The resolved reads do not consult it — supersession within a window is decided by processing_version then ingest_xid, and withdrawal by the zero-length tombstone window.';
 COMMENT ON COLUMN sec_node.source_system IS 'Roles: Audit. Where the fact came from (registry, worksheet, port, loader).';
-COMMENT ON COLUMN sec_node.content_hash IS 'Roles: Audit, Derived. sha256 over the canonical stored form — to_jsonb(row) minus record_id, ingest_xid, ingested_at and content_hash — computed by the sec_node_append_guard trigger on every insert, so the chain runs from the first append (AR-1.2, NFR-5). Reproducible from an export and stable across a re-realization that reassigns record_ids. A supplied value is verified against the computed one and rejected if it differs.';
+COMMENT ON COLUMN sec_node.content_hash IS 'Roles: Audit, Derived. sha256 over the canonical stored form — to_jsonb(row) minus record_id, ingest_xid, ingested_at and content_hash, with supersedes_record_id replaced by the predecessor''s content_hash — computed by the sec_node_append_guard trigger on every insert, so the chain runs from the first append (AR-1.2, NFR-5). Chaining on content rather than on a row number keeps it reproducible from an export and stable across a re-realization that reassigns record_ids. A supplied value is verified against the computed one and rejected if it differs.';
 -- Resolution index: the reads below sort (id, valid_from) ASC then processing_version DESC,
 -- ingest_xid DESC, record_id DESC. Columns AND directions have to match the whole key or the
 -- DISTINCT ON degrades to a full scan plus sort on every current read (VEC-633 measures this).
@@ -247,7 +247,7 @@ CREATE TABLE sec_edge (
     CONSTRAINT sec_edge_valid_chk CHECK (valid_from <= valid_to)
 );
 COMMENT ON TABLE sec_edge IS '[Dimension] Directed, typed, weighted relationship store (ADR-0005 §3/§5). Append-only (full ACL revoke incl. owner — nothing FKs this table); close-and-open at processing_version 0 (valid_to is NOT NULL, ''infinity'' when open, and in the PK); retraction is a tombstone append with a zero-length window. Endpoint-kind legality vs rel_type_vocabulary is loader/validator-enforced (cross-row); single-valued cardinality is a DQ check over current state, never a write trigger. Inverses and closures are derived, never stored. Plain table: governance-rate writes — block-stamped projection types (ALLOCATES) are excluded by design and would need their own hypertable store if ratified.';
-COMMENT ON COLUMN sec_edge.edge_id IS 'Roles: Derived. Generated human-readable identity; the PK is the (rel_type, src, dst, edge_seq, processing_version, valid_from) tuple.';
+COMMENT ON COLUMN sec_edge.edge_id IS 'Roles: Derived. Generated human-readable identity of the LOGICAL edge; the PK is the seven-column (rel_type, src_id, dst_id, edge_seq, processing_version, valid_from, valid_to) tuple, so one edge_id spans every version and window of that edge.';
 COMMENT ON COLUMN sec_edge.edge_seq IS 'Roles: PK component. DM-6 discriminator: deliberately duplicated edges (multi-typing, per-edge attribute clusters) coexist instead of superseding their twin. Base is 1 per ADR-0005 §3, so a twin is 2; 0 is rejected rather than left as a second spelling of the base edge, since edge_seq is rendered into the stored edge_id.';
 COMMENT ON COLUMN sec_edge.src_id IS 'Roles: FK→sec_node.id (soft; SCD2 ids non-unique — resolve via the current view). Edge source.';
 COMMENT ON COLUMN sec_edge.src_kind IS 'Denormalised source kind, CHECKed against the closed record_type set; that it AGREES with the source node''s record_type is cross-row and stays validator-enforced (GQ-11).';
@@ -269,9 +269,9 @@ COMMENT ON COLUMN sec_edge.actor IS 'Roles: Audit. Appending principal. Required
 COMMENT ON COLUMN sec_edge.change_reason_code IS 'Roles: FK→change_reason_vocabulary.code, Audit.';
 COMMENT ON COLUMN sec_edge.change_reason IS 'Roles: Audit. Free-text reason.';
 COMMENT ON COLUMN sec_edge.approved_by IS 'Roles: Audit. Approver where the reason code requires one.';
-COMMENT ON COLUMN sec_edge.supersedes_record_id IS 'Roles: FK-shaped→sec_edge.record_id (soft), Audit. record_id this append corrects, re-points or retracts. Not consulted by the resolved reads (see sec_node.supersedes_record_id).';
+COMMENT ON COLUMN sec_edge.supersedes_record_id IS 'Roles: FK-shaped→sec_edge.record_id (enforced by sec_edge_append_guard, see sec_node.supersedes_record_id), Audit. record_id this append corrects, re-points or retracts. Not consulted by the resolved reads.';
 COMMENT ON COLUMN sec_edge.source_system IS 'Roles: Audit. Where the edge came from.';
-COMMENT ON COLUMN sec_edge.content_hash IS 'Roles: Audit, Derived. sha256 over the canonical stored form — to_jsonb(row) minus record_id, ingest_xid, ingested_at, content_hash and the generated edge_id — computed by sec_edge_append_guard on every insert (AR-1.2). A supplied value is verified, never trusted.';
+COMMENT ON COLUMN sec_edge.content_hash IS 'Roles: Audit, Derived. sha256 over the canonical stored form — to_jsonb(row) minus record_id, ingest_xid, ingested_at, content_hash and the generated edge_id, with supersedes_record_id replaced by the predecessor''s content_hash — computed by sec_edge_append_guard on every insert (AR-1.2). A supplied value is verified, never trusted.';
 COMMENT ON COLUMN sec_edge.input_lineage IS 'Roles: Audit. For derived edges: source record ids (PR-2.3). NULL on curated edges.';
 -- Resolution index (see sec_node_resolve_idx); sec_edge_src_idx stays for src traversal.
 CREATE INDEX sec_edge_resolve_idx ON sec_edge (rel_type, src_id, dst_id, edge_seq, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC);
@@ -316,7 +316,35 @@ RETURNS SETOF sec_node LANGUAGE sql STABLE AS $$
       AND effective_at < valid_to
     ORDER BY id, valid_from DESC
 $$;
-COMMENT ON FUNCTION sec_node_as_of(date) IS 'As-of node read; effective_at is an explicit recorded parameter, never now() (ADR-0006 §4).';
+COMMENT ON FUNCTION sec_node_as_of(date) IS 'As-of node read; effective_at is an explicit recorded parameter, never now() (ADR-0006 §4). Filtering the RESULT of this function by record_type scans and sorts the whole store — use sec_node_as_of(effective_at, record_kind) instead.';
+
+-- Kind-scoped as-of read. Not a convenience: a predicate on record_type applied to the
+-- one-argument function's RESULT cannot be pushed through the DISTINCT ON, because
+-- record_type is not part of its key, so the whole store is scanned and sorted — measured at
+-- 65 ms with a 4.4 MB external merge over 200k rows, against 0.088 ms for the same function
+-- filtered on id, which IS in the key and does push down (review measurement on pg18). The
+-- pivot's dim_security and dim_entity (VEC-619) are exactly that shape.
+--
+-- Filtering INSIDE the CTE is sound rather than an approximation: record_type is fixed for
+-- the life of a node id by sec_node_id_prefix_chk, so no version of an id can carry a
+-- different kind, and restricting the input therefore cannot change which version wins.
+-- sec_node_type_idx (record_type, id, valid_from DESC, processing_version DESC) is what this
+-- reads.
+CREATE FUNCTION sec_node_as_of(effective_at date, record_kind text)
+RETURNS SETOF sec_node LANGUAGE sql STABLE AS $$
+    WITH latest AS (
+        SELECT DISTINCT ON (id, valid_from) *
+        FROM sec_node
+        WHERE record_type = record_kind
+        ORDER BY id, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC
+    )
+    SELECT DISTINCT ON (id) *
+    FROM latest
+    WHERE valid_from <= effective_at
+      AND effective_at < valid_to
+    ORDER BY id, valid_from DESC
+$$;
+COMMENT ON FUNCTION sec_node_as_of(date, text) IS 'As-of node read scoped to one record_type, pushed into the version resolution instead of applied to its result (see the note above the definition). Same two-step semantics as sec_node_as_of(date).';
 
 CREATE VIEW sec_edge_current AS
 WITH latest AS (
@@ -466,6 +494,22 @@ ALTER TABLE sec_node ADD CONSTRAINT sec_node_status_fkey
 -- remains is exactly what the writer determined — identity, attributes, valid window,
 -- and the provenance block — so the hash is reproducible from an export and survives a
 -- re-realization that assigns new record_ids (Realization §2's round-trip requirement).
+--
+-- supersedes_record_id is excluded for the same reason and REPLACED by the predecessor's
+-- content_hash, under the key supersedes_content_hash. It is itself a record_id, so leaving
+-- it in the pre-image would have broken exactly the round-trip the exclusion of record_id
+-- exists to protect: re-importing an export reassigns the identity sequence, the pointer
+-- changes, and every correction and tombstone in the file fails verification (review of the
+-- first draft, which did leave it in). Substituting the predecessor's hash also turns this
+-- from a per-row digest into a real chain — a correction is bound to the exact content it
+-- supersedes, not to a row number — which is what AR-1.2's chaining language asks for, and
+-- costs one lookup by record_id on a plain table at governance rate.
+--
+-- That lookup makes supersedes_record_id resolvable-or-nothing at the write boundary: an
+-- append naming a record_id that is not in the same store is rejected. The first draft called
+-- the reference deliberately soft so a correction could precede its target inside one batch;
+-- that case does not exist — a correction corrects a row that is already stored — and the
+-- chain cannot be computed without the predecessor.
 -- jsonb gives the canonicalisation for free: keys sorted, whitespace normalised, dates
 -- and timestamps rendered ISO 8601 independent of DateStyle, numerics at their stored
 -- scale. Adding a column later changes the hash of rows appended after it, not of
@@ -483,16 +527,30 @@ ALTER TABLE sec_node ADD CONSTRAINT sec_node_status_fkey
 CREATE FUNCTION sec_store_append_guard() RETURNS trigger
   LANGUAGE plpgsql AS $$
 DECLARE
-    computed bytea;
+    computed    bytea;
+    pre_image   jsonb;
+    parent_hash bytea;
 BEGIN
     IF NEW.ingest_xid IS DISTINCT FROM pg_current_xact_id() THEN
         RAISE EXCEPTION 'ingest_xid is platform-assigned on %.% and must never be writer-supplied (ADR-0005 §4, ADR-0006 §5); omit the column and let the default stand',
             TG_TABLE_SCHEMA, TG_TABLE_NAME;
     END IF;
 
-    computed := sha256(convert_to(
-        (to_jsonb(NEW) - 'record_id' - 'ingest_xid' - 'ingested_at' - 'content_hash' - 'edge_id')::text,
-        'UTF8'));
+    pre_image := to_jsonb(NEW)
+                   - 'record_id' - 'ingest_xid' - 'ingested_at' - 'content_hash'
+                   - 'edge_id' - 'supersedes_record_id';
+
+    IF NEW.supersedes_record_id IS NOT NULL THEN
+        EXECUTE format('SELECT content_hash FROM %I.%I WHERE record_id = $1', TG_TABLE_SCHEMA, TG_TABLE_NAME)
+            INTO parent_hash USING NEW.supersedes_record_id;
+        IF parent_hash IS NULL THEN
+            RAISE EXCEPTION 'supersedes_record_id % names no stored row in %.%; a correction chains on the content it supersedes, so the predecessor must already be appended (AR-1.2)',
+                NEW.supersedes_record_id, TG_TABLE_SCHEMA, TG_TABLE_NAME;
+        END IF;
+        pre_image := pre_image || jsonb_build_object('supersedes_content_hash', encode(parent_hash, 'hex'));
+    END IF;
+
+    computed := sha256(convert_to(pre_image::text, 'UTF8'));
 
     IF NEW.content_hash IS NOT NULL AND NEW.content_hash <> computed THEN
         RAISE EXCEPTION 'content_hash mismatch on %.%: supplied %, computed % — a supplied hash is verified, never trusted (AR-1.2)',
@@ -502,7 +560,7 @@ BEGIN
     NEW.content_hash := computed;
     RETURN NEW;
 END $$;
-COMMENT ON FUNCTION sec_store_append_guard() IS 'BEFORE INSERT guard for sec_node / sec_edge: rejects a writer-supplied ingest_xid, computes content_hash over to_jsonb(row) minus the platform-assigned and derived fields, and verifies rather than trusts a supplied hash (AR-1.2, NFR-5). Reads no table.';
+COMMENT ON FUNCTION sec_store_append_guard() IS 'BEFORE INSERT guard for sec_node / sec_edge: rejects a writer-supplied ingest_xid; computes content_hash over to_jsonb(row) minus the platform-assigned and derived fields, with supersedes_record_id replaced by the predecessor''s content_hash so the digest chains and survives a re-import that reassigns record_ids; rejects a supersedes_record_id naming no stored row; verifies rather than trusts a supplied hash (AR-1.2, NFR-5). Reads only the store it guards, by record_id.';
 
 CREATE TRIGGER sec_node_append_guard BEFORE INSERT ON sec_node
     FOR EACH ROW EXECUTE FUNCTION sec_store_append_guard();
