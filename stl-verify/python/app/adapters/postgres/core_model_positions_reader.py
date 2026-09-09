@@ -123,12 +123,6 @@ _POSITIONS = text("""
     WHERE p.chain_id = :chain_id AND p.name = :protocol_name AND c.amount > 0
 """)
 
-# Morpho has no *_current cache yet, so its newest-per-key read must be able to
-# see S3-tiered chunks. The GUC exists only where tiering does (Timescale Cloud);
-# without it there is no tiered history to miss.
-_TIERED_READS_GUC = text("SELECT 1 FROM pg_settings WHERE name = 'timescaledb.enable_tiered_reads'")
-_ENABLE_TIERED_READS = text("SET LOCAL timescaledb.enable_tiered_reads = 'on'")
-
 # sparklend_reserve_data is partitioned by block_number and has no tiering
 # policy, and every reserve is rewritten constantly, so its newest row is local.
 _RESERVE_PARAMS = text("""
@@ -282,9 +276,12 @@ def build_users_frame(
 _MORPHO_LIF_CAP = 1.15
 _MORPHO_BETA = 0.3
 
-# All Blue markets for one (collateral, loan) pair, with the latest position
-# per (user, market). The model's market key spans the pair, not one LLTV
-# tranche, so every tranche's borrowers are included.
+# All Blue markets for one (collateral, loan) pair, each borrower's newest state
+# from the trigger-fed morpho_market_position_current cache (VEC-753) — not
+# DISTINCT ON over the history: that scanned every chunk (1.7 s at 1.23M rows on
+# staging, growing with history) and needed tiered reads past the 1-year S3
+# horizon. The model's market key spans the pair, not one LLTV tranche, so every
+# tranche's borrowers are included.
 _MORPHO_POSITIONS = text("""
     WITH markets AS (
         SELECT mm.id, mm.lltv / 1e18 AS lltv,
@@ -299,23 +296,15 @@ _MORPHO_POSITIONS = text("""
         LEFT JOIN token_price_current lp ON lp.oracle_id = :oracle_id AND lp.token_id = mm.loan_token_id
         WHERE mm.chain_id = :chain_id
           AND upper(ct.symbol) = :collateral AND upper(lt.symbol) = :loan
-    ),
-    latest AS (
-        SELECT DISTINCT ON (mp.user_id, mp.morpho_market_id)
-               mp.user_id, mp.morpho_market_id, mp.collateral, mp.borrow_assets
-        FROM morpho_market_position mp
-        JOIN markets m ON m.id = mp.morpho_market_id
-        ORDER BY mp.user_id, mp.morpho_market_id,
-                 mp.block_number DESC, mp.block_version DESC, mp.processing_version DESC
     )
     SELECT u.address AS user_address, m.lltv,
            m.collateral_symbol, m.collateral_decimals, m.collateral_address, m.collateral_price,
            m.loan_symbol, m.loan_decimals, m.loan_address, m.loan_price,
-           l.collateral, l.borrow_assets
-    FROM latest l
-    JOIN markets m ON m.id = l.morpho_market_id
-    JOIN "user" u ON u.id = l.user_id
-    WHERE l.borrow_assets > 0
+           cur.collateral, cur.borrow_assets
+    FROM morpho_market_position_current cur
+    JOIN markets m ON m.id = cur.morpho_market_id
+    JOIN "user" u ON u.id = cur.user_id
+    WHERE cur.borrow_assets > 0
 """)
 
 
@@ -697,9 +686,7 @@ class PostgresPositionsReader:
         return users_df, market_df
 
     async def _get_morpho_data(self, collateral: str, loan_token: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-        async with self._engine.begin() as conn:
-            if (await conn.execute(_TIERED_READS_GUC)).scalar_one_or_none() is not None:
-                await conn.execute(_ENABLE_TIERED_READS)
+        async with self._engine.connect() as conn:
             oracle_id = await self._live_oracle_id(conn, "MORPHO")
             rows = (
                 await conn.execute(
