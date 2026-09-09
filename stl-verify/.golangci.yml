@@ -8,9 +8,40 @@
 version: "2"
 linters:
   enable:
+    - depguard
     - gocritic
     - modernize
   settings:
+    # Hexagonal layering from AGENTS.md ("dependencies flow inward"), enforced:
+    # domain -> nothing internal; ports -> domain; services -> ports + domain.
+    # Adapters are wired in cmd/, so only cmd/ and tests may import them.
+    depguard:
+      rules:
+        domain:
+          files:
+            - "**/internal/domain/**"
+          deny:
+            - pkg: github.com/archon-research/stl/stl-verify/internal/ports
+              desc: domain must not depend on ports
+            - pkg: github.com/archon-research/stl/stl-verify/internal/adapters
+              desc: domain must not depend on adapters
+            - pkg: github.com/archon-research/stl/stl-verify/internal/services
+              desc: domain must not depend on services
+        ports:
+          files:
+            - "**/internal/ports/**"
+          deny:
+            - pkg: github.com/archon-research/stl/stl-verify/internal/adapters
+              desc: ports must not depend on adapters
+            - pkg: github.com/archon-research/stl/stl-verify/internal/services
+              desc: ports must not depend on services
+        services:
+          files:
+            - "**/internal/services/**"
+            - "!**/*_test.go"
+          deny:
+            - pkg: github.com/archon-research/stl/stl-verify/internal/adapters
+              desc: services depend on ports; adapters are injected in cmd/
     staticcheck:
       # The standalone staticcheck binary's default set: the ST exclusions
       # match both tools' defaults (spelled out so the config doesn't depend
