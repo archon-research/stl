@@ -3962,9 +3962,10 @@ that binary the only evidence is the pod log line
    `terminationGracePeriodSeconds` (90s) must hold
    `lifecycle.ShutdownTimeout` (40s) + `lifecycle.ShutdownTailBudget` (45s).
    `TestTheArchiveDrainOutlastsOneWritesOwnTimeout` and the sibling budget tests
-   in `internal/pkg/lifecycle/shutdown_budget_test.go` assert the Go half; the
-   manifests are not covered by any test, so a grace period edited back to 60s
-   would reintroduce this silently.
+   in `internal/pkg/lifecycle/shutdown_budget_test.go` assert the Go half;
+   `TestEveryGoWorkerDeploymentGrantsThePodGracePeriod` beside them holds every
+   `k8s/base` Deployment to `PodTerminationGracePeriod`, so a grace period edited
+   back to 60s fails CI.
 
 ### Common causes
 
