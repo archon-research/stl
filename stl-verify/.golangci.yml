@@ -12,6 +12,18 @@ linters:
     - gocritic
     - modernize
   settings:
+    # Function-composition backstop (AGENTS.md "Function composition"; VEC-465).
+    # Not in `enable`: `make golangci-lint-new` runs these alone with
+    # --new-from-merge-base so only changed code is gated, while the full run
+    # above stays green on main. Comments count toward funlen on purpose.
+    cyclop:
+      max-complexity: 15
+    gocognit:
+      min-complexity: 20
+    funlen:
+      lines: 80
+      statements: 60
+      ignore-comments: false
     # Hexagonal layering from AGENTS.md ("dependencies flow inward"), enforced
     # on direct imports: domain -> nothing internal; ports -> domain;
     # services -> ports + domain. Adapters are wired in cmd/, so only cmd/ and
@@ -81,3 +93,9 @@ linters:
       - comments
       - std-error-handling
       - common-false-positives
+    rules:
+      # Table-driven tests and ABI literals are long by construction.
+      - linters: [funlen]
+        path: _test\.go$
+      - linters: [funlen]
+        path: internal/pkg/blockchain/abis/
