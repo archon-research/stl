@@ -1,15 +1,12 @@
 package lifecycle_test
 
 import (
-	"bytes"
-	"errors"
-	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
-
-	"gopkg.in/yaml.v3"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 )
@@ -20,18 +17,76 @@ var deploymentsOutsideTheGoShutdownChain = map[string]bool{
 	"python-api":        true,
 }
 
-type deploymentManifest struct {
-	Kind     string `yaml:"kind"`
-	Metadata struct {
-		Name string `yaml:"name"`
-	} `yaml:"metadata"`
-	Spec struct {
-		Template struct {
-			Spec struct {
-				TerminationGracePeriodSeconds *int64 `yaml:"terminationGracePeriodSeconds"`
-			} `yaml:"spec"`
-		} `yaml:"template"`
-	} `yaml:"spec"`
+type manifestFields struct {
+	kind  string
+	name  string
+	grace *int64
+}
+
+type manifestKey struct {
+	indent int
+	key    string
+}
+
+// The manifests are hand-written mappings, so a key's path follows from indentation alone.
+func readManifests(t *testing.T, path string) []manifestFields {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var docs []manifestFields
+	var cur manifestFields
+	var stack []manifestKey
+	flush := func() {
+		if cur != (manifestFields{}) {
+			docs = append(docs, cur)
+		}
+		cur = manifestFields{}
+		stack = stack[:0]
+	}
+	for line := range strings.SplitSeq(string(raw), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if trimmed == "---" {
+			flush()
+			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		rest := line[indent:]
+		if strings.HasPrefix(rest, "- ") {
+			indent += 2
+			rest = rest[2:]
+		}
+		key, val, ok := strings.Cut(rest, ":")
+		if !ok {
+			continue
+		}
+		key, val = strings.TrimSpace(key), strings.TrimSpace(val)
+		for len(stack) > 0 && stack[len(stack)-1].indent >= indent {
+			stack = stack[:len(stack)-1]
+		}
+		keys := make([]string, 0, len(stack)+1)
+		for _, k := range stack {
+			keys = append(keys, k.key)
+		}
+		switch strings.Join(append(keys, key), ".") {
+		case "kind":
+			cur.kind = val
+		case "metadata.name":
+			cur.name = val
+		case "spec.template.spec.terminationGracePeriodSeconds":
+			n, err := strconv.ParseInt(val, 10, 64)
+			if err != nil {
+				t.Fatalf("%s: terminationGracePeriodSeconds %q: %v", path, val, err)
+			}
+			cur.grace = &n
+		}
+		stack = append(stack, manifestKey{indent, key})
+	}
+	flush()
+	return docs
 }
 
 func TestEveryGoWorkerDeploymentGrantsThePodGracePeriod(t *testing.T) {
@@ -40,40 +95,26 @@ func TestEveryGoWorkerDeploymentGrantsThePodGracePeriod(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := int64(lifecycle.PodTerminationGracePeriod / time.Second)
+	want := lifecycle.PodTerminationGracePeriod
 	deployments := 0
 	seenOutside := map[string]bool{}
 	for _, path := range paths {
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		dec := yaml.NewDecoder(bytes.NewReader(raw))
-		for {
-			var m deploymentManifest
-			err := dec.Decode(&m)
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
-				t.Fatalf("%s: %v", path, err)
-			}
-			if m.Kind != "Deployment" {
+		for _, m := range readManifests(t, path) {
+			if m.kind != "Deployment" {
 				continue
 			}
 			deployments++
-			if deploymentsOutsideTheGoShutdownChain[m.Metadata.Name] {
-				seenOutside[m.Metadata.Name] = true
+			if deploymentsOutsideTheGoShutdownChain[m.name] {
+				seenOutside[m.name] = true
 				continue
 			}
-			got := m.Spec.Template.Spec.TerminationGracePeriodSeconds
 			switch {
-			case got == nil:
-				t.Errorf("%s: %s sets no terminationGracePeriodSeconds; the kubelet default is 30s, PodTerminationGracePeriod is %ds",
-					path, m.Metadata.Name, want)
-			case *got < want:
-				t.Errorf("%s: %s grants %ds, PodTerminationGracePeriod is %ds",
-					path, m.Metadata.Name, *got, want)
+			case m.grace == nil:
+				t.Errorf("%s: %s sets no terminationGracePeriodSeconds, so the PodSpec default of 30s applies; PodTerminationGracePeriod is %s",
+					path, m.name, want)
+			case time.Duration(*m.grace)*time.Second < want:
+				t.Errorf("%s: %s grants %ds, PodTerminationGracePeriod is %s",
+					path, m.name, *m.grace, want)
 			}
 		}
 	}
