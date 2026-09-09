@@ -866,13 +866,24 @@ than in workflow history; see the resume note at the top of this runbook.
 which carries no `block_version`, so each replayed row — and the head seed — is
 stamped with the version the chain's raw S3 archive holds at that height: the
 highest version archived there, the same rule `morpho-vault-backfill` reads off
-the S3 key it replays. That is what makes a replayed row dedupe with live
-indexing's row for the same block instead of ranking against it. The bucket
-arrives as `S3_BUCKET` from the ExternalSecret and the pod reads it through its
-EKS Pod Identity association. Both are settled at startup: the name is checked
-against `CHAIN_ID` (through `DEPLOY_ENV`), and the pod lists and reads the bucket
-once — so another chain's bucket or a missing grant is a worker that will not
-start, rather than a run that dies on its first height, three attempts over.
+the S3 key it replays. That is what puts a replayed row at the same
+`block_version` as every other replay of that block, so this run's row — not the
+`morpho-vault-backfill`'s older one — is the row a current read returns.
+
+It is **not** a dedupe with live indexing's row. On the deep history the bulk
+downloader wrote, the archive holds version 1 where live indexing stamped 0, so
+the replayed row deliberately ranks above the live one; the two are the same
+block, hash-verified, so their values agree. And a run from a different build
+gets its own `processing_version` either way — see "Idempotency" in
+`cmd/cronjobs/morpho-v2-bootstrap/main.go`. `block_states` cannot serve as the
+source of the version: it keeps 30 days, and the sweep starts at the VaultV2
+factory deploy block.
+
+The bucket arrives as `S3_BUCKET` from the ExternalSecret and the pod reads it
+through its EKS Pod Identity association. Both are settled at startup: the name is
+checked against `CHAIN_ID` (through `DEPLOY_ENV`), and the pod lists and reads the
+bucket once — so another chain's bucket or a missing grant is a worker that will
+not start, rather than a run that dies on its first height, three attempts over.
 Every run closes with one `block versions resolved from the raw archive` line:
 how many heights it resolved, and which of them carried a version above 0.
 A height the archive cannot answer for **stops the run**, naming the height: it
