@@ -2205,11 +2205,6 @@ func TestObserveAdapterMembership_AssertionThatChangesNothingAppendsNothing(t *t
 	}
 }
 
-// TestObserveAdapterMembership_AssertionThatReclassifiesIsRecorded pins the other half
-// of that conditional: a classification the log does not hold is information too. An
-// adapter first seen through an Allocate is probed once and can land on Unknown, so the
-// only route back is a later probe answering differently — which must append even though
-// membership itself is unchanged.
 func TestObserveAdapterMembership_AssertionThatReclassifiesIsRecorded(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	ctx := context.Background()
@@ -2237,11 +2232,6 @@ func TestObserveAdapterMembership_AssertionThatReclassifiesIsRecorded(t *testing
 	}
 }
 
-// TestObserveAdapterMembership_AnAssertedUnknownNeverRetractsAKnownType pins the
-// direction that conditional must NOT run in. classifyAdapter answers Unknown whenever
-// the probe does not land on exactly one marker, so a marker a future adapter family
-// adds to the probe table would make an already-classified adapter answer Unknown — and
-// UPDATE is revoked here, so a recorded 99 would be its classification forever.
 func TestObserveAdapterMembership_AnAssertedUnknownNeverRetractsAKnownType(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	ctx := context.Background()
