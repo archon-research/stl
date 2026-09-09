@@ -78,8 +78,6 @@ func (r *Resolver) ResolveBlockVersion(ctx context.Context, blockNumber int64, b
 	return version, err
 }
 
-// answer proves the archive's block at the height is the one being replayed, reading the
-// archive unless this run already proved that height.
 func (r *Resolver) answer(ctx context.Context, blockNumber int64, blockHash common.Hash) (int, error) {
 	if archived, memoized := r.resolved[blockNumber]; memoized {
 		if err := r.requireSameBlockAsProved(blockNumber, archived, blockHash); err != nil {

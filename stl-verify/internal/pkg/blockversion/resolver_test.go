@@ -135,9 +135,6 @@ func TestResolver_StopsAtAHeightTheArchiveCannotAnswerFor(t *testing.T) {
 	}
 }
 
-// common.HexToHash crops, pads and swallows decode errors, so a corrupt object naming
-// "0x1234" would become the zero hash and the height would fail as a MISMATCH — the one
-// verdict the runbook answers by republishing over a slot that is already occupied.
 func TestResolver_StopsAtAnArchivedObjectThatNamesNoBlockHash(t *testing.T) {
 	archive := archiveHolding(map[int64]archivedBlock{archiveHeight: {version: 1, hash: canonicalHash}})
 	archive.corrupt = map[int64]string{archiveHeight: "0x1234"}
