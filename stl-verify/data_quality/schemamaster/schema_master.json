@@ -1331,6 +1331,11 @@
       "class": "A",
       "not_null": true
     },
+    "observations": {
+      "type": "int8",
+      "class": "A",
+      "not_null": true
+    },
     "detail": {
       "type": "text",
       "class": "A",
@@ -1539,6 +1544,10 @@
       "owner": "prime"
     },
     "position_projection_refusal": {
+      "type": "infrastructure",
+      "owner": "prime"
+    },
+    "aave_unmapped_reserve": {
       "type": "infrastructure",
       "owner": "prime"
     },
