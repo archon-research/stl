@@ -52,6 +52,9 @@ async def engine(async_db_url: str):
         # Markets and their positions together: two tests seed the same
         # market_id, and the spoofed-collateral market must not leak.
         await conn.execute(text("TRUNCATE morpho_market CASCADE"))
+        # The trigger-fed cache carries no FK, so the CASCADE above never
+        # reaches it; a leaked row would resurrect a truncated market's borrower.
+        await conn.execute(text("TRUNCATE morpho_market_position_current"))
     yield eng
     await eng.dispose()
 
