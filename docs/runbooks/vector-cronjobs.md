@@ -890,6 +890,7 @@ resolved, and — per version it saw — how many heights sat at that version an
 their lowest and highest height. A version above 0 is not evidence of a reorg,
 just of what the archive holds. An `aborted` outcome means the sweep did not
 finish, so those extents cover only the range it reached.
+
 A height the archive cannot answer for **stops the run**, naming the height: it
 holds no object there, or the version it holds names a different block (an
 orphaned fork kept past its reorg — the ARCT-379 shape). Deep in the replay range
@@ -1684,9 +1685,9 @@ that is names no block — or `the raw archive holds another block at that heigh
 which names the archived hash beside the one being replayed. Both name the height
 and the bucket. The run stamps every row with the version the archive holds (see
 "Block versions come from the raw archive" above), so it stops rather than guess.
-Which repair to reach for depends on **which height** it is, and the error says.
+Which repair to reach for depends on which height it is, and the error says which.
 
-*The pinned head.* An error prefixed `resolving the block version of the pinned
+**The pinned head.** An error prefixed `resolving the block version of the pinned
 head <N>` and saying the archive `has not caught up to the finalized head` is an
 archive that is behind, not one with a hole. `raw-data-backup` archives a block
 when the watcher broadcasts it, minutes before it finalizes, so a head that is not
@@ -1700,8 +1701,8 @@ worker's in-flight object lands. The head is resolved before the sweep, and the
 activity's three attempts back off 2 s then 4 s, so a lagging head shows as a red
 run within seconds rather than after the whole replay.
 
-*Any height below the head*, deep in the replay range, is a real hole and does not
-clear on retry: repair the archive with `block-republisher` (one height) or
+**Any height below the head**, deep in the replay range, is a real hole and does
+not clear on retry: repair the archive with `block-republisher` (one height) or
 `raw-block-bulk-downloader` (a range), then start a new run.
 
 **Not failures:**
