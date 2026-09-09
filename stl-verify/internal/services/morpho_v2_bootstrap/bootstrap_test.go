@@ -424,7 +424,7 @@ func TestRun_StopsWhenAReplayedBlockHasNoResolvableVersion(t *testing.T) {
 	if err == nil {
 		t.Fatal("a log whose block has no archived version must fail the run")
 	}
-	for _, want := range []string{"identifies no block", "block=23400000"} {
+	for _, want := range []string{"identifies no block", "resolving the block version of block 23400000", "index=7"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error = %v, want it to name %q", err, want)
 		}

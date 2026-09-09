@@ -573,7 +573,7 @@ func (s *Service) replayLog(ctx context.Context, l ethtypes.Log, reads *replayRe
 	}
 	blockVersion, err := reads.versions.ResolveBlockVersion(ctx, int64(l.BlockNumber), l.BlockHash)
 	if err != nil {
-		return fmt.Errorf("replaying log tx=%s index=%d block=%d: %w", l.TxHash.Hex(), l.Index, l.BlockNumber, err)
+		return fmt.Errorf("resolving the block version of block %d (tx=%s index=%d): %w", l.BlockNumber, l.TxHash.Hex(), l.Index, err)
 	}
 	if err := s.replay.ReplayMetaMorphoLog(ctx, toSharedLog(l), int64(l.BlockNumber), l.BlockHash, blockVersion, blockTimestamp); err != nil {
 		return fmt.Errorf("replaying log tx=%s index=%d block=%d: %w", l.TxHash.Hex(), l.Index, l.BlockNumber, err)
