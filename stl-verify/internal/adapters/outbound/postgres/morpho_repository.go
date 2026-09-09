@@ -467,9 +467,7 @@ func (r *MorphoRepository) membershipAt(ctx context.Context, tx pgx.Tx, adapterI
 	err := tx.QueryRow(ctx,
 		`SELECT is_member, adapter_type FROM morpho_adapter_membership
 		 WHERE morpho_adapter_id = $1
-		   AND (block_number, block_version, log_index) <= ($2, $3, $4)
-		 ORDER BY block_number DESC, block_version DESC, log_index DESC, processing_version DESC
-		 LIMIT 1`,
+		   AND (block_number, block_version, log_index) <= ($2, $3, $4)`+latestMembershipOrder,
 		adapterID, at.BlockNumber, at.BlockVersion, at.LogIndex,
 	).Scan(&isMember, &adapterType)
 	if errors.Is(err, pgx.ErrNoRows) {
