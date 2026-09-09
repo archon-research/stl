@@ -4,7 +4,7 @@
 # Include language-agnostic linting targets
 include lint.mk
 
-.PHONY: golangci-lint-new all test test-race test-integration test-integration-shard integration-shard-check ci-service-check test-templates-clean lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-watcher-robinhood run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax run-allocation-tracker-robinhood help ci ci-checks install-hooks format \
+.PHONY: golangci-lint-new all test test-race test-integration test-integration-shard integration-shard-check ci-service-check test-templates-clean lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-watcher-robinhood run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-sparklend-position-tracker-arbitrum run-sparklend-position-tracker-optimism run-sparklend-position-tracker-base run-allocation-tracker run-allocation-tracker-avax run-allocation-tracker-robinhood help ci ci-checks install-hooks format \
 	dev-up dev-up-rebuild dev-up-workers dev-up-or-resume dev-preflight dev-env dev-secrets dev-env-files dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-image _docker-release-go-service _docker-build-go-service _docker-push-go-service \
@@ -188,6 +188,21 @@ run-sparklend-position-tracker:
 run-sparklend-position-tracker-avax:
 	@echo "==> Running Avalanche SparkLend position tracker (chain_id=43114)..."
 	@set -a && . cmd/workers/sparklend-indexer/.env.avax && [ -f cmd/workers/sparklend-indexer/.env.avax.local ] && . cmd/workers/sparklend-indexer/.env.avax.local; set +a && go run ./cmd/workers/sparklend-indexer
+
+# Run the Arbitrum SparkLend position tracker (requires dev-up first)
+run-sparklend-position-tracker-arbitrum:
+	@echo "==> Running Arbitrum SparkLend position tracker (chain_id=42161)..."
+	@set -a && . cmd/workers/sparklend-indexer/.env.arbitrum && [ -f cmd/workers/sparklend-indexer/.env.arbitrum.local ] && . cmd/workers/sparklend-indexer/.env.arbitrum.local; set +a && go run ./cmd/workers/sparklend-indexer
+
+# Run the Optimism SparkLend position tracker (requires dev-up first)
+run-sparklend-position-tracker-optimism:
+	@echo "==> Running Optimism SparkLend position tracker (chain_id=10)..."
+	@set -a && . cmd/workers/sparklend-indexer/.env.optimism && [ -f cmd/workers/sparklend-indexer/.env.optimism.local ] && . cmd/workers/sparklend-indexer/.env.optimism.local; set +a && go run ./cmd/workers/sparklend-indexer
+
+# Run the Base SparkLend position tracker (requires dev-up first)
+run-sparklend-position-tracker-base:
+	@echo "==> Running Base SparkLend position tracker (chain_id=8453)..."
+	@set -a && . cmd/workers/sparklend-indexer/.env.base && [ -f cmd/workers/sparklend-indexer/.env.base.local ] && . cmd/workers/sparklend-indexer/.env.base.local; set +a && go run ./cmd/workers/sparklend-indexer
 
 # Run one CORE model pass on the host against the dev-up database (requires dev-up
 # first). This is the --once path: no Temporal, computes and writes, then exits.
@@ -373,6 +388,13 @@ e2e-real-blocks:
 	@set -a; . ../.env.secrets 2>/dev/null; set +a; \
 	[ -n "$$ALCHEMY_API_KEY" ] || { echo "ERROR: ALCHEMY_API_KEY is empty; put it in ../.env.secrets"; exit 1; }; \
 	E2E_BLOCKS="$(BLOCKS)" go test -tags=integration,e2e -run TestE2E_RealBlocks -v -timeout=25m ./cmd/workers/morpho-indexer/
+
+# Spot-check the registered L2 Aave V3 reserve facts against the real per-chain RPC.
+# Needs ALCHEMY_API_KEY in ../.env.secrets.
+e2e-real-reserve-facts:
+	@set -a; if [ -f ../.env.secrets ]; then . ../.env.secrets; fi; set +a; \
+	[ -n "$$ALCHEMY_API_KEY" ] || { echo "ERROR: ALCHEMY_API_KEY is empty; put it in ../.env.secrets"; exit 1; }; \
+	go test -tags=integration,e2e -run TestRealReserveFacts_L2 -v -timeout=10m ./internal/pkg/aavelike/
 
 # Install development tools
 tools:
@@ -746,6 +768,60 @@ dev-env-files:
 		"DEPLOY_ENV=development" \
 		"LOG_LEVEL=debug" \
 		> cmd/workers/sparklend-indexer/.env.avax && \
+	printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://arb-mainnet.g.alchemy.com/v2" \
+		"AWS_SQS_QUEUE_URL=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)/000000000000/stl-arbitrum-sparklend-position.fifo" \
+		"AWS_SQS_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
+		"AWS_S3_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
+		"AWS_ACCESS_KEY_ID=test" \
+		"AWS_SECRET_ACCESS_KEY=test" \
+		"AWS_REGION=us-east-1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
+		"REDIS_ADDR=127.0.0.1:$(KIND_HOST_REDIS_PORT)" \
+		"REDIS_PASSWORD=" \
+		"CHAIN_ID=42161" \
+		"S3_BUCKET=stl-sentineldevelopment-arbitrum-raw" \
+		"DEPLOY_ENV=development" \
+		"LOG_LEVEL=debug" \
+		> cmd/workers/sparklend-indexer/.env.arbitrum && \
+	printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://opt-mainnet.g.alchemy.com/v2" \
+		"AWS_SQS_QUEUE_URL=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)/000000000000/stl-optimism-sparklend-position.fifo" \
+		"AWS_SQS_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
+		"AWS_S3_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
+		"AWS_ACCESS_KEY_ID=test" \
+		"AWS_SECRET_ACCESS_KEY=test" \
+		"AWS_REGION=us-east-1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
+		"REDIS_ADDR=127.0.0.1:$(KIND_HOST_REDIS_PORT)" \
+		"REDIS_PASSWORD=" \
+		"CHAIN_ID=10" \
+		"S3_BUCKET=stl-sentineldevelopment-optimism-raw" \
+		"DEPLOY_ENV=development" \
+		"LOG_LEVEL=debug" \
+		> cmd/workers/sparklend-indexer/.env.optimism && \
+	printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://base-mainnet.g.alchemy.com/v2" \
+		"AWS_SQS_QUEUE_URL=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)/000000000000/stl-base-sparklend-position.fifo" \
+		"AWS_SQS_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
+		"AWS_S3_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
+		"AWS_ACCESS_KEY_ID=test" \
+		"AWS_SECRET_ACCESS_KEY=test" \
+		"AWS_REGION=us-east-1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
+		"REDIS_ADDR=127.0.0.1:$(KIND_HOST_REDIS_PORT)" \
+		"REDIS_PASSWORD=" \
+		"CHAIN_ID=8453" \
+		"S3_BUCKET=stl-sentineldevelopment-base-raw" \
+		"DEPLOY_ENV=development" \
+		"LOG_LEVEL=debug" \
+		> cmd/workers/sparklend-indexer/.env.base && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
