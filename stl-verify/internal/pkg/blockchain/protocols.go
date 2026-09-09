@@ -53,8 +53,9 @@ type ProtocolConfig struct {
 	Slug         string
 	ProtocolType string
 	PoolAddress  ContractWithBlock
-	// ActiveAtBlock is documentation only: position reads call this address at
-	// whatever block they are given, so a read below it reverts (backfill only).
+	// UIPoolDataProvider.ActiveAtBlock is documentation only: position reads call
+	// this address at whatever block they are given, so a read below it reverts.
+	// PoolDataProviderHistory.ActiveAtBlock is the load-bearing one (GetForBlock).
 	UIPoolDataProvider    ContractWithBlock
 	PoolAddressesProvider ContractWithBlock
 	ProtocolVersion       ProtocolVersion
@@ -182,7 +183,7 @@ var protocolRegistry = map[ProtocolKey]ProtocolConfig{
 	// ═══════════════════════════════════════════════════════════════════════════
 
 	// Aave V3 Arbitrum - Pool created at block 7742429
-	// PoolDataProvider rotated 6 times, via PoolDataProviderUpdated not AddressSet
+	// 6 PoolDataProviderUpdated events (not AddressSet), one per history entry
 	// Source: https://github.com/bgd-labs/aave-address-book (AaveV3Arbitrum)
 	{42161, common.HexToAddress("0x794a61358D6845594F94dc1DB02A252b5b4814aD")}: {
 		Name:                  "Aave V3 Arbitrum",
@@ -207,7 +208,7 @@ var protocolRegistry = map[ProtocolKey]ProtocolConfig{
 	// ═══════════════════════════════════════════════════════════════════════════
 
 	// Aave V3 Optimism - Pool created at block 4365693
-	// PoolDataProvider rotated 6 times, via PoolDataProviderUpdated not AddressSet
+	// 6 PoolDataProviderUpdated events (not AddressSet), one per history entry
 	// Source: https://github.com/bgd-labs/aave-address-book (AaveV3Optimism)
 	{10, common.HexToAddress("0x794a61358D6845594F94dc1DB02A252b5b4814aD")}: {
 		Name:                  "Aave V3 Optimism",
@@ -233,7 +234,7 @@ var protocolRegistry = map[ProtocolKey]ProtocolConfig{
 
 	// Aave V3 Base - Pool created at block 2357134, its own address rather than
 	// the CREATE2 0x794a61... that Arbitrum/Optimism/Avalanche share.
-	// PoolDataProvider rotated 5 times, via PoolDataProviderUpdated not AddressSet
+	// 5 PoolDataProviderUpdated events (not AddressSet), one per history entry
 	// SparkLend's Ethereum PoolAddressesProvider address also has unrelated code
 	// here; it reverts on getMarketId/getPool, so Base gets no SparkLend entry.
 	// Source: https://github.com/bgd-labs/aave-address-book (AaveV3Base)
