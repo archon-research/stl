@@ -26,13 +26,25 @@
 # diff IDs instead, which are not comparable with what a registry stores, and
 # comparing the two would report every service as changed.
 #
+# Expect one all-CHANGED day per week, and do not read it as a fault. The
+# weekly security refresh (.github/workflows/image-security-refresh.yaml)
+# rebuilds every image with the layer cache disabled, so the OS package layers
+# move and the first deploy after it legitimately differs from every pinned
+# image. That is the deploy this whole mechanism is meant to allow — patches
+# landing — but it means a week of shadow verdicts contains one day where
+# essentially every image reports CHANGED. Anyone reconciling those verdicts to
+# justify the cutover should exclude that day, or read it as the refresh rather
+# than as churn the comparison failed to suppress.
+#
 # Verdicts, one per image:
 #   UNCHANGED  both resolve, layers identical -> the deploy could keep the pinned
 #              tag and leave these pods alone
 #   CHANGED    both resolve, layers differ -> the deploy must bump this tag
-#   NOT_BUILT  the candidate tag is absent from ECR. Not a comparison result: at
-#              this point in the deploy it should exist, so it is reported as a
-#              failure of the run, not as a service that happens to be unchanged
+#   NOT_BUILT  the candidate tag is absent from ECR, though by this point in the
+#              deploy it should exist. That is a finding about the deploy, not a
+#              failure of the comparison: it is reported loudly, counts as
+#              determined, and does not affect the exit code — see the note on
+#              UNKNOWN below for what the exit code does mean
 #   PINNED_GONE the tag the overlay pins is absent from ECR. This is the
 #              openmetadata-ingestion failure (ARCT-436, 2026-08-31): the image
 #              is gone but nothing notices until a node rotates and the kubelet
