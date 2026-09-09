@@ -167,28 +167,33 @@ func TestResolver_ReadsEachHeightOnce(t *testing.T) {
 	}
 }
 
-// The heights that resolved above version 0 are the ones a run is asked about afterwards:
-// they are where this job's rows and live indexing's meet.
-func TestResolver_SummaryNamesTheCorrectedHeights(t *testing.T) {
-	const corrected = archiveHeight + 1
+// A run is asked afterwards which versions its rows landed at and over what range, so the
+// summary reports one extent per version rather than a list of heights.
+func TestResolver_SummaryReportsWhatEachVersionCovers(t *testing.T) {
+	const middle, top = archiveHeight + 1, archiveHeight + 2
 	archive := archiveHolding(map[int64]archivedHeight{
-		archiveHeight: {version: 0, hash: canonicalHash},
-		corrected:     {version: 1, hash: canonicalHash},
+		archiveHeight: {version: 1, hash: canonicalHash},
+		middle:        {version: 0, hash: canonicalHash},
+		top:           {version: 1, hash: canonicalHash},
 	})
 	resolver := NewResolver(archive, archiveName)
 
-	for _, height := range []int64{archiveHeight, corrected, corrected} {
+	for _, height := range []int64{archiveHeight, middle, top, top} {
 		if _, err := resolver.ResolveBlockVersion(context.Background(), height, canonicalHash); err != nil {
 			t.Fatalf("ResolveBlockVersion(%d): %v", height, err)
 		}
 	}
 
 	summary := resolver.Summary()
-	if summary.Heights != 2 {
-		t.Errorf("heights = %d, want 2", summary.Heights)
+	if summary.HeightsResolved != 3 {
+		t.Errorf("heights resolved = %d, want 3", summary.HeightsResolved)
 	}
-	if !slices.Equal(summary.Corrected, []int64{corrected}) {
-		t.Errorf("corrected = %v, want [%d]", summary.Corrected, corrected)
+	want := []VersionExtent{
+		{Version: 0, Heights: 1, From: middle, To: middle},
+		{Version: 1, Heights: 2, From: archiveHeight, To: top},
+	}
+	if !slices.Equal(summary.Versions, want) {
+		t.Errorf("versions = %+v, want them ascending with each one's extent %+v", summary.Versions, want)
 	}
 }
 

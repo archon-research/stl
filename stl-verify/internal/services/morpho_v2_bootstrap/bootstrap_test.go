@@ -272,24 +272,92 @@ func TestRun_TellsAnArchiveBehindTheHeadFromOneHoldingAnotherBlock(t *testing.T)
 }
 
 // The summary is the one line a run closes with, so what it reports has to be taken when
-// the run ends rather than when the deferred call is set up.
+// the run ends rather than when the deferred call is set up — and it reports the extent
+// each version covers, because the version a height resolves to is what the archive
+// holds there, not evidence of a reorg.
 func TestRun_ClosesWithTheHeightsItResolved(t *testing.T) {
 	h := newBootstrapHarness(t)
 	logger, records := recordingLogger()
 	h.config.Logger = logger
-	replayer := &recordingReplayer{v2Vaults: map[common.Address]int64{testVaultAddr: 23_400_000}}
+	h.config.BlockChunkSize = 1_000_000
+	const headBlock = int64(24_000_000)
+	const firstLogBlock, secondLogBlock = uint64(23_400_000), uint64(23_500_000)
+	h.archive.versionAt = map[int64]int{int64(firstLogBlock): 1, int64(secondLogBlock): 1}
+	replayer := &recordingReplayer{v2Vaults: map[common.Address]int64{testVaultAddr: 0}}
+	service, err := NewService(h.config, h.chain, replayer, h.progress, h.archive, archiveName)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	h.chain.setFinalizedHead(headBlock, 1_770_000_000)
+	h.chain.logs = []ethtypes.Log{
+		h.addAdapterLog(firstLogBlock, h.chain.addBlock(firstLogBlock, 1_760_000_000), 0),
+		h.addAdapterLog(secondLogBlock, h.chain.addBlock(secondLogBlock, 1_761_000_000), 0),
+	}
+
+	if err := service.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	summary := versionSummary(t, *records)
+	if summary.Level != slog.LevelInfo {
+		t.Errorf("logged at %s, want Info for a run that completed", summary.Level)
+	}
+	attrs := logAttrs(summary)
+	if got := attrs["outcome"].String(); got != "completed" {
+		t.Errorf("outcome = %q, want %q", got, "completed")
+	}
+	want := map[string]int64{
+		"heights":           3,
+		"version_0.heights": 1,
+		"version_0.from":    headBlock,
+		"version_0.to":      headBlock,
+		"version_1.heights": 2,
+		"version_1.from":    int64(firstLogBlock),
+		"version_1.to":      int64(secondLogBlock),
+	}
+	for key, value := range want {
+		attr := attrs[key]
+		if attr.Kind() != slog.KindInt64 {
+			t.Errorf("%s = %v, want the number %d", key, attr, value)
+			continue
+		}
+		if got := attr.Int64(); got != value {
+			t.Errorf("%s = %d, want %d", key, got, value)
+		}
+	}
+}
+
+// An aborted run's summary is the only place an operator learns that the extents cover
+// just what the sweep reached, so it says so and is logged at Error rather than reading
+// like a clean finish.
+func TestRun_ReportsAnAbortedRunAtErrorWithWhatItResolved(t *testing.T) {
+	h := newBootstrapHarness(t)
+	logger, records := recordingLogger()
+	h.config.Logger = logger
+	replayer := &recordingReplayer{
+		v2Vaults: map[common.Address]int64{testVaultAddr: 0},
+		seedErr:  func(common.Address) error { return errors.New("execution reverted") },
+	}
 	service, err := NewService(h.config, h.chain, replayer, h.progress, h.archive, archiveName)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
 	h.chain.setFinalizedHead(24_000_000, 1_770_000_000)
 
-	if err := service.Run(context.Background()); err != nil {
-		t.Fatalf("Run: %v", err)
+	if err := service.Run(context.Background()); err == nil {
+		t.Fatal("expected the un-seedable vault to fail the run")
 	}
 
-	if got := logAttrs(versionSummary(t, *records))["heights"].Int64(); got != 1 {
-		t.Errorf("heights = %d, want the 1 height the run resolved", got)
+	summary := versionSummary(t, *records)
+	if summary.Level != slog.LevelError {
+		t.Errorf("logged at %s, want Error for a run that aborted", summary.Level)
+	}
+	attrs := logAttrs(summary)
+	if got := attrs["outcome"].String(); got != "aborted" {
+		t.Errorf("outcome = %q, want %q", got, "aborted")
+	}
+	if got := attrs["heights"].Int64(); got != 1 {
+		t.Errorf("heights = %d, want the 1 height the run resolved before it stopped", got)
 	}
 }
 
@@ -1302,8 +1370,10 @@ func (r *recordingReplayer) ReplayMetaMorphoLog(_ context.Context, log shared.Lo
 // answers that block's real hash, so a run asking about the wrong block fails the way the
 // resolver makes a real one fail.
 type fakeArchive struct {
-	chain      *fakeChainReader
-	version    int
+	chain   *fakeChainReader
+	version int
+	// versionAt overrides the version a named height is held at.
+	versionAt  map[int64]int
 	unarchived map[int64]bool
 	// forked names heights the archive holds ANOTHER block at, the ARCT-379 hole shape.
 	forked map[int64]common.Hash
@@ -1319,7 +1389,14 @@ func (a *fakeArchive) HighestVersion(_ context.Context, blockNumber int64) (int,
 	if a.unarchived[blockNumber] {
 		return 0, false, nil
 	}
-	return a.version, a.chain.hashOf(uint64(blockNumber)) != (common.Hash{}), nil
+	return a.versionOf(blockNumber), a.chain.hashOf(uint64(blockNumber)) != (common.Hash{}), nil
+}
+
+func (a *fakeArchive) versionOf(blockNumber int64) int {
+	if version, held := a.versionAt[blockNumber]; held {
+		return version
+	}
+	return a.version
 }
 
 func (a *fakeArchive) BlockHashAt(_ context.Context, blockNumber int64, version int) (string, bool, error) {
@@ -1330,7 +1407,7 @@ func (a *fakeArchive) BlockHashAt(_ context.Context, blockNumber int64, version 
 		return orphan.Hex(), true, nil
 	}
 	hash := a.chain.hashOf(uint64(blockNumber))
-	if hash == (common.Hash{}) || version != a.version {
+	if hash == (common.Hash{}) || version != a.versionOf(blockNumber) {
 		return "", false, nil
 	}
 	return hash.Hex(), true, nil

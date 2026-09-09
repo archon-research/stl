@@ -9,9 +9,12 @@
 package blockversion
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 
 	"github.com/ethereum/go-ethereum/common"
 
@@ -40,8 +43,7 @@ type Resolver struct {
 	archive     outbound.ArchiveReader
 	archiveName string
 
-	resolved  map[int64]archivedBlock
-	corrected []int64
+	resolved map[int64]archivedBlock
 }
 
 // archivedBlock is what the archive holds at one height: its TOP version, and the block
@@ -87,16 +89,40 @@ func (r *Resolver) requireSameBlock(blockNumber int64, archived archivedBlock, b
 		blockNumber, archived.version, r.archiveName, archived.hash.Hex(), blockHash.Hex(), ErrArchivedBlockMismatch)
 }
 
-// ResolvedVersions is what a run asked the archive for: how many heights it answered,
-// and which of those it holds under a corrected (non-zero) version — the blocks whose
-// replayed rows do not land at version 0.
-type ResolvedVersions struct {
-	Heights   int
-	Corrected []int64
+// RunSummary is what one run asked the archive for: how many heights it answered, and
+// what each version it answered with covers.
+type RunSummary struct {
+	HeightsResolved int
+	// Versions holds one entry per distinct version, ascending.
+	Versions []VersionExtent
 }
 
-func (r *Resolver) Summary() ResolvedVersions {
-	return ResolvedVersions{Heights: len(r.resolved), Corrected: append([]int64(nil), r.corrected...)}
+// VersionExtent is one version's share of a run: how many heights resolved to it, and the
+// lowest and highest of them. A version above 0 is what live indexing stamped at those
+// heights, not evidence of a reorg — most of the deep history the bulk downloader wrote
+// exists only at version 1.
+type VersionExtent struct {
+	Version int
+	Heights int
+	From    int64
+	To      int64
+}
+
+func (r *Resolver) Summary() RunSummary {
+	extents := map[int]VersionExtent{}
+	for height, archived := range r.resolved {
+		extent, seen := extents[archived.version]
+		if !seen {
+			extent = VersionExtent{Version: archived.version, From: height, To: height}
+		}
+		extent.Heights++
+		extent.From, extent.To = min(extent.From, height), max(extent.To, height)
+		extents[archived.version] = extent
+	}
+	versions := slices.SortedFunc(maps.Values(extents), func(a, b VersionExtent) int {
+		return cmp.Compare(a.Version, b.Version)
+	})
+	return RunSummary{HeightsResolved: len(r.resolved), Versions: versions}
 }
 
 // readArchivedBlock asks the archive what it holds at a height.
@@ -126,7 +152,4 @@ func (r *Resolver) readArchivedBlock(ctx context.Context, blockNumber int64) (ar
 // proven height is remembered, so a mismatch the archive is then repaired for is re-read.
 func (r *Resolver) remember(blockNumber int64, block archivedBlock) {
 	r.resolved[blockNumber] = block
-	if block.version > 0 {
-		r.corrected = append(r.corrected, blockNumber)
-	}
 }

@@ -174,9 +174,9 @@ func NewService(config Config, chain ChainReader, replay V2Replayer, progress Pr
 
 // Run performs one complete bootstrap pass. It is the body of the Temporal
 // activity, and is safe to invoke repeatedly.
-func (s *Service) Run(ctx context.Context) error {
+func (s *Service) Run(ctx context.Context) (err error) {
 	reads := s.newReplayReads()
-	defer func() { s.logResolvedBlockVersions(reads.versions.Summary()) }()
+	defer func() { s.logResolvedBlockVersions(ctx, reads.versions.Summary(), err) }()
 
 	head, err := s.pinFinalizedHead(ctx, reads.versions)
 	if err != nil {
@@ -210,10 +210,6 @@ func (s *Service) Run(ctx context.Context) error {
 	return nil
 }
 
-// loggedCorrectedHeights bounds the list a run closes with: an era-wide replay can carry
-// more corrected heights than one log line should, and the count beside it stays exact.
-const loggedCorrectedHeights = 20
-
 // replayReads are the per-height answers one run reads once and reuses: a block's
 // timestamp, and the block_version it was indexed under. Both belong to the run rather
 // than the pod: two runs can be in flight at once, and a memo they shared would let one
@@ -230,17 +226,22 @@ func (s *Service) newReplayReads() *replayReads {
 	}
 }
 
-// logResolvedBlockVersions closes the run with what the archive answered, deferred so a
-// failed run reports it too.
-func (s *Service) logResolvedBlockVersions(summary blockversion.ResolvedVersions) {
-	s.logger.Info("block versions resolved from the raw archive",
-		"heights", summary.Heights,
-		"correctedHeights", len(summary.Corrected),
-		"corrected", firstHeights(summary.Corrected))
-}
-
-func firstHeights(heights []int64) []int64 {
-	return heights[:min(len(heights), loggedCorrectedHeights)]
+// logResolvedBlockVersions closes the run with what the archive answered, deferred so an
+// aborted run reports the heights it did reach — and says which it is, because an aborted
+// run's extents cover only the part of the range it swept.
+func (s *Service) logResolvedBlockVersions(ctx context.Context, summary blockversion.RunSummary, runErr error) {
+	outcome, level := "completed", slog.LevelInfo
+	if runErr != nil {
+		outcome, level = "aborted", slog.LevelError
+	}
+	attrs := []slog.Attr{slog.String("outcome", outcome), slog.Int("heights", summary.HeightsResolved)}
+	for _, extent := range summary.Versions {
+		attrs = append(attrs, slog.Group(fmt.Sprintf("version_%d", extent.Version),
+			slog.Int("heights", extent.Heights),
+			slog.Int64("from", extent.From),
+			slog.Int64("to", extent.To)))
+	}
+	s.logger.LogAttrs(ctx, level, "block versions resolved from the raw archive", attrs...)
 }
 
 // emptyScopeError explains a run with nothing in scope. A repair job that heals
