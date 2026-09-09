@@ -3040,9 +3040,9 @@ not mistaken for a bug during triage.
 ### What it means
 
 The live morpho indexer for the labelled `chain` recorded more than 25 VaultV2
-adapters as `adapter_type=unknown` in 24 hours. The classifier probes one marker selector per
-modelled family on every adapter, and records Unknown (DB `adapter_type = 99`)
-unless **exactly one** answers:
+adapters as `adapter_type=unknown` in 24 hours. The classifier probes one marker
+selector per modelled family on every adapter, and records Unknown (DB
+`adapter_type = 99`) unless **exactly one** answers:
 
 | Family | Marker | Selector | `adapter_type` |
 |---|---|---|---|
@@ -3083,8 +3083,9 @@ each one seeds its whole adapter set in a single transaction. Acknowledge and
 curate.
 
 **Replays are excluded.** The rule counts every `service_name` except the two
-on-demand replay workers, `service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"`, so a
-chain added later is covered on day one with no edit to the rule. Every rule in the
+on-demand replay workers —
+`service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"` — so a chain
+added later is covered on day one with no edit to the rule. Every rule in the
 `vector-morpho-v2` group carries the same exclusion; a new replay worker has to be
 added to all of them. `morpho-vault-backfill` and `morpho-v2-bootstrap` drive
 historical logs through the same handlers and increment the same counter under
@@ -3218,8 +3219,9 @@ approximated: an adapter known only from an `Allocate` simply has **no**
 replayed. Current membership and classification are correct in the meantime.
 
 **Replays are excluded.** The rule counts every `service_name` except the two
-on-demand replay workers, `service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"`, so a
-chain added later needs no edit here. Every rule in the `vector-morpho-v2` group
+on-demand replay workers —
+`service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"` — so a chain
+added later needs no edit here. Every rule in the `vector-morpho-v2` group
 carries the same exclusion. `morpho-vault-backfill` and `morpho-v2-bootstrap` run
 historical `Allocate` logs through the same handlers under their own
 `service_name`, and replaying a mid-life discovery is exactly how the missing
@@ -3333,8 +3335,9 @@ Base reports `base-morpho-indexer`. Every rule in the `vector-morpho-v2` group
 carries the same exclusion, so a chain added later is covered on day one and only
 a new replay worker needs adding. The threshold is per `chain` and was sized on
 mainnet; Base has a single V2 vault (steakUSDC), so >20/h there is a stronger
-signal, not a false positive. `morpho-vault-backfill` and `morpho-v2-bootstrap` drive historical logs
-through the same handlers and increment the same counter under their own
+signal, not a false positive. `morpho-vault-backfill` and `morpho-v2-bootstrap`
+drive historical logs through the same handlers and increment the same counter
+under their own
 `service_name`, and they emit no `morpho_blocks_processed_total` for the loop gate
 to read — the 2026-08-28 staging era backfill replayed 2,604 `ForceDeallocate` at
 up to 1,025/h and held this firing for seven hours against ~1/h of real activity.
@@ -3524,8 +3527,8 @@ sample, so **worst case ~6h15m** (6h window + 15m `for`).
 ### Verify recovery
 
 `rate(morpho_v2_snapshots_written_total{service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"}[6h]) > 0`
-for the affected chain, and the
-three `max(block_number)` queries above tracking the chain head.
+for the affected chain, and the three `max(block_number)` queries above tracking
+the chain head.
 
 ---
 
