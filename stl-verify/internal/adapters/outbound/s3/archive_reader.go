@@ -45,10 +45,25 @@ var (
 // missing grant or a bucket that is not there stops the worker at startup instead
 // of failing every height of the first run.
 func (r *ArchiveReader) Ping(ctx context.Context) error {
-	if err := r.lister.ProbeListAccess(ctx, r.bucket, probePrefix); err != nil {
-		return fmt.Errorf("listing s3://%s: this pod needs s3:ListBucket on that bucket: %w", r.bucket, err)
+	if err := r.probeListAccess(ctx); err != nil {
+		return err
 	}
 	return r.probeObjectRead(ctx)
+}
+
+// probeListAccess lists one key under a real partition prefix. Only a refusal is a
+// missing grant; a bucket that is not there and an unreachable endpoint fail startup
+// too, and reporting either as one sends the operator after a policy already correct.
+func (r *ArchiveReader) probeListAccess(ctx context.Context) error {
+	err := r.lister.ProbeListAccess(ctx, r.bucket, probePrefix)
+	switch {
+	case err == nil:
+		return nil
+	case isAccessDenied(err):
+		return fmt.Errorf("listing s3://%s: this pod needs s3:ListBucket on that bucket: %w", r.bucket, err)
+	default:
+		return fmt.Errorf("listing s3://%s/%s: %w", r.bucket, probePrefix, err)
+	}
 }
 
 // probeObjectRead reads one byte of a key that does not exist. Listing proves

@@ -209,22 +209,19 @@ func TestRegister_RefusesANodeOnAnotherChain(t *testing.T) {
 	}
 }
 
-// TestRegister_RefusesAnArchiveItCannotList keeps the startup probe on the path a
-// deployment reaches: a bucket this pod may not list — a missing Pod Identity
-// grant, or a name that is not there — must stop the worker rather than fail
-// every height of the first run.
-func TestRegister_RefusesAnArchiveItCannotList(t *testing.T) {
+func TestRegister_RefusesAnArchiveThatIsNotThere(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
 	newDeployment(t, ctx)
-	t.Setenv("S3_BUCKET", "stl-sentinel"+deployEnv+"-ethereum-raw-never-created")
+	missing := "stl-sentinel" + deployEnv + "-ethereum-raw-never-created"
+	t.Setenv("S3_BUCKET", missing)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
 	err := register(ctx, temporal.Dependencies{Logger: discardLogger()}, env)
 
-	if err == nil || !strings.Contains(err.Error(), "s3:ListBucket") {
-		t.Fatalf("error = %v, want one naming the listing grant it needs", err)
+	if err == nil || !strings.Contains(err.Error(), missing) {
+		t.Fatalf("error = %v, want one naming the bucket it could not use", err)
 	}
 }
 

@@ -126,17 +126,14 @@ func TestSetupRunner_WiresAgainstAMigratedDatabase(t *testing.T) {
 	}
 }
 
-// TestSetupRunner_RefusesAnArchiveItCannotList keeps the startup probe on the path a
-// deployment reaches: a bucket this pod may not list — a missing Pod Identity grant, or a
-// name that is not there — must stop the worker rather than fail every height of a run,
-// three attempts over.
-func TestSetupRunner_RefusesAnArchiveItCannotList(t *testing.T) {
+func TestSetupRunner_RefusesAnArchiveThatIsNotThere(t *testing.T) {
 	setWorkerEnv(t, 1, 1)
-	t.Setenv("S3_BUCKET", "stl-sentinel"+deployEnv+"-ethereum-raw-never-created")
+	missing := "stl-sentinel" + deployEnv + "-ethereum-raw-never-created"
+	t.Setenv("S3_BUCKET", missing)
 
 	_, _, err := setupRunner(context.Background(), temporal.Dependencies{Logger: slog.Default()}, temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
-	if err == nil || !strings.Contains(err.Error(), "s3:ListBucket") {
-		t.Fatalf("err = %v, want one naming the listing grant it needs", err)
+	if err == nil || !strings.Contains(err.Error(), missing) {
+		t.Fatalf("err = %v, want one naming the bucket it could not use", err)
 	}
 }
 
