@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -19,7 +20,7 @@ import (
 )
 
 // mppCols is the aliased column list the projection-view contract requires.
-const mppCols = `v(chain_id,protocol_id,instrument_key,holder_id,quantity,deal_type_code,block_number,block_version,processing_version,block_timestamp)`
+const mppCols = `v(chain_id,protocol_id,instrument_key,holder_id,quantity,deal_type,block_number,block_version,processing_version,block_timestamp)`
 
 var (
 	lineCommentRE         = regexp.MustCompile(`(?m)--.*$`)
@@ -149,6 +150,19 @@ func TestPositionState(t *testing.T) {
 	psTestModelbasedFuzz(t, f)
 	// --- guards a data assertion cannot see: asserted on the mechanism ---
 	psTestGuardsADataAssertion(t, f)
+	// --- deal_type: carry, type gate, vocabulary gate (VEC-401) ---
+	psTestDealTypeCode(t, f)
+	// --- deal_type: the direct-INSERT path the materializer gates cannot reach ---
+	psTestDealTypeCodeDirectInsert(t, f)
+	// --- this migration must survive a re-apply (restore, partial-apply recovery) ---
+	psTestDealTypeCodeMigrationIsReRunnable(t, f)
+	// --- a higher block cannot carry an earlier instant, or the two caches disagree about now ---
+	psTestBlockTimeMonotonicPerPosition(t, f)
+	// --- every completed run is recorded, so a stale position is detectable ---
+	psTestCompletedRunIsRecorded(t, f)
+	// --- off-chain observations: chain NULL, block_number = epoch of the instant, never mixed ---
+	psTestClosure(t, f)
+	psTestOffChainObservations(t, f)
 }
 
 // psTestRecencyGuard covers: recency guard
@@ -205,13 +219,13 @@ func psTestInputRobustness(t *testing.T, f *psFixture) {
 
 	t.Run("numeric(30,18) quantity passes the contract (finding :197)", func(t *testing.T) {
 		mpp(t, "vtm", `SELECT 1::int chain_id,10::bigint protocol_id,'itm'::text instrument_key,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text holder_id,`+
-			`5::numeric(30,18) quantity,'LOAN'::text deal_type_code,100::bigint block_number,0::int block_version,`+
+			`5::numeric(30,18) quantity,'LOAN'::text deal_type,100::bigint block_number,0::int block_version,`+
 			`0::int processing_version,'2026-01-01'::timestamptz block_timestamp`, "typmod")
 	})
 
 	t.Run("float8 quantity fails the contract", func(t *testing.T) {
 		mppErr(t, "vfl", `SELECT 1::int chain_id,10::bigint protocol_id,'ifl'::text instrument_key,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text holder_id,`+
-			`1.5::float8 quantity,'LOAN'::text deal_type_code,1::bigint block_number,0::int block_version,`+
+			`1.5::float8 quantity,'LOAN'::text deal_type,1::bigint block_number,0::int block_version,`+
 			`0::int processing_version,'2026-01-01'::timestamptz block_timestamp`, "flt", "column contract")
 	})
 
@@ -238,8 +252,8 @@ func psTestInputRobustness(t *testing.T, f *psFixture) {
 		mppErr(t, "vuh", `SELECT * FROM (VALUES (1::int,10::bigint,'iuh'::text,'0xAB'::text,5::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) `+mppCols, "uh", "position_state_holder_hex_chk")
 	})
 
-	t.Run("Infinity quantity rejected by the CHECK", func(t *testing.T) {
-		mppErr(t, "vinf", `SELECT * FROM (VALUES (1::int,10::bigint,'iinf'::text,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text,'Infinity'::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) `+mppCols, "inf", "qty_nonneg")
+	t.Run("Infinity quantity is refused by name before the write", func(t *testing.T) {
+		mppErr(t, "vinf", `SELECT * FROM (VALUES (1::int,10::bigint,'iinf'::text,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text,'Infinity'::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) `+mppCols, "inf", "negative or non-finite quantity")
 	})
 }
 
@@ -399,7 +413,7 @@ func psTestIdentityIntegrityPositionkeyContract(t *testing.T, f *psFixture) {
 	mpp, mppErr := f.mpp, f.mppErr
 
 	t.Run("blank holder_id rejected even on a zero-quantity row", func(t *testing.T) {
-		// Identity fields feed position_id() for EVERY row, unlike deal_type_code (pre-flight (4) checks
+		// Identity fields feed position_id() for EVERY row, unlike deal_type (pre-flight (4) checks
 		// only non-zero rows). A blank holder must fail regardless of quantity — here on a zero row.
 		body := `SELECT * FROM (VALUES (1::int,10::bigint,'ihb'::text,''::text,0::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) ` + mppCols
 		mppErr(t, "vhb", body, "blankholder", "holder_id is required")
@@ -419,9 +433,11 @@ func psTestIdentityIntegrityPositionkeyContract(t *testing.T, f *psFixture) {
 
 	t.Run("null chain_id is legal and does not collide with a set chain_id", func(t *testing.T) {
 		// chain_id/protocol_id are nullable structural fields (render empty in position_key). A NULL-chain
-		// position must materialize AND hash distinctly from the same instrument/holder at chain 1.
+		// position is OFF-CHAIN, so its block_number is its instant in epoch seconds (1767225600 =
+		// 2026-01-01T00:00:00Z); it must materialize AND hash distinctly from the same instrument/holder
+		// at chain 1.
 		body := `SELECT * FROM (VALUES ` +
-			`(NULL::int,10::bigint,'inc'::text,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text,5::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz),` +
+			`(NULL::int,10::bigint,'inc'::text,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text,5::numeric,'LOAN'::text,1767225600::bigint,0::int,0::int,'2026-01-01'::timestamptz),` +
 			`(1::int,10::bigint,'inc'::text,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text,9::numeric,'BORROW'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) ` + mppCols
 		mpp(t, "vnc", body, "nullchain")
 		var nullRows, setRows int
@@ -443,7 +459,7 @@ func psTestContractEdgesMissingExtra(t *testing.T, f *psFixture) {
 
 	t.Run("view missing a contract column is rejected as MISSING", func(t *testing.T) {
 		// Drop block_number, a still-required column; the contract check must name it MISSING before any
-		// write. (This used to drop deal_type_code, which is no longer part of the required contract --
+		// write. (This used to drop deal_type, which is no longer part of the required contract --
 		// so the case silently stopped testing anything the moment that column left.)
 		body := `SELECT * FROM (VALUES (1::int,10::bigint,'imz'::text,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text,5::numeric,0::int,0::int,'2026-01-01'::timestamptz)) v(chain_id,protocol_id,instrument_key,holder_id,quantity,block_version,processing_version,block_timestamp)`
 		mppErr(t, "vmz", body, "missing", "block_number (MISSING)")
@@ -451,7 +467,7 @@ func psTestContractEdgesMissingExtra(t *testing.T, f *psFixture) {
 
 	t.Run("extra column in the view is tolerated", func(t *testing.T) {
 		// The temp projection selects contract columns by name, so an unrelated extra column is ignored.
-		body := `SELECT * FROM (VALUES (1::int,10::bigint,'ix'::text,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text,5::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz,'ignored'::text)) v(chain_id,protocol_id,instrument_key,holder_id,quantity,deal_type_code,block_number,block_version,processing_version,block_timestamp,extra)`
+		body := `SELECT * FROM (VALUES (1::int,10::bigint,'ix'::text,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text,5::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz,'ignored'::text)) v(chain_id,protocol_id,instrument_key,holder_id,quantity,deal_type,block_number,block_version,processing_version,block_timestamp,extra)`
 		mpp(t, "vx", body, "extra")
 	})
 }
@@ -460,15 +476,15 @@ func psTestContractEdgesMissingExtra(t *testing.T, f *psFixture) {
 func psTestQuantityCheckNegativeNan(t *testing.T, f *psFixture) {
 	mppErr := f.mppErr
 
-	t.Run("negative quantity rejected by the CHECK", func(t *testing.T) {
-		mppErr(t, "vneg", valuesOf(row("ineg", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", -5, "LOAN", 100, 0, 0)), "neg", "qty_nonneg")
+	t.Run("negative quantity is refused by name before the write", func(t *testing.T) {
+		mppErr(t, "vneg", valuesOf(row("ineg", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", -5, "LOAN", 100, 0, 0)), "neg", "negative or non-finite quantity")
 	})
 
-	t.Run("NaN quantity rejected by the CHECK", func(t *testing.T) {
-		// NaN sorts above every finite numeric, so it clears the quantity > 0 filter (the pre-flight sees a
-		// non-null code and passes); the CHECK must still reject it before it poisons downstream SUMs.
+	t.Run("NaN quantity is refused by name before the write", func(t *testing.T) {
+		// NaN sorts above every finite numeric, so it would clear closure's quantity > 0; the pre-write
+		// check names it, and the table CHECK still guards a direct INSERT.
 		body := `SELECT * FROM (VALUES (1::int,10::bigint,'inan'::text,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text,'NaN'::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) ` + mppCols
-		mppErr(t, "vnan", body, "nan", "qty_nonneg")
+		mppErr(t, "vnan", body, "nan", "negative or non-finite quantity")
 	})
 }
 
@@ -743,19 +759,18 @@ func psTestEmptyProjectionReturnCount(t *testing.T, f *psFixture) {
 		}
 	})
 
-	t.Run("a zero quantity and block zero are both legal and stored", func(t *testing.T) {
-		// Both bounds are documented as inclusive -- genesis is block 0, and a zero quantity is the
-		// closing observation exposure queries filter with quantity <> 0. Tightening either CHECK to a
-		// strict inequality survived the suite because nothing ever stored one.
-		mpp(t, "vzero", valuesOf(row("izero", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 0, "LOAN", 0, 0, 0)), "zero qty at block 0")
-		var qty, block int
+	t.Run("block zero is legal, and a zero quantity is stored as the close of a position", func(t *testing.T) {
+		// Both bounds are inclusive: genesis is block 0, and a zero quantity is the closing observation.
+		// A lone zero is a leading zero and is not an observation, so the close follows a positive.
+		mpp(t, "vzero", valuesOf(row("izero", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 5, "LOAN", 0, 0, 0), row("izero", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 0, "LOAN", 1, 0, 0)), "block 0 then a close")
+		var stored []string
 		if err := pool.QueryRow(ctx,
-			`SELECT quantity, block_number FROM position_state WHERE position_id = position_id(1,10,'izero','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')`,
-		).Scan(&qty, &block); err != nil {
-			t.Fatalf("the zero-quantity block-zero row was not stored: %v", err)
+			`SELECT array_agg(block_number::text || '=' || quantity::text ORDER BY block_number) FROM position_state WHERE position_id = position_id(1,10,'izero','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')`,
+		).Scan(&stored); err != nil {
+			t.Fatalf("read: %v", err)
 		}
-		if qty != 0 || block != 0 {
-			t.Errorf("stored quantity=%d block_number=%d; want 0 and 0", qty, block)
+		if strings.Join(stored, ",") != "0=5,1=0" {
+			t.Errorf("stored %v; want the block-0 open and the zero close", stored)
 		}
 	})
 
@@ -801,7 +816,7 @@ func psTestEmptyProjectionReturnCount(t *testing.T, f *psFixture) {
 		// genesis is a legal block time. Tightening it to a strict `>` survived, because nothing stored
 		// exactly that instant.
 		mpp(t, "vgen", `SELECT 1::int chain_id,10::bigint protocol_id,'igen'::text instrument_key,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text holder_id,`+
-			`5::numeric quantity,'LOAN'::text deal_type_code,0::bigint block_number,0::int block_version,`+
+			`5::numeric quantity,'LOAN'::text deal_type,0::bigint block_number,0::int block_version,`+
 			`0::int processing_version,'2009-01-03 00:00:00+00'::timestamptz block_timestamp`, "genesis")
 		var ts string
 		if err := pool.QueryRow(ctx,
@@ -840,7 +855,7 @@ func psTestEmptyProjectionReturnCount(t *testing.T, f *psFixture) {
 		// failure the '< Infinity' leg exists for, and a NULL build_id makes ADR-0002 provenance blank
 		// for a whole run. Neither is repairable: UPDATE and DELETE are revoked.
 		nullQty := `SELECT 1::int chain_id,10::bigint protocol_id,'inq'::text instrument_key,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::text holder_id,` +
-			`NULL::numeric quantity,'LOAN'::text deal_type_code,100::bigint block_number,0::int block_version,` +
+			`NULL::numeric quantity,'LOAN'::text deal_type,100::bigint block_number,0::int block_version,` +
 			`0::int processing_version,'2026-01-01'::timestamptz block_timestamp`
 		mppErr(t, "vnq", nullQty, "null quantity", "quantity=NULL")
 
@@ -1050,15 +1065,15 @@ func psTestAtomicityNotnullObservationColumns(t *testing.T, f *psFixture) {
 
 	t.Run("a within-write failure leaves existing rows untouched (atomicity)", func(t *testing.T) {
 		// Seed a position, then run a view emitting a new observation for it AND a second position whose
-		// quantity violates the CHECK. The failure must roll back the WHOLE statement: the seeded row is
+		// holder violates the hex CHECK at write time (the pre-write checks do not look at holder format). The failure must roll back the WHOLE statement: the seeded row is
 		// untouched and the poison position wrote nothing.
 		mpp(t, "vat", valuesOf(row("iat", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 5, "LOAN", 100, 0, 0)), "seed")
-		poison := valuesOf(row("iat", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 50, "LOAN", 200, 0, 0), row("iat2", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", -7, "LOAN", 100, 0, 0))
+		poison := valuesOf(row("iat", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 50, "LOAN", 200, 0, 0), row("iat2", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 7, "LOAN", 100, 0, 0))
 		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW vat AS `+poison); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := pool.Exec(ctx, `SELECT materialize_position_projection('vat'::regclass)`); err == nil || !strings.Contains(err.Error(), "position_state_qty_nonneg_chk") {
-			t.Fatalf("poison run: got %v; want the quantity CHECK failure (proves the failure happened mid-write)", err)
+		if _, err := pool.Exec(ctx, `SELECT materialize_position_projection('vat'::regclass)`); err == nil || !strings.Contains(err.Error(), "position_state_holder_hex_chk") {
+			t.Fatalf("poison run: got %v; want the holder hex CHECK failure (proves the failure happened mid-write)", err)
 		}
 		var unchanged bool
 		if err := pool.QueryRow(ctx, `SELECT quantity = 5 FROM position_state WHERE position_id = position_id(1,10,'iat','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')`).Scan(&unchanged); err != nil {
@@ -1687,13 +1702,13 @@ func psTestGuardsADataAssertion(t *testing.T, f *psFixture) {
 				vals := map[string]string{
 					"chain_id": "1::int", "protocol_id": "10::bigint",
 					"instrument_key": "'inull'::text", "holder_id": "'" + strings.Repeat("a", 40) + "'::text",
-					"quantity": "5::numeric", "deal_type_code": "'LOAN'::text",
+					"quantity": "5::numeric", "deal_type": "'LOAN'::text",
 					"block_number": "900::bigint", "block_version": "0::int",
 					"processing_version": "0::int", "block_timestamp": "'2026-01-01'::timestamptz",
 				}
 				vals[col] = "NULL::" + typed[col]
 				order := []string{"chain_id", "protocol_id", "instrument_key", "holder_id", "quantity",
-					"deal_type_code", "block_number", "block_version", "processing_version", "block_timestamp"}
+					"deal_type", "block_number", "block_version", "processing_version", "block_timestamp"}
 				parts := make([]string, 0, len(order))
 				for _, k := range order {
 					parts = append(parts, vals[k])
@@ -1828,7 +1843,7 @@ func psTestGuardsADataAssertion(t *testing.T, f *psFixture) {
 		// trip cross-view disjointness instead of exercising the type contract.
 		body := func(ik, qtyType, tsType string) string {
 			return `SELECT 1::int chain_id,10::bigint protocol_id,'` + ik + `'::text instrument_key,'` + holder +
-				`'::text holder_id,0.5::` + qtyType + ` quantity,'LOAN'::text deal_type_code,` +
+				`'::text holder_id,0.5::` + qtyType + ` quantity,'LOAN'::text deal_type,` +
 				`600::bigint block_number,0::int block_version,0::int processing_version,` +
 				`'2026-01-01 00:00:00.123456+00'::` + tsType + ` block_timestamp`
 		}
@@ -2086,6 +2101,554 @@ func psTestGuardsADataAssertion(t *testing.T, f *psFixture) {
 			if !pinned {
 				t.Errorf("%s: proconfig = %v; want a pinned search_path", fn, settings)
 			}
+		}
+	})
+}
+
+// psTestDealTypeCode covers: deal_type carry, type gate, vocabulary gate (VEC-401).
+// Every case fails on the pre-fix code it names -- the pre-fix materializer read the view's column
+// only when it was exactly `text`, stored whatever string it found, and validated nothing.
+func psTestDealTypeCode(t *testing.T, f *psFixture) {
+	// dtRow is row() with the deal_type slot under the caller's control: an arbitrary SQL
+	// expression, or "" to omit the column entirely (the MISSING-contract case).
+	dtRow := func(ik, expr string) string {
+		body := "(1::int,10::bigint,'" + ik + "'::text,'" + strings.Repeat("a", 40) + "'::text,5::numeric,"
+		cols := mppCols
+		if expr == "" {
+			cols = `v(chain_id,protocol_id,instrument_key,holder_id,quantity,block_number,` +
+				`block_version,processing_version,block_timestamp)`
+		} else {
+			body += expr + ","
+		}
+		body += "100::bigint,0::int,0::int,'2026-01-01'::timestamptz)"
+		return `SELECT * FROM (VALUES ` + body + `) ` + cols
+	}
+	stored := func(t *testing.T, ik string) *string {
+		t.Helper()
+		var got *string
+		if err := f.pool.QueryRow(f.ctx,
+			`SELECT deal_type FROM position_state WHERE instrument_key = $1`, ik).Scan(&got); err != nil {
+			t.Fatalf("read back %s: %v", ik, err)
+		}
+		return got
+	}
+
+	// deal_type is a required contract column typed exactly text. A narrower string type would truncate
+	// on cast, and the truncation can land on ANOTHER valid code ('CUSTODY_COLLATERAL'::varchar(7) is
+	// 'CUSTODY'), so the exact-type match refuses every non-text declaration up front.
+	t.Run("declared text is carried; any other string type is a contract violation", func(t *testing.T) {
+		ik := "dt-carry-text"
+		if n := f.mppN(t, "pv_dt_carry_text", dtRow(ik, "'LOAN'::text"), "carry"); n != 1 {
+			t.Fatalf("text: inserted %d rows, want 1", n)
+		}
+		if got := stored(t, ik); got == nil || *got != "LOAN" {
+			t.Errorf("text: deal_type = %v, want LOAN", got)
+		}
+		for _, c := range []struct{ name, expr, want string }{
+			{"varchar_63", "'BORROW'::varchar(63)", "deal_type (is character varying(63))"},
+			{"varchar_unbounded", "'COLLATERAL'::varchar", "deal_type (is character varying)"},
+			{"varchar_7_would_truncate_to_another_code", "'CUSTODY_COLLATERAL'::varchar(7)", "deal_type (is character varying(7))"},
+			{"bpchar_63", "'LOAN'::char(63)", "deal_type (is character(63))"},
+		} {
+			f.mppErr(t, "pv_dt_type_"+c.name, dtRow("dt-type-"+c.name, c.expr), "contract", c.want)
+		}
+	})
+
+	// A non-string deal_type is refused by the same exact-type contract match.
+	t.Run("non-string type is a contract violation", func(t *testing.T) {
+		f.mppErr(t, "pv_dt_int", dtRow("dt-int", "7::int"), "wrong type", "deal_type (is integer)")
+	})
+
+	// The materializer CANNOT apply a changed deal_type to a stored observation: the insert is
+	// suppressed on the 4-column key and UPDATE is revoked. Before this raised, the run returned a row
+	// count with no warning and the direction stayed wrong forever.
+	t.Run("re-emitting a stored key with a different deal type raises", func(t *testing.T) {
+		const ik = "dt-reemit"
+		body := dtRow(ik, "'LOAN'::text")
+		if n := f.mppN(t, "pv_dt_reemit", body, "first insert"); n != 1 {
+			t.Fatalf("first insert put %d rows, want 1", n)
+		}
+		f.mppErr(t, "pv_dt_reemit", dtRow(ik, "'BORROW'::text"), "drift", "CANNOT apply")
+
+		// NULL -> a value is the migration case: the column was added after the rows were stored, and
+		// it is just as unrepairable, so it must raise too rather than silently returning 0.
+		const ik2 = "dt-reemit-null"
+		if n := f.mppN(t, "pv_dt_reemit_null", dtRow(ik2, "NULL::text"), "first insert, silent"); n != 1 {
+			t.Fatalf("first insert put %d rows, want 1", n)
+		}
+		f.mppErr(t, "pv_dt_reemit_null", dtRow(ik2, "'LOAN'::text"), "drift", "CANNOT apply")
+
+		// Negative control: re-emitting the SAME deal type must stay a clean no-op, or the arm above
+		// would make every idempotent re-run fail.
+		if n := f.mppN(t, "pv_dt_reemit", dtRow(ik, "'LOAN'::text"), "idempotent re-run"); n != 0 {
+			t.Errorf("idempotent re-run inserted %d rows, want 0", n)
+		}
+	})
+
+	// Off-vocabulary codes must fail hard: UPDATE is revoked on position_state, so a bad code written
+	// once is unfixable without a superuser. Pre-fix all three of these were stored verbatim.
+	t.Run("off-vocabulary fails hard", func(t *testing.T) {
+		for _, c := range []struct{ name, expr string }{
+			{"wrong_case", "'loan'::text"},
+			{"unknown_code", "'NOT_A_DEAL_TYPE'::text"},
+			{"empty_string", "''::text"},
+		} {
+			body := dtRow("dt-bad-"+c.name, c.expr)
+			f.mppErr(t, "pv_dt_bad_"+c.name, body, "vocabulary gate", "position_state_deal_type_fkey")
+		}
+	})
+
+	// A projection with nothing to say emits NULL::text; it may not omit the column, or a silently
+	// stored NULL would be indistinguishable from a projection that forgot the direction.
+	t.Run("an explicit NULL inserts, an omitted column is refused as MISSING", func(t *testing.T) {
+		ik := "dt-silent-null"
+		if n := f.mppN(t, "pv_dt_silent_null", dtRow(ik, "NULL::text"), "explicit null"); n != 1 {
+			t.Fatalf("explicit NULL: inserted %d rows, want 1", n)
+		}
+		if got := stored(t, ik); got != nil {
+			t.Errorf("explicit NULL: deal_type = %q, want NULL", *got)
+		}
+		f.mppErr(t, "pv_dt_silent_omitted", dtRow("dt-silent-omitted", ""), "omitted", "deal_type (MISSING)")
+	})
+
+	// Every seeded code must round-trip, or the gate is too strict for the vocabulary it enforces.
+	t.Run("every seeded code round-trips", func(t *testing.T) {
+		codes := f.refDealTypeCodes(t)
+		for i, code := range codes {
+			ik := "dt-rt-" + strconv.Itoa(i)
+			body := dtRow(ik, "'"+code+"'::text")
+			if n := f.mppN(t, "pv_dt_rt_"+strconv.Itoa(i), body, "round-trip"); n != 1 {
+				t.Fatalf("%s: inserted %d rows, want 1", code, n)
+			}
+			if got := stored(t, ik); got == nil || *got != code {
+				t.Errorf("%s: deal_type = %v, want %q", code, got, code)
+			}
+		}
+	})
+
+	// The gate must read ref_deal_type rather than a copied IN-list, or the vocabulary drifts the moment
+	// a code is added. Asserted on the mechanism, and ordered reject-then-seed because the reference
+	// tables are append-only (DELETE is trigger-blocked), so the code cannot be withdrawn afterwards.
+	t.Run("vocabulary comes from ref_deal_type", func(t *testing.T) {
+		const code = "ZZ_TEST_ONLY_DEAL_TYPE"
+
+		body := dtRow("dt-refdriven-before", "'"+code+"'::text")
+		f.mppErr(t, "pv_dt_refdriven_before", body, "ref-driven", "position_state_deal_type_fkey")
+
+		if _, err := f.pool.Exec(f.ctx,
+			`INSERT INTO ref_deal_type (deal_type, direction, description)
+			 VALUES ($1, 'LONG', 'test-only; added by psTestDealTypeCode')`, code); err != nil {
+			t.Fatalf("seed %s: %v", code, err)
+		}
+
+		ik := "dt-refdriven-after"
+		body2 := dtRow(ik, "'"+code+"'::text")
+		if n := f.mppN(t, "pv_dt_refdriven_after", body2, "ref-driven"); n != 1 {
+			t.Fatalf("seeded code: inserted %d rows, want 1", n)
+		}
+		if got := stored(t, ik); got == nil || *got != code {
+			t.Errorf("seeded code: deal_type = %v, want %q", got, code)
+		}
+	})
+}
+
+// psTestDealTypeCodeDirectInsert covers the writer the materializer's gates do not bind: stl_readwrite
+// holds INSERT on position_state directly. Measured as stl_readwrite -- as the owning test role every
+// case is accepted regardless, so a superuser connection would prove nothing.
+//
+// Fails on the pre-CHECK code, which accepted 'loan', ”, '   ', a newline and a 1MB string through
+// this path, none of which UPDATE or DELETE can then repair.
+func psTestDealTypeCodeDirectInsert(t *testing.T, f *psFixture) {
+	rw, doneRW := f.asReadWrite(t)
+	defer doneRW()
+
+	ins := func(t *testing.T, code any, bn int) error {
+		t.Helper()
+		_, err := rw.Exec(f.ctx,
+			`INSERT INTO position_state
+			   (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
+			    block_number, block_version, processing_version, block_timestamp, projection,
+			    build_id, deal_type)
+			 VALUES (decode(repeat('cd',32),'hex'), 1, 10, 'dt-direct', repeat('a',40), 5,
+			         $1, 0, 0, '2026-01-01'::timestamptz, 'dt.direct.view', 0, $2)`, bn, code)
+		return err
+	}
+
+	t.Run("direct INSERT rejects malformed codes", func(t *testing.T) {
+		for i, c := range []struct{ name, code string }{
+			{"wrong_case", "loan"},
+			{"empty", ""},
+			{"whitespace", "   "},
+			{"leading_space", " LOAN"},
+			{"trailing_newline", "LOAN\n"},
+			{"embedded_newline", "LOAN\n-- rubbish"},
+			{"lowercase_tail", "LOAn"},
+			{"leading_digit", "1LOAN"},
+			{"one_megabyte", strings.Repeat("X", 1<<20)},
+		} {
+			if err := ins(t, c.code, 500+i); err == nil {
+				t.Errorf("%s: direct INSERT accepted %.40q, want rejection", c.name, c.code)
+			} else if !strings.Contains(err.Error(), "position_state_deal_type_fkey") {
+				t.Errorf("%s: rejected by %v, want the ref_deal_type FK", c.name, firstLineOf(err.Error()))
+			}
+		}
+	})
+
+	// Negative controls: the CHECK must not have made the column unusable or effectively NOT NULL.
+	t.Run("direct INSERT accepts a real code and NULL", func(t *testing.T) {
+		if err := ins(t, "LOAN", 600); err != nil {
+			t.Errorf("direct INSERT of 'LOAN': %v", err)
+		}
+		if err := ins(t, nil, 601); err != nil {
+			t.Errorf("direct INSERT of NULL: %v", err)
+		}
+		if err := ins(t, "COLLATERAL", 602); err != nil {
+			t.Errorf("direct INSERT of 'COLLATERAL': %v", err)
+		}
+	})
+
+	// stl_readwrite's table-level GRANT INSERT must reach the new column, and every code in the
+	// vocabulary must be storable through the role that writes it.
+	t.Run("the app role can store every ref_deal_type code", func(t *testing.T) {
+		var ok bool
+		if err := f.pool.QueryRow(f.ctx,
+			`SELECT has_column_privilege('stl_readwrite','position_state','deal_type','INSERT')`).Scan(&ok); err != nil {
+			t.Fatalf("check column privilege: %v", err)
+		}
+		if !ok {
+			t.Error("stl_readwrite has no INSERT privilege on position_state.deal_type")
+		}
+		codes := f.refDealTypeCodes(t)
+		for i, code := range codes {
+			if err := ins(t, code, 700+i); err != nil {
+				t.Errorf("ref_deal_type code %q is not storable: %v", code, firstLineOf(err.Error()))
+			}
+		}
+	})
+}
+
+// asReadWrite returns a pool connected as stl_readwrite. The fixture's own pool owns the schema, and
+// an owner bypasses the ACLs these subtests are about.
+func (f *psFixture) asReadWrite(t *testing.T) (*pgxpool.Pool, func()) {
+	t.Helper()
+	// Roles are cluster-scoped, not per-database, and this fixture's container is shared across the
+	// whole package -- so the LOGIN has to come back off, or every later test in this container runs
+	// against a stl_readwrite that can connect.
+	if _, err := f.pool.Exec(f.ctx, `ALTER ROLE stl_readwrite WITH LOGIN PASSWORD 'psfixture'`); err != nil {
+		t.Fatalf("give stl_readwrite a login: %v", err)
+	}
+
+	cfg := f.pool.Config().Copy()
+	cfg.ConnConfig.User = "stl_readwrite"
+	cfg.ConnConfig.Password = "psfixture"
+	pool, err := pgxpool.NewWithConfig(f.ctx, cfg)
+	if err != nil {
+		t.Fatalf("connect as stl_readwrite: %v", err)
+	}
+	// Returned rather than registered with t.Cleanup: the fixture closes its own pool with a plain
+	// defer, and defer runs BEFORE t.Cleanup, so a t.Cleanup revoke reaches a closed pool.
+	done := func() {
+		pool.Close()
+		if _, err := f.pool.Exec(f.ctx, `ALTER ROLE stl_readwrite WITH NOLOGIN PASSWORD NULL`); err != nil {
+			t.Errorf("revoke the stl_readwrite login: %v", err)
+		}
+	}
+	var who string
+	if err := pool.QueryRow(f.ctx, `SELECT current_user`).Scan(&who); err != nil {
+		t.Fatalf("confirm role: %v", err)
+	}
+	if who != "stl_readwrite" {
+		t.Fatalf("connected as %q, want stl_readwrite", who)
+	}
+	return pool, done
+}
+
+func firstLineOf(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+// refDealTypeCodes lists the seeded vocabulary. One helper because two subtests need it and the loop
+// is easy to write without checking rows.Err(), which would silently truncate the list and let an
+// "every code" assertion pass over part of it.
+func (f *psFixture) refDealTypeCodes(t *testing.T) []string {
+	t.Helper()
+	rows, err := f.pool.Query(f.ctx, `SELECT deal_type FROM ref_deal_type ORDER BY deal_type`)
+	if err != nil {
+		t.Fatalf("list ref_deal_type: %v", err)
+	}
+	defer rows.Close()
+	var codes []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			t.Fatalf("scan ref_deal_type: %v", err)
+		}
+		codes = append(codes, c)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate ref_deal_type: %v", err)
+	}
+	if len(codes) < 5 {
+		t.Fatalf("ref_deal_type has %d codes, expected the seeded vocabulary", len(codes))
+	}
+	return codes
+}
+
+// A restore, a manual apply, or a partial-apply recovery re-runs the file. Every statement in it is
+// guarded except ADD CONSTRAINT, which Postgres offers no IF NOT EXISTS for -- so it failed with
+// SQLSTATE 42710 until the DO block went in. #752 carries the same test for the same reason.
+func psTestDealTypeCodeMigrationIsReRunnable(t *testing.T, f *psFixture) {
+	t.Run("the migration re-applies cleanly", func(t *testing.T) {
+		raw, err := os.ReadFile(filepath.Join(getMigrationsPath(),
+			"20260818_140000_add_position_state_deal_type.sql"))
+		if err != nil {
+			t.Fatalf("read migration: %v", err)
+		}
+		if _, err := f.pool.Exec(f.ctx, string(raw)); err != nil {
+			t.Errorf("re-applying the migration failed: %v", err)
+		}
+	})
+}
+
+// psTestBlockTimeMonotonicPerPosition: the caches order by block_number and date by block_timestamp, so a
+// higher block with an earlier instant makes position_current and position_daily disagree about the
+// newest observation. On-chain that pairing is impossible; as input it is an error, and the design
+// harness produced the disagreement on 24/24 seeds before this check existed.
+func psTestBlockTimeMonotonicPerPosition(t *testing.T, f *psFixture) {
+	one := func(ik string, bn int, ts string) string {
+		return "(1::int,10::bigint,'" + ik + "'::text,'" + strings.Repeat("a", 40) + "'::text,5::numeric,'LOAN'::text," +
+			strconv.Itoa(bn) + "::bigint,0::int,0::int,'" + ts + "'::timestamptz)"
+	}
+	t.Run("within one batch", func(t *testing.T) {
+		body := `SELECT * FROM (VALUES ` + one("mono-batch", 100, "2026-03-02T00:00:00Z") + "," +
+			one("mono-batch", 200, "2026-03-01T00:00:00Z") + `) ` + mppCols
+		f.mppErr(t, "pv_mono_batch", body, "monotonic", "earlier block_timestamp")
+	})
+	t.Run("against stored history, in either direction", func(t *testing.T) {
+		if n := f.mppN(t, "pv_mono_hist", `SELECT * FROM (VALUES `+one("mono-hist", 200, "2026-03-02T00:00:00Z")+`) `+mppCols, "seed"); n != 1 {
+			t.Fatalf("seed inserted %d, want 1", n)
+		}
+		f.mppErr(t, "pv_mono_hist", `SELECT * FROM (VALUES `+one("mono-hist", 100, "2026-03-03T00:00:00Z")+`) `+mppCols,
+			"lower block, later instant", "earlier block_timestamp")
+		f.mppErr(t, "pv_mono_hist", `SELECT * FROM (VALUES `+one("mono-hist", 300, "2026-03-01T00:00:00Z")+`) `+mppCols,
+			"higher block, earlier instant", "earlier block_timestamp")
+	})
+	// Negative controls: equal instants across blocks and same-block corrections must still insert, and
+	// two positions are independent -- or the check would reject legitimate input.
+	t.Run("monotonic, same-instant and cross-position cases still insert", func(t *testing.T) {
+		body := `SELECT * FROM (VALUES ` + one("mono-ok", 100, "2026-03-01T00:00:00Z") + "," +
+			one("mono-ok", 200, "2026-03-01T00:00:00Z") + "," +
+			one("mono-ok", 300, "2026-03-02T00:00:00Z") + `) ` + mppCols
+		if n := f.mppN(t, "pv_mono_ok", body, "monotonic ok"); n != 3 {
+			t.Errorf("monotonic history inserted %d, want 3", n)
+		}
+		body2 := `SELECT * FROM (VALUES ` + one("mono-a", 100, "2026-03-05T00:00:00Z") + "," +
+			one("mono-b", 200, "2026-03-04T00:00:00Z") + `) ` + mppCols
+		if n := f.mppN(t, "pv_mono_two", body2, "two positions"); n != 2 {
+			t.Errorf("two independent positions inserted %d, want 2", n)
+		}
+	})
+}
+
+// psTestCompletedRunIsRecorded: a position that stops being observed keeps its last quantity forever,
+// and only block_timestamp age hinted at it. A run record per projection makes it a fact: swept up to
+// block N and not seen. Written inside the materializer's transaction, so a failed run leaves nothing.
+func psTestCompletedRunIsRecorded(t *testing.T, f *psFixture) {
+	runs := func(t *testing.T, view string) (n int, latest *time.Time) {
+		t.Helper()
+		if err := f.pool.QueryRow(f.ctx,
+			`SELECT count(*), max(block_timestamp) FROM position_projection_run WHERE projection = 'public.'||$1`,
+			view).Scan(&n, &latest); err != nil {
+			t.Fatalf("read runs for %s: %v", view, err)
+		}
+		return
+	}
+	row := func(ik string, bn int) string {
+		return "(1::int,10::bigint,'" + ik + "'::text,'" + strings.Repeat("a", 40) + "'::text,5::numeric,'LOAN'::text," +
+			strconv.Itoa(bn) + "::bigint,0::int,0::int,'2026-03-0" + strconv.Itoa(1+bn%9) + "T00:00:00Z'::timestamptz)"
+	}
+	day := func(d int) time.Time { return time.Date(2026, 3, d, 0, 0, 0, 0, time.UTC) }
+
+	t.Run("one row per completed run, carrying the run's latest block_timestamp", func(t *testing.T) {
+		if n := f.mppN(t, "pv_run_a", `SELECT * FROM (VALUES `+row("run-a", 100)+","+row("run-a", 250)+`) `+mppCols, "first"); n != 2 {
+			t.Fatalf("first run inserted %d, want 2", n)
+		}
+		n, latest := runs(t, "pv_run_a")
+		if n != 1 || latest == nil || !latest.Equal(day(8)) {
+			t.Errorf("after one run: %d rows, latest %v; want 1 row at 2026-03-08 (block 250's instant)", n, latest)
+		}
+		// an idempotent re-run inserts nothing but is still a completed sweep
+		if k := f.mppN(t, "pv_run_a", `SELECT * FROM (VALUES `+row("run-a", 100)+","+row("run-a", 250)+`) `+mppCols, "rerun"); k != 0 {
+			t.Fatalf("re-run inserted %d, want 0", k)
+		}
+		if n, _ := runs(t, "pv_run_a"); n != 2 {
+			t.Errorf("after a no-op re-run: %d run rows, want 2 -- a sweep that saw nothing new still completed", n)
+		}
+	})
+
+	t.Run("two runs of one view inside one transaction are two rows", func(t *testing.T) {
+		if _, err := f.pool.Exec(f.ctx, `CREATE OR REPLACE VIEW pv_run_tx AS SELECT * FROM (VALUES `+row("run-tx", 100)+`) `+mppCols); err != nil {
+			t.Fatal(err)
+		}
+		tx, err := f.pool.Begin(f.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback(f.ctx) }()
+		for i := 0; i < 2; i++ {
+			if _, err := tx.Exec(f.ctx, `SELECT materialize_position_projection('pv_run_tx'::regclass)`); err != nil {
+				t.Fatalf("run %d in one transaction: %v (created_at must be clock time, not the transaction time)", i+1, err)
+			}
+		}
+		if err := tx.Commit(f.ctx); err != nil {
+			t.Fatal(err)
+		}
+		if n, _ := runs(t, "pv_run_tx"); n != 2 {
+			t.Errorf("two runs in one transaction recorded %d rows, want 2", n)
+		}
+	})
+
+	t.Run("a failed run records nothing", func(t *testing.T) {
+		// A double-emitted key fails the run before its inserts; the run row must roll back with it.
+		body := `SELECT * FROM (VALUES ` + row("run-fail", 100) + "," + row("run-fail", 100) + `) ` + mppCols
+		f.mppErr(t, "pv_run_fail", body, "must fail", "double-emits")
+		if n, _ := runs(t, "pv_run_fail"); n != 0 {
+			t.Errorf("a failed run left %d run rows, want 0", n)
+		}
+	})
+
+	t.Run("an empty projection still records a completed sweep, with no instant", func(t *testing.T) {
+		body := `SELECT * FROM (VALUES ` + row("run-empty", 1) + `) ` + mppCols + ` WHERE false`
+		if n := f.mppN(t, "pv_run_empty", body, "empty"); n != 0 {
+			t.Fatalf("empty projection inserted %d, want 0", n)
+		}
+		n, latest := runs(t, "pv_run_empty")
+		if n != 1 || latest != nil {
+			t.Errorf("empty sweep: %d rows, latest %v; want 1 row with NULL block_timestamp", n, latest)
+		}
+	})
+
+	t.Run("a mixed on-chain and off-chain projection records a comparable instant", func(t *testing.T) {
+		// An off-chain row's block_number is epoch seconds (~1.7e9); max(block_number) would have made
+		// every on-chain position in the projection look stale forever. The instant is comparable.
+		body := `SELECT * FROM (VALUES ` + row("run-mixed-on", 100) + `,` +
+			`(NULL::int,NULL::bigint,'run-mixed-off'::text,'` + strings.Repeat("b", 40) + `'::text,5::numeric,'CUSTODY'::text,` +
+			`1772409600::bigint,0::int,0::int,'2026-03-02T00:00:00Z'::timestamptz)) ` + mppCols
+		if n := f.mppN(t, "pv_run_mixed", body, "mixed"); n != 2 {
+			t.Fatalf("mixed projection inserted %d, want 2", n)
+		}
+		_, latest := runs(t, "pv_run_mixed")
+		if latest == nil || !latest.Equal(day(2)) {
+			t.Errorf("mixed sweep latest = %v, want 2026-03-02 (the later of the two instants)", latest)
+		}
+	})
+}
+
+// psTestClosure: the materializer decides which emitted rows are observations. Leading zeros and
+// repeated zeros are not; the first zero after a positive is the close, and a zero at the same block as
+// its predecessor (a reorg or reprocess of the close) is kept so the canonical version survives.
+func psTestClosure(t *testing.T, f *psFixture) {
+	row := func(ik string, qty, bn, bv, pv int, ts string) string {
+		return "(1::int,10::bigint,'" + ik + "'::text,'" + strings.Repeat("c", 40) + "'::text," + strconv.Itoa(qty) + "::numeric,'LOAN'::text," +
+			strconv.Itoa(bn) + "::bigint," + strconv.Itoa(bv) + "::int," + strconv.Itoa(pv) + "::int,'" + ts + "'::timestamptz)"
+	}
+	stored := func(t *testing.T, ik string) []string {
+		t.Helper()
+		var got []string
+		if err := f.pool.QueryRow(f.ctx, `
+			SELECT coalesce(array_agg(block_number::text || 'v' || block_version::text || 'p' || processing_version::text || '=' || quantity::text
+			                          ORDER BY block_number, block_version, processing_version), '{}')
+			FROM position_state WHERE instrument_key = $1`, ik).Scan(&got); err != nil {
+			t.Fatalf("read %s: %v", ik, err)
+		}
+		return got
+	}
+	for _, c := range []struct {
+		name string
+		rows string
+		want []string
+	}{
+		{"leading zeros are dropped, the first positive opens", row("cl-lead", 0, 100, 0, 0, "2026-05-01") + "," + row("cl-lead", 0, 200, 0, 0, "2026-05-02") + "," + row("cl-lead", 7, 300, 0, 0, "2026-05-03"), []string{"300v0p0=7"}},
+		{"the first zero after a positive is the close, repeated zeros are dropped", row("cl-close", 5, 100, 0, 0, "2026-05-01") + "," + row("cl-close", 0, 200, 0, 0, "2026-05-02") + "," + row("cl-close", 0, 300, 0, 0, "2026-05-03"), []string{"100v0p0=5", "200v0p0=0"}},
+		{"a reorg sibling of the closing block is kept", row("cl-reorg", 5, 100, 0, 0, "2026-05-01") + "," + row("cl-reorg", 0, 200, 0, 0, "2026-05-02") + "," + row("cl-reorg", 0, 200, 1, 0, "2026-05-02T00:00:12Z"), []string{"100v0p0=5", "200v0p0=0", "200v1p0=0"}},
+		{"a reprocess sibling of the closing block is kept", row("cl-repro", 5, 100, 0, 0, "2026-05-01") + "," + row("cl-repro", 0, 200, 0, 0, "2026-05-02") + "," + row("cl-repro", 0, 200, 0, 1, "2026-05-02"), []string{"100v0p0=5", "200v0p0=0", "200v0p1=0"}},
+		{"a never-open position with a reorged leading zero emits nothing", row("cl-never", 0, 100, 0, 0, "2026-05-01") + "," + row("cl-never", 0, 100, 1, 0, "2026-05-01T00:00:12Z"), []string{}},
+		{"a re-open after a close survives", row("cl-reopen", 5, 100, 0, 0, "2026-05-01") + "," + row("cl-reopen", 0, 200, 0, 0, "2026-05-02") + "," + row("cl-reopen", 7, 300, 0, 0, "2026-05-03"), []string{"100v0p0=5", "200v0p0=0", "300v0p0=7"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f.mppN(t, "pv_"+strings.ReplaceAll(strings.Fields(c.name)[0]+strings.Fields(c.name)[1], "-", ""), `SELECT * FROM (VALUES `+c.rows+`) `+mppCols, c.name)
+			ik := strings.SplitN(strings.TrimPrefix(c.rows, "(1::int,10::bigint,'"), "'", 2)[0]
+			if got := stored(t, ik); strings.Join(got, ",") != strings.Join(c.want, ",") {
+				t.Errorf("stored %v, want %v", got, c.want)
+			}
+		})
+	}
+
+	t.Run("an out-of-order arrival: a zero seen first is a leading zero, and becomes the close once the positive lands", func(t *testing.T) {
+		const ik = "cl-ooo"
+		if n := f.mppN(t, "pv_clooo", `SELECT * FROM (VALUES `+row(ik, 0, 200, 0, 0, "2026-05-02")+`) `+mppCols, "zero first"); n != 0 {
+			t.Fatalf("a lone zero inserted %d rows, want 0", n)
+		}
+		if n := f.mppN(t, "pv_clooo", `SELECT * FROM (VALUES `+row(ik, 5, 100, 0, 0, "2026-05-01")+","+row(ik, 0, 200, 0, 0, "2026-05-02")+`) `+mppCols, "history complete"); n != 2 {
+			t.Fatalf("the completed history inserted %d rows, want 2 (the open and the close)", n)
+		}
+		if got := stored(t, ik); strings.Join(got, ",") != "100v0p0=5,200v0p0=0" {
+			t.Errorf("stored %v, want the open and the close", got)
+		}
+	})
+}
+
+// psTestOffChainObservations: a custody snapshot has no block. The observation key is (position, block,
+// versions), so distinct snapshots need distinct blocks; off-chain rows carry chain_id NULL and
+// block_number = floor(epoch seconds of block_timestamp), which the materializer enforces.
+func psTestOffChainObservations(t *testing.T, f *psFixture) {
+	epoch := func(ts string) int64 {
+		tm, err := time.Parse(time.RFC3339, ts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tm.Unix()
+	}
+	snap := func(ik string, qty int, ts string, bn int64) string {
+		return "(NULL::int,NULL::bigint,'" + ik + "'::text,'" + strings.Repeat("c", 40) + "'::text," + strconv.Itoa(qty) +
+			"::numeric,'CUSTODY'::text," + strconv.FormatInt(bn, 10) + "::bigint,0::int,0::int,'" + ts + "'::timestamptz)"
+	}
+	onchain := func(ik string, bn int, ts string) string {
+		return "(1::int,10::bigint,'" + ik + "'::text,'" + strings.Repeat("c", 40) + "'::text,5::numeric,'LOAN'::text," +
+			strconv.Itoa(bn) + "::bigint,0::int,0::int,'" + ts + "'::timestamptz)"
+	}
+	t1, t2, t3 := "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", "2026-05-03T00:00:00Z"
+
+	t.Run("snapshots are distinct observations and newer-wins follows the instant", func(t *testing.T) {
+		body := `SELECT * FROM (VALUES ` + snap("cust-a", 10, t1, epoch(t1)) + "," + snap("cust-a", 20, t2, epoch(t2)) + "," +
+			snap("cust-a", 15, t3, epoch(t3)) + `) ` + mppCols
+		if n := f.mppN(t, "pv_cust_a", body, "snapshots"); n != 3 {
+			t.Fatalf("three snapshots inserted %d rows, want 3", n)
+		}
+		var newest int
+		if err := f.pool.QueryRow(f.ctx, `SELECT quantity FROM position_state WHERE instrument_key = 'cust-a'
+			 ORDER BY block_number DESC, block_version DESC, processing_version DESC, block_timestamp DESC LIMIT 1`).Scan(&newest); err != nil {
+			t.Fatal(err)
+		}
+		if newest != 15 {
+			t.Errorf("newest off-chain observation has quantity %d, want 15", newest)
+		}
+	})
+
+	t.Run("an off-chain row whose block_number is not its instant is refused", func(t *testing.T) {
+		f.mppErr(t, "pv_cust_bad", `SELECT * FROM (VALUES `+snap("cust-bad", 10, t1, 0)+`) `+mppCols, "block 0", "not floor(epoch")
+		f.mppErr(t, "pv_cust_bad2", `SELECT * FROM (VALUES `+snap("cust-bad2", 10, t1, epoch(t1)+1)+`) `+mppCols, "off by one", "not floor(epoch")
+	})
+
+	// Negative controls: the epoch rule does not touch on-chain rows, and one projection may carry
+	// off-chain and on-chain POSITIONS side by side.
+	t.Run("on-chain rows are untouched and the two kinds may share a projection", func(t *testing.T) {
+		body := `SELECT * FROM (VALUES ` + snap("cust-b", 10, t1, epoch(t1)) + "," + onchain("chain-b", 100, t1) + `) ` + mppCols
+		if n := f.mppN(t, "pv_cust_both", body, "two positions"); n != 2 {
+			t.Errorf("two positions inserted %d, want 2", n)
 		}
 	})
 }

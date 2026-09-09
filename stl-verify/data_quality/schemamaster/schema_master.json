@@ -13,7 +13,6 @@
     "ref_entity_type",
     "ref_industry_group_l2",
     "ref_origination_type",
-    "position_classification",
     "position_entity_link",
     "ref_sector_l1",
     "ref_security_subtype_l3",
@@ -340,6 +339,10 @@
       "class": "S"
     },
     "custody_type": {
+      "type": "text",
+      "class": "S"
+    },
+    "deal_type": {
       "type": "text",
       "class": "S"
     },
@@ -1479,6 +1482,10 @@
     "oracle_asset": {
       "type": "config",
       "owner": "pricing"
+    },
+    "position_projection_run": {
+      "type": "infrastructure",
+      "owner": "prime"
     },
     "position_state": {
       "type": "derived",
