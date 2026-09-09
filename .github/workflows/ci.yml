@@ -52,6 +52,7 @@ jobs:
       go: ${{ steps.changed-files.outputs.go_any_changed }}
       python: ${{ steps.changed-files.outputs.python_any_changed }}
       ts: ${{ steps.changed-files.outputs.ts_any_changed }}
+      k8s: ${{ steps.changed-files.outputs.k8s_any_changed }}
       # ORB-362: a roster/renderer change must run the deploy even with no code
       # change — that is how a new image entry reaches the overlays.
       deploy: ${{ steps.changed-files.outputs.deploy_any_changed }}
@@ -131,7 +132,9 @@ jobs:
     needs: detect-changes
     if: |
       !cancelled() &&
-      (github.event_name == 'merge_group' || needs.detect-changes.outputs.go == 'true')
+      (github.event_name == 'merge_group' ||
+       needs.detect-changes.outputs.go == 'true' ||
+       needs.detect-changes.outputs.k8s == 'true')
     uses: ./.github/workflows/go-ci.yml
     secrets: inherit
 

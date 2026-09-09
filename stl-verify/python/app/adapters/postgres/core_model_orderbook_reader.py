@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 _BOOK_SYMBOLS: dict[str, list[str]] = {
     "BTC": ["BTC-USD", "BTC-USDT", "XBT/USD"],
     "ETH": ["ETH-USD", "ETH-USDT", "ETH/USD"],
+    # Flowing since the 25 Aug 2026 staging venue expansion (ARCT-316/319/321);
+    # prod still indexes BTC/ETH only, so its syrup markets stay on parquet.
+    "XRP": ["XRP-USD", "XRP-USDT", "XRP/USD"],
+    "HYPE": ["HYPE-USD", "HYPE-USDT", "HYPE/USD"],
 }
 
 # Token -> canonical book, matching the routing table in the model README:

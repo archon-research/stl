@@ -4,7 +4,7 @@
 # Include language-agnostic linting targets
 include lint.mk
 
-.PHONY: all test test-race test-integration test-integration-shard integration-shard-check ci-service-check test-templates-clean lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-watcher-robinhood run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax run-allocation-tracker-robinhood help ci ci-checks install-hooks format \
+.PHONY: golangci-lint-new all test test-race test-integration test-integration-shard integration-shard-check ci-service-check test-templates-clean lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-watcher-robinhood run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-sparklend-position-tracker-arbitrum run-sparklend-position-tracker-optimism run-sparklend-position-tracker-base run-allocation-tracker run-allocation-tracker-avax run-allocation-tracker-robinhood help ci ci-checks install-hooks format \
 	dev-up dev-up-rebuild dev-up-workers dev-up-or-resume dev-preflight dev-env dev-secrets dev-env-files dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-image _docker-release-go-service _docker-build-go-service _docker-push-go-service \
@@ -189,6 +189,21 @@ run-sparklend-position-tracker-avax:
 	@echo "==> Running Avalanche SparkLend position tracker (chain_id=43114)..."
 	@set -a && . cmd/workers/sparklend-indexer/.env.avax && [ -f cmd/workers/sparklend-indexer/.env.avax.local ] && . cmd/workers/sparklend-indexer/.env.avax.local; set +a && go run ./cmd/workers/sparklend-indexer
 
+# Run the Arbitrum SparkLend position tracker (requires dev-up first)
+run-sparklend-position-tracker-arbitrum:
+	@echo "==> Running Arbitrum SparkLend position tracker (chain_id=42161)..."
+	@set -a && . cmd/workers/sparklend-indexer/.env.arbitrum && [ -f cmd/workers/sparklend-indexer/.env.arbitrum.local ] && . cmd/workers/sparklend-indexer/.env.arbitrum.local; set +a && go run ./cmd/workers/sparklend-indexer
+
+# Run the Optimism SparkLend position tracker (requires dev-up first)
+run-sparklend-position-tracker-optimism:
+	@echo "==> Running Optimism SparkLend position tracker (chain_id=10)..."
+	@set -a && . cmd/workers/sparklend-indexer/.env.optimism && [ -f cmd/workers/sparklend-indexer/.env.optimism.local ] && . cmd/workers/sparklend-indexer/.env.optimism.local; set +a && go run ./cmd/workers/sparklend-indexer
+
+# Run the Base SparkLend position tracker (requires dev-up first)
+run-sparklend-position-tracker-base:
+	@echo "==> Running Base SparkLend position tracker (chain_id=8453)..."
+	@set -a && . cmd/workers/sparklend-indexer/.env.base && [ -f cmd/workers/sparklend-indexer/.env.base.local ] && . cmd/workers/sparklend-indexer/.env.base.local; set +a && go run ./cmd/workers/sparklend-indexer
+
 # Run one CORE model pass on the host against the dev-up database (requires dev-up
 # first). This is the --once path: no Temporal, computes and writes, then exits.
 # The scheduled worker is the Deployment that dev-up rolls out.
@@ -318,15 +333,17 @@ shared-container-check:
 	  exit 1; \
 	fi
 
-# Run staticcheck with all checks (install if needed)
-staticcheck:
-	@echo "==> Running staticcheck..."
-	$(GOBIN)/staticcheck ./...
-
 # Run golangci-lint with all linters (install if needed)
 golangci-lint:
 	@echo "==> Running golangci-lint..."
 	$(GOBIN)/golangci-lint run
+
+# Function-length / complexity linters on changed code only (VEC-465). Gated on
+# the merge base with origin/main so pre-existing long functions stay green;
+# a new or changed function past the thresholds in .golangci.yml fails.
+golangci-lint-new:
+	@echo "==> Running golangci-lint (funlen/gocognit/cyclop, changed code vs origin/main)..."
+	$(GOBIN)/golangci-lint run --enable-only=funlen,gocognit,cyclop --new-from-merge-base=origin/main
 
 # Run govulncheck for security vulnerabilities (install if needed)
 # GO-2026-4887, GO-2026-4883: docker/docker vulns with no upstream fix — only affects test code (testcontainers)
@@ -372,10 +389,16 @@ e2e-real-blocks:
 	[ -n "$$ALCHEMY_API_KEY" ] || { echo "ERROR: ALCHEMY_API_KEY is empty; put it in ../.env.secrets"; exit 1; }; \
 	E2E_BLOCKS="$(BLOCKS)" go test -tags=integration,e2e -run TestE2E_RealBlocks -v -timeout=25m ./cmd/workers/morpho-indexer/
 
+# Spot-check the registered L2 Aave V3 reserve facts against the real per-chain RPC.
+# Needs ALCHEMY_API_KEY in ../.env.secrets.
+e2e-real-reserve-facts:
+	@set -a; if [ -f ../.env.secrets ]; then . ../.env.secrets; fi; set +a; \
+	[ -n "$$ALCHEMY_API_KEY" ] || { echo "ERROR: ALCHEMY_API_KEY is empty; put it in ../.env.secrets"; exit 1; }; \
+	go test -tags=integration,e2e -run TestRealReserveFacts_L2 -v -timeout=10m ./internal/pkg/aavelike/
+
 # Install development tools
 tools:
 	@echo "==> Installing development tools..."
-	go install honnef.co/go/tools/cmd/staticcheck@latest
 	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 # keep in sync with .github/workflows/go-ci.yml
 	go install golang.org/x/vuln/cmd/govulncheck@latest
 	go install golang.org/x/tools/cmd/goimports@v0.49.0 # keep in sync with .github/workflows/go-ci.yml
@@ -386,7 +409,7 @@ tools:
 # CI target for lint/format/static/security checks. go vet, staticcheck, and
 # go fix -diff are covered by golangci-lint v2 (govet, staticcheck, modernize
 # linters — see .golangci.yml); running them separately tripled analysis time.
-ci-checks: fmt-check goimports-check tidy-check shared-container-check integration-shard-check ci-service-check check-overlay-images golangci-lint vulncheck
+ci-checks: fmt-check goimports-check tidy-check shared-container-check integration-shard-check ci-service-check check-overlay-images golangci-lint golangci-lint-new vulncheck
 
 # CI target: everything with strict checks
 # Order: fast checks first (fail fast), then expensive checks
@@ -745,6 +768,60 @@ dev-env-files:
 		"DEPLOY_ENV=development" \
 		"LOG_LEVEL=debug" \
 		> cmd/workers/sparklend-indexer/.env.avax && \
+	printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://arb-mainnet.g.alchemy.com/v2" \
+		"AWS_SQS_QUEUE_URL=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)/000000000000/stl-arbitrum-sparklend-position.fifo" \
+		"AWS_SQS_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
+		"AWS_S3_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
+		"AWS_ACCESS_KEY_ID=test" \
+		"AWS_SECRET_ACCESS_KEY=test" \
+		"AWS_REGION=us-east-1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
+		"REDIS_ADDR=127.0.0.1:$(KIND_HOST_REDIS_PORT)" \
+		"REDIS_PASSWORD=" \
+		"CHAIN_ID=42161" \
+		"S3_BUCKET=stl-sentineldevelopment-arbitrum-raw" \
+		"DEPLOY_ENV=development" \
+		"LOG_LEVEL=debug" \
+		> cmd/workers/sparklend-indexer/.env.arbitrum && \
+	printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://opt-mainnet.g.alchemy.com/v2" \
+		"AWS_SQS_QUEUE_URL=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)/000000000000/stl-optimism-sparklend-position.fifo" \
+		"AWS_SQS_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
+		"AWS_S3_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
+		"AWS_ACCESS_KEY_ID=test" \
+		"AWS_SECRET_ACCESS_KEY=test" \
+		"AWS_REGION=us-east-1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
+		"REDIS_ADDR=127.0.0.1:$(KIND_HOST_REDIS_PORT)" \
+		"REDIS_PASSWORD=" \
+		"CHAIN_ID=10" \
+		"S3_BUCKET=stl-sentineldevelopment-optimism-raw" \
+		"DEPLOY_ENV=development" \
+		"LOG_LEVEL=debug" \
+		> cmd/workers/sparklend-indexer/.env.optimism && \
+	printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://base-mainnet.g.alchemy.com/v2" \
+		"AWS_SQS_QUEUE_URL=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)/000000000000/stl-base-sparklend-position.fifo" \
+		"AWS_SQS_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
+		"AWS_S3_ENDPOINT=http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)" \
+		"AWS_ACCESS_KEY_ID=test" \
+		"AWS_SECRET_ACCESS_KEY=test" \
+		"AWS_REGION=us-east-1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
+		"REDIS_ADDR=127.0.0.1:$(KIND_HOST_REDIS_PORT)" \
+		"REDIS_PASSWORD=" \
+		"CHAIN_ID=8453" \
+		"S3_BUCKET=stl-sentineldevelopment-base-raw" \
+		"DEPLOY_ENV=development" \
+		"LOG_LEVEL=debug" \
+		> cmd/workers/sparklend-indexer/.env.base && \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
@@ -1856,8 +1933,9 @@ build-cronjob-%:
 	@echo "==> Built: dist/$*"
 
 # BUILD_GIT_HASH is stamped from HEAD rather than left at the .env's "dev": build_registry
-# keys rows by git hash, so "dev" collapses every local build into one build_id and the rows
-# a run wrote stop being attributable to the commit that wrote them. See run-allocation-tracker.
+# keys artefacts by (git_hash, service), so "dev" collapses every local build into one
+# build_id and the rows a run wrote stop being attributable to the commit that wrote them.
+# See run-allocation-tracker.
 run-cronjob-%:
 	@test -f cmd/cronjobs/$*/.env || { echo "ERROR: cmd/cronjobs/$*/.env is missing. 'make dev-env' writes only the jobs dev-env-files names; if $* is not one of them, copy a covered job's .env and edit the job-specific keys."; exit 1; }
 	@echo "==> Running $*..."

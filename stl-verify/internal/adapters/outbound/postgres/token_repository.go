@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -21,6 +22,7 @@ type TokenRepository struct {
 	pool      *pgxpool.Pool
 	logger    *slog.Logger
 	batchSize int
+	runID     buildregistry.RunID
 }
 
 // NewTokenRepository creates a new PostgreSQL Token repository.
@@ -29,7 +31,7 @@ type TokenRepository struct {
 //
 // Note: This function does not verify that the database connection is alive.
 // Use a separate health check or call pool.Ping() if connection validation is needed.
-func NewTokenRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) (*TokenRepository, error) {
+func NewTokenRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int, runID buildregistry.RunID) (*TokenRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
 	}
@@ -43,6 +45,7 @@ func NewTokenRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) 
 		pool:      pool,
 		logger:    logger,
 		batchSize: batchSize,
+		runID:     runID,
 	}, nil
 }
 
@@ -72,8 +75,8 @@ func (r *TokenRepository) GetOrCreateTokens(ctx context.Context, tx pgx.Tx, toke
 		// never refreshed on conflict, so RETURNING yields the stored values,
 		// which the scan checks against the incoming ones.
 		batch.Queue(
-			`INSERT INTO token (chain_id, address, symbol, decimals, created_at_block, metadata, updated_at)
-			 VALUES ($1, $2, $3, $4, $5, '{}', NOW())
+			`INSERT INTO token (chain_id, address, symbol, decimals, created_at_block, metadata, updated_at, run_id)
+			 VALUES ($1, $2, $3, $4, $5, '{}', NOW(), $6)
 			 ON CONFLICT (chain_id, address) DO UPDATE SET
 			     created_at_block = LEAST(token.created_at_block, EXCLUDED.created_at_block),
 			     updated_at = CASE
@@ -81,7 +84,7 @@ func (r *TokenRepository) GetOrCreateTokens(ctx context.Context, tx pgx.Tx, toke
 			         ELSE token.updated_at
 			     END
 			 RETURNING id, symbol, decimals`,
-			t.ChainID, t.Address.Bytes(), t.Symbol, t.Decimals, t.CreatedAtBlock,
+			t.ChainID, t.Address.Bytes(), t.Symbol, t.Decimals, t.CreatedAtBlock, r.runID,
 		)
 	}
 
@@ -200,8 +203,8 @@ func (r *TokenRepository) GetOrCreateToken(ctx context.Context, tx pgx.Tx, chain
 	// whichever worker wins the INSERT race, subsequent LEAST() merges still produce
 	// the correct minimum created_at_block.
 	err := tx.QueryRow(ctx,
-		`INSERT INTO token (chain_id, address, symbol, decimals, created_at_block, metadata, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, '{}', NOW())
+		`INSERT INTO token (chain_id, address, symbol, decimals, created_at_block, metadata, updated_at, run_id)
+		 VALUES ($1, $2, $3, $4, $5, '{}', NOW(), $6)
 		 ON CONFLICT (chain_id, address) DO UPDATE SET
 		     created_at_block = LEAST(token.created_at_block, EXCLUDED.created_at_block),
 		     updated_at = CASE
@@ -209,7 +212,7 @@ func (r *TokenRepository) GetOrCreateToken(ctx context.Context, tx pgx.Tx, chain
 		         ELSE token.updated_at
 		     END
 		 RETURNING id`,
-		chainID, address.Bytes(), symbol, decimals, createdAtBlock).Scan(&tokenID)
+		chainID, address.Bytes(), symbol, decimals, createdAtBlock, r.runID).Scan(&tokenID)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get or create token: %w", err)
 	}

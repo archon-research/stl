@@ -493,6 +493,7 @@ async def insert_maple_loan_collateral(
     decimals: int,
     value_usd: int | None,
     state: str = "Deposited",
+    liquidation_level: int | None = None,
     build_id: int = 0,
 ) -> None:
     """Insert a maple_loan_collateral snapshot row.
@@ -506,8 +507,9 @@ async def insert_maple_loan_collateral(
     await conn.execute(
         """
         INSERT INTO maple_loan_collateral
-            (maple_loan_id, synced_at, asset_symbol, asset_amount, asset_decimals, asset_value_usd, state, build_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            (maple_loan_id, synced_at, asset_symbol, asset_amount, asset_decimals, asset_value_usd, state,
+             liquidation_level, build_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         """,
         loan_id,
         synced_at,
@@ -516,6 +518,7 @@ async def insert_maple_loan_collateral(
         decimals,
         Decimal(value_usd) if value_usd is not None else None,
         state,
+        Decimal(liquidation_level) if liquidation_level is not None else None,
         build_id,
     )
 

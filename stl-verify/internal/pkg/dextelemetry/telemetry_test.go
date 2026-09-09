@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // Review-11 / A2: every datapoint must carry a `chain="<name>"` attribute (the
@@ -550,6 +551,32 @@ func newTestTelemetry(t *testing.T, prefix string, chainID int64) (*Telemetry, *
 		t.Fatalf("NewTelemetry: %v", err)
 	}
 	return tel, reader
+}
+
+// Guards the startup seed: VectorCurveIndexerStalled reads blocks.processed as
+// rate(success)==0, which cannot match an absent series. state.rows.written is
+// deliberately absent here — see NewTelemetry. See telemetry.SeedCounter.
+func TestNewTelemetry_SeedsAlertedSeriesAtZero(t *testing.T) {
+	_, reader := newTestTelemetry(t, "curve", 8453)
+
+	blockDPs := testutil.CollectSumDataPoints(t, reader, "curve.blocks.processed")
+	blockStatuses := map[string]int64{}
+	for _, dp := range blockDPs {
+		if chain := testutil.AttrValue(dp, "chain"); chain != "base" {
+			t.Errorf("curve.blocks.processed chain attr = %q, want %q", chain, "base")
+		}
+		blockStatuses[testutil.AttrValue(dp, "status")] = dp.Value
+	}
+	for _, status := range []string{"success", "error"} {
+		v, ok := blockStatuses[status]
+		if !ok {
+			t.Errorf("curve.blocks.processed missing status=%q series before any block", status)
+			continue
+		}
+		if v != 0 {
+			t.Errorf("curve.blocks.processed{status=%q} = %d, want 0", status, v)
+		}
+	}
 }
 
 func TestRecordPoolsNeverIndexed_RecordsZeroAsAValue(t *testing.T) {

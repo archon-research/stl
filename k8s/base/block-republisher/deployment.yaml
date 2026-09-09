@@ -70,4 +70,4 @@ spec:
       # the retry republishes the same event into the same slot — usually inside
       # SNS FIFO's five-minute deduplication window, and harmless outside it
       # because every consumer is append-only and re-derives identical rows.
-      terminationGracePeriodSeconds: 60
+      terminationGracePeriodSeconds: 90
