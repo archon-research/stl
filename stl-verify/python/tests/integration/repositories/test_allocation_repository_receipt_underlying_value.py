@@ -24,10 +24,14 @@ from decimal import Decimal
 import asyncpg
 import pytest
 import pytest_asyncio
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.adapters.postgres.allocation_position_repository import AllocationRepository
-from app.adapters.postgres.reference_as_of import utc_now
+from app.adapters.postgres.allocation_position_repository import (
+    _EXPOSURE_BUCKETS_SQL,
+    AllocationRepository,
+)
+from app.adapters.postgres.reference_as_of import ReferenceAsOf, utc_now
 from app.domain.entities.allocation import EthAddress
 from tests.integration.seed import (
     RUV_ATOKEN_BALANCE,
@@ -283,3 +287,54 @@ async def test_balance_basis_receipt_position_is_surfaced(repo) -> None:
     records = await _warning_records(repo)
     flagged = [r for r in records if "legacyReceipt" in getattr(r, "balance_basis_symbols", [])]
     assert flagged, "expected a warning flagging the receipt position valued on the balance fallback"
+
+
+# ---------------------------------------------------------------------------
+# VEC-712: the bucketed read resolves its latest prices from the
+# trigger-maintained ``token_price_current`` cache instead of LATERAL-ing into
+# the ``onchain_token_price`` hypertable behind it. The two must agree row for
+# row — the cache holds the newest row per (oracle, token) under the same
+# newer-wins comparison, so all that changed is which relation is scanned.
+# The columns are identically named, so the pre-swap query is the live one with
+# the relation substituted back; the guards below fail loudly if a later edit
+# makes that substitution a no-op, which would leave this test comparing a
+# query against itself.
+# ---------------------------------------------------------------------------
+
+_PRE_SWAP_EXPOSURE_BUCKETS_SQL = text(
+    str(_EXPOSURE_BUCKETS_SQL).replace("FROM token_price_current tpc", "FROM onchain_token_price tpc")
+)
+
+
+@pytest.mark.asyncio
+async def test_exposure_buckets_match_the_pre_swap_history_read(repo, async_db_url: str) -> None:
+    """Reading token_price_current yields the same buckets as LATERAL-ing into the history."""
+    assert "FROM token_price_current tpc" in str(_EXPOSURE_BUCKETS_SQL), (
+        "the bucketed read no longer resolves prices from the cache (VEC-712)"
+    )
+    assert "token_price_current" not in str(_PRE_SWAP_EXPOSURE_BUCKETS_SQL), (
+        "the pre-swap substitution missed a cache read; this test would compare the query against itself"
+    )
+
+    params = {
+        "proxy_addrs": [EthAddress(f"0x{RUV_LOCF_PROXY_HEX}").to_bytes()],
+        "from_timestamp": RUV_LOCF_BASE_TS,
+        "to_timestamp": RUV_LOCF_BASE_TS + dt.timedelta(hours=3),
+        "bucket_seconds": 3600.0,
+        "limit": 10,
+    }
+    reference = ReferenceAsOf(utc_now)
+
+    engine = create_async_engine(async_db_url)
+    try:
+        async with engine.connect() as conn:
+            before = (await conn.execute(_PRE_SWAP_EXPOSURE_BUCKETS_SQL, reference.params(**params))).fetchall()
+    finally:
+        await engine.dispose()
+
+    after = await _locf_exposure_by_bucket(repo)
+
+    assert any(row.exposure_usd for row in before), (
+        "expected a priced bucket; two unpriced reads would both COALESCE to 0 and match vacuously"
+    )
+    assert {row.bucket_start: row.exposure_usd for row in before} == after
