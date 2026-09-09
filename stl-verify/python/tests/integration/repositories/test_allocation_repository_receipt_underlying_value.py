@@ -35,6 +35,11 @@ from app.adapters.postgres.reference_as_of import ReferenceAsOf, utc_now
 from app.domain.entities.allocation import EthAddress
 from tests.integration.seed import (
     RUV_ATOKEN_BALANCE,
+    RUV_CONTEST_BALANCE,
+    RUV_CONTEST_HIGH_ORACLE_PRICE,
+    RUV_CONTEST_LOW_ORACLE_STALE_PRICE,
+    RUV_CONTEST_PROXY_HEX,
+    RUV_CONTEST_WINNING_PRICE,
     RUV_DIVERGENT_BALANCE,
     RUV_LEGACY_BALANCE,
     RUV_LOCF_BASE_TS,
@@ -212,15 +217,19 @@ async def test_morpho_vault_receipt_like_spark_usdc_bc_priced_by_redeemable_valu
 # ---------------------------------------------------------------------------
 
 
-async def _locf_exposure_by_bucket(repo: AllocationRepository) -> dict[dt.datetime, Decimal | None]:
+async def _exposure_by_bucket(repo: AllocationRepository, proxy_hex: str) -> dict[dt.datetime, Decimal | None]:
     buckets = await repo.list_exposure_buckets(
-        [EthAddress(f"0x{RUV_LOCF_PROXY_HEX}")],
+        [EthAddress(f"0x{proxy_hex}")],
         from_timestamp=RUV_LOCF_BASE_TS,
         to_timestamp=RUV_LOCF_BASE_TS + dt.timedelta(hours=3),
         bucket_seconds=3600.0,
         limit=10,
     )
     return {b.bucket_start: b.exposure_usd for b in buckets}
+
+
+async def _locf_exposure_by_bucket(repo: AllocationRepository) -> dict[dt.datetime, Decimal | None]:
+    return await _exposure_by_bucket(repo, RUV_LOCF_PROXY_HEX)
 
 
 @pytest.mark.asyncio
@@ -306,8 +315,9 @@ _PRE_SWAP_EXPOSURE_BUCKETS_SQL = text(
 )
 
 
+@pytest.mark.parametrize("proxy_hex", [RUV_LOCF_PROXY_HEX, RUV_CONTEST_PROXY_HEX])
 @pytest.mark.asyncio
-async def test_exposure_buckets_match_the_pre_swap_history_read(repo, async_db_url: str) -> None:
+async def test_exposure_buckets_match_the_pre_swap_history_read(repo, async_db_url: str, proxy_hex: str) -> None:
     """Reading token_price_current yields the same buckets as LATERAL-ing into the history."""
     assert "FROM token_price_current tpc" in str(_EXPOSURE_BUCKETS_SQL), (
         "the bucketed read no longer resolves prices from the cache (VEC-712)"
@@ -317,7 +327,7 @@ async def test_exposure_buckets_match_the_pre_swap_history_read(repo, async_db_u
     )
 
     params = {
-        "proxy_addrs": [EthAddress(f"0x{RUV_LOCF_PROXY_HEX}").to_bytes()],
+        "proxy_addrs": [EthAddress(f"0x{proxy_hex}").to_bytes()],
         "from_timestamp": RUV_LOCF_BASE_TS,
         "to_timestamp": RUV_LOCF_BASE_TS + dt.timedelta(hours=3),
         "bucket_seconds": 3600.0,
@@ -332,9 +342,29 @@ async def test_exposure_buckets_match_the_pre_swap_history_read(repo, async_db_u
     finally:
         await engine.dispose()
 
-    after = await _locf_exposure_by_bucket(repo)
+    after = await _exposure_by_bucket(repo, proxy_hex)
 
     assert any(row.exposure_usd for row in before), (
         "expected a priced bucket; two unpriced reads would both COALESCE to 0 and match vacuously"
     )
     assert {row.bucket_start: row.exposure_usd for row in before} == after
+
+
+@pytest.mark.asyncio
+async def test_exposure_bucket_prices_at_the_newest_revision_of_the_winning_oracle(repo) -> None:
+    """With two enabled oracles and a revised price, the bucket carries the newest revision.
+
+    Equality against the pre-swap query cannot show this on its own: a fixture
+    with one eligible candidate agrees either way. Here the low-id oracle's
+    revision (block 2100) must beat both its own superseded row (2000) and the
+    high-id oracle's row (2050) — so a cache that failed to retain the revision,
+    or an outer sort that ranked ``oracle_id`` above recency, lands on a
+    different, asserted-against price.
+    """
+    priced = [v for v in (await _exposure_by_bucket(repo, RUV_CONTEST_PROXY_HEX)).values() if v is not None]
+
+    assert priced, "expected at least one priced bucket for the contested-price position"
+    assert all(v == RUV_CONTEST_BALANCE * RUV_CONTEST_WINNING_PRICE for v in priced)
+    assert RUV_CONTEST_WINNING_PRICE not in (RUV_CONTEST_LOW_ORACLE_STALE_PRICE, RUV_CONTEST_HIGH_ORACLE_PRICE), (
+        "the losing prices must differ from the winner, or this test cannot fail"
+    )
