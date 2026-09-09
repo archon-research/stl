@@ -211,6 +211,142 @@ Semantics, independent of realization:
 - **Endpoint-kind and vocabulary rules are enforced on write** by the loader/validator, since
   they are cross-row.
 
+**The stores, as tables.** Both stores plus the registers, the shape table, and the seven
+governed vocabularies. Solid relationships are real foreign keys into the vocabularies. Dotted
+ones are **soft references**: an SCD2 id is non-unique by construction, so an endpoint resolves
+through the current view rather than a row-level foreign key — which is why endpoint-kind and
+cardinality are enforced by the validator above rather than by a constraint. Relationship
+labels carry the referencing column; the provenance block of §4 is elided on `SecEdge`.
+
+```mermaid
+erDiagram
+    SecNode {
+        text id PK "UK1"
+        text record_type PK "UK1"
+        int4 chain_id
+        text status FK "NodeStatusVocabulary"
+        jsonb attrs
+        date valid_from PK "UK1"
+        date valid_to PK "UK1"
+        bigint record_id "UK2"
+        int processing_version PK "UK1"
+        xid8 ingest_xid
+        timestamptz ingested_at
+        bigint run_id
+        text actor
+        text change_reason_code FK
+        text change_reason
+        text approved_by
+        bigint supersedes_record_id
+        text source_system
+        bytea content_hash
+    }
+    SecEdge {
+        text edge_id "generated"
+        int edge_seq PK
+        text src_id PK "soft FK SecNode"
+        text src_kind
+        text dst_id PK "soft FK SecNode"
+        text dst_kind
+        text rel_type PK "FK RelTypeVocabulary"
+        numeric rel_weight "30,18 exact"
+        text weight_basis FK "WeightBasisVocabulary"
+        bigint weight_asof_block
+        jsonb payload
+        date valid_from PK
+        date valid_to PK
+        bigint record_id "UK"
+        int processing_version PK
+        xid8 ingest_xid
+        jsonb input_lineage
+    }
+    InstrumentRegister {
+        text instrument_key PK
+        text key_namespace FK "KeyNamespaceVocabulary"
+        text security_id "soft FK SecNode"
+        int4 chain_id
+        jsonb attrs
+        date valid_from PK
+        int processing_version PK
+    }
+    AliasRegister {
+        text id_scheme PK "FK IdSchemeVocabulary"
+        text id_value PK
+        text node_id "soft FK SecNode"
+        date valid_from PK
+        date valid_to
+        int processing_version PK
+    }
+    Shape {
+        text shape_id PK
+        text applies_to_kind
+        text applies_to_concept "soft FK SecNode"
+        jsonb required_fields
+        jsonb field_types
+        jsonb required_edges
+        jsonb permitted_targets
+        text severity
+        text maturity_tier
+        text owner_role
+        int processing_version PK
+    }
+    RelTypeVocabulary {
+        text rel_type PK
+        text family
+        text_array src_kinds
+        text_array dst_kinds
+        text cardinality
+        text weight_basis FK
+        boolean derived_only
+        text maturity
+        text description
+    }
+    NodeStatusVocabulary {
+        text record_type PK
+        text status PK
+        boolean is_terminal
+        text pairs_with "soft FK RelTypeVocabulary"
+        text description
+    }
+    WeightBasisVocabulary {
+        text basis PK
+        text description
+    }
+    ChangeReasonVocabulary {
+        text code PK
+        boolean requires_approval
+        text description
+    }
+    ConceptClassVocabulary {
+        text concept_class PK
+        text maturity
+        text seed_source
+    }
+    KeyNamespaceVocabulary {
+        text key_namespace PK
+        text description
+    }
+    IdSchemeVocabulary {
+        text id_scheme PK
+        text_array applies_to
+        text value_form
+        boolean unique_current
+    }
+
+    RelTypeVocabulary ||--o{ SecEdge : "rel_type"
+    WeightBasisVocabulary ||--o{ SecEdge : "weight_basis"
+    WeightBasisVocabulary ||--o{ RelTypeVocabulary : "declared basis"
+    ChangeReasonVocabulary ||--o{ SecNode : "change_reason_code"
+    ChangeReasonVocabulary ||--o{ SecEdge : "change_reason_code"
+    NodeStatusVocabulary ||--o{ SecNode : "record_type + status"
+    KeyNamespaceVocabulary ||--o{ InstrumentRegister : "key_namespace"
+    IdSchemeVocabulary ||--o{ AliasRegister : "id_scheme"
+    SecNode ||..o{ SecEdge : "src / dst, soft"
+    SecNode ||..o{ InstrumentRegister : "security_id, soft"
+    SecNode ||..o{ AliasRegister : "node_id, soft"
+    SecNode ||..o{ Shape : "applies_to_concept, soft"
+```
+
 ### 4. Provenance and corrections (both stores)
 
 Every append — node version, edge row, alias row, shape version — carries the same immutable
@@ -359,6 +495,90 @@ Boundary rules that keep the graph clean:
 - **Inverses are read-side names**, defined in the resolution layer, never in the vocabulary.
 - **Native-key resolution is not an edge.** It lives in the instrument register (§2) and
   surfaces as `dim_instrument`; the vocabulary joins nodes only.
+
+**The security component.** The relationship types a `sec-*` node participates in — the seven
+ratified ones, plus the two draft types the wave-1 shapes already require (`PEGGED_TO`, which
+the `stablecoin` shape mandates `1..1`, and `RATED_BY`). The remaining draft SEC types of the
+table above are omitted here; the table is the vocabulary of record. Asset class, type and subtype are not columns: they are walked from one `BELONGS_TO` through
+a chain of `NARROWER_THAN`. `InstrumentRegister` resolves many native keys to one security —
+six USDC deployments are six register rows pointing at one `sec-usdc`.
+
+```mermaid
+erDiagram
+    Security {
+        text id PK "sec-*"
+        text ticker
+        text security_name
+        text currency FK "ref_currency"
+        boolean is_tokenised
+        text token_standard
+        text country_of_issuance FK "ref_country"
+        text country_of_risk FK "ref_country"
+        text credit_tranche
+        text credit_quality
+        text collateral_pool
+        text agency_status
+        text backing
+        text status FK "10 values, 6 terminal"
+    }
+    Entity { text id PK "em-*" }
+    Concept { text id PK "concept-*" }
+    Source { text id PK "src-*" }
+    InstrumentRegister {
+        text instrument_key PK
+        text key_namespace
+        int4 chain_id
+    }
+    Security }o--|| Concept : "BELONGS_TO  1 per concept class, ratified"
+    Security }o--|| Entity : "ISSUED_BY  1 current, ratified"
+    Security }o--o{ Security : "HAS_UNDERLYING  n, VALUE, ratified"
+    Security }o--|| Concept : "PEGGED_TO  1..1, draft, intrinsic"
+    Security }o--o{ Entity : "HELD_BY  n, ratified"
+    Security }o--o{ Concept : "RATED_BY  n, draft"
+    Security |o--o| Security : "SUCCEEDED_BY / SPLIT_FROM  1, ratified"
+    Security }o--o{ Source : "SOURCED_FROM  n, ratified"
+    InstrumentRegister }o--|| Security : "many native keys resolve to one security"
+```
+
+**The entity component.** Ratified types plus the two draft ones already exercised. Public identifiers (LEI, BIC, pipeline ids) resolve through
+`AliasRegister`, not through columns on the node. Ultimate parent is absent by design: one
+`SUBSIDIARY_OF` insert legitimately changes the answer for every descendant, so it is walked at
+pivot regeneration rather than stored — the defect `ultimate_parent_id` had. A natural person
+is an ENTITY keyed by surrogate only, with identifying attributes in the separate PII store of §8.
+
+```mermaid
+erDiagram
+    Entity {
+        text id PK "em-*"
+        text legal_name
+        text short_name
+        text entity_type FK "ref_entity_type"
+        text counterparty_role FK "ref_counterparty_role"
+        boolean is_internal
+        text origination_type FK "ref_origination_type"
+        text domicile_country FK "ref_country"
+        text country_of_risk FK "ref_country"
+        text sector FK "ref_sector_l1"
+        text status FK "6 values, 3 terminal"
+    }
+    Security { text id PK "sec-*" }
+    Concept { text id PK "concept-*" }
+    Source { text id PK "src-*" }
+    AliasRegister {
+        text id_scheme PK "LEI, BIC, PIPELINE_*"
+        text id_value PK
+    }
+    PiiStore { text surrogate_key PK "separate store, destroyable keys" }
+    Entity }o--o| Entity : "SUBSIDIARY_OF  1 current per parent, OWNERSHIP_PCT, ratified"
+    Entity }o--o{ Entity : "AFFILIATE_OF  n, ratified"
+    Entity }o--|| Concept : "BELONGS_TO  1 per concept class, ratified"
+    Entity }o--o{ Concept : "GOVERNED_BY  n, ratified"
+    Entity }o--o| Concept : "DOMICILED_IN  1, draft"
+    Entity }o--o{ Security : "TRUSTEE_OF  n, draft"
+    Entity }o--o{ Source : "SOURCED_FROM  n, ratified"
+    AliasRegister }o--|| Entity : "LEI and pipeline ids resolve here, not on the node"
+    Entity |o..o| PiiStore : "natural person: surrogate only"
+```
 
 ### 6. Concepts, shapes, and rules
 
@@ -640,6 +860,115 @@ reflected in the pivot within each consumer's declared staleness budget; whether
 fires on commit of a governed write or as a scheduled sweep is a realization choice, and GQ-29
 monitors the gap between the latest governed write and each table's `generated_at`. Any pivot
 table can be dropped and rebuilt with no information loss.
+
+**The pivot, as tables.** These are the only tables consumers touch. `PositionState` is shown
+for the join, not as part of this model: `DimInstrument` is the single point where the position
+stream meets reference data, and it meets it on `instrument_key` — never on a resolved
+classification, per the hashed-key rule in §9. Every table is keyed on the identity contract of
+§1, every table has an `as_of(effective_at)` form, and every table is a regenerable projection
+carrying the graph version it was resolved from.
+
+```mermaid
+erDiagram
+    DimSecurity {
+        text security_id PK
+        date as_of_valid PK
+        xid8 as_of_system PK
+        text asset_class_l1 "walked BELONGS_TO + NARROWER_THAN"
+        text security_type_l2
+        text security_subtype_l3
+        text currency
+        text status
+        text issuer_id FK "DimEntity"
+        text issuer_ultimate_parent_id FK "DimEntity"
+        text rating
+        text jurisdiction
+        bigint graph_version "manifest pin"
+        timestamptz generated_at
+    }
+    DimEntity {
+        text entity_id PK
+        date as_of_valid PK
+        xid8 as_of_system PK
+        text legal_name
+        text entity_type
+        text parent_id FK "DimEntity"
+        text ultimate_parent_id FK "walked SUBSIDIARY_OF, derived"
+        text domicile_country
+        text sector
+        boolean is_internal
+        bigint graph_version
+    }
+    DimInstrument {
+        text instrument_key PK "one current row"
+        text security_id FK "DimSecurity"
+        int4 chain_id
+        text key_namespace
+        bigint graph_version
+    }
+    FactLookthrough {
+        text security_id PK "FK DimSecurity"
+        text leaf_id PK "FK DimSecurity"
+        date as_of_valid PK
+        xid8 as_of_system PK
+        numeric weight "resolved HAS_UNDERLYING closure"
+        int depth
+    }
+    DimCluster {
+        text concept_id PK
+        text member_id PK "security, entity or concept"
+        int distance "expanded NARROWER_THAN"
+    }
+    DimSource {
+        text source_id PK
+        text feed_name
+        text licence_terms
+        boolean redistributable
+    }
+    EdgeCurrent {
+        text src_id PK
+        text rel_type PK
+        text dst_id PK
+        numeric rel_weight
+        date as_of_valid
+    }
+    NodeValidity {
+        text node_id PK
+        text shape_id PK "FK Shape"
+        text_array unmet_fields
+        text_array unmet_edges
+        text severity
+    }
+    EvidencePackage {
+        bigint record_id PK
+        date as_of PK
+        jsonb version_history
+        jsonb correction_chain
+        jsonb manifest
+    }
+    AliasLookup {
+        text id_scheme PK
+        text id_value PK
+        text node_id
+    }
+    PositionState {
+        text position_id PK "sha256 native only"
+        text instrument_key FK "DimInstrument"
+        text holder_id
+        int4 chain_id
+        bigint block_number
+    }
+
+    DimEntity ||--o{ DimSecurity : "issuer_id / ultimate parent"
+    DimEntity ||--o{ DimEntity : "parent_id"
+    DimSecurity ||--o{ DimInstrument : "one security, many native keys"
+    DimSecurity ||--o{ FactLookthrough : "security_id"
+    DimSecurity ||--o{ FactLookthrough : "leaf_id"
+    DimSecurity }o--o{ DimCluster : "member_id"
+    DimEntity }o--o{ DimCluster : "member_id"
+    DimInstrument ||--o{ PositionState : "the hot join, positions and Time-Series API"
+    DimSource ||--o{ DimSecurity : "provenance of the row"
+```
 
 ### 11. Operating the store: cadence, resolution, and external practice
 
