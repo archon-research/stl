@@ -1659,15 +1659,7 @@ async def _ruv_seed_price_contest_position(conn: asyncpg.Connection, *, prime_id
         (low_oracle_id, 2100, RUV_CONTEST_WINNING_PRICE),
     ]
     for oracle_id, block, price in prices:
-        await conn.execute(
-            "INSERT INTO onchain_token_price "
-            "(token_id, oracle_id, block_number, block_version, timestamp, price_usd) "
-            "VALUES ($1, $2, $3, 0, NOW(), $4)",
-            underlying_id,
-            oracle_id,
-            block,
-            price,
-        )
+        await insert_onchain_price(conn, token_id=underlying_id, oracle_id=oracle_id, price=price, block=block)
     for oracle_id in (low_oracle_id, high_oracle_id):
         await insert_oracle_asset(conn, oracle_id, underlying_id)
 

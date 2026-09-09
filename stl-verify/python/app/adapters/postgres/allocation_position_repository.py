@@ -1880,12 +1880,8 @@ WITH position_buckets AS (
       AND ap.created_at <= CAST(:to_timestamp AS TIMESTAMPTZ)
     GROUP BY rt.id, rt.underlying_token_id, rt.protocol_id, bucket
 ),
--- The latest price is bucket-independent, so it is resolved once per
--- (underlying, protocol) pair instead of inside the per-bucket join. The
--- figures behind that shape were measured against the price history the
--- lateral used to scan, not the cache it reads now (~1,600 re-scans on a
--- 24h/PT15M window; ~17s per request): resolving once is still the honest
--- shape for a value that does not vary by bucket.
+-- The latest price does not vary by bucket, so it is resolved once per
+-- (underlying, protocol) pair instead of inside the per-bucket join.
 price_keys AS (
     SELECT DISTINCT underlying_token_id, protocol_id
     FROM position_buckets

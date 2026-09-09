@@ -19,6 +19,7 @@ Isolated database per module (``module_db`` from ``conftest.py``); seeded by
 import asyncio
 import datetime as dt
 import logging
+import re
 from decimal import Decimal
 
 import asyncpg
@@ -96,6 +97,17 @@ async def repo(async_db_url: str):
     engine = create_async_engine(async_db_url)
     try:
         yield AllocationRepository(engine, utc_now)
+    finally:
+        await engine.dispose()
+
+
+@pytest_asyncio.fixture()
+async def conn(async_db_url: str):
+    """A connection for running the cache and history queries side by side."""
+    engine = create_async_engine(async_db_url)
+    try:
+        async with engine.connect() as connection:
+            yield connection
     finally:
         await engine.dispose()
 
@@ -310,19 +322,24 @@ async def test_balance_basis_receipt_position_is_surfaced(repo) -> None:
 # query against itself.
 # ---------------------------------------------------------------------------
 
-_PRE_SWAP_EXPOSURE_BUCKETS_SQL = text(
-    str(_EXPOSURE_BUCKETS_SQL).replace("FROM token_price_current tpc", "FROM onchain_token_price tpc")
-)
+# Matched by pattern rather than by literal: alias-agnostic, so a second cache
+# read added later cannot survive the substitution under a different alias, and
+# anchored to the keyword that introduces a relation, so prose naming the table
+# is not mistaken for a read of it. JOIN is covered as well as FROM — a cache
+# read reached by a join, not a lateral, is the form a literal FROM match misses.
+_CACHE_RELATION = re.compile(r"\b(FROM|JOIN)\s+token_price_current\b")
+
+_PRE_SWAP_EXPOSURE_BUCKETS_SQL = text(_CACHE_RELATION.sub(r"\1 onchain_token_price", str(_EXPOSURE_BUCKETS_SQL)))
 
 
 @pytest.mark.parametrize("proxy_hex", [RUV_LOCF_PROXY_HEX, RUV_CONTEST_PROXY_HEX])
 @pytest.mark.asyncio
-async def test_exposure_buckets_match_the_pre_swap_history_read(repo, async_db_url: str, proxy_hex: str) -> None:
+async def test_exposure_buckets_match_the_pre_swap_history_read(repo, conn, proxy_hex: str) -> None:
     """Reading token_price_current yields the same buckets as LATERAL-ing into the history."""
-    assert "FROM token_price_current tpc" in str(_EXPOSURE_BUCKETS_SQL), (
+    assert _CACHE_RELATION.search(str(_EXPOSURE_BUCKETS_SQL)), (
         "the bucketed read no longer resolves prices from the cache (VEC-712)"
     )
-    assert "token_price_current" not in str(_PRE_SWAP_EXPOSURE_BUCKETS_SQL), (
+    assert not _CACHE_RELATION.search(str(_PRE_SWAP_EXPOSURE_BUCKETS_SQL)), (
         "the pre-swap substitution missed a cache read; this test would compare the query against itself"
     )
 
@@ -335,12 +352,7 @@ async def test_exposure_buckets_match_the_pre_swap_history_read(repo, async_db_u
     }
     reference = ReferenceAsOf(utc_now)
 
-    engine = create_async_engine(async_db_url)
-    try:
-        async with engine.connect() as conn:
-            before = (await conn.execute(_PRE_SWAP_EXPOSURE_BUCKETS_SQL, reference.params(**params))).fetchall()
-    finally:
-        await engine.dispose()
+    before = (await conn.execute(_PRE_SWAP_EXPOSURE_BUCKETS_SQL, reference.params(**params))).fetchall()
 
     after = await _exposure_by_bucket(repo, proxy_hex)
 
