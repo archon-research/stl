@@ -215,24 +215,24 @@ func (r *PriceRepository) upsertAssetPriceBatch(ctx context.Context, tx pgx.Tx, 
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO asset_price (asset_id, source_id, timestamp, price_usd, market_cap_usd, volume_usd, processing_version, build_id)
+		INSERT INTO asset_price (asset_id, source_id, timestamp, price_usd, market_cap_usd, volume_usd, processing_version, build_id, run_id)
 		VALUES `)
 
-	args := make([]any, 0, len(prices)*7)
+	args := make([]any, 0, len(prices)*8)
 	for i, price := range prices {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 7
+		baseIdx := i * 8
 		// The INSERT, not the trigger, decides processing_version: on a
 		// columnstored chunk the ON CONFLICT arbiter resolves before row
 		// triggers fire, and a trigger-assigned version reaches it as DEFAULT 0,
 		// silently discarding corrections (ADR-0002 §3; see the migration).
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, next_processing_version_asset_price($%d, $%d, $%d, $%d), $%d)",
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, next_processing_version_asset_price($%d, $%d, $%d, $%d), $%d, $%d)",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6,
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+7, baseIdx+7))
+			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+7, baseIdx+7, baseIdx+8))
 
-		args = append(args, price.AssetID, price.SourceID, price.Timestamp, price.PriceUSD, price.MarketCapUSD, price.VolumeUSD, int(r.buildID))
+		args = append(args, price.AssetID, price.SourceID, price.Timestamp, price.PriceUSD, price.MarketCapUSD, price.VolumeUSD, int(r.buildID), r.runID)
 	}
 
 	sb.WriteString(` ON CONFLICT (asset_id, source_id, processing_version, timestamp) DO NOTHING`)
