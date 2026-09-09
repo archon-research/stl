@@ -1,6 +1,5 @@
--- VEC-401: record the deal type on the observation; it cannot be derived from position_state. The
--- Morpho market loan leg nets supply against borrow as abs(supply - borrow), so the sign, and with it
--- LOAN vs BORROW, is destroyed at projection time and no query recovers it.
+-- VEC-401: record the deal type on the observation, since position_state cannot derive it: the Morpho
+-- loan leg nets supply against borrow as abs(supply - borrow), which destroys the LOAN/BORROW sign.
 -- Sorts before every projection and cache so they can reference the column without declaring it.
 ALTER TABLE position_state ADD COLUMN IF NOT EXISTS deal_type text;
 
