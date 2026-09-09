@@ -10,7 +10,14 @@
 # put a per-build value back into a layer, they change rarely, and the check
 # costs four image builds — two of which run the arm64 runtime stage under
 # QEMU. A code change cannot break the property; a Dockerfile or Makefile
-# change is the only thing that can.
+# change is the only thing that can. .go-version/.python-version are included
+# for the same reason as the Dockerfiles: the script reads them directly to
+# pick the base image (see check-build-reproducible.sh's build()), so a bump
+# is a build-mechanism input, not "a code change", even though it lives at the
+# repo root rather than under stl-verify/. Ordinary source and dependency
+# files (stl-verify/python/pyproject.toml, ts/**, cmd/**, ...) are deliberately
+# left out: changing them is expected to change layers, which is not a
+# regression this workflow needs to catch.
 name: Build Reproducibility
 
 on:
@@ -21,6 +28,8 @@ on:
       - "stl-verify/.dockerignore"
       - "stl-verify/Makefile"
       - "stl-verify/internal/pkg/buildinfo/**"
+      - ".go-version"
+      - ".python-version"
       - "scripts/deploy/check-build-reproducible.sh"
       - ".github/workflows/build-reproducibility.yml"
   push:
@@ -31,6 +40,8 @@ on:
       - "stl-verify/.dockerignore"
       - "stl-verify/Makefile"
       - "stl-verify/internal/pkg/buildinfo/**"
+      - ".go-version"
+      - ".python-version"
       - "scripts/deploy/check-build-reproducible.sh"
       - ".github/workflows/build-reproducibility.yml"
   workflow_dispatch:

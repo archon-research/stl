@@ -14,21 +14,45 @@
 # Three builds per image, and all three verdicts matter:
 #   same        identical source, different build metadata  -> layers must MATCH
 #   docs-only   a markdown edit, as a new commit would be   -> layers must MATCH
+#               (python's build never reaches README.md — see ADR-0007 — so
+#               this leg is reported skipped-as-vacuous for --image python
+#               instead of run; a passing leg that lies is worse than one that
+#               says it was skipped)
 #   code        a real change to compiled source            -> layers must DIFFER
 #
 # The third is not decoration. Without it a comparison that always reports
 # "identical" — the wrong path compared, an empty layer list, a silently reused
 # tag — reads as a pass, and this script would certify the very thing it exists
 # to catch. A green run means the comparison is sensitive AND the build is
-# stable; a green run without the `code` case means neither.
+# stable; a green run without the `code` case means neither. The go docs-only
+# leg carries an analogous tripwire: it asserts the `COPY . .` step that ships
+# README.md into the builder was not itself cache-hit, so a future Dockerfile
+# change that stops the perturbation from reaching the build context fails
+# loudly instead of passing vacuously the way python's currently does.
 #
 # REQUIRES BuildKit (`docker/setup-buildx-action`). Layer identity across two
 # builds comes from BuildKit reusing a cached layer when the content feeding it
 # is unchanged: the binary is rebuilt, its bytes are identical, so the COPY that
 # ships it hits cache and the previous layer blob is reused. buildah/podman does
-# not reproduce that, and will report differing layers for identical content —
-# it is not a substitute for running this in CI, which is why nothing here tries
-# to accommodate it.
+# not reproduce that — it can report differing layers for identical content, or
+# reuse a layer despite a different --build-arg — so it is not a substitute for
+# running this in CI. require_buildkit() below refuses to run against anything
+# but a real buildx/BuildKit toolchain rather than silently producing a
+# meaningless result.
+#
+# CACHE, WARM ON PURPOSE, WITH ONE DELIBERATE EXCEPTION: every build below runs
+# against the same warm BuildKit cache within this one script invocation, so a
+# "layers match" verdict means the content hashed the same — not merely that
+# nothing reran. That is sound for the layers each leg is designed to perturb.
+# But no leg ever perturbs the inputs to python's `ui-builder` stage (the
+# `ts/` -> static-assets build), so across a whole run that stage is never
+# rebuilt — it is cache-hit every time, and a cache hit looks identical
+# regardless of whether ui-builder's own output is actually reproducible. The
+# python `same-source` leg forces that one stage cold (--no-cache-filter
+# ui-builder) so its output is independently recomputed and compared for real
+# at least once, without paying for a fully cold run — which would also
+# rebuild the QEMU-emulated arm64 stages, at several times the cost, for no
+# added coverage of ui-builder.
 #
 # Usage:
 #   check-build-reproducible.sh --image go|python [--keep]
@@ -45,6 +69,13 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BUILD_DIR="${REPO_ROOT}/stl-verify"
 IMAGE=""
 KEEP=0
+# Set (and unset) by callers around a build() call; deliberately plain strings,
+# not arrays — an empty bash-3.2 array under `set -u` word-splits as an
+# unbound variable, and every value used here is a bare flag with no spaces or
+# quoting to preserve.
+DOCS_BACKUP=""
+BUILD_EXTRA_ARGS=""
+BUILD_LOG=""
 
 die() { echo "::error::$*" >&2; exit 1; }
 
@@ -57,9 +88,10 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# The docs file and the compiled file each build perturbs. Both are inside the
-# build context; the compiled one must be reachable from the service being
-# built, or the `code` case would prove nothing.
+# The compiled file each build perturbs must be reachable from the service
+# being built, or the `code` case would prove nothing. The docs file is not
+# assumed reachable — python's isn't (ADR-0007) — so each image handles it on
+# its own terms below rather than pretending the perturbation always lands.
 DOCS_FILE="${BUILD_DIR}/README.md"
 case "$IMAGE" in
   go)
@@ -85,7 +117,16 @@ BUILD_SUFFIXES="baseline same-source docs-only code-change"
 # careless `git add -A`.
 cleanup() {
   rm -f "$CODE_FILE"
-  git -C "$REPO_ROOT" checkout -- "${DOCS_FILE#"${REPO_ROOT}/"}" 2>/dev/null || true
+  # Restore README.md only if this run actually perturbed it (DOCS_BACKUP is
+  # only ever set around that one edit), and restore the exact bytes captured
+  # right before the edit rather than `git checkout`ing it back to HEAD — the
+  # latter would silently discard any real uncommitted edit that was already
+  # sitting in the working tree when the script started.
+  if [ -n "$DOCS_BACKUP" ] && [ -f "$DOCS_BACKUP" ]; then
+    cp "$DOCS_BACKUP" "$DOCS_FILE"
+    rm -f "$DOCS_BACKUP"
+  fi
+  rm -f "$BUILD_LOG"
   if [ "$KEEP" -eq 0 ]; then
     for suffix in $BUILD_SUFFIXES; do
       docker rmi -f "${TAG_PREFIX}:${suffix}" >/dev/null 2>&1 || true
@@ -93,6 +134,33 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+# require_buildkit: verify a real buildx/BuildKit toolchain rather than assume
+# one just because a `docker buildx` subcommand exists. On this stack's dev
+# machines `docker` shims to podman, and podman's `buildx` stub does not fail —
+# it reports buildah's own version string instead — so a bare
+# command-exists check would pass while every comparison below is meaningless
+# (buildah reuses layers across different --build-arg values and reports
+# differing layers for identical content; see the header).
+require_buildkit() {
+  local version
+  version="$(docker buildx version 2>&1)" || die "docker buildx is unavailable, and BuildKit is required (see this script's header): ${version}"
+  case "$version" in
+    *buildah*) die "docker buildx resolved to buildah/podman (\"${version}\"), not BuildKit. Layer-digest comparisons are meaningless under it (see header) — run this in CI (docker/setup-buildx-action) or against a real Docker/BuildKit daemon." ;;
+  esac
+}
+
+# run_build: wraps `docker buildx build`, optionally teeing its plain-progress
+# output to BUILD_LOG so a leg can inspect which steps actually ran (used by
+# check_docs_reached_go_context). Plain progress only when logging — it is
+# noisier, and only that tripwire needs to parse it.
+run_build() {
+  if [ -n "$BUILD_LOG" ]; then
+    docker buildx build --progress=plain "$@" 2>&1 | tee "$BUILD_LOG" >&2
+  else
+    docker buildx build "$@" >&2
+  fi
+}
 
 # build <tag-suffix> <git-commit> <build-time>: build the image and echo its
 # layer digests as one space-separated line.
@@ -103,20 +171,22 @@ build() {
 
   if [ "$IMAGE" = "go" ]; then
     go_version="$(cat "${REPO_ROOT}/.go-version")"
-    docker buildx build --platform linux/arm64 \
+    run_build --platform linux/arm64 \
       --build-arg GO_VERSION="$go_version" \
       --build-arg CMD_PATH="$SERVICE_CMD_PATH" \
       --build-arg BIN="$SERVICE_BIN" \
       --build-arg GIT_COMMIT="$commit" \
       --build-arg GIT_BRANCH="repro-check-${suffix}" \
       --build-arg BUILD_TIME="$build_time" \
-      -f "${BUILD_DIR}/Dockerfile.common" -t "$tag" --load "$BUILD_DIR" >&2
+      $BUILD_EXTRA_ARGS \
+      -f "${BUILD_DIR}/Dockerfile.common" -t "$tag" --load "$BUILD_DIR"
   else
     python_version="$(cat "${REPO_ROOT}/.python-version")"
-    docker buildx build --platform linux/arm64 \
+    run_build --platform linux/arm64 \
       --build-arg PYTHON_VERSION="$python_version" \
       --build-arg GIT_COMMIT="$commit" \
-      -f "${BUILD_DIR}/python/Dockerfile" -t "$tag" --load "$BUILD_DIR" >&2
+      $BUILD_EXTRA_ARGS \
+      -f "${BUILD_DIR}/python/Dockerfile" -t "$tag" --load "$BUILD_DIR"
   fi
 
   local layers
@@ -127,10 +197,33 @@ build() {
   printf '%s' "$layers"
 }
 
+# check_docs_reached_go_context <build-log>: the go docs-only leg is only a
+# real test if the README.md edit actually reached the builder. If a future
+# Dockerfile change stopped `COPY . .` from seeing it, this leg would silently
+# become as vacuous as python's (ADR-0007) and still report "match". Confirm
+# from the build's own plain-progress log that the COPY step was not cache-hit
+# — i.e. that BuildKit saw different content this time than the baseline build.
+check_docs_reached_go_context() {
+  local log="$1" step
+  step="$(awk '/\[builder [0-9]+\/[0-9]+\] COPY \. \./ { match($0, /^#[0-9]+/); print substr($0, RSTART, RLENGTH); exit }' "$log")"
+  [ -n "$step" ] || die "could not find the 'COPY . .' step in the build log; cannot confirm the docs-only edit reached the go build context"
+  if grep -qF "${step} CACHED" "$log"; then
+    die "docs-only leg is vacuous: 'COPY . .' was cache-hit, so the README.md edit never reached the go build context. Check .dockerignore and Dockerfile.common's COPY paths (ORB-366)."
+  fi
+}
+
 # compare <case-name> <expectation: match|differ> <layers-a> <layers-b>
 FAILED=0
 compare() {
   local name="$1" expectation="$2" a="$3" b="$4"
+  # An empty or missing layer list must never read as "identical" — that is
+  # exactly the silent-pass failure mode this function exists to avoid (see
+  # the self-test below).
+  if [ -z "${a// /}" ] || [ -z "${b// /}" ]; then
+    FAILED=1
+    echo "  BAD  ${name}: empty/missing layer list (a='${a}' b='${b}'); cannot be treated as identical"
+    return
+  fi
   if [ "$a" = "$b" ]; then
     if [ "$expectation" = "match" ]; then
       echo "  ok   ${name}: layers identical, as required"
@@ -155,6 +248,27 @@ compare() {
   fi
 }
 
+# self_test_compare: compare() decides pass/fail for the whole script, so it
+# gets its own smoke test before anything else trusts it. Runs unconditionally
+# on every invocation (no docker involved, so it costs nothing) rather than
+# only in some separate test suite.
+self_test_compare() {
+  local saved_failed="$FAILED"
+
+  FAILED=0; compare t match  x x  >/dev/null; [ "$FAILED" -eq 0 ] || die "compare() self-test failed: identical inputs + match expectation should pass"
+  FAILED=0; compare t differ x x  >/dev/null; [ "$FAILED" -eq 1 ] || die "compare() self-test failed: identical inputs + differ expectation should fail"
+  FAILED=0; compare t differ x y  >/dev/null; [ "$FAILED" -eq 0 ] || die "compare() self-test failed: differing inputs + differ expectation should pass"
+  FAILED=0; compare t match  x y  >/dev/null; [ "$FAILED" -eq 1 ] || die "compare() self-test failed: differing inputs + match expectation should fail"
+  FAILED=0; compare t match  "" ""  >/dev/null; [ "$FAILED" -eq 1 ] || die "compare() self-test failed: empty/missing layers must not read as identical"
+  FAILED=0; compare t differ "" ""  >/dev/null; [ "$FAILED" -eq 1 ] || die "compare() self-test failed: empty/missing layers must not read as identical either way"
+
+  FAILED="$saved_failed"
+  echo "==> compare() self-test passed"
+}
+self_test_compare
+
+require_buildkit
+
 COMMIT_A="1111111111111111111111111111111111111111"
 COMMIT_B="2222222222222222222222222222222222222222"
 COMMIT_C="3333333333333333333333333333333333333333"
@@ -165,15 +279,36 @@ echo "--> baseline build"
 LAYERS_A="$(build baseline "$COMMIT_A" "2020-01-01T00:00:00Z")"
 
 echo "--> rebuild with different build metadata, same source"
+if [ "$IMAGE" = "python" ]; then
+  # Force the otherwise-never-perturbed ui-builder stage cold so its output is
+  # independently recomputed at least once in this run, instead of only ever
+  # being cache-hit (see the CACHE header note).
+  BUILD_EXTRA_ARGS="--no-cache-filter ui-builder"
+fi
 LAYERS_SAME="$(build same-source "$COMMIT_B" "2021-06-15T12:34:56Z")"
+BUILD_EXTRA_ARGS=""
 compare "same source, different build metadata" match "$LAYERS_A" "$LAYERS_SAME"
 
 echo "--> rebuild after a docs-only edit"
-echo "" >> "$DOCS_FILE"
-echo "<!-- reproducibility check: transient edit, reverted by the script -->" >> "$DOCS_FILE"
-LAYERS_DOCS="$(build docs-only "$COMMIT_C" "2022-02-02T02:02:02Z")"
-compare "docs-only change" match "$LAYERS_A" "$LAYERS_DOCS"
-git -C "$REPO_ROOT" checkout -- "${DOCS_FILE#"${REPO_ROOT}/"}"
+if [ "$IMAGE" = "python" ]; then
+  echo "  skip: python/Dockerfile has no COPY reaching ${DOCS_FILE#"${REPO_ROOT}/"} (ADR-0007);"
+  echo "        perturbing it would rebuild byte-identical instructions to the"
+  echo "        same-source case above and prove nothing."
+else
+  DOCS_BACKUP="$(mktemp)"
+  cp "$DOCS_FILE" "$DOCS_BACKUP"
+  echo "" >> "$DOCS_FILE"
+  echo "<!-- reproducibility check: transient edit, reverted by the script -->" >> "$DOCS_FILE"
+  BUILD_LOG="$(mktemp)"
+  LAYERS_DOCS="$(build docs-only "$COMMIT_C" "2022-02-02T02:02:02Z")"
+  check_docs_reached_go_context "$BUILD_LOG"
+  rm -f "$BUILD_LOG"
+  BUILD_LOG=""
+  compare "docs-only change" match "$LAYERS_A" "$LAYERS_DOCS"
+  cp "$DOCS_BACKUP" "$DOCS_FILE"
+  rm -f "$DOCS_BACKUP"
+  DOCS_BACKUP=""
+fi
 
 echo "--> rebuild after a real source change (control: this one must differ)"
 if [ "$IMAGE" = "go" ]; then

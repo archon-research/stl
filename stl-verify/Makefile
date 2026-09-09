@@ -51,7 +51,7 @@ include lint.mk
 		kind-create kind-delete kind-infra kind-config kind-secrets kind-bootstrap-db kind-migrate \
 		kind-load-migrate kind-load-watcher kind-load-workers kind-load-python-api kind-load-cronjobs \
 		kind-deploy-apps kind-deploy-workers kind-deploy-data-validator check-dev-overlay-sync \
-		check-reloader-opt-in check-overlay-images \
+		check-reloader-opt-in check-overlay-images build-reproducibility-check \
 		kind-redeploy-watcher kind-redeploy-worker \
 		docker-build-migrate \
 		kind-infra-ci kind-ci-up kind-ci-down \
@@ -2294,6 +2294,16 @@ check-overlay-images:
 	@for env in staging prod; do \
 	  ../scripts/deploy/render-overlay-images.sh --env $$env --check ../k8s/overlays/$$env/kustomization.yaml --allow-missing || exit 1; \
 	done
+
+# Assert that an image's layers depend only on its source, not on build
+# metadata (ORB-366) — the property the deploy comparison relies on to leave
+# an unchanged service's pods alone. Not part of `ci`/`ci-checks`: it costs
+# four real Docker builds, two of them under QEMU, and needs BuildKit (see the
+# script's header) rather than the podman this repo's `docker` shims to. Same
+# check the Build Reproducibility workflow runs, one image at a time.
+build-reproducibility-check:
+	@../scripts/deploy/check-build-reproducible.sh --image go
+	@../scripts/deploy/check-build-reproducible.sh --image python
 
 # Apply the dev core overlay (watcher, python-api, cronjobs) — reuses k8s/base.
 # Images must already be built + loaded into kind.
