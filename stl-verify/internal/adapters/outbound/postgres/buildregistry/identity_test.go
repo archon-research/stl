@@ -31,6 +31,14 @@ func TestResolveIdentity(t *testing.T) {
 			wantErr: "git hash not available",
 		},
 		{
+			// Dockerfile.common defaults the versioning args to "unknown"
+			// (ORB-366), so this is what an image built without them reports.
+			name:    "the literal unknown is an error, not an identity",
+			gitHash: "unknown",
+			argv0:   "/app/watcher",
+			wantErr: "git hash not available",
+		},
+		{
 			name:    "empty argv0 is an error",
 			gitHash: "abc123",
 			argv0:   "",
