@@ -1,15 +1,14 @@
 -- VEC-491: block_meta, the canonical (chain_id, block_number, block_version) -> block header time
 -- lookup for observation tables that carry no event-time column, filled out of band from the block
 -- headers in the S3 raw-block archive. Supersedes block_time (block_states is a rolling window).
---
+
 -- SCOPE: only the blocks the observation tables reference, per chain, not every archived block.
 -- Order 10^6 rows at the time of writing, of which ~0.1% carry block_version > 0. Re-measure the
 -- referenced set before any decision that assumes its size.
---
+
 -- Plain table, not a hypertable: reads are equality point lookups on the PK prefix with no time
--- predicate, so chunking and compression buy nothing and a columnstore policy would need an
--- integer_now_func that does not exist across six chains. DDL only; the historical load runs out
--- of band.
+-- predicate, so chunking and compression buy nothing, and a columnstore policy would need an
+-- integer_now_func that does not exist across six chains. DDL only; the load runs out of band.
 
 -- Superseded by block_meta. Empty and unconsumed (bucket 2 was never built); its population
 -- procedure is reproducible from block_states if it is ever needed again.
@@ -26,9 +25,8 @@ CREATE TABLE IF NOT EXISTS block_meta (
     -- deleted and reloaded by an operator rather than versioned. The loader inserts ON CONFLICT DO NOTHING.
     CONSTRAINT block_meta_pkey PRIMARY KEY (chain_id, block_number, block_version),
     -- Corruption guards at the loader's chokepoint: a hex-parse bug or a bad S3 key must fail here
-    -- rather than be served as event-time to every fill consumer. The upper bound is a fixed
-    -- constant so the CHECK stays immutable, and it only catches gross overshoots; a modest
-    -- misparse needs a cross-check against block_states, which is loader-side work.
+    -- rather than be served as event-time to every fill consumer. The upper bound is a fixed constant
+    -- so the CHECK stays immutable; it catches gross overshoots only, a cross-check is loader-side work.
     CONSTRAINT block_meta_coord_nonneg_chk CHECK (block_number >= 0 AND block_version >= 0 AND build_id >= 0),
     CONSTRAINT block_meta_chain_pos_chk CHECK (chain_id > 0),
     CONSTRAINT block_meta_ts_sane_chk CHECK (block_timestamp >= '2009-01-03 00:00:00+00'::timestamptz
