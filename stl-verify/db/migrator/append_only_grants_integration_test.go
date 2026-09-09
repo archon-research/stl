@@ -32,8 +32,7 @@ var convertedAppendOnlyTables = []string{
 	// VEC-652: append-only from birth, REVOKE in the creating migration.
 	"asset_price",
 	"psm3_alm_shares",
-	// VEC-402 (#625): SELECT+INSERT only, with the owner-side REVOKE too. position_classification
-	// is NOT here — #625 no longer touches it, and its own migration still grants full DML.
+	// VEC-402: SELECT+INSERT only, with the owner-side REVOKE too.
 	"position_state",
 	"oracle_asset",
 	// VEC-475 (#711): append-only from birth; the creating migration REVOKEs all seven.
@@ -44,6 +43,9 @@ var convertedAppendOnlyTables = []string{
 	"uniswap_v4_liquidity_event",
 	"uniswap_v4_tick",
 	"uniswap_v4_pool_event",
+	// VEC-401: run records are append-only; SELECT+INSERT only for the app role.
+	"position_projection_run",
+	"position_projection_refusal",
 	// VEC-598: provenance tables. The owner keeps UPDATE for the FK integrity probe
 	// (20260714_160000); a statement-level trigger raises on any real mutation.
 	"build_registry",

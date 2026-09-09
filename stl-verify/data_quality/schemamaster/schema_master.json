@@ -13,7 +13,6 @@
     "ref_entity_type",
     "ref_industry_group_l2",
     "ref_origination_type",
-    "position_classification",
     "position_entity_link",
     "ref_sector_l1",
     "ref_security_subtype_l3",
@@ -340,6 +339,10 @@
       "class": "S"
     },
     "custody_type": {
+      "type": "text",
+      "class": "S"
+    },
+    "deal_type": {
       "type": "text",
       "class": "S"
     },
@@ -1307,6 +1310,31 @@
       "type": "timestamptz",
       "class": "A",
       "semantics": "effective_time"
+    },
+    "rows_emitted": {
+      "type": "int8",
+      "class": "A",
+      "not_null": true
+    },
+    "rows_appended": {
+      "type": "int8",
+      "class": "A",
+      "not_null": true
+    },
+    "positions_refused": {
+      "type": "int4",
+      "class": "A",
+      "not_null": true
+    },
+    "reason": {
+      "type": "text",
+      "class": "A",
+      "not_null": true
+    },
+    "detail": {
+      "type": "text",
+      "class": "A",
+      "not_null": true
     }
   },
   "tables": {
@@ -1505,6 +1533,14 @@
     "oracle_asset": {
       "type": "config",
       "owner": "pricing"
+    },
+    "position_projection_run": {
+      "type": "infrastructure",
+      "owner": "prime"
+    },
+    "position_projection_refusal": {
+      "type": "infrastructure",
+      "owner": "prime"
     },
     "position_state": {
       "type": "derived",
