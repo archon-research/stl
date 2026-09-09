@@ -91,7 +91,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockversion"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -252,7 +251,7 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies, progress morph
 		return nil, nil, fmt.Errorf("verifying the RPC node's chain: %w", err)
 	}
 
-	versions, err := newBlockVersionResolver(ctx, bucket, deps.Logger)
+	archive, err := openArchive(ctx, bucket, deps.Logger)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -262,7 +261,7 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies, progress morph
 		return nil, nil, err
 	}
 
-	service, err := morpho_v2_bootstrap.NewService(sweepConfig, ethClient, replayService, progress, versions)
+	service, err := morpho_v2_bootstrap.NewService(sweepConfig, ethClient, replayService, progress, archive, "s3://"+bucket)
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating morpho v2 bootstrap service: %w", err)
 	}
@@ -290,20 +289,14 @@ func archiveBucket(chainID int64) (string, error) {
 	return bucket, nil
 }
 
-// newBlockVersionResolver opens the archive read-only — S3 access comes from this
-// Deployment's EKS Pod Identity association, granted in the infra repo — and probes it
-// the way the block-republisher does, so a missing grant is a worker that will not start
-// rather than three attempts of a run that dies on its first height.
-func newBlockVersionResolver(ctx context.Context, bucket string, logger *slog.Logger) (*blockversion.Resolver, error) {
+// openArchive opens the chain's raw archive read-only. S3 access comes from this
+// Deployment's EKS Pod Identity association, granted in the infra repo.
+func openArchive(ctx context.Context, bucket string, logger *slog.Logger) (*s3adapter.ArchiveReader, error) {
 	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{StaticCredentialsFromEnv: true})
 	if err != nil {
 		return nil, fmt.Errorf("loading AWS config: %w", err)
 	}
-	archive, err := s3adapter.OpenArchiveReader(ctx, awsCfg, bucket, logger)
-	if err != nil {
-		return nil, err
-	}
-	return blockversion.NewResolver(archive, "s3://"+bucket), nil
+	return s3adapter.OpenArchiveReader(ctx, awsCfg, bucket, logger)
 }
 
 // buildReplayService wires the morpho-indexer service in its replay

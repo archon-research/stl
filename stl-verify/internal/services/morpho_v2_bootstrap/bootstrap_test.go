@@ -32,6 +32,9 @@ import (
 // tests assert the sweep starts where it must, not merely where the code says.
 const mainnetVaultV2DeployBlock = int64(23_375_073)
 
+// archiveName is the bucket URL the run names in every error and log about the archive.
+const archiveName = "s3://stl-sentinelstaging-ethereum-raw-89d540d0"
+
 var (
 	testVaultAddr   = common.HexToAddress("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
 	secondVaultAddr = common.HexToAddress("0xdddddddddddddddddddddddddddddddddddddddd")
@@ -59,7 +62,7 @@ func TestNewService_RejectsInvalidConfig(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := valid
 			tc.mutate(&cfg)
-			if _, err := NewService(cfg, &fakeChainReader{}, &recordingReplayer{}, &fakeProgressStore{}, &fakeBlockVersionResolver{}); err == nil {
+			if _, err := NewService(cfg, &fakeChainReader{}, &recordingReplayer{}, &fakeProgressStore{}, &fakeArchive{chain: newFakeChainReader()}, archiveName); err == nil {
 				t.Fatal("expected NewService to reject the config")
 			}
 		})
@@ -146,7 +149,7 @@ func TestRun_ReplaysHistoryThenSeedsAdapters(t *testing.T) {
 // block outranks the correction this run just wrote (VEC-218).
 func TestRun_StampsTheBlockVersionTheArchiveHolds(t *testing.T) {
 	h := newBootstrapHarness(t)
-	h.versions.version = 4
+	h.archive.version = 4
 
 	const headBlock = int64(24_000_000)
 	const addAdapterBlock = uint64(23_400_000)
@@ -172,37 +175,9 @@ func TestRun_StampsTheBlockVersionTheArchiveHolds(t *testing.T) {
 			t.Errorf("adapter_state at block %d has block_version %d, want the archived 4", state.BlockNumber, state.BlockVersion)
 		}
 	}
-	want := []blockRef{{number: headBlock, hash: head.Hash()}, {number: int64(addAdapterBlock), hash: logBlockHash}}
-	if !slices.Equal(h.versions.asked, want) {
-		t.Errorf("resolved %v, want the pinned head and then the replayed log's block %v", h.versions.asked, want)
-	}
-}
-
-// TestRun_ClosesWithOnlyTheHeightsItResolvedItself: the resolver is built once per pod
-// and outlives a run, so a second run on an idle worker would otherwise close with the
-// heights the first one asked about — and answer them from its memo.
-func TestRun_ClosesWithOnlyTheHeightsItResolvedItself(t *testing.T) {
-	h := newBootstrapHarness(t)
-	logger, logs := capturingLogger()
-	h.config.Logger = logger
-	replayer := &recordingReplayer{v2Vaults: map[common.Address]int64{testVaultAddr: 23_400_000}}
-	service, err := NewService(h.config, h.chain, replayer, h.progress, h.versions)
-	if err != nil {
-		t.Fatalf("NewService: %v", err)
-	}
-	h.chain.setFinalizedHead(24_000_000, 1_770_000_000)
-
-	if err := service.Run(context.Background()); err != nil {
-		t.Fatalf("first run: %v", err)
-	}
-	firstRun := len(logs())
-	if err := service.Run(context.Background()); err != nil {
-		t.Fatalf("second run: %v", err)
-	}
-
-	secondRun := logs()[firstRun:]
-	if !strings.Contains(secondRun, "heights=1") {
-		t.Errorf("the second run reported heights it did not resolve:\n%s", secondRun)
+	want := []int64{headBlock, int64(addAdapterBlock)}
+	if !slices.Equal(h.archive.asked, want) {
+		t.Errorf("read %v from the archive, want the pinned head and then the replayed log's block %v", h.archive.asked, want)
 	}
 }
 
@@ -211,7 +186,7 @@ func TestRun_ClosesWithOnlyTheHeightsItResolvedItself(t *testing.T) {
 // guess, so the run stops with nothing written and the archive is what gets repaired.
 func TestRun_StopsWhenTheArchiveCannotResolveABlockVersion(t *testing.T) {
 	h := newBootstrapHarness(t)
-	h.versions.err = errors.New("the raw archive holds another block at that height")
+	h.archive.err = errors.New("the raw archive holds another block at that height")
 
 	const headBlock = int64(24_000_000)
 	const addAdapterBlock = uint64(23_400_000)
@@ -234,6 +209,49 @@ func TestRun_StopsWhenTheArchiveCannotResolveABlockVersion(t *testing.T) {
 	}
 }
 
+// Two runs can be in flight on one pod at once: the worker sets no
+// MaxConcurrentActivityExecutionSize and the workflow-ID guard only rejects a duplicate
+// ID. A run must therefore stamp only versions it read from the archive itself — an
+// inherited answer is one this run never proved against the block it is replaying, and it
+// is what leaves "repair the archive, start a new run" unable to clear a poisoned height.
+func TestRun_StampsOnlyVersionsItReadItself(t *testing.T) {
+	h := newBootstrapHarness(t)
+	const headBlock = int64(24_000_000)
+	const addAdapterBlock = uint64(23_400_000)
+	h.config.BlockChunkSize = 1_000_000
+	replayer := &recordingReplayer{v2Vaults: map[common.Address]int64{testVaultAddr: 0}}
+	archive := &fakeArchive{chain: h.chain, version: 1}
+	service, err := NewService(h.config, h.chain, replayer, h.progress, archive, archiveName)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	h.chain.setFinalizedHead(headBlock, 1_770_000_000)
+	logBlockHash := h.chain.addBlock(addAdapterBlock, 1_760_000_000)
+	h.chain.logs = []ethtypes.Log{h.addAdapterLog(addAdapterBlock, logBlockHash, 7)}
+	h.chain.beforeFilterLogs = func() {
+		archive.version = 2
+		if err := service.Run(context.Background()); err != nil {
+			t.Fatalf("the run started while the first one was sweeping: %v", err)
+		}
+		archive.version = 1
+	}
+
+	if err := service.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(replayer.replayed) != 2 {
+		t.Fatalf("replayed %d logs, want one per run", len(replayer.replayed))
+	}
+	if got := replayer.replayed[1].blockVersion; got != 1 {
+		t.Errorf("the interrupted run stamped block_version %d, want the 1 the archive held when that run read the height", got)
+	}
+	want := []int64{headBlock, headBlock, int64(addAdapterBlock), int64(addAdapterBlock)}
+	if !slices.Equal(archive.asked, want) {
+		t.Errorf("archive asked about %v, want each run reading both of its own heights %v", archive.asked, want)
+	}
+}
+
 // TestRun_StopsWhenAReplayedBlockHasNoResolvableVersion: the head resolving says nothing
 // about the two million blocks below it, so a hole anywhere in the swept range stops the
 // replay at that log rather than stamping a guess for the block it belongs to.
@@ -242,9 +260,7 @@ func TestRun_StopsWhenAReplayedBlockHasNoResolvableVersion(t *testing.T) {
 
 	const headBlock = int64(24_000_000)
 	const addAdapterBlock = uint64(23_400_000)
-	h.versions.errAt = map[int64]error{
-		int64(addAdapterBlock): errors.New("the raw archive identifies no block at that height"),
-	}
+	h.archive.unarchived = map[int64]bool{int64(addAdapterBlock): true}
 
 	head := h.chain.setFinalizedHead(headBlock, 1_770_000_000)
 	logBlockHash := h.chain.addBlock(addAdapterBlock, 1_760_000_000)
@@ -340,7 +356,7 @@ func TestRun_EveryVaultDeferredTellsTheOperatorToReRun(t *testing.T) {
 		testVaultAddr:   headBlock + 1,
 		secondVaultAddr: headBlock + 500,
 	}}
-	service, err := NewService(h.config, h.chain, replayer, h.progress, h.versions)
+	service, err := NewService(h.config, h.chain, replayer, h.progress, h.archive, archiveName)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -390,7 +406,7 @@ func TestRun_FinalizedHeadBelowDeployBlockFailsTheRun(t *testing.T) {
 func TestRun_ReplayFailureStopsBeforeSeed(t *testing.T) {
 	h := newBootstrapHarness(t)
 	replayer := &recordingReplayer{v2Vaults: map[common.Address]int64{testVaultAddr: 0}}
-	service, err := NewService(h.config, h.chain, replayer, h.progress, h.versions)
+	service, err := NewService(h.config, h.chain, replayer, h.progress, h.archive, archiveName)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -435,7 +451,7 @@ func TestRun_DefersAVaultFirstSeenAboveThePinnedHead(t *testing.T) {
 		testVaultAddr:   23_400_000,
 		secondVaultAddr: headBlock + 1,
 	}}
-	service, err := NewService(h.config, h.chain, replayer, h.progress, h.versions)
+	service, err := NewService(h.config, h.chain, replayer, h.progress, h.archive, archiveName)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -469,7 +485,7 @@ func TestRun_ALaterHeadPicksUpAPreviouslyDeferredVault(t *testing.T) {
 		testVaultAddr:   23_400_000,
 		secondVaultAddr: firstHead + 1,
 	}}
-	service, err := NewService(h.config, h.chain, replayer, h.progress, h.versions)
+	service, err := NewService(h.config, h.chain, replayer, h.progress, h.archive, archiveName)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -501,7 +517,7 @@ func TestRun_AHeadThatAdmitsADeferredVaultReSweepsTheWholeRange(t *testing.T) {
 		testVaultAddr:   23_400_000,
 		secondVaultAddr: firstHead + 1,
 	}}
-	service, err := NewService(h.config, h.chain, replayer, h.progress, h.versions)
+	service, err := NewService(h.config, h.chain, replayer, h.progress, h.archive, archiveName)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -544,7 +560,7 @@ func TestRun_SeedHealsEveryVaultPastAFailingOneAndStillFailsTheRun(t *testing.T)
 			return nil
 		},
 	}
-	service, err := NewService(h.config, h.chain, replayer, h.progress, h.versions)
+	service, err := NewService(h.config, h.chain, replayer, h.progress, h.archive, archiveName)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -585,7 +601,7 @@ func TestRun_SeedStopsAtOnceWhenTheRunIsCancelled(t *testing.T) {
 			return context.Canceled
 		},
 	}
-	service, err := NewService(h.config, h.chain, replayer, h.progress, h.versions)
+	service, err := NewService(h.config, h.chain, replayer, h.progress, h.archive, archiveName)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -622,7 +638,7 @@ func TestRun_SeedCancellationStillReportsTheFailuresAlreadyCollected(t *testing.
 			return nil
 		},
 	}
-	service, err := NewService(h.config, h.chain, replayer, h.progress, h.versions)
+	service, err := NewService(h.config, h.chain, replayer, h.progress, h.archive, archiveName)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -648,7 +664,7 @@ func TestRun_SeedCancellationStillReportsTheFailuresAlreadyCollected(t *testing.
 func TestRun_ReplayedLogsArriveInChainOrder(t *testing.T) {
 	h := newBootstrapHarness(t)
 	replayer := &recordingReplayer{v2Vaults: map[common.Address]int64{testVaultAddr: 0}}
-	service, err := NewService(h.config, h.chain, replayer, h.progress, h.versions)
+	service, err := NewService(h.config, h.chain, replayer, h.progress, h.archive, archiveName)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -692,7 +708,7 @@ func TestRun_ReplayedLogsArriveInChainOrder(t *testing.T) {
 func TestRun_RemovedLogFailsTheRun(t *testing.T) {
 	h := newBootstrapHarness(t)
 	replayer := &recordingReplayer{v2Vaults: map[common.Address]int64{testVaultAddr: 0}}
-	service, err := NewService(h.config, h.chain, replayer, h.progress, h.versions)
+	service, err := NewService(h.config, h.chain, replayer, h.progress, h.archive, archiveName)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -717,7 +733,7 @@ func TestRun_NarrowsRangeOnProviderCap(t *testing.T) {
 	h := newBootstrapHarness(t)
 	replayer := &recordingReplayer{v2Vaults: map[common.Address]int64{testVaultAddr: 0}}
 	h.config.BlockChunkSize = 1_000_000
-	service, err := NewService(h.config, h.chain, replayer, h.progress, h.versions)
+	service, err := NewService(h.config, h.chain, replayer, h.progress, h.archive, archiveName)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -747,7 +763,7 @@ func TestRun_NarrowsRangeOnProviderCap(t *testing.T) {
 func TestRun_UnrelatedGetLogsErrorBubbles(t *testing.T) {
 	h := newBootstrapHarness(t)
 	replayer := &recordingReplayer{v2Vaults: map[common.Address]int64{testVaultAddr: 0}}
-	service, err := NewService(h.config, h.chain, replayer, h.progress, h.versions)
+	service, err := NewService(h.config, h.chain, replayer, h.progress, h.archive, archiveName)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -770,7 +786,7 @@ type bootstrapHarness struct {
 	service       *Service
 	chain         *fakeChainReader
 	progress      *fakeProgressStore
-	versions      *fakeBlockVersionResolver
+	archive       *fakeArchive
 	multicaller   *testutil.MockMulticaller
 	morphoRepo    *testutil.MockMorphoRepository
 	adapters      []*entity.MorphoAdapterObservation
@@ -780,10 +796,8 @@ type bootstrapHarness struct {
 
 func newBootstrapHarness(t *testing.T) *bootstrapHarness {
 	t.Helper()
-	h := &bootstrapHarness{
-		t: t, chain: newFakeChainReader(), progress: &fakeProgressStore{},
-		versions: &fakeBlockVersionResolver{},
-	}
+	h := &bootstrapHarness{t: t, chain: newFakeChainReader(), progress: &fakeProgressStore{}}
+	h.archive = &fakeArchive{chain: h.chain}
 
 	h.multicaller = testutil.NewMockMulticaller()
 	h.morphoRepo = &testutil.MockMorphoRepository{}
@@ -841,7 +855,7 @@ func newBootstrapHarness(t *testing.T) *bootstrapHarness {
 	h.config.ChainID = 1
 	h.config.Logger = discardLogger()
 
-	h.service, err = NewService(h.config, h.chain, replay, h.progress, h.versions)
+	h.service, err = NewService(h.config, h.chain, replay, h.progress, h.archive, archiveName)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -1024,6 +1038,9 @@ type fakeChainReader struct {
 	// standing in for a run that dies part-way through its sweep.
 	failFilterAfter int
 	servedQueries   int
+	// beforeFilterLogs runs once, before the first eth_getLogs request is served, and
+	// then clears itself: it is how a test puts a whole second run inside one run's sweep.
+	beforeFilterLogs func()
 }
 
 func newFakeChainReader() *fakeChainReader {
@@ -1063,7 +1080,22 @@ func (f *fakeChainReader) HeaderByHash(_ context.Context, hash common.Hash) (*et
 	return header, nil
 }
 
+// hashOf returns the hash of a previously registered block, so a test can build
+// several logs at the same block without threading its hash through.
+func (f *fakeChainReader) hashOf(number uint64) common.Hash {
+	for hash, header := range f.headers {
+		if header.Number.Uint64() == number {
+			return hash
+		}
+	}
+	return common.Hash{}
+}
+
 func (f *fakeChainReader) FilterLogs(_ context.Context, q ethereum.FilterQuery) ([]ethtypes.Log, error) {
+	if hook := f.beforeFilterLogs; hook != nil {
+		f.beforeFilterLogs = nil
+		hook()
+	}
 	if f.filterErr != nil {
 		return nil, f.filterErr
 	}
@@ -1100,8 +1132,9 @@ type recordingReplayer struct {
 }
 
 type replayedLog struct {
-	log         shared.Log
-	blockNumber int64
+	log          shared.Log
+	blockNumber  int64
+	blockVersion int
 }
 
 func (r *recordingReplayer) LoadVaultRegistry(context.Context) error { return nil }
@@ -1118,43 +1151,43 @@ func (r *recordingReplayer) SeedV2VaultAdapters(_ context.Context, vaultAddress 
 	return nil
 }
 
-func (r *recordingReplayer) ReplayMetaMorphoLog(_ context.Context, log shared.Log, blockNumber int64, _ common.Hash, _ int, _ time.Time) error {
-	r.replayed = append(r.replayed, replayedLog{log: log, blockNumber: blockNumber})
+func (r *recordingReplayer) ReplayMetaMorphoLog(_ context.Context, log shared.Log, blockNumber int64, _ common.Hash, blockVersion int, _ time.Time) error {
+	r.replayed = append(r.replayed, replayedLog{log: log, blockNumber: blockNumber, blockVersion: blockVersion})
 	return nil
 }
 
-// fakeBlockVersionResolver stands in for the raw archive, answering one version for
-// every height and recording the blocks it was asked about.
-type fakeBlockVersionResolver struct {
-	version int
-	// err fails every height; errAt fails only the heights it names.
-	err   error
-	errAt map[int64]error
-	asked []blockRef
+// fakeArchive stands in for the raw archive: it holds every block the node fake was given,
+// at one version, so a height resolves exactly when the node knows a block there — and it
+// answers that block's real hash, so a run asking about the wrong block fails the way the
+// resolver makes a real one fail.
+type fakeArchive struct {
+	chain      *fakeChainReader
+	version    int
+	unarchived map[int64]bool
+	err        error
+	asked      []int64
 }
 
-func (f *fakeBlockVersionResolver) Summary() outbound.ResolvedVersions {
-	return outbound.ResolvedVersions{Heights: len(f.asked)}
-}
-
-func (f *fakeBlockVersionResolver) Reset() {
-	f.asked = nil
-}
-
-type blockRef struct {
-	number int64
-	hash   common.Hash
-}
-
-func (f *fakeBlockVersionResolver) ResolveBlockVersion(_ context.Context, blockNumber int64, blockHash common.Hash) (int, error) {
-	f.asked = append(f.asked, blockRef{number: blockNumber, hash: blockHash})
-	if err := f.errAt[blockNumber]; err != nil {
-		return 0, err
+func (a *fakeArchive) HighestVersion(_ context.Context, blockNumber int64) (int, bool, error) {
+	a.asked = append(a.asked, blockNumber)
+	if a.err != nil {
+		return 0, false, a.err
 	}
-	if f.err != nil {
-		return 0, f.err
+	if a.unarchived[blockNumber] {
+		return 0, false, nil
 	}
-	return f.version, nil
+	return a.version, a.chain.hashOf(uint64(blockNumber)) != (common.Hash{}), nil
+}
+
+func (a *fakeArchive) BlockHashAt(_ context.Context, blockNumber int64, version int) (string, bool, error) {
+	if a.err != nil {
+		return "", false, a.err
+	}
+	hash := a.chain.hashOf(uint64(blockNumber))
+	if hash == (common.Hash{}) || version != a.version {
+		return "", false, nil
+	}
+	return hash.Hex(), true, nil
 }
 
 // fakeProgressStore stands in for the Temporal heartbeat-details store: it keeps

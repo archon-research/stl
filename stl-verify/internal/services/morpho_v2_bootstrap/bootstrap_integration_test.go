@@ -406,7 +406,7 @@ func TestRun_ResumesAfterAKilledAttemptAndFinishesTheWork(t *testing.T) {
 // buildIntegrationService wires the bootstrap against the REAL postgres
 // repositories and the REAL morpho-indexer replay service, exactly as
 // cmd/cronjobs/morpho-v2-bootstrap does. Only the node is faked.
-func buildIntegrationService(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chain ChainReader, multicaller *testutil.MockMulticaller, progress ProgressStore) *Service {
+func buildIntegrationService(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chain *fakeChainReader, multicaller *testutil.MockMulticaller, progress ProgressStore) *Service {
 	t.Helper()
 	t.Setenv("BUILD_GIT_HASH", "test")
 
@@ -440,7 +440,7 @@ func buildIntegrationService(t *testing.T, ctx context.Context, pool *pgxpool.Po
 	cfg := ConfigDefaults()
 	cfg.ChainID = 1
 	cfg.Logger = logger
-	service, err := NewService(cfg, chain, replay, progress, &fakeBlockVersionResolver{})
+	service, err := NewService(cfg, chain, replay, progress, &fakeArchive{chain: chain}, archiveName)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -575,15 +575,4 @@ func countRows(t *testing.T, ctx context.Context, pool *pgxpool.Pool, table stri
 		t.Fatalf("counting %s: %v", table, err)
 	}
 	return n
-}
-
-// hashOf returns the hash of a previously registered block, so a test can build
-// several logs at the same block without threading its hash through.
-func (f *fakeChainReader) hashOf(number uint64) common.Hash {
-	for hash, header := range f.headers {
-		if header.Number.Uint64() == number {
-			return hash
-		}
-	}
-	return common.Hash{}
 }

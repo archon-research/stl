@@ -12,14 +12,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
-
-var _ outbound.BlockVersionResolver = (*Resolver)(nil)
 
 // ErrHeightNotArchived marks a height the archive cannot answer for: it holds no object
 // there, or none of the objects it holds identifies a block. Either way the archive is
@@ -35,11 +32,14 @@ var ErrArchivedBlockMismatch = errors.New("the raw archive holds another block a
 
 // Resolver answers from the raw archive, and proves the archive holds the block being
 // asked about before it answers.
+//
+// One Resolver serves one replay run. Its memo is only true of the archive the run read,
+// so a run that inherited another's would stamp a version it never proved and could not
+// be cleared by repairing the archive and starting again.
 type Resolver struct {
 	archive     outbound.ArchiveReader
 	archiveName string
 
-	mu        sync.Mutex
 	resolved  map[int64]archivedBlock
 	corrected []int64
 }
@@ -62,37 +62,24 @@ func NewResolver(archive outbound.ArchiveReader, archiveName string) *Resolver {
 }
 
 func (r *Resolver) ResolveBlockVersion(ctx context.Context, blockNumber int64, blockHash common.Hash) (int, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	archived, memoized := r.resolved[blockNumber]
-	if !memoized {
-		read, err := r.readArchivedBlock(ctx, blockNumber)
-		if err != nil {
+	if archived, memoized := r.resolved[blockNumber]; memoized {
+		if err := r.requireSameBlock(blockNumber, archived, blockHash); err != nil {
 			return 0, err
 		}
-		archived = read
+		return archived.version, nil
 	}
-	if err := r.speaksForTheReplayedBlock(blockNumber, archived, blockHash); err != nil {
+	archived, err := r.readArchivedBlock(ctx, blockNumber)
+	if err != nil {
 		return 0, err
 	}
-	if !memoized {
-		r.remember(blockNumber, archived)
+	if err := r.requireSameBlock(blockNumber, archived, blockHash); err != nil {
+		return 0, err
 	}
+	r.remember(blockNumber, archived)
 	return archived.version, nil
 }
 
-// Reset drops what an earlier run resolved, so a repaired height is read again rather
-// than answered from the memo of the orphan, and the summary belongs to one run.
-func (r *Resolver) Reset() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	r.resolved = map[int64]archivedBlock{}
-	r.corrected = nil
-}
-
-func (r *Resolver) speaksForTheReplayedBlock(blockNumber int64, archived archivedBlock, blockHash common.Hash) error {
+func (r *Resolver) requireSameBlock(blockNumber int64, archived archivedBlock, blockHash common.Hash) error {
 	if archived.hash == blockHash {
 		return nil
 	}
@@ -100,11 +87,16 @@ func (r *Resolver) speaksForTheReplayedBlock(blockNumber int64, archived archive
 		blockNumber, archived.version, r.archiveName, archived.hash.Hex(), blockHash.Hex(), ErrArchivedBlockMismatch)
 }
 
-func (r *Resolver) Summary() outbound.ResolvedVersions {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+// ResolvedVersions is what a run asked the archive for: how many heights it answered,
+// and which of those it holds under a corrected (non-zero) version — the blocks whose
+// replayed rows do not land at version 0.
+type ResolvedVersions struct {
+	Heights   int
+	Corrected []int64
+}
 
-	return outbound.ResolvedVersions{Heights: len(r.resolved), Corrected: append([]int64(nil), r.corrected...)}
+func (r *Resolver) Summary() ResolvedVersions {
+	return ResolvedVersions{Heights: len(r.resolved), Corrected: append([]int64(nil), r.corrected...)}
 }
 
 // readArchivedBlock asks the archive what it holds at a height.
