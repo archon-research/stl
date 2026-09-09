@@ -18,6 +18,10 @@
 # the first deploy after this run, not on this run.
 name: Image Security Refresh
 
+# Least privilege by default; each job widens to exactly what it needs. Without
+# this both jobs inherit the default token (zizmor excessive-permissions).
+permissions: {}
+
 on:
   schedule:
     # Mondays 04:00 UTC — before the working day, so the refreshed cache is in
@@ -65,8 +69,14 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
+      # Both values go through env rather than being interpolated into the
+      # script: an expansion inside `run:` is a code-injection vector, and a
+      # new workflow should not need an entry on zizmor's ignore list.
       - name: Login to GHCR (build cache)
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
 
       - name: Resolve build-cache repo
         run: echo "DOCKER_CACHE_REPO=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/buildcache" >> "$GITHUB_ENV"
@@ -90,6 +100,8 @@ jobs:
     name: Notify Image Security Refresh Failure
     if: ${{ always() && needs.refresh-build-cache.result == 'failure' }}
     needs: [refresh-build-cache]
+    permissions:
+      contents: read
     uses: ./.github/workflows/slack-notify.yaml
     with:
       status: failure
