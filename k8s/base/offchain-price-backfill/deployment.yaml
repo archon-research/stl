@@ -54,4 +54,4 @@ spec:
       # WorkerStopTimeout, so an in-flight activity is cancelled on shutdown and
       # Temporal retries that chunk on the next worker. Safe because chunks are
       # idempotent within a build.
-      terminationGracePeriodSeconds: 60
+      terminationGracePeriodSeconds: 90
