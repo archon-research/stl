@@ -60,10 +60,14 @@ func TestCompressedConvertedHypertablesHaveAVersionFunction(t *testing.T) {
 			// table name has to be maintained (after AGENTS.md, convertedAppendOnlyTables and
 			// schema_master), and it silently rots. This cannot: the moment such a table gains a
 			// trigger it re-enters scope and fails below for want of the function.
+			// BEFORE INSERT ... FOR EACH ROW only: that is the shape that can assign
+			// NEW.processing_version and hand the compressed-chunk arbiter a DEFAULT. An AFTER or
+			// statement-level trigger cannot, so its table's INSERT still names the column itself.
 			var userTriggers int
 			if err := pool.QueryRow(ctx, `
 				SELECT count(*) FROM pg_trigger
-				WHERE tgrelid = $1::regclass AND NOT tgisinternal`, table).Scan(&userTriggers); err != nil {
+				WHERE tgrelid = $1::regclass AND NOT tgisinternal
+				  AND (tgtype & 2) = 2 AND (tgtype & 1) = 1`, table).Scan(&userTriggers); err != nil {
 				t.Fatalf("look up triggers on %s: %v", table, err)
 			}
 			if userTriggers == 0 {
