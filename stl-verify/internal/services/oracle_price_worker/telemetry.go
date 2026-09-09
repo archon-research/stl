@@ -67,6 +67,11 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider,
 	if err := t.initUnitInstruments(); err != nil {
 		return nil, err
 	}
+
+	// VectorOracleIndexerStalled reads blocks.processed with rate()==0; seed so
+	// it is computable from process start (see telemetry.SeedCounter).
+	telemetry.SeedStatusCounter(context.Background(), t.blocksProcessed, t.chainAttr)
+
 	return t, nil
 }
 

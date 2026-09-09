@@ -895,9 +895,10 @@ func mustMarshalReceipts(t *testing.T, receipts []TransactionReceipt) json.RawMe
 
 // ── per-block liveness/latency metrics ──
 
-// TestProcessBlock_RecordsLivenessMetrics asserts every consumed block emits one
-// blocks_processed_total sample and one processing_duration_seconds observation
-// carrying {chain,status}, on both the success and error paths. These are the
+// TestProcessBlock_RecordsLivenessMetrics asserts every consumed block advances
+// one of the seeded blocks_processed_total series and emits one
+// processing_duration_seconds observation carrying {chain,status}, on both the
+// success and error paths. These are the
 // per-block liveness + latency signals the VectorAllocationTracker{Stalled,
 // ErrorRatioHigh,BlockLatencyHigh} alerts key on, so the exact metric and label
 // names must not drift from the alert expressions.
@@ -932,7 +933,7 @@ func TestProcessBlock_RecordsLivenessMetrics(t *testing.T) {
 				t.Fatalf("processBlock err = %v, wantErr = %v", err, tt.wantErr)
 			}
 
-			if got := singleStatusCounter(t, reader, "blocks_processed_total", tt.wantStatus); got != 1 {
+			if got := seededStatusCounter(t, reader, "blocks_processed_total", tt.wantStatus); got != 1 {
 				t.Errorf("blocks_processed_total{status=%q} = %d, want 1", tt.wantStatus, got)
 			}
 			if got := singleStatusHistogramCount(t, reader, "processing_duration_seconds", tt.wantStatus); got != 1 {
@@ -951,7 +952,9 @@ func newBlockMetrics(t *testing.T) (*telemetry.Metrics, sdkmetric.Reader) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	prev := otel.GetMeterProvider()
-	otel.SetMeterProvider(mp)
+	// telemetry.SetMeterProvider, not otel's: the blocks_processed_total seed is
+	// registered with OnMeterProviderReady, and only this entry point runs it.
+	telemetry.SetMeterProvider(mp)
 	t.Cleanup(func() {
 		otel.SetMeterProvider(prev)
 		_ = mp.Shutdown(context.Background())
@@ -1000,20 +1003,40 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// singleStatusCounter asserts the counter has exactly one datapoint, carrying
-// chain="mainnet" and the given status, and returns its value.
-func singleStatusCounter(t *testing.T, reader sdkmetric.Reader, name, status string) int64 {
+// seededStatusCounter asserts the counter carries exactly the two series
+// telemetry.NewMetrics seeds at 0, and that only wantStatus advanced. The
+// second half is the point: it proves the recorded sample landed ON the seeded
+// series rather than orphaning it into a parallel one, which would leave the
+// seeded series flat at 0 and defeat the alert it exists for.
+func seededStatusCounter(t *testing.T, reader sdkmetric.Reader, name, wantStatus string) int64 {
 	t.Helper()
 	m := collectMetric(t, reader, name)
 	sum, ok := m.Data.(metricdata.Sum[int64])
 	if !ok {
 		t.Fatalf("%s is %T, want Sum[int64]", name, m.Data)
 	}
-	if len(sum.DataPoints) != 1 {
-		t.Fatalf("%s has %d datapoints, want 1", name, len(sum.DataPoints))
+	if len(sum.DataPoints) != 2 {
+		t.Fatalf("%s has %d datapoints, want 2 (the seeded success and error series)", name, len(sum.DataPoints))
 	}
-	assertChainStatus(t, sum.DataPoints[0].Attributes, status)
-	return sum.DataPoints[0].Value
+
+	var got int64
+	var seen []string
+	for _, dp := range sum.DataPoints {
+		status, _ := dp.Attributes.Value("status")
+		seen = append(seen, status.AsString())
+		assertChainStatus(t, dp.Attributes, status.AsString())
+		if status.AsString() == wantStatus {
+			got = dp.Value
+			continue
+		}
+		if dp.Value != 0 {
+			t.Errorf("%s{status=%q} = %d, want 0", name, status.AsString(), dp.Value)
+		}
+	}
+	if !slices.Contains(seen, wantStatus) {
+		t.Fatalf("%s has series %v, none of them status=%q", name, seen, wantStatus)
+	}
+	return got
 }
 
 // singleStatusHistogramCount asserts the histogram has exactly one datapoint,
