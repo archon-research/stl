@@ -16,6 +16,9 @@ import (
 // plain unit tests; the service-wiring path is covered by the integration test
 // (main_integration_test.go).
 
+// rawArchiveBucket is a real per-chain raw bucket name, the shape the worker is handed.
+const rawArchiveBucket = "stl-sentinelstaging-ethereum-raw-89d540d0"
+
 func discardDeps() temporal.Dependencies {
 	return temporal.Dependencies{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 }
@@ -59,6 +62,8 @@ func TestSetupRunner_RequiresChainID(t *testing.T) {
 
 func TestSetupRunner_RequiresAlchemyKey(t *testing.T) {
 	t.Setenv("CHAIN_ID", "1")
+	t.Setenv("DEPLOY_ENV", "staging")
+	t.Setenv("S3_BUCKET", rawArchiveBucket)
 	t.Setenv("ALCHEMY_API_KEY", "")
 
 	_, _, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
@@ -70,6 +75,46 @@ func TestSetupRunner_RequiresAlchemyKey(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "resolving RPC URL") {
 		t.Errorf("error %q should identify the failed operation", err.Error())
+	}
+}
+
+func TestSetupRunner_RefusesAnUnusableArchiveConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     map[string]string
+		wantErr string
+	}{
+		{
+			name:    "no bucket at all",
+			env:     map[string]string{"S3_BUCKET": ""},
+			wantErr: "S3_BUCKET",
+		},
+		{
+			name:    "no environment to check the bucket against",
+			env:     map[string]string{"DEPLOY_ENV": ""},
+			wantErr: "DEPLOY_ENV",
+		},
+		{
+			name:    "another chain's raw bucket",
+			env:     map[string]string{"S3_BUCKET": "stl-sentinelstaging-base-raw-89d540d0"},
+			wantErr: "S3_BUCKET / CHAIN_ID mismatch",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CHAIN_ID", "1")
+			t.Setenv("DEPLOY_ENV", "staging")
+			t.Setenv("ALCHEMY_API_KEY", "key")
+			t.Setenv("S3_BUCKET", rawArchiveBucket)
+			for name, value := range tc.env {
+				t.Setenv(name, value)
+			}
+
+			_, _, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want one mentioning %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 

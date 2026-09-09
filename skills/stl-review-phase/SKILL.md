@@ -1,47 +1,29 @@
 ---
 name: stl-review-phase
-description: Run the standard parallel review after a substantive code change (new feature, refactor, or multi-file bug fix) and before declaring work done. Uses delegation when available and an in-agent fallback otherwise.
+description: Repo-specific review lenses for stl. Use with /code-review after a substantive change (new feature, refactor, or multi-file bug fix) and before declaring work done.
 ---
 
 # Review phase
 
-After completing a substantive code change (new feature, refactor, or bug fix
-touching multiple files), and before declaring the work done, launch the review
-lenses below concurrently using the platform's subagent or delegation tools.
-Use a specialized reviewer when the platform provides one; otherwise give the
-same brief to a general-purpose reviewer. Never skip a lens merely because a
-named reviewer is unavailable. If the platform's concurrency limit is lower
-than the number of lenses, combine adjacent lenses in one reviewer prompt.
-If the platform has no delegation tools, the current agent must apply every
-lens itself in one combined review before declaring the work done.
+Run `/code-review` (add `--fix` to apply findings to the working tree). Ask for
+`xhigh` or `max` when you want the multi-agent fan-out and the verify pass —
+on some models `high` and below are a single inline pass.
 
-Always run:
+Then verify these repo lenses were actually covered — add them to the review
+target prompt if not:
 
-1. **Guidelines and correctness** — adherence to project instructions, behavior,
-   style, and conventions. Prefer `pr-review-toolkit:code-reviewer` when available.
+1. **Hexagonal layering** — dependency direction (domain depends on nothing,
+   ports depend on domain, adapters depend on ports), port/adapter boundary leaks.
 2. **Silent failures** — error swallowing, ignored errors, inadequate fallbacks,
-   partial success, and NotFound-treated-as-success. Prefer
-   `pr-review-toolkit:silent-failure-hunter` when available.
-3. **Architecture** — hexagonal layering, dependency direction, port/adapter
-   boundaries, single responsibility, separation of concerns, and coupling.
-4. **Code quality and patterns** — function size, naming, idiomatic language use,
-   DRY, premature abstraction, test design, and SOLID concerns.
+   partial success, and NotFound-treated-as-success.
+3. **Append-only database** — no `UPDATE`/`DELETE`/`DO UPDATE` on a converted
+   table (see `stl-verify/db/migrations/AGENTS.md`).
+4. **Pipeline separation** — ingest writes "what happened" to Postgres; models
+   read from Postgres and write "what it means" to their own tables.
 
-Run additionally when applicable:
+Tag findings with short IDs (`B1`/`S1`/`N1`) grouped by severity so they can be
+referenced. Apply blocking and should-fix items before declaring the work done;
+surface nice-to-have items to the user for an explicit decision.
 
-5. **Tests and coverage** — when new tests are added or coverage is at risk.
-   Prefer `pr-review-toolkit:pr-test-analyzer` when available.
-6. **Type design** — when new types or interfaces are introduced. Prefer
-   `pr-review-toolkit:type-design-analyzer` when available.
-7. **Comments and documentation** — when substantive comments or docstrings are
-   added. Prefer `pr-review-toolkit:comment-analyzer` when available.
-
-Each reviewer prompt must include:
-
-- `Review only; do not modify files.` Reviewers share a worktree and concurrent
-  edits can race.
-- The plan file path (if a plan exists) and a precise list of files in scope.
-- A specific audit checklist tailored to that reviewer's lens — don't ask reviewers to "review the diff"; tell them what to look for.
-- The expected output format: **Blocking** / **Should-fix** / **Nice-to-have** / **Verified correct**, with file:line citations.
-
-Apply blocking and should-fix items before declaring the work done. Nice-to-have items are surfaced to the user for an explicit decision.
+If `/code-review` is unavailable (a harness without it), apply all four lenses
+yourself in one combined pass and say plainly that this was a single-pass review.

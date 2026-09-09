@@ -3,6 +3,7 @@ import type { ChangeEvent } from 'react';
 
 import { css } from '#styled-system/css';
 
+import type { Undefinable } from '../../shared/types/optional';
 import {
   filterFieldClassName,
   filterLabelClassName,
@@ -21,15 +22,16 @@ function normalizeFilterValue(value: string): string | undefined {
 }
 
 type ActivityFilterBarProps = {
-  actionFilter?: string;
-  onActionFilterChange?: (value: string | null) => void;
   tokenFilter: string | null;
-  onTokenFilterChange?: (value: string | null) => void;
   tokenOptions: string[];
   tokenOptionsFailed: boolean;
   hasActiveFilters: boolean;
   onClearFilters: () => void;
-};
+} & Undefinable<{
+  actionFilter?: string;
+  onActionFilterChange?: (value: string | null) => void;
+  onTokenFilterChange?: (value: string | null) => void;
+}>;
 
 export function ActivityFilterBar({
   actionFilter,

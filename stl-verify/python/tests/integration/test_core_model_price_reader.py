@@ -17,6 +17,7 @@ async def engine(async_db_url: str):
     eng = create_async_engine(async_db_url, pool_pre_ping=True)
     async with eng.begin() as conn:
         await conn.execute(text("TRUNCATE onchain_token_price"))
+        await conn.execute(text("TRUNCATE asset_price"))
         # The symbol-collision test seeds a second "WETH" token; _token_id
         # resolves by symbol, so a leaked spoof row would break sibling tests.
         await delete_spoof_token(conn)
@@ -138,8 +139,10 @@ async def test_a_gap_inside_the_window_fails_the_run(engine):
 
 
 async def test_an_unknown_symbol_fails_with_the_backfill_pointer(engine):
-    with pytest.raises(ValueError, match="XRP: no on-chain oracle prices"):
-        await PostgresPriceReader(engine, min_days=_MIN_DAYS).get_prices(["XRP"])
+    # SOL is neither a token with an oracle feed, a token-less catalog row,
+    # nor a proxied native.
+    with pytest.raises(ValueError, match="SOL: no on-chain oracle prices"):
+        await PostgresPriceReader(engine, min_days=_MIN_DAYS).get_prices(["SOL"])
 
 
 async def test_short_history_fails_rather_than_feeding_garch_a_stub(engine):
@@ -148,3 +151,67 @@ async def test_short_history_fails_rather_than_feeding_garch_a_stub(engine):
 
     with pytest.raises(ValueError, match="3 of the last 5 days missing"):
         await PostgresPriceReader(engine, min_days=_MIN_DAYS).get_prices(["WETH"])
+
+
+# Token-less assets (asset_price) and the BTC/ETH oracle proxies.
+# The XRP/HYPE catalog rows are seeded by the asset_price migration.
+
+
+async def _seed_asset_days(engine, symbol: str, closes: dict[dt.date, float]) -> None:
+    async with engine.begin() as conn:
+        asset = (
+            await conn.execute(
+                text("SELECT id, source_id FROM offchain_price_asset WHERE tokenless AND upper(symbol) = :s"),
+                {"s": symbol.upper()},
+            )
+        ).one()
+        for day, close in closes.items():
+            # Two snapshots per day: the later one must win as the close.
+            for hour, price in ((9, close + 5.0), (23, close)):
+                ts = dt.datetime.combine(day, dt.time(hour), tzinfo=dt.UTC)
+                await conn.execute(
+                    text("""
+                        INSERT INTO asset_price (asset_id, source_id, "timestamp", price_usd, processing_version)
+                        VALUES (:asset_id, :source_id, :ts, :price,
+                                next_processing_version_asset_price(:asset_id, :source_id, :ts, 0))
+                    """),
+                    {"asset_id": asset.id, "source_id": asset.source_id, "ts": ts, "price": price},
+                )
+
+
+async def test_tokenless_daily_close_is_the_newest_snapshot_of_each_day(engine):
+    days = _last_days(_MIN_DAYS)
+    await _seed_asset_days(engine, "XRP", {d: 1.40 + i * 0.01 for i, d in enumerate(days)})
+    reader = PostgresPriceReader(engine, min_days=_MIN_DAYS)
+    prices = await reader.get_prices(["XRP"])
+    assert prices["XRP"].iloc[-1] == pytest.approx(1.40 + (_MIN_DAYS - 1) * 0.01)
+    assert len(prices) == _MIN_DAYS
+
+
+async def test_oracle_and_tokenless_series_combine_into_one_frame(engine):
+    # Different history depths on purpose: the union of the two day indexes
+    # must come back sorted (statsmodels refuses a non-monotonic date index).
+    await _seed_days(engine, await _token_id(engine, "WETH"), {d: 2000.0 for d in _last_days(_MIN_DAYS)})
+    await _seed_asset_days(engine, "XRP", {d: 1.40 for d in _last_days(_MIN_DAYS + 3)})
+    prices = await PostgresPriceReader(engine, min_days=_MIN_DAYS).get_prices(["WETH", "XRP"])
+    assert list(prices.columns) == ["WETH", "XRP"]
+    assert prices.index.is_monotonic_increasing
+    assert len(prices) == _MIN_DAYS + 3
+    assert prices["WETH"].iloc[-1] == pytest.approx(2000.0)
+    assert prices["XRP"].iloc[-1] == pytest.approx(1.40)
+
+
+async def test_native_btc_and_eth_ride_their_wrapped_proxy_series(engine):
+    days = _last_days(_MIN_DAYS)
+    await _seed_days(engine, await _token_id(engine, "WBTC"), {d: 78000.0 for d in days})
+    await _seed_days(engine, await _token_id(engine, "WETH"), {d: 2000.0 for d in days})
+    prices = await PostgresPriceReader(engine, min_days=_MIN_DAYS).get_prices(["BTC", "ETH", "WBTC"])
+    # BTC and WBTC share the WBTC series on purpose; the copula's eigenvalue
+    # flooring absorbs the identical columns.
+    assert prices["BTC"].equals(prices["WBTC"])
+    assert prices["ETH"].iloc[-1] == pytest.approx(2000.0)
+
+
+async def test_a_tokenless_asset_without_history_fails_with_the_backfill_pointer(engine):
+    with pytest.raises(ValueError, match="HYPE: no asset_price series"):
+        await PostgresPriceReader(engine, min_days=_MIN_DAYS).get_prices(["HYPE"])
