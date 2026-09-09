@@ -96,7 +96,25 @@ overlay() {
 
 # check <name> <expected-exit> <expected-substring> -- <args...>
 check() {
-  local name="$1" want_exit="$2" want_text="$3"; shift 4
+  # `shift 4` below assumes exactly this shape. Under `set -e`, a call site one
+  # argument short (a missing "--", a forgotten want_text) would make `shift 4`
+  # fail with "shift count out of range" and abort the whole test run right
+  # there, mid-suite, with no indication of which check() call was short — the
+  # remaining checks simply never run. Fail closed instead: report which named
+  # check was malformed and keep going, so one bad call site costs one FAIL, not
+  # the rest of the suite.
+  if [ "$#" -lt 4 ]; then
+    FAILED=$((FAILED + 1))
+    echo "  FAIL ${1:-<unnamed check>}: check() called with $# argument(s), need at least 4: <name> <exit> <text> -- <args...>"
+    return
+  fi
+  local name="$1" want_exit="$2" want_text="$3" sep="$4"
+  if [ "$sep" != "--" ]; then
+    FAILED=$((FAILED + 1))
+    echo "  FAIL ${name}: check()'s 4th argument must be '--', got '${sep}'"
+    return
+  fi
+  shift 4
   local out status
   set +e
   out="$(STUB_RESPONSES="${WORK}/responses" PATH="${WORK}/bin:$PATH" bash "$SUBJECT" "$@" 2>&1)"
@@ -183,8 +201,24 @@ check "determining nothing exits non-zero" 1 "could not determine anything about
 rm -rf "${WORK}/responses"
 respond stl-sentinelstaging-watcher "$PINNED_SHA" "$(manifest_with_layers sha256:one)"
 respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$(manifest_with_layers sha256:one)"
-check "a partial failure still exits zero when something was determined" 0 "1 unchanged, 0 changed, 0 missing from ECR, 1 not compared" -- \
+check "a partial failure still exits zero when something was determined" 0 \
+  "1 unchanged, 0 changed, 0 pinned tag(s) gone from ECR (retention risk on a running image), 0 candidate(s) not yet built, 1 not compared" -- \
   --kustomization "$(overlay stl-sentinelstaging-watcher stl-sentinelstaging-migrate)" --tag "$DEPLOY_SHA"
+
+# PINNED_GONE (a retention incident on a running image) and NOT_BUILT (a build
+# that has not landed yet) are different operational problems and must not be
+# folded into one undifferentiated "registry problems" count in the summary.
+rm -rf "${WORK}/responses"
+respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$(manifest_with_layers sha256:one)"
+check "PINNED_GONE is counted separately from NOT_BUILT in the summary" 0 \
+  "0 unchanged, 0 changed, 1 pinned tag(s) gone from ECR (retention risk on a running image), 0 candidate(s) not yet built, 0 not compared" -- \
+  --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA"
+
+rm -rf "${WORK}/responses"
+respond stl-sentinelstaging-watcher "$PINNED_SHA" "$(manifest_with_layers sha256:one)"
+check "NOT_BUILT is counted separately from PINNED_GONE in the summary" 0 \
+  "0 unchanged, 0 changed, 0 pinned tag(s) gone from ECR (retention risk on a running image), 1 candidate(s) not yet built, 0 not compared" -- \
+  --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA"
 
 # Running after the deploy rewrote the block: both sides name the same tag, so
 # there is nothing to compare and UNCHANGED would be a lie.
@@ -273,24 +307,137 @@ NON_ECR_OVERLAY="${WORK}/kustomization-nonecr.yaml"
 check "a non-ECR newName is UNKNOWN" 1 "could not parse ECR account/region" -- \
   --kustomization "$NON_ECR_OVERLAY" --tag "$DEPLOY_SHA"
 
-# A quote in a value used to produce invalid JSON and kill the script at exit 5.
+# A quote or backslash in a value used to produce invalid JSON and kill the
+# script at exit 5 (outside its documented 0/1/2 contract). This must be a
+# genuinely adversarial value: an earlier version of this test built
+# QUOTE_OVERLAY with `newName: ...stl-sentinelstaging-watcher` -- containing no
+# quote character anywhere -- so both checks below passed whether or not the
+# jq -nc --arg fix was actually in place. This one carries a real double quote
+# and a real backslash into two JSON string fields (image and detail).
 rm -rf "${WORK}/responses"
 respond stl-sentinelstaging-watcher "$PINNED_SHA" "$(manifest_with_layers sha256:one)"
 respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$(manifest_with_layers sha256:one)"
 QUOTE_OVERLAY="${WORK}/kustomization-quote.yaml"
+ADVERSARIAL_NAME='not-an-ecr-host"quoted\repo'
 {
-  echo "images:"
-  echo "  - name: watcher"
-  echo "    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-watcher"
-  echo "    newTag: ${PINNED_SHA}"
+  printf 'images:\n'
+  printf '  - name: watcher\n'
+  printf '    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-watcher\n'
+  printf '    newTag: %s\n' "$PINNED_SHA"
+  # A second, unresolvable entry so the adversarial quote+backslash value
+  # itself flows into the JSON (as `image` and inside `detail`), while the
+  # watcher entry above keeps DETERMINED > 0 so the run still exits 0.
+  printf '  - name: quoted\n'
+  printf '    newName: %s\n' "$ADVERSARIAL_NAME"
+  printf '    newTag: %s\n' "$PINNED_SHA"
 } > "$QUOTE_OVERLAY"
 JSON_Q="${WORK}/quote.json"
-check "the JSON survives a quote in a value" 0 "Verdicts written" -- \
+check "the JSON survives a quote and a backslash in a value" 0 "Verdicts written" -- \
   --kustomization "$QUOTE_OVERLAY" --tag "$DEPLOY_SHA" --json "$JSON_Q"
 if jq -e . "$JSON_Q" >/dev/null 2>&1; then
   PASSED=$((PASSED + 1)); echo "  ok   the JSON output parses"
 else
   FAILED=$((FAILED + 1)); echo "  FAIL the JSON output does not parse"
+fi
+if [ "$(jq -r --arg n "$ADVERSARIAL_NAME" '.results[] | select(.image == $n) | .image' "$JSON_Q" 2>/dev/null)" = "$ADVERSARIAL_NAME" ]; then
+  PASSED=$((PASSED + 1)); echo "  ok   the adversarial quote+backslash value round-trips through the JSON intact"
+else
+  FAILED=$((FAILED + 1)); echo "  FAIL the adversarial value did not round-trip through the JSON"
+  cat "$JSON_Q" 2>/dev/null | sed 's/^/         /'
+fi
+
+# classify_pair_status's fail-closed arm (finding #3): layers_of's contract is
+# exactly {0, 2, 3, 4} and every value in that set already has a branch above
+# it, so a stub `aws` can never actually drive this function to the fail-closed
+# arm -- there is no way to make the real call site produce a fifth status.
+# Extract just this function from the subject script and call it directly with
+# one layers_of cannot currently produce, so the arm that matters most (the one
+# standing between an unrecognized status and a false UNCHANGED) is still
+# exercised end to end rather than only reasoned about.
+echo "==> classify_pair_status (unit)"
+CLASSIFY_SRC="$(sed -n '/^classify_pair_status()/,/^}/p' "$SUBJECT")"
+if [ -z "$CLASSIFY_SRC" ]; then
+  FAILED=$((FAILED + 1))
+  echo "  FAIL could not extract classify_pair_status() from ${SUBJECT}"
+else
+  (
+    eval "$CLASSIFY_SRC"
+    classify_pair_status 9 0 "sha256:one" "sha256:one" "some-repo" "pinned-tag" "candidate-tag"
+    printf '%s\t%s\n' "$verdict" "$detail"
+  ) > "${WORK}/classify-out"
+  CLASSIFY_VERDICT="$(cut -f1 "${WORK}/classify-out")"
+  CLASSIFY_DETAIL="$(cut -f2- "${WORK}/classify-out")"
+  if [ "$CLASSIFY_VERDICT" = "UNKNOWN" ] && printf '%s' "$CLASSIFY_DETAIL" | grep -q "unrecognized status"; then
+    PASSED=$((PASSED + 1))
+    echo "  ok   an unrecognized status (9) is UNKNOWN, not a fallthrough content comparison"
+  else
+    FAILED=$((FAILED + 1))
+    echo "  FAIL an unrecognized status did not report UNKNOWN (got verdict='${CLASSIFY_VERDICT}' detail='${CLASSIFY_DETAIL}')"
+  fi
+
+  # Same call but with identical layers: proves the fail-closed arm is checked
+  # BEFORE the content comparison, not after -- otherwise an unrecognized
+  # status paired with equal layer strings would still report UNCHANGED, which
+  # is exactly the dangerous wrong answer this arm exists to prevent.
+  (
+    eval "$CLASSIFY_SRC"
+    classify_pair_status 0 9 "sha256:one" "sha256:one" "some-repo" "pinned-tag" "candidate-tag"
+    printf '%s\n' "$verdict"
+  ) > "${WORK}/classify-out2"
+  if [ "$(cat "${WORK}/classify-out2")" = "UNKNOWN" ]; then
+    PASSED=$((PASSED + 1))
+    echo "  ok   an unrecognized status wins over an equal-layers comparison, never UNCHANGED"
+  else
+    FAILED=$((FAILED + 1))
+    echo "  FAIL an unrecognized status with equal layers reported '$(cat "${WORK}/classify-out2")', not UNKNOWN"
+  fi
+fi
+
+# check()'s own `shift 4` (finding #4): a call site short of arguments must not
+# abort the whole suite under set -e with "shift: shift count out of range" --
+# it should report one FAIL for that call and let the rest of the suite run.
+# Exercised in a subshell so the deliberately-malformed call below does not
+# corrupt this run's own PASSED/FAILED.
+echo "==> check() hardening (unit)"
+if (
+  PASSED=0; FAILED=0
+  check "deliberately short call" 0 "irrelevant"
+  [ "$FAILED" -eq 1 ] && [ "$PASSED" -eq 0 ]
+) >/dev/null 2>&1; then
+  PASSED=$((PASSED + 1))
+  echo "  ok   check() reports a clean FAIL on a short call instead of aborting the suite"
+else
+  FAILED=$((FAILED + 1))
+  echo "  FAIL check() did not handle a short call as expected"
+fi
+
+# --weekly-refresh (finding #7): recorded in the JSON and named in the human
+# summary, so a consumer reading a day of verdicts can tell a legitimate
+# all-CHANGED refresh day from real churn without guessing from the date.
+rm -rf "${WORK}/responses"
+respond stl-sentinelstaging-watcher "$PINNED_SHA" "$(manifest_with_layers sha256:one)"
+respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$(manifest_with_layers sha256:two)"
+JSON_R="${WORK}/refresh.json"
+check "--weekly-refresh is named in the human summary" 0 "flagged --weekly-refresh" -- \
+  --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA" --json "$JSON_R" --weekly-refresh
+if [ "$(jq -r '.weeklyRefresh' "$JSON_R" 2>/dev/null)" = "true" ]; then
+  PASSED=$((PASSED + 1)); echo "  ok   --weekly-refresh is recorded as weeklyRefresh:true in the JSON"
+else
+  FAILED=$((FAILED + 1)); echo "  FAIL weeklyRefresh was not recorded as true in the JSON"
+  cat "$JSON_R" 2>/dev/null | sed 's/^/         /'
+fi
+
+rm -rf "${WORK}/responses"
+respond stl-sentinelstaging-watcher "$PINNED_SHA" "$(manifest_with_layers sha256:one)"
+respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$(manifest_with_layers sha256:one)"
+JSON_NR="${WORK}/no-refresh.json"
+check "without --weekly-refresh the JSON records it as false" 0 "Verdicts written" -- \
+  --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA" --json "$JSON_NR"
+if [ "$(jq -r '.weeklyRefresh' "$JSON_NR" 2>/dev/null)" = "false" ]; then
+  PASSED=$((PASSED + 1)); echo "  ok   weeklyRefresh defaults to false in the JSON"
+else
+  FAILED=$((FAILED + 1)); echo "  FAIL weeklyRefresh did not default to false in the JSON"
+  cat "$JSON_NR" 2>/dev/null | sed 's/^/         /'
 fi
 
 echo "${PASSED} passed, ${FAILED} failed"

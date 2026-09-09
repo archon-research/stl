@@ -48,8 +48,13 @@
 #   PINNED_GONE the tag the overlay pins is absent from ECR. This is the
 #              openmetadata-ingestion failure (ARCT-436, 2026-08-31): the image
 #              is gone but nothing notices until a node rotates and the kubelet
-#              can no longer pull from its local cache. Keeping older tags for
-#              longer makes it likelier, so it is called out loudly here
+#              can no longer pull from its local cache. The mechanism this
+#              script measures for (UNCHANGED keeping the pinned tag instead of
+#              bumping it) leaves that pinned tag referenced for longer than it
+#              would otherwise be, without extending its retention in ECR by a
+#              single day — so the same lifecycle-policy expiry now lands on a
+#              tag pods are still depending on. Called out loudly here for that
+#              reason
 #   UNKNOWN    the comparison could not be made (AWS error, unparseable
 #              manifest, a manifest list where a single image was expected)
 #
@@ -60,7 +65,7 @@
 # evaluate a single image exits non-zero rather than printing an empty summary.
 #
 # Usage:
-#   compare-image-layers.sh --kustomization <file> --tag <40-hex-sha> [--json <path>]
+#   compare-image-layers.sh --kustomization <file> --tag <40-hex-sha> [--json <path>] [--weekly-refresh]
 #
 #   --kustomization  the overlay whose pinned tags are the "already running"
 #                    side. Read as it stands on disk, so run this BEFORE the
@@ -71,6 +76,16 @@
 #                    prefix kept — the same rule verify-ecr-images.sh uses)
 #   --json           also write the verdicts as JSON, for collecting a week of
 #                    them and reconciling every disagreement
+#   --weekly-refresh tell this run it follows the Monday 04:00 UTC
+#                    image-security-refresh, so a wave of CHANGED verdicts is
+#                    the refresh landing, not churn. This script has no
+#                    reliable way to infer that itself (the caller knows when
+#                    it is running; guessing from the current date here would
+#                    just move the unreliable inference inside the thing nobody
+#                    can double-check), so it is a flag the caller sets, not a
+#                    computation done here. Recorded in the JSON as
+#                    weeklyRefresh and noted in the human summary; changes no
+#                    verdict.
 #
 # Requires AWS credentials for the account the overlay's images name, with
 # ecr:BatchGetImage — the same permission verify-ecr-images.sh needs and the
@@ -82,14 +97,16 @@ set -euo pipefail
 KUSTOMIZATION=""
 TAG=""
 JSON_OUT=""
+WEEKLY_REFRESH=0
 
 die() { echo "::error::$*" >&2; exit 2; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --kustomization) KUSTOMIZATION="${2:-}"; shift 2 ;;
-    --tag)           TAG="${2:-}"; shift 2 ;;
-    --json)          JSON_OUT="${2:-}"; shift 2 ;;
+    --kustomization)  KUSTOMIZATION="${2:-}"; shift 2 ;;
+    --tag)             TAG="${2:-}"; shift 2 ;;
+    --json)            JSON_OUT="${2:-}"; shift 2 ;;
+    --weekly-refresh)  WEEKLY_REFRESH=1; shift ;;
     -h|--help) sed -n '/^# Usage:/,/^# Requires AWS/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
@@ -105,6 +122,22 @@ command -v aws >/dev/null || die "the aws CLI is required to read ECR image mani
 # verify-ecr-images.sh: kustomize emits `- name:` / `newName:` / `newTag:`, each
 # newName pairs with the newTag that follows it, and several bases can share one
 # image so the list is deduped.
+#
+# This is the THIRD independent parser of this block (render-overlay-images.sh,
+# check-overlay-tag-consistency.sh, and this one), each reading the YAML its own
+# way. They are not unified here — out of scope for ORB-366 — but
+# render-overlay-images.sh is authoritative: k8s/AGENTS.md says the block is
+# generated from k8s/image-roster.txt by that script, and its --check mode is
+# what actually gates deploy-prod. Known divergence: this parser strips only a
+# leading/trailing quote char from a value and does not strip a trailing `#
+# comment`, while render-overlay-images.sh's val() does. A hand-pinned entry
+# like `newTag: "<sha>"  # pinned per ARCT-436` -- a real shape, since
+# check-overlay-tag-consistency.sh's own comment expects hand-pins to carry an
+# explaining comment -- parses clean there and comes out here as the sha with
+# the trailing `"  # pinned per ARCT-436` glued on. Confirmed by running both
+# awk programs against that exact line. That candidate/pinned tag then fails to
+# resolve in ECR, which this script reports as UNKNOWN rather than a wrong
+# verdict, but it is a real parsing bug worth fixing (not fixed here).
 PAIRS_FILE="$(mktemp)"
 ROWS_FILE="$(mktemp)"
 trap 'rm -f "$PAIRS_FILE" "$ROWS_FILE"' EXIT
@@ -143,16 +176,28 @@ PAIR_COUNT="$(wc -l < "$PAIRS_FILE" | tr -d ' ')"
 # `batch-get-image` exits 0 for a tag that does not exist and puts the miss in
 # failures[], so `images[0].imageManifest` renders "None". A non-zero exit is
 # therefore the call failing, never a missing tag.
+#
+# The `|| status=$?` form on the assignment below is load-bearing, not style.
+# Every call site happens to invoke this as an `if` condition, and under `set
+# -e` that context suppresses errexit for everything evaluated inside it,
+# including a failing command substitution deep in this function -- which is
+# the only reason a plain `status=$?` on the next line ever gets to run.
+# Called any other way (a future call site, a helper that isn't an `if`), the
+# assignment's failure would abort the whole script right there under `set
+# -e`, before `status=$?` executes, collapsing the 2/3/4 distinction into a
+# bare `set -e` exit. Attaching `|| status=$?` directly to the failing command
+# is exempt from errexit unconditionally -- it is the command before the final
+# `||` in an OR list -- so the distinction survives regardless of how this
+# function is called.
 layers_of() {
-  local account="$1" region="$2" repo="$3" tag="$4" manifest media status
+  local account="$1" region="$2" repo="$3" tag="$4" manifest media status=0
 
   manifest="$(aws ecr batch-get-image \
       --region "$region" \
       --registry-id "$account" \
       --repository-name "$repo" \
       --image-ids "imageTag=${tag}" \
-      --query 'images[0].imageManifest' --output text 2>/dev/null)"
-  status=$?
+      --query 'images[0].imageManifest' --output text 2>/dev/null)" || status=$?
   [ "$status" -eq 0 ] || return 2
   [ -n "$manifest" ] && [ "$manifest" != "None" ] || return 3
 
@@ -174,7 +219,50 @@ layers_of() {
       else error("manifest has no usable layer digests") end' 2>/dev/null || return 4
 }
 
-UNCHANGED=0; CHANGED=0; REGISTRY_PROBLEMS=0; UNDETERMINED=0; DETERMINED=0
+# classify_pair_status <pinnedStatus> <candidateStatus> <pinnedLayers>
+# <candidateLayers> <repo> <pinnedTag> <candidateTag>: set $verdict and
+# $detail from one pair of layers_of results.
+#
+# Split out from the main loop so its last arm can be unit-tested directly:
+# layers_of's contract is exactly {0, 2, 3, 4}, and a stub `aws` can only ever
+# drive this function through statuses in that set, so the fail-closed arm
+# below -- the one that matters most, since it is the only thing standing
+# between an unrecognized status and a content comparison run on
+# possibly-empty strings -- could never be exercised end-to-end. As its own
+# function, a test can call it with a status layers_of cannot currently
+# produce and check that it still refuses to guess (see
+# compare-image-layers.test.sh).
+classify_pair_status() {
+  local pinnedStatus="$1" candidateStatus="$2" pinnedLayers="$3" candidateLayers="$4" repo="$5" pinnedTag="$6" candidateTag="$7"
+
+  if [ "$pinnedStatus" -eq 2 ] || [ "$candidateStatus" -eq 2 ]; then
+    verdict="UNKNOWN"
+    detail="an ECR call failed for ${repo} (throttle, credentials or network); absent and unreadable are not distinguishable here, so neither is claimed"
+  elif [ "$pinnedStatus" -eq 4 ] || [ "$candidateStatus" -eq 4 ]; then
+    verdict="UNKNOWN"; detail="${repo} returned a manifest with no usable layer digests"
+  elif [ "$pinnedStatus" -eq 3 ] && [ "$candidateStatus" -eq 3 ]; then
+    verdict="UNKNOWN"; detail="neither ${pinnedTag} nor ${candidateTag} exists in ${repo}"
+  elif [ "$pinnedStatus" -eq 3 ]; then
+    verdict="PINNED_GONE"; detail="${repo}:${pinnedTag} is pinned by the overlay but absent from ECR"
+  elif [ "$candidateStatus" -eq 3 ]; then
+    verdict="NOT_BUILT"; detail="${repo}:${candidateTag} was not found; expected it to exist by this point in the deploy"
+  elif [ "$pinnedStatus" -ne 0 ] || [ "$candidateStatus" -ne 0 ]; then
+    # Fail closed. layers_of promises only {0, 2, 3, 4} and every value in
+    # that set is handled above, so reaching here means either side returned
+    # something this function does not recognize. The one thing that must
+    # never happen next is falling into the content comparison below with
+    # possibly-empty strings and risking UNCHANGED -- the most dangerous wrong
+    # answer, since it means "do not redeploy".
+    verdict="UNKNOWN"
+    detail="${repo} returned an unrecognized status from layers_of (pinned=${pinnedStatus}, candidate=${candidateStatus})"
+  elif [ "$pinnedLayers" = "$candidateLayers" ]; then
+    verdict="UNCHANGED"; detail="$(printf '%s' "$pinnedLayers" | wc -w | tr -d ' ') layer(s) identical to ${pinnedTag}"
+  else
+    verdict="CHANGED"; detail="layers differ from ${pinnedTag}"
+  fi
+}
+
+UNCHANGED=0; CHANGED=0; PINNED_GONE_COUNT=0; NOT_BUILT_COUNT=0; UNDETERMINED=0; DETERMINED=0
 
 echo "Comparing ${PAIR_COUNT} image(s) pinned by ${KUSTOMIZATION} against their build at ${TAG:0:12}"
 
@@ -207,22 +295,7 @@ while IFS=$'\t' read -r newName pinnedTag; do
       candidateStatus=$?
     fi
 
-    if [ "$pinnedStatus" -eq 2 ] || [ "$candidateStatus" -eq 2 ]; then
-      verdict="UNKNOWN"
-      detail="an ECR call failed for ${repo} (throttle, credentials or network); absent and unreadable are not distinguishable here, so neither is claimed"
-    elif [ "$pinnedStatus" -eq 4 ] || [ "$candidateStatus" -eq 4 ]; then
-      verdict="UNKNOWN"; detail="${repo} returned a manifest with no usable layer digests"
-    elif [ "$pinnedStatus" -eq 3 ] && [ "$candidateStatus" -eq 3 ]; then
-      verdict="UNKNOWN"; detail="neither ${pinnedTag} nor ${candidateTag} exists in ${repo}"
-    elif [ "$pinnedStatus" -eq 3 ]; then
-      verdict="PINNED_GONE"; detail="${repo}:${pinnedTag} is pinned by the overlay but absent from ECR"
-    elif [ "$candidateStatus" -eq 3 ]; then
-      verdict="NOT_BUILT"; detail="${repo}:${candidateTag} was not found; expected it to exist by this point in the deploy"
-    elif [ "$pinnedLayers" = "$candidateLayers" ]; then
-      verdict="UNCHANGED"; detail="$(printf '%s' "$pinnedLayers" | wc -w | tr -d ' ') layer(s) identical to ${pinnedTag}"
-    else
-      verdict="CHANGED"; detail="layers differ from ${pinnedTag}"
-    fi
+    classify_pair_status "$pinnedStatus" "$candidateStatus" "$pinnedLayers" "$candidateLayers" "$repo" "$pinnedTag" "$candidateTag"
   fi
 
   # PINNED_GONE and NOT_BUILT are findings, not failures: the comparison worked
@@ -231,11 +304,20 @@ while IFS=$'\t' read -r newName pinnedTag; do
   # reports. Both findings stay warnings here because this run must never
   # affect a deploy — escalating a missing pinned tag to a hard failure belongs
   # to the registry conformance check (ARCT-436), not to a shadow comparison.
+  #
+  # PINNED_GONE and NOT_BUILT are counted separately (not folded into one
+  # "registry problems" number): a pinned tag disappearing from ECR is a
+  # retention incident on an image already running, while a candidate tag
+  # missing is a build that has not landed yet by this point in the deploy.
+  # Different operational problems, different responses, so the summary below
+  # names them separately rather than as one undifferentiated count.
   case "$verdict" in
-    UNCHANGED) UNCHANGED=$((UNCHANGED + 1)); DETERMINED=$((DETERMINED + 1)); echo "  UNCHANGED   ${repo}: ${detail}" ;;
-    CHANGED)   CHANGED=$((CHANGED + 1));     DETERMINED=$((DETERMINED + 1)); echo "  CHANGED     ${repo}: ${detail}" ;;
-    UNKNOWN)   UNDETERMINED=$((UNDETERMINED + 1)); echo "::warning::UNKNOWN ${repo}: ${detail}" ;;
-    *)         REGISTRY_PROBLEMS=$((REGISTRY_PROBLEMS + 1)); DETERMINED=$((DETERMINED + 1)); echo "::warning::${verdict} ${repo}: ${detail}" ;;
+    UNCHANGED)   UNCHANGED=$((UNCHANGED + 1)); DETERMINED=$((DETERMINED + 1)); echo "  UNCHANGED   ${repo}: ${detail}" ;;
+    CHANGED)     CHANGED=$((CHANGED + 1));     DETERMINED=$((DETERMINED + 1)); echo "  CHANGED     ${repo}: ${detail}" ;;
+    UNKNOWN)     UNDETERMINED=$((UNDETERMINED + 1)); echo "::warning::UNKNOWN ${repo}: ${detail}" ;;
+    PINNED_GONE) PINNED_GONE_COUNT=$((PINNED_GONE_COUNT + 1)); DETERMINED=$((DETERMINED + 1)); echo "::warning::PINNED_GONE ${repo}: ${detail}" ;;
+    NOT_BUILT)   NOT_BUILT_COUNT=$((NOT_BUILT_COUNT + 1));     DETERMINED=$((DETERMINED + 1)); echo "::warning::NOT_BUILT ${repo}: ${detail}" ;;
+    *)           echo "::error::${repo} produced an unrecognized verdict '${verdict}': ${detail}" >&2; exit 1 ;;
   esac
 
   # Built by jq, not by interpolation: a quote anywhere in newName or detail
@@ -255,21 +337,35 @@ while IFS=$'\t' read -r newName pinnedTag; do
 done < "$PAIRS_FILE"
 
 if [ -n "$JSON_OUT" ]; then
+  # generatedAt is recorded so a week of verdicts can be reconciled against the
+  # refresh workflow's actual run history, which is authoritative. weeklyRefresh
+  # stays caller-supplied and defaults to false: a reconciler should cross-check
+  # the timestamp rather than trust a flag nobody could verify.
   jq -s \
     --arg deploySha "$TAG" \
     --arg kustomization "$KUSTOMIZATION" \
-    '{deploySha: $deploySha, kustomization: $kustomization, results: .}' \
+    --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --argjson weeklyRefresh "$([ "$WEEKLY_REFRESH" -eq 1 ] && echo true || echo false)" \
+    '{deploySha: $deploySha, kustomization: $kustomization, generatedAt: $generatedAt, weeklyRefresh: $weeklyRefresh, results: .}' \
     "$ROWS_FILE" > "$JSON_OUT"
   echo "Verdicts written to ${JSON_OUT}"
 fi
 
 cat <<SUMMARY
-Summary: ${UNCHANGED} unchanged, ${CHANGED} changed, ${REGISTRY_PROBLEMS} missing from ECR, ${UNDETERMINED} not compared (of ${PAIR_COUNT}).
+Summary: ${UNCHANGED} unchanged, ${CHANGED} changed, ${PINNED_GONE_COUNT} pinned tag(s) gone from ECR (retention risk on a running image), ${NOT_BUILT_COUNT} candidate(s) not yet built, ${UNDETERMINED} not compared (of ${PAIR_COUNT}).
 This run changed nothing. Today's deploy rewrites every newTag in the block regardless
 of this verdict — more entries than the ${PAIR_COUNT} images counted here, since several
 bases share one image — so any image reported unchanged above names pods that rolled
 for no reason.
 SUMMARY
+
+if [ "$WEEKLY_REFRESH" -eq 1 ]; then
+  cat <<REFRESH
+This run is flagged --weekly-refresh: it follows the Monday 04:00 UTC
+image-security-refresh, so a wave of CHANGED verdicts above is that refresh
+landing, not churn the comparison failed to suppress.
+REFRESH
+fi
 
 # The exit code reports whether the comparison worked, never what the deploy
 # should do. A run that determined nothing has told us nothing, and the one

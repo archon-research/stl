@@ -148,6 +148,16 @@ jobs:
       # broken comparison still shows as a failed step, which is the point of
       # its exit code — it reports whether it could compare, never what the
       # deploy should do.
+      #
+      # image-security-refresh.yaml rebuilds every image cache-free every Monday
+      # 04:00 UTC, so the first deploy AFTER that run legitimately reports nearly
+      # every image CHANGED — the refresh landing, not churn. --weekly-refresh is
+      # deliberately NOT passed here. "Deploy ran on a Monday" is not that event:
+      # a Monday 02:00 deploy predates the refresh, and if main is quiet until
+      # Thursday it is Thursday's deploy that carries the wave. The guess would be
+      # wrong more often than right, and a wrong boolean in the record is worse
+      # than an absent one. The JSON records generatedAt instead, so a week of
+      # verdicts can be reconciled against the refresh workflow's real run history.
       - name: Compare built layers against the running images (log only)
         continue-on-error: true
         env:
