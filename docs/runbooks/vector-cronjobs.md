@@ -808,6 +808,27 @@ A third **on-demand** Temporal worker (`temporal.RunWorker`). Everything said
 about `offchain-price-backfill` above applies — nothing is missed while it is
 down, and it is excluded from `VectorCronjobAllRunsFailing` for the same reason.
 
+**Before starting a run, check what the range already holds.** Every V2 row
+carries the `block_version` the run that wrote it resolved, so an earlier run's
+stamps are visible per table:
+
+```sql
+SELECT 'morpho_vault_cap' AS tbl, block_version, count(*) AS rows, min(block_number) AS min_blk, max(block_number) AS max_blk
+FROM morpho_vault_cap GROUP BY 1, 2
+UNION ALL SELECT 'morpho_vault_fee', block_version, count(*), min(block_number), max(block_number) FROM morpho_vault_fee GROUP BY 1, 2
+UNION ALL SELECT 'morpho_adapter_state', block_version, count(*), min(block_number), max(block_number) FROM morpho_adapter_state GROUP BY 1, 2
+UNION ALL SELECT 'morpho_adapter_membership', block_version, count(*), min(block_number), max(block_number) FROM morpho_adapter_membership GROUP BY 1, 2
+ORDER BY 1, 2;
+```
+
+A version the archive does not hold for that range is an earlier run's stamp, not
+a reorg. Cross-check a few partitions across the range with
+`aws s3 ls s3://<bucket>/<partition>/`: on both envs the archive is version-1-only
+below ~24.27M, then a patchy band of identical 0/1 twins up to 24,340,697, then
+the watcher era at 0. On staging on 2026-09-08, 357 `morpho_vault_cap` identities
+carried both versions across blocks 23,419,201–24,339,378 — the constant-0
+bootstrap sitting beside the backfill's version-1 rows.
+
 **How to start a run.** Temporal UI (namespace **`vector`**) →
 **Start Workflow**:
 
