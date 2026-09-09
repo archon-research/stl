@@ -78,11 +78,6 @@ func TestSetupRunner_RequiresAlchemyKey(t *testing.T) {
 	}
 }
 
-// The archive is where every replayed row's block_version comes from, so a run without a
-// usable one would stamp a guess, and another chain's would resolve versions for heights
-// this chain never published. All of it is settled before the RPC is dialled: a
-// misconfigured archive must not surface as a worker that came up and then failed its
-// first run.
 func TestSetupRunner_RefusesAnUnusableArchiveConfig(t *testing.T) {
 	tests := []struct {
 		name    string

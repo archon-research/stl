@@ -13,7 +13,7 @@ import (
 func TestResolver_CountsEveryAnswerUnderItsOutcome(t *testing.T) {
 	const forked, unarchived, unreadable = archiveHeight + 1, archiveHeight + 2, archiveHeight + 3
 	reader := testutil.InstallMeterProvider(t)
-	archive := archiveHolding(map[int64]archivedHeight{
+	archive := archiveHolding(map[int64]archivedBlock{
 		archiveHeight: {version: 1, hash: canonicalHash},
 		forked:        {version: 0, hash: orphanedHash},
 	})

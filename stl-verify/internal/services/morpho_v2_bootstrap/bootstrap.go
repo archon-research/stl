@@ -556,8 +556,6 @@ func (s *Service) replayLogs(ctx context.Context, logs []ethtypes.Log, reads *re
 	return nil
 }
 
-// replayLog dates one log from its own block header, resolves the version that block
-// was indexed under, and feeds it through the live handler path.
 func (s *Service) replayLog(ctx context.Context, l ethtypes.Log, reads *replayReads) error {
 	// The sweep's upper bound is a finalized block, so a reorged-out log cannot
 	// legitimately appear. Replaying one would write state from a block that is not on

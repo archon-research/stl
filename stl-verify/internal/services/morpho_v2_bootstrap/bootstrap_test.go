@@ -144,10 +144,6 @@ func TestRun_ReplaysHistoryThenSeedsAdapters(t *testing.T) {
 	}
 }
 
-// TestRun_StampsTheBlockVersionTheArchiveHolds pins the version every replayed and
-// seeded row carries. A constant 0 files this run's rows beside live indexing's under a
-// version the ordering tuple ranks against them, so an older observation of a re-emitted
-// block outranks the correction this run just wrote (VEC-218).
 func TestRun_StampsTheBlockVersionTheArchiveHolds(t *testing.T) {
 	h := newBootstrapHarness(t)
 	h.archive.version = 4
@@ -182,11 +178,6 @@ func TestRun_StampsTheBlockVersionTheArchiveHolds(t *testing.T) {
 	}
 }
 
-// TestRun_StopsBeforeTheSweepWhenTheHeadHasNoResolvableVersion: an archive that cannot
-// say which version speaks for a block is the ARCT-379 hole shape, and one that cannot
-// answer for the pinned head will not answer for the two million blocks below it either.
-// Reading the head's version before the first eth_getLogs is what makes that a run that
-// fails in seconds rather than after the whole replay.
 func TestRun_StopsBeforeTheSweepWhenTheHeadHasNoResolvableVersion(t *testing.T) {
 	h := newBootstrapHarness(t)
 	h.archive.err = errors.New("the raw archive holds another block at that height")
@@ -217,11 +208,9 @@ func TestRun_StopsBeforeTheSweepWhenTheHeadHasNoResolvableVersion(t *testing.T) 
 	}
 }
 
-// A head the archive has not reached yet is not a hole to repair: raw-data-backup archives
-// a block when the watcher broadcasts it, minutes before it finalizes, so the archive
-// catches up on its own and the next run resolves the height. Republishing it instead
-// writes version 1 permanently and manufactures a _0_/_1_ twin when the in-flight object
-// lands — which is why the head's error must say that only for the height it is true of.
+// The archive catches up on its own: raw-data-backup archives a block when the watcher
+// broadcasts it, minutes before it finalizes. Republishing that height instead writes
+// version 1 permanently and manufactures a _0_/_1_ twin when the in-flight object lands.
 func TestRun_TellsAnArchiveBehindTheHeadFromOneHoldingAnotherBlock(t *testing.T) {
 	const headBlock = int64(24_000_000)
 	tests := []struct {
@@ -271,10 +260,8 @@ func TestRun_TellsAnArchiveBehindTheHeadFromOneHoldingAnotherBlock(t *testing.T)
 	}
 }
 
-// The summary is the one line a run closes with, so what it reports has to be taken when
-// the run ends rather than when the deferred call is set up — and it reports the extent
-// each version covers, because the version a height resolves to is what the archive
-// holds there, not evidence of a reorg.
+// The extents are per version rather than a list of heights because the version a height
+// resolves to is what the archive holds there, not evidence of a reorg.
 func TestRun_ClosesWithTheHeightsItResolved(t *testing.T) {
 	h := newBootstrapHarness(t)
 	logger, records := recordingLogger()
@@ -327,9 +314,8 @@ func TestRun_ClosesWithTheHeightsItResolved(t *testing.T) {
 	}
 }
 
-// An aborted run's summary is the only place an operator learns that the extents cover
-// just what the sweep reached, so it says so and is logged at Error rather than reading
-// like a clean finish.
+// An aborted run's extents cover only what the sweep reached, which is what the outcome
+// says; at Info it would read like a clean finish.
 func TestRun_ReportsAnAbortedRunAtErrorWithWhatItResolved(t *testing.T) {
 	h := newBootstrapHarness(t)
 	logger, records := recordingLogger()
@@ -363,9 +349,8 @@ func TestRun_ReportsAnAbortedRunAtErrorWithWhatItResolved(t *testing.T) {
 
 // Two runs can be in flight on one pod at once: the worker sets no
 // MaxConcurrentActivityExecutionSize and the workflow-ID guard only rejects a duplicate
-// ID. A run must therefore stamp only versions it read from the archive itself — an
-// inherited answer is one this run never proved against the block it is replaying, and it
-// is what leaves "repair the archive, start a new run" unable to clear a poisoned height.
+// ID. An inherited answer is one this run never proved, and it leaves "repair the archive,
+// start a new run" unable to clear a poisoned height.
 func TestRun_StampsOnlyVersionsItReadItself(t *testing.T) {
 	h := newBootstrapHarness(t)
 	const headBlock = int64(24_000_000)
@@ -404,9 +389,6 @@ func TestRun_StampsOnlyVersionsItReadItself(t *testing.T) {
 	}
 }
 
-// TestRun_StopsWhenAReplayedBlockHasNoResolvableVersion: the head resolving says nothing
-// about the two million blocks below it, so a hole anywhere in the swept range stops the
-// replay at that log rather than stamping a guess for the block it belongs to.
 func TestRun_StopsWhenAReplayedBlockHasNoResolvableVersion(t *testing.T) {
 	h := newBootstrapHarness(t)
 

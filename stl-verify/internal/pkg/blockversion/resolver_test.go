@@ -28,7 +28,7 @@ var (
 // block that version identifies (empty when nothing there names one), and the heights it
 // was asked about.
 type fakeArchive struct {
-	heights map[int64]archivedHeight
+	heights map[int64]archivedBlock
 	// corrupt overrides what a height's stored object names, for the strings a real
 	// object can carry that are not a block hash.
 	corrupt map[int64]string
@@ -36,12 +36,7 @@ type fakeArchive struct {
 	err     error
 }
 
-type archivedHeight struct {
-	version int
-	hash    common.Hash
-}
-
-func archiveHolding(heights map[int64]archivedHeight) *fakeArchive {
+func archiveHolding(heights map[int64]archivedBlock) *fakeArchive {
 	return &fakeArchive{heights: heights}
 }
 
@@ -72,11 +67,8 @@ func (a *fakeArchive) BlockHashAt(_ context.Context, blockNumber int64, version 
 	return held.hash.Hex(), true, nil
 }
 
-// The version a correction wrote is the one live indexing stamped its rows with, so the
-// version the archive holds is the one a replay of that block must carry — the same rule
-// the morpho-vault-backfill reads off the key it replays.
 func TestResolver_AnswersTheVersionTheArchiveHolds(t *testing.T) {
-	archive := archiveHolding(map[int64]archivedHeight{
+	archive := archiveHolding(map[int64]archivedBlock{
 		archiveHeight: {version: 2, hash: canonicalHash},
 	})
 
@@ -94,7 +86,7 @@ func TestResolver_AnswersTheVersionTheArchiveHolds(t *testing.T) {
 // canonical block. Its version speaks for the fork, so stamping rows with it would file
 // the replayed history under a block that never happened.
 func TestResolver_StopsWhenTheArchiveHoldsAnotherBlock(t *testing.T) {
-	archive := archiveHolding(map[int64]archivedHeight{
+	archive := archiveHolding(map[int64]archivedBlock{
 		archiveHeight: {version: 0, hash: orphanedHash},
 	})
 
@@ -117,11 +109,11 @@ func TestResolver_StopsAtAHeightTheArchiveCannotAnswerFor(t *testing.T) {
 	}{
 		{
 			name:    "a height the archive never received",
-			archive: archiveHolding(map[int64]archivedHeight{}),
+			archive: archiveHolding(map[int64]archivedBlock{}),
 		},
 		{
 			name: "a version occupied by objects that name no block",
-			archive: archiveHolding(map[int64]archivedHeight{
+			archive: archiveHolding(map[int64]archivedBlock{
 				archiveHeight: {version: 0},
 			}),
 		},
@@ -147,7 +139,7 @@ func TestResolver_StopsAtAHeightTheArchiveCannotAnswerFor(t *testing.T) {
 // "0x1234" would become the zero hash and the height would fail as a MISMATCH — the one
 // verdict the runbook answers by republishing over a slot that is already occupied.
 func TestResolver_StopsAtAnArchivedObjectThatNamesNoBlockHash(t *testing.T) {
-	archive := archiveHolding(map[int64]archivedHeight{archiveHeight: {version: 1, hash: canonicalHash}})
+	archive := archiveHolding(map[int64]archivedBlock{archiveHeight: {version: 1, hash: canonicalHash}})
 	archive.corrupt = map[int64]string{archiveHeight: "0x1234"}
 
 	_, err := resolverOver(archive).ResolveBlockVersion(context.Background(), archiveHeight, canonicalHash)
@@ -168,7 +160,7 @@ func TestResolver_StopsAtAnArchivedObjectThatNamesNoBlockHash(t *testing.T) {
 // A read that fails is not a height to repair: the archive said nothing either way, so
 // the run stops on the failure rather than treating it as an unarchived height.
 func TestResolver_BubblesAFailedArchiveRead(t *testing.T) {
-	archive := archiveHolding(map[int64]archivedHeight{archiveHeight: {version: 0, hash: canonicalHash}})
+	archive := archiveHolding(map[int64]archivedBlock{archiveHeight: {version: 0, hash: canonicalHash}})
 	archive.err = errors.New("access denied")
 
 	_, err := resolverOver(archive).ResolveBlockVersion(context.Background(), archiveHeight, canonicalHash)
@@ -181,11 +173,9 @@ func TestResolver_BubblesAFailedArchiveRead(t *testing.T) {
 	}
 }
 
-// One block carries many logs and the seed asks again for the head it pins, so a height
-// read per call would be one archive round trip per log.
 func TestResolver_ReadsEachHeightOnce(t *testing.T) {
 	const neighbour = archiveHeight + 1
-	archive := archiveHolding(map[int64]archivedHeight{
+	archive := archiveHolding(map[int64]archivedBlock{
 		archiveHeight: {version: 0, hash: canonicalHash},
 		neighbour:     {version: 0, hash: canonicalHash},
 	})
@@ -203,11 +193,9 @@ func TestResolver_ReadsEachHeightOnce(t *testing.T) {
 	}
 }
 
-// A run is asked afterwards which versions its rows landed at and over what range, so the
-// summary reports one extent per version rather than a list of heights.
 func TestResolver_SummaryReportsWhatEachVersionCovers(t *testing.T) {
 	const middle, top = archiveHeight + 1, archiveHeight + 2
-	archive := archiveHolding(map[int64]archivedHeight{
+	archive := archiveHolding(map[int64]archivedBlock{
 		archiveHeight: {version: 1, hash: canonicalHash},
 		middle:        {version: 0, hash: canonicalHash},
 		top:           {version: 1, hash: canonicalHash},
@@ -238,7 +226,7 @@ func TestResolver_SummaryReportsWhatEachVersionCovers(t *testing.T) {
 // the first one's version would file its rows under a block that never happened. The
 // failure is not the archive holding another block — it is the node handing this run two.
 func TestResolver_ReProvesAMemoizedHeightAgainstTheBlockBeingReplayed(t *testing.T) {
-	archive := archiveHolding(map[int64]archivedHeight{archiveHeight: {version: 1, hash: canonicalHash}})
+	archive := archiveHolding(map[int64]archivedBlock{archiveHeight: {version: 1, hash: canonicalHash}})
 	resolver := resolverOver(archive)
 	if _, err := resolver.ResolveBlockVersion(context.Background(), archiveHeight, canonicalHash); err != nil {
 		t.Fatalf("ResolveBlockVersion: %v", err)
@@ -263,14 +251,14 @@ func TestResolver_ReProvesAMemoizedHeightAgainstTheBlockBeingReplayed(t *testing
 // a new run, so the height it failed at must not stay answered from the memo: the
 // repaired archive is what the next call has to read.
 func TestResolver_ReadsARepairedHeightAgainAfterAMismatch(t *testing.T) {
-	archive := archiveHolding(map[int64]archivedHeight{
+	archive := archiveHolding(map[int64]archivedBlock{
 		archiveHeight: {version: 0, hash: orphanedHash},
 	})
 	resolver := resolverOver(archive)
 	if _, err := resolver.ResolveBlockVersion(context.Background(), archiveHeight, canonicalHash); !errors.Is(err, ErrArchivedBlockMismatch) {
 		t.Fatalf("error = %v, want ErrArchivedBlockMismatch", err)
 	}
-	archive.heights[archiveHeight] = archivedHeight{version: 1, hash: canonicalHash}
+	archive.heights[archiveHeight] = archivedBlock{version: 1, hash: canonicalHash}
 
 	version, err := resolver.ResolveBlockVersion(context.Background(), archiveHeight, canonicalHash)
 

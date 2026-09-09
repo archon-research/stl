@@ -4,8 +4,12 @@
 // The rule is the maintainer-set highest-version-wins one every read of the raw buckets
 // uses — stated in full on the morpho-vault-backfill's listHighestVersionReceipts, which
 // resolves the same version from the key it replays. The archive is asked, rather than
-// block_states, because it is the same source a replay of the stored payload would use,
-// and because it can also prove the version it names speaks for the block being replayed.
+// block_states, because it can also prove the version it names speaks for the block being
+// replayed, and because block_states cannot answer for most of a replay's range at all:
+// it carries add_retention_policy(…, INTERVAL '30 days')
+// (db/migrations/20260207_120000_add_chain_id_and_hypertable.sql:59) while a sweep starts
+// at its protocol's factory deploy block — on staging 2026-09-08 it held 507 of the
+// bootstrap's 4,039 heights, and none of the ones whose answer is non-zero.
 package blockversion
 
 import (
@@ -48,8 +52,6 @@ type Resolver struct {
 	resolved map[int64]archivedBlock
 }
 
-// archivedBlock is what the archive holds at one height: its TOP version, and the block
-// that version identifies.
 type archivedBlock struct {
 	version int
 	hash    common.Hash
@@ -165,7 +167,6 @@ func (r *Resolver) Summary() RunSummary {
 	return RunSummary{HeightsResolved: len(r.resolved), Versions: versions}
 }
 
-// readArchivedBlock asks the archive what it holds at a height.
 func (r *Resolver) readArchivedBlock(ctx context.Context, blockNumber int64) (archivedBlock, error) {
 	version, found, err := r.archive.HighestVersion(ctx, blockNumber)
 	if err != nil {
@@ -193,9 +194,7 @@ func (r *Resolver) readArchivedBlock(ctx context.Context, blockNumber int64) (ar
 	return archivedBlock{version: version, hash: common.HexToHash(hash)}, nil
 }
 
-// remember answers every later call about a height from the first read: every log of one
-// block asks the same question, and the run asks again for the head it seeds at. Only a
-// proven height is remembered, so a mismatch the archive is then repaired for is re-read.
+// Only a proven height is remembered, so a mismatch the archive is then repaired for is re-read.
 func (r *Resolver) remember(blockNumber int64, block archivedBlock) {
 	r.resolved[blockNumber] = block
 }

@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -17,6 +18,19 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_v2_bootstrap"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
+
+var (
+	sharedDSN           string
+	sharedLocalStackCfg testutil.LocalStackConfig
+)
+
+func TestMain(m *testing.M) {
+	os.Exit(testutil.RunShared(m, testutil.Shared{
+		TimescaleDSN:       &sharedDSN,
+		LocalStack:         &sharedLocalStackCfg,
+		LocalStackServices: "s3",
+	}))
+}
 
 func setWorkerEnv(t *testing.T, configuredChain, nodeChain int64) {
 	t.Helper()
@@ -32,9 +46,8 @@ func setWorkerEnv(t *testing.T, configuredChain, nodeChain int64) {
 // the test declares and the bucket it creates have to agree.
 const deployEnv = "mv2test"
 
-// setArchiveEnv gives the worker the chain's raw archive the way the ConfigMap and the
-// ExternalSecret do — a bucket that exists and is readable, since the startup probe reads
-// it before the runner is built.
+// setArchiveEnv gives the worker a bucket that exists and is readable, since the startup
+// probe reads it before the runner is built.
 func setArchiveEnv(t *testing.T, chainID int64) {
 	t.Helper()
 	ctx := context.Background()

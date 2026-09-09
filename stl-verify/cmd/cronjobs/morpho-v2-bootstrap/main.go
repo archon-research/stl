@@ -31,13 +31,11 @@
 //
 // # Block versions
 //
-// The run's events come from a node, which carries no block_version, so each one is
-// stamped with the version the chain's raw archive holds at that height — the same
-// highest-version rule the morpho-vault-backfill reads off the S3 key it replays. The
-// run therefore needs S3_BUCKET (cross-checked against CHAIN_ID, so DEPLOY_ENV too) and
-// read access to it, both settled at startup, and stops on a height the archive cannot
-// answer for or answers with another block; repair the archive first (see
-// docs/runbooks/vector-cronjobs.md).
+// Every replayed row's block_version is read from the chain's raw archive, so the run
+// needs S3_BUCKET (cross-checked against CHAIN_ID, so DEPLOY_ENV too) and read access to
+// it, both settled at startup. A height the archive cannot answer for stops the run: at
+// the head, wait for the archive; below it, repair the archive and start a new run (see
+// internal/pkg/blockversion and docs/runbooks/vector-cronjobs.md).
 //
 // # Idempotency
 //
@@ -269,11 +267,8 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies, progress morph
 	return temporal.RunnerFunc(service.Run), ethClient.Close, nil
 }
 
-// archiveBucket names the chain's raw archive — the same bucket the backup worker writes
-// and the morpho-vault-backfill replays from, under the same variable name — which every
-// replayed row's block_version is read from. Another chain's bucket answers for heights
-// this chain never published, and the two arrive as independent variables, so they are
-// cross-checked here the way the block-republisher cross-checks them.
+// archiveBucket cross-checks the bucket against the chain: they arrive as independent
+// variables, and another chain's archive answers for heights this chain never published.
 func archiveBucket(chainID int64) (string, error) {
 	bucket, err := env.Require("S3_BUCKET")
 	if err != nil {
