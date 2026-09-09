@@ -41,6 +41,7 @@ var (
 	thirdVaultAddr  = common.HexToAddress("0xcccccccccccccccccccccccccccccccccccccccc")
 	testAdapterAddr = common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2")
 	testTxHash      = common.HexToHash("0x3333333333333333333333333333333333333333333333333333333333333333")
+	orphanedHash    = common.HexToHash("0x9a8f7e6d5c4b3a2910ff0e1d2c3b4a5968778695a4b3c2d1e0f9a8b7c6d5e4f3")
 )
 
 func TestNewService_RejectsInvalidConfig(t *testing.T) {
@@ -213,6 +214,60 @@ func TestRun_StopsBeforeTheSweepWhenTheHeadHasNoResolvableVersion(t *testing.T) 
 	}
 	if len(h.adapters) != 0 || len(h.adapterStates) != 0 {
 		t.Errorf("wrote %d observations and %d snapshots, want nothing", len(h.adapters), len(h.adapterStates))
+	}
+}
+
+// A head the archive has not reached yet is not a hole to repair: raw-data-backup archives
+// a block when the watcher broadcasts it, minutes before it finalizes, so the archive
+// catches up on its own and the next run resolves the height. Republishing it instead
+// writes version 1 permanently and manufactures a _0_/_1_ twin when the in-flight object
+// lands — which is why the head's error must say that only for the height it is true of.
+func TestRun_TellsAnArchiveBehindTheHeadFromOneHoldingAnotherBlock(t *testing.T) {
+	const headBlock = int64(24_000_000)
+	tests := []struct {
+		name    string
+		hold    func(*fakeArchive)
+		want    []string
+		wantNot []string
+	}{
+		{
+			name: "a head the archive has not reached yet",
+			hold: func(a *fakeArchive) { a.unarchived = map[int64]bool{headBlock: true} },
+			want: []string{
+				"pinned head 24000000", "has not caught up to the finalized head",
+				"VectorBackupWorkerStalled", "chain 1", "Do not republish this height",
+			},
+		},
+		{
+			name:    "a head the archive holds another block at",
+			hold:    func(a *fakeArchive) { a.forked = map[int64]common.Hash{headBlock: orphanedHash} },
+			want:    []string{"pinned head 24000000", "holds another block at that height"},
+			wantNot: []string{"has not caught up", "Do not republish"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newBootstrapHarness(t)
+			tc.hold(h.archive)
+			h.chain.setFinalizedHead(headBlock, 1_770_000_000)
+
+			err := h.service.Run(context.Background())
+
+			if err == nil {
+				t.Fatal("a head with no resolvable version must fail the run")
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %v, want it to say %q", err, want)
+				}
+			}
+			for _, unwanted := range tc.wantNot {
+				if strings.Contains(err.Error(), unwanted) {
+					t.Errorf("error = %v, want it not to say %q", err, unwanted)
+				}
+			}
+		})
 	}
 }
 
@@ -1250,8 +1305,10 @@ type fakeArchive struct {
 	chain      *fakeChainReader
 	version    int
 	unarchived map[int64]bool
-	err        error
-	asked      []int64
+	// forked names heights the archive holds ANOTHER block at, the ARCT-379 hole shape.
+	forked map[int64]common.Hash
+	err    error
+	asked  []int64
 }
 
 func (a *fakeArchive) HighestVersion(_ context.Context, blockNumber int64) (int, bool, error) {
@@ -1268,6 +1325,9 @@ func (a *fakeArchive) HighestVersion(_ context.Context, blockNumber int64) (int,
 func (a *fakeArchive) BlockHashAt(_ context.Context, blockNumber int64, version int) (string, bool, error) {
 	if a.err != nil {
 		return "", false, a.err
+	}
+	if orphan, held := a.forked[blockNumber]; held {
+		return orphan.Hex(), true, nil
 	}
 	hash := a.chain.hashOf(uint64(blockNumber))
 	if hash == (common.Hash{}) || version != a.version {

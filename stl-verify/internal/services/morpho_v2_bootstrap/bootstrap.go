@@ -296,7 +296,7 @@ func (s *Service) pinFinalizedHead(ctx context.Context, versions *blockversion.R
 	}
 	version, err := versions.ResolveBlockVersion(ctx, header.Number.Int64(), header.Hash())
 	if err != nil {
-		return pinnedBlock{}, fmt.Errorf("resolving the block version of the pinned head %d: %w", header.Number.Int64(), err)
+		return pinnedBlock{}, s.headVersionError(header.Number.Int64(), err)
 	}
 	return pinnedBlock{
 		number:    header.Number.Int64(),
@@ -304,6 +304,19 @@ func (s *Service) pinFinalizedHead(ctx context.Context, versions *blockversion.R
 		timestamp: time.Unix(int64(header.Time), 0).UTC(),
 		version:   version,
 	}, nil
+}
+
+// headVersionError separates the two ways the head's version fails to resolve. An archive
+// that has not reached the head clears itself — raw-data-backup archives a block when the
+// watcher broadcasts it, minutes before it finalizes — while republishing that height
+// would write version 1 permanently and manufacture a _0_/_1_ twin when the object already
+// in flight lands. Every other failure, a mismatch included, is a height to repair.
+func (s *Service) headVersionError(headBlock int64, err error) error {
+	if errors.Is(err, blockversion.ErrHeightNotArchived) {
+		return fmt.Errorf("resolving the block version of the pinned head %d: the raw archive has not caught up to the finalized head; check VectorBackupWorkerStalled and the raw-data-backup worker for chain %d, then start a new run once it has. Do not republish this height: %w",
+			headBlock, s.config.ChainID, err)
+	}
+	return fmt.Errorf("resolving the block version of the pinned head %d: %w", headBlock, err)
 }
 
 // v2VaultScope is what a run will work on: the vaults it heals, sorted by
