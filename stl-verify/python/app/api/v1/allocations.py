@@ -27,7 +27,14 @@ from app.api.provenance import (
     get_requested_provenance,
     resolve_or_422,
 )
-from app.api.time_series import TimeSeriesWindow, apply_cache_control, build_window, get_time_series_query_params
+from app.api.time_series import (
+    ResampledTimeSeriesWindow,
+    TimeSeriesWindow,
+    apply_cache_control,
+    build_raw_window,
+    build_resampled_window,
+    get_time_series_query_params,
+)
 from app.domain.entities.allocation import (
     ActivityDirection,
     AnchorageCustodyHolding,
@@ -908,7 +915,7 @@ class RawAllocationActivityEnvelope(BaseModel):
     """The `mode=raw` arm of `AllocationActivityEnvelope`: activity event rows."""
 
     mode: Literal["raw"] = Field(description="Always `raw` on this arm: activity event rows.")
-    window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
+    window: TimeSeriesWindow = Field(description="The window applied to this response.")
     data: list[AllocationActivityResponse] = Field(description="Activity events, newest first.")
 
 
@@ -916,7 +923,7 @@ class AggregatedAllocationActivityEnvelope(BaseModel):
     """The `mode=aggregated` arm of `AllocationActivityEnvelope`: count/sum buckets."""
 
     mode: Literal["aggregated"] = Field(description="Always `aggregated` on this arm: count/sum time buckets.")
-    window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
+    window: ResampledTimeSeriesWindow = Field(description="The window and frequency applied to this response.")
     data: list[AllocationActivityBucketResponse] = Field(
         description="Event counts and tx-amount sums per time bucket, newest first."
     )
@@ -939,7 +946,7 @@ class AllocationActivityEnvelope(
         "Retrieve allocation activity events with optional filters, inside a `{mode, window, data}` "
         "envelope. All filters are optional and combine with logical AND. `protocol_name` and "
         "`token_symbol` use case-insensitive substring matching; the rest are exact matches. Results "
-        "are time-windowed (default last 24h) and ordered newest first. Set `aggregate=true` for "
+        "are time-windowed (default last 24h) and ordered newest first. Set `aggregation_method=end-period` for "
         "per-bucket event counts and tx-amount sums."
     ),
 )
@@ -983,7 +990,7 @@ async def list_allocation_activity(
     """Errors:
 
     - 422 if ``prime_id`` is malformed (or ``limit`` is out of range), or if
-      ``aggregate=true`` without a ``prime_id`` while authorization is on.
+      ``aggregation_method=end-period`` without a ``prime_id`` while authorization is on.
     - 200 with an empty ``data`` list if filters match no rows — including when
       ``prime_id`` is well-formed but unknown, and when the caller may not view
       it. ``prime_id`` is treated as a filter here, not a path resource, so
@@ -993,7 +1000,7 @@ async def list_allocation_activity(
     # Per-resource authz (ADR-015) is the allow-list in the SQL WHERE, on both
     # the raw and the aggregated path: an unknown or unpermitted prime_id
     # matches no rows. `allowed` is None when auth is off.
-    if allowed is not None and parsed_prime_id is None and time_series.aggregate:
+    if allowed is not None and parsed_prime_id is None and time_series.is_bucketed:
         # A bucket is one number over many primes; scope it to a named prime
         # rather than serving the caller's whole permitted set as a total.
         raise HTTPException(status_code=422, detail="prime_id is required for aggregated activity")
@@ -1006,11 +1013,10 @@ async def list_allocation_activity(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    window = build_window(time_series)
     apply_cache_control(response, time_series)
 
     try:
-        if time_series.aggregate:
+        if time_series.is_bucketed:
             buckets = await service.list_activity_buckets(
                 allowed_vaults=vault_filter(allowed),
                 prime_id=parsed_prime_id,
@@ -1027,7 +1033,7 @@ async def list_allocation_activity(
             return AllocationActivityEnvelope(
                 AggregatedAllocationActivityEnvelope(
                     mode="aggregated",
-                    window=window,
+                    window=build_resampled_window(time_series),
                     data=[AllocationActivityBucketResponse(**bucket.__dict__) for bucket in buckets],
                 )
             )
@@ -1060,7 +1066,7 @@ async def list_allocation_activity(
     return AllocationActivityEnvelope(
         RawAllocationActivityEnvelope(
             mode="raw",
-            window=window,
+            window=build_raw_window(time_series),
             data=[
                 AllocationActivityResponse(
                     chain_id=e.chain_id,

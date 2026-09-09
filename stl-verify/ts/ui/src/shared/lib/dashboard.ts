@@ -620,7 +620,7 @@ export function encumbranceSeverity(
  */
 // `timestamp` is what the synced cursor is keyed on, so it carries the bucket's
 // own instant rather than the formatted label: sibling cards bucket at different
-// resolutions, and only the instant means the same thing in all of them.
+// frequencies, and only the instant means the same thing in all of them.
 export function toChartSeries<T extends { bucket_start: string }>(
   buckets: readonly T[],
   read: (bucket: T) => number | null,

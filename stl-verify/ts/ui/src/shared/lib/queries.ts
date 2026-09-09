@@ -10,7 +10,8 @@ import type {
   PrimeDebtSnapshot,
   ProtocolEventsEnvelope,
   ProtocolEventsResponse,
-  TimeSeriesResolution,
+  AggregationMethod,
+  TimeSeriesFrequency,
   TokensResponse,
   TotalCapitalBucket,
   TotalCapitalEnvelope,
@@ -51,7 +52,7 @@ const CACHE = {
   /** The screen's primary per-block data: allocations, risk capital, debt. */
   position: { staleTime: 30_000, gcTime: 10 * MINUTE },
   /** One minute is the finest bucket the range picker can ask for (`PT1M`, at
-   * the 1h preset — see `getResolutionForRange`), so a shorter `staleTime`
+   * the 1h preset — see `getFrequencyForRange`), so a shorter `staleTime`
    * could not change the line that gets drawn. Revisit if a finer preset lands. */
   series: { staleTime: MINUTE, gcTime: 30 * MINUTE },
   /** A daily upstream feed seeded by a one-shot backfill; see the lookback below. */
@@ -71,6 +72,10 @@ const CACHE = {
   settledTx: { staleTime: HOUR, gcTime: HOUR },
 } as const;
 
+// Annotated, not `as const`: this fails at the definition if the generated enum
+// ever stops carrying the method every bucketed read here asks for.
+const END_PERIOD: AggregationMethod = 'end-period';
+
 // `sources` is the one genuinely optional envelope field in this file, so it
 // gets a stable fallback rather than a fresh array per select run.
 const NO_DATA_SOURCES: DataSourcesResponse['sources'] = [];
@@ -79,7 +84,7 @@ const NO_DATA_SOURCES: DataSourcesResponse['sources'] = [];
 export type SeriesWindow = {
   fromTimestamp: string | undefined;
   toTimestamp: string | undefined;
-  resolution: TimeSeriesResolution;
+  frequency: TimeSeriesFrequency;
 };
 
 // limit 500 (the per-prime max) so the longest ranges (e.g. 365d at P1D) return
@@ -92,8 +97,8 @@ function bucketQuery(range: SeriesWindow) {
       from_timestamp: range.fromTimestamp,
     }),
     ...(range.toTimestamp !== undefined && { to_timestamp: range.toTimestamp }),
-    resolution: range.resolution,
-    aggregate: true,
+    frequency: range.frequency,
+    aggregation_method: END_PERIOD,
     limit: 500,
   };
 }
@@ -209,8 +214,8 @@ const selectActivityBuckets = (
     );
   }
 
-  // Both series ask for `aggregate=true`, so this is the same violation the
-  // debt series throws on — coerced because its card degrades, not ignored.
+  // Both series ask for buckets, so this is the same violation the debt
+  // series throws on — coerced because its card degrades, not ignored.
   logging.warn('Allocation activity envelope was not aggregated', {
     mode: envelope.mode,
   });
@@ -380,7 +385,7 @@ function referenceDebtLookbackStart(): string {
 /**
  * The newest reference debt bucket.
  *
- * Reference debt is aggregate-only: upstream reports one figure per prime per
+ * Reference debt is bucketed-only: upstream reports one figure per prime per
  * day and carries no ilk or block identity, so the API rejects a raw request
  * rather than inventing them.
  */
@@ -392,7 +397,7 @@ export const latestReferenceDebtQuery = (primeId: string) =>
       params: {
         path: { prime_id: primeId },
         query: {
-          aggregate: true,
+          aggregation_method: END_PERIOD,
           limit: 1,
           source: 'reference' as const,
           from_timestamp: referenceDebtLookbackStart(),
@@ -579,7 +584,7 @@ export const tokenPriceQuery = (chainId: number, tokenAddress: string) =>
 
 /**
  * The activity feed's rows, which are raw events rather than buckets — the same
- * endpoint the metric band reads with `aggregate=true`, so the two share no
+ * endpoint the metric band reads as a resampled series, so the two share no
  * cache entry and neither can serve the other's shape.
  */
 export const activityQuery = (

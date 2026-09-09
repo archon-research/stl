@@ -9,7 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.adapters.postgres.protocol_event_repository import ProtocolEventRepository
 from app.api._validators import OptionalTxHashParam, TxHashParam
 from app.api.deps import get_engine
-from app.api.time_series import TimeSeriesWindow, apply_cache_control, build_window, get_time_series_query_params
+from app.api.time_series import (
+    ResampledTimeSeriesWindow,
+    TimeSeriesWindow,
+    apply_cache_control,
+    build_raw_window,
+    build_resampled_window,
+    get_time_series_query_params,
+)
 from app.domain.time_series import TimeSeriesQuery, enforce_filter_for_window
 from app.services.protocol_event_service import ProtocolEventService
 
@@ -72,7 +79,7 @@ class RawProtocolEventsEnvelope(BaseModel):
     """The `mode=raw` arm of `ProtocolEventsEnvelope`: decoded event rows."""
 
     mode: Literal["raw"] = Field(description="Always `raw` on this arm: decoded event rows.")
-    window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
+    window: TimeSeriesWindow = Field(description="The window applied to this response.")
     data: list[ProtocolEventResponse] = Field(description="Decoded events, newest first.")
 
 
@@ -80,7 +87,7 @@ class AggregatedProtocolEventsEnvelope(BaseModel):
     """The `mode=aggregated` arm of `ProtocolEventsEnvelope`: per-bucket counts."""
 
     mode: Literal["aggregated"] = Field(description="Always `aggregated` on this arm: per-bucket event counts.")
-    window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
+    window: ResampledTimeSeriesWindow = Field(description="The window and frequency applied to this response.")
     data: list[ProtocolEventBucketResponse] = Field(description="Event counts per time bucket, newest first.")
 
 
@@ -103,7 +110,8 @@ async def _get_protocol_event_service(engine: AsyncEngine = Depends(get_engine))
         "List decoded protocol events with optional filters. Use `tx_hash` to fetch all "
         "events for a single transaction or `protocol_name` to scope to one protocol. "
         "Results are time-windowed (default last 24h) and returned newest first inside a "
-        "`{mode, window, data}` envelope. Set `aggregate=true` to get per-bucket event counts."
+        "`{mode, window, data}` envelope. Set `aggregation_method=end-period` for per-bucket "
+        "event counts."
     ),
 )
 async def list_protocol_events(
@@ -125,10 +133,9 @@ async def list_protocol_events(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    window = build_window(time_series)
     apply_cache_control(response, time_series)
     try:
-        if time_series.aggregate:
+        if time_series.is_bucketed:
             buckets = await service.list_event_buckets(
                 tx_hash=tx_hash,
                 protocol_name=protocol_name,
@@ -140,7 +147,7 @@ async def list_protocol_events(
             return ProtocolEventsEnvelope(
                 AggregatedProtocolEventsEnvelope(
                     mode="aggregated",
-                    window=window,
+                    window=build_resampled_window(time_series),
                     data=[ProtocolEventBucketResponse(**bucket.__dict__) for bucket in buckets],
                 )
             )
@@ -155,7 +162,7 @@ async def list_protocol_events(
         return ProtocolEventsEnvelope(
             RawProtocolEventsEnvelope(
                 mode="raw",
-                window=window,
+                window=build_raw_window(time_series),
                 data=[ProtocolEventResponse(**event.__dict__) for event in events],
             )
         )

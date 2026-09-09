@@ -1,6 +1,6 @@
 """Aggregated time-bucket entities returned by the time-series endpoints.
 
-Each bucket represents one ``resolution``-wide slice of a time window. The
+Each bucket represents one ``frequency``-wide slice of a time window. The
 shape is tailored per endpoint: event streams report counts (and a value sum
 where meaningful), while the prime-debt value series reports the last observed
 value carried forward (LOCF) into each bucket.
