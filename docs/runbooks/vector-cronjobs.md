@@ -896,12 +896,12 @@ Ready, logging `this pod needs s3:ListBucket on that bucket` or `this pod needs
 s3:GetObject on that bucket` from the startup probes, and
 `VectorOnDemandWorkerDown` fires 30 minutes later.
 
-Every run closes with one `block versions resolved from the raw archive` line
-carrying an `outcome` of `completed` or `aborted`, the number of heights it
-resolved, and — per version it saw — how many heights sat at that version and
-their lowest and highest height. A version above 0 is not evidence of a reorg,
-just of what the archive holds. An `aborted` outcome means the sweep did not
-finish, so those extents cover only the range it reached.
+Every run closes with one `block versions resolved from the raw archive` line:
+`outcome=completed` at Info, `outcome=aborted` at **Error**, `heights=<n>` for the
+heights it resolved, and one `version_<v>` group per version the archive answered
+with, each carrying that version's own `heights`, `from` and `to`. A version above
+0 is not evidence of a reorg, just of what the archive holds. An `aborted` outcome
+means the sweep did not finish, so those extents cover only the range it reached.
 
 A height the archive cannot answer for **stops the run**, naming the height: it
 holds no object there, or the version it holds names a different block (an
