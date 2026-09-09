@@ -42,7 +42,7 @@ How a governed table obtains a canonical key it lacks natively (the transform la
 - `parent`/`key`/`ref` — single-hop FK join to the config parent.
 - `then_parent`/`then_key`/`then_ref` — a second hop (e.g. sky strategy → pool → protocol).
 - `const` — a literal.
-- `block_time` — the `(chain_id, block_number, block_version)` block-time dimension.
+- `block_time` — `block_timestamp` is not stored on the raw table; it is resolved by joining the `block_meta` dimension on `(chain_id, block_number, block_version)`.
 
 Every join is verified 0-unresolved on the live schema.
 
