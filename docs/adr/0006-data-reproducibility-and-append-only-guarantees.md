@@ -162,9 +162,10 @@ payload-identical, harmless under latest-wins, and deleting them would violate t
 ### 2. Code identity: artefacts, writer runs, and image retention
 
 ADR-0002's `build_registry(id, git_hash UNIQUE, …)` identifies a *commit*, which is not enough:
-one commit produces one image per service. And a row's provenance is not only code — the
-writer's *reference data* (which oracles/tokens/contracts it was told to poll) is loaded at
-process start and changes without a deploy. Two small tables replace "one int per git hash":
+one commit produces one image per service, and the same service can be rebuilt from the same
+commit with a different digest. And a row's provenance is not only code — the writer's *reference data*
+(which oracles/tokens/contracts it was told to poll) is loaded at process start and changes
+without a deploy. Two small tables replace "one int per git hash":
 
 ```sql
 -- what ran: an immutable deploy artefact
@@ -172,9 +173,10 @@ CREATE TABLE build_registry (               -- kept name; semantics widened
     id            SERIAL PRIMARY KEY,
     git_hash      TEXT NOT NULL,
     service       TEXT NOT NULL,             -- binary/deployment name, e.g. sparklend-indexer
+    image_digest  TEXT NOT NULL,             -- immutable, the retained artefact
     built_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     notes         TEXT,
-    UNIQUE (git_hash, service)
+    UNIQUE (git_hash, service, image_digest)
 );
 -- one process start of a writer or calculator
 CREATE TABLE writer_run (
@@ -187,22 +189,20 @@ CREATE TABLE writer_run (
 ```
 
 - Every binary registers its artefact and opens a **run** at startup (`buildregistry.New`
-  resolves `git_hash` as today and `service` from the binary name; hard error if either is
-  missing) and takes `reference_snapshot` in the same transaction in which it loads its reference
-  data. Governed rows carry **`run_id`** (`BIGINT`, `NULL` = pre-tracking);
+  resolves `git_hash` as today, `service` from the binary name, `image_digest` from the running
+  container; hard error if any is missing) and takes `reference_snapshot` in the same transaction in
+  which it loads its reference data. Governed rows carry **`run_id`** (`BIGINT`, `NULL` = pre-tracking);
   `build_id` on rows is retained for existing data and derivable through the run for new data.
   Repository constructors take the run id the way they take `BuildID` today.
 - "Reference data as of the writer run" is then exact and cheap: the reference rows visible in
   the run's `reference_snapshot` (reference tables are append-only, §4) with
   `valid_from <= reference_effective_at`. A process that reloads its reference data opens a new run.
-- **Production images are kept indefinitely.** ECR tag immutability (VEC-701) pins the
-  `<git-sha>` tag of each service's repository to one image forever, so `(git_hash, service)`
-  names the image without the process having to read its own digest, and the images are retained
-  with no lifecycle/expiry rule: an auditor can be handed the *original* image when rebuilding one
-  that behaves identically is impossible or impractical (toolchain drift, dependency sources gone,
-  non-reproducible base layers). Rebuilding from `git_hash` is the first path; the retained image
-  is the guaranteed fallback. A conformance check verifies every registered `git_hash` tag still
-  resolves in the registry.
+- **Production images are kept indefinitely.** Every `image_digest` in `build_registry` is
+  retained in the container registry with no lifecycle/expiry rule, so an auditor can be handed
+  the *original* image when rebuilding one that behaves identically is impossible or impractical
+  (toolchain drift, dependency sources gone, non-reproducible base layers). Rebuilding from
+  `git_hash` is the first path; the retained image is the guaranteed fallback. A conformance check
+  verifies every `image_digest` still resolves.
 - Later: `-trimpath`, pinned toolchain and base-image digests so rebuilds are bit-for-bit;
   useful, not required for possibility given the retained images.
 
@@ -426,7 +426,7 @@ and nothing that requires our database:
   UTC, calc `git_hash`, `schema_version`);
 - **every input row** as its recipe (§8) plus the row's **values**: table, natural key,
   `block_number`/`block_version`/`processing_version` where present, `run_id` → writer artefact
-  (`git_hash`, `service`) and the run's `reference_snapshot`/`reference_effective_at`;
+  (`git_hash`, `service`, `image_digest`) and the run's `reference_snapshot`/`reference_effective_at`;
 - for on-chain rows, the **full, immutable raw-archive object key(s)** from which the row can be
   re-derived by running the writer's build. The SC-call archive key is
   `raw-sc-calls/chain_id=…/block=…/{block}_{block_version}_{source}_{batch_hash}.jsonl.zst`; the
@@ -487,7 +487,7 @@ to recreate that one data point without our database:
 | Field | Source |
 |---|---|
 | `table`, natural key, `block_number`, `block_version`, `processing_version` | the row's identity |
-| `git_hash`, `service` | `writer_run[run_id] → build_registry` — the writer's exact code artefact (rebuild or retained image; the `<git-sha>` tag is immutable) |
+| `git_hash`, `service`, `image_digest` | `writer_run[run_id] → build_registry` — the writer's exact code artefact (rebuild or retained image) |
 | writer reference data: `reference_snapshot`, `reference_effective_at` | `writer_run[run_id]` — the reference rows the writer had, resolvable against the append-only reference tables (§4) |
 | `source` and the **full raw-archive object key(s)** (`…/{block}_{block_version}_{source}_{archive_batch}.jsonl.zst`) | which binary and exactly which S3 objects the row derives from; on-chain only |
 | `chain_id`, contract addresses/log identity where the row has them | to re-fetch from any archive node instead of our S3 |
@@ -525,7 +525,7 @@ prevents each. These are part of the decision, not commentary.
 | Calculation code without an identity (Python API today), or schema-resident logic (`_as_of` functions, tie-break rules) not pinned | §6: Python registers an artefact + run; the record carries `schema_version`. A third party rebuilds schema at that migration and code at that commit (or takes the retained image). |
 | A reference lookup uses `_current` (`valid_from <= now()`), so a future-dated reference row that is visible in the snapshot flips a later replay | §4: reference data is bitemporal; every calculation/writer reference read uses the recorded `effective_at`; `_current` views and `now()`/`CURRENT_DATE` are banned from calculation and writer SQL (schemamaster lint). |
 | A row's recipe names the writer's code but not the reference data the writer ran with, so "why this row exists / which calls were made" cannot be re-derived from chain | §2: rows carry `run_id`; `writer_run` records `reference_snapshot` + `reference_effective_at`; reference tables are append-only, so the writer's reference data is exactly recoverable. |
-| One `git_hash` maps to several service images, so the retained-image fallback cannot name the image that wrote a row | §2: `build_registry` keyed by `(git_hash, service)`, with ECR tag immutability (VEC-701) pinning each `<git-sha>` tag to one image; rows → `run_id` → artefact. |
+| One `git_hash` maps to several service images or a rebuilt digest, so the retained-image fallback cannot name the image that wrote a row | §2: `build_registry` keyed by `(git_hash, service, image_digest)`; rows → `run_id` → artefact. |
 | The recipe's archive locator is a listing prefix, not an object key, or the object was never written (best-effort archiver) | §6/§8: rows carry `archive_batch`, the key is fully derivable; archive existence is verified by a data-quality check with alerting, and archiving becomes a write prerequisite where gaps occur. |
 | Two concurrent corrections allocate the same `processing_version`, or a retried correction cannot find its earlier allocation | §3: per-table advisory lock around allocation; `UNIQUE (table_name, ticket)`; allocate-or-return-existing by ticket. |
 | A sanctioned in-place rewrite (`DISABLE TRIGGER` + `UPDATE`, as `20260306`, `20260410_125000`, `20260707` did) changes rows that earlier snapshots point at | Data fixes are new rows at a new `processing_version`. An in-place rewrite of a governed table is exceptional, requires an ADR-referenced migration, and is logged in `processing_version_log` with `reason` naming the calculations it invalidates. |
@@ -555,7 +555,7 @@ Ordered by information lost per day of delay; 1–3 make reproducibility *possib
 
 1. **Reference-table append-on-change** (§4) with `_as_of(effective_at)` reads, starting with `oracle_asset`
    and `position_classification` — the only item where waiting destroys information.
-2. **`ingest_xid` + `ingested_at`** on governed tables (§5) with the xid monotonicity guard in writer/API startup and the assurance job; `build_registry` widened to `(git_hash, service)`, `writer_run`, `run_id` and `archive_batch` on governed rows (§2/§8); calculation record + on-demand manifest generation, Python artefact/run, `schema_version` (§6).
+2. **`ingest_xid` + `ingested_at`** on governed tables (§5) with the xid monotonicity guard in writer/API startup and the assurance job; `build_registry` widened to `(git_hash, service, image_digest)`, `writer_run`, `run_id` and `archive_batch` on governed rows (§2/§8); calculation record + on-demand manifest generation, Python artefact/run, `schema_version` (§6).
 3. **Append-only enforcement** (§1): app role, guard triggers, conformance test.
 4. **Trigger removal** (§3): one migration drops the 36 functions/triggers, creates and seeds
    `processing_version_log`; delete the plan-cache/lock/sort tests and `db/migrations/AGENTS.md`
@@ -580,7 +580,7 @@ auditability requirements are deferred to a separate ADR. Per-requirement mappin
 |---|---|
 | AR-1.1 append-only stores | §1 |
 | AR-1.4 retraction as new append | §3 (corrections are new versions) |
-| PR-2.2 software version | §2 (`build_registry`: git hash, service) |
+| PR-2.2 software version | §2 (`build_registry`: git hash, service, image digest) |
 | PR-2.3 input lineage | §6 manifest, §8 recipe |
 | PR-2.4 run/config identity | §2 (`writer_run`) |
 | PR-2.6 provenance immutability | §1 (registry/log tables are governed, insert-only) |
