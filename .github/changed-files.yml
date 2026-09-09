@@ -40,6 +40,14 @@ ts:
   - .github/workflows/deploy.yaml
   - .github/workflows/ts-ci.yml
 
+# ARCT-401: the manifests are asserted by a Go test
+# (TestEveryGoWorkerDeploymentGrantsThePodGracePeriod), so a k8s-only change has
+# to run go-ci or the guard never sees it. Deliberately not folded into `go:`:
+# call-deploy keys off that group, and editing a manifest must not build images
+# and stamp a deploy.
+k8s:
+  - k8s/**
+
 # ORB-362: a roster or renderer change must run the deploy even when no code
 # changed — the bot regenerates the overlays' images blocks from the roster, so
 # a new image entry only reaches ArgoCD through a deploy run. No test suite keys

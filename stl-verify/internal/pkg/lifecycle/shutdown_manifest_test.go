@@ -1,6 +1,7 @@
 package lifecycle_test
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,7 +12,11 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 )
 
-// Python entry points: they never run lifecycle.Run, so the Go chain does not bind them.
+const gracePeriodField = "terminationGracePeriodSeconds"
+
+// The two Python entry points. Every other k8s/base Deployment ships a Go
+// binary and is held to the constant whether or not it runs lifecycle.Run —
+// most reach shutdown through Temporal — so no service argues its own number.
 var deploymentsOutsideTheGoShutdownChain = map[string]bool{
 	"core-model-runner": true,
 	"python-api":        true,
@@ -76,10 +81,10 @@ func readManifests(t *testing.T, path string) []manifestFields {
 			cur.kind = val
 		case "metadata.name":
 			cur.name = val
-		case "spec.template.spec.terminationGracePeriodSeconds":
+		case "spec.template.spec." + gracePeriodField:
 			n, err := strconv.ParseInt(val, 10, 64)
 			if err != nil {
-				t.Fatalf("%s: terminationGracePeriodSeconds %q: %v", path, val, err)
+				t.Fatalf("%s: %s %q: %v", path, gracePeriodField, val, err)
 			}
 			cur.grace = &n
 		}
@@ -89,6 +94,51 @@ func readManifests(t *testing.T, path string) []manifestFields {
 	return docs
 }
 
+// Overlays patch pod templates, so one could lower what k8s/base grants — as a
+// standalone file, a strategic-merge block or a JSON-6902 `path:`. Rather than
+// read three patch dialects, hold overlays to a flat rule: name the field only
+// as `terminationGracePeriodSeconds: <seconds>`, at or above the constant.
+func checkNoOverlayLowersTheGracePeriod(t *testing.T, want time.Duration) {
+	root := filepath.Join("..", "..", "..", "..", "k8s", "overlays")
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || filepath.Ext(path) != ".yaml" {
+			return nil
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		line := 0
+		for text := range strings.SplitSeq(string(raw), "\n") {
+			line++
+			if !strings.Contains(text, gracePeriodField) {
+				continue
+			}
+			key, val, ok := strings.Cut(strings.TrimPrefix(strings.TrimSpace(text), "- "), ":")
+			if !ok || strings.TrimSpace(key) != gracePeriodField {
+				t.Errorf("%s:%d: patches %s in a form this test cannot evaluate; write it as `%s: <seconds>`",
+					path, line, gracePeriodField, gracePeriodField)
+				continue
+			}
+			n, err := strconv.ParseInt(strings.TrimSpace(val), 10, 64)
+			if err != nil {
+				t.Errorf("%s:%d: %s is not a plain number of seconds: %q", path, line, gracePeriodField, strings.TrimSpace(val))
+				continue
+			}
+			if time.Duration(n)*time.Second < want {
+				t.Errorf("%s:%d: patches %s down to %ds, below PodTerminationGracePeriod %s", path, line, gracePeriodField, n, want)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestEveryGoWorkerDeploymentGrantsThePodGracePeriod(t *testing.T) {
 	paths, err := filepath.Glob(filepath.Join("..", "..", "..", "..", "k8s", "base", "*", "*.yaml"))
 	if err != nil {
@@ -96,22 +146,22 @@ func TestEveryGoWorkerDeploymentGrantsThePodGracePeriod(t *testing.T) {
 	}
 
 	want := lifecycle.PodTerminationGracePeriod
-	deployments := 0
+	goDeployments := 0
 	seenOutside := map[string]bool{}
 	for _, path := range paths {
 		for _, m := range readManifests(t, path) {
 			if m.kind != "Deployment" {
 				continue
 			}
-			deployments++
 			if deploymentsOutsideTheGoShutdownChain[m.name] {
 				seenOutside[m.name] = true
 				continue
 			}
+			goDeployments++
 			switch {
 			case m.grace == nil:
-				t.Errorf("%s: %s sets no terminationGracePeriodSeconds, so the PodSpec default of 30s applies; PodTerminationGracePeriod is %s",
-					path, m.name, want)
+				t.Errorf("%s: %s sets no %s, so the PodSpec default of 30s applies; PodTerminationGracePeriod is %s",
+					path, m.name, gracePeriodField, want)
 			case time.Duration(*m.grace)*time.Second < want:
 				t.Errorf("%s: %s grants %ds, PodTerminationGracePeriod is %s",
 					path, m.name, *m.grace, want)
@@ -119,12 +169,14 @@ func TestEveryGoWorkerDeploymentGrantsThePodGracePeriod(t *testing.T) {
 		}
 	}
 
-	if deployments == 0 {
-		t.Fatal("no Deployment under k8s/base: the glob no longer reaches the manifests")
+	if goDeployments == 0 {
+		t.Fatal("no Go worker Deployment under k8s/base: the glob no longer reaches the manifests")
 	}
 	for name := range deploymentsOutsideTheGoShutdownChain {
 		if !seenOutside[name] {
 			t.Errorf("%s is exempted but has no Deployment under k8s/base", name)
 		}
 	}
+
+	checkNoOverlayLowersTheGracePeriod(t, want)
 }
