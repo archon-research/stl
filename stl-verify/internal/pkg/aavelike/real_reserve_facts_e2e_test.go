@@ -4,6 +4,7 @@ package aavelike
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -22,9 +23,10 @@ import (
 
 const reserveFactsTimeout = 2 * time.Minute
 
-// TestRealReserveFacts_L2 reads each registered L2 Aave V3 market's USDC reserve
-// at a spot-checked block over the real RPC and requires the registry to resolve
-// the PoolDataProvider that actually served those values (ARCT-213). Run it with
+// TestRealReserveFacts_L2 reads registered L2 Aave V3 market reserves at
+// spot-checked blocks over the real RPC and requires the registry to resolve the
+// PoolDataProvider that actually served those values (ARCT-213). Each chain gets
+// its current provider (USDC) and one earlier interval (WETH). Run it with
 // `make e2e-real-reserve-facts`; it skips without ALCHEMY_API_KEY.
 func TestRealReserveFacts_L2(t *testing.T) {
 	apiKey := os.Getenv("ALCHEMY_API_KEY")
@@ -51,6 +53,17 @@ func TestRealReserveFacts_L2(t *testing.T) {
 			wantLiqThreshold: 7800,
 		},
 		{
+			// WETH inside the first of six provider intervals, so a wrong
+			// older address or ActiveAtBlock fails here rather than during backfill.
+			slug:             "aave_v3_arbitrum",
+			rpcBase:          "https://arb-mainnet.g.alchemy.com/v2",
+			block:            50000000,
+			poolDataProvider: "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",
+			reserve:          "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+			wantLTV:          8000,
+			wantLiqThreshold: 8250,
+		},
+		{
 			slug:             "aave_v3_optimism",
 			rpcBase:          "https://opt-mainnet.g.alchemy.com/v2",
 			block:            156535904,
@@ -58,6 +71,16 @@ func TestRealReserveFacts_L2(t *testing.T) {
 			reserve:          "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
 			wantLTV:          7500,
 			wantLiqThreshold: 7800,
+		},
+		{
+			// WETH inside the third of the six Optimism intervals.
+			slug:             "aave_v3_optimism",
+			rpcBase:          "https://opt-mainnet.g.alchemy.com/v2",
+			block:            125000000,
+			poolDataProvider: "0x7deEB8aCE4220643D8edeC871a23807E4d006eE5",
+			reserve:          "0x4200000000000000000000000000000000000006",
+			wantLTV:          8000,
+			wantLiqThreshold: 8250,
 		},
 		{
 			slug:             "aave_v3_base",
@@ -68,6 +91,16 @@ func TestRealReserveFacts_L2(t *testing.T) {
 			wantLTV:          7500,
 			wantLiqThreshold: 7800,
 		},
+		{
+			// WETH inside the first of the five Base intervals.
+			slug:             "aave_v3_base",
+			rpcBase:          "https://base-mainnet.g.alchemy.com/v2",
+			block:            10000000,
+			poolDataProvider: "0x2d8A3C5677189723C4cB8873CfC9C8976FDF38Ac",
+			reserve:          "0x4200000000000000000000000000000000000006",
+			wantLTV:          8000,
+			wantLiqThreshold: 8300,
+		},
 	}
 
 	erc20ABI, err := abis.GetERC20ABI()
@@ -77,7 +110,7 @@ func TestRealReserveFacts_L2(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	for _, tt := range tests {
-		t.Run(tt.slug, func(t *testing.T) {
+		t.Run(fmt.Sprintf("%s/%d", tt.slug, tt.block), func(t *testing.T) {
 			key, _, ok := blockchain.GetProtocolBySlug(tt.slug)
 			if !ok {
 				t.Fatalf("slug %q is not registered", tt.slug)
