@@ -233,7 +233,7 @@ data:
   DEPLOY_ENV: "prod"
   ENVIRONMENT: "sentinelprod"
   # Raw SC call archiving (VEC-81). Single bucket shared across chains;
-  # pod identity write policy granted in the infrastructure repo (ARCT-213).
+  # pod identity write policy granted in infrastructure#709 (ARCT-213).
   ARCHIVE_SC_CALLS: "true"
   RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
 ---
@@ -248,7 +248,7 @@ data:
   DEPLOY_ENV: "prod"
   ENVIRONMENT: "sentinelprod"
   # Raw SC call archiving (VEC-81). Single bucket shared across chains;
-  # pod identity write policy granted in the infrastructure repo (ARCT-213).
+  # pod identity write policy granted in infrastructure#709 (ARCT-213).
   ARCHIVE_SC_CALLS: "true"
   RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
 ---
@@ -263,7 +263,7 @@ data:
   DEPLOY_ENV: "prod"
   ENVIRONMENT: "sentinelprod"
   # Raw SC call archiving (VEC-81). Single bucket shared across chains;
-  # pod identity write policy granted in the infrastructure repo (ARCT-213).
+  # pod identity write policy granted in infrastructure#709 (ARCT-213).
   ARCHIVE_SC_CALLS: "true"
   RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
 ---
