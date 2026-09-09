@@ -1,9 +1,9 @@
 # ADR-0001: Local k8s with kind
 
-**Status**: Accepted
-**Proposed**: @angelostheodosiadis
-**Date**: 2026-03-03
-**Deciders**: @vector
+- **Status**: Accepted
+- **Proposed**: @angelostheodosiadis
+- **Date**: 2026-03-03
+- **Deciders**: @vector
 
 > **Update (2026-06, VEC-339):** The decision below still stands (kind for local),
 > but the implementation has evolved since this ADR was proposed. Current reality:
