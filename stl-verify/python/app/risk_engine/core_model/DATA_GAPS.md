@@ -46,7 +46,8 @@ assets. Prod is byte-identical to staging.
 |---|---|---|---|
 | WETH, WBTC | 2025-08-14 | 159 | gaps (below) |
 | CBBTC, EZETH, LBTC, RETH, RSETH, TBTC, WEETH, WSTETH | 2026-03-17 | 129 | too short + same gaps |
-| BTC, HYPE, XRP | — | — | no `offchain_price_asset` row at all |
+| HYPE, XRP | 2026-01-01 | 180 (staging) | token-less rows in `asset_price`; backfilled in staging 8 Sep, prod not yet |
+| BTC | — | — | no `offchain_price_asset` row at all |
 
 **Gaps** (shared by all assets — indexer downtime, not per-asset):
 - 2026-04-18 .. 2026-04-19 (2 days)
@@ -83,9 +84,11 @@ assets. Prod is byte-identical to staging.
   `backfill-xrp-hype-2026` backfilled 2026-01-01 → 2026-09-08 hourly (6,001
   points each, `coveredFrom` = requested `from`, zero missing days — 251 days,
   comfortably above TRAIN_SIZE), and the 5-minute sweep keeps the series
-  current. Prod still needs the #858 deploy plus the same workflow run. BTC
-  (`bitcoin`) remains unregistered — only Anchorage needs it. Note the CORE
-  price reader has no `asset_price` path yet; see §3.
+  current. The #858 rollout reached prod on 9 Sep (production deployment
+  succeeded), so prod has the migration and catalog rows — it still needs the
+  same workflow run. BTC (`bitcoin`) remains unregistered — only Anchorage
+  needs it, and it could instead reuse the BTC→WBTC proxy path the CORE price
+  reader now has (see §3).
 
 ---
 
