@@ -3039,8 +3039,8 @@ not mistaken for a bug during triage.
 
 ### What it means
 
-`morpho-indexer` recorded more than 25 VaultV2 adapters as `adapter_type=unknown`
-in 24 hours on the labelled `chain`. The classifier probes one marker selector per
+The live morpho indexer for the labelled `chain` recorded more than 25 VaultV2
+adapters as `adapter_type=unknown` in 24 hours. The classifier probes one marker selector per
 modelled family on every adapter, and records Unknown (DB `adapter_type = 99`)
 unless **exactly one** answers:
 

@@ -829,7 +829,7 @@ groups:
         annotations:
           summary: "Vector morpho VaultV2 registered {{ $value | printf \"%.0f\" }} unclassifiable adapters on {{ $labels.chain }}"
           description: |
-            `morpho-indexer` on chain `{{ $labels.chain }}` recorded
+            The live morpho indexer for chain `{{ $labels.chain }}` recorded
             `{{ $value | printf "%.0f" }}` VaultV2 adapters as type Unknown in 24h
             — no on-chain classification getter answered, or several did. Their
             realAssets are still tracked, but nothing downstream can attribute the
@@ -888,7 +888,7 @@ groups:
         annotations:
           summary: "Vector morpho VaultV2 lazily registering adapters on {{ $labels.chain }}"
           description: |
-            `morpho-indexer` on chain `{{ $labels.chain }}` self-healed
+            The live morpho indexer for chain `{{ $labels.chain }}` self-healed
             `{{ $value | printf "%.0f" }}` VaultV2 adapters in 6h — each one was
             named by a vault event but missing from the registry. Discovery seeds
             a vault's whole adapter set, so a sustained rate here means the
@@ -1073,12 +1073,12 @@ groups:
         annotations:
           summary: "Vector morpho VaultV2 writing no structured snapshots on {{ $labels.chain }}"
           description: |
-            `morpho-indexer` on chain `{{ $labels.chain }}` processed VaultV2
-            allocation / cap / fee events for 6h but committed zero structured
-            snapshots. The events are being audit-logged without producing
-            `morpho_adapter_state` / `morpho_vault_cap` / `morpho_vault_fee` rows,
-            and no error is raised — downstream VaultV2 composition and fee reads
-            are silently freezing.
+            The live morpho indexer for chain `{{ $labels.chain }}` processed
+            VaultV2 allocation / cap / fee events for 6h but committed zero
+            structured snapshots. The events are being audit-logged without
+            producing `morpho_adapter_state` / `morpho_vault_cap` /
+            `morpho_vault_fee` rows, and no error is raised — downstream
+            VaultV2 composition and fee reads are silently freezing.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormorphov2nosnapshotswritten
 
       - alert: VectorMorphoV2NoStructuredEvents
@@ -1141,12 +1141,13 @@ groups:
         annotations:
           summary: "Vector morpho decoding no VaultV2 structured events on {{ $labels.chain }}"
           description: |
-            `morpho-indexer` on chain `{{ $labels.chain }}` has processed blocks
-            successfully for 6h but decoded zero VaultV2 allocation / cap / fee
-            events. Mainnet normally sees ~150 an hour, so this is not a quiet
-            market: the V2 topics are likely no longer registered, the signatures
-            no longer match, or the vault registry holds no V2 vault — in every
-            case the structured tables stop filling with no error raised.
+            The live morpho indexer for chain `{{ $labels.chain }}` has
+            processed blocks successfully for 6h but decoded zero VaultV2
+            allocation / cap / fee events. Mainnet normally sees ~150 an hour,
+            so this is not a quiet market: the V2 topics are likely no longer
+            registered, the signatures no longer match, or the vault registry
+            holds no V2 vault — in every case the structured tables stop
+            filling with no error raised.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormorphov2nostructuredevents
 
   # Own rule GROUP but same file, so it keeps the filename-derived Mimir
