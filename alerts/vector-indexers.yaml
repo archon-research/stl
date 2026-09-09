@@ -1664,9 +1664,8 @@ groups:
   # allocation-tracker (VEC-499) — prime-allocation-indexer: consumes BlockEvents,
   # tracks ALM-proxy token positions (allocation_position) and total supplies into
   # TimescaleDB. One instance per chain: mainnet, avalanche, base (VEC-499),
-  # optimism, unichain, arbitrum (ARCT-216), robinhood (ARCT-397 — manifests in
-  # k8s/base only, not yet referenced from a cluster overlay, so its series do
-  # not exist yet).
+  # optimism, unichain, arbitrum (ARCT-216), robinhood (ARCT-397, wired into the
+  # staging overlay by #825/ARCT-377).
   - name: vector-allocation-tracker
     interval: 1m
     rules:

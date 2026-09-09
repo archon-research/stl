@@ -424,10 +424,10 @@ groups:
         # Ethereum (the bare `watcher`) reorgs normally (depth 1, a few times a
         # day) and is deliberately not listed. ADD new single-sequencer chains to
         # this list when onboarding them — robinhood joined on those grounds in
-        # ARCT-397 (its manifests are in k8s/base only, so it emits no series
-        # until it is wired into a cluster overlay). Scoping by service_name is
-        # interim; the proper fix is a chain-behavior label (reorgs_expected) so
-        # alerts stop hardcoding chain names: see VEC-295.
+        # ARCT-397 and has emitted series since #825 (ARCT-377) wired it into the
+        # staging overlay. Scoping by service_name is interim; the proper fix is
+        # a chain-behavior label (reorgs_expected) so alerts stop hardcoding
+        # chain names: see VEC-295.
         #
         # increase()>0 with a short dwell catches a single burst that the broader
         # sustained-rate VectorWatcherOutOfOrderBlocksHigh rule can miss — with
