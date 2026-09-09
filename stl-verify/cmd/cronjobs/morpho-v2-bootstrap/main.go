@@ -299,9 +299,9 @@ func newBlockVersionResolver(ctx context.Context, bucket string, logger *slog.Lo
 	if err != nil {
 		return nil, fmt.Errorf("loading AWS config: %w", err)
 	}
-	archive := s3adapter.NewArchiveReader(s3adapter.NewReaderFromEnv(awsCfg, logger), bucket)
-	if err := archive.Ping(ctx); err != nil {
-		return nil, fmt.Errorf("the raw archive %s is unusable: %w", bucket, err)
+	archive, err := s3adapter.OpenArchiveReader(ctx, awsCfg, bucket, logger)
+	if err != nil {
+		return nil, err
 	}
 	return blockversion.NewResolver(archive, "s3://"+bucket), nil
 }

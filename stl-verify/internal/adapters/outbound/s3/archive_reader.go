@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/archiveblock"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
@@ -31,6 +34,17 @@ type ArchiveReader struct {
 
 func NewArchiveReader(lister archiveObjects, bucket string) *ArchiveReader {
 	return &ArchiveReader{lister: lister, bucket: bucket}
+}
+
+// OpenArchiveReader opens a chain's raw archive read-only and proves at startup that this
+// pod may use it, so a bucket it cannot list or read is a worker that will not start
+// rather than a run that dies on its first height, three attempts over.
+func OpenArchiveReader(ctx context.Context, cfg aws.Config, bucket string, logger *slog.Logger) (*ArchiveReader, error) {
+	archive := NewArchiveReader(NewReaderFromEnv(cfg, logger), bucket)
+	if err := archive.Ping(ctx); err != nil {
+		return nil, fmt.Errorf("the raw archive %s is unusable: %w", bucket, err)
+	}
+	return archive, nil
 }
 
 // probePrefix is what the startup probes work under: a real partition prefix, so
