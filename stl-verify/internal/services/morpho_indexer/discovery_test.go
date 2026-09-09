@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"math/big"
 	"slices"
@@ -568,6 +569,81 @@ func TestProcessBlockEvent_VaultDiscovery_V2_CountsObservationsByTypeAndProvenan
 		if got := counterValue(t, reader, "morpho.v2.adapter.registrations", want); got != 1 {
 			t.Errorf("morpho.v2.adapter.registrations%v = %d, want 1", want, got)
 		}
+	}
+}
+
+func warnsContaining(h *capturingHandler, sub string) []map[string]string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var found []map[string]string
+	for _, r := range h.records {
+		if r.Level != slog.LevelWarn || !strings.Contains(r.Message, sub) {
+			continue
+		}
+		attrs := map[string]string{}
+		r.Attrs(func(a slog.Attr) bool {
+			attrs[a.Key] = a.Value.String()
+			return true
+		})
+		found = append(found, attrs)
+	}
+	return found
+}
+
+func TestProcessBlockEvent_VaultDiscovery_V2_LogsTheObservationsTheEnumerationAppends(t *testing.T) {
+	tests := []struct {
+		name     string
+		appended bool
+		wantWarn bool
+	}{
+		{name: "an answer the log did not hold is surfaced per adapter", appended: true, wantWarn: true},
+		{name: "an answer the log already gave appends nothing, so nothing is logged"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newTestHarness(t)
+			logs := h.captureLogs()
+			fx := h.setupV2DiscoveryWithTwoAdapters()
+
+			adapterIDByAddr := map[common.Address]int64{fx.adapterA: 101, fx.adapterB: 102}
+			h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, obs *entity.MorphoAdapterObservation) (int64, bool, error) {
+				return adapterIDByAddr[common.BytesToAddress(obs.Identity.Address)], tt.appended, nil
+			}
+
+			log := h.makeDiscoveryTriggerLog(fx.vault)
+			if err := h.processBlock(t, 1, 24481834, 2, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+				t.Fatalf("processBlock: %v", err)
+			}
+
+			var wantWarns []map[string]string
+			if tt.wantWarn {
+				wantWarns = []map[string]string{
+					{
+						"vault":        fx.vault.Hex(),
+						"adapter":      fx.adapterA.Hex(),
+						"block":        "24481834",
+						"adapter_type": "market_v1",
+						"observed_via": string(entity.MembershipFromDiscovery),
+					},
+					{
+						"vault":        fx.vault.Hex(),
+						"adapter":      fx.adapterB.Hex(),
+						"block":        "24481834",
+						"adapter_type": "vault_v1",
+						"observed_via": string(entity.MembershipFromDiscovery),
+					},
+				}
+			}
+			got := warnsContaining(logs, "the log did not already give this answer")
+			if len(got) != len(wantWarns) {
+				t.Fatalf("WARNs = %d %v, want %d %v", len(got), got, len(wantWarns), wantWarns)
+			}
+			for i, want := range wantWarns {
+				if !maps.Equal(got[i], want) {
+					t.Errorf("WARN %d attrs = %v, want %v", i, got[i], want)
+				}
+			}
+		})
 	}
 }
 
