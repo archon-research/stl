@@ -70,6 +70,49 @@ func TestNewService_RejectsInvalidConfig(t *testing.T) {
 	}
 }
 
+// A missing collaborator has to be refused at construction: this job is hand-started, so
+// a nil dereference surfaces as a red run someone waited hours for.
+func TestNewService_RequiresEveryCollaborator(t *testing.T) {
+	valid := ConfigDefaults()
+	valid.ChainID = 1
+	valid.Logger = discardLogger()
+	chain := newFakeChainReader()
+
+	type collaborators struct {
+		chain       ChainReader
+		replay      V2Replayer
+		progress    ProgressStore
+		archive     outbound.ArchiveReader
+		archiveName string
+	}
+	complete := collaborators{
+		chain: chain, replay: &recordingReplayer{}, progress: &fakeProgressStore{},
+		archive: &fakeArchive{chain: chain}, archiveName: archiveName,
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*collaborators)
+		wantErr string
+	}{
+		{name: "missing chain reader", mutate: func(c *collaborators) { c.chain = nil }, wantErr: "chain reader is required"},
+		{name: "missing replayer", mutate: func(c *collaborators) { c.replay = nil }, wantErr: "replayer is required"},
+		{name: "missing progress store", mutate: func(c *collaborators) { c.progress = nil }, wantErr: "progress store is required"},
+		{name: "missing archive", mutate: func(c *collaborators) { c.archive = nil }, wantErr: "archive reader is required"},
+		{name: "missing archive name", mutate: func(c *collaborators) { c.archiveName = "" }, wantErr: "archive name is required"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := complete
+			tc.mutate(&c)
+			_, err := NewService(valid, c.chain, c.replay, c.progress, c.archive, c.archiveName)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want one mentioning %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 // TestRun_ReplaysHistoryThenSeedsAdapters is the end-to-end pass: a persisted V2
 // vault with no adapter rows gets its historical AddAdapter replayed through the
 // REAL morpho-indexer handler path (NewReplayService → ReplayMetaMorphoLog), not
