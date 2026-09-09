@@ -107,6 +107,9 @@ type PositionSnapshot struct {
 	// ShareToken carried from PositionBalance (centrifuge/erc7540 only); the
 	// address to read row metadata from. See the field comment there.
 	ShareToken *common.Address
+	// ClosesEntryKey persists the row under Entry.ContractAddress — the key an older
+	// tracker kept this position on — with its metadata still read from ShareToken.
+	ClosesEntryKey bool
 
 	ChainID      int64
 	BlockNumber  int64

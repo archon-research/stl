@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math/big"
 	"slices"
 	"strings"
@@ -833,6 +834,7 @@ type centrifugeFixture struct {
 	handler *testHandler
 	source  *mockShareSource
 	block   int64
+	metrics sdkmetric.Reader
 }
 
 // newCentrifugeTracker wires a tracker over one centrifuge entry per shape, each
@@ -896,8 +898,9 @@ func newCentrifugeTrackerWithSource(t *testing.T, entries []*TokenEntry, source 
 
 	cache := testutil.NewMockBlockCache()
 	handler := &testHandler{}
+	tel, reader := newRecordingTelemetry(t)
 	svc, err := NewService(
-		Config{ChainID: 1, SweepEveryNBlocks: sweepEveryN, Logger: logger},
+		Config{ChainID: 1, SweepEveryNBlocks: sweepEveryN, Logger: logger, Telemetry: tel},
 		nil,
 		cache,
 		registry,
@@ -908,7 +911,7 @@ func newCentrifugeTrackerWithSource(t *testing.T, entries []*TokenEntry, source 
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	return &centrifugeFixture{svc: svc, cache: cache, handler: handler, source: source, block: centrifugeFirstBlock}
+	return &centrifugeFixture{svc: svc, cache: cache, handler: handler, source: source, block: centrifugeFirstBlock, metrics: reader}
 }
 
 // consume drives the next block, whose single receipt carries the given logs.
@@ -936,7 +939,7 @@ func (f *centrifugeFixture) redeliver(t *testing.T, logs ...gethtypes.Log) error
 // share starts from.
 func (f *centrifugeFixture) seedRoute(t *testing.T, emitter common.Address, entry *TokenEntry) {
 	t.Helper()
-	routes, err := f.svc.nextTransferRoutes([]namedEmitter{{entry: entry, emitter: emitter}}, centrifugeFirstBlock)
+	routes, err := f.svc.nextTransferRoutes(context.Background(), []namedEmitter{{entry: entry, emitter: emitter}}, centrifugeFirstBlock)
 	if err != nil {
 		t.Fatalf("seed the route for %s: %v", entry.ContractAddress.Hex(), err)
 	}
@@ -971,6 +974,19 @@ func (f *centrifugeFixture) snapshotFor(contract, wallet common.Address) *Positi
 		}
 	}
 	return nil
+}
+
+// closingSnapshots returns every row the handler received that closes an entry key.
+func (f *centrifugeFixture) closingSnapshots() []*PositionSnapshot {
+	var closing []*PositionSnapshot
+	for _, batch := range f.handler.batches {
+		for _, snap := range batch.Snapshots {
+			if snap.ClosesEntryKey {
+				closing = append(closing, snap)
+			}
+		}
+	}
+	return closing
 }
 
 // transferLog is a Transfer of the emitting token into a proxy, carrying a real
@@ -1170,6 +1186,39 @@ func TestSweep_ReplacesTheAliasOfARepointedShare(t *testing.T) {
 	}
 }
 
+// TestSweep_RepointedShareRecordsMetric: pruneDisplacedRoutes records one
+// allocation.share_repoints.total sample beside the Warn, so the follow-up
+// alert has a series to read.
+func TestSweep_RepointedShareRecordsMetric(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{groveVaultShape(groveJAAAVault, groveJAAAShare)}, 1)
+	stale := common.HexToAddress("0x0000000000000000000000000000000000005747")
+	f.seedRoute(t, stale, f.svc.entries[0])
+
+	if err := f.consume(t); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	m := collectMetric(t, f.metrics, "allocation.share_repoints.total")
+	sum, ok := m.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("allocation.share_repoints.total is %T, want Sum[int64]", m.Data)
+	}
+	if len(sum.DataPoints) != 1 {
+		t.Fatalf("got %d data points, want 1", len(sum.DataPoints))
+	}
+
+	dp := sum.DataPoints[0]
+	if dp.Value != 1 {
+		t.Errorf("value = %d, want 1", dp.Value)
+	}
+	if entry, ok := dp.Attributes.Value("entry"); !ok || entry.AsString() != groveJAAAVault.Hex() {
+		t.Errorf("entry attribute = %v, want %s", entry, groveJAAAVault.Hex())
+	}
+	if wallet, ok := dp.Attributes.Value("wallet"); !ok || wallet.AsString() != groveProxy.Hex() {
+		t.Errorf("wallet attribute = %v, want %s", wallet, groveProxy.Hex())
+	}
+}
+
 // TestProcessBlock_EventPathAdoptsARepointedShare: the event fetch resolves shares
 // too, so a re-point seen there must not wait for the next sweep.
 func TestProcessBlock_EventPathAdoptsARepointedShare(t *testing.T) {
@@ -1231,7 +1280,7 @@ func TestSweep_TwoEntriesSwappingSharesKeepBothRoutes(t *testing.T) {
 
 // TestSweep_ShareDowngradedToTheEntryItself_ReturnsError: share() reverting is how
 // a direct share is detected, so a transient failure reads as one and would re-key
-// the position onto the retired vault, where the cache trigger drops it silently.
+// the position onto the vault key closingSnapshots zeroes.
 func TestSweep_ShareDowngradedToTheEntryItself_ReturnsError(t *testing.T) {
 	f := newCentrifugeTracker(t, []centrifugeShape{groveVaultShape(groveJAAAVault, groveJAAAShare)}, 1)
 	if err := f.consume(t); err != nil {
@@ -1369,6 +1418,160 @@ func TestProcessBlock_RejectsTwoEntriesClaimingOneShare(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "double count") {
 		t.Errorf("error = %q, want it to name the double count", err)
+	}
+}
+
+// ── closing the key older trackers wrote on ──
+
+// TestSweep_FirstSweepClosesTheKeyOlderTrackersWroteOn: a position moved from the
+// vault to its share leaves a stale non-zero cache row on the vault, and the only
+// thing that clears it is an ordinary zero-balance row on that same key.
+func TestSweep_FirstSweepClosesTheKeyOlderTrackersWroteOn(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{groveVaultShape(groveJAAAVault, groveJAAAShare)}, 1)
+
+	if err := f.consume(t); err != nil {
+		t.Fatalf("first sweep: %v", err)
+	}
+
+	closing := f.closingSnapshots()
+	if len(closing) != 1 {
+		t.Fatalf("the first sweep emitted %d closing snapshots, want 1", len(closing))
+	}
+	got := closing[0]
+	if got.Entry.ContractAddress != groveJAAAVault || got.Entry.WalletAddress != groveProxy {
+		t.Errorf("closing row on %s/%s, want the vault entry %s/%s",
+			got.Entry.ContractAddress.Hex(), got.Entry.WalletAddress.Hex(), groveJAAAVault.Hex(), groveProxy.Hex())
+	}
+	if got.Balance == nil || got.Balance.Sign() != 0 || got.ScaledBalance == nil || got.ScaledBalance.Sign() != 0 {
+		t.Errorf("balances = (%v, %v), want (0, 0)", got.Balance, got.ScaledBalance)
+	}
+	if got.UnderlyingValue != nil {
+		t.Errorf("UnderlyingValue = %v, want nil", got.UnderlyingValue)
+	}
+	if got.ShareToken == nil || *got.ShareToken != groveJAAAShare {
+		t.Errorf("ShareToken = %v, want the share %s — the row reads its metadata there", got.ShareToken, groveJAAAShare.Hex())
+	}
+	if got.Direction != DirectionSweep || got.TxAmount == nil || got.TxAmount.Sign() != 0 {
+		t.Errorf("trigger = (%q, %v), want (%q, 0)", got.Direction, got.TxAmount, DirectionSweep)
+	}
+	if got.ChainID != 1 || got.BlockNumber != f.block || got.BlockVersion != 0 {
+		t.Errorf("block fields = (%d, %d, %d), want (1, %d, 0)", got.ChainID, got.BlockNumber, got.BlockVersion, f.block)
+	}
+
+	live := f.snapshotFor(groveJAAAVault, groveProxy)
+	if live == nil || live.ClosesEntryKey || live.Balance.Cmp(big.NewInt(500)) != 0 {
+		t.Fatalf("the row beside it = %v, want the untouched live balance of 500", live)
+	}
+	if live.ShareToken == nil || *live.ShareToken != groveJAAAShare {
+		t.Errorf("the live row's ShareToken = %v, want the share %s it keys on", live.ShareToken, groveJAAAShare.Hex())
+	}
+}
+
+// TestSweep_ClosesEveryVaultFrontedEntryOnOneWallet: the stale rows are per entry,
+// so one wallet fronting two vaults needs both closed, each naming its own share.
+func TestSweep_ClosesEveryVaultFrontedEntryOnOneWallet(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{
+		groveVaultShape(groveJAAAVault, groveJAAAShare),
+		groveVaultShape(groveJTRSYVault, sparkJTRSYShare),
+	}, 1)
+
+	if err := f.consume(t); err != nil {
+		t.Fatalf("first sweep: %v", err)
+	}
+
+	closing := f.closingSnapshots()
+	if len(closing) != 2 {
+		t.Fatalf("the first sweep emitted %d closing snapshots, want one per vault", len(closing))
+	}
+	got := make(map[common.Address]common.Address, len(closing))
+	for _, snap := range closing {
+		if snap.ShareToken == nil {
+			t.Fatalf("the closing row on %s carries no share token", snap.Entry.ContractAddress.Hex())
+		}
+		got[snap.Entry.ContractAddress] = *snap.ShareToken
+	}
+	want := map[common.Address]common.Address{
+		groveJAAAVault:  groveJAAAShare,
+		groveJTRSYVault: sparkJTRSYShare,
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("closing rows (vault -> share) = %v, want %v", got, want)
+	}
+}
+
+// TestSweep_DirectShareEntryIsNeverClosed: a direct share is keyed on the token it
+// holds, so the closing row would land on the live position and zero it.
+func TestSweep_DirectShareEntryIsNeverClosed(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{sparkDirectShareShape(sparkJTRSYShare)}, 1)
+
+	if err := f.consume(t); err != nil {
+		t.Fatalf("first sweep: %v", err)
+	}
+
+	if closing := f.closingSnapshots(); len(closing) != 0 {
+		t.Errorf("emitted %d closing snapshots for a direct share, want 0", len(closing))
+	}
+}
+
+// TestSweep_ClosesTheEntryKeyOnlyOnce: every later sweep would re-zero a key the
+// first one already emptied, so the trigger's newer-wins rule would keep the cache
+// row at 0 even after the position is re-opened on the vault.
+func TestSweep_ClosesTheEntryKeyOnlyOnce(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{groveVaultShape(groveJAAAVault, groveJAAAShare)}, 1)
+	if err := f.consume(t); err != nil {
+		t.Fatalf("first sweep: %v", err)
+	}
+	f.handler.batches = nil
+
+	if err := f.consume(t); err != nil {
+		t.Fatalf("second sweep: %v", err)
+	}
+
+	if closing := f.closingSnapshots(); len(closing) != 0 {
+		t.Errorf("the second sweep emitted %d closing snapshots, want 0", len(closing))
+	}
+}
+
+// TestSweep_HandlerFailureRepeatsTheClosingSnapshotOnRedelivery: the closing rows
+// are written once, so a sweep that never persisted must carry them again or the
+// stale vault row survives until the next process restart.
+func TestSweep_HandlerFailureRepeatsTheClosingSnapshotOnRedelivery(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{groveVaultShape(groveJAAAVault, groveJAAAShare)}, 1)
+
+	f.handler.err = errors.New("db down")
+	if err := f.consume(t); err == nil {
+		t.Fatal("a failing handler must fail the block")
+	}
+	f.handler.batches = nil
+	f.handler.err = nil
+
+	if err := f.redeliver(t); err != nil {
+		t.Fatalf("redelivery: %v", err)
+	}
+
+	if closing := f.closingSnapshots(); len(closing) != 1 {
+		t.Errorf("the redelivered sweep emitted %d closing snapshots, want 1", len(closing))
+	}
+}
+
+// TestProcessBlock_EventPathLeavesTheClosingToTheSweep: a zero-balance row emitted
+// next to a transfer would claim the position emptied at that block, so only the
+// sweep — which reads every entry — is allowed to close the older key.
+func TestProcessBlock_EventPathLeavesTheClosingToTheSweep(t *testing.T) {
+	f := newCentrifugeTracker(t, []centrifugeShape{groveVaultShape(groveJAAAVault, groveJAAAShare)}, 2)
+
+	if err := f.consume(t, transferLog(groveJAAAShare, groveProxy, big.NewInt(250), 7)); err != nil {
+		t.Fatalf("event block: %v", err)
+	}
+	if closing := f.closingSnapshots(); len(closing) != 0 {
+		t.Fatalf("the event path emitted %d closing snapshots, want 0", len(closing))
+	}
+
+	if err := f.consume(t); err != nil {
+		t.Fatalf("sweep block: %v", err)
+	}
+	if closing := f.closingSnapshots(); len(closing) != 1 {
+		t.Errorf("the first sweep after an event block emitted %d closing snapshots, want 1", len(closing))
 	}
 }
 

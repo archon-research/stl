@@ -36,6 +36,9 @@ type Config struct {
 	// is the signal the VectorAllocationTracker{Stalled,ErrorRatioHigh,BlockLatencyHigh}
 	// alerts key on. Optional; nil disables it.
 	Metrics outbound.BackupMetricsRecorder
+
+	// Telemetry records the share re-point counter. Optional; nil records nothing (unit tests).
+	Telemetry *Telemetry
 }
 
 func ConfigDefaults() Config {

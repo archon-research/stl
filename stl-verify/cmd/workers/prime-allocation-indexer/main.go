@@ -368,6 +368,7 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 			ChainID:           cfg.chainID,
 			Logger:            logger,
 			Metrics:           metrics,
+			Telemetry:         atTel,
 		},
 		sqsConsumer,
 		cacheReader,

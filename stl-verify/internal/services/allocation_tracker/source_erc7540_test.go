@@ -543,9 +543,9 @@ func TestERC7540Source_FetchBalances_DirectShareTokenFallback(t *testing.T) {
 
 // TestERC7540Source_FetchBalances_RevertingShareNeedsDecimalsToAnswer: a revert
 // on share() alone is not the direct-share shape — a vault whose share() failed
-// once would otherwise be keyed onto itself, a retired cache key. When decimals()
-// reverts too the address is neither a vault nor a token and the block fails
-// before any balance is read.
+// once would otherwise be keyed onto itself, the key closingSnapshots zeroes. When
+// decimals() reverts too the address is neither a vault nor a token and the block
+// fails before any balance is read.
 func TestERC7540Source_FetchBalances_RevertingShareNeedsDecimalsToAnswer(t *testing.T) {
 	mc := testutil.NewMockMulticaller()
 	src := newTestERC7540Source(t, mc)

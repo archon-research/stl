@@ -772,6 +772,37 @@ func TestCurrentTables_AllocationSweepWinsSameBlockTie(t *testing.T) {
 	}
 }
 
+// TestCurrentTables_AllocationZeroBalanceSweepClosesTheKey pins the convention a
+// stale key closes on: a later zero-balance sweep row wins the cache over an
+// earlier non-zero row on the same key, through both the trigger and the backfill.
+func TestCurrentTables_AllocationZeroBalanceSweepClosesTheKey(t *testing.T) {
+	withCurrentTablesPool(t)
+	ctx := context.Background()
+	f := setupCurrentTables(t)
+
+	const block = 1100
+	f.saveAllocations(t, ctx, f.allocationAt(0, 0, block, 3, 500))
+	f.saveAllocations(t, ctx, f.allocationAt(0, 0, block+75, 0, 0, asSweep()))
+
+	zeroHash := fmt.Sprintf("%064x", 0)
+	got := f.cachedAllocation(t, ctx, 0, 0)
+	if got.balance != 0 || got.direction != "sweep" || got.txHash != zeroHash || got.blockNumber != block+75 {
+		t.Errorf("cache holds %s, want the closing row (balance=0 direction=sweep tx_hash=%s block=%d)", got, zeroHash, block+75)
+	}
+	assertCachesMatchHistory(t, ctx)
+
+	if _, err := currentTablesPool.Exec(ctx, `DELETE FROM allocation_position_current`); err != nil {
+		t.Fatalf("empty the cache: %v", err)
+	}
+	runAllocationBackfillMigration(t, ctx)
+
+	got = f.cachedAllocation(t, ctx, 0, 0)
+	if got.balance != 0 || got.direction != "sweep" || got.txHash != zeroHash || got.blockNumber != block+75 {
+		t.Errorf("backfill restored %s, want the closing row (balance=0 direction=sweep tx_hash=%s block=%d)", got, zeroHash, block+75)
+	}
+	assertCachesMatchHistory(t, ctx)
+}
+
 // TestCurrentTables_AllocationReorgReplacementWinsAtLowerLogIndex pins the rank of
 // block_version above log_index. A reorg re-emits a block's logs at whatever
 // positions the new block gives them, so the replacement routinely lands EARLIER
@@ -864,7 +895,7 @@ func TestCurrentTables_AllocationTriggerFiresOnInsertIntoCompressedChunk(t *test
 }
 
 // TestCurrentTables_AllocationBackfillAgreesWithTheTrigger covers the half of the
-// design nothing else reaches. The recovery statement is a separate migration so that
+// design nothing else reaches. 20260825_120100 is a separate migration so that
 // CREATE TRIGGER's lock is not held for a full-history scan, and the cost of the
 // split is that the backfill applies against an empty allocation_position and is
 // never exercised again — while its DISTINCT ON has to stay the trigger's
@@ -905,10 +936,9 @@ func TestCurrentTables_AllocationBackfillAgreesWithTheTrigger(t *testing.T) {
 	assertCachesMatchHistory(t, ctx)
 }
 
-// runAllocationBackfillMigration applies the operator re-run the way the migrator
+// runAllocationBackfillMigration applies 20260825_120100 the way the migrator
 // does — the whole file, one Exec, one transaction, since SET LOCAL only warns
-// outside a transaction block. 20260908_120100 rather than the 20260825_120100 it
-// supersedes: the copied newer-wins terms are what this test holds to the trigger.
+// outside a transaction block.
 func runAllocationBackfillMigration(t *testing.T, ctx context.Context) {
 	t.Helper()
 	_, thisFile, _, ok := runtime.Caller(0)
@@ -916,7 +946,7 @@ func runAllocationBackfillMigration(t *testing.T, ctx context.Context) {
 		t.Fatal("cannot resolve this file's path")
 	}
 	sql, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "../../../../db/migrations",
-		"20260908_120100_converge_allocation_position_current_past_retired_keys.sql"))
+		"20260825_120100_backfill_allocation_position_current.sql"))
 	if err != nil {
 		t.Fatalf("read the backfill migration: %v", err)
 	}

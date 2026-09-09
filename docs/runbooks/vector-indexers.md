@@ -2889,12 +2889,18 @@ last line below in `read the [sweep] share tokens of block <N>`.
   but omitted an entry.
 - `entry <contract>/<wallet> named share <S> before and now reports itself` — the
   ratchet: a `share()` revert on an entry that already named a share would re-key
-  the position onto its vault, whose cache key is retired.
+  the position onto its vault, putting a non-zero row back on the key the
+  tracker's closing row zeroed, so the cache flips between vault and share.
 - `<A> and <B> both claim transfers of <S> into <W>` — two vaults front one share
   for one wallet; tracking both would double count.
 - `centrifuge entry <contract>/<wallet> came back with no share token` — the
   source returned a balance without naming the share; the routes would otherwise
   freeze at their last good value.
+- `share token re-pointed; event rows for this position stop until the next sweep`
+  — a Warn, not an error: the entry's `share()` now names a different token, so its
+  old route is dropped and the position moves again on the next sweep. The same
+  event increments `allocation.share_repoints.total` (labels `chain`, `entry`,
+  `wallet`); no alert reads it yet.
 
 **There is no per-entry discard.** The only sanctioned remedy today is to fix the
 underlying entry: correct or remove it in the axis-synome contract, regenerate,
@@ -2906,12 +2912,12 @@ specifically should not self-clear, and means the read is wrong rather than slow
 ### Converging `allocation_position_current` afterwards
 
 If the cache needs converging with history (a restore, a window with the trigger
-disabled, a newly retired key), re-run the statement in
-`stl-verify/db/migrations/20260908_120100_converge_allocation_position_current_past_retired_keys.sql`
-as the migrator (the cache's owner). It purges cache rows on keys
-`allocation_position_key_retirement_current` marks retired, then merges the rest
-forward-only. **Do not re-run `20260825_120100`**: it predates the retirement
-register and would put the retired vault keys straight back into the cache.
+disabled), re-run the statement in
+`stl-verify/db/migrations/20260825_120100_backfill_allocation_position_current.sql`
+as the migrator (the cache's owner). It is a forward-only merge over
+`allocation_position`: the tracker's zero-balance closing rows on the old vault
+keys are ordinary history rows to it, merged like any other. Nothing is
+superseded.
 
 ### Verify recovery
 

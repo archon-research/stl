@@ -95,11 +95,11 @@ func (h *PrimePositionHandler) HandleBatch(
 			}
 			continue
 		}
-		tokenAddr, err := positionTokenAddress(s)
-		if err != nil {
+		// Metadata comes from the share, but the key must still be nameable.
+		if _, err := positionTokenAddress(s); err != nil {
 			return fmt.Errorf("position token for metadata: %w", err)
 		}
-		addrs = append(addrs, tokenAddr)
+		addrs = append(addrs, metadataAddress(s))
 		if s.Entry.AssetAddress != nil {
 			addrs = append(addrs, *s.Entry.AssetAddress)
 		}
@@ -140,20 +140,39 @@ func (h *PrimePositionHandler) HandleBatch(
 	})
 }
 
-// positionTokenAddress is the token the row keys on and reads metadata from: an
-// ERC-7540 vault is not a token — the wallet holds the share, and so do prices.
+// positionTokenAddress is the token the row keys on: the share for a live ERC-7540
+// position — the wallet holds it, and prices sit there — else the entry's address.
 func positionTokenAddress(s *PositionSnapshot) (common.Address, error) {
+	if s.ClosesEntryKey {
+		if s.ShareToken == nil {
+			// Without the share the row has no metadata (see metadataAddress).
+			return common.Address{}, noShareTokenErr(s)
+		}
+		return s.Entry.ContractAddress, nil
+	}
 	if s.ShareToken != nil {
 		return *s.ShareToken, nil
 	}
 	if s.Entry.TokenType == TokenTypeCentrifuge {
-		// Falling back to the vault would write a key the cache trigger now drops,
-		// so the position would silently stop updating while history kept growing.
-		return common.Address{}, fmt.Errorf(
-			"centrifuge snapshot %s/%s carries no share token",
-			s.Entry.ContractAddress.Hex(), s.Entry.WalletAddress.Hex())
+		// Keying it on the vault would re-key the position onto the key
+		// closingSnapshots zeroes.
+		return common.Address{}, noShareTokenErr(s)
 	}
 	return s.Entry.ContractAddress, nil
+}
+
+func noShareTokenErr(s *PositionSnapshot) error {
+	return fmt.Errorf("snapshot %s/%s carries no share token",
+		s.Entry.ContractAddress.Hex(), s.Entry.WalletAddress.Hex())
+}
+
+// metadataAddress is where a row's decimals/symbol come from. An ERC-7540 vault
+// has neither, so it reads the share even when the row keys on the vault itself.
+func metadataAddress(s *PositionSnapshot) common.Address {
+	if s.ShareToken != nil {
+		return *s.ShareToken
+	}
+	return s.Entry.ContractAddress
 }
 
 func (h *PrimePositionHandler) buildPositions(
@@ -176,11 +195,12 @@ func (h *PrimePositionHandler) buildPositions(
 			}
 			meta = m
 		} else {
-			m, ok := h.metadata.get(tokenAddr)
+			metaAddr := metadataAddress(s)
+			m, ok := h.metadata.get(metaAddr)
 			if !ok {
 				return nil, fmt.Errorf(
 					"metadata missing for token %s",
-					tokenAddr.Hex(),
+					metaAddr.Hex(),
 				)
 			}
 			meta = m

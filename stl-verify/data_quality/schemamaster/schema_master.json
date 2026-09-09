@@ -953,10 +953,6 @@
       "type": "numeric",
       "class": "D"
     },
-    "reason": {
-      "type": "text",
-      "class": "A"
-    },
     "receipt_token_address": {
       "type": "bytea",
       "class": "S"
@@ -980,10 +976,6 @@
     },
     "reserve_factor": {
       "type": "numeric",
-      "class": "S"
-    },
-    "retired": {
-      "type": "bool",
       "class": "S"
     },
     "rewind_count": {
@@ -1099,10 +1091,6 @@
     "term_days": {
       "type": "int8",
       "class": "R"
-    },
-    "ticket": {
-      "type": "text",
-      "class": "A"
     },
     "to_address": {
       "type": "bytea",
@@ -1307,10 +1295,6 @@
     },
     "allocation_position_current": {
       "type": "derived",
-      "owner": "prime"
-    },
-    "allocation_position_key_retirement": {
-      "type": "config",
       "owner": "prime"
     },
     "anchorage_operation": {

@@ -42,11 +42,15 @@ type Service struct {
 	transferAliases  map[transferRouteKey]common.Address
 	handler          AllocationHandler
 	metrics          outbound.BackupMetricsRecorder
+	telemetry        *Telemetry
 	ctx              context.Context
 	cancel           context.CancelFunc
 	wg               sync.WaitGroup // tracks the SQS run loop so Stop can drain it
 	logger           *slog.Logger
 	blocksSinceSweep int
+	// entryKeysClosed records that the closing rows of this process have been
+	// persisted; they are written once, on the first sweep that HandleBatch accepts.
+	entryKeysClosed bool
 }
 
 func NewService(
@@ -98,6 +102,7 @@ func NewService(
 		transferAliases: make(map[transferRouteKey]common.Address),
 		handler:         handler,
 		metrics:         config.Metrics,
+		telemetry:       config.Telemetry,
 		logger:          config.Logger.With("component", "allocation-tracker"),
 	}, nil
 }
@@ -286,7 +291,7 @@ func (s *Service) processTransfers(
 	if err != nil {
 		return fmt.Errorf("read the share tokens of block %d: %w", event.BlockNumber, err)
 	}
-	routes, err := s.nextTransferRoutes(named, event.BlockNumber)
+	routes, err := s.nextTransferRoutes(ctx, named, event.BlockNumber)
 	if err != nil {
 		return fmt.Errorf("route transfers for block %d: %w", event.BlockNumber, err)
 	}
@@ -353,7 +358,7 @@ func (s *Service) resolveMissingTransferAliases(ctx context.Context, blockHash c
 		named = append(named, batch...)
 	}
 
-	next, err := s.nextTransferRoutes(named, blockNumber)
+	next, err := s.nextTransferRoutes(ctx, named, blockNumber)
 	if err != nil {
 		return fmt.Errorf("route the newly named entries: %w", err)
 	}
@@ -424,7 +429,7 @@ func namedEmittersFromBalances(entries []*TokenEntry, balances map[EntryKey]*Pos
 // reader mid-block keeps one consistent view (see processTransfers), and so two
 // entries swapping shares in one batch release before either claims — mutating
 // in place makes that swap fail or succeed on entry order.
-func (s *Service) nextTransferRoutes(named []namedEmitter, blockNumber int64) (map[transferRouteKey]common.Address, error) {
+func (s *Service) nextTransferRoutes(ctx context.Context, named []namedEmitter, blockNumber int64) (map[transferRouteKey]common.Address, error) {
 	if err := s.checkShareRatchets(named, blockNumber); err != nil {
 		return nil, err
 	}
@@ -432,7 +437,7 @@ func (s *Service) nextTransferRoutes(named []namedEmitter, blockNumber int64) (m
 	if next == nil {
 		next = make(map[transferRouteKey]common.Address, len(named))
 	}
-	s.pruneDisplacedRoutes(next, named, blockNumber)
+	s.pruneDisplacedRoutes(ctx, next, named, blockNumber)
 	if err := claimRoutes(next, named); err != nil {
 		return nil, err
 	}
@@ -451,7 +456,7 @@ func (s *Service) checkShareRatchets(named []namedEmitter, blockNumber int64) er
 // pruneDisplacedRoutes drops every route that still points an entry at an emitter
 // it no longer names, so a transfer of the retired token stops counting as this
 // position's activity.
-func (s *Service) pruneDisplacedRoutes(next map[transferRouteKey]common.Address, named []namedEmitter, blockNumber int64) {
+func (s *Service) pruneDisplacedRoutes(ctx context.Context, next map[transferRouteKey]common.Address, named []namedEmitter, blockNumber int64) {
 	for _, n := range named {
 		maps.DeleteFunc(next, func(route transferRouteKey, contract common.Address) bool {
 			displaced := route.Wallet == n.entry.WalletAddress &&
@@ -464,6 +469,7 @@ func (s *Service) pruneDisplacedRoutes(next map[transferRouteKey]common.Address,
 					"previousEmitter", route.Emitter.Hex(),
 					"emitter", n.emitter.Hex(),
 					"block", blockNumber)
+				s.telemetry.RecordShareRepoint(ctx, n.entry.ContractAddress, n.entry.WalletAddress)
 			}
 			return displaced
 		})
@@ -487,8 +493,7 @@ func claimRoutes(next map[transferRouteKey]common.Address, named []namedEmitter)
 // checkShareRatchet refuses to downgrade an entry that already named a share to
 // holding itself. ERC7540Source admits a share() revert as the direct-share shape
 // only once decimals() answers; this is the belt behind that: a node wrong twice
-// would otherwise re-key the position onto the retired vault, where the cache
-// trigger drops it and every health signal stays green.
+// would re-key the position onto the vault key closingSnapshots zeroes.
 func (s *Service) checkShareRatchet(n namedEmitter, blockNumber int64) error {
 	if n.emitter != n.entry.ContractAddress {
 		return nil
@@ -543,19 +548,7 @@ func (s *Service) buildSnapshots(
 			continue
 		}
 
-		snap := &PositionSnapshot{
-			Entry:           entry,
-			Balance:         bal.Balance,
-			ScaledBalance:   bal.ScaledBalance,
-			UnderlyingValue: bal.UnderlyingValue,
-			PoolToken0:      bal.PoolToken0,
-			PoolToken1:      bal.PoolToken1,
-			ShareToken:      bal.ShareToken,
-			ChainID:         event.ChainID,
-			BlockNumber:     event.BlockNumber,
-			BlockVersion:    event.Version,
-			BlockTimestamp:  blockTimestamp,
-		}
+		snap := snapshotOf(entry, bal, event.ChainID, event.BlockNumber, event.Version, blockTimestamp)
 		if t, ok := tLookup[entry.Key()]; ok {
 			snap.TxHash = t.TxHash
 			snap.LogIndex = t.LogIndex
@@ -616,34 +609,13 @@ func (s *Service) sweep(ctx context.Context, blockNumber int64, blockHash common
 	if err != nil {
 		return fmt.Errorf("read the sweep share tokens of block %d: %w", blockNumber, err)
 	}
-	routes, err := s.nextTransferRoutes(named, blockNumber)
+	routes, err := s.nextTransferRoutes(ctx, named, blockNumber)
 	if err != nil {
 		return fmt.Errorf("route transfers for sweep block %d: %w", blockNumber, err)
 	}
 
-	var snapshots []*PositionSnapshot
-	for _, entry := range s.entries {
-		bal, ok := fetch.Balances[entry.Key()]
-		if !ok {
-			continue
-		}
-		snapshots = append(snapshots, &PositionSnapshot{
-			Entry:           entry,
-			Balance:         bal.Balance,
-			ScaledBalance:   bal.ScaledBalance,
-			UnderlyingValue: bal.UnderlyingValue,
-			PoolToken0:      bal.PoolToken0,
-			PoolToken1:      bal.PoolToken1,
-			ShareToken:      bal.ShareToken,
-			ChainID:         s.config.ChainID,
-			BlockNumber:     blockNumber,
-			BlockVersion:    blockVersion,
-			TxAmount:        big.NewInt(0),
-			Direction:       DirectionSweep,
-			BlockTimestamp:  blockTimestamp,
-		})
-	}
-
+	snapshots := s.sweepSnapshots(fetch.Balances, blockNumber, blockVersion, blockTimestamp)
+	snapshots = append(snapshots, s.closingSnapshots(named, blockNumber, blockVersion, blockTimestamp)...)
 	supplies := buildSupplySnapshots(fetch.Supplies, s.config.ChainID, blockNumber, blockVersion, blockTimestamp, "sweep")
 
 	if len(snapshots) > 0 || len(supplies) > 0 {
@@ -651,7 +623,10 @@ func (s *Service) sweep(ctx context.Context, blockNumber int64, blockHash common
 			return fmt.Errorf("sweep handler: %w", err)
 		}
 	}
+	// Both committed only now: a NACKed sweep is redelivered, and it must repeat
+	// the closing rows and match the same transfers it matched the first time.
 	s.transferAliases = routes
+	s.entryKeysClosed = true
 
 	s.logger.Info("sweep complete",
 		"block", blockNumber,
@@ -659,4 +634,92 @@ func (s *Service) sweep(ctx context.Context, blockNumber int64, blockHash common
 		"supplies", len(supplies),
 		"duration", time.Since(start))
 	return nil
+}
+
+// sweepSnapshots is the reconciled state of every entry the fetch answered for.
+func (s *Service) sweepSnapshots(
+	balances map[EntryKey]*PositionBalance,
+	blockNumber int64,
+	blockVersion int,
+	blockTimestamp time.Time,
+) []*PositionSnapshot {
+	var snapshots []*PositionSnapshot
+	for _, entry := range s.entries {
+		bal, ok := balances[entry.Key()]
+		if !ok {
+			continue
+		}
+		snap := snapshotOf(entry, bal, s.config.ChainID, blockNumber, blockVersion, blockTimestamp)
+		snap.TxAmount = big.NewInt(0)
+		snap.Direction = DirectionSweep
+		snapshots = append(snapshots, snap)
+	}
+	return snapshots
+}
+
+// snapshotOf is the observed state of one entry; the caller adds the fields that
+// say what triggered the row.
+func snapshotOf(
+	entry *TokenEntry,
+	bal *PositionBalance,
+	chainID, blockNumber int64,
+	blockVersion int,
+	blockTimestamp time.Time,
+) *PositionSnapshot {
+	return &PositionSnapshot{
+		Entry:           entry,
+		Balance:         bal.Balance,
+		ScaledBalance:   bal.ScaledBalance,
+		UnderlyingValue: bal.UnderlyingValue,
+		PoolToken0:      bal.PoolToken0,
+		PoolToken1:      bal.PoolToken1,
+		ShareToken:      bal.ShareToken,
+		ChainID:         chainID,
+		BlockNumber:     blockNumber,
+		BlockVersion:    blockVersion,
+		BlockTimestamp:  blockTimestamp,
+	}
+}
+
+// closingSnapshots zeroes, once per process, the entry's own address — the key an
+// older tracker kept a vault-fronted position on, where a surviving row flips the
+// cache between vault and share. Sweep-only, and repeated until a batch persists.
+func (s *Service) closingSnapshots(
+	named []namedEmitter,
+	blockNumber int64,
+	blockVersion int,
+	blockTimestamp time.Time,
+) []*PositionSnapshot {
+	if s.entryKeysClosed {
+		return nil
+	}
+	var closing []*PositionSnapshot
+	for _, n := range named {
+		if n.emitter == n.entry.ContractAddress {
+			continue
+		}
+		closing = append(closing, closingSnapshot(n, s.config.ChainID, blockNumber, blockVersion, blockTimestamp))
+	}
+	return closing
+}
+
+func closingSnapshot(
+	n namedEmitter,
+	chainID, blockNumber int64,
+	blockVersion int,
+	blockTimestamp time.Time,
+) *PositionSnapshot {
+	return &PositionSnapshot{
+		Entry:          n.entry,
+		Balance:        big.NewInt(0),
+		ScaledBalance:  big.NewInt(0),
+		ShareToken:     &n.emitter,
+		ChainID:        chainID,
+		BlockNumber:    blockNumber,
+		BlockVersion:   blockVersion,
+		TxAmount:       big.NewInt(0),
+		Direction:      DirectionSweep,
+		ClosesEntryKey: true,
+		BlockTimestamp: blockTimestamp,
+	}
 }

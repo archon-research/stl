@@ -84,6 +84,49 @@ func TestTelemetry_RecordUnderlyingValueFailure(t *testing.T) {
 	}
 }
 
+func TestTelemetry_RecordShareRepoint(t *testing.T) {
+	tel, reader := newRecordingTelemetry(t)
+	ctx := context.Background()
+	entry := common.HexToAddress("0x4880799ee5200fc58da299e965df644fbf46780b")
+	wallet := common.HexToAddress("0x491edfb0b8b608044e227225c715981a30f3a44e")
+
+	tel.RecordShareRepoint(ctx, entry, wallet)
+
+	m := collectMetric(t, reader, "allocation.share_repoints.total")
+	sum, ok := m.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("allocation.share_repoints.total is %T, want Sum[int64]", m.Data)
+	}
+	if len(sum.DataPoints) != 1 {
+		t.Fatalf("got %d data points, want 1", len(sum.DataPoints))
+	}
+
+	dp := sum.DataPoints[0]
+	if dp.Value != 1 {
+		t.Errorf("datapoint value = %d, want 1", dp.Value)
+	}
+
+	chain, ok := dp.Attributes.Value("chain")
+	if !ok || chain.AsString() != "mainnet" {
+		t.Errorf("missing or incorrect chain attribute: got %v", chain)
+	}
+
+	gotEntry, ok := dp.Attributes.Value("entry")
+	if !ok || gotEntry.AsString() != entry.Hex() {
+		t.Errorf("missing or incorrect entry attribute: got %v, want %s", gotEntry, entry.Hex())
+	}
+
+	gotWallet, ok := dp.Attributes.Value("wallet")
+	if !ok || gotWallet.AsString() != wallet.Hex() {
+		t.Errorf("missing or incorrect wallet attribute: got %v, want %s", gotWallet, wallet.Hex())
+	}
+}
+
+func TestTelemetry_RecordShareRepoint_NilReceiverIsSafe(t *testing.T) {
+	var tel *Telemetry
+	tel.RecordShareRepoint(context.Background(), common.Address{}, common.Address{}) // must not panic
+}
+
 func TestNewTelemetry(t *testing.T) {
 	tel, err := NewTelemetry("mainnet")
 	if err != nil {

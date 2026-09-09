@@ -44,8 +44,6 @@ var convertedAppendOnlyTables = []string{
 	"uniswap_v4_liquidity_event",
 	"uniswap_v4_tick",
 	"uniswap_v4_pool_event",
-	// VEC-535: append-only from birth; an un-retirement is a new row, not an UPDATE.
-	"allocation_position_key_retirement",
 }
 
 // TestConvertedTablesAreAppendOnly asserts the DB-level half of the append-only rule:
@@ -88,52 +86,6 @@ func TestConvertedTablesAreAppendOnly(t *testing.T) {
 			}
 			if canUpdate || canDelete {
 				t.Errorf("%s: stl_readwrite must not hold UPDATE/DELETE, got update=%v delete=%v — is the REVOKE missing from the creating migration?", table, canUpdate, canDelete)
-			}
-		})
-	}
-}
-
-// ownerRevokedTables are the converted tables whose creating migration also revokes
-// UPDATE and DELETE from the OWNER (stl_migrator), so a stray fix-migration fails loudly.
-// position_state asserts its own in position_state_integration_test.go.
-var ownerRevokedTables = []string{
-	"allocation_position_key_retirement",
-}
-
-// TestOwnerRevokedTablesHoldNoOwnerWrite asserts the owner-side half of the revoke.
-// The REVOKE is guarded by role existence, and stl_migrator comes from the infra
-// bootstrap — no migration creates it — so under this harness it is ABSENT and the
-// REVOKE never executes. Log that skip rather than pass silently: a green run must not
-// read as evidence the owner-side revoke works.
-func TestOwnerRevokedTablesHoldNoOwnerWrite(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := setupPostgres(ctx, t)
-	defer cleanup()
-	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
-		t.Fatalf("migrations failed: %v", err)
-	}
-
-	var migratorExists bool
-	if err := pool.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'stl_migrator')`).Scan(&migratorExists); err != nil {
-		t.Fatal(err)
-	}
-	if !migratorExists {
-		t.Log("stl_migrator absent: the owner-side REVOKE was NOT executed or asserted in this run. " +
-			"It is covered only where the infra bootstrap has created the role.")
-		return
-	}
-	for _, table := range ownerRevokedTables {
-		t.Run(table, func(t *testing.T) {
-			var canUpdate, canDelete bool
-			if err := pool.QueryRow(ctx, `
-				SELECT has_table_privilege('stl_migrator', $1, 'UPDATE'),
-				       has_table_privilege('stl_migrator', $1, 'DELETE')`, table,
-			).Scan(&canUpdate, &canDelete); err != nil {
-				t.Fatalf("read owner grants for %s: %v", table, err)
-			}
-			if canUpdate || canDelete {
-				t.Errorf("%s: owner-side privileges present (UPDATE=%v DELETE=%v); want both revoked", table, canUpdate, canDelete)
 			}
 		})
 	}
