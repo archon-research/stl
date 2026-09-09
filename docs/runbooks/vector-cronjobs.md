@@ -884,8 +884,12 @@ through its EKS Pod Identity association. Both are settled at startup: the name 
 checked against `CHAIN_ID` (through `DEPLOY_ENV`), and the pod lists and reads the
 bucket once — so another chain's bucket or a missing grant is a worker that will
 not start, rather than a run that dies on its first height, three attempts over.
-Every run closes with one `block versions resolved from the raw archive` line:
-how many heights it resolved, and which of them carried a version above 0.
+Every run closes with one `block versions resolved from the raw archive` line
+carrying an `outcome` of `completed` or `aborted`, the number of heights it
+resolved, and — per version it saw — how many heights sat at that version and
+their lowest and highest height. A version above 0 is not evidence of a reorg,
+just of what the archive holds. An `aborted` outcome means the sweep did not
+finish, so those extents cover only the range it reached.
 A height the archive cannot answer for **stops the run**, naming the height: it
 holds no object there, or the version it holds names a different block (an
 orphaned fork kept past its reorg — the ARCT-379 shape). Repair the archive
