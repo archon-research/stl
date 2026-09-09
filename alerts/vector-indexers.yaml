@@ -752,11 +752,9 @@ groups:
   # workers' series stay on the dashboard as run progress.
   #
   # "Live indexer" is one Deployment per chain (morpho-indexer on mainnet,
-  # base-morpho-indexer on Base since ARCT-414) running the same binary; each
-  # emits its own service_name (SERVICE_NAME env from the pod's `app` label;
-  # binary support lands with ARCT-413 — until then the Base pod still reports
-  # service_name="morpho-indexer" with chain="base", and the regex covers both
-  # states).
+  # base-morpho-indexer on Base since ARCT-414) running the same binary. Each pod
+  # emits its own service_name: the SERVICE_NAME env taken from its `app` label,
+  # which the binary has read since ARCT-413.
   #
   # NO staleness rule here, deliberately. V2 vault state is event-driven: a
   # dormant vault legitimately writes nothing for days. Chain-verified in the

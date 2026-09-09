@@ -3316,14 +3316,14 @@ The price is that a stall's *first* hour can still fire this, because the succes
 rate needs the full 1h window to fall to zero — so rule out a stall first.
 
 The rule counts every `service_name` except the two on-demand replay workers,
-`service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"` (each Deployment's
-`SERVICE_NAME` is its `app` label; the binary reads it from ARCT-413 on — until
-that lands the Base pod still reports `service_name="morpho-indexer"` with
-`chain="base"`). Every rule in the `vector-morpho-v2` group carries the same
-exclusion, so a chain added later is covered on day one and only a new replay
-worker needs adding. The threshold is per `chain` and was sized on mainnet; Base
-has a single V2 vault (steakUSDC), so >20/h there is a stronger signal, not a false
-positive. `morpho-vault-backfill` and `morpho-v2-bootstrap` drive historical logs
+`service_name!~"(^|.*-)(morpho-vault-backfill|morpho-v2-bootstrap)"`. Each pod
+emits its own `service_name` — the `SERVICE_NAME` env taken from its `app` label,
+which the binary has read since ARCT-413 — so mainnet reports `morpho-indexer` and
+Base reports `base-morpho-indexer`. Every rule in the `vector-morpho-v2` group
+carries the same exclusion, so a chain added later is covered on day one and only
+a new replay worker needs adding. The threshold is per `chain` and was sized on
+mainnet; Base has a single V2 vault (steakUSDC), so >20/h there is a stronger
+signal, not a false positive. `morpho-vault-backfill` and `morpho-v2-bootstrap` drive historical logs
 through the same handlers and increment the same counter under their own
 `service_name`, and they emit no `morpho_blocks_processed_total` for the loop gate
 to read — the 2026-08-28 staging era backfill replayed 2,604 `ForceDeallocate` at
