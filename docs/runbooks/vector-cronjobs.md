@@ -1692,11 +1692,12 @@ each one is fixed or explicitly written off, which is the point: a hole is
 reported, never hidden.
 
 **4. A height the raw archive cannot answer for.** Either `the raw archive
-identifies no block at that height` — nothing is archived there, or the version
-that is names no block — or `the raw archive holds another block at that height`,
-which names the archived hash beside the one being replayed. Both name the height
-and the bucket. The run stamps every row with the version the archive holds (see
-"Block versions come from the raw archive" above), so it stops rather than guess.
+identifies no block at that height` — nothing is archived there at all, or the top
+version that is there names no usable block hash — or `the raw archive holds
+another block at that height`, which names the archived hash beside the one being
+replayed. Both name the height and the bucket. The run stamps every row with the
+version the archive holds (see "Block versions come from the raw archive" above),
+so it stops rather than guess.
 Which repair to reach for depends on which height it is, and the error says which.
 
 **The pinned head.** An error prefixed `resolving the block version of the pinned
