@@ -12,10 +12,21 @@
 #
 # This run pushes no image. It rebuilds with the layer cache disabled and
 # re-exports the shared build cache, so the next real deploy of any commit
-# inherits the patched layers. It cannot push a patched image itself: the SHA
-# tag for an already-built commit exists, and re-pushing it fails under ECR tag
-# immutability (ARCT-420). The consequence is that patches reach the cluster on
-# the first deploy after this run, not on this run.
+# inherits the patched layers. It deliberately does not push a patched image
+# for a SHA that already has one: that tag is what build_registry's
+# (git_hash, service) identity names, so replacing its bytes would change what
+# an already-written governed row points at.
+#
+# ARCT-420 will have ECR refuse such a push, but it is code-complete and NOT
+# YET APPLIED -- every stl-sentinel* repository still reports MUTABLE (checked
+# 2026-09-09 via `aws ecr describe-repositories --query
+# 'repositories[].imageTagMutability'`). So the re-push would currently succeed
+# silently, and DOCKER_PUSH=0 below is the only thing preventing it. Note the
+# eventual state is IMMUTABLE_WITH_EXCLUSION (alias tags `latest` / `*-latest`
+# excluded), not blanket immutability.
+#
+# The consequence either way is that patches reach the cluster on the first
+# deploy after this run, not on this run.
 name: Image Security Refresh
 
 # Least privilege by default; each job widens to exactly what it needs. Without
@@ -69,9 +80,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
-      # Both values go through env rather than being interpolated into the
-      # script: an expansion inside `run:` is a code-injection vector, and a
-      # new workflow should not need an entry on zizmor's ignore list.
+      # Every GitHub expression in this file reaches its `run:` through env
+      # rather than being interpolated into the script text: an expansion
+      # inside `run:` is a code-injection vector, and a new workflow should not
+      # need an entry on zizmor's ignore list. github.repository and github.sha
+      # are on zizmor's safe-context list so it would not flag them today —
+      # this is the habit being kept uniform, not a fix for a live hole.
       - name: Login to GHCR (build cache)
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -79,17 +93,21 @@ jobs:
         run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
 
       - name: Resolve build-cache repo
-        run: echo "DOCKER_CACHE_REPO=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/buildcache" >> "$GITHUB_ENV"
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: echo "DOCKER_CACHE_REPO=ghcr.io/$(echo "$REPOSITORY" | tr '[:upper:]' '[:lower:]')/buildcache" >> "$GITHUB_ENV"
 
       # DOCKER_PUSH=0 builds without loading or pushing any image, and normally
       # also skips the cache export; DOCKER_CACHE_EXPORT=1 restores the export,
       # which is the entire point of this run.
       - name: Rebuild all images with no cache and re-export the build cache
         working-directory: stl-verify
+        env:
+          IMAGE_TAG: ${{ github.sha }}
         run: |
           make docker-release-all \
             ENV=sentinelstaging \
-            IMAGE_TAG=${{ github.sha }} \
+            IMAGE_TAG="$IMAGE_TAG" \
             DOCKER_CACHE=1 \
             DOCKER_CACHE_REPO="$DOCKER_CACHE_REPO" \
             DOCKER_PUSH=0 \
