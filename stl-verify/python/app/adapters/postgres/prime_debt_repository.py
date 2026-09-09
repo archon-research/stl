@@ -9,6 +9,7 @@ from app.adapters.postgres._time_window import (
     optional_time_window_clause,
     required_time_window_clause,
 )
+from app.adapters.postgres.prime_resolver_repository import PrimeResolverRepository
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime_debt import PrimeDebtSnapshot
 from app.domain.entities.time_series_bucket import PrimeDebtBucket
@@ -59,54 +60,12 @@ class PrimeDebtRepository:
 
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
-
-    @staticmethod
-    def _prime_match_clause() -> str:
-        # /v1/primes exposes allocation proxy_address, while prime_debt is keyed by prime.id
-        # and prime.vault_address. Resolve by either identity to keep API contracts consistent.
-        return """
-            (
-                p.vault_address = decode(:address_hex, 'hex')
-                OR EXISTS (
-                    SELECT 1
-                    FROM prime_proxy pp
-                    WHERE pp.prime_id = p.id
-                      AND pp.proxy_address = decode(:address_hex, 'hex')
-                )
-            )
-        """
+        self._primes = PrimeResolverRepository(engine)
 
     async def resolve_prime_id(self, prime_address: EthAddress) -> int | None:
         """Resolve either prime identity (vault or proxy address) to ``prime.id``."""
-        query = text(
-            """
-            SELECT p.id
-            FROM prime p
-            WHERE
-            """
-            + self._prime_match_clause()
-            + """
-            ORDER BY p.vault_address = decode(:address_hex, 'hex') DESC, p.id
-            LIMIT 1
-            """
-        )
-
-        try:
-            async with self._engine.connect() as conn:
-                row = (await conn.execute(query, {"address_hex": prime_address.hex})).fetchone()
-
-            return row.id if row is not None else None
-        except Exception as exc:
-            logger.error(
-                "Failed to resolve prime id in database",
-                extra={
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc),
-                    "prime_address": str(prime_address),
-                },
-                exc_info=True,
-            )
-            raise ValueError(f"Database query failed while resolving prime {prime_address}: {exc}") from exc
+        prime = await self._primes.resolve(str(prime_address))
+        return prime.id if prime is not None else None
 
     async def list_debt_snapshots(
         self,

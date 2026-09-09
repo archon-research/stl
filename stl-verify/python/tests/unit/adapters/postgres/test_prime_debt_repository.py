@@ -32,23 +32,18 @@ def _engine_with_row(row):
     return engine, conn
 
 
-def test_prime_match_clause_keeps_vault_or_proxy_resolution() -> None:
-    clause = PrimeDebtRepository._prime_match_clause()
-
-    assert "p.vault_address" in clause
-    assert "prime_proxy pp" in clause
-    assert "pp.proxy_address" in clause
-
-
 @pytest.mark.asyncio
-async def test_resolve_prime_id_returns_the_matched_id_or_none() -> None:
-    engine_found, _ = _engine_with_row(SimpleNamespace(id=_PRIME_ID))
-    repo_found = PrimeDebtRepository(engine_found)
-    assert await repo_found.resolve_prime_id(_VALID_ADDR) == _PRIME_ID
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        (SimpleNamespace(id=_PRIME_ID, name="spark", prime_key="prm_2d3ceee8415e59f3", vault_hex="ab" * 20), _PRIME_ID),
+        (None, None),
+    ],
+)
+async def test_resolve_prime_id_returns_the_matched_id(row, expected) -> None:
+    engine, _ = _engine_with_row(row)
 
-    engine_missing, _ = _engine_with_row(None)
-    repo_missing = PrimeDebtRepository(engine_missing)
-    assert await repo_missing.resolve_prime_id(_VALID_ADDR) is None
+    assert await PrimeDebtRepository(engine).resolve_prime_id(_VALID_ADDR) == expected
 
 
 @pytest.mark.asyncio

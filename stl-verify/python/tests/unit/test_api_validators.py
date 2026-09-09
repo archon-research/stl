@@ -5,6 +5,7 @@ from app.api._validators import (
     _validate_eth_address,
     _validate_optional_eth_address,
     _validate_optional_tx_hash,
+    _validate_prime_identifier,
     _validate_tx_hash,
 )
 
@@ -98,3 +99,32 @@ def test_validate_optional_tx_hash_canonicalizes_uppercase_prefix():
 def test_validate_optional_tx_hash_rejects_malformed_value():
     with pytest.raises(ValueError, match="Invalid transaction hash format"):
         _validate_optional_tx_hash("0xdeadbeef")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "spark",
+        "obex",
+        "prime_debt_reference_buckets",
+        "0x" + "ab" * 20,
+    ],
+)
+def test_validate_prime_identifier_accepts_a_name_or_an_address(value: str):
+    assert _validate_prime_identifier(value) == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "0xdeadbeef",
+        "0x" + "ab" * 21,
+        "0X" + "AB" * 20,
+        "Spark",
+        "spark/exposure",
+        "",
+    ],
+)
+def test_validate_prime_identifier_rejects_malformed_values(value: str):
+    with pytest.raises(ValueError, match="Invalid"):
+        _validate_prime_identifier(value)

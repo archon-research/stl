@@ -16,9 +16,12 @@ from dataclasses import dataclass
 
 from fastapi import HTTPException
 
+from app.api.deps import PRIME_DENIED_DETAIL
 from app.domain.entities.allocation import EthAddress
+from app.domain.entities.prime import PrimeIdentity
 from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.token_catalog import TokenMetadata
+from app.ports.prime_resolver import PrimeResolver
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
 from app.ports.token_catalog_repository import TokenCatalogRepositoryPort
 
@@ -37,6 +40,18 @@ async def resolve_token(
     if meta is None:
         raise HTTPException(status_code=404, detail="Token not found")
     return meta
+
+
+async def resolve_prime(identifier: str, resolver: PrimeResolver) -> PrimeIdentity:
+    """Return the prime ``identifier`` names or raise 404.
+
+    The detail matches the authz gate's denial body, so the pair cannot be read as an
+    existence oracle.
+    """
+    prime = await resolver.resolve(identifier)
+    if prime is None:
+        raise HTTPException(status_code=404, detail=PRIME_DENIED_DETAIL)
+    return prime
 
 
 async def resolve_receipt_token(
