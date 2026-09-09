@@ -126,7 +126,7 @@ AS $proc$
         > (position_current.block_number, position_current.block_version, position_current.processing_version, position_current.block_timestamp);
 $proc$;
 
-COMMENT ON PROCEDURE rebuild_position_current() IS '[Operational] Rebuilds position_current from position_state (VEC-409): CALL rebuild_position_current(). Forward-only, so it raises a stale row and never lowers or removes one; it cannot repair a cache row ahead of history or a row whose position has no history left. Pins enable_tiered_reads so newest-per-key is computed over the whole table, tiered chunks included.';
+COMMENT ON PROCEDURE rebuild_position_current() IS '[Operational] Rebuilds position_current from position_state (VEC-409): CALL rebuild_position_current(), as the owner -- this procedure is invoker-rights, and the app role holds SELECT only. Forward-only, so it raises a stale row and never lowers or removes one; it cannot repair a cache row ahead of history or a row whose position has no history left. Pins enable_tiered_reads so newest-per-key is computed over the whole table, tiered chunks included.';
 
 -- Guarded like every other DDL statement here, so a re-run does not fail with "trigger already exists".
 DROP TRIGGER IF EXISTS trigger_upsert_position_current ON position_state;
@@ -138,6 +138,6 @@ EXECUTE FUNCTION upsert_position_current();
 
 -- KNOWN GAP: TimescaleDB refuses ENABLE ALWAYS on a hypertable trigger, so this one stays at ORIGIN and
 -- does not fire under session_replication_role = 'replica' (pg_restore --disable-triggers). Recovery is
--- CALL rebuild_position_current().
+-- CALL rebuild_position_current(), as the owner.
 
 INSERT INTO migrations (filename) VALUES ('20260819_150000_create_position_current.sql') ON CONFLICT (filename) DO NOTHING;
