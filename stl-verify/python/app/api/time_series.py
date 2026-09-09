@@ -12,8 +12,9 @@ from fastapi import HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from app.domain.time_series import (
+    AggregationMethod,
+    TimeSeriesFrequency,
     TimeSeriesQuery,
-    TimeSeriesResolution,
     resolve_time_series_query,
 )
 
@@ -21,6 +22,14 @@ from app.domain.time_series import (
 # responses cannot change going forward (the underlying rows are immutable once
 # observed), so a long TTL is safe and dramatically reduces hypertable load.
 _PINNED_WINDOW_CACHE_MAX_AGE_SECONDS = 300
+
+# Shared by both dependencies below, which differ only in how they default the
+# aggregation method.
+_FREQUENCY_DESCRIPTION = (
+    "ISO-8601 duration frequency for the resampled grid (for example `PT5M`, `PT1H`). Always "
+    "validated against the window's floor, and rejected without an `aggregation_method` to cut "
+    "on it. Defaults to the finest frequency the window allows."
+)
 
 
 def get_time_series_query_params(
@@ -32,24 +41,78 @@ def get_time_series_query_params(
         default=None,
         description="Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time.",
     ),
-    resolution: TimeSeriesResolution | None = Query(
+    frequency: TimeSeriesFrequency | None = Query(
+        default=None,
+        description=_FREQUENCY_DESCRIPTION,
+    ),
+    aggregation_method: AggregationMethod | None = Query(
         default=None,
         description=(
-            "ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing "
-            "when `aggregate=true`; defaults to the finest resolution allowed for the window."
+            "Resampling method for the returned grid. Supplying it returns a resampled series; "
+            "omitting it returns the series at its stored frequency. `end-period` is the only "
+            "accepted value."
         ),
     ),
-    aggregate: bool = Query(
-        default=False,
-        description="When true, return time-bucketed aggregates instead of raw rows.",
+) -> TimeSeriesQuery:
+    return _resolve_or_422(
+        from_timestamp=from_timestamp,
+        to_timestamp=to_timestamp,
+        frequency=frequency,
+        aggregation_method=aggregation_method,
+    )
+
+
+def get_resampled_time_series_query_params(
+    from_timestamp: datetime | None = Query(
+        default=None,
+        description="Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`.",
     ),
+    to_timestamp: datetime | None = Query(
+        default=None,
+        description="Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time.",
+    ),
+    frequency: TimeSeriesFrequency | None = Query(
+        default=None,
+        description=_FREQUENCY_DESCRIPTION,
+    ),
+    aggregation_method: AggregationMethod | None = Query(
+        default=AggregationMethod.END_PERIOD,
+        description=(
+            "Resampling method for the returned grid. This route only serves a resampled series, "
+            "so omitting it applies `end-period`, the only accepted value."
+        ),
+    ),
+) -> TimeSeriesQuery:
+    """The dependency for a route with no default-frequency mode.
+
+    Defaulting the method here rather than ignoring it keeps ``is_bucketed``
+    true on a route whose answer is always buckets, so the resolved query and
+    the response agree.
+    """
+    return _resolve_or_422(
+        from_timestamp=from_timestamp,
+        to_timestamp=to_timestamp,
+        frequency=frequency,
+        aggregation_method=aggregation_method,
+        default_aggregation_method=AggregationMethod.END_PERIOD,
+    )
+
+
+def _resolve_or_422(
+    *,
+    from_timestamp: datetime | None,
+    to_timestamp: datetime | None,
+    frequency: TimeSeriesFrequency | None,
+    aggregation_method: AggregationMethod | None,
+    default_aggregation_method: AggregationMethod | None = None,
 ) -> TimeSeriesQuery:
     try:
         return resolve_time_series_query(
             from_timestamp=from_timestamp,
             to_timestamp=to_timestamp,
-            resolution=resolution,
-            aggregate=aggregate,
+            frequency=frequency,
+            aggregation_method=aggregation_method,
+            default_aggregation_method=default_aggregation_method,
             now=datetime.now(UTC),
         )
     except ValueError as exc:
@@ -57,7 +120,7 @@ def get_time_series_query_params(
 
 
 class TimeSeriesWindow(BaseModel):
-    """The resolved window and resolution actually applied to a request.
+    """The resolved window applied to a request.
 
     Echoing this back lets consumers distinguish an empty result caused by the
     window from one caused by the absence of data.
@@ -65,17 +128,32 @@ class TimeSeriesWindow(BaseModel):
 
     from_timestamp: datetime = Field(description="Inclusive lower bound applied (UTC).")
     to_timestamp: datetime = Field(description="Inclusive upper bound applied (UTC).")
-    resolution: TimeSeriesResolution = Field(description="Resolution applied (relevant when aggregated).")
-    interval_ms: int = Field(description="Resolution width in milliseconds.")
 
 
-def build_window(query: TimeSeriesQuery) -> TimeSeriesWindow:
-    """Build the response window descriptor from a resolved query."""
-    return TimeSeriesWindow(
+class ResampledTimeSeriesWindow(TimeSeriesWindow):
+    """The window echo for a resampled response, naming the grid it sits on.
+
+    A default-frequency response carries the points at their stored frequency,
+    so it echoes the bare window above — a frequency there would name a grid the
+    points are not on, and a `null` would still put the key on the wire.
+    """
+
+    frequency: TimeSeriesFrequency = Field(description="Resampled grid the points sit on.")
+    frequency_ms: int = Field(description="`frequency` in milliseconds.")
+
+
+def build_raw_window(query: TimeSeriesQuery) -> TimeSeriesWindow:
+    """The echo for the unresampled arm of a route: the window, no grid."""
+    return TimeSeriesWindow(from_timestamp=query.from_timestamp, to_timestamp=query.to_timestamp)
+
+
+def build_resampled_window(query: TimeSeriesQuery) -> ResampledTimeSeriesWindow:
+    """The echo for a route that only ever answers with a resampled series."""
+    return ResampledTimeSeriesWindow(
         from_timestamp=query.from_timestamp,
         to_timestamp=query.to_timestamp,
-        resolution=query.resolution,
-        interval_ms=query.interval_ms,
+        frequency=query.frequency,
+        frequency_ms=query.frequency_ms,
     )
 
 

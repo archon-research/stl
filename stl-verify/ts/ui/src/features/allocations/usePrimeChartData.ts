@@ -39,7 +39,7 @@ const NO_EXPOSURE: ExposureBucket[] = [];
 /**
  * Loads the four per-prime time series backing the metric trend charts (prime
  * debt, allocation activity, total capital, exposure) for a given range and
- * resolution. Each is its own query, so a supplementary failure does not blank
+ * frequency. Each is its own query, so a supplementary failure does not blank
  * the whole view and a range already looked at comes back from the cache.
  */
 export function usePrimeChartData(

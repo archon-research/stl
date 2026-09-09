@@ -357,7 +357,7 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
   const [hoveredTimestamp] = useHoveredTimestamp();
   // Reads the instant off the hovered datum rather than inverting a pixel, so
   // sibling cards line up on the bucket a reader is actually over even though
-  // they bucket at different resolutions and start at different points.
+  // they bucket at different frequencies and start at different points.
   const cursorHandlers = useSyncedCursorHandlers<ChartDatum>(
     (point) => point.timestamp ?? Number.NaN,
   );
