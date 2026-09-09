@@ -75,6 +75,13 @@
 #   --json           also write the verdicts as JSON, for collecting a week of
 #                    them and reconciling every disagreement
 #
+# End of --help output.
+#
+# LOAD-BEARING: --help below extracts everything between the "# Usage:" line
+# above and the "End of --help output." line above by literal text match.
+# Move or reword either marker and update the sed range that reads them in
+# the same commit.
+#
 # Requires AWS credentials for the account the overlay's images name, with
 # ecr:BatchGetImage — the same permission verify-ecr-images.sh needs and the
 # deploy job already holds. Read-only.
@@ -93,7 +100,7 @@ while [ $# -gt 0 ]; do
     --kustomization)  KUSTOMIZATION="${2:-}"; shift 2 ;;
     --tag)             TAG="${2:-}"; shift 2 ;;
     --json)            JSON_OUT="${2:-}"; shift 2 ;;
-    -h|--help) sed -n '/^# Usage:/,/^# Requires AWS/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '/^# Usage:/,/^# End of --help output\.$/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -115,14 +122,15 @@ PAIRS_FILE="$(mktemp)"
 ROWS_FILE="$(mktemp)"
 trap 'rm -f "$PAIRS_FILE" "$ROWS_FILE"' EXIT
 awk '
+    function scalar(line) {
+      sub(/^[^:]*:[[:space:]]*/, "", line); gsub(/^"|"$/, "", line); return line
+    }
     /^images:/            { in_images = 1; next }
     in_images && /^[^[:space:]-]/ { in_images = 0 }
     !in_images            { next }
-    /^[[:space:]]*-?[[:space:]]*newName:/ {
-      v = $0; sub(/^[^:]*:[[:space:]]*/, "", v); gsub(/^"|"$/, "", v); name = v; next
-    }
+    /^[[:space:]]*-?[[:space:]]*newName:/ { name = scalar($0); next }
     /^[[:space:]]*newTag:/ {
-      v = $0; sub(/^[^:]*:[[:space:]]*/, "", v); gsub(/^"|"$/, "", v)
+      v = scalar($0)
       if (name != "") { print name "\t" v; name = "" }
     }
   ' "$KUSTOMIZATION" | sort -u > "$PAIRS_FILE"
