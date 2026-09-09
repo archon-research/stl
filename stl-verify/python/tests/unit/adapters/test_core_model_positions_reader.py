@@ -406,12 +406,7 @@ def test_anchorage_row_reproduces_a_real_staging_package():
 
 
 def test_anchorage_one_row_per_package():
-    df = build_anchorage_users_frame(
-        [
-            _anchorage_row(),
-            _anchorage_row(package_id="410e7ac982c41b3ccfdf", exposure=50_000_000.0, package_value=61_933_677.274),
-        ]
-    )
+    df = build_anchorage_users_frame([_anchorage_row(), _anchorage_row(package_id="410e7ac982c41b3ccfdf")])
     assert sorted(df["wallet_address"]) == ["0cb3a89e30d0aa19f671", "410e7ac982c41b3ccfdf"]
 
 

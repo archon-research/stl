@@ -491,41 +491,54 @@ async def anchorage_conn(db_url: str, engine):
 
 
 async def _seed_anchorage_prime(conn, name: str, vault_byte: bytes) -> int:
-    prime_id = await conn.fetchval(
-        "INSERT INTO prime (name, vault_address) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING RETURNING id",
+    return await conn.fetchval(
+        "INSERT INTO prime (name, vault_address) VALUES ($1, $2) "
+        "ON CONFLICT (name) DO UPDATE SET vault_address = EXCLUDED.vault_address RETURNING id",
         name,
         vault_byte * 20,
     )
-    if prime_id is None:
-        prime_id = await conn.fetchval("SELECT id FROM prime WHERE name = $1", name)
-    return prime_id
+
+
+async def _insert_live_package(
+    conn,
+    prime_id: int,
+    package_id: str,
+    snapshot_time: dt.datetime,
+    *,
+    exposure_value: Decimal = Decimal(150_000_000),
+    package_value: Decimal = Decimal(187_500_000),
+    asset_quantity: Decimal = Decimal(3125),
+    build_id: int = 0,
+) -> None:
+    """The canonical live BTC package ($150M loan against 3125 BTC at the seed price)."""
+    await insert_anchorage_snapshot(
+        conn,
+        prime_id=prime_id,
+        package_id=package_id,
+        active=True,
+        exposure_value=exposure_value,
+        package_value=package_value,
+        asset_quantity=asset_quantity,
+        snapshot_time=snapshot_time,
+        build_id=build_id,
+    )
 
 
 async def test_anchorage_latest_cohort_excludes_closed_packages_last_rows(engine, anchorage_conn):
     now = dt.datetime.now(dt.timezone.utc)
     prime_id = await _seed_anchorage_prime(anchorage_conn, "anchorage_core_model", b"\xd0")
-    await insert_anchorage_snapshot(
-        anchorage_conn,
-        prime_id=prime_id,
-        package_id="live-package",
-        active=True,
-        exposure_value=Decimal(150_000_000),
-        package_value=Decimal(187_500_000),
-        asset_quantity=Decimal(3125),
-        snapshot_time=now,
-    )
+    await _insert_live_package(anchorage_conn, prime_id, "live-package", now)
     # A closed package's LAST row is older than the cohort and still says
     # active=true; taking "latest row per package" instead of "latest poll
     # cohort" would resurrect it (the $521M trap).
-    await insert_anchorage_snapshot(
+    await _insert_live_package(
         anchorage_conn,
-        prime_id=prime_id,
-        package_id="closed-package",
-        active=True,
+        prime_id,
+        "closed-package",
+        now - dt.timedelta(hours=2),
         exposure_value=Decimal(99_000_000),
         package_value=Decimal(120_000_000),
         asset_quantity=Decimal(2000),
-        snapshot_time=now - dt.timedelta(hours=2),
     )
 
     users_df, market_df = await PostgresPositionsReader(engine).get_protocol_data(**_ANCHORAGE)
@@ -544,16 +557,8 @@ async def test_anchorage_correction_of_the_same_poll_wins(engine, anchorage_conn
     now = dt.datetime.now(dt.timezone.utc)
     prime_id = await _seed_anchorage_prime(anchorage_conn, "anchorage_core_model", b"\xd0")
     for build_id, quantity in ((0, 3000), (1, 3125)):
-        await insert_anchorage_snapshot(
-            anchorage_conn,
-            prime_id=prime_id,
-            package_id="corrected-package",
-            active=True,
-            exposure_value=Decimal(150_000_000),
-            package_value=Decimal(187_500_000),
-            asset_quantity=Decimal(quantity),
-            snapshot_time=now,
-            build_id=build_id,
+        await _insert_live_package(
+            anchorage_conn, prime_id, "corrected-package", now, asset_quantity=Decimal(quantity), build_id=build_id
         )
 
     users_df, _ = await PostgresPositionsReader(engine).get_protocol_data(**_ANCHORAGE)
@@ -568,25 +573,15 @@ async def test_anchorage_prime_cohorts_are_isolated(engine, anchorage_conn):
     now = dt.datetime.now(dt.timezone.utc)
     first = await _seed_anchorage_prime(anchorage_conn, "anchorage_core_model", b"\xd0")
     second = await _seed_anchorage_prime(anchorage_conn, "anchorage_core_model_2", b"\xd1")
-    await insert_anchorage_snapshot(
+    await _insert_live_package(anchorage_conn, first, "first-prime-package", now - dt.timedelta(minutes=30))
+    await _insert_live_package(
         anchorage_conn,
-        prime_id=first,
-        package_id="first-prime-package",
-        active=True,
-        exposure_value=Decimal(150_000_000),
-        package_value=Decimal(187_500_000),
-        asset_quantity=Decimal(3125),
-        snapshot_time=now - dt.timedelta(minutes=30),
-    )
-    await insert_anchorage_snapshot(
-        anchorage_conn,
-        prime_id=second,
-        package_id="second-prime-package",
-        active=True,
+        second,
+        "second-prime-package",
+        now,
         exposure_value=Decimal(50_000_000),
         package_value=Decimal(62_500_000),
         asset_quantity=Decimal(1041),
-        snapshot_time=now,
     )
 
     users_df, _ = await PostgresPositionsReader(engine).get_protocol_data(**_ANCHORAGE)
@@ -597,16 +592,7 @@ async def test_anchorage_prime_cohorts_are_isolated(engine, anchorage_conn):
 async def test_anchorage_a_stale_cohort_fails_the_run(engine, anchorage_conn):
     stale = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=3)
     prime_id = await _seed_anchorage_prime(anchorage_conn, "anchorage_core_model", b"\xd0")
-    await insert_anchorage_snapshot(
-        anchorage_conn,
-        prime_id=prime_id,
-        package_id="frozen-package",
-        active=True,
-        exposure_value=Decimal(150_000_000),
-        package_value=Decimal(187_500_000),
-        asset_quantity=Decimal(3125),
-        snapshot_time=stale,
-    )
+    await _insert_live_package(anchorage_conn, prime_id, "frozen-package", stale)
     with pytest.raises(ValueError, match="frozen feed"):
         await PostgresPositionsReader(engine).get_protocol_data(**_ANCHORAGE)
 
@@ -616,6 +602,7 @@ async def test_anchorage_no_packages_fails_the_run(engine, anchorage_conn):
         await PostgresPositionsReader(engine).get_protocol_data(**_ANCHORAGE)
 
 
-async def test_anchorage_refuses_a_specific_loan_token(engine, anchorage_conn):
+async def test_anchorage_refuses_a_specific_loan_token(engine):
+    # Raised before any query, so no seeded state is involved.
     with pytest.raises(ValueError, match="LOAN_TOKEN=ALL"):
         await PostgresPositionsReader(engine).get_protocol_data(**{**_ANCHORAGE, "loan_token": "USDC"})

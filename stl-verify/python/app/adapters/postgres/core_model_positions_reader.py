@@ -162,9 +162,14 @@ def supply_prices(positions: Sequence[PositionRow]) -> dict[str, float]:
     return {p.symbol.upper(): p.price for p in positions if p.side == "supply" and p.price is not None}
 
 
-def build_market_frame(supplied_symbols: set[str], prices: dict[str, float]) -> pd.DataFrame:
+def supplied_symbols(users_df: pd.DataFrame) -> set[str]:
+    """Symbols the frame carries as collateral (``<sym>_supply`` columns)."""
+    return {c.rsplit("_", 1)[0].upper() for c in users_df.columns if c.endswith("_supply")}
+
+
+def build_market_frame(supplied: set[str], prices: dict[str, float]) -> pd.DataFrame:
     """Oracle prices for the simulated collaterals present in this market."""
-    modeled = sorted(s for s in supplied_symbols if s in MODELED_COLLATERALS)
+    modeled = sorted(s for s in supplied if s in MODELED_COLLATERALS)
     missing = [s for s in modeled if s not in prices]
     if missing:
         raise ValueError(f"no oracle price for modeled collateral(s) {missing}; refusing a partial market frame")
@@ -607,7 +612,8 @@ _ANCHORAGE_POSITIONS = text("""
     FROM anchorage_package_snapshot a
     JOIN latest_poll lp ON lp.prime_id = a.prime_id AND lp.snapshot_time = a.snapshot_time
     WHERE a.active
-    ORDER BY a.prime_id, a.package_id, a.asset_type, a.custody_type, a.processing_version DESC
+    ORDER BY a.prime_id, a.package_id, a.asset_type, a.custody_type,
+             a.snapshot_time DESC, a.processing_version DESC
 """)
 
 
@@ -642,10 +648,11 @@ def anchorage_asset_prices(rows: Sequence[Any]) -> dict[str, float]:
     return {symbol: price for symbol, (_, price) in newest.items()}
 
 
-def _warn_anchorage_threshold_disagreement(rows: Sequence[Any]) -> None:
+def _log_anchorage_thresholds(rows: Sequence[Any]) -> None:
     """The model's margin-call band is one scalar per market (MC_TRIGGER), so
     packages disagreeing on their LTV-threshold triple cannot all be simulated
-    faithfully; per-row lltv still carries each package's critical_ltv."""
+    faithfully; per-row lltv still carries each package's critical_ltv. An
+    agreeing triple is logged so it sits next to the params in the run output."""
     triples = {(float(r.margin_call_ltv), float(r.critical_ltv), float(r.margin_return_ltv)) for r in rows}
     if len(triples) > 1:
         logger.warning(
@@ -672,13 +679,12 @@ def build_anchorage_users_frame(rows: Sequence[Any]) -> pd.DataFrame:
     repeat identically on every per-collateral-asset row of a package; asset
     rows contribute their own quantity and weighted value per symbol.
     """
-    _warn_anchorage_threshold_disagreement(rows)
+    _log_anchorage_thresholds(rows)
     packages: dict[tuple[int, str], dict[str, Any]] = {}
     for r in rows:
         pkg = packages.setdefault(
             (int(r.prime_id), r.package_id),
             {
-                "package_id": r.package_id,
                 "exposure": float(r.exposure_value),
                 "package_value": float(r.package_value),
                 "current_ltv": float(r.current_ltv),
@@ -827,7 +833,7 @@ class PostgresPositionsReader:
         }
 
         users_df = build_users_frame(positions, reserve_params, loan_token)
-        supplied = {c.rsplit("_", 1)[0].upper() for c in users_df.columns if c.endswith("_supply")}
+        supplied = supplied_symbols(users_df)
         market_df = build_market_frame(supplied, supply_prices(positions))
         logger.info(
             "positions loaded from live tables: %d borrowers, %d modeled collaterals (loan_token=%s)",
@@ -866,7 +872,7 @@ class PostgresPositionsReader:
                 "refusing to value positions on a stale snapshot — is maple-graphql-indexer running?"
             )
         users_df = build_syrup_users_frame(rows, loan_token, int(pool.underlying_decimals))
-        supplied = {c.rsplit("_", 1)[0].upper() for c in users_df.columns if c.endswith("_supply")}
+        supplied = supplied_symbols(users_df)
         market_df = build_market_frame(supplied, syrup_attested_prices(rows))
         logger.info(
             "syrup positions loaded from live tables: %d loan(s) of %s, %d modeled collateral(s)",
@@ -899,7 +905,7 @@ class PostgresPositionsReader:
                 "See app/risk_engine/core_model/DATA_GAPS.md."
             )
         users_df = build_anchorage_users_frame(rows)
-        supplied = {c.rsplit("_", 1)[0].upper() for c in users_df.columns if c.endswith("_supply")}
+        supplied = supplied_symbols(users_df)
         market_df = build_market_frame(supplied, anchorage_asset_prices(rows))
         logger.info(
             "anchorage positions loaded from live tables: %d package(s), %d modeled collateral(s)",
