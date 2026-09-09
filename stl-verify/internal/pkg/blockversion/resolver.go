@@ -65,7 +65,7 @@ func NewResolver(archive outbound.ArchiveReader, archiveName string) *Resolver {
 
 func (r *Resolver) ResolveBlockVersion(ctx context.Context, blockNumber int64, blockHash common.Hash) (int, error) {
 	if archived, memoized := r.resolved[blockNumber]; memoized {
-		if err := r.requireSameBlock(blockNumber, archived, blockHash); err != nil {
+		if err := r.requireSameBlockAsProved(blockNumber, archived, blockHash); err != nil {
 			return 0, err
 		}
 		return archived.version, nil
@@ -86,6 +86,17 @@ func (r *Resolver) requireSameBlock(blockNumber int64, archived archivedBlock, b
 		return nil
 	}
 	return fmt.Errorf("block %d version %d in %s holds %s, replaying %s: %w",
+		blockNumber, archived.version, r.archiveName, archived.hash.Hex(), blockHash.Hex(), ErrArchivedBlockMismatch)
+}
+
+// requireSameBlockAsProved re-proves a memoised height: the version is true of the block
+// it was proved against, so a second, different hash at that height is the node handing
+// one run two blocks, not the archive holding another one.
+func (r *Resolver) requireSameBlockAsProved(blockNumber int64, archived archivedBlock, blockHash common.Hash) error {
+	if archived.hash == blockHash {
+		return nil
+	}
+	return fmt.Errorf("block %d version %d in %s was already proved to be %s, and the node now replays %s at that height: %w",
 		blockNumber, archived.version, r.archiveName, archived.hash.Hex(), blockHash.Hex(), ErrArchivedBlockMismatch)
 }
 

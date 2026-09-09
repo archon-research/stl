@@ -225,6 +225,32 @@ func TestResolver_SummaryReportsWhatEachVersionCovers(t *testing.T) {
 	}
 }
 
+// A memoised height is proved only for the block it was proved against, so the hash is
+// re-checked on a memo hit too: answering a second, different block at that height with
+// the first one's version would file its rows under a block that never happened. The
+// failure is not the archive holding another block — it is the node handing this run two.
+func TestResolver_ReProvesAMemoizedHeightAgainstTheBlockBeingReplayed(t *testing.T) {
+	archive := archiveHolding(map[int64]archivedHeight{archiveHeight: {version: 1, hash: canonicalHash}})
+	resolver := NewResolver(archive, archiveName)
+	if _, err := resolver.ResolveBlockVersion(context.Background(), archiveHeight, canonicalHash); err != nil {
+		t.Fatalf("ResolveBlockVersion: %v", err)
+	}
+
+	_, err := resolver.ResolveBlockVersion(context.Background(), archiveHeight, orphanedHash)
+
+	if !errors.Is(err, ErrArchivedBlockMismatch) {
+		t.Fatalf("error = %v, want ErrArchivedBlockMismatch", err)
+	}
+	if want := []int64{archiveHeight}; !slices.Equal(archive.asked, want) {
+		t.Errorf("archive asked about %v, want the memoised height re-proved without another read %v", archive.asked, want)
+	}
+	for _, want := range []string{"already proved", canonicalHash.Hex(), orphanedHash.Hex()} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to name %q", err, want)
+		}
+	}
+}
+
 // A mismatch is the one failure an operator clears by repairing the archive and starting
 // a new run, so the height it failed at must not stay answered from the memo: the
 // repaired archive is what the next call has to read.
