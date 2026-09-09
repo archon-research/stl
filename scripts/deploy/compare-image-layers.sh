@@ -130,14 +130,17 @@ command -v aws >/dev/null || die "the aws CLI is required to read ECR image mani
 # generated from k8s/image-roster.txt by that script, and its --check mode is
 # what actually gates deploy-prod. Known divergence: this parser strips only a
 # leading/trailing quote char from a value and does not strip a trailing `#
-# comment`, while render-overlay-images.sh's val() does. A hand-pinned entry
-# like `newTag: "<sha>"  # pinned per ARCT-436` -- a real shape, since
-# check-overlay-tag-consistency.sh's own comment expects hand-pins to carry an
-# explaining comment -- parses clean there and comes out here as the sha with
-# the trailing `"  # pinned per ARCT-436` glued on. Confirmed by running both
-# awk programs against that exact line. That candidate/pinned tag then fails to
-# resolve in ECR, which this script reports as UNKNOWN rather than a wrong
-# verdict, but it is a real parsing bug worth fixing (not fixed here).
+# comment`, while both other parsers do: render-overlay-images.sh anchors its
+# newTag sed with `"?[[:space:]]*(#.*)?$`, and check-overlay-tag-consistency.sh
+# strips with `s/[[:space:]]+#.*$//`. A hand-pinned entry like
+# `newTag: "<sha>"  # pinned per ARCT-436` parses clean in both of those and
+# comes out here as the sha with `"  # pinned per ARCT-436` glued on. Verified
+# by running all three against that exact line.
+#
+# It fails safe: the mangled tag does not resolve in ECR, so this script says
+# UNKNOWN rather than giving a wrong verdict, and the bot-written block carries
+# no comments today. Tracked as VEC-754 (not fixed here -- unifying three
+# parsers touches the deploy path, which a log-only measurement should not).
 PAIRS_FILE="$(mktemp)"
 ROWS_FILE="$(mktemp)"
 trap 'rm -f "$PAIRS_FILE" "$ROWS_FILE"' EXIT
