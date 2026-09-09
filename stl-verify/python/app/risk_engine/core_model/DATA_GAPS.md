@@ -231,19 +231,32 @@ Known deviations (also in the reader's module docstring):
 - BA's `interest_rate` / `loan_token_symbol` / `collateral_token_symbol`
   parquet columns are skipped — nothing in the model reads them.
 
-**Why the syrup flags are still parquet:** the CORE **price reader** has no
-path for the syrup collaterals yet — XRP/HYPE live in the new `asset_price`
-table (token-less assets; backfilled in staging, see §1), and BTC/ETH need
-the WBTC/WETH proxy series (approved in the 17 Aug #at_stl thread). Flip
-`POSITION_SOURCE`/`PRICE_SOURCE`/`ORDERBOOK_SOURCE` together once that
-reader path exists, then compute a fully-live CRR against staging.
+**Syrup go-live (9 Sep 2026):** all three `*_SOURCE` flags flipped to
+`postgres` in `market_configs.json`. The price reader gained the two missing
+paths: token-less symbols (XRP, HYPE) read the CoinGecko series in
+`asset_price` (backfilled in staging, see §1), and native BTC/ETH proxy the
+WBTC/WETH oracle series (approved in the 17 Aug #at_stl thread; a market
+holding both BTC and WBTC gets two identical columns, which the copula's
+eigenvalue flooring absorbs). The order-book reader gained the XRP and HYPE
+venue books. Fully-live CRRs computed end to end against staging (9 Sep,
+N_MC=100, SEED=0): syrup_usdc crr_el 1.75%, syrup_usdt 2.77% (parquet
+same-code baselines: 6.04% / 9.77% — not expected to reconcile, the live
+borrower book and price regime differ from BA's June snapshot, same as the
+Morpho scope note above).
+
+**Prod lags this config** (no XRP/HYPE backfill in `asset_price`, order books
+BTC/ETH only), so the prod overlay pins both syrup markets back to parquet
+with per-market env vars (`CORE_MODEL_SYRUP_USDC_PRICE_SOURCE=parquet`, ×6 —
+`k8s/overlays/prod/configmaps.yaml`). To take prod live: run the
+`OffchainPriceBackfill` workflow there (§1), mirror the staging order-book
+symbol expansion in the prod configmaps (§2), then delete the six pin lines.
 
 Still parquet:
 
 | Market group | Live source | Notes |
 |---|---|---|
-| Syrup (2) | maple tables | **positions reader done (8 Sep 2026)**; blocked on the price-reader path for XRP/HYPE (`asset_price`) and BTC/ETH (WBTC/WETH proxies) |
-| Anchorage | anchorage-indexer tables | indexed; blocked on native-BTC price (no on-chain oracle) |
+| Syrup (2) | maple tables + asset_price | **fully live in staging (9 Sep 2026)**; prod pinned to parquet in the overlay until its data catches up |
+| Anchorage | anchorage-indexer tables | indexed; blocked on native-BTC price (no on-chain oracle — could now reuse the BTC→WBTC proxy path) |
 
 ---
 

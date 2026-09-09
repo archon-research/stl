@@ -898,3 +898,14 @@ data:
   # Same value as staging; the deployment's memory limit is sized for it — raise
   # both together (k8s/base/core-model-runner/deployment.yaml).
   CORE_MODEL_N_MC: "10000"
+  # market_configs.json runs the Syrup markets fully live, which matches
+  # staging's data but not prod's yet: prod has no XRP/HYPE price backfill in
+  # asset_price, and the prod order-book configmaps still index BTC/ETH only.
+  # Pin the two markets back to parquet here (per-market override, most
+  # specific wins) until both land; then delete these six lines.
+  CORE_MODEL_SYRUP_USDC_POSITION_SOURCE: "parquet"
+  CORE_MODEL_SYRUP_USDC_PRICE_SOURCE: "parquet"
+  CORE_MODEL_SYRUP_USDC_ORDERBOOK_SOURCE: "parquet"
+  CORE_MODEL_SYRUP_USDT_POSITION_SOURCE: "parquet"
+  CORE_MODEL_SYRUP_USDT_PRICE_SOURCE: "parquet"
+  CORE_MODEL_SYRUP_USDT_ORDERBOOK_SOURCE: "parquet"
