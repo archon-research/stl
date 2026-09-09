@@ -447,7 +447,7 @@ func (r *MorphoRepository) assertionAppends(ctx context.Context, tx pgx.Tx, adap
 // for a future family would otherwise flip a classified adapter to 99, and UPDATE is
 // revoked on the table, so that row would be its classification forever.
 func reclassifies(known, asserted *entity.MorphoAdapterType) bool {
-	if asserted == nil || (known != nil && *asserted == entity.MorphoAdapterTypeUnknown) {
+	if asserted == nil || *asserted == entity.MorphoAdapterTypeUnknown {
 		return false
 	}
 	return known == nil || *known != *asserted
