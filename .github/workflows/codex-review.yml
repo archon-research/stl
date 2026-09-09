@@ -172,16 +172,19 @@ jobs:
           set -euo pipefail
           BASE_SHA="$(git merge-base "origin/${BASE_REF}" "${HEAD_SHA}")"
 
-          # Standing instructions live in the prompt file; only per-run scope is
-          # appended. Title and body are quoted as data — their author is the
-          # person under review — and closing tags are defused so a literal
-          # </pr-body> can't end the untrusted block and speak with the prompt's
-          # own voice. This step holds no GitHub token for the same reason.
+          # Standing instructions come from the base branch, which the PR under
+          # review cannot write: on the branch, the lenses and the evidence bar
+          # are the author's to edit. Only per-run scope is appended, and a
+          # prompt change takes effect once it merges. Title and body are quoted
+          # as data — their author is the person under review — and closing tags
+          # are defused so a literal </pr-body> can't end the untrusted block and
+          # speak with the prompt's own voice. This step holds no GitHub token
+          # for the same reason.
           defuse() { printf '%s' "$1" | sed 's|</pr-|<\\/pr-|gI'; }
           PR_TITLE_SAFE="$(defuse "${PR_TITLE}")"
           PR_BODY_SAFE="$(defuse "${PR_BODY}")"
           {
-            cat .github/codex/prompts/review.md
+            git show "origin/${BASE_REF}:.github/codex/prompts/review.md"
             printf '\n## This run\n\n'
             printf 'Pull request: #%s\n' "${PR_NUMBER}"
             printf 'Diff under review: `git diff %s..%s`\n\n' "${BASE_SHA}" "${HEAD_SHA}"
