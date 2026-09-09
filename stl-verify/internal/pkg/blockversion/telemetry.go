@@ -1,10 +1,8 @@
 // telemetry.go instruments the resolver.
 //
-// block_version.resolved.total: heights a replay asked the raw archive about, by outcome.
-// The four failing and succeeding outcomes need different responses — an archive behind
-// the head clears itself, a hole is republished, a mismatch is investigated, a read
-// failure is the bucket or the network — so a red run's cause is readable without pulling
-// its logs, and the sum accounts for every call the run made.
+// block_version.resolved.total: heights a replay asked the raw archive about, by outcome, so
+// a red run's cause is readable without its logs. One of the five values is ambiguous alone:
+// `not_archived` is a lagging head that clears itself or a hole below it, per the error line.
 package blockversion
 
 import (
