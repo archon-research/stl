@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
 
@@ -42,6 +43,7 @@ var ErrArchivedBlockMismatch = errors.New("the raw archive holds another block a
 type Resolver struct {
 	archive     outbound.ArchiveReader
 	archiveName string
+	telemetry   telemetry
 
 	resolved map[int64]archivedBlock
 }
@@ -55,15 +57,28 @@ type archivedBlock struct {
 
 // NewResolver takes the archive to ask and the name to call it in errors and logs — the
 // bucket URL for the S3 one, so an operator is told what to repair.
-func NewResolver(archive outbound.ArchiveReader, archiveName string) *Resolver {
+func NewResolver(archive outbound.ArchiveReader, archiveName string, logger *slog.Logger) *Resolver {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Resolver{
 		archive:     archive,
 		archiveName: archiveName,
+		telemetry:   newTelemetry(logger),
 		resolved:    map[int64]archivedBlock{},
 	}
 }
 
 func (r *Resolver) ResolveBlockVersion(ctx context.Context, blockNumber int64, blockHash common.Hash) (int, error) {
+	_, memoized := r.resolved[blockNumber]
+	version, err := r.answer(ctx, blockNumber, blockHash)
+	r.telemetry.record(ctx, outcomeOf(memoized, err))
+	return version, err
+}
+
+// answer proves the archive's block at the height is the one being replayed, reading the
+// archive unless this run already proved that height.
+func (r *Resolver) answer(ctx context.Context, blockNumber int64, blockHash common.Hash) (int, error) {
 	if archived, memoized := r.resolved[blockNumber]; memoized {
 		if err := r.requireSameBlockAsProved(blockNumber, archived, blockHash); err != nil {
 			return 0, err
@@ -79,6 +94,20 @@ func (r *Resolver) ResolveBlockVersion(ctx context.Context, blockNumber int64, b
 	}
 	r.remember(blockNumber, archived)
 	return archived.version, nil
+}
+
+func outcomeOf(memoized bool, err error) resolveOutcome {
+	switch {
+	case errors.Is(err, ErrHeightNotArchived):
+		return outcomeNotArchived
+	case errors.Is(err, ErrArchivedBlockMismatch):
+		return outcomeMismatch
+	case err != nil:
+		return outcomeReadFailed
+	case memoized:
+		return outcomeMemo
+	}
+	return outcomeArchive
 }
 
 func (r *Resolver) requireSameBlock(blockNumber int64, archived archivedBlock, blockHash common.Hash) error {

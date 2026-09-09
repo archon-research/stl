@@ -222,7 +222,7 @@ type replayReads struct {
 func (s *Service) newReplayReads() *replayReads {
 	return &replayReads{
 		timestamps: blocktime.New(s.chain),
-		versions:   blockversion.NewResolver(s.archive, s.archiveName),
+		versions:   blockversion.NewResolver(s.archive, s.archiveName, s.logger),
 	}
 }
 
