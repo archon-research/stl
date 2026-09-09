@@ -225,6 +225,51 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: base-sparklend-position-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://base-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "8453"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in the infrastructure repo (ARCT-213).
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: optimism-sparklend-position-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://opt-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "10"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in the infrastructure repo (ARCT-213).
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arbitrum-sparklend-position-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://arb-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "42161"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in the infrastructure repo (ARCT-213).
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: avalanche-allocation-tracker-config
 data:
   AWS_REGION: "eu-west-1"

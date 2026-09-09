@@ -49,10 +49,12 @@ type ContractWithBlock struct {
 type PoolDataProviderHistory []ContractWithBlock
 
 type ProtocolConfig struct {
-	Name                  string
-	Slug                  string
-	ProtocolType          string
-	PoolAddress           ContractWithBlock
+	Name         string
+	Slug         string
+	ProtocolType string
+	PoolAddress  ContractWithBlock
+	// ActiveAtBlock is documentation only: position reads call this address at
+	// whatever block they are given, so a read below it reverts (backfill only).
 	UIPoolDataProvider    ContractWithBlock
 	PoolAddressesProvider ContractWithBlock
 	ProtocolVersion       ProtocolVersion
@@ -174,6 +176,93 @@ var protocolRegistry = map[ProtocolKey]ProtocolConfig{
 			{Address: common.HexToAddress("0x243Aa95cAC2a25651eda86e80bEe66114413c43b"), ActiveAtBlock: 40714595},
 		},
 	},
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// Arbitrum One (chainID 42161)
+	// ═══════════════════════════════════════════════════════════════════════════
+
+	// Aave V3 Arbitrum - Pool created at block 7742429
+	// PoolDataProvider rotated 6 times, via PoolDataProviderUpdated not AddressSet
+	// Source: https://github.com/bgd-labs/aave-address-book (AaveV3Arbitrum)
+	{42161, common.HexToAddress("0x794a61358D6845594F94dc1DB02A252b5b4814aD")}: {
+		Name:                  "Aave V3 Arbitrum",
+		Slug:                  "aave_v3_arbitrum",
+		ProtocolType:          "lending",
+		PoolAddress:           ContractWithBlock{Address: common.HexToAddress("0x794a61358D6845594F94dc1DB02A252b5b4814aD"), ActiveAtBlock: 7742429},
+		UIPoolDataProvider:    ContractWithBlock{Address: common.HexToAddress("0x91E04cf78e53aEBe609e8a7f2003e7EECD743F2B"), ActiveAtBlock: 451098138},
+		PoolAddressesProvider: ContractWithBlock{Address: common.HexToAddress("0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb"), ActiveAtBlock: 7736680},
+		ProtocolVersion:       ProtocolVersionAaveV3,
+		PoolDataProviderHistory: PoolDataProviderHistory{
+			{Address: common.HexToAddress("0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654"), ActiveAtBlock: 7736699},
+			{Address: common.HexToAddress("0x6b4E260b765B3cA1514e618C0215A6B7839fF93e"), ActiveAtBlock: 89267099},
+			{Address: common.HexToAddress("0x7deEB8aCE4220643D8edeC871a23807E4d006eE5"), ActiveAtBlock: 236626700},
+			{Address: common.HexToAddress("0x7F23D86Ee20D869112572136221e173428DD740B"), ActiveAtBlock: 261667030},
+			{Address: common.HexToAddress("0x14496b405D62c24F91f04Cda1c69Dc526D56fDE5"), ActiveAtBlock: 309447822},
+			{Address: common.HexToAddress("0x243Aa95cAC2a25651eda86e80bEe66114413c43b"), ActiveAtBlock: 353846925},
+		},
+	},
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// OP Mainnet (chainID 10)
+	// ═══════════════════════════════════════════════════════════════════════════
+
+	// Aave V3 Optimism - Pool created at block 4365693
+	// PoolDataProvider rotated 6 times, via PoolDataProviderUpdated not AddressSet
+	// Source: https://github.com/bgd-labs/aave-address-book (AaveV3Optimism)
+	{10, common.HexToAddress("0x794a61358D6845594F94dc1DB02A252b5b4814aD")}: {
+		Name:                  "Aave V3 Optimism",
+		Slug:                  "aave_v3_optimism",
+		ProtocolType:          "lending",
+		PoolAddress:           ContractWithBlock{Address: common.HexToAddress("0x794a61358D6845594F94dc1DB02A252b5b4814aD"), ActiveAtBlock: 4365693},
+		UIPoolDataProvider:    ContractWithBlock{Address: common.HexToAddress("0x68100bD5345eA474D93577127C11F39FF8463e93"), ActiveAtBlock: 150123046},
+		PoolAddressesProvider: ContractWithBlock{Address: common.HexToAddress("0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb"), ActiveAtBlock: 4365470},
+		ProtocolVersion:       ProtocolVersionAaveV3,
+		PoolDataProviderHistory: PoolDataProviderHistory{
+			{Address: common.HexToAddress("0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654"), ActiveAtBlock: 4365508},
+			{Address: common.HexToAddress("0xd9Ca4878dd38B021583c1B669905592EAe76E044"), ActiveAtBlock: 97221914},
+			{Address: common.HexToAddress("0x7deEB8aCE4220643D8edeC871a23807E4d006eE5"), ActiveAtBlock: 123246825},
+			{Address: common.HexToAddress("0x7F23D86Ee20D869112572136221e173428DD740B"), ActiveAtBlock: 126396433},
+			{Address: common.HexToAddress("0x14496b405D62c24F91f04Cda1c69Dc526D56fDE5"), ActiveAtBlock: 132405959},
+			{Address: common.HexToAddress("0x243Aa95cAC2a25651eda86e80bEe66114413c43b"), ActiveAtBlock: 137977405},
+		},
+	},
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// Base (chainID 8453)
+	// ═══════════════════════════════════════════════════════════════════════════
+
+	// Aave V3 Base - Pool created at block 2357134, its own address rather than
+	// the CREATE2 0x794a61... that Arbitrum/Optimism/Avalanche share.
+	// PoolDataProvider rotated 5 times, via PoolDataProviderUpdated not AddressSet
+	// SparkLend's Ethereum PoolAddressesProvider address also has unrelated code
+	// here; it reverts on getMarketId/getPool, so Base gets no SparkLend entry.
+	// Source: https://github.com/bgd-labs/aave-address-book (AaveV3Base)
+	{8453, common.HexToAddress("0xA238Dd80C259a72e81d7e4664a9801593F98d1c5")}: {
+		Name:                  "Aave V3 Base",
+		Slug:                  "aave_v3_base",
+		ProtocolType:          "lending",
+		PoolAddress:           ContractWithBlock{Address: common.HexToAddress("0xA238Dd80C259a72e81d7e4664a9801593F98d1c5"), ActiveAtBlock: 2357134},
+		UIPoolDataProvider:    ContractWithBlock{Address: common.HexToAddress("0x0C6BC4a12039788be08F87e87Cff87FEDbd1D386"), ActiveAtBlock: 44526436},
+		PoolAddressesProvider: ContractWithBlock{Address: common.HexToAddress("0xe20fCBdBfFC4Dd138cE8b2E6FBb6CB49777ad64D"), ActiveAtBlock: 2357105},
+		ProtocolVersion:       ProtocolVersionAaveV3,
+		PoolDataProviderHistory: PoolDataProviderHistory{
+			{Address: common.HexToAddress("0x2d8A3C5677189723C4cB8873CfC9C8976FDF38Ac"), ActiveAtBlock: 2357134},
+			{Address: common.HexToAddress("0x793177a6Cf520C7fE5B2E45660EBB48132184BBC"), ActiveAtBlock: 17651562},
+			{Address: common.HexToAddress("0xd82a47fdebB5bf5329b09441C3DaB4b5df2153Ad"), ActiveAtBlock: 20801170},
+			{Address: common.HexToAddress("0xC4Fcf9893072d61Cc2899C0054877Cb752587981"), ActiveAtBlock: 26810726},
+			{Address: common.HexToAddress("0x0F43731EB8d45A581f4a36DD74F5f358bc90C73A"), ActiveAtBlock: 32382140},
+		},
+	},
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// Unichain (chainID 130) - deliberately empty
+	// ═══════════════════════════════════════════════════════════════════════════
+	//
+	// Neither Aave V3 nor SparkLend is deployed on Unichain (verified 2026-09-08):
+	// aave-address-book has no AaveV3Unichain, spark-address-registry's Unichain.sol
+	// declares PSM3/ALM/SSR but no POOL, and a chain-wide eth_getLogs sweep over the
+	// Aave-family topics found only an abandoned unbranded fork (~$300 TVL).
+	// Revisit if Aave launches on Unichain (ARCT-213).
 }
 
 func init() {

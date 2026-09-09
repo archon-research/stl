@@ -1,6 +1,7 @@
 package blockchain
 
 import (
+	"fmt"
 	"maps"
 	"testing"
 
@@ -165,6 +166,33 @@ func getProtocolRegistry() map[ProtocolKey]ProtocolConfig {
 	registry := make(map[ProtocolKey]ProtocolConfig, len(protocolRegistry))
 	maps.Copy(registry, protocolRegistry)
 	return registry
+}
+
+// TestProtocolRegistryInvariants guards the hand-maintained registry against the
+// copy-paste mistakes a new chain entry invites. Sortedness is covered by
+// TestProtocolRegistryPoolDataProviderHistoryIsSorted.
+func TestProtocolRegistryInvariants(t *testing.T) {
+	slugOwner := make(map[string]ProtocolKey, len(protocolRegistry))
+
+	for key, config := range getProtocolRegistry() {
+		id := fmt.Sprintf("chainID=%d pool=%s", key.ChainID, key.PoolAddress.Hex())
+
+		if config.PoolAddress.Address != key.PoolAddress {
+			t.Errorf("%s: PoolAddress.Address = %s, want the map key's pool address", id, config.PoolAddress.Address.Hex())
+		}
+		if len(config.PoolDataProviderHistory) == 0 {
+			t.Errorf("%s: empty PoolDataProviderHistory", id)
+		}
+
+		switch other, taken := slugOwner[config.Slug]; {
+		case config.Slug == "":
+			t.Errorf("%s: empty Slug", id)
+		case taken:
+			t.Errorf("%s: Slug %q already used by chainID=%d pool=%s", id, config.Slug, other.ChainID, other.PoolAddress.Hex())
+		default:
+			slugOwner[config.Slug] = key
+		}
+	}
 }
 
 func TestProtocolRegistryPoolDataProviderHistoryIsSorted(t *testing.T) {

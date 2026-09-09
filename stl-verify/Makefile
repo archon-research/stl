@@ -372,6 +372,13 @@ e2e-real-blocks:
 	[ -n "$$ALCHEMY_API_KEY" ] || { echo "ERROR: ALCHEMY_API_KEY is empty; put it in ../.env.secrets"; exit 1; }; \
 	E2E_BLOCKS="$(BLOCKS)" go test -tags=integration,e2e -run TestE2E_RealBlocks -v -timeout=25m ./cmd/workers/morpho-indexer/
 
+# Spot-check the registered L2 Aave V3 reserve facts against the real per-chain RPC.
+# Needs ALCHEMY_API_KEY in ../.env.secrets.
+e2e-real-reserve-facts:
+	@set -a; if [ -f ../.env.secrets ]; then . ../.env.secrets; fi; set +a; \
+	[ -n "$$ALCHEMY_API_KEY" ] || { echo "ERROR: ALCHEMY_API_KEY is empty; put it in ../.env.secrets"; exit 1; }; \
+	go test -tags=integration,e2e -run TestRealReserveFacts_L2 -v -timeout=10m ./internal/pkg/aavelike/
+
 # Install development tools
 tools:
 	@echo "==> Installing development tools..."
