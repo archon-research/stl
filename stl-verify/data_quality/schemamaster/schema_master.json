@@ -1347,6 +1347,10 @@
       "type": "derived",
       "owner": "prime"
     },
+    "position_current": {
+      "type": "derived",
+      "owner": "prime"
+    },
     "anchorage_operation": {
       "type": "raw_pipeline",
       "owner": "prime",

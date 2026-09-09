@@ -162,6 +162,8 @@ func loginRoleDSN(t *testing.T, pool *pgxpool.Pool) string {
 // `GRANT INSERT, UPDATE` form; aligning them is a follow-up.
 var triggerOnlyCacheTables = []string{
 	"allocation_position_current",
+	// VEC-409: written only by its SECURITY DEFINER trigger and rebuild_position_current().
+	"position_current",
 	"morpho_market_position_current",
 }
 
