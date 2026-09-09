@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"maps"
 	"math/big"
 	"slices"
@@ -572,24 +571,6 @@ func TestProcessBlockEvent_VaultDiscovery_V2_CountsObservationsByTypeAndProvenan
 	}
 }
 
-func warnsContaining(h *capturingHandler, sub string) []map[string]string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	var found []map[string]string
-	for _, r := range h.records {
-		if r.Level != slog.LevelWarn || !strings.Contains(r.Message, sub) {
-			continue
-		}
-		attrs := map[string]string{}
-		r.Attrs(func(a slog.Attr) bool {
-			attrs[a.Key] = a.Value.String()
-			return true
-		})
-		found = append(found, attrs)
-	}
-	return found
-}
-
 func TestProcessBlockEvent_VaultDiscovery_V2_LogsTheObservationsTheEnumerationAppends(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -634,7 +615,7 @@ func TestProcessBlockEvent_VaultDiscovery_V2_LogsTheObservationsTheEnumerationAp
 					},
 				}
 			}
-			got := warnsContaining(logs, "the log did not already give this answer")
+			got := logs.warnsContaining("the log did not already give this answer")
 			if len(got) != len(wantWarns) {
 				t.Fatalf("WARNs = %d %v, want %d %v", len(got), got, len(wantWarns), wantWarns)
 			}
