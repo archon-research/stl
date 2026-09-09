@@ -339,12 +339,10 @@ groups:
         # without erroring, and change-only writes mean a frozen upstream
         # produces no rows anyway.
         #
-        # Gauge `oracle.unit.last_success_timestamp_seconds` (OTel) ->
-        # Prometheus `oracle_unit_last_success_timestamp_seconds`, set by the
-        # worker after every successful per-unit pass, written rows or not, and
-        # baselined per unit at startup: a unit that never succeeds still
-        # creates the series and goes stale one threshold after a deploy, and a
-        # restart re-arms the alert instead of silencing it. Because the gauge
+        # Counter `oracle.unit.passes` (OTel) -> Prometheus
+        # `oracle_unit_passes_total`, incremented after every successful
+        # per-unit pass, written rows or not, and seeded to 0 per unit at load
+        # so a unit that never succeeds is still observable. Because it
         # advances regardless of whether the price CHANGED, the signal is "the
         # worker stopped successfully processing this unit", NOT "the upstream
         # feed stopped updating". One tight generic threshold therefore works
@@ -353,6 +351,26 @@ groups:
         # of consecutive failure (~150 mainnet blocks at ~12s) is decisively
         # wedged, in the same spirit as the 15m Stalled rule but with slack for
         # SQS redelivery/backoff bursts.
+        #
+        # A counter, and not the `oracle_unit_last_success_timestamp_seconds`
+        # gauge this rule used to read (VEC-750). That gauge is baselined to the
+        # worker's own start, so its value says "this process started recently",
+        # not "this unit succeeded recently": a worker restarting more often
+        # than the threshold refreshed it before the threshold was ever crossed,
+        # and the rule could not fire however broken the unit was. No query
+        # fixes that — a refreshed baseline is indistinguishable from a genuine
+        # success at that instant, so the information is gone before PromQL sees
+        # it. A counter reset IS visible to Prometheus, so seeding to 0 keeps
+        # "no pass yet" observable across a restart. The gauge is still exported
+        # as the last-success readout for diagnosis; nothing alerts on it.
+        #
+        # Two legs exist for that survival. `sum by` drops k8s_pod_name, so a
+        # pod REPLACEMENT is not a fresh series from the rule's point of view:
+        # the old pod's samples stay in the window and increase() bridges the
+        # reset. The `offset 30m` leg keeps a cold start quiet — a unit whose
+        # series did not exist 30m ago cannot match, so a first deploy gets a
+        # full window to complete its first pass before the rule engages. Do
+        # not drop either one.
         #
         # Gated on the worker still consuming blocks so a whole-worker STALL
         # stays VectorOracleIndexerStalled's page instead of also firing once
@@ -372,17 +390,16 @@ groups:
         # the fluid-vault Stalled zero-fill note), and a unit dropped from the
         # registry stops exporting its series entirely, which an instant
         # vector cannot age. Both need follow-up (kube-state zero-fill on
-        # Stalled / an expected-units signal). Also: startup re-baselining
-        # means a worker restarting more often than every ~30m keeps a
-        # never-succeeding unit under threshold forever (an isolated restart
-        # merely delays firing by ~35m).
+        # Stalled / an expected-units signal).
+        #
         expr: |
-          (
-            time()
-            - max by (chain, cluster, oracle_name) (
-                oracle_unit_last_success_timestamp_seconds{k8s_namespace_name="vector"}
-              )
-          ) > 1800
+          sum by (chain, cluster, oracle_name) (
+            increase(oracle_unit_passes_total{k8s_namespace_name="vector"}[30m])
+          ) == 0
+          and on (chain, cluster, oracle_name)
+          sum by (chain, cluster, oracle_name) (
+            oracle_unit_passes_total{k8s_namespace_name="vector"} offset 30m
+          )
           and on (chain, cluster)
           sum by (chain, cluster) (
             rate(oracle_blocks_processed_total{k8s_namespace_name="vector"}[5m])
