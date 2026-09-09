@@ -1437,26 +1437,7 @@ func TestSweep_FirstSweepClosesTheKeyOlderTrackersWroteOn(t *testing.T) {
 	if len(closing) != 1 {
 		t.Fatalf("the first sweep emitted %d closing snapshots, want 1", len(closing))
 	}
-	got := closing[0]
-	if got.Entry.ContractAddress != groveJAAAVault || got.Entry.WalletAddress != groveProxy {
-		t.Errorf("closing row on %s/%s, want the vault entry %s/%s",
-			got.Entry.ContractAddress.Hex(), got.Entry.WalletAddress.Hex(), groveJAAAVault.Hex(), groveProxy.Hex())
-	}
-	if got.Balance == nil || got.Balance.Sign() != 0 || got.ScaledBalance == nil || got.ScaledBalance.Sign() != 0 {
-		t.Errorf("balances = (%v, %v), want (0, 0)", got.Balance, got.ScaledBalance)
-	}
-	if got.UnderlyingValue != nil {
-		t.Errorf("UnderlyingValue = %v, want nil", got.UnderlyingValue)
-	}
-	if got.ShareToken == nil || *got.ShareToken != groveJAAAShare {
-		t.Errorf("ShareToken = %v, want the share %s — the row reads its metadata there", got.ShareToken, groveJAAAShare.Hex())
-	}
-	if got.Direction != DirectionSweep || got.TxAmount == nil || got.TxAmount.Sign() != 0 {
-		t.Errorf("trigger = (%q, %v), want (%q, 0)", got.Direction, got.TxAmount, DirectionSweep)
-	}
-	if got.ChainID != 1 || got.BlockNumber != f.block || got.BlockVersion != 0 {
-		t.Errorf("block fields = (%d, %d, %d), want (1, %d, 0)", got.ChainID, got.BlockNumber, got.BlockVersion, f.block)
-	}
+	assertClosingRow(t, closing[0], groveJAAAVault, groveJAAAShare, f.block)
 
 	live := f.snapshotFor(groveJAAAVault, groveProxy)
 	if live == nil || live.ClosesEntryKey || live.Balance.Cmp(big.NewInt(500)) != 0 {
@@ -1465,6 +1446,33 @@ func TestSweep_FirstSweepClosesTheKeyOlderTrackersWroteOn(t *testing.T) {
 	if live.ShareToken == nil || *live.ShareToken != groveJAAAShare {
 		t.Errorf("the live row's ShareToken = %v, want the share %s it keys on", live.ShareToken, groveJAAAShare.Hex())
 	}
+}
+
+// assertClosingRow checks the shape closingSnapshot promises: the vault entry's key,
+// every amount zero, the share kept for metadata, and the sweep's block.
+func assertClosingRow(t *testing.T, got *PositionSnapshot, vault, share common.Address, block int64) {
+	t.Helper()
+	if got.Entry.ContractAddress != vault || got.Entry.WalletAddress != groveProxy {
+		t.Errorf("closing row on %s/%s, want the vault entry %s/%s",
+			got.Entry.ContractAddress.Hex(), got.Entry.WalletAddress.Hex(), vault.Hex(), groveProxy.Hex())
+	}
+	if !isZero(got.Balance) || !isZero(got.ScaledBalance) || got.UnderlyingValue != nil {
+		t.Errorf("amounts = (%v, %v, %v), want (0, 0, nil)", got.Balance, got.ScaledBalance, got.UnderlyingValue)
+	}
+	if got.ShareToken == nil || *got.ShareToken != share {
+		t.Errorf("ShareToken = %v, want the share %s — the row reads its metadata there", got.ShareToken, share.Hex())
+	}
+	if got.Direction != DirectionSweep || !isZero(got.TxAmount) {
+		t.Errorf("trigger = (%q, %v), want (%q, 0)", got.Direction, got.TxAmount, DirectionSweep)
+	}
+	if got.ChainID != 1 || got.BlockNumber != block || got.BlockVersion != 0 {
+		t.Errorf("block fields = (%d, %d, %d), want (1, %d, 0)", got.ChainID, got.BlockNumber, got.BlockVersion, block)
+	}
+}
+
+// isZero is an explicit zero, not a missing amount.
+func isZero(amount *big.Int) bool {
+	return amount != nil && amount.Sign() == 0
 }
 
 // TestSweep_ClosesEveryVaultFrontedEntryOnOneWallet: the stale rows are per entry,
