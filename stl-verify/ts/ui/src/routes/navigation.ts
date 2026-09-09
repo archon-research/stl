@@ -56,7 +56,9 @@ export function useViewNavigation(): (target: ViewNavigation) => void {
       void navigate({
         ...viewRoute(view, primeKey),
         search: (previous) => ({ ...previous, ...patch, prime }),
-        replace,
+        // Absent means "the router's default", which is what a caller
+        // that said nothing meant.
+        ...(replace !== undefined && { replace }),
       });
     },
     [navigate],

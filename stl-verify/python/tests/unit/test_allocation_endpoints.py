@@ -995,6 +995,46 @@ def test_list_allocation_activity_hides_synthetic_sweep_tx_hash():
     assert response.json()["data"][0]["tx_hash"] is None
 
 
+def test_list_allocation_activity_refuses_a_direction_outside_the_checked_set():
+    """`action_type` is a `Literal`, so an out-of-set direction fails loudly.
+
+    Unreachable in practice — `allocation_position.direction` carries
+    `CHECK (direction IN ('in', 'out', 'sweep'))`. Pinned because the refusal is
+    a deliberate choice, and because it lands earlier than one might expect: the
+    entity is a plain dataclass that validates nothing, so the row travels as
+    far as the response model's own constructor in the handler, which raises
+    before FastAPI reaches its response-serialization step.
+    """
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    service.list_allocation_activity.return_value = [
+        AllocationActivityEvent(
+            chain_id=1,
+            prime_address=_VALID_ADDR,
+            prime_name="spark",
+            protocol_name="SparkLend",
+            token_id=1,
+            token_symbol="spUSDC",
+            # Deliberately out of set: the point of the test. The dataclass does
+            # not validate, so only the response model can refuse it.
+            action_type="SWEEP",  # ty: ignore[invalid-argument-type]
+            tx_amount=Decimal("0"),
+            balance=Decimal("200.0"),
+            tx_hash="0x" + "cd" * 32,
+            log_index=0,
+            block_number=100,
+            block_version=0,
+            created_at=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+        )
+    ]
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    with pytest.raises(ValidationError):
+        client.get("/v1/allocations/activity")
+
+
 def test_list_allocation_activity_returns_200_empty_for_unknown_valid_prime_id():
     """Valid-format prime_id with no rows is a filter miss, not a missing resource → 200 []."""
     from app.api.v1 import allocations
