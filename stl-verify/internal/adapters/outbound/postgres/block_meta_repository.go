@@ -103,7 +103,7 @@ func (r *BlockMetaRepository) OpenWorkList(ctx context.Context, chainID int64) (
 			args = []any{chainID}
 		}
 		if _, err := tx.Exec(ctx, stmt, args...); err != nil {
-			_ = tx.Rollback(ctx)
+			rollback(ctx, tx, r.logger)
 			conn.Release()
 			return nil, fmt.Errorf("materialize the work list: %w", err)
 		}

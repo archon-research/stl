@@ -24,7 +24,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// maxBatchSize bounds rows per Upsert transaction. See the clamp in New for the measurement behind it.
+// maxBatchSize bounds rows per Upsert transaction. See the clamp in New for why it is bounded.
 const maxBatchSize = 5000
 
 // Config for a single-chain run.
@@ -62,15 +62,9 @@ func New(cfg Config, repo outbound.BlockMetaRepository, reader outbound.S3Reader
 	if cfg.BatchSize <= 0 {
 		cfg.BatchSize = 500
 	}
-	// Upper clamp, not just a default. Each row's BEFORE INSERT trigger takes a transaction-scoped
-	// pg_advisory_xact_lock, and Upsert commits a whole batch in one transaction, so every lock is held
-	// to commit and occupies the shared lock table. Measured on stock settings
-	// (max_locks_per_transaction=64, max_connections=100): 12,000 rows in one transaction succeeds,
-	// 15,000 fails with "out of shared memory". The lock table is SHARED, so concurrent per-chain
-	// loaders lower the real ceiling non-deterministically and exhaustion can fail unrelated
-	// transactions -- hence a bound well under the measured single-writer limit rather than near it.
-	// BATCH_SIZE is operator-set, and the natural instinct on a tens-of-millions-row backfill is a big
-	// number.
+	// Upper clamp, not just a default: one batch is one transaction holding a COPY into a temp table
+	// and its INSERT, and every header in it is read from S3 before that write, so an operator-set
+	// BATCH_SIZE in the tens of thousands means a long transaction and a large staged footprint.
 	if cfg.BatchSize > maxBatchSize {
 		cfg.BatchSize = maxBatchSize
 	}
