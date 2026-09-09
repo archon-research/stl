@@ -77,10 +77,10 @@ WITH canonical AS (
 )
 SELECT p.chain_id,
        p.protocol_id,
-       -- Chain-qualified: security_instrument_bridge is keyed on instrument_key ALONE, and a CREATE2
-       -- proxy can hold the same address on several chains. chain_id is assigned by the chain, so it
-       -- is intrinsic and admissible in the key; our own classifiers are not.
-       'maple:' || p.chain_id || ':' || encode(p.loan_address, 'hex') AS instrument_key,
+       -- The bare native id, matching every sibling projection. Whether a key needs chain qualifying
+       -- is one decision for the instrument register (VEC-616), which owns native-key resolution and
+       -- already records it; six projections must not answer it six ways.
+       encode(p.loan_address, 'hex')  AS instrument_key,
        encode(u.address, 'hex')       AS holder_id,
        p.principal_owed               AS quantity,
        -- The holder is the BORROWER and the quantity is what they owe, so this is a BORROW. It is a
@@ -96,7 +96,7 @@ SELECT p.chain_id,
 FROM placed p
 JOIN "user" u ON u.id = p.borrower_user_id;
 
-COMMENT ON VIEW position_maple_loan IS '[Operational] VEC-405 projection: Maple Open Term Loan state as native position rows, at the grain (loan, resolved block_number, block_version, processing_version). instrument_key is ''maple:<chain_id>:<loan address hex>''; holder_id is the borrower''s address; quantity is principal_owed, a raw integer in the POOL asset''s native decimals (maple_loan.maple_pool_id -> maple_pool.asset_token_id -> token.decimals), which the row itself does not carry; deal_type is BORROW, because the holder is the borrower and the quantity is what they owe. The source carries no block, so each cycle is placed at the last surviving (highest block_version) block_meta block at or before its synced_at and takes that block''s timestamp; reorg versions are collapsed first because a mixed timeline runs header time backwards against height. Cycles sharing a resolved block collapse to one observation, earliest synced_at winning, so any later reading inside that block window is DISCARDED and appears at no block -- the collapse rate is a property of block_meta density, not of this view. A repaid loan is closed from its ABSENCE, which maple_loan_state''s COMMENT defines as no longer active, but only when the closing cycle observed at least two peer loans and at least two further cycles passed without it returning; an unguarded close would let one truncated API response permanently zero every missing position. Emits the shared position_state column contract; closure is applied by materialize_position_projection().';
+COMMENT ON VIEW position_maple_loan IS '[Operational] VEC-405 projection: Maple Open Term Loan state as native position rows, at the grain (loan, resolved block_number, block_version, processing_version). instrument_key is the loan contract address as hex, the bare native id its sibling projections use; chain qualification is the instrument register''s decision (VEC-616), not this view''s; holder_id is the borrower''s address; quantity is principal_owed, a raw integer in the POOL asset''s native decimals (maple_loan.maple_pool_id -> maple_pool.asset_token_id -> token.decimals), which the row itself does not carry; deal_type is BORROW, because the holder is the borrower and the quantity is what they owe. The source carries no block, so each cycle is placed at the last surviving (highest block_version) block_meta block at or before its synced_at and takes that block''s timestamp; reorg versions are collapsed first because a mixed timeline runs header time backwards against height. Cycles sharing a resolved block collapse to one observation, earliest synced_at winning, so any later reading inside that block window is DISCARDED and appears at no block -- the collapse rate is a property of block_meta density, not of this view. A repaid loan is closed from its ABSENCE, which maple_loan_state''s COMMENT defines as no longer active, but only when the closing cycle observed at least two peer loans and at least two further cycles passed without it returning; an unguarded close would let one truncated API response permanently zero every missing position. Emits the shared position_state column contract; closure is applied by materialize_position_projection().';
 
 CREATE OR REPLACE FUNCTION materialize_maple_loan(p_build_id integer DEFAULT 0,
                                                   p_max_skew interval DEFAULT INTERVAL '10 minutes')

@@ -4,7 +4,6 @@ package migrator_test
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -138,7 +137,7 @@ func (f *mapleFixture) rows(t *testing.T, loan string) []mapleRow {
 		`SELECT ps.chain_id, ps.protocol_id, ps.instrument_key, ps.holder_id, ps.deal_type,
 		        ps.quantity::text, ps.block_timestamp, ps.block_number, ps.block_version, ps.processing_version
 		 FROM position_state ps
-		 JOIN maple_loan l ON ps.instrument_key = 'maple:' || l.chain_id || ':' || encode(l.loan_address, 'hex')
+		 JOIN maple_loan l ON ps.instrument_key = encode(l.loan_address, 'hex')
 		 WHERE l.id = $1
 		 ORDER BY ps.block_number, ps.block_version, ps.processing_version`, f.loans[loan])
 	if err != nil {
@@ -165,7 +164,7 @@ func (f *mapleFixture) viewQty(t *testing.T, loan string, bn int64) []string {
 	t.Helper()
 	rs, err := f.pool.Query(f.ctx,
 		`SELECT v.quantity::text FROM position_maple_loan v
-		 JOIN maple_loan l ON v.instrument_key = 'maple:' || l.chain_id || ':' || encode(l.loan_address, 'hex')
+		 JOIN maple_loan l ON v.instrument_key = encode(l.loan_address, 'hex')
 		 WHERE l.id = $1 AND v.block_number = $2 ORDER BY v.processing_version`, f.loans[loan], bn)
 	if err != nil {
 		t.Fatal(err)
@@ -214,7 +213,7 @@ func TestMapleLoanPlacement(t *testing.T) {
 	t.Run("identity carries the loan's protocol, its chain-qualified address and the borrower", func(t *testing.T) {
 		// protocol_id and instrument_key both feed position_id, so a wrong value silently re-keys the
 		// position. Nothing else in the suite reads protocol_id, and a min(protocol.id) mutation
-		// survives without this. instrument_key is chain-qualified because the bridge keys on it alone.
+		// survives without this.
 		var wantProto int64
 		var wantAddr, wantHolder string
 		if err := pool.QueryRow(ctx,
@@ -227,8 +226,8 @@ func TestMapleLoanPlacement(t *testing.T) {
 		if rs[0].protocolID != wantProto {
 			t.Errorf("protocol_id=%d; want the loan's own %d", rs[0].protocolID, wantProto)
 		}
-		if want := fmt.Sprintf("maple:1:%s", wantAddr); rs[0].instrument != want {
-			t.Errorf("instrument_key=%s; want %s", rs[0].instrument, want)
+		if rs[0].instrument != wantAddr {
+			t.Errorf("instrument_key=%s; want the bare loan address %s", rs[0].instrument, wantAddr)
 		}
 		if rs[0].holder != wantHolder {
 			t.Errorf("holder_id=%s; want the borrower's address %s", rs[0].holder, wantHolder)
@@ -388,8 +387,8 @@ func TestMapleLoanPlacement(t *testing.T) {
 			t.Fatalf("no run recorded under the view's qualified name: %v", err)
 		}
 		if err := pool.QueryRow(ctx,
-			`SELECT max(ps.block_timestamp) FROM position_state ps WHERE ps.deal_type = 'BORROW'
-			   AND ps.instrument_key LIKE 'maple:%'`).Scan(&spineTS); err != nil {
+			`SELECT max(ps.block_timestamp) FROM position_state ps
+			 JOIN maple_loan l ON ps.instrument_key = encode(l.loan_address, 'hex')`).Scan(&spineTS); err != nil {
 			t.Fatal(err)
 		}
 		if !runTS.Equal(spineTS) {
@@ -581,7 +580,7 @@ func TestMapleLoanAbsenceClose(t *testing.T) {
 		var zeros int
 		if err := pool.QueryRow(ctx,
 			`SELECT count(*) FROM position_state ps
-			 JOIN maple_loan l ON ps.instrument_key = 'maple:' || l.chain_id || ':' || encode(l.loan_address,'hex')
+			 JOIN maple_loan l ON ps.instrument_key = encode(l.loan_address,'hex')
 			 WHERE l.id = $1 AND ps.quantity = 0`, f.loans["gone"]).Scan(&zeros); err != nil {
 			t.Fatal(err)
 		}
@@ -602,7 +601,7 @@ func TestMapleLoanAbsenceClose(t *testing.T) {
 		var zeros int
 		if err := pool.QueryRow(ctx,
 			`SELECT count(*) FROM position_state ps
-			 JOIN maple_loan l ON ps.instrument_key = 'maple:' || l.chain_id || ':' || encode(l.loan_address,'hex')
+			 JOIN maple_loan l ON ps.instrument_key = encode(l.loan_address,'hex')
 			 WHERE l.id = $1 AND ps.quantity = 0`, f.loans["lonely"]).Scan(&zeros); err != nil {
 			t.Fatal(err)
 		}
@@ -635,7 +634,7 @@ func TestMapleLoanAbsenceClose(t *testing.T) {
 		var zeros int
 		if err := pool.QueryRow(ctx,
 			`SELECT count(*) FROM position_state ps
-			 JOIN maple_loan l ON ps.instrument_key = 'maple:' || l.chain_id || ':' || encode(l.loan_address,'hex')
+			 JOIN maple_loan l ON ps.instrument_key = encode(l.loan_address,'hex')
 			 WHERE l.id = $1 AND ps.quantity = 0`, f.loans["lonely"]).Scan(&zeros); err != nil {
 			t.Fatal(err)
 		}
