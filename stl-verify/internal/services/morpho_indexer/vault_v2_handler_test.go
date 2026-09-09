@@ -44,14 +44,25 @@ func (h *capturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *capturingHandler) WithGroup(string) slog.Handler      { return h }
 
 func (h *capturingHandler) hasWarnContaining(sub string) bool {
+	return len(h.warnsContaining(sub)) > 0
+}
+
+func (h *capturingHandler) warnsContaining(sub string) []map[string]string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	var found []map[string]string
 	for _, r := range h.records {
-		if r.Level == slog.LevelWarn && strings.Contains(r.Message, sub) {
-			return true
+		if r.Level != slog.LevelWarn || !strings.Contains(r.Message, sub) {
+			continue
 		}
+		attrs := map[string]string{}
+		r.Attrs(func(a slog.Attr) bool {
+			attrs[a.Key] = a.Value.String()
+			return true
+		})
+		found = append(found, attrs)
 	}
-	return false
+	return found
 }
 
 // captureLogs returns the handler the harness wired into the service and its
