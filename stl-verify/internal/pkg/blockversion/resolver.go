@@ -143,6 +143,12 @@ func (r *Resolver) readArchivedBlock(ctx context.Context, blockNumber int64) (ar
 		return archivedBlock{}, fmt.Errorf("block %d version %d in %s carries no block hash: %w",
 			blockNumber, version, r.archiveName, ErrHeightNotArchived)
 	}
+	// common.HexToHash crops, pads and drops decode errors, so an unchecked string turns
+	// a corrupt object into a mismatch — the verdict answered by republishing.
+	if !common.IsHexHash(hash) {
+		return archivedBlock{}, fmt.Errorf("block %d version %d in %s names %q, which is not a block hash: %w",
+			blockNumber, version, r.archiveName, hash, ErrHeightNotArchived)
+	}
 
 	return archivedBlock{version: version, hash: common.HexToHash(hash)}, nil
 }

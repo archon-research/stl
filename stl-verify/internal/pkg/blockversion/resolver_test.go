@@ -25,6 +25,9 @@ var (
 // was asked about.
 type fakeArchive struct {
 	heights map[int64]archivedHeight
+	// corrupt overrides what a height's stored object names, for the strings a real
+	// object can carry that are not a block hash.
+	corrupt map[int64]string
 	asked   []int64
 	err     error
 }
@@ -50,6 +53,9 @@ func (a *fakeArchive) HighestVersion(_ context.Context, blockNumber int64) (int,
 func (a *fakeArchive) BlockHashAt(_ context.Context, blockNumber int64, version int) (string, bool, error) {
 	if a.err != nil {
 		return "", false, a.err
+	}
+	if raw, corrupt := a.corrupt[blockNumber]; corrupt {
+		return raw, true, nil
 	}
 	held, archived := a.heights[blockNumber]
 	if !archived || held.version != version || held.hash == (common.Hash{}) {
@@ -126,6 +132,28 @@ func TestResolver_StopsAtAHeightTheArchiveCannotAnswerFor(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// common.HexToHash crops, pads and swallows decode errors, so a corrupt object naming
+// "0x1234" would become the zero hash and the height would fail as a MISMATCH — the one
+// verdict the runbook answers by republishing over a slot that is already occupied.
+func TestResolver_StopsAtAnArchivedObjectThatNamesNoBlockHash(t *testing.T) {
+	archive := archiveHolding(map[int64]archivedHeight{archiveHeight: {version: 1, hash: canonicalHash}})
+	archive.corrupt = map[int64]string{archiveHeight: "0x1234"}
+
+	_, err := NewResolver(archive, archiveName).ResolveBlockVersion(context.Background(), archiveHeight, canonicalHash)
+
+	if !errors.Is(err, ErrHeightNotArchived) {
+		t.Fatalf("error = %v, want ErrHeightNotArchived", err)
+	}
+	if errors.Is(err, ErrArchivedBlockMismatch) {
+		t.Errorf("error = %v, want it not to send the operator to the republisher", err)
+	}
+	for _, want := range []string{"25395651", "0x1234", archiveName} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to name %q", err, want)
+		}
 	}
 }
 
