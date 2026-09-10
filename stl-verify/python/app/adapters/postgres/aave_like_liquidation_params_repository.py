@@ -7,21 +7,8 @@ from app.domain.entities.risk import LiquidationParams
 
 # liquidation_threshold and liquidation_bonus are stored as basis points
 # (e.g. 8250 = 82.5%, 10500 = 1.05× multiplier). Divide by 10000 to normalise.
-#
-# Read from the trigger-maintained current-state cache, not from the
-# sparklend_reserve_data hypertable: a PK range scan over ~150 rows instead of a
-# DISTINCT ON across ~158 chunks.
-#
-# One deliberate semantic difference. The history query applied
-# usage_as_collateral_enabled BEFORE the DISTINCT ON, so a reserve the protocol has
-# since disabled could still be served from an older, still-enabled row. The cache
-# holds the newest row per reserve unconditionally and the filter is applied to
-# that, so such a reserve drops out — which is what "does the protocol still accept
-# this as collateral" means, and is how the backed-breakdown query already reads
-# this table. The two agree on every protocol of a full-scale clone (119 rows,
-# 0 diffs).
-#
-# `liquidation_threshold IS NOT NULL` is dropped with it: `> 0` excludes NULL anyway.
+# Reads the *_current cache (VEC-661): the collateral filter applies to the newest
+# row per reserve, so a reserve since disabled drops out, as in the breakdown read.
 _SQL = """
 SELECT
     token_id,
@@ -45,8 +32,7 @@ class AaveLikeLiquidationParamsRepository:
 
         Protocol-wide rather than filtered to a caller's token ids: these are
         protocol-level config, so one result serves every allocation of that protocol
-        in a request (``PostgresCryptoLendingReader`` slices it per caller). The
-        largest protocol has 64 reserves, so returning all of them is free.
+        in a request (``PostgresCryptoLendingReader`` slices it per caller).
         """
         async with self._engine.connect() as conn:
             result = await conn.execute(text(_SQL), {"protocol_id": protocol_id})

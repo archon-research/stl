@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from app.adapters.postgres.aave_like_liquidation_params_repository import (
     AaveLikeLiquidationParamsRepository,
 )
-from tests.integration.seed import store_test_ids
+from tests.integration.seed import insert_protocol, insert_token, store_test_ids
 
 
 async def _insert_reserve_with_liq_params(
@@ -120,20 +120,32 @@ async def test_another_protocols_reserves_are_not_returned(repository, db_url: s
         await conn.close()
 
     result = await repository.get_params(protocol_id=test_ids["protocol_id"])
+
+    assert set(result) == {test_ids["weth_id"], test_ids["cbbtc_id"]}
     assert result[test_ids["weth_id"]].liquidation_threshold == Decimal("0.825")
+    assert result[test_ids["weth_id"]].liquidation_bonus == Decimal("1.05")
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_reserve_disabled_as_collateral_drops_out(repository, db_url: str, test_ids: dict[str, int]) -> None:
+async def test_reserve_disabled_as_collateral_drops_out(repository, db_url: str) -> None:
     """A reserve the protocol has since stopped accepting as collateral is not returned.
 
     The old query filtered on usage_as_collateral_enabled *before* reducing to the
     newest row, so it could keep serving an older, still-enabled row after the
     protocol disabled the reserve. Reading the newest row and filtering that is what
     the flag means, and matches how the backed-breakdown query reads this table.
+
+    Seeds its own protocol and tokens: the module seed's reserves stay untouched.
     """
     conn = await asyncpg.connect(db_url)
     try:
+        protocol_id = await insert_protocol(conn, "liqDisabled", b"\xd1" * 20)
+        kept_id = await insert_token(conn, "LIQKEPT", 18, b"\xd2" * 20)
+        disabled_id = await insert_token(conn, "LIQDISABLED", 18, b"\xd3" * 20)
+        for token_id in (kept_id, disabled_id):
+            await _insert_reserve_with_liq_params(
+                conn, protocol_id, token_id, 20_000_000, liquidation_threshold_bps=7000, liquidation_bonus_bps=11000
+            )
         await conn.execute(
             """
             INSERT INTO sparklend_reserve_data
@@ -141,13 +153,13 @@ async def test_reserve_disabled_as_collateral_drops_out(repository, db_url: str,
                  usage_as_collateral_enabled, liquidation_threshold, liquidation_bonus)
             VALUES ($1, $2, $3, 0, false, 7000, 11000)
             """,
-            test_ids["protocol_id"],
-            test_ids["cbbtc_id"],
-            20_000_002,
+            protocol_id,
+            disabled_id,
+            20_000_001,
         )
     finally:
         await conn.close()
 
-    result = await repository.get_params(protocol_id=test_ids["protocol_id"])
-    assert test_ids["cbbtc_id"] not in result
-    assert test_ids["weth_id"] in result
+    result = await repository.get_params(protocol_id=protocol_id)
+
+    assert set(result) == {kept_id}

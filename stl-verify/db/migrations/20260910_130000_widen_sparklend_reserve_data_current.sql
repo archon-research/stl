@@ -1,23 +1,22 @@
 -- Widen sparklend_reserve_data_current to the full column set of a
--- sparklend_reserve_data row.
+-- sparklend_reserve_data row (VEC-661).
 --
 -- 20260820_120000_create_current_position_tables.sql created this cache carrying
 -- one payload column, usage_as_collateral_enabled, because that was all the
--- backed-breakdown read needed. The next reader
--- (aave_like_liquidation_params_repository, VEC-661) needs two more, and the one
--- after that will need others. Widening one column at a time means a migration per
--- reader, each one an ALTER + a CREATE OR REPLACE + a backfill over the history
--- hypertable — so this migration takes the whole row instead. The cache is 153 rows
--- on a full-scale clone (one per protocol/token reserve ever seen), so carrying 22
--- payload columns rather than 1 costs nothing measurable in storage, write time or
--- read time, and no further reader needs a migration.
+-- backed-breakdown read needed. The liquidation-params read
+-- (aave_like_liquidation_params_repository) needs two more, and the one after it
+-- will need others. Widening one column at a time means a migration per reader,
+-- each one an ALTER + a CREATE OR REPLACE + a backfill over the history hypertable,
+-- so this migration takes the whole row instead: the cache is one row per reserve
+-- ever seen, so carrying the payload costs nothing measurable, and no further
+-- reader needs a migration.
 --
 -- Every added column is NULL-able, for the reason the original migration gives for
 -- usage_as_collateral_enabled: the source columns are all NULL-able, and the cache
 -- is written by an AFTER INSERT trigger on the history table, so a NOT NULL here
--- would abort the very history insert that fires the trigger — i.e. stop ingest.
+-- would abort the very history insert that fires the trigger, i.e. stop ingest.
 --
--- Three source columns are deliberately NOT carried:
+-- Four source columns are deliberately NOT carried:
 --   * id           — a per-history-row surrogate. The cache's identity is
 --                    (protocol_id, token_id); an id column would invite reading it
 --                    as a pointer into history, which the newer-wins upsert does
@@ -25,10 +24,10 @@
 --   * created_at   — wall-clock time the history row was inserted. That is a fact
 --                    about the history row, not about the reserve, and the cache is
 --                    not an audit trail of its own writes.
---   * build_id     — audit-only ("which deployment wrote the history row"), same
---                    argument; and it is not_null in the schema_master register, so
---                    carrying it NULL-able would need a nullable_exempt entry for a
---                    column nothing reads.
+--   * build_id, run_id — audit-only ("which deployment / which run wrote the
+--                    history row"), same argument; and build_id is not_null in the
+--                    schema_master register, so carrying it NULL-able would need a
+--                    nullable_exempt entry for a column nothing reads.
 --
 -- Two source columns are carried under their CANONICAL name/type rather than
 -- verbatim, because schema_master governs this table and the conformance check
@@ -44,28 +43,31 @@
 --   * last_update_at — the history column is last_update_timestamp, a Unix epoch
 --     bigint whose canonical form schema_master declares as last_update_at
 --     (timestamptz) with plausibility bounds 1500000000..4100000000, values outside
---     them NULLed. Those bounds are not decoration: the history column's own COMMENT
---     records that ~5.9% of its values are corrupt (some negative). The cast is
+--     them NULLed. The bounds are load-bearing: the history column's own COMMENT
+--     records that a share of its values are corrupt (some negative). The cast is
 --     applied here so the cache holds the canonical value, and the guard is applied
 --     with it so corruption caches as NULL rather than as a year-1969 timestamp.
 --
--- The trigger function is replaced in place and the TRIGGER is NOT recreated. That
--- keeps this migration catalog-only with respect to the history hypertable: a
--- CREATE TRIGGER would take SHARE ROW EXCLUSIVE on sparklend_reserve_data and
--- propagate it to every one of its chunks, held to commit, queueing all ingest
--- behind this transaction. CREATE OR REPLACE FUNCTION touches pg_proc only.
+-- Catalog-only: ALTER on the cache and the trigger function replaced in place. The
+-- TRIGGER is NOT recreated — a CREATE TRIGGER would take SHARE ROW EXCLUSIVE on
+-- sparklend_reserve_data and propagate it to every one of its chunks, held to
+-- commit; CREATE OR REPLACE FUNCTION touches pg_proc only. The backfill is the
+-- SEPARATE next migration, 20260910_130050, and the split is load-bearing: ADD
+-- COLUMN holds ACCESS EXCLUSIVE on the cache until commit, and every
+-- sparklend_reserve_data insert fires the trigger that writes the cache, so a
+-- full-history scan run in this transaction would queue all SparkLend / Aave
+-- ingest behind it for the length of the scan. lock_timeout bounds only the
+-- acquisition of that lock, never the hold. Same shape as 20260910_120000
+-- (token_price_current.block_timestamp).
+--
+-- Still not SECURITY DEFINER: the VEC-577 caches keep their grant form until
+-- VEC-684 aligns them.
 
 -- Fail fast rather than convoy: the ALTER TABLE below takes ACCESS EXCLUSIVE on the
--- cache, which the /risk-capital reads query. Same rationale and value as the
--- original migration; re-run in a quieter window if it trips.
+-- cache, which the /risk-capital reads query and the ingest trigger writes. Same
+-- rationale and value as the original migration; re-run in a quieter window if it
+-- trips.
 SET LOCAL lock_timeout = '10s';
-
--- The backfill reads the history hypertable, which has an S3 tiering policy. Without
--- this, "newest row per key" is computed over local chunks only, so a reserve whose
--- newest row has already been tiered would backfill from a stale row or none at all,
--- silently. Set explicitly rather than inherited, in either direction, exactly as the
--- original migration argues.
-SET LOCAL timescaledb.enable_tiered_reads = 'on';
 
 ALTER TABLE sparklend_reserve_data_current
     ADD COLUMN IF NOT EXISTS unbacked                   NUMERIC,
@@ -90,7 +92,7 @@ ALTER TABLE sparklend_reserve_data_current
     ADD COLUMN IF NOT EXISTS is_active                  BOOLEAN,
     ADD COLUMN IF NOT EXISTS is_frozen                  BOOLEAN;
 
-COMMENT ON TABLE sparklend_reserve_data_current IS '[Operational] Newest sparklend_reserve_data row per (protocol, token), carrying that row''s full payload. Derived cache of the sparklend_reserve_data history; rebuildable from it at any time. Not a history: it answers "what is this reserve now", never "what was it at block N".';
+COMMENT ON TABLE sparklend_reserve_data_current IS '[Operational] Newest sparklend_reserve_data row per (protocol, token), carrying that row''s full payload. Derived cache of the sparklend_reserve_data history; rebuildable from it at any time (20260820_120000 to rebuild the rows, 20260910_130050 to converge the payload). Not a history: it answers "what is this reserve now", never "what was it at block N".';
 
 COMMENT ON COLUMN sparklend_reserve_data_current.unbacked IS 'Derived (copy of sparklend_reserve_data.unbacked). Raw on-chain integer in the reserve token''s native decimals. Unbacked aTokens minted against bridged liquidity.';
 COMMENT ON COLUMN sparklend_reserve_data_current.accrued_to_treasury_scaled IS 'Derived (copy of sparklend_reserve_data.accrued_to_treasury_scaled). Raw on-chain integer in the reserve token''s native decimals, scaled by liquidity_index — multiply by liquidity_index/1e27 for the current amount.';
@@ -103,7 +105,7 @@ COMMENT ON COLUMN sparklend_reserve_data_current.stable_borrow_rate IS 'Derived 
 COMMENT ON COLUMN sparklend_reserve_data_current.average_stable_borrow_rate IS 'Derived (copy of sparklend_reserve_data.average_stable_borrow_rate). Ray (÷1e27). Debt-weighted average of the outstanding stable borrow rates.';
 COMMENT ON COLUMN sparklend_reserve_data_current.liquidity_index IS 'Derived (copy of sparklend_reserve_data.liquidity_index). Ray (÷1e27). Cumulative interest factor since reserve creation, monotonically increasing.';
 COMMENT ON COLUMN sparklend_reserve_data_current.variable_borrow_index IS 'Derived (copy of sparklend_reserve_data.variable_borrow_index). Ray (÷1e27). Cumulative variable-borrow interest factor since reserve creation, monotonically increasing.';
-COMMENT ON COLUMN sparklend_reserve_data_current.last_update_at IS 'Derived (canonical cast of sparklend_reserve_data.last_update_timestamp, a Unix epoch). Protocol-reported time this reserve''s interest state was last updated — NOT the time this cache row was written. NULL when the epoch falls outside the schema_master plausibility bounds (1500000000..4100000000); ~5.9% of the history column''s values are corrupt, so a NULL here is expected.';
+COMMENT ON COLUMN sparklend_reserve_data_current.last_update_at IS 'Derived (canonical cast of sparklend_reserve_data.last_update_timestamp, a Unix epoch). Protocol-reported time this reserve''s interest state was last updated — NOT the time this cache row was written. NULL when the epoch falls outside the schema_master plausibility bounds (1500000000..4100000000); see the source column''s COMMENT for why such values exist, so a NULL here is expected rather than a gap.';
 COMMENT ON COLUMN sparklend_reserve_data_current.decimals IS 'Derived (canonical cast of sparklend_reserve_data.decimals). Count of decimal places in the reserve token''s on-chain integer amounts — a scale, not a value. NULL when the history value falls outside the ERC-20 uint8 range 0..255.';
 COMMENT ON COLUMN sparklend_reserve_data_current.ltv IS 'Derived (copy of sparklend_reserve_data.ltv). Basis points (÷10000): 7500 = 75%. Maximum loan-to-value for borrowing against this token as collateral.';
 COMMENT ON COLUMN sparklend_reserve_data_current.liquidation_threshold IS 'Derived (copy of sparklend_reserve_data.liquidation_threshold). Basis points (÷10000): 8250 = 82.5%. Loan-to-value at which positions in this reserve become liquidatable.';
@@ -173,89 +175,6 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Backfill. This is an UPDATE, not the original migration's INSERT … ON CONFLICT
--- DO UPDATE, and the difference is not cosmetic: that statement's guard is a strict
--- `>`, and every key here already sits at its newest version (the trigger has kept
--- it there since VEC-577). Re-running it would therefore conflict on every row and
--- take the DO NOTHING path of a guard that can never be true — a silent no-op that
--- leaves all 21 new columns NULL. The guard below is `<=` so the equal case, which
--- is the only case in practice, updates.
---
--- Keys are matched on (protocol_id, token_id); the version tuple and
--- usage_as_collateral_enabled are re-asserted alongside the new columns so the
--- statement converges a row that is genuinely older, not just fills its gaps. There
--- is no INSERT arm: a key in history but absent from the cache cannot exist — the
--- trigger has fired on every insert since VEC-577 and VEC-577's own backfill covered
--- everything before it. If that ever stops holding, the original migration's INSERT
--- backfill is the repair, and it is the statement to re-run.
-UPDATE sparklend_reserve_data_current c
-SET usage_as_collateral_enabled = s.usage_as_collateral_enabled,
-    unbacked                    = s.unbacked,
-    accrued_to_treasury_scaled  = s.accrued_to_treasury_scaled,
-    total_a_token               = s.total_a_token,
-    total_stable_debt           = s.total_stable_debt,
-    total_variable_debt         = s.total_variable_debt,
-    liquidity_rate              = s.liquidity_rate,
-    variable_borrow_rate        = s.variable_borrow_rate,
-    stable_borrow_rate          = s.stable_borrow_rate,
-    average_stable_borrow_rate  = s.average_stable_borrow_rate,
-    liquidity_index             = s.liquidity_index,
-    variable_borrow_index       = s.variable_borrow_index,
-    last_update_at              = s.last_update_at,
-    decimals                    = s.decimals,
-    ltv                         = s.ltv,
-    liquidation_threshold       = s.liquidation_threshold,
-    liquidation_bonus           = s.liquidation_bonus,
-    reserve_factor              = s.reserve_factor,
-    borrowing_enabled           = s.borrowing_enabled,
-    stable_borrow_rate_enabled  = s.stable_borrow_rate_enabled,
-    is_active                   = s.is_active,
-    is_frozen                   = s.is_frozen,
-    block_number                = s.block_number,
-    block_version               = s.block_version,
-    processing_version          = s.processing_version
-FROM (
-    SELECT DISTINCT ON (srd.protocol_id, srd.token_id)
-        srd.protocol_id,
-        srd.token_id,
-        srd.usage_as_collateral_enabled,
-        srd.unbacked,
-        srd.accrued_to_treasury_scaled,
-        srd.total_a_token,
-        srd.total_stable_debt,
-        srd.total_variable_debt,
-        srd.liquidity_rate,
-        srd.variable_borrow_rate,
-        srd.stable_borrow_rate,
-        srd.average_stable_borrow_rate,
-        srd.liquidity_index,
-        srd.variable_borrow_index,
-        CASE WHEN srd.last_update_timestamp BETWEEN 1500000000 AND 4100000000
-             THEN to_timestamp(srd.last_update_timestamp) END AS last_update_at,
-        CASE WHEN srd.decimals BETWEEN 0 AND 255 THEN srd.decimals::smallint END AS decimals,
-        srd.ltv,
-        srd.liquidation_threshold,
-        srd.liquidation_bonus,
-        srd.reserve_factor,
-        srd.borrowing_enabled,
-        srd.stable_borrow_rate_enabled,
-        srd.is_active,
-        srd.is_frozen,
-        srd.block_number,
-        srd.block_version,
-        COALESCE(srd.processing_version, -1) AS processing_version
-    FROM sparklend_reserve_data srd
-    ORDER BY srd.protocol_id, srd.token_id,
-             srd.block_number DESC, srd.block_version DESC, COALESCE(srd.processing_version, -1) DESC
-) s
-WHERE c.protocol_id = s.protocol_id
-  AND c.token_id    = s.token_id
-  AND (c.block_number, c.block_version, c.processing_version)
-   <= (s.block_number, s.block_version, s.processing_version);
-
--- 21 new columns' worth of stats the planner does not have yet.
-ANALYZE sparklend_reserve_data_current;
-
 INSERT INTO migrations (filename)
-VALUES ('20260825_150000_widen_sparklend_reserve_data_current.sql')
+VALUES ('20260910_130000_widen_sparklend_reserve_data_current.sql')
 ON CONFLICT (filename) DO NOTHING;

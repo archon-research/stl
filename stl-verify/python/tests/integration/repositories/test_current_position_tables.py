@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
 from app.adapters.postgres.reference_as_of import utc_now
+from tests.integration.conftest import MIGRATIONS_DIR
 from tests.integration.seed import (
     ORACLE_ASSET_RETIRED_FROM,
     bind_protocol_oracle,
@@ -293,93 +294,191 @@ async def test_correction_lands_over_a_backfilled_null_version_row(conn: asyncpg
     assert row["processing_version"] == 0
 
 
-@pytest.mark.asyncio(loop_scope="module")
-async def test_reserve_trigger_propagates_the_whole_row(conn: asyncpg.Connection) -> None:
-    """The cache carries the source row's full payload, not just the collateral flag.
+# A full sparklend_reserve_data payload, one distinct value per column so a copy
+# landing in the wrong column is caught. Shared by the widening tests below.
+_FULL_RESERVE_ROW_SQL = """
+INSERT INTO sparklend_reserve_data
+    (protocol_id, token_id, block_number, block_version, usage_as_collateral_enabled,
+     unbacked, accrued_to_treasury_scaled, total_a_token, total_stable_debt,
+     total_variable_debt, liquidity_rate, variable_borrow_rate, stable_borrow_rate,
+     average_stable_borrow_rate, liquidity_index, variable_borrow_index,
+     last_update_timestamp, decimals, ltv, liquidation_threshold, liquidation_bonus,
+     reserve_factor, borrowing_enabled, stable_borrow_rate_enabled, is_active, is_frozen)
+VALUES ($1, $2, $3, 0, true,
+        1, 2, 3, 4,
+        5, 6, 7, 8,
+        9, 10, 11,
+        1800000000, 18, 7500, 8250, 10500,
+        1000, true, false, true, false)
+"""
 
-    VEC-661 widened this table to every sparklend_reserve_data column so a new reader
-    needs no migration. Two of the columns are carried under their canonical
-    name/type rather than verbatim, and both conversions are guarded — so the
-    corrupt-epoch and out-of-range-decimals cases are asserted here too, since an
-    unguarded cast would raise inside the trigger and abort the history insert.
-    """
-    protocol_id = await insert_protocol(conn, "curWide", b"\xb1" * 20)
-    token_id = await insert_token(conn, "CURWIDE", 18, b"\xb2" * 20)
+# What the trigger must have written for _FULL_RESERVE_ROW_SQL: the two guarded
+# canonical casts (last_update_at, decimals) beside the verbatim copies.
+_FULL_RESERVE_ROW_CACHED = {
+    "unbacked": 1,
+    "accrued_to_treasury_scaled": 2,
+    "total_a_token": 3,
+    "total_stable_debt": 4,
+    "total_variable_debt": 5,
+    "liquidity_rate": 6,
+    "variable_borrow_rate": 7,
+    "stable_borrow_rate": 8,
+    "average_stable_borrow_rate": 9,
+    "liquidity_index": 10,
+    "variable_borrow_index": 11,
+    "last_update_at": datetime(2027, 1, 15, 8, 0, tzinfo=UTC),
+    "decimals": 18,
+    "ltv": 7500,
+    "liquidation_threshold": 8250,
+    "liquidation_bonus": 10500,
+    "reserve_factor": 1000,
+    "borrowing_enabled": True,
+    "stable_borrow_rate_enabled": False,
+    "is_active": True,
+    "is_frozen": False,
+}
 
-    await conn.execute(
-        """
-        INSERT INTO sparklend_reserve_data
-            (protocol_id, token_id, block_number, block_version, usage_as_collateral_enabled,
-             unbacked, accrued_to_treasury_scaled, total_a_token, total_stable_debt,
-             total_variable_debt, liquidity_rate, variable_borrow_rate, stable_borrow_rate,
-             average_stable_borrow_rate, liquidity_index, variable_borrow_index,
-             last_update_timestamp, decimals, ltv, liquidation_threshold, liquidation_bonus,
-             reserve_factor, borrowing_enabled, stable_borrow_rate_enabled, is_active, is_frozen)
-        VALUES ($1, $2, $3, 0, true,
-                1, 2, 3, 4,
-                5, 6, 7, 8,
-                9, 10, 11,
-                1800000000, 18, 7500, 8250, 10500,
-                1000, true, false, true, false)
-        """,
-        protocol_id,
-        token_id,
-        _BLOCK,
-    )
+_PAYLOAD_BACKFILL = MIGRATIONS_DIR / "20260910_130050_backfill_sparklend_reserve_data_current_payload.sql"
 
+
+async def _cached_reserve(conn: asyncpg.Connection, protocol_id: int, token_id: int) -> asyncpg.Record:
     row = await conn.fetchrow(
         "SELECT * FROM sparklend_reserve_data_current WHERE protocol_id = $1 AND token_id = $2",
         protocol_id,
         token_id,
     )
     assert row is not None
-    assert row["unbacked"] == 1
-    assert row["accrued_to_treasury_scaled"] == 2
-    assert row["total_a_token"] == 3
-    assert row["total_stable_debt"] == 4
-    assert row["total_variable_debt"] == 5
-    assert row["liquidity_rate"] == 6
-    assert row["variable_borrow_rate"] == 7
-    assert row["stable_borrow_rate"] == 8
-    assert row["average_stable_borrow_rate"] == 9
-    assert row["liquidity_index"] == 10
-    assert row["variable_borrow_index"] == 11
-    assert row["last_update_at"] == datetime(2027, 1, 15, 8, 0, tzinfo=UTC)
-    assert row["decimals"] == 18
-    assert row["ltv"] == 7500
-    assert row["liquidation_threshold"] == 8250
-    assert row["liquidation_bonus"] == 10500
-    assert row["reserve_factor"] == 1000
-    assert row["borrowing_enabled"] is True
-    assert row["stable_borrow_rate_enabled"] is False
-    assert row["is_active"] is True
-    assert row["is_frozen"] is False
+    return row
 
-    # A corrupt epoch (the history column's COMMENT records ~5.9% of them, some
-    # negative) and a decimals value outside the ERC-20 uint8 range must cache as
-    # NULL, and above all must not abort this insert.
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_reserve_trigger_propagates_the_whole_row(conn: asyncpg.Connection) -> None:
+    """The cache carries the source row's full payload, not just the collateral flag.
+
+    VEC-661 widened this table to every sparklend_reserve_data column so a new reader
+    needs no migration; last_update_at and decimals arrive as their canonical casts.
+    """
+    protocol_id = await insert_protocol(conn, "curWide", b"\xb3" * 20)
+    token_id = await insert_token(conn, "CURWIDE", 18, b"\xb4" * 20)
+
+    await conn.execute(_FULL_RESERVE_ROW_SQL, protocol_id, token_id, _BLOCK)
+
+    row = await _cached_reserve(conn, protocol_id, token_id)
+    assert {column: row[column] for column in _FULL_RESERVE_ROW_CACHED} == _FULL_RESERVE_ROW_CACHED
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_corrupt_reserve_epoch_caches_as_null_without_aborting_ingest(conn: asyncpg.Connection) -> None:
+    """A last_update_timestamp outside the plausibility bounds caches as NULL, and the insert lands.
+
+    The history column's COMMENT records that some of its values are corrupt (some
+    negative); an unguarded to_timestamp inside the trigger would raise and abort the
+    history insert that fired it.
+    """
+    protocol_id = await insert_protocol(conn, "curBadEpoch", b"\xb5" * 20)
+    token_id = await insert_token(conn, "CURBADEPOCH", 18, b"\xb6" * 20)
+
     await conn.execute(
         """
         INSERT INTO sparklend_reserve_data
             (protocol_id, token_id, block_number, block_version, usage_as_collateral_enabled,
              last_update_timestamp, decimals)
-        VALUES ($1, $2, $3, 0, true, -62135596800, 100000)
+        VALUES ($1, $2, $3, 0, true, -62135596800, 18)
         """,
         protocol_id,
         token_id,
-        _BLOCK + 1,
+        _BLOCK,
     )
 
-    row = await conn.fetchrow(
-        "SELECT last_update_at, decimals, block_number FROM sparklend_reserve_data_current "
-        "WHERE protocol_id = $1 AND token_id = $2",
+    row = await _cached_reserve(conn, protocol_id, token_id)
+    assert row["block_number"] == _BLOCK
+    assert row["last_update_at"] is None
+    assert row["decimals"] == 18
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_out_of_range_reserve_decimals_cache_as_null_without_aborting_ingest(conn: asyncpg.Connection) -> None:
+    """A decimals value outside the ERC-20 uint8 range caches as NULL, and the insert lands.
+
+    The cache column is the canonical int2; an unguarded ::smallint of the numeric
+    history value would raise inside the trigger and abort the history insert.
+    """
+    protocol_id = await insert_protocol(conn, "curBadDecimals", b"\xb7" * 20)
+    token_id = await insert_token(conn, "CURBADDEC", 18, b"\xb8" * 20)
+
+    await conn.execute(
+        """
+        INSERT INTO sparklend_reserve_data
+            (protocol_id, token_id, block_number, block_version, usage_as_collateral_enabled,
+             last_update_timestamp, decimals)
+        VALUES ($1, $2, $3, 0, true, 1800000000, 100000)
+        """,
+        protocol_id,
+        token_id,
+        _BLOCK,
+    )
+
+    row = await _cached_reserve(conn, protocol_id, token_id)
+    assert row["block_number"] == _BLOCK
+    assert row["decimals"] is None
+    assert row["last_update_at"] == datetime(2027, 1, 15, 8, 0, tzinfo=UTC)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_payload_backfill_fills_a_cache_row_left_behind_by_the_widening(conn: asyncpg.Connection) -> None:
+    """20260910_130050 fills the payload of a row that predates the widening.
+
+    On a fresh database the migrator's own run of that file matches nothing (the
+    cache is empty when it runs), so this is the only exercise of the statement
+    that fills the 21 new columns for every production row. The pre-widening shape
+    is reproduced by NULLing the payload the trigger just wrote, then the real
+    migration file is executed against it.
+    """
+    protocol_id = await insert_protocol(conn, "curBackfill", b"\xb9" * 20)
+    token_id = await insert_token(conn, "CURBACKFILL", 18, b"\xba" * 20)
+    await conn.execute(_FULL_RESERVE_ROW_SQL, protocol_id, token_id, _BLOCK)
+
+    payload = ", ".join(f"{column} = NULL" for column in _FULL_RESERVE_ROW_CACHED)
+    await conn.execute(
+        f"UPDATE sparklend_reserve_data_current SET {payload} WHERE protocol_id = $1 AND token_id = $2",  # noqa: S608
         protocol_id,
         token_id,
     )
-    assert row is not None
-    assert row["block_number"] == _BLOCK + 1
-    assert row["last_update_at"] is None
-    assert row["decimals"] is None
+    before = await _cached_reserve(conn, protocol_id, token_id)
+    assert all(before[column] is None for column in _FULL_RESERVE_ROW_CACHED)
+
+    await conn.execute(_PAYLOAD_BACKFILL.read_text())
+
+    row = await _cached_reserve(conn, protocol_id, token_id)
+    assert {column: row[column] for column in _FULL_RESERVE_ROW_CACHED} == _FULL_RESERVE_ROW_CACHED
+    assert (row["block_number"], row["block_version"], row["processing_version"]) == (_BLOCK, 0, 0)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_payload_backfill_never_lowers_a_cache_row_ahead_of_history(conn: asyncpg.Connection) -> None:
+    """The backfill's `<=` guard converges the equal case and refuses to lower a newer row.
+
+    A cache row ahead of the newest readable history row (a reserve whose newest
+    history row is not visible to the scan) keeps its version tuple, and its
+    payload is not overwritten from the older history row either.
+    """
+    protocol_id = await insert_protocol(conn, "curAhead", b"\xbb" * 20)
+    token_id = await insert_token(conn, "CURAHEAD", 18, b"\xbc" * 20)
+    await conn.execute(_FULL_RESERVE_ROW_SQL, protocol_id, token_id, _BLOCK)
+
+    await conn.execute(
+        "UPDATE sparklend_reserve_data_current SET block_number = $3, ltv = NULL "
+        "WHERE protocol_id = $1 AND token_id = $2",
+        protocol_id,
+        token_id,
+        _BLOCK + 5,
+    )
+
+    await conn.execute(_PAYLOAD_BACKFILL.read_text())
+
+    row = await _cached_reserve(conn, protocol_id, token_id)
+    assert row["block_number"] == _BLOCK + 5
+    assert row["ltv"] is None
 
 
 @pytest.mark.asyncio(loop_scope="module")
