@@ -4,14 +4,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"strconv"
-	"strings"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/services/uniswapv4bootstrap"
 )
-
-const defaultAlchemyHTTPURL = "https://eth-mainnet.g.alchemy.com/v2"
 
 type config struct {
 	dbURL     string
@@ -66,16 +63,8 @@ func (c *config) applyEnvFallbacks() error {
 		return fmt.Errorf("database URL not provided (use -db or DATABASE_URL)")
 	}
 
-	if c.rpcURL == "" {
-		url, err := alchemyURLFromEnv()
-		if err != nil {
-			return err
-		}
-		c.rpcURL = url
-	}
-
-	var positionBatch = int64(c.bootstrap.PositionBatch)
-	err := errors.Join(
+	positionBatch := int64(c.bootstrap.PositionBatch)
+	if err := errors.Join(
 		fillInt64FromEnv(&c.bootstrap.ChainID, "CHAIN_ID", 1),
 		fillInt64FromEnv(&c.bootstrap.FromBlock, "FROM_BLOCK", 0),
 		fillInt64FromEnv(&c.bootstrap.PinBlock, "PIN_BLOCK", 0),
@@ -84,9 +73,19 @@ func (c *config) applyEnvFallbacks() error {
 		fillInt64FromEnv(&c.bootstrap.MinWindow, "MIN_WINDOW", 0),
 		fillInt64FromEnv(&c.bootstrap.MaxWindow, "MAX_WINDOW", 0),
 		fillInt64FromEnv(&positionBatch, "POSITION_BATCH", 0),
-	)
+	); err != nil {
+		return err
+	}
 	c.bootstrap.PositionBatch = int(positionBatch)
-	return err
+
+	if c.rpcURL == "" {
+		url, err := chainutil.AlchemyRPCURL(c.bootstrap.ChainID)
+		if err != nil {
+			return fmt.Errorf("RPC endpoint not provided (use -rpc-url, or set ALCHEMY_API_KEY): %w", err)
+		}
+		c.rpcURL = url
+	}
+	return nil
 }
 
 // A flag always wins over the environment.
@@ -94,34 +93,10 @@ func fillInt64FromEnv(into *int64, key string, fallback int64) error {
 	if *into != 0 {
 		return nil
 	}
-	value, err := envInt64(key, fallback)
+	value, err := env.GetInt64(key, fallback)
 	if err != nil {
 		return err
 	}
 	*into = value
 	return nil
-}
-
-func alchemyURLFromEnv() (string, error) {
-	apiKey := env.Get("ALCHEMY_API_KEY", "")
-	if apiKey == "" {
-		return "", fmt.Errorf("RPC endpoint not provided (use -rpc-url, or set ALCHEMY_API_KEY)")
-	}
-	base := env.Get("ALCHEMY_HTTP_URL", "")
-	if base == "" {
-		base = defaultAlchemyHTTPURL
-	}
-	return strings.TrimRight(base, "/") + "/" + apiKey, nil
-}
-
-func envInt64(key string, fallback int64) (int64, error) {
-	raw := env.Get(key, "")
-	if raw == "" {
-		return fallback, nil
-	}
-	value, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("parsing %s %q: %w", key, raw, err)
-	}
-	return value, nil
 }

@@ -367,7 +367,7 @@ func TestIntegration_LargeFeeGrowthCheckpointsRoundTrip(t *testing.T) {
 	mc.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		results := make([]outbound.Result, len(calls))
 		for i := range results {
-			results[i] = outbound.Result{Success: true, ReturnData: packPositionInfoReturn(t, huge, huge, huge)}
+			results[i] = outbound.Result{Success: true, ReturnData: testutil.PackPositionInfo(t, huge, huge, huge)}
 		}
 		return results, nil
 	}

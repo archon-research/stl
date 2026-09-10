@@ -581,7 +581,7 @@ func TestRun_ReportsThePositionRowsTheWriterInserted(t *testing.T) {
 }
 
 func TestRun_BatchLogCountsPositionsWithinTheirOwnPool(t *testing.T) {
-	logs := &capturedLogs{}
+	logs := &testutil.SlogRecorder{}
 	f := newFixture(t, func(d *Deps) {
 		d.Logger = slog.New(logs)
 		d.Config.PositionBatch = 1
@@ -598,7 +598,7 @@ func TestRun_BatchLogCountsPositionsWithinTheirOwnPool(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	got := logs.int64Field("persisted uniswap-v4 position batch", "poolPositionsDone")
+	got := logs.Int64Attrs("persisted uniswap-v4 position batch", "poolPositionsDone")
 	want := []int64{1, 2, 1}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("poolPositionsDone per batch = %v, want %v: the second pool's counter restarts at 1", got, want)

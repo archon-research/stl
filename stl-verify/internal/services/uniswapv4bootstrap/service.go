@@ -28,7 +28,7 @@ type Deps struct {
 	Pools       []uniswapv4indexer.RegisteredPool
 	LogScan     outbound.LogScanClient
 	Multicaller outbound.Multicaller
-	Repo        outbound.UniswapV4Repository
+	Repo        outbound.UniswapV4PositionWriter
 	TxManager   outbound.TxManager
 	Logger      *slog.Logger
 	Config      Config
@@ -41,7 +41,7 @@ type Service struct {
 	topic0      common.Hash
 	logScan     outbound.LogScanClient
 	multicaller outbound.Multicaller
-	repo        outbound.UniswapV4Repository
+	repo        outbound.UniswapV4PositionWriter
 	txMgr       outbound.TxManager
 	logger      *slog.Logger
 	cfg         Config
@@ -61,12 +61,6 @@ type Summary struct {
 	PositionsRead    int
 	PositionsWritten int64
 	Batches          int
-}
-
-func (s *Summary) recordScan(stats scanStats) {
-	s.ScanWindows = stats.windows
-	s.ScanNarrowings = stats.narrowings
-	s.ScanLogs = stats.logs
 }
 
 func (s *Summary) recordKeys(keysByPool map[int64][]entity.UniswapV4PositionKey) {
@@ -103,7 +97,7 @@ func New(deps Deps) (*Service, error) {
 
 	return &Service{
 		pools:       pools,
-		poolsByHash: poolsByHash(pools),
+		poolsByHash: uniswapv4indexer.IndexPoolsByHash(pools),
 		poolManager: poolManager,
 		topic0:      topic0,
 		logScan:     deps.LogScan,
@@ -141,14 +135,6 @@ func snapshottablePoolsByID(all []uniswapv4indexer.RegisteredPool) []uniswapv4in
 	return pools
 }
 
-func poolsByHash(pools []uniswapv4indexer.RegisteredPool) map[common.Hash]uniswapv4indexer.RegisteredPool {
-	byHash := make(map[common.Hash]uniswapv4indexer.RegisteredPool, len(pools))
-	for _, pool := range pools {
-		byHash[pool.PoolIDHash] = pool
-	}
-	return byHash
-}
-
 func (s *Service) Run(ctx context.Context) (Summary, error) {
 	pin, err := pinBlock(ctx, s.logScan, s.cfg.FinalityDepth, s.cfg.PinBlock)
 	if err != nil {
@@ -169,7 +155,7 @@ func (s *Service) Run(ctx context.Context) (Summary, error) {
 	s.logStart(pin, from)
 
 	keysByPool, stats, err := s.discoverPositionKeys(ctx, from, pin.number)
-	summary.recordScan(stats)
+	summary.ScanWindows, summary.ScanNarrowings, summary.ScanLogs = stats.windows, stats.narrowings, stats.logs
 	if err != nil {
 		return summary, err
 	}

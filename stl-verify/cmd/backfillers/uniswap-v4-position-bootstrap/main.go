@@ -20,6 +20,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -124,14 +125,9 @@ func newMulticaller(
 		return nil, nil, fmt.Errorf("connecting to the RPC endpoint: %w", err)
 	}
 
-	chainID, err := ethClient.ChainID(ctx)
-	if err != nil {
+	if err := chainutil.AssertChainID(ctx, ethClient, cfg.bootstrap.ChainID); err != nil {
 		ethClient.Close()
-		return nil, nil, fmt.Errorf("reading the RPC chain id: %w", err)
-	}
-	if chainID.Int64() != cfg.bootstrap.ChainID {
-		ethClient.Close()
-		return nil, nil, fmt.Errorf("RPC chain id mismatch: the endpoint reports %d, the config says %d", chainID.Int64(), cfg.bootstrap.ChainID)
+		return nil, nil, err
 	}
 
 	multicaller, err := multicall.NewClient(ethClient, blockchain.Multicall3)

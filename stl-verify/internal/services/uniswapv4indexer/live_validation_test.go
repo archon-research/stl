@@ -97,7 +97,7 @@ func TestLiveValidation(t *testing.T) {
 	repo := postgres.NewUniswapV4Repository(dbPool, buildID)
 
 	regPools := loadRegistry(t, ctx, repo, rep)
-	poolsByID := indexPoolsByHash(regPools)
+	poolsByID := IndexPoolsByHash(regPools)
 	poolManager := regPools[0].PoolManager
 	rep.poolManager = poolManager.Hex()
 	rep.stateView = regPools[0].StateView.Hex()

@@ -3,16 +3,13 @@ package uniswapv4bootstrap
 import (
 	"context"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
 	"strconv"
-	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
@@ -209,30 +206,6 @@ func (f *fakeUniswapV4Repository) SavePositions(_ context.Context, _ pgx.Tx, pos
 	return int64(len(positions)), nil
 }
 
-func (f *fakeUniswapV4Repository) SaveBlock(context.Context, pgx.Tx, outbound.UniswapV4BlockWrites) (outbound.StateRowCounts, error) {
-	return outbound.StateRowCounts{}, errors.New("fake: SaveBlock writes a whole block; the bootstrap owns positions only")
-}
-
-func (f *fakeUniswapV4Repository) LoadPools(context.Context, int64) ([]outbound.UniswapV4PoolRow, error) {
-	return nil, errors.New("fake: LoadPools is the caller's job, not the bootstrap's")
-}
-
-func (f *fakeUniswapV4Repository) PoolIDsWithStateAtBlock(context.Context, int64, int64, time.Time) ([]common.Hash, error) {
-	return nil, errors.New("fake: PoolIDsWithStateAtBlock is a reorg-path read the bootstrap must not make")
-}
-
-func (f *fakeUniswapV4Repository) TicksForPoolAtBlock(context.Context, int64, int64, int64) ([]int32, error) {
-	return nil, errors.New("fake: TicksForPoolAtBlock is a reorg-path read the bootstrap must not make")
-}
-
-func (f *fakeUniswapV4Repository) PositionsForPoolAtBlock(context.Context, int64, int64, int64) ([]entity.UniswapV4PositionKey, error) {
-	return nil, errors.New("fake: PositionsForPoolAtBlock is a reorg-path read the bootstrap must not make")
-}
-
-func (f *fakeUniswapV4Repository) PoolIDsEverSnapshotted(context.Context, int64) ([]int64, error) {
-	return nil, errors.New("fake: PoolIDsEverSnapshotted is a live-service read the bootstrap must not make")
-}
-
 func (f *fakeUniswapV4Repository) savedPositions() []*entity.UniswapV4Position {
 	var all []*entity.UniswapV4Position
 	for _, batch := range f.SavedBatches {
@@ -241,77 +214,15 @@ func (f *fakeUniswapV4Repository) savedPositions() []*entity.UniswapV4Position {
 	return all
 }
 
-type capturedLogs struct {
-	mu      sync.Mutex
-	records []slog.Record
-}
-
-func (c *capturedLogs) Enabled(context.Context, slog.Level) bool { return true }
-
-func (c *capturedLogs) Handle(_ context.Context, record slog.Record) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.records = append(c.records, record.Clone())
-	return nil
-}
-
-func (c *capturedLogs) WithAttrs([]slog.Attr) slog.Handler { return c }
-func (c *capturedLogs) WithGroup(string) slog.Handler      { return c }
-
-func (c *capturedLogs) int64Field(msg, key string) []int64 {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	var values []int64
-	for _, record := range c.records {
-		if record.Message != msg {
-			continue
-		}
-		record.Attrs(func(attr slog.Attr) bool {
-			if attr.Key == key {
-				values = append(values, attr.Value.Int64())
-			}
-			return true
-		})
-	}
-	return values
-}
-
 func positionReturningMulticaller(t *testing.T, liquidity int64) *testutil.MockMulticaller {
 	t.Helper()
 	mc := testutil.NewMockMulticaller()
 	mc.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		results := make([]outbound.Result, len(calls))
 		for i := range results {
-			results[i] = outbound.Result{Success: true, ReturnData: packPositionInfoReturn(t, big.NewInt(liquidity), big.NewInt(0), big.NewInt(0))}
+			results[i] = outbound.Result{Success: true, ReturnData: testutil.PackPositionInfo(t, big.NewInt(liquidity), big.NewInt(0), big.NewInt(0))}
 		}
 		return results, nil
 	}
 	return mc
-}
-
-func packPositionInfoReturn(t *testing.T, liquidity, feeGrowthInside0, feeGrowthInside1 *big.Int) []byte {
-	t.Helper()
-	const j = `[
-		{"name":"getPositionInfo","type":"function","stateMutability":"view","inputs":[
-			{"name":"poolId","type":"bytes32"},
-			{"name":"owner","type":"address"},
-			{"name":"tickLower","type":"int24"},
-			{"name":"tickUpper","type":"int24"},
-			{"name":"salt","type":"bytes32"}
-		],"outputs":[
-			{"name":"liquidity","type":"uint128"},
-			{"name":"feeGrowthInside0LastX128","type":"uint256"},
-			{"name":"feeGrowthInside1LastX128","type":"uint256"}
-		]}
-	]`
-	a, err := abi.JSON(strings.NewReader(j))
-	if err != nil {
-		t.Fatalf("parsing position view test ABI: %v", err)
-	}
-	packed, err := a.Methods["getPositionInfo"].Outputs.Pack(liquidity, feeGrowthInside0, feeGrowthInside1)
-	if err != nil {
-		t.Fatalf("packing getPositionInfo return: %v", err)
-	}
-	return packed
 }

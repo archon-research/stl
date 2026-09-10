@@ -19,7 +19,10 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-var _ outbound.UniswapV4Repository = (*UniswapV4Repository)(nil)
+var (
+	_ outbound.UniswapV4Repository     = (*UniswapV4Repository)(nil)
+	_ outbound.UniswapV4PositionWriter = (*UniswapV4Repository)(nil)
+)
 
 // address(0) is not usable as native ETH: the token registry already holds it
 // as a "no token" sentinel with 0 decimals, so ETH amounts would scale by 10^0.

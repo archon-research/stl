@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -153,55 +154,11 @@ func TestGetLogs_BuildsThePositionalTopicsArray(t *testing.T) {
 			if !present {
 				t.Fatal("topics key is absent")
 			}
-			assertTopicsEqual(t, topics, tc.want)
+			if !reflect.DeepEqual(topics, tc.want) {
+				t.Errorf("topics = %v, want %v", topics, tc.want)
+			}
 		})
 	}
-}
-
-func assertTopicsEqual(t *testing.T, got any, want []any) {
-	t.Helper()
-	entries, ok := got.([]any)
-	if !ok {
-		t.Fatalf("topics = %T, want a JSON array", got)
-	}
-	if len(entries) != len(want) {
-		t.Fatalf("topics length = %d, want %d", len(entries), len(want))
-	}
-	for i, wantEntry := range want {
-		switch expected := wantEntry.(type) {
-		case nil:
-			if entries[i] != nil {
-				t.Errorf("topics[%d] = %v, want an explicit null placeholder", i, entries[i])
-			}
-		case string:
-			if !sameHexString(entries[i], expected) {
-				t.Errorf("topics[%d] = %v, want %s", i, entries[i], expected)
-			}
-		case []any:
-			assertOrSetEqual(t, i, entries[i], expected)
-		}
-	}
-}
-
-func assertOrSetEqual(t *testing.T, i int, got any, want []any) {
-	t.Helper()
-	orSet, isArray := got.([]any)
-	if !isArray {
-		t.Fatalf("topics[%d] = %T, want a JSON array (the OR-set)", i, got)
-	}
-	if len(orSet) != len(want) {
-		t.Fatalf("topics[%d] length = %d, want %d", i, len(orSet), len(want))
-	}
-	for j, wantHash := range want {
-		if !sameHexString(orSet[j], wantHash.(string)) {
-			t.Errorf("topics[%d][%d] = %v, want %v", i, j, orSet[j], wantHash)
-		}
-	}
-}
-
-func sameHexString(got any, want string) bool {
-	actual, isString := got.(string)
-	return isString && strings.EqualFold(actual, want)
 }
 
 func TestGetLogs_DecodesReturnedLogs(t *testing.T) {

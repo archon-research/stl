@@ -99,7 +99,7 @@ func NewUniswapV4Service(ctx context.Context, deps UniswapV4ServiceDeps) (*Unisw
 	}
 	baselineSeen := seenSet(everSnapshotted)
 	svc := &UniswapV4Service{
-		poolsByID:    indexPoolsByHash(deps.Pools),
+		poolsByID:    IndexPoolsByHash(deps.Pools),
 		poolsByRow:   indexPoolsByRowID(deps.Pools),
 		pools:        deps.Pools,
 		poolManager:  poolManager,
@@ -191,7 +191,7 @@ func PoolManagerFor(pools []RegisteredPool) (common.Address, error) {
 }
 
 // ValidatePoolKeys has already rejected duplicate PoolIds.
-func indexPoolsByHash(pools []RegisteredPool) map[common.Hash]RegisteredPool {
+func IndexPoolsByHash(pools []RegisteredPool) map[common.Hash]RegisteredPool {
 	byHash := make(map[common.Hash]RegisteredPool, len(pools))
 	for _, p := range pools {
 		byHash[p.PoolIDHash] = p

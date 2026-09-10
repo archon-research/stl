@@ -185,7 +185,7 @@ func (c *mockChain) serveCall(w http.ResponseWriter, req rpcutil.Request) {
 		if target != common.HexToAddress(stateViewAddr) {
 			return nil, false
 		}
-		return packPositionInfoReturn(c.t, big.NewInt(positionLiquidity)), true
+		return testutil.PackPositionInfo(c.t, big.NewInt(positionLiquidity), big.NewInt(0), big.NewInt(0)), true
 	})
 	if err != nil {
 		testutil.WriteRPCError(w, req.ID, -32000, err.Error())
@@ -237,32 +237,6 @@ func modifyLiquidityLogJSON(t *testing.T) map[string]any {
 		"logIndex":         "0x0",
 		"removed":          false,
 	}
-}
-
-func packPositionInfoReturn(t *testing.T, liquidity *big.Int) []byte {
-	t.Helper()
-	const j = `[
-		{"name":"getPositionInfo","type":"function","stateMutability":"view","inputs":[
-			{"name":"poolId","type":"bytes32"},
-			{"name":"owner","type":"address"},
-			{"name":"tickLower","type":"int24"},
-			{"name":"tickUpper","type":"int24"},
-			{"name":"salt","type":"bytes32"}
-		],"outputs":[
-			{"name":"liquidity","type":"uint128"},
-			{"name":"feeGrowthInside0LastX128","type":"uint256"},
-			{"name":"feeGrowthInside1LastX128","type":"uint256"}
-		]}
-	]`
-	a, err := abi.JSON(strings.NewReader(j))
-	if err != nil {
-		t.Fatalf("parsing the position view ABI: %v", err)
-	}
-	packed, err := a.Methods["getPositionInfo"].Outputs.Pack(liquidity, big.NewInt(0), big.NewInt(0))
-	if err != nil {
-		t.Fatalf("packing getPositionInfo return: %v", err)
-	}
-	return packed
 }
 
 // The pin is fixed so assertions do not depend on the mock's head.
@@ -395,8 +369,8 @@ func TestRunIntegration_RejectsAChainIDMismatch(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error: the endpoint serves another chain")
 	}
-	if !strings.Contains(err.Error(), "chain id mismatch") {
-		t.Errorf("error = %v, want it to name the chain id mismatch", err)
+	if !strings.Contains(err.Error(), "chain ID mismatch") {
+		t.Errorf("error = %v, want it to name the chain ID mismatch", err)
 	}
 }
 
@@ -413,8 +387,8 @@ func TestRunIntegration_RejectsAnUnreadableChainID(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error: the endpoint would not report its chain id")
 	}
-	if !strings.Contains(err.Error(), "chain id") {
-		t.Errorf("error = %v, want it to name the chain id read", err)
+	if !strings.Contains(err.Error(), "chain ID") {
+		t.Errorf("error = %v, want it to name the chain ID read", err)
 	}
 }
 

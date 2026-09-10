@@ -64,6 +64,7 @@ func TestParseConfig_ExplicitRPCURLNeedsNoAPIKey(t *testing.T) {
 
 func TestParseConfig_FlagsOverrideTheEnvironment(t *testing.T) {
 	setRequiredEnv(t)
+	t.Setenv("ALCHEMY_HTTP_URL", "https://base-mainnet.g.alchemy.com/v2")
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("FROM_BLOCK", "100")
 	t.Setenv("PIN_BLOCK", "200")
@@ -95,6 +96,7 @@ func TestParseConfig_FlagsOverrideTheEnvironment(t *testing.T) {
 
 func TestParseConfig_ReadsTheBlockOverridesFromTheEnvironment(t *testing.T) {
 	setRequiredEnv(t)
+	t.Setenv("ALCHEMY_HTTP_URL", "https://base-mainnet.g.alchemy.com/v2")
 	t.Setenv("CHAIN_ID", "8453")
 	t.Setenv("FROM_BLOCK", "21688329")
 	t.Setenv("PIN_BLOCK", "23000000")
@@ -141,6 +143,8 @@ func TestParseConfig_RejectsAnIncompleteOrUnparseableEnvironment(t *testing.T) {
 	}{
 		{"no database url", map[string]string{"DATABASE_URL": ""}, nil, "database URL"},
 		{"no alchemy key", map[string]string{"ALCHEMY_API_KEY": ""}, nil, "ALCHEMY_API_KEY"},
+		{"non-mainnet chain without an endpoint", map[string]string{"CHAIN_ID": "8453"}, nil, "ALCHEMY_HTTP_URL"},
+		{"endpoint with a query string", map[string]string{"ALCHEMY_HTTP_URL": "https://x.example/v2?key=1"}, nil, "ALCHEMY_HTTP_URL"},
 		{"unparseable chain id", map[string]string{"CHAIN_ID": "abc"}, nil, "CHAIN_ID"},
 		{"unparseable from block", map[string]string{"FROM_BLOCK": "abc"}, nil, "FROM_BLOCK"},
 		{"unparseable pin block", map[string]string{"PIN_BLOCK": "abc"}, nil, "PIN_BLOCK"},
