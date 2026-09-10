@@ -66,6 +66,30 @@ backfill command exists or is needed — the full projection *is* the backfill.
 
 ---
 
+## VectorPositionMaterializerWithholdingPositions
+
+**What it means.** A projection is withholding positions rather than failing. Its run succeeds, the
+other positions land, and these sit at whatever was last stored, which every downstream reader treats
+as current. `position_projection_run.positions_refused` is the per-run count the alert reads.
+
+**Which positions.** The refusal table holds one row per refused observation for the life of the
+refusal, so filter it against what is stored rather than reading it alone:
+
+```sql
+SELECT r.projection, encode(r.position_id, 'hex') AS position_id, r.reason,
+       min(r.block_number) AS from_block, min(r.created_at) AS first_refused_at, min(r.detail) AS detail
+  FROM position_projection_refusal r
+ WHERE NOT EXISTS (SELECT 1 FROM position_state p
+                    WHERE p.position_id = r.position_id AND p.block_number >= r.block_number)
+ GROUP BY 1, 2, 3
+ ORDER BY first_refused_at;
+```
+
+A position leaves that result by storing an observation at or beyond `from_block`, so a source
+correction clears it with no intervention here. `block_time_inverts_height` means the source gave a
+higher block an earlier instant and needs fixing upstream; the drift reasons mean a stored key was
+re-emitted with a different value, which a real correction expresses by bumping a version instead.
+
 ## VectorPositionMaterializerViewFailing
 
 **What it means.** One named projection returned an error. The runner logs it and moves on to the next

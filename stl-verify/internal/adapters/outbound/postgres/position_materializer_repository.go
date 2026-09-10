@@ -75,6 +75,34 @@ func (r *PositionMaterializerRepository) Materialize(ctx context.Context, materi
 	})
 }
 
+// RefusedByProjection reads each projection's positions_refused from its latest run row.
+// position_projection_run is keyed (projection, created_at), so the newest row per projection
+// is one index scan; a projection that has never run is absent rather than zero.
+func (r *PositionMaterializerRepository) RefusedByProjection(ctx context.Context) (map[string]int64, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT DISTINCT ON (projection) projection, positions_refused
+		  FROM position_projection_run
+		 ORDER BY projection, created_at DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("reading positions_refused: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[string]int64{}
+	for rows.Next() {
+		var projection string
+		var refused int64
+		if err := rows.Scan(&projection, &refused); err != nil {
+			return nil, fmt.Errorf("scanning positions_refused: %w", err)
+		}
+		out[projection] = refused
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating positions_refused: %w", err)
+	}
+	return out, nil
+}
+
 // materializeOnce is a single materialization attempt. The SELECT is its own
 // transaction, honoring the one-projection-per-transaction contract documented on
 // the shared function (per-view advisory xact lock). The function name is quoted as

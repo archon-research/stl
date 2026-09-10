@@ -17,4 +17,10 @@ type PositionMaterializer interface {
 	// projection per transaction (the shared function's per-view advisory lock is held to
 	// commit, and two callers locking different views in different orders would deadlock).
 	Materialize(ctx context.Context, materializer string, buildID int) (int64, error)
+
+	// RefusedByProjection returns each projection's positions_refused from its most recent
+	// run. The shared function withholds a position rather than failing the run when its new
+	// observations conflict, so a projection can report success indefinitely while a position
+	// stays frozen at a stale value. This is the count that makes that visible.
+	RefusedByProjection(ctx context.Context) (map[string]int64, error)
 }

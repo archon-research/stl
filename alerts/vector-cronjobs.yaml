@@ -689,6 +689,27 @@ groups:
             indexer has stalled, or a projection view's join has gone empty.
           runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializersilentlyempty"
 
+      - alert: VectorPositionMaterializerWithholdingPositions
+        # The shared function withholds a position whose new observations conflict and
+        # continues, so a projection reports success every tick while a position stays frozen
+        # at a stale value. Sustained, not instant: one tick's refusal is often a source
+        # correction arriving out of order and clears itself on the next run.
+        expr: |
+          max by (projection, cluster) (
+            position_materializer_positions_refused{k8s_namespace_name="vector"}
+          ) > 0
+        for: 3h
+        labels:
+          team: vector
+          severity: warning
+        annotations:
+          summary: "position-materializer is withholding positions in {{ $labels.projection }}"
+          description: >-
+            {{ $labels.projection }} has withheld {{ $value }} position(s) on
+            {{ $labels.cluster }} for 3h. Those positions read as current downstream while
+            sitting at a stale value. Find them with the query in the runbook.
+          runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializerwithholdingpositions"
+
       - alert: VectorPositionMaterializerViewFailing
         # One view is failing while others succeed. The generic cronjob alerts fire
         # on the RUN, so a single bad view among several is visible there only as a

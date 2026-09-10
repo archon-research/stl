@@ -105,5 +105,27 @@ func (s *Service) RunOnce(ctx context.Context) error {
 			"materializer", m, "rows_changed", changed, "duration", time.Since(start))
 		s.telemetry.RecordRun(ctx, m, "ok", changed)
 	}
+	s.publishWithheld(ctx)
 	return errors.Join(errs...)
+}
+
+// publishWithheld reports how many positions each projection's latest run withheld. The shared
+// function withholds a conflicting position and continues, so without this a projection reports
+// success every tick while a position sits frozen at a stale value and nothing says so.
+//
+// A failure here does not fail the run: the projections did their work and the rows are committed.
+// It is logged, and a read that keeps failing shows up as the gauge going absent.
+func (s *Service) publishWithheld(ctx context.Context) {
+	refused, err := s.materializer.RefusedByProjection(ctx)
+	if err != nil {
+		s.logger.Error("reading withheld positions failed; the projections themselves succeeded", "error", err)
+		return
+	}
+	for projection, n := range refused {
+		s.telemetry.RecordRefused(ctx, projection, n)
+		if n > 0 {
+			s.logger.Warn("projection is withholding positions",
+				"projection", projection, "positions_refused", n)
+		}
+	}
 }

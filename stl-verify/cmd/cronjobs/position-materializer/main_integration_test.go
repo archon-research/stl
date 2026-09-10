@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
@@ -122,5 +123,38 @@ func TestPositionMaterializer_RunOnce(t *testing.T) {
 	err = badRunner.Run(ctx)
 	if err == nil || !strings.Contains(err.Error(), "materialize_no_such") {
 		t.Errorf("bad entry: got %v; want a loud failure naming materialize_no_such", err)
+	}
+}
+
+// The withheld level is read with SQL, so it needs to run against a real position_projection_run:
+// the query takes the newest row per projection, and a projection that has never run must be absent
+// rather than reported as zero, or an alert cannot tell a healthy projection from a missing one.
+func TestPositionMaterializer_RefusedByProjection(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	ctx := context.Background()
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO position_projection_run
+		    (projection, created_at, build_id, block_timestamp, rows_emitted, rows_appended, positions_refused)
+		VALUES ('public.position_a', '2026-09-01T00:00:00Z', 0, NULL, 10, 10, 0),
+		       ('public.position_a', '2026-09-01T01:00:00Z', 0, NULL, 10,  0, 4),
+		       ('public.position_b', '2026-09-01T00:30:00Z', 0, NULL,  5,  5, 0)`); err != nil {
+		t.Fatalf("seeding runs: %v", err)
+	}
+
+	repo := postgres.NewPositionMaterializerRepository(pool, slog.Default())
+	got, err := repo.RefusedByProjection(ctx)
+	if err != nil {
+		t.Fatalf("RefusedByProjection: %v", err)
+	}
+	if got["public.position_a"] != 4 {
+		t.Errorf("position_a = %d, want 4 from its newest run, not 0 from the older one", got["public.position_a"])
+	}
+	if got["public.position_b"] != 0 {
+		t.Errorf("position_b = %d, want 0", got["public.position_b"])
+	}
+	if _, ok := got["public.position_never_run"]; ok {
+		t.Error("a projection with no run row is reported; it must be absent so absence stays distinguishable")
 	}
 }

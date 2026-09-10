@@ -9,13 +9,19 @@ import (
 
 // mockMaterializer implements outbound.PositionMaterializer with a func field.
 type mockMaterializer struct {
-	fn    func(ctx context.Context, view string, buildID int) (int64, error)
-	calls []string
+	fn         func(ctx context.Context, view string, buildID int) (int64, error)
+	calls      []string
+	refused    map[string]int64
+	refusedErr error
 }
 
 func (m *mockMaterializer) Materialize(ctx context.Context, view string, buildID int) (int64, error) {
 	m.calls = append(m.calls, view)
 	return m.fn(ctx, view, buildID)
+}
+
+func (m *mockMaterializer) RefusedByProjection(context.Context) (map[string]int64, error) {
+	return m.refused, m.refusedErr
 }
 
 func TestNewService_Validation(t *testing.T) {
