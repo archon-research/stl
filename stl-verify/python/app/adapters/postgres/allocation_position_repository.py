@@ -73,6 +73,44 @@ _ALLOCATION_ACTIVITY_LIMIT = 1000
 # emit a telemetry warning while still serving the honestly-stale data.
 _ANCHORAGE_STALE_AFTER = timedelta(hours=1)
 
+# The identity of an allocation_position row: allocation_position_pkey minus
+# processing_version, and minus created_at. created_at is the block timestamp and
+# a correction copies it unchanged, so it does NOT distinguish one version from
+# another -- which is precisely what makes the last()/locf reads below unsafe.
+#
+# The table is append-only: a correction is a new row differing from the original
+# in processing_version alone. Nothing has ever written a second version, so no
+# read guards against it; the moment a backfill does, a SUM over raw history
+# double-counts and a last()-by-time tie-breaks arbitrarily between the original
+# and the row that corrects it. Both shapes are fixed by collapsing to the newest
+# version per identity before aggregating (VEC-758).
+#
+# The column order is the leading prefix of allocation_position_pkey, so a
+# DISTINCT ON in this order is servable by an index scan rather than an explicit
+# sort. Keep the two in step if the primary key ever changes.
+_IDENTITY_COLUMNS = (
+    "chain_id",
+    "token_id",
+    "prime_id",
+    "proxy_address",
+    "block_number",
+    "block_version",
+    "tx_hash",
+    "log_index",
+    "direction",
+)
+
+
+def _latest_version_only(alias: str) -> tuple[str, str]:
+    """Return ``(distinct_on, order_by)`` keeping one row per identity.
+
+    PostgreSQL requires a DISTINCT ON query's ORDER BY to lead with exactly the
+    DISTINCT ON expressions, so the two are produced together rather than left
+    for each call site to keep in sync.
+    """
+    keys = ", ".join(f"{alias}.{column}" for column in _IDENTITY_COLUMNS)
+    return f"DISTINCT ON ({keys})", f"{keys}, {alias}.processing_version DESC"
+
 
 def _escape_like_pattern(value: str) -> str:
     r"""Escape LIKE metacharacters to prevent pattern injection.
@@ -825,13 +863,29 @@ class AllocationRepository:
         value forward; leading buckets before the first observation are ``None``.
         """
         subproxies = [bytes.fromhex(address[2:]) for address in subproxy_addresses()]
+        distinct_on, version_order = _latest_version_only("ap")
+        time_window = required_time_window_clause("ap.created_at")
         query = text(
-            """
+            f"""
             WITH target AS (
                 SELECT prime_id
                 FROM prime_proxy
                 WHERE proxy_address = decode(:address_hex, 'hex')
                 LIMIT 1
+            ),
+            -- One row per identity, newest processing_version, BEFORE the
+            -- bucketing below picks a per-bucket winner by time. A correction
+            -- shares its original's created_at exactly, so last() cannot break
+            -- that tie and would otherwise return either row arbitrarily.
+            latest AS (
+                SELECT {distinct_on} ap.balance, ap.created_at
+                FROM allocation_position ap
+                JOIN token t ON t.id = ap.token_id
+                WHERE ap.prime_id = (SELECT prime_id FROM target)
+                  AND ap.proxy_address IN :subproxy_addrs
+                  AND t.address = decode(:usds_hex, 'hex')
+                  {time_window}
+                ORDER BY {version_order}
             )
             SELECT
                 time_bucket_gapfill(
@@ -841,14 +895,7 @@ class AllocationRepository:
                     CAST(:to_timestamp AS TIMESTAMPTZ)
                 ) AS bucket_start,
                 locf(last(ap.balance, ap.created_at)) AS total_capital_usd
-            FROM allocation_position ap
-            JOIN token t ON t.id = ap.token_id
-            WHERE ap.prime_id = (SELECT prime_id FROM target)
-              AND ap.proxy_address IN :subproxy_addrs
-              AND t.address = decode(:usds_hex, 'hex')
-            """
-            + required_time_window_clause("ap.created_at")
-            + """
+            FROM latest ap
             GROUP BY bucket_start
             ORDER BY bucket_start DESC
             LIMIT :limit
@@ -1576,7 +1623,30 @@ SELECT
     ap.block_number,
     ap.block_version,
     ap.created_at
-FROM allocation_position ap
+FROM (
+    -- Newest processing_version per identity. This read is not aggregated, so
+    -- an un-deduped correction surfaces as a DUPLICATE ROW in the feed and
+    -- consumes a slot in :limit, shifting pagination (VEC-758). Only the
+    -- ap-only predicates are pushed in here -- the ones needing prime/token/
+    -- protocol joins stay in the outer WHERE, so the filter semantics are
+    -- unchanged and there is nothing to keep in sync.
+    SELECT DISTINCT ON (
+        d.chain_id, d.token_id, d.prime_id, d.proxy_address,
+        d.block_number, d.block_version, d.tx_hash, d.log_index, d.direction
+    )
+        d.chain_id, d.proxy_address, d.prime_id, d.token_id, d.direction,
+        d.tx_amount, d.balance, d.tx_hash, d.log_index, d.block_number,
+        d.block_version, d.created_at
+    FROM allocation_position d
+    WHERE (CAST(:proxy_addrs AS BYTEA[]) IS NULL OR d.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[])))
+        AND (CAST(:chain_id AS INTEGER) IS NULL OR d.chain_id = CAST(:chain_id AS INTEGER))
+        AND (CAST(:from_timestamp AS TIMESTAMPTZ) IS NULL OR d.created_at >= CAST(:from_timestamp AS TIMESTAMPTZ))
+        AND (CAST(:to_timestamp AS TIMESTAMPTZ) IS NULL OR d.created_at <= CAST(:to_timestamp AS TIMESTAMPTZ))
+    ORDER BY
+        d.chain_id, d.token_id, d.prime_id, d.proxy_address,
+        d.block_number, d.block_version, d.tx_hash, d.log_index,
+        d.direction, d.processing_version DESC
+) ap
 JOIN prime p ON p.id = ap.prime_id
 JOIN token t ON t.id = ap.token_id
 LEFT JOIN LATERAL (
@@ -1689,7 +1759,16 @@ _ALLOCATION_ACTIVITY_BUCKETS_SQL = text(f"""
 WITH window_rows AS MATERIALIZED (
     -- The activity rows this read aggregates. Fenced so the hypertable is
     -- scanned once; token_context and the outer query both read this set.
-    SELECT
+    --
+    -- DISTINCT ON keeps only the newest processing_version per identity. The
+    -- outer query SUMs over this set, so without it a correction row is added
+    -- to the total alongside the row it corrects (VEC-758). The key is the
+    -- leading prefix of allocation_position_pkey, so the sort is servable from
+    -- the index rather than materialised.
+    SELECT DISTINCT ON (
+        ap.chain_id, ap.token_id, ap.prime_id, ap.proxy_address,
+        ap.block_number, ap.block_version, ap.tx_hash, ap.log_index, ap.direction
+    )
         ap.chain_id,
         ap.token_id,
         ap.prime_id,
@@ -1714,6 +1793,10 @@ WITH window_rows AS MATERIALIZED (
              LIKE '%' || LOWER(CAST(:token_symbol AS TEXT)) || '%' ESCAPE '\\')
         AND (CAST(:tx_hash AS TEXT) IS NULL OR encode(ap.tx_hash, 'hex') = LOWER(CAST(:tx_hash AS TEXT)))
         {required_time_window_clause("ap.created_at")}
+    ORDER BY
+        ap.chain_id, ap.token_id, ap.prime_id, ap.proxy_address,
+        ap.block_number, ap.block_version, ap.tx_hash, ap.log_index,
+        ap.direction, ap.processing_version DESC
 ),
 token_context AS MATERIALIZED (
     -- Everything the aggregate needs per token (a handful of rows): protocol
@@ -1868,16 +1951,33 @@ WITH position_buckets AS (
                 ELSE COALESCE(ap.underlying_value, ap.balance)
             END,
             ap.created_at)) AS valuation_units
-    FROM allocation_position ap
+    FROM (
+        -- Newest processing_version per identity, before last() picks a
+        -- per-bucket winner. A correction copies its original's created_at
+        -- exactly, so last() has no tie to break and would return either row
+        -- arbitrarily -- the correction silently not applying, or flipping
+        -- between plans (VEC-758).
+        SELECT DISTINCT ON (
+            d.chain_id, d.token_id, d.prime_id, d.proxy_address,
+            d.block_number, d.block_version, d.tx_hash, d.log_index, d.direction
+        )
+            d.chain_id, d.token_id, d.created_at, d.balance,
+            d.underlying_value, d.underlying_token_id
+        FROM allocation_position d
+        -- Prime-wide, like the headline figure beside it: a prime holds
+        -- receipt tokens through one proxy per chain, so scoping to one
+        -- address prices a single chain against a prime-wide total.
+        WHERE d.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[]))
+          AND d.created_at >= CAST(:from_timestamp AS TIMESTAMPTZ)
+          AND d.created_at <= CAST(:to_timestamp AS TIMESTAMPTZ)
+        ORDER BY
+            d.chain_id, d.token_id, d.prime_id, d.proxy_address,
+            d.block_number, d.block_version, d.tx_hash, d.log_index,
+            d.direction, d.processing_version DESC
+    ) ap
     JOIN token t ON t.id = ap.token_id
     JOIN receipt_token rt
         ON rt.receipt_token_address = t.address AND rt.chain_id = ap.chain_id
-    -- Prime-wide, like the headline figure beside it: a prime holds
-    -- receipt tokens through one proxy per chain, so scoping to one
-    -- address prices a single chain against a prime-wide total.
-    WHERE ap.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[]))
-      AND ap.created_at >= CAST(:from_timestamp AS TIMESTAMPTZ)
-      AND ap.created_at <= CAST(:to_timestamp AS TIMESTAMPTZ)
     GROUP BY rt.id, rt.underlying_token_id, rt.protocol_id, bucket
 ),
 -- The latest price does not vary by bucket, so it is resolved once per
