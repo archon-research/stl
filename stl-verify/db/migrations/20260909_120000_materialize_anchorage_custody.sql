@@ -95,6 +95,33 @@ BEGIN
     IF v_bad IS NOT NULL THEN
         RAISE EXCEPTION 'materialize_anchorage_custody: unresolved inputs, refusing to run: %', v_bad;
     END IF;
+    -- This projection never closes from absence, so a package that stops being reported stays open
+    -- at its last quantity. One package going is a delisting; several going at once is the feed
+    -- failing, and carrying stale pledged collateral forward is worse than stopping.
+    WITH inst AS (
+        SELECT prime_id, snapshot_time,
+               row_number() OVER (PARTITION BY prime_id ORDER BY snapshot_time DESC) AS rn
+          FROM (SELECT DISTINCT prime_id, snapshot_time FROM public.anchorage_package_snapshot) d
+    )
+    SELECT string_agg(msg, '; ' ORDER BY msg) INTO v_bad FROM (
+        SELECT format('prime %s stopped reporting %s live package(s) at %s: %s',
+                      o.prime_id, count(DISTINCT s.package_id), n.snapshot_time,
+                      string_agg(DISTINCT s.package_id, ',')) AS msg
+          FROM inst o
+          JOIN inst n ON n.prime_id = o.prime_id AND n.rn = 1
+          JOIN public.anchorage_package_snapshot s
+            ON s.prime_id = o.prime_id AND s.snapshot_time = o.snapshot_time AND s.asset_quantity > 0
+         WHERE o.rn = 2
+           AND NOT EXISTS (SELECT 1 FROM public.anchorage_package_snapshot q
+                            WHERE q.prime_id = o.prime_id AND q.snapshot_time = n.snapshot_time
+                              AND q.package_id = s.package_id)
+         GROUP BY o.prime_id, n.snapshot_time
+        HAVING count(DISTINCT s.package_id) > 1
+    ) z;
+    IF v_bad IS NOT NULL THEN
+        RAISE EXCEPTION 'materialize_anchorage_custody: several live packages stopped being reported at once, which is a feed failure rather than a delisting; refusing to run: %', v_bad;
+    END IF;
+
     RETURN public.materialize_position_projection('public.position_anchorage_custody'::regclass, p_build_id);
 END
 $fn$;

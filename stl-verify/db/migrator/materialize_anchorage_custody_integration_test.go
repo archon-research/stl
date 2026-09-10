@@ -494,3 +494,43 @@ func TestAnchorageColonIsLegalWhenUnambiguous(t *testing.T) {
 		t.Errorf("instrument_key = %q; want anchorage:PKG:SEG:BTC", key)
 	}
 }
+
+// This projection never closes from absence, so a package that stops being reported keeps its last
+// quantity and reads as live pledged collateral. One package going is a delisting; several going at
+// once is the feed failing, and carrying that forward silently is worse than stopping.
+func TestMaterializeAnchorageRefusesWhenSeveralPackagesStopBeingReported(t *testing.T) {
+	ctx, pool := seedAnchorageBase(t)
+	for _, p := range []string{"PKG-A", "PKG-B", "PKG-C"} {
+		addSnap(t, ctx, pool, anchorageSnap{pkg: p, qty: 5, snapTS: "2026-06-01T00:00:00Z", ltvTS: "2026-06-01T00:00:00Z"})
+	}
+	// The next snapshot carries only one of the three.
+	addSnap(t, ctx, pool, anchorageSnap{pkg: "PKG-A", qty: 5, snapTS: "2026-06-01T01:00:00Z", ltvTS: "2026-06-01T01:00:00Z"})
+
+	_, err := pool.Exec(ctx, `SELECT materialize_anchorage_custody()`)
+	if err == nil {
+		t.Fatal("the run succeeded while two live packages stopped being reported")
+	}
+	if !strings.Contains(err.Error(), "stopped being reported") {
+		t.Errorf("refused with %v; want the feed-failure refusal", err)
+	}
+	for _, p := range []string{"PKG-B", "PKG-C"} {
+		if !strings.Contains(err.Error(), p) {
+			t.Errorf("the refusal does not name %s: %v", p, err)
+		}
+	}
+}
+
+// The control: a single package leaving is a delisting and stays open by design, so the run must
+// not stop. Without this the guard would refuse on ordinary custody churn.
+func TestMaterializeAnchorageOnePackageLeavingDoesNotRefuse(t *testing.T) {
+	ctx, pool := seedAnchorageBase(t)
+	for _, p := range []string{"PKG-A", "PKG-B", "PKG-C"} {
+		addSnap(t, ctx, pool, anchorageSnap{pkg: p, qty: 5, snapTS: "2026-06-01T00:00:00Z", ltvTS: "2026-06-01T00:00:00Z"})
+	}
+	for _, p := range []string{"PKG-A", "PKG-B"} {
+		addSnap(t, ctx, pool, anchorageSnap{pkg: p, qty: 5, snapTS: "2026-06-01T01:00:00Z", ltvTS: "2026-06-01T01:00:00Z"})
+	}
+	if _, err := pool.Exec(ctx, `SELECT materialize_anchorage_custody()`); err != nil {
+		t.Fatalf("the run refused although only one package left: %v", err)
+	}
+}
