@@ -43,7 +43,8 @@ JOIN prime    pr ON pr.id = o.prime_id;
 COMMENT ON VIEW position_sky_prime_debt IS '[Operational] VEC-406 projection: Sky prime debt as native position rows, one per (prime, Vat, ilk); instrument_key = native ilk_name, holder_id = the prime vault address, protocol_id = the Vat row stamped on the snapshot, deal_type BORROW. Emits the shared position_state column contract consumed by materialize_position_projection(); closure is applied there.';
 
 -- Names every snapshot the view cannot resolve, then delegates to the shared materializer.
-CREATE OR REPLACE FUNCTION materialize_sky_prime_debt(p_build_id integer DEFAULT 0) RETURNS bigint
+CREATE OR REPLACE FUNCTION materialize_sky_prime_debt(p_build_id integer DEFAULT 0,
+                                                      p_run_id bigint DEFAULT NULL) RETURNS bigint
     LANGUAGE plpgsql
     SET search_path FROM CURRENT AS $fn$
 DECLARE
@@ -60,10 +61,10 @@ BEGIN
     IF v_bad IS NOT NULL THEN
         RAISE EXCEPTION 'materialize_sky_prime_debt: unresolved inputs, refusing to run: %', v_bad;
     END IF;
-    RETURN public.materialize_position_projection('public.position_sky_prime_debt'::regclass, p_build_id);
+    RETURN public.materialize_position_projection('public.position_sky_prime_debt'::regclass, p_build_id, p_run_id);
 END
 $fn$;
 
-COMMENT ON FUNCTION materialize_sky_prime_debt(integer) IS '[Operational] VEC-406: materialize Sky prime debt into position_state via materialize_position_projection(position_sky_prime_debt), refusing by name a snapshot whose protocol_id has no protocol row. Returns rows appended.';
+COMMENT ON FUNCTION materialize_sky_prime_debt(integer, bigint) IS '[Operational] VEC-406: materialize Sky prime debt into position_state via materialize_position_projection(position_sky_prime_debt), refusing by name a snapshot whose protocol_id has no protocol row. Returns rows appended.';
 
 INSERT INTO migrations (filename) VALUES ('20260819_140000_materialize_sky_prime_debt.sql') ON CONFLICT (filename) DO NOTHING;
