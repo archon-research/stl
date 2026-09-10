@@ -5,7 +5,21 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
+
+// erc20Registry builds a tokenTypeRegistry resolving exactly one (chain,
+// address) pair to token_type "erc20" -- the only registry state a direct
+// (non-receipt-token) holding needs to classify as self-denominated.
+func erc20Registry(t *testing.T, chainID int64, addr common.Address) tokenTypeRegistry {
+	t.Helper()
+	chain, err := entity.ChainName(chainID)
+	if err != nil {
+		t.Fatalf("entity.ChainName(%d): %v", chainID, err)
+	}
+	return tokenTypeRegistry{tokenTypeKey(chain, addr): "erc20"}
+}
 
 var (
 	testVault      = common.HexToAddress("0x38464507e02c983f20428a6e8566693fe9e422a9")
@@ -29,7 +43,7 @@ func TestClassifyCandidates_DirectHolding(t *testing.T) {
 	c := baseCandidate()
 	c.isReceiptToken = false
 
-	out, stats, err := classifyCandidates([]candidateRow{c}, nil, cliConfig{})
+	out, stats, err := classifyCandidates([]candidateRow{c}, nil, erc20Registry(t, c.chainID, testDirect), cliConfig{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -51,7 +65,7 @@ func TestClassifyCandidates_AToken(t *testing.T) {
 	c.underlyingIsOneToOne = true
 	c.underlyingAddress = &underlying
 
-	out, stats, err := classifyCandidates([]candidateRow{c}, nil, cliConfig{})
+	out, stats, err := classifyCandidates([]candidateRow{c}, nil, nil, cliConfig{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -69,7 +83,7 @@ func TestClassifyCandidates_ATokenSkippedWithoutRegistryUnderlying(t *testing.T)
 	c.underlyingIsOneToOne = true
 	c.underlyingAddress = nil // registry could not resolve one
 
-	out, stats, err := classifyCandidates([]candidateRow{c}, nil, cliConfig{})
+	out, stats, err := classifyCandidates([]candidateRow{c}, nil, nil, cliConfig{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -103,7 +117,7 @@ func TestClassifyCandidates_ERC4626PrefersArchiveOverPriceRatio(t *testing.T) {
 	archiveRaw := big.NewInt(1_234_567_000) // 1234.567000 at 6 decimals
 	archiveResults := map[int]*big.Int{0: archiveRaw}
 
-	out, stats, err := classifyCandidates([]candidateRow{c}, archiveResults, cliConfig{maxPriceLag: 100})
+	out, stats, err := classifyCandidates([]candidateRow{c}, archiveResults, nil, cliConfig{maxPriceLag: 100})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -124,10 +138,11 @@ func TestClassifyCandidates_ERC4626FallsBackToPriceRatioWhenArchiveMissing(t *te
 	lag := int64(50)
 	c.erc4626UnderlyingHuman = &human
 	c.sharePriceBlockLag = &lag
+	c.underlyingPriceBlockLag = &lag
 
 	// No entry in archiveResults for index 0: the archive call reverted or
 	// was never attempted, so this must fall back rather than skip.
-	out, stats, err := classifyCandidates([]candidateRow{c}, map[int]*big.Int{}, cliConfig{maxPriceLag: 100})
+	out, stats, err := classifyCandidates([]candidateRow{c}, map[int]*big.Int{}, nil, cliConfig{maxPriceLag: 100})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -146,7 +161,7 @@ func TestClassifyCandidates_ERC4626FallsBackToPriceRatioWhenArchiveMissing(t *te
 func TestClassifyCandidates_ERC4626SkipsWhenNoPriceHistoryAndNoArchive(t *testing.T) {
 	c := erc4626Candidate() // erc4626UnderlyingHuman left nil: no price history
 
-	out, stats, err := classifyCandidates([]candidateRow{c}, map[int]*big.Int{}, cliConfig{maxPriceLag: 100})
+	out, stats, err := classifyCandidates([]candidateRow{c}, map[int]*big.Int{}, nil, cliConfig{maxPriceLag: 100})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -161,8 +176,9 @@ func TestClassifyCandidates_ERC4626SkipsWhenPriceTooStaleAndNoArchive(t *testing
 	lag := int64(200) // exceeds maxPriceLag below
 	c.erc4626UnderlyingHuman = &human
 	c.sharePriceBlockLag = &lag
+	c.underlyingPriceBlockLag = &lag
 
-	out, stats, err := classifyCandidates([]candidateRow{c}, map[int]*big.Int{}, cliConfig{maxPriceLag: 100})
+	out, stats, err := classifyCandidates([]candidateRow{c}, map[int]*big.Int{}, nil, cliConfig{maxPriceLag: 100})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -171,16 +187,46 @@ func TestClassifyCandidates_ERC4626SkipsWhenPriceTooStaleAndNoArchive(t *testing
 	}
 }
 
-func TestClassifyCandidates_ERC4626PriceRatioBadHumanStringErrors(t *testing.T) {
+// TestClassifyCandidates_ERC4626SkipsWhenUnderlyingLegIsStale guards the
+// underlying leg's own lag, not just the share leg's: a fresh share price
+// paired with a stale underlying price must not pass (the bound applies to
+// the older of the two legs).
+func TestClassifyCandidates_ERC4626SkipsWhenUnderlyingLegIsStale(t *testing.T) {
 	c := erc4626Candidate()
-	human := "not-a-number"
+	human := "1234.567000"
+	freshLag := int64(0)
+	staleLag := int64(200) // exceeds maxPriceLag below
+	c.erc4626UnderlyingHuman = &human
+	c.sharePriceBlockLag = &freshLag
+	c.underlyingPriceBlockLag = &staleLag
+
+	out, stats, err := classifyCandidates([]candidateRow{c}, map[int]*big.Int{}, nil, cliConfig{maxPriceLag: 100})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stats.skippedPriceTooStale != 1 || len(out) != 0 {
+		t.Fatalf("stats = %+v, len(out) = %d, want skippedPriceTooStale=1", stats, len(out))
+	}
+}
+
+// TestClassifyCandidates_ERC4626PriceRatioNonExactSkipsRowNotRun guards B3: a
+// division that does not terminate exactly at the token's decimals must skip
+// just this one row, never abort the whole batch.
+func TestClassifyCandidates_ERC4626PriceRatioNonExactSkipsRowNotRun(t *testing.T) {
+	c := erc4626Candidate()
+	// 36 fractional digits at 6 decimals is not an exact raw amount.
+	human := "100.023456789012345678901234567890123456"
 	lag := int64(0)
 	c.erc4626UnderlyingHuman = &human
 	c.sharePriceBlockLag = &lag
+	c.underlyingPriceBlockLag = &lag
 
-	_, _, err := classifyCandidates([]candidateRow{c}, map[int]*big.Int{}, cliConfig{maxPriceLag: 100})
-	if err == nil {
-		t.Fatal("expected an error for an unparsable price-ratio human string")
+	out, stats, err := classifyCandidates([]candidateRow{c}, map[int]*big.Int{}, nil, cliConfig{maxPriceLag: 100})
+	if err != nil {
+		t.Fatalf("a non-exact price ratio must skip the row, not fail the run: %v", err)
+	}
+	if stats.skippedRatioNotExact != 1 || len(out) != 0 {
+		t.Fatalf("stats = %+v, len(out) = %d, want skippedRatioNotExact=1, 0 positions", stats, len(out))
 	}
 }
 
@@ -210,7 +256,7 @@ func TestClassifyCandidates_ProtocolNameDrivesClassification_NotSymbol(t *testin
 	vault.protocolName = "Morpho Blue"
 	archiveRaw := big.NewInt(2_000_000_000_000_000_000)
 
-	out, stats, err := classifyCandidates([]candidateRow{aToken, vault}, map[int]*big.Int{1: archiveRaw}, cliConfig{})
+	out, stats, err := classifyCandidates([]candidateRow{aToken, vault}, map[int]*big.Int{1: archiveRaw}, nil, cliConfig{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -222,5 +268,61 @@ func TestClassifyCandidates_ProtocolNameDrivesClassification_NotSymbol(t *testin
 	}
 	if out[1].position.Underlying.Value.Cmp(archiveRaw) != 0 {
 		t.Errorf("Morpho-Blue-registered address must resolve via the real conversion, got %s", out[1].position.Underlying.Value)
+	}
+}
+
+// TestClassifyCandidates_NonReceiptTokenSkippedWhenNotPlainERC20 guards B1: a
+// row with no receipt_token match is not necessarily a plain erc20 -- Curve
+// LP shares, NAV/RWA shares and pre-cutover uni_v3 rows clear that check too
+// (receipt_token is seeded only for SparkLend/Aave/Morpho/Maple), and must be
+// left NULL rather than self-denominated.
+func TestClassifyCandidates_NonReceiptTokenSkippedWhenNotPlainERC20(t *testing.T) {
+	c := baseCandidate()
+	c.isReceiptToken = false
+
+	registry := tokenTypeRegistry{tokenTypeKey("mainnet", testDirect): "curve"}
+	out, stats, err := classifyCandidates([]candidateRow{c}, nil, registry, cliConfig{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stats.skippedNotPlainERC20 != 1 || len(out) != 0 {
+		t.Fatalf("stats = %+v, len(out) = %d, want skippedNotPlainERC20=1, 0 positions", stats, len(out))
+	}
+}
+
+// TestClassifyCandidates_NonReceiptTokenSkippedWhenAbsentFromRegistry guards
+// the unresolved case: a token absent from the axis-synome contract entirely
+// (retired/renamed since it was last regenerated) must not default to erc20 --
+// writing NULL is always safe, writing a wrong self-denomination is not.
+func TestClassifyCandidates_NonReceiptTokenSkippedWhenAbsentFromRegistry(t *testing.T) {
+	c := baseCandidate()
+	c.isReceiptToken = false
+
+	out, stats, err := classifyCandidates([]candidateRow{c}, nil, tokenTypeRegistry{}, cliConfig{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stats.skippedNotPlainERC20 != 1 || len(out) != 0 {
+		t.Fatalf("stats = %+v, len(out) = %d, want skippedNotPlainERC20=1, 0 positions", stats, len(out))
+	}
+}
+
+// TestClassifyCandidates_ScaledBalanceCarriedThrough guards B2: the original
+// row's scaled_balance must survive the correction unchanged, on every
+// classification path (toEntity, not any one caller, sets it).
+func TestClassifyCandidates_ScaledBalanceCarriedThrough(t *testing.T) {
+	underlying := testUnderlying
+	c := baseCandidate()
+	c.isReceiptToken = true
+	c.underlyingIsOneToOne = true
+	c.underlyingAddress = &underlying
+	c.scaledBalance = big.NewInt(900_000_000_000_000_000)
+
+	out, _, err := classifyCandidates([]candidateRow{c}, nil, nil, cliConfig{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 1 || out[0].position.ScaledBalance == nil || out[0].position.ScaledBalance.Cmp(c.scaledBalance) != 0 {
+		t.Fatalf("ScaledBalance = %v, want %s carried through from the candidate row", out[0].position.ScaledBalance, c.scaledBalance)
 	}
 }
