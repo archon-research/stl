@@ -38,6 +38,12 @@ func adapterTypeLabel(t *entity.MorphoAdapterType) string {
 		return "market_v1"
 	case entity.MorphoAdapterTypeVaultV1:
 		return "vault_v1"
+	case entity.MorphoAdapterTypeERC4626Merkl:
+		return "erc4626_merkl"
+	case entity.MorphoAdapterTypeBox:
+		return "box"
+	case entity.MorphoAdapterTypeCompoundV3:
+		return "compound_v3"
 	case entity.MorphoAdapterTypeUnknown:
 		return "unknown"
 	default:
@@ -181,6 +187,10 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider,
 	if err != nil {
 		return nil, fmt.Errorf("creating rpcDuration histogram: %w", err)
 	}
+
+	// VectorMorphoIndexerStalled reads blocks.processed with rate()==0; seed so
+	// it is computable from process start (see telemetry.SeedCounter).
+	telemetry.SeedStatusCounter(context.Background(), t.blocksProcessed, t.chainAttr)
 
 	return t, nil
 }

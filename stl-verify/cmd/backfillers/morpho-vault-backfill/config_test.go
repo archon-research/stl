@@ -27,7 +27,7 @@ func TestLoadConfig(t *testing.T) {
 			name: "defaults fill the optional knobs",
 			want: config{
 				bucket:     "stl-sentinelstaging-ethereum-raw-89d540d0",
-				rpcURL:     defaultAlchemyHTTPURL + "/test-key",
+				rpcURL:     "https://eth-mainnet.g.alchemy.com/v2/test-key",
 				chainID:    1,
 				goroutines: defaultGoroutines,
 				probeBatch: defaultProbeBatch,
@@ -49,7 +49,7 @@ func TestLoadConfig(t *testing.T) {
 			override: map[string]string{"BACKFILL_GOROUTINES": "64", "BACKFILL_PROBE_BATCH": "25"},
 			want: config{
 				bucket:     "stl-sentinelstaging-ethereum-raw-89d540d0",
-				rpcURL:     defaultAlchemyHTTPURL + "/test-key",
+				rpcURL:     "https://eth-mainnet.g.alchemy.com/v2/test-key",
 				chainID:    1,
 				goroutines: 64,
 				probeBatch: 25,
@@ -59,6 +59,11 @@ func TestLoadConfig(t *testing.T) {
 			name:            "missing CHAIN_ID",
 			override:        map[string]string{"CHAIN_ID": ""},
 			wantErrContains: "CHAIN_ID",
+		},
+		{
+			name:            "a non-mainnet chain must name its ALCHEMY_HTTP_URL",
+			override:        map[string]string{"CHAIN_ID": "8453"},
+			wantErrContains: "ALCHEMY_HTTP_URL is required for chain 8453",
 		},
 		{
 			name:            "zero CHAIN_ID",

@@ -16,7 +16,7 @@
 #   verify-ecr-images.sh --kustomization k8s/overlays/prod/kustomization.yaml [--tag <40-hex-sha>]
 #
 #   --tag SHA   Resolve every newTag to this deploy SHA before checking
-#               (mirrors the sed the deploy bot uses to stamp tags: the trailing
+#               (mirrors how render-overlay-images.sh stamps tags: the trailing
 #               40-hex is replaced, any cronjob "name-" prefix is preserved).
 #               Omit to check the tags exactly as written in the overlay. The
 #               deploy pipeline omits it: update-staging / update-prod run this

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -40,10 +41,11 @@ func (f *fakeBlockQuerier) BlockNumber(_ context.Context) (uint64, error) {
 
 // fakeSQSConsumer is a controllable in-memory SQS consumer for unit tests.
 type fakeSQSConsumer struct {
-	mu       sync.Mutex
-	messages []outbound.SQSMessage
-	served   int
-	deleted  []string
+	mu                sync.Mutex
+	messages          []outbound.SQSMessage
+	served            int
+	deleted           []string
+	visibilityTimeout time.Duration
 }
 
 func newFakeSQSConsumer(events []outbound.BlockEvent) *fakeSQSConsumer {
@@ -81,7 +83,14 @@ func (f *fakeSQSConsumer) DeleteMessage(_ context.Context, receiptHandle string)
 	return nil
 }
 
+func (f *fakeSQSConsumer) ChangeMessageVisibilityBatch(context.Context, []string, time.Duration) (map[string]error, error) {
+	return nil, nil
+}
+
 func (f *fakeSQSConsumer) VisibilityTimeout() time.Duration {
+	if f.visibilityTimeout > 0 {
+		return f.visibilityTimeout
+	}
 	return 300 * time.Second
 }
 
@@ -312,7 +321,7 @@ func defaultConfig(sweepEveryN int) prime_debt.Config {
 	return prime_debt.Config{
 		SweepEveryNBlocks: sweepEveryN,
 		ChainID:           testChainID,
-		MaxMessages:       10,
+		MaxMessages:       1,
 		PollInterval:      10 * time.Millisecond,
 	}
 }
@@ -391,6 +400,30 @@ func TestStart_NoPrimes(t *testing.T) {
 	}
 	if !containsAny(err.Error(), "no primes", "primes") {
 		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestStart_RefusesAVisibilityTimeoutAReceiveCanOutrun(t *testing.T) {
+	caller := newFakeVatCaller()
+	caller.setIlk(sparkPrime().VaultAddress, ilkFrom("ALLOCATOR-SPARK-A"))
+
+	consumer := newFakeSQSConsumer(nil)
+	consumer.visibilityTimeout = 30 * time.Second
+	repo := &fakePrimeDebtRepository{primes: []entity.Prime{sparkPrime()}}
+	svc, err := prime_debt.NewVaultDebtService(defaultConfig(75), caller, repo, consumer, newFakeBlockQuerier(testBlockNum))
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+
+	err = svc.Start(context.Background())
+	if err == nil {
+		_ = svc.Stop()
+		t.Fatal("Start accepted a 30s visibility timeout; a booted worker never crashloops on it, because " +
+			"ProcessMessages revalidates on every poll and RunLoop only logs what it returns, so the pod reports " +
+			"Ready and spins logging forever while the queue never drains")
+	}
+	if !strings.Contains(err.Error(), "visibility timeout") {
+		t.Errorf("Start error = %q, want it to name the visibility timeout", err)
 	}
 }
 

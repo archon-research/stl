@@ -44,21 +44,31 @@ func (h *capturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *capturingHandler) WithGroup(string) slog.Handler      { return h }
 
 func (h *capturingHandler) hasWarnContaining(sub string) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	for _, r := range h.records {
-		if r.Level == slog.LevelWarn && strings.Contains(r.Message, sub) {
-			return true
-		}
-	}
-	return false
+	return len(h.warnsContaining(sub)) > 0
 }
 
-// captureLogs replaces the service logger with a records-capturing one.
+func (h *capturingHandler) warnsContaining(sub string) []map[string]string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var found []map[string]string
+	for _, r := range h.records {
+		if r.Level != slog.LevelWarn || !strings.Contains(r.Message, sub) {
+			continue
+		}
+		attrs := map[string]string{}
+		r.Attrs(func(a slog.Attr) bool {
+			attrs[a.Key] = a.Value.String()
+			return true
+		})
+		found = append(found, attrs)
+	}
+	return found
+}
+
+// captureLogs returns the handler the harness wired into the service and its
+// multicaller at construction, so a test can assert on any line emitted.
 func (h *serviceTestHarness) captureLogs() *capturingHandler {
-	handler := &capturingHandler{}
-	h.svc.logger = slog.New(handler)
-	return handler
+	return h.logs
 }
 
 // --- transaction / probe observer ---
@@ -110,23 +120,19 @@ func (o *txProbeObserver) requireProbedOutsideTx(t *testing.T) {
 
 // --- probe / read result helpers ---
 
-// adapterProbeResults returns the 2-call adapter probe response
-// (morpho, morphoVaultV1) that classifies to adapterType.
+// adapterProbeResults returns the adapter probe response in which only
+// adapterType's own marker answers, so the classifier reads back that type. An
+// adapterType no marker claims (Unknown) leaves every call reverting.
 func (h *serviceTestHarness) adapterProbeResults(adapterType entity.MorphoAdapterType) []outbound.Result {
-	ok := func(succeed bool) outbound.Result {
-		if succeed {
-			return outbound.Result{Success: true, ReturnData: h.packAddress(common.HexToAddress("0x1"))}
+	results := make([]outbound.Result, adapterProbeCallsPerAdapter)
+	for i, marker := range adapterMarkers {
+		if marker.adapterType == adapterType {
+			results[i] = outbound.Result{Success: true, ReturnData: packAddress(common.HexToAddress("0x1"))}
+			continue
 		}
-		return outbound.Result{Success: false, ReturnData: nil}
+		results[i] = outbound.Result{Success: false, ReturnData: nil}
 	}
-	switch adapterType {
-	case entity.MorphoAdapterTypeMarketV1:
-		return []outbound.Result{ok(true), ok(false)}
-	case entity.MorphoAdapterTypeVaultV1:
-		return []outbound.Result{ok(false), ok(true)}
-	default:
-		return []outbound.Result{ok(false), ok(false)}
-	}
+	return results
 }
 
 var testAdapterAddr = common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2")
@@ -163,7 +169,7 @@ func TestProcessBlockEvent_AddAdapter(t *testing.T) {
 			logs := h.captureLogs()
 
 			h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-				if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+				if len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == testAdapterAddr {
 					return h.adapterProbeResults(tt.adapterType), nil
 				}
 				return nil, errTestUnexpectedCall(calls)
@@ -232,7 +238,7 @@ func TestProcessBlockEvent_AddAdapter_SeedsAdapterState(t *testing.T) {
 	realAssets := big.NewInt(41_300_000)
 	var gotHash common.Hash
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+		if len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == testAdapterAddr {
 			return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
 		}
 		return nil, errTestUnexpectedCall(calls)
@@ -330,7 +336,7 @@ func TestProcessBlockEvent_AddAdapter_RealAssetsSeedTolerance(t *testing.T) {
 			logs := h.captureLogs()
 
 			h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-				if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+				if len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == testAdapterAddr {
 					return h.adapterProbeResults(tt.adapterType), nil
 				}
 				return nil, errTestUnexpectedCall(calls)
@@ -463,7 +469,7 @@ func TestProcessBlockEvent_AdapterProbeRunsBeforeTransaction(t *testing.T) {
 
 			obs := &txProbeObserver{}
 			h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-				if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+				if len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == testAdapterAddr {
 					obs.recordProbe()
 					return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
 				}
@@ -571,7 +577,7 @@ func TestProcessBlockEvent_Allocation_WarnsOnlyWhenTheObservationWasRecorded(t *
 				return nil, errTestUnexpectedCall(calls)
 			}
 			h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-				if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+				if len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == testAdapterAddr {
 					return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
 				}
 				return nil, errTestUnexpectedCall(calls)
@@ -761,7 +767,7 @@ func TestProcessBlockEvent_Allocation_UnknownAdapterHeals(t *testing.T) {
 			}
 			// getAdapterType classification (2 number-pinned calls to the adapter).
 			h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-				if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+				if len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == testAdapterAddr {
 					return h.adapterProbeResults(tt.adapterType), nil
 				}
 				return nil, errTestUnexpectedCall(calls)
@@ -873,7 +879,7 @@ func TestProcessBlockEvent_AdapterRegistration_CountsOnlyAppendedObservations(t 
 			name: "redelivered AddAdapter the primary key already holds",
 			setup: func(h *serviceTestHarness) {
 				h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-					if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+					if len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == testAdapterAddr {
 						return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
 					}
 					return nil, errTestUnexpectedCall(calls)
@@ -932,7 +938,7 @@ func TestProcessBlockEvent_AdapterRegistration_RecordsProvenanceAndType(t *testi
 			name: "AddAdapter event",
 			setup: func(h *serviceTestHarness) {
 				h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-					if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+					if len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == testAdapterAddr {
 						return h.adapterProbeResults(entity.MorphoAdapterTypeUnknown), nil
 					}
 					return nil, errTestUnexpectedCall(calls)
@@ -953,7 +959,7 @@ func TestProcessBlockEvent_AdapterRegistration_RecordsProvenanceAndType(t *testi
 			name: "Allocate for an adapter that predates discovery",
 			setup: func(h *serviceTestHarness) {
 				h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-					if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+					if len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == testAdapterAddr {
 						return h.adapterProbeResults(entity.MorphoAdapterTypeUnknown), nil
 					}
 					return nil, errTestUnexpectedCall(calls)
@@ -1108,7 +1114,7 @@ func TestProcessBlockEvent_AdapterMembership_NotRecordedWhenTheCommitFails(t *te
 			name: "AddAdapter",
 			setup: func(h *serviceTestHarness) {
 				h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-					if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+					if len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == testAdapterAddr {
 						return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
 					}
 					return nil, errTestUnexpectedCall(calls)
@@ -1137,7 +1143,7 @@ func TestProcessBlockEvent_AdapterMembership_NotRecordedWhenTheCommitFails(t *te
 			name: "Allocate",
 			setup: func(h *serviceTestHarness) {
 				h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-					if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+					if len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == testAdapterAddr {
 						return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
 					}
 					return nil, errTestUnexpectedCall(calls)
@@ -1205,7 +1211,7 @@ func TestProcessBlockEvent_AddAdapter_CountsTheCommittedSeedAsASnapshot(t *testi
 			reader := h.recordMetrics(t)
 
 			h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-				if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+				if len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == testAdapterAddr {
 					return h.adapterProbeResults(tt.adapterType), nil
 				}
 				return nil, errTestUnexpectedCall(calls)
@@ -1536,8 +1542,8 @@ func (h *serviceTestHarness) feeGetterResults(perfFee, mgmtFee *big.Int, perfRec
 	return []outbound.Result{
 		{Success: true, ReturnData: h.packUint256(perfFee)},
 		{Success: true, ReturnData: h.packUint256(mgmtFee)},
-		{Success: true, ReturnData: h.packAddress(perfRecip)},
-		{Success: true, ReturnData: h.packAddress(mgmtRecip)},
+		{Success: true, ReturnData: packAddress(perfRecip)},
+		{Success: true, ReturnData: packAddress(mgmtRecip)},
 	}
 }
 

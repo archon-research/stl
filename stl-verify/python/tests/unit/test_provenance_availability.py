@@ -6,7 +6,6 @@ from fastapi.testclient import TestClient
 from app.api.deps import get_reference_risk_capital_service_factory
 from app.api.v1 import provenance_availability
 from app.domain.entities.allocation import Prime
-from app.domain.exceptions import ReferenceDataUnavailableError
 from app.main import app
 from app.services.allocation_service import AllocationService
 from app.services.reference_risk_capital_service import ReferenceRiskCapitalService
@@ -26,17 +25,12 @@ def _prime(name: str) -> Prime:
 
 @pytest.fixture
 def client(request):
-    """A client whose monitor returns ``request.param``, or raises it."""
-    outcome = request.param
-
+    """A client whose reference reader reports ``request.param`` as covered."""
     service = AsyncMock(spec=AllocationService)
     service.list_primes.return_value = [_prime("spark"), _prime("grove"), _prime("spark")]
 
     reference = AsyncMock(spec=ReferenceRiskCapitalService)
-    if isinstance(outcome, Exception):
-        reference.tracked_stars.side_effect = outcome
-    else:
-        reference.tracked_stars.return_value = outcome
+    reference.covered_stars.return_value = request.param
 
     async def _service_dep():
         yield service
@@ -50,7 +44,7 @@ def client(request):
 
 
 @pytest.mark.parametrize("client", [frozenset({"spark"})], indirect=True)
-def test_a_tracked_prime_can_be_served_from_either_provenance_or_both(client: TestClient):
+def test_a_covered_prime_can_be_served_from_either_provenance_or_both(client: TestClient):
     body = client.get("/v1/provenance/available").json()
 
     spark = next(row for row in body["primes"] if row["name"] == "spark")
@@ -58,7 +52,7 @@ def test_a_tracked_prime_can_be_served_from_either_provenance_or_both(client: Te
 
 
 @pytest.mark.parametrize("client", [frozenset({"spark"})], indirect=True)
-def test_an_untracked_prime_offers_only_stl_own_figures(client: TestClient):
+def test_an_uncovered_prime_offers_only_stl_own_figures(client: TestClient):
     body = client.get("/v1/provenance/available").json()
 
     grove = next(row for row in body["primes"] if row["name"] == "grove")
@@ -73,16 +67,24 @@ def test_each_prime_is_listed_once_however_many_proxies_it_has(client: TestClien
     assert names == sorted(set(names))
 
 
-@pytest.mark.parametrize("client", [ReferenceDataUnavailableError("boom")], indirect=True)
-def test_unknown_coverage_is_reported_as_no_coverage(client: TestClient):
-    # Never a 502: STL's own figures are unaffected. Claiming a provenance is
-    # available and then failing every request for it is the worse answer.
+@pytest.mark.parametrize("client", [frozenset()], indirect=True)
+def test_no_covered_prime_offers_stl_own_figures_alone(client: TestClient):
+    # Before the indexer's first cycle every prime is uncovered, and reporting
+    # `indexed` alone is a true statement about what can be served.
     response = client.get("/v1/provenance/available")
 
     assert response.status_code == 200
     body = response.json()
-    assert body["reference_upstream_reachable"] is False
     assert all(row["available"] == ["indexed"] for row in body["primes"])
+
+
+@pytest.mark.parametrize("client", [frozenset({"spark"})], indirect=True)
+def test_reachability_is_true_now_that_coverage_comes_from_stls_own_tables(client: TestClient):
+    # Retained for clients that branch on it. There is no upstream call left to
+    # fail: a failed read is a 500 and answers nothing at all.
+    body = client.get("/v1/provenance/available").json()
+
+    assert body["reference_upstream_reachable"] is True
 
 
 @pytest.mark.parametrize("client", [frozenset({"SPARK"})], indirect=True)

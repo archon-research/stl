@@ -1,0 +1,47 @@
+# =============================================================================
+# Mock CoinGecko Server Dockerfile
+# =============================================================================
+# Multi-stage build for the local-dev price-vendor stand-in (VEC-748).
+
+# -----------------------------------------------------------------------------
+# Build Stage
+# -----------------------------------------------------------------------------
+ARG GO_VERSION
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS builder
+
+# Cross-compilation arg only; this dev image embeds no version ldflags.
+ARG TARGETARCH
+
+RUN apk add --no-cache git ca-certificates
+
+WORKDIR /app
+
+# Copy go mod files first for better layer caching
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
+    -ldflags="-w -s -extldflags '-static'" \
+    -o /mock-coingecko-server \
+    ./cmd/util/mock-coingecko-server
+
+# -----------------------------------------------------------------------------
+# Runtime Stage
+# -----------------------------------------------------------------------------
+FROM alpine:3.21
+
+RUN apk add --no-cache ca-certificates tzdata
+
+RUN adduser -D -g '' appuser
+
+WORKDIR /app
+
+COPY --from=builder /mock-coingecko-server /app/mock-coingecko-server
+
+USER appuser
+
+EXPOSE 8080
+
+ENTRYPOINT ["/app/mock-coingecko-server"]

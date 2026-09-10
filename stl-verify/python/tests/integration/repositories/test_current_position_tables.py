@@ -13,7 +13,9 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
+from app.adapters.postgres.reference_as_of import utc_now
 from tests.integration.seed import (
+    ORACLE_ASSET_RETIRED_FROM,
     bind_protocol_oracle,
     insert_borrower_collateral,
     insert_borrower_debt,
@@ -24,6 +26,7 @@ from tests.integration.seed import (
     insert_reserve_data,
     insert_token,
     insert_user,
+    retire_oracle_asset,
 )
 
 _BLOCK = 30_000_000
@@ -49,7 +52,7 @@ async def repository(async_db_url: str) -> AsyncIterator[AaveLikeBackedBreakdown
     """The Aave-like backed breakdown repository under test."""
     engine = create_async_engine(async_db_url)
     try:
-        yield AaveLikeBackedBreakdownRepository(engine)
+        yield AaveLikeBackedBreakdownRepository(engine, utc_now)
     finally:
         await engine.dispose()
 
@@ -518,10 +521,8 @@ async def test_disabling_a_mapping_drops_the_price_at_read_time(
     }
 
     # Retiring a source is a configuration change on the mapping, not a rewrite
-    # of any price history.
-    await conn.execute(
-        "UPDATE oracle_asset SET enabled = false WHERE oracle_id = $1 AND token_id = $2", oracle_id, drop_id
-    )
+    # of any price history. Append-on-change, so the retirement is a new version.
+    await retire_oracle_asset(conn, oracle_id, drop_id, ORACLE_ASSET_RETIRED_FROM, "test: source retired")
     assert (
         await conn.fetchval(
             "SELECT count(*) FROM token_price_current WHERE oracle_id = $1 AND token_id = $2", oracle_id, drop_id
@@ -574,8 +575,8 @@ async def test_disabling_a_mapping_falls_back_to_the_next_enabled_oracle(
     before = await repository.get_backed_breakdown(protocol_id, debt_id)
     assert {item.symbol: item.price_usd for item in before.items} == {"FALLBACKCOLL": Decimal("10")}
 
-    await conn.execute(
-        "UPDATE oracle_asset SET enabled = false WHERE oracle_id = $1 AND token_id = $2", primary_oracle_id, coll_id
+    await retire_oracle_asset(
+        conn, primary_oracle_id, coll_id, ORACLE_ASSET_RETIRED_FROM, "test: primary source retired"
     )
 
     # Both rows are still cached; the read now picks the backup oracle's price.
@@ -584,3 +585,54 @@ async def test_disabling_a_mapping_falls_back_to_the_next_enabled_oracle(
     assert {item.symbol: item.price_usd for item in after.items} == {"FALLBACKCOLL": Decimal("2")}
     # The token keeps backing the debt in full — it did not drop out of the ratio.
     assert {item.symbol: item.backing_value for item in after.items} == {"FALLBACKCOLL": Decimal("100.00")}
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_price_cache_carries_the_winning_rows_timestamp(conn: asyncpg.Connection) -> None:
+    """The cache copies the winning history row's observation time and moves it with the row.
+
+    ``/v1/tokens/…/price`` and the CORE feed-liveness check read the timestamp from
+    here instead of the history (VEC-672), so it must always be the timestamp of the
+    row whose price the cache holds: it follows a newer insert and ignores an older
+    one arriving late.
+    """
+    oracle_id = await insert_oracle(conn, "cur_price_ts", b"\xb1" * 20)
+    token_id = await insert_token(conn, "CURPRICETS", 18, b"\xb2" * 20)
+    await insert_oracle_asset(conn, oracle_id, token_id)
+
+    async def history_timestamp(block: int):
+        return await conn.fetchval(
+            'SELECT "timestamp" FROM onchain_token_price WHERE oracle_id = $1 AND token_id = $2 AND block_number = $3',
+            oracle_id,
+            token_id,
+            block,
+        )
+
+    async def cached():
+        row = await conn.fetchrow(
+            "SELECT block_timestamp, block_number, price_usd FROM token_price_current "
+            "WHERE oracle_id = $1 AND token_id = $2",
+            oracle_id,
+            token_id,
+        )
+        assert row is not None
+        return row
+
+    await insert_onchain_price(
+        conn, token_id=token_id, oracle_id=oracle_id, price="3.0", block=_BLOCK, time_offset="-2 hours"
+    )
+    first = await cached()
+    assert first["block_timestamp"] == await history_timestamp(_BLOCK)
+
+    await insert_onchain_price(
+        conn, token_id=token_id, oracle_id=oracle_id, price="9.0", block=_BLOCK + 1, time_offset="-1 hours"
+    )
+    second = await cached()
+    assert second["block_number"] == _BLOCK + 1
+    assert second["block_timestamp"] == await history_timestamp(_BLOCK + 1)
+    assert second["block_timestamp"] > first["block_timestamp"]
+
+    await insert_onchain_price(
+        conn, token_id=token_id, oracle_id=oracle_id, price="1.0", block=_BLOCK - 1, time_offset="-3 hours"
+    )
+    assert dict(await cached()) == dict(second)

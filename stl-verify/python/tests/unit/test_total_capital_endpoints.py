@@ -53,14 +53,14 @@ def test_list_prime_total_capital_returns_aggregated_buckets():
             params={
                 "from_timestamp": "2026-05-19T00:00:00Z",
                 "to_timestamp": "2026-06-18T00:00:00Z",
-                "resolution": "PT6H",
+                "frequency": "PT6H",
             },
         )
 
         assert response.status_code == 200
         body = response.json()
         assert body["mode"] == "aggregated"
-        assert body["window"]["resolution"] == "PT6H"
+        assert body["window"]["frequency"] == "PT6H"
         # assets_usd and encumbrance_ratio are reference-only, so self mode
         # reports them unobserved rather than deriving a local stand-in.
         assert body["data"] == [

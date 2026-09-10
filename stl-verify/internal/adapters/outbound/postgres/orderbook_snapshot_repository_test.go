@@ -24,7 +24,7 @@ func TestBuildOrderbookSnapshotInsertParity(t *testing.T) {
 		{Exchange: "coinbase", Symbol: "ETH-USD", IngestedAt: now, PersistedAt: now}, // empty sides
 	}
 
-	sql, args, err := buildOrderbookSnapshotInsert(snaps)
+	sql, args, err := buildOrderbookSnapshotInsert(snaps, 1)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}

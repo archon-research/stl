@@ -4,3 +4,7 @@ target-version = "py312"
 [lint]
 select = ["E", "F", "I"]
 ignore = []
+
+[lint.per-file-ignores]
+# Vendored axis-synome sources keep upstream's long docstring lines verbatim.
+"app/risk_engine/_vendored_synome/**" = ["E501"]

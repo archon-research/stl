@@ -5,12 +5,17 @@ from decimal import Decimal
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.adapters.postgres.reference_as_of import (
+    ORACLE_ASSET_AS_OF,
+    ReferenceAsOf,
+    ReferenceEffectiveAtProvider,
+)
 from app.domain.entities.backed_breakdown import (
     BackedBreakdown,
     CollateralContribution,
 )
 
-_BACKED_BREAKDOWN_SQL = """
+_BACKED_BREAKDOWN_SQL = f"""
 -- Reads the trigger-maintained *_current tables (newest row per key, see
 -- 20260820_120000_create_current_position_tables.sql) instead of recomputing
 -- latest-over-history per request: the histories are mostly-compressed
@@ -42,15 +47,12 @@ user_collateral AS (
 ),
 
 -- Step 3: Current USD price per token from the protocol's oracles.
--- Same shape as before the *_current tables existed — which protocols an oracle
--- serves and whether its mapping is enabled are resolved HERE, not when the price
--- was written, so retiring a source takes effect immediately AND still falls back
--- to the protocol's next enabled oracle (canonical rationale, incl. the no-history
--- tradeoff, on _DIRECT_ASSET_HOLDINGS_SQL in allocation_position_repository.py).
--- Only the FROM changed: token_price_current instead of the onchain_token_price
--- hypertable, so the ranking runs over one row per (oracle, token) rather than all
--- of history. oracle_id breaks any remaining same-snapshot-key tie deterministically
--- (higher id = later-registered oracle).
+-- Which protocols an oracle serves, and whether its mapping was enabled, are resolved here
+-- and pinned to :reference_effective_at rather than at write time (canonical rationale on
+-- _DIRECT_ASSET_HOLDINGS_SQL in allocation_position_repository.py). FROM is
+-- token_price_current, not the onchain_token_price hypertable, so the ranking runs over one
+-- row per (oracle, token) rather than all of history. oracle_id breaks any remaining
+-- same-snapshot-key tie deterministically (higher id = later-registered oracle).
 token_prices AS (
     SELECT DISTINCT ON (tpc.token_id)
         tpc.token_id,
@@ -59,7 +61,7 @@ token_prices AS (
     JOIN protocol_oracle po ON po.oracle_id = tpc.oracle_id
     WHERE po.protocol_id = :protocol_id
       AND EXISTS (
-          SELECT 1 FROM oracle_asset oa
+          SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
           WHERE oa.oracle_id = tpc.oracle_id
             AND oa.token_id = tpc.token_id
             AND oa.enabled
@@ -139,8 +141,9 @@ ORDER BY a.backed_asset_id, backing_usd DESC;
 class AaveLikeBackedBreakdownRepository:
     """Postgres implementation of the backed breakdown repository for Aave-like protocols."""
 
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(self, engine: AsyncEngine, reference_effective_at: ReferenceEffectiveAtProvider) -> None:
         self._engine = engine
+        self._reference = ReferenceAsOf(reference_effective_at)
 
     async def get_backed_breakdowns(
         self, protocol_id: int, backed_asset_ids: Sequence[int]
@@ -159,7 +162,7 @@ class AaveLikeBackedBreakdownRepository:
         async with self._engine.connect() as connection:
             result = await connection.execute(
                 text(_BACKED_BREAKDOWN_SQL),
-                {"protocol_id": protocol_id, "backed_asset_ids": ids},
+                self._reference.params(protocol_id=protocol_id, backed_asset_ids=ids),
             )
             rows = result.fetchall()
 

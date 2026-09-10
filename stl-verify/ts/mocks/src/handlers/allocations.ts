@@ -6,9 +6,10 @@
  * `token_symbol` are case-insensitive substrings and `action_type` is
  * case-insensitive equality, matching the `LIKE`/`LOWER()` the repository uses.
  *
- * The `aggregate=true` envelope is a different row shape, not a variant of the
- * same one, and `ui/src/lib/api.ts` throws when it gets the wrong `mode` — so
- * the mock has to get the mode right or the app fails loudly, which is the point.
+ * The bucketed envelope is a different row shape, not a variant of the same
+ * one, and `ui/src/shared/lib/queries.ts` throws from its `select` when it gets
+ * the wrong `mode` — so the mock has to get the mode right or the app fails
+ * loudly, which is the point.
  */
 import { mockDelay } from '@archon-research/http-client-msw';
 import type { MockHandler } from '@archon-research/http-client-msw';
@@ -30,10 +31,11 @@ import {
   equalsInsensitive,
   includesInsensitive,
   readChainId,
-  readFlag,
   readProvenance,
   readLimit,
   resolveWindow,
+  rawWindowEcho,
+  resampledWindowEcho,
   sameHex,
 } from '../query.ts';
 import type {
@@ -204,7 +206,8 @@ export function allocationHandlers(): MockHandler[] {
         {
           fromTimestamp: query.get('from_timestamp'),
           toTimestamp: query.get('to_timestamp'),
-          resolution: query.get('resolution'),
+          frequency: query.get('frequency'),
+          aggregationMethod: query.get('aggregation_method'),
         },
         nowMs,
       );
@@ -223,12 +226,7 @@ export function allocationHandlers(): MockHandler[] {
       if (!chainId.ok) {
         return response.untyped(problemResponse(chainId.problem));
       }
-      const aggregate = readFlag('aggregate', query.get('aggregate'));
-      if (!aggregate.ok) {
-        return response.untyped(problemResponse(aggregate.problem));
-      }
-
-      const { window, fromMs, toMs } = resolved.value;
+      const { bucketed, frequencyMs, fromMs, toMs } = resolved.value;
       const filters: ActivityFilters = {
         primeId: query.get('prime_id'),
         chainId: chainId.value,
@@ -241,14 +239,14 @@ export function allocationHandlers(): MockHandler[] {
         .filter((row) => matchesFilters(row, filters))
         .filter((row) => withinWindow(row, fromMs, toMs));
 
-      if (aggregate.value) {
+      if (bucketed) {
         return response(200).json({
           mode: 'aggregated',
-          window,
+          window: resampledWindowEcho(resolved.value),
           data: activityBuckets(
             matched,
-            bucketStarts(fromMs, toMs, window.interval_ms, limit.value),
-            window.interval_ms,
+            bucketStarts(fromMs, toMs, frequencyMs, limit.value),
+            frequencyMs,
             receiptTokenUsdPerUnit(nowMs),
           ),
         });
@@ -256,7 +254,7 @@ export function allocationHandlers(): MockHandler[] {
 
       return response(200).json({
         mode: 'raw',
-        window,
+        window: rawWindowEcho(resolved.value),
         data: matched.slice(0, limit.value),
       });
     }),

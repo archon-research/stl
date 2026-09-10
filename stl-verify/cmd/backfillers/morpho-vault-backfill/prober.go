@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"slices"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
@@ -41,20 +42,13 @@ type vaultProber struct {
 	logger       *slog.Logger
 }
 
-// probeAllCandidates checks each candidate address by calling the shared probe
-// (MORPHO/asset/curator/liquidityAdapter) via multicall. Returns confirmed
-// vaults with their metadata.
 func (p *vaultProber) probeAllCandidates(
 	ctx context.Context,
 	candidates map[common.Address]int64,
 	probeBlock int64,
 	batchSize int,
 ) ([]confirmedVault, error) {
-	addrs := make([]common.Address, 0, len(candidates))
-	for addr := range candidates {
-		addrs = append(addrs, addr)
-	}
-
+	addrs := probeOrder(candidates)
 	blockNum := new(big.Int).SetInt64(probeBlock)
 	var confirmed []confirmedVault
 
@@ -66,7 +60,7 @@ func (p *vaultProber) probeAllCandidates(
 		end := min(i+batchSize, len(addrs))
 		batch := addrs[i:end]
 
-		vaults, err := p.probeBatchWithRetry(ctx, batch, candidates, blockNum)
+		vaults, err := p.probeBatch(ctx, batch, candidates, blockNum)
 		if err != nil {
 			return nil, fmt.Errorf("probing batch %d-%d: %w", i, end, err)
 		}
@@ -81,52 +75,15 @@ func (p *vaultProber) probeAllCandidates(
 	return confirmed, nil
 }
 
-// probeBatchWithRetry tries probeBatch, and on failure retries with progressively
-// smaller sub-batches down to single-address probes. This handles "out of gas"
-// errors from the multicall when a batch contains contracts that consume excessive gas.
-//
-// At the single-address floor there is nothing left to split, so the error is
-// propagated (failing the run) rather than swallowed. By that point the only
-// errors reaching here are transport failures (429 / timeout / 5xx, already
-// retried to exhaustion by the rpchttp client) or a structural-transport error
-// out of the multicall — ErrNotVault is consumed as a per-result Success:false
-// inside collectProbeConfirmed and never surfaces as an error. Swallowing here
-// would permanently black-hole a real vault while the backfill run exits 0;
-// failing loudly is safe because a backfiller re-run is idempotent.
-func (p *vaultProber) probeBatchWithRetry(
-	ctx context.Context,
-	batch []common.Address,
-	firstBlocks map[common.Address]int64,
-	blockNum *big.Int,
-) ([]confirmedVault, error) {
-	vaults, err := p.probeBatch(ctx, batch, firstBlocks, blockNum)
-	if err == nil {
-		return vaults, nil
+// Sorted because map order reshuffles batch composition between attempts, so a
+// batch failure would never name the same members twice.
+func probeOrder(candidates map[common.Address]int64) []common.Address {
+	addrs := make([]common.Address, 0, len(candidates))
+	for addr := range candidates {
+		addrs = append(addrs, addr)
 	}
-
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-
-	if len(batch) == 1 {
-		return nil, fmt.Errorf("probing candidate %s: %w", batch[0].Hex(), err)
-	}
-
-	// Batch failed — retry with halved batch size, down to individual probes.
-	p.logger.Warn("batch probe failed, retrying with smaller batches",
-		"batchSize", len(batch),
-		"error", err)
-
-	mid := len(batch) / 2
-	left, err := p.probeBatchWithRetry(ctx, batch[:mid], firstBlocks, blockNum)
-	if err != nil {
-		return nil, err
-	}
-	right, err := p.probeBatchWithRetry(ctx, batch[mid:], firstBlocks, blockNum)
-	if err != nil {
-		return nil, err
-	}
-	return append(left, right...), nil
+	slices.SortFunc(addrs, common.Address.Cmp)
+	return addrs
 }
 
 // confirmedProbe pairs a probe-confirmed vault address with the version the
@@ -138,9 +95,10 @@ type confirmedProbe struct {
 	version entity.MorphoVaultVersion
 }
 
-// probeBatch probes a batch of candidate addresses. For each address, it calls
-// the shared probe in a single multicall. Confirmed vaults get their metadata
-// fetched in a follow-up multicall.
+// probeBatch probes a batch of candidate addresses in a single multicall and
+// fetches the confirmed vaults' metadata in a follow-up one. A candidate that
+// traps on every selector arrives as failed calls (see multicall.Narrowing)
+// and is skipped like any non-vault.
 func (p *vaultProber) probeBatch(
 	ctx context.Context,
 	batch []common.Address,
@@ -157,7 +115,6 @@ func (p *vaultProber) probeBatch(
 	if err != nil {
 		return nil, fmt.Errorf("multicall probe: %w", err)
 	}
-
 	probeConfirmed, err := p.collectProbeConfirmed(batch, results)
 	if err != nil {
 		return nil, err
@@ -165,7 +122,6 @@ func (p *vaultProber) probeBatch(
 	if len(probeConfirmed) == 0 {
 		return nil, nil
 	}
-
 	return p.fetchVaultMetadata(ctx, probeConfirmed, firstBlocks, blockNum)
 }
 

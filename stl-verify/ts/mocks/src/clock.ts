@@ -19,6 +19,15 @@ export const MINUTE_MS = 60 * SECOND_MS;
 export const HOUR_MS = 60 * MINUTE_MS;
 export const DAY_MS = 24 * HOUR_MS;
 
+/**
+ * How stale Sky's figures are, inside the reference indexer's 15m cadence.
+ *
+ * The API serves STL's record of Sky rather than a live read, so a reference
+ * figure carries the cycle it was observed at. Non-zero on purpose: a fixture
+ * stamped `now` would never exercise the staleness the stamp exists to show.
+ */
+export const REFERENCE_SYNCED_AGO_MS = 11 * MINUTE_MS;
+
 /** The instant a handler renders its fixtures against. */
 export function mockNow(): number {
   return Date.now();
@@ -41,7 +50,7 @@ export function offsetIsoAgo(nowMs: number, agoMs: number): string {
   return isoAgo(nowMs, agoMs).replace(/Z$/u, '+00:00');
 }
 
-/** Buckets land on the resolution grid, as the real time-bucketed reads do. */
+/** Buckets land on the interval grid, as the real time-bucketed reads do. */
 export function floorToInterval(ms: number, intervalMs: number): number {
   return Math.floor(ms / intervalMs) * intervalMs;
 }
@@ -53,7 +62,7 @@ const SERIES_ANCHOR_INTERVAL_MS = 15 * MINUTE_MS;
  * The instant the generated value series are measured from.
  *
  * It must not come from the response: anchoring on the newest bucket made the
- * same `bucket_start` answer differently once the window or the resolution
+ * same `bucket_start` answer differently once the window or the interval
  * changed, and made a raw debt snapshot disagree with the bucket covering it. A
  * frozen epoch would fix that by drifting the whole series away from the current
  * figures the summary tiles read, so the anchor is the clock quantised to a

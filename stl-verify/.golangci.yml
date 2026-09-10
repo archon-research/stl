@@ -8,9 +8,67 @@
 version: "2"
 linters:
   enable:
+    - depguard
     - gocritic
     - modernize
   settings:
+    # Function-composition backstop (AGENTS.md "Function composition"; VEC-465).
+    # Not in `enable`: `make golangci-lint-new` runs these alone with
+    # --new-from-merge-base so only changed code is gated, while the full run
+    # above stays green on main. Comments count toward funlen on purpose.
+    cyclop:
+      max-complexity: 15
+    gocognit:
+      min-complexity: 20
+    funlen:
+      lines: 80
+      statements: 60
+      ignore-comments: false
+    # Hexagonal layering from AGENTS.md ("dependencies flow inward"), enforced
+    # on direct imports: domain -> nothing internal; ports -> domain;
+    # services -> ports + domain. Adapters are wired in cmd/, so only cmd/ and
+    # test files (all of them, not just integration tests) may import them.
+    # depguard matches pkg by prefix, hence the `$` (exact) + `/` (subtree)
+    # pairs: a bare prefix would also deny e.g. internal/portslegacy.
+    depguard:
+      rules:
+        domain:
+          files:
+            - "**/internal/domain/**"
+          deny:
+            - pkg: github.com/archon-research/stl/stl-verify/internal/ports$
+              desc: domain must not depend on ports
+            - pkg: github.com/archon-research/stl/stl-verify/internal/ports/
+              desc: domain must not depend on ports
+            - pkg: github.com/archon-research/stl/stl-verify/internal/adapters$
+              desc: domain must not depend on adapters
+            - pkg: github.com/archon-research/stl/stl-verify/internal/adapters/
+              desc: domain must not depend on adapters
+            - pkg: github.com/archon-research/stl/stl-verify/internal/services$
+              desc: domain must not depend on services
+            - pkg: github.com/archon-research/stl/stl-verify/internal/services/
+              desc: domain must not depend on services
+        ports:
+          files:
+            - "**/internal/ports/**"
+          deny:
+            - pkg: github.com/archon-research/stl/stl-verify/internal/adapters$
+              desc: ports must not depend on adapters
+            - pkg: github.com/archon-research/stl/stl-verify/internal/adapters/
+              desc: ports must not depend on adapters
+            - pkg: github.com/archon-research/stl/stl-verify/internal/services$
+              desc: ports must not depend on services
+            - pkg: github.com/archon-research/stl/stl-verify/internal/services/
+              desc: ports must not depend on services
+        services:
+          files:
+            - "**/internal/services/**"
+            - "!**/*_test.go"
+          deny:
+            - pkg: github.com/archon-research/stl/stl-verify/internal/adapters$
+              desc: services depend on ports; adapters are injected in cmd/
+            - pkg: github.com/archon-research/stl/stl-verify/internal/adapters/
+              desc: services depend on ports; adapters are injected in cmd/
     staticcheck:
       # The standalone staticcheck binary's default set: the ST exclusions
       # match both tools' defaults (spelled out so the config doesn't depend
@@ -35,3 +93,9 @@ linters:
       - comments
       - std-error-handling
       - common-false-positives
+    rules:
+      # Table-driven tests and ABI literals are long by construction.
+      - linters: [funlen]
+        path: _test\.go$
+      - linters: [funlen]
+        path: internal/pkg/blockchain/abis/

@@ -33,13 +33,14 @@ type ReorgRecorder interface {
 // Reason constants for ReorgRecorder.RecordReorgDropped. Stable label values
 // for the resulting metric so dashboards and alerts can rely on them.
 const (
-	// ReorgDropReasonStaleFork: RPC's canonical block at the incoming
-	// number does not match the incoming hash. The broadcast is on a fork
-	// that did not win.
+	// ReorgDropReasonStaleFork: the broadcast is on a fork that did not win,
+	// or a load-balanced node has not converged yet; recovery is the watermark
+	// rewind in HandleReorgAtomic once a later reorg commits below this height.
 	ReorgDropReasonStaleFork = "stale_fork"
 
 	// ReorgDropReasonVerifyError: RPC verification call failed. Conservative
-	// drop — the next live broadcast will retry once RPC stabilises.
+	// drop; recovery is the same watermark rewind plus gap fill as stale_fork,
+	// not a re-broadcast of the dropped height.
 	ReorgDropReasonVerifyError = "verify_error"
 
 	// ReorgDropReasonStateShifted: another writer committed to block_states
@@ -67,14 +68,15 @@ const (
 )
 
 // BackfillRecorder records observability events from the backfill gap-fill
-// loop. The single hook today is RecordBackfillGapNoCanonical, fired by the
-// post-cycle invariant check that catches "gap-fill returned success but no
-// canonical row exists" (the silent-failure mode behind VEC-277 arbitrum
-// backfill).
+// loop: the post-cycle invariant check that catches "gap-fill returned success
+// but no canonical row exists" (the silent-failure mode behind VEC-277 arbitrum
+// backfill), and the two cursor signals — how far behind head the watermark is,
+// and how often a pass's advance is refused.
 type BackfillRecorder interface {
 	// RecordBackfillGapNoCanonical increments the counter that fires when a
 	// per-block gap-fill cycle completes without producing a non-orphaned
-	// canonical row. Labelled by chain.
+	// canonical row. Per-chain attribution comes from service.name; the chainID
+	// argument reaches no metric attribute.
 	RecordBackfillGapNoCanonical(ctx context.Context, chainID int64)
 
 	// RecordWatermarkLag records the current backfill lag (highest known block
@@ -82,6 +84,16 @@ type BackfillRecorder interface {
 	// direct symptom that surfaced 26 days late in the VEC-277 incident: the
 	// watermark stayed pinned while head advanced.
 	RecordWatermarkLag(ctx context.Context, lag int64)
+
+	// RecordWatermarkAdvanceSkipped increments the counter for a compare-and-set
+	// the stored cursor refused. A non-zero rate means a reorg landed between a
+	// pass's cursor read and its write: contention, self-healing next pass. A
+	// wedged cursor is the opposite shape — this counter at zero with the lag
+	// gauge climbing. Per-chain attribution comes from service.name.
+	// Diagnostic only, no alert rule by design: a refusal self-heals on the next
+	// pass, and a cursor that stays stuck pages through
+	// VectorWatcherBackfillWatermarkLagHigh.
+	RecordWatermarkAdvanceSkipped(ctx context.Context, chainID int64)
 }
 
 // BackupMetricsRecorder records metrics for backup processing.

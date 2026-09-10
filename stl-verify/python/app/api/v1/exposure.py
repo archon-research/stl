@@ -9,17 +9,23 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
+from app.adapters.postgres.reference_as_of import ReferenceEffectiveAtProvider
 from app.api._validators import ProxyAddressPathParam
-from app.api.deps import get_engine, get_reference_capital_repository_factory
+from app.api.deps import (
+    get_engine,
+    get_reference_as_of,
+    get_reference_capital_repository_factory,
+    require_prime_view,
+)
 from app.api.provenance import (
     get_requested_provenance,
     resolve_or_422,
 )
 from app.api.time_series import (
-    TimeSeriesWindow,
+    ResampledTimeSeriesWindow,
     apply_cache_control,
-    build_window,
-    get_time_series_query_params,
+    build_resampled_window,
+    get_resampled_time_series_query_params,
 )
 from app.domain.entities.allocation import EthAddress
 from app.domain.provenance import Provenance
@@ -67,12 +73,15 @@ class ExposureEnvelope(BaseModel):
             "`exposure_usd` and `reference_exposure_usd` on every bucket."
         ),
     )
-    window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
+    window: ResampledTimeSeriesWindow = Field(description="The window and frequency applied to this response.")
     data: list[ExposureBucketResponse] = Field(description="Priced exposure per time bucket.")
 
 
-async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationService:
-    return AllocationService(AllocationRepository(engine))
+async def _get_service(
+    engine: AsyncEngine = Depends(get_engine),
+    reference_as_of: ReferenceEffectiveAtProvider = Depends(get_reference_as_of),
+) -> AllocationService:
+    return AllocationService(AllocationRepository(engine, reference_as_of))
 
 
 def _merged_bucket_starts(*grids: dict) -> list:
@@ -89,7 +98,7 @@ async def _reference_exposure_by_bucket(
 ) -> dict[datetime, Decimal | None]:
     """Sky's exposure keyed by bucket start.
 
-    Both series are gap-filled over the same window and resolution, so their
+    Both series are gap-filled over the same window and frequency, so their
     bucket grids are identical and a lookup cannot silently shift a value into a
     neighbouring bucket.
     """
@@ -113,19 +122,20 @@ async def _reference_exposure_by_bucket(
         "the latest underlying oracle price and summed (the current `balance * price` exposure "
         "extended over time). Direct (non-receipt-token) holdings are excluded, matching "
         "the risk-capital exposure basis. Returns `404` if the prime is unknown. Defaults to the "
-        "last 24h; pass a window and `resolution` for longer ranges."
+        "last 24h; pass a window and `frequency` for longer ranges."
     ),
 )
 async def list_prime_exposure(
     prime_id: ProxyAddressPathParam,
     response: Response,
-    time_series: TimeSeriesQuery = Depends(get_time_series_query_params),
+    time_series: TimeSeriesQuery = Depends(get_resampled_time_series_query_params),
     limit: int = Query(100, ge=1, le=500, description="Max buckets returned (default 100, max 500)."),
     requested_provenance: Provenance | None = Depends(get_requested_provenance),
     service: AllocationService = Depends(_get_service),
     reference_repositories: Callable[[], ReferenceCapitalRepository] = Depends(
         get_reference_capital_repository_factory
     ),
+    _authz: None = Depends(require_prime_view),
 ) -> ExposureEnvelope:
     prime_address = EthAddress(prime_id)
     if not await service.prime_exists(prime_address):
@@ -136,7 +146,7 @@ async def list_prime_exposure(
     # Exposure observations are immutable once written, so a fully-pinned window
     # is safely cacheable; a defaulted (now-relative) window is not.
     apply_cache_control(response, time_series)
-    window = build_window(time_series)
+    window = build_resampled_window(time_series)
 
     if source is Provenance.REFERENCE:
         reference_buckets = await reference_repositories().list_reference_capital_buckets(

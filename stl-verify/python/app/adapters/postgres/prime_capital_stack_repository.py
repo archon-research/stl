@@ -30,7 +30,7 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
     """
     WITH target AS (
         SELECT prime_id
-        FROM allocation_position
+        FROM prime_proxy
         WHERE proxy_address = decode(:address_hex, 'hex')
         LIMIT 1
     ), snapshots AS (
@@ -92,6 +92,21 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
         WHERE pbs.prime_id = (SELECT prime_id FROM target)
           AND pbs.observed_at < CAST(:from_timestamp AS TIMESTAMPTZ)
           AND pbs.observed_at >= CAST(:from_timestamp AS TIMESTAMPTZ) - INTERVAL '90 days'
+    ), ranked AS (
+        SELECT
+            observed_at, total_risk_capital_usd, exposure_usd, encumbrance_ratio, assets_usd,
+            row_number() OVER (
+                ORDER BY observed_at DESC, precedence, processing_version DESC
+            ) AS rank
+        FROM pre
+    ), first_rank AS (
+        SELECT
+            min(rank) FILTER (WHERE total_risk_capital_usd IS NOT NULL) AS total_capital,
+            min(rank) FILTER (WHERE exposure_usd IS NOT NULL) AS exposure,
+            min(rank) FILTER (WHERE encumbrance_ratio IS NOT NULL) AS encumbrance,
+            min(rank) FILTER (WHERE assets_usd IS NOT NULL) AS assets,
+            min(rank) AS capital
+        FROM ranked
     ), corrected AS (
         -- One series from two feeds. `last()` has no defined order among rows
         -- sharing a timestamp, so precedence is explicit rather than left to
@@ -122,29 +137,19 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
         -- Bounded, because a figure this stale is not a current reading. Callers
         -- pair it with the observation time so age is visible rather than implied.
         SELECT
-            (SELECT total_risk_capital_usd FROM pre
-              WHERE total_risk_capital_usd IS NOT NULL
-              ORDER BY observed_at DESC, precedence, processing_version DESC
-              LIMIT 1) AS total_capital_usd,
-            (SELECT exposure_usd FROM pre
-              WHERE exposure_usd IS NOT NULL
-              ORDER BY observed_at DESC, precedence, processing_version DESC
-              LIMIT 1) AS exposure_usd,
-            (SELECT encumbrance_ratio FROM pre
-              WHERE encumbrance_ratio IS NOT NULL
-              ORDER BY observed_at DESC, precedence, processing_version DESC
-              LIMIT 1) AS encumbrance_ratio,
-            (SELECT assets_usd FROM pre
-              WHERE assets_usd IS NOT NULL
-              ORDER BY observed_at DESC, precedence, processing_version DESC
-              LIMIT 1) AS assets_usd,
-            (SELECT observed_at FROM pre
-              WHERE assets_usd IS NOT NULL
-              ORDER BY observed_at DESC, precedence, processing_version DESC
-              LIMIT 1) AS assets_observed_at,
-            (SELECT observed_at FROM pre
-              ORDER BY observed_at DESC, precedence, processing_version DESC
-              LIMIT 1) AS capital_observed_at
+            max(ranked.total_risk_capital_usd) FILTER (WHERE ranked.rank = first_rank.total_capital)
+                AS total_capital_usd,
+            max(ranked.exposure_usd) FILTER (WHERE ranked.rank = first_rank.exposure)
+                AS exposure_usd,
+            max(ranked.encumbrance_ratio) FILTER (WHERE ranked.rank = first_rank.encumbrance)
+                AS encumbrance_ratio,
+            max(ranked.assets_usd) FILTER (WHERE ranked.rank = first_rank.assets)
+                AS assets_usd,
+            max(ranked.observed_at) FILTER (WHERE ranked.rank = first_rank.assets)
+                AS assets_observed_at,
+            max(ranked.observed_at) FILTER (WHERE ranked.rank = first_rank.capital)
+                AS capital_observed_at
+        FROM ranked CROSS JOIN first_rank
     )
     SELECT
         time_bucket_gapfill(

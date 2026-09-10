@@ -8,6 +8,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
+from app.adapters.postgres.reference_as_of import utc_now
 from app.domain.entities.backed_breakdown import BackedBreakdown
 from tests.integration.seed import (
     insert_borrower_collateral,
@@ -351,7 +352,7 @@ async def repository(
         repository_class = cast(Any, AaveLikeBackedBreakdownRepository)
         yield cast(
             ProtocolScopedBackedBreakdownRepository,
-            repository_class(engine),
+            repository_class(engine, utc_now),
         )
     finally:
         await engine.dispose()

@@ -20,7 +20,7 @@ from temporalio.testing import WorkflowEnvironment
 from testcontainers.postgres import PostgresContainer
 
 MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parents[3] / "db" / "migrations"
-TIMESCALEDB_IMAGE = "timescale/timescaledb:2.25.1-pg17"
+TIMESCALEDB_IMAGE = "timescale/timescaledb:2.29.2-pg18"
 
 
 # ---------------------------------------------------------------------------

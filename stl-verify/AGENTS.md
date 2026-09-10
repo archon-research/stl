@@ -34,17 +34,20 @@ Follow [Effective Go](https://go.dev/doc/effective_go).
 - `cmd/cronjobs/` — **Temporal**-scheduled (not k8s CronJobs): anchorage, maple-graphql, offchain-price, watcher-data-validator. Schedules live in Temporal state; workers reconcile a changed interval env var into the existing schedule at startup (Go `reconcileScheduleSpec`, Python `ensure_schedule`), so a redeploy is enough. Ticks must be idempotent (Temporal retries). `morpho-v2-bootstrap` sits here by neighbourhood only: it carries no schedule and is started by hand like a backfiller.
 - `cmd/backfillers/` — historical gap fillers. Mostly one-shot CLI binaries (sparklend,
   oracle-pricing, aave-like-user-snapshot, raw-block-bulk-downloader), plus
-  `offchain-price-backfill` and `morpho-vault-backfill`, which are long-running **on-demand
-  Temporal workers**: they poll a task queue and idle until a run is started by hand from the
-  Temporal UI, with the range as workflow input. Grouped here by purpose (backfilling), not by
-  lifecycle.
+  `offchain-price-backfill`, `morpho-vault-backfill` and `block-republisher`, which are
+  long-running **on-demand Temporal workers**: they poll a task queue and idle until a run is
+  started by hand from the Temporal UI, with the range (or the block list) as workflow input.
+  Grouped here by purpose (backfilling), not by lifecycle.
 - `cmd/util/` — `migrate`, `generate-er`, `null-payload-refill`, `stress-test`.
 
 Every binary extracts a `run(ctx, args) error` from `main()` and runs under one of three
-entry points for graceful SIGINT/SIGTERM shutdown (~25s): `lifecycle.Run` (workers),
-`temporal.RunCronjob` (scheduled cronjobs), or `temporal.RunWorker` (on-demand Temporal
-jobs — no schedule; parameters, where the job takes any, supplied at start time; see
-`docs/temporal_guide.md`).
+entry points for graceful SIGINT/SIGTERM shutdown, all inside the pods' 90s
+`terminationGracePeriodSeconds`: `lifecycle.Run` (workers — bounded by
+`lifecycle.ShutdownTimeout`, 40s, plus a 45s `lifecycle.ShutdownTailBudget` for the
+deferred archive drain and OTEL flush), `temporal.RunCronjob` (scheduled cronjobs), or
+`temporal.RunWorker` (on-demand Temporal jobs — no schedule; parameters, where the job
+takes any, supplied at start time; see `docs/temporal_guide.md`). The two Temporal entry
+points hand shutdown to the Temporal SDK and read neither `lifecycle` constant.
 
 ### Data flow
 
@@ -77,6 +80,7 @@ All commands run from `stl-verify/`:
 ```bash
 # Development
 make dev-up              # Start kind cluster with full pipeline (mock blockchain server by default)
+make dev-up-new          # A whole cluster of your own next to the running ones: free port offset, derived name
 KIND_CLUSTER=<name> KIND_PORT_OFFSET=<n> make dev-up   # Isolated second cluster: own name, host ports +n, image tags, data dir
 make dev-suspend         # Suspend local kind nodes (local dev only; do not use in CI/prod)
 make dev-resume          # Resume suspended local kind nodes (local dev only; do not use in CI/prod)
@@ -86,11 +90,21 @@ make run-watcher         # Run one service on the host against the cluster
 make run-<worker>        # grep '^run-' in the Makefile for the full list (incl. per-chain *-avax)
 make kind-use-alchemy    # Switch watcher from the mock chain to real Alchemy (key in .env.secrets)
 
+# dev-up also deploys mock-coingecko-server, and offchain-price-indexer runs against it
+# by default (no real key needed). To use the real Pro API: set COINGECKO_API_KEY in
+# .env.secrets, then `make kind-secrets kind-use-coingecko`.
+# With ALCHEMY_API_KEY in .env.secrets, dev-up also runs the Alchemy workers in-cluster —
+# including the DEX indexers (curve-indexer, uniswap-v3-indexer, uniswap-v4-indexer, all one
+# stl-dex-indexer image) — consuming the in-cluster watcher's blocks over LocalStack SNS→SQS.
+# Nothing runs on the host; the workers that have a `run-*` target (grep '^run-') can still be
+# run on the host for debugging.
+
 # Testing
 make test               # Unit tests only
 make test-race          # Unit tests with race detector (CI default)
 make test-integration   # Integration tests (requires Docker, 5m timeout)
 make e2e                # End-to-end tests with testcontainers
+make e2e-real-blocks BLOCKS=25827558   # morpho-indexer over real mainnet blocks (needs ALCHEMY_API_KEY in ../.env.secrets)
 make cover              # Generate coverage report
 go test -race -run 'TestName' ./internal/services/<pkg>/   # single test
 
@@ -113,7 +127,9 @@ make deploy-bulk-download ERIGON_USER=<user> ERIGON_IP=<ip>
 
 See [Makefile](Makefile) for the complete list of targets. Every `run-*`, `dev-*` and
 `kind-*` target honours `KIND_CLUSTER` / `KIND_PORT_OFFSET`, so two agents can each run
-a full cluster on one machine without colliding on ports, image tags or data dirs.
+a full cluster on one machine without colliding on ports, image tags or data dirs. Once a
+cluster exists, `export KIND_CLUSTER=<name>` is enough — the offset is derived from the
+host port its control plane publishes.
 
 ### Go linting
 
@@ -190,7 +206,7 @@ Go-only rules for the stl-verify service. Language-agnostic conventions (testing
     - **One service set per CI shard, never per test** — service startup and migrations, not the tests, dominate integration-test CI time. A package declares what it needs in `TestMain` via `testutil.RunShared`, which owns service lifecycle, teardown order and the goroutine leak check — never hand-roll those in a package. Each handle it publishes lands in a package var the tests read (`sharedDSN`, `sharedRedisAddr`, `sharedLocalStackCfg`). In CI it takes the shard's `services:` containers (`STL_TEST_POSTGRES_DSN`, `STL_TEST_REDIS_ADDR`, `STL_TEST_LOCALSTACK_ENDPOINT`); locally it starts testcontainers. The Postgres server those variables name must be disposable and reached as a superuser — the suite creates and drops databases, flips template flags and evicts sessions it does not own — so never point them at a dev database you care about. `make shared-container-check` (part of `ci-checks`) fails any container started in a test.
     - **Isolate each test inside those services**: `testutil.SetupTestDB(t, sharedDSN)` for Postgres, a `testutil.SanitizeTestName(t.Name())` prefix for Redis keys and SQS/SNS names, `testutil.S3TestBucketName(t, prefix)` for buckets, `testutil.SQSTestFifoQueueName(t, prefix)` for FIFO queues. Anything a test counts (rows, objects, messages) needs its own database/bucket/queue. A test that drives a binary cannot namespace the names the binary builds for itself, so it hands the binary a namespace to build them from: `REDIS_KEY_PREFIX` for the cache key, and an `S3_BUCKET` from `testutil.S3TestBucketName(t, "stl-sentinel{env}-{chain}-raw-")` — `chainutil.ValidateS3BucketForChain` checks that prefix, not the whole name. Reach for `testutil.EnsureBucket` only where one package's own tests share a bucket, such as an archive bucket named for the worker. `make ci-service-check` holds the workflow's service images and LocalStack `SERVICES` to what the helpers ask for.
     - **`SetupTestDB` clones a migrated template database**, so a new test costs a file copy and migration time stays flat as tests are added. Never migrate per test; use `testutil.SetupDBForMain(baseDSN, name)` for a database shared by one test file. The template name carries a digest of the migration set plus `templateFormat` — bump that constant whenever `buildTemplate` changes, or a stale template outlives the change. Either edit leaves stale templates behind on a long-lived server: `make test-templates-clean` drops them, by hand because dropping from inside the suite would race a sibling process mid-clone. `db/migrator` is the deliberate exception — applying migrations from scratch is what it tests.
-- **Function composition**: a function-length / complexity linter (golangci-lint `funlen`/`gocognit`) is the planned deterministic backstop so an over-long function fails CI automatically rather than relying on a reviewer noticing.
+- **Function composition** is backstopped in CI by golangci-lint `funlen` (80 lines / 60 statements, comments count), `gocognit` (20) and `cyclop` (15), run on changed code only (`make golangci-lint-new`, gated on the merge base with `origin/main`). A new or modified function past a threshold fails CI; untouched pre-existing offenders do not. Escape hatch: `//nolint:funlen // <why>` on the declaration, and expect the reviewer to push back.
 - **Binaries/Building**: When building binaries using `go build`, output to `stl-verify/dist`
 - **Code structure**: In main.go files, keep main() at the top of the file.
 

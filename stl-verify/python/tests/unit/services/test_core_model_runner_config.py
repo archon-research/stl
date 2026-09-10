@@ -79,6 +79,89 @@ def test_morpho_market_loaded_from_market_config(market_configs_path, monkeypatc
     assert cfg.params["MORPHO_MARKET"] == "CBBTC"
 
 
+# Data-source selection: per-market flags in market_configs.json, with the
+# CORE_MODEL_*_SOURCE env vars as a global override (local kind forces parquet).
+
+
+def test_orderbook_source_defaults_to_parquet(market_configs_path, monkeypatch):
+    monkeypatch.setattr(os, "environ", _env())
+    cfg = _one("sparklend_usdt", market_configs_path)
+    assert cfg.orderbook_source == "parquet"
+
+
+def test_orderbook_source_postgres_is_selectable(market_configs_path, monkeypatch):
+    monkeypatch.setattr(os, "environ", _env({"CORE_MODEL_ORDERBOOK_SOURCE": "postgres"}))
+    cfg = _one("sparklend_usdt", market_configs_path)
+    assert cfg.orderbook_source == "postgres"
+
+
+def test_orderbook_source_is_recorded_in_params_for_the_audit_trail(market_configs_path, monkeypatch):
+    monkeypatch.setattr(os, "environ", _env({"CORE_MODEL_ORDERBOOK_SOURCE": "postgres"}))
+    cfg = _one("sparklend_usdt", market_configs_path)
+    assert cfg.params["ORDERBOOK_SOURCE"] == "postgres"
+
+
+def test_invalid_orderbook_source_is_rejected(market_configs_path, monkeypatch):
+    monkeypatch.setattr(os, "environ", _env({"CORE_MODEL_ORDERBOOK_SOURCE": "csv"}))
+    with pytest.raises(ValueError, match="ORDERBOOK_SOURCE"):
+        _one("sparklend_usdt", market_configs_path)
+
+
+def test_sources_are_market_scoped_via_market_configs(tmp_path, monkeypatch):
+    # Coverage is per market: one market can run live while its neighbours in
+    # the same "all" tick stay on parquet.
+    cfg = {
+        "sparklend_usdt": {"PROTOCOL": "SPARKLEND", "LOAN_TOKEN": "USDT", "POSITION_SOURCE": "postgres"},
+        "syrup_usdt": {"PROTOCOL": "SYRUP", "LOAN_TOKEN": "USDT"},
+    }
+    p = tmp_path / "market_configs.json"
+    p.write_text(json.dumps(cfg))
+    monkeypatch.setattr(os, "environ", _env())
+    configs = {c.market_key: c for c in RunnerConfig.resolve("all", market_configs_path=p)}
+    assert configs["sparklend_usdt"].position_source == "postgres"
+    assert configs["syrup_usdt"].position_source == "parquet"
+
+
+def test_env_var_overrides_the_market_config_source(tmp_path, monkeypatch):
+    # The global env override exists to force parquet everywhere on a cluster
+    # with no indexed data (local kind).
+    cfg = {"sparklend_usdt": {"PROTOCOL": "SPARKLEND", "LOAN_TOKEN": "USDT", "POSITION_SOURCE": "postgres"}}
+    p = tmp_path / "market_configs.json"
+    p.write_text(json.dumps(cfg))
+    monkeypatch.setattr(os, "environ", _env({"CORE_MODEL_POSITION_SOURCE": "parquet"}))
+    cfg = _one("sparklend_usdt", p)
+    assert cfg.position_source == "parquet"
+
+
+def test_invalid_source_in_market_config_is_rejected(tmp_path, monkeypatch):
+    cfg = {"sparklend_usdt": {"PROTOCOL": "SPARKLEND", "LOAN_TOKEN": "USDT", "ORDERBOOK_SOURCE": "csv"}}
+    p = tmp_path / "market_configs.json"
+    p.write_text(json.dumps(cfg))
+    monkeypatch.setattr(os, "environ", _env())
+    with pytest.raises(ValueError, match="ORDERBOOK_SOURCE"):
+        _one("sparklend_usdt", p)
+
+
+def test_price_source_defaults_to_parquet_and_is_recorded(market_configs_path, monkeypatch):
+    monkeypatch.setattr(os, "environ", _env())
+    cfg = _one("sparklend_usdt", market_configs_path)
+    assert cfg.price_source == "parquet"
+    assert cfg.params["PRICE_SOURCE"] == "parquet"
+
+
+def test_price_source_postgres_is_selectable(market_configs_path, monkeypatch):
+    monkeypatch.setattr(os, "environ", _env({"CORE_MODEL_PRICE_SOURCE": "postgres"}))
+    cfg = _one("sparklend_usdt", market_configs_path)
+    assert cfg.price_source == "postgres"
+    assert cfg.params["PRICE_SOURCE"] == "postgres"
+
+
+def test_invalid_price_source_is_rejected(market_configs_path, monkeypatch):
+    monkeypatch.setattr(os, "environ", _env({"CORE_MODEL_PRICE_SOURCE": "csv"}))
+    with pytest.raises(ValueError, match="PRICE_SOURCE"):
+        _one("sparklend_usdt", market_configs_path)
+
+
 # resolve() -- the single entry point shared by the CLI and the Temporal activity
 
 
@@ -169,3 +252,43 @@ def test_every_shipped_market_builds_a_runner_config(monkeypatch):
     configs = RunnerConfig.resolve("all")
     assert configs
     assert all("PROTOCOL" in c.params for c in configs)
+
+
+def test_per_market_env_var_overrides_one_market_only(tmp_path, monkeypatch):
+    # The prod-behind-staging case: config says live, one environment pins a
+    # single market back to parquet without touching its neighbours.
+    cfg = {
+        "sparklend_usdt": {"PROTOCOL": "SPARKLEND", "LOAN_TOKEN": "USDT", "PRICE_SOURCE": "postgres"},
+        "syrup_usdt": {"PROTOCOL": "SYRUP", "LOAN_TOKEN": "USDT", "PRICE_SOURCE": "postgres"},
+    }
+    p = tmp_path / "market_configs.json"
+    p.write_text(json.dumps(cfg))
+    monkeypatch.setattr(os, "environ", _env({"CORE_MODEL_SYRUP_USDT_PRICE_SOURCE": "parquet"}))
+    configs = {c.market_key: c for c in RunnerConfig.resolve("all", market_configs_path=p)}
+    assert configs["syrup_usdt"].price_source == "parquet"
+    assert configs["sparklend_usdt"].price_source == "postgres"
+
+
+def test_per_market_env_var_beats_the_global_one(market_configs_path, monkeypatch):
+    monkeypatch.setattr(
+        os,
+        "environ",
+        _env(
+            {
+                "CORE_MODEL_POSITION_SOURCE": "parquet",
+                "CORE_MODEL_SPARKLEND_USDT_POSITION_SOURCE": "postgres",
+            }
+        ),
+    )
+    assert _one("sparklend_usdt", market_configs_path).position_source == "postgres"
+
+
+def test_per_market_env_var_maps_dashes_to_underscores(market_configs_path, monkeypatch):
+    monkeypatch.setattr(os, "environ", _env({"CORE_MODEL_MORPHO_CBBTC_USDC_ORDERBOOK_SOURCE": "postgres"}))
+    assert _one("morpho_cbbtc-usdc", market_configs_path).orderbook_source == "postgres"
+
+
+def test_invalid_per_market_source_is_rejected(market_configs_path, monkeypatch):
+    monkeypatch.setattr(os, "environ", _env({"CORE_MODEL_SPARKLEND_USDT_PRICE_SOURCE": "csv"}))
+    with pytest.raises(ValueError, match="PRICE_SOURCE"):
+        _one("sparklend_usdt", market_configs_path)

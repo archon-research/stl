@@ -1,15 +1,20 @@
 """Unit tests for the shared Python Temporal cronjob harness."""
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from typing import cast
+from unittest.mock import MagicMock
 
 import pytest
 from temporalio import workflow
 from temporalio.client import Client, ScheduleAlreadyRunningError, ScheduleOverlapPolicy
 from temporalio.service import RPCError, RPCStatusCode
 
-from app.adapters.temporal.cronjob import CronjobSpec, connect, ensure_schedule
+from app.adapters.temporal import cronjob as cronjob_module
+from app.adapters.temporal.cronjob import CronjobSpec, connect, ensure_schedule, run_cronjob
+from app.adapters.temporal.interceptor import RunMetricsInterceptor
+from app.adapters.temporal.metrics import CronjobMetrics
 
 
 @workflow.defn(name="MyCronjobTick")
@@ -145,3 +150,44 @@ async def test_connect_reads_the_shared_temporal_env_vars(monkeypatch):
     monkeypatch.setattr("app.adapters.temporal.cronjob.Client.connect", _fake_connect)
     await connect()
     assert captured == {"host_port": "temporal:7233", "namespace": "vector"}
+
+
+def test_build_worker_installs_the_run_metrics_interceptor(monkeypatch):
+    # The interceptor is this harness's single recording site (see
+    # interceptor.py) -- nothing else wires cronjob.runs.total /
+    # cronjob.run.duration_seconds, so a Worker built without it is silently
+    # invisible to the alerts.
+    captured: dict = {}
+
+    class _FakeWorker:
+        def __init__(self, *args, **kwargs) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(cronjob_module, "Worker", _FakeWorker)
+    metrics = MagicMock(spec=CronjobMetrics)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        cronjob_module._build_worker(MagicMock(), _spec(), executor, metrics)
+
+    interceptors = captured["interceptors"]
+    assert len(interceptors) == 1
+    assert isinstance(interceptors[0], RunMetricsInterceptor)
+    assert interceptors[0]._metrics is metrics
+
+
+async def test_run_cronjob_shuts_down_metrics_when_connect_fails(monkeypatch):
+    # A connect()/ensure_schedule() failure happens before the worker's own
+    # try/finally; the provider's periodic-reader thread must still be shut
+    # down on that path.
+    shutdown = MagicMock()
+    monkeypatch.setattr(cronjob_module, "init_metrics_provider", lambda _name: shutdown)
+
+    async def _failing_connect():
+        raise RPCError("connection refused", RPCStatusCode.UNAVAILABLE, b"")
+
+    monkeypatch.setattr(cronjob_module, "connect", _failing_connect)
+
+    with pytest.raises(RPCError):
+        await run_cronjob(_spec())
+
+    shutdown.assert_called_once()

@@ -344,7 +344,7 @@ func isLockTimeout(err error) bool {
 
 // DisableScheduledJobs stops TimescaleDB's policy jobs from running in this
 // database. Compression is the one that bites: a job firing mid-test rewrites a
-// chunk into a columnstore chunk plus a compress_hyper_* twin, and any test
+// chunk into a columnstore chunk plus its columnstore twin, and any test
 // asserting on chunk layout then sees two chunks where it seeded one.
 //
 // Per database, because the server-wide knob cannot be reached from here:

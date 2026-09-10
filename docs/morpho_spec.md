@@ -1904,7 +1904,7 @@ for each log in block:
 
 **V1 vaults wrapped by V2 are auto-discovered:** When a V2 vault allocates to a V1 vault via an adapter, the V1 vault emits a `Deposit` event with `owner = V2_vault_address`. The V1 vault's address appears in `log.Address`. If not yet known, `tryDiscoverVault` is called for it — it passes the `MORPHO()` check and is registered as a V1 vault.
 
-**Important: `not-vault` caching:** Addresses that are definitively rejected (event decode failure, or `MORPHO()` returning the wrong address) are cached in-memory as "not a vault" so discovery is never attempted again for them within the process lifetime. Transient failures (network errors, DB errors) are intentionally not cached, so discovery will be retried on the next event from that address.
+**Important: `not-vault` caching:** Addresses that are definitively rejected (event decode failure, `MORPHO()` returning the wrong address, or no probe selector answering) are cached in-memory as "not a vault" so discovery is never attempted again for them within the process lifetime. A contract that traps on every selector reaches the same verdict: its batched probe exhausts the node's gas budget, and the narrowing multicaller re-issues the batch in halves until every call's own answer is known, which for such a contract is a failed call per selector. Transient failures (network errors, DB errors, and an `eth_call` that exhausts gas on its own, which only a node's cap can cause) are intentionally not cached, so discovery will be retried on the next event from that address.
 
 **Alternative approach — factory event tracking:**
 
@@ -2494,10 +2494,13 @@ owner()                            // → address
 performanceFee()                   // → uint96
 managementFee()                    // → uint96
 
-// Adapter interface (both adapter types)
+// Adapter interface (all adapter types)
 realAssets()                       // → uint256 (total assets held by this adapter)
 morpho()                           // → address (present on MorphoMarketV1AdapterV2; used for type detection)
 morphoVaultV1()                    // → address (present on MorphoVaultV1Adapter; returns the wrapped V1 vault address)
+erc4626Vault()                     // → address (present on ERC4626MerklAdapter; returns the wrapped ERC-4626 vault)
+box()                              // → address (present on BoxAdapter; returns the wrapped Morpho Box)
+comet()                            // → address (present on CompoundV3Adapter; returns the wrapped Compound V3 Comet)
 marketParamsListLength()           // → uint256 (MorphoMarketV1AdapterV2 only; number of markets in adapter)
 marketParamsList(uint256 index)    // → MarketParams tuple (MorphoMarketV1AdapterV2 only; needed to compute marketId)
 
@@ -2543,9 +2546,14 @@ async function getV1VaultAllocations(vaultAddress: Address, blockNumber: bigint)
 
 **V2 vault allocation query (archive node, any block):**
 
-Adapter type detection uses two probe calls:
-- `morphoVaultV1()` succeeds → `MorphoVaultV1Adapter` (wraps a V1 vault)
+Adapter type detection uses one marker probe call per modelled family; exactly one
+answers on a real adapter, and none or several means the adapter is recorded as
+Unknown (bespoke curator-written adapters share no marker and stay there):
 - `morpho()` succeeds → `MorphoMarketV1AdapterV2` (holds Morpho Blue supply shares directly)
+- `morphoVaultV1()` succeeds → `MorphoVaultV1Adapter` (wraps a V1 vault)
+- `erc4626Vault()` succeeds → `ERC4626MerklAdapter` (wraps an external ERC-4626 vault, rewards via Merkl)
+- `box()` succeeds → `BoxAdapter` (wraps a Morpho Box)
+- `comet()` succeeds → `CompoundV3Adapter` (wraps a Compound V3 Comet)
 
 ```typescript
 async function getV2VaultAllocations(vaultAddress: Address, blockNumber: bigint) {

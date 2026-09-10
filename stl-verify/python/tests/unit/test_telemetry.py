@@ -5,6 +5,8 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from opentelemetry import trace
+from opentelemetry.metrics import _internal as metrics_internal
+from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 
@@ -27,13 +29,17 @@ class _CollectingExporter(SpanExporter):
 
 
 @pytest.fixture(autouse=True)
-def _reset_tracer_provider():
+def _reset_otel_providers():
     """Ensure OTel global state is clean between tests."""
-    original_provider = trace._TRACER_PROVIDER
-    original_done = trace._TRACER_PROVIDER_SET_ONCE._done
+    original_tracer = trace._TRACER_PROVIDER
+    original_tracer_done = trace._TRACER_PROVIDER_SET_ONCE._done
+    original_meter = metrics_internal._METER_PROVIDER
+    original_meter_done = metrics_internal._METER_PROVIDER_SET_ONCE._done
     yield
-    trace._TRACER_PROVIDER = original_provider
-    trace._TRACER_PROVIDER_SET_ONCE._done = original_done
+    trace._TRACER_PROVIDER = original_tracer
+    trace._TRACER_PROVIDER_SET_ONCE._done = original_tracer_done
+    metrics_internal._METER_PROVIDER = original_meter
+    metrics_internal._METER_PROVIDER_SET_ONCE._done = original_meter_done
 
 
 def _make_settings(**overrides: Any):
@@ -56,13 +62,16 @@ def test_setup_telemetry_noop_when_disabled():
     assert not isinstance(provider, TracerProvider)
 
 
-def test_setup_telemetry_configures_provider_when_enabled():
+def test_setup_telemetry_configures_providers_when_enabled():
     app = FastAPI()
     settings = _make_settings(otel_enabled=True)
-    setup_telemetry(app, settings)
-    provider = trace.get_tracer_provider()
-    assert isinstance(provider, TracerProvider)
-    provider.shutdown()
+    result = setup_telemetry(app, settings)
+    assert result is not None
+    tracer_provider, meter_provider = result
+    assert isinstance(tracer_provider, TracerProvider)
+    assert isinstance(meter_provider, MeterProvider)
+    assert isinstance(trace.get_tracer_provider(), TracerProvider)
+    shutdown_telemetry(result)
 
 
 def test_shutdown_telemetry_noop_when_none():
@@ -70,23 +79,28 @@ def test_shutdown_telemetry_noop_when_none():
     shutdown_telemetry(None)  # must not raise
 
 
-def test_shutdown_telemetry_only_affects_passed_provider(monkeypatch: pytest.MonkeyPatch):
-    """Shutting down a provider must not touch an externally installed global."""
-    global_provider = TracerProvider()
-    global_shutdown = MagicMock(wraps=global_provider.shutdown)
-    monkeypatch.setattr(global_provider, "shutdown", global_shutdown)
-    trace.set_tracer_provider(global_provider)
+def test_shutdown_telemetry_only_affects_passed_providers(monkeypatch: pytest.MonkeyPatch):
+    """Shutting down providers must not touch externally installed globals."""
+    global_tracer = TracerProvider()
+    global_tracer_shutdown = MagicMock(wraps=global_tracer.shutdown)
+    monkeypatch.setattr(global_tracer, "shutdown", global_tracer_shutdown)
+    trace.set_tracer_provider(global_tracer)
 
-    owned_provider = TracerProvider()
-    owned_shutdown = MagicMock(wraps=owned_provider.shutdown)
-    monkeypatch.setattr(owned_provider, "shutdown", owned_shutdown)
+    owned_tracer = TracerProvider()
+    owned_tracer_shutdown = MagicMock(wraps=owned_tracer.shutdown)
+    monkeypatch.setattr(owned_tracer, "shutdown", owned_tracer_shutdown)
 
-    shutdown_telemetry(owned_provider)
+    owned_meter = MeterProvider()
+    owned_meter_shutdown = MagicMock(wraps=owned_meter.shutdown)
+    monkeypatch.setattr(owned_meter, "shutdown", owned_meter_shutdown)
 
-    owned_shutdown.assert_called_once_with()
-    global_shutdown.assert_not_called()
+    shutdown_telemetry((owned_tracer, owned_meter))
 
-    global_provider.shutdown()
+    owned_tracer_shutdown.assert_called_once_with()
+    owned_meter_shutdown.assert_called_once_with()
+    global_tracer_shutdown.assert_not_called()
+
+    global_tracer.shutdown()
 
 
 def test_instrument_sqlalchemy_engine_noop_when_no_provider():

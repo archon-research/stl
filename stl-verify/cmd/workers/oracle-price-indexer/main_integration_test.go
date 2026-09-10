@@ -133,7 +133,7 @@ func setupIntegrationTest(t *testing.T, opts ...setupOption) *integrationEnv {
 		seedBlockNum, seedBlockNum))
 
 	// Configure environment for run()
-	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
@@ -161,15 +161,10 @@ func setupIntegrationTest(t *testing.T, opts ...setupOption) *integrationEnv {
 			"-queue", "http://localhost/test-queue",
 			"-db", dbURL,
 			"-redis", sharedRedisAddr,
-		})
+		}, nil)
 	}()
 
-	// Wait for the service to start (SQS ReceiveMessage call indicates it's polling)
-	select {
-	case <-sqsState.FirstCallReceived:
-	case <-time.After(30 * time.Second):
-		t.Fatal("timed out waiting for service to start")
-	}
+	testutil.WaitForFirstPoll(t, errCh, sqsState.FirstCallReceived)
 
 	return &integrationEnv{
 		pool:       pool,
@@ -289,7 +284,7 @@ func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer rpcServer.Close()
 
-	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 	t.Setenv("S3_BUCKET", testutil.S3TestBucketName(t, rawBucketPrefix))
@@ -299,7 +294,7 @@ func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 		"-queue", "http://localhost/test-queue",
 		"-redis", sharedRedisAddr,
 		"-db", "postgres://invalid:invalid@localhost:1/nonexistent?connect_timeout=1",
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error for bad database URL")
 	}

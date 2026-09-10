@@ -118,13 +118,16 @@ with `make dev-wipe`.
 Need a second cluster next to someone else's (two agents, one machine)?
 
 ```bash
-KIND_CLUSTER=mine KIND_PORT_OFFSET=100 make dev-up
+make dev-up-new                                  # free offset, name derived from it
+KIND_CLUSTER=mine KIND_PORT_OFFSET=100 make dev-up   # or name and offset yourself
 ```
 
 It gets its own cluster name, host ports (every mapped port +100), image
 tags (`stl-*:local-mine`) and data dir (`~/.mine`), so it cannot disturb
-the default `vector` cluster. Every `run-*`, `dev-*` and `kind-*` target
-honours the same two variables — export them in the shell you work in.
+the default `vector` cluster. `dev-up-new` prints the host endpoints when
+it is done; afterwards only `export KIND_CLUSTER=<name>` is needed, since
+every `run-*`, `dev-*` and `kind-*` target derives the offset from the
+cluster's own control plane.
 
 > **⚠️ You need an Alchemy key for anything to actually work.** By
 > default `make dev-up` points the watcher at a **mock blockchain
@@ -371,7 +374,10 @@ func run(ctx context.Context, args []string) error {
     ...
     consumer, err := sqsadapter.NewConsumer(awsCfg, sqsadapter.Config{...}, logger)
     pool, err   := postgres.OpenPool(ctx, postgres.DefaultDBConfig(cfg.dbURL))
-    repo, err   := postgres.NewOnchainPriceRepository(pool, logger, buildID, 0)
+    buildReg, err := buildregistry.New(ctx, pool)                       // artefact identity; hard error if incomplete
+    referenceEffectiveAt, err := env.ReferenceEffectiveAt(time.Now().UTC())
+    runID, err  := buildReg.OpenRun(ctx, referenceEffectiveAt, nil)     // one writer_run per process start
+    repo, err   := postgres.NewOnchainPriceRepository(pool, logger, buildReg.BuildID(), runID, 0)
     service, err := oracle_price_worker.NewService(shared.SQSConsumerConfig{...}, consumer, repo, ...)
 
     return lifecycle.Run(ctx, logger, service) // runs the consume loop; handles SIGINT/SIGTERM graceful stop
@@ -382,7 +388,12 @@ func run(ctx context.Context, args []string) error {
 
 1. **Create `cmd/workers/<my-worker>/main.go`.** Copy an existing worker
    as a template. Keep `main()` small — it parses flags, wires adapters,
-   and calls `lifecycle.Run`.
+   and calls `lifecycle.Run`. Every binary that connects to Postgres
+   registers its artefact and opens a writer run at startup
+   (`buildregistry.New` + `OpenRun`, ADR-0006 §2) and passes the `RunID`
+   into its repositories next to the `BuildID`; startup reads of an
+   append-on-change reference table go inside `OpenRun`'s load callback
+   (`internal/pkg/oraclewire` is the reference).
 2. **Create a service in `internal/services/<my_worker>/`.** The service
    owns the business logic, depends only on ports, and exposes a public
    API tested in isolation (mock the repo + consumer + any contract
@@ -394,17 +405,41 @@ func run(ctx context.Context, args []string) error {
 5. **Add k8s manifests** under `k8s/base/<my-worker>/`:
    `deployment.yaml`, `serviceaccount.yaml`, `kustomization.yaml`. Copy
    `k8s/base/oracle-price-worker/` as the template. Wire the new service
-   into `k8s/overlays/{staging,prod}/kustomization.yaml` and, for local
-   kind, `k8s/overlays/dev/workers/kustomization.yaml` (add the base dir
-   under `resources:` and a `localhost/stl-<name>:local` `images:` entry).
-6. **Add build/deploy targets to the Makefile** (`docker-build-<name>`,
+   into `k8s/overlays/{staging,prod}/kustomization.yaml` by adding the base
+   dir under `resources:` only — the `images:` block there is generated from
+   `k8s/image-roster.txt`, so add one roster line instead (kind, image name,
+   the `image:` alias your manifests use; ORB-362). For local kind,
+   `k8s/overlays/dev/workers/kustomization.yaml` still takes both the base
+   dir under `resources:` and a `localhost/stl-<name>:local` `images:` entry,
+   plus a patch setting `AWS_SQS_QUEUE_URL` to the LocalStack queue. The dev
+   runtime Component replaces the base's `envFrom` with the shared
+   `stl-config` + `stl-secrets`, so anything your base reads from a
+   per-service ConfigMap (e.g. the DEX indexers' `DEX`) must be set
+   explicitly in that patch.
+6. **Create the local SQS queue** in the LocalStack init script,
+   `stl-verify/localstack-init/init-aws.sh` — the single source of truth —
+   via `create_consumer_queue <chain> <name>`, which creates the FIFO
+   queue + DLQ and subscribes it to the chain's blocks topic with raw
+   delivery. `make kind-infra` generates the `localstack-init` ConfigMap
+   from that file and stamps a hash of it into the LocalStack pod
+   template, so the pod restarts and your queue exists after the next
+   `make dev-up`. Nothing is inlined in `k8s/dev-infra/localstack.yaml`.
+7. **Add build/deploy targets to the Makefile** (`docker-build-<name>`,
    `docker-release-<name>`, and register the worker in the `run-*` /
-   `kind-load-workers` / `kind-deploy-workers` groupings). Grep for an
+   `kind-load-workers` / `kind-deploy-workers` groupings, plus the
+   rollout lists in `_dev-up-alchemy-workers` and `dev-up`). Grep for an
    existing worker name in the Makefile to see every site you need to
    touch.
-7. **Coordinate with infra.** Open a PR in the Infrastructure repo for
+8. **Coordinate with infra.** Open a PR in the Infrastructure repo for
    the SQS queue, SNS subscription, IAM policy, and any secrets — your
    code PR depends on those resources existing.
+
+Once steps 5–7 are in place, `make dev-up` runs the worker in kind (when
+`ALCHEMY_API_KEY` is set in `.env.secrets`), consuming the in-cluster
+watcher's blocks through LocalStack SNS→SQS — no host-run binary, no
+ad-hoc queue script. The DEX indexers (`curve-indexer`,
+`uniswap-v3-indexer`, `uniswap-v4-indexer`, all one `stl-dex-indexer`
+image) are wired this way.
 
 > **Tip:** It's welcome (often preferred) to split the k8s-manifest and
 > Infrastructure-repo changes into a follow-up PR. The code PR stays
@@ -484,8 +519,9 @@ Run it locally with `uv run python -m cli.workers.<my_worker>.main` (from `stl-v
 - Long-poll SQS receive; process one message at a time in FIFO order;
   delete on success; let it redrive on failure.
 - Handle `SIGINT` / `SIGTERM` — finish the in-flight message, close
-  the DB pool, exit within ~25s (the Python equivalent of Go's
-  `lifecycle.Run`).
+  the DB pool, exit within Go's `lifecycle.ShutdownTimeout` (40s) plus
+  `lifecycle.ShutdownTailBudget` (45s), the Python equivalent of
+  `lifecycle.Run`.
 - Read block data from Redis using the exact cache-key convention
   above; do not refetch from Alchemy unless cache-miss rate indicates
   a real bug.
@@ -589,9 +625,12 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
    `k8s/base/offchain-price-indexer/` as the template — cronjob
    Deployments are small (50m/64Mi requests) because the work happens
    inside Temporal activities. Register the service in
-   `k8s/overlays/{staging,prod}/kustomization.yaml` and, for local kind
-   runs, in `k8s/overlays/dev/kustomization.yaml` (add the base dir to
-   `resources:` and a `localhost/stl-<name>:local` entry under `images:`).
+   `k8s/overlays/{staging,prod}/kustomization.yaml` (base dir under
+   `resources:` only — the `images:` block is generated from
+   `k8s/image-roster.txt`, so add a `cronjob <name> <alias>` roster line
+   instead; ORB-362) and, for local kind runs, in
+   `k8s/overlays/dev/kustomization.yaml` (add the base dir to `resources:`
+   and a `localhost/stl-<name>:local` entry under `images:`).
 4. **Wire the Makefile.** Image builds auto-discover via the
    `CRONJOBS := ...` glob, so a `docker-build-cronjob-<name>` target is
    already covered. Add the k8s Deployment name to `CRONJOB_DEPLOYMENTS`
@@ -976,7 +1015,8 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
    message on `main` and your intermediate commits are discarded
    automatically.
 5. **Merge to `main`** — CI then triggers `.github/workflows/deploy.yaml`,
-   which bumps image tags in `k8s/overlays/staging/kustomization.yaml`
+   which regenerates the `images:` block of
+   `k8s/overlays/staging/kustomization.yaml` from `k8s/image-roster.txt`
    and ArgoCD rolls the change into the `vector` namespace on the
    staging EKS cluster. Once staging is healthy, the same run promotes
    the images to the prod ECR, auto-commits the prod tag bump to `main`,
@@ -985,27 +1025,37 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
    review on that run; on approval the run syncs `stl-prod` in ArgoCD to
    the approved commit. Rejecting leaves the bump on `main` (it batches
    into the next approved deploy).
+   The deploy runs whenever `main` holds code that has not been promoted
+   yet — CI diffs each main push against the prod overlay's image tag,
+   not just against the push itself — so a docs-only merge can carry an
+   earlier merge's deploy, or retry a promotion that failed (ORB-361).
 6. **Adding a brand-new service image? Split it across two PRs.** If one PR
-   both introduces a new image (a new `make docker-*` target, or a base that
-   references an image name never built before) *and* the Deployment/CronJob
-   that runs it, ArgoCD syncs the new manifest on merge *before* the image
-   exists in ECR: the pods sit in `ImagePullBackOff` and the staging health
-   gate can hard-fail and skip prod promotion (see ORB-313). Instead:
-   - **PR 1** adds the build (Makefile target + the `SERVICES` / `CRONJOBS`
-     promotion lists in `.github/workflows/deploy.yaml`) so the image is
-     built and pushed to ECR.
-   - **PR 2** adds the `k8s/base/...` Deployment plus overlay wiring that
-     references it.
+   both introduces a new image (a new `make docker-*` target plus its
+   `k8s/image-roster.txt` line) *and* the Deployment/CronJob that runs it,
+   ArgoCD syncs the new manifest on merge *before* the image exists in ECR
+   and before the deploy bot has rendered its `images:` entry: the pods sit
+   in `ImagePullBackOff` until that run's stamp lands (see ORB-313). Instead:
+   - **PR 1** adds the build (Makefile target) and the roster line. The next
+     deploy builds and pushes the image and writes its overlay entries.
+   - **PR 2** adds the `k8s/base/...` Deployment plus the `resources:` entry
+     that references it — it renders against the entry PR 1's deploy wrote.
 
    This split is a recommendation, not an enforced rule. A combined PR still
    works: `build-push-staging` builds the new image in the same run before
-   `update-staging` stamps it, and the 900s staging health wait tolerates the
-   brief first-rollout `ImagePullBackOff`. Splitting simply avoids that race.
-   `scripts/deploy/verify-ecr-images.sh` (run before each stamp) is the backstop
-   for what the split does not cover: an image that was never built, or a prod
-   overlay entry missing from the `SERVICES` / `CRONJOBS` promotion list. It
-   fails the deploy with an explicit missing-image list instead of letting a
-   silent prod `ImagePullBackOff` through.
+   `update-staging` renders the block, and the staging health gate tolerates
+   the brief first-rollout `ImagePullBackOff`. Splitting simply avoids that
+   race. Never hand-add an `images:` entry (the old "copy a sibling's tag"
+   placeholder): the Manifests check rejects anything the roster does not
+   render, and the bot rewrites the block wholesale on every deploy (ORB-362).
+   The one sanctioned hand edit is removal: dropping or re-homing an image
+   means deleting its stale entry in the same PR as the roster change. (A
+   re-home leaves the alias unpinned in the merge commit until the post-merge
+   rewrite — the same brief `ImagePullBackOff` window as a first rollout.)
+   `scripts/deploy/verify-ecr-images.sh` (run before each stamp) remains the
+   backstop for an image that was never built — e.g. a roster line without a
+   matching Makefile release target. It fails the deploy with an explicit
+   missing-image list instead of letting a silent prod `ImagePullBackOff`
+   through.
 
 ---
 

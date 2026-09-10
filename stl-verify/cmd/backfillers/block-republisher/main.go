@@ -1,0 +1,219 @@
+// Package main is the block-republisher: an on-demand Temporal worker that
+// re-publishes a mined height under the next archive version so every consumer
+// appends the canonical block. One deployment serves one chain, on that chain's
+// task queue. Every payload is read by number and held to the canonical hash the
+// run derived — an archive node serves trace_block by hash only near the head,
+// and every hole this repairs is far older than that. Operation and the version
+// rule are in docs/runbooks/vector-cronjobs.md, section "block-republisher".
+package main
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awssns "github.com/aws/aws-sdk-go-v2/service/sns"
+	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/worker"
+	"go.temporal.io/sdk/workflow"
+
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
+	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
+	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
+	snsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
+	"github.com/archon-research/stl/stl-verify/internal/services/block_republish"
+)
+
+func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+
+	err := run(ctx)
+	cancel()
+	if err != nil {
+		slog.Error("block-republisher exited with error", "error", err)
+		os.Exit(1)
+	}
+}
+
+// Build metadata, populated from VCS in init() (GitBranch is set at link time).
+var (
+	GitCommit string
+	GitBranch string
+	BuildTime string
+)
+
+func init() {
+	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
+}
+
+// workflowTypeName is what an operator types into the Temporal UI's "Workflow
+// Type" field, so it is registered explicitly rather than derived from the Go
+// function name — a rename must not invalidate the runbook or muscle memory.
+const workflowTypeName = "BlockRepublish"
+
+func run(ctx context.Context) error {
+	taskQueue, err := taskQueueName()
+	if err != nil {
+		return fmt.Errorf("resolving the task queue: %w", err)
+	}
+
+	return temporal.RunWorker(ctx, temporal.BuildMeta{
+		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
+	}, temporal.WorkerConfig{
+		Name:       taskQueue,
+		NoDatabase: true,
+		Register:   register,
+	})
+}
+
+func register(ctx context.Context, deps temporal.Dependencies, r worker.Registry) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("loading configuration: %w", err)
+	}
+
+	activities, err := newRepublishActivities(ctx, deps.Logger, cfg)
+	if err != nil {
+		return fmt.Errorf("wiring the republish activity: %w", err)
+	}
+
+	r.RegisterWorkflowWithOptions(republishWorkflow, workflow.RegisterOptions{Name: workflowTypeName})
+	r.RegisterActivityWithOptions(activities.DeriveVersion, activity.RegisterOptions{Name: deriveVersionActivityName})
+	r.RegisterActivityWithOptions(activities.RepublishBlock, activity.RegisterOptions{Name: republishActivityName})
+	return nil
+}
+
+func newRepublishActivities(ctx context.Context, logger *slog.Logger, cfg config) (*republishActivities, error) {
+	chainName, err := entity.ChainName(cfg.chainID)
+	if err != nil {
+		return nil, fmt.Errorf("resolving the chain name for telemetry: %w", err)
+	}
+
+	client, err := newChainClient(ctx, chainName, cfg, logger)
+	if err != nil {
+		return nil, err
+	}
+	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{StaticCredentialsFromEnv: true})
+	if err != nil {
+		return nil, fmt.Errorf("loading AWS config: %w", err)
+	}
+	cache, err := openBlockCache(ctx, cfg, logger)
+	if err != nil {
+		return nil, err
+	}
+	archive, err := s3adapter.OpenArchiveReader(ctx, awsCfg, cfg.s3Bucket, logger)
+	if err != nil {
+		return nil, err
+	}
+	sink, err := openEventSink(awsCfg, cfg, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	service, err := block_republish.NewService(block_republish.Config{
+		ChainID:      cfg.chainID,
+		EnableTraces: cfg.enableTraces,
+		EnableBlobs:  cfg.enableBlobs,
+		Logger:       logger,
+	}, client, archive, cache, sink)
+	if err != nil {
+		return nil, fmt.Errorf("creating the block republish service: %w", err)
+	}
+
+	logger.Info("block-republisher configured",
+		"chainID", cfg.chainID, "chain", chainName, "environment", cfg.deployEnv,
+		"topic", cfg.snsTopicARN, "redis", cfg.redisAddr, "archive", cfg.s3Bucket,
+		"enableTraces", cfg.enableTraces, "enableBlobs", cfg.enableBlobs)
+
+	return &republishActivities{
+		service:     service,
+		newProgress: func() heartbeater { return temporal.NewActivityProgress[republishHeartbeat]() },
+	}, nil
+}
+
+// newChainClient builds the same RPC client the watcher fetches a block with, so
+// a republished payload is byte-for-byte the shape a live one has.
+func newChainClient(ctx context.Context, chainName string, cfg config, logger *slog.Logger) (*alchemy.Client, error) {
+	telemetry, err := alchemy.NewTelemetry(chainName)
+	if err != nil {
+		return nil, fmt.Errorf("creating alchemy telemetry: %w", err)
+	}
+	client, err := alchemy.NewClient(alchemy.ClientConfig{
+		HTTPURL:      cfg.rpcURL,
+		EnableTraces: cfg.enableTraces,
+		EnableBlobs:  cfg.enableBlobs,
+		// A republish issues one read per data type; this governs only the
+		// by-hash batch it does not use.
+		ParallelRPC: false,
+		Logger:      logger,
+		Telemetry:   telemetry,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating the RPC client: %w", err)
+	}
+	if err := guardNodeChain(ctx, client, cfg.chainID); err != nil {
+		return nil, err
+	}
+	return client, nil
+}
+
+// guardNodeChain refuses a node serving another chain. The chain and the node
+// URL arrive as independent variables, and neither the topic nor the bucket
+// guard can see between them: every height would be read from the wrong chain
+// and published, correctly named, onto this one's topic.
+func guardNodeChain(ctx context.Context, client *alchemy.Client, chainID int64) error {
+	served, err := client.ChainID(ctx)
+	if err != nil {
+		return fmt.Errorf("asking the node which chain it serves: %w", err)
+	}
+	if served != chainID {
+		return fmt.Errorf("ALCHEMY_HTTP_URL / CHAIN_ID mismatch: the node serves chain %d, CHAIN_ID says %d", served, chainID)
+	}
+	return nil
+}
+
+// openBlockCache dials Redis at startup rather than on the first run, so an
+// unreachable cache shows up as a worker that will not start instead of as a run
+// an operator has to babysit.
+func openBlockCache(ctx context.Context, cfg config, logger *slog.Logger) (*rediscache.BlockCache, error) {
+	cache, err := rediscache.NewBlockCache(rediscache.Config{
+		Addr:      cfg.redisAddr,
+		Password:  cfg.redisPassword,
+		DB:        0,
+		TTL:       cacheTTL,
+		KeyPrefix: cfg.redisKeyPrefix,
+	}, logger)
+	if err != nil {
+		return nil, fmt.Errorf("creating the Redis cache: %w", err)
+	}
+	if err := cache.Ping(ctx); err != nil {
+		return nil, fmt.Errorf("connecting to Redis at %s: %w", cfg.redisAddr, err)
+	}
+	return cache, nil
+}
+
+func openEventSink(awsCfg aws.Config, cfg config, logger *slog.Logger) (*snsadapter.EventSink, error) {
+	// Custom endpoint so the same binary talks to LocalStack in kind and in tests.
+	snsClient := awssns.NewFromConfig(awsCfg, func(o *awssns.Options) {
+		if cfg.snsEndpoint != "" {
+			o.BaseEndpoint = aws.String(cfg.snsEndpoint)
+		}
+	})
+
+	sink, err := snsadapter.NewEventSink(snsClient, snsadapter.Config{
+		TopicARN: cfg.snsTopicARN,
+		Logger:   logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating the SNS event sink: %w", err)
+	}
+	return sink, nil
+}

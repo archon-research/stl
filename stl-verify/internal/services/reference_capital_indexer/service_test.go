@@ -3,8 +3,15 @@ package reference_capital_indexer
 import (
 	"context"
 	"errors"
+	"slices"
+	"sort"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -40,12 +47,20 @@ type mockCapitalRepo struct {
 	err       error
 }
 
-func (m *mockCapitalRepo) SavePrimeCapitalSnapshots(_ context.Context, snapshots []entity.PrimeCapitalStackSnapshot) error {
+func (m *mockCapitalRepo) SavePrimeCapitalSnapshots(_ context.Context, _ pgx.Tx, snapshots []entity.PrimeCapitalStackSnapshot) error {
 	if m.err != nil {
 		return m.err
 	}
 	m.snapshots = append(m.snapshots, snapshots...)
 	return nil
+}
+
+// fakeTxManager calls fn with a nil pgx.Tx; sufficient since the mock repos
+// above ignore the tx argument.
+type fakeTxManager struct{}
+
+func (m *fakeTxManager) WithTransaction(_ context.Context, fn func(pgx.Tx) error) error {
+	return fn(nil)
 }
 
 type mockRiskProvider struct {
@@ -91,12 +106,15 @@ type mockSheetRepo struct {
 func (m *mockSheetRepo) SaveBalanceSheetSnapshots(
 	_ context.Context,
 	snapshots []entity.PrimeBalanceSheetSnapshot,
-) error {
+) (inserted, newDays int, err error) {
+	if len(snapshots) == 0 {
+		return 0, 0, nil // matches the real repo: an empty batch never touches the DB
+	}
 	if m.err != nil {
-		return m.err
+		return 0, 0, m.err
 	}
 	m.sheets = append(m.sheets, snapshots...)
-	return nil
+	return len(snapshots), len(snapshots), nil
 }
 
 type mockSheetProvider struct {
@@ -117,8 +135,147 @@ func (m *mockSheetProvider) FetchHistory(
 	return m.days, nil
 }
 
+// mockAllocationProvider fabricates one breakdown row per requested star unless
+// given explicit rows, so tests not about allocations pass the breakdown
+// coverage guard without stating fixtures.
+type mockAllocationProvider struct {
+	rows      []outbound.RiskCapitalAllocationRow
+	err       error
+	requested []string
+}
+
+func (m *mockAllocationProvider) FetchPrimeAllocations(
+	_ context.Context,
+	stars []string,
+) ([]outbound.RiskCapitalAllocationRow, error) {
+	m.requested = stars
+	if m.err != nil {
+		return nil, m.err
+	}
+	if m.rows != nil {
+		return m.rows, nil
+	}
+	rows := make([]outbound.RiskCapitalAllocationRow, 0, len(stars))
+	for _, star := range stars {
+		rows = append(rows, allocationRow(star))
+	}
+	return rows, nil
+}
+
+func allocationRow(star string) outbound.RiskCapitalAllocationRow {
+	chainID := int64(1)
+	name := "Spark USDS"
+	loanAddress := "0xdc035d45d973e3ec169d2276ddab16f1e407384f"
+	loanSymbol := "USDS"
+	return outbound.RiskCapitalAllocationRow{
+		Star:                star,
+		Protocol:            "sparklend",
+		Network:             "ethereum",
+		ChainID:             &chainID,
+		Symbol:              "spUSDS",
+		Name:                &name,
+		TokenAddress:        "0xc02ab1a5eaa8d1b114ef786d9bde108cd4364359",
+		LoanTokenAddress:    &loanAddress,
+		LoanTokenSymbol:     &loanSymbol,
+		Exposure:            "782710914.129541047405509005",
+		RequiredRiskCapital: "23308466.81",
+		CRR:                 "0.0447",
+	}
+}
+
+type mockAllocationRepo struct {
+	allocations []entity.PrimeCapitalStackAllocation
+	err         error
+}
+
+func (m *mockAllocationRepo) SaveCapitalStackAllocations(
+	_ context.Context,
+	_ pgx.Tx,
+	allocations []entity.PrimeCapitalStackAllocation,
+) error {
+	if m.err != nil {
+		return m.err
+	}
+	m.allocations = append(m.allocations, allocations...)
+	return nil
+}
+
+// mockPositionProvider fabricates one position per requested star unless given
+// explicit rows, mirroring mockAllocationProvider.
+type mockPositionProvider struct {
+	rows      []outbound.ReferencePositionRow
+	err       error
+	requested []string
+}
+
+func (m *mockPositionProvider) FetchPositions(
+	_ context.Context,
+	stars []string,
+) ([]outbound.ReferencePositionRow, error) {
+	m.requested = stars
+	if m.err != nil {
+		return nil, m.err
+	}
+	if m.rows != nil {
+		return m.rows, nil
+	}
+	rows := make([]outbound.ReferencePositionRow, 0, len(stars))
+	for _, star := range stars {
+		rows = append(rows, positionRow(star))
+	}
+	return rows, nil
+}
+
+func positionRow(star string) outbound.ReferencePositionRow {
+	chainID := int64(1)
+	allocated := "0.631323107861320473"
+	return outbound.ReferencePositionRow{
+		Star:            star,
+		Protocol:        "sparklend",
+		Network:         "ethereum",
+		ChainID:         &chainID,
+		TokenSymbol:     "spUSDS",
+		TokenAddress:    "0xc02ab1a5eaa8d1b114ef786d9bde108cd4364359",
+		WalletAddress:   "0x1111111111111111111111111111111111111111",
+		Assets:          "0.825893123256664748",
+		AllocatedAssets: &allocated,
+	}
+}
+
+type mockPositionRepo struct {
+	positions []entity.PrimeReferencePosition
+	err       error
+}
+
+func (m *mockPositionRepo) SaveReferencePositions(
+	_ context.Context,
+	_ pgx.Tx,
+	positions []entity.PrimeReferencePosition,
+) error {
+	if m.err != nil {
+		return m.err
+	}
+	m.positions = append(m.positions, positions...)
+	return nil
+}
+
+func defaultDeps(primes *mockPrimeRepo, capital *mockCapitalRepo, provider *mockRiskProvider) Deps {
+	return Deps{
+		PrimeRepo:          primes,
+		CapitalRepo:        capital,
+		RiskProvider:       provider,
+		AllocationProvider: &mockAllocationProvider{},
+		AllocationRepo:     &mockAllocationRepo{},
+		SheetRepo:          &mockSheetRepo{},
+		SheetProvider:      &mockSheetProvider{},
+		PositionProvider:   &mockPositionProvider{},
+		PositionRepo:       &mockPositionRepo{},
+		TxManager:          &fakeTxManager{},
+	}
+}
+
 func newService(primes *mockPrimeRepo, capital *mockCapitalRepo, provider *mockRiskProvider) *Service {
-	return newServiceWithSheets(primes, capital, provider, &mockSheetRepo{}, &mockSheetProvider{})
+	return newServiceWithDeps(defaultDeps(primes, capital, provider))
 }
 
 func newServiceWithSheets(
@@ -128,10 +285,18 @@ func newServiceWithSheets(
 	sheets *mockSheetRepo,
 	sheetProvider *mockSheetProvider,
 ) *Service {
-	return NewService(
-		primes, capital, provider, sheets, sheetProvider,
-		trackedStars, 7, func() time.Time { return syncedAt }, nil, nil,
-	)
+	deps := defaultDeps(primes, capital, provider)
+	deps.SheetRepo = sheets
+	deps.SheetProvider = sheetProvider
+	return newServiceWithDeps(deps)
+}
+
+func newServiceWithDeps(deps Deps) *Service {
+	service, err := NewService(deps, trackedStars, 7, func() time.Time { return syncedAt }, nil, nil)
+	if err != nil {
+		panic(err)
+	}
+	return service
 }
 
 func TestRunPersistsASnapshotPerUpstreamPrime(t *testing.T) {
@@ -284,21 +449,36 @@ func TestRunRecordsTheTrackedPrimesTheMonitorDoesCover(t *testing.T) {
 
 func TestRunFailsWhenNoPrimesAreTracked(t *testing.T) {
 	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
-	service := NewService(
-		&mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}},
-		&mockCapitalRepo{},
-		provider,
-		&mockSheetRepo{},
-		&mockSheetProvider{},
+	service, err := NewService(
+		defaultDeps(&mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}, &mockCapitalRepo{}, provider),
 		nil,
 		7,
 		func() time.Time { return syncedAt },
 		nil,
 		nil,
 	)
+	if err != nil {
+		t.Fatalf("NewService() = %v", err)
+	}
 
 	if err := service.Run(context.Background()); err == nil {
 		t.Fatal("Run() = nil, want an error")
+	}
+}
+
+// A forgotten Deps field must die at wiring time, not nil-deref mid-cycle
+// after rows were already persisted.
+func TestNewServiceRejectsAMissingPort(t *testing.T) {
+	deps := defaultDeps(&mockPrimeRepo{}, &mockCapitalRepo{}, &mockRiskProvider{})
+	deps.PositionRepo = nil
+
+	_, err := NewService(deps, trackedStars, 7, nil, nil, nil)
+
+	if err == nil {
+		t.Fatal("NewService() = nil, want an error naming the missing port")
+	}
+	if !strings.Contains(err.Error(), "PositionRepo") {
+		t.Errorf("error = %v, want it to name PositionRepo", err)
 	}
 }
 
@@ -383,6 +563,104 @@ func TestRunAdvancesTheBalanceSheetEachCycle(t *testing.T) {
 	}
 }
 
+// A tracked prime the balance-sheet feed's fetch window did not cover is a
+// coverage fact, not a failure: the cycle still succeeds and still persists
+// every day it did fetch.
+func TestRunSucceedsWhenABalanceSheetDayIsMissingForATrackedStar(t *testing.T) {
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}, {ID: 2, Name: "grove"}}}
+	sheets := &mockSheetRepo{}
+	sheetProvider := &mockSheetProvider{days: []outbound.BalanceSheetDay{{
+		Star: "spark", Date: "2026-08-19", TreasuryBalance: "1", Assets: "2",
+		AllocatedAssets: "3", IdleAssets: "4", Debt: "5", BackstopCapital: "6",
+	}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark"), upstreamRow("grove")}}
+
+	err := newServiceWithSheets(primes, &mockCapitalRepo{}, provider, sheets, sheetProvider).
+		Run(context.Background())
+
+	if err != nil {
+		t.Fatalf("Run() = %v, want nil — an uncovered balance-sheet prime must not fail the cycle", err)
+	}
+	if len(sheets.sheets) != 1 {
+		t.Errorf("saved %d balance sheets, want 1 for the day that was covered", len(sheets.sheets))
+	}
+}
+
+// Exercises the two new counters through Run() with a real Telemetry backed
+// by a manual reader, rather than only the pure uncoveredTrackedStars helper
+// below — this is what an operator's dashboard actually reads.
+func TestRunRecordsBalanceSheetTelemetryThroughACycle(t *testing.T) {
+	reader := metric.NewManualReader()
+	tel, err := NewTelemetryWithProvider(metric.NewMeterProvider(metric.WithReader(reader)))
+	if err != nil {
+		t.Fatalf("NewTelemetryWithProvider() = %v", err)
+	}
+
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}, {ID: 2, Name: "grove"}}}
+	sheets := &mockSheetRepo{}
+	sheetProvider := &mockSheetProvider{days: []outbound.BalanceSheetDay{{
+		Star: "spark", Date: "2026-08-19", TreasuryBalance: "1", Assets: "2",
+		AllocatedAssets: "3", IdleAssets: "4", Debt: "5", BackstopCapital: "6",
+	}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark"), upstreamRow("grove")}}
+	deps := defaultDeps(primes, &mockCapitalRepo{}, provider)
+	deps.SheetRepo = sheets
+	deps.SheetProvider = sheetProvider
+
+	service, err := NewService(deps, trackedStars, 7, func() time.Time { return syncedAt }, tel, nil)
+	if err != nil {
+		t.Fatalf("NewService() = %v", err)
+	}
+	if err := service.Run(context.Background()); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+
+	ctx := context.Background()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect() = %v", err)
+	}
+
+	inserted, uncoveredStar := balanceSheetMetricValues(t, rm)
+	if inserted != 1 {
+		t.Errorf("days.inserted.total = %d, want 1 — spark's one covered day", inserted)
+	}
+	if uncoveredStar != "grove" {
+		t.Errorf("primes.uncovered.total star = %q, want %q — grove's balance sheet was not fetched", uncoveredStar, "grove")
+	}
+}
+
+// balanceSheetMetricValues extracts the single data point recorded on each of
+// the two balance-sheet counters from a collected snapshot.
+func balanceSheetMetricValues(t *testing.T, rm metricdata.ResourceMetrics) (inserted int64, uncoveredStar string) {
+	t.Helper()
+	inserted = -1
+
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			switch m.Name {
+			case "reference_capital.sync.balance_sheet.days.inserted.total":
+				sum, ok := m.Data.(metricdata.Sum[int64])
+				if !ok || len(sum.DataPoints) != 1 {
+					t.Fatalf("days.inserted.total = %#v, want exactly one int64 data point", m.Data)
+				}
+				inserted = sum.DataPoints[0].Value
+			case "reference_capital.sync.balance_sheet.primes.uncovered.total":
+				sum, ok := m.Data.(metricdata.Sum[int64])
+				if !ok || len(sum.DataPoints) != 1 {
+					t.Fatalf("primes.uncovered.total = %#v, want exactly one int64 data point", m.Data)
+				}
+				star, ok := sum.DataPoints[0].Attributes.Value("star")
+				if !ok {
+					t.Fatal("primes.uncovered.total data point missing star attribute")
+				}
+				uncoveredStar = star.AsString()
+			}
+		}
+	}
+	return inserted, uncoveredStar
+}
+
 func TestRunAsksOnlyForEnoughDaysToCloseTheGap(t *testing.T) {
 	// The backfill seeded the year; a history-sized window every cycle would
 	// re-fetch all of it each time.
@@ -404,7 +682,8 @@ func TestRunAsksOnlyForEnoughDaysToCloseTheGap(t *testing.T) {
 func TestRunTreatsNoNewCompletedDayAsSuccess(t *testing.T) {
 	// The provider withholds the in-progress day, so a cycle running before
 	// upstream publishes yesterday legitimately finds nothing to add. The repo
-	// is rigged to fail, which proves it is never reached.
+	// is rigged to fail on a non-empty batch, which proves the empty one never
+	// reaches that branch.
 	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
 	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
 
@@ -417,7 +696,7 @@ func TestRunTreatsNoNewCompletedDayAsSuccess(t *testing.T) {
 	}
 }
 
-func TestRunPropagatesABalanceSheetFailure(t *testing.T) {
+func TestRunPropagatesABalanceSheetFetchFailure(t *testing.T) {
 	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
 	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
 
@@ -427,5 +706,345 @@ func TestRunPropagatesABalanceSheetFailure(t *testing.T) {
 
 	if !errors.Is(err, errProvider) {
 		t.Fatalf("Run() = %v, want it to wrap %v", err, errProvider)
+	}
+}
+
+func TestRunPropagatesABalanceSheetSaveFailure(t *testing.T) {
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
+	sheetProvider := &mockSheetProvider{days: []outbound.BalanceSheetDay{{
+		Star: "spark", Date: "2026-08-19", TreasuryBalance: "1", Assets: "2",
+		AllocatedAssets: "3", IdleAssets: "4", Debt: "5", BackstopCapital: "6",
+	}}}
+
+	err := newServiceWithSheets(
+		primes, &mockCapitalRepo{}, provider, &mockSheetRepo{err: errRepo}, sheetProvider,
+	).Run(context.Background())
+
+	if !errors.Is(err, errRepo) {
+		t.Fatalf("Run() = %v, want it to wrap %v", err, errRepo)
+	}
+}
+
+func TestRunPersistsTheBreakdownWithTheCyclesSyncedAt(t *testing.T) {
+	// The breakdown must join its prime-level totals exactly, which only holds
+	// if both tables carry the same cycle timestamp.
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
+	allocations := &mockAllocationRepo{}
+	deps := defaultDeps(primes, &mockCapitalRepo{}, provider)
+	deps.AllocationRepo = allocations
+
+	if err := newServiceWithDeps(deps).Run(context.Background()); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+
+	if len(allocations.allocations) != 1 {
+		t.Fatalf("saved %d allocations, want 1", len(allocations.allocations))
+	}
+	got := allocations.allocations[0]
+	if !got.SyncedAt.Equal(syncedAt) {
+		t.Errorf("SyncedAt = %v, want the cycle's %v", got.SyncedAt, syncedAt)
+	}
+	if got.PrimeID != 1 {
+		t.Errorf("PrimeID = %d, want 1", got.PrimeID)
+	}
+	if got.BuildID != 7 {
+		t.Errorf("BuildID = %d, want 7", got.BuildID)
+	}
+	if got.Source != entity.ReferenceDataSource {
+		t.Errorf("Source = %q, want %q", got.Source, entity.ReferenceDataSource)
+	}
+}
+
+func TestRunCarriesEveryBreakdownFigureOntoTheAllocation(t *testing.T) {
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
+	allocations := &mockAllocationRepo{}
+	deps := defaultDeps(primes, &mockCapitalRepo{}, provider)
+	deps.AllocationRepo = allocations
+
+	if err := newServiceWithDeps(deps).Run(context.Background()); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+
+	got := allocations.allocations[0]
+	for _, tc := range []struct{ field, got, want string }{
+		{"ProtocolName", got.ProtocolName, "sparklend"},
+		{"Network", got.Network, "ethereum"},
+		{"Symbol", got.Symbol, "spUSDS"},
+		{"TokenAddress", got.TokenAddress, "0xc02ab1a5eaa8d1b114ef786d9bde108cd4364359"},
+		{"ExposureUSD", got.ExposureUSD, "782710914.129541047405509005"},
+		{"RequiredRiskCapitalUSD", got.RequiredRiskCapitalUSD, "23308466.81"},
+		{"CRR", got.CRR, "0.0447"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q", tc.field, tc.got, tc.want)
+		}
+	}
+	if got.ChainID == nil || *got.ChainID != 1 {
+		t.Errorf("ChainID = %v, want 1", got.ChainID)
+	}
+	if got.LoanTokenSymbol == nil || *got.LoanTokenSymbol != "USDS" {
+		t.Errorf("LoanTokenSymbol = %v, want USDS", got.LoanTokenSymbol)
+	}
+}
+
+func TestRunAsksForBreakdownsOnlyForTheCoveredStars(t *testing.T) {
+	// grove is tracked but uncovered this cycle; the breakdown route answers an
+	// unknown star with a 500, so it must never be asked for one.
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
+	allocationProvider := &mockAllocationProvider{}
+	positionProvider := &mockPositionProvider{}
+	deps := defaultDeps(primes, &mockCapitalRepo{}, provider)
+	deps.AllocationProvider = allocationProvider
+	deps.PositionProvider = positionProvider
+
+	if err := newServiceWithDeps(deps).Run(context.Background()); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+
+	if len(allocationProvider.requested) != 1 || allocationProvider.requested[0] != "spark" {
+		t.Errorf("allocation stars = %v, want [spark]", allocationProvider.requested)
+	}
+	if len(positionProvider.requested) != 1 || positionProvider.requested[0] != "spark" {
+		t.Errorf("position stars = %v, want [spark]", positionProvider.requested)
+	}
+}
+
+func TestRunFailsWhenACoveredStarHasExposureButNoBreakdown(t *testing.T) {
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
+	deps := defaultDeps(primes, &mockCapitalRepo{}, provider)
+	deps.AllocationProvider = &mockAllocationProvider{rows: []outbound.RiskCapitalAllocationRow{}}
+
+	err := newServiceWithDeps(deps).Run(context.Background())
+
+	if err == nil {
+		t.Fatal("Run() = nil, want an error — real exposure beside an empty breakdown is upstream disagreeing with itself")
+	}
+}
+
+func TestRunAcceptsAnEmptyBreakdownForAZeroExposureStar(t *testing.T) {
+	row := upstreamRow("spark")
+	row.Exposure = "0"
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{row}}
+	deps := defaultDeps(primes, &mockCapitalRepo{}, provider)
+	deps.AllocationProvider = &mockAllocationProvider{rows: []outbound.RiskCapitalAllocationRow{}}
+
+	if err := newServiceWithDeps(deps).Run(context.Background()); err != nil {
+		t.Fatalf("Run() = %v, want nil — a prime holding nothing has nothing to break down", err)
+	}
+}
+
+func TestRunPersistsThePositionsWithTheCyclesSyncedAt(t *testing.T) {
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
+	positions := &mockPositionRepo{}
+	deps := defaultDeps(primes, &mockCapitalRepo{}, provider)
+	deps.PositionRepo = positions
+
+	if err := newServiceWithDeps(deps).Run(context.Background()); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+
+	if len(positions.positions) != 1 {
+		t.Fatalf("saved %d positions, want 1", len(positions.positions))
+	}
+	got := positions.positions[0]
+	if !got.SyncedAt.Equal(syncedAt) {
+		t.Errorf("SyncedAt = %v, want the cycle's %v", got.SyncedAt, syncedAt)
+	}
+	if got.AssetsUSD != "0.825893123256664748" {
+		t.Errorf("AssetsUSD = %q, want the upstream figure", got.AssetsUSD)
+	}
+	if got.WalletAddress != "0x1111111111111111111111111111111111111111" {
+		t.Errorf("WalletAddress = %q, want the upstream proxy address carried through", got.WalletAddress)
+	}
+	if got.Source != entity.ReferenceDataSource {
+		t.Errorf("Source = %q, want %q", got.Source, entity.ReferenceDataSource)
+	}
+	if got.IdleAssetsUSD != nil {
+		t.Errorf("IdleAssetsUSD = %v, want nil — an omitted figure must not become zero", *got.IdleAssetsUSD)
+	}
+}
+
+func TestRunFailsOnABreakdownForAPrimeTheRegistryDoesNotKnow(t *testing.T) {
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
+	deps := defaultDeps(primes, &mockCapitalRepo{}, provider)
+	deps.AllocationProvider = &mockAllocationProvider{rows: []outbound.RiskCapitalAllocationRow{allocationRow("newstar")}}
+
+	err := newServiceWithDeps(deps).Run(context.Background())
+
+	if err == nil {
+		t.Fatal("Run() = nil, want an error naming the unknown prime")
+	}
+}
+
+func TestRunPropagatesAnAllocationProviderFailure(t *testing.T) {
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
+	deps := defaultDeps(primes, &mockCapitalRepo{}, provider)
+	deps.AllocationProvider = &mockAllocationProvider{err: errProvider}
+
+	if err := newServiceWithDeps(deps).Run(context.Background()); !errors.Is(err, errProvider) {
+		t.Fatalf("Run() = %v, want it to wrap %v", err, errProvider)
+	}
+}
+
+func TestRunPropagatesAnAllocationPersistenceFailure(t *testing.T) {
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
+	deps := defaultDeps(primes, &mockCapitalRepo{}, provider)
+	deps.AllocationRepo = &mockAllocationRepo{err: errRepo}
+
+	if err := newServiceWithDeps(deps).Run(context.Background()); !errors.Is(err, errRepo) {
+		t.Fatalf("Run() = %v, want it to wrap %v", err, errRepo)
+	}
+}
+
+func TestRunPropagatesAPositionProviderFailure(t *testing.T) {
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
+	deps := defaultDeps(primes, &mockCapitalRepo{}, provider)
+	deps.PositionProvider = &mockPositionProvider{err: errProvider}
+
+	if err := newServiceWithDeps(deps).Run(context.Background()); !errors.Is(err, errProvider) {
+		t.Fatalf("Run() = %v, want it to wrap %v", err, errProvider)
+	}
+}
+
+func TestRunPropagatesAPositionPersistenceFailure(t *testing.T) {
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
+	deps := defaultDeps(primes, &mockCapitalRepo{}, provider)
+	deps.PositionRepo = &mockPositionRepo{err: errRepo}
+
+	if err := newServiceWithDeps(deps).Run(context.Background()); !errors.Is(err, errRepo) {
+		t.Fatalf("Run() = %v, want it to wrap %v", err, errRepo)
+	}
+}
+
+func TestRunFailsOnAPositionForAPrimeTheRegistryDoesNotKnow(t *testing.T) {
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
+	deps := defaultDeps(primes, &mockCapitalRepo{}, provider)
+	deps.PositionProvider = &mockPositionProvider{rows: []outbound.ReferencePositionRow{positionRow("newstar")}}
+
+	err := newServiceWithDeps(deps).Run(context.Background())
+
+	if err == nil {
+		t.Fatal("Run() = nil, want an error naming the unknown prime")
+	}
+}
+
+func TestRunFailsOnAnUnparseableExposure(t *testing.T) {
+	row := upstreamRow("spark")
+	row.Exposure = "n/a"
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{row}}
+	deps := defaultDeps(primes, &mockCapitalRepo{}, provider)
+	deps.AllocationProvider = &mockAllocationProvider{rows: []outbound.RiskCapitalAllocationRow{}}
+
+	err := newServiceWithDeps(deps).Run(context.Background())
+
+	if err == nil {
+		t.Fatal("Run() = nil, want an error — an unparseable exposure must fail, not panic")
+	}
+}
+
+// uncoveredBalanceSheetStars collects every star attribute recorded on the
+// balance-sheet-uncovered counter from a collected snapshot.
+func uncoveredBalanceSheetStars(t *testing.T, rm metricdata.ResourceMetrics) []string {
+	t.Helper()
+	var stars []string
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "reference_capital.sync.balance_sheet.primes.uncovered.total" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("primes.uncovered.total = %#v, want a Sum[int64]", m.Data)
+			}
+			for _, dp := range sum.DataPoints {
+				star, ok := dp.Attributes.Value("star")
+				if !ok {
+					t.Fatal("primes.uncovered.total data point missing star attribute")
+				}
+				stars = append(stars, star.AsString())
+			}
+		}
+	}
+	sort.Strings(stars)
+	return stars
+}
+
+// The nothing-covered edge of the same normalization+diff the telemetry test
+// above spot-checks with one uncovered star: neither tracked star appears in
+// the feed's fetch window.
+func TestRunReportsEveryTrackedStarUncoveredWhenTheBalanceSheetFeedCoversNone(t *testing.T) {
+	reader := metric.NewManualReader()
+	tel, err := NewTelemetryWithProvider(metric.NewMeterProvider(metric.WithReader(reader)))
+	if err != nil {
+		t.Fatalf("NewTelemetryWithProvider() = %v", err)
+	}
+
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}, {ID: 2, Name: "grove"}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark"), upstreamRow("grove")}}
+	deps := defaultDeps(primes, &mockCapitalRepo{}, provider)
+	deps.SheetProvider = &mockSheetProvider{} // covers no star
+
+	service, err := NewService(deps, trackedStars, 7, func() time.Time { return syncedAt }, tel, nil)
+	if err != nil {
+		t.Fatalf("NewService() = %v", err)
+	}
+	if err := service.Run(context.Background()); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect() = %v", err)
+	}
+	if got, want := uncoveredBalanceSheetStars(t, rm), []string{"grove", "spark"}; !slices.Equal(got, want) {
+		t.Errorf("uncovered stars = %v, want %v", got, want)
+	}
+}
+
+// The normalization edge: a tracked star configured with padding/casing must
+// still match the feed's plain-lowercase row, so it is not reported uncovered.
+func TestRunNormalizesATrackedStarBeforeComparingBalanceSheetCoverage(t *testing.T) {
+	reader := metric.NewManualReader()
+	tel, err := NewTelemetryWithProvider(metric.NewMeterProvider(metric.WithReader(reader)))
+	if err != nil {
+		t.Fatalf("NewTelemetryWithProvider() = %v", err)
+	}
+
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
+	deps := defaultDeps(primes, &mockCapitalRepo{}, provider)
+	deps.SheetProvider = &mockSheetProvider{days: []outbound.BalanceSheetDay{{
+		Star: "spark", Date: "2026-08-19", TreasuryBalance: "1", Assets: "2",
+		AllocatedAssets: "3", IdleAssets: "4", Debt: "5", BackstopCapital: "6",
+	}}}
+
+	service, err := NewService(deps, []string{" Spark "}, 7, func() time.Time { return syncedAt }, tel, nil)
+	if err != nil {
+		t.Fatalf("NewService() = %v", err)
+	}
+	if err := service.Run(context.Background()); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect() = %v", err)
+	}
+	if got := uncoveredBalanceSheetStars(t, rm); len(got) != 0 {
+		t.Errorf("uncovered stars = %v, want none — padding/casing must not split the star from its feed row", got)
 	}
 }

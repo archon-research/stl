@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const positionDBName = "test_position"
@@ -68,7 +69,7 @@ func setupPositionTest(t *testing.T) *positionTestFixture {
 
 	truncateCollaterals(t, ctx)
 
-	repo, err := NewPositionRepository(positionPool, nil, 0, 100)
+	repo, err := NewPositionRepository(positionPool, nil, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create repository: %v", err)
 	}
@@ -185,6 +186,11 @@ func TestSaveBorrower_RepayWithZeroBalance(t *testing.T) {
 	fixture := setupPositionTest(t)
 
 	ctx := context.Background()
+	buildID, runID := testutil.OpenTestRun(t, ctx, fixture.pool)
+	repo, err := NewPositionRepository(fixture.pool, nil, buildID, runID, 100)
+	if err != nil {
+		t.Fatalf("NewPositionRepository: %v", err)
+	}
 
 	tx, err := fixture.pool.Begin(ctx)
 	if err != nil {
@@ -192,7 +198,7 @@ func TestSaveBorrower_RepayWithZeroBalance(t *testing.T) {
 	}
 	defer tx.Rollback(ctx)
 
-	err = fixture.repo.SaveBorrower(ctx, tx, &entity.Borrower{
+	err = repo.SaveBorrower(ctx, tx, &entity.Borrower{
 		UserID: fixture.userID, ProtocolID: fixture.protocolID, TokenID: fixture.tokenID,
 		BlockNumber: 1100, BlockVersion: 0,
 		Amount: big.NewInt(0), Change: big.NewInt(500),
@@ -240,6 +246,11 @@ func TestSaveBorrower_RepayWithZeroBalance(t *testing.T) {
 	if !bytes.Equal(got.TxHash, []byte{0xaa, 0xbb, 0xcc}) {
 		t.Errorf("TxHash mismatch: got %v, want %v", got.TxHash, []byte{0xaa, 0xbb, 0xcc})
 	}
+	var gotRunID *int64
+	if err := fixture.pool.QueryRow(ctx, `SELECT run_id FROM borrower WHERE block_number = 1100`).Scan(&gotRunID); err != nil {
+		t.Fatalf("query run_id: %v", err)
+	}
+	testutil.RequireRunID(t, gotRunID, runID)
 }
 
 func TestSaveBorrowerCollaterals_EmptyRecords(t *testing.T) {

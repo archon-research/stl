@@ -9,6 +9,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"go.opentelemetry.io/otel/attribute"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -99,7 +100,10 @@ func TestRecordAdapterMembershipObservation_LabelsTypeAndProvenance(t *testing.T
 		{"unclassifiable adapter inferred from an Allocate", adapterTypeFor(entity.MorphoAdapterTypeUnknown), entity.MembershipFromAllocation, "unknown"},
 		{"a removal carries no classification at all", nil, entity.MembershipFromRemoveAdapter, "unprobed"},
 		{"adapter seeded by the bootstrap", adapterTypeFor(entity.MorphoAdapterTypeMarketV1), entity.MembershipFromBootstrapSeed, "market_v1"},
-		{"adapter type added to the enum but not the label map", adapterTypeFor(entity.MorphoAdapterType(3)), entity.MembershipFromAddAdapter, "type_3"},
+		{"external ERC-4626 vault adapter", adapterTypeFor(entity.MorphoAdapterTypeERC4626Merkl), entity.MembershipFromAddAdapter, "erc4626_merkl"},
+		{"box adapter", adapterTypeFor(entity.MorphoAdapterTypeBox), entity.MembershipFromAddAdapter, "box"},
+		{"compound v3 adapter", adapterTypeFor(entity.MorphoAdapterTypeCompoundV3), entity.MembershipFromAddAdapter, "compound_v3"},
+		{"adapter type added to the enum but not the label map", adapterTypeFor(entity.MorphoAdapterType(42)), entity.MembershipFromAddAdapter, "type_42"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -194,6 +198,33 @@ func exerciseAllMethods(t *testing.T, tel *Telemetry) {
 	span.End()
 	_, span = tel.StartSpan(ctx, "test.span", attribute.String("key", "value"))
 	span.End()
+}
+
+// Guards the startup seed: VectorMorphoIndexerStalled reads
+// morpho_blocks_processed_total with rate()==0 and must be computable from
+// process start (a worker dead before its first block emits no series at
+// all otherwise). See telemetry.SeedCounter.
+func TestNewTelemetry_SeedsBlockStatusSeriesAtZero(t *testing.T) {
+	_, reader := newRecordingTelemetry(t)
+
+	dps := testutil.CollectSumDataPoints(t, reader, "morpho.blocks.processed")
+	got := map[string]int64{}
+	for _, dp := range dps {
+		if chain := testutil.AttrValue(dp, "chain"); chain != "mainnet" {
+			t.Errorf("morpho.blocks.processed chain attr = %q, want %q", chain, "mainnet")
+		}
+		got[testutil.AttrValue(dp, "status")] = dp.Value
+	}
+	for _, status := range []string{"success", "error"} {
+		v, ok := got[status]
+		if !ok {
+			t.Errorf("morpho.blocks.processed missing status=%q series before any block", status)
+			continue
+		}
+		if v != 0 {
+			t.Errorf("morpho.blocks.processed{status=%q} = %d, want 0", status, v)
+		}
+	}
 }
 
 func TestTelemetry_NilSafe(t *testing.T) {

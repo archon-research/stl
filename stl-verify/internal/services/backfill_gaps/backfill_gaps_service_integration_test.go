@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -565,6 +566,11 @@ func TestVerifyChainIntegrity_EmptyRange(t *testing.T) {
 	}
 }
 
+// TestVerifyChainIntegrity_WithGaps guards the watermark against a hole the
+// gap filler already stepped over: block 5 and 6 are consecutive and correctly
+// linked, so before ARCT-379 the missing block 4 let the whole range read as a
+// valid chain — the shape every hole below the watermark takes, whoever put it
+// there.
 func TestVerifyChainIntegrity_WithGaps(t *testing.T) {
 
 	repo, cleanup := setupPostgres(t)
@@ -575,15 +581,15 @@ func TestVerifyChainIntegrity_WithGaps(t *testing.T) {
 	for i := int64(1); i <= 3; i++ {
 		saveBlock(t, ctx, repo, i)
 	}
-	// Block 5's parent_hash points to 4 (which doesn't exist in DB, but that's okay)
 	saveBlock(t, ctx, repo, 5)
 	saveBlock(t, ctx, repo, 6)
 
-	// This should pass because we only check consecutive blocks that exist
-	// Block 5 and 6 are consecutive and properly linked
 	err := repo.VerifyChainIntegrity(ctx, 1, 6)
-	if err != nil {
-		t.Errorf("expected valid chain with gaps (only consecutive blocks checked), got: %v", err)
+	if err == nil {
+		t.Fatal("expected the missing block 4 to be reported, got nil")
+	}
+	if !strings.Contains(err.Error(), "canonical block(s) 4 to 4 missing between blocks 3 and 5") {
+		t.Errorf("error should name the missing block 4, got: %v", err)
 	}
 }
 
@@ -711,7 +717,7 @@ func TestIntegration_ProcessBlockData_LinkageRaceCondition(t *testing.T) {
 // TestBackfillService_AdvancesWatermark_OnUnseededChain verifies that a chain
 // added to the `chain` table AFTER the schema migrations have run — and whose
 // backfill_watermark row therefore does not exist yet — still gets a watermark
-// row created by SetBackfillWatermark's UPSERT on the first successful pass.
+// row created by the first successful pass's advance.
 //
 // Pre-fix (VEC-149 schema bug), the INSERT inside the UPSERT fails with
 //
@@ -730,7 +736,7 @@ func TestBackfillService_AdvancesWatermark_OnUnseededChain(t *testing.T) {
 
 	// Insert a fresh chain that was NOT in the `chain` table when the
 	// VEC-149 migration's seed ran. This guarantees the watermark row must be
-	// created by SetBackfillWatermark's UPSERT, not the seed.
+	// created by the watermark advance, not the seed.
 	const testChainID int64 = 999
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO chain (chain_id, name) VALUES ($1, $2)`,
@@ -833,9 +839,7 @@ func TestBackfillService_WatermarkLag_ClampedNonNegative(t *testing.T) {
 	}
 	// Watermark sits AHEAD of the canonical head (the post-orphaning state):
 	// head(5) - watermark(100) = -95 before clamping.
-	if err := repo.SetBackfillWatermark(ctx, 100); err != nil {
-		t.Fatalf("set watermark: %v", err)
-	}
+	seedWatermark(t, ctx, repo, testChainID, 100, 0)
 
 	rec := &fakeBackfillRecorder{}
 	svc, err := NewBackfillService(
@@ -884,9 +888,10 @@ func TestIntegration_ProcessBlockData_ClearsOrphanOnIdempotentReFetch(t *testing
 		parentHash       = "0xVECNA_clear_499"
 	)
 
-	// Seed: a single row at this height, marked orphaned. This mirrors the
-	// production state after the buggy HandleReorgAtomic over-orphaned a row
-	// whose hash is in fact part of the new canonical chain.
+	// Seed: a single row at this height, marked orphaned, under the canonical
+	// successor that still names it as parent. This mirrors the production
+	// state after the buggy HandleReorgAtomic over-orphaned a row whose hash is
+	// in fact part of the new canonical chain.
 	if _, err := pgRepo.SaveBlock(ctx, outbound.BlockState{
 		Number:         num,
 		Hash:           blockHash,
@@ -898,6 +903,15 @@ func TestIntegration_ProcessBlockData_ClearsOrphanOnIdempotentReFetch(t *testing
 	}
 	if err := pgRepo.MarkBlockOrphaned(ctx, blockHash); err != nil {
 		t.Fatalf("mark orphaned: %v", err)
+	}
+	if _, err := pgRepo.SaveBlock(ctx, outbound.BlockState{
+		Number:         num + 1,
+		Hash:           "0xVECNA_clear_501",
+		ParentHash:     blockHash,
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("seed successor: %v", err)
 	}
 
 	// Pre-condition: FindGaps sees a gap (orphan-only row is invisible to
@@ -1113,5 +1127,682 @@ func TestIntegration_ProcessBlockData_DifferentHashSkipsUnchanged(t *testing.T) 
 	}
 	if fetched != nil {
 		t.Fatalf("expected no row for fetched (stale-fork) hash, got %+v", fetched)
+	}
+}
+
+// forkHash names a losing-fork block at a height, using a hash the mock
+// client's canonical chain never serves.
+func forkHash(number int64) string {
+	return fmt.Sprintf("0xARCT379_fork_a_%d", number)
+}
+
+// seedWatermark parks a chain's cursor. Seeding is SQL, not a port method:
+// production only moves the cursor through AdvanceBackfillWatermark's
+// compare-and-set or a reorg commit's rewind (ARCT-379).
+func seedWatermark(t *testing.T, ctx context.Context, repo *postgres.BlockStateRepository, chainID, watermark, rewindCount int64) {
+	t.Helper()
+	if _, err := repo.Pool().Exec(ctx,
+		`INSERT INTO backfill_watermark (chain_id, watermark, rewind_count) VALUES ($1, $2, $3)
+		 ON CONFLICT (chain_id) DO UPDATE SET watermark = EXCLUDED.watermark, rewind_count = EXCLUDED.rewind_count`,
+		chainID, watermark, rewindCount); err != nil {
+		t.Fatalf("seed watermark: %v", err)
+	}
+}
+
+// savePublishedBlock seeds a block that already went through the publish path,
+// so watermark advancement is not capped by GetMinUnpublishedBlock.
+func savePublishedBlock(t *testing.T, ctx context.Context, repo *postgres.BlockStateRepository, number int64, hash, parentHash string) {
+	t.Helper()
+	if _, err := repo.SaveBlock(ctx, outbound.BlockState{
+		Number:         number,
+		Hash:           hash,
+		ParentHash:     parentHash,
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("seed block %d: %v", number, err)
+	}
+	if err := repo.MarkPublishComplete(ctx, hash); err != nil {
+		t.Fatalf("mark published %d: %v", number, err)
+	}
+}
+
+// seedPublishedCanonicalChain seeds [from, to] from the mock client's canonical
+// chain, so parent_hash linkage matches what a fetch returns.
+func seedPublishedCanonicalChain(t *testing.T, ctx context.Context, repo *postgres.BlockStateRepository, client *testutil.MockBlockchainClient, from, to int64) {
+	t.Helper()
+	for i := from; i <= to; i++ {
+		h := client.GetHeader(i)
+		savePublishedBlock(t, ctx, repo, i, h.Hash, h.ParentHash)
+	}
+}
+
+// seedPublishedForkRun seeds [from, to] as a losing fork linked to the canonical
+// block below it — the state the watcher is left in when the canonical
+// broadcasts for those heights were dropped as stale_fork (ARCT-379).
+func seedPublishedForkRun(t *testing.T, ctx context.Context, repo *postgres.BlockStateRepository, client *testutil.MockBlockchainClient, from, to int64) {
+	t.Helper()
+	for i := from; i <= to; i++ {
+		parentHash := forkHash(i - 1)
+		if i == from {
+			parentHash = client.GetHeader(i - 1).Hash
+		}
+		savePublishedBlock(t, ctx, repo, i, forkHash(i), parentHash)
+	}
+}
+
+// commitReorgAt commits the reorg the next canonical broadcast triggers: it
+// orphans every height above commonAncestor and inserts newHead as canonical,
+// leaving the heights in between with no canonical row. orphanedHead is the row
+// the reorg replaces: a losing fork in most fixtures, and the chain's own
+// canonical head where the replaced broadcast was the dropped one.
+func commitReorgAt(t *testing.T, ctx context.Context, repo *postgres.BlockStateRepository, client *testutil.MockBlockchainClient, commonAncestor, newHead int64, orphanedHead string) {
+	t.Helper()
+	head := client.GetHeader(newHead)
+	if _, err := repo.HandleReorgAtomic(ctx, commonAncestor,
+		outbound.ReorgEvent{
+			DetectedAt:  time.Now(),
+			BlockNumber: newHead,
+			OldHash:     orphanedHead,
+			NewHash:     head.Hash,
+			Depth:       int(newHead - commonAncestor),
+		},
+		outbound.BlockState{
+			Number:         newHead,
+			Hash:           head.Hash,
+			ParentHash:     head.ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
+		}); err != nil {
+		t.Fatalf("HandleReorgAtomic: %v", err)
+	}
+	if err := repo.MarkPublishComplete(ctx, head.Hash); err != nil {
+		t.Fatalf("mark published head: %v", err)
+	}
+}
+
+// TestIntegration_BackfillLoop_FillsOrphanOnlyHeightAfterReorgRewind is the
+// end-to-end ARCT-379 reproduction. The watcher holds a losing fork at height
+// N, the canonical broadcast for N is dropped as stale_fork, and the next
+// broadcast (N+1) commits a reorg that orphans N without re-fetching it. Only
+// the watermark rewind inside HandleReorgAtomic puts N back inside FindGaps'
+// range; without it the pass below sees no gap and the height stays a hole.
+func TestIntegration_BackfillLoop_FillsOrphanOnlyHeightAfterReorgRewind(t *testing.T) {
+	pgRepo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+
+	const droppedNum int64 = 5
+
+	client := newMockClient()
+	for i := int64(1); i <= droppedNum+1; i++ {
+		client.AddBlock(i, "")
+	}
+
+	seedPublishedCanonicalChain(t, ctx, pgRepo, client, 1, droppedNum-1)
+	seedPublishedForkRun(t, ctx, pgRepo, client, droppedNum, droppedNum)
+	seedWatermark(t, ctx, pgRepo, 1, droppedNum, 0)
+	commitReorgAt(t, ctx, pgRepo, client, droppedNum-1, droppedNum+1, forkHash(droppedNum))
+
+	orphanOnly, err := pgRepo.FindOrphanOnlyHeights(ctx, 1, droppedNum+1)
+	if err != nil {
+		t.Fatalf("FindOrphanOnlyHeights pre: %v", err)
+	}
+	if len(orphanOnly) != 1 || orphanOnly[0] != droppedNum {
+		t.Fatalf("orphan-only heights pre = %v, want [%d]", orphanOnly, droppedNum)
+	}
+
+	svc, err := NewBackfillService(BackfillConfigDefaults(), client, pgRepo, memory.NewBlockCache(), &integrationMockEventSink{})
+	if err != nil {
+		t.Fatalf("NewBackfillService: %v", err)
+	}
+	if err := svc.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	t.Run("canonical block is saved as a new version", func(t *testing.T) {
+		got, err := pgRepo.GetBlockByNumber(ctx, droppedNum)
+		if err != nil {
+			t.Fatalf("GetBlockByNumber: %v", err)
+		}
+		if got == nil {
+			t.Fatalf("expected a canonical block at %d, got nil", droppedNum)
+		}
+		if want := client.GetHeader(droppedNum).Hash; got.Hash != want {
+			t.Errorf("hash = %s, want canonical %s", got.Hash, want)
+		}
+		if got.Version != 1 {
+			t.Errorf("version = %d, want 1 (the fork-A row keeps version 0)", got.Version)
+		}
+	})
+
+	t.Run("no orphan-only height remains", func(t *testing.T) {
+		heights, err := pgRepo.FindOrphanOnlyHeights(ctx, 1, droppedNum+1)
+		if err != nil {
+			t.Fatalf("FindOrphanOnlyHeights post: %v", err)
+		}
+		if len(heights) != 0 {
+			t.Errorf("orphan-only heights = %v, want none", heights)
+		}
+	})
+
+	t.Run("watermark advances past the filled height", func(t *testing.T) {
+		watermark, err := pgRepo.GetBackfillWatermark(ctx)
+		if err != nil {
+			t.Fatalf("GetBackfillWatermark: %v", err)
+		}
+		if watermark != droppedNum+1 {
+			t.Errorf("watermark = %d, want %d", watermark, droppedNum+1)
+		}
+	})
+}
+
+// reorgInjectingRepo commits a reorg from inside a pass, at the named
+// repository call, once. Every named point sits between the scan
+// advanceWatermark computes its target from and the write it makes at the end,
+// so each one is a reorg the pass must not overwrite.
+type reorgInjectingRepo struct {
+	*postgres.BlockStateRepository
+	at    string
+	onNth int
+	calls int
+	fire  func()
+}
+
+func (r *reorgInjectingRepo) trigger(at string) {
+	if r.fire == nil || r.at != at {
+		return
+	}
+	r.calls++
+	if r.calls < r.onNth {
+		return
+	}
+	r.fire()
+	r.fire = nil
+}
+
+// The second GetMaxBlockNumber of a pass is the one advanceWatermark makes;
+// findAndFillGaps makes the first.
+func (r *reorgInjectingRepo) GetMaxBlockNumber(ctx context.Context) (int64, error) {
+	r.trigger("GetMaxBlockNumber")
+	return r.BlockStateRepository.GetMaxBlockNumber(ctx)
+}
+
+// The integrity check is a pass's last read before the compare-and-set, so a
+// reorg fired once it has passed is one only the cursor itself can refuse.
+func (r *reorgInjectingRepo) VerifyChainIntegrity(ctx context.Context, fromBlock, toBlock int64) error {
+	err := r.BlockStateRepository.VerifyChainIntegrity(ctx, fromBlock, toBlock)
+	if err == nil {
+		r.trigger("VerifyChainIntegrity")
+	}
+	return err
+}
+
+// TestIntegration_BackfillLoop_ReorgRewindSurvivesConcurrentWatermarkAdvance is
+// the ARCT-379 lost-update regression. A pass decides where to advance the
+// watermark from a value it read before the reorg committed; writing that
+// decision unconditionally overwrites the rewind, puts the orphan-only height
+// back above the watermark, and the hole is never re-fetched.
+func TestIntegration_BackfillLoop_ReorgRewindSurvivesConcurrentWatermarkAdvance(t *testing.T) {
+	pgRepo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+
+	const droppedNum int64 = 5
+
+	client := newMockClient()
+	for i := int64(1); i <= droppedNum+1; i++ {
+		client.AddBlock(i, "")
+	}
+
+	seedPublishedCanonicalChain(t, ctx, pgRepo, client, 1, droppedNum-1)
+	seedPublishedForkRun(t, ctx, pgRepo, client, droppedNum, droppedNum)
+	seedWatermark(t, ctx, pgRepo, 1, droppedNum, 0)
+
+	repo := &reorgInjectingRepo{
+		BlockStateRepository: pgRepo,
+		at:                   "GetMaxBlockNumber",
+		onNth:                2,
+		fire: func() {
+			commitReorgAt(t, ctx, pgRepo, client, droppedNum-1, droppedNum+1, forkHash(droppedNum))
+		},
+	}
+
+	cfg := BackfillConfigDefaults()
+	// The stored head is still the losing fork here, so the boundary check would
+	// recover it before the race under test ever runs.
+	cfg.BoundaryCheckDepth = -1
+	svc, err := NewBackfillService(cfg, client, repo, memory.NewBlockCache(), &integrationMockEventSink{})
+	if err != nil {
+		t.Fatalf("NewBackfillService: %v", err)
+	}
+	if err := svc.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	t.Run("the rewind survives the pass that raced it", func(t *testing.T) {
+		watermark, err := pgRepo.GetBackfillWatermark(ctx)
+		if err != nil {
+			t.Fatalf("GetBackfillWatermark: %v", err)
+		}
+		if watermark != droppedNum-1 {
+			t.Errorf("watermark = %d, want %d (the reorg's common ancestor)", watermark, droppedNum-1)
+		}
+	})
+
+	if err := svc.RunOnce(ctx); err != nil {
+		t.Fatalf("second RunOnce: %v", err)
+	}
+
+	t.Run("the next pass fills the orphan-only height", func(t *testing.T) {
+		got, err := pgRepo.GetBlockByNumber(ctx, droppedNum)
+		if err != nil {
+			t.Fatalf("GetBlockByNumber: %v", err)
+		}
+		if got == nil {
+			t.Fatalf("expected a canonical block at %d, got nil", droppedNum)
+		}
+		if want := client.GetHeader(droppedNum).Hash; got.Hash != want {
+			t.Errorf("hash = %s, want canonical %s", got.Hash, want)
+		}
+		heights, err := pgRepo.FindOrphanOnlyHeights(ctx, 1, droppedNum+1)
+		if err != nil {
+			t.Fatalf("FindOrphanOnlyHeights: %v", err)
+		}
+		if len(heights) != 0 {
+			t.Errorf("orphan-only heights = %v, want none", heights)
+		}
+	})
+}
+
+// TestIntegration_BackfillLoop_NoOpRewindStillBlocksTheAdvance pins the term
+// that has to refuse the advance here. The ordinary staging state has the
+// watermark at head-1, which is where a reorg's common ancestor lands too, so
+// LEAST() leaves the watermark exactly where the pass read it and a
+// compare-and-set on the watermark alone still matches. The reorg is committed
+// once the pass's integrity check has passed — the last read before the write —
+// so nothing but the cursor's rewind count is left to catch it, and an advance
+// here retires the height the reorg just emptied.
+func TestIntegration_BackfillLoop_NoOpRewindStillBlocksTheAdvance(t *testing.T) {
+	pgRepo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+
+	const emptiedNum, newHead, rewindCount int64 = 5, 6, 7
+
+	client := newMockClient()
+	for i := int64(1); i <= newHead; i++ {
+		client.AddBlock(i, "")
+	}
+
+	seedPublishedCanonicalChain(t, ctx, pgRepo, client, 1, emptiedNum)
+	seedWatermark(t, ctx, pgRepo, 1, emptiedNum-1, rewindCount)
+
+	repo := &reorgInjectingRepo{
+		BlockStateRepository: pgRepo,
+		at:                   "VerifyChainIntegrity",
+		onNth:                1,
+		fire: func() {
+			commitReorgAt(t, ctx, pgRepo, client, emptiedNum-1, newHead, client.GetHeader(emptiedNum).Hash)
+		},
+	}
+
+	logs := &testutil.SlogRecorder{}
+	metrics := &fakeBackfillRecorder{}
+	cfg := BackfillConfigDefaults()
+	cfg.Logger = slog.New(logs)
+	cfg.Metrics = metrics
+	svc, err := NewBackfillService(cfg, client, repo, memory.NewBlockCache(), &integrationMockEventSink{})
+	if err != nil {
+		t.Fatalf("NewBackfillService: %v", err)
+	}
+	if err := svc.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	cursor, err := pgRepo.GetBackfillCursor(ctx)
+	if err != nil {
+		t.Fatalf("GetBackfillCursor: %v", err)
+	}
+	if want := (outbound.BackfillCursor{Watermark: emptiedNum - 1, RewindCount: rewindCount + 1}); cursor != want {
+		t.Fatalf("cursor = %+v, want %+v (the pass retired the height the reorg emptied)", cursor, want)
+	}
+
+	if got := metrics.SkippedAdvances(); got != 1 {
+		t.Errorf("skipped advances = %d, want 1", got)
+	}
+	if got := logs.CountInfo("watermark changed concurrently, skipping advance"); got != 1 {
+		t.Errorf("refused-advance log records = %d, want 1", got)
+	}
+
+	heights, err := pgRepo.FindOrphanOnlyHeights(ctx, 1, newHead)
+	if err != nil {
+		t.Fatalf("FindOrphanOnlyHeights: %v", err)
+	}
+	if len(heights) != 1 || heights[0] != emptiedNum {
+		t.Errorf("orphan-only heights = %v, want [%d] (still inside the gap finder's range)", heights, emptiedNum)
+	}
+}
+
+// TestIntegration_AdvanceWatermark_ReachesHeadOnAContiguousChain guards the
+// advance against the trailing-gap rule VerifyChainIntegrity gained: the range
+// it verifies ends at a height that always has a canonical row, so a whole
+// chain must still retire in one pass.
+func TestIntegration_AdvanceWatermark_ReachesHeadOnAContiguousChain(t *testing.T) {
+	pgRepo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+
+	const head int64 = 5
+	client := newMockClient()
+	for i := int64(1); i <= head; i++ {
+		client.AddBlock(i, "")
+	}
+	seedPublishedCanonicalChain(t, ctx, pgRepo, client, 1, head)
+	seedWatermark(t, ctx, pgRepo, 1, 2, 0)
+
+	cfg := BackfillConfigDefaults()
+	cfg.BoundaryCheckDepth = -1
+	svc, err := NewBackfillService(cfg, client, pgRepo, memory.NewBlockCache(), &integrationMockEventSink{})
+	if err != nil {
+		t.Fatalf("NewBackfillService: %v", err)
+	}
+	if err := svc.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	watermark, err := pgRepo.GetBackfillWatermark(ctx)
+	if err != nil {
+		t.Fatalf("GetBackfillWatermark: %v", err)
+	}
+	if watermark != head {
+		t.Errorf("watermark = %d, want %d", watermark, head)
+	}
+}
+
+// failingRefetchClient fails the canonical refetch for one height, the way a
+// degraded RPC does mid-recovery.
+type failingRefetchClient struct {
+	outbound.BlockchainClient
+	failAt int64
+}
+
+func (c *failingRefetchClient) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx bool) ([]outbound.BlockData, error) {
+	if c.failAt != 0 && slices.Contains(blockNums, c.failAt) {
+		return nil, fmt.Errorf("rpc unavailable for block %d", c.failAt)
+	}
+	return c.BlockchainClient.GetBlocksBatch(ctx, blockNums, fullTx)
+}
+
+// TestIntegration_BackfillLoop_StaleChainRecoveryRewindsWatermark is the
+// ARCT-379 round-3 regression. The boundary check orphans every stale block
+// before refetching any of them, and a refetch that fails is only logged — so
+// the height is left orphan-only below a watermark nothing rewinds, out of
+// FindGaps' reach for good.
+func TestIntegration_BackfillLoop_StaleChainRecoveryRewindsWatermark(t *testing.T) {
+	pgRepo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+
+	const staleFrom, staleTo int64 = 5, 6
+
+	client := newMockClient()
+	for i := int64(1); i <= staleTo; i++ {
+		client.AddBlock(i, "")
+	}
+	seedPublishedCanonicalChain(t, ctx, pgRepo, client, 1, staleTo)
+	seedWatermark(t, ctx, pgRepo, 1, staleTo, 0)
+
+	// The chain moved on under the stored rows: both stale heights now serve a
+	// different hash, and the refetch of the lower one fails.
+	newLow := fmt.Sprintf("0xARCT379_stale_%d", staleFrom)
+	newHigh := fmt.Sprintf("0xARCT379_stale_%d", staleTo)
+	client.SetBlockHeader(staleFrom, newLow, client.GetHeader(staleFrom-1).Hash)
+	client.SetBlockHeader(staleTo, newHigh, newLow)
+
+	rpc := &failingRefetchClient{BlockchainClient: client, failAt: staleFrom}
+	svc, err := NewBackfillService(BackfillConfigDefaults(), rpc, pgRepo, memory.NewBlockCache(), &integrationMockEventSink{})
+	if err != nil {
+		t.Fatalf("NewBackfillService: %v", err)
+	}
+	if err := svc.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	t.Run("the failed refetch leaves the height inside the gap finder's range", func(t *testing.T) {
+		watermark, err := pgRepo.GetBackfillWatermark(ctx)
+		if err != nil {
+			t.Fatalf("GetBackfillWatermark: %v", err)
+		}
+		if watermark != staleFrom-1 {
+			t.Fatalf("watermark = %d, want %d (below the lowest stale height)", watermark, staleFrom-1)
+		}
+		heights, err := pgRepo.FindOrphanOnlyHeights(ctx, 1, staleTo)
+		if err != nil {
+			t.Fatalf("FindOrphanOnlyHeights: %v", err)
+		}
+		if len(heights) != 1 || heights[0] != staleFrom {
+			t.Errorf("orphan-only heights = %v, want [%d]", heights, staleFrom)
+		}
+	})
+
+	rpc.failAt = 0
+	if err := svc.RunOnce(ctx); err != nil {
+		t.Fatalf("second RunOnce: %v", err)
+	}
+
+	t.Run("the next pass fills the height and the watermark catches up", func(t *testing.T) {
+		got, err := pgRepo.GetBlockByNumber(ctx, staleFrom)
+		if err != nil {
+			t.Fatalf("GetBlockByNumber: %v", err)
+		}
+		if got == nil {
+			t.Fatalf("expected a canonical block at %d, got nil", staleFrom)
+		}
+		if got.Hash != newLow {
+			t.Errorf("hash = %s, want %s", got.Hash, newLow)
+		}
+		heights, err := pgRepo.FindOrphanOnlyHeights(ctx, 1, staleTo)
+		if err != nil {
+			t.Fatalf("FindOrphanOnlyHeights: %v", err)
+		}
+		if len(heights) != 0 {
+			t.Errorf("orphan-only heights = %v, want none", heights)
+		}
+		watermark, err := pgRepo.GetBackfillWatermark(ctx)
+		if err != nil {
+			t.Fatalf("GetBackfillWatermark: %v", err)
+		}
+		if watermark != staleTo {
+			t.Errorf("watermark = %d, want %d", watermark, staleTo)
+		}
+	})
+}
+
+// TestIntegration_BackfillLoop_RefusesToUnOrphanLosingForkRun is the ARCT-379
+// un-orphan regression. A rewind leaves every orphaned height but the last
+// without a canonical successor, so validateBlockLinkage's forward check is
+// skipped; a node still serving the losing fork then gets its lowest height
+// promoted back to canonical, wedging the run's remaining heights forever.
+func TestIntegration_BackfillLoop_RefusesToUnOrphanLosingForkRun(t *testing.T) {
+	pgRepo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+
+	const forkFrom, forkTo int64 = 5, 6
+
+	client := newMockClient()
+	for i := int64(1); i <= forkTo+1; i++ {
+		client.AddBlock(i, "")
+	}
+	canonicalLow, canonicalHigh := client.GetHeader(forkFrom), client.GetHeader(forkTo)
+
+	seedPublishedCanonicalChain(t, ctx, pgRepo, client, 1, forkFrom-1)
+	seedPublishedForkRun(t, ctx, pgRepo, client, forkFrom, forkTo)
+	seedWatermark(t, ctx, pgRepo, 1, forkTo, 0)
+	commitReorgAt(t, ctx, pgRepo, client, forkFrom-1, forkTo+1, forkHash(forkTo))
+
+	// The load-balanced node has not converged: it still serves the losing fork.
+	client.SetBlockHeader(forkFrom, forkHash(forkFrom), canonicalLow.ParentHash)
+	client.SetBlockHeader(forkTo, forkHash(forkTo), forkHash(forkFrom))
+
+	logs := &testutil.SlogRecorder{}
+	cfg := BackfillConfigDefaults()
+	cfg.Logger = slog.New(logs)
+	// The boundary check would re-orphan a wrongly promoted fork on the next
+	// pass and hide the promotion; disabling it leaves the convergence phase
+	// asserting the un-orphan guard itself.
+	cfg.BoundaryCheckDepth = -1
+	svc, err := NewBackfillService(cfg, client, pgRepo, memory.NewBlockCache(), &integrationMockEventSink{})
+	if err != nil {
+		t.Fatalf("NewBackfillService: %v", err)
+	}
+	if err := svc.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	t.Run("the losing fork is refused, not promoted", func(t *testing.T) {
+		for _, number := range []int64{forkFrom, forkTo} {
+			got, err := pgRepo.GetBlockByNumber(ctx, number)
+			if err != nil {
+				t.Fatalf("GetBlockByNumber(%d): %v", number, err)
+			}
+			if got != nil {
+				t.Errorf("height %d has canonical row %+v, want none while the node serves the losing fork", number, got)
+			}
+		}
+		watermark, err := pgRepo.GetBackfillWatermark(ctx)
+		if err != nil {
+			t.Fatalf("GetBackfillWatermark: %v", err)
+		}
+		if watermark != forkFrom-1 {
+			t.Errorf("watermark = %d, want %d (the reorg's common ancestor)", watermark, forkFrom-1)
+		}
+		if !logs.ContainsAttr("refusing to un-orphan") {
+			t.Error("expected the refusal to be logged")
+		}
+	})
+
+	// The node converges on the winning fork.
+	client.SetBlockHeader(forkFrom, canonicalLow.Hash, canonicalLow.ParentHash)
+	client.SetBlockHeader(forkTo, canonicalHigh.Hash, canonicalHigh.ParentHash)
+
+	if err := svc.RunOnce(ctx); err != nil {
+		t.Fatalf("second RunOnce: %v", err)
+	}
+
+	// A fork promoted in the first pass would still hold these heights here: the
+	// canonical block is refused at a height another canonical row occupies.
+	t.Run("the winning fork lands once the node converges", func(t *testing.T) {
+		for number, want := range map[int64]string{forkFrom: canonicalLow.Hash, forkTo: canonicalHigh.Hash} {
+			got, err := pgRepo.GetBlockByNumber(ctx, number)
+			if err != nil {
+				t.Fatalf("GetBlockByNumber(%d): %v", number, err)
+			}
+			if got == nil {
+				t.Fatalf("expected a canonical block at %d, got nil", number)
+			}
+			if got.Hash != want {
+				t.Errorf("height %d hash = %s, want canonical %s", number, got.Hash, want)
+			}
+			if got.Version != 1 {
+				t.Errorf("height %d version = %d, want 1 (the fork row keeps version 0)", number, got.Version)
+			}
+		}
+		heights, err := pgRepo.FindOrphanOnlyHeights(ctx, 1, forkTo+1)
+		if err != nil {
+			t.Fatalf("FindOrphanOnlyHeights: %v", err)
+		}
+		if len(heights) != 0 {
+			t.Errorf("orphan-only heights = %v, want none", heights)
+		}
+		watermark, err := pgRepo.GetBackfillWatermark(ctx)
+		if err != nil {
+			t.Fatalf("GetBackfillWatermark: %v", err)
+		}
+		if watermark != forkTo+1 {
+			t.Errorf("watermark = %d, want %d", watermark, forkTo+1)
+		}
+	})
+}
+
+// rivalForkHash names the second losing fork at a height, for the case where
+// two orphaned rows share one height and the anchor descends to only one.
+func rivalForkHash(number int64) string {
+	return fmt.Sprintf("0xARCT379_fork_b_%d", number)
+}
+
+// TestIntegration_BackfillLoop_RefusesTheForkTheAnchorDoesNotDescendTo pins the
+// terminal check of the un-orphan walk. Two orphaned rows share a height; the
+// canonical successor's parent_hash names one of them, and the node serves the
+// other. Without the check the walk returns the segment it crossed and the heal
+// promotes the fork the chain above does NOT descend from — the wrong fork,
+// silently canonical, with the winner refused at that height from then on.
+func TestIntegration_BackfillLoop_RefusesTheForkTheAnchorDoesNotDescendTo(t *testing.T) {
+	pgRepo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+
+	const contested, successor int64 = 5, 6
+
+	client := newMockClient()
+	for i := int64(1); i <= successor; i++ {
+		client.AddBlock(i, "")
+	}
+	sharedParent := client.GetHeader(contested - 1).Hash
+
+	seedPublishedCanonicalChain(t, ctx, pgRepo, client, 1, contested-1)
+	savePublishedBlock(t, ctx, pgRepo, contested, forkHash(contested), sharedParent)
+	savePublishedBlock(t, ctx, pgRepo, contested, rivalForkHash(contested), sharedParent)
+	savePublishedBlock(t, ctx, pgRepo, successor, client.GetHeader(successor).Hash, rivalForkHash(contested))
+	for _, hash := range []string{forkHash(contested), rivalForkHash(contested)} {
+		if err := pgRepo.MarkBlockOrphaned(ctx, hash); err != nil {
+			t.Fatalf("orphan %s: %v", hash, err)
+		}
+	}
+	seedWatermark(t, ctx, pgRepo, 1, contested-1, 0)
+
+	// The node serves the fork the successor does not descend from.
+	client.SetBlockHeader(contested, forkHash(contested), sharedParent)
+
+	logs := &testutil.SlogRecorder{}
+	cfg := BackfillConfigDefaults()
+	cfg.Logger = slog.New(logs)
+	svc, err := NewBackfillService(cfg, client, pgRepo, memory.NewBlockCache(), &integrationMockEventSink{})
+	if err != nil {
+		t.Fatalf("NewBackfillService: %v", err)
+	}
+	if err := svc.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	wantReason := fmt.Sprintf("the chain below canonical block %d reaches %s at height %d, not %s",
+		successor, truncateHash(rivalForkHash(contested)), contested, truncateHash(forkHash(contested)))
+	if !logs.ContainsAttr(wantReason) {
+		t.Errorf("no log record carries the terminal-hash refusal %q", wantReason)
+	}
+
+	got, err := pgRepo.GetBlockByNumber(ctx, contested)
+	if err != nil {
+		t.Fatalf("GetBlockByNumber(%d): %v", contested, err)
+	}
+	if got != nil {
+		t.Errorf("height %d has canonical row %+v, want none — neither fork may be promoted", contested, got)
+	}
+	for _, hash := range []string{forkHash(contested), rivalForkHash(contested)} {
+		block, err := pgRepo.GetBlockByHash(ctx, hash)
+		if err != nil {
+			t.Fatalf("GetBlockByHash(%s): %v", hash, err)
+		}
+		if block == nil || !block.IsOrphaned {
+			t.Errorf("block %s = %+v, want it still orphaned", hash, block)
+		}
 	}
 }

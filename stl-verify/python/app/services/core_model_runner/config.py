@@ -18,10 +18,45 @@ from app.risk_engine.core_model.config import DEFAULTS, INPUTS_DIR, load_comment
 _MARKET_CONFIGS_DEFAULT = Path(INPUTS_DIR) / "market_configs.json"
 
 
+_DATA_SOURCES = ("parquet", "postgres")
+
+# Source keys resolve per market: default -> market_configs.json entry -> env
+# var overrides. Per-market matters because coverage is per market: SparkLend
+# can run on live tables while markets whose readers or feeds do not exist yet
+# stay on parquet, without the daily "all" tick failing on them. Two override
+# shapes, most specific wins:
+#   CORE_MODEL_PRICE_SOURCE=parquet               every market (a cluster with
+#                                                 no indexed data, e.g. dev)
+#   CORE_MODEL_SYRUP_USDC_PRICE_SOURCE=parquet    one market (an environment
+#                                                 whose data lags the config,
+#                                                 e.g. prod behind staging);
+#                                                 '-' in a market key becomes
+#                                                 '_' in the variable name
+_SOURCE_KEYS = {
+    "ORDERBOOK_SOURCE": "CORE_MODEL_ORDERBOOK_SOURCE",
+    "PRICE_SOURCE": "CORE_MODEL_PRICE_SOURCE",
+    "POSITION_SOURCE": "CORE_MODEL_POSITION_SOURCE",
+}
+
+
+def _resolve_source(key: str, market_key: str, market_config: dict) -> str:
+    per_market_var = f"CORE_MODEL_{market_key.upper().replace('-', '_')}_{key}"
+    source = os.environ.get(per_market_var, os.environ.get(_SOURCE_KEYS[key], market_config.get(key, "parquet")))
+    if source not in _DATA_SOURCES:
+        raise ValueError(f"invalid {key} {source!r}; allowed: {list(_DATA_SOURCES)}")
+    return source
+
+
 @dataclass(frozen=True)
 class RunnerConfig:
     market_key: str
     params: dict = field(default_factory=dict)
+    # Which source serves each input: "parquet" (static snapshots) or
+    # "postgres" (live tables). Per market — see DATA_GAPS.md for which
+    # markets still lack a live source.
+    orderbook_source: str = "parquet"
+    price_source: str = "parquet"
+    position_source: str = "parquet"
 
     @classmethod
     def resolve(
@@ -50,11 +85,29 @@ class RunnerConfig:
         env_overrides = {
             k: _coerce(k, os.environ[f"CORE_MODEL_{k}"]) for k in DEFAULTS if f"CORE_MODEL_{k}" in os.environ
         }
+        market_config = market_configs[market_key]
         # load_params layers defaults -> overrides AND drops unknown keys, so a
-        # stray key in market_configs.json cannot leak into the audit trail
-        # (params is recorded verbatim in the results table).
-        params = load_params(overrides={**market_configs[market_key], **env_overrides})
-        return cls(market_key=market_key, params=params)
+        # stray key in market_configs.json cannot leak into the audit trail (the
+        # results table stores params plus the writer's own mc_diagnostics key).
+        params = load_params(overrides={**market_config, **env_overrides})
+
+        orderbook_source = _resolve_source("ORDERBOOK_SOURCE", market_key, market_config)
+        price_source = _resolve_source("PRICE_SOURCE", market_key, market_config)
+        position_source = _resolve_source("POSITION_SOURCE", market_key, market_config)
+        # Recorded in params so every core_model_results row says which
+        # sources produced it — live-data and parquet CRRs must never be
+        # indistinguishable in the audit trail.
+        params["ORDERBOOK_SOURCE"] = orderbook_source
+        params["PRICE_SOURCE"] = price_source
+        params["POSITION_SOURCE"] = position_source
+
+        return cls(
+            market_key=market_key,
+            params=params,
+            orderbook_source=orderbook_source,
+            price_source=price_source,
+            position_source=position_source,
+        )
 
 
 def _coerce(param: str, raw: str) -> object:

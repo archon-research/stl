@@ -10,6 +10,7 @@ WORKDIR /ui
 COPY ts/package.json ts/package-lock.json ts/.npmrc ./
 COPY ts/ui/package.json ui/package.json
 
+RUN corepack enable npm
 RUN npm ci
 
 COPY ts/ui ui/

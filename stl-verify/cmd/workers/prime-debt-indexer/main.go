@@ -19,7 +19,6 @@ import (
 
 	vatAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
@@ -31,6 +30,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/services/prime_debt"
 )
 
@@ -55,7 +55,7 @@ func main() {
 		cancel()
 	}()
 
-	err := run(ctx, os.Args[1:])
+	err := run(ctx, os.Args[1:], lifecycle.ForceExitAfter(lifecycle.ShutdownTailBudget))
 	cancel()
 	if err != nil {
 		slog.Error("prime-debt-indexer exited with error", "error", err)
@@ -153,7 +153,7 @@ func parseConfig(args []string) (cliConfig, error) {
 
 // run is the entry point for the prime-debt-indexer.
 // It is extracted from main() to allow integration testing.
-func run(ctx context.Context, args []string) error {
+func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	cfg, err := parseConfig(args)
 	if err != nil {
 		return err
@@ -163,6 +163,17 @@ func run(ctx context.Context, args []string) error {
 		Level: env.ParseLogLevel(slog.LevelInfo),
 	}))
 	slog.SetDefault(logger)
+
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    "prime-debt-indexer",
+		ServiceVersion: buildinfo.GitHash(),
+		BuildTime:      BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("init telemetry: %w", err)
+	}
+	defer shutdownOTEL(context.Background())
 
 	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{
 		StaticCredentialsFromEnv: true,
@@ -191,9 +202,9 @@ func run(ctx context.Context, args []string) error {
 	defer pool.Close()
 	logger.Info("PostgreSQL connected")
 
-	buildReg, err := buildregistry.New(ctx, pool)
+	buildReg, runID, err := writerrun.Open(ctx, pool)
 	if err != nil {
-		return fmt.Errorf("registering build: %w", err)
+		return err
 	}
 
 	logger.Info("starting prime-debt-indexer",
@@ -202,18 +213,6 @@ func run(ctx context.Context, args []string) error {
 		"buildTime", BuildTime,
 		"chainID", cfg.chainID,
 	)
-
-	// OpenTelemetry
-	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    "prime-debt-indexer",
-		ServiceVersion: buildReg.GitHash(),
-		BuildTime:      BuildTime,
-		Logger:         logger,
-	})
-	if err != nil {
-		return fmt.Errorf("init telemetry: %w", err)
-	}
-	defer shutdownOTEL(context.Background())
 
 	// Ethereum JSON-RPC client
 	ethClient, err := rpchttp.DialEthereum(ctx, cfg.rpcURL)
@@ -238,7 +237,7 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
-	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "prime-debt")
+	archiveWrap, _, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "prime-debt")
 	if err != nil {
 		return err
 	}
@@ -257,14 +256,14 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("tx manager: %w", err)
 	}
-	primeDebtRepo := postgres.NewPrimeDebtRepository(pool, txm, logger, buildReg.BuildID())
+	primeDebtRepo := postgres.NewPrimeDebtRepository(pool, txm, logger, buildReg.BuildID(), runID)
 
 	// Vault debt service
 	svc, err := prime_debt.NewVaultDebtService(
 		prime_debt.Config{
 			SweepEveryNBlocks: cfg.sweepBlocks,
 			ChainID:           cfg.chainID,
-			MaxMessages:       10,
+			MaxMessages:       1,
 			PollInterval:      100 * time.Millisecond,
 			Logger:            logger,
 		},
@@ -282,5 +281,5 @@ func run(ctx context.Context, args []string) error {
 		"chainID", cfg.chainID,
 	)
 
-	return lifecycle.Run(ctx, logger, svc)
+	return lifecycle.RunWithTimeoutGuard(ctx, logger, onShutdownTimeout, svc)
 }

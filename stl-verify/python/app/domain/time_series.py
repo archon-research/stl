@@ -1,10 +1,11 @@
 """Shared time-series query policy.
 
 This module owns the normalization and validation rules for time-windowed
-queries: the default and maximum window, the allowed downsampling resolutions,
-and the window-to-resolution policy. It lives in the domain layer so the policy
-is reusable by any caller (HTTP today, scheduled jobs or other transports later)
-and is testable without FastAPI. It depends only on the standard library.
+queries: the default and maximum window, the allowed downsampling frequencies,
+the aggregation methods, and the window-to-frequency policy. It lives in the
+domain layer so the policy is reusable by any caller (HTTP today, scheduled jobs
+or other transports later) and is testable without FastAPI. It depends only on
+the standard library.
 """
 
 from dataclasses import dataclass
@@ -25,8 +26,8 @@ MAX_WINDOW = timedelta(days=366)
 UNFILTERED_MAX_WINDOW = timedelta(days=30)
 
 
-class TimeSeriesResolution(StrEnum):
-    """Allowed ISO-8601 durations for time-series downsampling."""
+class TimeSeriesFrequency(StrEnum):
+    """Allowed ISO-8601 durations for time-series resampling."""
 
     PT1M = "PT1M"
     PT5M = "PT5M"
@@ -37,26 +38,39 @@ class TimeSeriesResolution(StrEnum):
 
     @property
     def duration(self) -> timedelta:
-        return _RESOLUTION_TO_DURATION[self]
+        return _FREQUENCY_TO_DURATION[self]
 
     @property
-    def interval_ms(self) -> int:
+    def duration_ms(self) -> int:
         return int(self.duration.total_seconds() * 1000)
 
 
-_RESOLUTION_TO_DURATION: dict["TimeSeriesResolution", timedelta] = {
-    TimeSeriesResolution.PT1M: timedelta(minutes=1),
-    TimeSeriesResolution.PT5M: timedelta(minutes=5),
-    TimeSeriesResolution.PT15M: timedelta(minutes=15),
-    TimeSeriesResolution.PT1H: timedelta(hours=1),
-    TimeSeriesResolution.PT6H: timedelta(hours=6),
-    TimeSeriesResolution.P1D: timedelta(days=1),
+_FREQUENCY_TO_DURATION: dict["TimeSeriesFrequency", timedelta] = {
+    TimeSeriesFrequency.PT1M: timedelta(minutes=1),
+    TimeSeriesFrequency.PT5M: timedelta(minutes=5),
+    TimeSeriesFrequency.PT15M: timedelta(minutes=15),
+    TimeSeriesFrequency.PT1H: timedelta(hours=1),
+    TimeSeriesFrequency.PT6H: timedelta(hours=6),
+    TimeSeriesFrequency.P1D: timedelta(days=1),
 }
 
-# Fail at import time (not at request time) if a resolution lacks a duration.
-_missing_durations = set(TimeSeriesResolution) - set(_RESOLUTION_TO_DURATION)
+# Fail at import time (not at request time) if a frequency lacks a duration.
+_missing_durations = set(TimeSeriesFrequency) - set(_FREQUENCY_TO_DURATION)
 if _missing_durations:
-    raise RuntimeError(f"TimeSeriesResolution members missing a duration mapping: {_missing_durations}")
+    raise RuntimeError(f"TimeSeriesFrequency members missing a duration mapping: {_missing_durations}")
+
+
+# One member, because the bucketing in the Postgres adapters
+# (``time_bucket_gapfill`` + ``locf(last(...))``) is end-period and nothing else
+# is implemented. See ADR-0005 for the reserved methods and why they wait.
+class AggregationMethod(StrEnum):
+    """Resampling method applied to a resampled response.
+
+    ``start-period``, ``period-mean`` and ``period-median`` are reserved names,
+    not accepted values.
+    """
+
+    END_PERIOD = "end-period"
 
 
 @dataclass(frozen=True)
@@ -70,8 +84,8 @@ class TimeSeriesQuery:
 
     from_timestamp: datetime
     to_timestamp: datetime
-    resolution: TimeSeriesResolution
-    aggregate: bool = False
+    frequency: TimeSeriesFrequency
+    aggregation_method: AggregationMethod | None = None
     bounds_pinned: bool = False
     """True when both bounds were explicitly supplied by the caller (vs. defaulted
     to ``now``). Pinned windows are deterministic and therefore cacheable."""
@@ -87,25 +101,34 @@ class TimeSeriesQuery:
         return self.to_timestamp - self.from_timestamp
 
     @property
-    def interval_ms(self) -> int:
-        return self.resolution.interval_ms
+    def is_bucketed(self) -> bool:
+        """True when the caller asked for resampled buckets.
+
+        The presence of ``aggregation_method`` is the switch: absent means the
+        stored frequency, present means buckets on the requested grid.
+        """
+        return self.aggregation_method is not None
+
+    @property
+    def frequency_ms(self) -> int:
+        return self.frequency.duration_ms
 
     @property
     def bucket(self) -> timedelta:
-        return self.resolution.duration
+        return self.frequency.duration
 
 
-def minimum_resolution(window: timedelta) -> TimeSeriesResolution:
-    """Return the finest resolution permitted for a window of the given size."""
+def minimum_frequency(window: timedelta) -> TimeSeriesFrequency:
+    """Return the finest frequency permitted for a window of the given size."""
     if window <= timedelta(hours=6):
-        return TimeSeriesResolution.PT1M
+        return TimeSeriesFrequency.PT1M
     if window <= timedelta(hours=24):
-        return TimeSeriesResolution.PT5M
+        return TimeSeriesFrequency.PT5M
     if window <= timedelta(days=7):
-        return TimeSeriesResolution.PT15M
+        return TimeSeriesFrequency.PT15M
     if window <= timedelta(days=30):
-        return TimeSeriesResolution.PT1H
-    return TimeSeriesResolution.PT6H
+        return TimeSeriesFrequency.PT1H
+    return TimeSeriesFrequency.PT6H
 
 
 def _to_utc(value: datetime) -> datetime:
@@ -119,18 +142,32 @@ def resolve_time_series_query(
     *,
     from_timestamp: datetime | None,
     to_timestamp: datetime | None,
-    resolution: TimeSeriesResolution | None,
+    frequency: TimeSeriesFrequency | None,
     now: datetime,
-    aggregate: bool = False,
+    aggregation_method: AggregationMethod | None = None,
+    default_aggregation_method: AggregationMethod | None = None,
     default_window: timedelta = DEFAULT_WINDOW,
     max_window: timedelta = MAX_WINDOW,
 ) -> TimeSeriesQuery:
     """Apply defaults, normalize to UTC, and validate a time-series request.
 
+    ``default_aggregation_method`` is how a route that only ever answers with a
+    resampled series names its method, so its query is resampled whether or not
+    the caller spelled one.
+
     ``now`` is injected so the function stays pure and testable. Raises
-    ``ValueError`` on an inverted range, a window exceeding ``max_window``, or a
-    resolution finer than the window's minimum.
+    ``ValueError`` on an inverted range, a window exceeding ``max_window``, a
+    frequency supplied without a method, or a frequency finer than the window's
+    minimum.
     """
+    effective_method = aggregation_method or default_aggregation_method
+    # A frequency names the grid a method cuts on, so without one it would be
+    # validated and then dropped — the silent no-op the echo cannot report.
+    if frequency is not None and effective_method is None:
+        raise ValueError(
+            "frequency names the grid an aggregation_method cuts on; "
+            "supply aggregation_method=end-period or omit frequency"
+        )
     resolved_to = _to_utc(to_timestamp) if to_timestamp is not None else _to_utc(now)
     resolved_from = _to_utc(from_timestamp) if from_timestamp is not None else resolved_to - default_window
     bounds_pinned = from_timestamp is not None and to_timestamp is not None
@@ -142,16 +179,16 @@ def resolve_time_series_query(
     if window > max_window:
         raise ValueError(f"requested window of {window} exceeds the maximum allowed of {max_window}")
 
-    floor = minimum_resolution(window)
-    effective_resolution = resolution or floor
-    if effective_resolution.duration < floor.duration:
-        raise ValueError(f"resolution is too fine for the selected window; minimum allowed resolution is {floor.value}")
+    floor = minimum_frequency(window)
+    effective_frequency = frequency or floor
+    if effective_frequency.duration < floor.duration:
+        raise ValueError(f"frequency is too fine for the selected window; minimum allowed frequency is {floor.value}")
 
     return TimeSeriesQuery(
         from_timestamp=resolved_from,
         to_timestamp=resolved_to,
-        resolution=effective_resolution,
-        aggregate=aggregate,
+        frequency=effective_frequency,
+        aggregation_method=effective_method,
         bounds_pinned=bounds_pinned,
     )
 

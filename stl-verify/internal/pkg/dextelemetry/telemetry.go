@@ -1,11 +1,5 @@
-// Package dextelemetry exposes a small per-worker OpenTelemetry helper for
-// the three DEX SQS workers (curve, uniswap-v3, balancer). The structure
-// mirrors the per-package telemetry in services/morpho_indexer and
-// services/oracle_price_worker but accepts a prefix so the three workers can
-// share one implementation instead of duplicating it. Metric names follow the
-// established `<prefix>_blocks_processed_total` / `<prefix>_errors_total`
-// convention so the existing alert rule shape in alerts/vector-indexers.yaml
-// applies unchanged.
+// Package dextelemetry emits per-worker DEX metrics under a caller-supplied
+// prefix, named for the rules in alerts/vector-indexers.yaml.
 package dextelemetry
 
 import (
@@ -29,25 +23,20 @@ import (
 // no-op when called on a nil pointer, so production code can pass nil for
 // "telemetry disabled" without guard checks at each call site.
 type Telemetry struct {
-	prefix           string
-	chainAttr        attribute.KeyValue
-	blocksProcessed  metric.Int64Counter
-	errorsTotal      metric.Int64Counter
-	blockDuration    metric.Float64Histogram
-	stateRowsWritten metric.Int64Counter
-	poolsTouched     metric.Int64Counter
+	prefix             string
+	chainAttr          attribute.KeyValue
+	blocksProcessed    metric.Int64Counter
+	errorsTotal        metric.Int64Counter
+	blockDuration      metric.Float64Histogram
+	stateRowsWritten   metric.Int64Counter
+	stateRowsAttempted metric.Int64Counter
+	poolsTouched       metric.Int64Counter
+	poolsNeverIndexed  metric.Int64Gauge
 }
 
-// NewTelemetry registers four counters (`<prefix>.blocks.processed`,
-// `<prefix>.errors.total`, `<prefix>.state.rows.written`,
-// `<prefix>.pools.touched`) plus the `<prefix>.block.duration_seconds`
-// histogram. The OTel-to-Prometheus exporter normalises the dots to
-// underscores and adds the `_total` suffix, yielding the metric series names
-// the alert rules expect. The chain NAME (via entity.ChainName) is baked into
-// every datapoint as the `chain` attribute so multi-chain dashboards line up
-// with the morpho/oracle indexers, which label the same way. An unknown chainID
-// is rejected so a worker fails hard at startup rather than emitting an empty or
-// mismatched `chain` label.
+// NewTelemetry registers the whole instrument set for one DEX; the
+// OTel-to-Prometheus exporter normalises the dots to underscores and adds
+// `_total`, yielding the series names the alert rules select.
 func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 	if prefix == "" {
 		return nil, fmt.Errorf("dextelemetry.NewTelemetry: prefix must be non-empty")
@@ -96,6 +85,14 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 		return nil, fmt.Errorf("creating %s.state.rows.written counter: %w", prefix, err)
 	}
 
+	stateRowsAttempted, err := meter.Int64Counter(
+		prefix+".state.rows.attempted",
+		metric.WithDescription("Total state snapshot rows a block queued for insert, conflicts included"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating %s.state.rows.attempted counter: %w", prefix, err)
+	}
+
 	touched, err := meter.Int64Counter(
 		prefix+".pools.touched",
 		metric.WithDescription("Total registered pools touched by decoded events"),
@@ -104,15 +101,39 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 		return nil, fmt.Errorf("creating %s.pools.touched counter: %w", prefix, err)
 	}
 
-	return &Telemetry{
-		prefix:           prefix,
-		chainAttr:        attribute.String("chain", chainName),
-		blocksProcessed:  blocks,
-		errorsTotal:      errs,
-		blockDuration:    dur,
-		stateRowsWritten: stateRows,
-		poolsTouched:     touched,
-	}, nil
+	neverIndexed, err := meter.Int64Gauge(
+		prefix+".pools.never_indexed",
+		metric.WithDescription("Registered, snapshot-supported pools that have never produced a state or tick row"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating %s.pools.never_indexed gauge: %w", prefix, err)
+	}
+
+	t := &Telemetry{
+		prefix:             prefix,
+		chainAttr:          attribute.String("chain", chainName),
+		blocksProcessed:    blocks,
+		errorsTotal:        errs,
+		blockDuration:      dur,
+		stateRowsWritten:   stateRows,
+		stateRowsAttempted: stateRowsAttempted,
+		poolsTouched:       touched,
+		poolsNeverIndexed:  neverIndexed,
+	}
+	// Only blocks.processed: the Stalled rules read it as
+	// rate(status="success")==0, which cannot match an absent series.
+	//
+	// state.rows.written is deliberately NOT seeded even though it is read by
+	// an alert. Its absence is load-bearing — RecordStateRows is a no-op at
+	// zero rows so that "attempted but nothing written" is distinguishable from
+	// "wrote zero", which is the firing condition StateRowsNotLanding stages
+	// and its tests assert. Seeding would make the counter permanently present
+	// and erase that. The `A > 0 unless B > 0` shape needs no seed anyway, and
+	// it covers attempted/touched for the same reason. errors.total's
+	// `operation` label is open-ended; pools.never_indexed is a gauge its
+	// recorder already reports as 0.
+	telemetry.SeedStatusCounter(context.Background(), t.blocksProcessed, t.chainAttr)
+	return t, nil
 }
 
 // RecordBlockProcessed increments blocks_processed_total with
@@ -125,11 +146,7 @@ func (t *Telemetry) RecordBlockProcessed(ctx context.Context, dur time.Duration,
 	if t == nil {
 		return
 	}
-	status := "success"
-	if err != nil {
-		status = "error"
-	}
-	attrs := metric.WithAttributes(attribute.String("status", status), t.chainAttr)
+	attrs := metric.WithAttributes(telemetry.StatusAttr(err), t.chainAttr)
 	t.blocksProcessed.Add(ctx, 1, attrs)
 	t.blockDuration.Record(ctx, dur.Seconds(), attrs)
 }
@@ -146,8 +163,8 @@ func (t *Telemetry) RecordError(ctx context.Context, operation string, err error
 	))
 }
 
-// RecordStateRows increments state_rows_written_total by n. Nil receiver or
-// n <= 0 are no-ops.
+// RecordStateRows counts rows a block actually appended; an idempotent replay
+// legitimately appends none.
 func (t *Telemetry) RecordStateRows(ctx context.Context, n int) {
 	if t == nil || n <= 0 {
 		return
@@ -155,23 +172,34 @@ func (t *Telemetry) RecordStateRows(ctx context.Context, n int) {
 	t.stateRowsWritten.Add(ctx, int64(n), metric.WithAttributes(t.chainAttr))
 }
 
-// RecordPoolsTouched increments pools_touched_total by n, the number of
-// registered pools that a block's decoded events touched — the activity signal
-// the sweepless silent-empty alerts gate on (rationale in
-// alerts/vector-indexers.yaml, group vector-uniswap-v3-indexer). Nil receiver or
-// n <= 0 are no-ops, so a worker that never touches a pool never creates the
-// series at all; those rules use `unless` rather than `and … == 0` precisely to
-// fire on the absent series.
-//
-// Callers must record it from the touched-pool set decoded off the receipts
-// (upstream of DueSet), never from the due set itself: an always-empty DueSet is
-// precisely the bug those alerts exist to catch, and sourcing the gate from
-// DueSet would zero both sides of the comparison and go blind. The sweep (curve)
-// also puts untouched pools in the due set, which would make it a false activity
-// signal.
-func (t *Telemetry) RecordPoolsTouched(ctx context.Context, n int) {
+// RecordStateRowsAttempted counts rows queued for insert, conflicts included:
+// a replay reusing one processing_version writes nothing while healthy, so the
+// not-writing-state alerts key on attempted, never on written.
+func (t *Telemetry) RecordStateRowsAttempted(ctx context.Context, n int) {
 	if t == nil || n <= 0 {
 		return
 	}
-	t.poolsTouched.Add(ctx, int64(n), metric.WithAttributes(t.chainAttr))
+	t.stateRowsAttempted.Add(ctx, int64(n), metric.WithAttributes(t.chainAttr))
+}
+
+// Record n from the receipts' touched-pool set, never from DueSet: an always-empty
+// DueSet is the bug the sweepless silent-empty alerts catch, and they fire on this
+// series being absent, which a nil receiver or n <= 0 leaves it.
+func (t *Telemetry) RecordPoolsTouched(ctx context.Context, n int, attrs ...attribute.KeyValue) {
+	if t == nil || n <= 0 {
+		return
+	}
+	all := make([]attribute.KeyValue, 0, len(attrs)+1)
+	all = append(all, t.chainAttr)
+	all = append(all, attrs...)
+	t.poolsTouched.Add(ctx, int64(n), metric.WithAttributes(all...))
+}
+
+// RecordPoolsNeverIndexed records 0 rather than skipping it: its alert compares
+// a level, so the series must exist while the answer is "none".
+func (t *Telemetry) RecordPoolsNeverIndexed(ctx context.Context, n int) {
+	if t == nil {
+		return
+	}
+	t.poolsNeverIndexed.Record(ctx, int64(n), metric.WithAttributes(t.chainAttr))
 }

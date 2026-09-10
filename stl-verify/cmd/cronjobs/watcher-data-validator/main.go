@@ -17,6 +17,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/services/data_validator"
 )
 
@@ -55,7 +56,7 @@ func main() {
 	}
 }
 
-func setupRunner(_ context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
+func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
 	chainID, err := chainutil.RequireChainID()
 	if err != nil {
 		return nil, err
@@ -63,6 +64,10 @@ func setupRunner(_ context.Context, deps temporal.Dependencies) (temporal.Runner
 
 	etherscanAPIKey, err := env.Require("ETHERSCAN_API_KEY")
 	if err != nil {
+		return nil, err
+	}
+
+	if _, _, err := writerrun.Open(ctx, deps.Pool); err != nil {
 		return nil, err
 	}
 
@@ -92,9 +97,17 @@ func setupRunner(_ context.Context, deps temporal.Dependencies) (temporal.Runner
 			return fmt.Errorf("running validation: %w", err)
 		}
 		report.Finalize()
-		if !report.Success() {
-			return fmt.Errorf("validation failed: %d failures, %d errors", report.Failed, report.Errors)
-		}
-		return nil
+		return validationError(report)
 	}), nil
+}
+
+// validationError turns a report into the runner's error. That error is what
+// the Temporal UI shows and what the alert quotes, so it carries the messages
+// the runbook tells the operator to read, not just how many there were.
+func validationError(report *data_validator.Report) error {
+	if report.Success() {
+		return nil
+	}
+	return fmt.Errorf("validation failed: %d failures, %d errors — %s",
+		report.Failed, report.Errors, report.FailureSummary())
 }

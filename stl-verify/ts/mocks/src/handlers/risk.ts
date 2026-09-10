@@ -1,17 +1,15 @@
 /**
- * Risk capital, the collateral breakdown, RRC, and the upstream capital metrics.
+ * Risk capital, the collateral breakdown, and RRC.
  */
 import { mockDelay } from '@archon-research/http-client-msw';
 import type { MockHandler } from '@archon-research/http-client-msw';
 
-import { mockNow } from '../clock.ts';
 import {
   RISK_CAPITAL_BY_PROXY,
   breakdownFor,
   poolShareFor,
   rrcEnvelope,
   scaleBreakdown,
-  seedCapitalMetrics,
   toCompositeRiskCapital,
   toReferenceRiskCapital,
 } from '../fixtures/risk.ts';
@@ -134,11 +132,6 @@ export function riskHandlers(): MockHandler[] {
             ),
           )
         : response(200).json(envelope);
-    }),
-
-    mock.get('/v1/capital-metrics', async ({ response }) => {
-      await mockDelay(LIST_DELAY_MS);
-      return response(200).json(seedCapitalMetrics(mockNow()));
     }),
   ];
 }

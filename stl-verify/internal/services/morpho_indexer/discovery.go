@@ -86,6 +86,33 @@ type vaultDiscoveryReads struct {
 	fees          *vaultFeeConfig
 }
 
+// discoveryPath is the value of the discovery.path span attribute and the
+// discoveryPath log key: which event shape triggered a probe.
+type discoveryPath string
+
+const (
+	discoveryPathVaultActivity discoveryPath = "vaultActivity"
+	discoveryPathMorphoBlue    discoveryPath = "morphoBlue"
+)
+
+// discardIfNotVault caches a probe's definitive rejection of addr and reports
+// whether err was one. A vault-shaped rejection is WARNed, any other DEBUGged.
+func (s *Service) discardIfNotVault(addr common.Address, err error, path discoveryPath) bool {
+	var nv *ErrNotVault
+	if !errors.As(err, &nv) {
+		return false
+	}
+	s.vaultRegistry.MarkNotVault(addr)
+	if nv.VaultShaped {
+		s.logger.Warn("vault-shaped address rejected by probe — possible new vault flavour",
+			"address", addr.Hex(), "discoveryPath", path, "reason", err)
+	} else {
+		s.logger.Debug("not a Morpho-family vault",
+			"address", addr.Hex(), "discoveryPath", path, "reason", err)
+	}
+	return true
+}
+
 // discoverAndRegisterVault probes vaultAddress on-chain, persists the vault, its
 // asset token, and (for a VaultV2) all its enumerated adapters + seeded states in
 // a single transaction, then registers the vault in the in-memory registry.
@@ -278,7 +305,7 @@ func (s *Service) seedDiscoveredAdapters(ctx context.Context, tx pgx.Tx, vault *
 	for _, a := range adapters {
 		s.warnIfUnknownAdapterType(vaultAddress, a.address, a.adapterType, blockNumber)
 		adapterType := a.adapterType
-		adapterID, _, err := s.observeAdapterMembership(ctx, tx, vault, a.address, entity.MorphoAdapterMembership{
+		adapterID, appended, err := s.observeAdapterMembership(ctx, tx, vault, a.address, entity.MorphoAdapterMembership{
 			BlockNumber:  blockNumber,
 			BlockVersion: blockVersion,
 			LogIndex:     entity.EndOfBlockLogIndex,
@@ -289,6 +316,11 @@ func (s *Service) seedDiscoveredAdapters(ctx context.Context, tx pgx.Tx, vault *
 		}, recorded)
 		if err != nil {
 			return err
+		}
+		if appended {
+			s.logger.Warn("adapter membership recorded by the set enumeration; the log did not already give this answer",
+				"vault", vaultAddress.Hex(), "adapter", a.address.Hex(), "block", blockNumber,
+				"adapter_type", adapterTypeLabel(&adapterType), "observed_via", string(observedVia))
 		}
 		if _, err := s.saveAdapterSeedState(ctx, tx, adapterID, a.realAssets, blockNumber, blockVersion, blockTimestamp); err != nil {
 			return fmt.Errorf("seeding adapter state for %s: %w", a.address.Hex(), err)
@@ -332,7 +364,7 @@ func (s *Service) seedDiscoveredFees(ctx context.Context, tx pgx.Tx, vault *enti
 func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAddress common.Address, chainID, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.discoverVault",
 		attribute.String("vault.address", vaultAddress.Hex()),
-		attribute.String("discovery.path", "vaultActivity"))
+		attribute.String("discovery.path", string(discoveryPathVaultActivity)))
 	defer span.End()
 
 	// Validate this is a decodable MetaMorpho event before making on-chain calls.
@@ -413,24 +445,13 @@ func (s *Service) discoverV1V11VaultsInReceipt(ctx context.Context, receipt shar
 
 			probeCtx, probeSpan := s.telemetry.StartSpan(ctx, "morpho.discoverVault",
 				attribute.String("vault.address", addr.Hex()),
-				attribute.String("discovery.path", "morphoBlue"))
+				attribute.String("discovery.path", string(discoveryPathMorphoBlue)))
 			probeErr := s.discoverAndRegisterVault(probeCtx, addr, chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 			probeSpan.End()
 			if probeErr == nil {
 				continue
 			}
-			var nv *ErrNotVault
-			if errors.As(probeErr, &nv) {
-				s.vaultRegistry.MarkNotVault(addr)
-				if nv.VaultShaped {
-					s.logger.Warn("vault-shaped address rejected by probe (Morpho Blue path) — possible new vault flavour",
-						"address", addr.Hex(),
-						"reason", probeErr)
-				} else {
-					s.logger.Debug("not a Morpho-family vault (Morpho Blue path)",
-						"address", addr.Hex(),
-						"reason", probeErr)
-				}
+			if s.discardIfNotVault(addr, probeErr, discoveryPathMorphoBlue) {
 				continue
 			}
 			s.logger.Warn("V1/V1.1 vault discovery via Morpho Blue path failed (will retry)",

@@ -5,6 +5,9 @@ import (
 	"time"
 )
 
+// MaxVisibilityBatchSize is the SQS ceiling on one ChangeMessageVisibilityBatch.
+const MaxVisibilityBatchSize = 10
+
 // SQSMessage represents a message received from SQS.
 type SQSMessage struct {
 	// MessageID is the unique ID of the message.
@@ -34,6 +37,13 @@ type SQSConsumer interface {
 
 	// DeleteMessage removes a successfully processed message from the queue.
 	DeleteMessage(ctx context.Context, receiptHandle string) error
+
+	// ChangeMessageVisibilityBatch resets how long up to MaxVisibilityBatchSize
+	// messages stay hidden, counted from now; zero hands them back immediately.
+	// Refusals come back keyed by receipt handle. A non-nil error with a nil map
+	// changed nothing; with a non-nil map the batch was applied and the map is
+	// every refusal that could be attributed.
+	ChangeMessageVisibilityBatch(ctx context.Context, receiptHandles []string, visibility time.Duration) (map[string]error, error)
 
 	// VisibilityTimeout reports the per-receive visibility timeout configured on
 	// the consumer. The consume loop validates it exceeds the handler budget so a

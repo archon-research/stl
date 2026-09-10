@@ -16,12 +16,14 @@ import { DAY_MS, HOUR_MS, MINUTE_MS, floorToInterval, iso } from './clock.ts';
 import type { Parsed } from './problem.ts';
 import { invalidQueryParam, unprocessable } from './problem.ts';
 import type {
+  AggregationMethod,
   Provenance,
-  TimeSeriesResolution,
+  ResampledTimeSeriesWindow,
+  TimeSeriesFrequency,
   TimeSeriesWindow,
 } from './schema.ts';
 
-const RESOLUTION_INTERVAL_MS: Record<TimeSeriesResolution, number> = {
+const MS_BY_FREQUENCY: Record<TimeSeriesFrequency, number> = {
   PT1M: MINUTE_MS,
   PT5M: 5 * MINUTE_MS,
   PT15M: 15 * MINUTE_MS,
@@ -30,9 +32,21 @@ const RESOLUTION_INTERVAL_MS: Record<TimeSeriesResolution, number> = {
   P1D: DAY_MS,
 };
 
-const RESOLUTIONS = Object.keys(
-  RESOLUTION_INTERVAL_MS,
-) as TimeSeriesResolution[];
+// `Object.keys` is `string[]` however the record is typed, and the record is
+// the single source of truth for which frequencies exist -- so filter, not cast.
+const FREQUENCIES: TimeSeriesFrequency[] = Object.keys(MS_BY_FREQUENCY).filter(
+  (key): key is TimeSeriesFrequency => Object.hasOwn(MS_BY_FREQUENCY, key),
+);
+
+// A Record over the generated union, for the same reason as the map above: a
+// method added to the API becomes a build error here, not a mystery 422.
+const METHOD_KEYS = { 'end-period': 0 } satisfies Record<
+  AggregationMethod,
+  number
+>;
+const AGGREGATION_METHODS: AggregationMethod[] = Object.keys(
+  METHOD_KEYS,
+).filter((key): key is AggregationMethod => Object.hasOwn(METHOD_KEYS, key));
 
 const DEFAULT_WINDOW_MS = DAY_MS;
 const MAX_WINDOW_MS = 366 * DAY_MS;
@@ -45,13 +59,12 @@ const TRUE_WORDS = new Set(['1', 't', 'true', 'y', 'yes', 'on']);
 const FALSE_WORDS = new Set(['0', 'f', 'false', 'n', 'no', 'off']);
 
 /**
- * Absence is the param's default, which is `false` on every flag the app sends.
- * Anything outside the two vocabularies is a `422`, not a quiet `false`: the
- * mock that reads `aggregate=maybe` as off serves the raw envelope to a screen
- * asking for buckets, which is a shape mismatch the app would then blame on
- * itself.
+ * Absence is the param's default, which is `false`. Anything outside the two
+ * vocabularies is a `422`, not a quiet `false`: the mock that reads
+ * `reference=maybe` as off serves STL's own figures to a screen asking for
+ * Sky's, a mismatch the app would then blame on itself.
  */
-export function readFlag(name: string, raw: string | null): Parsed<boolean> {
+function readFlag(name: string, raw: string | null): Parsed<boolean> {
   if (raw === null) {
     return { ok: true, value: false };
   }
@@ -122,19 +135,37 @@ export function readChainId(raw: string | null): Parsed<number | null> {
   return { ok: true, value: Number(raw) };
 }
 
-function readResolution(
-  raw: string | null,
-): Parsed<TimeSeriesResolution | null> {
+function readFrequency(raw: string | null): Parsed<TimeSeriesFrequency | null> {
   if (raw === null) {
     return { ok: true, value: null };
   }
-  const match = RESOLUTIONS.find((candidate) => candidate === raw);
+  const match = FREQUENCIES.find((candidate) => candidate === raw);
   if (match === undefined) {
     return {
       ok: false,
       problem: invalidQueryParam(
-        'resolution',
-        `value is not a valid enumeration member; permitted: ${RESOLUTIONS.join(', ')}`,
+        'frequency',
+        `value is not a valid enumeration member; permitted: ${FREQUENCIES.join(', ')}`,
+      ),
+    };
+  }
+  return { ok: true, value: match };
+}
+
+/** Absent is the switch, not a default: no method means the stored frequency. */
+function readAggregationMethod(
+  raw: string | null,
+): Parsed<AggregationMethod | null> {
+  if (raw === null) {
+    return { ok: true, value: null };
+  }
+  const match = AGGREGATION_METHODS.find((candidate) => candidate === raw);
+  if (match === undefined) {
+    return {
+      ok: false,
+      problem: invalidQueryParam(
+        'aggregation_method',
+        `value is not a valid enumeration member; permitted: ${AGGREGATION_METHODS.join(', ')}`,
       ),
     };
   }
@@ -158,8 +189,8 @@ function readTimestamp(
   return { ok: true, value: parsed };
 }
 
-/** The finest resolution the API permits for a window of the given size. */
-export function minimumResolution(windowMs: number): TimeSeriesResolution {
+/** The finest frequency the API permits for a window of the given size. */
+function minimumFrequency(windowMs: number): TimeSeriesFrequency {
   if (windowMs <= 6 * HOUR_MS) return 'PT1M';
   if (windowMs <= DAY_MS) return 'PT5M';
   if (windowMs <= 7 * DAY_MS) return 'PT15M';
@@ -170,18 +201,22 @@ export function minimumResolution(windowMs: number): TimeSeriesResolution {
 export type WindowQuery = {
   fromTimestamp: string | null;
   toTimestamp: string | null;
-  resolution: string | null;
+  frequency: string | null;
+  aggregationMethod: string | null;
+  /** The method an always-resampled route applies when the caller names none. */
+  defaultAggregationMethod?: AggregationMethod;
 };
 
 export type ResolvedWindow = {
-  window: TimeSeriesWindow;
   fromMs: number;
   toMs: number;
+  frequency: TimeSeriesFrequency;
+  frequencyMs: number;
+  bucketed: boolean;
 };
 
 /**
- * The `{from, to, resolution, interval_ms}` block every bucketed endpoint echoes
- * back, plus the grid the buckets are cut on.
+ * The resolved window and the grid its buckets are cut on.
  *
  * The three rejections are the ones an empty `200` would otherwise disguise as
  * "no data in this range" — which is precisely what the echoed window exists to
@@ -195,8 +230,23 @@ export function resolveWindow(
   if (!to.ok) return to;
   const from = readTimestamp('from_timestamp', raw.fromTimestamp);
   if (!from.ok) return from;
-  const requested = readResolution(raw.resolution);
+  const requested = readFrequency(raw.frequency);
   if (!requested.ok) return requested;
+  const named = readAggregationMethod(raw.aggregationMethod);
+  if (!named.ok) return named;
+  const method = named.value ?? raw.defaultAggregationMethod ?? null;
+
+  // A frequency names the grid a method cuts on, so without one the API would
+  // validate it and then drop it — a silent no-op the echo cannot report.
+  if (requested.value !== null && method === null) {
+    return {
+      ok: false,
+      problem: unprocessable(
+        'frequency names the grid an aggregation_method cuts on; ' +
+          'supply aggregation_method=end-period or omit frequency',
+      ),
+    };
+  }
 
   const toMs = to.value ?? nowMs;
   const fromMs = from.value ?? toMs - DEFAULT_WINDOW_MS;
@@ -220,13 +270,13 @@ export function resolveWindow(
     };
   }
 
-  const floor = minimumResolution(windowMs);
-  const resolution = requested.value ?? floor;
-  if (RESOLUTION_INTERVAL_MS[resolution] < RESOLUTION_INTERVAL_MS[floor]) {
+  const floor = minimumFrequency(windowMs);
+  const frequency = requested.value ?? floor;
+  if (MS_BY_FREQUENCY[frequency] < MS_BY_FREQUENCY[floor]) {
     return {
       ok: false,
       problem: unprocessable(
-        `resolution is too fine for the selected window; minimum allowed resolution is ${floor}`,
+        `frequency is too fine for the selected window; minimum allowed frequency is ${floor}`,
       ),
     };
   }
@@ -236,18 +286,35 @@ export function resolveWindow(
     value: {
       fromMs,
       toMs,
-      window: {
-        from_timestamp: iso(fromMs),
-        to_timestamp: iso(toMs),
-        resolution,
-        interval_ms: RESOLUTION_INTERVAL_MS[resolution],
-      },
+      frequency,
+      frequencyMs: MS_BY_FREQUENCY[frequency],
+      bucketed: method !== null,
     },
   };
 }
 
+/** The echo the unresampled arm of a route serves: the window, no grid. */
+export function rawWindowEcho(resolved: ResolvedWindow): TimeSeriesWindow {
+  return {
+    from_timestamp: iso(resolved.fromMs),
+    to_timestamp: iso(resolved.toMs),
+  };
+}
+
+/** The echo a route that only ever answers with buckets serves. */
+export function resampledWindowEcho(
+  resolved: ResolvedWindow,
+): ResampledTimeSeriesWindow {
+  return {
+    from_timestamp: iso(resolved.fromMs),
+    to_timestamp: iso(resolved.toMs),
+    frequency: resolved.frequency,
+    frequency_ms: resolved.frequencyMs,
+  };
+}
+
 /**
- * Bucket starts on the resolution grid, newest first — the order every bucketed
+ * Bucket starts on the requested grid, newest first — the order every bucketed
  * endpoint returns and the order the charts assume.
  */
 export function bucketStarts(
