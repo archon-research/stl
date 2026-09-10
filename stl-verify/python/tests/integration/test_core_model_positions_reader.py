@@ -15,7 +15,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.adapters.postgres.core_model_positions_reader import PostgresPositionsReader
+from app.adapters.postgres.core_model_positions_reader import PostgresPositionsReader, _feed_alive_sql
 from tests.integration.core_model_seed import seed_spoof_token
 from tests.integration.seed import (
     insert_anchorage_snapshot,
@@ -606,3 +606,22 @@ async def test_anchorage_refuses_a_specific_loan_token(engine):
     # Raised before any query, so no seeded state is involved.
     with pytest.raises(ValueError, match="LOAN_TOKEN=ALL"):
         await PostgresPositionsReader(engine).get_protocol_data(**{**_ANCHORAGE, "loan_token": "USDC"})
+
+
+async def test_feed_liveness_is_per_oracle_across_tokens(engine):
+    # The window is per feed, not per token: one recent row on any token keeps
+    # the feed alive, a feed with no row inside the window is silent, and a row
+    # just outside the window does not count (VEC-672: the window is a literal so
+    # the planner excludes every chunk outside it; the semantics are unchanged).
+    async with engine.begin() as conn:
+        ids = await _ids(conn)
+        await _seed_price(conn, ids["weth"], ids["sparklend"], 2000.0, dt.timedelta(days=40), block=50)
+        await _seed_price(conn, ids["usdt"], ids["sparklend"], 1.0, dt.timedelta(minutes=1))
+        await _seed_price(conn, ids["weth"], ids["chainlink"], 2000.0, dt.timedelta(days=2, minutes=1), block=60)
+
+        async def alive(oracle_id: int) -> bool:
+            sql = _feed_alive_sql(dt.timedelta(days=2))
+            return (await conn.execute(sql, {"oracle_id": oracle_id})).scalar() == 1
+
+        assert await alive(ids["sparklend"]), "one recent token on the feed is enough"
+        assert not await alive(ids["chainlink"]), "a row just outside the window does not vouch for the feed"
