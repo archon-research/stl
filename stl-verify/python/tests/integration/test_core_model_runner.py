@@ -103,15 +103,15 @@ _GOLDEN_CASES = {
             # JUMPS deliberately left at its default (true).
         },
         "expected": {
-            "crr_el_pct": Decimal("0.8362"),
-            "crr_es_pct": Decimal("16.844187"),
-            "crr_var_pct": Decimal("10.500622"),
+            "crr_el_pct": Decimal("0.605311"),
+            "crr_es_pct": Decimal("13.138924"),
+            "crr_var_pct": Decimal("4.932652"),
             "hhi": Decimal("14.069008"),
             "n_scenarios": 50,
             "n_loss_scenarios": 4,
             "n_catastrophic_scenarios": 4,
-            "crr_el_se_pct": 0.5140769139405964,
-            "crr_el_rel_se": 0.6147777172995316,
+            "crr_el_se_pct": 0.43821062711199477,
+            "crr_el_rel_se": 0.7239429028063681,
         },
     },
 }

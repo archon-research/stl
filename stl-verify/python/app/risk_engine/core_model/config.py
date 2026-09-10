@@ -70,6 +70,52 @@ DEFAULTS: dict[str, Any] = _flatten(SCHEMA)
 """Flat {param_name: default_value} dict — the primary import target."""
 
 
+def _expected_kind(name: str) -> str:
+    """The type a param's value must have: the schema's declared 'type' where
+    present, else inferred from the default's Python type. A null default
+    (MC_TARGET_LTV) means nullable float."""
+    declared = SCHEMA[name].get("type")
+    if declared is not None:
+        return declared
+    default = DEFAULTS[name]
+    if default is None:
+        return "float | None"
+    return type(default).__name__
+
+
+_EXPECTED_KINDS: dict[str, str] = {k: _expected_kind(k) for k in DEFAULTS}
+
+
+def _value_matches(kind: str, value: Any) -> bool:
+    # bool is a subclass of int, so numeric kinds must exclude it explicitly.
+    if kind == "bool":
+        return isinstance(value, bool)
+    if kind == "int":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if kind == "float":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if kind == "float | None":
+        return value is None or (isinstance(value, (int, float)) and not isinstance(value, bool))
+    return isinstance(value, str)
+
+
+def _validate_types(params: dict[str, Any]) -> None:
+    """Reject values of the wrong type instead of letting them reach simulation.
+
+    A JSON or dict override like '"WORST_CASE": "false"' is a non-empty string
+    and would activate the truthy branch in the runner (audit T-01). Only the
+    types are enforced: the schema's min/max/choices stay advisory, matching
+    upstream's convention (documented in default_params.json).
+    """
+    bad = {
+        k: f"expected {_EXPECTED_KINDS[k]}, got {type(v).__name__} {v!r}"
+        for k, v in params.items()
+        if not _value_matches(_EXPECTED_KINDS[k], v)
+    }
+    if bad:
+        raise ValueError(f"invalid CORE parameter types: {bad}")
+
+
 # ── Helper ─────────────────────────────────────────────────────────────────────
 
 
@@ -114,4 +160,5 @@ def load_params(
             if k in params:
                 params[k] = v
 
+    _validate_types(params)
     return params

@@ -224,7 +224,11 @@ class Forecaster:
 
     @staticmethod
     def brownian_bridge_hourly(
-        daily_returns: pd.Series, daily_vol: pd.Series, jump_series: pd.Series, hours: int = 24, seed: int | None = 0
+        daily_returns: pd.Series,
+        daily_vol: pd.Series,
+        jump_series: Optional[pd.Series],
+        hours: int = 24,
+        seed: int | None = 0,
     ) -> pd.Series:
 
         hourly_returns = []
@@ -247,9 +251,14 @@ class Forecaster:
 
             r_cont_hourly = R_d / hours + sigma_d * np.sqrt(dt) * Z
 
-            if np.isnan(r_cont_hourly).any() or np.isinf(r_cont_hourly).any():
-                print(f"[BB] Bad hourly returns at {t}: R_d={R_d}, sigma_d={sigma_d}")
-                r_cont_hourly = np.zeros(hours)  # fallback
+            if not np.isfinite(r_cont_hourly).all():
+                # Upstream substituted zeros here, so a degenerate daily return
+                # or volatility produced flat price paths that were persisted
+                # as an apparently valid CRR (audit C-09). Fail before the
+                # result can reach the writer.
+                raise ValueError(
+                    f"non-finite hourly returns in the Brownian bridge at step {t}: R_d={R_d}, sigma_d={sigma_d}"
+                )
 
             if jump_series is not None:
                 hourly_jumps = jump_series.loc[t]  # shape (24,)
@@ -396,7 +405,7 @@ class Simulator:
         forecasted_step: int,
         use_log_returns: bool,
         use_brownian_bridge: bool,
-        jump_parameters: pd.DataFrame,
+        jump_parameters: Optional[dict],
         n_sims: int,
         seed: int,
         market_df: pd.DataFrame,

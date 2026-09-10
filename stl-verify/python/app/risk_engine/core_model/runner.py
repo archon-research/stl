@@ -113,12 +113,10 @@ async def _run_pipeline(
     prices_df = await data_reader.get_prices(collateral_list)
 
     results = {}
-    # TODO(bug#5): JUMP_PARAMS is calibrated from one token and reused for all.
-    # Per-token path exists in forecaster.py but is never populated here.
-    JUMP_PARAMS = None
 
     for collateral in collateral_list:
         TICKER = collateral.upper()
+        token_jump_params = None
 
         prices = prices_df[collateral].dropna()
         prices.name = TICKER
@@ -152,13 +150,13 @@ async def _run_pipeline(
                 prices_jumps = prices.copy()
             returns, log_returns = Calibrator.calculate_returns(prices_jumps)
             all_returns = log_returns if p["USE_LOG_RETURNS"] else returns
-            JUMP_PARAMS = Calibrator.fit_poisson_intensity(
+            token_jump_params = Calibrator.fit_poisson_intensity(
                 hist_series=all_returns,
                 lower_q=0.025,
                 upper_q=0.975,
                 focus_on_negative=p["FOCUS_ON_NEGATIVE"],
             )
-            JUMP_PARAMS["focus_on_negative"] = p["FOCUS_ON_NEGATIVE"]
+            token_jump_params["focus_on_negative"] = p["FOCUS_ON_NEGATIVE"]
 
         simulator = Simulator(prices, arima_spec, garch_spec, p["SEED"])
         arima_model, garch_model, residuals = simulator.arma_garch_refitter(
@@ -172,6 +170,9 @@ async def _run_pipeline(
             "arima_model": arima_model,
             "garch_model": garch_model,
             "residuals": residuals,
+            # Each token simulates with the jumps calibrated from its own
+            # returns; upstream reused whichever token was calibrated last.
+            "jump_params": token_jump_params,
         }
 
     all_simulated_prices = Simulator.simulate_prices(
@@ -180,7 +181,7 @@ async def _run_pipeline(
         forecasted_step=p["FORECAST_STEP"],
         use_log_returns=p["USE_LOG_RETURNS"],
         use_brownian_bridge=p["HOURLY_CONV"],
-        jump_parameters=JUMP_PARAMS,
+        jump_parameters=None,
         n_sims=p["N_MC"],
         seed=p["SEED"],
         market_df=market_df,

@@ -132,3 +132,62 @@ def test_refit_preserves_the_calibrated_distribution(grid_name):
     _, garch_refit, _ = simulator.arma_garch_refitter(train_size=250, use_log_returns=True)
 
     assert garch_refit.model.distribution.name.lower() == grid_name
+
+
+def test_simulate_prices_gives_each_token_its_own_jump_params(monkeypatch):
+    """VEC-768 / audit C-08: upstream calibrated jumps per token but simulated
+    every token with whichever was calibrated last."""
+    garch = _fit_garch("t")
+    prices = pd.Series(np.linspace(100.0, 110.0, 250))
+    jumps_a = {"lambda": 0.1, "df": 4.0, "jump_mean": -0.01, "jump_std": 0.05, "crisis_cap": 0.5}
+    jumps_b = {"lambda": 0.9, "df": 3.0, "jump_mean": -0.05, "jump_std": 0.10, "crisis_cap": 0.5}
+    result_per_token = {
+        "AAA": {
+            "prices": prices,
+            "arima_model": None,
+            "garch_model": garch,
+            "residuals": garch.resid,
+            "jump_params": jumps_a,
+        },
+        "BBB": {
+            "prices": prices,
+            "arima_model": None,
+            "garch_model": garch,
+            "residuals": garch.resid,
+            "jump_params": jumps_b,
+        },
+    }
+
+    received: dict[str, dict | None] = {}
+
+    def _record(
+        self, jump_params, correlated_eps, prices_series, use_log_returns, forecasted_step, token_name, market_df
+    ):
+        received[token_name] = jump_params
+        return pd.Series(np.full(forecasted_step, 100.0))
+
+    monkeypatch.setattr(Forecaster, "price_forecasting", _record)
+
+    Simulator.simulate_prices(
+        result_per_token=result_per_token,
+        copula_type="GAUSSIAN",
+        forecasted_step=2,
+        use_log_returns=True,
+        use_brownian_bridge=False,
+        jump_parameters=None,
+        n_sims=2,
+        seed=0,
+        market_df=pd.DataFrame(),
+    )
+
+    assert received == {"AAA": jumps_a, "BBB": jumps_b}
+
+
+def test_brownian_bridge_raises_on_non_finite_returns():
+    """VEC-768 / audit C-09: upstream substituted zeros, persisting flat price
+    paths as an apparently valid CRR."""
+    daily_returns = pd.Series([0.01, np.nan])
+    daily_vol = pd.Series([0.02, 0.02])
+
+    with pytest.raises(ValueError, match="non-finite hourly returns"):
+        Forecaster.brownian_bridge_hourly(daily_returns, daily_vol, jump_series=None, hours=24, seed=0)
