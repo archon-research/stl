@@ -165,8 +165,6 @@ trap cleanup EXIT
 # buildah included, called out separately only because it is the common local
 # case here and deserves a friendlier message.
 #
-# No bypass env var, deliberately: it would trade a loud rejection for the
-# silent wrong verdict this check exists to prevent. Widen the pattern in a PR.
 require_buildkit() {
   local version
   version="$(docker buildx version 2>&1)" || die "docker buildx is unavailable, and BuildKit is required (see this script's header): ${version}"
