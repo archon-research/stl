@@ -1371,7 +1371,7 @@
       "owner": "infra"
     },
     "block_meta": {
-      "type": "infrastructure",
+      "type": "dimension",
       "owner": "infra"
     },
     "borrower": {
