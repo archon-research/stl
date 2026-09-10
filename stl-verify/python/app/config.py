@@ -142,16 +142,17 @@ class Settings(BaseSettings):
     # positions × proxies, which this ceiling does not bound — it only decides how
     # far a replica gets before callers queue on pool_timeout and surface as 500s.
     # Bounding the fan-out itself is VEC-532.
-    db_pool_size: int = Field(default=10, ge=1)
-    db_max_overflow: int = Field(default=20, ge=0)
+    db_pool_size: int = Field(default=4, ge=1)
+    db_max_overflow: int = Field(default=2, ge=0)
     # How long a caller queues for a connection before its request fails. Left on
     # SQLAlchemy's unset 30s, a saturated replica holds a worker for half a minute
     # per queued caller, so one burst on the fan-out also stalls the endpoints that
     # never touch this pool. Set well above a healthy acquisition so it fires on
     # real exhaustion rather than on load: the fan-out's own queries run in
     # hundreds of milliseconds, so ten seconds of queueing means saturation, and
-    # failing then keeps it legible instead of silently slow.
-    db_pool_timeout: int = Field(default=10, ge=1)
+    # failing then keeps it legible instead of silently slow. At the pool size
+    # above, queueing is routine rather than saturation, so the default is longer.
+    db_pool_timeout: int = Field(default=30, ge=1)
     # Ceiling on how long a pooled connection lives before it is re-opened.
     # Bounds the blast radius of a connection the disconnect handling misses:
     # after a pooler incident (see create_db_engine), a poisoned connection can
