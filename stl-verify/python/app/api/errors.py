@@ -66,16 +66,27 @@ class ApiErrorResponse(BaseModel):
         default=None, description="Ceiling the request exceeded. Max-points rejections only."
     )
     suggested_from_timestamp: datetime | None = Field(
-        default=None, description="Lower bound of a window that would fit. Max-points rejections only."
+        default=None,
+        description=(
+            "Lower bound of a narrower window to retry. Scaled by the requested window's "
+            "average density, so it is exact only for evenly spaced observations: a series "
+            "clustered in this span is rejected again, with a further-narrowed suggestion. "
+            "Max-points rejections only, and absent once the scaled span rounds below a second."
+        ),
     )
     suggested_to_timestamp: datetime | None = Field(
-        default=None, description="Upper bound of a window that would fit. Max-points rejections only."
+        default=None,
+        description=(
+            "Upper bound of the narrower window to retry — the requested upper bound. "
+            "Max-points rejections only, and absent with `suggested_from_timestamp`."
+        ),
     )
     suggested_frequency: TimeSeriesFrequency | None = Field(
         default=None,
         description=(
-            "A frequency that would fit the requested window, with "
-            "`aggregation_method=end-period`. Max-points rejections only."
+            "A frequency that fits the requested window as asked, with "
+            "`aggregation_method=end-period`; unlike the window suggestion it needs no "
+            "second round trip. Max-points rejections only."
         ),
     )
 

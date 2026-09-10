@@ -307,13 +307,35 @@ def test_max_points_rejects_a_count_above_the_ceiling() -> None:
     assert exc_info.value.max_points == MAX_POINTS
 
 
-def test_max_points_suggests_a_window_that_would_fit() -> None:
+def test_max_points_scales_the_suggested_window_by_the_average_density() -> None:
     with pytest.raises(MaxPointsExceededError) as exc_info:
         enforce_max_points(MAX_POINTS * 4, query=_window(timedelta(hours=24)))
 
     rejection = exc_info.value
     assert rejection.suggested_to_timestamp == _NOW
     assert rejection.suggested_from_timestamp == _NOW - timedelta(hours=6)
+
+
+def test_the_suggested_window_narrows_on_every_round_until_it_bottoms_out() -> None:
+    # The suggestion is scaled by the average density, so a series clustered in
+    # the suggested span is rejected again. What keeps a re-tiling client off a
+    # loop is that the span shrinks by the same ratio each round and eventually
+    # drops out entirely, leaving the frequency. Worst case: the count never
+    # falls, i.e. every observation sits inside the span just suggested.
+    span = timedelta(hours=24)
+    for _ in range(20):
+        with pytest.raises(MaxPointsExceededError) as exc_info:
+            enforce_max_points(MAX_POINTS * 4, query=_window(span))
+        rejection = exc_info.value
+        lower, upper = rejection.suggested_from_timestamp, rejection.suggested_to_timestamp
+        if lower is None or upper is None:
+            assert lower is None and upper is None
+            assert rejection.suggested_frequency is not None
+            break
+        assert upper - lower < span
+        span = upper - lower
+    else:
+        pytest.fail("the suggested window never bottomed out")
 
 
 def test_max_points_suggests_the_windows_finest_permitted_frequency() -> None:

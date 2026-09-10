@@ -1111,16 +1111,16 @@ export interface components {
        * @description Observations the request would return. Max-points rejections only.
        */
       point_count?: number | null;
-      /** @description A frequency that would fit the requested window, with `aggregation_method=end-period`. Max-points rejections only. */
+      /** @description A frequency that fits the requested window as asked, with `aggregation_method=end-period`; unlike the window suggestion it needs no second round trip. Max-points rejections only. */
       suggested_frequency?: components['schemas']['TimeSeriesFrequency'] | null;
       /**
        * Suggested From Timestamp
-       * @description Lower bound of a window that would fit. Max-points rejections only.
+       * @description Lower bound of a narrower window to retry. Scaled by the requested window's average density, so it is exact only for evenly spaced observations: a series clustered in this span is rejected again, with a further-narrowed suggestion. Max-points rejections only, and absent once the scaled span rounds below a second.
        */
       suggested_from_timestamp?: string | null;
       /**
        * Suggested To Timestamp
-       * @description Upper bound of a window that would fit. Max-points rejections only.
+       * @description Upper bound of the narrower window to retry — the requested upper bound. Max-points rejections only, and absent with `suggested_from_timestamp`.
        */
       suggested_to_timestamp?: string | null;
     };

@@ -124,8 +124,10 @@ class FrequencyWithoutAggregationMethodError(TimeSeriesQueryError):
 class MaxPointsExceededError(TimeSeriesQueryError):
     """The default-frequency response would carry more points than the ceiling.
 
-    Carries a window and a frequency that would fit, so a client re-tiles or
-    resamples without parsing the message.
+    Carries a narrower window and a frequency, so a client re-tiles or resamples
+    without parsing the message. The frequency fits by construction; the window is
+    proportional to the window's average density and so an estimate — a series
+    clustered in the suggested span is rejected again. See ``enforce_max_points``.
     """
 
     error_code = "max_points_exceeded"
@@ -140,7 +142,7 @@ class MaxPointsExceededError(TimeSeriesQueryError):
         suggested_frequency: TimeSeriesFrequency,
     ) -> None:
         narrower = (
-            f"narrow the window to {suggested_from_timestamp.isoformat()}/{suggested_to_timestamp.isoformat()} or "
+            f"retry within {suggested_from_timestamp.isoformat()}/{suggested_to_timestamp.isoformat()} or "
             if suggested_from_timestamp is not None and suggested_to_timestamp is not None
             else ""
         )
@@ -338,6 +340,13 @@ def enforce_max_points(point_count: int, *, query: TimeWindow, max_points: int =
     rejection replaces the truncation flag, the suggestions carried by the raised
     error are the only machine-readable way out — a client re-tiles the window or
     drops to the suggested frequency without parsing the message.
+
+    The window suggestion is proportional: ``max_points / point_count`` of the
+    requested span, anchored at the upper bound. That is exact only for evenly
+    spaced observations — a series clustered in the trailing span holds more than
+    ``max_points`` there and is rejected again, on a span the same ratio narrows
+    further each round, so a re-tiling client converges geometrically. The
+    frequency suggestion fits by construction, which is the one-round-trip way out.
 
     ``point_count`` must be counted over the same latest-version rows the response
     would carry, from the same snapshot; see ``read_bounded_series``.
