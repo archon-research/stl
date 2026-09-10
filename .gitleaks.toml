@@ -34,6 +34,16 @@ regexes = [
   '''_HEX\s*=\s*["'][a-fA-F0-9]{40}["']''',
 ]
 
+# prime_key (VEC-707) is the public handle of a prime: `prm_` + 16 hex chars,
+# minted by the schema and printed in URLs, fixtures and seed rows. It is an
+# identifier, not a credential, but next to a `key:`/`_KEY =` context its entropy
+# trips `generic-api-key`. Scoped by value shape, like the addresses above.
+[[allowlists]]
+description = "prime_key identifiers (prm_ + 16 hex) are public prime handles, never credentials"
+regexes = [
+  '''prm_[a-f0-9]{16}''',
+]
+
 [[allowlists]]
 description = "generated OpenAPI output embeds contract addresses"
 paths = [
