@@ -394,6 +394,22 @@ func TestMaterializeAaveLendingRecordsUnmappedReservesAndProjectsTheRest(t *test
 	if spine != 1 {
 		t.Errorf("position_state holds %d rows, want 1", spine)
 	}
+
+	// The gap rows are this run's own record, so they name its writer run too: a gap nobody can trace
+	// to an artefact cannot be told from a gap a later mapping already closed (ADR-0006 §2).
+	if _, err := pool.Exec(ctx, `SELECT materialize_aave_lending(7, 9182)`); err != nil {
+		t.Fatalf("second run with a writer run: %v", err)
+	}
+	var stamped, unstamped int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE run_id = 9182 AND build_id = 7),
+		       count(*) FILTER (WHERE run_id IS NULL AND build_id = 9)
+		  FROM aave_unmapped_reserve`).Scan(&stamped, &unstamped); err != nil {
+		t.Fatal(err)
+	}
+	if stamped != 2 || unstamped != 2 {
+		t.Errorf("gap rows: %d from run 9182 and %d from the un-tracked run, want 2 and 2", stamped, unstamped)
+	}
 }
 
 // Each run appends its own view of the gap, so a closed mapping shows as its disappearance from later
@@ -741,5 +757,26 @@ func TestMaterializeAaveLendingAClosedPositionLosingItsMappingDoesNotRefuse(t *t
 	}
 	if _, err := pool.Exec(ctx, `SELECT materialize_aave_lending()`); err != nil {
 		t.Fatalf("the run refused although nothing live was stranded: %v", err)
+	}
+}
+
+// The wrapper is the only path the runner calls, so it has to forward the writer run to the spine or
+// every row this projection appends is provenance-free (ADR-0006 §2). The run record is the witness:
+// its run_id can only have arrived through the wrapper's own parameter.
+func TestMaterializeAaveLendingForwardsTheWriterRun(t *testing.T) {
+	ctx, pool, _ := seedAaveLending(t)
+	if _, err := pool.Exec(ctx, `SELECT materialize_aave_lending(7, 9182)`); err != nil {
+		t.Fatalf("materialize_aave_lending with a run: %v", err)
+	}
+	var runID *int64
+	var buildID int
+	if err := pool.QueryRow(ctx, `
+		SELECT run_id, build_id FROM position_projection_run
+		 WHERE projection = 'public.position_aave_lending'
+		 ORDER BY created_at DESC LIMIT 1`).Scan(&runID, &buildID); err != nil {
+		t.Fatalf("read the run record: %v", err)
+	}
+	if runID == nil || *runID != 9182 || buildID != 7 {
+		t.Errorf("run record = run_id %v build_id %d, want 9182 and 7", runID, buildID)
 	}
 }
