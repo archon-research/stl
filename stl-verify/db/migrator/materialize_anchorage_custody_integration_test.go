@@ -514,4 +514,23 @@ func TestMaterializeAnchorageCustodyForwardsTheWriterRun(t *testing.T) {
 	if runID == nil || *runID != 9182 || buildID != 7 {
 		t.Errorf("run record = run_id %v build_id %d, want 9182 and 7", runID, buildID)
 	}
+
+	// The runner passes the two provenance arguments BY NAME, so these parameter names are the
+	// contract: renaming one here leaves this migration valid and breaks that projection only.
+	var args []string
+	if err := pool.QueryRow(ctx, `
+		SELECT proargnames::text[] FROM pg_proc WHERE proname = 'materialize_anchorage_custody'`).Scan(&args); err != nil {
+		t.Fatalf("read the wrapper's parameter names: %v", err)
+	}
+	for _, want := range []string{"p_build_id", "p_run_id"} {
+		found := false
+		for _, a := range args {
+			if a == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("materialize_anchorage_custody declares %v, missing %s -- the runner calls it by name", args, want)
+		}
+	}
 }
