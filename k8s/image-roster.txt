@@ -57,6 +57,7 @@ cronjob reference-capital-backfill reference-capital-backfill
 cronjob watcher-data-validator     watcher-data-validator arbitrum-watcher-data-validator avalanche-watcher-data-validator base-watcher-data-validator optimism-watcher-data-validator unichain-watcher-data-validator
 cronjob transform-worker           transform-worker
 cronjob transform-bootstrap        -                          # one-off Job; pinned by hand in k8s/overlays/*/bootstrap/
+cronjob uniswap-v4-position-bootstrap -                       # one-off Job (VEC-639); pinned by hand in k8s/overlays/*/uniswap-v4-position-bootstrap/
 cronjob morpho-v2-bootstrap        morpho-v2-bootstrap
 cronjob morpho-vault-backfill      morpho-vault-backfill
 cronjob block-republisher          block-republisher

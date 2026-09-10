@@ -1854,9 +1854,25 @@ all zeros and is persisted as such — that erasure is what the row records.
 
 Run it **after the indexer's first deploy on a chain**, and again **after any
 suspected gap**: a long outage, a DLQ'd stretch, or a newly registered pool
-whose history predates its registration. It is not scheduled and not wired into
-any overlay; it is applied by hand from
-`k8s/base/uniswap-v4-position-bootstrap/`.
+whose history predates its registration. It is not scheduled and not in any
+synced overlay's `resources`; the pipeline builds and promotes its image on every
+deploy (roster line `uniswap-v4-position-bootstrap`, shared cronjob ECR repo, tag
+`uniswap-v4-position-bootstrap-<sha>`), and it is applied by hand through the
+manual-apply overlay, which pins that image and the `vector` namespace:
+
+```sh
+# 1. pin a built image (any main SHA since the merge)
+$EDITOR k8s/overlays/<env>/uniswap-v4-position-bootstrap/kustomization.yaml   # newTag
+# 2. run, follow, and delete afterwards (a Job spec is immutable, so a rerun needs the old one gone)
+kustomize build k8s/overlays/<env>/uniswap-v4-position-bootstrap | kubectl apply -f -
+kubectl -n vector logs -f job/uniswap-v4-position-bootstrap
+kubectl -n vector delete job uniswap-v4-position-bootstrap
+```
+
+The Job reuses the indexer's ConfigMap, Secret and ServiceAccount, so
+`DATABASE_URL`, `ALCHEMY_API_KEY`, `ALCHEMY_HTTP_URL` and `CHAIN_ID` come from
+there. To override the pin or the scan start, add `PIN_BLOCK` / `FROM_BLOCK` to
+the container's `env:` (the flags `-pin` / `-from` read the same values).
 
 - **Pin semantics.** The whole run snapshots one block: `head - 64` by default
   (two epochs, comfortably past finalisation), overridable with `-pin`. One
@@ -1873,9 +1889,9 @@ any overlay; it is applied by hand from
   row the live indexer already wrote *above* the pin is never regressed. A run
   over already-covered history reports `positionsWritten=0` — that, not the row
   count, is how you tell a no-op rerun from one that closed a real gap.
-- **Resuming an interrupted run.** Resume with `-pin <P>`, taking `P` from the
-  failed run's error (`resume this snapshot with -pin …`) or from its
-  `starting uniswap-v4 position bootstrap` log line. A bare rerun re-derives a
+- **Resuming an interrupted run.** Resume with `-pin <P>` (`PIN_BLOCK=<P>` in the
+  Job), taking `P` from the failed run's error (`resume this snapshot with -pin …`)
+  or from its `starting uniswap-v4 position bootstrap` log line. A bare rerun re-derives a
   fresh `head - 64` and would stitch one snapshot across two heights. Batches
   already committed stay, and the resumed run re-reads them without appending.
 

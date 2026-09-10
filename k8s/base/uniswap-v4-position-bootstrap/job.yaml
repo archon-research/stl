@@ -1,6 +1,7 @@
-# Deliberately not referenced by any overlay and not an ArgoCD PreSync hook: the
-# run is expensive and on demand, so a sync must never fire it. Apply it by hand
-# per env — see docs/runbooks/vector-indexers.md#uniswap-v4-indexer-vec-475.
+# Deliberately not in any synced overlay's resources and not an ArgoCD PreSync
+# hook: the run is expensive and on demand, so a sync must never fire it. Apply
+# it by hand through k8s/overlays/<env>/uniswap-v4-position-bootstrap/, which
+# pins the image — see docs/runbooks/vector-indexers.md#uniswap-v4-indexer-vec-475.
 apiVersion: batch/v1
 kind: Job
 metadata:
