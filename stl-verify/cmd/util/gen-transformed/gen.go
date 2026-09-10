@@ -225,7 +225,7 @@ func joinFor(fills []schemamaster.Fill) (clause, alias string, err error) {
 }
 
 // checkBucket1Fills rejects fills that a bucket-1 projection cannot render. A
-// Const or BlockTime fill has no parent join, so fillExpr would emit p."col"
+// Const or BlockMeta fill has no parent join, so fillExpr would emit p."col"
 // referencing an alias that does not exist; those fills belong to bucket 2/3 and
 // must not reach the parent-column path. A two-hop fill (ThenParent) whose first
 // hop is missing (Parent == "") is the same failure class: its subquery is keyed
@@ -233,8 +233,8 @@ func joinFor(fills []schemamaster.Fill) (clause, alias string, err error) {
 // undefined.
 func checkBucket1Fills(table string, fills []schemamaster.Fill) error {
 	for _, f := range fills {
-		if f.Const != nil || f.BlockTime {
-			return fmt.Errorf("fill %s.%s is a Const/BlockTime fill (bucket 2/3) and cannot be rendered by the bucket-1 generator", table, f.Column)
+		if f.Const != nil || f.BlockMeta {
+			return fmt.Errorf("fill %s.%s is a Const/BlockMeta fill (bucket 2/3) and cannot be rendered by the bucket-1 generator", table, f.Column)
 		}
 		if f.ThenParent != "" && f.Parent == "" {
 			return fmt.Errorf("fill %s.%s sets then_parent without parent: the two-hop subquery references parent alias p, but no join is emitted without parent/key/ref", table, f.Column)
@@ -254,7 +254,7 @@ func filledColumns(fills []schemamaster.Fill) (exprs, cols []string) {
 }
 
 // fillExpr renders one filled column. Single-hop reads from the joined parent p; a
-// two-hop is a correlated subquery keyed on p's column. Const/BlockTime fills are
+// two-hop is a correlated subquery keyed on p's column. Const/BlockMeta fills are
 // bucket 2/3 and are rejected by checkBucket1Fills before reaching here, so the
 // remaining fills always have a parent join and the p."col" reference is valid.
 func fillExpr(f schemamaster.Fill) string {

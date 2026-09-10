@@ -43,6 +43,8 @@ var convertedAppendOnlyTables = []string{
 	"uniswap_v4_liquidity_event",
 	"uniswap_v4_tick",
 	"uniswap_v4_pool_event",
+	// VEC-572 (#736): append-only from birth, REVOKE in the creating migration.
+	"uniswap_v4_position",
 	// VEC-401: run records are append-only; SELECT+INSERT only for the app role.
 	"position_projection_run",
 	// VEC-491: block header times are immutable facts; a mis-parse is deleted and reloaded.

@@ -103,37 +103,39 @@ func insertUniswapTickSQL(table string, valueColumns []string) string {
 }
 
 // Ticks are deduplicated per (pool_id, tick) upstream, so each key appears at
-// most once here and the batch needs no same-key sequencing.
-func (w uniswapTickWriter) writeTicks(ctx context.Context, tx pgx.Tx, ticks []uniswapTickRow, buildID buildregistry.BuildID) error {
+// most once here and the batch needs no same-key sequencing. Returns the rows
+// it persisted; the unchanged ones it drops are the difference from len(ticks).
+func (w uniswapTickWriter) writeTicks(ctx context.Context, tx pgx.Tx, ticks []uniswapTickRow, buildID buildregistry.BuildID) (int64, error) {
 	if len(ticks) == 0 {
-		return nil
+		return 0, nil
 	}
 
-	blockNumber, err := w.sharedBlockNumber(ticks)
+	blockNumber, err := sharedBlockNumber(w.table, ticks, func(t uniswapTickRow) int64 { return t.blockNumber })
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	keys := distinctSortedUniswapTickKeys(ticks)
 	if err := w.lockTickKeys(ctx, tx, keys); err != nil {
-		return err
+		return 0, err
 	}
 
 	latest, err := w.readLatestTicks(ctx, tx, keys, blockNumber)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	return w.insertChangedTicks(ctx, tx, ticks, latest, buildID)
 }
 
-// readLatestTicks bounds by this height, so a write spanning blocks would
-// compare a tick against another block's row.
-func (w uniswapTickWriter) sharedBlockNumber(ticks []uniswapTickRow) (int64, error) {
-	blockNumber := ticks[0].blockNumber
-	for _, t := range ticks[1:] {
-		if t.blockNumber != blockNumber {
-			return 0, fmt.Errorf("%s write spans blocks %d and %d: one SaveBlock is one block", w.table, blockNumber, t.blockNumber)
+// sharedBlockNumber returns the one block every row belongs to; rows must be
+// non-empty. The read-latest queries bound on that height, so a mixed batch
+// would compare a row against another block's state.
+func sharedBlockNumber[T any](table string, rows []T, blockNumberOf func(T) int64) (int64, error) {
+	blockNumber := blockNumberOf(rows[0])
+	for _, row := range rows[1:] {
+		if got := blockNumberOf(row); got != blockNumber {
+			return 0, fmt.Errorf("%s write spans blocks %d and %d: one SaveBlock is one block", table, blockNumber, got)
 		}
 	}
 	return blockNumber, nil
@@ -214,7 +216,7 @@ func (w uniswapTickWriter) insertChangedTicks(
 	ticks []uniswapTickRow,
 	latest map[uniswapTickKey]uniswapTickValues,
 	buildID buildregistry.BuildID,
-) (err error) {
+) (inserted int64, err error) {
 	batch := &pgx.Batch{}
 	var queued int
 	for i, t := range ticks {
@@ -224,14 +226,14 @@ func (w uniswapTickWriter) insertChangedTicks(
 		}
 		args, argsErr := w.insertArgs(t, buildID)
 		if argsErr != nil {
-			return fmt.Errorf("tick %d: converting %s pool=%d tick=%d: %w", i, w.table, t.poolID, t.tick, argsErr)
+			return 0, fmt.Errorf("tick %d: converting %s pool=%d tick=%d: %w", i, w.table, t.poolID, t.tick, argsErr)
 		}
 		batch.Queue(w.insertSQL, args...)
 		queued++
 	}
 
 	if queued == 0 {
-		return nil
+		return 0, nil
 	}
 
 	br := tx.SendBatch(ctx, batch)
@@ -241,11 +243,13 @@ func (w uniswapTickWriter) insertChangedTicks(
 		}
 	}()
 	for i := range queued {
-		if _, err := br.Exec(); err != nil {
-			return fmt.Errorf("inserting %s batch entry %d: %w", w.table, i, err)
+		tag, execErr := br.Exec()
+		if execErr != nil {
+			return 0, fmt.Errorf("inserting %s batch entry %d: %w", w.table, i, execErr)
 		}
+		inserted += tag.RowsAffected()
 	}
-	return nil
+	return inserted, nil
 }
 
 func (w uniswapTickWriter) insertArgs(t uniswapTickRow, buildID buildregistry.BuildID) ([]any, error) {
