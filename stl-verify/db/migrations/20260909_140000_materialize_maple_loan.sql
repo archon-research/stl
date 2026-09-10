@@ -16,7 +16,7 @@ DO $$ BEGIN
 END $$;
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS block_meta_chain_time_idx
-    ON block_meta (chain_id, block_timestamp DESC, block_number DESC, block_version DESC);
+    ON block_meta (chain_id, block_timestamp DESC, block_number DESC, block_version DESC, processing_version DESC);
 
 COMMENT ON INDEX block_meta_chain_time_idx IS '[Dimension] Serves the date-or-instant to block-height lookup that position_maple_loan (VEC-405) performs per sync cycle; block_meta''s PK leads with block_number and cannot. Column order matches that view''s ORDER BY so the pick is an index-only scan. Following 20260818_130000''s note on position_state, which defers a reverse-lookup index to the PR of its first consumer.';
 
@@ -28,7 +28,7 @@ WITH canonical AS (
     SELECT DISTINCT ON (m.chain_id, m.block_number)
            m.chain_id, m.block_number, m.block_version, m.block_timestamp
     FROM block_meta m
-    ORDER BY m.chain_id, m.block_number, m.block_version DESC
+    ORDER BY m.chain_id, m.block_number, m.block_version DESC, m.processing_version DESC
 ), cycle AS (
     SELECT s.maple_loan_id, s.synced_at, s.principal_owed, s.processing_version,
            l.chain_id, l.protocol_id, l.loan_address, l.borrower_user_id
@@ -135,9 +135,11 @@ BEGIN
                                 AND b.block_timestamp < a.block_timestamp
         WHERE EXISTS (SELECT 1 FROM public.maple_loan l WHERE l.chain_id = a.chain_id)
           AND NOT EXISTS (SELECT 1 FROM public.block_meta o WHERE o.chain_id = a.chain_id
-                           AND o.block_number = a.block_number AND o.block_version > a.block_version)
+                           AND o.block_number = a.block_number
+                           AND (o.block_version, o.processing_version) > (a.block_version, a.processing_version))
           AND NOT EXISTS (SELECT 1 FROM public.block_meta o WHERE o.chain_id = b.chain_id
-                           AND o.block_number = b.block_number AND o.block_version > b.block_version)
+                           AND o.block_number = b.block_number
+                           AND (o.block_version, o.processing_version) > (b.block_version, b.processing_version))
         LIMIT 5) z;
     IF v_bad IS NOT NULL THEN
         RAISE EXCEPTION 'materialize_maple_loan: block_meta header times invert against height, so a placement would be wrong; fix the mis-parsed rows first (first 5): %', v_bad;
@@ -166,7 +168,8 @@ BEGIN
             SELECT m.block_timestamp FROM public.block_meta m
             WHERE m.chain_id = l.chain_id AND m.block_timestamp <= s.synced_at
               AND NOT EXISTS (SELECT 1 FROM public.block_meta o WHERE o.chain_id = m.chain_id
-                               AND o.block_number = m.block_number AND o.block_version > m.block_version)
+                               AND o.block_number = m.block_number
+                               AND (o.block_version, o.processing_version) > (m.block_version, m.processing_version))
             ORDER BY m.block_timestamp DESC LIMIT 1) b
         WHERE s.synced_at - b.block_timestamp > p_max_skew
         GROUP BY l.chain_id) z;
