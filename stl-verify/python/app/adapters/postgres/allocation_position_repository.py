@@ -78,16 +78,24 @@ _ANCHORAGE_STALE_AFTER = timedelta(hours=1)
 # a correction copies it unchanged, so it does NOT distinguish one version from
 # another -- which is precisely what makes the last()/locf reads below unsafe.
 #
-# The table is append-only: a correction is a new row differing from the original
-# in processing_version alone. Nothing has ever written a second version, so no
-# read guards against it; the moment a backfill does, a SUM over raw history
-# double-counts and a last()-by-time tie-breaks arbitrarily between the original
-# and the row that corrects it. Both shapes are fixed by collapsing to the newest
-# version per identity before aggregating (VEC-758).
+# The table is append-only: a correction is a new row sharing this identity and
+# created_at but differing in a value column (balance, underlying_value, ...) --
+# an identical row would be pointless. Several single-row reads already guard
+# against a second version with ORDER BY ... processing_version DESC LIMIT 1
+# (get_latest_total_capital_usd, the direct-holdings and USD-exposure CTEs, the
+# tier-2 nearest-ratio laterals). The reads below are the ones that see MULTIPLE
+# rows per identity before that tiebreak can apply: a SUM over raw history
+# double-counts, and a last()-by-time tie-breaks arbitrarily between the original
+# and the correction. Both are fixed by collapsing to the newest version per
+# identity first (VEC-758).
 #
-# The column order is the leading prefix of allocation_position_pkey, so a
-# DISTINCT ON in this order is servable by an index scan rather than an explicit
-# sort. Keep the two in step if the primary key ever changes.
+# The column order is the leading 9-column prefix of allocation_position_pkey and
+# of idx_allocation_position_pv_lookup, but that index sorts created_at ahead of
+# processing_version, so this order still costs an Incremental Sort for the
+# trailing processing_version DESC -- and every call site here also filters a
+# created_at window, which the index can't serve either, so the plan is a Seq
+# Scan plus a full Sort in practice (verified on PG 18.6). Keep the column list
+# in step if the primary key ever changes.
 _IDENTITY_COLUMNS = (
     "chain_id",
     "token_id",
@@ -110,6 +118,12 @@ def _latest_version_only(alias: str) -> tuple[str, str]:
     """
     keys = ", ".join(f"{alias}.{column}" for column in _IDENTITY_COLUMNS)
     return f"DISTINCT ON ({keys})", f"{keys}, {alias}.processing_version DESC"
+
+
+# Precomputed for the module-level query strings below, which interpolate these
+# at import time rather than calling _latest_version_only() per query build.
+_DISTINCT_ON_D, _VERSION_ORDER_D = _latest_version_only("d")
+_DISTINCT_ON_AP, _VERSION_ORDER_AP = _latest_version_only("ap")
 
 
 def _escape_like_pattern(value: str) -> str:
@@ -863,7 +877,7 @@ class AllocationRepository:
         value forward; leading buckets before the first observation are ``None``.
         """
         subproxies = [bytes.fromhex(address[2:]) for address in subproxy_addresses()]
-        distinct_on, version_order = _latest_version_only("ap")
+        distinct_on, version_order = _DISTINCT_ON_AP, _VERSION_ORDER_AP
         time_window = required_time_window_clause("ap.created_at")
         query = text(
             f"""
@@ -1607,7 +1621,7 @@ WHERE p.balance > 0
 """)
 
 
-_ALLOCATION_ACTIVITY_SQL = text("""
+_ALLOCATION_ACTIVITY_SQL = text(f"""
 SELECT
     ap.chain_id,
     encode(ap.proxy_address, 'hex') AS prime_address,
@@ -1625,15 +1639,17 @@ SELECT
     ap.created_at
 FROM (
     -- Newest processing_version per identity. This read is not aggregated, so
-    -- an un-deduped correction surfaces as a DUPLICATE ROW in the feed and
-    -- consumes a slot in :limit, shifting pagination (VEC-758). Only the
-    -- ap-only predicates are pushed in here -- the ones needing prime/token/
-    -- protocol joins stay in the outer WHERE, so the filter semantics are
-    -- unchanged and there is nothing to keep in sync.
-    SELECT DISTINCT ON (
-        d.chain_id, d.token_id, d.prime_id, d.proxy_address,
-        d.block_number, d.block_version, d.tx_hash, d.log_index, d.direction
-    )
+    -- an un-deduped correction surfaces as a DUPLICATE ROW in the feed -- there
+    -- is no OFFSET/cursor here, only a LIMIT, so the real harm is dropping the
+    -- oldest row of the truncated window, not "shifting" a page (VEC-758).
+    -- Safe to push into this subquery: a filter on an _IDENTITY_COLUMNS column
+    -- (chain_id, proxy_address, direction, tx_hash, ...) -- identity is exactly
+    -- what a correction shares with its original. Unsafe: a filter on a VALUE
+    -- column (balance, underlying_value, ...), which could exclude the
+    -- correction before DISTINCT ON resolves it and resurrect the row it
+    -- superseded. Predicates needing prime/token/protocol joins stay in the
+    -- outer WHERE regardless.
+    SELECT {_DISTINCT_ON_D}
         d.chain_id, d.proxy_address, d.prime_id, d.token_id, d.direction,
         d.tx_amount, d.balance, d.tx_hash, d.log_index, d.block_number,
         d.block_version, d.created_at
@@ -1642,10 +1658,7 @@ FROM (
         AND (CAST(:chain_id AS INTEGER) IS NULL OR d.chain_id = CAST(:chain_id AS INTEGER))
         AND (CAST(:from_timestamp AS TIMESTAMPTZ) IS NULL OR d.created_at >= CAST(:from_timestamp AS TIMESTAMPTZ))
         AND (CAST(:to_timestamp AS TIMESTAMPTZ) IS NULL OR d.created_at <= CAST(:to_timestamp AS TIMESTAMPTZ))
-    ORDER BY
-        d.chain_id, d.token_id, d.prime_id, d.proxy_address,
-        d.block_number, d.block_version, d.tx_hash, d.log_index,
-        d.direction, d.processing_version DESC
+    ORDER BY {_VERSION_ORDER_D}
 ) ap
 JOIN prime p ON p.id = ap.prime_id
 JOIN token t ON t.id = ap.token_id
@@ -1762,13 +1775,11 @@ WITH window_rows AS MATERIALIZED (
     --
     -- DISTINCT ON keeps only the newest processing_version per identity. The
     -- outer query SUMs over this set, so without it a correction row is added
-    -- to the total alongside the row it corrects (VEC-758). The key is the
-    -- leading prefix of allocation_position_pkey, so the sort is servable from
-    -- the index rather than materialised.
-    SELECT DISTINCT ON (
-        ap.chain_id, ap.token_id, ap.prime_id, ap.proxy_address,
-        ap.block_number, ap.block_version, ap.tx_hash, ap.log_index, ap.direction
-    )
+    -- to the total alongside the row it corrects (VEC-758). The mandatory
+    -- created_at window below defeats the pv-lookup index either way, so this
+    -- is a Seq Scan plus a full Sort, not an index-served one (see
+    -- _IDENTITY_COLUMNS).
+    SELECT {_DISTINCT_ON_AP}
         ap.chain_id,
         ap.token_id,
         ap.prime_id,
@@ -1793,10 +1804,7 @@ WITH window_rows AS MATERIALIZED (
              LIKE '%' || LOWER(CAST(:token_symbol AS TEXT)) || '%' ESCAPE '\\')
         AND (CAST(:tx_hash AS TEXT) IS NULL OR encode(ap.tx_hash, 'hex') = LOWER(CAST(:tx_hash AS TEXT)))
         {required_time_window_clause("ap.created_at")}
-    ORDER BY
-        ap.chain_id, ap.token_id, ap.prime_id, ap.proxy_address,
-        ap.block_number, ap.block_version, ap.tx_hash, ap.log_index,
-        ap.direction, ap.processing_version DESC
+    ORDER BY {_VERSION_ORDER_AP}
 ),
 token_context AS MATERIALIZED (
     -- Everything the aggregate needs per token (a handful of rows): protocol
@@ -1957,10 +1965,7 @@ WITH position_buckets AS (
         -- exactly, so last() has no tie to break and would return either row
         -- arbitrarily -- the correction silently not applying, or flipping
         -- between plans (VEC-758).
-        SELECT DISTINCT ON (
-            d.chain_id, d.token_id, d.prime_id, d.proxy_address,
-            d.block_number, d.block_version, d.tx_hash, d.log_index, d.direction
-        )
+        SELECT {_DISTINCT_ON_D}
             d.chain_id, d.token_id, d.created_at, d.balance,
             d.underlying_value, d.underlying_token_id
         FROM allocation_position d
@@ -1970,10 +1975,7 @@ WITH position_buckets AS (
         WHERE d.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[]))
           AND d.created_at >= CAST(:from_timestamp AS TIMESTAMPTZ)
           AND d.created_at <= CAST(:to_timestamp AS TIMESTAMPTZ)
-        ORDER BY
-            d.chain_id, d.token_id, d.prime_id, d.proxy_address,
-            d.block_number, d.block_version, d.tx_hash, d.log_index,
-            d.direction, d.processing_version DESC
+        ORDER BY {_VERSION_ORDER_D}
     ) ap
     JOIN token t ON t.id = ap.token_id
     JOIN receipt_token rt
