@@ -1009,7 +1009,7 @@ data:
   # wrapper runs its projection's own pre-flight refusals before the shared
   # materializer appends to position_state (docs/runbooks/vector-position-materializer.md).
   # Morpho only for now. Sky maps block_timestamp to synced_at, a sync clock, so an
-  # out-of-order retry inverts instant against height. Aave's created_at defaults to
-  # now(), so its legacy rows carry wall clock rather than the block time the tracker
-  # stamps today. Anchorage, prime allocation and Maple each join by their own change.
+  # out-of-order retry inverts instant against height, and Aave's created_at defaults to
+  # now() so its legacy rows carry wall clock. Both join once their views read block_meta
+  # instead, as position_maple_loan already does; Anchorage and prime allocation follow.
   POSITION_PROJECTIONS: "materialize_morpho_market,materialize_morpho_vault"
