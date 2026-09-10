@@ -7,10 +7,13 @@ types live here too, since they are an HTTP-contract concern.
 """
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from fastapi import HTTPException, Query, Response
-from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
+from pydantic import BaseModel, Field, GetJsonSchemaHandler, SerializerFunctionWrapHandler, model_serializer
+from pydantic.json_schema import JsonSchemaValue
+from pydantic_core import CoreSchema
+from pydantic_core.core_schema import ModelSchema
 
 from app.domain.time_series import (
     AggregationMethod,
@@ -126,15 +129,16 @@ class BucketPoint(BaseModel):
     A level series carries its last observed value into an empty bucket, so the
     point has to say which of the two it is: a mean over carried values is
     biased toward stale ones and looks entirely plausible. The marker is
-    serialized only where it is true, so absence means observed and a
-    1,464-point response pays for a handful of extra fields rather than 1,464.
+    serialized only where it is true, so a 1,464-point response pays for a
+    handful of extra fields rather than 1,464.
     """
 
     filled: bool = Field(
         default=False,
         description=(
             "Present and `true` only when the value was carried into an empty bucket rather "
-            "than observed in it. Absent means the bucket was observed."
+            "than observed in it. Absent means it was not carried: the bucket was either "
+            "observed, or it precedes the series' first observation and its value is `null`."
         ),
     )
 
@@ -144,6 +148,14 @@ class BucketPoint(BaseModel):
         if not serialized.get("filled"):
             serialized.pop("filled", None)
         return serialized
+
+    @classmethod
+    def __get_pydantic_json_schema__(cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
+        # Pydantic derives a serialization schema from the wrap serializer's
+        # return annotation, which would publish every subclass as a bare
+        # object. Schema comes from the fields under it instead.
+        model_schema = cast(ModelSchema, core_schema)
+        return handler.resolve_ref_schema(handler(model_schema["schema"]))
 
 
 class TimeSeriesWindow(BaseModel):

@@ -13,7 +13,7 @@ _WINDOW_START = datetime(2026, 3, 5, 8, 0, tzinfo=UTC)
 def _query(
     *,
     from_timestamp: datetime = _WINDOW_START,
-    to_timestamp: datetime = _WINDOW_START + 4 * _HOUR,
+    to_timestamp: datetime = _WINDOW_START + 4 * _HOUR + timedelta(minutes=30),
     frequency: TimeSeriesFrequency = TimeSeriesFrequency.PT1H,
 ) -> TimeSeriesQuery:
     return TimeSeriesQuery(
@@ -33,6 +33,16 @@ def _bucket(hours: int) -> datetime:
 
 def test_grid_covers_the_window_newest_first() -> None:
     assert bucket_starts(_query()) == [_bucket(4), _bucket(3), _bucket(2), _bucket(1), _bucket(0)]
+
+
+def test_grid_generates_no_bucket_for_an_upper_bound_on_a_boundary() -> None:
+    query = _query(to_timestamp=_bucket(4))
+
+    assert bucket_starts(query) == [_bucket(3), _bucket(2), _bucket(1), _bucket(0)]
+
+
+def test_grid_is_empty_for_a_window_with_no_bucket_to_generate() -> None:
+    assert bucket_starts(_query(to_timestamp=_WINDOW_START)) == []
 
 
 def test_grid_answers_a_bound_inside_a_bucket_with_that_whole_bucket() -> None:
@@ -74,6 +84,14 @@ def test_level_carries_the_last_value_into_empty_buckets_and_marks_them() -> Non
     ]
 
 
+def test_level_keeps_a_bucket_observed_at_the_exclusive_upper_bound() -> None:
+    query = _query(to_timestamp=_bucket(4))
+
+    points = apply_gap_policy(SeriesKind.LEVEL, {_bucket(4): Decimal("7")}, query=query)
+
+    assert points[0] == GapFilledPoint(_bucket(4), Decimal("7"))
+
+
 def test_level_leaves_buckets_before_the_first_observation_null_and_unmarked() -> None:
     points = apply_gap_policy(SeriesKind.LEVEL, {_bucket(3): Decimal("5")}, query=_query())
 
@@ -94,6 +112,14 @@ def test_level_treats_an_observed_null_as_observed() -> None:
 
     observed_point = next(point for point in points if point.bucket_start == _bucket(2))
     assert observed_point == GapFilledPoint(_bucket(2), None)
+
+
+def test_level_carries_an_observed_null_without_marking_the_buckets_it_fills() -> None:
+    points = apply_gap_policy(SeriesKind.LEVEL, {_bucket(1): Decimal("3"), _bucket(2): None}, query=_query())
+
+    after_the_null = [point for point in points if point.bucket_start > _bucket(2)]
+    assert [point.value for point in after_the_null] == [None, None]
+    assert not any(point.filled for point in after_the_null)
 
 
 # --- flow series ----------------------------------------------------------
@@ -132,3 +158,8 @@ def test_flow_zero_may_be_any_shape_of_empty_point() -> None:
 def test_flow_without_a_zero_is_rejected() -> None:
     with pytest.raises(ValueError, match="zero"):
         apply_gap_policy(SeriesKind.FLOW, {}, query=_query())
+
+
+def test_flow_with_a_prior_is_rejected() -> None:
+    with pytest.raises(ValueError, match="no prior value"):
+        apply_gap_policy(SeriesKind.FLOW, {}, query=_query(), zero=0, prior=99)

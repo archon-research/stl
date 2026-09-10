@@ -207,3 +207,9 @@ def test_a_point_before_the_first_observation_leaves_the_marker_off_the_wire() -
     point = _Point(bucket_start=_BUCKET_START)
 
     assert "filled" not in point.model_dump(mode="json")
+
+
+def test_the_published_schema_keeps_the_fields_under_the_marker() -> None:
+    schema = _Point.model_json_schema(mode="serialization")
+
+    assert set(schema["properties"]) == {"bucket_start", "value", "filled"}
