@@ -7,9 +7,10 @@ types live here too, since they are an HTTP-contract concern.
 """
 
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import HTTPException, Query, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
 
 from app.domain.time_series import (
     AggregationMethod,
@@ -117,6 +118,32 @@ def _resolve_or_422(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+class BucketPoint(BaseModel):
+    """Base for one point of a bucketed series, carrying the filled marker.
+
+    A level series carries its last observed value into an empty bucket, so the
+    point has to say which of the two it is: a mean over carried values is
+    biased toward stale ones and looks entirely plausible. The marker is
+    serialized only where it is true, so absence means observed and a
+    1,464-point response pays for a handful of extra fields rather than 1,464.
+    """
+
+    filled: bool = Field(
+        default=False,
+        description=(
+            "Present and `true` only when the value was carried into an empty bucket rather "
+            "than observed in it. Absent means the bucket was observed."
+        ),
+    )
+
+    @model_serializer(mode="wrap")
+    def _drop_unfilled_marker(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        serialized = handler(self)
+        if not serialized.get("filled"):
+            serialized.pop("filled", None)
+        return serialized
 
 
 class TimeSeriesWindow(BaseModel):

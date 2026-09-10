@@ -1,9 +1,11 @@
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 from fastapi import HTTPException, Response
 
 from app.api.time_series import (
+    BucketPoint,
     ResampledTimeSeriesWindow,
     apply_cache_control,
     build_raw_window,
@@ -179,3 +181,29 @@ def test_apply_cache_control_sets_no_store_when_both_defaulted() -> None:
     response = Response()
     apply_cache_control(response, query)
     assert response.headers["Cache-Control"] == "no-store"
+
+
+class _Point(BucketPoint):
+    bucket_start: datetime
+    value: Decimal | None = None
+
+
+_BUCKET_START = datetime(2026, 3, 5, 8, 0, tzinfo=UTC)
+
+
+def test_a_filled_point_carries_the_marker() -> None:
+    point = _Point(bucket_start=_BUCKET_START, value=Decimal("1"), filled=True)
+
+    assert point.model_dump()["filled"] is True
+
+
+def test_an_observed_point_leaves_the_marker_off_the_wire() -> None:
+    point = _Point(bucket_start=_BUCKET_START, value=Decimal("1"))
+
+    assert "filled" not in point.model_dump(mode="json")
+
+
+def test_a_point_before_the_first_observation_leaves_the_marker_off_the_wire() -> None:
+    point = _Point(bucket_start=_BUCKET_START)
+
+    assert "filled" not in point.model_dump(mode="json")
