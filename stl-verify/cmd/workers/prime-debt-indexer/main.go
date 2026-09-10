@@ -19,7 +19,6 @@ import (
 
 	vatAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
@@ -31,6 +30,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/services/prime_debt"
 )
 
@@ -202,9 +202,9 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	defer pool.Close()
 	logger.Info("PostgreSQL connected")
 
-	buildReg, err := buildregistry.New(ctx, pool)
+	buildReg, runID, err := writerrun.Open(ctx, pool)
 	if err != nil {
-		return fmt.Errorf("registering build: %w", err)
+		return err
 	}
 
 	logger.Info("starting prime-debt-indexer",
@@ -256,7 +256,7 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	if err != nil {
 		return fmt.Errorf("tx manager: %w", err)
 	}
-	primeDebtRepo := postgres.NewPrimeDebtRepository(pool, txm, logger, buildReg.BuildID())
+	primeDebtRepo := postgres.NewPrimeDebtRepository(pool, txm, logger, buildReg.BuildID(), runID)
 
 	// Vault debt service
 	svc, err := prime_debt.NewVaultDebtService(

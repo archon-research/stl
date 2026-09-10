@@ -129,6 +129,12 @@ for queue in oracle-price sparklend-position allocation-tracker; do
   done
 done
 
+# SparkLend position tracker also runs on the three L2 Aave V3 markets (ARCT-213).
+# No unichain queue: neither Aave V3 nor SparkLend is deployed on chain 130.
+for chain in arbitrum optimism base; do
+  create_consumer_queue "$chain" "sparklend-position"
+done
+
 # PSM3 indexer runs on the four L2 chains
 for chain in base optimism unichain arbitrum; do
   create_consumer_queue "$chain" "psm3-indexer"

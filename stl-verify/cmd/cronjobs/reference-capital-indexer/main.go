@@ -14,13 +14,13 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sky"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/skydata"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/axis_synome_contract"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/services/reference_capital_indexer"
 )
 
@@ -54,9 +54,9 @@ func main() {
 }
 
 func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
-	buildReg, err := buildregistry.New(ctx, deps.Pool)
+	buildReg, runID, err := writerrun.Open(ctx, deps.Pool)
 	if err != nil {
-		return nil, fmt.Errorf("registering build: %w", err)
+		return nil, err
 	}
 
 	txm, err := postgres.NewTxManager(deps.Pool, deps.Logger)
@@ -96,14 +96,14 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 	service, err := reference_capital_indexer.NewService(
 		reference_capital_indexer.Deps{
 			PrimeRepo:          postgres.NewPrimeRepository(deps.Pool),
-			CapitalRepo:        postgres.NewPrimeCapitalStackRepository(deps.Pool, deps.Logger),
+			CapitalRepo:        postgres.NewPrimeCapitalStackRepository(deps.Pool, deps.Logger, runID),
 			RiskProvider:       skyClient,
 			AllocationProvider: skyClient,
-			AllocationRepo:     postgres.NewPrimeCapitalStackAllocationRepository(deps.Pool, deps.Logger),
-			SheetRepo:          postgres.NewPrimeBalanceSheetRepository(deps.Pool, txm, deps.Logger),
+			AllocationRepo:     postgres.NewPrimeCapitalStackAllocationRepository(deps.Pool, deps.Logger, runID),
+			SheetRepo:          postgres.NewPrimeBalanceSheetRepository(deps.Pool, txm, deps.Logger, runID),
 			SheetProvider:      sheetClient,
 			PositionProvider:   sheetClient,
-			PositionRepo:       postgres.NewPrimeReferencePositionRepository(deps.Pool, deps.Logger),
+			PositionRepo:       postgres.NewPrimeReferencePositionRepository(deps.Pool, deps.Logger, runID),
 			TxManager:          txm,
 		},
 		trackedStars,

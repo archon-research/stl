@@ -8,9 +8,11 @@ from app.adapters.postgres.core_model_positions_reader import (
     PositionRow,
     build_market_frame,
     build_morpho_users_frame,
+    build_syrup_users_frame,
     build_users_frame,
     morpho_liquidation_incentive,
     supply_prices,
+    syrup_attested_prices,
 )
 
 _PRICES = {"WETH": 2000.0, "WSTETH": 2400.0, "USDT": 1.0, "USDS": 1.0, "DAI": 1.0, "USDC": 1.0, "WBTC": 1.0}
@@ -218,3 +220,137 @@ def test_morpho_zero_collateral_borrowers_are_excluded():
 def test_morpho_unpriced_token_fails_the_build():
     with pytest.raises(ValueError, match="CBBTC"):
         build_morpho_users_frame([_morpho_row(collateral_price=None)])
+
+
+# Syrup (Maple)
+
+
+def _syrup_row(
+    address_hex="aa" * 20,
+    principal=25_000_000 * 10**6,
+    acm_ratio=None,
+    symbol="BTC",
+    amount=505 * 10**8,
+    decimals=8,
+    value_usd=int(78276.425 * 10**8),
+    liquidation_level=1_111_111,
+):
+    """One loan row as the SQL returns it: raw units, ratios in fixed-point x1e6 / x1e8."""
+    return SimpleNamespace(
+        borrower_address=bytes.fromhex(address_hex),
+        principal_owed=principal,
+        acm_ratio=acm_ratio,
+        synced_at=None,
+        asset_symbol=symbol,
+        asset_amount=amount,
+        asset_decimals=decimals,
+        asset_value_usd=value_usd,
+        liquidation_level=liquidation_level,
+    )
+
+
+def test_syrup_row_reproduces_a_real_ba_parquet_row():
+    # users_syrup_usdc.parquet row 0x198aec...: 100M USDC against 2627.055713 BTC
+    # at Maple's attested 71,809.935 — lltv 0.83001, ltv 0.530086, hf 1.565803,
+    # liquidation_incentive 1.02. The staging loan of that borrower carries
+    # liquidation_level 1204800, whose inverse is that exact lltv.
+    row = build_syrup_users_frame(
+        [
+            _syrup_row(
+                principal=100_000_000 * 10**6,
+                amount=262_705_571_300,  # 2627.055713 BTC in 8 dp
+                value_usd=int(71809.935 * 10**8),
+                liquidation_level=1_204_800,
+            )
+        ],
+        "USDC",
+        6,
+    ).iloc[0]
+    assert row["lltv"] == pytest.approx(0.83001, abs=1e-5)
+    assert row["ltv"] == pytest.approx(0.530086, abs=1e-6)
+    assert row["health_factor"] == pytest.approx(1.565803, abs=1e-5)
+    assert row["liquidation_incentive"] == pytest.approx(1.02)
+    assert row["btc_supply"] == pytest.approx(2627.055713)
+    assert row["btc_supply_usd"] == pytest.approx(188_648_700, rel=1e-6)
+    assert row["usdc_borrow"] == row["usdc_borrow_usd"] == pytest.approx(100_000_000)
+    assert row["total_borrow_usd"] == pytest.approx(100_000_000)
+    assert row["total_collateral_usd"] == pytest.approx(row["btc_supply_usd"])
+    assert row["wallet_address"] == "0x" + "aa" * 20
+
+
+def test_syrup_keeps_one_row_per_loan_so_wallets_repeat():
+    df = build_syrup_users_frame([_syrup_row(), _syrup_row()], "USDC", 6)
+    assert list(df["wallet_address"]) == ["0x" + "aa" * 20] * 2
+
+
+def test_syrup_par_coverage_trigger_loans_are_excluded(caplog):
+    # liquidation_level <= 1e6 means the loan is margin-called at/above full
+    # coverage (stable-on-stable terms): no price risk to simulate, and its
+    # LT >= 1 would break the liquidator's -1 + LT*(1+bonus) < 0 guard.
+    rows = [
+        _syrup_row(),
+        _syrup_row(address_hex="bb" * 20, symbol="PYUSD", value_usd=10**8, liquidation_level=900_000),
+        _syrup_row(address_hex="cc" * 20, symbol="USDC", value_usd=10**8, liquidation_level=1_000_000),
+    ]
+    df = build_syrup_users_frame(rows, "USDC", 6)
+    assert list(df["wallet_address"]) == ["0x" + "aa" * 20]
+    assert (df["lltv"] < 1.0).all()
+    assert "at/above par coverage" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        dict(symbol=None, amount=None, decimals=8, value_usd=None, liquidation_level=None),  # no collateral row
+        dict(symbol=""),
+        dict(amount=None),
+        dict(amount=0),
+        dict(value_usd=None),
+        dict(liquidation_level=None),
+    ],
+)
+def test_syrup_loans_without_usable_collateral_are_excluded(broken, caplog):
+    rows = [_syrup_row(), _syrup_row(address_hex="bb" * 20, **broken)]
+    df = build_syrup_users_frame(rows, "USDC", 6)
+    assert list(df["wallet_address"]) == ["0x" + "aa" * 20]
+    assert "no usable collateral" in caplog.text
+
+
+def test_syrup_all_loans_excluded_fails_rather_than_an_empty_market():
+    with pytest.raises(ValueError, match="no simulatable external Active syrup loans"):
+        build_syrup_users_frame([_syrup_row(liquidation_level=900_000)], "USDC", 6)
+
+
+def test_syrup_two_attested_prices_for_one_symbol_are_refused():
+    rows = [_syrup_row(), _syrup_row(address_hex="bb" * 20, value_usd=int(78277.0 * 10**8))]
+    with pytest.raises(ValueError, match="two prices for BTC"):
+        build_syrup_users_frame(rows, "USDC", 6)
+
+
+def test_syrup_acm_disagreement_warns(caplog):
+    # Computed coverage: 505 * 78276.425 / 25M = 1.5812; an acm_ratio of 2.0
+    # is a >1% disagreement and must be surfaced.
+    build_syrup_users_frame([_syrup_row(acm_ratio=2_000_000)], "USDC", 6)
+    assert "acm_ratio" in caplog.text
+
+
+def test_syrup_acm_agreement_stays_quiet(caplog):
+    build_syrup_users_frame([_syrup_row(acm_ratio=1_581_184)], "USDC", 6)
+    assert "acm_ratio" not in caplog.text
+
+
+def test_syrup_attested_prices_cover_only_valued_symbols():
+    rows = [_syrup_row(), _syrup_row(address_hex="bb" * 20, symbol="XRP", value_usd=None)]
+    assert syrup_attested_prices(rows) == pytest.approx({"BTC": 78276.425})
+
+
+def test_syrup_price_disagreement_on_an_excluded_stable_does_not_fail_the_market():
+    # Two PYUSD loans attested a hair apart would otherwise fail the whole
+    # market over a symbol the frame never uses (their loans are excluded).
+    rows = [
+        _syrup_row(),
+        _syrup_row(address_hex="bb" * 20, symbol="PYUSD", value_usd=99982038, liquidation_level=900_000),
+        _syrup_row(address_hex="cc" * 20, symbol="PYUSD", value_usd=99982040, liquidation_level=900_000),
+    ]
+    assert syrup_attested_prices(rows) == pytest.approx({"BTC": 78276.425})
+    assert len(build_syrup_users_frame(rows, "USDC", 6)) == 1

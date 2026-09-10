@@ -137,7 +137,7 @@ function ActivityChainCell({
   chainLabels,
 }: {
   event: AllocationActivity;
-  chainLabels?: ChainLabelLookup;
+  chainLabels?: ChainLabelLookup | undefined;
 }) {
   const chainLabel = getChainLabel(event.chain_id, chainLabels);
 

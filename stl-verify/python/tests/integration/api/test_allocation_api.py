@@ -606,8 +606,8 @@ def test_activity_buckets_net_flow_is_signed_and_excludes_sweeps(client: TestCli
             "prime_id": f"0x{_FLOW_PROXY_HEX}",
             "from_timestamp": "2026-01-01T00:00:00Z",
             "to_timestamp": "2026-01-01T01:00:00Z",
-            "resolution": "PT1H",
-            "aggregate": "true",
+            "frequency": "PT1H",
+            "aggregation_method": "end-period",
         },
     )
 
@@ -636,8 +636,8 @@ def test_activity_buckets_exclude_direct_asset_flows(client: TestClient) -> None
             "prime_id": f"0x{_DIRECT_FLOW_PROXY_HEX}",
             "from_timestamp": "2026-01-01T00:00:00Z",
             "to_timestamp": "2026-01-01T01:00:00Z",
-            "resolution": "PT1H",
-            "aggregate": "true",
+            "frequency": "PT1H",
+            "aggregation_method": "end-period",
         },
     )
 
@@ -667,8 +667,8 @@ def test_total_capital_buckets_locf_carry_forward_and_leading_gap(client: TestCl
         params={
             "from_timestamp": "2025-12-31T23:00:00Z",
             "to_timestamp": "2026-01-01T03:30:00Z",
-            "resolution": "PT1H",
-            "aggregate": "true",
+            "frequency": "PT1H",
+            "aggregation_method": "end-period",
         },
     )
 
@@ -703,8 +703,8 @@ def test_total_capital_returns_all_null_when_prime_has_no_treasury(client: TestC
         params={
             "from_timestamp": "2026-01-01T00:00:00Z",
             "to_timestamp": "2026-01-01T03:00:00Z",
-            "resolution": "PT1H",
-            "aggregate": "true",
+            "frequency": "PT1H",
+            "aggregation_method": "end-period",
         },
     )
 

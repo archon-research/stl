@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"go.opentelemetry.io/otel/attribute"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -170,6 +171,33 @@ func TestSecondsHistograms_UseSecondsBuckets(t *testing.T) {
 	}
 }
 
+// Guards the startup seed: VectorOracleIndexerStalled reads
+// oracle_blocks_processed_total with rate()==0 and must be computable from
+// process start (a worker dead before its first block emits no series at
+// all otherwise). See telemetry.SeedCounter.
+func TestNewTelemetry_SeedsBlockStatusSeriesAtZero(t *testing.T) {
+	_, reader := newRecordingTelemetry(t)
+
+	dps := testutil.CollectSumDataPoints(t, reader, "oracle.blocks.processed")
+	got := map[string]int64{}
+	for _, dp := range dps {
+		if chain := testutil.AttrValue(dp, "chain"); chain != "mainnet" {
+			t.Errorf("oracle.blocks.processed chain attr = %q, want %q", chain, "mainnet")
+		}
+		got[testutil.AttrValue(dp, "status")] = dp.Value
+	}
+	for _, status := range []string{"success", "error"} {
+		v, ok := got[status]
+		if !ok {
+			t.Errorf("oracle.blocks.processed missing status=%q series before any block", status)
+			continue
+		}
+		if v != 0 {
+			t.Errorf("oracle.blocks.processed{status=%q} = %d, want 0", status, v)
+		}
+	}
+}
+
 func TestTelemetry_NilSafe(t *testing.T) {
 	var tel *Telemetry // nil pointer
 	ctx := context.Background()
@@ -236,4 +264,74 @@ func TestTelemetry_NilSafe(t *testing.T) {
 		telemetry.SetSpanError(span, nil, "should be no-op")
 		telemetry.SetSpanError(span, someErr, "test error description")
 	})
+}
+
+// VectorOracleUnitStale reads oracle.unit.passes with increase(...)==0, so a
+// unit that has completed no pass must still export the series — otherwise the
+// comparison matches nothing and the alert cannot fire for exactly the unit it
+// exists to catch (VEC-750).
+func TestRecordUnitLoaded_SeedsThePassCounterAtZero(t *testing.T) {
+	tel, reader := newRecordingTelemetry(t)
+
+	tel.RecordUnitLoaded(context.Background(), "chainlink")
+
+	dps := testutil.CollectSumDataPoints(t, reader, "oracle.unit.passes")
+	if len(dps) != 1 {
+		t.Fatalf("oracle.unit.passes has %d series after load, want 1", len(dps))
+	}
+	if dps[0].Value != 0 {
+		t.Errorf("seeded value = %d, want 0", dps[0].Value)
+	}
+	if got := testutil.AttrValue(dps[0], "oracle.name"); got != "chainlink" {
+		t.Errorf("oracle.name = %q, want %q", got, "chainlink")
+	}
+	if got := testutil.AttrValue(dps[0], "chain"); got != "mainnet" {
+		t.Errorf("chain = %q, want %q", got, "mainnet")
+	}
+}
+
+// The seeded series and the series RecordUnitSuccess writes must be one series.
+// If the two label sets ever diverge, the seeded one stays flat at 0 while real
+// passes accumulate on a second series, increase() goes back to missing the
+// first increment, and the counter looks seeded while the alert stays blind.
+// Asserted by series count, because a value assertion alone cannot see it.
+func TestRecordUnitSuccess_LandsOnTheSeededSeries(t *testing.T) {
+	tel, reader := newRecordingTelemetry(t)
+	ctx := context.Background()
+
+	tel.RecordUnitLoaded(ctx, "chainlink")
+	tel.RecordUnitSuccess(ctx, "chainlink")
+
+	dps := testutil.CollectSumDataPoints(t, reader, "oracle.unit.passes")
+	if len(dps) != 1 {
+		t.Fatalf("oracle.unit.passes has %d series after one pass, want 1 — the success orphaned the seeded series", len(dps))
+	}
+	if dps[0].Value != 1 {
+		t.Errorf("value = %d, want 1 (0 seeded then 1 pass)", dps[0].Value)
+	}
+}
+
+// Each unit is alerted independently, so loading several must produce a series
+// per unit rather than one merged series.
+func TestRecordUnitLoaded_SeedsEachUnitSeparately(t *testing.T) {
+	tel, reader := newRecordingTelemetry(t)
+	ctx := context.Background()
+
+	for _, unit := range []string{"chainlink", "chronicle", "redstone"} {
+		tel.RecordUnitLoaded(ctx, unit)
+	}
+	tel.RecordUnitSuccess(ctx, "chronicle")
+
+	got := testutil.CollectCounterByAttr(t, reader, "oracle.unit.passes", "oracle.name")
+	want := map[string]int64{"chainlink": 0, "chronicle": 1, "redstone": 0}
+	for unit, wantValue := range want {
+		value, ok := got[unit]
+		if !ok {
+			t.Errorf("oracle.unit.passes missing the %q series", unit)
+			continue
+		}
+		if value != wantValue {
+			t.Errorf("oracle.unit.passes{oracle_name=%q} = %d, want %d", unit, value, wantValue)
+		}
+	}
 }

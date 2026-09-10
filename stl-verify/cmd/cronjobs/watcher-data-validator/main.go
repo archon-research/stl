@@ -17,6 +17,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/services/data_validator"
 )
 
@@ -55,7 +56,7 @@ func main() {
 	}
 }
 
-func setupRunner(_ context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
+func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
 	chainID, err := chainutil.RequireChainID()
 	if err != nil {
 		return nil, err
@@ -63,6 +64,10 @@ func setupRunner(_ context.Context, deps temporal.Dependencies) (temporal.Runner
 
 	etherscanAPIKey, err := env.Require("ETHERSCAN_API_KEY")
 	if err != nil {
+		return nil, err
+	}
+
+	if _, _, err := writerrun.Open(ctx, deps.Pool); err != nil {
 		return nil, err
 	}
 

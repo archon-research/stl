@@ -325,9 +325,9 @@ export function BottomPanel({
               <ErrorState
                 title="Unable to load receipt tokens"
                 description="An error occurred while fetching receipt token data."
-                errorMessage={errorMessage ?? undefined}
                 tone="critical"
                 size="inline"
+                {...(errorMessage !== null && { errorMessage })}
               />
             }
             emptyView={

@@ -24,10 +24,11 @@ type MorphoRepository struct {
 	pool    *pgxpool.Pool
 	logger  *slog.Logger
 	buildID buildregistry.BuildID
+	runID   buildregistry.RunID
 }
 
 // NewMorphoRepository creates a new PostgreSQL Morpho repository.
-func NewMorphoRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildregistry.BuildID) (*MorphoRepository, error) {
+func NewMorphoRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildregistry.BuildID, runID buildregistry.RunID) (*MorphoRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
 	}
@@ -38,6 +39,7 @@ func NewMorphoRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildr
 		pool:    pool,
 		logger:  logger,
 		buildID: buildID,
+		runID:   runID,
 	}, nil
 }
 
@@ -51,12 +53,12 @@ func (r *MorphoRepository) GetOrCreateMarket(ctx context.Context, tx pgx.Tx, mar
 	var id int64
 	// The no-op SET is required so that DO UPDATE ... RETURNING id works on conflict.
 	err = tx.QueryRow(ctx,
-		`INSERT INTO morpho_market (chain_id, protocol_id, market_id, loan_token_id, collateral_token_id, oracle_address, irm_address, lltv, created_at_block)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		`INSERT INTO morpho_market (chain_id, protocol_id, market_id, loan_token_id, collateral_token_id, oracle_address, irm_address, lltv, created_at_block, run_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		 ON CONFLICT (chain_id, market_id) DO UPDATE SET protocol_id = EXCLUDED.protocol_id
 		 RETURNING id`,
 		market.ChainID, market.ProtocolID, market.MarketID.Bytes(), market.LoanTokenID, market.CollateralTokenID,
-		market.OracleAddress.Bytes(), market.IrmAddress.Bytes(), lltv, market.CreatedAtBlock,
+		market.OracleAddress.Bytes(), market.IrmAddress.Bytes(), lltv, market.CreatedAtBlock, r.runID,
 	).Scan(&id)
 
 	if err != nil {
@@ -153,12 +155,12 @@ func (r *MorphoRepository) SaveMarketState(ctx context.Context, tx pgx.Tx, state
 	// snapshot (eth_call reads end-of-block state), so the first insert captures
 	// the correct state. Reorgs use a different block_version, so they insert cleanly.
 	_, err = tx.Exec(ctx,
-		`INSERT INTO morpho_market_state (morpho_market_id, block_number, block_version, timestamp, total_supply_assets, total_supply_shares, total_borrow_assets, total_borrow_shares, last_update, fee, prev_borrow_rate, interest_accrued, fee_shares, build_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		`INSERT INTO morpho_market_state (morpho_market_id, block_number, block_version, timestamp, total_supply_assets, total_supply_shares, total_borrow_assets, total_borrow_shares, last_update, fee, prev_borrow_rate, interest_accrued, fee_shares, build_id, run_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		 ON CONFLICT (morpho_market_id, block_number, block_version, processing_version, timestamp) DO NOTHING`,
 		state.MorphoMarketID, state.BlockNumber, state.BlockVersion, state.BlockTimestamp,
 		totalSupplyAssets, totalSupplyShares, totalBorrowAssets, totalBorrowShares,
-		state.LastUpdate, fee, prevBorrowRate, interestAccrued, feeShares, int(r.buildID),
+		state.LastUpdate, fee, prevBorrowRate, interestAccrued, feeShares, int(r.buildID), r.runID,
 	)
 	if err != nil {
 		return fmt.Errorf("saving morpho market state: %w", err)
@@ -190,11 +192,11 @@ func (r *MorphoRepository) SaveMarketPosition(ctx context.Context, tx pgx.Tx, po
 	}
 
 	_, err = tx.Exec(ctx,
-		`INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets, build_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		`INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets, build_id, run_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		 ON CONFLICT (user_id, morpho_market_id, block_number, block_version, processing_version, timestamp) DO NOTHING`,
 		position.UserID, position.MorphoMarketID, position.BlockNumber, position.BlockVersion, position.Timestamp,
-		supplyShares, borrowShares, collateral, supplyAssets, borrowAssets, int(r.buildID),
+		supplyShares, borrowShares, collateral, supplyAssets, borrowAssets, int(r.buildID), r.runID,
 	)
 	if err != nil {
 		return fmt.Errorf("saving morpho market position: %w", err)
@@ -211,13 +213,13 @@ func (r *MorphoRepository) SaveMarketPosition(ctx context.Context, tx pgx.Tx, po
 func (r *MorphoRepository) GetOrCreateVault(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault) (int64, error) {
 	var id int64
 	err := tx.QueryRow(ctx,
-		`INSERT INTO morpho_vault (chain_id, protocol_id, address, name, symbol, asset_token_id, vault_version, created_at_block)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		`INSERT INTO morpho_vault (chain_id, protocol_id, address, name, symbol, asset_token_id, vault_version, created_at_block, run_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 ON CONFLICT (chain_id, address) DO UPDATE SET
 		     created_at_block = LEAST(morpho_vault.created_at_block, EXCLUDED.created_at_block)
 		 RETURNING id`,
 		vault.ChainID, vault.ProtocolID, vault.Address, vault.Name, vault.Symbol,
-		vault.AssetTokenID, vault.VaultVersion, vault.CreatedAtBlock,
+		vault.AssetTokenID, vault.VaultVersion, vault.CreatedAtBlock, r.runID,
 	).Scan(&id)
 
 	if err != nil {
@@ -302,11 +304,11 @@ func (r *MorphoRepository) SaveVaultState(ctx context.Context, tx pgx.Tx, state 
 	}
 
 	_, err = tx.Exec(ctx,
-		`INSERT INTO morpho_vault_state (morpho_vault_id, block_number, block_version, timestamp, total_assets, total_shares, fee_shares, new_total_assets, previous_total_assets, management_fee_shares, build_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		`INSERT INTO morpho_vault_state (morpho_vault_id, block_number, block_version, timestamp, total_assets, total_shares, fee_shares, new_total_assets, previous_total_assets, management_fee_shares, build_id, run_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		 ON CONFLICT (morpho_vault_id, block_number, block_version, processing_version, timestamp) DO NOTHING`,
 		state.MorphoVaultID, state.BlockNumber, state.BlockVersion, state.BlockTimestamp,
-		totalAssets, totalShares, feeShares, newTotalAssets, previousTotalAssets, managementFeeShares, int(r.buildID),
+		totalAssets, totalShares, feeShares, newTotalAssets, previousTotalAssets, managementFeeShares, int(r.buildID), r.runID,
 	)
 	if err != nil {
 		return fmt.Errorf("saving morpho vault state: %w", err)
@@ -326,11 +328,11 @@ func (r *MorphoRepository) SaveVaultPosition(ctx context.Context, tx pgx.Tx, pos
 	}
 
 	_, err = tx.Exec(ctx,
-		`INSERT INTO morpho_vault_position (user_id, morpho_vault_id, block_number, block_version, timestamp, shares, assets, build_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		`INSERT INTO morpho_vault_position (user_id, morpho_vault_id, block_number, block_version, timestamp, shares, assets, build_id, run_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 ON CONFLICT (user_id, morpho_vault_id, block_number, block_version, processing_version, timestamp) DO NOTHING`,
 		position.UserID, position.MorphoVaultID, position.BlockNumber, position.BlockVersion, position.Timestamp,
-		shares, assets, int(r.buildID),
+		shares, assets, int(r.buildID), r.runID,
 	)
 	if err != nil {
 		return fmt.Errorf("saving morpho vault position: %w", err)
@@ -392,11 +394,11 @@ func (r *MorphoRepository) ObserveAdapterMembership(ctx context.Context, tx pgx.
 func (r *MorphoRepository) adapterIdentityID(ctx context.Context, tx pgx.Tx, identity *entity.MorphoAdapterIdentity) (int64, error) {
 	var id int64
 	err := tx.QueryRow(ctx,
-		`INSERT INTO morpho_adapter (morpho_vault_id, address, asset_token_id, build_id)
-		 VALUES ($1, $2, $3, $4)
+		`INSERT INTO morpho_adapter (morpho_vault_id, address, asset_token_id, build_id, run_id)
+		 VALUES ($1, $2, $3, $4, $5)
 		 ON CONFLICT (morpho_vault_id, address) DO NOTHING
 		 RETURNING id`,
-		identity.MorphoVaultID, identity.Address, identity.AssetTokenID, int(r.buildID),
+		identity.MorphoVaultID, identity.Address, identity.AssetTokenID, int(r.buildID), r.runID,
 	).Scan(&id)
 	if err == nil {
 		return id, nil
@@ -434,29 +436,55 @@ func (r *MorphoRepository) assertionAppends(ctx context.Context, tx pgx.Tx, adap
 	if err != nil {
 		return false, err
 	}
-	return known == nil || *known != m.IsMember, nil
+	if known == nil || known.isMember != m.IsMember {
+		return true, nil
+	}
+	return reclassifies(known.adapterType, m.AdapterType), nil
+}
+
+// reclassifies reports whether an assertion's probe answers the classification question
+// differently from the log. Neither a missing type — a replayed Allocate skips the probe
+// when the adapter is already a member — nor an Unknown one retracts what the log holds:
+// classifyAdapter answers Unknown for anything but exactly one marker, so a marker added
+// for a future family would otherwise flip a classified adapter to 99, and UPDATE is
+// revoked on the table, so that row would be its classification forever.
+func reclassifies(known, asserted *entity.MorphoAdapterType) bool {
+	if asserted == nil || *asserted == entity.MorphoAdapterTypeUnknown {
+		return false
+	}
+	return known == nil || *known != *asserted
+}
+
+type knownMembership struct {
+	isMember    bool
+	adapterType *entity.MorphoAdapterType
 }
 
 // membershipAt returns the answer the log already gives for an adapter at a block
 // position — the latest observation at or below it — or nil when the log says nothing
 // there yet.
-func (r *MorphoRepository) membershipAt(ctx context.Context, tx pgx.Tx, adapterID int64, at entity.BlockPosition) (*bool, error) {
+func (r *MorphoRepository) membershipAt(ctx context.Context, tx pgx.Tx, adapterID int64, at entity.BlockPosition) (*knownMembership, error) {
 	var isMember bool
+	var adapterType *int16
 	err := tx.QueryRow(ctx,
-		`SELECT is_member FROM morpho_adapter_membership
+		`SELECT is_member, adapter_type FROM morpho_adapter_membership
 		 WHERE morpho_adapter_id = $1
-		   AND (block_number, block_version, log_index) <= ($2, $3, $4)
-		 ORDER BY block_number DESC, block_version DESC, log_index DESC, processing_version DESC
-		 LIMIT 1`,
+		   AND (block_number, block_version, log_index) <= ($2, $3, $4)`+latestMembershipOrder,
 		adapterID, at.BlockNumber, at.BlockVersion, at.LogIndex,
-	).Scan(&isMember)
+	).Scan(&isMember, &adapterType)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading adapter %d membership as of block %d: %w", adapterID, at.BlockNumber, err)
 	}
-	return &isMember, nil
+
+	known := knownMembership{isMember: isMember}
+	if adapterType != nil {
+		classified := entity.MorphoAdapterType(*adapterType)
+		known.adapterType = &classified
+	}
+	return &known, nil
 }
 
 // appendMembership writes one observation and reports whether a row was actually added.
@@ -473,11 +501,11 @@ func (r *MorphoRepository) appendMembership(ctx context.Context, tx pgx.Tx, adap
 	tag, err := tx.Exec(ctx,
 		`INSERT INTO morpho_adapter_membership
 		     (morpho_adapter_id, block_number, block_version, log_index, timestamp,
-		      is_member, adapter_type, observed_via, build_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		      is_member, adapter_type, observed_via, build_id, run_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		 ON CONFLICT (morpho_adapter_id, block_number, block_version, log_index, processing_version) DO NOTHING`,
 		adapterID, m.BlockNumber, m.BlockVersion, m.LogIndex, m.Timestamp,
-		m.IsMember, adapterType, string(m.ObservedVia), int(r.buildID),
+		m.IsMember, adapterType, string(m.ObservedVia), int(r.buildID), r.runID,
 	)
 	if err != nil {
 		return false, fmt.Errorf("recording adapter %d membership at block %d: %w", adapterID, m.BlockNumber, err)
@@ -492,8 +520,7 @@ func (r *MorphoRepository) appendMembership(ctx context.Context, tx pgx.Tx, adap
 // id IS the (vault, address) key — it is created before the lock is taken, and creating it
 // needs no lock of its own (ON CONFLICT DO NOTHING makes that race a no-op) — and the key
 // is deliberately block-free, so every decision about one adapter serializes regardless of
-// the block it carries. Only one key is ever held, so the sorted-order rule has nothing to
-// order.
+// the block it carries.
 func lockAdapterKey(ctx context.Context, tx pgx.Tx, adapterID int64) error {
 	lockKey := fmt.Sprintf("morpho_adapter|%d", adapterID)
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lockKey); err != nil {
@@ -608,10 +635,10 @@ func (r *MorphoRepository) SaveAdapterState(ctx context.Context, tx pgx.Tx, stat
 	// (20260821_120000_morpho_adapter_state_version_function.sql). ON CONFLICT DO
 	// NOTHING dedupes same-build retries (see SaveMarketState for the rationale).
 	tag, err := tx.Exec(ctx,
-		`INSERT INTO morpho_adapter_state (morpho_adapter_id, block_number, block_version, timestamp, real_assets, processing_version, build_id)
-		 VALUES ($1, $2, $3, $4, $5, next_processing_version_morpho_adapter_state($1, $2, $3, $4, $6), $6)
+		`INSERT INTO morpho_adapter_state (morpho_adapter_id, block_number, block_version, timestamp, real_assets, processing_version, build_id, run_id)
+		 VALUES ($1, $2, $3, $4, $5, next_processing_version_morpho_adapter_state($1, $2, $3, $4, $6), $6, $7)
 		 ON CONFLICT (morpho_adapter_id, block_number, block_version, timestamp, processing_version) DO NOTHING`,
-		state.MorphoAdapterID, state.BlockNumber, state.BlockVersion, state.Timestamp, realAssets, int(r.buildID),
+		state.MorphoAdapterID, state.BlockNumber, state.BlockVersion, state.Timestamp, realAssets, int(r.buildID), r.runID,
 	)
 	if err != nil {
 		return false, fmt.Errorf("saving morpho adapter state: %w", err)
@@ -636,11 +663,11 @@ func (r *MorphoRepository) SaveVaultCap(ctx context.Context, tx pgx.Tx, vaultCap
 	}
 
 	tag, err := tx.Exec(ctx,
-		`INSERT INTO morpho_vault_cap (morpho_vault_id, cap_id, id_data, absolute_cap, relative_cap, block_number, block_version, timestamp, build_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		`INSERT INTO morpho_vault_cap (morpho_vault_id, cap_id, id_data, absolute_cap, relative_cap, block_number, block_version, timestamp, build_id, run_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		 ON CONFLICT (morpho_vault_id, cap_id, block_number, block_version, timestamp, processing_version) DO NOTHING`,
 		vaultCap.MorphoVaultID, vaultCap.CapID, vaultCap.IDData, absoluteCap, relativeCap,
-		vaultCap.BlockNumber, vaultCap.BlockVersion, vaultCap.Timestamp, int(r.buildID),
+		vaultCap.BlockNumber, vaultCap.BlockVersion, vaultCap.Timestamp, int(r.buildID), r.runID,
 	)
 	if err != nil {
 		return false, fmt.Errorf("saving morpho vault cap: %w", err)
@@ -668,12 +695,12 @@ func (r *MorphoRepository) SaveVaultFee(ctx context.Context, tx pgx.Tx, vaultFee
 	// dedupes same-build retries and same-block sibling fee events (see
 	// SaveVaultCap for the rationale).
 	tag, err := tx.Exec(ctx,
-		`INSERT INTO morpho_vault_fee (morpho_vault_id, performance_fee, management_fee, performance_fee_recipient, management_fee_recipient, block_number, block_version, timestamp, build_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		`INSERT INTO morpho_vault_fee (morpho_vault_id, performance_fee, management_fee, performance_fee_recipient, management_fee_recipient, block_number, block_version, timestamp, build_id, run_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		 ON CONFLICT (morpho_vault_id, block_number, block_version, timestamp, processing_version) DO NOTHING`,
 		vaultFee.MorphoVaultID, performanceFee, managementFee,
 		vaultFee.PerformanceFeeRecipient, vaultFee.ManagementFeeRecipient,
-		vaultFee.BlockNumber, vaultFee.BlockVersion, vaultFee.Timestamp, int(r.buildID),
+		vaultFee.BlockNumber, vaultFee.BlockVersion, vaultFee.Timestamp, int(r.buildID), r.runID,
 	)
 	if err != nil {
 		return false, fmt.Errorf("saving morpho vault fee: %w", err)

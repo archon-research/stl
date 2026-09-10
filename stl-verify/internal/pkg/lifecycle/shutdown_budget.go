@@ -13,6 +13,7 @@ const ShutdownTimeout = 40 * time.Second
 const ShutdownTailBudget = 45 * time.Second
 
 // PodTerminationGracePeriod mirrors terminationGracePeriodSeconds on every Go
-// worker Deployment: past it the kubelet SIGKILLs. No test can see those
-// manifests, so a raise here must reach the cluster before the image reading it.
+// worker Deployment: past it the kubelet SIGKILLs. shutdown_manifest_test.go
+// holds the manifests to it; a raise here still has to reach the cluster before
+// the image reading it.
 const PodTerminationGracePeriod = 90 * time.Second

@@ -25,12 +25,13 @@ type FluidVaultRepository struct {
 	pool      *pgxpool.Pool
 	logger    *slog.Logger
 	buildID   buildregistry.BuildID
+	runID     buildregistry.RunID
 	batchSize int
 }
 
 // NewFluidVaultRepository creates a new PostgreSQL Fluid vault repository.
 // If batchSize is <= 0, a default batch size of 1000 is used.
-func NewFluidVaultRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildregistry.BuildID, batchSize int) (*FluidVaultRepository, error) {
+func NewFluidVaultRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildregistry.BuildID, runID buildregistry.RunID, batchSize int) (*FluidVaultRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
 	}
@@ -44,6 +45,7 @@ func NewFluidVaultRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID bu
 		pool:      pool,
 		logger:    logger,
 		buildID:   buildID,
+		runID:     runID,
 		batchSize: batchSize,
 	}, nil
 }
@@ -69,11 +71,11 @@ func (r *FluidVaultRepository) RecordVaults(ctx context.Context, tx pgx.Tx, vaul
 	batch := &pgx.Batch{}
 	for _, v := range sorted {
 		batch.Queue(
-			`INSERT INTO fluid_vault (chain_id, protocol_id, address, vault_type, collateral_token_id, debt_token_id, created_at_block)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7)
+			`INSERT INTO fluid_vault (chain_id, protocol_id, address, vault_type, collateral_token_id, debt_token_id, created_at_block, run_id)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 			 ON CONFLICT (chain_id, address) DO UPDATE SET id = fluid_vault.id
 			 RETURNING id, protocol_id, vault_type, collateral_token_id, debt_token_id, created_at_block`,
-			v.ChainID, v.ProtocolID, v.Address, v.VaultType, v.CollateralTokenID, v.DebtTokenID, v.CreatedAtBlock,
+			v.ChainID, v.ProtocolID, v.Address, v.VaultType, v.CollateralTokenID, v.DebtTokenID, v.CreatedAtBlock, r.runID,
 		)
 	}
 
@@ -163,9 +165,9 @@ func (r *FluidVaultRepository) SaveVaultStates(ctx context.Context, tx pgx.Tx, s
 }
 
 func (r *FluidVaultRepository) saveVaultStateBatch(ctx context.Context, tx pgx.Tx, states []*entity.FluidVaultState) (int64, error) {
-	const cols = 11
+	const cols = 12
 	var sb strings.Builder
-	sb.WriteString(`INSERT INTO fluid_vault_state (fluid_vault_id, block_number, block_version, block_timestamp, total_collateral, total_debt, supply_exchange_price, borrow_exchange_price, supply_rate, borrow_rate, build_id) VALUES `)
+	sb.WriteString(`INSERT INTO fluid_vault_state (fluid_vault_id, block_number, block_version, block_timestamp, total_collateral, total_debt, supply_exchange_price, borrow_exchange_price, supply_rate, borrow_rate, build_id, run_id) VALUES `)
 
 	args := make([]any, 0, len(states)*cols)
 	for i, s := range states {
@@ -181,7 +183,7 @@ func (r *FluidVaultRepository) saveVaultStateBatch(ctx context.Context, tx pgx.T
 		writeValuesPlaceholders(&sb, i, cols)
 		args = append(args, s.FluidVaultID, s.BlockNumber, s.BlockVersion, s.Timestamp,
 			totalCollateral, totalDebt, optionalNumeric(s.SupplyExchangePrice), optionalNumeric(s.BorrowExchangePrice),
-			optionalNumeric(s.SupplyRate), optionalNumeric(s.BorrowRate), int(r.buildID))
+			optionalNumeric(s.SupplyRate), optionalNumeric(s.BorrowRate), int(r.buildID), r.runID)
 	}
 	sb.WriteString(` ON CONFLICT (fluid_vault_id, block_number, block_version, block_timestamp, processing_version) DO NOTHING`)
 

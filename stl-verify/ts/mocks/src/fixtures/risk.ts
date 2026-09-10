@@ -120,10 +120,13 @@ const GROVE_PER_ALLOCATION: readonly AllocationRiskCapital[] =
 
 type PerChainRow = readonly [
   proxy_address: ChainRiskCapital['proxy_address'],
-  chain: ChainRiskCapital['chain'],
-  exposure_usd: ChainRiskCapital['exposure_usd'],
-  required_risk_capital_usd: ChainRiskCapital['required_risk_capital_usd'],
-  allocation_count: ChainRiskCapital['allocation_count'],
+  chain: Exclude<ChainRiskCapital['chain'], undefined>,
+  exposure_usd: Exclude<ChainRiskCapital['exposure_usd'], undefined>,
+  required_risk_capital_usd: Exclude<
+    ChainRiskCapital['required_risk_capital_usd'],
+    undefined
+  >,
+  allocation_count: Exclude<ChainRiskCapital['allocation_count'], undefined>,
 ];
 
 function perChain(rows: readonly PerChainRow[]): ChainRiskCapital[] {
@@ -470,14 +473,15 @@ export function toCompositeRiskCapital(
     reference_prime_exposure_usd: reference.prime_exposure_usd,
     reference_prime_required_risk_capital_usd:
       reference.prime_required_risk_capital_usd,
-    reference_total_risk_capital_usd: reference.total_risk_capital_usd,
-    reference_prime_encumbrance_ratio: reference.prime_encumbrance_ratio,
+    reference_total_risk_capital_usd: reference.total_risk_capital_usd ?? null,
+    reference_prime_encumbrance_ratio:
+      reference.prime_encumbrance_ratio ?? null,
     // Sky reports these and STL models none of them, so the merged answer
     // carries them whole.
-    junior_risk_capital_usd: reference.junior_risk_capital_usd,
-    senior_risk_capital_usd: reference.senior_risk_capital_usd,
-    exposure_share: reference.exposure_share,
-    reference_synced_at: reference.reference_synced_at,
+    junior_risk_capital_usd: reference.junior_risk_capital_usd ?? null,
+    senior_risk_capital_usd: reference.senior_risk_capital_usd ?? null,
+    exposure_share: reference.exposure_share ?? null,
+    reference_synced_at: reference.reference_synced_at ?? null,
   };
 }
 
@@ -512,7 +516,7 @@ export function toReferenceRiskCapital(
     exposure_usd: primeExposureUsd,
     required_risk_capital_usd: primeRequiredRiskCapitalUsd,
     modeled_exposure_usd: self.prime_modeled_exposure_usd,
-    encumbrance_ratio: self.prime_encumbrance_ratio,
+    encumbrance_ratio: self.prime_encumbrance_ratio ?? null,
     junior_risk_capital_usd: usdFigure(junior),
     senior_risk_capital_usd: usdFigure(senior),
     internal_junior_risk_capital_usd: usdFigure(juniorInternal),

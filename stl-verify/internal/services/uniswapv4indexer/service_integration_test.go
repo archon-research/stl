@@ -119,7 +119,7 @@ func setupV4Integration(t *testing.T) *v4IntegrationFixture {
 		Pools:       pools,
 		Multicaller: mc,
 		Repo:        repo,
-		EventWriter: dexconsumer.NewProtocolEventWriter(rows[0].ProtocolID, postgres.NewEventRepository(nil, 1)),
+		EventWriter: dexconsumer.NewProtocolEventWriter(rows[0].ProtocolID, postgres.NewEventRepository(nil, 1, 1)),
 		TxManager:   txMgr,
 		ChainID:     testChainID,
 		Logger:      testLogger(),

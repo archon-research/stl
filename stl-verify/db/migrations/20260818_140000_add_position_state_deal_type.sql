@@ -20,8 +20,11 @@ COMMENT ON COLUMN position_state.deal_type IS 'Derived, nullable. Deal type of T
 CREATE TABLE IF NOT EXISTS position_projection_run (
     projection      text        NOT NULL,
     created_at      timestamptz NOT NULL DEFAULT clock_timestamp(),
-    build_id        integer     NOT NULL,
-    block_timestamp timestamptz,
+    build_id          integer     NOT NULL,
+    block_timestamp   timestamptz,
+    rows_emitted      bigint      NOT NULL,
+    rows_appended     bigint      NOT NULL,
+    positions_refused integer     NOT NULL,
     CONSTRAINT position_projection_run_pkey PRIMARY KEY (projection, created_at)
 );
 
@@ -29,11 +32,48 @@ COMMENT ON TABLE position_projection_run IS '[Operational] One row per COMPLETED
 COMMENT ON COLUMN position_projection_run.projection IS 'Roles: PK. The projection view''s canonical name, as stamped on position_state.projection.';
 COMMENT ON COLUMN position_projection_run.created_at IS 'Roles: PK. When the run completed (clock time, so two runs in one transaction are two rows). UTC.';
 COMMENT ON COLUMN position_projection_run.build_id IS 'Roles: Audit. build_registry.id of the run (0 = pre-tracking).';
-COMMENT ON COLUMN position_projection_run.block_timestamp IS 'Roles: Derived. Latest block_timestamp the projection emitted in this run; NULL when it emitted nothing, which is still a completed sweep. Comparable across on-chain and off-chain observations, unlike block_number.';
+COMMENT ON COLUMN position_projection_run.block_timestamp IS 'Roles: Derived. Latest block_timestamp among the observations this run accepted; NULL when it accepted nothing, which is still a completed sweep. Comparable across on-chain and off-chain observations, unlike block_number.';
+COMMENT ON COLUMN position_projection_run.rows_emitted IS 'Roles: Audit. Observations the projection emitted this run after closure and before any position was withheld. Compare with rows_appended and positions_refused to reconcile a run.';
+COMMENT ON COLUMN position_projection_run.rows_appended IS 'Roles: Audit. Observations this run appended to position_state.';
+COMMENT ON COLUMN position_projection_run.positions_refused IS 'Roles: Audit. Positions whose new observations this run WITHHELD because a higher block carried an earlier instant; each is in position_projection_refusal. Non-zero means the projection or its source needs attention, while every other position kept landing.';
 
 GRANT SELECT ON position_projection_run TO stl_readonly;
 GRANT SELECT, INSERT ON position_projection_run TO stl_readwrite;
 REVOKE UPDATE, DELETE ON position_projection_run FROM stl_readwrite;
+
+-- Data conflicts are recorded here and the run continues; only view bugs (NULLs, wrong types, a
+-- double-emitted key, a negative quantity) still abort a run. A wedge that refused every later run of
+-- a projection over one position's bad pair had no repair path: position_state has no update channel.
+CREATE TABLE IF NOT EXISTS position_projection_refusal (
+    projection         text        NOT NULL,
+    position_id        bytea       NOT NULL,
+    block_number       bigint      NOT NULL,
+    block_version      integer     NOT NULL,
+    processing_version integer     NOT NULL,
+    reason             text        NOT NULL,
+    detail             text        NOT NULL,
+    build_id           integer     NOT NULL,
+    created_at         timestamptz NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT position_projection_refusal_pkey
+        PRIMARY KEY (projection, position_id, block_number, block_version, processing_version, reason),
+    CONSTRAINT position_projection_refusal_reason_chk
+        CHECK (reason IN ('block_time_inverts_height', 'deal_type_drift', 'observation_drift'))
+);
+
+COMMENT ON TABLE position_projection_refusal IS '[Operational] One row per observation a materialize_position_projection() run could not apply, keyed on the observation and the reason, so a refusal that persists across runs is one row and not one per run. block_time_inverts_height: the position''s NEW observations were withheld this run because a higher block carried an earlier instant, within the batch or against stored history, and the rest of the batch continued. deal_type_drift and observation_drift: a stored observation key was re-emitted with a different deal_type, or a different block_timestamp or quantity; the stored row is kept and nothing is applied, since a real correction bumps block_version or processing_version. Read with position_projection_run.positions_refused for the per-run signal. Plain table: bounded by the number of distinct refused observations, so no compression or tiering.';
+COMMENT ON COLUMN position_projection_refusal.projection IS 'Roles: PK. The projection view''s canonical name, as on position_projection_run.';
+COMMENT ON COLUMN position_projection_refusal.position_id IS 'Roles: PK. The refused position; it may have no row in position_state yet.';
+COMMENT ON COLUMN position_projection_refusal.block_number IS 'Roles: PK. The refused observation''s block.';
+COMMENT ON COLUMN position_projection_refusal.block_version IS 'Roles: PK. The refused observation''s reorg version.';
+COMMENT ON COLUMN position_projection_refusal.processing_version IS 'Roles: PK. The refused observation''s processing version.';
+COMMENT ON COLUMN position_projection_refusal.reason IS 'Roles: PK. block_time_inverts_height | deal_type_drift | observation_drift, per the table comment.';
+COMMENT ON COLUMN position_projection_refusal.detail IS 'Roles: Audit. The instrument_key, holder_id and the values in conflict, so the row can be acted on without joining the spine.';
+COMMENT ON COLUMN position_projection_refusal.build_id IS 'Roles: Audit. build_registry.id of the run that first recorded it (0 = pre-tracking).';
+COMMENT ON COLUMN position_projection_refusal.created_at IS 'Roles: Audit. When first recorded (clock time). UTC.';
+
+GRANT SELECT ON position_projection_refusal TO stl_readonly;
+GRANT SELECT, INSERT ON position_projection_refusal TO stl_readwrite;
+REVOKE UPDATE, DELETE ON position_projection_refusal FROM stl_readwrite;
 
 COMMENT ON COLUMN position_state.block_number IS 'Roles: PK. Block height of the observation for an on-chain projection (chain_id set). For an OFF-CHAIN observation (chain_id NULL, a custody snapshot) it is floor(epoch seconds of block_timestamp), enforced by the materializer, and not a block on any chain.';
 
@@ -46,7 +86,7 @@ CREATE OR REPLACE FUNCTION materialize_position_projection(p_view regclass, p_bu
     SET search_path FROM CURRENT
     SET timescaledb.enable_tiered_reads = 'on'
     AS $fn$
-DECLARE n bigint; bad text; bad_qty text; bad_dt text; v_qualname text;
+DECLARE n bigint; bad text; bad_qty text; bad_dt text; v_qualname text; v_emitted bigint; v_refused integer := 0;
 BEGIN
     IF p_view IS NULL THEN
         RAISE EXCEPTION 'materialize_position_projection: p_view must not be NULL';
@@ -99,6 +139,8 @@ BEGIN
 
     DROP TABLE IF EXISTS pg_temp._mpp_src;
     DROP TABLE IF EXISTS pg_temp._mpp_new;
+    DROP TABLE IF EXISTS pg_temp._mpp_drift;
+    DROP TABLE IF EXISTS pg_temp._mpp_refused;
     EXECUTE format($q$
         CREATE TEMP TABLE _mpp_src ON COMMIT DROP AS
         SELECT public.position_id(chain_id, protocol_id, instrument_key, holder_id) AS position_id,
@@ -156,50 +198,88 @@ BEGIN
     END IF;
 
     -- Closure, applied once here rather than per view: keep every positive row, the first zero after a
-    -- positive (the close) and a zero whose predecessor is a sibling version of the same block (a reorg
-    -- or reprocess of the close). Leading zeros and repeated zeros at later blocks are not observations.
+    -- positive (the close) and a zero whose predecessor is a sibling version of the same block. Leading
+    -- zeros and repeated zeros are not observations. Judged against stored history too, not the batch alone.
     DELETE FROM pg_temp._mpp_src s USING (
-        SELECT ctid AS rid, quantity,
-               lag(quantity)     OVER w AS prev_qty,
-               lag(block_number) OVER w AS prev_bn,
-               coalesce(bool_or(quantity > 0) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), false) AS opened_before
-        FROM pg_temp._mpp_src
-        WINDOW w AS (PARTITION BY position_id ORDER BY block_number, block_version, processing_version)) k
+        SELECT m.ctid AS rid, m.quantity,
+               coalesce(lag(m.quantity)     OVER w, h.prev_qty) AS prev_qty,
+               coalesce(lag(m.block_number) OVER w, h.prev_bn)  AS prev_bn,
+               coalesce(bool_or(m.quantity > 0) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), false)
+                 OR coalesce(h.opened_before, false) AS opened_before
+        FROM pg_temp._mpp_src m
+        -- The stored row at or before the position's first batch row in full key order, and whether it had
+        -- opened by then. A first row that is itself stored is a re-emit, suppressed on insert, so the STORED
+        -- value is what its siblings are judged against; a lone close would otherwise read as a leading zero.
+        LEFT JOIN (
+            SELECT b.position_id,
+                   (SELECT p.quantity FROM public.position_state p
+                     WHERE p.position_id = b.position_id
+                       AND (p.block_number, p.block_version, p.processing_version) <= (b.bn, b.bv, b.pv)
+                     ORDER BY p.block_number DESC, p.block_version DESC, p.processing_version DESC LIMIT 1) AS prev_qty,
+                   (SELECT p.block_number FROM public.position_state p
+                     WHERE p.position_id = b.position_id
+                       AND (p.block_number, p.block_version, p.processing_version) <= (b.bn, b.bv, b.pv)
+                     ORDER BY p.block_number DESC, p.block_version DESC, p.processing_version DESC LIMIT 1) AS prev_bn,
+                   EXISTS (SELECT 1 FROM public.position_state p
+                            WHERE p.position_id = b.position_id AND p.quantity > 0
+                              AND (p.block_number, p.block_version, p.processing_version) <= (b.bn, b.bv, b.pv)) AS opened_before
+            FROM (SELECT DISTINCT ON (position_id) position_id,
+                         block_number AS bn, block_version AS bv, processing_version AS pv
+                  FROM pg_temp._mpp_src
+                  ORDER BY position_id, block_number, block_version, processing_version) b) h
+          ON h.position_id = m.position_id
+        WINDOW w AS (PARTITION BY m.position_id ORDER BY m.block_number, m.block_version, m.processing_version)) k
     WHERE s.ctid = k.rid
-      -- coalesce: on a position's first row prev_qty is NULL and a NULL predicate would spare the row
+      -- coalesce: with no predecessor anywhere prev_qty is NULL and a NULL predicate would spare the row
       AND NOT coalesce(k.quantity > 0 OR k.prev_qty > 0 OR (k.opened_before AND k.prev_bn = s.block_number), false);
     ANALYZE pg_temp._mpp_src;
+    SELECT count(*) INTO v_emitted FROM pg_temp._mpp_src;
 
-    -- One pass over the stored keys this batch re-emits. Timestamp and quantity drift are kept-stored
-    -- and warned; deal_type drift cannot be applied (no UPDATE channel), so it raises after both warnings.
-    SELECT string_agg(msg, '; ') FILTER (WHERE ts_drift),
-           string_agg(msg, '; ') FILTER (WHERE qty_drift),
-           string_agg(msg || format(' stored=%s emitted=%s', coalesce(stored_dt, 'NULL'), coalesce(emitted_dt, 'NULL')), '; ')
-               FILTER (WHERE dt_drift)
-      INTO bad, bad_qty, bad_dt
-    FROM (
-        SELECT format('pos=%s bn=%s bv=%s pv=%s', encode(s.position_id, 'hex'),
-                      s.block_number, s.block_version, s.processing_version) AS msg,
+    -- One pass over the stored keys this batch re-emits. Stored rows are kept and nothing is applied:
+    -- a real correction bumps block_version/processing_version. Every drift is recorded, so the fork
+    -- between view and spine is a queryable row rather than a log line, and the run continues.
+    CREATE TEMP TABLE _mpp_drift ON COMMIT DROP AS
+        SELECT s.position_id, s.block_number, s.block_version, s.processing_version, s.instrument_key, s.holder_id,
                p.block_timestamp <> s.block_timestamp        AS ts_drift,
                p.quantity IS DISTINCT FROM s.quantity        AS qty_drift,
                p.deal_type IS DISTINCT FROM s.deal_type      AS dt_drift,
-               p.deal_type AS stored_dt, s.deal_type AS emitted_dt
+               p.block_timestamp AS stored_ts,  s.block_timestamp AS emitted_ts,
+               p.quantity        AS stored_qty, s.quantity        AS emitted_qty,
+               p.deal_type       AS stored_dt,  s.deal_type       AS emitted_dt
         FROM pg_temp._mpp_src s
         JOIN public.position_state p ON p.position_id = s.position_id AND p.block_number = s.block_number
              AND p.block_version = s.block_version AND p.processing_version = s.processing_version
         WHERE p.block_timestamp <> s.block_timestamp
            OR p.quantity IS DISTINCT FROM s.quantity
-           OR p.deal_type IS DISTINCT FROM s.deal_type
-        ORDER BY s.position_id, s.block_number, s.block_version, s.processing_version
-        LIMIT 5) z;
+           OR p.deal_type IS DISTINCT FROM s.deal_type;
+    INSERT INTO public.position_projection_refusal
+        (projection, position_id, block_number, block_version, processing_version, reason, detail, build_id)
+    SELECT v_qualname, position_id, block_number, block_version, processing_version, r.reason,
+           format('ik=%s holder=%s stored ts=%s qty=%s dt=%s; emitted ts=%s qty=%s dt=%s', instrument_key, holder_id,
+                  stored_ts, stored_qty, coalesce(stored_dt, 'NULL'), emitted_ts, emitted_qty, coalesce(emitted_dt, 'NULL')),
+           p_build_id
+    FROM pg_temp._mpp_drift d
+    CROSS JOIN LATERAL (SELECT 'deal_type_drift' AS reason WHERE d.dt_drift
+                        UNION ALL SELECT 'observation_drift' WHERE d.ts_drift OR d.qty_drift) r
+    ON CONFLICT DO NOTHING;
+    SELECT string_agg(msg, '; ') FILTER (WHERE ts_drift),
+           string_agg(msg, '; ') FILTER (WHERE qty_drift),
+           string_agg(msg || format(' stored=%s emitted=%s', coalesce(stored_dt, 'NULL'), coalesce(emitted_dt, 'NULL')), '; ')
+               FILTER (WHERE dt_drift)
+      INTO bad, bad_qty, bad_dt
+    FROM (SELECT format('pos=%s bn=%s bv=%s pv=%s', encode(position_id, 'hex'), block_number, block_version, processing_version) AS msg,
+                 ts_drift, qty_drift, dt_drift, stored_dt, emitted_dt
+          FROM pg_temp._mpp_drift
+          ORDER BY position_id, block_number, block_version, processing_version
+          LIMIT 5) z;
     IF bad IS NOT NULL THEN
-        RAISE WARNING 'projection % re-emits stored observations with a changed block_timestamp; stored rows kept (a real correction must bump block_version/processing_version): %', p_view, bad;
+        RAISE WARNING 'projection % re-emits stored observations with a changed block_timestamp; stored rows kept and recorded in position_projection_refusal (a real correction must bump block_version/processing_version): %', p_view, bad;
     END IF;
     IF bad_qty IS NOT NULL THEN
-        RAISE WARNING 'projection % re-emits stored observations with a changed quantity; stored rows kept (append-only: a real correction must bump block_version/processing_version): %', p_view, bad_qty;
+        RAISE WARNING 'projection % re-emits stored observations with a changed quantity; stored rows kept and recorded in position_projection_refusal (append-only: a real correction must bump block_version/processing_version): %', p_view, bad_qty;
     END IF;
     IF bad_dt IS NOT NULL THEN
-        RAISE EXCEPTION 'projection % re-emits stored observations with a different deal_type, which this function CANNOT apply: the insert is suppressed on the stored key and UPDATE is revoked; a real correction must bump block_version/processing_version: %', p_view, bad_dt;
+        RAISE WARNING 'projection % re-emits stored observations with a different deal_type; stored rows kept and recorded in position_projection_refusal, since the insert is suppressed on the stored key and UPDATE is revoked (a real correction must bump block_version/processing_version): %', p_view, bad_dt;
     END IF;
 
     -- Off-chain rows (chain_id NULL) carry block_number = floor(epoch of block_timestamp): the
@@ -222,9 +302,11 @@ BEGIN
                            WHERE p.position_id = s.position_id AND p.block_number = s.block_number
                              AND p.block_version = s.block_version AND p.processing_version = s.processing_version);
     ANALYZE pg_temp._mpp_new;
-    SELECT string_agg(msg, '; ') INTO bad FROM (
-        SELECT format('pos=%s bn=%s@%s vs bn=%s@%s', encode(w.position_id, 'hex'),
-                      w.block_number, w.block_timestamp, o.block_number, o.block_timestamp) AS msg
+    -- The offending POSITIONS, not the first five: their new observations are withheld this run and
+    -- recorded, and every other position lands. Aborting here refused the whole projection forever.
+    CREATE TEMP TABLE _mpp_refused ON COMMIT DROP AS
+        SELECT DISTINCT ON (w.position_id) w.position_id,
+               format('bn=%s@%s vs bn=%s@%s', w.block_number, w.block_timestamp, o.block_number, o.block_timestamp) AS detail
         FROM (SELECT position_id, block_number, block_timestamp,
                      lag(block_number)  OVER win AS prev_bn, lag(block_timestamp)  OVER win AS prev_ts,
                      lead(block_number) OVER win AS next_bn, lead(block_timestamp) OVER win AS next_ts
@@ -245,10 +327,23 @@ BEGIN
         ) o
         WHERE (w.block_number > o.block_number AND w.block_timestamp < o.block_timestamp)
            OR (w.block_number < o.block_number AND w.block_timestamp > o.block_timestamp)
-        ORDER BY w.position_id, w.block_number
-        LIMIT 5) z;
-    IF bad IS NOT NULL THEN
-        RAISE EXCEPTION 'projection % emits a higher block with an earlier block_timestamp for one position; the caches order by block and date by timestamp, so they would disagree: %', p_view, bad;
+        ORDER BY w.position_id, w.block_number;
+    INSERT INTO public.position_projection_refusal
+        (projection, position_id, block_number, block_version, processing_version, reason, detail, build_id)
+    SELECT v_qualname, s.position_id, s.block_number, s.block_version, s.processing_version, 'block_time_inverts_height',
+           format('ik=%s holder=%s %s', s.instrument_key, s.holder_id, r.detail), p_build_id
+    FROM pg_temp._mpp_src s
+    JOIN pg_temp._mpp_refused r USING (position_id)
+    WHERE NOT EXISTS (SELECT 1 FROM public.position_state p
+                       WHERE p.position_id = s.position_id AND p.block_number = s.block_number
+                         AND p.block_version = s.block_version AND p.processing_version = s.processing_version)
+    ON CONFLICT DO NOTHING;
+    SELECT count(*) INTO v_refused FROM pg_temp._mpp_refused;
+    IF v_refused > 0 THEN
+        SELECT string_agg(format('pos=%s %s', encode(position_id, 'hex'), detail), '; ') INTO bad
+          FROM (SELECT * FROM pg_temp._mpp_refused ORDER BY position_id LIMIT 5) z;
+        RAISE WARNING 'projection % emits a higher block with an earlier block_timestamp for % position(s); their new observations are withheld this run and recorded in position_projection_refusal, the rest of the batch continues (first 5): %', p_view, v_refused, bad;
+        DELETE FROM pg_temp._mpp_src s USING pg_temp._mpp_refused r WHERE s.position_id = r.position_id;
     END IF;
 
     SELECT format('position %s owned by %s', encode(p.position_id, 'hex'), p.projection) INTO bad
@@ -276,16 +371,19 @@ BEGIN
     ON CONFLICT (position_id, block_number, block_version, processing_version, block_timestamp) DO NOTHING;
     GET DIAGNOSTICS n = ROW_COUNT;
 
-    INSERT INTO public.position_projection_run (projection, build_id, block_timestamp)
-    SELECT v_qualname, p_build_id, max(block_timestamp) FROM pg_temp._mpp_src;
+    INSERT INTO public.position_projection_run
+        (projection, build_id, block_timestamp, rows_emitted, rows_appended, positions_refused)
+    SELECT v_qualname, p_build_id, max(block_timestamp), v_emitted, n, v_refused FROM pg_temp._mpp_src;
 
     DROP TABLE pg_temp._mpp_src;
     DROP TABLE pg_temp._mpp_new;
+    DROP TABLE pg_temp._mpp_drift;
+    DROP TABLE pg_temp._mpp_refused;
 
     RETURN n;
 END $fn$;
 
-COMMENT ON FUNCTION materialize_position_projection(regclass, integer) IS '[Operational] VEC-402..407 shared materializer: evaluate a per-protocol projection view ONCE into a temp table, validate it against the position_state column contract (each RAISE in the body names its own check), then apply closure (a position''s leading zeros and repeated zeros are not observations; the first zero after a positive and its same-block siblings are), APPEND the new observations and record the completed run in position_projection_run, all in one transaction. deal_type is copied through; the FK to ref_deal_type constrains the value. position_id is recomputed via position_id(); serialized per view by an advisory lock on the view''s canonical name. Idempotent; run out of band. Returns rows INSERTED.';
+COMMENT ON FUNCTION materialize_position_projection(regclass, integer) IS '[Operational] VEC-402..407 shared materializer: evaluate a per-protocol projection view ONCE into a temp table, validate it against the position_state column contract (each RAISE in the body names its own check), then apply closure against the batch and stored history together (a position''s leading zeros and repeated zeros are not observations; the first zero after a positive and its same-block siblings are, even when the batch carries only the close), APPEND the new observations and record the completed run with its counts in position_projection_run, all in one transaction. A view bug (NULLs, a wrong type, a double-emitted key, a negative quantity, a cross-view position) aborts the run; a data conflict does not: a position whose new observations invert block against instant is withheld this run, and a stored key re-emitted with a different value keeps the stored row, each recorded in position_projection_refusal and warned. deal_type is copied through; the FK to ref_deal_type constrains the value. position_id is recomputed via position_id(); serialized per view by an advisory lock on the view''s canonical name. Idempotent for a fixed source; run out of band. Returns rows INSERTED.';
 
 -- position_classification is retired: the classification lands on the observation, where a position
 -- that flips LOAN/BORROW can be represented; a mutable per-position copy cannot, and nothing wrote it.

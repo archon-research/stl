@@ -620,7 +620,7 @@ export function encumbranceSeverity(
  */
 // `timestamp` is what the synced cursor is keyed on, so it carries the bucket's
 // own instant rather than the formatted label: sibling cards bucket at different
-// resolutions, and only the instant means the same thing in all of them.
+// frequencies, and only the instant means the same thing in all of them.
 export function toChartSeries<T extends { bucket_start: string }>(
   buckets: readonly T[],
   read: (bucket: T) => number | null,
@@ -810,13 +810,20 @@ export function formatWadValue(
   try {
     const wei = BigInt(plain.split('.')[0] || '0');
     const wad = 10n ** 18n;
-    const whole = wei / wad;
-    const fraction = wei % wad;
+    // Sign is split off before the divide: BigInt truncates toward zero, so a
+    // negative wei leaves a negative remainder and composing the two gave
+    // "-1.-500000".
+    const negative = wei < 0n;
+    const magnitude = negative ? -wei : wei;
+    const whole = magnitude / wad;
+    const fraction = magnitude % wad;
     const fraction6 = ((fraction * 1_000_000n) / wad)
       .toString()
       .padStart(6, '0');
 
-    return formatTokenAmount(`${whole.toString()}.${fraction6}`);
+    return formatTokenAmount(
+      `${negative ? '-' : ''}${whole.toString()}.${fraction6}`,
+    );
   } catch {
     logging.warn(`Failed to parse WAD value: "${value}"`, {
       context: 'formatWadValue',
