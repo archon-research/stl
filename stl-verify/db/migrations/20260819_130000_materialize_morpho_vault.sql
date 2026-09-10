@@ -25,7 +25,8 @@ COMMENT ON VIEW position_morpho_vault IS '[Operational] VEC-403 projection: Morp
 -- Wrapper over the shared materializer: the projection view above holds all the Morpho-vault-specific
 -- logic. It refuses first, because holder_id is the depositor's address alone while chain_id comes from
 -- the vault, and morpho_vault_position constrains neither against the other.
-CREATE OR REPLACE FUNCTION materialize_morpho_vault(p_build_id integer DEFAULT 0) RETURNS bigint
+CREATE OR REPLACE FUNCTION materialize_morpho_vault(p_build_id integer DEFAULT 0,
+                                                    p_run_id bigint DEFAULT NULL) RETURNS bigint
     LANGUAGE plpgsql
     SET search_path FROM CURRENT AS $fn$
 DECLARE
@@ -47,10 +48,10 @@ BEGIN
     IF v_bad IS NOT NULL THEN
         RAISE EXCEPTION 'materialize_morpho_vault: one address on several chains would collapse into one position, refusing to run: %', v_bad;
     END IF;
-    RETURN public.materialize_position_projection('public.position_morpho_vault'::regclass, p_build_id);
+    RETURN public.materialize_position_projection('public.position_morpho_vault'::regclass, p_build_id, p_run_id);
 END
 $fn$;
 
-COMMENT ON FUNCTION materialize_morpho_vault(integer) IS '[Operational] VEC-403: appends Morpho vault position observations into position_state via materialize_position_projection(position_morpho_vault). See that function''s comment for the run contract.';
+COMMENT ON FUNCTION materialize_morpho_vault(integer, bigint) IS '[Operational] VEC-403: appends Morpho vault position observations into position_state via materialize_position_projection(position_morpho_vault). See that function''s comment for the run contract.';
 
 INSERT INTO migrations (filename) VALUES ('20260819_130000_materialize_morpho_vault.sql') ON CONFLICT (filename) DO NOTHING;
