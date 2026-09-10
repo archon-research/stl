@@ -848,7 +848,7 @@ class AllocationRepository:
             # one: widening it only moves where a sparsely-observed entity's
             # reach runs out, it does not remove the case (VEC-760).
             window = to_timestamp - from_timestamp
-            params["seed_from"] = from_timestamp - window
+            params["seed_from"] = from_timestamp - max(window, _BALANCE_SEED_REACH)
 
         statement = _ALLOCATION_BALANCE_BUCKETS_SQL if series == "balance" else _ALLOCATION_ACTIVITY_BUCKETS_SQL
         try:
@@ -1834,6 +1834,15 @@ LIMIT :limit
 # Prices come from token_price_current, so every bucket is valued at the newest
 # price rather than its own block's -- documented on the flow read and tracked
 # in VEC-763; it applies identically here.
+# Minimum distance before the window to look for a carry-forward seed. A window
+# is also a floor on its own reach, so a long window looks back at least its own
+# length; a short one still reaches 30 days. Without the floor a 24h window sees
+# only 24h of history, and an entity last observed before that contributes no
+# row, so it forms no gapfill group and leaves the total altogether rather than
+# reporting its last known value.
+_BALANCE_SEED_REACH = timedelta(days=30)
+
+
 _ALLOCATION_BALANCE_BUCKETS_SQL = text(f"""
 WITH window_rows AS MATERIALIZED (
     -- Deduped to the newest processing_version per identity for the same reason
