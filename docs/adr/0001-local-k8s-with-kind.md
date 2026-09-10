@@ -29,7 +29,7 @@ we have adopted for production deployments on EKS.
 Use **kind** (Kubernetes IN Docker) as the local cluster runtime.
 
 A `make kind-up` target will bring up a full kind cluster containing:
-- TimescaleDB (`timescale/timescaledb:2.25.1-pg17`) — primary database and local "tigerdata"
+- TimescaleDB (`timescale/timescaledb:2.29.2-pg18`) — primary database and local "tigerdata"
   endpoint, eliminating the staging tunnel requirement
 - Redis
 - LocalStack (SNS + SQS with full fan-out topology)
