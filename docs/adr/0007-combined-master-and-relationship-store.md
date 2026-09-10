@@ -1138,6 +1138,13 @@ separately and on evidence, and none of them may change the model:
    binding measurements are look-through regeneration cost per graph version and interactive
    exploration latency, both on VEC-633.
 
+   A dedicated graph engine may also enter without becoming the store of record: as a
+   read-only exploration sidecar fed from the pivot — a regenerable projection under §10's
+   rules, staleness governed by GQ-29, carrying no audit-grade requirement because the copy
+   is derived and rebuildable. A failed exploration-latency measurement is therefore answered
+   by an additive sidecar, not a store migration; only the batch budgets failing reopens the
+   store-of-record question.
+
 3. **Validator generation.** Shapes are data (§6); each realization generates its enforcement —
    SHACL for an RDF store, constraint DDL + loader checks for Postgres, per-shape validation
    queries elsewhere. The shape manifest is the asset; no engine owns it.
