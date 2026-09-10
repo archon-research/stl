@@ -55,6 +55,19 @@ class CryptoLendingReader(Protocol):
         """Return liquidation params for the receipt token's active collateral tokens."""
         ...
 
+    async def batch_get_liquidation_params(
+        self, infos: Sequence[ReceiptTokenInfo]
+    ) -> dict[int, Mapping[int, LiquidationParams]]:
+        """Return protocol-wide liquidation params for the aave-like receipt tokens among *infos*.
+
+        Keyed by ``receipt_token_id``; one read per protocol, shared by every
+        receipt token of that protocol, which the per-allocation compute slices to
+        its own collateral token ids. Receipt tokens whose params are resolved per
+        backed asset (Morpho) or that have none (Maple) are absent and fall back
+        to ``get_liquidation_params``.
+        """
+        ...
+
     async def get_share(self, info: ReceiptTokenInfo, prime_id: EthAddress) -> Decimal:
         """Return the prime's share of the receipt-token supply."""
         ...

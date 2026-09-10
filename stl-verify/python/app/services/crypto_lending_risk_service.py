@@ -86,6 +86,7 @@ class CryptoLendingRiskService:
         share_or_err: Decimal | Exception,
         info: ReceiptTokenInfo | None = None,
         breakdown_override: BackedBreakdown | None = None,
+        liquidation_params_override: Mapping[int, LiquidationParams] | None = None,
     ) -> RrcResult:
         """Compute the RRC reusing a pre-resolved share.
 
@@ -105,7 +106,10 @@ class CryptoLendingRiskService:
         build the batch, avoiding a redundant ``get_receipt_token`` round-trip; it
         is fetched here only when not supplied. ``breakdown_override`` likewise
         carries a pre-fetched backed breakdown (from ``reader.batch_get_breakdowns``)
-        so the per-asset breakdown query is not re-run here.
+        so the per-asset breakdown query is not re-run here, and
+        ``liquidation_params_override`` the protocol-wide liquidation params (from
+        ``reader.batch_get_liquidation_params``), sliced here to this asset's
+        collateral, so that read runs once per protocol rather than once per asset.
         """
         if not self.applies_to(asset_id, prime_id):
             raise ValueError(f"unsupported asset_id={asset_id}")
@@ -116,7 +120,11 @@ class CryptoLendingRiskService:
         if info is None:
             raise ValueError(f"receipt token not found: {asset_id}")
         _, items = await self._load_enriched_items_for_info(
-            info, prime_id=prime_id, share_override=share_or_err, breakdown_override=breakdown_override
+            info,
+            prime_id=prime_id,
+            share_override=share_or_err,
+            breakdown_override=breakdown_override,
+            liquidation_params_override=liquidation_params_override,
         )
         return self._build_result(asset_id, prime_id, gap_pct, items)
 
@@ -270,6 +278,7 @@ class CryptoLendingRiskService:
         share_override: Decimal | Exception | None = None,
         breakdown_override: BackedBreakdown | None = None,
         pool_wallet: EthAddress | None = None,
+        liquidation_params_override: Mapping[int, LiquidationParams] | None = None,
     ) -> tuple[int, list[RiskEnrichedCollateral]]:
         if not self._reader.requires_liquidation_enrichment(info):
             # Pool-level, USD-valued, symbol-keyed breakdown (e.g. Maple Syrup): no
@@ -329,7 +338,11 @@ class CryptoLendingRiskService:
                 share = share_override
 
         token_ids = [item.token_id for item in breakdown.items if item.token_id is not None]
-        liq_params = await self._reader.get_liquidation_params(info, breakdown.backed_asset_id, token_ids)
+        if liquidation_params_override is not None:
+            prefetched = liquidation_params_override
+            liq_params = {tid: prefetched[tid] for tid in token_ids if tid in prefetched}
+        else:
+            liq_params = await self._reader.get_liquidation_params(info, breakdown.backed_asset_id, token_ids)
         return breakdown.backed_asset_id, self._build_enriched_items(breakdown, share, liq_params)
 
     @staticmethod

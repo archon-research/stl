@@ -1,6 +1,6 @@
 import asyncio
 import re
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from decimal import Decimal
 
 from sqlalchemy import text
@@ -126,7 +126,6 @@ class PostgresCryptoLendingReader:
         self._morpho_liq_repo = morpho_liq_repo
         self._engine = engine
         self._allocation_share_max_stale_seconds = allocation_share_max_stale_seconds
-        self._aave_liq_inflight: dict[int, asyncio.Task[dict[int, LiquidationParams]]] = {}
 
     async def list_supported_asset_ids(self) -> set[int]:
         """Return every receipt_token_id whose protocol is supported by crypto lending."""
@@ -225,7 +224,7 @@ class PostgresCryptoLendingReader:
         normalized = _normalize_protocol_name(info.protocol_name)
 
         if normalized in _AAVE_LIKE:
-            params = await self._aave_params_for_protocol(info.protocol_id)
+            params = await self._aave_liq_repo.get_params(info.protocol_id)
             return {tid: params[tid] for tid in token_ids if tid in params}
 
         if normalized in _MORPHO:
@@ -241,32 +240,29 @@ class PostgresCryptoLendingReader:
 
         raise ValueError(f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})")
 
-    def _aave_params_for_protocol(self, protocol_id: int) -> Awaitable[dict[int, LiquidationParams]]:
-        """Read one protocol's aave-like liquidation params once, however many allocations ask.
+    async def batch_get_liquidation_params(
+        self, infos: Sequence[ReceiptTokenInfo]
+    ) -> dict[int, Mapping[int, LiquidationParams]]:
+        """Read each aave-like protocol's liquidation params once, for every receipt token of it.
 
-        These params are protocol-wide config, but ``get_liquidation_params`` is
-        called once per allocation, so a prime holding three allocations of the same
-        protocol ran the same query three times. Those computes all run inside a
-        single ``asyncio.gather`` (``PrimeRiskCapitalService``), so their lookups
-        overlap: the first starts the read and the rest await the same task.
-
-        The entry is dropped as soon as the read resolves, so this is a
-        coalescing window, not a cache — a later request re-reads the
-        trigger-maintained table and sees any reserve change since. Requests that do
-        happen to overlap share one read, which is sound for the same reason the
-        allocations within one request can: the params are protocol-level config
-        read at "now", with no per-request as-of semantics.
-
-        ``shield`` because the task is shared: without it one awaiter being
-        cancelled — a client disconnecting mid-request — would cancel the read out
-        from under any other request that had joined the same task.
+        The params are protocol-level config, so one read serves every allocation
+        of that protocol in a request; ``get_liquidation_params`` would run it once
+        per allocation. Distinct protocols are read concurrently.
         """
-        task = self._aave_liq_inflight.get(protocol_id)
-        if task is None:
-            task = asyncio.create_task(self._aave_liq_repo.get_params(protocol_id))
-            self._aave_liq_inflight[protocol_id] = task
-            task.add_done_callback(lambda _: self._aave_liq_inflight.pop(protocol_id, None))
-        return asyncio.shield(task)
+        aave_by_protocol: dict[int, list[ReceiptTokenInfo]] = {}
+        for info in infos:
+            if _normalize_protocol_name(info.protocol_name) in _AAVE_LIKE:
+                aave_by_protocol.setdefault(info.protocol_id, []).append(info)
+        if not aave_by_protocol:
+            return {}
+
+        protocol_ids = list(aave_by_protocol)
+        per_protocol = await asyncio.gather(*(self._aave_liq_repo.get_params(pid) for pid in protocol_ids))
+        return {
+            info.receipt_token_id: params
+            for protocol_id, params in zip(protocol_ids, per_protocol)
+            for info in aave_by_protocol[protocol_id]
+        }
 
     async def get_share(self, info: ReceiptTokenInfo, prime_id: EthAddress) -> Decimal:
         normalized = _normalize_protocol_name(info.protocol_name)

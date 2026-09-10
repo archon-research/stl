@@ -36,10 +36,11 @@
 --     retrofit that schema_master sanctions only via a declared cast transform on
 --     sparklend_reserve_data itself. A table created after the register uses the
 --     canonical width (same rationale as token_price_current.oracle_id in the
---     original migration). Cast under a 0..255 range test rather than bare: ERC-20
---     decimals is a uint8, so anything outside that is corrupt, and an unguarded
+--     original migration). Cast under a whole-number 0..255 test rather than bare:
+--     ERC-20 decimals is a uint8, so anything else is corrupt, an unguarded
 --     ::smallint on an out-of-range value would raise inside the trigger and abort
---     the history insert. Out of range therefore caches as NULL.
+--     the history insert, and on a fractional one it would round. Both therefore
+--     cache as NULL.
 --   * last_update_at — the history column is last_update_timestamp, a Unix epoch
 --     bigint whose canonical form schema_master declares as last_update_at
 --     (timestamptz) with plausibility bounds 1500000000..4100000000, values outside
@@ -92,7 +93,7 @@ ALTER TABLE sparklend_reserve_data_current
     ADD COLUMN IF NOT EXISTS is_active                  BOOLEAN,
     ADD COLUMN IF NOT EXISTS is_frozen                  BOOLEAN;
 
-COMMENT ON TABLE sparklend_reserve_data_current IS '[Operational] Newest sparklend_reserve_data row per (protocol, token), carrying that row''s full payload. Derived cache of the sparklend_reserve_data history; rebuildable from it at any time (20260820_120000 to rebuild the rows, 20260910_130050 to converge the payload). Not a history: it answers "what is this reserve now", never "what was it at block N".';
+COMMENT ON TABLE sparklend_reserve_data_current IS '[Operational] Newest sparklend_reserve_data row per (protocol, token), carrying that row''s full payload. Derived cache of the sparklend_reserve_data history; rebuildable from it at any time by re-running the backfill statement of 20260910_130050 (an INSERT ... ON CONFLICT DO UPDATE that repairs absent and stale rows alike). Not a history: it answers "what is this reserve now", never "what was it at block N".';
 
 COMMENT ON COLUMN sparklend_reserve_data_current.unbacked IS 'Derived (copy of sparklend_reserve_data.unbacked). Raw on-chain integer in the reserve token''s native decimals. Unbacked aTokens minted against bridged liquidity.';
 COMMENT ON COLUMN sparklend_reserve_data_current.accrued_to_treasury_scaled IS 'Derived (copy of sparklend_reserve_data.accrued_to_treasury_scaled). Raw on-chain integer in the reserve token''s native decimals, scaled by liquidity_index — multiply by liquidity_index/1e27 for the current amount.';
@@ -106,7 +107,7 @@ COMMENT ON COLUMN sparklend_reserve_data_current.average_stable_borrow_rate IS '
 COMMENT ON COLUMN sparklend_reserve_data_current.liquidity_index IS 'Derived (copy of sparklend_reserve_data.liquidity_index). Ray (÷1e27). Cumulative interest factor since reserve creation, monotonically increasing.';
 COMMENT ON COLUMN sparklend_reserve_data_current.variable_borrow_index IS 'Derived (copy of sparklend_reserve_data.variable_borrow_index). Ray (÷1e27). Cumulative variable-borrow interest factor since reserve creation, monotonically increasing.';
 COMMENT ON COLUMN sparklend_reserve_data_current.last_update_at IS 'Derived (canonical cast of sparklend_reserve_data.last_update_timestamp, a Unix epoch). Protocol-reported time this reserve''s interest state was last updated — NOT the time this cache row was written. NULL when the epoch falls outside the schema_master plausibility bounds (1500000000..4100000000); see the source column''s COMMENT for why such values exist, so a NULL here is expected rather than a gap.';
-COMMENT ON COLUMN sparklend_reserve_data_current.decimals IS 'Derived (canonical cast of sparklend_reserve_data.decimals). Count of decimal places in the reserve token''s on-chain integer amounts — a scale, not a value. NULL when the history value falls outside the ERC-20 uint8 range 0..255.';
+COMMENT ON COLUMN sparklend_reserve_data_current.decimals IS 'Derived (canonical cast of sparklend_reserve_data.decimals). Count of decimal places in the reserve token''s on-chain integer amounts — a scale, not a value. NULL when the history value is fractional or outside the ERC-20 uint8 range 0..255.';
 COMMENT ON COLUMN sparklend_reserve_data_current.ltv IS 'Derived (copy of sparklend_reserve_data.ltv). Basis points (÷10000): 7500 = 75%. Maximum loan-to-value for borrowing against this token as collateral.';
 COMMENT ON COLUMN sparklend_reserve_data_current.liquidation_threshold IS 'Derived (copy of sparklend_reserve_data.liquidation_threshold). Basis points (÷10000): 8250 = 82.5%. Loan-to-value at which positions in this reserve become liquidatable.';
 COMMENT ON COLUMN sparklend_reserve_data_current.liquidation_bonus IS 'Derived (copy of sparklend_reserve_data.liquidation_bonus). Basis points (÷10000) as a MULTIPLIER, not a spread: 10500 = 1.05×, i.e. a 5% liquidator bonus.';
@@ -138,7 +139,8 @@ BEGIN
          NEW.average_stable_borrow_rate, NEW.liquidity_index, NEW.variable_borrow_index,
          CASE WHEN NEW.last_update_timestamp BETWEEN 1500000000 AND 4100000000
               THEN to_timestamp(NEW.last_update_timestamp) END,
-         CASE WHEN NEW.decimals BETWEEN 0 AND 255 THEN NEW.decimals::smallint END,
+         CASE WHEN NEW.decimals BETWEEN 0 AND 255 AND NEW.decimals = trunc(NEW.decimals)
+              THEN NEW.decimals::smallint END,
          NEW.ltv, NEW.liquidation_threshold, NEW.liquidation_bonus,
          NEW.reserve_factor, NEW.borrowing_enabled, NEW.stable_borrow_rate_enabled,
          NEW.is_active, NEW.is_frozen,

@@ -509,6 +509,30 @@ class TestComputeWithShare:
         assert prefetched.risk_model == baseline.risk_model
 
     @pytest.mark.asyncio
+    async def test_compute_with_share_uses_the_prefetched_liquidation_params(
+        self,
+        service: CryptoLendingRiskService,
+        reader: MagicMock,
+    ) -> None:
+        """A prefetched protocol-wide params set replaces the per-asset read, sliced to this asset."""
+        baseline = await service.compute_with_share(
+            RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={}, share_or_err=Decimal("1")
+        )
+        reader.get_liquidation_params.reset_mock()
+
+        prefetched = await service.compute_with_share(
+            RECEIPT_TOKEN_ID,
+            DUMMY_PRIME,
+            overrides={},
+            share_or_err=Decimal("1"),
+            liquidation_params_override={10: _params(10, "0.825", "1.05"), 11: _params(11, "0.5", "1.2")},
+        )
+
+        reader.get_liquidation_params.assert_not_awaited()
+        assert prefetched.rrc_usd == baseline.rrc_usd
+        assert prefetched.comparable_crr_pct == baseline.comparable_crr_pct
+
+    @pytest.mark.asyncio
     async def test_compute_with_share_rejects_unsupported_asset(
         self,
         service: CryptoLendingRiskService,

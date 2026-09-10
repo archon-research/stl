@@ -1,4 +1,3 @@
-import asyncio
 from dataclasses import replace
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -266,41 +265,25 @@ async def test_get_liquidation_params_uses_aave_like_repository(
 
 
 @pytest.mark.asyncio
-async def test_overlapping_aave_lookups_for_one_protocol_share_one_read(
+async def test_batch_get_liquidation_params_reads_each_aave_protocol_once(
     reader: PostgresCryptoLendingReader,
     aave_liq_repo: MagicMock,
 ) -> None:
-    """Allocations of one protocol computed together must cost one read, not one each.
+    """One protocol-wide read per aave-like protocol, shared by its receipt tokens; Morpho absent."""
+    by_protocol = {
+        1: {1: LiquidationParams(1, Decimal("0.8"), Decimal("1.05"))},
+        3: {2: LiquidationParams(2, Decimal("0.7"), Decimal("1.10"))},
+    }
+    aave_liq_repo.get_params = AsyncMock(side_effect=lambda protocol_id: by_protocol[protocol_id])
+    first = _aave_like_info()
+    second = replace(first, receipt_token_id=100)
+    other_protocol = replace(first, receipt_token_id=101, protocol_id=3)
 
-    They are computed inside a single ``asyncio.gather``, so their lookups overlap.
-    The second and third join the first's in-flight read instead of repeating it.
-    """
-    params = {1: LiquidationParams(1, Decimal("0.8"), Decimal("1.05"))}
-    started = asyncio.Event()
-    release = asyncio.Event()
+    result = await reader.batch_get_liquidation_params([first, second, other_protocol, _morpho_info()])
 
-    async def _blocking_read(protocol_id: int) -> dict[int, LiquidationParams]:
-        started.set()
-        await release.wait()
-        return params
-
-    aave_liq_repo.get_params = AsyncMock(side_effect=_blocking_read)
-    info = _aave_like_info()
-
-    lookups = [
-        asyncio.create_task(reader.get_liquidation_params(info, backed_asset_id=42, token_ids=[1])) for _ in range(3)
-    ]
-    await started.wait()
-    release.set()
-    results = await asyncio.gather(*lookups)
-
-    assert aave_liq_repo.get_params.await_count == 1
-    assert results == [params, params, params]
-
-    # And the window closes: a later lookup re-reads rather than serving a cached
-    # result, so a reserve change between requests is picked up.
-    await reader.get_liquidation_params(info, backed_asset_id=42, token_ids=[1])
     assert aave_liq_repo.get_params.await_count == 2
+    assert {call.args[0] for call in aave_liq_repo.get_params.await_args_list} == {1, 3}
+    assert result == {99: by_protocol[1], 100: by_protocol[1], 101: by_protocol[3]}
 
 
 @pytest.mark.asyncio

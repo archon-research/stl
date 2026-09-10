@@ -20,6 +20,7 @@ async def _insert_reserve_with_liq_params(
     *,
     liquidation_threshold_bps: int,
     liquidation_bonus_bps: int,
+    collateral_enabled: bool = True,
 ) -> None:
     await conn.execute(
         """
@@ -27,7 +28,7 @@ async def _insert_reserve_with_liq_params(
             (protocol_id, token_id, block_number, block_version,
              usage_as_collateral_enabled, ltv,
              liquidation_threshold, liquidation_bonus)
-        VALUES ($1, $2, $3, 0, true, $4, $5, $6)
+        VALUES ($1, $2, $3, 0, $7, $4, $5, $6)
         """,
         protocol_id,
         token_id,
@@ -35,6 +36,7 @@ async def _insert_reserve_with_liq_params(
         Decimal("8000"),
         Decimal(liquidation_threshold_bps),
         Decimal(liquidation_bonus_bps),
+        collateral_enabled,
     )
 
 
@@ -107,7 +109,7 @@ async def test_another_protocols_reserves_are_not_returned(repository, db_url: s
     """The read is protocol-scoped, so a same-token reserve elsewhere must not leak in."""
     conn = await asyncpg.connect(db_url)
     try:
-        other_protocol_id = cast(int, await conn.fetchval("SELECT id FROM protocol WHERE name = 'Aave V3'"))
+        other_protocol_id = await insert_protocol(conn, "liqOther", b"\xd4" * 20)
         await _insert_reserve_with_liq_params(
             conn,
             other_protocol_id,
@@ -130,12 +132,9 @@ async def test_another_protocols_reserves_are_not_returned(repository, db_url: s
 async def test_reserve_disabled_as_collateral_drops_out(repository, db_url: str) -> None:
     """A reserve the protocol has since stopped accepting as collateral is not returned.
 
-    The old query filtered on usage_as_collateral_enabled *before* reducing to the
-    newest row, so it could keep serving an older, still-enabled row after the
-    protocol disabled the reserve. Reading the newest row and filtering that is what
-    the flag means, and matches how the backed-breakdown query reads this table.
-
-    Seeds its own protocol and tokens: the module seed's reserves stay untouched.
+    The collateral filter applies to the newest row per reserve, as in the
+    backed-breakdown read: an older, still-enabled row does not keep the reserve
+    in. Seeds its own protocol and tokens, so the module seed stays untouched.
     """
     conn = await asyncpg.connect(db_url)
     try:
@@ -146,16 +145,14 @@ async def test_reserve_disabled_as_collateral_drops_out(repository, db_url: str)
             await _insert_reserve_with_liq_params(
                 conn, protocol_id, token_id, 20_000_000, liquidation_threshold_bps=7000, liquidation_bonus_bps=11000
             )
-        await conn.execute(
-            """
-            INSERT INTO sparklend_reserve_data
-                (protocol_id, token_id, block_number, block_version,
-                 usage_as_collateral_enabled, liquidation_threshold, liquidation_bonus)
-            VALUES ($1, $2, $3, 0, false, 7000, 11000)
-            """,
+        await _insert_reserve_with_liq_params(
+            conn,
             protocol_id,
             disabled_id,
             20_000_001,
+            liquidation_threshold_bps=7000,
+            liquidation_bonus_bps=11000,
+            collateral_enabled=False,
         )
     finally:
         await conn.close()
