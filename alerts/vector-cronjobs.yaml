@@ -661,7 +661,7 @@ groups:
           (
             sum by (service_name, cluster) (
               increase(position_materializer_projection_runs_total{
-                status="success",
+                status="ok",
                 k8s_namespace_name="vector"
               }[6h])
             ) > 0
@@ -694,7 +694,7 @@ groups:
         # on the RUN, so a single bad view among several is visible there only as a
         # whole-run error; this names the view, which is what the runbook needs.
         expr: |
-          sum by (view, cluster) (
+          sum by (materializer, cluster) (
             increase(position_materializer_projection_runs_total{
               status="error",
               k8s_namespace_name="vector"
@@ -707,9 +707,9 @@ groups:
           component: position-materializer
           namespace: vector
         annotations:
-          summary: "position-materializer view {{ $labels.view }} is failing"
+          summary: "position-materializer view {{ $labels.materializer }} is failing"
           description: >-
-            Projection {{ $labels.view }} returned an error on
+            Projection {{ $labels.materializer }} returned an error on
             {{ $labels.cluster }} in the last 15m. The shared materializer fails
             the whole run rather than skipping a view, so the other views in the
             same run did not write either.

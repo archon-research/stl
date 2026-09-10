@@ -68,9 +68,10 @@ backfill command exists or is needed — the full projection *is* the backfill.
 
 ## VectorPositionMaterializerViewFailing
 
-**What it means.** One named projection returned an error. The shared materializer fails the whole run
-rather than skipping a view, so the other views in that run did not write either — the alert names the
-view so you do not have to find it in logs.
+**What it means.** One named projection returned an error. The runner logs it and moves on to the next
+projection, so every other view in that run did write; only this one did not. The alert names the view so
+you do not have to find it in logs. Check `position_projection_refusal` and `positions_refused` in
+`position_projection_run` too: a run can succeed while withholding individual positions.
 
 **The four ways a run fails, and what each one means.**
 

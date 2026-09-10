@@ -55,7 +55,7 @@ func (t *Telemetry) RecordRun(ctx context.Context, view, status string, changed 
 		attribute.String("status", status),
 	)
 	t.projectionRuns.Add(ctx, 1, attrs)
-	if changed > 0 {
-		t.rowsChanged.Add(ctx, changed, metric.WithAttributes(attribute.String("materializer", view)))
-	}
+	// Recorded even at zero: the series has to exist for a run that appended nothing,
+	// which is the case VectorPositionMaterializerSilentlyEmpty exists to catch.
+	t.rowsChanged.Add(ctx, changed, metric.WithAttributes(attribute.String("materializer", view)))
 }
