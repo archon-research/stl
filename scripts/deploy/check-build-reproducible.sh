@@ -165,13 +165,8 @@ trap cleanup EXIT
 # buildah included, called out separately only because it is the common local
 # case here and deserves a friendlier message.
 #
-# No override env var: the whole point of this check is that a wrong
-# "identical" verdict must never slip through silently, so a flag that lets
-# you skip it would just move the failure mode from "loud rejection" (which
-# names the fix) to "silent wrong verdict" (which is exactly what this script
-# exists to prevent). If a future real buildx version ever prints a
-# genuinely different string, fix the pattern below, in the open, in a PR —
-# don't grant a bypass.
+# No bypass env var, deliberately: it would trade a loud rejection for the
+# silent wrong verdict this check exists to prevent. Widen the pattern in a PR.
 require_buildkit() {
   local version
   version="$(docker buildx version 2>&1)" || die "docker buildx is unavailable, and BuildKit is required (see this script's header): ${version}"
@@ -190,27 +185,14 @@ require_buildkit() {
 # caller's default. CI (docker/setup-buildx-action) always leaves a
 # docker-container driver builder active, which is what BuildKit's layer-cache
 # reuse across builds depends on; locally, Docker Desktop's default builder
-# uses the `docker` driver instead, where cross-platform `--platform
-# linux/arm64 --load` behaves differently (and can need the containerd image
-# store) — so a local run's verdict would otherwise depend on ambient buildx
-# config this script never checked.
-#
-# Reuse the active builder when it is already docker-container (the CI case:
-# zero cost, nothing created) and only create a private one, removed by
-# cleanup() on exit, when it is not (the Docker Desktop case). Unconditionally
-# creating a fresh builder every run was rejected: CI already pays for
-# bootstrapping one via setup-buildx-action, and bootstrapping a second one on
-# top of it on every invocation would make CI both slower and redundant for no
-# gain, since CI's builder is already the right driver.
+# uses the `docker` driver, where `--platform linux/arm64 --load` behaves
+# differently, so a verdict would otherwise depend on ambient buildx config.
+# Reuses an active docker-container builder (CI) rather than creating a second.
 use_isolated_builder() {
   local driver inspect_out status=0
 
-  # Capture with `|| status=$?`, never a bare assignment: this script runs under
-  # `set -euo pipefail`, so an unguarded `driver="$(docker ... | awk ...)"` aborts
-  # the whole run the moment `docker buildx inspect` returns non-zero -- silently,
-  # with only the raw exit code and no message. That is exactly how this function
-  # first failed in CI (exit 255, no output). Keep stderr too: discarding it is
-  # what made the failure undiagnosable.
+  # `|| status=$?`, never a bare capture: under errexit an unguarded assignment
+  # aborts the run with only a raw exit code. Keep stderr; it is the diagnostic.
   inspect_out="$(docker buildx inspect 2>&1)" || status=$?
   if [ "$status" -ne 0 ]; then
     driver=""
