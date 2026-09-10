@@ -101,8 +101,9 @@ func TestParseConfig_ReadsTheBlockOverridesFromTheEnvironment(t *testing.T) {
 	t.Setenv("FROM_BLOCK", "21688329")
 	t.Setenv("PIN_BLOCK", "23000000")
 
-	// Chain 8453 has no default finality depth and the depth has no env form.
-	cfg, err := parseConfig([]string{"-finality-depth", "200"})
+	// Chain 8453 has no default finality depth.
+	t.Setenv("FINALITY_DEPTH", "200")
+	cfg, err := parseConfig(nil)
 	if err != nil {
 		t.Fatalf("parseConfig: %v", err)
 	}

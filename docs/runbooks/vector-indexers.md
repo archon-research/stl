@@ -1873,7 +1873,8 @@ The Job reuses the indexer's ConfigMap, Secret and ServiceAccount, so
 `DATABASE_URL`, `ALCHEMY_API_KEY`, `ALCHEMY_HTTP_URL` and `CHAIN_ID` come from
 there. Every flag has an env twin for the Job's `env:`: `PIN_BLOCK`,
 `FROM_BLOCK`, `FINALITY_DEPTH`, `INITIAL_WINDOW`, `MIN_WINDOW`, `MAX_WINDOW`,
-`POSITION_BATCH` (a flag wins over its env var; `0` means "use the default").
+`POSITION_BATCH` (a flag wins over its env var; `0` or empty means "use the
+default" — off mainnet `FINALITY_DEPTH` has none and must be set).
 
 - **Pin semantics.** The whole run snapshots one block: on mainnet `head - 64`
   by default (two epochs, comfortably past finalisation), overridable with
@@ -1970,8 +1971,11 @@ natural key is `(chain_id, pool_id)` and never `pool_id` alone).
    `VectorUniswapV4IndexerStalled` will fire on a phantom chain.
 5. **Bootstrap** — run `uniswap-v4-position-bootstrap` once by hand with
    `-chain-id`, the chain's RPC endpoint and an explicit `-finality-depth`
-   chosen for that chain's finality (see *Pin semantics* above); the mainnet
-   Job manifest is not reusable as-is.
+   chosen for that chain's finality (see *Pin semantics* above). The mainnet
+   Job manifest is not reusable as-is: copy
+   `k8s/overlays/<env>/uniswap-v4-position-bootstrap/` for the chain, patch the
+   Job's `envFrom` to the chain's ConfigMap and Secret and set `FINALITY_DEPTH`
+   in its `env:`.
 
 **Who holds a posm position NFT.** `uniswap_v4_position.owner` is the
 *PoolManager-level* owner, which for every PositionManager-managed position is
