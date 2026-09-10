@@ -902,13 +902,44 @@ func TestMapleLoanForwardsTheWriterRun(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("appended %d rows, want 1", n)
 	}
-	var runID *int64
-	var buildID int
+	var stamped, unstamped int
 	if err := pool.QueryRow(ctx, `
-		SELECT run_id, build_id FROM position_state ORDER BY block_timestamp DESC LIMIT 1`).Scan(&runID, &buildID); err != nil {
-		t.Fatalf("read the appended row: %v", err)
+		SELECT count(*) FILTER (WHERE run_id = 9182 AND build_id = 7),
+		       count(*) FILTER (WHERE run_id IS DISTINCT FROM 9182)
+		  FROM position_state`).Scan(&stamped, &unstamped); err != nil {
+		t.Fatalf("read the appended rows: %v", err)
 	}
-	if runID == nil || *runID != 9182 || buildID != 7 {
-		t.Errorf("appended row = run_id %v build_id %d, want 9182 and 7", runID, buildID)
+	if stamped != 1 || unstamped != 0 {
+		t.Errorf("appended rows: %d carry run 9182 at build 7, %d do not, want 1 and 0", stamped, unstamped)
+	}
+	// The run record is the wrapper's other witness, and it is the only one the other six assert.
+	var runRecord *int64
+	if err := pool.QueryRow(ctx, `
+		SELECT run_id FROM position_projection_run
+		 WHERE projection = 'public.position_maple_loan'
+		 ORDER BY created_at DESC LIMIT 1`).Scan(&runRecord); err != nil {
+		t.Fatalf("read the run record: %v", err)
+	}
+	if runRecord == nil || *runRecord != 9182 {
+		t.Errorf("run record = %v, want 9182", runRecord)
+	}
+
+	// The runner passes the two provenance arguments BY NAME, so these parameter names are the
+	// contract: renaming one here leaves this migration valid and breaks that projection only.
+	var args []string
+	if err := pool.QueryRow(ctx, `
+		SELECT proargnames::text[] FROM pg_proc WHERE proname = 'materialize_maple_loan'`).Scan(&args); err != nil {
+		t.Fatalf("read the wrapper's parameter names: %v", err)
+	}
+	for _, want := range []string{"p_build_id", "p_run_id"} {
+		found := false
+		for _, a := range args {
+			if a == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("materialize_maple_loan declares %v, missing %s -- the runner calls it by name", args, want)
+		}
 	}
 }
