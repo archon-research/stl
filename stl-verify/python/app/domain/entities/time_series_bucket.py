@@ -21,24 +21,26 @@ class AllocationActivityBucket:
     ``balance_usd`` is the bucket's position value read from recorded state
     rather than reconstructed from flow, and is populated only for
     ``series="balance"`` (VEC-760). The two are alternatives, not companions:
-    each request runs one query, so the fields the other would fill are left at
-    their zero value. It is a different measure as well as a cheaper one --
-    mark-to-market rather than cost basis -- so a share-price move appears in
-    ``balance_usd`` on a day with no transaction, and in ``net_flow_usd`` not at
-    all.
+    each request runs one query, so the fields the other would fill are left
+    ``None`` rather than a misleading zero. It is a different measure as well
+    as a cheaper one -- mark-to-market rather than cost basis -- so a
+    share-price move appears in ``balance_usd`` on a day with no transaction,
+    and in ``net_flow_usd`` not at all.
     """
 
     bucket_start: datetime
-    event_count: int
-    total_tx_amount: Decimal
-    net_flow_usd: Decimal
+    event_count: int | None
+    total_tx_amount: Decimal | None
+    net_flow_usd: Decimal | None
     balance_usd: Decimal | None = None
 
     def __post_init__(self) -> None:
-        if self.event_count < 0:
+        if self.event_count is not None and self.event_count < 0:
             raise ValueError(f"event_count must be non-negative, got {self.event_count}")
-        if self.total_tx_amount < 0:
+        if self.total_tx_amount is not None and self.total_tx_amount < 0:
             raise ValueError(f"total_tx_amount must be non-negative, got {self.total_tx_amount}")
+        if self.balance_usd is not None and self.balance_usd < 0:
+            raise ValueError(f"balance_usd must be non-negative, got {self.balance_usd}")
 
 
 @dataclass(frozen=True)

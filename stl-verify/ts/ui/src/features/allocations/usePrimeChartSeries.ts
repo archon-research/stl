@@ -105,9 +105,8 @@ function getFrequencyForRange(
  * The trend series behind the metric cards, for one prime over one window.
  *
  * `primeTotalAllocationUsd` is the current whole-prime total, owned by the
- * caller that owns the rows. The balance series no longer anchors on it -- that
- * is read per bucket server-side now -- but self mode still falls back to it for
- * the collateral figure it has no indexed equivalent for.
+ * caller that owns the rows. Self mode falls back to it for the collateral
+ * figure it has no indexed equivalent for.
  */
 export function usePrimeChartSeries(
   primaryProxyAddress: string | null,
@@ -144,24 +143,13 @@ export function usePrimeChartSeries(
 
   // Each bucket's own recorded position value, read server-side
   // (`series=balance`). Clamped at 0 since a negative balance is meaningless.
-  //
-  // This replaced a client-side reconstruction: anchor at the current total and
-  // walk backwards undoing each bucket's net flow. That had three problems the
-  // server-side read does not. It accumulated per-transaction imprecision into
-  // every earlier bucket, growing ~0.33pp per day further back. It could not
-  // see yield, which moves a balance with no transaction to undo, so it
-  // attributed today's accrued value to every earlier bucket. And it was only
-  // valid when the window ended at "now", which is why custom ranges were
-  // suppressed entirely -- a fixed window's newest bucket is in the past, so
-  // anchoring it at the current total misstated every point. State needs no
-  // anchor, so custom ranges now work.
+  // Needs no anchor, so it is valid for custom ranges too.
   const allocationBalanceSeries = useMemo<ChartDatum[]>(
     () =>
       toChartSeries(activityBuckets, (bucket) => {
         const value = parseNumericValue(bucket.balance_usd);
-        // Absent means "not known for this bucket", which toChartSeries drops
-        // -- a gap in the line. Coercing it to 0 would draw a floor that reads
-        // as the position having emptied.
+        // Absent means "not known for this bucket" -- toChartSeries drops it,
+        // a gap in the line rather than a false floor at zero (VEC-537).
         return value === null ? null : Math.max(value, 0);
       }),
     [activityBuckets],

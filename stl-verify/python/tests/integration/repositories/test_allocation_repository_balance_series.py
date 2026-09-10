@@ -12,16 +12,18 @@ it a *different* read rather than a cheaper one:
   copies its original's ``created_at`` and ``last()`` therefore cannot break the
   tie (VEC-758);
 * it refuses a row whose own underlying disagrees with the registry's, matching
-  every other valuation read;
-* it leaves ``net_flow_usd`` alone, and ``series="flow"`` leaves
-  ``balance_usd`` unset -- one query runs per call, not both.
+  every other valuation read, and that refusal poisons the bucket rather than
+  silently omitting the entity from the total (VEC-537's failure class);
+* ``protocol_name`` filters it, the same as every other filter on this read;
+* it leaves ``net_flow_usd``/``event_count``/``total_tx_amount`` at ``None``,
+  and ``series="flow"`` leaves ``balance_usd`` unset -- one query runs per
+  call, not both.
 
 Isolated database per module (``module_db`` from ``conftest.py``); seeded by
 ``seed_balance_series_positions``.
 """
 
 import datetime as dt
-from decimal import Decimal
 from typing import Literal
 
 import pytest
@@ -41,9 +43,14 @@ from tests.integration.seed import (
     BS_PROXY_CORRECTED,
     BS_PROXY_DIRECT,
     BS_PROXY_DIVERGENT,
+    BS_PROXY_MIXED,
     BS_PROXY_SEEDED,
+    BS_PROXY_SUMMED,
     BS_SEEDED_UNDERLYING_VALUE,
+    BS_SUMMED_DIRECT_BALANCE,
+    BS_SUMMED_UNDERLYING_VALUE,
     BS_UNDERLYING_PRICE,
+    BS_VAULT_HEX,
     seed_balance_series_positions,
 )
 
@@ -68,6 +75,8 @@ async def _buckets(
     *,
     series: Literal["flow", "balance"] = "balance",
     days: int = 10,
+    protocol_name: str | None = None,
+    allowed_vaults: list[EthAddress] | None = None,
 ):
     now = dt.datetime.now(dt.UTC)
     return await repo.list_activity_buckets(
@@ -77,6 +86,8 @@ async def _buckets(
         bucket_seconds=_DAY,
         limit=500,
         series=series,
+        protocol_name=protocol_name,
+        allowed_vaults=allowed_vaults,
     )
 
 
@@ -120,13 +131,62 @@ async def test_correction_supersedes_its_original_rather_than_adding_to_it(repo:
 
 async def test_divergent_underlying_is_refused(repo: AllocationRepository) -> None:
     buckets = await _buckets(repo, BS_PROXY_DIVERGENT)
-    # Refused rows contribute nothing, so there is no value to report at all.
-    assert all(b.balance_usd in (None, Decimal(0)) for b in buckets), [b.balance_usd for b in buckets]
+    # A refused row is PRESENT, not absent: it still produces a full range of
+    # buckets (VEC-760 B5), every one None, rather than vanishing outright and
+    # leaving an empty result set that would pass this assertion vacuously.
+    assert buckets, "a refused row must still produce buckets, not vanish from the result entirely"
+    assert all(b.balance_usd is None for b in buckets), [b.balance_usd for b in buckets]
+
+
+async def test_unpriceable_entity_poisons_the_total_instead_of_being_dropped(repo: AllocationRepository) -> None:
+    # BS_PROXY_MIXED holds a priced direct holding AND a divergent (unpriceable)
+    # receipt row. A plain SUM would silently skip the unpriceable entity and
+    # report just the direct holding's value -- a confident but wrong total,
+    # the exact VEC-537 failure class B5 closes. The whole bucket must go None.
+    buckets = await _buckets(repo, BS_PROXY_MIXED)
+    assert buckets, "expected buckets for the mixed proxy"
+    assert all(b.balance_usd is None for b in buckets), [b.balance_usd for b in buckets]
+
+
+async def test_multiple_entities_under_one_proxy_are_summed(repo: AllocationRepository) -> None:
+    # BS_PROXY_SUMMED holds two different cleanly-priced entities; the total
+    # must be their sum, not just whichever one a wrong query happened to pick.
+    buckets = await _buckets(repo, BS_PROXY_SUMMED)
+    expected = BS_SUMMED_UNDERLYING_VALUE * BS_UNDERLYING_PRICE + BS_SUMMED_DIRECT_BALANCE * BS_DIRECT_PRICE
+    assert buckets[0].balance_usd == expected
 
 
 async def test_direct_holding_priced_by_its_own_token_price(repo: AllocationRepository) -> None:
     buckets = await _buckets(repo, BS_PROXY_DIRECT)
     assert buckets[0].balance_usd == BS_DIRECT_BALANCE * BS_DIRECT_PRICE
+
+
+async def test_protocol_name_filters_the_balance_series(repo: AllocationRepository) -> None:
+    # VEC-760 I2: protocol_name was silently ignored on this query -- present
+    # in _ALLOCATION_ACTIVITY_BUCKETS_SQL but absent from the balance one.
+    expected = BS_CARRY_UNDERLYING_VALUE * BS_UNDERLYING_PRICE
+    matched = await _buckets(repo, BS_PROXY_CARRY, protocol_name="bsLike")
+    assert matched[0].balance_usd == expected
+
+    unmatched = await _buckets(repo, BS_PROXY_CARRY, protocol_name="not-a-real-protocol")
+    assert all(b.balance_usd is None for b in unmatched), [b.balance_usd for b in unmatched]
+
+
+async def test_allowed_vaults_cross_tenant_filter_applies_to_the_balance_series(
+    repo: AllocationRepository,
+) -> None:
+    """The balance query's ``allowed_vaults`` predicate, exercised non-NULL.
+
+    Asserting on ``event_count`` (as the general authz suite does) would pass
+    vacuously here -- balance mode leaves it ``None`` -- so this checks
+    ``balance_usd`` instead.
+    """
+    expected = BS_CARRY_UNDERLYING_VALUE * BS_UNDERLYING_PRICE
+    own_vault = await _buckets(repo, BS_PROXY_CARRY, allowed_vaults=[EthAddress("0x" + BS_VAULT_HEX)])
+    assert own_vault[0].balance_usd == expected
+
+    other_vault = await _buckets(repo, BS_PROXY_CARRY, allowed_vaults=[EthAddress("0x" + "ab" * 20)])
+    assert all(b.balance_usd is None for b in other_vault), [b.balance_usd for b in other_vault]
 
 
 async def test_flow_series_leaves_balance_unset_and_balance_series_leaves_flow_alone(
@@ -137,9 +197,9 @@ async def test_flow_series_leaves_balance_unset_and_balance_series_leaves_flow_a
 
     balance = await _buckets(repo, BS_PROXY_CARRY, series="balance")
     assert any(b.balance_usd is not None for b in balance)
-    # Only one query runs, so the flow columns are left at their zero value
-    # rather than being computed alongside.
-    assert all(b.net_flow_usd == 0 and b.event_count == 0 for b in balance)
+    # Only one query runs, so the flow columns are left None rather than being
+    # computed alongside -- not a misleading zero (VEC-760).
+    assert all(b.net_flow_usd is None and b.event_count is None and b.total_tx_amount is None for b in balance)
 
 
 async def test_buckets_before_the_first_observation_are_null_not_zero(repo: AllocationRepository) -> None:

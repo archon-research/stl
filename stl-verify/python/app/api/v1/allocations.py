@@ -891,12 +891,21 @@ class AllocationActivityBucketResponse(BaseModel):
     """Allocation activity aggregated into a single time bucket."""
 
     bucket_start: datetime = Field(description="Inclusive start of the time bucket (UTC).")
-    event_count: int = Field(description="Number of activity events in the bucket.", examples=[42])
-    total_tx_amount: PlainDecimal = Field(
-        description="Sum of `tx_amount` across the bucket's events, serialized as a JSON string.",
+    event_count: int | None = Field(
+        default=None,
+        description="Number of activity events in the bucket. Null on `series=balance`, which does not compute it.",
+        examples=[42],
+    )
+    total_tx_amount: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "Sum of `tx_amount` across the bucket's events, serialized as a JSON string. Null on "
+            "`series=balance`, which does not compute it."
+        ),
         examples=["1234567890000000000000"],
     )
-    net_flow_usd: PlainDecimal = Field(
+    net_flow_usd: PlainDecimal | None = Field(
+        default=None,
         description=(
             "Signed net flow valued in USD (inflows positive, outflows negative). Only receipt-token "
             "flows are valued: each is converted to underlying units at its row's share ratio "
@@ -905,7 +914,8 @@ class AllocationActivityBucketResponse(BaseModel):
             "no valued row at all, then priced at the receipt token's latest underlying oracle "
             "price. Rows whose recorded underlying diverges from the registry's are refused and "
             "contribute 0, as do direct holdings. Lets clients reconstruct a balance series by "
-            "anchoring at the current total and cumulating net flows backwards."
+            "anchoring at the current total and cumulating net flows backwards. Null on "
+            "`series=balance`, which does not compute it."
         ),
         examples=["1234567.89"],
     )
@@ -1014,8 +1024,9 @@ async def list_allocation_activity(
 ) -> AllocationActivityEnvelope:
     """Errors:
 
-    - 422 if ``prime_id`` is malformed (or ``limit`` is out of range), or if
-      ``aggregation_method=end-period`` without a ``prime_id`` while authorization is on.
+    - 422 if ``prime_id`` is malformed (or ``limit`` is out of range), if
+      ``aggregation_method=end-period`` without a ``prime_id`` while authorization is on,
+      or if ``series=balance`` without ``aggregation_method=end-period``.
     - 200 with an empty ``data`` list if filters match no rows — including when
       ``prime_id`` is well-formed but unknown, and when the caller may not view
       it. ``prime_id`` is treated as a filter here, not a path resource, so
@@ -1029,6 +1040,10 @@ async def list_allocation_activity(
         # A bucket is one number over many primes; scope it to a named prime
         # rather than serving the caller's whole permitted set as a total.
         raise HTTPException(status_code=422, detail="prime_id is required for aggregated activity")
+    if series != "flow" and not time_series.is_bucketed:
+        # series picks between two aggregate SQL statements that only run
+        # when aggregation_method=end-period is set.
+        raise HTTPException(status_code=422, detail="series is only applicable with aggregation_method=end-period")
     # Selective = an index-seekable exact filter. Substring filters
     # (protocol_name/token_symbol) and low-cardinality filters (chain_id,
     # action_type) do not qualify because they cannot prune chunks.

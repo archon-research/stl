@@ -967,6 +967,27 @@ def test_list_allocation_activity_returns_422_for_invalid_prime_id():
     service.list_allocation_activity.assert_not_awaited()
 
 
+def test_list_allocation_activity_returns_422_for_series_without_aggregation():
+    """``series`` selects between two aggregate queries; the raw arm has neither.
+
+    Silently ignoring it (VEC-760) would let ``series=balance`` on a raw request
+    look like it took effect.
+    """
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(
+        "/v1/allocations/activity",
+        params={"series": "balance"},
+    )
+
+    assert response.status_code == 422
+    service.list_allocation_activity.assert_not_awaited()
+
+
 def test_list_allocation_activity_hides_synthetic_sweep_tx_hash():
     from app.api.v1 import allocations
 

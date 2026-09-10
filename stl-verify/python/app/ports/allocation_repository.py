@@ -149,7 +149,8 @@ class AllocationRepositoryPort(Protocol):
         default) event counts, tx-amount sums and signed USD net flow;
         ``"balance"`` each bucket's position value read from recorded state.
         They are alternatives -- one query runs per call, and the fields
-        belonging to the other series come back at their zero value.
+        belonging to the other series come back ``None`` rather than a
+        misleading zero.
         """
         ...
 

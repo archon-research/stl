@@ -130,37 +130,55 @@
             "type": "string"
           },
           "event_count": {
-            "description": "Number of activity events in the bucket.",
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Number of activity events in the bucket. Null on `series=balance`, which does not compute it.",
             "examples": [
               42
             ],
-            "title": "Event Count",
-            "type": "integer"
+            "title": "Event Count"
           },
           "net_flow_usd": {
-            "description": "Signed net flow valued in USD (inflows positive, outflows negative). Only receipt-token flows are valued: each is converted to underlying units at its row's share ratio (underlying_value / balance), borrowing the nearest same-token row's ratio when the row's own is unavailable and falling back to the raw tx_amount only when the token has no valued row at all, then priced at the receipt token's latest underlying oracle price. Rows whose recorded underlying diverges from the registry's are refused and contribute 0, as do direct holdings. Lets clients reconstruct a balance series by anchoring at the current total and cumulating net flows backwards.",
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Signed net flow valued in USD (inflows positive, outflows negative). Only receipt-token flows are valued: each is converted to underlying units at its row's share ratio (underlying_value / balance), borrowing the nearest same-token row's ratio when the row's own is unavailable and falling back to the raw tx_amount only when the token has no valued row at all, then priced at the receipt token's latest underlying oracle price. Rows whose recorded underlying diverges from the registry's are refused and contribute 0, as do direct holdings. Lets clients reconstruct a balance series by anchoring at the current total and cumulating net flows backwards. Null on `series=balance`, which does not compute it.",
             "examples": [
               "1234567.89"
             ],
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Net Flow Usd",
-            "type": "string"
+            "title": "Net Flow Usd"
           },
           "total_tx_amount": {
-            "description": "Sum of `tx_amount` across the bucket's events, serialized as a JSON string.",
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Sum of `tx_amount` across the bucket's events, serialized as a JSON string. Null on `series=balance`, which does not compute it.",
             "examples": [
               "1234567890000000000000"
             ],
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Total Tx Amount",
-            "type": "string"
+            "title": "Total Tx Amount"
           }
         },
         "required": [
-          "bucket_start",
-          "event_count",
-          "total_tx_amount",
-          "net_flow_usd"
+          "bucket_start"
         ],
         "title": "AllocationActivityBucketResponse",
         "type": "object"

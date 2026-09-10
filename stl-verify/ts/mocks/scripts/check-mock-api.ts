@@ -137,6 +137,33 @@ function got<K, V>(map: ReadonlyMap<K, V>, key: K, label: string): V {
 }
 
 /**
+ * Unwraps a field that is only conditionally populated on the wire
+ * (`event_count` et al. go `null` on `series=balance`, VEC-760) at a call
+ * site that knows, from the query it made, which series answered.
+ */
+function present<T>(value: T | null | undefined, label: string): T {
+  assert.ok(
+    value !== null && value !== undefined,
+    `${label}: expected a value, got ${String(value)}`,
+  );
+  return value;
+}
+
+/**
+ * The union member that DECLARES key `K`, whether required or optional --
+ * `Extract<T, Record<K, unknown>>` only catches the required case, and an
+ * optional field (`event_count` et al. on `AllocationActivityBucketResponse`,
+ * VEC-760) is structurally assignable to `Record<K, unknown>` from a member
+ * that never declares the key at all, so `Extract` alone stops discriminating
+ * the moment a field the raw arm never had becomes optional on the other.
+ */
+type HasKey<Row, K extends PropertyKey> = Row extends unknown
+  ? K extends keyof Row
+    ? Row
+    : never
+  : never;
+
+/**
  * Narrow an envelope's `data` to the arm the query selected. Bucketed and
  * unbucketed rows are separate response schemas and the query param that picks
  * between them is not expressible in the response, so the generated type is a
@@ -147,7 +174,7 @@ function armWith<Rows extends readonly object[], K extends PropertyKey>(
   rows: Rows,
   key: K,
   label: string,
-): Extract<Rows[number], Record<K, unknown>>[] {
+): HasKey<Rows[number], K>[] {
   for (const row of rows) {
     assert.ok(
       key in row,
@@ -157,7 +184,7 @@ function armWith<Rows extends readonly object[], K extends PropertyKey>(
 
   // `rows` is a union of arrays, so the element type is `Rows[number]` and the
   // loop above is what proves which arm this is.
-  return rows as unknown as Extract<Rows[number], Record<K, unknown>>[];
+  return rows as unknown as HasKey<Rows[number], K>[];
 }
 
 /** Rows and queries these checks pass around, named off the generated paths. */
@@ -424,7 +451,10 @@ async function checkRawAndAggregatedActivityAgree() {
     aggregated.data,
     'event_count',
     'aggregated activity',
-  ).reduce((total, bucket) => total + bucket.event_count, 0);
+  ).reduce(
+    (total, bucket) => total + present(bucket.event_count, 'event_count'),
+    0,
+  );
   assert.equal(
     bucketed,
     raw.data.length,
@@ -484,11 +514,15 @@ async function checkAggregatedFlowsAreValued() {
       feed.data,
       'event_count',
       `activity?aggregation_method&token_symbol=${symbol}`,
-    ).filter((bucket) => Number(bucket.total_tx_amount) > 0);
+    ).filter(
+      (bucket) =>
+        Number(present(bucket.total_tx_amount, 'total_tx_amount')) > 0,
+    );
     assert.ok(moved.length > 0, `${symbol} moved nothing in the window`);
     return moved.map(
       (bucket) =>
-        Math.abs(Number(bucket.net_flow_usd)) / Number(bucket.total_tx_amount),
+        Math.abs(Number(present(bucket.net_flow_usd, 'net_flow_usd'))) /
+        Number(present(bucket.total_tx_amount, 'total_tx_amount')),
     );
   };
 
@@ -1341,6 +1375,20 @@ async function checkMalformedParamsAreRejected() {
     activity({ from_timestamp: 'lastweek' }),
     422,
     'unparseable from_timestamp',
+  );
+  await expectRejection(
+    '/v1/allocations/activity',
+    activity({ series: 'bogus' }),
+    422,
+    'series=bogus',
+  );
+  // series picks between two aggregate queries that only run when
+  // aggregation_method=end-period is set (VEC-760); this request has neither.
+  await expectStatus(
+    '/v1/allocations/activity',
+    activity({ series: 'balance' }),
+    422,
+    'series=balance without aggregation_method',
   );
 }
 

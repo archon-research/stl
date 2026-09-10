@@ -25,7 +25,7 @@ import {
 import { PRIMES } from '../fixtures/registry.ts';
 import { decimalString, usdString } from '../fixtures/series.ts';
 import { LIST_DELAY_MS, SERIES_DELAY_MS, mock } from '../mock-api.ts';
-import { notFound, problemResponse } from '../problem.ts';
+import { notFound, problemResponse, unprocessable } from '../problem.ts';
 import {
   bucketStarts,
   equalsInsensitive,
@@ -33,6 +33,7 @@ import {
   readChainId,
   readProvenance,
   readLimit,
+  readSeries,
   resolveWindow,
   rawWindowEcho,
   resampledWindowEcho,
@@ -102,9 +103,9 @@ function activityBuckets(
   // function's own `AllocationActivityBucket[]` is not enough, because a
   // `.map()` result is checked for assignability rather than for excess keys.
   //
-  // The two series are alternatives on the real endpoint -- one query runs, and
-  // the other's fields come back at their zero value. Mirrored here so a screen
-  // built against the mocks cannot accidentally rely on both being populated.
+  // The two series are alternatives on the real endpoint -- one query runs,
+  // and the other's fields are left out. Mirrored here so a screen built
+  // against the mocks cannot accidentally rely on both being populated.
   return bucketStartsMs.map((startMs): AllocationActivityBucket => {
     const inBucket = rows.filter((row) => {
       const createdMs = Date.parse(row.created_at);
@@ -114,9 +115,6 @@ function activityBuckets(
     if (series === 'balance') {
       return {
         bucket_start: iso(startMs),
-        event_count: 0,
-        total_tx_amount: decimalString(0),
-        net_flow_usd: usdString(0),
         balance_usd: usdString(
           balanceAt(rows, startMs + intervalMs, usdPerUnit),
         ),
@@ -136,15 +134,15 @@ function activityBuckets(
 
 /**
  * The bucket's closing position value, as `series=balance` reports it: the
- * cumulative signed flow of everything up to the bucket's end.
+ * cumulative signed flow of everything up to the bucket's end -- an
+ * approximation of the endpoint's own recorded-state read, which the fixture
+ * has no equivalent of.
  *
- * Not how the endpoint computes it -- it reads each bucket's own recorded
- * position state, which the fixture has no equivalent of. Deriving it from the
- * same rows the flow series uses is the same trade the comment above
- * `activityBuckets` describes: one source, so a screen toggling between the two
- * cannot show a chart and a table that disagree. It is monotonic in the same
- * direction as the real series and lands on the same final value, which is what
- * a consumer of the fixture can rely on.
+ * Derived from the same rows the flow series uses, for the reason the comment
+ * above `activityBuckets` gives: one source, so a screen toggling between the
+ * two cannot show a chart and a table that disagree. It is monotonic in the
+ * same direction as the real series and lands on the same final value, which
+ * is what a consumer of the fixture can rely on.
  */
 function balanceAt(
   rows: readonly AllocationActivity[],
@@ -266,6 +264,10 @@ export function allocationHandlers(): MockHandler[] {
       if (!chainId.ok) {
         return response.untyped(problemResponse(chainId.problem));
       }
+      const series = readSeries(query.get('series'));
+      if (!series.ok) {
+        return response.untyped(problemResponse(series.problem));
+      }
       const { bucketed, frequencyMs, fromMs, toMs } = resolved.value;
       const filters: ActivityFilters = {
         primeId: query.get('prime_id'),
@@ -288,9 +290,21 @@ export function allocationHandlers(): MockHandler[] {
             bucketStarts(fromMs, toMs, frequencyMs, limit.value),
             frequencyMs,
             receiptTokenUsdPerUnit(nowMs),
-            query.get('series') === 'balance' ? 'balance' : 'flow',
+            series.value,
           ),
         });
+      }
+
+      // series picks between two aggregate queries that only run when
+      // aggregation_method=end-period is set.
+      if (series.value !== 'flow') {
+        return response.untyped(
+          problemResponse(
+            unprocessable(
+              'series is only applicable with aggregation_method=end-period',
+            ),
+          ),
+        );
       }
 
       return response(200).json({
