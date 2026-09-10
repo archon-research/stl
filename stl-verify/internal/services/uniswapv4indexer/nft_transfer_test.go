@@ -8,6 +8,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
@@ -111,30 +112,34 @@ func TestDecodeEvents_PositionManagerTransfer(t *testing.T) {
 			if len(got.NFTTransfers) != 1 {
 				t.Fatalf("NFTTransfers = %d, want 1", len(got.NFTTransfers))
 			}
-			transfer := got.NFTTransfers[0]
-			if transfer.PositionManagerID != positionManagerRowID {
-				t.Errorf("PositionManagerID = %d, want %d", transfer.PositionManagerID, positionManagerRowID)
-			}
-			if transfer.TokenID.Cmp(tt.wantToken) != 0 {
-				t.Errorf("TokenID = %s, want %s", transfer.TokenID, tt.wantToken)
-			}
-			if got := transfer.From; got != common.HexToAddress(tt.wantFrom) {
-				t.Errorf("From = %s, want %s", got, tt.wantFrom)
-			}
-			if got := transfer.To; got != common.HexToAddress(tt.wantTo) {
-				t.Errorf("To = %s, want %s", got, tt.wantTo)
-			}
-			if got := transfer.TxHash; got != common.HexToHash(tt.wantTx) {
-				t.Errorf("TxHash = %s, want %s", got, tt.wantTx)
-			}
-			if transfer.LogIndex != tt.wantLog {
-				t.Errorf("LogIndex = %d, want %d", transfer.LogIndex, tt.wantLog)
-			}
-			if transfer.BlockNumber != blockNumber || transfer.BlockVersion != blockVer || !transfer.BlockTimestamp.Equal(blockTS) {
-				t.Errorf("block coords = (%d, %d, %s), want (%d, %d, %s)",
-					transfer.BlockNumber, transfer.BlockVersion, transfer.BlockTimestamp, blockNumber, blockVer, blockTS)
-			}
+			assertPosmTransfer(t, got.NFTTransfers[0], tt.wantTx, tt.wantLog, tt.wantFrom, tt.wantTo, tt.wantToken)
 		})
+	}
+}
+
+func assertPosmTransfer(t *testing.T, transfer *entity.UniswapV4PositionNFTTransfer, wantTx string, wantLog int, wantFrom, wantTo string, wantToken *big.Int) {
+	t.Helper()
+	if transfer.PositionManagerID != positionManagerRowID {
+		t.Errorf("PositionManagerID = %d, want %d", transfer.PositionManagerID, positionManagerRowID)
+	}
+	if transfer.TokenID.Cmp(wantToken) != 0 {
+		t.Errorf("TokenID = %s, want %s", transfer.TokenID, wantToken)
+	}
+	if transfer.From != common.HexToAddress(wantFrom) {
+		t.Errorf("From = %s, want %s", transfer.From, wantFrom)
+	}
+	if transfer.To != common.HexToAddress(wantTo) {
+		t.Errorf("To = %s, want %s", transfer.To, wantTo)
+	}
+	if transfer.TxHash != common.HexToHash(wantTx) {
+		t.Errorf("TxHash = %s, want %s", transfer.TxHash, wantTx)
+	}
+	if transfer.LogIndex != wantLog {
+		t.Errorf("LogIndex = %d, want %d", transfer.LogIndex, wantLog)
+	}
+	if transfer.BlockNumber != blockNumber || transfer.BlockVersion != blockVer || !transfer.BlockTimestamp.Equal(blockTS) {
+		t.Errorf("block coords = (%d, %d, %s), want (%d, %d, %s)",
+			transfer.BlockNumber, transfer.BlockVersion, transfer.BlockTimestamp, blockNumber, blockVer, blockTS)
 	}
 }
 

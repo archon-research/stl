@@ -235,7 +235,7 @@ func (t *Telemetry) RecordPositionRows(ctx context.Context, n int) {
 	t.positionRowsWritten.Add(ctx, int64(n), metric.WithAttributes(t.chainAttr))
 }
 
-// RecordNFTTransferRows counts the posm Transfer rows a committed block offered,
+// RecordNFTTransferRows counts the posm Transfer rows a committed block landed,
 // the only evidence that decoding still works: a wrong PositionManager address
 // raises no error and empties this series alone.
 func (t *Telemetry) RecordNFTTransferRows(ctx context.Context, n int) {

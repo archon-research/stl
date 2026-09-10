@@ -2867,11 +2867,23 @@ func TestUniswapV4Repository_SaveBlock_RoundTripsNFTTransfers(t *testing.T) {
 	}
 
 	repo := newUniswapV4Repo(t)
+	writes := outbound.UniswapV4BlockWrites{NFTTransfers: []*entity.UniswapV4PositionNFTTransfer{mint, move}}
 	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
-		if _, err := repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{
-			NFTTransfers: []*entity.UniswapV4PositionNFTTransfer{mint, move},
-		}); err != nil {
+		counts, err := repo.SaveBlock(ctx, tx, writes)
+		if err != nil {
 			t.Fatalf("SaveBlock: %v", err)
+		}
+		if counts.NFTTransfersPersisted != 2 {
+			t.Errorf("NFTTransfersPersisted = %d, want 2", counts.NFTTransfersPersisted)
+		}
+	})
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		counts, err := repo.SaveBlock(ctx, tx, writes)
+		if err != nil {
+			t.Fatalf("SaveBlock replay: %v", err)
+		}
+		if counts.NFTTransfersPersisted != 0 {
+			t.Errorf("NFTTransfersPersisted on an identical replay = %d, want 0: the metric must count rows that landed", counts.NFTTransfersPersisted)
 		}
 	})
 

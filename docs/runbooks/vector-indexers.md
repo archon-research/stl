@@ -2932,8 +2932,9 @@ is a straight-line decode.
    ```
 
 3. **Rows actually landing** — the metric counts the rows a committed block
-   offered, so a non-empty recent tail means the metric pipeline broke rather
-   than the decode:
+   inserted, so a non-empty recent tail means the metric pipeline broke rather
+   than the decode (a redelivered block re-offers rows that conflict away and
+   counts zero, which is healthy):
 
    ```sql
    SELECT max(block_number) AS newest_block, count(*) AS rows_last_day

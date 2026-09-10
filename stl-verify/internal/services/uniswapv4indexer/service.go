@@ -206,6 +206,9 @@ func PoolManagerFor(pools []RegisteredPool) (common.Address, error) {
 // shares, by PoolManagerFor's one-deployment rule. A registry that lost it would
 // hand back address(0), which the log filter matches.
 func PositionManagerFor(pools []RegisteredPool) (RegisteredPositionManager, error) {
+	if len(pools) == 0 {
+		return RegisteredPositionManager{}, fmt.Errorf("no pools registered: no PositionManager to derive")
+	}
 	first := pools[0]
 	for _, pool := range pools[1:] {
 		if pool.PositionManager != first.PositionManager {
@@ -296,20 +299,20 @@ func (s *UniswapV4Service) handleBlock(ctx context.Context, event outbound.Block
 
 	s.markSnapshotted(dueSet, snaps.baselined, coords.number, coords.version)
 	s.markIndexed(ctx, dueSet)
-	s.recordBlockMetrics(ctx, acc, writes, stateRows)
+	s.recordBlockMetrics(ctx, acc, stateRows)
 	return nil
 }
 
 // recordBlockMetrics runs only after a successful commit. Attempted is what
-// VectorUniswapV4IndexerNotWritingState keys on; the tick and position counts
-// are what the append-on-change writers persisted, i.e. real table growth.
-func (s *UniswapV4Service) recordBlockMetrics(ctx context.Context, acc blockAccumulators, writes outbound.UniswapV4BlockWrites, rows outbound.StateRowCounts) {
+// VectorUniswapV4IndexerNotWritingState keys on; the tick, position and NFT
+// transfer counts are rows that landed, i.e. real table growth.
+func (s *UniswapV4Service) recordBlockMetrics(ctx context.Context, acc blockAccumulators, rows outbound.StateRowCounts) {
 	s.recordPoolsTouched(ctx, acc.touchedIDs)
 	s.telemetry.RecordStateRowsAttempted(ctx, int(rows.Attempted))
 	s.telemetry.RecordStateRows(ctx, int(rows.Persisted))
 	s.telemetry.RecordTickRows(ctx, int(rows.TicksPersisted))
 	s.telemetry.RecordPositionRows(ctx, int(rows.PositionsPersisted))
-	s.telemetry.RecordNFTTransferRows(ctx, len(writes.NFTTransfers))
+	s.telemetry.RecordNFTTransferRows(ctx, int(rows.NFTTransfersPersisted))
 }
 
 // Only the snapshot_supported half reaches the due set, so only it may gate

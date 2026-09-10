@@ -462,20 +462,30 @@ func convertV4BlockWrites(w outbound.UniswapV4BlockWrites) (v4BatchRows, error) 
 }
 
 type v4BatchSection struct {
-	name            string
-	count           int
-	countsStateRows bool
+	name  string
+	count int
+	// record adds one statement's outcome to the counts the caller reports.
+	record func(*outbound.StateRowCounts, int64)
+}
+
+func recordStateRow(c *outbound.StateRowCounts, affected int64) {
+	c.Attempted++
+	c.Persisted += affected
+}
+
+func recordNFTTransferRow(c *outbound.StateRowCounts, affected int64) {
+	c.NFTTransfersPersisted += affected
 }
 
 // Order must match queueUniswapV4Batch: pgx returns batch results positionally,
 // so a reordering silently mis-attributes the row counts and the error messages.
 func (rows v4BatchRows) sections() []v4BatchSection {
 	return []v4BatchSection{
-		{name: "state", count: len(rows.states), countsStateRows: true},
+		{name: "state", count: len(rows.states), record: recordStateRow},
 		{name: "swap", count: len(rows.swaps)},
 		{name: "liquidity event", count: len(rows.liqs)},
 		{name: "pool event", count: len(rows.poolEvents)},
-		{name: "nft transfer", count: len(rows.nftTransfers)},
+		{name: "nft transfer", count: len(rows.nftTransfers), record: recordNFTTransferRow},
 	}
 }
 
@@ -588,9 +598,8 @@ func sendUniswapV4Batch(ctx context.Context, tx pgx.Tx, batch *pgx.Batch, rows v
 			if readErr != nil {
 				return stateRows, fmt.Errorf("batch %s %d: %w", section.name, i, readErr)
 			}
-			if section.countsStateRows {
-				stateRows.Attempted++
-				stateRows.Persisted += tag.RowsAffected()
+			if section.record != nil {
+				section.record(&stateRows, tag.RowsAffected())
 			}
 		}
 	}
