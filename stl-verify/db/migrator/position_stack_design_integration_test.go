@@ -6,7 +6,9 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,14 +19,18 @@ import (
 // in random order so a later batch carries an older observation. The cache invariants (position_current,
 // position_daily) live with the migrations that create those tables. Every violation is a test failure.
 func TestPositionStackDesignInvariants(t *testing.T) {
-	const seeds = 24
+	// The committed set is what CI runs, so the default stays fixed and deterministic. These two
+	// env vars widen it without editing code: 24 histories is a lottery, and a defect that only
+	// appears outside them would pass on every branch at once.
+	seeds := envInt(t, "POSITION_STACK_SEEDS", 24)
+	multiplier := envInt(t, "POSITION_STACK_SEED_MULTIPLIER", 7919)
 	for seed := 1; seed <= seeds; seed++ {
 		t.Run(fmt.Sprintf("seed-%02d", seed), func(t *testing.T) {
 			ctx := context.Background()
 			pool, cleanup := setupMigratedPostgres(ctx, t)
 			defer cleanup()
 
-			rng := rand.New(rand.NewSource(int64(seed) * 7919))
+			rng := rand.New(rand.NewSource(int64(seed) * int64(multiplier)))
 			rows := generateHistory(rng)
 			view := fmt.Sprintf("pv_design_%d", seed)
 
@@ -262,6 +268,20 @@ func TestPositionStackDesignInvariants(t *testing.T) {
 			}
 		})
 	}
+}
+
+// envInt reads a positive override for a seed knob, or returns the committed default.
+func envInt(t *testing.T, name string, def int) int {
+	t.Helper()
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		t.Fatalf("%s=%q: want a positive integer", name, v)
+	}
+	return n
 }
 
 type obsRow struct {
