@@ -2562,6 +2562,10 @@ groups:
             TimescaleDB is going stale. Check the pod logs and SQS backlog.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerstalled
 
+      # ---------------------------------------------------------------------
+      # WARNING
+      # ---------------------------------------------------------------------
+
       - alert: VectorUniswapV4IndexerErrorRatioHigh
         # A RATIO (error/total), not an absolute error rate, because
         # uniswap_v4_errors_total increments at most once per SQS message and is
