@@ -40,12 +40,13 @@ func TestSharedBlockNumberRejectsMixedBlocks(t *testing.T) {
 		{poolID: 1, tick: 60, blockNumber: 100, liquidityGross: big.NewInt(1)},
 		{poolID: 1, tick: 120, blockNumber: 101, liquidityGross: big.NewInt(1)},
 	}
-	if _, err := uniswapV4TickWriter.sharedBlockNumber(rows); err == nil {
+	blockNumberOf := func(t uniswapTickRow) int64 { return t.blockNumber }
+	if _, err := sharedBlockNumber("uniswap_v4_tick", rows, blockNumberOf); err == nil {
 		t.Fatal("sharedBlockNumber across two blocks: want error, got nil")
 	}
 
 	rows[1].blockNumber = 100
-	got, err := uniswapV4TickWriter.sharedBlockNumber(rows)
+	got, err := sharedBlockNumber("uniswap_v4_tick", rows, blockNumberOf)
 	if err != nil {
 		t.Fatalf("sharedBlockNumber: %v", err)
 	}
