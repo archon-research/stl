@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -19,17 +20,22 @@ var _ outbound.BlockMetaRepository = (*BlockMetaRepository)(nil)
 type BlockMetaRepository struct {
 	pool   *pgxpool.Pool
 	logger *slog.Logger
+	runID  buildregistry.RunID
 }
 
-// NewBlockMetaRepository creates a new PostgreSQL block_meta repository.
-func NewBlockMetaRepository(pool *pgxpool.Pool, logger *slog.Logger) (*BlockMetaRepository, error) {
+// NewBlockMetaRepository creates a new PostgreSQL block_meta repository. runID is the writer run
+// opened by the process; it stamps every row the loader writes (ADR-0006 §2).
+func NewBlockMetaRepository(pool *pgxpool.Pool, logger *slog.Logger, runID buildregistry.RunID) (*BlockMetaRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
+	}
+	if runID == 0 {
+		return nil, fmt.Errorf("run id cannot be zero")
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &BlockMetaRepository{pool: pool, logger: logger}, nil
+	return &BlockMetaRepository{pool: pool, logger: logger, runID: runID}, nil
 }
 
 // pendingBlocksQuery resolves the blocks referenced by the observation tables but not yet in
@@ -162,9 +168,10 @@ var blockMetaStageColumns = []string{"chain_id", "block_number", "block_version"
 // INSERTs at the millions-of-blocks scale of a full-history backfill, and folding the whole batch
 // into one INSERT keeps the conflict check server-side.
 //
-// The arbiter is block_meta's primary key, the natural key (chain_id, block_number, block_version):
-// a header time is immutable, so a re-run is a no-op and a mis-parse is corrected by an operator
-// deleting and reloading the affected coordinates, not by a second row.
+// The arbiter is block_meta's primary key (chain_id, block_number, block_version, processing_version).
+// The loader always writes processing_version 0, so a re-run is a no-op; a mis-parsed header is
+// corrected by appending the same block at a higher processing_version, which this path never
+// touches and never overwrites. Every row carries the process's run_id.
 func (r *BlockMetaRepository) Upsert(ctx context.Context, rows []outbound.BlockMetaRow) (int64, error) {
 	if len(rows) == 0 {
 		return 0, nil
@@ -199,9 +206,9 @@ func (r *BlockMetaRepository) Upsert(ctx context.Context, rows []outbound.BlockM
 	}
 
 	ct, err := tx.Exec(ctx, `
-INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp)
-SELECT chain_id, block_number, block_version, block_timestamp FROM block_meta_stage
-ON CONFLICT (chain_id, block_number, block_version) DO NOTHING`)
+INSERT INTO block_meta (chain_id, block_number, block_version, processing_version, block_timestamp, run_id)
+SELECT chain_id, block_number, block_version, 0, block_timestamp, $1 FROM block_meta_stage
+ON CONFLICT (chain_id, block_number, block_version, processing_version) DO NOTHING`, int64(r.runID))
 	if err != nil {
 		return 0, fmt.Errorf("insert from stage: %w", err)
 	}

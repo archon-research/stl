@@ -26,7 +26,7 @@ import (
 )
 
 // No block_meta fixture here, deliberately: the schema PR's migration is in db/migrations, so
-// testutil.SetupTestDB's template carries the real table, its natural-key PK and the CHECKs. A
+// testutil.SetupTestDB's template carries the real table, its version-tuple PK and the CHECKs. A
 // fixture shaped like the query it tests cannot detect a disagreement with production.
 
 // newLocalStackReader builds the real S3 reader adapter pointed at the shared
@@ -157,8 +157,11 @@ func TestRunIntegration_FillsBlockMetaFromS3(t *testing.T) {
 		chainID, protocolID); err != nil {
 		t.Fatalf("seed protocol_event block 300: %v", err)
 	}
+	// It is also present at processing_version 1 with a corrected time: the loader must neither
+	// re-fetch it nor touch either row, since the correction axis belongs to the operator.
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp) VALUES ($1, 300, 0, to_timestamp($2))`,
+		`INSERT INTO block_meta (chain_id, block_number, block_version, processing_version, block_timestamp)
+		 VALUES ($1, 300, 0, 0, to_timestamp($2)), ($1, 300, 0, 1, to_timestamp($2 + 7))`,
 		chainID, b300Seeded); err != nil {
 		t.Fatalf("pre-seed block_meta block 300: %v", err)
 	}
@@ -207,7 +210,8 @@ func TestRunIntegration_FillsBlockMetaFromS3(t *testing.T) {
 	uploadBlock(t, ctx, s3Client, bucket, 600, 0, b600v0Hex)
 	uploadBlock(t, ctx, s3Client, bucket, 600, 1, b600v1Hex)
 
-	repo, err := postgres.NewBlockMetaRepository(pool, logger)
+	_, runID := testutil.OpenTestRun(t, ctx, pool)
+	repo, err := postgres.NewBlockMetaRepository(pool, logger, runID)
 	if err != nil {
 		t.Fatalf("NewBlockMetaRepository: %v", err)
 	}
@@ -256,8 +260,31 @@ func TestRunIntegration_FillsBlockMetaFromS3(t *testing.T) {
 		t.Errorf("chain-8453 block 400 leaked into block_meta (%d rows); chain filter is broken", block400Rows)
 	}
 
-	if got := countBlockMeta(t, ctx, pool); got != 6 {
-		t.Errorf("expected 6 block_meta rows after first run, got %d", got)
+	if got := countBlockMeta(t, ctx, pool); got != 7 {
+		t.Errorf("expected 7 block_meta rows after first run, got %d", got)
+	}
+
+	// Every row the loader wrote is processing_version 0 and carries this run's id; the two
+	// pre-seeded block 300 rows (no run_id, one of them a correction at processing_version 1)
+	// are exactly as seeded.
+	var loaded, seeded int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM block_meta WHERE processing_version = 0 AND run_id = $1 AND block_number <> 300`,
+		int64(runID)).Scan(&loaded); err != nil {
+		t.Fatalf("count loader-stamped rows: %v", err)
+	}
+	if loaded != 5 {
+		t.Errorf("expected 5 rows stamped with run_id %d at processing_version 0, got %d", runID, loaded)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM block_meta
+		 WHERE chain_id = $1 AND block_number = 300 AND run_id IS NULL
+		   AND extract(epoch FROM block_timestamp) = $2 + 7 * processing_version`,
+		chainID, b300Seeded).Scan(&seeded); err != nil {
+		t.Fatalf("count seeded block 300 rows: %v", err)
+	}
+	if seeded != 2 {
+		t.Errorf("expected both seeded block 300 rows untouched, got %d matching", seeded)
 	}
 
 	// Rerun: every referenced block on chain 1 is now present, so it is a no-op.
@@ -268,8 +295,8 @@ func TestRunIntegration_FillsBlockMetaFromS3(t *testing.T) {
 	if upserted2 != 0 {
 		t.Errorf("expected rerun to upsert 0 rows, got %d", upserted2)
 	}
-	if got := countBlockMeta(t, ctx, pool); got != 6 {
-		t.Errorf("expected 6 block_meta rows after rerun, got %d", got)
+	if got := countBlockMeta(t, ctx, pool); got != 7 {
+		t.Errorf("expected 7 block_meta rows after rerun, got %d", got)
 	}
 }
 

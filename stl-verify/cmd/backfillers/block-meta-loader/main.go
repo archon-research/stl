@@ -22,6 +22,7 @@ import (
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/services/block_meta_loader"
 )
 
@@ -97,7 +98,12 @@ func run(parent context.Context, logger *slog.Logger) error {
 	}
 	defer pool.Close()
 
-	repo, err := postgres.NewBlockMetaRepository(pool, logger)
+	_, runID, err := writerrun.Open(ctx, pool)
+	if err != nil {
+		return err
+	}
+
+	repo, err := postgres.NewBlockMetaRepository(pool, logger, runID)
 	if err != nil {
 		return fmt.Errorf("creating block_meta repository: %w", err)
 	}
