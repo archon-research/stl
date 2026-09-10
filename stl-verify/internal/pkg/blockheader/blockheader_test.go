@@ -3,6 +3,7 @@ package blockheader
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseTimestamp(t *testing.T) {
@@ -53,23 +54,33 @@ func TestParseTimestamp(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := ParseTimestamp([]byte(tt.payload))
 			if tt.wantErr != "" {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil (time %s)", tt.wantErr, got)
-				}
-				if !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
-				}
+				assertErrorContains(t, err, tt.wantErr, got)
 				return
 			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got.Unix() != tt.wantUnix {
-				t.Errorf("timestamp = %d (%s), want %d", got.Unix(), got, tt.wantUnix)
-			}
-			if got.Location() != nil && got.Location().String() != "UTC" {
-				t.Errorf("timestamp not in UTC: %s", got.Location())
-			}
+			assertUTCUnix(t, err, got, tt.wantUnix)
 		})
+	}
+}
+
+func assertErrorContains(t *testing.T, err error, want string, got time.Time) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected error containing %q, got nil (time %s)", want, got)
+	}
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("error = %v, want it to contain %q", err, want)
+	}
+}
+
+func assertUTCUnix(t *testing.T, err error, got time.Time, wantUnix int64) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Unix() != wantUnix {
+		t.Errorf("timestamp = %d (%s), want %d", got.Unix(), got, wantUnix)
+	}
+	if loc := got.Location(); loc != nil && loc.String() != "UTC" {
+		t.Errorf("timestamp not in UTC: %s", loc)
 	}
 }
