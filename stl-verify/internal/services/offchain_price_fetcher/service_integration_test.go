@@ -184,7 +184,7 @@ func TestIntegration_FetchCurrentPrices(t *testing.T) {
 	}
 
 	// Create repository
-	repo, err := postgres.NewPriceRepository(pool, nil, 0, 100)
+	repo, err := postgres.NewPriceRepository(pool, nil, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create price repository: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestIntegration_FetchCurrentPrices_AllEnabledAssets(t *testing.T) {
 		t.Fatalf("failed to create coingecko client: %v", err)
 	}
 
-	repo, err := postgres.NewPriceRepository(pool, nil, 0, 100)
+	repo, err := postgres.NewPriceRepository(pool, nil, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create price repository: %v", err)
 	}
@@ -336,7 +336,7 @@ func TestIntegration_FetchHistoricalData(t *testing.T) {
 		t.Fatalf("failed to create coingecko client: %v", err)
 	}
 
-	repo, err := postgres.NewPriceRepository(pool, nil, 0, 100)
+	repo, err := postgres.NewPriceRepository(pool, nil, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create price repository: %v", err)
 	}
@@ -413,7 +413,7 @@ func TestIntegration_FetchHistoricalData_MultipleAssetsConcurrently(t *testing.T
 		t.Fatalf("failed to create coingecko client: %v", err)
 	}
 
-	repo, err := postgres.NewPriceRepository(pool, nil, 0, 100)
+	repo, err := postgres.NewPriceRepository(pool, nil, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create price repository: %v", err)
 	}
@@ -478,7 +478,7 @@ func TestIntegration_UpsertIdempotency(t *testing.T) {
 		t.Fatalf("failed to create coingecko client: %v", err)
 	}
 
-	repo, err := postgres.NewPriceRepository(pool, nil, 0, 100)
+	repo, err := postgres.NewPriceRepository(pool, nil, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create price repository: %v", err)
 	}
@@ -558,7 +558,7 @@ func newIntegrationService(t *testing.T, pool *pgxpool.Pool, baseURL string) *Se
 	if err != nil {
 		t.Fatalf("failed to create coingecko client: %v", err)
 	}
-	repo, err := postgres.NewPriceRepository(pool, nil, 0, 100)
+	repo, err := postgres.NewPriceRepository(pool, nil, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create price repository: %v", err)
 	}
@@ -693,7 +693,7 @@ func TestIntegration_AssetPriceCrossBuildReplayAppendsNewVersions(t *testing.T) 
 
 	runWithBuild := func(buildID int) {
 		t.Helper()
-		repo, err := postgres.NewPriceRepository(pool, nil, buildregistry.BuildID(buildID), 100)
+		repo, err := postgres.NewPriceRepository(pool, nil, buildregistry.BuildID(buildID), 0, 100)
 		if err != nil {
 			t.Fatalf("failed to create price repository: %v", err)
 		}
@@ -784,7 +784,7 @@ func assetPriceVersions(t *testing.T, ctx context.Context, pool *pgxpool.Pool, a
 
 func upsertOneAssetPrice(t *testing.T, ctx context.Context, pool *pgxpool.Pool, buildID int, assetID, sourceID int64, price float64, ts time.Time) {
 	t.Helper()
-	repo, err := postgres.NewPriceRepository(pool, nil, buildregistry.BuildID(buildID), 100)
+	repo, err := postgres.NewPriceRepository(pool, nil, buildregistry.BuildID(buildID), 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create price repository: %v", err)
 	}
@@ -871,7 +871,7 @@ func TestIntegration_NoEnabledAssets(t *testing.T) {
 		t.Fatalf("failed to create coingecko client: %v", err)
 	}
 
-	repo, err := postgres.NewPriceRepository(pool, nil, 0, 100)
+	repo, err := postgres.NewPriceRepository(pool, nil, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("failed to create price repository: %v", err)
 	}

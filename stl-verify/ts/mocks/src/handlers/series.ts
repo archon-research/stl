@@ -1,9 +1,9 @@
 /**
  * The three per-prime time series: exposure, total capital, debt.
  *
- * Exposure and total capital are aggregate-only by contract (`mode` is the
+ * Exposure and total capital are bucketed-only by contract (`mode` is the
  * constant `'aggregated'`). Debt has both modes, and a reference provenance is
- * aggregate-only there because upstream publishes one figure per prime per day
+ * bucketed-only there because upstream publishes one figure per prime per day
  * with no ilk or block identity, so the API answers `400` rather than inventing
  * them.
  */
@@ -29,19 +29,21 @@ import {
 import { SERIES_DELAY_MS, mock } from '../mock-api.ts';
 import type { Parsed, Problem } from '../problem.ts';
 import { badRequest, notFound, problemResponse } from '../problem.ts';
+import type { ResolvedWindow } from '../query.ts';
 import {
   bucketStarts,
-  readFlag,
   readLimit,
   readProvenance,
+  resampledWindowEcho,
   resolveWindow,
   sameHex,
+  rawWindowEcho,
 } from '../query.ts';
 import type {
+  AggregationMethod,
   ExposureBucket,
   PrimeDebtBucket,
   Provenance,
-  TimeSeriesWindow,
   TotalCapitalBucket,
 } from '../schema.ts';
 
@@ -75,7 +77,7 @@ function findPrimeOrProxy(primeId: string): SeededPrime | undefined {
 }
 
 type SeriesRequest = {
-  window: TimeSeriesWindow;
+  resolved: ResolvedWindow;
   starts: number[];
   limit: number;
   source: Provenance;
@@ -84,7 +86,9 @@ type SeriesRequest = {
 type SeriesQuery = {
   fromTimestamp: string | null;
   toTimestamp: string | null;
-  resolution: string | null;
+  frequency: string | null;
+  aggregationMethod: string | null;
+  defaultAggregationMethod?: AggregationMethod;
   limit: string | null;
   source: string | null;
   reference: string | null;
@@ -92,7 +96,7 @@ type SeriesQuery = {
 
 /**
  * Takes the raw strings rather than the resolver's `query` object: the three
- * endpoints declare the same five params but as three separate generated types,
+ * endpoints declare the same six params but as three separate generated types,
  * and a helper typed against one would not accept the others.
  */
 function readSeriesRequest(
@@ -106,20 +110,20 @@ function readSeriesRequest(
   const source = readProvenance(raw.source, raw.reference);
   if (!source.ok) return source;
 
-  const { window, fromMs, toMs } = resolved.value;
+  const { fromMs, toMs, frequencyMs } = resolved.value;
   return {
     ok: true,
     value: {
-      window,
+      resolved: resolved.value,
       limit: limit.value,
-      starts: bucketStarts(fromMs, toMs, window.interval_ms, limit.value),
+      starts: bucketStarts(fromMs, toMs, frequencyMs, limit.value),
       source: source.value,
     },
   };
 }
 
 /**
- * The three endpoints declare the same five params, so one structural reader
+ * The three endpoints declare the same six params, so one structural reader
  * serves all three — and it stays typed, which a cast to `string` would not: a
  * param the document drops stops satisfying this type.
  */
@@ -128,18 +132,26 @@ type SeriesQueryReader = {
     name:
       | 'from_timestamp'
       | 'to_timestamp'
-      | 'resolution'
+      | 'frequency'
+      | 'aggregation_method'
       | 'limit'
       | 'source'
       | 'reference',
   ) => string | null;
 };
 
-function seriesQuery(query: SeriesQueryReader): SeriesQuery {
+function seriesQuery(
+  query: SeriesQueryReader,
+  defaultAggregationMethod?: AggregationMethod,
+): SeriesQuery {
   return {
     fromTimestamp: query.get('from_timestamp'),
     toTimestamp: query.get('to_timestamp'),
-    resolution: query.get('resolution'),
+    frequency: query.get('frequency'),
+    aggregationMethod: query.get('aggregation_method'),
+    // Spread, not assigned: under `exactOptionalPropertyTypes` an explicit
+    // `undefined` does not satisfy an optional field.
+    ...(defaultAggregationMethod !== undefined && { defaultAggregationMethod }),
     limit: query.get('limit'),
     source: query.get('source'),
     reference: query.get('reference'),
@@ -162,7 +174,10 @@ export function seriesHandlers(): MockHandler[] {
             problemResponse(unknownPrime(params.prime_id)),
           );
         }
-        const request = readSeriesRequest(seriesQuery(query), nowMs);
+        const request = readSeriesRequest(
+          seriesQuery(query, 'end-period'),
+          nowMs,
+        );
         if (!request.ok) {
           return response.untyped(problemResponse(request.problem));
         }
@@ -170,7 +185,7 @@ export function seriesHandlers(): MockHandler[] {
         return response(200).json({
           mode: 'aggregated',
           source: request.value.source,
-          window: request.value.window,
+          window: resampledWindowEcho(request.value.resolved),
           // The return annotation is load-bearing, not decoration: a `.map()`
           // result is not a fresh object literal, so without it a bucket field
           // the document drops stays assignable and the mock keeps serving a
@@ -195,7 +210,10 @@ export function seriesHandlers(): MockHandler[] {
             problemResponse(unknownPrime(params.prime_id)),
           );
         }
-        const request = readSeriesRequest(seriesQuery(query), nowMs);
+        const request = readSeriesRequest(
+          seriesQuery(query, 'end-period'),
+          nowMs,
+        );
         if (!request.ok) {
           return response.untyped(problemResponse(request.problem));
         }
@@ -215,7 +233,7 @@ export function seriesHandlers(): MockHandler[] {
         return response(200).json({
           mode: 'aggregated',
           source: request.value.source,
-          window: request.value.window,
+          window: resampledWindowEcho(request.value.resolved),
           data: seriesPoints(
             TOTAL_CAPITAL_USD,
             request.value.starts,
@@ -245,26 +263,23 @@ export function seriesHandlers(): MockHandler[] {
           return response.untyped(problemResponse(request.problem));
         }
 
-        const { window, starts, limit, source } = request.value;
-        const parsedAggregate = readFlag('aggregate', query.get('aggregate'));
-        if (!parsedAggregate.ok) {
-          return response.untyped(problemResponse(parsedAggregate.problem));
-        }
-        const aggregate = parsedAggregate.value;
+        const { resolved, starts, limit, source } = request.value;
 
-        if (source !== 'indexed' && !aggregate) {
+        if (source !== 'indexed' && !resolved.bucketed) {
           return response.untyped(
             problemResponse(
-              badRequest('reference debt requires aggregate=true'),
+              badRequest(
+                'reference debt requires aggregation_method=end-period',
+              ),
             ),
           );
         }
 
-        if (aggregate) {
+        if (resolved.bucketed) {
           return response(200).json({
             mode: 'aggregated',
             source,
-            window,
+            window: resampledWindowEcho(resolved),
             data: seriesPoints(PRIME_DEBT_USDS, starts, nowMs).map(
               (point): PrimeDebtBucket => ({
                 bucket_start: iso(point.startMs),
@@ -277,7 +292,7 @@ export function seriesHandlers(): MockHandler[] {
         return response(200).json({
           mode: 'raw',
           source: 'indexed',
-          window,
+          window: rawWindowEcho(resolved),
           data: seedDebtSnapshots(
             nowMs,
             prime.prime_vault_address,

@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const eventDBName = "test_event"
@@ -42,7 +43,7 @@ func setupEventTest(t *testing.T) *eventTestFixture {
 
 	truncateEvents(t, ctx)
 
-	repo := NewEventRepository(nil, 0)
+	repo := NewEventRepository(nil, 0, 0)
 
 	fixture := &eventTestFixture{
 		repo: repo,
@@ -61,6 +62,8 @@ func TestSaveEvent_SingleEvent(t *testing.T) {
 	fixture := setupEventTest(t)
 
 	ctx := context.Background()
+	buildID, runID := testutil.OpenTestRun(t, ctx, eventPool)
+	fixture.repo = NewEventRepository(nil, buildID, runID)
 
 	eventData := json.RawMessage(`{"user":"0xabc","reserve":"0xdef","amount":"1000000"}`)
 	event, err := entity.NewProtocolEvent(1, fixture.protocolID, 1000, 0, []byte{0x01, 0x02}, 5, []byte{0xaa, 0xbb}, "Borrow", eventData, time.Unix(1700000000, 0).UTC())
@@ -97,9 +100,10 @@ func TestSaveEvent_SingleEvent(t *testing.T) {
 	var storedEventName string
 	var storedEventData json.RawMessage
 	var storedBlockNumber int64
+	var storedRunID *int64
 	err = eventPool.QueryRow(ctx,
-		`SELECT event_name, event_data, block_number FROM protocol_event WHERE event_name = 'Borrow'`).
-		Scan(&storedEventName, &storedEventData, &storedBlockNumber)
+		`SELECT event_name, event_data, block_number, run_id FROM protocol_event WHERE event_name = 'Borrow'`).
+		Scan(&storedEventName, &storedEventData, &storedBlockNumber, &storedRunID)
 	if err != nil {
 		t.Fatalf("failed to query stored event: %v", err)
 	}
@@ -108,6 +112,9 @@ func TestSaveEvent_SingleEvent(t *testing.T) {
 	}
 	if storedBlockNumber != 1000 {
 		t.Errorf("block_number = %v, want 1000", storedBlockNumber)
+	}
+	if storedRunID == nil || *storedRunID != int64(runID) {
+		t.Errorf("run_id = %v, want %d", storedRunID, runID)
 	}
 	// Compare parsed JSON (JSONB normalizes key ordering)
 	var storedMap, expectedMap map[string]interface{}

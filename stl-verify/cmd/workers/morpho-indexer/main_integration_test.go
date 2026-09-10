@@ -80,7 +80,7 @@ func TestParseConfig_RequiresAlchemyHTTPURLOffMainnet(t *testing.T) {
 func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	rpcServer := testutil.StartChainIDRPC(t, 1)
 
-	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
@@ -121,7 +121,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	bucket := testutil.S3TestBucketName(t, rawBucketPrefix)
 	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 
-	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
@@ -212,7 +212,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 		blockNum, version, blockNum,
 	))
 
-	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)

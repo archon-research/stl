@@ -13,7 +13,6 @@
     "ref_entity_type",
     "ref_industry_group_l2",
     "ref_origination_type",
-    "position_classification",
     "position_entity_link",
     "ref_sector_l1",
     "ref_security_subtype_l3",
@@ -41,6 +40,7 @@
     "uniswap_v4_pool_event",
     "uniswap_v4_pool_manager",
     "uniswap_v4_pool_state",
+    "uniswap_v4_position",
     "uniswap_v4_swap",
     "uniswap_v4_tick"
   ],
@@ -384,6 +384,10 @@
       "class": "S"
     },
     "custody_type": {
+      "type": "text",
+      "class": "S"
+    },
+    "deal_type": {
       "type": "text",
       "class": "S"
     },
@@ -1119,10 +1123,6 @@
       "class": "S",
       "not_null": true
     },
-    "run_id": {
-      "type": "int8",
-      "class": "A"
-    },
     "scaled_balance": {
       "type": "numeric",
       "class": "D"
@@ -1472,6 +1472,53 @@
     "wallet_address": {
       "type": "text",
       "class": "S"
+    },
+    "run_id": {
+      "type": "int8",
+      "class": "A"
+    },
+    "service": {
+      "type": "text",
+      "class": "S"
+    },
+    "started_at": {
+      "type": "timestamptz",
+      "class": "A",
+      "semantics": "processing_time"
+    },
+    "reference_snapshot": {
+      "type": "text",
+      "class": "S"
+    },
+    "reference_effective_at": {
+      "type": "timestamptz",
+      "class": "A",
+      "semantics": "effective_time"
+    },
+    "rows_emitted": {
+      "type": "int8",
+      "class": "A",
+      "not_null": true
+    },
+    "rows_appended": {
+      "type": "int8",
+      "class": "A",
+      "not_null": true
+    },
+    "positions_refused": {
+      "type": "int4",
+      "class": "A",
+      "not_null": true
+    },
+    "reason": {
+      "type": "text",
+      "class": "A",
+      "not_null": true
+    },
+    "detail": {
+      "type": "text",
+      "class": "A",
+      "not_null": true
     }
   },
   "tables": {
@@ -1625,6 +1672,10 @@
       "type": "raw_pipeline",
       "owner": "morpho"
     },
+    "morpho_market_position_current": {
+      "type": "derived",
+      "owner": "morpho"
+    },
     "morpho_market_state": {
       "type": "raw_pipeline",
       "owner": "morpho"
@@ -1678,6 +1729,14 @@
     "oracle_asset": {
       "type": "config",
       "owner": "pricing"
+    },
+    "position_projection_refusal": {
+      "type": "infrastructure",
+      "owner": "prime"
+    },
+    "position_projection_run": {
+      "type": "infrastructure",
+      "owner": "prime"
     },
     "position_state": {
       "type": "derived",
@@ -1787,6 +1846,10 @@
     "weight_basis_vocabulary": {
       "type": "config",
       "owner": "refdata"
+    },
+    "writer_run": {
+      "type": "infrastructure",
+      "owner": "infra"
     }
   },
   "transforms": [

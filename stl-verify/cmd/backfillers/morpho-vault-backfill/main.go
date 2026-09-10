@@ -39,7 +39,6 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -52,6 +51,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 )
@@ -160,9 +160,9 @@ func newBackfillActivities(ctx context.Context, deps temporal.Dependencies, cfg 
 		}
 	}()
 
-	buildReg, err := buildregistry.New(ctx, deps.Pool)
+	buildReg, runID, err := writerrun.Open(ctx, deps.Pool)
 	if err != nil {
-		return nil, nil, fmt.Errorf("registering build: %w", err)
+		return nil, nil, err
 	}
 
 	s3Reader, err := newS3Reader(ctx, deps.Logger, cfg)
@@ -206,6 +206,7 @@ func newBackfillActivities(ctx context.Context, deps temporal.Dependencies, cfg 
 		logger:      deps.Logger,
 		pool:        deps.Pool,
 		buildID:     buildReg.BuildID(),
+		runID:       runID,
 		s3Reader:    s3Reader,
 		extractor:   extractor,
 		prober:      prober,

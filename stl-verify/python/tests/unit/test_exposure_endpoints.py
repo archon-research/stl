@@ -46,13 +46,15 @@ def test_list_prime_exposure_returns_aggregated_buckets():
             params={
                 "from_timestamp": "2026-05-19T00:00:00Z",
                 "to_timestamp": "2026-06-18T00:00:00Z",
-                "resolution": "PT6H",
+                "frequency": "PT6H",
             },
         )
 
         assert response.status_code == 200
         body = response.json()
         assert body["mode"] == "aggregated"
+        assert body["window"]["frequency"] == "PT6H"
+        assert body["window"]["frequency_ms"] == 6 * 60 * 60 * 1000
         assert body["data"] == [
             {
                 "bucket_start": "2026-06-18T00:00:00Z",

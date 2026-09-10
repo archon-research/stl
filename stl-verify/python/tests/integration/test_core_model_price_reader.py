@@ -17,6 +17,9 @@ async def engine(async_db_url: str):
     eng = create_async_engine(async_db_url, pool_pre_ping=True)
     async with eng.begin() as conn:
         await conn.execute(text("TRUNCATE onchain_token_price"))
+        # Trigger-fed and FK-less, so nothing above clears it; the ambiguity
+        # guard reads "has this oracle priced the token" from here.
+        await conn.execute(text("TRUNCATE token_price_current"))
         await conn.execute(text("TRUNCATE asset_price"))
         # The symbol-collision test seeds a second "WETH" token; _token_id
         # resolves by symbol, so a leaked spoof row would break sibling tests.

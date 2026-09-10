@@ -22,10 +22,10 @@ from app.api.provenance import (
     resolve_or_422,
 )
 from app.api.time_series import (
-    TimeSeriesWindow,
+    ResampledTimeSeriesWindow,
     apply_cache_control,
-    build_window,
-    get_time_series_query_params,
+    build_resampled_window,
+    get_resampled_time_series_query_params,
 )
 from app.domain.entities.allocation import EthAddress
 from app.domain.provenance import Provenance
@@ -119,7 +119,7 @@ class TotalCapitalEnvelope(BaseModel):
             "where that provenance reported nothing."
         ),
     )
-    window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
+    window: ResampledTimeSeriesWindow = Field(description="The window and frequency applied to this response.")
     data: list[TotalCapitalBucketResponse] = Field(
         description="Last observed capital figures per time bucket, newest first."
     )
@@ -159,13 +159,13 @@ def _reference_field(by_bucket: dict, bucket_start, field: str):
         "`source=both`) each bucket also carries `assets_usd` "
         "(the upstream PRIME COLLATERAL figure) and the monitor's `encumbrance_ratio`. "
         "Returns `404` if the prime is unknown. Defaults to the last 24h; "
-        "pass a window and `resolution` for longer ranges."
+        "pass a window and `frequency` for longer ranges."
     ),
 )
 async def list_prime_total_capital(
     prime_id: ProxyAddressPathParam,
     response: Response,
-    time_series: TimeSeriesQuery = Depends(get_time_series_query_params),
+    time_series: TimeSeriesQuery = Depends(get_resampled_time_series_query_params),
     limit: int = Query(100, ge=1, le=500, description="Max buckets returned (default 100, max 500)."),
     requested_provenance: Provenance | None = Depends(get_requested_provenance),
     service: AllocationService = Depends(_get_service),
@@ -183,7 +183,7 @@ async def list_prime_total_capital(
     # Treasury observations are immutable once written, so a fully-pinned window
     # is safely cacheable; a defaulted (now-relative) window is not.
     apply_cache_control(response, time_series)
-    window = build_window(time_series)
+    window = build_resampled_window(time_series)
 
     if source is Provenance.REFERENCE:
         reference_buckets = await reference_repositories().list_reference_capital_buckets(
@@ -227,7 +227,7 @@ async def list_prime_total_capital(
                 limit=limit,
             ),
         )
-        # Both series are gap-filled over the same window and resolution, so the
+        # Both series are gap-filled over the same window and frequency, so the
         # bucket grids match and a lookup cannot shift a value one bucket over.
         reference_by_bucket = {bucket.bucket_start: bucket for bucket in reference_buckets}
         indexed_by_bucket = {bucket.bucket_start: bucket.total_capital_usd for bucket in buckets}

@@ -29,6 +29,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/oraclewire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -236,14 +237,13 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	}
 	defer archiveDrain()
 
-	repo, err := postgres.NewOnchainPriceRepository(pool, logger, buildReg.BuildID(), 0)
-	if err != nil {
-		return fmt.Errorf("creating repository: %w", err)
-	}
-
 	referenceEffectiveAt, err := env.ReferenceEffectiveAt(time.Now().UTC())
 	if err != nil {
 		return fmt.Errorf("resolving reference effective time: %w", err)
+	}
+	repo, units, err := oraclewire.OpenRun(ctx, buildReg, pool, cfg.chainID, referenceEffectiveAt, 0, logger)
+	if err != nil {
+		return err
 	}
 
 	service, err := oracle_price_worker.NewService(
@@ -272,6 +272,7 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 		return fmt.Errorf("creating service: %w", err)
 	}
 	service.WithTelemetry(oracleTelemetry)
+	service.WithUnits(units)
 
 	return lifecycle.RunWithTimeoutGuard(ctx, logger, onShutdownTimeout, service)
 }

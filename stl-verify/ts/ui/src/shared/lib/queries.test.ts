@@ -59,7 +59,7 @@ function keyInitOf(options: {
 const WINDOW: SeriesWindow = {
   fromTimestamp: '2026-08-27T00:00:00.000Z',
   toTimestamp: '2026-08-28T00:00:00.000Z',
-  resolution: 'PT15M',
+  frequency: 'PT15M',
 };
 
 const PRIME = '0x1601843c5e9bc251a3272907010afa41fa18347e';
@@ -67,8 +67,8 @@ const PRIME = '0x1601843c5e9bc251a3272907010afa41fa18347e';
 const ENVELOPE_WINDOW: PrimeDebtEnvelope['window'] = {
   from_timestamp: '2026-08-27T00:00:00.000Z',
   to_timestamp: '2026-08-28T00:00:00.000Z',
-  interval_ms: 900_000,
-  resolution: 'PT15M',
+  frequency: 'PT15M',
+  frequency_ms: 900_000,
 };
 
 /** The arm of `TEnvelope` that answers to `TMode`, as the fixtures name them. */
@@ -242,8 +242,8 @@ describe('envelope payload policy', () => {
 });
 
 describe('envelope mode policy', () => {
-  // The two series ask for `aggregate=true` alike; only what they do with a
-  // disagreeing answer differs, and that asymmetry is deliberate.
+  // The two series ask for buckets alike; only what they do with a disagreeing
+  // answer differs, and that asymmetry is deliberate.
   it('rejects a raw envelope on the primary debt series', () => {
     const select = selectOf<PrimeDebtEnvelope, unknown>(
       debtSeriesQuery(PRIME, WINDOW),

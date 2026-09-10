@@ -927,7 +927,7 @@ def test_list_allocation_activity_returns_aggregated_buckets():
         params={
             "from_timestamp": "2026-01-01T00:00:00Z",
             "to_timestamp": "2026-01-02T00:00:00Z",
-            "aggregate": "true",
+            "aggregation_method": "end-period",
         },
     )
 
@@ -1122,12 +1122,25 @@ def test_list_allocation_activity_allows_wide_window_with_prime_id_filter():
             "prime_id": _VALID_ADDR,
             "from_timestamp": "2026-01-01T00:00:00Z",
             "to_timestamp": "2026-03-15T00:00:00Z",
-            "resolution": "PT6H",
         },
     )
 
     assert response.status_code == 200
     service.list_allocation_activity.assert_awaited_once()
+
+
+def test_a_default_frequency_activity_window_names_no_grid():
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    service.list_allocation_activity.return_value = []
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    window = client.get("/v1/allocations/activity").json()["window"]
+
+    assert "frequency" not in window
+    assert "frequency_ms" not in window
 
 
 def test_list_allocation_activity_returns_422_for_invalid_tx_hash():
