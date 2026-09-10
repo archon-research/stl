@@ -18,6 +18,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # sql-comment-check diffs added *.sql against a merge base, which a
+          # depth-1 checkout has no origin/main to compute.
+          fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -35,7 +38,7 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@latest
 
       - name: Format and module checks
-        run: make fmt-check goimports-check tidy-check shared-container-check integration-shard-check ci-service-check
+        run: make fmt-check goimports-check tidy-check shared-container-check integration-shard-check ci-service-check sql-comment-check
 
       # Runs the golangci-lint binary directly (not `make golangci-lint`) so
       # the action can manage the binary install and analysis cache. Covers
