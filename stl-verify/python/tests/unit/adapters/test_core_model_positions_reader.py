@@ -6,6 +6,8 @@ import pytest
 
 from app.adapters.postgres.core_model_positions_reader import (
     PositionRow,
+    anchorage_asset_prices,
+    build_anchorage_users_frame,
     build_market_frame,
     build_morpho_users_frame,
     build_syrup_users_frame,
@@ -354,3 +356,142 @@ def test_syrup_price_disagreement_on_an_excluded_stable_does_not_fail_the_market
     ]
     assert syrup_attested_prices(rows) == pytest.approx({"BTC": 78276.425})
     assert len(build_syrup_users_frame(rows, "USDC", 6)) == 1
+
+
+def _anchorage_row(
+    package_id="0cb3a89e30d0aa19f671",
+    prime_id=1,
+    exposure=150_000_000.0,
+    package_value=185_804_734.1519485304,
+    current_ltv=None,
+    margin_call_ltv=0.85,
+    critical_ltv=0.9,
+    margin_return_ltv=0.7,
+    asset_type="BTC",
+    asset_price=65_572.72,
+    asset_quantity=2833.56758957,
+    asset_weighted_value=None,
+    ltv_timestamp=1,
+):
+    """One cohort row as the SQL returns it (the defaults are a real staging package)."""
+    return SimpleNamespace(
+        prime_id=prime_id,
+        package_id=package_id,
+        exposure_value=exposure,
+        package_value=package_value,
+        current_ltv=current_ltv if current_ltv is not None else (exposure / package_value if package_value else 0.0),
+        margin_call_ltv=margin_call_ltv,
+        critical_ltv=critical_ltv,
+        margin_return_ltv=margin_return_ltv,
+        asset_type=asset_type,
+        asset_price=asset_price,
+        asset_quantity=asset_quantity,
+        asset_weighted_value=asset_weighted_value if asset_weighted_value is not None else package_value,
+        ltv_timestamp=ltv_timestamp,
+    )
+
+
+def test_anchorage_row_reproduces_a_real_staging_package():
+    row = build_anchorage_users_frame([_anchorage_row()]).iloc[0]
+    assert row["wallet_address"] == "0cb3a89e30d0aa19f671"
+    assert row["lltv"] == pytest.approx(0.9)
+    assert row["ltv"] == pytest.approx(0.8072991287581084)
+    assert row["health_factor"] == pytest.approx(0.9 / 0.8072991287581084)
+    assert row["liquidation_incentive"] == pytest.approx(1.02)
+    assert row["btc_supply"] == pytest.approx(2833.56758957)
+    assert row["btc_supply_usd"] == pytest.approx(185_804_734.15, rel=1e-9)
+    assert row["usdc_borrow"] == row["usdc_borrow_usd"] == pytest.approx(150_000_000)
+    assert row["total_collateral_usd"] == pytest.approx(185_804_734.15, rel=1e-9)
+    assert row["total_borrow_usd"] == pytest.approx(150_000_000)
+
+
+def test_anchorage_one_row_per_package():
+    df = build_anchorage_users_frame([_anchorage_row(), _anchorage_row(package_id="410e7ac982c41b3ccfdf")])
+    assert sorted(df["wallet_address"]) == ["0cb3a89e30d0aa19f671", "410e7ac982c41b3ccfdf"]
+
+
+def test_anchorage_multi_asset_package_sums_per_symbol_and_keeps_package_totals():
+    package_value = 150_000.0
+    rows = [
+        _anchorage_row(
+            exposure=100_000.0,
+            package_value=package_value,
+            asset_type="BTC",
+            asset_price=100_000.0,
+            asset_quantity=1.0,
+            asset_weighted_value=100_000.0,
+        ),
+        _anchorage_row(
+            exposure=100_000.0,
+            package_value=package_value,
+            asset_type="ETH",
+            asset_price=5_000.0,
+            asset_quantity=10.0,
+            asset_weighted_value=50_000.0,
+        ),
+    ]
+    row = build_anchorage_users_frame(rows).iloc[0]
+    assert row["btc_supply"] == pytest.approx(1.0)
+    assert row["btc_supply_usd"] == pytest.approx(100_000.0)
+    assert row["eth_supply"] == pytest.approx(10.0)
+    assert row["eth_supply_usd"] == pytest.approx(50_000.0)
+    assert row["total_collateral_usd"] == pytest.approx(package_value)
+    assert row["total_borrow_usd"] == pytest.approx(100_000.0)
+
+
+def test_anchorage_custody_only_packages_are_skipped():
+    df = build_anchorage_users_frame([_anchorage_row(), _anchorage_row(package_id="idle", exposure=0.0)])
+    assert list(df["wallet_address"]) == ["0cb3a89e30d0aa19f671"]
+
+
+def test_anchorage_zero_package_value_with_a_loan_is_excluded_loudly(caplog):
+    rows = [
+        _anchorage_row(),
+        _anchorage_row(package_id="baddebt", package_value=0.0, current_ltv=0.0, asset_weighted_value=0.0),
+    ]
+    df = build_anchorage_users_frame(rows)
+    assert list(df["wallet_address"]) == ["0cb3a89e30d0aa19f671"]
+    assert "zero package value" in caplog.text
+
+
+def test_anchorage_all_packages_excluded_fails_rather_than_an_empty_market():
+    with pytest.raises(ValueError, match="no active anchorage packages with a drawn loan"):
+        build_anchorage_users_frame([_anchorage_row(exposure=0.0)])
+
+
+def test_anchorage_stored_ltv_disagreement_warns(caplog):
+    build_anchorage_users_frame([_anchorage_row(current_ltv=0.5)])
+    assert "stored current_ltv" in caplog.text
+
+
+def test_anchorage_asset_value_disagreement_warns(caplog):
+    build_anchorage_users_frame([_anchorage_row(asset_price=70_000.0)])
+    assert "asset_weighted_value" in caplog.text
+
+
+def test_anchorage_consistent_package_stays_quiet(caplog):
+    build_anchorage_users_frame([_anchorage_row()])
+    assert "disagrees" not in caplog.text
+
+
+def test_anchorage_threshold_triple_disagreement_warns(caplog):
+    rows = [_anchorage_row(), _anchorage_row(package_id="other", margin_call_ltv=0.8)]
+    build_anchorage_users_frame(rows)
+    assert "distinct (margin_call, critical, margin_return)" in caplog.text
+
+
+def test_anchorage_prices_take_the_newest_ltv_timestamp():
+    rows = [
+        _anchorage_row(asset_price=65_572.72, ltv_timestamp=2),
+        _anchorage_row(package_id="other", asset_price=65_571.59, ltv_timestamp=1),
+    ]
+    assert anchorage_asset_prices(rows) == pytest.approx({"BTC": 65_572.72})
+
+
+def test_anchorage_intra_poll_price_spread_warns(caplog):
+    rows = [
+        _anchorage_row(asset_price=65_000.0, ltv_timestamp=2),
+        _anchorage_row(package_id="other", asset_price=60_000.0, ltv_timestamp=1),
+    ]
+    anchorage_asset_prices(rows)
+    assert "disagree on the BTC price" in caplog.text
