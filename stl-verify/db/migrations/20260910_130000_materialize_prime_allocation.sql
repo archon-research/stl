@@ -49,6 +49,10 @@ COMMENT ON VIEW position_prime_allocation IS '[Operational] VEC-407 projection: 
 -- An empty search_path, not FROM CURRENT: that captures '"$user", public', which still resolves per
 -- role at call time and so keeps the shadowing hazard it looks like it removes. Both references are
 -- schema-qualified and regclass resolves through implicit pg_catalog, so nothing needs a path.
+-- Dropped rather than replaced: keeping the old argument list beside the new one makes a
+-- call that omits the run ambiguous, as it did for the spine.
+DROP FUNCTION IF EXISTS materialize_prime_allocation(integer);
+
 CREATE OR REPLACE FUNCTION materialize_prime_allocation(p_build_id integer DEFAULT 0,
                                                         p_run_id bigint DEFAULT NULL) RETURNS bigint
     LANGUAGE sql
@@ -56,6 +60,6 @@ CREATE OR REPLACE FUNCTION materialize_prime_allocation(p_build_id integer DEFAU
     SELECT public.materialize_position_projection('public.position_prime_allocation'::regclass, p_build_id, p_run_id);
 $fn$;
 
-COMMENT ON FUNCTION materialize_prime_allocation(integer, bigint) IS '[Operational] VEC-407: appends Prime ALM allocation observations into position_state via materialize_position_projection(position_prime_allocation). See that function''s comment for the run contract.';
+COMMENT ON FUNCTION materialize_prime_allocation(integer, bigint) IS '[Operational] VEC-407: appends Prime ALM allocation observations into position_state via materialize_position_projection(position_prime_allocation). See that function''s comment for the run contract. p_build_id and p_run_id are stamped on every row appended (ADR-0006 §2).';
 
 INSERT INTO migrations (filename) VALUES ('20260910_130000_materialize_prime_allocation.sql') ON CONFLICT (filename) DO NOTHING;
