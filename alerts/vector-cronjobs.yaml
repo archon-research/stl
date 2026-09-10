@@ -710,7 +710,7 @@ groups:
           summary: "position-materializer view {{ $labels.materializer }} is failing"
           description: >-
             Projection {{ $labels.materializer }} returned an error on
-            {{ $labels.cluster }} in the last 15m. The shared materializer fails
-            the whole run rather than skipping a view, so the other views in the
-            same run did not write either.
+            {{ $labels.cluster }} in the last 15m. The runner logs the failure
+            and continues, so the other views in the same run did write; only
+            this one did not.
           runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializerviewfailing"
