@@ -183,4 +183,33 @@ func TestPositionProjectionRefusal(t *testing.T) {
 			t.Error("stl_readonly must be able to read refusals")
 		}
 	})
+
+	t.Run("only the inverting observations are withheld; the position's monotone ones land", func(t *testing.T) {
+		// Withholding the whole position left it frozen every run: the source is append-only, so the
+		// next run re-derived the identical batch and refused it again, and nothing ever landed.
+		v := view(
+			row("inv-part", 100, "2026-07-01T10:00:00Z", "500", "'LOAN'"),
+			row("inv-part", 200, "2026-07-01T09:00:00Z", "600", "'LOAN'"),
+			row("inv-part", 300, "2026-07-01T11:00:00Z", "700", "'LOAN'"),
+			row("inv-part", 400, "2026-07-01T12:00:00Z", "800", "'LOAN'"),
+			row("inv-part", 500, "2026-07-01T13:00:00Z", "900", "'LOAN'"),
+		)
+		if n := f.mppN(t, "pv_inv_part", v, "inverted pair plus monotone rows"); n != 3 {
+			t.Errorf("inserted %d, want the 3 monotone observations", n)
+		}
+		if got := count(t, `SELECT count(*) FROM position_state WHERE instrument_key = 'inv-part'
+		                     AND block_number IN (100, 200)`); got != 0 {
+			t.Errorf("%d of the inverting pair reached the spine; want none", got)
+		}
+		if got := count(t, `SELECT count(*) FROM position_state WHERE instrument_key = 'inv-part'`); got != 3 {
+			t.Errorf("the position holds %d observations, want 3", got)
+		}
+		if got := refusals(t, "inv-part", "block_time_inverts_height"); got != 2 {
+			t.Errorf("recorded %d refusals, want one per side of the pair", got)
+		}
+		// Re-running adds nothing: the pair is still ambiguous, the rest is already stored.
+		if n := f.mppN(t, "pv_inv_part", v, "re-run"); n != 0 {
+			t.Errorf("re-running inserted %d, want 0", n)
+		}
+	})
 }
