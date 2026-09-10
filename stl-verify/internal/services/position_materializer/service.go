@@ -38,10 +38,10 @@ type Service struct {
 // no blank or duplicate entries (a duplicate is a config typo — reruns are
 // idempotent but a silent double-run hides the mistake). buildID and runID are
 // stamped on every appended row, as the ADR-0002 code-provenance record and the
-// ADR-0006 §2 writer run; neither may be
-// write, and the database function rejects a blank one anyway — failing here is
-// earlier and clearer. logger defaults to slog.Default(); telemetry may be nil
-// (its metrics become no-ops).
+// ADR-0006 §2 writer run. buildID may be 0, the reserved pre-tracking build;
+// runID may not, because a run is opened at startup and a zero would name a
+// writer_run row that does not exist. logger defaults to slog.Default();
+// telemetry may be nil (its metrics become no-ops).
 func NewService(materializers []string, materializer outbound.PositionMaterializer, buildID int, runID int64, logger *slog.Logger, telemetry *Telemetry) (*Service, error) {
 	if materializer == nil {
 		return nil, fmt.Errorf("position materializer is required")

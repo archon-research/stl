@@ -63,6 +63,15 @@ func TestPositionMaterializer_RunOnce(t *testing.T) {
 		t.Fatalf("create materializer wrappers: %v", err)
 	}
 
+	// Filler runs, so writer_run.id and build_registry.id cannot coincide: on a fresh database both
+	// sequences would hand out 1, and a swap of the two named arguments would satisfy every assertion
+	// below. These make the ids differ by construction.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO writer_run (build_id, reference_snapshot, reference_effective_at)
+		SELECT 0, 'filler', now() FROM generate_series(1, 5)`); err != nil {
+		t.Fatalf("seed filler writer runs: %v", err)
+	}
+
 	// setupRunner registers a build, which needs a git hash. `go test` does not stamp VCS info, so
 	// without this the test fails before it reaches anything it asserts -- in CI as well as locally.
 	// Every sibling integration test that registers a build does the same.
@@ -104,16 +113,23 @@ func TestPositionMaterializer_RunOnce(t *testing.T) {
 	// And with the writer run this process opened. The stub wrapper declares a parameter between the
 	// two provenance ones, as materialize_maple_loan does, so a positional second argument would have
 	// bound the run to a skew tolerance instead of reaching the spine.
-	if runID == nil || *runID <= 0 {
-		t.Errorf("run_id = %v; want the writer run this process opened", runID)
-	} else {
-		var openRuns int
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM writer_run WHERE id = $1`, *runID).Scan(&openRuns); err != nil {
-			t.Fatal(err)
-		}
-		if openRuns != 1 {
-			t.Errorf("run_id %d names no writer_run row", *runID)
-		}
+	if runID == nil {
+		t.Fatalf("run_id is NULL; want the writer run this process opened")
+	}
+	// The run must be the newest one, must not be the build id, and must belong to this build.
+	var wantRun int64
+	var runBuild int
+	if err := pool.QueryRow(ctx, `SELECT id, build_id FROM writer_run ORDER BY id DESC LIMIT 1`).Scan(&wantRun, &runBuild); err != nil {
+		t.Fatal(err)
+	}
+	if *runID != wantRun {
+		t.Errorf("run_id = %d; want %d, the run this process opened", *runID, wantRun)
+	}
+	if *runID == int64(buildID) {
+		t.Errorf("run_id and build_id are both %d, so this cannot tell the two arguments apart", buildID)
+	}
+	if runBuild != buildID {
+		t.Errorf("writer_run %d names build %d, but the rows carry build %d", *runID, runBuild, buildID)
 	}
 
 	// The rerun re-derives the same observation, so it must append nothing; the refusing wrapper

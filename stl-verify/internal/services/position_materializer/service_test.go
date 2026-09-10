@@ -31,13 +31,18 @@ func TestNewService_Validation(t *testing.T) {
 		views   []string
 		mat     *mockMaterializer
 		buildID int
+		runID   int64
 		want    string
 	}{
-		{"nil materializer", []string{"v"}, nil, 1, "materializer is required"},
-		{"empty views", nil, ok, 1, "no projection materializers configured"},
-		{"blank view entry", []string{"a", "  "}, ok, 1, "blank entry"},
-		{"duplicate view", []string{"a", "b", "a"}, ok, 1, "configured twice"},
-		{"negative buildID", []string{"a"}, ok, -1, "must not be negative"},
+		{"nil materializer", []string{"v"}, nil, 1, 77, "materializer is required"},
+		{"empty views", nil, ok, 1, 77, "no projection materializers configured"},
+		{"blank view entry", []string{"a", "  "}, ok, 1, 77, "blank entry"},
+		{"duplicate view", []string{"a", "b", "a"}, ok, 1, 77, "configured twice"},
+		{"negative buildID", []string{"a"}, ok, -1, 77, "must not be negative"},
+		// A zero run is the shape the wiring produces when it never opens one, and every row the
+		// sweep appended would then name a writer_run that does not exist.
+		{"zero runID", []string{"a"}, ok, 1, 0, "must be a writer_run id"},
+		{"negative runID", []string{"a"}, ok, 1, -1, "must be a writer_run id"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -47,9 +52,9 @@ func TestNewService_Validation(t *testing.T) {
 			}
 			var err error
 			if mat == nil {
-				_, err = NewService(tc.views, nil, tc.buildID, 77, nil, nil)
+				_, err = NewService(tc.views, nil, tc.buildID, tc.runID, nil, nil)
 			} else {
-				_, err = NewService(tc.views, mat, tc.buildID, 77, nil, nil)
+				_, err = NewService(tc.views, mat, tc.buildID, tc.runID, nil, nil)
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("NewService error = %v; want it to contain %q", err, tc.want)

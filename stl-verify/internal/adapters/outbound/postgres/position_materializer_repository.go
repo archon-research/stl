@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -115,7 +116,9 @@ func (r *PositionMaterializerRepository) RefusedByProjection(ctx context.Context
 func (r *PositionMaterializerRepository) materializeOnce(ctx context.Context, materializer string, buildID int, runID int64) (int64, error) {
 	var changed int64
 	q := fmt.Sprintf(`SELECT %s(p_build_id => $1, p_run_id => $2)`, pgx.Identifier{materializer}.Sanitize())
-	if err := r.pool.QueryRow(ctx, q, buildID, runID).Scan(&changed); err != nil {
+	// buildregistry.RunID, not the bare int64: its Valuer maps 0 to NULL, because a zero would name a
+	// writer_run row that does not exist and run_id carries no FK to catch it.
+	if err := r.pool.QueryRow(ctx, q, buildID, buildregistry.RunID(runID)).Scan(&changed); err != nil {
 		return 0, fmt.Errorf("running %s: %w", materializer, err)
 	}
 	return changed, nil

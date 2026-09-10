@@ -48,7 +48,9 @@ whole history every time.
    If the source is stale, the incident belongs to that indexer, not here. The generic cronjob alerts
    for that indexer should also be firing.
 
-3. If the sources are current but nothing lands, run one projection by hand and read the count:
+3. If the sources are current but nothing lands, run one projection by hand and read the count. A
+   manual call stamps `build_id = 0` and a NULL run on every row it appends, and the table is
+   append-only, so that provenance cannot be corrected afterwards:
    ```sql
    SELECT materialize_morpho_vault(0);
    ```
@@ -120,7 +122,8 @@ you do not have to find it in logs. Check `position_projection_refusal` and `pos
 | `violates the position_state column contract: X (is Y / MISSING)` | the view lost a column or changed its type | fix the view; the contract is the ten columns in the migration header |
 | `double-emits a logical observation key` | the view produces two rows for one `(position, block, block_version, processing_version)` | dedupe the view; usually a join fanning out |
 | `emits position_ids owned by another projection` | two views claim the same position — their `instrument_key` forms disagree, or the fan-out overlaps | decide which view owns it; do **not** work around it, this is the guard doing its job |
-| `p_view (oid N) does not name an existing relation` | a configured view was dropped, or the list names something that is not a relation | fix `POSITION_PROJECTIONS`, or restore the view |
+| `function materialize_x(p_build_id => integer, p_run_id => bigint) does not exist` | a configured entry names no wrapper, or a deployed wrapper does not take `p_run_id` | fix `POSITION_PROJECTIONS`, or ship the wrapper's own migration |
+| `p_view (oid N) does not name an existing relation` | a wrapper's own view was dropped | restore the view |
 
 **A warning rather than an error** — `re-emits stored observations with a changed block_timestamp` or
 `changed quantity` — is not a failure. The stored row is kept and nothing is rewritten. It means the
