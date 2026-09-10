@@ -57,7 +57,7 @@ func (f *positionDailyFixture) observe(id string, o dailyObs) {
 		     block_number, block_version, processing_version, block_timestamp, projection, build_id, deal_type,
 		     run_id)
 		VALUES (sha256($1::bytea), 1, 1, 'inst-' || $1, substr(md5($1) || md5($1), 1, 40), $2, $3, $4, $5::int, $6,
-		        'public.proj-' || ($5::int)::text, $5::int, $7, 7700 + $5::int)`,
+		        'public.proj-' || ($5::int)::text, $5::int, $7, 7700 + ($3::bigint * 10) + $5::int)`,
 		id, o.qty, o.block, o.bv, o.pv, o.ts, dt); err != nil {
 		f.t.Fatalf("observe %s at block %d: %v", id, o.block, err)
 	}
@@ -584,7 +584,7 @@ func TestPositionDailyEqualsTheSpineArgmaxOverRandomHistories(t *testing.T) {
 				if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW `+view+` AS `+valuesBody(arrived)); err != nil {
 					t.Fatalf("create view (batch %d): %v", bi, err)
 				}
-				if _, err := pool.Exec(ctx, `SELECT materialize_position_projection($1::regclass)`, view); err != nil {
+				if _, err := pool.Exec(ctx, `SELECT materialize_position_projection($1::regclass, 0, $2)`, view, 9000+bi); err != nil {
 					t.Fatalf("materialize batch %d: %v", bi, err)
 				}
 			}
@@ -609,7 +609,7 @@ func TestPositionDailyEqualsTheSpineArgmaxOverRandomHistories(t *testing.T) {
 				         ORDER BY position_id, block_number DESC) latest`); err != nil {
 				t.Fatalf("create the same-day view: %v", err)
 			}
-			if _, err := pool.Exec(ctx, `SELECT materialize_position_projection($1::regclass)`, view); err != nil {
+			if _, err := pool.Exec(ctx, `SELECT materialize_position_projection($1::regclass, 0, $2)`, view, 9500); err != nil {
 				t.Fatalf("materialize the same-day observations: %v", err)
 			}
 

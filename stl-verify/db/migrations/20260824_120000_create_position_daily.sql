@@ -28,6 +28,10 @@ CREATE TABLE IF NOT EXISTS position_daily (
     CONSTRAINT position_daily_as_of_date_chk CHECK (as_of_date = (block_timestamp AT TIME ZONE 'utc')::date)
 );
 
+-- CREATE TABLE IF NOT EXISTS adds no column to a table that already exists, so run_id needs its
+-- own idempotent ALTER: the writers below read it and are parsed when they are created.
+ALTER TABLE position_daily ADD COLUMN IF NOT EXISTS run_id bigint;
+
 -- Hypertable on as_of_date, converted while the table is still empty. 7-day chunks rather than
 -- position_state's 1-day: chunk count drives planning and per-position fan-out. No default index --
 -- chunk exclusion on as_of_date does that job.
