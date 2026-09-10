@@ -22,7 +22,6 @@ import (
 	"github.com/stretchr/testify/mock"
 	"go.temporal.io/sdk/testsuite"
 
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
@@ -112,6 +111,7 @@ func setWorkerEnv(t *testing.T, bucket, rpcURL string) {
 	// The build registry refuses to register a build it cannot identify, and a
 	// `go test` binary carries no VCS stamp.
 	t.Setenv("BUILD_GIT_HASH", "integration-test")
+	testutil.SetBuildGitHash(t)
 }
 
 func newDeps(t *testing.T, pool *pgxpool.Pool) temporal.Dependencies {
@@ -439,14 +439,11 @@ func discoverInto(t *testing.T, ctx context.Context, bucket string, vault common
 	if err != nil {
 		t.Fatalf("newVaultProber: %v", err)
 	}
-	buildReg, err := buildregistry.New(ctx, pool)
-	if err != nil {
-		t.Fatalf("registering the build: %v", err)
-	}
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
 
 	for _, rng := range ranges {
 		if _, err := discoverAndPersistVaults(ctx, logger, s3Reader, extractor, prober, pool,
-			buildReg.BuildID(), cfg, rng, probeBlock); err != nil {
+			buildID, runID, cfg, rng, probeBlock); err != nil {
 			t.Fatalf("discovering over blocks %d-%d: %v", rng.From, rng.To, err)
 		}
 	}
@@ -643,12 +640,8 @@ func replayOneAddAdapter(t *testing.T) *countingMorphoRepository {
 	multicaller := testutil.NewMockMulticaller()
 	wireAdapterRegistrationReads(t, multicaller, adapter)
 
-	t.Setenv("BUILD_GIT_HASH", "integration-test")
-	buildReg, err := buildregistry.New(ctx, pool)
-	if err != nil {
-		t.Fatalf("registering the build: %v", err)
-	}
-	svc, counted, err := buildReplayService(testutil.DiscardLogger(), multicaller, pool, buildReg.BuildID(), 1)
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	svc, counted, err := buildReplayService(testutil.DiscardLogger(), multicaller, pool, buildID, runID, 1)
 	if err != nil {
 		t.Fatalf("buildReplayService: %v", err)
 	}

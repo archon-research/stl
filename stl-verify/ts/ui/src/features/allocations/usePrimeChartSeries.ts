@@ -11,7 +11,7 @@ import { useProvenanceView } from '../../shared/lib/provenance';
 import type {
   ExposureBucket,
   PrimeDebtBucket,
-  TimeSeriesResolution,
+  TimeSeriesFrequency,
   TotalCapitalBucket,
 } from '../../shared/types/allocation';
 import type { ChartDatum } from './metricCards';
@@ -40,22 +40,22 @@ export type PrimeChartSeries = {
   activityErrorMessage: string | null;
 };
 
-// Picks the chart's downsampling resolution for a range. This is deliberately
-// NOT the server's window-to-resolution policy (`time_series.minimum_resolution`),
-// which is only a *floor* — the finest resolution the backend will allow for a
-// window. This instead picks a *display* resolution that (1) is always at least
+// Picks the chart's downsampling frequency for a range. This is deliberately
+// NOT the server's window-to-frequency policy (`time_series.minimum_frequency`),
+// which is only a *floor* — the finest frequency the backend will allow for a
+// window. This instead picks a *display* frequency that (1) is always at least
 // as coarse as that floor (so the request never 422s) and (2) keeps the bucket
 // count under the 500 per-prime page cap. Letting the server default would pick
 // its floor and silently truncate long ranges (365d at the PT6H floor is ~1460
 // buckets, well over 500). Each value below must stay >= the server floor for
 // its window; if the server's policy tightens, these must be revisited.
-function getResolutionForRange(
+function getFrequencyForRange(
   preset: RangePreset,
   range: TimeRange,
-): TimeSeriesResolution {
+): TimeSeriesFrequency {
   const presetMap: Record<
     Exclude<RangePreset, 'custom'>,
-    TimeSeriesResolution
+    TimeSeriesFrequency
   > = {
     '1h': 'PT1M',
     '6h': 'PT5M',
@@ -116,8 +116,8 @@ export function usePrimeChartSeries(
 ): PrimeChartSeries {
   const { showsReference: showsReferenceNow } = useProvenanceView();
 
-  const chartResolution = useMemo(
-    () => getResolutionForRange(rangePreset, timeRange),
+  const chartFrequency = useMemo(
+    () => getFrequencyForRange(rangePreset, timeRange),
     [rangePreset, timeRange],
   );
 
@@ -137,7 +137,7 @@ export function usePrimeChartSeries(
     {
       fromTimestamp: timeRange.from_timestamp,
       toTimestamp: timeRange.to_timestamp,
-      resolution: chartResolution,
+      frequency: chartFrequency,
     },
   );
 

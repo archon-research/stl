@@ -47,13 +47,20 @@
     "PRICE_SOURCE": "postgres",
     "ORDERBOOK_SOURCE": "postgres"
   },
+  "_comment_syrup_sources": "Fully live in staging (8-9 Sep 2026): positions from the maple_* tables, prices from onchain_token_price (BTC/ETH via the WBTC/WETH proxy series) plus asset_price (XRP/HYPE, token-less), books from cex_orderbook_snapshots. Prod data lags this config (no XRP/HYPE backfill, books BTC/ETH only), so the prod overlay pins these two markets back to parquet via the per-market CORE_MODEL_SYRUP_* env vars until it catches up.",
   "syrup_usdc": {
     "PROTOCOL": "SYRUP",
-    "LOAN_TOKEN": "USDC"
+    "LOAN_TOKEN": "USDC",
+    "POSITION_SOURCE": "postgres",
+    "PRICE_SOURCE": "postgres",
+    "ORDERBOOK_SOURCE": "postgres"
   },
   "syrup_usdt": {
     "PROTOCOL": "SYRUP",
-    "LOAN_TOKEN": "USDT"
+    "LOAN_TOKEN": "USDT",
+    "POSITION_SOURCE": "postgres",
+    "PRICE_SOURCE": "postgres",
+    "ORDERBOOK_SOURCE": "postgres"
   },
   "anchorage": {
     "PROTOCOL": "ANCHORAGE",

@@ -145,10 +145,13 @@ async def test_list_supported_asset_ids_filters_supported_protocols(
             ReceiptTokenProtocolPair(receipt_token_id=2, protocol_name="morpho-blue", chain_id=1),
             ReceiptTokenProtocolPair(receipt_token_id=3, protocol_name="Unsupported", chain_id=1),
             ReceiptTokenProtocolPair(receipt_token_id=4, protocol_name="Aave V3 Avalanche", chain_id=43114),
+            ReceiptTokenProtocolPair(receipt_token_id=5, protocol_name="Aave V3 Arbitrum", chain_id=42161),
+            ReceiptTokenProtocolPair(receipt_token_id=6, protocol_name="Aave V3 Optimism", chain_id=10),
+            ReceiptTokenProtocolPair(receipt_token_id=7, protocol_name="Aave V3 Base", chain_id=8453),
         ]
     )
 
-    assert await reader.list_supported_asset_ids() == {1, 2, 4}
+    assert await reader.list_supported_asset_ids() == {1, 2, 4, 5, 6, 7}
     receipt_token_repo.list_protocol_pairs.assert_awaited_once_with()
 
 

@@ -27,7 +27,22 @@ from app.logging import get_logger
 
 logger = get_logger(__name__)
 
-_AAVE_LIKE = frozenset({"sparklend", "aave_v2", "aave_v3", "aave_v3_lido", "aave_v3_rwa", "aave_v3_avalanche"})
+# The L2 markets (arbitrum/optimism/base, ARCT-213) have no receipt tokens or
+# oracle_asset rows yet, so they contribute nothing until those land; listing
+# them here keeps the breakdown from raising unsupported-protocol when they do.
+_AAVE_LIKE = frozenset(
+    {
+        "sparklend",
+        "aave_v2",
+        "aave_v3",
+        "aave_v3_lido",
+        "aave_v3_rwa",
+        "aave_v3_avalanche",
+        "aave_v3_arbitrum",
+        "aave_v3_optimism",
+        "aave_v3_base",
+    }
+)
 _MORPHO = frozenset({"morpho_blue"})
 _MAPLE = frozenset({"maple"})
 # Protocols eligible for the gap-sweep RRC model (feeds ``list_supported_asset_ids`` →

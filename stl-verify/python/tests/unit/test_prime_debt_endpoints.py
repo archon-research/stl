@@ -46,6 +46,20 @@ def _snapshot() -> PrimeDebtSnapshot:
     )
 
 
+def test_a_default_frequency_debt_window_names_no_grid():
+    from app.api.v1 import prime_debts
+
+    service = _make_service(snapshots=[_snapshot()])
+    app.dependency_overrides[prime_debts._get_prime_debt_service] = _override_service(service)
+    try:
+        window = TestClient(app).get(f"/v1/primes/{_VALID_ADDR}/debt").json()["window"]
+
+        assert "frequency" not in window
+        assert "frequency_ms" not in window
+    finally:
+        app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
+
+
 def test_list_prime_debt_snapshots_returns_rows():
     from app.api.v1 import prime_debts
 
@@ -60,8 +74,6 @@ def test_list_prime_debt_snapshots_returns_rows():
         assert response.status_code == 200
         body = response.json()
         assert body["mode"] == "raw"
-        assert body["window"]["resolution"] == "PT5M"
-        assert body["window"]["interval_ms"] == 5 * 60 * 1000
         assert body["data"] == [
             {
                 "prime_address": _VALID_ADDR,
@@ -151,7 +163,7 @@ def test_list_prime_debt_returns_aggregated_buckets():
             params={
                 "from_timestamp": "2026-03-04T12:00:00Z",
                 "to_timestamp": "2026-03-05T12:00:00Z",
-                "aggregate": "true",
+                "aggregation_method": "end-period",
             },
         )
 
@@ -178,7 +190,7 @@ def test_list_prime_debt_snapshots_returns_404_when_prime_missing():
     try:
         client = TestClient(app)
 
-        for params in ({}, {"aggregate": "true"}):
+        for params in ({}, {"aggregation_method": "end-period"}):
             response = client.get(f"/v1/primes/{_VALID_ADDR}/debt", params=params)
 
             assert response.status_code == 404
@@ -297,7 +309,6 @@ def test_list_prime_debt_snapshots_forwards_explicit_time_window():
             params={
                 "from_timestamp": "2026-03-01T00:00:00Z",
                 "to_timestamp": "2026-03-05T00:00:00Z",
-                "resolution": "PT15M",
             },
         )
 

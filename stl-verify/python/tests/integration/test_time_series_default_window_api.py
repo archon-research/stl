@@ -2,7 +2,7 @@
 
 These tests verify that endpoints using the shared time-series controller
 implicitly apply a 24h window when callers omit `from_timestamp` and
-`to_timestamp`, and that `aggregate=true` returns time-bucketed results.
+`to_timestamp`, and that `aggregation_method=end-period` returns time-bucketed results.
 """
 
 import asyncio
@@ -157,8 +157,8 @@ def test_prime_debt_defaults_to_last_24h(client: TestClient) -> None:
     assert rows[0]["block_number"] == 200
 
 
-def test_allocations_activity_aggregate_buckets_count_in_window(client: TestClient) -> None:
-    response = client.get(f"/v1/allocations/activity?prime_id=0x{_SPARK_PROXY_ADDR}&aggregate=true")
+def test_allocations_activity_bucketed_series_count_in_window(client: TestClient) -> None:
+    response = client.get(f"/v1/allocations/activity?prime_id=0x{_SPARK_PROXY_ADDR}&aggregation_method=end-period")
 
     assert response.status_code == 200
     body = response.json()
@@ -169,8 +169,8 @@ def test_allocations_activity_aggregate_buckets_count_in_window(client: TestClie
     assert sum((Decimal(b["total_tx_amount"]) for b in buckets), Decimal(0)) == Decimal("10")
 
 
-def test_protocol_events_aggregate_buckets_count_in_window(client: TestClient) -> None:
-    response = client.get("/v1/protocol-events?protocol_name=SparkLend&aggregate=true")
+def test_protocol_events_bucketed_series_count_in_window(client: TestClient) -> None:
+    response = client.get("/v1/protocol-events?protocol_name=SparkLend&aggregation_method=end-period")
 
     assert response.status_code == 200
     body = response.json()
@@ -178,9 +178,9 @@ def test_protocol_events_aggregate_buckets_count_in_window(client: TestClient) -
     assert sum(b["event_count"] for b in body["data"]) == 1
 
 
-def test_prime_debt_aggregate_buckets_carry_last_value(client: TestClient) -> None:
-    # Coarse resolution keeps the bucket count small and fully within the limit.
-    response = client.get(f"/v1/primes/{_SPARK_VAULT_ADDR}/debt?aggregate=true&resolution=PT1H")
+def test_prime_debt_bucketed_series_carry_last_value(client: TestClient) -> None:
+    # A coarse frequency keeps the bucket count small and fully within the limit.
+    response = client.get(f"/v1/primes/{_SPARK_VAULT_ADDR}/debt?aggregation_method=end-period&frequency=PT1H")
 
     assert response.status_code == 200
     body = response.json()

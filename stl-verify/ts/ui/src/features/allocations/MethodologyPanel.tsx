@@ -25,6 +25,7 @@ import {
   tokensQuery,
 } from '../../shared/lib/queries';
 import type { DataSource } from '../../shared/types/allocation';
+import type { Undefinable } from '../../shared/types/optional';
 import { LazyRegion, lazyChunk } from '../../shared/ui/LazyRegion';
 
 const NO_SOURCES: DataSource[] = [];
@@ -56,10 +57,11 @@ const metadataBodyClassName = css({
 type MethodologyPanelProps = {
   isOpen: boolean;
   onToggle: () => void;
+} & Undefinable<{
   selectedTokenAddress?: string | null;
   selectedTokenSymbol?: string | null;
   selectedChainId?: number | null;
-};
+}>;
 
 const METHODOLOGY_MARKDOWN = `## Internal Data (STL)
 - Onchain allocation positions from Ethereum mainnet

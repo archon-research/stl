@@ -135,9 +135,9 @@ def test_debt_resolves_by_proxy_address_to_the_same_payload(client: TestClient) 
 
 
 def test_aggregated_debt_resolves_by_proxy_address_to_the_same_buckets(client: TestClient) -> None:
-    by_vault = _debt(client, _SPARK_VAULT_ADDR, aggregate="true", resolution="P1D")
+    by_vault = _debt(client, _SPARK_VAULT_ADDR, aggregation_method="end-period", frequency="P1D")
 
-    by_proxy = _debt(client, _SPARK_PROXY_ADDR, aggregate="true", resolution="P1D")
+    by_proxy = _debt(client, _SPARK_PROXY_ADDR, aggregation_method="end-period", frequency="P1D")
 
     assert by_proxy == by_vault
     assert "2000" in {bucket["debt_wad"] for bucket in by_proxy["data"]}

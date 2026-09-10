@@ -225,6 +225,51 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: base-sparklend-position-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://base-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "8453"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#709 (ARCT-213).
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: optimism-sparklend-position-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://opt-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "10"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#709 (ARCT-213).
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arbitrum-sparklend-position-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://arb-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "42161"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#709 (ARCT-213).
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: avalanche-allocation-tracker-config
 data:
   AWS_REGION: "eu-west-1"
@@ -372,7 +417,10 @@ data:
 ---
 # On-demand one-shot VaultV2 repair worker (VEC-218) — see
 # docs/runbooks/vector-cronjobs.md. ALCHEMY_HTTP_URL is omitted: the binary
-# defaults to eth-mainnet, matching CHAIN_ID below.
+# defaults to eth-mainnet, matching CHAIN_ID below. The raw bucket every replayed
+# row's block_version is read from is not here — it carries a random suffix and so
+# arrives via the ExternalSecret, the same way the morpho-vault-backfill gets it.
+# DEPLOY_ENV is what the startup guard checks that bucket's name against.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -381,6 +429,8 @@ data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "1"
+  AWS_REGION: "eu-west-1"
+  DEPLOY_ENV: "prod"
 ---
 # On-demand Morpho vault backfill worker (VEC-218). ALCHEMY_HTTP_URL is omitted:
 # the binary defaults to eth-mainnet, matching CHAIN_ID below. The bucket is not
@@ -829,39 +879,51 @@ data:
 # CEX order book indexer — Coinbase. OKX/Kraken get their own configmaps with the
 # venue-specific EXCHANGE and SYMBOLS (OKX uses dash pairs like BTC-USDT; Kraken
 # uses slash pairs with its own asset names like XBT/USD).
+# Symbol sets mirror the staging expansion (ARCT-316/319/321, 25 Aug 2026), where
+# every entry was verified against the live venue API and has been flowing since;
+# the CORE Syrup markets need the XRP/HYPE books (VEC-652).
+# All six verified tradeable against the Coinbase products API on 2026-08-24; the
+# model's other ten tokens are not listed on Coinbase at all.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: cex-orderbook-indexer-coinbase-config
 data:
   EXCHANGE: "coinbase"
-  SYMBOLS: "BTC-USD,ETH-USD"
+  SYMBOLS: "BTC-USD,ETH-USD,XRP-USD,SOL-USD,HYPE-USD,JITOSOL-USD"
   ORDERBOOK_DEPTH: "100"
   ORDERBOOK_INTERVAL: "5s"
   ENVIRONMENT: "sentinelprod"
 ---
-# OKX uses dash-separated instrument ids with a USDT quote (no USD spot pairs);
-# BTC-USDT/ETH-USDT verified live against the OKX SPOT instruments API.
+# OKX uses dash-separated instrument ids. All six are quoted in USDT: JITOSOL has
+# no other book, so USDT keeps one quote across the set. Verified live against the
+# OKX SPOT instruments API on 2026-08-24; the model's other ten tokens are not
+# listed at all. Merging these USDT books into the model's USD depth curve ignores
+# the basis — VEC-458 owns that decision.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: cex-orderbook-indexer-okx-config
 data:
   EXCHANGE: "okx"
-  SYMBOLS: "BTC-USDT,ETH-USDT"
+  SYMBOLS: "BTC-USDT,ETH-USDT,XRP-USDT,SOL-USDT,HYPE-USDT,JITOSOL-USDT"
   ORDERBOOK_DEPTH: "100"
   ORDERBOOK_INTERVAL: "5s"
   ENVIRONMENT: "sentinelprod"
 ---
-# Kraken uses slash-separated pairs with its own asset names (XBT, not BTC);
-# XBT/USD and ETH/USD verified live against the Kraken AssetPairs "wsname" field.
+# Kraken uses slash-separated pairs with its own asset names (XBT, not BTC), so
+# each entry is the exact "wsname" string from the AssetPairs API rather than one
+# built by convention. All seven verified live on 2026-08-24 and USD-quoted, so
+# the books merge with Coinbase's without a basis adjustment. TBTC/USD is listed
+# but excluded: 621bps spread and no resting size within 2% of mid. The model's
+# remaining eight tokens are not listed on Kraken at all.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: cex-orderbook-indexer-kraken-config
 data:
   EXCHANGE: "kraken"
-  SYMBOLS: "XBT/USD,ETH/USD"
+  SYMBOLS: "XBT/USD,ETH/USD,XRP/USD,SOL/USD,HYPE/USD,JITOSOL/USD,WBTC/USD"
   ORDERBOOK_DEPTH: "100"
   ORDERBOOK_INTERVAL: "5s"
   ENVIRONMENT: "sentinelprod"

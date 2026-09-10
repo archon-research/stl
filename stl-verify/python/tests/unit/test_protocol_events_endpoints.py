@@ -68,7 +68,6 @@ def test_list_protocol_events_returns_rows_and_applies_filters():
             "protocol_name": "spark",
             "from_timestamp": "2026-03-05T00:00:00Z",
             "to_timestamp": "2026-03-05T12:00:00Z",
-            "resolution": "PT5M",
             "limit": 25,
         },
     )
@@ -102,13 +101,15 @@ def test_list_protocol_events_returns_aggregated_buckets():
             "protocol_name": "spark",
             "from_timestamp": "2026-03-05T00:00:00Z",
             "to_timestamp": "2026-03-05T12:00:00Z",
-            "aggregate": "true",
+            "aggregation_method": "end-period",
         },
     )
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["mode"] == "aggregated"
+    assert payload["window"]["frequency"] == "PT5M"
+    assert payload["window"]["frequency_ms"] == 5 * 60 * 1000
     assert payload["data"] == [{"bucket_start": "2026-03-05T12:00:00Z", "event_count": 4}]
     kwargs = service.list_event_buckets.await_args.kwargs
     assert kwargs["bucket_seconds"] == 5 * 60  # 12h window -> PT5M default
@@ -187,7 +188,7 @@ def test_list_protocol_events_returns_422_for_limit_too_large():
     service.list_events.assert_not_awaited()
 
 
-def test_list_protocol_events_returns_422_for_too_fine_resolution_for_window():
+def test_list_protocol_events_returns_422_for_too_fine_frequency_for_window():
     from app.api.v1 import protocol_events
 
     service = _make_service(events=[])
@@ -199,12 +200,50 @@ def test_list_protocol_events_returns_422_for_too_fine_resolution_for_window():
         params={
             "from_timestamp": "2026-01-01T00:00:00Z",
             "to_timestamp": "2026-02-15T00:00:00Z",
-            "resolution": "PT1M",
+            "frequency": "PT1M",
+            "aggregation_method": "end-period",
         },
     )
 
     assert response.status_code == 422
     service.list_events.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"aggregation_method": "period-mean"},
+        {"aggregation_method": ""},
+        {"frequency": "PT3M", "aggregation_method": "end-period"},
+        {"frequency": "PT1H"},
+    ],
+    ids=["reserved-method", "empty-method", "unknown-frequency", "frequency-with-no-method"],
+)
+def test_list_protocol_events_returns_422_for_an_unusable_grid(params):
+    from app.api.v1 import protocol_events
+
+    service = _make_service(events=[])
+    app.dependency_overrides[protocol_events._get_protocol_event_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get("/v1/protocol-events", params=params)
+
+    assert response.status_code == 422
+    service.list_events.assert_not_awaited()
+    service.list_event_buckets.assert_not_awaited()
+
+
+def test_a_default_frequency_protocol_events_window_names_no_grid():
+    from app.api.v1 import protocol_events
+
+    service = _make_service(events=[])
+    app.dependency_overrides[protocol_events._get_protocol_event_service] = _override_service(service)
+    client = TestClient(app)
+
+    window = client.get("/v1/protocol-events").json()["window"]
+
+    assert "frequency" not in window
+    assert "frequency_ms" not in window
 
 
 def test_get_tx_events_returns_empty_list_for_nonexistent_tx():
@@ -286,7 +325,6 @@ def test_list_protocol_events_allows_wide_window_with_tx_hash_filter():
             "tx_hash": _VALID_TX_HASH,
             "from_timestamp": "2026-01-01T00:00:00Z",
             "to_timestamp": "2026-03-15T00:00:00Z",
-            "resolution": "PT6H",
         },
     )
 

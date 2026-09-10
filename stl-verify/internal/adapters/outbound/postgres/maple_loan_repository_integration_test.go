@@ -58,11 +58,30 @@ func truncateMaple(t *testing.T, ctx context.Context) {
 
 func newMapleRepo(t *testing.T, buildID buildregistry.BuildID) *MapleGraphQLRepository {
 	t.Helper()
-	repo, err := NewMapleGraphQLRepository(maplePool, nil, buildID, 0)
+	repo, err := NewMapleGraphQLRepository(maplePool, nil, buildID, 0, 0)
 	if err != nil {
 		t.Fatalf("NewMapleGraphQLRepository: %v", err)
 	}
 	return repo
+}
+
+func newMapleRunRepo(t *testing.T, ctx context.Context) (*MapleGraphQLRepository, buildregistry.RunID) {
+	t.Helper()
+	buildID, runID := testutil.OpenTestRun(t, ctx, maplePool)
+	repo, err := NewMapleGraphQLRepository(maplePool, nil, buildID, runID, 0)
+	if err != nil {
+		t.Fatalf("NewMapleGraphQLRepository: %v", err)
+	}
+	return repo, runID
+}
+
+func requireMapleRowRunID(t *testing.T, ctx context.Context, table string, id int64, runID buildregistry.RunID) {
+	t.Helper()
+	var gotRunID *int64
+	if err := maplePool.QueryRow(ctx, `SELECT run_id FROM `+table+` WHERE id = $1`, id).Scan(&gotRunID); err != nil {
+		t.Fatalf("reading back %s: %v", table, err)
+	}
+	testutil.RequireRunID(t, gotRunID, runID)
 }
 
 // inMapleTx runs fn inside a committed transaction.
@@ -203,7 +222,7 @@ func TestMapleGetMapleProtocolID(t *testing.T) {
 func TestMapleRecordPools_RoundTripAndNoOp(t *testing.T) {
 	ctx := context.Background()
 	truncateMaple(t, ctx)
-	repo := newMapleRepo(t, 0)
+	repo, runID := newMapleRunRepo(t, ctx)
 	protocolID := mapleProtocolID(t, ctx, repo)
 
 	var ids map[common.Address]int64
@@ -260,6 +279,7 @@ func TestMapleRecordPools_RoundTripAndNoOp(t *testing.T) {
 	if name != "Pool A" || isSyrup {
 		t.Errorf("name/is_syrup = %q/%v, want unchanged Pool A/false", name, isSyrup)
 	}
+	requireMapleRowRunID(t, ctx, "maple_pool", ids[common.BytesToAddress(poolA.Address)], runID)
 }
 
 func TestMapleRecordPools_RejectsIdentityChange(t *testing.T) {
@@ -509,7 +529,7 @@ func TestMapleSatellite_TombstoneHidesFromCurrentView(t *testing.T) {
 func TestMaplePoolStates_RoundTrip(t *testing.T) {
 	ctx := context.Background()
 	truncateMaple(t, ctx)
-	repo := newMapleRepo(t, 0)
+	repo, runID := newMapleRunRepo(t, ctx)
 	poolID := recordTestPool(t, ctx, repo, 0x20)
 
 	state, err := maple.NewPoolState(maple.PoolStateParams{
@@ -527,11 +547,13 @@ func TestMaplePoolStates_RoundTrip(t *testing.T) {
 
 	var tvl, utilization string
 	var spotAPY *string
+	var gotRunID *int64
 	if err := maplePool.QueryRow(ctx,
-		`SELECT tvl::text, utilization::text, spot_apy::text FROM maple_pool_state WHERE maple_pool_id = $1`,
-		poolID).Scan(&tvl, &utilization, &spotAPY); err != nil {
+		`SELECT tvl::text, utilization::text, spot_apy::text, run_id FROM maple_pool_state WHERE maple_pool_id = $1`,
+		poolID).Scan(&tvl, &utilization, &spotAPY, &gotRunID); err != nil {
 		t.Fatalf("querying pool state: %v", err)
 	}
+	testutil.RequireRunID(t, gotRunID, runID)
 	if tvl != "1000" {
 		t.Errorf("tvl = %s, want 1000", tvl)
 	}
@@ -588,7 +610,7 @@ func TestMaplePoolStates_DedupWarnsOnConflict(t *testing.T) {
 	ctx := context.Background()
 	truncateMaple(t, ctx)
 	recorder := &testutil.SlogRecorder{}
-	repo, err := NewMapleGraphQLRepository(maplePool, slog.New(recorder), 0, 0)
+	repo, err := NewMapleGraphQLRepository(maplePool, slog.New(recorder), 0, 0, 0)
 	if err != nil {
 		t.Fatalf("NewMapleGraphQLRepository: %v", err)
 	}
@@ -689,7 +711,7 @@ func TestMaplePoolStates_PartialDedupAcrossChunksFails(t *testing.T) {
 	// per-chunk it would read as one full dedup plus clean inserts.
 	ctx := context.Background()
 	truncateMaple(t, ctx)
-	repo, err := NewMapleGraphQLRepository(maplePool, nil, 0, 1)
+	repo, err := NewMapleGraphQLRepository(maplePool, nil, 0, 0, 1)
 	if err != nil {
 		t.Fatalf("NewMapleGraphQLRepository: %v", err)
 	}
@@ -733,7 +755,7 @@ func TestMaplePoolStates_MultiChunkBatch(t *testing.T) {
 
 	// batchSize 2 with 5 states exercises the chunked-insert path (3 chunks,
 	// the last one partial) that the default batch size of 1000 never hits.
-	repo, err := NewMapleGraphQLRepository(maplePool, nil, 0, 2)
+	repo, err := NewMapleGraphQLRepository(maplePool, nil, 0, 0, 2)
 	if err != nil {
 		t.Fatalf("NewMapleGraphQLRepository: %v", err)
 	}
@@ -770,11 +792,12 @@ func TestMaplePoolStates_MultiChunkBatch(t *testing.T) {
 func TestMapleLoans_FullRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	truncateMaple(t, ctx)
-	repo := newMapleRepo(t, 0)
+	repo, runID := newMapleRunRepo(t, ctx)
 	poolID := recordTestPool(t, ctx, repo, 0x21)
 
 	internalLoanID := recordTestLoan(t, ctx, repo, poolID, 0x30, &maple.LoanMeta{Type: "amm", DexName: "Uniswap"})
 	externalLoanID := recordTestLoan(t, ctx, repo, poolID, 0x31, nil)
+	requireMapleRowRunID(t, ctx, "maple_loan", internalLoanID, runID)
 
 	// is_internal is derived in the view from the current loan_meta_type.
 	var isInternal bool
@@ -1462,7 +1485,7 @@ func TestMapleFTLLoanStates_IdempotencyAndReprocessing(t *testing.T) {
 func TestMapleSkyStrategies_RoundTrip(t *testing.T) {
 	ctx := context.Background()
 	truncateMaple(t, ctx)
-	repo := newMapleRepo(t, 0)
+	repo, runID := newMapleRunRepo(t, ctx)
 	poolID := recordTestPool(t, ctx, repo, 0x24)
 
 	strategy, err := maple.NewSkyStrategy(1, mapleAddr(0x40), poolID, 100)
@@ -1480,6 +1503,7 @@ func TestMapleSkyStrategies_RoundTrip(t *testing.T) {
 	if strategyID == 0 {
 		t.Fatal("strategy id not resolved")
 	}
+	requireMapleRowRunID(t, ctx, "maple_sky_strategy", strategyID, runID)
 
 	// Unchanged re-record is a clean no-op that keeps the id (nothing is
 	// refreshed).
