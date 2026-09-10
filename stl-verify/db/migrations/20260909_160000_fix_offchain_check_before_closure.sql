@@ -12,7 +12,8 @@ CREATE OR REPLACE FUNCTION materialize_position_projection(p_view regclass, p_bu
     SET search_path FROM CURRENT
     SET timescaledb.enable_tiered_reads = 'on'
     AS $fn$
-DECLARE n bigint; bad text; bad_qty text; bad_dt text; v_qualname text; v_emitted bigint; v_refused integer := 0;
+DECLARE n bigint; bad text; bad_qty text; bad_dt text; v_qualname text; v_emitted bigint;
+        v_inverted integer := 0; v_refused integer := 0;
 BEGIN
     IF p_view IS NULL THEN
         RAISE EXCEPTION 'materialize_position_projection: p_view must not be NULL';
@@ -264,11 +265,18 @@ BEGIN
                        WHERE p.position_id = s.position_id AND p.block_number = s.block_number
                          AND p.block_version = s.block_version AND p.processing_version = s.processing_version)
     ON CONFLICT DO NOTHING;
-    SELECT count(*) INTO v_refused FROM pg_temp._mpp_refused;
-    IF v_refused > 0 THEN
+    SELECT count(*) INTO v_inverted FROM pg_temp._mpp_refused;
+    -- positions_refused counts every class the run withheld, not just the inversions: a projection
+    -- re-emitting stored keys with changed values reported zero, so the per-run signal and the alert
+    -- that reads it stayed silent while the view and the spine disagreed indefinitely.
+    SELECT count(*) INTO v_refused
+      FROM (SELECT position_id FROM pg_temp._mpp_refused
+            UNION
+            SELECT position_id FROM pg_temp._mpp_drift) z;
+    IF v_inverted > 0 THEN
         SELECT string_agg(format('pos=%s %s', encode(position_id, 'hex'), detail), '; ') INTO bad
           FROM (SELECT * FROM pg_temp._mpp_refused ORDER BY position_id LIMIT 5) z;
-        RAISE WARNING 'projection % emits a higher block with an earlier block_timestamp for % position(s); their new observations are withheld this run and recorded in position_projection_refusal, the rest of the batch continues (first 5): %', p_view, v_refused, bad;
+        RAISE WARNING 'projection % emits a higher block with an earlier block_timestamp for % position(s); their new observations are withheld this run and recorded in position_projection_refusal, the rest of the batch continues (first 5): %', p_view, v_inverted, bad;
         DELETE FROM pg_temp._mpp_src s USING pg_temp._mpp_refused r WHERE s.position_id = r.position_id;
     END IF;
 
