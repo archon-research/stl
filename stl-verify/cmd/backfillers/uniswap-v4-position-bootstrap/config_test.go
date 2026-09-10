@@ -101,6 +101,7 @@ func TestParseConfig_ReadsTheBlockOverridesFromTheEnvironment(t *testing.T) {
 	t.Setenv("FROM_BLOCK", "21688329")
 	t.Setenv("PIN_BLOCK", "23000000")
 
+	t.Setenv("FINALITY_DEPTH", "200")
 	cfg, err := parseConfig(nil)
 	if err != nil {
 		t.Fatalf("parseConfig: %v", err)
@@ -110,6 +111,9 @@ func TestParseConfig_ReadsTheBlockOverridesFromTheEnvironment(t *testing.T) {
 	}
 	if cfg.bootstrap.FromBlock != 21688329 || cfg.bootstrap.PinBlock != 23000000 {
 		t.Errorf("from/pin = %d/%d, want 21688329/23000000", cfg.bootstrap.FromBlock, cfg.bootstrap.PinBlock)
+	}
+	if cfg.bootstrap.FinalityDepth != 200 {
+		t.Errorf("FinalityDepth = %d, want FINALITY_DEPTH's 200", cfg.bootstrap.FinalityDepth)
 	}
 }
 
@@ -151,6 +155,7 @@ func TestParseConfig_RejectsAnIncompleteOrUnparseableEnvironment(t *testing.T) {
 		{"unparseable position batch", map[string]string{"POSITION_BATCH": "abc"}, nil, "POSITION_BATCH"},
 		{"invalid env window", map[string]string{"MAX_WINDOW": "1", "INITIAL_WINDOW": "10"}, nil, "initialWindow"},
 		{"invalid bootstrap config", nil, []string{"-position-batch", "-1"}, "positionBatch"},
+		{"off-mainnet chain without a finality depth", map[string]string{"CHAIN_ID": "8453"}, []string{"-rpc-url", "http://base.invalid"}, "finality depth"},
 		{"unknown flag", nil, []string{"-nope"}, "nope"},
 	}
 	for _, tt := range tests {

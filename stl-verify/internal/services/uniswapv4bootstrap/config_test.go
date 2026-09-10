@@ -86,3 +86,47 @@ func TestConfigValidate_ExportedFormAppliesTheDefaultsFirst(t *testing.T) {
 		t.Fatal("expected an error: a negative batch is not filled by the defaults")
 	}
 }
+
+func TestConfigWithDefaults_FinalityDepthDefaultsOnlyOnMainnet(t *testing.T) {
+	if got := (Config{ChainID: 8453}.withDefaults()).FinalityDepth; got != 0 {
+		t.Errorf("FinalityDepth on chain 8453 = %d, want 0 (no default off mainnet)", got)
+	}
+}
+
+func TestConfigValidate_OffMainnetNeedsAnExplicitFinalityDepth(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		cfg  Config
+	}{
+		{"no pin, no depth", Config{ChainID: 8453}},
+		{"pin but no depth", Config{ChainID: 8453, PinBlock: 100}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.Validate()
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			for _, want := range []string{"finality depth", "8453"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %v, want it to name %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestConfigValidate_OffMainnetAcceptsAnExplicitFinalityDepth(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		cfg  Config
+	}{
+		{"depth", Config{ChainID: 8453, FinalityDepth: 200}},
+		{"depth and pin", Config{ChainID: 8453, FinalityDepth: 200, PinBlock: 100}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.cfg.Validate(); err != nil {
+				t.Errorf("Validate: %v", err)
+			}
+		})
+	}
+}

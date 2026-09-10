@@ -159,7 +159,7 @@ func RequireChainID() (int, error) {
 }
 
 const (
-	ethereumMainnetChainID int64 = 1
+	EthereumMainnetChainID int64 = 1
 	defaultAlchemyHTTPURL        = "https://eth-mainnet.g.alchemy.com/v2"
 )
 
@@ -171,7 +171,7 @@ func AlchemyRPCURL(chainID int64) (string, error) {
 		return "", fmt.Errorf("requiring ALCHEMY_API_KEY: %w", err)
 	}
 	baseURL := env.Get("ALCHEMY_HTTP_URL", "")
-	if baseURL == "" && chainID != ethereumMainnetChainID {
+	if baseURL == "" && chainID != EthereumMainnetChainID {
 		return "", fmt.Errorf("ALCHEMY_HTTP_URL is required for chain %d (the default endpoint is mainnet-only)", chainID)
 	}
 	if baseURL == "" {
