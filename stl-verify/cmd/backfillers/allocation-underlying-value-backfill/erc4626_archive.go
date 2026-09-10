@@ -80,13 +80,14 @@ func isERC4626ArchiveCandidate(c candidateRow) bool {
 
 // resolve reads convertToAssets(balance) for every erc4626 candidate at its
 // own pinned block_number, batched by block. A row absent from the returned
-// map is not an error: the vault call reverted (AllowFailure), which is a
-// legitimate historical gap -- an archive node lacking that exact state, or
-// the vault not yet deployed -- and the caller falls back to the price-ratio
-// derivation for it. A transport-level failure (the eth_call itself erroring,
-// a decode failure) is returned as an error and aborts the run: those are not
-// a per-vault fact, so continuing would silently drop rows this run could
-// have gotten right.
+// map is not an error: the vault call reverted (AllowFailure), returned
+// undecodable data, or returned an implausible zero for a nonzero balance --
+// all legitimate per-vault historical gaps (an archive node lacking that
+// exact state, the vault not yet deployed, a paused vault or uninitialised
+// proxy) -- and the caller falls back to the price-ratio derivation for it.
+// Only a transport-level failure (the eth_call/multicall itself erroring) is
+// returned as an error and aborts the run: that is not a per-vault fact, so
+// continuing would silently drop rows this run could have gotten right.
 func (r *erc4626ArchiveResolver) resolve(ctx context.Context, candidates []candidateRow, logger *slog.Logger) (map[int]*big.Int, error) {
 	groups := make(map[blockKey][]int)
 	for i, c := range candidates {
@@ -143,10 +144,28 @@ func (r *erc4626ArchiveResolver) resolveGroup(
 				"chain_id", key.chainID, "block_number", key.blockNumber, "vault", candidates[idx].tokenAddress.Hex())
 			continue
 		}
+		// A per-vault decode failure (e.g. Success:true with empty or
+		// malformed returndata -- an uninitialised proxy, a non-4626
+		// contract at that address) is the same kind of historical gap as a
+		// revert: a fact about this one vault at this one block, not a
+		// transport failure. Falling back to price ratio for it, rather than
+		// aborting the whole run, matches how a revert is already handled.
 		assets, err := blockchain.UnpackConvertToAssets(r.erc4626ABI, results[j].ReturnData)
 		if err != nil {
-			return fmt.Errorf("decoding convertToAssets for chain %d block %d vault %s: %w",
-				key.chainID, key.blockNumber, candidates[idx].tokenAddress.Hex(), err)
+			logger.Warn("convertToAssets returned undecodable data, falling back to price ratio",
+				"chain_id", key.chainID, "block_number", key.blockNumber, "vault", candidates[idx].tokenAddress.Hex(), "error", err)
+			continue
+		}
+		// A vault converting a genuinely zero share balance to zero assets is
+		// real (an emptied position). Zero assets for a NONZERO share balance
+		// is not plausible for a live erc4626 vault, and is exactly what 32
+		// zero-byte returndata from a paused vault, an uninitialised proxy or
+		// a non-4626 contract decodes to -- so it gets the same fallback as a
+		// revert instead of being trusted as an observation.
+		if assets.Sign() < 0 || (assets.Sign() == 0 && candidates[idx].balance.Sign() > 0) {
+			logger.Warn("convertToAssets returned an implausible non-positive result for a nonzero balance, falling back to price ratio",
+				"chain_id", key.chainID, "block_number", key.blockNumber, "vault", candidates[idx].tokenAddress.Hex(), "assets", assets.String())
+			continue
 		}
 		out[idx] = assets
 	}

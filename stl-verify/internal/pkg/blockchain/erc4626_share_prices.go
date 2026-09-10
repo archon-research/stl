@@ -300,6 +300,9 @@ func UnpackConvertToAssets(shareABI *abi.ABI, data []byte) (*big.Int, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(unpacked) == 0 {
+		return nil, fmt.Errorf("convertToAssets: no return values unpacked")
+	}
 	assets, ok := unpacked[0].(*big.Int)
 	if !ok {
 		return nil, fmt.Errorf("convertToAssets: expected *big.Int, got %T", unpacked[0])

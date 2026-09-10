@@ -111,7 +111,11 @@ func TestERC4626ArchiveResolver_TransportErrorPropagates(t *testing.T) {
 	}
 }
 
-func TestERC4626ArchiveResolver_DecodeErrorPropagates(t *testing.T) {
+// TestERC4626ArchiveResolver_DecodeErrorIsOmittedNotErrored guards B4's
+// "adjacent" finding: Success:true with empty or malformed returndata (an
+// uninitialised proxy, a non-4626 contract at that address) is a per-vault
+// historical fact, exactly like a revert -- it must not abort the whole run.
+func TestERC4626ArchiveResolver_DecodeErrorIsOmittedNotErrored(t *testing.T) {
 	row := erc4626Candidate()
 	row.blockNumber = 100
 
@@ -121,9 +125,92 @@ func TestERC4626ArchiveResolver_DecodeErrorPropagates(t *testing.T) {
 	}
 
 	r := newTestResolver(t, mock)
-	_, err := r.resolve(context.Background(), []candidateRow{row}, slog.Default())
-	if err == nil {
-		t.Fatal("a malformed successful response must be a hard error, not silently dropped")
+	got, err := r.resolve(context.Background(), []candidateRow{row}, slog.Default())
+	if err != nil {
+		t.Fatalf("a per-vault decode failure must not fail the whole resolve: %v", err)
+	}
+	if _, ok := got[0]; ok {
+		t.Error("undecodable row must be absent from the result map so the caller falls back to price-ratio")
+	}
+}
+
+// TestERC4626ArchiveResolver_ZeroAssetsForNonzeroBalanceIsOmittedNotTrusted
+// guards B4: a live erc4626 vault does not plausibly convert a nonzero share
+// balance to zero assets, and that is exactly what 32 zero-byte returndata
+// from a paused vault or uninitialised proxy decodes to -- so it must not be
+// trusted as an observation.
+func TestERC4626ArchiveResolver_ZeroAssetsForNonzeroBalanceIsOmittedNotTrusted(t *testing.T) {
+	row := erc4626Candidate()
+	row.blockNumber = 100
+	row.balance = big.NewInt(1_000_000) // nonzero shares
+
+	mock := testutil.NewMockMulticaller()
+	mock.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return []outbound.Result{{Success: true, ReturnData: packConvertToAssets(t, big.NewInt(0))}}, nil
+	}
+
+	r := newTestResolver(t, mock)
+	got, err := r.resolve(context.Background(), []candidateRow{row}, slog.Default())
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if _, ok := got[0]; ok {
+		t.Error("an implausible zero for a nonzero balance must fall back to price-ratio, not be trusted")
+	}
+}
+
+// TestERC4626ArchiveResolver_ZeroAssetsForZeroBalanceIsTrusted is the B4
+// counterpart: zero shares converting to zero assets is a real, emptied
+// position, not an implausibility signal, and must be trusted.
+func TestERC4626ArchiveResolver_ZeroAssetsForZeroBalanceIsTrusted(t *testing.T) {
+	row := erc4626Candidate()
+	row.blockNumber = 100
+	row.balance = big.NewInt(0)
+
+	mock := testutil.NewMockMulticaller()
+	mock.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return []outbound.Result{{Success: true, ReturnData: packConvertToAssets(t, big.NewInt(0))}}, nil
+	}
+
+	r := newTestResolver(t, mock)
+	got, err := r.resolve(context.Background(), []candidateRow{row}, slog.Default())
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	assets, ok := got[0]
+	if !ok || assets.Sign() != 0 {
+		t.Errorf("got[0] = %v, ok=%v, want a trusted explicit 0 for a genuinely empty position", assets, ok)
+	}
+}
+
+// TestERC4626ArchiveResolver_MixedOutcomeBatch covers a batch sharing one
+// block where some rows succeed and others revert, guarding that a failure on
+// one call in the multicall never contaminates a sibling call's own result.
+func TestERC4626ArchiveResolver_MixedOutcomeBatch(t *testing.T) {
+	rowOK := erc4626Candidate()
+	rowOK.blockNumber = 100
+	rowReverted := erc4626Candidate()
+	rowReverted.blockNumber = 100
+	rowReverted.tokenAddress = common.HexToAddress("0x2222222222222222222222222222222222222222")
+
+	mock := testutil.NewMockMulticaller()
+	mock.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return []outbound.Result{
+			{Success: true, ReturnData: packConvertToAssets(t, big.NewInt(500))},
+			{Success: false},
+		}, nil
+	}
+
+	r := newTestResolver(t, mock)
+	got, err := r.resolve(context.Background(), []candidateRow{rowOK, rowReverted}, slog.Default())
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if assets, ok := got[0]; !ok || assets.Cmp(big.NewInt(500)) != 0 {
+		t.Errorf("got[0] = %v, ok=%v, want the successful sibling call's own result 500", assets, ok)
+	}
+	if _, ok := got[1]; ok {
+		t.Error("got[1] must be absent: this row's own call reverted, regardless of its sibling's success")
 	}
 }
 
