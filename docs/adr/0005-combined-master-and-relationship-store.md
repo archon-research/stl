@@ -50,7 +50,9 @@
   regenerated when the graph changes, as-of-capable, joinable against the timeseries at block
   time.
 - The standalone masters (`entity_master`, `security_master`, `security_instrument_bridge`,
-  `entity_ref_codes`, `position_entity_link`) are **superseded and frozen** — see Deprecations.
+  `entity_ref_codes`) are **superseded and frozen** — see Deprecations. `position_entity_link`
+  is frozen too, but it is keyed on `position_id` and belongs to the position layer, so this
+  model does not replace it — where non-issuer entity roles land is open (VEC-628).
 
 ## Context
 
@@ -1060,9 +1062,16 @@ technology must enforce it; "platform" means it lives outside this store.
 The standalone-master build is superseded by this model:
 
 - **Frozen (no further loads):** `security_master`, `security_instrument_bridge` (both shipped
-  empty), `entity_master`, `entity_ref_codes`, `position_entity_link`, and the resolvers built
-  on them (`holder_entity_resolver`, #614). Their migrations are immutable and stay in place;
+  empty), `entity_master`, `entity_ref_codes`, and the resolvers built on them
+  (`holder_entity_resolver`, #614). Their migrations are immutable and stay in place;
   deprecation is stopped loads and new migrations, never edits to applied ones.
+- **Frozen but not superseded:** `position_entity_link` is keyed on `position_id`, so it sits
+  in the position layer rather than among the masters, and nothing here takes over its job.
+  It shipped empty and has no writer, so freezing it removes no capability — but non-issuer
+  entity roles per position (custodian, counterparty, operator) are consequently **recorded
+  nowhere today**. Whether they land as append-only edges, which would keep role history the
+  mutable table never did, or as this table retargeted at node ids, is open on VEC-628 and
+  turns on whether a position is an edge endpoint at all (§9).
 - **Ported:** the entity rows already seeded (the prime/protocol registry seed, #611, and the
   curated GLEIF issuers, VEC-525) become the first ENTITY nodes — their ids conform to §1 and
   stand unchanged. `entity_ref_codes`' resolution job moves to the alias register; the bridge's
