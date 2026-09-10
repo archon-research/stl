@@ -55,14 +55,8 @@ RUN groupadd --system --gid 10001 appuser \
 # commit, so every python-api pod rolled whether or not any Python changed.
 # GIT_COMMIT now lands at the end of the file, where it cannot reach a layer.
 #
-# What replaces that cache-busting is deliberate and worth stating: with the
-# cache warm this step replays, so a commit no longer picks up OS patches by
-# itself. The weekly refresh (.github/workflows/image-security-refresh.yaml)
-# rebuilds every image with DOCKER_NO_CACHE=1 and re-exports the shared build
-# cache, so the next deploy of any commit ships the patched layer. Patches land
-# on the first deploy after a refresh rather than on the refresh itself: an
-# image for an already-pushed SHA cannot be re-pushed under ECR tag
-# immutability (ARCT-420), so the refresh updates the cache, not the release.
+# Patches land on the first deploy after the weekly refresh (image-security-refresh.yaml),
+# not on the refresh itself, which pushes no image -- see ADR-0007.
 #
 # Then strip OS packages the service never uses at runtime (perl, bash,
 # ncurses, util-linux, gzip, tar, sed, coreutils, apt, ...). They exist only

@@ -55,7 +55,8 @@ Root repo map and cross-cutting rules: [../AGENTS.md](../AGENTS.md).
   for nothing (ORB-366) — but that also removed the incidental rebuild that used to pull in `apt-get
   upgrade` on every release. `.github/workflows/image-security-refresh.yaml` replaces it: a cache-free
   rebuild of every image, Mondays 04:00 UTC, which pushes no image and only re-exports the shared build
-  cache. It cannot push one — the SHA tag for an already-built commit exists and ECR tag immutability
-  rejects a re-push (ARCT-420). So patches reach the cluster on the **first deploy after** that run, not
-  on the run itself. A week where nothing deploys is a week where nothing is patched.
+  cache. `DOCKER_PUSH=0` is what stops the push today, not the registry: ECR tag immutability (ARCT-420)
+  is code-complete but not yet applied, and every `stl-sentinel*` repository still reports MUTABLE — see
+  ADR-0007 before flipping `DOCKER_PUSH=1`. So patches reach the cluster on the **first deploy after**
+  that run, not on the run itself. A week where nothing deploys is a week where nothing is patched.
 - AWS resources (SQS queues, SNS subscriptions, IAM, secrets) live in a separate private infrastructure repo and must land **before** the code that needs them.

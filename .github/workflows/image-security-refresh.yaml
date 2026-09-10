@@ -1,32 +1,16 @@
 # Actions are pinned to commit SHAs for supply-chain security.
 # To update: git ls-remote --tags https://github.com/<org>/<action>.git | grep <tag>
 #
-# Weekly cache-free rebuild of every image, so OS security updates keep landing
-# after ORB-366 (see the note above `apt-get upgrade` in stl-verify/python/Dockerfile).
+# Weekly cache-free rebuild of every image so OS security updates keep landing
+# without a per-commit rebuild trigger (ORB-366; see stl-verify/python/Dockerfile).
 #
-# The images used to pick up patches by accident: a per-commit value sat above
-# the OS-update layer in each Dockerfile, so every release rebuilt it. That is
-# also what made an unchanged service produce a new image on every commit and
-# roll its pods for nothing, so it had to go. Patching is now explicit and
-# scheduled instead of an incidental effect of deploying.
+# It never re-pushes a SHA that already has one: that tag is what
+# build_registry's identity governs -- see ADR-0007.
 #
-# This run pushes no image. It rebuilds with the layer cache disabled and
-# re-exports the shared build cache, so the next real deploy of any commit
-# inherits the patched layers. It deliberately does not push a patched image
-# for a SHA that already has one: that tag is what build_registry's
-# (git_hash, service) identity names, so replacing its bytes would change what
-# an already-written governed row points at.
+# ARCT-420 (tag immutability) is code-complete but NOT yet applied -- every
+# stl-sentinel* repo still reports MUTABLE, so DOCKER_PUSH=0 below is the only guard.
 #
-# ARCT-420 will have ECR refuse such a push, but it is code-complete and NOT
-# YET APPLIED -- every stl-sentinel* repository still reports MUTABLE (checked
-# 2026-09-09 via `aws ecr describe-repositories --query
-# 'repositories[].imageTagMutability'`). So the re-push would currently succeed
-# silently, and DOCKER_PUSH=0 below is the only thing preventing it. Note the
-# eventual state is IMMUTABLE_WITH_EXCLUSION (alias tags `latest` / `*-latest`
-# excluded), not blanket immutability.
-#
-# The consequence either way is that patches reach the cluster on the first
-# deploy after this run, not on this run.
+# Patches reach the cluster on the first deploy after this run, not on this run.
 name: Image Security Refresh
 
 # Least privilege by default; each job widens to exactly what it needs. Without

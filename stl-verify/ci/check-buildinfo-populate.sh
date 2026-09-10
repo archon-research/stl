@@ -18,7 +18,9 @@ expected='buildinfo.Populate(&GitCommit, &GitBranch, &BuildTime)'
 # Scoped to cmd/ (not repo-wide '.'): .gopath/ (module cache) and
 # .claude/worktrees/ (sibling worktree checkouts) both sit outside cmd/, so
 # this can't pick up vendored or duplicate copies of the same main.go files.
-files="$(grep -rl 'buildinfo\.Populate(' cmd --include='main.go' | sort)"
+# || true: grep exits 1 when no file matches (a cmd/ restructure, or the call
+# moving out of cmd/), and set -e would abort here before the guard below can report it.
+files="$(grep -rl 'buildinfo\.Populate(' cmd --include='main.go' | sort || true)"
 
 if [[ -z "$files" ]]; then
   echo "ERROR: no cmd/**/main.go calls buildinfo.Populate -- check the grep pattern" >&2
