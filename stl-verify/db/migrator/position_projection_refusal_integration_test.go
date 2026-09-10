@@ -154,6 +154,31 @@ func TestPositionProjectionRefusal(t *testing.T) {
 		}
 	})
 
+	t.Run("the run record counts a declined correction, not only an inversion", func(t *testing.T) {
+		// positions_refused counted inversions alone, so a projection re-emitting stored keys with
+		// changed values reported zero and the alert reading it stayed quiet while the view and the
+		// spine disagreed indefinitely.
+		open := view(row("drift-count", 100, "2026-06-10T00:00:00Z", "5", "'LOAN'"))
+		if n := f.mppN(t, "pv_drift_count", open, "open"); n != 1 {
+			t.Fatalf("open inserted %d, want 1", n)
+		}
+		changed := view(row("drift-count", 100, "2026-06-10T00:00:00Z", "9", "'LOAN'"))
+		if n := f.mppN(t, "pv_drift_count", changed, "same key, changed quantity"); n != 0 {
+			t.Fatalf("the re-emit inserted %d, want 0: the stored row is kept", n)
+		}
+		var refused int
+		if err := f.pool.QueryRow(f.ctx, `SELECT positions_refused FROM position_projection_run
+			WHERE projection = 'public.pv_drift_count' ORDER BY created_at DESC LIMIT 1`).Scan(&refused); err != nil {
+			t.Fatal(err)
+		}
+		if refused != 1 {
+			t.Errorf("positions_refused = %d after a declined correction; want 1", refused)
+		}
+		if got := refusals(t, "drift-count", "observation_drift"); got != 1 {
+			t.Errorf("recorded %d observation_drift rows; want 1", got)
+		}
+	})
+
 	t.Run("a view bug still aborts: a double-emitted key is not a data conflict", func(t *testing.T) {
 		// Negative control for the whole design line: quarantine is for arrival-order conflicts only.
 		f.mppErr(t, "pv_dup", view(
@@ -181,6 +206,39 @@ func TestPositionProjectionRefusal(t *testing.T) {
 		}
 		if !canSelect {
 			t.Error("stl_readonly must be able to read refusals")
+		}
+	})
+
+	t.Run("a withheld position is withheld whole: no survivor may invert, no close may orphan", func(t *testing.T) {
+		// Withholding only the offending pair makes previously non-adjacent survivors adjacent, and
+		// they can invert; and a zero kept because the batch carried its positive predecessor
+		// outlives that predecessor. Both leave the spine in a state it has no way to repair.
+		if n := f.mppN(t, "pv_whole_a", view(
+			row("whole-a", 100, "2026-07-03T00:00:00Z", "7", "'LOAN'"),
+			row("whole-a", 200, "2026-07-07T00:00:00Z", "9", "'LOAN'"),
+			row("whole-a", 300, "2026-07-01T00:00:00Z", "10", "'LOAN'"),
+			row("whole-a", 400, "2026-07-02T00:00:00Z", "11", "'LOAN'"),
+		), "one inverting pair with non-adjacent survivors"); n != 0 {
+			t.Errorf("appended %d; the position is withheld whole, so nothing may land", n)
+		}
+		if got := count(t, `SELECT count(*) FROM position_state a JOIN position_state b
+		                     ON a.position_id = b.position_id AND a.block_number < b.block_number
+		                     WHERE a.instrument_key = 'whole-a' AND a.block_timestamp > b.block_timestamp`); got != 0 {
+			t.Errorf("%d stored pair(s) carry a higher block at an earlier instant", got)
+		}
+
+		if n := f.mppN(t, "pv_whole_b", view(
+			row("whole-b", 100, "2026-07-07T00:00:00Z", "7", "'LOAN'"),
+			row("whole-b", 150, "2026-07-01T00:00:00Z", "3", "'LOAN'"),
+			row("whole-b", 200, "2026-07-02T00:00:00Z", "0", "'LOAN'"),
+		), "a close whose only positive predecessor is in the withheld pair"); n != 0 {
+			t.Errorf("appended %d; the position is withheld whole, so its close may not land alone", n)
+		}
+		if got := count(t, `SELECT count(*) FROM position_state z WHERE z.instrument_key = 'whole-b'
+		                     AND z.quantity = 0 AND NOT EXISTS (
+		                       SELECT 1 FROM position_state p WHERE p.position_id = z.position_id
+		                        AND p.quantity > 0 AND p.block_number <= z.block_number)`); got != 0 {
+			t.Errorf("%d stored zero(s) have no positive predecessor", got)
 		}
 	})
 }

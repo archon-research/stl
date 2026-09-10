@@ -261,10 +261,12 @@ func assertCachesMatchHistory(t *testing.T, ctx context.Context) {
 			FROM borrower_collateral
 			ORDER BY protocol_id, user_id, token_id,
 			         block_number DESC, block_version DESC, processing_version DESC`},
+		// block_timestamp (20260910_120000) is a copy of the winning row's
+		// "timestamp", carried for the reads and not a term of the comparison.
 		{"token_price_current", `TABLE token_price_current`, `
 			SELECT DISTINCT ON (oracle_id, token_id)
 			       oracle_id::bigint, token_id, price_usd, block_number,
-			       block_version::int, processing_version
+			       block_version::int, processing_version, "timestamp" AS block_timestamp
 			FROM onchain_token_price
 			ORDER BY oracle_id, token_id,
 			         block_number DESC, block_version DESC, processing_version DESC`},
