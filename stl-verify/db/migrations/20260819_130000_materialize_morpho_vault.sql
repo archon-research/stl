@@ -25,6 +25,10 @@ COMMENT ON VIEW position_morpho_vault IS '[Operational] VEC-403 projection: Morp
 -- Wrapper over the shared materializer: the projection view above holds all the Morpho-vault-specific
 -- logic. It refuses first, because holder_id is the depositor's address alone while chain_id comes from
 -- the vault, and morpho_vault_position constrains neither against the other.
+-- Dropped rather than replaced: keeping the old argument list beside the new one makes a
+-- call that omits the run ambiguous, as it did for the spine.
+DROP FUNCTION IF EXISTS materialize_morpho_vault(integer);
+
 CREATE OR REPLACE FUNCTION materialize_morpho_vault(p_build_id integer DEFAULT 0,
                                                     p_run_id bigint DEFAULT NULL) RETURNS bigint
     LANGUAGE plpgsql
@@ -52,6 +56,6 @@ BEGIN
 END
 $fn$;
 
-COMMENT ON FUNCTION materialize_morpho_vault(integer, bigint) IS '[Operational] VEC-403: appends Morpho vault position observations into position_state via materialize_position_projection(position_morpho_vault). See that function''s comment for the run contract.';
+COMMENT ON FUNCTION materialize_morpho_vault(integer, bigint) IS '[Operational] VEC-403: appends Morpho vault position observations into position_state via materialize_position_projection(position_morpho_vault). See that function''s comment for the run contract. p_build_id and p_run_id are stamped on every row appended (ADR-0006 §2).';
 
 INSERT INTO migrations (filename) VALUES ('20260819_130000_materialize_morpho_vault.sql') ON CONFLICT (filename) DO NOTHING;
