@@ -940,10 +940,14 @@ def test_list_allocation_activity_returns_aggregated_buckets():
             "event_count": 3,
             "total_tx_amount": "450.5",
             "net_flow_usd": "-120.25",
+            # Null on the flow series, which is the default: the two series are
+            # alternatives and only one query runs (VEC-760).
+            "balance_usd": None,
         }
     ]
     kwargs = service.list_activity_buckets.await_args.kwargs
     assert kwargs["bucket_seconds"] == 5 * 60  # 24h window -> PT5M default
+    assert kwargs["series"] == "flow"
     service.list_allocation_activity.assert_not_awaited()
 
 
