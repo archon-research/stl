@@ -19,6 +19,10 @@ CREATE TABLE IF NOT EXISTS aave_unmapped_reserve (
     CONSTRAINT aave_unmapped_reserve_observations_chk CHECK (observations > 0)
 );
 
+-- CREATE TABLE IF NOT EXISTS adds no column to a table that already exists, so run_id needs its
+-- own idempotent ALTER: the writers below read it and are parsed when they are created.
+ALTER TABLE aave_unmapped_reserve ADD COLUMN IF NOT EXISTS run_id bigint;
+
 COMMENT ON TABLE aave_unmapped_reserve IS '[Operational] VEC-404: one row per materialize_aave_lending() run per reserve the projection skipped because no token mapping resolves it. The tag is reason, which also names the ledger: no_variable_debt_token for a debt reserve (borrower) absent from debt_token or carrying a NULL variable_debt_address, no_receipt_token for a supply reserve (borrower_collateral) absent from receipt_token. observations counts the ledger rows skipped. Append-only: each run appends its own view of the gap, so closing one is visible as its disappearance from later runs rather than as a mutation. A reserve here holds real exposure that position_state does not carry.';
 COMMENT ON COLUMN aave_unmapped_reserve.protocol_id IS 'Roles: PK, FK->protocol.id. The lending protocol whose reserve is unmapped.';
 COMMENT ON COLUMN aave_unmapped_reserve.token_id IS 'Roles: PK, FK->token.id. The reserve''s underlying token, which is what the mapping is missing for.';
@@ -92,6 +96,10 @@ COMMENT ON VIEW position_aave_lending IS '[Operational] VEC-404 projection: Aave
 
 -- Records the reserves it cannot key, then refuses only what would key WRONGLY: an ambiguous mapping
 -- or a cross-chain ledger row would mint a colliding or wrong position_id, which the spine cannot undo.
+-- Dropped rather than replaced: keeping the old argument list beside the new one makes a
+-- call that omits the run ambiguous, as it did for the spine.
+DROP FUNCTION IF EXISTS materialize_aave_lending(integer);
+
 CREATE OR REPLACE FUNCTION materialize_aave_lending(p_build_id integer DEFAULT 0,
                                                     p_run_id bigint DEFAULT NULL) RETURNS bigint
     LANGUAGE plpgsql
@@ -183,6 +191,6 @@ BEGIN
 END
 $fn$;
 
-COMMENT ON FUNCTION materialize_aave_lending(integer, bigint) IS '[Operational] VEC-404: materialize Aave-family lending positions into position_state via materialize_position_projection(position_aave_lending). Records each reserve it cannot key in aave_unmapped_reserve (tagged no_variable_debt_token or no_receipt_token) and projects the rest. Refuses to run, naming up to ten offenders, only for inputs that would key WRONGLY: a reserve mapped to several receipt tokens, one variable-debt token shared across reserves, or a ledger row mixing chains. Idempotent; run out of band. p_build_id is stamped on every appended row (build_registry.id; 0 = pre-tracking). Returns position_state rows appended.';
+COMMENT ON FUNCTION materialize_aave_lending(integer, bigint) IS '[Operational] VEC-404: materialize Aave-family lending positions into position_state via materialize_position_projection(position_aave_lending). Records each reserve it cannot key in aave_unmapped_reserve (tagged no_variable_debt_token or no_receipt_token) and projects the rest. Refuses to run, naming up to ten offenders, only for inputs that would key WRONGLY: a reserve mapped to several receipt tokens, one variable-debt token shared across reserves, or a ledger row mixing chains. Idempotent; run out of band. p_build_id is stamped on every appended row (build_registry.id; 0 = pre-tracking). Returns position_state rows appended. p_build_id and p_run_id are stamped on every row appended (ADR-0006 §2).';
 
 INSERT INTO migrations (filename) VALUES ('20260908_120000_materialize_aave_lending.sql') ON CONFLICT (filename) DO NOTHING;
