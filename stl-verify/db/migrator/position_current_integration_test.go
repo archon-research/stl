@@ -533,9 +533,22 @@ func TestPositionCurrentReplicaRoleGapIsRepairedByRebuild(t *testing.T) {
 	if cached != 0 {
 		t.Skipf("the trigger fired under the replica role (cache rows = %d); the gap does not reproduce here", cached)
 	}
+	// The gap is readable without the argmax scan: the cache's newest write predates the spine's.
+	if !f.cacheLagsSpine() {
+		t.Error("max(position_current.created_at) does not fall behind max(position_state.created_at) while the cache is behind history")
+	}
+	// A live check, not a record: the next insert the trigger does see brings the cache's newest write level
+	// with the spine's, and the bypassed position stays missing behind a reading that says nothing is wrong.
+	f.observe("masking", obs{qty: 1, block: 100, ts: "2026-01-01T00:00:00Z", dealType: "LOAN"})
+	if f.cacheLagsSpine() {
+		t.Error("the reading still falls behind after a later fired insert; the KNOWN GAP comment says it is masked from then on")
+	}
 	f.rebuild()
 	if qty, block, _ := f.current("replica"); qty != 9 || block != 100 {
 		t.Errorf("after the rebuild the cache holds %d at block %d; want 9 at 100 -- the documented recovery does not recover it", qty, block)
+	}
+	if f.cacheLagsSpine() {
+		t.Error("max(position_current.created_at) still falls behind max(position_state.created_at) after the rebuild repaired it")
 	}
 }
 

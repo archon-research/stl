@@ -20,12 +20,15 @@ CREATE TABLE IF NOT EXISTS position_current (
     build_id           integer     NOT NULL,
     run_id             bigint,
     deal_type          text,
+    created_at         timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT position_current_pkey PRIMARY KEY (position_id)
 );
 
--- CREATE TABLE IF NOT EXISTS adds no column to a table that already exists, so run_id needs its
--- own idempotent ALTER: the writers below read it and are parsed when they are created.
+-- CREATE TABLE IF NOT EXISTS adds no column to a table an earlier revision of this file created, so each
+-- column added since gets an idempotent ALTER. The migrator never re-applies a recorded file; this serves
+-- the harness re-run tests and a manual re-apply, where the LANGUAGE sql procedure below must parse.
 ALTER TABLE position_current ADD COLUMN IF NOT EXISTS run_id bigint;
+ALTER TABLE position_current ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();
 
 COMMENT ON TABLE position_current IS '[Operational] One row per position: its newest observation from position_state, by (block_number, block_version, processing_version, block_timestamp). Derived cache maintained by trigger_upsert_position_current; rebuildable with CALL rebuild_position_current(). Two classes it cannot repair: a cache row ahead of history, and a row whose position has no history left. Never read it as history - point-in-time questions are answered from position_state.';
 COMMENT ON COLUMN position_current.position_id IS 'Roles: PK. The bytea(32) native position identity from position_id() (VEC-400).';
@@ -42,6 +45,7 @@ COMMENT ON COLUMN position_current.projection IS 'Roles: Audit. Which projection
 COMMENT ON COLUMN position_current.deal_type IS 'Roles: Derived (copy of position_state.deal_type). The deal type of the latest observation; a position that flips direction changes this value.';
 COMMENT ON COLUMN position_current.build_id IS 'Roles: Audit. Which build wrote the latest observation (build_registry.id; 0 = pre-tracking).';
 COMMENT ON COLUMN position_current.run_id IS 'Roles: Audit (copy of position_state.run_id). Which writer run appended the latest observation (writer_run.id; NULL means it predates run tracking).';
+COMMENT ON COLUMN position_current.created_at IS 'Roles: Audit. When the content of this row was last written - the first insert or the latest overwrite by a newer observation; one the guard rejects leaves it alone. Not block time (see block_timestamp). max(created_at) behind max(position_state.created_at), both processing time, is the staleness signal; a lag that survives CALL rebuild_position_current() is late-arriving older history, not a gap.';
 
 -- Trigger-only cache, like allocation_position_current (20260825_120000): the app role reads and the
 -- SECURITY DEFINER maintainer writes, so no caller needs a write grant and the cache cannot fork from
@@ -83,7 +87,8 @@ BEGIN
         projection         = EXCLUDED.projection,
         build_id           = EXCLUDED.build_id,
         run_id             = EXCLUDED.run_id,
-        deal_type          = EXCLUDED.deal_type
+        deal_type          = EXCLUDED.deal_type,
+        created_at         = now()
     WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_version, EXCLUDED.block_timestamp)
         > (cur.block_number, cur.block_version, cur.processing_version, cur.block_timestamp);
     RETURN NULL;
@@ -127,7 +132,8 @@ AS $proc$
         projection         = EXCLUDED.projection,
         build_id           = EXCLUDED.build_id,
         run_id             = EXCLUDED.run_id,
-        deal_type          = EXCLUDED.deal_type
+        deal_type          = EXCLUDED.deal_type,
+        created_at         = now()
     -- Forward-only: raise a stale row, never lower one. No equal-coordinate arm is needed now that the
     -- cache has no write channel outside these two writers, which cannot disagree on one coordinate.
     WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_version, EXCLUDED.block_timestamp)
@@ -144,8 +150,8 @@ CREATE TRIGGER trigger_upsert_position_current
     FOR EACH STATEMENT
 EXECUTE FUNCTION upsert_position_current();
 
--- KNOWN GAP: TimescaleDB refuses ENABLE ALWAYS on a hypertable trigger, so this one stays at ORIGIN and
--- does not fire under session_replication_role = 'replica' (pg_restore --disable-triggers). Recovery is
--- CALL rebuild_position_current(), as the owner.
+-- KNOWN GAP: TimescaleDB refuses ENABLE ALWAYS on a hypertable trigger, so it stays at ORIGIN and does not
+-- fire under session_replication_role = 'replica' (pg_restore --disable-triggers). Until the next fired insert
+-- the bypass shows as max(created_at) behind position_state's (if its rows took the default); rebuild repairs it.
 
 INSERT INTO migrations (filename) VALUES ('20260819_150000_create_position_current.sql') ON CONFLICT (filename) DO NOTHING;
