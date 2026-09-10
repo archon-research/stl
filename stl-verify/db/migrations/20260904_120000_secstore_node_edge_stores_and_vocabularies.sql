@@ -11,8 +11,16 @@
 -- references between versioned stores (SCD2 ids are non-unique; resolve via the _current
 -- views), no session-level SET search_path (VEC-411). Spine columns per ADR-0006:
 -- processing_version is caller-assigned (0 live, N per correction run), ingest_xid is never
--- writer-supplied, ingested_at is a label only. run_id stays a bare bigint until the
--- writer_run FK lands with ADR-0006 §2 (#689 / VEC-598).
+-- writer-supplied, ingested_at is a label only. run_id is a real FK to writer_run(id),
+-- which 20260902_120000 landed for ADR-0006 §2: every governed row reaches its build
+-- artefact through run_id -> writer_run.build_id -> build_registry, and NULL means written
+-- before tracking (writer_run's own COMMENT defines it that way, and the 501 seeded rows
+-- here are exactly that case).
+--
+-- Being a child changes nothing about the full ACL revoke on the stores below: the FK
+-- integrity probe runs on the PARENT as the parent's owner, so it is writer_run that must
+-- keep owner UPDATE, and 20260902_120000 does keep it — deliberately, for this trap, with
+-- its immutability enforced by a STATEMENT-level trigger that a row lock does not fire.
 --
 -- Two engine-enforced write-boundary guarantees on the stores, both by BEFORE INSERT trigger
 -- (sec_store_append_guard, defined below with its full rationale): ingest_xid can only be the
@@ -175,7 +183,7 @@ CREATE TABLE sec_node (
     processing_version  integer NOT NULL DEFAULT 0 CHECK (processing_version >= 0),
     ingest_xid          xid8 NOT NULL DEFAULT pg_current_xact_id(),
     ingested_at         timestamptz NOT NULL DEFAULT now(),
-    run_id              bigint,
+    run_id              bigint REFERENCES writer_run(id),
     actor               text NOT NULL,
     change_reason_code  text NOT NULL REFERENCES change_reason_vocabulary(code),
     change_reason       text NOT NULL,
@@ -219,7 +227,7 @@ COMMENT ON COLUMN sec_node.record_id IS 'Roles: Audit, UNIQUE. Per-append surrog
 COMMENT ON COLUMN sec_node.processing_version IS 'Roles: Audit, PK component. Correction version, caller-assigned per ADR-0006 §3: 0 live, N per correction run via processing_version_log. A valid-time change (close-and-open, an ended window, a tombstone) is NOT a correction and stays at 0 — valid_to carries it. Un-retracting a tombstoned record IS a correction run at N. CONSEQUENCE of the resolution order (processing_version before ingest_xid): once a window has been corrected at N, a later ordinary append at 0 for that same (id, valid_from) never wins its group, whatever its ingest_xid, and with no error — a curator''s correction is not silently undone by the next pipeline run, and moving that window again takes another correction run. If a load appears to do nothing, this is why.';
 COMMENT ON COLUMN sec_node.ingest_xid IS 'Roles: Audit. Knowledge-time visibility key (ADR-0006 §5, pg_visible_in_snapshot) and the supersession tiebreak inside a valid window. Never writer-supplied: the sec_node_append_guard trigger rejects an insert that sets it to anything but the current transaction id. xid8 is 64-bit, so no wraparound — but the values are CLUSTER-LOCAL: pg_dump/restore, logical replication and a major-version upgrade do not preserve them, so a snapshot a manifest recorded stops resolving against the restored cluster. The model-level contract is a total, commit-consistent, writer-unforgeable ordering key; xid8 + pg_visible_in_snapshot is the Postgres realization of it (VEC-632 records that distinction, and what a restore does to existing manifests).';
 COMMENT ON COLUMN sec_node.ingested_at IS 'Roles: Audit. Wall-clock label only; never the audit key (a row stamps at transaction start but becomes visible at commit).';
-COMMENT ON COLUMN sec_node.run_id IS 'Roles: Audit. Writer run; FK to writer_run lands with ADR-0006 §2 (VEC-598).';
+COMMENT ON COLUMN sec_node.run_id IS 'Roles: FK→writer_run.id, Audit. The process start that wrote this row (ADR-0006 §2); resolves to the build artefact through writer_run.build_id, and to the reference data the writer saw through writer_run.reference_snapshot / reference_effective_at. NULL means written before run tracking — which is what the seeded rows are.';
 COMMENT ON COLUMN sec_node.actor IS 'Roles: Audit. Real, non-shared principal (human or service) that appended the row. Required.';
 COMMENT ON COLUMN sec_node.change_reason_code IS 'Roles: FK→change_reason_vocabulary.code, Audit. Structured reason for the append.';
 COMMENT ON COLUMN sec_node.change_reason IS 'Roles: Audit. Free-text reason; cites the source where change_reason_code = CURATED_SOURCE.';
@@ -264,7 +272,7 @@ CREATE TABLE sec_edge (
     processing_version  integer NOT NULL DEFAULT 0 CHECK (processing_version >= 0),
     ingest_xid          xid8 NOT NULL DEFAULT pg_current_xact_id(),
     ingested_at         timestamptz NOT NULL DEFAULT now(),
-    run_id              bigint,
+    run_id              bigint REFERENCES writer_run(id),
     actor               text NOT NULL,
     change_reason_code  text NOT NULL REFERENCES change_reason_vocabulary(code),
     change_reason       text NOT NULL,
@@ -318,7 +326,7 @@ COMMENT ON COLUMN sec_edge.record_id IS 'Roles: Audit, UNIQUE. Per-append surrog
 COMMENT ON COLUMN sec_edge.processing_version IS 'Roles: Audit, PK component. Correction version, caller-assigned (ADR-0006 §3); 0 live. Close-and-open, an ended link and a tombstone all stay at 0.';
 COMMENT ON COLUMN sec_edge.ingest_xid IS 'Roles: Audit. Knowledge-time visibility key (ADR-0006 §5) and the supersession tiebreak inside a valid window. Never writer-supplied; enforced by sec_edge_append_guard.';
 COMMENT ON COLUMN sec_edge.ingested_at IS 'Roles: Audit. Wall-clock label only.';
-COMMENT ON COLUMN sec_edge.run_id IS 'Roles: Audit. Writer run; FK lands with ADR-0006 §2 (VEC-598).';
+COMMENT ON COLUMN sec_edge.run_id IS 'Roles: FK→writer_run.id, Audit. See sec_node.run_id.';
 COMMENT ON COLUMN sec_edge.actor IS 'Roles: Audit. Appending principal. Required.';
 COMMENT ON COLUMN sec_edge.change_reason_code IS 'Roles: FK→change_reason_vocabulary.code, Audit.';
 COMMENT ON COLUMN sec_edge.change_reason IS 'Roles: Audit. Free-text reason.';

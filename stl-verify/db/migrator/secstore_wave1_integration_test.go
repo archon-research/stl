@@ -598,6 +598,46 @@ func TestSecStoreAppendGuardChainsAndRejectsForgedProvenance(t *testing.T) {
 		}
 	})
 
+	t.Run("run_id_must_name_a_real_writer_run", func(t *testing.T) {
+		// The FK exists so a governed row always resolves to the artefact that wrote it
+		// (run_id -> writer_run.build_id -> build_registry, ADR-0006 §2). NULL stays legal and
+		// means written before run tracking, which is what the 501 seeded rows are.
+		_, err := pool.Exec(ctx, `
+			INSERT INTO sec_node (id, record_type, status, valid_from, run_id, `+secstoreSpine+`)
+			VALUES ('em-t-run-bad', 'ENTITY', 'ACTIVE', '2026-01-01', 999999999, 'test', 'SEED_LOAD', 'no such run', 'test')`)
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "23503" {
+			t.Fatalf("unknown run_id failed with %v, want SQLSTATE 23503 (foreign_key_violation)", err)
+		}
+
+		// A real run is accepted. build_registry id 0 is the pre-tracking row every database
+		// carries, so the fixture needs no artefact of its own.
+		var runID int64
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO writer_run (build_id, reference_snapshot, reference_effective_at)
+			VALUES (0, pg_current_snapshot()::text, now()) RETURNING id`).Scan(&runID); err != nil {
+			t.Fatalf("open a writer run: %v", err)
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO sec_node (id, record_type, status, valid_from, run_id, `+secstoreSpine+`)
+			VALUES ('em-t-run-good', 'ENTITY', 'ACTIVE', '2026-01-01', $1, 'test', 'SEED_LOAD', 'attributed', 'test')`, runID); err != nil {
+			t.Fatalf("a row naming a real writer run must land: %v", err)
+		}
+
+		// The point of the FK: the row resolves to its build artefact by join, not by trust.
+		var gitHash string
+		if err := pool.QueryRow(ctx, `
+			SELECT b.git_hash FROM sec_node n
+			JOIN writer_run w ON w.id = n.run_id
+			JOIN build_registry b ON b.id = w.build_id
+			WHERE n.id = 'em-t-run-good'`).Scan(&gitHash); err != nil {
+			t.Fatalf("resolve the row to its artefact: %v", err)
+		}
+		if gitHash == "" {
+			t.Error("empty git_hash from the provenance join")
+		}
+	})
+
 	t.Run("a_window_starting_at_infinity_is_rejected", func(t *testing.T) {
 		// It used to satisfy valid_from <= valid_to, land, take a PK slot and a content_hash, and
 		// then match no read ever — every read tests valid_from <= effective_at. A write that
