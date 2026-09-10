@@ -2459,22 +2459,25 @@ groups:
         # chain: the bare name is mainnet, every other chain is
         # `<chain>-uniswap-v4-indexer` with the entity.ChainName value verbatim
         # (`base-`, `avalanche-c-`), so the derived label equals the `chain` the
-        # worker itself emits. The two label_replace calls are the whole mapping:
-        # the first captures the prefix, the second turns "no prefix" into
-        # mainnet. A second chain is covered by this rule as written and must
-        # not get a copy; VectorUniswapV4IndexerStalled repeats the same mapping
-        # so that its zero-fill joins the worker's own `chain` label.
+        # worker itself emits. The label_replace calls are the whole mapping: the
+        # first captures the prefix, the second turns "no prefix" into mainnet,
+        # the third maps the `avalanche-` prefix every other Avalanche Deployment
+        # carries onto the worker's `avalanche-c`. VectorUniswapV4IndexerStalled
+        # repeats it so that its zero-fill joins the worker's own `chain` label.
         expr: |
           label_replace(
             label_replace(
-              max by (deployment, cluster) (
-                kube_deployment_status_replicas_available{
-                  deployment=~"(.*-)?uniswap-v4-indexer", namespace="vector"
-                }
+              label_replace(
+                max by (deployment, cluster) (
+                  kube_deployment_status_replicas_available{
+                    deployment=~"(.*-)?uniswap-v4-indexer", namespace="vector"
+                  }
+                ),
+                "chain", "$1", "deployment", "^(.*)-uniswap-v4-indexer$"
               ),
-              "chain", "$1", "deployment", "^(.*)-uniswap-v4-indexer$"
+              "chain", "mainnet", "chain", "^$"
             ),
-            "chain", "mainnet", "chain", "^$"
+            "chain", "avalanche-c", "chain", "^avalanche$"
           ) < 1
         for: 10m
         labels:
@@ -2508,8 +2511,7 @@ groups:
         # the replica gate join `on (chain, cluster)` against the worker's own
         # `chain` label: one chain stalling reaches zero on its own series while
         # a second chain's Deployment keeps running, and a dead second-chain pod
-        # is Down's case, not this rule's. A second chain must not get a copy of
-        # this rule — it needs the naming rule and nothing else.
+        # is Down's case, not this rule's.
         expr: |
           (
             (
@@ -2522,12 +2524,15 @@ groups:
               max by (chain, cluster) (
                 label_replace(
                   label_replace(
-                    kube_deployment_status_replicas_available{
-                      deployment=~"(.*-)?uniswap-v4-indexer", namespace="vector"
-                    },
-                    "chain", "$1", "deployment", "^(.*)-uniswap-v4-indexer$"
+                    label_replace(
+                      kube_deployment_status_replicas_available{
+                        deployment=~"(.*-)?uniswap-v4-indexer", namespace="vector"
+                      },
+                      "chain", "$1", "deployment", "^(.*)-uniswap-v4-indexer$"
+                    ),
+                    "chain", "mainnet", "chain", "^$"
                   ),
-                  "chain", "mainnet", "chain", "^$"
+                  "chain", "avalanche-c", "chain", "^avalanche$"
                 )
               ) * 0
             ) == 0
@@ -2537,12 +2542,15 @@ groups:
             max by (chain, cluster) (
               label_replace(
                 label_replace(
-                  kube_deployment_status_replicas_available{
-                    deployment=~"(.*-)?uniswap-v4-indexer", namespace="vector"
-                  },
-                  "chain", "$1", "deployment", "^(.*)-uniswap-v4-indexer$"
+                  label_replace(
+                    kube_deployment_status_replicas_available{
+                      deployment=~"(.*-)?uniswap-v4-indexer", namespace="vector"
+                    },
+                    "chain", "$1", "deployment", "^(.*)-uniswap-v4-indexer$"
+                  ),
+                  "chain", "mainnet", "chain", "^$"
                 ),
-                "chain", "mainnet", "chain", "^$"
+                "chain", "avalanche-c", "chain", "^avalanche$"
               )
             ) >= 1
           )

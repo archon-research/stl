@@ -261,6 +261,11 @@ func setupRun(t *testing.T, opts mockChainOptions) (*pgxpool.Pool, []string) {
 	return db, runArgs(dbURL, server.URL)
 }
 
+// onBase moves a run to chain 8453 with the depth mainnet would have defaulted.
+func onBase(args []string) []string {
+	return append(withChainID(args, "8453"), "-finality-depth", "64")
+}
+
 func withChainID(args []string, chainID string) []string {
 	for i, arg := range args {
 		if arg == "-chain-id" {
@@ -365,8 +370,7 @@ func TestRunIntegration_RejectsAnUnreachableDatabase(t *testing.T) {
 func TestRunIntegration_RejectsAChainIDMismatch(t *testing.T) {
 	_, args := setupRun(t, mockChainOptions{})
 
-	// Off mainnet the depth has no default; the mismatch must still be what fails.
-	args = append(withChainID(args, "8453"), "-finality-depth", "64")
+	args = onBase(args)
 	err := run(context.Background(), args)
 	if err == nil {
 		t.Fatal("expected an error: the endpoint serves another chain")
@@ -397,8 +401,7 @@ func TestRunIntegration_RejectsAnUnreadableChainID(t *testing.T) {
 func TestRunIntegration_RejectsAChainWithNoRegisteredPools(t *testing.T) {
 	_, args := setupRun(t, mockChainOptions{chainID: "0x2105"})
 
-	// Off mainnet the depth has no default; the mismatch must still be what fails.
-	args = append(withChainID(args, "8453"), "-finality-depth", "64")
+	args = onBase(args)
 	err := run(context.Background(), args)
 	if err == nil {
 		t.Fatal("expected an error: chain 8453 has no seeded uniswap v4 registry")

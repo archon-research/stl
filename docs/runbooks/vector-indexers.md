@@ -1931,25 +1931,28 @@ change: the SQS loop deletes a message whose chain id is not the worker's
 (`chain ID mismatch, deleting message`), `entity.ChainName` fails boot on an
 unknown chain id, `dexbootstrap` refuses to boot off mainnet without
 `ALCHEMY_HTTP_URL`, `ValidatePoolKeys` refuses a registry whose PoolIds do not
-hash from their keys, and every registry and fact table is keyed on `chain_id`
-(a PoolId is identical across chains for an identical PoolKey, which is why the
+hash from their keys, every registry table is keyed on `chain_id` and every
+fact table reaches the chain through its pool or manager surrogate (a PoolId is
+identical across chains for an identical PoolKey, which is why the registry's
 natural key is `(chain_id, pool_id)` and never `pool_id` alone).
 
 1. **Infrastructure repo** — the chain's `uniswap_v4_indexing` SQS queue, IAM
    role and pod identity, mirroring archon-research/infrastructure#617 for
    ethereum. The chain must already have a watcher and backup worker (mainnet,
-   arbitrum, base, optimism, unichain and avalanche do); a chain id missing
-   from `entity.ChainIDToName` is chain onboarding, not a V4 task.
+   arbitrum, base, optimism, unichain, robinhood and avalanche do); a chain id
+   missing from `entity.ChainIDToName` is chain onboarding, not a V4 task.
 2. **One additive migration**, every value read from chain and asserted in a
-   `DO` block (the `20260831_120000_seed_prime_dex_pools.sql` shape): a
+   `DO` block (the `20260908_120000_seed_uniswap_v4_rlusd_usds.sql` shape): a
    `protocol` row for the chain's PoolManager; a `uniswap_v4_pool_manager` row
    with its StateView address and deploy block; a `uniswap_v4_position_manager`
    row for its PositionManager; a native-currency placeholder `token` row
    (`0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE`, that chain's native symbol
    and decimals — only chain 1 has one today, and without it the pool seed's
    token join inserts nothing); the pools' `token` rows; the pools themselves,
-   each from its own `Initialize` log. Extend the expectation list in
-   `uniswap_v4_migration_integration_test.go`. Re-derive the five hypertables'
+   each from its own `Initialize` log. The seed tests in
+   `uniswap_v4_migration_integration_test.go` are chain-1-only today
+   (`uniswapV4ExpectedPool` has no chain field, the queries say `chain_id = 1`),
+   so a second chain needs chain-aware expectations, not a longer list. Re-derive the five hypertables'
    `chunk_interval` for the combined ingest (VEC-663's rule: the active chunk plus
    its indexes within a quarter of `shared_buffers`, capped at 30 days; 30 days
    today at mainnet's few MB/day): `set_chunk_time_interval` affects new chunks
@@ -1959,10 +1962,18 @@ natural key is `(chain_id, pool_id)` and never `pool_id` alone).
    `k8s/base/<chain>-uniswap-v4-indexer/`, changing only the names, where
    `<chain>` is the `entity.ChainName` value verbatim (`base`, `avalanche-c`):
    that name is what the Down and Stalled rules derive their `chain` label
-   from, and the `app` label must equal the Deployment name. Add its ConfigMap
-   (`DEX=uniswap-v4`, `CHAIN_ID`, `ALCHEMY_HTTP_URL`), its ExternalSecret
-   (queue URL, `DATABASE_URL`, `ALCHEMY_API_KEY`), the overlay `resources:`
-   entries, and the `k8s/image-roster.txt` line.
+   from, and the `app` label must equal the Deployment name. 43114 is the one
+   chain whose `entity.ChainName` (`avalanche-c`) differs from its k8s prefix
+   (`avalanche-`); the rules map `avalanche-` onto `avalanche-c`, so either name
+   works there. Keep `image:
+   dex-indexer`: the roster already aliases it for the three DEX bases, so
+   there is no `k8s/image-roster.txt` change (rename the image key and it is a
+   new alias on that line, never a new line). Add its ConfigMap with the same
+   entries as the mainnet one (`DEX`, `CHAIN_ID`, `AWS_REGION`,
+   `ALCHEMY_HTTP_URL`, `ENVIRONMENT`, `DEPLOY_ENV`), its ExternalSecret (`AWS_SQS_QUEUE_URL`,
+   `DATABASE_URL`, `ALCHEMY_API_KEY`, `REDIS_ADDR`, `S3_BUCKET` — the bucket
+   must be the chain's `stl-sentinel<env>-<chain>-raw`, which `dexbootstrap`
+   checks against `CHAIN_ID`), and the overlay `resources:` entries.
 4. **Alerts** — nothing to copy: every rule in the group is chain-generic. On
    the first deploy confirm that
    `kube_deployment_status_replicas_available{deployment="<chain>-uniswap-v4-indexer"}`
@@ -1972,10 +1983,11 @@ natural key is `(chain_id, pool_id)` and never `pool_id` alone).
 5. **Bootstrap** — run `uniswap-v4-position-bootstrap` once by hand with
    `-chain-id`, the chain's RPC endpoint and an explicit `-finality-depth`
    chosen for that chain's finality (see *Pin semantics* above). The mainnet
-   Job manifest is not reusable as-is: copy
-   `k8s/overlays/<env>/uniswap-v4-position-bootstrap/` for the chain, patch the
-   Job's `envFrom` to the chain's ConfigMap and Secret and set `FINALITY_DEPTH`
-   in its `env:`.
+   Job manifest is not reusable as-is: its name, ServiceAccount and `envFrom`
+   are mainnet's and live in the base. Give the chain its own overlay directory
+   next to `k8s/overlays/<env>/uniswap-v4-position-bootstrap/` whose
+   `patches:` rename the Job and ServiceAccount, point `envFrom` at the chain's
+   ConfigMap and Secret, and set `FINALITY_DEPTH` in `env:`.
 
 **Who holds a posm position NFT.** `uniswap_v4_position.owner` is the
 *PoolManager-level* owner, which for every PositionManager-managed position is
@@ -2214,7 +2226,8 @@ label. That is what lets one chain reach zero on its own series while another
 chain's Deployment keeps running, and what keeps a dead second-chain pod in
 Down's lane rather than this one's. The metric-keyed rules in the group —
 ErrorRatioHigh, BlockLatencyHigh, NotWritingState, NoPoolsTouched,
-PoolNeverIndexed, NoNFTTransfers — derive `chain` from the series directly.
+PoolNeverIndexed, StateRowsNotLanding, NoNFTTransfers — derive `chain` from the
+series directly.
 One rule covers every chain; a new chain needs the Deployment naming rule and
 nothing else ([Adding a chain](#adding-a-chain)).
 
@@ -2260,7 +2273,7 @@ A startup registry refusal is **not** in this list: it kills the pod, so it fire
 
 ### Verify recovery
 
-`sum by (chain, cluster) (rate(uniswap_v4_blocks_processed_total{status="success"}[5m])) > 0`
+`sum by (chain, cluster) (rate(uniswap_v4_blocks_processed_total{status="success", k8s_namespace_name="vector"}[5m])) > 0`
 for the alert's `chain` in the affected cluster.
 
 ---
@@ -2318,7 +2331,7 @@ not an alert.
    price. Confirm with the `getSlot0` snippet in the service intro, then append
    a superseding registry row
    ([Fixing a bad registry row](#fixing-a-bad-registry-row)).
-4. **Recent deploys** — `kubectl rollout history deploy/uniswap-v4-indexer -n vector`.
+4. **Recent deploys** — `kubectl rollout history deploy/$DEPLOY -n vector`.
 5. **Chain reorgs** — check watcher logs; a reorg delivers blocks the indexer
    may reject until the version advances.
 
@@ -2637,7 +2650,7 @@ signature, and only one of them is a fault.
 
 ### First checks
 
-1. **Is it a replay?** `kubectl -n vector logs -l app=uniswap-v4-indexer --tail=500 | grep -E "block=[0-9]+"`
+1. **Is it a replay?** `kubectl -n vector logs -l app=$DEPLOY --tail=500 | grep -E "block=[0-9]+"` (`$DEPLOY`: `uniswap-v4-indexer` on mainnet, `<chain>-uniswap-v4-indexer` elsewhere)
    — block numbers well below the chain head, arriving in order, is a replay.
    Confirm with `SELECT max(block_number) FROM uniswap_v4_pool_state` against the head.
 2. **Is it a drop?** Pick one queued block from the logs and check the table:

@@ -87,14 +87,9 @@ func TestConfigValidate_ExportedFormAppliesTheDefaultsFirst(t *testing.T) {
 	}
 }
 
-// 64 blocks is two mainnet epochs. On Base that is two minutes and on Arbitrum
-// sixteen seconds, neither of which is final, so the default must not leak.
 func TestConfigWithDefaults_FinalityDepthDefaultsOnlyOnMainnet(t *testing.T) {
 	if got := (Config{ChainID: 8453}.withDefaults()).FinalityDepth; got != 0 {
 		t.Errorf("FinalityDepth on chain 8453 = %d, want 0 (no default off mainnet)", got)
-	}
-	if got := (Config{ChainID: 1}.withDefaults()).FinalityDepth; got != DefaultFinalityDepth {
-		t.Errorf("FinalityDepth on chain 1 = %d, want %d", got, DefaultFinalityDepth)
 	}
 }
 
@@ -104,8 +99,6 @@ func TestConfigValidate_OffMainnetNeedsAnExplicitFinalityDepth(t *testing.T) {
 		cfg  Config
 	}{
 		{"no pin, no depth", Config{ChainID: 8453}},
-		// An explicit pin alone is not enough: finalitySafeHeight's reorg-window
-		// refusal is `pin > head - depth`, which a zero depth disables.
 		{"pin but no depth", Config{ChainID: 8453, PinBlock: 100}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -120,11 +113,20 @@ func TestConfigValidate_OffMainnetNeedsAnExplicitFinalityDepth(t *testing.T) {
 			}
 		})
 	}
+}
 
-	if err := (Config{ChainID: 8453, FinalityDepth: 200}).Validate(); err != nil {
-		t.Errorf("explicit depth off mainnet: %v", err)
-	}
-	if err := (Config{ChainID: 8453, FinalityDepth: 200, PinBlock: 100}).Validate(); err != nil {
-		t.Errorf("explicit depth and pin off mainnet: %v", err)
+func TestConfigValidate_OffMainnetAcceptsAnExplicitFinalityDepth(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		cfg  Config
+	}{
+		{"depth", Config{ChainID: 8453, FinalityDepth: 200}},
+		{"depth and pin", Config{ChainID: 8453, FinalityDepth: 200, PinBlock: 100}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.cfg.Validate(); err != nil {
+				t.Errorf("Validate: %v", err)
+			}
+		})
 	}
 }

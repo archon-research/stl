@@ -1,6 +1,10 @@
 package uniswapv4bootstrap
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
+)
 
 const (
 	// 64 blocks is two epochs on Ethereum mainnet, past finalisation: the pinned
@@ -29,10 +33,8 @@ type Config struct {
 	PositionBatch int
 }
 
-const mainnetChainID = int64(1)
-
 func (c Config) withDefaults() Config {
-	if c.FinalityDepth == 0 && c.ChainID == mainnetChainID {
+	if c.FinalityDepth == 0 && c.ChainID == chainutil.EthereumMainnetChainID {
 		c.FinalityDepth = DefaultFinalityDepth
 	}
 	if c.InitialWindow == 0 {
@@ -62,8 +64,7 @@ func (c Config) validate() error {
 		return fmt.Errorf("chainID must be positive, got %d", c.ChainID)
 	case c.FinalityDepth < 0:
 		return fmt.Errorf("finality depth must not be negative, got %d", c.FinalityDepth)
-	// An explicit pin alone is not enough: finalitySafeHeight's reorg-window
-	// refusal is `pin > head - depth`, which a zero depth disables.
+	// A pin alone is not enough: the reorg-window refusal is pin > head - depth.
 	case c.FinalityDepth == 0:
 		return fmt.Errorf("chain %d has no default finality depth: pass one explicitly (%d is two mainnet epochs and means nothing elsewhere)", c.ChainID, DefaultFinalityDepth)
 	case c.FromBlock < 0:
