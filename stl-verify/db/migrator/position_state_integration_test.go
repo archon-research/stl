@@ -2449,7 +2449,7 @@ func psTestDealTypeCodeMigrationIsReRunnable(t *testing.T, f *psFixture) {
 	// spine this PR replaced. Both then exist and every two-argument call is ambiguous, which is why a
 	// partial re-apply has to be followed by the later files -- the operator's own order.
 	t.Run("re-applying the later files restores the current spine, and the old overload is gone", func(t *testing.T) {
-		apply(t, "20260909_155000_add_run_id_to_position_stack.sql")
+		apply(t, "20260818_150000_add_run_id_to_position_stack.sql")
 		apply(t, "20260909_160000_fix_offchain_check_before_closure.sql")
 		var n int
 		if err := f.pool.QueryRow(f.ctx, `
