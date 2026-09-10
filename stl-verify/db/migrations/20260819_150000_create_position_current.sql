@@ -23,6 +23,10 @@ CREATE TABLE IF NOT EXISTS position_current (
     CONSTRAINT position_current_pkey PRIMARY KEY (position_id)
 );
 
+-- CREATE TABLE IF NOT EXISTS adds no column to a table that already exists, so run_id needs its
+-- own idempotent ALTER: the writers below read it and are parsed when they are created.
+ALTER TABLE position_current ADD COLUMN IF NOT EXISTS run_id bigint;
+
 COMMENT ON TABLE position_current IS '[Operational] One row per position: its newest observation from position_state, by (block_number, block_version, processing_version, block_timestamp). Derived cache maintained by trigger_upsert_position_current; rebuildable with CALL rebuild_position_current(). Two classes it cannot repair: a cache row ahead of history, and a row whose position has no history left. Never read it as history - point-in-time questions are answered from position_state.';
 COMMENT ON COLUMN position_current.position_id IS 'Roles: PK. The bytea(32) native position identity from position_id() (VEC-400).';
 COMMENT ON COLUMN position_current.chain_id IS 'Roles: Derived (copy of position_state.chain_id). NULL is a materializer convention for an off-chain source, not missing data.';

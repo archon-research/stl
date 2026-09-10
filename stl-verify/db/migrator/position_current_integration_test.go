@@ -52,13 +52,14 @@ func (f *positionCurrentFixture) observe(id string, o obs) {
 	if o.dealType != "" {
 		dt = o.dealType
 	}
-	// run_id is seeded non-NULL and varies with the coordinate, so the whole-row comparison against
-	// the winning spine row covers it: a writer that forgets it leaves NULL in the cache.
+	// run_id is seeded non-NULL and varies with block AND processing_version, neither of which the
+	// writers' newer-wins ORDER BY reads together, so the whole-row comparison catches a writer that
+	// forgets the column and one that copies another row's run.
 	if _, err := f.pool.Exec(f.ctx, `
 		INSERT INTO position_state
 		    (`+positionStateCols+`, run_id)
 		VALUES (sha256($1::bytea), 1, 1, 'inst-' || $1, substr(md5($1) || md5($1), 1, 40), $2, $3, $4, $5::int, $6,
-		        'public.proj-' || ($5::int)::text, $5::int, $7, 7700 + $5::int)`,
+		        'public.proj-' || ($5::int)::text, $5::int, $7, 7700 + ($3::bigint * 10) + $5::int)`,
 		id, o.qty, o.block, o.bv, o.pv, o.ts, dt); err != nil {
 		f.t.Fatalf("observe %s at block %d: %v", id, o.block, err)
 	}
@@ -610,7 +611,7 @@ func TestPositionCurrentEqualsTheSpineArgmaxOverRandomHistories(t *testing.T) {
 				if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW `+view+` AS `+valuesBody(arrived)); err != nil {
 					t.Fatalf("create view (batch %d): %v", bi, err)
 				}
-				if _, err := pool.Exec(ctx, `SELECT materialize_position_projection($1::regclass)`, view); err != nil {
+				if _, err := pool.Exec(ctx, `SELECT materialize_position_projection($1::regclass, 0, $2)`, view, 9000+bi); err != nil {
 					t.Fatalf("materialize batch %d: %v", bi, err)
 				}
 			}
