@@ -177,6 +177,7 @@ func (s *UniswapV3Service) handleBlock(ctx context.Context, event outbound.Block
 	s.telemetry.RecordPoolsTouched(ctx, len(acc.touchedIDs))
 	s.telemetry.RecordStateRowsAttempted(ctx, int(stateRows.Attempted))
 	s.telemetry.RecordStateRows(ctx, int(stateRows.Persisted))
+	s.telemetry.RecordTickRows(ctx, int(stateRows.TicksPersisted))
 	return nil
 }
 
@@ -391,22 +392,21 @@ func (s *UniswapV3Service) buildBlockWrites(acc blockAccumulators, states []*ent
 	return writes, capturedIns
 }
 
-// dexconsumer.PersistBlock carries only the persisted count back, so
-// persistBlock rides the attempted count out on the closure.
+// dexconsumer.PersistBlock carries only the persisted state count back, so
+// the full counts ride the closure.
 func (s *UniswapV3Service) persistBlock(ctx context.Context, writes outbound.UniswapV3BlockWrites, capturedIns []dexconsumer.ProtocolEventInput, bn int64) (outbound.StateRowCounts, error) {
-	var attempted int64
-	persisted, err := dexconsumer.PersistBlock(ctx, s.txMgr, s.eventWriter, func(ctx context.Context, tx pgx.Tx) (int64, error) {
+	var counts outbound.StateRowCounts
+	if _, err := dexconsumer.PersistBlock(ctx, s.txMgr, s.eventWriter, func(ctx context.Context, tx pgx.Tx) (int64, error) {
 		rows, err := s.repo.SaveBlock(ctx, tx, writes)
 		if err != nil {
 			return 0, fmt.Errorf("persisting uniswap v3 block %d: %w", bn, err)
 		}
-		attempted = rows.Attempted
+		counts = rows
 		return rows.Persisted, nil
-	}, capturedIns, bn)
-	if err != nil {
+	}, capturedIns, bn); err != nil {
 		return outbound.StateRowCounts{}, err
 	}
-	return outbound.StateRowCounts{Attempted: attempted, Persisted: persisted}, nil
+	return counts, nil
 }
 
 // markSnapshotted records the tracker and baselineSeen bookkeeping AFTER a

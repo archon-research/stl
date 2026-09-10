@@ -8,15 +8,17 @@ freshness).
 """
 
 import datetime as dt
+from decimal import Decimal
 
 import asyncpg
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.adapters.postgres.core_model_positions_reader import PostgresPositionsReader
+from app.adapters.postgres.core_model_positions_reader import PostgresPositionsReader, _feed_alive_sql
 from tests.integration.core_model_seed import seed_spoof_token
 from tests.integration.seed import (
+    insert_anchorage_snapshot,
     insert_maple_loan,
     insert_maple_loan_collateral,
     insert_maple_loan_state,
@@ -225,7 +227,7 @@ async def test_a_second_token_with_the_same_symbol_that_nobody_holds_is_ignored(
 async def test_unsupported_protocol_fails_with_the_data_gaps_pointer(engine):
     with pytest.raises(ValueError, match="DATA_GAPS"):
         await PostgresPositionsReader(engine).get_protocol_data(
-            protocol="ANCHORAGE", network="ETHEREUM", morpho_market="", loan_token="USDC", galaxy_type=""
+            protocol="GALAXY", network="ETHEREUM", morpho_market="", loan_token="USDC", galaxy_type=""
         )
 
 
@@ -457,3 +459,169 @@ async def test_syrup_a_stale_pool_cycle_fails_the_run(engine, syrup_conn):
 async def test_syrup_without_a_matching_pool_fails_the_run(engine, syrup_conn):
     with pytest.raises(ValueError, match="exactly one syrup pool"):
         await PostgresPositionsReader(engine).get_protocol_data(**{**_SYRUP, "loan_token": "USDT"})
+
+
+# Anchorage: what only the database covers — the per-prime latest-poll cohort
+# (closed packages keep active=true on their last row and must not leak), the
+# processing_version correction pick, and the cohort staleness bound. Frame
+# math is unit-tested.
+
+_ANCHORAGE = dict(protocol="ANCHORAGE", network="ETHEREUM", morpho_market="", loan_token="ALL", galaxy_type="")
+
+# The seed helper's fixed package terms: critical_ltv 0.85, asset_price 60000.
+_ANCHORAGE_CRITICAL_LTV = 0.85
+_ANCHORAGE_SEED_PRICE = 60_000
+
+
+@pytest.fixture()
+async def anchorage_conn(db_url: str, engine):
+    """asyncpg connection for the anchorage seed helper, on a clean snapshot slate.
+
+    Reuses the module ``engine`` fixture for the reader under test; the
+    anchorage table is truncated here because that fixture only clears the
+    SparkLend/Morpho ones. The reader scans every prime, so leftover snapshots
+    from sibling tests would pollute the cohort.
+    """
+    conn = await asyncpg.connect(db_url)
+    try:
+        await conn.execute("TRUNCATE anchorage_package_snapshot")
+        yield conn
+    finally:
+        await conn.close()
+
+
+async def _seed_anchorage_prime(conn, name: str, vault_byte: bytes) -> int:
+    return await conn.fetchval(
+        "INSERT INTO prime (name, vault_address) VALUES ($1, $2) "
+        "ON CONFLICT (name) DO UPDATE SET vault_address = EXCLUDED.vault_address RETURNING id",
+        name,
+        vault_byte * 20,
+    )
+
+
+async def _insert_live_package(
+    conn,
+    prime_id: int,
+    package_id: str,
+    snapshot_time: dt.datetime,
+    *,
+    exposure_value: Decimal = Decimal(150_000_000),
+    package_value: Decimal = Decimal(187_500_000),
+    asset_quantity: Decimal = Decimal(3125),
+    build_id: int = 0,
+) -> None:
+    """The canonical live BTC package ($150M loan against 3125 BTC at the seed price)."""
+    await insert_anchorage_snapshot(
+        conn,
+        prime_id=prime_id,
+        package_id=package_id,
+        active=True,
+        exposure_value=exposure_value,
+        package_value=package_value,
+        asset_quantity=asset_quantity,
+        snapshot_time=snapshot_time,
+        build_id=build_id,
+    )
+
+
+async def test_anchorage_latest_cohort_excludes_closed_packages_last_rows(engine, anchorage_conn):
+    now = dt.datetime.now(dt.timezone.utc)
+    prime_id = await _seed_anchorage_prime(anchorage_conn, "anchorage_core_model", b"\xd0")
+    await _insert_live_package(anchorage_conn, prime_id, "live-package", now)
+    # A closed package's LAST row is older than the cohort and still says
+    # active=true; taking "latest row per package" instead of "latest poll
+    # cohort" would resurrect it (the $521M trap).
+    await _insert_live_package(
+        anchorage_conn,
+        prime_id,
+        "closed-package",
+        now - dt.timedelta(hours=2),
+        exposure_value=Decimal(99_000_000),
+        package_value=Decimal(120_000_000),
+        asset_quantity=Decimal(2000),
+    )
+
+    users_df, market_df = await PostgresPositionsReader(engine).get_protocol_data(**_ANCHORAGE)
+
+    assert list(users_df["wallet_address"]) == ["live-package"]
+    row = users_df.iloc[0]
+    assert row["usdc_borrow"] == pytest.approx(150_000_000)
+    assert row["btc_supply"] == pytest.approx(3125)
+    assert row["lltv"] == pytest.approx(_ANCHORAGE_CRITICAL_LTV)
+    assert row["ltv"] == pytest.approx(0.8)
+    assert list(market_df["token_symbol"]) == ["BTC"]
+    assert market_df["oracle_price"].iloc[0] == pytest.approx(_ANCHORAGE_SEED_PRICE)
+
+
+async def test_anchorage_correction_of_the_same_poll_wins(engine, anchorage_conn):
+    now = dt.datetime.now(dt.timezone.utc)
+    prime_id = await _seed_anchorage_prime(anchorage_conn, "anchorage_core_model", b"\xd0")
+    for build_id, quantity in ((0, 3000), (1, 3125)):
+        await _insert_live_package(
+            anchorage_conn, prime_id, "corrected-package", now, asset_quantity=Decimal(quantity), build_id=build_id
+        )
+
+    users_df, _ = await PostgresPositionsReader(engine).get_protocol_data(**_ANCHORAGE)
+
+    assert len(users_df) == 1
+    assert users_df.iloc[0]["btc_supply"] == pytest.approx(3125)
+
+
+async def test_anchorage_prime_cohorts_are_isolated(engine, anchorage_conn):
+    # A second prime polled later must not starve the first: the latest poll
+    # is per prime, not a global MAX(snapshot_time).
+    now = dt.datetime.now(dt.timezone.utc)
+    first = await _seed_anchorage_prime(anchorage_conn, "anchorage_core_model", b"\xd0")
+    second = await _seed_anchorage_prime(anchorage_conn, "anchorage_core_model_2", b"\xd1")
+    await _insert_live_package(anchorage_conn, first, "first-prime-package", now - dt.timedelta(minutes=30))
+    await _insert_live_package(
+        anchorage_conn,
+        second,
+        "second-prime-package",
+        now,
+        exposure_value=Decimal(50_000_000),
+        package_value=Decimal(62_500_000),
+        asset_quantity=Decimal(1041),
+    )
+
+    users_df, _ = await PostgresPositionsReader(engine).get_protocol_data(**_ANCHORAGE)
+
+    assert sorted(users_df["wallet_address"]) == ["first-prime-package", "second-prime-package"]
+
+
+async def test_anchorage_a_stale_cohort_fails_the_run(engine, anchorage_conn):
+    stale = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=3)
+    prime_id = await _seed_anchorage_prime(anchorage_conn, "anchorage_core_model", b"\xd0")
+    await _insert_live_package(anchorage_conn, prime_id, "frozen-package", stale)
+    with pytest.raises(ValueError, match="frozen feed"):
+        await PostgresPositionsReader(engine).get_protocol_data(**_ANCHORAGE)
+
+
+async def test_anchorage_no_packages_fails_the_run(engine, anchorage_conn):
+    with pytest.raises(ValueError, match="no active anchorage packages"):
+        await PostgresPositionsReader(engine).get_protocol_data(**_ANCHORAGE)
+
+
+async def test_anchorage_refuses_a_specific_loan_token(engine):
+    # Raised before any query, so no seeded state is involved.
+    with pytest.raises(ValueError, match="LOAN_TOKEN=ALL"):
+        await PostgresPositionsReader(engine).get_protocol_data(**{**_ANCHORAGE, "loan_token": "USDC"})
+
+
+async def test_feed_liveness_is_per_oracle_across_tokens(engine):
+    # The window is per feed, not per token: one recent row on any token keeps
+    # the feed alive, a feed with no row inside the window is silent, and a row
+    # just outside the window does not count (VEC-672: the window is a literal so
+    # the planner excludes every chunk outside it; the semantics are unchanged).
+    async with engine.begin() as conn:
+        ids = await _ids(conn)
+        await _seed_price(conn, ids["weth"], ids["sparklend"], 2000.0, dt.timedelta(days=40), block=50)
+        await _seed_price(conn, ids["usdt"], ids["sparklend"], 1.0, dt.timedelta(minutes=1))
+        await _seed_price(conn, ids["weth"], ids["chainlink"], 2000.0, dt.timedelta(days=2, minutes=1), block=60)
+
+        async def alive(oracle_id: int) -> bool:
+            sql = _feed_alive_sql(dt.timedelta(days=2))
+            return (await conn.execute(sql, {"oracle_id": oracle_id})).scalar() == 1
+
+        assert await alive(ids["sparklend"]), "one recent token on the feed is enough"
+        assert not await alive(ids["chainlink"]), "a row just outside the window does not vouch for the feed"
