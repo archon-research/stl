@@ -45,6 +45,11 @@
 #              failure of the comparison: it is reported loudly, counts as
 #              determined, and does not affect the exit code — see the note on
 #              UNKNOWN below for what the exit code does mean
+#   SKIPPED    the overlay already names the deploy tag, so there is no
+#              "already running" side to compare against -- this ran after the
+#              block was rewritten, or the same commit is being re-deployed.
+#              Benign: it is not counted as a failure and does not affect the
+#              exit code
 #   PINNED_GONE the tag the overlay pins is absent from ECR. This is the
 #              openmetadata-ingestion failure (ARCT-436, 2026-08-31): the image
 #              is gone but nothing notices until a node rotates and the kubelet
@@ -123,24 +128,8 @@ command -v aws >/dev/null || die "the aws CLI is required to read ECR image mani
 # newName pairs with the newTag that follows it, and several bases can share one
 # image so the list is deduped.
 #
-# This is the THIRD independent parser of this block (render-overlay-images.sh,
-# check-overlay-tag-consistency.sh, and this one), each reading the YAML its own
-# way. They are not unified here — out of scope for ORB-366 — but
-# render-overlay-images.sh is authoritative: k8s/AGENTS.md says the block is
-# generated from k8s/image-roster.txt by that script, and its --check mode is
-# what actually gates deploy-prod. Known divergence: this parser strips only a
-# leading/trailing quote char from a value and does not strip a trailing `#
-# comment`, while both other parsers do: render-overlay-images.sh anchors its
-# newTag sed with `"?[[:space:]]*(#.*)?$`, and check-overlay-tag-consistency.sh
-# strips with `s/[[:space:]]+#.*$//`. A hand-pinned entry like
-# `newTag: "<sha>"  # pinned per ARCT-436` parses clean in both of those and
-# comes out here as the sha with `"  # pinned per ARCT-436` glued on. Verified
-# by running all three against that exact line.
-#
-# It fails safe: the mangled tag does not resolve in ECR, so this script says
-# UNKNOWN rather than giving a wrong verdict, and the bot-written block carries
-# no comments today. Tracked as VEC-754 (not fixed here -- unifying three
-# parsers touches the deploy path, which a log-only measurement should not).
+# Does not strip a trailing `# comment` where render-overlay-images.sh (the
+# authoritative parser, per k8s/AGENTS.md) does; fails safe, tracked as VEC-754.
 PAIRS_FILE="$(mktemp)"
 ROWS_FILE="$(mktemp)"
 trap 'rm -f "$PAIRS_FILE" "$ROWS_FILE"' EXIT
@@ -265,7 +254,7 @@ classify_pair_status() {
   fi
 }
 
-UNCHANGED=0; CHANGED=0; PINNED_GONE_COUNT=0; NOT_BUILT_COUNT=0; UNDETERMINED=0; DETERMINED=0
+UNCHANGED=0; CHANGED=0; PINNED_GONE_COUNT=0; NOT_BUILT_COUNT=0; UNDETERMINED=0; DETERMINED=0; SKIPPED=0
 
 echo "Comparing ${PAIR_COUNT} image(s) pinned by ${KUSTOMIZATION} against their build at ${TAG:0:12}"
 
@@ -282,9 +271,9 @@ while IFS=$'\t' read -r newName pinnedTag; do
     verdict="UNKNOWN"; detail="could not parse ECR account/region from ${newName}"
   elif [ "$pinnedTag" = "$candidateTag" ]; then
     # The overlay already names the deploy SHA, so there is no "already running"
-    # side left to compare against. Reporting UNCHANGED here would be the
-    # comforting answer, and wrong: it means this ran after the rewrite.
-    verdict="UNKNOWN"
+    # side left to compare against. Not UNCHANGED (the comforting, wrong answer)
+    # and not UNKNOWN either: nothing failed, so it must not raise the alarm.
+    verdict="SKIPPED"
     detail="overlay already pins ${TAG:0:12}; run this before the deploy rewrites the block"
   else
     if pinnedLayers="$(layers_of "$account" "$region" "$repo" "$pinnedTag")"; then
@@ -317,6 +306,7 @@ while IFS=$'\t' read -r newName pinnedTag; do
   case "$verdict" in
     UNCHANGED)   UNCHANGED=$((UNCHANGED + 1)); DETERMINED=$((DETERMINED + 1)); echo "  UNCHANGED   ${repo}: ${detail}" ;;
     CHANGED)     CHANGED=$((CHANGED + 1));     DETERMINED=$((DETERMINED + 1)); echo "  CHANGED     ${repo}: ${detail}" ;;
+    SKIPPED)     SKIPPED=$((SKIPPED + 1));           echo "  SKIPPED     ${repo}: ${detail}" ;;
     UNKNOWN)     UNDETERMINED=$((UNDETERMINED + 1)); echo "::warning::UNKNOWN ${repo}: ${detail}" ;;
     PINNED_GONE) PINNED_GONE_COUNT=$((PINNED_GONE_COUNT + 1)); DETERMINED=$((DETERMINED + 1)); echo "::warning::PINNED_GONE ${repo}: ${detail}" ;;
     NOT_BUILT)   NOT_BUILT_COUNT=$((NOT_BUILT_COUNT + 1));     DETERMINED=$((DETERMINED + 1)); echo "::warning::NOT_BUILT ${repo}: ${detail}" ;;
@@ -355,7 +345,7 @@ if [ -n "$JSON_OUT" ]; then
 fi
 
 cat <<SUMMARY
-Summary: ${UNCHANGED} unchanged, ${CHANGED} changed, ${PINNED_GONE_COUNT} pinned tag(s) gone from ECR (retention risk on a running image), ${NOT_BUILT_COUNT} candidate(s) not yet built, ${UNDETERMINED} not compared (of ${PAIR_COUNT}).
+Summary: ${UNCHANGED} unchanged, ${CHANGED} changed, ${PINNED_GONE_COUNT} pinned tag(s) gone from ECR (retention risk on a running image), ${NOT_BUILT_COUNT} candidate(s) not yet built, ${SKIPPED} skipped (overlay already at the deploy tag), ${UNDETERMINED} not compared (of ${PAIR_COUNT}).
 This run changed nothing. Today's deploy rewrites every newTag in the block regardless
 of this verdict — more entries than the ${PAIR_COUNT} images counted here, since several
 bases share one image — so any image reported unchanged above names pods that rolled
@@ -373,6 +363,14 @@ fi
 # The exit code reports whether the comparison worked, never what the deploy
 # should do. A run that determined nothing has told us nothing, and the one
 # thing it must not do is read as clean.
+# Every pair skipped is the benign no-op: a re-deploy of a commit whose bump
+# already landed. Nothing failed, so this must not raise the "broken" alarm --
+# that annotation is the only signal separating a real failure from a clean
+# week, and firing it on a recurring benign case trains readers to ignore it.
+if [ "$SKIPPED" -eq "$PAIR_COUNT" ]; then
+  echo "Every overlay entry already names ${TAG:0:12}: this ran after the block was rewritten, so there was nothing to compare. Not a failure."
+  exit 0
+fi
 if [ "$DETERMINED" -eq 0 ]; then
   echo "::error::Examined ${PAIR_COUNT} image(s) and could not determine anything about a single one. The comparison is broken, not the deploy — do not read this as 'nothing changed'." >&2
   exit 1

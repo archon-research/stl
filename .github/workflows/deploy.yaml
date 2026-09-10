@@ -149,22 +149,21 @@ jobs:
       # its exit code — it reports whether it could compare, never what the
       # deploy should do.
       #
-      # image-security-refresh.yaml rebuilds every image cache-free every Monday
-      # 04:00 UTC, so the first deploy AFTER that run legitimately reports nearly
-      # every image CHANGED — the refresh landing, not churn. --weekly-refresh is
-      # deliberately NOT passed here. "Deploy ran on a Monday" is not that event:
-      # a Monday 02:00 deploy predates the refresh, and if main is quiet until
-      # Thursday it is Thursday's deploy that carries the wave. The guess would be
-      # wrong more often than right, and a wrong boolean in the record is worse
-      # than an absent one. The JSON records generatedAt instead, so a week of
-      # verdicts can be reconciled against the refresh workflow's real run history.
+      # --weekly-refresh is deliberately not passed: "ran on a Monday" is not the
+      # same event as "first deploy after the refresh" (see ADR-0007).
       - name: Compare built layers against the running images (log only)
         continue-on-error: true
         env:
           SHA: ${{ inputs.sha || github.sha }}
+          KUSTOMIZATION: k8s/overlays/staging/kustomization.yaml
         run: |
+          # Read the same overlay the render step below rewrites: main can move
+          # under this job, which is why that step re-fetches rather than trusting
+          # the initial checkout.
+          git fetch -q origin main
+          git checkout -q FETCH_HEAD -- "$KUSTOMIZATION"
           scripts/deploy/compare-image-layers.sh \
-            --kustomization k8s/overlays/staging/kustomization.yaml \
+            --kustomization "$KUSTOMIZATION" \
             --tag "$SHA" \
             --json "${RUNNER_TEMP}/layer-verdicts.json"
 

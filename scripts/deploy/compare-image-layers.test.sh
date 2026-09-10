@@ -202,7 +202,7 @@ rm -rf "${WORK}/responses"
 respond stl-sentinelstaging-watcher "$PINNED_SHA" "$(manifest_with_layers sha256:one)"
 respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$(manifest_with_layers sha256:one)"
 check "a partial failure still exits zero when something was determined" 0 \
-  "1 unchanged, 0 changed, 0 pinned tag(s) gone from ECR (retention risk on a running image), 0 candidate(s) not yet built, 1 not compared" -- \
+  "1 unchanged, 0 changed, 0 pinned tag(s) gone from ECR (retention risk on a running image), 0 candidate(s) not yet built, 0 skipped (overlay already at the deploy tag), 1 not compared" -- \
   --kustomization "$(overlay stl-sentinelstaging-watcher stl-sentinelstaging-migrate)" --tag "$DEPLOY_SHA"
 
 # PINNED_GONE (a retention incident on a running image) and NOT_BUILT (a build
@@ -211,13 +211,13 @@ check "a partial failure still exits zero when something was determined" 0 \
 rm -rf "${WORK}/responses"
 respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$(manifest_with_layers sha256:one)"
 check "PINNED_GONE is counted separately from NOT_BUILT in the summary" 0 \
-  "0 unchanged, 0 changed, 1 pinned tag(s) gone from ECR (retention risk on a running image), 0 candidate(s) not yet built, 0 not compared" -- \
+  "0 unchanged, 0 changed, 1 pinned tag(s) gone from ECR (retention risk on a running image), 0 candidate(s) not yet built, 0 skipped (overlay already at the deploy tag), 0 not compared" -- \
   --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA"
 
 rm -rf "${WORK}/responses"
 respond stl-sentinelstaging-watcher "$PINNED_SHA" "$(manifest_with_layers sha256:one)"
 check "NOT_BUILT is counted separately from PINNED_GONE in the summary" 0 \
-  "0 unchanged, 0 changed, 0 pinned tag(s) gone from ECR (retention risk on a running image), 1 candidate(s) not yet built, 0 not compared" -- \
+  "0 unchanged, 0 changed, 0 pinned tag(s) gone from ECR (retention risk on a running image), 1 candidate(s) not yet built, 0 skipped (overlay already at the deploy tag), 0 not compared" -- \
   --kustomization "$(overlay stl-sentinelstaging-watcher)" --tag "$DEPLOY_SHA"
 
 # Running after the deploy rewrote the block: both sides name the same tag, so
@@ -226,8 +226,20 @@ rm -rf "${WORK}/responses"
 respond stl-sentinelstaging-watcher "$DEPLOY_SHA" "$(manifest_with_layers sha256:one)"
 OVERLAY_AT_DEPLOY="${WORK}/kustomization-at-deploy.yaml"
 sed "s/${PINNED_SHA}/${DEPLOY_SHA}/" "$(overlay stl-sentinelstaging-watcher)" > "$OVERLAY_AT_DEPLOY"
-check "an already-rewritten overlay reports UNKNOWN" 1 "run this before the deploy rewrites" -- \
+check "an already-rewritten overlay reports SKIPPED, not a failure" 0 "SKIPPED     stl-sentinelstaging-watcher" -- \
   --kustomization "$OVERLAY_AT_DEPLOY" --tag "$DEPLOY_SHA"
+check "a fully skipped run says so plainly" 0 "there was nothing to compare. Not a failure." -- \
+  --kustomization "$OVERLAY_AT_DEPLOY" --tag "$DEPLOY_SHA"
+# The alarm exists to separate a real failure from a clean week; a benign
+# re-deploy must not trip it, or readers learn to ignore it.
+OUT_SKIP="${WORK}/skip.out"
+STUB_RESPONSES="${WORK}/responses" PATH="${WORK}/bin:$PATH" \
+  bash "$SUBJECT" --kustomization "$OVERLAY_AT_DEPLOY" --tag "$DEPLOY_SHA" >"$OUT_SKIP" 2>&1 || true
+if grep -q 'The comparison is broken' "$OUT_SKIP"; then
+  FAILED=$((FAILED + 1)); echo "  FAIL a skipped run must not raise the 'comparison is broken' alarm"
+else
+  PASSED=$((PASSED + 1)); echo "  ok   a skipped run does not raise the 'comparison is broken' alarm"
+fi
 
 # Cronjobs share one repo and carry a name prefix; the prefix must survive.
 rm -rf "${WORK}/responses"
