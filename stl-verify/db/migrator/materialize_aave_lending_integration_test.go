@@ -674,3 +674,71 @@ func TestMaterializeAaveLendingIgnoresReferenceDataNoLedgerKeysThrough(t *testin
 		})
 	}
 }
+
+// A reserve losing its token mapping is not a gap in new data, it strands exposure already stored:
+// the view stops emitting that instrument, the stored rows keep their last quantity, and nothing
+// closes them. Reference data regressing is not a data conflict, so the run refuses by name.
+func TestMaterializeAaveLendingRefusesWhenAMappingStrandsStoredExposure(t *testing.T) {
+	ctx, pool, written := seedAaveLending(t)
+	if written == 0 {
+		t.Fatal("the base fixture appended nothing, so there is no stored exposure to strand")
+	}
+
+	var instrument string
+	if err := pool.QueryRow(ctx, `
+		SELECT DISTINCT ON (position_id) instrument_key FROM position_state
+		 WHERE projection = 'public.position_aave_lending' AND quantity > 0
+		 ORDER BY position_id, block_number DESC, block_version DESC,
+		          processing_version DESC, block_timestamp DESC
+		 LIMIT 1`).Scan(&instrument); err != nil {
+		t.Fatalf("finding a stored live position: %v", err)
+	}
+
+	// The reference-data resync that drops the mapping this instrument was keyed from.
+	if _, err := pool.Exec(ctx, `
+		UPDATE debt_token SET variable_debt_address = NULL
+		 WHERE encode(variable_debt_address, 'hex') = $1`, instrument); err != nil {
+		t.Fatalf("clearing the debt mapping: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE receipt_token SET receipt_token_address = NULL
+		 WHERE encode(receipt_token_address, 'hex') = $1`, instrument); err != nil {
+		t.Fatalf("clearing the receipt mapping: %v", err)
+	}
+
+	_, err := pool.Exec(ctx, `SELECT materialize_aave_lending()`)
+	if err == nil {
+		t.Fatal("the run succeeded while its stored exposure had no instrument left in the view")
+	}
+	if !strings.Contains(err.Error(), "no longer emits") {
+		t.Errorf("refused with %v; want the stranded-exposure refusal", err)
+	}
+	if !strings.Contains(err.Error(), instrument) {
+		t.Errorf("the refusal does not name %s: %v", instrument, err)
+	}
+}
+
+// The control: a closed position carries no live exposure, so losing its mapping strands nothing
+// and must not stop the run. Without this the guard could refuse on every historical mapping change.
+func TestMaterializeAaveLendingAClosedPositionLosingItsMappingDoesNotRefuse(t *testing.T) {
+	ctx, pool, _ := seedAaveLending(t)
+
+	// Zero every stored position, so nothing is live regardless of which mapping goes.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO position_state (position_id, chain_id, protocol_id, instrument_key, holder_id,
+		                            quantity, deal_type, block_number, block_version, processing_version,
+		                            block_timestamp, projection, build_id)
+		SELECT DISTINCT ON (position_id) position_id, chain_id, protocol_id, instrument_key, holder_id,
+		       0, deal_type, block_number + 1000, block_version, processing_version,
+		       block_timestamp + interval '1 day', projection, build_id
+		  FROM position_state WHERE projection = 'public.position_aave_lending'
+		 ORDER BY position_id, block_number DESC`); err != nil {
+		t.Fatalf("closing the stored positions: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE debt_token SET variable_debt_address = NULL`); err != nil {
+		t.Fatalf("clearing every debt mapping: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `SELECT materialize_aave_lending()`); err != nil {
+		t.Fatalf("the run refused although nothing live was stranded: %v", err)
+	}
+}

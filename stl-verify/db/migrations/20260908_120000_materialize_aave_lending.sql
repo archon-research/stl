@@ -160,6 +160,22 @@ BEGIN
     WHERE rt.receipt_token_address IS NULL
     GROUP BY c.protocol_id, c.token_id;
 
+    -- A mapping that disappears strands live exposure: the view stops emitting that instrument, the
+    -- stored rows keep their last quantity and nothing closes them. Reference data regressing is not a
+    -- data conflict, so refuse by name rather than leave the exposure reading as current.
+    SELECT string_agg(DISTINCT s.instrument_key, ', ' ORDER BY s.instrument_key) INTO v_bad
+    FROM (SELECT DISTINCT ON (p.position_id) p.instrument_key, p.quantity
+            FROM public.position_state p
+           WHERE p.projection = 'public.position_aave_lending'
+           ORDER BY p.position_id, p.block_number DESC, p.block_version DESC,
+                    p.processing_version DESC, p.block_timestamp DESC) s
+    WHERE s.quantity > 0
+      AND NOT EXISTS (SELECT 1 FROM public.position_aave_lending v
+                       WHERE v.instrument_key = s.instrument_key);
+    IF v_bad IS NOT NULL THEN
+        RAISE EXCEPTION 'materialize_aave_lending: live exposure whose instrument the view no longer emits, so a lost token mapping would strand it; refusing to run: %', v_bad;
+    END IF;
+
     RETURN public.materialize_position_projection('public.position_aave_lending'::regclass, p_build_id);
 END
 $fn$;
