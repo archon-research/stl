@@ -60,3 +60,4 @@
 ./internal/services/uniswapv4indexer
 ./internal/pkg/tickbitmap
 ./internal/pkg/blockversion
+./cmd/backfillers/allocation-underlying-value-backfill
