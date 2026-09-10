@@ -842,11 +842,8 @@ class AllocationRepository:
         }
         if series == "balance":
             # How far before the window to look for each entity's carry-forward
-            # seed. Bounded rather than open-ended -- an unbounded scan is what
-            # made the prototype of this query run the database out of memory.
-            # One window-length back is a scan cost bound, not a correctness
-            # one: widening it only moves where a sparsely-observed entity's
-            # reach runs out, it does not remove the case (VEC-760).
+            # seed: the window's own length, floored at _BALANCE_SEED_REACH.
+            # The bound is what keeps the seed scan finite (VEC-760).
             window = to_timestamp - from_timestamp
             params["seed_from"] = from_timestamp - max(window, _BALANCE_SEED_REACH)
 
@@ -1979,13 +1976,12 @@ observations AS (
     -- Each entity's carry-in, anchored at the window start so it becomes a real
     -- row in the first bucket rather than an argument to locf().
     --
-    -- Two bugs this shape avoids. time_bucket_gapfill only emits a bucket
-    -- series for groups that have at least one row, so an entity whose latest
-    -- observation predates the window produced NO buckets at all and vanished
-    -- from the total instead of carrying its value forward -- which at a 24h
-    -- window is most entities. And passing the seed as locf's second argument
-    -- meant a correlated subquery re-evaluated per (bucket, entity) group: 43s
-    -- of a 47.6s query, the cost #728 removed from the exposure read.
+    -- The seed enters as a row in the row set, timestamped at the window
+    -- start, so every entity with a prior observation owns at least one row
+    -- inside the window. time_bucket_gapfill emits a bucket series per group
+    -- that has a row, and locf then carries this value across the buckets
+    -- before the entity's first in-window observation. One scan, evaluated
+    -- once, rather than per (bucket, entity) group.
     SELECT proxy_address, chain_id, token_id,
            CAST(:from_timestamp AS TIMESTAMPTZ) AS created_at, value_usd
     FROM seed
