@@ -58,7 +58,7 @@ whole history every time.
 4. Check the projection list is what you expect. An operator setting `POSITION_PROJECTIONS` to a
    single entry, or to a view that legitimately has no new rows, produces exactly this signal:
    ```bash
-   kubectl -n vector get cronjob position-materializer -o yaml | grep -A2 POSITION_PROJECTIONS
+   kubectl -n vector get configmap position-materializer -o yaml | grep -A2 POSITION_PROJECTIONS
    ```
 
 **Resolution.** Fix the upstream indexer or the view, then let the next scheduled run catch up. No
@@ -73,22 +73,38 @@ other positions land, and these sit at whatever was last stored, which every dow
 as current. `position_projection_run.positions_refused` is the per-run count the alert reads.
 
 **Which positions.** The refusal table holds one row per refused observation for the life of the
-refusal, so filter it against what is stored rather than reading it alone:
+refusal, and the two classes need different questions asked of them.
+
+Withheld by a block-against-instant inversion, so nothing of that position landed:
 
 ```sql
-SELECT r.projection, encode(r.position_id, 'hex') AS position_id, r.reason,
+SELECT r.projection, encode(r.position_id, 'hex') AS position_id,
        min(r.block_number) AS from_block, min(r.created_at) AS first_refused_at, min(r.detail) AS detail
   FROM position_projection_refusal r
- WHERE NOT EXISTS (SELECT 1 FROM position_state p
+ WHERE r.reason = 'block_time_inverts_height'
+   AND NOT EXISTS (SELECT 1 FROM position_state p
                     WHERE p.position_id = r.position_id AND p.block_number >= r.block_number)
- GROUP BY 1, 2, 3
+ GROUP BY 1, 2
  ORDER BY first_refused_at;
 ```
 
-A position leaves that result by storing an observation at or beyond `from_block`, so a source
-correction clears it with no intervention here. `block_time_inverts_height` means the source gave a
-higher block an earlier instant and needs fixing upstream; the drift reasons mean a stored key was
-re-emitted with a different value, which a real correction expresses by bumping a version instead.
+A correction the spine declined, where the stored row is kept and so is present by definition. The
+inversion filter above would hide every one of these:
+
+```sql
+SELECT r.projection, encode(r.position_id, 'hex') AS position_id, r.reason,
+       r.block_number, r.created_at, r.detail
+  FROM position_projection_refusal r
+ WHERE r.reason IN ('observation_drift', 'deal_type_drift')
+ ORDER BY r.created_at DESC
+ LIMIT 50;
+```
+
+An inversion means the source gave a higher block an earlier instant and needs fixing upstream; the
+position leaves the first result by storing an observation at or beyond `from_block`, so a source
+correction clears it with no intervention here. A drift means the view re-emitted a stored key with
+a different value, which a real correction expresses by bumping `block_version` or
+`processing_version` instead. Both classes count towards `positions_refused`.
 
 ## VectorPositionMaterializerViewFailing
 
