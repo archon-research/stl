@@ -118,6 +118,19 @@ async def test_a_row_before_the_window_seeds_the_first_bucket(repo: AllocationRe
     assert all(b.balance_usd == expected for b in buckets), [b.balance_usd for b in buckets]
 
 
+async def test_short_window_still_reaches_back_for_a_dormant_entity(repo: AllocationRepository) -> None:
+    # BS_PROXY_SEEDED's only row is 12 days old. A one-day window that reached
+    # back only its own length would find no row for this entity at all, so it
+    # would form no gapfill group -- vanishing from the total rather than
+    # reporting its last known value, on a day nothing happened to it. The
+    # unpriceable-entity guard does not cover this: there is no row to poison
+    # the total with. _BALANCE_SEED_REACH is what keeps it visible.
+    buckets = await _buckets(repo, BS_PROXY_SEEDED, days=1)
+    expected = BS_SEEDED_UNDERLYING_VALUE * BS_UNDERLYING_PRICE
+    assert buckets, "a dormant entity dropped out of a short window entirely"
+    assert all(b.balance_usd == expected for b in buckets), [b.balance_usd for b in buckets]
+
+
 async def test_correction_supersedes_its_original_rather_than_adding_to_it(repo: AllocationRepository) -> None:
     buckets = await _buckets(repo, BS_PROXY_CORRECTED)
     corrected = BS_CORRECTED_FIXED_UNDERLYING_VALUE * BS_UNDERLYING_PRICE
