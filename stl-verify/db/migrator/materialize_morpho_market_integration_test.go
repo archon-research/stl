@@ -306,3 +306,24 @@ func TestMaterializeMorphoMarketNegativeSourceAmountAborts(t *testing.T) {
 		})
 	}
 }
+
+// The wrapper is the only path the runner calls, so it has to forward the writer run to the spine or
+// every row this projection appends is provenance-free (ADR-0006 §2). The run record is the witness:
+// its run_id can only have arrived through the wrapper's own parameter.
+func TestMaterializeMorphoMarketForwardsTheWriterRun(t *testing.T) {
+	ctx, pool, _ := seedMorphoMarket(t)
+	if _, err := pool.Exec(ctx, `SELECT materialize_morpho_market(7, 9182)`); err != nil {
+		t.Fatalf("materialize_morpho_market with a run: %v", err)
+	}
+	var runID *int64
+	var buildID int
+	if err := pool.QueryRow(ctx, `
+		SELECT run_id, build_id FROM position_projection_run
+		 WHERE projection = 'public.position_morpho_market'
+		 ORDER BY created_at DESC LIMIT 1`).Scan(&runID, &buildID); err != nil {
+		t.Fatalf("read the run record: %v", err)
+	}
+	if runID == nil || *runID != 9182 || buildID != 7 {
+		t.Errorf("run record = run_id %v build_id %d, want 9182 and 7", runID, buildID)
+	}
+}

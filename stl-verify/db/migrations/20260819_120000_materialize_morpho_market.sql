@@ -65,7 +65,8 @@ COMMENT ON VIEW position_morpho_market IS '[Operational] VEC-402 projection: Mor
 -- Per-projection entry point; the view above holds all the Morpho-market logic. It refuses a negative
 -- source amount first: netting means abs() would launder it, and a negative borrow makes the netted
 -- sum MORE positive, so neither the view nor the spine's negative-quantity check would see it.
-CREATE OR REPLACE FUNCTION materialize_morpho_market(p_build_id integer DEFAULT 0) RETURNS bigint
+CREATE OR REPLACE FUNCTION materialize_morpho_market(p_build_id integer DEFAULT 0,
+                                                     p_run_id bigint DEFAULT NULL) RETURNS bigint
     LANGUAGE plpgsql
     SET search_path FROM CURRENT AS $fn$
 DECLARE
@@ -84,10 +85,10 @@ BEGIN
     IF v_bad IS NOT NULL THEN
         RAISE EXCEPTION 'materialize_morpho_market: a negative source amount cannot be a position exposure, refusing to run: %', v_bad;
     END IF;
-    RETURN public.materialize_position_projection('public.position_morpho_market'::regclass, p_build_id);
+    RETURN public.materialize_position_projection('public.position_morpho_market'::regclass, p_build_id, p_run_id);
 END
 $fn$;
 
-COMMENT ON FUNCTION materialize_morpho_market(integer) IS '[Operational] VEC-402: appends Morpho market position observations into position_state via materialize_position_projection(position_morpho_market). See that function''s comment for the run contract.';
+COMMENT ON FUNCTION materialize_morpho_market(integer, bigint) IS '[Operational] VEC-402: appends Morpho market position observations into position_state via materialize_position_projection(position_morpho_market). See that function''s comment for the run contract. p_build_id and p_run_id are stamped on every row appended (ADR-0006 §2).';
 
 INSERT INTO migrations (filename) VALUES ('20260819_120000_materialize_morpho_market.sql') ON CONFLICT (filename) DO NOTHING;
