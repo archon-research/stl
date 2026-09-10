@@ -7,6 +7,7 @@ import pytest
 
 from app.adapters.postgres.prime_debt_repository import PrimeDebtRepository
 from app.domain.entities.allocation import EthAddress
+from app.domain.entities.prime import PrimeIdentity
 
 _VALID_ADDR = EthAddress("0x" + "ab" * 20)
 _PRIME_ID = 7
@@ -34,23 +35,24 @@ def _engine_with_row(row):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("row", "expected"),
+    ("resolved", "expected"),
     [
-        (SimpleNamespace(id=_PRIME_ID, name="spark", prime_key="prm_2d3ceee8415e59f3", vault_hex="ab" * 20), _PRIME_ID),
+        (PrimeIdentity(id=_PRIME_ID, name="spark", prime_key="prm_x", vault_address=_VALID_ADDR), _PRIME_ID),
         (None, None),
     ],
 )
-async def test_resolve_prime_id_returns_the_matched_id(row, expected) -> None:
-    engine, _ = _engine_with_row(row)
+async def test_resolve_prime_id_returns_the_matched_id(resolved, expected) -> None:
+    primes = AsyncMock()
+    primes.resolve.return_value = resolved
 
-    assert await PrimeDebtRepository(engine).resolve_prime_id(_VALID_ADDR) == expected
+    assert await PrimeDebtRepository(MagicMock(), primes).resolve_prime_id(_VALID_ADDR) == expected
 
 
 @pytest.mark.asyncio
 async def test_list_queries_filter_by_prime_id_without_a_correlated_exists() -> None:
     # The match clause used to be inlined here, so its EXISTS re-scanned every allocation_position chunk.
     engine, conn = _engine_with_rows([])
-    repo = PrimeDebtRepository(engine)
+    repo = PrimeDebtRepository(engine, AsyncMock())
 
     await repo.list_debt_snapshots(_PRIME_ID)
     await repo.list_debt_buckets(
@@ -82,7 +84,7 @@ async def test_list_debt_snapshots_maps_rows_and_clamps_limit() -> None:
         )
     ]
     engine, conn = _engine_with_rows(rows)
-    repo = PrimeDebtRepository(engine)
+    repo = PrimeDebtRepository(engine, AsyncMock())
 
     from_ts = datetime(2026, 1, 1, tzinfo=UTC)
     to_ts = datetime(2026, 1, 2, tzinfo=UTC)
@@ -100,7 +102,7 @@ async def test_list_debt_snapshots_maps_rows_and_clamps_limit() -> None:
 @pytest.mark.asyncio
 async def test_list_reference_debt_buckets_filters_by_prime_id_without_a_correlated_exists() -> None:
     engine, conn = _engine_with_rows([])
-    repo = PrimeDebtRepository(engine)
+    repo = PrimeDebtRepository(engine, AsyncMock())
 
     await repo.list_reference_debt_buckets(
         _PRIME_ID,
@@ -124,7 +126,7 @@ async def test_list_debt_snapshots_wraps_database_errors() -> None:
     conn.execute = AsyncMock(side_effect=RuntimeError("boom"))
     engine.connect.return_value = conn
 
-    repo = PrimeDebtRepository(engine)
+    repo = PrimeDebtRepository(engine, AsyncMock())
 
     with pytest.raises(ValueError, match="fetching debt snapshots"):
         await repo.list_debt_snapshots(_PRIME_ID)

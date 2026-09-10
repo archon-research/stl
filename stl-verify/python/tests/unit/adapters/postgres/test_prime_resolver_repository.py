@@ -5,6 +5,7 @@ import pytest
 from app.adapters.postgres.prime_resolver_repository import PrimeResolverRepository
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime import PrimeIdentity
+from app.domain.exceptions import InvalidPrimeIdentifierError
 
 _VAULT_HEX = "ab" * 20
 _ROW = SimpleNamespace(id=7, name="spark", prime_key="prm_2d3ceee8415e59f3", vault_hex=_VAULT_HEX)
@@ -46,7 +47,7 @@ async def test_resolve_binds_the_identifier_to_the_matching_form(stub_engine, id
 async def test_resolve_rejects_a_malformed_address_rather_than_reading_it_as_a_name(stub_engine) -> None:
     engine, _ = stub_engine({"fetchone.return_value": None})
 
-    with pytest.raises(ValueError, match="Invalid Ethereum address"):
+    with pytest.raises(InvalidPrimeIdentifierError, match="Invalid prime identifier"):
         await PrimeResolverRepository(engine).resolve("0xdeadbeef")
 
 

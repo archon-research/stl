@@ -1,6 +1,9 @@
+import pathlib
+
 import pytest
 
 from app.api._validators import (
+    PRIME_NAME_PATTERN,
     TX_HASH_PATTERN,
     _validate_eth_address,
     _validate_optional_eth_address,
@@ -128,3 +131,12 @@ def test_validate_prime_identifier_accepts_a_name_or_an_address(value: str):
 def test_validate_prime_identifier_rejects_malformed_values(value: str):
     with pytest.raises(ValueError, match="Invalid"):
         _validate_prime_identifier(value)
+
+
+def test_prime_name_pattern_matches_the_database_check():
+    """The regex is written twice — here and in the CHECK — so drift is a silent 422."""
+    migration = (
+        pathlib.Path(__file__).resolve().parents[3] / "db" / "migrations" / "20260908_130000_add_prime_key.sql"
+    ).read_text()
+
+    assert f"CHECK (name ~ '{PRIME_NAME_PATTERN}')" in migration

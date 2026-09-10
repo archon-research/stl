@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, RootModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.prime_debt_repository import PrimeDebtRepository
+from app.adapters.postgres.prime_resolver_repository import PrimeResolverRepository
 from app.api._validators import PrimeOrProxyAddressPathParam
 from app.api.deps import get_engine, require_prime_view
 from app.api.provenance import (
@@ -128,7 +129,7 @@ class PrimeDebtEnvelope(
 
 
 async def _get_prime_debt_service(engine: AsyncEngine = Depends(get_engine)) -> PrimeDebtService:
-    return PrimeDebtService(PrimeDebtRepository(engine))
+    return PrimeDebtService(PrimeDebtRepository(engine, PrimeResolverRepository(engine)))
 
 
 @router.get(

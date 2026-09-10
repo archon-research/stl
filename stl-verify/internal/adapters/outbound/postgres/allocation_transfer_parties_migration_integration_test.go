@@ -79,8 +79,8 @@ func TestSavePositions_PersistsTransferParties(t *testing.T) {
 	}
 
 	if _, err := allocTransferPartiesPool.Exec(ctx,
-		`INSERT INTO prime (name, vault_address)
-		 VALUES ('spark', '\x691a6c29e9e96dd897718305427ad5d534db16ba')
+		`INSERT INTO prime (prime_key, name, vault_address)
+		 VALUES ('prm_t_spark', 'spark', '\x691a6c29e9e96dd897718305427ad5d534db16ba')
 		 ON CONFLICT DO NOTHING`,
 	); err != nil {
 		t.Fatalf("seed prime: %v", err)

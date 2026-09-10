@@ -21,6 +21,7 @@ from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime import PrimeIdentity
 from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.token_catalog import TokenMetadata
+from app.domain.exceptions import InvalidPrimeIdentifierError
 from app.ports.prime_resolver import PrimeResolver
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
 from app.ports.token_catalog_repository import TokenCatalogRepositoryPort
@@ -43,12 +44,18 @@ async def resolve_token(
 
 
 async def resolve_prime(identifier: str, resolver: PrimeResolver) -> PrimeIdentity:
-    """Return the prime ``identifier`` names or raise 404.
+    """Return the prime ``identifier`` names, or raise 422, 503 or 404.
 
-    The detail matches the authz gate's denial body, so the pair cannot be read as an
-    existence oracle.
+    Mirrors the authz gate (``deps.check_prime_view``) on all three: a malformed
+    identifier is 422, a failed lookup is 503 rather than the caller's fault, and the
+    404 detail matches the gate's denial body so the pair is not an existence oracle.
     """
-    prime = await resolver.resolve(identifier)
+    try:
+        prime = await resolver.resolve(identifier)
+    except InvalidPrimeIdentifierError as exc:
+        raise HTTPException(status_code=422, detail="malformed prime id") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail="prime lookup unavailable") from exc
     if prime is None:
         raise HTTPException(status_code=404, detail=PRIME_DENIED_DETAIL)
     return prime

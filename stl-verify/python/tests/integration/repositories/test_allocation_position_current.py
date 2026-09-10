@@ -42,7 +42,7 @@ async def conn(db_url: str) -> AsyncIterator[asyncpg.Connection]:
 async def prime_id(conn: asyncpg.Connection) -> int:
     """A prime to hang the seeded proxies off."""
     return await conn.fetchval(
-        "INSERT INTO prime (name, vault_address) VALUES ('alloc_current', $1) "
+        "INSERT INTO prime (prime_key, name, vault_address) VALUES ('prm_t_alloc_current', 'alloc_current', $1) "
         "ON CONFLICT (name) DO UPDATE SET vault_address = EXCLUDED.vault_address RETURNING id",
         b"\x51" * 20,
     )

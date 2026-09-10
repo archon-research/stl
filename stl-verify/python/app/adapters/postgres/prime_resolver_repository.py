@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.adapters.postgres._reading import reading
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime import PrimeIdentity
+from app.domain.exceptions import InvalidPrimeIdentifierError
 
 # `prime.name`, `prime.vault_address` and `prime_proxy.proxy_address` are each UNIQUE, so at
 # most one row matches. The ORDER BY settles only one prime's proxy equalling another's vault.
@@ -35,7 +36,12 @@ def _address_hex(identifier: str) -> str | None:
     A ``0x`` prefix commits the value to being an address, so a malformed one raises
     rather than falling through to a name lookup that resolves to nothing.
     """
-    return EthAddress(identifier).hex if identifier.lower().startswith("0x") else None
+    if not identifier.lower().startswith("0x"):
+        return None
+    try:
+        return EthAddress(identifier).hex
+    except ValueError as exc:
+        raise InvalidPrimeIdentifierError(f"Invalid prime identifier: {identifier}") from exc
 
 
 class PrimeResolverRepository:

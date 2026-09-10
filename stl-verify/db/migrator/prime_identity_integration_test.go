@@ -22,10 +22,6 @@ var primeIdentityLedger = map[string]struct {
 	"obex":  {id: 3, key: "prm_11db7b73f1333a63"},
 }
 
-// unmintedKeyPrefix marks a key that came from the column DEFAULT rather than a migration
-// literal. It differs per environment, so it must never reach the ledger.
-const unmintedKeyPrefix = "prm_unminted_"
-
 // TestPrimeNamesNeverRemap fails when a prime name maps to a different prime.id or prime_key
 // than it did before, and when a prime reaches the database without a ledger entry. It runs
 // against a freshly migrated database, so the ids it pins are the fresh-DB assignment order —
@@ -50,10 +46,6 @@ func TestPrimeNamesNeverRemap(t *testing.T) {
 		}
 		seen[name] = true
 
-		if strings.HasPrefix(key, unmintedKeyPrefix) {
-			t.Errorf("prime %q took its key from the column DEFAULT; mint a literal one in the migration that adds it", name)
-			continue
-		}
 		want, ok := primeIdentityLedger[name]
 		if !ok {
 			t.Errorf("prime %q is in the database but not in the ledger; add it with the id and key its migration mints", name)
@@ -117,7 +109,8 @@ func TestPrimeNameMustBeAnAddressableSlug(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := pool.Exec(ctx,
-				`INSERT INTO prime (name, vault_address) VALUES ($1, decode('11223344556677889900aabbccddeeff00112233', 'hex'))`,
+				`INSERT INTO prime (prime_key, name, vault_address)
+				  VALUES ('prm_t_rejected', $1, decode('11223344556677889900aabbccddeeff00112233', 'hex'))`,
 				tc.primeName)
 			if err == nil {
 				t.Fatalf("prime name %q should be rejected", tc.primeName)

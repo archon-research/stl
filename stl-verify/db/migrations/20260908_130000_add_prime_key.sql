@@ -1,8 +1,7 @@
 -- Mint prime_key: the opaque, permanent handle every prime-scoped API response carries
--- (ADR-0005 decision 1). A real prime's key is a literal, so staging, prod and a fresh local
--- database agree on it. The DEFAULT exists only so test fixtures can seed a prime without
--- one; it is self-describing rather than plausible, and TestPrimeNamesNeverRemap
--- (db/migrator) rejects any prime whose key still carries the `prm_unminted_` prefix.
+-- (ADR-0005 decision 1). Every key is a literal and the column has no DEFAULT, so an insert
+-- that omits one fails rather than minting a value that differs between environments —
+-- which for a permanent public identifier is the failure with no recovery.
 
 ALTER TABLE prime ADD COLUMN prime_key TEXT;
 
@@ -24,7 +23,6 @@ DO $$
         END IF;
     END $$;
 
-ALTER TABLE prime ALTER COLUMN prime_key SET DEFAULT 'prm_unminted_' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 12);
 ALTER TABLE prime ALTER COLUMN prime_key SET NOT NULL;
 ALTER TABLE prime ADD CONSTRAINT prime_prime_key_key UNIQUE (prime_key);
 
@@ -50,7 +48,7 @@ CREATE TRIGGER prime_key_immutable
     BEFORE UPDATE OF prime_key ON prime
     FOR EACH ROW EXECUTE FUNCTION prime_key_immutable();
 
-COMMENT ON COLUMN prime.prime_key IS 'The prime''s opaque public handle, minted once and never changed (enforced by the prime_key_immutable trigger). Roles: Natural key (public). Unlike name and vault_address — both time-varying attributes of this row — it is what an API client keys on. Never a URL segment; it rides the response envelope. Mint it as a literal in the migration that adds the prime, so every environment agrees on it.';
+COMMENT ON COLUMN prime.prime_key IS 'The prime''s opaque public handle, minted once and never changed (enforced by the prime_key_immutable trigger). Roles: Natural key (public). Unlike name and vault_address — both time-varying attributes of this row — it is what an API client keys on. Never a URL segment; it rides the response envelope. There is deliberately no DEFAULT: mint it as a literal in the migration that adds the prime, so every environment agrees on it.';
 
 INSERT INTO migrations (filename)
 VALUES ('20260908_130000_add_prime_key.sql')

@@ -73,10 +73,13 @@ async def test_an_address_that_is_one_primes_vault_and_anothers_proxy_resolves_t
     conn = await asyncpg.connect(db_url)
     try:
         vault_owner = await conn.fetchval(
-            "INSERT INTO prime (name, vault_address) VALUES ('resolver_vault_match', $1) RETURNING id", address
+            "INSERT INTO prime (prime_key, name, vault_address) "
+            "VALUES ('prm_t_resolver_vault_match', 'resolver_vault_match', $1) RETURNING id",
+            address,
         )
         proxy_owner = await conn.fetchval(
-            "INSERT INTO prime (name, vault_address) VALUES ('resolver_proxy_match', $1) RETURNING id",
+            "INSERT INTO prime (prime_key, name, vault_address) "
+            "VALUES ('prm_t_resolver_proxy_match', 'resolver_proxy_match', $1) RETURNING id",
             bytes.fromhex("7d" * 20),
         )
         await conn.execute(
