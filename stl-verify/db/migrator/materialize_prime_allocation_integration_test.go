@@ -475,3 +475,40 @@ func TestMaterializePrimeAllocationKeepsEachBlockVersion(t *testing.T) {
 		t.Errorf("stored %q; want both reorg versions as distinct observations", got)
 	}
 }
+
+// The wrapper must resolve its own view, not one the caller's search_path happens to reach.
+// Unpinned and unqualified it failed outright under a caller path without public, and under a
+// path that reached a same-named view elsewhere it would have materialized that one and stamped
+// its schema as the position's owning projection.
+func TestMaterializePrimeAllocationPinsItsSearchPath(t *testing.T) {
+	ctx, pool, _ := seedPrimeAllocation(t)
+
+	var cfg []string
+	if err := pool.QueryRow(ctx, `
+		SELECT coalesce(proconfig, ARRAY[]::text[]) FROM pg_proc
+		 WHERE proname = 'materialize_prime_allocation'`).Scan(&cfg); err != nil {
+		t.Fatalf("reading proconfig: %v", err)
+	}
+	var pinned bool
+	for _, c := range cfg {
+		if strings.HasPrefix(c, "search_path=") {
+			pinned = true
+		}
+	}
+	if !pinned {
+		t.Errorf("the wrapper pins no search_path (proconfig %v), so it resolves its view in the caller's path", cfg)
+	}
+
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, `SET search_path = pg_catalog`); err != nil {
+		t.Fatalf("setting a caller path without public: %v", err)
+	}
+	var written int64
+	if err := conn.QueryRow(ctx, `SELECT public.materialize_prime_allocation()`).Scan(&written); err != nil {
+		t.Fatalf("the wrapper failed under a caller search_path without public: %v", err)
+	}
+}
