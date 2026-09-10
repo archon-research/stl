@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// The VEC-617 acceptance tests for combined-master wave 1 (ADR-0005, #652): the four
+// The VEC-617 acceptance tests for combined-master wave 1 (ADR-0007, #652): the four
 // behaviours the migrations claim and that nothing else in CI would catch if they broke.
 //
 // They live in db/migrator, alongside append_only_grants_integration_test.go, because they
@@ -58,7 +58,7 @@ func insertNode(ctx context.Context, t *testing.T, pool *pgxpool.Pool, id, statu
 //
 // The tombstone subtests cover the other half of supersession: a zero-length window
 // (valid_to = valid_from) withdraws THAT WINDOW from every resolved read while its history
-// stays in the base table, which is how ADR-0005 §3's retraction and a valid-time amendment
+// stays in the base table, which is how ADR-0007 §3's retraction and a valid-time amendment
 // work. Scope matters and is asserted in both directions — one tombstone clears a one-window
 // record entirely, and leaves a closed-and-reopened record's later window live and current.
 func TestSecStoreClosingRowSupersedesRatherThanResurrects(t *testing.T) {
@@ -231,7 +231,7 @@ func TestSecStoreClosingRowSupersedesRatherThanResurrects(t *testing.T) {
 //
 // The triple itself — (rel_type, src_kind, dst_kind) against rel_type_vocabulary.src_kinds /
 // dst_kinds — is NOT refused, and cannot be with wave 1's schema: legality lives in two array
-// columns, which no FK or CHECK on sec_edge can consult, so ADR-0005 §3 assigns the rule to the
+// columns, which no FK or CHECK on sec_edge can consult, so ADR-0007 §3 assigns the rule to the
 // loader/validator (GQ-11) and that validator is VEC-622's. The last subtest asserts the gap
 // rather than pretending it away: the vocabulary already holds everything needed to decide the
 // triple, and the write is nonetheless accepted today.
@@ -298,7 +298,7 @@ func TestSecStoreRejectsAnIllegalRelTypeTriple(t *testing.T) {
 			t.Fatalf("read endpoint rule for ISSUED_BY: %v", err)
 		}
 		if legal {
-			t.Error("rel_type_vocabulary says ISSUED_BY may point at a CONCEPT; the seeded rule is SECURITY -> ENTITY (ADR-0005 §5)")
+			t.Error("rel_type_vocabulary says ISSUED_BY may point at a CONCEPT; the seeded rule is SECURITY -> ENTITY (ADR-0007 §5)")
 		}
 	})
 
@@ -308,13 +308,13 @@ func TestSecStoreRejectsAnIllegalRelTypeTriple(t *testing.T) {
 		if err := insertEdge("triple", "ISSUED_BY", "sec-t-triple-c", "SECURITY", "concept-t-triple-c", "CONCEPT"); err != nil {
 			t.Fatalf("SECURITY -> CONCEPT ISSUED_BY was refused with %v — if that is deliberate, this subtest is now inverted: assert the rejection and delete this comment (GQ-11, VEC-622)", err)
 		}
-		t.Log("known gap: an illegal (rel_type, src_kind, dst_kind) triple lands. Legality is two array columns on the vocabulary, which no CHECK or FK on sec_edge can read, so ADR-0005 §3 assigns GQ-11 to the validator (VEC-622)")
+		t.Log("known gap: an illegal (rel_type, src_kind, dst_kind) triple lands. Legality is two array columns on the vocabulary, which no CHECK or FK on sec_edge can read, so ADR-0007 §3 assigns GQ-11 to the validator (VEC-622)")
 	})
 }
 
 // TestSecStoreSingleValuedRepointPassesTheWriteAndIsCaughtByTheDQRule is acceptance item 3.
 //
-// ISSUED_BY is single-valued per ADR-0005 §5, and that is deliberately NOT a write-time rule: a
+// ISSUED_BY is single-valued per ADR-0007 §5, and that is deliberately NOT a write-time rule: a
 // re-point always time-overlaps the edge it supersedes, so a write-time cardinality check would
 // reject every legitimate one. The rule runs over RESOLVED CURRENT STATE instead (GQ-20), which
 // means a badly executed re-point — open the new issuer without closing the old — has to pass

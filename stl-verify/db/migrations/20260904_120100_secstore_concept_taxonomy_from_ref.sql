@@ -2,7 +2,7 @@
 -- 149 NARROWER_THAN edges, generated 2026-08-26 from the live ref_* tables (asset classes,
 -- security types/subtypes, sectors, jurisdictions, currencies, ratings, entity types, roles).
 --
--- The promotion test (ADR-0005 §2): a vocabulary value becomes a node only when something
+-- The promotion test (ADR-0007 §2): a vocabulary value becomes a node only when something
 -- needs to point at it — a NARROWER_THAN parent, a classification membership, a peg target.
 -- Deal, origination and corporate-action types fail the test and stay reference rows. The
 -- ref_* tables keep their rows and inbound FKs; the vocabulary stays authoritative for the

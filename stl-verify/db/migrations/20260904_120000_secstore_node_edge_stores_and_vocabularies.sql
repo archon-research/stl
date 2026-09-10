@@ -1,5 +1,5 @@
 -- VEC-617: the combined master, wave 1 — the node store, the edge store, and their governed
--- vocabularies (ADR-0005, #652). Deliberately narrow: this wave ships only what the reference
+-- vocabularies (ADR-0007, #652). Deliberately narrow: this wave ships only what the reference
 -- taxonomy (20260904_120100) needs and what is stable enough to freeze in an immutable
 -- migration. Deferred to their own waves, with the tickets that own them: the registers
 -- (VEC-616), the shape rows and guard concepts (VEC-622, landing with the validator that
@@ -40,7 +40,7 @@
 --   * A retraction is expressible: a TOMBSTONE is an append with a ZERO-LENGTH window
 --     (valid_to = valid_from), which is why the window CHECK is <= and not <. It matches no
 --     as-of date, so the WINDOW it names drops out of the resolved reads while every version of
---     it stays readable — ADR-0005 §3's "tombstone append that supersedes the retracted row",
+--     it stays readable — ADR-0007 §3's "tombstone append that supersedes the retracted row",
 --     with supersedes_record_id naming the retracted record (UNIQUE (record_id) makes that
 --     pointer resolvable). Un-retracting is a correction run at N, not a re-append at 0: the
 --     re-asserted row would otherwise collide with the original and be dropped by
@@ -74,7 +74,7 @@
 --
 -- The frozen masters (entity_master/security_master, VEC-410/411) stored valid_from only and
 -- derived valid_to_exclusive with lead(); that pattern cannot express an ended edge, which has no
--- status column to retire it, and ADR-0005 §3 stores the pair. Divergence is deliberate.
+-- status column to retire it, and ADR-0007 §3 stores the pair. Divergence is deliberate.
 --
 -- Plain tables, not hypertables: every table here writes at governance rate (rows per day
 -- at most), the sparse-table exception in db/migrations AGENTS.md. Each table COMMENT
@@ -84,15 +84,15 @@
 
 -- ---------------------------------------------------------------------------
 -- Vocabulary tables (governed lists; the ref_* bar: standards-anchored or
--- decided in ADR-0005, nothing debatable, seed-once)
+-- decided in ADR-0007, nothing debatable, seed-once)
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE weight_basis_vocabulary (
     basis        text PRIMARY KEY,
     description  text NOT NULL
 );
-COMMENT ON TABLE weight_basis_vocabulary IS '[Configuration] Legal weight bases (ADR-0005 §3): three, each a share of a whole. Weights of unlike bases must never be summed; a conversion ratio is edge payload, not a weight — which is why UNITS is absent (see the basis column). Plain table: seed-once, extended by reviewed migration.';
-COMMENT ON COLUMN weight_basis_vocabulary.basis IS 'Roles: PK. Basis code (VALUE / NOTIONAL / OWNERSHIP_PCT). Each names a SHARE OF A WHOLE, which is what makes weights along a path multiplicable and weights under one basis summable. UNITS was seeded here and dropped before merge: no rel_type declared it, and ''unit ratio'' is a conversion ratio, which ADR-0005 §3 puts in the edge payload rather than the weight (review of the first draft; #652 carries the definition).';
+COMMENT ON TABLE weight_basis_vocabulary IS '[Configuration] Legal weight bases (ADR-0007 §3): three, each a share of a whole. Weights of unlike bases must never be summed; a conversion ratio is edge payload, not a weight — which is why UNITS is absent (see the basis column). Plain table: seed-once, extended by reviewed migration.';
+COMMENT ON COLUMN weight_basis_vocabulary.basis IS 'Roles: PK. Basis code (VALUE / NOTIONAL / OWNERSHIP_PCT). Each names a SHARE OF A WHOLE, which is what makes weights along a path multiplicable and weights under one basis summable. UNITS was seeded here and dropped before merge: no rel_type declared it, and ''unit ratio'' is a conversion ratio, which ADR-0007 §3 puts in the edge payload rather than the weight (review of the first draft; #652 carries the definition).';
 COMMENT ON COLUMN weight_basis_vocabulary.description IS 'What the basis measures and where it is used.';
 
 -- Declared before rel_type_vocabulary so its weight_basis is a real FK, not a soft one.
@@ -110,9 +110,9 @@ CREATE TABLE rel_type_vocabulary (
     description         text NOT NULL,
     change_reason       text NOT NULL DEFAULT 'SEED_LOAD'
 );
-COMMENT ON TABLE rel_type_vocabulary IS '[Configuration] Governed relationship vocabulary (ADR-0005 §5). Adding or ratifying a type is a reviewed migration. Endpoint legality is the (rel_type, src_kind, dst_kind) triple, enforced by the loader/validator (cross-row; an FK cannot see the endpoint row). Plain table: governance-rate writes.';
+COMMENT ON TABLE rel_type_vocabulary IS '[Configuration] Governed relationship vocabulary (ADR-0007 §5). Adding or ratifying a type is a reviewed migration. Endpoint legality is the (rel_type, src_kind, dst_kind) triple, enforced by the loader/validator (cross-row; an FK cannot see the endpoint row). Plain table: governance-rate writes.';
 COMMENT ON COLUMN rel_type_vocabulary.rel_type IS 'Roles: PK. The edge type name, UPPER_SNAKE.';
-COMMENT ON COLUMN rel_type_vocabulary.family IS 'One of the six ADR-0005 §5 families.';
+COMMENT ON COLUMN rel_type_vocabulary.family IS 'One of the six ADR-0007 §5 families.';
 COMMENT ON COLUMN rel_type_vocabulary.src_kinds IS 'Legal source node kinds (sec_node.record_type values).';
 COMMENT ON COLUMN rel_type_vocabulary.dst_kinds IS 'Legal destination node kinds.';
 COMMENT ON COLUMN rel_type_vocabulary.cardinality IS 'Expected current-state cardinality; a DQ check over current state, never a write trigger (an open edge always time-overlaps its re-point).';
@@ -127,7 +127,7 @@ CREATE TABLE change_reason_vocabulary (
     description        text NOT NULL,
     requires_approval  boolean NOT NULL DEFAULT false
 );
-COMMENT ON TABLE change_reason_vocabulary IS '[Configuration] Structured change_reason_code set (ADR-0005 §4, CR-3.3). Every node/edge append cites one. Plain table: seed-once, extended by reviewed migration.';
+COMMENT ON TABLE change_reason_vocabulary IS '[Configuration] Structured change_reason_code set (ADR-0007 §4, CR-3.3). Every node/edge append cites one. Plain table: seed-once, extended by reviewed migration.';
 COMMENT ON COLUMN change_reason_vocabulary.code IS 'Roles: PK. Reason code, UPPER_SNAKE.';
 COMMENT ON COLUMN change_reason_vocabulary.description IS 'When to use the code.';
 COMMENT ON COLUMN change_reason_vocabulary.requires_approval IS 'true: an append citing this code must carry approved_by (validator-enforced; approval identity distinct from the appender).';
@@ -152,7 +152,7 @@ CREATE TABLE node_status_vocabulary (
     description  text NOT NULL,
     PRIMARY KEY (record_type, status)
 );
-COMMENT ON TABLE node_status_vocabulary IS '[Configuration] Per-kind node status vocabulary (ADR-0005 §2). A status change is a node version, never a mutation; terminal statuses retire nothing — history, edges and register rows remain readable. Plain table: seed-once.';
+COMMENT ON TABLE node_status_vocabulary IS '[Configuration] Per-kind node status vocabulary (ADR-0007 §2). A status change is a node version, never a mutation; terminal statuses retire nothing — history, edges and register rows remain readable. Plain table: seed-once.';
 COMMENT ON COLUMN node_status_vocabulary.record_type IS 'Roles: PK (with status). The node kind the status applies to.';
 COMMENT ON COLUMN node_status_vocabulary.status IS 'Roles: PK (with record_type). Status value, UPPER_SNAKE.';
 COMMENT ON COLUMN node_status_vocabulary.is_terminal IS 'true: no further lifecycle expected; excluded from the active universe, history intact.';
@@ -187,7 +187,7 @@ CREATE TABLE sec_node (
     CONSTRAINT sec_node_record_id_key UNIQUE (record_id),
     -- The prefix is a GOVERNED part of the id contract, not a legibility nicety: three things in
     -- this file derive record_type from it — this CHECK, sec_edge's endpoint-kind CHECKs, and the
-    -- kind-scoped read's pushdown. ADR-0005 §1.1 still calls the mnemonic fragment something the
+    -- kind-scoped read's pushdown. ADR-0007 §1.1 still calls the mnemonic fragment something the
     -- model does not rely on, which VEC-632 has to correct; until it does, adding a node kind or a
     -- mnemonic colliding with another kind's prefix breaks all three (review finding). acct-% is
     -- admitted here while ACCOUNT is still 'proposed' in ADR §2, matching BELONGS_TO, which is
@@ -207,14 +207,14 @@ CREATE TABLE sec_node (
     -- reason — a start nobody can name is not a start).
     CONSTRAINT sec_node_valid_from_finite_chk CHECK (valid_from <> 'infinity' AND valid_from <> '-infinity')
 );
-COMMENT ON TABLE sec_node IS '[Dimension] Combined SECs master (ADR-0005 §2): one node per real-world thing, discriminated by record_type. Append-only (full ACL revoke incl. owner — nothing FKs this table), bitemporal (valid window + ingest_xid). valid_to is NOT NULL (''infinity'' when open) and in the PK, so close-and-open is an append at processing_version 0; a zero-length window is a retraction tombstone. The instrument is NOT a node kind: native keys resolve via the instrument register (VEC-616). Individuals carry a pseudonymous surrogate only; PII lives in a separate store (DP-1). Plain table: governance-rate writes, per the sparse-table exception.';
+COMMENT ON TABLE sec_node IS '[Dimension] Combined SECs master (ADR-0007 §2): one node per real-world thing, discriminated by record_type. Append-only (full ACL revoke incl. owner — nothing FKs this table), bitemporal (valid window + ingest_xid). valid_to is NOT NULL (''infinity'' when open) and in the PK, so close-and-open is an append at processing_version 0; a zero-length window is a retraction tombstone. The instrument is NOT a node kind: native keys resolve via the instrument register (VEC-616). Individuals carry a pseudonymous surrogate only; PII lives in a separate store (DP-1). Plain table: governance-rate writes, per the sparse-table exception.';
 COMMENT ON COLUMN sec_node.id IS 'Roles: PK (with processing_version, valid_from). Opaque, kind-prefixed (em-/sec-/concept-/src-/acct-), house-assigned once, never derived from a public identifier or symbol, and never hashed into position_id. Seeded em-* ids stand unchanged.';
-COMMENT ON COLUMN sec_node.record_type IS 'Node kind. ENTITY / SECURITY / CONCEPT / SOURCE live; ACCOUNT staged (ADR-0005 §2).';
+COMMENT ON COLUMN sec_node.record_type IS 'Node kind. ENTITY / SECURITY / CONCEPT / SOURCE live; ACCOUNT staged (ADR-0007 §2).';
 COMMENT ON COLUMN sec_node.chain_id IS 'Roles: FK→chain.chain_id (soft). NULL for off-chain things.';
 COMMENT ON COLUMN sec_node.status IS 'Roles: FK→node_status_vocabulary (composite with record_type). A status change is a new version.';
 COMMENT ON COLUMN sec_node.attrs IS 'Kind-specific attributes as jsonb; the shape system (VEC-622) decides required-ness per type. Hot attributes promote to typed columns only on VEC-633 evidence.';
-COMMENT ON COLUMN sec_node.valid_from IS 'Roles: PK (with id, processing_version, valid_to). Valid-time window start, UTC date, half-open [valid_from, valid_to). GRAIN IS A DAY, so two changes to one record on the same day are not both representable: both windows are [D, D+1), resolution picks one by processing_version then ingest_xid, and the other is unreachable by any as-of date even though it was true for part of D. Accepted for curated data at governance cadence — widening the type later would rewrite every row and every key — and recorded here because ADR-0005 §3 says ''UTC dates'' without saying this (VEC-632).';
-COMMENT ON COLUMN sec_node.valid_to IS 'Roles: PK (with id, processing_version, valid_from). Valid-time window end, exclusive; ''infinity'' = open/current, never NULL. In the key so close-and-open is an ordinary append at processing_version 0. A ZERO-LENGTH window (valid_to = valid_from) is a TOMBSTONE: it matches no as-of date, so THAT WINDOW drops out of the resolved reads with its history intact (ADR-0005 §3 retraction; pair it with change_reason_code RETRACTION and supersedes_record_id). It withdraws one window, not the logical record — a closed-and-reopened record takes one tombstone per window, and single-append record withdrawal is VEC-622''s.';
+COMMENT ON COLUMN sec_node.valid_from IS 'Roles: PK (with id, processing_version, valid_to). Valid-time window start, UTC date, half-open [valid_from, valid_to). GRAIN IS A DAY, so two changes to one record on the same day are not both representable: both windows are [D, D+1), resolution picks one by processing_version then ingest_xid, and the other is unreachable by any as-of date even though it was true for part of D. Accepted for curated data at governance cadence — widening the type later would rewrite every row and every key — and recorded here because ADR-0007 §3 says ''UTC dates'' without saying this (VEC-632).';
+COMMENT ON COLUMN sec_node.valid_to IS 'Roles: PK (with id, processing_version, valid_from). Valid-time window end, exclusive; ''infinity'' = open/current, never NULL. In the key so close-and-open is an ordinary append at processing_version 0. A ZERO-LENGTH window (valid_to = valid_from) is a TOMBSTONE: it matches no as-of date, so THAT WINDOW drops out of the resolved reads with its history intact (ADR-0007 §3 retraction; pair it with change_reason_code RETRACTION and supersedes_record_id). It withdraws one window, not the logical record — a closed-and-reopened record takes one tombstone per window, and single-append record withdrawal is VEC-622''s.';
 COMMENT ON COLUMN sec_node.record_id IS 'Roles: Audit, UNIQUE. Per-append surrogate; what supersedes_record_id, a retraction and a reproduction manifest point at (PR-2.1). Unique per store, not globally: a manifest cites (table, record_id).';
 COMMENT ON COLUMN sec_node.processing_version IS 'Roles: Audit, PK component. Correction version, caller-assigned per ADR-0006 §3: 0 live, N per correction run via processing_version_log. A valid-time change (close-and-open, an ended window, a tombstone) is NOT a correction and stays at 0 — valid_to carries it. Un-retracting a tombstoned record IS a correction run at N. CONSEQUENCE of the resolution order (processing_version before ingest_xid): once a window has been corrected at N, a later ordinary append at 0 for that same (id, valid_from) never wins its group, whatever its ingest_xid, and with no error — a curator''s correction is not silently undone by the next pipeline run, and moving that window again takes another correction run. If a load appears to do nothing, this is why.';
 COMMENT ON COLUMN sec_node.ingest_xid IS 'Roles: Audit. Knowledge-time visibility key (ADR-0006 §5, pg_visible_in_snapshot) and the supersession tiebreak inside a valid window. Never writer-supplied: the sec_node_append_guard trigger rejects an insert that sets it to anything but the current transaction id. xid8 is 64-bit, so no wraparound — but the values are CLUSTER-LOCAL: pg_dump/restore, logical replication and a major-version upgrade do not preserve them, so a snapshot a manifest recorded stops resolving against the restored cluster. The model-level contract is a total, commit-consistent, writer-unforgeable ordering key; xid8 + pg_visible_in_snapshot is the Postgres realization of it (VEC-632 records that distinction, and what a restore does to existing manifests).';
@@ -300,9 +300,9 @@ CREATE TABLE sec_edge (
     CONSTRAINT sec_edge_valid_chk CHECK (valid_from <= valid_to),
     CONSTRAINT sec_edge_valid_from_finite_chk CHECK (valid_from <> 'infinity' AND valid_from <> '-infinity')
 );
-COMMENT ON TABLE sec_edge IS '[Dimension] Directed, typed, weighted relationship store (ADR-0005 §3/§5). Append-only (full ACL revoke incl. owner — nothing FKs this table); close-and-open at processing_version 0 (valid_to is NOT NULL, ''infinity'' when open, and in the PK); retraction is a tombstone append with a zero-length window. Endpoint-kind legality vs rel_type_vocabulary is loader/validator-enforced (cross-row); single-valued cardinality is a DQ check over current state, never a write trigger. Inverses and closures are derived, never stored. Plain table: governance-rate writes — block-stamped projection types (ALLOCATES) are excluded by design and would need their own hypertable store if ratified.';
+COMMENT ON TABLE sec_edge IS '[Dimension] Directed, typed, weighted relationship store (ADR-0007 §3/§5). Append-only (full ACL revoke incl. owner — nothing FKs this table); close-and-open at processing_version 0 (valid_to is NOT NULL, ''infinity'' when open, and in the PK); retraction is a tombstone append with a zero-length window. Endpoint-kind legality vs rel_type_vocabulary is loader/validator-enforced (cross-row); single-valued cardinality is a DQ check over current state, never a write trigger. Inverses and closures are derived, never stored. Plain table: governance-rate writes — block-stamped projection types (ALLOCATES) are excluded by design and would need their own hypertable store if ratified.';
 COMMENT ON COLUMN sec_edge.edge_id IS 'Roles: Derived. Generated human-readable identity of the LOGICAL edge; the PK is the seven-column (rel_type, src_id, dst_id, edge_seq, processing_version, valid_from, valid_to) tuple, so one edge_id spans every version and window of that edge.';
-COMMENT ON COLUMN sec_edge.edge_seq IS 'Roles: PK component. DM-6 discriminator: deliberately duplicated edges (multi-typing, per-edge attribute clusters) coexist instead of superseding their twin. Base is 1 per ADR-0005 §3, so a twin is 2; 0 is rejected rather than left as a second spelling of the base edge, since edge_seq is rendered into the stored edge_id. NO ALLOCATOR EXISTS, and this column sits inside the row''s identity: choosing 2 means reading current state first, so a writer must take pg_advisory_xact_lock on (rel_type, src_id, dst_id) per the read-then-write rule in db/migrations AGENTS.md, and a replay must CARRY the seq from its source rather than recompute it — recomputed it can differ run to run, and edge_id plus every content_hash chained from it differ with it. Two concurrent twins otherwise both compute 2 and the loser is a PK violation. VEC-622 owns the loader that allocates it; whether the discriminator should be a counter at all, rather than a function of the payload cluster that distinguishes the twins, is open (review finding).';
+COMMENT ON COLUMN sec_edge.edge_seq IS 'Roles: PK component. DM-6 discriminator: deliberately duplicated edges (multi-typing, per-edge attribute clusters) coexist instead of superseding their twin. Base is 1 per ADR-0007 §3, so a twin is 2; 0 is rejected rather than left as a second spelling of the base edge, since edge_seq is rendered into the stored edge_id. NO ALLOCATOR EXISTS, and this column sits inside the row''s identity: choosing 2 means reading current state first, so a writer must take pg_advisory_xact_lock on (rel_type, src_id, dst_id) per the read-then-write rule in db/migrations AGENTS.md, and a replay must CARRY the seq from its source rather than recompute it — recomputed it can differ run to run, and edge_id plus every content_hash chained from it differ with it. Two concurrent twins otherwise both compute 2 and the loser is a PK violation. VEC-622 owns the loader that allocates it; whether the discriminator should be a counter at all, rather than a function of the payload cluster that distinguishes the twins, is open (review finding).';
 COMMENT ON COLUMN sec_edge.src_id IS 'Roles: FK→sec_node.id (soft; SCD2 ids non-unique — resolve via the current view). Edge source.';
 COMMENT ON COLUMN sec_edge.src_kind IS 'Denormalised source kind, CHECKed to agree with src_id''s own prefix (so ''em-…'' cannot be declared SECURITY). That the endpoint EXISTS as a current node is cross-row and stays validator-enforced (GQ-11).';
 COMMENT ON COLUMN sec_edge.dst_id IS 'Roles: FK→sec_node.id (soft). Edge destination.';
@@ -589,13 +589,13 @@ ALTER TABLE sec_node ADD CONSTRAINT sec_node_status_fkey
 --     knowledge-time visibility and ordering key (ADR-0006 §5,
 --     pg_visible_in_snapshot) and now also decides supersession inside a valid
 --     window, so a forged value silently corrupts replay and lets a writer reorder
---     its own corrections. ADR-0005 §4 says never writer-supplied; this enforces it.
+--     its own corrections. ADR-0007 §4 says never writer-supplied; this enforces it.
 --     The guard RAISES rather than overwriting: a writer that sets it has a bug, and
 --     a bug that repairs itself is a bug you ship. Omitting the column (the normal
 --     path) leaves the DEFAULT, which equals pg_current_xact_id() in the same
 --     transaction, so the check is a no-op there.
 --   * content_hash was left NULL "to be wired with the validator" (VEC-622). AR-1.2
---     requires the chain to run from the FIRST append, and ADR-0005 §4 banks on the
+--     requires the chain to run from the FIRST append, and ADR-0007 §4 banks on the
 --     store being empty as the reason that is free — deferring it spends exactly that,
 --     and the 501 rows of 20260904_120100 would have been permanently outside the
 --     chain. Computing it here costs nothing and covers every writer, not just the
@@ -658,7 +658,7 @@ DECLARE
     parent_hash bytea;
 BEGIN
     IF NEW.ingest_xid IS DISTINCT FROM pg_current_xact_id() THEN
-        RAISE EXCEPTION 'ingest_xid is platform-assigned on %.% and must never be writer-supplied (ADR-0005 §4, ADR-0006 §5); omit the column and let the default stand',
+        RAISE EXCEPTION 'ingest_xid is platform-assigned on %.% and must never be writer-supplied (ADR-0007 §4, ADR-0006 §5); omit the column and let the default stand',
             TG_TABLE_SCHEMA, TG_TABLE_NAME;
     END IF;
 
