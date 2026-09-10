@@ -2367,6 +2367,59 @@ groups:
             this chain, or an address-matching regression in poolsByAddr.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3indexernopoolstouched
 
+      # =====================================================================
+      # VEC-572 — design-decision watchdog, the uniswap_v3_tick twin of
+      # VectorUniswapV4AppendOnChangeGrowthHigh; that rule's comment carries
+      # the threshold derivation and the zero-fill / replica-gate reasoning.
+      # Self-contained; keep it last in this group.
+      # =====================================================================
+      - alert: VectorUniswapV3AppendOnChangeGrowthHigh
+        # uniswap_v3_tick is deliberately a PLAIN table, not a hypertable (its
+        # COMMENT ON TABLE and db/migrations/AGENTS.md): append-on-change, so
+        # each write first reads the latest row per (pool_id, tick) with no
+        # time bound the planner could use, which a hypertable answers with a
+        # per-chunk fan-out. Right only while the table stays small; this trips
+        # at a sustained 250k rows/day (2.9 rows/s, ~90M rows/year against a
+        # ~100M-row plain-table budget). Nothing is broken when it fires.
+        # `sum by (cluster)` without `chain`: the budget belongs to the table,
+        # and one uniswap_v3_tick holds every chain's rows.
+        expr: |
+          (
+            sum by (cluster) (
+              rate(uniswap_v3_tick_rows_written_total{k8s_namespace_name="vector"}[6h])
+            )
+            or
+            max by (cluster) (
+              kube_deployment_status_replicas_available{
+                deployment="uniswap-v3-indexer", namespace="vector"
+              }
+            ) * 0
+          ) > 2.9
+          and on (cluster)
+          (
+            max by (cluster) (
+              kube_deployment_status_replicas_available{
+                deployment="uniswap-v3-indexer", namespace="vector"
+              }
+            ) >= 1
+          )
+        for: 6h
+        labels:
+          team: vector
+          severity: warning
+          component: uniswap-v3-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector uniswap_v3_tick outgrowing its plain-table budget"
+          description: |
+            Append-on-change write rate into `uniswap_v3_tick` has exceeded
+            250k rows/day (2.9 rows/s) sustained for 6h — about 90M rows/year
+            against the ~100M-row budget that deliberately-plain (non-hypertable)
+            table was sized for. Nothing is broken; this is the tripwire on that
+            design choice. Check the real row count, and if the rate is the new
+            normal plan the hypertable conversion described in the runbook.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3appendonchangegrowthhigh
+
   # uniswap-v4-indexer (VEC-475) — Uniswap V4 DEX pool/swap/liquidity indexer.
   # Runs via the unified dex-indexer binary (DEX=uniswap-v4); metric prefix
   # uniswap_v4, declared by uniswapV4Factory.MetricPrefix() in
@@ -2918,10 +2971,9 @@ groups:
         # enumeration (O(10³) ticks in one block), spikes the instantaneous rate
         # by design and must not wake anyone; 6h of both smooths those away.
         #
-        # The counters count rows OFFERED to the append-on-change writer, which
-        # then drops the unchanged ones, so this over-estimates real table
-        # growth — deliberately: firing early on a headroom warning is the safe
-        # direction.
+        # The counters count the rows the append-on-change writers PERSISTED —
+        # the unchanged ones they drop are never counted — so the rate is real
+        # table growth.
         #
         # `sum by (cluster)` WITHOUT `chain`, unlike every other rule in this
         # group: the budget belongs to the TABLE, and one uniswap_v4_position /

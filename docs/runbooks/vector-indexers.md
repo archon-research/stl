@@ -1685,6 +1685,76 @@ touches is roughly 30x the worst observed quiet gap. It is not a lull.
 
 `rate(uniswap_v3_pools_touched_total[6h]) > 0` for the affected chain.
 
+## VectorUniswapV3AppendOnChangeGrowthHigh
+
+**Severity:** warning · **For:** 6h
+
+**Nothing is broken.** The `uniswap_v3_tick` twin of
+[VectorUniswapV4AppendOnChangeGrowthHigh](#vectoruniswapv4appendonchangegrowthhigh):
+same plain-table rationale, same threshold derivation (250k rows/day sustained =
+2.9 rows/s, about a year of runway against a ~100M-row budget), same 6h window
+and `for:`, same table-wide `sum by (cluster)`. Read that section for the why;
+this one carries only what differs for V3. Treat it as a planning ticket, not an
+incident.
+
+### First checks
+
+1. **Actual row count and size.**
+
+   ```sql
+   SELECT relname, n_live_tup,
+          pg_size_pretty(pg_total_relation_size(relid)) AS total_size
+   FROM pg_stat_user_tables
+   WHERE relname = 'uniswap_v3_tick';
+   ```
+
+2. **Growth over time**, to tell a step change from a one-off:
+
+   ```sql
+   SELECT date_trunc('day', block_timestamp) AS day, count(*) AS row_count
+   FROM uniswap_v3_tick
+   WHERE block_timestamp > now() - INTERVAL '30 days'
+   GROUP BY 1 ORDER BY 1;
+   ```
+
+3. **What changed.** More pools, not more traffic per pool, almost always
+   (`uniswap_v3_pool` is unversioned, so a plain count is the registry size):
+
+   ```sql
+   SELECT count(*) AS pools FROM uniswap_v3_pool;
+   ```
+
+   A pool's first touch also enumerates every initialized tick once
+   (`BaselineTicks`, O(10³) rows in one block); a batch of newly seeded pools
+   shows up as a step that the 6h window is meant to absorb.
+
+### Common causes
+
+The V4 section's list applies — registry expansion, a new chain's indexer
+writing into the same table, a backfill longer than 6h — plus the V3-specific
+regression: rows appended on every touch instead of on change (a field dropped
+from `uniswapTickWriter.unchanged`, or `initialized` no longer compared). Same
+symptom and the same probe as the V4 section, on `uniswap_v3_tick` with
+`(pool_id, tick)` as the key and `(liquidity_gross, liquidity_net,
+fee_growth_outside0_x128, fee_growth_outside1_x128, initialized)` as the values.
+
+### Remediation
+
+The create/copy/swap conversion in the V4 section applies with `uniswap_v3_tick`
+for `uniswap_v4_position`, `(pool_id, tick)` for the natural key and
+`uniswap_v3_pool` as the FK target — including all four "re-solve the fan-out"
+items (30-day chunks, `block_timestamp` pinned in the trigger lookups, a bounded
+lookback only if the `COMMENT` states it, and no tiering policy).
+
+### Verify recovery
+
+```promql
+sum(rate(uniswap_v3_tick_rows_written_total[6h])) <= 2.9
+```
+
+After an actual conversion the rule no longer describes reality — delete or
+re-scope it in the same PR (`alerts/AGENTS.md`, alert ownership).
+
 ---
 
 ## uniswap-v4-indexer (VEC-475)
@@ -2739,14 +2809,13 @@ regime change. A backfill, or a pool's first-touch baseline tick enumeration
 (O(10³) ticks read in one block), spikes the instantaneous rate by design and
 must not wake anyone.
 
-> The counters count rows **offered** to the append-on-change writer, which then
-> drops the unchanged ones. The alert therefore over-estimates real table growth
-> — on purpose: firing early on a headroom warning is the safe direction. Expect
-> the real row counts below to be *lower* than the metric implies.
+> The counters count the rows the append-on-change writers **persisted** — the
+> unchanged ones they drop are never counted — so the rate is real table growth
+> and the row counts below should match its integral.
 
 ### First checks
 
-1. **Actual row counts.** The metric is an upper bound; these are the truth.
+1. **Actual row counts.** These are the truth the metric approximates.
 
    ```sql
    SELECT 'uniswap_v4_tick' AS table_name, count(*) AS row_count FROM uniswap_v4_tick
@@ -2796,22 +2865,35 @@ must not wake anyone.
 - **A backfill running longer than 6h** — legitimate and transient. Confirm it is
   a backfill, let it finish, expect the alert to clear itself.
 - **An append-on-change regression** — rows appended on every touch instead of
-  only on change (a field dropped from `v4TickUnchanged` / `v4PositionUnchanged`,
+  only on change (a field dropped from `uniswapTickWriter.unchanged` / `v4PositionUnchanged`,
   or a `block_version` that always differs). This one *is* a bug. Symptom:
-  consecutive rows for one natural key carrying identical values.
+  consecutive rows for one natural key at *different heights* carrying identical
+  values. Same-height pairs are healthy by design — a reorg re-observation
+  stores identical values at `block_version` 0 and 1, and a rebuild may at
+  `processing_version` 1 — so the probe compares each row with the previous row
+  of its key at another height. An out-of-order backfill row (written with no
+  prior row at or below its height) can show up here too; check the
+  `created_at` order before reading a hit as the regression.
 
   ```sql
-  -- Keys with more versions than distinct values: should return nothing.
-  SELECT pool_id, owner, tick_lower, tick_upper, salt,
-         count(*) AS versions,
-         count(DISTINCT (liquidity,
-                         fee_growth_inside0_last_x128,
-                         fee_growth_inside1_last_x128)) AS distinct_values
-  FROM uniswap_v4_position
-  GROUP BY 1, 2, 3, 4, 5
-  HAVING count(*) > count(DISTINCT (liquidity,
-                                    fee_growth_inside0_last_x128,
-                                    fee_growth_inside1_last_x128))
+  -- Rows repeating the previous height's values for the same key: should return nothing.
+  WITH ordered AS (
+    SELECT pool_id, owner, tick_lower, tick_upper, salt, block_number, block_version,
+           liquidity, fee_growth_inside0_last_x128, fee_growth_inside1_last_x128,
+           lag(block_number)                  OVER w AS prev_block,
+           lag(liquidity)                     OVER w AS prev_liquidity,
+           lag(fee_growth_inside0_last_x128)  OVER w AS prev_fee0,
+           lag(fee_growth_inside1_last_x128)  OVER w AS prev_fee1
+    FROM uniswap_v4_position
+    WINDOW w AS (PARTITION BY pool_id, owner, tick_lower, tick_upper, salt
+                 ORDER BY block_number, block_version, processing_version)
+  )
+  SELECT pool_id, owner, tick_lower, tick_upper, salt, block_number, block_version
+  FROM ordered
+  WHERE prev_block IS NOT NULL AND prev_block <> block_number
+    AND liquidity = prev_liquidity
+    AND fee_growth_inside0_last_x128 = prev_fee0
+    AND fee_growth_inside1_last_x128 = prev_fee1
   LIMIT 20;
   ```
 
@@ -2826,11 +2908,15 @@ forbids `UPDATE`/`DELETE` on ingest paths, and this is a schema migration that
 only INSERTs and renames.
 
 ```sql
--- 1. New table, same columns. block_timestamp must join the PK: TimescaleDB
---    requires the partition column in every unique index on a hypertable.
+-- 1. New table, same columns. LIKE copies CHECKs, NOT NULLs, defaults and,
+--    with INCLUDING INDEXES, the PK and the two secondary indexes (under
+--    default names) -- never a foreign key, so that is re-added by hand.
+--    block_timestamp must join the PK: TimescaleDB requires the partition
+--    column in every unique index on a hypertable.
 CREATE TABLE uniswap_v4_position_new
-    (LIKE uniswap_v4_position INCLUDING DEFAULTS INCLUDING CONSTRAINTS);
+    (LIKE uniswap_v4_position INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING INDEXES);
 ALTER TABLE uniswap_v4_position_new
+    ADD FOREIGN KEY (pool_id) REFERENCES uniswap_v4_pool (id),
     DROP CONSTRAINT uniswap_v4_position_new_pkey,
     ADD PRIMARY KEY (pool_id, owner, tick_lower, tick_upper, salt,
                      block_timestamp, block_number, block_version, processing_version);
@@ -2838,13 +2924,14 @@ SELECT create_hypertable('uniswap_v4_position_new', 'block_timestamp',
                          chunk_time_interval => INTERVAL '30 days',
                          migrate_data => false);
 
--- 2. Copy. Batch by block_number on a large table so one transaction does not
---    hold a snapshot for hours.
+-- 2. Copy. On a large table run this per block_number range (add
+--    WHERE block_number >= lo AND block_number < hi and loop) so one
+--    transaction does not hold a snapshot for hours; a small one copies in one.
 INSERT INTO uniswap_v4_position_new SELECT * FROM uniswap_v4_position;
 
--- 3. Swap, then re-create the indexes, the processing_version trigger and the
---    REVOKEs against the new table: LIKE carries none of them, and grants
---    follow the object, not the name.
+-- 3. Swap, then re-create the processing_version trigger and the REVOKEs
+--    against the new table: LIKE carries neither, and grants follow the
+--    object, not the name. No compression or tiering policy -- see below.
 ALTER TABLE uniswap_v4_position RENAME TO uniswap_v4_position_old;
 ALTER TABLE uniswap_v4_position_new RENAME TO uniswap_v4_position;
 ```
@@ -2862,11 +2949,19 @@ query it penalises. The conversion is only finished when that read prunes chunks
    on one fork is one block — so the equality is exact, and it prunes the
    per-inserted-row lookup to a single chunk. This is the hottest path.
 3. **A bounded lookback in the read-latest query** (`readLatestPositionsV4` /
-   `readLatestTicksV4`). Safe but semantically weakening: a key untouched for
+   `readLatestTicks`). Safe but semantically weakening: a key untouched for
    longer than the window is re-appended with identical values rather than
    skipped. Not wrong data — readers take `ORDER BY block_number DESC … LIMIT 1`
    — but it turns "append-on-change" into "append-on-change within N days" and
    must be stated in the table COMMENT if adopted.
+
+4. **No S3 tiering policy on the converted table** — or a lookback in the
+   read-latest query shorter than the tiering horizon. `timescaledb.enable_tiered_reads`
+   is off, so a prior row past the horizon is invisible to `readLatestPositionsV4`
+   and the writer appends a change that never happened: the wrong-data failure
+   `db/migrations/AGENTS.md` describes. Its rule that every hypertable gets
+   compression and tiering in its creating migration does not apply here; the
+   table `COMMENT` records the exception, keep it that way.
 
 Do **not** pin `block_timestamp` by equality in `PositionsForPoolAtBlock` /
 `TicksForPoolAtBlock`: a reorged block at the same height carries a *different*
