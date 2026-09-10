@@ -63,13 +63,14 @@ func TestAlerts_UseMetricsThisWorkerEmits(t *testing.T) {
 func TestAlerts_GroupByLabelsThatExist(t *testing.T) {
 	body := alertsFile(t)
 	// Only the rules that read this worker's metrics; the file covers every cronjob.
-	for _, block := range strings.Split(body, "- alert:")[1:] {
-		if !strings.Contains(block, "position_materializer_") {
+	for block := range strings.SplitSeq(body, "- alert:") {
+		// The first chunk is everything before the first rule, which names no alert.
+		if !strings.Contains(block, "position_materializer_") || !strings.Contains(block, "expr:") {
 			continue
 		}
 		name := strings.TrimSpace(strings.SplitN(block, "\n", 2)[0])
 		for _, by := range regexp.MustCompile(`by \(([^)]*)\)`).FindAllStringSubmatch(block, -1) {
-			for _, label := range strings.Split(by[1], ",") {
+			for label := range strings.SplitSeq(by[1], ",") {
 				label = strings.TrimSpace(label)
 				if label == "" || emittedAttrs[label] || infraLabels[label] {
 					continue
