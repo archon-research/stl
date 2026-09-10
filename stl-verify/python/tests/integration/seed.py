@@ -3371,3 +3371,176 @@ async def seed_processing_version_dedup_scenarios(db_url: str) -> None:
                 )
     finally:
         await conn.close()
+
+
+# --- VEC-760 balance series (series="balance") ----------------------------
+# Each scenario gets its own proxy so a test can assert on one in isolation:
+# the read sums every entity under the proxies it is given.
+BS_PROXY_CARRY = "1b" * 20
+BS_PROXY_CORRECTED = "2b" * 20
+BS_PROXY_DIVERGENT = "3b" * 20
+BS_PROXY_DIRECT = "4b" * 20
+BS_PROXY_SEEDED = "5b" * 20
+
+_BS_VAULT_HEX = "b0" * 20
+_BS_PROTOCOL_HEX = "b1" * 20
+_BS_ORACLE_HEX = "b2" * 20
+_BS_UNDERLYING_HEX = "b3" * 20
+_BS_ALT_UNDERLYING_HEX = "b4" * 20
+_BS_RECEIPT_HEX = "b5" * 20
+_BS_DIRECT_HEX = "b6" * 20
+
+# Deliberately not 1.0, so a value that skipped the price multiply is visibly
+# wrong rather than coincidentally right.
+BS_UNDERLYING_PRICE = Decimal("2")
+BS_DIRECT_PRICE = Decimal("3")
+
+BS_CARRY_UNDERLYING_VALUE = Decimal("50")
+BS_CORRECTED_ORIGINAL_UNDERLYING_VALUE = Decimal("10")
+BS_CORRECTED_FIXED_UNDERLYING_VALUE = Decimal("90")
+BS_DIRECT_BALANCE = Decimal("7")
+BS_SEEDED_UNDERLYING_VALUE = Decimal("11")
+
+
+async def seed_balance_series_positions(db_url: str) -> None:
+    """Seed the ``series="balance"`` scenarios into the given database.
+
+    Rows are placed relative to ``now`` so a test can ask for a window in days
+    and land them in known buckets:
+
+    * ``BS_PROXY_CARRY``     one receipt row 3 days ago, nothing since -> LOCF.
+    * ``BS_PROXY_CORRECTED`` a row and its ``processing_version`` correction at
+      the same instant, with different values -> the dedup must pick the
+      correction, not the original and not both.
+    * ``BS_PROXY_DIVERGENT`` a receipt row whose own ``underlying_token_id``
+      disagrees with the registry's -> refused, contributes nothing.
+    * ``BS_PROXY_DIRECT``    a direct holding, priced by its own token price.
+    * ``BS_PROXY_SEEDED``    its only row is BEFORE the window -> the carry-in
+      seed has to supply it.
+    """
+    conn = await asyncpg.connect(db_url)
+    try:
+        async with conn.transaction():
+            prime_id = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('bs_balance', $1) RETURNING id",
+                bytes.fromhex(_BS_VAULT_HEX),
+            )
+            protocol_id = await conn.fetchval(
+                "INSERT INTO protocol (chain_id, address, name, protocol_type) "
+                "VALUES (1, $1, 'bsLike', 'lending') RETURNING id",
+                bytes.fromhex(_BS_PROTOCOL_HEX),
+            )
+            oracle_id = await conn.fetchval(
+                "INSERT INTO oracle (name, display_name, chain_id, address) "
+                "VALUES ('bs_balance', 'Balance series test oracle', 1, $1) RETURNING id",
+                bytes.fromhex(_BS_ORACLE_HEX),
+            )
+            await conn.execute(
+                "INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block) VALUES ($1, $2, 1)",
+                protocol_id,
+                oracle_id,
+            )
+
+            underlying_id = await insert_token(conn, "bsUSDC", 6, bytes.fromhex(_BS_UNDERLYING_HEX))
+            await _insert_price(conn, underlying_id, oracle_id, BS_UNDERLYING_PRICE)
+            alt_underlying_id = await insert_token(conn, "bsALT", 6, bytes.fromhex(_BS_ALT_UNDERLYING_HEX))
+            await _insert_price(conn, alt_underlying_id, oracle_id, Decimal("5"))
+
+            receipt_id = await insert_token(conn, "bsRCPT", 6, bytes.fromhex(_BS_RECEIPT_HEX))
+            await insert_receipt_token_row(
+                conn,
+                protocol_id=protocol_id,
+                underlying_token_id=underlying_id,
+                address=bytes.fromhex(_BS_RECEIPT_HEX),
+                symbol="bsRCPT",
+            )
+            direct_id = await insert_token(conn, "bsDIR", 6, bytes.fromhex(_BS_DIRECT_HEX))
+            await _insert_price(conn, direct_id, oracle_id, BS_DIRECT_PRICE)
+
+            now = dt.datetime.now(dt.UTC)
+            three_days_ago = now - dt.timedelta(days=3)
+            # Comfortably inside the seed reach, but outside any window a test asks for.
+            pre_window = now - dt.timedelta(days=12)
+
+            await insert_allocation_position(
+                conn,
+                token_id=receipt_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_CARRY,
+                balance=Decimal("100"),
+                block=1000,
+                tx="c1" * 32,
+                direction="sweep",
+                underlying_value=BS_CARRY_UNDERLYING_VALUE,
+                underlying_token_id=underlying_id,
+                created_at=three_days_ago,
+                tx_amount=0,
+            )
+
+            # The correction repeats the row with the SAME created_at and a fresh
+            # build_id, which is how the assign trigger hands out
+            # processing_version=1 -- see insert_allocation_position's docstring.
+            for build_id, value in (
+                (0, BS_CORRECTED_ORIGINAL_UNDERLYING_VALUE),
+                (1, BS_CORRECTED_FIXED_UNDERLYING_VALUE),
+            ):
+                await insert_allocation_position(
+                    conn,
+                    token_id=receipt_id,
+                    prime_id=prime_id,
+                    proxy_hex=BS_PROXY_CORRECTED,
+                    balance=Decimal("100"),
+                    block=1000,
+                    tx="c2" * 32,
+                    direction="sweep",
+                    underlying_value=value,
+                    underlying_token_id=underlying_id,
+                    created_at=three_days_ago,
+                    tx_amount=0,
+                    build_id=build_id,
+                )
+
+            await insert_allocation_position(
+                conn,
+                token_id=receipt_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_DIVERGENT,
+                balance=Decimal("100"),
+                block=1000,
+                tx="c3" * 32,
+                direction="sweep",
+                underlying_value=Decimal("77"),
+                underlying_token_id=alt_underlying_id,
+                created_at=three_days_ago,
+                tx_amount=0,
+            )
+
+            await insert_allocation_position(
+                conn,
+                token_id=direct_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_DIRECT,
+                balance=BS_DIRECT_BALANCE,
+                block=1000,
+                tx="c4" * 32,
+                direction="sweep",
+                created_at=three_days_ago,
+                tx_amount=0,
+            )
+
+            await insert_allocation_position(
+                conn,
+                token_id=receipt_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_SEEDED,
+                balance=Decimal("100"),
+                block=900,
+                tx="c5" * 32,
+                direction="sweep",
+                underlying_value=BS_SEEDED_UNDERLYING_VALUE,
+                underlying_token_id=underlying_id,
+                created_at=pre_window,
+                tx_amount=0,
+            )
+    finally:
+        await conn.close()
