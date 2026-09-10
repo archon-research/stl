@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // materialize_position_projection aborts on a view bug and continues on a data conflict. These pin the
@@ -212,4 +213,84 @@ func TestPositionProjectionRefusal(t *testing.T) {
 			t.Errorf("re-running inserted %d, want 0", n)
 		}
 	})
+}
+
+// Two projections minting one position_id must not both land. The ownership check is a snapshot
+// read, so B has to be held off until A's row is visible; otherwise both append and every later run
+// of both aborts, with recovery needing a superuser since UPDATE and DELETE are revoked.
+func TestMaterializeSerialisesOnTheIdentityNotTheView(t *testing.T) {
+	f, cleanup := newPositionStateFixture(t)
+	defer cleanup()
+	h := strings.Repeat("c", 40)
+	body := func(bn int, ts string) string {
+		return `SELECT * FROM (VALUES (1::int,10::bigint,'race-key'::text,'` + h +
+			`'::text,500::numeric,'LOAN'::text,` + strconv.Itoa(bn) + `::bigint,0::int,0::int,'` + ts + `'::timestamptz)) ` + mppCols
+	}
+	for _, v := range []struct{ name, b string }{
+		{"pv_race_a", body(100, "2026-08-01T00:00:00Z")},
+		{"pv_race_b", body(200, "2026-08-02T00:00:00Z")},
+	} {
+		if _, err := f.pool.Exec(f.ctx, `CREATE OR REPLACE VIEW `+v.name+` AS `+v.b); err != nil {
+			t.Fatalf("creating %s: %v", v.name, err)
+		}
+	}
+
+	a, err := f.pool.Acquire(f.ctx)
+	if err != nil {
+		t.Fatalf("acquire a: %v", err)
+	}
+	defer a.Release()
+	txA, err := a.Begin(f.ctx)
+	if err != nil {
+		t.Fatalf("begin a: %v", err)
+	}
+	var appendedA int64
+	if err := txA.QueryRow(f.ctx, `SELECT materialize_position_projection('pv_race_a'::regclass)`).Scan(&appendedA); err != nil {
+		_ = txA.Rollback(f.ctx)
+		t.Fatalf("projection a: %v", err)
+	}
+
+	// B runs while A is uncommitted. It must not decide ownership from a snapshot without A's row.
+	type outcome struct {
+		appended int64
+		err      error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		b, err := f.pool.Acquire(f.ctx)
+		if err != nil {
+			done <- outcome{err: err}
+			return
+		}
+		defer b.Release()
+		var n int64
+		e := b.QueryRow(f.ctx, `SELECT materialize_position_projection('pv_race_b'::regclass)`).Scan(&n)
+		done <- outcome{appended: n, err: e}
+	}()
+
+	time.Sleep(750 * time.Millisecond) // let B reach whatever it blocks on
+	select {
+	case got := <-done:
+		t.Fatalf("projection b finished before a committed: appended=%d err=%v", got.appended, got.err)
+	default:
+	}
+	if err := txA.Commit(f.ctx); err != nil {
+		t.Fatalf("commit a: %v", err)
+	}
+
+	got := <-done
+	if got.err == nil {
+		t.Errorf("projection b appended %d rows for a position a owns; want the ownership abort", got.appended)
+	} else if !strings.Contains(got.err.Error(), "owned by another projection") {
+		t.Errorf("projection b failed with %v; want the cross-view ownership abort", got.err)
+	}
+
+	var owners int
+	if err := f.pool.QueryRow(f.ctx,
+		`SELECT count(DISTINCT projection) FROM position_state WHERE instrument_key = 'race-key'`).Scan(&owners); err != nil {
+		t.Fatal(err)
+	}
+	if owners != 1 {
+		t.Errorf("%d projections own the position; want 1", owners)
+	}
 }

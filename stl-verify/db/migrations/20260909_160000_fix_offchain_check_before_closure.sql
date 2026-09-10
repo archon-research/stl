@@ -278,6 +278,12 @@ BEGIN
            AND s.block_version = r.block_version AND s.processing_version = r.processing_version;
     END IF;
 
+    -- Lock the identities before reading who owns them: the check below is a snapshot read, so two
+    -- projections minting one position_id could each pass it and both append, wedging both for good.
+    -- Keyed per position, so views on disjoint positions still run concurrently; ordered to not deadlock.
+    PERFORM pg_advisory_xact_lock(hashtextextended('position_id.' || encode(s.position_id, 'hex'), 0))
+    FROM (SELECT DISTINCT position_id FROM pg_temp._mpp_src) s ORDER BY s.position_id;
+
     SELECT format('position %s owned by %s', encode(p.position_id, 'hex'), p.projection) INTO bad
     FROM (SELECT DISTINCT position_id FROM pg_temp._mpp_src) s
     JOIN public.position_state p
