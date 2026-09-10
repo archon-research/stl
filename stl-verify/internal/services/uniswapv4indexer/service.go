@@ -260,19 +260,20 @@ func (s *UniswapV4Service) handleBlock(ctx context.Context, event outbound.Block
 
 	s.markSnapshotted(dueSet, snaps.baselined, coords.number, coords.version)
 	s.markIndexed(ctx, dueSet)
-	s.recordBlockMetrics(ctx, acc, writes, stateRows)
+	s.recordBlockMetrics(ctx, acc, stateRows)
 	return nil
 }
 
 // recordBlockMetrics runs only after a successful commit. Attempted is what
-// VectorUniswapV4IndexerNotWritingState keys on; the tick/position counts come
-// from the write set, so they over-count the rows the writer drops as unchanged.
-func (s *UniswapV4Service) recordBlockMetrics(ctx context.Context, acc blockAccumulators, writes outbound.UniswapV4BlockWrites, stateRows outbound.StateRowCounts) {
+// VectorUniswapV4IndexerNotWritingState keys on; the tick and position counts
+// are what the append-on-change writers persisted, which the growth alert
+// reads as table growth.
+func (s *UniswapV4Service) recordBlockMetrics(ctx context.Context, acc blockAccumulators, rows outbound.StateRowCounts) {
 	s.recordPoolsTouched(ctx, acc.touchedIDs)
-	s.telemetry.RecordStateRowsAttempted(ctx, int(stateRows.Attempted))
-	s.telemetry.RecordStateRows(ctx, int(stateRows.Persisted))
-	s.telemetry.RecordTickRows(ctx, len(writes.Ticks))
-	s.telemetry.RecordPositionRows(ctx, len(writes.Positions))
+	s.telemetry.RecordStateRowsAttempted(ctx, int(rows.Attempted))
+	s.telemetry.RecordStateRows(ctx, int(rows.Persisted))
+	s.telemetry.RecordTickRows(ctx, int(rows.TicksPersisted))
+	s.telemetry.RecordPositionRows(ctx, int(rows.PositionsPersisted))
 }
 
 // Only the snapshot_supported half reaches the due set, so only it may gate
@@ -465,7 +466,7 @@ func (s *UniswapV4Service) snapshotPoolPositions(ctx context.Context, pool Regis
 	keys := TouchedPositions(liqEvents)
 
 	if coords.version > 0 {
-		prior, err := s.repo.PositionsForPoolAtBlock(ctx, pool.ID, coords.number)
+		prior, err := s.repo.PositionsForPoolAtBlock(ctx, s.chainID, pool.ID, coords.number)
 		if err != nil {
 			return nil, fmt.Errorf("reading prior-version positions for pool %s block %d: %w", pool.PoolIDHash, coords.number, err)
 		}
@@ -599,22 +600,21 @@ func (s *UniswapV4Service) buildBlockWrites(acc blockAccumulators, snaps blockSn
 	return writes, dexconsumer.ToProtocolEventInputs(acc.captured, s.chainID, coords.number, coords.version, coords.ts)
 }
 
-// PersistBlock carries only the persisted count back, so attempted rides the
-// closure.
+// PersistBlock carries only the persisted state count back, so the full counts
+// ride the closure.
 func (s *UniswapV4Service) persistBlock(ctx context.Context, writes outbound.UniswapV4BlockWrites, capturedIns []dexconsumer.ProtocolEventInput, bn int64) (outbound.StateRowCounts, error) {
-	var attempted int64
-	persisted, err := dexconsumer.PersistBlock(ctx, s.txMgr, s.eventWriter, func(ctx context.Context, tx pgx.Tx) (int64, error) {
+	var counts outbound.StateRowCounts
+	if _, err := dexconsumer.PersistBlock(ctx, s.txMgr, s.eventWriter, func(ctx context.Context, tx pgx.Tx) (int64, error) {
 		rows, err := s.repo.SaveBlock(ctx, tx, writes)
 		if err != nil {
 			return 0, fmt.Errorf("persisting uniswap v4 block %d: %w", bn, err)
 		}
-		attempted = rows.Attempted
+		counts = rows
 		return rows.Persisted, nil
-	}, capturedIns, bn)
-	if err != nil {
+	}, capturedIns, bn); err != nil {
 		return outbound.StateRowCounts{}, err
 	}
-	return outbound.StateRowCounts{Attempted: attempted, Persisted: persisted}, nil
+	return counts, nil
 }
 
 // Called only after a successful persist: a failed block must leave its pools due

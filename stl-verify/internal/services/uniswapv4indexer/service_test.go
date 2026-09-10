@@ -32,10 +32,12 @@ import (
 type fakeUniswapRepo struct {
 	lastWrites     outbound.UniswapV4BlockWrites
 	saveBlockCalls int
-	// Overrides the PERSISTED count only; a pointer so a test can stage an
-	// explicit 0, the ON CONFLICT DO NOTHING replay.
-	stateRowsReturn *int64
-	err             error
+	// Override the PERSISTED counts only; pointers so a test can stage an
+	// explicit 0, the ON CONFLICT DO NOTHING replay or an unchanged slot.
+	stateRowsReturn    *int64
+	tickRowsReturn     *int64
+	positionRowsReturn *int64
+	err                error
 
 	priorTicks        map[fakePoolBlockKey][]int32
 	ticksForPoolCalls []fakePoolBlockKey
@@ -79,7 +81,7 @@ func (r *fakeUniswapRepo) TicksForPoolAtBlock(_ context.Context, chainID int64, 
 	return r.priorTicks[key], nil
 }
 
-func (r *fakeUniswapRepo) PositionsForPoolAtBlock(_ context.Context, poolID int64, blockNumber int64) ([]entity.UniswapV4PositionKey, error) {
+func (r *fakeUniswapRepo) PositionsForPoolAtBlock(_ context.Context, _ int64, poolID int64, blockNumber int64) ([]entity.UniswapV4PositionKey, error) {
 	key := fakePoolBlockKey{poolID: poolID, blockNumber: blockNumber}
 	r.positionsForPoolCalls = append(r.positionsForPoolCalls, key)
 	if r.positionsForPoolErr != nil {
@@ -112,11 +114,19 @@ func (r *fakeUniswapRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.Unis
 	}
 	r.lastWrites = w
 	counts := outbound.StateRowCounts{
-		Attempted: int64(len(w.States)),
-		Persisted: int64(len(w.States)),
+		Attempted:          int64(len(w.States)),
+		Persisted:          int64(len(w.States)),
+		TicksPersisted:     int64(len(w.Ticks)),
+		PositionsPersisted: int64(len(w.Positions)),
 	}
 	if r.stateRowsReturn != nil {
 		counts.Persisted = *r.stateRowsReturn
+	}
+	if r.tickRowsReturn != nil {
+		counts.TicksPersisted = *r.tickRowsReturn
+	}
+	if r.positionRowsReturn != nil {
+		counts.PositionsPersisted = *r.positionRowsReturn
 	}
 	return counts, nil
 }
@@ -1884,6 +1894,34 @@ func TestBlockHandler_RecordsAppendOnChangeRowsWritten(t *testing.T) {
 	}
 	if rows, ok := sumCounter(t, rm, "uniswap_v4.position.rows.written"); !ok || rows != 1 {
 		t.Errorf("uniswap_v4.position.rows.written = %d (present=%t), want 1", rows, ok)
+	}
+}
+
+// The growth alert reads these as table growth, so they must be what the
+// writers persisted, not what the block offered them.
+func TestBlockHandler_RecordsPersistedNotOfferedAppendOnChangeRows(t *testing.T) {
+	pool := servicePool()
+	svc, repo, mc, reader := newTelemetryService(t, []RegisteredPool{pool})
+	mc.tickResults[-100] = goodTickResult(t)
+	mc.tickResults[200] = goodTickResult(t)
+	oneTick, noPositions := int64(1), int64(0)
+	repo.tickRowsReturn = &oneTick
+	repo.positionRowsReturn = &noPositions
+
+	receipt := shared.TransactionReceipt{Logs: []shared.Log{modifyLog(t, pool, "0x0", -100, 200, 5000)}}
+	if err := svc.BlockHandler()(context.Background(), blockEvent(200), []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+	if got := repo.lastWrites; len(got.Ticks) != 2 || len(got.Positions) != 1 {
+		t.Fatalf("offered ticks=%d positions=%d, want 2 and 1 (the block must offer more than the repository persists for this test to discriminate)", len(got.Ticks), len(got.Positions))
+	}
+
+	rm := collect(t, reader)
+	if rows, ok := sumCounter(t, rm, "uniswap_v4.tick.rows.written"); !ok || rows != 1 {
+		t.Errorf("uniswap_v4.tick.rows.written = %d (present=%t), want 1 (the persisted count, not the 2 offered)", rows, ok)
+	}
+	if rows, ok := sumCounter(t, rm, "uniswap_v4.position.rows.written"); ok {
+		t.Errorf("uniswap_v4.position.rows.written = %d, want the counter absent (0 persisted is a no-op)", rows)
 	}
 }
 

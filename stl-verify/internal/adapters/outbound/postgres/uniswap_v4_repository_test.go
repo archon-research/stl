@@ -10,26 +10,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
 
-func TestSharedPositionBlockNumberRejectsMixedBlocks(t *testing.T) {
-	rows := []*entity.UniswapV4Position{
-		{PoolID: 1, TickLower: -60, TickUpper: 60, BlockNumber: 100, Liquidity: big.NewInt(1)},
-		{PoolID: 1, TickLower: -120, TickUpper: 120, BlockNumber: 101, Liquidity: big.NewInt(1)},
-	}
-	blockNumberOf := func(p *entity.UniswapV4Position) int64 { return p.BlockNumber }
-	if _, err := sharedBlockNumber("position", rows, blockNumberOf); err == nil {
-		t.Fatal("sharedBlockNumber across two blocks: want error, got nil")
-	}
-
-	rows[1].BlockNumber = 100
-	got, err := sharedBlockNumber("position", rows, blockNumberOf)
-	if err != nil {
-		t.Fatalf("sharedBlockNumber: %v", err)
-	}
-	if got != 100 {
-		t.Errorf("blockNumber = %d, want 100", got)
-	}
-}
-
 func TestV4PositionUnchanged(t *testing.T) {
 	stored := func(blockNumber int64, blockVersion int, liquidity int64) v4PositionValues {
 		return v4PositionValues{
