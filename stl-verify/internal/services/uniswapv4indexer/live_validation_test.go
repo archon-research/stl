@@ -5,6 +5,7 @@ package uniswapv4indexer
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -809,9 +810,9 @@ func (h *liveHarness) readTouchedPositions(t *testing.T, ctx context.Context, de
 	return rows
 }
 
-// An added delta must leave the position holding at least that much, which is
-// what proves the key addresses the position the event names rather than an
-// unrelated zeroed slot.
+// A net positive delta must leave the position holding at least that much: that
+// is what proves the key addresses the position the events name. Net, not per
+// event — an add and a same-block burn on one key legitimately end below the add.
 func assertPositionInvariants(t *testing.T, events []*entity.UniswapV4LiquidityEvent, positions []*entity.UniswapV4Position, rep *liveReport) {
 	t.Helper()
 
@@ -820,16 +821,24 @@ func assertPositionInvariants(t *testing.T, events []*entity.UniswapV4LiquidityE
 		byKey[p.Key()] = p
 	}
 
+	netDelta := make(map[entity.UniswapV4PositionKey]*big.Int, len(events))
 	for _, e := range events {
 		key := entity.UniswapV4PositionKey{Owner: e.Sender, TickLower: e.TickLower, TickUpper: e.TickUpper, Salt: e.Salt}
-		got, read := byKey[key]
-		if !read {
+		if _, read := byKey[key]; !read {
 			addFinding(t, rep, fmt.Sprintf("ModifyLiquidity tx=%s logIndex=%d touched position %+v but no getPositionInfo row was read for it", e.TxHash, e.LogIndex, key))
 			continue
 		}
-		if e.LiquidityDelta.Sign() > 0 && got.Liquidity.Cmp(e.LiquidityDelta) < 0 {
-			addFinding(t, rep, fmt.Sprintf("position %+v reads back liquidity %s after an add of %s: the read is not addressing the position the event names",
-				key, got.Liquidity, e.LiquidityDelta))
+		if netDelta[key] == nil {
+			netDelta[key] = new(big.Int)
+		}
+		netDelta[key].Add(netDelta[key], e.LiquidityDelta)
+	}
+
+	for _, key := range slices.SortedFunc(maps.Keys(netDelta), entity.UniswapV4PositionKey.Compare) {
+		delta := netDelta[key]
+		if got := byKey[key]; delta.Sign() > 0 && got.Liquidity.Cmp(delta) < 0 {
+			addFinding(t, rep, fmt.Sprintf("position %+v reads back liquidity %s after a net add of %s: the read is not addressing the position the events name",
+				key, got.Liquidity, delta))
 		}
 	}
 }
