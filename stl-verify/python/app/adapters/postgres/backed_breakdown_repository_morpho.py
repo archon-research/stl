@@ -55,62 +55,44 @@ WITH morpho_vaults AS (
   vault_users AS (
       {MORPHO_VAULT_USERS_SQL}
   ),
+  -- vault_states, market_allocs and market_states read the trigger-maintained
+  -- *_current caches (newest row per key: 20260910_140000 for the vault and market
+  -- state, 20260909_150000 for positions) instead of reducing each history per
+  -- request, so this query plans over no hypertable chunk at all.
   vault_states AS (
-      SELECT DISTINCT ON (vs.morpho_vault_id)
-          vs.morpho_vault_id as vault_id,
-          vs.total_assets / power(10, t.decimals) as total_assets,
-          t.id as loan_token_id,
-          t.symbol as loan_token
-      FROM morpho_vault_state vs
-      JOIN morpho_vault v ON v.id = vs.morpho_vault_id
+      SELECT vsc.morpho_vault_id as vault_id,
+             vsc.total_assets / power(10, t.decimals) as total_assets,
+             t.id as loan_token_id,
+             t.symbol as loan_token
+      FROM morpho_vault_state_current vsc
+      JOIN morpho_vaults mv ON mv.vault_id = vsc.morpho_vault_id
+      JOIN morpho_vault v ON v.id = vsc.morpho_vault_id
       JOIN token t ON t.id = v.asset_token_id
-      WHERE vs.morpho_vault_id IN (SELECT vault_id FROM morpho_vaults)
-      ORDER BY vs.morpho_vault_id, vs.block_number DESC, vs.block_version DESC, vs.processing_version DESC
   ),
-  vault_market_ids AS (
-      SELECT DISTINCT vu.vault_id, vu.user_id, mp.morpho_market_id
-      FROM vault_users vu
-      JOIN LATERAL (
-          SELECT DISTINCT morpho_market_id
-          FROM morpho_market_position
-          WHERE user_id = vu.user_id
-      ) mp ON true
-  ),
-  -- One row per (vault, market): the latest position of every walked user, summed,
-  -- since several VaultV2 adapters may supply the same market.
+  -- One row per (vault, market): the newest position of every walked user, summed,
+  -- since several VaultV2 adapters may supply the same market. The position cache
+  -- holds exactly one row per (user, market), so a user's rows ARE the set of
+  -- markets it has ever held — a fully exited market is still present, at zero.
   market_allocs AS (
-      SELECT vmi.vault_id,
-             vmi.morpho_market_id,
+      SELECT vu.vault_id,
+             mpc.morpho_market_id,
              ct.id as collateral_token_id,
              ct.symbol as collateral,
-             sum(pos.supply_assets) / power(10, lt.decimals) as vault_supply
-      FROM vault_market_ids vmi
-      JOIN LATERAL (
-          SELECT supply_assets
-          FROM morpho_market_position
-          WHERE user_id = vmi.user_id
-            AND morpho_market_id = vmi.morpho_market_id
-          ORDER BY block_number DESC, block_version DESC, processing_version DESC
-          LIMIT 1
-      ) pos ON true
-      JOIN morpho_market mm ON mm.id = vmi.morpho_market_id
+             sum(mpc.supply_assets) / power(10, lt.decimals) as vault_supply
+      FROM vault_users vu
+      JOIN morpho_market_position_current mpc ON mpc.user_id = vu.user_id
+      JOIN morpho_market mm ON mm.id = mpc.morpho_market_id
       JOIN token ct ON ct.id = mm.collateral_token_id
       JOIN token lt ON lt.id = mm.loan_token_id
-      GROUP BY vmi.vault_id, vmi.morpho_market_id, ct.id, ct.symbol, lt.decimals
+      GROUP BY vu.vault_id, mpc.morpho_market_id, ct.id, ct.symbol, lt.decimals
   ),
   market_states AS (
-      SELECT ms.*
-      FROM (SELECT DISTINCT morpho_market_id FROM market_allocs) ma
-      JOIN LATERAL (
-          SELECT morpho_market_id,
-                 CASE WHEN total_supply_assets > 0
-                     THEN total_borrow_assets::numeric / total_supply_assets::numeric
-                     ELSE 0 END as utilization
-          FROM morpho_market_state
-          WHERE morpho_market_id = ma.morpho_market_id
-          ORDER BY block_number DESC, block_version DESC, processing_version DESC
-          LIMIT 1
-      ) ms ON true
+      SELECT msc.morpho_market_id,
+             CASE WHEN msc.total_supply_assets > 0
+                 THEN msc.total_borrow_assets::numeric / msc.total_supply_assets::numeric
+                 ELSE 0 END as utilization
+      FROM morpho_market_state_current msc
+      WHERE msc.morpho_market_id IN (SELECT morpho_market_id FROM market_allocs)
   ),
   breakdown AS (
       SELECT
@@ -145,20 +127,22 @@ WITH morpho_vaults AS (
   ),
   -- Latest USD price per token from the vault's Morpho Blue protocol_oracle
   -- binding, mirroring the Aave repo's token_prices CTE (same enabled-oracle_asset
-  -- gate + snapshot order). Each row exposes its OWN token's price so amount/price
-  -- stay denominated in the row's symbol, as Aave does.
+  -- gate + snapshot order, same token_price_current source so the ranking runs over
+  -- one row per (oracle, token) rather than the onchain_token_price hypertable).
+  -- Each row exposes its OWN token's price so amount/price stay denominated in the
+  -- row's symbol, as Aave does.
   token_prices AS (
-      SELECT DISTINCT ON (otp.token_id)
-          otp.token_id,
-          otp.price_usd
-      FROM onchain_token_price otp
-      JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
+      SELECT DISTINCT ON (tpc.token_id)
+          tpc.token_id,
+          tpc.price_usd
+      FROM token_price_current tpc
+      JOIN protocol_oracle po ON po.oracle_id = tpc.oracle_id
       JOIN morpho_vault v ON v.id = :backed_asset_id AND po.protocol_id = v.protocol_id
       WHERE EXISTS (
           SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
-          WHERE oa.oracle_id = otp.oracle_id AND oa.token_id = otp.token_id AND oa.enabled
+          WHERE oa.oracle_id = tpc.oracle_id AND oa.token_id = tpc.token_id AND oa.enabled
       )
-      ORDER BY otp.token_id, otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC, otp.oracle_id DESC
+      ORDER BY tpc.token_id, tpc.block_number DESC, tpc.block_version DESC, tpc.processing_version DESC, tpc.oracle_id DESC
   ),
   -- The vault's loan token converts every (loan-token-denominated) backing amount
   -- to USD, so it is pulled out separately as the scaling factor for backed_amount.
