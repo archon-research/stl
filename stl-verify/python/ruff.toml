@@ -6,5 +6,5 @@ select = ["E", "F", "I"]
 ignore = []
 
 [lint.per-file-ignores]
-# Vendored axis-synome sources keep upstream's long docstring lines verbatim.
+# Vendored axis-synome docstrings carry long single-line provenance notes.
 "app/risk_engine/_vendored_synome/**" = ["E501"]
