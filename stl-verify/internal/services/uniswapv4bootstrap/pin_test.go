@@ -146,6 +146,9 @@ func TestAssertPinStable_FailsWhenTheHeightNowNamesAnotherBlock(t *testing.T) {
 	if !strings.Contains(err.Error(), forkHash) || !strings.Contains(err.Error(), pinHash) {
 		t.Errorf("error = %v, want it to name both hashes", err)
 	}
+	if !errors.Is(err, ErrPinMoved) {
+		t.Errorf("error = %v, want it to wrap ErrPinMoved so the entry point withholds the resume hint", err)
+	}
 }
 
 func TestAssertPinStable_PropagatesTheReReadFailure(t *testing.T) {

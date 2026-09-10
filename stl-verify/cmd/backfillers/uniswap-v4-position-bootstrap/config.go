@@ -26,11 +26,11 @@ func parseConfig(args []string) (config, error) {
 	chainID := fs.Int64("chain-id", 0, "Chain ID (default: CHAIN_ID, else 1)")
 	fromBlock := fs.Int64("from", 0, "First block to scan (default: FROM_BLOCK, else the lowest pool deploy_block)")
 	pinBlock := fs.Int64("pin", 0, "Block to snapshot at (default: PIN_BLOCK, else head minus the finality depth)")
-	finalityDepth := fs.Int64("finality-depth", 0, fmt.Sprintf("Blocks below the head to pin at (default %d)", uniswapv4bootstrap.DefaultFinalityDepth))
-	initialWindow := fs.Int64("initial-window", 0, fmt.Sprintf("Blocks per eth_getLogs window before adaptation (default %d)", uniswapv4bootstrap.DefaultInitialWindow))
-	minWindow := fs.Int64("min-window", 0, fmt.Sprintf("Smallest window the bisect may narrow to (default %d)", uniswapv4bootstrap.DefaultMinWindow))
-	maxWindow := fs.Int64("max-window", 0, fmt.Sprintf("Largest window the growth may widen to (default %d)", uniswapv4bootstrap.DefaultMaxWindow))
-	positionBatch := fs.Int("position-batch", 0, fmt.Sprintf("Positions per multicall and per write transaction (default %d)", uniswapv4bootstrap.DefaultPositionBatch))
+	finalityDepth := fs.Int64("finality-depth", 0, fmt.Sprintf("Blocks below the head to pin at (default: FINALITY_DEPTH, else %d)", uniswapv4bootstrap.DefaultFinalityDepth))
+	initialWindow := fs.Int64("initial-window", 0, fmt.Sprintf("Blocks per eth_getLogs window before adaptation (default: INITIAL_WINDOW, else %d)", uniswapv4bootstrap.DefaultInitialWindow))
+	minWindow := fs.Int64("min-window", 0, fmt.Sprintf("Smallest window the bisect may narrow to (default: MIN_WINDOW, else %d)", uniswapv4bootstrap.DefaultMinWindow))
+	maxWindow := fs.Int64("max-window", 0, fmt.Sprintf("Largest window the growth may widen to (default: MAX_WINDOW, else %d)", uniswapv4bootstrap.DefaultMaxWindow))
+	positionBatch := fs.Int("position-batch", 0, fmt.Sprintf("Positions per write transaction (default: POSITION_BATCH, else %d)", uniswapv4bootstrap.DefaultPositionBatch))
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -74,11 +74,19 @@ func (c *config) applyEnvFallbacks() error {
 		c.rpcURL = url
 	}
 
-	return errors.Join(
+	var positionBatch = int64(c.bootstrap.PositionBatch)
+	err := errors.Join(
 		fillInt64FromEnv(&c.bootstrap.ChainID, "CHAIN_ID", 1),
 		fillInt64FromEnv(&c.bootstrap.FromBlock, "FROM_BLOCK", 0),
 		fillInt64FromEnv(&c.bootstrap.PinBlock, "PIN_BLOCK", 0),
+		fillInt64FromEnv(&c.bootstrap.FinalityDepth, "FINALITY_DEPTH", 0),
+		fillInt64FromEnv(&c.bootstrap.InitialWindow, "INITIAL_WINDOW", 0),
+		fillInt64FromEnv(&c.bootstrap.MinWindow, "MIN_WINDOW", 0),
+		fillInt64FromEnv(&c.bootstrap.MaxWindow, "MAX_WINDOW", 0),
+		fillInt64FromEnv(&positionBatch, "POSITION_BATCH", 0),
 	)
+	c.bootstrap.PositionBatch = int(positionBatch)
+	return err
 }
 
 // A flag always wins over the environment.

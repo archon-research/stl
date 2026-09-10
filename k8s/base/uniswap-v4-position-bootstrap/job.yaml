@@ -30,7 +30,7 @@ spec:
               cpu: "100m"
               memory: "128Mi"
             limits:
-              # Peak memory is one window's logs plus one 500-position multicall
-              # batch, so it is bounded by the widest window, not by history.
+              # Peak memory is the distinct position keys plus one window's logs
+              # plus one multicall batch: ~70 B per key, so ~10^6 keys fit.
               cpu: "1000m"
               memory: "512Mi"

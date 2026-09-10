@@ -1871,8 +1871,9 @@ kubectl -n vector delete job uniswap-v4-position-bootstrap
 
 The Job reuses the indexer's ConfigMap, Secret and ServiceAccount, so
 `DATABASE_URL`, `ALCHEMY_API_KEY`, `ALCHEMY_HTTP_URL` and `CHAIN_ID` come from
-there. To override the pin or the scan start, add `PIN_BLOCK` / `FROM_BLOCK` to
-the container's `env:` (the flags `-pin` / `-from` read the same values).
+there. Every flag has an env twin for the Job's `env:`: `PIN_BLOCK`,
+`FROM_BLOCK`, `FINALITY_DEPTH`, `INITIAL_WINDOW`, `MIN_WINDOW`, `MAX_WINDOW`,
+`POSITION_BATCH` (a flag wins over its env var; `0` means "use the default").
 
 - **Pin semantics.** The whole run snapshots one block: `head - 64` by default
   (two epochs, comfortably past finalisation), overridable with `-pin`. One
@@ -1894,6 +1895,15 @@ the container's `env:` (the flags `-pin` / `-from` read the same values).
   or from its `starting uniswap-v4 position bootstrap` log line. A bare rerun re-derives a
   fresh `head - 64` and would stitch one snapshot across two heights. Batches
   already committed stay, and the resumed run re-reads them without appending.
+  A run that fails with `pinned block … is … now` does not carry the hint: the
+  height was reorged past the finality depth, and the answer is a fresh pin.
+- **Known edge: a pinned height the watcher saw reorged.** Rows carry
+  `block_version = 0`. If the live indexer holds a `block_version = 1` row at
+  the pinned height for a position touched in that block, the bootstrap's
+  version-0 row (canonical values) is appended anyway, because the writer treats
+  a version difference at the same height as a change, and a rerun with the
+  same `-pin` appends it again. State-at-height answers are unaffected (the
+  canonical version ranks above); pick a fresh pin, the default, to avoid it.
 
 **Tables:** `uniswap_v4_pool_state`, `uniswap_v4_swap`,
 `uniswap_v4_liquidity_event`, `uniswap_v4_tick`, `uniswap_v4_pool_event`,

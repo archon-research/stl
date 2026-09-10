@@ -13,6 +13,9 @@ func setRequiredEnv(t *testing.T) {
 	t.Setenv("CHAIN_ID", "")
 	t.Setenv("FROM_BLOCK", "")
 	t.Setenv("PIN_BLOCK", "")
+	for _, key := range []string{"FINALITY_DEPTH", "INITIAL_WINDOW", "MIN_WINDOW", "MAX_WINDOW", "POSITION_BATCH"} {
+		t.Setenv(key, "")
+	}
 }
 
 func TestParseConfig_DefaultsToMainnetAlchemyAndChainOne(t *testing.T) {
@@ -108,6 +111,27 @@ func TestParseConfig_ReadsTheBlockOverridesFromTheEnvironment(t *testing.T) {
 	}
 }
 
+func TestParseConfig_ReadsTheScanKnobsFromTheEnvironment(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("FINALITY_DEPTH", "128")
+	t.Setenv("INITIAL_WINDOW", "20000")
+	t.Setenv("MIN_WINDOW", "10")
+	t.Setenv("MAX_WINDOW", "50000")
+	t.Setenv("POSITION_BATCH", "42")
+
+	cfg, err := parseConfig([]string{"-min-window", "5"})
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	got := cfg.bootstrap
+	if got.FinalityDepth != 128 || got.InitialWindow != 20000 || got.MaxWindow != 50000 || got.PositionBatch != 42 {
+		t.Errorf("bootstrap config = %+v, want the env knobs", got)
+	}
+	if got.MinWindow != 5 {
+		t.Errorf("MinWindow = %d, want the flag (5) to win over MIN_WINDOW", got.MinWindow)
+	}
+}
+
 func TestParseConfig_RejectsAnIncompleteOrUnparseableEnvironment(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -120,6 +144,8 @@ func TestParseConfig_RejectsAnIncompleteOrUnparseableEnvironment(t *testing.T) {
 		{"unparseable chain id", map[string]string{"CHAIN_ID": "abc"}, nil, "CHAIN_ID"},
 		{"unparseable from block", map[string]string{"FROM_BLOCK": "abc"}, nil, "FROM_BLOCK"},
 		{"unparseable pin block", map[string]string{"PIN_BLOCK": "abc"}, nil, "PIN_BLOCK"},
+		{"unparseable position batch", map[string]string{"POSITION_BATCH": "abc"}, nil, "POSITION_BATCH"},
+		{"invalid env window", map[string]string{"MAX_WINDOW": "1", "INITIAL_WINDOW": "10"}, nil, "initialWindow"},
 		{"invalid bootstrap config", nil, []string{"-position-batch", "-1"}, "positionBatch"},
 		{"unknown flag", nil, []string{"-nope"}, "nope"},
 	}

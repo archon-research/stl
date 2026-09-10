@@ -2,6 +2,7 @@ package uniswapv4bootstrap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -11,6 +12,10 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
+
+// ErrPinMoved: the pinned height names another hash than it did at the start,
+// so the run must start over on a fresh pin rather than resume this one.
+var ErrPinMoved = errors.New("pinned block is no longer canonical")
 
 type pinnedBlock struct {
 	number int64
@@ -94,8 +99,8 @@ func assertPinStable(ctx context.Context, client outbound.LogScanClient, pin pin
 		return err
 	}
 	if current.hash != pin.hash {
-		return fmt.Errorf("pinned block %d was %s at the start of the scan and is %s now: the chain reorged past the finality depth, re-run against a fresh pin",
-			pin.number, pin.hash, current.hash)
+		return fmt.Errorf("pinned block %d was %s at the start of the scan and is %s now: the chain reorged past the finality depth, re-run against a fresh pin: %w",
+			pin.number, pin.hash, current.hash, ErrPinMoved)
 	}
 	return nil
 }

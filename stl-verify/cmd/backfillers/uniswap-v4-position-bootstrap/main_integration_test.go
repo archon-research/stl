@@ -70,7 +70,10 @@ type mockChainOptions struct {
 func startMockChain(t *testing.T, opts mockChainOptions) *httptest.Server {
 	t.Helper()
 	chainID := opts.chainID
-	if chainID == "" && !opts.chainIDFails() {
+	switch {
+	case opts.chainIDFails():
+		chainID = ""
+	case chainID == "":
 		chainID = "0x1"
 	}
 	chain := &mockChain{t: t, getLogsRefusals: opts.refusals, chainID: chainID, getLogsFatal: opts.getLogsFatal}

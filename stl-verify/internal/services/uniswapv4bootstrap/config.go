@@ -11,7 +11,8 @@ const (
 	DefaultInitialWindow = int64(500_000)
 	DefaultMinWindow     = int64(1)
 	DefaultMaxWindow     = int64(1_000_000)
-	// The getPositionInfo multicall cap, so one persisted batch is one round trip.
+	// The getPositionInfo multicall cap, so the default batch is one round trip;
+	// a larger batch is one transaction over several multicalls.
 	DefaultPositionBatch = 500
 )
 

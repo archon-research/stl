@@ -4,11 +4,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -24,6 +26,10 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/uniswapv4bootstrap"
 	"github.com/archon-research/stl/stl-verify/internal/services/uniswapv4indexer"
 )
+
+// A wide eth_getLogs window can take longer than the client's default to
+// answer or to refuse; a timeout is retried as transient and then fails the run.
+const logScanTimeout = 60 * time.Second
 
 func main() {
 	if err := runWithSignals(os.Args[1:]); err != nil {
@@ -62,7 +68,7 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("registering build: %w", err)
 	}
 
-	logScan, err := alchemy.NewClient(alchemy.ClientConfig{HTTPURL: cfg.rpcURL, Logger: logger})
+	logScan, err := alchemy.NewClient(alchemy.ClientConfig{HTTPURL: cfg.rpcURL, Timeout: logScanTimeout, Logger: logger})
 	if err != nil {
 		return fmt.Errorf("creating log scan client: %w", err)
 	}
@@ -80,6 +86,10 @@ func run(ctx context.Context, args []string) error {
 
 	summary, err := svc.Run(ctx)
 	if err != nil {
+		logger.Error("uniswap-v4 position bootstrap failed",
+			"chainId", cfg.bootstrap.ChainID, "pinnedBlock", summary.PinnedBlock, "fromBlock", summary.FromBlock,
+			"scanWindows", summary.ScanWindows, "scanLogs", summary.ScanLogs, "keys", summary.Keys,
+			"positionsRead", summary.PositionsRead, "positionsWritten", summary.PositionsWritten, "batches", summary.Batches)
 		return resumableError(summary, err)
 	}
 	logger.Info("uniswap-v4 position bootstrap finished",
@@ -96,7 +106,7 @@ func run(ctx context.Context, args []string) error {
 // A bare rerun re-derives its own head-64 pin, stitching one snapshot across
 // two heights, so a failed run must name the pin to resume it with.
 func resumableError(summary uniswapv4bootstrap.Summary, err error) error {
-	if summary.PinnedBlock == 0 {
+	if summary.PinnedBlock == 0 || errors.Is(err, uniswapv4bootstrap.ErrPinMoved) {
 		return err
 	}
 	return fmt.Errorf("bootstrap pinned at block %d failed; resume this snapshot with -pin %d: %w",

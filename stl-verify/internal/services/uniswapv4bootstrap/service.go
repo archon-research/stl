@@ -88,14 +88,13 @@ func New(deps Deps) (*Service, error) {
 	if err := uniswapv4indexer.ValidatePoolKeys(deps.Pools); err != nil {
 		return nil, err
 	}
-	poolManager, err := uniswapv4indexer.PoolManagerFor(deps.Pools)
-	if err != nil {
-		return nil, err
-	}
-
 	pools := snapshottablePoolsByID(deps.Pools)
 	if len(pools) == 0 {
 		return nil, fmt.Errorf("no registered uniswap v4 pool on chain %d is snapshot_supported: nothing to bootstrap", cfg.ChainID)
+	}
+	poolManager, err := uniswapv4indexer.PoolManagerFor(pools)
+	if err != nil {
+		return nil, err
 	}
 	topic0, err := uniswapv4indexer.ModifyLiquidityTopic0()
 	if err != nil {
@@ -235,17 +234,14 @@ func (s *Service) discoverPositionKeys(ctx context.Context, from, to int64) (map
 		if err != nil {
 			return err
 		}
+		// Merged per window so memory follows the distinct keys, not the log count.
 		for poolID, keys := range windowKeys {
-			found[poolID] = append(found[poolID], keys...)
+			found[poolID] = uniswapv4indexer.MergePositionKeys(found[poolID], keys)
 		}
 		return nil
 	})
 	if err != nil {
 		return nil, stats, err
-	}
-
-	for poolID, keys := range found {
-		found[poolID] = uniswapv4indexer.MergePositionKeys(keys, nil)
 	}
 	s.logger.Info("uniswap-v4 position discovery complete",
 		"chainId", s.cfg.ChainID, "fromBlock", from, "toBlock", to,
