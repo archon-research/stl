@@ -96,12 +96,12 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 		return nil, err
 	}
 
-	tickRows, err := counter(".tick.rows.written", "Total per-tick rows offered to the append-on-change writer")
+	tickRows, err := counter(".tick.rows.written", "Total per-tick rows the append-on-change writer persisted")
 	if err != nil {
 		return nil, err
 	}
 
-	positionRows, err := counter(".position.rows.written", "Total per-position rows offered to the append-on-change writer")
+	positionRows, err := counter(".position.rows.written", "Total per-position rows the append-on-change writer persisted")
 	if err != nil {
 		return nil, err
 	}
@@ -211,9 +211,9 @@ func (t *Telemetry) RecordPoolsNeverIndexed(ctx context.Context, n int) {
 	t.poolsNeverIndexed.Record(ctx, int64(n), metric.WithAttributes(t.chainAttr))
 }
 
-// RecordTickRows counts the rows a committed block OFFERED to the
-// append-on-change writer: an upper bound, since the writer drops any whose
-// state is unchanged. Over-counting only makes the growth alert fire early.
+// RecordTickRows and RecordPositionRows count the rows a committed block's
+// append-on-change writers persisted; the unchanged rows they drop are not
+// counted. Zero is a no-op, as for RecordStateRows.
 func (t *Telemetry) RecordTickRows(ctx context.Context, n int) {
 	if t == nil || n <= 0 {
 		return
