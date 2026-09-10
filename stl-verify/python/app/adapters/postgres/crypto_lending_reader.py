@@ -224,7 +224,8 @@ class PostgresCryptoLendingReader:
         normalized = _normalize_protocol_name(info.protocol_name)
 
         if normalized in _AAVE_LIKE:
-            return await self._aave_liq_repo.get_params(info.protocol_id, token_ids)
+            params = await self._aave_liq_repo.get_params(info.protocol_id)
+            return {tid: params[tid] for tid in token_ids if tid in params}
 
         if normalized in _MORPHO:
             return await self._morpho_liq_repo.get_params(backed_asset_id, token_ids)
@@ -238,6 +239,30 @@ class PostgresCryptoLendingReader:
             return {}
 
         raise ValueError(f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})")
+
+    async def batch_get_liquidation_params(
+        self, infos: Sequence[ReceiptTokenInfo]
+    ) -> dict[int, Mapping[int, LiquidationParams]]:
+        """Read each aave-like protocol's liquidation params once, for every receipt token of it.
+
+        The params are protocol-level config, so one read serves every allocation
+        of that protocol in a request; ``get_liquidation_params`` would run it once
+        per allocation. Distinct protocols are read concurrently.
+        """
+        aave_by_protocol: dict[int, list[ReceiptTokenInfo]] = {}
+        for info in infos:
+            if _normalize_protocol_name(info.protocol_name) in _AAVE_LIKE:
+                aave_by_protocol.setdefault(info.protocol_id, []).append(info)
+        if not aave_by_protocol:
+            return {}
+
+        protocol_ids = list(aave_by_protocol)
+        per_protocol = await asyncio.gather(*(self._aave_liq_repo.get_params(pid) for pid in protocol_ids))
+        return {
+            info.receipt_token_id: params
+            for protocol_id, params in zip(protocol_ids, per_protocol)
+            for info in aave_by_protocol[protocol_id]
+        }
 
     async def get_share(self, info: ReceiptTokenInfo, prime_id: EthAddress) -> Decimal:
         normalized = _normalize_protocol_name(info.protocol_name)

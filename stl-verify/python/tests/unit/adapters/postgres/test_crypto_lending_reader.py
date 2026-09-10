@@ -259,8 +259,31 @@ async def test_get_liquidation_params_uses_aave_like_repository(
 
     result = await reader.get_liquidation_params(info, backed_asset_id=42, token_ids=[1, 2])
 
-    aave_liq_repo.get_params.assert_awaited_once_with(info.protocol_id, [1, 2])
-    assert result == aave_liq_repo.get_params.return_value
+    # The repository read is protocol-wide; the reader slices it to the caller's tokens.
+    aave_liq_repo.get_params.assert_awaited_once_with(info.protocol_id)
+    assert result == {1: aave_liq_repo.get_params.return_value[1]}
+
+
+@pytest.mark.asyncio
+async def test_batch_get_liquidation_params_reads_each_aave_protocol_once(
+    reader: PostgresCryptoLendingReader,
+    aave_liq_repo: MagicMock,
+) -> None:
+    """One protocol-wide read per aave-like protocol, shared by its receipt tokens; Morpho absent."""
+    by_protocol = {
+        1: {1: LiquidationParams(1, Decimal("0.8"), Decimal("1.05"))},
+        3: {2: LiquidationParams(2, Decimal("0.7"), Decimal("1.10"))},
+    }
+    aave_liq_repo.get_params = AsyncMock(side_effect=lambda protocol_id: by_protocol[protocol_id])
+    first = _aave_like_info()
+    second = replace(first, receipt_token_id=100)
+    other_protocol = replace(first, receipt_token_id=101, protocol_id=3)
+
+    result = await reader.batch_get_liquidation_params([first, second, other_protocol, _morpho_info()])
+
+    assert aave_liq_repo.get_params.await_count == 2
+    assert {call.args[0] for call in aave_liq_repo.get_params.await_args_list} == {1, 3}
+    assert result == {99: by_protocol[1], 100: by_protocol[1], 101: by_protocol[3]}
 
 
 @pytest.mark.asyncio

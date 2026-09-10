@@ -5,6 +5,7 @@ database keeps the scenarios independent of each other and of ordering.
 """
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import asyncpg
@@ -14,6 +15,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
 from app.adapters.postgres.reference_as_of import utc_now
+from tests.integration.conftest import MIGRATIONS_DIR
 from tests.integration.seed import (
     ORACLE_ASSET_RETIRED_FROM,
     bind_protocol_oracle,
@@ -290,6 +292,214 @@ async def test_correction_lands_over_a_backfilled_null_version_row(conn: asyncpg
     assert row is not None
     assert row["usage_as_collateral_enabled"] is False
     assert row["processing_version"] == 0
+
+
+# A full sparklend_reserve_data payload: one distinct numeric per column, and the
+# four flags as parameters, so a copy landing in the wrong column is caught. The
+# widening tests below share it.
+_FULL_RESERVE_ROW_SQL = """
+INSERT INTO sparklend_reserve_data
+    (protocol_id, token_id, block_number, block_version, usage_as_collateral_enabled,
+     unbacked, accrued_to_treasury_scaled, total_a_token, total_stable_debt,
+     total_variable_debt, liquidity_rate, variable_borrow_rate, stable_borrow_rate,
+     average_stable_borrow_rate, liquidity_index, variable_borrow_index,
+     last_update_timestamp, decimals, ltv, liquidation_threshold, liquidation_bonus,
+     reserve_factor, borrowing_enabled, stable_borrow_rate_enabled, is_active, is_frozen)
+VALUES ($1, $2, $3, 0, true,
+        1, 2, 3, 4,
+        5, 6, 7, 8,
+        9, 10, 11,
+        1800000000, 18, 7500, 8250, 10500,
+        1000, $4, $5, $6, $7)
+"""
+
+_FLAG_COLUMNS = ("borrowing_enabled", "stable_borrow_rate_enabled", "is_active", "is_frozen")
+# Two complementary flag patterns: every pairwise swap of the four flag columns
+# flips at least one assertion under one of them.
+_FLAG_PATTERNS: list[tuple[bool, ...]] = [(True, False, True, False), (True, True, False, False)]
+
+# What the trigger must have written for _FULL_RESERVE_ROW_SQL: the two guarded
+# canonical casts (last_update_at, decimals) beside the verbatim copies.
+_FULL_RESERVE_ROW_CACHED = {
+    "unbacked": 1,
+    "accrued_to_treasury_scaled": 2,
+    "total_a_token": 3,
+    "total_stable_debt": 4,
+    "total_variable_debt": 5,
+    "liquidity_rate": 6,
+    "variable_borrow_rate": 7,
+    "stable_borrow_rate": 8,
+    "average_stable_borrow_rate": 9,
+    "liquidity_index": 10,
+    "variable_borrow_index": 11,
+    "last_update_at": datetime(2027, 1, 15, 8, 0, tzinfo=UTC),
+    "decimals": 18,
+    "ltv": 7500,
+    "liquidation_threshold": 8250,
+    "liquidation_bonus": 10500,
+    "reserve_factor": 1000,
+}
+
+_PAYLOAD_BACKFILL = MIGRATIONS_DIR / "20260910_130050_backfill_sparklend_reserve_data_current_payload.sql"
+# to_timestamp(1800000000), the in-bounds epoch the full row and the guard cases carry.
+_PLAUSIBLE_EPOCH_AT = datetime(2027, 1, 15, 8, 0, tzinfo=UTC)
+
+
+def _expected_payload(flags: tuple[bool, ...]) -> dict[str, object]:
+    return {**_FULL_RESERVE_ROW_CACHED, **dict(zip(_FLAG_COLUMNS, flags))}
+
+
+async def _cached_reserve(conn: asyncpg.Connection, protocol_id: int, token_id: int) -> asyncpg.Record:
+    row = await conn.fetchrow(
+        "SELECT * FROM sparklend_reserve_data_current WHERE protocol_id = $1 AND token_id = $2",
+        protocol_id,
+        token_id,
+    )
+    assert row is not None
+    return row
+
+
+@pytest.mark.asyncio(loop_scope="module")
+@pytest.mark.parametrize("flags", _FLAG_PATTERNS, ids=["tftf", "ttff"])
+async def test_reserve_trigger_propagates_the_whole_row(conn: asyncpg.Connection, flags: tuple[bool, ...]) -> None:
+    """The cache carries the source row's full payload, not just the collateral flag.
+
+    Every sparklend_reserve_data column is cached so a new reader needs no
+    migration; last_update_at and decimals arrive as their canonical casts.
+    """
+    seed = 0xB3 + 2 * _FLAG_PATTERNS.index(flags)
+    protocol_id = await insert_protocol(conn, f"curWide{seed:x}", bytes([seed]) * 20)
+    token_id = await insert_token(conn, f"CURWIDE{seed:x}", 18, bytes([seed + 1]) * 20)
+
+    await conn.execute(_FULL_RESERVE_ROW_SQL, protocol_id, token_id, _BLOCK, *flags)
+
+    row = await _cached_reserve(conn, protocol_id, token_id)
+    expected = _expected_payload(flags)
+    assert {column: row[column] for column in expected} == expected
+
+
+@pytest.mark.asyncio(loop_scope="module")
+@pytest.mark.parametrize(
+    ("last_update_timestamp", "decimals", "cached_last_update_at", "cached_decimals", "seed"),
+    [
+        pytest.param(-62135596800, 18, None, 18, 0xB7, id="epoch outside the plausibility bounds"),
+        pytest.param(1800000000, 100000, _PLAUSIBLE_EPOCH_AT, None, 0xB9, id="decimals above uint8"),
+        pytest.param(1800000000, Decimal("18.5"), _PLAUSIBLE_EPOCH_AT, None, 0xBB, id="fractional decimals"),
+    ],
+)
+async def test_implausible_reserve_values_cache_as_null_without_aborting_ingest(
+    conn: asyncpg.Connection,
+    last_update_timestamp: int,
+    decimals: object,
+    cached_last_update_at: datetime | None,
+    cached_decimals: int | None,
+    seed: int,
+) -> None:
+    """A source value the canonical cast cannot represent caches as NULL, and the insert lands.
+
+    The history column's COMMENT records that some epochs are corrupt (some
+    negative), and nothing constrains decimals to a uint8; an unguarded cast inside
+    the trigger would raise (or, for a fraction, round) and abort the history insert.
+    """
+    protocol_id = await insert_protocol(conn, f"curGuard{seed:x}", bytes([seed]) * 20)
+    token_id = await insert_token(conn, f"CURGUARD{seed:x}", 18, bytes([seed + 1]) * 20)
+
+    await conn.execute(
+        """
+        INSERT INTO sparklend_reserve_data
+            (protocol_id, token_id, block_number, block_version, usage_as_collateral_enabled,
+             last_update_timestamp, decimals)
+        VALUES ($1, $2, $3, 0, true, $4, $5)
+        """,
+        protocol_id,
+        token_id,
+        _BLOCK,
+        last_update_timestamp,
+        decimals,
+    )
+
+    row = await _cached_reserve(conn, protocol_id, token_id)
+    assert row["block_number"] == _BLOCK
+    assert row["last_update_at"] == cached_last_update_at
+    assert row["decimals"] == cached_decimals
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_payload_backfill_fills_a_cache_row_left_behind_by_the_widening(conn: asyncpg.Connection) -> None:
+    """20260910_130050 fills the payload of a row that predates the widening.
+
+    On a fresh database the migrator's own run of that file matches nothing (the
+    cache is empty when it runs), so this is the only exercise of the statement
+    that fills the 21 new columns for every production row. The pre-widening shape
+    is reproduced by NULLing the payload the trigger just wrote, then the real
+    migration file is executed against it.
+    """
+    protocol_id = await insert_protocol(conn, "curBackfill", b"\xc1" * 20)
+    token_id = await insert_token(conn, "CURBACKFILL", 18, b"\xc2" * 20)
+    flags = _FLAG_PATTERNS[0]
+    await conn.execute(_FULL_RESERVE_ROW_SQL, protocol_id, token_id, _BLOCK, *flags)
+
+    expected = _expected_payload(flags)
+    payload = ", ".join(f"{column} = NULL" for column in expected)
+    await conn.execute(
+        f"UPDATE sparklend_reserve_data_current SET {payload} WHERE protocol_id = $1 AND token_id = $2",  # noqa: S608
+        protocol_id,
+        token_id,
+    )
+    before = await _cached_reserve(conn, protocol_id, token_id)
+    assert all(before[column] is None for column in expected)
+
+    await conn.execute(_PAYLOAD_BACKFILL.read_text())
+
+    row = await _cached_reserve(conn, protocol_id, token_id)
+    assert {column: row[column] for column in expected} == expected
+    assert (row["block_number"], row["block_version"], row["processing_version"]) == (_BLOCK, 0, 0)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_payload_backfill_repairs_a_key_missing_from_the_cache(conn: asyncpg.Connection) -> None:
+    """The same statement is the rebuild: a key history has but the cache lacks is inserted whole."""
+    protocol_id = await insert_protocol(conn, "curRepair", b"\xc3" * 20)
+    token_id = await insert_token(conn, "CURREPAIR", 18, b"\xc4" * 20)
+    flags = _FLAG_PATTERNS[1]
+    await conn.execute(_FULL_RESERVE_ROW_SQL, protocol_id, token_id, _BLOCK, *flags)
+    await conn.execute(
+        "DELETE FROM sparklend_reserve_data_current WHERE protocol_id = $1 AND token_id = $2", protocol_id, token_id
+    )
+
+    await conn.execute(_PAYLOAD_BACKFILL.read_text())
+
+    row = await _cached_reserve(conn, protocol_id, token_id)
+    expected = _expected_payload(flags)
+    assert {column: row[column] for column in expected} == expected
+    assert (row["block_number"], row["block_version"], row["processing_version"]) == (_BLOCK, 0, 0)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_payload_backfill_never_lowers_a_cache_row_ahead_of_history(conn: asyncpg.Connection) -> None:
+    """The backfill's `>=` guard converges the equal case and refuses to lower a newer row.
+
+    A cache row ahead of the newest readable history row (a reserve whose newest
+    history row is not visible to the scan) keeps its version tuple, and its
+    payload is not overwritten from the older history row either.
+    """
+    protocol_id = await insert_protocol(conn, "curAhead", b"\xc5" * 20)
+    token_id = await insert_token(conn, "CURAHEAD", 18, b"\xc6" * 20)
+    await conn.execute(_FULL_RESERVE_ROW_SQL, protocol_id, token_id, _BLOCK, *_FLAG_PATTERNS[0])
+
+    await conn.execute(
+        "UPDATE sparklend_reserve_data_current SET block_number = $3, ltv = NULL "
+        "WHERE protocol_id = $1 AND token_id = $2",
+        protocol_id,
+        token_id,
+        _BLOCK + 5,
+    )
+
+    await conn.execute(_PAYLOAD_BACKFILL.read_text())
+
+    row = await _cached_reserve(conn, protocol_id, token_id)
+    assert row["block_number"] == _BLOCK + 5
+    assert row["ltv"] is None
 
 
 @pytest.mark.asyncio(loop_scope="module")

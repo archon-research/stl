@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from app.adapters.postgres.aave_like_liquidation_params_repository import (
     AaveLikeLiquidationParamsRepository,
 )
-from tests.integration.seed import store_test_ids
+from tests.integration.seed import insert_protocol, insert_token, store_test_ids
 
 
 async def _insert_reserve_with_liq_params(
@@ -20,6 +20,7 @@ async def _insert_reserve_with_liq_params(
     *,
     liquidation_threshold_bps: int,
     liquidation_bonus_bps: int,
+    collateral_enabled: bool = True,
 ) -> None:
     await conn.execute(
         """
@@ -27,7 +28,7 @@ async def _insert_reserve_with_liq_params(
             (protocol_id, token_id, block_number, block_version,
              usage_as_collateral_enabled, ltv,
              liquidation_threshold, liquidation_bonus)
-        VALUES ($1, $2, $3, 0, true, $4, $5, $6)
+        VALUES ($1, $2, $3, 0, $7, $4, $5, $6)
         """,
         protocol_id,
         token_id,
@@ -35,6 +36,7 @@ async def _insert_reserve_with_liq_params(
         Decimal("8000"),
         Decimal(liquidation_threshold_bps),
         Decimal(liquidation_bonus_bps),
+        collateral_enabled,
     )
 
 
@@ -88,10 +90,7 @@ async def repository(async_db_url: str, _seed_data: None, test_ids: dict[str, in
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_returns_normalised_params_for_known_tokens(repository, test_ids: dict[str, int]) -> None:
-    result = await repository.get_params(
-        protocol_id=test_ids["protocol_id"],
-        token_ids=[test_ids["weth_id"], test_ids["cbbtc_id"]],
-    )
+    result = await repository.get_params(protocol_id=test_ids["protocol_id"])
 
     assert test_ids["weth_id"] in result
     assert test_ids["cbbtc_id"] in result
@@ -106,12 +105,58 @@ async def test_returns_normalised_params_for_known_tokens(repository, test_ids: 
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_missing_token_absent_from_result(repository, test_ids: dict[str, int]) -> None:
-    result = await repository.get_params(protocol_id=test_ids["protocol_id"], token_ids=[99999])
-    assert 99999 not in result
+async def test_another_protocols_reserves_are_not_returned(repository, db_url: str, test_ids: dict[str, int]) -> None:
+    """The read is protocol-scoped, so a same-token reserve elsewhere must not leak in."""
+    conn = await asyncpg.connect(db_url)
+    try:
+        other_protocol_id = await insert_protocol(conn, "liqOther", b"\xd4" * 20)
+        await _insert_reserve_with_liq_params(
+            conn,
+            other_protocol_id,
+            test_ids["weth_id"],
+            20_000_001,
+            liquidation_threshold_bps=6000,
+            liquidation_bonus_bps=12000,
+        )
+    finally:
+        await conn.close()
+
+    result = await repository.get_params(protocol_id=test_ids["protocol_id"])
+
+    assert set(result) == {test_ids["weth_id"], test_ids["cbbtc_id"]}
+    assert result[test_ids["weth_id"]].liquidation_threshold == Decimal("0.825")
+    assert result[test_ids["weth_id"]].liquidation_bonus == Decimal("1.05")
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_empty_token_ids_returns_empty_dict(repository, test_ids: dict[str, int]) -> None:
-    result = await repository.get_params(protocol_id=test_ids["protocol_id"], token_ids=[])
-    assert result == {}
+async def test_reserve_disabled_as_collateral_drops_out(repository, db_url: str) -> None:
+    """A reserve the protocol has since stopped accepting as collateral is not returned.
+
+    The collateral filter applies to the newest row per reserve, as in the
+    backed-breakdown read: an older, still-enabled row does not keep the reserve
+    in. Seeds its own protocol and tokens, so the module seed stays untouched.
+    """
+    conn = await asyncpg.connect(db_url)
+    try:
+        protocol_id = await insert_protocol(conn, "liqDisabled", b"\xd1" * 20)
+        kept_id = await insert_token(conn, "LIQKEPT", 18, b"\xd2" * 20)
+        disabled_id = await insert_token(conn, "LIQDISABLED", 18, b"\xd3" * 20)
+        for token_id in (kept_id, disabled_id):
+            await _insert_reserve_with_liq_params(
+                conn, protocol_id, token_id, 20_000_000, liquidation_threshold_bps=7000, liquidation_bonus_bps=11000
+            )
+        await _insert_reserve_with_liq_params(
+            conn,
+            protocol_id,
+            disabled_id,
+            20_000_001,
+            liquidation_threshold_bps=7000,
+            liquidation_bonus_bps=11000,
+            collateral_enabled=False,
+        )
+    finally:
+        await conn.close()
+
+    result = await repository.get_params(protocol_id=protocol_id)
+
+    assert set(result) == {kept_id}
