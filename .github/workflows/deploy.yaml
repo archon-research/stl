@@ -149,8 +149,6 @@ jobs:
       # its exit code — it reports whether it could compare, never what the
       # deploy should do.
       #
-      # --weekly-refresh is deliberately not passed: "ran on a Monday" is not the
-      # same event as "first deploy after the refresh" (see ADR-0007).
       - name: Compare built layers against the running images (log only)
         continue-on-error: true
         env:
