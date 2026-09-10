@@ -1,12 +1,16 @@
 {
   "$schema": "https://unpkg.com/knip@6.32.2/schema.json",
-  "ignoreBinaries": ["make"],
+  "ignoreBinaries": [
+    "make"
+  ],
   "ignoreDependencies": [
     "oxlint-tsgolint",
     "@pandacss/preset-base",
     "@pandacss/preset-panda"
   ],
-  "tags": ["-knipignore"],
+  "tags": [
+    "-knipignore"
+  ],
   "workspaces": {
     ".": {
       "entry": [],
@@ -15,17 +19,27 @@
     "ui": {
       "entry": [
         "index.html",
+        "src/curation/main.tsx",
         "scripts/*.ts",
         "env.ts",
         "oxlint.config.ts",
         ".oxfmtrc.ts",
         "src/features/allocations/MetricsFootnote.tsx"
       ],
-      "project": ["**/*.{ts,tsx,js}", "!src/generated/**"]
+      "project": [
+        "**/*.{ts,tsx,js}",
+        "!src/generated/**"
+      ]
     },
     "mocks": {
-      "entry": ["scripts/*.ts", "oxlint.config.ts", ".oxfmtrc.ts"],
-      "project": ["**/*.ts"]
+      "entry": [
+        "scripts/*.ts",
+        "oxlint.config.ts",
+        ".oxfmtrc.ts"
+      ],
+      "project": [
+        "**/*.ts"
+      ]
     }
   }
 }

@@ -2,16 +2,14 @@
   "extends": "@archon-research/tsconfig/react",
   "compilerOptions": {
     "exactOptionalPropertyTypes": true,
-    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+    "noEmit": true,
     "types": ["vite/client"],
     "jsx": "react-jsx",
-    "composite": true,
     "preserveSymlinks": true,
     "paths": {
       "#src/*": ["./src/*"],
       "#styled-system/*": ["./styled-system/*"]
     }
   },
-  "include": ["src", "styled-system"],
-  "exclude": ["src/curation"]
+  "include": ["src/curation", "src/vite-env.d.ts", "styled-system"]
 }

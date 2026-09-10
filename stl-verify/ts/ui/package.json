@@ -18,7 +18,7 @@
     "prepare": "panda codegen",
     "dev": "node scripts/copy-theme-bootstrap.ts && vite",
     "build": "node scripts/copy-theme-bootstrap.ts && vite build",
-    "type:check": "tsc -b",
+    "type:check": "tsc -b && tsc -p tsconfig.curation.json",
     "format": "uikit-cli format --write \"src/**/*.ts\" \"src/**/*.tsx\" \"src/**/*.css\" \"scripts/**/*.ts\" panda.config.ts vite.config.ts env.ts oxlint.config.ts .oxfmtrc.ts index.html",
     "format:check": "uikit-cli format --check \"src/**/*.ts\" \"src/**/*.tsx\" \"src/**/*.css\" \"scripts/**/*.ts\" panda.config.ts vite.config.ts env.ts oxlint.config.ts .oxfmtrc.ts index.html",
     "preview": "vite preview",
@@ -32,7 +32,9 @@
     "test:unindexed-chains": "node scripts/check-unindexed-chains.ts",
     "generate:openapi-types": "uikit-openapi-generate --schema ./src/generated/openapi-schema.json --output ./src/generated/openapi-types.ts && uikit-cli format --write ./src/generated/openapi-types.ts",
     "lint": "uikit-cli lint -c oxlint.config.ts --type-aware --max-warnings=0 --report-unused-disable-directives src scripts panda.config.ts vite.config.ts env.ts oxlint.config.ts .oxfmtrc.ts",
-    "doctor": "uikit-cli doctor --codegen"
+    "doctor": "uikit-cli doctor --codegen",
+    "dev:curation": "node scripts/copy-theme-bootstrap.ts && vite --open /curation.html",
+    "build:curation": "node scripts/copy-theme-bootstrap.ts && vite build --config vite.curation.config.ts"
   },
   "dependencies": {
     "@archon-research/charting": "0.10.1",
@@ -49,6 +51,7 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@archon-research/http-client-msw": "0.10.1",
     "@archon-research/oxfmt-config": "0.10.1",
     "@archon-research/oxlint-config": "0.10.1",
     "@archon-research/tsconfig": "0.10.1",
