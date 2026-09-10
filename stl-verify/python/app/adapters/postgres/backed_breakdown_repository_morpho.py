@@ -47,12 +47,7 @@ collateral behind it.
 """
 
 _MORPHO_BACKED_BREAKDOWN_SQL = f"""
-WITH morpho_vaults AS (
-      SELECT mv.id as vault_id
-      FROM morpho_vault mv
-      WHERE mv.id = :backed_asset_id
-  ),
-  vault_users AS (
+WITH vault_users AS (
       {MORPHO_VAULT_USERS_SQL}
   ),
   -- vault_states, market_allocs and market_states read the trigger-maintained
@@ -65,8 +60,7 @@ WITH morpho_vaults AS (
              t.id as loan_token_id,
              t.symbol as loan_token
       FROM morpho_vault_state_current vsc
-      JOIN morpho_vaults mv ON mv.vault_id = vsc.morpho_vault_id
-      JOIN morpho_vault v ON v.id = vsc.morpho_vault_id
+      JOIN morpho_vault v ON v.id = vsc.morpho_vault_id AND v.id = :backed_asset_id
       JOIN token t ON t.id = v.asset_token_id
   ),
   -- One row per (vault, market): the newest position of every walked user, summed,

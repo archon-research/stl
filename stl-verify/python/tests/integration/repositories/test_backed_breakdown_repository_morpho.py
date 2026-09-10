@@ -7,9 +7,11 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from app.adapters.postgres import backed_breakdown_repository_morpho as morpho_breakdown
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
 from app.adapters.postgres.reference_as_of import utc_now
 from app.domain.entities.backed_breakdown import BackedBreakdown
+from tests.integration.explain import explain_nodes, hypertable_relations
 from tests.integration.seed import (
     insert_morpho_adapter,
     insert_oracle_asset,
@@ -732,6 +734,45 @@ async def test_fully_exited_market_contributes_no_backing(
         "WETH": Decimal("32.00"),
         "WBTC": Decimal("15.00"),
     }
+
+
+# The four hypertables the pre-VEC-659 query planned per request; each is now
+# reached only through its trigger-maintained *_current cache.
+_MORPHO_BREAKDOWN_HYPERTABLES = [
+    "morpho_vault_state",
+    "morpho_market_state",
+    "morpho_market_position",
+    "onchain_token_price",
+]
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_breakdown_plan_never_touches_a_hypertable(
+    async_db_url: str, repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    """The breakdown must plan no chunk of the Morpho or price histories.
+
+    The value tests above pass whether the query reads the caches or reduces the
+    histories per request; only the plan shape distinguishes them, and the plan is
+    what /risk-capital pays for on every request. Plain EXPLAIN, so the assertion
+    does not depend on the seeded rows beyond the module seed having created at
+    least one chunk per history.
+    """
+    engine = create_async_engine(async_db_url)
+    try:
+        async with engine.connect() as conn:
+            nodes = await explain_nodes(
+                conn,
+                morpho_breakdown._MORPHO_BACKED_BREAKDOWN_SQL,
+                {"backed_asset_id": test_ids["vault_id"], "reference_effective_at": utc_now()},
+            )
+            history_relations = await hypertable_relations(conn, _MORPHO_BREAKDOWN_HYPERTABLES)
+    finally:
+        await engine.dispose()
+
+    assert nodes, "EXPLAIN returned no plan nodes"
+    assert len(history_relations) > len(_MORPHO_BREAKDOWN_HYPERTABLES), "the seed created no chunk to assert against"
+    assert not [node for node in nodes if node.get("Relation Name") in history_relations]
 
 
 async def _assert_single_idle_row(

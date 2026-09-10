@@ -235,24 +235,28 @@ async def test_implausible_market_last_update_caches_as_null_without_aborting_in
     assert row["last_update_at"] is None
 
 
-# The invariant the whole design rests on, one query per cache: each holds exactly
-# "newest row per key" over its history, with the newest-first order the trigger's
-# comparison defines (identity terms, then processing_version). Symmetric EXCEPT so
-# a missing row and a stale row are distinguishable.
+# The invariant the whole design rests on, one query per cache: for a key, the cache
+# row equals "newest row" over that key's history, with the newest-first order the
+# trigger's comparison defines (identity terms, then processing_version). Symmetric
+# EXCEPT so a missing row and a stale row are distinguishable. Scoped to the
+# scenario's own key, so the assertion never reaches another scenario's rows.
 _NEWEST_PER_KEY = {
-    "morpho_vault_state_current": (
+    "vault_state": (
         """
         SELECT DISTINCT ON (morpho_vault_id)
                morpho_vault_id, total_assets, total_shares, "timestamp",
                block_number, block_version, processing_version
         FROM morpho_vault_state
+        WHERE morpho_vault_id = $1
         ORDER BY morpho_vault_id, block_number DESC, block_version DESC, "timestamp" DESC, processing_version DESC""",
         """
         SELECT morpho_vault_id, total_assets, total_shares, block_timestamp,
                block_number, block_version, processing_version
-        FROM morpho_vault_state_current""",
+        FROM morpho_vault_state_current
+        WHERE morpho_vault_id = $1""",
+        ("morpho_vault_id",),
     ),
-    "morpho_market_state_current": (
+    "market_state": (
         """
         SELECT DISTINCT ON (morpho_market_id)
                morpho_market_id, total_supply_assets, total_supply_shares, total_borrow_assets,
@@ -261,55 +265,54 @@ _NEWEST_PER_KEY = {
                fee, "timestamp",
                block_number, block_version, processing_version
         FROM morpho_market_state
+        WHERE morpho_market_id = $1
         ORDER BY morpho_market_id, block_number DESC, block_version DESC, "timestamp" DESC, processing_version DESC""",
         """
         SELECT morpho_market_id, total_supply_assets, total_supply_shares, total_borrow_assets,
                total_borrow_shares, last_update_at, fee, block_timestamp,
                block_number, block_version, processing_version
-        FROM morpho_market_state_current""",
+        FROM morpho_market_state_current
+        WHERE morpho_market_id = $1""",
+        ("morpho_market_id",),
     ),
-    "morpho_market_position_current": (
+    "market_position": (
         """
         SELECT DISTINCT ON (user_id, morpho_market_id)
                user_id, morpho_market_id, supply_shares, borrow_shares, collateral,
                supply_assets, borrow_assets, "timestamp",
                block_number, block_version, processing_version
         FROM morpho_market_position
+        WHERE user_id = $1 AND morpho_market_id = $2
         ORDER BY user_id, morpho_market_id,
                  block_number DESC, block_version DESC, "timestamp" DESC, processing_version DESC""",
         """
         SELECT user_id, morpho_market_id, supply_shares, borrow_shares, collateral,
                supply_assets, borrow_assets, block_timestamp,
                block_number, block_version, processing_version
-        FROM morpho_market_position_current""",
+        FROM morpho_market_position_current
+        WHERE user_id = $1 AND morpho_market_id = $2""",
+        ("user_id", "morpho_market_id"),
     ),
 }
 
 
 @pytest.mark.asyncio(loop_scope="module")
-@pytest.mark.parametrize(
-    ("cache_table", "seed"),
-    [
-        ("morpho_vault_state_current", 0xA1),
-        ("morpho_market_state_current", 0xB1),
-        ("morpho_market_position_current", 0xC1),
-    ],
-)
+@pytest.mark.parametrize(("history", "seed"), [(history, seed + 0x90) for history, seed in _HISTORIES])
 async def test_cache_equals_newest_row_per_key_over_the_history(
-    conn: asyncpg.Connection, cache_table: str, seed: int
+    conn: asyncpg.Connection, history: str, seed: int
 ) -> None:
-    """Each cache equals the DISTINCT ON the breakdown query used to compute per request."""
+    """Each cache row equals the DISTINCT ON the breakdown query used to compute per request."""
     keys = await _seed_morpho_keys(conn, f"Inv{seed:x}", seed)
-    for history in _CACHES:
-        for block, value in ((_BLOCK, 10), (_BLOCK + 2, 30), (_BLOCK + 1, 20)):
-            await _insert_history(conn, history, keys, value=value, block=block)
+    for block, value in ((_BLOCK, 10), (_BLOCK + 2, 30), (_BLOCK + 1, 20)):
+        await _insert_history(conn, history, keys, value=value, block=block)
 
-    newest, cached = _NEWEST_PER_KEY[cache_table]
+    newest, cached, key_columns = _NEWEST_PER_KEY[history]
     missing, stale = await conn.fetchrow(
         f"""
         WITH newest AS ({newest}), cached AS ({cached})
         SELECT (SELECT count(*) FROM (TABLE newest EXCEPT TABLE cached) a),
                (SELECT count(*) FROM (TABLE cached EXCEPT TABLE newest) b)
-        """  # noqa: S608
+        """,  # noqa: S608
+        *(keys[column] for column in key_columns),
     )
     assert (missing, stale) == (0, 0)

@@ -57,7 +57,6 @@ async def engine(async_db_url: str):
         # The trigger-fed cache carries no FK, so the CASCADE above never
         # reaches it; a leaked row would resurrect a truncated market's borrower.
         await conn.execute(text("TRUNCATE morpho_market_position_current"))
-        await conn.execute(text("TRUNCATE morpho_market_state_current"))
     yield eng
     await eng.dispose()
 

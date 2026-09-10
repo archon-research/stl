@@ -29,9 +29,9 @@
 -- Unix-epoch bigint only through a declared cast transform with plausibility
 -- bounds 1500000000..4100000000, and the guard is applied here with the cast so an
 -- implausible epoch caches as NULL instead of raising inside the trigger and
--- aborting the history insert (the shape 20260910_130000 uses for
--- sparklend_reserve_data.last_update_timestamp). It is the one NULL-able payload
--- column for that reason.
+-- aborting the history insert (the CASE 20260706_140000_create_transformed_bucket1
+-- applies for the same transform; the bounds are the register's guard_min /
+-- guard_max). It is the one NULL-able payload column for that reason.
 --
 -- NEWER-WINS. The new row wins iff
 --   (block_number, block_version, block_timestamp, processing_version)
@@ -44,13 +44,16 @@
 -- each history's PK for a single cache key. processing_version is a PK column on
 -- both histories, so it is never NULL and no sentinel is needed.
 --
--- Deadlock-freedom: as 20260909_150000 states for the position cache. The live
--- writers are the per-chain morpho-indexer workers (one SQS consumer each), whose
--- keys never overlap across chains (a vault and a market belong to one chain), so
--- concurrent multi-row transactions cannot visit the same cache rows in opposite
--- orders. A replay/backfill overlapping the live consumer of the SAME chain writes
--- one block per transaction in block order; the newer-wins guard makes either
--- arrival order converge.
+-- Deadlock-freedom rests on one invariant: every writer of these histories opens
+-- one transaction per EVENT (morpho_blue_handler and metamorpho_handler wrap each
+-- handled log in WithTransaction; morpho-vault-backfill replays one log per call),
+-- so a transaction touches at most one row of each cache and two transactions can
+-- never take these row locks in opposite orders. That is the invariant to preserve:
+-- ON CONFLICT DO UPDATE locks the existing row even when its WHERE is false, so a
+-- writer that ever batches several markets or vaults into one transaction must
+-- insert them in key order first. Across chains the keys are disjoint (a vault and
+-- a market belong to one chain), and the newer-wins guard makes either arrival
+-- order of a replay beside the live consumer converge.
 --
 -- No FK columns, matching the sibling caches: test fixtures that TRUNCATE a history
 -- must TRUNCATE its cache alongside it (CASCADE will not reach it).
