@@ -259,6 +259,14 @@ func setWorkerEnv(t *testing.T, chainID, rpcURL string) {
 	t.Setenv("BUILD_GIT_HASH", "test")
 }
 
+// setBaseWorkerEnv moves the worker to chain 8453 with the depth mainnet would
+// have defaulted, so the refusal under test is the one that fails.
+func setBaseWorkerEnv(t *testing.T, rpcURL string) {
+	t.Helper()
+	setWorkerEnv(t, "8453", rpcURL)
+	t.Setenv("FINALITY_DEPTH", "64")
+}
+
 // deployment is one registered worker against one database and one mock chain,
 // the way register wires it in production.
 type deployment struct {
@@ -438,9 +446,7 @@ func TestRegisterIntegration_RefusesAChainIDMismatch(t *testing.T) {
 	db, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 	server := startMockChain(t, mockChainOptions{})
-	setWorkerEnv(t, "8453", server.URL)
-	// Off mainnet the depth has no default; the refusal under test must still be the one that fails.
-	t.Setenv("FINALITY_DEPTH", "64")
+	setBaseWorkerEnv(t, server.URL)
 
 	_, err := registerWorker(t, db)
 
@@ -466,9 +472,7 @@ func TestRegisterIntegration_RefusesAChainWithNoRegisteredPools(t *testing.T) {
 	db, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 	server := startMockChain(t, mockChainOptions{chainID: "0x2105"})
-	setWorkerEnv(t, "8453", server.URL)
-	// Off mainnet the depth has no default; the refusal under test must still be the one that fails.
-	t.Setenv("FINALITY_DEPTH", "64")
+	setBaseWorkerEnv(t, server.URL)
 
 	_, err := registerWorker(t, db)
 
