@@ -68,28 +68,9 @@ func run(parent context.Context, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	awsRegion := os.Getenv("AWS_REGION")
-	if awsRegion == "" {
-		awsRegion = "eu-west-1"
-	}
-	awsOpts := []func(*awsconfig.LoadOptions) error{awsconfig.WithRegion(awsRegion)}
-	if endpoint := os.Getenv("AWS_ENDPOINT_URL"); endpoint != "" {
-		awsOpts = append(awsOpts, awsconfig.WithBaseEndpoint(endpoint))
-		logger.Info("using custom AWS endpoint", "url", endpoint)
-	}
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsOpts...)
+	reader, err := newS3Reader(ctx, logger)
 	if err != nil {
-		return fmt.Errorf("loading AWS config: %w", err)
-	}
-
-	// A custom endpoint (LocalStack) needs path-style addressing; virtual-hosted URLs won't resolve.
-	var reader *s3adapter.Reader
-	if os.Getenv("AWS_ENDPOINT_URL") != "" {
-		reader = s3adapter.NewReaderWithOptions(awsCfg, logger, func(o *s3.Options) {
-			o.UsePathStyle = true
-		})
-	} else {
-		reader = s3adapter.NewReader(awsCfg, logger)
+		return err
 	}
 
 	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(dsn))
@@ -124,4 +105,29 @@ func run(parent context.Context, logger *slog.Logger) error {
 	}
 	logger.Info("block-meta-loader done", "chain", chainID, "rows", loaded)
 	return nil
+}
+
+// newS3Reader builds the raw-block archive reader from the environment. A custom endpoint
+// (LocalStack) needs path-style addressing; virtual-hosted URLs won't resolve against it.
+func newS3Reader(ctx context.Context, logger *slog.Logger) (*s3adapter.Reader, error) {
+	awsRegion := os.Getenv("AWS_REGION")
+	if awsRegion == "" {
+		awsRegion = "eu-west-1"
+	}
+	awsOpts := []func(*awsconfig.LoadOptions) error{awsconfig.WithRegion(awsRegion)}
+	endpoint := os.Getenv("AWS_ENDPOINT_URL")
+	if endpoint != "" {
+		awsOpts = append(awsOpts, awsconfig.WithBaseEndpoint(endpoint))
+		logger.Info("using custom AWS endpoint", "url", endpoint)
+	}
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("loading AWS config: %w", err)
+	}
+	if endpoint == "" {
+		return s3adapter.NewReader(awsCfg, logger), nil
+	}
+	return s3adapter.NewReaderWithOptions(awsCfg, logger, func(o *s3.Options) {
+		o.UsePathStyle = true
+	}), nil
 }
