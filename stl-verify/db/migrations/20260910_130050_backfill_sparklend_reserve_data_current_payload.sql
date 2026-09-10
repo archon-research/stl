@@ -25,11 +25,12 @@
 -- backfill (20260820_120000) is the repair, and it is the statement to re-run first.
 SET LOCAL lock_timeout = '10s';
 
--- The history hypertable has an S3 tiering policy. A reserve whose newest row has
--- already been tiered — a deprecated reserve, last touched past the horizon — is
--- exactly the row the cache already holds (VEC-577's backfill ran with tiered reads
--- on), so a local-only scan would find an older row for it, fail the guard, and
--- leave its payload NULL. Set explicitly rather than inherited, in either direction.
+-- sparklend_reserve_data carries no tiering policy today — compression only, set
+-- outside the migrations (20260410_140000) — so this GUC is a no-op for it. It is
+-- still set explicitly, in either direction, as every sibling backfill does
+-- (20260820_120000 measured why the default cannot be trusted): if a policy is ever
+-- added, a local-only scan would find an older row for a reserve whose newest row
+-- had been tiered, fail the guard below, and leave its payload NULL.
 SET LOCAL timescaledb.enable_tiered_reads = 'on';
 
 UPDATE sparklend_reserve_data_current c
