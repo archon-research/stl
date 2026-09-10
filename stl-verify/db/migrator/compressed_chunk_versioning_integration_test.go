@@ -61,16 +61,10 @@ func TestCompressedConvertedHypertablesHaveAVersionFunction(t *testing.T) {
 			// schema_master), and it silently rots. This cannot: the moment such a table gains a
 			// trigger it re-enters scope and fails below for want of the function.
 			// BEFORE INSERT ... FOR EACH ROW only: that is the shape that can assign
-			// NEW.processing_version and so hand the compressed-chunk arbiter a DEFAULT. An AFTER or
-			// statement-level trigger cannot, so its table's INSERT still names the column itself.
-			var assigningTriggers int
-			if err := pool.QueryRow(ctx, `
-				SELECT count(*) FROM pg_trigger
-				WHERE tgrelid = $1::regclass AND NOT tgisinternal
-				  AND (tgtype & 2) = 2 AND (tgtype & 1) = 1`, table).Scan(&assigningTriggers); err != nil {
-				t.Fatalf("look up triggers on %s: %v", table, err)
-			}
-			if assigningTriggers == 0 {
+			// NEW.processing_version and so hand the compressed-chunk arbiter a DEFAULT. An AFTER,
+			// statement-level or UPDATE/DELETE-only trigger cannot, so its table's INSERT still names the
+			// column itself.
+			if beforeInsertRowTriggers(ctx, t, pool, table) == 0 {
 				t.Skipf("%s carries no BEFORE INSERT row trigger, so its INSERT supplies processing_version "+
 					"itself and no version function applies (behaviour covered by TestPositionState/\"a "+
 					"correction for a position an already-compressed chunk holds is stored, not dropped\")", table)
@@ -121,4 +115,64 @@ func compressedConvertedTables(t *testing.T, ctx context.Context, pool *pgxpool.
 		t.Fatalf("read compression-settings rows: %v", err)
 	}
 	return tables
+}
+
+// beforeInsertRowTriggers counts the user triggers on table shaped to assign NEW.processing_version:
+// BEFORE (tgtype & 2), FOR EACH ROW (tgtype & 1) and firing on INSERT (tgtype & 4). The INSERT bit keeps
+// a BEFORE UPDATE or DELETE row trigger out of the count: it never sees the row the arbiter resolves.
+func beforeInsertRowTriggers(ctx context.Context, t *testing.T, pool *pgxpool.Pool, table string) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM pg_trigger
+		WHERE tgrelid = $1::regclass AND NOT tgisinternal
+		  AND (tgtype & 2) = 2 AND (tgtype & 1) = 1 AND (tgtype & 4) = 4`, table).Scan(&n); err != nil {
+		t.Fatalf("look up triggers on %s: %v", table, err)
+	}
+	return n
+}
+
+// The predicate that scopes the check above. A trigger that cannot fire on INSERT, or fires per statement,
+// never sees the row the compressed-chunk arbiter resolves, so it must not pull its table back into scope:
+// a BEFORE UPDATE row trigger is tgtype 19 (ROW|BEFORE|UPDATE) and matched a mask that read BEFORE and ROW
+// but not INSERT.
+func TestVersionFunctionGuardCountsOnlyBeforeInsertRowTriggers(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	// The guard skips position_state on the premise that it carries none; TimescaleDB's own insert blocker
+	// must stay out of the count for that to hold.
+	if n := beforeInsertRowTriggers(ctx, t, pool, "position_state"); n != 0 {
+		t.Fatalf("position_state already counts %d BEFORE INSERT row triggers; the guard's skip rests on 0", n)
+	}
+	if _, err := pool.Exec(ctx,
+		`CREATE FUNCTION public.probe_noop() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$`); err != nil {
+		t.Fatalf("create the probe trigger function: %v", err)
+	}
+	for _, tc := range []struct {
+		shape string
+		adds  int
+	}{
+		{"BEFORE UPDATE ON position_state FOR EACH ROW", 0},
+		{"BEFORE DELETE ON position_state FOR EACH ROW", 0},
+		{"AFTER INSERT ON position_state FOR EACH ROW", 0},
+		{"BEFORE INSERT ON position_state FOR EACH STATEMENT", 0},
+		{"BEFORE INSERT ON position_state FOR EACH ROW", 1},
+		{"BEFORE INSERT OR UPDATE ON position_state FOR EACH ROW", 1},
+	} {
+		t.Run(tc.shape, func(t *testing.T) {
+			if _, err := pool.Exec(ctx, `CREATE TRIGGER probe_trg `+tc.shape+` EXECUTE FUNCTION public.probe_noop()`); err != nil {
+				t.Fatalf("create the probe trigger: %v", err)
+			}
+			defer func() {
+				if _, err := pool.Exec(ctx, `DROP TRIGGER probe_trg ON position_state`); err != nil {
+					t.Errorf("drop the probe trigger: %v", err)
+				}
+			}()
+			if got := beforeInsertRowTriggers(ctx, t, pool, "position_state"); got != tc.adds {
+				t.Errorf("a %s trigger counts %d, want %d", tc.shape, got, tc.adds)
+			}
+		})
+	}
 }
