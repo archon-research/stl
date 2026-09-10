@@ -281,8 +281,8 @@ func TestPositionManagerFor_RejectsAMixedRegistry(t *testing.T) {
 	}
 }
 
-// A registry that lost the posm hands every pool address(0), which LogBelongsTo
-// matches: every real transfer is dropped and no decode ever errors.
+// A registry that lost the posm hands every pool address(0), which no log is
+// emitted by: every real transfer is dropped and no decode ever errors.
 func TestPositionManagerFor_RejectsARegistryWithoutAPositionManager(t *testing.T) {
 	for _, tc := range []struct {
 		name string

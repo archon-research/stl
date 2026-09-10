@@ -2820,8 +2820,12 @@ func newUniswapV4RepoNFTTransfer(managerID, blockNumber int64, blockVersion, log
 // test pins cannot drift from each other or from the documented ordering.
 const uniswapV4HolderAtBlockSQL = `
 	SELECT to_address
-	FROM uniswap_v4_position_nft_transfer
+	FROM uniswap_v4_position_nft_transfer t
 	WHERE position_manager_id = $1 AND token_id = $2 AND block_number <= $3
+	  AND NOT EXISTS (
+	      SELECT 1 FROM block_states b
+	      WHERE b.chain_id = $4 AND b.number = t.block_number
+	        AND b.version = t.block_version AND b.is_orphaned)
 	ORDER BY block_number DESC, block_version DESC, log_index DESC, processing_version DESC
 	LIMIT 1`
 
@@ -2829,7 +2833,7 @@ func holderOfUniswapV4Token(t *testing.T, ctx context.Context, managerID int64, 
 	t.Helper()
 	var to []byte
 	if err := uniswapV4TestPool.QueryRow(ctx, uniswapV4HolderAtBlockSQL,
-		managerID, tokenID, atBlock).Scan(&to); err != nil {
+		managerID, tokenID, atBlock, uniswapV4RepoSaveChainID).Scan(&to); err != nil {
 		t.Fatalf("reading holder of token %d at block %d: %v", tokenID, atBlock, err)
 	}
 	return common.BytesToAddress(to)
@@ -3087,6 +3091,52 @@ func TestUniswapV4Repository_NFTTransferHolderAtBlockPrefersTheNewerBlockVersion
 	if got := holderOfUniswapV4Token(t, ctx, managerID, tokenID, blockNumber); got != canonical.To {
 		t.Errorf("holder at block %d = %s, want %s (block_version %d at log %d must beat the orphaned fork's log %d)",
 			blockNumber, got, canonical.To, canonical.BlockVersion, canonical.LogIndex, orphaned.LogIndex)
+	}
+}
+
+// Nothing re-reads chain state, so a transfer decoded on a fork the watcher
+// later orphaned is superseded only if the canonical block re-emits one for
+// that token; when it does not, only the block_states exclusion keeps the
+// orphaned row from answering.
+func TestUniswapV4Repository_NFTTransferHolderAtBlockSkipsAnOrphanedVersion(t *testing.T) {
+	ctx := context.Background()
+	seedUniswapV4RepoTestPool(t, ctx, 0x5a)
+	managerID := currentUniswapV4RepoPositionManagerID(t, ctx, uniswapV4RepoSaveChainID)
+
+	const (
+		blockNumber = int64(21800140)
+		tokenID     = int64(4244)
+	)
+	earlier := newUniswapV4RepoNFTTransfer(managerID, blockNumber-10, 0, 3, tokenID,
+		uniswapV4MoveFixtureFrom, uniswapV4MoveFixtureTo)
+	orphaned := newUniswapV4RepoNFTTransfer(managerID, blockNumber, 0, 9, tokenID,
+		uniswapV4MoveFixtureTo, uniswapV4MintFixtureTo)
+
+	repo := newUniswapV4Repo(t)
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		if _, err := repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{
+			NFTTransfers: []*entity.UniswapV4PositionNFTTransfer{earlier, orphaned},
+		}); err != nil {
+			t.Fatalf("SaveBlock: %v", err)
+		}
+	})
+	// The watcher's record of the reorg: version 0 orphaned, the canonical
+	// version 1 carrying no transfer of this token. assign_block_version numbers
+	// them in insertion order.
+	for _, b := range []struct {
+		hash     string
+		orphaned bool
+	}{{"0xorphan-21800140", true}, {"0xcanon-21800140", false}} {
+		if _, err := uniswapV4TestPool.Exec(ctx, `
+			INSERT INTO block_states (chain_id, number, hash, parent_hash, received_at, is_orphaned, created_at)
+			VALUES ($1, $2, $3, '0xparent', 0, $4, now())`,
+			uniswapV4RepoSaveChainID, blockNumber, b.hash, b.orphaned); err != nil {
+			t.Fatalf("seeding block_states %s: %v", b.hash, err)
+		}
+	}
+
+	if got := holderOfUniswapV4Token(t, ctx, managerID, tokenID, blockNumber); got != earlier.To {
+		t.Errorf("holder at block %d = %s, want %s: the transfer at the orphaned version 0 must not answer", blockNumber, got, earlier.To)
 	}
 }
 
