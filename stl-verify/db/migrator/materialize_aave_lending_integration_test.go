@@ -684,29 +684,30 @@ func TestMaterializeAaveLendingRefusesWhenAMappingStrandsStoredExposure(t *testi
 		t.Fatal("the base fixture appended nothing, so there is no stored exposure to strand")
 	}
 
+	// A debt-leg instrument specifically: variable_debt_address is the nullable mapping, so
+	// clearing it is the resync this guard is about. receipt_token_address is NOT NULL and a
+	// receipt mapping disappears by deletion instead, which is the same signal to the view.
 	var instrument string
 	if err := pool.QueryRow(ctx, `
 		SELECT DISTINCT ON (position_id) instrument_key FROM position_state
-		 WHERE projection = 'public.position_aave_lending' AND quantity > 0
+		 WHERE projection = 'public.position_aave_lending' AND quantity > 0 AND deal_type = 'BORROW'
 		 ORDER BY position_id, block_number DESC, block_version DESC,
 		          processing_version DESC, block_timestamp DESC
 		 LIMIT 1`).Scan(&instrument); err != nil {
-		t.Fatalf("finding a stored live position: %v", err)
+		t.Fatalf("finding a stored live debt position: %v", err)
 	}
 
-	// The reference-data resync that drops the mapping this instrument was keyed from.
-	if _, err := pool.Exec(ctx, `
+	res, err := pool.Exec(ctx, `
 		UPDATE debt_token SET variable_debt_address = NULL
-		 WHERE encode(variable_debt_address, 'hex') = $1`, instrument); err != nil {
+		 WHERE encode(variable_debt_address, 'hex') = $1`, instrument)
+	if err != nil {
 		t.Fatalf("clearing the debt mapping: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `
-		UPDATE receipt_token SET receipt_token_address = NULL
-		 WHERE encode(receipt_token_address, 'hex') = $1`, instrument); err != nil {
-		t.Fatalf("clearing the receipt mapping: %v", err)
+	if res.RowsAffected() != 1 {
+		t.Fatalf("cleared %d debt mappings for %s; want exactly the one it was keyed from", res.RowsAffected(), instrument)
 	}
 
-	_, err := pool.Exec(ctx, `SELECT materialize_aave_lending()`)
+	_, err = pool.Exec(ctx, `SELECT materialize_aave_lending()`)
 	if err == nil {
 		t.Fatal("the run succeeded while its stored exposure had no instrument left in the view")
 	}
