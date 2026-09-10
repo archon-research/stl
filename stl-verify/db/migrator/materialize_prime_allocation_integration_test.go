@@ -488,14 +488,14 @@ func TestMaterializePrimeAllocationPinsItsSearchPath(t *testing.T) {
 		 WHERE proname = 'materialize_prime_allocation'`).Scan(&cfg); err != nil {
 		t.Fatalf("reading proconfig: %v", err)
 	}
-	var pinned bool
+	var empty bool
 	for _, c := range cfg {
-		if strings.HasPrefix(c, "search_path=") {
-			pinned = true
+		if c == `search_path=""` || c == "search_path=" {
+			empty = true
 		}
 	}
-	if !pinned {
-		t.Errorf("the wrapper pins no search_path (proconfig %v), so it resolves its view in the caller's path", cfg)
+	if !empty {
+		t.Errorf("the wrapper's search_path is %v; want it empty, since \"$user\", public still resolves per role", cfg)
 	}
 
 	conn, err := pool.Acquire(ctx)
@@ -529,6 +529,15 @@ func TestMaterializePrimeAllocationResolvesPastAShadowingSchema(t *testing.T) {
 	if _, err := pool.Exec(ctx, `CREATE OR REPLACE FUNCTION `+pgIdent(role)+`.materialize_position_projection(regclass, integer)
 	                             RETURNS bigint LANGUAGE sql AS $$ SELECT -1::bigint $$`); err != nil {
 		t.Fatalf("creating the shadowing function: %v", err)
+	}
+	// And a view of the same name, so an unqualified regclass literal would resolve to this one.
+	if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW `+pgIdent(role)+`.position_prime_allocation AS
+	                             SELECT NULL::int AS chain_id, NULL::bigint AS protocol_id,
+	                                    'shadow'::text AS instrument_key, 'shadow'::text AS holder_id,
+	                                    0::numeric AS quantity, NULL::text AS deal_type, 0::bigint AS block_number,
+	                                    0::int AS block_version, 0::int AS processing_version,
+	                                    now() AS block_timestamp WHERE false`); err != nil {
+		t.Fatalf("creating the shadowing view: %v", err)
 	}
 	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DROP SCHEMA IF EXISTS `+pgIdent(role)+` CASCADE`) })
 

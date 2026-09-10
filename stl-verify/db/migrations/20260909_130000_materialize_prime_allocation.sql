@@ -42,9 +42,12 @@ COMMENT ON VIEW position_prime_allocation IS '[Operational] VEC-407 projection: 
 -- Thin per-projection entry point for the runner's POSITION_PROJECTIONS list; the view above holds all
 -- the allocation logic. No pre-check: token_id and prime_id are FK-enforced and both token.address and
 -- prime.vault_address are NOT NULL, so the view's joins cannot drop a row.
+-- An empty search_path, not FROM CURRENT: that captures '"$user", public', which still resolves per
+-- role at call time and so keeps the shadowing hazard it looks like it removes. Both references are
+-- schema-qualified and regclass resolves through implicit pg_catalog, so nothing needs a path.
 CREATE OR REPLACE FUNCTION materialize_prime_allocation(p_build_id integer DEFAULT 0) RETURNS bigint
     LANGUAGE sql
-    SET search_path FROM CURRENT AS $fn$
+    SET search_path = '' AS $fn$
     SELECT public.materialize_position_projection('public.position_prime_allocation'::regclass, p_build_id);
 $fn$;
 
