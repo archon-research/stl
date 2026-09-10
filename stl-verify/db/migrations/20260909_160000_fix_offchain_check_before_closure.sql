@@ -3,10 +3,16 @@
 -- swallowed. 20260818_140000 is applied and immutable, so the fix lands here.
 
 -- It now runs before closure, as the negative-quantity check beside it already did for exactly this
--- reason. Nothing else about the function changes: the closure predicate, the drift and inversion
--- checks, the run record and the counters are byte-identical to 20260818_140000.
+-- reason. The other change is p_run_id, stamped beside p_build_id on the observations, the run
+-- record and the refusals; the closure predicate, the drift and inversion checks and the counters
+-- are byte-identical to 20260818_140000.
 
-CREATE OR REPLACE FUNCTION materialize_position_projection(p_view regclass, p_build_id integer DEFAULT 0)
+-- The old two-argument function is dropped rather than replaced: keeping it would make every
+-- two-argument call ambiguous against the defaulted third parameter.
+DROP FUNCTION IF EXISTS materialize_position_projection(regclass, integer);
+
+CREATE OR REPLACE FUNCTION materialize_position_projection(p_view regclass, p_build_id integer DEFAULT 0,
+                                                           p_run_id bigint DEFAULT NULL)
     RETURNS bigint
     LANGUAGE plpgsql
     SET search_path FROM CURRENT
@@ -191,11 +197,11 @@ BEGIN
            OR p.quantity IS DISTINCT FROM s.quantity
            OR p.deal_type IS DISTINCT FROM s.deal_type;
     INSERT INTO public.position_projection_refusal
-        (projection, position_id, block_number, block_version, processing_version, reason, detail, build_id)
+        (projection, position_id, block_number, block_version, processing_version, reason, detail, build_id, run_id)
     SELECT v_qualname, position_id, block_number, block_version, processing_version, r.reason,
            format('ik=%s holder=%s stored ts=%s qty=%s dt=%s; emitted ts=%s qty=%s dt=%s', instrument_key, holder_id,
                   stored_ts, stored_qty, coalesce(stored_dt, 'NULL'), emitted_ts, emitted_qty, coalesce(emitted_dt, 'NULL')),
-           p_build_id
+           p_build_id, p_run_id
     FROM pg_temp._mpp_drift d
     CROSS JOIN LATERAL (SELECT 'deal_type_drift' AS reason WHERE d.dt_drift
                         UNION ALL SELECT 'observation_drift' WHERE d.ts_drift OR d.qty_drift) r
@@ -256,9 +262,9 @@ BEGIN
            OR (w.block_number < o.block_number AND w.block_timestamp > o.block_timestamp)
         ORDER BY w.position_id, w.block_number;
     INSERT INTO public.position_projection_refusal
-        (projection, position_id, block_number, block_version, processing_version, reason, detail, build_id)
+        (projection, position_id, block_number, block_version, processing_version, reason, detail, build_id, run_id)
     SELECT v_qualname, s.position_id, s.block_number, s.block_version, s.processing_version, 'block_time_inverts_height',
-           format('ik=%s holder=%s %s', s.instrument_key, s.holder_id, r.detail), p_build_id
+           format('ik=%s holder=%s %s', s.instrument_key, s.holder_id, r.detail), p_build_id, p_run_id
     FROM pg_temp._mpp_src s
     JOIN pg_temp._mpp_refused r USING (position_id)
     WHERE NOT EXISTS (SELECT 1 FROM public.position_state p
@@ -292,10 +298,10 @@ BEGIN
     INSERT INTO public.position_state
         (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
          block_number, block_version, processing_version, block_timestamp, projection, build_id,
-         deal_type)
+         run_id, deal_type)
     SELECT s.position_id, s.chain_id, s.protocol_id, s.instrument_key, s.holder_id, s.quantity,
            s.block_number, s.block_version, s.processing_version, s.block_timestamp, v_qualname,
-           p_build_id, s.deal_type
+           p_build_id, p_run_id, s.deal_type
     FROM pg_temp._mpp_src s
     WHERE NOT EXISTS (
         SELECT 1 FROM public.position_state p
@@ -306,8 +312,8 @@ BEGIN
     GET DIAGNOSTICS n = ROW_COUNT;
 
     INSERT INTO public.position_projection_run
-        (projection, build_id, block_timestamp, rows_emitted, rows_appended, positions_refused)
-    SELECT v_qualname, p_build_id, max(block_timestamp), v_emitted, n, v_refused FROM pg_temp._mpp_src;
+        (projection, build_id, run_id, block_timestamp, rows_emitted, rows_appended, positions_refused)
+    SELECT v_qualname, p_build_id, p_run_id, max(block_timestamp), v_emitted, n, v_refused FROM pg_temp._mpp_src;
 
     DROP TABLE pg_temp._mpp_src;
     DROP TABLE pg_temp._mpp_new;
@@ -318,7 +324,7 @@ BEGIN
 END $fn$;
 
 
-COMMENT ON FUNCTION materialize_position_projection(regclass, integer) IS '[Operational] VEC-402..407 shared materializer: evaluate a per-protocol projection view ONCE into a temp table, validate it against the position_state column contract (each RAISE in the body names its own check), then apply closure and APPEND the new observations, recording the completed run with its counts in position_projection_run, all in one transaction. A view bug (NULLs, a wrong type, a double-emitted key, a negative quantity, the off-chain block_number rule) aborts the run BEFORE closure can drop the offending row; a position_id owned by another projection aborts it too, but after closure, because the check reads what the run would actually append. A data conflict aborts nothing: a position whose new observations invert block against instant is withheld this run, and a stored key re-emitted with a different value keeps the stored row, each recorded in position_projection_refusal and warned. deal_type is copied through; the FK to ref_deal_type constrains the value. position_id is recomputed via position_id(); serialized per view by an advisory lock on the view''s canonical name. Idempotent for a fixed source; run out of band. Returns rows INSERTED.';
+COMMENT ON FUNCTION materialize_position_projection(regclass, integer, bigint) IS '[Operational] VEC-402..407 shared materializer: evaluate a per-protocol projection view ONCE into a temp table, validate it against the position_state column contract (each RAISE in the body names its own check), then apply closure and APPEND the new observations, recording the completed run with its counts in position_projection_run, all in one transaction. A view bug (NULLs, a wrong type, a double-emitted key, a negative quantity, the off-chain block_number rule) aborts the run BEFORE closure can drop the offending row; a position_id owned by another projection aborts it too, but after closure, because the check reads what the run would actually append. A data conflict aborts nothing: a position whose new observations invert block against instant is withheld this run, and a stored key re-emitted with a different value keeps the stored row, each recorded in position_projection_refusal and warned. deal_type is copied through; the FK to ref_deal_type constrains the value. position_id is recomputed via position_id(); serialized per view by an advisory lock on the view''s canonical name. Idempotent for a fixed source; run out of band. p_build_id and p_run_id are stamped on every row it appends, on the refusals and on the run record (NULL run means pre-tracking). Returns rows INSERTED.';
 
 COMMENT ON COLUMN position_projection_run.positions_refused IS 'Audit. Distinct positions this run withheld or declined, across every class it records in position_projection_refusal: a position whose new observations invert block against instant is withheld, and a stored key re-emitted with a different value is declined while the position''s other observations land. Join position_projection_refusal.reason to tell the two apart; the count alone does not.';
 
