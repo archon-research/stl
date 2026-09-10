@@ -3381,8 +3381,10 @@ BS_PROXY_CORRECTED = "2b" * 20
 BS_PROXY_DIVERGENT = "3b" * 20
 BS_PROXY_DIRECT = "4b" * 20
 BS_PROXY_SEEDED = "5b" * 20
+BS_PROXY_MIXED = "6b" * 20
+BS_PROXY_SUMMED = "7b" * 20
 
-_BS_VAULT_HEX = "b0" * 20
+BS_VAULT_HEX = "b0" * 20
 _BS_PROTOCOL_HEX = "b1" * 20
 _BS_ORACLE_HEX = "b2" * 20
 _BS_UNDERLYING_HEX = "b3" * 20
@@ -3400,6 +3402,9 @@ BS_CORRECTED_ORIGINAL_UNDERLYING_VALUE = Decimal("10")
 BS_CORRECTED_FIXED_UNDERLYING_VALUE = Decimal("90")
 BS_DIRECT_BALANCE = Decimal("7")
 BS_SEEDED_UNDERLYING_VALUE = Decimal("11")
+BS_MIXED_DIRECT_BALANCE = Decimal("15")
+BS_SUMMED_UNDERLYING_VALUE = Decimal("20")
+BS_SUMMED_DIRECT_BALANCE = Decimal("5")
 
 
 async def seed_balance_series_positions(db_url: str) -> None:
@@ -3413,17 +3418,25 @@ async def seed_balance_series_positions(db_url: str) -> None:
       the same instant, with different values -> the dedup must pick the
       correction, not the original and not both.
     * ``BS_PROXY_DIVERGENT`` a receipt row whose own ``underlying_token_id``
-      disagrees with the registry's -> refused, contributes nothing.
+      disagrees with the registry's -> refused, present but unpriceable, so it
+      poisons its buckets to ``None`` rather than dropping out silently.
     * ``BS_PROXY_DIRECT``    a direct holding, priced by its own token price.
     * ``BS_PROXY_SEEDED``    its only row is BEFORE the window -> the carry-in
       seed has to supply it.
+    * ``BS_PROXY_MIXED``     one priced direct holding and one divergent
+      receipt row -- two different entities under the same proxy -> the
+      priced entity's value must not silently stand in for the total once the
+      divergent one poisons it.
+    * ``BS_PROXY_SUMMED``    two different priced entities under the same
+      proxy, both cleanly priced -> the total must be their sum, not just one
+      of them.
     """
     conn = await asyncpg.connect(db_url)
     try:
         async with conn.transaction():
             prime_id = await conn.fetchval(
                 "INSERT INTO prime (name, vault_address) VALUES ('bs_balance', $1) RETURNING id",
-                bytes.fromhex(_BS_VAULT_HEX),
+                bytes.fromhex(BS_VAULT_HEX),
             )
             protocol_id = await conn.fetchval(
                 "INSERT INTO protocol (chain_id, address, name, protocol_type) "
@@ -3540,6 +3553,60 @@ async def seed_balance_series_positions(db_url: str) -> None:
                 underlying_value=BS_SEEDED_UNDERLYING_VALUE,
                 underlying_token_id=underlying_id,
                 created_at=pre_window,
+                tx_amount=0,
+            )
+
+            await insert_allocation_position(
+                conn,
+                token_id=direct_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_MIXED,
+                balance=BS_MIXED_DIRECT_BALANCE,
+                block=1000,
+                tx="c6" * 32,
+                direction="sweep",
+                created_at=three_days_ago,
+                tx_amount=0,
+            )
+            await insert_allocation_position(
+                conn,
+                token_id=receipt_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_MIXED,
+                balance=Decimal("100"),
+                block=1000,
+                tx="c7" * 32,
+                direction="sweep",
+                underlying_value=Decimal("77"),
+                underlying_token_id=alt_underlying_id,
+                created_at=three_days_ago,
+                tx_amount=0,
+            )
+
+            await insert_allocation_position(
+                conn,
+                token_id=receipt_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_SUMMED,
+                balance=Decimal("100"),
+                block=1000,
+                tx="c8" * 32,
+                direction="sweep",
+                underlying_value=BS_SUMMED_UNDERLYING_VALUE,
+                underlying_token_id=underlying_id,
+                created_at=three_days_ago,
+                tx_amount=0,
+            )
+            await insert_allocation_position(
+                conn,
+                token_id=direct_id,
+                prime_id=prime_id,
+                proxy_hex=BS_PROXY_SUMMED,
+                balance=BS_SUMMED_DIRECT_BALANCE,
+                block=1000,
+                tx="c9" * 32,
+                direction="sweep",
+                created_at=three_days_ago,
                 tx_amount=0,
             )
     finally:

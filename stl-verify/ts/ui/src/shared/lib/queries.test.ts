@@ -196,6 +196,18 @@ describe('the token-symbol projection', () => {
   });
 });
 
+describe('activitySeriesQuery params', () => {
+  // usePrimeChartSeries reads balance_usd, not net_flow_usd -- the request has
+  // to actually ask for it. `series` carries no other signal (`prime_id` and
+  // the window are shared with the raw feed), so nothing else would catch it
+  // if `series: 'balance'` were ever dropped from the query (VEC-760).
+  it('asks the endpoint for the balance series, not the default flow one', () => {
+    expect(keyInitOf(activitySeriesQuery(PRIME, WINDOW)).query).toMatchObject({
+      series: 'balance',
+    });
+  });
+});
+
 describe('envelope payload policy', () => {
   // `data` is required and non-nullable on every envelope, so a missing one is
   // a contract violation — and a `select` that throws logs nowhere by itself.
