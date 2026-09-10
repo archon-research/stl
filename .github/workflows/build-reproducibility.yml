@@ -6,24 +6,25 @@
 # scripts/deploy/check-build-reproducible.sh for what is asserted and why the
 # "must differ" control case is not optional.
 #
-# Scoped to the build inputs rather than run on every PR. Only these files can
-# put a per-build value back into a layer, they change rarely, and the check
-# costs four image builds — two of which run the arm64 runtime stage under
-# QEMU. A code change cannot break the property; a Dockerfile or Makefile
-# change is the only thing that can. .go-version/.python-version are included
-# for the same reason as the Dockerfiles: the script reads them directly to
-# pick the base image (see check-build-reproducible.sh's build()), so a bump
-# is a build-mechanism input, not "a code change", even though it lives at the
-# repo root rather than under stl-verify/. Ordinary source and dependency
-# files (stl-verify/python/pyproject.toml, ts/**, cmd/**, ...) are deliberately
-# left out: changing them is expected to change layers, which is not a
-# regression this workflow needs to catch.
+# Scoped to build-mechanism inputs, not ordinary source/dependency changes:
+# those are expected to change layers, so catching them here would not be a
+# regression. .go-version/.python-version are included because the script
+# reads them directly to pick the base image, not because they are "code".
+# Four image builds per run, two of which run the arm64 runtime stage under
+# QEMU.
+#
+# GAP: the harness calls `docker buildx build` directly with its own
+# hardcoded --build-arg list — it never goes through the Makefile's
+# _docker-release-image. A stamp reintroduced only on that path (e.g. via
+# IMG_EXTRA_ARGS, or a new per-build arg added to GIT_ARGS) builds green here
+# even though stl-verify/Makefile is listed in `paths` below.
 name: Build Reproducibility
 
 on:
   pull_request:
     paths:
       - "stl-verify/Dockerfile.common"
+      - "stl-verify/Dockerfile.migrate"
       - "stl-verify/python/Dockerfile"
       - "stl-verify/.dockerignore"
       - "stl-verify/Makefile"
@@ -36,6 +37,7 @@ on:
     branches: [main]
     paths:
       - "stl-verify/Dockerfile.common"
+      - "stl-verify/Dockerfile.migrate"
       - "stl-verify/python/Dockerfile"
       - "stl-verify/.dockerignore"
       - "stl-verify/Makefile"
@@ -56,9 +58,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
-      fail-fast: false # each image's verdict is independent and both are wanted
+      fail-fast: false # each image's verdict is independent and all are wanted
       matrix:
-        image: [go, python]
+        image: [go, python, migrate]
     permissions:
       contents: read
     steps:

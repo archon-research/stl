@@ -24,11 +24,12 @@
 # "identical" — the wrong path compared, an empty layer list, a silently reused
 # tag — reads as a pass, and this script would certify the very thing it exists
 # to catch. A green run means the comparison is sensitive AND the build is
-# stable; a green run without the `code` case means neither. The go docs-only
-# leg carries an analogous tripwire: it asserts the `COPY . .` step that ships
-# README.md into the builder was not itself cache-hit, so a future Dockerfile
-# change that stops the perturbation from reaching the build context fails
-# loudly instead of passing vacuously the way python's currently does.
+# stable; a green run without the `code` case means neither. The go and
+# migrate docs-only legs carry an analogous tripwire: each asserts the
+# `COPY . .` step that ships README.md into its builder was not itself
+# cache-hit, so a future Dockerfile change that stops the perturbation from
+# reaching the build context fails loudly instead of passing vacuously the
+# way python's currently does.
 #
 # REQUIRES BuildKit (`docker/setup-buildx-action`). Layer identity across two
 # builds comes from BuildKit reusing a cached layer when the content feeding it
@@ -55,11 +56,13 @@
 # added coverage of ui-builder.
 #
 # Usage:
-#   check-build-reproducible.sh --image go|python [--keep]
+#   check-build-reproducible.sh --image go|python|migrate [--keep]
 #
 #   --image go      build a Go service from Dockerfile.common (all Go services
 #                   share it, so one stands in for every one of them)
 #   --image python  build the python-api image from python/Dockerfile
+#   --image migrate build the migrate image from Dockerfile.migrate — its own
+#                   Dockerfile, not covered by the go leg above
 #   --keep          leave the built images behind for inspection
 #
 # Deliberately bash 3.2 + BSD awk compatible, like the other scripts here.
@@ -102,7 +105,10 @@ case "$IMAGE" in
   python)
     CODE_FILE="${BUILD_DIR}/python/app/zz_reproducibility_control.py"
     ;;
-  *) die "--image must be go or python (got '${IMAGE:-}')" ;;
+  migrate)
+    CODE_FILE="${BUILD_DIR}/cmd/util/migrate/zz_reproducibility_control.go"
+    ;;
+  *) die "--image must be go, python, or migrate (got '${IMAGE:-}')" ;;
 esac
 
 [ -f "$DOCS_FILE" ] || die "docs file not found, cannot run the docs-only case: ${DOCS_FILE}"
@@ -180,6 +186,16 @@ build() {
       --build-arg BUILD_TIME="$build_time" \
       $BUILD_EXTRA_ARGS \
       -f "${BUILD_DIR}/Dockerfile.common" -t "$tag" --load "$BUILD_DIR"
+  elif [ "$IMAGE" = "migrate" ]; then
+    # Dockerfile.migrate takes only GO_VERSION -- no CMD_PATH/BIN (its build
+    # target is hardcoded) and no versioning args (it stamps nothing, see
+    # ADR-0007), so commit/build_time are accepted for a uniform build()
+    # signature but unused here.
+    go_version="$(cat "${REPO_ROOT}/.go-version")"
+    run_build --platform linux/arm64 \
+      --build-arg GO_VERSION="$go_version" \
+      $BUILD_EXTRA_ARGS \
+      -f "${BUILD_DIR}/Dockerfile.migrate" -t "$tag" --load "$BUILD_DIR"
   else
     python_version="$(cat "${REPO_ROOT}/.python-version")"
     run_build --platform linux/arm64 \
@@ -190,25 +206,28 @@ build() {
   fi
 
   local layers
-  layers="$(docker image inspect "$tag" --format '{{range .RootFS.Layers}}{{.}} {{end}}')"
+  # `|| true`: under pipefail a failing `docker image inspect` would abort the
+  # script right here and skip the die() below, losing the message.
+  layers="$(docker image inspect "$tag" --format '{{range .RootFS.Layers}}{{.}} {{end}}')" || true
   # An empty layer list would make every comparison trivially equal, which is
   # the shape of a pass that means nothing.
   [ -n "${layers// /}" ] || die "no layers reported for ${tag}; the comparison would be meaningless"
   printf '%s' "$layers"
 }
 
-# check_docs_reached_go_context <build-log>: the go docs-only leg is only a
-# real test if the README.md edit actually reached the builder. If a future
-# Dockerfile change stopped `COPY . .` from seeing it, this leg would silently
-# become as vacuous as python's (ADR-0007) and still report "match". Confirm
-# from the build's own plain-progress log that the COPY step was not cache-hit
-# — i.e. that BuildKit saw different content this time than the baseline build.
+# check_docs_reached_go_context <build-log>: used by go and migrate (both
+# build from a "builder" stage) — their docs-only leg is only a real test if
+# the README.md edit actually reached that stage. If a future Dockerfile
+# change stopped `COPY . .` from seeing it, this leg would silently become as
+# vacuous as python's (ADR-0007) and still report "match". Confirm from the
+# build's own plain-progress log that the COPY step was not cache-hit — i.e.
+# that BuildKit saw different content this time than the baseline build.
 check_docs_reached_go_context() {
   local log="$1" step
   step="$(awk '/\[builder [0-9]+\/[0-9]+\] COPY \. \./ { match($0, /^#[0-9]+/); print substr($0, RSTART, RLENGTH); exit }' "$log")"
-  [ -n "$step" ] || die "could not find the 'COPY . .' step in the build log; cannot confirm the docs-only edit reached the go build context"
+  [ -n "$step" ] || die "could not find the 'COPY . .' step in the build log; cannot confirm the docs-only edit reached the builder's build context"
   if grep -qF "${step} CACHED" "$log"; then
-    die "docs-only leg is vacuous: 'COPY . .' was cache-hit, so the README.md edit never reached the go build context. Check .dockerignore and Dockerfile.common's COPY paths (ORB-366)."
+    die "docs-only leg is vacuous: 'COPY . .' was cache-hit, so the README.md edit never reached the ${IMAGE} build context. Check .dockerignore and this Dockerfile's COPY paths (ORB-366)."
   fi
 }
 
@@ -222,7 +241,10 @@ check_docs_reached_go_context() {
 check_ui_builder_rebuilt() {
   local log="$1" steps cached total
   # Every plain-progress step line for the stage, e.g. "#24 [ui-builder 6/9] RUN npm ci".
-  steps="$(grep -oE '^#[0-9]+ \[ui-builder [0-9]+/[0-9]+\]' "$log" | awk '{print $1}' | sort -u)"
+  # `|| true`: grep exits 1 on no match, and under pipefail that would abort the
+  # script right here and skip the die() below, losing the message (the exact
+  # rename case it exists to describe).
+  steps="$(grep -oE '^#[0-9]+ \[ui-builder [0-9]+/[0-9]+\]' "$log" | awk '{print $1}' | sort -u)" || true
   [ -n "$steps" ] || die "no 'ui-builder' stage appears in the build log: --no-cache-filter ui-builder matched nothing. The stage was probably renamed in python/Dockerfile — update the filter and this check together (ORB-366, ADR-0007)."
   total="$(printf '%s\n' "$steps" | grep -c .)"
   cached=0
@@ -339,7 +361,7 @@ else
 fi
 
 echo "--> rebuild after a real source change (control: this one must differ)"
-if [ "$IMAGE" = "go" ]; then
+if [ "$IMAGE" = "go" ] || [ "$IMAGE" = "migrate" ]; then
   # An init() cannot be dropped by the linker, so this reliably changes the
   # binary. A comment or an unused declaration would not, and a control that
   # silently changes nothing is worse than no control.
