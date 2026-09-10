@@ -612,17 +612,17 @@ func TestPositionDailyEqualsTheSpineArgmaxOverRandomHistories(t *testing.T) {
 
 			// The daily grain is (position, UTC date), so the oracle partitions by both.
 			const dailyGrain = ", (block_timestamp AT TIME ZONE 'utc')::date"
-			cols := sharedSpineColumns(ctx, t, pool, "position_daily")
-			if d := diffCacheAgainstSpineArgmax(ctx, t, pool, "position_daily", dailyGrain, cols); d != "" {
+			cols := dailySharedSpineColumns(ctx, t, pool, "position_daily")
+			if d := diffDailyCacheAgainstSpineArgmax(ctx, t, pool, "position_daily", dailyGrain, cols); d != "" {
 				t.Errorf("after the trigger: %s", d)
 			}
 
 			// A rebuild over the converged cache changes nothing; over a lagging one it converges.
-			before := cacheDigest(ctx, t, pool, "position_daily")
+			before := dailyCacheDigest(ctx, t, pool, "position_daily")
 			if _, err := pool.Exec(ctx, `CALL rebuild_position_daily()`); err != nil {
 				t.Fatalf("rebuild over a converged cache: %v", err)
 			}
-			if cacheDigest(ctx, t, pool, "position_daily") != before {
+			if dailyCacheDigest(ctx, t, pool, "position_daily") != before {
 				t.Error("a rebuild over a converged cache changed it")
 			}
 			// block_timestamp must stay on as_of_date (a CHECK pins it), so the lag is created by
@@ -635,16 +635,16 @@ func TestPositionDailyEqualsTheSpineArgmaxOverRandomHistories(t *testing.T) {
 			if _, err := pool.Exec(ctx, `CALL rebuild_position_daily()`); err != nil {
 				t.Fatalf("rebuild over a lagging cache: %v", err)
 			}
-			if d := diffCacheAgainstSpineArgmax(ctx, t, pool, "position_daily", dailyGrain, cols); d != "" {
+			if d := diffDailyCacheAgainstSpineArgmax(ctx, t, pool, "position_daily", dailyGrain, cols); d != "" {
 				t.Errorf("the rebuild did not converge a lagging cache: %s", d)
 			}
 		})
 	}
 }
 
-// sharedSpineColumns lists the columns the cache and position_state both carry, so a comparison over
+// dailySharedSpineColumns lists the columns the cache and position_state both carry, so a comparison over
 // them covers deal_type without naming it and cannot silently narrow when a column is added.
-func sharedSpineColumns(ctx context.Context, t *testing.T, pool *pgxpool.Pool, cache string) []string {
+func dailySharedSpineColumns(ctx context.Context, t *testing.T, pool *pgxpool.Pool, cache string) []string {
 	t.Helper()
 	rows, err := pool.Query(ctx, `
 		SELECT a.attname FROM pg_attribute a
@@ -681,9 +681,9 @@ func sharedSpineColumns(ctx context.Context, t *testing.T, pool *pgxpool.Pool, c
 	return out
 }
 
-// diffCacheAgainstSpineArgmax compares the cache against the newest position_state row per position,
+// diffDailyCacheAgainstSpineArgmax compares the cache against the newest position_state row per position,
 // at the cache's own grain, over the given columns.
-func diffCacheAgainstSpineArgmax(ctx context.Context, t *testing.T, pool *pgxpool.Pool, cache, grain string, cols []string) string {
+func diffDailyCacheAgainstSpineArgmax(ctx context.Context, t *testing.T, pool *pgxpool.Pool, cache, grain string, cols []string) string {
 	t.Helper()
 	sel := strings.Join(cols, ", ")
 	var onlyOracle, onlyCache int
@@ -709,7 +709,7 @@ func diffCacheAgainstSpineArgmax(ctx context.Context, t *testing.T, pool *pgxpoo
 		onlyOracle, onlyCache, example)
 }
 
-func cacheDigest(ctx context.Context, t *testing.T, pool *pgxpool.Pool, cache string) string {
+func dailyCacheDigest(ctx context.Context, t *testing.T, pool *pgxpool.Pool, cache string) string {
 	t.Helper()
 	var d string
 	if err := pool.QueryRow(ctx, fmt.Sprintf(
