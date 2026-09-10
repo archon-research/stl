@@ -60,3 +60,5 @@
 ./internal/services/uniswapv4indexer
 ./internal/pkg/tickbitmap
 ./internal/pkg/blockversion
+./internal/services/uniswapv4bootstrap
+./cmd/backfillers/uniswap-v4-position-bootstrap

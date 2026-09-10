@@ -1103,6 +1103,35 @@ func TestUniswapV4ColumnComments(t *testing.T) {
 	}
 }
 
+func uniswapV4TableComment(t *testing.T, ctx context.Context, table string) string {
+	t.Helper()
+
+	var comment *string
+	if err := uniswapV4TestPool.QueryRow(ctx, `
+		SELECT obj_description(c.oid)
+		FROM pg_class c
+		WHERE c.relname = $1 AND pg_table_is_visible(c.oid)`, table).Scan(&comment); err != nil {
+		t.Fatalf("reading the %s table comment: %v", table, err)
+	}
+	if comment == nil {
+		t.Fatalf("%s has no COMMENT", table)
+	}
+	return *comment
+}
+
+func TestUniswapV4PositionCommentDescribesTheBootstrapCoverage(t *testing.T) {
+	comment := uniswapV4TableComment(t, context.Background(), "uniswap_v4_position")
+
+	for _, want := range []string{"uniswap-v4-position-bootstrap", "pinned block", "idempotent"} {
+		if !strings.Contains(comment, want) {
+			t.Errorf("uniswap_v4_position comment does not mention %q: %s", want, comment)
+		}
+	}
+	if strings.Contains(comment, "incomplete by construction") {
+		t.Errorf("uniswap_v4_position comment still calls coverage incomplete by construction: %s", comment)
+	}
+}
+
 func uniswapV4ColumnComment(t *testing.T, ctx context.Context, table, column string) string {
 	t.Helper()
 

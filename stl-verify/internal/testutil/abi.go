@@ -2,8 +2,10 @@ package testutil
 
 import (
 	"math/big"
+	"strings"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
@@ -47,6 +49,26 @@ func PackLatestRoundData(t *testing.T, roundID *big.Int, answer *big.Int, starte
 	data, err := feedABI.Methods["latestRoundData"].Outputs.Pack(roundID, answer, startedAt, updatedAt, answeredInRound)
 	if err != nil {
 		t.Fatalf("packing latestRoundData: %v", err)
+	}
+	return data
+}
+
+// PackPositionInfo ABI-encodes StateView.getPositionInfo's (liquidity,
+// feeGrowthInside0LastX128, feeGrowthInside1LastX128) return data.
+func PackPositionInfo(t *testing.T, liquidity, feeGrowthInside0, feeGrowthInside1 *big.Int) []byte {
+	t.Helper()
+	const positionInfoABI = `[{"name":"getPositionInfo","type":"function","stateMutability":"view",
+		"inputs":[{"name":"poolId","type":"bytes32"},{"name":"owner","type":"address"},
+			{"name":"tickLower","type":"int24"},{"name":"tickUpper","type":"int24"},{"name":"salt","type":"bytes32"}],
+		"outputs":[{"name":"liquidity","type":"uint128"},
+			{"name":"feeGrowthInside0LastX128","type":"uint256"},{"name":"feeGrowthInside1LastX128","type":"uint256"}]}]`
+	a, err := abi.JSON(strings.NewReader(positionInfoABI))
+	if err != nil {
+		t.Fatalf("parsing the getPositionInfo ABI: %v", err)
+	}
+	data, err := a.Methods["getPositionInfo"].Outputs.Pack(liquidity, feeGrowthInside0, feeGrowthInside1)
+	if err != nil {
+		t.Fatalf("packing getPositionInfo: %v", err)
 	}
 	return data
 }
