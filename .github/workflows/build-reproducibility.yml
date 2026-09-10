@@ -12,12 +12,6 @@
 # reads them directly to pick the base image, not because they are "code".
 # Four image builds per run, two of which run the arm64 runtime stage under
 # QEMU.
-#
-# GAP: the harness calls `docker buildx build` directly with its own
-# hardcoded --build-arg list — it never goes through the Makefile's
-# _docker-release-image. A stamp reintroduced only on that path (e.g. via
-# IMG_EXTRA_ARGS, or a new per-build arg added to GIT_ARGS) builds green here
-# even though stl-verify/Makefile is listed in `paths` below.
 name: Build Reproducibility
 
 on:
@@ -27,7 +21,6 @@ on:
       - "stl-verify/Dockerfile.migrate"
       - "stl-verify/python/Dockerfile"
       - "stl-verify/.dockerignore"
-      - "stl-verify/Makefile"
       - "stl-verify/internal/pkg/buildinfo/**"
       - ".go-version"
       - ".python-version"
@@ -40,7 +33,6 @@ on:
       - "stl-verify/Dockerfile.migrate"
       - "stl-verify/python/Dockerfile"
       - "stl-verify/.dockerignore"
-      - "stl-verify/Makefile"
       - "stl-verify/internal/pkg/buildinfo/**"
       - ".go-version"
       - ".python-version"
