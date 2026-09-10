@@ -23,18 +23,19 @@ import (
 // no-op when called on a nil pointer, so production code can pass nil for
 // "telemetry disabled" without guard checks at each call site.
 type Telemetry struct {
-	prefix              string
-	chainAttr           attribute.KeyValue
-	blocksProcessed     metric.Int64Counter
-	errorsTotal         metric.Int64Counter
-	blockDuration       metric.Float64Histogram
-	stateRowsWritten    metric.Int64Counter
-	stateRowsAttempted  metric.Int64Counter
-	poolsTouched        metric.Int64Counter
-	tickRowsWritten     metric.Int64Counter
-	positionRowsWritten metric.Int64Counter
-	nftTransferRows     metric.Int64Counter
-	poolsNeverIndexed   metric.Int64Gauge
+	prefix                   string
+	chainAttr                attribute.KeyValue
+	blocksProcessed          metric.Int64Counter
+	errorsTotal              metric.Int64Counter
+	blockDuration            metric.Float64Histogram
+	stateRowsWritten         metric.Int64Counter
+	stateRowsAttempted       metric.Int64Counter
+	poolsTouched             metric.Int64Counter
+	tickRowsWritten          metric.Int64Counter
+	positionRowsWritten      metric.Int64Counter
+	nftTransferRowsAttempted metric.Int64Counter
+	nftTransferRowsWritten   metric.Int64Counter
+	poolsNeverIndexed        metric.Int64Gauge
 }
 
 // NewTelemetry registers the whole instrument set for one DEX; the
@@ -107,7 +108,11 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 		return nil, err
 	}
 
-	nftTransferRows, err := counter(".nft.transfer.rows.written", "Total NFT transfer event rows written")
+	nftTransferRowsAttempted, err := counter(".nft.transfer.rows.attempted", "Total NFT transfer rows a block queued for insert, conflicts included")
+	if err != nil {
+		return nil, err
+	}
+	nftTransferRowsWritten, err := counter(".nft.transfer.rows.written", "Total NFT transfer event rows written")
 	if err != nil {
 		return nil, err
 	}
@@ -121,18 +126,19 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 	}
 
 	t := &Telemetry{
-		prefix:              prefix,
-		chainAttr:           attribute.String("chain", chainName),
-		blocksProcessed:     blocks,
-		errorsTotal:         errs,
-		blockDuration:       dur,
-		stateRowsWritten:    stateRows,
-		stateRowsAttempted:  stateRowsAttempted,
-		poolsTouched:        touched,
-		tickRowsWritten:     tickRows,
-		positionRowsWritten: positionRows,
-		nftTransferRows:     nftTransferRows,
-		poolsNeverIndexed:   neverIndexed,
+		prefix:                   prefix,
+		chainAttr:                attribute.String("chain", chainName),
+		blocksProcessed:          blocks,
+		errorsTotal:              errs,
+		blockDuration:            dur,
+		stateRowsWritten:         stateRows,
+		stateRowsAttempted:       stateRowsAttempted,
+		poolsTouched:             touched,
+		tickRowsWritten:          tickRows,
+		positionRowsWritten:      positionRows,
+		nftTransferRowsAttempted: nftTransferRowsAttempted,
+		nftTransferRowsWritten:   nftTransferRowsWritten,
+		poolsNeverIndexed:        neverIndexed,
 	}
 	// Only blocks.processed: the Stalled rules read it as
 	// rate(status="success")==0, which cannot match an absent series.
@@ -235,12 +241,19 @@ func (t *Telemetry) RecordPositionRows(ctx context.Context, n int) {
 	t.positionRowsWritten.Add(ctx, int64(n), metric.WithAttributes(t.chainAttr))
 }
 
-// RecordNFTTransferRows counts the posm Transfer rows a committed block landed,
-// the only evidence that decoding still works: a wrong PositionManager address
-// raises no error and empties this series alone.
-func (t *Telemetry) RecordNFTTransferRows(ctx context.Context, n int) {
-	if t == nil || n <= 0 {
+// RecordNFTTransferRows counts the posm Transfer rows a committed block queued
+// (attempted) and landed (written). Attempted is the decode evidence the
+// NoNFTTransfers alert keys on — a wrong PositionManager address raises no error
+// and empties it alone — and, as for state rows, a same-build replay lands
+// nothing while healthy, so the alert must never key on written.
+func (t *Telemetry) RecordNFTTransferRows(ctx context.Context, attempted, written int) {
+	if t == nil {
 		return
 	}
-	t.nftTransferRows.Add(ctx, int64(n), metric.WithAttributes(t.chainAttr))
+	if attempted > 0 {
+		t.nftTransferRowsAttempted.Add(ctx, int64(attempted), metric.WithAttributes(t.chainAttr))
+	}
+	if written > 0 {
+		t.nftTransferRowsWritten.Add(ctx, int64(written), metric.WithAttributes(t.chainAttr))
+	}
 }

@@ -323,7 +323,7 @@ func TestUniswapV4NFTTransferTokenBlockIndexServesTheHolderQuery(t *testing.T) {
 	const firstBlock = int64(22600000)
 	seedUniswapV4NFTTransferPlanHistory(t, ctx, managerID, firstBlock, 60, 40)
 
-	plan := explainUniswapV4Query(t, ctx, uniswapV4HolderAtBlockSQL, managerID, 7, firstBlock+31)
+	plan := explainUniswapV4Query(t, ctx, uniswapV4HolderAtBlockSQL, managerID, 7, firstBlock+31, uniswapV4FactParentChainID+900)
 
 	if !uniswapV4PlanIndexCondCovers(plan, "token_id") {
 		t.Errorf("the holder query does not reach token_id through an index condition, so idx_uniswap_v4_position_nft_transfer_token_block is not serving it:\n%s", plan)

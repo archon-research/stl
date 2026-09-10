@@ -1939,6 +1939,10 @@ JOIN (
 ) m ON m.id = t.position_manager_id
 WHERE t.token_id = 388720
   AND t.block_number <= 25873334
+  AND NOT EXISTS (
+      SELECT 1 FROM block_states b
+      WHERE b.chain_id = 1 AND b.number = t.block_number
+        AND b.version = t.block_version AND b.is_orphaned)
 ORDER BY t.block_number DESC, t.block_version DESC, t.log_index DESC,
          t.processing_version DESC
 LIMIT 1;
@@ -1946,7 +1950,11 @@ LIMIT 1;
 
 `log_index DESC` is load-bearing, not decoration: a token can change hands twice
 in one block (it happens on every routed sale), and dropping it silently returns
-the earlier holder. An all-zero `to_address` is a burn, not a holder.
+the earlier holder. An all-zero `to_address` is a burn, not a holder. The
+`block_states` exclusion is load-bearing too: nothing is re-read from chain
+state, so a transfer decoded on a fork the watcher later orphaned is superseded
+only if the canonical block re-emits one for that token — when it does not, the
+orphaned row would otherwise stay the newest and name a holder that never was.
 
 Two invariants worth knowing before you debug anything here:
 
@@ -2875,7 +2883,10 @@ the left side exists for the fresh-deploy reason spelt out on `NoPoolsTouched`.
 Blocks are advancing (`uniswap_v4_blocks_processed_total{status="success"}` is
 non-zero, both now and 6h ago) but **not one** Uniswap V4 PositionManager
 ERC-721 `Transfer` has been decoded
-(`uniswap_v4_nft_transfer_rows_written_total` is zero or absent) for 6 hours.
+(`uniswap_v4_nft_transfer_rows_attempted_total` is zero or absent) for 6 hours.
+The series counts rows *queued*, not landed, so a redelivered range that lands
+nothing (every INSERT conflicts away) still keeps it alive;
+`uniswap_v4_nft_transfer_rows_written_total` is the growth counter.
 
 `uniswap_v4_position_nft_transfer` is the only source of posm token holders, so
 while this fires "who holds token T" answers with stale data and no query can
@@ -2931,10 +2942,8 @@ is a straight-line decode.
      --rpc-url "$RPC_URL" | grep -c 'blockNumber'
    ```
 
-3. **Rows actually landing** — the metric counts the rows a committed block
-   inserted, so a non-empty recent tail means the metric pipeline broke rather
-   than the decode (a redelivered block re-offers rows that conflict away and
-   counts zero, which is healthy):
+3. **Rows actually landing** — a non-empty recent tail with the alert firing
+   means the metric pipeline broke rather than the decode:
 
    ```sql
    SELECT max(block_number) AS newest_block, count(*) AS rows_last_day
@@ -2965,7 +2974,7 @@ is a straight-line decode.
 
 ### Verify recovery
 
-`rate(uniswap_v4_nft_transfer_rows_written_total[6h]) > 0` for the affected
+`rate(uniswap_v4_nft_transfer_rows_attempted_total[6h]) > 0` for the affected
 chain, and the step-3 SQL's `newest_block` tracks the chain head.
 
 ---

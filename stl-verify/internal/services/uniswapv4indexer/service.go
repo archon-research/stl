@@ -204,11 +204,9 @@ func PoolManagerFor(pools []RegisteredPool) (common.Address, error) {
 
 // PositionManagerFor returns the one ERC-721 PositionManager the registry
 // shares, by PoolManagerFor's one-deployment rule. A registry that lost it would
-// hand back address(0), which the log filter matches.
+// hand back address(0), which no log is emitted by: every transfer would be
+// dropped without an error.
 func PositionManagerFor(pools []RegisteredPool) (RegisteredPositionManager, error) {
-	if len(pools) == 0 {
-		return RegisteredPositionManager{}, fmt.Errorf("no pools registered: no PositionManager to derive")
-	}
 	first := pools[0]
 	for _, pool := range pools[1:] {
 		if pool.PositionManager != first.PositionManager {
@@ -219,7 +217,7 @@ func PositionManagerFor(pools []RegisteredPool) (RegisteredPositionManager, erro
 		}
 	}
 	if first.PositionManager == (common.Address{}) || first.PositionManagerID <= 0 {
-		return RegisteredPositionManager{}, fmt.Errorf("pool %d carries no PositionManager registry row: address(0) would match every log", first.ID)
+		return RegisteredPositionManager{}, fmt.Errorf("pool %d carries no PositionManager registry row: address(0) matches no log, so every transfer would be dropped silently", first.ID)
 	}
 	return RegisteredPositionManager{ID: first.PositionManagerID, Address: first.PositionManager}, nil
 }
@@ -312,7 +310,7 @@ func (s *UniswapV4Service) recordBlockMetrics(ctx context.Context, acc blockAccu
 	s.telemetry.RecordStateRows(ctx, int(rows.Persisted))
 	s.telemetry.RecordTickRows(ctx, int(rows.TicksPersisted))
 	s.telemetry.RecordPositionRows(ctx, int(rows.PositionsPersisted))
-	s.telemetry.RecordNFTTransferRows(ctx, int(rows.NFTTransfersPersisted))
+	s.telemetry.RecordNFTTransferRows(ctx, len(acc.nftTransfers), int(rows.NFTTransfersPersisted))
 }
 
 // Only the snapshot_supported half reaches the due set, so only it may gate
