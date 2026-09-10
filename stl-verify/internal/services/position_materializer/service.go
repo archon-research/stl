@@ -109,9 +109,11 @@ func (s *Service) RunOnce(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// publishWithheld reports how many positions each projection's latest run withheld. The shared
-// function withholds a conflicting position and continues, so without this a projection reports
-// success every tick while a position sits frozen at a stale value and nothing says so.
+// publishWithheld reports each projection's positions_refused from its latest run: positions whose
+// new observations were withheld, and positions whose re-emitted stored key was declined. The
+// shared function does both and continues, so without this a projection reports success every tick
+// while a position sits at a stale value or the view and the spine disagree, and nothing says so.
+// The two classes are told apart by position_projection_refusal.reason, not by this number.
 //
 // A failure here does not fail the run: the projections did their work and the rows are committed.
 // It is logged, and a read that keeps failing shows up as the gauge going absent.
@@ -124,7 +126,7 @@ func (s *Service) publishWithheld(ctx context.Context) {
 	for projection, n := range refused {
 		s.telemetry.RecordRefused(ctx, projection, n)
 		if n > 0 {
-			s.logger.Warn("projection is withholding positions",
+			s.logger.Warn("projection withheld or declined observations for some positions",
 				"projection", projection, "positions_refused", n)
 		}
 	}

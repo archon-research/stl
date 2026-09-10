@@ -39,7 +39,7 @@ func NewTelemetryWithProvider(mp metric.MeterProvider) (*Telemetry, error) {
 	}
 	if t.positionsRefused, err = meter.Int64Gauge(
 		"position_materializer.positions_refused",
-		metric.WithDescription("Positions the projection's latest run withheld rather than applied"),
+		metric.WithDescription("Positions the projection's latest run withheld or declined a correction for"),
 	); err != nil {
 		return nil, fmt.Errorf("building positionsRefused gauge: %w", err)
 	}

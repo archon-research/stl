@@ -705,9 +705,10 @@ groups:
         annotations:
           summary: "position-materializer is withholding positions in {{ $labels.projection }}"
           description: >-
-            {{ $labels.projection }} has withheld {{ $value }} position(s) on
-            {{ $labels.cluster }} for 3h. Those positions read as current downstream while
-            sitting at a stale value. Find them with the query in the runbook.
+            {{ $labels.projection }} has withheld or declined {{ $value }} position(s) on
+            {{ $labels.cluster }} for 3h. A withheld position reads as current downstream while
+            sitting at a stale value; a declined correction means the view and the spine disagree.
+            The runbook has a query per class.
           runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializerwithholdingpositions"
 
       - alert: VectorPositionMaterializerViewFailing
