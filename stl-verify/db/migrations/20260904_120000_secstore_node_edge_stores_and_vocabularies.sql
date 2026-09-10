@@ -91,8 +91,8 @@ CREATE TABLE weight_basis_vocabulary (
     basis        text PRIMARY KEY,
     description  text NOT NULL
 );
-COMMENT ON TABLE weight_basis_vocabulary IS '[Configuration] Legal weight bases (ADR-0005 §3). Weights of unlike bases must never be summed; conversion ratios are edge payload, not weights. Plain table: seed-once.';
-COMMENT ON COLUMN weight_basis_vocabulary.basis IS 'Roles: PK. Basis code (VALUE / NOTIONAL / UNITS / OWNERSHIP_PCT).';
+COMMENT ON TABLE weight_basis_vocabulary IS '[Configuration] Legal weight bases (ADR-0005 §3): three, each a share of a whole. Weights of unlike bases must never be summed; a conversion ratio is edge payload, not a weight — which is why UNITS is absent (see the basis column). Plain table: seed-once, extended by reviewed migration.';
+COMMENT ON COLUMN weight_basis_vocabulary.basis IS 'Roles: PK. Basis code (VALUE / NOTIONAL / OWNERSHIP_PCT). Each names a SHARE OF A WHOLE, which is what makes weights along a path multiplicable and weights under one basis summable. UNITS was seeded here and dropped before merge: no rel_type declared it, and ''unit ratio'' is a conversion ratio, which ADR-0005 §3 puts in the edge payload rather than the weight (review of the first draft; #652 carries the definition).';
 COMMENT ON COLUMN weight_basis_vocabulary.description IS 'What the basis measures and where it is used.';
 
 -- Declared before rel_type_vocabulary so its weight_basis is a real FK, not a soft one.
@@ -495,7 +495,6 @@ COMMENT ON FUNCTION sec_edge_as_of(date, pg_snapshot) IS 'Bitemporal edge read; 
 INSERT INTO weight_basis_vocabulary (basis, description) VALUES
  ('VALUE','share by USD value: look-through composition, allocations'),
  ('NOTIONAL','share by notional: index/benchmark membership'),
- ('UNITS','unit ratio'),
  ('OWNERSHIP_PCT','ownership fraction: corporate structure')
 ON CONFLICT (basis) DO NOTHING;
 
