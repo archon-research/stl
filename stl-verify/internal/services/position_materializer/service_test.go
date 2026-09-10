@@ -9,15 +9,15 @@ import (
 
 // mockMaterializer implements outbound.PositionMaterializer with a func field.
 type mockMaterializer struct {
-	fn         func(ctx context.Context, view string, buildID int) (int64, error)
+	fn         func(ctx context.Context, view string, buildID int, runID int64) (int64, error)
 	calls      []string
 	refused    map[string]int64
 	refusedErr error
 }
 
-func (m *mockMaterializer) Materialize(ctx context.Context, view string, buildID int) (int64, error) {
+func (m *mockMaterializer) Materialize(ctx context.Context, view string, buildID int, runID int64) (int64, error) {
 	m.calls = append(m.calls, view)
-	return m.fn(ctx, view, buildID)
+	return m.fn(ctx, view, buildID, runID)
 }
 
 func (m *mockMaterializer) RefusedByProjection(context.Context) (map[string]int64, error) {
@@ -25,7 +25,7 @@ func (m *mockMaterializer) RefusedByProjection(context.Context) (map[string]int6
 }
 
 func TestNewService_Validation(t *testing.T) {
-	ok := &mockMaterializer{fn: func(context.Context, string, int) (int64, error) { return 0, nil }}
+	ok := &mockMaterializer{fn: func(context.Context, string, int, int64) (int64, error) { return 0, nil }}
 	cases := []struct {
 		name    string
 		views   []string
@@ -47,9 +47,9 @@ func TestNewService_Validation(t *testing.T) {
 			}
 			var err error
 			if mat == nil {
-				_, err = NewService(tc.views, nil, tc.buildID, nil, nil)
+				_, err = NewService(tc.views, nil, tc.buildID, 77, nil, nil)
 			} else {
-				_, err = NewService(tc.views, mat, tc.buildID, nil, nil)
+				_, err = NewService(tc.views, mat, tc.buildID, 77, nil, nil)
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("NewService error = %v; want it to contain %q", err, tc.want)
@@ -58,13 +58,39 @@ func TestNewService_Validation(t *testing.T) {
 	}
 }
 
+// The run id is opened once per process and has to reach every projection, or the rows a sweep
+// appends cannot be attributed to the artefact that wrote them (ADR-0006 §2).
+func TestRunOncePropagatesTheWriterRunToEveryProjection(t *testing.T) {
+	var runs []int64
+	mat := &mockMaterializer{fn: func(_ context.Context, _ string, _ int, runID int64) (int64, error) {
+		runs = append(runs, runID)
+		return 0, nil
+	}}
+	svc, err := NewService([]string{"va", "vb", "vc"}, mat, 4711, 8823, nil, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	if err := svc.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(runs) != 3 {
+		t.Fatalf("materialized %d projections, want 3", len(runs))
+	}
+	for _, r := range runs {
+		if r != 8823 {
+			t.Errorf("runID = %d; want 8823 propagated to every projection", r)
+		}
+	}
+}
+
 func TestRunOnce_AllViewsInOrderWithReason(t *testing.T) {
 	var builds []int
-	mat := &mockMaterializer{fn: func(_ context.Context, _ string, buildID int) (int64, error) {
+
+	mat := &mockMaterializer{fn: func(_ context.Context, _ string, buildID int, _ int64) (int64, error) {
 		builds = append(builds, buildID)
 		return 3, nil
 	}}
-	svc, err := NewService([]string{"va", "vb", "vc"}, mat, 4711, nil, nil)
+	svc, err := NewService([]string{"va", "vb", "vc"}, mat, 4711, 77, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,13 +109,13 @@ func TestRunOnce_AllViewsInOrderWithReason(t *testing.T) {
 
 func TestRunOnce_OneFailureDoesNotStarveTheRest(t *testing.T) {
 	boom := errors.New("contract violation")
-	mat := &mockMaterializer{fn: func(_ context.Context, view string, _ int) (int64, error) {
+	mat := &mockMaterializer{fn: func(_ context.Context, view string, _ int, _ int64) (int64, error) {
 		if view == "vb" {
 			return 0, boom
 		}
 		return 1, nil
 	}}
-	svc, err := NewService([]string{"va", "vb", "vc"}, mat, 4711, nil, nil)
+	svc, err := NewService([]string{"va", "vb", "vc"}, mat, 4711, 77, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,13 +133,13 @@ func TestRunOnce_OneFailureDoesNotStarveTheRest(t *testing.T) {
 
 func TestRunOnce_ParentCancellationAborts(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	mat := &mockMaterializer{fn: func(_ context.Context, view string, _ int) (int64, error) {
+	mat := &mockMaterializer{fn: func(_ context.Context, view string, _ int, _ int64) (int64, error) {
 		if view == "va" {
 			cancel() // cancellation arrives while the first view is running
 		}
 		return 1, nil
 	}}
-	svc, err := NewService([]string{"va", "vb"}, mat, 1, nil, nil)
+	svc, err := NewService([]string{"va", "vb"}, mat, 1, 77, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

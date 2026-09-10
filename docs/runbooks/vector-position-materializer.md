@@ -1,7 +1,7 @@
 # Runbook — position-materializer (VEC-402)
 
-The cronjob calls one per-projection materializer function (`materialize_morpho_market(build_id)`,
-`materialize_aave_lending(build_id)`, ...) per configured entry. Each wrapper runs its projection's own
+The cronjob calls one per-projection materializer function (`materialize_morpho_market`,
+`materialize_aave_lending`, ...) per configured entry, passing `p_build_id` and `p_run_id` by name. Each wrapper runs its projection's own
 pre-flight checks, then the shared `materialize_position_projection` validates the view against the
 `position_state` column contract, evaluates it once into a temp table, runs its checks, and appends the
 observations it has not already stored.
@@ -136,16 +136,17 @@ recovered run writes exactly the observations the failed runs missed.
 
 ## Checking what a run actually did
 
-`build_id` records which build wrote each row, so a run is traceable after the fact:
+`build_id` records which build wrote each row and `run_id` which process start, so a run is traceable after the fact:
 
 ```sql
-SELECT build_id, projection, count(*) AS observations, min(created_at), max(created_at)
+SELECT build_id, run_id, projection, count(*) AS observations, min(created_at), max(created_at)
   FROM position_state
- GROUP BY build_id, projection
+ GROUP BY build_id, run_id, projection
  ORDER BY max(created_at) DESC
  LIMIT 10;
 ```
 
-A `build_id` of `0` means the row was written without a resolved build (the reserved pre-tracking
-value) — for this service that indicates the build registry lookup was skipped, which should not
+A `run_id` of `NULL` means the row predates run tracking; the service refuses to start without an
+open run, so a deployed sweep never writes one. A `build_id` of `0` means the row was written without
+a resolved build (the reserved pre-tracking value) — for this service that indicates the build registry lookup was skipped, which should not
 happen in a deployed environment.

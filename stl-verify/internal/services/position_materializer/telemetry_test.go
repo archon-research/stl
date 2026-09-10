@@ -46,10 +46,10 @@ func TestRecordRun_RowsChangedSeriesExistsWhenNothingWasAppended(t *testing.T) {
 func TestRunOnce_PublishesTheWithheldLevel(t *testing.T) {
 	tel, reader := newRecordingTelemetry(t)
 	mm := &mockMaterializer{
-		fn:      func(context.Context, string, int) (int64, error) { return 0, nil },
+		fn:      func(context.Context, string, int, int64) (int64, error) { return 0, nil },
 		refused: map[string]int64{"public.position_sky_prime_debt": 3, "public.position_morpho_vault": 0},
 	}
-	s, err := NewService([]string{"materialize_sky_prime_debt"}, mm, 0, nil, tel)
+	s, err := NewService([]string{"materialize_sky_prime_debt"}, mm, 0, 77, nil, tel)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

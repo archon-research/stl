@@ -23,10 +23,10 @@ import (
 	"syscall"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/services/position_materializer"
 )
 
@@ -126,17 +126,16 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies, materializers 
 		return nil, fmt.Errorf("creating position materializer telemetry: %w", err)
 	}
 
-	// Provenance is build_id on every appended row (ADR-0002), resolved the same way
-	// every other cronjob resolves it: the registry maps this binary's git hash to an
-	// id, inserting it on first sight.
-	buildReg, err := buildregistry.New(ctx, deps.Pool)
+	// Provenance on every appended row: build_id for the code artefact (ADR-0002) and run_id
+	// for this process start (ADR-0006 §2), resolved the way every other cronjob resolves them.
+	buildReg, runID, err := writerrun.Open(ctx, deps.Pool)
 	if err != nil {
-		return nil, fmt.Errorf("registering build: %w", err)
+		return nil, err
 	}
 
 	repo := postgres.NewPositionMaterializerRepository(deps.Pool, deps.Logger)
 
-	service, err := position_materializer.NewService(materializers, repo, int(buildReg.BuildID()), deps.Logger, telemetry)
+	service, err := position_materializer.NewService(materializers, repo, int(buildReg.BuildID()), int64(runID), deps.Logger, telemetry)
 	if err != nil {
 		return nil, fmt.Errorf("creating position materializer service: %w", err)
 	}

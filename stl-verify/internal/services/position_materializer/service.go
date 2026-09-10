@@ -27,6 +27,7 @@ type Service struct {
 	materializers []string
 	materializer  outbound.PositionMaterializer
 	buildID       int
+	runID         int64
 	logger        *slog.Logger
 	telemetry     *Telemetry
 }
@@ -35,12 +36,13 @@ type Service struct {
 // list of materialize_<projection> function names to run; it must be non-empty (an empty list
 // means the deployment is misconfigured, not that there is nothing to do), with
 // no blank or duplicate entries (a duplicate is a config typo — reruns are
-// idempotent but a silent double-run hides the mistake). buildID is stamped on
-// every appended row as the ADR-0002 code-provenance record; it must not be
+// idempotent but a silent double-run hides the mistake). buildID and runID are
+// stamped on every appended row, as the ADR-0002 code-provenance record and the
+// ADR-0006 §2 writer run; neither may be
 // write, and the database function rejects a blank one anyway — failing here is
 // earlier and clearer. logger defaults to slog.Default(); telemetry may be nil
 // (its metrics become no-ops).
-func NewService(materializers []string, materializer outbound.PositionMaterializer, buildID int, logger *slog.Logger, telemetry *Telemetry) (*Service, error) {
+func NewService(materializers []string, materializer outbound.PositionMaterializer, buildID int, runID int64, logger *slog.Logger, telemetry *Telemetry) (*Service, error) {
 	if materializer == nil {
 		return nil, fmt.Errorf("position materializer is required")
 	}
@@ -60,6 +62,11 @@ func NewService(materializers []string, materializer outbound.PositionMaterializ
 	if buildID < 0 {
 		return nil, fmt.Errorf("buildID must not be negative, got %d", buildID)
 	}
+	// A run is opened at startup, so a zero here means the wiring skipped it and every row this
+	// process appends would be unattributable.
+	if runID <= 0 {
+		return nil, fmt.Errorf("runID must be a writer_run id, got %d", runID)
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -67,6 +74,7 @@ func NewService(materializers []string, materializer outbound.PositionMaterializ
 		materializers: materializers,
 		materializer:  materializer,
 		buildID:       buildID,
+		runID:         runID,
 		logger:        logger.With("component", "position-materializer"),
 		telemetry:     telemetry,
 	}, nil
@@ -94,7 +102,7 @@ func (s *Service) RunOnce(ctx context.Context) error {
 			break
 		}
 		start := time.Now()
-		changed, err := s.materializer.Materialize(ctx, m, s.buildID)
+		changed, err := s.materializer.Materialize(ctx, m, s.buildID, s.runID)
 		if err != nil {
 			s.logger.Error("projection materialization failed", "materializer", m, "error", err)
 			s.telemetry.RecordRun(ctx, m, "error", 0)

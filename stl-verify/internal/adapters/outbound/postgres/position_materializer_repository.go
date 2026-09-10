@@ -53,7 +53,7 @@ func NewPositionMaterializerRepository(pool *pgxpool.Pool, logger *slog.Logger) 
 // chunk lock for longer than that (~900ms observed for one run_job over 100
 // chunks). If that proves too short in practice the values want raising, but not
 // by guesswork ahead of a measurement from a real runner.
-func (r *PositionMaterializerRepository) Materialize(ctx context.Context, materializer string, buildID int) (int64, error) {
+func (r *PositionMaterializerRepository) Materialize(ctx context.Context, materializer string, buildID int, runID int64) (int64, error) {
 	cfg := retry.Config{
 		MaxRetries:     10,
 		InitialBackoff: 1 * time.Millisecond,
@@ -67,11 +67,12 @@ func (r *PositionMaterializerRepository) Materialize(ctx context.Context, materi
 			"attempt", attempt,
 			"materializer", materializer,
 			"build_id", buildID,
+			"run_id", runID,
 			"backoff", backoff)
 	}
 
 	return retry.Do(ctx, cfg, isRetryableTxError, onRetry, func() (int64, error) {
-		return r.materializeOnce(ctx, materializer, buildID)
+		return r.materializeOnce(ctx, materializer, buildID, runID)
 	})
 }
 
@@ -108,10 +109,13 @@ func (r *PositionMaterializerRepository) RefusedByProjection(ctx context.Context
 // the shared function (per-view advisory xact lock). The function name is quoted as
 // an identifier, so a misconfigured entry fails loudly as an unknown function and
 // cannot be silently skipped or read as SQL.
-func (r *PositionMaterializerRepository) materializeOnce(ctx context.Context, materializer string, buildID int) (int64, error) {
+// The arguments are named, not positional: the wrappers do not share an argument list
+// (materialize_maple_loan takes a skew tolerance between the two provenance parameters), so a
+// positional second argument would land on whatever that projection declares there.
+func (r *PositionMaterializerRepository) materializeOnce(ctx context.Context, materializer string, buildID int, runID int64) (int64, error) {
 	var changed int64
-	q := fmt.Sprintf(`SELECT %s($1)`, pgx.Identifier{materializer}.Sanitize())
-	if err := r.pool.QueryRow(ctx, q, buildID).Scan(&changed); err != nil {
+	q := fmt.Sprintf(`SELECT %s(p_build_id => $1, p_run_id => $2)`, pgx.Identifier{materializer}.Sanitize())
+	if err := r.pool.QueryRow(ctx, q, buildID, runID).Scan(&changed); err != nil {
 		return 0, fmt.Errorf("running %s: %w", materializer, err)
 	}
 	return changed, nil

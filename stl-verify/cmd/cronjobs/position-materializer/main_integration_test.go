@@ -52,10 +52,12 @@ func TestPositionMaterializer_RunOnce(t *testing.T) {
 	// the other refuses, the way materialize_aave_lending refuses an unmapped reserve. The refusal must
 	// surface through the runner and must not stop the other projection from materializing.
 	if _, err := pool.Exec(ctx, `
-		CREATE FUNCTION materialize_itest(p_build_id integer DEFAULT 0) RETURNS bigint LANGUAGE sql AS $fn$
-			SELECT materialize_position_projection('position_itest'::regclass, p_build_id);
+		CREATE FUNCTION materialize_itest(p_build_id integer DEFAULT 0, p_max_skew interval DEFAULT '1 day',
+		                                  p_run_id bigint DEFAULT NULL) RETURNS bigint LANGUAGE sql AS $fn$
+			SELECT materialize_position_projection('position_itest'::regclass, p_build_id, p_run_id);
 		$fn$;
-		CREATE FUNCTION materialize_itest_refusing(p_build_id integer DEFAULT 0) RETURNS bigint LANGUAGE plpgsql AS $fn$
+		CREATE FUNCTION materialize_itest_refusing(p_build_id integer DEFAULT 0,
+		                                           p_run_id bigint DEFAULT NULL) RETURNS bigint LANGUAGE plpgsql AS $fn$
 			BEGIN RAISE EXCEPTION 'materialize_itest_refusing: unresolved inputs, refusing to run: reserve 7'; END
 		$fn$;`); err != nil {
 		t.Fatalf("create materializer wrappers: %v", err)
@@ -84,9 +86,10 @@ func TestPositionMaterializer_RunOnce(t *testing.T) {
 	// build_registry.id is a SERIAL starting above the reserved 0 = pre-tracking row).
 	var quantity int64
 	var buildID int
+	var runID *int64
 	var projection string
-	if err := pool.QueryRow(ctx, `SELECT quantity, build_id, projection FROM position_state
-		WHERE position_id = position_id(1, 10, 'itest-instrument', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')`).Scan(&quantity, &buildID, &projection); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT quantity, build_id, run_id, projection FROM position_state
+		WHERE position_id = position_id(1, 10, 'itest-instrument', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')`).Scan(&quantity, &buildID, &runID, &projection); err != nil {
 		t.Fatalf("observation not appended: %v", err)
 	}
 	if quantity != 5 {
@@ -97,6 +100,20 @@ func TestPositionMaterializer_RunOnce(t *testing.T) {
 	}
 	if projection != "public.position_itest" {
 		t.Errorf("projection = %q; want public.position_itest", projection)
+	}
+	// And with the writer run this process opened. The stub wrapper declares a parameter between the
+	// two provenance ones, as materialize_maple_loan does, so a positional second argument would have
+	// bound the run to a skew tolerance instead of reaching the spine.
+	if runID == nil || *runID <= 0 {
+		t.Errorf("run_id = %v; want the writer run this process opened", runID)
+	} else {
+		var openRuns int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM writer_run WHERE id = $1`, *runID).Scan(&openRuns); err != nil {
+			t.Fatal(err)
+		}
+		if openRuns != 1 {
+			t.Errorf("run_id %d names no writer_run row", *runID)
+		}
 	}
 
 	// The rerun re-derives the same observation, so it must append nothing; the refusing wrapper
