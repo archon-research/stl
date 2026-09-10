@@ -242,48 +242,57 @@ _GET_TOKEN_BY_CHAIN_ADDRESS_SQL = text(
 
 _LATEST_PRICE_SQL = text(
     f"""
+    -- Both halves read the trigger-maintained *_current caches — one row per
+    -- source per token — not the onchain_token_price / offchain_token_price
+    -- hypertables. A latest-row read with no time predicate cannot exclude a
+    -- chunk, so on the histories this statement planned over ~700 chunks per
+    -- call: 63 MB and 5.6 s of planning for a 40 ms read on staging (VEC-672).
     WITH latest_onchain AS (
         SELECT
-            otp.token_id,
+            tpc.token_id,
             'onchain'::TEXT AS source_type,
-            otp.oracle_id::BIGINT AS source_id,
+            tpc.oracle_id::BIGINT AS source_id,
             o.name AS source_name,
             o.display_name AS source_display_name,
-            otp.price_usd,
-            otp.timestamp,
-            EXTRACT(EPOCH FROM (NOW() - otp.timestamp))::BIGINT AS staleness_seconds
-        FROM onchain_token_price otp
-        JOIN oracle o ON o.id = otp.oracle_id
-        WHERE otp.token_id = :token_id
-        -- enabled-mapping filter + oracle_id tiebreak (canonical rationale, incl.
-        -- the append-on-change read path, on _DIRECT_ASSET_HOLDINGS_SQL in
-        -- allocation_position_repository.py). A source retired as of
-        -- :reference_effective_at is excluded; same-block rows from two oracles
-        -- also share the block timestamp, so ties reach this read too.
+            tpc.price_usd,
+            tpc.block_timestamp AS "timestamp",
+            EXTRACT(EPOCH FROM (NOW() - tpc.block_timestamp))::BIGINT AS staleness_seconds
+        FROM token_price_current tpc
+        JOIN oracle o ON o.id = tpc.oracle_id
+        WHERE tpc.token_id = :token_id
+          -- A cache row without a timestamp is one whose winning history row a
+          -- plain session cannot read (20260910_120000); it cannot be dated, so
+          -- it is absent here, exactly as it was absent from the history read.
+          AND tpc.block_timestamp IS NOT NULL
+          -- enabled-mapping filter + oracle_id tiebreak (canonical rationale, incl.
+          -- the append-on-change read path, on _DIRECT_ASSET_HOLDINGS_SQL in
+          -- allocation_position_repository.py). A source retired as of
+          -- :reference_effective_at is excluded; same-block rows from two oracles
+          -- also share the block timestamp, so ties reach this read too.
           AND EXISTS (
               SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
-              WHERE oa.oracle_id = otp.oracle_id
-                AND oa.token_id = otp.token_id
+              WHERE oa.oracle_id = tpc.oracle_id
+                AND oa.token_id = tpc.token_id
                 AND oa.enabled
           )
-        ORDER BY otp.timestamp DESC, otp.block_number DESC, otp.block_version DESC,
-                 otp.processing_version DESC, otp.oracle_id DESC
+        ORDER BY tpc.block_timestamp DESC, tpc.block_number DESC, tpc.block_version DESC,
+                 tpc.processing_version DESC, tpc.oracle_id DESC
         LIMIT 1
     ),
     latest_offchain AS (
         SELECT
-            otp.token_id,
+            opc.token_id,
             'offchain'::TEXT AS source_type,
-            otp.source_id::BIGINT AS source_id,
+            opc.source_id::BIGINT AS source_id,
             ops.name AS source_name,
             ops.display_name AS source_display_name,
-            otp.price_usd,
-            otp.timestamp,
-            EXTRACT(EPOCH FROM (NOW() - otp.timestamp))::BIGINT AS staleness_seconds
-        FROM offchain_token_price otp
-        JOIN offchain_price_source ops ON ops.id = otp.source_id
-        WHERE otp.token_id = :token_id
-        ORDER BY otp.timestamp DESC, otp.processing_version DESC
+            opc.price_usd,
+            opc.snapshot_time AS "timestamp",
+            EXTRACT(EPOCH FROM (NOW() - opc.snapshot_time))::BIGINT AS staleness_seconds
+        FROM offchain_token_price_current opc
+        JOIN offchain_price_source ops ON ops.id = opc.source_id
+        WHERE opc.token_id = :token_id
+        ORDER BY opc.snapshot_time DESC, opc.processing_version DESC
         LIMIT 1
     )
     SELECT

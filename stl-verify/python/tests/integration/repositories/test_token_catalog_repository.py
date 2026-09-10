@@ -149,3 +149,60 @@ async def test_get_latest_price_excludes_disabled_higher_block_source(repository
     assert quote is not None
     assert quote.source_name == "cat_dis_enabled"
     assert quote.price_usd == Decimal("1.25")
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_get_latest_price_serves_the_newer_of_onchain_and_offchain(repository, db_url) -> None:
+    """The on-chain and off-chain caches compete on observation time; the newer one serves the quote.
+
+    Both halves of the read moved from the price histories to their *_current
+    caches (VEC-672); the cross-source choice and the reported timestamp must be
+    unchanged by that.
+    """
+    conn = await asyncpg.connect(db_url)
+    try:
+        token_id = await insert_token(conn, "mixCat", 6, b"\x8a" * 20)
+        oracle_id = await conn.fetchval(
+            "INSERT INTO oracle (name, display_name, chain_id, address) "
+            "VALUES ('cat_mix_oracle', 'Catalog mixed-source oracle', 1, $1) RETURNING id",
+            b"\x8b" * 20,
+        )
+        source_id = await conn.fetchval("SELECT id FROM offchain_price_source WHERE name = 'coingecko'")
+        onchain_at = dt.datetime(2026, 3, 3, 0, 0, tzinfo=dt.UTC)
+        offchain_at = onchain_at + dt.timedelta(hours=1)
+        await conn.execute(
+            "INSERT INTO onchain_token_price "
+            "(token_id, oracle_id, block_number, block_version, timestamp, price_usd) "
+            "VALUES ($1, $2, 6000, 0, $3, 2.00)",
+            token_id,
+            oracle_id,
+            onchain_at,
+        )
+        await insert_oracle_asset(conn, oracle_id, token_id)
+        await conn.execute(
+            'INSERT INTO offchain_token_price (token_id, source_id, "timestamp", price_usd) VALUES ($1, $2, $3, 2.10)',
+            token_id,
+            source_id,
+            offchain_at,
+        )
+
+        quote = await repository.get_latest_price(token_id)
+        assert quote is not None
+        assert (quote.source_name, quote.price_usd, quote.timestamp) == ("coingecko", Decimal("2.10"), offchain_at)
+
+        newer_onchain_at = offchain_at + dt.timedelta(hours=1)
+        await conn.execute(
+            "INSERT INTO onchain_token_price "
+            "(token_id, oracle_id, block_number, block_version, timestamp, price_usd) "
+            "VALUES ($1, $2, 6001, 0, $3, 2.20)",
+            token_id,
+            oracle_id,
+            newer_onchain_at,
+        )
+    finally:
+        await conn.close()
+
+    quote = await repository.get_latest_price(token_id)
+    assert quote is not None
+    assert (quote.source_name, quote.price_usd) == ("cat_mix_oracle", Decimal("2.20"))
+    assert quote.timestamp == newer_onchain_at

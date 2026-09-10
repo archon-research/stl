@@ -163,6 +163,7 @@ func loginRoleDSN(t *testing.T, pool *pgxpool.Pool) string {
 var triggerOnlyCacheTables = []string{
 	"allocation_position_current",
 	"morpho_market_position_current",
+	"offchain_token_price_current",
 }
 
 // TestTriggerOnlyCachesGrantTheAppRoleNoWrite asserts that the application role keeps SELECT and
