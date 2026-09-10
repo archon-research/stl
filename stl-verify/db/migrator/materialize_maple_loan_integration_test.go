@@ -884,3 +884,31 @@ func TestMapleLoanARepaymentClosesAlongsideNewOriginations(t *testing.T) {
 		t.Errorf("the closing observation carries %s; want 0", rs[1].qty)
 	}
 }
+
+// The wrapper is the only path the runner calls, so it has to forward the writer run to the spine or
+// every row this projection appends is provenance-free (ADR-0006 §2). The run record is the witness:
+// its run_id can only have arrived through the wrapper's own parameter.
+func TestMapleLoanForwardsTheWriterRun(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+	f := seedMaple(ctx, t, pool, map[string]int{"run-fwd": 1})
+	f.blocks(t, 1, 100, "2026-04-01T00:00:00Z", 40, 3600)
+	f.cycle(t, "run-fwd", "2026-04-01T05:00:00Z", "1000", 0)
+	var n int64
+	if err := pool.QueryRow(ctx, `SELECT materialize_maple_loan(7, $1::interval, 9182)`, mapleTolerance).Scan(&n); err != nil {
+		t.Fatalf("materialize_maple_loan with a run: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("appended %d rows, want 1", n)
+	}
+	var runID *int64
+	var buildID int
+	if err := pool.QueryRow(ctx, `
+		SELECT run_id, build_id FROM position_state ORDER BY block_timestamp DESC LIMIT 1`).Scan(&runID, &buildID); err != nil {
+		t.Fatalf("read the appended row: %v", err)
+	}
+	if runID == nil || *runID != 9182 || buildID != 7 {
+		t.Errorf("appended row = run_id %v build_id %d, want 9182 and 7", runID, buildID)
+	}
+}
