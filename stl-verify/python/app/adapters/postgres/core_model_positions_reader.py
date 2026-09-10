@@ -63,7 +63,7 @@ from decimal import Decimal
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import text
+from sqlalchemy import TextClause, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.adapters.postgres.core_model_orderbook_reader import BTC_GROUP, ETH_GROUP
@@ -95,14 +95,24 @@ _ORACLE_ID = text("""
     LIMIT 1
 """)
 
+
 # A feed that wrote nothing at all in the window is the dead-indexer case; a
 # single token's old row is not (rows are written only when a price changes).
-_FEED_ALIVE = text("""
-    SELECT 1
-    FROM onchain_token_price
-    WHERE oracle_id = :oracle_id AND "timestamp" > now() - CAST(:max_age AS interval)
-    LIMIT 1
-""")
+#
+# The window is interpolated as a SQL literal, never bound: `now() - $n` is not
+# constified, so a bound interval planned every chunk of onchain_token_price
+# (21.8 MB / 754 ms on staging, VEC-672) while the literal excludes all but the
+# window's chunks at plan time (100 kB / 0.4 ms). The value is config, an int of
+# seconds, never user input.
+def _feed_alive_sql(max_age: timedelta) -> TextClause:
+    seconds = max(int(max_age.total_seconds()), 0)
+    return text(f"""
+        SELECT 1
+        FROM onchain_token_price
+        WHERE oracle_id = :oracle_id AND "timestamp" > now() - interval '{seconds} seconds'
+        LIMIT 1
+    """)
+
 
 # Newest state per (user, token) per side from the trigger-fed *_current caches,
 # not DISTINCT ON over the histories: those hypertables tier chunks older than a
@@ -449,9 +459,11 @@ _SYRUP_POSITIONS = text("""
       AND ls.synced_at = (SELECT synced_at FROM pool_cycle)
 """)
 
-# Loans of one cycle share one Maple-attested price per symbol; anything else
-# is a data defect, not a spread to average over.
-_SYRUP_PRICE_TOLERANCE = 1e-6
+# Maple values each loan's collateral separately, so loans of one cycle carry
+# slightly different attested prices per symbol (observed ~0.1% in prod). A
+# spread beyond this limit is not valuation timing but a scale/join defect
+# (1e8-vs-1e6 is 100x; a stale-cycle mix is percent-level on a volatile day).
+_SYRUP_PRICE_SPREAD_LIMIT = 0.10
 
 # Computed coverage (collateral USD / principal) and Maple's own acm_ratio are
 # derived from the same attested prices, so they should agree to rounding;
@@ -464,38 +476,66 @@ def syrup_lltv(liquidation_level: float) -> float:
     return float(_SYRUP_PAR_COVERAGE_LEVEL) / float(liquidation_level)
 
 
-def syrup_attested_prices(rows: Sequence[Any]) -> dict[str, float]:
-    """``{SYMBOL: price}`` from Maple's attested per-unit valuations — the market frame's input.
+def _syrup_attested_price(r: Any) -> float:
+    """Maple's attested per-unit USD valuation of the loan's collateral (``asset_value_usd``, x1e8)."""
+    return float(Decimal(str(r.asset_value_usd)) / Decimal(10) ** 8)
 
-    Scoped to the loans that can enter the frame (above-par trigger): a price
-    disagreement on an excluded stable must not fail the whole market.
+
+def _syrup_collateral_qty(r: Any) -> float:
+    """Collateral amount in token units (``asset_amount`` with ``asset_decimals`` applied)."""
+    return float(Decimal(str(r.asset_amount)) / (Decimal(10) ** int(r.asset_decimals)))
+
+
+def _syrup_in_frame_scope(r: Any) -> bool:
+    """Whether the loan can enter the frame: valued collateral and an above-par trigger."""
+    if r.asset_symbol is None or r.asset_symbol == "" or r.asset_amount is None or r.asset_value_usd is None:
+        return False
+    return r.liquidation_level is not None and float(r.liquidation_level) > _SYRUP_PAR_COVERAGE_LEVEL
+
+
+def syrup_attested_prices(rows: Sequence[Any]) -> dict[str, float]:
+    """``{SYMBOL: price}`` — the market frame's input, from Maple's per-loan attested valuations.
+
+    The quantity-weighted mean, so ``sum(<sym>_supply) x oracle_price`` equals
+    the users frame's ``sum(<sym>_supply_usd)`` by construction. Scoped to the
+    loans that can enter the frame (above-par trigger): a price disagreement on
+    an excluded stable must not fail the whole market.
     """
-    prices: dict[str, float] = {}
+    qty_sum: dict[str, float] = {}
+    usd_sum: dict[str, float] = {}
+    lo: dict[str, float] = {}
+    hi: dict[str, float] = {}
     for r in rows:
-        if r.asset_symbol is None or r.asset_symbol == "" or r.asset_value_usd is None:
-            continue
-        if r.liquidation_level is None or float(r.liquidation_level) <= _SYRUP_PAR_COVERAGE_LEVEL:
+        if not _syrup_in_frame_scope(r):
             continue
         symbol = r.asset_symbol.upper()
-        price = float(Decimal(str(r.asset_value_usd)) / Decimal(10) ** 8)
-        known = prices.setdefault(symbol, price)
-        if abs(known - price) > _SYRUP_PRICE_TOLERANCE * max(abs(known), abs(price)):
+        price = _syrup_attested_price(r)
+        qty = _syrup_collateral_qty(r)
+        if qty * price <= 0:
+            # The users frame drops these loans (no positive collateral value),
+            # so they must not weigh on the market frame's price either.
+            continue
+        qty_sum[symbol] = qty_sum.get(symbol, 0.0) + qty
+        usd_sum[symbol] = usd_sum.get(symbol, 0.0) + qty * price
+        lo[symbol] = min(lo.get(symbol, price), price)
+        hi[symbol] = max(hi.get(symbol, price), price)
+    for symbol in hi:
+        if hi[symbol] - lo[symbol] > _SYRUP_PRICE_SPREAD_LIMIT * hi[symbol]:
             raise ValueError(
-                f"Maple attested two prices for {symbol} in one cycle ({known} vs {price}); "
-                "refusing an ambiguous collateral valuation"
+                f"Maple's attested {symbol} prices span {lo[symbol]} to {hi[symbol]} in one cycle; "
+                "a spread this wide is a units or snapshot-join defect, refusing to value the market"
             )
-    return prices
+    return {s: usd_sum[s] / qty_sum[s] for s in qty_sum if qty_sum[s] > 0}
 
 
 def build_syrup_users_frame(rows: Sequence[Any], loan_token: str, underlying_decimals: int) -> pd.DataFrame:
     """Assemble the Syrup users frame: one row per external Active loan.
 
     BA's parquet is per-loan too (wallet_address repeats; nothing downstream
-    groups by it), each loan carrying exactly one collateral asset and its own
-    LT from the loan's margin-call trigger.
+    groups by it), each loan carrying exactly one collateral asset, its own
+    attested valuation, and its own LT from the loan's margin-call trigger.
     """
     borrow_col = loan_token.lower()
-    prices = syrup_attested_prices(rows)
     dropped_no_collateral: list[tuple[str, float]] = []
     dropped_par_trigger: list[tuple[str, float]] = []
     acm_deviations: list[float] = []
@@ -522,8 +562,10 @@ def build_syrup_users_frame(rows: Sequence[Any], loan_token: str, underlying_dec
             dropped_par_trigger.append((address, principal))
             continue
         symbol = r.asset_symbol.upper()
-        qty = float(Decimal(str(r.asset_amount)) / (Decimal(10) ** int(r.asset_decimals)))
-        collateral_usd = qty * prices[symbol]
+        qty = _syrup_collateral_qty(r)
+        # Each loan at its own attested valuation: Maple values collateral per
+        # loan, so cycle-mates can legitimately carry different prices.
+        collateral_usd = qty * _syrup_attested_price(r)
         if collateral_usd <= 0:
             dropped_no_collateral.append((address, principal))
             continue
@@ -769,6 +811,7 @@ class PostgresPositionsReader:
         self._engine = engine
         self._chain_id = chain_id
         self._max_feed_age = max_feed_age
+        self._feed_alive = _feed_alive_sql(max_feed_age)
 
     async def _live_oracle_id(self, conn: AsyncConnection, protocol_key: str) -> int:
         """Id of the protocol's valuation oracle, refusing a binding that is missing or a feed that is silent."""
@@ -780,7 +823,7 @@ class PostgresPositionsReader:
                 f"oracle {oracle_name!r} is not bound to protocol {protocol_name!r} on chain {self._chain_id} "
                 "in protocol_oracle; refusing to value positions with an unregistered oracle"
             )
-        alive = await conn.execute(_FEED_ALIVE, {"oracle_id": oracle_id, "max_age": self._max_feed_age})
+        alive = await conn.execute(self._feed_alive, {"oracle_id": oracle_id})
         if alive.scalar_one_or_none() is None:
             raise ValueError(
                 f"oracle feed {oracle_name!r} wrote no price in the last {self._max_feed_age}; "

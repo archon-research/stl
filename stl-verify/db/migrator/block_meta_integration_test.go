@@ -9,8 +9,8 @@ import (
 )
 
 // VEC-491: block_meta is a plain dimension keyed on the natural key (chain_id, block_number,
-// block_version). A block header time is immutable, so there is no correction axis: the loader inserts
-// ON CONFLICT DO NOTHING and a mis-parse is deleted and reloaded by an operator.
+// block_version, processing_version). UPDATE and DELETE are revoked, so a mis-parsed header time is
+// corrected by appending the same block at a higher processing_version; readers take the highest.
 func TestBlockMeta(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -122,19 +122,40 @@ func TestBlockMeta(t *testing.T) {
 		}
 	})
 
-	t.Run("no correction axis: no processing_version or metadata column, no trigger, no current view", func(t *testing.T) {
-		var extraCols, triggers int
-		var viewPresent bool
-		if err := pool.QueryRow(ctx, `
-			SELECT (SELECT count(*) FROM information_schema.columns
-			         WHERE table_schema = 'public' AND table_name = 'block_meta'
-			           AND column_name IN ('processing_version', 'metadata')),
-			       (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'block_meta'::regclass AND NOT tgisinternal),
-			       to_regclass('block_meta_current') IS NOT NULL`).Scan(&extraCols, &triggers, &viewPresent); err != nil {
+	t.Run("a mis-parsed header is corrected by a higher processing_version, and the highest wins", func(t *testing.T) {
+		// The record of a header time can be wrong even though the header itself cannot change, and
+		// UPDATE and DELETE are revoked, so the correction axis is the only repair path there is.
+		if err := insert(t, 1, 300, 0, "2026-01-01T00:00:00Z", 1); err != nil {
 			t.Fatal(err)
 		}
-		if extraCols != 0 || triggers != 0 || viewPresent {
-			t.Errorf("block_meta carries extra columns=%d triggers=%d current view=%v; the natural key is the whole design", extraCols, triggers, viewPresent)
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO block_meta (chain_id, block_number, block_version, processing_version, block_timestamp, build_id)
+			 VALUES (1, 300, 0, 1, '2026-01-01T00:00:07Z', 2)`); err != nil {
+			t.Fatalf("appending the correction: %v", err)
+		}
+		var picked string
+		if err := pool.QueryRow(ctx, `
+			SELECT block_timestamp::text FROM block_meta
+			 WHERE chain_id = 1 AND block_number = 300
+			 ORDER BY block_version DESC, processing_version DESC LIMIT 1`).Scan(&picked); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(picked, "2026-01-01 00:00:07") {
+			t.Errorf("the highest processing_version reads %s; want the corrected 00:00:07", picked)
+		}
+		if rows, times := timesAt(t, 1, 300); rows != 2 || times != 2 {
+			t.Errorf("rows=%d distinct times=%d; want both rows kept, since nothing is rewritten", rows, times)
+		}
+		// Still no trigger and no current view: the pick is the reader's ORDER BY, not a maintained row.
+		var triggers int
+		var viewPresent bool
+		if err := pool.QueryRow(ctx, `
+			SELECT (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'block_meta'::regclass AND NOT tgisinternal),
+			       to_regclass('block_meta_current') IS NOT NULL`).Scan(&triggers, &viewPresent); err != nil {
+			t.Fatal(err)
+		}
+		if triggers != 0 || viewPresent {
+			t.Errorf("triggers=%d current view=%v; want neither", triggers, viewPresent)
 		}
 	})
 }
