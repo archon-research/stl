@@ -787,7 +787,7 @@ func TestUniswapV4Repository_SaveBlock_IdenticalReplayInsertsNothing(t *testing.
 		t.Errorf("replay = %+v, want {Attempted:1 Persisted:0} (ON CONFLICT DO NOTHING appends nothing, but the block still tried)", got)
 	}
 
-	for _, table := range append(slices.Clone(uniswapV4BatchedFactTables), "uniswap_v4_position") {
+	for _, table := range uniswapV4FactTablesWithPositions {
 		t.Run(table, func(t *testing.T) {
 			if got := uniswapV4RowCount(t, ctx, table, poolID, blockNumber); got != 1 {
 				t.Errorf("%s row count = %d, want 1 (a replay must not duplicate)", table, got)
@@ -803,6 +803,9 @@ var uniswapV4BatchedFactTables = []string{
 	"uniswap_v4_liquidity_event",
 	"uniswap_v4_pool_event",
 }
+
+// uniswapV4FactTablesWithPositions is every table one SaveBlock writes a row to.
+var uniswapV4FactTablesWithPositions = append(slices.Clone(uniswapV4BatchedFactTables), "uniswap_v4_position")
 
 func uniswapV4RowCount(t *testing.T, ctx context.Context, table string, poolID int64, blockNumber int64) int {
 	t.Helper()
@@ -831,7 +834,7 @@ func TestUniswapV4Repository_SaveBlock_ReorgVersionAppendsAtProcessingVersionZer
 		})
 	}
 
-	for _, table := range append(slices.Clone(uniswapV4BatchedFactTables), "uniswap_v4_position") {
+	for _, table := range uniswapV4FactTablesWithPositions {
 		t.Run(table, func(t *testing.T) {
 			got := uniswapV4RowVersions(t, ctx, table, poolID, blockNumber)
 			want := [][2]int{{0, 0}, {1, 0}}
@@ -1832,8 +1835,7 @@ func TestUniswapV4Repository_WritePositions_NewBuildRewritesChangedValuesAtProce
 }
 
 // A deploy rolled back to build A replays a block that build B had rewritten in
-// between: A's own (N, v0) row still holds what A reads, so the discarded insert
-// is a replay, not a disagreement. A THIRD value from A at the same slot is one.
+// between: the PK drops A's re-insert against A's own (N, v0) row, no error.
 func TestUniswapV4Repository_WritePositions_RolledBackBuildReplayingItsOwnRowIsANoOp(t *testing.T) {
 	ctx := context.Background()
 	f := newUniswapV4PositionFixture(t, ctx, 0x3d)
@@ -1867,44 +1869,11 @@ func TestUniswapV4Repository_WritePositions_RolledBackBuildReplayingItsOwnRowIsA
 		t.Errorf("(processing_version, build_id) = %v, want %v (the replay must neither append nor error)", got, want)
 	}
 
-	drifted := defaultUniswapV4PositionValues()
-	drifted.liquidity = big.NewInt(3000)
-	withUniswapV4RollbackTx(t, ctx, func(tx pgx.Tx) {
-		_, err := f.repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{Positions: []*entity.UniswapV4Position{
-			f.position(key, blockNumber, 0, drifted),
-		}})
-		if err == nil {
-			t.Fatal("build reading a third value at its own (block, version): want error, got nil")
-		}
-		if !strings.Contains(err.Error(), "disagrees with itself") {
-			t.Errorf("error %q does not name the read disagreement", err)
-		}
-	})
 }
 
-func TestUniswapV4Repository_WritePositions_DuplicateSlotInOneBlockErrors(t *testing.T) {
-	ctx := context.Background()
-	f := newUniswapV4PositionFixture(t, ctx, 0x36)
-	key := defaultUniswapV4PositionKey()
-
-	other := defaultUniswapV4PositionValues()
-	other.liquidity = big.NewInt(4242)
-
-	withUniswapV4RollbackTx(t, ctx, func(tx pgx.Tx) {
-		_, err := f.repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{Positions: []*entity.UniswapV4Position{
-			f.position(key, 6700, 0, defaultUniswapV4PositionValues()),
-			f.position(key, 6700, 0, other),
-		}})
-		if err == nil {
-			t.Fatal("SaveBlock with one slot twice: want error, got nil")
-		}
-		if !strings.Contains(err.Error(), "distinct slots") {
-			t.Errorf("error %q does not name the duplicate slot", err)
-		}
-	})
-}
-
-func TestUniswapV4Repository_WritePositions_ValueDriftAtOneBlockVersionErrors(t *testing.T) {
+// A re-read of a (block, version) this build already stored is dropped by the
+// PK, first write wins: no dead-lettered block, the same silence the tick writer keeps.
+func TestUniswapV4Repository_WritePositions_ValueDriftAtOneBlockVersionKeepsTheFirstWrite(t *testing.T) {
 	ctx := context.Background()
 	f := newUniswapV4PositionFixture(t, ctx, 0x37)
 	key := defaultUniswapV4PositionKey()
@@ -1914,21 +1883,14 @@ func TestUniswapV4Repository_WritePositions_ValueDriftAtOneBlockVersionErrors(t 
 
 	drifted := defaultUniswapV4PositionValues()
 	drifted.liquidity = big.NewInt(999_999)
+	f.save(f.position(key, blockNumber, 0, drifted))
 
-	withUniswapV4RollbackTx(t, ctx, func(tx pgx.Tx) {
-		_, err := f.repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{Positions: []*entity.UniswapV4Position{
-			f.position(key, blockNumber, 0, drifted),
-		}})
-		if err == nil {
-			t.Fatal("SaveBlock re-writing one block version with different values: want error, got nil")
-		}
-		if !strings.Contains(err.Error(), "disagrees with itself") {
-			t.Errorf("error %q does not name the read disagreement", err)
-		}
-		if got := f.rowCountIn(tx, key); got != 1 {
-			t.Errorf("row count = %d, want 1 (the drifted write must not have landed)", got)
-		}
-	})
+	if got := f.rowCount(key); got != 1 {
+		t.Errorf("row count = %d, want 1 (the drifted re-read must not append)", got)
+	}
+	if got := f.latestValue(key, "liquidity"); got != "1000" {
+		t.Errorf("liquidity = %s, want 1000 (the first write wins)", got)
+	}
 }
 
 func TestUniswapV4Repository_WritePositions_MixedBlockNumbersError(t *testing.T) {
@@ -2417,8 +2379,8 @@ func newUniswapV4TestState(poolID int64, blockNumber int64, blockVersion int, ti
 }
 
 // newUniswapV4TestBlockWrites builds one validated row for each of the five
-// fact hypertables, sharing every key but blockVersion so two calls differ
-// exactly as an original and its reorg re-observation do.
+// fact tables (four batched hypertables, the plain uniswap_v4_position), sharing
+// every key but blockVersion so two calls differ as an original and its reorg re-observation do.
 func newUniswapV4TestBlockWrites(t *testing.T, poolID int64, blockNumber int64, blockVersion int) outbound.UniswapV4BlockWrites {
 	t.Helper()
 

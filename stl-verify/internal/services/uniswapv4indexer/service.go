@@ -266,8 +266,7 @@ func (s *UniswapV4Service) handleBlock(ctx context.Context, event outbound.Block
 
 // recordBlockMetrics runs only after a successful commit. Attempted is what
 // VectorUniswapV4IndexerNotWritingState keys on; the tick and position counts
-// are what the append-on-change writers persisted, which the growth alert
-// reads as table growth.
+// are what the append-on-change writers persisted, i.e. real table growth.
 func (s *UniswapV4Service) recordBlockMetrics(ctx context.Context, acc blockAccumulators, rows outbound.StateRowCounts) {
 	s.recordPoolsTouched(ctx, acc.touchedIDs)
 	s.telemetry.RecordStateRowsAttempted(ctx, int(rows.Attempted))

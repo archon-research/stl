@@ -2370,8 +2370,7 @@ groups:
       # =====================================================================
       # VEC-572 — design-decision watchdog, the uniswap_v3_tick twin of
       # VectorUniswapV4AppendOnChangeGrowthHigh; that rule's comment carries
-      # the threshold derivation and the zero-fill / replica-gate reasoning.
-      # Self-contained; keep it last in this group.
+      # the threshold derivation. Self-contained; keep it last in this group.
       # =====================================================================
       - alert: VectorUniswapV3AppendOnChangeGrowthHigh
         # uniswap_v3_tick is deliberately a PLAIN table, not a hypertable (its
@@ -2382,27 +2381,12 @@ groups:
         # at a sustained 250k rows/day (2.9 rows/s, ~90M rows/year against a
         # ~100M-row plain-table budget). Nothing is broken when it fires.
         # `sum by (cluster)` without `chain`: the budget belongs to the table,
-        # and one uniswap_v3_tick holds every chain's rows.
+        # and one uniswap_v3_tick holds every chain's rows. One term, so no
+        # zero-fill is needed: an absent series and a zero rate both stay quiet.
         expr: |
-          (
-            sum by (cluster) (
-              rate(uniswap_v3_tick_rows_written_total{k8s_namespace_name="vector"}[6h])
-            )
-            or
-            max by (cluster) (
-              kube_deployment_status_replicas_available{
-                deployment="uniswap-v3-indexer", namespace="vector"
-              }
-            ) * 0
+          sum by (cluster) (
+            rate(uniswap_v3_tick_rows_written_total{k8s_namespace_name="vector"}[6h])
           ) > 2.9
-          and on (cluster)
-          (
-            max by (cluster) (
-              kube_deployment_status_replicas_available{
-                deployment="uniswap-v3-indexer", namespace="vector"
-              }
-            ) >= 1
-          )
         for: 6h
         labels:
           team: vector
@@ -2986,8 +2970,8 @@ groups:
         # the first tick/position row lands the series do not exist and a bare
         # `sum(rate(...))` is ABSENT, not zero — the `+` would then yield an
         # empty vector and the rule would be silently un-evaluable rather than
-        # simply under threshold. Gated on >=1 replica so a scaled-down
-        # deployment does not evaluate at all.
+        # simply under threshold. No replica gate: `0 > 2.9` is already false,
+        # and a gate only adds a kube-state gap as a way to stop evaluating.
         expr: |
           (
             (
@@ -3014,14 +2998,6 @@ groups:
               ) * 0
             )
           ) > 2.9
-          and on (cluster)
-          (
-            max by (cluster) (
-              kube_deployment_status_replicas_available{
-                deployment="uniswap-v4-indexer", namespace="vector"
-              }
-            ) >= 1
-          )
         for: 6h
         labels:
           team: vector

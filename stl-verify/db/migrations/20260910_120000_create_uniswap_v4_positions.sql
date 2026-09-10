@@ -115,5 +115,5 @@ COMMENT ON COLUMN uniswap_v4_pool.snapshot_supported IS
 REVOKE UPDATE, DELETE, TRUNCATE ON uniswap_v4_position FROM stl_readwrite;
 
 INSERT INTO migrations (filename)
-VALUES ('20260820_120000_create_uniswap_v4_positions.sql')
+VALUES ('20260910_120000_create_uniswap_v4_positions.sql')
 ON CONFLICT (filename) DO NOTHING;

@@ -602,13 +602,8 @@ func (r *UniswapV4Repository) writePositions(ctx context.Context, tx pgx.Tx, pos
 		return 0, err
 	}
 
+	// Slots are deduplicated upstream (MergePositionKeys), as ticks are.
 	keys := distinctSortedV4PositionKeys(positions)
-	// A duplicate slot would compare both rows against the same prior state and
-	// let ON CONFLICT DO NOTHING drop the second one's values in silence.
-	if len(keys) != len(positions) {
-		return 0, fmt.Errorf("uniswap_v4 position write has %d rows for %d distinct slots: one block must touch a position once", len(positions), len(keys))
-	}
-
 	if err := lockPositionKeysV4(ctx, tx, keys); err != nil {
 		return 0, err
 	}
@@ -739,43 +734,48 @@ func readLatestPositionsV4(ctx context.Context, tx pgx.Tx, keys []v4PositionKey,
 	return latest, nil
 }
 
+// A discarded insert is a row this build already wrote at (block, version):
+// the trigger reuses its processing_version, so first write wins, as for ticks.
 func (r *UniswapV4Repository) insertChangedPositionsV4(
 	ctx context.Context, tx pgx.Tx,
 	positions []*entity.UniswapV4Position,
 	latest map[v4PositionKey]v4PositionValues,
-) (int64, error) {
+) (inserted int64, err error) {
 	batch, queued, err := queueChangedPositionsV4(positions, latest, r.buildID)
 	if err != nil {
 		return 0, err
 	}
-	if len(queued) == 0 {
+	if queued == 0 {
 		return 0, nil
 	}
 
-	inserted, discarded, err := sendPositionBatchV4(ctx, tx, batch, queued)
-	if err != nil {
-		return 0, err
-	}
-	for _, q := range discarded {
-		if err := r.assertOwnRowAgrees(ctx, tx, q.position); err != nil {
-			return 0, err
+	br := tx.SendBatch(ctx, batch)
+	defer func() {
+		if closeErr := br.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing uniswap_v4 position batch: %w", closeErr))
 		}
+	}()
+	for i := range queued {
+		tag, execErr := br.Exec()
+		if execErr != nil {
+			return 0, fmt.Errorf("inserting uniswap_v4 position batch entry %d: %w", i, execErr)
+		}
+		inserted += tag.RowsAffected()
 	}
 	return inserted, nil
 }
 
-func queueChangedPositionsV4(positions []*entity.UniswapV4Position, latest map[v4PositionKey]v4PositionValues, buildID buildregistry.BuildID) (*pgx.Batch, []v4QueuedPosition, error) {
+func queueChangedPositionsV4(positions []*entity.UniswapV4Position, latest map[v4PositionKey]v4PositionValues, buildID buildregistry.BuildID) (*pgx.Batch, int, error) {
 	batch := &pgx.Batch{}
-	var queued []v4QueuedPosition
+	queued := 0
 	for i, p := range positions {
 		slot := v4PositionKey{poolID: p.PoolID, key: p.Key()}
-		prior, hasPrior := latest[slot]
-		if hasPrior && v4PositionUnchanged(prior, p) {
+		if prior, hasPrior := latest[slot]; hasPrior && v4PositionUnchanged(prior, p) {
 			continue
 		}
 		converted, convErr := convertV4Position(p)
 		if convErr != nil {
-			return nil, nil, fmt.Errorf("position %d: converting pool=%d %+v: %w", i, p.PoolID, slot.key, convErr)
+			return nil, 0, fmt.Errorf("position %d: converting pool=%d %+v: %w", i, p.PoolID, slot.key, convErr)
 		}
 		batch.Queue(
 			`INSERT INTO uniswap_v4_position
@@ -790,68 +790,9 @@ func queueChangedPositionsV4(positions []*entity.UniswapV4Position, latest map[v
 			converted.liquidity, converted.feeGrowthInside0LastX128,
 			converted.feeGrowthInside1LastX128, int(buildID),
 		)
-		queued = append(queued, v4QueuedPosition{
-			position:      p,
-			supersedesRow: hasPrior && prior.blockNumber == p.BlockNumber && prior.blockVersion == p.BlockVersion,
-		})
+		queued++
 	}
 	return batch, queued, nil
-}
-
-type v4QueuedPosition struct {
-	position *entity.UniswapV4Position
-	// supersedesRow marks values differing from a row at the SAME (block_number,
-	// block_version): the one case where a discarded insert needs explaining.
-	supersedesRow bool
-}
-
-// sendPositionBatchV4 closes the batch reader before returning, so the caller
-// may query the transaction again. A superseding insert the PK discarded comes
-// back in discarded instead of failing here.
-func sendPositionBatchV4(ctx context.Context, tx pgx.Tx, batch *pgx.Batch, queued []v4QueuedPosition) (inserted int64, discarded []v4QueuedPosition, err error) {
-	br := tx.SendBatch(ctx, batch)
-	defer func() {
-		if closeErr := br.Close(); closeErr != nil {
-			err = errors.Join(err, fmt.Errorf("closing uniswap_v4 position batch: %w", closeErr))
-		}
-	}()
-	for _, q := range queued {
-		tag, execErr := br.Exec()
-		if execErr != nil {
-			return 0, nil, fmt.Errorf("inserting uniswap_v4 position pool=%d %+v at block %d: %w", q.position.PoolID, q.position.Key(), q.position.BlockNumber, execErr)
-		}
-		if tag.RowsAffected() == 0 && q.supersedesRow {
-			discarded = append(discarded, q)
-		}
-		inserted += tag.RowsAffected()
-	}
-	return inserted, discarded, nil
-}
-
-// A superseding insert the PK discarded conflicted with THIS build's own row at
-// (block, version) — the trigger reuses only this build's processing_version —
-// so identical values are a rollback replay and differing ones a self-disagreement.
-func (r *UniswapV4Repository) assertOwnRowAgrees(ctx context.Context, tx pgx.Tx, p *entity.UniswapV4Position) error {
-	var liquidity, feeGrowthInside0, feeGrowthInside1 pgtype.Numeric
-	if err := tx.QueryRow(ctx,
-		`SELECT liquidity, fee_growth_inside0_last_x128, fee_growth_inside1_last_x128
-		 FROM uniswap_v4_position
-		 WHERE pool_id = $1 AND owner = $2 AND tick_lower = $3 AND tick_upper = $4 AND salt = $5
-		   AND block_number = $6 AND block_version = $7 AND build_id = $8`,
-		p.PoolID, p.Owner.Bytes(), p.TickLower, p.TickUpper, p.Salt.Bytes(),
-		p.BlockNumber, p.BlockVersion, int(r.buildID),
-	).Scan(&liquidity, &feeGrowthInside0, &feeGrowthInside1); err != nil {
-		return fmt.Errorf("uniswap_v4 position pool=%d %+v at block %d: insert discarded, and this build's own row could not be read back: %w", p.PoolID, p.Key(), p.BlockNumber, err)
-	}
-	own, err := toV4PositionValues(p.BlockNumber, p.BlockVersion, liquidity, feeGrowthInside0, feeGrowthInside1)
-	if err != nil {
-		return fmt.Errorf("reading this build's uniswap_v4 position for pool=%d %+v: %w", p.PoolID, p.Key(), err)
-	}
-	if v4PositionUnchanged(own, p) {
-		return nil
-	}
-	return fmt.Errorf("uniswap_v4 position pool=%d %+v at block %d already stored with different values under this build: the authoritative read disagrees with itself",
-		p.PoolID, p.Key(), p.BlockNumber)
 }
 
 type v4PositionConverted struct {

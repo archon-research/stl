@@ -52,10 +52,9 @@ type UniswapV4Repository interface {
 	// Tick positions already written for pool at blockNumber, so a reorg
 	// redelivery re-reads them; reads committed rows outside any transaction.
 	TicksForPoolAtBlock(ctx context.Context, chainID int64, poolID int64, blockNumber int64) ([]int32, error)
-	// PositionsForPoolAtBlock returns the position keys already stored for pool at
-	// blockNumber, in entity.UniswapV4PositionKey.Compare order, rows written
-	// under a superseded registry surrogate included. A position is discovered
-	// only from a log, so a reorg redelivery cannot name it otherwise.
+	// PositionsForPoolAtBlock returns the position keys stored for pool at
+	// blockNumber (superseded registry surrogates resolved), in Compare order: a
+	// position is discovered only from a log, so a reorg redelivery cannot name it.
 	PositionsForPoolAtBlock(ctx context.Context, chainID int64, poolID int64, blockNumber int64) ([]entity.UniswapV4PositionKey, error)
 	// Pools on chainID that ever wrote a state or tick row, ascending. Read once
 	// at construction to rebuild the never-indexed and already-baselined sets.

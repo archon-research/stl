@@ -11,7 +11,6 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/tickbitmap"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -43,7 +42,9 @@ func positionViewABI() (*abi.ABI, error) {
 	return positionViewABIOnce()
 }
 
-const positionsPerCall = tickbitmap.TicksPerCall
+// One getPositionInfo is one storage read, like getTickInfo, so the same
+// per-call budget applies; the value is a copy, not a coupling.
+const positionsPerCall = 500
 
 // TouchedPositions returns the deduplicated, Compare-sorted positions this
 // block's ModifyLiquidity events touched. Zero-delta pokes are INCLUDED, unlike

@@ -71,7 +71,7 @@ func readUniswapV4MigrationSeededPoolIDs() []string {
 
 // uniswapV4Tables are the 7 tables created by
 // 20260819_120000_create_uniswap_v4_tables.sql plus uniswap_v4_position from
-// 20260820_120000_create_uniswap_v4_positions.sql.
+// 20260910_120000_create_uniswap_v4_positions.sql.
 var uniswapV4Tables = []string{
 	"uniswap_v4_pool_manager",
 	"uniswap_v4_pool",

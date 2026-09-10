@@ -2158,16 +2158,6 @@ not an alert.
   block number.
 - Transient RPC timeout on the StateView multicall -> usually self-clears;
   investigate if sustained.
-- `the authoritative read disagrees with itself` -> a hash-pinned
-  `getPositionInfo` read for a `(block, version)` this build already stored came
-  back with different values, and the position writer refuses to pick one.
-  Deterministic: every redelivery of that block fails the same way until the
-  build changes (a rollback to this build replaying its own values is a no-op
-  and does not trip it), so the message dead-letters. Recover by confirming the
-  value at the block hash by hand (`eth_call` against the StateView at that
-  hash) and deploying a new build — its `build_id` appends the correction at
-  `processing_version` + 1 — then redrive the DLQ message.
-
 ### How to spot a decoder gap (no alert covers this)
 
 An **unknown `topics[0]` raises no error and moves no counter.** `captureRaw`
