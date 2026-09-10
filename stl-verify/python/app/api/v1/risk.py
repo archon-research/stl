@@ -21,6 +21,7 @@ from app.api.deps import (
     require_prime_view_body,
     require_prime_view_query,
 )
+from app.api.errors import ApiRejectionError
 from app.api.v1._resolvers import (
     AssetById,
     AssetIdentity,
@@ -179,7 +180,7 @@ async def _compute_bad_debt(
     service: CryptoLendingRiskService,
 ) -> BadDebtResponse:
     if not (_ZERO <= gap_pct <= _ONE):
-        raise HTTPException(status_code=422, detail="gap_pct must be between 0 and 1")
+        raise ApiRejectionError("gap_pct must be between 0 and 1")
 
     try:
         pool_wallet = await _authorized_pool_prime(request, principal, receipt_token_id, service)
@@ -187,7 +188,7 @@ async def _compute_bad_debt(
     except AllocationUnpricedError as exc:
         raise share_error_503(exc) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise ApiRejectionError(str(exc)) from exc
     if bad_debt is None:
         raise HTTPException(404, "receipt token not found")
     return BadDebtResponse(
@@ -213,7 +214,7 @@ async def _compute_risk_breakdown(
     except AllocationUnpricedError as exc:
         raise share_error_503(exc) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise ApiRejectionError(str(exc)) from exc
     if breakdown is None:
         raise HTTPException(404, "receipt token not found")
     return RiskBreakdownResponse(
@@ -604,10 +605,7 @@ async def _compute_envelope(
 ) -> RrcEnvelope:
     unknown_models = set(overrides) - registry.risk_model_names
     if unknown_models:
-        raise HTTPException(
-            status_code=422,
-            detail=f"unknown override model keys: {sorted(unknown_models)}",
-        )
+        raise ApiRejectionError(f"unknown override model keys: {sorted(unknown_models)}")
 
     asset_id = info.receipt_token_id
     applicable = registry.applicable(asset_id, prime_id)
@@ -624,7 +622,7 @@ async def _compute_envelope(
         except AllocationUnpricedError as exc:
             raise share_error_503(exc) from exc
         except InvalidOverrideError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            raise ApiRejectionError(str(exc)) from exc
         except ModelDataUnavailableError as exc:
             # A model with no data yet degrades the envelope, not the endpoint.
             logger.warning("skipping model without data model=%s asset_id=%s: %s", m.risk_model, asset_id, exc)

@@ -4,11 +4,10 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.exceptions import RequestValidationError
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.openapi.docs import get_swagger_ui_html, get_swagger_ui_oauth2_redirect_html
 from fastapi.openapi.utils import get_openapi
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from sqlalchemy import text
 
 from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
@@ -24,6 +23,7 @@ from app.adapters.postgres.morpho_vault_allocations_reader import PostgresMorpho
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository, resolve_receipt_token_mapping
 from app.adapters.postgres.reference_as_of import pinned_to
 from app.api.deps import require_analyst, require_viewer
+from app.api.errors import API_ERROR_RESPONSES, register_error_handlers
 from app.api.v1 import (
     allocations,
     data_sources,
@@ -316,6 +316,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
         lifespan=lifespan,
         docs_url=None,
         openapi_tags=OPENAPI_TAGS,
+        responses=API_ERROR_RESPONSES,
     )
     application.add_middleware(RequestIdMiddleware)
     # The gates read THIS object, not a fresh get_settings(): an app built with
@@ -323,44 +324,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
     application.state.settings = settings
     application.state.telemetry_providers = setup_telemetry(application, settings)
 
-    @application.exception_handler(RequestValidationError)
-    async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
-        errors = exc.errors()
-        logger.warning(
-            "Request validation failed",
-            extra={
-                "path": request.url.path,
-                "method": request.method,
-                "validation_error_count": len(errors),
-            },
-        )
-        # Convert validation errors to JSON-serializable format
-        serializable_errors = []
-        for error in errors:
-            serializable_error = {
-                "loc": error.get("loc", []),
-                "msg": error.get("msg", ""),
-                "type": error.get("type", ""),
-            }
-            # Log input for diagnostics but do not echo it in the response body
-            # to avoid reflecting potentially sensitive user-provided data.
-            if "input" in error:
-                try:
-                    raw = error["input"]
-                    logger.debug(
-                        "Validation error input",
-                        extra={
-                            "path": request.url.path,
-                            "method": request.method,
-                            "input_type": type(raw).__name__,
-                            "input_len": len(str(raw)),
-                        },
-                    )
-                except Exception:  # noqa: BLE001 - best-effort diagnostic logging
-                    pass
-            serializable_errors.append(serializable_error)
-
-        return JSONResponse(status_code=422, content={"detail": serializable_errors})
+    register_error_handlers(application)
 
     # Per ROUTER, never global middleware — see require_role. status.router is
     # deliberately ungated: kubelet reaches its probes directly.

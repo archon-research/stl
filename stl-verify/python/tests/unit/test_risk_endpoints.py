@@ -80,7 +80,7 @@ def test_bad_debt_returns_422_on_value_error() -> None:
         response = client.get(f"/v1/risk/{_RECEIPT_TOKEN_ID}/bad-debt?gap_pct=0.1")
 
         assert response.status_code == 422
-        assert response.json()["detail"] == "bad receipt token shape"
+        assert response.json()["message"] == "bad receipt token shape"
     finally:
         app.dependency_overrides.pop(get_crypto_lending_risk_service, None)
 
@@ -205,7 +205,7 @@ def test_breakdown_returns_422_on_value_error() -> None:
         response = client.get(f"/v1/risk/{_RECEIPT_TOKEN_ID}/breakdown")
 
         assert response.status_code == 422
-        assert response.json()["detail"] == "bad receipt token shape"
+        assert response.json()["message"] == "bad receipt token shape"
     finally:
         app.dependency_overrides.pop(get_crypto_lending_risk_service, None)
 

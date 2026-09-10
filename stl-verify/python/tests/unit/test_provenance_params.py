@@ -2,6 +2,7 @@ import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
+from app.api.errors import register_error_handlers
 from app.api.provenance import get_requested_provenance, resolve_or_422
 from app.domain.provenance import Provenance
 
@@ -9,6 +10,7 @@ from app.domain.provenance import Provenance
 @pytest.fixture
 def client() -> TestClient:
     app = FastAPI()
+    register_error_handlers(app)
 
     @app.get("/probe")
     def probe(requested: Provenance | None = Depends(get_requested_provenance)):
@@ -55,7 +57,7 @@ def test_rejects_the_two_parameters_when_they_disagree(client: TestClient):
     response = client.get("/probe?source=indexed&reference=true")
 
     assert response.status_code == 422
-    assert "conflicts" in response.json()["detail"]
+    assert "conflicts" in response.json()["message"]
 
 
 def test_narrows_the_default_to_the_only_provenance_available(client: TestClient):
@@ -66,4 +68,4 @@ def test_refuses_a_provenance_the_endpoint_cannot_serve(client: TestClient):
     response = client.get("/indexed-only?source=reference")
 
     assert response.status_code == 422
-    assert "not available here" in response.json()["detail"]
+    assert "not available here" in response.json()["message"]

@@ -159,7 +159,7 @@ def test_an_unscoped_bucket_query_is_refused_while_authorization_is_on(client: T
     response = client.get("/v1/allocations/activity?aggregation_method=end-period")
 
     assert response.status_code == 422
-    assert response.json()["detail"] == "prime_id is required for aggregated activity"
+    assert response.json()["message"] == "prime_id is required for aggregated activity"
 
 
 @pytest.mark.parametrize("client", [None], indirect=True)

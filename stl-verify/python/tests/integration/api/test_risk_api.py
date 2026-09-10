@@ -182,14 +182,14 @@ def test_get_rrc_returns_422_when_both_identities_supplied(client: TestClient) -
     )
 
     assert response.status_code == 422
-    assert "got both" in response.json()["detail"]
+    assert "got both" in response.json()["message"]
 
 
 def test_get_rrc_returns_422_when_neither_identity_supplied(client: TestClient) -> None:
     response = client.get("/v1/risk/rrc", params={"prime_id": _PRIME_ID})
 
     assert response.status_code == 422
-    assert "neither" in response.json()["detail"]
+    assert "neither" in response.json()["message"]
 
 
 def test_get_rrc_returns_422_when_only_chain_id_supplied(client: TestClient) -> None:

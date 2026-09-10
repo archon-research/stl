@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from fastapi import HTTPException, Response
+from fastapi import Response
 
 from app.api.time_series import (
     BucketPoint,
@@ -10,10 +10,19 @@ from app.api.time_series import (
     apply_cache_control,
     build_raw_window,
     build_resampled_window,
+    get_latest_query_params,
     get_resampled_time_series_query_params,
     get_time_series_query_params,
 )
-from app.domain.time_series import AggregationMethod, TimeSeriesFrequency
+from app.domain.time_series import (
+    MAX_WINDOW,
+    AggregationMethod,
+    FrequencyTooFineError,
+    FrequencyWithoutAggregationMethodError,
+    InvalidTimeRangeError,
+    TimeSeriesFrequency,
+    WindowTooLargeError,
+)
 
 
 def test_returns_resolved_query_with_defaults() -> None:
@@ -53,52 +62,44 @@ def test_passes_aggregation_method_through() -> None:
     assert query.is_bucketed is True
 
 
-def test_maps_inverted_range_to_http_422() -> None:
-    with pytest.raises(HTTPException) as exc_info:
+def test_raises_the_inverted_range_error() -> None:
+    with pytest.raises(InvalidTimeRangeError):
         get_time_series_query_params(
             from_timestamp=datetime(2026, 3, 6, 0, 0, tzinfo=UTC),
             to_timestamp=datetime(2026, 3, 5, 0, 0, tzinfo=UTC),
             frequency=None,
             aggregation_method=None,
         )
-    assert exc_info.value.status_code == 422
-    assert "from_timestamp" in exc_info.value.detail
 
 
-def test_maps_frequency_too_fine_to_http_422() -> None:
-    with pytest.raises(HTTPException) as exc_info:
+def test_raises_the_frequency_too_fine_error() -> None:
+    with pytest.raises(FrequencyTooFineError):
         get_time_series_query_params(
             from_timestamp=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
             to_timestamp=datetime(2026, 2, 15, 0, 0, tzinfo=UTC),
             frequency=TimeSeriesFrequency.PT1M,
             aggregation_method=AggregationMethod.END_PERIOD,
         )
-    assert exc_info.value.status_code == 422
-    assert "minimum allowed frequency" in exc_info.value.detail
 
 
-def test_maps_a_frequency_with_no_method_to_http_422() -> None:
-    with pytest.raises(HTTPException) as exc_info:
+def test_raises_the_frequency_without_a_method_error() -> None:
+    with pytest.raises(FrequencyWithoutAggregationMethodError):
         get_time_series_query_params(
             from_timestamp=None,
             to_timestamp=datetime(2026, 3, 5, 12, 0, tzinfo=UTC),
             frequency=TimeSeriesFrequency.PT1H,
             aggregation_method=None,
         )
-    assert exc_info.value.status_code == 422
-    assert "aggregation_method" in exc_info.value.detail
 
 
-def test_maps_window_too_large_to_http_422() -> None:
-    with pytest.raises(HTTPException) as exc_info:
+def test_raises_the_window_too_large_error() -> None:
+    with pytest.raises(WindowTooLargeError):
         get_time_series_query_params(
             from_timestamp=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
             to_timestamp=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
             frequency=None,
             aggregation_method=None,
         )
-    assert exc_info.value.status_code == 422
-    assert "exceeds the maximum" in exc_info.value.detail
 
 
 def test_build_resampled_window_echoes_the_frequency_of_a_bucketed_query() -> None:
@@ -222,3 +223,37 @@ def test_the_published_schema_keeps_the_model_name_and_docstring() -> None:
 
     assert schema["title"] == "_Point"
     assert schema["description"] == "One bucket of a series, for the schema tests."
+
+
+def test_latest_dependency_bounds_the_lookback_by_the_max_window() -> None:
+    window = get_latest_query_params(to_timestamp=datetime(2026, 3, 5, 12, 0, tzinfo=UTC))
+
+    assert window.to_timestamp == datetime(2026, 3, 5, 12, 0, tzinfo=UTC)
+    assert window.from_timestamp == datetime(2026, 3, 5, 12, 0, tzinfo=UTC) - MAX_WINDOW
+
+
+def test_latest_dependency_defaults_its_bound_to_now() -> None:
+    before = datetime.now(UTC)
+    window = get_latest_query_params(to_timestamp=None)
+    after = datetime.now(UTC)
+
+    assert before <= window.to_timestamp <= after
+
+
+def test_apply_cache_control_caches_a_latest_request_with_an_explicit_bound() -> None:
+    response = Response()
+    apply_cache_control(response, get_latest_query_params(to_timestamp=datetime(2026, 3, 5, 12, 0, tzinfo=UTC)))
+    assert response.headers["Cache-Control"] == "public, max-age=300"
+
+
+def test_apply_cache_control_does_not_cache_a_latest_request_defaulted_to_now() -> None:
+    response = Response()
+    apply_cache_control(response, get_latest_query_params(to_timestamp=None))
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_build_raw_window_echoes_the_resolved_latest_window() -> None:
+    resolved = get_latest_query_params(to_timestamp=None)
+    echo = build_raw_window(resolved)
+    assert echo.to_timestamp == resolved.to_timestamp
+    assert echo.from_timestamp == resolved.from_timestamp

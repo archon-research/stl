@@ -128,10 +128,7 @@ async def list_protocol_events(
     # A selective filter is one the index can seek to: tx_hash (exact byte
     # match) or protocol_name (exact equality, joins to indexed protocol_id).
     has_selective_filter = tx_hash is not None or protocol_name is not None
-    try:
-        enforce_filter_for_window(time_series, has_selective_filter=has_selective_filter)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    enforce_filter_for_window(time_series, has_selective_filter=has_selective_filter)
 
     apply_cache_control(response, time_series)
     try:

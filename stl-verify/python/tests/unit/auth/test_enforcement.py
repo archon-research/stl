@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from app.adapters.postgres.reference_as_of import utc_now
 from app.api import deps
+from app.api.errors import register_error_handlers
 from app.auth.jwt import Principal
 
 VAULT = "0x" + "a" * 40
@@ -32,6 +33,7 @@ def _settings_on(monkeypatch: pytest.MonkeyPatch) -> None:
 def _app(*, verifier=None, fga=None, principal=None, engine=None) -> TestClient:
     """A tiny app exercising the real dependencies without the service graph."""
     app = FastAPI()
+    register_error_handlers(app)
     if verifier is not None:
         app.state.verifier = verifier
     if fga is not None:
@@ -172,6 +174,7 @@ def test_list_filter_truncation_is_500():
     fga = AsyncMock()
     fga.list_objects.side_effect = FgaTruncated("ceiling")
     app = FastAPI()
+    register_error_handlers(app)
     app.state.fga = fga
     app.dependency_overrides[deps.get_principal] = lambda: _principal({"org:viewer"})
 
@@ -317,6 +320,7 @@ def test_list_filtering_emits_a_count_never_the_allow_list(caplog):
     fga = AsyncMock()
     fga.list_objects.return_value = frozenset({VAULT.upper(), PROXY})
     app = FastAPI()
+    register_error_handlers(app)
     app.state.fga = fga
     app.dependency_overrides[deps.get_principal] = lambda: _principal({"org:viewer"})
 
@@ -376,6 +380,7 @@ def _allow_list_client(objects: frozenset[str]) -> tuple[TestClient, AsyncMock]:
     fga = AsyncMock()
     fga.list_objects.return_value = objects
     app = FastAPI()
+    register_error_handlers(app)
     app.state.fga = fga
     app.dependency_overrides[deps.get_principal] = lambda: _principal({"org:viewer"})
 
