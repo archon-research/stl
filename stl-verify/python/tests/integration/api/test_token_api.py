@@ -5,7 +5,7 @@ Exercises the FastAPI handlers through ``TokenCatalogService`` to
 ``TokenCatalogRepository`` against a real Postgres.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import asyncpg
@@ -34,7 +34,9 @@ async def _seed_weth_price(db_url: str) -> None:
             """,
             token_id,
             source_id,
-            datetime(2026, 1, 1, tzinfo=UTC),
+            # Inside the read's 7-day window (VEC-672): the feed writes every
+            # poll, so an older row is a silent feed, not a current quote.
+            datetime.now(UTC) - timedelta(hours=1),
             Decimal("2500.50"),
         )
     finally:
