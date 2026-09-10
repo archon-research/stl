@@ -225,7 +225,7 @@ func (f *fakeUniswapV4Repository) TicksForPoolAtBlock(context.Context, int64, in
 	return nil, errors.New("fake: TicksForPoolAtBlock is a reorg-path read the bootstrap must not make")
 }
 
-func (f *fakeUniswapV4Repository) PositionsForPoolAtBlock(context.Context, int64, int64) ([]entity.UniswapV4PositionKey, error) {
+func (f *fakeUniswapV4Repository) PositionsForPoolAtBlock(context.Context, int64, int64, int64) ([]entity.UniswapV4PositionKey, error) {
 	return nil, errors.New("fake: PositionsForPoolAtBlock is a reorg-path read the bootstrap must not make")
 }
 
