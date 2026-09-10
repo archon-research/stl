@@ -62,6 +62,7 @@
     "PRICE_SOURCE": "postgres",
     "ORDERBOOK_SOURCE": "postgres"
   },
+  "_comment_anchorage_sources": "The live positions reader (anchorage_package_snapshot) is implemented and tested, but the upstream Anchorage API has returned zero packages since 2026-06-16 (ARCT-229), so the newest cohort fails the reader's freshness bound in both environments. All three sources stay parquet until the feed resumes; flip them together, because the market frame's oracle_price anchors the simulated paths, so positions, prices and books must describe one coherent moment.",
   "anchorage": {
     "PROTOCOL": "ANCHORAGE",
     "LOAN_TOKEN": "ALL"
