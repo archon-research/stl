@@ -43,6 +43,8 @@ type dailyObs struct {
 
 // observe appends one observation to the history, which the trigger propagates to the day's row.
 // projection and build_id vary with processing_version, so a SET list that drops either is caught.
+// run_id is seeded non-NULL and varies with the coordinate, so the whole-row comparison against the
+// winning spine row covers it: a writer that forgets it leaves NULL in the cache.
 func (f *positionDailyFixture) observe(id string, o dailyObs) {
 	f.t.Helper()
 	var dt any
@@ -52,9 +54,10 @@ func (f *positionDailyFixture) observe(id string, o dailyObs) {
 	if _, err := f.pool.Exec(f.ctx, `
 		INSERT INTO position_state
 		    (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
-		     block_number, block_version, processing_version, block_timestamp, projection, build_id, deal_type)
+		     block_number, block_version, processing_version, block_timestamp, projection, build_id, deal_type,
+		     run_id)
 		VALUES (sha256($1::bytea), 1, 1, 'inst-' || $1, substr(md5($1) || md5($1), 1, 40), $2, $3, $4, $5::int, $6,
-		        'public.proj-' || ($5::int)::text, $5::int, $7)`,
+		        'public.proj-' || ($5::int)::text, $5::int, $7, 7700 + $5::int)`,
 		id, o.qty, o.block, o.bv, o.pv, o.ts, dt); err != nil {
 		f.t.Fatalf("observe %s at block %d: %v", id, o.block, err)
 	}
