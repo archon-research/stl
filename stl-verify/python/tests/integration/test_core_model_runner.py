@@ -44,10 +44,12 @@ _BACKTEST_ROWS = 20
 
 # Metric agreement bound. The pipeline is bit-deterministic on one machine
 # (verified: two full runs, identical output); the tolerance absorbs only
-# BLAS/optimizer noise across platforms. A liquidation flipping on a
-# profitability knife edge moves a metric far beyond this and fails loudly,
-# which is the point.
-_REL_TOL = 1e-6
+# cross-platform BLAS/optimizer noise, measured at ~1.2e-6 relative between
+# macOS-arm64 and Linux-x86_64 CI — which also flips the last digit of the
+# 6-dp-rounded CRRs (abs 1e-6, rel 2e-4 on the smallest metric). 1e-3 covers
+# both with headroom while staying far below any real change: the smallest
+# historical model fix moved CRRs ~30%, and a seed change moves them 2000x.
+_REL_TOL = 1e-3
 
 
 class _TruncatedReader(ParquetCoreModelDataReader):
