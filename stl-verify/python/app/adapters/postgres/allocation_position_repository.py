@@ -886,7 +886,9 @@ class AllocationRepository:
                 total_tx_amount=_safe_decimal(row.total_tx_amount, "total_tx_amount", "aggregate"),
                 net_flow_usd=_safe_decimal(row.net_flow_usd, "net_flow_usd", "aggregate"),
                 balance_usd=(
-                    _safe_decimal(row.balance_usd, "balance_usd", "aggregate") if series == "balance" else None
+                    _safe_decimal(row.balance_usd, "balance_usd", "aggregate")
+                    if series == "balance" and row.balance_usd is not None
+                    else None
                 ),
             )
             for row in rows
@@ -1985,7 +1987,13 @@ SELECT
     0 AS event_count,
     0 AS total_tx_amount,
     0 AS net_flow_usd,
-    COALESCE(SUM(entity_value_usd), 0) AS balance_usd
+    -- NOT coalesced to zero. A bucket before any entity has been observed has
+    -- no known value, and $0 is indistinguishable from a position that really
+    -- went to zero -- the silent-zero failure VEC-537 is about. NULL lets the
+    -- client leave a gap in the line instead of drawing a false floor. SUM
+    -- already skips NULL members, so a bucket where only some entities are
+    -- unknown still reports the ones that are known.
+    SUM(entity_value_usd) AS balance_usd
 FROM per_entity
 GROUP BY bucket_start
 ORDER BY bucket_start DESC

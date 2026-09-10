@@ -447,7 +447,21 @@ export const activitySeriesQuery = (primeId: string, window: SeriesWindow) =>
   api.queryOptions(
     'get',
     '/v1/allocations/activity',
-    { params: { query: { prime_id: primeId, ...bucketQuery(window) } } },
+    {
+      params: {
+        query: {
+          prime_id: primeId,
+          // The balance is read from each bucket's own recorded state rather
+          // than reconstructed here from net flow. It costs the server far
+          // less, it does not accumulate error the further back the window
+          // reaches, it sees yield accrual (which moves a balance with no
+          // transaction to observe), and it needs no anchor -- which is what
+          // lets the chart work for a window that does not end at now.
+          series: 'balance',
+          ...bucketQuery(window),
+        },
+      },
+    },
     {
       ...CACHE.series,
       select: selectActivityBuckets,

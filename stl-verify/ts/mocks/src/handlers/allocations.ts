@@ -96,15 +96,32 @@ function activityBuckets(
   bucketStartsMs: readonly number[],
   intervalMs: number,
   usdPerUnit: ReadonlyMap<number, number>,
+  series: 'flow' | 'balance',
 ): AllocationActivityBucket[] {
   // The callback's return annotation is what makes the literal fresh; the
   // function's own `AllocationActivityBucket[]` is not enough, because a
   // `.map()` result is checked for assignability rather than for excess keys.
+  //
+  // The two series are alternatives on the real endpoint -- one query runs, and
+  // the other's fields come back at their zero value. Mirrored here so a screen
+  // built against the mocks cannot accidentally rely on both being populated.
   return bucketStartsMs.map((startMs): AllocationActivityBucket => {
     const inBucket = rows.filter((row) => {
       const createdMs = Date.parse(row.created_at);
       return createdMs >= startMs && createdMs < startMs + intervalMs;
     });
+
+    if (series === 'balance') {
+      return {
+        bucket_start: iso(startMs),
+        event_count: 0,
+        total_tx_amount: decimalString(0),
+        net_flow_usd: usdString(0),
+        balance_usd: usdString(
+          balanceAt(rows, startMs + intervalMs, usdPerUnit),
+        ),
+      };
+    }
 
     return {
       bucket_start: iso(startMs),
@@ -115,6 +132,29 @@ function activityBuckets(
       ),
     };
   });
+}
+
+/**
+ * The bucket's closing position value, as `series=balance` reports it: the
+ * cumulative signed flow of everything up to the bucket's end.
+ *
+ * Not how the endpoint computes it -- it reads each bucket's own recorded
+ * position state, which the fixture has no equivalent of. Deriving it from the
+ * same rows the flow series uses is the same trade the comment above
+ * `activityBuckets` describes: one source, so a screen toggling between the two
+ * cannot show a chart and a table that disagree. It is monotonic in the same
+ * direction as the real series and lands on the same final value, which is what
+ * a consumer of the fixture can rely on.
+ */
+function balanceAt(
+  rows: readonly AllocationActivity[],
+  endMs: number,
+  usdPerUnit: ReadonlyMap<number, number>,
+): number {
+  return sumBy(
+    rows.filter((row) => Date.parse(row.created_at) < endMs),
+    (row) => signedFlowUsd(row, usdPerUnit),
+  );
 }
 
 function sumBy(
@@ -248,6 +288,7 @@ export function allocationHandlers(): MockHandler[] {
             bucketStarts(fromMs, toMs, frequencyMs, limit.value),
             frequencyMs,
             receiptTokenUsdPerUnit(nowMs),
+            query.get('series') === 'balance' ? 'balance' : 'flow',
           ),
         });
       }
