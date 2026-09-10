@@ -15,7 +15,7 @@ import pandas as pd
 from arch import arch_model
 from arch.univariate.base import ARCHModelResult
 from joblib import Parallel, delayed
-from scipy.stats import norm, t
+from scipy.stats import norm
 from statsmodels.tsa.arima.model import ARIMA, ARIMAResults
 from tqdm import tqdm
 
@@ -69,8 +69,8 @@ def compute_lindy_factor(
 class Forecaster:
     def __init__(
         self,
-        arma_model: ARIMAResults,
-        garch_model: ARCHModelResult,
+        arma_model: Optional[ARIMAResults],
+        garch_model: Optional[ARCHModelResult],
         seed: int,
         use_brownian_bridge: Optional[bool] = False,
         vol_floor: Optional[float] = None,
@@ -102,42 +102,25 @@ class Forecaster:
     def _sample_poisson(self, lam: float, size: int) -> np.ndarray:
         return self.rng.poisson(lam, size)
 
-    def _inverse_cdf_transform(self, u: pd.DataFrame) -> np.ndarray:
+    def _innovations_from_uniform(self, u: np.ndarray) -> np.ndarray:
+        """Map copula uniforms to innovations via the fitted GARCH distribution's own ppf.
+
+        Deviation from the upstream repo (see the README's *Changes from the
+        original standalone version* table): upstream dispatched on
+        ``dist.name.lower().startswith("student")``, which the arch names
+        ("Standardized Student's t", "Standardized Skew Student's t") never
+        match, so every fit simulated Gaussian innovations; its t-branch also
+        used scipy's unstandardized ``t.ppf`` (variance nu/(nu-2), not 1) and
+        ignored the skew-t's lambda. arch's distributions are
+        variance-standardized, so their quantiles plug directly into
+        ``mean + vol * innovation``; the fitted shape parameters (nu for
+        Student's t, eta/lambda for skew-t) are the last ``num_params``
+        entries of the fitted parameter vector.
         """
-        u must be in (0,1), shape = (N_MC, step)
-        """
-        dist_name, df = self._get_garch_distribution()
-
-        if dist_name == "t":
-            return t.ppf(u, df=df)
-        else:
-            return norm.ppf(u)
-
-    def _get_garch_distribution(self) -> tuple[str, any]:
-        """
-        Safely detects the GARCH innovation distribution and its parameters.
-        Returns: (dist_name, df)
-        """
-
-        try:
-            dist = self.garch_model.model.distribution
-            name = dist.name.lower()
-
-            if "student" in name or "t" in name:
-                # Read nu from the *fitted* parameter vector, not the unfitted
-                # distribution object (which never has the estimated value).
-                params = self.garch_model.params
-                df = params.get("nu", params.get("df", None))
-                if df is None:
-                    df = 10.0  # hard fallback
-                return "t", float(df)
-
-            else:
-                return "normal", None
-
-        except Exception:
-            # Absolute fallback if anything breaks
-            return "normal", None
+        dist = self.garch_model.model.distribution
+        n_shape = dist.num_params
+        shape = np.asarray(self.garch_model.params)[-n_shape:] if n_shape else np.empty(0)
+        return np.asarray(dist.ppf(u, shape))
 
     def returns_forecasting(
         self,
@@ -187,22 +170,19 @@ class Forecaster:
             if self.lindy_factor != 1.0:
                 vol_forecast = vol_forecast * self.lindy_factor
 
-            if hasattr(self.garch_model.model, "distribution"):
-                dist = self.garch_model.model.distribution
-                # TODO(bug#6): startswith("student") misses arch distributions whose name begins
-                # with "Standardized" (e.g. "Standardized Student's t"). Use "student" in name
-                # as _get_garch_distribution does. Until fixed, Student-t innovations fall through
-                # to the Normal branch, underestimating tail risk.
-                if dist.name.lower().startswith("student"):
-                    # Read nu from the *fitted* parameter vector (same fix as _get_garch_distribution)
-                    _params = self.garch_model.params
-                    df = _params.get("nu", _params.get("df", 10.0))
-                    random_innovations = pd.Series(t.ppf(correlated_uniform, df=float(df)), index=mean_forecast.index)
-                else:
-                    random_innovations = pd.Series(norm.ppf(correlated_uniform), index=mean_forecast.index)
-
-            else:
-                random_innovations = pd.Series(norm.ppf(correlated_uniform), index=mean_forecast.index)
+            if not hasattr(self.garch_model.model, "distribution"):
+                # A fitted arch result always carries model.distribution; anything
+                # else is a foreign object we cannot draw correct innovations for.
+                # Upstream silently fell back to Gaussian here — the same defect
+                # class as the dispatch bug this replaces.
+                raise ValueError(
+                    f"garch_model.model has no innovation distribution (got {type(self.garch_model.model)!r}); "
+                    "cannot map copula uniforms to innovations"
+                )
+            random_innovations = pd.Series(
+                self._innovations_from_uniform(np.asarray(correlated_uniform)),
+                index=mean_forecast.index,
+            )
 
         else:
             hist_vol = returns.squeeze().std()
@@ -249,7 +229,7 @@ class Forecaster:
 
         hourly_returns = []
 
-        for step_idx, t in enumerate(daily_returns.index):  # noqa: F402
+        for step_idx, t in enumerate(daily_returns.index):
             # Use the integer step position, not hash(t): hash() is non-deterministic
             # across Python processes (PYTHONHASHSEED), so the same seed would give
             # different Brownian bridge paths in different runs.
@@ -339,8 +319,8 @@ class Simulator:
     def __init__(
         self,
         price_series: pd.Series,
-        arima_spec: dict,
-        garch_spec: dict,
+        arima_spec: Optional[dict],
+        garch_spec: Optional[dict],
         seed: int,
         *,
         market_input: pd.DataFrame = pd.DataFrame(),
