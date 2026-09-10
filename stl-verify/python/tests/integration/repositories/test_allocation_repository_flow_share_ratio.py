@@ -25,6 +25,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
+from app.adapters.postgres.reference_as_of import utc_now
 from app.domain.entities.allocation import EthAddress
 from tests.integration.seed import (
     FR_ATOKEN_TX_AMOUNT,
@@ -57,10 +58,14 @@ from tests.integration.seed import (
     FR_PROXY_MIXED,
     FR_PROXY_NEVER_VALUED,
     FR_PROXY_RATIO,
+    FR_PROXY_SAME_BLOCK,
     FR_PROXY_TIE,
     FR_RATIO_BALANCE,
     FR_RATIO_TX_AMOUNT,
     FR_RATIO_UNDERLYING_VALUE,
+    FR_SAME_BLOCK_HIGH_LOG_DONOR_BALANCE,
+    FR_SAME_BLOCK_HIGH_LOG_DONOR_UNDERLYING_VALUE,
+    FR_SAME_BLOCK_TX_AMOUNT,
     FR_TIE_BEFORE_DONOR_BALANCE,
     FR_TIE_BEFORE_DONOR_UNDERLYING_VALUE,
     FR_TIE_TX_AMOUNT,
@@ -91,7 +96,7 @@ async def repo(async_db_url: str):
     """Bare AllocationRepository for direct-method tests."""
     engine = create_async_engine(async_db_url)
     try:
-        yield AllocationRepository(engine)
+        yield AllocationRepository(engine, utc_now)
     finally:
         await engine.dispose()
 
@@ -99,7 +104,7 @@ async def repo(async_db_url: str):
 async def _single_bucket(repo: AllocationRepository, proxy_hex: str):
     """Return the one hourly bucket every seeded scenario lands its rows in."""
     buckets = await repo.list_activity_buckets(
-        prime_id=EthAddress(f"0x{proxy_hex}"),
+        proxy_addresses=[EthAddress(f"0x{proxy_hex}")],
         from_timestamp=FR_BUCKET_TS - dt.timedelta(minutes=30),
         to_timestamp=FR_BUCKET_TS + dt.timedelta(minutes=30),
         bucket_seconds=3600.0,
@@ -214,8 +219,56 @@ async def test_equidistant_ratio_candidates_prefer_the_at_or_before_row(repo) ->
 
 
 @pytest.mark.asyncio
+async def test_same_block_donors_resolve_by_log_index(repo) -> None:
+    """Two donors in the flow's own block: the higher log_index wins, not the higher ratio."""
+    bucket = await _single_bucket(repo, FR_PROXY_SAME_BLOCK)
+    ratio = FR_SAME_BLOCK_HIGH_LOG_DONOR_UNDERLYING_VALUE / FR_SAME_BLOCK_HIGH_LOG_DONOR_BALANCE
+    assert bucket.net_flow_usd == FR_SAME_BLOCK_TX_AMOUNT * ratio * FR_UNDERLYING_PRICE
+
+
+@pytest.mark.asyncio
 async def test_mixed_bucket_sums_ratio_and_nearest_row_flows(repo) -> None:
     """One bucket mixing own-ratio in/out, a nearest-ratio legacy row, and a sweep sums per-row valuations."""
     bucket = await _single_bucket(repo, FR_PROXY_MIXED)
     assert bucket.event_count == 4
     assert bucket.net_flow_usd == _EXPECTED_MIXED_NET_FLOW
+
+
+@pytest.mark.asyncio
+async def test_resolves_a_prime_to_every_one_of_its_proxies(repo: AllocationRepository):
+    """The widening behind the prime-wide activity trend.
+
+    Resolved from allocation_position, not the axis-synome contract: /v1/primes
+    is built from these same rows, so a contract that has not been told about a
+    proxy yet would make server and client disagree about what a prime is. None
+    of the seeded flow-ratio proxies is in the contract, so a contract-based
+    lookup would silently return just the address it was given.
+    """
+    resolved = await repo.list_prime_proxy_addresses(EthAddress(f"0x{FR_PROXY_RATIO}"))
+
+    hexes = {str(a)[2:] for a in resolved}
+    assert FR_PROXY_RATIO in hexes
+    assert FR_PROXY_ATOKEN in hexes, "a sibling proxy of the same prime must be included"
+
+
+@pytest.mark.asyncio
+async def test_an_address_with_no_rows_resolves_to_itself(repo: AllocationRepository):
+    """Never empty — downstream an empty filter is indistinguishable from none."""
+    unknown = EthAddress("0x" + "ab" * 20)
+
+    assert await repo.list_prime_proxy_addresses(unknown) == [unknown]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_proxy_filter_matches_nothing_rather_than_everything(
+    repo: AllocationRepository,
+):
+    buckets = await repo.list_activity_buckets(
+        proxy_addresses=[],
+        from_timestamp=FR_BUCKET_TS - dt.timedelta(minutes=30),
+        to_timestamp=FR_BUCKET_TS + dt.timedelta(minutes=30),
+        bucket_seconds=3600.0,
+        limit=10,
+    )
+
+    assert all(b.event_count == 0 for b in buckets)

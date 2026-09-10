@@ -26,6 +26,7 @@ type AllocationRepository struct {
 	tokenRepo outbound.TokenRepository
 	logger    *slog.Logger
 	buildID   buildregistry.BuildID
+	runID     buildregistry.RunID
 }
 
 type tokenCacheKey struct {
@@ -39,6 +40,7 @@ func NewAllocationRepository(
 	tokenRepo outbound.TokenRepository,
 	logger *slog.Logger,
 	buildID buildregistry.BuildID,
+	runID buildregistry.RunID,
 ) *AllocationRepository {
 	if logger == nil {
 		logger = slog.Default()
@@ -49,6 +51,7 @@ func NewAllocationRepository(
 		tokenRepo: tokenRepo,
 		logger:    logger,
 		buildID:   buildID,
+		runID:     runID,
 	}
 }
 
@@ -179,9 +182,9 @@ func (r *AllocationRepository) buildInsertArgs(
 			chain_id, token_id, prime_id, proxy_address,
 			balance, scaled_balance,
 			block_number, block_version,
-			tx_hash, log_index, tx_amount, direction, created_at, build_id,
-			underlying_value, underlying_token_id
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+			tx_hash, log_index, tx_amount, direction, created_at, build_id, run_id,
+			underlying_value, underlying_token_id, from_address, to_address
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
 		ON CONFLICT (chain_id, token_id, prime_id, proxy_address, block_number, block_version, tx_hash, log_index, direction, processing_version, created_at) DO NOTHING
 	`
 
@@ -200,11 +203,23 @@ func (r *AllocationRepository) buildInsertArgs(
 		pos.Direction,
 		pos.CreatedAt,
 		int(r.buildID),
+		r.runID,
 		underlyingValue,
 		underlyingTokenID,
+		encodeAddress(pos.FromAddress),
+		encodeAddress(pos.ToAddress),
 	}
 
 	return query, args, nil
+}
+
+// encodeAddress keeps a nil address NULL, distinct from the zero address, which
+// is a genuine mint/burn party and must persist as 20 zero bytes.
+func encodeAddress(addr *common.Address) []byte {
+	if addr == nil {
+		return nil
+	}
+	return addr.Bytes()
 }
 
 // encodeTxHash returns the on-chain transaction hash for a position, or the

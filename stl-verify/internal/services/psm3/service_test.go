@@ -27,6 +27,8 @@ const (
 
 var testPSM3Address = common.HexToAddress("0x1601843c5E9bC251A3272907010AFa41Fa18347E")
 
+var testALMAddress = common.HexToAddress("0x2917956eFF0B5eaF030abDB4EF4296DF775009cA")
+
 // ---------------------------------------------------------------------------
 // Fakes
 // ---------------------------------------------------------------------------
@@ -67,6 +69,13 @@ func newFakePSM3Caller() *fakePSM3Caller {
 			USDCBalance:    big.NewInt(3_000_000),
 			TotalAssets:    big.NewInt(6_000_000),
 			ConversionRate: big.NewInt(1_050_000),
+			TotalShares:    big.NewInt(6_000_000),
+			ALMPositions: []entity.PSM3ALMPosition{{
+				Prime:      "spark",
+				Address:    testALMAddress,
+				Shares:     big.NewInt(5_900_000),
+				AssetValue: big.NewInt(5_900_000),
+			}},
 		},
 	}
 }
@@ -145,10 +154,11 @@ func (r *fakePSM3Repo) allSaved() []*entity.PSM3Reserves {
 
 // fakeSQSConsumer is a controllable in-memory SQS consumer.
 type fakeSQSConsumer struct {
-	mu       sync.Mutex
-	messages []outbound.SQSMessage
-	served   int
-	deleted  []string
+	mu                sync.Mutex
+	messages          []outbound.SQSMessage
+	served            int
+	deleted           []string
+	visibilityTimeout time.Duration
 }
 
 func newFakeSQSConsumer(events []outbound.BlockEvent) *fakeSQSConsumer {
@@ -183,9 +193,18 @@ func (f *fakeSQSConsumer) DeleteMessage(_ context.Context, receiptHandle string)
 	return nil
 }
 
+func (f *fakeSQSConsumer) ChangeMessageVisibilityBatch(context.Context, []string, time.Duration) (map[string]error, error) {
+	return nil, nil
+}
+
 func (f *fakeSQSConsumer) Close() error { return nil }
 
-func (f *fakeSQSConsumer) VisibilityTimeout() time.Duration { return 30 * time.Second }
+func (f *fakeSQSConsumer) VisibilityTimeout() time.Duration {
+	if f.visibilityTimeout > 0 {
+		return f.visibilityTimeout
+	}
+	return 180 * time.Second
+}
 
 func (f *fakeSQSConsumer) deleteCount() int {
 	f.mu.Lock()
@@ -218,7 +237,7 @@ func defaultConfig(sweepEveryN int) psm3.Config {
 		SweepEveryNBlocks: sweepEveryN,
 		ChainID:           testChainID,
 		PSM3Address:       testPSM3Address,
-		MaxMessages:       10,
+		MaxMessages:       1,
 		PollInterval:      10 * time.Millisecond,
 	}
 }
@@ -356,6 +375,23 @@ func TestStart_BlockQuerierError(t *testing.T) {
 	}
 }
 
+func TestStart_RefusesAVisibilityTimeoutAReceiveCanOutrun(t *testing.T) {
+	consumer := newFakeSQSConsumer(nil)
+	consumer.visibilityTimeout = 30 * time.Second
+	svc := newService(t, defaultConfig(1), newFakePSM3Caller(), &fakePSM3Repo{}, consumer)
+
+	err := svc.Start(context.Background())
+	if err == nil {
+		_ = svc.Stop()
+		t.Fatal("Start accepted a 30s visibility timeout; a booted worker never crashloops on it, because " +
+			"ProcessMessages revalidates on every poll and RunLoop only logs what it returns, so the pod reports " +
+			"Ready and spins logging forever while the queue never drains")
+	}
+	if !strings.Contains(err.Error(), "visibility timeout") {
+		t.Errorf("Start error = %q, want it to name the visibility timeout", err)
+	}
+}
+
 func TestStart_ResolvesImmutablesAtLatestBlock(t *testing.T) {
 	caller := newFakePSM3Caller()
 	svc := newService(t, defaultConfig(1), caller, &fakePSM3Repo{}, newFakeSQSConsumer(nil))
@@ -422,6 +458,9 @@ func TestSweep_WritesSnapshot(t *testing.T) {
 	}
 	if snap.Address != testPSM3Address {
 		t.Errorf("Address = %s, want %s", snap.Address.Hex(), testPSM3Address.Hex())
+	}
+	if len(snap.State.ALMPositions) != 1 || snap.State.ALMPositions[0].Address != testALMAddress {
+		t.Errorf("ALMPositions = %+v, want a single position for %s", snap.State.ALMPositions, testALMAddress.Hex())
 	}
 	if snap.BlockNumber != testBlockNum {
 		t.Errorf("BlockNumber = %d, want %d", snap.BlockNumber, testBlockNum)

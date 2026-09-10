@@ -10,6 +10,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 )
 
 // DBConfig holds configuration for the PostgreSQL connection pool.
@@ -51,6 +55,11 @@ type DBConfig struct {
 	// this pool builder run legitimately long statements. Set it only on
 	// latency-bounded services that should never run a long single statement.
 	StatementTimeout time.Duration
+
+	// MeterProvider supplies the pool's query metrics. Defaults to the global
+	// provider, whose instruments record nothing until telemetry.InitMetrics
+	// installs the exporting one.
+	MeterProvider metric.MeterProvider
 }
 
 // LogValue implements slog.LogValuer to redact the URL (which contains credentials).
@@ -154,7 +163,36 @@ func buildPoolConfig(cfg DBConfig) (*pgxpool.Config, error) {
 		poolConfig.AfterConnect = ac
 	}
 
+	if err := attachQueryTracer(poolConfig, cfg.MeterProvider); err != nil {
+		return nil, err
+	}
+
 	return poolConfig, nil
+}
+
+// attachQueryTracer gives the pool the pgx tracer behind the fleet-wide database
+// error metrics.
+func attachQueryTracer(poolConfig *pgxpool.Config, injected metric.MeterProvider) error {
+	mp := injected
+	if mp == nil {
+		mp = otel.GetMeterProvider()
+	}
+
+	tracer, err := newQueryErrorTracer(mp)
+	if err != nil {
+		return fmt.Errorf("building query error tracer: %w", err)
+	}
+	poolConfig.ConnConfig.Tracer = tracer
+
+	if injected == nil {
+		// An injected provider is already exporting, so the seed
+		// newQueryErrorTracer wrote has landed. The global one has too in every
+		// metric-exporting binary, which telemetry.InitOTEL asserts; this covers
+		// the pools built without telemetry at all — one-shot backfillers, tests.
+		telemetry.OnMeterProviderReady("postgres.OpenPool", tracer.seedErrorClasses)
+	}
+
+	return nil
 }
 
 // OpenPool creates and configures a PostgreSQL connection pool using pgxpool.

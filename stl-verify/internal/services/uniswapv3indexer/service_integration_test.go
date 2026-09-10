@@ -85,7 +85,7 @@ func setupReorgIntegration(t *testing.T) *reorgIntegrationFixture {
 	t.Helper()
 	ctx := context.Background()
 
-	db, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	db, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	pool := uniswapTestPool()
@@ -104,7 +104,7 @@ func setupReorgIntegration(t *testing.T) *reorgIntegrationFixture {
 	if err != nil {
 		t.Fatalf("NewTxManager: %v", err)
 	}
-	eventRepo := postgres.NewEventRepository(nil, 1)
+	eventRepo := postgres.NewEventRepository(nil, 1, 1)
 	writer := dexconsumer.NewProtocolEventWriter(protocolID, eventRepo)
 
 	mc := &recordingMulticaller{

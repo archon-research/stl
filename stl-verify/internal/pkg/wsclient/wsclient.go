@@ -293,11 +293,6 @@ func (c *Conn) WriteText(data []byte) error {
 	return c.writeMessage(websocket.TextMessage, data)
 }
 
-// WriteBinary sends a raw binary frame.
-func (c *Conn) WriteBinary(data []byte) error {
-	return c.writeMessage(websocket.BinaryMessage, data)
-}
-
 func (c *Conn) writeMessage(messageType int, data []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()

@@ -12,6 +12,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -147,6 +148,7 @@ func TestSync_NullDowngradesRecorded(t *testing.T) {
 	}
 	client.GetActiveLoansFn = func(context.Context) ([]outbound.MapleActiveLoan, error) {
 		loans := fixtureLoans()
+		loans[0].Collateral.Asset = "" // API reported a null asset symbol
 		loans[0].Collateral.AssetAmount = nil
 		loans[0].Collateral.AssetValueUSD = nil
 		loans[2].Collateral.AssetAmount = nil
@@ -200,6 +202,7 @@ func TestSync_NullDowngradesRecorded(t *testing.T) {
 		"pool_collateral_value_usd":     1,
 		"pool_monthly_apy":              1, // fixture pool 2 has no APYs
 		"pool_spot_apy":                 1,
+		"collateral_asset_symbol":       1,
 		"collateral_asset_amount":       2,
 		"collateral_asset_value_usd":    1,
 		"loan_acm_ratio":                1, // fixture loan 2 is uncollateralized
@@ -368,5 +371,55 @@ func TestNewTelemetryWithProviders_InstrumentErrors(t *testing.T) {
 				t.Errorf("error = %q", err.Error())
 			}
 		})
+	}
+}
+
+// Guards the startup seeds: VectorMapleIndexerStalled (cycles, rate==0) and
+// VectorMaplePoolWritesZero (rows_written{table="maple_pool_state"}, increase==0)
+// must be computable from process start. See telemetry.SeedCounter.
+func TestNewTelemetry_SeedsAlertedSeriesAtZero(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+
+	if _, err := NewTelemetryWithProviders(tracenoop.NewTracerProvider(), mp); err != nil {
+		t.Fatalf("NewTelemetryWithProviders() error: %v", err)
+	}
+
+	cycleDPs := testutil.CollectSumDataPoints(t, reader, "maple.sync.cycles.total")
+	cycleStatuses := map[string]int64{}
+	for _, dp := range cycleDPs {
+		if chain := testutil.AttrValue(dp, "chain"); chain != "ethereum" {
+			t.Errorf("maple.sync.cycles.total chain attr = %q, want %q", chain, "ethereum")
+		}
+		cycleStatuses[testutil.AttrValue(dp, "status")] = dp.Value
+	}
+	for _, status := range []string{"success", "error"} {
+		v, ok := cycleStatuses[status]
+		if !ok {
+			t.Errorf("maple.sync.cycles.total missing status=%q series before any cycle", status)
+			continue
+		}
+		if v != 0 {
+			t.Errorf("maple.sync.cycles.total{status=%q} = %d, want 0", status, v)
+		}
+	}
+
+	var poolRows *metricdata.DataPoint[int64]
+	for _, dp := range testutil.CollectSumDataPoints(t, reader, "maple.sync.rows.written") {
+		if testutil.AttrValue(dp, "table") == maplePoolStateTable {
+			dp := dp
+			poolRows = &dp
+		}
+	}
+	if poolRows == nil {
+		t.Errorf("maple.sync.rows.written missing table=%q series before any cycle", maplePoolStateTable)
+		return
+	}
+	if chain := testutil.AttrValue(*poolRows, "chain"); chain != "ethereum" {
+		t.Errorf("maple.sync.rows.written{table=%q} chain attr = %q, want %q", maplePoolStateTable, chain, "ethereum")
+	}
+	if poolRows.Value != 0 {
+		t.Errorf("maple.sync.rows.written{table=%q} = %d, want 0", maplePoolStateTable, poolRows.Value)
 	}
 }

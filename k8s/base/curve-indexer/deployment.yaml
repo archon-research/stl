@@ -4,6 +4,13 @@ metadata:
   name: curve-indexer
 spec:
   replicas: 1
+  # Explicit, matching the API-server default — ArgoCD must own spec.strategy or
+  # a later change to it cannot prune rollingUpdate. k8s/AGENTS.md, "Rollout strategy".
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
   selector:
     matchLabels:
       app: curve-indexer
@@ -17,9 +24,6 @@ spec:
         - name: curve-indexer
           # Image name used as the Kustomize images transformer key.
           # The overlay kustomization.yaml overrides newName + newTag.
-          # Runs the shared dex-indexer binary (cmd/workers/dex-indexer) with
-          # DEX=curve from curve-indexer-config, defined per overlay (VEC-329).
-          # Not defined in this base, so this base is not overlay-wired until then.
           image: dex-indexer
           envFrom:
             - configMapRef:
@@ -42,4 +46,4 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 30
             failureThreshold: 3
-      terminationGracePeriodSeconds: 60
+      terminationGracePeriodSeconds: 90

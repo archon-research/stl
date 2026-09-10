@@ -141,8 +141,7 @@ func (h *CryptoswapHandler) DecodeEvents(
 			result.LpTokenEvents = append(result.LpTokenEvents, rec)
 		}
 
-		switch ev.Name {
-		case "TokenExchange":
+		if ev.Name == "TokenExchange" {
 			swap, err := extractCryptoswapTokenExchange(eventData, pool, logIndex, txHash)
 			if err != nil {
 				return DecodedEvents{}, fmt.Errorf("extracting TokenExchange: %w", err)

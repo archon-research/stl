@@ -88,6 +88,10 @@ func NewTelemetryWithProvider(mp metric.MeterProvider, chain string) (*Telemetry
 		return nil, fmt.Errorf("creating conversionRate gauge: %w", err)
 	}
 
+	// VectorPSM3IndexerStalled reads sweeps{status="success"} with rate()==0;
+	// seed so it is computable from process start (see telemetry.SeedCounter).
+	telemetry.SeedStatusCounter(context.Background(), t.sweeps, t.chainAttr)
+
 	return t, nil
 }
 

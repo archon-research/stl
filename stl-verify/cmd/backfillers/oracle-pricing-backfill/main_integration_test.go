@@ -16,14 +16,7 @@ import (
 var sharedDSN string
 
 func TestMain(m *testing.M) {
-	dsn, cleanup := testutil.StartTimescaleDBForMain()
-	sharedDSN = dsn
-
-	code := m.Run()
-
-	cleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.RunShared(m, testutil.Shared{TimescaleDSN: &sharedDSN}))
 }
 
 // ---------------------------------------------------------------------------
@@ -31,7 +24,7 @@ func TestMain(m *testing.M) {
 // ---------------------------------------------------------------------------
 
 func TestRunIntegration_HappyPath(t *testing.T) {
-	pool, dbURL, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -65,6 +58,7 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	defer rpcServer.Close()
 
 	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 
 	args := []string{
 		"-rpc-url", rpcServer.URL,
@@ -105,6 +99,7 @@ func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 	defer rpcServer.Close()
 
 	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 
 	err := run([]string{
 		"-rpc-url", rpcServer.URL,

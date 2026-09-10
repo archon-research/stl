@@ -353,6 +353,10 @@ func (c *eventSinkConsumer) DeleteCount() int {
 	return len(c.deleted)
 }
 
+func (c *eventSinkConsumer) ChangeMessageVisibilityBatch(context.Context, []string, time.Duration) (map[string]error, error) {
+	return nil, nil
+}
+
 func (c *eventSinkConsumer) VisibilityTimeout() time.Duration {
 	return 300 * time.Second
 }
@@ -428,7 +432,7 @@ func TestE2E_VEC242_NullBlockBodyRejected_RetryThenWorkerProcesses(t *testing.T)
 	defer cancel()
 
 	// --- Schema, oracle/token fixtures, repositories ---
-	pool, _, schemaCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, schemaCleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(schemaCleanup)
 
 	logger := testutil.DiscardLogger()
@@ -438,7 +442,7 @@ func TestE2E_VEC242_NullBlockBodyRejected_RetryThenWorkerProcesses(t *testing.T)
 	tokenID := testutil.SeedToken(t, ctx, pool, 1, "0x0000000000000000000000000000000000000051", "VTK", 18)
 	testutil.SeedOracleAsset(t, ctx, pool, oracleID, tokenID)
 
-	priceRepo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 100)
+	priceRepo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("NewOnchainPriceRepository: %v", err)
 	}
@@ -517,7 +521,7 @@ func TestE2E_VEC242_NullBlockBodyRejected_RetryThenWorkerProcesses(t *testing.T)
 		Logger:       logger,
 		ChainID:      1,
 	}
-	workerSvc, err := NewService(workerCfg, consumer, cache, priceRepo, multicallFactoryFor(mc))
+	workerSvc, err := NewService(workerCfg, consumer, cache, priceRepo, multicallFactoryFor(mc), testReferenceEffectiveAt)
 	if err != nil {
 		t.Fatalf("NewService (worker): %v", err)
 	}
@@ -630,7 +634,7 @@ func TestE2E_VEC242_GapFillRetriesNull(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	pool, _, schemaCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, schemaCleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(schemaCleanup)
 	logger := testutil.DiscardLogger()
 	testutil.DisableAllOracles(t, ctx, pool)

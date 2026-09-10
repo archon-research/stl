@@ -6,14 +6,15 @@
 // column in windows and calling transformed._bootstrap_<source>(from, to), which
 // upserts ON CONFLICT DO UPDATE guarded by IS DISTINCT FROM.
 //
-// It is Temporal-free by design (it only needs a *pgxpool.Pool + Params): the
-// transform-bootstrap Temporal worker (cmd/cronjobs/transform-bootstrap) wraps
-// Run in a RunnerFunc, and the integration test drives it directly. Run must be
-// executed out of band from the worker's steady-state activity — it enables
-// tiered reads and disables the statement timeout for its own session so
-// S3-tiered history is included and large windows are not cut off. The enqueue
-// triggers are already live, so any rows written while it runs are captured by
-// the queue; the guarded upsert makes the overlap (and re-running) idempotent.
+// It is Temporal-free by design (it needs only a *pgxpool.Pool + Params): the
+// on-demand transform-bootstrap worker (cmd/backfillers/transform-bootstrap)
+// wraps Run in a temporal.RunnerFunc, and the integration test drives it
+// directly. Run must be executed out of band from the transform-worker's
+// steady-state activity — it enables tiered reads and disables the statement
+// timeout for its own session so S3-tiered history is included and large windows
+// are not cut off. The enqueue triggers are already live, so any rows written
+// while it runs are captured by the queue; the guarded upsert makes the overlap
+// (and re-running) idempotent.
 package transform_bootstrap
 
 import (
@@ -31,10 +32,11 @@ import (
 
 // Params configures a bootstrap run.
 type Params struct {
-	// From is the start of the backfill window. The zero value is the
-	// "derive per source" sentinel: Run starts each source at its own earliest
-	// raw row. A fixed default would silently exclude older history from the
-	// copy while the parity ledger still counts it, so drift would alert.
+	// From is the start of the backfill window. The zero value is the "derive per
+	// source" sentinel: Run starts each source at its own earliest raw row. A fixed
+	// default (e.g. 2025-01-01) would silently exclude older history from the copy
+	// while the parity ledger still counts it, so drift would alert until someone
+	// re-ran from an earlier start.
 	From time.Time
 	// Step is the window size per _bootstrap call. Must be positive.
 	Step time.Duration
@@ -178,10 +180,11 @@ func selectSources(ctx context.Context, conn *pgxpool.Conn, only string) ([]stri
 }
 
 // earliestRawTime returns the minimum value of a source's time-dimension column in
-// raw, used as the per-source backfill start when From is zero. It reads the time
-// column from the hypertable's first dimension (the same lookup the parity functions
-// use) so it does not hardcode per-table column names. A NULL minimum (empty raw
-// table) returns the zero time, which the caller treats as "nothing to copy".
+// raw, used as the per-source backfill start when Params.From is unset. It reads the
+// time column from the hypertable's first dimension (the same lookup the parity
+// functions use) so it does not hardcode per-table column names. A NULL minimum
+// (empty raw table) returns the zero time, which the caller treats as "nothing to
+// copy".
 func earliestRawTime(ctx context.Context, conn *pgxpool.Conn, source string) (time.Time, error) {
 	var col string
 	err := conn.QueryRow(ctx,
@@ -202,8 +205,9 @@ func earliestRawTime(ctx context.Context, conn *pgxpool.Conn, source string) (ti
 	return earliest.UTC(), nil
 }
 
-// ParseTime accepts an RFC3339 or YYYY-MM-DD string and returns it in UTC. Used
-// by the worker to read BOOTSTRAP_FROM from the environment.
+// ParseTime accepts the two forms an operator supplies a window start in: RFC3339
+// or YYYY-MM-DD. Exported for the worker, which reads Params.From from the
+// environment rather than a flag.
 func ParseTime(s string) (time.Time, error) {
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
 		return t.UTC(), nil

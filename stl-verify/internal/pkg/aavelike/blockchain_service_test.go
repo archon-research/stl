@@ -455,7 +455,8 @@ func TestBlockchainService_ParseReserveData(t *testing.T) {
 						var values []any
 
 						// Different protocols have different field counts
-						if proto.version == "aave-v2" {
+						switch proto.version {
+						case "aave-v2":
 							// Aave V2: 10 fields
 							values = []any{
 								big.NewInt(1000),       // availableLiquidity
@@ -469,7 +470,7 @@ func TestBlockchainService_ParseReserveData(t *testing.T) {
 								big.NewInt(11000),      // variableBorrowIndex
 								big.NewInt(1640995200), // lastUpdateTimestamp
 							}
-						} else if proto.version == "sparklend" {
+						case "sparklend":
 							// Sparklend: 12 fields (same interface as Aave V3)
 							values = []any{
 								big.NewInt(1000),       // unbacked
@@ -485,7 +486,7 @@ func TestBlockchainService_ParseReserveData(t *testing.T) {
 								big.NewInt(11000),      // variableBorrowIndex
 								big.NewInt(1640995200), // lastUpdateTimestamp
 							}
-						} else {
+						default:
 							// Aave V3: 12 fields
 							values = []any{
 								big.NewInt(1000),       // unbacked

@@ -1,9 +1,8 @@
 from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
@@ -23,6 +22,45 @@ from tests.factories import (
 
 _VALID_ADDR = "0x" + "ab" * 20
 
+_SPARK_MAINNET_ALM = "0x1601843c5e9bc251a3272907010afa41fa18347e"
+_SPARK_BASE_ALM = "0x2917956eff0b5eaf030abdb4ef4296df775009ca"
+_SPARK_AVALANCHE_ALM = "0xece6b0e8a54c2f44e066fbb9234e7157b15b7fec"
+
+_SPARK_VAULT = "0x691a6c29e9e96dd897718305427ad5d534db16ba"
+
+
+def _vault_address_for(name: str) -> str:
+    """Default vault address for `_prime()`, keyed by prime name.
+
+    `prime.vault_address` is UNIQUE in the schema, so a single shared default
+    across differently-named primes (e.g. spark and grove in the same test)
+    would encode a state the schema forbids. `spark` keeps the realistic
+    `_SPARK_VAULT` constant other tests assert against; every other name gets
+    a value derived from itself so no two names collide.
+    """
+    if name == "spark":
+        return _SPARK_VAULT
+    return "0x" + name.encode().hex().ljust(40, "0")[:40]
+
+
+def _prime(
+    address: str,
+    *,
+    name: str = "spark",
+    chain_id: int = 1,
+    chain: str | None = "mainnet",
+    prime_vault_address: str | None = None,
+) -> Prime:
+    return Prime(
+        id=address,
+        name=name,
+        address=address,
+        chain_id=chain_id,
+        chain=chain,
+        role="alm",
+        prime_vault_address=prime_vault_address if prime_vault_address is not None else _vault_address_for(name),
+    )
+
 
 @pytest.fixture(autouse=True)
 def _clear_dependency_overrides():
@@ -37,6 +75,7 @@ def _make_service(
     anchorage_holdings=None,
     *,
     exists: bool = True,
+    primary_proxy: str | None = _SPARK_MAINNET_ALM,
 ) -> AsyncMock:
     service = AsyncMock(spec=AllocationService)
     service.list_primes.return_value = primes or []
@@ -45,6 +84,9 @@ def _make_service(
     service.list_anchorage_custody_holdings.return_value = anchorage_holdings or []
     service.prime_exists.return_value = exists
     service.list_activity_buckets.return_value = []
+    # Which proxy carries the prime's prime-scoped rows is a fact about the
+    # indexed data, so the repository answers it; tests state the answer.
+    service.primary_proxy_address.return_value = primary_proxy
     return service
 
 
@@ -55,13 +97,75 @@ def _override_service(service: AsyncMock):
     return _dep
 
 
+def test_list_primes_labels_each_proxy_with_chain_and_role():
+    from app.api.v1 import allocations
+
+    service = _make_service(
+        primes=[
+            _prime(_SPARK_MAINNET_ALM, chain_id=1, chain="mainnet"),
+            _prime(_SPARK_AVALANCHE_ALM, chain_id=43114, chain="avalanche-c"),
+        ]
+    )
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    response = TestClient(app).get("/v1/primes")
+
+    assert response.status_code == 200
+    assert [(row["name"], row["chain_id"], row["chain"], row["role"]) for row in response.json()] == [
+        ("spark", 1, "mainnet", "alm"),
+        ("spark", 43114, "avalanche-c", "alm"),
+    ]
+
+
+def test_list_primes_keeps_the_existing_id_name_address_fields():
+    from app.api.v1 import allocations
+
+    service = _make_service(primes=[_prime(_SPARK_MAINNET_ALM)])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    response = TestClient(app).get("/v1/primes")
+
+    row = response.json()[0]
+    assert row["id"] == _SPARK_MAINNET_ALM
+    assert row["name"] == "spark"
+    assert row["address"] == _SPARK_MAINNET_ALM
+
+
+def test_list_primes_exposes_the_prime_vault_address_as_a_grouping_key():
+    from app.api.v1 import allocations
+
+    service = _make_service(
+        primes=[
+            _prime(_SPARK_MAINNET_ALM, chain_id=1, chain="mainnet"),
+            _prime(_SPARK_AVALANCHE_ALM, chain_id=43114, chain="avalanche-c"),
+        ]
+    )
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    response = TestClient(app).get("/v1/primes")
+
+    assert {row["prime_vault_address"] for row in response.json()} == {_SPARK_VAULT}
+
+
+def test_list_primes_marks_the_redundant_id_field_deprecated():
+    schema = app.openapi()["components"]["schemas"]["PrimeResponse"]["properties"]
+
+    assert schema["id"]["deprecated"] is True
+
+
+def test_list_primes_does_not_deprecate_the_address_field():
+    schema = app.openapi()["components"]["schemas"]["PrimeResponse"]["properties"]
+
+    assert "deprecated" not in schema["address"]
+
+
 def test_list_primes_returns_200_with_prime_names():
     from app.api.v1 import allocations
 
     service = _make_service(
         primes=[
-            Prime(id="0xaaa", name="grove", address="0xaaa"),
-            Prime(id="0xbbb", name="spark", address="0xbbb"),
+            _prime("0xaaa", name="grove", chain=None),
+            _prime("0xbbb", name="spark", chain=None),
         ]
     )
     app.dependency_overrides[allocations._get_service] = _override_service(service)
@@ -71,8 +175,24 @@ def test_list_primes_returns_200_with_prime_names():
 
     assert response.status_code == 200
     assert response.json() == [
-        {"id": "0xaaa", "name": "grove", "address": "0xaaa"},
-        {"id": "0xbbb", "name": "spark", "address": "0xbbb"},
+        {
+            "id": "0xaaa",
+            "name": "grove",
+            "address": "0xaaa",
+            "chain_id": 1,
+            "chain": None,
+            "role": "alm",
+            "prime_vault_address": _vault_address_for("grove"),
+        },
+        {
+            "id": "0xbbb",
+            "name": "spark",
+            "address": "0xbbb",
+            "chain_id": 1,
+            "chain": None,
+            "role": "alm",
+            "prime_vault_address": _SPARK_VAULT,
+        },
     ]
 
 
@@ -104,8 +224,13 @@ def test_list_allocations_returns_200_with_enriched_holdings():
     assert data == [
         {
             "chain_id": 1,
+            "position_keys": ["token:1", "position:1:0x" + "a" * 40],
+            "source": "indexed",
+            "network": None,
+            "wallet_address": None,
             "receipt_token_id": 1,
             "receipt_token_address": "0x" + "a" * 40,
+            "held_token_address": None,
             "underlying_token_id": 10,
             "underlying_token_address": "0x" + "b" * 40,
             "symbol": "aUSDC",
@@ -113,13 +238,83 @@ def test_list_allocations_returns_200_with_enriched_holdings():
             "protocol_name": "aave_v3",
             "balance": "100.0",
             "amount_usd": None,
+            "reference_amount_usd": None,
+            "reference_synced_at": None,
             "latest_activity_at": None,
             "latest_activity_action": None,
             "latest_activity_amount": None,
             "category": "allocation",
+            "scope": "proxy",
         }
     ]
     service.list_receipt_token_positions.assert_awaited_once_with(EthAddress(_VALID_ADDR))
+
+
+def test_a_wrapper_priced_through_its_underlying_is_not_keyed_on_it():
+    """A wrapper STL has no registry entry for keys on itself, not its underlying.
+
+    `sparkPrimeUSDC1` is held as a direct asset priced through USDC, so its row
+    reports USDC as its underlying. Keying it there matched it to Sky's own
+    plain-USDC row — which reports $0 — so the merged row claimed Sky valued a
+    $20.3M position at nothing while Sky's real row for it went unjoined.
+
+    Its own address is what it answers to, whether or not an underlying is
+    projected: a genuine direct holding *is* the token it holds too (pinned by
+    the test below), so both shapes key the same way.
+    """
+    from app.api.v1 import allocations
+
+    holding = make_direct_asset_holding(
+        symbol="sparkPrimeUSDC1",
+        token_address="0x" + "d" * 40,
+        underlying_token_id=3,
+        underlying_token_address="0x" + "e" * 40,
+        underlying_symbol="USDC",
+    )
+    service = _make_service(direct_holdings=[holding])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    (row,) = response.json()
+    # Still reports the underlying it is priced through; only the key ignores it.
+    assert row["underlying_token_address"] == "0x" + "e" * 40
+    assert row["held_token_address"] == "0x" + "d" * 40
+    assert row["position_keys"] == ["position:1:0x" + "d" * 40]
+
+
+def test_a_wrapper_and_the_asset_it_is_priced_through_never_share_a_key():
+    """The wrapper and a plain holding of its underlying are two positions.
+
+    Both are direct holdings on the same chain naming USDC as their underlying,
+    which is exactly the pair that collapsed into one when the underlying's
+    address keyed both.
+    """
+    from app.api.v1 import allocations
+
+    usdc_address = "0x" + "e" * 40
+    wrapper = make_direct_asset_holding(
+        symbol="sparkPrimeUSDC1",
+        token_id=3,
+        token_address="0x" + "d" * 40,
+        underlying_token_id=4,
+        underlying_token_address=usdc_address,
+        underlying_symbol="USDC",
+    )
+    plain_usdc = make_direct_asset_holding(symbol="USDC", token_id=4, token_address=usdc_address)
+    service = _make_service(direct_holdings=[wrapper, plain_usdc])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    wrapper_row, plain_row = response.json()
+    assert wrapper_row["position_keys"] == ["position:1:0x" + "d" * 40]
+    assert plain_row["position_keys"] == [f"position:1:{usdc_address}"]
+    assert not set(wrapper_row["position_keys"]) & set(plain_row["position_keys"])
 
 
 def test_list_allocations_returns_direct_asset_rows_with_null_receipt_fields():
@@ -141,8 +336,14 @@ def test_list_allocations_returns_direct_asset_rows_with_null_receipt_fields():
     assert response.json() == [
         {
             "chain_id": 1,
+            # A direct holding is the asset itself, so the asset's address keys it.
+            "position_keys": ["position:1:0x" + "c" * 40],
+            "source": "indexed",
+            "network": None,
+            "wallet_address": None,
             "receipt_token_id": None,
             "receipt_token_address": None,
+            "held_token_address": "0x" + "c" * 40,
             "underlying_token_id": 99,
             "underlying_token_address": "0x" + "c" * 40,
             "symbol": "PYUSD",
@@ -150,10 +351,13 @@ def test_list_allocations_returns_direct_asset_rows_with_null_receipt_fields():
             "protocol_name": None,
             "balance": "250.0",
             "amount_usd": None,
+            "reference_amount_usd": None,
+            "reference_synced_at": None,
             "latest_activity_at": None,
             "latest_activity_action": None,
             "latest_activity_amount": None,
             "category": "asset",
+            "scope": "proxy",
         }
     ]
     service.list_direct_asset_holdings.assert_awaited_once_with(EthAddress(_VALID_ADDR))
@@ -304,14 +508,21 @@ def test_list_allocations_surfaces_anchorage_custody_row():
     app.dependency_overrides[allocations._get_service] = _override_service(service)
     client = TestClient(app)
 
-    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+    response = client.get(f"/v1/primes/{_SPARK_MAINNET_ALM}/allocations")
 
     assert response.status_code == 200
     assert response.json() == [
         {
             "chain_id": 0,
+            # Off-chain custody keys on its protocol: it is the one thing the two
+            # provenances describe the same way.
+            "position_keys": ["custody:anchorage"],
+            "source": "indexed",
+            "network": None,
+            "wallet_address": None,
             "receipt_token_id": None,
             "receipt_token_address": None,
+            "held_token_address": None,
             "underlying_token_id": None,
             "underlying_token_address": None,
             "symbol": "BTC",
@@ -319,13 +530,16 @@ def test_list_allocations_surfaces_anchorage_custody_row():
             "protocol_name": "anchorage",
             "balance": "4722.61",
             "amount_usd": "250000000",
+            "reference_amount_usd": None,
+            "reference_synced_at": None,
             "latest_activity_at": ANCHORAGE_FROZEN_AS_OF.isoformat(),
             "latest_activity_action": None,
             "latest_activity_amount": None,
             "category": "custody",
+            "scope": "prime",
         }
     ]
-    service.list_anchorage_custody_holdings.assert_awaited_once_with(EthAddress(_VALID_ADDR))
+    service.list_anchorage_custody_holdings.assert_awaited_once_with(EthAddress(_SPARK_MAINNET_ALM))
 
 
 def test_list_allocations_combines_receipt_direct_and_custody_rows():
@@ -340,7 +554,7 @@ def test_list_allocations_combines_receipt_direct_and_custody_rows():
     app.dependency_overrides[allocations._get_service] = _override_service(service)
     client = TestClient(app)
 
-    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+    response = client.get(f"/v1/primes/{_SPARK_MAINNET_ALM}/allocations")
 
     assert response.status_code == 200
     rows = response.json()
@@ -363,13 +577,139 @@ def test_list_allocations_custody_row_surfaces_frozen_snapshot_time_verbatim():
     app.dependency_overrides[allocations._get_service] = _override_service(service)
     client = TestClient(app)
 
-    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+    response = client.get(f"/v1/primes/{_SPARK_MAINNET_ALM}/allocations")
 
     assert response.status_code == 200
     row = response.json()[0]
     assert row["latest_activity_at"] == ANCHORAGE_FROZEN_AS_OF.isoformat()
     assert row["latest_activity_action"] is None
     assert row["latest_activity_amount"] is None
+
+
+def test_list_allocations_includes_the_custody_leg_for_the_primary_proxy():
+    from app.api.v1 import allocations
+
+    service = _make_service(anchorage_holdings=[make_anchorage_custody_holding()])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    response = TestClient(app).get(f"/v1/primes/{_SPARK_MAINNET_ALM}/allocations")
+
+    assert response.status_code == 200
+    rows = [row for row in response.json() if row["symbol"] == "BTC"]
+    assert len(rows) == 1
+
+
+def test_list_allocations_tags_the_custody_leg_as_prime_scoped():
+    from app.api.v1 import allocations
+
+    service = _make_service(anchorage_holdings=[make_anchorage_custody_holding()])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    response = TestClient(app).get(f"/v1/primes/{_SPARK_MAINNET_ALM}/allocations")
+
+    row = next(row for row in response.json() if row["symbol"] == "BTC")
+    assert row["scope"] == "prime"
+
+
+def test_list_allocations_omits_the_custody_leg_for_a_non_primary_proxy():
+    from app.api.v1 import allocations
+
+    service = _make_service(anchorage_holdings=[make_anchorage_custody_holding()])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    response = TestClient(app).get(f"/v1/primes/{_SPARK_AVALANCHE_ALM}/allocations")
+
+    assert response.status_code == 200
+    assert [row for row in response.json() if row["symbol"] == "BTC"] == []
+
+
+def test_list_allocations_does_not_query_custody_for_a_non_primary_proxy():
+    from app.api.v1 import allocations
+
+    service = _make_service(anchorage_holdings=[make_anchorage_custody_holding()])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    TestClient(app).get(f"/v1/primes/{_SPARK_AVALANCHE_ALM}/allocations")
+
+    service.list_anchorage_custody_holdings.assert_not_called()
+
+
+def test_list_allocations_includes_the_custody_leg_for_a_primary_proxy_unknown_to_the_contract():
+    """Attribution follows the indexed data, not the contract pin.
+
+    A proxy the pinned axis-synome contract has not been told about — the state
+    during a chain onboarding — still carries the prime-scoped leg when it is the
+    prime's primary, because withholding it there would make the row unreachable.
+    """
+    from app.api.v1 import allocations
+
+    service = _make_service(anchorage_holdings=[make_anchorage_custody_holding()], primary_proxy=_VALID_ADDR)
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    response = TestClient(app).get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    rows = [row for row in response.json() if row["symbol"] == "BTC"]
+    assert len(rows) == 1
+
+
+def test_list_allocations_omits_the_custody_leg_for_a_non_primary_proxy_unknown_to_the_contract():
+    """The double-count this gate exists to prevent.
+
+    A proxy absent from the contract but present in the data used to be treated
+    as its own primary, so it served a second copy of the $250M leg while the
+    prime's real primary served the first — and a consumer unioning a prime's
+    proxies counted it twice.
+    """
+    from app.api.v1 import allocations
+
+    service = _make_service(anchorage_holdings=[make_anchorage_custody_holding()], primary_proxy=_SPARK_MAINNET_ALM)
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    response = TestClient(app).get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    assert [row for row in response.json() if row["symbol"] == "BTC"] == []
+
+
+def test_list_allocations_withholds_the_custody_leg_when_no_primary_resolves():
+    """Unreachable after the prime_exists gate, so it is logged rather than guessed."""
+    from app.api.v1 import allocations
+
+    service = _make_service(anchorage_holdings=[make_anchorage_custody_holding()], primary_proxy=None)
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    with patch("app.api.v1.allocations.logger") as mock_logger:
+        response = TestClient(app).get(f"/v1/primes/{_SPARK_MAINNET_ALM}/allocations")
+
+    assert [row for row in response.json() if row["symbol"] == "BTC"] == []
+    mock_logger.error.assert_called_once()
+
+
+def test_list_allocations_matches_the_primary_proxy_case_insensitively():
+    """`/v1/primes` serves lowercase addresses; a caller may checksum-case the path."""
+    from app.api.v1 import allocations
+
+    service = _make_service(
+        anchorage_holdings=[make_anchorage_custody_holding()],
+        primary_proxy=_SPARK_MAINNET_ALM,
+    )
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    response = TestClient(app).get(f"/v1/primes/{_SPARK_MAINNET_ALM.upper().replace('0X', '0x')}/allocations")
+
+    assert [row for row in response.json() if row["symbol"] == "BTC"] != []
+
+
+def test_list_allocations_tags_on_chain_rows_as_proxy_scoped():
+    from app.api.v1 import allocations
+
+    service = _make_service(direct_holdings=[make_direct_asset_holding()])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    response = TestClient(app).get(f"/v1/primes/{_SPARK_MAINNET_ALM}/allocations")
+
+    assert response.json()[0]["scope"] == "proxy"
 
 
 @pytest.mark.parametrize(
@@ -587,7 +927,7 @@ def test_list_allocation_activity_returns_aggregated_buckets():
         params={
             "from_timestamp": "2026-01-01T00:00:00Z",
             "to_timestamp": "2026-01-02T00:00:00Z",
-            "aggregate": "true",
+            "aggregation_method": "end-period",
         },
     )
 
@@ -653,6 +993,46 @@ def test_list_allocation_activity_hides_synthetic_sweep_tx_hash():
 
     assert response.status_code == 200
     assert response.json()["data"][0]["tx_hash"] is None
+
+
+def test_list_allocation_activity_refuses_a_direction_outside_the_checked_set():
+    """`action_type` is a `Literal`, so an out-of-set direction fails loudly.
+
+    Unreachable in practice — `allocation_position.direction` carries
+    `CHECK (direction IN ('in', 'out', 'sweep'))`. Pinned because the refusal is
+    a deliberate choice, and because it lands earlier than one might expect: the
+    entity is a plain dataclass that validates nothing, so the row travels as
+    far as the response model's own constructor in the handler, which raises
+    before FastAPI reaches its response-serialization step.
+    """
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    service.list_allocation_activity.return_value = [
+        AllocationActivityEvent(
+            chain_id=1,
+            prime_address=_VALID_ADDR,
+            prime_name="spark",
+            protocol_name="SparkLend",
+            token_id=1,
+            token_symbol="spUSDC",
+            # Deliberately out of set: the point of the test. The dataclass does
+            # not validate, so only the response model can refuse it.
+            action_type="SWEEP",  # ty: ignore[invalid-argument-type]
+            tx_amount=Decimal("0"),
+            balance=Decimal("200.0"),
+            tx_hash="0x" + "cd" * 32,
+            log_index=0,
+            block_number=100,
+            block_version=0,
+            created_at=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+        )
+    ]
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    with pytest.raises(ValidationError):
+        client.get("/v1/allocations/activity")
 
 
 def test_list_allocation_activity_returns_200_empty_for_unknown_valid_prime_id():
@@ -742,12 +1122,25 @@ def test_list_allocation_activity_allows_wide_window_with_prime_id_filter():
             "prime_id": _VALID_ADDR,
             "from_timestamp": "2026-01-01T00:00:00Z",
             "to_timestamp": "2026-03-15T00:00:00Z",
-            "resolution": "PT6H",
         },
     )
 
     assert response.status_code == 200
     service.list_allocation_activity.assert_awaited_once()
+
+
+def test_a_default_frequency_activity_window_names_no_grid():
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    service.list_allocation_activity.return_value = []
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    window = client.get("/v1/allocations/activity").json()["window"]
+
+    assert "frequency" not in window
+    assert "frequency_ms" not in window
 
 
 def test_list_allocation_activity_returns_422_for_invalid_tx_hash():
@@ -810,211 +1203,6 @@ def test_list_allocation_activity_sets_no_store_when_bounds_not_pinned():
 
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
-
-
-# --- capital-metrics endpoint ---
-
-
-def test_list_capital_metrics_maps_star_risk_capital_data(monkeypatch):
-    """Metrics are sourced from Star risk capital upstream, matched by prime name."""
-    from app.api.v1 import allocations
-
-    grove_addr = _VALID_ADDR
-    spark_addr = "0x" + "cd" * 20
-
-    service = _make_service(
-        primes=[
-            Prime(id=grove_addr, name="grove", address=grove_addr),
-            Prime(id=spark_addr, name="spark", address=spark_addr),
-        ]
-    )
-    app.dependency_overrides[allocations._get_service] = _override_service(service)
-
-    async def _fake_payload():
-        return allocations.StarRiskCapitalResponse.model_validate(
-            {
-                "status": 200,
-                "success": True,
-                "data": {
-                    "results": [
-                        {
-                            "star": "grove",
-                            "exposure": "500.00",
-                            "total_rc": "100.00",
-                            "financial_rrc": "40.00",
-                            "exposure_share": "50.00%",
-                            "risk_tolerance_ratio": "5.00",
-                        },
-                        {
-                            "star": "spark",
-                            "exposure": "200.00",
-                            "total_rc": "80.00",
-                            "financial_rrc": "30.00",
-                            "exposure_share": "20.00%",
-                            "risk_tolerance_ratio": "2.50",
-                        },
-                    ]
-                },
-            }
-        )
-
-    monkeypatch.setattr(allocations, "_fetch_star_risk_capital_payload", _fake_payload)
-    client = TestClient(app)
-
-    response = client.get("/v1/capital-metrics")
-
-    assert response.status_code == 200
-    data = response.json()
-    assert len(data) == 2
-
-    grove = next(m for m in data if m["prime_id"] == grove_addr)
-    assert grove["exposure"] == "500.00"
-    assert grove["total_risk_capital"] == "100.00"
-    assert grove["required_risk_capital"] == "40.00"
-    assert grove["capital_buffer"] == "60.00"
-    assert grove["encumbrance_ratio"] == "5.00"
-
-    spark = next(m for m in data if m["prime_id"] == spark_addr)
-    assert spark["exposure"] == "200.00"
-    assert spark["encumbrance_ratio"] == "2.50"
-
-
-def test_list_capital_metrics_returns_defaults_for_primes_with_no_star_row(monkeypatch):
-    """Primes not present in Star risk capital data are returned with default metric values."""
-    from app.api.v1 import allocations
-
-    grove_addr = _VALID_ADDR
-    service = _make_service(
-        primes=[
-            Prime(id=grove_addr, name="grove", address=grove_addr),
-            Prime(id="0x" + "ee" * 20, name="unknown-prime", address="0x" + "ee" * 20),
-        ]
-    )
-    app.dependency_overrides[allocations._get_service] = _override_service(service)
-
-    async def _fake_payload():
-        return allocations.StarRiskCapitalResponse.model_validate(
-            {
-                "status": 200,
-                "success": True,
-                "data": {
-                    "results": [
-                        {
-                            "star": "grove",
-                            "exposure": "100.00",
-                            "total_rc": "50.00",
-                            "financial_rrc": "20.00",
-                            "exposure_share": "10.00%",
-                            "risk_tolerance_ratio": "2.00",
-                        }
-                    ]
-                },
-            }
-        )
-
-    monkeypatch.setattr(allocations, "_fetch_star_risk_capital_payload", _fake_payload)
-    client = TestClient(app)
-
-    response = client.get("/v1/capital-metrics")
-
-    assert response.status_code == 200
-    data = response.json()
-    assert len(data) == 2
-    grove = next(item for item in data if item["prime_name"] == "grove")
-    assert grove["exposure"] == "100.00"
-
-    missing = next(item for item in data if item["prime_name"] == "unknown-prime")
-    assert missing["exposure"] == "0"
-    assert missing["capital_buffer"] == "0"
-    assert missing["required_risk_capital"] == "0"
-    assert missing["total_risk_capital"] == "0"
-    assert missing["encumbrance_ratio"] is None
-    assert missing["validation_note"] == "No upstream Star risk-capital row matched this prime."
-
-
-def test_list_capital_metrics_returns_502_for_invalid_numeric_payload(monkeypatch):
-    from app.api.v1 import allocations
-
-    grove_addr = _VALID_ADDR
-    service = _make_service(primes=[Prime(id=grove_addr, name="grove", address=grove_addr)])
-    app.dependency_overrides[allocations._get_service] = _override_service(service)
-
-    async def _fake_payload():
-        return allocations.StarRiskCapitalResponse.model_validate(
-            {
-                "status": 200,
-                "success": True,
-                "data": {
-                    "results": [
-                        {
-                            "star": "grove",
-                            "exposure": "not-a-number",
-                            "total_rc": "50.00",
-                            "financial_rrc": "20.00",
-                            "exposure_share": "10.00%",
-                            "risk_tolerance_ratio": "2.00",
-                        }
-                    ]
-                },
-            }
-        )
-
-    monkeypatch.setattr(allocations, "_fetch_star_risk_capital_payload", _fake_payload)
-    client = TestClient(app)
-
-    response = client.get("/v1/capital-metrics")
-
-    assert response.status_code == 502
-    assert "invalid numeric value" in response.json()["detail"]
-
-
-def test_list_capital_metrics_returns_502_when_upstream_fetch_fails(monkeypatch):
-    from app.api.v1 import allocations
-
-    service = _make_service(primes=[Prime(id=_VALID_ADDR, name="grove", address=_VALID_ADDR)])
-    app.dependency_overrides[allocations._get_service] = _override_service(service)
-
-    async def _raise_fetch_error():
-        raise HTTPException(status_code=502, detail="Risk capital upstream request failed")
-
-    monkeypatch.setattr(allocations, "_fetch_star_risk_capital_payload", _raise_fetch_error)
-    client = TestClient(app)
-
-    response = client.get("/v1/capital-metrics")
-
-    assert response.status_code == 502
-    assert response.json() == {"detail": "Risk capital upstream request failed"}
-
-
-def test_list_capital_metrics_returns_empty_when_payload_has_no_data(monkeypatch):
-    from app.api.v1 import allocations
-
-    service = _make_service(primes=[Prime(id=_VALID_ADDR, name="grove", address=_VALID_ADDR)])
-    app.dependency_overrides[allocations._get_service] = _override_service(service)
-
-    async def _fake_payload_without_data():
-        return allocations.StarRiskCapitalResponse.model_validate(
-            {
-                "status": 200,
-                "success": True,
-                "data": None,
-            }
-        )
-
-    monkeypatch.setattr(allocations, "_fetch_star_risk_capital_payload", _fake_payload_without_data)
-    client = TestClient(app)
-
-    response = client.get("/v1/capital-metrics")
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert len(payload) == 1
-    assert payload[0]["prime_id"] == _VALID_ADDR
-    assert payload[0]["exposure"] == "0"
-    assert payload[0]["is_validated"] is False
-
-
-# --- data-sources endpoint ---
 
 
 def test_get_data_sources_returns_200_with_sources():

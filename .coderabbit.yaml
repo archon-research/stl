@@ -71,6 +71,10 @@ reviews:
     enabled: true
     auto_incremental_review: true
     drafts: false
+    # `.*` rather than the branch-naming convention: only the default branch
+    # counts as a review base otherwise, which skips every stacked PR.
+    base_branches:
+      - ".*"
     ignore_title_keywords:
       - "wip"
       - "WIP"

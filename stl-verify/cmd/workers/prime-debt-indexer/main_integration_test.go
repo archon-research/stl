@@ -37,17 +37,11 @@ const (
 )
 
 func TestMain(m *testing.M) {
-	dsn, dbCleanup := testutil.StartTimescaleDBForMain()
-	sharedDSN = dsn
-	lsCfg, lsCleanup := testutil.StartLocalStackForMain("s3")
-	sharedLocalStackCfg = lsCfg
-
-	code := m.Run()
-
-	lsCleanup()
-	dbCleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.RunShared(m, testutil.Shared{
+		TimescaleDSN:       &sharedDSN,
+		LocalStack:         &sharedLocalStackCfg,
+		LocalStackServices: "s3",
+	}))
 }
 
 // primeFixture holds test data for a single prime vault.
@@ -236,7 +230,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	sqsServer, _ := testutil.StartMockSQS(t)
 	defer sqsServer.Close()
 
-	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 	t.Setenv("ETH_RPC_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
 	t.Setenv("AWS_REGION", "us-east-1")
@@ -248,7 +242,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	err := run(context.Background(), []string{
 		"-db", "postgres://invalid:invalid@localhost:1/nonexistent?connect_timeout=1",
 		"-queue", "http://localhost/test-queue",
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error for bad connection config")
 	}
@@ -260,7 +254,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	if _, err := pool.Exec(ctx, `TRUNCATE prime CASCADE`); err != nil {
@@ -283,7 +277,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	// Enqueue enough block events to trigger at least one sweep
 	enqueueBlockEvents(t, sqsState, 20971520, 5, 1)
 
-	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 	t.Setenv("ETH_RPC_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
 	t.Setenv("AWS_REGION", "us-east-1")
@@ -302,22 +296,14 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 			"-vat", "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b",
 			"-queue", sqsServer.URL + "/queue/test",
 			"-sweep-blocks", "1",
-		})
+		}, nil)
 	}()
 
-	deadline := time.After(15 * time.Second)
-	for {
+	testutil.WaitForWorkerCondition(t, errCh, 15*time.Second, func() bool {
 		var count int
 		err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM prime_debt`).Scan(&count)
-		if err == nil && count >= 1 {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for debt snapshot to be written")
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
+		return err == nil && count >= 1
+	}, "a debt snapshot to be written")
 
 	var ilkName, debtWad string
 	var primeID, blockNumber int64
@@ -354,7 +340,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 func TestRunIntegration_NoPrimesInDB(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	if _, err := pool.Exec(ctx, `TRUNCATE prime CASCADE`); err != nil {
@@ -370,7 +356,7 @@ func TestRunIntegration_NoPrimesInDB(t *testing.T) {
 	sqsServer, _ := testutil.StartMockSQS(t)
 	defer sqsServer.Close()
 
-	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 	t.Setenv("ETH_RPC_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
 	t.Setenv("AWS_REGION", "us-east-1")
@@ -383,7 +369,7 @@ func TestRunIntegration_NoPrimesInDB(t *testing.T) {
 		"-db", dbURL,
 		"-vat", "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b",
 		"-queue", sqsServer.URL + "/queue/test",
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error when no primes are registered")
 	}
@@ -395,7 +381,7 @@ func TestRunIntegration_NoPrimesInDB(t *testing.T) {
 func TestRunIntegration_MultipleVaults(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	const vatAddr = "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"
@@ -432,7 +418,7 @@ func TestRunIntegration_MultipleVaults(t *testing.T) {
 
 	enqueueBlockEvents(t, sqsState, 20971520, 5, 1)
 
-	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 	t.Setenv("ETH_RPC_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
 	t.Setenv("AWS_REGION", "us-east-1")
@@ -451,22 +437,14 @@ func TestRunIntegration_MultipleVaults(t *testing.T) {
 			"-vat", vatAddr,
 			"-queue", sqsServer.URL + "/queue/test",
 			"-sweep-blocks", "1",
-		})
+		}, nil)
 	}()
 
-	deadline := time.After(15 * time.Second)
-	for {
+	testutil.WaitForWorkerCondition(t, errCh, 15*time.Second, func() bool {
 		var count int
 		err := pool.QueryRow(ctx, `SELECT COUNT(DISTINCT prime_id) FROM prime_debt`).Scan(&count)
-		if err == nil && count >= len(primes) {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for snapshots from all primes")
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
+		return err == nil && count >= len(primes)
+	}, "snapshots from all primes")
 
 	rows, err := pool.Query(ctx, `
 		SELECT p.name, pd.ilk_name, pd.debt_wad::text, pd.block_number
@@ -513,7 +491,7 @@ func TestRunIntegration_MultipleVaults(t *testing.T) {
 func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	const vatAddr = "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"
@@ -540,7 +518,7 @@ func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 	const wantRows = 3
 	enqueueBlockEvents(t, sqsState, 20971520, wantRows+2, 1)
 
-	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 	t.Setenv("ETH_RPC_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
 	t.Setenv("AWS_REGION", "us-east-1")
@@ -559,26 +537,14 @@ func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 			"-vat", vatAddr,
 			"-queue", sqsServer.URL + "/queue/test",
 			"-sweep-blocks", "1",
-		})
+		}, nil)
 	}()
 
-	deadline := time.After(15 * time.Second)
-	for {
+	testutil.WaitForWorkerCondition(t, errCh, 15*time.Second, func() bool {
 		var count int
 		err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM prime_debt`).Scan(&count)
-		if err == nil && count >= wantRows {
-			break
-		}
-		select {
-		case <-deadline:
-			var got int
-			if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM prime_debt`).Scan(&got); err != nil {
-				t.Fatalf("timed out and failed to query count: %v", err)
-			}
-			t.Fatalf("timed out: want %d rows, have %d", wantRows, got)
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
+		return err == nil && count >= wantRows
+	}, fmt.Sprintf("%d prime_debt rows", wantRows))
 
 	var distinctTimes int
 	if err := pool.QueryRow(ctx, `SELECT COUNT(DISTINCT synced_at) FROM prime_debt`).Scan(&distinctTimes); err != nil {
@@ -601,7 +567,7 @@ func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	const vatAddr = "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"
@@ -624,9 +590,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 
 	// Create the archive bucket so the fire-and-forget archiver has somewhere to write.
 	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
-	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(archiveBucket)}); err != nil {
-		t.Fatalf("create bucket %s: %v", archiveBucket, err)
-	}
+	testutil.EnsureBucket(t, ctx, s3Client, archiveBucket)
 
 	sqsServer, sqsState := testutil.StartMockSQS(t)
 	defer sqsServer.Close()
@@ -636,7 +600,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	const startBlock = int64(20971520)
 	enqueueBlockEvents(t, sqsState, startBlock, 5, 1)
 
-	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 	t.Setenv("ETH_RPC_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
 	t.Setenv("AWS_S3_ENDPOINT", sharedLocalStackCfg.Endpoint)
@@ -658,11 +622,11 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 			"-vat", vatAddr,
 			"-queue", sqsServer.URL + "/queue/test",
 			"-sweep-blocks", "1",
-		})
+		}, nil)
 	}()
 
 	// Wait until a debt snapshot is written so the sweep (and its multicalls) has run.
-	testutil.WaitForCondition(t, 15*time.Second, func() bool {
+	testutil.WaitForWorkerCondition(t, errCh, 15*time.Second, func() bool {
 		var count int
 		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM prime_debt`).Scan(&count); err != nil {
 			return false
@@ -730,7 +694,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 }
 
 func TestRunIntegration_InvalidVatFlag(t *testing.T) {
-	_, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	_, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -742,7 +706,7 @@ func TestRunIntegration_InvalidVatFlag(t *testing.T) {
 	sqsServer, _ := testutil.StartMockSQS(t)
 	defer sqsServer.Close()
 
-	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 	t.Setenv("ETH_RPC_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
 	t.Setenv("AWS_REGION", "us-east-1")
@@ -755,7 +719,7 @@ func TestRunIntegration_InvalidVatFlag(t *testing.T) {
 		"-db", dbURL,
 		"-vat", "not-a-valid-address",
 		"-queue", sqsServer.URL + "/queue/test",
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error for invalid vat address")
 	}

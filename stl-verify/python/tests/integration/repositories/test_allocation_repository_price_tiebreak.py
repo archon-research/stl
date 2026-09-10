@@ -23,6 +23,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
+from app.adapters.postgres.reference_as_of import utc_now
 from app.domain.entities.allocation import EthAddress
 from tests.integration.seed import (
     TIE_FRESH_PRICE,
@@ -48,7 +49,7 @@ async def repo(async_db_url: str):
     """Bare AllocationRepository for direct-method tests."""
     engine = create_async_engine(async_db_url)
     try:
-        yield AllocationRepository(engine)
+        yield AllocationRepository(engine, utc_now)
     finally:
         await engine.dispose()
 
@@ -102,7 +103,7 @@ async def test_activity_buckets_net_flow_price_tie_resolves_to_highest_oracle_id
     """
     now = dt.datetime.now(dt.UTC)
     buckets = await repo.list_activity_buckets(
-        prime_id=_PRIME,
+        proxy_addresses=[_PRIME],
         from_timestamp=now - dt.timedelta(hours=1),
         to_timestamp=now + dt.timedelta(hours=1),
         bucket_seconds=7200.0,

@@ -35,18 +35,11 @@ var (
 )
 
 func TestMain(m *testing.M) {
-	dsn, dbCleanup := testutil.StartTimescaleDBForMain()
-	sharedDSN = dsn
-
-	lsCfg, lsCleanup := testutil.StartLocalStackForMain("s3")
-	sharedLocalStackCfg = lsCfg
-
-	code := m.Run()
-
-	lsCleanup()
-	dbCleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.RunShared(m, testutil.Shared{
+		TimescaleDSN:       &sharedDSN,
+		LocalStack:         &sharedLocalStackCfg,
+		LocalStackServices: "s3",
+	}))
 }
 
 // ---------------------------------------------------------------------------
@@ -60,7 +53,7 @@ func TestMain(m *testing.M) {
 func TestRunIntegration_HappyPath(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	s3Cfg := sharedLocalStackCfg
@@ -69,9 +62,7 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	const bucket = "test-sparklend-backfill"
 	const fromBlock = 100
 	const toBlock = 102
-	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatalf("create bucket: %v", err)
-	}
+	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 
 	// Upload gzipped block + receipt files for each block in the range.
 	for blockNum := int64(fromBlock); blockNum <= toBlock; blockNum++ {
@@ -96,6 +87,7 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	defer rpcServer.Close()
 
 	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 	t.Setenv("AWS_ENDPOINT_URL", s3Cfg.Endpoint)
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
@@ -134,7 +126,7 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 func TestRunIntegration_BorrowEvent(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	s3Cfg := sharedLocalStackCfg
@@ -145,9 +137,7 @@ func TestRunIntegration_BorrowEvent(t *testing.T) {
 	const blockNum = int64(16800000)
 	const bucket = "test-sparklend-borrow"
 
-	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatalf("create bucket: %v", err)
-	}
+	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 
 	// DAI address — reserve token for the Borrow event.
 	const daiAddress = "0x6B175474E89094C44Da98b954EedeAC495271d0F"
@@ -201,6 +191,7 @@ func TestRunIntegration_BorrowEvent(t *testing.T) {
 	defer rpcServer.Close()
 
 	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 	t.Setenv("AWS_ENDPOINT_URL", s3Cfg.Endpoint)
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
@@ -231,9 +222,7 @@ func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 	s3Client := testutil.NewS3Client(t, ctx, s3Cfg)
 
 	const bucket = "test-sparklend-backfill-baddb"
-	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatalf("create bucket: %v", err)
-	}
+	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 	uploadBlock(t, ctx, s3Client, bucket, 100, 1)
 	uploadReceipts(t, ctx, s3Client, bucket, 100, 1, []shared.TransactionReceipt{})
 
@@ -241,6 +230,7 @@ func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 	defer rpcServer.Close()
 
 	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 	t.Setenv("AWS_ENDPOINT_URL", s3Cfg.Endpoint)
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
@@ -270,7 +260,7 @@ func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	ctx := context.Background()
 
-	_, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	_, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	s3Cfg := sharedLocalStackCfg
@@ -283,9 +273,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	const archivePrefix = "raw-sc-calls/chain_id=1/"
 
 	for _, b := range []string{bucket, archiveBucket} {
-		if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(b)}); err != nil {
-			t.Fatalf("create bucket %s: %v", b, err)
-		}
+		testutil.EnsureBucket(t, ctx, s3Client, b)
 	}
 
 	const daiAddress = "0x6B175474E89094C44Da98b954EedeAC495271d0F"
@@ -326,6 +314,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	defer rpcServer.Close()
 
 	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 	t.Setenv("AWS_ENDPOINT_URL", s3Cfg.Endpoint)
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
@@ -469,7 +458,7 @@ func assertBorrowEventDBState(t *testing.T, ctx context.Context, pool *pgxpool.P
 func TestRunIntegration_BorrowEvent_WithCollateral(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	s3Cfg := sharedLocalStackCfg
@@ -478,9 +467,7 @@ func TestRunIntegration_BorrowEvent_WithCollateral(t *testing.T) {
 	const blockNum = int64(16800000)
 	const bucket = "test-sparklend-borrow-collateral"
 
-	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatalf("create bucket: %v", err)
-	}
+	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 
 	const daiAddress = "0x6B175474E89094C44Da98b954EedeAC495271d0F"
 	const wethAddress = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
@@ -521,6 +508,7 @@ func TestRunIntegration_BorrowEvent_WithCollateral(t *testing.T) {
 	defer rpcServer.Close()
 
 	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 	t.Setenv("AWS_ENDPOINT_URL", s3Cfg.Endpoint)
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
@@ -541,9 +529,12 @@ func TestRunIntegration_BorrowEvent_WithCollateral(t *testing.T) {
 
 	assertBorrowEventDBState(t, ctx, pool, 1)
 
-	// Additionally verify that the collateral token (WETH) was created.
+	// Additionally verify that the Ethereum collateral token was created.
 	var wethTokenCount int
-	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM token WHERE symbol = 'WETH'`).Scan(&wethTokenCount); err != nil {
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM token WHERE chain_id = 1 AND address = $1`,
+		common.HexToAddress(wethAddress).Bytes(),
+	).Scan(&wethTokenCount); err != nil {
 		t.Fatalf("query WETH token count: %v", err)
 	}
 	if wethTokenCount != 1 {

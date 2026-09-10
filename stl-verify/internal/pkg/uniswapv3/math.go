@@ -36,15 +36,16 @@ func ComputePositionAmounts(sqrtPriceX96 *big.Int, tickLower, tickUpper int, liq
 
 	var amount0, amount1 *big.Int
 
-	if sqrtPriceX96.Cmp(sqrtRatioAX96) <= 0 {
+	switch {
+	case sqrtPriceX96.Cmp(sqrtRatioAX96) <= 0:
 		// Current price below range — all token0.
 		amount0 = getAmount0ForLiquidity(sqrtRatioAX96, sqrtRatioBX96, liquidity)
 		amount1 = big.NewInt(0)
-	} else if sqrtPriceX96.Cmp(sqrtRatioBX96) >= 0 {
+	case sqrtPriceX96.Cmp(sqrtRatioBX96) >= 0:
 		// Current price above range — all token1.
 		amount0 = big.NewInt(0)
 		amount1 = getAmount1ForLiquidity(sqrtRatioAX96, sqrtRatioBX96, liquidity)
-	} else {
+	default:
 		// In range — split.
 		amount0 = getAmount0ForLiquidity(sqrtPriceX96, sqrtRatioBX96, liquidity)
 		amount1 = getAmount1ForLiquidity(sqrtRatioAX96, sqrtPriceX96, liquidity)

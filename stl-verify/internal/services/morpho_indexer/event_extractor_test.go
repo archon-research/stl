@@ -1,6 +1,7 @@
 package morpho_indexer
 
 import (
+	"math/big"
 	"strings"
 	"testing"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/testutils"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 )
 
@@ -243,9 +245,10 @@ func TestExtractMetaMorphoEvent_RegisteredButNotTyped(t *testing.T) {
 		t.Fatalf("NewEventExtractor() error: %v", err)
 	}
 
-	// AddAdapter is registered (verified by TestMetaMorphoEventName above)
-	// but has no typed handler.
-	log := shared.Log{Topics: []string{"0x8f125a24838c4c23e893904b255b5c672d43d4cb8af7e3d15841eaeabc1e68aa"}}
+	// SetCurator is registered (verified by TestMetaMorphoEventName above) but
+	// has no typed handler — the adapter / cap / fee events do, so use a
+	// governance setter that remains audit-log-only.
+	log := shared.Log{Topics: []string{"0xbd0a63c12948fbc9194a5839019f99c9d71db924e5c70018265bc778b8f1a506"}}
 	event, extractErr := e.ExtractMetaMorphoEvent(log)
 	if extractErr != nil {
 		t.Fatalf("ExtractMetaMorphoEvent should not error for registered-but-not-typed events; got: %v", extractErr)
@@ -563,4 +566,447 @@ func TestVaultAccrueInterestEvent_ToJSON_V1(t *testing.T) {
 	if strings.Contains(jsonStr, `"managementFeeShares"`) {
 		t.Errorf("V1 ToJSON() should not contain managementFeeShares field, got %s", jsonStr)
 	}
+}
+
+// --- Morpho VaultV2 adapter / allocation / cap / fee extractor tests ---
+
+func mustV2EventsABI(t *testing.T) *abi.ABI {
+	t.Helper()
+	a, err := abis.GetVaultV2EventsABI()
+	if err != nil {
+		t.Fatalf("GetVaultV2EventsABI: %v", err)
+	}
+	return a
+}
+
+// makeV2Log builds a VaultV2 event log: event.ID plus already-encoded indexed
+// topics, with the non-indexed args ABI-packed into data.
+func makeV2Log(t *testing.T, event abi.Event, indexed []common.Hash, nonIndexed ...any) shared.Log {
+	t.Helper()
+	data, err := event.Inputs.NonIndexed().Pack(nonIndexed...)
+	if err != nil {
+		t.Fatalf("packing %s data: %v", event.Name, err)
+	}
+	topics := make([]string, 0, len(indexed)+1)
+	topics = append(topics, event.ID.Hex())
+	for _, h := range indexed {
+		topics = append(topics, h.Hex())
+	}
+	return shared.Log{
+		Topics:          topics,
+		Data:            common.Bytes2Hex(data),
+		TransactionHash: "0xf00d",
+	}
+}
+
+// TestExtractMetaMorphoEvent_TooFewTopicsErrors guards parseTopics: a registered
+// event whose log carries fewer topics than its declared indexed params must
+// return an error, not panic inside abi.ParseTopicsIntoMap.
+func TestExtractMetaMorphoEvent_TooFewTopicsErrors(t *testing.T) {
+	e, err := NewEventExtractor()
+	if err != nil {
+		t.Fatalf("NewEventExtractor: %v", err)
+	}
+	v2 := mustV2EventsABI(t)
+	ev := v2.Events["AddAdapter"] // AddAdapter(address indexed account): 1 indexed
+	// A log with only topic0 (missing the indexed account topic) is malformed.
+	log := shared.Log{Topics: []string{ev.ID.Hex()}, Data: "0x", TransactionHash: "0xf00d"}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("parseTopics panicked instead of returning an error: %v", r)
+		}
+	}()
+	if _, err := e.ExtractMetaMorphoEvent(log); err == nil {
+		t.Fatal("expected an error for a log with fewer topics than indexed params")
+	}
+}
+
+// TestExtractMetaMorphoEvent_TruncatedDataErrors guards the shared parseData
+// path: a registered V2 event whose non-indexed data is truncated must surface a
+// decode error, never a silently zero-filled event. One case suffices — every
+// typed extractor decodes its non-indexed args through the same
+// parseData → UnpackIntoMap call.
+func TestExtractMetaMorphoEvent_TruncatedDataErrors(t *testing.T) {
+	e, err := NewEventExtractor()
+	if err != nil {
+		t.Fatalf("NewEventExtractor: %v", err)
+	}
+	v2 := mustV2EventsABI(t)
+	id := common.HexToHash("0x00000000000000000000000000000000000000000000000000000000000000ab")
+
+	// A valid IncreaseAbsoluteCap log (non-indexed: idData bytes + newCap uint256).
+	log := makeV2Log(t, v2.Events["IncreaseAbsoluteCap"], []common.Hash{id}, []byte{0x01, 0x02, 0x03, 0x04}, big.NewInt(1_000_000))
+	// Truncate the ABI-packed data so the tuple can no longer be decoded.
+	log.Data = log.Data[:8]
+
+	if _, err := e.ExtractMetaMorphoEvent(log); err == nil {
+		t.Fatal("expected a decode error for truncated event data")
+	}
+}
+
+// TestExtractVaultAccrueInterest_OptionalV2Fields covers the missing-vs-mistyped
+// discrimination on the V2-only accrue fields: absent → left nil, present →
+// carried, present-but-wrong-type → error (never a silent NULL).
+func TestExtractVaultAccrueInterest_OptionalV2Fields(t *testing.T) {
+	t.Run("absent leaves them nil", func(t *testing.T) {
+		got, err := extractVaultAccrueInterest(map[string]any{
+			"newTotalAssets": big.NewInt(1),
+			"feeShares":      big.NewInt(2),
+		}, "0xf00d")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.PreviousTotalAssets != nil || got.ManagementFeeShares != nil {
+			t.Errorf("absent V2 fields should be nil, got prev=%v mgmt=%v", got.PreviousTotalAssets, got.ManagementFeeShares)
+		}
+	})
+	t.Run("present are carried", func(t *testing.T) {
+		got, err := extractVaultAccrueInterest(map[string]any{
+			"newTotalAssets":       big.NewInt(1),
+			"performanceFeeShares": big.NewInt(2),
+			"previousTotalAssets":  big.NewInt(9),
+			"managementFeeShares":  big.NewInt(7),
+		}, "0xf00d")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.PreviousTotalAssets.Cmp(big.NewInt(9)) != 0 || got.ManagementFeeShares.Cmp(big.NewInt(7)) != 0 {
+			t.Errorf("prev=%v mgmt=%v, want 9 and 7", got.PreviousTotalAssets, got.ManagementFeeShares)
+		}
+	})
+	t.Run("wrong type propagates", func(t *testing.T) {
+		_, err := extractVaultAccrueInterest(map[string]any{
+			"newTotalAssets":      big.NewInt(1),
+			"feeShares":           big.NewInt(2),
+			"managementFeeShares": "not-a-bigint",
+		}, "0xf00d")
+		if err == nil {
+			t.Fatal("expected an error when managementFeeShares has the wrong type")
+		}
+	})
+}
+
+func addrTopic(a common.Address) common.Hash { return common.BytesToHash(a.Bytes()) }
+
+func hashSlice(hs ...common.Hash) [][32]byte {
+	out := make([][32]byte, len(hs))
+	for i, h := range hs {
+		out[i] = h
+	}
+	return out
+}
+
+func TestExtractMetaMorphoEvent_AdapterEvents(t *testing.T) {
+	e, err := NewEventExtractor()
+	if err != nil {
+		t.Fatalf("NewEventExtractor: %v", err)
+	}
+	v2 := mustV2EventsABI(t)
+	account := common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2")
+
+	tests := []struct {
+		name     string
+		event    abi.Event
+		wantType entity.MorphoEventType
+	}{
+		{"AddAdapter", v2.Events["AddAdapter"], entity.MorphoEventVaultAddAdapter},
+		{"RemoveAdapter", v2.Events["RemoveAdapter"], entity.MorphoEventVaultRemoveAdapter},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			log := makeV2Log(t, tt.event, []common.Hash{addrTopic(account)})
+			ev, err := e.ExtractMetaMorphoEvent(log)
+			if err != nil {
+				t.Fatalf("ExtractMetaMorphoEvent: %v", err)
+			}
+			if ev == nil {
+				t.Fatal("expected typed event, got nil")
+			}
+			if ev.Type() != tt.wantType {
+				t.Errorf("Type() = %s, want %s", ev.Type(), tt.wantType)
+			}
+			var got common.Address
+			switch e := ev.(type) {
+			case *AddAdapterEvent:
+				got = e.Account
+			case *RemoveAdapterEvent:
+				got = e.Account
+			default:
+				t.Fatalf("unexpected type %T", ev)
+			}
+			if got != account {
+				t.Errorf("Account = %s, want %s", got.Hex(), account.Hex())
+			}
+		})
+	}
+}
+
+func TestExtractMetaMorphoEvent_Allocation(t *testing.T) {
+	e, err := NewEventExtractor()
+	if err != nil {
+		t.Fatalf("NewEventExtractor: %v", err)
+	}
+	v2 := mustV2EventsABI(t)
+	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	adapter := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	id1 := common.HexToHash("0xaa")
+	id2 := common.HexToHash("0xbb")
+
+	tests := []struct {
+		name     string
+		event    abi.Event
+		change   *big.Int
+		wantType entity.MorphoEventType
+	}{
+		{"Allocate", v2.Events["Allocate"], big.NewInt(750), entity.MorphoEventVaultAllocate},
+		{"Deallocate", v2.Events["Deallocate"], big.NewInt(-750), entity.MorphoEventVaultDeallocate},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			log := makeV2Log(t, tt.event,
+				[]common.Hash{addrTopic(sender), addrTopic(adapter)},
+				big.NewInt(123456), hashSlice(id1, id2), tt.change)
+			ev, err := e.ExtractMetaMorphoEvent(log)
+			if err != nil {
+				t.Fatalf("ExtractMetaMorphoEvent: %v", err)
+			}
+			if ev == nil {
+				t.Fatal("expected typed event, got nil")
+			}
+			if ev.Type() != tt.wantType {
+				t.Errorf("Type() = %s, want %s", ev.Type(), tt.wantType)
+			}
+			var (
+				gotSender, gotAdapter common.Address
+				gotAssets, gotChange  *big.Int
+				gotIDs                []common.Hash
+			)
+			switch e := ev.(type) {
+			case *AllocateEvent:
+				gotSender, gotAdapter, gotAssets, gotIDs, gotChange = e.Sender, e.Adapter, e.Assets, e.IDs, e.Change
+			case *DeallocateEvent:
+				gotSender, gotAdapter, gotAssets, gotIDs, gotChange = e.Sender, e.Adapter, e.Assets, e.IDs, e.Change
+			default:
+				t.Fatalf("unexpected type %T", ev)
+			}
+			if gotSender != sender {
+				t.Errorf("Sender = %s, want %s", gotSender.Hex(), sender.Hex())
+			}
+			if gotAdapter != adapter {
+				t.Errorf("Adapter = %s, want %s", gotAdapter.Hex(), adapter.Hex())
+			}
+			if gotAssets.Int64() != 123456 {
+				t.Errorf("Assets = %s, want 123456", gotAssets)
+			}
+			if gotChange.Cmp(tt.change) != 0 {
+				t.Errorf("Change = %s, want %s", gotChange, tt.change)
+			}
+			if len(gotIDs) != 2 || gotIDs[0] != id1 || gotIDs[1] != id2 {
+				t.Errorf("IDs = %v, want [%s %s]", gotIDs, id1.Hex(), id2.Hex())
+			}
+		})
+	}
+}
+
+func TestExtractMetaMorphoEvent_ForceDeallocate(t *testing.T) {
+	e, err := NewEventExtractor()
+	if err != nil {
+		t.Fatalf("NewEventExtractor: %v", err)
+	}
+	v2 := mustV2EventsABI(t)
+	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	adapter := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	onBehalf := common.HexToAddress("0x3333333333333333333333333333333333333333")
+	id1 := common.HexToHash("0xcc")
+
+	// ForceDeallocate: indexed(sender, onBehalf); non-indexed(adapter, assets, ids, penaltyAssets).
+	log := makeV2Log(t, v2.Events["ForceDeallocate"],
+		[]common.Hash{addrTopic(sender), addrTopic(onBehalf)},
+		adapter, big.NewInt(9000), hashSlice(id1), big.NewInt(42))
+	ev, err := e.ExtractMetaMorphoEvent(log)
+	if err != nil {
+		t.Fatalf("ExtractMetaMorphoEvent: %v", err)
+	}
+	fd, ok := ev.(*ForceDeallocateEvent)
+	if !ok {
+		t.Fatalf("expected *ForceDeallocateEvent, got %T", ev)
+	}
+	if fd.Sender != sender {
+		t.Errorf("Sender = %s, want %s", fd.Sender.Hex(), sender.Hex())
+	}
+	if fd.Adapter != adapter {
+		t.Errorf("Adapter = %s, want %s", fd.Adapter.Hex(), adapter.Hex())
+	}
+	if fd.OnBehalf != onBehalf {
+		t.Errorf("OnBehalf = %s, want %s", fd.OnBehalf.Hex(), onBehalf.Hex())
+	}
+	if fd.Assets.Int64() != 9000 {
+		t.Errorf("Assets = %s, want 9000", fd.Assets)
+	}
+	if fd.PenaltyAssets.Int64() != 42 {
+		t.Errorf("PenaltyAssets = %s, want 42", fd.PenaltyAssets)
+	}
+	if len(fd.IDs) != 1 || fd.IDs[0] != id1 {
+		t.Errorf("IDs = %v, want [%s]", fd.IDs, id1.Hex())
+	}
+}
+
+func TestExtractMetaMorphoEvent_CapEvents(t *testing.T) {
+	e, err := NewEventExtractor()
+	if err != nil {
+		t.Fatalf("NewEventExtractor: %v", err)
+	}
+	v2 := mustV2EventsABI(t)
+	sender := common.HexToAddress("0x9999999999999999999999999999999999999999")
+	id := common.HexToHash("0x00000000000000000000000000000000000000000000000000000000000000ab")
+	idData := []byte{0x01, 0x02, 0x03, 0x04}
+	newCap := big.NewInt(1_000_000)
+
+	// assertCap validates the fields common to all four cap events, plus the
+	// per-event sender (zero for the Increase* events, which carry none).
+	assertCap := func(t *testing.T, gotSender common.Address, gotID common.Hash, gotIDData []byte, gotCap *big.Int, wantSender common.Address) {
+		if gotSender != wantSender {
+			t.Errorf("Sender = %s, want %s", gotSender.Hex(), wantSender.Hex())
+		}
+		if gotID != id {
+			t.Errorf("ID = %s, want %s", gotID.Hex(), id.Hex())
+		}
+		if string(gotIDData) != string(idData) {
+			t.Errorf("IDData = %x, want %x", gotIDData, idData)
+		}
+		if gotCap.Cmp(newCap) != 0 {
+			t.Errorf("newCap = %s, want %s", gotCap, newCap)
+		}
+	}
+
+	t.Run("IncreaseAbsoluteCap", func(t *testing.T) {
+		log := makeV2Log(t, v2.Events["IncreaseAbsoluteCap"], []common.Hash{id}, idData, newCap)
+		ev, err := e.ExtractMetaMorphoEvent(log)
+		if err != nil {
+			t.Fatalf("extract: %v", err)
+		}
+		c, ok := ev.(*IncreaseAbsoluteCapEvent)
+		if !ok {
+			t.Fatalf("got %T", ev)
+		}
+		assertCap(t, common.Address{}, c.ID, c.IDData, c.NewAbsoluteCap, common.Address{})
+	})
+
+	t.Run("DecreaseAbsoluteCap", func(t *testing.T) {
+		log := makeV2Log(t, v2.Events["DecreaseAbsoluteCap"], []common.Hash{addrTopic(sender), id}, idData, newCap)
+		ev, err := e.ExtractMetaMorphoEvent(log)
+		if err != nil {
+			t.Fatalf("extract: %v", err)
+		}
+		c, ok := ev.(*DecreaseAbsoluteCapEvent)
+		if !ok {
+			t.Fatalf("got %T", ev)
+		}
+		assertCap(t, c.Sender, c.ID, c.IDData, c.NewAbsoluteCap, sender)
+	})
+
+	t.Run("IncreaseRelativeCap", func(t *testing.T) {
+		log := makeV2Log(t, v2.Events["IncreaseRelativeCap"], []common.Hash{id}, idData, newCap)
+		ev, err := e.ExtractMetaMorphoEvent(log)
+		if err != nil {
+			t.Fatalf("extract: %v", err)
+		}
+		c, ok := ev.(*IncreaseRelativeCapEvent)
+		if !ok {
+			t.Fatalf("got %T", ev)
+		}
+		assertCap(t, common.Address{}, c.ID, c.IDData, c.NewRelativeCap, common.Address{})
+	})
+
+	t.Run("DecreaseRelativeCap", func(t *testing.T) {
+		log := makeV2Log(t, v2.Events["DecreaseRelativeCap"], []common.Hash{addrTopic(sender), id}, idData, newCap)
+		ev, err := e.ExtractMetaMorphoEvent(log)
+		if err != nil {
+			t.Fatalf("extract: %v", err)
+		}
+		c, ok := ev.(*DecreaseRelativeCapEvent)
+		if !ok {
+			t.Fatalf("got %T", ev)
+		}
+		assertCap(t, c.Sender, c.ID, c.IDData, c.NewRelativeCap, sender)
+	})
+}
+
+func TestExtractMetaMorphoEvent_FeeEvents(t *testing.T) {
+	e, err := NewEventExtractor()
+	if err != nil {
+		t.Fatalf("NewEventExtractor: %v", err)
+	}
+	v2 := mustV2EventsABI(t)
+	fee := big.NewInt(100_000_000_000_000_000) // 0.1 WAD
+
+	t.Run("SetPerformanceFee", func(t *testing.T) {
+		log := makeV2Log(t, v2.Events["SetPerformanceFee"], nil, fee)
+		ev, err := e.ExtractMetaMorphoEvent(log)
+		if err != nil {
+			t.Fatalf("extract: %v", err)
+		}
+		pf, ok := ev.(*SetPerformanceFeeEvent)
+		if !ok {
+			t.Fatalf("got %T", ev)
+		}
+		if pf.NewPerformanceFee.Cmp(fee) != 0 {
+			t.Errorf("NewPerformanceFee = %s, want %s", pf.NewPerformanceFee, fee)
+		}
+	})
+
+	t.Run("SetManagementFee", func(t *testing.T) {
+		log := makeV2Log(t, v2.Events["SetManagementFee"], nil, fee)
+		ev, err := e.ExtractMetaMorphoEvent(log)
+		if err != nil {
+			t.Fatalf("extract: %v", err)
+		}
+		mf, ok := ev.(*SetManagementFeeEvent)
+		if !ok {
+			t.Fatalf("got %T", ev)
+		}
+		if mf.NewManagementFee.Cmp(fee) != 0 {
+			t.Errorf("NewManagementFee = %s, want %s", mf.NewManagementFee, fee)
+		}
+	})
+}
+
+func TestExtractMetaMorphoEvent_FeeRecipientEvents(t *testing.T) {
+	e, err := NewEventExtractor()
+	if err != nil {
+		t.Fatalf("NewEventExtractor: %v", err)
+	}
+	v2 := mustV2EventsABI(t)
+	recipient := common.HexToAddress("0x5555555555555555555555555555555555555555")
+
+	t.Run("SetPerformanceFeeRecipient", func(t *testing.T) {
+		log := makeV2Log(t, v2.Events["SetPerformanceFeeRecipient"], []common.Hash{addrTopic(recipient)})
+		ev, err := e.ExtractMetaMorphoEvent(log)
+		if err != nil {
+			t.Fatalf("extract: %v", err)
+		}
+		r, ok := ev.(*SetPerformanceFeeRecipientEvent)
+		if !ok {
+			t.Fatalf("got %T", ev)
+		}
+		if r.NewPerformanceFeeRecipient != recipient {
+			t.Errorf("recipient = %s, want %s", r.NewPerformanceFeeRecipient.Hex(), recipient.Hex())
+		}
+	})
+
+	t.Run("SetManagementFeeRecipient", func(t *testing.T) {
+		log := makeV2Log(t, v2.Events["SetManagementFeeRecipient"], []common.Hash{addrTopic(recipient)})
+		ev, err := e.ExtractMetaMorphoEvent(log)
+		if err != nil {
+			t.Fatalf("extract: %v", err)
+		}
+		r, ok := ev.(*SetManagementFeeRecipientEvent)
+		if !ok {
+			t.Fatalf("got %T", ev)
+		}
+		if r.NewManagementFeeRecipient != recipient {
+			t.Errorf("recipient = %s, want %s", r.NewManagementFeeRecipient.Hex(), recipient.Hex())
+		}
+	})
 }

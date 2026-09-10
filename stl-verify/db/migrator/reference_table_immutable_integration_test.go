@@ -6,8 +6,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-
-	"github.com/archon-research/stl/stl-verify/db/migrator"
 )
 
 // TestReferenceTableImmutable pins the fix for the FK-insert blocker (Simon review on #574): after
@@ -18,11 +16,8 @@ import (
 // exercise the ACL path, but the trigger it pairs with is role-independent and is asserted here.
 func TestReferenceTableImmutable(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := setupPostgres(ctx, t)
+	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
-	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
-		t.Fatalf("migrations: %v", err)
-	}
 
 	// INSERT of a new code is still allowed (append-only permits deliberate additions).
 	if _, err := pool.Exec(ctx,

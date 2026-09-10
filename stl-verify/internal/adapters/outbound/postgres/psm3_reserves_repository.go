@@ -22,10 +22,11 @@ type PSM3ReservesRepository struct {
 	txm     *TxManager
 	logger  *slog.Logger
 	buildID buildregistry.BuildID
+	runID   buildregistry.RunID
 }
 
 // NewPSM3ReservesRepository creates a new PSM3ReservesRepository.
-func NewPSM3ReservesRepository(txm *TxManager, logger *slog.Logger, buildID buildregistry.BuildID) *PSM3ReservesRepository {
+func NewPSM3ReservesRepository(txm *TxManager, logger *slog.Logger, buildID buildregistry.BuildID, runID buildregistry.RunID) *PSM3ReservesRepository {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -33,22 +34,24 @@ func NewPSM3ReservesRepository(txm *TxManager, logger *slog.Logger, buildID buil
 		txm:     txm,
 		logger:  logger.With("component", "psm3-reserves-repo"),
 		buildID: buildID,
+		runID:   runID,
 	}
 }
 
-// SaveReserves appends one snapshot row. Raw balances are stored as NUMERIC
-// via big.Int's decimal string representation. Duplicate snapshots (same
-// natural key) are silently skipped via ON CONFLICT DO NOTHING.
+// SaveReserves appends one pool row plus one psm3_alm_shares row per tracked
+// ALM, in a single transaction so a block is never half-recorded. Raw balances
+// are stored as NUMERIC via big.Int's decimal string representation. Duplicate
+// snapshots (same natural key) are silently skipped via ON CONFLICT DO NOTHING.
 func (r *PSM3ReservesRepository) SaveReserves(ctx context.Context, snap *entity.PSM3Reserves) error {
 	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		const q = `
 			INSERT INTO psm3_reserves (
 				chain_id, address,
 				usds_balance, susds_balance, usdc_balance,
-				total_assets, conversion_rate,
+				total_assets, conversion_rate, total_shares,
 				block_number, block_version, block_timestamp,
-				source, build_id
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+				source, build_id, run_id
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 			ON CONFLICT (chain_id, block_number, block_version, processing_version, block_timestamp) DO NOTHING
 		`
 
@@ -60,17 +63,60 @@ func (r *PSM3ReservesRepository) SaveReserves(ctx context.Context, snap *entity.
 			snap.State.USDCBalance.String(),
 			snap.State.TotalAssets.String(),
 			snap.State.ConversionRate.String(),
+			snap.State.TotalShares.String(),
 			snap.BlockNumber,
 			snap.BlockVersion,
 			snap.BlockTimestamp,
 			snap.Source,
 			int(r.buildID),
+			r.runID,
 		)
 		if err != nil {
 			return fmt.Errorf("insert psm3 reserves (chain=%d block=%d): %w", snap.ChainID, snap.BlockNumber, err)
 		}
 
-		r.logger.Debug("psm3 reserves saved", "chain", snap.ChainID, "block", snap.BlockNumber)
+		if err := r.saveALMPositions(ctx, tx, snap); err != nil {
+			return err
+		}
+
+		r.logger.Debug("psm3 reserves saved", "chain", snap.ChainID, "block", snap.BlockNumber, "almPositions", len(snap.State.ALMPositions))
 		return nil
 	})
+}
+
+// saveALMPositions appends one row per tracked ALM stake. prime_id is resolved
+// by prime.name in the statement, so an unregistered prime fails the insert
+// rather than silently writing an orphan stake.
+func (r *PSM3ReservesRepository) saveALMPositions(ctx context.Context, tx pgx.Tx, snap *entity.PSM3Reserves) error {
+	const q = `
+		INSERT INTO psm3_alm_shares (
+			chain_id, address, prime_id, alm_address,
+			shares, asset_value,
+			block_number, block_version, block_timestamp,
+			source, build_id, run_id
+		) VALUES ($1, $2, (SELECT id FROM prime WHERE name = $3), $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		ON CONFLICT (chain_id, alm_address, block_number, block_version, processing_version, block_timestamp) DO NOTHING
+	`
+
+	for _, pos := range snap.State.ALMPositions {
+		_, err := tx.Exec(ctx, q,
+			snap.ChainID,
+			snap.Address.Bytes(),
+			pos.Prime,
+			pos.Address.Bytes(),
+			pos.Shares.String(),
+			pos.AssetValue.String(),
+			snap.BlockNumber,
+			snap.BlockVersion,
+			snap.BlockTimestamp,
+			snap.Source,
+			int(r.buildID),
+			r.runID,
+		)
+		if err != nil {
+			return fmt.Errorf("insert psm3 alm shares (chain=%d block=%d prime=%s): %w",
+				snap.ChainID, snap.BlockNumber, pos.Prime, err)
+		}
+	}
+	return nil
 }

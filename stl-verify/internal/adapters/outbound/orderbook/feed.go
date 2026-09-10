@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -68,6 +69,11 @@ type exchangeFeed interface {
 	normalizeSymbol(symbol string) (string, error)
 	// endpoint returns the WebSocket URL.
 	endpoint() string
+	// instruments returns the venue's currently tradeable symbols, in the same
+	// normalized form normalizeSymbol produces. Mandatory: every venue must be
+	// able to answer "is this symbol real", because a venue that cannot is one
+	// where a typo stays invisible.
+	instruments(ctx context.Context) (map[string]bool, error)
 	// subscribeMessages returns the frames to send after connecting.
 	subscribeMessages(group []string) []any
 	// newHandler creates a fresh frame handler for one connection, scoped to the
@@ -99,6 +105,12 @@ var errSequenceGap = errors.New("orderbook update sequence gap")
 // The reconnect it triggers re-sends only our subscriptions, so it self-heals
 // rather than emitting a book we cannot account for.
 var errUnexpectedSymbol = errors.New("orderbook update for unsubscribed symbol")
+
+// errStaleFeed signals a connection the stale watchdog closed: the venue kept
+// the socket alive but delivered no book updates within Config.StaleReconnect.
+// Distinct so the reconnect metric can separate silently dead feeds
+// (reason="stale_feed") from ordinary transport drops.
+var errStaleFeed = errors.New("orderbook feed stale")
 
 // appPinger is an optional interface for exchanges that require an
 // application-level keepalive (e.g. OKX's "ping" text frame) in addition to
@@ -139,7 +151,8 @@ func newFeedProvider(cfg Config, exchange exchangeFeed, maxSymbols int) (*feedPr
 func (p *feedProvider) Name() string { return p.exchange.name() }
 
 // Watch subscribes to symbols and streams aggregated books, splitting symbols
-// across the fewest connections the exchange allows.
+// across the fewest connections the exchange allows. It errors before
+// connecting when the venue does not trade every configured symbol.
 func (p *feedProvider) Watch(ctx context.Context, symbols []string) (<-chan entity.OrderbookUpdate, error) {
 	if len(symbols) == 0 {
 		return nil, errors.New("at least one symbol is required")
@@ -148,7 +161,11 @@ func (p *feedProvider) Watch(ctx context.Context, symbols []string) (<-chan enti
 	if err != nil {
 		return nil, err
 	}
-	groups := chunkSymbols(dedupSymbols(symbols), p.maxSymbols)
+	symbols = dedupSymbols(symbols)
+	if err := validateSymbols(ctx, p.exchange, symbols); err != nil {
+		return nil, err
+	}
+	groups := chunkSymbols(symbols, p.maxSymbols)
 	out := runConnections(ctx, groups, p.cfg.OutputBuffer, func(ctx context.Context, group []string, out chan<- entity.OrderbookUpdate) {
 		reconnectLoop(ctx, p.cfg, p.logger, p.metrics, func(ctx context.Context, ready func()) error {
 			return p.runConnection(ctx, group, out, ready)
@@ -185,6 +202,21 @@ func (p *feedProvider) runConnection(ctx context.Context, group []string, out ch
 		p.startAppPing(connCtx, ws, pinger)
 	}
 
+	// A venue can keep the socket alive (heartbeats, pong replies) while its book
+	// channel is silently dead — e.g. a Kraken websocket-restart drain (VEC-542) —
+	// so transport-level read timeouts never fire. This watchdog, reset on every
+	// book change and armed from connect time so a never-syncing connection ages
+	// out too, closes the socket instead and hands recovery to the reconnect
+	// loop. Staleness is per connection, not per symbol: any symbol's update
+	// counts, so one quiet low-liquidity symbol cannot reconnect a healthy
+	// connection.
+	stale := &atomic.Bool{}
+	watchdog := time.AfterFunc(p.cfg.StaleReconnect, func() {
+		stale.Store(true)
+		ws.Close()
+	})
+	defer watchdog.Stop()
+
 	handler := p.exchange.newHandler(group, p.logger)
 	em := newEmitter(out, p.logger, p.metrics)
 	// Reset the reconnect backoff only once every symbol in the group has produced
@@ -199,11 +231,17 @@ func (p *feedProvider) runConnection(ctx context.Context, group []string, out ch
 			if ctx.Err() != nil {
 				return nil
 			}
+			if stale.Load() {
+				return fmt.Errorf("%w: no book updates for %s", errStaleFeed, p.cfg.StaleReconnect)
+			}
 			return fmt.Errorf("websocket: %w", err)
 		}
 		changes, err := handler.handle(frame.Data)
 		if err != nil {
 			return err
+		}
+		if len(changes) > 0 {
+			watchdog.Reset(p.cfg.StaleReconnect)
 		}
 		for _, s := range changes {
 			em.emit(s.book, s.isSnapshot, s.t)

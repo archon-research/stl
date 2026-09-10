@@ -231,6 +231,7 @@ func TestReconnectReasonClassification(t *testing.T) {
 	}{
 		{"sequence gap", fmt.Errorf("okx X: %w", errSequenceGap), "sequence_gap"},
 		{"unexpected symbol", fmt.Errorf("okx Y: %w", errUnexpectedSymbol), "unexpected_symbol"},
+		{"stale feed", fmt.Errorf("kraken: %w", errStaleFeed), "stale_feed"},
 		{"transport error", errors.New("websocket: eof"), "ws_error"},
 	}
 	for _, tt := range tests {

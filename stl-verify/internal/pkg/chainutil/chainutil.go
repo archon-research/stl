@@ -1,14 +1,65 @@
-// Package chainutil provides utilities for working with blockchain chain IDs and names.
+// Package chainutil provides utilities for working with blockchain chain IDs and
+// names, and for cross-checking a deployment's configured chain against its wiring.
 package chainutil
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"math/big"
+	"net"
+	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 )
+
+// BlockDataExpectation declares which block data types a chain's watcher fetches
+// and caches for every block. It is a chain fact with two readers: a tool that
+// re-publishes a block must produce exactly this set, and a consumer of the
+// block feed may expect to find exactly this set.
+type BlockDataExpectation struct {
+	// ExpectReceipts indicates receipts data is required for this chain.
+	ExpectReceipts bool
+	// ExpectTraces indicates traces data is required for this chain.
+	ExpectTraces bool
+	// ExpectBlobs indicates blob sidecars are required for this chain.
+	ExpectBlobs bool
+}
+
+// DefaultChainExpectations returns the expectations for known chains. These MUST
+// mirror what each chain's watcher actually caches: receipts are always fetched,
+// but traces only when the watcher runs without --enable-traces=false. Today only
+// the ethereum watcher fetches traces; every other chain's watcher sets
+// --enable-traces=false (avalanche and arbitrum have no trace_block on Alchemy at
+// all; base/optimism/unichain support it but the watcher still does not fetch
+// it). Blobs are not fetched anywhere (--enable-blobs is false).
+func DefaultChainExpectations() map[int64]BlockDataExpectation {
+	return map[int64]BlockDataExpectation{
+		1:     {ExpectReceipts: true, ExpectTraces: true, ExpectBlobs: false},  // Ethereum Mainnet
+		43114: {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Avalanche C-Chain
+		8453:  {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Base
+		10:    {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Optimism
+		130:   {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Unichain
+		42161: {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Arbitrum
+		4663:  {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Robinhood Chain
+	}
+}
+
+// ChainSlug returns the name a chain's deployed resources are built from: its
+// raw bucket and blocks topic, and the Kubernetes and Temporal names derived
+// from them. It errors on a chain the repo does not watch, so a caller naming a
+// resource fails hard rather than building one nothing serves.
+func ChainSlug(chainID int64) (string, error) {
+	chainName, ok := entity.ChainIDToS3Bucket[chainID]
+	if !ok {
+		return "", fmt.Errorf("unknown chain ID %d", chainID)
+	}
+	return chainName, nil
+}
 
 // ValidateS3BucketForChain checks that the S3 bucket name has the expected prefix
 // for the given chain ID and deployment environment. This prevents accidentally
@@ -28,9 +79,9 @@ func ValidateS3BucketForChain(chainID int64, bucket string, environment string) 
 		return fmt.Errorf("environment must not be empty")
 	}
 
-	chainName, ok := entity.ChainIDToS3Bucket[chainID]
-	if !ok {
-		return fmt.Errorf("unknown chain ID %d: cannot validate bucket name", chainID)
+	chainName, err := ChainSlug(chainID)
+	if err != nil {
+		return fmt.Errorf("%w: cannot validate bucket name", err)
 	}
 
 	expectedPrefix := fmt.Sprintf("stl-sentinel%s-%s-raw", environment, chainName)
@@ -58,9 +109,9 @@ func ValidateSNSTopicForChain(chainID int64, topicARN string, environment string
 		return fmt.Errorf("environment must not be empty")
 	}
 
-	chainName, ok := entity.ChainIDToS3Bucket[chainID]
-	if !ok {
-		return fmt.Errorf("unknown chain ID %d: cannot validate sns topic", chainID)
+	chainName, err := ChainSlug(chainID)
+	if err != nil {
+		return fmt.Errorf("%w: cannot validate sns topic", err)
 	}
 
 	expectedSuffix := fmt.Sprintf(":stl-sentinel%s-%s-blocks.fifo", environment, chainName)
@@ -105,4 +156,67 @@ func RequireChainID() (int, error) {
 		return 0, fmt.Errorf("CHAIN_ID must be a valid integer: %w", err)
 	}
 	return id, nil
+}
+
+const (
+	ethereumMainnetChainID int64 = 1
+	defaultAlchemyHTTPURL        = "https://eth-mainnet.g.alchemy.com/v2"
+)
+
+// AlchemyRPCURL builds a credentialed node URL; its endpoint default is
+// mainnet-only, and remote endpoints must use HTTPS.
+func AlchemyRPCURL(chainID int64) (string, error) {
+	apiKey, err := env.Require("ALCHEMY_API_KEY")
+	if err != nil {
+		return "", fmt.Errorf("requiring ALCHEMY_API_KEY: %w", err)
+	}
+	baseURL := env.Get("ALCHEMY_HTTP_URL", "")
+	if baseURL == "" && chainID != ethereumMainnetChainID {
+		return "", fmt.Errorf("ALCHEMY_HTTP_URL is required for chain %d (the default endpoint is mainnet-only)", chainID)
+	}
+	if baseURL == "" {
+		baseURL = defaultAlchemyHTTPURL
+	}
+	parsedURL, err := url.Parse(baseURL)
+	if err != nil {
+		return "", fmt.Errorf("parsing ALCHEMY_HTTP_URL: %w", err)
+	}
+	if parsedURL.Hostname() == "" {
+		return "", errors.New("ALCHEMY_HTTP_URL must be an absolute URL")
+	}
+	if parsedURL.User != nil || parsedURL.RawQuery != "" || parsedURL.ForceQuery || strings.Contains(baseURL, "#") {
+		return "", errors.New("ALCHEMY_HTTP_URL must not contain user info, a query, or a fragment")
+	}
+	hostIP := net.ParseIP(parsedURL.Hostname())
+	isLoopback := strings.EqualFold(parsedURL.Hostname(), "localhost") || hostIP.IsLoopback()
+	if parsedURL.Scheme != "https" && !(parsedURL.Scheme == "http" && isLoopback) {
+		return "", errors.New("ALCHEMY_HTTP_URL must use HTTPS unless it targets loopback")
+	}
+	return strings.TrimRight(baseURL, "/") + "/" + apiKey, nil
+}
+
+// ChainIDReader is the one node method AssertChainID needs, so the check is
+// testable without an *ethclient.Client.
+type ChainIDReader interface {
+	ChainID(ctx context.Context) (*big.Int, error)
+}
+
+// chainIDProbeTimeout bounds the startup probe on its own: the dialers' budgets
+// (60s to 5m, with retries) are sized for heavy calls, not for failing a sick node fast.
+const chainIDProbeTimeout = 15 * time.Second
+
+// AssertChainID refuses a node on another chain before its chain-scoped data can
+// be read or written under the configured chain ID.
+func AssertChainID(ctx context.Context, node ChainIDReader, want int64) error {
+	ctx, cancel := context.WithTimeout(ctx, chainIDProbeTimeout)
+	defer cancel()
+
+	got, err := node.ChainID(ctx)
+	if err != nil {
+		return fmt.Errorf("fetching RPC chain ID: %w", err)
+	}
+	if got == nil || !got.IsInt64() || got.Int64() != want {
+		return fmt.Errorf("RPC chain ID mismatch: RPC reports %s, config says %d", got, want)
+	}
+	return nil
 }

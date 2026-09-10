@@ -8,10 +8,12 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	metricsdk "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // Review-11 / A2: every datapoint must carry a `chain="<name>"` attribute (the
@@ -283,8 +285,60 @@ func TestTelemetry_NilSafe(t *testing.T) {
 	tel.RecordError(ctx, "op", nil)
 	tel.RecordStateRows(ctx, 5)
 	tel.RecordStateRows(ctx, 0)
+	tel.RecordStateRowsAttempted(ctx, 5)
+	tel.RecordStateRowsAttempted(ctx, 0)
 	tel.RecordPoolsTouched(ctx, 5)
 	tel.RecordPoolsTouched(ctx, 0)
+	tel.RecordPoolsNeverIndexed(ctx, 5)
+	tel.RecordPoolsNeverIndexed(ctx, 0)
+	tel.RecordTickRows(ctx, 5)
+	tel.RecordTickRows(ctx, 0)
+	tel.RecordPositionRows(ctx, 5)
+	tel.RecordPositionRows(ctx, 0)
+}
+
+func TestRecordAppendOnChangeRows_IncrementsItsOwnCounter(t *testing.T) {
+	for _, tc := range []struct {
+		metric string
+		record func(*Telemetry, context.Context, int)
+	}{
+		{"curve.tick.rows.written", (*Telemetry).RecordTickRows},
+		{"curve.position.rows.written", (*Telemetry).RecordPositionRows},
+	} {
+		t.Run(tc.metric, func(t *testing.T) {
+			reader := metricsdk.NewManualReader()
+			mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+			prev := otel.GetMeterProvider()
+			otel.SetMeterProvider(mp)
+			t.Cleanup(func() {
+				otel.SetMeterProvider(prev)
+				_ = mp.Shutdown(context.Background())
+			})
+
+			tel, err := NewTelemetry("curve", 1)
+			if err != nil {
+				t.Fatalf("NewTelemetry: %v", err)
+			}
+
+			ctx := context.Background()
+			tc.record(tel, ctx, 3)
+			tc.record(tel, ctx, 5)
+			tc.record(tel, ctx, 0)  // no-op
+			tc.record(tel, ctx, -1) // no-op
+
+			var rm metricdata.ResourceMetrics
+			if err := reader.Collect(ctx, &rm); err != nil {
+				t.Fatalf("Collect: %v", err)
+			}
+
+			if got := readSingleSumCount(t, &rm, tc.metric); got != 8 {
+				t.Errorf("%s = %d, want 8 (3+5; 0 and -1 are no-ops)", tc.metric, got)
+			}
+			if want := "mainnet"; readChainAttr(t, &rm, tc.metric) != want {
+				t.Errorf("%s chain attr = %q, want %q", tc.metric, readChainAttr(t, &rm, tc.metric), want)
+			}
+		})
+	}
 }
 
 func TestRecordStateRows_IncrementsCounter(t *testing.T) {
@@ -316,6 +370,38 @@ func TestRecordStateRows_IncrementsCounter(t *testing.T) {
 	got := readSingleSumCount(t, &rm, "curve.state.rows.written")
 	if got != 8 {
 		t.Errorf("curve.state.rows.written = %d, want 8 (3+5; 0 and -1 are no-ops)", got)
+	}
+}
+
+func TestRecordStateRowsAttempted_IncrementsCounter(t *testing.T) {
+	reader := metricsdk.NewManualReader()
+	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
+
+	tel, err := NewTelemetry("curve", 1)
+	if err != nil {
+		t.Fatalf("NewTelemetry: %v", err)
+	}
+
+	ctx := context.Background()
+	tel.RecordStateRowsAttempted(ctx, 3)
+	tel.RecordStateRowsAttempted(ctx, 5)
+	tel.RecordStateRowsAttempted(ctx, 0)
+	tel.RecordStateRowsAttempted(ctx, -1)
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	got := readSingleSumCount(t, &rm, "curve.state.rows.attempted")
+	if got != 8 {
+		t.Errorf("curve.state.rows.attempted = %d, want 8 (3+5; 0 and -1 are no-ops)", got)
 	}
 }
 
@@ -386,6 +472,66 @@ func TestRecordPoolsTouched_AttachesChainLabel(t *testing.T) {
 	}
 }
 
+func TestRecordPoolsTouched_KeepsCallerAttributesAlongsideChain(t *testing.T) {
+	reader := metricsdk.NewManualReader()
+	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
+
+	tel, err := NewTelemetry("uniswap_v4", 1)
+	if err != nil {
+		t.Fatalf("NewTelemetry: %v", err)
+	}
+
+	ctx := context.Background()
+	tel.RecordPoolsTouched(ctx, 1, attribute.String("snapshot_supported", "true"))
+	tel.RecordPoolsTouched(ctx, 2, attribute.String("snapshot_supported", "false"))
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	if got := readChainAttr(t, &rm, "uniswap_v4.pools.touched"); got != "mainnet" {
+		t.Errorf("uniswap_v4.pools.touched chain attr = %q, want %q", got, "mainnet")
+	}
+	for value, want := range map[string]int64{"true": 1, "false": 2} {
+		got, ok := readSumFor(t, &rm, "uniswap_v4.pools.touched", "snapshot_supported", value)
+		if !ok || got != want {
+			t.Errorf("uniswap_v4.pools.touched{snapshot_supported=%s} = %d (present=%t), want %d", value, got, ok, want)
+		}
+	}
+}
+
+func readSumFor(t *testing.T, rm *metricdata.ResourceMetrics, name, key, value string) (int64, bool) {
+	t.Helper()
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric %s is %T, want Sum[int64]", name, m.Data)
+			}
+			var total int64
+			present := false
+			for _, dp := range sum.DataPoints {
+				if got, ok := dp.Attributes.Value(attribute.Key(key)); ok && got.AsString() == value {
+					total += dp.Value
+					present = true
+				}
+			}
+			return total, present
+		}
+	}
+	return 0, false
+}
+
 // readBlockCounters returns the counter values for status=success and
 // status=error attributes on the named metric.
 func readBlockCounters(t *testing.T, rm *metricdata.ResourceMetrics, name string) (success, errCount int64) {
@@ -435,4 +581,124 @@ func readSingleSumCount(t *testing.T, rm *metricdata.ResourceMetrics, name strin
 	}
 	t.Fatalf("metric %s not found", name)
 	return 0
+}
+
+func newTestTelemetry(t *testing.T, prefix string, chainID int64) (*Telemetry, *metricsdk.ManualReader) {
+	t.Helper()
+	reader := metricsdk.NewManualReader()
+	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
+
+	tel, err := NewTelemetry(prefix, chainID)
+	if err != nil {
+		t.Fatalf("NewTelemetry: %v", err)
+	}
+	return tel, reader
+}
+
+// Guards the startup seed: VectorCurveIndexerStalled reads blocks.processed as
+// rate(success)==0, which cannot match an absent series. state.rows.written is
+// deliberately absent here — see NewTelemetry. See telemetry.SeedCounter.
+func TestNewTelemetry_SeedsAlertedSeriesAtZero(t *testing.T) {
+	_, reader := newTestTelemetry(t, "curve", 8453)
+
+	blockDPs := testutil.CollectSumDataPoints(t, reader, "curve.blocks.processed")
+	blockStatuses := map[string]int64{}
+	for _, dp := range blockDPs {
+		if chain := testutil.AttrValue(dp, "chain"); chain != "base" {
+			t.Errorf("curve.blocks.processed chain attr = %q, want %q", chain, "base")
+		}
+		blockStatuses[testutil.AttrValue(dp, "status")] = dp.Value
+	}
+	for _, status := range []string{"success", "error"} {
+		v, ok := blockStatuses[status]
+		if !ok {
+			t.Errorf("curve.blocks.processed missing status=%q series before any block", status)
+			continue
+		}
+		if v != 0 {
+			t.Errorf("curve.blocks.processed{status=%q} = %d, want 0", status, v)
+		}
+	}
+}
+
+func TestRecordPoolsNeverIndexed_RecordsZeroAsAValue(t *testing.T) {
+	tel, reader := newTestTelemetry(t, "uniswap_v4", 1)
+	tel.RecordPoolsNeverIndexed(context.Background(), 0)
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if got := readGaugeValue(t, &rm, "uniswap_v4.pools.never_indexed"); got != 0 {
+		t.Errorf("uniswap_v4.pools.never_indexed = %d, want 0", got)
+	}
+}
+
+func TestRecordPoolsNeverIndexed_ReportsTheLatestValue(t *testing.T) {
+	tel, reader := newTestTelemetry(t, "uniswap_v4", 1)
+	ctx := context.Background()
+	tel.RecordPoolsNeverIndexed(ctx, 3)
+	tel.RecordPoolsNeverIndexed(ctx, 1)
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if got := readGaugeValue(t, &rm, "uniswap_v4.pools.never_indexed"); got != 1 {
+		t.Errorf("uniswap_v4.pools.never_indexed = %d, want 1 (a gauge reports the level, not a sum)", got)
+	}
+}
+
+func TestRecordPoolsNeverIndexed_AttachesChainLabel(t *testing.T) {
+	tel, reader := newTestTelemetry(t, "uniswap_v4", 8453)
+	tel.RecordPoolsNeverIndexed(context.Background(), 2)
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if got := readGaugeChainAttr(t, &rm, "uniswap_v4.pools.never_indexed"); got != "base" {
+		t.Errorf("uniswap_v4.pools.never_indexed chain attr = %q, want %q", got, "base")
+	}
+}
+
+func readGaugeDataPoints(t *testing.T, rm *metricdata.ResourceMetrics, name string) []metricdata.DataPoint[int64] {
+	t.Helper()
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			gauge, ok := m.Data.(metricdata.Gauge[int64])
+			if !ok {
+				t.Fatalf("%s: unexpected metric type %T", name, m.Data)
+			}
+			if len(gauge.DataPoints) != 1 {
+				t.Fatalf("%s: %d datapoints, want 1", name, len(gauge.DataPoints))
+			}
+			return gauge.DataPoints
+		}
+	}
+	t.Fatalf("metric %s not found", name)
+	return nil
+}
+
+func readGaugeValue(t *testing.T, rm *metricdata.ResourceMetrics, name string) int64 {
+	t.Helper()
+	return readGaugeDataPoints(t, rm, name)[0].Value
+}
+
+func readGaugeChainAttr(t *testing.T, rm *metricdata.ResourceMetrics, name string) string {
+	t.Helper()
+	v, ok := readGaugeDataPoints(t, rm, name)[0].Attributes.Value("chain")
+	if !ok {
+		t.Fatalf("metric %s has no chain attribute", name)
+	}
+	return v.AsString()
 }

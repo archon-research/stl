@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
@@ -23,15 +24,16 @@ var _ outbound.OnchainPriceRepository = (*OnchainPriceRepository)(nil)
 
 // OnchainPriceRepository is a PostgreSQL implementation of the outbound.OnchainPriceRepository port.
 type OnchainPriceRepository struct {
-	pool      *pgxpool.Pool
+	db        querier
 	logger    *slog.Logger
 	buildID   buildregistry.BuildID
+	runID     buildregistry.RunID
 	batchSize int
 }
 
 // NewOnchainPriceRepository creates a new PostgreSQL onchain price repository.
 // If batchSize is <= 0, a default batch size of 1000 is used.
-func NewOnchainPriceRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildregistry.BuildID, batchSize int) (*OnchainPriceRepository, error) {
+func NewOnchainPriceRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildregistry.BuildID, runID buildregistry.RunID, batchSize int) (*OnchainPriceRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
 	}
@@ -42,18 +44,28 @@ func NewOnchainPriceRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID 
 		batchSize = 1000
 	}
 	return &OnchainPriceRepository{
-		pool:      pool,
+		db:        pool,
 		logger:    logger,
 		buildID:   buildID,
+		runID:     runID,
 		batchSize: batchSize,
 	}, nil
+}
+
+// WithTx returns a copy of the repository whose statements run on tx: how a writer
+// loads its reference data inside the transaction that records its run snapshot
+// (buildregistry.Registry.OpenRun, ADR-0006 §2). The copy is valid until tx ends.
+func (r *OnchainPriceRepository) WithTx(tx pgx.Tx) *OnchainPriceRepository {
+	scoped := *r
+	scoped.db = tx
+	return &scoped
 }
 
 // GetOracle retrieves an oracle by its name.
 func (r *OnchainPriceRepository) GetOracle(ctx context.Context, name string) (*entity.Oracle, error) {
 	var o entity.Oracle
 	var addrBytes []byte
-	err := r.pool.QueryRow(ctx, `
+	err := r.db.QueryRow(ctx, `
 		SELECT id, name, display_name, chain_id, address, oracle_type,
 		       deployment_block, enabled, price_decimals, created_at, updated_at
 		FROM oracle
@@ -72,14 +84,17 @@ func (r *OnchainPriceRepository) GetOracle(ctx context.Context, name string) (*e
 	return &o, nil
 }
 
-// GetEnabledAssets retrieves all enabled assets for a given oracle.
-func (r *OnchainPriceRepository) GetEnabledAssets(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error) {
-	rows, err := r.pool.Query(ctx, `
-		SELECT id, oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, created_at
-		FROM oracle_asset
-		WHERE oracle_id = $1 AND enabled = true
-		ORDER BY id
-	`, oracleID)
+// Ordered by the natural key, not by id: a re-versioned row gets a fresh id, so id order would
+// reshuffle the list on every mapping change.
+var enabledAssetsSQL = fmt.Sprintf(`
+	SELECT id, oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, created_at
+	FROM %s oa
+	WHERE oracle_id = $1 AND enabled = true
+	ORDER BY oracle_id, token_id, feed_key
+`, OracleAssetAsOf("$2::timestamptz"))
+
+func (r *OnchainPriceRepository) GetEnabledAssets(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) ([]*entity.OracleAsset, error) {
+	rows, err := r.db.Query(ctx, enabledAssetsSQL, oracleID, referenceEffectiveAt)
 	if err != nil {
 		return nil, fmt.Errorf("querying enabled oracle assets: %w", err)
 	}
@@ -111,7 +126,7 @@ func (r *OnchainPriceRepository) GetEnabledAssets(ctx context.Context, oracleID 
 // GetLatestPrices returns the most recent price per token for a given oracle.
 // Used for change detection: only store prices that differ from the previous block.
 func (r *OnchainPriceRepository) GetLatestPrices(ctx context.Context, oracleID int64) (map[int64]float64, error) {
-	rows, err := r.pool.Query(ctx, `
+	rows, err := r.db.Query(ctx, `
 		SELECT DISTINCT ON (token_id) token_id, price_usd
 		FROM onchain_token_price
 		WHERE oracle_id = $1
@@ -141,7 +156,7 @@ func (r *OnchainPriceRepository) GetLatestPrices(ctx context.Context, oracleID i
 // Returns 0 if no blocks have been stored yet.
 func (r *OnchainPriceRepository) GetLatestBlock(ctx context.Context, oracleID int64) (int64, error) {
 	var blockNumber *int64
-	err := r.pool.QueryRow(ctx, `
+	err := r.db.QueryRow(ctx, `
 		SELECT MAX(block_number)
 		FROM onchain_token_price
 		WHERE oracle_id = $1
@@ -155,15 +170,18 @@ func (r *OnchainPriceRepository) GetLatestBlock(ctx context.Context, oracleID in
 	return *blockNumber, nil
 }
 
-// GetTokenInfos returns a map of token_id → TokenInfo (address + decimals) for enabled oracle assets.
-func (r *OnchainPriceRepository) GetTokenInfos(ctx context.Context, oracleID int64) (map[int64]outbound.TokenInfo, error) {
-	rows, err := r.pool.Query(ctx, `
-		SELECT oa.token_id, t.address, t.decimals
-		FROM oracle_asset oa
-		JOIN token t ON t.id = oa.token_id
-		WHERE oa.oracle_id = $1 AND oa.enabled = true
-		ORDER BY oa.id
-	`, oracleID)
+// Same effective_at as GetEnabledAssets, or a unit would carry an asset it never resolved an
+// address for.
+var tokenInfosSQL = fmt.Sprintf(`
+	SELECT oa.token_id, t.address, t.decimals
+	FROM %s oa
+	JOIN token t ON t.id = oa.token_id
+	WHERE oa.oracle_id = $1 AND oa.enabled = true
+	ORDER BY oa.oracle_id, oa.token_id, oa.feed_key
+`, OracleAssetAsOf("$2::timestamptz"))
+
+func (r *OnchainPriceRepository) GetTokenInfos(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) (map[int64]outbound.TokenInfo, error) {
+	rows, err := r.db.Query(ctx, tokenInfosSQL, oracleID, referenceEffectiveAt)
 	if err != nil {
 		return nil, fmt.Errorf("querying token infos: %w", err)
 	}
@@ -203,7 +221,7 @@ func (r *OnchainPriceRepository) UpsertPrices(ctx context.Context, prices []*ent
 		)
 	})
 
-	tx, err := r.pool.Begin(ctx)
+	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
@@ -231,19 +249,20 @@ func (r *OnchainPriceRepository) upsertPriceBatch(ctx context.Context, tx pgx.Tx
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO onchain_token_price (token_id, oracle_id, block_number, block_version, timestamp, price_usd, build_id)
+		INSERT INTO onchain_token_price (token_id, oracle_id, block_number, block_version, timestamp, price_usd, build_id, run_id)
 		VALUES `)
 
-	args := make([]any, 0, len(prices)*7)
+	const cols = 8
+	args := make([]any, 0, len(prices)*cols)
 	for i, price := range prices {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 7
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d)",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7))
+		baseIdx := i * cols
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8))
 
-		args = append(args, price.TokenID, price.OracleID, price.BlockNumber, price.BlockVersion, price.Timestamp, price.PriceUSD, int(r.buildID))
+		args = append(args, price.TokenID, price.OracleID, price.BlockNumber, price.BlockVersion, price.Timestamp, price.PriceUSD, int(r.buildID), r.runID)
 	}
 
 	sb.WriteString(` ON CONFLICT (token_id, oracle_id, block_number, block_version, processing_version, timestamp) DO NOTHING`)
@@ -257,7 +276,7 @@ func (r *OnchainPriceRepository) upsertPriceBatch(ctx context.Context, tx pgx.Tx
 
 // GetEnabledOraclesByChain retrieves all enabled oracles for a given chain.
 func (r *OnchainPriceRepository) GetEnabledOraclesByChain(ctx context.Context, chainID int64) ([]*entity.Oracle, error) {
-	rows, err := r.pool.Query(ctx, `
+	rows, err := r.db.Query(ctx, `
 		SELECT id, name, display_name, chain_id, address, oracle_type,
 		       deployment_block, enabled, price_decimals, created_at, updated_at
 		FROM oracle
@@ -292,7 +311,7 @@ func (r *OnchainPriceRepository) GetEnabledOraclesByChain(ctx context.Context, c
 func (r *OnchainPriceRepository) GetOracleByAddress(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error) {
 	var o entity.Oracle
 	var addrBytes []byte
-	err := r.pool.QueryRow(ctx, `
+	err := r.db.QueryRow(ctx, `
 		SELECT id, name, display_name, chain_id, address, oracle_type,
 		       deployment_block, enabled, price_decimals, created_at, updated_at
 		FROM oracle
@@ -316,12 +335,12 @@ func (r *OnchainPriceRepository) InsertOracle(ctx context.Context, oracle *entit
 	if oracle.OracleType == "" {
 		return nil, fmt.Errorf("inserting oracle: oracle_type is required")
 	}
-	err := r.pool.QueryRow(ctx, `
-		INSERT INTO oracle (name, display_name, chain_id, address, oracle_type, deployment_block, enabled, price_decimals)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	err := r.db.QueryRow(ctx, `
+		INSERT INTO oracle (name, display_name, chain_id, address, oracle_type, deployment_block, enabled, price_decimals, run_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		RETURNING id, created_at, updated_at
 	`, oracle.Name, oracle.DisplayName, oracle.ChainID, oracle.Address.Bytes(),
-		oracle.OracleType, oracle.DeploymentBlock, oracle.Enabled, oracle.PriceDecimals,
+		oracle.OracleType, oracle.DeploymentBlock, oracle.Enabled, oracle.PriceDecimals, r.runID,
 	).Scan(&oracle.ID, &oracle.CreatedAt, &oracle.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("inserting oracle: %w", err)
@@ -331,11 +350,11 @@ func (r *OnchainPriceRepository) InsertOracle(ctx context.Context, oracle *entit
 
 // InsertProtocolOracleBinding inserts a new protocol-oracle binding.
 func (r *OnchainPriceRepository) InsertProtocolOracleBinding(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error) {
-	err := r.pool.QueryRow(ctx, `
-		INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block)
-		VALUES ($1, $2, $3)
+	err := r.db.QueryRow(ctx, `
+		INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block, run_id)
+		VALUES ($1, $2, $3, $4)
 		RETURNING id, created_at
-	`, binding.ProtocolID, binding.OracleID, binding.FromBlock,
+	`, binding.ProtocolID, binding.OracleID, binding.FromBlock, r.runID,
 	).Scan(&binding.ID, &binding.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("inserting protocol oracle binding: %w", err)
@@ -345,7 +364,7 @@ func (r *OnchainPriceRepository) InsertProtocolOracleBinding(ctx context.Context
 
 // GetAllProtocolOracleBindings retrieves ALL protocol-oracle bindings ordered by protocol and from_block.
 func (r *OnchainPriceRepository) GetAllProtocolOracleBindings(ctx context.Context) ([]*entity.ProtocolOracle, error) {
-	rows, err := r.pool.Query(ctx, `
+	rows, err := r.db.Query(ctx, `
 		SELECT id, protocol_id, oracle_id, from_block, created_at
 		FROM protocol_oracle
 		ORDER BY protocol_id, from_block
@@ -369,17 +388,80 @@ func (r *OnchainPriceRepository) GetAllProtocolOracleBindings(ctx context.Contex
 	return bindings, nil
 }
 
-// CopyOracleAssets copies all enabled oracle_asset rows from one oracle to another.
-func (r *OnchainPriceRepository) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64) error {
-	_, err := r.pool.Exec(ctx, `
-		INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
-		SELECT $2, token_id, enabled, feed_address, feed_decimals, quote_currency
-		FROM oracle_asset
-		WHERE oracle_id = $1 AND enabled = true
-		ON CONFLICT DO NOTHING
-	`, fromOracleID, toOracleID)
+// valid_from is the run's recorded instant, not the wall clock, so a replay produces identically
+// dated rows; change_reason renders it in UTC so the text never depends on the session TimeZone.
+// Zero rows copied is legitimate but logged, because the target is then registered with no assets
+// and the symptom surfaces much later in a different process.
+// change_reason is rendered in Go and bound as a parameter: the text is a description for a human
+// reader, not a value SQL needs to compute, and formatting it here keeps the query free of a
+// session-TimeZone-dependent to_char.
+var copyOracleAssetsSQL = fmt.Sprintf(`
+	INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, valid_from, change_reason, run_id)
+	SELECT $2, token_id, enabled, feed_address, feed_decimals, quote_currency, $3::timestamptz, $4, $5
+	FROM %s oa
+	WHERE oracle_id = $1 AND enabled = true
+	ON CONFLICT DO NOTHING
+`, OracleAssetAsOf("$3::timestamptz"))
+
+// The arbiter skips a source key the target already holds at processing_version 0, which is benign
+// only while that existing row carries the same mapping. A differing one leaves the target
+// partially mapped, and reporting success would hide it.
+var unmappedSourceAssetsSQL = fmt.Sprintf(`
+	SELECT count(*)
+	FROM %[1]s src
+	WHERE src.oracle_id = $1 AND src.enabled
+	  AND NOT EXISTS (
+		SELECT 1
+		FROM %[1]s tgt
+		WHERE tgt.oracle_id = $2
+		  AND tgt.token_id = src.token_id
+		  AND tgt.feed_key = src.feed_key
+		  AND tgt.enabled
+		  AND tgt.feed_decimals IS NOT DISTINCT FROM src.feed_decimals
+		  AND tgt.quote_currency IS NOT DISTINCT FROM src.quote_currency
+	  )
+`, OracleAssetAsOf("$3::timestamptz"))
+
+// The INSERT and its verification share one transaction. The arbiter skips only the conflicting
+// keys, so a target holding a conflicting version still takes every other source mapping: on
+// autocommit the caller got an error while that subset stayed behind, registering the target as
+// partially mapped. Appending cannot undo it either — the table forbids DELETE, so the residue
+// could only be superseded by a further disabling version. Rolling back leaves the target as it
+// was, which is the only outcome the error message honestly describes.
+func (r *OnchainPriceRepository) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64, referenceEffectiveAt time.Time) error {
+	changeReason := fmt.Sprintf("copied from oracle %d as of %s",
+		fromOracleID, referenceEffectiveAt.UTC().Format(time.RFC3339))
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer rollback(ctx, tx, r.logger)
+
+	tag, err := tx.Exec(ctx, copyOracleAssetsSQL, fromOracleID, toOracleID, referenceEffectiveAt, changeReason, r.runID)
 	if err != nil {
 		return fmt.Errorf("copying oracle assets from %d to %d: %w", fromOracleID, toOracleID, err)
 	}
+
+	// Reads the rows the INSERT just wrote: the count is what the commit would make visible.
+	var unmapped int
+	if err := tx.QueryRow(ctx, unmappedSourceAssetsSQL,
+		fromOracleID, toOracleID, referenceEffectiveAt).Scan(&unmapped); err != nil {
+		return fmt.Errorf("verifying copied oracle assets from %d to %d: %w", fromOracleID, toOracleID, err)
+	}
+	if unmapped > 0 {
+		return fmt.Errorf("copying oracle assets from %d to %d: %d of the source's enabled mappings are absent or differ on the target; it already carries conflicting versions",
+			fromOracleID, toOracleID, unmapped)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing the oracle asset copy from %d to %d: %w", fromOracleID, toOracleID, err)
+	}
+
+	r.logger.Info("copied oracle assets",
+		"from_oracle_id", fromOracleID,
+		"to_oracle_id", toOracleID,
+		"rows", tag.RowsAffected(),
+		"reference_effective_at", referenceEffectiveAt.UTC().Format(time.RFC3339Nano))
 	return nil
 }

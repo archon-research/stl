@@ -1,9 +1,13 @@
 # ADR-0002: Data Auditability and Processing Versioning
 
-**Status**: Accepted  
-**Proposed**: @simonbojeoutzen  
-**Date**: 2026-04-08  
-**Deciders**: @vector, @infrastructure
+- **Status**: Accepted
+- **Proposed**: @simonbojeoutzen
+- **Date**: 2026-04-08
+- **Deciders**: @vector, @infrastructure
+
+> **Note (2026-08-17):** [ADR-0006](0006-data-reproducibility-and-append-only-guarantees.md)
+> proposes to supersede the version-assignment mechanism in §3 and to extend this ADR to
+> third-party reproducibility. Until ADR-0006 is accepted, this document remains authoritative.
 
 ## Context
 
@@ -157,8 +161,56 @@ and the constraint is already enforced at the application level — each service
 ### 3. Automatic Version Assignment via Per-Table Triggers
 
 Each state table gets a dedicated trigger function that assigns `processing_version` automatically
-on insert. The functions use hardcoded column names so PostgreSQL can cache the query plan,
-following the same pattern as the existing `assign_block_version` trigger on `block_states`.
+on insert. The functions use hardcoded column names rather than dynamic SQL, following the same
+pattern as the existing `assign_block_version` trigger on `block_states`.
+
+#### Plan caching must be disabled
+
+Every such function on a **hypertable** wants `plan_cache_mode = 'force_custom_plan'`:
+
+```sql
+ALTER FUNCTION assign_processing_version_<table>() SET plan_cache_mode = 'force_custom_plan';
+```
+
+Applied to all 36 functions: `20260806_120000_processing_version_force_custom_plan.sql`
+covers `offchain_token_price`, where the cost was measured and a historical backfill made
+it acute, and `20260806_130000_set_plan_cache_mode_on_processing_version_triggers.sql`
+covers the rest — the setting is semantics-free (plan choice only), so blanket coverage
+beats waiting for each table to age into the same pathology. New versioned hypertables
+must declare the `SET` inside the `CREATE FUNCTION` that defines their trigger:
+`CREATE OR REPLACE FUNCTION` resets `proconfig`, so a detached `ALTER` does not survive
+a later function edit (see `db/migrations/AGENTS.md`).
+
+This reverses an earlier assumption in this ADR, which treated PL/pgSQL's plan caching as a
+benefit of hardcoding the column names. For a **hypertable** it is the opposite. PL/pgSQL switches
+a statement to a *generic* plan after roughly five executions, and a generic plan cannot prune
+chunks — the partition value is a placeholder when the plan is built, so the plan keeps every
+chunk and re-derives the surviving one at each execution ("Chunks excluded during startup: N").
+Per-row cost then grows with chunk count, on tables that only ever gain chunks.
+
+Measured on timescaledb 2.25.1-pg17, one 721-row batch against ~2,000 chunks:
+
+| | Time |
+|---|---|
+| Generic plan (the default after warm-up) | 4,410 ms |
+| Triggers disabled entirely | 8–19 ms |
+| `force_custom_plan` | 148 ms, and flat in chunk count |
+
+About 92% of the cost was the `build_id` retry check, which no covering index serves. A local
+reproduction at 782 chunks on slower storage measured 84,301 ms against 590 ms — a 143× difference.
+
+Note the trigger is `BEFORE INSERT`, so it fires for rows `ON CONFLICT` later discards too: a
+re-run over an already-populated range pays the same per-row floor and is **not** free.
+
+`force_custom_plan` re-plans with real parameter values on every execution. Chunk pruning returns
+and the extra planning is repaid many times over. Semantics are untouched — same rows, same
+versions, same locking.
+
+Preferred over adding a covering index for the `build_id` check: an index fixes one table, costs
+write throughput on the hot ingest path, and still leaves a generic plan unable to prune.
+
+Enforced by `TestProcessingVersionTriggersForceCustomPlan`, which enumerates
+`assign_processing_version_*` from `pg_proc` and fails if any function lacks the setting.
 
 #### Retry vs. Reprocessing
 
@@ -200,6 +252,29 @@ trigger from seeing committed rows from the lock holder.
 Two concurrent transactions inserting overlapping rows in different order would deadlock.
 Batch repository methods must sort rows by natural key before building the INSERT to ensure
 consistent lock acquisition order across transactions.
+
+**VaultV2 lock prefixes:** The Morpho VaultV2 tables extend the prefix registry with four more
+entries, each hashing its full natural key:
+- `mas` — `morpho_adapter_state` (`morpho_adapter_id, block_number, block_version, timestamp`)
+- `mam` — `morpho_adapter_membership` (`morpho_adapter_id, block_number, block_version, log_index`;
+  no `timestamp` — it is a plain table whose key is the latest-row ordering tuple, so the
+  lock string is all-integer and needs no epoch stabilisation)
+- `mvc` — `morpho_vault_cap` (`morpho_vault_id, cap_id, block_number, block_version, timestamp`)
+- `mvf` — `morpho_vault_fee` (`morpho_vault_id, block_number, block_version, timestamp`)
+
+`morpho_adapter` itself (the identity table) has deliberately **no** trigger and no prefix:
+identity rows are written once with no `(key, version)` series to decide about, so
+`INSERT … ON CONFLICT DO NOTHING` needs no lock. The repository additionally serializes the
+membership *assertion* path on a per-`(vault, address)` advisory key (`lockAdapterKey`) — that
+is an application-level lock guarding a different decision ("what does the log say at this
+position"), not a trigger prefix, and is documented on the port.
+
+Today each VaultV2 handler writes exactly one of these tables per transaction, so no
+combined-write lock ordering is exercised yet. The prefixes are registered as a forward-looking
+invariant: any future transaction that writes both a vault's state and its adapter state /
+membership / caps / fees must acquire the `mas`, `mam`, `mvc` and `mvf` locks after the parent
+vault's `mvs` state lock — a state-first acquisition order that keeps concurrent writers on the
+same vault deadlock-free.
 
 #### Trigger Examples
 
@@ -295,7 +370,8 @@ EXECUTE FUNCTION assign_processing_version_onchain_token_price();
 
 -- Same pattern for: borrower, borrower_collateral, sparklend_reserve_data,
 -- morpho_market_position, morpho_vault_state, morpho_vault_position,
--- prime_debt, allocation_position, protocol_event
+-- morpho_adapter_membership, morpho_adapter_state, morpho_vault_cap,
+-- morpho_vault_fee, prime_debt, allocation_position, protocol_event
 -- (each with its own natural key columns in the WHERE clause)
 
 -- ============================================================================
@@ -427,6 +503,31 @@ constraints that include `processing_version`. On retries (same `build_id`), the
 the existing version and the conflict clause deduplicates. On reprocessing (different `build_id`),
 the trigger assigns a new version and the insert succeeds.
 
+**Amendment (2026-08-21, VEC-218): on a compressed chunk the trigger is too late, so the
+INSERT must pass the version.** TimescaleDB resolves an INSERT's `ON CONFLICT` against
+compressed data *before* row triggers fire (verified on 2.25.1-pg17). A `processing_version`
+left to the trigger therefore reaches the arbiter as the column's `DEFAULT 0`, matches the
+`processing_version = 0` row already in the chunk, and the reprocessed row is discarded with
+no error and no rows affected — 150 rows replayed into a compressed chunk under a new
+`build_id` wrote 0, where the same replay wrote all 150 while the chunk was still rowstore.
+Compression starts at 2 days, so this is every chunk a replay or backfill writes into, and
+"reprocessing appends a new version" did not hold there at all. Adding `processing_version`
+to `compress_orderby` does not change it; the blind spot is the trigger's timing.
+
+The fix keeps the invariant in the database and adds one call site rather than a second
+definition: the rule moves into a `next_processing_version_<table>(…)` SQL function — the
+advisory lock included — which the trigger delegates to and the repository's INSERT calls in
+its `VALUES` list. Both therefore compute the same answer, the second under the lock the
+first already holds, and the arbiter sees the version the row will really carry. The function
+must stay `VOLATILE`: a `STABLE` one would read the calling statement's snapshot, so a writer
+released from the lock would recompute the version the writer it waited for already took, and
+on compressed data no unique index catches the duplicate that follows. This narrows, but does
+not remove, the "Application-level version assignment" rejection below: the version is still
+defined once, in the database, and the trigger remains the floor for a writer that passes
+none — but only on a rowstore chunk. Converted so far: `morpho_adapter_state`. Every other
+table listed here still leaves the version to the trigger alone and still loses corrections
+written into an already-compressed chunk.
+
 #### Performance
 
 Each trigger function uses static SQL with hardcoded column names, allowing PostgreSQL to cache
@@ -477,6 +578,10 @@ triggers:
 | `morpho_market_position` | `user_id, morpho_market_id, block_number, block_version, timestamp` | Hypertable (compression) |
 | `morpho_vault_state` | `morpho_vault_id, block_number, block_version, timestamp` | Hypertable (compression) |
 | `morpho_vault_position` | `user_id, morpho_vault_id, block_number, block_version, timestamp` | Hypertable (compression) |
+| `morpho_adapter_membership` | `morpho_adapter_id, block_number, block_version, log_index` | Plain table, natural PK |
+| `morpho_adapter_state` | `morpho_adapter_id, block_number, block_version, timestamp` | Hypertable (compression) |
+| `morpho_vault_cap` | `morpho_vault_id, cap_id, block_number, block_version, timestamp` | Plain table, natural PK |
+| `morpho_vault_fee` | `morpho_vault_id, block_number, block_version, timestamp` | Plain table, natural PK |
 | `prime_debt` | `prime_id, block_number, block_version, synced_at` | Hypertable, UNIQUE only (no PK) |
 | `allocation_position` | `chain_id, token_id, prime_id, proxy_address, block_number, block_version, tx_hash, log_index, direction, created_at` | Hypertable (columnstore), natural PK |
 | `protocol_event` | `chain_id, block_number, block_version, tx_hash, log_index, created_at` | Hypertable (columnstore), natural PK |
@@ -490,10 +595,13 @@ triggers:
 | `offchain_token_price` | `token_id, source_id, timestamp` | Hypertable (compression) |
 
 **Notes:**
-- All state tables are now hypertables. Tables using the old compression API
-  (`timescaledb.compress`) require `remove_compression_policy` + `decompress_chunk` before
-  constraint alteration. Tables using the columnstore API (`timescaledb.enable_columnstore`)
-  require pausing the job, decompressing, and disabling columnstore before alteration.
+- All state tables are hypertables except the sparse governance-event tables marked
+  "Plain table" above (`morpho_adapter_membership`, `morpho_vault_cap`, `morpho_vault_fee`),
+  whose write rate makes chunking pure overhead (CONTRIBUTING §11 rule 4). Tables using the
+  old compression API (`timescaledb.compress`) require `remove_compression_policy` +
+  `decompress_chunk` before constraint alteration. Tables using the columnstore API
+  (`timescaledb.enable_columnstore`) require pausing the job, decompressing, and disabling
+  columnstore before alteration.
 - `sparklend_reserve_data` has a surrogate PK `(id, block_number)` with a **separate** UNIQUE
   constraint on the natural key. `processing_version` is added to the UNIQUE constraint, not
   the surrogate PK. `prime_debt` has no PK — only a UNIQUE constraint.
@@ -568,7 +676,10 @@ one query per reprocessing run instead of per row), but splits the versioning in
 multiple code paths. Every new service or adapter that writes to a state table must remember to
 implement the version logic correctly — a missed code path silently overwrites data at
 `processing_version = 0`. Rejected in favour of the trigger, which enforces the invariant in the
-database regardless of which code path inserts data.
+database regardless of which code path inserts data. (Partly revisited — see the amendment in
+§3: on a compressed chunk the trigger fires after the arbiter has already discarded the row, so
+the INSERT has to pass a version. It passes one computed by the same database function the
+trigger calls, which is what keeps this rejection's reasoning intact.)
 
 **Foreign key from hypertables to build_registry** — Would provide database-level referential
 integrity. Rejected because foreign keys are incompatible with distributed hypertables (as

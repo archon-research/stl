@@ -1,6 +1,8 @@
 package blockchain
 
 import (
+	"fmt"
+	"maps"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -53,6 +55,38 @@ func TestIsKnownProtocol(t *testing.T) {
 			name:     "Aave V3 Avalanche address on wrong chain",
 			chainID:  1,
 			address:  "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+			expected: false,
+		},
+		{
+			name:     "Aave V3 Arbitrum",
+			chainID:  42161,
+			address:  "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+			expected: true,
+		},
+		{
+			name:     "Aave V3 Optimism",
+			chainID:  10,
+			address:  "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+			expected: true,
+		},
+		{
+			name:     "Aave V3 Base",
+			chainID:  8453,
+			address:  "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5",
+			expected: true,
+		},
+		{
+			// Base runs its own Pool address, so the CREATE2 address the other
+			// L2s share must not resolve there.
+			name:     "shared L2 Pool address on Base",
+			chainID:  8453,
+			address:  "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+			expected: false,
+		},
+		{
+			name:     "Base Pool address on Arbitrum",
+			chainID:  42161,
+			address:  "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5",
 			expected: false,
 		},
 		{
@@ -120,6 +154,42 @@ func TestGetProtocolConfig(t *testing.T) {
 			expectType:   "lending",
 		},
 		{
+			name:         "Aave V3 Arbitrum",
+			chainID:      42161,
+			address:      "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+			expectExists: true,
+			expectName:   "Aave V3 Arbitrum",
+			expectType:   "lending",
+		},
+		{
+			name:         "Aave V3 Optimism",
+			chainID:      10,
+			address:      "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+			expectExists: true,
+			expectName:   "Aave V3 Optimism",
+			expectType:   "lending",
+		},
+		{
+			name:         "Aave V3 Base",
+			chainID:      8453,
+			address:      "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5",
+			expectExists: true,
+			expectName:   "Aave V3 Base",
+			expectType:   "lending",
+		},
+		{
+			name:         "shared L2 Pool address on Base",
+			chainID:      8453,
+			address:      "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+			expectExists: false,
+		},
+		{
+			name:         "Base Pool address on Arbitrum",
+			chainID:      42161,
+			address:      "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5",
+			expectExists: false,
+		},
+		{
 			name:         "Aave V3 address on wrong chain",
 			chainID:      43114,
 			address:      "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
@@ -159,8 +229,42 @@ func TestGetProtocolConfig(t *testing.T) {
 	}
 }
 
+// getProtocolRegistry returns a copy of all known protocol configs.
+func getProtocolRegistry() map[ProtocolKey]ProtocolConfig {
+	registry := make(map[ProtocolKey]ProtocolConfig, len(protocolRegistry))
+	maps.Copy(registry, protocolRegistry)
+	return registry
+}
+
+// TestProtocolRegistryInvariants guards the hand-maintained registry against the
+// copy-paste mistakes a new chain entry invites. Sortedness is covered by
+// TestProtocolRegistryPoolDataProviderHistoryIsSorted.
+func TestProtocolRegistryInvariants(t *testing.T) {
+	slugOwner := make(map[string]ProtocolKey, len(protocolRegistry))
+
+	for key, config := range getProtocolRegistry() {
+		id := fmt.Sprintf("chainID=%d pool=%s", key.ChainID, key.PoolAddress.Hex())
+
+		if config.PoolAddress.Address != key.PoolAddress {
+			t.Errorf("%s: PoolAddress.Address = %s, want the map key's pool address", id, config.PoolAddress.Address.Hex())
+		}
+		if len(config.PoolDataProviderHistory) == 0 {
+			t.Errorf("%s: empty PoolDataProviderHistory", id)
+		}
+
+		switch other, taken := slugOwner[config.Slug]; {
+		case config.Slug == "":
+			t.Errorf("%s: empty Slug", id)
+		case taken:
+			t.Errorf("%s: Slug %q already used by chainID=%d pool=%s", id, config.Slug, other.ChainID, other.PoolAddress.Hex())
+		default:
+			slugOwner[config.Slug] = key
+		}
+	}
+}
+
 func TestProtocolRegistryPoolDataProviderHistoryIsSorted(t *testing.T) {
-	registry := GetProtocolRegistry()
+	registry := getProtocolRegistry()
 
 	for key, config := range registry {
 		history := config.PoolDataProviderHistory

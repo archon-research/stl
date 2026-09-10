@@ -19,7 +19,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	redisAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
@@ -31,6 +30,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/services/aavelike_position_tracker"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
@@ -48,24 +48,26 @@ func init() {
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
-	if err := run(ctx, os.Args[1:]); err != nil {
+	err := run(ctx, os.Args[1:], lifecycle.ForceExitAfter(lifecycle.ShutdownTailBudget))
+	cancel()
+	if err != nil {
 		slog.Error("fatal error", "error", err)
 		os.Exit(1)
 	}
 }
 
 type cliConfig struct {
-	queueURL    string
-	redisAddr   string
-	dbURL       string
-	alchemyURL  string
-	s3Bucket    string
-	deployEnv   string
-	maxMessages int
-	waitTime    int
-	chainID     int64
+	queueURL          string
+	redisAddr         string
+	dbURL             string
+	alchemyURL        string
+	s3Bucket          string
+	deployEnv         string
+	maxMessages       int
+	waitTime          int
+	visibilityTimeout int
+	chainID           int64
 }
 
 func parseConfig(args []string) (cliConfig, error) {
@@ -73,18 +75,39 @@ func parseConfig(args []string) (cliConfig, error) {
 	queueURL := fs.String("queue", "", "SQS Queue URL")
 	redisAddr := fs.String("redis", "", "Redis address")
 	dbURL := fs.String("db", "", "PostgreSQL connection URL")
-	maxMessages := fs.Int("max", 10, "Max messages per poll")
+	maxMessages := fs.Int("max", 1, "Max messages per receive; more raises the visibility timeout the queue must carry")
 	waitTime := fs.Int("wait", 20, "Wait time in seconds (long polling)")
+	visibilityTimeout := fs.Int("visibility-timeout", 300, "SQS visibility timeout in seconds")
 	if err := fs.Parse(args); err != nil {
 		return cliConfig{}, fmt.Errorf("parsing CLI flags: %w", err)
 	}
 
+	// Env vars are fallbacks only; an explicitly-set flag wins over its env var.
+	setFlags := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+
 	cfg := cliConfig{
-		queueURL:    *queueURL,
-		redisAddr:   *redisAddr,
-		dbURL:       *dbURL,
-		maxMessages: *maxMessages,
-		waitTime:    *waitTime,
+		queueURL:          *queueURL,
+		redisAddr:         *redisAddr,
+		dbURL:             *dbURL,
+		maxMessages:       *maxMessages,
+		waitTime:          *waitTime,
+		visibilityTimeout: *visibilityTimeout,
+	}
+
+	if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" && !setFlags["wait"] {
+		v, err := strconv.Atoi(waitTimeStr)
+		if err != nil {
+			return cliConfig{}, fmt.Errorf("parsing SQS_WAIT_TIME %q: %w", waitTimeStr, err)
+		}
+		cfg.waitTime = v
+	}
+	if visTimeStr := env.Get("SQS_VISIBILITY_TIMEOUT", ""); visTimeStr != "" && !setFlags["visibility-timeout"] {
+		v, err := strconv.Atoi(visTimeStr)
+		if err != nil {
+			return cliConfig{}, fmt.Errorf("parsing SQS_VISIBILITY_TIMEOUT %q: %w", visTimeStr, err)
+		}
+		cfg.visibilityTimeout = v
 	}
 
 	if cfg.queueURL == "" {
@@ -135,7 +158,7 @@ func parseConfig(args []string) (cliConfig, error) {
 	return cfg, nil
 }
 
-func run(ctx context.Context, args []string) error {
+func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	cfg, err := parseConfig(args)
 	if err != nil {
 		return err
@@ -145,6 +168,17 @@ func run(ctx context.Context, args []string) error {
 		Level: env.ParseLogLevel(slog.LevelInfo),
 	}))
 	slog.SetDefault(logger)
+
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    "sparklend-indexer",
+		ServiceVersion: buildinfo.GitHash(),
+		BuildTime:      BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("initializing telemetry: %w", err)
+	}
+	defer shutdownOTEL(context.Background())
 
 	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{
 		StaticCredentialsFromEnv: true,
@@ -157,7 +191,7 @@ func run(ctx context.Context, args []string) error {
 	sqsConsumer, err := sqsAdapter.NewConsumer(awsCfg, sqsAdapter.Config{
 		QueueURL:          cfg.queueURL,
 		WaitTimeSeconds:   int32(cfg.waitTime),
-		VisibilityTimeout: 300,
+		VisibilityTimeout: int32(cfg.visibilityTimeout),
 		BaseEndpoint:      env.Get("AWS_SQS_ENDPOINT", ""),
 	}, logger)
 	if err != nil {
@@ -169,16 +203,20 @@ func run(ctx context.Context, args []string) error {
 	cacheCfg := redisAdapter.ConfigDefaults()
 	cacheCfg.Addr = cfg.redisAddr
 	cacheCfg.Password = env.Get("REDIS_PASSWORD", "")
+	// KeyPrefix is configurable for the tests that drive this binary: they cannot
+	// namespace a key the binary builds for itself, and they share one Redis.
+	cacheCfg.KeyPrefix = env.Get("REDIS_KEY_PREFIX", "stl")
 	blockCache, err := redisAdapter.NewBlockCache(cacheCfg, logger)
 	if err != nil {
 		return fmt.Errorf("creating block cache: %w", err)
 	}
+	defer blockCache.Close()
 	if err := blockCache.Ping(ctx); err != nil {
 		return fmt.Errorf("connecting to Redis: %w", err)
 	}
-	defer blockCache.Close()
 	logger.Info("Redis connected", "addr", cfg.redisAddr)
-	s3Reader := s3adapter.NewReader(awsCfg, logger)
+
+	s3Reader := s3adapter.NewReaderFromEnv(awsCfg, logger)
 	cacheReader, err := cache.NewReaderWithFallback(blockCache, s3Reader, cfg.chainID, cfg.deployEnv, cfg.s3Bucket, logger)
 	if err != nil {
 		return fmt.Errorf("creating cache reader: %w", err)
@@ -199,9 +237,9 @@ func run(ctx context.Context, args []string) error {
 	defer pool.Close()
 	logger.Info("PostgreSQL connected")
 
-	buildReg, err := buildregistry.New(ctx, pool)
+	buildReg, runID, err := writerrun.Open(ctx, pool)
 	if err != nil {
-		return fmt.Errorf("registering build: %w", err)
+		return err
 	}
 
 	logger.Info("starting sparklend position tracker",
@@ -216,50 +254,37 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating transaction manager: %w", err)
 	}
 
-	userRepo, err := postgres.NewUserRepository(pool, logger, 0)
+	userRepo, err := postgres.NewUserRepository(pool, logger, 0, runID)
 	if err != nil {
 		return fmt.Errorf("creating user repository: %w", err)
 	}
 
-	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildReg.BuildID(), 0)
+	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildReg.BuildID(), runID, 0)
 	if err != nil {
 		return fmt.Errorf("creating protocol repository: %w", err)
 	}
 
-	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 0)
+	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 0, runID)
 	if err != nil {
 		return fmt.Errorf("creating token repository: %w", err)
 	}
 
-	positionRepo, err := postgres.NewPositionRepository(pool, logger, buildReg.BuildID(), 0)
+	positionRepo, err := postgres.NewPositionRepository(pool, logger, buildReg.BuildID(), runID, 0)
 	if err != nil {
 		return fmt.Errorf("creating position repository: %w", err)
 	}
 
-	eventRepo := postgres.NewEventRepository(logger, buildReg.BuildID())
+	eventRepo := postgres.NewEventRepository(logger, buildReg.BuildID(), runID)
 
-	receiptTokenRepo, err := postgres.NewReceiptTokenRepository(pool, logger)
+	receiptTokenRepo, err := postgres.NewReceiptTokenRepository(pool, logger, runID)
 	if err != nil {
 		return fmt.Errorf("creating receipt token repository: %w", err)
 	}
 
-	debtTokenRepo, err := postgres.NewDebtTokenRepository(pool, logger)
+	debtTokenRepo, err := postgres.NewDebtTokenRepository(pool, logger, runID)
 	if err != nil {
 		return fmt.Errorf("creating debt token repository: %w", err)
 	}
-
-	// Initialize OpenTelemetry before constructing any telemetry instruments, so
-	// they bind to the configured meter provider rather than the global no-op one.
-	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    "sparklend-indexer",
-		ServiceVersion: buildReg.GitHash(),
-		BuildTime:      BuildTime,
-		Logger:         logger,
-	})
-	if err != nil {
-		return fmt.Errorf("initializing telemetry: %w", err)
-	}
-	defer shutdownOTEL(context.Background())
 
 	// Multicall client with batch-size telemetry, optionally wrapped for raw SC
 	// call archiving (VEC-81). Archiving is off unless ARCHIVE_SC_CALLS=true.
@@ -275,7 +300,7 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("creating multicall client: %w", err)
 	}
-	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "sparklend")
+	archiveWrap, _, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "sparklend")
 	if err != nil {
 		return err
 	}
@@ -308,5 +333,5 @@ func run(ctx context.Context, args []string) error {
 
 	logger.Info("sparklend position tracker started, waiting for messages...")
 
-	return lifecycle.Run(ctx, logger, service)
+	return lifecycle.RunWithTimeoutGuard(ctx, logger, onShutdownTimeout, service)
 }

@@ -8,17 +8,13 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/data_quality/schemamaster"
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// TestSchemaConformance is the gate: it migrates a fresh DB, reads every live base-table
-// column from information_schema, and fails if any governed column is unregistered or has
+// TestSchemaConformance is the gate: it reads every live base-table column from
+// information_schema, and fails if any governed column is unregistered or has
 // drifted from the register. Generalizes the hardcoded build_id/processing_version existence
 // checks in db/migrator/migrator_integration_test.go into a data-driven sweep.
 func TestSchemaConformance(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
-	defer cleanup()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -27,7 +23,7 @@ func TestSchemaConformance(t *testing.T) {
 		t.Fatalf("load register: %v", err)
 	}
 
-	rows, err := pool.Query(ctx, `
+	rows, err := sharedPool.Query(ctx, `
 		SELECT c.table_name, c.column_name, c.data_type, c.is_nullable
 		FROM information_schema.columns c
 		JOIN information_schema.tables t
@@ -71,9 +67,6 @@ func TestSchemaConformance(t *testing.T) {
 // map back to a governed raw_pipeline table. Reads the actual _sources rows from the
 // migrated DB, so a raw_pipeline table added without building or deferring it fails here.
 func TestTransformCoverageConformance(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
-	defer cleanup()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -82,7 +75,7 @@ func TestTransformCoverageConformance(t *testing.T) {
 		t.Fatalf("load register: %v", err)
 	}
 
-	rows, err := pool.Query(ctx, `SELECT source FROM transformed._sources`)
+	rows, err := sharedPool.Query(ctx, `SELECT source FROM transformed._sources`)
 	if err != nil {
 		t.Fatalf("query transformed._sources: %v", err)
 	}

@@ -86,6 +86,7 @@ kind: ConfigMap
 metadata:
   name: morpho-indexer-config
 data:
+  CHAIN_ID: "1"
   AWS_REGION: "eu-west-1"
   ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
   ENVIRONMENT: "sentinelprod"
@@ -95,10 +96,28 @@ data:
   ARCHIVE_SC_CALLS: "true"
   RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
 ---
-# curve-indexer + uniswap-v3-indexer run the shared dex-indexer binary; the DEX
-# key selects the factory. No SC-call archiving (dexbootstrap does not wire the
-# archiving decorator). SQS queue URL, DB, Redis, Alchemy key come from the
-# matching ExternalSecret.
+# base-morpho-indexer: the morpho-indexer binary on Base (chain 8453), ARCT-414.
+# The Base-specific SQS queue, Redis and raw bucket come from the matching
+# ExternalSecret; the Base raw bucket is mandatory (the worker rejects an
+# S3_BUCKET whose chain does not match CHAIN_ID).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: base-morpho-indexer-config
+data:
+  CHAIN_ID: "8453"
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://base-mainnet.g.alchemy.com/v2"
+  ENVIRONMENT: "sentinelprod"
+  DEPLOY_ENV: "prod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains, like the
+  # other Base workers (base-oracle-price-worker, base-allocation-tracker); the
+  # base-morpho-indexer pod identity's write policy is granted in ARCT-412.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+# No SC-call archiving on any DEX indexer: dexbootstrap does not wire the
+# archiving decorator, so ARCHIVE_SC_CALLS / RAW_SC_BUCKET would do nothing.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -117,6 +136,18 @@ metadata:
   name: uniswap-v3-indexer-config
 data:
   DEX: "uniswap-v3"
+  CHAIN_ID: "1"
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  ENVIRONMENT: "sentinelprod"
+  DEPLOY_ENV: "prod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: uniswap-v4-indexer-config
+data:
+  DEX: "uniswap-v4"
   CHAIN_ID: "1"
   AWS_REGION: "eu-west-1"
   ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
@@ -158,6 +189,11 @@ data:
   # is identical.
   BACKFILL_BATCH_SIZE: "100"
   BACKFILL_POLL_INTERVAL: "5s"
+  # Live path: one Alchemy attempt is capped at 10s (~41s over its 4 attempts) and
+  # 300 newHeads slots hold ~5 min at ~1 block/s, so a hung request drops nothing.
+  # Backfill keeps the client default (30s) for its batches.
+  LIVE_RPC_TIMEOUT: "10s"
+  SUBSCRIBER_BUFFER_SIZE: "300"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -189,6 +225,51 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: base-sparklend-position-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://base-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "8453"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#709 (ARCT-213).
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: optimism-sparklend-position-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://opt-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "10"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#709 (ARCT-213).
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arbitrum-sparklend-position-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://arb-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "42161"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#709 (ARCT-213).
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: avalanche-allocation-tracker-config
 data:
   AWS_REGION: "eu-west-1"
@@ -211,6 +292,77 @@ data:
   DEPLOY_ENV: "prod"
   CHAIN_ID: "8453"
   ENVIRONMENT: "sentinelprod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#383.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+# The three L2 trackers immediately below (ARCT-216) set SWEEP_BLOCKS because the 75-block
+# default is block-count based: at these chains' cadences it would re-read and
+# append every tracked position every ~19s (arbitrum) to ~150s (optimism). The
+# values normalise the sweep to ~10 minutes, matching the psm3-indexer configmaps
+# for the same chains.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: optimism-allocation-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://opt-mainnet.g.alchemy.com/v2"
+  DEPLOY_ENV: "prod"
+  CHAIN_ID: "10"
+  ENVIRONMENT: "sentinelprod"
+  SWEEP_BLOCKS: "300"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#383.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unichain-allocation-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://unichain-mainnet.g.alchemy.com/v2"
+  DEPLOY_ENV: "prod"
+  CHAIN_ID: "130"
+  ENVIRONMENT: "sentinelprod"
+  SWEEP_BLOCKS: "600"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#383.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arbitrum-allocation-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://arb-mainnet.g.alchemy.com/v2"
+  DEPLOY_ENV: "prod"
+  CHAIN_ID: "42161"
+  ENVIRONMENT: "sentinelprod"
+  SWEEP_BLOCKS: "2400"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#383.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+# Robinhood's ~100ms blocks make the 75-block default a sweep every ~7.5s;
+# 6000 holds it to the ~10 minutes the ARCT-216 chains use (ARCT-400).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: robinhood-allocation-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://robinhood-mainnet.g.alchemy.com/v2"
+  DEPLOY_ENV: "prod"
+  CHAIN_ID: "4663"
+  ENVIRONMENT: "sentinelprod"
+  SWEEP_BLOCKS: "6000"
   # Raw SC call archiving (VEC-81). Single bucket shared across chains;
   # pod identity write policy granted in infrastructure#383.
   ARCHIVE_SC_CALLS: "true"
@@ -247,6 +399,154 @@ data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "1"
+---
+# On-demand CoinGecko backfill worker (VEC-540). Same Temporal namespace and DB as
+# the 5-minute indexer; the difference is that this worker registers no schedule.
+#
+# OTEL_EXPORTER_OTLP_ENDPOINT is set explicitly: without it InitMetrics installs a
+# no-op provider and the job emits no metrics at all — do not drop it here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: offchain-price-backfill
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "1"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector-opentelemetry-collector.observability.svc.cluster.local:4317"
+---
+# On-demand one-shot VaultV2 repair worker (VEC-218) — see
+# docs/runbooks/vector-cronjobs.md. ALCHEMY_HTTP_URL is omitted: the binary
+# defaults to eth-mainnet, matching CHAIN_ID below. The raw bucket every replayed
+# row's block_version is read from is not here — it carries a random suffix and so
+# arrives via the ExternalSecret, the same way the morpho-vault-backfill gets it.
+# DEPLOY_ENV is what the startup guard checks that bucket's name against.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: morpho-v2-bootstrap
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "1"
+  AWS_REGION: "eu-west-1"
+  DEPLOY_ENV: "prod"
+---
+# On-demand Morpho vault backfill worker (VEC-218). ALCHEMY_HTTP_URL is omitted:
+# the binary defaults to eth-mainnet, matching CHAIN_ID below. The bucket is not
+# here — it carries a random suffix and so arrives via the ExternalSecret.
+#
+# OTEL_EXPORTER_OTLP_ENDPOINT below only duplicates the value this Deployment
+# already gets from otel-config — it is redundant, not load-bearing.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: morpho-vault-backfill
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "1"
+  AWS_REGION: "eu-west-1"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector-opentelemetry-collector.observability.svc.cluster.local:4317"
+---
+# On-demand block republisher (ARCT-383) — see docs/runbooks/vector-cronjobs.md.
+# AWS_SNS_TOPIC_ARN and REDIS_ADDR arrive via the ExternalSecret, the same
+# infra-config values the ethereum watcher publishes with.
+# DEPLOY_ENV is what the startup guard validates that topic's chain against.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: block-republisher
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "1"
+  # Required, not defaulted: a deployment without it would fetch another chain's
+  # blocks for its heights. The value is the ethereum watcher's own.
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  DEPLOY_ENV: "prod"
+---
+# On-demand block republisher for Arbitrum — see the ethereum one above.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arbitrum-block-republisher
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "42161"
+  # Required, not defaulted: a deployment without it would fetch another chain's
+  # blocks for its heights. The value is the arbitrum watcher's own.
+  ALCHEMY_HTTP_URL: "https://arb-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  DEPLOY_ENV: "prod"
+---
+# On-demand block republisher for Avalanche — see the ethereum one above.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: avalanche-block-republisher
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "43114"
+  # Required, not defaulted: a deployment without it would fetch another chain's
+  # blocks for its heights. The value is the avalanche watcher's own.
+  ALCHEMY_HTTP_URL: "https://avax-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  DEPLOY_ENV: "prod"
+---
+# On-demand block republisher for Base — see the ethereum one above.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: base-block-republisher
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "8453"
+  # Required, not defaulted: a deployment without it would fetch another chain's
+  # blocks for its heights. The value is the base watcher's own.
+  ALCHEMY_HTTP_URL: "https://base-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  DEPLOY_ENV: "prod"
+---
+# On-demand block republisher for Optimism — see the ethereum one above.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: optimism-block-republisher
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "10"
+  # Required, not defaulted: a deployment without it would fetch another chain's
+  # blocks for its heights. The value is the optimism watcher's own.
+  ALCHEMY_HTTP_URL: "https://opt-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  DEPLOY_ENV: "prod"
+---
+# On-demand block republisher for Unichain — see the ethereum one above.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unichain-block-republisher
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "130"
+  # Required, not defaulted: a deployment without it would fetch another chain's
+  # blocks for its heights. The value is the unichain watcher's own.
+  ALCHEMY_HTTP_URL: "https://unichain-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  DEPLOY_ENV: "prod"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -347,6 +647,11 @@ data:
   AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
   ENVIRONMENT: "sentinelprod"
   ENABLE_BACKFILL: "true"
+  # Live path: one Alchemy attempt is capped at 10s (~41s over its 4 attempts) and
+  # 300 newHeads slots hold ~10 min at ~0.5 block/s, so a hung request drops nothing.
+  # Backfill keeps the client default (30s) for its batches.
+  LIVE_RPC_TIMEOUT: "10s"
+  SUBSCRIBER_BUFFER_SIZE: "300"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -360,6 +665,11 @@ data:
   AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
   ENVIRONMENT: "sentinelprod"
   ENABLE_BACKFILL: "true"
+  # Live path: one Alchemy attempt is capped at 10s (~41s over its 4 attempts) and
+  # 300 newHeads slots hold ~10 min at ~0.5 block/s, so a hung request drops nothing.
+  # Backfill keeps the client default (30s) for its batches.
+  LIVE_RPC_TIMEOUT: "10s"
+  SUBSCRIBER_BUFFER_SIZE: "300"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -373,6 +683,11 @@ data:
   AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
   ENVIRONMENT: "sentinelprod"
   ENABLE_BACKFILL: "true"
+  # Live path: one Alchemy attempt is capped at 10s (~41s over its 4 attempts) and
+  # 300 newHeads slots hold ~5 min at ~1 block/s, so a hung request drops nothing.
+  # Backfill keeps the client default (30s) for its batches.
+  LIVE_RPC_TIMEOUT: "10s"
+  SUBSCRIBER_BUFFER_SIZE: "300"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -390,6 +705,31 @@ data:
   # let alone drain a backlog. 100 blocks every 5s = ~20 blk/s, ~5x live.
   BACKFILL_BATCH_SIZE: "100"
   BACKFILL_POLL_INTERVAL: "5s"
+  # Live path: one Alchemy attempt is capped at 10s (~41s over its 4 attempts) and
+  # 1000 newHeads slots hold ~4 min at ~4 blocks/s, so a hung request drops
+  # nothing. Backfill keeps the client default (30s) for its 100-block batches.
+  LIVE_RPC_TIMEOUT: "10s"
+  SUBSCRIBER_BUFFER_SIZE: "1000"
+---
+# This overlay does not deploy the watcher base yet; the config lands first so
+# Robinhood's ~100ms blocks never start on the 100-slot default (VEC-742).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: robinhood-watcher-config
+data:
+  CHAIN_ID: "4663"
+  ALCHEMY_HTTP_URL: "https://robinhood-mainnet.g.alchemy.com/v2"
+  ALCHEMY_WS_URL: "wss://robinhood-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  ENVIRONMENT: "sentinelprod"
+  ENABLE_BACKFILL: "true"
+  # Live path: one Alchemy attempt is capped at 10s (~41s over its 4 attempts) and
+  # 2500 newHeads slots hold ~4 min at ~10 blocks/s, so a hung request drops
+  # nothing. Backfill keeps the client default (30s) for its batches.
+  LIVE_RPC_TIMEOUT: "10s"
+  SUBSCRIBER_BUFFER_SIZE: "2500"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -479,6 +819,26 @@ data:
   OTEL_ENABLED: "true"
   OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
   OTEL_SERVICE_NAME: "stl-verify-python-api"
+  # DB pool for the API, declared here rather than left baked into the image so it
+  # can be tuned by editing config and restarting — this ConfigMap is consumed via
+  # envFrom with no hash suffix. A prime-scoped risk-capital request opens
+  # connections in proportion to positions x ALM proxies: the ceiling decides when
+  # a replica saturates, and the timeout decides what happens next — a queued
+  # caller fails fast instead of holding a worker for SQLAlchemy's unset 30s and
+  # dragging down endpoints that never touch this pool. VEC-532 bounds the fan-out
+  # itself.
+  # Held at 5 + 10 until it does: at 10 + 20 the fan-out's decompressing backends
+  # exhausted the 8 GiB TigerData primary on 2026-08-13, failing every client's
+  # queries with `out of memory` for four minutes.
+  DB_POOL_SIZE: "5"
+  DB_MAX_OVERFLOW: "10"
+  DB_POOL_TIMEOUT: "10"
+  # Recycle retires connections poisoned by a pooler incident that the app's
+  # disconnect handling misses; the statement cache must stay 0 behind a
+  # transaction-mode pooler (see app/config.py). Declared here, like the pool
+  # values above, so an operator can tune them without a rebuild.
+  DB_POOL_RECYCLE_SECONDS: "300"
+  DB_STATEMENT_CACHE_SIZE: "0"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -519,39 +879,84 @@ data:
 # CEX order book indexer — Coinbase. OKX/Kraken get their own configmaps with the
 # venue-specific EXCHANGE and SYMBOLS (OKX uses dash pairs like BTC-USDT; Kraken
 # uses slash pairs with its own asset names like XBT/USD).
+# Symbol sets mirror the staging expansion (ARCT-316/319/321, 25 Aug 2026), where
+# every entry was verified against the live venue API and has been flowing since;
+# the CORE Syrup markets need the XRP/HYPE books (VEC-652).
+# All six verified tradeable against the Coinbase products API on 2026-08-24; the
+# model's other ten tokens are not listed on Coinbase at all.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: cex-orderbook-indexer-coinbase-config
 data:
   EXCHANGE: "coinbase"
-  SYMBOLS: "BTC-USD,ETH-USD"
+  SYMBOLS: "BTC-USD,ETH-USD,XRP-USD,SOL-USD,HYPE-USD,JITOSOL-USD"
   ORDERBOOK_DEPTH: "100"
   ORDERBOOK_INTERVAL: "5s"
   ENVIRONMENT: "sentinelprod"
 ---
-# OKX uses dash-separated instrument ids with a USDT quote (no USD spot pairs);
-# BTC-USDT/ETH-USDT verified live against the OKX SPOT instruments API.
+# OKX uses dash-separated instrument ids. All six are quoted in USDT: JITOSOL has
+# no other book, so USDT keeps one quote across the set. Verified live against the
+# OKX SPOT instruments API on 2026-08-24; the model's other ten tokens are not
+# listed at all. Merging these USDT books into the model's USD depth curve ignores
+# the basis — VEC-458 owns that decision.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: cex-orderbook-indexer-okx-config
 data:
   EXCHANGE: "okx"
-  SYMBOLS: "BTC-USDT,ETH-USDT"
+  SYMBOLS: "BTC-USDT,ETH-USDT,XRP-USDT,SOL-USDT,HYPE-USDT,JITOSOL-USDT"
   ORDERBOOK_DEPTH: "100"
   ORDERBOOK_INTERVAL: "5s"
   ENVIRONMENT: "sentinelprod"
 ---
-# Kraken uses slash-separated pairs with its own asset names (XBT, not BTC);
-# XBT/USD and ETH/USD verified live against the Kraken AssetPairs "wsname" field.
+# Kraken uses slash-separated pairs with its own asset names (XBT, not BTC), so
+# each entry is the exact "wsname" string from the AssetPairs API rather than one
+# built by convention. All seven verified live on 2026-08-24 and USD-quoted, so
+# the books merge with Coinbase's without a basis adjustment. TBTC/USD is listed
+# but excluded: 621bps spread and no resting size within 2% of mid. The model's
+# remaining eight tokens are not listed on Kraken at all.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: cex-orderbook-indexer-kraken-config
 data:
   EXCHANGE: "kraken"
-  SYMBOLS: "XBT/USD,ETH/USD"
+  SYMBOLS: "XBT/USD,ETH/USD,XRP/USD,SOL/USD,HYPE/USD,JITOSOL/USD,WBTC/USD"
   ORDERBOOK_DEPTH: "100"
   ORDERBOOK_INTERVAL: "5s"
   ENVIRONMENT: "sentinelprod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: reference-capital-indexer
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  # The schedule lives in Temporal state; the worker reconciles a changed
+  # interval into it on startup, so a redeploy is enough (stl-verify/AGENTS.md).
+  REFERENCE_CAPITAL_SYNC_INTERVAL: "15m"
+  # Risk-capital root, without the /primes route the client appends itself.
+  SKY_RISK_CAPITAL_URL: "https://info-sky.blockanalitica.com/star-monitoring/risk-capital"
+  # Balance-sheet feed. Read every cycle by the indexer -- for the per-prime
+  # daily aggregates and the per-position rows the API now serves reference
+  # allocations from -- and by the reference-capital-backfill Deployment, which
+  # seeds the history the indexer cannot reach.
+  SKY_DATA_URL: "https://sky.data.blockanalitica.com/internal"
+  ENVIRONMENT: "sentinelprod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: core-model-runner
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  # The schedule lives in Temporal state; the worker reconciles a changed
+  # interval into it on startup, so a redeploy is enough (stl-verify/AGENTS.md).
+  CORE_MODEL_RUN_INTERVAL_HOURS: "24"
+  # Same value as staging; the deployment's memory limit is sized for it — raise
+  # both together (k8s/base/core-model-runner/deployment.yaml).
+  CORE_MODEL_N_MC: "10000"

@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
@@ -28,7 +29,7 @@ class AllocationRepositoryPort(Protocol):
         """Return protocol metadata used by the UI."""
         ...
 
-    async def list_primes(self) -> list[Prime]:
+    async def list_primes(self, allowed_vaults: Sequence[EthAddress] | None = None) -> list[Prime]:
         """Return all distinct primes."""
         ...
 
@@ -98,10 +99,14 @@ class AllocationRepositoryPort(Protocol):
         """
         ...
 
+    async def get_prime_vault_address(self, address: EthAddress) -> str | None:
+        """Vault address for a vault-or-proxy address, or None if unknown."""
+        ...
+
     async def list_allocation_activity(
         self,
         *,
-        prime_id: EthAddress | None = None,
+        proxy_addresses: Sequence[EthAddress] | None = None,
         chain_id: int | None = None,
         protocol_name: str | None = None,
         action_type: str | None = None,
@@ -110,14 +115,19 @@ class AllocationRepositoryPort(Protocol):
         from_timestamp: datetime | None = None,
         to_timestamp: datetime | None = None,
         limit: int = 100,
+        allowed_vaults: Sequence[EthAddress] | None = None,
     ) -> list[AllocationActivityEvent]:
-        """Return allocation activity events with optional filters."""
+        """Return allocation activity events with optional filters.
+
+        ``proxy_addresses`` is ``None`` for unscoped; an empty list matches
+        nothing and must never be read as unscoped.
+        """
         ...
 
     async def list_activity_buckets(
         self,
         *,
-        prime_id: EthAddress | None = None,
+        proxy_addresses: Sequence[EthAddress] | None = None,
         chain_id: int | None = None,
         protocol_name: str | None = None,
         action_type: str | None = None,
@@ -127,8 +137,13 @@ class AllocationRepositoryPort(Protocol):
         to_timestamp: datetime,
         bucket_seconds: float,
         limit: int = 100,
+        allowed_vaults: Sequence[EthAddress] | None = None,
     ) -> list[AllocationActivityBucket]:
-        """Return allocation activity aggregated into time buckets."""
+        """Return allocation activity aggregated into time buckets.
+
+        ``proxy_addresses`` and ``allowed_vaults`` follow
+        ``list_allocation_activity``'s contract.
+        """
         ...
 
     async def list_total_capital_buckets(
@@ -147,14 +162,28 @@ class AllocationRepositoryPort(Protocol):
         """Return the prime's latest treasury USDS balance (Total Risk Capital), or None."""
         ...
 
+    async def list_prime_proxy_addresses(self, prime_address: EthAddress) -> list[EthAddress]:
+        """Return every allocation proxy of the prime that owns ``prime_address``.
+
+        Never empty: an address with no rows resolves to itself.
+        """
+        ...
+
+    async def primary_proxy_address(self, prime_address: EthAddress) -> str | None:
+        """Return the one proxy of this prime that carries its prime-scoped rows."""
+        ...
+
     async def list_exposure_buckets(
         self,
-        prime_address: EthAddress,
+        proxy_addresses: Sequence[EthAddress],
         *,
         from_timestamp: datetime,
         to_timestamp: datetime,
         bucket_seconds: float,
         limit: int = 100,
     ) -> list[ExposureBucket]:
-        """Return priced receipt-token exposure aggregated into time buckets."""
+        """Return priced receipt-token exposure aggregated into time buckets.
+
+        Scoped to the given proxies, which the service resolves prime-wide.
+        """
         ...

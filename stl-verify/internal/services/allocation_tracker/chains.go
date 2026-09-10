@@ -50,6 +50,10 @@ var servedTrackerChains = map[string]bool{
 	"mainnet":     true, // prime-allocation-indexer (CHAIN_ID 1)
 	"avalanche-c": true, // avalanche-allocation-tracker (CHAIN_ID 43114, VEC-499)
 	"base":        true, // base-allocation-tracker (CHAIN_ID 8453, VEC-499)
+	"optimism":    true, // optimism-allocation-tracker (CHAIN_ID 10, ARCT-216)
+	"unichain":    true, // unichain-allocation-tracker (CHAIN_ID 130, ARCT-216)
+	"arbitrum":    true, // arbitrum-allocation-tracker (CHAIN_ID 42161, ARCT-216)
+	"robinhood":   true, // robinhood-allocation-tracker (CHAIN_ID 4663, grove scope)
 }
 
 // acknowledgedUnservedByTrackerChains lists vocabulary-known contract chains (in
@@ -58,11 +62,7 @@ var servedTrackerChains = map[string]bool{
 // in the same PR that deploys its tracker; the staleness rule in validateContractChainsServed
 // fails CI if a chain ends up both served and acknowledged. Vocabulary-UNKNOWN unserved chains
 // live in acknowledgedUnservedChains, not here (see the partition note above).
-var acknowledgedUnservedByTrackerChains = map[string]bool{
-	"arbitrum": true, // no allocation-tracker deployed yet
-	"optimism": true, // no allocation-tracker deployed yet
-	"unichain": true, // no allocation-tracker deployed yet
-}
+var acknowledgedUnservedByTrackerChains = map[string]bool{}
 
 // allAcknowledgedUnservedChains is the set of chains it is acceptable for no tracker to serve:
 // the union of the vocabulary-unknown acknowledgements (acknowledgedUnservedChains, unserved a

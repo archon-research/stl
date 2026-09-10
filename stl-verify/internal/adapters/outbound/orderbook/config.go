@@ -31,6 +31,11 @@ type Config struct {
 	// behind, so this need not be large.
 	OutputBuffer int
 
+	// StaleReconnect is how long a connection's books may go without any update
+	// before it is closed for a re-dial; see the stale watchdog in runConnection
+	// for the why.
+	StaleReconnect time.Duration
+
 	// MeterProvider supplies the provider's OpenTelemetry metrics. Defaults to
 	// the global provider (a no-op until telemetry.InitMetrics runs).
 	MeterProvider metric.MeterProvider
@@ -44,6 +49,7 @@ func DefaultConfig() Config {
 		MaxBackoff:     60 * time.Second,
 		BackoffFactor:  2.0,
 		OutputBuffer:   256,
+		StaleReconnect: 90 * time.Second,
 	}
 }
 
@@ -63,6 +69,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.OutputBuffer <= 0 {
 		c.OutputBuffer = d.OutputBuffer
+	}
+	if c.StaleReconnect <= 0 {
+		c.StaleReconnect = d.StaleReconnect
 	}
 	if c.MeterProvider == nil {
 		c.MeterProvider = otel.GetMeterProvider()

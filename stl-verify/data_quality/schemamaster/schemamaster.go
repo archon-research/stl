@@ -152,7 +152,26 @@ func Load() (*Register, error) {
 	if err := json.Unmarshal(configBytes, &r); err != nil {
 		return nil, fmt.Errorf("parsing schema_master.json: %w", err)
 	}
+	for name, meta := range r.Tables {
+		if _, ok := tableTypes[meta.Type]; !ok {
+			return nil, fmt.Errorf("table %q: unknown type %q (want one of raw_pipeline, config, dimension, infrastructure, derived, model_output, or \"\" for untyped)", name, meta.Type)
+		}
+	}
 	return &r, nil
+}
+
+// tableTypes is the closed TableMeta.Type vocabulary. Without this a typo
+// ("raw_pipelin", "derivedd") reads as untyped, which silently skips the
+// required-key pass and drops the table out of transform coverage — the two
+// checks gated on Type — instead of failing.
+var tableTypes = map[string]struct{}{
+	"":               {}, // untyped: pending classification, see README
+	"raw_pipeline":   {},
+	"config":         {},
+	"dimension":      {},
+	"infrastructure": {},
+	"derived":        {},
+	"model_output":   {},
 }
 
 // Column is a live column as reported by information_schema.

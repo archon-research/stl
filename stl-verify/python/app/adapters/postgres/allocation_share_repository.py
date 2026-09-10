@@ -25,7 +25,10 @@ logger = get_logger(__name__)
 #   * Pinned balance: most-recent ``allocation_position`` row at or strictly
 #     before the supply row's ``(block_number, block_version)`` — never *after*
 #     — so a balance from a later block is never paired with an earlier supply
-#     when ``totalSupply()`` failed on the newer block.
+#     when ``totalSupply()`` failed on the newer block. "Most-recent" is the
+#     seven-term newer-wins order every allocation latest-row read shares, with
+#     ``created_at`` standing in for the cache's ``block_timestamp``; rationale on
+#     ``allocation_position_repository._RECEIPT_TOKEN_POSITIONS_SQL``.
 #   * 14d ``created_at`` bound: perf guardrail, not correctness.
 #     ``allocation_position`` is a TimescaleDB columnstore hypertable and
 #     ``LIMIT 1`` over the segmentby-indexed ``(chain_id, token_id,
@@ -71,8 +74,9 @@ LEFT JOIN LATERAL (
       AND (ap.block_number < ls.block_number
            OR (ap.block_number = ls.block_number
                AND ap.block_version = ls.block_version))
-    ORDER BY ap.block_number DESC, ap.block_version DESC,
-             ap.processing_version DESC, ap.log_index DESC
+    ORDER BY ap.block_number DESC, ap.block_version DESC, ap.created_at DESC,
+             ap.log_index DESC, ap.direction DESC, ap.tx_hash DESC,
+             ap.processing_version DESC
     LIMIT 1
 ) pb ON true
 """

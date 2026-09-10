@@ -12,11 +12,11 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/coingecko"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/services/offchain_price_fetcher"
 )
 
@@ -32,9 +32,8 @@ func init() {
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
-	if err := temporal.RunCronjob(ctx, temporal.BuildMeta{
+	err := temporal.RunCronjob(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporal.CronjobConfig{
 		Name:            "offchain-price-indexer",
@@ -42,7 +41,9 @@ func main() {
 		IntervalDefault: "5m",
 		OpenDatabase:    postgres.PoolOpener(postgres.DefaultDBConfig(env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"))),
 		Setup:           setupRunner,
-	}); err != nil {
+	})
+	cancel()
+	if err != nil {
 		slog.Error("fatal", "error", err)
 		os.Exit(1)
 	}
@@ -59,9 +60,9 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 		return nil, err
 	}
 
-	buildReg, err := buildregistry.New(ctx, deps.Pool)
+	buildReg, runID, err := writerrun.Open(ctx, deps.Pool)
 	if err != nil {
-		return nil, fmt.Errorf("registering build: %w", err)
+		return nil, err
 	}
 
 	provider, err := coingecko.NewClient(coingecko.ClientConfig{
@@ -73,7 +74,7 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 		return nil, fmt.Errorf("creating coingecko provider: %w", err)
 	}
 
-	priceRepo, err := postgres.NewPriceRepository(deps.Pool, deps.Logger, buildReg.BuildID(), 0)
+	priceRepo, err := postgres.NewPriceRepository(deps.Pool, deps.Logger, buildReg.BuildID(), runID, 0)
 	if err != nil {
 		return nil, fmt.Errorf("creating price repository: %w", err)
 	}

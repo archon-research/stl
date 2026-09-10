@@ -20,14 +20,30 @@ import (
 // fakeExchange is a minimal exchangeFeed for feed tests. Frames are
 // {"symbol","snapshot","price","size"} JSON objects applied to the bid side.
 type fakeExchange struct {
-	url string
+	url      string
+	instrs   map[string]bool // tradeable set; nil means fakeInstruments
+	instrErr error
 
 	mu     sync.Mutex
 	groups [][]string // symbol groups passed to subscribeMessages
 }
 
+// fakeInstruments is the fake venue's tradeable set: the symbols the feed tests
+// subscribe to, so startup validation passes without each test declaring them.
+var fakeInstruments = symbolSet([]string{"X", "BTC-USD"})
+
 func (e *fakeExchange) name() string     { return "fake" }
 func (e *fakeExchange) endpoint() string { return e.url }
+
+func (e *fakeExchange) instruments(context.Context) (map[string]bool, error) {
+	if e.instrErr != nil {
+		return nil, e.instrErr
+	}
+	if e.instrs != nil {
+		return e.instrs, nil
+	}
+	return fakeInstruments, nil
+}
 
 // normalizeSymbol is permissive: it only upper-cases, so the feed test's "X"
 // symbol still passes.
@@ -280,6 +296,146 @@ func TestWatchDedupsNormalizedSymbols(t *testing.T) {
 	groups := ex.subscribedGroups()
 	if len(groups) != 1 || len(groups[0]) != 1 || groups[0][0] != "BTC-USD" {
 		t.Fatalf("subscribed groups = %v, want one group with the single deduped symbol BTC-USD", groups)
+	}
+}
+
+// TestWatchRejectsUnknownSymbolBeforeConnecting: a misspelled symbol must fail
+// the worker at startup rather than dial and then silently never sync.
+func TestWatchRejectsUnknownSymbolBeforeConnecting(t *testing.T) {
+	var conns atomic.Int32
+	srv := newWSTestServer(t, func(conn *websocket.Conn) {
+		conns.Add(1)
+		keepOpen(conn)
+	})
+	p := newTestFeedProvider(t, testConfig(), &fakeExchange{url: srv.url}, 10)
+
+	_, err := p.Watch(t.Context(), []string{"X", "NOPE"})
+	if err == nil {
+		t.Fatal("expected Watch to reject a symbol the venue does not trade")
+	}
+	if !strings.Contains(err.Error(), "NOPE") {
+		t.Errorf("error %q does not name the bad symbol", err)
+	}
+	if got := conns.Load(); got != 0 {
+		t.Errorf("connections opened = %d, want 0 before validation passes", got)
+	}
+}
+
+// TestFeedProviderReconnectsOnSilentlyStaleFeed: a venue that keeps the socket
+// alive (pongs/heartbeats) but stops sending book updates must be dropped and
+// re-dialed once StaleReconnect elapses, instead of waiting for the server to
+// close (Kraken restart drain, VEC-542). A reconnect is observed as a second
+// server-side connection delivering a fresh snapshot.
+func TestFeedProviderReconnectsOnSilentlyStaleFeed(t *testing.T) {
+	var conns atomic.Int32
+	srv := newWSTestServer(t, func(conn *websocket.Conn) {
+		conns.Add(1)
+		sendText(t, conn, `{"symbol":"X","snapshot":true,"price":100,"size":1}`)
+		keepOpen(conn) // socket stays alive; no further book updates
+	})
+
+	cfg := testConfig()
+	cfg.StaleReconnect = 50 * time.Millisecond
+	p := newTestFeedProvider(t, cfg, &fakeExchange{url: srv.url}, 10)
+
+	ch, err := p.Watch(t.Context(), []string{"X"})
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+
+	receiveWithin(t, ch, 2*time.Second) // first connection's snapshot
+	// Only a watchdog-triggered reconnect produces a second snapshot: the server
+	// never closes the connection on its own.
+	u := receiveWithin(t, ch, 2*time.Second)
+	if !u.IsSnapshot {
+		t.Error("update after a stale reconnect should be a fresh snapshot")
+	}
+	if got := conns.Load(); got < 2 {
+		t.Errorf("server saw %d connections, want >= 2 (stale connection re-dialed)", got)
+	}
+}
+
+// TestFeedProviderReconnectsWhenConnectionNeverProducesABook: the stale window
+// starts at connect time, so a venue that accepts the subscription but never
+// sends a single book frame is also re-dialed (the read deadline never fires
+// for it: pong replies keep resetting it).
+func TestFeedProviderReconnectsWhenConnectionNeverProducesABook(t *testing.T) {
+	var conns atomic.Int32
+	srv := newWSTestServer(t, func(conn *websocket.Conn) {
+		conns.Add(1)
+		keepOpen(conn) // subscribe accepted; no frames ever sent
+	})
+
+	cfg := testConfig()
+	cfg.StaleReconnect = 50 * time.Millisecond
+	p := newTestFeedProvider(t, cfg, &fakeExchange{url: srv.url}, 10)
+
+	if _, err := p.Watch(t.Context(), []string{"X"}); err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+
+	deadline := time.After(2 * time.Second)
+	for conns.Load() < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("server saw %d connections, want >= 2 (never-synced connection re-dialed)", conns.Load())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// TestRunConnectionReturnsStaleFeedError: a watchdog-triggered close must
+// surface as errStaleFeed, not a generic transport error, so the reconnect
+// metric can label it reason="stale_feed" and operators can tell a silently
+// dead venue from ordinary connection churn.
+func TestRunConnectionReturnsStaleFeedError(t *testing.T) {
+	srv := newWSTestServer(t, func(conn *websocket.Conn) {
+		sendText(t, conn, `{"symbol":"X","snapshot":true,"price":100,"size":1}`)
+		keepOpen(conn)
+	})
+
+	cfg := testConfig()
+	cfg.StaleReconnect = 50 * time.Millisecond
+	p := newTestFeedProvider(t, cfg, &fakeExchange{url: srv.url}, 10)
+
+	out := make(chan entity.OrderbookUpdate, 4)
+	err := p.runConnection(t.Context(), []string{"X"}, out, func() {})
+	if !errors.Is(err, errStaleFeed) {
+		t.Errorf("runConnection error = %v, want errStaleFeed", err)
+	}
+}
+
+// TestFeedProviderStaysConnectedWhileUpdatesFlow: book updates arriving well
+// within StaleReconnect must not trigger watchdog reconnects.
+func TestFeedProviderStaysConnectedWhileUpdatesFlow(t *testing.T) {
+	var conns atomic.Int32
+	srv := newWSTestServer(t, func(conn *websocket.Conn) {
+		conns.Add(1)
+		sendText(t, conn, `{"symbol":"X","snapshot":true,"price":100,"size":1}`)
+		for range 20 {
+			time.Sleep(25 * time.Millisecond)
+			sendText(t, conn, `{"symbol":"X","snapshot":false,"price":101,"size":2}`)
+		}
+		keepOpen(conn)
+	})
+
+	cfg := testConfig()
+	// Generous threshold: the send loop covers ~500ms, so even a long scheduler
+	// stall between sends cannot legitimately trip the watchdog mid-test.
+	cfg.StaleReconnect = 2 * time.Second
+	p := newTestFeedProvider(t, cfg, &fakeExchange{url: srv.url}, 10)
+
+	ch, err := p.Watch(t.Context(), []string{"X"})
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+
+	// Drain updates for the full send window (~500ms of 25ms-spaced updates).
+	for range 21 {
+		receiveWithin(t, ch, 2*time.Second)
+	}
+	if got := conns.Load(); got != 1 {
+		t.Errorf("server saw %d connections, want 1 (no spurious stale reconnects)", got)
 	}
 }
 

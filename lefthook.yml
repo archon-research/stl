@@ -3,11 +3,16 @@
 # Install: make install-hooks or lefthook install
 # Run manually: lefthook run pre-commit
 
-# Use doublestar glob matcher for standard recursive behavior
-glob_matcher: doublestar
+# Globs are matched with gobwas/glob compiled without separators, so `*` spans
+# `/` and there is no distinct `**`. Write `dir/**.ext` to mean "any depth";
+# `dir/**/*.ext` silently skips files sitting directly in dir/.
 
+# Every `extends` path -- including those inside an extended file -- is resolved
+# against the repo root, so they all have to live here to be spelled correctly.
 extends:
   - stl-verify/lefthook.yml
+  - stl-verify/python/lefthook.yml
+  - stl-verify/ts/lefthook.yml
 
 # Root-level generic checks
 pre-commit:
@@ -17,10 +22,26 @@ pre-commit:
   commands:
     # Root-level generic file checks
     trailing-whitespace:
-      glob: "**/*.{yml,yaml,json,md,sh}"
+      glob: "**/*.{yml,yaml,json,sh}"
       exclude: '(stl-verify|lefthook).*'
       stage_fixed: true
       run: perl -i -pe 's/[^\S\n]+$//' {staged_files}
+
+    # Markdown is split out because its hard line break *is* two trailing
+    # spaces, so a blanket strip silently deletes intentional formatting — it
+    # did exactly that to every ADR metadata block, leaving those headers to
+    # render as one run-on line. Strip as usual, but keep a deliberate
+    # two-space break on a non-blank line, and normalise three or more down to
+    # two. Same rule as pre-commit's --markdown-linebreak-ext=md. The
+    # replacement is written \x20\x20 rather than as literal spaces so what it
+    # produces cannot itself be mangled by a whitespace-trimming editor, which
+    # is the bug this hook had.
+    trailing-whitespace-markdown:
+      glob: "**/*.md"
+      exclude: '(stl-verify|lefthook).*'
+      stage_fixed: true
+      run: |
+        perl -i -pe 'if (/\S/ && / {2}$/) { s/[^\S\n]+$/\x20\x20/ } else { s/[^\S\n]+$// }' {staged_files}
 
     end-of-file-fixer:
       glob: "**/*.{yml,yaml,json,md,sh}"

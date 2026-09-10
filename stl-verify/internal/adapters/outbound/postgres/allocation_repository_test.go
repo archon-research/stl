@@ -220,15 +220,98 @@ func TestBuildInsertArgs_UnderlyingValueUsesAssetDecimals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildInsertArgs: %v", err)
 	}
-	underlying := args[14].(pgtype.Numeric) // $15
+	underlying := args[15].(pgtype.Numeric) // $16
 	if !underlying.Valid {
 		t.Fatal("underlying_value must be non-NULL")
 	}
 	if underlying.Exp != -6 {
 		t.Fatalf("underlying_value Exp = %d, want -6 (asset decimals, not share decimals)", underlying.Exp)
 	}
-	if got := args[15].(*int64); got == nil || *got != 77 { // $16
+	if got := args[16].(*int64); got == nil || *got != 77 { // $17
 		t.Fatalf("underlying_token_id = %v, want 77", got)
+	}
+}
+
+func TestBuildInsertArgs_TransferParties(t *testing.T) {
+	proxy := common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
+	counterparty := common.HexToAddress("0x9999999999999999999999999999999999999999")
+	zero := common.Address{}
+	txHash := "0xda50e73f9d4722402ae4ec6e506c3726a78fc5f6146b4957bfadc2c1fffc8f8c"
+
+	newPos := func(direction string, from, to *common.Address, tx string) *entity.AllocationPosition {
+		return &entity.AllocationPosition{
+			ChainID:       1,
+			TokenAddress:  common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
+			TokenDecimals: 6,
+			ProxyAddress:  proxy,
+			Balance:       big.NewInt(1),
+			TxHash:        tx,
+			TxAmount:      big.NewInt(1),
+			Direction:     direction,
+			FromAddress:   from,
+			ToAddress:     to,
+		}
+	}
+
+	tests := []struct {
+		name             string
+		pos              *entity.AllocationPosition
+		wantFrom, wantTo []byte
+	}{
+		{
+			name:     "inbound transfer stores both sides as decoded",
+			pos:      newPos("in", &counterparty, &proxy, txHash),
+			wantFrom: counterparty.Bytes(),
+			wantTo:   proxy.Bytes(),
+		},
+		{
+			name:     "outbound transfer stores both sides as decoded",
+			pos:      newPos("out", &proxy, &counterparty, txHash),
+			wantFrom: proxy.Bytes(),
+			wantTo:   counterparty.Bytes(),
+		},
+		{
+			name:     "mint stores 20 zero bytes, not NULL",
+			pos:      newPos("in", &zero, &proxy, txHash),
+			wantFrom: make([]byte, common.AddressLength),
+			wantTo:   proxy.Bytes(),
+		},
+		{
+			name:     "burn stores 20 zero bytes, not NULL",
+			pos:      newPos("out", &proxy, &zero, txHash),
+			wantFrom: proxy.Bytes(),
+			wantTo:   make([]byte, common.AddressLength),
+		},
+		{
+			name:     "sweep row stores NULL on both",
+			pos:      newPos("sweep", nil, nil, ""),
+			wantFrom: nil,
+			wantTo:   nil,
+		},
+	}
+
+	r := &AllocationRepository{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, args, err := r.buildInsertArgs(tt.pos, 1, nil)
+			if err != nil {
+				t.Fatalf("buildInsertArgs: %v", err)
+			}
+			gotFrom, ok := args[17].([]byte) // $18
+			if !ok {
+				t.Fatalf("expected args[17] to be []byte, got %T", args[17])
+			}
+			gotTo, ok := args[18].([]byte) // $19
+			if !ok {
+				t.Fatalf("expected args[18] to be []byte, got %T", args[18])
+			}
+			if !bytes.Equal(gotFrom, tt.wantFrom) {
+				t.Errorf("from_address = %x, want %x", gotFrom, tt.wantFrom)
+			}
+			if !bytes.Equal(gotTo, tt.wantTo) {
+				t.Errorf("to_address = %x, want %x", gotTo, tt.wantTo)
+			}
+		})
 	}
 }
 
@@ -245,10 +328,10 @@ func TestBuildInsertArgs_NilUnderlyingWritesBothNull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildInsertArgs: %v", err)
 	}
-	if args[14].(pgtype.Numeric).Valid {
+	if args[15].(pgtype.Numeric).Valid {
 		t.Fatal("underlying_value must be NULL when no valuation")
 	}
-	if args[15].(*int64) != nil {
+	if args[16].(*int64) != nil {
 		t.Fatal("underlying_token_id must be NULL when no valuation")
 	}
 }

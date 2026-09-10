@@ -1,9 +1,12 @@
 package orderbook
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -22,6 +25,12 @@ const (
 	// response names intentionally differ, so they are pinned here together.
 	coinbaseSubscribeChannel = "level2"
 	coinbaseDataChannel      = "l2_data"
+
+	coinbaseRESTBase     = "https://api.coinbase.com"
+	coinbaseProductsPath = "/api/v3/brokerage/market/products"
+	// coinbaseStatusOnline is the only product status that trades; "delisted"
+	// products stay in the listing.
+	coinbaseStatusOnline = "online"
 )
 
 // NewCoinbaseProvider creates a provider that streams L2 books from Coinbase
@@ -36,10 +45,12 @@ const (
 //
 // Docs: https://docs.cdp.coinbase.com/coinbase-app/advanced-trade-apis/websocket/websocket-channels
 func NewCoinbaseProvider(cfg Config) (outbound.OrderbookProvider, error) {
-	return newFeedProvider(cfg, &coinbaseExchange{}, coinbaseMaxSymbols)
+	return newFeedProvider(cfg, &coinbaseExchange{restBase: coinbaseRESTBase}, coinbaseMaxSymbols)
 }
 
-type coinbaseExchange struct{}
+type coinbaseExchange struct {
+	restBase string
+}
 
 func (e *coinbaseExchange) name() string     { return exchangeCoinbase }
 func (e *coinbaseExchange) endpoint() string { return coinbaseWSBase }
@@ -47,6 +58,55 @@ func (e *coinbaseExchange) endpoint() string { return coinbaseWSBase }
 func (e *coinbaseExchange) normalizeSymbol(s string) (string, error) {
 	return normalizeSeparatedPair(s, "-")
 }
+
+// instruments lists Coinbase spot products by product_id, following
+// pagination.next_cursor until has_next is false: the endpoint returns every
+// product in one page today, but the contract paginates, and a product dropped
+// off an unfetched page would falsely reject a valid config at startup. A
+// product carries four independent kill switches (status, trading_disabled,
+// is_disabled, cancel_only), all of which must be clear for it to trade;
+// cancel_only forbids new orders (a halt/delisting state), unlike limit_only
+// and post_only, which restrict order types but keep the market trading.
+func (e *coinbaseExchange) instruments(ctx context.Context) (map[string]bool, error) {
+	tradeable := make(map[string]bool)
+	cursor := ""
+	for {
+		var resp struct {
+			Products []struct {
+				ProductID       string `json:"product_id"`
+				Status          string `json:"status"`
+				TradingDisabled bool   `json:"trading_disabled"`
+				IsDisabled      bool   `json:"is_disabled"`
+				CancelOnly      bool   `json:"cancel_only"`
+			} `json:"products"`
+			Pagination struct {
+				NextCursor string `json:"next_cursor"`
+				HasNext    bool   `json:"has_next"`
+			} `json:"pagination"`
+		}
+		reqURL := e.restBase + coinbaseProductsPath + "?product_type=SPOT"
+		if cursor != "" {
+			reqURL += "&cursor=" + url.QueryEscape(cursor)
+		}
+		if err := fetchJSON(ctx, reqURL, &resp); err != nil {
+			return nil, err
+		}
+		for _, p := range resp.Products {
+			if p.Status == coinbaseStatusOnline && !p.TradingDisabled && !p.IsDisabled && !p.CancelOnly {
+				tradeable[strings.ToUpper(p.ProductID)] = true
+			}
+		}
+		if !resp.Pagination.HasNext {
+			return tradeable, nil
+		}
+		// A cursor that does not advance would refetch the same page forever.
+		if resp.Pagination.NextCursor == "" || resp.Pagination.NextCursor == cursor {
+			return nil, fmt.Errorf("coinbase products: has_next with unusable cursor %q", resp.Pagination.NextCursor)
+		}
+		cursor = resp.Pagination.NextCursor
+	}
+}
+
 func (e *coinbaseExchange) newHandler(group []string, logger *slog.Logger) frameHandler {
 	return &coinbaseHandler{
 		books:        newBookSet(exchangeCoinbase),

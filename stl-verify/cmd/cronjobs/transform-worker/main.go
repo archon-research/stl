@@ -18,23 +18,24 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/services/transform_worker"
 )
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
 	// Require DATABASE_URL rather than default to localhost: a deployed worker that
 	// silently connected to a local (empty) database would report healthy while
 	// materializing nothing.
 	dbURL, err := env.Require("DATABASE_URL")
 	if err != nil {
+		cancel()
 		slog.Error("transform-worker startup failed: missing configuration", "error", err)
 		os.Exit(1)
 	}
 
-	if err := temporal.RunCronjob(ctx, temporal.BuildMeta{
+	err = temporal.RunCronjob(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporal.CronjobConfig{
 		Name:              env.Get("SERVICE_NAME", "transform-worker"),
@@ -43,7 +44,9 @@ func main() {
 		IntervalOffsetEnv: "TRANSFORM_SCHEDULE_OFFSET",
 		OpenDatabase:      postgres.PoolOpener(postgres.DefaultDBConfig(dbURL)),
 		Setup:             setupRunner,
-	}); err != nil {
+	})
+	cancel()
+	if err != nil {
 		slog.Error("transform-worker cronjob exited with error", "error", err)
 		os.Exit(1)
 	}
@@ -60,7 +63,11 @@ func init() {
 	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
 }
 
-func setupRunner(_ context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
+func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
+	if _, _, err := writerrun.Open(ctx, deps.Pool); err != nil {
+		return nil, err
+	}
+
 	telemetry, err := transform_worker.NewTelemetry()
 	if err != nil {
 		return nil, fmt.Errorf("creating transform telemetry: %w", err)

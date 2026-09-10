@@ -25,6 +25,23 @@ const (
 	MorphoEventVaultAccrueInterest MorphoEventType = "VaultAccrueInterest"
 )
 
+// Morpho VaultV2 adapter / cap / fee events (structured tracking).
+const (
+	MorphoEventVaultAddAdapter                 MorphoEventType = "VaultAddAdapter"
+	MorphoEventVaultRemoveAdapter              MorphoEventType = "VaultRemoveAdapter"
+	MorphoEventVaultAllocate                   MorphoEventType = "VaultAllocate"
+	MorphoEventVaultDeallocate                 MorphoEventType = "VaultDeallocate"
+	MorphoEventVaultForceDeallocate            MorphoEventType = "VaultForceDeallocate"
+	MorphoEventVaultIncreaseAbsoluteCap        MorphoEventType = "VaultIncreaseAbsoluteCap"
+	MorphoEventVaultDecreaseAbsoluteCap        MorphoEventType = "VaultDecreaseAbsoluteCap"
+	MorphoEventVaultIncreaseRelativeCap        MorphoEventType = "VaultIncreaseRelativeCap"
+	MorphoEventVaultDecreaseRelativeCap        MorphoEventType = "VaultDecreaseRelativeCap"
+	MorphoEventVaultSetPerformanceFee          MorphoEventType = "VaultSetPerformanceFee"
+	MorphoEventVaultSetManagementFee           MorphoEventType = "VaultSetManagementFee"
+	MorphoEventVaultSetPerformanceFeeRecipient MorphoEventType = "VaultSetPerformanceFeeRecipient"
+	MorphoEventVaultSetManagementFeeRecipient  MorphoEventType = "VaultSetManagementFeeRecipient"
+)
+
 var validMorphoEventTypes = map[MorphoEventType]bool{
 	MorphoEventCreateMarket:        true,
 	MorphoEventSupply:              true,
@@ -40,6 +57,20 @@ var validMorphoEventTypes = map[MorphoEventType]bool{
 	MorphoEventVaultWithdraw:       true,
 	MorphoEventVaultTransfer:       true,
 	MorphoEventVaultAccrueInterest: true,
+
+	MorphoEventVaultAddAdapter:                 true,
+	MorphoEventVaultRemoveAdapter:              true,
+	MorphoEventVaultAllocate:                   true,
+	MorphoEventVaultDeallocate:                 true,
+	MorphoEventVaultForceDeallocate:            true,
+	MorphoEventVaultIncreaseAbsoluteCap:        true,
+	MorphoEventVaultDecreaseAbsoluteCap:        true,
+	MorphoEventVaultIncreaseRelativeCap:        true,
+	MorphoEventVaultDecreaseRelativeCap:        true,
+	MorphoEventVaultSetPerformanceFee:          true,
+	MorphoEventVaultSetManagementFee:           true,
+	MorphoEventVaultSetPerformanceFeeRecipient: true,
+	MorphoEventVaultSetManagementFeeRecipient:  true,
 }
 
 // IsValid returns true if the MorphoEventType is a known valid type.

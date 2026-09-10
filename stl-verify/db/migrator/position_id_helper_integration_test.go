@@ -6,8 +6,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-
-	"github.com/archon-research/stl/stl-verify/db/migrator"
 )
 
 // Native instrument keys (the VEC-412 bridge form): the instrument's own globally-unique id, never a
@@ -25,11 +23,8 @@ const (
 // Every per-protocol materializer depends on this helper, so the contract is pinned here.
 func TestPositionIdHelper(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := setupPostgres(ctx, t)
+	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
-	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
-		t.Fatalf("migrations: %v", err)
-	}
 
 	// Chain + protocol present -> the canonical string per the spec.
 	var key string

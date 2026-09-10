@@ -11,12 +11,12 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	psm3Adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
@@ -28,6 +28,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/services/psm3"
 )
 
@@ -44,7 +45,6 @@ func init() {
 
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -53,7 +53,9 @@ func main() {
 		cancel()
 	}()
 
-	if err := run(ctx, os.Args[1:]); err != nil {
+	err := run(ctx, os.Args[1:], lifecycle.ForceExitAfter(lifecycle.ShutdownTailBudget))
+	cancel()
+	if err != nil {
 		slog.Error("psm3-indexer exited with error", "error", err)
 		os.Exit(1)
 	}
@@ -61,7 +63,7 @@ func main() {
 
 // run is the entry point for the psm3-indexer.
 // It is extracted from main() to allow integration testing.
-func run(ctx context.Context, args []string) error {
+func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 	fs := flag.NewFlagSet("psm3-indexer", flag.ContinueOnError)
 	dbURL := fs.String("db", env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"), "PostgreSQL connection string")
 	rpcURL := fs.String("rpc", env.Get("ETH_RPC_URL", ""), "Ethereum JSON-RPC endpoint (e.g. https://base-mainnet.g.alchemy.com/v2/<key>)")
@@ -78,12 +80,21 @@ func run(ctx context.Context, args []string) error {
 	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
 
 	if *rpcURL == "" {
-		// Fallback: compose from ALCHEMY_HTTP_URL + ALCHEMY_API_KEY env vars.
+		// Fallback: compose from ALCHEMY_HTTP_URL + ALCHEMY_API_KEY env vars. Unlike
+		// the mainnet-only workers there is no default base URL, because psm3 runs on
+		// four chains and a mainnet default would silently index the wrong one.
 		alchemyHTTPURL := env.Get("ALCHEMY_HTTP_URL", "")
 		if alchemyHTTPURL == "" {
 			return fmt.Errorf("RPC endpoint not provided (use -rpc flag, ETH_RPC_URL or ALCHEMY_HTTP_URL+ALCHEMY_API_KEY env vars)")
 		}
-		*rpcURL = fmt.Sprintf("%s/%s", alchemyHTTPURL, env.Get("ALCHEMY_API_KEY", ""))
+		// The key is required for the same reason prime-debt-indexer requires it: an
+		// empty key composes a URL ending in "/" that dials fine and then 401s on
+		// every call, which is indistinguishable from an RPC outage.
+		alchemyAPIKey := env.Get("ALCHEMY_API_KEY", "")
+		if alchemyAPIKey == "" {
+			return fmt.Errorf("ALCHEMY_API_KEY is required when composing the RPC endpoint from ALCHEMY_HTTP_URL")
+		}
+		*rpcURL = fmt.Sprintf("%s/%s", strings.TrimRight(alchemyHTTPURL, "/"), alchemyAPIKey)
 	}
 
 	if *queueURL == "" {
@@ -132,6 +143,17 @@ func run(ctx context.Context, args []string) error {
 	}))
 	slog.SetDefault(logger)
 
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    "psm3-indexer",
+		ServiceVersion: buildinfo.GitHash(),
+		BuildTime:      BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("init telemetry: %w", err)
+	}
+	defer shutdownOTEL(context.Background())
+
 	// Per-chain PSM3 addresses, cross-checked against axis-synome so the two
 	// registries cannot drift silently.
 	psm3Cfg, err := psm3Adapter.PSM3ConfigForChain(chainID)
@@ -166,16 +188,16 @@ func run(ctx context.Context, args []string) error {
 	defer sqsConsumer.Close()
 
 	// PostgreSQL
-	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(*dbURL))
+	pool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(*dbURL))
 	if err != nil {
 		return fmt.Errorf("database: %w", err)
 	}
 	defer pool.Close()
 	logger.Info("PostgreSQL connected")
 
-	buildReg, err := buildregistry.New(ctx, pool)
+	buildReg, runID, err := writerrun.Open(ctx, pool)
 	if err != nil {
-		return fmt.Errorf("registering build: %w", err)
+		return err
 	}
 
 	logger.Info("starting psm3-indexer",
@@ -185,18 +207,6 @@ func run(ctx context.Context, args []string) error {
 		"chainID", chainID,
 		"psm3", psm3Cfg.PSM3.Hex(),
 	)
-
-	// OpenTelemetry
-	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    "psm3-indexer",
-		ServiceVersion: buildReg.GitHash(),
-		BuildTime:      BuildTime,
-		Logger:         logger,
-	})
-	if err != nil {
-		return fmt.Errorf("init telemetry: %w", err)
-	}
-	defer shutdownOTEL(context.Background())
 
 	// Ethereum JSON-RPC client
 	ethClient, err := rpchttp.DialEthereum(ctx, *rpcURL)
@@ -227,7 +237,7 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("tx manager: %w", err)
 	}
-	reservesRepo := postgres.NewPSM3ReservesRepository(txm, logger, buildReg.BuildID())
+	reservesRepo := postgres.NewPSM3ReservesRepository(txm, logger, buildReg.BuildID(), runID)
 
 	// PSM3 service telemetry (emits psm3_* metrics labelled by chain)
 	svcTelemetry, err := psm3.NewTelemetry(chainName)
@@ -241,7 +251,7 @@ func run(ctx context.Context, args []string) error {
 			SweepEveryNBlocks: *sweepBlocks,
 			ChainID:           chainID,
 			PSM3Address:       psm3Cfg.PSM3,
-			MaxMessages:       10,
+			MaxMessages:       1,
 			PollInterval:      100 * time.Millisecond,
 			Logger:            logger,
 			Telemetry:         svcTelemetry,
@@ -260,5 +270,5 @@ func run(ctx context.Context, args []string) error {
 		"chainID", chainID,
 	)
 
-	return lifecycle.Run(ctx, logger, svc)
+	return lifecycle.RunWithTimeoutGuard(ctx, logger, onShutdownTimeout, svc)
 }

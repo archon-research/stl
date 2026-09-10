@@ -209,8 +209,13 @@ func (c *Client) getCurrentPricesBatch(ctx context.Context, assetIDs []string) (
 
 // GetHistoricalData fetches historical prices and volumes for a single asset.
 // Uses the /coins/{id}/market_chart/range endpoint.
-// Note: CoinGecko returns hourly data for ranges up to 90 days, daily for larger ranges.
-// For best results, fetch in 30-day chunks.
+//
+// Resolution follows the width of the requested range and degrades silently: up to
+// 90 days inclusive the response is hourly, past that it is daily, with no error
+// and nothing in the payload to tell them apart. Verified against the live Pro API
+// on 2026-08-05 — a 90-day range returned 2159 hourly points, 91 days returned 92
+// daily ones. Mirrored as offchain_price_fetcher.MaxHourlyWindow for callers that
+// have to size their own windows.
 func (c *Client) GetHistoricalData(ctx context.Context, assetID string, from, to time.Time) (*outbound.HistoricalData, error) {
 	endpoint := fmt.Sprintf("%s/coins/%s/market_chart/range", c.config.BaseURL, assetID)
 	params := url.Values{
@@ -282,13 +287,19 @@ func (c *Client) doRequest(ctx context.Context, endpoint string, params url.Valu
 }
 
 // coinGeckoErrorParser parses CoinGecko-specific error responses.
+//
+// Every 4xx it sees is tagged outbound.ErrRequestRejected: the request was
+// refused for a reason that will not change on retry (401 bad key, 403 plan,
+// 404 unknown coin). 429 never reaches here — the shared client returns it as a
+// plain retryable error before consulting this parser — so the tag cannot
+// mislabel rate limiting as permanent.
 func coinGeckoErrorParser(statusCode int, body []byte) error {
 	if statusCode >= 400 && statusCode < 500 {
 		var apiErr coinGeckoError
 		if jsonErr := json.Unmarshal(body, &apiErr); jsonErr == nil && apiErr.Error != "" {
-			return fmt.Errorf("API error (HTTP %d): %s", statusCode, apiErr.Error)
+			return fmt.Errorf("API error (HTTP %d): %s: %w", statusCode, apiErr.Error, outbound.ErrRequestRejected)
 		}
-		return fmt.Errorf("client error (HTTP %d): %s", statusCode, string(body))
+		return fmt.Errorf("client error (HTTP %d): %s: %w", statusCode, string(body), outbound.ErrRequestRejected)
 	}
 	return nil
 }

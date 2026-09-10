@@ -23,6 +23,10 @@ import (
 // ---------------------------------------------------------------------------
 
 // mockRepo implements outbound.OnchainPriceRepository for testing.
+// Deliberately after the fixtures: the seed helpers stamp valid_from with time.Now(), and
+// the pinned read resolves only versions with valid_from <= effective_at.
+var testReferenceEffectiveAt = time.Now().UTC().Add(24 * time.Hour)
+
 type mockRepo struct {
 	getOracleFn                    func(ctx context.Context, name string) (*entity.Oracle, error)
 	getEnabledAssetsFn             func(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error)
@@ -40,6 +44,8 @@ type mockRepo struct {
 	// mu guards upserted for concurrent access from the batch writer goroutine.
 	mu       sync.Mutex
 	upserted []*entity.OnchainTokenPrice
+
+	referenceEffectiveAt time.Time
 }
 
 func (m *mockRepo) GetOracle(ctx context.Context, name string) (*entity.Oracle, error) {
@@ -49,7 +55,8 @@ func (m *mockRepo) GetOracle(ctx context.Context, name string) (*entity.Oracle, 
 	return nil, errors.New("GetOracle not mocked")
 }
 
-func (m *mockRepo) GetEnabledAssets(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error) {
+func (m *mockRepo) GetEnabledAssets(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) ([]*entity.OracleAsset, error) {
+	m.referenceEffectiveAt = referenceEffectiveAt
 	if m.getEnabledAssetsFn != nil {
 		return m.getEnabledAssetsFn(ctx, oracleID)
 	}
@@ -70,7 +77,8 @@ func (m *mockRepo) GetLatestBlock(ctx context.Context, oracleID int64) (int64, e
 	return 0, nil
 }
 
-func (m *mockRepo) GetTokenInfos(ctx context.Context, oracleID int64) (map[int64]outbound.TokenInfo, error) {
+func (m *mockRepo) GetTokenInfos(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) (map[int64]outbound.TokenInfo, error) {
+	m.referenceEffectiveAt = referenceEffectiveAt
 	if m.getTokenInfosFn != nil {
 		return m.getTokenInfosFn(ctx, oracleID)
 	}
@@ -115,7 +123,7 @@ func (m *mockRepo) InsertProtocolOracleBinding(ctx context.Context, binding *ent
 	return nil, errors.New("InsertProtocolOracleBinding not mocked")
 }
 
-func (m *mockRepo) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64) error {
+func (m *mockRepo) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64, referenceEffectiveAt time.Time) error {
 	if m.copyOracleAssetsFn != nil {
 		return m.copyOracleAssetsFn(ctx, fromOracleID, toOracleID)
 	}
@@ -412,10 +420,11 @@ func TestNewService(t *testing.T) {
 		{
 			name: "success with all valid params",
 			config: Config{
-				ChainID:     1,
-				Concurrency: 2,
-				BatchSize:   50,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          2,
+				BatchSize:            50,
+				Logger:               testutil.DiscardLogger(),
 			},
 			headerFetcher:  validFetcher,
 			newMulticaller: validFactory,
@@ -435,8 +444,9 @@ func TestNewService(t *testing.T) {
 			},
 		},
 		{
-			name:           "success with default config values",
-			config:         Config{ChainID: 1}, // all zero values except ChainID
+			name: "success with default config values",
+			// ChainID and ReferenceEffectiveAt are required, not defaultable.
+			config:         Config{ChainID: 1, ReferenceEffectiveAt: testReferenceEffectiveAt},
 			headerFetcher:  validFetcher,
 			newMulticaller: validFactory,
 			repo:           validRepo,
@@ -458,9 +468,10 @@ func TestNewService(t *testing.T) {
 		{
 			name: "success with negative concurrency uses default",
 			config: Config{
-				ChainID:     1,
-				Concurrency: -5,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          -5,
+				Logger:               testutil.DiscardLogger(),
 			},
 			headerFetcher:  validFetcher,
 			newMulticaller: validFactory,
@@ -476,9 +487,10 @@ func TestNewService(t *testing.T) {
 		{
 			name: "success with negative batch size uses default",
 			config: Config{
-				ChainID:   1,
-				BatchSize: -1,
-				Logger:    testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				BatchSize:            -1,
+				Logger:               testutil.DiscardLogger(),
 			},
 			headerFetcher:  validFetcher,
 			newMulticaller: validFactory,
@@ -595,14 +607,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -630,14 +641,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   101,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 10,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          10,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -665,14 +675,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -707,10 +716,11 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -737,10 +747,11 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -761,10 +772,11 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -788,10 +800,11 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				return &mockRepo{
@@ -820,14 +833,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   3, // small batch size forces flush during for loop
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            3, // small batch size forces flush during for loop
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -855,10 +867,11 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   3, // small batch triggers mid-loop flush
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            3, // small batch triggers mid-loop flush
+				Logger:               testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				repo := defaultRepoSetup()
@@ -887,10 +900,11 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				repo := defaultRepoSetup()
@@ -919,14 +933,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo:   defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher { return &mockHeaderFetcher{} },
 			setupMC: func(t *testing.T) MulticallFactory {
 				return func(_ entity.OracleType) (outbound.Multicaller, error) {
@@ -946,14 +959,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -999,14 +1011,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -1043,14 +1054,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   102,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -1101,14 +1111,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   102,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -1158,14 +1167,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 0,
 			toBlock:   0,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, _ *big.Int) (*ethtypes.Header, error) {
@@ -1196,14 +1204,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   10099,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -1223,10 +1230,11 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   101,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				oracle := defaultOracle()
@@ -1270,14 +1278,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return feedOracleRepoSetup()
-			},
+			setupRepo: feedOracleRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -1303,14 +1310,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   104,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return feedOracleRepoSetup()
-			},
+			setupRepo: feedOracleRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -1342,10 +1348,11 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   100,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				feedAddr1 := common.HexToAddress("0x0000000000000000000000000000000000000F01")
@@ -1425,14 +1432,13 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   102,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return feedOracleRepoSetup()
-			},
+			setupRepo: feedOracleRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -1467,10 +1473,11 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   100,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				feedAddr := common.HexToAddress("0x0000000000000000000000000000000000000F01")
@@ -1520,10 +1527,11 @@ func TestRun(t *testing.T) {
 			fromBlock: 100,
 			toBlock:   100,
 			config: Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   100,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            100,
+				Logger:               testutil.DiscardLogger(),
 			},
 			setupRepo: func() *mockRepo {
 				oracle1 := defaultOracle()
@@ -1671,10 +1679,11 @@ func TestRun_ChangeDetection_MultiplePriceChanges(t *testing.T) {
 	}
 
 	svc, err := NewService(Config{
-		ChainID:     1,
-		Concurrency: 1,
-		BatchSize:   100,
-		Logger:      testutil.DiscardLogger(),
+		ChainID:              1,
+		ReferenceEffectiveAt: testReferenceEffectiveAt,
+		Concurrency:          1,
+		BatchSize:            100,
+		Logger:               testutil.DiscardLogger(),
 	}, header, mcFactory, repo)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -1750,10 +1759,11 @@ func TestRun_VerifiesUpsertedPriceFields(t *testing.T) {
 	}
 
 	svc, err := NewService(Config{
-		ChainID:     1,
-		Concurrency: 1,
-		BatchSize:   100,
-		Logger:      testutil.DiscardLogger(),
+		ChainID:              1,
+		ReferenceEffectiveAt: testReferenceEffectiveAt,
+		Concurrency:          1,
+		BatchSize:            100,
+		Logger:               testutil.DiscardLogger(),
 	}, header, mcFactory, repo)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -1823,10 +1833,11 @@ func TestRun_DuplicateBlocksSafeWithIdempotentUpsert(t *testing.T) {
 	}
 
 	svc, err := NewService(Config{
-		ChainID:     1,
-		Concurrency: 1,
-		BatchSize:   100,
-		Logger:      testutil.DiscardLogger(),
+		ChainID:              1,
+		ReferenceEffectiveAt: testReferenceEffectiveAt,
+		Concurrency:          1,
+		BatchSize:            100,
+		Logger:               testutil.DiscardLogger(),
 	}, header, mcFactory, repo)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -2232,10 +2243,11 @@ func TestRun_BlockRangeClamping(t *testing.T) {
 			}
 
 			svc, err := NewService(Config{
-				ChainID:     1,
-				Concurrency: 1,
-				BatchSize:   1000,
-				Logger:      testutil.DiscardLogger(),
+				ChainID:              1,
+				ReferenceEffectiveAt: testReferenceEffectiveAt,
+				Concurrency:          1,
+				BatchSize:            1000,
+				Logger:               testutil.DiscardLogger(),
 			}, header, func(_ entity.OracleType) (outbound.Multicaller, error) {
 				return &testutil.MockMulticaller{ExecuteFn: blockDependentPrices(t)}, nil
 			}, repo)
@@ -2329,10 +2341,11 @@ func TestRun_FeedOracle_ChangeDetection(t *testing.T) {
 	mcFactory := decimalsPassFactory(t, []uint8{8}, innerFactory)
 
 	svc, err := NewService(Config{
-		ChainID:     1,
-		Concurrency: 1,
-		BatchSize:   100,
-		Logger:      testutil.DiscardLogger(),
+		ChainID:              1,
+		ReferenceEffectiveAt: testReferenceEffectiveAt,
+		Concurrency:          1,
+		BatchSize:            100,
+		Logger:               testutil.DiscardLogger(),
 	}, header, mcFactory, repo)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -2406,7 +2419,7 @@ func TestRun_FeedDecimalsValidation(t *testing.T) {
 		}
 
 		svc, err := NewService(
-			Config{ChainID: 1, Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger()},
+			Config{ChainID: 1, Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger(), ReferenceEffectiveAt: testReferenceEffectiveAt},
 			&mockHeaderFetcher{},
 			mcFactory,
 			repo,
@@ -2465,7 +2478,7 @@ func TestRun_FeedDecimalsValidation(t *testing.T) {
 		}
 
 		svc, err := NewService(
-			Config{ChainID: 1, Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger()},
+			Config{ChainID: 1, Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger(), ReferenceEffectiveAt: testReferenceEffectiveAt},
 			&mockHeaderFetcher{},
 			mcFactory,
 			repo,
@@ -2559,10 +2572,11 @@ func TestRun_ERC4626Oracle(t *testing.T) {
 	}
 
 	svc, err := NewService(Config{
-		ChainID:     1,
-		Concurrency: 1,
-		BatchSize:   100,
-		Logger:      testutil.DiscardLogger(),
+		ChainID:              1,
+		ReferenceEffectiveAt: testReferenceEffectiveAt,
+		Concurrency:          1,
+		BatchSize:            100,
+		Logger:               testutil.DiscardLogger(),
 	}, header, mcFactory, repo)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -2616,7 +2630,7 @@ func TestRun_ERC4626FeedDecimalsValidation(t *testing.T) {
 	}
 
 	svc, err := NewService(
-		Config{ChainID: 1, Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger()},
+		Config{ChainID: 1, Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger(), ReferenceEffectiveAt: testReferenceEffectiveAt},
 		&mockHeaderFetcher{},
 		mcFactory,
 		repo,
@@ -2683,7 +2697,7 @@ func TestRun_ERC4626UnderlyingDecimalsMismatch(t *testing.T) {
 	}
 
 	svc, err := NewService(
-		Config{ChainID: 1, Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger()},
+		Config{ChainID: 1, Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger(), ReferenceEffectiveAt: testReferenceEffectiveAt},
 		&mockHeaderFetcher{},
 		mcFactory,
 		repo,

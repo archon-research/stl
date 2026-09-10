@@ -11,34 +11,38 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 )
 
 func main() {
 	output := flag.String("output", "../docs/entity_relation.md", "Output file path for the Mermaid ER diagram")
 	flag.Parse()
 
-	connStr := requireEnv("DATABASE_URL")
-	ctx := context.Background()
-
-	pool, err := pgxpool.New(ctx, connStr)
-	if err != nil {
-		log.Fatalf("connecting to database: %v", err)
-	}
-	defer pool.Close()
-
-	if err := run(ctx, pool, *output); err != nil {
-		log.Fatalf("generating ER diagram: %v", err)
+	if err := generate(*output); err != nil {
+		log.Fatal(err)
 	}
 
 	log.Printf("ER diagram written to %s", *output)
 }
 
-func requireEnv(key string) string {
-	value := os.Getenv(key)
-	if value == "" {
-		log.Fatalf("required environment variable not set: %s", key)
+func generate(outputPath string) error {
+	connStr, err := env.Require("DATABASE_URL")
+	if err != nil {
+		return err
 	}
-	return value
+	ctx := context.Background()
+
+	pool, err := pgxpool.New(ctx, connStr)
+	if err != nil {
+		return fmt.Errorf("connecting to database: %w", err)
+	}
+	defer pool.Close()
+
+	if err := run(ctx, pool, outputPath); err != nil {
+		return fmt.Errorf("generating ER diagram: %w", err)
+	}
+	return nil
 }
 
 func run(ctx context.Context, pool *pgxpool.Pool, outputPath string) error {
@@ -113,6 +117,7 @@ var tablePriority = map[string]int{
 	"offchain_price_asset":   51,
 	"onchain_token_price":    60,
 	"offchain_token_price":   61,
+	"asset_price":            62,
 	"block_states":           90,
 	"reorg_events":           91,
 	"backfill_watermark":     92,

@@ -15,8 +15,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/aws/aws-sdk-go-v2/config"
-
+	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 
@@ -69,9 +68,10 @@ func main() {
 
 	// Handle shutdown signals
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
-	if err := run(ctx, logger, *workers); err != nil && !errors.Is(err, context.Canceled) {
+	err := run(ctx, logger, *workers)
+	cancel()
+	if err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("backup service failed", "error", err)
 		os.Exit(1)
 	}
@@ -212,8 +212,10 @@ func run(ctx context.Context, logger *slog.Logger, workers int) error {
 		return err
 	}
 
-	// Load AWS config
-	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(cfg.awsRegion))
+	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{
+		Region:                   cfg.awsRegion,
+		StaticCredentialsFromEnv: true,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to load AWS config: %w", err)
 	}
@@ -301,7 +303,6 @@ func run(ctx context.Context, logger *slog.Logger, workers int) error {
 		ChainID:             cfg.chainID,
 		Bucket:              cfg.bucket,
 		Workers:             cfg.workers,
-		BatchSize:           10, // Max messages per SQS receive call
 		CacheMissMaxRetries: cfg.cacheMissMaxRetries,
 		Logger:              logger,
 		Metrics:             metricsRec,

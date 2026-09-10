@@ -57,72 +57,7 @@ func TestRunCronjob_InitializesOTEL(t *testing.T) {
 	}
 }
 
-// TestCronjobConfig_Validate covers the Manual-mode relaxation (VEC-490): a
-// trigger-only job needs no IntervalDefault, while every other job still does.
-func TestCronjobConfig_Validate(t *testing.T) {
-	openDB := func(context.Context) (*pgxpool.Pool, error) { return nil, nil }
-	setup := func(context.Context, Dependencies) (Runner, error) { return nil, nil }
-
-	tests := []struct {
-		name    string
-		cfg     CronjobConfig
-		wantErr string
-	}{
-		{
-			name: "manual job needs no interval",
-			cfg:  CronjobConfig{Name: "backfill", Manual: true, OpenDatabase: openDB, Setup: setup},
-		},
-		{
-			name:    "non-manual job requires interval",
-			cfg:     CronjobConfig{Name: "ticker", OpenDatabase: openDB, Setup: setup},
-			wantErr: "IntervalDefault is required",
-		},
-		{
-			name: "interval job with interval is valid",
-			cfg:  CronjobConfig{Name: "ticker", IntervalDefault: "5m", OpenDatabase: openDB, Setup: setup},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := tt.cfg.validate()
-			if tt.wantErr == "" {
-				if err != nil {
-					t.Fatalf("validate() = %v, want nil", err)
-				}
-				return
-			}
-			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("validate() = %v, want error containing %q", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-// TestCronjobConfig_WorkflowArgs maps the activity overrides into the workflow
-// input verbatim; zero values are preserved (cronjobWorkflow resolves them to
-// defaults), so an interval job with no overrides passes a zero workflowParams.
-func TestCronjobConfig_WorkflowArgs(t *testing.T) {
-	if got := (CronjobConfig{}).workflowArgs(); got != (workflowParams{}) {
-		t.Errorf("workflowArgs() with no overrides = %+v, want zero value", got)
-	}
-	cfg := CronjobConfig{
-		ActivityStartToCloseTimeout:    24 * time.Hour,
-		ActivityScheduleToCloseTimeout: 24 * time.Hour,
-		ActivityHeartbeatTimeout:       2 * time.Minute,
-		ActivityMaxAttempts:            1,
-	}
-	want := workflowParams{
-		StartToCloseTimeout:    24 * time.Hour,
-		ScheduleToCloseTimeout: 24 * time.Hour,
-		HeartbeatTimeout:       2 * time.Minute,
-		MaximumAttempts:        1,
-	}
-	if got := cfg.workflowArgs(); got != want {
-		t.Errorf("workflowArgs() = %+v, want %+v", got, want)
-	}
-}
-
-func TestBuildScheduleSpec_Offset(t *testing.T) {
+func TestBuildScheduleInterval_Offset(t *testing.T) {
 	tests := []struct {
 		name       string
 		cfg        CronjobConfig
@@ -174,7 +109,7 @@ func TestBuildScheduleSpec_Offset(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			getenv := func(k string) string { return tc.env[k] }
-			spec, err := buildScheduleSpec(tc.cfg, getenv)
+			got, err := buildScheduleInterval(tc.cfg, getenv)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -184,7 +119,6 @@ func TestBuildScheduleSpec_Offset(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			got := spec.Intervals[0]
 			if got.Every != tc.wantEvery || got.Offset != tc.wantOffset {
 				t.Fatalf("got {Every:%s Offset:%s}, want {Every:%s Offset:%s}",
 					got.Every, got.Offset, tc.wantEvery, tc.wantOffset)
@@ -219,38 +153,104 @@ func TestApplyScheduleSpecUpdate_PreservesActionReplacesSpec(t *testing.T) {
 	}
 }
 
-// TestApplyScheduleActionUpdate_PreservesSpecAndStateReplacesAction pins the
-// manual (trigger-only) reconcile: the action's Args are patched while the timing
-// spec and paused state are left untouched, so a redeploy never unpauses the
-// schedule or re-adds an interval.
-func TestApplyScheduleActionUpdate_PreservesSpecAndStateReplacesAction(t *testing.T) {
-	paused := true
-	in := client.ScheduleUpdateInput{
-		Description: client.ScheduleDescription{
-			Schedule: client.Schedule{
-				Action: &client.ScheduleWorkflowAction{ID: "scheduled-backfill", TaskQueue: "backfill", Args: []any{"old"}},
-				Spec:   &client.ScheduleSpec{}, // manual: no intervals
-				State:  &client.ScheduleState{Paused: paused},
-			},
+func TestCronjobConfigValidate(t *testing.T) {
+	base := func(mutate func(*CronjobConfig)) CronjobConfig {
+		cfg := CronjobConfig{
+			Name:            "job",
+			IntervalDefault: "5m",
+			OpenDatabase:    func(context.Context) (*pgxpool.Pool, error) { return nil, nil },
+			Setup:           func(context.Context, Dependencies) (Runner, error) { return nil, nil },
+		}
+		mutate(&cfg)
+		return cfg
+	}
+	tests := []struct {
+		name    string
+		cfg     CronjobConfig
+		wantErr string
+	}{
+		{
+			name: "scheduled cronjob with an interval is valid",
+			cfg:  base(func(*CronjobConfig) {}),
+		},
+		{
+			name:    "scheduled cronjob without an interval is rejected",
+			cfg:     base(func(c *CronjobConfig) { c.IntervalDefault = "" }),
+			wantErr: "IntervalDefault",
 		},
 	}
-	want := &client.ScheduleWorkflowAction{ID: "scheduled-backfill", TaskQueue: "backfill", Args: []any{"new"}}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("validate() = %v, want an error mentioning %q", err, tc.wantErr)
+			}
+		})
+	}
+}
 
-	upd := applyScheduleActionUpdate(in, want)
+// A cronjob's schedule must reach Temporal unpaused and on its interval: a
+// paused one would leave the job producing nothing while the worker looks
+// perfectly healthy.
+func TestEnsureSchedule_ScheduledJobStaysUnpaused(t *testing.T) {
+	opts, err := captureScheduleCreate(t, CronjobConfig{Name: "interval-job", IntervalDefault: "1h"})
+	if err != nil {
+		t.Fatalf("ensureSchedule: %v", err)
+	}
+	if opts.Paused {
+		t.Error("Paused = true for an interval-driven cronjob; a cronjob must keep running on its schedule")
+	}
+	if len(opts.Spec.Intervals) != 1 || opts.Spec.Intervals[0].Every != time.Hour {
+		t.Errorf("Spec.Intervals = %v, want a single 1h interval", opts.Spec.Intervals)
+	}
+}
 
-	gotAction, ok := upd.Schedule.Action.(*client.ScheduleWorkflowAction)
+// TestEnsureSchedule_PassesActivityTimeoutsToWorkflow pins that the configured
+// timeouts reach the schedule's workflow action as an argument. Without this a
+// multi-hour bootstrap would be killed by the 10m default StartToCloseTimeout.
+func TestEnsureSchedule_PassesActivityTimeoutsToWorkflow(t *testing.T) {
+	want := ActivityTimeouts{StartToClose: 6 * time.Hour, ScheduleToClose: 12 * time.Hour, MaximumAttempts: 2}
+	opts, err := captureScheduleCreate(t, CronjobConfig{Name: "long-job", IntervalDefault: "24h", ActivityTimeouts: want})
+	if err != nil {
+		t.Fatalf("ensureSchedule: %v", err)
+	}
+	action, ok := opts.Action.(*client.ScheduleWorkflowAction)
 	if !ok {
-		t.Fatalf("Action type = %T, want *client.ScheduleWorkflowAction", upd.Schedule.Action)
+		t.Fatalf("Action type = %T, want *client.ScheduleWorkflowAction", opts.Action)
 	}
-	if len(gotAction.Args) != 1 || gotAction.Args[0] != "new" {
-		t.Fatalf("Args = %v, want [new] (action must be replaced)", gotAction.Args)
+	if len(action.Args) != 1 {
+		t.Fatalf("Args = %v, want exactly the activity timeouts", action.Args)
 	}
-	if len(upd.Schedule.Spec.Intervals) != 0 {
-		t.Fatalf("Spec.Intervals = %v, want empty (no interval must be added)", upd.Schedule.Spec.Intervals)
+	got, ok := action.Args[0].(ActivityTimeouts)
+	if !ok {
+		t.Fatalf("Args[0] type = %T, want ActivityTimeouts", action.Args[0])
 	}
-	if upd.Schedule.State == nil || !upd.Schedule.State.Paused {
-		t.Fatalf("State.Paused = %v, want true (must stay paused)", upd.Schedule.State)
+	if got != want {
+		t.Fatalf("Args[0] = %+v, want %+v", got, want)
 	}
+}
+
+// captureScheduleCreate runs ensureSchedule against a mock ScheduleClient and
+// returns the ScheduleOptions it tried to create.
+func captureScheduleCreate(t *testing.T, cfg CronjobConfig) (client.ScheduleOptions, error) {
+	t.Helper()
+	var got client.ScheduleOptions
+	scheduleClient := &mocks.ScheduleClient{}
+	scheduleClient.On("Create", mock.Anything, mock.Anything).
+		Run(func(args mock.Arguments) { got = args.Get(1).(client.ScheduleOptions) }).
+		Return(nil, nil)
+
+	c := &mocks.Client{}
+	c.On("ScheduleClient").Return(scheduleClient)
+
+	err := ensureSchedule(context.Background(), c, slog.Default(), cfg.Name, cfg)
+	return got, err
 }
 
 // TestEnsureSchedule_ReconcileFailureIsNonFatal pins that a failed reconcile of
@@ -274,5 +274,29 @@ func TestEnsureSchedule_ReconcileFailureIsNonFatal(t *testing.T) {
 	err := ensureSchedule(context.Background(), c, slog.Default(), "test-job", cfg)
 	if err != nil {
 		t.Fatalf("ensureSchedule returned %v, want nil (reconcile failure must be non-fatal)", err)
+	}
+}
+
+// (*pgxpool.Pool).Close on the nil pool would panic during the unwind.
+func TestOpenPool_IsANoOpWhenNoOpenerIsDeclared(t *testing.T) {
+	pool, closePool, err := openPool(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("openPool: %v", err)
+	}
+	if pool != nil {
+		t.Errorf("pool = %v, want nil", pool)
+	}
+	closePool()
+}
+
+func TestOpenPool_SurfacesAFailedOpen(t *testing.T) {
+	sentinel := errors.New("dial postgres: connection refused")
+
+	_, _, err := openPool(context.Background(), func(context.Context) (*pgxpool.Pool, error) {
+		return nil, sentinel
+	})
+
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("error = %v, want the opener's own error", err)
 	}
 }

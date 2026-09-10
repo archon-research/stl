@@ -13,16 +13,12 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const receiptTokenSchemaName = "test_receipt_token"
+const receiptTokenDBName = "test_receipt_token"
 
 var receiptTokenPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(receiptTokenSchemaName, func() {
-		receiptTokenPool = testutil.SetupSchemaForMain(sharedDSN, receiptTokenSchemaName)
-	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, receiptTokenPool, receiptTokenSchemaName)
-	})
+	useFileDatabase(receiptTokenDBName, &receiptTokenPool)
 }
 
 // truncateReceiptToken clears the receipt_token table and its dependencies for test isolation.
@@ -39,11 +35,11 @@ func truncateReceiptToken(t *testing.T, ctx context.Context) {
 func seedReceiptTokenDeps(t *testing.T, ctx context.Context, chainID int64) (int64, int64) {
 	t.Helper()
 
-	protocolRepo, err := NewProtocolRepository(receiptTokenPool, nil, 0, 0)
+	protocolRepo, err := NewProtocolRepository(receiptTokenPool, nil, 0, 0, 0)
 	if err != nil {
 		t.Fatalf("NewProtocolRepository: %v", err)
 	}
-	tokenRepo, err := NewTokenRepository(receiptTokenPool, nil, 0)
+	tokenRepo, err := NewTokenRepository(receiptTokenPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
@@ -84,7 +80,8 @@ func TestGetOrCreateReceiptToken(t *testing.T) {
 				truncateReceiptToken(t, ctx)
 				protocolID, tokenID := seedReceiptTokenDeps(t, ctx, 1)
 
-				repo, err := NewReceiptTokenRepository(receiptTokenPool, nil)
+				_, runID := testutil.OpenTestRun(t, ctx, receiptTokenPool)
+				repo, err := NewReceiptTokenRepository(receiptTokenPool, nil, runID)
 				if err != nil {
 					t.Fatalf("NewReceiptTokenRepository: %v", err)
 				}
@@ -116,9 +113,10 @@ func TestGetOrCreateReceiptToken(t *testing.T) {
 				// Verify the row exists with correct values.
 				var symbol string
 				var createdAtBlock int64
+				var gotRunID *int64
 				err = receiptTokenPool.QueryRow(ctx,
-					`SELECT symbol, created_at_block FROM receipt_token WHERE id = $1`, id,
-				).Scan(&symbol, &createdAtBlock)
+					`SELECT symbol, created_at_block, run_id FROM receipt_token WHERE id = $1`, id,
+				).Scan(&symbol, &createdAtBlock, &gotRunID)
 				if err != nil {
 					t.Fatalf("query: %v", err)
 				}
@@ -128,6 +126,7 @@ func TestGetOrCreateReceiptToken(t *testing.T) {
 				if createdAtBlock != 500 {
 					t.Errorf("created_at_block = %d, want 500", createdAtBlock)
 				}
+				testutil.RequireRunID(t, gotRunID, runID)
 			},
 		},
 		{
@@ -136,7 +135,7 @@ func TestGetOrCreateReceiptToken(t *testing.T) {
 				truncateReceiptToken(t, ctx)
 				protocolID, tokenID := seedReceiptTokenDeps(t, ctx, 1)
 
-				repo, err := NewReceiptTokenRepository(receiptTokenPool, nil)
+				repo, err := NewReceiptTokenRepository(receiptTokenPool, nil, 0)
 				if err != nil {
 					t.Fatalf("NewReceiptTokenRepository: %v", err)
 				}
@@ -184,7 +183,7 @@ func TestGetOrCreateReceiptToken(t *testing.T) {
 				truncateReceiptToken(t, ctx)
 				protocolID, tokenID := seedReceiptTokenDeps(t, ctx, 1)
 
-				repo, err := NewReceiptTokenRepository(receiptTokenPool, nil)
+				repo, err := NewReceiptTokenRepository(receiptTokenPool, nil, 0)
 				if err != nil {
 					t.Fatalf("NewReceiptTokenRepository: %v", err)
 				}
@@ -243,7 +242,7 @@ func TestGetOrCreateReceiptToken(t *testing.T) {
 				protocolID1, tokenID1 := seedReceiptTokenDeps(t, ctx, 1)
 				protocolID2, tokenID2 := seedReceiptTokenDeps(t, ctx, 43114)
 
-				repo, err := NewReceiptTokenRepository(receiptTokenPool, nil)
+				repo, err := NewReceiptTokenRepository(receiptTokenPool, nil, 0)
 				if err != nil {
 					t.Fatalf("NewReceiptTokenRepository: %v", err)
 				}

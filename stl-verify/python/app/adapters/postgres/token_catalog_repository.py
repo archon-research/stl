@@ -5,6 +5,11 @@ from typing import Any
 from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.adapters.postgres.reference_as_of import (
+    ORACLE_ASSET_AS_OF,
+    ReferenceAsOf,
+    ReferenceEffectiveAtProvider,
+)
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.token_catalog import TokenMetadata, TokenPriceQuote
 
@@ -62,8 +67,9 @@ def _normalize_symbol(value: str | None) -> str | None:
 
 
 class TokenCatalogRepository:
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(self, engine: AsyncEngine, reference_effective_at: ReferenceEffectiveAtProvider) -> None:
         self._engine = engine
+        self._reference = ReferenceAsOf(reference_effective_at)
 
     @staticmethod
     def _row_to_metadata(row: Row[Any]) -> TokenMetadata:
@@ -155,7 +161,7 @@ class TokenCatalogRepository:
     async def get_latest_price(self, token_id: int) -> TokenPriceQuote | None:
         try:
             async with self._engine.connect() as conn:
-                row = (await conn.execute(_LATEST_PRICE_SQL, {"token_id": token_id})).fetchone()
+                row = (await conn.execute(_LATEST_PRICE_SQL, self._reference.params(token_id=token_id))).fetchone()
 
             if row is None:
                 return None
@@ -235,33 +241,42 @@ _GET_TOKEN_BY_CHAIN_ADDRESS_SQL = text(
 
 
 _LATEST_PRICE_SQL = text(
-    """
+    f"""
+    -- A latest-row read with no time predicate cannot exclude a chunk, so on the
+    -- price histories this statement planned over every chunk (VEC-672). The two
+    -- halves differ in what fixes that: on-chain rows are written only when a
+    -- price changes, so a window would drop a stable that has not moved in months
+    -- and the read comes from token_price_current instead; off-chain snapshots are
+    -- written every poll, so a window on the history is enough there.
     WITH latest_onchain AS (
         SELECT
-            otp.token_id,
+            tpc.token_id,
             'onchain'::TEXT AS source_type,
-            otp.oracle_id::BIGINT AS source_id,
+            tpc.oracle_id::BIGINT AS source_id,
             o.name AS source_name,
             o.display_name AS source_display_name,
-            otp.price_usd,
-            otp.timestamp,
-            EXTRACT(EPOCH FROM (NOW() - otp.timestamp))::BIGINT AS staleness_seconds
-        FROM onchain_token_price otp
-        JOIN oracle o ON o.id = otp.oracle_id
-        WHERE otp.token_id = :token_id
-        -- enabled-mapping filter + oracle_id tiebreak (canonical rationale, incl.
-        -- the no-history tradeoff, on _DIRECT_ASSET_HOLDINGS_SQL in
-        -- allocation_position_repository.py). A retired source is excluded at
-        -- read time; same-block rows from two oracles also share the block
-        -- timestamp, so ties reach this read too.
+            tpc.price_usd,
+            tpc.block_timestamp AS "timestamp",
+            EXTRACT(EPOCH FROM (NOW() - tpc.block_timestamp))::BIGINT AS staleness_seconds
+        FROM token_price_current tpc
+        JOIN oracle o ON o.id = tpc.oracle_id
+        WHERE tpc.token_id = :token_id
+          -- An undated cache row (20260910_120050 could not read its history
+          -- row) is absent here, exactly as it was absent from the history read.
+          AND tpc.block_timestamp IS NOT NULL
+          -- enabled-mapping filter + oracle_id tiebreak (canonical rationale, incl.
+          -- the append-on-change read path, on _DIRECT_ASSET_HOLDINGS_SQL in
+          -- allocation_position_repository.py). A source retired as of
+          -- :reference_effective_at is excluded; same-block rows from two oracles
+          -- also share the block timestamp, so ties reach this read too.
           AND EXISTS (
-              SELECT 1 FROM oracle_asset oa
-              WHERE oa.oracle_id = otp.oracle_id
-                AND oa.token_id = otp.token_id
+              SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
+              WHERE oa.oracle_id = tpc.oracle_id
+                AND oa.token_id = tpc.token_id
                 AND oa.enabled
           )
-        ORDER BY otp.timestamp DESC, otp.block_number DESC, otp.block_version DESC,
-                 otp.processing_version DESC, otp.oracle_id DESC
+        ORDER BY tpc.block_timestamp DESC, tpc.block_number DESC, tpc.block_version DESC,
+                 tpc.processing_version DESC, tpc.oracle_id DESC
         LIMIT 1
     ),
     latest_offchain AS (
@@ -272,12 +287,17 @@ _LATEST_PRICE_SQL = text(
             ops.name AS source_name,
             ops.display_name AS source_display_name,
             otp.price_usd,
-            otp.timestamp,
-            EXTRACT(EPOCH FROM (NOW() - otp.timestamp))::BIGINT AS staleness_seconds
+            otp."timestamp",
+            EXTRACT(EPOCH FROM (NOW() - otp."timestamp"))::BIGINT AS staleness_seconds
         FROM offchain_token_price otp
         JOIN offchain_price_source ops ON ops.id = otp.source_id
         WHERE otp.token_id = :token_id
-        ORDER BY otp.timestamp DESC, otp.processing_version DESC
+          -- A SQL literal, never a bind parameter: `now() - $n` is not constified,
+          -- so a bound interval plans every chunk (db/migrations/AGENTS.md). Seven
+          -- days is many polls of a feed that writes every interval; a feed silent
+          -- for longer has no current quote, as the CORE liveness check treats it.
+          AND otp."timestamp" > now() - interval '7 days'
+        ORDER BY otp."timestamp" DESC, otp.processing_version DESC
         LIMIT 1
     )
     SELECT

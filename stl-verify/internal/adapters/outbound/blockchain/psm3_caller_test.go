@@ -84,13 +84,14 @@ func resolvedCaller(t *testing.T, mc *testutil.MockMulticaller) *PSM3Caller {
 
 func TestPSM3ConfigForChain(t *testing.T) {
 	tests := []struct {
-		chainID  int64
-		wantPSM3 string
+		chainID      int64
+		wantPSM3     string
+		wantSparkALM string
 	}{
-		{8453, "0x1601843c5E9bC251A3272907010AFa41Fa18347E"},
-		{10, "0xe0F9978b907853F354d79188A3dEfbD41978af62"},
-		{42161, "0x2B05F8e1cACC6974fD79A673a341Fe1f58d27266"},
-		{130, "0x7b42Ed932f26509465F7cE3FAF76FfCe1275312f"},
+		{8453, "0x1601843c5E9bC251A3272907010AFa41Fa18347E", "0x2917956eFF0B5eaF030abDB4EF4296DF775009cA"},
+		{10, "0xe0F9978b907853F354d79188A3dEfbD41978af62", "0x876664f0c9Ff24D1aa355Ce9f1680AE1A5bf36fB"},
+		{42161, "0x2B05F8e1cACC6974fD79A673a341Fe1f58d27266", "0x92afd6F2385a90e44da3a8B60fe36f6cBe1D8709"},
+		{130, "0x7b42Ed932f26509465F7cE3FAF76FfCe1275312f", "0x345E368fcCd62266B3f5F37C9a131FD1c39f5869"},
 	}
 	for _, tc := range tests {
 		cfg, err := PSM3ConfigForChain(tc.chainID)
@@ -99,6 +100,12 @@ func TestPSM3ConfigForChain(t *testing.T) {
 		}
 		if cfg.PSM3 != common.HexToAddress(tc.wantPSM3) {
 			t.Errorf("chain %d: PSM3 = %s, want %s", tc.chainID, cfg.PSM3.Hex(), tc.wantPSM3)
+		}
+		if len(cfg.ALMs) != 1 || cfg.ALMs[0].Prime != "spark" {
+			t.Fatalf("chain %d: ALMs = %+v, want a single spark entry", tc.chainID, cfg.ALMs)
+		}
+		if cfg.ALMs[0].Address != common.HexToAddress(tc.wantSparkALM) {
+			t.Errorf("chain %d: spark ALM = %s, want %s", tc.chainID, cfg.ALMs[0].Address.Hex(), tc.wantSparkALM)
 		}
 	}
 }
@@ -109,9 +116,13 @@ func TestPSM3ConfigForChain_Unknown(t *testing.T) {
 	}
 }
 
-func synomeContract(entries map[string][]axis_synome_contract.TokenEntry) *axis_synome_contract.Contract {
+func synomeContract(
+	entries map[string][]axis_synome_contract.TokenEntry,
+	proxies map[string]map[string][]axis_synome_contract.ProxyConfig,
+) *axis_synome_contract.Contract {
 	var c axis_synome_contract.Contract
 	c.AxisSynome.Spec.Entities.AssetsByPrime.ASSETSByPrime = entries
+	c.AxisSynome.Spec.Entities.AlmProxies.AlmProxy = proxies
 	return &c
 }
 
@@ -120,38 +131,90 @@ func TestValidateAgainstAxisSynome(t *testing.T) {
 	psm3Entry := func(chain, address string) axis_synome_contract.TokenEntry {
 		return axis_synome_contract.TokenEntry{ContractAddress: address, Chain: chain, Protocol: "psm3"}
 	}
+	sparkOnBase := map[string][]axis_synome_contract.TokenEntry{
+		"spark": {psm3Entry("base", "0x1601843c5e9bc251a3272907010afa41fa18347e")},
+	}
+	almProxies := func(chain, address, role string) map[string]map[string][]axis_synome_contract.ProxyConfig {
+		return map[string]map[string][]axis_synome_contract.ProxyConfig{
+			"spark": {chain: {{Star: "spark", Chain: chain, Address: address, Role: role}}},
+		}
+	}
+	sparkALMOnBase := almProxies("base", "0x2917956eff0b5eaf030abdb4ef4296df775009ca", "alm")
 
 	tests := []struct {
 		name    string
 		chainID int64
 		entries map[string][]axis_synome_contract.TokenEntry
+		proxies map[string]map[string][]axis_synome_contract.ProxyConfig
 		wantErr string
 	}{
 		{
 			"match", 8453,
-			map[string][]axis_synome_contract.TokenEntry{"spark": {psm3Entry("base", "0x1601843c5e9bc251a3272907010afa41fa18347e")}},
+			sparkOnBase,
+			sparkALMOnBase,
 			"",
 		},
 		{
 			"address mismatch", 8453,
 			map[string][]axis_synome_contract.TokenEntry{"spark": {psm3Entry("base", "0x2b05f8e1cacc6974fd79a673a341fe1f58d27266")}},
+			sparkALMOnBase,
 			"config has",
 		},
 		{
 			"no entry for chain", 8453,
 			map[string][]axis_synome_contract.TokenEntry{"spark": {psm3Entry("arbitrum", "0x2b05f8e1cacc6974fd79a673a341fe1f58d27266")}},
+			sparkALMOnBase,
 			"no psm3 entry",
 		},
 		{
 			"unknown chain id", 999,
 			map[string][]axis_synome_contract.TokenEntry{},
+			nil,
 			"unknown chain ID",
+		},
+		{
+			"alm proxy mismatch", 8453,
+			sparkOnBase,
+			almProxies("base", "0x92afd6f2385a90e44da3a8b60fe36f6cbe1d8709", "alm"),
+			"config has",
+		},
+		{
+			"no alm proxy for chain", 8453,
+			sparkOnBase,
+			almProxies("arbitrum", "0x92afd6f2385a90e44da3a8b60fe36f6cbe1d8709", "alm"),
+			"no alm proxy",
+		},
+		{
+			"subproxy is not the alm proxy", 8453,
+			sparkOnBase,
+			almProxies("base", "0x2917956eff0b5eaf030abdb4ef4296df775009ca", "subproxy"),
+			"no alm proxy",
+		},
+		{
+			"two stars own the chain's psm3", 8453,
+			map[string][]axis_synome_contract.TokenEntry{
+				"spark": {psm3Entry("base", "0x1601843c5e9bc251a3272907010afa41fa18347e")},
+				"grove": {psm3Entry("base", "0x1601843c5e9bc251a3272907010afa41fa18347e")},
+			},
+			sparkALMOnBase,
+			"two stars",
+		},
+		{
+			"two alm proxies during a rotation window", 8453,
+			sparkOnBase,
+			map[string]map[string][]axis_synome_contract.ProxyConfig{
+				"spark": {"base": {
+					{Star: "spark", Chain: "base", Address: "0x2917956eff0b5eaf030abdb4ef4296df775009ca", Role: "alm"},
+					{Star: "spark", Chain: "base", Address: "0x92afd6f2385a90e44da3a8b60fe36f6cbe1d8709", Role: "alm"},
+				}},
+			},
+			"want exactly one",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := cfg.ValidateAgainstAxisSynome(synomeContract(tc.entries), tc.chainID)
+			err := cfg.ValidateAgainstAxisSynome(synomeContract(tc.entries, tc.proxies), tc.chainID)
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
@@ -348,6 +411,9 @@ func TestReadState_HappyPath_PocketRedirect(t *testing.T) {
 	usdcBal := big.NewInt(333)
 	totalAssets := big.NewInt(666)
 	rate := new(big.Int).Exp(big.NewInt(10), big.NewInt(27), nil)
+	almShares := big.NewInt(444)
+	totalShares := big.NewInt(555)
+	almAssetValue := big.NewInt(532)
 
 	mc := testutil.NewMockMulticaller()
 	caller := resolvedCaller(t, mc)
@@ -365,14 +431,21 @@ func TestReadState_HappyPath_PocketRedirect(t *testing.T) {
 		}
 		switch mc.CallCount {
 		case 1: // round 1
-			if len(calls) != 5 {
-				t.Fatalf("round 1: expected 5 calls, got %d", len(calls))
+			if len(calls) != 7 {
+				t.Fatalf("round 1: expected 7 calls, got %d", len(calls))
 			}
-			wantTargets := []common.Address{cfg.PSM3, cfg.USDS, cfg.SUSDS, cfg.PSM3, testRateProvider}
+			wantTargets := []common.Address{cfg.PSM3, cfg.USDS, cfg.SUSDS, cfg.PSM3, testRateProvider, cfg.PSM3, cfg.PSM3}
 			for i, want := range wantTargets {
 				if calls[i].Target != want {
 					t.Errorf("round 1 call %d target = %s, want %s", i, calls[i].Target.Hex(), want.Hex())
 				}
+			}
+			sharesArgs, err := caller.psm3ABI.Methods["shares"].Inputs.Unpack(calls[idxFirstALMShares].CallData[4:])
+			if err != nil {
+				t.Fatalf("unpack shares calldata: %v", err)
+			}
+			if got := sharesArgs[0].(common.Address); got != cfg.ALMs[0].Address {
+				t.Errorf("shares arg = %s, want ALM proxy %s", got.Hex(), cfg.ALMs[0].Address.Hex())
 			}
 			return []outbound.Result{
 				{Success: true, ReturnData: packAddressOutput(t, caller, "pocket", pocket)},
@@ -380,10 +453,12 @@ func TestReadState_HappyPath_PocketRedirect(t *testing.T) {
 				{Success: true, ReturnData: packUintOutput(t, susdsBal)},
 				{Success: true, ReturnData: packUintOutput(t, totalAssets)},
 				{Success: true, ReturnData: packUintOutput(t, rate)},
+				{Success: true, ReturnData: packUintOutput(t, totalShares)},
+				{Success: true, ReturnData: packUintOutput(t, almShares)},
 			}, nil
-		case 2: // round 2: USDC.balanceOf(pocket)
-			if len(calls) != 1 {
-				t.Fatalf("round 2: expected 1 call, got %d", len(calls))
+		case 2: // round 2: USDC.balanceOf(pocket) + convertToAssetValue(almShares)
+			if len(calls) != 2 {
+				t.Fatalf("round 2: expected 2 calls, got %d", len(calls))
 			}
 			if calls[0].Target != cfg.USDC {
 				t.Errorf("round 2 target = %s, want USDC %s", calls[0].Target.Hex(), cfg.USDC.Hex())
@@ -395,7 +470,20 @@ func TestReadState_HappyPath_PocketRedirect(t *testing.T) {
 			if got := args[0].(common.Address); got != pocket {
 				t.Errorf("round 2 balanceOf arg = %s, want pocket %s (must follow the redirect)", got.Hex(), pocket.Hex())
 			}
-			return []outbound.Result{{Success: true, ReturnData: packUintOutput(t, usdcBal)}}, nil
+			if calls[1].Target != cfg.PSM3 {
+				t.Errorf("round 2 call 1 target = %s, want PSM3 %s", calls[1].Target.Hex(), cfg.PSM3.Hex())
+			}
+			convArgs, err := caller.psm3ABI.Methods["convertToAssetValue"].Inputs.Unpack(calls[1].CallData[4:])
+			if err != nil {
+				t.Fatalf("unpack convertToAssetValue calldata: %v", err)
+			}
+			if got := convArgs[0].(*big.Int); got.Cmp(almShares) != 0 {
+				t.Errorf("convertToAssetValue arg = %s, want the ALM's share count %s", got, almShares)
+			}
+			return []outbound.Result{
+				{Success: true, ReturnData: packUintOutput(t, usdcBal)},
+				{Success: true, ReturnData: packUintOutput(t, almAssetValue)},
+			}, nil
 		default:
 			t.Fatalf("unexpected multicall round %d", mc.CallCount)
 			return nil, nil
@@ -410,9 +498,123 @@ func TestReadState_HappyPath_PocketRedirect(t *testing.T) {
 		state.SUSDSBalance.Cmp(susdsBal) != 0 ||
 		state.USDCBalance.Cmp(usdcBal) != 0 ||
 		state.TotalAssets.Cmp(totalAssets) != 0 ||
-		state.ConversionRate.Cmp(rate) != 0 {
+		state.ConversionRate.Cmp(rate) != 0 ||
+		state.TotalShares.Cmp(totalShares) != 0 ||
+		len(state.ALMPositions) != 1 ||
+		state.ALMPositions[0].Prime != "spark" ||
+		state.ALMPositions[0].Address != cfg.ALMs[0].Address ||
+		state.ALMPositions[0].Shares.Cmp(almShares) != 0 ||
+		state.ALMPositions[0].AssetValue.Cmp(almAssetValue) != 0 {
 		t.Errorf("unexpected state: %+v", state)
 	}
+}
+
+// TestReadState_MultipleALMs pins the multi-prime path: each configured ALM
+// gets its own shares call and its own convertToAssetValue, paired by index.
+func TestReadState_MultipleALMs(t *testing.T) {
+	cfg := baseConfig(t)
+	// Grove's real base ALM proxy from axis-synome; Grove does not deposit into
+	// Spark's PSM3 today, so this stands in for the next prime that does.
+	cfg.ALMs = append(cfg.ALMs, PSM3ALM{
+		Prime:   "grove",
+		Address: common.HexToAddress("0x9b746dbc5269e1df6e4193bcb441c0fbbf1cecee"),
+	})
+
+	caller, err := NewPSM3Caller(testutil.NewMockMulticaller(), cfg)
+	if err != nil {
+		t.Fatalf("create caller: %v", err)
+	}
+	mc := caller.multicaller.(*testutil.MockMulticaller)
+	mc.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return immutableResults(t, caller, cfg), nil
+	}
+	if err := caller.ResolveImmutables(context.Background(), big.NewInt(1)); err != nil {
+		t.Fatalf("resolve immutables: %v", err)
+	}
+	mc.CallCount = 0
+
+	shares := map[common.Address]*big.Int{
+		cfg.ALMs[0].Address: big.NewInt(60),
+		cfg.ALMs[1].Address: big.NewInt(30),
+	}
+	totalShares := big.NewInt(100)
+	totalAssets := big.NewInt(200)
+
+	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch mc.CallCount {
+		case 1: // round 1: fixed legs + one shares call per ALM
+			if len(calls) != idxFirstALMShares+len(cfg.ALMs) {
+				t.Fatalf("round 1: got %d calls, want %d", len(calls), idxFirstALMShares+len(cfg.ALMs))
+			}
+			results := []outbound.Result{
+				{Success: true, ReturnData: packAddressOutput(t, caller, "pocket", cfg.PSM3)},
+				{Success: true, ReturnData: packUintOutput(t, big.NewInt(1))},
+				{Success: true, ReturnData: packUintOutput(t, big.NewInt(2))},
+				{Success: true, ReturnData: packUintOutput(t, totalAssets)},
+				{Success: true, ReturnData: packUintOutput(t, big.NewInt(4))},
+				{Success: true, ReturnData: packUintOutput(t, totalShares)},
+			}
+			for i, alm := range cfg.ALMs {
+				args, err := caller.psm3ABI.Methods["shares"].Inputs.Unpack(calls[idxFirstALMShares+i].CallData[4:])
+				if err != nil {
+					t.Fatalf("unpack shares calldata %d: %v", i, err)
+				}
+				if got := args[0].(common.Address); got != alm.Address {
+					t.Errorf("shares arg %d = %s, want %s ALM %s", i, got.Hex(), alm.Prime, alm.Address.Hex())
+				}
+				results = append(results, outbound.Result{Success: true, ReturnData: packUintOutput(t, shares[alm.Address])})
+			}
+			return results, nil
+		case 2: // round 2: USDC balance + one convertToAssetValue per ALM
+			if len(calls) != 1+len(cfg.ALMs) {
+				t.Fatalf("round 2: got %d calls, want %d", len(calls), 1+len(cfg.ALMs))
+			}
+			results := []outbound.Result{{Success: true, ReturnData: packUintOutput(t, big.NewInt(5))}}
+			for i, alm := range cfg.ALMs {
+				args, err := caller.psm3ABI.Methods["convertToAssetValue"].Inputs.Unpack(calls[1+i].CallData[4:])
+				if err != nil {
+					t.Fatalf("unpack convertToAssetValue calldata %d: %v", i, err)
+				}
+				if got := args[0].(*big.Int); got.Cmp(shares[alm.Address]) != 0 {
+					t.Errorf("convertToAssetValue arg %d = %s, want %s ALM's shares %s", i, got, alm.Prime, shares[alm.Address])
+				}
+				// Mirror the contract so a mis-paired argument changes the result.
+				value := new(big.Int).Div(new(big.Int).Mul(args[0].(*big.Int), totalAssets), totalShares)
+				results = append(results, outbound.Result{Success: true, ReturnData: packUintOutput(t, value)})
+			}
+			return results, nil
+		default:
+			t.Fatalf("unexpected multicall round %d", mc.CallCount)
+			return nil, nil
+		}
+	}
+
+	state, err := caller.ReadState(context.Background(), common.HexToHash("0xbeef"))
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	if len(state.ALMPositions) != len(cfg.ALMs) {
+		t.Fatalf("got %d positions, want %d", len(state.ALMPositions), len(cfg.ALMs))
+	}
+	for i, alm := range cfg.ALMs {
+		pos := state.ALMPositions[i]
+		want := new(big.Int).Div(new(big.Int).Mul(shares[alm.Address], totalAssets), totalShares)
+		if pos.Prime != alm.Prime || pos.Address != alm.Address ||
+			pos.Shares.Cmp(shares[alm.Address]) != 0 || pos.AssetValue.Cmp(want) != 0 {
+			t.Errorf("position %d = %+v, want prime %s shares %s value %s", i, pos, alm.Prime, shares[alm.Address], want)
+		}
+	}
+}
+
+// round1Results returns a happy-path ReadState round-1 result set
+// [pocket, usds, susds, totalAssets, rate, totalShares, shares(alm)].
+func round1Results(t *testing.T, c *PSM3Caller, pocket common.Address) []outbound.Result {
+	t.Helper()
+	results := []outbound.Result{{Success: true, ReturnData: packAddressOutput(t, c, "pocket", pocket)}}
+	for i := int64(1); i <= 6; i++ {
+		results = append(results, outbound.Result{Success: true, ReturnData: packUintOutput(t, big.NewInt(i))})
+	}
+	return results
 }
 
 func TestReadState_Round1Failures(t *testing.T) {
@@ -423,6 +625,8 @@ func TestReadState_Round1Failures(t *testing.T) {
 	}{
 		{"failed call", func(r []outbound.Result) { r[1].Success = false }, "balanceOf call failed"},
 		{"garbage return data", func(r []outbound.Result) { r[3].ReturnData = []byte{0xff} }, "unpack totalAssets"},
+		{"failed shares call", func(r []outbound.Result) { r[idxFirstALMShares].Success = false }, "shares call failed"},
+		{"garbage total shares", func(r []outbound.Result) { r[idxTotalShares].ReturnData = []byte{0xff} }, "unpack totalShares"},
 	}
 
 	for _, tc := range tests {
@@ -431,13 +635,7 @@ func TestReadState_Round1Failures(t *testing.T) {
 			caller := resolvedCaller(t, mc)
 
 			mc.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-				results := []outbound.Result{
-					{Success: true, ReturnData: packAddressOutput(t, caller, "pocket", baseConfig(t).PSM3)},
-					{Success: true, ReturnData: packUintOutput(t, big.NewInt(1))},
-					{Success: true, ReturnData: packUintOutput(t, big.NewInt(2))},
-					{Success: true, ReturnData: packUintOutput(t, big.NewInt(3))},
-					{Success: true, ReturnData: packUintOutput(t, big.NewInt(4))},
-				}
+				results := round1Results(t, caller, baseConfig(t).PSM3)
 				tc.mutate(results)
 				return results, nil
 			}
@@ -450,26 +648,56 @@ func TestReadState_Round1Failures(t *testing.T) {
 	}
 }
 
-func TestReadState_Round2Error(t *testing.T) {
-	mc := testutil.NewMockMulticaller()
-	caller := resolvedCaller(t, mc)
-
-	mc.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if mc.CallCount == 1 {
-			return []outbound.Result{
-				{Success: true, ReturnData: packAddressOutput(t, caller, "pocket", baseConfig(t).PSM3)},
-				{Success: true, ReturnData: packUintOutput(t, big.NewInt(1))},
-				{Success: true, ReturnData: packUintOutput(t, big.NewInt(2))},
-				{Success: true, ReturnData: packUintOutput(t, big.NewInt(3))},
-				{Success: true, ReturnData: packUintOutput(t, big.NewInt(4))},
-			}, nil
-		}
-		return nil, errors.New("RPC unavailable")
+func TestReadState_Round2Failures(t *testing.T) {
+	tests := []struct {
+		name    string
+		round2  func() ([]outbound.Result, error)
+		wantErr string
+	}{
+		{
+			"multicall error",
+			func() ([]outbound.Result, error) { return nil, errors.New("RPC unavailable") },
+			"usdc balance at pocket",
+		},
+		{
+			"failed convertToAssetValue call",
+			func() ([]outbound.Result, error) {
+				return []outbound.Result{
+					{Success: true, ReturnData: common.BigToHash(big.NewInt(7)).Bytes()},
+					{Success: false},
+				}, nil
+			},
+			"convertToAssetValue call failed",
+		},
+		{
+			"garbage convertToAssetValue return data",
+			func() ([]outbound.Result, error) {
+				return []outbound.Result{
+					{Success: true, ReturnData: common.BigToHash(big.NewInt(7)).Bytes()},
+					{Success: true, ReturnData: []byte{0xff}},
+				}, nil
+			},
+			"unpack convertToAssetValue",
+		},
 	}
 
-	_, err := caller.ReadState(context.Background(), common.HexToHash("0xdead"))
-	if err == nil || !strings.Contains(err.Error(), "usdc balance at pocket") {
-		t.Fatalf("expected round 2 error, got: %v", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := testutil.NewMockMulticaller()
+			caller := resolvedCaller(t, mc)
+
+			mc.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+				if mc.CallCount == 1 {
+					return round1Results(t, caller, baseConfig(t).PSM3), nil
+				}
+				return tc.round2()
+			}
+
+			_, err := caller.ReadState(context.Background(), common.HexToHash("0xdead"))
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error %v does not contain %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 
@@ -478,13 +706,7 @@ func TestReadState_ZeroPocket(t *testing.T) {
 	caller := resolvedCaller(t, mc)
 
 	mc.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		return []outbound.Result{
-			{Success: true, ReturnData: packAddressOutput(t, caller, "pocket", common.Address{})},
-			{Success: true, ReturnData: packUintOutput(t, big.NewInt(1))},
-			{Success: true, ReturnData: packUintOutput(t, big.NewInt(2))},
-			{Success: true, ReturnData: packUintOutput(t, big.NewInt(3))},
-			{Success: true, ReturnData: packUintOutput(t, big.NewInt(4))},
-		}, nil
+		return round1Results(t, caller, common.Address{}), nil
 	}
 
 	// A zero pocket must hard-fail before reading USDC.balanceOf(0x0).

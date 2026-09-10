@@ -11,10 +11,10 @@ import (
 	"syscall"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	tracker "github.com/archon-research/stl/stl-verify/internal/services/anchorage_tracker"
 )
 
@@ -30,9 +30,8 @@ func init() {
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
-	if err := temporal.RunCronjob(ctx, temporal.BuildMeta{
+	err := temporal.RunCronjob(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporal.CronjobConfig{
 		Name:            "anchorage-indexer",
@@ -40,7 +39,9 @@ func main() {
 		IntervalDefault: "15m",
 		OpenDatabase:    postgres.PoolOpener(postgres.DefaultDBConfig(env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"))),
 		Setup:           setupRunner,
-	}); err != nil {
+	})
+	cancel()
+	if err != nil {
 		slog.Error("fatal", "error", err)
 		os.Exit(1)
 	}
@@ -64,9 +65,9 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 		return nil, err
 	}
 
-	buildReg, err := buildregistry.New(ctx, deps.Pool)
+	buildReg, runID, err := writerrun.Open(ctx, deps.Pool)
 	if err != nil {
-		return nil, fmt.Errorf("registering build: %w", err)
+		return nil, err
 	}
 
 	txm, err := postgres.NewTxManager(deps.Pool, deps.Logger)
@@ -74,7 +75,7 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 		return nil, fmt.Errorf("creating tx manager: %w", err)
 	}
 
-	repo := postgres.NewAnchorageRepository(deps.Pool, txm, deps.Logger, buildReg.BuildID())
+	repo := postgres.NewAnchorageRepository(deps.Pool, txm, deps.Logger, buildReg.BuildID(), runID)
 	primeRepo := postgres.NewPrimeRepository(deps.Pool)
 
 	primeID, err := primeRepo.GetPrimeIDByName(ctx, primeName)

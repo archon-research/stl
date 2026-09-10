@@ -20,16 +20,12 @@ import (
 // by the token and user integration tests in this package.
 func i64(n int64) *int64 { return &n }
 
-const tokenSchemaName = "test_token"
+const tokenDBName = "test_token"
 
 var tokenPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(tokenSchemaName, func() {
-		tokenPool = testutil.SetupSchemaForMain(sharedDSN, tokenSchemaName)
-	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, tokenPool, tokenSchemaName)
-	})
+	useFileDatabase(tokenDBName, &tokenPool)
 }
 
 // truncateToken clears the token table for test isolation.
@@ -45,7 +41,8 @@ func TestGetOrCreateToken_CreatesNewToken(t *testing.T) {
 	truncateToken(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	_, runID := testutil.OpenTestRun(t, ctx, tokenPool)
+	repo, err := NewTokenRepository(tokenPool, nil, 0, runID)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
@@ -72,10 +69,11 @@ func TestGetOrCreateToken_CreatesNewToken(t *testing.T) {
 
 	var symbol string
 	var decimals int
+	var gotRunID *int64
 	err = tokenPool.QueryRow(ctx,
-		`SELECT symbol, decimals FROM token WHERE chain_id = $1 AND address = $2`,
+		`SELECT symbol, decimals, run_id FROM token WHERE chain_id = $1 AND address = $2`,
 		1, addr.Bytes(),
-	).Scan(&symbol, &decimals)
+	).Scan(&symbol, &decimals, &gotRunID)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -85,13 +83,14 @@ func TestGetOrCreateToken_CreatesNewToken(t *testing.T) {
 	if decimals != 18 {
 		t.Errorf("decimals = %d, want 18", decimals)
 	}
+	testutil.RequireRunID(t, gotRunID, runID)
 }
 
 func TestGetOrCreateToken_IdempotentReturnsSameID(t *testing.T) {
 	truncateToken(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	repo, err := NewTokenRepository(tokenPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
@@ -131,7 +130,7 @@ func TestGetOrCreateToken_EmptySymbolIsPersistedAsProvided(t *testing.T) {
 	truncateToken(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	repo, err := NewTokenRepository(tokenPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
@@ -171,7 +170,7 @@ func TestGetOrCreateToken_CreatedAtBlockUsesLeast(t *testing.T) {
 	truncateToken(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	repo, err := NewTokenRepository(tokenPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
@@ -224,7 +223,7 @@ func TestGetOrCreateToken_ConcurrentRaceReturnsSameID(t *testing.T) {
 	truncateToken(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	repo, err := NewTokenRepository(tokenPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
@@ -287,7 +286,7 @@ func TestListTokensMissingSymbol(t *testing.T) {
 	truncateToken(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	repo, err := NewTokenRepository(tokenPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
@@ -338,7 +337,7 @@ func TestListTokensMissingSymbol_RespectsLimit(t *testing.T) {
 	truncateToken(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	repo, err := NewTokenRepository(tokenPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
@@ -385,7 +384,7 @@ func TestResolveTokenSymbol_FillsEmptyAndRefusesClobber(t *testing.T) {
 	truncateToken(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	repo, err := NewTokenRepository(tokenPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
@@ -455,7 +454,7 @@ func TestListTokensMissingSymbol_NullSymbolIsMissing(t *testing.T) {
 	truncateToken(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	repo, err := NewTokenRepository(tokenPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
@@ -511,7 +510,7 @@ func TestResolveTokenSymbol_RejectsEmptySymbol(t *testing.T) {
 	truncateToken(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	repo, err := NewTokenRepository(tokenPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
@@ -552,7 +551,7 @@ func TestGetOrCreateTokens_DedupesBatch(t *testing.T) {
 	truncateToken(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	repo, err := NewTokenRepository(tokenPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
@@ -581,7 +580,7 @@ func TestGetOrCreateTokens_MixedChainBatchRejected(t *testing.T) {
 	truncateToken(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	repo, err := NewTokenRepository(tokenPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
@@ -609,7 +608,7 @@ func TestGetOrCreateTokens_NilBlockInsertsNull(t *testing.T) {
 	truncateToken(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	repo, err := NewTokenRepository(tokenPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
@@ -641,7 +640,7 @@ func TestGetOrCreateTokens_NilBlockPreservesExisting(t *testing.T) {
 	truncateToken(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	repo, err := NewTokenRepository(tokenPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
@@ -684,7 +683,7 @@ func TestGetOrCreateTokens_SymbolDriftWarns(t *testing.T) {
 	truncateToken(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	repo, err := NewTokenRepository(tokenPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
@@ -727,7 +726,7 @@ func TestGetOrCreateTokens_NullBlockSelfHeals(t *testing.T) {
 	truncateToken(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	repo, err := NewTokenRepository(tokenPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
@@ -765,7 +764,7 @@ func TestGetOrCreateTokens_DecimalsDriftFails(t *testing.T) {
 	truncateToken(t, context.Background())
 	ctx := context.Background()
 
-	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	repo, err := NewTokenRepository(tokenPool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}

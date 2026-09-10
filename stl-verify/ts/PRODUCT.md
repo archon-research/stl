@@ -37,5 +37,5 @@ Trustworthy, direct, technically precise, and calm under pressure. UI copy is co
 - Scan performance: the primary dashboard stays readable and responsive at representative allocation counts without layout thrash.
 
 ## Last refreshed from
-- App structure: `stl-verify/ts/ui/src/App.tsx` and `src/components/` (PrimeSidebar, TopBar, SummaryMetric, AllocationGrid, BottomPanel, RiskDetailDrawer).
+- App structure: `stl-verify/ts/ui/src/routes/` (RootLayout, AllocationRoute, ActivitiesRoute), `src/features/` (AllocationGrid, BottomPanel, RiskDetailDrawer, ActivityFeed) and `src/shared/ui/` (PrimeSidebar, TopBar, SummaryMetric).
 - Design tokens: `stl-verify/ts/ui/panda.config.ts` and `DESIGN.md`.

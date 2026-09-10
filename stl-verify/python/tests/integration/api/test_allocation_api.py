@@ -25,6 +25,7 @@ from tests.integration.seed import (
     GHOST_OPEN_PROXY_HEX,
     GHOST_SWEEP_PROXY_HEX,
     GHOST_TIEBREAK_PROXY_HEX,
+    declare_prime_proxy,
     insert_allocation_position,
     insert_oracle_asset,
     insert_token,
@@ -38,7 +39,8 @@ _GROVE_PROXY_HEX = "abcdef1234567890abcdef1234567890abcdef12"
 _OBEX_PROXY_HEX = "fedcba9876543210fedcba9876543210fedcba98"
 _UNKNOWN_PROXY_HEX = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 # Real Spark SubProxy address — used to exercise the ALM-only filter in
-# /v1/primes. Must match app.domain.proxy_kind._SUB_PROXY_HEX.
+# /v1/primes. Must match the subproxy entries in the axis-synome contract
+# (see app.domain.prime_registry.subproxy_addresses).
 _SPARK_SUB_PROXY_HEX = "3300f198988e4c9c63f75df86de36421f06af8c4"
 
 # Underlying tokens seeded by the sparklend migration (all chain_id=1).
@@ -129,6 +131,15 @@ async def _seed(db_url: str) -> None:
                 weth_id,
                 bytes.fromhex(_AWETH_HEX),
             )
+
+            # prime_proxy is static reference data, so these scenario proxies are
+            # declared explicitly; positions alone do not make an address resolve.
+            for _prime_id, _proxy_hex in (
+                (spark_id, _SPARK_PROXY_HEX),
+                (grove_id, _GROVE_PROXY_HEX),
+                (obex_id, _OBEX_PROXY_HEX),
+            ):
+                await declare_prime_proxy(conn, prime_id=_prime_id, proxy_hex=_proxy_hex)
 
             # spark holds aUSDC: an earlier balance (block 1000) and the latest
             # (block 2000). A block_version=1 row at block 1000 simulates a
@@ -324,7 +335,13 @@ def client(async_db_url: str, tmp_path: Path):
     empty_mapping = tmp_path / "empty_mapping.json"
     empty_mapping.write_text("{}")
     test_app = create_app(
-        Settings.model_validate({"database_url": SecretStr(async_db_url), "suraf_mappings_file": empty_mapping})
+        Settings.model_validate(
+            {
+                "database_url": SecretStr(async_db_url),
+                "suraf_mappings_file": empty_mapping,
+                "core_model_mappings_file": empty_mapping,
+            }
+        )
     )
     with TestClient(test_app) as c:
         yield c
@@ -335,17 +352,18 @@ def test_list_primes_returns_seeded_primes(client: TestClient) -> None:
 
     assert response.status_code == 200
     data = response.json()
-    # Assert presence of the primes this test seeds rather than an exact global
-    # count: other scenarios in this module (ghost-balance) add their own ALM
-    # proxies to the same database, and a "list everything" endpoint returns
-    # them all.
-    by_name = {item["name"]: item for item in data}
-    assert by_name["spark"]["id"] == f"0x{_SPARK_PROXY_HEX}"
-    assert by_name["spark"]["address"] == f"0x{_SPARK_PROXY_HEX}"
-    assert by_name["grove"]["id"] == f"0x{_GROVE_PROXY_HEX}"
-    assert by_name["grove"]["address"] == f"0x{_GROVE_PROXY_HEX}"
-    assert by_name["obex"]["id"] == f"0x{_OBEX_PROXY_HEX}"
-    assert by_name["obex"]["address"] == f"0x{_OBEX_PROXY_HEX}"
+    # Keyed by address, not by name: the endpoint lists the whole declared proxy
+    # universe, so a prime legitimately appears once per proxy — the migration's
+    # real spark and grove proxies alongside this module's seeded ones.
+    by_address = {item["address"]: item for item in data}
+    for proxy_hex, name in (
+        (_SPARK_PROXY_HEX, "spark"),
+        (_GROVE_PROXY_HEX, "grove"),
+        (_OBEX_PROXY_HEX, "obex"),
+    ):
+        row = by_address[f"0x{proxy_hex}"]
+        assert row["name"] == name
+        assert row["id"] == f"0x{proxy_hex}"
     # SubProxy rows (e.g. _SPARK_SUB_PROXY_HEX) share spark_id and must be
     # filtered out — only the ALM proxy per prime should appear.
     addresses = {item["address"] for item in data}
@@ -588,8 +606,8 @@ def test_activity_buckets_net_flow_is_signed_and_excludes_sweeps(client: TestCli
             "prime_id": f"0x{_FLOW_PROXY_HEX}",
             "from_timestamp": "2026-01-01T00:00:00Z",
             "to_timestamp": "2026-01-01T01:00:00Z",
-            "resolution": "PT1H",
-            "aggregate": "true",
+            "frequency": "PT1H",
+            "aggregation_method": "end-period",
         },
     )
 
@@ -618,8 +636,8 @@ def test_activity_buckets_exclude_direct_asset_flows(client: TestClient) -> None
             "prime_id": f"0x{_DIRECT_FLOW_PROXY_HEX}",
             "from_timestamp": "2026-01-01T00:00:00Z",
             "to_timestamp": "2026-01-01T01:00:00Z",
-            "resolution": "PT1H",
-            "aggregate": "true",
+            "frequency": "PT1H",
+            "aggregation_method": "end-period",
         },
     )
 
@@ -649,8 +667,8 @@ def test_total_capital_buckets_locf_carry_forward_and_leading_gap(client: TestCl
         params={
             "from_timestamp": "2025-12-31T23:00:00Z",
             "to_timestamp": "2026-01-01T03:30:00Z",
-            "resolution": "PT1H",
-            "aggregate": "true",
+            "frequency": "PT1H",
+            "aggregation_method": "end-period",
         },
     )
 
@@ -685,8 +703,8 @@ def test_total_capital_returns_all_null_when_prime_has_no_treasury(client: TestC
         params={
             "from_timestamp": "2026-01-01T00:00:00Z",
             "to_timestamp": "2026-01-01T03:00:00Z",
-            "resolution": "PT1H",
-            "aggregate": "true",
+            "frequency": "PT1H",
+            "aggregation_method": "end-period",
         },
     )
 
@@ -701,7 +719,8 @@ def test_total_capital_returns_all_null_when_prime_has_no_treasury(client: TestC
 def test_risk_capital_self_computed_total_is_latest_treasury(client: TestClient) -> None:
     """The self-computed risk-capital endpoint reports Total Risk Capital from the
     latest on-chain SubProxy USDS balance (the 2.1M observation wins over 2.0M),
-    independent of the Star feed. The default model (gap_sweep) is reported and a
+    independent of the Star feed. ``model`` reports the top of the indexed view's
+    preference order (core_model) regardless of what actually priced, and a
     per-allocation breakdown is present; required RRC depends on model coverage
     which the fixture does not seed, so it is not asserted here.
     """
@@ -709,7 +728,7 @@ def test_risk_capital_self_computed_total_is_latest_treasury(client: TestClient)
 
     assert response.status_code == 200
     body = response.json()
-    assert body["model"] == "gap_sweep"
+    assert body["model"] == "core_model"
     assert Decimal(body["total_risk_capital_usd"]) == Decimal("2100000")
     assert isinstance(body["per_allocation"], list)
 

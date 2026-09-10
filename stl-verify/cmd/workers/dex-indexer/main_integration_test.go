@@ -12,9 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -24,21 +21,17 @@ var (
 	sharedLocalStackCfg testutil.LocalStackConfig
 )
 
+// rawBucketPrefix satisfies chainutil.ValidateS3BucketForChain, a prefix check
+// rather than an equality one, so a per-test suffix is allowed.
+const rawBucketPrefix = "stl-sentineltest-ethereum-raw-"
+
 func TestMain(m *testing.M) {
-	dsn, dbCleanup := testutil.StartTimescaleDBForMain()
-	sharedDSN = dsn
-	redisAddr, redisCleanup := testutil.StartRedisForMain()
-	sharedRedisAddr = redisAddr
-	lsCfg, lsCleanup := testutil.StartLocalStackForMain("s3")
-	sharedLocalStackCfg = lsCfg
-
-	code := m.Run()
-
-	lsCleanup()
-	redisCleanup()
-	dbCleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.RunShared(m, testutil.Shared{
+		TimescaleDSN:       &sharedDSN,
+		RedisAddr:          &sharedRedisAddr,
+		LocalStack:         &sharedLocalStackCfg,
+		LocalStackServices: "s3",
+	}))
 }
 
 // ---------------------------------------------------------------------------
@@ -51,10 +44,10 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 
 	// CHAIN_ID=1 lets ParseConfig accept the default mainnet Alchemy endpoint
 	// convention and pass the S3-bucket / chain cross-check for "ethereum".
-	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
-	t.Setenv("S3_BUCKET", "stl-sentineltest-ethereum-raw")
+	t.Setenv("S3_BUCKET", testutil.S3TestBucketName(t, rawBucketPrefix))
 	t.Setenv("DEPLOY_ENV", "test")
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("DEX", "curve")
@@ -63,7 +56,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 		"-queue", "http://localhost/test-queue",
 		"-redis", "localhost:6379",
 		"-db", "postgres://invalid:invalid@localhost:1/nonexistent?connect_timeout=1",
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error for bad database URL")
 	}
@@ -73,28 +66,31 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	}
 }
 
-// TestRunIntegration_StartupAndShutdown exercises the full cmd-level boot path
-// (Bootstrap -> factory.BuildHandler -> LoadPools over the seeded registry ->
-// RunLoop) for BOTH DEX factories. Running only DEX=curve would let a
-// uniswap-v3-specific wiring regression (nil dep, chain-ID plumbing, seed drift
-// in RegisteredPoolsFromRows) ship green, since the registry-map unit test only
-// checks ServiceName/MetricPrefix, not the production build path.
+// Every DEX factory is booted, not just one: the registry-map unit test checks
+// ServiceName/MetricPrefix, never the production build path.
 func TestRunIntegration_StartupAndShutdown(t *testing.T) {
-	for _, dex := range []string{"curve", "uniswap-v3"} {
+	for _, dex := range []string{"curve", "uniswap-v3", "uniswap-v4"} {
 		t.Run(dex, func(t *testing.T) {
 			runStartupAndShutdown(t, dex)
 		})
 	}
 }
 
-func runStartupAndShutdown(t *testing.T, dex string) {
+// dexRunEnv is a booted-and-wired environment for run(): a migrated database
+// plus mock chain, SQS and S3 endpoints, with the process env pointing at them.
+type dexRunEnv struct {
+	args     []string
+	sqsState *testutil.MockSQSServer
+}
+
+func setupDexRunEnv(t *testing.T, dex string) dexRunEnv {
+	t.Helper()
 	ctx := context.Background()
 
-	// SetupTestSchema applies all migrations, which seed the Curve pools and the
-	// 18 Uniswap V3 pools on chain_id=1. run() calls LoadPools(chainID) and fails
-	// hard on zero pools, so CHAIN_ID must be "1" to match the seeded rows.
-	_, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
-	defer dbCleanup()
+	// Migrations seed every DEX's pools on chain_id=1, and run() fails hard on
+	// zero pools, so CHAIN_ID must match.
+	_, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
+	t.Cleanup(dbCleanup)
 
 	// After the capability-probe removal, startup makes no chain call, and with no
 	// SQS messages RunLoop just polls; a fixed "0x1" reply is enough for the dial.
@@ -102,25 +98,16 @@ func runStartupAndShutdown(t *testing.T, dex string) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"result":"0x1"}`)
 	}))
-	defer rpcServer.Close()
+	t.Cleanup(rpcServer.Close)
 
 	sqsServer, sqsState := testutil.StartMockSQS(t)
-	defer sqsServer.Close()
+	t.Cleanup(sqsServer.Close)
 
 	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
+	bucket := testutil.S3TestBucketName(t, rawBucketPrefix)
+	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 
-	// Bucket name must satisfy the stl-sentinel{env}-{chain}-raw prefix convention;
-	// chainutil resolves chain 1 to "ethereum", so this is the only valid name.
-	const (
-		bucket    = "stl-sentineltest-ethereum-raw"
-		deployEnv = "test"
-	)
-
-	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatalf("create S3 bucket: %v", err)
-	}
-
-	t.Setenv("BUILD_GIT_HASH", "test")
+	testutil.SetBuildGitHash(t)
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
@@ -129,29 +116,60 @@ func runStartupAndShutdown(t *testing.T, dex string) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 	t.Setenv("S3_BUCKET", bucket)
-	t.Setenv("DEPLOY_ENV", deployEnv)
+	t.Setenv("DEPLOY_ENV", "test")
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("DEX", dex)
+
+	return dexRunEnv{
+		args: []string{
+			"-queue", "http://localhost/test-queue",
+			"-db", dbURL,
+			"-redis", sharedRedisAddr,
+		},
+		sqsState: sqsState,
+	}
+}
+
+const spinsForeverIfBooted = "a booted worker never crashloops on it, because ProcessMessages " +
+	"revalidates on every poll and RunLoop only logs what it returns, so the pod reports Ready " +
+	"and spins logging forever while the queue never drains"
+
+func TestRunIntegration_RefusesAVisibilityTimeoutAReceiveCanOutrun(t *testing.T) {
+	env := setupDexRunEnv(t, "curve")
+	t.Setenv("SQS_VISIBILITY_TIMEOUT", "30")
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	errCh := make(chan error, 1)
+	go func() { errCh <- run(runCtx, env.args, nil) }()
+
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "visibility timeout") {
+			t.Fatalf("run() error = %v, want one naming the visibility timeout: %s", err, spinsForeverIfBooted)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatalf("run() kept booting on a 30s visibility timeout: %s", spinsForeverIfBooted)
+	}
+}
+
+func runStartupAndShutdown(t *testing.T, dex string) {
+	env := setupDexRunEnv(t, dex)
+	sqsState := env.sqsState
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	teardownGuardArmed := make(chan struct{}, 1)
+	errCh := make(chan error, 1)
 	go func() {
-		errCh <- run(runCtx, []string{
-			"-queue", "http://localhost/test-queue",
-			"-db", dbURL,
-			"-redis", sharedRedisAddr,
-		})
+		errCh <- run(runCtx, env.args, func() { teardownGuardArmed <- struct{}{} })
 	}()
 
 	// A ReceiveMessage call means Bootstrap -> LoadPools -> the DEX's
 	// BuildHandler all succeeded and RunLoop is polling.
-	select {
-	case <-sqsState.FirstCallReceived:
-	case <-time.After(30 * time.Second):
-		t.Fatal("timed out waiting for service to start")
-	}
+	testutil.WaitForFirstPoll(t, errCh, sqsState.FirstCallReceived)
 
 	// Service is running and polling SQS. Trigger graceful shutdown.
 	cancel()
@@ -167,5 +185,12 @@ func runStartupAndShutdown(t *testing.T, dex string) {
 
 	if receives := sqsState.Receives(); receives < 1 {
 		t.Errorf("expected at least 1 ReceiveMessage call, got %d", receives)
+	}
+	// pgxpool.Close waits on any connection an abandoned handler still holds, so
+	// the teardown needs the same bound lifecycle.Run gives the other workers.
+	select {
+	case <-teardownGuardArmed:
+	default:
+		t.Error("run() tore down without arming the teardown timeout guard")
 	}
 }

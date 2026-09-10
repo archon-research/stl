@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
 
@@ -29,8 +30,8 @@ class AllocationService:
     async def list_protocols(self) -> list[ProtocolMetadata]:
         return await self._repository.list_protocols()
 
-    async def list_primes(self) -> list[Prime]:
-        return await self._repository.list_primes()
+    async def list_primes(self, allowed_vaults: Sequence[EthAddress] | None = None) -> list[Prime]:
+        return await self._repository.list_primes(allowed_vaults=allowed_vaults)
 
     async def prime_exists(self, prime_address: EthAddress) -> bool:
         return await self._repository.prime_exists(prime_address)
@@ -44,8 +45,27 @@ class AllocationService:
     async def list_anchorage_custody_holdings(self, prime_id: EthAddress) -> list[AnchorageCustodyHolding]:
         return await self._repository.list_anchorage_custody_holdings(prime_id)
 
+    async def primary_proxy_address(self, prime_id: EthAddress) -> str | None:
+        return await self._repository.primary_proxy_address(prime_id)
+
     async def get_total_usd_exposure(self, prime_id: EthAddress) -> Decimal:
         return await self._repository.get_total_usd_exposure(prime_id)
+
+    async def prime_proxy_addresses(self, prime_id: EthAddress) -> list[EthAddress]:
+        """Every allocation proxy of the prime that owns ``prime_id``."""
+        return await self._repository.list_prime_proxy_addresses(prime_id)
+
+    async def _prime_proxies(self, prime_id: EthAddress | None) -> list[EthAddress] | None:
+        """Widen one proxy address to every allocation proxy of its prime.
+
+        A prime allocates through one proxy per chain, so activity addressed by
+        any one of them belongs to the whole prime; scoping to the address as
+        given reports a fraction of the prime's flows against a prime-wide
+        headline.
+        """
+        if prime_id is None:
+            return None
+        return await self._repository.list_prime_proxy_addresses(prime_id)
 
     async def list_allocation_activity(
         self,
@@ -59,9 +79,14 @@ class AllocationService:
         from_timestamp: datetime | None = None,
         to_timestamp: datetime | None = None,
         limit: int = 100,
+        allowed_vaults: Sequence[EthAddress] | None = None,
     ) -> list[AllocationActivityEvent]:
+        # Authorization is part of the query semantics: allowed_vaults travels
+        # to the repository and lands in the SQL WHERE, before ORDER BY/LIMIT.
+        # None = auth off (no filter); [] = caller may view nothing (no rows).
         return await self._repository.list_allocation_activity(
-            prime_id=prime_id,
+            proxy_addresses=await self._prime_proxies(prime_id),
+            allowed_vaults=allowed_vaults,
             chain_id=chain_id,
             protocol_name=protocol_name,
             action_type=action_type,
@@ -85,9 +110,13 @@ class AllocationService:
         to_timestamp: datetime,
         bucket_seconds: float,
         limit: int = 100,
+        allowed_vaults: Sequence[EthAddress] | None = None,
     ) -> list[AllocationActivityBucket]:
+        # Same contract as the raw feed: the allow-list lands in the SQL WHERE,
+        # so an aggregate can only ever sum rows the caller may view.
         return await self._repository.list_activity_buckets(
-            prime_id=prime_id,
+            proxy_addresses=await self._prime_proxies(prime_id),
+            allowed_vaults=allowed_vaults,
             chain_id=chain_id,
             protocol_name=protocol_name,
             action_type=action_type,
@@ -126,7 +155,7 @@ class AllocationService:
         limit: int = 100,
     ) -> list[ExposureBucket]:
         return await self._repository.list_exposure_buckets(
-            prime_address,
+            await self._repository.list_prime_proxy_addresses(prime_address),
             from_timestamp=from_timestamp,
             to_timestamp=to_timestamp,
             bucket_seconds=bucket_seconds,
