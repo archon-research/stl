@@ -823,7 +823,13 @@ reference. They meet at three seams, and only these:
 
 ### 10. The pivot: the consumer read contract
 
-Consumers read the pivot, not the graph. SECstore does not exist in isolation — its purpose is to
+Consumers read the pivot, not the graph — **reading** meaning attributes, classification and
+resolved relationships. Holding a node id as a foreign reference is not walking the graph: a
+consumer may store an `id` and resolve it through `dim_security` / `dim_instrument` at read
+time, which is how a consumer outside this store addresses one thing in it. What the rule
+forbids is reading attributes off `sec_node` or traversing `sec_edge` directly.
+
+SECstore does not exist in isolation — its purpose is to
 feed operational engines, rule stores, and business logic (D-6), and the operational side links
 back to it by reference (D-5). The model's read surface is the **pivot** (IN-1): materialized
 tables, regenerated when the graph changes, not per query. "View" is the wrong word for them
