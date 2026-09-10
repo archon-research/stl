@@ -130,19 +130,19 @@ promotion test — *does it carry attributes of its own, and do other things poi
 | `ACCOUNT` | proposed | a book that can hold things (prime, vault, custody account); what holdings-by-dimension groups on, and the source endpoint of `ALLOCATES`. Ratify when the first account-grained consumer lands. |
 | `EVENT` | deferred | dated corporate actions stay in an events table the graph references; an event promotes only when one event spans several securities and carries a ratio |
 
-- **Identity is the stable contract**: the node `id`, and only the `id`. It is what the
-  relationship store joins on (`sec_edge.src_id` / `dst_id`); `record_type` is carried for
-  constraint and filtering, not as an independent key, and the edge store's `src_kind` /
-  `dst_kind` CHECKs enforce that the kind agrees with the id's prefix — so it is derivable
-  from the id rather than part of it. The timeseries does not join on a node at all: it meets
-  this store at the three seams of §9 (instrument register, alias register, `block_meta`),
-  and nothing is stamped onto position rows.
-- **Chain is an instrument attribute, not a security's.** It qualifies a deployment — the
-  same native key reused across chains — so it lives on the instrument register row and in
-  `position_id`'s pre-image (VEC-400, merged), never as part of a security's identity. One
-  security has N chain deployments: six USDC deployments resolve to one `sec-usdc`. A
-  nullable `chain_id` on the node is a convenience column for single-chain things, and is
-  NULL for every ENTITY, CONCEPT and SOURCE by construction.
+- **Identity is the stable contract**: the node `id`. It is what an edge's endpoints reference
+  and what every register and alias row resolves to. `record_type` is a required attribute
+  the relationship vocabulary constrains against (§5), and because ids are kind-prefixed it
+  is derivable from the id rather than independent of it. The timeseries joins no node: it
+  meets this store at the three seams of §9 — instrument register, alias register,
+  `block_meta` — with nothing stamped onto position rows.
+- **Chain qualifies a deployment, not a security.** The same native key is reused across
+  chains, so chain is an instrument attribute: it belongs on the instrument register row
+  (below) and in `position_id`'s pre-image, where the already-built helper states its
+  purpose — when set it disambiguates the same native `instrument_key` reused across chains.
+  A security that trades on several chains cannot carry one chain: six USDC deployments
+  resolve to one `sec-usdc`. Whether a realization also keeps a nullable chain field on the
+  node for single-chain convenience is a realization choice, and is not identity.
 - **The instrument is a key, not a node — decided.** A native key resolves to a security
   through the **instrument register**: `instrument_key → security_id`, where the destination
   is an ordinary SECURITY node id (a soft reference resolved through the current view, like an
