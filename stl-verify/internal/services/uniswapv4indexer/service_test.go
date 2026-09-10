@@ -114,10 +114,11 @@ func (r *fakeUniswapRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.Unis
 	}
 	r.lastWrites = w
 	counts := outbound.StateRowCounts{
-		Attempted:          int64(len(w.States)),
-		Persisted:          int64(len(w.States)),
-		TicksPersisted:     int64(len(w.Ticks)),
-		PositionsPersisted: int64(len(w.Positions)),
+		Attempted:             int64(len(w.States)),
+		Persisted:             int64(len(w.States)),
+		TicksPersisted:        int64(len(w.Ticks)),
+		PositionsPersisted:    int64(len(w.Positions)),
+		NFTTransfersPersisted: int64(len(w.NFTTransfers)),
 	}
 	if r.stateRowsReturn != nil {
 		counts.Persisted = *r.stateRowsReturn
@@ -373,6 +374,8 @@ func servicePool() RegisteredPool {
 		ID:                7,
 		PoolManager:       poolManagerAddress(),
 		StateView:         common.HexToAddress(stateViewAddr),
+		PositionManagerID: positionManagerRowID,
+		PositionManager:   common.HexToAddress(positionManagerAddr),
 		PoolIDHash:        common.HexToHash(wbtcWstethPoolID),
 		Currency0:         common.HexToAddress(wbtcAddress),
 		Currency1:         common.HexToAddress(wstethAddress),
@@ -703,6 +706,32 @@ func TestBlockHandler_MixedEventsPersistsBlockWrites(t *testing.T) {
 	}
 	if len(w.Positions) != 1 {
 		t.Errorf("Positions = %d, want 1 (the modify event's position)", len(w.Positions))
+	}
+}
+
+// A posm transfer touches no pool, so hasEvents is the only thing that keeps the
+// block from returning before the write.
+func TestBlockHandler_PosmTransferOnlyBlockPersistsTheTransfer(t *testing.T) {
+	pool := servicePool()
+	svc, repo, mc, txMgr := newTestService(t, pool)
+
+	receipt := shared.TransactionReceipt{Logs: []shared.Log{posmMoveFixtureLog()}}
+	if err := svc.BlockHandler()(context.Background(), blockEvent(200), []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	if txMgr.calls != 1 {
+		t.Fatalf("WithTransaction calls = %d, want 1", txMgr.calls)
+	}
+	if mc.executeAtHashCalls != 0 {
+		t.Errorf("ExecuteAtHash calls = %d, want 0 (a transfer touches no pool, so nothing is snapshotted)", mc.executeAtHashCalls)
+	}
+	w := repo.lastWrites
+	if len(w.NFTTransfers) != 1 || w.NFTTransfers[0].TokenID.Int64() != 388720 {
+		t.Errorf("NFTTransfers = %+v, want the one decoded transfer of token 388720", w.NFTTransfers)
+	}
+	if len(w.States) != 0 || len(w.Ticks) != 0 || len(w.Positions) != 0 {
+		t.Errorf("states/ticks/positions = %d/%d/%d, want none", len(w.States), len(w.Ticks), len(w.Positions))
 	}
 }
 

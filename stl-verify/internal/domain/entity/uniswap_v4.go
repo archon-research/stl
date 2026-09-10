@@ -31,6 +31,10 @@ func validatePoolBlockKey(poolID, blockNumber int64, blockVersion int, blockTime
 	if poolID <= 0 {
 		return fmt.Errorf("poolID must be positive, got %d", poolID)
 	}
+	return validateV4BlockKey(blockNumber, blockVersion, blockTimestamp)
+}
+
+func validateV4BlockKey(blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
 	if blockNumber <= 0 {
 		return fmt.Errorf("blockNumber must be positive, got %d", blockNumber)
 	}
@@ -406,4 +410,32 @@ func (e *UniswapV4PoolEvent) Validate() error {
 		return fmt.Errorf("params must be valid JSON")
 	}
 	return nil
+}
+
+// UniswapV4PositionNFTTransfer is one ERC-721 Transfer log from the V4
+// PositionManager. From is address(0) on a mint and To on a burn, so neither is
+// required to be set.
+type UniswapV4PositionNFTTransfer struct {
+	PositionManagerID int64
+	TokenID           *big.Int
+	BlockNumber       int64
+	BlockVersion      int
+	BlockTimestamp    time.Time
+	TxHash            common.Hash
+	LogIndex          int
+	From              common.Address
+	To                common.Address
+}
+
+func (t *UniswapV4PositionNFTTransfer) Validate() error {
+	if t.PositionManagerID <= 0 {
+		return fmt.Errorf("positionManagerID must be positive, got %d", t.PositionManagerID)
+	}
+	if err := validateV4BlockKey(t.BlockNumber, t.BlockVersion, t.BlockTimestamp); err != nil {
+		return err
+	}
+	if err := validatePoolLogKey(t.TxHash, t.LogIndex); err != nil {
+		return err
+	}
+	return requireNonNegativeBigInt("tokenID", t.TokenID)
 }

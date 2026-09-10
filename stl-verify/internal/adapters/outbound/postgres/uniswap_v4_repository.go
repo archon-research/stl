@@ -42,6 +42,7 @@ func NewUniswapV4Repository(pool *pgxpool.Pool, buildID buildregistry.BuildID) *
 // manager_id separates an absent manager row from an off-chain protocol.
 const loadUniswapV4PoolsSQL = `
 	SELECT p.id, m.manager_id, m.protocol_id, m.pool_manager_address, m.state_view_address,
+	       pm.position_manager_id, pm.position_manager_protocol_id, pm.position_manager_address,
 	       p.pool_id, p.currency0, p.currency1,
 	       t0.address, t0.decimals, t1.address, t1.decimals,
 	       p.fee, p.tick_spacing, p.hooks, p.deploy_block, p.snapshot_supported
@@ -63,6 +64,15 @@ const loadUniswapV4PoolsSQL = `
 	    ORDER BY mgr.processing_version DESC
 	    LIMIT 1
 	) m ON TRUE
+	LEFT JOIN LATERAL (
+	    SELECT posm.id AS position_manager_id, posm.protocol_id AS position_manager_protocol_id,
+	           pr.address AS position_manager_address
+	    FROM uniswap_v4_position_manager posm
+	    LEFT JOIN protocol pr ON pr.id = posm.protocol_id AND pr.chain_id = $1
+	    WHERE posm.chain_id = $1
+	    ORDER BY posm.processing_version DESC
+	    LIMIT 1
+	) pm ON TRUE
 	LEFT JOIN token t0 ON t0.id = p.currency0_token_id AND t0.chain_id = $1
 	LEFT JOIN token t1 ON t1.id = p.currency1_token_id AND t1.chain_id = $1
 	ORDER BY p.id`
@@ -94,6 +104,9 @@ func scanUniswapV4PoolRow(rows pgx.Rows, chainID int64) (outbound.UniswapV4PoolR
 		managerID              *int64
 		protocolID             *int64
 		poolManager, stateView []byte
+		positionManagerID      *int64
+		positionManagerProtoID *int64
+		positionManagerAddress []byte
 		onchainPoolID          []byte
 		currency0, currency1   []byte
 		token0, token1         []byte
@@ -105,6 +118,7 @@ func scanUniswapV4PoolRow(rows pgx.Rows, chainID int64) (outbound.UniswapV4PoolR
 		row                    outbound.UniswapV4PoolRow
 	)
 	if err := rows.Scan(&id, &managerID, &protocolID, &poolManager, &stateView,
+		&positionManagerID, &positionManagerProtoID, &positionManagerAddress,
 		&onchainPoolID, &currency0, &currency1,
 		&token0, &decimals0, &token1, &decimals1,
 		&fee, &tickSpacing, &hooks, &deployBlock, &snapshotSupported); err != nil {
@@ -115,6 +129,12 @@ func scanUniswapV4PoolRow(rows pgx.Rows, chainID int64) (outbound.UniswapV4PoolR
 	}
 	if poolManager == nil {
 		return row, fmt.Errorf("uniswap_v4_pool_manager row %d for chain %d references protocol %d, which is not on chain %d", *managerID, chainID, *protocolID, chainID)
+	}
+	if positionManagerID == nil {
+		return row, fmt.Errorf("chain %d has uniswap_v4 pools (e.g. %d) but no uniswap_v4_position_manager row", chainID, id)
+	}
+	if positionManagerAddress == nil {
+		return row, fmt.Errorf("uniswap_v4_position_manager row %d for chain %d references protocol %d, which is not on chain %d", *positionManagerID, chainID, *positionManagerProtoID, chainID)
 	}
 
 	currency0Decimals, err := currencyTokenDecimals(id, "currency0", common.BytesToAddress(currency0), token0, decimals0)
@@ -131,6 +151,8 @@ func scanUniswapV4PoolRow(rows pgx.Rows, chainID int64) (outbound.UniswapV4PoolR
 		ProtocolID:        *protocolID,
 		PoolManager:       common.BytesToAddress(poolManager),
 		StateView:         common.BytesToAddress(stateView),
+		PositionManagerID: *positionManagerID,
+		PositionManager:   common.BytesToAddress(positionManagerAddress),
 		PoolIDHash:        common.BytesToHash(onchainPoolID),
 		Currency0:         common.BytesToAddress(currency0),
 		Currency1:         common.BytesToAddress(currency1),
@@ -392,10 +414,28 @@ func convertV4LiquidityEvents(events []*entity.UniswapV4LiquidityEvent) ([]v4Liq
 }
 
 type v4BatchRows struct {
-	states     []v4StateConverted
-	swaps      []v4SwapConverted
-	liqs       []v4LiquidityEventConverted
-	poolEvents []*entity.UniswapV4PoolEvent
+	states       []v4StateConverted
+	swaps        []v4SwapConverted
+	liqs         []v4LiquidityEventConverted
+	poolEvents   []*entity.UniswapV4PoolEvent
+	nftTransfers []v4NFTTransferConverted
+}
+
+type v4NFTTransferConverted struct {
+	t       *entity.UniswapV4PositionNFTTransfer
+	tokenID pgtype.Numeric
+}
+
+func convertV4NFTTransfers(transfers []*entity.UniswapV4PositionNFTTransfer) ([]v4NFTTransferConverted, error) {
+	out := make([]v4NFTTransferConverted, 0, len(transfers))
+	for i, t := range transfers {
+		tokenID, convErr := BigIntToNumericRequired(t.TokenID, "token_id")
+		if convErr != nil {
+			return nil, fmt.Errorf("nft transfer %d converting token_id: %w", i, convErr)
+		}
+		out = append(out, v4NFTTransferConverted{t: t, tokenID: tokenID})
+	}
+	return out, nil
 }
 
 func convertV4BlockWrites(w outbound.UniswapV4BlockWrites) (v4BatchRows, error) {
@@ -411,23 +451,41 @@ func convertV4BlockWrites(w outbound.UniswapV4BlockWrites) (v4BatchRows, error) 
 	if err != nil {
 		return v4BatchRows{}, err
 	}
-	return v4BatchRows{states: states, swaps: swaps, liqs: liqs, poolEvents: w.PoolEvents}, nil
+	nftTransfers, err := convertV4NFTTransfers(w.NFTTransfers)
+	if err != nil {
+		return v4BatchRows{}, err
+	}
+	return v4BatchRows{
+		states: states, swaps: swaps, liqs: liqs,
+		poolEvents: w.PoolEvents, nftTransfers: nftTransfers,
+	}, nil
 }
 
 type v4BatchSection struct {
-	name            string
-	count           int
-	countsStateRows bool
+	name  string
+	count int
+	// record adds one statement's outcome to the counts the caller reports.
+	record func(*outbound.StateRowCounts, int64)
+}
+
+func recordStateRow(c *outbound.StateRowCounts, affected int64) {
+	c.Attempted++
+	c.Persisted += affected
+}
+
+func recordNFTTransferRow(c *outbound.StateRowCounts, affected int64) {
+	c.NFTTransfersPersisted += affected
 }
 
 // Order must match queueUniswapV4Batch: pgx returns batch results positionally,
 // so a reordering silently mis-attributes the row counts and the error messages.
 func (rows v4BatchRows) sections() []v4BatchSection {
 	return []v4BatchSection{
-		{name: "state", count: len(rows.states), countsStateRows: true},
+		{name: "state", count: len(rows.states), record: recordStateRow},
 		{name: "swap", count: len(rows.swaps)},
 		{name: "liquidity event", count: len(rows.liqs)},
 		{name: "pool event", count: len(rows.poolEvents)},
+		{name: "nft transfer", count: len(rows.nftTransfers), record: recordNFTTransferRow},
 	}
 }
 
@@ -438,6 +496,7 @@ func queueUniswapV4Batch(batch *pgx.Batch, rows v4BatchRows, buildID buildregist
 	queueV4Swaps(batch, rows.swaps, buildID)
 	queueV4LiquidityEvents(batch, rows.liqs, buildID)
 	queueV4PoolEvents(batch, rows.poolEvents, buildID)
+	queueV4NFTTransfers(batch, rows.nftTransfers, buildID)
 }
 
 func queueV4States(batch *pgx.Batch, states []v4StateConverted, buildID buildregistry.BuildID) {
@@ -509,6 +568,22 @@ func queueV4PoolEvents(batch *pgx.Batch, poolEvents []*entity.UniswapV4PoolEvent
 	}
 }
 
+func queueV4NFTTransfers(batch *pgx.Batch, transfers []v4NFTTransferConverted, buildID buildregistry.BuildID) {
+	for _, c := range transfers {
+		t := c.t
+		batch.Queue(
+			`INSERT INTO uniswap_v4_position_nft_transfer
+			   (position_manager_id, token_id, block_number, block_version, block_timestamp,
+			    tx_hash, log_index, from_address, to_address, processing_version, build_id)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,
+			         next_processing_version_uniswap_v4_position_nft_transfer($1,$3,$4,$7,$10), $10)
+			 ON CONFLICT (position_manager_id, block_timestamp, block_number, block_version, log_index, processing_version) DO NOTHING`,
+			t.PositionManagerID, c.tokenID, t.BlockNumber, t.BlockVersion, t.BlockTimestamp,
+			t.TxHash.Bytes(), t.LogIndex, t.From.Bytes(), t.To.Bytes(), int(buildID),
+		)
+	}
+}
+
 func sendUniswapV4Batch(ctx context.Context, tx pgx.Tx, batch *pgx.Batch, rows v4BatchRows) (stateRows outbound.StateRowCounts, err error) {
 	br := tx.SendBatch(ctx, batch)
 	defer func() {
@@ -523,9 +598,8 @@ func sendUniswapV4Batch(ctx context.Context, tx pgx.Tx, batch *pgx.Batch, rows v
 			if readErr != nil {
 				return stateRows, fmt.Errorf("batch %s %d: %w", section.name, i, readErr)
 			}
-			if section.countsStateRows {
-				stateRows.Attempted++
-				stateRows.Persisted += tag.RowsAffected()
+			if section.record != nil {
+				section.record(&stateRows, tag.RowsAffected())
 			}
 		}
 	}
