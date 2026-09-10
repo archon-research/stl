@@ -242,11 +242,9 @@ _GET_TOKEN_BY_CHAIN_ADDRESS_SQL = text(
 
 _LATEST_PRICE_SQL = text(
     f"""
-    -- Both halves read the trigger-maintained *_current caches — one row per
-    -- source per token — not the onchain_token_price / offchain_token_price
-    -- hypertables. A latest-row read with no time predicate cannot exclude a
-    -- chunk, so on the histories this statement planned over ~700 chunks per
-    -- call: 63 MB and 5.6 s of planning for a 40 ms read on staging (VEC-672).
+    -- Both halves read the *_current caches (one row per source per token): a
+    -- latest-row read with no time predicate cannot exclude a chunk of the price
+    -- histories, so on them this statement planned over every chunk (VEC-672).
     WITH latest_onchain AS (
         SELECT
             tpc.token_id,
@@ -260,9 +258,8 @@ _LATEST_PRICE_SQL = text(
         FROM token_price_current tpc
         JOIN oracle o ON o.id = tpc.oracle_id
         WHERE tpc.token_id = :token_id
-          -- A cache row without a timestamp is one whose winning history row a
-          -- plain session cannot read (20260910_120000); it cannot be dated, so
-          -- it is absent here, exactly as it was absent from the history read.
+          -- An undated cache row (20260910_120050 could not read its history
+          -- row) is absent here, exactly as it was absent from the history read.
           AND tpc.block_timestamp IS NOT NULL
           -- enabled-mapping filter + oracle_id tiebreak (canonical rationale, incl.
           -- the append-on-change read path, on _DIRECT_ASSET_HOLDINGS_SQL in

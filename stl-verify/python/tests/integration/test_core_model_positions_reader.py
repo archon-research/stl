@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.adapters.postgres.core_model_positions_reader import PostgresPositionsReader
+from app.adapters.postgres.core_model_positions_reader import _FEED_ALIVE, PostgresPositionsReader
 from tests.integration.core_model_seed import seed_spoof_token
 from tests.integration.seed import (
     insert_maple_loan,
@@ -457,3 +457,27 @@ async def test_syrup_a_stale_pool_cycle_fails_the_run(engine, syrup_conn):
 async def test_syrup_without_a_matching_pool_fails_the_run(engine, syrup_conn):
     with pytest.raises(ValueError, match="exactly one syrup pool"):
         await PostgresPositionsReader(engine).get_protocol_data(**{**_SYRUP, "loan_token": "USDT"})
+
+
+async def test_feed_liveness_is_per_oracle_across_tokens_and_ignores_undated_cache_rows(engine):
+    # _FEED_ALIVE reads token_price_current (VEC-672): one row per (oracle, token),
+    # so "some row in the window" must hold across the feed's tokens, not per
+    # token, and a cache row the backfill could not date (20260910_120050) is not
+    # evidence that the feed is alive.
+    async with engine.begin() as conn:
+        ids = await _ids(conn)
+        await _seed_price(conn, ids["weth"], ids["sparklend"], 2000.0, dt.timedelta(days=40), block=50)
+        await _seed_price(conn, ids["usdt"], ids["sparklend"], 1.0, dt.timedelta(minutes=1))
+
+        async def alive(oracle_id: int) -> bool:
+            params = {"oracle_id": oracle_id, "max_age": dt.timedelta(days=2)}
+            return (await conn.execute(_FEED_ALIVE, params)).scalar() == 1
+
+        assert await alive(ids["sparklend"]), "one recent token on the feed is enough"
+        assert not await alive(ids["chainlink"]), "a feed that wrote nothing is silent"
+
+        await conn.execute(
+            text("UPDATE token_price_current SET block_timestamp = NULL WHERE oracle_id = :o"),
+            {"o": ids["sparklend"]},
+        )
+        assert not await alive(ids["sparklend"]), "undated rows cannot vouch for the feed"

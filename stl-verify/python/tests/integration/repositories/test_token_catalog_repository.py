@@ -206,3 +206,49 @@ async def test_get_latest_price_serves_the_newer_of_onchain_and_offchain(reposit
     assert quote is not None
     assert (quote.source_name, quote.price_usd) == ("cat_mix_oracle", Decimal("2.20"))
     assert quote.timestamp == newer_onchain_at
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_get_latest_price_treats_an_undated_cache_row_as_absent(repository, db_url) -> None:
+    """A token_price_current row without block_timestamp (20260910_120050 could not
+    date it) is skipped: the quote falls through to the off-chain source, or to
+    "no quote" when there is none — as it did when the history read could not
+    see the row."""
+    conn = await asyncpg.connect(db_url)
+    try:
+        token_id = await insert_token(conn, "undCat", 6, b"\x8c" * 20)
+        oracle_id = await conn.fetchval(
+            "INSERT INTO oracle (name, display_name, chain_id, address) "
+            "VALUES ('cat_undated_oracle', 'Catalog undated-row oracle', 1, $1) RETURNING id",
+            b"\x8d" * 20,
+        )
+        await conn.execute(
+            "INSERT INTO onchain_token_price "
+            "(token_id, oracle_id, block_number, block_version, timestamp, price_usd) "
+            "VALUES ($1, $2, 7000, 0, $3, 3.00)",
+            token_id,
+            oracle_id,
+            dt.datetime(2026, 3, 4, tzinfo=dt.UTC),
+        )
+        await insert_oracle_asset(conn, oracle_id, token_id)
+        await conn.execute(
+            "UPDATE token_price_current SET block_timestamp = NULL WHERE oracle_id = $1 AND token_id = $2",
+            oracle_id,
+            token_id,
+        )
+        assert await repository.get_latest_price(token_id) is None
+
+        source_id = await conn.fetchval("SELECT id FROM offchain_price_source WHERE name = 'coingecko'")
+        offchain_at = dt.datetime(2026, 3, 1, tzinfo=dt.UTC)  # older than the undated on-chain row
+        await conn.execute(
+            'INSERT INTO offchain_token_price (token_id, source_id, "timestamp", price_usd) VALUES ($1, $2, $3, 2.90)',
+            token_id,
+            source_id,
+            offchain_at,
+        )
+    finally:
+        await conn.close()
+
+    quote = await repository.get_latest_price(token_id)
+    assert quote is not None
+    assert (quote.source_name, quote.price_usd, quote.timestamp) == ("coingecko", Decimal("2.90"), offchain_at)

@@ -92,11 +92,9 @@ _ORACLE_ID = text("""
 
 # A feed that wrote nothing at all in the window is the dead-indexer case; a
 # single token's old row is not (rows are written only when a price changes).
-# Answered from token_price_current — the newest row per (oracle, token) — not the
-# history: a feed has some row in the window iff its newest row for some token is
-# in it, so the answer is identical, without planning over every chunk of
-# onchain_token_price (VEC-672). A cache row still without a block_timestamp
-# (20260910_120000) is older than any window and correctly reads as silent.
+# Answered from token_price_current, not the history: a feed has some row in the
+# window iff its newest row for some token is in it (VEC-672). An undated cache
+# row (20260910_120050) is older than any window and reads as silent.
 _FEED_ALIVE = text("""
     SELECT 1
     FROM token_price_current
