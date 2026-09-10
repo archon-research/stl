@@ -61,19 +61,19 @@ func TestCompressedConvertedHypertablesHaveAVersionFunction(t *testing.T) {
 			// schema_master), and it silently rots. This cannot: the moment such a table gains a
 			// trigger it re-enters scope and fails below for want of the function.
 			// BEFORE INSERT ... FOR EACH ROW only: that is the shape that can assign
-			// NEW.processing_version and hand the compressed-chunk arbiter a DEFAULT. An AFTER or
+			// NEW.processing_version and so hand the compressed-chunk arbiter a DEFAULT. An AFTER or
 			// statement-level trigger cannot, so its table's INSERT still names the column itself.
-			var userTriggers int
+			var assigningTriggers int
 			if err := pool.QueryRow(ctx, `
 				SELECT count(*) FROM pg_trigger
 				WHERE tgrelid = $1::regclass AND NOT tgisinternal
-				  AND (tgtype & 2) = 2 AND (tgtype & 1) = 1`, table).Scan(&userTriggers); err != nil {
+				  AND (tgtype & 2) = 2 AND (tgtype & 1) = 1`, table).Scan(&assigningTriggers); err != nil {
 				t.Fatalf("look up triggers on %s: %v", table, err)
 			}
-			if userTriggers == 0 {
-				t.Skipf("%s carries no trigger, so its INSERT supplies processing_version itself and no "+
-					"version function applies (behaviour covered by TestPositionState/\"a correction for "+
-					"a position an already-compressed chunk holds is stored, not dropped\")", table)
+			if assigningTriggers == 0 {
+				t.Skipf("%s carries no BEFORE INSERT row trigger, so its INSERT supplies processing_version "+
+					"itself and no version function applies (behaviour covered by TestPositionState/\"a "+
+					"correction for a position an already-compressed chunk holds is stored, not dropped\")", table)
 			}
 			var exists bool
 			if err := pool.QueryRow(ctx, `
