@@ -91,7 +91,9 @@ resources:
   - ../../base/avalanche-watcher-data-validator
   - ../../base/transform-worker
   # On-demand transform bootstrap worker (VEC-490). No Temporal schedule: idles
-  # on its task queue until an operator starts a run.
+  # on its task queue until an operator starts a run. Staging only for now: prod
+  # follows once the staging copy is verified, via the usual image promotion, and
+  # needs this base plus a transform-bootstrap ConfigMap added to the prod overlay.
   - ../../base/transform-bootstrap
   - ../../base/migrate
   - ../../base/python-api

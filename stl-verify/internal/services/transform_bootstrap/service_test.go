@@ -35,6 +35,49 @@ func TestRun_RejectsNonPositiveStep(t *testing.T) {
 	}
 }
 
+// TestRun_RejectsFromAtOrAfterNow: a From that selects no history must be
+// rejected rather than produce a successful no-op run. From arrives from a
+// ConfigMap read at worker startup, so a stale value would otherwise no-op every
+// run while reporting success. Rejected before the pool is touched, which the nil
+// pool asserts.
+func TestRun_RejectsFromAtOrAfterNow(t *testing.T) {
+	tests := []struct {
+		name string
+		from time.Time
+	}{
+		{name: "far future", from: time.Now().UTC().Add(365 * 24 * time.Hour)},
+		{name: "just ahead", from: time.Now().UTC().Add(time.Hour)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := Run(context.Background(), nil, Params{From: tt.from, Step: 24 * time.Hour}, slog.Default())
+			if err == nil {
+				t.Fatalf("Run(from=%v) = nil, wanted a rejection", tt.from)
+			}
+			if !strings.Contains(err.Error(), "from must be before now") {
+				t.Fatalf("Run(from=%v) error = %q, want it to name the from guard", tt.from, err)
+			}
+		})
+	}
+}
+
+// TestRun_AcceptsZeroFrom: the zero From is the derive-per-source sentinel and
+// must NOT be caught by the guard above. It gets past validation and fails on the
+// nil pool instead, which is how we know it was not rejected.
+func TestRun_AcceptsZeroFrom(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected the nil pool to panic, meaning the zero From passed validation")
+		}
+	}()
+
+	err := Run(context.Background(), nil, Params{Step: 24 * time.Hour}, slog.Default())
+	if err != nil && strings.Contains(err.Error(), "from must be before now") {
+		t.Fatalf("zero From was rejected by the from guard: %v", err)
+	}
+}
+
 // TestParseTime covers the two forms an operator supplies BOOTSTRAP_FROM in, and
 // that anything else is rejected rather than silently treated as the zero time —
 // which Run would read as the "derive per source" sentinel and quietly backfill a

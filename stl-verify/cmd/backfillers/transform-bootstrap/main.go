@@ -16,19 +16,31 @@
 //
 //	temporal workflow start --namespace vector \
 //	  --task-queue transform-bootstrap --type TransformBootstrap \
-//	  --workflow-id transform-bootstrap-<date>
+//	  --workflow-id transform-bootstrap
 //
-// The workflow ID is the concurrency guard: Temporal rejects a duplicate while a
-// run with that ID is in flight, so a double-start cannot run two copies over the
-// same windows.
+// The workflow ID is the ONLY concurrency guard on this path — RunnerJob carries
+// no overlap policy, unlike the schedule this replaced — so it must be the FIXED
+// string above, never suffixed with a date or a ticket. Temporal rejects a
+// duplicate while a run with that ID is in flight, and allows a fresh one once it
+// closes, which is the same "never two at once, re-runnable afterwards" semantics
+// the paused schedule got from Overlap: SKIP. Two differently-suffixed IDs are two
+// different workflows and Temporal will run both walks concurrently: idempotent
+// (the upserts are guarded) but hours of duplicated database load, and with
+// MaximumAttempts 1 an overlap-induced failure does not retry.
 //
 // # Window
 //
 // The run takes no workflow input; its window comes from the environment
-// (BOOTSTRAP_FROM / BOOTSTRAP_STEP / BOOTSTRAP_SOURCE), read at startup so a
-// malformed value fails the pod rather than a run hours in. Changing the window
-// is a ConfigMap change plus a rollout, not something typed at start time —
-// which is what keeps a re-run reproducible.
+// (BOOTSTRAP_FROM / BOOTSTRAP_STEP / BOOTSTRAP_SOURCE). BOOTSTRAP_FROM and
+// BOOTSTRAP_STEP are parsed at startup, so a malformed one fails the pod rather
+// than a run hours in; BOOTSTRAP_SOURCE is a plain string here and is validated
+// against transformed._sources when a run starts, before anything is copied.
+// Changing the window is a ConfigMap change plus a rollout, not something typed
+// at start time — which is what keeps a re-run reproducible.
+//
+// Because the ConfigMap is Reloader-watched, editing it IS a rollout: it will
+// cancel a run that is in flight, with no retry (MaximumAttempts 1) and no
+// resume. Scope a re-run before starting it, never during one.
 //
 // # Idempotency
 //
@@ -68,7 +80,14 @@ func main() {
 }
 
 const (
-	jobName = "transform-bootstrap"
+	// taskQueueName is the Temporal task queue an operator starts a run on, and
+	// also the OTel service name the vector-cronjobs alerts select by
+	// (service_name!="transform-bootstrap" excludes it from
+	// VectorCronjobAllRunsFailing). Fixed rather than env-overridable: a
+	// SERVICE_NAME added to the Deployment later would silently move the queue,
+	// leaving a started workflow unanswered and the alert selectors pointing at a
+	// name nothing emits.
+	taskQueueName = "transform-bootstrap"
 
 	// workflowTypeName is what an operator types into the Temporal UI's "Workflow
 	// Type" field, so it is registered explicitly rather than derived from the Go
@@ -93,40 +112,44 @@ func run(ctx context.Context) error {
 	// report success.
 	dbURL, err := env.Require("DATABASE_URL")
 	if err != nil {
-		return err
+		return fmt.Errorf("startup configuration: %w", err)
 	}
 
 	return temporal.RunWorker(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporal.WorkerConfig{
-		Name:         env.Get("SERVICE_NAME", jobName),
+		Name:         taskQueueName,
 		OpenDatabase: postgres.PoolOpener(postgres.DefaultDBConfig(dbURL)),
 		Register:     register,
 	})
 }
 
 // register resolves the backfill window from the environment before registering,
-// so a malformed BOOTSTRAP_* value fails the pod at startup instead of a run an
-// operator has already started.
+// so a malformed BOOTSTRAP_FROM or BOOTSTRAP_STEP fails the pod at startup rather
+// than a run an operator has already started. BOOTSTRAP_SOURCE needs the database
+// to validate and is checked in the service instead, before any copy.
 func register(ctx context.Context, deps temporal.Dependencies, r worker.Registry) error {
 	if _, _, err := writerrun.Open(ctx, deps.Pool); err != nil {
-		return err
+		return fmt.Errorf("opening writer run: %w", err)
 	}
 
 	params, err := paramsFromEnv()
 	if err != nil {
-		return err
+		return fmt.Errorf("resolving the backfill window: %w", err)
 	}
 
 	runner := temporal.RunnerFunc(func(ctx context.Context) error {
 		return transform_bootstrap.Run(ctx, deps.Pool, params, deps.Logger)
 	})
 
-	return temporal.RegisterRunner(r, temporal.RunnerJob{
+	if err := temporal.RegisterRunner(r, temporal.RunnerJob{
 		WorkflowType: workflowTypeName,
 		Runner:       runner,
 		Timeouts:     bootstrapActivityTimeouts,
-	})
+	}); err != nil {
+		return fmt.Errorf("registering the bootstrap runner: %w", err)
+	}
+	return nil
 }
 
 // bootstrapActivityTimeouts sizes one run against a full-history copy of every
@@ -157,7 +180,7 @@ func paramsFromEnv() (transform_bootstrap.Params, error) {
 	// advances the per-window loop, which Run rejects anyway.
 	step, err := env.GetPositiveDuration("BOOTSTRAP_STEP", defaultBootstrapStep)
 	if err != nil {
-		return p, err
+		return p, fmt.Errorf("parsing BOOTSTRAP_STEP: %w", err)
 	}
 	p.Step = step
 

@@ -58,6 +58,20 @@ func Run(ctx context.Context, pool *pgxpool.Pool, p Params, logger *slog.Logger)
 		return fmt.Errorf("step must be positive, got %v", p.Step)
 	}
 
+	// A From at or after now selects no history: the walk runs zero windows, yet
+	// the parity seed still runs and Run returns nil, so the whole thing reports
+	// a clean, successful, entirely no-op backfill. That was survivable when From
+	// was a flag typed per invocation; it now arrives from a ConfigMap read at
+	// worker startup, so one stale or mistyped value silently no-ops every run
+	// until someone notices. Reject it before taking a connection.
+	//
+	// The zero From needs no exemption: it is year 1, which is before any now, so
+	// the derive-per-source sentinel passes this guard unchanged.
+	now := time.Now().UTC()
+	if !p.From.Before(now) {
+		return fmt.Errorf("from must be before now, got %s (now %s)", p.From.Format(time.RFC3339), now.Format(time.RFC3339))
+	}
+
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquiring connection: %w", err)
@@ -73,7 +87,7 @@ func Run(ctx context.Context, pool *pgxpool.Pool, p Params, logger *slog.Logger)
 		return err
 	}
 
-	end := time.Now().UTC().Add(p.Step) // one step past now so the live tail is included
+	end := now.Add(p.Step) // one step past now so the live tail is included
 	for _, source := range sources {
 		// A zero From means "start at this source's earliest raw row". Deriving it
 		// per source avoids both a guessed global start that excludes older history

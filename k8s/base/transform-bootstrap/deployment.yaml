@@ -10,9 +10,14 @@
 # and a re-merge to retry; ArgoCD owns the tag here, so that cannot recur, and a
 # retry is starting the workflow again rather than a merge.
 #
-# The run window is BOOTSTRAP_FROM/STEP/SOURCE in the ConfigMap below, read at
-# startup — changing it is a config change plus a rollout, which is what keeps a
-# re-run reproducible.
+# The run window is BOOTSTRAP_FROM/STEP/SOURCE in the transform-bootstrap
+# ConfigMap, read at startup — changing it is a config change plus a rollout,
+# which is what keeps a re-run reproducible.
+#
+# That ConfigMap is Reloader-watched (ADR-013), so editing it IS a rollout and
+# will cancel a run in flight. With MaximumAttempts 1 and no resumable progress
+# that loses the whole walk rather than restarting it mid-way, so scope a re-run
+# before starting it, never during one.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

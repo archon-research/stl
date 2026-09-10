@@ -18,6 +18,7 @@ into TimescaleDB (or validates stored data). Current cronjobs:
 | `reference-capital-backfill` | `reference-capital-backfill` | **on demand** | Seeds the reference balance-sheet history predating the syncer's first run |
 | `morpho-vault-backfill` | `morpho-vault-backfill` | **on demand** | Discovers Morpho vaults from the archived S3 receipts and replays their VaultV2 structured events, for a block range supplied at start time (VEC-218) |
 | `morpho-v2-bootstrap` | `morpho-v2-bootstrap` | **on demand** | One-shot repair of Morpho VaultV2 vaults discovered before atomic discovery (VEC-218) |
+| `transform-bootstrap` | `transform-bootstrap` | **on demand** | Copies the raw history predating the transformed-layer enqueue triggers, over a window set in its ConfigMap rather than at start time (VEC-490) |
 | `block-republisher`, `<chain>-block-republisher` | `block-republisher`, `<chain>-block-republisher` | **on demand** | Re-publishes named block heights under the next `block_version` their raw archive leaves free, so every indexer appends the canonical block for a height whose only published version is a losing fork (ARCT-383). One deployment per chain — see the table under its section below |
 | `core-model-runner` | `core-model-runner` | 24h | CORE model CRR per market → `core_model_results` (Python harness; staging + prod; N_MC=10000, pod sized from a live-data pass in #891) |
 
@@ -449,7 +450,8 @@ stale. The only impact is that a new run cannot be started until the pod is back
 Warning severity for that reason.
 
 Currently matches: `offchain-price-backfill`, `reference-capital-backfill`,
-`morpho-vault-backfill`, `morpho-v2-bootstrap`, and every chain's republisher —
+`morpho-vault-backfill`, `morpho-v2-bootstrap`, `transform-bootstrap`, and every
+chain's republisher —
 `block-republisher` and `<chain>-block-republisher`, which the rule matches with
 one prefix-agnostic regex rather than a list of chains.
 
@@ -913,6 +915,63 @@ hole but an archive that has not caught up, and republishing that height makes
 things worse; see "morpho-v2-bootstrap run outcomes" below. Either way, do not
 work around it by stamping a version — the whole point is that no row is written
 under a version no canonical block was archived under.
+
+---
+
+### Special case: `transform-bootstrap` (on-demand, no schedule)
+
+Copies the raw history that predates the transformed-layer enqueue triggers. The
+`AFTER INSERT` trigger on each raw table only enqueues rows written *after* it
+existed, and `transform-worker` drains those queues — so everything older reaches
+the transformed layer only through this job (VEC-490).
+
+Start it from the Temporal UI (Workflow Type `TransformBootstrap`, no input) or:
+
+```
+temporal workflow start --namespace vector \
+  --task-queue transform-bootstrap --type TransformBootstrap \
+  --workflow-id transform-bootstrap
+```
+
+- **Use that exact workflow ID — do not add a date or a ticket suffix.** It is
+  the only thing preventing two concurrent runs: `RegisterRunner` carries no
+  overlap policy, so two differently-suffixed IDs are two workflows and Temporal
+  runs both walks at once. Harmless to the data (the upserts are `ON CONFLICT DO
+  UPDATE` guarded by `IS DISTINCT FROM`) but hours of duplicated database load,
+  and `MaximumAttempts: 1` means the resulting failure does not retry. The fixed
+  ID gives the same "never two at once, re-runnable once it closes" behaviour the
+  paused schedule used to get from `Overlap: SKIP`.
+- **The window is config, not input.** `BOOTSTRAP_FROM`, `BOOTSTRAP_STEP` and
+  `BOOTSTRAP_SOURCE` come from the `transform-bootstrap` ConfigMap, read at pod
+  startup. A malformed `BOOTSTRAP_FROM`/`BOOTSTRAP_STEP` fails the pod rather than
+  a run hours in; a `BOOTSTRAP_SOURCE` typo fails when a run starts, before
+  anything is copied. Leaving `BOOTSTRAP_FROM` unset makes each source start at
+  its own earliest raw row, which is safer than a guessed global start.
+- **Editing that ConfigMap IS a rollout** (Reloader, ADR-013), so it cancels a run
+  in flight — no retry, no resume, and the next run restarts at the first window.
+  Scope a re-run *before* starting it, and confirm nothing is in flight first.
+  Revert a temporary `BOOTSTRAP_SOURCE` afterwards, or every later run stays
+  narrowed to that one table.
+- **No resumable progress.** The walk records none, which is why
+  `MaximumAttempts` is 1: a retry would repeat hours of work from the beginning
+  rather than continue. Re-running is safe, just expensive — an operator's call.
+- **A cancelled run raises no alert.** It lands as `status="canceled"`, which no
+  rule keys on, and `VectorCronjobRunFailing` only sees genuine errors. After any
+  rollout that may have overlapped a run, check the Temporal UI rather than
+  assuming a green dashboard means the copy finished.
+- **Verify a run landed** by parity rather than a green workflow: drift must be 0
+  for each source it covered.
+
+  ```sql
+  SELECT source, drift FROM transformed._parity_status ORDER BY source;
+  ```
+
+  Note that the bootstrap is the only writer of *tiered* (S3) day-buckets into the
+  ledger, and it writes them `frozen=true` — `transform-worker`'s per-tick refresh
+  only ever recounts local chunks. A tiered bucket recorded at bootstrap is never
+  re-counted, so a run that copied nothing for a fully tiered source still reads
+  `drift = 0`. Cross-check row counts on the transformed table for a source whose
+  history is mostly tiered.
 
 ---
 
@@ -1753,8 +1812,9 @@ exposure.
 Failure + all-failing alerts are automatic (they group by `service_name`).
 `VectorCronjobAllRunsFailing` excludes `maple-graphql-indexer`, the on-demand
 jobs (`offchain-price-backfill`, `reference-capital-backfill`,
-`morpho-vault-backfill`, `morpho-v2-bootstrap`, and every chain's republisher:
-`block-republisher` and `<chain>-block-republisher`), and `core-model-runner`;
+`morpho-vault-backfill`, `morpho-v2-bootstrap`, `transform-bootstrap`, and every
+chain's republisher: `block-republisher` and `<chain>-block-republisher`), and
+`core-model-runner`;
 `VectorCronjobRunFailing` excludes only maple. Two manual steps:
 
 1. Add the new **Deployment name** to the `deployment=~"..."` regex in the
