@@ -42,15 +42,20 @@ COMMENT ON VIEW position_prime_allocation IS '[Operational] VEC-407 projection: 
 -- Thin per-projection entry point for the runner's POSITION_PROJECTIONS list; the view above holds all
 -- the allocation logic. No pre-check: token_id and prime_id are FK-enforced and both token.address and
 -- prime.vault_address are NOT NULL, so the view's joins cannot drop a row.
+-- Ordered after the spine's own migration on purpose: this wrapper is LANGUAGE sql, so its body is
+-- parsed when it is created, and the three-argument materialize_position_projection has to exist by
+-- then.
+
 -- An empty search_path, not FROM CURRENT: that captures '"$user", public', which still resolves per
 -- role at call time and so keeps the shadowing hazard it looks like it removes. Both references are
 -- schema-qualified and regclass resolves through implicit pg_catalog, so nothing needs a path.
-CREATE OR REPLACE FUNCTION materialize_prime_allocation(p_build_id integer DEFAULT 0) RETURNS bigint
+CREATE OR REPLACE FUNCTION materialize_prime_allocation(p_build_id integer DEFAULT 0,
+                                                        p_run_id bigint DEFAULT NULL) RETURNS bigint
     LANGUAGE sql
     SET search_path = '' AS $fn$
-    SELECT public.materialize_position_projection('public.position_prime_allocation'::regclass, p_build_id);
+    SELECT public.materialize_position_projection('public.position_prime_allocation'::regclass, p_build_id, p_run_id);
 $fn$;
 
-COMMENT ON FUNCTION materialize_prime_allocation(integer) IS '[Operational] VEC-407: appends Prime ALM allocation observations into position_state via materialize_position_projection(position_prime_allocation). See that function''s comment for the run contract.';
+COMMENT ON FUNCTION materialize_prime_allocation(integer, bigint) IS '[Operational] VEC-407: appends Prime ALM allocation observations into position_state via materialize_position_projection(position_prime_allocation). See that function''s comment for the run contract.';
 
-INSERT INTO migrations (filename) VALUES ('20260909_130000_materialize_prime_allocation.sql') ON CONFLICT (filename) DO NOTHING;
+INSERT INTO migrations (filename) VALUES ('20260910_130000_materialize_prime_allocation.sql') ON CONFLICT (filename) DO NOTHING;
