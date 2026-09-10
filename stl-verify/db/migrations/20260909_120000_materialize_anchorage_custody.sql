@@ -43,7 +43,8 @@ COMMENT ON VIEW position_anchorage_custody IS '[Operational] VEC-408 projection:
 -- Names every input the view cannot place, then delegates; each case would otherwise be dropped or
 -- collide silently. It takes the materializer's OWN lock key first, so a row inserted after the check
 -- cannot slip past, and matches its enable_tiered_reads, or it would read fewer chunks than the view.
-CREATE OR REPLACE FUNCTION materialize_anchorage_custody(p_build_id integer DEFAULT 0) RETURNS bigint
+CREATE OR REPLACE FUNCTION materialize_anchorage_custody(p_build_id integer DEFAULT 0,
+                                                         p_run_id bigint DEFAULT NULL) RETURNS bigint
     LANGUAGE plpgsql
     SET search_path FROM CURRENT
     SET timescaledb.enable_tiered_reads = 'on' AS $fn$
@@ -95,11 +96,11 @@ BEGIN
     IF v_bad IS NOT NULL THEN
         RAISE EXCEPTION 'materialize_anchorage_custody: unresolved inputs, refusing to run: %', v_bad;
     END IF;
-    RETURN public.materialize_position_projection('public.position_anchorage_custody'::regclass, p_build_id);
+    RETURN public.materialize_position_projection('public.position_anchorage_custody'::regclass, p_build_id, p_run_id);
 END
 $fn$;
 
-COMMENT ON FUNCTION materialize_anchorage_custody(integer) IS '[Operational] VEC-408: materialize Anchorage custody packages into position_state via materialize_position_projection(position_anchorage_custody). Refuses to run, naming up to five offenders, when a custody_type is not a known custodian (the view drops it), when one instrument has two snapshots inside a second or one (package, asset) carries several custody types (either collides on the observation key, since block_number is the instant in whole seconds), or when a package or asset id is blank or contains the '';'' key delimiter. Takes the materializer''s own advisory lock first, so a row inserted after the check cannot slip past it. Idempotent; run out of band. Returns rows appended.';
+COMMENT ON FUNCTION materialize_anchorage_custody(integer, bigint) IS '[Operational] VEC-408: materialize Anchorage custody packages into position_state via materialize_position_projection(position_anchorage_custody). Refuses to run, naming up to five offenders, when a custody_type is not a known custodian (the view drops it), when one instrument has two snapshots inside a second or one (package, asset) carries several custody types (either collides on the observation key, since block_number is the instant in whole seconds), or when a package or asset id is blank or contains the '';'' key delimiter. Takes the materializer''s own advisory lock first, so a row inserted after the check cannot slip past it. Idempotent; run out of band. Returns rows appended.';
 
 GRANT SELECT ON anchorage_known_custody_type, position_anchorage_custody TO stl_readonly;
 GRANT SELECT ON anchorage_known_custody_type, position_anchorage_custody TO stl_readwrite;
