@@ -91,11 +91,13 @@
 
 CREATE TABLE weight_basis_vocabulary (
     basis        text PRIMARY KEY,
-    description  text NOT NULL
+    description  text NOT NULL,
+    run_id       bigint REFERENCES writer_run(id)
 );
 COMMENT ON TABLE weight_basis_vocabulary IS '[Configuration] Legal weight bases (ADR-0007 §3): three, each a share of a whole. Weights of unlike bases must never be summed; a conversion ratio is edge payload, not a weight (see the basis column). Plain table: seed-once, extended by reviewed migration.';
 COMMENT ON COLUMN weight_basis_vocabulary.basis IS 'Roles: PK. Basis code (VALUE / NOTIONAL / OWNERSHIP_PCT). Each names a SHARE OF A WHOLE, which is what makes weights along a path multiplicable and weights under one basis summable. A conversion ratio is not a share: ADR-0007 §3 puts ratios in the edge payload.';
 COMMENT ON COLUMN weight_basis_vocabulary.description IS 'What the basis measures and where it is used.';
+COMMENT ON COLUMN weight_basis_vocabulary.run_id IS 'Roles: FK→writer_run.id, Audit. The process start that wrote this row (ADR-0006 §2); resolves to the build artefact through writer_run.build_id. NULL means written before run tracking — which is what the rows seeded here are.';
 
 -- Declared before rel_type_vocabulary so its weight_basis is a real FK, not a soft one.
 CREATE TABLE rel_type_vocabulary (
@@ -110,7 +112,8 @@ CREATE TABLE rel_type_vocabulary (
     derived_only        boolean NOT NULL DEFAULT false,
     maturity            text NOT NULL CHECK (maturity IN ('ratified','draft')),
     description         text NOT NULL,
-    change_reason       text NOT NULL DEFAULT 'SEED_LOAD'
+    change_reason       text NOT NULL DEFAULT 'SEED_LOAD',
+    run_id              bigint REFERENCES writer_run(id)
 );
 COMMENT ON TABLE rel_type_vocabulary IS '[Configuration] Governed relationship vocabulary (ADR-0007 §5). Adding or ratifying a type is a reviewed migration. Endpoint legality is the (rel_type, src_kind, dst_kind) triple, enforced by the loader/validator (cross-row; an FK cannot see the endpoint row). Plain table: governance-rate writes.';
 COMMENT ON COLUMN rel_type_vocabulary.rel_type IS 'Roles: PK. The edge type name, UPPER_SNAKE.';
@@ -123,28 +126,33 @@ COMMENT ON COLUMN rel_type_vocabulary.derived_only IS 'true: rows of this type a
 COMMENT ON COLUMN rel_type_vocabulary.maturity IS 'ratified: decided and stable. draft types are not seeded; they land by migration when ratified.';
 COMMENT ON COLUMN rel_type_vocabulary.description IS 'What the type means; the reviewed definition.';
 COMMENT ON COLUMN rel_type_vocabulary.change_reason IS 'Roles: Audit. Why the row exists (vocabulary rows carry the slim spine; full provenance lives on nodes/edges).';
+COMMENT ON COLUMN rel_type_vocabulary.run_id IS 'Roles: FK→writer_run.id, Audit. The process start that wrote this row (ADR-0006 §2); resolves to the build artefact through writer_run.build_id. NULL means written before run tracking — which is what the rows seeded here are.';
 
 CREATE TABLE change_reason_vocabulary (
     code               text PRIMARY KEY,
     description        text NOT NULL,
-    requires_approval  boolean NOT NULL DEFAULT false
+    requires_approval  boolean NOT NULL DEFAULT false,
+    run_id             bigint REFERENCES writer_run(id)
 );
 COMMENT ON TABLE change_reason_vocabulary IS '[Configuration] Structured change_reason_code set (ADR-0007 §4, CR-3.3). Every node/edge append cites one. Plain table: seed-once, extended by reviewed migration.';
 COMMENT ON COLUMN change_reason_vocabulary.code IS 'Roles: PK. Reason code, UPPER_SNAKE.';
 COMMENT ON COLUMN change_reason_vocabulary.description IS 'When to use the code.';
 COMMENT ON COLUMN change_reason_vocabulary.requires_approval IS 'true: an append citing this code must carry approved_by (validator-enforced; approval identity distinct from the appender).';
+COMMENT ON COLUMN change_reason_vocabulary.run_id IS 'Roles: FK→writer_run.id, Audit. The process start that wrote this row (ADR-0006 §2); resolves to the build artefact through writer_run.build_id. NULL means written before run tracking — which is what the rows seeded here are.';
 
 CREATE TABLE concept_class_vocabulary (
     concept_class text PRIMARY KEY,
     maturity      text NOT NULL CHECK (maturity IN ('ratified','draft')),
     seed_source   text,
-    description   text NOT NULL
+    description   text NOT NULL,
+    run_id        bigint REFERENCES writer_run(id)
 );
 COMMENT ON TABLE concept_class_vocabulary IS '[Configuration] Concept classes: which kind of category a CONCEPT node is (sec_node.attrs.concept_class). Plain table: seed-once. The guard class ships with the shape system (VEC-622).';
 COMMENT ON COLUMN concept_class_vocabulary.concept_class IS 'Roles: PK. Class name, lower_snake.';
 COMMENT ON COLUMN concept_class_vocabulary.maturity IS 'ratified: carries shapes and governed memberships. draft: taxonomy exists, rules pending.';
 COMMENT ON COLUMN concept_class_vocabulary.seed_source IS 'Which ref_* vocabulary seeds the class, where one does (the promotion path of 20260904_120100).';
 COMMENT ON COLUMN concept_class_vocabulary.description IS 'What the class categorises.';
+COMMENT ON COLUMN concept_class_vocabulary.run_id IS 'Roles: FK→writer_run.id, Audit. The process start that wrote this row (ADR-0006 §2); resolves to the build artefact through writer_run.build_id. NULL means written before run tracking — which is what the rows seeded here are.';
 
 CREATE TABLE node_status_vocabulary (
     record_type  text NOT NULL,
@@ -152,6 +160,7 @@ CREATE TABLE node_status_vocabulary (
     is_terminal  boolean NOT NULL,
     pairs_with   text,
     description  text NOT NULL,
+    run_id       bigint REFERENCES writer_run(id),
     PRIMARY KEY (record_type, status)
 );
 COMMENT ON TABLE node_status_vocabulary IS '[Configuration] Per-kind node status vocabulary (ADR-0007 §2). A status change is a node version, never a mutation; terminal statuses retire nothing — history, edges and register rows remain readable. Plain table: seed-once.';
@@ -160,6 +169,7 @@ COMMENT ON COLUMN node_status_vocabulary.status IS 'Roles: PK (with record_type)
 COMMENT ON COLUMN node_status_vocabulary.is_terminal IS 'true: no further lifecycle expected; excluded from the active universe, history intact.';
 COMMENT ON COLUMN node_status_vocabulary.pairs_with IS 'Roles: FK→rel_type_vocabulary.rel_type (soft). The edge type a transition into this status pairs with, where one is required (e.g. MERGED pairs with SUCCEEDED_BY).';
 COMMENT ON COLUMN node_status_vocabulary.description IS 'When the status applies.';
+COMMENT ON COLUMN node_status_vocabulary.run_id IS 'Roles: FK→writer_run.id, Audit. The process start that wrote this row (ADR-0006 §2); resolves to the build artefact through writer_run.build_id. NULL means written before run tracking — which is what the rows seeded here are.';
 
 -- ---------------------------------------------------------------------------
 -- The combined master: nodes
