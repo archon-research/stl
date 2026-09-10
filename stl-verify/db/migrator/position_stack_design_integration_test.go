@@ -6,7 +6,9 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,14 +19,18 @@ import (
 // in random order so a later batch carries an older observation. The cache invariants (position_current,
 // position_daily) live with the migrations that create those tables. Every violation is a test failure.
 func TestPositionStackDesignInvariants(t *testing.T) {
-	const seeds = 24
+	// The committed set is what CI runs, so the default stays fixed and deterministic. These two
+	// env vars widen it without editing code: 24 histories is a lottery, and a defect that only
+	// appears outside them would pass on every branch at once.
+	seeds := envInt(t, "POSITION_STACK_SEEDS", 24)
+	multiplier := envInt(t, "POSITION_STACK_SEED_MULTIPLIER", 7919)
 	for seed := 1; seed <= seeds; seed++ {
 		t.Run(fmt.Sprintf("seed-%02d", seed), func(t *testing.T) {
 			ctx := context.Background()
 			pool, cleanup := setupMigratedPostgres(ctx, t)
 			defer cleanup()
 
-			rng := rand.New(rand.NewSource(int64(seed) * 7919))
+			rng := rand.New(rand.NewSource(int64(seed) * int64(multiplier)))
 			rows := generateHistory(rng)
 			view := fmt.Sprintf("pv_design_%d", seed)
 
@@ -177,8 +183,135 @@ func TestPositionStackDesignInvariants(t *testing.T) {
 			if flipped > 0 {
 				t.Logf("I8: %d position_ids span more than one deal type", flipped)
 			}
+
+			// I4: no stored pair of one position carries a higher block at an earlier instant. The
+			// gate exists to keep this true, and asserting the ORACLE is not the same as asserting
+			// the spine: a change that withheld part of a batch left survivors that invert.
+			var inverted int
+			if err := pool.QueryRow(ctx, `
+				SELECT count(*) FROM position_state a JOIN position_state b
+				  ON a.position_id = b.position_id AND a.block_number < b.block_number
+				 WHERE a.block_timestamp > b.block_timestamp`).Scan(&inverted); err != nil {
+				t.Fatalf("I4: %v", err)
+			}
+			if inverted != 0 {
+				t.Errorf("I4 %d stored pair(s) carry a higher block at an earlier instant", inverted)
+			}
+
+			// I6: no stored zero lacks a positive observation at or below its block. Closure is
+			// judged on the batch plus stored history, so anything that drops rows between closure
+			// and the append can strand a close on a position that never opened.
+			var orphaned int
+			if err := pool.QueryRow(ctx, `
+				SELECT count(*) FROM position_state z
+				 WHERE z.quantity = 0
+				   AND NOT EXISTS (SELECT 1 FROM position_state p
+				                    WHERE p.position_id = z.position_id AND p.quantity > 0
+				                      AND p.block_number <= z.block_number)`).Scan(&orphaned); err != nil {
+				t.Fatalf("I6: %v", err)
+			}
+			if orphaned != 0 {
+				t.Errorf("I6 %d stored zero(s) have no positive observation at or below them", orphaned)
+			}
+
+			// I1: the stored identity is the hash of exactly the four key fields and nothing else.
+			// A materializer that hashes a different set still satisfies I0, because I0 compares on
+			// the fields, so the identity contract needs its own assertion.
+			var wrongID int
+			if err := pool.QueryRow(ctx, `
+				SELECT count(*) FROM position_state
+				 WHERE position_id <> public.position_id(chain_id, protocol_id, instrument_key, holder_id)`).Scan(&wrongID); err != nil {
+				t.Fatalf("I1: %v", err)
+			}
+			if wrongID != 0 {
+				t.Errorf("I1 %d stored rows carry a position_id that is not position_id() of their own key fields", wrongID)
+			}
+
+			// I2: an identity already owned by one projection is refused to a second one, and
+			// nothing of the intruder's is stored. A global "no id has two projections" count
+			// cannot fail here, because no two design views share an identity by construction.
+			var oc, op int
+			var oi, oh string
+			var ownedMaxBlock int64
+			var ownedMaxTS time.Time
+			if err := pool.QueryRow(ctx, `
+				SELECT chain_id, protocol_id, instrument_key, holder_id,
+				       max(block_number), max(block_timestamp)
+				  FROM position_state
+				 WHERE instrument_key = 'design-inst' AND chain_id IS NOT NULL
+				 GROUP BY chain_id, protocol_id, instrument_key, holder_id
+				 ORDER BY holder_id LIMIT 1`).Scan(&oc, &op, &oi, &oh, &ownedMaxBlock, &ownedMaxTS); err != nil {
+				t.Fatalf("I2 pick an owned identity: %v", err)
+			}
+			steal := fmt.Sprintf("pv_design_steal_%d", seed)
+			// Beyond every block and instant already stored for that position, so the intruder
+			// cannot be quarantined as a block/instant inversion: that quarantine drops the
+			// position from the source before the ownership check runs, and the abort would
+			// then never be reached. CREATE VIEW takes no bind parameters, so values are
+			// interpolated; they come from the fixture this test just wrote.
+			if _, err := pool.Exec(ctx, fmt.Sprintf(`CREATE OR REPLACE VIEW %s AS
+				SELECT %d::int AS chain_id, %d::bigint AS protocol_id, '%s'::text AS instrument_key,
+				       '%s'::text AS holder_id, 11::numeric AS quantity, %d::bigint AS block_number,
+				       0::int AS block_version, 0::int AS processing_version,
+				       '%s'::timestamptz AS block_timestamp, NULL::text AS deal_type`,
+				steal, oc, op, oi, oh, ownedMaxBlock+10,
+				ownedMaxTS.Add(24*time.Hour).Format(time.RFC3339))); err != nil {
+				t.Fatalf("I2 view: %v", err)
+			}
+			var stolen int
+			// The abort is asserted by name. A bare "did it error" check also passes on an
+			// unrelated refusal, so it would hold even with the ownership guard switched off.
+			// p_build_id is omitted because passing NULL is itself refused by the materializer.
+			errSteal := pool.QueryRow(ctx, `SELECT materialize_position_projection($1::regclass)`, steal).Scan(&stolen)
+			if errSteal == nil || !strings.Contains(errSteal.Error(), "owned by another projection") {
+				t.Errorf("I2 want the cross-view ownership abort for an identity owned by %s; got appended=%d err=%v", view, stolen, errSteal)
+			}
+			var atStealBlock int
+			if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state WHERE block_number = $1`, ownedMaxBlock+10).Scan(&atStealBlock); err != nil {
+				t.Fatalf("I2: %v", err)
+			}
+			if atStealBlock != 0 {
+				t.Errorf("I2 %d rows from the intruding projection reached the spine; want none", atStealBlock)
+			}
+
+			// I3: a view that emits one logical observation key twice is refused outright, not
+			// deduplicated and not partly stored. Downgrading that abort loses rows silently.
+			dup := fmt.Sprintf("pv_design_dup_%d", seed)
+			if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW `+dup+` AS
+				SELECT * FROM (VALUES
+				  (1::int, 10::bigint, 'design-dup'::text, 'dddddddddddddddddddddddddddddddddddddddd'::text, 5::numeric, 900::bigint, 0::int, 0::int, '2026-03-01T00:00:00Z'::timestamptz, NULL::text),
+				  (1::int, 10::bigint, 'design-dup'::text, 'dddddddddddddddddddddddddddddddddddddddd'::text, 7::numeric, 900::bigint, 0::int, 0::int, '2026-03-01T00:00:00Z'::timestamptz, NULL::text)
+				) v(chain_id,protocol_id,instrument_key,holder_id,quantity,block_number,block_version,processing_version,block_timestamp,deal_type)`); err != nil {
+				t.Fatalf("I3 view: %v", err)
+			}
+			var appended int
+			errDup := pool.QueryRow(ctx, `SELECT materialize_position_projection($1::regclass)`, dup).Scan(&appended)
+			if errDup == nil || !strings.Contains(errDup.Error(), "double-emits a logical observation key") {
+				t.Errorf("I3 want the double-emit abort; got appended=%d err=%v", appended, errDup)
+			}
+			var dupStored int
+			if e := pool.QueryRow(ctx, `SELECT count(*) FROM position_state WHERE instrument_key = 'design-dup'`).Scan(&dupStored); e != nil {
+				t.Fatalf("I3: %v", e)
+			}
+			if dupStored != 0 {
+				t.Errorf("I3 %d rows from the double-emitting view reached the spine; want none", dupStored)
+			}
 		})
 	}
+}
+
+// envInt reads a positive override for a seed knob, or returns the committed default.
+func envInt(t *testing.T, name string, def int) int {
+	t.Helper()
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		t.Fatalf("%s=%q: want a positive integer", name, v)
+	}
+	return n
 }
 
 type obsRow struct {
@@ -231,9 +364,12 @@ func generateHistory(rng *rand.Rand) []obsRow {
 			default:
 				r.dealType = "BORROW"
 			}
-			k := fmt.Sprintf("%v|%s|%d|%d|%d|%s", r.offChain, holder, r.block, r.bver, r.pver, r.ts.Format(time.RFC3339))
+			// The spine's logical observation key carries no timestamp, so neither may this:
+			// two rows differing only in ts are one observation to the materializer, which
+			// rejects them as a double-emit.
+			k := fmt.Sprintf("%v|%s|%d|%d|%d", r.offChain, holder, r.block, r.bver, r.pver)
 			if seen[k] {
-				continue // the spine PK forbids a duplicate coordinate
+				continue
 			}
 			seen[k] = true
 			rows = append(rows, r)
@@ -310,6 +446,13 @@ func splitBatches(rng *rand.Rand, rows []obsRow) [][]obsRow {
 }
 
 func valuesBody(rows []obsRow) string {
+	if len(rows) == 0 {
+		// A history of nothing but leading zeros closes to nothing; VALUES cannot be empty.
+		return `SELECT NULL::int AS chain_id, NULL::bigint AS protocol_id, NULL::text AS instrument_key, ` +
+			`NULL::text AS holder_id, NULL::numeric AS quantity, NULL::bigint AS block_number, ` +
+			`NULL::int AS block_version, NULL::int AS processing_version, ` +
+			`NULL::timestamptz AS block_timestamp, NULL::text AS deal_type WHERE false`
+	}
 	parts := make([]string, 0, len(rows))
 	for _, r := range rows {
 		dt := "NULL::text"
