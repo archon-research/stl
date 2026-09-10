@@ -1008,7 +1008,8 @@ data:
   # Explicit list of materialize_<projection>() wrappers, never discovery. Each
   # wrapper runs its projection's own pre-flight refusals before the shared
   # materializer appends to position_state (docs/runbooks/vector-position-materializer.md).
-  # Morpho only for now: Sky reads synced_at and Aave reads created_at as event
-  # time, both of which put higher blocks at earlier instants, which the spine
-  # refuses by design. They join once block_meta supplies block_timestamp.
+  # Morpho only for now. Sky maps block_timestamp to synced_at, a sync clock, so an
+  # out-of-order retry inverts instant against height. Aave's created_at defaults to
+  # now(), so its legacy rows carry wall clock rather than the block time the tracker
+  # stamps today. Anchorage, prime allocation and Maple each join by their own change.
   POSITION_PROJECTIONS: "materialize_morpho_market,materialize_morpho_vault"
