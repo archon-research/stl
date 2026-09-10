@@ -102,10 +102,18 @@ func (r *PrimeDebtRepository) SaveDebtSnapshots(ctx context.Context, debts []*en
 		)
 	})
 
+	// A snapshot with no protocol row cannot be projected: position_id hashes protocol_id, and
+	// materialize_sky_prime_debt() refuses the whole run for one unresolvable row.
+	for i, d := range debts {
+		if d.ProtocolID == 0 {
+			return fmt.Errorf("debt snapshot %d (prime_id=%d) carries no protocol_id", i, d.PrimeID)
+		}
+	}
+
 	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		const q = `
-			INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at, build_id, run_id)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			INSERT INTO prime_debt (prime_id, protocol_id, ilk_name, debt_wad, block_number, block_version, synced_at, build_id, run_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			ON CONFLICT (prime_id, block_number, block_version, processing_version, synced_at) DO NOTHING
 		`
 
@@ -113,6 +121,7 @@ func (r *PrimeDebtRepository) SaveDebtSnapshots(ctx context.Context, debts []*en
 		for _, d := range debts {
 			batch.Queue(q,
 				d.PrimeID,
+				d.ProtocolID,
 				d.IlkName,
 				d.DebtWad.String(), // NUMERIC from decimal string representation of big.Int
 				d.BlockNumber,
@@ -137,4 +146,16 @@ func (r *PrimeDebtRepository) SaveDebtSnapshots(ctx context.Context, debts []*en
 		r.logger.Debug("debt snapshots saved", "count", len(debts))
 		return nil
 	})
+}
+
+// ProtocolIDByAddress resolves an existing protocol row for a contract. It never creates one: the
+// row's name and category are decided by the migration that seeds it, not by a writer at runtime.
+func (r *PrimeDebtRepository) ProtocolIDByAddress(ctx context.Context, chainID int64, address common.Address) (int64, error) {
+	var id int64
+	err := r.pool.QueryRow(ctx,
+		`SELECT id FROM protocol WHERE chain_id = $1 AND address = $2`, chainID, address.Bytes()).Scan(&id)
+	if err != nil {
+		return 0, fmt.Errorf("resolving protocol %s on chain %d: %w", address.Hex(), chainID, err)
+	}
+	return id, nil
 }

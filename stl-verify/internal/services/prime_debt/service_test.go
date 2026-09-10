@@ -260,6 +260,12 @@ func (r *fakePrimeDebtRepository) SaveDebtSnapshots(_ context.Context, debts []*
 	return nil
 }
 
+// ProtocolIDByAddress is unused by the service: the indexer resolves the row at startup and passes
+// the id through Config, which is what keeps the address out of the write path.
+func (r *fakePrimeDebtRepository) ProtocolIDByAddress(_ context.Context, _ int64, _ common.Address) (int64, error) {
+	return 0, fmt.Errorf("not used by the service")
+}
+
 func (r *fakePrimeDebtRepository) savedCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -317,12 +323,29 @@ func makeBlockEvents(startBlock int64, count int) []outbound.BlockEvent {
 	return events
 }
 
+// testProtocolID stands for the Vat's protocol row, which the indexer resolves at startup.
+const testProtocolID = int64(4242)
+
 func defaultConfig(sweepEveryN int) prime_debt.Config {
 	return prime_debt.Config{
 		SweepEveryNBlocks: sweepEveryN,
 		ChainID:           testChainID,
+		ProtocolID:        testProtocolID,
 		MaxMessages:       1,
 		PollInterval:      10 * time.Millisecond,
+	}
+}
+
+// Every snapshot the service builds carries the Vat's protocol row, because position_id hashes it
+// and the projection refuses a run for one row without it. A zero is refused at construction, and
+// the stamp itself is asserted in the sweep assertions below.
+func TestNewVaultDebtService_RefusesAZeroProtocolID(t *testing.T) {
+	cfg := defaultConfig(75)
+	cfg.ProtocolID = 0
+	_, err := prime_debt.NewVaultDebtService(cfg, newFakeVatCaller(), &fakePrimeDebtRepository{},
+		newFakeSQSConsumer(nil), newFakeBlockQuerier(testBlockNum))
+	if err == nil || !strings.Contains(err.Error(), "protocol id") {
+		t.Fatalf("error = %v; want it to name the missing protocol id", err)
 	}
 }
 
@@ -548,6 +571,11 @@ func TestSync_WritesSnapshotPerPrime(t *testing.T) {
 	for _, snap := range repo.allSaved() {
 		if snap.IlkName == "" {
 			t.Errorf("prime_id %d: empty ilk_name", snap.PrimeID)
+		}
+		// The Vat's protocol row travels on every snapshot: position_id hashes it, and a NULL here
+		// makes materialize_sky_prime_debt() refuse every later run with no way to repair the row.
+		if snap.ProtocolID != testProtocolID {
+			t.Errorf("prime_id %d: protocol_id = %d, want %d", snap.PrimeID, snap.ProtocolID, testProtocolID)
 		}
 		if snap.DebtWad == nil || snap.DebtWad.Sign() == 0 {
 			t.Errorf("prime_id %d: nil or zero debt_wad", snap.PrimeID)

@@ -43,6 +43,10 @@ JOIN prime    pr ON pr.id = o.prime_id;
 COMMENT ON VIEW position_sky_prime_debt IS '[Operational] VEC-406 projection: Sky prime debt as native position rows, one per (prime, Vat, ilk); instrument_key = native ilk_name, holder_id = the prime vault address, protocol_id = the Vat row stamped on the snapshot, deal_type BORROW. Emits the shared position_state column contract consumed by materialize_position_projection(); closure is applied there.';
 
 -- Names every snapshot the view cannot resolve, then delegates to the shared materializer.
+-- Dropped rather than replaced: keeping the old argument list beside the new one makes a
+-- call that omits the run ambiguous, as it did for the spine.
+DROP FUNCTION IF EXISTS materialize_sky_prime_debt(integer);
+
 CREATE OR REPLACE FUNCTION materialize_sky_prime_debt(p_build_id integer DEFAULT 0,
                                                       p_run_id bigint DEFAULT NULL) RETURNS bigint
     LANGUAGE plpgsql
@@ -65,6 +69,6 @@ BEGIN
 END
 $fn$;
 
-COMMENT ON FUNCTION materialize_sky_prime_debt(integer, bigint) IS '[Operational] VEC-406: materialize Sky prime debt into position_state via materialize_position_projection(position_sky_prime_debt), refusing by name a snapshot whose protocol_id has no protocol row. Returns rows appended.';
+COMMENT ON FUNCTION materialize_sky_prime_debt(integer, bigint) IS '[Operational] VEC-406: materialize Sky prime debt into position_state via materialize_position_projection(position_sky_prime_debt), refusing by name a snapshot whose protocol_id has no protocol row. Returns rows appended. p_build_id and p_run_id are stamped on every row appended (ADR-0006 §2).';
 
 INSERT INTO migrations (filename) VALUES ('20260819_140000_materialize_sky_prime_debt.sql') ON CONFLICT (filename) DO NOTHING;
