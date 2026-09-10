@@ -41,7 +41,7 @@ The financial model logic (ARMA-GARCH calibration, copula simulation, liquidatio
 | **SparkLend** | 4 | Live tables (17 Aug 2026): `borrower*` positions, `onchain_token_price`, `cex_orderbook_snapshots` |
 | **Morpho** | 2 | Live tables (18 Aug 2026): `morpho_market_position` + the same price/book sources |
 | **Maple (Syrup)** | 2 | Live tables (9 Sep 2026): `maple_*` loans, `onchain_token_price` + `asset_price`, `cex_orderbook_snapshots` |
-| **Anchorage** | 1 | Parquet snapshots (off-chain feed indexed; blocked on a BTC price series — see DATA_GAPS §3) |
+| **Anchorage** | 1 | Parquet snapshots (live reader written; blocked on the frozen upstream feed, ARCT-229 — see DATA_GAPS §3) |
 | **Galaxy** | disabled | Parquet market frame only; no position ingestion exists (DATA_GAPS §4) |
 
 ---
@@ -52,7 +52,7 @@ The model draws from three distinct data layers, each independently switchable p
 
 ### 1 — Protocol position data
 
-Borrower-level positions (collateral amounts, debt, LTV, liquidation threshold, liquidation bonus). Live: per-protocol readers in `core_model_positions_reader.py` — SparkLend from the `borrower*` current caches, Morpho from `morpho_market_position`, Syrup one row per external Active Maple loan. Anchorage and Galaxy stay parquet.
+Borrower-level positions (collateral amounts, debt, LTV, liquidation threshold, liquidation bonus). Live: per-protocol readers in `core_model_positions_reader.py` — SparkLend from the `borrower*` current caches, Morpho from `morpho_market_position`, Syrup one row per external Active Maple loan, Anchorage one row per active custody package (runs parquet until the frozen upstream feed resumes, ARCT-229). Galaxy stays parquet.
 
 ### 2 — Price data
 
@@ -338,7 +338,7 @@ app/ports/
 app/adapters/
 ├── composite.py                             Per-input parquet/postgres switch (the *_SOURCE flags)
 ├── parquet/core_model_data_reader.py        Reads static parquet snapshots
-├── postgres/core_model_positions_reader.py  Live positions: SparkLend, Morpho, Syrup
+├── postgres/core_model_positions_reader.py  Live positions: SparkLend, Morpho, Syrup, Anchorage
 ├── postgres/core_model_price_reader.py      Live daily closes: oracle series + asset_price + BTC/ETH proxies
 ├── postgres/core_model_orderbook_reader.py  Live venue books from cex_orderbook_snapshots
 ├── postgres/core_model_results_reader.py    Reads core_model_results table
@@ -428,8 +428,11 @@ ingestion pipeline do not exist. See DATA_GAPS §4.
 ### Remaining parquet inputs
 
 Anchorage is the one enabled market still on snapshots (`users_anchorage.parquet`
-/ `market_anchorage.parquet`); its blocker is a BTC price series, which the
-price reader's BTC→WBTC proxy path could now provide (DATA_GAPS §3). The
+/ `market_anchorage.parquet`). Its live positions reader is written and tested
+(one row per active custody package from `anchorage_package_snapshot`), but the
+upstream Anchorage API has returned zero packages since 2026-06-16 (ARCT-229),
+so the sources stay parquet until the feed resumes (DATA_GAPS §3 has the flip
+step). The
 parquet files under `inputs/` are **not updated automatically**: for the live
 markets they remain useful only as the dev-cluster fallback and for
 before/after comparisons, and their CRRs reflect BA's June 2026 snapshot, not

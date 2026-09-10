@@ -4,7 +4,8 @@ Tracks every gap between the static parquet snapshots and the live data in our
 own tables — each entry says what is missing and what brings it back. Started
 as a full inventory on **14 Aug 2026**; per-section UPDATE notes carry later
 dates. As of **9 Sep 2026**, 8 of the 9 enabled markets run fully live
-(SparkLend ×4, Morpho ×2, Syrup ×2); Anchorage stays on parquet. Re-verify any
+(SparkLend ×4, Morpho ×2, Syrup ×2); Anchorage stays on parquet — its reader
+is written, but the upstream feed is frozen (§3, ARCT-229). Re-verify any
 quoted staging number before acting on it.
 
 The model needs three inputs per market: borrower positions, daily price
@@ -257,7 +258,47 @@ Still parquet:
 
 | Market group | Live source | Notes |
 |---|---|---|
-| Anchorage | anchorage-indexer tables | indexed; reader unwritten, and it needs a BTC price series — the price reader's BTC→WBTC proxy path now covers that |
+| Anchorage | `anchorage_package_snapshot` | reader written and tested (9 Sep 2026); blocked ONLY on the frozen upstream feed, see below |
+
+**Anchorage (1 market): reader done, feed frozen (9 Sep 2026).** The positions
+reader builds one row per active custody package from the latest poll cohort
+per prime (the cohort-first scoping matters: a closed package keeps its last
+row forever, still `active=true` — the same $521M trap
+`_ANCHORAGE_CUSTODY_HOLDINGS_SQL` documents). Column semantics follow that
+query's findings: `exposure_value` = the package's USD loan, `package_value` =
+its collateral value, both package-level; `asset_quantity` /
+`asset_weighted_value` per collateral asset. LT is `critical_ltv` (0.90 on the
+live packages — forced liquidation), and the live threshold triple matches the
+model's margin-call defaults exactly: `MC_TRIGGER` 0.05 = `critical_ltv` 0.90
+− `margin_call_ltv` 0.85 (`margin_return_ltv` 0.70 would map to
+`MC_TARGET_LTV`, inert while `MC_CURE_PROB` is 0). The market frame prices
+collateral with Anchorage's own `asset_price` (the protocol's valuation, the
+Syrup convention); `liquidation_incentive` is BA's flat 1.02. One deliberate
+scope change, like Morpho's: BA's parquet aggregated the venue into a single
+wallet row, the live frame keys per package (3 today), so HHI drops from 1.0
+to the real per-package concentration.
+
+**The single blocker is upstream**: the Anchorage API has returned zero
+packages since 2026-06-16 19:45 UTC (ARCT-229, staleness alert in PR #714;
+root cause needs someone with Anchorage access). Both environments hold the
+same frozen cohort — 3 BTC packages, $250M exposure_value, $309.7M
+package_value — which the reader's freshness bound rejects, correctly. Once
+rows flow again, go-live is the three `*_SOURCE` flags on the `anchorage`
+entry in `market_configs.json`, flipped together (the market frame's
+`oracle_price` anchors the simulated paths, so positions, prices and books
+must describe one coherent moment). Prices and books are already proven by
+the other markets: BTC rides the WBTC oracle proxy series and the live BTC
+venue book.
+
+Smoke-tested end to end against staging (9 Sep 2026, read-only): live
+positions with the staleness bound relaxed past the freeze, live oracle
+return history, June parquet books (coherent with the cohort's June price
+anchor), N_MC=200, SEED=0 → 3 packages, $250M borrowed, avg LTV 80.73%,
+crr_el 8.45%, HHI 0.44. A wiring check only — the frozen cohort makes it a
+hybrid of June positions and a current return series, not a reference CRR
+(same-code parquet baseline: crr_el 19.66%, HHI 1.0 — BA's single
+aggregated-wallet row and Yahoo return series, so no reconciliation is
+expected).
 
 ---
 
@@ -312,7 +353,8 @@ resolved. 8 of the 9 enabled markets are live as of 9 Sep 2026.
    result row says which books produced it.
 4. ~~XRP/HYPE/SOL/JITOSOL orderbook symbols~~ — **done in staging 25 Aug and
    prod 9 Sep** (§2).
-5. ~~Positions adapters per protocol~~ — **done** for SparkLend, Morpho and
-   Syrup (§3). Anchorage stays parquet (its reader is unwritten; smallest
-   remaining piece once the BTC price question is settled).
+5. ~~Positions adapters per protocol~~ — **done** for SparkLend, Morpho,
+   Syrup and (9 Sep) Anchorage (§3). Anchorage still runs parquet: its reader
+   is written and tested, but the upstream feed is frozen (ARCT-229) and the
+   flip waits on it.
 6. Galaxy inputs (new sources — separate decision, §4). Still open.
