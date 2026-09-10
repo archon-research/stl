@@ -909,6 +909,20 @@ class AllocationActivityBucketResponse(BaseModel):
         ),
         examples=["1234567.89"],
     )
+    balance_usd: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "Position value in USD read from each bucket's own recorded state, present only when "
+            "`series=balance`. Unlike `net_flow_usd` this needs no client-side reconstruction and no "
+            "anchor, so it is valid for a window that does not end at now. It is also a different "
+            "measure: true mark-to-market rather than cost basis, so a share-price move on a receipt "
+            "token appears here even in a bucket with no transaction, and yield accrual is included. "
+            "Valued as COALESCE(underlying_value, balance) x the registry underlying's latest oracle "
+            "price, refusing any row whose own underlying diverges from the registry's. Null on "
+            "`series=flow`."
+        ),
+        examples=["3280541138.58"],
+    )
 
 
 class RawAllocationActivityEnvelope(BaseModel):
@@ -984,6 +998,17 @@ async def list_allocation_activity(
     ] = None,
     time_series: TimeSeriesQuery = Depends(get_time_series_query_params),
     limit: int = Query(100, ge=1, le=1000, description="Max results (default 100, max 1000)."),
+    series: Literal["flow", "balance"] = Query(
+        default="flow",
+        description=(
+            "Which aggregated series to return. `flow` (default) keeps the existing behaviour: event "
+            "counts, tx-amount sums and signed USD net flow, from which a client reconstructs a "
+            "balance by anchoring at the current total. `balance` returns `balance_usd` read directly "
+            "from each bucket's recorded state — substantially cheaper, valid for windows that do not "
+            "end at now, and mark-to-market rather than cost basis. Ignored unless "
+            "`aggregation_method=end-period`."
+        ),
+    ),
     service: AllocationService = Depends(_get_service),
     allowed: frozenset[str] | None = Depends(allowed_prime_vaults),
 ) -> AllocationActivityEnvelope:
@@ -1029,6 +1054,7 @@ async def list_allocation_activity(
                 to_timestamp=time_series.to_timestamp,
                 bucket_seconds=time_series.bucket.total_seconds(),
                 limit=limit,
+                series=series,
             )
             return AllocationActivityEnvelope(
                 AggregatedAllocationActivityEnvelope(

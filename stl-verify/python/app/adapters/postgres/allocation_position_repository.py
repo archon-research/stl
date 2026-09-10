@@ -3,7 +3,7 @@ import logging
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Literal
 
 from opentelemetry import trace
 from sqlalchemy import bindparam, text
@@ -815,8 +815,18 @@ class AllocationRepository:
         bucket_seconds: float,
         limit: int = 100,
         allowed_vaults: Sequence[EthAddress] | None = None,
+        series: Literal["flow", "balance"] = "flow",
     ) -> list[AllocationActivityBucket]:
-        """Return allocation activity counts and tx-amount sums per time bucket."""
+        """Return per-bucket activity aggregates, or per-bucket position value.
+
+        ``series="flow"`` keeps the historical behaviour: event counts,
+        tx-amount sums and the signed USD net flow. ``series="balance"`` runs
+        the checkpoint read instead and returns ``balance_usd`` — a different
+        and much cheaper measure, see ``_ALLOCATION_BALANCE_BUCKETS_SQL``.
+
+        Exactly one query runs per call, so the fields belonging to the other
+        series come back at zero rather than being computed alongside.
+        """
         params = {
             "proxy_addrs": (None if proxy_addresses is None else [a.to_bytes() for a in proxy_addresses]),
             "allowed_vaults": (None if allowed_vaults is None else [v.to_bytes() for v in allowed_vaults]),
@@ -830,10 +840,20 @@ class AllocationRepository:
             "bucket_seconds": bucket_seconds,
             "limit": clamp_limit(limit, _ALLOCATION_ACTIVITY_LIMIT),
         }
+        if series == "balance":
+            # How far before the window to look for each entity's carry-forward
+            # seed. Bounded rather than open-ended: an unbounded scan is what
+            # made the prototype of this query run out of memory on a full
+            # history. One window-length back is enough for any entity observed
+            # at a comparable cadence, and an entity with no observation in that
+            # reach simply has no value until its first in-window row.
+            window = to_timestamp - from_timestamp
+            params["seed_from"] = from_timestamp - window
 
+        statement = _ALLOCATION_BALANCE_BUCKETS_SQL if series == "balance" else _ALLOCATION_ACTIVITY_BUCKETS_SQL
         try:
             async with self._engine.connect() as conn:
-                result = await conn.execute(_ALLOCATION_ACTIVITY_BUCKETS_SQL, self._reference.params(**params))
+                result = await conn.execute(statement, self._reference.params(**params))
                 rows = result.fetchall()
         except asyncio.CancelledError:
             raise
@@ -854,6 +874,9 @@ class AllocationRepository:
                 event_count=row.event_count,
                 total_tx_amount=_safe_decimal(row.total_tx_amount, "total_tx_amount", "aggregate"),
                 net_flow_usd=_safe_decimal(row.net_flow_usd, "net_flow_usd", "aggregate"),
+                balance_usd=(
+                    _safe_decimal(row.balance_usd, "balance_usd", "aggregate") if series == "balance" else None
+                ),
             )
             for row in rows
         ]
@@ -1768,6 +1791,187 @@ LIMIT :limit
 # at the flow's block, not a per-leg execution price. Acceptable because a
 # yield vault's share ratio moves slowly, so the same-block position ratio is
 # indistinguishable from the execution price at this read's resolution.
+# Balance counterpart of _ALLOCATION_ACTIVITY_BUCKETS_SQL, for series=balance
+# (VEC-760). Same filters, same buckets, but it READS each bucket's recorded
+# position state instead of summing the flows into it.
+#
+# Why this exists rather than the client reconstructing from net_flow_usd:
+#
+#   * Cost. The flow read prices every transaction in the window and falls back
+#     to a full-history nearest-ratio probe for any row lacking its own
+#     underlying_value -- 62,187 of 106,956 rows for spark at 90 days. Reading
+#     state skips both. Measured on a staging clone: 38.4s/22.1GB -> 4.6s/412MB.
+#   * Accuracy. Reconstruction is one anchor plus N sequential subtractions, so
+#     per-transaction imprecision accumulates into every earlier bucket and
+#     never self-corrects; measured against fully-covered post-cutover data the
+#     error grows ~0.33pp per day further back (r=0.79). Each bucket here is
+#     independently anchored, so an error stays in its own day.
+#   * Yield. Ratio accretion moves a balance without any transfer, so the flow
+#     read cannot see it at all (sparkUSDC: +$284.4M of state against $63.8K of
+#     flows over 90 days). Anchored at today and walked back, that yield is
+#     silently attributed to every earlier bucket.
+#   * Anchoring. Reconstruction is only valid when the window ends at now, which
+#     is why the UI suppresses this chart for custom ranges. State needs no
+#     anchor, so custom ranges work.
+#
+# It is a different measure, not a cheaper one: cost basis becomes true
+# mark-to-market, so a share-price move shows on a day with no transaction.
+# That is the same basis debt/total-capital/exposure already report.
+#
+# The valuation basis matches the other receipt reads (see the block above
+# _RECEIPT_TOKEN_POSITIONS_SQL): COALESCE(underlying_value, balance) x the
+# registry underlying's price, refusing a row whose own underlying diverges.
+# Prices come from token_price_current, so every bucket is valued at the newest
+# price rather than its own block's -- documented on the flow read and tracked
+# in VEC-763; it applies identically here.
+_ALLOCATION_BALANCE_BUCKETS_SQL = text(f"""
+WITH window_rows AS MATERIALIZED (
+    -- Deduped to the newest processing_version per identity for the same reason
+    -- the flow read is (VEC-758): last() below picks a per-bucket winner by
+    -- created_at, and a correction copies its original's created_at exactly, so
+    -- the tie is unbreakable and would resolve arbitrarily.
+    SELECT DISTINCT ON (
+        ap.chain_id, ap.token_id, ap.prime_id, ap.proxy_address,
+        ap.block_number, ap.block_version, ap.tx_hash, ap.log_index, ap.direction
+    )
+        ap.chain_id,
+        ap.token_id,
+        ap.prime_id,
+        ap.proxy_address,
+        ap.balance,
+        ap.underlying_value,
+        ap.underlying_token_id,
+        ap.created_at,
+        t.address AS token_address
+    FROM allocation_position ap
+    JOIN token t ON t.id = ap.token_id AND t.chain_id = ap.chain_id
+    JOIN prime p ON p.id = ap.prime_id
+    WHERE (CAST(:proxy_addrs AS BYTEA[]) IS NULL OR ap.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[])))
+        AND (CAST(:allowed_vaults AS BYTEA[]) IS NULL OR p.vault_address = ANY(CAST(:allowed_vaults AS BYTEA[])))
+        AND ap.created_at IS NOT NULL
+        AND (CAST(:chain_id AS INTEGER) IS NULL OR ap.chain_id = CAST(:chain_id AS INTEGER))
+        AND (CAST(:action_type AS TEXT) IS NULL OR LOWER(COALESCE(ap.direction::text, '')) =
+             LOWER(CAST(:action_type AS TEXT)))
+        AND (CAST(:token_symbol AS TEXT) IS NULL OR LOWER(COALESCE(t.symbol, ''))
+             LIKE '%' || LOWER(CAST(:token_symbol AS TEXT)) || '%' ESCAPE '\\')
+        AND (CAST(:tx_hash AS TEXT) IS NULL OR encode(ap.tx_hash, 'hex') = LOWER(CAST(:tx_hash AS TEXT)))
+        AND ap.created_at >= CAST(:seed_from AS TIMESTAMPTZ)
+        AND ap.created_at <= CAST(:to_timestamp AS TIMESTAMPTZ)
+    ORDER BY
+        ap.chain_id, ap.token_id, ap.prime_id, ap.proxy_address,
+        ap.block_number, ap.block_version, ap.tx_hash, ap.log_index,
+        ap.direction, ap.processing_version DESC
+),
+token_context AS MATERIALIZED (
+    -- One row per token: registry underlying and its latest price. Identical in
+    -- shape and rationale to the flow read's, including MATERIALIZED being
+    -- load-bearing. Direct holdings get a NULL underlying and are priced by
+    -- their own token price instead.
+    SELECT
+        wt.chain_id,
+        wt.token_id,
+        rt.underlying_token_id,
+        (
+            SELECT tpc.price_usd
+            FROM token_price_current tpc
+            JOIN protocol_oracle po ON po.oracle_id = tpc.oracle_id
+                AND po.protocol_id = rt.protocol_id
+            WHERE tpc.token_id = rt.underlying_token_id
+              AND EXISTS (
+                  SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
+                  WHERE oa.oracle_id = tpc.oracle_id
+                    AND oa.token_id = tpc.token_id
+                    AND oa.enabled
+              )
+            ORDER BY tpc.block_number DESC, tpc.block_version DESC,
+                     tpc.processing_version DESC, tpc.oracle_id DESC
+            LIMIT 1
+        ) AS receipt_price_usd,
+        (
+            SELECT tpc.price_usd
+            FROM token_price_current tpc
+            WHERE tpc.token_id = wt.token_id
+            ORDER BY tpc.block_number DESC, tpc.block_version DESC,
+                     tpc.processing_version DESC
+            LIMIT 1
+        ) AS direct_price_usd
+    FROM (SELECT DISTINCT chain_id, token_id, token_address FROM window_rows) wt
+    LEFT JOIN receipt_token rt
+        ON rt.chain_id = wt.chain_id AND rt.receipt_token_address = wt.token_address
+),
+valued_rows AS MATERIALIZED (
+    SELECT
+        ap.proxy_address,
+        ap.chain_id,
+        ap.token_id,
+        ap.created_at,
+        CASE
+            -- Same refusal as every other valuation read: a row whose own
+            -- underlying disagrees with the registry's is denominated in a
+            -- different asset than the price multiplies, so it is not priced.
+            WHEN ap.underlying_token_id IS NOT NULL
+             AND tc.underlying_token_id IS NOT NULL
+             AND ap.underlying_token_id <> tc.underlying_token_id THEN NULL
+            WHEN tc.underlying_token_id IS NOT NULL
+                THEN COALESCE(ap.underlying_value, ap.balance) * tc.receipt_price_usd
+            ELSE ap.balance * tc.direct_price_usd
+        END AS value_usd
+    FROM window_rows ap
+    JOIN token_context tc ON tc.chain_id = ap.chain_id AND tc.token_id = ap.token_id
+),
+priced AS (SELECT * FROM valued_rows WHERE value_usd IS NOT NULL),
+seed AS (
+    -- Each entity's last known value strictly before the window, so a bucket
+    -- with no observation of its own can still carry one forward. Resolved as a
+    -- single DISTINCT ON scan rather than a per-entity correlated subquery --
+    -- the prototype ran it as a lateral and paid 36 loops for spark's 58 tokens
+    -- (same shape of fix as #728 on the exposure read).
+    SELECT DISTINCT ON (proxy_address, chain_id, token_id)
+           proxy_address, chain_id, token_id, value_usd
+    FROM priced
+    WHERE created_at < CAST(:from_timestamp AS TIMESTAMPTZ)
+    ORDER BY proxy_address, chain_id, token_id, created_at DESC
+),
+in_window AS (
+    SELECT * FROM priced WHERE created_at >= CAST(:from_timestamp AS TIMESTAMPTZ)
+),
+per_entity AS (
+    -- The seed arrives by JOIN, not as a correlated subquery inside locf().
+    -- Written the obvious way it is re-evaluated once per (bucket, entity)
+    -- group -- 2,706 groups here -- and measured at 43s of a 47s query, which
+    -- is the same per-entity-lateral cost #728 removed from the exposure read.
+    -- Joined instead, `seed` is scanned once. It is functionally determined by
+    -- the entity key, so grouping by it adds no groups.
+    SELECT
+        {time_bucket_expr("iw.created_at")} AS bucket_start,
+        iw.proxy_address,
+        iw.chain_id,
+        iw.token_id,
+        locf(
+            last(iw.value_usd, iw.created_at),
+            s.value_usd,
+            treat_null_as_missing => true
+        ) AS entity_value_usd
+    FROM in_window iw
+    LEFT JOIN seed s
+        ON s.proxy_address = iw.proxy_address
+       AND s.chain_id = iw.chain_id
+       AND s.token_id = iw.token_id
+    GROUP BY bucket_start, iw.proxy_address, iw.chain_id, iw.token_id, s.value_usd
+)
+SELECT
+    bucket_start,
+    0 AS event_count,
+    0 AS total_tx_amount,
+    0 AS net_flow_usd,
+    COALESCE(SUM(entity_value_usd), 0) AS balance_usd
+FROM per_entity
+GROUP BY bucket_start
+ORDER BY bucket_start DESC
+LIMIT :limit
+""")
+
+
 _ALLOCATION_ACTIVITY_BUCKETS_SQL = text(f"""
 WITH window_rows AS MATERIALIZED (
     -- The activity rows this read aggregates. Fenced so the hypertable is
