@@ -17,12 +17,22 @@ class AllocationActivityBucket:
 
     ``net_flow_usd`` is the signed net flow valued in USD (inflows positive,
     outflows negative); it may be negative, unlike ``total_tx_amount``.
+
+    ``balance_usd`` is the bucket's position value read from recorded state
+    rather than reconstructed from flow, and is populated only for
+    ``series="balance"`` (VEC-760). The two are alternatives, not companions:
+    each request runs one query, so the fields the other would fill are left at
+    their zero value. It is a different measure as well as a cheaper one --
+    mark-to-market rather than cost basis -- so a share-price move appears in
+    ``balance_usd`` on a day with no transaction, and in ``net_flow_usd`` not at
+    all.
     """
 
     bucket_start: datetime
     event_count: int
     total_tx_amount: Decimal
     net_flow_usd: Decimal
+    balance_usd: Decimal | None = None
 
     def __post_init__(self) -> None:
         if self.event_count < 0:

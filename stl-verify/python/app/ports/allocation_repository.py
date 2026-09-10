@@ -1,7 +1,7 @@
 from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
-from typing import Protocol
+from typing import Literal, Protocol
 
 from app.domain.entities.allocation import (
     AnchorageCustodyHolding,
@@ -138,11 +138,18 @@ class AllocationRepositoryPort(Protocol):
         bucket_seconds: float,
         limit: int = 100,
         allowed_vaults: Sequence[EthAddress] | None = None,
+        series: Literal["flow", "balance"] = "flow",
     ) -> list[AllocationActivityBucket]:
         """Return allocation activity aggregated into time buckets.
 
         ``proxy_addresses`` and ``allowed_vaults`` follow
         ``list_allocation_activity``'s contract.
+
+        ``series`` selects which aggregate the buckets carry: ``"flow"`` (the
+        default) event counts, tx-amount sums and signed USD net flow;
+        ``"balance"`` each bucket's position value read from recorded state.
+        They are alternatives -- one query runs per call, and the fields
+        belonging to the other series come back at their zero value.
         """
         ...
 
