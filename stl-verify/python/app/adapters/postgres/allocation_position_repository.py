@@ -73,6 +73,11 @@ _ALLOCATION_ACTIVITY_LIMIT = 1000
 # emit a telemetry warning while still serving the honestly-stale data.
 _ANCHORAGE_STALE_AFTER = timedelta(hours=1)
 
+# Minimum reach back before a window for the balance series' carry-forward seed
+# (VEC-760). See the comment at its use site for why a window-relative reach
+# alone silently drops sparsely-observed positions.
+_BALANCE_SEED_REACH = timedelta(days=30)
+
 # The identity of an allocation_position row: allocation_position_pkey minus
 # processing_version, and minus created_at. created_at is the block timestamp and
 # a correction copies it unchanged, so it does NOT distinguish one version from
@@ -842,13 +847,19 @@ class AllocationRepository:
         }
         if series == "balance":
             # How far before the window to look for each entity's carry-forward
-            # seed. Bounded rather than open-ended: an unbounded scan is what
-            # made the prototype of this query run out of memory on a full
-            # history. One window-length back is enough for any entity observed
-            # at a comparable cadence, and an entity with no observation in that
-            # reach simply has no value until its first in-window row.
+            # seed. Bounded rather than open-ended -- an unbounded scan is what
+            # made the prototype of this query run the database out of memory.
+            #
+            # The floor is what matters. Reaching back only one window-length
+            # looks natural and is wrong for short windows: at a 24h window an
+            # entity last observed three days ago finds no seed, contributes
+            # nothing, and its position silently disappears from the total
+            # instead of carrying forward. Sweeps are dense enough not to notice,
+            # which is exactly why it would have shipped unnoticed. The floor
+            # covers a sparsely-observed entity; the window term covers a long
+            # window whose own span already exceeds it.
             window = to_timestamp - from_timestamp
-            params["seed_from"] = from_timestamp - window
+            params["seed_from"] = from_timestamp - max(window, _BALANCE_SEED_REACH)
 
         statement = _ALLOCATION_BALANCE_BUCKETS_SQL if series == "balance" else _ALLOCATION_ACTIVITY_BUCKETS_SQL
         try:
@@ -1932,32 +1943,42 @@ seed AS (
     WHERE created_at < CAST(:from_timestamp AS TIMESTAMPTZ)
     ORDER BY proxy_address, chain_id, token_id, created_at DESC
 ),
-in_window AS (
-    SELECT * FROM priced WHERE created_at >= CAST(:from_timestamp AS TIMESTAMPTZ)
+observations AS (
+    SELECT proxy_address, chain_id, token_id, created_at, value_usd
+    FROM priced
+    WHERE created_at >= CAST(:from_timestamp AS TIMESTAMPTZ)
+    UNION ALL
+    -- Each entity's carry-in, anchored at the window start so it becomes a real
+    -- row in the first bucket rather than an argument to locf().
+    --
+    -- Two bugs this shape avoids. time_bucket_gapfill only emits a bucket
+    -- series for groups that have at least one row, so an entity whose latest
+    -- observation predates the window produced NO buckets at all and vanished
+    -- from the total instead of carrying its value forward -- which at a 24h
+    -- window is most entities. And passing the seed as locf's second argument
+    -- meant a correlated subquery re-evaluated per (bucket, entity) group: 43s
+    -- of a 47.6s query, the cost #728 removed from the exposure read.
+    SELECT proxy_address, chain_id, token_id,
+           CAST(:from_timestamp AS TIMESTAMPTZ) AS created_at, value_usd
+    FROM seed
 ),
 per_entity AS (
-    -- The seed arrives by JOIN, not as a correlated subquery inside locf().
-    -- Written the obvious way it is re-evaluated once per (bucket, entity)
-    -- group -- 2,706 groups here -- and measured at 43s of a 47s query, which
-    -- is the same per-entity-lateral cost #728 removed from the exposure read.
-    -- Joined instead, `seed` is scanned once. It is functionally determined by
-    -- the entity key, so grouping by it adds no groups.
     SELECT
-        {time_bucket_expr("iw.created_at")} AS bucket_start,
-        iw.proxy_address,
-        iw.chain_id,
-        iw.token_id,
-        locf(
-            last(iw.value_usd, iw.created_at),
-            s.value_usd,
-            treat_null_as_missing => true
-        ) AS entity_value_usd
-    FROM in_window iw
-    LEFT JOIN seed s
-        ON s.proxy_address = iw.proxy_address
-       AND s.chain_id = iw.chain_id
-       AND s.token_id = iw.token_id
-    GROUP BY bucket_start, iw.proxy_address, iw.chain_id, iw.token_id, s.value_usd
+        time_bucket_gapfill(
+            make_interval(secs => :bucket_seconds),
+            o.created_at,
+            CAST(:from_timestamp AS TIMESTAMPTZ),
+            CAST(:to_timestamp AS TIMESTAMPTZ)
+        ) AS bucket_start,
+        o.proxy_address,
+        o.chain_id,
+        o.token_id,
+        -- gapfill + locf, not the plain time_bucket the other bucketed reads
+        -- use: a bucket with no observation of its own has to report the last
+        -- known value, not nothing.
+        locf(last(o.value_usd, o.created_at)) AS entity_value_usd
+    FROM observations o
+    GROUP BY bucket_start, o.proxy_address, o.chain_id, o.token_id
 )
 SELECT
     bucket_start,
