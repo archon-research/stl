@@ -22,14 +22,16 @@ CREATE TABLE IF NOT EXISTS position_daily (
     build_id           integer     NOT NULL,
     run_id             bigint,
     deal_type          text,
+    created_at         timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT position_daily_pkey PRIMARY KEY (position_id, as_of_date),
     -- The one constraint that is not a copy of a position_state guard: it pins both writers' date
     -- derivation together, and on a hypertable a wrong value would also seat the row in the wrong chunk.
     CONSTRAINT position_daily_as_of_date_chk CHECK (as_of_date = (block_timestamp AT TIME ZONE 'utc')::date)
 );
 
--- CREATE TABLE IF NOT EXISTS adds no column to a table that already exists, so run_id needs its
--- own idempotent ALTER: the writers below read it and are parsed when they are created.
+-- CREATE TABLE IF NOT EXISTS adds no column to a table an earlier revision of this file created, so run_id
+-- gets an idempotent ALTER: the LANGUAGE sql procedure below reads it and must parse. created_at gets none --
+-- once this table is a columnstore hypertable TimescaleDB rejects a DEFAULT now() column, so wipe instead.
 ALTER TABLE position_daily ADD COLUMN IF NOT EXISTS run_id bigint;
 
 -- Hypertable on as_of_date, converted while the table is still empty. 7-day chunks rather than
@@ -51,6 +53,8 @@ $tier$;
 -- Compression at 30 days, past the window the trigger keeps rewriting: a bulk upsert into a compressed
 -- chunk exceeds max_tuples_decompressed_per_dml_transaction (measured: fails at 100,001 on 150k rows),
 -- so both writers lift that limit for their own statement rather than the table forgoing compression.
+-- created_at is deliberately not a segmentby or orderby key: it changes on every overwrite, where the
+-- columnstore key must be the stable identity a chunk is grouped and sorted by.
 ALTER TABLE position_daily SET (
     timescaledb.compress,
     timescaledb.compress_segmentby = 'position_id',
@@ -74,6 +78,7 @@ COMMENT ON COLUMN position_daily.projection IS 'Roles: Audit. Which projection v
 COMMENT ON COLUMN position_daily.deal_type IS 'Roles: Derived (copy of position_state.deal_type). The deal type of that day''s winning observation.';
 COMMENT ON COLUMN position_daily.build_id IS 'Roles: Audit. Which build wrote the winning observation (build_registry.id; 0 = pre-tracking).';
 COMMENT ON COLUMN position_daily.run_id IS 'Roles: Audit (copy of position_state.run_id). Which writer run appended the winning observation (writer_run.id; NULL means it predates run tracking).';
+COMMENT ON COLUMN position_daily.created_at IS 'Roles: Audit. When this day''s row was last written - its first insert or the latest overwrite by a newer observation for the same date; one the guard rejects leaves it alone. Not block time (see block_timestamp). max(created_at) behind max(position_state.created_at), both processing time, is the staleness signal, weaker at this grain than at position_current''s: a late observation for a date with no row yet is an INSERT, so it advances the reading rather than lagging it.';
 
 -- Trigger-only cache, like position_current and allocation_position_current: the app role reads and the
 -- SECURITY DEFINER maintainer writes, so no caller needs a write grant and the cache cannot fork from
@@ -118,7 +123,8 @@ BEGIN
         projection         = EXCLUDED.projection,
         build_id           = EXCLUDED.build_id,
         run_id             = EXCLUDED.run_id,
-        deal_type          = EXCLUDED.deal_type
+        deal_type          = EXCLUDED.deal_type,
+        created_at         = now()
     WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_version, EXCLUDED.block_timestamp)
         > (cur.block_number, cur.block_version, cur.processing_version, cur.block_timestamp);
     RETURN NULL;
@@ -163,7 +169,8 @@ AS $proc$
         projection         = EXCLUDED.projection,
         build_id           = EXCLUDED.build_id,
         run_id             = EXCLUDED.run_id,
-        deal_type          = EXCLUDED.deal_type
+        deal_type          = EXCLUDED.deal_type,
+        created_at         = now()
     -- Forward-only: raise a stale row, never lower one. No equal-coordinate arm is needed now that the
     -- cache has no write channel outside these two writers, which cannot disagree on one coordinate.
     WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_version, EXCLUDED.block_timestamp)
