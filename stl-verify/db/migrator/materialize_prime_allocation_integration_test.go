@@ -476,10 +476,9 @@ func TestMaterializePrimeAllocationKeepsEachBlockVersion(t *testing.T) {
 	}
 }
 
-// The wrapper must resolve its own view, not one the caller's search_path happens to reach.
-// Unpinned and unqualified it failed outright under a caller path without public, and under a
-// path that reached a same-named view elsewhere it would have materialized that one and stamped
-// its schema as the position's owning projection.
+// The wrapper must resolve its own view and the shared function by name, not whatever the
+// search_path happens to reach. SET search_path FROM CURRENT snapshots "$user", public, which
+// still resolves per role at call time, so qualification is what actually protects it.
 func TestMaterializePrimeAllocationPinsItsSearchPath(t *testing.T) {
 	ctx, pool, _ := seedPrimeAllocation(t)
 
@@ -512,3 +511,34 @@ func TestMaterializePrimeAllocationPinsItsSearchPath(t *testing.T) {
 		t.Fatalf("the wrapper failed under a caller search_path without public: %v", err)
 	}
 }
+
+// A schema named after the calling role is searched before public under "$user", public, so an
+// object placed there shadows an unqualified reference. The wrapper names both its view and the
+// shared function with their schema, so neither can be swapped underneath it.
+func TestMaterializePrimeAllocationResolvesPastAShadowingSchema(t *testing.T) {
+	ctx, pool, _ := seedPrimeAllocation(t)
+
+	var role string
+	if err := pool.QueryRow(ctx, `SELECT current_user`).Scan(&role); err != nil {
+		t.Fatalf("current_user: %v", err)
+	}
+	// A shadow that would be caught: it returns a sentinel instead of appending anything.
+	if _, err := pool.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS `+pgIdent(role)); err != nil {
+		t.Fatalf("creating the shadowing schema: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `CREATE OR REPLACE FUNCTION `+pgIdent(role)+`.materialize_position_projection(regclass, integer)
+	                             RETURNS bigint LANGUAGE sql AS $$ SELECT -1::bigint $$`); err != nil {
+		t.Fatalf("creating the shadowing function: %v", err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DROP SCHEMA IF EXISTS `+pgIdent(role)+` CASCADE`) })
+
+	var got int64
+	if err := pool.QueryRow(ctx, `SELECT public.materialize_prime_allocation()`).Scan(&got); err != nil {
+		t.Fatalf("materialize_prime_allocation: %v", err)
+	}
+	if got == -1 {
+		t.Error("the wrapper called the shadowing function, so its reference is unqualified")
+	}
+}
+
+func pgIdent(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }

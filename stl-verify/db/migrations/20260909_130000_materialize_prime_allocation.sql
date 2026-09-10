@@ -45,7 +45,7 @@ COMMENT ON VIEW position_prime_allocation IS '[Operational] VEC-407 projection: 
 CREATE OR REPLACE FUNCTION materialize_prime_allocation(p_build_id integer DEFAULT 0) RETURNS bigint
     LANGUAGE sql
     SET search_path FROM CURRENT AS $fn$
-    SELECT materialize_position_projection('public.position_prime_allocation'::regclass, p_build_id);
+    SELECT public.materialize_position_projection('public.position_prime_allocation'::regclass, p_build_id);
 $fn$;
 
 COMMENT ON FUNCTION materialize_prime_allocation(integer) IS '[Operational] VEC-407: appends Prime ALM allocation observations into position_state via materialize_position_projection(position_prime_allocation). See that function''s comment for the run contract.';
