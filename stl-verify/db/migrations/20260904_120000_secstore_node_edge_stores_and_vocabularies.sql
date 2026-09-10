@@ -34,41 +34,35 @@
 --     (SELECT ... FOR KEY SHARE, executed as the parent's OWNER) requires UPDATE on the
 --     parent — so the owner keeps UPDATE and append-only is enforced by the
 --     reference_table_immutable() trigger instead (20260714_160000, Simon's #574 finding).
---     Revoking owner UPDATE here would make every INSERT into sec_node/sec_edge fail with
---     "permission denied" under the prod roles while passing superuser CI.
+--     The owner's UPDATE is what the RI probe needs under the prod roles; superuser CI cannot
+--     observe its absence.
 --
 -- Valid time is TOTAL and stored, not derived: valid_to is NOT NULL with an 'infinity' sentinel
--- for an open window, and it sits IN THE PRIMARY KEY. Three things follow, and they are the
--- reason for the shape (review of the first draft, which had a nullable valid_to outside the PK):
+-- for an open window, and it sits IN THE PRIMARY KEY. Three properties follow from that shape:
 --   * Close-and-open is an ordinary append at processing_version 0. Closing a window means
---     appending the same (id, valid_from) with a real valid_to; without valid_to in the key that
---     row collides with the open one, which would force every curated edit to allocate a
---     correction version through processing_version_log (ADR-0006 §3 reserves those for
---     correction RUNS, one per ticket) — an issuer re-point is not a correction run.
+--     appending the same (id, valid_from) with a real valid_to, which valid_to's place in the
+--     key keeps distinct from the open row. ADR-0006 §3 reserves processing_version > 0 for
+--     correction RUNS, one allocation per ticket; an issuer re-point is curation, not a run.
 --   * A retraction is expressible: a TOMBSTONE is an append with a ZERO-LENGTH window
 --     (valid_to = valid_from), which is why the window CHECK is <= and not <. It matches no
 --     as-of date, so the WINDOW it names drops out of the resolved reads while every version of
 --     it stays readable — ADR-0007 §3's "tombstone append that supersedes the retracted row",
 --     with supersedes_record_id naming the retracted record (UNIQUE (record_id) makes that
---     pointer resolvable). Un-retracting is a correction run at N, not a re-append at 0: the
---     re-asserted row would otherwise collide with the original and be dropped by
---     ON CONFLICT DO NOTHING, leaving the tombstone winning forever.
+--     pointer resolvable). Un-retracting is a correction run at N: at 0 the re-asserted row
+--     shares the original's key, so ON CONFLICT DO NOTHING drops it and the tombstone keeps
+--     winning.
 --
 --     A tombstone withdraws ONE WINDOW, not the logical record, because supersession resolves
 --     per (logical record, valid_from) and a zero-length append only wins its own group. A
 --     record that has been closed and reopened therefore takes one tombstone per window: given
 --     Jan-open, Jan-closed-to-Jun and Jun-open, a tombstone on the Jan group leaves the Jun
---     window live and current. That is the honest scope of the mechanism, and it is asserted
---     that way in TestSecStoreClosingRowSupersedesRatherThanResurrects rather than only in the
---     single-window case, which passes either way (review finding: the claim above originally
---     said "the logical record drops out", which is true only of a one-window record).
---     Withdrawing a logical record in ONE append, and the DQ rule that flags a half-retracted
---     record, are VEC-622's — they need the validator that would police them.
+--     window live and current. TestSecStoreClosingRowSupersedesRatherThanResurrects asserts
+--     both scopes. Withdrawing a logical record in ONE append, and the DQ rule that flags a
+--     half-retracted record, are VEC-622's — they need the validator that would police them.
 --   * Knowledge time appears twice and the two are not the same: as the SUPERSESSION ORDER
 --     inside a valid window (next bullet), and as a READ PARAMETER — both _as_of functions
---     take a pg_snapshot overload answering "what did we know then", which the ordering alone
---     does not provide. The first draft shipped only the effective-date read while this header
---     read as though resolution covered both clocks (review finding).
+--     take a pg_snapshot overload answering "what did we know then". Supersession order decides
+--     which append wins a window; a snapshot decides which appends the reader can see at all.
 --   * Resolution is by knowledge time within a window: latest append per (logical record,
 --     valid_from) is processing_version DESC, then ingest_xid DESC (ADR-0006 §5's ordering key —
 --     never writer-supplied, so a writer cannot reorder its own supersession), then record_id
@@ -99,8 +93,8 @@ CREATE TABLE weight_basis_vocabulary (
     basis        text PRIMARY KEY,
     description  text NOT NULL
 );
-COMMENT ON TABLE weight_basis_vocabulary IS '[Configuration] Legal weight bases (ADR-0007 §3): three, each a share of a whole. Weights of unlike bases must never be summed; a conversion ratio is edge payload, not a weight — which is why UNITS is absent (see the basis column). Plain table: seed-once, extended by reviewed migration.';
-COMMENT ON COLUMN weight_basis_vocabulary.basis IS 'Roles: PK. Basis code (VALUE / NOTIONAL / OWNERSHIP_PCT). Each names a SHARE OF A WHOLE, which is what makes weights along a path multiplicable and weights under one basis summable. UNITS was seeded here and dropped before merge: no rel_type declared it, and ''unit ratio'' is a conversion ratio, which ADR-0007 §3 puts in the edge payload rather than the weight (review of the first draft; #652 carries the definition).';
+COMMENT ON TABLE weight_basis_vocabulary IS '[Configuration] Legal weight bases (ADR-0007 §3): three, each a share of a whole. Weights of unlike bases must never be summed; a conversion ratio is edge payload, not a weight (see the basis column). Plain table: seed-once, extended by reviewed migration.';
+COMMENT ON COLUMN weight_basis_vocabulary.basis IS 'Roles: PK. Basis code (VALUE / NOTIONAL / OWNERSHIP_PCT). Each names a SHARE OF A WHOLE, which is what makes weights along a path multiplicable and weights under one basis summable. A conversion ratio is not a share: ADR-0007 §3 puts ratios in the edge payload.';
 COMMENT ON COLUMN weight_basis_vocabulary.description IS 'What the basis measures and where it is used.';
 
 -- Declared before rel_type_vocabulary so its weight_basis is a real FK, not a soft one.
@@ -193,13 +187,11 @@ CREATE TABLE sec_node (
     content_hash        bytea NOT NULL,
     PRIMARY KEY (id, processing_version, valid_from, valid_to),
     CONSTRAINT sec_node_record_id_key UNIQUE (record_id),
-    -- The prefix is a GOVERNED part of the id contract, not a legibility nicety: three things in
-    -- this file derive record_type from it — this CHECK, sec_edge's endpoint-kind CHECKs, and the
-    -- kind-scoped read's pushdown. ADR-0007 §1.1 still calls the mnemonic fragment something the
-    -- model does not rely on, which VEC-632 has to correct; until it does, adding a node kind or a
-    -- mnemonic colliding with another kind's prefix breaks all three (review finding). acct-% is
-    -- admitted here while ACCOUNT is still 'proposed' in ADR §2, matching BELONGS_TO, which is
-    -- ratified and already names ACCOUNT as an endpoint kind.
+    -- The prefix is a GOVERNED part of the id contract: three things in this file derive
+    -- record_type from it — this CHECK, sec_edge's endpoint-kind CHECKs, and the kind-scoped
+    -- read's pushdown. A new node kind needs a prefix unique across all of them, and VEC-632
+    -- carries the matching correction to ADR-0007 §1.1. acct-% is admitted for ACCOUNT, which
+    -- ratified BELONGS_TO already names as an endpoint kind.
     CONSTRAINT sec_node_id_prefix_chk CHECK (
         (record_type = 'ENTITY'   AND id LIKE 'em-%')      OR
         (record_type = 'SECURITY' AND id LIKE 'sec-%')     OR
@@ -208,11 +200,8 @@ CREATE TABLE sec_node (
         (record_type = 'ACCOUNT'  AND id LIKE 'acct-%')
     ),
     CONSTRAINT sec_node_valid_chk CHECK (valid_from <= valid_to),
-    -- A row whose window STARTS at infinity satisfies valid_from <= valid_to and then matches no
-    -- read ever, because every read tests valid_from <= effective_at: it lands, takes a PK slot
-    -- and a content_hash, and is invisible forever with no error anywhere. 'infinity' is the
-    -- open-END sentinel and nothing else (review finding; '-infinity' is refused for the same
-    -- reason — a start nobody can name is not a start).
+    -- 'infinity' is the open-END sentinel only. Every read tests valid_from <= effective_at, so
+    -- a window starting at either infinity is unreachable by any as-of date.
     CONSTRAINT sec_node_valid_from_finite_chk CHECK (valid_from <> 'infinity' AND valid_from <> '-infinity')
 );
 COMMENT ON TABLE sec_node IS '[Dimension] Combined SECs master (ADR-0007 §2): one node per real-world thing, discriminated by record_type. Append-only (full ACL revoke incl. owner — nothing FKs this table), bitemporal (valid window + ingest_xid). valid_to is NOT NULL (''infinity'' when open) and in the PK, so close-and-open is an append at processing_version 0; a zero-length window is a retraction tombstone. The instrument is NOT a node kind: native keys resolve via the instrument register (VEC-616). Individuals carry a pseudonymous surrogate only; PII lives in a separate store (DP-1). Plain table: governance-rate writes, per the sparse-table exception.';
@@ -221,7 +210,7 @@ COMMENT ON COLUMN sec_node.record_type IS 'Node kind. ENTITY / SECURITY / CONCEP
 COMMENT ON COLUMN sec_node.chain_id IS 'Roles: FK→chain.chain_id (soft). NULL for off-chain things.';
 COMMENT ON COLUMN sec_node.status IS 'Roles: FK→node_status_vocabulary (composite with record_type). A status change is a new version.';
 COMMENT ON COLUMN sec_node.attrs IS 'Kind-specific attributes as jsonb; the shape system (VEC-622) decides required-ness per type. Hot attributes promote to typed columns only on VEC-633 evidence.';
-COMMENT ON COLUMN sec_node.valid_from IS 'Roles: PK (with id, processing_version, valid_to). Valid-time window start, UTC date, half-open [valid_from, valid_to). GRAIN IS A DAY, so two changes to one record on the same day are not both representable: both windows are [D, D+1), resolution picks one by processing_version then ingest_xid, and the other is unreachable by any as-of date even though it was true for part of D. Accepted for curated data at governance cadence — widening the type later would rewrite every row and every key — and recorded here because ADR-0007 §3 says ''UTC dates'' without saying this (VEC-632).';
+COMMENT ON COLUMN sec_node.valid_from IS 'Roles: PK (with id, processing_version, valid_to). Valid-time window start, UTC date, half-open [valid_from, valid_to). GRAIN IS A DAY, so two changes to one record on the same day are not both representable: both windows are [D, D+1), resolution picks one by processing_version then ingest_xid, and the other is unreachable by any as-of date even though it was true for part of D. Accepted for curated data at governance cadence; VEC-632 records the constraint in ADR-0007 §3.';
 COMMENT ON COLUMN sec_node.valid_to IS 'Roles: PK (with id, processing_version, valid_from). Valid-time window end, exclusive; ''infinity'' = open/current, never NULL. In the key so close-and-open is an ordinary append at processing_version 0. A ZERO-LENGTH window (valid_to = valid_from) is a TOMBSTONE: it matches no as-of date, so THAT WINDOW drops out of the resolved reads with its history intact (ADR-0007 §3 retraction; pair it with change_reason_code RETRACTION and supersedes_record_id). It withdraws one window, not the logical record — a closed-and-reopened record takes one tombstone per window, and single-append record withdrawal is VEC-622''s.';
 COMMENT ON COLUMN sec_node.record_id IS 'Roles: Audit, UNIQUE. Per-append surrogate; what supersedes_record_id, a retraction and a reproduction manifest point at (PR-2.1). Unique per store, not globally: a manifest cites (table, record_id).';
 COMMENT ON COLUMN sec_node.processing_version IS 'Roles: Audit, PK component. Correction version, caller-assigned per ADR-0006 §3: 0 live, N per correction run via processing_version_log. A valid-time change (close-and-open, an ended window, a tombstone) is NOT a correction and stays at 0 — valid_to carries it. Un-retracting a tombstoned record IS a correction run at N. CONSEQUENCE of the resolution order (processing_version before ingest_xid): once a window has been corrected at N, a later ordinary append at 0 for that same (id, valid_from) never wins its group, whatever its ingest_xid, and with no error — a curator''s correction is not silently undone by the next pipeline run, and moving that window again takes another correction run. If a load appears to do nothing, this is why.';
@@ -239,14 +228,10 @@ COMMENT ON COLUMN sec_node.content_hash IS 'Roles: Audit, Derived. sha256 over t
 -- ingest_xid DESC, record_id DESC. Columns AND directions have to match the whole key or the
 -- DISTINCT ON degrades to a full scan plus sort on every current read (VEC-633 measures this).
 CREATE INDEX sec_node_resolve_idx ON sec_node (id, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC);
--- Same rule as sec_node_resolve_idx, and it applies here too: the kind-scoped read below sorts
--- (id, valid_from) ASC then processing_version DESC, ingest_xid DESC, record_id DESC, so this key
--- must match through its whole length. It was (…, valid_from DESC, processing_version DESC) —
--- wrong direction on valid_from and two columns short, so it could not supply the sort at all and
--- the planner fell back to sec_node_resolve_idx, which has no leading record_type. Measured at
--- 200k nodes: 102 ms with the mismatched key against 64 ms with this one, the difference being an
--- inner sort node that disappears (review of the first draft, which shipped the mismatch under a
--- comment stating the rule correctly).
+-- Same rule as sec_node_resolve_idx: the kind-scoped read below sorts (id, valid_from) ASC then
+-- processing_version DESC, ingest_xid DESC, record_id DESC, so this key must match through its
+-- whole length or the read pays an inner sort — 64 ms with this key against 102 ms without it at
+-- 200k nodes.
 CREATE INDEX sec_node_type_idx ON sec_node (record_type, id, valid_from, processing_version DESC, ingest_xid DESC, record_id DESC);
 
 -- ---------------------------------------------------------------------------
@@ -284,13 +269,11 @@ CREATE TABLE sec_edge (
     PRIMARY KEY (rel_type, src_id, dst_id, edge_seq, processing_version, valid_from, valid_to),
     CONSTRAINT sec_edge_record_id_key UNIQUE (record_id),
     CONSTRAINT sec_edge_weight_basis_chk CHECK (rel_weight IS NULL OR weight_basis IS NOT NULL),
-    -- The cheap half of GQ-11 at the engine boundary. Endpoint EXISTENCE is cross-row and stays
-    -- with the validator, but the kind is NOT only a domain question: sec_node_id_prefix_chk makes
-    -- record_type a deterministic function of the id prefix, so a declared kind that contradicts
-    -- its own endpoint id is single-row checkable — the same fact the kind-scoped read below
-    -- relies on for its pushdown. The first draft checked only that the kind was one of the five,
-    -- which accepted ('em-90001','SECURITY') and an empty dst_id (review finding). These CHECKs
-    -- are sec_node_id_prefix_chk applied to each endpoint, and they subsume the domain check.
+    -- The cheap half of GQ-11 at the engine boundary: sec_node_id_prefix_chk makes record_type a
+    -- deterministic function of the id prefix, so a declared kind that contradicts its own
+    -- endpoint id is single-row checkable — the same fact the kind-scoped read below relies on
+    -- for its pushdown. These are sec_node_id_prefix_chk applied to each endpoint. Endpoint
+    -- EXISTENCE is cross-row and stays with the validator.
     CONSTRAINT sec_edge_src_kind_chk CHECK (
         (src_kind = 'ENTITY'   AND src_id LIKE 'em-%')      OR
         (src_kind = 'SECURITY' AND src_id LIKE 'sec-%')     OR
@@ -310,7 +293,7 @@ CREATE TABLE sec_edge (
 );
 COMMENT ON TABLE sec_edge IS '[Dimension] Directed, typed, weighted relationship store (ADR-0007 §3/§5). Append-only (full ACL revoke incl. owner — nothing FKs this table); close-and-open at processing_version 0 (valid_to is NOT NULL, ''infinity'' when open, and in the PK); retraction is a tombstone append with a zero-length window. Endpoint-kind legality vs rel_type_vocabulary is loader/validator-enforced (cross-row); single-valued cardinality is a DQ check over current state, never a write trigger. Inverses and closures are derived, never stored. Plain table: governance-rate writes — block-stamped projection types (ALLOCATES) are excluded by design and would need their own hypertable store if ratified.';
 COMMENT ON COLUMN sec_edge.edge_id IS 'Roles: Derived. Generated human-readable identity of the LOGICAL edge; the PK is the seven-column (rel_type, src_id, dst_id, edge_seq, processing_version, valid_from, valid_to) tuple, so one edge_id spans every version and window of that edge.';
-COMMENT ON COLUMN sec_edge.edge_seq IS 'Roles: PK component. DM-6 discriminator: deliberately duplicated edges (multi-typing, per-edge attribute clusters) coexist instead of superseding their twin. Base is 1 per ADR-0007 §3, so a twin is 2; 0 is rejected rather than left as a second spelling of the base edge, since edge_seq is rendered into the stored edge_id. NO ALLOCATOR EXISTS, and this column sits inside the row''s identity: choosing 2 means reading current state first, so a writer must take pg_advisory_xact_lock on (rel_type, src_id, dst_id) per the read-then-write rule in db/migrations AGENTS.md, and a replay must CARRY the seq from its source rather than recompute it — recomputed it can differ run to run, and edge_id plus every content_hash chained from it differ with it. Two concurrent twins otherwise both compute 2 and the loser is a PK violation. VEC-622 owns the loader that allocates it; whether the discriminator should be a counter at all, rather than a function of the payload cluster that distinguishes the twins, is open (review finding).';
+COMMENT ON COLUMN sec_edge.edge_seq IS 'Roles: PK component. DM-6 discriminator: deliberately duplicated edges (multi-typing, per-edge attribute clusters) coexist instead of superseding their twin. Base is 1 per ADR-0007 §3, so a twin is 2; 0 is rejected rather than left as a second spelling of the base edge, since edge_seq is rendered into the stored edge_id. The seq sits inside the row''s identity and is rendered into edge_id, so allocation is a read-then-write on current state: a writer takes pg_advisory_xact_lock on (rel_type, src_id, dst_id) per the read-then-write rule in db/migrations AGENTS.md, and a replay CARRIES the seq from its source, since a recomputed seq changes edge_id and every content_hash chained from it. VEC-622 owns the loader that allocates it.';
 COMMENT ON COLUMN sec_edge.src_id IS 'Roles: FK→sec_node.id (soft; SCD2 ids non-unique — resolve via the current view). Edge source.';
 COMMENT ON COLUMN sec_edge.src_kind IS 'Denormalised source kind, CHECKed to agree with src_id''s own prefix (so ''em-…'' cannot be declared SECURITY). That the endpoint EXISTS as a current node is cross-row and stays validator-enforced (GQ-11).';
 COMMENT ON COLUMN sec_edge.dst_id IS 'Roles: FK→sec_node.id (soft). Edge destination.';
@@ -380,8 +363,7 @@ RETURNS SETOF sec_node LANGUAGE sql STABLE AS $$
 $$;
 COMMENT ON FUNCTION sec_node_as_of(date) IS 'As-of node read; effective_at is an explicit recorded parameter, never now() (ADR-0006 §4). Filtering the RESULT of this function by record_type scans and sorts the whole store — use sec_node_as_of_kind(effective_at, record_kind) instead.';
 
--- Kind-scoped as-of read, under its own name rather than as an overload (see the pg_snapshot
--- form below for why). Not a convenience: a predicate on record_type applied to the
+-- Kind-scoped as-of read. Not a convenience: a predicate on record_type applied to the
 -- one-argument function's RESULT cannot be pushed through the DISTINCT ON, because
 -- record_type is not part of its key, so the whole store is scanned and sorted — measured at
 -- 65 ms with a 4.4 MB external merge over 200k rows, against 0.088 ms for the same function
@@ -406,7 +388,7 @@ RETURNS SETOF sec_node LANGUAGE sql STABLE AS $$
       AND effective_at < valid_to
     ORDER BY id, valid_from DESC
 $$;
-COMMENT ON FUNCTION sec_node_as_of_kind(date, text) IS 'As-of node read scoped to one record_type, pushed into the version resolution instead of applied to its result (see the note above the definition). Same two-step semantics as sec_node_as_of(date). Deliberately NOT an overload of sec_node_as_of: see the note on the pg_snapshot form.';
+COMMENT ON FUNCTION sec_node_as_of_kind(date, text) IS 'As-of node read scoped to one record_type, pushed into the version resolution instead of applied to its result (see the note above the definition). Same two-step semantics as sec_node_as_of(date).';
 
 -- Knowledge-time read: what a reader holding this snapshot would have seen as true on
 -- effective_at. The two clocks are independent parameters, which is the whole point — valid time
@@ -419,17 +401,13 @@ COMMENT ON FUNCTION sec_node_as_of_kind(date, text) IS 'As-of node read scoped t
 -- effective date (ADR-0006 §5) and replay through here; an arbitrary wall-clock T is served by
 -- nearest-prior-record lookup, which is a read over ingested_at and not this function's job.
 --
--- known_at is pg_snapshot rather than a timestamp deliberately: ingest_xid is the exact
--- visibility key and wall clock cannot order commits (a row stamps ingested_at at transaction
--- start and becomes visible at commit).
+-- known_at is pg_snapshot because ingest_xid is the exact visibility key: a row stamps
+-- ingested_at at transaction start and becomes visible at commit, so wall clock cannot order
+-- commits.
 --
--- This is why the kind-scoped read is sec_node_as_of_KIND and not a second two-argument
--- overload. With both present, an unknown-typed second argument resolves to text (the preferred
--- type in its category), and most drivers have no pg_snapshot type and bind it as a string — so
--- a knowledge-time replay would silently become a kind-scoped read for a record_type that does
--- not exist: zero rows, no error, indistinguishable from "the record did not exist then". The
--- first draft documented that hazard instead of removing it (review finding). A distinct name
--- means a mis-bound snapshot is a type error at the call, which is what it should be.
+-- Callers pass known_at as a typed pg_snapshot; most drivers have no such type and bind it as a
+-- string, and the distinct name of the kind-scoped read (sec_node_as_of_kind) makes that a type
+-- error at the call site.
 CREATE FUNCTION sec_node_as_of(effective_at date, known_at pg_snapshot)
 RETURNS SETOF sec_node LANGUAGE sql STABLE AS $$
     WITH known AS (
@@ -592,22 +570,14 @@ ALTER TABLE sec_node ADD CONSTRAINT sec_node_status_fkey
 -- Write-boundary guard on the two stores: ingest_xid is platform-assigned, and
 -- content_hash is computed by the engine from the first append (AR-1.2, NFR-5).
 --
--- Both were writer-trusted in the first draft and neither survives review that way:
---   * ingest_xid had only a DEFAULT, so a writer could supply any xid8. It is the
---     knowledge-time visibility and ordering key (ADR-0006 §5,
---     pg_visible_in_snapshot) and now also decides supersession inside a valid
---     window, so a forged value silently corrupts replay and lets a writer reorder
---     its own corrections. ADR-0007 §4 says never writer-supplied; this enforces it.
---     The guard RAISES rather than overwriting: a writer that sets it has a bug, and
---     a bug that repairs itself is a bug you ship. Omitting the column (the normal
---     path) leaves the DEFAULT, which equals pg_current_xact_id() in the same
---     transaction, so the check is a no-op there.
---   * content_hash was left NULL "to be wired with the validator" (VEC-622). AR-1.2
---     requires the chain to run from the FIRST append, and ADR-0007 §4 banks on the
---     store being empty as the reason that is free — deferring it spends exactly that,
---     and the 501 rows of 20260904_120100 would have been permanently outside the
---     chain. Computing it here costs nothing and covers every writer, not just the
---     seed.
+--   * ingest_xid is the knowledge-time visibility and ordering key (ADR-0006 §5,
+--     pg_visible_in_snapshot) and decides supersession inside a valid window, so a
+--     forged value corrupts replay and lets a writer reorder its own corrections.
+--     ADR-0007 §4 says never writer-supplied; the guard RAISES on a supplied value,
+--     because a writer that sets it has a bug. The normal path omits the column, and
+--     the DEFAULT equals pg_current_xact_id() in the same transaction.
+--   * content_hash covers every writer from the first append, the 501 rows of
+--     20260904_120100 included, which is what AR-1.2 requires of the chain.
 --
 -- The hashed canonical form is to_jsonb(NEW) minus the platform-assigned and derived
 -- fields: record_id (an identity sequence), ingest_xid / ingested_at (assigned here),
@@ -616,46 +586,33 @@ ALTER TABLE sec_node ADD CONSTRAINT sec_node_status_fkey
 -- and the provenance block — so the hash is reproducible from a POSTGRES export and survives one
 -- that reassigns record_ids, which is what AR-1.2 needs.
 --
--- It is NOT portable across realizations, and an earlier draft of this comment claimed it was
--- (review finding). to_jsonb(row) is a Postgres serialization, not a canonical one: numeric(30,18)
--- renders its trailing zeros, so 0.5 and 0.500000000000000000 hash differently; jsonb decides key
--- order and drops duplicate keys on ingest; date and xid8 rendering are Postgres's. Realization §1
--- is still open between attrs jsonb and fixed columns, and those two hash the same logical row
--- differently. Meeting the ADR's round-trip-export criterion needs the canonical form defined in
--- the MODEL — declared field order, numeric scale normalisation, date format — so a validator can
--- reproduce it anywhere; that is VEC-632's, not this migration's.
+-- The scope is a Postgres export, because to_jsonb(row) is a Postgres serialization:
+-- numeric(30,18) renders its trailing zeros, so 0.5 and 0.500000000000000000 hash differently;
+-- jsonb decides key order; date and xid8 rendering are Postgres's. The ADR's
+-- round-trip-export criterion needs a canonical form the MODEL defines — declared field order,
+-- numeric scale normalisation, date format — which is VEC-632's.
 --
--- supersedes_record_id is excluded for the same reason and REPLACED by the predecessor's
--- content_hash, under the key supersedes_content_hash. It is itself a record_id, so leaving
--- it in the pre-image would have broken exactly the round-trip the exclusion of record_id
--- exists to protect: re-importing an export reassigns the identity sequence, the pointer
--- changes, and every correction and tombstone in the file fails verification (review of the
--- first draft, which did leave it in). Substituting the predecessor's hash also turns this
--- from a per-row digest into a real chain — a correction is bound to the exact content it
--- supersedes, not to a row number — which is what AR-1.2's chaining language asks for, and
--- costs one lookup by record_id on a plain table at governance rate.
+-- supersedes_record_id is itself a record_id, so it is excluded for the same reason and
+-- REPLACED by the predecessor's content_hash under the key supersedes_content_hash — which
+-- makes the digest a chain, binding a correction to the exact content it supersedes rather
+-- than to a row number (AR-1.2), at one lookup by record_id on a plain table.
 --
 -- That lookup makes supersedes_record_id resolvable-or-nothing at the write boundary: an
--- append naming a record_id that is not in the same store is rejected. The first draft called
--- the reference deliberately soft so a correction could precede its target inside one batch;
--- that case does not exist — a correction corrects a row that is already stored — and the
--- chain cannot be computed without the predecessor.
+-- append naming a record_id absent from the same store is rejected, since the chain needs the
+-- predecessor's hash to exist.
 -- jsonb gives the canonicalisation for free: keys sorted, whitespace normalised, dates
 -- and timestamps rendered ISO 8601 independent of DateStyle, numerics at their stored
 -- scale. Adding a column later changes the hash of rows appended after it, not of
--- existing rows — state it in the ADR when it happens rather than rehashing history.
+-- existing rows; the ADR records that when it happens.
 --
 -- Supplying content_hash is allowed only if it MATCHES what the engine computes: that
 -- makes re-importing an exported row a verification rather than a leap of faith, and a
 -- mismatch fails the insert. content_hash is declared NOT NULL on both stores: NOT NULL is
 -- checked after BEFORE triggers, so the guard always satisfies it, and the declaration turns a
 -- disabled trigger into a failed insert instead of a silently unhashed row.
--- The predecessor lookup does not need the plan_cache_mode treatment that AGENTS.md requires of
--- BEFORE INSERT triggers, and the reason is not "no table is read" — the guard reads the store it
--- guards (an earlier draft of this comment said otherwise): that rule is scoped to per-row
--- HYPERTABLE lookups, where a generic plan fans out over every chunk. These are plain tables, the
--- lookup is an equality on a unique index, and it goes through EXECUTE, which plpgsql never
--- plan-caches at all.
+-- AGENTS.md's plan_cache_mode rule for BEFORE INSERT triggers is scoped to per-row HYPERTABLE
+-- lookups, where a generic plan fans out over every chunk. The predecessor lookup is an equality
+-- on a unique index of a plain table, through EXECUTE, which plpgsql never plan-caches.
 -- ---------------------------------------------------------------------------
 
 CREATE FUNCTION sec_store_append_guard() RETURNS trigger
@@ -709,17 +666,8 @@ CREATE TRIGGER sec_edge_append_guard BEFORE INSERT ON sec_edge
 -- reference_table_immutable() trigger enforces append-only instead.
 -- ---------------------------------------------------------------------------
 
--- reference_table_immutable() is NOT redeclared here: it is owned by
--- 20260714_160000_fix_reference_table_fk_inserts.sql and already carries every ref_* trigger.
--- Re-CREATE OR REPLACEing it from a second migration would let either file silently redefine the
--- other's behaviour (and would reset any function-level SET, per db/migrations AGENTS.md). The
--- triggers below just point at it.
-
--- The owner-side revoke is derived from pg_class.relowner, not from a hardcoded role name. The
--- first draft looped over ARRAY['stl_readwrite','stl_migrator'] under IF EXISTS, so in any
--- environment whose tables are owned by a differently named role the store-side revoke — the
--- whole append-only guarantee here — silently did nothing. Deriving the owner means the REVOKE
--- always executes and the ACL is always recorded, whatever the role is called.
+-- The owner-side revoke derives the owner from pg_class.relowner, so the REVOKE executes and
+-- the ACL is recorded whatever the owning role is called.
 --
 -- Where the owner is a SUPERUSER (the test harness migrates as its own bootstrap role) the ACL is
 -- recorded but not enforced, because superusers bypass privilege checks. That is the documented
@@ -741,9 +689,7 @@ BEGIN
             EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON %I FROM stl_readwrite', t);
         END IF;
         IF NOT owner_is_super AND has_table_privilege(owner_role, t, 'UPDATE') THEN
-            -- RAISE takes % only; %I is a format() specifier and renders as the value with a
-            -- literal I glued on, which is not what you want in the one message that fires when
-            -- append-only has already failed.
+            -- RAISE takes % only; %I belongs to format().
             RAISE EXCEPTION 'append-only not enforced: owner % still holds UPDATE on % after the revoke', owner_role, t;
         END IF;
     END LOOP;

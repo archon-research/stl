@@ -43,11 +43,9 @@ var convertedAppendOnlyTables = []string{
 	// fires in CI, where that role does not exist and position_state's owner-side revoke
 	// silently no-ops.
 	//
-	// Their governed vocabularies are deliberately absent from this list: they are FK parents, so
-	// the owner keeps UPDATE for the integrity probe and append-only there is the
-	// reference_table_immutable() trigger instead of an ACL (20260714_160000, #574).
-	// TestSecStoreWave1IsAppendOnlyUnderTheRealRoles covers all of that; this list is what
-	// answers "which tables are append-only".
+	// This list is what answers "which tables are append-only" for the ACL-enforced set;
+	// TestSecStoreWave1IsAppendOnlyUnderTheRealRoles covers the vocabularies, which are FK
+	// parents and enforce append-only through reference_table_immutable() (20260714_160000, #574).
 	"sec_node",
 	"sec_edge",
 	// VEC-475 (#711): append-only from birth; the creating migration REVOKEs all seven.

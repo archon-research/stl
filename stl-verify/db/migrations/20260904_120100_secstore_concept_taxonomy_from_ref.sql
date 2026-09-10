@@ -18,10 +18,9 @@
 -- migration filename is the attributable actor for a seed; a curator's principal arrives with
 -- VEC-624 for curated appends.
 --
--- Content hashes are NOT literals here: sec_store_append_guard (20260904_120000) computes one
--- for every row on insert, so these 501 rows are inside the hash chain from the first append
--- (AR-1.2) rather than being the permanent gap a deferred population would have left. Same
--- reason no row supplies ingest_xid: the guard rejects a writer-supplied one.
+-- sec_store_append_guard (20260904_120000) computes a content_hash for every row on insert, so
+-- these 501 rows are inside the hash chain from the first append (AR-1.2), and it assigns
+-- ingest_xid, which no row here supplies.
 --
 -- Requires 20260904_120000 (stores + vocabularies).
 

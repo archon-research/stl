@@ -72,9 +72,8 @@ func TestSecStoreClosingRowSupersedesRatherThanResurrects(t *testing.T) {
 	insertNode(ctx, t, pool, id, "INACTIVE", "2026-06-01", "'infinity'", "open the next window")
 
 	t.Run("close_and_open_lands_at_processing_version_0", func(t *testing.T) {
-		// min and max, not count(DISTINCT): a uniform-but-wrong version satisfies "they all agree"
-		// and the subtest's own name would be false — change the column default to 1 and the
-		// earlier form still passed.
+		// min and max, not count(DISTINCT): the assertion is that the version is 0, and
+		// "they all agree" is satisfied by any uniform value.
 		var rows, lo, hi int
 		if err := pool.QueryRow(ctx, `
 			SELECT count(*), min(processing_version), max(processing_version)
@@ -230,11 +229,10 @@ func TestSecStoreClosingRowSupersedesRatherThanResurrects(t *testing.T) {
 // a rel_type outside the governed vocabulary are both refused at the write boundary.
 //
 // The triple itself — (rel_type, src_kind, dst_kind) against rel_type_vocabulary.src_kinds /
-// dst_kinds — is NOT refused, and cannot be with wave 1's schema: legality lives in two array
-// columns, which no FK or CHECK on sec_edge can consult, so ADR-0007 §3 assigns the rule to the
-// loader/validator (GQ-11) and that validator is VEC-622's. The last subtest asserts the gap
-// rather than pretending it away: the vocabulary already holds everything needed to decide the
-// triple, and the write is nonetheless accepted today.
+// dst_kinds — lives in two array columns that no FK or CHECK on sec_edge can consult, so
+// ADR-0007 §3 assigns it to the loader/validator (GQ-11), which is VEC-622's. The last subtest
+// pins today's boundary: the vocabulary holds everything needed to decide the triple, and the
+// write is accepted.
 //
 // When VEC-622 lands the validator — or when the vocabulary grows the legal-pairs table that
 // would turn this into a composite FK, which is also what SAME_AS and SUPERSEDES need before
@@ -314,11 +312,10 @@ func TestSecStoreRejectsAnIllegalRelTypeTriple(t *testing.T) {
 
 // TestSecStoreSingleValuedRepointPassesTheWriteAndIsCaughtByTheDQRule is acceptance item 3.
 //
-// ISSUED_BY is single-valued per ADR-0007 §5, and that is deliberately NOT a write-time rule: a
-// re-point always time-overlaps the edge it supersedes, so a write-time cardinality check would
-// reject every legitimate one. The rule runs over RESOLVED CURRENT STATE instead (GQ-20), which
-// means a badly executed re-point — open the new issuer without closing the old — has to pass
-// the write and then show up in the check.
+// ISSUED_BY is single-valued per ADR-0007 §5, and the rule runs over RESOLVED CURRENT STATE
+// (GQ-20) because a re-point always time-overlaps the edge it supersedes. So a badly executed
+// re-point — open the new issuer without closing the old — passes the write and shows up in the
+// check.
 //
 // Both halves are asserted here. The check itself is GQ-20's query against sec_edge_current;
 // VEC-619 will surface it as a DQ view over the pivot, and when it does this test should read
@@ -406,9 +403,9 @@ func TestSecStoreSingleValuedRepointPassesTheWriteAndIsCaughtByTheDQRule(t *test
 //     position_state pattern. Nothing FKs these tables, so the owner-side revoke cannot break
 //     an integrity probe.
 //   - the vocabularies: FK parents, so the owner KEEPS UPDATE — the FK integrity probe
-//     (SELECT ... FOR KEY SHARE) executes as the parent's owner and requires it. That is the
-//     #574 finding (20260714_160000), invisible under a superuser, and the reason append-only
-//     there is the reference_table_immutable() trigger instead of an ACL.
+//     (SELECT ... FOR KEY SHARE) executes as the parent's owner and requires it (#574,
+//     20260714_160000, invisible under a superuser). append-only there is the
+//     reference_table_immutable() trigger.
 //
 // So this test asserts four different things, and the last one is the regression guard that
 // matters most: an INSERT into sec_edge as the real login role must still pass the FK probes
@@ -639,9 +636,8 @@ func TestSecStoreAppendGuardChainsAndRejectsForgedProvenance(t *testing.T) {
 	})
 
 	t.Run("a_window_starting_at_infinity_is_rejected", func(t *testing.T) {
-		// It used to satisfy valid_from <= valid_to, land, take a PK slot and a content_hash, and
-		// then match no read ever — every read tests valid_from <= effective_at. A write that
-		// disappears without an error is worse than one that fails.
+		// Every read tests valid_from <= effective_at, so a window starting at infinity would be
+		// unreachable by any as-of date; the CHECK turns that into a failed write.
 		for _, store := range []string{"sec_node", "sec_edge"} {
 			var err error
 			if store == "sec_node" {
