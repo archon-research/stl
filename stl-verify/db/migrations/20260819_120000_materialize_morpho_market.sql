@@ -65,6 +65,10 @@ COMMENT ON VIEW position_morpho_market IS '[Operational] VEC-402 projection: Mor
 -- Per-projection entry point; the view above holds all the Morpho-market logic. It refuses a negative
 -- source amount first: netting means abs() would launder it, and a negative borrow makes the netted
 -- sum MORE positive, so neither the view nor the spine's negative-quantity check would see it.
+-- Dropped rather than replaced: keeping the old argument list beside the new one makes a
+-- call that omits the run ambiguous, as it did for the spine.
+DROP FUNCTION IF EXISTS materialize_morpho_market(integer);
+
 CREATE OR REPLACE FUNCTION materialize_morpho_market(p_build_id integer DEFAULT 0,
                                                      p_run_id bigint DEFAULT NULL) RETURNS bigint
     LANGUAGE plpgsql
