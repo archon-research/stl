@@ -1522,10 +1522,6 @@
       "type": "raw_pipeline",
       "owner": "pricing"
     },
-    "offchain_token_price_current": {
-      "type": "derived",
-      "owner": "pricing"
-    },
     "onchain_token_price": {
       "type": "raw_pipeline",
       "owner": "pricing"

@@ -153,11 +153,11 @@ async def test_get_latest_price_excludes_disabled_higher_block_source(repository
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_get_latest_price_serves_the_newer_of_onchain_and_offchain(repository, db_url) -> None:
-    """The on-chain and off-chain caches compete on observation time; the newer one serves the quote.
+    """The on-chain cache and the windowed off-chain history compete on observation time.
 
-    Both halves of the read moved from the price histories to their *_current
-    caches (VEC-672); the cross-source choice and the reported timestamp must be
-    unchanged by that.
+    The on-chain half moved to token_price_current and the off-chain half gained a
+    7-day window (VEC-672); the cross-source choice and the reported timestamp must
+    be unchanged by that.
     """
     conn = await asyncpg.connect(db_url)
     try:
@@ -168,7 +168,7 @@ async def test_get_latest_price_serves_the_newer_of_onchain_and_offchain(reposit
             b"\x8b" * 20,
         )
         source_id = await conn.fetchval("SELECT id FROM offchain_price_source WHERE name = 'coingecko'")
-        onchain_at = dt.datetime(2026, 3, 3, 0, 0, tzinfo=dt.UTC)
+        onchain_at = dt.datetime.now(dt.UTC).replace(microsecond=0) - dt.timedelta(hours=3)
         offchain_at = onchain_at + dt.timedelta(hours=1)
         await conn.execute(
             "INSERT INTO onchain_token_price "
@@ -239,7 +239,7 @@ async def test_get_latest_price_treats_an_undated_cache_row_as_absent(repository
         assert await repository.get_latest_price(token_id) is None
 
         source_id = await conn.fetchval("SELECT id FROM offchain_price_source WHERE name = 'coingecko'")
-        offchain_at = dt.datetime(2026, 3, 1, tzinfo=dt.UTC)  # older than the undated on-chain row
+        offchain_at = dt.datetime.now(dt.UTC).replace(microsecond=0) - dt.timedelta(days=2)  # inside the window
         await conn.execute(
             'INSERT INTO offchain_token_price (token_id, source_id, "timestamp", price_usd) VALUES ($1, $2, $3, 2.90)',
             token_id,
@@ -252,3 +252,38 @@ async def test_get_latest_price_treats_an_undated_cache_row_as_absent(repository
     quote = await repository.get_latest_price(token_id)
     assert quote is not None
     assert (quote.source_name, quote.price_usd, quote.timestamp) == ("coingecko", Decimal("2.90"), offchain_at)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_get_latest_price_ignores_an_offchain_row_outside_the_window(repository, db_url) -> None:
+    """An off-chain row older than the 7-day window is not a current quote (VEC-672).
+
+    The feed writes every poll, so a token without a row in the window has a
+    silent feed; the read reports no quote rather than a week-old one, as the
+    CORE liveness check treats a silent feed.
+    """
+    conn = await asyncpg.connect(db_url)
+    try:
+        token_id = await insert_token(conn, "winCat", 6, b"\x8e" * 20)
+        source_id = await conn.fetchval("SELECT id FROM offchain_price_source WHERE name = 'coingecko'")
+        await conn.execute(
+            'INSERT INTO offchain_token_price (token_id, source_id, "timestamp", price_usd) VALUES ($1, $2, $3, 4.00)',
+            token_id,
+            source_id,
+            dt.datetime.now(dt.UTC) - dt.timedelta(days=8),
+        )
+        assert await repository.get_latest_price(token_id) is None
+
+        inside = dt.datetime.now(dt.UTC).replace(microsecond=0) - dt.timedelta(days=6)
+        await conn.execute(
+            'INSERT INTO offchain_token_price (token_id, source_id, "timestamp", price_usd) VALUES ($1, $2, $3, 4.10)',
+            token_id,
+            source_id,
+            inside,
+        )
+    finally:
+        await conn.close()
+
+    quote = await repository.get_latest_price(token_id)
+    assert quote is not None
+    assert (quote.source_name, quote.price_usd, quote.timestamp) == ("coingecko", Decimal("4.10"), inside)

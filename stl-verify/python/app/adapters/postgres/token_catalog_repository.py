@@ -242,9 +242,12 @@ _GET_TOKEN_BY_CHAIN_ADDRESS_SQL = text(
 
 _LATEST_PRICE_SQL = text(
     f"""
-    -- Both halves read the *_current caches (one row per source per token): a
-    -- latest-row read with no time predicate cannot exclude a chunk of the price
-    -- histories, so on them this statement planned over every chunk (VEC-672).
+    -- A latest-row read with no time predicate cannot exclude a chunk, so on the
+    -- price histories this statement planned over every chunk (VEC-672). The two
+    -- halves differ in what fixes that: on-chain rows are written only when a
+    -- price changes, so a window would drop a stable that has not moved in months
+    -- and the read comes from token_price_current instead; off-chain snapshots are
+    -- written every poll, so a window on the history is enough there.
     WITH latest_onchain AS (
         SELECT
             tpc.token_id,
@@ -278,18 +281,23 @@ _LATEST_PRICE_SQL = text(
     ),
     latest_offchain AS (
         SELECT
-            opc.token_id,
+            otp.token_id,
             'offchain'::TEXT AS source_type,
-            opc.source_id::BIGINT AS source_id,
+            otp.source_id::BIGINT AS source_id,
             ops.name AS source_name,
             ops.display_name AS source_display_name,
-            opc.price_usd,
-            opc.snapshot_time AS "timestamp",
-            EXTRACT(EPOCH FROM (NOW() - opc.snapshot_time))::BIGINT AS staleness_seconds
-        FROM offchain_token_price_current opc
-        JOIN offchain_price_source ops ON ops.id = opc.source_id
-        WHERE opc.token_id = :token_id
-        ORDER BY opc.snapshot_time DESC, opc.processing_version DESC
+            otp.price_usd,
+            otp."timestamp",
+            EXTRACT(EPOCH FROM (NOW() - otp."timestamp"))::BIGINT AS staleness_seconds
+        FROM offchain_token_price otp
+        JOIN offchain_price_source ops ON ops.id = otp.source_id
+        WHERE otp.token_id = :token_id
+          -- A SQL literal, never a bind parameter: `now() - $n` is not constified,
+          -- so a bound interval plans every chunk (db/migrations/AGENTS.md). Seven
+          -- days is many polls of a feed that writes every interval; a feed silent
+          -- for longer has no current quote, as the CORE liveness check treats it.
+          AND otp."timestamp" > now() - interval '7 days'
+        ORDER BY otp."timestamp" DESC, otp.processing_version DESC
         LIMIT 1
     )
     SELECT

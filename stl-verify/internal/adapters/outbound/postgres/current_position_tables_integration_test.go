@@ -119,7 +119,6 @@ func resetCurrentTables(t *testing.T, ctx context.Context) {
 		"borrower", "borrower_current",
 		"borrower_collateral", "borrower_collateral_current",
 		"onchain_token_price", "token_price_current",
-		"offchain_token_price", "offchain_token_price_current",
 		"allocation_position", "allocation_position_current",
 	} {
 		if _, err := currentTablesPool.Exec(ctx, `DELETE FROM `+table); err != nil {
@@ -245,9 +244,9 @@ func (f *currentTablesFixture) cachedDebt(t *testing.T, ctx context.Context, tok
 func assertCachesMatchHistory(t *testing.T, ctx context.Context) {
 	t.Helper()
 
-	// cached is spelled out per table rather than `TABLE <cache>` where the cache
-	// carries created_at (allocation_position_current, offchain_token_price_current),
-	// which is the write time of the cache row itself and has no counterpart in history.
+	// cached is spelled out per table rather than `TABLE <cache>` because
+	// allocation_position_current carries created_at, which is the write time of
+	// the cache row itself and has no counterpart in history.
 	checks := []struct{ table, cached, newest string }{
 		{"borrower_current", `TABLE borrower_current`, `
 			SELECT DISTINCT ON (protocol_id, user_id, token_id)
@@ -271,15 +270,6 @@ func assertCachesMatchHistory(t *testing.T, ctx context.Context) {
 			FROM onchain_token_price
 			ORDER BY oracle_id, token_id,
 			         block_number DESC, block_version DESC, processing_version DESC`},
-		// Two-term order: the history has no block tuple, so observation time
-		// is the identity term and processing_version stays last (20260910_120100).
-		{"offchain_token_price_current", `
-			SELECT token_id, source_id, price_usd, snapshot_time, processing_version
-			FROM offchain_token_price_current`, `
-			SELECT DISTINCT ON (token_id, source_id)
-			       token_id, source_id::bigint, price_usd, "timestamp" AS snapshot_time, processing_version
-			FROM offchain_token_price
-			ORDER BY token_id, source_id, "timestamp" DESC, processing_version DESC`},
 		// The seven-term order is the cache's newer-wins comparison, spelled the
 		// same way here: identity first, processing_version last.
 		{"allocation_position_current", `

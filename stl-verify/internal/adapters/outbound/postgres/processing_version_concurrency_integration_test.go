@@ -407,10 +407,6 @@ func truncateOffchainPriceForConcurrency(t *testing.T, ctx context.Context) {
 	if _, err := concurrencyPool.Exec(ctx, `DELETE FROM offchain_token_price`); err != nil {
 		t.Fatalf("truncate offchain_token_price: %v", err)
 	}
-	// Trigger-fed cache with no FK: nothing above reaches it (20260910_120100).
-	if _, err := concurrencyPool.Exec(ctx, `DELETE FROM offchain_token_price_current`); err != nil {
-		t.Fatalf("truncate offchain_token_price_current: %v", err)
-	}
 	if _, err := concurrencyPool.Exec(ctx, `TRUNCATE token CASCADE`); err != nil {
 		t.Fatalf("truncate token: %v", err)
 	}

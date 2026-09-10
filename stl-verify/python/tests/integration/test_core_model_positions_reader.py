@@ -15,7 +15,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.adapters.postgres.core_model_positions_reader import _FEED_ALIVE, PostgresPositionsReader
+from app.adapters.postgres.core_model_positions_reader import PostgresPositionsReader, _feed_alive_sql
 from tests.integration.core_model_seed import seed_spoof_token
 from tests.integration.seed import (
     insert_anchorage_snapshot,
@@ -608,25 +608,20 @@ async def test_anchorage_refuses_a_specific_loan_token(engine):
         await PostgresPositionsReader(engine).get_protocol_data(**{**_ANCHORAGE, "loan_token": "USDC"})
 
 
-async def test_feed_liveness_is_per_oracle_across_tokens_and_ignores_undated_cache_rows(engine):
-    # _FEED_ALIVE reads token_price_current (VEC-672): one row per (oracle, token),
-    # so "some row in the window" must hold across the feed's tokens, not per
-    # token, and a cache row the backfill could not date (20260910_120050) is not
-    # evidence that the feed is alive.
+async def test_feed_liveness_is_per_oracle_across_tokens(engine):
+    # The window is per feed, not per token: one recent row on any token keeps
+    # the feed alive, a feed with no row inside the window is silent, and a row
+    # just outside the window does not count (VEC-672: the window is a literal so
+    # the planner excludes every chunk outside it; the semantics are unchanged).
     async with engine.begin() as conn:
         ids = await _ids(conn)
         await _seed_price(conn, ids["weth"], ids["sparklend"], 2000.0, dt.timedelta(days=40), block=50)
         await _seed_price(conn, ids["usdt"], ids["sparklend"], 1.0, dt.timedelta(minutes=1))
+        await _seed_price(conn, ids["weth"], ids["chainlink"], 2000.0, dt.timedelta(days=2, minutes=1), block=60)
 
         async def alive(oracle_id: int) -> bool:
-            params = {"oracle_id": oracle_id, "max_age": dt.timedelta(days=2)}
-            return (await conn.execute(_FEED_ALIVE, params)).scalar() == 1
+            sql = _feed_alive_sql(dt.timedelta(days=2))
+            return (await conn.execute(sql, {"oracle_id": oracle_id})).scalar() == 1
 
         assert await alive(ids["sparklend"]), "one recent token on the feed is enough"
-        assert not await alive(ids["chainlink"]), "a feed that wrote nothing is silent"
-
-        await conn.execute(
-            text("UPDATE token_price_current SET block_timestamp = NULL WHERE oracle_id = :o"),
-            {"o": ids["sparklend"]},
-        )
-        assert not await alive(ids["sparklend"]), "undated rows cannot vouch for the feed"
+        assert not await alive(ids["chainlink"]), "a row just outside the window does not vouch for the feed"
