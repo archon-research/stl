@@ -107,6 +107,22 @@
       "AllocationActivityBucketResponse": {
         "description": "Allocation activity aggregated into a single time bucket.",
         "properties": {
+          "balance_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Position value in USD read from each bucket's own recorded state, present only when `series=balance`. Unlike `net_flow_usd` this needs no client-side reconstruction and no anchor, so it is valid for a window that does not end at now. It is also a different measure: true mark-to-market rather than cost basis, so a share-price move on a receipt token appears here even in a bucket with no transaction, and yield accrual is included. Valued as COALESCE(underlying_value, balance) x the registry underlying's latest oracle price, refusing any row whose own underlying diverges from the registry's. Null on `series=flow`.",
+            "examples": [
+              "3280541138.58"
+            ],
+            "title": "Balance Usd"
+          },
           "bucket_start": {
             "description": "Inclusive start of the time bucket (UTC).",
             "format": "date-time",
@@ -3498,6 +3514,22 @@
               "minimum": 1,
               "title": "Limit",
               "type": "integer"
+            }
+          },
+          {
+            "description": "Which aggregated series to return. `flow` (default) keeps the existing behaviour: event counts, tx-amount sums and signed USD net flow, from which a client reconstructs a balance by anchoring at the current total. `balance` returns `balance_usd` read directly from each bucket's recorded state \u2014 substantially cheaper, valid for windows that do not end at now, and mark-to-market rather than cost basis. Ignored unless `aggregation_method=end-period`.",
+            "in": "query",
+            "name": "series",
+            "required": false,
+            "schema": {
+              "default": "flow",
+              "description": "Which aggregated series to return. `flow` (default) keeps the existing behaviour: event counts, tx-amount sums and signed USD net flow, from which a client reconstructs a balance by anchoring at the current total. `balance` returns `balance_usd` read directly from each bucket's recorded state \u2014 substantially cheaper, valid for windows that do not end at now, and mark-to-market rather than cost basis. Ignored unless `aggregation_method=end-period`.",
+              "enum": [
+                "flow",
+                "balance"
+              ],
+              "title": "Series",
+              "type": "string"
             }
           },
           {

@@ -136,7 +136,19 @@ async def test_flow_series_leaves_balance_unset_and_balance_series_leaves_flow_a
     assert all(b.balance_usd is None for b in flow), "flow series must not claim a balance"
 
     balance = await _buckets(repo, BS_PROXY_CARRY, series="balance")
-    assert all(b.balance_usd is not None for b in balance)
+    assert any(b.balance_usd is not None for b in balance)
     # Only one query runs, so the flow columns are left at their zero value
     # rather than being computed alongside.
     assert all(b.net_flow_usd == 0 and b.event_count == 0 for b in balance)
+
+
+async def test_buckets_before_the_first_observation_are_null_not_zero(repo: AllocationRepository) -> None:
+    # The seeded row is 3 days old inside a 10-day window, so the leading
+    # buckets have no known value. They must come back NULL: $0 is
+    # indistinguishable from a position that really emptied, which is the
+    # silent-zero failure VEC-537 is about, and the chart drops a null bucket
+    # rather than drawing a false floor.
+    buckets = await _buckets(repo, BS_PROXY_CARRY)
+    oldest_first = sorted(buckets, key=lambda b: b.bucket_start)
+    assert oldest_first[0].balance_usd is None, "a bucket before any observation must not report a figure"
+    assert oldest_first[-1].balance_usd == BS_CARRY_UNDERLYING_VALUE * BS_UNDERLYING_PRICE
