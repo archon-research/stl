@@ -529,9 +529,12 @@ func TestRunIntegration_BorrowEvent_WithCollateral(t *testing.T) {
 
 	assertBorrowEventDBState(t, ctx, pool, 1)
 
-	// Additionally verify that the collateral token (WETH) was created.
+	// Additionally verify that the Ethereum collateral token was created.
 	var wethTokenCount int
-	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM token WHERE symbol = 'WETH'`).Scan(&wethTokenCount); err != nil {
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM token WHERE chain_id = 1 AND address = $1`,
+		common.HexToAddress(wethAddress).Bytes(),
+	).Scan(&wethTokenCount); err != nil {
 		t.Fatalf("query WETH token count: %v", err)
 	}
 	if wethTokenCount != 1 {
