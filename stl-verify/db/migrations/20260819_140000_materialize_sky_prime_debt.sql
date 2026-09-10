@@ -7,9 +7,11 @@
 ALTER TABLE prime_debt ADD COLUMN IF NOT EXISTS protocol_id bigint;
 COMMENT ON COLUMN prime_debt.protocol_id IS 'protocol.id of the Vat contract this snapshot was read from; set by the prime-debt indexer. Rows written before the column existed were backfilled to the MCD Vat row.';
 
--- The MCD Vat, the indexer''s VAT_ADDRESS default: the row every pre-existing snapshot was read from.
+-- The MCD Vat, the indexer's VAT_ADDRESS default: the row every pre-existing snapshot was read from.
+-- Named for the contract, not for Sky, and protocol_type is left NULL: the column is free text with
+-- no vocabulary behind it, and Sky is not a lending protocol.
 INSERT INTO protocol (chain_id, address, name, protocol_type)
-VALUES (1, '\x35d1b3f3d7966a1dfe207aa4514c12a259a0492b', 'sky', 'lending')
+VALUES (1, '\x35d1b3f3d7966a1dfe207aa4514c12a259a0492b', 'mcd-vat', NULL)
 ON CONFLICT (chain_id, address) DO NOTHING;
 
 UPDATE prime_debt
