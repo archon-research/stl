@@ -216,7 +216,9 @@ governed vocabularies. Solid relationships are real foreign keys into the vocabu
 ones are **soft references**: an SCD2 id is non-unique by construction, so an endpoint resolves
 through the current view rather than a row-level foreign key — which is why endpoint-kind and
 cardinality are enforced by the validator above rather than by a constraint. Relationship
-labels carry the referencing column; the provenance block of §4 is elided on `SecEdge`.
+labels carry the referencing column. The provenance block of §4 is elided on `SecEdge`,
+so no relationship is drawn from it — it carries the same `change_reason_code` and lineage
+columns as `SecNode`.
 
 ```mermaid
 erDiagram
@@ -282,7 +284,9 @@ erDiagram
         text applies_to_kind
         text applies_to_concept "soft FK SecNode"
         jsonb required_fields
+        jsonb forbidden_fields "enforces DP-1, checked by GQ-15"
         jsonb field_types
+        jsonb field_constraints "enumerations, formats, ranges"
         jsonb required_edges
         jsonb permitted_targets
         text severity
@@ -337,7 +341,6 @@ erDiagram
     WeightBasisVocabulary ||--o{ SecEdge : "weight_basis"
     WeightBasisVocabulary ||--o{ RelTypeVocabulary : "declared basis"
     ChangeReasonVocabulary ||--o{ SecNode : "change_reason_code"
-    ChangeReasonVocabulary ||--o{ SecEdge : "change_reason_code"
     NodeStatusVocabulary ||--o{ SecNode : "record_type + status"
     KeyNamespaceVocabulary ||--o{ InstrumentRegister : "key_namespace"
     IdSchemeVocabulary ||--o{ AliasRegister : "id_scheme"
@@ -1024,7 +1027,7 @@ technology must enforce it; "platform" means it lives outside this store.
 | AR-1.5 | retention per data class | platform/realization; the model never deletes; derived pivot rows are regenerable and need only live while manifests cite them |
 | AR-1.7 | exceptional hard deletion | platform: out-of-band, dual-authorised; interacts with DP-2 crypto-shredding |
 | PR-2.1 | record id, system timestamp, actor, trigger | model: provenance block, §4 |
-| PR-2.2 | software version per append | model: `build_id` block, §4, per ADR-0002 |
+| PR-2.2 | software version per append | model: `run_id` → `writer_run` → build artefact, §4, per ADR-0006 §2 |
 | PR-2.3 | input lineage for derived values | model: lineage on derived rows (`ALLOCATES`, pivot outputs), §4–5 |
 | PR-2.4 | run id / config version for automated appends | model: `source_system` + trigger, §4 |
 | PR-2.5 | attributable principals | platform (identity system); the model stores the resolved actor |
@@ -1059,6 +1062,20 @@ The standalone-master build is superseded by this model:
 - **Tickets:** VEC-418, VEC-419, VEC-420, and VEC-524 were canceled against the frozen tables;
   their loading, resolution, and data-quality needs are re-scoped against this model.
 
+## Out of scope, declared
+
+This ADR decides the data model. Five PRD requirement groups are **not** addressed here, and
+under the precedence clause above silence would read as an omission rather than a deferral, so
+each is named with where it lands. Nothing in this list is settled by this document.
+
+| PRD | why not here | where it lands |
+|---|---|---|
+| SC-1, SC-2 (scale, exploration latency) | the model is size-independent, but the engine choice is not. The only empirical claim in this document is verification against an ephemeral Postgres over the held book — GQ-31's control total, not a scale test. Nothing here states what a regenerated `fact_lookthrough` costs at 10^8 securities | VEC-633, the engine gate. **Added to the Realization §2 selection criteria below**, since that is where scale actually binds the decision |
+| AC-1, AC-2, AC-4 (role model, visibility vs editability) | only AC-3 is modelled, as the shape's type-scoped `owner_role`. A role set and the visibility/editability split are a write-path design, not a model contract — and expensive to retrofit onto an append-only store, so they are scoped, not dismissed | VEC-647, the governed write path |
+| IN-3, IN-4, IN-5 (Synome connector, Synlang read path, connector language) | the pivot (§10) is the declared consumer contract; per-consumer connectors sit above it. Synlang appears in this document only as a candidate *engine* (Realization §2), never as a consumer, which is the D-4 reading this ADR does not take | open, no ticket yet |
+| D-3 / PRD §8 (phasing) | this document specifies the Phase-2 model in full — bitemporality, hash chain from row one, GDPR pseudonymisation, 39 relationship types. The PRD prescribes a bounded, partly throwaway Phase 1 over the TerminusDB underlyings. The position taken: the model is specified once and adopted in waves, because the store is empty today and retrofitting bitemporality or the hash chain onto populated tables is the expensive order. The Phase-1 slice is real and named | VEC-631 (TerminusDB underlyings, Atlas §6, retire the legacy access package); wave 1 is #875 |
+| CH-4 (NFAT beacon for Laniakea phase one) | not addressed, and not deferred anywhere until now. The model imposes no obstacle — a beacon reads the pivot like any other consumer — but the requirement is numbered and needs an owner | open, no ticket yet |
+
 ## Realization (explicitly not decided here)
 
 The model above is the contract. The realization decisions below are open, to be made
@@ -1088,6 +1105,12 @@ separately and on evidence, and none of them may change the model:
    an equivalent mechanism anywhere else), shape validation (§6), type-scoped access control
    (AC-3), and round-trip export — the model serialises to JSON and must translate between
    realizations losslessly.
+
+   **Scale is a selection criterion, not an afterthought** (SC-1, SC-2): the PRD sizes the
+   store at hundreds of thousands of equities, double- to triple-digit millions of bonds, and
+   the options combinatorial space. No candidate is selected on the held book's numbers. The
+   binding measurements are look-through regeneration cost per graph version and interactive
+   exploration latency, both on VEC-633.
 
 3. **Validator generation.** Shapes are data (§6); each realization generates its enforcement —
    SHACL for an RDF store, constraint DDL + loader checks for Postgres, per-shape validation
