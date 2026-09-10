@@ -321,10 +321,40 @@ def test_syrup_all_loans_excluded_fails_rather_than_an_empty_market():
         build_syrup_users_frame([_syrup_row(liquidation_level=900_000)], "USDC", 6)
 
 
-def test_syrup_two_attested_prices_for_one_symbol_are_refused():
-    rows = [_syrup_row(), _syrup_row(address_hex="bb" * 20, value_usd=int(78277.0 * 10**8))]
-    with pytest.raises(ValueError, match="two prices for BTC"):
-        build_syrup_users_frame(rows, "USDC", 6)
+def test_syrup_each_loan_is_valued_at_its_own_attested_price():
+    # Prod 2026-09-10 01:10 cycle: two loans of one cycle attested ETH a hair
+    # apart (Maple values loans at slightly different moments).
+    rows = [
+        _syrup_row(symbol="ETH", decimals=18, amount=10 * 10**18, value_usd=int(2473.725 * 10**8)),
+        _syrup_row(
+            address_hex="bb" * 20, symbol="ETH", decimals=18, amount=10 * 10**18, value_usd=int(2473.59 * 10**8)
+        ),
+    ]
+    df = build_syrup_users_frame(rows, "USDC", 6)
+    assert list(df["eth_supply_usd"]) == pytest.approx([24737.25, 24735.90])
+
+
+def test_syrup_market_price_is_the_quantity_weighted_mean_of_per_loan_prices():
+    # 30 ETH @ 2473.725 and 10 ETH @ 2473.59: sum(supply) x oracle_price must
+    # equal the users frame's sum(supply_usd).
+    rows = [
+        _syrup_row(symbol="ETH", decimals=18, amount=30 * 10**18, value_usd=int(2473.725 * 10**8)),
+        _syrup_row(
+            address_hex="bb" * 20, symbol="ETH", decimals=18, amount=10 * 10**18, value_usd=int(2473.59 * 10**8)
+        ),
+    ]
+    prices = syrup_attested_prices(rows)
+    df = build_syrup_users_frame(rows, "USDC", 6)
+    assert prices == pytest.approx({"ETH": (30 * 2473.725 + 10 * 2473.59) / 40})
+    assert df["eth_supply"].sum() * prices["ETH"] == pytest.approx(df["eth_supply_usd"].sum())
+
+
+def test_syrup_price_spread_beyond_the_defect_limit_is_refused():
+    # A >10% spread within one cycle is a units or snapshot-join defect, not
+    # per-loan valuation timing.
+    rows = [_syrup_row(), _syrup_row(address_hex="bb" * 20, value_usd=int(70000.0 * 10**8))]
+    with pytest.raises(ValueError, match="attested BTC prices span"):
+        syrup_attested_prices(rows)
 
 
 def test_syrup_acm_disagreement_warns(caplog):

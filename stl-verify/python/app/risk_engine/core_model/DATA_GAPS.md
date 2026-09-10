@@ -205,7 +205,10 @@ inverse of Maple's margin-call coverage trigger
 0.830013, the parquet's own 0.83001. Collateral is valued with Maple's
 attested per-unit prices (`asset_value_usd`, ×1e8) — the protocol's own
 valuation, and exactly what BA's parquet used (HYPE 16,305,615 / 400,000.058
-= 40.764 = its market-frame price). `liquidation_incentive` is BA's flat
+= 40.764 = its market-frame price). Maple values each loan separately, so
+cycle-mates can carry slightly different prices for one symbol (~0.1% observed
+in prod): each loan is valued at its own price, and the market frame gets the
+quantity-weighted mean. `liquidation_incentive` is BA's flat
 1.02. Unit pinning: a synthetic replay of the parquet's 0x198aec… row
 reproduces lltv/ltv/HF to 1e-5 (unit test); against staging, per-loan
 computed coverage matches Maple's own `acm_ratio` to rounding (505 ×
