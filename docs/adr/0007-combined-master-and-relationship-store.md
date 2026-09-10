@@ -1,4 +1,4 @@
-# ADR-0005: Combined Master (Entity, Security, Concept) and a Relationship Store
+# ADR-0007: Combined Master (Entity, Security, Concept) and a Relationship Store
 
 **Status**: Accepted (data model) — storage representation and engine are follow-up decisions
 **Proposed**: @peter.simon, @yasanji.ratnaike
