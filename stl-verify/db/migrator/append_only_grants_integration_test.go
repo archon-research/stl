@@ -36,11 +36,17 @@ var convertedAppendOnlyTables = []string{
 	// is NOT here — #625 no longer touches it, and its own migration still grants full DML.
 	"position_state",
 	"oracle_asset",
-	// VEC-617 (#875): the combined master's two stores. Append-only from birth, and the only
-	// entries here whose OWNER is revoked too — nothing FKs them, so the owner-side revoke
-	// cannot break an RI probe. Their governed vocabularies are deliberately absent: they are
-	// FK parents, so the owner keeps UPDATE for the integrity probe and append-only there is
-	// the reference_table_immutable() trigger instead of an ACL (20260714_160000, #574).
+	// VEC-617 (#875): the combined master's two stores. Append-only from birth, with the owner's
+	// mutation privileges revoked as well — the position_state pattern, which does the same
+	// (20260818_130000), and which is safe on all three because nothing FKs them, so the
+	// owner-side revoke cannot break an RI probe. What differs is how the owner is found: these
+	// two derive it from pg_class.relowner instead of naming stl_migrator, so the revoke also
+	// fires in CI, where that role does not exist and position_state's owner-side revoke
+	// silently no-ops.
+	//
+	// Their governed vocabularies are deliberately absent from this list: they are FK parents, so
+	// the owner keeps UPDATE for the integrity probe and append-only there is the
+	// reference_table_immutable() trigger instead of an ACL (20260714_160000, #574).
 	// TestSecStoreWave1IsAppendOnlyUnderTheRealRoles covers all of that; this list is what
 	// answers "which tables are append-only".
 	"sec_node",
