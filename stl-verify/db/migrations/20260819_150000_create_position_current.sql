@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS position_current (
     block_timestamp    timestamptz NOT NULL,
     projection         text        NOT NULL,
     build_id           integer     NOT NULL,
+    run_id             bigint,
     deal_type          text,
     CONSTRAINT position_current_pkey PRIMARY KEY (position_id)
 );
@@ -36,6 +37,7 @@ COMMENT ON COLUMN position_current.block_timestamp IS 'Roles: Derived. On-chain 
 COMMENT ON COLUMN position_current.projection IS 'Roles: Audit. Which projection view wrote the latest observation.';
 COMMENT ON COLUMN position_current.deal_type IS 'Roles: Derived (copy of position_state.deal_type). The deal type of the latest observation; a position that flips direction changes this value.';
 COMMENT ON COLUMN position_current.build_id IS 'Roles: Audit. Which build wrote the latest observation (build_registry.id; 0 = pre-tracking).';
+COMMENT ON COLUMN position_current.run_id IS 'Roles: Audit (copy of position_state.run_id). Which writer run appended the latest observation (writer_run.id; NULL means it predates run tracking).';
 
 -- Trigger-only cache, like allocation_position_current (20260825_120000): the app role reads and the
 -- SECURITY DEFINER maintainer writes, so no caller needs a write grant and the cache cannot fork from
@@ -54,13 +56,13 @@ BEGIN
     INSERT INTO public.position_current AS cur
         (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
          block_number, block_version, processing_version, block_timestamp, projection, build_id,
-         deal_type)
+         run_id, deal_type)
     -- One upsert per STATEMENT over the transition table, ordered by position_id: the only total order
     -- a block_timestamp cannot permute, so this cannot cross the rebuild's lock order.
     SELECT DISTINCT ON (n.position_id)
            n.position_id, n.chain_id, n.protocol_id,
            n.instrument_key, n.holder_id, n.quantity, n.block_number, n.block_version,
-           n.processing_version, n.block_timestamp, n.projection, n.build_id, n.deal_type
+           n.processing_version, n.block_timestamp, n.projection, n.build_id, n.run_id, n.deal_type
     FROM newrows n
     ORDER BY n.position_id,
              n.block_number DESC, n.block_version DESC, n.processing_version DESC, n.block_timestamp DESC
@@ -76,6 +78,7 @@ BEGIN
         block_timestamp    = EXCLUDED.block_timestamp,
         projection         = EXCLUDED.projection,
         build_id           = EXCLUDED.build_id,
+        run_id             = EXCLUDED.run_id,
         deal_type          = EXCLUDED.deal_type
     WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_version, EXCLUDED.block_timestamp)
         > (cur.block_number, cur.block_version, cur.processing_version, cur.block_timestamp);
@@ -97,13 +100,13 @@ AS $proc$
     INSERT INTO public.position_current
         (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
          block_number, block_version, processing_version, block_timestamp, projection, build_id,
-         deal_type)
+         run_id, deal_type)
     -- position_id first, which is both the DISTINCT ON key and the lock order, so the two writers
     -- sweep the PK in one key-derived total order.
     SELECT DISTINCT ON (p.position_id)
            p.position_id, p.chain_id, p.protocol_id,
            p.instrument_key, p.holder_id, p.quantity, p.block_number, p.block_version,
-           p.processing_version, p.block_timestamp, p.projection, p.build_id, p.deal_type
+           p.processing_version, p.block_timestamp, p.projection, p.build_id, p.run_id, p.deal_type
     FROM public.position_state p
     ORDER BY p.position_id,
              p.block_number DESC, p.block_version DESC, p.processing_version DESC, p.block_timestamp DESC
@@ -119,6 +122,7 @@ AS $proc$
         block_timestamp    = EXCLUDED.block_timestamp,
         projection         = EXCLUDED.projection,
         build_id           = EXCLUDED.build_id,
+        run_id             = EXCLUDED.run_id,
         deal_type          = EXCLUDED.deal_type
     -- Forward-only: raise a stale row, never lower one. No equal-coordinate arm is needed now that the
     -- cache has no write channel outside these two writers, which cannot disagree on one coordinate.

@@ -52,11 +52,13 @@ func (f *positionCurrentFixture) observe(id string, o obs) {
 	if o.dealType != "" {
 		dt = o.dealType
 	}
+	// run_id is seeded non-NULL and varies with the coordinate, so the whole-row comparison against
+	// the winning spine row covers it: a writer that forgets it leaves NULL in the cache.
 	if _, err := f.pool.Exec(f.ctx, `
 		INSERT INTO position_state
-		    (`+positionStateCols+`)
+		    (`+positionStateCols+`, run_id)
 		VALUES (sha256($1::bytea), 1, 1, 'inst-' || $1, substr(md5($1) || md5($1), 1, 40), $2, $3, $4, $5::int, $6,
-		        'public.proj-' || ($5::int)::text, $5::int, $7)`,
+		        'public.proj-' || ($5::int)::text, $5::int, $7, 7700 + $5::int)`,
 		id, o.qty, o.block, o.bv, o.pv, o.ts, dt); err != nil {
 		f.t.Fatalf("observe %s at block %d: %v", id, o.block, err)
 	}
