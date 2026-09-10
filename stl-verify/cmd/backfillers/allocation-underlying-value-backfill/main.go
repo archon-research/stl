@@ -266,11 +266,19 @@ func run(ctx context.Context, args []string) error {
 // already exists in history — this is a correction, not a new event.
 func toEntity(c candidateRow, underlyingAsset common.Address, underlyingDecimals int32, underlyingRaw *big.Int) *entity.AllocationPosition {
 	return &entity.AllocationPosition{
-		ChainID:        c.chainID,
-		TokenAddress:   c.tokenAddress,
-		PrimeID:        c.primeID,
-		ProxyAddress:   c.proxyAddress,
-		Balance:        c.balance,
+		ChainID:      c.chainID,
+		TokenAddress: c.tokenAddress,
+		PrimeID:      c.primeID,
+		ProxyAddress: c.proxyAddress,
+		Balance:      c.balance,
+		// Load-bearing. The repository writes balance as
+		// toNumeric(pos.Balance, pos.TokenDecimals), so leaving this at its zero
+		// value descales by 10^0 and stores the RAW integer in a column that
+		// holds human-normalized values -- balance inflated by 10^18 for an
+		// 18-decimal token. underlying_value escaped it only because
+		// Underlying.AssetDecimals is set, which is what made the bug survive a
+		// row-count-only check of the write.
+		TokenDecimals:  int(c.tokenDecimals),
 		BlockNumber:    c.blockNumber,
 		BlockVersion:   int(c.blockVersion),
 		TxHash:         c.txHash,
