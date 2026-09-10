@@ -744,3 +744,71 @@ func TestMapleLoanViewContract(t *testing.T) {
 		}
 	})
 }
+
+// A partial fetch and a repayment look identical to a count floor: a truncated cycle holding
+// any two loans clears a floor of two. Five loans, then three cycles carrying only two of them,
+// must close nothing -- a false zero cannot be retracted on an append-only spine.
+func TestMapleLoanTruncatedCycleDoesNotClose(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+	f := seedMaple(ctx, t, pool, map[string]int{"l1": 1, "l2": 1, "l3": 1, "l4": 1, "l5": 1})
+	f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 60, 120)
+
+	instants := []string{
+		"2026-06-16T08:05:00Z", "2026-06-16T08:15:00Z",
+		"2026-06-16T08:25:00Z", "2026-06-16T08:35:00Z",
+	}
+	for _, l := range []string{"l1", "l2", "l3", "l4", "l5"} {
+		f.cycle(t, l, instants[0], "100", 1)
+	}
+	// The fetch degrades and returns two of the five for every later cycle.
+	for _, ts := range instants[1:] {
+		f.cycle(t, "l1", ts, "100", 1)
+		f.cycle(t, "l2", ts, "100", 1)
+	}
+	f.mustRun(t)
+
+	for _, l := range []string{"l3", "l4", "l5"} {
+		rs := f.rows(t, l)
+		if len(rs) != 1 {
+			t.Errorf("%s: want only its open observation, got %d: %+v", l, len(rs), rs)
+			continue
+		}
+		if rs[0].qty != "100" {
+			t.Errorf("%s: stored %s, want the open 100", l, rs[0].qty)
+		}
+	}
+}
+
+// The peer count still has to fall for a close to be inferred at all, so a single repayment
+// out of five closes normally. Without this the truncation guard could pass by never closing.
+func TestMapleLoanSingleRepaymentAmongManyStillCloses(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+	f := seedMaple(ctx, t, pool, map[string]int{"r1": 1, "r2": 1, "r3": 1, "r4": 1, "repaid": 1})
+	f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 60, 120)
+
+	instants := []string{
+		"2026-06-16T08:05:00Z", "2026-06-16T08:15:00Z",
+		"2026-06-16T08:25:00Z", "2026-06-16T08:35:00Z",
+	}
+	for _, l := range []string{"r1", "r2", "r3", "r4", "repaid"} {
+		f.cycle(t, l, instants[0], "100", 1)
+	}
+	for _, ts := range instants[1:] {
+		for _, l := range []string{"r1", "r2", "r3", "r4"} {
+			f.cycle(t, l, ts, "100", 1)
+		}
+	}
+	f.mustRun(t)
+
+	rs := f.rows(t, "repaid")
+	if len(rs) != 2 {
+		t.Fatalf("want the open observation and one close, got %d: %+v", len(rs), rs)
+	}
+	if rs[1].qty != "0" {
+		t.Errorf("the closing observation carries %s; want 0", rs[1].qty)
+	}
+}

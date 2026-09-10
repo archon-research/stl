@@ -44,18 +44,21 @@ WITH canonical AS (
            max(synced_at) AS last_synced_at
     FROM cycle GROUP BY 1, 2, 3, 4, 5
 ), closed AS (
-    -- Absence IS the close signal: maple_loan_state's COMMENT states a loan absent at a synced_at is
-    -- no longer active. Guarded, because a truncated cycle looks identical to a repayment and a false
-    -- zero is permanent here: the closing instant must have seen >= 2 peers, and >= 2 must have passed.
+    -- Absence IS the close signal, and a false zero is permanent on an append-only spine. A partial
+    -- fetch loses several loans at once, a repayment loses one, so the cycle where this loan vanished
+    -- must still carry every peer it had: a count floor alone passes any truncation holding 2 loans.
     SELECT ls.maple_loan_id, i.synced_at, 0::numeric AS principal_owed, 0 AS processing_version,
            ls.chain_id, ls.protocol_id, ls.loan_address, ls.borrower_user_id
     FROM last_seen ls
+    JOIN instant seen ON seen.chain_id = ls.chain_id AND seen.synced_at = ls.last_synced_at
     CROSS JOIN LATERAL (
-        SELECT n.synced_at FROM instant n
-        WHERE n.chain_id = ls.chain_id AND n.synced_at > ls.last_synced_at AND n.loans_present >= 2
+        SELECT n.synced_at, n.loans_present FROM instant n
+        WHERE n.chain_id = ls.chain_id AND n.synced_at > ls.last_synced_at
         ORDER BY n.synced_at
         LIMIT 1) i
-    WHERE (SELECT count(*) FROM instant n2
+    WHERE i.loans_present >= 2
+      AND i.loans_present >= seen.loans_present - 1
+      AND (SELECT count(*) FROM instant n2
             WHERE n2.chain_id = ls.chain_id AND n2.synced_at > ls.last_synced_at) >= 2
 ), placed AS (
     -- Many cycles share a block at a 10-minute cadence, so they collapse here and the earliest
