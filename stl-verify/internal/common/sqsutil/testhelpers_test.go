@@ -251,6 +251,27 @@ func collectSettleChains(t *testing.T, reader sdkmetric.Reader) []string {
 
 func settleDataPoints(t *testing.T, reader sdkmetric.Reader) []metricdata.DataPoint[int64] {
 	t.Helper()
+	return counterDataPoints(t, reader, "sqs.message.settles.total")
+}
+
+type discardKey struct {
+	chain  string
+	reason string
+}
+
+func collectDiscardCounter(t *testing.T, reader sdkmetric.Reader) map[discardKey]int64 {
+	t.Helper()
+	counts := make(map[discardKey]int64)
+	for _, dp := range counterDataPoints(t, reader, "sqs.message.discards.total") {
+		chain, _ := dp.Attributes.Value("chain")
+		reason, _ := dp.Attributes.Value("reason")
+		counts[discardKey{chain: chain.AsString(), reason: reason.AsString()}] += dp.Value
+	}
+	return counts
+}
+
+func counterDataPoints(t *testing.T, reader sdkmetric.Reader, name string) []metricdata.DataPoint[int64] {
+	t.Helper()
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &rm); err != nil {
 		t.Fatalf("collecting metrics: %v", err)
@@ -258,7 +279,7 @@ func settleDataPoints(t *testing.T, reader sdkmetric.Reader) []metricdata.DataPo
 	var points []metricdata.DataPoint[int64]
 	for _, scope := range rm.ScopeMetrics {
 		for _, m := range scope.Metrics {
-			if m.Name != "sqs.message.settles.total" {
+			if m.Name != name {
 				continue
 			}
 			sum, ok := m.Data.(metricdata.Sum[int64])

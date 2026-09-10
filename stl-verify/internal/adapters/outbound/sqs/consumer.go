@@ -61,9 +61,10 @@ type Config struct {
 func ConfigDefaults() Config {
 	return Config{
 		WaitTimeSeconds: maxLongPollSeconds,
-		// Covers one message per receive at the default handler budget plus the
-		// shutdown drain and settles (145s); consumer_defaults_test.go pins that
-		// against sqsutil.ValidateVisibilityTimeout rather than the literal.
+		// Covers one message per receive at the default handler budget plus its
+		// supersession lookup, the shutdown drain and settles (150s);
+		// consumer_defaults_test.go pins that against
+		// sqsutil.ValidateVisibilityTimeout rather than the literal.
 		VisibilityTimeout: 180,
 	}
 }

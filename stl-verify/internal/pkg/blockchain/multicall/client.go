@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/rpcerr"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -120,7 +121,7 @@ func (c *Client) ExecuteAtHash(ctx context.Context, calls []outbound.Call, block
 	result, err := c.ethClient.CallContractAtHash(ctx, c.callMsg(data), blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call multicall contract at address=%s blockHash=%s calls=%d: %w",
-			c.address.Hex(), blockHash.Hex(), len(calls), err)
+			c.address.Hex(), blockHash.Hex(), len(calls), rpcerr.TagBlockUnavailableAtHash(err))
 	}
 
 	return c.unpackAggregate3(result, blockHash.Hex())

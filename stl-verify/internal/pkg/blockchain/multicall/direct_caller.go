@@ -58,7 +58,8 @@ func (c *DirectCaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call,
 	if blockHash == (common.Hash{}) {
 		return nil, fmt.Errorf("block hash is required")
 	}
-	return c.executeAt(ctx, calls, toBlockHashArg(blockHash))
+	results, err := c.executeAt(ctx, calls, toBlockHashArg(blockHash))
+	return results, rpcerr.TagBlockUnavailableAtHash(err)
 }
 
 // executeAt sends all calls in a single JSON-RPC batch request pinned to

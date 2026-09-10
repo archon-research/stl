@@ -179,11 +179,12 @@ func NewService(
 // CrashLoopBackOff cycle before refusing.
 func (s *Service) consumeLoop() sqsutil.Config {
 	return sqsutil.Config{
-		Consumer:     s.consumer,
-		MaxMessages:  s.config.MaxMessages,
-		PollInterval: s.config.PollInterval,
-		Logger:       s.logger,
-		ChainID:      s.config.ChainID,
+		Consumer:        s.consumer,
+		MaxMessages:     s.config.MaxMessages,
+		PollInterval:    s.config.PollInterval,
+		Logger:          s.logger,
+		ChainID:         s.config.ChainID,
+		SupersededBlock: s.config.SupersededBlock,
 	}
 }
 

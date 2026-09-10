@@ -16,6 +16,7 @@ import (
 	redisAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
+	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
@@ -304,12 +305,15 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 		return fmt.Errorf("creating receipt token repository: %w", err)
 	}
 
+	blockStateRepo := postgres.NewBlockStateRepository(pool, cfg.chainID, logger)
+
 	// Service
 	svcConfig := morpho_indexer.Config{
 		SQSConsumerConfig: shared.SQSConsumerConfig{
-			MaxMessages: cfg.maxMessages,
-			Logger:      logger,
-			ChainID:     cfg.chainID,
+			MaxMessages:     cfg.maxMessages,
+			Logger:          logger,
+			ChainID:         cfg.chainID,
+			SupersededBlock: sqsutil.NewSupersededBlockLookup(blockStateRepo),
 		},
 		Telemetry: morphoTelemetry,
 	}

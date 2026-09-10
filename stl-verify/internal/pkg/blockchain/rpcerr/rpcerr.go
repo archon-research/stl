@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -121,4 +122,52 @@ func RequireAllSucceeded(results []outbound.Result, op string) error {
 	}
 	return fmt.Errorf("%s: %d of %d sub-calls reverted (indices %s)",
 		op, len(failed), len(results), strings.Join(idxs, ","))
+}
+
+// ErrBlockUnavailableAtHash marks a hash-pinned read the node refused because it
+// holds no block at that hash. It says nothing about why: a node that has
+// dropped an orphaned fork and one that is simply behind or pruned answer
+// identically, so a caller acting on it must establish the block's fate against
+// the canonical chain before treating the failure as permanent.
+var ErrBlockUnavailableAtHash = errors.New("block unavailable at hash")
+
+// blockUnavailablePhrases are the answers observed for a hash a node cannot
+// resolve: drpc's -32001 "block not found: hash …", geth's "header for hash not
+// found", reth's "header not found", and the older "unknown block". No error
+// code is specific to the condition, so the text is the discriminator, matched
+// lower-cased. Alchemy's exact wording is unverified, which is why this set is a
+// floor rather than a closed enumeration — a phrasing missing from it only leaves
+// a message retrying, the behaviour that predates the classifier.
+var blockUnavailablePhrases = []string{
+	"block not found",
+	"header for hash not found",
+	"header not found",
+	"unknown block",
+}
+
+// IsBlockUnavailableAtHash reports whether err is the node's answer that it
+// cannot serve the block the caller pinned to.
+func IsBlockUnavailableAtHash(err error) bool {
+	if err == nil {
+		return false
+	}
+	var rpcErr rpc.Error
+	if !errors.As(err, &rpcErr) {
+		return false
+	}
+	text := strings.ToLower(rpcErr.Error())
+	return slices.ContainsFunc(blockUnavailablePhrases, func(phrase string) bool {
+		return strings.Contains(text, phrase)
+	})
+}
+
+// TagBlockUnavailableAtHash annotates err with ErrBlockUnavailableAtHash when it
+// is that answer, so a caller far from the RPC layer matches the condition with
+// errors.Is rather than re-deriving the provider phrasings. Every other error,
+// nil included, is returned unchanged.
+func TagBlockUnavailableAtHash(err error) error {
+	if !IsBlockUnavailableAtHash(err) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrBlockUnavailableAtHash, err)
 }

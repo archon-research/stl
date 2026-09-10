@@ -17,6 +17,11 @@ import (
 // unbounded settle against a silent connection parks the poll loop for good.
 const SettleTimeout = 5 * time.Second
 
+// SupersessionLookupTimeout bounds the block-record read that confirms a block
+// was superseded before its message is discarded. It sits on the settle path, so
+// ValidateVisibilityTimeout budgets it alongside the handler.
+const SupersessionLookupTimeout = 5 * time.Second
+
 // CleanupContext returns the context for a queue call that settles a message
 // (delete, release, dead-letter publish): bounded by SettleTimeout, detached from
 // the caller's cancellation so a shutdown landing mid-call cannot kill a call SQS
@@ -38,46 +43,65 @@ const (
 	settleStatusFailed = "failed"
 )
 
-// The counter is resolved per settle rather than once at startup: settles reach
-// this package through free functions, so there is no constructor to build it
-// in, and the meter caches the instrument per name.
-type settleRecorder struct {
-	settles metric.Int64Counter
+// The instrument is resolved per record rather than once at startup: these
+// counters are reached through free functions, so there is no constructor to
+// build them in, and the meter caches the instrument per name.
+type chainCounter struct {
+	counter metric.Int64Counter
 	chain   attribute.KeyValue
 }
 
-func newSettleRecorder(logger *slog.Logger, chainID int64) settleRecorder {
-	settles, err := otel.GetMeterProvider().Meter(instrumentationName).Int64Counter(
-		settleCounterName,
-		metric.WithDescription("SQS messages settled by the consume loop, by operation and outcome"),
+func newChainCounter(logger *slog.Logger, chainID int64, name, description string) chainCounter {
+	counter, err := otel.GetMeterProvider().Meter(instrumentationName).Int64Counter(
+		name,
+		metric.WithDescription(description),
 	)
 	if err != nil {
-		// Metrics must never break the settle path.
-		logger.Error("building "+settleCounterName+" counter; settle metrics disabled", "error", err)
-		return settleRecorder{}
+		// Metrics must never break the path they observe.
+		logger.Error("building "+name+" counter; those metrics are disabled", "error", err)
+		return chainCounter{}
 	}
-	return settleRecorder{settles: settles, chain: chainAttribute(logger, chainID)}
+	return chainCounter{counter: counter, chain: chainAttribute(logger, chainID, name)}
+}
+
+func (c chainCounter) add(ctx context.Context, attrs ...attribute.KeyValue) {
+	c.emit(ctx, 1, attrs...)
+}
+
+// seed exports a series at 0 so a rule reading it with increase() sees the step
+// to 1; an OTel series that first appears at 1 hides that step for good.
+func (c chainCounter) seed(ctx context.Context, attrs ...attribute.KeyValue) {
+	c.emit(ctx, 0, attrs...)
+}
+
+func (c chainCounter) emit(ctx context.Context, delta int64, attrs ...attribute.KeyValue) {
+	if c.counter == nil {
+		return
+	}
+	c.counter.Add(ctx, delta, metric.WithAttributes(append([]attribute.KeyValue{c.chain}, attrs...)...))
 }
 
 // The chain name, not the ID: every sibling instrument labels `chain` that way
 // and the backup-worker alerts group by it.
-func chainAttribute(logger *slog.Logger, chainID int64) attribute.KeyValue {
+func chainAttribute(logger *slog.Logger, chainID int64, instrument string) attribute.KeyValue {
 	name, err := entity.ChainName(chainID)
 	if err != nil {
-		logger.Error("resolving the chain name for "+settleCounterName,
+		logger.Error("resolving the chain name for "+instrument,
 			"chainID", chainID,
 			"error", err)
 	}
 	return attribute.String("chain", name)
 }
 
+type settleRecorder struct{ chainCounter }
+
+func newSettleRecorder(logger *slog.Logger, chainID int64) settleRecorder {
+	return settleRecorder{newChainCounter(logger, chainID, settleCounterName,
+		"SQS messages settled by the consume loop, by operation and outcome")}
+}
+
 func (r settleRecorder) record(ctx context.Context, op, status string) {
-	if r.settles == nil {
-		return
-	}
-	r.settles.Add(ctx, 1, metric.WithAttributes(r.chain,
-		attribute.String("op", op),
-		attribute.String("status", status)))
+	r.add(ctx, attribute.String("op", op), attribute.String("status", status))
 }
 
 func settleStatus(err error) string {

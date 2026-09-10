@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 )
 
 // SQSConsumerConfig holds common configuration for SQS consumer services.
@@ -12,6 +14,12 @@ type SQSConsumerConfig struct {
 	PollInterval time.Duration
 	Logger       *slog.Logger
 	ChainID      int64
+
+	// SupersededBlock is the consume loop's optional supersession check; see
+	// sqsutil.Config. A composition root that reads chain state pinned to the
+	// event's block hash should supply
+	// sqsutil.NewSupersededBlockLookup(blockStateRepo).
+	SupersededBlock sqsutil.SupersededBlockLookup
 }
 
 // SQSConsumerConfigDefaults returns default values for SQS consumer configuration.

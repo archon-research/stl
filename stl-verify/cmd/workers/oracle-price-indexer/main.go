@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 
@@ -246,10 +247,13 @@ func run(ctx context.Context, args []string, onShutdownTimeout func()) error {
 		return err
 	}
 
+	blockStateRepo := postgres.NewBlockStateRepository(pool, cfg.chainID, logger)
+
 	service, err := oracle_price_worker.NewService(
 		shared.SQSConsumerConfig{
-			Logger:  logger,
-			ChainID: cfg.chainID,
+			Logger:          logger,
+			ChainID:         cfg.chainID,
+			SupersededBlock: sqsutil.NewSupersededBlockLookup(blockStateRepo),
 		},
 		consumer,
 		cacheReader,

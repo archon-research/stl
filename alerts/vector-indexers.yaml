@@ -759,6 +759,50 @@ groups:
             processed again.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorsqsdeletefailed
 
+      - alert: VectorSQSMessagesDiscarded
+        # sqs_message_discards_total{reason,chain,service_name} counts the messages
+        # the consume loop settled by throwing them away instead of processing
+        # them. reason="non_canonical_block" is the only one that needs a human: a
+        # block a reorg orphaned, confirmed superseded against the watcher's own
+        # block_states record, whose message is deleted rather than left to burn
+        # its receive budget into the DLQ and head-of-line block the chain's FIFO
+        # group meanwhile. Deleting it is the correct call — but it also removes
+        # the DLQ, which was the only visible trace such a block left, so this
+        # rule is that trace. reason="foreign_chain" is a misrouted queue, covered
+        # by the topic/queue wiring rather than by an operator, and is excluded.
+        #
+        # > 0, not the > 1 recurrence gate VectorSQSDeleteFailed uses: one discard
+        # is one height whose indexing now depends entirely on a successor event
+        # having been published for it, and that is exactly the case somebody has
+        # to confirm. Discards are rare — a reorg deep enough to strand a message
+        # mid-handler — so this does not chatter.
+        #
+        # increase() works here because both reason series are seeded at 0 when
+        # the consume loop starts (sqsutil.seedDiscardCounter). Unseeded, an OTel
+        # counter series first appears at 1 and increase() cannot see that step,
+        # so a worker's first discard — the common case for something this rare —
+        # would never fire.
+        expr: |
+          sum by (service_name, chain, cluster) (
+            increase(sqs_message_discards_total{reason="non_canonical_block", k8s_namespace_name="vector"}[15m])
+          ) > 0
+        for: 5m
+        labels:
+          team: vector
+          severity: warning
+          component: sqs
+          namespace: vector
+        annotations:
+          summary: "Vector SQS discarded {{ $value }} orphaned-block message(s) for {{ $labels.service_name }} on {{ $labels.chain }}"
+          description: |
+            `{{ $labels.service_name }}` on chain `{{ $labels.chain }}` discarded
+            {{ $value }} SQS message(s) in the last 15m for blocks a reorg orphaned.
+            Each one was confirmed superseded in `block_states` before it was
+            deleted, so a successor version should already have been published for
+            that height — confirm that it was. If none was, the height is a hole
+            with nothing left to retry it.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorsqsmessagesdiscarded
+
   # morpho VaultV2 structured tracking (VEC-218) — the adapter registry, adapter
   # realAssets snapshots, allocation caps and fee-config snapshots the morpho
   # indexer derives from VaultV2's own event surface. Own GROUP, same file, so it

@@ -48,6 +48,13 @@ type Config struct {
 	// finish; past it its message is released to the successor. Zero uses
 	// DefaultDrainTimeout.
 	DrainTimeout time.Duration
+
+	// SupersededBlock lets the loop confirm, before abandoning a message, that
+	// the block it names lost a reorg to a block whose own event was published.
+	// Nil leaves every handler error retryable, so a consumer that does not read
+	// chain state — or one with no block record to hand — keeps today's
+	// behaviour exactly.
+	SupersededBlock SupersededBlockLookup
 }
 
 // Validate checks the config at boot: a worker whose visibility timeout cannot
@@ -92,9 +99,10 @@ func (c Config) drainTimeout() time.Duration {
 // ValidateVisibilityTimeout returns an error unless the SQS visibility timeout
 // strictly exceeds the wall time a whole receive can take. SQS starts one
 // visibility clock for every message it hands back, the loop settles them
-// serially, and shutdown adds a drain plus the two settle calls that follow it;
-// a timeout below that sum lets a message be redelivered while its handler is
-// still running (duplicate processing / re-entrant lock contention).
+// serially — spending a supersession lookup on each failure before it does — and
+// shutdown adds a drain plus the two settle calls that follow it; a timeout below
+// that sum lets a message be redelivered while its handler is still running
+// (duplicate processing / re-entrant lock contention).
 // handlerTimeout <= 0 means DefaultHandlerTimeout, inFlightPerReceive <= 0 means
 // one, and the drain is budgeted at DefaultDrainTimeout.
 func ValidateVisibilityTimeout(visibilityTimeout, handlerTimeout time.Duration, inFlightPerReceive int) error {
@@ -103,12 +111,12 @@ func ValidateVisibilityTimeout(visibilityTimeout, handlerTimeout time.Duration, 
 		budget = DefaultHandlerTimeout
 	}
 	inFlight := max(inFlightPerReceive, 1)
-	needed := time.Duration(inFlight)*budget + DefaultDrainTimeout + 2*SettleTimeout
+	needed := time.Duration(inFlight)*(budget+SupersessionLookupTimeout) + DefaultDrainTimeout + 2*SettleTimeout
 	if visibilityTimeout <= needed {
 		return fmt.Errorf("sqsutil: SQS visibility timeout %s must exceed %s, the wall time %d message(s) per receive "+
-			"take at a %s handler budget plus the %s shutdown drain and two %s settle calls, "+
-			"otherwise a message can be redelivered while its handler is still running",
-			visibilityTimeout, needed, inFlight, budget, DefaultDrainTimeout, SettleTimeout)
+			"take at a %s handler budget plus a %s supersession lookup each, the %s shutdown drain and two %s settle "+
+			"calls, otherwise a message can be redelivered while its handler is still running",
+			visibilityTimeout, needed, inFlight, budget, SupersessionLookupTimeout, DefaultDrainTimeout, SettleTimeout)
 	}
 	return nil
 }
@@ -120,6 +128,8 @@ func ValidateVisibilityTimeout(visibilityTimeout, handlerTimeout time.Duration, 
 // PollInterval paces an idle queue, and pacing a backlog by it instead would
 // cap catch-up at one receive per interval.
 func RunLoop(ctx context.Context, cfg Config, handler BlockEventHandler) {
+	seedDiscardCounter(ctx, cfg)
+
 	for ctx.Err() == nil {
 		received, err := ProcessMessages(ctx, cfg, handler)
 		if err != nil {
@@ -237,6 +247,7 @@ func discardForeignChainMessage(ctx context.Context, cfg Config, msg outbound.SQ
 		"expected", cfg.ChainID,
 		"got", event.ChainID,
 		"block", event.BlockNumber)
+	recordDiscard(ctx, cfg, discardReasonForeignChain)
 
 	return deleteSettledMessage(ctx, cfg, msg)
 }
@@ -249,10 +260,13 @@ func runHandler(ctx context.Context, cfg Config, event outbound.BlockEvent, hand
 }
 
 func settleMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, event outbound.BlockEvent, outcome DrainOutcome) error {
-	if outcome.Err != nil {
-		return keepMessageForRedelivery(cfg, msg, event, outcome)
+	if outcome.Err == nil {
+		return deleteProcessedMessage(ctx, cfg, msg, outcome)
 	}
-	return deleteProcessedMessage(ctx, cfg, msg, outcome)
+	if confirmSupersededBlock(ctx, cfg, msg, event, outcome.Err) {
+		return discardSupersededBlockMessage(ctx, cfg, msg, event)
+	}
+	return keepMessageForRedelivery(cfg, msg, event, outcome)
 }
 
 func keepMessageForRedelivery(cfg Config, msg outbound.SQSMessage, event outbound.BlockEvent, outcome DrainOutcome) error {

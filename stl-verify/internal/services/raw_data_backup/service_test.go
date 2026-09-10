@@ -4097,6 +4097,6 @@ func TestNewService_DefaultsTheBatchSizeToTheWorkerCount(t *testing.T) {
 // A test that fans a batch wider than its worker pool has to widen the
 // visibility clock with it, the way a deployment would.
 func visibilityCovering(config Config) time.Duration {
-	return time.Duration(inFlightPerReceive(config))*sqsutil.DefaultHandlerTimeout +
+	return time.Duration(inFlightPerReceive(config))*(sqsutil.DefaultHandlerTimeout+sqsutil.SupersessionLookupTimeout) +
 		sqsutil.DefaultDrainTimeout + 3*sqsutil.SettleTimeout
 }

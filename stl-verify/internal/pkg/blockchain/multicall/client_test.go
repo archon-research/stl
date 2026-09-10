@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -18,6 +19,7 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/rpcerr"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
@@ -246,5 +248,46 @@ func TestExecuteAtHashRejectsZeroHash(t *testing.T) {
 	c := &Client{}
 	if _, err := c.ExecuteAtHash(context.Background(), nil, common.Hash{}); err == nil {
 		t.Fatal("expected error for zero block hash, got nil")
+	}
+}
+
+func TestExecuteAtHashTagsABlockTheNodeCannotServe(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("reading request body: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		var req struct {
+			ID json.RawMessage `json:"id"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Errorf("unmarshalling JSON-RPC request %s: %v", body, err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32001,"message":"block not found: hash 0x70559c33e0f4f4d6e9f0d1c1a5f3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5"}}`, req.ID)
+	}))
+	t.Cleanup(srv.Close)
+
+	rpcClient, err := rpc.DialHTTP(srv.URL)
+	if err != nil {
+		t.Fatalf("rpc.DialHTTP: %v", err)
+	}
+	t.Cleanup(rpcClient.Close)
+
+	mc, err := NewClient(ethclient.NewClient(rpcClient), common.HexToAddress("0xcA11bde05977b3631167028862bE2a173976CA11"))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	calls := []outbound.Call{{Target: common.Address{}, CallData: []byte{0x01, 0x02, 0x03, 0x04}}}
+	_, execErr := mc.ExecuteAtHash(context.Background(), calls,
+		common.HexToHash("0x70559c33e0f4f4d6e9f0d1c1a5f3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5"))
+
+	if !errors.Is(execErr, rpcerr.ErrBlockUnavailableAtHash) {
+		t.Fatalf("ExecuteAtHash error = %v, want it to match rpcerr.ErrBlockUnavailableAtHash", execErr)
 	}
 }

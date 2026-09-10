@@ -19,10 +19,11 @@ func shutdownPathBudgets() map[string]time.Duration {
 		"poll completes after SIGTERM, then its batch is released": sqsadapter.PollBudget(
 			sqsadapter.ConfigDefaults().WaitTimeSeconds) + sqsutil.SettleTimeout,
 
-		// Two cleanup budgets: the delete, then the one release that hands back
-		// everything the batch left unsettled — RunLoop batches are one chunk.
+		// A supersession lookup can precede the settle, then two cleanup budgets:
+		// the delete, then the one release that hands back everything the batch
+		// left unsettled — RunLoop batches are one chunk.
 		"handler drains to its budget, then the batch is settled": sqsutil.DefaultDrainTimeout +
-			2*sqsutil.SettleTimeout,
+			sqsutil.SupersessionLookupTimeout + 2*sqsutil.SettleTimeout,
 	}
 }
 
@@ -34,10 +35,11 @@ func shutdownTailBudget() time.Duration {
 // that had already succeeded rather than wait the moment out.
 func TestEveryShutdownBudgetHasAFloor(t *testing.T) {
 	budgets := map[string]time.Duration{
-		"archivingwire.DrainTimeout":     archivingwire.DrainTimeout,
-		"sqsutil.DefaultDrainTimeout":    sqsutil.DefaultDrainTimeout,
-		"sqsutil.SettleTimeout":          sqsutil.SettleTimeout,
-		"telemetry.ShutdownFlushTimeout": telemetry.ShutdownFlushTimeout,
+		"archivingwire.DrainTimeout":        archivingwire.DrainTimeout,
+		"sqsutil.DefaultDrainTimeout":       sqsutil.DefaultDrainTimeout,
+		"sqsutil.SettleTimeout":             sqsutil.SettleTimeout,
+		"sqsutil.SupersessionLookupTimeout": sqsutil.SupersessionLookupTimeout,
+		"telemetry.ShutdownFlushTimeout":    telemetry.ShutdownFlushTimeout,
 	}
 	for name, budget := range budgets {
 		t.Run(name, func(t *testing.T) {

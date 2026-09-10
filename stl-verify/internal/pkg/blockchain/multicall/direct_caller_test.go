@@ -3,6 +3,7 @@ package multicall
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -14,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/rpc"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/rpcerr"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -554,5 +556,37 @@ func TestDirectCaller_Address(t *testing.T) {
 	addr := dc.Address()
 	if addr != (common.Address{}) {
 		t.Errorf("Address() = %s, want zero address", addr.Hex())
+	}
+}
+
+func TestDirectCaller_ExecuteAtHashTagsABlockTheNodeCannotServe(t *testing.T) {
+	srv := startBatchRPCServer(t, func(rpcutil.Request) (json.RawMessage, *rpcError) {
+		return nil, &rpcError{Code: -32001, Message: "block not found: hash 0x70559c33e0f4f4d6e9f0d1c1a5f3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5"}
+	})
+	defer srv.Close()
+
+	calls := []outbound.Call{{Target: common.HexToAddress("0x1111111111111111111111111111111111111111"), CallData: []byte{0xAB, 0xCD}}}
+	_, err := newTestDirectCaller(t, srv.URL).ExecuteAtHash(context.Background(), calls,
+		common.HexToHash("0x70559c33e0f4f4d6e9f0d1c1a5f3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5"))
+
+	if !errors.Is(err, rpcerr.ErrBlockUnavailableAtHash) {
+		t.Fatalf("ExecuteAtHash error = %v, want it to match rpcerr.ErrBlockUnavailableAtHash", err)
+	}
+}
+
+func TestDirectCaller_ExecuteDoesNotTagANumberPinnedRead(t *testing.T) {
+	srv := startBatchRPCServer(t, func(rpcutil.Request) (json.RawMessage, *rpcError) {
+		return nil, &rpcError{Code: -32001, Message: "block not found"}
+	})
+	defer srv.Close()
+
+	calls := []outbound.Call{{Target: common.HexToAddress("0x1111111111111111111111111111111111111111"), CallData: []byte{0xAB, 0xCD}}}
+	_, err := newTestDirectCaller(t, srv.URL).Execute(context.Background(), calls, big.NewInt(100))
+
+	if err == nil {
+		t.Fatal("expected the node's refusal to propagate")
+	}
+	if errors.Is(err, rpcerr.ErrBlockUnavailableAtHash) {
+		t.Error("the sentinel marks a hash-pinned read; a number-pinned one must not carry it")
 	}
 }

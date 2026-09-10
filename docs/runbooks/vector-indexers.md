@@ -4082,16 +4082,17 @@ written down so nobody goes looking for the rule that should have fired.
 
 `sqsutil.Config.Validate` is a boot check, not a warning: the queue's visibility
 timeout must strictly exceed the wall time one whole receive can take —
-messages-per-receive × the handler budget, plus the shutdown drain and the two
-settle calls that follow it — and a worker whose config fails that refuses to
+messages-per-receive × (the handler budget plus the supersession lookup a failed
+handler spends before its message is settled), plus the shutdown drain and the
+two settle calls that follow it — and a worker whose config fails that refuses to
 start. `Start()` returns the error, `lifecycle.Run` propagates it, `main` exits
 1, and the pod goes **CrashLoopBackOff with its logs ending at that line**:
 
 ```text
-sqsutil: SQS visibility timeout 30s must exceed 2m25s, the wall time 1 message(s)
-per receive take at a 2m0s handler budget plus the 15s shutdown drain and two 5s
-settle calls, otherwise a message can be redelivered while its handler is still
-running
+sqsutil: SQS visibility timeout 30s must exceed 2m30s, the wall time 1 message(s)
+per receive take at a 2m0s handler budget plus a 5s supersession lookup each, the
+15s shutdown drain and two 5s settle calls, otherwise a message can be
+redelivered while its handler is still running
 ```
 
 ```logql
@@ -4316,5 +4317,94 @@ sum by (service_name, chain, cluster) (
 back to `0` or absent for the affected source, with
 `sqs_message_settles_total{op="delete", status="ok"}` advancing and that chain's
 block height moving again.
+
+---
+
+## VectorSQSMessagesDiscarded
+
+**Severity:** warning · **For:** 5m · **Window:** 15m
+
+### What it means
+
+An indexer threw away an SQS message instead of processing it, because the block
+the message named was orphaned by a reorg and the node can no longer serve it.
+Every indexer state read is pinned to the block hash, so that read fails
+permanently: left alone the message burns its whole receive budget on the way to
+the DLQ and, because the FIFO `MessageGroupId` is the chain ID, head-of-line
+blocks every later block for that chain for the ~17 minutes that takes.
+
+The loop does not take the node's word for it. Before deleting anything it reads
+the watcher's own `block_states` record and discards only when a **canonical,
+published** row already stands at that height under a **different** hash. That
+single condition carries both halves of a safe discard: the event's block lost
+its reorg, *and* an event went out for the height under the winner, so the height
+still gets indexed. A read that fails, a height with no canonical row, and a
+canonical row that was never published all keep the message retrying instead.
+
+So the discard itself is the correct call. This rule exists because the discard
+is now the **only** trace such a block leaves — the DLQ hop it replaces was the
+visible signal before — and because the safety argument rests on a successor
+event that somebody should confirm actually landed.
+
+`reason="foreign_chain"` discards are excluded: that is a queue subscribed to the
+wrong chain's topic, a wiring fix rather than an operator's.
+
+### First checks (≤5 min)
+
+1. **Find the discard in the logs** — it is a single WARN carrying the height and
+   the orphaned hash:
+
+   ```logql
+   {k8s_namespace_name="vector", service_name="<svc>"} |= "discarding its message"
+   ```
+
+   The `block`, `blockHash`, `chainID` and `messageID` fields identify the height.
+2. **Check the height in `block_states`** — this is the confirmation the alert is
+   asking for. Every version of that height, canonical flag and publish flag:
+
+   ```sql
+   SELECT number, hash, version, is_orphaned, block_published, received_at
+   FROM block_states
+   WHERE chain_id = <chain_id> AND number = <block>
+   ORDER BY version;
+   ```
+
+   Expected: the discarded `blockHash` present with `is_orphaned = true`, and a
+   second row at the same height with `is_orphaned = false` **and**
+   `block_published = true`. That published row is the successor event the
+   indexer will process, and there is nothing further to do.
+3. **No published successor?** — then the height has nothing left to index it and
+   is a hole. Re-publish it with `block-republisher`, the on-demand Temporal
+   worker that re-emits a mined height under the next free `block_version`: see
+   [vector-cronjobs.md § `block-republisher`](vector-cronjobs.md#special-case-block-republisher-on-demand-no-schedule)
+   for the per-chain deployment and how to start a run. This should not happen —
+   the discard is gated on that row existing — so if it does, capture the height
+   before republishing and raise it: the gate itself is wrong.
+4. **Confirm the height actually landed downstream** — the indexer's own tables
+   should hold rows for that block once the successor event is consumed. A
+   discard followed by no rows at that height is the failure mode this rule is
+   watching for.
+5. **Many discards at once** — a burst across consecutive heights is a deep reorg,
+   not a bug in one message. Cross-check `reorg_events` for the chain and confirm
+   the watcher republished the whole replaced segment.
+
+### Common causes
+
+- A reorg deep enough to orphan a block while its message was already in flight,
+  on a backend that drops the losing fork rather than serving it.
+- A chain with frequent short reorgs (Base, Avalanche) reordering under load.
+- A backfill or replay re-emitting a height whose earlier version was a losing
+  fork, so the older message is still queued when the winner is published.
+
+### Verify recovery
+
+```promql
+sum by (service_name, chain, cluster) (
+  increase(sqs_message_discards_total{reason="non_canonical_block", k8s_namespace_name="vector"}[15m])
+)
+```
+
+back to `0` for the affected source, with that chain's block height advancing and
+the indexer's own tables carrying rows for the discarded height.
 
 ---

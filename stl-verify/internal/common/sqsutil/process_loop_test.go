@@ -306,8 +306,8 @@ func TestValidateVisibilityTimeout(t *testing.T) {
 		wantErr    bool
 	}{
 		{"the shipped 180s queue covers one message per receive", 180 * time.Second, 0, 1, false},
-		{"the tightest passing margin is one second", 146 * time.Second, 0, 1, false},
-		{"the exact sum is rejected", 145 * time.Second, 0, 1, true},
+		{"the tightest passing margin is one second", 151 * time.Second, 0, 1, false},
+		{"the exact sum is rejected", 150 * time.Second, 0, 1, true},
 		{"the handler budget alone is not enough", DefaultHandlerTimeout, 0, 1, true},
 		{"an unset batch size counts as one message", 180 * time.Second, 0, 0, false},
 		{"two messages per receive outrun the shipped 180s queue", 180 * time.Second, 0, 2, true},

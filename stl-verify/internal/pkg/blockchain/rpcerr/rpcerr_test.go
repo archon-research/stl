@@ -134,3 +134,67 @@ func TestIsRequestTooLarge(t *testing.T) {
 		})
 	}
 }
+
+func TestIsBlockUnavailableAtHash(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil is not a missing block", err: nil, want: false},
+		{name: "drpc -32001 block not found names the hash", err: testutil.RPCError{Code: -32001, Msg: "block not found: hash 0x70559c33e0f4f4d6e9f0d1c1a5f3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5"}, want: true},
+		{name: "geth header-for-hash phrasing is a missing block", err: testutil.RPCError{Code: -32000, Msg: "header for hash not found"}, want: true},
+		{name: "reth header not found is a missing block", err: testutil.RPCError{Code: -32000, Msg: "header not found"}, want: true},
+		{name: "unknown block is a missing block", err: testutil.RPCError{Code: -32000, Msg: "unknown block"}, want: true},
+		{name: "capitalised phrasing is a missing block", err: testutil.RPCError{Code: -32001, Msg: "Block not found"}, want: true},
+		{name: "wrapped missing block is still a missing block", err: fmt.Errorf("multicall at hash: %w", testutil.RPCError{Code: -32001, Msg: "block not found: hash 0xabc"}), want: true},
+		{name: "execution revert is NOT a missing block", err: testutil.RPCError{Code: 3, Msg: "execution reverted"}, want: false},
+		{name: "rate limit is NOT a missing block", err: testutil.ThrottledRPCError(), want: false},
+		{name: "out of gas is NOT a missing block", err: testutil.GasExhaustedRPCError(), want: false},
+		{name: "plain stdlib error naming a missing block is NOT one", err: errors.New("block not found"), want: false},
+		{name: "network failure is NOT a missing block", err: &net.OpError{Op: "dial", Err: errors.New("timeout")}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsBlockUnavailableAtHash(tt.err); got != tt.want {
+				t.Errorf("IsBlockUnavailableAtHash(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTagBlockUnavailableAtHashMarksAMissingBlockForErrorsIs(t *testing.T) {
+	underlying := testutil.RPCError{Code: -32001, Msg: "block not found: hash 0xabc"}
+
+	tagged := TagBlockUnavailableAtHash(underlying)
+
+	if !errors.Is(tagged, ErrBlockUnavailableAtHash) {
+		t.Errorf("errors.Is(%v, ErrBlockUnavailableAtHash) = false, want true", tagged)
+	}
+	if !errors.Is(tagged, underlying) {
+		t.Errorf("tagging must keep the provider's own error matchable; got %v", tagged)
+	}
+}
+
+func TestTagBlockUnavailableAtHashLeavesOtherErrorsAlone(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "nil", err: nil},
+		{name: "revert", err: testutil.RPCError{Code: 3, Msg: "execution reverted"}},
+		{name: "throttle", err: testutil.ThrottledRPCError()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := TagBlockUnavailableAtHash(tt.err)
+			if got != tt.err {
+				t.Errorf("TagBlockUnavailableAtHash(%v) = %v, want it returned unchanged", tt.err, got)
+			}
+			if errors.Is(got, ErrBlockUnavailableAtHash) {
+				t.Errorf("%v must not match ErrBlockUnavailableAtHash", got)
+			}
+		})
+	}
+}
