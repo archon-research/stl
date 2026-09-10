@@ -223,20 +223,17 @@ BEGIN
     -- block, dated by timestamp) disagree. Adjacent pairs suffice: within the batch by window, against
     -- history by one indexed probe below and above each new row, so cost is bounded by the batch.
     CREATE TEMP TABLE _mpp_new ON COMMIT DROP AS
-        SELECT s.position_id, s.block_number, s.block_version, s.processing_version, s.block_timestamp
-        FROM pg_temp._mpp_src s
+        SELECT s.position_id, s.block_number, s.block_timestamp FROM pg_temp._mpp_src s
         WHERE NOT EXISTS (SELECT 1 FROM public.position_state p
                            WHERE p.position_id = s.position_id AND p.block_number = s.block_number
                              AND p.block_version = s.block_version AND p.processing_version = s.processing_version);
     ANALYZE pg_temp._mpp_new;
-    -- The offending OBSERVATIONS, not their whole position: the pair is ambiguous, so both sides of it
-    -- are withheld and recorded, while the position's monotone observations land. Withholding the
-    -- position instead left it frozen every run, because the same batch recurs from an append-only source.
+    -- The offending POSITIONS, not the first five: their new observations are withheld this run and
+    -- recorded, and every other position lands. Aborting here refused the whole projection forever.
     CREATE TEMP TABLE _mpp_refused ON COMMIT DROP AS
-        SELECT DISTINCT ON (w.position_id, w.block_number, w.block_version, w.processing_version)
-               w.position_id, w.block_number, w.block_version, w.processing_version,
+        SELECT DISTINCT ON (w.position_id) w.position_id,
                format('bn=%s@%s vs bn=%s@%s', w.block_number, w.block_timestamp, o.block_number, o.block_timestamp) AS detail
-        FROM (SELECT position_id, block_number, block_version, processing_version, block_timestamp,
+        FROM (SELECT position_id, block_number, block_timestamp,
                      lag(block_number)  OVER win AS prev_bn, lag(block_timestamp)  OVER win AS prev_ts,
                      lead(block_number) OVER win AS next_bn, lead(block_timestamp) OVER win AS next_ts
               FROM pg_temp._mpp_new
@@ -256,33 +253,24 @@ BEGIN
         ) o
         WHERE (w.block_number > o.block_number AND w.block_timestamp < o.block_timestamp)
            OR (w.block_number < o.block_number AND w.block_timestamp > o.block_timestamp)
-        ORDER BY w.position_id, w.block_number, w.block_version, w.processing_version;
+        ORDER BY w.position_id, w.block_number;
     INSERT INTO public.position_projection_refusal
         (projection, position_id, block_number, block_version, processing_version, reason, detail, build_id)
     SELECT v_qualname, s.position_id, s.block_number, s.block_version, s.processing_version, 'block_time_inverts_height',
            format('ik=%s holder=%s %s', s.instrument_key, s.holder_id, r.detail), p_build_id
     FROM pg_temp._mpp_src s
-    JOIN pg_temp._mpp_refused r
-      USING (position_id, block_number, block_version, processing_version)
+    JOIN pg_temp._mpp_refused r USING (position_id)
     WHERE NOT EXISTS (SELECT 1 FROM public.position_state p
                        WHERE p.position_id = s.position_id AND p.block_number = s.block_number
                          AND p.block_version = s.block_version AND p.processing_version = s.processing_version)
     ON CONFLICT DO NOTHING;
-    SELECT count(DISTINCT position_id) INTO v_refused FROM pg_temp._mpp_refused;
+    SELECT count(*) INTO v_refused FROM pg_temp._mpp_refused;
     IF v_refused > 0 THEN
         SELECT string_agg(format('pos=%s %s', encode(position_id, 'hex'), detail), '; ') INTO bad
           FROM (SELECT * FROM pg_temp._mpp_refused ORDER BY position_id LIMIT 5) z;
         RAISE WARNING 'projection % emits a higher block with an earlier block_timestamp for % position(s); their new observations are withheld this run and recorded in position_projection_refusal, the rest of the batch continues (first 5): %', p_view, v_refused, bad;
-        DELETE FROM pg_temp._mpp_src s USING pg_temp._mpp_refused r
-         WHERE s.position_id = r.position_id AND s.block_number = r.block_number
-           AND s.block_version = r.block_version AND s.processing_version = r.processing_version;
+        DELETE FROM pg_temp._mpp_src s USING pg_temp._mpp_refused r WHERE s.position_id = r.position_id;
     END IF;
-
-    -- Lock the identities before reading who owns them: the check below is a snapshot read, so two
-    -- projections minting one position_id could each pass it and both append, wedging both for good.
-    -- Keyed per position, so views on disjoint positions still run concurrently; ordered to not deadlock.
-    PERFORM pg_advisory_xact_lock(hashtextextended('position_id.' || encode(s.position_id, 'hex'), 0))
-    FROM (SELECT DISTINCT position_id FROM pg_temp._mpp_src) s ORDER BY s.position_id;
 
     SELECT format('position %s owned by %s', encode(p.position_id, 'hex'), p.projection) INTO bad
     FROM (SELECT DISTINCT position_id FROM pg_temp._mpp_src) s

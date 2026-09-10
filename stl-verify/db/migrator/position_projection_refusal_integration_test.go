@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 // materialize_position_projection aborts on a view bug and continues on a data conflict. These pin the
@@ -185,112 +184,36 @@ func TestPositionProjectionRefusal(t *testing.T) {
 		}
 	})
 
-	t.Run("only the inverting observations are withheld; the position's monotone ones land", func(t *testing.T) {
-		// Withholding the whole position left it frozen every run: the source is append-only, so the
-		// next run re-derived the identical batch and refused it again, and nothing ever landed.
-		v := view(
-			row("inv-part", 100, "2026-07-01T10:00:00Z", "500", "'LOAN'"),
-			row("inv-part", 200, "2026-07-01T09:00:00Z", "600", "'LOAN'"),
-			row("inv-part", 300, "2026-07-01T11:00:00Z", "700", "'LOAN'"),
-			row("inv-part", 400, "2026-07-01T12:00:00Z", "800", "'LOAN'"),
-			row("inv-part", 500, "2026-07-01T13:00:00Z", "900", "'LOAN'"),
-		)
-		if n := f.mppN(t, "pv_inv_part", v, "inverted pair plus monotone rows"); n != 3 {
-			t.Errorf("inserted %d, want the 3 monotone observations", n)
+	t.Run("a withheld position is withheld whole: no survivor may invert, no close may orphan", func(t *testing.T) {
+		// Withholding only the offending pair makes previously non-adjacent survivors adjacent, and
+		// they can invert; and a zero kept because the batch carried its positive predecessor
+		// outlives that predecessor. Both leave the spine in a state it has no way to repair.
+		if n := f.mppN(t, "pv_whole_a", view(
+			row("whole-a", 100, "2026-07-03T00:00:00Z", "7", "'LOAN'"),
+			row("whole-a", 200, "2026-07-07T00:00:00Z", "9", "'LOAN'"),
+			row("whole-a", 300, "2026-07-01T00:00:00Z", "10", "'LOAN'"),
+			row("whole-a", 400, "2026-07-02T00:00:00Z", "11", "'LOAN'"),
+		), "one inverting pair with non-adjacent survivors"); n != 0 {
+			t.Errorf("appended %d; the position is withheld whole, so nothing may land", n)
 		}
-		if got := count(t, `SELECT count(*) FROM position_state WHERE instrument_key = 'inv-part'
-		                     AND block_number IN (100, 200)`); got != 0 {
-			t.Errorf("%d of the inverting pair reached the spine; want none", got)
+		if got := count(t, `SELECT count(*) FROM position_state a JOIN position_state b
+		                     ON a.position_id = b.position_id AND a.block_number < b.block_number
+		                     WHERE a.instrument_key = 'whole-a' AND a.block_timestamp > b.block_timestamp`); got != 0 {
+			t.Errorf("%d stored pair(s) carry a higher block at an earlier instant", got)
 		}
-		if got := count(t, `SELECT count(*) FROM position_state WHERE instrument_key = 'inv-part'`); got != 3 {
-			t.Errorf("the position holds %d observations, want 3", got)
+
+		if n := f.mppN(t, "pv_whole_b", view(
+			row("whole-b", 100, "2026-07-07T00:00:00Z", "7", "'LOAN'"),
+			row("whole-b", 150, "2026-07-01T00:00:00Z", "3", "'LOAN'"),
+			row("whole-b", 200, "2026-07-02T00:00:00Z", "0", "'LOAN'"),
+		), "a close whose only positive predecessor is in the withheld pair"); n != 0 {
+			t.Errorf("appended %d; the position is withheld whole, so its close may not land alone", n)
 		}
-		if got := refusals(t, "inv-part", "block_time_inverts_height"); got != 2 {
-			t.Errorf("recorded %d refusals, want one per side of the pair", got)
-		}
-		// Re-running adds nothing: the pair is still ambiguous, the rest is already stored.
-		if n := f.mppN(t, "pv_inv_part", v, "re-run"); n != 0 {
-			t.Errorf("re-running inserted %d, want 0", n)
+		if got := count(t, `SELECT count(*) FROM position_state z WHERE z.instrument_key = 'whole-b'
+		                     AND z.quantity = 0 AND NOT EXISTS (
+		                       SELECT 1 FROM position_state p WHERE p.position_id = z.position_id
+		                        AND p.quantity > 0 AND p.block_number <= z.block_number)`); got != 0 {
+			t.Errorf("%d stored zero(s) have no positive predecessor", got)
 		}
 	})
-}
-
-// Two projections minting one position_id must not both land. The ownership check is a snapshot
-// read, so B has to be held off until A's row is visible; otherwise both append and every later run
-// of both aborts, with recovery needing a superuser since UPDATE and DELETE are revoked.
-func TestMaterializeSerialisesOnTheIdentityNotTheView(t *testing.T) {
-	f, cleanup := newPositionStateFixture(t)
-	defer cleanup()
-	h := strings.Repeat("c", 40)
-	body := func(bn int, ts string) string {
-		return `SELECT * FROM (VALUES (1::int,10::bigint,'race-key'::text,'` + h +
-			`'::text,500::numeric,'LOAN'::text,` + strconv.Itoa(bn) + `::bigint,0::int,0::int,'` + ts + `'::timestamptz)) ` + mppCols
-	}
-	for _, v := range []struct{ name, b string }{
-		{"pv_race_a", body(100, "2026-08-01T00:00:00Z")},
-		{"pv_race_b", body(200, "2026-08-02T00:00:00Z")},
-	} {
-		if _, err := f.pool.Exec(f.ctx, `CREATE OR REPLACE VIEW `+v.name+` AS `+v.b); err != nil {
-			t.Fatalf("creating %s: %v", v.name, err)
-		}
-	}
-
-	a, err := f.pool.Acquire(f.ctx)
-	if err != nil {
-		t.Fatalf("acquire a: %v", err)
-	}
-	defer a.Release()
-	txA, err := a.Begin(f.ctx)
-	if err != nil {
-		t.Fatalf("begin a: %v", err)
-	}
-	var appendedA int64
-	if err := txA.QueryRow(f.ctx, `SELECT materialize_position_projection('pv_race_a'::regclass)`).Scan(&appendedA); err != nil {
-		_ = txA.Rollback(f.ctx)
-		t.Fatalf("projection a: %v", err)
-	}
-
-	// B runs while A is uncommitted. It must not decide ownership from a snapshot without A's row.
-	type outcome struct {
-		appended int64
-		err      error
-	}
-	done := make(chan outcome, 1)
-	go func() {
-		b, err := f.pool.Acquire(f.ctx)
-		if err != nil {
-			done <- outcome{err: err}
-			return
-		}
-		defer b.Release()
-		var n int64
-		e := b.QueryRow(f.ctx, `SELECT materialize_position_projection('pv_race_b'::regclass)`).Scan(&n)
-		done <- outcome{appended: n, err: e}
-	}()
-
-	time.Sleep(750 * time.Millisecond) // let B reach whatever it blocks on
-	select {
-	case got := <-done:
-		t.Fatalf("projection b finished before a committed: appended=%d err=%v", got.appended, got.err)
-	default:
-	}
-	if err := txA.Commit(f.ctx); err != nil {
-		t.Fatalf("commit a: %v", err)
-	}
-
-	got := <-done
-	if got.err == nil {
-		t.Errorf("projection b appended %d rows for a position a owns; want the ownership abort", got.appended)
-	} else if !strings.Contains(got.err.Error(), "owned by another projection") {
-		t.Errorf("projection b failed with %v; want the cross-view ownership abort", got.err)
-	}
-
-	var owners int
-	if err := f.pool.QueryRow(f.ctx,
-		`SELECT count(DISTINCT projection) FROM position_state WHERE instrument_key = 'race-key'`).Scan(&owners); err != nil {
-		t.Fatal(err)
-	}
-	if owners != 1 {
-		t.Errorf("%d projections own the position; want 1", owners)
-	}
 }

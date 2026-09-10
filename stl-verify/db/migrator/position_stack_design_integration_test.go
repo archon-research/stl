@@ -184,6 +184,36 @@ func TestPositionStackDesignInvariants(t *testing.T) {
 				t.Logf("I8: %d position_ids span more than one deal type", flipped)
 			}
 
+			// I4: no stored pair of one position carries a higher block at an earlier instant. The
+			// gate exists to keep this true, and asserting the ORACLE is not the same as asserting
+			// the spine: a change that withheld part of a batch left survivors that invert.
+			var inverted int
+			if err := pool.QueryRow(ctx, `
+				SELECT count(*) FROM position_state a JOIN position_state b
+				  ON a.position_id = b.position_id AND a.block_number < b.block_number
+				 WHERE a.block_timestamp > b.block_timestamp`).Scan(&inverted); err != nil {
+				t.Fatalf("I4: %v", err)
+			}
+			if inverted != 0 {
+				t.Errorf("I4 %d stored pair(s) carry a higher block at an earlier instant", inverted)
+			}
+
+			// I6: no stored zero lacks a positive observation at or below its block. Closure is
+			// judged on the batch plus stored history, so anything that drops rows between closure
+			// and the append can strand a close on a position that never opened.
+			var orphaned int
+			if err := pool.QueryRow(ctx, `
+				SELECT count(*) FROM position_state z
+				 WHERE z.quantity = 0
+				   AND NOT EXISTS (SELECT 1 FROM position_state p
+				                    WHERE p.position_id = z.position_id AND p.quantity > 0
+				                      AND p.block_number <= z.block_number)`).Scan(&orphaned); err != nil {
+				t.Fatalf("I6: %v", err)
+			}
+			if orphaned != 0 {
+				t.Errorf("I6 %d stored zero(s) have no positive observation at or below them", orphaned)
+			}
+
 			// I1: the stored identity is the hash of exactly the four key fields and nothing else.
 			// A materializer that hashes a different set still satisfies I0, because I0 compares on
 			// the fields, so the identity contract needs its own assertion.
