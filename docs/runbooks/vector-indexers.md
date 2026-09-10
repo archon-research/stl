@@ -1740,11 +1740,11 @@ fee_growth_outside0_x128, fee_growth_outside1_x128, initialized)` as the values.
 
 ### Remediation
 
-The create/copy/swap conversion in the V4 section applies with `uniswap_v3_tick`
-for `uniswap_v4_position`, `(pool_id, tick)` for the natural key and
-`uniswap_v3_pool` as the FK target — including all four "re-solve the fan-out"
-items (30-day chunks, `block_timestamp` pinned in the trigger lookups, a bounded
-lookback only if the `COMMENT` states it, and no tiering policy).
+The in-place conversion in the V4 section applies with `uniswap_v3_tick` for
+`uniswap_v4_position` and `(pool_id, tick)` for the natural key — including all
+four "re-solve the fan-out" items (30-day chunks, `block_timestamp` pinned in
+the trigger lookups, a bounded lookback only if the `COMMENT` states it, and no
+tiering policy).
 
 ### Verify recovery
 
@@ -2158,6 +2158,15 @@ not an alert.
   block number.
 - Transient RPC timeout on the StateView multicall -> usually self-clears;
   investigate if sustained.
+- `the authoritative read disagrees with itself` -> a hash-pinned
+  `getPositionInfo` read for a `(block, version)` this build already stored came
+  back with different values, and the position writer refuses to pick one.
+  Deterministic: every redelivery of that block fails the same way until the
+  build changes (a rollback to this build replaying its own values is a no-op
+  and does not trip it), so the message dead-letters. Recover by confirming the
+  value at the block hash by hand (`eth_call` against the StateView at that
+  hash) and deploying a new build — its `build_id` appends the correction at
+  `processing_version` + 1 — then redrive the DLQ message.
 
 ### How to spot a decoder gap (no alert covers this)
 
@@ -2902,38 +2911,28 @@ must not wake anyone.
 Only once the rate is confirmed to be the new normal. This is a **new** migration,
 never an edit to the creating one.
 
-TimescaleDB will not partition a table that already holds rows in place, so the
-shape is create-new / copy / swap. The append-only rule does not block this: it
-forbids `UPDATE`/`DELETE` on ingest paths, and this is a schema migration that
-only INSERTs and renames.
+The conversion is in place: `create_hypertable(..., migrate_data => true)`
+partitions a populated table and keeps every dependent object — the FK, the
+secondary indexes, the `processing_version` trigger and the grants (so the
+`REVOKE` still holds) — at the price of an exclusive lock for the duration of
+the row migration, which is why it needs a maintenance window rather than a
+copy/swap dance. The one schema change it forces: `block_timestamp` must join the
+PK, because TimescaleDB requires the partition column in every unique index on a
+hypertable. The append-only rule does not block any of this: it forbids
+`UPDATE`/`DELETE` on ingest paths, and this migration changes only the schema.
 
 ```sql
--- 1. New table, same columns. LIKE copies CHECKs, NOT NULLs, defaults and,
---    with INCLUDING INDEXES, the PK and the two secondary indexes (under
---    default names) -- never a foreign key, so that is re-added by hand.
---    block_timestamp must join the PK: TimescaleDB requires the partition
---    column in every unique index on a hypertable.
-CREATE TABLE uniswap_v4_position_new
-    (LIKE uniswap_v4_position INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING INDEXES);
-ALTER TABLE uniswap_v4_position_new
-    ADD FOREIGN KEY (pool_id) REFERENCES uniswap_v4_pool (id),
-    DROP CONSTRAINT uniswap_v4_position_new_pkey,
+-- 1. block_timestamp joins the PK (functionally determined by
+--    (block_number, block_version), so the uniqueness it guards is unchanged).
+ALTER TABLE uniswap_v4_position
+    DROP CONSTRAINT uniswap_v4_position_pkey,
     ADD PRIMARY KEY (pool_id, owner, tick_lower, tick_upper, salt,
                      block_timestamp, block_number, block_version, processing_version);
-SELECT create_hypertable('uniswap_v4_position_new', 'block_timestamp',
+
+-- 2. Partition in place. No compression or tiering policy -- see below.
+SELECT create_hypertable('uniswap_v4_position', 'block_timestamp',
                          chunk_time_interval => INTERVAL '30 days',
-                         migrate_data => false);
-
--- 2. Copy. On a large table run this per block_number range (add
---    WHERE block_number >= lo AND block_number < hi and loop) so one
---    transaction does not hold a snapshot for hours; a small one copies in one.
-INSERT INTO uniswap_v4_position_new SELECT * FROM uniswap_v4_position;
-
--- 3. Swap, then re-create the processing_version trigger and the REVOKEs
---    against the new table: LIKE carries neither, and grants follow the
---    object, not the name. No compression or tiering policy -- see below.
-ALTER TABLE uniswap_v4_position RENAME TO uniswap_v4_position_old;
-ALTER TABLE uniswap_v4_position_new RENAME TO uniswap_v4_position;
+                         migrate_data => true);
 ```
 
 **Re-solve the fan-out before shipping it.** Partitioning is what this alert asks

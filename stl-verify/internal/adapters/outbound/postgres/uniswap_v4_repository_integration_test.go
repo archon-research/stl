@@ -1446,6 +1446,21 @@ func (f uniswapV4PositionFixture) rowCount(key entity.UniswapV4PositionKey) int 
 	return count
 }
 
+// rowCountIn reads through tx: asserted before a rollback, the count reflects
+// what SaveBlock did rather than what the rollback undid.
+func (f uniswapV4PositionFixture) rowCountIn(tx pgx.Tx, key entity.UniswapV4PositionKey) int {
+	f.t.Helper()
+	var count int
+	if err := tx.QueryRow(f.ctx,
+		`SELECT count(*) FROM uniswap_v4_position
+		 WHERE pool_id=$1 AND owner=$2 AND tick_lower=$3 AND tick_upper=$4 AND salt=$5`,
+		f.poolID, key.Owner.Bytes(), key.TickLower, key.TickUpper, key.Salt.Bytes(),
+	).Scan(&count); err != nil {
+		f.t.Fatalf("count positions for %+v in tx: %v", key, err)
+	}
+	return count
+}
+
 func (f uniswapV4PositionFixture) latestValue(key entity.UniswapV4PositionKey, column string) string {
 	f.t.Helper()
 	var value string
@@ -1910,11 +1925,10 @@ func TestUniswapV4Repository_WritePositions_ValueDriftAtOneBlockVersionErrors(t 
 		if !strings.Contains(err.Error(), "disagrees with itself") {
 			t.Errorf("error %q does not name the read disagreement", err)
 		}
+		if got := f.rowCountIn(tx, key); got != 1 {
+			t.Errorf("row count = %d, want 1 (the drifted write must not have landed)", got)
+		}
 	})
-
-	if got := f.rowCount(key); got != 1 {
-		t.Errorf("row count = %d, want 1 (the drifted write must not have landed)", got)
-	}
 }
 
 func TestUniswapV4Repository_WritePositions_MixedBlockNumbersError(t *testing.T) {
@@ -1961,18 +1975,10 @@ func TestUniswapV4Repository_WritePositions_NilNumericWritesNothing(t *testing.T
 				}); err == nil {
 					t.Fatalf("SaveBlock with a nil %s: want error, got nil", tc.column)
 				}
+				if got := f.rowCountIn(tx, defaultUniswapV4PositionKey()); got != 0 {
+					t.Errorf("uniswap_v4_position has %d rows after a failed SaveBlock, want 0 (the batch must not run past the conversion error)", got)
+				}
 			})
-
-			var count int
-			if err := uniswapV4TestPool.QueryRow(ctx,
-				`SELECT count(*) FROM uniswap_v4_position WHERE pool_id=$1 AND block_number=$2`,
-				f.poolID, blockNumber,
-			).Scan(&count); err != nil {
-				t.Fatalf("count positions: %v", err)
-			}
-			if count != 0 {
-				t.Errorf("uniswap_v4_position has %d rows after a rolled-back SaveBlock, want 0", count)
-			}
 		})
 	}
 }

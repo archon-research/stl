@@ -980,9 +980,8 @@ func TestUniswapV4PositionRejectsWrongOwnerAndSaltWidths(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := uniswapV4TestPool.Exec(ctx, insert, poolID, tc.owner, tc.salt); err == nil {
-				t.Fatal("mis-sized owner/salt was accepted, want a CHECK violation")
-			}
+			_, err := uniswapV4TestPool.Exec(ctx, insert, poolID, tc.owner, tc.salt)
+			requireUniswapV4CheckViolation(t, err)
 		})
 	}
 }
