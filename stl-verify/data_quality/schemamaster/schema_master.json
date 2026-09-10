@@ -902,6 +902,10 @@
       "type": "int8",
       "class": "R"
     },
+    "prime_key": {
+      "type": "text",
+      "class": "S"
+    },
     "principal_out": {
       "type": "numeric",
       "class": "S"
