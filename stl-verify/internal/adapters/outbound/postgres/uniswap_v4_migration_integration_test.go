@@ -1132,8 +1132,6 @@ func TestUniswapV4PositionCommentDescribesTheBootstrapCoverage(t *testing.T) {
 	}
 }
 
-// uniswapV4ColumnComment returns one column's COMMENT, failing the test when
-// the column or its comment is absent.
 func uniswapV4ColumnComment(t *testing.T, ctx context.Context, table, column string) string {
 	t.Helper()
 

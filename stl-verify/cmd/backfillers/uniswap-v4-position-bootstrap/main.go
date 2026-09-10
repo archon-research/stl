@@ -87,10 +87,12 @@ func run(ctx context.Context, args []string) error {
 
 	summary, err := svc.Run(ctx)
 	if err != nil {
-		logger.Error("uniswap-v4 position bootstrap failed",
-			"chainId", cfg.bootstrap.ChainID, "pinnedBlock", summary.PinnedBlock, "fromBlock", summary.FromBlock,
-			"scanWindows", summary.ScanWindows, "scanLogs", summary.ScanLogs, "keys", summary.Keys,
-			"positionsRead", summary.PositionsRead, "positionsWritten", summary.PositionsWritten, "batches", summary.Batches)
+		if summary.PinnedBlock != 0 {
+			logger.Warn("uniswap-v4 position bootstrap stopped with partial progress",
+				"chainId", cfg.bootstrap.ChainID, "pinnedBlock", summary.PinnedBlock, "fromBlock", summary.FromBlock,
+				"scanWindows", summary.ScanWindows, "scanLogs", summary.ScanLogs, "keys", summary.Keys,
+				"positionsRead", summary.PositionsRead, "positionsWritten", summary.PositionsWritten, "batches", summary.Batches)
+		}
 		return resumableError(summary, err)
 	}
 	logger.Info("uniswap-v4 position bootstrap finished",

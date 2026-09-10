@@ -90,11 +90,11 @@ func (s *logWindowScanner) narrow(size, from, to int64, err error) (int64, error
 	if !errors.Is(err, outbound.ErrLogRangeTooLarge) {
 		return 0, fmt.Errorf("scanning blocks %d-%d for uniswap-v4 ModifyLiquidity logs: %w", from, to, err)
 	}
-	if size <= s.policy.min {
-		return 0, fmt.Errorf("blocks %d-%d refused at the minimum window of %d blocks; a single block's logs exceed the provider's response limit: %w",
-			from, to, s.policy.min, err)
+	if size <= 1 {
+		return 0, fmt.Errorf("block %d refused on its own; a single block's logs exceed the provider's response limit: %w", from, err)
 	}
-	narrowed := s.policy.shrink(size)
+	// A tail the scan end already clamped below the minimum still halves.
+	narrowed := min(s.policy.shrink(size), size/2)
 	s.logger.Info("narrowing the uniswap-v4 position scan window",
 		"fromBlock", from, "refusedToBlock", to, "refusedWindowBlocks", size, "nextWindowBlocks", narrowed, "error", err)
 	return narrowed, nil

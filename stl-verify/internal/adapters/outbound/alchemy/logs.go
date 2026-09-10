@@ -25,6 +25,8 @@ var rangeRefusalPhrases = []string{
 	"limited to a 10000 range",
 	"block range is too large",
 	"block range too large",
+	// Deliberate: a provider-side timeout on a wide window is a range problem in
+	// practice, and a narrower retry is cheaper than three identical ones.
 	"query timeout exceeded",
 	"exceed maximum block range",
 }

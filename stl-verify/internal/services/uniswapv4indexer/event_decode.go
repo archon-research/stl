@@ -223,8 +223,6 @@ func assertHexWords(log shared.Log) error {
 	return nil
 }
 
-// decodeAndCapture ABI-decodes a known event and mirrors it into the capture
-// net, returning the decoded fields for any typed entity built from them.
 func (d *receiptDecoder) decodeAndCapture(ev abi.Event, log shared.Log, site logSite) (map[string]any, error) {
 	data, err := shared.DecodeLog(ev, log)
 	if err != nil {

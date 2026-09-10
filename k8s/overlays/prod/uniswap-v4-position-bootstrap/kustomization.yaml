@@ -13,6 +13,14 @@ namespace: vector
 resources:
   - ../../../base/uniswap-v4-position-bootstrap
 
+# To resume a failed run at its pin (or tune a window), uncomment and set:
+# patches:
+#   - target: {kind: Job, name: uniswap-v4-position-bootstrap}
+#     patch: |-
+#       - op: replace
+#         path: /spec/template/spec/containers/0/env/0/value
+#         value: "25946281"   # PIN_BLOCK; env/1 is FROM_BLOCK, see the base Job
+#
 images:
   - name: uniswap-v4-position-bootstrap
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cronjob

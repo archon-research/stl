@@ -131,9 +131,6 @@ func (r *fakeUniswapRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.Unis
 	return counts, nil
 }
 
-// fakeEventRepo counts saved events, satisfying outbound.EventRepository. err,
-// when set, makes SaveBatch fail so tests can exercise the persist path where
-// the typed write succeeds but the captured-events write does not.
 type fakeEventRepo struct {
 	events []*entity.ProtocolEvent
 	err    error

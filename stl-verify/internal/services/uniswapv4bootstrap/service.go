@@ -168,17 +168,7 @@ func (s *Service) Run(ctx context.Context) (Summary, error) {
 	if err := s.snapshotAndPersist(ctx, keysByPool, pin, &summary); err != nil {
 		return summary, err
 	}
-
-	s.logComplete(summary)
 	return summary, nil
-}
-
-func (s *Service) logComplete(summary Summary) {
-	s.logger.Info("uniswap-v4 position bootstrap complete",
-		"chainId", s.cfg.ChainID, "pinnedBlock", summary.PinnedBlock, "pools", summary.Pools,
-		"keys", summary.Keys, "positionsRead", summary.PositionsRead,
-		"positionsWritten", summary.PositionsWritten, "batches", summary.Batches,
-		"scanWindows", summary.ScanWindows, "scanNarrowings", summary.ScanNarrowings, "scanLogs", summary.ScanLogs)
 }
 
 func (s *Service) logStart(pin pinnedBlock, from int64) {

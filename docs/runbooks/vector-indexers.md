@@ -1885,18 +1885,27 @@ there. Every flag has an env twin for the Job's `env:`: `PIN_BLOCK`,
   pin is re-read after the scan, and the run fails rather than write if the
   height now names a different hash.
 - **Rerun behaviour.** It keeps no progress state. Re-running is safe and
-  **idempotent**: the append-on-change writer inserts only where the stored value
-  for a slot differs, and its read of the current value is height-bounded, so a
-  row the live indexer already wrote *above* the pin is never regressed. A run
-  over already-covered history reports `positionsWritten=0` — that, not the row
-  count, is how you tell a no-op rerun from one that closed a real gap.
+  **idempotent except at a pinned height that carries a live `block_version > 0`
+  row** (the known edge below): the append-on-change writer inserts only where
+  the stored value for a slot differs, and its read of the current value is
+  height-bounded, so a row the live indexer already wrote *above* the pin is
+  never regressed. A run over already-covered history reports
+  `positionsWritten=0` — that, not the row count, is how you tell a no-op rerun
+  from one that closed a real gap.
+- **Row volume.** Every key ever touched gets one row at the pin, closed
+  positions included (their all-zero row is the record). Mainnet, 21 pools,
+  2026-09: 4,451 rows, 138 open and 4,313 closed, in one run. The
+  `VectorUniswapV4AppendOnChangeGrowthHigh` 6h rate spikes once after a first
+  run by design; a rerun adds ~nothing.
 - **Resuming an interrupted run.** Resume with `-pin <P>` (`PIN_BLOCK=<P>` in the
   Job), taking `P` from the failed run's error (`resume this snapshot with -pin …`)
   or from its `starting uniswap-v4 position bootstrap` log line. A bare rerun re-derives a
   fresh `head - 64` and would stitch one snapshot across two heights. Batches
   already committed stay, and the resumed run re-reads them without appending.
   A run that fails with `pinned block … is … now` does not carry the hint: the
-  height was reorged past the finality depth, and the answer is a fresh pin.
+  height was reorged past the finality depth, and the answer is a fresh pin. In
+  the Job, `PIN_BLOCK` and the other knobs are the base's empty `env:` entries;
+  set them through the overlay's `patches:` (a commented example is in each).
 - **Known edge: a pinned height the watcher saw reorged.** Rows carry
   `block_version = 0`. If the live indexer holds a `block_version = 1` row at
   the pinned height for a position touched in that block, the bootstrap's

@@ -216,6 +216,26 @@ func TestScan_RefusalAtTheMinimumWindowFailsTheScan(t *testing.T) {
 	}
 }
 
+func TestScan_TailAlreadyBelowTheMinimumWindowStillBisects(t *testing.T) {
+	client := newFakeLogScanClient(0, nil)
+	client.GetLogsFn = func(f outbound.LogFilter) ([]outbound.FilteredLog, error) {
+		if f.ToBlock-f.FromBlock+1 > 150 {
+			return nil, fmt.Errorf("provider says no: %w", outbound.ErrLogRangeTooLarge)
+		}
+		return nil, nil
+	}
+	// The 300-block range is under the 1000-block minimum from the start.
+	scanner := testScanner(t, client, testWindowPolicy(1000, 1000, 1000))
+
+	var ranges [][2]int64
+	if _, err := scanner.scan(context.Background(), 1000, 1299, collectRanges(&ranges)); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if len(ranges) != 2 || ranges[0] != [2]int64{1000, 1149} || ranges[1] != [2]int64{1150, 1299} {
+		t.Errorf("windows = %v, want [1000 1149] [1150 1299]: a clamped tail below the minimum must still halve", ranges)
+	}
+}
+
 func TestScan_NonRangeErrorFailsImmediately(t *testing.T) {
 	client := newFakeLogScanClient(0, nil)
 	boom := errors.New("archive node unavailable")

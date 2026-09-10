@@ -175,9 +175,6 @@ func (s *UniswapV4Service) reportExcludedFromSnapshots() {
 // PoolManagerFor returns the one PoolManager address the registry shares; a
 // mixed registry is two deployments, which the log filter silently mis-handles.
 func PoolManagerFor(pools []RegisteredPool) (common.Address, error) {
-	if len(pools) == 0 {
-		return common.Address{}, fmt.Errorf("no pools registered: no PoolManager to derive")
-	}
 	first := pools[0]
 	for _, pool := range pools[1:] {
 		if pool.PoolManager != first.PoolManager {

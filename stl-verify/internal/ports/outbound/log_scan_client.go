@@ -40,7 +40,7 @@ type LogScanClient interface {
 	// never retried: only the caller's windowing policy can fix it.
 	GetLogs(ctx context.Context, filter LogFilter) ([]FilteredLog, error)
 	GetCurrentBlockNumber(ctx context.Context) (int64, error)
-	// Must answer from the current canonical chain, never a cache: a scan
-	// re-reads one height to prove its pin still names the same hash.
+	// The reorg check re-reads one height to prove its pin still names the same
+	// hash; callers rely on the provider answering from its current canonical view.
 	GetBlockHeaderByNumber(ctx context.Context, blockNumber int64) (*BlockHeader, error)
 }

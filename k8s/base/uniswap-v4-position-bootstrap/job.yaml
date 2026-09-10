@@ -25,6 +25,23 @@ spec:
                 name: uniswap-v4-indexer-config
             - secretRef:
                 name: uniswap-v4-indexer
+          # Empty = the binary's default. Set PIN_BLOCK to resume a failed run's
+          # snapshot; the overlay's patch is the place to do it per env.
+          env:
+            - name: PIN_BLOCK
+              value: ""
+            - name: FROM_BLOCK
+              value: ""
+            - name: FINALITY_DEPTH
+              value: ""
+            - name: INITIAL_WINDOW
+              value: ""
+            - name: MIN_WINDOW
+              value: ""
+            - name: MAX_WINDOW
+              value: ""
+            - name: POSITION_BATCH
+              value: ""
           resources:
             requests:
               cpu: "100m"
