@@ -54,19 +54,20 @@ func sparkPrimeID(t *testing.T, ctx context.Context, pool *pgxpool.Pool) int64 {
 // historicalPosition is one pre-cutover allocation_position row this backfill
 // is meant to correct: underlying_value/underlying_token_id are never set here.
 type historicalPosition struct {
-	tokenID      int64
-	primeID      int64
-	proxyAddress common.Address
-	balance      string // numeric literal text, e.g. "1000.500000000000000000"
-	blockNumber  int64
-	blockVersion int32
-	txHash       string // 0x-prefixed, 32 bytes
-	logIndex     int32
-	txAmount     string
-	direction    string
-	fromAddress  *common.Address
-	toAddress    *common.Address
-	createdAt    time.Time
+	tokenID       int64
+	primeID       int64
+	proxyAddress  common.Address
+	balance       string // numeric literal text, e.g. "1000.500000000000000000"
+	scaledBalance string // numeric literal text, or "" for NULL (the common case)
+	blockNumber   int64
+	blockVersion  int32
+	txHash        string // 0x-prefixed, 32 bytes
+	logIndex      int32
+	txAmount      string
+	direction     string
+	fromAddress   *common.Address
+	toAddress     *common.Address
+	createdAt     time.Time
 }
 
 // insertHistoricalPosition seeds one row as the live indexer would have
@@ -89,12 +90,17 @@ func insertHistoricalPosition(t *testing.T, ctx context.Context, pool *pgxpool.P
 		toBytes = p.toAddress.Bytes()
 	}
 
+	scaledBalanceLiteral := "NULL"
+	if p.scaledBalance != "" {
+		scaledBalanceLiteral = p.scaledBalance
+	}
+
 	query := fmt.Sprintf(`
 		INSERT INTO allocation_position
-			(chain_id, token_id, prime_id, proxy_address, balance, block_number, block_version,
+			(chain_id, token_id, prime_id, proxy_address, balance, scaled_balance, block_number, block_version,
 			 tx_hash, log_index, tx_amount, direction, created_at, from_address, to_address)
-		VALUES (1, $1, $2, $3, %s, $4, $5, $6, $7, %s, $8, $9, $10, $11)
-	`, p.balance, p.txAmount)
+		VALUES (1, $1, $2, $3, %s, %s, $4, $5, $6, $7, %s, $8, $9, $10, $11)
+	`, p.balance, scaledBalanceLiteral, p.txAmount)
 
 	if _, err := pool.Exec(ctx, query,
 		p.tokenID, p.primeID, p.proxyAddress.Bytes(),
@@ -178,10 +184,14 @@ func TestRunIntegration_ScalingFix(t *testing.T) {
 	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 	ctx := context.Background()
+	t.Setenv("BUILD_GIT_HASH", "test")
 
 	seedChain(t, ctx, pool)
 	primeID := sparkPrimeID(t, ctx, pool)
-	tokenID := testutil.SeedToken(t, ctx, pool, 1, "0x1111111111111111111111111111111111111111", "sUSDS", 18)
+	// DAI's real mainnet address: the axis-synome token_type registry (B1)
+	// must resolve this as "erc20" for the direct-holding path to fire at
+	// all, and that registry only carries real, currently-tracked assets.
+	tokenID := testutil.SeedToken(t, ctx, pool, 1, "0x6B175474E89094C44Da98b954EedeAC495271d0F", "DAI", 18)
 	proxy := common.HexToAddress("0x2222222222222222222222222222222222222222")
 
 	const balanceHuman = "1402923191.117714747284001290"
@@ -223,6 +233,7 @@ func TestRunIntegration_AaveFamilyMatcher(t *testing.T) {
 	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 	ctx := context.Background()
+	t.Setenv("BUILD_GIT_HASH", "test")
 
 	seedChain(t, ctx, pool)
 	primeID := sparkPrimeID(t, ctx, pool)
@@ -280,6 +291,7 @@ func TestRunIntegration_NonAaveRegistrationIsNotTreated1to1(t *testing.T) {
 	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 	ctx := context.Background()
+	t.Setenv("BUILD_GIT_HASH", "test")
 
 	seedChain(t, ctx, pool)
 	primeID := sparkPrimeID(t, ctx, pool)
@@ -333,6 +345,7 @@ func TestRunIntegration_ERC4626FallsBackToPriceRatioWhenArchiveReverts(t *testin
 	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 	ctx := context.Background()
+	t.Setenv("BUILD_GIT_HASH", "test")
 
 	seedChain(t, ctx, pool)
 	primeID := sparkPrimeID(t, ctx, pool)
@@ -345,6 +358,12 @@ func TestRunIntegration_ERC4626FallsBackToPriceRatioWhenArchiveReverts(t *testin
 
 	const blockNumber = 25_200_000
 	oracleID := testutil.SeedFeedOracle(t, ctx, pool, "test-oracle-fallback", "Test Oracle", "chainlink", 1, 8)
+	// The price-ratio SQL only trusts a price from the oracle protocol_oracle
+	// binds to this row's own protocol, and only when that (oracle, token)
+	// mapping is enabled -- both legs need it, per the reviewer's I4 finding.
+	testutil.SeedProtocolOracle(t, ctx, pool, protocolID, oracleID, 0)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, vaultID)
+	testutil.SeedOracleAsset(t, ctx, pool, oracleID, underlyingID)
 	// share_price/underlying_price = 2.0/1.0 -- balance 100 shares -> 200 DAI.
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO onchain_token_price (token_id, oracle_id, block_number, timestamp, price_usd)
@@ -392,6 +411,7 @@ func TestRunIntegration_Idempotent(t *testing.T) {
 	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 	ctx := context.Background()
+	t.Setenv("BUILD_GIT_HASH", "test")
 
 	seedChain(t, ctx, pool)
 	primeID := sparkPrimeID(t, ctx, pool)
@@ -443,6 +463,7 @@ func TestRunIntegration_SweepInOutPredicate(t *testing.T) {
 	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 	ctx := context.Background()
+	t.Setenv("BUILD_GIT_HASH", "test")
 
 	seedChain(t, ctx, pool)
 	primeID := sparkPrimeID(t, ctx, pool)
@@ -522,6 +543,7 @@ func TestRunIntegration_DryRunWritesNothing(t *testing.T) {
 	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 	ctx := context.Background()
+	t.Setenv("BUILD_GIT_HASH", "test")
 
 	seedChain(t, ctx, pool)
 	primeID := sparkPrimeID(t, ctx, pool)
@@ -559,6 +581,7 @@ func TestRunIntegration_DryRunWritesNothing(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRunIntegration_BadDatabaseURL(t *testing.T) {
+	t.Setenv("BUILD_GIT_HASH", "test")
 	err := run(context.Background(), []string{
 		"-db", "postgres://invalid:invalid@localhost:1/nonexistent?connect_timeout=1",
 	})
@@ -575,6 +598,7 @@ func TestRunIntegration_MissingArchiveCredentialsFailsLoud(t *testing.T) {
 	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 	ctx := context.Background()
+	t.Setenv("BUILD_GIT_HASH", "test")
 
 	seedChain(t, ctx, pool)
 	primeID := sparkPrimeID(t, ctx, pool)
@@ -598,5 +622,157 @@ func TestRunIntegration_MissingArchiveCredentialsFailsLoud(t *testing.T) {
 	err := run(ctx, []string{"-db", dbURL, "-dry-run=false", "-limit", "10"})
 	if err == nil {
 		t.Fatal("expected an error: no archive credentials means the erc4626 row can never be resolved")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// B1: a non-receipt-token row is not necessarily a plain erc20. A token
+// absent from the axis-synome token_type registry entirely must be left
+// alone (NULL stays NULL), never self-denominated on the assumption that "no
+// receipt_token match" means erc20.
+// ---------------------------------------------------------------------------
+
+func TestRunIntegration_NonReceiptTokenNotInRegistryIsNotCorrected(t *testing.T) {
+	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	ctx := context.Background()
+	t.Setenv("BUILD_GIT_HASH", "test")
+
+	seedChain(t, ctx, pool)
+	primeID := sparkPrimeID(t, ctx, pool)
+	// A fabricated address the real axis-synome contract cannot possibly
+	// register -- standing in for a Curve LP share, a NAV/RWA share, or a
+	// pre-cutover uni_v3 row, none of which are receipt_token rows either.
+	tokenID := testutil.SeedToken(t, ctx, pool, 1, "0x0030000000000000000000000000000000000a", "crvUnknown", 18)
+	proxy := common.HexToAddress("0x0030000000000000000000000000000000000b")
+
+	insertHistoricalPosition(t, ctx, pool, historicalPosition{
+		tokenID: tokenID, primeID: primeID, proxyAddress: proxy,
+		balance: "10.000000000000000000", blockNumber: 25_700_000,
+		txHash: fmt.Sprintf("0x%064d", 31), logIndex: 0,
+		txAmount: "10.000000000000000000", direction: "sweep",
+		createdAt: mustParseTime(t, "2026-01-07T00:00:00Z"),
+	})
+
+	if err := run(ctx, []string{"-db", dbURL, "-dry-run=false", "-limit", "10"}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	var corrected int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM allocation_position WHERE token_id = $1 AND processing_version > 0`,
+		tokenID,
+	).Scan(&corrected); err != nil {
+		t.Fatalf("count corrected rows: %v", err)
+	}
+	if corrected != 0 {
+		t.Errorf("corrected rows = %d, want 0: a token absent from the token_type registry must never be self-denominated", corrected)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// B2: scaled_balance is a real, separately-tracked field (aToken
+// scaledBalanceOf, curve/erc4626 raw share count) and must survive a
+// correction unchanged, not go silently NULL.
+// ---------------------------------------------------------------------------
+
+func TestRunIntegration_ScaledBalanceCarriedThrough(t *testing.T) {
+	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	ctx := context.Background()
+	t.Setenv("BUILD_GIT_HASH", "test")
+
+	seedChain(t, ctx, pool)
+	primeID := sparkPrimeID(t, ctx, pool)
+	tokenID := testutil.SeedToken(t, ctx, pool, 1, "0x6B175474E89094C44Da98b954EedeAC495271d0F", "DAI", 18)
+	proxy := common.HexToAddress("0x0020000000000000000000000000000000000a")
+
+	const scaledBalanceHuman = "9.900000000000000000"
+	insertHistoricalPosition(t, ctx, pool, historicalPosition{
+		tokenID: tokenID, primeID: primeID, proxyAddress: proxy,
+		balance: "10.000000000000000000", scaledBalance: scaledBalanceHuman,
+		blockNumber: 25_800_000,
+		txHash:      fmt.Sprintf("0x%064d", 32), logIndex: 0,
+		txAmount:  "10.000000000000000000",
+		direction: "sweep",
+		createdAt: mustParseTime(t, "2026-01-08T00:00:00Z"),
+	})
+
+	if err := run(ctx, []string{"-db", dbURL, "-dry-run=false", "-limit", "10"}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	var writtenScaledBalance string
+	if err := pool.QueryRow(ctx,
+		`SELECT scaled_balance::text FROM allocation_position WHERE token_id = $1 AND processing_version > 0`,
+		tokenID,
+	).Scan(&writtenScaledBalance); err != nil {
+		t.Fatalf("query corrected row: %v", err)
+	}
+	if writtenScaledBalance != scaledBalanceHuman {
+		t.Errorf("scaled_balance = %q, want %q carried through from the original row", writtenScaledBalance, scaledBalanceHuman)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// I4: a price is only trusted from the oracle protocol_oracle binds to the
+// row's own protocol. A price seeded under some OTHER oracle, with no
+// protocol_oracle binding at all, must not enter the ratio.
+// ---------------------------------------------------------------------------
+
+func TestRunIntegration_OracleGateRejectsUnboundOracle(t *testing.T) {
+	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+	ctx := context.Background()
+	t.Setenv("BUILD_GIT_HASH", "test")
+
+	seedChain(t, ctx, pool)
+	primeID := sparkPrimeID(t, ctx, pool)
+
+	protocolID := testutil.SeedProtocol(t, ctx, pool, 1, "0x00100000000000000000000000000000000000aa", "Morpho Blue", "vault", 100, "")
+	underlyingID := testutil.SeedToken(t, ctx, pool, 1, "0x00100000000000000000000000000000000000bb", "DAI", 18)
+	vaultAddr := "0x00100000000000000000000000000000000000cc"
+	vaultID := testutil.SeedToken(t, ctx, pool, 1, vaultAddr, "spDAI", 18)
+	testutil.SeedReceiptToken(t, ctx, pool, 1, vaultAddr, protocolID, underlyingID, "spDAI")
+
+	const blockNumber = 25_900_000
+	// Prices exist, but this oracle is never bound to Morpho Blue via
+	// protocol_oracle -- an unrelated oracle happening to carry a price for
+	// the same tokens must not be trusted.
+	oracleID := testutil.SeedFeedOracle(t, ctx, pool, "test-oracle-unbound", "Test Oracle", "chainlink", 1, 8)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO onchain_token_price (token_id, oracle_id, block_number, timestamp, price_usd)
+		VALUES ($1, $2, $3, $4, 2.0), ($5, $2, $3, $4, 1.0)
+	`, vaultID, oracleID, int64(blockNumber), mustParseTime(t, "2026-01-01T00:00:00Z"), underlyingID); err != nil {
+		t.Fatalf("seed onchain_token_price: %v", err)
+	}
+
+	proxy := common.HexToAddress("0x00100000000000000000000000000000000000dd")
+	insertHistoricalPosition(t, ctx, pool, historicalPosition{
+		tokenID: vaultID, primeID: primeID, proxyAddress: proxy,
+		balance: "100.000000000000000000", blockNumber: blockNumber,
+		txHash: fmt.Sprintf("0x%064d", 33), logIndex: 0,
+		txAmount: "100.000000000000000000", direction: "sweep",
+		createdAt: mustParseTime(t, "2026-01-09T00:00:00Z"),
+	})
+
+	rpcServer := startConvertToAssetsRPC(t, []bool{false}, []*big.Int{nil}) // archive reverts too
+	defer rpcServer.Close()
+	t.Setenv("ALCHEMY_API_KEY", "test-key")
+	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
+
+	if err := run(ctx, []string{"-db", dbURL, "-dry-run=false", "-limit", "10"}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	var corrected int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM allocation_position WHERE token_id = $1 AND processing_version > 0`,
+		vaultID,
+	).Scan(&corrected); err != nil {
+		t.Fatalf("count corrected rows: %v", err)
+	}
+	if corrected != 0 {
+		t.Errorf("corrected rows = %d, want 0: a price from an oracle not bound to this row's protocol must not be used", corrected)
 	}
 }

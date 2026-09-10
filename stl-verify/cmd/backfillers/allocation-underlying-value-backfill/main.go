@@ -1,24 +1,24 @@
 // Package main backfills allocation_position.underlying_value for rows written
 // before the 2026-07-06 deploy that started populating it on ingest.
 //
-// Three kinds of holding are resolved: direct erc20 holdings (underlying_value
+// Four kinds of holding are resolved: direct erc20 holdings (underlying_value
 // duplicates balance, underlying_token_id self-referencing per the column's
-// documented invariant), aToken holdings (1:1 by construction), and
-// erc4626-like receipt tokens, whose conversion ratio genuinely moves over
-// time. The erc4626 case is read from a real archive RPC -- convertToAssets
-// at the row's own pinned block_number, batched per block via multicall (see
-// erc4626_archive.go) -- falling back to a price-ratio derivation from
-// onchain_token_price only for a row the archive could not answer (see
-// classify.go).
+// documented invariant; gated on the axis-synome token_type registry, not
+// merely "no receipt_token match" -- see token_type_registry.go), aToken
+// holdings (1:1 by construction), erc4626-like receipt tokens, whose
+// conversion ratio genuinely moves over time, and everything else (Curve LP
+// shares, NAV/RWA shares, pre-cutover uni_v3 rows), which is left NULL as
+// not computable in this phase. The erc4626 case is read from a real archive
+// RPC -- convertToAssets at the row's own pinned block_number, batched per
+// block via multicall (see erc4626_archive.go) -- falling back to a
+// price-ratio derivation from onchain_token_price only for a row the archive
+// could not answer (see classify.go).
 //
-// Sweeps are in scope alongside in/out transfers. An earlier revision restricted
-// this to direction IN ('in','out') on the belief that every pre-cutover row was
-// unbackfillable until from_address/to_address were recovered. That reads
-// validateTransferParties too broadly: it requires the two parties only for a
-// transfer-driven row, and requires them to be NULL for a sweep. Pre-cutover
-// sweeps are therefore already-valid entities with nothing to recover first, and
-// they are both the larger share of the gap (353,429 vs 126,161 for spark) and
-// the rows a checkpoint-based balance read actually consumes.
+// Sweeps are in scope alongside in/out transfers: validateTransferParties
+// requires both transfer parties only for a transfer-driven row, and requires
+// them absent for a sweep, so a pre-cutover sweep is already a valid entity
+// with nothing to recover first (pre-cutover in/out rows need the transfer-party
+// log re-decode first and are left for that half of VEC-759).
 //
 // Writes go through the same AllocationRepository.SavePositions the live tracker
 // uses, so the append-only invariant holds for free: a new build_id makes the
@@ -93,15 +93,17 @@ func parseFlags(args []string) (cliConfig, error) {
 }
 
 // candidateRow is a row missing underlying_value, plus the classification
-// inputs needed to decide whether it's in the deterministic (no-RPC) subset.
+// inputs needed to resolve it: direct/aToken/erc4626 bucketing, and the
+// registry and price-history fields the erc4626 and price-ratio paths need.
 type candidateRow struct {
 	chainID              int64
 	tokenAddress         common.Address
 	tokenDecimals        int32
 	primeID              int64
 	proxyAddress         common.Address
-	balance              *big.Int // raw units, descaled by tokenDecimals at read time
+	balance              *big.Int // raw units, upscaled from the DB's human-normalized text via humanToRaw
 	balanceHuman         string
+	scaledBalance        *big.Int // raw units; nil when the original row's scaled_balance is NULL
 	blockNumber          int64
 	blockVersion         int32
 	txHash               string
@@ -118,9 +120,10 @@ type candidateRow struct {
 	// erc4626 conversion, derived from onchain_token_price at (or at-or-before)
 	// this row's own block rather than from a live convertToAssets call. Both
 	// are nil when the price history does not reach this block.
-	erc4626UnderlyingHuman *string
-	sharePriceBlockLag     *int64
-	protocolName           string
+	erc4626UnderlyingHuman  *string
+	sharePriceBlockLag      *int64
+	underlyingPriceBlockLag *int64
+	protocolName            string
 }
 
 func run(ctx context.Context, args []string) error {
@@ -144,12 +147,15 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("fetch candidates: %w", err)
 	}
-	logCandidatesFetched(candidates)
 
 	classified, err := resolveAndClassify(ctx, candidates, cfg)
 	if err != nil {
 		return err
 	}
+	// Logged only once classification has actually succeeded: this count and
+	// cursor are what a batched caller advances -after by, and a value logged
+	// before a possible abort above would name a batch that was never written.
+	logCandidatesFetched(candidates, cfg.limit)
 
 	if cfg.dryRun {
 		logDryRunPreview(classified)
@@ -168,11 +174,7 @@ type runnerDeps struct {
 }
 
 func wireDependencies(ctx context.Context, pool *pgxpool.Pool) (runnerDeps, error) {
-	registry, err := buildregistry.NewWithIdentity(ctx, pool, buildregistry.Identity{
-		Service:   "allocation-underlying-value-backfill",
-		GitHash:   "prototype",
-		BuildTime: time.Now().UTC().Format(time.RFC3339),
-	})
+	registry, err := buildregistry.New(ctx, pool)
 	if err != nil {
 		return runnerDeps{}, fmt.Errorf("register build: %w", err)
 	}
@@ -205,21 +207,39 @@ func wireDependencies(ctx context.Context, pool *pgxpool.Pool) (runnerDeps, erro
 // written, so a caller that advanced only past written rows would re-fetch
 // them forever and the LIMIT window would stop making progress long before
 // the gap was closed.
-func logCandidatesFetched(candidates []candidateRow) {
+//
+// -after has only created_at resolution, so a full batch sharing one
+// created_at value (more distinct rows at that instant than -limit) cannot be
+// advanced past by any -after value: the next run re-fetches the same batch
+// forever. That's flagged here, not fixed here -- fixing it needs a cursor
+// with a secondary key, which is a CLI contract change.
+func logCandidatesFetched(candidates []candidateRow, limit int) {
 	if len(candidates) == 0 {
 		slog.Info("candidates fetched", "count", 0)
 		return
 	}
+	maxCreatedAt := candidates[len(candidates)-1].createdAt
 	slog.Info("candidates fetched",
 		"count", len(candidates),
-		"max_created_at", candidates[len(candidates)-1].createdAt.UTC().Format(time.RFC3339Nano),
+		"max_created_at", maxCreatedAt.UTC().Format(time.RFC3339Nano),
 	)
+	if len(candidates) == limit && candidates[0].createdAt.Equal(maxCreatedAt) {
+		slog.Warn("this batch's rows all share one created_at and filled -limit; "+
+			"-after cannot resolve finer than created_at, so if any are permanently "+
+			"skippable the next run may re-fetch this same batch instead of progressing",
+			"created_at", maxCreatedAt.UTC().Format(time.RFC3339Nano), "limit", limit)
+	}
 }
 
 // resolveAndClassify reads the real erc4626 conversions this batch's rows
 // need from the archive, then classifies every candidate (falling back to the
 // price-ratio derivation only where the archive could not answer).
 func resolveAndClassify(ctx context.Context, candidates []candidateRow, cfg cliConfig) ([]positionSource, error) {
+	tokenTypes, err := loadTokenTypeRegistry()
+	if err != nil {
+		return nil, fmt.Errorf("loading token type registry: %w", err)
+	}
+
 	archiveResolver, err := newERC4626ArchiveResolver()
 	if err != nil {
 		return nil, fmt.Errorf("initializing erc4626 archive resolver: %w", err)
@@ -229,7 +249,7 @@ func resolveAndClassify(ctx context.Context, candidates []candidateRow, cfg cliC
 		return nil, fmt.Errorf("resolving erc4626 conversions via archive: %w", err)
 	}
 
-	classified, stats, err := classifyCandidates(candidates, archiveResults, cfg)
+	classified, stats, err := classifyCandidates(candidates, archiveResults, tokenTypes, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -265,20 +285,26 @@ func persist(ctx context.Context, deps runnerDeps, classified []positionSource) 
 		return fmt.Errorf("save positions: %w", err)
 	}
 
-	slog.Info("backfilled", "rows_written", len(positions))
+	// "submitted", not "confirmed inserted": ON CONFLICT DO NOTHING can no-op
+	// an individual row (e.g. a concurrent run already wrote it), and
+	// SavePositions returns no per-row count to distinguish that from a real
+	// insert.
+	slog.Info("backfilled", "rows_submitted", len(positions))
 	return nil
 }
 
 // toEntity rebuilds the original event as a new AllocationPosition carrying the
-// derived underlying valuation. Every other field is copied from the row that
-// already exists in history — this is a correction, not a new event.
+// derived underlying valuation. Every other field, including ScaledBalance, is
+// copied from the row that already exists in history — this is a correction,
+// not a new event.
 func toEntity(c candidateRow, underlyingAsset common.Address, underlyingDecimals int32, underlyingRaw *big.Int) *entity.AllocationPosition {
 	return &entity.AllocationPosition{
-		ChainID:      c.chainID,
-		TokenAddress: c.tokenAddress,
-		PrimeID:      c.primeID,
-		ProxyAddress: c.proxyAddress,
-		Balance:      c.balance,
+		ChainID:       c.chainID,
+		TokenAddress:  c.tokenAddress,
+		PrimeID:       c.primeID,
+		ProxyAddress:  c.proxyAddress,
+		Balance:       c.balance,
+		ScaledBalance: c.scaledBalance,
 		// Load-bearing. The repository writes balance as
 		// toNumeric(pos.Balance, pos.TokenDecimals), so leaving this at its zero
 		// value descales by 10^0 and stores the RAW integer in a column that
@@ -307,14 +333,28 @@ func toEntity(c candidateRow, underlyingAsset common.Address, underlyingDecimals
 
 // candidateQuery finds flow rows missing underlying_value, joined with enough
 // registry and price-history data to classify each one downstream: a
-// receipt_token row with no match is a direct holding; a match under an
-// Aave-family protocol is an aToken; anything else with a match is
-// erc4626-like.
+// receipt_token row with no match is a direct holding (subject to the
+// axis-synome token_type check in classify.go); a match under an Aave-family
+// protocol is an aToken; anything else with a match is erc4626-like.
+//
+// The price-ratio fallback's onchain_token_price reads are gated exactly like
+// the balance-pricing SQL gates them (allocation_position_repository.py,
+// _ALLOCATION_ACTIVITY_BUCKETS_SQL's token_context CTE): a price only counts
+// if its oracle is the one protocol_oracle binds to the row's own protocol,
+// and that (oracle, token) mapping is enabled in oracle_asset. Without this a
+// price from an unrelated, possibly-disabled oracle silently entered the
+// ratio.
 const candidateQuery = `
+	WITH enabled_oracle_assets AS MATERIALIZED (
+		SELECT DISTINCT ON (oracle_id, token_id, feed_key) oracle_id, token_id, enabled
+		FROM oracle_asset
+		WHERE valid_from <= now()
+		ORDER BY oracle_id, token_id, feed_key, valid_from DESC, processing_version DESC
+	)
 	SELECT
 		ap.chain_id, t.address, t.decimals,
 		ap.prime_id, ap.proxy_address,
-		ap.balance::text, ap.block_number, ap.block_version,
+		ap.balance::text, ap.scaled_balance::text, ap.block_number, ap.block_version,
 		encode(ap.tx_hash, 'hex'), ap.log_index, ap.tx_amount::text, ap.direction,
 		ap.from_address, ap.to_address, ap.created_at,
 		rt.receipt_token_address IS NOT NULL AS is_receipt_token,
@@ -330,7 +370,8 @@ const candidateQuery = `
 		-- fallback when a real archive convertToAssets read can't reach this
 		-- row's own block.
 		(ap.balance * shp.price_usd / NULLIF(undp.price_usd, 0))::text,
-		(ap.block_number - shp.block_number)
+		(ap.block_number - shp.block_number),
+		(ap.block_number - undp.block_number)
 	FROM allocation_position ap
 	JOIN token t ON t.id = ap.token_id
 	LEFT JOIN receipt_token rt ON rt.chain_id = ap.chain_id AND rt.receipt_token_address = t.address
@@ -339,15 +380,19 @@ const candidateQuery = `
 	LEFT JOIN LATERAL (
 		SELECT o.price_usd, o.block_number
 		FROM onchain_token_price o
+		JOIN protocol_oracle po ON po.oracle_id = o.oracle_id AND po.protocol_id = rt.protocol_id
+		JOIN enabled_oracle_assets oa ON oa.oracle_id = o.oracle_id AND oa.token_id = o.token_id AND oa.enabled
 		WHERE o.token_id = ap.token_id AND o.block_number <= ap.block_number
-		ORDER BY o.block_number DESC, o.block_version DESC, o.processing_version DESC
+		ORDER BY o.block_number DESC, o.block_version DESC, o.processing_version DESC, o.oracle_id DESC
 		LIMIT 1
 	) shp ON TRUE
 	LEFT JOIN LATERAL (
-		SELECT o.price_usd
+		SELECT o.price_usd, o.block_number
 		FROM onchain_token_price o
+		JOIN protocol_oracle po ON po.oracle_id = o.oracle_id AND po.protocol_id = rt.protocol_id
+		JOIN enabled_oracle_assets oa ON oa.oracle_id = o.oracle_id AND oa.token_id = o.token_id AND oa.enabled
 		WHERE o.token_id = rt.underlying_token_id AND o.block_number <= ap.block_number
-		ORDER BY o.block_number DESC, o.block_version DESC, o.processing_version DESC
+		ORDER BY o.block_number DESC, o.block_version DESC, o.processing_version DESC, o.oracle_id DESC
 		LIMIT 1
 	) undp ON TRUE
 	WHERE ap.direction IN ('in', 'out', 'sweep')
@@ -384,7 +429,10 @@ const candidateQuery = `
 	        AND c.direction      = ap.direction
 	        AND c.processing_version > ap.processing_version
 	  )
-	ORDER BY ap.created_at
+	-- block_number/log_index only break ties for a deterministic scan order;
+	-- the resume cursor itself is created_at alone (see the -after doc and
+	-- logCandidatesFetched's saturation warning for that cursor's limit).
+	ORDER BY ap.created_at, ap.block_number, ap.log_index
 	LIMIT $3`
 
 func fetchCandidates(ctx context.Context, pool *pgxpool.Pool, cfg cliConfig) ([]candidateRow, error) {
@@ -422,18 +470,19 @@ func scanCandidateRow(rows pgx.Rows) (candidateRow, error) {
 		underlyingDecimals      *int32
 		protocolName            *string
 		balanceStr, txAmountStr string
+		scaledBalanceStr        *string
 		txHashHex               string
 	)
 	if err := rows.Scan(
 		&c.chainID, &tokenAddr, &c.tokenDecimals,
 		&c.primeID, &proxyAddr,
-		&balanceStr, &c.blockNumber, &c.blockVersion,
+		&balanceStr, &scaledBalanceStr, &c.blockNumber, &c.blockVersion,
 		&txHashHex, &c.logIndex, &txAmountStr, &c.direction,
 		&fromAddr, &toAddr, &c.createdAt,
 		&c.isReceiptToken,
 		&underlyingAddr, &underlyingDecimals,
 		&protocolName,
-		&c.erc4626UnderlyingHuman, &c.sharePriceBlockLag,
+		&c.erc4626UnderlyingHuman, &c.sharePriceBlockLag, &c.underlyingPriceBlockLag,
 	); err != nil {
 		return candidateRow{}, err
 	}
@@ -470,6 +519,14 @@ func scanCandidateRow(rows pgx.Rows) (candidateRow, error) {
 	c.balance = balance
 	c.balanceHuman = balanceStr
 
+	if scaledBalanceStr != nil {
+		scaledBalance, err := humanToRaw(*scaledBalanceStr, c.tokenDecimals)
+		if err != nil {
+			return candidateRow{}, fmt.Errorf("scaled_balance for block %d: %w", c.blockNumber, err)
+		}
+		c.scaledBalance = scaledBalance
+	}
+
 	txAmount, err := humanToRaw(txAmountStr, c.tokenDecimals)
 	if err != nil {
 		return candidateRow{}, fmt.Errorf("tx_amount for block %d: %w", c.blockNumber, err)
@@ -484,9 +541,8 @@ func scanCandidateRow(rows pgx.Rows) (candidateRow, error) {
 //
 // Aave registers one protocol row per market -- "Aave V3 Lido", "Aave V3 Base",
 // "Aave V3 RWA" and so on -- so this matches the family prefix rather than an
-// exact list. The exact-match version this replaces named only three of the
-// nine Aave-family protocols in the registry and silently classified the other
-// six as erc4626, skipping rows that need no on-chain call at all.
+// exact list, which would silently classify an unlisted market as erc4626 and
+// skip rows that need no on-chain call at all.
 func isAaveFamily(protocolName string) bool {
 	return protocolName == "SparkLend" ||
 		strings.HasPrefix(protocolName, "Aave V2") ||
