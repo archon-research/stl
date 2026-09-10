@@ -812,3 +812,75 @@ func TestMapleLoanSingleRepaymentAmongManyStillCloses(t *testing.T) {
 		t.Errorf("the closing observation carries %s; want 0", rs[1].qty)
 	}
 }
+
+// A count of peers cannot tell "still there" from "replaced": a fetch that loses two loans while
+// two others are originated reports the same number, so a count guard zeroes the two it lost.
+// The rule is peer retention, so the loans that were there must still be there.
+func TestMapleLoanOriginationDoesNotMaskATruncation(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+	f := seedMaple(ctx, t, pool, map[string]int{
+		"x1": 1, "x2": 1, "x3": 1, "x4": 1, "x5": 1, "new6": 1, "new7": 1,
+	})
+	f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 60, 120)
+
+	instants := []string{
+		"2026-06-16T08:05:00Z", "2026-06-16T08:15:00Z",
+		"2026-06-16T08:25:00Z", "2026-06-16T08:35:00Z",
+	}
+	for _, l := range []string{"x1", "x2", "x3", "x4", "x5"} {
+		f.cycle(t, l, instants[0], "100", 1)
+	}
+	// The fetch loses x4 and x5 while new6 and new7 are originated, so the count stays at five.
+	for _, ts := range instants[1:] {
+		for _, l := range []string{"x1", "x2", "x3", "new6", "new7"} {
+			f.cycle(t, l, ts, "100", 1)
+		}
+	}
+	f.mustRun(t)
+
+	for _, l := range []string{"x4", "x5"} {
+		rs := f.rows(t, l)
+		if len(rs) != 1 {
+			t.Errorf("%s: want only its open observation, got %d: %+v", l, len(rs), rs)
+			continue
+		}
+		if rs[0].qty != "100" {
+			t.Errorf("%s: stored %s, want the open 100", l, rs[0].qty)
+		}
+	}
+}
+
+// The retention rule must not stop a genuine repayment closing while other loans are originated
+// alongside it, or it would trade a false zero for a position that never closes.
+func TestMapleLoanARepaymentClosesAlongsideNewOriginations(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+	f := seedMaple(ctx, t, pool, map[string]int{"k1": 1, "k2": 1, "gone": 1, "fresh": 1})
+	f.blocks(t, 1, 1000, "2026-06-16T08:00:00Z", 60, 120)
+
+	instants := []string{
+		"2026-06-16T08:05:00Z", "2026-06-16T08:15:00Z",
+		"2026-06-16T08:25:00Z", "2026-06-16T08:35:00Z",
+	}
+	for _, l := range []string{"k1", "k2", "gone"} {
+		f.cycle(t, l, instants[0], "100", 1)
+	}
+	// gone repays; k1 and k2 keep reporting and fresh is originated.
+	for _, ts := range instants[1:] {
+		for _, l := range []string{"k1", "k2", "fresh"} {
+			f.cycle(t, l, ts, "100", 1)
+		}
+	}
+	f.mustRun(t)
+
+	rs := f.rows(t, "gone")
+	if len(rs) != 2 {
+		t.Fatalf("want the open observation and one close, got %d: %+v", len(rs), rs)
+	}
+	if rs[1].qty != "0" {
+		t.Errorf("the closing observation carries %s; want 0", rs[1].qty)
+	}
+}

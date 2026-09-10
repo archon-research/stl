@@ -44,22 +44,32 @@ WITH canonical AS (
            max(synced_at) AS last_synced_at
     FROM cycle GROUP BY 1, 2, 3, 4, 5
 ), closed AS (
-    -- Absence IS the close signal, and a false zero is permanent on an append-only spine. A partial
-    -- fetch loses several loans at once, a repayment loses one, so the cycle where this loan vanished
-    -- must still carry every peer it had: a count floor alone passes any truncation holding 2 loans.
+    -- Absence IS the close signal and a false zero is permanent on an append-only spine, so the
+    -- cycle where this loan vanished must still carry every peer it had. Counting peers instead
+    -- lets a concurrent origination refill what a partial fetch emptied and zero live loans.
     SELECT ls.maple_loan_id, i.synced_at, 0::numeric AS principal_owed, 0 AS processing_version,
            ls.chain_id, ls.protocol_id, ls.loan_address, ls.borrower_user_id
     FROM last_seen ls
-    JOIN instant seen ON seen.chain_id = ls.chain_id AND seen.synced_at = ls.last_synced_at
     CROSS JOIN LATERAL (
-        SELECT n.synced_at, n.loans_present FROM instant n
+        SELECT n.synced_at FROM instant n
         WHERE n.chain_id = ls.chain_id AND n.synced_at > ls.last_synced_at
         ORDER BY n.synced_at
         LIMIT 1) i
-    WHERE i.loans_present >= 2
-      AND i.loans_present >= seen.loans_present - 1
-      AND (SELECT count(*) FROM instant n2
+    WHERE (SELECT count(*) FROM instant n2
             WHERE n2.chain_id = ls.chain_id AND n2.synced_at > ls.last_synced_at) >= 2
+      -- It had peers, so a sole loan on a chain is never closed from absence: its disappearance
+      -- leaves no cycle row at all, which is indistinguishable from the fetch having stopped.
+      AND EXISTS (SELECT 1 FROM cycle p
+                   WHERE p.chain_id = ls.chain_id AND p.synced_at = ls.last_synced_at
+                     AND p.maple_loan_id <> ls.maple_loan_id)
+      -- And every one of those peers is still reported at the vanishing cycle.
+      AND NOT EXISTS (
+          SELECT 1 FROM cycle p
+           WHERE p.chain_id = ls.chain_id AND p.synced_at = ls.last_synced_at
+             AND p.maple_loan_id <> ls.maple_loan_id
+             AND NOT EXISTS (SELECT 1 FROM cycle q
+                              WHERE q.chain_id = ls.chain_id AND q.synced_at = i.synced_at
+                                AND q.maple_loan_id = p.maple_loan_id))
 ), placed AS (
     -- Many cycles share a block at a 10-minute cadence, so they collapse here and the earliest
     -- synced_at is the stable pick: a later arrival must not move an already-emitted observation.
@@ -99,7 +109,7 @@ SELECT p.chain_id,
 FROM placed p
 JOIN "user" u ON u.id = p.borrower_user_id;
 
-COMMENT ON VIEW position_maple_loan IS '[Operational] VEC-405 projection: Maple Open Term Loan state as native position rows, at the grain (loan, resolved block_number, block_version, processing_version). instrument_key is the loan contract address as hex, the bare native id its sibling projections use; chain qualification is the instrument register''s decision (VEC-616), not this view''s; holder_id is the borrower''s address; quantity is principal_owed, a raw integer in the POOL asset''s native decimals (maple_loan.maple_pool_id -> maple_pool.asset_token_id -> token.decimals), which the row itself does not carry; deal_type is BORROW, because the holder is the borrower and the quantity is what they owe. The source carries no block, so each cycle is placed at the last surviving (highest block_version) block_meta block at or before its synced_at and takes that block''s timestamp; reorg versions are collapsed first because a mixed timeline runs header time backwards against height. Cycles sharing a resolved block collapse to one observation, earliest synced_at winning, so any later reading inside that block window is DISCARDED and appears at no block -- the collapse rate is a property of block_meta density, not of this view. A repaid loan is closed from its ABSENCE, which maple_loan_state''s COMMENT defines as no longer active, but only when the closing cycle observed at least two peer loans and at least two further cycles passed without it returning; an unguarded close would let one truncated API response permanently zero every missing position. Emits the shared position_state column contract; closure is applied by materialize_position_projection().';
+COMMENT ON VIEW position_maple_loan IS '[Operational] VEC-405 projection: Maple Open Term Loan state as native position rows, at the grain (loan, resolved block_number, block_version, processing_version). instrument_key is the loan contract address as hex, the bare native id its sibling projections use; chain qualification is the instrument register''s decision (VEC-616), not this view''s; holder_id is the borrower''s address; quantity is principal_owed, a raw integer in the POOL asset''s native decimals (maple_loan.maple_pool_id -> maple_pool.asset_token_id -> token.decimals), which the row itself does not carry; deal_type is BORROW, because the holder is the borrower and the quantity is what they owe. The source carries no block, so each cycle is placed at the last surviving (highest block_version) block_meta block at or before its synced_at and takes that block''s timestamp; reorg versions are collapsed first because a mixed timeline runs header time backwards against height. Cycles sharing a resolved block collapse to one observation, earliest synced_at winning, so any later reading inside that block window is DISCARDED and appears at no block -- the collapse rate is a property of block_meta density, not of this view. A repaid loan is closed from its ABSENCE, which maple_loan_state''s COMMENT defines as no longer active, but only when it had peers, every one of those peers is still reported at the cycle it vanished from, and at least two further cycles passed without it returning; a count of peers is not enough, because a concurrent origination refills what a truncated response emptied and one such response would permanently zero every missing position. Emits the shared position_state column contract; closure is applied by materialize_position_projection().';
 
 CREATE OR REPLACE FUNCTION materialize_maple_loan(p_build_id integer DEFAULT 0,
                                                   p_max_skew interval DEFAULT INTERVAL '10 minutes')
