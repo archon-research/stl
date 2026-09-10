@@ -48,8 +48,7 @@ func newERC4626ArchiveResolver() (*erc4626ArchiveResolver, error) {
 }
 
 // multicallerForChain dials a chain's archive RPC on first use and memoizes
-// it. A test pre-populates multicallers directly (an outbound port, mocked
-// per repo convention) so it never runs this dial.
+// it in multicallers, keyed by chain.
 func (r *erc4626ArchiveResolver) multicallerForChain(ctx context.Context, chainID int64) (outbound.Multicaller, error) {
 	if mc, ok := r.multicallers[chainID]; ok {
 		return mc, nil

@@ -96,10 +96,8 @@ func directHoldingPosition(c candidateRow) positionSource {
 
 // aTokenPosition resolves a 1:1 aToken holding: the raw underlying amount
 // equals the raw balance, only the denominating asset differs. ok is false
-// when the registry has no resolved underlying for this receipt_token row.
-// Unreachable today (receipt_token.underlying_token_id is NOT NULL and FKs to
-// an existing token row), kept as a type-level guard against that constraint
-// relaxing rather than a live safety net.
+// when the registry has no resolved underlying for this receipt_token row,
+// which classifyCandidates counts as skippedNoUnderlying.
 func aTokenPosition(c candidateRow) (positionSource, bool) {
 	if c.underlyingAddress == nil {
 		return positionSource{}, false
