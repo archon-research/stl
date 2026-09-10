@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/archiveblock"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
@@ -33,6 +36,17 @@ func NewArchiveReader(lister archiveObjects, bucket string) *ArchiveReader {
 	return &ArchiveReader{lister: lister, bucket: bucket}
 }
 
+// OpenArchiveReader opens a chain's raw archive read-only and proves at startup that this
+// pod may use it, so a bucket it cannot list or read is a worker that will not start
+// rather than a run that dies on its first height, three attempts over.
+func OpenArchiveReader(ctx context.Context, cfg aws.Config, bucket string, logger *slog.Logger) (*ArchiveReader, error) {
+	archive := NewArchiveReader(NewReaderFromEnv(cfg, logger), bucket)
+	if err := archive.Ping(ctx); err != nil {
+		return nil, fmt.Errorf("the raw archive %s is unusable: %w", bucket, err)
+	}
+	return archive, nil
+}
+
 // probePrefix is what the startup probes work under: a real partition prefix, so
 // a grant conditioned on one covers them. probeObjectKey names a key nothing can
 // ever be stored at — its absence is the answer the read expects.
@@ -45,10 +59,25 @@ var (
 // missing grant or a bucket that is not there stops the worker at startup instead
 // of failing every height of the first run.
 func (r *ArchiveReader) Ping(ctx context.Context) error {
-	if err := r.lister.ProbeListAccess(ctx, r.bucket, probePrefix); err != nil {
-		return fmt.Errorf("listing s3://%s: this pod needs s3:ListBucket on that bucket: %w", r.bucket, err)
+	if err := r.probeListAccess(ctx); err != nil {
+		return err
 	}
 	return r.probeObjectRead(ctx)
+}
+
+// probeListAccess lists one key under a real partition prefix. Only a refusal is a
+// missing grant; a bucket that is not there and an unreachable endpoint fail startup
+// too, and reporting either as one sends the operator after a policy already correct.
+func (r *ArchiveReader) probeListAccess(ctx context.Context) error {
+	err := r.lister.ProbeListAccess(ctx, r.bucket, probePrefix)
+	switch {
+	case err == nil:
+		return nil
+	case isAccessDenied(err):
+		return fmt.Errorf("listing s3://%s: this pod needs s3:ListBucket on that bucket: %w", r.bucket, err)
+	default:
+		return fmt.Errorf("listing s3://%s/%s: %w", r.bucket, probePrefix, err)
+	}
 }
 
 // probeObjectRead reads one byte of a key that does not exist. Listing proves

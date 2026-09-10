@@ -29,6 +29,14 @@
 // today's V2 era (~15m end to end, 2026-08); the activity timeouts below are
 // sized as headroom for era growth and provider slowness, not as an estimate.
 //
+// # Block versions
+//
+// Every replayed row's block_version is read from the chain's raw archive, so the run
+// needs S3_BUCKET (cross-checked against CHAIN_ID, so DEPLOY_ENV too) and read access to
+// it, both settled at startup. A height the archive cannot answer for stops the run: at
+// the head, wait for the archive; below it, repair the archive and start a new run (see
+// internal/pkg/blockversion and docs/runbooks/vector-cronjobs.md).
+//
 // # Idempotency
 //
 // Every write goes through the same idempotent repository methods live indexing
@@ -74,14 +82,17 @@ import (
 	"go.temporal.io/sdk/worker"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
+	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_v2_bootstrap"
 )
@@ -125,30 +136,48 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("startup configuration: %w", err)
 	}
 
+	bootstrap := &bootstrapWorker{}
+	defer bootstrap.close()
+
 	return temporal.RunWorker(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporal.WorkerConfig{
 		Name:         taskQueueName,
 		OpenDatabase: postgres.PoolOpener(postgres.DefaultDBConfig(dbURL)),
-		Register:     register,
+		Register:     bootstrap.register,
 	})
 }
 
-func register(ctx context.Context, deps temporal.Dependencies, r worker.Registry) error {
+type bootstrapWorker struct {
+	cleanup func()
+}
+
+func (b *bootstrapWorker) close() {
+	if b.cleanup != nil {
+		b.cleanup()
+	}
+}
+
+func (b *bootstrapWorker) register(ctx context.Context, deps temporal.Dependencies, r worker.Registry) error {
 	// One store, shared by the sweep and the liveness heartbeat: the ticker
 	// re-sends what the sweep recorded instead of erasing it with a bare ping.
 	progress := temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]()
 
-	runner, err := setupRunner(ctx, deps, progress)
+	runner, cleanup, err := setupRunner(ctx, deps, progress)
 	if err != nil {
-		return err
+		return fmt.Errorf("setting up bootstrap runner: %w", err)
 	}
-	return temporal.RegisterRunner(r, temporal.RunnerJob{
+	if err := temporal.RegisterRunner(r, temporal.RunnerJob{
 		WorkflowType: workflowTypeName,
 		Runner:       runner,
 		Timeouts:     bootstrapActivityTimeouts,
 		Progress:     progress,
-	})
+	}); err != nil {
+		cleanup()
+		return fmt.Errorf("registering bootstrap runner: %w", err)
+	}
+	b.cleanup = cleanup
+	return nil
 }
 
 // bootstrapActivityTimeouts sizes one run against a full mainnet sweep: ~2M
@@ -182,68 +211,119 @@ var bootstrapActivityTimeouts = temporal.ActivityTimeouts{
 	Heartbeat:       time.Minute,
 }
 
-func setupRunner(ctx context.Context, deps temporal.Dependencies, progress morpho_v2_bootstrap.ProgressStore) (temporal.Runner, error) {
+func setupRunner(ctx context.Context, deps temporal.Dependencies, progress morpho_v2_bootstrap.ProgressStore) (temporal.Runner, func(), error) {
 	chainID, err := chainutil.RequireChainID()
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("requiring chain ID: %w", err)
 	}
 
 	sweepConfig, err := parseSweepConfig(os.Getenv)
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("parsing sweep config: %w", err)
 	}
 	sweepConfig.ChainID = int64(chainID)
 	sweepConfig.Logger = deps.Logger
 
-	rpcURL, err := resolveRPCURL(os.Getenv)
+	bucket, err := archiveBucket(int64(chainID))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+
+	rpcURL, err := chainutil.AlchemyRPCURL(int64(chainID))
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolving RPC URL: %w", err)
 	}
 	// The sweep issues long, wide eth_getLogs requests; the default 60s client
 	// budget would abort them before the node finished collecting results.
 	ethClient, err := rpchttp.DialEthereum(ctx, rpcURL, rpchttp.WithClientTimeout(5*time.Minute))
 	if err != nil {
-		return nil, fmt.Errorf("connecting to RPC: %w", err)
+		return nil, nil, fmt.Errorf("connecting to RPC: %w", err)
+	}
+	completed := false
+	defer func() {
+		if !completed {
+			ethClient.Close()
+		}
+	}()
+	if err := chainutil.AssertChainID(ctx, ethClient, int64(chainID)); err != nil {
+		return nil, nil, fmt.Errorf("verifying the RPC node's chain: %w", err)
+	}
+
+	archive, err := openArchive(ctx, bucket, deps.Logger)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	replayService, err := buildReplayService(ctx, deps, int64(chainID), ethClient)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	service, err := morpho_v2_bootstrap.NewService(sweepConfig, ethClient, replayService, progress)
+	service, err := morpho_v2_bootstrap.NewService(sweepConfig, ethClient, replayService, progress, archive, "s3://"+bucket)
 	if err != nil {
-		return nil, fmt.Errorf("creating morpho v2 bootstrap service: %w", err)
+		return nil, nil, fmt.Errorf("creating morpho v2 bootstrap service: %w", err)
 	}
-	return temporal.RunnerFunc(service.Run), nil
+	completed = true
+	return temporal.RunnerFunc(service.Run), ethClient.Close, nil
+}
+
+// archiveBucket cross-checks the bucket against the chain: they arrive as independent
+// variables, and another chain's archive answers for heights this chain never published.
+func archiveBucket(chainID int64) (string, error) {
+	bucket, err := env.Require("S3_BUCKET")
+	if err != nil {
+		return "", err
+	}
+	deployEnv, err := env.Require("DEPLOY_ENV")
+	if err != nil {
+		return "", err
+	}
+	if err := chainutil.ValidateS3BucketForChain(chainID, bucket, deployEnv); err != nil {
+		return "", fmt.Errorf("S3_BUCKET / CHAIN_ID mismatch: %w", err)
+	}
+	return bucket, nil
+}
+
+// openArchive opens the chain's raw archive read-only. S3 access comes from this
+// Deployment's EKS Pod Identity association, granted in the infra repo.
+func openArchive(ctx context.Context, bucket string, logger *slog.Logger) (*s3adapter.ArchiveReader, error) {
+	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{StaticCredentialsFromEnv: true})
+	if err != nil {
+		return nil, fmt.Errorf("loading AWS config: %w", err)
+	}
+	return s3adapter.OpenArchiveReader(ctx, awsCfg, bucket, logger)
 }
 
 // buildReplayService wires the morpho-indexer service in its replay
 // configuration — the same one the morpho-vault-backfill uses. The
 // bootstrap drives the real handlers through it rather than reimplementing them.
 func buildReplayService(ctx context.Context, deps temporal.Dependencies, chainID int64, ethClient *ethclient.Client) (*morpho_indexer.Service, error) {
-	buildReg, err := buildregistry.New(ctx, deps.Pool)
+	buildReg, runID, err := writerrun.Open(ctx, deps.Pool)
 	if err != nil {
-		return nil, fmt.Errorf("registering build: %w", err)
+		return nil, err
 	}
 
-	multicaller, err := multicall.NewClient(ethClient, blockchain.Multicall3)
+	chainName, err := entity.ChainName(chainID)
 	if err != nil {
-		return nil, fmt.Errorf("creating multicall client: %w", err)
+		return nil, fmt.Errorf("resolving the chain name for telemetry: %w", err)
+	}
+	multicaller, err := multicall.NewNarrowingClient(ethClient, blockchain.Multicall3, chainName, deps.Logger)
+	if err != nil {
+		return nil, err
 	}
 	txManager, err := postgres.NewTxManager(deps.Pool, deps.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("creating tx manager: %w", err)
 	}
-	morphoRepo, err := postgres.NewMorphoRepository(deps.Pool, deps.Logger, buildReg.BuildID())
+	morphoRepo, err := postgres.NewMorphoRepository(deps.Pool, deps.Logger, buildReg.BuildID(), runID)
 	if err != nil {
 		return nil, fmt.Errorf("creating morpho repository: %w", err)
 	}
-	protocolRepo, err := postgres.NewProtocolRepository(deps.Pool, deps.Logger, buildReg.BuildID(), 0)
+	protocolRepo, err := postgres.NewProtocolRepository(deps.Pool, deps.Logger, buildReg.BuildID(), runID, 0)
 	if err != nil {
 		return nil, fmt.Errorf("creating protocol repository: %w", err)
 	}
-	eventRepo := postgres.NewEventRepository(deps.Logger, buildReg.BuildID())
+	eventRepo := postgres.NewEventRepository(deps.Logger, buildReg.BuildID(), runID)
 
 	svcConfig, err := morpho_indexer.NewReplayConfig(chainID, deps.Logger)
 	if err != nil {
@@ -277,19 +357,4 @@ func parseSweepConfig(getenv func(string) string) (morpho_v2_bootstrap.Config, e
 		cfg.AddressBatchSize = size
 	}
 	return cfg, nil
-}
-
-// resolveRPCURL builds the node URL from the same ALCHEMY_HTTP_URL +
-// ALCHEMY_API_KEY pair every other indexer uses, so this cronjob's secret wiring
-// matches the workers'.
-func resolveRPCURL(getenv func(string) string) (string, error) {
-	apiKey := getenv("ALCHEMY_API_KEY")
-	if apiKey == "" {
-		return "", fmt.Errorf("ALCHEMY_API_KEY environment variable is required")
-	}
-	baseURL := getenv("ALCHEMY_HTTP_URL")
-	if baseURL == "" {
-		baseURL = "https://eth-mainnet.g.alchemy.com/v2"
-	}
-	return fmt.Sprintf("%s/%s", baseURL, apiKey), nil
 }

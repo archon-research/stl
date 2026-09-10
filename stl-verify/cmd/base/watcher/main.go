@@ -31,6 +31,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/writerrun"
 	"github.com/archon-research/stl/stl-verify/internal/services/backfill_gaps"
 	"github.com/archon-research/stl/stl-verify/internal/services/live_data"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -92,7 +93,7 @@ func main() {
 // cleanupTimeout bounds the deferred closes that run after a shutdown timeout.
 // pgxpool.Close blocks until every acquired connection is handed back, and the
 // goroutines still holding them are the ones that just missed
-// lifecycle.ShutdownTimeout. Together the two fit inside the pod's 60s
+// lifecycle.ShutdownTimeout. Together the two fit inside the pod's 90s
 // terminationGracePeriodSeconds (k8s/base/watcher/deployment.yaml).
 const cleanupTimeout = 15 * time.Second
 
@@ -125,18 +126,29 @@ type watcherConfig struct {
 	snsTopicARN    string
 	chainID        int64
 	enableBackfill bool
+	live           liveTuning
+}
+
+// liveTuning bounds how long one block's Alchemy fetch can stall the live
+// consumer and how many newHeads the subscriber holds meanwhile. Headers
+// beyond the buffer are dropped, so the buffer must cover the fetch's worst
+// case (rpcTimeout × up to four attempts) at the chain's block rate.
+type liveTuning struct {
+	rpcTimeout   time.Duration
+	headerBuffer int
 }
 
 // dependencies are the outbound adapters the services are built from. The three
 // that need closing (cache, eventSink, and the pool behind blockState) are
 // opened and deferred by run; the rest hold no resource of their own.
 type dependencies struct {
-	subscriber *alchemy.Subscriber
-	client     *alchemy.Client
-	blockState *postgres.BlockStateRepository
-	cache      *rediscache.BlockCache
-	eventSink  *snsadapter.EventSink
-	metrics    *shared.ServiceTelemetry
+	subscriber     *alchemy.Subscriber
+	liveClient     *alchemy.Client
+	backfillClient *alchemy.Client
+	blockState     *postgres.BlockStateRepository
+	cache          *rediscache.BlockCache
+	eventSink      *snsadapter.EventSink
+	metrics        *shared.ServiceTelemetry
 }
 
 func run(ctx context.Context, opts cliOptions) (err error) {
@@ -192,6 +204,10 @@ func run(ctx context.Context, opts cliOptions) (err error) {
 	}
 	defer pool.Close()
 	logger.Info("PostgreSQL connected, block state tracking enabled")
+
+	if _, _, err := writerrun.Open(ctx, pool); err != nil {
+		return err
+	}
 
 	cache, err := openRedisCache(ctx, cfg, logger)
 	if err != nil {
@@ -293,6 +309,10 @@ func loadWatcherConfig() (watcherConfig, error) {
 	if err != nil {
 		return watcherConfig{}, err
 	}
+	live, err := loadLiveTuning()
+	if err != nil {
+		return watcherConfig{}, err
+	}
 	return watcherConfig{
 		alchemyAPIKey:  apiKey,
 		alchemyHTTPURL: env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2"),
@@ -305,7 +325,27 @@ func loadWatcherConfig() (watcherConfig, error) {
 		snsTopicARN:    snsTopicARN,
 		chainID:        chainID,
 		enableBackfill: env.Get("ENABLE_BACKFILL", "false") == "true",
+		live:           live,
 	}, nil
+}
+
+// loadLiveTuning reads the live-path knobs; unset values take the adapters'
+// own defaults. Backfill is unaffected: its client keeps the adapter default
+// (see openDependencies).
+//
+// Env vars:
+//   - LIVE_RPC_TIMEOUT        (duration; bounds one HTTP attempt, the client retries 3x)
+//   - SUBSCRIBER_BUFFER_SIZE  (int; newHeads held while the consumer is busy)
+func loadLiveTuning() (liveTuning, error) {
+	rpcTimeout, err := env.GetPositiveDuration("LIVE_RPC_TIMEOUT", alchemy.ClientConfigDefaults().Timeout)
+	if err != nil {
+		return liveTuning{}, err
+	}
+	headerBuffer, err := env.GetPositiveInt("SUBSCRIBER_BUFFER_SIZE", alchemy.SubscriberConfigDefaults().ChannelBufferSize)
+	if err != nil {
+		return liveTuning{}, err
+	}
+	return liveTuning{rpcTimeout: rpcTimeout, headerBuffer: headerBuffer}, nil
 }
 
 func openRedisCache(ctx context.Context, cfg watcherConfig, logger *slog.Logger) (*rediscache.BlockCache, error) {
@@ -365,21 +405,6 @@ func openDependencies(
 	eventSink *snsadapter.EventSink,
 	logger *slog.Logger,
 ) (dependencies, error) {
-	subscriber, err := alchemy.NewSubscriber(alchemy.SubscriberConfig{
-		WebSocketURL:      fmt.Sprintf("%s/%s", cfg.alchemyWSURL, cfg.alchemyAPIKey),
-		InitialBackoff:    1 * time.Second,
-		MaxBackoff:        30 * time.Second,
-		PingInterval:      30 * time.Second,
-		PongTimeout:       10 * time.Second,
-		ReadTimeout:       60 * time.Second,
-		ChannelBufferSize: 100,
-		HealthTimeout:     30 * time.Second,
-		Logger:            logger,
-	})
-	if err != nil {
-		return dependencies{}, fmt.Errorf("creating subscriber: %w", err)
-	}
-
 	// Instrument construction fails on a bad instrument definition, not on a
 	// transient condition, so continuing here would mean running blind forever.
 	alchemyTelemetry, err := alchemy.NewTelemetry(cfg.chainName)
@@ -387,21 +412,27 @@ func openDependencies(
 		return dependencies{}, fmt.Errorf("creating alchemy telemetry: %w", err)
 	}
 
-	client, err := alchemy.NewClient(alchemy.ClientConfig{
-		HTTPURL:      fmt.Sprintf("%s/%s", cfg.alchemyHTTPURL, cfg.alchemyAPIKey),
-		EnableTraces: opts.enableTraces,
-		EnableBlobs:  opts.enableBlobs,
-		ParallelRPC:  opts.parallelRPC,
-		Logger:       logger,
-		Telemetry:    alchemyTelemetry,
-	})
+	subscriber, err := alchemy.NewSubscriber(newSubscriberConfig(cfg, logger, alchemyTelemetry))
 	if err != nil {
-		return dependencies{}, fmt.Errorf("creating client: %w", err)
+		return dependencies{}, fmt.Errorf("creating subscriber: %w", err)
 	}
-	logger.Info("alchemy client configured",
+
+	liveClient, err := alchemy.NewClient(newClientConfig(cfg, opts, logger, alchemyTelemetry, cfg.live.rpcTimeout))
+	if err != nil {
+		return dependencies{}, fmt.Errorf("creating live client: %w", err)
+	}
+	// A 100-block backfill batch is a far larger request than one block's
+	// fetch, so backfill keeps the adapter's timeout rather than the live bound.
+	backfillClient, err := alchemy.NewClient(newClientConfig(cfg, opts, logger, alchemyTelemetry, alchemy.ClientConfigDefaults().Timeout))
+	if err != nil {
+		return dependencies{}, fmt.Errorf("creating backfill client: %w", err)
+	}
+	logger.Info("alchemy adapters configured",
 		"enableTraces", opts.enableTraces,
 		"enableBlobs", opts.enableBlobs,
 		"parallelRPC", opts.parallelRPC,
+		"liveRPCTimeout", cfg.live.rpcTimeout,
+		"subscriberBufferSize", cfg.live.headerBuffer,
 		"chainID", cfg.chainID,
 	)
 
@@ -414,13 +445,44 @@ func openDependencies(
 	}
 
 	return dependencies{
-		subscriber: subscriber,
-		client:     client,
-		blockState: postgres.NewBlockStateRepository(pool, cfg.chainID, logger),
-		cache:      cache,
-		eventSink:  eventSink,
-		metrics:    serviceTelemetry,
+		subscriber:     subscriber,
+		liveClient:     liveClient,
+		backfillClient: backfillClient,
+		blockState:     postgres.NewBlockStateRepository(pool, cfg.chainID, logger),
+		cache:          cache,
+		eventSink:      eventSink,
+		metrics:        serviceTelemetry,
 	}, nil
+}
+
+// newSubscriberConfig builds the watcher's WebSocket subscriber settings.
+// telemetry is optional to the adapter but never optional here: without it the
+// subscriber's blocks received/dropped counters emit nothing.
+func newSubscriberConfig(cfg watcherConfig, logger *slog.Logger, telemetry *alchemy.Telemetry) alchemy.SubscriberConfig {
+	return alchemy.SubscriberConfig{
+		WebSocketURL:      fmt.Sprintf("%s/%s", cfg.alchemyWSURL, cfg.alchemyAPIKey),
+		InitialBackoff:    1 * time.Second,
+		MaxBackoff:        30 * time.Second,
+		PingInterval:      30 * time.Second,
+		PongTimeout:       10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		ChannelBufferSize: cfg.live.headerBuffer,
+		HealthTimeout:     30 * time.Second,
+		Logger:            logger,
+		Telemetry:         telemetry,
+	}
+}
+
+func newClientConfig(cfg watcherConfig, opts cliOptions, logger *slog.Logger, telemetry *alchemy.Telemetry, timeout time.Duration) alchemy.ClientConfig {
+	return alchemy.ClientConfig{
+		HTTPURL:      fmt.Sprintf("%s/%s", cfg.alchemyHTTPURL, cfg.alchemyAPIKey),
+		Timeout:      timeout,
+		EnableTraces: opts.enableTraces,
+		EnableBlobs:  opts.enableBlobs,
+		ParallelRPC:  opts.parallelRPC,
+		Logger:       logger,
+		Telemetry:    telemetry,
+	}
 }
 
 // newServices returns the live service and, when ENABLE_BACKFILL is set, the
@@ -436,7 +498,7 @@ func newServices(cfg watcherConfig, opts cliOptions, deps dependencies, logger *
 			Metrics:            deps.metrics,
 		},
 		deps.subscriber,
-		deps.client,
+		deps.liveClient,
 		deps.blockState,
 		deps.cache,
 		deps.eventSink,
@@ -461,7 +523,7 @@ func newServices(cfg watcherConfig, opts cliOptions, deps dependencies, logger *
 
 	backfill, err := backfill_gaps.NewBackfillService(
 		backfillConfig,
-		deps.client,
+		deps.backfillClient,
 		deps.blockState,
 		deps.cache,
 		deps.eventSink,
@@ -519,34 +581,25 @@ func resolveServiceName(getenv func(string) string) string {
 
 // loadBackfillConfig reads the env-driven backfill knobs. Defaults preserve the
 // historic 10 blocks / 30s behaviour for any chain that doesn't override them.
-// Non-positive values are rejected: time.NewTicker panics on d <= 0, and a
-// negative BatchSize would feed back into SQL LIMIT and gap-fill arithmetic.
+// Non-positive values are rejected up front: time.NewTicker panics on d <= 0,
+// and a negative BatchSize would feed back into SQL LIMIT and gap-fill arithmetic.
 //
 // Env vars:
 //   - BACKFILL_BATCH_SIZE      (int,      default 10)
 //   - BACKFILL_POLL_INTERVAL   (duration, default 30s)
 //   - BACKFILL_RETRY_MIN_AGE   (duration, default 30s)
 func loadBackfillConfig(chainID int64, enableTraces, enableBlobs bool, logger *slog.Logger, metrics *shared.ServiceTelemetry) (backfill_gaps.BackfillConfig, error) {
-	batchSize, err := env.GetInt("BACKFILL_BATCH_SIZE", 10)
+	batchSize, err := env.GetPositiveInt("BACKFILL_BATCH_SIZE", 10)
 	if err != nil {
 		return backfill_gaps.BackfillConfig{}, err
 	}
-	if batchSize <= 0 {
-		return backfill_gaps.BackfillConfig{}, fmt.Errorf("BACKFILL_BATCH_SIZE must be > 0, got %d", batchSize)
-	}
-	pollInterval, err := env.GetDuration("BACKFILL_POLL_INTERVAL", 30*time.Second)
+	pollInterval, err := env.GetPositiveDuration("BACKFILL_POLL_INTERVAL", 30*time.Second)
 	if err != nil {
 		return backfill_gaps.BackfillConfig{}, err
 	}
-	if pollInterval <= 0 {
-		return backfill_gaps.BackfillConfig{}, fmt.Errorf("BACKFILL_POLL_INTERVAL must be > 0, got %s", pollInterval)
-	}
-	retryMinAge, err := env.GetDuration("BACKFILL_RETRY_MIN_AGE", 30*time.Second)
+	retryMinAge, err := env.GetPositiveDuration("BACKFILL_RETRY_MIN_AGE", 30*time.Second)
 	if err != nil {
 		return backfill_gaps.BackfillConfig{}, err
-	}
-	if retryMinAge <= 0 {
-		return backfill_gaps.BackfillConfig{}, fmt.Errorf("BACKFILL_RETRY_MIN_AGE must be > 0, got %s", retryMinAge)
 	}
 	return backfill_gaps.BackfillConfig{
 		ChainID:      chainID,

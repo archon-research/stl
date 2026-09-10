@@ -150,15 +150,15 @@ func newIntegrationService(t *testing.T, pool *pgxpool.Pool, endpoint string) *S
 	if err != nil {
 		t.Fatalf("maple.NewClient: %v", err)
 	}
-	repo, err := postgres.NewMapleGraphQLRepository(pool, nil, 0, 0)
+	repo, err := postgres.NewMapleGraphQLRepository(pool, nil, 0, 0, 0)
 	if err != nil {
 		t.Fatalf("NewMapleGraphQLRepository: %v", err)
 	}
-	tokenRepo, err := postgres.NewTokenRepository(pool, nil, 0)
+	tokenRepo, err := postgres.NewTokenRepository(pool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
-	userRepo, err := postgres.NewUserRepository(pool, nil, 0)
+	userRepo, err := postgres.NewUserRepository(pool, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("NewUserRepository: %v", err)
 	}

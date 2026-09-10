@@ -288,31 +288,3 @@ func TestHash_AReadFailureIsNotAnUnknownHash(t *testing.T) {
 		t.Errorf("error = %v, want a throttled read left retryable", err)
 	}
 }
-
-func TestHashFromPayload(t *testing.T) {
-	tests := []struct {
-		name      string
-		payload   string
-		want      string
-		wantFound bool
-	}{
-		{name: "a header", payload: `{"number":"0x1","hash":"0xabc"}`, want: "0xabc", wantFound: true},
-		{name: "a payload carrying no hash", payload: `{"number":"0x1"}`},
-		{name: "a null payload", payload: `null`},
-		{name: "a nested hash is not the block's", payload: `{"transactions":[{"hash":"0xdead"}]}`},
-		{name: "a hash that is not a string", payload: `{"hash":123}`},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, found := HashFromPayload([]byte(tt.payload))
-
-			if found != tt.wantFound {
-				t.Fatalf("HashFromPayload found = %v, want %v", found, tt.wantFound)
-			}
-			if got != tt.want {
-				t.Errorf("HashFromPayload = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}

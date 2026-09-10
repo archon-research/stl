@@ -97,6 +97,19 @@ def _strip_hex_prefix(tx_hash: str | None) -> str | None:
     return tx_hash
 
 
+def _loggable_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Bind parameters reduced to something safe to put on one log line.
+
+    List values become their LENGTH: ``allowed_vaults`` is the caller's whole
+    authorization set, runs to the OpenFGA ListObjects ceiling, and deps.py
+    deliberately logs it as a count and never as a list.
+    """
+    return {
+        key: (f"[{len(value)} values]" if isinstance(value, list | tuple) else None if value is None else str(value))
+        for key, value in params.items()
+    }
+
+
 def _safe_decimal(value: Any, field_name: str, row_identifier: Any = None) -> Decimal:
     """Convert value to Decimal with error context for debugging.
 
@@ -184,7 +197,8 @@ class AllocationRepository:
             )
             raise ValueError(f"Database query failed while fetching protocols: {exc}") from exc
 
-    async def list_primes(self) -> list[Prime]:
+    async def list_primes(self, allowed_vaults: Sequence[EthAddress] | None = None) -> list[Prime]:
+        params = {"allowed_vaults": (None if allowed_vaults is None else [v.to_bytes() for v in allowed_vaults])}
         try:
             async with self._engine.connect() as conn:
                 result = await conn.execute(
@@ -197,9 +211,14 @@ class AllocationRepository:
                             encode(p.vault_address, 'hex') AS vault_address
                         FROM prime_proxy pp
                         JOIN prime p ON p.id = pp.prime_id
+                        WHERE (
+                            CAST(:allowed_vaults AS BYTEA[]) IS NULL
+                            OR p.vault_address = ANY(CAST(:allowed_vaults AS BYTEA[]))
+                        )
                         ORDER BY pp.proxy_address, pp.chain_id
                         """
-                    )
+                    ),
+                    params,
                 )
                 primes: list[Prime] = []
                 for row in result:
@@ -227,7 +246,13 @@ class AllocationRepository:
         except Exception as exc:
             logger.error(
                 "Failed to fetch primes from database",
-                extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+                # The engine hides bind parameters from the error text, so the
+                # allow-list size comes from here or not at all.
+                extra={
+                    "params": _loggable_params(params),
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
                 exc_info=True,
             )
             raise ValueError(f"Database query failed while fetching primes: {exc}") from exc
@@ -621,6 +646,34 @@ class AllocationRepository:
             )
             raise ValueError(f"Database query failed while fetching total USD exposure: {exc}") from exc
 
+    async def get_prime_vault_address(self, address: EthAddress) -> str | None:
+        """Resolve a vault-or-proxy address to its prime's vault address.
+
+        The authorization object id for a prime is its vault address, and
+        callers may present any of the prime's proxies. Lowercase 0x-prefixed.
+        """
+        sql = text(
+            """
+            SELECT encode(p.vault_address, 'hex') AS vault
+            FROM prime p
+            WHERE p.vault_address = :addr
+            UNION ALL
+            SELECT encode(p.vault_address, 'hex') AS vault
+            FROM prime_proxy pp
+            JOIN prime p ON p.id = pp.prime_id
+            WHERE pp.proxy_address = :addr
+            LIMIT 1
+            """
+        )
+        try:
+            async with self._engine.connect() as conn:
+                row = (await conn.execute(sql, {"addr": address.to_bytes()})).first()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise ValueError(f"Database query failed while resolving prime vault: {exc}") from exc
+        return ("0x" + row.vault) if row and row.vault else None
+
     async def list_allocation_activity(
         self,
         *,
@@ -633,10 +686,12 @@ class AllocationRepository:
         from_timestamp: datetime | None = None,
         to_timestamp: datetime | None = None,
         limit: int = 100,
+        allowed_vaults: Sequence[EthAddress] | None = None,
     ) -> list[AllocationActivityEvent]:
         # Escape LIKE metacharacters to prevent pattern injection
         params = {
             "proxy_addrs": (None if proxy_addresses is None else [a.to_bytes() for a in proxy_addresses]),
+            "allowed_vaults": (None if allowed_vaults is None else [v.to_bytes() for v in allowed_vaults]),
             "chain_id": chain_id,
             "protocol_name": _escape_like_pattern(protocol_name) if protocol_name else None,
             "action_type": action_type,
@@ -667,7 +722,7 @@ class AllocationRepository:
             logger.error(
                 "Allocation activity query failed",
                 extra={
-                    "params": {k: str(v) if v is not None else None for k, v in params.items()},
+                    "params": _loggable_params(params),
                     "error_type": type(exc).__name__,
                 },
                 exc_info=True,
@@ -707,10 +762,12 @@ class AllocationRepository:
         to_timestamp: datetime,
         bucket_seconds: float,
         limit: int = 100,
+        allowed_vaults: Sequence[EthAddress] | None = None,
     ) -> list[AllocationActivityBucket]:
         """Return allocation activity counts and tx-amount sums per time bucket."""
         params = {
             "proxy_addrs": (None if proxy_addresses is None else [a.to_bytes() for a in proxy_addresses]),
+            "allowed_vaults": (None if allowed_vaults is None else [v.to_bytes() for v in allowed_vaults]),
             "chain_id": chain_id,
             "protocol_name": _escape_like_pattern(protocol_name) if protocol_name else None,
             "action_type": action_type,
@@ -732,7 +789,7 @@ class AllocationRepository:
             logger.error(
                 "Allocation activity bucket query failed",
                 extra={
-                    "params": {k: str(v) if v is not None else None for k, v in params.items()},
+                    "params": _loggable_params(params),
                     "error_type": type(exc).__name__,
                 },
                 exc_info=True,
@@ -1617,6 +1674,9 @@ LEFT JOIN LATERAL (
     LIMIT 1
 ) AS protocol_match ON TRUE
 WHERE (CAST(:proxy_addrs AS BYTEA[]) IS NULL OR ap.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[])))
+    -- authorization filter: NULL = auth off (no filter); [] = caller may view
+    -- no primes (no rows). Applied before ORDER BY/LIMIT with the other filters.
+    AND (CAST(:allowed_vaults AS BYTEA[]) IS NULL OR p.vault_address = ANY(CAST(:allowed_vaults AS BYTEA[])))
     AND ap.direction IS NOT NULL
     AND ap.tx_amount IS NOT NULL
     AND ap.balance IS NOT NULL
@@ -1703,120 +1763,83 @@ LIMIT :limit
 # yield vault's share ratio moves slowly, so the same-block position ratio is
 # indistinguishable from the execution price at this read's resolution.
 _ALLOCATION_ACTIVITY_BUCKETS_SQL = text(f"""
-WITH receipt_token_price AS (
-    -- Latest underlying oracle price per receipt token, computed ONCE per token
-    -- (a few dozen rows) rather than once per activity event (~100k+). The
-    -- main query then hash-joins this by token address.
+WITH window_rows AS MATERIALIZED (
+    -- The activity rows this read aggregates. Fenced so the hypertable is
+    -- scanned once; token_context and the outer query both read this set.
     SELECT
-        rt.chain_id,
-        rt.receipt_token_address,
+        ap.chain_id,
+        ap.token_id,
+        ap.prime_id,
+        ap.direction,
+        ap.tx_amount,
+        ap.balance,
+        ap.underlying_value,
+        ap.underlying_token_id,
+        ap.block_number,
+        ap.created_at,
+        t.address AS token_address
+    FROM allocation_position ap
+    JOIN token t ON t.id = ap.token_id
+    WHERE (CAST(:proxy_addrs AS BYTEA[]) IS NULL OR ap.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[])))
+        AND ap.direction IS NOT NULL
+        AND ap.tx_amount IS NOT NULL
+        AND ap.created_at IS NOT NULL
+        AND (CAST(:chain_id AS INTEGER) IS NULL OR ap.chain_id = CAST(:chain_id AS INTEGER))
+        AND (CAST(:action_type AS TEXT) IS NULL OR LOWER(COALESCE(ap.direction::text, '')) =
+             LOWER(CAST(:action_type AS TEXT)))
+        AND (CAST(:token_symbol AS TEXT) IS NULL OR LOWER(COALESCE(t.symbol, ''))
+             LIKE '%' || LOWER(CAST(:token_symbol AS TEXT)) || '%' ESCAPE '\\')
+        AND (CAST(:tx_hash AS TEXT) IS NULL OR encode(ap.tx_hash, 'hex') = LOWER(CAST(:tx_hash AS TEXT)))
+        {required_time_window_clause("ap.created_at")}
+),
+token_context AS MATERIALIZED (
+    -- Everything the aggregate needs per token (a handful of rows): protocol
+    -- name, registry underlying, and the latest underlying oracle price for
+    -- receipt tokens. Direct holdings get NULLs and so contribute 0 USD.
+    -- MATERIALIZED is load-bearing: inlined, the price subquery would run
+    -- once per flow row instead of once per token.
+    SELECT
+        wt.chain_id,
+        wt.token_id,
         rt.underlying_token_id,
+        protocol_match.protocol_name,
         (
-            SELECT otp.price_usd
-            FROM onchain_token_price otp
-            JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
-            WHERE po.protocol_id = rt.protocol_id
-              AND otp.token_id = rt.underlying_token_id
+            SELECT tpc.price_usd
+            FROM token_price_current tpc
+            JOIN protocol_oracle po ON po.oracle_id = tpc.oracle_id
+                AND po.protocol_id = rt.protocol_id
+            WHERE tpc.token_id = rt.underlying_token_id
             -- enabled-mapping filter + oracle_id tiebreak (rationale on _DIRECT_ASSET_HOLDINGS_SQL).
               AND EXISTS (
                   SELECT 1 FROM {ORACLE_ASSET_AS_OF} oa
-                  WHERE oa.oracle_id = otp.oracle_id
-                    AND oa.token_id = otp.token_id
+                  WHERE oa.oracle_id = tpc.oracle_id
+                    AND oa.token_id = tpc.token_id
                     AND oa.enabled
               )
-            ORDER BY otp.block_number DESC, otp.block_version DESC,
-                     otp.processing_version DESC, otp.oracle_id DESC
+            ORDER BY tpc.block_number DESC, tpc.block_version DESC,
+                     tpc.processing_version DESC, tpc.oracle_id DESC
             LIMIT 1
         ) AS price_usd
-    FROM receipt_token rt
-),
-share_ratio_stream AS (
-    -- One pass over each receipt token's FULL history (deliberately not
-    -- filtered by prime or time window: the nearest valued row may belong to
-    -- any position and sit outside the queried window), keeping donor rows
-    -- (usable, unit-consistent ratio) and rows that need to borrow one.
-    -- donor_key is [block_number, block_version, processing_version,
-    -- log_index, ratio]: lexicographic MAX/MIN picks the nearest donor with
-    -- the usual version tiebreaks, and the ratio rides along as the last
-    -- element. Per-row probes into allocation_position are not an option
-    -- here: it is a columnar-compressed hypertable with no token segmentby,
-    -- so a per-flow LATERAL cannot prune batches and re-scans the token's
-    -- block range per flow row; this stream plus the window pass below
-    -- resolves every needed ratio in one scan.
-    SELECT
-        ap2.token_id,
-        ap2.chain_id,
-        ap2.block_number,
-        CASE
-            WHEN ap2.underlying_value IS NOT NULL
-             AND ap2.balance > 0
-             AND ap2.underlying_token_id = rt2.underlying_token_id
-            THEN ARRAY[
-                ap2.block_number, ap2.block_version,
-                ap2.processing_version, ap2.log_index,
-                ap2.underlying_value / ap2.balance
-            ]
-        END AS donor_key
-    FROM allocation_position ap2
-    JOIN token t2 ON t2.id = ap2.token_id
-    JOIN receipt_token rt2
-        ON rt2.receipt_token_address = t2.address AND rt2.chain_id = ap2.chain_id
-    WHERE (
-            ap2.underlying_value IS NOT NULL
-        AND ap2.balance > 0
-        AND ap2.underlying_token_id = rt2.underlying_token_id
-        )
-       OR (
-            ap2.direction IN ('in', 'out')
-        AND (ap2.underlying_value IS NULL OR ap2.balance = 0)
-        )
-),
-nearest_share_ratio AS MATERIALIZED (
-    -- Tier-2 nearest donor ratio per (token, chain, block). The RANGE frames
-    -- make every row of a block see the same prev/next donor (same-block
-    -- donors count at distance 0 on both sides), so DISTINCT collapses the
-    -- stream to one row per block and the equi-join below cannot fan out.
-    -- prev wins distance ties: the at-or-before row.
-    --
-    -- MATERIALIZED is load-bearing: inlined, the planner merge-joins this map
-    -- on (chain_id, token_id) alone with block_number as a join filter,
-    -- sorting the entire activity scan and rescanning each token's map rows
-    -- per activity row (minutes on the warehouse). Fenced, it builds the map
-    -- once (~tens of thousands of rows) and hash-joins on all three keys.
-    SELECT DISTINCT
-        token_id,
-        chain_id,
-        block_number,
-        CASE
-            WHEN prev_donor IS NULL THEN next_donor[5]
-            WHEN next_donor IS NULL THEN prev_donor[5]
-            WHEN block_number - prev_donor[1] <= next_donor[1] - block_number
-                THEN prev_donor[5]
-            ELSE next_donor[5]
-        END AS ratio
-    FROM (
-        SELECT
-            token_id,
-            chain_id,
-            block_number,
-            MAX(donor_key) OVER (
-                PARTITION BY token_id, chain_id ORDER BY block_number
-                RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-            ) AS prev_donor,
-            -- ORDER BY DESC + UNBOUNDED PRECEDING accumulates from the
-            -- partition's end, covering the same rows (block >= current) as
-            -- CURRENT ROW .. UNBOUNDED FOLLOWING over ASC would; the latter
-            -- is a shrinking frame Postgres recomputes from scratch per row,
-            -- quadratic per partition (measured 64s on the warehouse).
-            MIN(CASE WHEN donor_key IS NOT NULL THEN ARRAY[
-                donor_key[1], -donor_key[2], -donor_key[3], -donor_key[4],
-                donor_key[5]
-            ] END) OVER (
-                PARTITION BY token_id, chain_id ORDER BY block_number DESC
-                RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-            ) AS next_donor
-        FROM share_ratio_stream
-    ) donors
+    FROM (SELECT DISTINCT chain_id, token_id, token_address FROM window_rows) wt
+    LEFT JOIN receipt_token rt
+        ON rt.chain_id = wt.chain_id AND rt.receipt_token_address = wt.token_address
+    LEFT JOIN LATERAL (
+        SELECT pr.name AS protocol_name, 1 AS match_priority
+        FROM receipt_token rt1
+        JOIN protocol pr ON pr.id = rt1.protocol_id
+        WHERE pr.chain_id = wt.chain_id
+          AND rt1.receipt_token_address = wt.token_address
+
+        UNION ALL
+
+        SELECT pr.name AS protocol_name, 2 AS match_priority
+        FROM receipt_token rt2
+        JOIN protocol pr ON pr.id = rt2.protocol_id
+        WHERE pr.chain_id = wt.chain_id
+          AND rt2.underlying_token_id = wt.token_id
+        ORDER BY match_priority
+        LIMIT 1
+    ) AS protocol_match ON TRUE
 )
 SELECT
     {time_bucket_expr("ap.created_at")} AS bucket_start,
@@ -1830,53 +1853,70 @@ SELECT
         END
         * CASE
             WHEN ap.underlying_token_id IS NOT NULL
-             AND ap.underlying_token_id <> price.underlying_token_id THEN 0
+             AND ap.underlying_token_id <> tc.underlying_token_id THEN 0
             WHEN ap.underlying_value IS NOT NULL AND ap.balance > 0
                 THEN ap.underlying_value / ap.balance
             ELSE COALESCE(nearest_ratio.ratio, 1)
         END
-        * COALESCE(price.price_usd, 0)
+        * COALESCE(tc.price_usd, 0)
     ), 0) AS net_flow_usd
-FROM allocation_position ap
+FROM window_rows ap
 JOIN prime p ON p.id = ap.prime_id
-JOIN token t ON t.id = ap.token_id
+JOIN token_context tc ON tc.chain_id = ap.chain_id AND tc.token_id = ap.token_id
 LEFT JOIN LATERAL (
-    SELECT pr.name AS protocol_name, 1 AS match_priority
-    FROM receipt_token rt
-    JOIN protocol pr ON pr.id = rt.protocol_id
-    WHERE pr.chain_id = ap.chain_id
-      AND rt.receipt_token_address = t.address
-
-    UNION ALL
-
-    SELECT pr.name AS protocol_name, 2 AS match_priority
-    FROM receipt_token rt
-    JOIN protocol pr ON pr.id = rt.protocol_id
-    WHERE pr.chain_id = ap.chain_id
-      AND rt.underlying_token_id = t.id
-    ORDER BY match_priority
+    -- Tier-2 ratio: the nearest same-token row with a usable, unit-consistent
+    -- ratio, looked up per flow row that needs one (the WHERE gates the probe
+    -- so rows with their own ratio cost nothing). Deliberately reads the FULL
+    -- allocation_position history, not window_rows: the donor may belong to
+    -- any proxy and sit outside the queried window. Each side is one bounded
+    -- probe on (chain_id, token_id, block_number); the compressed chunks are
+    -- segmented by chain_id/token_id so the probe prunes to the token's
+    -- batches. Ties on block distance go to the at-or-before row; ties within
+    -- a block go to the highest version/log_index, then the ratio itself.
+    SELECT candidate.ratio
+    FROM (
+        (
+            SELECT d.block_number, d.underlying_value / d.balance AS ratio, 0 AS side
+            FROM allocation_position d
+            WHERE d.chain_id = ap.chain_id
+              AND d.token_id = ap.token_id
+              AND d.block_number <= ap.block_number
+              AND d.underlying_value IS NOT NULL
+              AND d.balance > 0
+              AND d.underlying_token_id = tc.underlying_token_id
+            ORDER BY d.block_number DESC, d.block_version DESC,
+                     d.processing_version DESC, d.log_index DESC,
+                     d.underlying_value / d.balance DESC
+            LIMIT 1
+        )
+        UNION ALL
+        (
+            SELECT d.block_number, d.underlying_value / d.balance AS ratio, 1 AS side
+            FROM allocation_position d
+            WHERE d.chain_id = ap.chain_id
+              AND d.token_id = ap.token_id
+              AND d.block_number >= ap.block_number
+              AND d.underlying_value IS NOT NULL
+              AND d.balance > 0
+              AND d.underlying_token_id = tc.underlying_token_id
+            ORDER BY d.block_number ASC, d.block_version DESC,
+                     d.processing_version DESC, d.log_index DESC,
+                     d.underlying_value / d.balance ASC
+            LIMIT 1
+        )
+    ) candidate
+    WHERE ap.direction IN ('in', 'out')
+      AND (ap.underlying_value IS NULL OR ap.balance = 0)
+      AND tc.underlying_token_id IS NOT NULL
+    ORDER BY abs(candidate.block_number - ap.block_number), candidate.side
     LIMIT 1
-) AS protocol_match ON TRUE
-LEFT JOIN receipt_token_price price
-    ON price.receipt_token_address = t.address
-    AND price.chain_id = ap.chain_id
-LEFT JOIN nearest_share_ratio nearest_ratio
-    ON nearest_ratio.token_id = ap.token_id
-    AND nearest_ratio.chain_id = ap.chain_id
-    AND nearest_ratio.block_number = ap.block_number
-WHERE (CAST(:proxy_addrs AS BYTEA[]) IS NULL OR ap.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[])))
-    AND ap.direction IS NOT NULL
-    AND ap.tx_amount IS NOT NULL
-    AND ap.created_at IS NOT NULL
-    AND (CAST(:chain_id AS INTEGER) IS NULL OR ap.chain_id = CAST(:chain_id AS INTEGER))
-    AND (CAST(:protocol_name AS TEXT) IS NULL OR LOWER(COALESCE(protocol_match.protocol_name, ''))
+) AS nearest_ratio ON TRUE
+WHERE
+    -- authorization filter, same contract as _ALLOCATION_ACTIVITY_SQL: an
+    -- aggregate spans primes, so the allow-list has to bound the rows it sums.
+    (CAST(:allowed_vaults AS BYTEA[]) IS NULL OR p.vault_address = ANY(CAST(:allowed_vaults AS BYTEA[])))
+    AND (CAST(:protocol_name AS TEXT) IS NULL OR LOWER(COALESCE(tc.protocol_name, ''))
          LIKE '%' || LOWER(CAST(:protocol_name AS TEXT)) || '%' ESCAPE '\\')
-    AND (CAST(:action_type AS TEXT) IS NULL OR LOWER(COALESCE(ap.direction::text, '')) =
-         LOWER(CAST(:action_type AS TEXT)))
-    AND (CAST(:token_symbol AS TEXT) IS NULL OR LOWER(COALESCE(t.symbol, ''))
-         LIKE '%' || LOWER(CAST(:token_symbol AS TEXT)) || '%' ESCAPE '\\')
-    AND (CAST(:tx_hash AS TEXT) IS NULL OR encode(ap.tx_hash, 'hex') = LOWER(CAST(:tx_hash AS TEXT)))
-    {required_time_window_clause("ap.created_at")}
 GROUP BY bucket_start
 ORDER BY bucket_start DESC
 LIMIT :limit

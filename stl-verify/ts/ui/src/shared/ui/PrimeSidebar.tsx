@@ -130,9 +130,9 @@ export function PrimeSidebar({
             <ErrorState
               title="Unable to load primes"
               description="An error occurred while fetching primes data."
-              errorMessage={errorMessage ?? undefined}
               tone="critical"
               size="inline"
+              {...(errorMessage !== null && { errorMessage })}
             />
           }
           emptyView={

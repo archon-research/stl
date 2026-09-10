@@ -2,9 +2,9 @@ import { useSearch } from '@tanstack/react-router';
 
 // Selects the provenance every endpoint that supports it answers from:
 //
-//   /allocation                    → source: "both"      (merged, the default)
+//   /allocation                    → source: "reference" (Sky's published figures, the default)
 //   /allocation?source=indexed     → source: "indexed"   (STL's own model)
-//   /allocation?source=reference   → source: "reference" (Sky's published figures)
+//   /allocation?source=both        → source: "both"      (merged)
 //
 // The settings menu writes it; opening the same view twice also works, which is
 // how the two are compared side by side.
@@ -41,7 +41,7 @@ export const PROVENANCE: Provenance =
           ? 'indexed'
           : 'reference',
       ) ?? 'indexed')
-    : 'both');
+    : 'reference');
 
 /**
  * The provenance to request, always stated rather than defaulted.
@@ -185,8 +185,10 @@ export function narrowRiskCapital(
   }
 
   const sky = view === 'reference';
-  const drop = <T>(value: T, isSkys: boolean): T | null =>
-    isSkys === sky ? value : null;
+  // Always present in practice, but `?: string | null` on the wire makes
+  // every read possibly-undefined; fold it rather than leak it.
+  const drop = <T>(value: T | null | undefined, isSkys: boolean): T | null =>
+    isSkys === sky ? (value ?? null) : null;
 
   return {
     ...response,

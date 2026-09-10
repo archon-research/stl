@@ -490,8 +490,8 @@ class Simulator:
                 )
                 return {"prices": forecasted_prices.values}
 
-            # n_jobs=1 on purpose: the heaviest market already peaks at ~8.0 GiB
-            # single-process; loky workers would multiply that past any pod limit.
+            # n_jobs=1 on purpose: the heaviest market peaks at ~7.5 GiB single-process
+            # before MIN_BORROW_USD (~1.4 GiB after); loky workers would multiply that.
             sim_results = Parallel(n_jobs=1)(delayed(run_simulation)(i) for i in tqdm(range(n_sims)))
 
             all_prices = [res["prices"] if res is not None else np.full(forecasted_step, np.nan) for res in sim_results]

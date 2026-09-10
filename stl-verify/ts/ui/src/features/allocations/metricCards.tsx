@@ -14,6 +14,7 @@ import {
   formatFreshnessLabel,
 } from '../../shared/lib/dashboard';
 import { preferReference } from '../../shared/lib/provenance';
+import { Placeholder } from '../../shared/ui/Placeholder';
 
 export type ChartDatum = {
   label: string;
@@ -44,16 +45,18 @@ export type MetricChartSpec = {
   // Why the card has nothing to draw, for a card that cannot stand itself up
   // from a current value: without it a failed read plots as the empty state.
   errorMessage?: string | null;
-  // Ordered ascending. Each draws a dashed limit line with a labelled edge.
-  // `showInTooltip` also reports it at the cursor, in its own stroke — for a
-  // limit the series is read directly against. Off by default: a limit the
-  // reader is not comparing against only crowds the readout.
-  thresholds?: {
-    value: number;
-    label?: string;
-    showInTooltip?: boolean;
-    stroke?: ChartColor;
-  }[];
+  // Each draws a dashed limit line with a labelled edge. `showInTooltip` also
+  // reports it at the cursor, in its own stroke — for a limit the series is
+  // read directly against. Off by default: a limit the reader is not comparing
+  // against only crowds the readout.
+  thresholds?:
+    | {
+        value: number;
+        label?: string;
+        showInTooltip?: boolean;
+        stroke?: ChartColor;
+      }[]
+    | undefined;
 };
 
 // Every card the metrics band knows how to build. Not what it shows: see
@@ -77,7 +80,7 @@ export const TOP_METRIC_CARD_LABELS: Record<TopMetricCard, string> = {
   'total-risk-capital': 'Total risk capital',
   'prime-collateral': 'Prime collateral',
   encumbrance: 'Encumbrance',
-  'prime-debt': 'Prime debt exposure',
+  'prime-debt': 'Prime debt',
 };
 
 // The cards actually placed in the grid. Its length drives both the loading
@@ -294,27 +297,6 @@ export const CHART_HEIGHT = 236;
  * the label is known up front, so the page reads as itself while it loads and
  * nothing moves when the figures land.
  */
-// Not `SkeletonStack`: it fills its items with `surface.subtle`, which is this
-// card's own fill, and takes no tone — so its placeholders are invisible here
-// and neither a composed class nor a descendant override outranks the kit's own
-// layer.
-const placeholderClassName = css({
-  bg: 'border.subtle',
-  borderRadius: 'sm',
-  animation: 'pulse',
-});
-
-function Placeholder({ width, height }: { width: string; height: number }) {
-  return (
-    <div
-      className={placeholderClassName}
-      // Sizes vary per slot, so they ride the style attribute: Panda generates
-      // its classes at build time and cannot see a value passed in.
-      style={{ width, height: `${height}px` }}
-    />
-  );
-}
-
 export function MetricCardSkeleton({ label }: { label: string }) {
   return (
     <MetricCard
@@ -383,7 +365,7 @@ export function MetricCardError({
             size="inline"
             title={title}
             description={description}
-            errorMessage={errorMessage ?? undefined}
+            {...(errorMessage !== null && { errorMessage })}
           />
         </div>
       }

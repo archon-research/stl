@@ -20,15 +20,17 @@ async def engine(async_db_url: str):
     await eng.dispose()
 
 
-async def _seed(engine, exchange: str, symbol: str, asks: list[list[str]], age: timedelta = timedelta(seconds=5)):
+async def _seed(engine, exchange: str, symbol: str, bids: list[list[str]], age: timedelta = timedelta(seconds=5)):
     ts = dt.datetime.now(dt.UTC) - age
+    # Asks carry a decoy level: the reader must read the bid side only.
+    decoy_asks = '[["999999.0", "1.0"]]'
     async with engine.begin() as conn:
         await conn.execute(
             text("""
                 INSERT INTO cex_orderbook_snapshots (exchange, symbol, ingested_at, persisted_at, bids, asks)
                 VALUES (:exchange, :symbol, :ts, :ts, :bids, :asks)
             """),
-            {"exchange": exchange, "symbol": symbol, "ts": ts, "bids": "[]", "asks": json.dumps(asks)},
+            {"exchange": exchange, "symbol": symbol, "ts": ts, "bids": json.dumps(bids), "asks": decoy_asks},
         )
 
 
@@ -39,8 +41,8 @@ async def test_aggregates_the_latest_snapshot_of_every_venue(engine):
 
     books = await PostgresOrderbookReader(engine).get_orderbooks(["WETH"])
     df = books["WETH"]
-    assert list(df["price"]) == [1999.0, 2000.0, 2001.0]
-    assert list(df["liquidity"]) == [5997.0, 2000.0, 4002.0]
+    assert list(df["price"]) == [2001.0, 2000.0, 1999.0]  # best price first
+    assert list(df["liquidity"]) == [4002.0, 2000.0, 5997.0]
 
 
 async def test_only_the_newest_snapshot_per_venue_is_used(engine):

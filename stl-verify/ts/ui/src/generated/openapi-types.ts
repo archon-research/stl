@@ -13,7 +13,7 @@ export interface paths {
     };
     /**
      * Allocation activity feed
-     * @description Retrieve allocation activity events with optional filters, inside a `{mode, window, data}` envelope. All filters are optional and combine with logical AND. `protocol_name` and `token_symbol` use case-insensitive substring matching; the rest are exact matches. Results are time-windowed (default last 24h) and ordered newest first. Set `aggregate=true` for per-bucket event counts and tx-amount sums.
+     * @description Retrieve allocation activity events with optional filters, inside a `{mode, window, data}` envelope. All filters are optional and combine with logical AND. `protocol_name` and `token_symbol` use case-insensitive substring matching; the rest are exact matches. Results are time-windowed (default last 24h) and ordered newest first. Set `aggregation_method=end-period` for per-bucket event counts and tx-amount sums.
      */
     get: operations['list_allocation_activity_v1_allocations_activity_get'];
     put?: never;
@@ -115,7 +115,7 @@ export interface paths {
     };
     /**
      * List prime debt snapshots
-     * @description Return debt snapshots for a prime, newest first, inside a `{mode, window, data}` envelope. Results are time-windowed (default last 24h). Returns `404` if the prime is unknown. Each snapshot carries the `block_number`/`block_version` it was observed at; consumers can use `block_version` to detect reorg-driven re-emissions. Set `aggregate=true` for the last debt value per time bucket (gap-filled). Pass `source=reference` (with `aggregate=true`) for Sky's own reported debt instead of the on-chain per-ilk figure, or `source=both` to carry each in its own field on every bucket; `source` reports which provenance answered.
+     * @description Return debt snapshots for a prime, newest first, inside a `{mode, window, data}` envelope. Results are time-windowed (default last 24h). Returns `404` if the prime is unknown. Each snapshot carries the `block_number`/`block_version` it was observed at; consumers can use `block_version` to detect reorg-driven re-emissions. Set `aggregation_method=end-period` for the last debt value per time bucket (gap-filled). Pass `source=reference` (with `aggregation_method=end-period`) for Sky's own reported debt instead of the on-chain per-ilk figure, or `source=both` to carry each in its own field on every bucket; `source` reports which provenance answered.
      */
     get: operations['list_prime_debt_snapshots_v1_primes__prime_id__debt_get'];
     put?: never;
@@ -135,7 +135,7 @@ export interface paths {
     };
     /**
      * Prime exposure time series
-     * @description Return the prime's priced receipt-token exposure over time, gap-filled (LOCF) into buckets. Per bucket, each receipt-token position's carried-forward balance is valued at the latest underlying oracle price and summed (the current `balance * price` exposure extended over time). Direct (non-receipt-token) holdings are excluded, matching the risk-capital exposure basis. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `resolution` for longer ranges.
+     * @description Return the prime's priced receipt-token exposure over time, gap-filled (LOCF) into buckets. Per bucket, each receipt-token position's carried-forward balance is valued at the latest underlying oracle price and summed (the current `balance * price` exposure extended over time). Direct (non-receipt-token) holdings are excluded, matching the risk-capital exposure basis. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `frequency` for longer ranges.
      */
     get: operations['list_prime_exposure_v1_primes__prime_id__exposure_get'];
     put?: never;
@@ -177,7 +177,7 @@ export interface paths {
     };
     /**
      * Prime total-capital (treasury) time series
-     * @description Return the prime's total capital over time, gap-filled (LOCF) into buckets. Total capital is the treasury USDS held in the prime's SubProxy wallet (USDS is dollar-pegged, so the balance is the USD figure); it matches the upstream Star `total_capital`. Wherever the response carries Sky's figures (`source=reference` or `source=both`) each bucket also carries `assets_usd` (the upstream PRIME COLLATERAL figure) and the monitor's `encumbrance_ratio`. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `resolution` for longer ranges.
+     * @description Return the prime's total capital over time, gap-filled (LOCF) into buckets. Total capital is the treasury USDS held in the prime's SubProxy wallet (USDS is dollar-pegged, so the balance is the USD figure); it matches the upstream Star `total_capital`. Wherever the response carries Sky's figures (`source=reference` or `source=both`) each bucket also carries `assets_usd` (the upstream PRIME COLLATERAL figure) and the monitor's `encumbrance_ratio`. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `frequency` for longer ranges.
      */
     get: operations['list_prime_total_capital_v1_primes__prime_id__total_capital_get'];
     put?: never;
@@ -197,7 +197,7 @@ export interface paths {
     };
     /**
      * List protocol events
-     * @description List decoded protocol events with optional filters. Use `tx_hash` to fetch all events for a single transaction or `protocol_name` to scope to one protocol. Results are time-windowed (default last 24h) and returned newest first inside a `{mode, window, data}` envelope. Set `aggregate=true` to get per-bucket event counts.
+     * @description List decoded protocol events with optional filters. Use `tx_hash` to fetch all events for a single transaction or `protocol_name` to scope to one protocol. Results are time-windowed (default last 24h) and returned newest first inside a `{mode, window, data}` envelope. Set `aggregation_method=end-period` for per-bucket event counts.
      */
     get: operations['list_protocol_events_v1_protocol_events_get'];
     put?: never;
@@ -334,12 +334,12 @@ export interface paths {
     };
     /**
      * Estimate bad debt at a collateral gap (by chain id and receipt-token address)
-     * @description Estimate USD bad debt for the receipt-token position at `(chain_id, token_address)` when collateral prices fall by `gap_pct` (a fraction in `[0, 1]`).
+     * @description Estimate USD bad debt for the receipt-token position at `(chain_id, token_address)` when collateral prices fall by `gap_pct` (a fraction in `[0, 1]`). The position resolves to the receipt token's largest current holder, so the estimate is that prime's and the caller needs access to it.
      *
      *     `token_address` is the **receipt-token** address (e.g. `aUSDC`, `spWETH`), not the underlying ERC-20 address. Passing an underlying address yields a `404` whose body suggests matching receipt tokens.
      *
      *     Errors:
-     *     - `404` if the receipt token is not found.
+     *     - `404` if the receipt token is not found, or the caller may not view the prime the position resolves to.
      *     - `422` if `chain_id` < 1, `token_address` is malformed, or `gap_pct` is outside `[0, 1]`.
      *     - `503` (`share_data_*`) if the allocation-share lookup fails.
      */
@@ -365,10 +365,10 @@ export interface paths {
      *
      *     `token_address` is the **receipt-token** address (e.g. `aUSDC`, `spWETH`), not the underlying ERC-20 address. Passing an underlying address yields a `404` whose body suggests matching receipt tokens.
      *
-     *     Pass an optional `prime_id` to scale the breakdown to that prime's position (per-prime, pro-rata by pool share); omit it for the pool-level breakdown.
+     *     Pass an optional `prime_id` to scale the breakdown to that prime's position (per-prime, pro-rata by pool share). Omitted, the position resolves to the receipt token's largest current holder, so the response is that prime's breakdown and the caller needs access to it.
      *
      *     Errors:
-     *     - `404` if the receipt token is not found.
+     *     - `404` if the receipt token is not found, or the caller may not view the prime the position resolves to.
      *     - `422` if `chain_id` < 1, `token_address` is malformed, or `prime_id` is malformed.
      *     - `503` (`share_data_*`) if the allocation-share lookup fails.
      */
@@ -391,12 +391,12 @@ export interface paths {
     /**
      * Estimate bad debt at a collateral gap (deprecated)
      * @deprecated
-     * @description Estimate USD bad debt for a receipt-token position when collateral prices fall by `gap_pct` (a fraction in `[0, 1]`).
+     * @description Estimate USD bad debt for a receipt-token position when collateral prices fall by `gap_pct` (a fraction in `[0, 1]`). The position resolves to the receipt token's largest current holder, so the estimate is that prime's and the caller needs access to it.
      *
      *     **Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/bad-debt`.
      *
      *     Errors:
-     *     - `404` if the receipt token is not found.
+     *     - `404` if the receipt token is not found, or the caller may not view the prime the position resolves to.
      *     - `422` if `gap_pct` is outside `[0, 1]`.
      *     - `503` (`share_data_*`) if the allocation-share lookup fails.
      */
@@ -421,12 +421,12 @@ export interface paths {
      * @deprecated
      * @description Return the full risk-enriched collateral breakdown for a receipt-token position: one row per backing token with amount, USD value, price, liquidation threshold, and bonus.
      *
-     *     Pass an optional `prime_id` to scale the breakdown to that prime's position (per-prime, pro-rata by pool share); omit it for the pool-level breakdown.
+     *     Pass an optional `prime_id` to scale the breakdown to that prime's position (per-prime, pro-rata by pool share). Omitted, the position resolves to the receipt token's largest current holder, so the response is that prime's breakdown and the caller needs access to it.
      *
      *     **Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/breakdown`.
      *
      *     Errors:
-     *     - `404` if the receipt token is not found.
+     *     - `404` if the receipt token is not found, or the caller may not view the prime the position resolves to.
      *     - `422` if `prime_id` is malformed.
      *     - `503` (`share_data_*`) if the allocation-share lookup fails.
      */
@@ -598,6 +598,74 @@ export type webhooks = Record<string, never>;
 export interface components {
   schemas: {
     /**
+     * AggregatedAllocationActivityEnvelope
+     * @description The `mode=aggregated` arm of `AllocationActivityEnvelope`: count/sum buckets.
+     */
+    AggregatedAllocationActivityEnvelope: {
+      /**
+       * Data
+       * @description Event counts and tx-amount sums per time bucket, newest first.
+       */
+      data: components['schemas']['AllocationActivityBucketResponse'][];
+      /**
+       * @description Always `aggregated` on this arm: count/sum time buckets. (enum property replaced by openapi-typescript)
+       * @enum {string}
+       */
+      mode: 'aggregated';
+      /** @description The window and frequency applied to this response. */
+      window: components['schemas']['ResampledTimeSeriesWindow'];
+    };
+    /**
+     * AggregatedPrimeDebtEnvelope
+     * @description The `mode=aggregated` arm of `PrimeDebtEnvelope`: gap-filled value buckets.
+     */
+    AggregatedPrimeDebtEnvelope: {
+      /**
+       * Data
+       * @description Last observed debt per time bucket, newest first.
+       */
+      data: components['schemas']['PrimeDebtBucketResponse'][];
+      /**
+       * @description Always `aggregated` on this arm: gap-filled time buckets. (enum property replaced by openapi-typescript)
+       * @enum {string}
+       */
+      mode: 'aggregated';
+      /**
+       * @description Provenance the series was answered from. `indexed` is the on-chain per-ilk debt; `reference` is Sky's own reported figure; `both` fills `debt_wad` and `reference_debt_wad` on every bucket, leaving either null where that provenance reported nothing. Raw snapshots are always `indexed`.
+       * @default indexed
+       */
+      source: components['schemas']['Provenance'];
+      /** @description The window and frequency applied to this response. */
+      window: components['schemas']['ResampledTimeSeriesWindow'];
+    };
+    /**
+     * AggregatedProtocolEventsEnvelope
+     * @description The `mode=aggregated` arm of `ProtocolEventsEnvelope`: per-bucket counts.
+     */
+    AggregatedProtocolEventsEnvelope: {
+      /**
+       * Data
+       * @description Event counts per time bucket, newest first.
+       */
+      data: components['schemas']['ProtocolEventBucketResponse'][];
+      /**
+       * @description Always `aggregated` on this arm: per-bucket event counts. (enum property replaced by openapi-typescript)
+       * @enum {string}
+       */
+      mode: 'aggregated';
+      /** @description The window and frequency applied to this response. */
+      window: components['schemas']['ResampledTimeSeriesWindow'];
+    };
+    /**
+     * AggregationMethod
+     * @description Resampling method applied to a resampled response.
+     *
+     *     ``start-period``, ``period-mean`` and ``period-median`` are reserved names,
+     *     not accepted values.
+     * @enum {string}
+     */
+    AggregationMethod: 'end-period';
+    /**
      * AllocationActivityBucketResponse
      * @description Allocation activity aggregated into a single time bucket.
      */
@@ -631,23 +699,9 @@ export interface components {
      * AllocationActivityEnvelope
      * @description Allocation activity response: raw events or aggregated time buckets.
      */
-    AllocationActivityEnvelope: {
-      /**
-       * Data
-       * @description Events when `mode=raw`, count/sum buckets when `mode=aggregated`.
-       */
-      data:
-        | components['schemas']['AllocationActivityResponse'][]
-        | components['schemas']['AllocationActivityBucketResponse'][];
-      /**
-       * Mode
-       * @description `raw` for events, `aggregated` for time buckets.
-       * @enum {string}
-       */
-      mode: 'raw' | 'aggregated';
-      /** @description The window and resolution applied to this response. */
-      window: components['schemas']['TimeSeriesWindow'];
-    };
+    AllocationActivityEnvelope:
+      | components['schemas']['RawAllocationActivityEnvelope']
+      | components['schemas']['AggregatedAllocationActivityEnvelope'];
     /**
      * AllocationActivityResponse
      * @description Allocation activity event record for timeline feeds.
@@ -655,10 +709,11 @@ export interface components {
     AllocationActivityResponse: {
       /**
        * Action Type
-       * @description One of `in`, `out`, `sweep`.
+       * @description Direction of the event.
        * @example in
+       * @enum {string}
        */
-      action_type: string;
+      action_type: 'in' | 'out' | 'sweep';
       /**
        * Balance
        * @description Resulting balance after the event, in token units.
@@ -816,10 +871,10 @@ export interface components {
       held_token_address?: string | null;
       /**
        * Latest Activity Action
-       * @description Direction of the most recent activity (`in`, `out`, `sweep`), or `null`.
+       * @description Direction of the most recent activity, or `null`.
        * @example out
        */
-      latest_activity_action?: string | null;
+      latest_activity_action?: ('in' | 'out' | 'sweep') | null;
       /**
        * Latest Activity Amount
        * @description Token-unit magnitude of the most recent activity (unsigned). Decimal serialized as a JSON string. `null` when there is no activity.
@@ -962,7 +1017,7 @@ export interface components {
        * Model
        * @description Model that produced the figure. `null` when unpriced, and always `null` for a Sky-reported row, which runs no model.
        */
-      model?: string | null;
+      model?: ('suraf' | 'gap_sweep' | 'core_model') | null;
       /**
        * Position Keys
        * @description Keys this position answers to, strongest first, computed the same way as the allocations endpoint's. Two rows describe the same position when they share any one of them, which is how a client attaches this row's figures to an allocation: a position Sky reports and STL does not index has no `receipt_token_id` to join by. Opaque — the spelling is not a contract, only the equality is.
@@ -1280,8 +1335,8 @@ export interface components {
        * @default indexed
        */
       source: components['schemas']['Provenance'];
-      /** @description The window and resolution applied to this response. */
-      window: components['schemas']['TimeSeriesWindow'];
+      /** @description The window and frequency applied to this response. */
+      window: components['schemas']['ResampledTimeSeriesWindow'];
     };
     /**
      * GapSweepDetails
@@ -1340,28 +1395,9 @@ export interface components {
      * PrimeDebtEnvelope
      * @description Prime debt response: raw snapshots or aggregated time buckets.
      */
-    PrimeDebtEnvelope: {
-      /**
-       * Data
-       * @description Snapshots when `mode=raw`, value buckets when `mode=aggregated`.
-       */
-      data:
-        | components['schemas']['PrimeDebtSnapshotResponse'][]
-        | components['schemas']['PrimeDebtBucketResponse'][];
-      /**
-       * Mode
-       * @description `raw` for snapshots, `aggregated` for time buckets.
-       * @enum {string}
-       */
-      mode: 'raw' | 'aggregated';
-      /**
-       * @description Provenance the series was answered from. `indexed` is the on-chain per-ilk debt; `reference` is Sky's own reported figure; `both` fills `debt_wad` and `reference_debt_wad` on every bucket, leaving either null where that provenance reported nothing. Raw snapshots are always `indexed`.
-       * @default indexed
-       */
-      source: components['schemas']['Provenance'];
-      /** @description The window and resolution applied to this response. */
-      window: components['schemas']['TimeSeriesWindow'];
-    };
+    PrimeDebtEnvelope:
+      | components['schemas']['RawPrimeDebtEnvelope']
+      | components['schemas']['AggregatedPrimeDebtEnvelope'];
     /**
      * PrimeDebtSnapshotResponse
      * @description A single observed prime-debt position at a point in time.
@@ -1562,7 +1598,7 @@ export interface components {
        * @description The default RRC model this view prefers (`core_model`). `null` under `source=reference`, which runs no model; under `source=both` it is STL's preference, since the unprefixed figures are STL's. A given `per_allocation` row can still carry a different model: `indexed` falls back to `gap_sweep` for a position `core_model` has no data for.
        * @example core_model
        */
-      model: string | null;
+      model: ('suraf' | 'gap_sweep' | 'core_model') | null;
       /**
        * Modeled Exposure Usd
        * @description Exposure the default model could price (USD). Under `source=reference` it equals `exposure_usd`: the monitor publishes only positions it has already priced.
@@ -1808,23 +1844,9 @@ export interface components {
      * ProtocolEventsEnvelope
      * @description Protocol events response: raw rows or aggregated time buckets.
      */
-    ProtocolEventsEnvelope: {
-      /**
-       * Data
-       * @description Events when `mode=raw`, count buckets when `mode=aggregated`.
-       */
-      data:
-        | components['schemas']['ProtocolEventResponse'][]
-        | components['schemas']['ProtocolEventBucketResponse'][];
-      /**
-       * Mode
-       * @description `raw` for events, `aggregated` for time buckets.
-       * @enum {string}
-       */
-      mode: 'raw' | 'aggregated';
-      /** @description The window and resolution applied to this response. */
-      window: components['schemas']['TimeSeriesWindow'];
-    };
+    ProtocolEventsEnvelope:
+      | components['schemas']['RawProtocolEventsEnvelope']
+      | components['schemas']['AggregatedProtocolEventsEnvelope'];
     /**
      * ProtocolResponse
      * @description A protocol (lender, AMM, etc.) that STL classifies positions against.
@@ -1880,6 +1902,94 @@ export interface components {
        * @description DEPRECATED — always `true`. Coverage is now read from STL's own record of the reference feeds rather than by calling them, so there is no upstream to be unreachable: a read that fails is a `500` and cannot answer at all. Retained so clients that branch on it keep working. Read `available` per prime instead.
        */
       reference_upstream_reachable: boolean;
+    };
+    /**
+     * RawAllocationActivityEnvelope
+     * @description The `mode=raw` arm of `AllocationActivityEnvelope`: activity event rows.
+     */
+    RawAllocationActivityEnvelope: {
+      /**
+       * Data
+       * @description Activity events, newest first.
+       */
+      data: components['schemas']['AllocationActivityResponse'][];
+      /**
+       * @description Always `raw` on this arm: activity event rows. (enum property replaced by openapi-typescript)
+       * @enum {string}
+       */
+      mode: 'raw';
+      /** @description The window applied to this response. */
+      window: components['schemas']['TimeSeriesWindow'];
+    };
+    /**
+     * RawPrimeDebtEnvelope
+     * @description The `mode=raw` arm of `PrimeDebtEnvelope`: observed debt snapshots.
+     */
+    RawPrimeDebtEnvelope: {
+      /**
+       * Data
+       * @description Observed debt snapshots, newest first.
+       */
+      data: components['schemas']['PrimeDebtSnapshotResponse'][];
+      /**
+       * @description Always `raw` on this arm: observed debt snapshots. (enum property replaced by openapi-typescript)
+       * @enum {string}
+       */
+      mode: 'raw';
+      /**
+       * @description Provenance the series was answered from. `indexed` is the on-chain per-ilk debt; `reference` is Sky's own reported figure; `both` fills `debt_wad` and `reference_debt_wad` on every bucket, leaving either null where that provenance reported nothing. Raw snapshots are always `indexed`.
+       * @default indexed
+       */
+      source: components['schemas']['Provenance'];
+      /** @description The window applied to this response. */
+      window: components['schemas']['TimeSeriesWindow'];
+    };
+    /**
+     * RawProtocolEventsEnvelope
+     * @description The `mode=raw` arm of `ProtocolEventsEnvelope`: decoded event rows.
+     */
+    RawProtocolEventsEnvelope: {
+      /**
+       * Data
+       * @description Decoded events, newest first.
+       */
+      data: components['schemas']['ProtocolEventResponse'][];
+      /**
+       * @description Always `raw` on this arm: decoded event rows. (enum property replaced by openapi-typescript)
+       * @enum {string}
+       */
+      mode: 'raw';
+      /** @description The window applied to this response. */
+      window: components['schemas']['TimeSeriesWindow'];
+    };
+    /**
+     * ResampledTimeSeriesWindow
+     * @description The window echo for a resampled response, naming the grid it sits on.
+     *
+     *     A default-frequency response carries the points at their stored frequency,
+     *     so it echoes the bare window above — a frequency there would name a grid the
+     *     points are not on, and a `null` would still put the key on the wire.
+     */
+    ResampledTimeSeriesWindow: {
+      /** @description Resampled grid the points sit on. */
+      frequency: components['schemas']['TimeSeriesFrequency'];
+      /**
+       * Frequency Ms
+       * @description `frequency` in milliseconds.
+       */
+      frequency_ms: number;
+      /**
+       * From Timestamp
+       * Format: date-time
+       * @description Inclusive lower bound applied (UTC).
+       */
+      from_timestamp: string;
+      /**
+       * To Timestamp
+       * Format: date-time
+       * @description Inclusive upper bound applied (UTC).
+       */
+      to_timestamp: string;
     };
     /**
      * RiskBreakdownItemResponse
@@ -2156,14 +2266,14 @@ export interface components {
       unadjusted_crr_pct: string;
     };
     /**
-     * TimeSeriesResolution
-     * @description Allowed ISO-8601 durations for time-series downsampling.
+     * TimeSeriesFrequency
+     * @description Allowed ISO-8601 durations for time-series resampling.
      * @enum {string}
      */
-    TimeSeriesResolution: 'PT1M' | 'PT5M' | 'PT15M' | 'PT1H' | 'PT6H' | 'P1D';
+    TimeSeriesFrequency: 'PT1M' | 'PT5M' | 'PT15M' | 'PT1H' | 'PT6H' | 'P1D';
     /**
      * TimeSeriesWindow
-     * @description The resolved window and resolution actually applied to a request.
+     * @description The resolved window applied to a request.
      *
      *     Echoing this back lets consumers distinguish an empty result caused by the
      *     window from one caused by the absence of data.
@@ -2175,13 +2285,6 @@ export interface components {
        * @description Inclusive lower bound applied (UTC).
        */
       from_timestamp: string;
-      /**
-       * Interval Ms
-       * @description Resolution width in milliseconds.
-       */
-      interval_ms: number;
-      /** @description Resolution applied (relevant when aggregated). */
-      resolution: components['schemas']['TimeSeriesResolution'];
       /**
        * To Timestamp
        * Format: date-time
@@ -2401,8 +2504,8 @@ export interface components {
        * @default indexed
        */
       source: components['schemas']['Provenance'];
-      /** @description The window and resolution applied to this response. */
-      window: components['schemas']['TimeSeriesWindow'];
+      /** @description The window and frequency applied to this response. */
+      window: components['schemas']['ResampledTimeSeriesWindow'];
     };
     /** ValidationError */
     ValidationError: {
@@ -2447,10 +2550,10 @@ export interface operations {
         from_timestamp?: string | null;
         /** @description Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time. */
         to_timestamp?: string | null;
-        /** @description ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window. */
-        resolution?: components['schemas']['TimeSeriesResolution'] | null;
-        /** @description When true, return time-bucketed aggregates instead of raw rows. */
-        aggregate?: boolean;
+        /** @description ISO-8601 duration frequency for the resampled grid (for example `PT5M`, `PT1H`). Always validated against the window's floor, and rejected without an `aggregation_method` to cut on it. Defaults to the finest frequency the window allows. */
+        frequency?: components['schemas']['TimeSeriesFrequency'] | null;
+        /** @description Resampling method for the returned grid. Supplying it returns a resampled series; omitting it returns the series at its stored frequency. `end-period` is the only accepted value. */
+        aggregation_method?: components['schemas']['AggregationMethod'] | null;
       };
       header?: never;
       path?: never;
@@ -2587,10 +2690,10 @@ export interface operations {
         from_timestamp?: string | null;
         /** @description Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time. */
         to_timestamp?: string | null;
-        /** @description ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window. */
-        resolution?: components['schemas']['TimeSeriesResolution'] | null;
-        /** @description When true, return time-bucketed aggregates instead of raw rows. */
-        aggregate?: boolean;
+        /** @description ISO-8601 duration frequency for the resampled grid (for example `PT5M`, `PT1H`). Always validated against the window's floor, and rejected without an `aggregation_method` to cut on it. Defaults to the finest frequency the window allows. */
+        frequency?: components['schemas']['TimeSeriesFrequency'] | null;
+        /** @description Resampling method for the returned grid. Supplying it returns a resampled series; omitting it returns the series at its stored frequency. `end-period` is the only accepted value. */
+        aggregation_method?: components['schemas']['AggregationMethod'] | null;
         /** @description Which provenance to answer from. `indexed` is STL's own model computed from the chain it indexes; `reference` is Sky's published figures as observed by STL; `both` merges them, which is the default. An endpoint fed by a single provenance narrows `both` to that one and says so in the response's `source`, but naming a provenance it cannot serve is a `422`. */
         source?: components['schemas']['Provenance'] | null;
         /**
@@ -2637,10 +2740,10 @@ export interface operations {
         from_timestamp?: string | null;
         /** @description Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time. */
         to_timestamp?: string | null;
-        /** @description ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window. */
-        resolution?: components['schemas']['TimeSeriesResolution'] | null;
-        /** @description When true, return time-bucketed aggregates instead of raw rows. */
-        aggregate?: boolean;
+        /** @description ISO-8601 duration frequency for the resampled grid (for example `PT5M`, `PT1H`). Always validated against the window's floor, and rejected without an `aggregation_method` to cut on it. Defaults to the finest frequency the window allows. */
+        frequency?: components['schemas']['TimeSeriesFrequency'] | null;
+        /** @description Resampling method for the returned grid. This route only serves a resampled series, so omitting it applies `end-period`, the only accepted value. */
+        aggregation_method?: components['schemas']['AggregationMethod'] | null;
         /** @description Which provenance to answer from. `indexed` is STL's own model computed from the chain it indexes; `reference` is Sky's published figures as observed by STL; `both` merges them, which is the default. An endpoint fed by a single provenance narrows `both` to that one and says so in the response's `source`, but naming a provenance it cannot serve is a `422`. */
         source?: components['schemas']['Provenance'] | null;
         /**
@@ -2727,10 +2830,10 @@ export interface operations {
         from_timestamp?: string | null;
         /** @description Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time. */
         to_timestamp?: string | null;
-        /** @description ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window. */
-        resolution?: components['schemas']['TimeSeriesResolution'] | null;
-        /** @description When true, return time-bucketed aggregates instead of raw rows. */
-        aggregate?: boolean;
+        /** @description ISO-8601 duration frequency for the resampled grid (for example `PT5M`, `PT1H`). Always validated against the window's floor, and rejected without an `aggregation_method` to cut on it. Defaults to the finest frequency the window allows. */
+        frequency?: components['schemas']['TimeSeriesFrequency'] | null;
+        /** @description Resampling method for the returned grid. This route only serves a resampled series, so omitting it applies `end-period`, the only accepted value. */
+        aggregation_method?: components['schemas']['AggregationMethod'] | null;
         /** @description Which provenance to answer from. `indexed` is STL's own model computed from the chain it indexes; `reference` is Sky's published figures as observed by STL; `both` merges them, which is the default. An endpoint fed by a single provenance narrows `both` to that one and says so in the response's `source`, but naming a provenance it cannot serve is a `422`. */
         source?: components['schemas']['Provenance'] | null;
         /**
@@ -2781,10 +2884,10 @@ export interface operations {
         from_timestamp?: string | null;
         /** @description Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time. */
         to_timestamp?: string | null;
-        /** @description ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window. */
-        resolution?: components['schemas']['TimeSeriesResolution'] | null;
-        /** @description When true, return time-bucketed aggregates instead of raw rows. */
-        aggregate?: boolean;
+        /** @description ISO-8601 duration frequency for the resampled grid (for example `PT5M`, `PT1H`). Always validated against the window's floor, and rejected without an `aggregation_method` to cut on it. Defaults to the finest frequency the window allows. */
+        frequency?: components['schemas']['TimeSeriesFrequency'] | null;
+        /** @description Resampling method for the returned grid. Supplying it returns a resampled series; omitting it returns the series at its stored frequency. `end-period` is the only accepted value. */
+        aggregation_method?: components['schemas']['AggregationMethod'] | null;
       };
       header?: never;
       path?: never;

@@ -17,6 +17,7 @@ import {
   formatWadValue,
 } from '../../shared/lib/dashboard';
 import type { PrimeRiskCapital } from '../../shared/types/allocation';
+import { Placeholder } from '../../shared/ui/Placeholder';
 import { ExposureCard, PrimeCollateralCard } from './HiddenMetricCards';
 import { MetricCardLegend, MetricCardTrend } from './metricCardChart';
 import {
@@ -317,7 +318,7 @@ function EncumbranceCard({
   const chip = ENCUMBRANCE_BAND_CHIP[severity];
   return (
     <MetricCard
-      label="Encumbrance ratio"
+      label={TOP_METRIC_CARD_LABELS['encumbrance']}
       info="Required risk capital as a share of total risk capital. The Sky Atlas defines at or above 100% as a Low Severity Breach and above 103% as a High Severity Breach; 80–100% is flagged At risk here as an early warning."
       infoHref="https://sky-atlas.io/#5435f680-aaaa-461a-bcae-4056bb8964d9"
       infoLinkText="Sky Atlas A.3.2.2.7.2.1.1.1 →"
@@ -382,7 +383,7 @@ function PrimeDebtCard({
 }) {
   return (
     <MetricCard
-      label="Prime debt exposure"
+      label={TOP_METRIC_CARD_LABELS['prime-debt']}
       info="What the prime has drawn against its allocator vault: the minted debt for its ilk, in USDS terms. The indexed figure is read from chain state; the reference figure is the legacy feed's own reported debt."
       infoHref="https://sky-atlas.io/#1c09308d-b7cd-495c-b547-baf628a6e323"
       infoLinkText="Sky Atlas A.3.7.1.2 →"
@@ -394,23 +395,35 @@ function PrimeDebtCard({
           errorMessage={chartsErrorMessage}
         />
       }
-      value={isLoading ? 'Loading...' : formatWadValue(wad)}
-      detail={
+      // A placeholder rather than the word "Loading...": its three siblings hold
+      // their shape while they wait, so spelling it out read as the figure
+      // itself — and swapping the whole detail slot for a sentence left this the
+      // only card in the row with no chart box reserved.
+      value={
         isLoading ? (
-          'Fetching latest debt snapshot'
+          <Placeholder width="8rem" height={28} />
         ) : (
-          <div className={metricDetailClassName}>
-            {/* The ilk alone. The raw WAD that used to sit beside it — with a
-                tooltip and an explorer link — was read as the prime's address
-                when it is the unrounded debt the headline already states. */}
-            <div className={metricCaptionClassName}>{ilkLabel ?? '\u00A0'}</div>
-            <MetricCardTrend
-              chart={chart}
-              isLoading={isChartsLoading}
-              errorMessage={chartsErrorMessage}
-            />
-          </div>
+          formatWadValue(wad)
         )
+      }
+      detail={
+        <div className={metricDetailClassName}>
+          {/* The ilk alone. The raw WAD that used to sit beside it — with a
+              tooltip and an explorer link — was read as the prime's address
+              when it is the unrounded debt the headline already states. */}
+          <div className={metricCaptionClassName}>
+            {isLoading ? (
+              <Placeholder width="12rem" height={16} />
+            ) : (
+              (ilkLabel ?? '\u00A0')
+            )}
+          </div>
+          <MetricCardTrend
+            chart={chart}
+            isLoading={isChartsLoading}
+            errorMessage={chartsErrorMessage}
+          />
+        </div>
       }
     />
   );

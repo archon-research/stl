@@ -96,10 +96,28 @@ data:
   ARCHIVE_SC_CALLS: "true"
   RAW_SC_BUCKET: "stl-sentinelstaging-raw-sc-calls"
 ---
-# curve-indexer + uniswap-v3-indexer run the shared dex-indexer binary; the DEX
-# key selects the factory. No SC-call archiving (dexbootstrap does not wire the
-# archiving decorator), so no ARCHIVE_SC_CALLS / RAW_SC_BUCKET here. The SQS
-# queue URL, DB, Redis, and Alchemy key come from the matching ExternalSecret.
+# base-morpho-indexer: the morpho-indexer binary on Base (chain 8453), ARCT-414.
+# The Base-specific SQS queue, Redis and raw bucket come from the matching
+# ExternalSecret; the Base raw bucket is mandatory (the worker rejects an
+# S3_BUCKET whose chain does not match CHAIN_ID).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: base-morpho-indexer-config
+data:
+  CHAIN_ID: "8453"
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://base-mainnet.g.alchemy.com/v2"
+  ENVIRONMENT: "sentinelstaging"
+  DEPLOY_ENV: "staging"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains, like the
+  # other Base workers (base-oracle-price-worker, base-allocation-tracker); the
+  # base-morpho-indexer pod identity's write policy is granted in ARCT-412.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelstaging-raw-sc-calls"
+---
+# No SC-call archiving on any DEX indexer: dexbootstrap does not wire the
+# archiving decorator, so ARCHIVE_SC_CALLS / RAW_SC_BUCKET would do nothing.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -118,6 +136,18 @@ metadata:
   name: uniswap-v3-indexer-config
 data:
   DEX: "uniswap-v3"
+  CHAIN_ID: "1"
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  ENVIRONMENT: "sentinelstaging"
+  DEPLOY_ENV: "staging"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: uniswap-v4-indexer-config
+data:
+  DEX: "uniswap-v4"
   CHAIN_ID: "1"
   AWS_REGION: "eu-west-1"
   ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
@@ -157,6 +187,11 @@ data:
   # matching the arbitrum tuning below.
   BACKFILL_BATCH_SIZE: "100"
   BACKFILL_POLL_INTERVAL: "5s"
+  # Live path: one Alchemy attempt is capped at 10s (~41s over its 4 attempts) and
+  # 300 newHeads slots hold ~5 min at ~1 block/s, so a hung request drops nothing.
+  # Backfill keeps the client default (30s) for its batches.
+  LIVE_RPC_TIMEOUT: "10s"
+  SUBSCRIBER_BUFFER_SIZE: "300"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -182,6 +217,51 @@ data:
   ENVIRONMENT: "sentinelstaging"
   # Raw SC call archiving (VEC-81). Single bucket shared across chains;
   # pod identity write policy granted in infrastructure#393 (VEC-361).
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelstaging-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: base-sparklend-position-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://base-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "8453"
+  DEPLOY_ENV: "staging"
+  ENVIRONMENT: "sentinelstaging"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#709 (ARCT-213).
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelstaging-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: optimism-sparklend-position-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://opt-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "10"
+  DEPLOY_ENV: "staging"
+  ENVIRONMENT: "sentinelstaging"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#709 (ARCT-213).
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelstaging-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arbitrum-sparklend-position-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://arb-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "42161"
+  DEPLOY_ENV: "staging"
+  ENVIRONMENT: "sentinelstaging"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#709 (ARCT-213).
   ARCHIVE_SC_CALLS: "true"
   RAW_SC_BUCKET: "stl-sentinelstaging-raw-sc-calls"
 ---
@@ -215,9 +295,9 @@ data:
   ARCHIVE_SC_CALLS: "true"
   RAW_SC_BUCKET: "stl-sentinelstaging-raw-sc-calls"
 ---
-# The three L2 trackers below (ARCT-216) set SWEEP_BLOCKS because the 75-block
+# The three L2 trackers immediately below (ARCT-216) set SWEEP_BLOCKS because the 75-block
 # default is block-count based: at these chains' cadences it would re-read and
-# append every tracked position every ~19s (arbitrum) to ~75s (unichain). The
+# append every tracked position every ~19s (arbitrum) to ~150s (optimism). The
 # values normalise the sweep to ~10 minutes, matching the psm3-indexer configmaps
 # for the same chains.
 apiVersion: v1
@@ -263,6 +343,24 @@ data:
   CHAIN_ID: "42161"
   ENVIRONMENT: "sentinelstaging"
   SWEEP_BLOCKS: "2400"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#383.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelstaging-raw-sc-calls"
+---
+# Robinhood's ~100ms blocks make the 75-block default a sweep every ~7.5s;
+# 6000 holds it to the ~10 minutes the ARCT-216 chains use (ARCT-400).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: robinhood-allocation-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://robinhood-mainnet.g.alchemy.com/v2"
+  DEPLOY_ENV: "staging"
+  CHAIN_ID: "4663"
+  ENVIRONMENT: "sentinelstaging"
+  SWEEP_BLOCKS: "6000"
   # Raw SC call archiving (VEC-81). Single bucket shared across chains;
   # pod identity write policy granted in infrastructure#383.
   ARCHIVE_SC_CALLS: "true"
@@ -317,7 +415,10 @@ data:
 ---
 # On-demand one-shot VaultV2 repair worker (VEC-218) — see
 # docs/runbooks/vector-cronjobs.md. ALCHEMY_HTTP_URL is omitted: the binary
-# defaults to eth-mainnet, matching CHAIN_ID below.
+# defaults to eth-mainnet, matching CHAIN_ID below. The raw bucket every replayed
+# row's block_version is read from is not here — it carries a random suffix and so
+# arrives via the ExternalSecret, the same way the morpho-vault-backfill gets it.
+# DEPLOY_ENV is what the startup guard checks that bucket's name against.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -326,6 +427,8 @@ data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "1"
+  AWS_REGION: "eu-west-1"
+  DEPLOY_ENV: "staging"
 ---
 # On-demand Morpho vault backfill worker (VEC-218). ALCHEMY_HTTP_URL is omitted:
 # the binary defaults to eth-mainnet, matching CHAIN_ID below. The bucket is not
@@ -359,6 +462,86 @@ data:
   # Required, not defaulted: a deployment without it would fetch another chain's
   # blocks for its heights. The value is the ethereum watcher's own.
   ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  DEPLOY_ENV: "staging"
+---
+# On-demand block republisher for Arbitrum — see the ethereum one above.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arbitrum-block-republisher
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "42161"
+  # Required, not defaulted: a deployment without it would fetch another chain's
+  # blocks for its heights. The value is the arbitrum watcher's own.
+  ALCHEMY_HTTP_URL: "https://arb-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  DEPLOY_ENV: "staging"
+---
+# On-demand block republisher for Avalanche — see the ethereum one above.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: avalanche-block-republisher
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "43114"
+  # Required, not defaulted: a deployment without it would fetch another chain's
+  # blocks for its heights. The value is the avalanche watcher's own.
+  ALCHEMY_HTTP_URL: "https://avax-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  DEPLOY_ENV: "staging"
+---
+# On-demand block republisher for Base — see the ethereum one above.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: base-block-republisher
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "8453"
+  # Required, not defaulted: a deployment without it would fetch another chain's
+  # blocks for its heights. The value is the base watcher's own.
+  ALCHEMY_HTTP_URL: "https://base-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  DEPLOY_ENV: "staging"
+---
+# On-demand block republisher for Optimism — see the ethereum one above.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: optimism-block-republisher
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "10"
+  # Required, not defaulted: a deployment without it would fetch another chain's
+  # blocks for its heights. The value is the optimism watcher's own.
+  ALCHEMY_HTTP_URL: "https://opt-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  DEPLOY_ENV: "staging"
+---
+# On-demand block republisher for Unichain — see the ethereum one above.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unichain-block-republisher
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "130"
+  # Required, not defaulted: a deployment without it would fetch another chain's
+  # blocks for its heights. The value is the unichain watcher's own.
+  ALCHEMY_HTTP_URL: "https://unichain-mainnet.g.alchemy.com/v2"
   AWS_REGION: "eu-west-1"
   AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
   DEPLOY_ENV: "staging"
@@ -511,6 +694,11 @@ data:
   AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
   ENVIRONMENT: "sentinelstaging"
   ENABLE_BACKFILL: "true"
+  # Live path: one Alchemy attempt is capped at 10s (~41s over its 4 attempts) and
+  # 300 newHeads slots hold ~10 min at ~0.5 block/s, so a hung request drops nothing.
+  # Backfill keeps the client default (30s) for its batches.
+  LIVE_RPC_TIMEOUT: "10s"
+  SUBSCRIBER_BUFFER_SIZE: "300"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -524,6 +712,11 @@ data:
   AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
   ENVIRONMENT: "sentinelstaging"
   ENABLE_BACKFILL: "true"
+  # Live path: one Alchemy attempt is capped at 10s (~41s over its 4 attempts) and
+  # 300 newHeads slots hold ~10 min at ~0.5 block/s, so a hung request drops nothing.
+  # Backfill keeps the client default (30s) for its batches.
+  LIVE_RPC_TIMEOUT: "10s"
+  SUBSCRIBER_BUFFER_SIZE: "300"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -537,6 +730,11 @@ data:
   AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
   ENVIRONMENT: "sentinelstaging"
   ENABLE_BACKFILL: "true"
+  # Live path: one Alchemy attempt is capped at 10s (~41s over its 4 attempts) and
+  # 300 newHeads slots hold ~5 min at ~1 block/s, so a hung request drops nothing.
+  # Backfill keeps the client default (30s) for its batches.
+  LIVE_RPC_TIMEOUT: "10s"
+  SUBSCRIBER_BUFFER_SIZE: "300"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -554,6 +752,29 @@ data:
   # let alone drain a backlog. 100 blocks every 5s = ~20 blk/s, ~5x live.
   BACKFILL_BATCH_SIZE: "100"
   BACKFILL_POLL_INTERVAL: "5s"
+  # Live path: one Alchemy attempt is capped at 10s (~41s over its 4 attempts) and
+  # 1000 newHeads slots hold ~4 min at ~4 blocks/s, so a hung request drops
+  # nothing. Backfill keeps the client default (30s) for its 100-block batches.
+  LIVE_RPC_TIMEOUT: "10s"
+  SUBSCRIBER_BUFFER_SIZE: "1000"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: robinhood-watcher-config
+data:
+  CHAIN_ID: "4663"
+  ALCHEMY_HTTP_URL: "https://robinhood-mainnet.g.alchemy.com/v2"
+  ALCHEMY_WS_URL: "wss://robinhood-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  ENVIRONMENT: "sentinelstaging"
+  ENABLE_BACKFILL: "true"
+  # Live path: one Alchemy attempt is capped at 10s (~41s over its 4 attempts) and
+  # 2500 newHeads slots hold ~4 min at ~10 blocks/s, so a hung request drops
+  # nothing. Backfill keeps the client default (30s) for its batches.
+  LIVE_RPC_TIMEOUT: "10s"
+  SUBSCRIBER_BUFFER_SIZE: "2500"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -606,6 +827,30 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: robinhood-backup-worker-config
+data:
+  CHAIN_ID: "4663"
+  # Cache-miss RPC fallback only, not the hot path; same endpoint the watcher uses
+  # (#825, ARCT-377).
+  ALCHEMY_HTTP_URL: "https://robinhood-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  # 10, where every other chain runs 2. BatchSize defaults to WORKERS (NewService)
+  # and a chain's blocks share one FIFO MessageGroupId (sns.EventSink), so WORKERS
+  # is the pipeline depth, not just a worker count; 10 is the most SQS returns in
+  # one ReceiveMessage (clampBatchSize), so there is no lever past it.
+  # Sized from an *estimated* ~100ms per cache-hit message (one HeadObject, two
+  # Redis reads, two PUTs) against Robinhood's ~10 blk/s. That figure is unmeasured
+  # and ignores the cache-miss path (an Alchemy fetch plus CACHE_MISS_MAX_RETRIES
+  # re-reads, defaulted to 3 here), which is why this takes headroom rather than a
+  # tight fit: nothing alerts on merely falling behind, VectorBackupWorkerStalled
+  # needs the rate at exactly zero. Confirm the real per-message cost in staging.
+  WORKERS: "10"
+  DEPLOY_ENV: "staging"
+  ENVIRONMENT: "sentinelstaging"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: avalanche-oracle-price-worker-config
 data:
   AWS_REGION: "eu-west-1"
@@ -643,6 +888,22 @@ data:
   OTEL_ENABLED: "true"
   OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
   OTEL_SERVICE_NAME: "stl-verify-python-api"
+  # Auth plane (ADR-015) — ships dark. Flipping AUTH_ENABLED turns on token
+  # verification, the per-router role gates and the OpenFGA checks together.
+  AUTH_ENABLED: "false"
+  # Two names for one Keycloak. OIDC_ISSUER must equal the `iss` CLAIM
+  # (KC_HOSTNAME), which jwt.py compares exactly and Swagger sends a BROWSER to;
+  # OIDC_JWKS_URL is where this POD fetches keys, and MagicDNS does not resolve
+  # `keycloak-staging` inside a pod.
+  OIDC_ISSUER: "http://keycloak-staging/realms/archon"
+  OIDC_JWKS_URL: "http://keycloak.auth.svc/realms/archon/protocol/openid-connect/certs"
+  OIDC_AUDIENCE: "python-api"
+  OPENFGA_URL: "http://openfga.auth.svc:8080"
+  OPENFGA_STORE_NAME: "auth"
+  # Must track OpenFGA's own OPENFGA_LIST_OBJECTS_MAX_RESULTS (server default
+  # 1000, set in the infrastructure repo). A ceiling ABOVE the server's max
+  # makes a truncated allow-list read as complete and silently under-return.
+  OPENFGA_LIST_CEILING: "1000"
   # DB pool for the API, declared here rather than left baked into the image so it
   # can be tuned by editing config and restarting — this ConfigMap is consumed via
   # envFrom with no hash suffix. A prime-scoped risk-capital request opens
@@ -729,11 +990,10 @@ data:
   # The schedule lives in Temporal state; the worker reconciles a changed
   # interval into it on startup, so a redeploy is enough (stl-verify/AGENTS.md).
   CORE_MODEL_RUN_INTERVAL_HOURS: "24"
-  # Deliberately tiny while staging only validates the pipeline end to end:
-  # the pod's memory limit is sized for this cap (~1.0 GiB measured for a
-  # full 9-market tick; the N_MC=10000 default peaks at ~8.0 GiB on one
-  # market alone). Raise only together with the deployment's memory limit.
-  CORE_MODEL_N_MC: "100"
+  # The model's design point. The deployment's memory limit is sized from a
+  # full-pass measurement at this value (1.6 GiB peak on live staging data,
+  # k8s/base/core-model-runner/deployment.yaml); raise both together.
+  CORE_MODEL_N_MC: "10000"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -748,4 +1008,7 @@ data:
   # Explicit list of materialize_<projection>() wrappers, never discovery. Each
   # wrapper runs its projection's own pre-flight refusals before the shared
   # materializer appends to position_state (docs/runbooks/vector-position-materializer.md).
-  POSITION_PROJECTIONS: "materialize_morpho_market,materialize_morpho_vault,materialize_sky_prime_debt,materialize_aave_lending"
+  # Morpho only for now: Sky reads synced_at and Aave reads created_at as event
+  # time, both of which put higher blocks at earlier instants, which the spine
+  # refuses by design. They join once block_meta supplies block_timestamp.
+  POSITION_PROJECTIONS: "materialize_morpho_market,materialize_morpho_vault"

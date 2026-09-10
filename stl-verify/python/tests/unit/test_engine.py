@@ -86,6 +86,20 @@ def test_create_db_engine_recycles_connections_on_the_configured_interval(
     assert pool._recycle == 120
 
 
+def test_create_db_engine_keeps_bind_parameters_out_of_error_strings() -> None:
+    """A StatementError renders its bind parameters into its own string, and on a
+    prime-filtered query those are the caller's whole vault allow-list — which
+    the repositories then log. What SQLAlchemy renders once the kwarg is set is
+    pinned against a real error in ``tests/integration/test_db_error_redaction``;
+    this only guards the kwarg, so dropping it fails here first.
+    """
+    settings = Settings.model_validate({})
+
+    engine = create_db_engine(settings.async_database_url)
+
+    assert engine.sync_engine.hide_parameters is True
+
+
 def test_create_db_engine_registers_the_stale_transaction_disconnect_listener() -> None:
     """A tuned engine helper proves nothing unless engines actually go through
     it, so the listener has to be asserted on the factory's output, not merely

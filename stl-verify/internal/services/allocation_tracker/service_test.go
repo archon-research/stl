@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -142,6 +143,30 @@ func TestNewService_RejectsChainScopedInputMismatch(t *testing.T) {
 	)
 	if err == nil || !strings.Contains(err.Error(), "want mainnet") {
 		t.Fatalf("error = %v, want chain mismatch", err)
+	}
+}
+
+func TestNewService_RejectsNegativeSweepCadence(t *testing.T) {
+	registry := NewSourceRegistry(ConfigDefaults().Logger)
+	entries := []*TokenEntry{{
+		ContractAddress: common.HexToAddress("0x1111"),
+		WalletAddress:   common.HexToAddress("0xaaaa"),
+		Star:            "spark",
+		Chain:           "mainnet",
+		TokenType:       "erc20",
+	}}
+	proxies := []ProxyConfig{{
+		Star:    "spark",
+		Chain:   "mainnet",
+		Address: common.HexToAddress("0xaaaa"),
+	}}
+
+	_, err := NewService(
+		Config{ChainID: 1, SweepEveryNBlocks: -1},
+		nil, nil, registry, entries, &testHandler{}, proxies,
+	)
+	if err == nil || !strings.Contains(err.Error(), "must not be negative") {
+		t.Fatalf("error = %v, want a negative-cadence rejection (it would sweep on every block)", err)
 	}
 }
 
@@ -427,50 +452,169 @@ func TestProcessBlock_MissingBlockHash_ReturnsError(t *testing.T) {
 	}
 }
 
-// runSweepWithBalance runs one sweep block where a single entry of the given
-// token type resolves to the given balance, returning the snapshot the
-// handler received.
-func runSweepWithBalance(t *testing.T, tokenType, sourceName string, bal *PositionBalance) *PositionSnapshot {
+type trackerFixture struct {
+	svc     *Service
+	handler *testHandler
+	source  *mockSource
+}
+
+func newTracker(t *testing.T, tokenType, sourceName string, bal *PositionBalance, sweepEveryN int) *trackerFixture {
 	t.Helper()
-	cache := testutil.NewMockBlockCache()
-	cache.SetReceipts(1, 500, 0, mustMarshalReceipts(t, []TransactionReceipt{}))
 
 	entry := &TokenEntry{
 		ContractAddress: common.HexToAddress("0x1111"),
-		WalletAddress:   common.HexToAddress("0xbbbb"),
+		WalletAddress:   common.HexToAddress("0xaaaa"),
+		Star:            "spark",
+		Chain:           "mainnet",
 		TokenType:       tokenType,
 	}
 	result := NewFetchResult()
 	result.Balances[entry.Key()] = bal
 
-	registry := NewSourceRegistry(slog.New(slog.NewTextHandler(io.Discard, nil)))
-	registry.Register(&mockSource{
+	source := &mockSource{
 		name:       sourceName,
 		tokenTypes: map[string]bool{tokenType: true},
 		result:     result,
-	})
+	}
+	logger := quietLogger()
+	registry := NewSourceRegistry(logger)
+	registry.Register(source)
+
+	receipts := mustMarshalReceipts(t, []TransactionReceipt{})
+	cache := testutil.NewMockBlockCache()
+	cache.GetReceiptsFn = func(context.Context, int64, int64, int) (json.RawMessage, error) {
+		return receipts, nil
+	}
 
 	handler := &testHandler{}
-	svc := &Service{
-		cache:            cache,
-		extractor:        NewTransferExtractor(nil),
-		registry:         registry,
-		entries:          []*TokenEntry{entry},
-		handler:          handler,
-		logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
-		config:           Config{ChainID: 1, SweepEveryNBlocks: 1},
-		blocksSinceSweep: 0,
+	svc, err := NewService(
+		Config{ChainID: 1, SweepEveryNBlocks: sweepEveryN, Logger: logger},
+		nil,
+		cache,
+		registry,
+		[]*TokenEntry{entry},
+		handler,
+		[]ProxyConfig{{Star: "spark", Chain: "mainnet", Address: common.HexToAddress("0xaaaa")}},
+	)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	return &trackerFixture{svc: svc, handler: handler, source: source}
+}
+
+func newCadenceFixture(t *testing.T, sweepEveryN int) *trackerFixture {
+	t.Helper()
+	return newTracker(t, "erc20", "erc20", &PositionBalance{Balance: big.NewInt(1), UnderlyingValue: big.NewInt(1)}, sweepEveryN)
+}
+
+func (f *trackerFixture) driveBacklog(first int64, count int) []int64 {
+	var failed []int64
+	for i := range count {
+		event := outbound.BlockEvent{
+			ChainID:        1,
+			BlockNumber:    first + int64(i),
+			BlockTimestamp: 1700000000,
+			BlockHash:      testBlockHash.Hex(),
+		}
+		if err := f.svc.processBlock(context.Background(), event); err != nil {
+			failed = append(failed, event.BlockNumber)
+		}
+	}
+	return failed
+}
+
+func (f *trackerFixture) sweptBlocks() []int64 {
+	var blocks []int64
+	for _, batch := range f.handler.batches {
+		for _, snapshot := range batch.Snapshots {
+			if snapshot.Direction == DirectionSweep {
+				blocks = append(blocks, snapshot.BlockNumber)
+			}
+		}
+	}
+	return blocks
+}
+
+func TestProcessBlock_SweepsOnEveryNthConsumedBlock(t *testing.T) {
+	const first int64 = 50701400
+
+	tests := []struct {
+		name        string
+		sweepEveryN int
+		blocks      int
+		want        []int64
+	}{
+		{
+			name:        "75-block default",
+			sweepEveryN: 75,
+			blocks:      225,
+			want:        []int64{first + 74, first + 149, first + 224},
+		},
+		{
+			name:        "6000-block cadence",
+			sweepEveryN: 6000,
+			blocks:      12000,
+			want:        []int64{first + 5999, first + 11999},
+		},
 	}
 
-	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 500, Version: 0, BlockTimestamp: 1700000000, BlockHash: testBlockHash.Hex()}
-	if err := svc.processBlock(context.Background(), event); err != nil {
-		t.Fatalf("processBlock: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newCadenceFixture(t, tt.sweepEveryN)
+
+			if failed := f.driveBacklog(first, tt.blocks); len(failed) > 0 {
+				t.Fatalf("processBlock failed on blocks %v", failed)
+			}
+
+			if got := f.sweptBlocks(); !slices.Equal(got, tt.want) {
+				t.Errorf("swept blocks = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProcessBlock_SweepFailureRetriesOnRedelivery(t *testing.T) {
+	const first int64 = 50701400
+	const sweepEveryN = 75
+
+	f := newCadenceFixture(t, sweepEveryN)
+	f.source.err = fmt.Errorf("temporary rpc error")
+	f.source.errCalls = 1
+
+	failed := f.driveBacklog(first, sweepEveryN)
+
+	if want := []int64{first + 74}; !slices.Equal(failed, want) {
+		t.Fatalf("failed blocks = %v, want %v", failed, want)
+	}
+	if failed := f.driveBacklog(first+74, 1); len(failed) != 0 {
+		t.Fatalf("redelivery failed on blocks %v", failed)
+	}
+	if got, want := f.sweptBlocks(), []int64{first + 74}; !slices.Equal(got, want) {
+		t.Errorf("swept blocks = %v, want %v", got, want)
 	}
 
-	if len(handler.batches) != 1 || len(handler.batches[0].Snapshots) != 1 {
-		t.Fatalf("expected 1 batch with 1 snapshot, got %d batches", len(handler.batches))
+	if failed := f.driveBacklog(first+75, sweepEveryN); len(failed) != 0 {
+		t.Fatalf("processBlock failed on blocks %v", failed)
 	}
-	return handler.batches[0].Snapshots[0]
+	if got, want := f.sweptBlocks(), []int64{first + 74, first + 149}; !slices.Equal(got, want) {
+		t.Errorf("swept blocks = %v, want %v", got, want)
+	}
+}
+
+// runSweepWithBalance runs one sweep block where a single entry of the given
+// token type resolves to the given balance, returning the snapshot the
+// handler received.
+func runSweepWithBalance(t *testing.T, tokenType, sourceName string, bal *PositionBalance) *PositionSnapshot {
+	t.Helper()
+
+	f := newTracker(t, tokenType, sourceName, bal, 1)
+	if failed := f.driveBacklog(500, 1); len(failed) > 0 {
+		t.Fatalf("processBlock failed on blocks %v", failed)
+	}
+	if len(f.handler.batches) != 1 || len(f.handler.batches[0].Snapshots) != 1 {
+		t.Fatalf("expected 1 batch with 1 snapshot, got %d batches", len(f.handler.batches))
+	}
+	return f.handler.batches[0].Snapshots[0]
 }
 
 func TestSweep_ThreadsUnderlyingValueOntoSnapshot(t *testing.T) {
@@ -751,9 +895,10 @@ func mustMarshalReceipts(t *testing.T, receipts []TransactionReceipt) json.RawMe
 
 // ── per-block liveness/latency metrics ──
 
-// TestProcessBlock_RecordsLivenessMetrics asserts every consumed block emits one
-// blocks_processed_total sample and one processing_duration_seconds observation
-// carrying {chain,status}, on both the success and error paths. These are the
+// TestProcessBlock_RecordsLivenessMetrics asserts every consumed block advances
+// one of the seeded blocks_processed_total series and emits one
+// processing_duration_seconds observation carrying {chain,status}, on both the
+// success and error paths. These are the
 // per-block liveness + latency signals the VectorAllocationTracker{Stalled,
 // ErrorRatioHigh,BlockLatencyHigh} alerts key on, so the exact metric and label
 // names must not drift from the alert expressions.
@@ -788,7 +933,7 @@ func TestProcessBlock_RecordsLivenessMetrics(t *testing.T) {
 				t.Fatalf("processBlock err = %v, wantErr = %v", err, tt.wantErr)
 			}
 
-			if got := singleStatusCounter(t, reader, "blocks_processed_total", tt.wantStatus); got != 1 {
+			if got := seededStatusCounter(t, reader, "blocks_processed_total", tt.wantStatus); got != 1 {
 				t.Errorf("blocks_processed_total{status=%q} = %d, want 1", tt.wantStatus, got)
 			}
 			if got := singleStatusHistogramCount(t, reader, "processing_duration_seconds", tt.wantStatus); got != 1 {
@@ -807,7 +952,9 @@ func newBlockMetrics(t *testing.T) (*telemetry.Metrics, sdkmetric.Reader) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	prev := otel.GetMeterProvider()
-	otel.SetMeterProvider(mp)
+	// telemetry.SetMeterProvider, not otel's: the blocks_processed_total seed is
+	// registered with OnMeterProviderReady, and only this entry point runs it.
+	telemetry.SetMeterProvider(mp)
 	t.Cleanup(func() {
 		otel.SetMeterProvider(prev)
 		_ = mp.Shutdown(context.Background())
@@ -856,20 +1003,40 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// singleStatusCounter asserts the counter has exactly one datapoint, carrying
-// chain="mainnet" and the given status, and returns its value.
-func singleStatusCounter(t *testing.T, reader sdkmetric.Reader, name, status string) int64 {
+// seededStatusCounter asserts the counter carries exactly the two series
+// telemetry.NewMetrics seeds at 0, and that only wantStatus advanced. The
+// second half is the point: it proves the recorded sample landed ON the seeded
+// series rather than orphaning it into a parallel one, which would leave the
+// seeded series flat at 0 and defeat the alert it exists for.
+func seededStatusCounter(t *testing.T, reader sdkmetric.Reader, name, wantStatus string) int64 {
 	t.Helper()
 	m := collectMetric(t, reader, name)
 	sum, ok := m.Data.(metricdata.Sum[int64])
 	if !ok {
 		t.Fatalf("%s is %T, want Sum[int64]", name, m.Data)
 	}
-	if len(sum.DataPoints) != 1 {
-		t.Fatalf("%s has %d datapoints, want 1", name, len(sum.DataPoints))
+	if len(sum.DataPoints) != 2 {
+		t.Fatalf("%s has %d datapoints, want 2 (the seeded success and error series)", name, len(sum.DataPoints))
 	}
-	assertChainStatus(t, sum.DataPoints[0].Attributes, status)
-	return sum.DataPoints[0].Value
+
+	var got int64
+	var seen []string
+	for _, dp := range sum.DataPoints {
+		status, _ := dp.Attributes.Value("status")
+		seen = append(seen, status.AsString())
+		assertChainStatus(t, dp.Attributes, status.AsString())
+		if status.AsString() == wantStatus {
+			got = dp.Value
+			continue
+		}
+		if dp.Value != 0 {
+			t.Errorf("%s{status=%q} = %d, want 0", name, status.AsString(), dp.Value)
+		}
+	}
+	if !slices.Contains(seen, wantStatus) {
+		t.Fatalf("%s has series %v, none of them status=%q", name, seen, wantStatus)
+	}
+	return got
 }
 
 // singleStatusHistogramCount asserts the histogram has exactly one datapoint,

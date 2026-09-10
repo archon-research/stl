@@ -9,8 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -22,11 +20,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/mock"
-	"go.opentelemetry.io/otel"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.temporal.io/sdk/testsuite"
 
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
@@ -55,33 +50,6 @@ func TestMain(m *testing.M) {
 	cleanupDB()
 	code = testutil.CheckGoroutineLeaks(code)
 	os.Exit(code)
-}
-
-// chainFixtureServer answers the one JSON-RPC call the composition root makes at
-// startup: the chain-ID check against CHAIN_ID.
-func chainFixtureServer(t *testing.T, chainIDHex string) *httptest.Server {
-	t.Helper()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			ID     json.RawMessage `json:"id"`
-			Method string          `json:"method"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Errorf("decoding the RPC request: %v", err)
-			return
-		}
-		if req.Method != "eth_chainId" {
-			t.Errorf("unexpected RPC method %q; this fixture only serves eth_chainId", req.Method)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		if _, err := fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":%q}`, req.ID, chainIDHex); err != nil {
-			t.Errorf("writing the RPC response: %v", err)
-		}
-	}))
-	t.Cleanup(server.Close)
-	return server
 }
 
 // seedBucket creates a bucket of this test's own and returns its name. Sibling
@@ -143,6 +111,7 @@ func setWorkerEnv(t *testing.T, bucket, rpcURL string) {
 	// The build registry refuses to register a build it cannot identify, and a
 	// `go test` binary carries no VCS stamp.
 	t.Setenv("BUILD_GIT_HASH", "integration-test")
+	testutil.SetBuildGitHash(t)
 }
 
 func newDeps(t *testing.T, pool *pgxpool.Pool) temporal.Dependencies {
@@ -184,7 +153,7 @@ func TestIntegration_Register_ExposesTheDocumentedWorkflowType(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
-	server := chainFixtureServer(t, "0x1")
+	server := testutil.StartChainIDRPC(t, 1)
 	setWorkerEnv(t, seedBucket(t, ctx), server.URL)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
@@ -214,8 +183,12 @@ func TestIntegration_Register_RefusesAChainIDMismatch(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
-	server := chainFixtureServer(t, "0xa4b1")
+	server := testutil.StartChainIDRPC(t, 42161)
 	setWorkerEnv(t, seedBucket(t, ctx), server.URL)
+	var buildsBefore int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM build_registry`).Scan(&buildsBefore); err != nil {
+		t.Fatalf("counting builds before registration: %v", err)
+	}
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
 	err := newBackfillWorker(t).register(ctx, newDeps(t, pool), env)
@@ -225,6 +198,13 @@ func TestIntegration_Register_RefusesAChainIDMismatch(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "chain ID mismatch") {
 		t.Errorf("error = %v, want it to name the chain ID mismatch", err)
+	}
+	var buildsAfter int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM build_registry`).Scan(&buildsAfter); err != nil {
+		t.Fatalf("counting builds after registration: %v", err)
+	}
+	if buildsAfter != buildsBefore {
+		t.Errorf("build rows = %d after mismatch, want unchanged at %d", buildsAfter, buildsBefore)
 	}
 }
 
@@ -266,7 +246,7 @@ func TestIntegration_DiscoverVaults_FindsNoCandidatesInAnUnrelatedRange(t *testi
 		}})
 	}
 
-	setWorkerEnv(t, bucket, chainFixtureServer(t, "0x1").URL)
+	setWorkerEnv(t, bucket, testutil.StartChainIDRPC(t, 1).URL)
 	env := newActivityEnv(t, ctx, pool)
 
 	got := runDiscovery(t, env, blockRange{From: 0, To: lastBlock})
@@ -315,7 +295,7 @@ func TestIntegration_DiscoverVaults_FailsOnAnUndecodableMorphoBlueLog(t *testing
 		}})
 	}
 
-	setWorkerEnv(t, bucket, chainFixtureServer(t, "0x1").URL)
+	setWorkerEnv(t, bucket, testutil.StartChainIDRPC(t, 1).URL)
 	env := newActivityEnv(t, ctx, pool)
 
 	var activities *backfillActivities
@@ -336,7 +316,7 @@ func TestIntegration_Backfill_FailsOnAnArchiveGapWhenNoV2VaultIsKnown(t *testing
 	ctx := context.Background()
 	const missingBlock = int64(3)
 	bucket := seedQuietBlocks(t, ctx, 1, 6, missingBlock)
-	setWorkerEnv(t, bucket, chainFixtureServer(t, "0x1").URL)
+	setWorkerEnv(t, bucket, testutil.StartChainIDRPC(t, 1).URL)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
 	if err := newBackfillWorker(t).register(ctx, newDeps(t, pool), env); err != nil {
@@ -362,7 +342,7 @@ func TestIntegration_Backfill_SucceedsWithNothingToReplayOverACompleteArchive(t 
 	ctx := context.Background()
 	deleteSeededV2Vaults(t, ctx, pool)
 	bucket := seedQuietBlocks(t, ctx, 1, 6, -1)
-	setWorkerEnv(t, bucket, chainFixtureServer(t, "0x1").URL)
+	setWorkerEnv(t, bucket, testutil.StartChainIDRPC(t, 1).URL)
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
 	if err := newBackfillWorker(t).register(ctx, newDeps(t, pool), env); err != nil {
@@ -401,7 +381,7 @@ func TestIntegration_DiscoverVaults_ASplitRunPersistsWhatAWholeRunDoes(t *testin
 	)
 	vault := common.HexToAddress("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 	bucket := seedVaultActivity(t, ctx, vault, firstBlock, lastBlock, partitionEdge-2, partitionEdge+3)
-	setWorkerEnv(t, bucket, chainFixtureServer(t, "0x1").URL)
+	setWorkerEnv(t, bucket, testutil.StartChainIDRPC(t, 1).URL)
 
 	var whole, split persistedVault
 	t.Run("over the whole range", func(t *testing.T) {
@@ -455,18 +435,15 @@ func discoverInto(t *testing.T, ctx context.Context, bucket string, vault common
 	if err != nil {
 		t.Fatalf("NewEventExtractor: %v", err)
 	}
-	prober, err := newVaultProber(logger, blockStampedVaultProbe(t), cfg.chainID)
+	prober, err := newVaultProber(logger, blockStampedVaultProbe(t))
 	if err != nil {
 		t.Fatalf("newVaultProber: %v", err)
 	}
-	buildReg, err := buildregistry.New(ctx, pool)
-	if err != nil {
-		t.Fatalf("registering the build: %v", err)
-	}
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
 
 	for _, rng := range ranges {
 		if _, err := discoverAndPersistVaults(ctx, logger, s3Reader, extractor, prober, pool,
-			buildReg.BuildID(), cfg, rng, probeBlock); err != nil {
+			buildID, runID, cfg, rng, probeBlock); err != nil {
 			t.Fatalf("discovering over blocks %d-%d: %v", rng.From, rng.To, err)
 		}
 	}
@@ -597,7 +574,7 @@ func TestIntegration_ReplayPartition_ReplaysNothingWhenNoV2VaultIsKnown(t *testi
 	ctx := context.Background()
 	deleteSeededV2Vaults(t, ctx, pool)
 	// Deliberately an empty bucket: reaching S3 at all here would be the bug.
-	setWorkerEnv(t, seedBucket(t, ctx), chainFixtureServer(t, "0x1").URL)
+	setWorkerEnv(t, seedBucket(t, ctx), testutil.StartChainIDRPC(t, 1).URL)
 	env := newActivityEnv(t, ctx, pool)
 
 	replayed := replayOnePartition(t, env, partitionWork{
@@ -621,14 +598,14 @@ func TestIntegration_ReplayPartition_ReplaysNothingWhenNoV2VaultIsKnown(t *testi
 // composition root builds is what proves the wiring, rather than reading a field
 // back.
 func TestIntegration_BuildReplayService_MetersTheReplayPath(t *testing.T) {
-	reader := installTestMeterProvider(t)
+	reader := testutil.InstallMeterProvider(t)
 	replayOneAddAdapter(t)
 
 	// The chain label is asserted too: the counter is per-chain, so a service
 	// handed a raw chain id instead of a chain NAME would meter every replay under
 	// a series the per-chain alerts never select.
 	want := map[string]string{"chain": "mainnet", "observed_via": "add_adapter_event"}
-	if got := counterValue(t, reader, "morpho.v2.adapter.registrations", want); got != 1 {
+	if got := testutil.CounterValue(t, reader, "morpho.v2.adapter.registrations", want); got != 1 {
 		t.Errorf("morpho.v2.adapter.registrations%v = %d, want 1: a replay service with no Telemetry records nothing", want, got)
 	}
 }
@@ -663,12 +640,8 @@ func replayOneAddAdapter(t *testing.T) *countingMorphoRepository {
 	multicaller := testutil.NewMockMulticaller()
 	wireAdapterRegistrationReads(t, multicaller, adapter)
 
-	t.Setenv("BUILD_GIT_HASH", "integration-test")
-	buildReg, err := buildregistry.New(ctx, pool)
-	if err != nil {
-		t.Fatalf("registering the build: %v", err)
-	}
-	svc, counted, err := buildReplayService(testutil.DiscardLogger(), multicaller, pool, buildReg.BuildID(), 1)
+	buildID, runID := testutil.OpenTestRun(t, ctx, pool)
+	svc, counted, err := buildReplayService(testutil.DiscardLogger(), multicaller, pool, buildID, runID, 1)
 	if err != nil {
 		t.Fatalf("buildReplayService: %v", err)
 	}
@@ -680,24 +653,6 @@ func replayOneAddAdapter(t *testing.T) *countingMorphoRepository {
 		t.Fatalf("ReplayMetaMorphoLog: %v", err)
 	}
 	return counted
-}
-
-// installTestMeterProvider points the global meter provider — the one
-// morpho_indexer.NewTelemetry reads — at an in-memory reader for one test, and
-// restores whatever was there.
-func installTestMeterProvider(t *testing.T) sdkmetric.Reader {
-	t.Helper()
-	reader := sdkmetric.NewManualReader()
-	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	previous := otel.GetMeterProvider()
-	otel.SetMeterProvider(provider)
-	t.Cleanup(func() {
-		otel.SetMeterProvider(previous)
-		if err := provider.Shutdown(context.Background()); err != nil {
-			t.Errorf("shutting down the test meter provider: %v", err)
-		}
-	})
-	return reader
 }
 
 // seedV2VaultRow inserts the protocol, asset token and VaultV2 row a replay

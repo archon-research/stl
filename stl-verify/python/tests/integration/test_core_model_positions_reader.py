@@ -9,12 +9,22 @@ freshness).
 
 import datetime as dt
 
+import asyncpg
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.core_model_positions_reader import PostgresPositionsReader
 from tests.integration.core_model_seed import seed_spoof_token
+from tests.integration.seed import (
+    insert_maple_loan,
+    insert_maple_loan_collateral,
+    insert_maple_loan_state,
+    insert_maple_pool,
+    insert_maple_pool_state,
+    insert_user,
+    maple_seed_ids,
+)
 
 _WETH = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
 _USDT = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
@@ -42,6 +52,9 @@ async def engine(async_db_url: str):
         # Markets and their positions together: two tests seed the same
         # market_id, and the spoofed-collateral market must not leak.
         await conn.execute(text("TRUNCATE morpho_market CASCADE"))
+        # The trigger-fed cache carries no FK, so the CASCADE above never
+        # reaches it; a leaked row would resurrect a truncated market's borrower.
+        await conn.execute(text("TRUNCATE morpho_market_position_current"))
     yield eng
     await eng.dispose()
 
@@ -212,7 +225,7 @@ async def test_a_second_token_with_the_same_symbol_that_nobody_holds_is_ignored(
 async def test_unsupported_protocol_fails_with_the_data_gaps_pointer(engine):
     with pytest.raises(ValueError, match="DATA_GAPS"):
         await PostgresPositionsReader(engine).get_protocol_data(
-            protocol="SYRUP", network="ETHEREUM", morpho_market="", loan_token="USDC", galaxy_type=""
+            protocol="ANCHORAGE", network="ETHEREUM", morpho_market="", loan_token="USDC", galaxy_type=""
         )
 
 
@@ -301,3 +314,146 @@ async def test_morpho_unknown_pair_fails_loudly(engine):
         await _seed_market(conn, ids, oracle="chainlink")  # feed alive, so the pair itself is what fails
     with pytest.raises(ValueError, match="no morpho_market rows"):
         await PostgresPositionsReader(engine).get_protocol_data(**{**_MORPHO, "loan_token": "DAI"})
+
+
+# Syrup (Maple): what only the database covers — pool resolution by underlying
+# symbol, the pool-cycle anchor, the is_internal filter, the collateral join on
+# the loan state's exact (synced_at, processing_version), and the cycle
+# staleness bound. Frame math is unit-tested.
+
+_SYRUP = dict(protocol="SYRUP", network="ETHEREUM", morpho_market="", loan_token="USDC", galaxy_type="")
+
+_POOL_ADDR = bytes.fromhex("f0" * 20)
+_BTC_PRICE_1E8 = int(78276.425 * 10**8)
+
+
+@pytest.fixture()
+async def syrup_conn(db_url: str, engine):
+    """asyncpg connection for the maple seed helpers, on a clean maple slate.
+
+    Reuses the module ``engine`` fixture for the reader under test; maple
+    tables are truncated here because that fixture only clears the
+    SparkLend/Morpho ones.
+    """
+    conn = await asyncpg.connect(db_url)
+    try:
+        for table in ("maple_loan_state", "maple_loan_collateral", "maple_pool_state"):
+            await conn.execute(f"TRUNCATE {table}")
+        await conn.execute("TRUNCATE maple_pool CASCADE")
+        yield conn
+    finally:
+        await conn.close()
+
+
+async def _seed_syrup_pool(conn, synced_at: dt.datetime, *, address: bytes = _POOL_ADDR) -> tuple[int, int]:
+    protocol_id, usdc_id = await maple_seed_ids(conn)
+    pool_id = await insert_maple_pool(
+        conn, protocol_id=protocol_id, address=address, asset_token_id=usdc_id, synced_at=synced_at
+    )
+    await insert_maple_pool_state(conn, pool_id=pool_id, synced_at=synced_at, liquid_assets=0)
+    return protocol_id, pool_id
+
+
+async def _seed_syrup_loan(
+    conn,
+    protocol_id: int,
+    pool_id: int,
+    address: bytes,
+    synced_at: dt.datetime,
+    *,
+    principal: int = 25_000_000 * 10**6,
+    meta: str | None = None,
+    amount: int | None = 505 * 10**8,
+    level: int | None = 1_111_111,
+    build_id: int = 0,
+) -> int:
+    borrower_id = await insert_user(conn, address[::-1])
+    loan_id = await insert_maple_loan(
+        conn,
+        protocol_id=protocol_id,
+        pool_id=pool_id,
+        borrower_user_id=borrower_id,
+        address=address,
+        synced_at=synced_at,
+        loan_meta_type=meta,
+    )
+    await insert_maple_loan_state(
+        conn, loan_id=loan_id, synced_at=synced_at, state="Active", principal_owed=principal, build_id=build_id
+    )
+    await insert_maple_loan_collateral(
+        conn,
+        loan_id=loan_id,
+        synced_at=synced_at,
+        symbol="BTC",
+        amount=amount,
+        decimals=8,
+        value_usd=_BTC_PRICE_1E8,
+        liquidation_level=level,
+        build_id=build_id,
+    )
+    return loan_id
+
+
+async def test_syrup_external_loans_of_the_current_cycle_build_the_frame(engine, syrup_conn):
+    now = dt.datetime.now(dt.timezone.utc)
+    old = now - dt.timedelta(hours=2)
+    protocol_id, pool_id = await _seed_syrup_pool(syrup_conn, now)
+    await _seed_syrup_loan(syrup_conn, protocol_id, pool_id, b"\x01" * 20, now)
+    # Internal (amm) loans, loans absent from the newest cycle, and repaid
+    # loans still reported Active at $0 (ltv would divide by zero) never appear.
+    await _seed_syrup_loan(syrup_conn, protocol_id, pool_id, b"\x02" * 20, now, meta="amm")
+    await _seed_syrup_loan(syrup_conn, protocol_id, pool_id, b"\x03" * 20, old, principal=99 * 10**6)
+    await _seed_syrup_loan(syrup_conn, protocol_id, pool_id, b"\x06" * 20, now, principal=0)
+
+    users_df, market_df = await PostgresPositionsReader(engine).get_protocol_data(**_SYRUP)
+    assert len(users_df) == 1
+    row = users_df.iloc[0]
+    assert row["usdc_borrow"] == pytest.approx(25_000_000)
+    assert row["btc_supply"] == pytest.approx(505.0)
+    assert row["lltv"] == pytest.approx(0.9, abs=1e-6)
+    assert list(market_df["token_symbol"]) == ["BTC"]
+    assert market_df["oracle_price"].iloc[0] == pytest.approx(78276.425)
+
+
+async def test_syrup_collateral_joins_the_state_rows_own_processing_version(engine, syrup_conn):
+    now = dt.datetime.now(dt.timezone.utc)
+    protocol_id, pool_id = await _seed_syrup_pool(syrup_conn, now)
+    loan = b"\x04" * 20
+    await _seed_syrup_loan(syrup_conn, protocol_id, pool_id, loan, now, amount=100 * 10**8, build_id=0)
+    # A reprocess of the same cycle: the pv-1 state must pair with the pv-1
+    # collateral, never with the pv-0 row of the same synced_at.
+    await insert_maple_loan_state(
+        syrup_conn,
+        loan_id=(await syrup_conn.fetchval("SELECT id FROM maple_loan WHERE loan_address = $1", loan)),
+        synced_at=now,
+        state="Active",
+        principal_owed=25_000_000 * 10**6,
+        build_id=1,
+    )
+    await insert_maple_loan_collateral(
+        syrup_conn,
+        loan_id=(await syrup_conn.fetchval("SELECT id FROM maple_loan WHERE loan_address = $1", loan)),
+        synced_at=now,
+        symbol="BTC",
+        amount=505 * 10**8,
+        decimals=8,
+        value_usd=_BTC_PRICE_1E8,
+        liquidation_level=1_111_111,
+        build_id=1,
+    )
+    users_df, _ = await PostgresPositionsReader(engine).get_protocol_data(**_SYRUP)
+    assert len(users_df) == 1
+    assert users_df.iloc[0]["btc_supply"] == pytest.approx(505.0)
+
+
+async def test_syrup_a_stale_pool_cycle_fails_the_run(engine, syrup_conn):
+    stale = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=3)
+    protocol_id, pool_id = await _seed_syrup_pool(syrup_conn, stale)
+    await _seed_syrup_loan(syrup_conn, protocol_id, pool_id, b"\x05" * 20, stale)
+    with pytest.raises(ValueError, match="stale snapshot"):
+        await PostgresPositionsReader(engine).get_protocol_data(**_SYRUP)
+
+
+async def test_syrup_without_a_matching_pool_fails_the_run(engine, syrup_conn):
+    with pytest.raises(ValueError, match="exactly one syrup pool"):
+        await PostgresPositionsReader(engine).get_protocol_data(**{**_SYRUP, "loan_token": "USDT"})

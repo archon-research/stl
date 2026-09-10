@@ -3,6 +3,7 @@ import {
   ErrorState,
   SkeletonStack,
 } from '@archon-research/design-system';
+import { isHttpRequestError } from '@archon-research/http-client-react';
 import { useQuery } from '@tanstack/react-query';
 import { useMemo } from 'react';
 
@@ -282,6 +283,14 @@ export function RrcTab({
 
   const rrc = rrcResult.data ?? null;
   const isLoading = canLoadRrc && rrcResult.isPending;
+  // A 404 is this endpoint's by-design answer, not a failure: it fires when no
+  // model in the registry applies to the position's asset (a protocol the
+  // lending reader deliberately leaves out for want of a quantitative model),
+  // when the only applicable model has no data yet, or when the asset id is
+  // unknown. All three mean "nothing to compute here", so they get the note
+  // panel; the critical panel stays for the statuses that mean an outage.
+  const hasNoModel =
+    isHttpRequestError(rrcResult.error) && rrcResult.error.status === 404;
   const errorMessage = toQueryErrorMessage(rrcResult.error);
 
   // Which model the prime's reported requirement comes from, and Sky's figures
@@ -414,6 +423,14 @@ export function RrcTab({
   if (isChainMismatch) {
     return (
       <TabNotePanel message="Required risk capital is not yet available for non-mainnet allocations." />
+    );
+  }
+
+  if (hasNoModel) {
+    return (
+      <TabNotePanel
+        message={`Verify has no risk model for ${selectedReceiptToken.protocol_name ?? 'this protocol'} positions yet, so required risk capital is unavailable for this position.`}
+      />
     );
   }
 

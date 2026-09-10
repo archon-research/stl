@@ -236,7 +236,7 @@ export function useDataSourceSection(
         // The superseded spelling is dropped on the way out, so a link carrying
         // both cannot arrive contradicting itself.
         reference: undefined,
-        source: value === 'both' ? undefined : value,
+        source: value === 'reference' ? undefined : value,
       });
 
       // A composite response holds both provenances, so narrowing it is a

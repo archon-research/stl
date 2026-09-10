@@ -118,7 +118,7 @@ func assertOracleEmitsPricesForSymbols(t *testing.T, oracleName string, symbols 
 		}
 	}
 
-	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 100)
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 0, 100)
 	if err != nil {
 		t.Fatalf("create repository: %v", err)
 	}

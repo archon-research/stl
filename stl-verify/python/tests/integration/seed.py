@@ -50,6 +50,50 @@ async def insert_user(conn: asyncpg.Connection, address: bytes) -> int:
     )
 
 
+async def insert_morpho_adapter(
+    conn: asyncpg.Connection,
+    *,
+    vault_id: int,
+    address: bytes,
+    asset_token_id: int,
+    block: int,
+    removed_at_block: int | None = None,
+) -> None:
+    """Insert a VaultV2 Morpho Blue market adapter (type 1) added to its vault at ``block``.
+
+    ``removed_at_block`` appends a RemoveAdapter row so the adapter leaves ``morpho_adapter_current``.
+    """
+    adapter_id = await conn.fetchval(
+        """
+        INSERT INTO morpho_adapter (morpho_vault_id, address, asset_token_id)
+        VALUES ($1, $2, $3)
+        RETURNING id
+        """,
+        vault_id,
+        address,
+        asset_token_id,
+    )
+    await conn.execute(
+        """
+        INSERT INTO morpho_adapter_membership
+            (morpho_adapter_id, block_number, log_index, timestamp, is_member, adapter_type, observed_via)
+        VALUES ($1, $2, 0, NOW(), true, 1, 'add_adapter_event')
+        """,
+        adapter_id,
+        block,
+    )
+    if removed_at_block is not None:
+        await conn.execute(
+            """
+            INSERT INTO morpho_adapter_membership
+                (morpho_adapter_id, block_number, log_index, timestamp, is_member, adapter_type, observed_via)
+            VALUES ($1, $2, 0, NOW(), false, NULL, 'remove_adapter_event')
+            """,
+            adapter_id,
+            removed_at_block,
+        )
+
+
 async def insert_protocol(
     conn: asyncpg.Connection,
     name: str,
@@ -449,6 +493,7 @@ async def insert_maple_loan_collateral(
     decimals: int,
     value_usd: int | None,
     state: str = "Deposited",
+    liquidation_level: int | None = None,
     build_id: int = 0,
 ) -> None:
     """Insert a maple_loan_collateral snapshot row.
@@ -462,8 +507,9 @@ async def insert_maple_loan_collateral(
     await conn.execute(
         """
         INSERT INTO maple_loan_collateral
-            (maple_loan_id, synced_at, asset_symbol, asset_amount, asset_decimals, asset_value_usd, state, build_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            (maple_loan_id, synced_at, asset_symbol, asset_amount, asset_decimals, asset_value_usd, state,
+             liquidation_level, build_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         """,
         loan_id,
         synced_at,
@@ -472,6 +518,7 @@ async def insert_maple_loan_collateral(
         decimals,
         Decimal(value_usd) if value_usd is not None else None,
         state,
+        Decimal(liquidation_level) if liquidation_level is not None else None,
         build_id,
     )
 
@@ -1621,6 +1668,9 @@ async def _ruv_seed_morpho_like_position(conn: asyncpg.Connection, *, prime_id: 
 #   * FR_PROXY_DISTANCE         donors on both sides at different distances ->
 #                               the closer one wins regardless of side
 #   * FR_PROXY_TIE              donors equidistant -> the at-or-before one wins
+#   * FR_PROXY_SAME_BLOCK       two donors in the flow's own block -> the higher
+#                               log_index wins (it carries the LOWER ratio, so a
+#                               "pick the max ratio" shortcut would fail)
 #   * FR_PROXY_MIXED            ratio in + ratio out + legacy in + sweep, one
 #                               bucket; the legacy row borrows the out row's
 #                               ratio (nearest at-or-before)
@@ -1639,6 +1689,7 @@ FR_PROXY_ATOKEN = "8e" * 20
 FR_PROXY_DONOR_DIVERGENT = "9e" * 20
 FR_PROXY_DISTANCE = "ae" * 20
 FR_PROXY_TIE = "be" * 20
+FR_PROXY_SAME_BLOCK = "ce" * 20
 _FR_PROXY_DONOR = "fe" * 20
 
 _FR_VAULT_HEX = "97" * 20
@@ -1718,6 +1769,13 @@ FR_TIE_BEFORE_DONOR_BALANCE = Decimal("100")
 FR_TIE_BEFORE_DONOR_UNDERLYING_VALUE = Decimal("110")
 FR_TIE_AFTER_DONOR_BALANCE = Decimal("100")
 FR_TIE_AFTER_DONOR_UNDERLYING_VALUE = Decimal("130")
+FR_SAME_BLOCK_TX_AMOUNT = Decimal("80")
+FR_SAME_BLOCK_BALANCE = Decimal("600")
+FR_SAME_BLOCK = 9950
+FR_SAME_BLOCK_LOW_LOG_DONOR_BALANCE = Decimal("100")
+FR_SAME_BLOCK_LOW_LOG_DONOR_UNDERLYING_VALUE = Decimal("150")
+FR_SAME_BLOCK_HIGH_LOG_DONOR_BALANCE = Decimal("100")
+FR_SAME_BLOCK_HIGH_LOG_DONOR_UNDERLYING_VALUE = Decimal("120")
 
 # Mixed bucket: both own-ratio rows sit at the same 1.17 share ratio; the
 # legacy row borrows the out row's ratio (nearest at-or-before, one block).
@@ -1783,6 +1841,7 @@ async def seed_flow_share_ratio_activity(db_url: str) -> None:
             donor_div_token = await receipt("d9" * 20, "frVaultDonorDiv")
             distance_token = await receipt("da" * 20, "frVaultDistance")
             tie_token = await receipt("db" * 20, "frVaultTie")
+            same_block_token = await receipt("dd" * 20, "frVaultSameBlock")
             mixed_token = await receipt("dc" * 20, "frVaultMixed")
 
             donor = _FR_PROXY_DONOR
@@ -1917,6 +1976,16 @@ async def seed_flow_share_ratio_activity(db_url: str) -> None:
                 ),
                 (tie_token, FR_PROXY_TIE, "in", FR_TIE_TX_AMOUNT, FR_TIE_BALANCE, None, None, 9900),
                 (
+                    same_block_token,
+                    FR_PROXY_SAME_BLOCK,
+                    "in",
+                    FR_SAME_BLOCK_TX_AMOUNT,
+                    FR_SAME_BLOCK_BALANCE,
+                    None,
+                    None,
+                    FR_SAME_BLOCK,
+                ),
+                (
                     tie_token,
                     donor,
                     "sweep",
@@ -2001,6 +2070,27 @@ async def seed_flow_share_ratio_activity(db_url: str) -> None:
                     underlying_token_id=underlying_token_id,
                     created_at=FR_BUCKET_TS,
                     tx_amount=tx_amount,
+                )
+            # Same-block donors for FR_PROXY_SAME_BLOCK: identical block, differing
+            # log_index, so only the log_index tiebreak separates them.
+            for log_index, balance, underlying_value in (
+                (3, FR_SAME_BLOCK_LOW_LOG_DONOR_BALANCE, FR_SAME_BLOCK_LOW_LOG_DONOR_UNDERLYING_VALUE),
+                (7, FR_SAME_BLOCK_HIGH_LOG_DONOR_BALANCE, FR_SAME_BLOCK_HIGH_LOG_DONOR_UNDERLYING_VALUE),
+            ):
+                await insert_allocation_position(
+                    conn,
+                    token_id=same_block_token,
+                    prime_id=prime_id,
+                    proxy_hex=donor,
+                    balance=balance,
+                    block=FR_SAME_BLOCK,
+                    tx=f"{0x70 + log_index:02x}" * 32,
+                    direction="sweep",
+                    log_index=log_index,
+                    underlying_value=underlying_value,
+                    underlying_token_id=underlying_id,
+                    created_at=FR_BUCKET_TS,
+                    tx_amount=Decimal(0),
                 )
     finally:
         await conn.close()

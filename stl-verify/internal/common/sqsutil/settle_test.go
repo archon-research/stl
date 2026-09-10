@@ -48,7 +48,7 @@ func TestProcessMessages_CountsASettledDelete(t *testing.T) {
 
 // The SQS client carries no read timeout, so an unbounded settle against a
 // silent connection parks the single-goroutine poll loop for good.
-func TestCleanupContext_BoundsTheSettleCallOnALiveParent(t *testing.T) {
+func TestCleanupContext_BoundsTheSettleCall(t *testing.T) {
 	ctx, cancel := CleanupContext(context.Background())
 	defer cancel()
 
@@ -58,5 +58,20 @@ func TestCleanupContext_BoundsTheSettleCallOnALiveParent(t *testing.T) {
 	}
 	if remaining := time.Until(deadline); remaining > SettleTimeout {
 		t.Errorf("expected a deadline within %s, got %s remaining", SettleTimeout, remaining)
+	}
+}
+
+func TestCleanupContext_SurvivesAParentCancelledMidCall(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	ctx, cancel := CleanupContext(parent)
+	defer cancel()
+
+	cancelParent()
+
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("expected the settle context to outlive its cancelled parent, got %v", err)
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		t.Error("expected the detached settle context to keep its deadline")
 	}
 }

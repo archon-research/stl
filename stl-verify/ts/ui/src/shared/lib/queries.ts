@@ -10,11 +10,13 @@ import type {
   PrimeDebtSnapshot,
   ProtocolEventsEnvelope,
   ProtocolEventsResponse,
-  TimeSeriesResolution,
+  AggregationMethod,
+  TimeSeriesFrequency,
   TokensResponse,
   TotalCapitalBucket,
   TotalCapitalEnvelope,
 } from '../types/allocation';
+import type { Undefinable } from '../types/optional';
 import { api } from './api-client';
 import { sortByBucketStart } from './dashboard';
 import { logging } from './logging';
@@ -50,7 +52,7 @@ const CACHE = {
   /** The screen's primary per-block data: allocations, risk capital, debt. */
   position: { staleTime: 30_000, gcTime: 10 * MINUTE },
   /** One minute is the finest bucket the range picker can ask for (`PT1M`, at
-   * the 1h preset — see `getResolutionForRange`), so a shorter `staleTime`
+   * the 1h preset — see `getFrequencyForRange`), so a shorter `staleTime`
    * could not change the line that gets drawn. Revisit if a finer preset lands. */
   series: { staleTime: MINUTE, gcTime: 30 * MINUTE },
   /** A daily upstream feed seeded by a one-shot backfill; see the lookback below. */
@@ -70,6 +72,10 @@ const CACHE = {
   settledTx: { staleTime: HOUR, gcTime: HOUR },
 } as const;
 
+// Annotated, not `as const`: this fails at the definition if the generated enum
+// ever stops carrying the method every bucketed read here asks for.
+const END_PERIOD: AggregationMethod = 'end-period';
+
 // `sources` is the one genuinely optional envelope field in this file, so it
 // gets a stable fallback rather than a fresh array per select run.
 const NO_DATA_SOURCES: DataSourcesResponse['sources'] = [];
@@ -78,25 +84,44 @@ const NO_DATA_SOURCES: DataSourcesResponse['sources'] = [];
 export type SeriesWindow = {
   fromTimestamp: string | undefined;
   toTimestamp: string | undefined;
-  resolution: TimeSeriesResolution;
+  frequency: TimeSeriesFrequency;
 };
 
 // limit 500 (the per-prime max) so the longest ranges (e.g. 365d at P1D) return
 // every bucket rather than being truncated to the default page.
 function bucketQuery(range: SeriesWindow) {
   return {
-    from_timestamp: range.fromTimestamp,
-    to_timestamp: range.toTimestamp,
-    resolution: range.resolution,
-    aggregate: true,
+    // Omitted, not `null`: the key sanitizer strips an absent param and keeps
+    // a null one, so coalescing would split the cache entry for one window.
+    ...(range.fromTimestamp !== undefined && {
+      from_timestamp: range.fromTimestamp,
+    }),
+    ...(range.toTimestamp !== undefined && { to_timestamp: range.toTimestamp }),
+    frequency: range.frequency,
+    aggregation_method: END_PERIOD,
     limit: 500,
   };
 }
 
-// `Array.isArray` is the entire check either way; carrying it in a predicate
-// keeps the arm the caller named from needing an assertion to come back.
-function isEnvelopeRows<TRows>(data: unknown): data is TRows {
-  return Array.isArray(data);
+/** The arm of a bucketed envelope that answers to `TMode`. */
+type EnvelopeArm<TEnvelope extends BucketedEnvelope, TMode> = Extract<
+  TEnvelope,
+  { mode: TMode }
+>;
+
+/** What the schema's `oneOf`/`discriminator` guarantees every envelope here has. */
+type BucketedEnvelope = { mode: string; data: readonly unknown[] };
+
+// A predicate, not an assertion: the schema discriminates on `mode`, so naming
+// the arm is all TypeScript needs to correlate `data` with it.
+function isEnvelopeMode<
+  TEnvelope extends BucketedEnvelope,
+  TMode extends TEnvelope['mode'],
+>(
+  envelope: TEnvelope,
+  expected: TMode,
+): envelope is EnvelopeArm<TEnvelope, TMode> {
+  return envelope.mode === expected;
 }
 
 /**
@@ -109,18 +134,21 @@ function isEnvelopeRows<TRows>(data: unknown): data is TRows {
  * drawing an empty view over a broken payload. Thrown from a `select`, which
  * react-query reports as the query's own error.
  *
- * `TRows` is the arm the caller asked for, stated once as a type argument and
- * constrained to one the envelope can actually carry. The schema types `data`
- * as the union of every mode's rows without discriminating on `mode`, so the
- * correlation cannot be inferred -- see VEC-686.
+ * The return type is the named arm's own `data`, so callers state the mode and
+ * nothing else; `Array.isArray` guards a shape the schema promises rather than
+ * establishing one.
  */
 function requireEnvelopeRows<
-  TEnvelope extends { mode: string; data: unknown },
-  TRows extends TEnvelope['data'],
->(envelope: TEnvelope, expected: TEnvelope['mode'], label: string): TRows {
-  const { data, mode } = envelope;
-  if (mode === expected && isEnvelopeRows<TRows>(data)) {
-    return data;
+  TEnvelope extends BucketedEnvelope,
+  TMode extends TEnvelope['mode'],
+>(
+  envelope: TEnvelope,
+  expected: TMode,
+  label: string,
+): EnvelopeArm<TEnvelope, TMode>['data'] {
+  const { mode } = envelope;
+  if (isEnvelopeMode(envelope, expected) && Array.isArray(envelope.data)) {
+    return envelope.data;
   }
 
   const fault = mode === expected ? 'a non-array `data`' : `"${mode}"`;
@@ -142,7 +170,7 @@ function requireEnvelopeRows<
 const selectLatestDebtSnapshot = (
   envelope: PrimeDebtEnvelope,
 ): PrimeDebtSnapshot | null => {
-  const snapshots = requireEnvelopeRows<PrimeDebtEnvelope, PrimeDebtSnapshot[]>(
+  const snapshots = requireEnvelopeRows(
     envelope,
     'raw',
     'GET /v1/primes/{prime_id}/debt',
@@ -153,7 +181,7 @@ const selectLatestDebtSnapshot = (
 const selectLatestDebtBucket = (
   envelope: PrimeDebtEnvelope,
 ): PrimeDebtBucket | null => {
-  const buckets = requireEnvelopeRows<PrimeDebtEnvelope, PrimeDebtBucket[]>(
+  const buckets = requireEnvelopeRows(
     envelope,
     'aggregated',
     'GET /v1/primes/{prime_id}/debt',
@@ -163,7 +191,7 @@ const selectLatestDebtBucket = (
 
 const selectDebtBuckets = (envelope: PrimeDebtEnvelope): PrimeDebtBucket[] =>
   sortByBucketStart(
-    requireEnvelopeRows<PrimeDebtEnvelope, PrimeDebtBucket[]>(
+    requireEnvelopeRows(
       envelope,
       'aggregated',
       'GET /v1/primes/{prime_id}/debt',
@@ -174,16 +202,20 @@ const selectActivityBuckets = (
   envelope: AllocationActivityEnvelope,
 ): AllocationActivityBucket[] => {
   if (envelope.mode === 'aggregated') {
+    // Still through the guard, like the three sibling series: `mode` narrowing
+    // cannot rule out a `data` that is not an array, and that is as loud a
+    // contract violation here as anywhere.
     return sortByBucketStart(
-      requireEnvelopeRows<
-        AllocationActivityEnvelope,
-        AllocationActivityBucket[]
-      >(envelope, 'aggregated', 'GET /v1/allocations/activity'),
+      requireEnvelopeRows(
+        envelope,
+        'aggregated',
+        'GET /v1/allocations/activity',
+      ),
     );
   }
 
-  // Both series ask for `aggregate=true`, so this is the same violation the
-  // debt series throws on — coerced because its card degrades, not ignored.
+  // Both series ask for buckets, so this is the same violation the debt
+  // series throws on — coerced because its card degrades, not ignored.
   logging.warn('Allocation activity envelope was not aggregated', {
     mode: envelope.mode,
   });
@@ -194,7 +226,7 @@ const selectTotalCapitalBuckets = (
   envelope: TotalCapitalEnvelope,
 ): TotalCapitalBucket[] =>
   sortByBucketStart(
-    requireEnvelopeRows<TotalCapitalEnvelope, TotalCapitalBucket[]>(
+    requireEnvelopeRows(
       envelope,
       'aggregated',
       'GET /v1/primes/{prime_id}/total-capital',
@@ -203,7 +235,7 @@ const selectTotalCapitalBuckets = (
 
 const selectExposureBuckets = (envelope: ExposureEnvelope): ExposureBucket[] =>
   sortByBucketStart(
-    requireEnvelopeRows<ExposureEnvelope, ExposureBucket[]>(
+    requireEnvelopeRows(
       envelope,
       'aggregated',
       'GET /v1/primes/{prime_id}/exposure',
@@ -216,20 +248,12 @@ const selectDataSources = (response: DataSourcesResponse) =>
 const selectRawActivity = (
   envelope: AllocationActivityEnvelope,
 ): AllocationActivityResponse =>
-  requireEnvelopeRows<AllocationActivityEnvelope, AllocationActivityResponse>(
-    envelope,
-    'raw',
-    'GET /v1/allocations/activity',
-  );
+  requireEnvelopeRows(envelope, 'raw', 'GET /v1/allocations/activity');
 
 const selectProtocolEvents = (
   envelope: ProtocolEventsEnvelope,
 ): ProtocolEventsResponse =>
-  requireEnvelopeRows<ProtocolEventsEnvelope, ProtocolEventsResponse>(
-    envelope,
-    'raw',
-    'GET /v1/protocol-events',
-  );
+  requireEnvelopeRows(envelope, 'raw', 'GET /v1/protocol-events');
 
 const selectTokenSymbols = (tokens: TokensResponse): string[] =>
   Array.from(
@@ -361,7 +385,7 @@ function referenceDebtLookbackStart(): string {
 /**
  * The newest reference debt bucket.
  *
- * Reference debt is aggregate-only: upstream reports one figure per prime per
+ * Reference debt is bucketed-only: upstream reports one figure per prime per
  * day and carries no ilk or block identity, so the API rejects a raw request
  * rather than inventing them.
  */
@@ -373,7 +397,7 @@ export const latestReferenceDebtQuery = (primeId: string) =>
       params: {
         path: { prime_id: primeId },
         query: {
-          aggregate: true,
+          aggregation_method: END_PERIOD,
           limit: 1,
           source: 'reference' as const,
           from_timestamp: referenceDebtLookbackStart(),
@@ -489,7 +513,7 @@ export const riskBreakdownQuery = (
     {
       params: {
         path: { chain_id: chainId, token_address: tokenAddress },
-        query: primeId ? { prime_id: primeId } : undefined,
+        ...(primeId && { query: { prime_id: primeId } }),
       },
     },
     {
@@ -517,7 +541,13 @@ export const rrcQuery = (
     },
     {
       ...CACHE.drawer,
-      meta: { logMessage: 'Failed to load required risk capital (RRC)' },
+      meta: {
+        // A 404 here is expected for any asset no risk model covers, so the
+        // failure is not on its own an incident; the tab renders that case as
+        // a note.
+        logLevel: 'warn',
+        logMessage: 'Failed to load required risk capital (RRC)',
+      },
     },
   );
 
@@ -554,23 +584,51 @@ export const tokenPriceQuery = (chainId: number, tokenAddress: string) =>
 
 /**
  * The activity feed's rows, which are raw events rather than buckets — the same
- * endpoint the metric band reads with `aggregate=true`, so the two share no
+ * endpoint the metric band reads as a resampled series, so the two share no
  * cache entry and neither can serve the other's shape.
  */
-export const activityQuery = (filters: {
-  prime_id?: string;
-  chain_id?: number;
-  protocol_name?: string;
-  action_type?: string;
-  token_symbol?: string;
-  from_timestamp?: string;
-  to_timestamp?: string;
-  limit?: number;
-}) =>
+export const activityQuery = (
+  filters: Undefinable<{
+    prime_id?: string;
+    chain_id?: number;
+    protocol_name?: string;
+    action_type?: string;
+    token_symbol?: string;
+    from_timestamp?: string;
+    to_timestamp?: string;
+    limit?: number;
+  }>,
+) =>
   api.queryOptions(
     'get',
     '/v1/allocations/activity',
-    { params: { query: filters } },
+    {
+      params: {
+        query: {
+          // Every field is omitted rather than nulled when unset: the key
+          // sanitizer strips an absent param and keeps a null one, so
+          // coalescing would give an unscoped read a different cache entry.
+          ...(filters.prime_id !== undefined && { prime_id: filters.prime_id }),
+          ...(filters.chain_id !== undefined && { chain_id: filters.chain_id }),
+          ...(filters.protocol_name !== undefined && {
+            protocol_name: filters.protocol_name,
+          }),
+          ...(filters.action_type !== undefined && {
+            action_type: filters.action_type,
+          }),
+          ...(filters.token_symbol !== undefined && {
+            token_symbol: filters.token_symbol,
+          }),
+          ...(filters.from_timestamp !== undefined && {
+            from_timestamp: filters.from_timestamp,
+          }),
+          ...(filters.to_timestamp !== undefined && {
+            to_timestamp: filters.to_timestamp,
+          }),
+          ...(filters.limit !== undefined && { limit: filters.limit }),
+        },
+      },
+    },
     {
       ...CACHE.position,
       select: selectRawActivity,
@@ -619,8 +677,8 @@ export const txProtocolEventsFallbackQuery = (txHash: string) =>
   );
 
 export type TokenFilters = {
-  chain_id?: number;
-  symbol?: string;
+  chain_id?: number | undefined;
+  symbol?: string | undefined;
   limit?: number;
 };
 
@@ -628,7 +686,15 @@ export const tokensQuery = (filters: TokenFilters) =>
   api.queryOptions(
     'get',
     '/v1/tokens',
-    { params: { query: filters } },
+    {
+      params: {
+        query: {
+          ...(filters.chain_id !== undefined && { chain_id: filters.chain_id }),
+          ...(filters.symbol !== undefined && { symbol: filters.symbol }),
+          ...(filters.limit !== undefined && { limit: filters.limit }),
+        },
+      },
+    },
     {
       ...CACHE.tokenList,
       meta: { logLevel: 'warn', logMessage: 'Token catalogue unavailable' },

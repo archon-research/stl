@@ -74,11 +74,20 @@ class Settings(BaseSettings):
     auth_enabled: bool = False
     oidc_issuer: str = ""  # e.g. http://keycloak.auth.svc/realms/archon
     oidc_audience: str = ""  # `aud` the API validates
+    # Split from the issuer because `iss` is Keycloak's browser-reachable
+    # KC_HOSTNAME while pods fetch keys from the in-cluster Service. Empty =
+    # derive from the issuer.
+    oidc_jwks_url: str = ""
     openfga_url: str = ""  # e.g. http://openfga.auth.svc:8080
     # Published by the openfga-store ConfigMap (store/model ids are created by
     # the store-bootstrap Job; they cannot be known at deploy-authoring time).
     openfga_store_id: str = ""
     openfga_model_id: str = ""
+    openfga_store_name: str = "auth"
+    openfga_api_key: SecretStr = SecretStr("")
+    # Must track OpenFGA's own OPENFGA_LIST_OBJECTS_MAX_RESULTS: a ceiling
+    # above the server's max makes a truncated allow-list look complete.
+    openfga_list_ceiling: int = 1000
 
     risk_default_gap_pct: Decimal = Field(default=Decimal("0.15"), ge=0, le=1)
     suraf_inputs_dir: Path = ENV_DIR / "suraf" / "inputs"

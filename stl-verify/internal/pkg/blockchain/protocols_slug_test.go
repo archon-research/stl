@@ -14,6 +14,9 @@ func TestGetProtocolBySlug(t *testing.T) {
 		{"aave_v3_lido_ethereum", "Aave V3 Lido", true},
 		{"aave_v3_rwa_ethereum", "Aave V3 RWA", true},
 		{"aave_v3_avalanche", "Aave V3 Avalanche", true},
+		{"aave_v3_arbitrum", "Aave V3 Arbitrum", true},
+		{"aave_v3_optimism", "Aave V3 Optimism", true},
+		{"aave_v3_base", "Aave V3 Base", true},
 		{"unknown_protocol", "", false},
 		{"", "", false},
 	}
