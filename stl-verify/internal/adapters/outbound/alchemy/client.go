@@ -705,46 +705,11 @@ func (c *Client) callClassified(ctx context.Context, req jsonRPCRequest, classif
 
 	var rpcResp jsonRPCResponse
 	err = c.doWithRetry(ctx, req.Method, func() error {
-		// Reset response to avoid leftover error field from previous attempts
-		rpcResp = jsonRPCResponse{}
-
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.HTTPURL, bytes.NewReader(reqBytes))
+		resp, err := c.postJSONRPC(ctx, reqBytes, classify)
 		if err != nil {
-			return &nonRetryableError{err: fmt.Errorf("failed to create request: %w", err)}
+			return err
 		}
-		httpReq.Header.Set("Content-Type", "application/json")
-
-		httpResp, err := c.httpClient.Do(httpReq)
-		if err != nil {
-			return fmt.Errorf("HTTP request failed: %w", err)
-		}
-		defer func() {
-			if err := httpResp.Body.Close(); err != nil {
-				c.logger.Warn("failed to close HTTP response body", "error", err)
-			}
-		}()
-
-		// Check for retryable HTTP status codes
-		if httpResp.StatusCode >= 500 || httpResp.StatusCode == 429 {
-			return fmt.Errorf("HTTP %d: server error", httpResp.StatusCode)
-		}
-
-		respBytes, err := io.ReadAll(httpResp.Body)
-		if err != nil {
-			return fmt.Errorf("failed to read response: %w", err)
-		}
-
-		if err := json.Unmarshal(respBytes, &rpcResp); err != nil {
-			return fmt.Errorf("failed to parse response: %w", err)
-		}
-
-		if rpcResp.Error != nil {
-			if classify != nil {
-				return classify(rpcResp.Error)
-			}
-			return fmt.Errorf("RPC error: %s", rpcResp.Error.Message)
-		}
-
+		rpcResp = resp
 		return nil
 	})
 
@@ -757,6 +722,45 @@ func (c *Client) callClassified(ctx context.Context, req jsonRPCRequest, classif
 		return nil, err
 	}
 	return &rpcResp, nil
+}
+
+func (c *Client) postJSONRPC(ctx context.Context, body []byte, classify func(*jsonRPCError) error) (jsonRPCResponse, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.HTTPURL, bytes.NewReader(body))
+	if err != nil {
+		return jsonRPCResponse{}, &nonRetryableError{err: fmt.Errorf("failed to create request: %w", err)}
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	httpResp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return jsonRPCResponse{}, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer func() {
+		if err := httpResp.Body.Close(); err != nil {
+			c.logger.Warn("failed to close HTTP response body", "error", err)
+		}
+	}()
+
+	if httpResp.StatusCode >= 500 || httpResp.StatusCode == 429 {
+		return jsonRPCResponse{}, fmt.Errorf("HTTP %d: server error", httpResp.StatusCode)
+	}
+
+	respBytes, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return jsonRPCResponse{}, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var rpcResp jsonRPCResponse
+	if err := json.Unmarshal(respBytes, &rpcResp); err != nil {
+		return jsonRPCResponse{}, fmt.Errorf("failed to parse response: %w", err)
+	}
+	if rpcResp.Error != nil {
+		if classify != nil {
+			return jsonRPCResponse{}, classify(rpcResp.Error)
+		}
+		return jsonRPCResponse{}, fmt.Errorf("RPC error: %s", rpcResp.Error.Message)
+	}
+	return rpcResp, nil
 }
 
 // nonRetryableError wraps errors that should not be retried.
