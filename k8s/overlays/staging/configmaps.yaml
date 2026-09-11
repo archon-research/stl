@@ -900,9 +900,10 @@ data:
   OIDC_AUDIENCE: "python-api"
   OPENFGA_URL: "http://openfga.auth.svc:8080"
   OPENFGA_STORE_NAME: "auth"
-  # Must track OpenFGA's own OPENFGA_LIST_OBJECTS_MAX_RESULTS (server default
-  # 1000, set in the infrastructure repo). A ceiling ABOVE the server's max
-  # makes a truncated allow-list read as complete and silently under-return.
+  # Must track OpenFGA's own OPENFGA_LIST_OBJECTS_MAX_RESULTS, pinned to 1000
+  # in the infrastructure repo's OpenFGA deployment (ORB-400). A ceiling ABOVE
+  # the server's max makes a truncated allow-list read as complete and
+  # silently under-return.
   OPENFGA_LIST_CEILING: "1000"
   # DB pool for the API, declared here rather than left baked into the image so it
   # can be tuned by editing config and restarting — this ConfigMap is consumed via
