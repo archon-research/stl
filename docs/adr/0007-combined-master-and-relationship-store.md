@@ -197,7 +197,7 @@ live as columns on a node — the earlier `issuer_entity_id`, `parent_entity_id`
 | `rel_type` | the kind of link, from the governed vocabulary (§5) |
 | `valid_from` / `valid_to` | valid time: when the link is true in the world (UTC dates, half-open); open `valid_to` means current |
 | `rel_weight` | nullable **exact decimal** (reference realization `numeric(30,18)`, never a binary float — a float weight cannot reproduce look-through bit-for-bit, RP-4.4) |
-| `weight_basis` | **mandatory whenever `rel_weight` is set**: `VALUE`, `NOTIONAL`, `UNITS`, `OWNERSHIP_PCT` — an unlabelled 0.6 is not addable, and unlike bases must never be summed (DM-5). Conversion ratios are edge payload, not weights. |
+| `weight_basis` | **mandatory whenever `rel_weight` is set**: `VALUE`, `NOTIONAL`, `OWNERSHIP_PCT` — an unlabelled 0.6 is not addable, and unlike bases must never be summed (DM-5). Conversion ratios are edge payload, not weights, and a count is not a share, so neither is a basis. |
 | `weight_asof_block` | only for market-derived weights (`ALLOCATES`): the block the mix was computed from — the CH-3 resolution |
 | `payload` | the type-specific attribute cluster (DM-6): a ratio and event date, a rating and outlook, a lien seniority, a counterparty role |
 | provenance block | §4: knowledge time, actor, software version, lineage, correction fields |
@@ -207,8 +207,18 @@ Semantics, independent of realization:
 - **Directed.** Each edge is `src_id → dst_id`. Inverses (`ISSUES` from `ISSUED_BY`,
   `UNDERLYING_OF` from `HAS_UNDERLYING`) and closures (ultimate parent, look-through) are
   **derived at read time and not stored**, so every derived answer has one source of truth.
+- **A weight is a share of a whole**, in the declared basis: one concept in three denominators —
+  a share of USD value, of notional, or of equity. That is what makes weights along a path
+  multiplicable and weights under one basis summable.
 - **Weighted for look-through.** Exposure to a leaf is the sum over paths of the product of
   weights along each path, defined only within one `weight_basis`.
+- **Siblings conserve the whole.** Weights under one (`src`, `rel_type`, `weight_basis`), as of a
+  date, sum to `1` for `VALUE` and `NOTIONAL` and to at most `1` for `OWNERSHIP_PCT`, where
+  knowing 60% of a cap table is a limit of knowledge rather than wrong data. A short set is not a
+  rounding matter: the error compounds with depth, and 5% short at each of four levels loses
+  18.5% of the exposure. Exact decimals do not divide evenly — three equal siblings sum to
+  `1 - 1e-18` at `numeric(30,18)` — so the **last sibling in `dst_id` order absorbs the
+  residual**, which keeps the sum exact rather than merely close (RP-4.4).
 - **Append-only, close-and-open** (AR-1.1, AR-1.4). A change closes the current row and opens a
   new one; a re-point, a type change, an ended link, and a backdated late-learned link are all
   data changes. A retraction is a tombstone append that supersedes the retracted row.
@@ -730,7 +740,7 @@ adding or changing a rule is a reviewed change, and rule ids are stable referenc
 | GQ-25 | edge-budget envelopes per shape (a stablecoin with two current issuers, a wrapper with two underlyings) | OpenMetadata | alert |
 | GQ-26 | duplicate suspicion: distinct nodes sharing an alias value or exact legal name without a `SAME_AS` claim | OpenMetadata | alert |
 | GQ-27 | derived-only discipline: every `ALLOCATES` row carries `weight_asof_block` + input lineage; none is hand-written | OpenMetadata | alert |
-| GQ-28 | weight closure: weights per (src, rel_type) in one basis departing from 1.0 beyond tolerance | OpenMetadata | blocks metrics for the node; under 1 advisory (partial recording is legitimate) |
+| GQ-28 | weight closure: weights per (`src`, `rel_type`, `weight_basis`), as of a date, departing from the whole — exactly, for curated sets, since the residual convention leaves no remainder; within one ulp per sibling (`n x 1e-18` at `numeric(30,18)`) for derived sets, whose shares are each rounded | OpenMetadata | blocks metrics for the node; under 1 advisory (partial recording is legitimate) |
 | GQ-29 | pivot staleness: each pivot table's `generated_at` vs the latest governed write | OpenMetadata | alert |
 | GQ-30 | `node_validity` backlog trend: the EXPECTED gap count per shape must not grow unbounded (day-one baseline: 15 UNKNOWN entities, 2 unclassified held securities) | OpenMetadata | alert |
 | GQ-31 | look-through coverage: a held instrument resolving to no leaf set (26 of 70 held tokens today) | OpenMetadata | published control total |
