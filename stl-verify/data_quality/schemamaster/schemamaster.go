@@ -73,7 +73,7 @@ type Override struct {
 // check reads only Table+Column (a declared fill satisfies a required key);
 // the remaining fields describe the mechanism for the transform generator: a single-hop FK join
 // (Parent/Key/Ref), an optional second hop (ThenParent/ThenKey/ThenRef), a literal (Const), or the
-// block-time dimension (BlockTime).
+// block-time dimension (BlockMeta).
 type Fill struct {
 	Table      string `json:"table"`
 	Column     string `json:"column"`
@@ -84,7 +84,7 @@ type Fill struct {
 	ThenKey    string `json:"then_key"`
 	ThenRef    string `json:"then_ref"`
 	Const      *int   `json:"const"`
-	BlockTime  bool   `json:"block_time"`
+	BlockMeta  bool   `json:"block_meta"`
 }
 
 // RequiredKey asserts that every governed table whose type is in AppliesTo resolves one of AnyOf
