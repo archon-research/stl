@@ -5,8 +5,9 @@ parameters, including the superseded boolean, and maps the domain's
 ``ValueError`` to HTTP 422.
 """
 
-from fastapi import HTTPException, Query
+from fastapi import Query
 
+from app.api.errors import ApiRejectionError
 from app.domain.provenance import (
     Provenance,
     legacy_reference_flag_as_provenance,
@@ -44,12 +45,8 @@ def get_requested_provenance(
     legacy = legacy_reference_flag_as_provenance(reference)
 
     if source is not None and legacy is not None and source is not legacy:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"source={source.value} conflicts with the deprecated reference={str(reference).lower()}; "
-                "pass only source"
-            ),
+        raise ApiRejectionError(
+            f"source={source.value} conflicts with the deprecated reference={str(reference).lower()}; pass only source"
         )
 
     return source if source is not None else legacy
@@ -65,4 +62,4 @@ def resolve_or_422(
     try:
         return resolve_provenance(requested, available=available, default=default)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise ApiRejectionError(str(exc)) from exc

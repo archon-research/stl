@@ -352,7 +352,7 @@ def test_post_returns_422_on_unknown_top_level_override_model(client: TestClient
     )
 
     assert response.status_code == 422
-    assert "typo_model" in response.json()["detail"]
+    assert "typo_model" in response.json()["message"]
     assert suraf.calls == []
 
 
@@ -373,7 +373,7 @@ def test_post_returns_422_when_service_raises_on_unknown_per_model_key(client: T
     )
 
     assert response.status_code == 422
-    assert "nonsense" in response.json()["detail"]
+    assert "nonsense" in response.json()["message"]
 
 
 def test_post_lets_invariant_breach_value_error_become_500() -> None:
@@ -543,7 +543,7 @@ def test_post_real_service_returns_422_on_out_of_range_gap_pct(client: TestClien
     )
 
     assert response.status_code == 422
-    assert "gap_pct" in response.json()["detail"]
+    assert "gap_pct" in response.json()["message"]
 
 
 def test_post_real_service_returns_422_on_unparseable_gap_pct(client: TestClient) -> None:
@@ -576,7 +576,7 @@ def test_post_real_service_returns_422_on_unknown_override_key(client: TestClien
     )
 
     assert response.status_code == 422
-    assert "nonsense" in response.json()["detail"]
+    assert "nonsense" in response.json()["message"]
 
 
 def test_post_real_service_returns_422_on_oversize_gap_pct_string(client: TestClient) -> None:
@@ -594,7 +594,7 @@ def test_post_real_service_returns_422_on_oversize_gap_pct_string(client: TestCl
     )
 
     assert response.status_code == 422
-    assert "too long" in response.json()["detail"]
+    assert "too long" in response.json()["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -637,7 +637,7 @@ def test_post_real_suraf_returns_422_on_oversize_usd_exposure_string(client: Tes
     )
 
     assert response.status_code == 422
-    assert "too long" in response.json()["detail"]
+    assert "too long" in response.json()["message"]
 
 
 def test_post_real_suraf_returns_422_when_usd_exposure_above_max(client: TestClient) -> None:
@@ -655,7 +655,7 @@ def test_post_real_suraf_returns_422_when_usd_exposure_above_max(client: TestCli
     )
 
     assert response.status_code == 422
-    assert "usd_exposure" in response.json()["detail"]
+    assert "usd_exposure" in response.json()["message"]
 
 
 def test_post_real_suraf_quantizes_rrc_to_usd_cents(client: TestClient) -> None:

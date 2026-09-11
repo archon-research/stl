@@ -1104,7 +1104,8 @@ def test_list_allocation_activity_returns_422_for_wide_window_without_filter():
     )
 
     assert response.status_code == 422
-    assert "selective filter" in response.json()["detail"]
+    assert response.json()["error_code"] == "window_too_large"
+    assert "selective filter" in response.json()["message"]
     service.list_allocation_activity.assert_not_awaited()
 
 

@@ -1,26 +1,30 @@
 """FastAPI integration for the shared time-series query policy.
 
 This is the inbound adapter for the domain ``time_series`` policy: it declares
-the HTTP query parameters, delegates normalization/validation to the domain
-resolver, and maps domain ``ValueError``s to HTTP 422. The response envelope
-types live here too, since they are an HTTP-contract concern.
+the HTTP query parameters and delegates normalization/validation to the domain
+resolvers, whose rejections travel as ``TimeSeriesQueryError`` and are rendered
+by the shared handler in ``app.api.errors``. The response envelope types live
+here too, since they are an HTTP-contract concern.
 """
 
 from datetime import UTC, datetime
 
-from fastapi import HTTPException, Query, Response
+from fastapi import Query, Response
 from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
 
 from app.domain.time_series import (
     AggregationMethod,
     TimeSeriesFrequency,
     TimeSeriesQuery,
+    TimeWindow,
+    resolve_latest_query,
     resolve_time_series_query,
 )
 
-# Public cache lifetime for responses with a pinned window. Pinned-window
-# responses cannot change going forward (the underlying rows are immutable once
-# observed), so a long TTL is safe and dramatically reduces hypertable load.
+# Public cache lifetime for responses with a pinned window. A pinned window can
+# still change — a correction or a backfill writes inside a window already served
+# — but only those two can, and they are rare, so bounded staleness on a copy we
+# cannot recall is the accepted trade.
 _PINNED_WINDOW_CACHE_MAX_AGE_SECONDS = 300
 
 # Shared by both dependencies below, which differ only in how they default the
@@ -54,11 +58,12 @@ def get_time_series_query_params(
         ),
     ),
 ) -> TimeSeriesQuery:
-    return _resolve_or_422(
+    return resolve_time_series_query(
         from_timestamp=from_timestamp,
         to_timestamp=to_timestamp,
         frequency=frequency,
         aggregation_method=aggregation_method,
+        now=datetime.now(UTC),
     )
 
 
@@ -89,34 +94,27 @@ def get_resampled_time_series_query_params(
     true on a route whose answer is always buckets, so the resolved query and
     the response agree.
     """
-    return _resolve_or_422(
+    return resolve_time_series_query(
         from_timestamp=from_timestamp,
         to_timestamp=to_timestamp,
         frequency=frequency,
         aggregation_method=aggregation_method,
         default_aggregation_method=AggregationMethod.END_PERIOD,
+        now=datetime.now(UTC),
     )
 
 
-def _resolve_or_422(
-    *,
-    from_timestamp: datetime | None,
-    to_timestamp: datetime | None,
-    frequency: TimeSeriesFrequency | None,
-    aggregation_method: AggregationMethod | None,
-    default_aggregation_method: AggregationMethod | None = None,
-) -> TimeSeriesQuery:
-    try:
-        return resolve_time_series_query(
-            from_timestamp=from_timestamp,
-            to_timestamp=to_timestamp,
-            frequency=frequency,
-            aggregation_method=aggregation_method,
-            default_aggregation_method=default_aggregation_method,
-            now=datetime.now(UTC),
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+def get_latest_query_params(
+    to_timestamp: datetime | None = Query(
+        default=None,
+        description=(
+            "As-of upper bound (ISO-8601, inclusive): the newest observation at or before it is "
+            "returned. Defaults to the current UTC time, which the response's window echo reports."
+        ),
+    ),
+) -> TimeWindow:
+    """The dependency for a ``/latest`` route: an as-of bound over a bounded lookback."""
+    return resolve_latest_query(to_timestamp=to_timestamp, now=datetime.now(UTC))
 
 
 class BucketPoint(BaseModel):
@@ -170,8 +168,8 @@ class ResampledTimeSeriesWindow(TimeSeriesWindow):
     frequency_ms: int = Field(description="`frequency` in milliseconds.")
 
 
-def build_raw_window(query: TimeSeriesQuery) -> TimeSeriesWindow:
-    """The echo for the unresampled arm of a route: the window, no grid."""
+def build_raw_window(query: TimeWindow) -> TimeSeriesWindow:
+    """The echo for a response with no grid: the unresampled arm of a route, and ``/latest``."""
     return TimeSeriesWindow(from_timestamp=query.from_timestamp, to_timestamp=query.to_timestamp)
 
 
@@ -185,13 +183,12 @@ def build_resampled_window(query: TimeSeriesQuery) -> ResampledTimeSeriesWindow:
     )
 
 
-def apply_cache_control(response: Response, query: TimeSeriesQuery) -> None:
+def apply_cache_control(response: Response, query: TimeWindow) -> None:
     """Set ``Cache-Control`` on responses whose window is fully pinned by the caller.
 
-    When ``to_timestamp`` is defaulted to ``now``, two requests one second apart
-    return different windows, so the response must not be cached. When both
-    bounds are supplied explicitly the window is deterministic and the response
-    is safe to cache publicly for a short period.
+    When a bound is defaulted to ``now``, two requests one second apart answer
+    over different windows, so the response must not be cached. A pinned window
+    is deterministic and is cached publicly for a short period.
     """
     if query.bounds_pinned:
         response.headers["Cache-Control"] = f"public, max-age={_PINNED_WINDOW_CACHE_MAX_AGE_SECONDS}"

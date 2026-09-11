@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from fastapi import HTTPException
 
+from app.api.errors import ApiRejectionError
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.token_catalog import TokenMetadata
@@ -89,4 +90,4 @@ def parse_asset_identity(
         detail = "provide exactly one of asset_id or (chain_id, token_address); got both"
     else:
         detail = "provide exactly one of asset_id or (chain_id, token_address); got neither"
-    raise HTTPException(status_code=422, detail=detail)
+    raise ApiRejectionError(detail)
