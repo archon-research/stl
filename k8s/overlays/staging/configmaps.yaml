@@ -994,3 +994,22 @@ data:
   # full-pass measurement at this value (1.6 GiB peak on live staging data,
   # k8s/base/core-model-runner/deployment.yaml); raise both together.
   CORE_MODEL_N_MC: "10000"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: position-materializer
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  # The schedule lives in Temporal state; the worker reconciles a changed
+  # interval into it on startup, so a redeploy is enough (stl-verify/AGENTS.md).
+  MATERIALIZE_INTERVAL: "1h"
+  # Explicit list of materialize_<projection>() wrappers, never discovery. Each
+  # wrapper runs its projection's own pre-flight refusals before the shared
+  # materializer appends to position_state (docs/runbooks/vector-position-materializer.md).
+  # Morpho only for now. Sky maps block_timestamp to synced_at, a sync clock, so an
+  # out-of-order retry inverts instant against height, and Aave's created_at defaults to
+  # now() so its legacy rows carry wall clock. Both join once their views read block_meta
+  # instead, as position_maple_loan already does; Anchorage and prime allocation follow.
+  POSITION_PROJECTIONS: "materialize_morpho_market,materialize_morpho_vault"

@@ -650,3 +650,89 @@ groups:
             /debt and /total-capital series is now frozen on its last value via
             locf.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorreferencecapitalindexerbalancesheetstalled
+      - alert: VectorPositionMaterializerSilentlyEmpty
+        # Runs are succeeding but no observation has been appended for any view in
+        # 6 hours. On a chain producing blocks that is not a plausible steady
+        # state: it means every projection is returning rows already stored, which
+        # is what an upstream indexer stall looks like from here. Warning, not a
+        # page: the data is stale, not wrong, and nothing is corrupted — the append
+        # is idempotent, so recovery is the next successful run.
+        expr: |
+          (
+            sum by (service_name, cluster) (
+              increase(position_materializer_projection_runs_total{
+                status="ok",
+                k8s_namespace_name="vector"
+              }[6h])
+            ) > 0
+          )
+          and
+          (
+            sum by (service_name, cluster) (
+              increase(position_materializer_rows_changed_total{
+                k8s_namespace_name="vector"
+              }[6h])
+            ) == 0
+          )
+        for: 30m
+        labels:
+          team: vector
+          severity: warning
+          component: position-materializer
+          namespace: vector
+        annotations:
+          summary: "position-materializer has appended no observations in 6h"
+          description: >-
+            Runs are succeeding on {{ $labels.cluster }} but
+            position_materializer_rows_changed_total has not moved in 6 hours, so
+            position_state is not tracking new positions. Most likely an upstream
+            indexer has stalled, or a projection view's join has gone empty.
+          runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializersilentlyempty"
+
+      - alert: VectorPositionMaterializerWithholdingPositions
+        # The shared function withholds a position whose new observations conflict and
+        # continues, so a projection reports success every tick while a position stays frozen
+        # at a stale value. Sustained, not instant: one tick's refusal is often a source
+        # correction arriving out of order and clears itself on the next run.
+        expr: |
+          max by (projection, cluster) (
+            position_materializer_positions_refused{k8s_namespace_name="vector"}
+          ) > 0
+        for: 3h
+        labels:
+          team: vector
+          severity: warning
+        annotations:
+          summary: "position-materializer is withholding positions in {{ $labels.projection }}"
+          description: >-
+            {{ $labels.projection }} has withheld or declined {{ $value }} position(s) on
+            {{ $labels.cluster }} for 3h. A withheld position reads as current downstream while
+            sitting at a stale value; a declined correction means the view and the spine disagree.
+            The runbook has a query per class.
+          runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializerwithholdingpositions"
+
+      - alert: VectorPositionMaterializerViewFailing
+        # One view is failing while others succeed. The generic cronjob alerts fire
+        # on the RUN, so a single bad view among several is visible there only as a
+        # whole-run error; this names the view, which is what the runbook needs.
+        expr: |
+          sum by (materializer, cluster) (
+            increase(position_materializer_projection_runs_total{
+              status="error",
+              k8s_namespace_name="vector"
+            }[15m])
+          ) > 0
+        for: 0m
+        labels:
+          team: vector
+          severity: warning
+          component: position-materializer
+          namespace: vector
+        annotations:
+          summary: "position-materializer view {{ $labels.materializer }} is failing"
+          description: >-
+            Projection {{ $labels.materializer }} returned an error on
+            {{ $labels.cluster }} in the last 15m. The runner logs the failure
+            and continues, so the other views in the same run did write; only
+            this one did not.
+          runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializerviewfailing"
