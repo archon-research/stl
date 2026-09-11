@@ -7,18 +7,27 @@
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE weight_basis_vocabulary (
-    basis        text PRIMARY KEY,
+    basis        text NOT NULL,
     description  text NOT NULL,
-    run_id       bigint REFERENCES writer_run(id)
+    change_reason text NOT NULL DEFAULT 'SEED_LOAD' CHECK (btrim(change_reason) <> ''),
+    run_id       bigint REFERENCES writer_run(id),
+    valid_from          date NOT NULL DEFAULT (now() AT TIME ZONE 'utc')::date,
+    processing_version  integer NOT NULL DEFAULT 0 CHECK (processing_version >= 0),
+    record_id           bigint GENERATED ALWAYS AS IDENTITY,
+    ingest_xid          xid8 NOT NULL DEFAULT pg_current_xact_id(),
+    ingested_at         timestamptz NOT NULL DEFAULT now(),
+    actor               text NOT NULL DEFAULT 'migration:20260904_120000',
+    content_hash        bytea NOT NULL,
+    PRIMARY KEY (basis, valid_from, processing_version),
+    CONSTRAINT weight_basis_vocabulary_record_id_key UNIQUE (record_id)
 );
-COMMENT ON TABLE weight_basis_vocabulary IS '[Configuration] Legal weight bases (ADR-0007 §3): three, each a share of a whole. Weights of unlike bases must never be summed; a conversion ratio is edge payload, not a weight (see the basis column). Plain table: seed-once, extended by reviewed migration.';
+COMMENT ON TABLE weight_basis_vocabulary IS '[Configuration] Legal weight bases (ADR-0007 §3): three, each a share of a whole. Weights of unlike bases must never be summed; a conversion ratio is edge payload, not a weight (see the basis column). VERSIONED reference table (ADR-0006 §1/§4, ADR-0007 §5): the natural key repeats, the PK carries valid_from and processing_version, and a change is an APPENDED version at processing_version 0 — never an in-place edit, which reference_table_immutable() and the full ACL revoke both refuse. valid_from in the key is a deliberate divergence from oracle_asset (VEC-597): with only processing_version there, an ordinary governance change would have to burn a correction version, which ADR-0006 §3 reserves for correction runs. The provenance spine (record_id, ingest_xid, ingested_at, actor, change_reason, content_hash) means what it means on sec_node and is engine-assigned by the same guard.';
 COMMENT ON COLUMN weight_basis_vocabulary.basis IS 'Roles: PK. Basis code (VALUE / NOTIONAL / OWNERSHIP_PCT). Each names a SHARE OF A WHOLE, which is what makes weights along a path multiplicable and weights under one basis summable. A conversion ratio is not a share: ADR-0007 §3 puts ratios in the edge payload.';
 COMMENT ON COLUMN weight_basis_vocabulary.description IS 'What the basis measures and where it is used.';
 COMMENT ON COLUMN weight_basis_vocabulary.run_id IS 'Roles: FK→writer_run.id, Audit. The process start that wrote this row (ADR-0006 §2); resolves to the build artefact through writer_run.build_id. NULL means written before run tracking — which is what the rows seeded here are.';
 
--- Declared before rel_type_vocabulary so its weight_basis is a real FK, not a soft one.
 CREATE TABLE rel_type_vocabulary (
-    rel_type            text PRIMARY KEY,
+    rel_type            text NOT NULL,
     family              text NOT NULL CHECK (family IN
                           ('composition','issuance_ownership_control','holding_allocation',
                            'classification_governance','identity_resolution','lifecycle')),
@@ -27,21 +36,30 @@ CREATE TABLE rel_type_vocabulary (
     cardinality         text NOT NULL CHECK (cardinality IN ('1','n','1_per_class','1_per_parent')),
     cluster_key         text[] CHECK (cluster_key IS NULL OR
                           (cluster_key <> '{}' AND array_position(cluster_key, NULL) IS NULL)),
-    weight_basis        text REFERENCES weight_basis_vocabulary(basis),
+    weight_basis        text,
     derived_only        boolean NOT NULL DEFAULT false,
     maturity            text NOT NULL CHECK (maturity IN ('ratified','draft')),
     description         text NOT NULL,
-    change_reason       text NOT NULL DEFAULT 'SEED_LOAD',
-    run_id              bigint REFERENCES writer_run(id)
+    change_reason       text NOT NULL DEFAULT 'SEED_LOAD' CHECK (btrim(change_reason) <> ''),
+    run_id              bigint REFERENCES writer_run(id),
+    valid_from          date NOT NULL DEFAULT (now() AT TIME ZONE 'utc')::date,
+    processing_version  integer NOT NULL DEFAULT 0 CHECK (processing_version >= 0),
+    record_id           bigint GENERATED ALWAYS AS IDENTITY,
+    ingest_xid          xid8 NOT NULL DEFAULT pg_current_xact_id(),
+    ingested_at         timestamptz NOT NULL DEFAULT now(),
+    actor               text NOT NULL DEFAULT 'migration:20260904_120000',
+    content_hash        bytea NOT NULL,
+    PRIMARY KEY (rel_type, valid_from, processing_version),
+    CONSTRAINT rel_type_vocabulary_record_id_key UNIQUE (record_id)
 );
-COMMENT ON TABLE rel_type_vocabulary IS '[Configuration] Governed relationship vocabulary (ADR-0007 §5). Adding or ratifying a type is a reviewed migration. Endpoint legality is the (rel_type, src_kind, dst_kind) triple, enforced by the loader/validator (cross-row; an FK cannot see the endpoint row). Plain table: governance-rate writes.';
+COMMENT ON TABLE rel_type_vocabulary IS '[Configuration] Governed relationship vocabulary (ADR-0007 §5). Adding or ratifying a type is a reviewed migration. Endpoint legality is the (rel_type, src_kind, dst_kind) triple, enforced by the loader/validator (cross-row; an FK cannot see the endpoint row). VERSIONED reference table (ADR-0006 §1/§4, ADR-0007 §5): the natural key repeats, the PK carries valid_from and processing_version, and a change is an APPENDED version at processing_version 0 — never an in-place edit, which reference_table_immutable() and the full ACL revoke both refuse. valid_from in the key is a deliberate divergence from oracle_asset (VEC-597): with only processing_version there, an ordinary governance change would have to burn a correction version, which ADR-0006 §3 reserves for correction runs. The provenance spine (record_id, ingest_xid, ingested_at, actor, change_reason, content_hash) means what it means on sec_node and is engine-assigned by the same guard.';
 COMMENT ON COLUMN rel_type_vocabulary.rel_type IS 'Roles: PK. The edge type name, UPPER_SNAKE.';
 COMMENT ON COLUMN rel_type_vocabulary.family IS 'One of the six ADR-0007 §5 families.';
 COMMENT ON COLUMN rel_type_vocabulary.src_kinds IS 'Legal source node kinds (sec_node.record_type values).';
 COMMENT ON COLUMN rel_type_vocabulary.dst_kinds IS 'Legal destination node kinds.';
 COMMENT ON COLUMN rel_type_vocabulary.cardinality IS 'Expected current-state cardinality; a DQ check over current state, never a write trigger (an open edge always time-overlaps its re-point).';
-COMMENT ON COLUMN rel_type_vocabulary.cluster_key IS 'The payload keys that distinguish a deliberate TWIN of this type, and nothing else: sec_edge.edge_disc is derived from them, so they must be IMMUTABLE over the edge''s life and every edge of the type must carry them (the guard refuses a payload that does not). A mutable key — an outlook, a weight — would fork identity on close-and-open instead of closing the window. NULL = no twins: one logical edge per (rel_type, src_id, dst_id), and a same-pair duplicate collides on the PK rather than becoming an unintended twin (GQ-19). Twelve of the thirteen ratified types are NULL; SPLIT_FROM keys on ex_date because two corporate actions on one pair are two edges, and without the key the second collapses onto the first in every resolved read. THIS COLUMN IS NOT AMENDABLE IN PLACE: reference_table_immutable() blocks UPDATE, so a declared value is frozen for the life of the row and a change means a migration that drops the trigger, updates, and recreates it — under LOCK TABLE sec_edge, since the guard reads this column without a row lock and an in-flight writer would otherwise key an edge on the old declaration. A draft type declares its key in the migration that ratifies it, which is an ordinary INSERT.';
-COMMENT ON COLUMN rel_type_vocabulary.weight_basis IS 'Roles: FK→weight_basis_vocabulary.basis. The declared basis for weighted types; NULL = unweighted type.';
+COMMENT ON COLUMN rel_type_vocabulary.cluster_key IS 'The payload keys that distinguish a deliberate TWIN of this type, and nothing else: sec_edge.edge_disc is derived from them, so they must be IMMUTABLE over the edge''s life and every edge of the type must carry them (the guard refuses a payload that does not). A mutable key — an outlook, a weight — would fork identity on close-and-open instead of closing the window. NULL = no twins: one logical edge per (rel_type, src_id, dst_id), and a same-pair duplicate collides on the PK rather than becoming an unintended twin (GQ-19). Twelve of the thirteen ratified types are NULL; SPLIT_FROM keys on ex_date because two corporate actions on one pair are two edges, and without the key the second collapses onto the first in every resolved read. Amending it is an APPENDED VERSION of the type row, never an in-place edit — the vocabulary is versioned for this among other reasons. Two obligations come with an amendment: it changes edge_disc for edges appended after it, so existing rows keep the identity they were written with and the type''s history records which declaration produced which; and it must run under LOCK TABLE sec_edge, since the guard reads the current version without a row lock and an in-flight writer would otherwise key an edge on the superseded declaration. A draft type declares its key in the migration that ratifies it.';
+COMMENT ON COLUMN rel_type_vocabulary.weight_basis IS 'Roles: soft ref→weight_basis_vocabulary.basis (the vocabulary is versioned, so its natural key repeats and no FK can target it; resolve against the current version). The declared basis for weighted types; NULL = unweighted type.';
 COMMENT ON COLUMN rel_type_vocabulary.derived_only IS 'true: rows of this type are projections written by a loader with lineage, never curated by hand.';
 COMMENT ON COLUMN rel_type_vocabulary.maturity IS 'ratified: decided and stable. draft types are not seeded; they land by migration when ratified.';
 COMMENT ON COLUMN rel_type_vocabulary.description IS 'What the type means; the reviewed definition.';
@@ -49,25 +67,45 @@ COMMENT ON COLUMN rel_type_vocabulary.change_reason IS 'Roles: Audit. Why the ro
 COMMENT ON COLUMN rel_type_vocabulary.run_id IS 'Roles: FK→writer_run.id, Audit. The process start that wrote this row (ADR-0006 §2); resolves to the build artefact through writer_run.build_id. NULL means written before run tracking — which is what the rows seeded here are.';
 
 CREATE TABLE change_reason_vocabulary (
-    code               text PRIMARY KEY,
+    code               text NOT NULL,
     description        text NOT NULL,
     requires_approval  boolean NOT NULL DEFAULT false,
-    run_id             bigint REFERENCES writer_run(id)
+    change_reason      text NOT NULL DEFAULT 'SEED_LOAD' CHECK (btrim(change_reason) <> ''),
+    run_id             bigint REFERENCES writer_run(id),
+    valid_from          date NOT NULL DEFAULT (now() AT TIME ZONE 'utc')::date,
+    processing_version  integer NOT NULL DEFAULT 0 CHECK (processing_version >= 0),
+    record_id           bigint GENERATED ALWAYS AS IDENTITY,
+    ingest_xid          xid8 NOT NULL DEFAULT pg_current_xact_id(),
+    ingested_at         timestamptz NOT NULL DEFAULT now(),
+    actor               text NOT NULL DEFAULT 'migration:20260904_120000',
+    content_hash        bytea NOT NULL,
+    PRIMARY KEY (code, valid_from, processing_version),
+    CONSTRAINT change_reason_vocabulary_record_id_key UNIQUE (record_id)
 );
-COMMENT ON TABLE change_reason_vocabulary IS '[Configuration] Structured change_reason_code set (ADR-0007 §4, CR-3.3). Every node/edge append cites one. Plain table: seed-once, extended by reviewed migration.';
+COMMENT ON TABLE change_reason_vocabulary IS '[Configuration] Structured change_reason_code set (ADR-0007 §4, CR-3.3). Every node/edge append cites one. VERSIONED reference table (ADR-0006 §1/§4, ADR-0007 §5): the natural key repeats, the PK carries valid_from and processing_version, and a change is an APPENDED version at processing_version 0 — never an in-place edit, which reference_table_immutable() and the full ACL revoke both refuse. valid_from in the key is a deliberate divergence from oracle_asset (VEC-597): with only processing_version there, an ordinary governance change would have to burn a correction version, which ADR-0006 §3 reserves for correction runs. The provenance spine (record_id, ingest_xid, ingested_at, actor, change_reason, content_hash) means what it means on sec_node and is engine-assigned by the same guard.';
 COMMENT ON COLUMN change_reason_vocabulary.code IS 'Roles: PK. Reason code, UPPER_SNAKE.';
 COMMENT ON COLUMN change_reason_vocabulary.description IS 'When to use the code.';
 COMMENT ON COLUMN change_reason_vocabulary.requires_approval IS 'true: an append citing this code must carry approved_by (validator-enforced; approval identity distinct from the appender).';
 COMMENT ON COLUMN change_reason_vocabulary.run_id IS 'Roles: FK→writer_run.id, Audit. The process start that wrote this row (ADR-0006 §2); resolves to the build artefact through writer_run.build_id. NULL means written before run tracking — which is what the rows seeded here are.';
 
 CREATE TABLE concept_class_vocabulary (
-    concept_class text PRIMARY KEY,
+    concept_class text NOT NULL,
     maturity      text NOT NULL CHECK (maturity IN ('ratified','draft')),
     seed_source   text,
     description   text NOT NULL,
-    run_id        bigint REFERENCES writer_run(id)
+    change_reason text NOT NULL DEFAULT 'SEED_LOAD' CHECK (btrim(change_reason) <> ''),
+    run_id        bigint REFERENCES writer_run(id),
+    valid_from          date NOT NULL DEFAULT (now() AT TIME ZONE 'utc')::date,
+    processing_version  integer NOT NULL DEFAULT 0 CHECK (processing_version >= 0),
+    record_id           bigint GENERATED ALWAYS AS IDENTITY,
+    ingest_xid          xid8 NOT NULL DEFAULT pg_current_xact_id(),
+    ingested_at         timestamptz NOT NULL DEFAULT now(),
+    actor               text NOT NULL DEFAULT 'migration:20260904_120000',
+    content_hash        bytea NOT NULL,
+    PRIMARY KEY (concept_class, valid_from, processing_version),
+    CONSTRAINT concept_class_vocabulary_record_id_key UNIQUE (record_id)
 );
-COMMENT ON TABLE concept_class_vocabulary IS '[Configuration] Concept classes: which kind of category a CONCEPT node is (sec_node.attrs.concept_class). Plain table: seed-once. The guard class ships with the shape system (VEC-622).';
+COMMENT ON TABLE concept_class_vocabulary IS '[Configuration] Concept classes: which kind of category a CONCEPT node is (sec_node.attrs.concept_class). Plain table: seed-once. The guard class ships with the shape system (VEC-622). VERSIONED reference table (ADR-0006 §1/§4, ADR-0007 §5): the natural key repeats, the PK carries valid_from and processing_version, and a change is an APPENDED version at processing_version 0 — never an in-place edit, which reference_table_immutable() and the full ACL revoke both refuse. valid_from in the key is a deliberate divergence from oracle_asset (VEC-597): with only processing_version there, an ordinary governance change would have to burn a correction version, which ADR-0006 §3 reserves for correction runs. The provenance spine (record_id, ingest_xid, ingested_at, actor, change_reason, content_hash) means what it means on sec_node and is engine-assigned by the same guard.';
 COMMENT ON COLUMN concept_class_vocabulary.concept_class IS 'Roles: PK. Class name, lower_snake.';
 COMMENT ON COLUMN concept_class_vocabulary.maturity IS 'ratified: carries shapes and governed memberships. draft: taxonomy exists, rules pending.';
 COMMENT ON COLUMN concept_class_vocabulary.seed_source IS 'Which ref_* vocabulary seeds the class, where one does (the promotion path of 20260904_120100).';
@@ -80,10 +118,19 @@ CREATE TABLE node_status_vocabulary (
     is_terminal  boolean NOT NULL,
     pairs_with   text,
     description  text NOT NULL,
+    change_reason text NOT NULL DEFAULT 'SEED_LOAD' CHECK (btrim(change_reason) <> ''),
     run_id       bigint REFERENCES writer_run(id),
-    PRIMARY KEY (record_type, status)
+    valid_from          date NOT NULL DEFAULT (now() AT TIME ZONE 'utc')::date,
+    processing_version  integer NOT NULL DEFAULT 0 CHECK (processing_version >= 0),
+    record_id           bigint GENERATED ALWAYS AS IDENTITY,
+    ingest_xid          xid8 NOT NULL DEFAULT pg_current_xact_id(),
+    ingested_at         timestamptz NOT NULL DEFAULT now(),
+    actor               text NOT NULL DEFAULT 'migration:20260904_120000',
+    content_hash        bytea NOT NULL,
+    PRIMARY KEY (record_type, status, valid_from, processing_version),
+    CONSTRAINT node_status_vocabulary_record_id_key UNIQUE (record_id)
 );
-COMMENT ON TABLE node_status_vocabulary IS '[Configuration] Per-kind node status vocabulary (ADR-0007 §2). A status change is a node version, never a mutation; terminal statuses retire nothing — history, edges and register rows remain readable. Plain table: seed-once.';
+COMMENT ON TABLE node_status_vocabulary IS '[Configuration] Per-kind node status vocabulary (ADR-0007 §2). A status change is a node version, never a mutation; terminal statuses retire nothing — history, edges and register rows remain readable. Plain table: seed-once. VERSIONED reference table (ADR-0006 §1/§4, ADR-0007 §5): the natural key repeats, the PK carries valid_from and processing_version, and a change is an APPENDED version at processing_version 0 — never an in-place edit, which reference_table_immutable() and the full ACL revoke both refuse. valid_from in the key is a deliberate divergence from oracle_asset (VEC-597): with only processing_version there, an ordinary governance change would have to burn a correction version, which ADR-0006 §3 reserves for correction runs. The provenance spine (record_id, ingest_xid, ingested_at, actor, change_reason, content_hash) means what it means on sec_node and is engine-assigned by the same guard.';
 COMMENT ON COLUMN node_status_vocabulary.record_type IS 'Roles: PK (with status). The node kind the status applies to.';
 COMMENT ON COLUMN node_status_vocabulary.status IS 'Roles: PK (with record_type). Status value, UPPER_SNAKE.';
 COMMENT ON COLUMN node_status_vocabulary.is_terminal IS 'true: no further lifecycle expected; excluded from the active universe, history intact.';
@@ -109,7 +156,7 @@ CREATE TABLE sec_node (
     ingested_at         timestamptz NOT NULL DEFAULT now(),
     run_id              bigint REFERENCES writer_run(id),
     actor               text NOT NULL,
-    change_reason_code  text NOT NULL REFERENCES change_reason_vocabulary(code),
+    change_reason_code  text NOT NULL,
     change_reason       text NOT NULL,
     approved_by         text,
     supersedes_record_id bigint,
@@ -136,7 +183,7 @@ COMMENT ON TABLE sec_node IS '[Dimension] Combined SECs master (ADR-0007 §2): o
 COMMENT ON COLUMN sec_node.id IS 'Roles: PK (with processing_version, valid_from). Opaque, kind-prefixed (em-/sec-/concept-/src-/acct-), house-assigned once, never derived from a public identifier or symbol, and never hashed into position_id. Seeded em-* ids stand unchanged.';
 COMMENT ON COLUMN sec_node.record_type IS 'Node kind. ENTITY / SECURITY / CONCEPT / SOURCE live; ACCOUNT staged (ADR-0007 §2).';
 COMMENT ON COLUMN sec_node.chain_id IS 'Roles: FK→chain.chain_id (soft). NULL for off-chain things.';
-COMMENT ON COLUMN sec_node.status IS 'Roles: FK→node_status_vocabulary (composite with record_type). A status change is a new version.';
+COMMENT ON COLUMN sec_node.status IS 'Roles: soft ref→node_status_vocabulary (composite with record_type; versioned, so GQ-03 is validator-enforced against the current version rather than by an FK). A status change is a new version.';
 COMMENT ON COLUMN sec_node.attrs IS 'Kind-specific attributes as jsonb; the shape system (VEC-622) decides required-ness per type. Hot attributes promote to typed columns only on VEC-633 evidence.';
 COMMENT ON COLUMN sec_node.valid_from IS 'Roles: PK (with id, processing_version, valid_to). Valid-time window start, UTC date, half-open [valid_from, valid_to). GRAIN IS A DAY, so two changes to one record on the same day are not both representable: both windows are [D, D+1), resolution picks one by processing_version then ingest_xid, and the other is unreachable by any as-of date even though it was true for part of D. Accepted for curated data at governance cadence; VEC-632 records the constraint in ADR-0007 §3.';
 COMMENT ON COLUMN sec_node.valid_to IS 'Roles: PK (with id, processing_version, valid_from). Valid-time window end, exclusive; ''infinity'' = open/current, never NULL. In the key so close-and-open is an ordinary append at processing_version 0. A ZERO-LENGTH window (valid_to = valid_from) is a TOMBSTONE: it matches no as-of date, so THAT WINDOW drops out of the resolved reads with its history intact (ADR-0007 §3 retraction; pair it with change_reason_code RETRACTION and supersedes_record_id). It withdraws one window, not the logical record — a closed-and-reopened record takes one tombstone per window, and single-append record withdrawal is VEC-622''s.';
@@ -146,7 +193,7 @@ COMMENT ON COLUMN sec_node.ingest_xid IS 'Roles: Audit. Knowledge-time visibilit
 COMMENT ON COLUMN sec_node.ingested_at IS 'Roles: Audit. Wall-clock label only; never the audit key (a row stamps at transaction start but becomes visible at commit).';
 COMMENT ON COLUMN sec_node.run_id IS 'Roles: FK→writer_run.id, Audit. The process start that wrote this row (ADR-0006 §2); resolves to the build artefact through writer_run.build_id, and to the reference data the writer saw through writer_run.reference_snapshot / reference_effective_at. NULL means written before run tracking — which is what the seeded rows are.';
 COMMENT ON COLUMN sec_node.actor IS 'Roles: Audit. Real, non-shared principal (human or service) that appended the row. Required.';
-COMMENT ON COLUMN sec_node.change_reason_code IS 'Roles: FK→change_reason_vocabulary.code, Audit. Structured reason for the append.';
+COMMENT ON COLUMN sec_node.change_reason_code IS 'Roles: soft ref→change_reason_vocabulary.code (the vocabulary is versioned, so its natural key repeats and no FK can target it; resolve against the current version). Audit. Structured reason for the append.';
 COMMENT ON COLUMN sec_node.change_reason IS 'Roles: Audit. Free-text reason; cites the source where change_reason_code = CURATED_SOURCE.';
 COMMENT ON COLUMN sec_node.approved_by IS 'Roles: Audit. Approver, distinct from actor, where the reason code requires approval.';
 COMMENT ON COLUMN sec_node.supersedes_record_id IS 'Roles: FK-shaped→sec_node.record_id (enforced by sec_node_append_guard, which needs the predecessor''s content_hash to chain this row''s hash; an unresolvable pointer is rejected), Audit. record_id this append corrects or retracts; the correction chain is walkable through it, and content_hash binds this row to the exact content it supersedes. The resolved reads do not consult it — supersession within a window is decided by processing_version then ingest_xid, and withdrawal by the zero-length tombstone window.';
@@ -174,9 +221,9 @@ CREATE TABLE sec_edge (
     src_kind            text NOT NULL,
     dst_id              text NOT NULL,
     dst_kind            text NOT NULL,
-    rel_type            text NOT NULL REFERENCES rel_type_vocabulary(rel_type),
+    rel_type            text NOT NULL,
     rel_weight          numeric(30,18),
-    weight_basis        text REFERENCES weight_basis_vocabulary(basis),
+    weight_basis        text,
     weight_asof_block   bigint,
     payload             jsonb NOT NULL DEFAULT '{}'::jsonb,
     valid_from          date NOT NULL,
@@ -187,7 +234,7 @@ CREATE TABLE sec_edge (
     ingested_at         timestamptz NOT NULL DEFAULT now(),
     run_id              bigint REFERENCES writer_run(id),
     actor               text NOT NULL,
-    change_reason_code  text NOT NULL REFERENCES change_reason_vocabulary(code),
+    change_reason_code  text NOT NULL,
     change_reason       text NOT NULL,
     approved_by         text,
     supersedes_record_id bigint,
@@ -224,9 +271,9 @@ COMMENT ON COLUMN sec_edge.src_id IS 'Roles: FK→sec_node.id (soft; SCD2 ids no
 COMMENT ON COLUMN sec_edge.src_kind IS 'Denormalised source kind, CHECKed to agree with src_id''s own prefix (so ''em-…'' cannot be declared SECURITY). That the endpoint EXISTS as a current node is cross-row and stays validator-enforced (GQ-11).';
 COMMENT ON COLUMN sec_edge.dst_id IS 'Roles: FK→sec_node.id (soft). Edge destination.';
 COMMENT ON COLUMN sec_edge.dst_kind IS 'Denormalised destination kind, CHECKed to agree with dst_id''s own prefix. Endpoint existence stays validator-enforced (GQ-11).';
-COMMENT ON COLUMN sec_edge.rel_type IS 'Roles: FK→rel_type_vocabulary.rel_type, PK component. The governed type.';
+COMMENT ON COLUMN sec_edge.rel_type IS 'Roles: PK component. The governed type. Soft ref→rel_type_vocabulary.rel_type: the vocabulary is versioned, so GQ-01 is enforced by sec_store_append_guard against the current version rather than by an FK — the guard has to read that row anyway to derive edge_disc.';
 COMMENT ON COLUMN sec_edge.rel_weight IS 'Exact decimal numeric(30,18), never float (RP-4.4). Look-through = sum over paths of weight products within one basis. NULL on unweighted types; a NULL weight on a weighted walk is an error, never treated as 1.0.';
-COMMENT ON COLUMN sec_edge.weight_basis IS 'Roles: FK→weight_basis_vocabulary.basis. Mandatory when rel_weight is present (CHECK).';
+COMMENT ON COLUMN sec_edge.weight_basis IS 'Roles: soft ref→weight_basis_vocabulary.basis (the vocabulary is versioned, so its natural key repeats and no FK can target it; resolve against the current version). Mandatory when rel_weight is present (CHECK).';
 COMMENT ON COLUMN sec_edge.weight_asof_block IS 'Block number a market-derived weight was computed at. Raw chain block height. NULL for curated weights.';
 COMMENT ON COLUMN sec_edge.payload IS 'Type-specific attribute cluster (ratio+event_date, agency+rating+outlook, lien seniority, role). Split in two by rel_type_vocabulary.cluster_key: the declared keys are immutable and derive edge_disc, everything else is free to change under close-and-open.';
 COMMENT ON COLUMN sec_edge.valid_from IS 'Roles: PK component. Valid-time window start, UTC date, half-open.';
@@ -237,7 +284,7 @@ COMMENT ON COLUMN sec_edge.ingest_xid IS 'Roles: Audit. Knowledge-time visibilit
 COMMENT ON COLUMN sec_edge.ingested_at IS 'Roles: Audit. Wall-clock label only.';
 COMMENT ON COLUMN sec_edge.run_id IS 'Roles: FK→writer_run.id, Audit. See sec_node.run_id.';
 COMMENT ON COLUMN sec_edge.actor IS 'Roles: Audit. Appending principal. Required.';
-COMMENT ON COLUMN sec_edge.change_reason_code IS 'Roles: FK→change_reason_vocabulary.code, Audit.';
+COMMENT ON COLUMN sec_edge.change_reason_code IS 'Roles: soft ref→change_reason_vocabulary.code (the vocabulary is versioned, so its natural key repeats and no FK can target it; resolve against the current version). Audit.';
 COMMENT ON COLUMN sec_edge.change_reason IS 'Roles: Audit. Free-text reason.';
 COMMENT ON COLUMN sec_edge.approved_by IS 'Roles: Audit. Approver where the reason code requires one.';
 COMMENT ON COLUMN sec_edge.supersedes_record_id IS 'Roles: FK-shaped→sec_edge.record_id (enforced by sec_edge_append_guard, see sec_node.supersedes_record_id), Audit. record_id this append corrects, re-points or retracts. Not consulted by the resolved reads.';
@@ -368,99 +415,6 @@ RETURNS SETOF sec_edge LANGUAGE sql STABLE AS $$
     ORDER BY rel_type, src_id, dst_id, edge_disc, valid_from DESC
 $$;
 COMMENT ON FUNCTION sec_edge_as_of(date, pg_snapshot) IS 'Bitemporal edge read; see sec_node_as_of(date, pg_snapshot).';
-
--- ---------------------------------------------------------------------------
--- Vocabulary seeds (the decided, stable content only)
--- ---------------------------------------------------------------------------
-
-INSERT INTO weight_basis_vocabulary (basis, description) VALUES
- ('VALUE','share by USD value: look-through composition, allocations'),
- ('NOTIONAL','share by notional: index/benchmark membership'),
- ('OWNERSHIP_PCT','ownership fraction: corporate structure')
-ON CONFLICT (basis) DO NOTHING;
-
-INSERT INTO change_reason_vocabulary (code, description, requires_approval) VALUES
- ('SEED_LOAD','initial vocabulary/schema/data seed', false),
- ('PORT_FROM_STANDALONE','row ported from the frozen standalone masters', false),
- ('RULE_DERIVED','loader rule where the shape is known (e.g. receipt_token => receipt token)', false),
- ('CURATED_SOURCE','sourced judgment; the source is cited in change_reason', false),
- ('RECLASSIFICATION','a classification moved', true),
- ('REPOINT','an edge or register mapping re-pointed', true),
- ('VALID_TIME_AMEND','late-arriving or amended source data; valid window corrected', false),
- ('RESTATEMENT','an earlier record was wrong; supersedes_record_id set', true),
- ('RETRACTION','tombstone: the record should never have existed', true),
- ('CORPORATE_ACTION','status version + succession edge', false),
- ('DEDUP_SUPERSEDE','SAME_AS / SUPERSEDES outcome', true)
-ON CONFLICT (code) DO NOTHING;
-
-INSERT INTO concept_class_vocabulary (concept_class, maturity, seed_source, description) VALUES
- ('instrument_type','ratified','ref asset_class / security_type','top-level instrument classification; carries shapes'),
- ('instrument_subtype','ratified','ref security_subtype','subtype under instrument_type via NARROWER_THAN'),
- ('entity_type','draft','ref entity_type','legal form'),
- ('counterparty_role','draft','ref counterparty_role','role vocabulary'),
- ('sector','draft','ref sector (GICS)','issuer sector'),
- ('credit_rating','draft','ref credit_rating','RATED_BY targets'),
- ('jurisdiction','draft','ref country (ISO 3166)','DOMICILED_IN targets'),
- ('currency','draft','ref currency (ISO 4217)','DENOMINATED_IN / PEGGED_TO targets')
-ON CONFLICT (concept_class) DO NOTHING;
-
--- The ratified relationship types only. Draft types (COLLATERALISED_BY, TRANCHE_OF,
--- REFERENCES, MANAGED_BY, RATED_BY, PEGGED_TO, SAME_AS, ...) land by migration when they
--- ratify, each with its first consumer — nothing speculative is frozen here.
-INSERT INTO rel_type_vocabulary
- (rel_type, family, src_kinds, dst_kinds, cardinality, cluster_key, weight_basis, derived_only, maturity, description) VALUES
- ('HAS_UNDERLYING','composition','{SECURITY}','{SECURITY}','n',NULL,'VALUE',false,'ratified','what a token or wrapper is built on; the look-through spine'),
- ('ISSUED_BY','issuance_ownership_control','{SECURITY}','{ENTITY}','1',NULL,NULL,false,'ratified','the issuer; replaces issuer_entity_id as authority'),
- ('SUBSIDIARY_OF','issuance_ownership_control','{ENTITY}','{ENTITY}','1_per_parent',NULL,'OWNERSHIP_PCT',false,'ratified','legal parent; ultimate parent derived by walking, never stored'),
- ('AFFILIATE_OF','issuance_ownership_control','{ENTITY}','{ENTITY}','n',NULL,NULL,false,'ratified','related, not owned'),
- ('HELD_BY','holding_allocation','{SECURITY}','{ENTITY}','n',NULL,NULL,false,'ratified','holder of record where holding is a reference fact; balances stay in the timeseries'),
- ('BELONGS_TO','classification_governance','{SECURITY,ENTITY,ACCOUNT}','{CONCEPT}','1_per_class',NULL,NULL,false,'ratified','category membership'),
- ('NARROWER_THAN','classification_governance','{CONCEPT}','{CONCEPT}','1',NULL,NULL,false,'ratified','taxonomy hierarchy; shape inheritance path'),
- ('GOVERNED_BY','classification_governance','{ENTITY,ACCOUNT}','{CONCEPT}','n',NULL,NULL,false,'ratified','which rule set applies'),
- ('SCORED_BY','classification_governance','{CONCEPT}','{CONCEPT}','n',NULL,NULL,false,'ratified','concept-to-concept pivot: asset class -> risk model'),
- ('OWNED_BY','classification_governance','{CONCEPT}','{ENTITY}','1',NULL,NULL,false,'ratified','stewardship of a rule set'),
- ('SOURCED_FROM','classification_governance','{SECURITY,ENTITY,CONCEPT,SOURCE,ACCOUNT}','{SOURCE}','n',NULL,NULL,false,'ratified','feed provenance where lineage points at a source'),
- ('SUCCEEDED_BY','lifecycle','{SECURITY}','{SECURITY}','1',NULL,NULL,false,'ratified','merger / redenomination; old node -> MERGED; register re-points'),
- ('SPLIT_FROM','lifecycle','{SECURITY}','{SECURITY}','1','{ex_date}',NULL,false,'ratified','split / reverse split; payload: ratio, ex_date')
-ON CONFLICT (rel_type) DO NOTHING;
-
-INSERT INTO node_status_vocabulary (record_type, status, is_terminal, pairs_with, description) VALUES
- ('SECURITY','ACTIVE',    false, NULL,           'live instrument-of-record'),
- ('SECURITY','SUSPENDED', false, NULL,           'trading halted / contract paused; expected to resume or resolve'),
- ('SECURITY','DELISTED',  false, NULL,           'no longer listed on its venue; may persist off-venue'),
- ('SECURITY','DEFAULTED', false, NULL,           'issuer default; may restructure, so not terminal'),
- ('SECURITY','MATURED',   true,  NULL,           'term instrument reached maturity'),
- ('SECURITY','REDEEMED',  true,  NULL,           'redeemed or called; payload carries the call details'),
- ('SECURITY','CONVERTED', true,  'CONVERTS_TO',  'converted into another security'),
- ('SECURITY','MERGED',    true,  'SUCCEEDED_BY', 'merged / redenominated; the register re-points to the successor'),
- ('SECURITY','EXPIRED',   true,  NULL,           'derivative or right lapsed unexercised'),
- ('SECURITY','RETIRED',   true,  NULL,           'wound down with no successor'),
- ('ENTITY','ACTIVE',         false, NULL,         'operating legal person / operator'),
- ('ENTITY','INACTIVE',       false, NULL,         'dormant per registry (GLEIF entity status INACTIVE)'),
- ('ENTITY','IN_LIQUIDATION', false, NULL,         'winding up in progress'),
- ('ENTITY','DISSOLVED',      true,  NULL,         'legally dissolved'),
- ('ENTITY','MERGED',         true,  NULL,         'absorbed into another entity; corporate-structure edges record where'),
- ('ENTITY','SUPERSEDED',     true,  'SUPERSEDES', 'deduplicated; the surviving node is the SUPERSEDES source'),
- ('CONCEPT','ACTIVE',     false, NULL,         'in the governed vocabulary; memberships allowed'),
- ('CONCEPT','DEPRECATED', false, NULL,         'no new memberships; existing ones stand'),
- ('CONCEPT','RETIRED',    true,  NULL,         'memberships must move; validator flags remaining ones'),
- ('CONCEPT','SUPERSEDED', true,  'SUPERSEDES', 'replaced by another concept'),
- ('SOURCE','ACTIVE',         false, NULL,         'licensed and feeding'),
- ('SOURCE','SUSPENDED',      false, NULL,         'paused, e.g. licence lapsed; exposability off'),
- ('SOURCE','DECOMMISSIONED', true,  NULL,         'feed ended; provenance references remain valid'),
- ('SOURCE','SUPERSEDED',     true,  'SUPERSEDES', 'replaced by another source'),
- ('ACCOUNT','ACTIVE', false, NULL, 'open book'),
- ('ACCOUNT','FROZEN', false, NULL, 'no movements permitted; still reportable'),
- ('ACCOUNT','CLOSED', true,  NULL, 'closed book; history remains')
-ON CONFLICT (record_type, status) DO NOTHING;
-
--- pairs_with names two draft types (CONVERTS_TO, SUPERSEDES) not yet in the vocabulary:
--- deliberately a soft reference — the status rows are the stable record of the pairing,
--- and the edge types land when they ratify.
-
-ALTER TABLE sec_node ADD CONSTRAINT sec_node_status_fkey
-    FOREIGN KEY (record_type, status) REFERENCES node_status_vocabulary (record_type, status);
-
 -- ---------------------------------------------------------------------------
 -- Write boundary: ingest_xid platform-assigned, content_hash engine-computed (AR-1.2, NFR-5).
 -- ---------------------------------------------------------------------------
@@ -512,7 +466,13 @@ DECLARE
     derived_disc text;
     parent_disc  text;
     vocab_found  boolean;
+    row_json     jsonb;
 BEGIN
+    -- The guard runs on the two stores and on the five vocabularies, which carry the same
+    -- provenance block but not the stores' columns, so every branch below tests for its column
+    -- rather than assuming a shape. NEW.<field> on an absent column is a runtime error, and AND
+    -- does not reliably short-circuit, so the tests nest rather than combine.
+    row_json := to_jsonb(NEW);
     IF NEW.ingest_xid IS DISTINCT FROM pg_current_xact_id() THEN
         RAISE EXCEPTION 'ingest_xid is platform-assigned on %.% and must never be writer-supplied (ADR-0007 §4, ADR-0006 §5); omit the column and let the default stand',
             TG_TABLE_SCHEMA, TG_TABLE_NAME;
@@ -520,9 +480,15 @@ BEGIN
 
     -- Derived before the pre-image is taken, so content_hash covers the discriminator it ends up
     -- keyed by. Keyed on the column rather than the table name, which a rename would defeat.
-    IF to_jsonb(NEW) ? 'edge_disc' THEN
+    IF row_json ? 'edge_disc' THEN
+        -- Current version, not a unique row: the vocabulary is versioned (ADR-0007 §5), so the
+        -- natural key repeats and the pinned read is this ORDER BY rather than an FK.
         SELECT v.cluster_key, true INTO declared_key, vocab_found
-          FROM rel_type_vocabulary v WHERE v.rel_type = NEW.rel_type;
+          FROM rel_type_vocabulary v
+         WHERE v.rel_type = NEW.rel_type
+           AND v.valid_from <= (now() AT TIME ZONE 'utc')::date
+         ORDER BY v.valid_from DESC, v.processing_version DESC, v.record_id DESC
+         LIMIT 1;
         IF coalesce(vocab_found, false) THEN
             derived_disc := sec_edge_discriminator(NEW.payload, declared_key);
             IF derived_disc IS NULL THEN
@@ -547,24 +513,64 @@ BEGIN
                 END IF;
             END IF;
         ELSE
-            -- No vocabulary row: the rel_type FK owns this (23503, GQ-01). A placeholder only so
-            -- the NOT NULL check, which runs first, cannot pre-empt it with 23502.
-            NEW.edge_disc := coalesce(NEW.edge_disc, 'base');
+            -- GQ-01 at the engine. It was the rel_type FK until the vocabulary became versioned;
+            -- a repeating natural key cannot be an FK target, and the guard has to read the
+            -- vocabulary anyway to derive edge_disc, so an unregistered type fails here instead
+            -- of landing with a discriminator derived from a declaration that does not exist.
+            RAISE EXCEPTION 'rel_type % is not in the governed vocabulary as of today (ADR-0007 §5, GQ-01)',
+                NEW.rel_type;
         END IF;
     END IF;
 
+    -- The vocabulary references the dropped FKs used to enforce. A versioned vocabulary cannot be
+    -- an FK target, but the guard is already reading one, so these stay engine-enforced rather
+    -- than becoming validator rules: existence as of today, against any live version.
+    IF row_json ? 'change_reason_code' THEN
+        IF NOT EXISTS (SELECT 1 FROM change_reason_vocabulary v
+                        WHERE v.code = NEW.change_reason_code
+                          AND v.valid_from <= (now() AT TIME ZONE 'utc')::date) THEN
+            RAISE EXCEPTION 'change_reason_code % is not in the governed vocabulary as of today (ADR-0007 §4, CR-3.3)',
+                NEW.change_reason_code;
+        END IF;
+    END IF;
+
+    IF row_json ? 'weight_basis' THEN
+        IF NEW.weight_basis IS NOT NULL THEN
+            IF NOT EXISTS (SELECT 1 FROM weight_basis_vocabulary v
+                            WHERE v.basis = NEW.weight_basis
+                              AND v.valid_from <= (now() AT TIME ZONE 'utc')::date) THEN
+                RAISE EXCEPTION 'weight_basis % is not in the governed vocabulary as of today (ADR-0007 §3, DM-5)',
+                    NEW.weight_basis;
+            END IF;
+        END IF;
+    END IF;
+
+    -- node_status_vocabulary carries record_type and status itself, so the check has to exclude
+    -- the table it reads: a vocabulary does not validate its own rows against itself.
+    IF row_json ? 'status' AND TG_RELID <> 'node_status_vocabulary'::regclass THEN
+        IF NOT EXISTS (SELECT 1 FROM node_status_vocabulary v
+                        WHERE v.record_type = NEW.record_type AND v.status = NEW.status
+                          AND v.valid_from <= (now() AT TIME ZONE 'utc')::date) THEN
+            RAISE EXCEPTION 'status % is not legal for record_type % as of today (ADR-0007 §2, GQ-03)',
+                NEW.status, NEW.record_type;
+        END IF;
+    END IF;
+
+    -- Re-read: the edge branch above assigns edge_disc, and the hash has to cover it.
     pre_image := to_jsonb(NEW)
                    - 'record_id' - 'ingest_xid' - 'ingested_at' - 'content_hash'
                    - 'edge_id' - 'supersedes_record_id';
 
-    IF NEW.supersedes_record_id IS NOT NULL THEN
-        EXECUTE format('SELECT content_hash FROM %I.%I WHERE record_id = $1', TG_TABLE_SCHEMA, TG_TABLE_NAME)
-            INTO parent_hash USING NEW.supersedes_record_id;
-        IF parent_hash IS NULL THEN
-            RAISE EXCEPTION 'supersedes_record_id % names no stored row in %.%; a correction chains on the content it supersedes, so the predecessor must already be appended (AR-1.2)',
-                NEW.supersedes_record_id, TG_TABLE_SCHEMA, TG_TABLE_NAME;
+    IF row_json ? 'supersedes_record_id' THEN
+        IF NEW.supersedes_record_id IS NOT NULL THEN
+            EXECUTE format('SELECT content_hash FROM %I.%I WHERE record_id = $1', TG_TABLE_SCHEMA, TG_TABLE_NAME)
+                INTO parent_hash USING NEW.supersedes_record_id;
+            IF parent_hash IS NULL THEN
+                RAISE EXCEPTION 'supersedes_record_id % names no stored row in %.%; a correction chains on the content it supersedes, so the predecessor must already be appended (AR-1.2)',
+                    NEW.supersedes_record_id, TG_TABLE_SCHEMA, TG_TABLE_NAME;
+            END IF;
+            pre_image := pre_image || jsonb_build_object('supersedes_content_hash', encode(parent_hash, 'hex'));
         END IF;
-        pre_image := pre_image || jsonb_build_object('supersedes_content_hash', encode(parent_hash, 'hex'));
     END IF;
 
     computed := sha256(convert_to(pre_image::text, 'UTF8'));
@@ -583,6 +589,115 @@ CREATE TRIGGER sec_node_append_guard BEFORE INSERT ON sec_node
     FOR EACH ROW EXECUTE FUNCTION sec_store_append_guard();
 CREATE TRIGGER sec_edge_append_guard BEFORE INSERT ON sec_edge
     FOR EACH ROW EXECUTE FUNCTION sec_store_append_guard();
+
+-- The vocabularies carry the §4 provenance block now, so they take the same guard: engine-assigned
+-- ingest_xid and a content hash from the first append. The edge branch keys on edge_disc, which
+-- they do not have, so it is skipped.
+DO $$
+DECLARE t text;
+BEGIN
+    FOREACH t IN ARRAY ARRAY['rel_type_vocabulary','weight_basis_vocabulary',
+                             'change_reason_vocabulary','concept_class_vocabulary',
+                             'node_status_vocabulary'] LOOP
+        EXECUTE format('CREATE TRIGGER %I BEFORE INSERT ON %I FOR EACH ROW EXECUTE FUNCTION sec_store_append_guard()',
+                       t || '_append_guard', t);
+    END LOOP;
+END $$;
+
+
+
+-- ---------------------------------------------------------------------------
+-- Vocabulary seeds (the decided, stable content only)
+-- ---------------------------------------------------------------------------
+
+INSERT INTO weight_basis_vocabulary (basis, description) VALUES
+ ('VALUE','share by USD value: look-through composition, allocations'),
+ ('NOTIONAL','share by notional: index/benchmark membership'),
+ ('OWNERSHIP_PCT','ownership fraction: corporate structure')
+ON CONFLICT (basis, valid_from, processing_version) DO NOTHING;
+
+INSERT INTO change_reason_vocabulary (code, description, requires_approval) VALUES
+ ('SEED_LOAD','initial vocabulary/schema/data seed', false),
+ ('PORT_FROM_STANDALONE','row ported from the frozen standalone masters', false),
+ ('RULE_DERIVED','loader rule where the shape is known (e.g. receipt_token => receipt token)', false),
+ ('CURATED_SOURCE','sourced judgment; the source is cited in change_reason', false),
+ ('RECLASSIFICATION','a classification moved', true),
+ ('REPOINT','an edge or register mapping re-pointed', true),
+ ('VALID_TIME_AMEND','late-arriving or amended source data; valid window corrected', false),
+ ('RESTATEMENT','an earlier record was wrong; supersedes_record_id set', true),
+ ('RETRACTION','tombstone: the record should never have existed', true),
+ ('CORPORATE_ACTION','status version + succession edge', false),
+ ('DEDUP_SUPERSEDE','SAME_AS / SUPERSEDES outcome', true)
+ON CONFLICT (code, valid_from, processing_version) DO NOTHING;
+
+INSERT INTO concept_class_vocabulary (concept_class, maturity, seed_source, description) VALUES
+ ('instrument_type','ratified','ref asset_class / security_type','top-level instrument classification; carries shapes'),
+ ('instrument_subtype','ratified','ref security_subtype','subtype under instrument_type via NARROWER_THAN'),
+ ('entity_type','draft','ref entity_type','legal form'),
+ ('counterparty_role','draft','ref counterparty_role','role vocabulary'),
+ ('sector','draft','ref sector (GICS)','issuer sector'),
+ ('credit_rating','draft','ref credit_rating','RATED_BY targets'),
+ ('jurisdiction','draft','ref country (ISO 3166)','DOMICILED_IN targets'),
+ ('currency','draft','ref currency (ISO 4217)','DENOMINATED_IN / PEGGED_TO targets')
+ON CONFLICT (concept_class, valid_from, processing_version) DO NOTHING;
+
+-- The ratified relationship types only. Draft types (COLLATERALISED_BY, TRANCHE_OF,
+-- REFERENCES, MANAGED_BY, RATED_BY, PEGGED_TO, SAME_AS, ...) land by migration when they
+-- ratify, each with its first consumer — nothing speculative is frozen here.
+INSERT INTO rel_type_vocabulary
+ (rel_type, family, src_kinds, dst_kinds, cardinality, cluster_key, weight_basis, derived_only, maturity, description) VALUES
+ ('HAS_UNDERLYING','composition','{SECURITY}','{SECURITY}','n',NULL,'VALUE',false,'ratified','what a token or wrapper is built on; the look-through spine'),
+ ('ISSUED_BY','issuance_ownership_control','{SECURITY}','{ENTITY}','1',NULL,NULL,false,'ratified','the issuer; replaces issuer_entity_id as authority'),
+ ('SUBSIDIARY_OF','issuance_ownership_control','{ENTITY}','{ENTITY}','1_per_parent',NULL,'OWNERSHIP_PCT',false,'ratified','legal parent; ultimate parent derived by walking, never stored'),
+ ('AFFILIATE_OF','issuance_ownership_control','{ENTITY}','{ENTITY}','n',NULL,NULL,false,'ratified','related, not owned'),
+ ('HELD_BY','holding_allocation','{SECURITY}','{ENTITY}','n',NULL,NULL,false,'ratified','holder of record where holding is a reference fact; balances stay in the timeseries'),
+ ('BELONGS_TO','classification_governance','{SECURITY,ENTITY,ACCOUNT}','{CONCEPT}','1_per_class',NULL,NULL,false,'ratified','category membership'),
+ ('NARROWER_THAN','classification_governance','{CONCEPT}','{CONCEPT}','1',NULL,NULL,false,'ratified','taxonomy hierarchy; shape inheritance path'),
+ ('GOVERNED_BY','classification_governance','{ENTITY,ACCOUNT}','{CONCEPT}','n',NULL,NULL,false,'ratified','which rule set applies'),
+ ('SCORED_BY','classification_governance','{CONCEPT}','{CONCEPT}','n',NULL,NULL,false,'ratified','concept-to-concept pivot: asset class -> risk model'),
+ ('OWNED_BY','classification_governance','{CONCEPT}','{ENTITY}','1',NULL,NULL,false,'ratified','stewardship of a rule set'),
+ ('SOURCED_FROM','classification_governance','{SECURITY,ENTITY,CONCEPT,SOURCE,ACCOUNT}','{SOURCE}','n',NULL,NULL,false,'ratified','feed provenance where lineage points at a source'),
+ ('SUCCEEDED_BY','lifecycle','{SECURITY}','{SECURITY}','1',NULL,NULL,false,'ratified','merger / redenomination; old node -> MERGED; register re-points'),
+ ('SPLIT_FROM','lifecycle','{SECURITY}','{SECURITY}','1','{ex_date}',NULL,false,'ratified','split / reverse split; payload: ratio, ex_date')
+ON CONFLICT (rel_type, valid_from, processing_version) DO NOTHING;
+
+INSERT INTO node_status_vocabulary (record_type, status, is_terminal, pairs_with, description) VALUES
+ ('SECURITY','ACTIVE',    false, NULL,           'live instrument-of-record'),
+ ('SECURITY','SUSPENDED', false, NULL,           'trading halted / contract paused; expected to resume or resolve'),
+ ('SECURITY','DELISTED',  false, NULL,           'no longer listed on its venue; may persist off-venue'),
+ ('SECURITY','DEFAULTED', false, NULL,           'issuer default; may restructure, so not terminal'),
+ ('SECURITY','MATURED',   true,  NULL,           'term instrument reached maturity'),
+ ('SECURITY','REDEEMED',  true,  NULL,           'redeemed or called; payload carries the call details'),
+ ('SECURITY','CONVERTED', true,  'CONVERTS_TO',  'converted into another security'),
+ ('SECURITY','MERGED',    true,  'SUCCEEDED_BY', 'merged / redenominated; the register re-points to the successor'),
+ ('SECURITY','EXPIRED',   true,  NULL,           'derivative or right lapsed unexercised'),
+ ('SECURITY','RETIRED',   true,  NULL,           'wound down with no successor'),
+ ('ENTITY','ACTIVE',         false, NULL,         'operating legal person / operator'),
+ ('ENTITY','INACTIVE',       false, NULL,         'dormant per registry (GLEIF entity status INACTIVE)'),
+ ('ENTITY','IN_LIQUIDATION', false, NULL,         'winding up in progress'),
+ ('ENTITY','DISSOLVED',      true,  NULL,         'legally dissolved'),
+ ('ENTITY','MERGED',         true,  NULL,         'absorbed into another entity; corporate-structure edges record where'),
+ ('ENTITY','SUPERSEDED',     true,  'SUPERSEDES', 'deduplicated; the surviving node is the SUPERSEDES source'),
+ ('CONCEPT','ACTIVE',     false, NULL,         'in the governed vocabulary; memberships allowed'),
+ ('CONCEPT','DEPRECATED', false, NULL,         'no new memberships; existing ones stand'),
+ ('CONCEPT','RETIRED',    true,  NULL,         'memberships must move; validator flags remaining ones'),
+ ('CONCEPT','SUPERSEDED', true,  'SUPERSEDES', 'replaced by another concept'),
+ ('SOURCE','ACTIVE',         false, NULL,         'licensed and feeding'),
+ ('SOURCE','SUSPENDED',      false, NULL,         'paused, e.g. licence lapsed; exposability off'),
+ ('SOURCE','DECOMMISSIONED', true,  NULL,         'feed ended; provenance references remain valid'),
+ ('SOURCE','SUPERSEDED',     true,  'SUPERSEDES', 'replaced by another source'),
+ ('ACCOUNT','ACTIVE', false, NULL, 'open book'),
+ ('ACCOUNT','FROZEN', false, NULL, 'no movements permitted; still reportable'),
+ ('ACCOUNT','CLOSED', true,  NULL, 'closed book; history remains')
+ON CONFLICT (record_type, status, valid_from, processing_version) DO NOTHING;
+
+-- pairs_with names two draft types (CONVERTS_TO, SUPERSEDES) not yet in the vocabulary:
+-- deliberately a soft reference — the status rows are the stable record of the pairing,
+-- and the edge types land when they ratify.
+
+-- (record_type, status) was a composite FK to node_status_vocabulary. The vocabulary is
+-- versioned now, so its natural key is not unique and no FK can point at it: GQ-03 moves to
+-- the validator, resolved against the current version (ADR-0007 §5).
 
 -- ---------------------------------------------------------------------------
 -- Append-only by table class: full revoke on the stores, immutability trigger on the FK parents.
@@ -610,17 +725,25 @@ BEGIN
             RAISE EXCEPTION 'append-only not enforced: owner % still holds UPDATE on % after the revoke', owner_role, t;
         END IF;
     END LOOP;
-    -- Vocabulary tables: app role fully revoked; the OWNER KEEPS UPDATE because the FK integrity
-    -- probe (SELECT ... FOR KEY SHARE) runs as the parent's owner and needs it (20260714_160000,
-    -- #574); DELETE/TRUNCATE revoked, and reference_table_immutable() blocks real mutation.
+    -- Vocabularies: the same full revoke as the stores. The owner kept UPDATE here only because
+    -- an FK integrity probe runs as the parent's owner (20260714_160000, #574) — nothing FKs these
+    -- tables now that their natural key repeats, so the exception goes with the FKs, and a change
+    -- is an appended version rather than an in-place edit.
     FOREACH t IN ARRAY ARRAY['rel_type_vocabulary','weight_basis_vocabulary',
                              'change_reason_vocabulary','concept_class_vocabulary',
                              'node_status_vocabulary'] LOOP
         SELECT pg_get_userbyid(c.relowner) INTO owner_role FROM pg_class c WHERE c.oid = t::regclass;
+        SELECT rolsuper INTO owner_is_super FROM pg_roles WHERE rolname = owner_role;
+        EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON %I FROM %I', t, owner_role);
         IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'stl_readwrite') THEN
             EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON %I FROM stl_readwrite', t);
         END IF;
-        EXECUTE format('REVOKE DELETE, TRUNCATE ON %I FROM %I', t, owner_role);
+        IF NOT owner_is_super AND has_table_privilege(owner_role, t, 'UPDATE') THEN
+            RAISE EXCEPTION 'append-only not enforced: owner % still holds UPDATE on % after the revoke', owner_role, t;
+        END IF;
+        -- Kept alongside the revoke rather than replaced by it: a SUPERUSER owner bypasses the ACL
+        -- entirely (the documented position_state gap, and the shape the CI harness runs in), and
+        -- the trigger is the only thing that refuses an in-place edit there.
         EXECUTE format('CREATE TRIGGER %I BEFORE UPDATE OR DELETE ON %I FOR EACH ROW EXECUTE FUNCTION reference_table_immutable()',
                        t || '_immutable', t);
     END LOOP;

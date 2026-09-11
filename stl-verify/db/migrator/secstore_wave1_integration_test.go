@@ -263,10 +263,12 @@ func TestSecStoreRejectsAnIllegalRelTypeTriple(t *testing.T) {
 	})
 
 	t.Run("rel_type_outside_the_governed_vocabulary_is_rejected", func(t *testing.T) {
+		// GQ-01 is still refused at the engine, by sec_store_append_guard rather than by an FK:
+		// the vocabulary is versioned, so its natural key repeats and cannot be an FK target.
 		err := insertEdge("reltype", "INVENTED_BY", "sec-t-triple-b", "SECURITY", "em-t-triple-b", "ENTITY")
 		var pgErr *pgconn.PgError
-		if !errors.As(err, &pgErr) || pgErr.Code != "23503" {
-			t.Fatalf("insert with rel_type INVENTED_BY failed with %v, want SQLSTATE 23503 (foreign_key_violation) — GQ-01", err)
+		if !errors.As(err, &pgErr) || pgErr.Code != "P0001" {
+			t.Fatalf("insert with rel_type INVENTED_BY failed with %v, want the guard's P0001 — GQ-01", err)
 		}
 	})
 
@@ -499,10 +501,13 @@ func TestSecStoreWave1IsAppendOnlyUnderTheRealRoles(t *testing.T) {
 		}
 	})
 
-	t.Run("owner_keeps_update_on_the_vocabularies_for_the_fk_probe", func(t *testing.T) {
+	t.Run("the_vocabularies_are_revoked_like_the_stores", func(t *testing.T) {
+		// The owner kept UPDATE here only because an FK integrity probe runs as the parent's
+		// owner (20260714_160000, #574). Versioning the vocabularies removed every FK that
+		// pointed at them, so the exception went with the FKs and they take the store's revoke.
 		for _, table := range vocabularies {
-			if !ownerHas(t, table, "UPDATE") {
-				t.Errorf("%s: the owner lost UPDATE — the FK integrity probe runs as the parent's owner and needs it, so every INSERT into sec_node/sec_edge would fail under the prod roles (20260714_160000, #574)", table)
+			if ownerHas(t, table, "UPDATE") {
+				t.Errorf("%s: the owner still holds UPDATE — nothing FKs these tables now, so a change is an appended version and no probe needs it", table)
 			}
 			if ownerHas(t, table, "DELETE") {
 				t.Errorf("%s: the owner still holds DELETE; append-only leaves no delete channel", table)
@@ -841,6 +846,150 @@ func TestSecStoreKnowledgeTimeReadReplaysWhatWasKnown(t *testing.T) {
 		}
 		if oldReason != "SEED_LOAD" || newReason != "RESTATEMENT" {
 			t.Errorf("edge replay resolved %s through the recorded snapshot and %s through the effective-date read, want SEED_LOAD and RESTATEMENT", oldReason, newReason)
+		}
+	})
+}
+
+// TestSecStoreVocabulariesAreVersioned covers the governed vocabularies' storage shape.
+//
+// They are append-only, which was the point, but they were also unversioned — the natural key
+// alone was the primary key. So a value that is meant to change could not: UPDATE raises from
+// reference_table_immutable(), and a successor row collides. Three columns name transitions that
+// shape cannot represent — maturity, IdSchemeVocabulary.unique_current, and rel_type_vocabulary's
+// cluster_key — and the observed cost was six concept_class values permanently stuck at draft.
+//
+// valid_from and processing_version are in the key now, so a change is an appended version at
+// processing_version 0. valid_from is in the key deliberately, diverging from oracle_asset
+// (VEC-597): with only processing_version there, an ordinary ratification would have to burn a
+// correction version, which ADR-0006 §3 reserves for correction runs.
+func TestSecStoreVocabulariesAreVersioned(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	t.Run("a_draft_class_ratifies_by_appending_a_version", func(t *testing.T) {
+		var before string
+		if err := pool.QueryRow(ctx, `
+			SELECT maturity FROM concept_class_vocabulary WHERE concept_class = 'entity_type'`).Scan(&before); err != nil {
+			t.Fatalf("read the seeded class: %v", err)
+		}
+		if before != "draft" {
+			t.Fatalf("entity_type seeds as %q, want draft — the fixture this test is built on has moved", before)
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO concept_class_vocabulary
+				(concept_class, maturity, seed_source, description, valid_from, change_reason)
+			VALUES ('entity_type','ratified','ref entity_type','legal form',
+			        (now() AT TIME ZONE 'utc')::date + 1, 'RATIFIED')`); err != nil {
+			t.Fatalf("ratify by appending a version: %v — this is the defect the versioned key exists to fix", err)
+		}
+		var versions, maxPV int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*), max(processing_version) FROM concept_class_vocabulary
+			 WHERE concept_class = 'entity_type'`).Scan(&versions, &maxPV); err != nil {
+			t.Fatalf("count versions: %v", err)
+		}
+		if versions != 2 {
+			t.Errorf("entity_type has %d versions, want 2 — the draft row must stay as history", versions)
+		}
+		if maxPV != 0 {
+			t.Errorf("ratification landed at processing_version %d, want 0 — a governance change is "+
+				"not a correction run (ADR-0006 §3)", maxPV)
+		}
+	})
+
+	t.Run("an_in_place_edit_is_still_refused", func(t *testing.T) {
+		// Versioning is not a loosening: the only way to change a value is still to append.
+		_, err := pool.Exec(ctx, `UPDATE concept_class_vocabulary SET maturity = 'ratified' WHERE concept_class = 'sector'`)
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "P0001" {
+			t.Fatalf("UPDATE failed with %v, want P0001 from reference_table_immutable()", err)
+		}
+	})
+
+	t.Run("a_cluster_key_can_be_declared_after_the_type_ratifies", func(t *testing.T) {
+		// The reason the SOURCED_FROM / HELD_BY / AFFILIATE_OF decision stopped being a merge
+		// blocker: a ratified type with no cluster key can gain one by appending a version.
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO rel_type_vocabulary
+				(rel_type, family, src_kinds, dst_kinds, cardinality, cluster_key, maturity,
+				 description, valid_from, change_reason)
+			SELECT rel_type, family, src_kinds, dst_kinds, cardinality, '{facet}', maturity,
+			       description, (now() AT TIME ZONE 'utc')::date + 1, 'DECLARE_CLUSTER_KEY'
+			  FROM rel_type_vocabulary WHERE rel_type = 'SOURCED_FROM'`); err != nil {
+			t.Fatalf("declare a cluster key on a ratified type: %v", err)
+		}
+		var declared []string
+		if err := pool.QueryRow(ctx, `
+			SELECT cluster_key FROM rel_type_vocabulary
+			 WHERE rel_type = 'SOURCED_FROM'
+			 ORDER BY valid_from DESC, processing_version DESC LIMIT 1`).Scan(&declared); err != nil {
+			t.Fatalf("read the current declaration: %v", err)
+		}
+		if len(declared) != 1 || declared[0] != "facet" {
+			t.Errorf("current cluster_key is %v, want [facet]", declared)
+		}
+	})
+
+	t.Run("every_seeded_row_is_inside_the_hash_chain", func(t *testing.T) {
+		// The vocabularies carry the §4 provenance block now, so the guard runs on them too and
+		// the chain covers the seed rather than starting after it (AR-1.2).
+		for _, table := range []string{"rel_type_vocabulary", "weight_basis_vocabulary",
+			"change_reason_vocabulary", "concept_class_vocabulary", "node_status_vocabulary"} {
+			var rows, hashed, distinct int
+			if err := pool.QueryRow(ctx, `
+				SELECT count(*), count(content_hash), count(DISTINCT content_hash)
+				  FROM `+table).Scan(&rows, &hashed, &distinct); err != nil {
+				t.Fatalf("%s: %v", table, err)
+			}
+			if rows == 0 || hashed != rows || distinct != rows {
+				t.Errorf("%s: %d rows, %d hashed, %d distinct hashes — every seeded row must be "+
+					"in the chain with its own digest", table, rows, hashed, distinct)
+			}
+		}
+	})
+
+	t.Run("nothing_the_dropped_foreign_keys_caught_is_now_accepted", func(t *testing.T) {
+		// Versioning the vocabularies removed four foreign keys. Each one refused a specific bad
+		// write before, and each of those writes must still be refused — by the append guard now,
+		// which is already reading the vocabulary. Without this, the versioning change quietly
+		// widens what the store accepts and every other test stays green.
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO sec_node (id, record_type, status, valid_from, `+secstoreSpine+`)
+			VALUES ('sec-fk-a','SECURITY','ACTIVE','2026-01-01','test','SEED_LOAD','fixture','test'),
+			       ('sec-fk-b','SECURITY','ACTIVE','2026-01-01','test','SEED_LOAD','fixture','test')`); err != nil {
+			t.Fatalf("fixture nodes: %v", err)
+		}
+		for _, c := range []struct{ name, stmt string }{
+			{"unknown rel_type (was sec_edge_rel_type_fkey)", `
+				INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, valid_from, ` + secstoreSpine + `)
+				VALUES ('sec-fk-a','SECURITY','sec-fk-b','SECURITY','NO_SUCH_TYPE','2026-01-01','test','SEED_LOAD','r','test')`},
+			{"unknown weight_basis (was sec_edge_weight_basis_fkey)", `
+				INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, rel_weight, weight_basis, valid_from, ` + secstoreSpine + `)
+				VALUES ('sec-fk-a','SECURITY','sec-fk-b','SECURITY','HAS_UNDERLYING',0.5,'NOT_A_BASIS','2026-01-01','test','SEED_LOAD','r','test')`},
+			{"unknown change_reason_code (was sec_node_change_reason_code_fkey)", `
+				INSERT INTO sec_node (id, record_type, status, valid_from, actor, change_reason_code, change_reason, source_system)
+				VALUES ('sec-fk-c','SECURITY','ACTIVE','2026-01-01','test','NOT_A_REASON','r','test')`},
+			{"illegal status for the kind (was sec_node_status_fkey)", `
+				INSERT INTO sec_node (id, record_type, status, valid_from, ` + secstoreSpine + `)
+				VALUES ('sec-fk-d','SECURITY','NOT_A_STATUS','2026-01-01','test','SEED_LOAD','r','test')`},
+		} {
+			_, err := pool.Exec(ctx, c.stmt)
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.Code != "P0001" {
+				t.Errorf("%s: accepted or failed with %v, want the guard's P0001 — this write was "+
+					"refused before the vocabularies were versioned and must still be", c.name, err)
+			}
+		}
+	})
+
+	t.Run("a_writer_supplied_ingest_xid_is_refused", func(t *testing.T) {
+		_, err := pool.Exec(ctx, `
+			INSERT INTO weight_basis_vocabulary (basis, description, ingest_xid)
+			VALUES ('FORGED','forged provenance', '1'::xid8)`)
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "P0001" {
+			t.Fatalf("a forged ingest_xid on a vocabulary failed with %v, want P0001", err)
 		}
 	})
 }
@@ -1221,18 +1370,19 @@ func TestSecStoreEdgeDiscriminatorIsDerivedNotAllocated(t *testing.T) {
 		sqlstate(t, err, "P0001", "the guard derives on any table carrying edge_disc, not just sec_edge")
 	})
 
-	t.Run("an_unknown_rel_type_is_still_the_fks_to_reject", func(t *testing.T) {
-		// Both spellings: the guard must not shadow GQ-01 with its own error, and supplying a
-		// discriminator must not turn a missing vocabulary row into a mismatch complaint.
+	t.Run("an_unknown_rel_type_is_refused_by_the_guard", func(t *testing.T) {
+		// The vocabulary is versioned, so the FK that used to refuse this is gone. The guard has
+		// to read the type's row anyway to derive edge_disc, so it refuses there instead of
+		// deriving an identity from a declaration that does not exist.
 		err := insertEdge("NO_SUCH_TYPE", "sec-d-m", "sec-d-n", `{}`, "2026-01-01", "'infinity'")
-		sqlstate(t, err, "23503", "an unregistered rel_type is the vocabulary FK's to refuse")
+		sqlstate(t, err, "P0001", "an unregistered rel_type has no declaration to derive from")
 
 		_, err = pool.Exec(ctx, `
 			INSERT INTO sec_edge (src_id, src_kind, dst_id, dst_kind, rel_type, edge_disc,
 			                      valid_from, `+secstoreSpine+`)
 			VALUES ('sec-d-m','SECURITY','sec-d-n','SECURITY','NO_SUCH_TYPE','`+discSenior+`',
 			        '2026-01-01','test','SEED_LOAD','unknown type, supplied disc','test')`)
-		sqlstate(t, err, "23503", "a supplied discriminator must not pre-empt the vocabulary FK either")
+		sqlstate(t, err, "P0001", "supplying a discriminator must not make an unknown type land")
 	})
 
 	t.Run("the_discriminator_reproduces_from_the_payload_alone", func(t *testing.T) {
