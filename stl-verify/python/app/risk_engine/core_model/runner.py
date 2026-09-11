@@ -181,7 +181,6 @@ async def _run_pipeline(
         forecasted_step=p["FORECAST_STEP"],
         use_log_returns=p["USE_LOG_RETURNS"],
         use_brownian_bridge=p["HOURLY_CONV"],
-        jump_parameters=None,
         n_sims=p["N_MC"],
         seed=p["SEED"],
         market_df=market_df,

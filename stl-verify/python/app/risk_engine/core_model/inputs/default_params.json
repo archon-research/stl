@@ -132,6 +132,7 @@
   },
   "MC_TARGET_LTV": {
     "value": null,
+    "type": "float | None",
     "description": "LTV the borrower restores to after a successful margin call; null = restore to each borrower's initial LTV (SYRUP/ANCHORAGE only)"
   },
   "MC_CURE_PROB": {

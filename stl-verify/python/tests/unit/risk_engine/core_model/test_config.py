@@ -23,18 +23,18 @@ def test_string_false_for_a_bool_param_raises():
 
 
 @pytest.mark.parametrize(
-    ("param", "bad_value", "expected_kind"),
+    ("param", "bad_value", "expected_match"),
     [
-        ("N_MC", "1000", "int"),
-        ("N_MC", True, "int"),
-        ("PERC", "0.975", "float"),
-        ("JUMPS", 1, "bool"),
-        ("PROTOCOL", 3, "str"),
-        ("MC_TARGET_LTV", "0.7", "float | None"),
+        ("N_MC", "1000", "N_MC.*expected int"),
+        ("N_MC", True, "N_MC.*expected int"),
+        ("PERC", "0.975", "PERC.*expected float"),
+        ("JUMPS", 1, "JUMPS.*expected bool"),
+        ("PROTOCOL", 3, "PROTOCOL.*expected str"),
+        ("MC_TARGET_LTV", "0.7", r"MC_TARGET_LTV.*expected float \| None"),
     ],
 )
-def test_wrong_type_raises(param, bad_value, expected_kind):
-    with pytest.raises(ValueError, match=f"{param}.*expected {expected_kind.split(' ')[0]}"):
+def test_wrong_type_raises(param, bad_value, expected_match):
+    with pytest.raises(ValueError, match=expected_match):
         load_params(overrides={param: bad_value})
 
 
@@ -56,3 +56,11 @@ def test_error_names_every_offending_param():
         load_params(overrides={"WORST_CASE": "false", "N_MC": "1000"})
     assert "WORST_CASE" in str(exc.value)
     assert "N_MC" in str(exc.value)
+
+
+def test_unknown_declared_kind_is_rejected_at_build():
+    from app.risk_engine.core_model.config import _build_expected_kinds
+
+    schema = {"N_MC": {"value": 100, "type": "number"}}
+    with pytest.raises(ValueError, match="N_MC.*unknown kind 'number'"):
+        _build_expected_kinds(schema, {"N_MC": 100})

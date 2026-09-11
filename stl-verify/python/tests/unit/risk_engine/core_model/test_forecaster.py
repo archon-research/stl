@@ -174,7 +174,6 @@ def test_simulate_prices_gives_each_token_its_own_jump_params(monkeypatch):
         forecasted_step=2,
         use_log_returns=True,
         use_brownian_bridge=False,
-        jump_parameters=None,
         n_sims=2,
         seed=0,
         market_df=pd.DataFrame(),
