@@ -5,12 +5,15 @@
 	skills-list \
 	skills-update \
 	skills-install-dry-run \
+	skills-deploy-local \
 	skills-validate
 
 SKILLFILE_BIN := ./bin/skillfile
 SKILLFILE_RELEASE ?= latest
 SKILLFILE_FORCE_INSTALL ?= 0
 SKILLFILE_MANIFEST := ./Skillfile
+LOCAL_SKILLS := $(notdir $(wildcard skills/*))
+SKILL_DEPLOY_TARGETS := .claude/skills .codex/skills .github/skills
 
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
@@ -62,26 +65,39 @@ skillfile-update-cli: ## Update skillfile CLI (alias for install, defaults to la
 
 skills-install: skillfile-install-cli ## Fetch, lock, and deploy skills to configured platforms
 	@$(SKILLFILE_BIN) install
+	@$(MAKE) --no-print-directory skills-deploy-local
 
 skills-list: skillfile-install-cli ## Show skill status from Skillfile/Skillfile.lock
 	@$(SKILLFILE_BIN) status
 
 skills-update: skillfile-install-cli ## Update upstream refs and redeploy to configured platforms
 	@$(SKILLFILE_BIN) install --update
+	@$(MAKE) --no-print-directory skills-deploy-local
 
 skills-install-dry-run: skillfile-install-cli ## Preview install/update changes without writing files
 	@$(SKILLFILE_BIN) install --dry-run
+
+skills-deploy-local: ## Sync canonical local skills to every generated deployment target
+	@set -e; \
+	for skill in $(LOCAL_SKILLS); do \
+		for target in $(SKILL_DEPLOY_TARGETS); do \
+			mkdir -p "$$target/$$skill"; \
+			rsync -a --delete "skills/$$skill/" "$$target/$$skill/"; \
+		done; \
+	done
 
 skills-validate: skillfile-install-cli ## Validate Skillfile and checked-in Claude copies
 	@$(SKILLFILE_BIN) validate
 	@set -e; \
 	for source in skills/*; do \
 		[ -d "$$source" ] || continue; \
-		deployed=".claude/skills/$$(basename "$$source")"; \
-		if [ ! -d "$$deployed" ] || ! diff -qr "$$source" "$$deployed" >/dev/null; then \
-			echo "Skill deployment is stale: $$deployed (run make skills-install)"; \
-			exit 1; \
-		fi; \
+		for target in $(SKILL_DEPLOY_TARGETS); do \
+			deployed="$$target/$$(basename "$$source")"; \
+			if [ ! -d "$$deployed" ] || ! diff -qr "$$source" "$$deployed" >/dev/null; then \
+				echo "Skill deployment is stale: $$deployed (run make skills-install)"; \
+				exit 1; \
+			fi; \
+		done; \
 	done
 # Orphan check disabled: remote-sourced skills (e.g. the github-hosted gh-stack)
 # deploy into .claude/skills/ but have no local skills/ source, so they would be
